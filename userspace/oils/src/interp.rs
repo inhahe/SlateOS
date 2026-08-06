@@ -2129,6 +2129,20 @@ impl std::fmt::Debug for InputSrc {
 /// is what reproduces it.
 type InputFd = Arc<Mutex<InputSrc>>;
 
+/// The read side of a descriptor that is open but has **no write half** —
+/// what [`WriteFd::ReadOnly`] and [`StderrTarget::Discard`] carry.
+///
+/// It exists for one consumer: a child. The shell's own writes are answered
+/// from the *access mode* alone (see [`WriteFd::ReadOnly`]), because attempting
+/// one raises a host-specific error; but a child must be handed the descriptor
+/// itself, so that its own write fails exactly as bash's child's does rather
+/// than succeeding into an empty stream that took the bytes.
+///
+/// `None` where the description has no OS object to hand over — a
+/// here-document's byte snapshot, a directory, a source already closed. There
+/// a child gets `Stdio::null()`, which is the nearest thing there is.
+type ReadOnlySrc = Option<InputFd>;
+
 /// Wrap a byte snapshot as a fresh [`InputFd`] positioned at its start.
 fn bytes_input(bytes: Vec<u8>) -> InputFd {
     Arc::new(Mutex::new(InputSrc::Bytes(io::Cursor::new(bytes))))
@@ -2256,6 +2270,34 @@ fn child_input(c: &InputFd) -> ChildIn {
         // exact — bash's `cat < dir` fails inside `cat`, and what a host's
         // `cat` makes of a directory is not the shell's business.
         InputSrc::Closed | InputSrc::WriteOnly | InputSrc::Directory => ChildIn::Closed,
+    }
+}
+
+/// Prepare a [`ReadOnlySrc`] as a child's fd 1 or fd 2.
+///
+/// The child is handed the read-only description itself, so that its own write
+/// through it fails as bash's child's does — on this host with `EBADF`, the same
+/// errno a Unix child gets, so even the diagnostic matches. Handing
+/// `Stdio::null()` instead would make the write *succeed*, which is the bug this
+/// exists to avoid: the bytes would be swallowed and the child would exit 0
+/// where bash's exits 1.
+///
+/// `Stdio::null()` is the fallback for the cases with no OS object to hand over
+/// — a here-document's byte snapshot, a directory, a source already closed, or a
+/// handle the host declines to duplicate. It is wrong in the same direction, but
+/// there is nothing else to give: a portable API offers no way to forge a
+/// descriptor that fails writes. Those are also the rare shapes; the ordinary
+/// `2>&3` under an `exec 3< file` is a real file and takes the first path.
+fn child_read_only_out(src: &ReadOnlySrc) -> Stdio {
+    let Some(c) = src else {
+        return Stdio::null();
+    };
+    let mut guard = lock_input(c);
+    match &mut *guard {
+        InputSrc::File(f) => f.share().map_or_else(|_| Stdio::null(), Stdio::from),
+        InputSrc::Bytes(_) | InputSrc::Closed | InputSrc::WriteOnly | InputSrc::Directory => {
+            Stdio::null()
+        }
     }
 }
 
@@ -2516,7 +2558,13 @@ enum StderrTarget {
     /// `EBADF` and there is nowhere to report *that* failure, so the bytes are
     /// dropped. bash does the same: `ls /nosuch 2>&0 < f` prints nothing at all
     /// and still exits 2.
-    Discard,
+    ///
+    /// The payload is [`WriteFd::ReadOnly`]'s, and carried for the same reason:
+    /// an external child is handed the read-only description rather than an
+    /// empty stream, so its own write fails as bash's child's does. Dropping is
+    /// the right answer for what the *shell* writes, but an empty stream drops
+    /// by taking the bytes, and a child can tell the difference in its status.
+    Discard(ReadOnlySrc),
     /// `2>&-` — fd 2 is not open at all. Inside the shell that looks exactly
     /// like [`StderrTarget::Discard`]: the bytes go nowhere and there is no
     /// second stderr to say so on.
@@ -2556,10 +2604,23 @@ enum WriteFd {
     /// It exists (so `exec 3>&0` succeeds and `>&0` is a valid redirect), but
     /// POSIX gives `EBADF` for a write to it, and bash duly reports
     /// `echo: write error: Bad file descriptor` with status 1. Modelling the
-    /// *access mode* is what makes that the answer on every host: writing to a
-    /// read-only handle raises a platform-specific error (Windows says access
-    /// denied), whereas "this description has no write half" is portable.
-    ReadOnly,
+    /// *access mode* is what makes that the answer on every host **for the
+    /// shell's own writes**: attempting one on a read-only handle raises a
+    /// platform-specific error (Windows says access denied), whereas "this
+    /// description has no write half" is portable.
+    ///
+    /// The payload is the read side of that same description, carried for the
+    /// one purpose the access mode cannot serve: handing the descriptor to a
+    /// **child**. bash gives the child the read-only description and lets the
+    /// child's own write fail, and on this host that lands in the same place as
+    /// on POSIX — a child's CRT answers a write to a read-only handle with
+    /// `EBADF`, measured, not the access-denied the shell's own `WriteFile`
+    /// would report. Without it `cmd 2>&3` under a read-only fd 3 exited 0
+    /// where bash exits 1, the child having been given an empty stream that
+    /// took its bytes instead of a descriptor that refused them.
+    ///
+    /// See [`ReadOnlySrc`] for when the payload is absent.
+    ReadOnly(ReadOnlySrc),
     /// A descriptor that is not open at all — what `>&-` leaves behind
     /// (`echo hi >&-`, `{ …; } >&-`, `exec 1>&-`).
     ///
@@ -2587,7 +2648,7 @@ impl WriteFd {
             // report that they could not — so what fd 2 is handed is dropped.
             // The two are still told apart, because a child and a dup can tell
             // them apart (see [`StderrTarget::Closed`]).
-            WriteFd::ReadOnly => StderrTarget::Discard,
+            WriteFd::ReadOnly(src) => StderrTarget::Discard(src.clone()),
             WriteFd::Closed => StderrTarget::Closed,
         }
     }
@@ -2600,7 +2661,7 @@ impl WriteFd {
         match self {
             WriteFd::File(f) => WriteFd::File(Arc::clone(f)),
             WriteFd::Capture(sink) => WriteFd::Capture(sink.share()),
-            WriteFd::ReadOnly => WriteFd::ReadOnly,
+            WriteFd::ReadOnly(src) => WriteFd::ReadOnly(src.clone()),
             WriteFd::Closed => WriteFd::Closed,
         }
     }
@@ -2643,7 +2704,7 @@ fn write_to_write_fd(w: &WriteFd, bytes: &[u8]) -> io::Result<()> {
             Ok(())
         }
         WriteFd::File(f) => f.try_clone()?.write_all(bytes),
-        WriteFd::ReadOnly | WriteFd::Closed => Err(ebadf()),
+        WriteFd::ReadOnly(_) | WriteFd::Closed => Err(ebadf()),
     }
 }
 
@@ -2680,19 +2741,17 @@ fn child_out_from_write_fd(w: &WriteFd, what: &str) -> Result<ChildOut, String> 
             .map(|f| ChildOut::Handle(Stdio::from(f)))
             .map_err(|e| format!("{what}: {e}")),
         // Every caller is resolving a *dup source* for a child, and the two
-        // reach that answer for different reasons.
+        // part company there.
         //
-        // `Closed` agrees with bash: a descriptor that is not there cannot be
-        // duplicated, and bash fails such a redirect when it is set up rather
-        // than when the child writes.
-        //
-        // `ReadOnly` does not. bash hands the child the read-only description
-        // and lets the child's own write fail; `WriteFd::ReadOnly` is a
-        // handle-less unit variant recording an access mode, so there is
-        // nothing here to hand over. For fd 1 the status still agrees (1) and
-        // only the wording differs; for fd 2 it does not — see
-        // TD-OILS-A-READ-ONLY-FD-2-IS-HANDED-TO-AN-EXTERNAL-CHILD-AS-AN-EMPTY-STREAM.
-        WriteFd::ReadOnly | WriteFd::Closed => Err(format!("{what}: Bad file descriptor")),
+        // A read-only descriptor can be duplicated — bash's dup succeeds and it
+        // is the *child's own write* that fails — so the child is handed the
+        // description itself. `Stdio::null()` would not do: an empty stream
+        // takes the bytes and the child exits 0 where bash's exits 1.
+        WriteFd::ReadOnly(src) => Ok(ChildOut::Handle(child_read_only_out(src))),
+        // A descriptor that is not there cannot be duplicated at all, and bash
+        // fails such a redirect when it is set up rather than when the child
+        // writes.
+        WriteFd::Closed => Err(format!("{what}: Bad file descriptor")),
     }
 }
 
@@ -10290,8 +10349,9 @@ impl Shell {
             // *there*, though, which is why the state is `ReadOnly` rather than
             // `Closed`: a `3>&2` beside it copies a descriptor rather than being
             // refused one.
-            self.stderr_stack.push(StderrTarget::Discard);
-            stderr_file = Some(WriteFd::ReadOnly);
+            self.stderr_stack
+                .push(StderrTarget::Discard(plan.stderr_read.clone()));
+            stderr_file = Some(WriteFd::ReadOnly(plan.stderr_read.clone()));
             pushed_stderr = true;
         } else if let Some((path, append)) = &plan.stderr {
             // `> f 2>&1` / `&> f` / `2>f 1>&2`: fd 2 is a *dup* of fd 1's handle
@@ -10394,8 +10454,8 @@ impl Shell {
             StagedStdSinks {
                 stdout: stdout_file.as_ref(),
                 stderr: stderr_file.as_ref(),
-                stdout_read_only: plan.stdout_is_read_only(),
-                stderr_read_only: plan.stderr_is_read_only(),
+                stdout_read_only: plan.stdout_is_read_only().then_some(&plan.stdout_read),
+                stderr_read_only: plan.stderr_is_read_only().then_some(&plan.stderr_read),
             },
         );
         saved_fds.extend(self.install_std_reads(&plan));
@@ -10422,14 +10482,18 @@ impl Shell {
         // that fails, with the body running as usual. Recorded here rather than
         // in the plan because only the lookup below can tell a read-only source
         // from a writable one: fd 3's binding may be one this same list staged.
-        let mut stdout_read_only = plan.stdout_is_read_only();
+        // `Some` when fd 1 has no write half, carrying the read side of the same
+        // description so a child can be handed the descriptor itself — see
+        // [`ReadOnlySrc`].
+        let mut stdout_read_only: Option<ReadOnlySrc> =
+            plan.stdout_is_read_only().then(|| plan.stdout_read.clone());
         let mut stdout_capture_fd: Option<CaptureSink> = None;
         if stdout_file.is_none()
             && let Some(n) = plan.stdout_to_fd
         {
             match self.write_fd_for(n, &plan) {
                 Some(WriteFd::Capture(sink)) => stdout_capture_fd = Some(sink.clone()),
-                Some(WriteFd::ReadOnly) => stdout_read_only = true,
+                Some(WriteFd::ReadOnly(src)) => stdout_read_only = Some(src.clone()),
                 // A descriptor a `>&-` closed is no descriptor to copy at all,
                 // so — unlike the read-only case — the redirect itself is what
                 // bash refuses, and the body never runs.
@@ -10498,11 +10562,11 @@ impl Shell {
         // A `{ …; } 1<in` is the third shape: fd 1 is bound, and to something
         // that cannot be written — so the body inherits a descriptor whose
         // writes fail rather than the ambient stdout.
-        let scoped_stdout = match (&stdout_file, plan.stdout_closed, stdout_read_only) {
+        let scoped_stdout = match (&stdout_file, plan.stdout_closed, &stdout_read_only) {
             (Some(f), _, _) => Some(WriteFd::File(Arc::clone(f))),
             (None, true, _) => Some(WriteFd::Closed),
-            (None, false, true) => Some(WriteFd::ReadOnly),
-            (None, false, false) => None,
+            (None, false, Some(src)) => Some(WriteFd::ReadOnly(src.clone())),
+            (None, false, None) => None,
         };
         let saved_exec_stdout = scoped_stdout.map(|w| self.exec_stdout.replace(w));
         // fd 2's save covers more ground than fd 1's: it is taken whenever the
@@ -10548,7 +10612,7 @@ impl Shell {
             // overrides that an inner `exec` simply replaces.
             let inherit_stdin = StdinSrc::Inherit;
             let sin: &StdinSrc = if input_fd.is_some() { &inherit_stdin } else { stdin };
-            if stdout_file.is_some() || plan.stdout_closed || stdout_read_only {
+            if stdout_file.is_some() || plan.stdout_closed || stdout_read_only.is_some() {
                 // fd 1 flows to the file — or to nothing at all, for `>&-` — via
                 // `exec_stdout`; run with an ambient `Out::Inherit` (the group
                 // redirect fully rebinds fd 1, so the enclosing capture/pipe is
@@ -10671,7 +10735,8 @@ impl Shell {
                 // redirect, and what lets a `4>&3` copy it at all.
                 ExtraFdOp::Input(src) => {
                     self.open_fds.insert(*fd, Arc::clone(src));
-                    self.open_write_fds.insert(*fd, WriteFd::ReadOnly);
+                    self.open_write_fds
+                        .insert(*fd, WriteFd::ReadOnly(Some(Arc::clone(src))));
                 }
                 ExtraFdOp::OutputFile(handle) => {
                     // The open already happened, and already reported itself if
@@ -19353,11 +19418,17 @@ impl Shell {
                             }
                         },
                         // fd 0 under a plain `< file` is open for reading only.
-                        // bash hands the child that description and lets the child's
-                        // own write fail; we cannot forge such a descriptor on every
-                        // host, so the shell refuses the redirect — same status and
-                        // stream, different wording (TD-OILS-FD0-WRITE).
-                        Some(WriteFd::ReadOnly | WriteFd::Closed) | None => {
+                        // bash hands the child that description and lets the
+                        // child's own write fail, and so do we: the child gets
+                        // the read-only descriptor and answers its own write
+                        // with `EBADF`, naming itself as bash's child does.
+                        Some(WriteFd::ReadOnly(src)) => {
+                            cmd.stdout(child_read_only_out(&src));
+                        }
+                        // A descriptor that is not there cannot be duplicated,
+                        // and bash fails such a redirect when it is set up
+                        // rather than when the child writes.
+                        Some(WriteFd::Closed) | None => {
                             self.perrln(&format!("{n}: Bad file descriptor"));
                             self.last_status = 1;
                             return;
@@ -19388,11 +19459,10 @@ impl Shell {
                         // rebound fd 1 out from under it.
                         match w {
                             // `exec 1>&0` onto a read-only fd 0: see the `>&N` case
-                            // above — the child gets no descriptor it could write to.
-                            WriteFd::ReadOnly => {
-                                self.perrln("0: Bad file descriptor");
-                                self.last_status = 1;
-                                return;
+                            // above — the child is handed the read-only
+                            // description and its own write fails.
+                            WriteFd::ReadOnly(src) => {
+                                cmd.stdout(child_read_only_out(src));
                             }
                             // `exec 1>&-`: the descriptor is not there to be
                             // given, so the child is handed the absence itself
@@ -19439,10 +19509,11 @@ impl Shell {
                         // Persistent `exec > file`: the child's fd 1 is the file (a
                         // dup of the shared handle, so it writes at the live offset).
                         match w {
-                            WriteFd::ReadOnly => {
-                                self.perrln("0: Bad file descriptor");
-                                self.last_status = 1;
-                                return;
+                            // A persistent `exec 1>&0` onto a read-only fd 0:
+                            // the child is handed that description, and its own
+                            // write through it fails.
+                            WriteFd::ReadOnly(src) => {
+                                cmd.stdout(child_read_only_out(src));
                             }
                             // A persistent `exec 1>&-`: the child has no fd 1 to
                             // be given, and the absence is what it is given —
@@ -19512,11 +19583,16 @@ impl Shell {
                         return;
                     }
                 },
-                // `2>&0` onto a read-only fd 0 (or a closed descriptor): every
-                // write fails and there is nowhere to report it, so the child's
-                // diagnostics are lost. bash behaves identically —
-                // `ls /nosuch 2>&0 < f` prints nothing and still exits 2.
-                Some(WriteFd::ReadOnly | WriteFd::Closed) => {
+                // `2>&0` onto a read-only fd 0: the dup succeeds, so the child
+                // is handed that description. Its diagnostics are lost either
+                // way — every write fails and there is nowhere to report it —
+                // but the failure is the child's, and shows in its status:
+                // `sh -c 'echo E >&2' 2>&3` under an `exec 3< f` exits 1.
+                Some(WriteFd::ReadOnly(src)) => {
+                    cmd.stderr(child_read_only_out(&src));
+                }
+                // A closed descriptor cannot be duplicated at all.
+                Some(WriteFd::Closed) => {
                     cmd.stderr(Stdio::null());
                 }
                 None => {
@@ -19609,8 +19685,8 @@ impl Shell {
                         // and there is nowhere to say so. (An empty stream is
                         // not the same descriptor; see the fd 2 note in
                         // TD-OILS-AN-EXTERNAL-CHILD-CANNOT-BE-GIVEN-A-CLOSED-FD-0.)
-                        Some(WriteFd::ReadOnly) => {
-                            cmd.stderr(Stdio::null());
+                        Some(WriteFd::ReadOnly(src)) => {
+                            cmd.stderr(child_read_only_out(src));
                         }
                         // A persistent `exec 2>&-`: there is no fd 2 to give.
                         Some(WriteFd::Closed) => {
@@ -19619,8 +19695,11 @@ impl Shell {
                         None => {}
                     }
                 }
-                Some(StderrTarget::Discard) => {
-                    cmd.stderr(Stdio::null());
+                // A scoped `{ …; } 2>&0` onto a read-only fd 0 — the same
+                // descriptor, reached through the stderr stack rather than the
+                // base. The child is handed it for the same reason.
+                Some(StderrTarget::Discard(src)) => {
+                    cmd.stderr(child_read_only_out(src));
                 }
                 // An enclosing `{ …; } 2>&-` / `( … ) 2>&-`: the body has no
                 // fd 2, and neither does anything it starts.
@@ -20356,14 +20435,17 @@ impl Shell {
                     // to a source that has no write half, so the shell's own
                     // writes to it fail from here on — with fd 2's diagnostics
                     // simply dropped, having nowhere to be reported.
-                    self.set_std_read_half(fd, Some(f));
-                    self.set_std_write_half(fd, Some(WriteFd::ReadOnly));
+                    self.set_std_read_half(fd, Some(Arc::clone(&f)));
+                    self.set_std_write_half(fd, Some(WriteFd::ReadOnly(Some(f))));
                 } else {
-                    self.open_fds.insert(fd, f);
                     // Open, but with no write half — which is what makes a
                     // later `echo >&N` fail at the *write* and a `M>&N` copy it
-                    // rather than call it no descriptor at all.
-                    self.open_write_fds.insert(fd, WriteFd::ReadOnly);
+                    // rather than call it no descriptor at all. The write side
+                    // holds the read side so a child can be handed the
+                    // descriptor itself (see [`ReadOnlySrc`]).
+                    self.open_write_fds
+                        .insert(fd, WriteFd::ReadOnly(Some(Arc::clone(&f))));
+                    self.open_fds.insert(fd, f);
                 }
             }
             RedirectOp::ReadWrite => {
@@ -20410,11 +20492,14 @@ impl Shell {
                     // `exec 1<<< text`: a here-document is a read-only source
                     // like any other, and binding one to a standard write
                     // descriptor takes its write half away just as `1< f` does.
-                    self.set_std_read_half(fd, Some(bytes_input(body)));
-                    self.set_std_write_half(fd, Some(WriteFd::ReadOnly));
+                    let src = bytes_input(body);
+                    self.set_std_read_half(fd, Some(Arc::clone(&src)));
+                    self.set_std_write_half(fd, Some(WriteFd::ReadOnly(Some(src))));
                 } else {
-                    self.open_fds.insert(fd, bytes_input(body));
-                    self.open_write_fds.insert(fd, WriteFd::ReadOnly);
+                    let src = bytes_input(body);
+                    self.open_write_fds
+                        .insert(fd, WriteFd::ReadOnly(Some(Arc::clone(&src))));
+                    self.open_fds.insert(fd, src);
                 }
             }
             RedirectOp::WriteBoth | RedirectOp::AppendBoth => {
@@ -20788,18 +20873,23 @@ impl Shell {
                     self.exec_stdin = Some(read_half.unwrap_or_else(write_only_input));
                     self.exec_stdin_write = None;
                 } else if fd >= 3 {
-                    self.open_fds.insert(fd, read_half.unwrap_or_else(write_only_input));
+                    let src = read_half.unwrap_or_else(write_only_input);
                     match write_half {
                         Ok(Some(w)) => {
                             self.open_write_fds.insert(fd, w);
                         }
                         // A source with no write half of its own, or a std fd
                         // whose live sink could not be snapshotted: fd N exists
-                        // and cannot be written through it.
+                        // and cannot be written through it. The read side of the
+                        // same description travels with it, so a child can be
+                        // handed the descriptor rather than a substitute for it
+                        // (see [`ReadOnlySrc`]).
                         _ => {
-                            self.open_write_fds.insert(fd, WriteFd::ReadOnly);
+                            self.open_write_fds
+                                .insert(fd, WriteFd::ReadOnly(Some(Arc::clone(&src))));
                         }
                     }
+                    self.open_fds.insert(fd, src);
                     self.coproc_read_fds.remove(&fd);
                 } else {
                     // `exec 1<&N` / `exec 2<&N` — one `dup2`, so the standard
@@ -20808,8 +20898,12 @@ impl Shell {
                     // half that source had. A source with none leaves fd 1 / fd 2
                     // a descriptor the shell's own writes fail on, which is not
                     // the same as leaving it on the terminal.
-                    self.set_std_read_half(fd, Some(read_half.unwrap_or_else(write_only_input)));
-                    self.set_std_write_half(fd, write_half.unwrap_or(Some(WriteFd::ReadOnly)));
+                    let src = read_half.unwrap_or_else(write_only_input);
+                    self.set_std_write_half(
+                        fd,
+                        write_half.unwrap_or(Some(WriteFd::ReadOnly(Some(Arc::clone(&src))))),
+                    );
+                    self.set_std_read_half(fd, Some(src));
                     self.open_write_fds.remove(&fd);
                     self.coproc_read_fds.remove(&fd);
                 }
@@ -21667,7 +21761,8 @@ impl Shell {
         // dropped just as a closed fd 2 drops it — the status is the command's
         // own, unchanged.
         if redir.stderr_is_read_only() {
-            self.stderr_stack.push(StderrTarget::Discard);
+            self.stderr_stack
+                .push(StderrTarget::Discard(redir.stderr_read.clone()));
             return true;
         }
         if let Some((path, append)) = &redir.stderr {
@@ -28723,7 +28818,8 @@ impl Shell {
                                 // meant before is replaced, not merged.
                                 ExtraFdOp::Input(src) => {
                                     self.open_fds.insert(*fd, Arc::clone(src));
-                                    self.open_write_fds.insert(*fd, WriteFd::ReadOnly);
+                                    self.open_write_fds
+                                        .insert(*fd, WriteFd::ReadOnly(Some(Arc::clone(src))));
                                 }
                                 ExtraFdOp::OutputFile(handle) => {
                                     // As in `install_extra_fds`: the descriptor
@@ -44431,7 +44527,9 @@ impl Shell {
         if redir.rebinds_stdin() {
             Some(match redir.stdin_write.as_ref() {
                 Some(f) => WriteFd::File(Arc::clone(f)),
-                None => WriteFd::ReadOnly,
+                // No write half — but fd 0's *read* half is this same
+                // description, and that is what a child is handed.
+                None => WriteFd::ReadOnly(redir.stdin.clone()),
             })
         } else {
             self.ambient_stdin_write_fd()
@@ -44447,7 +44545,11 @@ impl Shell {
         }
         Some(match self.exec_stdin_write.as_ref() {
             Some(f) => WriteFd::File(Arc::clone(f)),
-            None => WriteFd::ReadOnly,
+            // As in [`Shell::stdin_write_fd`]: no write half, but the read half
+            // of the same description is what a child is handed. `None` here
+            // means fd 0 was never redirected at all, and the ambient stdin is
+            // reached through inheritance rather than through a handle.
+            None => WriteFd::ReadOnly(self.exec_stdin.clone()),
         })
     }
 
@@ -44621,11 +44723,11 @@ impl Shell {
     /// `2: Bad file descriptor` itself invisible for the same reason.
     fn stderr_has_no_write_half(&self, depth: usize) -> bool {
         match self.stderr_target_at(depth) {
-            Some(StderrTarget::Discard | StderrTarget::Closed) => true,
+            Some(StderrTarget::Discard(_) | StderrTarget::Closed) => true,
             Some(_) => false,
             None => matches!(
                 self.exec_stderr,
-                Some(WriteFd::Closed | WriteFd::ReadOnly)
+                Some(WriteFd::Closed | WriteFd::ReadOnly(_))
             ),
         }
     }
@@ -44666,7 +44768,7 @@ impl Shell {
             }
             // fd 2 names a descriptor that cannot be written to, or none at
             // all; the diagnostic is lost, exactly as it is under bash.
-            Some(StderrTarget::Discard | StderrTarget::Closed) => {}
+            Some(StderrTarget::Discard(_) | StderrTarget::Closed) => {}
             Some(StderrTarget::WriteFd(f)) => {
                 let _ = (&**f).write_all(bytes);
             }
@@ -45119,12 +45221,14 @@ impl Shell {
             // inheriting there would hand it the shell's stdout, which is where
             // every `cmd >&2` used to land (TD-OILS-EXTERNAL-DUP-TO-STDERR).
             None => match &self.exec_stderr {
-                // `exec 2>&0` left fd 2 open for reading only. The base fd 2
-                // path drops the child's diagnostics on the floor for that (as
-                // bash does, whose writes simply fail with nowhere to report
-                // it), so a dup of it drops them too — rather than refusing the
-                // redirect, which is what the generic helper would do.
-                Some(WriteFd::ReadOnly) => Ok(ChildOut::Handle(Stdio::null())),
+                // `exec 2>&0` left fd 2 open for reading only, and `cmd >&2` is
+                // a dup of it: the child gets the read-only description, whose
+                // writes fail — rather than refusing the redirect, which is
+                // what the generic helper would do (bash's dup succeeds and it
+                // is the child's own write that fails).
+                Some(WriteFd::ReadOnly(src)) => {
+                    Ok(ChildOut::Handle(child_read_only_out(src)))
+                }
                 Some(w) => child_out_from_write_fd(w, "exec stderr"),
                 None => dup_std_handle(false)
                     .map(|f| ChildOut::Handle(Stdio::from(f)))
@@ -45134,7 +45238,9 @@ impl Shell {
             // descriptor to give the child: pipe it and drain into the buffer,
             // exactly as [`Shell::child_stdio_for_stdout`] does for fd 1.
             Some(StderrTarget::Buffer(sink)) => Ok(ChildOut::Sink(sink.clone())),
-            Some(StderrTarget::Discard) => Ok(ChildOut::Handle(Stdio::null())),
+            // A scoped `{ …; } 2>&0`: the same read-only description, reached
+            // through the stderr stack.
+            Some(StderrTarget::Discard(src)) => Ok(ChildOut::Handle(child_read_only_out(src))),
             // `cmd 1>&2` under an enclosing `2>&-` is a dup of a descriptor
             // that is not there, and bash fails it when the redirect is set up
             // rather than when the child writes: `{ sh -c 'echo O' 1>&2; } 2>&-`
@@ -46284,10 +46390,12 @@ struct StagedStdSinks<'a> {
     stderr: Option<&'a WriteFd>,
     /// This list bound fd 1 to a source with no write half (`1< file`), so what
     /// a dup of fd 1 copies is a descriptor writes fail on — not the ambient
-    /// stdout, and not a handle at all.
-    stdout_read_only: bool,
+    /// stdout, and not a handle at all. `Some` when that happened, carrying the
+    /// read side of the same description for a child to be handed; the borrow
+    /// keeps this type `Copy`, which the call sites rely on.
+    stdout_read_only: Option<&'a ReadOnlySrc>,
     /// [`StagedStdSinks::stdout_read_only`] for fd 2.
-    stderr_read_only: bool,
+    stderr_read_only: Option<&'a ReadOnlySrc>,
 }
 
 impl StagedStdSinks<'_> {
@@ -46295,10 +46403,14 @@ impl StagedStdSinks<'_> {
     /// (or staged something that is not a file handle to copy).
     fn get(self, n: i32) -> Option<WriteFd> {
         match n {
-            1 if self.stdout_read_only => Some(WriteFd::ReadOnly),
-            1 => self.stdout.map(|f| WriteFd::File(Arc::clone(f))),
-            2 if self.stderr_read_only => Some(WriteFd::ReadOnly),
-            2 => self.stderr.cloned(),
+            1 => match self.stdout_read_only {
+                Some(src) => Some(WriteFd::ReadOnly(src.clone())),
+                None => self.stdout.map(|f| WriteFd::File(Arc::clone(f))),
+            },
+            2 => match self.stderr_read_only {
+                Some(src) => Some(WriteFd::ReadOnly(src.clone())),
+                None => self.stderr.cloned(),
+            },
             _ => None,
         }
     }

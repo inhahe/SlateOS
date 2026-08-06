@@ -1640,7 +1640,43 @@ model end to end: which name the array is made of, that the subscript is never
 evaluated, the `=`-outside-the-subscript split, the empty-subscript refusal, and
 which letters put the operand back on the built-name path.
 
-### TD-OILS-A-READ-ONLY-FD-2-IS-HANDED-TO-AN-EXTERNAL-CHILD-AS-AN-EMPTY-STREAM. `cmd 2>&3` with a read-only fd 3 lets the child's write succeed — 2026-08-06 — OPEN
+### TD-OILS-A-READ-ONLY-FD-2-IS-HANDED-TO-AN-EXTERNAL-CHILD-AS-AN-EMPTY-STREAM. `cmd 2>&3` with a read-only fd 3 lets the child's write succeed — 2026-08-06 — ✅ FIXED 2026-08-06
+
+**Fix (2026-08-06).** `WriteFd::ReadOnly` now carries the description it names,
+as `ReadOnlySrc = Option<InputFd>` — the same `Arc` the read side holds, so
+nothing is duplicated until a child actually asks for it. `StderrTarget::Discard`
+carries the same payload for the same reason. A new `child_read_only_out()`
+turns that payload into a child `Stdio` by `share()`ing the underlying file,
+falling back to `Stdio::null()` only where there is genuinely no OS object to
+hand over (a here-document's byte snapshot, a directory, an already-closed
+source, or a handle the host declines to duplicate). Every child-wiring site now
+routes through it: the transient `cmd 1>&N` / `cmd 2>&N` arms, the
+`exec_stdout_shadowing` arm, the persistent `exec_stdout` / `exec_stderr` arms,
+`child_stdio_for_stderr`'s two, and `child_out_from_write_fd` — which no longer
+answers `ReadOnly` with an `Err`, since bash's dup of a read-only descriptor
+*succeeds* and it is the child's own write that fails.
+
+The doubt that had kept this open was portability: `WriteFd::ReadOnly` models an
+access mode precisely *because* Windows answers the shell's own write to a
+read-only handle with `ERROR_ACCESS_DENIED`, which would print "Permission
+denied" where bash prints "Bad file descriptor". That concern turns out not to
+reach the child. Measured with a Python probe: a native child handed a read-only
+handle as its stdout answers its write with **`Errno 9` / `EBADF`** — the same
+errno a Unix child gets — so handing the descriptor over reproduces bash exactly,
+message as well as status. The access-mode modelling remains right for the
+shell's own writes and wrong for nothing else.
+
+This also closes **residual divergence 1 of TD-OILS-FD0-WRITE**: an external
+child's `>&0` on a read-only fd 0 now fails inside the child with its own
+`echo: write error: Bad file descriptor`, where the shell used to refuse the
+redirect with `osh: 0: Bad file descriptor` (same status, different wording).
+
+**Tests.** `tests/corpus/redirect-fd0-write.sh` gained three sections — fd 2 via
+`exec 3< f` and via `2>&0`, in the transient / `exec` / group forms; the fd 1
+form where the child's own diagnostic is visible; and `1>&2` onto a read-only
+fd 2 — all byte-identical to bash 5.2.37.
+
+**Original report follows.**
 
 **Where:** `userspace/oils/src/interp.rs` — the external-command stderr wiring:
 the `Some(WriteFd::ReadOnly)` arm under `exec_stderr` and the
@@ -23666,11 +23702,15 @@ six unit tests in `interp.rs`
 shapes still differ from bash, all same-status/same-stream wording or
 unmodelled-syntax cases:
 
-1. An **external child**'s `>&0` on a read-only fd 0 gets `osh: 0: Bad file
+1. ~~An **external child**'s `>&0` on a read-only fd 0 gets `osh: 0: Bad file
    descriptor` from the shell instead of the child's own `write error` message.
    Same status 1, same stream, different wording — the shell refuses to hand the
    child a descriptor it knows is unwritable rather than letting the child
-   discover it.
+   discover it.~~ **Closed 2026-08-06** by
+   `TD-OILS-A-READ-ONLY-FD-2-IS-HANDED-TO-AN-EXTERNAL-CHILD-AS-AN-EMPTY-STREAM`:
+   `WriteFd::ReadOnly` now carries the description, so the child is handed it and
+   discovers the failure itself, word for word as bash's does. Covered by the
+   external-child sections of `tests/corpus/redirect-fd0-write.sh`.
 2. ~~`{ echo Q >&0; } <&-` gives a *write-time* error where bash gives a
    *redirect-time* `0: Bad file descriptor`, because `0<&-` (closing fd 0) is not
    modelled — fd 0 has no "closed" state distinct from "read-only".~~ **Closed
@@ -36812,10 +36852,12 @@ them means the child's write succeeds. **Corrected 2026-08-06** — `sh -c 'echo
 split out of `Discard` after all and the child is handed a genuine absence via
 `ClosedStd`. `Discard` kept the read-only meaning. The `1>&2` refusal above is
 now that variant's doing rather than a `WriteFd` check. See
-TD-OILS-AN-EXTERNAL-CHILD-CANNOT-BE-GIVEN-A-CLOSED-FD-0 for the mechanism, and
-TD-OILS-A-READ-ONLY-FD-2-IS-HANDED-TO-AN-EXTERNAL-CHILD-AS-AN-EMPTY-STREAM for
-the half of the original reasoning that is still true of `Discard` and still
-diverges.
+TD-OILS-AN-EXTERNAL-CHILD-CANNOT-BE-GIVEN-A-CLOSED-FD-0 for the mechanism.
+
+`Discard` was wrong in the same way for the same reason, and was corrected the
+same day: it now carries the read-only description so the child can be handed
+*that*, whose write fails as bash's child's does. See
+TD-OILS-A-READ-ONLY-FD-2-IS-HANDED-TO-AN-EXTERNAL-CHILD-AS-AN-EMPTY-STREAM.
 
 The same divergence fd 1 has remains: `2>&- >&2` (bash fails the dup, osh does
 not) is the order-free-plan limit, identical in kind to `>&- 3>&1`.

@@ -15,6 +15,12 @@
 # fd 2 is the one place where the failure is invisible: `2>&0` on a read-only
 # fd 0 means a diagnostic has nowhere to go, so it is dropped and only the exit
 # status survives.
+#
+# An *external* child is handed the read-only description itself, not an empty
+# stream that would take the bytes: the dup succeeds — bash's does too, which is
+# why this is not a redirect-time error — and it is the child's own write that
+# fails, with its own `EBADF`. That is the whole difference at fd 2, where the
+# diagnostic is lost either way and only the status can tell the two apart.
 
 echo "=== a write to a read-only fd 0 fails, and names the builtin"
 printf 'l1\nl2\n' > f
@@ -61,3 +67,39 @@ printf 'abcdefghij\n' > g6
 exec 0<> g6; exec 0< f; echo W >&0; echo "  st=$?"
 exec 0<&-
 echo "  g6=[$(cat g6)]"
+
+# Everything from here on runs a child. Each probe is a subshell so an `exec`
+# inside it cannot reach the next one, and stderr is collected and replayed at
+# the end so it can be compared in a fixed place. The child's own diagnostic
+# names the command as it was started — on this host the resolved path rather
+# than the word (TD-OILS-HOST-ARGV0, a `std::process` limitation, not a target
+# one) — so the leading directories are filtered off at the replay.
+exec 4>&2 2>err
+
+echo "=== an external child is handed the read-only fd 2, not an empty stream"
+# Both lose the diagnostic; only the first makes the child's own write fail,
+# and at fd 2 the status is the only place that can show it.
+( exec 3< f; sh -c 'echo E >&2' 2>&3 );         echo "  cmd rc=$?"
+( exec 3< f; exec 2>&3; sh -c 'echo E >&2' );   echo "  exec rc=$?"
+( exec 3< f; { sh -c 'echo E >&2'; } 2>&3 );    echo "  group rc=$?"
+( exec < f; sh -c 'echo E >&2' 2>&0 );          echo "  2>&0 rc=$?"
+( exec < f; exec 2>&0; sh -c 'echo E >&2' );    echo "  exec 2>&0 rc=$?"
+# A child that has its own status keeps it, and one that never writes to fd 2
+# is untroubled by the whole business.
+( exec 3< f; sh -c 'echo E >&2; exit 7' 2>&3 ); echo "  own status rc=$?"
+( exec 3< f; sh -c 'exit 0' 2>&3 );             echo "  quiet rc=$?"
+
+echo "=== fd 1 the same way, where the child can say so"
+( exec 3< f; sh -c 'echo O' >&3 );              echo "  cmd rc=$?"
+( exec < f; sh -c 'echo O' >&0 );               echo "  >&0 rc=$?"
+( exec < f; exec 1>&0; sh -c 'echo O' );        echo "  exec rc=$?"
+
+echo "=== and a dup of a read-only fd 2 into a child's fd 1"
+( exec 3< f; exec 2>&3; sh -c 'echo O' >&2 );   echo "  exec rc=$?"
+( exec 3< f; { sh -c 'echo O' 1>&2; } 2>&3 );   echo "  group rc=$?"
+
+exec 2>&4 4>&-
+echo "=== none of it wrote to the file"
+echo "  f=[$(tr '\n' / < f)]"
+echo "=== what went to stderr"
+sed 's#^[^:]*/##' err

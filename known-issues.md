@@ -105,60 +105,105 @@ Two smaller rules fell out of reading `parse_matched_pair` (parse.y:3775–3781,
 `a_here_document_delimiter_takes_a_group_whole` and
 `an_unclosed_group_in_a_here_document_delimiter_is_fatal`.
 
-**Left behind:** TD-OILS-A-SYNTAX-ERROR-ON-A-LINE-THAT-DECLARED-A-HERE-DOCUMENT-IS-BLAMED-TOO-EARLY,
+**Left behind:** TD-OILS-A-PENDING-HERE-DOCUMENT-IS-NOT-GATHERED-WHEN-A-TOP-LEVEL-LIST-IS-REDUCED,
 found while writing the corpus case.
 
-### TD-OILS-A-SYNTAX-ERROR-ON-A-LINE-THAT-DECLARED-A-HERE-DOCUMENT-IS-BLAMED-TOO-EARLY. bash reports at the line body collection stopped on — 2026-08-06 — OPEN
+### TD-OILS-A-PENDING-HERE-DOCUMENT-IS-NOT-GATHERED-WHEN-A-TOP-LEVEL-LIST-IS-REDUCED. Two symptoms, one missing rule — 2026-08-06 — OPEN
 
-**Where:** `userspace/oils/src/parser.rs` — `Parser::reader_line`, which is
-`cur_line()` plus `Spans::cont_lines`.
+**Where:** `userspace/oils/src/parser.rs` — `Parser::reader_line` /
+`Parser::reader_echo`, and the lexer/parser split that puts here-document
+collection entirely in `userspace/oils/src/lexer.rs`.
 
-**What.** bash stamps a syntax error with `line_number` — *the reader's* current
-line, not the offending token's. osh already models that for line continuations
-(TD-OILS-A-CONTINUATION-AFTER-A-TOKEN-MOVES-THE-ERROR-DOWN-A-LINE), but a
-here-document moves the reader the same way and is not counted: collecting a
-body fetches every body line, so by the time the parser sees the token, the
-reader is at the delimiter line — or at the end of input if the delimiter never
-came.
+**What.** bash gathers a pending here-document from *three* places, not one. The
+obvious one is the newline token (`read_token`, parse.y:3450). The two osh does
+not model are yacc reductions:
+
+```
+simple_list:	simple_list1
+			{ ...  if (need_here_doc) gather_here_documents ();  ... }
+```
+
+(parse.y:1217, and the `&`/`;` variants at 1235/1250), plus the same in
+`compound_list`. So an offending token that is merely the *lookahead* for a
+top-level `simple_list1 → simple_list` reduction gets the here-document
+collected before the error is reported — and collection moves bash's reader.
+
+Two divergences fall out of that, and they are the same bug seen twice.
+
+**Symptom 1 — the error is blamed too early.** `make_here_document`
+(make_cmd.c:621) does `line_number++` once per line it reads, delimiter line
+included, so after collection the reader sits on the delimiter line:
 
 ```text
 cat <<E(          bash: line 3: syntax error near unexpected token `('
 body                    line 3: `cat <<E('
-E                 osh:  line 1: … (same message, same echoed line)
+E                 osh:  line 1: … (same message, same echoed text)
 echo tail
 ```
-
-The `(` is on line 1 in both; only the stamp differs. Measured shapes:
 
 | source | bash | osh |
 |---|---|---|
 | `cat <<E(` / `body` / `E` / `echo tail` | 3 | 1 |
 | the same with three body lines | 5 | 1 |
 | `echo one` first | 4 | 2 |
-| `cat <<E(` / `body` / `E(` (never delimited) | end of input | 1 |
+| `cat <<E;;` / `body` / `E` / `echo tail` | 3 | 1 |
+| `cat <<E` / `body` / `E` / `cat <<F(` / `b` / `F` | 6 | 4 |
 
-Control probes agree, which is what says the here-document is the whole of it:
-`echo (` on its own, and `cat <<E` / `body` / `E` / `echo (`, both match.
+Note the **echoed line does not move with the number** — bash prints
+`cat <<E(`, which is line 1, under a "line 3:" prefix. `read_a_line`
+(parse.y:2080) reads here-document bodies into a buffer of its own and never
+replaces `shell_input_line`, so only `line_number` advances. osh derives the
+echo from the reported number (`nth_source_line` in `Shell::…`, interp.rs
+~45211), so moving the number alone would echo the wrong text; `ParseError::echo`
+already exists to override it and is what should carry the token's own line.
 
-**Reproduce:** put the deleted final section back into
-`tests/corpus/a-here-document-delimiter-is-a-whole-word-groups-and-all.sh`:
+**Symptom 2 — a pending here-document's warning is lost.** If an unterminated
+construct *after* the `<<` on the same line swallows the rest of the input, the
+here-document never gets a body, and the same reduction warns about it:
 
-```sh
-echo "=== and the group has to close"
-cat <<E(
-body
-E(
+```text
+cat <<E "         bash: line 1: unexpected EOF while looking for matching `"'
+body                    line 4: warning: here-document at line 4 delimited by
+E                             end-of-file (wanted `E')
+                  osh:  the error only
 ```
 
-bash blames line 79, osh line 77.
+Both numbers in the warning are the EOF line, collection having "begun" there.
+Two pending here-documents give two warnings, in declaration order
+(`cat <<E; cat <<F "` / `a` / `E` / `b` / `F` warns for `E` then `F`). Holds for
+every `parse_matched_pair` construct — `"`, `'`, `` ` ``, `${`, `$((` — and for
+`<<-` and a quoted delimiter alike.
 
-**Proper fix.** Extend the reader model to here-documents: the reader's line
-after a token is `cur_line()` + continuations crossed + **the body lines the
-pending here-documents consumed**. The lexer already knows both numbers — it
-records `body_line` and `eof_line` for the unterminated-here-document warning
-(`ReaderWarning::HeredocEof`) — so the missing piece is carrying the reader's
-final position out of `collect_heredocs` and into `Spans`, next to
-`cont_lines`, rather than a new scan.
+**What proves it is one rule, not two.** The reduction only fires at top level,
+and *both* symptoms vanish together the moment the command is inside a compound:
+
+| source | bash |
+|---|---|
+| `cat <<E(` / `body` / `E` / `echo t` | line **3** |
+| `{ cat <<E(` / … | line **1** |
+| `if cat <<E(` / … | line **1** |
+| `while cat <<E(` / … | line **1** |
+| `cat <<E "` / `body` / `E` | error **+ warning** |
+| `if cat <<E "` / `body` / `E` | error, **no warning** |
+
+`$( … )` is exempt from both, because `parse_comsub` parses the body in a nested
+reader rather than letting `parse_matched_pair` swallow it: `cat <<E $(x` /
+`body` / `E` gives the error and nothing else.
+
+**Proper fix.** The obstacle is architectural: osh lexes the whole input first,
+so here-document collection (and its warnings) happens in the lexer, with no
+parser reduction to hang off. The rule needs the parser's answer to "is this
+token the lookahead of a top-level list reduction?", which is exactly
+"`Parser::parse_list` is about to finish an item and the nesting depth is zero".
+
+So: have the lexer record, per pending here-document, the reader position
+collection *would* leave the reader at (it already computes both numbers for
+`ReaderWarning::HeredocEof`), and carry the still-pending ones on the parked
+`LexError`. Then the parser, at the point where it stamps a diagnostic
+(`parse_tokens` and `IncrementalParser`, parser.rs:971 and :1476), adds the
+here-document advance to `reader_line()` and pins `reader_echo()` to the token's
+own line — but only when the error is at top level, and emits the pending
+warnings under the same condition.
 
 ### TD-OILS-A-LONE-CONDITIONAL-END-RAN-AS-A-COMMAND. `]]` was an ordinary word to osh where bash makes it a reserved token — 2026-08-06 — ✅ FIXED 2026-08-06
 

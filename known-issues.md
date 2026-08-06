@@ -202,15 +202,14 @@ written through is never re-truncated.
 
 Covered by `userspace/oils/tests/corpus/a-redirect-list-is-performed-left-to-right-and-each-step-is-already-in-effect.sh`.
 
-**Not covered by this fix** — the same left-to-right principle for descriptors
-other than fd 2. See
-TD-OILS-A-REDIRECT-LISTS-EARLIER-MEMBERS-ARE-IN-EFFECT-FOR-EVERY-FD-NOT-JUST-FD-2
+The same left-to-right principle for descriptors other than fd 2 was carried out
+in TD-OILS-A-REDIRECT-LISTS-EARLIER-MEMBERS-ARE-IN-EFFECT-FOR-EVERY-FD-NOT-JUST-FD-2
 below.
 
-### TD-OILS-A-REDIRECT-LISTS-EARLIER-MEMBERS-ARE-IN-EFFECT-FOR-EVERY-FD-NOT-JUST-FD-2. A later word's expansion cannot see an earlier `3>` or `<` in the same list — 2026-08-06 — OPEN
+### TD-OILS-A-REDIRECT-LISTS-EARLIER-MEMBERS-ARE-IN-EFFECT-FOR-EVERY-FD-NOT-JUST-FD-2. A later word's expansion cannot see an earlier `3>` or `<` in the same list — 2026-08-06 — ✅ FIXED 2026-08-06
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::resolve_redirect_list`, which
-now installs the partial plan's *stderr* around each step but nothing else.
+installed the partial plan's *stderr* around each step but nothing else.
 
 **What.** bash performs the whole list against the real fd table, so *every*
 descriptor an earlier member bound is in force while a later member's word is
@@ -232,22 +231,58 @@ $ osh  -c 'true <in > $(cat; echo /dev/null)'
 Found while fixing TD-OILS-A-REDIRECT-LIST-IS-NOT-APPLIED-AS-IT-IS-BUILT above,
 whose measurement covered fd 2 only.
 
-**Proper fix.** Grow the partial installation from "the stderr sink" to "the
-plan so far", using the existing `install_extra_fds` / `restore_extra_fds` /
-`install_std_reads` helpers plus a stdin binding, installed *incrementally*
-(only the ops each step added) and unwound once at the end of the list rather
-than pushed and popped per step. The blocker is that `ExtraFdOp::OutputFile`
-still carries a *path*, so re-installing it reopens and re-truncates the file —
-fd ≥ 3 has to be given the same "open once, keep the handle" treatment that fd 1
-and fd 2 just got (`ExtraFdOp::OutputFile(Str, bool)` → a variant carrying the
-`Arc<File>` the resolve-time open produced). fd 0 needs the expansion path to
-take its stdin from the partial plan rather than from the ambient descriptor,
-which today is a parameter rather than shell state.
-
 **Impact.** Confined to a redirect word that *reads* the descriptor table while
 being expanded — a command substitution using `>&N`/`<&N`, or one that reads fd
-0. Rare in practice, but the fd-0 case can *hang* osh where bash returns
+0. Rare in practice, but the fd-0 case could *hang* osh where bash returned
 immediately, which is worse than a wrong answer.
+
+**Fixed.** The partial installation grew from "the stderr sink" to "the plan so
+far", in three parts, one per descriptor class:
+
+- **fd ≥ 3.** `ExtraFdOp::OutputFile` carried a *path*, so re-installing one
+  reopened and re-truncated the file. It now carries the `Arc<File>` the
+  resolve-time open produced — the same "open once, keep the handle" treatment
+  fd 1 and fd 2 got in the entry above — which makes `install_extra_fds`
+  side-effect-free and so safe to call mid-list. `resolve_redirect_list` installs
+  `plan.extra_fds` *incrementally* (only the entries the last step appended,
+  tracked by a `staged_upto` index) and unwinds once at the end via
+  `restore_extra_fds`, because re-installing an earlier entry would rebind a
+  descriptor the expansion may still be holding. A repeated fd is saved twice —
+  once by the step that first bound it, once by the step that rebound it — and
+  the unwind runs in reverse, so the binding the list started with is what comes
+  back. Unwinding at the end rather than per step is why the two failure exits
+  now record a `RedirFail` and break instead of returning where they are found.
+- **fd 0.** New `push_partial_stdin` / `pop_partial_stdin`, the companions of
+  `push_partial_stderr`, wrapped around each step. They install the plan's fd 0
+  as `exec_stdin`/`exec_stdin_write` — the *ambient* binding — because that is
+  how fd 0 reaches an expansion at all: a command substitution runs with
+  `StdinSrc::Inherit`, which resolves through it. The source is resolved by the
+  existing `plan_stdin_fd`, already designed for mid-list use by the `<&0` dup,
+  so the word and the command *share* one cursor exactly as they share one
+  descriptor in bash; `<&-` resolves to an explicitly closed input rather than to
+  `None`, which as an ambient binding would have meant the real terminal.
+- **fd 1** needs no staging: a command substitution's fd 1 is always its capture
+  pipe, so no word can observe the list's stdout by writing to it, and a *dup* of
+  it (`>f 3>&1`) is answered from the plan by `AliasSink`, not from the
+  descriptor table. Verified by measurement, not assumed.
+
+Now matching bash, all previously divergent:
+
+```text
+true 3>f3 > $(echo x >&3; echo /dev/null)                  f3 holds `x`
+true 3>f3 4>&3 > $(echo y >&4; echo /dev/null)             f3 holds `y`
+true <in 3> $(cat >&2; echo /dev/null)                     `in`'s contents
+true <in 3> $(read -r a; …) 4> $(read -r b; …)             a=L1, b=L2
+{ read -r c; …; } <in 3> $(read -r a; …)                   a=L1, c=L2
+true <<< $'H1\nH2' 3> $(read -r a; …)                      a=H1
+true <&- 3> $(read -r a; …)                                read error: 0: EBADF
+```
+
+and, unchanged, the reversed orders that must *not* see the binding
+(`3> $(…) <in`, `> $(echo x >&3; …) 3>f3`), the no-leak-past-the-list cases, and
+an outer `exec 3>outer` restored afterwards with its offset shared.
+
+Covered by the same corpus case as the entry above.
 
 ### TD-OILS-A-PIPELINE-STAGE-COUNTS-AS-A-SUBSHELL-FOR-THE-FATAL-ABORT-STATUS. A `set -u` abort in a pipeline stage yields 1 where bash yields 127 — 2026-08-06 — OPEN
 

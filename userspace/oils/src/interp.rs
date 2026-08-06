@@ -10300,17 +10300,12 @@ impl Shell {
                     self.open_fds.insert(*fd, Arc::clone(src));
                     self.open_write_fds.insert(*fd, WriteFd::ReadOnly);
                 }
-                ExtraFdOp::OutputFile(path, append) => match open_out(&self.cwd, path, *append) {
-                    Ok(f) => {
-                        self.open_write_fds.insert(*fd, WriteFd::File(std::sync::Arc::new(f)));
-                        self.open_fds.insert(*fd, write_only_input());
-                    }
-                    Err(e) => {
-                        let line = bfmt![self.err_prefix(), path, b": ", io_error_message(&e)];
-                        self.berrln(&line);
-                        self.last_status = 1;
-                    }
-                },
+                ExtraFdOp::OutputFile(handle) => {
+                    // The open already happened, and already reported itself if
+                    // it failed — the list aborts there and never reaches here.
+                    self.open_write_fds.insert(*fd, WriteFd::File(Arc::clone(handle)));
+                    self.open_fds.insert(*fd, write_only_input());
+                }
                 ExtraFdOp::AliasFd { src, read, sink } => {
                     self.open_fds.insert(*fd, Arc::clone(read));
                     // A `>out 3>&1` copies the file this list opened for fd 1,
@@ -20801,6 +20796,40 @@ impl Shell {
         })
     }
 
+    /// Resolve a redirect list into a [`RedirPlan`], *performing* it as it goes.
+    ///
+    /// bash does not build a plan and install it; `do_redirections` (`redir.c`)
+    /// walks the list and hands each member to `do_redirection_internal`, which
+    /// expands the word and installs the result before the walk moves on. So
+    /// member N's word is expanded with members 1..N-1 already in force, and a
+    /// word that *looks at* the descriptor table sees them:
+    ///
+    /// ```text
+    /// 2>err > $(echo boom >&2; echo /dev/null)   `boom` lands in `err`
+    /// > $(echo boom >&2; echo /dev/null) 2>err   `boom` lands on the terminal
+    /// 3>f3 > $(echo x >&3; echo /dev/null)       `x` lands in `f3`
+    /// <in  > $(cat >&2;    echo /dev/null)       `in`'s contents are read
+    /// ```
+    ///
+    /// Three things are therefore put in effect around each step and taken away
+    /// again afterwards:
+    ///
+    /// - the partial plan's fd-2 sink ([`Shell::push_partial_stderr`]) and its
+    ///   fd 0 ([`Shell::push_partial_stdin`]), both pushed and popped *per step*
+    ///   — a later member can readdress either, so each step must see the
+    ///   binding as of that step and nothing may outlive the list;
+    /// - its fd ≥ 3 bindings, installed *incrementally* (only what the last step
+    ///   added) and unwound once at the end, since re-installing one would
+    ///   rebind a descriptor the expansion may still be holding.
+    ///
+    /// Unwinding the fd ≥ 3 staging at the end and not per step is also why the
+    /// failure paths go through a `fail` variable rather than returning where
+    /// they are found.
+    ///
+    /// fd 1 needs no staging of its own: a command substitution's fd 1 is always
+    /// its capture pipe, so no word can observe the list's stdout by writing to
+    /// it, and a *dup* of it (`>f 3>&1`) is answered from the plan by
+    /// [`AliasSink`] rather than from the descriptor table.
     fn resolve_redirect_list(
         &mut self,
         redirs: &[Redirect],
@@ -20809,28 +20838,33 @@ impl Shell {
     ) -> Result<RedirPlan, Box<RedirFailure>> {
         let mut plan = RedirPlan::default();
         let mut reserved: Vec<i32> = Vec::new();
+        // The fd ≥ 3 bindings this list has staged, and how many of
+        // `plan.extra_fds` they cover. A repeated fd is saved twice — once by
+        // the step that first bound it and once by the step that rebound it —
+        // and `restore_extra_fds` unwinds in reverse, so the binding the list
+        // started with is the one that comes back.
+        let mut staged: Vec<SavedFd> = Vec::new();
+        let mut staged_upto = 0usize;
+        let mut fail: Option<RedirFail> = None;
         for r in redirs {
             self.dup_save_note = DupSaveNote::None;
-            // bash performs a redirect list against the real fd table, strictly
-            // left to right, so redirects 1..N-1 are already *in effect* while
-            // redirect N's word is expanded. Anything the expansion writes to
-            // fd 2 — a `set -u` complaint, or the stderr of a command
-            // substitution inside the word — therefore goes to the sink an
-            // earlier member of the same list established:
-            //
-            //     2>err > $(echo boom >&2; echo /dev/null)   → `boom` in `err`
-            //     > $(echo boom >&2; echo /dev/null) 2>err   → `boom` on the
-            //                                                  terminal
-            //
-            // Pushing the partial plan's sink around the resolution reproduces
-            // that: the whole expansion runs with fd 2 addressed as the list has
-            // addressed it so far, and it is popped again before the next step
-            // re-derives it from the now-larger plan.
+            if let Some(fresh) = plan.extra_fds.get(staged_upto..).filter(|f| !f.is_empty()) {
+                // `StagedStdSinks::default`, as the execution-time install
+                // uses: whether a `3>&1` copies the list's own fd 1 or the
+                // ambient one is a separate question, answered by [`AliasSink`]
+                // at resolution time — see TD-OILS-DUP-OF-STDOUT-IS-NOT-THE-LIST-SO-FAR.
+                let fresh = fresh.to_vec();
+                staged_upto = plan.extra_fds.len();
+                let s = self.install_extra_fds(&fresh, out, StagedStdSinks::default());
+                staged.extend(s);
+            }
+            let stdin_saved = self.push_partial_stdin(&mut plan);
             let pushed = self.push_partial_stderr(&plan, out);
             let attempt = self.resolve_one_redirect(r, &mut plan, &mut reserved, out, scope);
             if pushed {
                 self.stderr_stack.pop();
             }
+            self.pop_partial_stdin(stdin_saved);
             // A fatal word-expansion error *inside* the redirect's word abandons
             // the redirect and the command with it, before either is performed.
             // Checked here rather than per-op so it covers every word alike —
@@ -20838,32 +20872,41 @@ impl Shell {
             // fail as redirections at all and so would otherwise be planned from
             // the half-built text and handed to a command bash never runs.
             if self.expansion_failed() {
-                return Err(Box::new(RedirFailure {
-                    partial: plan,
-                    msg: Str::new(),
-                    fatal: true,
-                    // The word never produced a descriptor to save, so there is
-                    // no save to have failed.
-                    dup_save: DupSaveNote::None,
-                }));
+                fail = Some(RedirFail::Fatal);
+                break;
             }
             if let Err(msg) = attempt {
-                // Hand the caller the plan built from the redirects *before* this
-                // one: bash applies redirections left to right against the real fd
-                // table, so the diagnostic for a failure goes to fd 2 as it stood
-                // at that moment (`2>err > /nodir/f` writes the message into
-                // `err`; `> /nodir/f 2>err` writes it to the original stderr and
-                // never creates `err`).
-                return Err(Box::new(RedirFailure {
-                    partial: plan,
-                    msg,
-                    fatal: false,
-                    dup_save: self.dup_save_note,
-                }));
+                fail = Some(RedirFail::Failed(msg, self.dup_save_note));
+                break;
             }
         }
-        Self::reconcile_dup_then_close(&mut plan);
-        Ok(plan)
+        self.restore_extra_fds(staged);
+        match fail {
+            // The word never produced a descriptor to save, so there is no save
+            // to have failed.
+            Some(RedirFail::Fatal) => Err(Box::new(RedirFailure {
+                partial: plan,
+                msg: Str::new(),
+                fatal: true,
+                dup_save: DupSaveNote::None,
+            })),
+            // Hand the caller the plan built from the redirects *before* this
+            // one: bash applies redirections left to right against the real fd
+            // table, so the diagnostic for a failure goes to fd 2 as it stood at
+            // that moment (`2>err > /nodir/f` writes the message into `err`;
+            // `> /nodir/f 2>err` writes it to the original stderr and never
+            // creates `err`).
+            Some(RedirFail::Failed(msg, dup_save)) => Err(Box::new(RedirFailure {
+                partial: plan,
+                msg,
+                fatal: false,
+                dup_save,
+            })),
+            None => {
+                Self::reconcile_dup_then_close(&mut plan);
+                Ok(plan)
+            }
+        }
     }
 
     /// The [`Flow`] a command takes when a *word expansion inside one of its
@@ -21204,6 +21247,54 @@ impl Shell {
         false
     }
 
+    /// Put a *partially applied* plan's fd 0 in effect as the ambient input,
+    /// returning the previous binding for [`Shell::pop_partial_stdin`] to put
+    /// back (or `None` when the plan has not bound fd 0 and the ambient input
+    /// already stands).
+    ///
+    /// The companion of [`Shell::push_partial_stderr`] for the other direction:
+    /// a word later in the same list is expanded with the earlier `<file`
+    /// already performed, so a command substitution in it reads that file —
+    /// `<in 3> $(cat >&2; echo /dev/null)` echoes `in`'s contents.
+    ///
+    /// Installed as `exec_stdin` rather than handed down as a source because
+    /// that is how fd 0 reaches an expansion at all: a substitution runs with
+    /// [`StdinSrc::Inherit`], which resolves through the ambient binding. The
+    /// write half travels with it, exactly as in [`Shell::exec_with_redirects`],
+    /// so a `0<> f` earlier in the list also makes a later word's `>&0` writable.
+    ///
+    /// The source is *shared*, not copied, so what the word consumes the command
+    /// does not see again — bash's one descriptor, one offset:
+    ///
+    /// ```text
+    /// { read -r c; echo "c=[$c]"; } <in 3> $(read -r a; echo "a=[$a]" >&2; …)
+    /// a=[L1]
+    /// c=[L2]
+    /// ```
+    fn push_partial_stdin(&mut self, p: &mut RedirPlan) -> Option<StagedStdin> {
+        if !p.rebinds_stdin() {
+            return None;
+        }
+        // The same resolver the mid-list `<&0` dup uses, and for the same
+        // reason: it answers "what is fd 0 *at this point in the list*", which
+        // is exactly what the next word must see. A plan that bound fd 0 to
+        // nothing readable (`<&-`) resolves to `None` there, which as an
+        // ambient binding would mean the shell's real stdin — so it becomes an
+        // explicitly closed descriptor instead, and the word's read fails as
+        // bash's does rather than reaching the terminal.
+        let src = self.plan_stdin_fd(p).unwrap_or_else(closed_input);
+        let prev_write = std::mem::replace(&mut self.exec_stdin_write, p.stdin_write.clone());
+        Some((self.exec_stdin.replace(src), prev_write))
+    }
+
+    /// Undo a [`Shell::push_partial_stdin`].
+    fn pop_partial_stdin(&mut self, saved: Option<StagedStdin>) {
+        if let Some((r, w)) = saved {
+            self.exec_stdin = r;
+            self.exec_stdin_write = w;
+        }
+    }
+
     /// Fold one redirect into `plan`, performing its side effects (opening an
     /// input file, creating/truncating an output target, allocating a `{name}`
     /// descriptor) as it goes. Split out of [`Shell::resolve_redirects`] purely
@@ -21436,9 +21527,7 @@ impl Shell {
                         // not stdout. Only `exec` consumes it; on any other
                         // command it is a documented no-op (previously this fell
                         // into the stdout arm and wrongly redirected fd 1).
-                        f if f >= 3 => plan
-                            .extra_fds
-                            .push((f, ExtraFdOp::OutputFile(target, append))),
+                        f if f >= 3 => plan.extra_fds.push((f, ExtraFdOp::OutputFile(h))),
                         _ => {
                             plan.clear_stdout();
                             plan.stdout = Some((target, append));
@@ -28011,24 +28100,14 @@ impl Shell {
                                     self.open_fds.insert(*fd, Arc::clone(src));
                                     self.open_write_fds.insert(*fd, WriteFd::ReadOnly);
                                 }
-                                ExtraFdOp::OutputFile(path, append) => {
-                                    match open_out(&self.cwd, path, *append) {
-                                        Ok(f) => {
-                                            self.open_write_fds
-                                                .insert(*fd, WriteFd::File(std::sync::Arc::new(f)));
-                                            self.open_fds.insert(*fd, write_only_input());
-                                        }
-                                        Err(e) => {
-                                            let msg = bfmt![
-                                                self.err_prefix(),
-                                                path,
-                                                b": ",
-                                                io_error_message(&e)
-                                            ];
-                                            self.berrln(&msg);
-                                            rc = 1;
-                                        }
-                                    }
+                                ExtraFdOp::OutputFile(handle) => {
+                                    // As in `install_extra_fds`: the descriptor
+                                    // the redirect opened, not a second open of
+                                    // the path. `exec 3>f; echo a >&3; echo b
+                                    // >&3` must append, not rewrite offset 0.
+                                    self.open_write_fds
+                                        .insert(*fd, WriteFd::File(Arc::clone(handle)));
+                                    self.open_fds.insert(*fd, write_only_input());
                                 }
                                 // `exec 3>&1` inside `$( … )` aliases fd 3 to the
                                 // capture, not to the terminal — the descriptor
@@ -45390,6 +45469,22 @@ struct RedirFailure {
     dup_save: DupSaveNote,
 }
 
+/// How a redirect list stopped early, held until its staging can be unwound.
+///
+/// [`Shell::resolve_redirect_list`] performs the list as it walks it, so by the
+/// time a member fails there are fd ≥ 3 bindings in place that must come back
+/// out before the [`RedirFailure`] is built and returned. Returning from inside
+/// the loop would skip that unwind, so the two failure exits record *why* they
+/// stopped here and let the single exit after the loop do the restoring.
+enum RedirFail {
+    /// A fatal word expansion inside the redirect abandoned it — the complaint
+    /// is already printed, so there is nothing to carry but the fact.
+    Fatal,
+    /// The redirection itself could not be established: its diagnostic, and
+    /// whether saving the old descriptor failed too.
+    Failed(Str, DupSaveNote),
+}
+
 /// Why a failed dup would additionally print bash's unnumbered
 /// `redirection error: cannot duplicate fd: <errno>` line, which precedes the
 /// ordinary numbered diagnostic.
@@ -45458,6 +45553,12 @@ impl RedirPlan {
 /// shell's fd tables and reinstated when the body finishes.
 type SavedFd = (i32, Option<InputFd>, Option<WriteFd>);
 
+/// The ambient fd 0 displaced by [`Shell::push_partial_stdin`] — `(prior read
+/// cursor, prior write half)` — held for the length of one redirect-list step
+/// and put back by [`Shell::pop_partial_stdin`]. Both halves travel together
+/// because rebinding fd 0 replaces both (see [`Shell::exec_stdin_write`]).
+type StagedStdin = (Option<InputFd>, Option<Arc<File>>);
+
 /// An operation on a non-standard file descriptor (fd ≥ 3), captured by
 /// [`Shell::resolve_redirects`] and applied to the shell's fd tables by `exec`.
 #[derive(Debug, Clone)]
@@ -45469,10 +45570,16 @@ enum ExtraFdOp {
     /// [`WriteFd::ReadOnly`]: the descriptor exists, so `echo >&N` is a valid
     /// redirect, and it is the write that fails.
     Input(InputFd),
-    /// Open fd N for writing to `path` (`N> file` / `N>> file`); the `bool` is
-    /// the append flag. fd N's read half becomes [`InputSrc::WriteOnly`], for
-    /// the mirror-image reason [`ExtraFdOp::Input`] gives.
-    OutputFile(Str, bool),
+    /// Bind fd N to the descriptor an `N> file` / `N>> file` opened. Opened at
+    /// resolution time and carried here, not reopened at apply time, for the
+    /// same reason [`ExtraFdOp::Input`] carries its descriptor and
+    /// [`RedirPlan::stdout_write`] carries fd 1's: bash opens a target once,
+    /// when the redirect is performed, and every writer of the fd shares that
+    /// one open file description — so they share its offset and none of them
+    /// can truncate away what an earlier one wrote. fd N's read half becomes
+    /// [`InputSrc::WriteOnly`], for the mirror-image reason
+    /// [`ExtraFdOp::Input`] gives.
+    OutputFile(Arc<File>),
     /// Alias fd N to another descriptor (`3>&1`, `3<&1`, `3>&0`, `7>&5`,
     /// `4<&3`) — *both* of its halves, because a dup is one `dup2` and the copy
     /// carries whatever access mode the source had. Which way the arrow was

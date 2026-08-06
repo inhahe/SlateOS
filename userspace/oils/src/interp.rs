@@ -36080,6 +36080,58 @@ impl Shell {
         }
     }
 
+    /// The compound path's array-kind refusal, in the two shapes bash gives it.
+    ///
+    /// The line is the compound-assignment machinery's, which is why it carries
+    /// no `declare:` tag (unlike the bare-name form in
+    /// [`Shell::builtin_declare`]). What follows it turns on whether there is a
+    /// function frame around the command — bash's `variable_context`:
+    ///
+    /// * At top level the machinery's failure ends the parse unit, so the
+    ///   builtin never runs and never speaks its half. `None` says so, and the
+    ///   caller returns [`Flow::Discard`].
+    /// * Inside a function it is an ordinary failure: the builtin runs, is
+    ///   handed the same operand, and refuses it again with its own tag. The
+    ///   returned line is that half, to be *held* on the operand rather than
+    ///   spoken now — bash prints every machinery half before any builtin one,
+    ///   for the same reason the `noassign` and readonly refusals hold theirs.
+    ///
+    /// The machinery's half names the running function when the binding it
+    /// would make is a **global** one (`declare -g` from inside a function); a
+    /// declaration binding a local is untagged, as at top level. That is the
+    /// opposite way round from the readonly refusal, which is tagged and only
+    /// ever fires on a local — the two come from different places in bash.
+    ///
+    /// `blame` is the name the refusal is *about*, which is not always the
+    /// operand: an operand reached through a reference to an element is refused
+    /// in the base array's name, because the base is the array whose kind is
+    /// being asked to change.
+    fn compound_kind_refusal(
+        &mut self,
+        blame: &str,
+        kinds: (&'static str, &'static str),
+        make_local: bool,
+        cmd: &str,
+    ) -> Option<Str> {
+        let (from_kind, to_kind) = kinds;
+        let msg: Str = bfmt![
+            blame.as_bytes(),
+            format!(": cannot convert {from_kind} to {to_kind} array")
+        ];
+        let top = self.local_frames.is_empty();
+        let tag: Str = if make_local || top {
+            Vec::new()
+        } else {
+            bfmt![&self.fn_stack.last().cloned().unwrap_or_default(), b": "]
+        };
+        self.berrln(&bfmt![self.err_prefix(), &tag, &msg]);
+        self.last_status = 1;
+        if top {
+            return None;
+        }
+        Some(bfmt![self.err_prefix(), cmd, b": ", &msg])
+    }
+
     /// Give `name` an array kind, carrying any value it already holds as a
     /// *scalar* in as element (or key) `0`.
     ///
@@ -36708,6 +36760,57 @@ impl Shell {
             let spelled = resolved
                 .as_ref()
                 .and_then(|t| Self::spelled_local_name(t, !self.local_frames.is_empty()));
+            // `positions` is in `argv` space, where index 0 is the command word;
+            // the builtin's operand loop walks `argv[1..]`, so the position is
+            // one less. A compound written after every word sits past the end,
+            // and the loop appends it.
+            let at = positions.get(k).copied().unwrap_or(argv.len()).saturating_sub(1);
+            // Wherever the declaration would *not* bind a local — at top level,
+            // and under `-g` — a reference to an element makes bash reach for
+            // the reference's **base** array before anything else, and it is
+            // there that `-a`/`-A` are answered. So the refusal a script sees
+            // blames `n`, not `n[1]`, and it comes before the refusal of the
+            // spelling as an identifier below.
+            //
+            // The reach is bash's `find_or_make_array_variable`: an existing
+            // array of the other kind is what earns the refusal, while a base
+            // that is a scalar — or is not there at all — is *made* an array of
+            // the literal's kind, the scalar's value carried in as element `0`.
+            // That is why `declare -gA r=([k]=v)` through `nosuch[1]` leaves
+            // both `declare -A nosuch` and the spelling behind. It is only the
+            // kind that reaches the base: no other attribute of the command
+            // lands on it.
+            //
+            // Nothing is made at top level, though, where the operand is about
+            // to be refused as an identifier and the parse unit thrown away —
+            // bash's shell is over by then, so a base it may have made is
+            // unobservable, and one osh left behind would not be.
+            if let Some(base) = resolved
+                .as_ref()
+                .and_then(|t| t.sub.as_ref().map(|_| t.base.clone()))
+                .filter(|_| !make_local)
+            {
+                if let Some(kinds) = self.array_kind_conflict(&base, assoc, indexed) {
+                    let Some(held) = self.compound_kind_refusal(&base, kinds, make_local, cmd) else {
+                        return Err(Flow::Discard);
+                    };
+                    bound.push(BoundCompound {
+                        at,
+                        name: a.name.clone(),
+                        target: spelled.clone().unwrap_or_else(|| a.name.clone()),
+                        refused_local: Some(held),
+                        refused_nameref: false,
+                    });
+                    continue;
+                }
+                if spelled.is_some()
+                    && !self.arrays.contains_key(&base)
+                    && !self.assoc.contains_key(&base)
+                {
+                    self.array_kind_apply(&base, assoc);
+                    self.declared.insert(base);
+                }
+            }
             let target = match (&spelled, resolved) {
                 (Some(s), _) => s.clone(),
                 (None, Some(RefTarget { base, sub: None })) => base,
@@ -36732,12 +36835,8 @@ impl Shell {
                 }
                 (None, None) => a.name.clone(),
             };
-            // `positions` is in `argv` space, where index 0 is the command word;
-            // the builtin's operand loop walks `argv[1..]`, so the position is
-            // one less. A compound written after every word sits past the end,
-            // and the loop appends it.
             bound.push(BoundCompound {
-                at: positions.get(k).copied().unwrap_or(argv.len()).saturating_sub(1),
+                at,
                 name: a.name.clone(),
                 target: target.clone(),
                 refused_local: None,
@@ -36855,47 +36954,10 @@ impl Shell {
             // `self.arrays` — which looks exactly like silent data loss to a
             // script. Reject with bash's message and status 1, leaving the
             // variable untouched (`unset` first is the way to change kind).
-            if let Some((from_kind, to_kind)) = self.array_kind_conflict(&target, assoc, indexed) {
-                // The *literal* form is diagnosed by bash's compound-assignment
-                // machinery, which is why the first line carries no `declare:`
-                // tag (unlike the bare-name form in `builtin_declare`). What
-                // follows it depends on whether there is a function frame
-                // around the command, which is bash's `variable_context`:
-                //
-                //   * At top level the machinery's failure ends the parse unit,
-                //     so the builtin never runs and never speaks its half —
-                //     one line, and nothing after the command on that line.
-                //   * Inside a function it is an ordinary failure: the builtin
-                //     runs, is handed the same operand, and refuses it again
-                //     with its own tag. The command returns 1 and the function
-                //     carries on. The second half is held on the operand
-                //     rather than spoken here, for the same reason the
-                //     `noassign` and readonly refusals above hold theirs:
-                //     bash prints every machinery half before any builtin one.
-                //
-                // The machinery's half names the running function when the
-                // binding it would make is a *global* one — `declare -g` from
-                // inside a function. A declaration binding a local is
-                // untagged, as at top level. (This is the opposite way round
-                // from the readonly refusal above, which is tagged and only
-                // ever fires on a local; the two come from different places in
-                // bash.)
-                let msg: Str = bfmt![
-                    a.name.as_bytes(),
-                    format!(": cannot convert {from_kind} to {to_kind} array")
-                ];
-                let top = self.local_frames.is_empty();
-                let tag: Str = if make_local || top {
-                    Vec::new()
-                } else {
-                    bfmt![&self.fn_stack.last().cloned().unwrap_or_default(), b": "]
-                };
-                self.berrln(&bfmt![self.err_prefix(), &tag, &msg]);
-                self.last_status = 1;
-                if top {
+            if let Some(kinds) = self.array_kind_conflict(&target, assoc, indexed) {
+                let Some(held) = self.compound_kind_refusal(&a.name, kinds, make_local, cmd) else {
                     return Err(Flow::Discard);
-                }
-                let held = bfmt![self.err_prefix(), cmd, b": ", &msg];
+                };
                 if let Some(e) = bound.last_mut() {
                     e.refused_local = Some(held);
                 }

@@ -1147,7 +1147,7 @@ from different places in bash.
 `Flow::Discard`, keeping the discard for the top-level case alone. Corpus:
 `a-compound-kind-refusal-inside-a-function-is-reported-twice.sh`.
 
-### TD-OILS-AN-ASSOCIATIVE-COMPOUND-THROUGH-A-REFERENCE-TO-AN-ELEMENT-IS-BLAMED-BY-THE-WRONG-RULE. `declare -n r='n[1]'; declare -A r=([k]=v)` says `` `n[1]': not a valid identifier `` where bash says `n: cannot convert indexed to associative array` — 2026-08-05 — OPEN
+### TD-OILS-AN-ASSOCIATIVE-COMPOUND-THROUGH-A-REFERENCE-TO-AN-ELEMENT-IS-BLAMED-BY-THE-WRONG-RULE. `declare -n r='n[1]'; declare -A r=([k]=v)` says `` `n[1]': not a valid identifier `` where bash says `n: cannot convert indexed to associative array` — 2026-08-05 — ✅ FIXED 2026-08-05
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::declare_compounds_scoped`.
 
@@ -1208,12 +1208,22 @@ declaration builtin's failed assignment word ends a non-interactive shell), the
 `-g` shape reports from the compound machinery — tagged with the function's name
 — *and* from the builtin, then merely fails: `echo "s=$?"` runs and prints 1.
 
-**Proper fix.** Order the two: with an explicit `-A`/`-a` in hand, ask the kind
-question of `target.base` first, and only then refuse the subscript. Ask it
-wherever the operand reached the base — the element store, and the `-g` compound
-that binds the spelling — but not from the plain local binding, which never
-touches the base. Under `-g` also create the base when it is absent, and emit
-the refusal twice without discarding.
+**Fixed 2026-08-05.** `Shell::declare_compounds_scoped` reaches the base before
+the `target` match, wherever the declaration would not bind a local. That is
+one `array_kind_conflict` on `RefTarget::base` — raised through the shared
+`Shell::compound_kind_refusal`, so it takes the two shapes of the entry above —
+followed, where the operand goes on to bind a spelling, by an
+`array_kind_apply` on a base that is not already an array of either kind. The
+apply is bash's `find_or_make_array_variable`, which is also why a *scalar*
+base is converted (its value carried in as element `0`) and an existing array
+of the agreeing kind is left alone. Nothing is made at top level, where the
+operand is refused as an identifier and the unit thrown away: bash's shell is
+over by then, so a base it may have made is unobservable, and one osh left
+behind would not be. Corpus:
+`the-kind-of-a-compound-through-a-reference-to-an-element-is-the-base-arrays.sh`.
+
+The *scalar* operand path asks the same question with the same misplaced blame;
+that is the entry below, still open.
 
 ### TD-OILS-A-KIND-CONVERSION-REFUSAL-THROUGH-A-REFERENCE-TO-AN-ELEMENT-BLAMES-THE-OPERAND. `declare -n r='n[1]'; declare -A r` says `r:` where bash says `n:` — 2026-08-05 — OPEN
 

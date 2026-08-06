@@ -205,6 +205,53 @@ the store cases, so the sweep stays green either way.
 `Shell::arrays` / `Shell::assoc` and every reader of them. Probes:
 `/d/tmp/hh/bo.sh` (T-series), `/d/tmp/hh/bp.sh` (U-series).
 
+## Q38 — Add antivirus exclusions so the osh corpus sweep is runnable again? — Status: OPEN
+
+**Question.** Process creation on this machine currently costs **~390 ms per
+spawn** through the MSYS runtime — roughly 20× normal, and stable across
+back-to-back measurements. `bash -c 'for i in $(seq 1 100); do /usr/bin/true;
+done'` takes 36–41 s. That makes `scripts/osh-bash-diff.py` unusable: the sweep
+of 2026-08-06 05:58 produced seven failures that were all `status: bash=-1`
+(the *reference* shell timing out with osh completing correctly), and the
+failures cascade, because each timed-out case leaves its bash tree behind.
+Individual cases that should take a second now take 13–53 s against a 20 s
+budget. Full measurements are in `known-issues.md` under
+`TD-OILS-CORPUS-SWEEP-IS-UNRUNNABLE-WHEN-PROCESS-SPAWN-LATENCY-SPIKES`.
+
+Windows Defender real-time protection is on and its exclusion list cannot be
+read or written without admin — hence this question rather than a fix.
+
+**Options.**
+
+- **A — Add Defender exclusions** for `C:\Program Files\Git\usr\bin\`, the
+  repo's `target\` tree, and `osh.exe`. *Pro:* directly targets the most likely
+  cause (real-time scanning of every short-lived MSYS process); restores the
+  sweep as a trustworthy gate, which is the only cross-checking tool osh parity
+  work has. *Con:* needs admin; narrows AV coverage over a build tree and a
+  shell — a real, if small, security tradeoff, and one on paths that execute
+  downloaded toolchain code.
+- **B — Diagnose further before excluding anything.** The cause is not proven:
+  Defender was equally on during the green 444-case sweep at 05:15 the same
+  morning, so something *changed*. *Pro:* avoids weakening AV for a guess.
+  *Con:* costs operator time, and the sweep stays unusable meanwhile.
+- **C — Live with it.** Rely on the 1384-case unit suite plus targeted
+  single-case corpus runs, and treat full sweeps as occasional. *Pro:* free.
+  *Con:* the unit suite does not compare against real bash at all; single-case
+  runs cannot catch a regression in a case you did not think to run.
+
+**Claude's recommendation.** **A**, scoped as narrowly as it will go — ideally
+a *process* exclusion for `bash.exe`/`osh.exe` rather than blanket path
+exclusions, which keeps file scanning intact. If you would rather not touch
+Defender at all, **C** is survivable and is what I am doing meanwhile.
+**Not blocking:** I discriminate `bash=-1` timeouts from real regressions by
+timing the case under bash alone, and there is plenty of unblocked parity work
+(~42 open `TD-OILS-*` entries).
+
+**Where it bites.** `scripts/osh-bash-diff.py` (`CASE_TIMEOUT = 20`, the
+`# TIMEOUT: N` per-case override) and every `userspace/oils/tests/corpus/*.sh`
+that spawns externals. Note the proper fix is *not* raising `CASE_TIMEOUT`:
+that would make every genuine hang cost minutes instead of seconds.
+
 ---
 
 Recently resolved (see `design-decisions.md` for the full rationale):

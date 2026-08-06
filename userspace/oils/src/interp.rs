@@ -35170,23 +35170,59 @@ impl Shell {
                 self.unreference_elem_base(base_name);
             }
             // `+n` follows on the same terms as any other letter, save that a
-            // *local* binding never does: inside a function, `local -n r=w;
-            // declare -x +n r` exports `r` and leaves `w` alone, exactly as a
-            // plain `declare -x r` there would.
+            // *local* binding usually does not: inside a function, `w=5;
+            // local -n r=w; declare -x +n r` exports `r` and leaves `w` alone,
+            // exactly as a plain `declare -x r` there would.
+            //
+            // What decides is whether the name the reference leads to already
+            // exists. bash looks it up, and when nothing answers the
+            // declaration is about the target after all: the target is brought
+            // into being with whatever was asked for and the reference is left
+            // as it was, nameref attribute and all.
+            //
+            // ```sh
+            // f() { declare -n r=nosuch; declare -x +n r; }
+            //   # declare -x nosuch, and r stays declare -n r="nosuch"
+            // f() { declare nosuch; declare -n r=nosuch; declare +n r; }
+            //   # nosuch exists, so r becomes the plain string "nosuch"
+            // ```
+            //
+            // "Exists" is bash's plain lookup, so a name brought into being
+            // unvalued counts — [`Self::name_is_bound`] is that question. A
+            // subscripted spelling is never a name on its own, so an element
+            // reference always follows, unless an earlier operand made one (see
+            // [`Self::spelled_local_name`]). The peek uses the silent
+            // [`Self::resolve_ref_name`] so it cannot add a warning to the
+            // walk the declaration itself is about to do.
+            let unset_nameref_follows = unset_nameref
+                && make_local
+                && !nameref
+                && binding_is_nameref
+                && !unreference
+                && self
+                    .resolve_ref_name(base_name)
+                    .is_some_and(|t| !self.name_is_bound(&t.spelling()));
             let follow = !nameref
                 && binding_is_nameref
                 && !unreference
-                && (!unset_nameref || !make_local);
+                && (!unset_nameref || !make_local || unset_nameref_follows);
             // …and `+n` takes the attribute off the last reference in the
             // chain rather than the operand's own name, which is only the same
             // name when the chain is one link long. Read before the walk can be
             // disturbed by anything below. Where the operand does not follow,
             // the name it was written with is the binding this declaration is
             // about, so that is the one that loses it.
-            let nameref_off_name = if unset_nameref && follow {
-                self.last_nameref_of(base_name)
+            //
+            // `None` where the declaration followed *because* the target does
+            // not exist: the letter is then about that target, which cannot be
+            // carrying a nameref attribute, so nothing comes off anywhere and
+            // the operand's own reference survives.
+            let nameref_off_name = if unset_nameref_follows {
+                None
+            } else if unset_nameref && follow {
+                Some(self.last_nameref_of(base_name))
             } else {
-                base_name.to_string()
+                Some(base_name.to_string())
             };
             // Whether this operand brings an array into being rather than only
             // saying something about a binding that is already there. A
@@ -35246,13 +35282,20 @@ impl Shell {
             // The re-check is what keeps the two `unreference` paths above out:
             // an operand that has just stopped being a reference is declaring
             // an array of its own, and still has that to do.
+            //
+            // An operand that followed because its target does not exist is
+            // not one of these: it has a target to bring into being, and `+n`
+            // is the part of it with nothing to do.
             if unset_nameref
                 && !nameref
                 && !other_attrs
                 && value.is_none()
+                && !unset_nameref_follows
                 && self.nameref_attr.contains(base_name)
             {
-                self.nameref_attr.remove(&nameref_off_name);
+                if let Some(off) = &nameref_off_name {
+                    self.nameref_attr.remove(off);
+                }
                 continue;
             }
             // The target's own subscript and the operand's cannot both stand:
@@ -35666,9 +35709,13 @@ impl Shell {
             // the attribute lands.
             if unset_nameref {
                 // Not `base_name`, which by here is the target the reference
-                // led to: the letter is about the reference itself. See
-                // `nameref_off_name` above.
-                self.nameref_attr.remove(&nameref_off_name);
+                // led to: the letter is about the reference itself — unless the
+                // declaration followed *because* that target does not exist,
+                // and then it is about the target and there is nothing to take
+                // off. See `nameref_off_name` above.
+                if let Some(off) = &nameref_off_name {
+                    self.nameref_attr.remove(off);
+                }
             } else if nameref {
                 if assoc || indexed {
                     // An array kind named alongside `-n` takes the name for

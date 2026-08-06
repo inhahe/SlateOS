@@ -960,6 +960,19 @@ the operand. A function that uses `+n` to test whether a reference resolves sees
 the opposite answer, and any attribute in the same command lands on the wrong
 variable.
 
+**Fixed 2026-08-05.** `Shell::builtin_declare_scoped` peeks at the target with
+the silent `Shell::resolve_ref_name` — silent so the peek cannot add a warning to
+the walk the declaration is about to do — and lets a `+n` local binding follow
+when `Shell::name_is_bound` says the resolved spelling names nothing.
+`nameref_off_name` became an `Option`, `None` in exactly that case: the letter is
+then about a target that cannot be carrying the attribute, so nothing comes off
+and the operand's own reference survives. The `+n`-only early exit steps aside
+for it, since such an operand still has a target to bring into being. An element
+reference reaches this every time and lands in the spelling-named binding the
+entry above supplies, so `declare -x +n r` through `declare -n r='n[1]'` leaves
+`declare -x n[1]`. Corpus:
+`plus-n-on-a-local-binding-follows-the-reference-when-its-target-does-not-exist.sh`.
+
 ### TD-OILS-SET-LISTS-A-DECLARED-BUT-UNVALUED-ARRAY. `declare -a qq` then `set` prints a bare `qq`; bash prints nothing — 2026-08-05 — ✅ FIXED 2026-08-05
 
 **Where:** `userspace/oils/src/interp.rs` — the `set`-with-no-operands listing.

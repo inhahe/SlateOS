@@ -136,6 +136,77 @@ coreutils in `userspace/`.
 
 ---
 
+## Q37 — How far should osh's bash parity go when the behavior being matched is an upstream bash *defect*? — Status: OPEN
+
+**Question.** osh is driven toward byte-exact bash 5.2.37 parity, and until now
+every divergence found has turned out to be *designed* bash behavior once its
+source was read. This one is not. `declare -n q='n[1]'; declare q` — a valueless,
+flagless declaration through a reference to an array element — makes bash bind a
+**null value** into `n[1]`. The element list is untouched, but every reader of
+`n` then stops at the null:
+
+```text
+$ n=(a b c); declare -n q='n[1]'; declare q
+$ declare -p n;  echo "${#n[@]} [${!n[@]}] [${n[@]}]";  echo "${n[1]-UNSET}"
+declare -a n
+0 [] []
+UNSET
+$ n[5]=z; declare -p n
+declare -a n=([0]="a" [1]= [2]="c" [5]="z")     # …and they are all still there
+```
+
+It ignores `readonly` (the bind carries `ASS_FORCE`), it turns a scalar base into
+an *empty* array, and it empties an associative one the same way. No other
+bash-level operation can produce a null element, and nothing in the manual or
+the source comments suggests this state was intended — the chain is
+`bind_variable(q, NULL, ASS_FORCE)` → `assign_array_element("n[1]", NULL, …)` →
+`array_insert(a, 1, NULL)`, i.e. a NULL that was never checked for.
+
+Full detail, probes and the reading of the bash source are in
+`known-issues.md` under
+`TD-OILS-A-DECLARATION-WITH-NOTHING-TO-DO-BINDS-A-NULL-THROUGH-THE-REFERENCE`.
+The *read* half of this path (the subscript really is evaluated as arithmetic,
+which is designed behavior) is already implemented and matched.
+
+**Options.**
+
+- **A — Waive it.** Mark the case `EXPECT-DIFF` in the corpus with the reasoning
+  above, and treat "bash's own bugs" as outside the parity target from here on.
+  *Pro:* costs nothing; keeps osh's value model honest (`Str`, never null);
+  a script that relies on this is relying on a state bash cannot explain.
+  *Con:* a divergence a real script could hit, however absurdly; and it sets a
+  precedent that requires judging "bug vs. design" case by case.
+- **B — Reproduce it.** Make the array element type nullable (`Option<Str>`) and
+  teach every reader — listing, `${!a[@]}`, `${#a[@]}`, `${a[@]}`, `${a[i]-D}`,
+  arithmetic reads, `unset`, iteration — to stop at the first null. *Pro:*
+  byte-exact parity with no exceptions, which is the stated goal; the "stop at
+  the first null" rule is at least uniform. *Con:* a large, invasive change to
+  the core value model (`Shell::arrays` / `Shell::assoc` are threaded through
+  most of `interp.rs`) purely to chase a defect; every future reader has to
+  remember the rule; and if bash fixes it upstream the change becomes dead
+  weight that has to be unwound.
+- **C — Reproduce only the observable surface, not the model.** Keep `Str`
+  elements and instead mark the *variable* "poisoned" with a flag that makes the
+  readers report it as empty until the next store. *Pro:* far smaller than B;
+  no change to the element type. *Con:* the flag is a fiction that will not
+  survive the next edge case (bash's `n[5]=z` recovery already needs a rule of
+  its own), i.e. exactly the band-aid CLAUDE.md forbids.
+
+**Claude's recommendation.** **A.** The parity target is worth a great deal, but
+not the core value model, and this is the first divergence where the thing being
+matched is not a behavior at all — it is an unchecked NULL. If you want B I will
+do it (it is a few focused hours, not a blocker), but I would rather spend that
+on the ~20 genuine divergences still open in `known-issues.md`. **Not blocking:**
+the read half is fixed and committed, and the corpus case that covers it omits
+the store cases, so the sweep stays green either way.
+
+**Where it bites.** `userspace/oils/src/interp.rs` —
+`Shell::declare_ref_bind_read` (the read that would have to become a store),
+`Shell::arrays` / `Shell::assoc` and every reader of them. Probes:
+`/d/tmp/hh/bo.sh` (T-series), `/d/tmp/hh/bp.sh` (U-series).
+
+---
+
 Recently resolved (see `design-decisions.md` for the full rationale):
 
 - Q36 How osh splits `$PATH` on the Windows dev host — resolved 2026-08-04

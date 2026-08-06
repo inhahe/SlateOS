@@ -53,9 +53,17 @@ echo '=== any flag takes the operand off the path entirely'
 ( n=(a b c); declare -n r='n[1+]'; declare -g r; echo "rc=$?" )
 ( n=(a b c); declare -n r='n[1+]'; export r; echo "rc=$?" )
 
-echo '=== a value does too, and is refused as an identifier instead'
+echo '=== a value does not: it keeps the operand on the path, error and all'
 ( n=(a b c); declare -n r='n[1+]'; declare r=x; echo "rc=$?" )
 ( n=(a b c); declare -n r='n[1+]'; declare r=(x y); echo "rc=$?" )
+
+echo '=== a subscript that does evaluate still falls through to the ordinary path'
+( declare -n q='nope[1]';   declare q; echo "rc=$?"; declare -p nope )
+( declare -n q='nope[1+1]'; declare q; echo "rc=$?"; declare -p nope )
+
+echo '=== the two halves disagree about which letters count'
+( n=(a b c); declare -n r='n[1+]'; declare -r r; echo "rc=$?" )
+( n=(a b c); declare -n r='n[1+]'; declare -r r=(x y); echo "rc=$?" )
 
 echo '=== the array is left alone throughout'
 ( n=(a b c); declare -n r='n[-9]'; declare r; declare -p n )

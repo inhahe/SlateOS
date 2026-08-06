@@ -17343,11 +17343,37 @@ impl Shell {
     /// restores the local. A name with no local shadow needs no swap: it is
     /// already global.
     ///
+    /// `chklocal` is bash's second global-scope mode, asked for by the
+    /// undocumented `-G` (and carried standingly by `export` and `readonly`):
+    /// a local belonging to *this very frame* is written instead of the global,
+    /// while one belonging to an enclosing frame is stepped over as usual. So
+    ///
+    /// ```sh
+    /// y=glob; f(){ local y=in; declare -G y=out; }; f   # y is still glob
+    /// y=glob; g(){ declare -G y=out; }
+    ///         f(){ local y=in; g; }; f                  # y is now out
+    /// ```
+    ///
+    /// which is just "skip the swap where the innermost frame already holds the
+    /// name".
+    ///
     /// Returns the entries to hand back to `leave_global_scope`, in the order
     /// they were swapped.
-    fn enter_global_scope(&mut self, names: &[String]) -> Vec<(String, usize, VarSnapshot)> {
+    fn enter_global_scope(
+        &mut self,
+        names: &[String],
+        chklocal: bool,
+    ) -> Vec<(String, usize, VarSnapshot)> {
         let mut saved = Vec::new();
         for name in names {
+            if chklocal
+                && self
+                    .local_frames
+                    .last()
+                    .is_some_and(|f| f.iter().any(|(n, _)| n == name))
+            {
+                continue;
+            }
             // The *outermost* shadowing frame, so a name localized at several
             // call depths still resolves to the true global (bash writes the
             // global from any depth).
@@ -17390,14 +17416,21 @@ impl Shell {
         }
     }
 
-    /// Whether a declaration builtin's leading flags leave `-g` in force.
+    /// Whether a declaration builtin's leading flags put it in global scope, and
+    /// whether they also ask for bash's `chklocal`.
     ///
     /// A separate scan from the builtins' own flag loops because the swap has to
     /// happen *around* them — the global binding must already be live when the
-    /// first operand is processed. `+g` cancels, last one wins, exactly as the
-    /// builtins parse it.
-    fn declare_global_flag(args: &[Str]) -> bool {
+    /// first operand is processed.
+    ///
+    /// `-g` and the undocumented `-G` both force global scope, and neither is
+    /// cancelled by its `+` form: bash's option loop sets `mkglobal` in the `-`
+    /// direction only and never clears it again. `-G` additionally sets
+    /// `chklocal`, which is what `export` and `readonly` carry standingly — see
+    /// [`Shell::enter_global_scope`] for what it changes.
+    fn declare_global_flag(args: &[Str]) -> (bool, bool) {
         let mut global = false;
+        let mut chklocal = false;
         for arg in args.get(..Self::declare_flag_end(args)).unwrap_or_default() {
             if arg.as_slice() == b"--" {
                 break;
@@ -17406,11 +17439,17 @@ impl Shell {
             let Some(flags) = arg.strip_prefix(b"-").or_else(|| arg.strip_prefix(b"+")) else {
                 break;
             };
-            if flags.contains(&b'g') {
-                global = enable;
+            if !enable {
+                continue;
+            }
+            if flags.contains(&b'g') || flags.contains(&b'G') {
+                global = true;
+            }
+            if flags.contains(&b'G') {
+                chklocal = true;
             }
         }
-        global
+        (global, chklocal)
     }
 
     /// The identifier each operand of a declaration builtin declares: the part
@@ -34574,11 +34613,11 @@ impl Shell {
     /// swapping each operand's global binding into place around the declaration
     /// proper (see [`Shell::enter_global_scope`]).
     fn builtin_declare(&mut self, args: &[Str], is_local: bool, tag: &str, flag_limit: usize) -> i32 {
-        // `local` is never global, whatever flags it is given.
-        if is_local || !Self::declare_global_flag(args) {
+        let (global, chklocal) = Self::declare_global_flag(args);
+        if !global {
             return self.builtin_declare_scoped(args, is_local, tag, flag_limit, &[]);
         }
-        let saved = self.enter_global_scope(&Self::declare_operand_names(args));
+        let saved = self.enter_global_scope(&Self::declare_operand_names(args), chklocal);
         let status = self.builtin_declare_scoped(args, is_local, tag, flag_limit, &[]);
         self.leave_global_scope(saved);
         status
@@ -34814,7 +34853,17 @@ impl Shell {
                                 unset_nameref = true;
                             }
                         }
-                        b'g' => global = enable,
+                        // `-g` and `-G` both force global scope; `-G` also asks
+                        // to prefer a local of *this* frame if there is one, so
+                        // the two differ only in `chklocal`, which the wrapper
+                        // reads for itself out of the same words.
+                        //
+                        // Neither takes it back: bash's option loop sets
+                        // `mkglobal` only in the `-` direction and never clears
+                        // it, so `declare -g +g v=1` inside a function is still
+                        // global.
+                        b'g' | b'G' if enable => global = true,
+                        b'g' | b'G' => {}
                         b't' => {
                             if enable {
                                 trace = true;
@@ -34861,7 +34910,10 @@ impl Shell {
         // exactly like `local`; `declare -g` opts back out to global scope. The
         // `local` builtin is always local. Outside a function everything is
         // global regardless.
-        let make_local = is_local || (!global && !self.local_frames.is_empty());
+        // `-g`/`-G` opt back out to global scope — including under `local`, which
+        // is bash's `declare` with one extra check in front of the same option
+        // loop, so `local -g y=1` writes the global and leaves any local alone.
+        let make_local = !global && (is_local || !self.local_frames.is_empty());
         // Whether the command asks for anything of its operands *besides* the
         // nameref letter. `-g` does not count — it chooses which binding the
         // declaration writes rather than saying anything about it — and neither
@@ -36396,9 +36448,8 @@ impl Shell {
         decl_arrays: &[DeclArray],
         body: impl FnOnce(&mut Self) -> T,
     ) -> T {
-        if argv.first().map(Vec::as_slice) == Some(b"local".as_slice())
-            || !Self::declare_global_flag(argv.get(1..).unwrap_or_default())
-        {
+        let (global, chklocal) = Self::declare_global_flag(argv.get(1..).unwrap_or_default());
+        if !global {
             return body(self);
         }
         let mut names = Self::declare_operand_names(argv.get(1..).unwrap_or_default());
@@ -36409,7 +36460,7 @@ impl Shell {
                 names.push(d.assign.name.clone());
             }
         }
-        let saved = self.enter_global_scope(&names);
+        let saved = self.enter_global_scope(&names, chklocal);
         let outcome = body(self);
         self.leave_global_scope(saved);
         outcome
@@ -36465,7 +36516,6 @@ impl Shell {
             .map(Vec::as_slice)
             .and_then(bytes::as_str)
             .unwrap_or_default();
-        let is_local = cmd == "local";
         // `local` outside a function is refused by the *builtin*, which bash
         // reaches only once the words have expanded — so the refusal waits for
         // phase 2 below, and the compound literals bind (globally) before it.
@@ -36582,7 +36632,14 @@ impl Shell {
                     b'A' => unset_assoc = true,
                     b'a' if enable => indexed = true,
                     b'a' => unset_indexed = true,
-                    b'g' => global = enable,
+                    // Only the `-` direction, and never taken back — see the
+                    // same letter in [`Shell::builtin_declare_scoped`]. `-G` is
+                    // *not* a synonym here: the flag the assignment machinery
+                    // looks for on the word is one of `A`, `a`, `g`, so a
+                    // compound literal under `declare -G` binds a local like any
+                    // other, and only the builtin's attribute pass goes global.
+                    b'g' if enable => global = true,
+                    b'g' => {}
                     b'i' => {
                         int_named = true;
                         if enable {
@@ -36666,8 +36723,11 @@ impl Shell {
         // this phase behaves exactly as a bare `q=(1)` would — including taking
         // the plain untagged readonly refusal rather than the doubly-reported
         // local-shadow one.
-        let make_local =
-            !self.local_frames.is_empty() && (is_local || (!global && !global_builtin));
+        //
+        // `-g` overrides `local` too: bash's `local` builtin is `declare` with
+        // one extra check, so it reads the letter out of the same option loop
+        // and `local -g y=1` inside a function writes the *global*.
+        let make_local = !self.local_frames.is_empty() && !global && !global_builtin;
         // Naming both `-a` and `-A` in the `-` direction is a conflict with the
         // command itself, and a *different* refusal from the conversion one in
         // phase 1. The `-A` wins: the name becomes associative and the literal

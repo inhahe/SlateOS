@@ -76420,14 +76420,23 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
         // The older one keeps its `-` after finishing — and loses its `&`,
         // because there is no longer anything running in the background.
-        sh.run_source("sleep 0.2 & sleep 1 &".as_bytes());
+        //
+        // Job 1 is ended by a `kill` rather than by outliving a short `sleep`:
+        // the mark it is given depends on its being *alive* when job 2 is
+        // created, and no wall-clock duration guarantees that — a loaded
+        // machine can spend longer spawning job 2 than a short `sleep` takes to
+        // run, and then job 1 correctly gets no mark and the assertion fails on
+        // a race rather than on the behaviour. `Terminated` in place of `Done`
+        // is incidental; what is under test is that death does not disturb the
+        // marker.
+        sh.run_source("sleep 30 & sleep 1 &".as_bytes());
+        sh.run_source("kill %1".as_bytes());
         // Wait for the shell to *admit* job 1 is over rather than for a fixed
-        // stretch of wall clock: on a loaded machine spawning `sleep` can eat
-        // more slack than any constant leaves.
+        // stretch of wall clock.
         settle_job(&mut sh, 1);
         assert_eq!(
             listing(&mut sh, "jobs"),
-            "[1]-  Done                    sleep 0.2\n\
+            "[1]-  Terminated              sleep 30\n\
              [2]+  Running                 sleep 1 &\n"
         );
         sh.run_source("wait".as_bytes());

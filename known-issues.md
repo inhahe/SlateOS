@@ -21137,7 +21137,7 @@ That makes the fix local:
 of 24 hand-measured shapes against bash 5.2.37. The 24th is logged as
 TD-OILS-CMDSUB-HEREDOC-NESTED-GATHER-ORDER below.
 
-### TD-OILS-CMDSUB-HEREDOC-NESTED-GATHER-ORDER. two nested substitutions, each with a here-document past its close, warn in the wrong order and name the wrong lines — 2026-07-30 — OPEN
+### TD-OILS-CMDSUB-HEREDOC-NESTED-GATHER-ORDER. two nested substitutions, each with a here-document past its close, warn in the wrong order and name the wrong lines — 2026-07-30 — ✅ FIXED 2026-08-06
 
 **Where:** `userspace/oils/src/lexer.rs` — `read_balanced_inner` / `gather_ahead`.
 The extent scan of a `$( … )` copies its text and gathers the here-documents
@@ -21190,8 +21190,42 @@ separately.
 
 **Impact.** Very narrow — one line has to carry two levels of substitution and a
 here-document past the close at each. Everything except the two warning lines and
-their order is already correct, so nothing observable to a script is wrong. Not
-covered by a corpus case for that reason; the repro above is the whole of it.
+their order is already correct, so nothing observable to a script is wrong.
+
+**Fixed 2026-08-06** by doing the nested gather where bash does it, at the nested
+`)`. `read_balanced_inner`'s `nested` stack now carries, alongside each nested
+level's depth, the length `pending` had when that level opened; at the level's
+`)` the entries from that mark on are exactly the ones it declared and did not
+delimit, and they are handed to `gather_ahead` there and then — with the count as
+`own`, so the warning is raised at that moment, on the line the reader is
+actually on. `gather_ahead` records the read-ahead in `hd_ahead`, and
+`fetched_line()` already prefers `hd_ahead.line`, so the outer scan's own warning
+at its `)` — and the `here-document … delimited by end-of-file` that follows a
+body running out — pick up the advanced line for free.
+
+Two things the plan above got wrong, both in the direction of less work:
+
+- **The raw text is not awkward.** The body is spliced in *at the nested `)`*,
+  ahead of the paren the scan is about to copy, so the re-lex of the outer body
+  finds the nested here-document **inline** — `$(cat <<B` / `bbb` / `B` / `)` —
+  exactly as if the source had been written that way. No splitting of
+  `consume_subst_heredoc_bodies`, and the two gathers stay in reader order.
+- **No suppression is needed.** Because the splice is inline, the re-lex never
+  reaches a `)` with anything pending, so it never calls `gather_ahead` and has
+  nothing to warn about. The `Lexer::paren_body` flag was not touched.
+
+One real subtlety did turn up: a gathered body whose last line ends the input has
+no newline of its own to copy, so the delimiter and the `)` would be spliced into
+`B)` and the re-lex would look for a delimiter it can no longer find — reported
+as `unexpected EOF while looking for matching ')'`. The splice therefore ends the
+copy with a newline if the body did not. (This never bit the outer gather, which
+happens last and has no `)` left to copy after it.)
+
+**Verified:** `tests/corpus/a-here-document-past-two-closes-is-fetched-at-the-inner-one.sh`
+(byte-for-byte, 11 shapes including three levels of nesting, two here-documents
+at the inner level, a `case` and a `<( … )` inside the inner one, and two `eval`s
+whose input runs out), plus two more cases in
+`lexer::tests::a_substitution_gathers_a_here_document_from_past_its_close`.
 
 ### TD-OILS-CMDSUB-CASE-PATTERN-PAREN. a `case` pattern's `)` inside `$( … )` closes the substitution — ✅ RESOLVED 2026-07-30
 

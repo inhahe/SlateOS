@@ -3226,13 +3226,12 @@ impl Lexer {
         // `<<` in there is a left shift and a `#` a base marker (`16#ff`), so
         // neither introduces anything.
         let mut arith_from: Option<usize> = None;
-        // The depths opened by a *nested* `$(`, `<(` or `>(`. Their bodies are
-        // re-lexed as inputs of their own, so a here-document declared inside one
-        // is that lex's to report — this scan still has to consume the body (it is
-        // the only reader that can), but warning here as well would double it.
-        // A plain `( … )` group is not on this stack: it is re-lexed as part of
-        // this same text, so nothing else would report it.
-        let mut nested: Vec<usize> = Vec::new();
+        // The depths opened by a *nested* `$(`, `<(` or `>(`, each paired with the
+        // length `pending` had when it opened — so the entries declared inside it
+        // are the ones from that mark on. A plain `( … )` group is not on this
+        // stack: its text is part of this body and is re-lexed with it, so a
+        // here-document in it is found inline like any other.
+        let mut nested: Vec<(usize, usize)> = Vec::new();
         // How many of `pending` were declared directly in this body, and so are
         // this scan's to warn about. See [`Lexer::gather_ahead`].
         let mut own = 0usize;
@@ -3441,7 +3440,7 @@ impl Lexer {
                         && arith_from.is_none()
                         && matches!(self.at(self.pos.wrapping_sub(2)), Some('$' | '<' | '>'))
                     {
-                        nested.push(depth);
+                        nested.push((depth, pending.len()));
                     }
                 }
             } else if c == close {
@@ -3469,8 +3468,36 @@ impl Lexer {
                         }
                         return Ok(raw);
                     }
-                    if nested.last() == Some(&(depth + 1)) {
-                        nested.pop();
+                    if nested.last().map(|&(d, _)| d) == Some(depth + 1) {
+                        // The nested substitution ends here, so anything it
+                        // declared and did not delimit is *its* here-document
+                        // past *its* close — and bash's reader, which is one
+                        // line-based reader shared across the whole nesting,
+                        // fetches those bodies now, before the outer scan goes
+                        // on. Doing it here rather than deferring to the re-lex
+                        // is what puts the reader on the right line for every
+                        // warning that follows: in
+                        // `x=$(cat <<A; echo $(cat <<B) mid)` bash blames the
+                        // nested one on line 1 and the outer one on the line B's
+                        // body ran to, not on line 1 twice.
+                        //
+                        // The body text is spliced in ahead of the `)` that is
+                        // about to be copied, so the re-lex of this body finds
+                        // the nested here-document *inline* — which is also why
+                        // that re-lex has nothing left to warn about.
+                        //
+                        // `own` needs no adjustment: it counts entries declared
+                        // with `nested` empty, which are the ones ahead of every
+                        // mark, so the split never touches them. A newline inside
+                        // the nested body drains `pending` and zeroes `own`
+                        // together, which leaves the mark past the end — hence
+                        // the clamp, and nothing to gather.
+                        let mark = nested.pop().map_or(0, |(_, m)| m);
+                        let mut inner = pending.split_off(mark.min(pending.len()));
+                        if !inner.is_empty() {
+                            let count = inner.len();
+                            self.gather_ahead(&mut inner, count, &mut raw)?;
+                        }
                     }
                     if arith_from == Some(depth) {
                         arith_from = None;
@@ -3500,10 +3527,11 @@ impl Lexer {
     /// putting it back. [`Lexer::sync_ahead`] redeems that record when the cursor
     /// reaches the end of its line, so the lines are read exactly once.
     ///
-    /// `own` counts the here-documents this substitution declared *directly*.
-    /// Ones from a nested `$( … )` have to be fetched too — they are in the text
-    /// this scan is copying — but the warning about them is the nested reader's,
-    /// and it is issued when that body is lexed as an input of its own.
+    /// `own` counts the here-documents the warning is about; 0 fetches silently.
+    /// The scan calls this twice over for a nested substitution — once at the
+    /// nested `)` for what that one declared, once at its own `)` for the rest —
+    /// so that the reader advances in bash's order and each warning names the
+    /// line the reader had reached when it was raised.
     fn gather_ahead(
         &mut self,
         pending: &mut Vec<(Str, bool)>,
@@ -3536,6 +3564,15 @@ impl Lexer {
         // reached a newline of its own to supply that.
         raw.push(b'\n');
         let gathered = self.consume_subst_heredoc_bodies(pending, raw);
+        // A body whose last line *is* the last line of the input has no newline
+        // of its own to copy, and this splice may not be the last thing in the
+        // text: the `)` of the substitution that closed here is appended right
+        // after it, and `B` and `)` run together into `B)` — a delimiter the
+        // re-lex can never find. Only the copy gets the newline the input
+        // omitted; the reader has not moved.
+        if !raw.ends_with(b"\n") {
+            raw.push(b'\n');
+        }
         self.hd_ahead = Some(HdAhead { pos: self.pos, line: self.fetched_line() });
         self.pos = resume;
         gathered
@@ -4663,13 +4700,23 @@ mod tests {
                 "x=$(cat <<A) $(cat <<C); echo hi\naaa\nA\nccc\nC\n",
                 (&["cat <<A\naaa\nA\n", "cat <<C\nccc\nC\n"], &[(1, 1), (1, 3)]),
             ),
-            // A nested substitution's here-document has to be fetched by the
-            // outer scan — the text it is copying runs over those lines — but
-            // the *warning* is the inner reader's, raised when that body is
-            // lexed as an input of its own. So the outer scan says nothing.
+            // A nested substitution's here-document is fetched at the *nested*
+            // `)`, which is where bash's one shared reader reaches it, and the
+            // body is spliced in there — so the copied text holds it inline and
+            // the re-lex has nothing left to gather or to warn about.
             (
                 "x=$(echo $(cat <<A) tail); echo hi\naaa\nA\n",
-                (&["echo $(cat <<A) tail\naaa\nA\n"], &[]),
+                (&["echo $(cat <<A\naaa\nA\n) tail"], &[(1, 1)]),
+            ),
+            // Both levels at once: the inner gather runs first and leaves the
+            // reader past B's body, so the outer warning names line 5 and not
+            // line 1. See TD-OILS-CMDSUB-HEREDOC-NESTED-GATHER-ORDER.
+            (
+                "x=$(cat <<A; echo $(cat <<B) mid); echo hi\naaa\nA\nbbb\nB\nA\n",
+                (
+                    &["cat <<A; echo $(cat <<B\naaa\nA\nbbb\nB\n) mid\nA\n"],
+                    &[(1, 1), (1, 5)],
+                ),
             ),
         ];
         for (src, (raws, warned)) in cases {

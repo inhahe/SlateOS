@@ -23897,32 +23897,42 @@ impl Shell {
     }
 
     /// The name a declaration builtin binds when it follows a reference to an
-    /// *element* and the binding it writes is a **local** — the target's
+    /// *element* and does not store into the element at all — the target's
     /// spelling, whole and unparsed.
     ///
     /// bash's `declare_internal` resolves the nameref to a string and hands
-    /// that string to `make_local_variable`, which does not look for a
-    /// subscript in it. So the frame gets a variable whose name is `n[1]`,
-    /// `n[1+1]`, `n[ 1 ]`, `m[k]` or `n[@]` exactly as the reference spelled
-    /// it; the array the text seems to point at is never touched. Every shape
-    /// of the operand makes one, because every one of them is a declaration
-    /// about that name: a value binds it, and a valueless operand leaves it
+    /// that string on as a name, and nothing downstream looks for a subscript
+    /// in it. So a variable comes into being called `n[1]`, `n[1+1]`,
+    /// `n[ 1 ]`, `m[k]` or `n[@]` exactly as the reference spelled it; the
+    /// array the text seems to point at is never touched. Every shape of the
+    /// operand makes one, because every one of them is a declaration about
+    /// that name: a value binds it, and a valueless operand leaves it
     /// created-but-unset with whatever attributes were asked for
     /// (`declare -i r` gives `declare -i n[1]`), which `declare -p 'n[1]'`
     /// then prints and `set` — listing only *valued* names — does not.
     ///
-    /// `None` means the ordinary rule stands and the element is the target
-    /// after all:
+    /// `binds_spelling` is the caller's answer to "does this operand take that
+    /// route", and the two operand kinds answer it differently:
     ///
-    /// * a declaration that writes a *global* binding (top level, or `-g`)
-    ///   stores the element the reference names, as bash does;
-    /// * a subscript that is not valid UTF-8 cannot be a name here, because
-    ///   osh keys its variable tables by `String`. bash would bind it; the
-    ///   element store this falls back to is the nearest thing osh can
-    ///   represent. See `known-issues.md`'s TD-OILS-NONUTF8-ENV-NAME for the
-    ///   same structural limit reached from the environment.
-    fn spelled_local_name(target: &RefTarget, make_local: bool) -> Option<String> {
-        if !make_local || target.sub.is_none() {
+    /// * a **scalar** operand takes it only where the declaration binds a
+    ///   *local*. `declare -g r=zz` still stores the element, and so does one
+    ///   at top level.
+    /// * a **compound** one takes it anywhere inside a function, `-g` or not.
+    ///   `-g` only changes which binding of that name the literal lands in —
+    ///   the innermost one visible, or a new global — because bash binds the
+    ///   name ordinarily rather than forcing a global. So `-g` from a deeper
+    ///   frame overwrites a caller's spelling-named local instead of reaching
+    ///   past it.
+    ///
+    /// `None` means the ordinary rule stands and the element is the target
+    /// after all — or that osh cannot represent the name: a subscript that is
+    /// not valid UTF-8 cannot be a key here, because osh keys its variable
+    /// tables by `String`. bash would bind it; the element store this falls
+    /// back to is the nearest thing osh can represent. See `known-issues.md`'s
+    /// TD-OILS-NONUTF8-ENV-NAME for the same structural limit reached from the
+    /// environment.
+    fn spelled_local_name(target: &RefTarget, binds_spelling: bool) -> Option<String> {
+        if !binds_spelling || target.sub.is_none() {
             return None;
         }
         String::from_utf8(target.spelling()).ok()
@@ -36679,16 +36689,25 @@ impl Shell {
             let follow =
                 self.nameref_attr.contains(&a.name) && (!make_local || self.local_binds_here(&a.name));
             let resolved = if follow { self.resolve_ref_use(&a.name) } else { None };
-            // A *local* binding made through a reference to an element is
-            // named by the whole spelling — see
-            // [`Shell::spelled_local_name`], which the scalar operand path
-            // asks the same question. The literal then binds to that name like
-            // any other, kind and all: `declare -A r=([k]=v)` through
-            // `declare -n r='n[1]'` leaves `declare -A n[1]=([k]="v" )`
-            // behind.
+            // A binding made through a reference to an element is named by the
+            // whole spelling — see [`Shell::spelled_local_name`], which the
+            // scalar operand path asks the same question. The literal then
+            // binds to that name like any other, kind and all:
+            // `declare -A r=([k]=v)` through `declare -n r='n[1]'` leaves
+            // `declare -A n[1]=([k]="v" )` behind.
+            //
+            // Where the scalar path asks whether the declaration binds a
+            // *local*, this one asks only whether it is running inside a
+            // function: `-g` takes this route too, and only changes where the
+            // name binds. Nothing more is needed for that, because
+            // [`Shell::enter_global_scope`] swaps the *operand's* name and not
+            // the spelling — so a store to the spelling already lands in
+            // whichever binding of it is live, which is bash's own
+            // `bind_variable`: the caller's local if it has one, a new global
+            // otherwise.
             let spelled = resolved
                 .as_ref()
-                .and_then(|t| Self::spelled_local_name(t, make_local));
+                .and_then(|t| Self::spelled_local_name(t, !self.local_frames.is_empty()));
             let target = match (&spelled, resolved) {
                 (Some(s), _) => s.clone(),
                 (None, Some(RefTarget { base, sub: None })) => base,

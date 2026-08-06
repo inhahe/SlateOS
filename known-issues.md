@@ -33683,7 +33683,7 @@ is now byte-identical between the two shells.
 Rare — `unset FUNCNAME` is nearly always a mistake — and independent of
 `set -u`, which reports the name identically either way.
 
-### TD-OILS-INDIRECT-BANG-UNWIND. `${!r}` with `r=!` under `set -u` reports once where bash reports twice — 2026-08-01
+### TD-OILS-INDIRECT-BANG-UNWIND. `${!r}` with `r=!` under `set -u` reports once where bash reports twice — 2026-08-01 — ✅ FIXED 2026-08-06
 
 **Where:** `userspace/oils/src/interp.rs` — the indirect-expansion path
 (`expand_indirect` / `resolve_indirect_target`), which reads the pointer's value
@@ -33707,15 +33707,91 @@ agrees under `set -u` too — it is `!` alone, because it is the only special
 parameter that is ever unset (see the `$!` work in
 `tests/corpus/nounset-last-bg-pid.sh`).
 
-**Proper fix.** Raise the unbound error against the *target* spelling (`$!`)
-rather than the concatenated `!r`, and let the failure propagate back out to the
-indirection, which then reports its own "bad substitution" naming the whole
-reference as written. That means the indirect path has to distinguish "the
-pointer named something that is unset" from "the pointer named nothing", and
-report at both levels rather than collapsing to one.
+**Fixed.** `Shell::indirect_special_unbound` in `userspace/oils/src/interp.rs`,
+called from both indirect paths (`expand_indirect` and the `IndirectOp` arm of
+`expand_part`).
 
-**Impact.** Cosmetic: the wording and count of a diagnostic in a corner that
-takes a deliberately perverse pointer to reach. No effect on values or status.
+**Why bash does it.** Which branch of `parameter_brace_expand_word` the target
+takes decides who complains. An ordinary name is looked up with
+`find_variable`, and an unset one is simply *absent* — no complaint — so the
+indirection reports `!r: unbound variable` against the reference as written
+(`subst.c:9931`), which is what osh already did. A **special** parameter
+instead goes through `param_expand`, which raises the complaint itself against
+the target's own `$…` spelling and hands back a failure rather than a value;
+`parameter_brace_expand` then turns that failure into `bad_substitution`
+naming the whole word (`subst.c:9825`–`9829`). Hence two lines, and the second
+is a DISCARD — status 1, the next line still runs — not nounset's 127 abort.
+
+Only `$!` reaches this, and it was worth checking why: `$*` and `$@` have their
+own unbound check but it is compiled out unless bash is built `STRICT_POSIX`
+(`subst.c:10342`, `10465`), and a positional target is read by
+`get_dollar_var_value` rather than `param_expand`, so `r=1` with no positionals
+reports `!r` like any other unset name. Measured across every special parameter
+(`! ? $ # - _ 0 1 @ *`).
+
+The one thing that was **not** obvious from the entry above: the failure
+happens *inside* the indirection, before the modifier is looked at. So
+`${!r-D}` does not supply its default, `${!r+S}` does not stay empty, and
+`${!r@Q}`/`${!r^^}`/`${!r:1:2}` all report the same two lines — bash's order,
+now osh's. `${#!r}` is different again and already agreed: it is a parse-level
+bad substitution, and the `$!` line never appears.
+
+`tests/corpus/nounset-last-bg-pid.sh` covers the whole shape.
+
+### TD-OILS-INDIRECT-WHOLE-SET-NOUNSET. A quoted `"${!r}"` whose target names an empty `*`-style whole set is an unbound error in bash, not an empty string — 2026-08-06 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `indirect_ref_part` /
+`indirect_target_value`, the whole-array referent path, and the nounset check
+in `expand_indirect`.
+
+**What.** Found while fixing TD-OILS-INDIRECT-BANG-UNWIND. Under `set -u`, a
+*quoted* indirect reference whose target names a whole set spelled with `*` —
+`*` itself, or `name[*]` — and whose set has **no elements** is an unbound
+error in bash. osh expands it to the empty string.
+
+```text
+$ set -u; set --;            r='*';      echo "[${!r}]"   bash: !r: unbound variable   osh: []
+$ set -u; declare -a a;      r='a[*]';   echo "[${!r}]"   bash: !r: unbound variable   osh: []
+$ set -u; declare -A m;      r='m[*]';   echo "[${!r}]"   bash: !r: unbound variable   osh: []
+$ set -u; unset a;           r='a[*]';   echo "[${!r}]"   bash: !r: unbound variable   osh: []
+$ set -u; IFS=; set --;      r='*';      echo "[${!r}]"   bash: !r: unbound variable   osh: []
+```
+
+Everything around it agrees, and the boundaries are sharp:
+
+* **unquoted** `${!r}` is exempt in both, for every one of the cases above;
+* an `@`-spelled target (`@`, `name[@]`) is exempt in both, quoted or not;
+* it is the *element count* that decides, not the joined text — `a=("")` and
+  `set -- ""` are "set" in both even though they join to nothing, while
+  `declare -A m` with no keys is unset;
+* a **direct** whole-array reference is exempt in both however it is quoted
+  (`"${a[*]}"` on an empty `a` is silent), so this is specific to reaching one
+  through an indirection.
+
+**Why bash does it.** The outer nounset check
+(`subst.c:9928`) fires when the target expanded to nothing and
+`all_element_arrayref == 0`. For a *direct* array reference bash sets
+`all_element_arrayref = 1` unconditionally for both `[@]` and `[*]`
+(`subst.c:9883`). For an *indirect* one it instead takes the flag from
+`chk_atstar`'s `contains_dollar_at` (`subst.c:9840`), and `chk_atstar` only
+sets that for a `*`-spelled set **when the reference is unquoted**
+(`subst.c` `chk_atstar`, the `name[0] == '*' && quoted == 0` arm) — because a
+quoted `"$*"` is one word and so does not "contain `$@`". The `@`-spelled arms
+have no such condition, which is why they are exempt either way.
+
+**Proper fix.** Two halves. (a) A whole-set referent with no elements must
+answer *unset* rather than the empty string, so the nounset check can see it —
+today `indirect_target_value` returns `Some("")` for `name[@]`/`name[*]`, and
+`indirect_ref_part` hands the whole thing off to `expand_array_ref` as a node,
+which loses the fact that it was reached through an indirection. (b) The check
+then needs the reference's *quoting*, which that node path does not currently
+carry, to reproduce the `*`-quoted/unquoted split. The natural shape is to keep
+the indirection's own nounset decision in `expand_indirect` and give the
+whole-set delegation a flag saying "reached through `${!…}`, quoted or not".
+
+**Impact.** A missing diagnostic and a missing abort under `set -u`, in a
+reference that has to be both indirect and `*`-spelled and empty. No effect on
+values with nounset off.
 
 ### TD-OILS-READ-LONE-BACKSLASH-CTLESC. `read` on input that is nothing but a trailing backslash leaves bash's internal `CTLESC` (`\001`) in the variable; osh leaves it empty — NOT-A-BUG (bash defect, deliberately not replicated) — 2026-08-01
 

@@ -55,6 +55,35 @@ echo "=== an indirection through it is named as the reference"
 q 'set -- ; r=1; echo "[${!r}]"'
 q 'true & wait; r=!; case ${!r} in [0-9]*) echo digits;; *) echo other;; esac'
 
+# …except when the reference reaches `$!` itself, which is the only target that
+# complains on its *own* behalf: it is read through the special-parameter path
+# rather than looked up as a name, so the complaint names `$!` and the
+# indirection is then left holding a failure, which it reports a second time as
+# a bad substitution naming the whole word. Two lines, status 1, and the next
+# line still runs — where an ordinary unset target gives one line and aborts.
+# It happens inside the indirection, so no modifier gets a turn: not even the
+# default-value family, which excuses a direct `$!`.
+echo "=== but a reference that reaches it complains twice, and no modifier gets a turn"
+q 'r=!; echo "[${!r}]"'
+q 'r=!; echo "${!r}"'
+q 'r=!; echo x${!r}y'
+q 'r=!; v=${!r}; echo "[$v]"'
+q 'r=!; echo "[${!r-D}][${!r:-D}][${!r+S}][${!r:+S}]"'
+q 'r=!; echo "[${!r@Q}][${!r@A}][${!r@a}]"'
+q 'r=!; echo "[${!r^^}][${!r,,}][${!r/a/b}][${!r%x}][${!r#x}][${!r:1:2}]"'
+q 'r=!; echo "[${#!r}]"'
+q 'r=!; echo "[${!r}]"; echo tail'
+q 'r=!; ( echo "[${!r}]" ); echo tail'
+
+echo "=== and once a job has been started the reference reads it like any other"
+q 'true & wait; r=!; echo "[${!r:+y}][${!r-D}]" | sed "s/[0-9][0-9]*/N/"'
+q 'true & wait; r=!; echo "[${!r}]" | sed "s/[0-9][0-9]*/N/"'
+
+# `${#!r}` is left out here: it is a bad substitution at parse time whatever
+# nounset says, so it would swallow the line it shares.
+echo "=== with nounset off the reference is simply empty"
+q 'set +u; r=!; echo "[${!r}][${!r-D}][${!r:-D}][${!r+S}]"'
+
 echo "=== with nounset off it is simply empty"
 ( eval 'echo "[$!][${!}][${#!}]"'; echo "rc=$?" ) 2>&1 | n
 echo "=== done"

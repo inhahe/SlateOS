@@ -14610,6 +14610,11 @@ impl Shell {
         match self.indirect_target_value(name) {
             Some(v) => v,
             None => {
+                // A target that complains on its own behalf unwinds through two
+                // layers instead of one; see the helper.
+                if self.indirect_special_unbound(refname, index, name) {
+                    return Str::new();
+                }
                 // The reference resolved, but to nothing. Under `set -u` that
                 // is a fault, named after the reference the writer typed —
                 // `${!r}` reports `!r`, never the target it reached.
@@ -14620,6 +14625,54 @@ impl Shell {
                 Str::new()
             }
         }
+    }
+
+    /// The one indirect target that reports its *own* unbound-ness, and the
+    /// second complaint that follows from it. `true` means both are out and the
+    /// caller has nothing left to expand.
+    ///
+    /// bash reads an indirect target through `parameter_brace_expand_word`, and
+    /// which branch that takes decides who gets to complain. An ordinary name
+    /// is looked up with `find_variable`, and an unset one is simply absent —
+    /// silence, and the *indirection* then reports `!r: unbound variable`
+    /// against the reference as written (`subst.c:9931`). A **special**
+    /// parameter instead goes through `param_expand`, which raises the
+    /// complaint itself, against the target's own `$…` spelling, and hands back
+    /// a failure rather than a value; `parameter_brace_expand` turns that
+    /// failure into `bad_substitution` naming the whole word
+    /// (`subst.c:9825`-`9829`). So two lines come out, and the second is a
+    /// DISCARD — status 1, the next line still runs — not nounset's 127 abort.
+    ///
+    /// Only `$!` can reach this, because it is the only special parameter that
+    /// is ever unset: `$*` and `$@` have their own unbound check but it is
+    /// compiled out unless bash is built `STRICT_POSIX` (`subst.c:10342`,
+    /// `10465`), and a positional target is read by `get_dollar_var_value`
+    /// rather than `param_expand`, so `r=1` with no positionals reports `!r`
+    /// like any other unset name. Measured across every special parameter.
+    ///
+    /// This fires before any modifier is considered, which is bash's order too
+    /// — the failure happens inside the indirection, so `${!r-D}` never gets to
+    /// supply its default.
+    fn indirect_special_unbound(
+        &mut self,
+        refname: &str,
+        index: &Option<ArrayIndex>,
+        target: &str,
+    ) -> bool {
+        if target != "!" || !self.unbound_is_error(target) {
+            return false;
+        }
+        // bash abandons the whole expansion at the first such failure, so a
+        // word holding two of them (`"${!r}${!r}"`) complains once. The second
+        // line is guarded inside `bad_substitution_with`; the first has to be
+        // guarded here, or it would be the one thing that came out twice.
+        if self.unbound_error.is_some() || self.discard_error.is_some() {
+            return true;
+        }
+        self.perrln(b"$!: unbound variable".as_slice());
+        let raw = bfmt![b"!", Self::indirect_ref_src(refname, index)];
+        self.bad_substitution_with(&raw, false);
+        true
     }
 
     /// The value a resolved indirect *target* holds: a plain variable's, an
@@ -23106,6 +23159,17 @@ impl Shell {
                 } else {
                     self.indirect_target_value(&tname)
                 };
+                // A target that complains on its own behalf does so *inside*
+                // the indirection, before the modifier is looked at — so
+                // `${!r-D}` never gets to supply its default. See
+                // [`Shell::indirect_special_unbound`]. `points_nowhere` is
+                // excluded because its stand-in name is not a real target.
+                if operand.is_none()
+                    && !points_nowhere
+                    && self.indirect_special_unbound(refname, index, &tname)
+                {
+                    return Str::new();
+                }
                 // For the length of the modifier's expansion, a complaint about
                 // an unset parameter is a complaint about *this* reference.
                 let saved_label = self.ref_label.replace(label);

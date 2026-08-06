@@ -3398,6 +3398,46 @@ const COMP_ACTIONS: &[(&str, char)] = &[
     ("variable", 'v'),
 ];
 
+/// What bash makes of a fork it performed before it knew what the command was
+/// — a pipeline stage, or an `&` job — settled by [`Shell::settle_stage`] once
+/// the stage's outermost command is dispatched.
+///
+/// The two verdicts do not agree, which is the whole reason this is an enum and
+/// not a flag: `$BASH_SUBSHELL` counts a function call as a subshell, while the
+/// `setjmp (top_level)` that would catch a fatal abort is installed only on the
+/// *builtin* branch beside it. See [`Shell::abort_catch`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StageKind {
+    /// A `( … )`, which is a subshell in its own right: its own clone supplies
+    /// both the level and the handler, so the stage's pendings only need
+    /// clearing (bash forks once for the two together).
+    Nested,
+    /// Any other compound command — bash's `execute_in_subshell`, which counts
+    /// the level and installs a handler.
+    Subshell,
+    /// A function call — `execute_subshell_builtin_or_function`'s function
+    /// branch, which counts the level but calls `execute_function` with no
+    /// `setjmp` in the way.
+    Function,
+    /// An `eval`/`.`/`source` — the same function's *builtin* branch, whose
+    /// `setjmp_nosigs (top_level)` ends in `subshell_exit (EXECUTION_FAILURE)`.
+    Builtin,
+}
+
+impl StageKind {
+    /// Whether bash counts this shape towards `$BASH_SUBSHELL` here (and so
+    /// also calls `without_job_control`).
+    fn counts_level(self) -> bool {
+        matches!(self, Self::Subshell | Self::Function | Self::Builtin)
+    }
+
+    /// Whether bash installs a `top_level` handler for this shape, which
+    /// catches a fatal abort raised inside it and answers 1 instead of 127.
+    fn catches_abort(self) -> bool {
+        matches!(self, Self::Subshell | Self::Builtin)
+    }
+}
+
 /// The shell interpreter and its mutable session state.
 pub struct Shell {
     vars: HashMap<String, Str>,
@@ -3523,10 +3563,9 @@ pub struct Shell {
     /// one more for every `( … )` group, command substitution, pipeline stage,
     /// process substitution, `&` job or other clone.
     ///
-    /// This is **not** `$BASH_SUBSHELL`, which counts fewer of them — see
-    /// [`Shell::subshell_level`]. It is the answer to "is this the main shell
-    /// environment", which is what decides whether a fatal expansion abort
-    /// takes the whole `-c` shell down ([`Shell::fatal_abort_status`]).
+    /// This is **not** `$BASH_SUBSHELL`, which counts fewer of them (see
+    /// [`Shell::subshell_level`]), nor [`Shell::abort_catch`], which counts
+    /// fewer again. It is the answer to "is this the main shell environment".
     subshell_depth: u32,
     /// `$BASH_SUBSHELL` — the subshell level *bash reports*, which is not the
     /// same as the nesting depth above.
@@ -3556,6 +3595,57 @@ pub struct Shell {
     /// itself, because the number assigned may be negative and because nothing
     /// but the reported value may move — a subshell is still a subshell.
     subshell_base: i64,
+    /// How many of bash's `setjmp (top_level)` handlers stand between here and
+    /// the invocation's own read-eval loop — a *third* depth, counting fewer
+    /// environments than either [`Shell::subshell_depth`] or
+    /// [`Shell::subshell_level`], and the one that decides whether a fatal
+    /// abort keeps its 127 ([`Shell::fatal_abort_status`],
+    /// [`Shell::parse_error_flow`]).
+    ///
+    /// A fatal word expansion or a `$( … )`-body parse error is
+    /// `jump_to_top_level (FORCE_EOF)`, a `longjmp` to the nearest handler.
+    /// Only `shell.c`'s `run_one_command` — the `-c` path — turns that into
+    /// 127:
+    ///
+    /// ```c
+    /// case FORCE_EOF:                     /* shell.c:1446 */
+    ///   return last_command_exit_value = 127;
+    /// ```
+    ///
+    /// Any handler in between catches it first and answers 1 instead, so the
+    /// question is never "how deeply nested am I" but "is there a handler in
+    /// the way". bash installs one in exactly three places, and this counter
+    /// tracks all three:
+    ///
+    /// - `execute_in_subshell` (`execute_cmd.c:1703`) — a `( … )`, a command
+    ///   or process substitution, a coproc, and a compound command run as a
+    ///   pipeline stage or `&` job:
+    ///   ```c
+    ///   else if (result)
+    ///     return_code = (last_command_exit_value == EXECUTION_SUCCESS)
+    ///                     ? EXECUTION_FAILURE : last_command_exit_value;
+    ///   ```
+    /// - `execute_subshell_builtin_or_function` (`execute_cmd.c:5379`), but
+    ///   only on its **builtin** branch — `subshell_exit (EXECUTION_FAILURE)`.
+    ///   The neighbouring *function* branch calls `execute_function` with no
+    ///   `setjmp` at all, which is why a function is not counted here even
+    ///   though `$BASH_SUBSHELL` counts it.
+    /// - the `-c` string's own `parse_and_execute`, which is the zero the
+    ///   whole count is measured from.
+    ///
+    /// A plain simple command run as a stage or `&` job is not counted either:
+    /// `execute_simple_command` forks *before* `expand_words`, so its word
+    /// expansion has no handler in the way. Measured:
+    ///
+    /// ```sh
+    /// set -u; echo a | echo "$nope"                 # 127 — stage, no handler
+    /// set -u; f(){ echo "$nope"; }; echo a | f      # 127 — function branch
+    /// set -u; echo a | { echo "$nope"; }            #   1 — execute_in_subshell
+    /// set -u; echo a | eval 'echo "$nope"'          #   1 — builtin branch
+    /// set -u; echo "$nope" &                        # 127 — simple, async
+    /// set -u; true && echo "$nope" &                #   1 — CMD_FORCE_SUBSHELL
+    /// ```
+    abort_catch: u32,
     /// Set on a pipeline stage's clone: the fork has happened, but whether it
     /// counts towards `$BASH_SUBSHELL` is not known until the stage's own
     /// top-level command is dispatched. Taken by [`Shell::exec_command`] (for a
@@ -3567,6 +3657,17 @@ pub struct Shell {
     /// taken rather than tested: `eval 'eval "echo \$BASH_SUBSHELL"' | cat`
     /// reports 1, not 2.
     stage_pending_level: bool,
+    /// The [`Shell::abort_catch`] half of the same pending verdict, kept apart
+    /// from [`Shell::stage_pending_level`] because the two do not agree: a
+    /// function call as a stage raises `$BASH_SUBSHELL` but installs no
+    /// handler, so it claims the level and drops this. Both are settled in one
+    /// place, by [`Shell::settle_stage`].
+    ///
+    /// An `&` job sets this without the level, because bash has already
+    /// counted the level for it (`echo "$BASH_SUBSHELL" &` reports 1, unlike
+    /// the same command as a pipeline stage) while still deciding the handler
+    /// by the command's shape.
+    stage_pending_catch: bool,
     /// Set on the clone a pipeline stage or a `&` job runs in: the simple
     /// command this shell was forked to run has *already* been announced to the
     /// DEBUG trap by the shell that forked it, so it must not be announced a
@@ -4008,9 +4109,11 @@ pub struct Shell {
     /// unset/null parameter, and a `${…}` "bad substitution". Carries the
     /// **main-shell** exit status the shell aborts with (**127** for nounset and
     /// `${var:?}`, **1** for a bad substitution). That carried code is only
-    /// honoured in the *main shell environment* (`subshell_depth == 0`, which
-    /// includes brace groups and function bodies); inside any subshell / command
-    /// substitution / pipeline stage bash yields **1** for all of them — see
+    /// honoured where nothing intercepts the abort on its way out
+    /// (`abort_catch == 0`, which includes brace groups, function bodies and a
+    /// simple command run as a pipeline stage); wherever bash has a
+    /// `setjmp (top_level)` in between — a subshell, a command substitution, a
+    /// compound-command stage — it yields **1** for all of them. See
     /// [`Shell::fatal_abort_status`]. The simple-command driver checks the flag
     /// and aborts (`Flow::Exit`) after expanding its words.
     ///
@@ -5057,7 +5160,9 @@ impl Shell {
             subshell_depth: 0,
             subshell_level: 0,
             subshell_base: 0,
+            abort_catch: 0,
             stage_pending_level: false,
+            stage_pending_catch: false,
             debug_announced: false,
             debug_skipped: false,
             debug_stage_skips: Vec::new(),
@@ -7200,7 +7305,7 @@ impl Shell {
         // exits 2 only at the outer level, via the assignment's status.
         let code = if self.errexit {
             2
-        } else if self.command_mode && self.subshell_depth == 0 {
+        } else if self.command_mode && self.abort_catch == 0 {
             127
         } else {
             1
@@ -7227,12 +7332,18 @@ impl Shell {
     /// So only a `-c` command-mode shell honours the higher 127; every other
     /// top-level context (script file, stdin, interactive REPL) uses 1. Bad
     /// indirect/subscript aborts carry 1 already, so they are 1 everywhere.
-    /// Inside any subshell, command substitution, or pipeline stage
-    /// (`subshell_depth > 0`) bash also uses 1, without touching the parent
-    /// shell. Brace groups and function bodies run at the caller's depth, so they
-    /// correctly inherit the enclosing shell's status.
+    ///
+    /// What demotes the 127 elsewhere is **not** nesting but interception: the
+    /// abort is a `longjmp`, and the 127 belongs to the `-c` path's own handler
+    /// (`shell.c:1446`), so anything that catches it first answers 1 in its
+    /// place. That is why a `( … )` and a piped `{ … }` are 1 while a piped
+    /// simple command — forked, but with no handler between it and the top —
+    /// keeps 127. [`Shell::abort_catch`] is the count of handlers in the way,
+    /// and it, not [`Shell::subshell_depth`], is the test here. Brace groups and
+    /// function bodies install none, so they correctly inherit the enclosing
+    /// shell's status wherever they run.
     fn fatal_abort_status(&self, code: i32) -> i32 {
-        if self.subshell_depth == 0 && self.command_mode {
+        if self.abort_catch == 0 && self.command_mode {
             code
         } else {
             1
@@ -8645,25 +8756,25 @@ impl Shell {
             self.last_status = 1;
             return Flow::Next;
         }
-        // A pipeline stage was forked before anything was known about it; this
-        // is where it becomes clear whether bash would have called that fork a
-        // subshell. See [`Shell::clone_for_pipeline_stage`].
-        if self.stage_pending_level {
+        // A pipeline stage or `&` job was forked before anything was known
+        // about it; this is where it becomes clear what bash would have called
+        // that fork. See [`Shell::clone_for_pipeline_stage`].
+        if self.stage_pending_level || self.stage_pending_catch {
             match cmd {
                 // A redirect belongs to the command inside it, which decides.
                 Command::Redirected { .. } => {}
                 // Decided once the command name is resolved � a function or an
                 // `eval`/`.`/`source` re-enters the shell, anything else does
-                // not. See [`Shell::exec_simple`].
+                // not. See [`Shell::exec_simple`]. A plain simple command
+                // claims nothing at all, so both pendings are left unclaimed
+                // and the stage stays uncounted and uncaught.
                 Command::Simple(_) => {}
                 // Already a subshell in its own right: its clone raises the
                 // level, and bash forks once for the two together.
-                Command::Subshell(_) => {
-                    self.take_stage_level();
-                }
+                Command::Subshell(_) => self.settle_stage(StageKind::Nested),
                 // Every other shell control structure is one bash enters a
                 // subshell for when it is piped.
-                _ => self.enter_stage_subshell(),
+                _ => self.settle_stage(StageKind::Subshell),
             }
         }
         // Every command shape passes through here, which makes this the one
@@ -10843,8 +10954,15 @@ impl Shell {
             subshell_depth: self.subshell_depth.saturating_add(1),
             subshell_level: self.subshell_level.saturating_add(1),
             subshell_base: self.subshell_base,
+            // Every caller of this constructor is one of bash's
+            // `execute_in_subshell`s, which installs a `setjmp (top_level)` of
+            // its own — except the two that take it back off again, a pipeline
+            // stage and an `&` job, which decide by the command's shape. See
+            // [`Shell::abort_catch`].
+            abort_catch: self.abort_catch.saturating_add(1),
             // A fresh subshell is not a pipeline stage until said otherwise.
             stage_pending_level: false,
+            stage_pending_catch: false,
             // Nor has anything been announced on its behalf; the callers that
             // forked for an already-announced command say so themselves.
             debug_announced: false,
@@ -11212,11 +11330,17 @@ impl Shell {
     /// own dispatch settles it, so the level comes back off here and
     /// [`Shell::stage_pending_level`] is left for whoever claims it.
     ///
+    /// The `setjmp (top_level)` a fatal abort would be caught by is pending for
+    /// the same reason and settled at the same moment, but by a different rule
+    /// — see [`Shell::abort_catch`] — so it comes off here too.
+    ///
     /// [`clone_for_subshell`]: Shell::clone_for_subshell
     fn clone_for_pipeline_stage(&self) -> Shell {
         let mut sub = self.clone_for_subshell();
         sub.subshell_level = self.subshell_level;
         sub.stage_pending_level = true;
+        sub.abort_catch = self.abort_catch;
+        sub.stage_pending_catch = true;
         sub.inherit_jobs(self);
         sub
     }
@@ -11261,20 +11385,28 @@ impl Shell {
         std::mem::take(&mut self.stage_pending_level)
     }
 
-    /// Enter the subshell a pipeline stage was forked for, if this is the
-    /// command that makes it one. See [`Shell::clone_for_pipeline_stage`].
+    /// Settle what a fork made before the command was known turns out to have
+    /// been, now that the stage's outermost command is in hand. See
+    /// [`Shell::clone_for_pipeline_stage`] and [`Shell::stage_pending_catch`].
     ///
-    /// This is bash's `execute_in_subshell`, and it does two things, not one:
-    /// besides counting towards `$BASH_SUBSHELL` it calls `without_job_control`,
-    /// which empties the job table. So the same distinction that makes
+    /// Both pending verdicts are taken either way, so nothing nested inside the
+    /// stage can claim them a second time.
+    ///
+    /// Counting the `$BASH_SUBSHELL` level also empties the job table, because
+    /// the two bash paths that count it — `execute_in_subshell` and
+    /// `execute_subshell_builtin_or_function` — both call `without_job_control`
+    /// first. That is why the same distinction which makes
     /// `echo "[$BASH_SUBSHELL]" | cat` print 0 also makes `jobs | cat` list the
     /// shell's jobs while `{ jobs; } | cat` lists none — measured.
-    fn enter_stage_subshell(&mut self) {
-        if self.take_stage_level() {
+    fn settle_stage(&mut self, kind: StageKind) {
+        if self.take_stage_level() && kind.counts_level() {
             self.subshell_level = self.subshell_level.saturating_add(1);
             self.jobs.clear();
             self.current_job = None;
             self.previous_job = None;
+        }
+        if std::mem::take(&mut self.stage_pending_catch) && kind.catches_abort() {
+            self.abort_catch = self.abort_catch.saturating_add(1);
         }
     }
 
@@ -16898,8 +17030,12 @@ impl Shell {
             && !self.posix_special_builtin_first(name_str.as_deref())
         {
             // A function body re-enters the evaluator, so a pipeline stage that
-            // is a function call is one bash counts. See [`Shell::stage_pending_level`].
-            self.enter_stage_subshell();
+            // is a function call is one bash counts — but *only* for the level.
+            // `execute_subshell_builtin_or_function`'s function branch calls
+            // `execute_function` with no `setjmp (top_level)` in the way, so a
+            // fatal abort inside it is not caught and keeps its 127. See
+            // [`StageKind::Function`].
+            self.settle_stage(StageKind::Function);
             let name = name.clone();
             let args: Vec<Str> = argv[1..].to_vec();
             if redir.needs_scope() {
@@ -19406,6 +19542,22 @@ impl Shell {
         // subshell" behaviour; osh uses a thread rather than a fork. See
         // TD-OILS13.
         let mut sub = self.clone_for_subshell();
+        // An `&` job is one of the forks bash makes before it knows what the
+        // command is, so whether a fatal abort inside it is *caught* — and so
+        // demoted from 127 to 1 — is settled by the command's shape, exactly as
+        // for a pipeline stage (`echo "$nope" &` is 127, `{ echo "$nope"; } &`
+        // is 1). Only the abort handler is deferred: bash counts the
+        // `$BASH_SUBSHELL` level for every `&` job whatever its shape
+        // (`echo "$BASH_SUBSHELL" &` reports 1), so the clone keeps that.
+        //
+        // An and-or list is the exception, and settled here: `a && b &` gets
+        // `CMD_FORCE_SUBSHELL` in `execute_connection`, which sends it straight
+        // to `execute_in_subshell` and its handler, so the clone's own count
+        // stands.
+        if ao.rest.is_empty() {
+            sub.abort_catch = self.abort_catch;
+            sub.stage_pending_catch = true;
+        }
         if let Some(skips) = announced {
             sub.debug_announced = true;
             sub.debug_stage_skips = skips;
@@ -27521,10 +27673,19 @@ impl Shell {
         // bash reports as a subshell; one that merely expands its words and
         // prints is not, because the expansion already happened. `eval`, `.` and
         // `source` are the builtins that re-enter, and they claim the stage's
-        // pending level here — which is also how `command eval …` and
-        // `builtin eval …` claim it, since both re-dispatch through this.
+        // pending verdicts here — which is also how `command eval …` and
+        // `builtin eval …` claim them, since both re-dispatch through this.
+        //
+        // They claim the abort handler too, because the branch bash dispatches
+        // them on wraps the body in `setjmp_nosigs (top_level)`: `echo a | eval
+        // 'echo $nope'` scores 1 where `echo a | echo "$nope"` scores 127. The
+        // handler covers only the *body*, which is why it is claimed here and
+        // not around the word expansion that produced `argv` — bash forks in
+        // `execute_simple_command` before `expand_words`, so a fatal abort in
+        // the builtin's own words is raised with no handler in the way and
+        // keeps its 127 (`echo a | printf "%s" "$nope"`).
         if matches!(name, "eval" | "." | "source") {
-            self.enter_stage_subshell();
+            self.settle_stage(StageKind::Builtin);
         }
         let flow = if builtin_runs_commands(name, argv.get(1..).unwrap_or(&[])) && !redir.is_empty()
         {

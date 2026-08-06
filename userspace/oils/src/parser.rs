@@ -923,8 +923,29 @@ impl IncrementalParser {
                     // happens next.
                     match p.pos.checked_sub(1).and_then(|i| p.toks.get(i)) {
                         // `;`/`&` chain another command onto the same logical
-                        // line, so the unit continues.
-                        Some(Tok::Op(Op::Semi | Op::Amp)) => {}
+                        // line, so the unit continues — but only as far as the
+                        // end of that line. A separator written *last* on a line
+                        // is followed by the newline that ends the unit, and the
+                        // newline has to be consumed here because `parse_item`
+                        // would otherwise skip over it looking for the next
+                        // command and join the two lines into one unit.
+                        //
+                        // The boundary is observable, which is why the trailing
+                        // separator must not blur it: bash's reader takes one
+                        // line at a time, so `alias foo=…;` on its own line is a
+                        // unit of its own and the `foo` beneath it is parsed
+                        // afterwards, with the alias in force. Joined, the alias
+                        // would be defined and used inside a single parse and
+                        // `foo` would go out as an ordinary command word. The
+                        // same boundary decides where finished jobs leave the
+                        // table, what `set -v` echoes at a time, what the history
+                        // records as one entry, and what `\#` counts.
+                        Some(Tok::Op(Op::Semi | Op::Amp)) => {
+                            if matches!(p.peek(), Some(Tok::Newline)) {
+                                p.bump();
+                                break Ok(());
+                            }
+                        }
                         // A newline ends the unit.
                         Some(Tok::Newline) => break Ok(()),
                         // No separator at all: valid only at end of input.

@@ -13,6 +13,9 @@ add to roadmap-detailed to provide a function for program profilers to see how l
    counters it reads.]
 
 do the speed benchmarks on fastpy again since OS had to do some fixes.
+  [FOR THE FASTPY SESSION, NOT THIS ONE — the benchmarks live in the fastpy repo
+   (`D:\visual studio projects\fastpy`) and measure its compiler/runtime; nothing
+   in this repo can move those numbers. Flagging rather than silently skipping.]
 
 tell opus in OS:
 I told Fable 5 to optimize fastpy, so you may want to re-port whatever's necessary to assimilate the optimizations. Here's what Fable 5 said:
@@ -45,6 +48,18 @@ d83b6f5 toolchain: cache MSVC env instead of re-running vcvars per link
 
 Bottom line: compile/iteration time dropped ~92% (2.4s → ~0.2s for a typical small program) with no runtime regressions and no behavioral changes. The generated code itself was already near-optimal, so the headline gains are in developer iteration speed rather than output performance.
 """
+  [READ 2026-08-06 — nothing to re-port into this repo. I checked: the OS tree
+   vendors no copy of the fastpy compiler. `git ls-files | grep fastpy` outside
+   `services/` returns exactly one file, `scripts/convert-fastpy-embeds.py`, and
+   the ~200 `services/fastpy-*` directories are *generated outputs* (compiled
+   ring-3 test programs), not compiler source. So all three of Fable 5's commits
+   (d83b6f5 toolchain MSVC-env cache, dbb6b1f codegen hoisted tree walks, 096babe
+   docs) land wholly inside `D:\visual studio projects\fastpy` and this repo picks
+   them up for free the next time it invokes fastpy — the −92% is on *our* build
+   times too, since every `services/fastpy-*` rebuild pays the old ~2.1 s
+   vcvars64 cost per link.
+   One thing worth knowing here: `FASTPY_OPT` defaults to 2. If a fastpy-built
+   OS component ever needs a different backend opt level, that is now the knob.]
 
 --
 
@@ -52,6 +67,42 @@ the crate is ~15k+ lines with 477 passing tests and is quite mature now. Most ca
 
 ". This is a real, in-scope bash-superset gap (the goal is bash compatibility, and line N: is strictly more useful for debugging). "
 The reason I wanted you to port oils is because of its superset capability. Can you port all of it?
+
+  [ANSWERED 2026-08-06 — yes, with one distinction worth making, because "all of
+   oils" is two different things shipped in one binary:
+
+   1. OSH — the bash-compatible half. That is what `userspace/oils` already is,
+      and it is the part your superset motive actually wants. Today: ~110k lines
+      of Rust, 458 differential corpus cases + ~1,390 unit tests, every case
+      compared byte-for-byte against real bash 5.2.37 (stdout, stderr, exit
+      status). What remains is a long tail of *measured* divergences — one
+      escape, one redirect shape, one builtin flag at a time — not missing
+      subsystems. Each costs ~5–20 min, so the tail is bounded work, not an open
+      research problem, and it shrinks every session.
+
+   2. YSH — oils' *new* language (typed Int/Float/List/Dict values, `proc`/`func`,
+      the `=` expression dialect, `json`/`json8`, blocks as arguments,
+      `var`/`setvar`/`const`, `try`/`_error`/`_status`). It shares oils' runtime
+      but is a separate language, and it adds nothing to bash compatibility.
+      Also portable: it is a second front end (lexer → parser → evaluator) over
+      the interpreter and value model I already have, exposed as a `ysh` binary
+      the way oils exposes one binary under two names. Order-of-magnitude: a few
+      focused active hours to a couple of calendar days.
+
+   One caveat on method. I do not translate oils' Python line-by-line; the port
+   is differential — measure bash, read bash's C source to *explain* the
+   measurement, then freeze it as a corpus case. For OSH that reference exists
+   locally (`/d/refsrc/bash-5.2`). For YSH there is no bash to measure, so the
+   reference has to become oils' own source + its spec-test suite, and neither is
+   checked out here. If you want YSH, drop the oils repo somewhere on disk (or
+   say the word and I'll fetch it) — otherwise I'd be reimplementing a language
+   from memory, which is exactly the failure mode the differential method exists
+   to avoid.
+
+   Recommendation, which matches your unfinished note below: finish the OSH
+   surface first — it is what makes the shell a bash *superset*, and it is the
+   one on the critical path for init scripts, build scripts and the installer —
+   then add YSH as a second dialect once its reference is available.]
 
 I have an idea: Continue porting a bash-compatible shell from oils, then once we get our C++ toolchain in, you can 
 

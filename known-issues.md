@@ -93,7 +93,7 @@ already holds; the two `make_local` expressions lost their `is_local` override.
 `declare_compounds_scoped` deliberately does *not* read `G`. Corpus:
 `the-declaration-builtins-global-flag-is-never-taken-back-and-has-an-undocumented-twin.sh`.
 
-### TD-OILS-HELP-DECLARE-SUMMARY-LINE-IS-NOT-BASHS. `help declare` says "Declare variables and give them attributes." where bash says "Set variable values and attributes." — 2026-08-06 — OPEN
+### TD-OILS-HELP-DECLARE-SUMMARY-LINE-IS-NOT-BASHS. `help declare` says "Declare variables and give them attributes." where bash says "Set variable values and attributes." — 2026-08-06 — ✅ FIXED 2026-08-06
 
 **Where:** `userspace/oils/src/interp.rs` — the `help` builtin's text table.
 
@@ -114,9 +114,65 @@ attributes" is bash's line for `typeset`, not `declare` — the two were
 transposed. Noticed while probing `declare -G`; no corpus case exercises `help`
 for these builtins yet.
 
-**Proper fix.** Diff osh's whole help table against `help -d` and `help` output
-from bash 5.2.37 rather than fixing this one entry, and add a corpus case that
-walks every builtin's short description.
+**Fixed.** The whole table was diffed against bash 5.2.37 rather than just this
+entry: `compgen -b` gives the same 61 names on both sides, and walking `help -d`
+over them found **28** wrong descriptions, not one. They fell into two groups —
+a handful that were genuinely transposed (`declare`/`typeset`, `.`/`source`) and
+a long tail that had been paraphrased into more modern-sounding English than
+bash's own (`dirs - Display directory stack.`, `printf - Formats and prints
+ARGUMENTS under control of the FORMAT.`, `unalias - Remove each NAME from the
+list of defined aliases.`). All 28 are now bash's text verbatim; the
+reserved-word topics (`for ((`, `{ ... }`, `(( ... ))`, `variables`, …) already
+matched. New corpus case
+`help-says-of-each-builtin-what-bash-says-of-it.sh` walks `help -d` and `help -s`
+over every name `compgen -b` yields, plus the keyword topics, a pattern match
+and a miss.
+
+The blank-indented line this entry also noticed is a different, larger gap; see
+TD-OILS-HELP-HAS-NO-LONG-DESCRIPTIONS below.
+
+### TD-OILS-HELP-HAS-NO-LONG-DESCRIPTIONS. `help cd` prints one line where bash prints thirty — 2026-08-06 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `HELP_TABLE` (three columns: name,
+synopsis, short description) and the `help` builtin that formats it.
+
+**What.** bash's long help is the synopsis line, the short description, a blank
+line indented to four spaces, then a multi-paragraph body ending in an
+`Exit Status:` stanza. osh stops after the short description:
+
+```text
+$ help declare
+bash: declare: declare [-aAfFgiIlnrtux] …
+      ····Set variable values and attributes.
+      ····
+      ····Declare variables and give them attributes.  If no NAMEs are given,
+      ····display the attributes and values of all variables.
+      …
+      ····Exit Status:
+      ····Returns success unless an invalid option is supplied or a variable
+      ····assignment error occurs.
+osh : declare: declare [-aAfFgiIlnrtux] …
+      ····Set variable values and attributes.
+```
+
+`help -m NAME` reformats the same body under `NAME`/`SYNOPSIS`/`DESCRIPTION`
+headings, so it is short by the same text.
+
+The patternless listing differs too, though only in layout: bash pads the
+synopses into **two columns** of half the terminal width, truncating each with
+`>`, and precedes them with `A star (*) next to a name means that the command is
+disabled.`; osh prints one untruncated synopsis per line and omits the star
+note. (The banner line above it — `GNU bash, version …` vs `osh (Oils for
+SlateOS) …` — is a deliberate divergence and is why no corpus case can compare
+patternless `help` directly.)
+
+**Proper fix.** Add a fourth column to `HELP_TABLE` holding the body verbatim
+from bash 5.2.37's `builtins/*.def` `$BUILTIN … $END` blocks (the text is
+`gettext`-marked there and is what `bash_builtin_help` prints), and have `help`
+emit synopsis / short / blank / body. It is ~60 entries of static text —
+mechanical, but it is the whole of `builtins/help.def`'s payload, so it wants
+its own commit and a corpus case that walks `help NAME` and `help -m NAME` over
+`compgen -b`. Reference: `D:\refsrc\bash-5.2\builtins\`.
 
 ### TD-OILS-A-REFERENCES-SUBSCRIPT-IS-NEVER-EVALUATED-AS-ARITHMETIC. `declare -n r='n[1+]'` should be an arithmetic syntax error, not "not a valid identifier" — 2026-08-06 — ✅ FIXED 2026-08-06
 

@@ -55849,6 +55849,79 @@ mod tests {
         assert_eq!(unit(&mut ip), (false, false, vec![]));
     }
 
+    /// bash gathers a pending here-document from three places, not one. The
+    /// obvious one is the newline token; the one measured here is the yacc
+    /// action of `simple_list` (parse.y:1217), which fires on a token that is
+    /// merely the *lookahead* of a **top-level** list reduction — so the body is
+    /// read before that token is found to be a syntax error, and the error is
+    /// blamed on the line the reading left the reader on. The echoed text does
+    /// not move with it: `read_a_line` (parse.y:2080) reads a body into a buffer
+    /// of its own and never replaces `shell_input_line`.
+    ///
+    /// The same action in `compound_list` (1148) is guarded by
+    /// `last_read_token == '\n'`, so inside any compound only the ordinary
+    /// newline gather fires and nothing moves. Both halves measured against
+    /// bash 5.2.37.
+    #[test]
+    fn a_pending_here_document_is_gathered_before_a_top_level_list_is_blamed() {
+        let opts = crate::lexer::ParseOpts::default();
+        let fail = |src: &str| {
+            let mut ip = crate::parser::IncrementalParser::new(src.as_bytes(), 0, opts);
+            loop {
+                match ip.next_unit(None, opts) {
+                    Some(Err(e)) => {
+                        return (
+                            e.line,
+                            e.echo.map(|s| String::from_utf8_lossy(&s).into_owned()),
+                        );
+                    }
+                    Some(Ok(_)) => {}
+                    None => panic!("expected a syntax error in {src:?}"),
+                }
+            }
+        };
+        for (src, line, echo) in [
+            // The body and the delimiter line are both read before the `(` is
+            // looked at, so the blame lands two lines down — on text that is not
+            // the text echoed underneath it.
+            ("cat <<E(\nbody\nE\necho tail\n", 3, "cat <<E("),
+            ("cat <<E(\nb1\nb2\nb3\nE\necho tail\n", 5, "cat <<E("),
+            ("echo one\ncat <<E(\nbody\nE\n", 4, "cat <<E("),
+            // Any lookahead the top-level list cannot continue with does it.
+            ("cat <<E;;\nbody\nE\n", 3, "cat <<E;;"),
+            ("cat <<E; fi\nbody\nE\n", 3, "cat <<E; fi"),
+            // The advance is the *second* here-document's body, the first
+            // having been gathered at the newline that ended its own line.
+            ("cat <<E\nbody\nE\ncat <<F(\nb\nF\n", 6, "cat <<F("),
+            // Two pending at once are gathered together…
+            ("cat <<A <<B(\na1\nA\nb1\nB\n", 5, "cat <<A <<B("),
+            // …but only the ones declared *before* the offending token are
+            // pending at all, which is what separates these two.
+            ("cat <<A( <<B\na1\nA\nb1\nB\n", 3, "cat <<A( <<B"),
+            // A `\<newline>` inside an expanding body is joined away, yet still
+            // costs a line: `read_a_line` bumps `line_number` for the pair it
+            // deletes as well as for the line it hands back.
+            ("cat <<E(\nbo\\\ndy\nE\n", 4, "cat <<E("),
+            // A body cut off by the end of input moves the reader by what it did
+            // read, the missing delimiter costing nothing.
+            ("cat <<E(\nbody\n", 2, "cat <<E("),
+        ] {
+            assert_eq!(fail(src), (Some(line), Some(echo.to_string())), "{src:?}");
+        }
+        // Inside a compound the reduction never happens, so the error stays on
+        // its own line — and needs no pinned echo, the line number being the
+        // written one again.
+        for src in [
+            "{ cat <<E(\nbody\nE\n}\n",
+            "if cat <<E(\nbody\nE\nfi\n",
+            "( cat <<E(\nbody\nE\n)\n",
+            "f() { cat <<E(\nbody\nE\n}\n",
+            "for x in a; do cat <<E(\nbody\nE\ndone\n",
+        ] {
+            assert_eq!(fail(src), (Some(1), None), "{src:?}");
+        }
+    }
+
     #[test]
     fn unterminated_constructs_report_matching_eof_message() {
         // bash reports unclosed quotes/substitutions as

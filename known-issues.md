@@ -108,7 +108,7 @@ Two smaller rules fell out of reading `parse_matched_pair` (parse.y:3775–3781,
 **Left behind:** TD-OILS-A-PENDING-HERE-DOCUMENT-IS-NOT-GATHERED-WHEN-A-TOP-LEVEL-LIST-IS-REDUCED,
 found while writing the corpus case.
 
-### TD-OILS-A-PENDING-HERE-DOCUMENT-IS-NOT-GATHERED-WHEN-A-TOP-LEVEL-LIST-IS-REDUCED. Two symptoms, one missing rule — 2026-08-06 — OPEN
+### TD-OILS-A-PENDING-HERE-DOCUMENT-IS-NOT-GATHERED-WHEN-A-TOP-LEVEL-LIST-IS-REDUCED. Two symptoms, one missing rule — 2026-08-06 — ◐ SYMPTOM 1 FIXED 2026-08-06, SYMPTOM 2 OPEN
 
 **Where:** `userspace/oils/src/parser.rs` — `Parser::reader_line` /
 `Parser::reader_echo`, and the lexer/parser split that puts here-document
@@ -204,6 +204,129 @@ collection *would* leave the reader at (it already computes both numbers for
 here-document advance to `reader_line()` and pins `reader_echo()` to the token's
 own line — but only when the error is at top level, and emits the pending
 warnings under the same condition.
+
+**Symptom 1, as fixed (2026-08-06).** Three pieces, one per file:
+
+* `lexer.rs` — `collect_heredocs` now notes, per body it collects, the input
+  lines the collection consumed, keyed by the placeholder token's index. The
+  count is taken straight off the reader: newlines in the span the collection
+  advanced over, plus one if it ended mid-line. That is precisely bash's advance,
+  because `make_here_document` (make_cmd.c:621) bumps `line_number` once per line
+  `read_a_line` hands it (delimiter line included) and `read_a_line`
+  (parse.y:2080) bumps it again for each `\<newline>` it joins away — the two
+  together being the physical lines the body occupied. `Tokenized` carries them
+  out in a `heredoc_lines: Vec<u32>` parallel to `toks`. The `$( … )` body path
+  (`consume_subst_heredoc_bodies`) is deliberately left alone: bash exempts it.
+* `parser.rs` — `Parser::depth` counts nested command lists, raised in exactly
+  two places (`parse_program` and `parse_case_body`, each split into a wrapper
+  and an `_inner`) because `IncrementalParser::next_unit` drives `parse_item`
+  directly, so depth 0 *is* the top level. It is unwound only on success: a
+  failing parse must be stamped with the depth the error was raised at.
+* `parser.rs` — `IncrementalParser::heredoc_gather` sums the recorded counts of
+  the here-documents still pending when the error was raised (scanning back from
+  the offending token to the last newline, which is what "pending" means), and
+  only at depth 0. The stamping site adds that to `reader_line()` and, when it is
+  non-zero, pins the echo to the offending token's own physical line with
+  `tok_line_text` — sliced out of `src` via `orig_offsets`, so no `LineMap`
+  renumbering can corrupt it.
+
+The "only ones declared *before* the offending token" refinement is what
+separates `cat <<A <<B(` (line 5) from `cat <<A( <<B` (line 3) on the same five
+lines of input.
+
+**Pinned by**
+`tests/corpus/a-pending-here-document-is-gathered-before-the-token-that-ends-the-list-is-blamed.sh`
+(21 probes; fails on its first without the fix) and the unit test
+`a_pending_here_document_is_gathered_before_a_top_level_list_is_blamed`.
+
+**Still open:** symptom 2, the lost `here-document … delimited by end-of-file`
+warning. It needs the *other* half of the reduction — emitting the pending
+warnings — which the lexer currently drops when an unterminated construct after
+the `<<` swallows the input, and which nothing yet carries to the parser.
+
+**Left behind:**
+TD-OILS-AN-ALIAS-SPLICED-HERE-DOCUMENT-GETS-NO-BODY and
+TD-OILS-A-STRAY-PAREN-IN-A-CASE-ARM-IS-NOT-DIAGNOSED-WHERE-IT-STANDS, both found
+while measuring shapes for the corpus case.
+
+### TD-OILS-AN-ALIAS-SPLICED-HERE-DOCUMENT-GETS-NO-BODY. A `<<` that arrives through an alias loses its redirection entirely — 2026-08-06 — OPEN
+
+**Where:** `userspace/oils/src/lexer.rs` — `expand_aliases_tracked` /
+`expand_aliases_inner`, which lex each alias replacement as a *text of its own*
+(`AliasInput::src`), and `Lexer::collect_heredocs`, which can only collect a body
+from the text the `<<` was lexed in.
+
+**What.** A here-document operator written inside an alias value does nothing:
+
+```
+shopt -s expand_aliases
+alias A="cat <<E"
+A
+body
+E
+
+bash: body
+osh : line 4: body: command not found
+      line 5: E: command not found          rc=127
+```
+
+The `<<` is not merely un-collected — it is gone. With the delimiter supplied by
+the calling line instead, the shape is unmistakable:
+
+```
+alias B="cat <<"
+B E2          bash: reads the following lines as E2's body
+              osh : runs `cat E2` — the operator dropped, the delimiter an argument
+```
+
+`alias A="cat <<E; echo tail"` shows the same from the other side: osh prints
+`tail`, so the command did run, with `cat` reading nothing.
+
+**Why.** bash expands an alias by pushing its value onto the *input stream*
+(`push_string`, parse.y), so the `<<` is read by the same reader that will later
+reach the newline and gather — the body comes off the calling line's input, which
+is exactly where the user wrote it. osh lexes the replacement separately: the
+`<<` is scanned in a text where there is no following newline to gather at and no
+body to gather, so the pending here-document is discarded with the sub-lexer.
+
+**Proper fix.** The alias pass has to hand a `<<` it emits back to the outer
+text's pending list rather than resolving it in the replacement's own lexer —
+i.e. `PendingHeredoc` must survive the text boundary, carrying the outer reader
+position, so the outer newline collects it. That the fix is not local is why the
+already-landed
+TD-OILS-A-PENDING-HERE-DOCUMENT-IS-NOT-GATHERED-WHEN-A-TOP-LEVEL-LIST-IS-REDUCED
+work has to tolerate an alias-spliced `<<` with no recorded line count
+(`IncrementalParser::heredoc_gather` skips one whose `work_origin` is `None`).
+
+### TD-OILS-A-STRAY-PAREN-IN-A-CASE-ARM-IS-NOT-DIAGNOSED-WHERE-IT-STANDS. `case a in a) echo x( y;; esac` is blamed on the `;;` — 2026-08-06 — OPEN
+
+**Where:** `userspace/oils/src/parser.rs` — `parse_case_body`, and whatever
+tracks paren nesting for a case arm's pattern list.
+
+**What.** A bare `(` after a command word is a syntax error at the `(` in every
+context bash has — except that osh gets the `case` arm wrong, and only the
+`case` arm:
+
+```
+                                osh                     bash
+echo x( y                       near `('  line 1        near `('  line 1   ✔
+{ echo x( y; }                  near `('  line 1        near `('  line 1   ✔
+case a in a) echo x( y;; esac   near `;;' line 1        near `('  line 1   ✘
+case a in a) echo x) y;; esac   near `)'  line 1        near `)'  line 1   ✔
+```
+
+The `)` twin being right makes the shape clear: the arm's parser is counting an
+unmatched `(` as an *open* rather than rejecting it, so the error only surfaces
+when the `;;` arrives with the count still non-zero. Nothing about
+here-documents is involved — a multi-line arm reports the `;;` line, which is how
+this was found (a `case`-arm probe was dropped from
+`tests/corpus/a-pending-here-document-is-gathered-before-the-token-that-ends-the-list-is-blamed.sh`
+for it).
+
+**Proper fix.** A `(` in a case arm's *body* is not part of the pattern list at
+all — pattern parens are only in play before the arm's `)` is seen. The arm body
+should be parsed with the same command-position rules as any other list, so a
+stray `(` after a word is rejected on the spot.
 
 ### TD-OILS-A-LONE-CONDITIONAL-END-RAN-AS-A-COMMAND. `]]` was an ordinary word to osh where bash makes it a reserved token — 2026-08-06 — ✅ FIXED 2026-08-06
 

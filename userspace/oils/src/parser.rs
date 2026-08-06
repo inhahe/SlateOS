@@ -492,6 +492,10 @@ pub struct IncrementalParser {
     /// lexer joined away. bash's history stores the *joined* line, so
     /// [`Self::line_text`] cuts these spans back out — see [`Tokenized::conts`].
     orig_conts: Vec<u32>,
+    /// Parallel to `orig`: how many input lines collecting each here-document's
+    /// body consumed. See [`Tokenized::heredoc_lines`] and
+    /// [`Self::heredoc_gather`].
+    orig_heredoc_lines: Vec<u32>,
     /// Char offset into `src` of the first character not yet handed out as unit
     /// text. Runs ahead of `pos` only in whole tokens, so it survives a
     /// [`Self::relex`] (which rebases offsets onto the same `src`).
@@ -582,6 +586,7 @@ impl IncrementalParser {
             offsets: orig_offsets,
             ends: orig_ends,
             conts: orig_conts,
+            heredoc_lines: orig_heredoc_lines,
             warnings,
             err,
         } = tokenize_deferred(src, opts);
@@ -595,6 +600,7 @@ impl IncrementalParser {
             orig_offsets,
             orig_ends,
             orig_conts,
+            orig_heredoc_lines,
             hist_cursor: 0,
             expand_cursor: 0,
             unit_lines: Vec::new(),
@@ -655,6 +661,7 @@ impl IncrementalParser {
             mut offsets,
             mut ends,
             conts,
+            heredoc_lines,
             warnings,
             err,
         } = tokenize_deferred(&tail, opts);
@@ -671,6 +678,7 @@ impl IncrementalParser {
         self.orig_lines = orig_lines;
         self.orig_offsets = offsets;
         self.orig_ends = ends;
+        self.orig_heredoc_lines = heredoc_lines;
         // The head was not re-scanned, so its continuations are still the only
         // record of what the first lex joined away there — text the history may
         // yet slice, since `hist_cursor` can trail `off` by a comment or two.
@@ -872,6 +880,83 @@ impl IncrementalParser {
         self.expand_cursor = start;
     }
 
+    /// How many input lines bash's reader would have moved on before blaming the
+    /// token `p` is stopped at — the here-documents that token's own reduction
+    /// gathers, before it is looked at closely enough to be a syntax error.
+    ///
+    /// bash gathers a pending here-document from three places. The one this
+    /// lexer models is the newline token; the one that matters here is the yacc
+    /// action of `simple_list` (parse.y:1217, with the `&`/`;` variants at 1235
+    /// and 1250):
+    ///
+    /// ```text
+    /// simple_list:    simple_list1
+    ///                 { ...  if (need_here_doc) gather_here_documents ();  ... }
+    /// ```
+    ///
+    /// The reduction needs a lookahead, and a token that cannot continue the
+    /// list is exactly that — so the body is read *first* and the error is
+    /// blamed on the line the reading left the reader on:
+    ///
+    /// ```text
+    /// cat <<E(          line 3: syntax error near unexpected token `('
+    /// body              line 3: `cat <<E('
+    /// E
+    /// ```
+    ///
+    /// Two conditions, both of them bash's:
+    ///
+    /// * **Top level only.** The same action in `compound_list` (1148) is
+    ///   guarded by `last_read_token == '\n'`, so inside a `{ }`, `( )`, `if`,
+    ///   `while`, `case` arm or function body only the ordinary newline gather
+    ///   fires and `{ cat <<E(` is blamed on line 1. See [`Parser::depth`].
+    /// * **Still pending.** Only the here-documents declared since the last
+    ///   newline and *before* the offending token are gathered, which is why
+    ///   `cat <<A( <<B` is blamed on `A`'s delimiter line and not on `B`'s.
+    fn heredoc_gather(&self, p: &Parser) -> u32 {
+        if p.depth != 0 {
+            return 0;
+        }
+        let mut n = 0u32;
+        for i in (0..p.pos.min(p.toks.len())).rev() {
+            match p.toks.get(i) {
+                Some(Tok::Newline) => break,
+                Some(Tok::HereDoc(..)) => {
+                    // An alias-spliced `<<` has no count to look up, because
+                    // the expansion pass never collected a body for it — see
+                    // TD-OILS-AN-ALIAS-SPLICED-HERE-DOCUMENT-GETS-NO-BODY.
+                    let Some(&Some(oi)) = self.work_origin.get(i) else { continue };
+                    n = n.saturating_add(self.orig_heredoc_lines.get(oi).copied().unwrap_or(0));
+                }
+                _ => {}
+            }
+        }
+        n
+    }
+
+    /// The physical source line the token `p` is stopped at was written on,
+    /// which is what bash echoes under a diagnostic whose line number a
+    /// here-document gather has moved past. Keyed off the token's own character
+    /// offset rather than its line number, so it is unaffected by the
+    /// renumbering `line_map` applies.
+    fn tok_line_text(&self, p: &Parser) -> Option<Str> {
+        let &Some(oi) = self.work_origin.get(p.pos)? else { return None };
+        let off = (*self.orig_offsets.get(oi)? as usize).min(self.src.len());
+        let start = self
+            .src
+            .get(..off)
+            .unwrap_or(&[])
+            .iter()
+            .rposition(|&c| c == '\n')
+            .map_or(0, |i| i.saturating_add(1));
+        let end = self.line_end(start);
+        let mut text = bytes::from_chars(self.src.get(start..end).unwrap_or(&[]).iter().copied());
+        if text.ends_with(b"\r") {
+            text.pop();
+        }
+        Some(text)
+    }
+
     /// Parse the next unit under the given alias state, or `None` when the input
     /// is exhausted. A returned [`ParseError`] also ends the iteration: bash
     /// abandons the rest of a script (or `eval`/`source` string) after a syntax
@@ -909,6 +994,7 @@ impl IncrementalParser {
             spans: std::mem::take(&mut self.work_spans),
             pos: self.wpos,
             opts: self.opts,
+            depth: 0,
         };
         let mut items = Vec::new();
         let outcome = loop {
@@ -968,8 +1054,24 @@ impl IncrementalParser {
         // error can name a token from outside this stream).
         let ran_out = p.peek().is_none();
         let outcome = outcome.map_err(|e| {
-            let line = p.reader_line().saturating_add(u32::from(e.is_incomplete()));
-            e.or_line(line).or_echo(p.reader_echo())
+            // A here-document still pending at a *top-level* reduction is
+            // gathered before the offending token is ever found to be one, and
+            // gathering moves bash's reader. See [`Self::heredoc_gather`].
+            // Only for an error being stamped here: one that already names a
+            // line was raised in a stream of its own (a `$( … )` body), where
+            // the reduction never happens.
+            let gathered = if e.line.is_none() { self.heredoc_gather(&p) } else { 0 };
+            let line = p
+                .reader_line()
+                .saturating_add(u32::from(e.is_incomplete()))
+                .saturating_add(gathered);
+            // `read_a_line` (parse.y:2080) reads a here-document body into a
+            // buffer of its own and never replaces `shell_input_line`, so the
+            // gather moved the *number* and not the text: bash prints the line
+            // the error was written on under a prefix naming a later one.
+            let pinned = (gathered > 0).then(|| self.tok_line_text(&p)).flatten();
+            let echo = p.reader_echo().or(pinned);
+            e.or_line(line).or_echo(echo)
         });
         self.wpos = p.pos;
         self.work = p.toks;
@@ -1450,6 +1552,7 @@ fn parse_tokens_ending(
         spans,
         pos: 0,
         opts,
+        depth: 0,
     };
     // The closing `)` is consumed by nothing, so a complete body leaves the
     // cursor on it rather than past it.
@@ -1494,6 +1597,20 @@ struct Parser {
     /// The options the tokens were lexed under, carried so that a nested body
     /// re-lexed during parsing (`$( … )`, `<( … )`) is read the same way.
     opts: ParseOpts,
+    /// How many *nested* command lists the parser is inside — the body of a
+    /// `{ }`, `( )`, `if`, `while`, `for`, `case` arm or function.
+    ///
+    /// Only one thing asks: bash gathers a pending here-document at the
+    /// reduction of `simple_list` (parse.y:1217), which is the **top-level**
+    /// list and no other. The same action inside `compound_list` (1148) is
+    /// guarded by `last_read_token == '\n'`, so within a compound only the
+    /// ordinary newline gather ever fires. That is why `cat <<E(` is blamed on
+    /// its here-document's delimiter line and `{ cat <<E(` on its own. See
+    /// [`Tokenized::heredoc_lines`](crate::lexer::Tokenized::heredoc_lines).
+    ///
+    /// A failing parse leaves this raised: what the question wants is the depth
+    /// the error was *raised* at, not the depth the cursor unwound to.
+    depth: u32,
 }
 
 /// The text a token stream was lexed from, with each token's end offset into it.
@@ -2113,6 +2230,25 @@ impl Parser {
     /// separator (`;`/`&`) with no preceding command is likewise rejected
     /// (`; echo`, `echo a ; ; echo b`) — blank *lines* between commands are fine.
     fn parse_program(&mut self, stops: &[&str], allow_empty: bool) -> Result<Program, ParseError> {
+        // Every call but the two outermost ones ([`IncrementalParser::next_unit`]
+        // drives `parse_item` directly, and `parse_tokens_ending` does not ask)
+        // is the body of some compound, so the counter can live here rather than
+        // at each of the dozen sites. See [`Parser::depth`] for what asks.
+        self.depth = self.depth.saturating_add(1);
+        let r = self.parse_program_inner(stops, allow_empty);
+        // Unwound only on success: a failure goes straight to the stamping site,
+        // which wants the depth the error was raised at.
+        if r.is_ok() {
+            self.depth = self.depth.saturating_sub(1);
+        }
+        r
+    }
+
+    fn parse_program_inner(
+        &mut self,
+        stops: &[&str],
+        allow_empty: bool,
+    ) -> Result<Program, ParseError> {
         let mut items = Vec::new();
         while let Some(item) = self.parse_item(stops)? {
             items.push(item);
@@ -2813,6 +2949,17 @@ impl Parser {
 
     /// Parse a `case`-arm body: a command list terminated by `;;` or `esac`.
     fn parse_case_body(&mut self) -> Result<Program, ParseError> {
+        // A nested list like any other, but built from `parse_and_or` rather
+        // than [`Parser::parse_program`], so it keeps [`Parser::depth`] itself.
+        self.depth = self.depth.saturating_add(1);
+        let r = self.parse_case_body_inner();
+        if r.is_ok() {
+            self.depth = self.depth.saturating_sub(1);
+        }
+        r
+    }
+
+    fn parse_case_body_inner(&mut self) -> Result<Program, ParseError> {
         let mut items = Vec::new();
         loop {
             self.skip_separators();

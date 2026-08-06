@@ -436,6 +436,11 @@ struct Lexer {
     /// enclosing scan consumes — has no other way to name the token it belongs
     /// to. Left at 0 by the lexers that never run the token loop.
     next_tok_index: usize,
+    /// For each here-document body this scan collected: its placeholder token's
+    /// index, and the number of input lines the collection consumed. See
+    /// [`Tokenized::heredoc_lines`], which is this in the dense form the reader
+    /// indexes by token.
+    heredoc_lines: Vec<(usize, u32)>,
 }
 
 /// A warning bash raises from its **reader** rather than from the parse or the
@@ -784,6 +789,7 @@ impl Lexer {
             warnings: Vec::new(),
             hd_ahead: None,
             next_tok_index: 0,
+            heredoc_lines: Vec::new(),
         }
     }
 
@@ -907,6 +913,21 @@ pub struct Tokenized {
     /// *not* deleted and so is not listed here, which is exactly the
     /// distinction bash's own history draws.
     pub conts: Vec<u32>,
+    /// Parallel to `toks`: for a `HereDoc` token, the number of input lines
+    /// collecting its body consumed; 0 for every other token.
+    ///
+    /// bash gathers a pending here-document from *three* places, not one. The
+    /// obvious one is the newline token, which is the only one this lexer can
+    /// model — collection happens where the body sits in the input, so a lexer
+    /// that reads the whole source up front has no reduction to hang the other
+    /// two off. They are `gather_here_documents()` in the yacc actions of
+    /// `simple_list` (parse.y:1217, with the `&`/`;` variants at 1235/1250) and
+    /// `compound_list` (1148), and the first of them fires on a token that is
+    /// merely the *lookahead* of a top-level list reduction — before that token
+    /// is found to be a syntax error. So the body is read first and the error is
+    /// blamed on the line the reader has been moved to, which is what this
+    /// number lets [`crate::parser::IncrementalParser`] add back.
+    pub heredoc_lines: Vec<u32>,
     /// Every warning the reader raised, in the order it raised them. The reader
     /// ([`crate::parser::IncrementalParser`]) holds them until the parse unit
     /// owning each `tok_index` is handed out, since bash's warning comes from its
@@ -943,8 +964,14 @@ pub fn tokenize_deferred(src: BStr<'_>, opts: ParseOpts) -> Tokenized {
     conts.sort_unstable();
     conts.dedup();
     let warnings = std::mem::take(&mut lx.warnings);
+    let mut heredoc_lines = vec![0u32; toks.len()];
+    for (i, n) in std::mem::take(&mut lx.heredoc_lines) {
+        if let Some(slot) = heredoc_lines.get_mut(i) {
+            *slot = n;
+        }
+    }
     let Err(e) = res else {
-        return Tokenized { toks, lines, offsets, ends, conts, warnings, err: None };
+        return Tokenized { toks, lines, offsets, ends, conts, heredoc_lines, warnings, err: None };
     };
     // The failing token's own line is the fallback when the raise site did not
     // name one. `Lexer::line` only advances at the end of each `run_into`
@@ -969,6 +996,7 @@ pub fn tokenize_deferred(src: BStr<'_>, opts: ParseOpts) -> Tokenized {
     lines.truncate(keep);
     offsets.truncate(keep);
     ends.truncate(keep);
+    heredoc_lines.truncate(keep);
     // The continuations are keyed by source offset rather than by token index, so
     // the ones past the cut simply describe text no caller will slice; leaving
     // them costs nothing and keeps the list a faithful record of the whole scan.
@@ -977,7 +1005,7 @@ pub fn tokenize_deferred(src: BStr<'_>, opts: ParseOpts) -> Tokenized {
     // but if one ever did, its token is beyond the cut and so names input that
     // never runs. The reader's `tok_index` gate keeps it quiet on its own, which is
     // the same rule that keeps bash quiet after `echo one )`.
-    Tokenized { toks, lines, offsets, ends, conts, warnings, err: Some((e, line)) }
+    Tokenized { toks, lines, offsets, ends, conts, heredoc_lines, warnings, err: Some((e, line)) }
 }
 
 /// Which quote, if any, the reader is still *inside* after `src` — `Some('\'')`
@@ -4139,6 +4167,9 @@ impl Lexer {
             // at all but wherever the first one's body left the cursor, which is
             // why `cat <<A <<B` is the shape to test against.
             let body_line = self.fetched_line();
+            // Where this body's collection starts, so the lines it consumes can
+            // be counted off against it below.
+            let from = self.pos;
             loop {
                 if self.pos >= self.chars.len() {
                     // EOF before the delimiter. In strict mode (REPL
@@ -4190,6 +4221,16 @@ impl Lexer {
                 body.extend_from_slice(content);
                 body.push(b'\n');
             }
+            // What the collection moved bash's reader by. `make_here_document`
+            // (make_cmd.c:621) bumps `line_number` once per line `read_a_line`
+            // hands it — the delimiter's line included — and `read_a_line` bumps
+            // it again for each `\<newline>` it joins away inside an expanding
+            // body, so the two together come to exactly the physical lines
+            // consumed. See [`Tokenized::heredoc_lines`] for who needs this.
+            let taken = self.chars.get(from..self.pos).unwrap_or(&[]);
+            let lines = taken.iter().filter(|&&c| c == '\n').count()
+                + usize::from(taken.last().is_some_and(|&c| c != '\n'));
+            self.heredoc_lines.push((ph.tok_index, u32::try_from(lines).unwrap_or(u32::MAX)));
             let segs = scan_heredoc_segs(&body, ph.expand)?;
             if let Some(slot) = out.get_mut(ph.tok_index) {
                 *slot = Tok::HereDoc(segs, ph.delim.clone(), !ph.expand);

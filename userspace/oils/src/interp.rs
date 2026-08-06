@@ -35333,6 +35333,38 @@ impl Shell {
                 }
                 continue;
             }
+            // A declaration that asks for *nothing* — no attribute in either
+            // direction, no `-g`, no value — does not reach for the reference's
+            // base at all. bash has nothing to build a new name out of, so it
+            // falls through to an ordinary bind of the operand, which follows
+            // the reference and finds a whole-array subscript there:
+            // `n=(a b c); declare -n r='n[@]'; declare r` says
+            // `n[@]: bad array subscript`, declares nothing, and succeeds.
+            //
+            // Any flag at all takes the operand off that path — even one that
+            // only *removes* an attribute, and even one bash cannot honour —
+            // because the base-reaching branch is entered on the mere presence
+            // of a flag: `declare -r r`, `declare +r r` and `declare -g r` are
+            // all silent, and each lands on `n`. `-I` and `-G` are the two
+            // letters that ask nothing of a variable, so they leave the
+            // complaint standing. Inside a function nothing is reached for
+            // either: the declaration binds a local named by the whole
+            // spelling, which is a name and not a reference.
+            if value.is_none()
+                && subscript.is_none()
+                && !make_local
+                && !print_mode
+                && !global
+                && !nameref
+                && !unset_nameref
+                && !other_attrs
+                && let Some(t) = &target
+                && let Some(sub) = &t.sub
+                && let Some(c) = Self::whole_array_sub(sub)
+            {
+                self.warn_whole_array_sub(&t.base, c);
+                continue;
+            }
             // The operand as the user wrote it, before a reference was followed
             // — which is the name bash's "cannot destroy array variables"
             // refusal quotes, unlike every other diagnostic here.
@@ -36835,6 +36867,37 @@ impl Shell {
                 // machinery's untagged spelling — the reference's own text, not
                 // the operand's — and discards the rest of the parse unit.
                 (None, Some(RefTarget { base, sub: Some(sub) })) => {
+                    // A reference to a *whole* array is complained about twice,
+                    // and the first line comes from a step before the refusal:
+                    // the machinery hands the operand to `declare` itself to get
+                    // the binding made, and a `declare` that has been given
+                    // nothing to do with it just binds the name, following the
+                    // reference into the subscript it cannot evaluate. That is
+                    // the same silence-or-complaint the *valueless* scalar
+                    // operand shows in [`Shell::builtin_declare_scoped`], and it
+                    // turns on the same thing: whether the command asks anything
+                    // of the variable.
+                    //
+                    // The set of letters that count is narrower here, though,
+                    // because the machinery does not pass the command's flags on
+                    // — it rebuilds them, keeping only the array kind (`-a`,
+                    // `-A`), the scope (`-g`, and the standing global scope of
+                    // `export` and `readonly`), and the letters that transform a
+                    // *value* as it binds (`i`, `l`, `u`, `c`), which it takes in
+                    // either direction. So `declare -r r=(x y)`, `declare -t`,
+                    // `declare -p`, `declare -I` and even `declare +a` all still
+                    // give the line, while `declare -i`, `declare +l` and
+                    // `export` do not.
+                    if !kind_or_scope_flag
+                        && !global_builtin
+                        && !int_named
+                        && !seen_lower
+                        && !seen_upper
+                        && !seen_capcase
+                        && let Some(c) = Self::whole_array_sub(&sub)
+                    {
+                        self.warn_whole_array_sub(&base, c);
+                    }
                     let msg = bfmt![b"`", base.as_bytes(), b"[", &sub, b"]': not a valid identifier"];
                     self.berrln(&bfmt![self.err_prefix(), &msg]);
                     self.last_status = 1;

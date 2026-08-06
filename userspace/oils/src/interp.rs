@@ -14789,6 +14789,21 @@ impl Shell {
             return Ok(None);
         }
         if index.is_some() && !self.ref_name_exists(refname) {
+            // The subscript is evaluated even though there is no variable to
+            // subscript, and *before* the complaint below — bash reads the
+            // reference the ordinary way and only discovers the pointer is
+            // missing afterwards. So its side effects happen
+            // (`${!nope[$(echo ran >&2; echo 0)]}` prints `ran`) and its own
+            // faults are reported in its place: `${!nope[0+]}` is the arithmetic
+            // syntax error, and `set -u; ${!nope[n]}` is `n: unbound variable`.
+            // Arithmetically, because with no variable in hand there is nothing
+            // to say the subscript is an associative key.
+            if let Some(ArrayIndex::Index(w)) = index {
+                let _ = self.eval_arith_index(w);
+                if self.expansion_failed() {
+                    return Err(());
+                }
+            }
             let src = Self::indirect_ref_src(refname, index);
             self.berrln(&bfmt![
                 self.err_prefix(),
@@ -16290,6 +16305,41 @@ impl Shell {
             || self.declared.contains(name)
     }
 
+    /// Whether `name` has a binding that bash would call *visible* — i.e.
+    /// whether `find_variable` would hand back a variable that `invisible_p`
+    /// does not reject.
+    ///
+    /// A declaration is not an assignment: `declare -a q`, `declare -A m`,
+    /// `export E` and `declare -i n` all leave an entry behind (so `declare -p`
+    /// reports the name and its attributes) while the variable itself is still
+    /// unset. [`Shell::declared`] is exactly that state, so it vetoes any table
+    /// entry the name may also have — a bare `declare -a q` puts an empty array
+    /// in [`Shell::arrays`] for later writes to land in, and that array is not a
+    /// value.
+    ///
+    /// Distinct from [`Shell::array_shape_exists`], which additionally demands
+    /// that the visible thing be an *array*: a plain `s=hi` is visible here and
+    /// shapeless there.
+    fn var_binding_is_visible(&self, name: &str) -> bool {
+        if self.declared.contains(name) {
+            return false;
+        }
+        // An array's own invisibility is not recorded in `declared` — a bare
+        // `declare -a q` leaves an empty entry in [`Shell::arrays`] — so it is
+        // asked of [`Shell::array_is_visible`] instead.
+        if self.arrays.contains_key(name) || self.assoc.contains_key(name) {
+            return self.array_is_visible(name);
+        }
+        if self.vars.contains_key(name) {
+            return true;
+        }
+        // A dynamic special is a live binding, so it is visible — except the
+        // one kind bash creates without assigning: `FUNCNAME` outside a
+        // function. See [`DynListing::BareArray`].
+        self.dynamic_special(name)
+            .is_some_and(|d| d.listed != DynListing::BareArray)
+    }
+
     /// Whether `name` holds an array of either kind — what `compgen -A
     /// arrayvar` asks. A dynamic special is answered from the table, since the
     /// call-stack arrays have no entry of their own at every level.
@@ -16366,11 +16416,13 @@ impl Shell {
     ///
     /// A declaration is not an assignment, so `declare -a q` leaves the name
     /// unset and shapeless (bash calls it invisible) while the empty `q=()`
-    /// gives it a shape. [`Shell::array_valued`] is exactly that distinction
-    /// for a name the script assigned; the shell's *own* arrays (`FUNCNAME`,
-    /// `BASH_VERSINFO`, `PIPESTATUS`, …) are materialised into the tables
-    /// without going through an assignment, so they are recognised by having a
-    /// table entry that no bare declaration accounts for.
+    /// gives it a shape. That is [`Shell::array_is_visible`]'s question, and
+    /// *not* a question about the tables: a bare `declare -a q` makes an empty
+    /// entry in [`Shell::arrays`] for later writes to land in — it just does not
+    /// make it [`Shell::array_valued`]. (An earlier version of this asked
+    /// whether the name was in [`Shell::declared`] instead, which an array
+    /// declaration never sets, so `set -u; declare -a q; echo ${#q[0]}` wrongly
+    /// answered 0 where bash reports `q: unbound variable`.)
     fn array_shape_exists(&self, name: &str) -> bool {
         // `BASH_ARGC`/`BASH_ARGV` are arrays in bash from startup on, whereas
         // osh materialises them only from a live `extdebug` frame (a deliberate
@@ -16380,9 +16432,18 @@ impl Shell {
         if matches!(name, "BASH_ARGC" | "BASH_ARGV") {
             return true;
         }
-        self.array_valued.contains(name)
-            || ((self.arrays.contains_key(name) || self.assoc.contains_key(name))
-                && !self.declared.contains(name))
+        // The call-stack arrays have no table entry until a frame fills them,
+        // and bash's two of them do not agree about being invisible while
+        // empty: it *assigns* `BASH_SOURCE` and `BASH_LINENO` an empty array at
+        // startup but creates `FUNCNAME` without assigning it, which is the
+        // same distinction [`DynListing::EmptyArray`] and
+        // [`DynListing::BareArray`] draw for `declare -p`. So at a script's top
+        // level `set -u; echo ${#BASH_SOURCE[@]}` is 0 while
+        // `set -u; echo ${#FUNCNAME[@]}` is `FUNCNAME: unbound variable`.
+        self.array_is_visible(name)
+            || self
+                .dynamic_special_listed(name)
+                .is_some_and(|d| d.listed == DynListing::EmptyArray)
     }
 
     fn expand_array_ref(&mut self, name: &str, index: &ArrayIndex, length: bool) -> Str {
@@ -16405,17 +16466,44 @@ impl Shell {
             // `${a[@]}` is empty, `${#a[@]}` is 0.
             return if length { b"0".to_vec() } else { Str::new() };
         };
-        // A subscripted *length* asks about the variable's shape, and under
-        // `set -u` bash faults when there is no shape to ask about: `${#x[0]}`
-        // on a scalar, on a name only declared (`declare -a q`, `export E`), or
-        // on nothing at all reports the base name alone — the subscript is
-        // neither evaluated nor quoted, and the answer comes before any
-        // complaint the subscript would have earned. An array that exists but
-        // is empty (`x=()`, or one whose last element was `unset`) has a shape,
-        // so what counts is the table entry rather than the element.
-        if length && self.unbound_is_error(written) && !self.array_shape_exists(name) {
-            self.raise_unbound(written.as_bytes());
-            return b"0".to_vec();
+        // A subscripted *length* does not go through the ordinary read at all:
+        // bash answers it out of `array_length_reference` (`subst.c:7213`),
+        // which opens with two rules of its own —
+        //
+        // ```c
+        // if ((var == 0 || invisible_p (var) ||
+        //      (assoc_p (var) == 0 && array_p (var) == 0)) && unbound_vars_is_error)
+        //   { set_exit_status (EXECUTION_FAILURE); err_unboundvar (s); return (-1); }
+        // else if (var == 0 || invisible_p (var))
+        //   return 0;
+        // ```
+        //
+        // First: under `set -u`, anything with no array shape to ask about
+        // faults — a name only declared (`declare -a q`, `export E`), a name
+        // that does not exist, *and* a perfectly good scalar, which the
+        // ordinary read would have answered happily (`set -u; s=hi;
+        // ${#s[0]}` reports `s`). The complaint names the base alone; the
+        // subscript is neither evaluated nor quoted, so it comes out ahead of
+        // any complaint the subscript would have earned itself.
+        //
+        // Second, and *whether or not* `set -u` is on: when there is no
+        // visible variable the answer is 0 and the subscript is still never
+        // evaluated. `declare -a q; echo ${#q[0+]}` prints `0`, where the
+        // visible `q=(); echo ${#q[0+]}` reports the arithmetic syntax error.
+        // Only the invisible names short-circuit — a visible scalar falls
+        // through and evaluates its subscript like any other.
+        //
+        // An array that exists but is empty (`x=()`, or one whose last element
+        // was `unset`) has a shape and is visible, so what counts is the table
+        // entry rather than the element.
+        if length && !self.array_shape_exists(name) {
+            if self.unbound_is_error(written) {
+                self.raise_unbound_length(written.as_bytes());
+                return b"0".to_vec();
+            }
+            if !self.var_binding_is_visible(name) {
+                return b"0".to_vec();
+            }
         }
         match index {
             ArrayIndex::All | ArrayIndex::Star => {
@@ -16500,8 +16588,9 @@ impl Shell {
                             // included and *unevaluated*: `${x[1+1]}` reports
                             // `x[1+1]`, `${x[n]}` reports `x[n]`, and
                             // `${m[$(echo k)]}` reports the substitution itself.
-                            // A subscript already reported as bad says both
-                            // things, in that order.
+                            // A subscript already reported as bad stops the
+                            // word there and never reaches this test; see
+                            // [`Shell::raise_unbound`].
                             if self.unbound_is_error(written) {
                                 let shown =
                                     bfmt![written, b"[", crate::unparse::word_src(w), b"]"];
@@ -24561,6 +24650,13 @@ impl Shell {
             ParamOp::AssignDefault => {
                 if is_active {
                     SplitItems::List(vec![cur.unwrap_or_default()])
+                } else if self.expansion_failed() {
+                    // The parameter reads as unset only because reaching it
+                    // already faulted, so the operator does not apply and — as
+                    // importantly — the subscript is not evaluated a second
+                    // time to be assigned through. `${nope[0+]:=d}` says `0+`
+                    // once, as bash does. See [`Shell::raise_unbound`].
+                    SplitItems::List(Vec::new())
                 } else {
                     // A parameter the shell answers for itself has nowhere to
                     // put a default, and bash refuses before the word is even
@@ -24631,6 +24727,14 @@ impl Shell {
             ParamOp::ErrorIfUnset => {
                 if is_active {
                     SplitItems::List(vec![cur.unwrap_or_default()])
+                } else if self.expansion_failed() {
+                    // The parameter reads as unset only because reaching it
+                    // already faulted — a bad subscript, most often. bash
+                    // abandons the word at that first fault and never applies
+                    // the operator, so `${nope[0+]:?boom}` says `0+` and
+                    // nothing else. See [`Shell::raise_unbound`], which turns
+                    // the same corner for the nounset test.
+                    SplitItems::List(Vec::new())
                 } else {
                     let msg = self.expand_to_string(arg);
                     // bash's default diagnostic distinguishes the two forms: the
@@ -24933,10 +25037,55 @@ impl Shell {
     /// positionals indirects through nothing and so reports `!@` even though
     /// `$@` itself is never unset.
     fn raise_unbound(&mut self, shown: BStr<'_>) {
+        // A word that has already faulted is abandoned where it stood, so the
+        // nounset test is never reached for what came after — see
+        // [`Shell::expansion_failed`]. A bad subscript is the case that shows
+        // it: bash's `${nope[0+]}` under `set -u` complains about `0+` and
+        // stops there, leaving the abort at the subscript's own status of 1
+        // rather than adding an `unbound variable` for the array it never got
+        // round to reading, and `${nope[n]}` with `n` unset likewise reports
+        // only `n`. (Measured; a previous comment here claimed both were said,
+        // which no bash version does.)
+        if self.expansion_failed() {
+            return;
+        }
         // bash aborts a non-interactive shell with status 127 on a nounset
         // unset-variable reference.
         self.arm_unbound_abort();
         self.perrln(&bfmt![shown, b": unbound variable"]);
+    }
+
+    /// The nounset complaint a *subscripted length* makes: the same words as
+    /// [`Shell::raise_unbound`], but a milder abort.
+    ///
+    /// `array_length_reference` (`subst.c:7213`) reports it and answers `-1`,
+    /// and its caller turns that into `expand_wdesc_error` rather than
+    /// `expand_wdesc_fatal` (`subst.c:9701`):
+    ///
+    /// ```c
+    /// *indexp = sindex;
+    /// if (number < 0)
+    ///   return (&expand_wdesc_error);
+    /// ```
+    ///
+    /// `expand_wdesc_error` ends in `jump_to_top_level (DISCARD)`, which
+    /// `run_one_command` answers with `return last_command_exit_value = 1`
+    /// (`shell.c:1467`), where the `FORCE_EOF` an ordinary unset reference
+    /// raises is answered with 127 two lines above. Both abort the whole `-c`
+    /// input; only the status differs:
+    ///
+    /// ```sh
+    /// bash -c 'set -u; echo "${#nope}";    echo after'   # 127, no `after`
+    /// bash -c 'set -u; echo "${#nope[0]}"; echo after'   #   1, no `after`
+    /// ```
+    fn raise_unbound_length(&mut self, shown: BStr<'_>) {
+        // As in [`Shell::raise_unbound`]: a word that has already faulted is
+        // abandoned where it stood and says nothing more.
+        if self.expansion_failed() {
+            return;
+        }
+        self.perrln(&bfmt![shown, b": unbound variable"]);
+        self.arm_discard(1);
     }
 
     /// Whether a reference to unset `name` is an error at all. Checking this

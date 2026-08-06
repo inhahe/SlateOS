@@ -1324,13 +1324,26 @@ impl ClosedStd {
 /// in one place.
 static SPAWN_STD_HANDLES: RwLock<()> = RwLock::new(());
 
+/// Hold the shared side of [`SPAWN_STD_HANDLES`] across a use of the shell's
+/// *own* fd 1 or fd 2.
+///
+/// The write side needs this where the read side did not. `io::stdout()` on
+/// Windows re-reads `STD_OUTPUT_HANDLE` for every write and answers a nulled
+/// slot with `BrokenPipe`, so a thread writing to the ambient stdout during
+/// another thread's closing spawn would lose its output — and unlike fd 0,
+/// which a `&` job never has, fd 1 is exactly what a `&` job inherits, so
+/// `{ echo one & }; cmd >&-` really can put the two at the same moment.
+fn std_handles_shared() -> std::sync::RwLockReadGuard<'static, ()> {
+    SPAWN_STD_HANDLES
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Start `pc`, giving the child closed standard descriptors where `closed`
 /// asks for them.
 fn spawn_with_closed_std(pc: &mut PCommand, closed: ClosedStd) -> std::io::Result<Child> {
     if !closed.any() {
-        let _shared = SPAWN_STD_HANDLES
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _shared = std_handles_shared();
         return pc.spawn();
     }
     // The Windows mechanism works *through* inheritance, so the descriptors
@@ -1385,12 +1398,14 @@ unsafe extern "system" {
 /// `( exec 0<&-; cat )` both print `cat: failed to set file descriptor
 /// text/binary mode: Bad file descriptor` and exit 1.
 ///
-/// The window is the spawn call, and the shell's *own* reads through the slot
-/// are not in it: a thread can only read the ambient fd 0 when its stdin is
-/// inherited, and a thread can only reach here having redirected fd 0 away, so
-/// the two are never the same thread — and no two concurrent threads inherit
+/// The window is the spawn call. For fd 0 the shell's *own* reads are outside
+/// it by construction: a thread can only read the ambient fd 0 when its stdin
+/// is inherited, and a thread can only reach here having redirected fd 0 away,
+/// so the two are never the same thread — and no two concurrent threads inherit
 /// fd 0 together, since a pipeline gives it to the head stage alone and a `&`
-/// job gets an empty stream instead of it.
+/// job gets an empty stream instead of it. For fd 1 and fd 2 that argument does
+/// not hold — a `&` job inherits both — so the shell's own uses of them take
+/// [`std_handles_shared`] and wait the window out instead.
 #[cfg(windows)]
 struct NulledStdHandles {
     /// The slots emptied, with what was in them.
@@ -19243,18 +19258,14 @@ impl Shell {
         }
 
         // stdout
-        if redir.stdout_closed {
-            // `cmd >&-`: bash hands the child a closed fd 1 and lets the child's
-            // own write fail. `Stdio` has no closed form and a forged one is not
-            // portable, so the shell refuses the redirect instead — same status
-            // (1) and same stream, different wording. Same trade as
-            // [`child_out_from_write_fd`]'s; see TD-OILS-FD0-WRITE.
-            self.perrln("1: Bad file descriptor");
-            self.last_status = 1;
-            return;
-        }
-        let capturing =
-            matches!(out, Out::Capture(_)) && redir.stdout.is_none() && redir.stdout_to_fd.is_none();
+        //
+        // A closed fd 1 captures nothing: `x=$(cmd >&-)` is an empty capture
+        // whatever the command writes, so the pipe-and-drain the enclosing
+        // [`Out::Capture`] would otherwise ask for is not set up at all.
+        let capturing = !redir.stdout_closed
+            && matches!(out, Out::Capture(_))
+            && redir.stdout.is_none()
+            && redir.stdout_to_fd.is_none();
         // For dup forms like `>f 2>&1` / `&>f` the resolver rewrites fd 2 to the
         // same file path as fd 1, but stdout and stderr must share ONE open file
         // description (interleaved, one offset) rather than two independent
@@ -19266,168 +19277,176 @@ impl Shell {
         // holds — `r=$( exec 3>&1; cat f >&3 >/dev/null )` writes to the capture
         // through fd 3 while fd 1 goes elsewhere).
         let mut stdout_capture_fd: Option<CaptureSink> = None;
-        match &redir.stdout {
-            Some((path, append)) => match open_std_sink(
-                &self.cwd,
-                redir.stdout_write.as_ref(),
-                path,
-                *append,
-            ) {
-                Ok(f) => {
-                    if redir.stderr_shares_stdout
-                        && redir.stderr.as_ref().is_some_and(|(sp, _)| sp == path)
-                        && let Ok(c) = f.try_clone()
-                    {
-                        stdout_file_for_stderr = Some(c);
-                    }
-                    cmd.stdout(Stdio::from(f));
-                }
-                Err(e) => {
-                    let line = bfmt![self.err_prefix(), path, b": ", io_error_message(&e)];
-                    self.berrln(&line);
-                    self.last_status = 1;
-                    return;
-                }
-            },
-            None if redir.stdout_to_fd.is_some() => {
-                // `cmd >&N` (N ≥ 3): the child's fd 1 is a user-space write
-                // descriptor opened by `exec N> file` — or, when N was dup'd from
-                // a command substitution's fd 1, that substitution's capture,
-                // which has no OS handle to give the child and so is piped and
-                // drained after the spawn like any other captured stream.
-                let n = redir.stdout_to_fd.unwrap_or(0);
-                match self.write_fd_for(n, redir) {
-                    Some(WriteFd::Capture(sink)) => {
-                        cmd.stdout(Stdio::piped());
-                        stdout_capture_fd = Some(sink.clone());
-                    }
-                    Some(WriteFd::File(f)) => match f.try_clone() {
-                        Ok(f) => {
-                            cmd.stdout(Stdio::from(f));
+        // `cmd >&-` (and a persistent `exec 1>&-` reached below): the child is
+        // to be handed no fd 1 at all, not a substitute for one. `ClosedStd`
+        // carries that to the spawn, which nulls the descriptor across it — so
+        // nothing here needs to resolve a destination, and the child's own
+        // write is what fails, as bash's forked child's does.
+        if redir.stdout_closed {
+            closed.stdout = true;
+        } else {
+            match &redir.stdout {
+                Some((path, append)) => match open_std_sink(
+                    &self.cwd,
+                    redir.stdout_write.as_ref(),
+                    path,
+                    *append,
+                ) {
+                    Ok(f) => {
+                        if redir.stderr_shares_stdout
+                            && redir.stderr.as_ref().is_some_and(|(sp, _)| sp == path)
+                            && let Ok(c) = f.try_clone()
+                        {
+                            stdout_file_for_stderr = Some(c);
                         }
-                        Err(_) => {
+                        cmd.stdout(Stdio::from(f));
+                    }
+                    Err(e) => {
+                        let line = bfmt![self.err_prefix(), path, b": ", io_error_message(&e)];
+                        self.berrln(&line);
+                        self.last_status = 1;
+                        return;
+                    }
+                },
+                None if redir.stdout_to_fd.is_some() => {
+                    // `cmd >&N` (N ≥ 3): the child's fd 1 is a user-space write
+                    // descriptor opened by `exec N> file` — or, when N was dup'd from
+                    // a command substitution's fd 1, that substitution's capture,
+                    // which has no OS handle to give the child and so is piped and
+                    // drained after the spawn like any other captured stream.
+                    let n = redir.stdout_to_fd.unwrap_or(0);
+                    match self.write_fd_for(n, redir) {
+                        Some(WriteFd::Capture(sink)) => {
+                            cmd.stdout(Stdio::piped());
+                            stdout_capture_fd = Some(sink.clone());
+                        }
+                        Some(WriteFd::File(f)) => match f.try_clone() {
+                            Ok(f) => {
+                                cmd.stdout(Stdio::from(f));
+                            }
+                            Err(_) => {
+                                self.perrln(&format!("{n}: Bad file descriptor"));
+                                self.last_status = 1;
+                                return;
+                            }
+                        },
+                        // fd 0 under a plain `< file` is open for reading only.
+                        // bash hands the child that description and lets the child's
+                        // own write fail; we cannot forge such a descriptor on every
+                        // host, so the shell refuses the redirect — same status and
+                        // stream, different wording (TD-OILS-FD0-WRITE).
+                        Some(WriteFd::ReadOnly | WriteFd::Closed) | None => {
                             self.perrln(&format!("{n}: Bad file descriptor"));
                             self.last_status = 1;
                             return;
                         }
-                    },
-                    // fd 0 under a plain `< file` is open for reading only.
-                    // bash hands the child that description and lets the child's
-                    // own write fail; we cannot forge such a descriptor on every
-                    // host, so the shell refuses the redirect — same status and
-                    // stream, different wording (TD-OILS-FD0-WRITE).
-                    Some(WriteFd::ReadOnly | WriteFd::Closed) | None => {
-                        self.perrln(&format!("{n}: Bad file descriptor"));
-                        self.last_status = 1;
-                        return;
                     }
                 }
-            }
-            None => {
-                if redir.stdout_to_stderr {
-                    // `1>&2` and fd 2 is not a file: send fd 1 to the current
-                    // stderr sink (an enclosing compound `2>` redirect, or the
-                    // shell's real stderr).
-                    match self.child_stdio_for_stderr() {
-                        Ok(ChildOut::Handle(s)) => {
-                            cmd.stdout(s);
-                        }
-                        Ok(ChildOut::Sink(sink)) => {
-                            cmd.stdout(Stdio::piped());
-                            stdout_capture_fd = Some(sink);
-                        }
-                        Err(e) => {
-                            self.perrln(&e.to_string());
-                            self.last_status = 1;
-                            return;
-                        }
-                    }
-                } else if let Some(w) = self.exec_stdout_shadowing(out) {
-                    // A runtime `exec > file` inside a capture/pipe binding
-                    // rebound fd 1 out from under it.
-                    match w {
-                        // `exec 1>&0` onto a read-only fd 0: see the `>&N` case
-                        // above — the child gets no descriptor it could write to.
-                        WriteFd::ReadOnly => {
-                            self.perrln("0: Bad file descriptor");
-                            self.last_status = 1;
-                            return;
-                        }
-                        // `exec 1>&-`: likewise, and named after fd 1 itself.
-                        WriteFd::Closed => {
-                            self.perrln("1: Bad file descriptor");
-                            self.last_status = 1;
-                            return;
-                        }
-                        WriteFd::Capture(sink) => {
-                            // `exec 1>&N` where fd N was dup'd from an *outer*
-                            // capture: no OS handle, so pipe and drain.
-                            let sink = sink.clone();
-                            cmd.stdout(Stdio::piped());
-                            stdout_capture_fd = Some(sink);
-                        }
-                        WriteFd::File(f) => match f.try_clone() {
-                            Ok(fc) => {
-                                cmd.stdout(Stdio::from(fc));
+                None => {
+                    if redir.stdout_to_stderr {
+                        // `1>&2` and fd 2 is not a file: send fd 1 to the current
+                        // stderr sink (an enclosing compound `2>` redirect, or the
+                        // shell's real stderr).
+                        match self.child_stdio_for_stderr() {
+                            Ok(ChildOut::Handle(s)) => {
+                                cmd.stdout(s);
+                            }
+                            Ok(ChildOut::Sink(sink)) => {
+                                cmd.stdout(Stdio::piped());
+                                stdout_capture_fd = Some(sink);
                             }
                             Err(e) => {
-                                self.perrln(&format!("exec stdout: {e}"));
+                                self.perrln(&e.to_string());
                                 self.last_status = 1;
                                 return;
                             }
-                        },
-                    }
-                } else if capturing {
-                    cmd.stdout(Stdio::piped());
-                } else if let Out::Pipe(w) = out {
-                    // Stream the child's stdout straight into the downstream pipe
-                    // (a clone; the parent stage keeps its own writer, which is
-                    // fine — `SIGPIPE`/EOF key on the read end, not extra writers).
-                    match w.try_clone() {
-                        Ok(wp) => {
-                            cmd.stdout(Stdio::from(wp));
                         }
-                        Err(e) => {
-                            self.perrln(&format!("pipe: {e}"));
-                            self.last_status = 1;
-                            return;
-                        }
-                    }
-                } else if let Some(w) = &self.exec_stdout {
-                    // Persistent `exec > file`: the child's fd 1 is the file (a
-                    // dup of the shared handle, so it writes at the live offset).
-                    match w {
-                        WriteFd::ReadOnly => {
-                            self.perrln("0: Bad file descriptor");
-                            self.last_status = 1;
-                            return;
-                        }
-                        // A persistent `exec 1>&-`: the child has no fd 1 to be
-                        // given, so the shell refuses rather than let it inherit
-                        // the terminal.
-                        WriteFd::Closed => {
-                            self.perrln("1: Bad file descriptor");
-                            self.last_status = 1;
-                            return;
-                        }
-                        WriteFd::Capture(sink) => {
-                            let sink = sink.clone();
-                            cmd.stdout(Stdio::piped());
-                            stdout_capture_fd = Some(sink);
-                        }
-                        WriteFd::File(f) => match f.try_clone() {
-                            Ok(fc) => {
-                                cmd.stdout(Stdio::from(fc));
-                            }
-                            Err(e) => {
-                                self.perrln(&format!("exec stdout: {e}"));
+                    } else if let Some(w) = self.exec_stdout_shadowing(out) {
+                        // A runtime `exec > file` inside a capture/pipe binding
+                        // rebound fd 1 out from under it.
+                        match w {
+                            // `exec 1>&0` onto a read-only fd 0: see the `>&N` case
+                            // above — the child gets no descriptor it could write to.
+                            WriteFd::ReadOnly => {
+                                self.perrln("0: Bad file descriptor");
                                 self.last_status = 1;
                                 return;
                             }
-                        },
+                            // `exec 1>&-`: the descriptor is not there to be
+                            // given, so the child is handed the absence itself
+                            // rather than the terminal it would otherwise
+                            // inherit — as for `redir.stdout_closed` above.
+                            WriteFd::Closed => {
+                                closed.stdout = true;
+                            }
+                            WriteFd::Capture(sink) => {
+                                // `exec 1>&N` where fd N was dup'd from an *outer*
+                                // capture: no OS handle, so pipe and drain.
+                                let sink = sink.clone();
+                                cmd.stdout(Stdio::piped());
+                                stdout_capture_fd = Some(sink);
+                            }
+                            WriteFd::File(f) => match f.try_clone() {
+                                Ok(fc) => {
+                                    cmd.stdout(Stdio::from(fc));
+                                }
+                                Err(e) => {
+                                    self.perrln(&format!("exec stdout: {e}"));
+                                    self.last_status = 1;
+                                    return;
+                                }
+                            },
+                        }
+                    } else if capturing {
+                        cmd.stdout(Stdio::piped());
+                    } else if let Out::Pipe(w) = out {
+                        // Stream the child's stdout straight into the downstream pipe
+                        // (a clone; the parent stage keeps its own writer, which is
+                        // fine — `SIGPIPE`/EOF key on the read end, not extra writers).
+                        match w.try_clone() {
+                            Ok(wp) => {
+                                cmd.stdout(Stdio::from(wp));
+                            }
+                            Err(e) => {
+                                self.perrln(&format!("pipe: {e}"));
+                                self.last_status = 1;
+                                return;
+                            }
+                        }
+                    } else if let Some(w) = &self.exec_stdout {
+                        // Persistent `exec > file`: the child's fd 1 is the file (a
+                        // dup of the shared handle, so it writes at the live offset).
+                        match w {
+                            WriteFd::ReadOnly => {
+                                self.perrln("0: Bad file descriptor");
+                                self.last_status = 1;
+                                return;
+                            }
+                            // A persistent `exec 1>&-`: the child has no fd 1 to
+                            // be given, and the absence is what it is given —
+                            // inheriting the terminal would be its opposite.
+                            WriteFd::Closed => {
+                                closed.stdout = true;
+                            }
+                            WriteFd::Capture(sink) => {
+                                let sink = sink.clone();
+                                cmd.stdout(Stdio::piped());
+                                stdout_capture_fd = Some(sink);
+                            }
+                            WriteFd::File(f) => match f.try_clone() {
+                                Ok(fc) => {
+                                    cmd.stdout(Stdio::from(fc));
+                                }
+                                Err(e) => {
+                                    self.perrln(&format!("exec stdout: {e}"));
+                                    self.last_status = 1;
+                                    return;
+                                }
+                            },
+                        }
+                    } else {
+                        cmd.stdout(Stdio::inherit());
                     }
-                } else {
-                    cmd.stdout(Stdio::inherit());
                 }
             }
         }
@@ -44271,6 +44290,7 @@ impl Shell {
                     let r = if let Some(w) = self.exec_stdout.clone() {
                         write_to_write_fd(&w, bytes)
                     } else {
+                        let _shared = std_handles_shared();
                         let stdout = io::stdout();
                         let mut lock = stdout.lock();
                         // The flush is part of the write: `io::stdout()` is line
@@ -44504,6 +44524,7 @@ impl Shell {
                     let _ = write_to_write_fd(w, bytes);
                 }
                 None => {
+                    let _shared = std_handles_shared();
                     let o = io::stdout();
                     let mut lock = o.lock();
                     let _ = lock.write_all(bytes);
@@ -44592,6 +44613,7 @@ impl Shell {
                     // dropped — as bash drops a failed write to fd 2.
                     let _ = write_to_write_fd(w, bytes);
                 } else {
+                    let _shared = std_handles_shared();
                     let e = io::stderr();
                     let mut lock = e.lock();
                     let _ = lock.write_all(bytes);
@@ -44971,6 +44993,7 @@ impl Shell {
                         let _ = write_to_write_fd(w, &bytes);
                         return;
                     }
+                    let _shared = std_handles_shared();
                     let o = io::stdout();
                     let mut lock = o.lock();
                     let _ = lock.write_all(&bytes);
@@ -51459,6 +51482,7 @@ fn varfd_close_target(value: BStr<'_>) -> Option<i32> {
 #[cfg(unix)]
 fn dup_std_handle(is_stdout: bool) -> io::Result<std::fs::File> {
     use std::os::fd::AsFd;
+    let _shared = std_handles_shared();
     let owned = if is_stdout {
         io::stdout().as_fd().try_clone_to_owned()?
     } else {
@@ -51472,6 +51496,9 @@ fn dup_std_handle(is_stdout: bool) -> io::Result<std::fs::File> {
 #[cfg(windows)]
 fn dup_std_handle(is_stdout: bool) -> io::Result<std::fs::File> {
     use std::os::windows::io::AsHandle;
+    // The slot must hold the shell's real handle while it is read: a closing
+    // spawn empties it, and duplicating nothing would fail the redirect.
+    let _shared = std_handles_shared();
     let owned = if is_stdout {
         io::stdout().as_handle().try_clone_to_owned()?
     } else {
@@ -64907,28 +64934,29 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     /// the failing spawn as well, where the restore rides on `Drop` alone.
     #[cfg(windows)]
     #[test]
-    fn a_closing_spawn_gives_the_shells_own_standard_handle_back() {
-        let [stdin_slot, ..] = STD_HANDLE_SLOTS;
-        // SAFETY: a read of a constant slot number; nothing is dereferenced.
-        let before = unsafe { GetStdHandle(stdin_slot) };
+    fn a_closing_spawn_gives_the_shells_own_standard_handles_back() {
+        // SAFETY: reads of constant slot numbers; nothing is dereferenced.
+        let before = STD_HANDLE_SLOTS.map(|slot| unsafe { GetStdHandle(slot) });
+        // All three at once: the write side borrows the stdout and stderr slots
+        // the same way the read side borrows stdin's.
+        let all = ClosedStd { stdin: true, stdout: true, stderr: true };
 
         // A spawn that succeeds. `cmd` is on every Windows host's `PATH`, and
         // `/c exit 0` neither reads nor writes anything.
         let mut pc = PCommand::new("cmd");
         pc.args(["/c", "exit", "0"]);
-        pc.stdout(Stdio::null()).stderr(Stdio::null());
-        let mut child = spawn_with_closed_std(&mut pc, ClosedStd::STDIN)
-            .expect("cmd must be spawnable on a Windows host");
+        let mut child =
+            spawn_with_closed_std(&mut pc, all).expect("cmd must be spawnable on a Windows host");
         // SAFETY: as above.
-        assert_eq!(unsafe { GetStdHandle(stdin_slot) }, before);
+        assert_eq!(STD_HANDLE_SLOTS.map(|slot| unsafe { GetStdHandle(slot) }), before);
         let _ = child.wait();
 
-        // …and one that does not: the slot is put back by the guard's `Drop`
+        // …and one that does not: the slots are put back by the guard's `Drop`
         // rather than by anything on the success path.
         let mut pc = PCommand::new("./no-such-program-zq");
-        assert!(spawn_with_closed_std(&mut pc, ClosedStd::STDIN).is_err());
+        assert!(spawn_with_closed_std(&mut pc, all).is_err());
         // SAFETY: as above.
-        assert_eq!(unsafe { GetStdHandle(stdin_slot) }, before);
+        assert_eq!(STD_HANDLE_SLOTS.map(|slot| unsafe { GetStdHandle(slot) }), before);
     }
 
     #[test]

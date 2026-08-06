@@ -796,7 +796,7 @@ r1                       # the pipeline read the script's own stdin
 `a_pipeline_head_stage_reads_the_ambient_fd_zero` and
 `an_exec_inside_a_redirected_group_rebinds_fd_zero_for_the_rest_of_it`.
 
-### TD-OILS-AN-EXTERNAL-CHILD-CANNOT-BE-GIVEN-A-CLOSED-FD-0 — 2026-08-06 — ✅ FIXED 2026-08-06
+### TD-OILS-AN-EXTERNAL-CHILD-CANNOT-BE-GIVEN-A-CLOSED-FD-0 — 2026-08-06 — ✅ FIXED 2026-08-06 (fd 0 and fd 1; fd 2 still open, see the end)
 
 **Where:** `userspace/oils/src/interp.rs` — `child_input` / `ChildIn::Closed`,
 and `HeadIn::Closed`, both of which fall back to `Stdio::null()`.
@@ -879,12 +879,46 @@ fd 0 still working after a closing spawn. Plus
 `a_closing_spawn_gives_the_shells_own_standard_handle_back`, which pins the
 restore on both the succeeding and the failing spawn.
 
-**The write side is still open.** `child_out_from_write_fd` refuses the redirect
-for `WriteFd::Closed`/`ReadOnly` rather than letting the child's own write fail
-— see TD-OILS-TRANSIENT-CLOSE-OF-A-STD-FD-IS-A-NO-OP's two knowingly-left
-divergences. `ClosedStd` already carries `stdout`/`stderr` for it and the
-mechanism is the same; it is a separate change because it also has to unpick the
-refusal path, which reports through a different channel.
+**fd 1 followed the same day**, as the second use of `ClosedStd`. The shell used
+to refuse `cmd >&-` outright (`1: Bad file descriptor`, status 1) rather than let
+the child's write fail; it now sets `closed.stdout` and resolves no destination
+at all, and the child says what bash's child says:
+
+```text
+$ cat in >&-      # both shells
+cat: standard output: Bad file descriptor      → 1
+```
+
+Three sites feed it: `RedirPlan::stdout_closed` (`cmd >&-`), a scoped
+`exec 1>&-` seen through `exec_stdout_shadowing`, and a persistent one seen
+through `exec_stdout`. `capturing` is switched off alongside, because a closed
+fd 1 collects nothing — `x=$(cmd >&-)` is an empty capture whatever the command
+writes, and setting up the pipe-and-drain would be arranging a destination for
+a descriptor that is not there.
+
+That half needed one thing the read side did not: the shell's *own* fd 1 and
+fd 2 have to wait the window out. `io::stdout()` on Windows re-reads
+`STD_OUTPUT_HANDLE` for every write and answers a nulled slot with `BrokenPipe`,
+and unlike fd 0 — which a `&` job never has — fd 1 is exactly what a `&` job
+inherits, so `{ echo one & }; cmd >&-` really can put a write and a closing
+spawn at the same moment. The four ambient write sites and `dup_std_handle` now
+take `std_handles_shared()`, the read side of the same `RwLock`; a closing spawn
+is rare and short, so nothing waits in practice.
+
+Verified by the last section of `tests/corpus/redirect-close-of-stdout.sh`:
+per-command and persistent closes, both spellings, the reopen orderings, a
+pipeline *tail* stage with no fd 1, `sleep` (which never writes and is
+untroubled) beside `cat /dev/null` (which is not, because it closes fd 1 at
+exit), an empty capture, and the shell's own fd 1 still working afterwards.
+
+**fd 2 is what is left.** `RedirPlan::stderr_closed` hands the child
+`Stdio::null()`, which drops the diagnostics as bash does but leaves the child's
+write *succeeding*: `sh -c 'echo E >&2' 2>&-` exits 1 in bash and 0 here.
+Closing it properly needs `StderrTarget` to tell a closed fd 2 from a read-only
+one — today both are `StderrTarget::Discard`, deliberately, because dropping was
+the whole answer while children got `null()` — and `ChildOut` to carry the
+closure through `child_stdio_for_stderr`, which is also `1>&2`'s path. That is a
+wider change than fd 1's and is why it is not in the same commit.
 
 ### TD-OILS-A-DUP-TARGET-OF-DOUBLE-DASH-IS-NOT-SPLIT-INTO-A-CLOSE-AND-AN-ARGUMENT. `>&--` is taken as one word — 2026-08-06 — ✅ FIXED 2026-08-06
 
@@ -36615,13 +36649,14 @@ transient side carries it as `RedirPlan::stdout_closed`, the persistent side as
 a descriptor to dup *from*: `exec 1>&-; exec 3>&1` reports `1: Bad file
 descriptor` at the `exec`.
 
-Two divergences are knowingly left in the fd 1 case:
+Two divergences were knowingly left in the fd 1 case:
 
-* **External children.** bash hands the child the closed descriptor and lets the
+* **External children.** bash handed the child the closed descriptor and let the
   *child's* write fail (`cmd: write error: …`); `Stdio` has no closed form and a
-  forged one is not portable, so the shell refuses the redirect instead —
+  forged one looked unportable, so the shell refused the redirect instead —
   `1: Bad file descriptor`, same status (1) and same stream, different wording.
-  The same trade `TD-OILS-FD0-WRITE` already makes.
+  **Closed 2026-08-06** by `ClosedStd`, the same mechanism that closed the read
+  side; see TD-OILS-AN-EXTERNAL-CHILD-CANNOT-BE-GIVEN-A-CLOSED-FD-0.
 * **A dup *from* fd 1 later in the list that closed it** — `{ echo Z; } >&- 3>&1`,
   `$( { echo E; } >&- 2>&1 )`. bash fails both with `1: Bad file descriptor`, osh
   succeeds: `install_extra_fds` (and the `2>&1` resolution) run before the scoped
@@ -36703,9 +36738,8 @@ got `Stdio::null()` (`ChildIn::Closed`), so it saw an empty stdin rather than
 descriptor. **Closed 2026-08-06** — `ClosedStd` hands the child the missing
 descriptor after all, without the raw `CreateProcess` that looked necessary;
 see TD-OILS-AN-EXTERNAL-CHILD-CANNOT-BE-GIVEN-A-CLOSED-FD-0. The equivalent on
-the *write* side (an external `cmd >&-`, where osh refuses the redirect rather
-than letting the child's write fail) is still open and is the next use of the
-same mechanism.
+the *write* side (an external `cmd >&-`) was closed by the same mechanism on the
+same day; fd 2 is the remaining one, and is tracked in that entry.
 
 Covered by `tests/corpus/redirect-close-of-stdin.sh` plus four unit tests.
 

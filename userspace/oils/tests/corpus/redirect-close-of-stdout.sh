@@ -22,12 +22,17 @@
 # `1<&-` closes fd 1 exactly as `1>&-` does, because which side of the `&` the
 # `-` is written on says nothing about which descriptor is meant.
 #
+# An *external* `cmd >&-` is the last section: there the shell has nothing to
+# report, because the failure is the child's own. bash forks and leaves the
+# child without an fd 1; osh spawns and arranges the same absence, so the two
+# children fail alike — `cat: standard output: Bad file descriptor`, status 1 —
+# and a child that never writes is untroubled by it.
+#
 # Deliberately absent: a dup *from* fd 1 later in the same list that closed it
-# (`>&- 3>&1`, `>&- 2>&1` — bash fails these with `1: Bad file descriptor`) and
-# an external `cmd >&-`, both of which osh knowingly answers differently. Which
-# is why the capture below writes `2>&1 >&-` rather than `>&- 2>&1`: fd 2 must
-# be given fd 1 while fd 1 is still there. See
-# TD-OILS-TRANSIENT-CLOSE-OF-A-STD-FD-IS-A-NO-OP.
+# (`>&- 3>&1`, `>&- 2>&1` — bash fails these with `1: Bad file descriptor`),
+# which osh knowingly answers differently. Which is why the capture below writes
+# `2>&1 >&-` rather than `>&- 2>&1`: fd 2 must be given fd 1 while fd 1 is still
+# there. See TD-OILS-TRANSIENT-CLOSE-OF-A-STD-FD-IS-A-NO-OP.
 #
 # Every persistent probe runs in a subshell so the close cannot reach the next
 # one. Stderr is collected and replayed at the end so it can be compared in a
@@ -71,3 +76,38 @@ echo "=== a pipeline stage whose stdout is closed"
 exec 2>&4 4>&-
 echo "=== what went to stderr"
 cat err
+
+# The child's own diagnostic names the command as it was started, and on this
+# host that is the resolved path rather than the word (TD-OILS-HOST-ARGV0, a
+# `std::process` limitation, not a target one), so the leading directories are
+# filtered off. Everything goes down one pipe so write order is one order.
+printf 'x\n' > in
+{
+  echo "=== an external child is given the closed descriptor, not an empty one"
+  ( cat in >&-;  echo "  cmd rc=$?" )
+  ( cat in 1>&-; echo "  1>&- rc=$?" )
+  ( cat in 1<&-; echo "  1<&- rc=$?" )
+  ( exec 1>&-; cat in; echo "  exec rc=$?" )
+
+  echo "=== the last mention of fd 1 wins there too"
+  ( cat in >&- 1>g1; echo "  reopen rc=$?" )
+  ( cat in 1>g2 >&-; echo "  close-after rc=$?" )
+  ( exec 1>&-; exec 1>g3; cat in; echo "  exec reopen rc=$?" )
+
+  echo "=== a pipeline stage with no fd 1"
+  cat in | tr a-z A-Z >&-; echo "  tail rc=$?"
+
+  echo "=== a child that never writes is untroubled"
+  # `cat` is not one of those even with nothing to copy: it closes its stdout
+  # at exit, which is the failing write. `sleep` never touches fd 1 at all.
+  ( sleep 0 >&-;        echo "  sleep rc=$?" )
+  ( cat /dev/null >&-;  echo "  empty-cat rc=$?" )
+
+  echo "=== a capture of one collects nothing"
+  ( v=$(cat in >&-); echo "  cap rc=$? v=[$v]" )
+
+  echo "=== and the shell's own fd 1 is left as it was"
+  ( cat in >&-; cat in; echo "  after rc=$?" )
+} 2>&1 | sed 's#^[^:]*/##'
+echo "=== the files the reopens wrote"
+echo "g1=[$(cat g1)] g2=[$(cat g2)] g3=[$(cat g3)]"

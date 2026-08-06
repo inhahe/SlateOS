@@ -23,7 +23,9 @@
 # dup of it keeps both.
 #
 # Which source it is does not enter into it: a here-document on fd 1 is as
-# read-only as a file is.
+# read-only as a file is, and so is a *directory*, which is the source with no
+# bytes to read either — the write half is missing for the same reason and the
+# status says the same thing.
 #
 # An *external* command is handed the descriptor rather than told about it, so
 # the write that fails is the child's own and the status that reports it is the
@@ -58,6 +60,7 @@
 # one. Stderr is collected and replayed at the end so it can be compared in a
 # fixed place; nothing here prints a pid, so it is replayed unfiltered.
 printf 'one\ntwo\n' > in
+mkdir -p dd
 printf 'A\nB\n' > rw
 printf 'A\nB\n' > rw2
 exec 4>&2 2>err
@@ -114,6 +117,20 @@ echo "=== and 2>&1 after it copies a fd 1 that cannot be written either"
 echo "=== an <> source is the case that keeps both"
 ( { echo W >&2; } 3<>rw 2<&3;        echo "  rw rc=$?"; cat rw )
 ( { echo W; } 3<>rw2 1>&3;           echo "  rw2 rc=$?"; cat rw2 )
+
+echo "=== a directory is the source with no bytes, and no write half either"
+# Nothing here can be handed over as a *description* — a directory yields no
+# usable handle — so what the child gets is no fd at all, which fails its write
+# with the same `EBADF` and the same status. An empty stream would not: it would
+# take the bytes and let the child exit 0.
+( { echo W; } 1<dd;                     echo "  builtin rc=$?" )
+( { echo W >&2; } 2<dd;                 echo "  builtin-fd2 rc=$?" )
+( { echo W >&3; } 1<dd 3>&1;            echo "  dup rc=$?" )
+( sh -c 'echo W' 1<dd 2>/dev/null;      echo "  ext rc=$?" )
+( sh -c 'echo W >&2' 2<dd;              echo "  ext-fd2 rc=$?" )
+( sh -c 'echo W' 3<dd 1>&3 2>/dev/null; echo "  ext-dup rc=$?" )
+( exec 1<dd; sh -c 'echo W' 2>/dev/null ); echo "  ext-exec rc=$?"
+( sh -c 'echo W' 1<dd 2>&1;             echo "  ext-2>&1 rc=$?" )
 
 echo "=== an external command is handed the descriptor and answers for itself"
 # Nothing appears on stdout in any of these: the `W` never leaves the child.

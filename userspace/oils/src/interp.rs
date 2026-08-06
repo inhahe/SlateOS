@@ -2296,18 +2296,22 @@ fn child_input(c: &InputFd) -> ChildIn {
 /// consuming on its behalf would empty an `exec 3<<HD` for the shell's own later
 /// `read <&3`, which is the far likelier script.
 ///
-/// `Stdio::null()` remains the fallback for the shapes that have neither an OS
-/// object nor bytes — a directory, a source already closed, a handle the host
-/// declines to duplicate. It is still wrong in the same direction, and
-/// TD-OILS-A-CHILD-GIVEN-A-WRITE-PROOF-FD-CAN-STILL-WRITE covers giving those a
-/// closed descriptor instead.
-fn child_read_only_out(src: &ReadOnlySrc) -> Stdio {
+/// The shapes with neither an OS object nor bytes — a directory, a source
+/// already closed, a handle the host declines to duplicate — are handed over
+/// **closed** ([`ReadOnlyOut::Closed`]). A closed descriptor is not what bash
+/// gives the child (bash's is open and merely unwritable), but it fails the
+/// child's write with the same `EBADF` and the same status, which is everything
+/// such a descriptor is used for. `Stdio::null()` is the one answer that must
+/// not be given: it takes the bytes and lets the child exit 0.
+fn child_read_only_out(src: &ReadOnlySrc) -> ReadOnlyOut {
     let Some(c) = src else {
-        return Stdio::null();
+        return ReadOnlyOut::Closed;
     };
     let mut guard = lock_input(c);
     match &mut *guard {
-        InputSrc::File(f) => f.share().map_or_else(|_| Stdio::null(), Stdio::from),
+        InputSrc::File(f) => f
+            .share()
+            .map_or(ReadOnlyOut::Closed, |d| ReadOnlyOut::Handle(Stdio::from(d))),
         InputSrc::Bytes(cur) => {
             let pos = usize::try_from(cur.position()).unwrap_or(usize::MAX);
             let rest = cur.get_ref().get(pos..).unwrap_or_default().to_vec();
@@ -2319,14 +2323,47 @@ fn child_read_only_out(src: &ReadOnlySrc) -> Stdio {
                         // resulting `BrokenPipe` just ends the thread.
                         let _ = w.write_all(&rest);
                     });
-                    Stdio::from(r)
+                    ReadOnlyOut::Handle(Stdio::from(r))
                 }
-                // No pipe to be had: fall back to the old approximation rather
-                // than fail a spawn that bash would complete.
-                Err(_) => Stdio::null(),
+                // No pipe to be had: the write must still fail, so hand the
+                // absence over rather than an empty stream that would take it.
+                Err(_) => ReadOnlyOut::Closed,
             }
         }
-        InputSrc::Closed | InputSrc::WriteOnly | InputSrc::Directory => Stdio::null(),
+        InputSrc::Closed | InputSrc::WriteOnly | InputSrc::Directory => ReadOnlyOut::Closed,
+    }
+}
+
+/// What [`child_read_only_out`] resolved a read-only fd 1 / fd 2 to.
+///
+/// `Stdio` alone cannot say "closed" — see [`ClosedStd`] — and "closed" is the
+/// only honest answer for a description with nothing to hand over, so the two
+/// have to be told apart by the caller rather than collapsed here.
+enum ReadOnlyOut {
+    /// Give the child this descriptor; its own write through it fails.
+    Handle(Stdio),
+    /// Give the child no such descriptor at all, via [`ClosedStd`].
+    Closed,
+}
+
+/// Wire a read-only source onto a child's fd 1, recording in `closed` the case
+/// that has nothing to wire.
+fn set_child_stdout_read_only(cmd: &mut PCommand, closed: &mut ClosedStd, src: &ReadOnlySrc) {
+    match child_read_only_out(src) {
+        ReadOnlyOut::Handle(s) => {
+            cmd.stdout(s);
+        }
+        ReadOnlyOut::Closed => closed.stdout = true,
+    }
+}
+
+/// [`set_child_stdout_read_only`] for fd 2.
+fn set_child_stderr_read_only(cmd: &mut PCommand, closed: &mut ClosedStd, src: &ReadOnlySrc) {
+    match child_read_only_out(src) {
+        ReadOnlyOut::Handle(s) => {
+            cmd.stderr(s);
+        }
+        ReadOnlyOut::Closed => closed.stderr = true,
     }
 }
 
@@ -2718,6 +2755,19 @@ enum ChildOut {
     Handle(Stdio),
     /// Pipe the child and append the drained bytes to this sink.
     Sink(CaptureSink),
+    /// Give the child no descriptor here at all, via [`ClosedStd`] — a
+    /// read-only description with nothing to hand over. See
+    /// [`ReadOnlyOut::Closed`].
+    Closed,
+}
+
+impl From<ReadOnlyOut> for ChildOut {
+    fn from(r: ReadOnlyOut) -> Self {
+        match r {
+            ReadOnlyOut::Handle(s) => ChildOut::Handle(s),
+            ReadOnlyOut::Closed => ChildOut::Closed,
+        }
+    }
 }
 
 /// Write bytes to whatever a [`WriteFd`] names. A file handle is `try_clone`d
@@ -2776,7 +2826,7 @@ fn child_out_from_write_fd(w: &WriteFd, what: &str) -> Result<ChildOut, String> 
         // is the *child's own write* that fails — so the child is handed the
         // description itself. `Stdio::null()` would not do: an empty stream
         // takes the bytes and the child exits 0 where bash's exits 1.
-        WriteFd::ReadOnly(src) => Ok(ChildOut::Handle(child_read_only_out(src))),
+        WriteFd::ReadOnly(src) => Ok(ChildOut::from(child_read_only_out(src))),
         // A descriptor that is not there cannot be duplicated at all, and bash
         // fails such a redirect when it is set up rather than when the child
         // writes.
@@ -19546,7 +19596,7 @@ impl Shell {
                         // the read-only descriptor and answers its own write
                         // with `EBADF`, naming itself as bash's child does.
                         Some(WriteFd::ReadOnly(src)) => {
-                            cmd.stdout(child_read_only_out(&src));
+                            set_child_stdout_read_only(&mut cmd, &mut closed, &src);
                         }
                         // A descriptor that is not there cannot be duplicated,
                         // and bash fails such a redirect when it is set up
@@ -19569,7 +19619,7 @@ impl Shell {
                         // to be handed the descriptor to answer for itself, or
                         // it would inherit the shell's terminal and print there
                         // — which is what osh did.
-                        cmd.stdout(child_read_only_out(&redir.stdout_read));
+                        set_child_stdout_read_only(&mut cmd, &mut closed, &redir.stdout_read);
                     } else if redir.stdout_to_stderr {
                         // `1>&2` and fd 2 is not a file: send fd 1 to the current
                         // stderr sink (an enclosing compound `2>` redirect, or the
@@ -19582,6 +19632,11 @@ impl Shell {
                                 cmd.stdout(Stdio::piped());
                                 stdout_capture_fd = Some(sink);
                             }
+                            // fd 2 is a read-only description with nothing to
+                            // hand over, so the fd 1 copied from it has nothing
+                            // either — and the child's write must fail rather
+                            // than be swallowed.
+                            Ok(ChildOut::Closed) => closed.stdout = true,
                             Err(e) => {
                                 self.perrln(&e.to_string());
                                 self.last_status = 1;
@@ -19596,7 +19651,7 @@ impl Shell {
                             // above — the child is handed the read-only
                             // description and its own write fails.
                             WriteFd::ReadOnly(src) => {
-                                cmd.stdout(child_read_only_out(src));
+                                set_child_stdout_read_only(&mut cmd, &mut closed, src);
                             }
                             // `exec 1>&-`: the descriptor is not there to be
                             // given, so the child is handed the absence itself
@@ -19647,7 +19702,7 @@ impl Shell {
                             // the child is handed that description, and its own
                             // write through it fails.
                             WriteFd::ReadOnly(src) => {
-                                cmd.stdout(child_read_only_out(src));
+                                set_child_stdout_read_only(&mut cmd, &mut closed, src);
                             }
                             // A persistent `exec 1>&-`: the child has no fd 1 to
                             // be given, and the absence is what it is given —
@@ -19703,7 +19758,7 @@ impl Shell {
             // `cmd 2< file` / `cmd 2<<HD`: fd 2 for the same reason fd 1 has one
             // above — the descriptor is open and has no write half, so the
             // child's diagnostics fail to go out and its status says so.
-            cmd.stderr(child_read_only_out(&redir.stderr_read));
+            set_child_stderr_read_only(&mut cmd, &mut closed, &redir.stderr_read);
         } else if let Some(n) = redir.stderr_to_fd {
             // `cmd 2>&N` (N ≥ 3): the child's fd 2 is a user-space write fd —
             // piped and drained when that fd names a capture, as for fd 1 above.
@@ -19728,7 +19783,7 @@ impl Shell {
                 // but the failure is the child's, and shows in its status:
                 // `sh -c 'echo E >&2' 2>&3` under an `exec 3< f` exits 1.
                 Some(WriteFd::ReadOnly(src)) => {
-                    cmd.stderr(child_read_only_out(&src));
+                    set_child_stderr_read_only(&mut cmd, &mut closed, &src);
                 }
                 // A closed descriptor cannot be duplicated at all.
                 Some(WriteFd::Closed) => {
@@ -19769,6 +19824,10 @@ impl Shell {
                 Ok(ChildOut::Handle(s)) => {
                     cmd.stderr(s);
                 }
+                // `2>&1` where fd 1 is a read-only description with nothing to
+                // hand over: the dup copies the missing write half, so fd 2 has
+                // none either and the child's diagnostics fail to go out.
+                Ok(ChildOut::Closed) => closed.stderr = true,
                 Ok(ChildOut::Sink(sink)) => {
                     // When that sink is the one `out` holds *and* fd 1 still
                     // resolves to it, the two streams are one description in
@@ -19829,7 +19888,7 @@ impl Shell {
                         // not the same descriptor; see the fd 2 note in
                         // TD-OILS-AN-EXTERNAL-CHILD-CANNOT-BE-GIVEN-A-CLOSED-FD-0.)
                         Some(WriteFd::ReadOnly(src)) => {
-                            cmd.stderr(child_read_only_out(src));
+                            set_child_stderr_read_only(&mut cmd, &mut closed, src);
                         }
                         // A persistent `exec 2>&-`: there is no fd 2 to give.
                         Some(WriteFd::Closed) => {
@@ -19842,7 +19901,7 @@ impl Shell {
                 // descriptor, reached through the stderr stack rather than the
                 // base. The child is handed it for the same reason.
                 Some(StderrTarget::Discard(src)) => {
-                    cmd.stderr(child_read_only_out(src));
+                    set_child_stderr_read_only(&mut cmd, &mut closed, src);
                 }
                 // An enclosing `{ …; } 2>&-` / `( … ) 2>&-`: the body has no
                 // fd 2, and neither does anything it starts.
@@ -45378,7 +45437,7 @@ impl Shell {
                 // what the generic helper would do (bash's dup succeeds and it
                 // is the child's own write that fails).
                 Some(WriteFd::ReadOnly(src)) => {
-                    Ok(ChildOut::Handle(child_read_only_out(src)))
+                    Ok(ChildOut::from(child_read_only_out(src)))
                 }
                 Some(w) => child_out_from_write_fd(w, "exec stderr"),
                 None => dup_std_handle(false)
@@ -45391,7 +45450,7 @@ impl Shell {
             Some(StderrTarget::Buffer(sink)) => Ok(ChildOut::Sink(sink.clone())),
             // A scoped `{ …; } 2>&0`: the same read-only description, reached
             // through the stderr stack.
-            Some(StderrTarget::Discard(src)) => Ok(ChildOut::Handle(child_read_only_out(src))),
+            Some(StderrTarget::Discard(src)) => Ok(ChildOut::from(child_read_only_out(src))),
             // `cmd 1>&2` under an enclosing `2>&-` is a dup of a descriptor
             // that is not there, and bash fails it when the redirect is set up
             // rather than when the child writes: `{ sh -c 'echo O' 1>&2; } 2>&-`

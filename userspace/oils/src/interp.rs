@@ -12014,6 +12014,33 @@ impl Shell {
             };
             target
         };
+        // A compound literal makes a whole array, and a reference designating
+        // one **element** — or a whole array — names none. bash refuses it in
+        // the compound-assignment machinery's untagged spelling, quoting the
+        // target as the reference holds it: the same refusal a declaration
+        // builtin's compound operand gives (see
+        // [`Shell::declare_compounds_scoped`]).
+        //
+        // It comes before everything the scalar path does with a subscripted
+        // target — before the base is unreferenced (`declare -n base=n; declare
+        // -n r='base[1]'; r=(x y)` says nothing about a nameref attribute),
+        // before the whole-array complaint (`n[@]` is quoted as the identifier
+        // it is not, never called a bad subscript), before the subscript is
+        // evaluated at all (`n[1+]` is quoted as written), before the readonly
+        // guard, and before the literal's own words are expanded (`r=($(f))`
+        // never runs `f`).
+        //
+        // The abort it raises is the deep one: a nested read-eval loop does not
+        // confine it, so `eval 'r=(x y); echo IN'` prints no `IN` and the
+        // caller of the `eval` gets no further either — and neither does the
+        // caller of a *function* that did it. See
+        // [`Self::arm_int_bind_discard`].
+        if a.index.is_none() && matches!(a.value, AssignRhs::Array(_)) && target.sub.is_some() {
+            let spelled = target.spelling();
+            self.warn_elem_not_identifier(&spelled);
+            self.arm_int_bind_discard();
+            return false;
+        }
         // The base of an element destination is bound where it is *written*, so
         // a reference sitting on it is stripped rather than followed — and
         // stripped before the refusal below, which is the order bash reports the

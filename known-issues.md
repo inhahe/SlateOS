@@ -631,6 +631,222 @@ written-subscript path keeps both halves, so nothing else moves.
 
 **Corpus:** `unset-through-a-reference-to-an-element-follows-the-base.sh`.
 
+### TD-OILS-A-COMPOUND-LITERAL-THROUGH-A-REFERENCE-TO-AN-ELEMENT-IS-STORED-INSTEAD-OF-REFUSED. `n=(a b c); declare -n r='n[1]'; r=(x y)` overwrote `n` where bash says `` `n[1]': not a valid identifier `` — 2026-08-05 — ✅ **FIXED 2026-08-05**
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::apply_assignment_inner`.
+
+**What.** A compound literal makes a whole array, and a reference designating
+one **element** — or an array *whole* — names none. osh followed the reference
+anyway: `apply_assignment_inner` rewrote `r=(x y)` into `n[1]=(x y)` and the
+array store then ignored the subscript, replacing `n` outright. Measured:
+
+```text
+                                       bash                    osh (before)
+n=(a b c); declare -n r='n[1]'
+  r=(x y)                              `n[1]': not a valid    s=0, `declare -a n=
+                                       identifier             ([0]="x" [1]="y")`
+  r+=(x y)                             the same refusal       s=0, appended to `n`
+declare -n r='n[@]'; r=(x y)           `n[@]': not a valid    `n[@]: bad array
+                                       identifier             subscript`
+declare -n base=n
+  declare -n r='base[1]'; r=(x y)      `base[1]': not a       `warning: base:
+                                       valid identifier       removing nameref
+                                                              attribute`, then
+                                                              `base` made an array
+declare -A mm=([k]=K)
+  declare -n r='mm[k]'; r=(x y)        `mm[k]': not a valid   s=0, `mm=([x]="y")`
+                                       identifier
+declare -n r='n[1+]'; r=(x y)          `n[1+]': not a valid   s=0, stored
+                                       identifier
+readonly n; declare -n r='n[1]'
+  r=(x y)                              `n[1]': not a valid    `r: readonly variable`
+                                       identifier
+f(){ echo RAN; echo z; }
+  declare -n r='n[1]'; r=($(f))        refused, `f` not run   `RAN`, then stored
+declare -n r=n; r=(x y)                followed, s=0          the same — agreed
+```
+
+The refusal is the one a declaration builtin's compound operand already gave
+(`Shell::declare_compounds_scoped`), and it precedes **everything** the scalar
+path does with a subscripted target: the base of an element destination is not
+unreferenced first, a whole-array target is quoted as the identifier it is not
+rather than called a bad subscript, the subscript is never evaluated, the
+readonly guard is never reached, and the literal's own words are never expanded.
+
+**Fixed 2026-08-05.** `apply_assignment_inner` refuses an `AssignRhs::Array`
+whose resolved target carries a subscript, ahead of the unreference and the
+whole-array complaint, with `Shell::warn_elem_not_identifier` on the target's
+spelling.
+
+The abort is the **deep** one (`Shell::arm_int_bind_discard`), measured: a
+nested read-eval loop does not confine it, so `eval 'r=(x y); echo IN'` prints
+no `IN` and the caller of the `eval` gets no further either — and neither does
+the caller of a *function* that did it. A subshell still confines it, being a
+shell of its own, and `set -e` / `set -o posix` change nothing.
+
+**Corpus:** `a-compound-literal-through-a-reference-to-an-element-is-refused.sh`.
+
+### TD-OILS-A-COMPOUND-LITERAL-IS-A-SYNTAX-ERROR-WHERE-BASH-PARSES-IT-AND-REFUSES-IT-AT-RUNTIME. `n[1]=(x y)` is `` syntax error near unexpected token `(' `` where bash says `n[1]: cannot assign list to array member` — 2026-08-05 — OPEN
+
+**Where:** `userspace/oils/src/parser.rs` — the assignment-word rule, which
+admits a compound literal only for an *unsubscripted* name.
+
+**What.** bash's word rule for a compound literal is about the **word**, not the
+destination: any `name[sub]=(…)` is an assignment word, and the objection to
+putting a list in one element is raised later, when the value is bound. osh
+decides at parse time, so the whole parse unit is lost instead — and lost
+*noisily*, which is worse than the runtime complaint because a script that never
+reaches the line still fails to parse. Measured:
+
+```text
+                                       bash                       osh
+n=(a b c); n[1]=(x y)                  `n[1]: cannot assign list  `syntax error near
+                                       to array member`, s=1      unexpected token `('`
+n=(a b c); declare n[1]=(x y)          the same                   the same syntax error
+n=(a b c); declare -n r=n
+  r[1]=(x y)                           `r[1]: cannot assign list  the same syntax error
+                                       to array member`
+```
+
+The name blamed is the one **written**, not the one it resolved to (`r[1]`, not
+`n[1]`) — the rule an array-shaped write already follows; see
+`Shell::assignment_write_refused`.
+
+**Proper fix.** Let the parser build the assignment word with both a subscript
+and an `AssignRhs::Array`, and refuse it in `Shell::apply_assignment_inner`
+where every other destination objection lives — next to the reference refusal
+recorded in
+TD-OILS-A-COMPOUND-LITERAL-THROUGH-A-REFERENCE-TO-AN-ELEMENT-IS-STORED-INSTEAD-OF-REFUSED,
+and blamed by the spelling rather than the resolved name. The status is 1 and,
+being an ordinary failed assignment, it ends the parse unit.
+
+**Impact.** Any script containing `a[i]=(…)` anywhere — a typo, or a
+deliberately-unreached branch — refuses to parse at all under osh.
+
+### TD-OILS-A-DECLARATION-BUILTIN-FOLLOWS-A-REFERENCE-TO-AN-ELEMENT-THAT-BASH-LEAVES-ALONE. `f() { declare -n r='n[1]'; declare r=(x y); }` refused where bash does nothing at all — 2026-08-05 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::declare_compounds_scoped`,
+the `follow` condition `self.nameref_attr.contains(&a.name) && (!make_local ||
+self.local_binds_here(&a.name))`.
+
+**What.** A declaration builtin follows a nameref operand — but bash stops
+following when the binding the declaration *writes* is the reference itself, and
+then quietly does nothing rather than binding the reference. osh follows in that
+case and reaches the element refusal. Measured with a global `n=(a b c)`:
+
+```text
+                                              bash             osh
+declare -n r='n[1]'; declare r=(x y)          `n[1]': not a    the same — agreed
+  (at global scope)                           valid identifier
+f() { declare -n r='n[1]'; declare r=(x y); } s=0, nothing     the refusal
+f() { declare -n r='n[1]'; local r=(x y); }   s=0, nothing     the refusal
+f() { declare -n r='n[1]'; local r=zz; }      s=0, nothing     `n` becomes
+                                                               `([1]="zz")`
+declare -n r='n[1]'
+  f() { declare -g r=(x y); }                 s=0, nothing     the refusal
+f() { declare -n r='n[1]'; declare -g r=(x y); }
+                                              s=0, nothing     the same — agreed
+declare -n r='n[1]'; f() { declare r=(x y); } a fresh local    the same — agreed
+                                              array `r`
+f() { declare -n r=n; declare r=(x y); }      follows, `n`      the same — agreed
+                                              becomes `(x y)`
+```
+
+Two things are wrong at once: the scalar case (`local r=zz`) stores where bash
+stores nothing, and every compound case reports a refusal bash does not make.
+The pattern the measurements fit is that bash declines to bind a *reference*
+that its own frame already holds — whether the frame is the local one or, under
+`-g`, the global one — and reports success having done nothing. `local_binds_here`
+is the right question asked backwards, and `-g` is not asked at all.
+
+**Proper fix.** Make `follow` false whenever the declaration binds the very
+frame the reference lives in (the `-g` case included), and make that outcome a
+silent success rather than a bind. The scalar operand path in
+`Shell::builtin_declare_scoped` shares the rule and must move with it.
+
+### TD-OILS-A-WHOLE-ARRAY-REFERENCE-UNDER-A-DECLARATION-BUILTIN-IS-MISSING-ITS-BAD-SUBSCRIPT-LINE. `declare -n r='n[@]'; declare r=(x y)` gives one line where bash gives two — 2026-08-05 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::declare_compounds_scoped`,
+the `RefTarget { sub: Some(…) }` arm.
+
+**What.** bash validates the reference's subscript on the way to deciding the
+operand names no array, and complains about both:
+
+```text
+                                       bash                     osh
+n=(a b c); declare -n r='n[@]'
+  declare r=(x y)                      `n[@]: bad array         only the second line
+                                       subscript`, then
+                                       `` `n[@]': not a valid
+                                       identifier ``
+n=(a b c); declare -n r='n[1]'
+  declare r=(x y)                      one line only            the same — agreed
+n=(a b c); declare -n r='n[@]'
+  r=(x y)                              one line only            the same — agreed
+```
+
+Only the *declaration builtin* path gives two — the ordinary assignment gives
+one, which is what
+TD-OILS-A-COMPOUND-LITERAL-THROUGH-A-REFERENCE-TO-AN-ELEMENT-IS-STORED-INSTEAD-OF-REFUSED
+made osh match. So the extra line belongs to whatever the builtin does before it
+refuses, not to the refusal itself.
+
+**Proper fix.** Find what bash reads the operand with before it refuses it
+(`Shell::warn_whole_array_sub`'s wording is the one it prints) and put that
+lookup ahead of the refusal, for a whole-array subscript only.
+
+### TD-OILS-AN-ASSOCIATIVE-COMPOUND-THROUGH-A-REFERENCE-TO-AN-ELEMENT-IS-BLAMED-BY-THE-WRONG-RULE. `declare -n r='n[1]'; declare -A r=([k]=v)` says `` `n[1]': not a valid identifier `` where bash says `n: cannot convert indexed to associative array` — 2026-08-05 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::declare_compounds_scoped`.
+
+**What.** `-A` names a *kind*, and bash decides the kind against the reference's
+**base** before it ever asks whether the operand names an element. Measured with
+`n=(a b c)`:
+
+```text
+                                       bash                     osh
+declare -n r='n[1]'; declare -A r=([k]=v)
+                                       `n: cannot convert       `` `n[1]': not a valid
+                                       indexed to associative   identifier ``
+                                       array`
+declare -n r='n[1]'; declare r=(x y)   `` `n[1]': not a valid   the same — agreed
+                                       identifier ``
+```
+
+The blame is the **base**, unsubscripted, which is a further sign that the kind
+check runs on the array the reference points into rather than on the operand.
+
+**Proper fix.** Order the two: with an explicit `-A`/`-a` in hand, ask the kind
+question of `target.base` first, and only then refuse the subscript.
+
+### TD-OILS-A-DECLARATION-REFUSAL-INSIDE-EVAL-IS-NOT-TAGGED-EVAL. `eval 'declare r=(x y)'` through a reference to an element drops the `eval:` tag bash puts on it — 2026-08-05 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::declare_compounds_scoped`,
+the `self.err_prefix()` on the refusal.
+
+**What.** bash prints the compound-assignment machinery's refusal with
+`this_command_name` in front, and inside an `eval` that is still `eval` — the
+declaration builtin never became the current command, because the refusal is
+raised before it runs:
+
+```text
+                                       bash                     osh
+declare -n r='n[1]'
+  eval 'declare r=(x y)'               ``eval: `n[1]': not a    untagged
+                                       valid identifier``
+  declare r=(x y)                      untagged                 the same — agreed
+  eval 'r=(x y)'                       untagged                 the same — agreed
+```
+
+The last row is the ordinary assignment, which carries no tag under `eval`
+either — so the tag is the *builtin operand* path's, and `eval` only supplies
+the name because nothing has replaced it yet.
+
+**Proper fix.** `err_prefix` answers the builtin tag; the refusal at
+`declare_compounds_scoped` runs before the builtin is entered and so should take
+the *ambient* command name instead — the same one `Shell::arith_cmd` carries for
+`((`/`let`.
+
 ### TD-OILS-BASH-CRASHES-ON-A-DEFAULTING-ASSIGNMENT-THROUGH-A-REFERENCE. `n=(); declare -n r='n[1]'; : "${r:=D}"` segfaults bash 5.2.37 — 2026-08-05 — ⚠️ **NOT EMULATED (upstream bug)**
 
 **Where:** nothing of ours — recorded so the gap in

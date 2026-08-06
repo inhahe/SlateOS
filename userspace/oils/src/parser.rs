@@ -3274,9 +3274,17 @@ impl Parser {
                     // After the command word, an array literal is only allowed as
                     // an operand of a declaration builtin (`declare -A m=([k]=v)`);
                     // anywhere else it's a syntax error.
+                    //
+                    // bash has no rule of its own to cite here: `echo n=(x y)` is
+                    // an ordinary word followed by a `(` the grammar had no place
+                    // for, so it is the *token* that gets named — and, as for
+                    // every `near unexpected token`, the offending source line is
+                    // echoed after it. Naming a rule instead would print a
+                    // message bash never prints, so this reports the `(`, which
+                    // is what our one token stands in for.
                     let is_decl_operand = seen_word && is_declaration_command(&cmd.words);
                     if seen_word && !is_decl_operand {
-                        return Err(ParseError::new("array assignment is only valid before the command word"));
+                        return Err(ParseError::new("syntax error near unexpected token `('"));
                     }
                     let Some(Tok::ArrayAssign {
                         name,

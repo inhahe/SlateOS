@@ -744,17 +744,17 @@ readonly guard is never reached. As a command *prefix* (`v=1 n[1]=(x y) true`)
 it stays the other refusal — `` `n[1]': not a valid identifier ``, status
 untouched, command run — which `prefix_assignment_name` already gave.
 
-**Still open alongside it:** *after* the command word osh names its own rule
+**Found alongside it:** *after* the command word osh named its own rule
 (`syntax error: array assignment is only valid before the command word`) where
-bash names the token that surprised it and echoes the line. That is not
-specific to the subscripted form — `echo n=(x y)` diverges the same way — and
-is tracked as
+bash names the token that surprised it and echoes the line. That was not
+specific to the subscripted form — `echo n=(x y)` diverged the same way — and
+is fixed under
 TD-OILS-A-COMPOUND-LITERAL-AFTER-THE-COMMAND-WORD-DOES-NOT-NAME-THE-TOKEN-THAT-SURPRISED-IT.
 
 **Corpus:**
 `a-subscripted-compound-assignment-parses-and-is-refused-when-it-binds.sh`.
 
-### TD-OILS-A-COMPOUND-LITERAL-AFTER-THE-COMMAND-WORD-DOES-NOT-NAME-THE-TOKEN-THAT-SURPRISED-IT. `echo n=(x y)` says `array assignment is only valid before the command word` where bash names `` `(' `` and echoes the line — 2026-08-05 — OPEN
+### TD-OILS-A-COMPOUND-LITERAL-AFTER-THE-COMMAND-WORD-DOES-NOT-NAME-THE-TOKEN-THAT-SURPRISED-IT. `echo n=(x y)` says `array assignment is only valid before the command word` where bash names `` `(' `` and echoes the line — 2026-08-05 — ✅ FIXED
 
 **Where:** `userspace/oils/src/parser.rs` — `parse_simple`'s `Tok::ArrayAssign`
 arm, the `seen_word && !is_decl_operand` guard, which raises a rule of its own
@@ -786,9 +786,16 @@ carries the name and the literal, so the line can be reprinted from source.
 either. But a script that greps its own stderr, or a user reading it, sees a
 message bash never prints.
 
-**Corpus:** none yet; the shape kills a script outright, so it needs a file of
-its own — planned as
-`a-compound-literal-after-the-command-word-names-the-token-that-surprised-it.sh`.
+**Fixed 2026-08-05.** `parse_simple`'s guard now returns `` syntax error near
+unexpected token `(' `` instead of naming a rule, which is all that was needed:
+`Shell::format_parse_error` already echoes the offending source line after any
+message containing `syntax error near `, and already tags an `eval` body's
+errors `eval: line N:` and echoes the eval *string* rather than the script line.
+
+**Corpus:**
+`a-compound-literal-after-the-command-word-names-the-token-that-surprised-it.sh`
+— which reaches the shape repeatedly through `eval` (confined, status 2), since
+a bare one kills the script and so has to go last.
 
 ### TD-OILS-A-DECLARATION-BUILTIN-FOLLOWS-A-REFERENCE-TO-AN-ELEMENT-THAT-BASH-LEAVES-ALONE. `f() { declare -n r='n[1]'; declare r=(x y); }` refused where bash does nothing at all — 2026-08-05 — OPEN
 

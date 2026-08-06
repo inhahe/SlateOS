@@ -276,7 +276,7 @@ TD-OILS-A-DUP-TARGET-OF-DOUBLE-DASH-IS-NOT-SPLIT-INTO-A-CLOSE-AND-AN-ARGUMENT;
 a third, `1>&3- 2>&3-` in one list, is TD-OILS14 (the order-free `RedirPlan`)
 rather than anything about moves.
 
-### TD-OILS-A-FAILED-MOVE-OMITS-BASHS-EXTRA-CANNOT-DUPLICATE-FD-LINE. A move from a bad descriptor prints one diagnostic where bash prints two — 2026-08-06 — OPEN
+### TD-OILS-A-FAILED-MOVE-OMITS-BASHS-EXTRA-CANNOT-DUPLICATE-FD-LINE. A move from a bad descriptor prints one diagnostic where bash prints two — 2026-08-06 — ✅ FIXED 2026-08-06
 
 **Where:** `userspace/oils/src/interp.rs` — the `RedirectOp::DupOut`/`DupIn` arm
 of `Shell::resolve_one_redirect` and of `Shell::apply_persistent_redirect`, and
@@ -306,13 +306,172 @@ open, and the shell itself performs the redirection**:
 | `true 3>&9-`, `true 5>&9-` | no | shell | **no** |
 | `/bin/true 1>&9-`, `cat <&9-` | yes | forked child | **no** |
 
-**Proper fix.** Carry the "a move failed and the redirector was open" fact out
-on `RedirFailure` and print the extra line from the caller, which is the one
-that knows whether it forks — `Shell::simple_command_forks`, added for
-TD-OILS-NOUNSET-IN-A-REDIRECTION-WORD, already answers exactly that question.
+**Why those, and not others.** `redir.c`'s dup case has *two* `fcntl(F_DUPFD)`
+calls on the dup's **source**, and each prints the line on its own failure:
 
-**Impact.** Cosmetic, and only on an error path: one missing stderr line when a
-script moves from a descriptor it never opened. Status and stdout are correct.
+* `add_undo_redirect (redir_fd, r_close_this, -1)` (`redir.c:1307`) saves the
+  redirector so the close a *move* adds can be undone. It is guarded twice —
+  `RX_UNDOABLE`, and `fcntl (redirector, F_GETFD, 0) != -1`, i.e. the
+  redirector must already be open — which is exactly the measured table above.
+  `exec` is **not** exempt: `execute_cmd.c:797` applies a simple command's
+  list with `RX_ACTIVE|RX_UNDOABLE` like any other, and `exec` merely throws
+  the undo list away *afterwards*. So `exec 1>&9-` prints it and
+  `exec 3>&9-` does not, exactly as `true 1>&9-`/`true 3>&9-` do.
+* `redirector = fcntl (redir_fd, F_DUPFD, SHELL_FD_BASE)` (`redir.c:1134`)
+  allocates a `{v}>&N` / `{v}<&N` redirect's own descriptor. That save is how
+  the redirect is *performed*, so it is not tied to keeping an undo list: a
+  forked child prints it too, and a plain `{v}>&9` prints it as readily as a
+  move does.
+
+Both saves are of the source, so both fail exactly when the source is not
+open — which is when the numbered line is raised. The extra line therefore
+never appears alone, never accompanies `ambiguous redirect`, and never
+attaches to a plain numbered `N>&M`.
+
+**Fixed by** a `Shell::dup_save_note` field carrying a `DupSaveNote`
+(`None` / `Always` / `WhenNotForked`) set at the dup site and consumed by the
+failure reporter, which knows whether the command forks. `Shell::
+dup_save_note_for` downgrades it to `None` for the two words that never reach
+the `fcntl` — a close (no source to save) and a non-descriptor word (rejected
+earlier as `ambiguous redirect`).
+
+Corpus case:
+`a-failed-dup-prints-an-extra-unnumbered-cannot-duplicate-fd-line.sh`.
+
+### TD-OILS-A-DUP-WORD-THAT-NAMES-NO-DESCRIPTOR-TOOK-THE-WRONG-BRANCH-FOUR-WAYS — 2026-08-06 — ✅ FIXED 2026-08-06
+
+**Where:** `userspace/oils/src/interp.rs` — the `DupOut`/`DupIn` arms of
+`Shell::resolve_one_redirect` and `Shell::apply_persistent_redirect`.
+
+`[N]>&WORD` and `[N]<&WORD` are the only redirects whose *instruction* is
+decided after the expansion. bash's ladder (`do_redirection_internal`,
+`redir.c` ~795–870) is narrower than "a number dups, anything else is a
+filename", and osh got four rungs of it wrong. Found while writing the corpus
+case for the extra `cannot duplicate fd` line.
+
+| # | bash | osh was | fix |
+|---|---|---|---|
+| 1 | the word expanded to **no word** (unset-and-unquoted, or split into several): a *move* becomes a close of its own redirector, everything else is `ambiguous redirect` | `v=; true 3>&$v-` said `ambiguous redirect`; bash is silent, rc=0 | `Shell::expand_redirect_word_once` hands the ambiguity back as `None` instead of as an error, and the dup arms read it as a close |
+| 4 | `>&WORD` becomes a file **only** on fd 1, **only** as a plain dup — never a move, never a `{v}` | `true 1>&nope-` created the file `nope`; bash says `ambiguous redirect` | `Shell::dup_word_becomes_file` reproduces all three conditions |
+| — | a `{v}` redirect that becomes a close stops being an allocation: bash takes the descriptor out of `$v` | `e=-; true {v}>&$e` allocated fd 10 | `PersistentBind::VarfdClose(fd)` — the *caller* performs the close, because only it knows whether it is `exec`'s (permanent) or a command's (undone at exit) |
+| — | `redirection_error` names the **variable** for bash's own negative codes (`AMBIGUOUS_REDIRECT`, `NOCLOBBER_REDIRECT`, `RESTRICTED_REDIRECT`) but the **path** for a real `errno` | `true {v}>&nope` said `nope`; bash says `v` | free fn `varfd_error_subject`, applied by wrappers on both redirect entry points |
+
+A fifth, structural one fell out of the same work: `apply_persistent_redirect`
+expanded its filename with `expand_to_string`, so **`exec` never reported
+`ambiguous redirect` at all** — `v="a b"; exec > $v` silently created two
+files. It now goes through `Shell::expand_redirect_target` like every other
+redirect.
+
+Corpus case:
+`a-dup-word-that-names-no-descriptor-translates-three-different-ways.sh`.
+
+### TD-OILS-A-VARFD-CLOSE-WHOSE-VARIABLE-IS-NOT-A-NUMBER-SHOULD-CLOSE-FD-0 — 2026-08-06 — ✅ FIXED 2026-08-06
+
+**Where:** `userspace/oils/src/interp.rs` — `varfd_close_target`, reached from
+`Shell::varfd_close_fd`.
+
+**What.** bash's `legal_number` (`general.c`) returns **0** on failure — never a
+negative — and writes `*result = 0` *before* it parses. `redir_varvalue`
+(`redir.c`) tests `if (legal_number (val, &vmax) < 0) return -1;`, so that guard
+never fires: every value it rejects silently becomes `0`, and `{v}>&-` closes
+**stdin**. `i = vmax` then narrows to `int`, so it *wraps* rather than
+saturating.
+
+```text
+$ bash -c 'v=nope; exec {v}>&-; echo rc=$?'   # closes fd 0, rc=0
+$ osh  -c 'v=nope; exec {v}>&-; echo rc=$?'
+osh: line 1: v: ambiguous redirect
+```
+
+Measured across bash 5.2.37: `nope`, `0x10`, `1 2`, `1x`, a bare `+`/`-`,
+whitespace, an overflow, and `4294967296` all close fd 0; `4294967297` closes
+fd 1; `2147483648` and `2147483649` wrap to a negative and are refused; only
+unset, empty and an actually-negative value are `v: ambiguous redirect`.
+
+**Fixed by** rewriting `varfd_close_target` as `legal_number(v).unwrap_or(0)`
+followed by the wrapping `as i32` and the `>= 0` refusal — reusing the same
+`legal_number` every builtin that takes a number already goes through. The
+`unwrap_or(0)` carries a comment pointing at `general.c`, since it looks like a
+bug in *our* code otherwise. Corpus case:
+`a-varfd-close-reads-its-variable-through-bashs-legal-number-bug.sh`.
+
+### TD-OILS-AN-EXEC-INSIDE-A-REDIRECTED-GROUP-COULD-NOT-REBIND-FD-0 — 2026-08-06 — ✅ FIXED 2026-08-06
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::exec_with_redirects`, where
+a compound command's own `< file` is installed for its body.
+
+**What.** A group's `< file` was handed to the body *twice*: as the ambient
+`Shell::exec_stdin`, and again as a `StdinSrc::Fd` argument. The argument wins
+everywhere it is consulted, so it **froze** fd 0 for the body — an `exec` inside
+the group could not rebind it, though `exec >` and `exec 2>` inside the same
+group could, because fd 1 and fd 2 are only ever passed as
+`exec_stdout`/`exec_stderr` overrides.
+
+```text
+$ bash -c '( exec 0<&-; read x; echo rc=$? ) < /dev/null'
+bash: line 1: read: read error: 0: Bad file descriptor
+rc=1
+$ osh  -c '( exec 0<&-; read x; echo rc=$? ) < /dev/null'
+rc=1                                    # silent: an EOF, not an error
+$ osh  -c '( exec 0< f; read x; echo "x=$x" ) < /dev/null'
+x=                                      # the `exec` was ignored outright
+```
+
+**Fixed by** passing `StdinSrc::Inherit` down when the group binds fd 0, so the
+body resolves fd 0 through `exec_stdin` — the single binding an inner `exec`
+replaces. Found while writing the corpus case for the `{v}>&-` value rule.
+
+### TD-OILS-A-PIPELINE-HEAD-STAGE-IGNORED-A-PERSISTENT-EXEC-STDIN — 2026-08-06 — ✅ FIXED 2026-08-06
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::pipeline_head_stdin`.
+
+**What.** The head stage of a pipeline gets its input from that function alone,
+and it answered `None` for `StdinSrc::Inherit` on the theory that a persistent
+`exec < file` would be "consulted per-command further down". It is not: both
+pipeline drivers turn `None` into `Stdio::inherit()`, i.e. the shell's **real**
+stdin. So an `exec <` (and, after the fix above, an enclosing group's `< file`)
+was invisible to a head stage:
+
+```text
+$ bash -c 'exec < six.txt; head -n 1 | cat; head -n 1'
+r1
+r2
+$ osh -c 'exec < six.txt; head -n 1 | cat; head -n 1'
+r1                       # the pipeline read the script's own stdin
+```
+
+**Fixed by** resolving `Inherit` through `Shell::exec_stdin` there, leaving
+`None` for a genuinely unbound fd 0 — which is the only case
+`Stdio::inherit()` is right for. Regression tests:
+`a_pipeline_head_stage_reads_the_ambient_fd_zero` and
+`an_exec_inside_a_redirected_group_rebinds_fd_zero_for_the_rest_of_it`.
+
+### TD-OILS-AN-EXTERNAL-CHILD-CANNOT-BE-GIVEN-A-CLOSED-FD-0 — 2026-08-06 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `child_input` / `ChildIn::Closed`,
+and `HeadIn::Closed`, both of which fall back to `Stdio::null()`.
+
+**What.** bash hands a child a genuinely closed descriptor, so the child's own
+read fails; osh gives it an empty one, so the child sees a clean EOF:
+
+```text
+$ bash -c '( exec 0<&-; cat; echo rc=$? ) < /dev/null'
+cat: failed to set file descriptor text/binary mode: Bad file descriptor
+rc=1
+$ osh -c '( exec 0<&-; cat; echo rc=$? ) < /dev/null'
+rc=0
+```
+
+Only *external* commands diverge — every builtin (`read`, `mapfile`, …) reports
+the read error correctly, because it never leaves the shell.
+
+**Proper fix.** `std::process::Stdio` has no closed form, so this needs a raw
+`CreateProcess` with `hStdInput = NULL` (and a `close`-before-`exec` on POSIX).
+That is the same trade already recorded for the write side in TD-OILS-FD0-WRITE;
+if either is ever done properly, do both together.
+
+**Impact.** A child that would have failed on a closed stdin instead succeeds
+reading nothing. Rare, and the shell's own status is the only thing that differs.
 
 ### TD-OILS-A-DUP-TARGET-OF-DOUBLE-DASH-IS-NOT-SPLIT-INTO-A-CLOSE-AND-AN-ARGUMENT. `>&--` is taken as one word — 2026-08-06 — OPEN
 
@@ -7440,7 +7599,7 @@ The corpus flake this entry opened with is the same race, from the same
 line: `f | cat` was the only case in the file that could interleave
 observably.
 
-### TD-OILS-CORPUS-JOBS-SWEEP-CURRENT-MARKER-FLAKE. `tests/corpus/jobs-sweep-line.sh` disagreed once on the `+` current-job marker — 2026-08-05 — OPEN (unreproduced; suspected bash-side timing, not an osh bug)
+### TD-OILS-CORPUS-JOBS-SWEEP-CURRENT-MARKER-FLAKE. `tests/corpus/jobs-sweep-line.sh` disagreed once on the `+` current-job marker — 2026-08-05 — ✅ FIXED 2026-08-06 (test bug: bash's job-birth race, mechanism measured and read out of `jobs.c`)
 
 **Where:** `userspace/oils/tests/corpus/jobs-sweep-line.sh` lines 13–17, the
 `== …but not the line itself` section:
@@ -7461,28 +7620,72 @@ output differed — same rows, same statuses, same exit codes. The case was then
 re-run in isolation six times and matched every time, so the capture we have is
 the diff summary rather than a reproducible case.
 
-**Why it is probably bash's timing and not ours.** The `+` marks bash's
-*current* job, and bash recomputes it (`reset_current()` in `jobs.c`) whenever a
-job leaves: it prefers the last stopped job, then the last running one, and
-settles on no job at all if every entry is already dead. Here `true` is long
-finished and `sleep 0.2` is a foreground job that also occupies the table while
-it runs, so which answer `reset_current` gives depends on whether job 1's exit
-status had already been reaped when `sleep` left. Under load that reaping can
-land on the other side of the boundary, and bash then has no current job to
-mark. osh's marker is stable because it decides the current job from the table
-rather than from reap order.
+**The mechanism, now read out of the source rather than guessed at.** The
+earlier guess in this entry — that `reset_current()` runs when job 1 is *reaped*
+— was wrong, and the source says why: `waitchld` only reaches its
+`reset_current ()` when `set_job_status_and_cleanup` returns non-zero, and that
+function increments `call_set_current` **only** on a stop or a
+stopped→running resume (`jobs.c`), never on a plain death. A job merely dying
+therefore never moves the markers. Nor does the foreground `sleep`'s row
+leaving: `delete_job` calls `reset_current` only `if (job_index ==
+js.j_current || job_index == js.j_previous)`, and a foreground job is never
+either — only `stop_pipeline`'s async branch sets the current job.
 
-**Why it is not fixed.** Guessing at the mechanism is not the same as measuring
-it, and the observation to date is a single unreproduced line. Deliberately not
-"fixed" by relaxing the case — that would delete real coverage of the sweep for
-a flake we have not shown is a flake. **Next occurrence must be captured**: run
-the section in a loop against bash alone under parallel load (a few `cargo
-build`s alongside) and collect the listings until one drops the `+`. If bash
-turns out to be deterministic and osh is the one that varies, this is a real
-osh bug and the entry becomes a fix.
+The real window is at the job's **birth**, not its death. `stop_pipeline`
+(`jobs.c`) builds the row from the child's *already-recorded* status —
+`waitchld` writes `child->status` / `child->running` before it checks whether
+the child has a job yet, and `continue`s if it does not — and then:
 
-**Impact.** A full-corpus run can report one spurious failure. It does not
-affect any shipped behaviour.
+```c
+newjob->state = any_running ? JRUNNING : (any_stopped ? JSTOPPED : JDEAD);
+...
+if (async) { ...; reset_current (); }
+```
+
+So if the async child exits and its `SIGCHLD` is delivered in the gap between
+the fork and `stop_pipeline`'s `BLOCK_CHILD`, the job is born **JDEAD**. The
+`reset_current ()` on the next line then finds no stopped job and no running one
+(`job_last_running` skips the dead row), falls through to `js.j_current =
+js.j_previous = NO_JOB`, and *every* row prints unmarked. The row itself is
+still listed — JDEAD is not deleted, only `cleanup_dead_jobs` deletes — so the
+only thing the race changes is the marker. That is exactly the captured
+`[1]   Done                    true`.
+
+**Measured.** The section was run against bash alone 1900 times (400 + 1500);
+all 1900 printed `[1]+`. The window is real but very narrow — consistent with
+one occurrence across hundreds of full sweeps. osh is the shell that is right
+here: it decides the current job from the table, so an instant exit cannot
+un-mark a row.
+
+**Fixed** by removing the window from the case rather than by relaxing an
+assertion, so the sweep coverage is untouched: every job in the file is now
+`sleep 0.05 &` instead of `true &` (and `( sleep 0.05; exit 5 ) &` for the one
+that carries a status). The child is now guaranteed to still be alive while its
+own row is being built, so `any_running` is true and the job can never be born
+JDEAD. The header records the mechanism.
+
+Widening the job's lifetime tightens the margin at the *other* end, though, and
+the first attempt kept the original 0.2 s foreground gap and was caught by it:
+run back-to-back with 1500 concurrent bash spawns saturating the machine, the
+case failed once (`sleep 0.05` had not finished by the time `jobs` looked), then
+passed 7 times in a row once the machine was idle. Both halves of "is the job
+finished yet" cost a process spawn, and a spawn under load can run to a large
+fraction of a second, so the gap is now `sleep 0.5` — ~450 ms of slack in the
+direction that matters. Re-validated 4× *while* a 900-spawn load generator was
+running, plus `jobs-listing` 2× under the same load; all green.
+
+**Also fixed alongside, same root cause, opposite marker.** A later sweep caught
+`tests/corpus/jobs-listing.sh` disagreeing on the `-` *previous*-job marker
+(bash `[1]-  Done`, osh `[1]   Done`, twice). Same family: `set_current_job`
+picks `js.j_previous` with `candidate = RUNNING (js.j_current) ?
+job_last_running (js.j_current) : job_last_running (js.j_jobslots);`, so a job
+earns `-` **iff it was still RUNNING at the moment the next job was spawned** —
+which a 0.05 s lifetime decides by race against a process spawn. Retimed: the
+two `sleep 0.05 & sleep 0.8 & …` lines whose marker depends on that became
+`sleep 0.6 & sleep 2 & sleep 1.0; jobs`, and the three "reaping a job" lines,
+which want the *opposite* fact (job 1 already dead when job 2 spawns), got an
+explicit `sleep 0.4` gap instead of relying on a short lifetime. The case
+already states a `# TIMEOUT: 60` budget; it runs in ~25 s per shell.
 
 ### TD-OILS-CORPUS-SECONDS-BOUNDARY-FLAKE. `tests/corpus/dynamic-var-assign.sh` reads `SECONDS` across a second boundary — ✅ RESOLVED 2026-07-31 (test bug, not a shell bug)
 

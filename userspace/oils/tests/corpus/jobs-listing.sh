@@ -4,6 +4,13 @@
 # are already over by the time anything looks, "long" ones are still running —
 # so the listing is reproducible.
 #
+# The marker sections need a *second* fact to be beyond doubt: whether a job was
+# still alive at the moment the **next** one was spawned, which is what earns it
+# the `-`. A lifetime shorter than a process spawn decides that by race, so the
+# short job in those two sections is 0.6s rather than 0.05s — comfortably longer
+# than a spawn even on a loaded machine, and still comfortably shorter than the
+# 1.0s the foreground `sleep` then waits before `jobs` looks.
+#
 # Those deliberate lifetimes add up, and each `sleep` costs a process spawn on
 # top, so the case runs long enough to trip the harness's 20s default when the
 # machine is busy. It states a budget of its own instead.
@@ -19,7 +26,7 @@ wait
 # The marker is history, not a property of the table as it stands: a job that
 # was *running when the next one started* keeps the `-` even after it finishes,
 # which is why the finished job below is still marked.
-sleep 0.05 & sleep 0.8 & sleep 0.4; jobs
+sleep 0.6 & sleep 2 & sleep 1.0; jobs
 wait
 
 echo "=== …and a job that had already finished by then is not marked at all"
@@ -31,7 +38,7 @@ sleep 0.7 & sleep 0.8 & sleep 0.9 & jobs
 wait
 
 echo "=== a running job's command keeps its \`&\`; a finished one loses it"
-sleep 0.05 & sleep 0.7 & sleep 0.4; jobs
+sleep 0.6 & sleep 2 & sleep 1.0; jobs
 wait
 
 echo "=== the state column words a clean exit, a dirty one and a signal apart"
@@ -55,14 +62,18 @@ wait
 wait
 
 echo "=== reaping a job does not disturb the others' markers"
-sleep 0.05 & sleep 0.7 & sleep 0.8 & wait %1; jobs
+# These want the opposite fact from the section above — job 1 already *dead*
+# when job 2 is spawned, so it is never marked — and it is the same race, so it
+# gets the same treatment: an explicit gap rather than a lifetime that merely
+# tends to be shorter than a process spawn.
+sleep 0.05 & sleep 0.4; sleep 0.7 & sleep 1.5 & wait %1; jobs
 wait
 # …but reaping a *marked* one does: the previous job falls back to the current
 # one when no older job is still running, and both markers go away when nothing
 # is running at all.
-sleep 0.05 & sleep 0.7 & sleep 0.8 & wait %2; jobs
+sleep 0.05 & sleep 0.4; sleep 0.7 & sleep 1.5 & wait %2; jobs
 wait
-sleep 0.05 & sleep 0.1 & sleep 0.15 & wait %3; jobs
+sleep 0.05 & sleep 0.4; sleep 0.05 & sleep 0.4; sleep 0.05 & wait %3; jobs
 wait
 
 echo "=== %+, %% and %- name exactly those two jobs"

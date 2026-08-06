@@ -2781,6 +2781,26 @@ enum DupOrigin<'a> {
     SpecialPath,
 }
 
+/// What a persistent redirect turned out to be, which its `{name}` caller
+/// cannot tell in advance — see [`Shell::apply_persistent_redirect`].
+///
+/// A `{v}>&WORD` reads as an *allocation* until its word is expanded, and as
+/// the `{v}>&-` close form once the word turns out to be one. The two differ in
+/// everything the caller does next: an allocation stores its descriptor in the
+/// variable and may have to give it back afterwards, where a close touches
+/// neither the variable nor the undo list.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PersistentBind {
+    /// The redirect bound the descriptor it was given.
+    Bound,
+    /// The redirect was the `{name}` close form after all, and names the
+    /// descriptor `$name` holds. Nothing was allocated, so there is nothing to
+    /// store — and the close itself is left to the caller, because only the
+    /// caller knows whether it is `exec`'s (permanent) or a command's (undone
+    /// when the command ends, exactly as a literal `{v}>&-` is).
+    VarfdClose(i32),
+}
+
 /// The one coproc a shell keeps track of (see [`Shell::coproc_tracked`]).
 ///
 /// The two descriptors are recorded here rather than read back out of `NAME`
@@ -3731,6 +3751,18 @@ pub struct Shell {
     /// snapshot of each fd's *remaining* bytes with an independent offset (same
     /// approximation as [`Shell::exec_stdin`]).
     open_fds: std::collections::HashMap<i32, InputFd>,
+    /// Set by the dup resolvers when the redirect they are about to attempt
+    /// would, if its source turns out not to be open, also earn bash's
+    /// unnumbered `redirection error: cannot duplicate fd` line — see
+    /// [`DupSaveNote`]. Read (and cleared) by [`Shell::resolve_redirect_list`]
+    /// and the `exec` path when a redirect actually fails.
+    ///
+    /// Carried on the shell rather than returned because the resolvers signal
+    /// failure with a bare message (`Result<(), Str>`) that several helpers
+    /// produce, and because the note is set *before* the attempt, at the only
+    /// point where the redirect's spelling and the redirector's state are both
+    /// in hand.
+    dup_save_note: DupSaveNote,
     /// User-space table of non-standard *write* descriptors (fd ≥ 3) opened by a
     /// redirection-only `exec 3> file` / `exec 3>> file`. Each entry is a
     /// [`WriteFd`] — usually a shared [`std::fs::File`] handle, but a capture
@@ -5047,6 +5079,7 @@ impl Shell {
             stdin_redirected: false,
             pipe_stage_redirect_root: false,
             open_fds: std::collections::HashMap::new(),
+            dup_save_note: DupSaveNote::None,
             open_write_fds: std::collections::HashMap::new(),
             coproc_read_fds: std::collections::HashMap::new(),
             coproc_tracked: None,
@@ -8015,37 +8048,45 @@ impl Shell {
     /// that has not started yet. Draining it advances the source, so a later
     /// `read` in the enclosing command does not replay those bytes.
     ///
-    /// `Inherit` stays `None`: a persistent `exec < file` is consulted
-    /// per-command further down, so resolving it here would consume it twice.
+    /// `Inherit` is resolved through [`Shell::exec_stdin`], the *ambient* fd 0 —
+    /// which a persistent `exec < file`, or an enclosing group's `< file`
+    /// (installed the same way), has bound. This is the only place a head stage
+    /// gets its input from, so leaving `Inherit` as `None` here would hand the
+    /// stage the shell's **real** stdin: `exec < f; head -n 1 | cat` read the
+    /// script's own input rather than `f`. Only a genuinely unbound fd 0 is
+    /// `None`, and that is the case `Stdio::inherit()` is right for.
     fn pipeline_head_stdin(&mut self, stdin: &StdinSrc) -> Option<HeadIn> {
-        match stdin {
-            StdinSrc::Inherit => None,
-            // A clone of the read end, so the head stage streams rather than
-            // buffering (an unbounded upstream like `yes` must not be drained).
-            StdinSrc::Pipe(r) => match r.borrow().get_ref().try_clone() {
+        // A clone of the read end, so the head stage streams rather than
+        // buffering (an unbounded upstream like `yes` must not be drained).
+        if let StdinSrc::Pipe(r) = stdin {
+            return match r.borrow().get_ref().try_clone() {
                 Ok(rp) => Some(HeadIn::Pipe(rp)),
                 Err(e) => {
                     self.perrln(&format!("pipe: {e}"));
                     None
                 }
-            },
-            StdinSrc::Fd(c) => match child_input(c) {
-                ChildIn::Handle(f) => Some(HeadIn::File(f)),
-                ChildIn::Closed => Some(HeadIn::Closed),
-                ChildIn::Bytes(rest) => match io::pipe() {
-                    Ok((r, mut w)) => {
-                        std::thread::spawn(move || {
-                            // The reader closing early (`… | head`) is normal:
-                            // the resulting `BrokenPipe` just ends this thread.
-                            let _ = w.write_all(&rest);
-                        });
-                        Some(HeadIn::Pipe(r))
-                    }
-                    Err(e) => {
-                        self.perrln(&format!("pipe: {e}"));
-                        None
-                    }
-                },
+            };
+        }
+        let cursor = match stdin {
+            StdinSrc::Fd(c) => Some(Arc::clone(c)),
+            _ => self.exec_stdin.as_ref().map(Arc::clone),
+        }?;
+        match child_input(&cursor) {
+            ChildIn::Handle(f) => Some(HeadIn::File(f)),
+            ChildIn::Closed => Some(HeadIn::Closed),
+            ChildIn::Bytes(rest) => match io::pipe() {
+                Ok((r, mut w)) => {
+                    std::thread::spawn(move || {
+                        // The reader closing early (`… | head`) is normal:
+                        // the resulting `BrokenPipe` just ends this thread.
+                        let _ = w.write_all(&rest);
+                    });
+                    Some(HeadIn::Pipe(r))
+                }
+                Err(e) => {
+                    self.perrln(&format!("pipe: {e}"));
+                    None
+                }
             },
         }
     }
@@ -9792,7 +9833,10 @@ impl Shell {
                         RedirFatal::Shell
                     })
                 } else {
-                    self.last_status = self.report_redirect_failure(&fail, out);
+                    // Same split as the fatal case just above: only a subshell
+                    // applies its list in the fork.
+                    let forked = scope == VarfdScope::Subshell;
+                    self.last_status = self.report_redirect_failure(&fail, forked, out);
                     Flow::Next
                 };
                 self.finish_procsubs(in_mark, out_mark);
@@ -10124,14 +10168,19 @@ impl Shell {
             // scope is still torn down below.
             Flow::Next
         } else {
-            let owned_stdin;
-            let sin: &StdinSrc = match input_fd {
-                Some(c) => {
-                    owned_stdin = StdinSrc::Fd(c);
-                    &owned_stdin
-                }
-                None => stdin,
-            };
+            // The group's own fd 0 was installed as the *ambient* input
+            // (`exec_stdin`) just above, so the body reads it through
+            // `StdinSrc::Inherit` rather than through a second handle on the
+            // same descriptor. Handing the handle down instead would freeze
+            // fd 0 for the whole body: an `exec 0< f` or `exec 0<&-` inside the
+            // group rebinds `exec_stdin`, and a frozen handle would go on
+            // reading the group's file past it. bash rebinds fd 0 for the rest
+            // of the group, which is why `( exec 0<&-; read x ) < /dev/null` is
+            // a read error rather than an end of input. fd 1 and fd 2 already
+            // work this way — their group sinks are `exec_stdout`/`exec_stderr`
+            // overrides that an inner `exec` simply replaces.
+            let inherit_stdin = StdinSrc::Inherit;
+            let sin: &StdinSrc = if input_fd.is_some() { &inherit_stdin } else { stdin };
             if stdout_file.is_some() || plan.stdout_closed || stdout_read_only {
                 // fd 1 flows to the file — or to nothing at all, for `>&-` — via
                 // `exec_stdout`; run with an ambient `Out::Inherit` (the group
@@ -10858,6 +10907,9 @@ impl Shell {
                 .iter()
                 .map(|(&fd, c)| (fd, Arc::clone(c)))
                 .collect(),
+            // Scratch state belonging to one in-flight redirect list, never to
+            // a shell: a clone starts with nothing pending.
+            dup_save_note: DupSaveNote::None,
             // Write descriptors share the same handle (bash: a subshell inherits
             // the fd, so writes go to one OS offset). A capture entry is aliased
             // *uncounted* here — a synchronous subshell finishes before the
@@ -16625,7 +16677,8 @@ impl Shell {
                         return self.fatal_redirect_flow(kind);
                     }
                     Err(fail) => {
-                        self.last_status = self.report_redirect_failure(&fail, out);
+                        let forked = Self::null_command_forces_fork(&sc.redirects);
+                        self.last_status = self.report_redirect_failure(&fail, forked, out);
                     }
                 }
             }
@@ -16797,7 +16850,11 @@ impl Shell {
                 return self.fatal_redirect_flow(kind);
             }
             Err(fail) => {
-                self.last_status = self.report_redirect_failure(&fail, out);
+                // The same question the fatal case above asks, and the same
+                // answer: an external forks to do its list, a builtin or a
+                // function does not.
+                let forked = self.simple_command_forks(&argv);
+                self.last_status = self.report_redirect_failure(&fail, forked, out);
                 // bash decides this one from the command word as written, so a
                 // `command`/`builtin` prefix takes it out of the rule (neither
                 // is itself special) while `eval`, `:`, `export`, … are in it.
@@ -17093,7 +17150,9 @@ impl Shell {
                 // reaches the command after it.
                 Err(fail) if fail.fatal => self.fatal_redirect_flow(RedirFatal::Shell),
                 Err(fail) => {
-                    self.last_status = self.report_redirect_failure(&fail, out);
+                    // As above: the shell runs the body itself, so there is no
+                    // fork and the list is the shell's own.
+                    self.last_status = self.report_redirect_failure(&fail, false, out);
                     Flow::Next
                 }
             }
@@ -19611,21 +19670,28 @@ impl Shell {
         match &r.varfd {
             Some(name) => {
                 if redir_is_close(r) {
-                    // `{v}>&-`: operate on the fd currently held in `$v`. An
-                    // unset or empty variable names no descriptor, and neither
-                    // does a value outside the range a descriptor can have —
-                    // see [`varfd_close_target`] for the whole rule.
-                    return match self.vars.get(name).map(Vec::as_slice).and_then(varfd_close_target)
-                    {
-                        Some(n) => Ok(n),
-                        None => Err(bfmt![name, b": ambiguous redirect"]),
-                    };
+                    return self.varfd_close_fd(name);
                 }
                 let n = self.alloc_varfd(reserved);
                 reserved.push(n);
                 Ok(n)
             }
             None => Ok(r.fd),
+        }
+    }
+
+    /// The descriptor a `{name}` *close* operates on: the one `$name` currently
+    /// holds. Nothing is allocated and the variable is left alone.
+    ///
+    /// Reached both from the form written as a close (`{v}>&-`) and from one
+    /// that becomes one only after its word is expanded (`e=-; {v}>&$e`) — bash
+    /// runs the two through the same `redir_varvalue`. An unset or empty
+    /// variable names no descriptor, and neither does a value outside the range
+    /// a descriptor can have; see [`varfd_close_target`] for the whole rule.
+    fn varfd_close_fd(&mut self, name: &str) -> Result<i32, Str> {
+        match self.vars.get(name).map(Vec::as_slice).and_then(varfd_close_target) {
+            Some(n) => Ok(n),
+            None => Err(bfmt![name, b": ambiguous redirect"]),
         }
     }
 
@@ -19682,33 +19748,55 @@ impl Shell {
     /// [`Self::apply_exec_redirects`] and the persistent varfd path in
     /// [`Self::resolve_redirects`]. `fd` is the already-resolved descriptor
     /// (varfd-allocated or literal).
-    fn apply_persistent_redirect(&mut self, r: &Redirect, fd: i32, out: &Out) -> Result<(), Str> {
-        /// Expand a persistent redirect's target, refusing to hand back a
-        /// *partially* expanded one.
+    fn apply_persistent_redirect(
+        &mut self,
+        r: &Redirect,
+        fd: i32,
+        out: &Out,
+    ) -> Result<PersistentBind, Str> {
+        self.apply_persistent_redirect_inner(r, fd, out)
+            .map_err(|e| varfd_error_subject(r, e))
+    }
+
+    /// [`Shell::apply_persistent_redirect`] before its diagnostic is readdressed
+    /// for a `{name}` redirect — see [`varfd_error_subject`]. (Applying that
+    /// twice is harmless: the rewrite leaves an already-rewritten message
+    /// alone, which is what the scoped path's own wrapper relies on.)
+    fn apply_persistent_redirect_inner(
+        &mut self,
+        r: &Redirect,
+        fd: i32,
+        out: &Out,
+    ) -> Result<PersistentBind, Str> {
+        /// Expand a persistent redirect's *filename* target.
         ///
-        /// bash abandons a redirection word at the first fatal expansion error
-        /// and never opens what came back, so `set -u; exec > "$nope"sub/x`
-        /// creates nothing. Expanding straight into the open would instead
-        /// create `sub/x`, from a path the redirect never named. The error text
-        /// is empty because the diagnostic was already made at expansion time;
-        /// the caller reports nothing further.
+        /// The same [`Shell::expand_redirect_target`] the transient path uses,
+        /// and for the same two reasons: bash performs an `exec` redirect with
+        /// the very code it performs a command's with (`do_redirection_internal`
+        /// is reached either way), so `exec > $v` is an `ambiguous redirect`
+        /// when `$v` is unset or splits, exactly as `true > $v` is; and it
+        /// abandons the word at the first *fatal* expansion error without
+        /// opening what came back, so `set -u; exec > "$nope"sub/x` creates
+        /// nothing where expanding straight into the open would have created
+        /// `sub/x`, from a path the redirect never named.
         macro_rules! target {
             () => {
                 target!(&r.target)
             };
-            ($w:expr) => {{
-                let s = self.expand_to_string($w);
-                if self.expansion_failed() {
-                    return Err(Str::new());
+            ($w:expr) => {
+                match self.expand_redirect_target($w, RedirWord::Filename) {
+                    Ok(s) => s,
+                    Err(e) => return Err(e),
                 }
-                s
-            }};
+            };
         }
         match r.op {
             RedirectOp::Read => {
                 let path = target!();
                 if let Some(n) = special_redirect_fd(&path) {
-                    return self.persistent_special_dup(fd, &path, n, true, out);
+                    return self
+                        .persistent_special_dup(fd, &path, n, true, out)
+                        .map(|()| PersistentBind::Bound);
                 }
                 let f = self.open_input_source(&path)?;
                 if fd == 0 {
@@ -19737,7 +19825,9 @@ impl Shell {
                 // the one open, so they share an OS file offset.
                 let path = target!();
                 if let Some(n) = special_redirect_fd(&path) {
-                    return self.persistent_special_dup(fd, &path, n, fd == 0, out);
+                    return self
+                        .persistent_special_dup(fd, &path, n, fd == 0, out)
+                        .map(|()| PersistentBind::Bound);
                 }
                 let (rd, wr) = open_rw_pair(&self.cwd, &path)
                     .map_err(|e| bfmt![&path, b": ", io_error_message(&e)])?;
@@ -19784,7 +19874,9 @@ impl Shell {
                 let target = target!();
                 let append = matches!(r.op, RedirectOp::AppendBoth);
                 if let Some(n) = special_redirect_fd(&target) {
-                    return self.persistent_special_dup(fd, &target, n, false, out);
+                    return self
+                        .persistent_special_dup(fd, &target, n, false, out)
+                        .map(|()| PersistentBind::Bound);
                 }
                 self.noclobber_check(&target, !append)?;
                 let f = open_out(&self.cwd, &target, append)
@@ -19802,7 +19894,9 @@ impl Shell {
                 let append = matches!(r.op, RedirectOp::Append);
                 // A dup, not an open — so noclobber has no file to protect.
                 if let Some(n) = special_redirect_fd(&target) {
-                    return self.persistent_special_dup(fd, &target, n, false, out);
+                    return self
+                        .persistent_special_dup(fd, &target, n, false, out)
+                        .map(|()| PersistentBind::Bound);
                 }
                 self.noclobber_check(&target, matches!(r.op, RedirectOp::Write))?;
                 let f = open_out(&self.cwd, &target, append)
@@ -19835,26 +19929,83 @@ impl Shell {
                 // is the one the descriptor is actually left with.
                 let moved = crate::ast::dup_move_source(&r.target);
                 let word = moved.as_ref().unwrap_or(&r.target);
-                let target = target!(word);
                 let origin = DupOrigin::Word(r);
-                if input {
-                    self.apply_persistent_dup_in(&origin, fd, &target, out)?;
-                } else {
-                    self.apply_persistent_dup_out(&origin, fd, &target, out)?;
+                let expanded = self.expand_redirect_word_once(word, RedirWord::Dup)?;
+                // A move whose word expands to no word at all is a close of its
+                // own redirector, not a complaint — see
+                // [`Shell::expand_redirect_word_once`]. `exec` keeps no undo
+                // list, so that close is the one the descriptor is left with.
+                let closes = match &expanded {
+                    Some(t) => t == b"-".as_slice(),
+                    None if moved.is_some() => true,
+                    None => {
+                        return Err(bfmt![
+                            crate::unparse::word_src(word),
+                            b": ambiguous redirect"
+                        ]);
+                    }
+                };
+                // …and a close is where a `{v}` redirect stops being an
+                // allocation. bash rewrites the instruction to `r_close_this`
+                // and then, still seeing `REDIR_VARASSIGN`, takes the descriptor
+                // from `$v` rather than from the fd it was about to hand out
+                // (`redir_varvalue`, in `do_redirection_internal`'s
+                // `r_close_this` case). So `e=-; {v}>&$e` is `{v}>&-` — it
+                // closes what `$v` already names, stores nothing, and with `v`
+                // unset says `v: ambiguous redirect`.
+                if closes && let Some(name) = r.varfd.as_ref() {
+                    return Ok(PersistentBind::VarfdClose(self.varfd_close_fd(name)?));
                 }
+                let Some(target) = expanded else {
+                    return self
+                        .persistent_dup(&origin, fd, b"-", input, out)
+                        .map(|()| PersistentBind::Bound);
+                };
+                // A varfd dup saves the source to allocate the variable's own
+                // descriptor, so it reports a bad source whoever performs it;
+                // a plain move saves it only to undo the close it adds, and
+                // only when the redirector it is about to overwrite is open.
+                // Recorded after the expansion, since only the expanded target
+                // says whether the attempt gets as far as the save at all, and
+                // before the attempt, so the redirector's state is still the
+                // one bash tests. See [`DupSaveNote`].
+                let kind = if r.varfd.is_some() {
+                    DupSaveNote::Always
+                } else if moved.is_some() && self.fd_is_open(fd) {
+                    DupSaveNote::WhenNotForked
+                } else {
+                    DupSaveNote::None
+                };
+                self.dup_save_note = Self::dup_save_note_for(&target, kind);
+                self.persistent_dup(&origin, fd, &target, input, out)?;
                 if moved.is_some()
                     && let DupWord::Fd(n) = Self::classify_dup_word(&target)
                     && n != fd
                 {
-                    if input {
-                        self.apply_persistent_dup_in(&origin, n, b"-", out)?;
-                    } else {
-                        self.apply_persistent_dup_out(&origin, n, b"-", out)?;
-                    }
+                    self.persistent_dup(&origin, n, b"-", input, out)?;
                 }
             }
         }
-        Ok(())
+        Ok(PersistentBind::Bound)
+    }
+
+    /// [`Shell::apply_persistent_dup_in`] or [`Shell::apply_persistent_dup_out`]
+    /// as the redirect's arrow selects. Which of the two runs settles only the
+    /// *default* when the target says nothing (`<&N` reads, `>&N` writes); a
+    /// close and a numeric dup mean the same thing either way.
+    fn persistent_dup(
+        &mut self,
+        origin: &DupOrigin<'_>,
+        fd: i32,
+        target: BStr<'_>,
+        input: bool,
+        out: &Out,
+    ) -> Result<(), Str> {
+        if input {
+            self.apply_persistent_dup_in(origin, fd, target, out)
+        } else {
+            self.apply_persistent_dup_out(origin, fd, target, out)
+        }
     }
 
     /// The `set -C` guard, to run immediately before an output open.
@@ -19985,7 +20136,7 @@ impl Shell {
                     }
                 }
             }
-            DupWord::NotAFd if fd == 1 => {
+            DupWord::NotAFd if Self::dup_word_becomes_file(origin, fd) => {
                 // `exec >&file` (and `1>&$f`): both streams to the file. bash
                 // gets here by rewriting the instruction to `r_err_and_out`
                 // once the word is expanded, so from this point on it *is* the
@@ -20362,6 +20513,24 @@ impl Shell {
         DupWord::NotAFd
     }
 
+    /// The note a dup failure earns given the target the word expanded to:
+    /// `kind` when that target names a descriptor, and none otherwise.
+    ///
+    /// bash's extra line comes from an `fcntl` on the dup's *source*, which it
+    /// only reaches once the word has been accepted as a descriptor number.
+    /// The two words that are not one never get that far: `>&word` is rejected
+    /// earlier as `ambiguous redirect`, and `>&-` is a close, which has no
+    /// source to save and cannot fail. Both bad-descriptor classifications do
+    /// reach the `fcntl` — [`Shell::classify_dup_word`] does not test whether
+    /// the descriptor is *open*, so `Fd(9)` with 9 closed is exactly the case
+    /// the line exists to report.
+    fn dup_save_note_for(target: BStr<'_>, kind: DupSaveNote) -> DupSaveNote {
+        match Self::classify_dup_word(target) {
+            DupWord::Fd(_) | DupWord::BadFd => kind,
+            DupWord::Close | DupWord::NotAFd => DupSaveNote::None,
+        }
+    }
+
     /// Which text a `<&WORD`/`>&WORD` names when the descriptor turns out to be
     /// bad. bash has two answers and picks between them by *how the word was
     /// written*, not by what went wrong:
@@ -20442,6 +20611,39 @@ impl Shell {
         n == fd && matches!(origin, DupOrigin::Word(_))
     }
 
+    /// Whether a `>&WORD` whose word turned out not to name a descriptor falls
+    /// back to being a redirect of both streams to a *file* of that name,
+    /// rather than an `ambiguous redirect`.
+    ///
+    /// bash's condition is narrow (`do_redirection_internal`):
+    ///
+    /// ```c
+    /// else if (ri == r_duplicating_output_word &&
+    ///          (redirect->rflags & REDIR_VARASSIGN) == 0 && redirector == 1)
+    /// ```
+    ///
+    /// so all three of the following disqualify it, and each is measurable:
+    ///
+    /// * a **move**, which is `r_move_output_word` and not the dup — `1>&nope-`
+    ///   is `nope: ambiguous redirect`, where `1>&nope` creates the file;
+    /// * a **varfd**, whose redirector is a variable — `{v}>&nope` is ambiguous
+    ///   whatever descriptor `v` was about to be given;
+    /// * any redirector but the `1` the operator supplies by itself.
+    ///
+    /// The input side has no such fallback at all, so it never asks.
+    fn dup_word_becomes_file(origin: &DupOrigin<'_>, fd: i32) -> bool {
+        fd == 1
+            && match origin {
+                DupOrigin::Word(r) => {
+                    r.varfd.is_none() && crate::ast::dup_move_source(&r.target).is_none()
+                }
+                // A special filename always expands to a number, so this is
+                // unreachable; `false` is still the honest answer — a
+                // `/dev/fd/N` that named no descriptor is not a file to create.
+                DupOrigin::SpecialPath => false,
+            }
+    }
+
     /// Expand a redirection target word, with the two post-expansion steps set
     /// by the mode and by which shape of word it is.
     ///
@@ -20489,6 +20691,27 @@ impl Shell {
     /// **as written** (`>$r` → "$r: ambiguous redirect"), not the expansion.
     /// Here-documents and here-strings are exempt and never routed through here.
     fn expand_redirect_target(&mut self, w: &Word, kind: RedirWord) -> Result<Str, Str> {
+        self.expand_redirect_word_once(w, kind)?
+            .ok_or_else(|| bfmt![crate::unparse::word_src(w), b": ambiguous redirect"])
+    }
+
+    /// [`Shell::expand_redirect_target`]'s core, with the ambiguity handed back
+    /// as `None` instead of as an error.
+    ///
+    /// Worth telling apart because one caller does not treat it as one: bash's
+    /// `redirection_expand` answers NULL for both "no words" and "more than one
+    /// word", and a *move* reads that answer as a close of its own redirector
+    /// rather than as a complaint — `v=; 3>&$v-` closes fd 3 and succeeds where
+    /// `v=; 3>&$v` fails. See the `TRANSLATE_REDIRECT` block in
+    /// `do_redirection_internal`, whose comment credits ksh93 with the rule.
+    ///
+    /// `Err` stays reserved for a *fatal* expansion error, which no caller
+    /// rescues — see below for why it is checked before the fields are counted.
+    fn expand_redirect_word_once(
+        &mut self,
+        w: &Word,
+        kind: RedirWord,
+    ) -> Result<Option<Str>, Str> {
         let mut fields = self.expand_redirect_word(w, kind);
         // A fatal expansion error — a `set -u` reference, a `${x:?}`, a bad
         // indirect — abandons the word where it stands, and bash never looks at
@@ -20502,11 +20725,7 @@ impl Shell {
         if self.expansion_failed() {
             return Err(Str::new());
         }
-        if fields.len() == 1 {
-            Ok(fields.pop().unwrap_or_default())
-        } else {
-            Err(bfmt![crate::unparse::word_src(w), b": ambiguous redirect"])
-        }
+        Ok((fields.len() == 1).then(|| fields.pop().unwrap_or_default()))
     }
 
     fn resolve_redirects(
@@ -20591,6 +20810,7 @@ impl Shell {
         let mut plan = RedirPlan::default();
         let mut reserved: Vec<i32> = Vec::new();
         for r in redirs {
+            self.dup_save_note = DupSaveNote::None;
             let attempt = self.resolve_one_redirect(r, &mut plan, &mut reserved, out, scope);
             // A fatal word-expansion error *inside* the redirect's word abandons
             // the redirect and the command with it, before either is performed.
@@ -20603,6 +20823,9 @@ impl Shell {
                     partial: plan,
                     msg: Str::new(),
                     fatal: true,
+                    // The word never produced a descriptor to save, so there is
+                    // no save to have failed.
+                    dup_save: DupSaveNote::None,
                 }));
             }
             if let Err(msg) = attempt {
@@ -20616,6 +20839,7 @@ impl Shell {
                     partial: plan,
                     msg,
                     fatal: false,
+                    dup_save: self.dup_save_note,
                 }));
             }
         }
@@ -20760,10 +20984,35 @@ impl Shell {
     /// happens first). Routing through the partial plan reproduces that; the
     /// sink is pushed onto `stderr_stack` and popped again so the message goes
     /// through the ordinary [`Shell::emit_stderr`] machinery.
-    fn report_redirect_failure(&mut self, fail: &RedirFailure, out: &mut Out) -> i32 {
+    ///
+    /// `forked` says whether bash performs this list in a child rather than in
+    /// the shell, which decides whether a failed dup's extra line is printed —
+    /// see [`DupSaveNote`]. Only the caller knows: an external command and a
+    /// `( … )` subshell fork, a builtin, function, brace group, loop, `exec`
+    /// and (usually) a null command do not.
+    fn report_redirect_failure(
+        &mut self,
+        fail: &RedirFailure,
+        forked: bool,
+        out: &mut Out,
+    ) -> i32 {
+        // bash's `sys_error`: the shell's name, with no `line N:` token, and
+        // ahead of the numbered line — but through the same fd 2, so it goes
+        // inside the partial-plan routing below.
+        let note = match fail.dup_save {
+            DupSaveNote::None => None,
+            DupSaveNote::WhenNotForked if forked => None,
+            DupSaveNote::Always | DupSaveNote::WhenNotForked => Some(bfmt![
+                self.error_source(),
+                b": redirection error: cannot duplicate fd: Bad file descriptor"
+            ]),
+        };
         let msg = bfmt![self.err_prefix(), &fail.msg];
         let p = &fail.partial;
         let pushed = self.push_partial_stderr(p, out);
+        if let Some(note) = note {
+            self.berrln(&note);
+        }
         self.berrln(&msg);
         if pushed {
             self.stderr_stack.pop();
@@ -20938,6 +21187,20 @@ impl Shell {
         out: &Out,
         scope: VarfdScope,
     ) -> Result<(), Str> {
+        self.resolve_one_redirect_inner(r, plan, reserved, out, scope)
+            .map_err(|e| varfd_error_subject(r, e))
+    }
+
+    /// [`Shell::resolve_one_redirect`] before its diagnostic is readdressed for
+    /// a `{name}` redirect — see [`varfd_error_subject`].
+    fn resolve_one_redirect_inner(
+        &mut self,
+        r: &Redirect,
+        plan: &mut RedirPlan,
+        reserved: &mut Vec<i32>,
+        out: &Out,
+        scope: VarfdScope,
+    ) -> Result<(), Str> {
         {
             let fd = self.redir_effective_fd(r, reserved)?;
             // A `{name}>file`-style varfd redirect (open form) binds a *new*
@@ -20947,7 +21210,18 @@ impl Shell {
             // (`{name}>&-`) instead reuses `$name`'s current fd and is scoped
             // like a numeric `N>&-`, so it flows through the plan below.
             if let Some(name) = r.varfd.as_ref().filter(|_| !redir_is_close(r)) {
-                self.apply_persistent_redirect(r, fd, out)?;
+                // …unless the word turned it into the close form after all, in
+                // which case there is no descriptor to store or give back, and
+                // the close belongs in the plan so the command undoes it. See
+                // [`PersistentBind`].
+                if let PersistentBind::VarfdClose(n) = self.apply_persistent_redirect(r, fd, out)? {
+                    let origin = DupOrigin::Word(r);
+                    return if r.op == RedirectOp::DupIn {
+                        self.resolve_dup_in(&origin, n, b"-", plan)
+                    } else {
+                        self.resolve_dup_out(&origin, n, b"-", plan)
+                    };
+                }
                 if scope == VarfdScope::NullCommand {
                     // Opened, and then thrown away without ever being named —
                     // see [`VarfdScope::NullCommand`].
@@ -21144,8 +21418,36 @@ impl Shell {
                     // whatever `$v` holds, and `>&$v` with `v=3-` is not one.
                     let moved = crate::ast::dup_move_source(&r.target);
                     let word = moved.as_ref().unwrap_or(&r.target);
-                    let target = self.expand_redirect_target(word, RedirWord::Dup)?;
                     let origin = DupOrigin::Word(r);
+                    let Some(target) = self.expand_redirect_word_once(word, RedirWord::Dup)? else {
+                        // A move whose word expands to no word at all is a close
+                        // of its own redirector, not a complaint — see
+                        // [`Shell::expand_redirect_word_once`]. The dup it would
+                        // have been has no source, so there is nothing to note.
+                        if moved.is_some() {
+                            return if input {
+                                self.resolve_dup_in(&origin, fd, b"-", plan)
+                            } else {
+                                self.resolve_dup_out(&origin, fd, b"-", plan)
+                            };
+                        }
+                        return Err(bfmt![
+                            crate::unparse::word_src(word),
+                            b": ambiguous redirect"
+                        ]);
+                    };
+                    // Only a move saves a descriptor for the close it adds, and
+                    // only when the redirector it is about to overwrite is
+                    // open. Recorded after the expansion, since only the
+                    // expanded target says whether the attempt reaches the save
+                    // at all, and before the attempt, so the redirector's state
+                    // is still the one bash tests. See [`DupSaveNote`]. (The
+                    // varfd site is not here: an open-form `{v}>&N` is applied
+                    // by `apply_persistent_redirect` above, which notes it.)
+                    if moved.is_some() && self.fd_is_open(fd) {
+                        self.dup_save_note =
+                            Self::dup_save_note_for(&target, DupSaveNote::WhenNotForked);
+                    }
                     if input {
                         self.resolve_dup_in(&origin, fd, &target, plan)?;
                     } else {
@@ -21240,7 +21542,7 @@ impl Shell {
             _ => None,
         };
         if dup == DupWord::NotAFd {
-            if fd == 1 {
+            if Self::dup_word_becomes_file(origin, fd) {
                 // `>&file` on fd 1 *is* `&>file`, and bash reaches it by the
                 // same route — `do_redirection_internal` rewrites the
                 // instruction to `r_err_and_out` here, after the expansion. So
@@ -21655,6 +21957,7 @@ impl Shell {
         let mut rc = 0;
         let mut reserved: Vec<i32> = Vec::new();
         for r in redirs {
+            self.dup_save_note = DupSaveNote::None;
             // Resolve `{name}>…` varfd redirects: allocate a free fd ≥ 10 (or,
             // for `{name}>&-`, read the number back out of the variable).
             let fd = match self.redir_effective_fd(r, &mut reserved) {
@@ -21666,10 +21969,19 @@ impl Shell {
                     continue;
                 }
             };
-            let mut res = self.apply_persistent_redirect(r, fd, out);
+            let bind = self.apply_persistent_redirect(r, fd, out);
             // The store into the variable comes after the bind, and only if it
-            // succeeded — see [`Shell::commit_varfd`].
-            if res.is_ok()
+            // succeeded — see [`Shell::commit_varfd`]. A word that turned the
+            // redirect into a close allocated nothing to store: see
+            // [`PersistentBind`].
+            // `exec` keeps what it does, so the close a word turned this into is
+            // permanent — the very thing a literal `exec {v}>&-` does.
+            if let Ok(PersistentBind::VarfdClose(n)) = bind {
+                self.close_fd(n);
+            }
+            let bound = bind == Ok(PersistentBind::Bound);
+            let mut res = bind.map(|_| ());
+            if bound
                 && let Some(name) = r.varfd.as_ref().filter(|_| !redir_is_close(r))
             {
                 res = self.commit_varfd(name, fd);
@@ -21680,6 +21992,17 @@ impl Shell {
                 // whole list rather than moving on to the next redirect.
                 if self.expansion_failed() {
                     break;
+                }
+                // `exec` performs its list in the shell, so it never forks away
+                // the save that raises this — both notes apply. See
+                // [`DupSaveNote`] and [`Shell::report_redirect_failure`], which
+                // prints the same pair for a scoped list.
+                if self.dup_save_note != DupSaveNote::None {
+                    let note = bfmt![
+                        self.error_source(),
+                        b": redirection error: cannot duplicate fd: Bad file descriptor"
+                    ];
+                    self.berrln(&note);
                 }
                 let line = bfmt![self.err_prefix(), &e];
                 self.berrln(&line);
@@ -45016,6 +45339,45 @@ struct RedirFailure {
     /// yielding no fields would otherwise earn is never reached — bash gives up
     /// on the word at the error and never counts its fields.
     fatal: bool,
+    /// Whether the failure also earns bash's unnumbered `redirection error:
+    /// cannot duplicate fd` line ahead of the numbered one.
+    dup_save: DupSaveNote,
+}
+
+/// Why a failed dup would additionally print bash's unnumbered
+/// `redirection error: cannot duplicate fd: <errno>` line, which precedes the
+/// ordinary numbered diagnostic.
+///
+/// bash saves a descriptor with `fcntl(fd, F_DUPFD, …)` in two places along the
+/// dup path, and each reports this line — `sys_error`, so with the shell's name
+/// but no `line N:` — when the save fails. Both saves are of the dup's *source*,
+/// so both fail precisely when the source is not open, which is also when the
+/// numbered `<n>: Bad file descriptor` is raised. The line therefore never
+/// appears on its own, and never accompanies `ambiguous redirect`.
+///
+/// The two sites differ in whether forking suppresses them, which is why this
+/// is carried out to the caller instead of printed where it is detected: only
+/// the caller knows whether bash performs the list in the shell or in a child.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DupSaveNote {
+    /// No extra line.
+    None,
+    /// `{v}>&N` / `{v}<&N`, move or not: bash dups the source to allocate the
+    /// variable's own descriptor (`redirector = fcntl (redir_fd, F_DUPFD,
+    /// SHELL_FD_BASE)` in `do_redirection_internal`'s dup case). That save is
+    /// how the redirect is *performed*, not how it is undone, so it is not
+    /// gated on keeping an undo list — a forked child prints it too.
+    Always,
+    /// `N>&M-`: a move adds a close of `M`, and bash saves `M` so the close can
+    /// be undone (`add_undo_redirect (redir_fd, r_close_this, -1)`). Guarded by
+    /// `fcntl (redirector, F_GETFD, 0) != -1` — the redirector must already be
+    /// open — and reached only under `RX_UNDOABLE`, so a command performed in a
+    /// forked child has no undo list to build and stays silent. `exec` is *not*
+    /// such a case: its list is a builtin's, applied by `execute_command_internal`
+    /// with `RX_ACTIVE|RX_UNDOABLE` like any other, and all `exec` does is
+    /// discard the undo list afterwards. So `exec 1>&9-` prints the line and
+    /// `exec 3>&9-` does not, exactly as `true 1>&9-` and `true 3>&9-` do.
+    WhenNotForked,
 }
 
 impl RedirPlan {
@@ -50272,36 +50634,85 @@ fn parse_xtrace_fd(value: BStr<'_>) -> Option<i32> {
     i32::try_from(n).ok()
 }
 
-fn varfd_close_target(value: BStr<'_>) -> Option<i32> {
-    // C's `isspace` in the "C" locale, which is what `strtoimax` skips — and
-    // one character wider than Rust's `is_ascii_whitespace`, which omits the
-    // vertical tab.
-    let ws = |b: &u8| matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r');
-    let mut s = value;
-    while s.first().is_some_and(ws) {
-        s = s.get(1..).unwrap_or_default();
-    }
-    while s.last().is_some_and(ws) {
-        s = s.get(..s.len().saturating_sub(1)).unwrap_or_default();
-    }
-    let (negative, digits) = match s.split_first() {
-        Some((b'-', rest)) => (true, rest),
-        Some((b'+', rest)) => (false, rest),
-        _ => (false, s),
+/// Readdress a `{name}>…` redirect's diagnostic to the *variable*, which is how
+/// bash reports the failures it raises itself.
+///
+/// `redirection_error` picks the subject by error code, and takes the
+/// redirector's word ahead of everything else whenever the redirect is a varfd
+/// and the code is one of its own negative ones:
+///
+/// ```c
+/// if ((temp->rflags & REDIR_VARASSIGN) && error < 0)
+///   filename = allocname = savestring (temp->redirector.filename->word);
+/// ```
+///
+/// Those codes are `AMBIGUOUS_REDIRECT`, `NOCLOBBER_REDIRECT` and
+/// `RESTRICTED_REDIRECT` (`command.h`), each of which has exactly one message,
+/// so matching the message is matching the code. A positive `errno` is *not*
+/// among them, which is why `{v}> /nodir/x` still names the path — and why this
+/// rewrites by suffix rather than replacing every subject unconditionally.
+///
+/// Measured: `{v}>&nope`, `{v}<&nope`, `{v}>&$w` with `$w` splitting or empty,
+/// `{v}> $w` likewise, and `set -C; {v}> exist` all name `v`; the identical
+/// redirects without `{v}` name the word, and `{v}> /nodir/x` names the path.
+fn varfd_error_subject(r: &Redirect, msg: Str) -> Str {
+    /// The whole of bash's negative-code message set that a redirect can reach.
+    /// A here-document's temp file (`HEREDOC_REDIRECT`) is a shell-internal
+    /// failure osh has no equivalent of, and `BADVAR_REDIRECT` names the
+    /// variable already.
+    const SHELL_LEVEL: [&[u8]; 3] = [
+        b": ambiguous redirect",
+        b": cannot overwrite existing file",
+        b": restricted: cannot redirect output",
+    ];
+    let Some(name) = r.varfd.as_ref() else {
+        return msg;
     };
-    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+    match SHELL_LEVEL.iter().find(|s| msg.ends_with(s)) {
+        Some(suffix) => bfmt![name.as_bytes(), *suffix],
+        None => msg,
+    }
+}
+
+/// The descriptor `{v}>&-` closes, given the value of `$v` — or `None` where
+/// bash refuses the redirect as `v: ambiguous redirect`.
+///
+/// bash's `redir_varvalue` (`redir.c`) reads the value in three steps, and each
+/// of them has a surprise in it:
+///
+/// ```c
+/// if (val == 0 || *val == 0)
+///   return -1;
+/// if (legal_number (val, &vmax) < 0)
+///   return -1;
+/// i = vmax;  /* integer truncation */
+/// return i;
+/// ```
+///
+/// 1. only an *unset* or *empty* value is refused here;
+/// 2. the `legal_number` guard **never fires**. `legal_number` (`general.c`)
+///    returns `1` or `0`, never a negative — and it writes `*result = 0`
+///    *before* it parses. So every value it rejects — `nope`, `0x10`, `1 2`,
+///    a bare `+`, whitespace, an `intmax_t` overflow — silently becomes **0**,
+///    and `{v}>&-` closes **stdin**. That is a bash bug, but it is bash's
+///    observable behaviour, so osh reproduces it rather than "improving" on it;
+/// 3. `i = vmax` is a C narrowing conversion, so it *wraps*. `v=4294967296`
+///    closes fd 0 and `v=4294967297` closes fd 1, and `v=2147483648` wraps to
+///    `INT_MIN` and so is refused for being negative.
+///
+/// The refusal in step 3 is the only one past step 1: `redirector < 0` is what
+/// `do_redirection_internal` turns into `AMBIGUOUS_REDIRECT`.
+///
+/// [`legal_number`] is the same reader every builtin that takes a number uses,
+/// so only the `unwrap_or(0)` and the wrapping cast are this caller's own.
+fn varfd_close_target(value: BStr<'_>) -> Option<i32> {
+    if value.is_empty() {
         return None;
     }
-    // Overflow is "not a number" to `legal_number` (it sets `errno`), so it
-    // takes the same refusal every other non-number does.
-    let mut n: i64 = 0;
-    for d in digits {
-        n = n.checked_mul(10)?.checked_add(i64::from(d - b'0'))?;
-    }
-    if negative && n != 0 {
-        return None;
-    }
-    i32::try_from(n).ok()
+    // `i = vmax`: C truncation to `int`, which wraps rather than saturating.
+    #[allow(clippy::cast_possible_truncation)]
+    let fd = legal_number(value).unwrap_or(0) as i32;
+    (fd >= 0).then_some(fd)
 }
 
 /// Duplicate the process's real standard stdout (`is_stdout`) or stderr into an
@@ -79289,31 +79700,38 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     fn varfd_close_reads_its_variable_the_way_bash_does() {
         // `{v}>&-` names its descriptor by the *value* of `$v`, which bash reads
         // with `legal_number`: `strtoimax` over the whole string, so surrounding
-        // whitespace is skipped and a leading sign is a sign — and then refuses
-        // anything outside `0 ..= INT_MAX`. Regression: osh used `str::parse`,
-        // which rejects ` 10 ` (ambiguous where bash closes fd 10) and accepts
-        // `-1` (a silent no-op where bash refuses).
+        // whitespace is skipped and a leading sign is a sign. Regression: osh
+        // used `str::parse`, which rejects ` 10 ` (ambiguous where bash closes
+        // fd 10) and accepts `-1` (a silent no-op where bash refuses).
         assert_eq!(varfd_close_target(b" 10 "), Some(10));
         assert_eq!(varfd_close_target(b"\t\n\x0b\x0c\r7 "), Some(7));
         assert_eq!(varfd_close_target(b"+1"), Some(1));
         assert_eq!(varfd_close_target(b"010"), Some(10));
         assert_eq!(varfd_close_target(b"-0"), Some(0));
         assert_eq!(varfd_close_target(b"2147483647"), Some(i32::MAX));
-        // Refused: no value, no digits, a sign with nothing behind it, a
-        // negative descriptor, and one past `INT_MAX`.
-        for bad in [
-            &b""[..],
-            b" ",
-            b"-1",
-            b" -1 ",
+        // Everything `legal_number` *rejects* still gets through, as fd 0 —
+        // it leaves `*result = 0` behind and reports the failure with a return
+        // of 0, which `redir_varvalue`'s `< 0` test never sees. Measured: each
+        // of these closes stdin in bash 5.2.37.
+        for zero in [
+            &b" "[..],
             b"+",
-            b"2147483648",
+            b"-",
             b"abc",
             b"1x",
             b"1 2",
             b"0x10",
             b"999999999999999999999",
         ] {
+            assert_eq!(varfd_close_target(zero), Some(0), "zero: {zero:?}");
+        }
+        // `i = vmax` truncates to `int` and wraps, so a value past `INT_MAX`
+        // does not saturate — it lands wherever its low 32 bits point.
+        assert_eq!(varfd_close_target(b"4294967296"), Some(0));
+        assert_eq!(varfd_close_target(b"4294967297"), Some(1));
+        // Refused: no value at all, and anything that ends up negative —
+        // including one past `INT_MAX`, which wraps to `INT_MIN`.
+        for bad in [&b""[..], b"-1", b" -1 ", b"2147483648", b"2147483649"] {
             assert_eq!(varfd_close_target(bad), None, "bad: {bad:?}");
         }
         // …and the shell reports that refusal as an ambiguous redirect, naming
@@ -80639,6 +81057,36 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
              echo \"a=[$a] c=[$c] d=[$d] e=[$e]\"; exec 3<&- 4<&-",
         );
         assert_eq!(o, "a=[r1] c=[r3] d=[r4] e=[r5]\n");
+    }
+
+    #[test]
+    fn a_pipeline_head_stage_reads_the_ambient_fd_zero() {
+        // A pipeline's head stage takes its input from `pipeline_head_stdin`
+        // alone, so an fd 0 that a persistent `exec <` bound has to be resolved
+        // *there*: leaving it to be inherited hands the stage the shell's real
+        // stdin instead. Regression — this printed nothing (or the script's own
+        // input), and the following `head` then started at the first line.
+        let o = run_over_six_lines("exec < {FILE}; head -n 1 | cat; head -n 1");
+        assert_eq!(o, "r1\nr2\n");
+    }
+
+    #[test]
+    fn an_exec_inside_a_redirected_group_rebinds_fd_zero_for_the_rest_of_it() {
+        // A group's `< file` is installed as the ambient fd 0, so the body must
+        // read it *through* that binding rather than through a second handle on
+        // the same descriptor — otherwise an `exec` inside the group cannot
+        // rebind fd 0, the way it can rebind fd 1 and fd 2. Regression: the
+        // `exec` was silently ignored and the group's file went on being read.
+        let o = run_over_six_lines(
+            "{ exec < {FILE}; read a; } < /dev/null; echo \"a=[$a]\"",
+        );
+        assert_eq!(o, "a=[r1]\n");
+        // …and the close form, which leaves fd 0 unreadable rather than empty:
+        // a read *error*, which assigns nothing, not an end of input.
+        let o = run_over_six_lines(
+            "{ exec <&-; read a; echo \"rc=$? a=[$a]\"; } < {FILE} 2>/dev/null",
+        );
+        assert_eq!(o, "rc=1 a=[]\n");
     }
 
     #[test]

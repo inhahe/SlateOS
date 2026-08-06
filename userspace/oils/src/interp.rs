@@ -31059,6 +31059,15 @@ impl Shell {
         // truncated columns; osh prints one per line (full, untruncated) so no
         // information is lost and the output is width-independent — a documented,
         // intentional cosmetic divergence (see known-issues TD-OILS-HELP-LAYOUT).
+        //
+        // The one thing that divergence must *not* cost is information, so the
+        // per-name enabled marker is bash's: `dispcolumn` in `builtins/help.def`
+        // writes `' '` or `'*'` into the first column of every cell according to
+        // `BUILTIN_ENABLED`, and the header explains it. osh implements
+        // `enable -n`, so without the marker a disabled builtin was
+        // indistinguishable from an enabled one here. Reserved-word topics are
+        // never starred — `enable -n if` is refused as "not a shell builtin", so
+        // no reserved word can be in `disabled_builtins`.
         if patterns.is_empty() {
             let mut names: Vec<&str> = HELP_TABLE.iter().map(|(n, _, _)| *n).collect();
             names.sort_unstable();
@@ -31071,8 +31080,10 @@ impl Shell {
             text.push_str("These shell commands are defined internally.  Type `help' to see this list.\n");
             text.push_str("Type `help name' to find out more about the function `name'.\n");
             text.push_str("Use `man -k' or `info' to find out more about commands not in this list.\n\n");
+            text.push_str("A star (*) next to a name means that the command is disabled.\n\n");
             for n in names {
                 if let Some((_, usage, _)) = HELP_TABLE.iter().find(|(hn, _, _)| hn == &n) {
+                    text.push(if self.disabled_builtins.contains(n) { '*' } else { ' ' });
                     text.push_str(usage);
                     text.push('\n');
                 }
@@ -64329,6 +64340,19 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert!(out.contains("Type `help name' to find out more"), "got: {out:?}");
         assert!(out.contains("echo [-neE] [arg ...]"), "got: {out:?}");
         assert!(out.contains("help [-dms] [pattern ...]"), "got: {out:?}");
+        // Every synopsis carries bash's enabled marker in column one: a space
+        // normally, a star when `enable -n` has turned the builtin off. The
+        // header line explaining the star is bash's own wording.
+        assert!(
+            out.contains("A star (*) next to a name means that the command is disabled.\n\n"),
+            "got: {out:?}"
+        );
+        assert!(out.contains("\n echo [-neE] [arg ...]\n"), "got: {out:?}");
+        let out = run("enable -n echo; help").0;
+        assert!(out.contains("\n*echo [-neE] [arg ...]\n"), "got: {out:?}");
+        // A reserved word can never be starred — it is not a builtin, so
+        // `enable -n` refuses it and it can never be in the disabled set.
+        assert!(out.contains("\n if COMMANDS; then COMMANDS;"), "got: {out:?}");
         // Unknown topic is a status-1 error with no stdout.
         let (o, code) = run("help nosuchbuiltin");
         assert_eq!(o, "");

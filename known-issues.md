@@ -195,11 +195,9 @@ every topic. Generator used for the capture: `/d/tmp/hh/genhelp.py`. Reference:
 
 The patternless-listing layout noted above is *not* touched by this: it is a
 separate, deliberate divergence already recorded as TD-OILS-HELP-LAYOUT
-(INTENTIONAL / documented, 2026-07-20). One thing there is worth revisiting
-though — bash's star note (`A star (*) next to a name means that the command is
-disabled.`) and the stars themselves are real information osh drops even though
-it implements `enable -n`, and printing them costs nothing in either of that
-entry's two stated reasons.
+(INTENTIONAL / documented, 2026-07-20) — though the one part of it that was
+information loss rather than layout, bash's star note and the per-name
+disabled markers, has since been recovered there.
 
 ### TD-OILS-A-REFERENCES-SUBSCRIPT-IS-NEVER-EVALUATED-AS-ARITHMETIC. `declare -n r='n[1+]'` should be an arithmetic syntax error, not "not a valid identifier" — 2026-08-06 — ✅ FIXED 2026-08-06
 
@@ -16213,6 +16211,18 @@ four guidance lines, a star-disabled note, then all builtin synopses laid out in
 synopses truncated and marked with a trailing `>`. osh instead prints its **own**
 identity header (`osh (Oils for SlateOS) <ver>` + the guidance lines) followed by
 one **full, untruncated** synopsis per line.
+
+**Update 2026-08-06 — the star is no longer dropped.** The divergence is about
+*layout*, and it must not cost information. bash's `dispcolumn`
+(`builtins/help.def`) writes `' '` or `'*'` into the first column of every cell
+from `BUILTIN_ENABLED`, and the header line explains it; osh implements
+`enable -n` but printed neither, so a disabled builtin was indistinguishable
+from an enabled one in the listing. osh now prints bash's note verbatim
+(`A star (*) next to a name means that the command is disabled.`) and the same
+per-name marker. Reserved-word topics are never starred, because `enable -n if`
+is refused as "not a shell builtin" and so no reserved word can reach the
+disabled set. What remains divergent is only the column layout and the banner —
+the two reasons below.
 
 **Why intentional (two independent reasons):**
 1. **Identity.** osh must not claim to be "GNU bash" — the banner deliberately

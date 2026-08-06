@@ -1009,40 +1009,70 @@ empty *assigned* array (`q=()`) is visible and still lists. Corpus:
 `declares-listing-flags-choose-which-names-are-listed.sh`, which already covered
 the scalar half.
 
-### TD-OILS-A-DECLARATION-BUILTIN-UNDER--G-WITH-A-COMPOUND-VALUE-THROUGH-AN-ELEMENT-REFERENCE-DOES-NOTHING-IN-BASH. `f() { declare -g r=(x y); }` with a global `declare -n r='n[1]'` is silent where every neighbour is not — 2026-08-05 — OPEN
+### TD-OILS-A--G-COMPOUND-THROUGH-A-REFERENCE-TO-AN-ELEMENT-BINDS-THE-SPELLING-TOO. `f() { declare -g r=(x y); }` with a global `declare -n r='n[1]'` makes a variable named `n[1]`; osh refuses it — 2026-08-05 — OPEN
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::declare_compounds_scoped`,
-the `-g` path.
+the `spelled` computation (which asks `make_local`) and the `-A` kind check.
 
-**What.** With a *global* `declare -n r='n[1]'` and a global `n=(a b c)`:
+**What.** The rule
+TD-OILS-A-DECLARATION-BUILTIN-THAT-BINDS-A-LOCAL-THROUGH-A-REFERENCE-TO-AN-ELEMENT-MAKES-A-LOCAL-NAMED-BY-THE-SPELLING
+fixed for a *local* binding is not about locals at all on the compound path: it
+is about being inside a function. `-g` does not switch it off — it only changes
+*which binding of the spelling* the literal lands in. With a global
+`declare -n r='n[1]'` and a global `n=(a b c)`:
 
 ```text
-                                              bash              osh
-declare -g r=zz     (inside a function)       `n[1]` becomes    the same — agreed
+                                              bash                osh
+declare -g r=zz     (inside a function)       `n[1]` becomes      agreed
                                               `zz`
-declare -g r=(x y)  (inside a function)       nothing at all,   `` `n[1]': not a
-                                              s=0, no output    valid identifier ``
-declare -g r=(x y)  (at top level)            the refusal       the same — agreed
-declare r=(x y)     (at top level)            the refusal       the same — agreed
-declare -g r=(x y)  (plain ref `r=n`,         follows, `n`      the same — agreed
+declare -g r=(x y)  (inside a function)       `declare -a         `` `n[1]': not a
+                                              n[1]=([0]="x"       valid identifier ``
+                                              [1]="y")``, global
+declare -g r=(x y)  (at top level)            the refusal         agreed
+declare r=(x y)     (at top level)            the refusal         agreed
+declare -g r=(x y)  (plain ref `r=n`,         follows, `n`        agreed
                      inside a function)       becomes `(x y)`
+declare -g r=(x y)  (local ref, no global     plain global        agreed
+                     `r`, inside a function)  `r=(x y)`
 ```
 
-So the scalar `-g` follows, the top-level compound refuses, and only the
-compound `-g` *inside a function* falls silently through both. It looks like
-bash's compound path taking the local-binding branch (because
-`variable_context > 0`) and then finding no local frame to bind a
-spelling-named variable in.
+The earlier reading — "nothing at all, s=0, no output" — was the same `set`-style
+measurement artifact that misread the local case: `declare -p 'n[1]'` shows the
+binding plainly.
 
-**Proper fix.** Determine which branch bash actually takes — the likeliest
-reading is that the compound operand asks `variable_context` rather than the
-`-g` flag, so it believes it is making a local and then binds nothing — and
-reproduce whichever it is. Do this only after
-TD-OILS-A-DECLARATION-BUILTIN-THAT-BINDS-A-LOCAL-THROUGH-A-REFERENCE-TO-AN-ELEMENT-MAKES-A-LOCAL-NAMED-BY-THE-SPELLING,
-which supplies the branch it would be falling into.
+Where it lands is bash's ordinary bind rather than a forced global: `-g` from a
+deeper frame overwrites a caller's spelling-named local instead of reaching past
+it, and only makes a global when no binding of that name is visible. Which
+reference is consulted is the usual question of which binding the declaration
+writes — `-g` writes the global one, so it follows a *global* `declare -n` and
+ignores a local one.
 
-**Impact.** One shape, silently divergent in both directions: osh reports an
-error bash does not, and neither stores anything.
+The `-A` kind check is a separate matter and does *not* move to the spelling: it
+is the attribute half, and attributes through an element reference have always
+landed on the base array. So `declare -gA r=([k]=v)` through `n[1]` is refused
+with `n: cannot convert indexed to associative array` (twice — once from the
+compound machinery, once from the builtin), while the same through an
+associative base succeeds and leaves the spelling holding an associative array.
+Inside a function *without* `-g` there is no such check at all, because the
+attribute lands on the spelling-named local. And where the base does not exist,
+`declare -gA r=([k]=v)` through `nosuch[1]` makes both `declare -A nosuch` and
+`declare -A nosuch[1]=([k]="v" )`.
+
+**Proper fix.** Pass "inside a function" (`!local_frames.is_empty()`) rather than
+`make_local` to `Shell::spelled_local_name` from the compound path — the scalar
+path must keep `make_local`, since `declare -g r=zz` still stores the element.
+The store then needs no other change: `enter_global_scope` swaps only the
+operand's own name, so a write to the spelling already hits the live binding,
+which is bash's `bind_variable`. The `-A` refusal has to keep naming the base.
+
+**Impact.** One shape, divergent in both directions: osh reports an error bash
+does not, and bash leaves behind a binding osh never makes.
+
+The corpus file for it is written and parked outside the tree at
+`/d/tmp/hh/pending-g-corpus.sh` — it is the measurement of the rule above, so it
+fails until the fix lands and is kept out of `tests/corpus/` until then. Add it
+as
+`a-g-compound-through-a-reference-to-an-element-binds-the-spelling-where-it-can.sh`.
 
 ### TD-OILS-A-WHOLE-ARRAY-REFERENCE-UNDER-A-DECLARATION-BUILTIN-IS-MISSING-ITS-BAD-SUBSCRIPT-LINE. `declare -n r='n[@]'; declare r=(x y)` gives one line where bash gives two — 2026-08-05 — OPEN
 
@@ -1071,9 +1101,23 @@ TD-OILS-A-COMPOUND-LITERAL-THROUGH-A-REFERENCE-TO-AN-ELEMENT-IS-STORED-INSTEAD-O
 made osh match. So the extra line belongs to whatever the builtin does before it
 refuses, not to the refusal itself.
 
+Re-measured 2026-08-05, which narrows it further. The extra line comes only from
+the operand that has no array flag — `declare -a r=(x y)` and `declare -A r=(…)`
+through the same `n[@]` give one line each (the `-A` one being the kind check of
+the entry below) — and only where the operand is *refused* at all: inside a
+function the same command binds a local named `n[@]` and says nothing. The base
+makes no difference: `m[@]` on an associative array and `nosuch[@]` on no array
+at all both give it, and `*` reads the same as `@`.
+
+That matches bash's own shape, described in `declare_compounds_scoped` for
+allexport: `declare NAME=(…)` without an array flag reaches the variable through
+the ordinary scalar bind first, and that is the read which evaluates the
+subscript and complains.
+
 **Proper fix.** Find what bash reads the operand with before it refuses it
 (`Shell::warn_whole_array_sub`'s wording is the one it prints) and put that
-lookup ahead of the refusal, for a whole-array subscript only.
+lookup ahead of the refusal, for a whole-array subscript on a flagless operand
+only.
 
 ### TD-OILS-AN-ASSOCIATIVE-COMPOUND-THROUGH-A-REFERENCE-TO-AN-ELEMENT-IS-BLAMED-BY-THE-WRONG-RULE. `declare -n r='n[1]'; declare -A r=([k]=v)` says `` `n[1]': not a valid identifier `` where bash says `n: cannot convert indexed to associative array` — 2026-08-05 — OPEN
 
@@ -1096,8 +1140,48 @@ declare -n r='n[1]'; declare r=(x y)   `` `n[1]': not a valid   the same — agr
 The blame is the **base**, unsubscripted, which is a further sign that the kind
 check runs on the array the reference points into rather than on the operand.
 
+Re-measured 2026-08-05: `-a` is the same rule in the other direction —
+`declare -A m=([k]=K); declare -n r='m[k]'; declare -a r=(x y)` gives
+`m: cannot convert associative to indexed array` — and the check comes *before*
+the bad-subscript line of the entry above, so `declare -n r='n[@]';
+declare -A r=([k]=v)` gives the conversion error alone. Where the kinds already
+agree nothing is said and the identifier refusal stands. The check belongs to
+the element-store path only: inside a function, where the literal binds a local
+named by the spelling, `declare -A r=([k]=v)` through `n[1]` or `n[@]` succeeds
+and leaves `declare -A n[1]=([k]="v" )` with `n` untouched.
+
 **Proper fix.** Order the two: with an explicit `-A`/`-a` in hand, ask the kind
-question of `target.base` first, and only then refuse the subscript.
+question of `target.base` first, and only then refuse the subscript. Ask it only
+where the operand is heading for the element store — not where it binds a
+spelling-named variable.
+
+### TD-OILS-A-KIND-CONVERSION-REFUSAL-THROUGH-A-REFERENCE-TO-AN-ELEMENT-BLAMES-THE-OPERAND. `declare -n r='n[1]'; declare -A r` says `r:` where bash says `n:` — 2026-08-05 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::builtin_declare_scoped`, the
+indexed/associative conversion refusal.
+
+**What.** The *scalar* operand path has the same misplaced blame the entry above
+describes for the compound one, and it shows on a valueless operand, where there
+is no literal involved at all. With `n=(a b c)` and a `declare -n r='n[1]'`:
+
+```text
+                                       bash                     osh
+declare -A r                           `declare: n: cannot      `declare: r: cannot
+  (top level)                          convert indexed to       convert indexed to
+                                       associative array`       associative array`
+f() { declare -gA r; }                 the same, `n:`           the same, `r:`
+declare -a r                           nothing, s=0             the same — agreed
+```
+
+The status and the fact of the refusal agree; only the name in it is wrong.
+Attributes through an element reference land on the base array, so the base is
+what the conversion is about and what bash names.
+
+**Proper fix.** Name `target.base` in the refusal rather than the operand, on the
+same terms the store already follows the reference.
+
+**Impact.** A misleading diagnostic: a script's error output names a variable
+that was never the one being converted.
 
 ### TD-OILS-A-DECLARATION-REFUSAL-INSIDE-EVAL-IS-NOT-TAGGED-EVAL. `eval 'declare r=(x y)'` through a reference to an element drops the `eval:` tag bash puts on it — 2026-08-05 — OPEN
 

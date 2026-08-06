@@ -233,7 +233,38 @@ defect. **Ask the operator before doing it** (`open-questions.md`), and prefer
 waiving it in the corpus if the answer is no. Probes: `/d/tmp/hh/bo.sh` (T-series)
 and `/d/tmp/hh/bp.sh` (U-series).
 
-### TD-OILS-A-DECLARATION-OPERAND-WRITTEN-WITH-A-SUBSCRIPT-IS-NOT-TRUNCATED-AT-THE-BRACKET. `declare 'r[1]'` through a reference is quiet in bash and refused in osh — 2026-08-06 — OPEN
+### TD-OILS-AN-ARRAY-A-FAILED-ELEMENT-STORE-BROUGHT-INTO-BEING-IS-INVISIBLE-IN-OSH-AND-VISIBLE-IN-BASH. `declare 'z[]=v'` leaves `declare -a z=()` in bash and `declare -a z` in osh — 2026-08-06 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `builtin_declare_scoped`, the store
+path a valued subscripted operand takes, and whatever marks a freshly made array
+invisible.
+
+**What.** bash prints a declared-but-unset array as `declare -a z` and one that
+exists with no elements as `declare -a z=()` — the `att_invisible` distinction.
+An element store whose *subscript* is refused has already made the array by the
+time it fails, and makes it visible:
+
+```text
+$ ( declare 'z[]=v'; declare -p z )
+bash: z[]: bad array subscript / declare -a z=()
+osh : z[]: bad array subscript / declare -a z
+```
+
+The valueless `declare 'z[1]'` agrees on both sides (`declare -a z`, invisible),
+and so does the same store onto an array that already exists, so this is only
+about the one case that *creates* the array and then fails.
+
+**Why.** bash's `assign_array_element` calls `find_or_make_array_variable`
+before it validates the subscript, and the make marks the variable visible;
+osh makes the array only as a side effect of the declaration and leaves it in
+the invisible state the valueless form wants.
+
+**Proper fix.** Make the valued path's array creation visible independently of
+the declaration's own invisible marking, then add the case to
+`a-declaration-operand-is-truncated-at-its-bracket-before-anything-looks-at-it.sh`,
+which deliberately omits it today. Probe: `/d/tmp/hh/cf.sh` (K1 vs K2).
+
+### TD-OILS-A-DECLARATION-OPERAND-WRITTEN-WITH-A-SUBSCRIPT-IS-NOT-TRUNCATED-AT-THE-BRACKET. `declare 'r[1]'` through a reference is quiet in bash and refused in osh — 2026-08-06 — ✅ FIXED 2026-08-06
 
 **Where:** `userspace/oils/src/interp.rs` — `builtin_declare_scoped`, the
 operand-name refusal that produces `` `NAME': not a valid identifier ``.
@@ -272,11 +303,25 @@ path, which has nothing to bind (no value, no flags) and returns success without
 touching anything. osh instead concatenates the reference's spelling with the
 operand's subscript and refuses the result unconditionally.
 
-**Proper fix.** Truncate the operand at `[` in `builtin_declare_scoped` the way
-bash does, keep the bracket text aside as `making_array_special` does, and gate
-the doubled-subscript refusal on the same "does this command ask for anything?"
-predicate already used for the bad-subscript line. Add the N-series probes from
-`/d/tmp/hh/bx.sh` as a corpus case.
+**Fixed.** `builtin_declare_scoped` now gates the doubled-subscript refusal on
+the same "does this command ask for anything?" predicate the bad-subscript line
+already used (`value.is_none() && !make_local && !print_mode && !global &&
+!nameref && !unset_nameref && !other_attrs`). Where it does not fire, the
+operand is modelled on bash's plain `find_variable` of the *truncated* name,
+which follows a reference only as far as a variable that already exists: a
+target carrying a subscript of its own, or one nothing has bound, answers
+nothing, so `target` is dropped and `unreference_for_declare` makes the array of
+the operand's own name — exactly as the circular-chain arm just above already
+did. `-G` is `-g`'s twin and asks for a binding, so it goes to the built name;
+`-I` asks nothing and stays. Two comments that had lumped `-G` in with `-I` were
+corrected at the same time.
+
+The neighbouring half — the `=` that splits `NAME=value` is the one *outside* the
+subscript, and an empty subscript is refused as an identifier on the valueless
+path — landed with it. Corpus case:
+`a-declaration-operand-is-truncated-at-its-bracket-before-anything-looks-at-it.sh`.
+Probes: `/d/tmp/hh/bx.sh` (N-series), `/d/tmp/hh/bz.sh`, `/d/tmp/hh/ca.sh`,
+`/d/tmp/hh/da.sh`.
 
 ### TD-TOOLS-A-CORPUS-CASE-RACED-TWO-PIPELINE-STAGES-FOR-THE-SAME-FD. `xtrace-pipeline` failed once in a full sweep and passed 5/5 alone — 2026-08-05 — ✅ FIXED 2026-08-05
 

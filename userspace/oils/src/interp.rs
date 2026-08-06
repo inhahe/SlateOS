@@ -35211,8 +35211,21 @@ impl Shell {
             // numerically adds, under `-i`) the variable's current value.
             // The *name* is text by definition, but the *value* is bytes and
             // stays bytes: `declare x=$'\xff'` has to keep the byte it was given.
+            //
+            // The `=` that splits them is the one *outside* any subscript, which
+            // is why the search is [`attr_assignment_split`] — bash's
+            // `assignment()`, the same one `export` and `readonly` already use —
+            // rather than the first `=` in the word. A subscript is an ordinary
+            // shell word and may hold an `=` of its own: `declare 'z[x=7]=v'`
+            // assigns element `7` (and leaves `x` set to 7), where splitting at
+            // the first `=` read the name as `z[x` — a subscript that never
+            // closes — and refused the whole operand as an identifier.
+            //
+            // A word that does not begin like an identifier yields no split at
+            // all, so `1x=v`, `=5` and `bad@name=v` stay whole and are quoted
+            // back whole by the refusal below, exactly as bash quotes them.
             let (name, append, value): (BStr<'_>, bool, Option<Str>) =
-                match name_val.iter().position(|b| *b == b'=') {
+                match attr_assignment_split(name_val.as_slice()) {
                     Some(eq) => {
                         let plus = eq > 0 && name_val.get(eq - 1) == Some(&b'+');
                         let end = if plus { eq - 1 } else { eq };
@@ -35272,7 +35285,19 @@ impl Shell {
             let (base_name, subscript): (BStr<'_>, Option<BStr<'_>>) =
                 match name.iter().position(|b| *b == b'[') {
                     Some(p) if p > 0 => match skip_subscript(name, p) {
-                        Some(close) if close.saturating_add(1) == name.len() => {
+                        // An *empty* subscript is no subscript at all: bash's
+                        // `valid_array_reference` requires one, so a valueless
+                        // `declare 'z[]'` is refused as an identifier — quoted
+                        // whole, and before anything is made — however the base
+                        // is spelled and whatever it already holds. A *valued*
+                        // `z[]=v` has a store to attempt and draws
+                        // `z[]: bad array subscript` from that store instead, so
+                        // it keeps the empty subscript and is left to reach it.
+                        Some(close)
+                            if close.saturating_add(1) == name.len()
+                                && (value.is_some()
+                                    || name.get(p + 1..close).is_some_and(|s| !s.is_empty())) =>
+                        {
                             (name.get(..p).unwrap_or_default(), name.get(p + 1..close))
                         }
                         _ => (name, None),
@@ -35478,7 +35503,7 @@ impl Shell {
             // turns to the operand's own name) and earns one. See
             // [`Self::resolve_ref_use_walks`]; the model is `known-issues.md`'s
             // TD-OILS-NAMEREF-WARNING-COUNT.
-            let target = if follow {
+            let mut target = if follow {
                 self.resolve_ref_use_walks(base_name, if makes_array { 1 } else { 2 })
             } else {
                 None
@@ -35522,6 +35547,51 @@ impl Shell {
                 }
                 continue;
             }
+            // A declaration that asks for *nothing* never builds a name out of
+            // the reference's value, so it never reaches the refusal below: the
+            // branch that builds one (`declare.def:733`) is entered only when
+            // there is something to ask for. What a subscripted operand does
+            // instead is look its **own** name up with a plain `find_variable`,
+            // which follows the reference only as far as an *existing* variable:
+            //
+            // ```sh
+            // w=5; declare -n r=w; declare 'r[1]'    # declare -a w=([0]="5")
+            // ```
+            //
+            // A target that names no such variable answers nothing at all —
+            // because it carries a subscript of its own, which is never a name,
+            // or because nothing has bound it — and the array the operand still
+            // needs is then made under the operand's own name, taking the
+            // reference with it, exactly as a circular chain's is above:
+            //
+            // ```sh
+            // n=(a b c); declare -n r='n[1]'; declare 'r[1]'
+            //   # declare -a r, and `n` untouched
+            // declare -n r=nope; declare 'r[1]'
+            //   # declare -a r, and `nope` never brought into being
+            // ```
+            //
+            // Any flag at all, `-g` (or its twin `-G`, which is also a scope
+            // choice), or a value takes the operand back onto the building
+            // branch — `-I` excepted, as ever, since it asks nothing of a
+            // variable at all. This is the subscripted operand's half of the
+            // same gate [`Shell::declare_ref_bind_read`] answers for the
+            // unsubscripted one.
+            if subscript.is_some()
+                && value.is_none()
+                && !make_local
+                && !print_mode
+                && !global
+                && !nameref
+                && !unset_nameref
+                && !other_attrs
+                && target
+                    .as_ref()
+                    .is_some_and(|t| t.sub.is_some() || !self.name_is_bound(t.base.as_bytes()))
+            {
+                self.unreference_for_declare(base_name);
+                target = None;
+            }
             // The target's own subscript and the operand's cannot both stand:
             // nothing is *named* `arr[1]`, so `arr[1][0]` is no identifier
             // either. bash reports the name it built and declares nothing —
@@ -35560,9 +35630,9 @@ impl Shell {
             // Any flag at all takes the operand off that path — even one that
             // only *removes* an attribute, and even one bash cannot honour —
             // because the base-reaching branch is entered on the mere presence
-            // of a flag: `declare -r r`, `declare +r r` and `declare -g r` are
-            // all silent, and each lands on `n`. `-I` and `-G` are the two
-            // letters that ask nothing of a variable, so they leave the
+            // of a flag: `declare -r r`, `declare +r r`, `declare -g r` and its
+            // twin `declare -G r` are all silent, and each lands on `n`. `-I` is
+            // the one letter that asks nothing of a variable, so it leaves the
             // complaint standing. Inside a function nothing is reached for
             // either: the declaration binds a local named by the whole
             // spelling, which is a name and not a reference.

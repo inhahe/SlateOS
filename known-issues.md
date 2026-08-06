@@ -158,21 +158,48 @@ osh : declare: declare [-aAfFgiIlnrtux] …
 `help -m NAME` reformats the same body under `NAME`/`SYNOPSIS`/`DESCRIPTION`
 headings, so it is short by the same text.
 
-The patternless listing differs too, though only in layout: bash pads the
-synopses into **two columns** of half the terminal width, truncating each with
-`>`, and precedes them with `A star (*) next to a name means that the command is
-disabled.`; osh prints one untruncated synopsis per line and omits the star
-note. (The banner line above it — `GNU bash, version …` vs `osh (Oils for
-SlateOS) …` — is a deliberate divergence and is why no corpus case can compare
-patternless `help` directly.)
+(The patternless listing also differs in layout, but that is a separate and
+deliberate divergence — see TD-OILS-HELP-LAYOUT.)
 
-**Proper fix.** Add a fourth column to `HELP_TABLE` holding the body verbatim
-from bash 5.2.37's `builtins/*.def` `$BUILTIN … $END` blocks (the text is
-`gettext`-marked there and is what `bash_builtin_help` prints), and have `help`
-emit synopsis / short / blank / body. It is ~60 entries of static text —
-mechanical, but it is the whole of `builtins/help.def`'s payload, so it wants
-its own commit and a corpus case that walks `help NAME` and `help -m NAME` over
-`compgen -b`. Reference: `D:\refsrc\bash-5.2\builtins\`.
+**Fixed.** A companion table `HELP_BODIES` holds the body of all **75** topics
+(61 builtins + 14 reserved-word topics), and `builtin_help` prints synopsis /
+short description / four-space separator / body. `help -m` is now a real man
+page rather than an alias for the long form, and the three flags take bash's
+precedence: `-d` beats `-m` and `-s`, `-m` beats `-s`.
+
+Two things the shape of the fix turned on:
+
+* The bodies are stored **with** bash's four-space indentation and trailing
+  newline instead of being indented at print time. bash's paragraph separators
+  are four spaces and nothing else, but `help variables` ends with a
+  *genuinely empty* line, and no re-indentation rule produces both. (The cause
+  is somewhere in `show_longdoc`/`mkbuiltins`' handling of that topic's
+  `$DOCNAME variable_help`; it was not worth chasing, since storing what bash
+  prints answers it either way.)
+* The text is hard-wrapped in `builtins/*.def`, not at print time, so it does
+  not depend on `COLUMNS` — verified with `COLUMNS=40` vs `COLUMNS=200`. That
+  is what makes capturing it from the reference shell exact.
+
+All 75 topics are byte-identical to bash in the long form. `help -m` is
+byte-identical too **except** two identity lines: `SEE ALSO` says `osh(1)` and
+`IMPLEMENTATION` says osh's version rather than bash's version + FSF copyright.
+That follows the standing rule that osh reports its own identity wherever it
+reports one (`--version`, `$BASH_VERSION`, the patternless `help` banner), and
+is why the corpus case walks the long form rather than `-m`.
+
+The unit test `help_table_and_bodies_agree` keeps the two tables from drifting
+(same 75 names, every body indented and newline-terminated), and the corpus case
+`help-says-of-each-builtin-what-bash-says-of-it.sh` walks the long form over
+every topic. Generator used for the capture: `/d/tmp/hh/genhelp.py`. Reference:
+`D:\refsrc\bash-5.2\builtins\help.def` (`show_longdoc`, `show_manpage`).
+
+The patternless-listing layout noted above is *not* touched by this: it is a
+separate, deliberate divergence already recorded as TD-OILS-HELP-LAYOUT
+(INTENTIONAL / documented, 2026-07-20). One thing there is worth revisiting
+though — bash's star note (`A star (*) next to a name means that the command is
+disabled.`) and the stars themselves are real information osh drops even though
+it implements `enable -n`, and printing them costs nothing in either of that
+entry's two stated reasons.
 
 ### TD-OILS-A-REFERENCES-SUBSCRIPT-IS-NEVER-EVALUATED-AS-ARITHMETIC. `declare -n r='n[1+]'` should be an arithmetic syntax error, not "not a valid identifier" — 2026-08-06 — ✅ FIXED 2026-08-06
 

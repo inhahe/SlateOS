@@ -3769,6 +3769,30 @@ pub struct Shell {
     /// command substitution's capture. Consulted by every ambient fd-1 write
     /// ([`Shell::write_bytes`] `Out::Inherit`, external children).
     exec_stdout: Option<WriteFd>,
+    /// The fd-1 sink that lives in the [`Out`] value currently threaded through
+    /// execution — a command substitution's capture buffer or a pipeline
+    /// stage's pipe — rather than in [`Shell::exec_stdout`]. `None` = fd 1 is
+    /// whatever `exec_stdout` says (or the shell's real stdout).
+    ///
+    /// It exists because not every fd-1 write happens with an `Out` in hand.
+    /// `set -x` under `BASH_XTRACEFD=1` is the case: a trace line is raised from
+    /// deep inside expansion and from the `[[ … ]]` evaluator, neither of which
+    /// carries an `Out` (a conditional writes nothing), yet bash puts the line
+    /// on the *live* fd 1 — into the capture for
+    /// `x=$(BASH_XTRACEFD=1; set -x; echo hi)`, and down the pipe for
+    /// `echo p | cat > f`, whose `++ echo p` reaches `f` by way of `cat`.
+    ///
+    /// Maintained at exactly the sites that clear `exec_stdout` to install a
+    /// capture/pipe `Out` for a body, so the two never both describe fd 1: a
+    /// runtime `exec > file` *inside* such a body sets `exec_stdout` again and
+    /// is the later word on fd 1, which is why every reader asks `exec_stdout`
+    /// first and falls through to this. A compound command's `> file` shadows it
+    /// the same way, via the scoped `exec_stdout` override
+    /// [`Shell::exec_redirected`] installs.
+    ///
+    /// Inherited by subshell clones, which inherit fd 1; a clone that *is* a new
+    /// stage or substitution overwrites it with its own sink.
+    live_stdout: Option<WriteFd>,
     /// Persistent stderr target set by a redirection-only `exec 2> file` /
     /// `exec 2>> file` (or mirrored from `exec_stdout` by `exec … 2>&1`, which
     /// shares the same `Arc<File>`). `None` = the shell's real stderr. A restore
@@ -3792,7 +3816,9 @@ pub struct Shell {
     ///
     /// The fd 1 twin of this is [`Shell::exec_stdout_shadowing`], which can ask
     /// the cheaper question — fd 1's ambient sink is a value (`Out`), not a
-    /// stack, so "is it not the real fd 1?" suffices there.
+    /// stack, so "is it not the real fd 1?" suffices there. (A write with no
+    /// `Out` in hand asks [`Shell::live_stdout`] instead, which mirrors that
+    /// value; the ordering question is the same one, answered the same way.)
     exec_stderr_depth: usize,
     /// Persistent stdin source set by a redirection-only `exec < file` (or an
     /// `exec << EOF` here-doc): the file's bytes are read once into a
@@ -5177,6 +5203,7 @@ impl Shell {
             current_line: 1,
             stderr_stack: Vec::new(),
             exec_stdout: None,
+            live_stdout: None,
             exec_stderr: None,
             exec_stderr_depth: 0,
             exec_stdin: None,
@@ -8402,6 +8429,12 @@ impl Shell {
                         // persistent `exec > file` the shell had bound — so a
                         // later `exec >` inside the stage is what rebinds it.
                         sub.exec_stdout = None;
+                        // …and it is fd 1 for a write with no `Out` in hand
+                        // too — a `BASH_XTRACEFD=1` trace goes down the pipe.
+                        // A failed dup only costs the trace its diversion.
+                        sub.live_stdout = pipe_writer_to_file(&writer)
+                            .ok()
+                            .map(|f| WriteFd::File(Arc::new(f)));
                         let mut o = Out::Pipe(writer);
                         sub.exec_command(cmd, &mut o, &stdin);
                         // A pipeline stage runs in its own subshell: fire its
@@ -10304,9 +10337,12 @@ impl Shell {
                 // so a persistent `exec > file` is set aside for the body just as
                 // it is for the `1>&2` capture below.
                 let saved_exec_stdout = self.exec_stdout.take();
+                let saved_live_stdout =
+                    self.live_stdout.replace(WriteFd::Capture(sink.clone()));
                 let mut o = Out::Capture(sink.clone());
                 let flow = run(self, &mut o, sin);
                 self.exec_stdout = saved_exec_stdout;
+                self.live_stdout = saved_live_stdout;
                 flow
             } else {
                 match &capture {
@@ -10316,9 +10352,12 @@ impl Shell {
                         // `exec > file` for the body — `exec >f; { echo hi; } >&2`
                         // writes to stderr, not to `f`.
                         let saved_exec_stdout = self.exec_stdout.take();
+                        let saved_live_stdout =
+                            self.live_stdout.replace(WriteFd::Capture(buf.clone()));
                         let mut o = Out::Capture(buf.clone());
                         let flow = run(self, &mut o, sin);
                         self.exec_stdout = saved_exec_stdout;
+                        self.live_stdout = saved_live_stdout;
                         flow
                     }
                     None => run(self, out, sin),
@@ -10996,6 +11035,8 @@ impl Shell {
             // A subshell inherits the shell's fd table, including any persistent
             // `exec > file` / `exec 2> file` redirection.
             exec_stdout: self.exec_stdout.clone(),
+            // A subshell inherits fd 1, including an enclosing capture or pipe.
+            live_stdout: self.live_stdout.clone(),
             exec_stderr: self.exec_stderr.clone(),
             // The stack is cloned whole just above, so the depth the `exec` was
             // installed at still names the same entry in the clone.
@@ -19833,6 +19874,9 @@ impl Shell {
             sub.rebase_stack(SHELL_STACK_SIZE);
             // The coproc's pipe is its fd 1 (see the pipeline stage above).
             sub.exec_stdout = None;
+            sub.live_stdout = pipe_writer_to_file(&child_stdout_w)
+                .ok()
+                .map(|f| WriteFd::File(Arc::new(f)));
             let mut out = Out::Pipe(child_stdout_w);
             let sin = StdinSrc::pipe(child_stdin_r);
             let _ = sub.exec_command(&body_owned, &mut out, &sin);
@@ -26896,6 +26940,7 @@ impl Shell {
             // the write end of the collecting pipe, replacing any persistent
             // `exec > file`, so `exec >f; x=$(echo hi)` still captures `hi`.
             sub.exec_stdout = None;
+            sub.live_stdout = Some(WriteFd::Capture(cap.clone()));
             let mut out = Out::Capture(cap.clone());
             if let Flow::Exit(code) = sub.run_source_flow_out(src, &mut out, &StdinSrc::Inherit, map, HistRead::Off)
             {
@@ -27105,6 +27150,8 @@ impl Shell {
                 // buffer, not any persistent `exec > file` (restored below —
                 // unlike a substitution this runs in the current shell).
                 let saved_exec_stdout = self.exec_stdout.take();
+                let saved_live_stdout =
+                    self.live_stdout.replace(WriteFd::Capture(cap.clone()));
                 // As in a command substitution, bash's subshell here runs with
                 // `-v` cleared and one expansion level deeper (`cat <(echo p)`
                 // traces `++ echo p`); osh runs the body in the current shell,
@@ -27123,6 +27170,7 @@ impl Shell {
                 self.xtrace_level = self.xtrace_level.saturating_sub(1);
                 self.set_verbose(saved_verbose);
                 self.exec_stdout = saved_exec_stdout;
+                self.live_stdout = saved_live_stdout;
             }
             let buf = take_capture(&cap);
             if std::fs::write(&path, &buf).is_ok() {
@@ -39221,7 +39269,10 @@ impl Shell {
                 line.extend_from_slice(&xtrace_quote(w));
             }
             line.push(b'\n');
-            self.emit_stderr(&line);
+            // A trace, not a diagnostic: `$BASH_XTRACEFD` diverts it like any
+            // other. Writing it to fd 2 outright made this the one trace line
+            // the variable did not move.
+            self.emit_xtrace(&line);
         }
         // Everything below this line is the *builtin*, so it speaks through the
         // command's own `2>`: bash applies a simple command's redirections after
@@ -44255,10 +44306,10 @@ impl Shell {
             2 => self.emit_stderr(bytes),
             // fd 1's live sink is the `Out` value a command carries, and a trace
             // raised from inside a `[[ … ]]` primary has no `Out` to consult —
-            // so the trace reaches the *ambient* fd 1 rather than a capture or a
-            // pipeline stage's. See known-issues
-            // TD-OILS-XTRACEFD-STDOUT-IS-THE-AMBIENT-ONE.
-            1 => match &self.exec_stdout {
+            // so [`Shell::live_stdout`] carries it instead, beneath any
+            // persistent `exec > file` (the later word on fd 1 when both are
+            // set) and above the shell's real stdout.
+            1 => match self.exec_stdout.as_ref().or(self.live_stdout.as_ref()) {
                 Some(w) => {
                     let _ = write_to_write_fd(w, bytes);
                 }

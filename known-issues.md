@@ -2406,7 +2406,7 @@ the target is absent) and TD-OILS-SET-LISTS-A-DECLARED-BUT-UNVALUED-ARRAY.
 **Corpus:**
 `a-local-declared-through-a-reference-to-an-element-is-named-by-the-spelling.sh`
 
-### TD-OILS-UNSET-N-ON-A-LOCAL-BINDING-FOLLOWS-A-REFERENCE-WHOSE-TARGET-DOES-NOT-EXIST. `f() { declare -n r=nosuch; declare +n r; }` declares `nosuch` and leaves `r` a reference — 2026-08-05 — OPEN
+### TD-OILS-UNSET-N-ON-A-LOCAL-BINDING-FOLLOWS-A-REFERENCE-WHOSE-TARGET-DOES-NOT-EXIST. `f() { declare -n r=nosuch; declare +n r; }` declares `nosuch` and leaves `r` a reference — 2026-08-05 — ✅ FIXED 2026-08-05
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::builtin_declare_scoped`, the
 `follow` rule (`(!unset_nameref || !make_local)`) and the `+n` early exit just
@@ -37205,7 +37205,7 @@ call, since they sit outside the repository.
 
 ---
 
-### TD-OILS-XTRACEFD-STDOUT-IS-THE-AMBIENT-ONE. `BASH_XTRACEFD=1` traces to the shell's fd 1, not to an enclosing capture or pipeline stage — 2026-08-04 — OPEN
+### TD-OILS-XTRACEFD-STDOUT-IS-THE-AMBIENT-ONE. `BASH_XTRACEFD=1` traces to the shell's fd 1, not to an enclosing capture or pipeline stage — 2026-08-04 — ✅ FIXED 2026-08-06
 
 **Where:** `Shell::emit_xtrace` in `userspace/oils/src/interp.rs`, the `1 => …`
 arm.
@@ -37245,6 +37245,57 @@ currently switched (command substitution, pipeline stage, a compound command's
 fd 2, and `exec_stdout_shadowing`'s "fd 1's ambient sink is a value, not a stack"
 comment would stop being true — which is the same reason it is worth doing: the
 asymmetry between the two standard write descriptors is itself the tech debt.
+
+**Fixed 2026-08-06,** by that route but with the save/restore shape `exec_stdout`
+already uses rather than an explicit `Vec` — the call stack is the stack.
+`Shell::live_stdout: Option<WriteFd>` holds the fd-1 sink that lives in the
+`Out` value, and `emit_xtrace`'s fd-1 arm reads
+`self.exec_stdout.as_ref().or(self.live_stdout.as_ref())`.
+
+Why bash needs no such field: `$BASH_XTRACEFD` names a *descriptor*, and bash
+opens it once —
+
+```c
+      fd = (int)strtol (t, &e, 10);
+      if (e != t && *e == '\0' && sh_validfd (fd))
+	{
+	  fp = fdopen (fd, "w");                 /* variables.c, sv_xtracefd */
+	  ...
+	    xtrace_set (fd, fp);
+```
+
+— after which every trace line is an `fprintf (xtrace_fp, …)` in `print_cmd.c`.
+A substitution and a pipeline stage are *forks*, so descriptor 1 in the writing
+process simply **is** the pipe. osh runs those bodies in-process and carries
+fd 1 as a threaded value, so the number has to be resolved against something the
+shell knows; `live_stdout` is that something.
+
+Maintained at exactly the six sites that clear `exec_stdout` to install a
+capture/pipe `Out` for a body — `command_sub`, the input half of process
+substitution, `exec_redirected`'s two `1>&N`/`1>&2` capture arms, the pipeline
+stage thread, and the `coproc` body thread — so the two fields never both
+describe fd 1 and the *later word wins* rule falls out of asking `exec_stdout`
+first: a runtime `exec > file` inside a capture sets it again, and a compound
+command's `> file` shadows via the scoped override `exec_redirected` already
+installs. Subshell clones inherit it, because a subshell inherits fd 1. The pipe
+cases store a dup (`pipe_writer_to_file`, the same conversion `alias_write_fd`
+uses for `3>&1` in a stage); a failed dup only costs the trace its diversion.
+
+**And it was hiding a second bug.** The compound-declaration trace line —
+`declare -a arr=(1 2)`'s `+ declare -a arr`, emitted from
+`Shell::builtin_declare_scoped`'s phase-3 preamble — went out through
+`emit_stderr` rather than `emit_xtrace`, so it was the one trace line
+`$BASH_XTRACEFD` did not move *at any number*: `exec 3>t; BASH_XTRACEFD=3;
+declare -a arr=(1 2)` left it on fd 2 while every other line went to fd 3. Now
+`emit_xtrace`, which routes to fd 2 anyway when the variable is unset, so
+nothing else changes.
+
+**Corpus:** `a-trace-diverted-to-fd-one-goes-wherever-fd-one-goes.sh` — 34
+probes. Two orderings are pinned there as part of the answer: a simple command
+is traced *before* its own redirect is applied (so `echo p | cat > f` puts
+`++ echo p` into `f`, by way of `cat`, but not `++ cat`), and an inner
+substitution's trace lands in the inner capture and so becomes part of the
+*value* the outer assignment is traced with.
 
 ### TD-OILS-COMMAND-V-DOES-NOT-CONSULT-THE-HASH-TABLE. a described name does not ask the `hash` table — ✅ **FIXED 2026-08-04**
 

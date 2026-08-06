@@ -19693,8 +19693,11 @@ impl Shell {
         /// is empty because the diagnostic was already made at expansion time;
         /// the caller reports nothing further.
         macro_rules! target {
-            () => {{
-                let s = self.expand_to_string(&r.target);
+            () => {
+                target!(&r.target)
+            };
+            ($w:expr) => {{
+                let s = self.expand_to_string($w);
                 if self.expansion_failed() {
                     return Err(Str::new());
                 }
@@ -19824,13 +19827,31 @@ impl Shell {
                     }
                 }
             }
-            RedirectOp::DupOut => {
-                let target = target!();
-                self.apply_persistent_dup_out(&DupOrigin::Word(r), fd, &target, out)?;
-            }
-            RedirectOp::DupIn => {
-                let target = target!();
-                self.apply_persistent_dup_in(&DupOrigin::Word(r), fd, &target, out)?;
+            RedirectOp::DupOut | RedirectOp::DupIn => {
+                let input = r.op == RedirectOp::DupIn;
+                // See the scoped resolver in `Shell::resolve_one_redirect` for
+                // why the `-` comes off the source *text* and not off what it
+                // expands to. `exec` keeps no undo list, so the close this adds
+                // is the one the descriptor is actually left with.
+                let moved = crate::ast::dup_move_source(&r.target);
+                let word = moved.as_ref().unwrap_or(&r.target);
+                let target = target!(word);
+                let origin = DupOrigin::Word(r);
+                if input {
+                    self.apply_persistent_dup_in(&origin, fd, &target, out)?;
+                } else {
+                    self.apply_persistent_dup_out(&origin, fd, &target, out)?;
+                }
+                if moved.is_some()
+                    && let DupWord::Fd(n) = Self::classify_dup_word(&target)
+                    && n != fd
+                {
+                    if input {
+                        self.apply_persistent_dup_in(&origin, n, b"-", out)?;
+                    } else {
+                        self.apply_persistent_dup_out(&origin, n, b"-", out)?;
+                    }
+                }
             }
         }
         Ok(())
@@ -20367,7 +20388,12 @@ impl Shell {
     /// fd it allocated, which is an arbitrary large number — so it keeps the
     /// word.
     fn dup_error_subject(r: &Redirect, fd: i32, operator_default_fd: i32) -> Str {
-        let src = crate::unparse::word_src(&r.target);
+        // A move's trailing `-` belongs to the operator, not to the word, so the
+        // subject is the source alone — `1>&9-` says `9`, and a bare-number
+        // source says it whatever the redirector is, exactly as `r_move_output`
+        // carries the number the way `r_duplicating_output` does.
+        let moved = crate::ast::dup_move_source(&r.target);
+        let src = crate::unparse::word_src(moved.as_ref().unwrap_or(&r.target));
         // Digits alone are a `NUMBER` only while they fit; a longer run falls
         // back to being a word, and so back to the rule below — which is why
         // `7<&99999999999999999999` says `7` where `7<&007` says `7` for an
@@ -20378,7 +20404,11 @@ impl Shell {
         {
             return n.to_string().into_bytes();
         }
-        if fd != operator_default_fd && r.varfd.is_none() {
+        // A move that is *not* a bare number never names its word at all: it is
+        // the redirector that is reported, even where the plain `_word` form
+        // would have named the word because the redirector was the operator's
+        // own default. `1>&$v-` says `1` where `1>&$v` says `$v`.
+        if (moved.is_some() || fd != operator_default_fd) && r.varfd.is_none() {
             return fd.to_string().into_bytes();
         }
         src
@@ -20533,13 +20563,13 @@ impl Shell {
                 RedirectOp::Read | RedirectOp::ReadWrite => true,
                 RedirectOp::DupIn | RedirectOp::DupOut => {
                     // A bare `[0-9]+` is bash's `r_duplicating_*` and a bare
-                    // `[0-9]+-` its `r_move_*`; neither forks. Everything else —
-                    // the `-` close included — is the `_word` form, which does.
-                    let [WordPart::Literal(s)] = r.target.parts.as_slice() else {
-                        return true;
-                    };
-                    let digits = s.strip_suffix(b"-").unwrap_or(s);
-                    digits.is_empty() || !digits.iter().all(u8::is_ascii_digit)
+                    // `[0-9]+-` its `r_move_*`; neither forks, because bash
+                    // settles both at parse time. Everything else — the `-`
+                    // close included — is a `_word` form, which does.
+                    !matches!(
+                        crate::ast::dup_spelling(&r.target),
+                        crate::ast::DupSpelling::Number | crate::ast::DupSpelling::MoveNumber
+                    )
                 }
                 RedirectOp::Write
                 | RedirectOp::Clobber
@@ -21106,13 +21136,35 @@ impl Shell {
                         }
                     }
                 }
-                RedirectOp::DupOut => {
-                    let target = self.expand_redirect_target(&r.target, RedirWord::Dup)?;
-                    self.resolve_dup_out(&DupOrigin::Word(r), fd, &target, plan)?;
-                }
-                RedirectOp::DupIn => {
-                    let target = self.expand_redirect_target(&r.target, RedirWord::Dup)?;
-                    self.resolve_dup_in(&DupOrigin::Word(r), fd, &target, plan)?;
+                RedirectOp::DupOut | RedirectOp::DupIn => {
+                    let input = r.op == RedirectOp::DupIn;
+                    // `N>&M-` is a *move*: the dup below, and then a close of
+                    // the source. Taking the `-` off here rather than off the
+                    // expansion is what keeps the two apart — `>&$v-` is a move
+                    // whatever `$v` holds, and `>&$v` with `v=3-` is not one.
+                    let moved = crate::ast::dup_move_source(&r.target);
+                    let word = moved.as_ref().unwrap_or(&r.target);
+                    let target = self.expand_redirect_target(word, RedirWord::Dup)?;
+                    let origin = DupOrigin::Word(r);
+                    if input {
+                        self.resolve_dup_in(&origin, fd, &target, plan)?;
+                    } else {
+                        self.resolve_dup_out(&origin, fd, &target, plan)?;
+                    }
+                    // Only a source that named a real descriptor is closed, and
+                    // never when it is the redirector itself: bash's `3>&3-`
+                    // leaves fd 3 open, where the `3>&3 3>&-` it otherwise
+                    // means would not.
+                    if moved.is_some()
+                        && let DupWord::Fd(n) = Self::classify_dup_word(&target)
+                        && n != fd
+                    {
+                        if input {
+                            self.resolve_dup_in(&origin, n, b"-", plan)?;
+                        } else {
+                            self.resolve_dup_out(&origin, n, b"-", plan)?;
+                        }
+                    }
                 }
             }
         }

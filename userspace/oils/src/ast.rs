@@ -1247,11 +1247,68 @@ pub enum DupSpelling {
     /// `r_duplicating_input_word`/`_output_word`. The classification is the
     /// parser's, so it never sees through quotes: `>&"2"` is a word.
     Word,
+    /// `N>&M-` — bash's `r_move_output`/`r_move_input`: duplicate `M` onto `N`
+    /// and then close `M`. The source is a bare run of digits.
+    MoveNumber,
+    /// `N>&$v-` — bash's `r_move_*_word`, the same thing with a source that has
+    /// to be expanded first.
+    MoveWord,
+}
+
+impl DupSpelling {
+    /// Whether this spelling closes the source descriptor after duplicating it.
+    #[must_use]
+    pub fn is_move(self) -> bool {
+        matches!(self, DupSpelling::MoveNumber | DupSpelling::MoveWord)
+    }
+}
+
+/// The source word of a *move* redirection — `N>&M-` with the trailing `-`
+/// taken off — or `None` if the target is not a move at all.
+///
+/// The `-` is part of the *source text*, never of an expansion: bash sorts the
+/// word at parse time, so `>&$v-` is a move whatever `$v` holds, while `>&$v`
+/// with `v=3-` is not one and ends up naming a file called `3-`. It has to be
+/// unquoted too, by the same rule that keeps `>&"2"` a word: `>&3"-"` is the
+/// filename `3-`.
+#[must_use]
+pub fn dup_move_source(target: &Word) -> Option<Word> {
+    let (last, rest) = target.parts.split_last()?;
+    let WordPart::Literal(s) = last else {
+        return None;
+    };
+    let s = s.strip_suffix(b"-")?;
+    // A bare `-` is a close, not a move with an empty source; and `>&--` is a
+    // close followed by the argument `-`, because bash's lexer takes the `>&-`
+    // before it ever collects a word. Neither leaves a source behind.
+    if s.first() == Some(&b'-') {
+        return None;
+    }
+    let mut parts = rest.to_vec();
+    if !s.is_empty() {
+        parts.push(WordPart::Literal(s.to_vec()));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(Word { parts })
 }
 
 /// Sort a `<&`/`>&` target the way bash's parser does. See [`DupSpelling`].
 #[must_use]
 pub fn dup_spelling(target: &Word) -> DupSpelling {
+    if let Some(src) = dup_move_source(target) {
+        return match dup_spelling_plain(&src) {
+            DupSpelling::Number => DupSpelling::MoveNumber,
+            _ => DupSpelling::MoveWord,
+        };
+    }
+    dup_spelling_plain(target)
+}
+
+/// [`dup_spelling`] without the move check — the sort bash's parser does once it
+/// has already taken any trailing `-` off.
+fn dup_spelling_plain(target: &Word) -> DupSpelling {
     let [WordPart::Literal(s)] = target.parts.as_slice() else {
         return DupSpelling::Word;
     };
@@ -1267,6 +1324,65 @@ pub fn dup_spelling(target: &Word) -> DupSpelling {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The target word of the first redirect on the first simple command.
+    fn first_redirect_target(src: &str) -> Word {
+        let prog = crate::parser::parse(src.as_bytes()).expect("parse");
+        let Command::Simple(sc) = &prog.items[0].list.first.commands[0] else {
+            panic!("not a simple command: {src}");
+        };
+        sc.redirects[0].target.clone()
+    }
+
+    #[test]
+    fn a_move_is_sorted_by_how_the_dash_was_written_not_by_what_it_expands_to() {
+        // The `-` belongs to the source text, so an expansion can neither supply
+        // it nor take it away, and quoting it takes the move away entirely.
+        for (src, want) in [
+            ("true >&3-", DupSpelling::MoveNumber),
+            ("true 1>&3-", DupSpelling::MoveNumber),
+            ("true <&3-", DupSpelling::MoveNumber),
+            ("true >&$v-", DupSpelling::MoveWord),
+            ("true >&${v}-", DupSpelling::MoveWord),
+            // Only the `-` itself has to be bare: `>&"3"-` is still a move, but
+            // of the *word* `"3"`, by the same rule that keeps `>&"2"` a word.
+            ("true >&\"3\"-", DupSpelling::MoveWord),
+            // Quoted dash: not a move at all, just the filename `3-`.
+            ("true >&3\"-\"", DupSpelling::Word),
+            (r"true >&3\-", DupSpelling::Word),
+            // The dash cannot come out of an expansion.
+            ("true >&$v", DupSpelling::Word),
+            // A bare `-` is a close, not a move with an empty source; `--` is a
+            // close with an argument after it, so it is no move either.
+            ("true >&-", DupSpelling::Close),
+            ("true >&3", DupSpelling::Number),
+        ] {
+            assert_eq!(
+                dup_spelling(&first_redirect_target(src)),
+                want,
+                "spelling of {src}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_moves_source_is_the_word_with_the_dash_taken_off() {
+        let src = dup_move_source(&first_redirect_target("true 1>&3-")).expect("a move");
+        assert_eq!(src.parts, vec![WordPart::Literal(b"3".to_vec())]);
+
+        // `>&"3"-` loses only the dash: the quoted part is left as it stands, so
+        // the source still classifies as a word rather than a number.
+        let src = dup_move_source(&first_redirect_target("true 1>&\"3\"-")).expect("a move");
+        assert_eq!(dup_spelling_plain(&src), DupSpelling::Word);
+
+        // Nothing to take off, or nothing left after taking it off.
+        for src in ["true 1>&3", "true 1>&-", "true 1>&$v"] {
+            assert!(
+                dup_move_source(&first_redirect_target(src)).is_none(),
+                "{src} is not a move"
+            );
+        }
+    }
 
     /// The command word of the first simple command in `src`.
     fn first_word(src: &str) -> Word {

@@ -43,6 +43,78 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
+### TD-OILS-CORPUS-SWEEP-IS-UNRUNNABLE-WHEN-PROCESS-SPAWN-LATENCY-SPIKES. A full sweep reports a cascade of `bash=-1` timeouts that are the machine's, not the shell's — 2026-08-06 — OPEN (environmental)
+
+**Where:** `scripts/osh-bash-diff.py` (`CASE_TIMEOUT = 20`, the `# TIMEOUT: N`
+per-case override), and any corpus case that spawns a lot of externals.
+
+**What:** the sweep of 2026-08-06 05:58 recorded seven failures —
+`a-a-collection-declaration-is-split-into-words`,
+`a-a-name-enumeration-passes-over-a-bare-declaration`,
+`local-dash-binds-a-variable-no-listing-reports`, `local-outside-function`,
+`logout`, `nameref-declare`, `noassign-vars` — every one of them of the shape
+
+```
+status: bash=-1 osh=0
+bash stderr: <timed out after 20s>
+```
+
+i.e. the *reference* shell timed out while osh completed with correct output.
+None is a shell bug and none is a regression: the timings below were taken with
+osh not running at all.
+
+**Measured (idle machine, 2026-08-06 06:20–06:35):**
+
+| what | wall | note |
+|---|---|---|
+| `noassign-vars.sh` under bash | 29.4 s | but only 0.59 s user + 1.24 s sys |
+| `local-outside-function.sh` | 13.4 s | |
+| `local-dash-binds-a-variable-…` | 22.6 s | already over the 20 s default |
+| `a-a-collection-declaration-…` | 41.9 s | |
+| `a-a-name-enumeration-…` | 42.8 s | |
+| `nameref-declare.sh` | 44.4 s | |
+| `logout.sh` | 53.2 s | |
+| `bash -c 'for i in $(seq 1 100); do /usr/bin/true; done'` | 36.1 / 41.4 / 38.4 s | **~390 ms per spawn** |
+
+The 29 s wall against 1.8 s of CPU is the whole story: bash is not computing,
+it is waiting on process creation. ~390 ms per `fork`+`exec` through the MSYS
+runtime is roughly **20× the normal cost on this machine**, and it is
+reproducible across back-to-back runs, so it is a standing condition and not a
+momentary spike. A sweep is ~444 cases; at that spawn cost it neither finishes
+in reasonable time nor produces trustworthy results.
+
+**Why it cascades.** Each timed-out case leaves its bash tree behind — the
+run of 05:58 had grown to 16 live `bash.exe` processes, of which 8 went away
+the moment the sweep's own PID tree was killed. So the failures are
+progressively *more* likely the longer the sweep runs: the alphabetical run of
+consecutive victims from `local-*` through `noassign-*` is that, not a family
+resemblance between the cases.
+
+**Not the cause (checked):** Defender real-time protection is on, but it was
+equally on during the green 444-case sweep at 05:15 the same morning; the
+`ftrace.exe` GPU render belonging to a concurrent session started at 06:22,
+*after* the first timeouts at 05:58; and no process was consuming meaningful
+CPU during the 390 ms/spawn measurement (top consumer ~13%).
+
+**What to do:**
+
+1. **Do not read a `bash=-1` failure as a regression.** Discriminate first:
+   `status: bash=-1` with osh's stdout present and correct means the harness
+   timed the *reference* out. Confirm by timing the case under bash alone,
+   with osh uninvolved.
+2. **Re-measure spawn cost before trusting a sweep.** The one-liner in the
+   table above is the canary; under ~50 ms/spawn the 20 s default is fine.
+3. **The proper fix is not to raise `CASE_TIMEOUT`.** Papering over a 20×
+   environment regression with a bigger budget makes every genuine hang cost
+   minutes instead of seconds. `# TIMEOUT: N` remains right for cases that are
+   intrinsically long (the TD-OILS-CORPUS-LOAD-SENSITIVE-CASES precedent) —
+   `local-dash-binds-a-variable-no-listing-reports` at 22.6 s is arguably one
+   even on a healthy machine — but the seven above are not intrinsically long.
+4. **The environment fix needs the operator**, since it is system-wide and
+   needs admin: add Defender process/path exclusions for
+   `C:\Program Files\Git\usr\bin\`, the repo's `target\` tree and `osh.exe`.
+   Logged rather than done for that reason.
+
 ### TD-OILS-A-REDIRECT-LIST-IS-NOT-APPLIED-AS-IT-IS-BUILT. An earlier `2>` in the same list does not catch a diagnostic raised while a later word is expanded — 2026-08-06 — OPEN
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::resolve_redirect_list`, which
@@ -132,7 +204,7 @@ than a change to the field.
 simple-command pipeline stage under `bash -c`. Narrow, but it is exactly the
 status a `set -u` script would branch on.
 
-### TD-OILS-FD-MOVE-REDIRECTS-ARE-NOT-IMPLEMENTED. `n>&m-` / `n<&m-` are rejected as an ambiguous redirect — 2026-08-06 — OPEN
+### TD-OILS-FD-MOVE-REDIRECTS-ARE-NOT-IMPLEMENTED. `n>&m-` / `n<&m-` are rejected as an ambiguous redirect — 2026-08-06 — ✅ FIXED 2026-08-06
 
 **Where:** `userspace/oils/src/ast.rs` — `dup_spelling` has no `Move` variant, so
 a target of `m-` falls through to `DupSpelling::Word`; `userspace/oils/src/interp.rs`
@@ -167,6 +239,106 @@ close of the source. `unparse` must print the trailing `-` back.
 **Impact.** Any script using the move idiom fails outright. The idiom is
 uncommon but not exotic — it is the tidy spelling of the `exec 3>&1 1>&2 2>&3
 3>&-` descriptor shuffle.
+
+**Fixed.** Implemented as proposed, with three things the entry above did not
+anticipate, all measured against bash 5.2.37:
+
+*The `-` is syntactic, and it is the source text that carries it.* bash sorts
+the word at parse time, so the trailing `-` is never something an expansion can
+supply or take away:
+
+| written | is a move? | because |
+|---|---|---|
+| `>&3-` | yes | bare number + unquoted `-` |
+| `>&$v-` | yes, whatever `$v` holds | the `-` is the source text's |
+| `>&"3"-` | yes | only the `-` itself has to be unquoted |
+| `>&3"-"` | **no** — the filename `3-` | the `-` is quoted |
+| `>&$v` with `v=3-` | **no** — the filename `3-` | the `-` came from the expansion |
+
+So `ast::dup_move_source` strips the `-` off the *word*, and `dup_spelling`
+grew `MoveNumber`/`MoveWord` by classifying what is left.
+
+*A self-move does not close.* `3>&3-` leaves fd 3 open, where the `3>&3 3>&-`
+it otherwise means would close it — so the emitted close is skipped when the
+source is the redirector.
+
+*A move names a bad descriptor differently from the word form it looks like.*
+The bare-number form names its source whatever the redirector is (`1>&9-` and
+`3>&9-` both say `9`); every other form names the **redirector**, even where the
+plain word form would have named the word — `1>&$v-` says `1` where `1>&$v`
+says `$v`. `Shell::dup_error_subject` now strips the move first and skips the
+word-or-redirector rule for what is left.
+
+Corpus case: `a-move-redirection-duplicates-its-source-and-then-closes-it.sh`.
+Two residual divergences found while writing it are logged separately as
+TD-OILS-A-FAILED-MOVE-OMITS-BASHS-EXTRA-CANNOT-DUPLICATE-FD-LINE and
+TD-OILS-A-DUP-TARGET-OF-DOUBLE-DASH-IS-NOT-SPLIT-INTO-A-CLOSE-AND-AN-ARGUMENT;
+a third, `1>&3- 2>&3-` in one list, is TD-OILS14 (the order-free `RedirPlan`)
+rather than anything about moves.
+
+### TD-OILS-A-FAILED-MOVE-OMITS-BASHS-EXTRA-CANNOT-DUPLICATE-FD-LINE. A move from a bad descriptor prints one diagnostic where bash prints two — 2026-08-06 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — the `RedirectOp::DupOut`/`DupIn` arm
+of `Shell::resolve_one_redirect` and of `Shell::apply_persistent_redirect`, and
+`Shell::report_redirect_failure`, which prints the *numbered* line.
+
+**What.** When a move's source descriptor is not open, bash prints an extra,
+**unnumbered** line before the ordinary one:
+
+```text
+$ bash -c 'true 1>&9-'
+bash: redirection error: cannot duplicate fd: Bad file descriptor
+bash: line 1: 9: Bad file descriptor
+$ osh -c 'true 1>&9-'
+osh: line 1: 9: Bad file descriptor
+```
+
+The numbered line, and the status, already match. The extra line is bash's
+`add_undo_redirect` failing to save a descriptor for the restore list, and it
+appears on a precisely measured condition — **the redirector fd is already
+open, and the shell itself performs the redirection**:
+
+| case | redirector open? | performed by | extra line |
+|---|---|---|---|
+| `true 1>&9-`, `true 0<&9-`, `true 2>&9-` | yes | shell | yes |
+| `exec 5>&1; true 5>&9-` | yes | shell | yes |
+| `exec 1>&9-`, `1>&9-` (null command) | yes | shell | yes |
+| `true 3>&9-`, `true 5>&9-` | no | shell | **no** |
+| `/bin/true 1>&9-`, `cat <&9-` | yes | forked child | **no** |
+
+**Proper fix.** Carry the "a move failed and the redirector was open" fact out
+on `RedirFailure` and print the extra line from the caller, which is the one
+that knows whether it forks — `Shell::simple_command_forks`, added for
+TD-OILS-NOUNSET-IN-A-REDIRECTION-WORD, already answers exactly that question.
+
+**Impact.** Cosmetic, and only on an error path: one missing stderr line when a
+script moves from a descriptor it never opened. Status and stdout are correct.
+
+### TD-OILS-A-DUP-TARGET-OF-DOUBLE-DASH-IS-NOT-SPLIT-INTO-A-CLOSE-AND-AN-ARGUMENT. `>&--` is taken as one word — 2026-08-06 — OPEN
+
+**Where:** `userspace/oils/src/lexer.rs` — whatever collects the word after a
+`<&`/`>&`; bash's lexer takes the `-` as the whole redirection target the moment
+it sees it, and leaves anything after it to be an ordinary word.
+
+**What.** bash reads `>&-` as a close and the remaining `-` as an *argument*:
+
+```text
+$ bash -c 'f(){ true 1>&--; }; declare -f f'   →   true - 1>&-
+$ bash -c 'exec 3>&1; echo z 1>&--'            →   echo: write error: Bad file descriptor
+$ osh  -c 'f(){ true 1>&--; }; declare -f f'   →   true >&--
+$ osh  -c 'exec 3>&1; echo z 1>&--'            →   (silent, rc=0)
+```
+
+osh keeps `--` as one target word, so it never closes fd 1 and never grows the
+extra argument. Pre-existing — `ast::dup_move_source` deliberately declines a
+source that begins with `-`, so the move work neither caused nor changed it.
+
+**Proper fix.** Stop the dup-target scan at a leading `-`: the target is exactly
+`-`, and the rest of the token is a separate word.
+
+**Impact.** Very low; `>&--` is a typo, not an idiom. Worth fixing only because
+it is a one-line lexer rule and the current behaviour is silently wrong rather
+than an error.
 
 ### TD-OILS-NOUNSET-IN-A-REDIRECTION-WORD. An unbound variable in a here-doc body or a redirection target does not stop the command in osh, and then aborts a shell bash leaves running — 2026-08-06 — ✅ FIXED 2026-08-06
 

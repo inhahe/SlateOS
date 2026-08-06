@@ -746,7 +746,13 @@ fn dup_src(r: &Redirect, default_fd: i32, op: &str) -> Str {
     let target = word_src(&r.target);
     match dup_spelling(&r.target) {
         DupSpelling::Close => bfmt![r.fd, b">&-"],
-        DupSpelling::Number => bfmt![r.fd, op, &target],
+        // A move keeps its own direction, unlike a close, but shows the fd
+        // whichever way the source was written — `>&3-` comes back `1>&3-` and
+        // `<&$v-` comes back `0<&$v-`, where the plain `_word` form would have
+        // elided both. `target` still carries the trailing `-`.
+        DupSpelling::Number | DupSpelling::MoveNumber | DupSpelling::MoveWord => {
+            bfmt![r.fd, op, &target]
+        }
         DupSpelling::Word => fd_prefixed(r.fd, default_fd, op, "", &target),
     }
 }

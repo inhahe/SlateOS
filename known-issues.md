@@ -43,6 +43,86 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
+### TD-OILS-NOUNSET-IN-A-REDIRECTION-WORD. An unbound variable in a here-doc body or a redirection target does not stop the command in osh, and then aborts a shell bash leaves running — 2026-08-06 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — the redirection-plan builder and the
+`RedirectOp::HereDoc` / `RedirectOp::HereStr` expansion paths, and whatever
+decides that a failed expansion aborts the shell rather than failing the
+command.
+
+**What.** Found while fixing TD-OILS-INDIRECT-WHOLE-SET-NOUNSET, which needed to
+know how a here-document body behaves under `set -u`. In bash a here-doc body is
+expanded as a *quoted* word; if that raises an unbound-variable error, the
+diagnostic is printed, **the command does not run**, and the shell survives with
+a non-zero status for that command. osh prints the same diagnostic, then **runs
+the command anyway** with the body it managed to build, and then aborts.
+
+```text
+$ ( set -u; cat <<X
+[$nope]
+X
+  echo tail; echo "rc=$?" )
+
+bash 5.2.37:   nope: unbound variable       osh:   nope: unbound variable
+               tail                                []            <- ran anyway
+               rc=0                                              <- then aborted
+```
+
+Separately, a redirection *target* that fails the same way gets one extra line
+in osh: `: > $nope` under `set -u` prints the unbound diagnostic in both, but
+osh follows it with a spurious `$nope: ambiguous redirect`. bash raises the
+unbound error and never reaches the ambiguity check.
+
+**Proper fix.** A failed expansion inside a redirection word must (a) abandon
+the redirection *and the command it belongs to* before either is performed,
+and (b) be reported as a command failure, not as a shell-fatal condition — the
+shell-fatal path belongs to a *simple command's* word expansion, not to its
+redirections. The ambiguous-redirect check must then not run at all on a word
+whose expansion already failed.
+
+**Impact.** A command runs that bash refuses to run, with a partly-expanded
+here-doc body; and a script that bash keeps alive is killed. Only under
+`set -u`, and only when the unbound variable is inside a redirection word. It is
+why the whole-set corpus case deliberately omits the here-document and
+arithmetic-string contexts — a case there would be measuring this instead.
+
+### TD-OILS-NOUNSET-SKIPS-ARITHMETIC. `set -u` never reaches arithmetic: `(( nope ))` reads 0 in osh where bash calls it an unbound variable and aborts — 2026-08-06 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — the arithmetic evaluator's variable
+lookup (the path that turns a bare name into its value), used by `(( ))`,
+`$(( ))` and an array subscript.
+
+**What.** Also found while fixing TD-OILS-INDIRECT-WHOLE-SET-NOUNSET. Under
+`set -u` bash treats a name read by the arithmetic evaluator exactly like any
+other parameter read: unset is an error, it is reported, and a non-interactive
+shell aborts. osh silently substitutes 0 in every arithmetic context, so the
+diagnostic never appears and the shell keeps going.
+
+```text
+$ ( set -u; (( nope + 0 )); echo tail; echo "rc=$?" )
+bash 5.2.37:  nope: unbound variable          osh:  tail
+              (aborts, no `tail`)                   rc=0
+
+$ ( set -u; echo "$(( nope + 0 ))" )        bash: unbound variable   osh: 0
+$ ( set -u; declare -a a; echo "${a[nope]}" ) bash: unbound variable  osh: (empty)
+```
+
+Note that an *unset* name and a name holding the empty string are different
+here, as everywhere else: bash's arithmetic reads an empty-but-set variable as 0
+without complaint, so the check must be on set-ness, not on the text.
+
+**Proper fix.** Route the arithmetic evaluator's name lookup through the same
+nounset check the word expander uses, so an unset name raises
+`<name>: unbound variable` and takes the usual abort path. The lookup is shared
+by `(( ))`, `$(( ))`, array subscripts, `let`, the arithmetic `for`, and the
+arithmetic-string contexts (`${a[…]}` on the left of an assignment), so one
+place should cover all of them — but each needs a corpus case, because bash's
+arithmetic-string contexts are *quoted* and so differ from the others for
+whole-set references.
+
+**Impact.** A whole class of `set -u` diagnostics is missing, and scripts that
+bash stops osh runs on with a silent 0. No effect with nounset off.
+
 ### TD-OILS-THE-DECLARATION-BUILTINS-GLOBAL-FLAG-COULD-BE-TAKEN-BACK-AND-HAD-NO-TWIN. `declare -g +g`, `declare -G` and `local -g` all landed in the wrong scope — 2026-08-06 — ✅ FIXED 2026-08-06
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::declare_global_flag`,
@@ -33738,7 +33818,7 @@ bad substitution, and the `$!` line never appears.
 
 `tests/corpus/nounset-last-bg-pid.sh` covers the whole shape.
 
-### TD-OILS-INDIRECT-WHOLE-SET-NOUNSET. A quoted `"${!r}"` whose target names an empty `*`-style whole set is an unbound error in bash, not an empty string — 2026-08-06 — OPEN
+### TD-OILS-INDIRECT-WHOLE-SET-NOUNSET. A quoted `"${!r}"` whose target names an empty `*`-style whole set is an unbound error in bash, not an empty string — 2026-08-06 — ✅ FIXED 2026-08-06
 
 **Where:** `userspace/oils/src/interp.rs` — `indirect_ref_part` /
 `indirect_target_value`, the whole-array referent path, and the nounset check
@@ -33779,19 +33859,49 @@ sets that for a `*`-spelled set **when the reference is unquoted**
 quoted `"$*"` is one word and so does not "contain `$@`". The `@`-spelled arms
 have no such condition, which is why they are exempt either way.
 
-**Proper fix.** Two halves. (a) A whole-set referent with no elements must
-answer *unset* rather than the empty string, so the nounset check can see it —
-today `indirect_target_value` returns `Some("")` for `name[@]`/`name[*]`, and
-`indirect_ref_part` hands the whole thing off to `expand_array_ref` as a node,
-which loses the fact that it was reached through an indirection. (b) The check
-then needs the reference's *quoting*, which that node path does not currently
-carry, to reproduce the `*`-quoted/unquoted split. The natural shape is to keep
-the indirection's own nounset decision in `expand_indirect` and give the
-whole-set delegation a flag saying "reached through `${!…}`, quoted or not".
+**Two further halves, measured after the entry was first written.**
 
-**Impact.** A missing diagnostic and a missing abort under `set -u`, in a
-reference that has to be both indirect and `*`-spelled and empty. No effect on
-values with nounset off.
+*The operators that raise it.* The gate at `subst.c:9926-9928` runs only for
+`want_substring || want_patsub || want_casemod || c == '@' || c == '#' ||
+c == '%' || c == RBRACE`. So `${!r:1:2}`, `${!r/x/y}`, `${!r^^}`, `${!r@Q}`,
+`${!r#x}`, `${!r%x}` and the bare `${!r}` all raise, while the whole
+default-value family — `${!r-D}`, `${!r:-D}`, `${!r=D}`, `${!r+S}`, `${!r:+S}`,
+`${!r?}` — is simply absent from that list and is therefore exempt.
+
+*A context that never splits counts as quoted — but only for the bare star.*
+`chk_atstar`'s `*` arm requires `quoted == 0 && expand_no_split_dollar_star == 0`,
+whereas its `name[*]` arm consults `quoted` alone. So in a context that takes
+the word whole without quoting it — an assignment's value `v=${!r}`, an array
+element store `a[0]=${!r}`, a `[[ ]]` word, a `case` pattern, a here-string, the
+operand of a `${x:-…}` — a bare `r='*'` raises and a `r='a[*]'` stays exempt.
+That is bash being inconsistent between its two `*` spellings, and it is
+observable, so osh reproduces it deliberately. A here-**document** body and an
+arithmetic string are *quoted* rather than merely unsplit, so both spellings
+raise in them; a redirection target and the assignment-shaped arguments of
+`declare`/`export`/`local`/`readonly` are ordinary split words and stay exempt.
+
+**Fixed** by two predicates in `interp.rs`. `Shell::whole_star_set_unbound`
+holds the rule: given the referent's base name (`None` for the bare `*`), it
+asks whether the set is empty *by element count* and whether the context is one
+that cannot come apart — `self.dquote` for a `name[*]`, and additionally
+`self.no_split_star || self.cond_word` for a bare `*` — and if so raises
+`!<ref>`, named after the reference rather than the target.
+`Shell::indirect_whole_set_unbound` is the thin wrapper for callers that hold a
+resolved target *string*: it recognises `*` and `name[*]` and delegates. Four
+call sites use them — `expand_indirect`, `indirect_ref_part`,
+`indirect_op_part`, and the `WordPart::IndirectOp` arm — the last two passing an
+`op_exempt` flag so the default-value family is skipped.
+
+`Shell::no_split_star` is a new field mirroring bash's
+`expand_no_split_dollar_star`, with exactly one reader (the predicate above) so
+it cannot regress anything else. It is set in `expand_assignment_value` and
+`expand_operand_fields`, and in the new `Shell::expand_here_string` — which also
+folded together the two duplicated `RedirectOp::HereStr` bodies (the
+`exec`/persistent-redirect path and the command redirection-plan path) that had
+drifted apart. `command_sub_body` clears it alongside `dquote` and `cond_word`.
+
+**Corpus:** `an-empty-star-set-reached-through-a-reference-is-unset-where-it-cannot-come-apart.sh`,
+107 lines, byte-identical to bash 5.2.37.
 
 ### TD-OILS-READ-LONE-BACKSLASH-CTLESC. `read` on input that is nothing but a trailing backslash leaves bash's internal `CTLESC` (`\001`) in the variable; osh leaves it empty — NOT-A-BUG (bash defect, deliberately not replicated) — 2026-08-01
 

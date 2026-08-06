@@ -4212,6 +4212,19 @@ pub struct Shell {
     /// [`Shell::cond_word`]: `"$(f)"` quotes the substitution's *result*, not
     /// the words `f` runs.
     dquote: bool,
+    /// bash's `expand_no_split_dollar_star`: a context that takes the word
+    /// *whole*, so an unquoted `$*` joins with `$IFS`'s first character instead
+    /// of coming apart into fields — an assignment's value, a here-string, the
+    /// operand of a `${x:-w}`. Distinct from [`Shell::dquote`] because bash
+    /// keeps the two apart, and one place can tell: the `*` arm of `chk_atstar`
+    /// consults both, while the `name[*]` arm consults only the quoting. So
+    /// `declare -a a; r='a[*]'; v=${!r}` is exempt from the `set -u` fault
+    /// below where `r='*'; v=${!r}` is not. See
+    /// [`Shell::indirect_whole_set_unbound`], its only reader.
+    ///
+    /// A `[[ ]]`/`case` word is one of these contexts too, but it already has
+    /// [`Shell::cond_word`] to say so and the predicate asks that separately.
+    no_split_star: bool,
     /// Set when a `[[ … =~ RHS ]]` match fails because the RHS could not be
     /// compiled as a regex. bash reports such a `[[` command as status 2 (not 1
     /// "no match") and prints nothing to stderr. `exec_cond` checks this flag
@@ -5088,6 +5101,7 @@ impl Shell {
             saw_quoted_at_list: false,
             run_at_unjoins: false,
             dquote: false,
+            no_split_star: false,
             cond_regex_error: false,
             arith_cmd: None,
             expand_cmd: None,
@@ -10934,6 +10948,7 @@ impl Shell {
             saw_quoted_at_list: false,
             run_at_unjoins: false,
             dquote: false,
+            no_split_star: false,
             cond_regex_error: false,
             arith_cmd: None,
             // A fork inherits the name in force, because bash's is an ordinary
@@ -14607,6 +14622,12 @@ impl Shell {
             self.note_shell_error(FatalWhen::ErrexitOrPosix);
             return Str::new();
         };
+        // An empty `*`-spelled whole set is unset here even though it expands to
+        // a perfectly good empty string, so it has to be asked about before the
+        // value is read rather than after. See the helper.
+        if self.indirect_whole_set_unbound(refname, index, name, false) {
+            return Str::new();
+        }
         match self.indirect_target_value(name) {
             Some(v) => v,
             None => {
@@ -14672,6 +14693,98 @@ impl Shell {
         self.perrln(b"$!: unbound variable".as_slice());
         let raw = bfmt![b"!", Self::indirect_ref_src(refname, index)];
         self.bad_substitution_with(&raw, false);
+        true
+    }
+
+    /// The whole set that `set -u` still objects to: a `*`-spelled one with no
+    /// elements, read through a reference somewhere it could not have come
+    /// apart. `true` means the complaint is out and there is nothing to expand.
+    ///
+    /// A whole set is normally exempt — a list with nothing in it is a
+    /// legitimate answer, which is why `"${a[*]}"` on an empty `a` is silent —
+    /// but bash grants that exemption only where the reference *is* a list.
+    /// Its nounset check (`subst.c:9928`) skips a reference whose
+    /// `all_element_arrayref` is set, and for an **indirect** one that flag
+    /// comes from `chk_atstar` on the resolved target (`subst.c:9840`) rather
+    /// than being set unconditionally the way a direct array reference sets it
+    /// (`subst.c:9883`). `chk_atstar` answers yes for `@` and `name[@]` always,
+    /// but for `*` and `name[*]` only when the reference is unquoted — a quoted
+    /// `"$*"` is one word, so it "contains `$@`" in no useful sense. Hence a
+    /// split that exists for indirection and not for the written-out spelling:
+    /// `"${a[*]}"` is silent where `r='a[*]'; "${!r}"` faults.
+    ///
+    /// The two spellings then part company once more, and bash is simply
+    /// inconsistent about it: the `*` arm also consults
+    /// `expand_no_split_dollar_star`, so an unquoted bare `*` faults in any
+    /// context that takes the word whole ([`Shell::no_split_star`]), while an
+    /// unquoted `name[*]` stays exempt in all of them.
+    ///
+    /// What decides emptiness is the **element count**, not the text the
+    /// elements join to: `set -- ""` and `a=("")` hold one empty element and
+    /// are set, where `declare -A m` with no keys is not.
+    ///
+    /// Callers pass `op_exempt` for the `${x:-w}` family, which bash's check
+    /// leaves out of its operator list entirely.
+    fn indirect_whole_set_unbound(
+        &mut self,
+        refname: &str,
+        index: &Option<ArrayIndex>,
+        target: &str,
+        op_exempt: bool,
+    ) -> bool {
+        // Only the `*` spellings are ever in question, so anything else — an
+        // ordinary name, an element reference, either `@` — is settled here.
+        let base = if let Some(open) = target.find('[') {
+            let Some(inner) = target.strip_suffix(']') else {
+                return false;
+            };
+            if inner.get(open.saturating_add(1)..) != Some("*") {
+                return false;
+            }
+            match target.get(..open).filter(|b| !b.is_empty()) {
+                Some(b) => Some(b.to_owned()),
+                None => return false,
+            }
+        } else {
+            if target != "*" {
+                return false;
+            }
+            None
+        };
+        self.whole_star_set_unbound(refname, index, base.as_deref(), op_exempt)
+    }
+
+    /// [`Shell::indirect_whole_set_unbound`] with the target already taken
+    /// apart: `None` is the bare `*`, `Some(base)` is `base[*]`. The recognisers
+    /// know that much without re-reading the pointer, and the two spellings do
+    /// not ask the same question about the context, so this is where the split
+    /// lives.
+    fn whole_star_set_unbound(
+        &mut self,
+        refname: &str,
+        index: &Option<ArrayIndex>,
+        base: Option<&str>,
+        op_exempt: bool,
+    ) -> bool {
+        if op_exempt || !self.nounset || self.expansion_failed() {
+            return false;
+        }
+        // `name[*]` asks about the quoting alone; a bare `*` asks about every
+        // context that keeps a word whole.
+        let empty = match base {
+            Some(base) => self.dquote && self.array_elements(base).is_empty(),
+            None => {
+                (self.dquote || self.no_split_star || self.cond_word)
+                    && self.positional.is_empty()
+            }
+        };
+        if !empty {
+            return false;
+        }
+        // Named after the reference the writer typed, like every other nounset
+        // complaint an indirection makes — `!r`, never the `*` it reached.
+        let shown = bfmt![b"!", Self::indirect_ref_src(refname, index)];
+        self.raise_unbound(&shown);
         true
     }
 
@@ -14757,6 +14870,13 @@ impl Shell {
             return None;
         }
         let (name, star) = self.indirect_whole_array(refname, index)?;
+        // The one complaint this path has to make itself: a `Some` means the
+        // caller never reaches [`Shell::expand_indirect`], so the empty-set
+        // nounset fault has no other home. It is silent unless it fires, which
+        // is what the recogniser contract above is really about.
+        if star && self.whole_star_set_unbound(refname, index, Some(&name), false) {
+            return None;
+        }
         Some(WordPart::ArrayRef {
             name,
             index: if star {
@@ -14840,6 +14960,21 @@ impl Shell {
             return None;
         }
         let (name, star) = self.indirect_whole_array(refname, index)?;
+        // As in [`Shell::indirect_ref_part`] — with the operator exemption, which
+        // for this shape is exactly the `${x:-w}` family: bash's nounset check
+        // lists the operators that can raise one (`want_substring || want_patsub
+        // || want_casemod || '@' || '#' || '%' || RBRACE`, `subst.c:9926`) and
+        // that family is not among them.
+        if star
+            && self.whole_star_set_unbound(
+                refname,
+                index,
+                Some(&name),
+                matches!(target, WordPart::ParamOp { .. }),
+            )
+        {
+            return None;
+        }
         array_target_part(target, name, star)
     }
 
@@ -19493,9 +19628,7 @@ impl Shell {
                 let body = if matches!(r.op, RedirectOp::HereDoc) {
                     self.expand_double_quoted(&r.target.parts)
                 } else {
-                    let mut s = self.expand_to_string(&r.target);
-                    s.push(b'\n');
-                    s
+                    self.expand_here_string(&r.target)
                 };
                 if fd == 0 {
                     self.exec_stdin = Some(bytes_input(body));
@@ -20560,8 +20693,7 @@ impl Shell {
                     Self::plan_here_bytes(fd, body, plan);
                 }
                 RedirectOp::HereStr => {
-                    let mut s = self.expand_to_string(&r.target);
-                    s.push(b'\n');
+                    let s = self.expand_here_string(&r.target);
                     Self::plan_here_bytes(fd, s, plan);
                 }
                 RedirectOp::WriteBoth | RedirectOp::AppendBoth => {
@@ -22252,6 +22384,20 @@ impl Shell {
         fields.concat()
     }
 
+    /// A here-string's body: the word taken whole, with the newline bash adds.
+    ///
+    /// Whole but *not* quoted: bash expands it with `expand_string_unsplit`, so
+    /// an unquoted `$*` in one joins rather than splitting — see
+    /// [`Shell::no_split_star`]. A here-*document* body is quoted instead, and
+    /// its callers say so by going through [`Shell::expand_double_quoted`].
+    fn expand_here_string(&mut self, word: &Word) -> Str {
+        let saved_star = std::mem::replace(&mut self.no_split_star, true);
+        let mut s = self.expand_to_string(word);
+        self.no_split_star = saved_star;
+        s.push(b'\n');
+        s
+    }
+
     /// The same, for a `[[ ]]` operand or a `case` subject — [`Shell::cond_word`],
     /// which joins like an assignment's value but for the two rules
     /// [`Shell::at_sep`] and [`Shell::cond_word_indirect`] record.
@@ -22307,7 +22453,14 @@ impl Shell {
     /// produced by a parameter/command expansion does not create one.
     fn expand_assignment_value(&mut self, word: &Word) -> Str {
         let saved = self.begin_word(word);
+        // An assignment takes its value whole, which is bash's
+        // `expand_no_split_dollar_star` — see [`Shell::no_split_star`]. It is
+        // *this* path and not the `declare`/`export`/`local` arguments that look
+        // like assignments: those are ordinary command words to bash, and an
+        // unquoted `$*` in one still splits.
+        let saved_star = std::mem::replace(&mut self.no_split_star, true);
         let out = self.expand_assignment_value_inner(word);
+        self.no_split_star = saved_star;
         self.end_word(saved);
         out
     }
@@ -22460,6 +22613,11 @@ impl Shell {
             SplitMode::Operand
         };
         let saved = self.begin_word(arg);
+        // bash expands the operand with `expand_string_unsplit`, so it is one of
+        // the contexts that keeps a `$*` whole even unquoted — see
+        // [`Shell::no_split_star`]. The fields the operand hands back are the
+        // *enclosing* word's to split, which is a different question.
+        let saved_star = std::mem::replace(&mut self.no_split_star, true);
         // Scoped to this operand, and reported to whoever joins its fields:
         // a list inside a *nested* operand is that operand's own business, and
         // this restore is what keeps it there. See [`Shell::saw_quoted_list`].
@@ -22468,6 +22626,7 @@ impl Shell {
         let fields = self.expand_word_annotated(arg, mode);
         self.operand_saw_list = std::mem::replace(&mut self.saw_quoted_list, outer);
         self.operand_saw_at_list = std::mem::replace(&mut self.saw_at_list, outer_at);
+        self.no_split_star = saved_star;
         self.end_word(saved);
         fields
     }
@@ -23167,6 +23326,20 @@ impl Shell {
                 if operand.is_none()
                     && !points_nowhere
                     && self.indirect_special_unbound(refname, index, &tname)
+                {
+                    return Str::new();
+                }
+                // And an empty `*`-spelled whole set is unset here whatever it
+                // expanded to, so it is asked about on the same footing. The
+                // bracketed spellings never reach this — `indirect_op_part`
+                // answered them above — so this is the bare `$*` target.
+                if !points_nowhere
+                    && self.indirect_whole_set_unbound(
+                        refname,
+                        index,
+                        &tname,
+                        matches!(**target, WordPart::ParamOp { .. }),
+                    )
                 {
                     return Str::new();
                 }
@@ -25485,7 +25658,12 @@ impl Shell {
         // Nor is the quoting: `"$(f)"` quotes the substitution's result, and
         // leaves `f`'s own words unquoted. See [`Shell::dquote`].
         let saved_dquote = std::mem::replace(&mut self.dquote, false);
+        // Nor is the splitting: `v=$(f)` takes the *substitution* whole, and
+        // leaves `f`'s own words to split as they would anywhere. See
+        // [`Shell::no_split_star`].
+        let saved_star = std::mem::replace(&mut self.no_split_star, false);
         let out = self.command_sub_body_inner(body);
+        self.no_split_star = saved_star;
         self.dquote = saved_dquote;
         self.cond_word = saved_cond_word;
         out

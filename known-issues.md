@@ -797,46 +797,107 @@ errors `eval: line N:` and echoes the eval *string* rather than the script line.
 — which reaches the shape repeatedly through `eval` (confined, status 2), since
 a bare one kills the script and so has to go last.
 
-### TD-OILS-A-DECLARATION-BUILTIN-FOLLOWS-A-REFERENCE-TO-AN-ELEMENT-THAT-BASH-LEAVES-ALONE. `f() { declare -n r='n[1]'; declare r=(x y); }` refused where bash does nothing at all — 2026-08-05 — OPEN
+### TD-OILS-A-DECLARATION-BUILTIN-THAT-BINDS-A-LOCAL-THROUGH-A-REFERENCE-TO-AN-ELEMENT-MAKES-A-LOCAL-NAMED-BY-THE-SPELLING. `f() { declare -n r='n[1]'; declare r=zz; }` binds a local literally *named* `n[1]` — 2026-08-05 — OPEN
 
-**Where:** `userspace/oils/src/interp.rs` — `Shell::declare_compounds_scoped`,
-the `follow` condition `self.nameref_attr.contains(&a.name) && (!make_local ||
-self.local_binds_here(&a.name))`.
+**Where:** `userspace/oils/src/interp.rs` — `Shell::builtin_declare_scoped` (the
+scalar operand path, where `target` is applied as `(base, sub)`),
+`Shell::declare_compounds_scoped` (the compound operand path), and whatever
+turns a nameref's value into a `RefTarget` on the read/write side.
 
-**What.** A declaration builtin follows a nameref operand — but bash stops
-following when the binding the declaration *writes* is the reference itself, and
-then quietly does nothing rather than binding the reference. osh follows in that
-case and reaches the element refusal. Measured with a global `n=(a b c)`:
+**What.** A declaration builtin that binds a **local** follows a nameref the
+current frame holds — and then makes a local whose *name* is the reference's
+target **spelling, verbatim**. When the target carries a subscript that name is
+not an identifier at all: bash happily creates a variable called `n[1]`, and
+`n[1+1]`, `n[ 1 ]`, `m[k]`, `n[@]` alike — the text is never parsed. Measured
+(`n=(a b c)` global, everything else inside `f`):
 
 ```text
-                                              bash             osh
-declare -n r='n[1]'; declare r=(x y)          `n[1]': not a    the same — agreed
-  (at global scope)                           valid identifier
-f() { declare -n r='n[1]'; declare r=(x y); } s=0, nothing     the refusal
-f() { declare -n r='n[1]'; local r=(x y); }   s=0, nothing     the refusal
-f() { declare -n r='n[1]'; local r=zz; }      s=0, nothing     `n` becomes
-                                                               `([1]="zz")`
-declare -n r='n[1]'
-  f() { declare -g r=(x y); }                 s=0, nothing     the refusal
-f() { declare -n r='n[1]'; declare -g r=(x y); }
-                                              s=0, nothing     the same — agreed
-declare -n r='n[1]'; f() { declare r=(x y); } a fresh local    the same — agreed
-                                              array `r`
-f() { declare -n r=n; declare r=(x y); }      follows, `n`      the same — agreed
-                                              becomes `(x y)`
+                                        bash                       osh
+declare -n r='n[1]'; declare r=zz       a local named `n[1]`,      a local array `n`
+                                        `$r` is `zz`, `${n[1]}`    with `[1]="zz"`;
+                                        still `b`, `set` lists     `${n[1]}` reads `zz`
+                                        `n[1]=zz`
+declare -n r='n[1]'; declare r=(x y)    the same, holding the      `` `n[1]': not a
+                                        array; `${r[*]}` is        valid identifier ``
+                                        `x y`
+declare -n r='n[1]'; declare -i r=7+1   `declare -i n[1]="8"`      —
+declare -n r='n[1]'; declare -A r=([k]=v)
+                                        `declare -A n[1]=([k]="v" )`
+                                                                   —
+declare -n r='n[1]'; declare r          nothing at all, s=0        —
+declare -n r='n[1]'; declare -i r       nothing at all, s=0        —
+declare -n r='n[@]'; declare r=zz       a local named `n[@]`       the refusal
+declare -n r=n; declare r=(x y)         a local *array* `n`,       the same — agreed
+                                        shadowing the global
+declare -n r=nosuch; declare r=(x y)    a local `nosuch`           the same — agreed
 ```
 
-Two things are wrong at once: the scalar case (`local r=zz`) stores where bash
-stores nothing, and every compound case reports a refusal bash does not make.
-The pattern the measurements fit is that bash declines to bind a *reference*
-that its own frame already holds — whether the frame is the local one or, under
-`-g`, the global one — and reports success having done nothing. `local_binds_here`
-is the right question asked backwards, and `-g` is not asked at all.
+So there is no special case at all: the rule is simply *make a local of the
+target's spelling*, and the odd-looking outcomes follow from a spelling that is
+not an identifier. Only a **valued** operand makes one — a valueless `declare r`
+or `declare -i r` creates nothing and leaves `r` the reference it was.
 
-**Proper fix.** Make `follow` false whenever the declaration binds the very
-frame the reference lives in (the `-g` case included), and make that outcome a
-silent success rather than a bind. The scalar operand path in
-`Shell::builtin_declare_scoped` shares the rule and must move with it.
+The binding is real, frame-scoped and reachable: any nameref whose value is that
+same spelling finds it (`g() { declare -n s='n[1]'; echo "$s"; }` prints `zz`
+while the frame lives), a write through such a reference lands on it, `declare -p
+'n[1]'` prints it, and a nested frame making its own leaves the outer one
+untouched. What does *not* see it is a plain `${n[1]}`, which is still the array
+element — the two names only look alike.
+
+Note the boundary: this is the **local**-binding path only. At global scope, and
+under `-g` with a scalar value, bash follows the reference properly and stores
+the array element (`declare -n r='n[1]'; declare r=zz` at top level really does
+set `n[1]`), while a *compound* value there is refused with `` `n[1]': not a
+valid identifier ``. The one shape that fits nothing is `-g` with a compound
+value *inside a function*, which does nothing at all and says nothing — logged
+separately below.
+
+**Proper fix.** Where the operand follows a reference and the declaration binds
+a local, use the target's spelling as the whole name and drop the subscript
+— `(base_name, subscript)` becomes `(spelling, None)` — in both
+`builtin_declare_scoped` and `declare_compounds_scoped`, and only when the
+operand has a value. The read/write side then needs a nameref whose value is a
+subscripted spelling to look for a binding of that literal name *before* it
+treats the text as an element reference.
+
+**Impact.** osh writes the caller's array where bash writes a throwaway local,
+so a function using this shape silently corrupts data the caller still owns —
+and refuses outright on the compound form.
+
+### TD-OILS-A-DECLARATION-BUILTIN-UNDER--G-WITH-A-COMPOUND-VALUE-THROUGH-AN-ELEMENT-REFERENCE-DOES-NOTHING-IN-BASH. `f() { declare -g r=(x y); }` with a global `declare -n r='n[1]'` is silent where every neighbour is not — 2026-08-05 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::declare_compounds_scoped`,
+the `-g` path.
+
+**What.** With a *global* `declare -n r='n[1]'` and a global `n=(a b c)`:
+
+```text
+                                              bash              osh
+declare -g r=zz     (inside a function)       `n[1]` becomes    the same — agreed
+                                              `zz`
+declare -g r=(x y)  (inside a function)       nothing at all,   `` `n[1]': not a
+                                              s=0, no output    valid identifier ``
+declare -g r=(x y)  (at top level)            the refusal       the same — agreed
+declare r=(x y)     (at top level)            the refusal       the same — agreed
+declare -g r=(x y)  (plain ref `r=n`,         follows, `n`      the same — agreed
+                     inside a function)       becomes `(x y)`
+```
+
+So the scalar `-g` follows, the top-level compound refuses, and only the
+compound `-g` *inside a function* falls silently through both. It looks like
+bash's compound path taking the local-binding branch (because
+`variable_context > 0`) and then finding no local frame to bind a
+spelling-named variable in.
+
+**Proper fix.** Determine which branch bash actually takes — the likeliest
+reading is that the compound operand asks `variable_context` rather than the
+`-g` flag, so it believes it is making a local and then binds nothing — and
+reproduce whichever it is. Do this only after
+TD-OILS-A-DECLARATION-BUILTIN-THAT-BINDS-A-LOCAL-THROUGH-A-REFERENCE-TO-AN-ELEMENT-MAKES-A-LOCAL-NAMED-BY-THE-SPELLING,
+which supplies the branch it would be falling into.
+
+**Impact.** One shape, silently divergent in both directions: osh reports an
+error bash does not, and neither stores anything.
 
 ### TD-OILS-A-WHOLE-ARRAY-REFERENCE-UNDER-A-DECLARATION-BUILTIN-IS-MISSING-ITS-BAD-SUBSCRIPT-LINE. `declare -n r='n[@]'; declare r=(x y)` gives one line where bash gives two — 2026-08-05 — OPEN
 

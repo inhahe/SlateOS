@@ -80,6 +80,22 @@ echo "--- and the merely-declared name is passed over"
 declare | grep -c ZZDECLARED
 declare -p | grep -c ZZDECLARED
 
+echo "=== a merely-declared array is passed over too, of either kind"
+# An empty compound *is* a value, so `q=()` is listed while a bare `declare -a q`
+# — which leaves the name declared and unvalued — is not. `declare -p` reports
+# both, and tells them apart by printing the `=()`.
+declare -a ZZDA
+declare -A ZZDAA
+declare -a ZZEA=()
+declare -A ZZEAA=()
+echo "--- bare declare"; declare | mine
+echo "--- set"; set | mine
+echo "--- declare -p"; declare -p ZZDA ZZDAA ZZEA ZZEAA
+echo "--- and the same for an integer and a plain one"
+declare -i ZZDI
+declare ZZDS
+declare | grep -c '^ZZD[IS]'
+
 echo "=== the same letters without -p, which lists the same names"
 echo "--- declare -r"; declare -r | mine
 echo "--- declare -ai"; declare -ai | mine

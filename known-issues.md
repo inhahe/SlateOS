@@ -960,7 +960,7 @@ the operand. A function that uses `+n` to test whether a reference resolves sees
 the opposite answer, and any attribute in the same command lands on the wrong
 variable.
 
-### TD-OILS-SET-LISTS-A-DECLARED-BUT-UNVALUED-ARRAY. `declare -a qq` then `set` prints a bare `qq`; bash prints nothing — 2026-08-05 — OPEN
+### TD-OILS-SET-LISTS-A-DECLARED-BUT-UNVALUED-ARRAY. `declare -a qq` then `set` prints a bare `qq`; bash prints nothing — 2026-08-05 — ✅ FIXED 2026-08-05
 
 **Where:** `userspace/oils/src/interp.rs` — the `set`-with-no-operands listing.
 
@@ -988,6 +988,13 @@ and `declare -a q=()`), exactly as it already skips a scalar that is only in
 
 **Impact.** Small and cosmetic, but `set` is what scripts diff to snapshot an
 environment, so a spurious line changes the snapshot.
+
+**Fixed 2026-08-05.** `Shell::format_var_setline` answers `None` for an array
+that `Shell::array_is_visible` says was never valued, which is what both callers
+— the bare `set` listing and `declare`'s set-style one — already wanted. An
+empty *assigned* array (`q=()`) is visible and still lists. Corpus:
+`declares-listing-flags-choose-which-names-are-listed.sh`, which already covered
+the scalar half.
 
 ### TD-OILS-A-DECLARATION-BUILTIN-UNDER--G-WITH-A-COMPOUND-VALUE-THROUGH-AN-ELEMENT-REFERENCE-DOES-NOTHING-IN-BASH. `f() { declare -g r=(x y); }` with a global `declare -n r='n[1]'` is silent where every neighbour is not — 2026-08-05 — OPEN
 

@@ -34350,8 +34350,19 @@ impl Shell {
     /// double-quoted form as `declare -p`, but scalars use bash's minimal
     /// single-quote style (see `quote_set_value`) — e.g. `y=5`, `x='a b'` rather
     /// than `declare -p`'s `y="5"`, `x="a b"`.
+    ///
+    /// `None` for a name that has been declared and never valued, which this
+    /// listing is not about: bash's is a walk of the variables that *hold*
+    /// something, so `declare -a q` contributes nothing where the empty-but-
+    /// assigned `q=()` contributes `q=()`. The scalar half falls out of osh's
+    /// never putting a bare declaration in [`Shell::vars`]; the array half is
+    /// [`Shell::array_is_visible`], the same flag `declare -p` consults to
+    /// choose between printing `declare -a q` and `declare -a q=()`.
     fn format_var_setline(&mut self, name: &str) -> Option<Str> {
         if self.assoc.contains_key(name) || self.arrays.contains_key(name) {
+            if !self.array_is_visible(name) {
+                return None;
+            }
             return self.format_var_assignment(name);
         }
         if let Some(v) = self.vars.get(name) {

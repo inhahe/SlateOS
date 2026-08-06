@@ -1493,10 +1493,10 @@ struct BuiltinStdout {
     /// itself.
     path: Str,
     append: bool,
-    /// The already-open write half of a `1<> file`, carried over from
+    /// The descriptor the fd-1 redirect opened, carried over from
     /// [`RedirPlan::stdout_write`]. Where it is set the handle is *duplicated*
     /// rather than the path reopened, so the builtin's output lands at the
-    /// offset the read half shares — see [`open_std_sink`].
+    /// offset every other writer of fd 1 shares — see [`open_std_sink`].
     rw: Option<Arc<std::fs::File>>,
     /// Opened at the first write rather than on entry: a builtin that produces
     /// no output must not report a failure to open a file it never used. (The
@@ -20811,7 +20811,26 @@ impl Shell {
         let mut reserved: Vec<i32> = Vec::new();
         for r in redirs {
             self.dup_save_note = DupSaveNote::None;
+            // bash performs a redirect list against the real fd table, strictly
+            // left to right, so redirects 1..N-1 are already *in effect* while
+            // redirect N's word is expanded. Anything the expansion writes to
+            // fd 2 — a `set -u` complaint, or the stderr of a command
+            // substitution inside the word — therefore goes to the sink an
+            // earlier member of the same list established:
+            //
+            //     2>err > $(echo boom >&2; echo /dev/null)   → `boom` in `err`
+            //     > $(echo boom >&2; echo /dev/null) 2>err   → `boom` on the
+            //                                                  terminal
+            //
+            // Pushing the partial plan's sink around the resolution reproduces
+            // that: the whole expansion runs with fd 2 addressed as the list has
+            // addressed it so far, and it is popped again before the next step
+            // re-derives it from the now-larger plan.
+            let pushed = self.push_partial_stderr(&plan, out);
             let attempt = self.resolve_one_redirect(r, &mut plan, &mut reserved, out, scope);
+            if pushed {
+                self.stderr_stack.pop();
+            }
             // A fatal word-expansion error *inside* the redirect's word abandons
             // the redirect and the command with it, before either is performed.
             // Checked here rather than per-op so it covers every word alike —
@@ -21115,16 +21134,25 @@ impl Shell {
     /// Push the `StderrTarget` implied by a *partially applied* redirect plan,
     /// returning whether anything was pushed (and so must be popped).
     ///
-    /// Only used by [`Shell::report_redirect_failure`]; the normal execution
-    /// paths install stderr from a complete plan in `run_builtin` /
-    /// `exec_with_redirects`, where the surrounding capture/merge bookkeeping
-    /// also applies.
-    fn push_partial_stderr(&mut self, p: &RedirPlan, out: &mut Out) -> bool {
-        if let Some((path, append)) = &p.stderr {
-            // Append even for a `2>file`: the file was already truncated when
-            // that redirect was resolved, and re-truncating would drop anything
-            // an earlier command in the same plan wrote.
-            if let Ok(f) = open_std_sink(&self.cwd, p.stderr_write.as_ref(), path, *append) {
+    /// Used by [`Shell::resolve_redirect_list`], to put the redirects already
+    /// resolved in effect while the next one's word is expanded, and by
+    /// [`Shell::report_redirect_failure`], to address the diagnostic for a
+    /// redirect that failed. The normal execution paths install stderr from a
+    /// *complete* plan in `run_builtin` / `exec_with_redirects`, where the
+    /// surrounding capture/merge bookkeeping also applies.
+    fn push_partial_stderr(&mut self, p: &RedirPlan, out: &Out) -> bool {
+        if let Some((path, _append)) = &p.stderr {
+            // Normally the handle beside the path is taken and the path is not
+            // reopened at all — that is the whole point of holding the
+            // descriptor the redirect opened (see [`RedirPlan::stderr_write`]).
+            // Where there is no handle to take, append rather than truncate,
+            // whatever the redirect's own flag says: the file was truncated
+            // once already, when the redirect was resolved (`2>err` empties an
+            // existing `err` even if the command never writes), and truncating
+            // this *re*-open would drop what an earlier step of the same list
+            // has since put there — `2>err > $(echo boom >&2; echo /nodir/f)`
+            // must leave `err` holding both `boom` and the failure message.
+            if let Ok(f) = open_std_sink(&self.cwd, p.stderr_write.as_ref(), path, true) {
                 self.stderr_stack.push(StderrTarget::File(Arc::new(f)));
                 return true;
             }
@@ -21138,9 +21166,11 @@ impl Shell {
         }
         if p.stderr_to_stdout {
             // fd 2 follows fd 1 as of that moment: an already-resolved `>file`
-            // target if there is one, else the caller's live stdout sink.
-            if let Some((path, append)) = &p.stdout {
-                if let Ok(f) = open_std_sink(&self.cwd, p.stdout_write.as_ref(), path, *append) {
+            // target if there is one, else the caller's live stdout sink. The
+            // handle is preferred, and a fallback re-open appends, for the same
+            // reasons as fd 2's own path just above.
+            if let Some((path, _append)) = &p.stdout {
+                if let Ok(f) = open_std_sink(&self.cwd, p.stdout_write.as_ref(), path, true) {
                     self.stderr_stack.push(StderrTarget::File(Arc::new(f)));
                     return true;
                 }
@@ -21361,7 +21391,7 @@ impl Shell {
                     // `&>` truncates, so `set -C` guards it exactly as it guards
                     // the `>` it stands for; `&>>` appends and is exempt.
                     self.noclobber_check(&target, !append)?;
-                    open_output_target(&self.cwd, &target, append)?;
+                    let h = open_output_target(&self.cwd, &target, append)?;
                     // Both fds now target the file: clear every competing dup so
                     // this (later) redirect wins over earlier `2>&1`/`>&N` forms.
                     plan.clear_stdout();
@@ -21370,6 +21400,9 @@ impl Shell {
                     plan.stderr = Some((target, append));
                     // `&>` is `>file 2>&1`: fd 2 is a dup of fd 1, sharing one
                     // open file description (and offset) — writes interleave.
+                    // Literally so: both slots carry the same handle.
+                    plan.stdout_write = Some(Arc::clone(&h));
+                    plan.stderr_write = Some(h);
                     plan.stderr_shares_stdout = true;
                 }
                 RedirectOp::Write | RedirectOp::Clobber | RedirectOp::Append => {
@@ -21386,16 +21419,18 @@ impl Shell {
                     // *before* the open below, which would otherwise truncate the
                     // very file noclobber exists to protect.
                     self.noclobber_check(&target, matches!(r.op, RedirectOp::Write))?;
-                    open_output_target(&self.cwd, &target, append)?;
+                    let h = open_output_target(&self.cwd, &target, append)?;
                     match fd {
                         2 => {
                             // An explicit `2>file` is an *independent* open, even
                             // if it names the same path as `>file`: bash gives each
                             // its own offset, so the writes clobber (not share) —
-                            // hence no `stderr_shares_stdout`. And, being later,
-                            // it overrides any earlier dup or close of fd 2.
+                            // hence no `stderr_shares_stdout`, and hence a handle
+                            // of its own rather than a copy of fd 1's. And, being
+                            // later, it overrides any earlier dup or close of fd 2.
                             plan.clear_stderr();
                             plan.stderr = Some((target, append));
+                            plan.stderr_write = Some(h);
                         }
                         // fd ≥ 3 (`exec 3> file`): a user-space write descriptor,
                         // not stdout. Only `exec` consumes it; on any other
@@ -21407,6 +21442,7 @@ impl Shell {
                         _ => {
                             plan.clear_stdout();
                             plan.stdout = Some((target, append));
+                            plan.stdout_write = Some(h);
                         }
                     }
                 }
@@ -21555,13 +21591,15 @@ impl Shell {
                 }
                 self.noclobber_check(target, true)?;
                 let target = target.to_vec();
-                open_output_target(&self.cwd, &target, false)?;
+                let h = open_output_target(&self.cwd, &target, false)?;
                 plan.clear_stdout();
                 plan.clear_stderr();
                 plan.stdout = Some((target.clone(), false));
                 plan.stderr = Some((target, false));
                 // `>&file` is `>file 2>&1` — fd 2 dup's fd 1 (shared offset,
-                // interleaved writes).
+                // interleaved writes), so both carry the one handle.
+                plan.stdout_write = Some(Arc::clone(&h));
+                plan.stderr_write = Some(h);
                 plan.stderr_shares_stdout = true;
             } else {
                 // The ambiguous message names the *expansion*, unlike the bad-fd
@@ -45115,16 +45153,24 @@ struct RedirPlan {
     /// so `{ cd /nosuchdir; } 2<in` exits 1 in silence.
     stderr_read: Option<InputFd>,
     stdout: Option<(Str, bool)>,
-    /// The *write* half of a `1<> file` — a duplicate of the very descriptor in
-    /// [`RedirPlan::stdout_read`], so the two share one offset, as
-    /// [`RedirPlan::stdin_write`] is for fd 0.
+    /// The descriptor the fd-1 redirect *opened* — the single open file
+    /// description every writer of fd 1 then shares, as [`RedirPlan::stdin`] is
+    /// for fd 0. bash opens a target once, when the redirect is performed; the
+    /// path beside it is kept because it is what the rest of the plan is asked
+    /// about (whether fd 1 is writable at all, and whether a same-path `2>&1`
+    /// is a dup), but it is the handle that is written through, and wherever it
+    /// is set it wins over the path (see [`open_std_sink`]).
     ///
-    /// Set only for `<>`. Where it is set it wins over the `stdout` path beside
-    /// it (see [`open_std_sink`]): reopening the path would give a second open
-    /// file description with an offset of its own, so the write would land at
-    /// the end rather than where the read half stands. The path is kept anyway,
-    /// since it is what the rest of the plan is asked about — whether fd 1 is
-    /// writable at all, and whether a same-path `2>&1` beside it is a dup.
+    /// Sharing the one description is not a detail — reopening the path per
+    /// writer gives each an offset of its own, so a `>file` would truncate away
+    /// what an earlier writer of the same command had already put there, and a
+    /// `1<>file` would write at the end rather than where the read half stands.
+    /// Three things reach for it: a `<>` (where it is the duplicate of
+    /// [`RedirPlan::stdout_read`]), a plain `>`/`>>`/`>|`, and a dup that
+    /// copies another fd's description (`>file 2>&1` gives fd 2 *this* handle).
+    ///
+    /// `None` means fd 1 has no file of its own — it is a dup of a live sink, a
+    /// pipe, a capture, or the ambient descriptor.
     stdout_write: Option<Arc<File>>,
     stderr: Option<(Str, bool)>,
     /// [`RedirPlan::stdout_write`] for fd 2.
@@ -50480,7 +50526,8 @@ fn nth_source_line(src: BStr<'_>, line: u32) -> Option<BStr<'_>> {
 }
 
 /// Create/truncate (or open for append) an output redirect's target *now*,
-/// discarding the handle and keeping only the success/failure.
+/// returning the descriptor — the one open file description every writer of
+/// that fd will share for the command's duration.
 ///
 /// bash establishes redirections strictly left to right against the real fd
 /// table, so `> f`'s file side effect happens before the next redirect is even
@@ -50491,9 +50538,14 @@ fn nth_source_line(src: BStr<'_>, line: u32) -> Option<BStr<'_>> {
 /// non-existent, while `2>err > nodir/f` reports *into* `err`. It also gives
 /// no-output commands (`: > f`, `true 2> e`, a bare `> f`) the create/truncate
 /// bash performs for them.
-fn open_output_target(cwd: BStr<'_>, path: BStr<'_>, append: bool) -> Result<(), Str> {
+fn open_output_target(cwd: BStr<'_>, path: BStr<'_>, append: bool) -> Result<Arc<File>, Str> {
     match open_out(cwd, path, append) {
-        Ok(_) => Ok(()),
+        // The descriptor is handed back, not dropped: bash opens a redirect's
+        // target exactly once, when the redirect is performed, and every later
+        // writer of that fd shares the one open file description — so they
+        // share its offset, and none of them can truncate away what an earlier
+        // one wrote. Reopening the path per writer would do both.
+        Ok(f) => Ok(Arc::new(f)),
         // The diagnostic names the path as the *user* wrote it, not the
         // cwd-resolved form bash never shows.
         Err(e) => Err(bfmt![path, b": ", io_error_message(&e)]),

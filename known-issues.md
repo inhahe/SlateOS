@@ -115,7 +115,7 @@ CPU during the 390 ms/spawn measurement (top consumer ~13%).
    `C:\Program Files\Git\usr\bin\`, the repo's `target\` tree and `osh.exe`.
    Logged rather than done for that reason.
 
-### TD-OILS-A-REDIRECT-LIST-IS-NOT-APPLIED-AS-IT-IS-BUILT. An earlier `2>` in the same list does not catch a diagnostic raised while a later word is expanded — 2026-08-06 — OPEN
+### TD-OILS-A-REDIRECT-LIST-IS-NOT-APPLIED-AS-IT-IS-BUILT. An earlier `2>` in the same list does not catch a diagnostic raised while a later word is expanded — 2026-08-06 — ✅ FIXED 2026-08-06
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::resolve_redirect_list`, which
 resolves every redirect in the list before any of the plan is installed.
@@ -156,6 +156,98 @@ dup-vs-close ordering.
 redirection word land in the wrong place whenever the same list already
 redirected fd 2. Silent — the output is not lost, just misrouted — and confined
 to multi-redirect lists.
+
+**Fixed** by doing what the "proper fix" above says — `resolve_redirect_list`
+now pushes the partial plan's stderr sink around each `resolve_one_redirect`
+call, so the whole of step N's expansion runs with fd 2 addressed as steps
+1..N-1 left it — **and by fixing the second bug that turned up the moment the
+first one was fixed.**
+
+**The second bug: a redirect's target was opened once per writer, not once.**
+With the push in place, `2>err > $(echo boom >&2; echo /dev/null)` put `boom`
+into `err` and then *lost* it: the command's own `push_builtin_stderr` reopened
+`err` — with the redirect's own `append` flag, i.e. truncating — and wiped it.
+The list's resolve-time `open_output_target` had opened the file only to create
+and truncate it and to see whether that worked, then dropped the descriptor, and
+every later consumer (`push_builtin_stderr`, `push_partial_stderr`,
+`exec_with_redirects`, the fork path, `BuiltinStdout`) reopened the path for
+itself. bash opens a target exactly once, when the redirect is performed, and
+every writer of that fd then shares the one open file description.
+
+That was invisible while only one writer existed per command, and it is exactly
+what `RedirPlan::stdin` already documents for fd 0 ("bash opens once, at
+redirection time, and every reader of fd 0 for the command's duration shares
+that one open file description"). The fix widens `RedirPlan::stdout_write` /
+`stderr_write` from "the write half of a `1<> file`" to "the descriptor this
+redirect opened", which every consumer already prefers over the path — they all
+call `open_std_sink(cwd, plan.*_write.as_ref(), path, append)`, whose handle
+branch `try_clone`s rather than reopening. `open_output_target` therefore hands
+its `File` back instead of dropping it, and the four places that plan an fd-1 or
+fd-2 file target store it:
+
+| spelling | handles |
+|---|---|
+| `>f` / `>>f` / `>\|f` on fd 1 | `stdout_write` |
+| `2>f` / `2>>f` | `stderr_write` — its *own* open, so `>f 2>f` still clobbers |
+| `&>f` / `&>>f` | one handle in both slots — `&>` is `>f 2>&1`, one description |
+| `>&f` (`r_err_and_out` after expansion) | ditto |
+
+and `>f 2>&1` / `2>f 1>&2` now literally share the description that
+`stderr_shares_stdout` was only asserting they shared.
+
+Two behaviours that were previously latent and are now correct by construction:
+a second writer of the same fd within one command continues at the first's
+offset instead of truncating it away, and a `2>err` that has already been
+written through is never re-truncated.
+
+Covered by `userspace/oils/tests/corpus/a-redirect-list-is-performed-left-to-right-and-each-step-is-already-in-effect.sh`.
+
+**Not covered by this fix** — the same left-to-right principle for descriptors
+other than fd 2. See
+TD-OILS-A-REDIRECT-LISTS-EARLIER-MEMBERS-ARE-IN-EFFECT-FOR-EVERY-FD-NOT-JUST-FD-2
+below.
+
+### TD-OILS-A-REDIRECT-LISTS-EARLIER-MEMBERS-ARE-IN-EFFECT-FOR-EVERY-FD-NOT-JUST-FD-2. A later word's expansion cannot see an earlier `3>` or `<` in the same list — 2026-08-06 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::resolve_redirect_list`, which
+now installs the partial plan's *stderr* around each step but nothing else.
+
+**What.** bash performs the whole list against the real fd table, so *every*
+descriptor an earlier member bound is in force while a later member's word is
+expanded — not just fd 2:
+
+```text
+$ bash -c 'true 3>f3 > $(echo x >&3; echo /dev/null)'; cat f3
+x                                     # bash: fd 3 is already open on f3
+$ osh  -c 'true 3>f3 > $(echo x >&3; echo /dev/null)'
+osh: line 1: 3: Bad file descriptor    # osh: the plan is not installed yet
+
+$ bash -c 'true <in > $(cat; echo /dev/null)'
+bash: line 1: $(cat; echo /dev/null): ambiguous redirect
+                                      # bash: `cat` read `in`, so two fields
+$ osh  -c 'true <in > $(cat; echo /dev/null)'
+                                      # osh: `cat` reads the terminal, and hangs
+```
+
+Found while fixing TD-OILS-A-REDIRECT-LIST-IS-NOT-APPLIED-AS-IT-IS-BUILT above,
+whose measurement covered fd 2 only.
+
+**Proper fix.** Grow the partial installation from "the stderr sink" to "the
+plan so far", using the existing `install_extra_fds` / `restore_extra_fds` /
+`install_std_reads` helpers plus a stdin binding, installed *incrementally*
+(only the ops each step added) and unwound once at the end of the list rather
+than pushed and popped per step. The blocker is that `ExtraFdOp::OutputFile`
+still carries a *path*, so re-installing it reopens and re-truncates the file —
+fd ≥ 3 has to be given the same "open once, keep the handle" treatment that fd 1
+and fd 2 just got (`ExtraFdOp::OutputFile(Str, bool)` → a variant carrying the
+`Arc<File>` the resolve-time open produced). fd 0 needs the expansion path to
+take its stdin from the partial plan rather than from the ambient descriptor,
+which today is a parameter rather than shell state.
+
+**Impact.** Confined to a redirect word that *reads* the descriptor table while
+being expanded — a command substitution using `>&N`/`<&N`, or one that reads fd
+0. Rare in practice, but the fd-0 case can *hang* osh where bash returns
+immediately, which is worse than a wrong answer.
 
 ### TD-OILS-A-PIPELINE-STAGE-COUNTS-AS-A-SUBSHELL-FOR-THE-FATAL-ABORT-STATUS. A `set -u` abort in a pipeline stage yields 1 where bash yields 127 — 2026-08-06 — OPEN
 

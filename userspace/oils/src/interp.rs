@@ -53923,8 +53923,9 @@ fn format_conversion(
         if let Some(p) = prec_n {
             rendered.truncate(p);
         }
-        // String-style field-width padding (never zero-padded).
-        let len = bytes::char_count(&rendered);
+        // String-style field-width padding (never zero-padded), by bytes like
+        // every other field here — see the note at the general padding below.
+        let len = rendered.len();
         if len < width_n {
             let pad = width_n - len;
             if left {
@@ -54031,14 +54032,16 @@ fn format_conversion(
             }
             q
         }
-        // bash's `%c` writes the first *character* of the argument, so a
-        // multibyte character is written whole; a byte that is not part of one
-        // is itself the character (see `bytes::char_at`). An argument that is
-        // empty — or missing altogether — still has a first character: C's
-        // terminator, so bash writes a NUL byte and the field is one wide.
-        b'c' => match next_arg(arg_i) {
-            a if a.is_empty() => vec![0],
-            a => bytes::char_at(&a, 0),
+        // bash's `%c` writes the first *byte*, not the first character: `getchr`
+        // is `(int)garglist->word->word[0]` (printf.def:1165), stored into a
+        // `char` and handed to C's `%c`. So a multibyte argument is cut mid-
+        // character — `printf %c '…x'` writes the lone byte `\xe2` — for the
+        // same reason the field width counts bytes: nothing decodes the string.
+        // An argument that is empty — or missing altogether — still has a first
+        // byte: C's terminator, so bash writes a NUL and the field is one wide.
+        b'c' => match next_arg(arg_i).first() {
+            None => vec![0],
+            Some(&b) => vec![b],
         },
         b'd' | b'i' => {
             let raw = next_arg(arg_i);
@@ -54208,9 +54211,15 @@ fn format_conversion(
 
     // Apply field width padding. The sign/base prefix and the digit body are
     // padded as a unit; for zero-padding the zeros go between them.
-    // Field width counts *characters*, so a multibyte `%s` argument pads to the
-    // width bash would give it rather than to its byte length.
-    let total_len = bytes::char_count(&num_prefix) + bytes::char_count(&rendered);
+    //
+    // The width counts *bytes*, not characters. bash does not lay the field out
+    // itself: `PF` (printf.def:124) reconstructs the directive and hands the
+    // width to the C library as `%*s`, and C's `%s` is a `char *` padded to a
+    // byte count. So a multibyte argument comes out *narrower* than the width
+    // suggests — `printf '[%-8s]' 'a…b'` is `[a…b   ]`, five bytes of text plus
+    // three spaces, not eight columns. It is locale-independent for the same
+    // reason: nothing in the path ever decodes the string.
+    let total_len = num_prefix.len() + rendered.len();
     if total_len < width_n {
         let pad = width_n - total_len;
         if left {
@@ -62312,14 +62321,20 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
 
     #[test]
     fn printf_field_ops_do_not_split_or_panic_on_stray_bytes() {
-        // `%c` writes the first *character*, so a multibyte character is
-        // written whole rather than cut to its lead byte.
-        assert_eq!(run_raw("printf '%c' \"$(printf '\\u00e9x')\"").0, b"\xc3\xa9");
-        // (The companion case — a lone 0xff as the *argument*, which `%c` must
-        // treat as one character — cannot be staged from shell source yet:
-        // command substitution still captures into a `String`, so the byte is
-        // replaced before printf sees it. `bytes::char_at` covers it directly
-        // until the capture path is byte-native.)
+        // `%c` writes the first *byte* — bash's `getchr` is `word[0]` — so a
+        // multibyte argument is cut to its lead byte rather than written whole.
+        assert_eq!(run_raw("printf '%c' \"$(printf '\\u00e9x')\"").0, b"\xc3");
+        // The field width is a byte count too, both for the same reason: bash
+        // hands the directive to C, which never decodes the string. So the
+        // multibyte argument fills more of the field than its width suggests.
+        assert_eq!(
+            run_raw("printf '[%-6s]' \"$(printf 'a\\u00e9b')\"").0,
+            b"[a\xc3\xa9b  ]"
+        );
+        assert_eq!(
+            run_raw("printf '[%6s]' \"$(printf 'a\\u00e9b')\"").0,
+            b"[  a\xc3\xa9b]"
+        );
         // `%.Ns` truncates by bytes (C semantics). Landing mid-character used
         // to panic — `String::truncate` rejects a non-boundary index; over
         // bytes it simply cuts.

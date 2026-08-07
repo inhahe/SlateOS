@@ -28341,19 +28341,39 @@ impl Shell {
     /// expression, reusing the normal [`Shell::command_sub`] path (trailing-
     /// newline stripping, `$(<file)` fast path, read-eval body semantics).
     ///
+    /// An unparseable body is *reported*, not swallowed. It is the substitution
+    /// that is being run here, and bash blames it exactly as it blames one in a
+    /// word — `command substitution: line N: syntax error near unexpected token`
+    /// — before going on to fail the arithmetic on the empty value it left
+    /// behind. `echo $(( 1 + \`fi\` ))` prints both diagnostics, in that order.
+    /// That reporting is [`Shell::command_sub`]'s, which runs the text through
+    /// the read-eval loop with `comsub_read_eval` set; there is nothing to do
+    /// here but not get in its way. (An earlier eager `parse` did get in the
+    /// way, on the theory that a body the enclosing parse never saw could not be
+    /// attributed anywhere. It is: the substitution is its own input.)
+    ///
     /// The body reaches us as raw text — the arithmetic scanner carved it out of
-    /// the expression string — so it numbers its own lines from 1 and takes the
-    /// identity map. An unparseable body yields the empty string *silently*:
-    /// unlike a normal `$( … )` this text was never seen by the enclosing parse,
-    /// so a diagnostic here would be attributed to the wrong place. The eager
-    /// parse is only that validity check; the run is incremental, so a `shopt`
-    /// or `alias` in the body still affects the rest of it.
+    /// the expression string — so it numbers its own lines from 1 and needs the
+    /// same rebasing a backtick in a word gets, off the line the *enclosing
+    /// command* has reached rather than the one the body opened on. That is
+    /// bash's, measured:
+    ///
+    /// ```text
+    /// 3: echo $(( 1 + `fi` ))            body blamed at line 3
+    /// 5: echo $(( 1 + `
+    /// 6: fi                              body blamed at line 8
+    /// 7: ` ))
+    /// ```
+    ///
+    /// Line 8 is past the whole construct: the parser had reached line 7, and
+    /// `fi` is the body's second line, so 7 + 2 - 1. `current_line` is that
+    /// reached line and is already absolute, so an arithmetic expression inside
+    /// an `eval` or a function composes without further work — the same
+    /// `Offset(reached - 1)` [`Shell::command_sub_body_inner`] gives
+    /// [`CmdSubBody::Backtick`].
     fn run_command_sub_text(&mut self, text: BStr<'_>) -> Str {
-        if crate::parser::parse(text).is_err() {
-            return Str::new();
-        }
         self.comsub_count = self.comsub_count.wrapping_add(1);
-        let map = LineMap::Offset(0);
+        let map = LineMap::Offset(self.current_line.saturating_sub(1));
         let path = self.comsub_text_read_file(text, &map);
         self.command_sub(text, &map, path)
     }

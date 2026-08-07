@@ -97,7 +97,7 @@ body, and not a second time out here — otherwise
 
 Covered by `tests/corpus/arith-scan-parses-a-nested-substitution-in-place.sh`.
 
-### TD-OILS-A-FAILING-BACKTICK-INSIDE-AN-ARITHMETIC-EXPANSION-LOSES-ITS-DIAGNOSTIC. `` echo $(( 1 + `fi` )) `` printed only the arithmetic error — 2026-08-07 — OPEN
+### TD-OILS-A-FAILING-BACKTICK-INSIDE-AN-ARITHMETIC-EXPANSION-LOSES-ITS-DIAGNOSTIC. `` echo $(( 1 + `fi` )) `` printed only the arithmetic error — 2026-08-07 — ✅ FIXED 2026-08-07
 
 **Where:** `userspace/oils/src/interp.rs` — the arithmetic evaluator's expansion
 of a command substitution inside an expression.
@@ -118,10 +118,128 @@ The arithmetic error itself matches byte for byte, including the two spaces
 where the substitution's empty value went — so the expansion happens and the
 value is right; only the body's own diagnostic is swallowed.
 
-**Proper fix:** the substitution inside an arithmetic expression must go through
-the same deferred-body path as one in a word, which reports a parse error rather
-than discarding it. Find where the arith evaluator expands and stop it
-suppressing the body's diagnostics.
+**Fixed by** two changes to `Shell::run_command_sub_text`, the entry point the
+arithmetic evaluator uses for a substitution it carved out of an expression
+string. The second was invisible until the first landed.
+
+- **The eager `parse` pre-check is gone.** The function opened with
+  `if crate::parser::parse(text).is_err() { return Str::new(); }`, whose comment
+  reasoned that a body the enclosing parse never saw could not be attributed
+  anywhere, so a diagnostic would be blamed on the wrong place. Measurement
+  contradicted it: bash blames the body exactly as it blames a substitution in
+  an ordinary word — `command substitution: line N: …` — and only then fails
+  the arithmetic on the empty value the failure left behind. Nothing needed to
+  be *added* to report it; `Shell::command_sub` already runs the text through
+  the read-eval loop with `comsub_read_eval` set, and the pre-check was the only
+  thing standing in its way. Deleting it also corrected an exit status for
+  free: `` x=$(( `fi` )) `` returned 0 and now returns bash's 2.
+- **The body is numbered off the line the enclosing command reached**, not from
+  its own line 1. The map was `LineMap::Offset(0)`; it is now
+  `LineMap::Offset(self.current_line.saturating_sub(1))` — the same rebasing
+  `Shell::command_sub_body_inner` gives a `CmdSubBody::Backtick` in a word.
+  bash's rule, measured: blamed line = (line the enclosing command reached) +
+  (line within the body) − 1, so a body whose `fi` sits on physical line 6 with
+  the closing backtick on line 7 is blamed at **line 8** — past the whole
+  construct. `current_line` is already absolute, so an arithmetic expression
+  inside an `eval` or a function composes without further work.
+
+**Still divergent, tracked separately:** `` declare -i n; n=1+`fi` `` — see
+TD-OILS-A-FAILING-SUBSTITUTIONS-STATUS-IS-LOST-WHEN-AN-INTEGER-ASSIGNMENT-ALSO-FAILS.
+
+Covered by `tests/corpus/a-backtick-that-fails-to-parse-is-blamed-before-the-arithmetic-is.sh`.
+
+### TD-OILS-A-COMMAND-RUN-FROM-A-CUT-SHORT-ARITHMETIC-SUBSTITUTION-IS-BLAMED-AT-THE-WRONG-LINE. `` echo $(( $(case x in x) echo 5;; esac) )) `` — 2026-08-07 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — the line a command inherits when it
+is run from text the arithmetic scan left over.
+
+**What.** Both shells end the substitution at the `case` pattern's `)` — that is
+the scan's table, not a defect (see `Shell::skip_opaque`) — so `5` is left as a
+bare word and looked up as a command. They disagree only on the line blamed:
+
+```text
+bash: case.sh: line 25: 5: command not found
+osh : case.sh: line 21: 5: command not found
+```
+
+Line 21 is the `( eval "$1" )` inside the corpus helper `e`, i.e. the line the
+*enclosing* command reached. Line 25 is further on, so bash is counting
+something osh is not; the probe was one physical line either way, so this is not
+a body-line-vs-physical-line question of the kind
+TD-OILS-A-FAILING-BACKTICK-INSIDE-AN-ARITHMETIC-EXPANSION-LOSES-ITS-DIAGNOSTIC
+settled.
+
+**Proper fix:** measure what bash counts here before changing anything — the 25
+needs explaining first. Probe with a helper whose `eval` sits at a known line
+and vary the distance between it and the failing word; the difference between 21
+and 25 should identify what is being added.
+
+Not probed in `tests/corpus/arith-expansion-scan-and-classify.sh` — the section
+on the scan's skip table notes the exclusion — because the rest of that probe
+matches and only the line number would fail.
+
+### TD-OILS-A-FAILING-SUBSTITUTIONS-STATUS-IS-LOST-WHEN-AN-INTEGER-ASSIGNMENT-ALSO-FAILS. `` declare -i n; n=1+`fi` `` — 2026-08-07 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — the status an assignment returns when
+the variable is integer-attributed and the arithmetic evaluation of its value
+fails.
+
+**What.** An assignment normally returns the status of the last substitution its
+value performed. When the variable carries `-i`, the assigned text is then
+evaluated as arithmetic, and that evaluation can fail in its own right. bash
+keeps the substitution's status through that second failure; osh replaces it
+with the arithmetic one:
+
+```text
+declare -i n; n=1+`fi`
+  bash: command substitution: line 1: syntax error near unexpected token `fi'
+        line 1: 1+: syntax error: operand expected (error token is "+")   rc=2
+  osh : (same two diagnostics)                                            rc=1
+```
+
+Both diagnostics match byte for byte — this is purely the status.
+
+**Only this shape.** Measured against bash 5.2.37, every neighbour already
+agrees at rc=2: `` x=`fi` `` (no integer attribute), `` n=`fi` `` and
+`` n=`fi`+1 `` (integer, but the arithmetic of an empty/`+1` value does not
+itself fail the same way), and `` declare n; n=1+`fi` `` (no integer attribute,
+so `1+` is stored verbatim and never evaluated). The divergence needs *both*
+failures — the substitution's and the arithmetic's — in one assignment.
+
+**Why bash does this.** The failure is not *reported* as a status at all — it is
+an abort. `make_variable_value` (variables.c:2941) calls `evalexp` on the value
+when the slot is `integer_p`, and on `expok == 0` does `top_level_cleanup ();
+jump_to_top_level (DISCARD)` (variables.c:2959–2968) unless the caller passed
+`ASS_NOLONGJMP` — which is how `(( … ))` and `let` get a mere status where an
+assignment gets an unwind. `top_level_cleanup` pops the saved `top_level`
+jump buffer that `parse_and_execute` installed, which is why the unwind passes
+straight through an `eval` or a `source` and always lands in the reader loop.
+And the reader loop's handler does not force a status — it only supplies one
+when there is none (eval.c:103):
+
+```c
+	    case DISCARD:
+	      /* Make sure the exit status is reset to a non-zero value, but
+		 leave existing non-zero values (e.g., > 128 on signal)
+		 alone. */
+	      if (last_command_exit_value == 0)
+		set_exit_status (EXECUTION_FAILURE);
+```
+
+So the 2 the failed substitution left in `last_command_exit_value` survives, and
+the 1 that `declare -i b=2+` produces is merely the `== 0` fallback.
+
+**Proper fix:** `Shell::arm_int_bind_discard` (`interp.rs`) hardcodes
+`status: 1`. It should carry `1` only when `self.last_status` is 0, and the
+current status otherwise — the direct transcription of the C above. (bash
+decides this at the reader loop rather than at the raise, but nothing runs in
+between, so arming with the resolved status is equivalent; `arm_discard`'s
+explicit-status contract is unaffected.) Note this makes
+[`Shell::arm_int_bind_discard`]'s doc example — `` eval 'declare -i b=2+' ``
+leaving `$?` at 1 — the fallback case rather than the rule, so that doc needs
+amending with it. Deliberately excluded from
+`tests/corpus/a-backtick-that-fails-to-parse-is-blamed-before-the-arithmetic-is.sh`
+so that case could land green; add a row there when this is fixed.
 
 ### TD-OILS-AN-UNTERMINATED-BRACE-LEFT-BY-AN-ARITHMETIC-SCAN-IS-NOT-A-BAD-SUBSTITUTION. `echo $[ 1 + ${x:-]} ]` — 2026-08-07 — OPEN
 

@@ -4011,7 +4011,11 @@ impl Lexer {
             Some('{') => {
                 self.pos += 1;
                 let open = self.cur_line();
-                let (raw, nested) = self.read_dollar_brace()?;
+                // bash's `P_DQUOTE` for the body: `read_token_word` hands the
+                // `${` the delimiter it is standing in (`parse_matched_pair (cd,
+                // '{', '}', …)`, parse.y:5033), and `rflags` is `P_DQUOTE` when
+                // that delimiter is a `"` (parse.y:3696).
+                let (raw, nested) = self.read_dollar_brace(in_dquote)?;
                 Ok(Some(Seg::ParamBraced(raw, open, nested)))
             }
             Some('[') => {
@@ -4220,12 +4224,14 @@ impl Lexer {
     ///
     /// Only the *extent* is wanted — the escapes travel unresolved. That is
     /// **not** what bash does: it translates a `$'…'` where it reads it, and
-    /// [`Lexer::read_opaque_span`] does the same. This copy is for the one place
-    /// that cannot yet: a `${ … }` body, where whether the translation is
-    /// re-quoted afterwards depends on a `dolbrace_state` osh does not track
-    /// (parse.y:3865–3888), and where bash 5.2's answer is a defect it has
-    /// already fixed behind `#if 0 /* TAG:bash-5.3 */`. Copying leaves osh with
-    /// the 5.3 answer. See `known-issues.md`,
+    /// both [`Lexer::read_opaque_span`] and [`Lexer::read_dollar_brace_body`] do
+    /// the same. This copy is for the one place that cannot: a `${ … }` body
+    /// written *inside double quotes*, where bash 5.2 translates but does not
+    /// re-quote (the `else` at parse.y:3887, reached because its
+    /// `dolbrace_state` guards are not met), so the `'` and `}` in the
+    /// translation go on to be read as the enclosing scan's own. That is a
+    /// defect bash has already fixed behind `#if 0 /* TAG:bash-5.3 */`, and
+    /// copying the run leaves osh with the 5.3 answer. See `known-issues.md`,
     /// `TD-OILS-AN-ANSI-C-STRING-IS-NOT-REQUOTED-AFTER-A-BRACE-BODY-TRANSLATES-IT`.
     fn take_ansi_c_run(&mut self, raw: &mut Str) -> Result<(), LexError> {
         let q_open = self.cur_line();
@@ -4367,7 +4373,9 @@ impl Lexer {
                             // The body's own eager parses join this scan's: a
                             // `${ … }` is read by `parse_matched_pair` too, so
                             // nothing in it is deferred by sitting one level in.
-                            let (inner, nested) = self.read_dollar_brace()?;
+                            // This one is inside the double-quoted run, so it
+                            // carries `P_DQUOTE` (parse.y:3696).
+                            let (inner, nested) = self.read_dollar_brace(true)?;
                             self.arith_comsubs.extend(nested);
                             raw.extend_from_slice(b"${");
                             raw.extend_from_slice(&inner);
@@ -4446,7 +4454,14 @@ impl Lexer {
             // `)` it wanted rather than the `}`.
             '$' if command && self.peek() == Some('{') => {
                 self.pos += 1;
-                let (inner, nested) = self.read_dollar_brace()?;
+                // Not inside a double-quoted run: the `"` arm above is the one
+                // that reads those, and it passes `true`. (bash would still say
+                // `P_DQUOTE` for a `${ … }` in a `$( … )` body that *encloses*
+                // this scan and was itself written in quotes — its delimiter
+                // stack is never popped for the `(`. osh reads such a body on
+                // its own, so it sees the 5.3 answer there; see
+                // `TD-OILS-AN-ANSI-C-STRING-IS-NOT-REQUOTED-AFTER-A-BRACE-BODY-TRANSLATES-IT`.)
+                let (inner, nested) = self.read_dollar_brace(false)?;
                 self.arith_comsubs.extend(nested);
                 raw.extend_from_slice(b"${");
                 raw.extend_from_slice(&inner);
@@ -4913,15 +4928,20 @@ impl Lexer {
     /// to report. The caller decides — an enclosing raw-text scan folds them
     /// into its own collection, while the parser runs them only where the body
     /// itself was never parsed (`seg_to_part`'s `ParamBraced` arm).
-    fn read_dollar_brace(&mut self) -> Result<(Str, Vec<CmdSubSpan>), LexError> {
+    ///
+    /// `in_dquote` is bash's `P_DQUOTE` for this scan — set when the `${` was
+    /// written inside a double-quoted run. The body is read the same either way;
+    /// all it decides is what becomes of a `$'…'` in it, and that is the one
+    /// place bash 5.2's answer differs from 5.3's. See the arm below.
+    fn read_dollar_brace(&mut self, in_dquote: bool) -> Result<(Str, Vec<CmdSubSpan>), LexError> {
         let outer = std::mem::take(&mut self.arith_comsubs);
-        let r = self.read_dollar_brace_body();
+        let r = self.read_dollar_brace_body(in_dquote);
         let nested = std::mem::replace(&mut self.arith_comsubs, outer);
         r.map(|raw| (raw, nested))
     }
 
     /// The scan proper for [`Lexer::read_dollar_brace`].
-    fn read_dollar_brace_body(&mut self) -> Result<Str, LexError> {
+    fn read_dollar_brace_body(&mut self, in_dquote: bool) -> Result<Str, LexError> {
         let open = self.cur_line();
         let mut raw = Str::new();
         loop {
@@ -4996,6 +5016,35 @@ impl Lexer {
                 // own terminator; consume it whole so a `}` or `)` inside it is
                 // not mistaken for our terminator.
                 '$' => {
+                    // `$'…'` is translated where it is read, like in every other
+                    // grouping construct — but *only* when this scan carries no
+                    // `P_DQUOTE`. That is bash's third re-quoting branch
+                    // (parse.y:3882): `ansiexpand`, then `sh_single_quote`, then
+                    // `retind -= 2` to back up over the `$'` already written.
+                    // Deciding before the `$` is written is the same thing
+                    // without the rewind.
+                    //
+                    // The re-quoting is what keeps the value a value — the text
+                    // spliced in is read again by whatever reads this body, and
+                    // an unquoted `'` or `}` in it would be that reader's. But
+                    // the *shape* changes even so: a `$'x\ny'` puts a real
+                    // newline where the source had none, so a `$LINENO` after it
+                    // in the same `$( … )` body moves down a line, exactly as
+                    // bash's does.
+                    //
+                    // Inside double quotes bash 5.2 instead splices the
+                    // translation in *raw* (the `else` at parse.y:3887, its
+                    // `dolbrace_state` guards not met), which is the defect it
+                    // has already fixed behind `#if 0 /* TAG:bash-5.3 */`.
+                    // Copying the run untranslated leaves osh with the 5.3
+                    // answer; see `known-issues.md`,
+                    // `TD-OILS-AN-ANSI-C-STRING-IS-NOT-REQUOTED-AFTER-A-BRACE-BODY-TRANSLATES-IT`.
+                    if !in_dquote && self.peek() == Some('\'') {
+                        self.pos += 1;
+                        let s = self.read_ansi_c_quote()?;
+                        raw.extend_from_slice(&crate::escape::sh_single_quote(&s));
+                        continue;
+                    }
                     raw.push(b'$');
                     match self.peek() {
                         Some('{') => {
@@ -5005,7 +5054,7 @@ impl Lexer {
                             // `echo ${#x:-${y:-$(fi)}}` is a syntax error, not a
                             // `bad substitution`, so the record has to travel out
                             // past the level that collected it.
-                            let (inner, nested) = self.read_dollar_brace()?;
+                            let (inner, nested) = self.read_dollar_brace(in_dquote)?;
                             self.arith_comsubs.extend(nested);
                             raw.extend_from_slice(&inner);
                             raw.push(b'}');
@@ -5053,11 +5102,13 @@ impl Lexer {
                             raw.extend_from_slice(&inner);
                             raw.push(b']');
                         }
-                        // Not the single-quoted run the `'` arm above would read:
-                        // a `\'` inside `$'…'` is an ANSI-C escape and keeps the
-                        // run open. bash reads one with `P_ALLOWESC` here as in
-                        // every other grouping construct (parse.y:3847), so
-                        // `${x:-$'a\'b'}` has a body that balances.
+                        // The double-quoted case the arm above stepped past.
+                        // Not the single-quoted run the `'` arm further up would
+                        // read: a `\'` inside `$'…'` is an ANSI-C escape and
+                        // keeps the run open. bash reads one with `P_ALLOWESC`
+                        // here as in every other grouping construct
+                        // (parse.y:3847), so `"${x:-$'a\'b'}"` has a body that
+                        // balances.
                         Some('\'') => self.take_ansi_c_run(&mut raw)?,
                         _ => {}
                     }

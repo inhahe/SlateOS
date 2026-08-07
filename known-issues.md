@@ -43,6 +43,112 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
+### TD-OILS-A-DOLLAR-QUOTE-IN-AN-ARITHMETIC-STRING-IS-NOT-TRANSLATED-AT-PARSE-TIME. `echo $(( $"a" ))` — 2026-08-07
+
+**Where:** `userspace/oils/src/lexer.rs` — whatever reads the body of a `$(( … ))`
+/ `$[ … ]`. osh hands the raw text on with the `$'…'` and `$"…"` still in it.
+
+**What:** the two dollar-quotes are translated by the *parser*, not the
+expander: `parse_matched_pair` (parse.y:3854, 3898) rewrites them in place as it
+reads the matched pair, so by the time arithmetic sees the string they are gone.
+The arithmetic body is read without `P_DQUOTE`, which picks these arms:
+
+* `$'…'` → `ansiexpand`, then `sh_single_quote` (parse.y:3884) — the result is
+  re-quoted, so `$'5'` becomes `'5'` and a single-quoted run is *never* valid
+  arithmetic. `$'a\'b'` comes back as `'a'\''b'`. So a `$'…'` in an arithmetic
+  string is always an error in bash too; only the text of the error differs.
+* `$"…"` → `locale_expand`, then (with the default `singlequote_translations`
+  off) `sh_mkdoublequoted` (parse.y:3919) — *not* re-quoted, so the translation
+  is rescanned as arithmetic. `$"a"` is the variable `a`.
+
+**Repro** (bash 5.2.37 left, osh right):
+
+| input | bash | osh |
+|---|---|---|
+| `echo $(( $'a' ))` | ``'a' : syntax error: operand expected (error token is "'a' ")`` | the same with `$'a'` for `'a'` |
+| `echo $(( $'a\'b' ))` | error token ``'a'\''b'`` | error token `$'a\'b'` |
+| `a=5; echo $(( $"a" ))` | `5` | ``$a : syntax error: operand expected`` |
+| `echo $(( $"a" ))` | `0` | the same syntax error |
+| `echo $(( ${x:-$'5'} + 0 ))` | ``'5' + 0 : syntax error…`` | `5` |
+
+osh already evaluates a bare `"a"` inside `$(( … ))` correctly (`echo $(( "a" ))`
+prints `5`), so the whole of the `$"…"` case falls out of doing the translation.
+
+**Proper fix:** translate `$'…'` and `$"…"` where the arithmetic body is *read*,
+with parse.y's re-quoting rule — `sh_single_quote` for `$'…'`, the double-quoted
+form for `$"…"` — rather than leaving them for the arithmetic evaluator, which
+by then cannot tell them from text the writer quoted themselves.
+
+### TD-OILS-A-C-STYLE-FOR-LOOPS-STATUS-FOLLOWED-ITS-HEADER. `for (( $(exit 7); 0; 0 ))` returned 7 — 2026-08-07 — ✅ FIXED 2026-08-07
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::exec_for_arith`.
+
+**What was wrong.** Each of the three header sections is a word expansion and so
+may run commands, which leave their status behind in `$?`. osh returned whatever
+was left there; bash never does. `execute_arith_for_command` (execute_cmd.c)
+keeps a `body_status`, starts it at `EXECUTION_SUCCESS` and writes it *only* from
+`execute_command (arith_for_command->action)` — so a loop that never iterates is
+a success however its header was spelled, and one that did iterate answers with
+the last thing its **body** ran, even though the update section ran afterwards.
+
+```text
+for (( $(exit 7); 0; 0 )); do :; done   bash: 0   osh was: 7
+for (( i=0; i<2; i=i+$(exit 7)1 )); do true; done   bash: 0   osh was: 7
+```
+
+**Fixed by** carrying a `body_status` local through `exec_for_arith` exactly as
+bash does, and assigning it to `self.last_status` on the way out. Covered by
+`tests/corpus/a-c-style-for-loops-status-is-its-bodys-alone.sh`.
+
+### TD-OILS-A-C-STYLE-FOR-HEADER-IS-SPLIT-ON-EVERY-SEMICOLON. `for ((${x:-;}; 0;))` was a syntax error — 2026-08-07 — ✅ FIXED 2026-08-07
+
+**Where:** `userspace/oils/src/parser.rs` — `Parser::parse_for_arith` and the new
+free function `arith_for_sections`.
+
+**What was wrong.** osh carved the header with `raw.split(|&b| b == b';')`. bash
+does not split on a raw semicolon at all: each section runs up to the next `;`
+found by `skip_to_delim (start, 0, ";", SD_NOJMP|SD_NOPROCSUB)`
+(`make_arith_for_command`, make_cmd.c:288), which steps *over* a `\c` pair,
+`'…'`, `"…"`, `` `…` ``, `$( … )`, `${ … }`, `$'…'` and `$"…"` — so a `;` inside
+any of those is part of the section. What it does **not** step over, because the
+flag set says so (subst.c:2181): a `[ … ]` subscript (that wants `SD_GLOB`), a
+`<( … )` / `>( … )` (suppressed by `SD_NOPROCSUB`), a bare `( … )` or a `? :`
+(those want `SD_ARITHEXP`) and `$[ … ]` (which `skip_to_delim` does not know).
+So `a[1;2]` really is two sections in bash.
+
+Nor is a bad count "not a C-style for loop": bash reports it with two
+`parser_error` lines and status 2 (make_cmd.c:311–319) — so no source line is
+echoed under them — and blames the line the `((` was read on
+(`arith_for_lineno`, parse.y:4469), not the `done` the parser has reached by
+then, because the header is counted in the grammar's *reduction* (parse.y:881).
+
+```
+syntax error: arithmetic expression required      # fewer than 3 sections
+syntax error: `;' unexpected                      # more than 3
+syntax error: `((${; 0;))'                        # always, with the raw text
+```
+
+**Repro** (bash 5.2.37 left, osh right):
+
+| input | bash | osh |
+|---|---|---|
+| `for ((${x:-;}; 0;)); do :; done` | `((: ;: syntax error: operand expected`, rc 1 | `C-style for loop requires …`, rc 2 |
+| `x=1; for ((n=${x:-;}; n<2; n++)); do echo n=$n; done` | `n=1` | `C-style for loop requires …` |
+| `for (("1;2"; 0;)); do :; done` | `((: 1;2: … invalid arithmetic operator` | `C-style for loop requires …` |
+| ``for ((`echo 1;2`; 0;)); do :; done`` | `2: command not found`, then rc 0 | `C-style for loop requires …` |
+| `for (($(echo 1;2); 0;)); do :; done` | `2: command not found`, then rc 0 | `C-style for loop requires …` |
+| `for ((a[1;2]=0; 0;)); do :; done` | ``syntax error: `;' unexpected`` + ``syntax error: `((a[1;2]=0; 0;))'`` | `C-style for loop requires …` |
+| `for ((${; 0;)); do :; done` | `syntax error: arithmetic expression required` + the header echo, rc 2 | `${: bad substitution`, rc 1 |
+
+**Fixed by** `arith_for_sections`, which walks the raw header with the existing
+`skip_construct` — the scanner that already models exactly this flag set — and
+by `parse_for_arith` emitting bash's two-message diagnostic at the `((`'s own
+line after the whole `do … done` has been read. Reporting two messages under one
+error needed `ParseError::msg: Str` to become `msgs: Vec<Str>`, so that the
+`line N:` prefix goes on each *message* rather than each physical line (the
+header echo quotes back a header that may itself span lines). Covered by
+`tests/corpus/a-c-style-for-header-is-carved-by-its-own-scan.sh`.
+
 ### TD-OILS-AN-UNTERMINATED-BRACE-LEFT-BY-AN-ARITHMETIC-SCAN-IS-NOT-A-BAD-SUBSTITUTION. `echo $[ 1 + ${x:-]} ]` — 2026-08-07 — ✅ FIXED 2026-08-07
 
 **Where:** `userspace/oils/src/interp.rs` — the `'{'` arm of
@@ -158,50 +264,6 @@ the arithmetic string.
 **Proper fix:** in the double-quoted-word scanner, do not treat `$[` as an
 arithmetic substitution when looking for the end of the quoted text — let the
 `${` be found first, exactly as bash does.
-
-### TD-OILS-A-C-STYLE-FOR-HEADER-IS-SPLIT-ON-EVERY-SEMICOLON. `for ((${x:-;}; 0;))` is a syntax error — 2026-08-07
-
-**Where:** `userspace/oils/src/parser.rs` — `Parser::parse_for_arith`
-(~line 3431), which does `raw.split(|&b| b == b';')`.
-
-**What:** bash does not split the `for (( … ))` header on raw semicolons. Each
-of the three sections is carved with
-`skip_to_delim (start, 0, ";", SD_NOJMP|SD_NOPROCSUB)` (`make_arith_for_command`,
-make_cmd.c:288), which steps *over* a `\c` pair, `'…'`, `"…"`, `` `…` ``,
-`$( … )` and `${ … }` — so a `;` inside any of those is part of the section, not
-a separator. osh's naive split miscounts every such header.
-
-What it does **not** step over, because the flags say so (subst.c:2181): a
-`[ … ]` subscript (that wants `SD_GLOB`), a `<( … )` / `>( … )` process
-substitution (`SD_NOPROCSUB` is set), and a parenthesised group or a `? :`
-(those want `SD_ARITHEXP`, which this call does not pass). So `a[1;2]` really is
-two sections in bash, and the diagnostic below is what comes out.
-
-Nor is a bad count "not a C-style for loop": bash reports it with two lines and
-status 2 (make_cmd.c:311–319), quoting the header text back —
-
-```
-syntax error: arithmetic expression required      # fewer than 3 sections
-syntax error: `;' unexpected                      # more than 3
-syntax error: `((${; 0;))'                        # always, with the raw text
-```
-
-**Repro** (bash 5.2.37 left, osh right):
-
-| input | bash | osh |
-|---|---|---|
-| `for ((${x:-;}; 0;)); do :; done` | `((: ;: syntax error: operand expected`, rc 1 | `C-style for loop requires …`, rc 2 |
-| `x=1; for ((n=${x:-;}; n<2; n++)); do echo n=$n; done` | `n=1` | `C-style for loop requires …` |
-| `for (("1;2"; 0;)); do :; done` | `((: 1;2: … invalid arithmetic operator` | `C-style for loop requires …` |
-| ``for ((`echo 1;2`; 0;)); do :; done`` | `2: command not found`, then rc 0 | `C-style for loop requires …` |
-| `for (($(echo 1;2); 0;)); do :; done` | `2: command not found`, then rc 0 | `C-style for loop requires …` |
-| `for ((a[1;2]=0; 0;)); do :; done` | ``syntax error: `;' unexpected`` + ``syntax error: `((a[1;2]=0; 0;))'`` | `C-style for loop requires …` |
-| `for ((${; 0;)); do :; done` | `syntax error: arithmetic expression required` + the header echo, rc 2 | `${: bad substitution`, rc 1 |
-
-**Proper fix:** port `skip_to_delim`'s section-carving into `parse_for_arith`
-with exactly that flag set (there is already a `${ … }`/`$( … )`/quote-aware
-scanner in the lexer to reuse), count sections bash's way, and emit bash's
-two-line diagnostic with the raw header quoted back.
 
 ### TD-OILS-AN-UNBRACED-NAME-IN-AN-ARITHMETIC-STRING-IS-NOT-NOUNSET-CHECKED. `set -u; echo $(( $y + 1 ))` printed `1` — 2026-08-07 — ✅ FIXED 2026-08-07
 

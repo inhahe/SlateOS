@@ -43,7 +43,7 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
-### TD-OILS-A-NESTED-SUBSTITUTION-INSIDE-AN-ARITHMETIC-SCAN-IS-NOT-PARSED-WHEN-IT-CLOSES. `echo $(( 1 + $(fi) ))` evaluated instead of failing — 2026-08-07 — OPEN
+### TD-OILS-A-NESTED-SUBSTITUTION-INSIDE-AN-ARITHMETIC-SCAN-IS-NOT-PARSED-WHEN-IT-CLOSES. `echo $(( 1 + $(fi) ))` evaluated instead of failing — 2026-08-07 — ✅ FIXED 2026-08-07
 
 **Where:** `userspace/oils/src/lexer.rs` — `Lexer::read_opaque_span`'s nested
 `$( … )` arm, reached from `read_balanced_body` with `command = false`.
@@ -75,6 +75,27 @@ arm needs to do both regardless of `command`. Note this is bash's *only*
 exception — `` ` ` ``, `'…'`, `"…"` and `${…}` stay opaque to the arithmetic
 scan (see
 TD-OILS-AN-UNTERMINATED-ARITHMETIC-EXPANSION-IS-REPARSED-AS-A-SUBSTITUTION-BODY).
+
+**Fixed** as described. The parse itself belongs to `parser`, which the lexer
+must not depend on, so the scan *records* each nested body in a new
+`Lexer::arith_comsubs: Vec<CmdSubSpan>` and the parser drains it: `Seg::Arith`
+gained a third field and `SubBody::ArithFallback` a payload — **both**, because
+the eager parse happens during the scan and so before the `chk_arithsub`
+classification that tells the two apart (`echo $(( echo $(fi) ) )` falls back to
+a command substitution *and* still dies on the `fi`). `parser::seg_to_part` then
+runs `parse_cmdsub_body` on each and throws the result away, which is exactly
+what bash keeps (`APPEND_NESTRET` saves only the text; the body is read again at
+expansion).
+
+Every construct whose text is *copied for a re-lex* takes the list out of the
+way first (`read_subst_body`, `read_dollar_brace`, and the nested `$(` inside a
+double-quoted span), so a body's own substitutions are parsed once, with that
+body, and not a second time out here — otherwise
+`echo $(( $(echo "$(( $(fi) ))") ))` would parse the innermost body twice.
+`parser::map_arith_comsubs` renumbers the recorded close lines alongside
+`Seg::CmdSub`'s, so an error in one is blamed on the enclosing source's line.
+
+Covered by `tests/corpus/arith-scan-parses-a-nested-substitution-in-place.sh`.
 
 ### TD-OILS-A-FAILING-BACKTICK-INSIDE-AN-ARITHMETIC-EXPANSION-LOSES-ITS-DIAGNOSTIC. `` echo $(( 1 + `fi` )) `` printed only the arithmetic error — 2026-08-07 — OPEN
 
@@ -126,6 +147,64 @@ instead — a different path entirely.
 **Proper fix:** expand the arithmetic text as a word before parsing it as an
 expression, and let the word expansion's own errors out. That is the order bash
 uses (`expand_arith_string` runs before `evalexp`).
+
+### TD-OILS-A-SUBSTITUTION-INSIDE-A-BRACE-EXPANSION-IS-BLAMED-ON-THE-BODYS-OWN-LINE. `echo ${x:-$(fi)}` from a script names line 1 — 2026-08-07 — OPEN
+
+**Where:** `userspace/oils/src/parser.rs` — `Seg::ParamBraced` / the
+`parse_braced_param_in` re-lex, and `map_segs`.
+
+**What.** A `${ … }` body is kept as raw text and lexed again by
+`parse_braced_param_in`. That second lex numbers its lines from 1, so a `$( … )`
+inside it records a `close_line` in the *body's* coordinates — and nothing
+renumbers it back, because `map_segs` can only reach the close lines that are
+already `Seg`s. The error is then blamed on line 1 and, having no line in the
+enclosing source to quote, loses its echoed source line as well:
+
+```text
+# a script whose `e() { ( eval "$1" ) 2>&1; … }` sits on line 4
+e 'echo ${x:-$(fi)}'
+bash: eval: line 4: syntax error near unexpected token `fi'
+      eval: line 4: `echo ${x:-$(fi)}'
+osh : eval: line 1: syntax error near unexpected token `fi'
+      (no second line)
+```
+
+Pre-existing and independent of the arithmetic work: `echo ${x:-$(fi)}` shows it
+with no `$((` anywhere. The same text at the top level of a `-c` string matches,
+because there the two coordinate systems coincide. The arithmetic sibling
+`echo $(( ${x:-$(fi)} ))` is *not* affected — an arithmetic scan does not treat
+`${ … }` as opaque, so that `$(` is met by the enclosing scan and renumbered
+with it (see
+TD-OILS-A-NESTED-SUBSTITUTION-INSIDE-AN-ARITHMETIC-SCAN-IS-NOT-PARSED-WHEN-IT-CLOSES).
+
+**Proper fix:** give `Seg::ParamBraced` the line its `${` sits on, renumber it in
+`map_segs` like every other recorded line, and have `parse_braced_param_in`
+apply the resulting offset to the body's own lex — the same shape as
+`parse_procsub_body`'s `LineMap::Offset`. Once done, add
+`e 'echo ${x:-$(( 1 + $(fi) ))}'` back to
+`tests/corpus/arith-scan-parses-a-nested-substitution-in-place.sh`, where it was
+removed for exactly this reason.
+
+### TD-OILS-A-SINGLE-QUOTE-IS-NOT-A-QUOTE-WHEN-AN-ARITHMETIC-EXPANSION-IS-EVALUATED. `echo $(( 1 + '$(fi)' ))` — 2026-08-07 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — expansion of `Seg::Arith`.
+
+**What.** The `$((` *scan* honours `'…'` (`shellquote` recurses for it,
+parse.y:3844), so a `)` in one closes nothing. But the text that survives the
+scan is then expanded as a word, and by then the quotes are just characters
+bash's arithmetic path does not re-honour — so the `$( … )` inside them runs:
+
+```text
+bash: command substitution: line 2: syntax error near unexpected token `fi)' ''
+      … (the substitution ran)
+osh : line 1: 1 + '' : syntax error: operand expected                       rc=1
+```
+
+Almost certainly the same root cause as
+TD-OILS-AN-UNTERMINATED-BRACE-LEFT-BY-AN-ARITHMETIC-SCAN-IS-NOT-A-BAD-SUBSTITUTION:
+osh hands the arithmetic text straight to the expression parser, where bash runs
+`expand_arith_string` over it first. Fixing that one should fix this; measure
+both together.
 
 ### TD-OILS-THE-JOBS-CURRENT-AND-PREVIOUS-TEST-IS-FLAKY-UNDER-LOAD. `jobs_marks_the_current_and_previous_job` failed once in a contended run — 2026-08-07 — OPEN
 

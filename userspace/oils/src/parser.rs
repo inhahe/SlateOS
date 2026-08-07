@@ -41,7 +41,7 @@ use crate::assoc::AssocArray;
 use crate::bfmt;
 use crate::bytes::{self, BStr, Ch, Str};
 use crate::lexer::{
-    AliasExpansion, HeredocEof, ParseOpts, Op, ReaderWarning, Seg, Spanned, Tok,
+    AliasExpansion, CmdSubSpan, HeredocEof, ParseOpts, Op, ReaderWarning, Seg, Spanned, Tok,
     SubBody, TokSpan, Tokenized, UngatheredHeredoc,
     expand_aliases_tracked, tokenize,
     tokenize_paren_body, tokenize_deferred, tokenize_spanned, word_is_assignment,
@@ -2017,11 +2017,27 @@ fn map_lines(toks: &mut [Tok], lines: &mut [u32], map: &LineMap) {
 fn map_segs(segs: &mut [Seg], map: &LineMap) {
     for seg in segs {
         match seg {
-            Seg::CmdSub(_, close, _) => *close = map.map(*close),
+            Seg::CmdSub(_, close, body) => {
+                *close = map.map(*close);
+                if let SubBody::ArithFallback(nested) = body {
+                    map_arith_comsubs(nested, map);
+                }
+            }
+            Seg::Arith(_, _, nested) => map_arith_comsubs(nested, map),
             Seg::ProcSub(_, _, open) => *open = map.map(*open),
             Seg::Dq(inner) => map_segs(inner, map),
             _ => {}
         }
+    }
+}
+
+/// Renumber the nested bodies an arithmetic scan recorded, exactly as a
+/// [`Seg::CmdSub`]'s own close line is renumbered: they are parsed in this token
+/// stream, so an error in one is blamed on the enclosing source's line and not
+/// on the line a fresh lex of the body would have counted.
+fn map_arith_comsubs(nested: &mut [CmdSubSpan], map: &LineMap) {
+    for sub in nested {
+        sub.close_line = map.map(sub.close_line);
     }
 }
 
@@ -4595,6 +4611,23 @@ fn word_from_segs_in(segs: &[Seg], opts: ParseOpts, q: Quoting) -> Result<Word, 
     Ok(Word { parts })
 }
 
+/// Parse the `$( … )` bodies an arithmetic scan stepped over, and throw the
+/// result away.
+///
+/// bash parses them where it meets them — `parse_matched_pair` under `P_ARITH`
+/// sends a `$(` to `parse_dollar_word` and from there to `parse_comsub`
+/// (parse.y:3937, 3959) — but keeps only the *text* (`APPEND_NESTRET`), reading
+/// the body again when the expansion runs. So the parse's one lasting effect is
+/// its error, and that error belongs to the enclosing unit: `echo $(( 1 + $(fi)
+/// ))` never reaches the arithmetic evaluator, and
+/// `if false; then echo $(( 1 + $(fi) )); fi` dies with the branch untaken.
+fn parse_arith_comsubs(nested: &[CmdSubSpan], opts: ParseOpts) -> Result<(), ParseError> {
+    for sub in nested {
+        parse_cmdsub_body(&sub.src, sub.close_line, opts)?;
+    }
+    Ok(())
+}
+
 fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, ParseError> {
     Ok(match seg {
         Seg::Lit(s) => WordPart::Literal(s.clone()),
@@ -4621,10 +4654,13 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
                     verbatim: verbatim.clone(),
                     close_line: *close_line,
                 },
-                SubBody::ArithFallback => CmdSubBody::ArithFallback {
-                    src: raw.clone(),
-                    close_line: *close_line,
-                },
+                SubBody::ArithFallback(nested) => {
+                    parse_arith_comsubs(nested, opts)?;
+                    CmdSubBody::ArithFallback {
+                        src: raw.clone(),
+                        close_line: *close_line,
+                    }
+                }
                 SubBody::Eager => {
                     // The eager parse is kept — it is what found the `)` and
                     // what raises the fatal syntax error — but so is the body
@@ -4634,10 +4670,13 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
                 }
             },
         },
-        Seg::Arith(raw, bracket) => WordPart::ArithSub {
-            expr: raw.clone(),
-            bracket: *bracket,
-        },
+        Seg::Arith(raw, bracket, nested) => {
+            parse_arith_comsubs(nested, opts)?;
+            WordPart::ArithSub {
+                expr: raw.clone(),
+                bracket: *bracket,
+            }
+        }
         Seg::ProcSub(input, raw, open_line) => WordPart::ProcSub {
             input: *input,
             body: parse_procsub_body(raw, *open_line, opts)?,

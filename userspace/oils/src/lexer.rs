@@ -299,7 +299,26 @@ pub enum SubBody {
     /// hands that same text to `command_substitute` — the very call a backtick
     /// body makes — so the body is read then and not before, and there is no
     /// body text to print back other than the one that runs.
-    ArithFallback,
+    ///
+    /// Carries the nested substitutions the scan stepped over, for the same
+    /// reason [`Seg::Arith`] does: the eager parse happens during the scan and
+    /// so before the classification that chose this variant.
+    ArithFallback(Vec<CmdSubSpan>),
+}
+
+/// A `$( … )` body an *arithmetic* scan stepped over, which bash parses in place
+/// (parse.y:3937 → 3959) even though the text around it is an expression.
+///
+/// Only the parse's failure is observable — the body is read again when the
+/// expansion runs — so this carries just what a parse needs. See
+/// [`Lexer::arith_comsubs`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CmdSubSpan {
+    /// The body, without the delimiters.
+    pub src: Str,
+    /// The line the body's own `)` sits on, for the same renumbering an eager
+    /// `$( … )` gets.
+    pub close_line: u32,
 }
 
 /// A word fragment, preserving quoting for later expansion.
@@ -338,7 +357,11 @@ pub enum Seg {
     /// The `bool` is `true` when the deprecated `$[ … ]` spelling was used. The
     /// two evaluate identically, but bash prints a stored function body back in
     /// whichever form the source wrote, so the distinction must survive here.
-    Arith(Str, bool),
+    ///
+    /// The third field is the nested `$( … )` bodies the scan stepped over,
+    /// which bash parses *there and then* rather than at expansion time — see
+    /// [`Lexer::arith_comsubs`].
+    Arith(Str, bool, Vec<CmdSubSpan>),
     /// `<( … )` / `>( … )` process substitution — the `bool` is `true` for the
     /// input form `<(…)`, the `String` is the raw inner command source, and the
     /// `u32` is the 1-based source line the `<(`/`>(` opens on.
@@ -539,6 +562,29 @@ struct Lexer {
     /// too, but its offsets are relative to that string and are simply dropped
     /// with the lexer.
     conts: Vec<u32>,
+    /// The nested `$( … )` bodies the arithmetic scan currently running has
+    /// stepped over, in the order it met them.
+    ///
+    /// bash does not step over one: under `P_ARITH` a `$(` goes to
+    /// `parse_dollar_word` and from there to `parse_comsub` (parse.y:3937,
+    /// 3959), a whole nested parse, so a body that will not parse is a **fatal
+    /// syntax error in the enclosing unit** — raised while the enclosing line is
+    /// still being read, long before any arithmetic is evaluated. Only its
+    /// *text* is kept (`APPEND_NESTRET`); the parse's sole lasting effect is the
+    /// error, and the body is read again when the expansion runs.
+    ///
+    /// The parse itself belongs to [`crate::parser`], which the lexer must not
+    /// depend on, so the scan records the bodies here and the parser drains them
+    /// out of the [`Seg`] — see `seg_to_part`. Both spellings of the result
+    /// carry them, because the eager parse happens before the classification
+    /// that tells them apart: `echo $(( echo $(fi) ) )` falls back to a command
+    /// substitution *and* still dies on `fi`.
+    ///
+    /// Non-empty only inside a `$((`/`$[` scan. Every construct that starts a
+    /// scan of its own — the two producers, and a nested `$( … )` whose body is
+    /// commands — swaps this list out for the duration, so a body's own nested
+    /// substitutions are parsed with that body and not a second time out here.
+    arith_comsubs: Vec<CmdSubSpan>,
     /// Reader-level warnings raised during the scan, in the order they happened.
     /// The here-document-at-EOF ones are only filled in lenient mode (see
     /// `strict_heredoc_eof`), since strict mode raises instead. See
@@ -1021,6 +1067,7 @@ impl Lexer {
             strict_heredoc_eof: false,
             paren_body: false,
             conts: Vec::new(),
+            arith_comsubs: Vec::new(),
             warnings: Vec::new(),
             warn_from: Vec::new(),
             hd_ahead: None,
@@ -3957,8 +4004,10 @@ impl Lexer {
                 // bash still accepts it as an alias for `$(( … ))`.
                 self.pos += 1;
                 let open = self.cur_line();
+                let outer = std::mem::take(&mut self.arith_comsubs);
                 let raw = self.read_balanced('[', ']').map_err(|e| e.at(open))?;
-                Ok(Some(Seg::Arith(raw, true)))
+                let nested = std::mem::replace(&mut self.arith_comsubs, outer);
+                Ok(Some(Seg::Arith(raw, true, nested)))
             }
             Some('(') => {
                 if self.at(self.cont_skip(self.pos + 1)) == Some('(') {
@@ -3988,7 +4037,9 @@ impl Lexer {
                     // of the text and nothing else.
                     let open = self.cur_line();
                     self.adv();
+                    let outer = std::mem::take(&mut self.arith_comsubs);
                     let raw = self.read_balanced('(', ')').map_err(|e| e.at(open))?;
+                    let nested = std::mem::replace(&mut self.arith_comsubs, outer);
                     // `chk_arithsub`'s own preamble: the body must open with the
                     // `(` this scan counted and close with its mate.
                     if let Some(expr) = raw
@@ -3996,9 +4047,17 @@ impl Lexer {
                         .and_then(|e| e.strip_suffix(b")"))
                         .filter(|e| is_arith_expr(e))
                     {
-                        return Ok(Some(Seg::Arith(expr.into(), false)));
+                        return Ok(Some(Seg::Arith(expr.into(), false, nested)));
                     }
-                    Ok(Some(Seg::CmdSub(raw, self.cur_line(), SubBody::ArithFallback)))
+                    // The nested bodies travel with the fallback too: the eager
+                    // parse happened during the scan, and so before the check that
+                    // sent the text this way. `echo $(( echo $(fi) ) )` runs as a
+                    // command substitution *and* still dies on the `fi`.
+                    Ok(Some(Seg::CmdSub(
+                        raw,
+                        self.cur_line(),
+                        SubBody::ArithFallback(nested),
+                    )))
                 } else {
                     self.pos += 1;
                     // `$( … )` is the one construct bash blames on the *end* of
@@ -4077,7 +4136,15 @@ impl Lexer {
     /// escape. Those are copied whole rather than character by character, which
     /// incidentally makes `$(echo \))` and `` $(echo `echo )`) `` scan correctly.
     fn read_subst_body(&mut self) -> Result<Str, LexError> {
+        // A body of commands is *text* to this scan: it is copied out and lexed
+        // again later, and that re-lex meets every arithmetic expansion in it a
+        // second time. So whatever nested substitutions the copy collects belong
+        // to that parse and not to an arithmetic scan out here — otherwise
+        // `$(( $(echo "$(( $(fi) ))") ))` would parse the innermost body twice.
+        // See [`Lexer::arith_comsubs`].
+        let outer = std::mem::take(&mut self.arith_comsubs);
         let r = self.read_balanced_inner('(', ')', true);
+        self.arith_comsubs = outer;
         if r.is_err() {
             // bash reads this body with a whole nested `yyparse`, and `parse_comsub`
             // (parse.y:4133) zeroes `need_here_doc` before starting it. The saved
@@ -4237,7 +4304,19 @@ impl Lexer {
                         // position to divert.
                         Some('$') if self.peek_at(1) == Some('(') => {
                             self.pos += 2;
+                            // Commands, and so copied for a re-lex — its own
+                            // collections stay with it. But the body itself is
+                            // one bash parses in place when *this* scan is
+                            // arithmetic: `echo $(( "$(fi)" ))` is fatal.
+                            let outer = std::mem::take(&mut self.arith_comsubs);
                             let inner = self.read_balanced_inner('(', ')', true)?;
+                            self.arith_comsubs = outer;
+                            if !command {
+                                self.arith_comsubs.push(CmdSubSpan {
+                                    src: inner.clone(),
+                                    close_line: self.cur_line(),
+                                });
+                            }
                             raw.extend_from_slice(b"$(");
                             raw.extend_from_slice(&inner);
                             raw.push(b')');
@@ -4291,6 +4370,17 @@ impl Lexer {
             '$' if !command && self.peek() == Some('(') && self.peek_at(1) != Some('(') => {
                 self.pos += 1;
                 let inner = self.read_subst_body().map_err(|e| e.at(self.eof_line()))?;
+                // The parse is bash's, not ours to defer: `parse_dollar_word`
+                // runs `parse_comsub` here and now, and its failure is a syntax
+                // error in the *enclosing* unit — which is why
+                // `if false; then echo $(( 1 + $(fi) )); fi` dies even though the
+                // branch is never taken. Only the text survives the parse
+                // (`APPEND_NESTRET`), so the body is read again at expansion; the
+                // record kept here is just enough for the parser to run it.
+                self.arith_comsubs.push(CmdSubSpan {
+                    src: inner.clone(),
+                    close_line: self.cur_line(),
+                });
                 raw.extend_from_slice(b"$(");
                 raw.extend_from_slice(&inner);
                 raw.push(b')');
@@ -4717,6 +4807,19 @@ impl Lexer {
     /// spans that must balance with their own terminators; single/double
     /// quotes protect their contents; a backslash escapes the next character.
     fn read_dollar_brace(&mut self) -> Result<Str, LexError> {
+        // Like a substitution body, this text is copied for a re-lex that meets
+        // every construct in it again — so nothing collected inside may escape
+        // to an arithmetic scan out here. `echo ${x:-$(( 1 + $(fi) ))}` is fatal
+        // in bash because that *re-lex* reaches the `$(fi)`, not because this
+        // scan did. See [`Lexer::arith_comsubs`].
+        let outer = std::mem::take(&mut self.arith_comsubs);
+        let r = self.read_dollar_brace_body();
+        self.arith_comsubs = outer;
+        r
+    }
+
+    /// The scan proper for [`Lexer::read_dollar_brace`].
+    fn read_dollar_brace_body(&mut self) -> Result<Str, LexError> {
         let open = self.cur_line();
         let mut raw = Str::new();
         loop {
@@ -5669,7 +5772,7 @@ mod tests {
             panic!("expected word");
         }
         if let Tok::Word(segs) = &toks[2] {
-            assert!(matches!(segs[0], Seg::Arith(_, false)));
+            assert!(matches!(segs[0], Seg::Arith(_, false, _)));
         } else {
             panic!("expected word");
         }
@@ -5700,7 +5803,7 @@ mod tests {
             "echo $(( echo a ))",
         ] {
             assert!(
-                matches!(seg(src), Seg::Arith(_, false)),
+                matches!(seg(src), Seg::Arith(_, false, _)),
                 "{src} should read as arithmetic, got {:?}",
                 seg(src)
             );
@@ -5727,7 +5830,7 @@ mod tests {
         // same input still lexes.
         let toks = tokenize("echo $(( echo a ) | cat) $((1 + 1))\necho done").unwrap();
         assert!(matches!(&toks[1], Tok::Word(s) if matches!(s[0], Seg::CmdSub(..))));
-        assert!(matches!(&toks[2], Tok::Word(s) if matches!(s[0], Seg::Arith(_, false))));
+        assert!(matches!(&toks[2], Tok::Word(s) if matches!(s[0], Seg::Arith(_, false, _))));
     }
 
     #[test]

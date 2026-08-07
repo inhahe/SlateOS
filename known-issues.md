@@ -981,7 +981,7 @@ and `tests/corpus/set-v-echoes-a-line-the-parse-then-refuses.sh`.
 
 **Proper fix (the syntax-error half, still open).** Rows 1–2 of the table above
 remain: an unclosed quote still pre-empts a grammar error raised *before* it on
-the same line. That is the same architectural obstacle as
+the same line. That is the same architectural obstacle as the residue of
 TD-OILS-A-COMSUB-THAT-NEVER-CLOSES-HIDES-THE-ERROR-INSIDE-IT: the parked lexer
 error must not pre-empt a grammar error raised on a token that precedes the
 unclosed construct *on the same line*. That needs the failing line's tokens kept
@@ -1105,7 +1105,7 @@ which measures all four halves of the rule: the thirteen command positions,
 the six word positions, the four quoted spellings, and that `[[ … ]]` still
 closes.
 
-### TD-OILS-A-COMSUB-THAT-NEVER-CLOSES-HIDES-THE-ERROR-INSIDE-IT. bash parses a `$( … )` body as it reads it; osh scans for the `)` first — 2026-08-06 — OPEN
+### TD-OILS-A-COMSUB-THAT-NEVER-CLOSES-HIDES-THE-ERROR-INSIDE-IT. bash parses a `$( … )` body as it reads it; osh scans for the `)` first — 2026-08-06 — ✅ MOSTLY FIXED 2026-08-07 (three shapes left, below)
 
 **Where:** `userspace/oils/src/lexer.rs` — the command-substitution scanner
 (the balanced-paren scan that raises ``unexpected EOF while looking for
@@ -1150,13 +1150,90 @@ Everything where the body closes is already byte-exact — `echo $(fi)`,
 `$(()` all match — so this is purely about which of two errors wins, not
 about parsing the body at all.
 
-**Proper fix:** invert the two steps — parse the body incrementally from
-the `$(`, stopping at a `)` in command-terminator position, and raise the
-unmatched-paren error only when that parse reaches end of input without
-one. That is the same restructuring the sibling entry below
-(`…ONLY-ONE-OF-BASHS-TWO-DIAGNOSTICS`) wants for `[[ ]]`, and both should
-be done together: bash's rule in each case is that a lexer that dies at EOF
-hands a bail token *back to the parser*, which then gets its own say.
+**The rule, measured (2026-08-07).** Once bash enters a `$(`, the
+construct that *contained* it stops mattering: `parse_comsub` runs a whole
+nested `yyparse` over the rest of the input with `shell_eof_token = ')'`,
+so the enclosing quote is simply not open any more as far as that parse is
+concerned. Every shape below falls out of that one sentence, and the
+surprising rows are the ones where an enclosing `"` looks like it should
+win and does not:
+
+| script | bash reports | why |
+|---|---|---|
+| `echo $(fi` | `` near `fi' `` L1 | nested parse errors |
+| `echo $(echo a` | `` EOF matching `)' `` L2 | nested parse reached EOF cleanly |
+| `echo $(a \|` / `echo $(!` | `` EOF matching `)' `` L2 | nested parse ran *out*, so the `)` wins |
+| `echo $(`⇥`fi` | `` near `fi' `` **L2** | the body is numbered physically |
+| `echo $(fi) $(done` | `` near `fi' `` L1 | left to right; the second is never reached |
+| `echo <(fi`, `echo >(fi` | `` near `fi' `` L1 | process substitution parses the same way |
+| `echo ${x:-$(fi` | `` near `fi' `` L1 | the `${` never gets to miss its `}` |
+| `echo $(( $(fi` | `` near `fi' `` L1 | nor does the arithmetic scan its `)` |
+| `echo $(echo x; $(fi` | `` near `fi' `` L1 | recursion: the inner one bails in its turn |
+| `echo "$(fi` | `` near `fi' `` L1 | the enclosing `"` is not consulted |
+| `echo "$(fi)` | `` near `fi' `` L1 | **and not even when the body closes** |
+| `echo "$(fi"` | `` EOF matching `"' `` L1 | the `"` is *inside the body*, and unclosed there |
+| `echo "x$(fi"y"` | `` EOF matching `)' `` L2 | body is `fi"y"` — one quoted word, no error |
+| ``echo `fi`` | ``EOF matching `` `' `` L1 | backticks are a matched pair, never parsed |
+| `echo $(echo `` ` ``fi` | ``EOF matching `` `' `` L1 | …so the backtick inside the body dies first |
+| `echo ${x`, `echo $((1+` | `` EOF matching `}'/`)' `` | no nested parse at all |
+
+The last two rows are the boundary: only `$( )`, `<( )` and `>( )` get a
+nested parse. `` ` ` ``, `${ }` and `$(( ))` are `parse_matched_pair`, and
+osh already matches them.
+
+**Fixed 2026-08-07.** The scan still finds the `)` first, but an error that
+*is* the missing `)` now carries the body it ran out inside
+(`lexer::SubstBail`: the text from just past the `(` to end of input, plus
+the line the `(` sat on), and the parser — which owns the lexer-error-to-
+`ParseError` conversion and holds the `ParseOpts` — parses it before
+deciding (`parser::resolve_subst_bail` / `bail_body_error`). A body error
+that is *not* `ParseError::is_incomplete` wins; one that is means the body
+merely ran out, which is bash's `EOF_Reached` path, so the `)` message
+stands. Three details that are not obvious and that the tests pin:
+
+  * the body is parsed **plainly**, not through `parse_cmdsub_body`, whose
+    synthetic trailing `)` would get `echo $(a |` blamed on a paren that is
+    not there;
+  * the bail is attached on the way *out* of each nested scan, so the
+    **outermost** substitution wins and `echo $(fi; $(done` is `` near `fi' ``
+    — the order bash blames in, its nested parse of the outer body being
+    what reaches the inner `$(` at all;
+  * within one body the halves are tried left to right — the tokens that did
+    lex first, and only then the substitution the body itself ran out inside.
+
+**Pinned by** `parser.rs::an_unterminated_substitutions_body_is_parsed_anyway`
+and `tests/corpus/a-substitution-body-is-read-before-its-closing-paren-is-missed.sh`.
+
+**What is left (three shapes).** All three need the *failing line's tokens
+kept* rather than cut, or the body parsed at the moment the `$(` is scanned
+rather than when the scan runs out:
+
+| script | bash | osh |
+|---|---|---|
+| `echo "$(fi)` | `` near `fi' `` | ``EOF matching `"' `` |
+| `echo $(fi)x$(` | `` near `fi' `` | ``EOF matching `)' `` L2 |
+| `echo $(fi) $(done` | `` near `fi' `` | `` near `done' `` |
+
+The first is the enclosing-quote half: the body *closes*, so no bail is
+raised at all, and the unterminated `"` around it is the only failure the
+scan sees. Reaching bash here means parsing every `$( … )` body where it is
+scanned, closed or not.
+
+The other two are the same blocker as the syntax-error half of
+TD-OILS-A-LINE-THAT-FAILS-TO-LEX-IS-NOT-REPORTED-AS-A-LINE: `tokenize_deferred`
+cuts `toks` back to the last complete logical line, so an error on a token
+that *precedes* the unclosed construct on the same line is never raised and
+the parked lexer error wins by default. That it is not really about
+substitutions at all is shown by `fi; $(done`, which osh blames on `done`
+with no enclosing substitution in sight.
+
+**Proper fix for the residue:** a lexer bail token standing where the
+unclosed construct opened, so the failing line's tokens survive the cut and
+the parser can run up to it and stop there. That is the same restructuring
+the sibling entry below (`…ONLY-ONE-OF-BASHS-TWO-DIAGNOSTICS`) wants for
+`[[ ]]`, and the two should be done together: bash's rule in each case is
+that a lexer which dies at EOF hands a bail token *back to the parser*,
+which then gets its own say.
 
 ### TD-OILS-A-CONDITIONAL-RHS-THAT-DIES-AT-EOF-GETS-ONLY-ONE-OF-BASHS-TWO-DIAGNOSTICS. `[[ x =~ ( ]]` — 2026-08-06 — OPEN
 

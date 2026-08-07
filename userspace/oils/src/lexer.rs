@@ -80,12 +80,53 @@ pub struct LexError {
     /// shell to read on. See [`crate::parser::ParseError::recoverable`], which
     /// this becomes.
     pub recoverable: bool,
+    /// The body of the `$( … )` / `<( … )` this error ran out of input inside,
+    /// and the line its `(` sat on. See [`SubstBail`].
+    pub bail: Option<SubstBail>,
+}
+
+/// A substitution body the scan never found the `)` of, kept so that the error
+/// can be *reconsidered* once someone able to parse it gets hold of it.
+///
+/// bash never scans for that `)` in the first place. `parse_comsub`
+/// (parse.y:4083) runs a whole nested `yyparse` over the rest of the input with
+/// `shell_eof_token = ')'`, so the body is parsed as it is read and the missing
+/// paren is only noticed if that parse survives to end of input:
+///
+/// ```c
+///   token_to_read = DOLPAREN;     /* let's trick the parser */
+///   r = yyparse ();
+///   …
+///   if (EOF_Reached)
+///     {
+///       parser_state |= PST_NOERROR;
+///       return (&matched_pair_error);
+///     }
+/// ```
+///
+/// An error *in* the body therefore comes out first and the `)` is never
+/// mentioned: `echo $(fi` is ``syntax error near unexpected token `fi'``, not
+/// ``unexpected EOF while looking for matching `)'``. The enclosing construct
+/// is not consulted either — a `${`, a `$((` or a `"` around the substitution
+/// never gets to miss its own delimiter, because the nested parse dies first.
+///
+/// osh scans for the `)` and parses the body afterwards, which is the opposite
+/// order, so the body has to be carried out on the error to be given its say.
+/// [`crate::parser`] is where that happens: it owns the lexer-error-to-parse-
+/// error conversion and holds the [`ParseOpts`] a parse needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubstBail {
+    /// Everything from just past the `(` to the end of the input — which is the
+    /// whole of the body, since the scan only bails when the input ran out.
+    pub body: Str,
+    /// The line the `(` was on, for numbering the body physically.
+    pub open_line: u32,
 }
 
 impl LexError {
     /// A lexer error with no line preference; the caller's fallback applies.
     pub(crate) fn new(msg: &(impl bytes::PushBytes + ?Sized)) -> Self {
-        Self { msg: bfmt![msg], line: None, looking_for: None, recoverable: false }
+        Self { msg: bfmt![msg], line: None, looking_for: None, recoverable: false, bail: None }
     }
 
     /// Fill in the reporting line if the raise site did not already choose one.
@@ -122,6 +163,7 @@ fn eof_matching(close: char) -> LexError {
         line: None,
         looking_for: Some(close),
         recoverable: false,
+        bail: None,
     }
 }
 
@@ -3968,7 +4010,46 @@ impl Lexer {
         r
     }
 
+    /// The scan proper is [`Lexer::read_balanced_body`]; this wraps it to hang
+    /// the unparsed body off an error that ran out of input, for a substitution
+    /// body only. See [`SubstBail`].
+    ///
+    /// It is done on the way *out* rather than at the end-of-input site so that
+    /// the **outermost** substitution wins: a nested `$(` bails first with its
+    /// own smaller body, and each enclosing scan replaces it as the error
+    /// unwinds. That is the order bash blames in, because its nested parse of
+    /// the outer body is what reaches the inner `$(` in the first place —
+    /// `echo $(fi; $(done` is ``near `fi'``, not ``near `done'``.
     fn read_balanced_inner(
+        &mut self,
+        open: char,
+        close: char,
+        heredocs: bool,
+    ) -> Result<Str, LexError> {
+        if !heredocs {
+            return self.read_balanced_body(open, close, heredocs);
+        }
+        let body_start = self.pos;
+        let open_line = self.cur_line();
+        self.read_balanced_body(open, close, heredocs).map_err(|mut e| {
+            // Only an error that *is* the missing `)` — this scan's own
+            // end-of-input, or one already carrying a bail from a substitution
+            // inside it. An unterminated quote in the body is a different
+            // failure and bash reports it as one: `echo $(echo "x` names the
+            // `"`, because the nested parse's own lexer dies on it.
+            if e.bail.is_none() && !(e.line.is_none() && e.looking_for == Some(close)) {
+                return e;
+            }
+            let mut body = Str::new();
+            for cx in self.chars.get(body_start..).unwrap_or_default() {
+                cx.push_to(&mut body);
+            }
+            e.bail = Some(SubstBail { body, open_line });
+            e
+        })
+    }
+
+    fn read_balanced_body(
         &mut self,
         open: char,
         close: char,

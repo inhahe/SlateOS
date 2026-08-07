@@ -277,6 +277,60 @@ impl From<crate::lexer::LexError> for ParseError {
     }
 }
 
+/// [`ParseError::from`], after giving a substitution body that the scan never
+/// found the `)` of its say. See [`crate::lexer::SubstBail`].
+///
+/// bash parses that body *as it reads it*, so an error in it comes out before
+/// the missing paren is ever noticed — ``echo $(fi`` is ``syntax error near
+/// unexpected token `fi'``, not ``unexpected EOF while looking for matching
+/// `)'``. osh scans first and parses second, so the body arrives here unread
+/// and is read now.
+///
+/// The body is parsed *plainly*, not through [`parse_cmdsub_body`]: that one
+/// appends the substitution's `)` where the body's trailing newline would go,
+/// because that is the token bash's parser sees next — but here there is no
+/// `)`, and blaming one would turn `echo $(a |` into ``near `)'`` where bash
+/// says the body simply ran out. A body error that *is* an end-of-input error
+/// means exactly that, and is bash's `EOF_Reached` path (parse.y:4170), on
+/// which the `)` message stands.
+fn resolve_subst_bail(e: crate::lexer::LexError, opts: ParseOpts) -> ParseError {
+    let Some(bail) = e.bail.clone() else { return ParseError::from(e) };
+    bail_body_error(&bail, opts).unwrap_or_else(|| ParseError::from(e))
+}
+
+/// The error bash's nested parse of an unterminated substitution body would
+/// raise, or `None` if that parse would simply have run out of input.
+///
+/// The body is read left to right, so the two halves are tried in that order:
+/// the tokens that *did* lex are parsed first, and only if they get to the end
+/// without complaining does the substitution the body itself ran out inside get
+/// its turn. `echo $(fi; $(done` is ``near `fi'`` and not ``near `done'``, for
+/// the same reason `echo $(fi) $(done` is.
+///
+/// The recursion terminates because a nested bail's body begins past its own
+/// `(`, so each step is a strictly shorter suffix of the input.
+fn bail_body_error(bail: &crate::lexer::SubstBail, opts: ParseOpts) -> Option<ParseError> {
+    let base = bail.open_line.saturating_sub(1);
+    let Tokenized { toks: mut t, lines: mut l, ends, err, .. } =
+        crate::lexer::tokenize_deferred(&bail.body, opts);
+    // The body's line 1 is the line its `(` sits on, the two being on the same
+    // physical line by construction.
+    map_lines(&mut t, &mut l, &LineMap::Offset(base));
+    if let Err(inner) = parse_tokens(t, l, Spans::of(&bail.body, ends), opts) {
+        // An end-of-input error means the body merely ran out, which is bash's
+        // `EOF_Reached` path (parse.y:4170) — the one on which the missing `)`
+        // is what gets reported. Blaming a token here would also have to invent
+        // one: [`parse_cmdsub_body`] can say ``near `)'`` because the `)` really
+        // is the next token, and here there is no `)` at all.
+        if !inner.is_incomplete() {
+            return Some(inner.in_paren_body());
+        }
+    }
+    let mut nested = err?.0.bail?;
+    nested.open_line = nested.open_line.saturating_add(base);
+    bail_body_error(&nested, opts)
+}
+
 /// Parse shell source into a [`Program`].
 ///
 /// # Errors
@@ -302,7 +356,7 @@ pub fn parse_opts(src: BStr<'_>, opts: ParseOpts) -> Result<Program, ParseError>
     // will parse (see [`crate::lexer::strip_nuls`]).
     let src = crate::lexer::strip_nuls(src);
     let Spanned { toks, lines, ends, .. } =
-        tokenize_spanned(&src, opts).map_err(ParseError::from)?;
+        tokenize_spanned(&src, opts).map_err(|e| resolve_subst_bail(e, opts))?;
     parse_tokens(toks, lines, Spans::of(&src, ends), opts)
 }
 
@@ -345,7 +399,7 @@ pub fn parse_procsub_body(
 /// unterminated here-document).
 pub fn parse_strict_heredoc(src: BStr<'_>, opts: ParseOpts) -> Result<Program, ParseError> {
     let Spanned { toks, lines, ends, .. } =
-        crate::lexer::tokenize_spanned_strict(src, opts).map_err(ParseError::from)?;
+        crate::lexer::tokenize_spanned_strict(src, opts).map_err(|e| resolve_subst_bail(e, opts))?;
     parse_tokens(toks, lines, Spans::of(src, ends), opts)
 }
 
@@ -359,7 +413,7 @@ pub fn parse_with_aliases(
     opts: ParseOpts,
 ) -> Result<Program, ParseError> {
     let Spanned { toks, lines, starts, ends, .. } =
-        tokenize_spanned(src, opts).map_err(ParseError::from)?;
+        tokenize_spanned(src, opts).map_err(|e| resolve_subst_bail(e, opts))?;
     // An alias splices in tokens that were never written where they are being
     // read — but they *were* written somewhere, in the alias's own value, which
     // bash pushes onto the input and reports errors against. So the expansion
@@ -653,7 +707,7 @@ impl IncrementalParser {
             pos: 0,
             last_aliases: None,
             pending_lex_err: err
-                .map(|(e, line)| ParseError::from(e).or_line(line))
+                .map(|(e, line)| resolve_subst_bail(e, opts).or_line(line))
                 .map(|e| ParseError {
                     line: e.line.map(|l| line_map.map(l)),
                     ..e
@@ -738,7 +792,7 @@ impl IncrementalParser {
         self.pos = 0;
         self.opts = opts;
         self.pending_lex_err = err
-            .map(|(e, line)| ParseError::from(e).or_line(line))
+            .map(|(e, line)| resolve_subst_bail(e, opts).or_line(line))
             .map(|e| ParseError {
                 line: e.line.map(|l| map.map(l)),
                 ..e
@@ -956,7 +1010,7 @@ impl IncrementalParser {
         self.orig_conts
             .extend(conts.iter().map(|&o| o.saturating_add(delta)));
         self.pending_lex_err = err
-            .map(|(e, line)| ParseError::from(e).or_line(line))
+            .map(|(e, line)| resolve_subst_bail(e, self.opts).or_line(line))
             .map(|e| ParseError { line: e.line.map(|l| map.map(l)), ..e });
         self.last_aliases = None;
     }
@@ -6540,6 +6594,62 @@ mod tests {
         assert_eq!(parse(nested).unwrap_err().line, Some(4));
         // A process substitution body was always numbered this way.
         assert_eq!(parse("echo one\ncat <(echo a\nfor\n)\n").unwrap_err().line, Some(3));
+    }
+
+    /// A body whose `)` never arrives is parsed all the same, and its own error
+    /// is what gets reported — the missing paren never being mentioned. bash
+    /// reaches that by parsing the body *as it reads it* (`parse_comsub` runs a
+    /// whole nested `yyparse` with `shell_eof_token = ')'`), so the `)` is only
+    /// noticed on the `EOF_Reached` path, where that parse ran out rather than
+    /// objected. See `resolve_subst_bail`. Every row is measured from bash 5.2.
+    #[test]
+    fn an_unterminated_substitutions_body_is_parsed_anyway() {
+        let near = |t: &str| format!("syntax error near unexpected token `{t}'");
+        for (src, tok, line) in [
+            ("echo $(fi", "fi", 1),
+            ("echo $(;", ";", 1),
+            ("echo $(done", "done", 1),
+            ("echo $(echo a; fi", "fi", 1),
+            ("x=$(fi", "fi", 1),
+            // Numbered physically, from the line the `(` sits on — not from the
+            // body's own first line.
+            ("echo $(\nfi", "fi", 2),
+            ("echo one\necho $(fi", "fi", 2),
+            ("echo $(echo a\necho b\nfi", "fi", 3),
+            // Process substitution is read the same way.
+            ("echo <(fi", "fi", 1),
+            ("echo >(fi", "fi", 1),
+            // The construct that *contained* the substitution never gets to miss
+            // its own delimiter: the nested parse dies first.
+            ("echo ${x:-$(fi", "fi", 1),
+            ("echo $(( $(fi", "fi", 1),
+            ("echo \"$(fi", "fi", 1),
+            // Left to right, outermost first: the enclosing body is parsed
+            // before the substitution it ran out inside gets its turn.
+            ("echo $(echo x; $(fi", "fi", 1),
+        ] {
+            let e = parse(src).unwrap_err();
+            assert_eq!(emsg(&e), near(tok), "{src:?}");
+            assert_eq!(e.line, Some(line), "{src:?}");
+            // Found inside a body, so fatal to whoever was reading it.
+            assert!(e.fatal, "{src:?}");
+        }
+        // A body that merely *ran out* is bash's `EOF_Reached` path, and there
+        // the missing `)` is what stands: there is no token to blame, and one
+        // would have to be invented to blame it.
+        for src in ["echo $(echo a", "echo $(", "echo $(a |", "echo $(!", "echo $(if true"] {
+            let e = parse(src).unwrap_err();
+            assert_eq!(emsg(&e), "unexpected EOF while looking for matching `)'", "{src:?}");
+        }
+        // An unterminated quote *inside* the body is that quote's error, since
+        // the nested parse's own lexer is what dies on it.
+        for (src, msg) in [
+            ("echo $(echo \"x", "unexpected EOF while looking for matching `\"'"),
+            ("echo $(echo 'x", "unexpected EOF while looking for matching `''"),
+            ("echo $(echo `fi", "unexpected EOF while looking for matching ``'"),
+        ] {
+            assert_eq!(emsg(&parse(src).unwrap_err()), msg, "{src:?}");
+        }
     }
 
     #[test]

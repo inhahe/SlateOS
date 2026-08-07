@@ -6693,13 +6693,13 @@ impl Shell {
                 // function's name and `line 0`, the environment having no lines.
                 let prefix = bfmt![self.name.as_slice(), b": ", name, b": line 0: "];
                 let mut msg = Str::new();
-                for (i, msg_line) in e.msg.split(|&b| b == b'\n').enumerate() {
+                for (i, one) in e.msgs.iter().enumerate() {
                     if i > 0 {
                         msg.push(b'\n');
                     }
-                    msg.push_str(&wrap_parse_message(msg_line, &prefix));
+                    msg.push_str(&wrap_parse_message(one, &prefix));
                 }
-                if bytes::contains(&e.msg, b"syntax error near ")
+                if e.msgs.iter().any(|m| bytes::contains(m, b"syntax error near "))
                     && let Some(text) = nth_source_line(&src, e.line.unwrap_or(1))
                 {
                     msg.push_str(&bfmt![b"\n", &prefix, b"`", text, b"'"]);
@@ -45815,7 +45815,7 @@ impl Shell {
         // error's own: bash builds a multi-line diagnostic from several frames,
         // each passing its own `line_number` (see `ParseError::line_at`).
         let mut out = Str::new();
-        for (i, msg_line) in e.msg.split(|&b| b == b'\n').enumerate() {
+        for (i, one) in e.msgs.iter().enumerate() {
             if i > 0 {
                 out.push(b'\n');
             }
@@ -45825,7 +45825,7 @@ impl Shell {
             } else {
                 self.syntax_error_prefix(at)
             };
-            out.push_str(&wrap_parse_message(msg_line, &own));
+            out.push_str(&wrap_parse_message(one, &own));
         }
         // bash echoes the offending physical source line on a final diagnostic
         // line whenever it reports the error "near" a token (`near unexpected
@@ -45841,7 +45841,7 @@ impl Shell {
         // reader is inside it, so an error found there is echoed as the
         // replacement instead — see [`crate::parser::ParseError::echo`], which
         // carries it when that is so.
-        if bytes::contains(&e.msg, b"syntax error near ")
+        if e.msgs.iter().any(|m| bytes::contains(m, b"syntax error near "))
             && let Some(text) = e
                 .echo
                 .as_deref()
@@ -56121,13 +56121,13 @@ mod tests {
         // "syntax error: " prefix.
         let e = ParseError::new("syntax error near unexpected token '--'");
         assert_eq!(
-            wrap_parse_message(&e.msg, "osh: "),
+            wrap_parse_message(&e.msg(), "osh: "),
             "osh: syntax error near unexpected token '--'"
         );
         // A fragment-style message still gets the prefix.
         let e2 = ParseError::new("expected ')'");
         assert_eq!(
-            wrap_parse_message(&e2.msg, "osh: "),
+            wrap_parse_message(&e2.msg(), "osh: "),
             "osh: syntax error: expected ')'"
         );
     }
@@ -56460,7 +56460,7 @@ mod tests {
                 Some(Err(e)) => {
                     assert_eq!(units, 2, "both complete lines are handed out first");
                     assert_eq!(e.line, Some(3));
-                    assert!(bytes::contains(&e.msg, b"unexpected EOF while looking for"));
+                    assert!(bytes::contains(&e.msg(), b"unexpected EOF while looking for"));
                     break;
                 }
                 None => panic!("the lexer error must surface"),
@@ -57092,7 +57092,7 @@ mod tests {
         ] {
             let err = parse(src.as_bytes()).expect_err("should fail to parse");
             assert_eq!(
-                err.msg,
+                err.msg(),
                 bfmt![b"unexpected EOF while looking for matching `", close, b"'"],
                 "src {src:?}"
             );
@@ -57104,13 +57104,13 @@ mod tests {
         // A stray extra pipe: bash prints `syntax error near unexpected token `|'`.
         let err = parse("echo a | | echo b".as_bytes()).expect_err("should fail");
         assert!(
-            err.msg.starts_with(b"syntax error near unexpected token"),
+            err.msg().starts_with(b"syntax error near unexpected token"),
             "got {:?}",
-            err.msg
+            err.msg()
         );
         // The wrapper passes that form through untagged.
         assert_eq!(
-            wrap_parse_message(&err.msg, "osh: "),
+            wrap_parse_message(&err.msg(), "osh: "),
             "osh: syntax error near unexpected token `|'"
         );
         // An invalid `for` loop variable is *not* a parse error: bash's grammar

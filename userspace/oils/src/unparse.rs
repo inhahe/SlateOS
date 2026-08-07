@@ -1528,7 +1528,7 @@ mod tests {
             let value = dump_exported(src, "f");
             let reparsed = format!("f {value}");
             let prog = parse(reparsed.as_bytes())
-                .unwrap_or_else(|e| panic!("re-parse {reparsed:?}: {}", String::from_utf8_lossy(&e.msg)));
+                .unwrap_or_else(|e| panic!("re-parse {reparsed:?}: {}", String::from_utf8_lossy(&e.msg())));
             let f = prog
                 .items
                 .iter()

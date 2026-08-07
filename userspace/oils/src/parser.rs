@@ -136,13 +136,29 @@ fn map_frag_segs(segs: &mut [Seg], line: u32) {
 /// falls back to the current execution line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
-    /// The message, as bytes. Most are fixed text, but the ones that name the
+    /// The diagnostic, one entry per message bash would emit — one
+    /// `parser_error`/`report_syntax_error` call each, and one `<name>: line N:`
+    /// prefix each. Almost always a single entry; see [`ParseError::under`] for
+    /// where a second comes from.
+    ///
+    /// An entry is *not* a physical line: a message may itself span several,
+    /// because it quotes back text the user wrote over several. The header of a
+    /// malformed `for (( … ))` is the case that shows it — bash prints one
+    /// message with the newline still in it, prefixed only at its start:
+    ///
+    /// ```text
+    /// line 1: syntax error: arithmetic expression required
+    /// line 1: syntax error: `((0;
+    /// 0))'
+    /// ```
+    ///
+    /// Each entry is bytes. Most are fixed text, but the ones that name the
     /// offending construct quote a *shell word* back — the token in `syntax
     /// error near unexpected token \`…'`, or the name in `\`…': not a valid
     /// identifier` — and a shell word may hold any byte. The word therefore
     /// goes back out as the bytes the user wrote rather than through a decode
     /// that would rewrite the very text being blamed.
-    pub msg: Str,
+    pub msgs: Vec<Str>,
     pub line: Option<u32>,
     /// True when the error was found inside a `$( … )` or `<( … )` body, which
     /// bash treats as fatal to whatever was reading that body.
@@ -181,8 +197,8 @@ pub struct ParseError {
     /// The *unit* is what dies, not the line: `echo one; a=(x; y)` never prints
     /// `one`, because `;` chains it into the same unit.
     pub recoverable: bool,
-    /// The lines of `msg` that are *not* reported at `line`, as
-    /// `(index of the line in `msg`, the line to report it at)`.
+    /// The entries of `msgs` that are *not* reported at `line`, as
+    /// `(index into `msgs`, the line to report it at)`.
     ///
     /// Empty for almost every error, because a diagnostic is normally reported
     /// wholly at one place. bash does not promise that, though: it prints a
@@ -249,7 +265,7 @@ impl ParseError {
     /// the grammar; [`parse_tokens`] stamps the line afterwards).
     pub fn new(msg: &(impl bytes::PushBytes + ?Sized)) -> Self {
         Self {
-            msg: bfmt![msg],
+            msgs: vec![bfmt![msg]],
             line: None,
             fatal: false,
             recoverable: false,
@@ -265,16 +281,16 @@ impl ParseError {
     /// `parser_error` twice — but osh carries an error to one place that prints
     /// it, so the two messages have to travel joined. `first`'s line and echo
     /// lead, it being the one reported first; this error's own `line_at` entries
-    /// shift past `first`'s message lines so they keep naming the same text.
+    /// shift past `first`'s messages so they keep naming the same text.
     #[must_use]
     fn under(self, first: Self) -> Self {
-        let lead = u32::try_from(first.msg.iter().filter(|&&b| b == b'\n').count())
-            .unwrap_or(u32::MAX)
-            .saturating_add(1);
+        let lead = u32::try_from(first.msgs.len()).unwrap_or(u32::MAX);
         let mut line_at = first.line_at;
         line_at.extend(self.line_at.iter().map(|&(i, l)| (i.saturating_add(lead), l)));
+        let mut msgs = first.msgs;
+        msgs.extend(self.msgs);
         Self {
-            msg: bfmt![first.msg, b"\n", self.msg],
+            msgs,
             line: first.line,
             fatal: first.fatal,
             recoverable: first.recoverable,
@@ -284,7 +300,15 @@ impl ParseError {
         }
     }
 
-    /// Where the `i`th line of `msg` is reported, given the error's own line.
+    /// The whole diagnostic as one byte string, its messages newline-joined —
+    /// for the callers that only want to look at or print the text, and do not
+    /// care where the prefixes go.
+    #[must_use]
+    pub fn msg(&self) -> Str {
+        self.msgs.join(&b'\n')
+    }
+
+    /// Where the `i`th message is reported, given the error's own line.
     /// See [`Self::line_at`].
     #[must_use]
     pub fn line_of(&self, i: usize, line: u32) -> u32 {
@@ -343,8 +367,10 @@ impl ParseError {
     /// token and is not continuable.
     #[must_use]
     pub fn is_incomplete(&self) -> bool {
-        bytes::contains(&self.msg, b"unexpected end of file")
-            || bytes::contains(&self.msg, b"unexpected EOF while looking for")
+        self.msgs.iter().any(|m| {
+            bytes::contains(m, b"unexpected end of file")
+                || bytes::contains(m, b"unexpected EOF while looking for")
+        })
     }
 }
 
@@ -358,7 +384,7 @@ impl ParseError {
 impl From<crate::lexer::LexError> for ParseError {
     fn from(e: crate::lexer::LexError) -> Self {
         Self {
-            msg: e.msg,
+            msgs: vec![e.msg],
             line: e.line,
             fatal: false,
             recoverable: e.recoverable,
@@ -1979,7 +2005,7 @@ pub fn parse_cmdsub_body(
             // is not continuable, so the REPL must not offer a PS2 prompt for
             // one. Neither form can be completed by more input anyway — the
             // lexer already found the closing delimiter.
-            if e.msg == b"syntax error: unexpected end of file" {
+            if e.msg() == b"syntax error: unexpected end of file" {
                 ParseError::new("syntax error near unexpected token `)'")
             } else {
                 e
@@ -3635,12 +3661,11 @@ impl Parser {
             // the last line it actually read — so `[[ -n x ` on line 1 of a file
             // reports `line 1` and then `line 2`.
             if self.peek().is_none() {
-                return Err(ParseError {
+                let first = ParseError {
                     line_at: vec![(0, self.cur_line())],
-                    ..ParseError::new(
-                        "unexpected EOF while looking for `]]'\nsyntax error: unexpected end of file",
-                    )
-                });
+                    ..ParseError::new("unexpected EOF while looking for `]]'")
+                };
+                return Err(ParseError::new("syntax error: unexpected end of file").under(first));
             }
             // A complete sub-expression followed by a stray token where `]]` was
             // expected. bash reports this as `syntax error in conditional
@@ -3652,28 +3677,24 @@ impl Parser {
             // `: unexpected token \`X'` suffix on the first line, which is how
             // bash distinguishes a token it can name from a word it cannot.
             let tok = self.token_display();
-            if matches!(self.peek(), Some(Tok::Op(_))) {
-                let near = self.cond_near_at(self.pos);
-                return Err(ParseError {
-                    line_at: vec![(0, open)],
-                    ..ParseError::new(&bfmt![
-                        b"syntax error in conditional expression: unexpected token `",
-                        &tok,
-                        b"'\nsyntax error near `",
-                        near,
-                        b"'"
-                    ])
-                });
-            }
-            let near = self.cond_near_at(self.pos);
-            return Err(ParseError {
-                line_at: vec![(0, open)],
-                ..ParseError::new(&bfmt![
-                    b"syntax error in conditional expression\nsyntax error near `",
-                    near,
+            let head = if matches!(self.peek(), Some(Tok::Op(_))) {
+                bfmt![
+                    b"syntax error in conditional expression: unexpected token `",
+                    &tok,
                     b"'"
-                ])
-            });
+                ]
+            } else {
+                bfmt![b"syntax error in conditional expression"]
+            };
+            let near = self.cond_near_at(self.pos);
+            // Two `parser_error` calls, so two messages and two `line N:`
+            // prefixes — the first at the `[[`'s own line, the second wherever
+            // the reader stopped.
+            let first = ParseError {
+                line_at: vec![(0, open)],
+                ..ParseError::new(&head)
+            };
+            return Err(ParseError::new(&bfmt![b"syntax error near `", near, b"'"]).under(first));
         }
         self.pos += 1;
         Ok(Command::Cond(expr))
@@ -5972,27 +5993,22 @@ impl CondError {
             CondError::Other(e) => return e,
             CondError::Cond { clauses, tail } => (clauses, tail),
         };
-        let mut msg = Str::new();
+        let mut msgs = Vec::new();
         let mut line_at = Vec::new();
         for (i, (line, text)) in clauses.iter().enumerate() {
             if let Some(l) = *line {
                 line_at.push((u32::try_from(i).unwrap_or(u32::MAX), l));
             }
-            if i > 0 {
-                msg.push(b'\n');
-            }
-            msg.extend_from_slice(text);
+            msgs.push(text.clone());
         }
         // No tail is the bail case, which is also the case with no `near` line
-        // to end on — so there is nothing to separate the clauses from either.
+        // to end on.
         let bail_sequel = tail.is_none();
-        if let Some(tail) = &tail {
-            if !clauses.is_empty() {
-                msg.push(b'\n');
-            }
-            msg.extend_from_slice(tail);
+        if let Some(tail) = tail {
+            msgs.push(tail);
         }
-        ParseError { line_at, bail_sequel, ..ParseError::new(&msg) }
+        // Never empty: every constructor gives at least a clause or a tail.
+        ParseError { msgs, line_at, bail_sequel, ..ParseError::new(b"") }
     }
 }
 
@@ -6082,7 +6098,7 @@ mod tests {
     /// diagnostic compares bytes directly.
     #[track_caller]
     fn emsg(e: &ParseError) -> String {
-        String::from_utf8(e.msg.clone()).expect("diagnostic is text")
+        String::from_utf8(e.msg()).expect("diagnostic is text")
     }
 
     /// The text of a byte string an assertion wants to compare against a
@@ -6181,7 +6197,7 @@ mod tests {
     fn diagnostics_quote_the_source_bytes_back() {
         // The offending token, named by its source spelling.
         let e = super::parse(b"f() a\xffb").unwrap_err();
-        assert_eq!(e.msg, b"syntax error near unexpected token `a\xffb'");
+        assert_eq!(e.msg(), b"syntax error near unexpected token `a\xffb'");
 
         // A loop variable that is not an identifier — and cannot be one, since a
         // name is ASCII by construction — *parses*; the refusal is bash's at run
@@ -6202,7 +6218,7 @@ mod tests {
         // The `[[ … ]]` family names its token the same way, on the second line.
         let e = super::parse(b"[[ -z x a\xffb ]]").unwrap_err();
         assert_eq!(
-            e.msg,
+            e.msg(),
             b"syntax error in conditional expression\nsyntax error near `a\xffb'"
         );
 
@@ -6210,7 +6226,7 @@ mod tests {
         // the same bytes and still classifies as *incomplete* — so a REPL line
         // holding one keeps reading rather than erroring out.
         let e = super::parse(b"echo \"a\xffb").unwrap_err();
-        assert_eq!(e.msg, b"unexpected EOF while looking for matching `\"'");
+        assert_eq!(e.msg(), b"unexpected EOF while looking for matching `\"'");
         assert!(e.is_incomplete());
     }
 
@@ -6430,7 +6446,7 @@ mod tests {
     /// expectation is bash 5.2.37's own.
     #[test]
     fn a_paren_after_a_word_commits_to_a_function_definition() {
-        let err = |src: &str| String::from_utf8_lossy(&parse(src).unwrap_err().msg).into_owned();
+        let err = |src: &str| String::from_utf8_lossy(&parse(src).unwrap_err().msg()).into_owned();
         assert_eq!(err("a ( b"), "syntax error near unexpected token `b'");
         assert_eq!(err("a (b)"), "syntax error near unexpected token `b'");
         assert_eq!(err("a ( ;"), "syntax error near unexpected token `;'");
@@ -6782,8 +6798,8 @@ mod tests {
                 let Err(e) = unit else { continue };
                 let line = e.line.unwrap_or(0);
                 return e
-                    .msg
-                    .split(|&b| b == b'\n')
+                    .msgs
+                    .iter()
                     .enumerate()
                     .map(|(i, m)| {
                         // Latin-1, so the one non-ASCII byte these messages can

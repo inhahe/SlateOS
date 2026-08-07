@@ -3374,8 +3374,17 @@ impl Parser {
         // single `ArithCmd` token carrying the raw `init; cond; update` text.
         if let Some(Tok::ArithCmd(raw)) = self.peek() {
             let raw = raw.clone();
+            // bash stamps `arith_for_lineno` where the `((` is read
+            // (parse.y:4469), not where the command is reduced, so a malformed
+            // header is blamed here rather than on the `done` far below — and
+            // at the line the `((` opened on, where a token's own line is the
+            // one it *ends* on ([`crate::lexer::Lexer::stamp_lines`], which
+            // models `$LINENO`). The only newlines the token spans are the ones
+            // in the header, so counting those walks the line back.
+            let nl = raw.iter().filter(|&&b| b == b'\n').count();
+            let line = self.cur_line().saturating_sub(u32::try_from(nl).unwrap_or(u32::MAX));
             self.pos += 1;
-            return self.parse_for_arith(&raw);
+            return self.parse_for_arith(&raw, line);
         }
         if !matches!(self.peek(), Some(Tok::Word(_))) {
             // `for` with no loop variable (`for; do …`, `for` at EOF, `for |`):
@@ -3451,27 +3460,41 @@ impl Parser {
     }
 
     /// Parse the body of a C-style `for (( init; cond; update ))` loop, given
-    /// the raw `init; cond; update` text captured from the arithmetic token.
-    /// The three sections are split on `;`; an omitted section is empty (an
-    /// empty condition is treated as always-true at run time).
-    fn parse_for_arith(&mut self, raw: BStr<'_>) -> Result<Command, ParseError> {
-        let parts: Vec<BStr<'_>> = raw.split(|&b| b == b';').collect();
-        if parts.len() != 3 {
-            return Err(ParseError::new("C-style for loop requires 'for (( init; cond; update ))'"));
-        }
-        // Only the *leading* whitespace is dropped. bash keeps each section's
-        // source text from its first non-blank character onwards, which shows up
-        // when a function is printed back by `declare -f`: `for (( i=0; i<2;
-        // i++ ))` comes back as `for ((i=0; i<2; i++ ))`, trailing space and
-        // all. The arithmetic evaluator ignores the whitespace either way.
-        let init = bytes::trim_start(parts.first().copied().unwrap_or_default()).to_vec();
-        let cond = bytes::trim_start(parts.get(1).copied().unwrap_or_default()).to_vec();
-        let update = bytes::trim_start(parts.get(2).copied().unwrap_or_default()).to_vec();
+    /// the raw `init; cond; update` text captured from the arithmetic token and
+    /// the line the `((` was read on.
+    ///
+    /// The header is carved by [`arith_for_sections`] and is only *counted*
+    /// once the whole command has been read, because that is when bash looks:
+    /// `make_arith_for_command` runs from the grammar's reduction of
+    /// `FOR ARITH_FOR_EXPRS … DO compound_list DONE` (parse.y:881), so a syntax
+    /// error anywhere in the body is met first and reported instead —
+    /// `for ((0;0)); do fi; done` names `fi`, not the two-section header.
+    fn parse_for_arith(&mut self, raw: BStr<'_>, line: u32) -> Result<Command, ParseError> {
+        let secs = arith_for_sections(&bytes::chars(raw).collect::<Vec<_>>());
         // An optional separator (`;`/newline) may precede `do`.
         self.skip_separators();
         self.expect_reserved("do")?;
         let body = self.parse_program(&["done"], false)?;
         self.expect_reserved("done")?;
+        if secs.len() != 3 {
+            // `nsemi != 3` (make_cmd.c:309). The count decides only *which*
+            // first line is printed; the second, quoting the header back
+            // between the `((` and `))` the writer did not have to type twice,
+            // is the same either way. Both are `parser_error` calls rather than
+            // `report_syntax_error`, so neither echoes the offending source
+            // line, and both name the `((`'s own line.
+            let first = ParseError::new(if secs.len() < 3 {
+                "syntax error: arithmetic expression required"
+            } else {
+                "syntax error: `;' unexpected"
+            });
+            return Err(ParseError::new(&bfmt![b"syntax error: `((", raw, b"))'"])
+                .under(first)
+                .or_line(line));
+        }
+        let init = secs.first().cloned().unwrap_or_default();
+        let cond = secs.get(1).cloned().unwrap_or_default();
+        let update = secs.get(2).cloned().unwrap_or_default();
         Ok(Command::ForArith(ForArithClause {
             init,
             cond,
@@ -4879,6 +4902,53 @@ fn skip_balanced(chs: &[Ch], from: usize, open: char, close: char) -> Option<usi
         }
     }
     None
+}
+
+/// Carve a C-style `for (( … ))` header into its `;`-separated sections.
+///
+/// bash's `make_arith_for_command` (make_cmd.c:278–307) walks the raw header
+/// with `skip_to_delim (start, 0, ";", SD_NOJMP|SD_NOPROCSUB)`, taking the run
+/// up to each top-level `;` for one section and counting them as it goes — so
+/// the result is always at least one section, and three is the only count the
+/// caller accepts.
+///
+/// That flag set is exactly the one [`skip_construct`] models, which is why the
+/// scan is shared. A `;` inside a quoted run, a `` ` … ` ``, a `$( … )`, a
+/// `${ … }`, a `$'…'` or a `$"…"` belongs to that construct and separates
+/// nothing; one inside `[ … ]` (stepping over that wants `SD_GLOB`), `<( … )`
+/// (suppressed by `SD_NOPROCSUB`), `$[ … ]` (which `skip_to_delim` does not
+/// know) or a bare `( … )` (that wants `SD_ARITHEXP`) really does end a
+/// section, however arithmetic the text around it looks:
+///
+/// ```text
+/// for (( ${x:-;}; 0; 0 ))     three sections — the `;` is the expansion's
+/// for (( a[1;2]; 0; 0 ))      four — `syntax error: `;' unexpected'
+/// for (( $[1;2]; 0; 0 ))      four, for the same reason
+/// ```
+///
+/// Each section begins past the space and tab bash's `whitespace()` skips, and
+/// past nothing else — a leading newline is part of the text, and stays there
+/// when `declare -f` prints the loop back. Trailing whitespace is never
+/// dropped, which is why `for ((  i=0 ; i<2 ; i++  ))` comes back from
+/// `declare -f` as `for ((i=0 ; i<2 ; i++  ))`.
+fn arith_for_sections(chs: &[Ch]) -> Vec<Str> {
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    loop {
+        while matches!(syn_at(chs, i), ' ' | '\t') {
+            i += 1;
+        }
+        let start = i;
+        while i < chs.len() && syn_at(chs, i) != ';' {
+            // Always past `i`, so the scan cannot stall.
+            i = skip_construct(chs, i).unwrap_or(i + 1);
+        }
+        out.push(bytes::from_chars(chs.get(start..i).unwrap_or_default().iter().copied()));
+        if i >= chs.len() {
+            return out;
+        }
+        i += 1; // step over the `;`
+    }
 }
 
 fn matching_subscript_close(chs: &[Ch], open: usize) -> Option<usize> {
@@ -7499,6 +7569,105 @@ mod tests {
             panic!("expected arith command");
         };
         assert_eq!(text(bytes::trim(raw)), "x + 1");
+    }
+
+    /// The three sections of a `for (( … ))` header are not `;`-separated
+    /// fields: they are whatever bash's
+    /// `skip_to_delim (start, 0, ";", SD_NOJMP|SD_NOPROCSUB)` walks past. A `;`
+    /// inside a construct that scan steps over belongs to the construct, and one
+    /// inside a construct it does *not* step over ends a section however
+    /// arithmetic the text around it looks.
+    #[test]
+    fn an_arith_for_header_is_carved_by_the_scan_and_not_by_semicolons() {
+        fn secs(src: &str) -> Vec<String> {
+            let chs = bytes::chars(src.as_bytes()).collect::<Vec<_>>();
+            arith_for_sections(&chs).iter().map(|s| text(s)).collect()
+        }
+
+        assert_eq!(secs("i=0; i<2; i++"), ["i=0", "i<2", "i++"]);
+
+        // Stepped over, so the `;` separates nothing.
+        for held in [
+            "${x:-;}",
+            "\"1;2\"",
+            "' 1;2'",
+            "`echo 1;2`",
+            "$(echo 1;2)",
+            "$'a;b'",
+            "$\"a;b\"",
+            "\\;",
+            "$(( 1;2 ))",
+        ] {
+            assert_eq!(secs(&format!("{held}; 0; 0")), [held, "0", "0"], "{held}");
+        }
+
+        // Not stepped over — a subscript wants `SD_GLOB`, a process
+        // substitution is suppressed by `SD_NOPROCSUB`, a bare group and a
+        // `? :` want `SD_ARITHEXP`, and `$[ … ]` is unknown to the scan.
+        for (src, want) in [
+            ("a[1;2]", ["a[1", "2]"]),
+            ("$[1;2]", ["$[1", "2]"]),
+            ("(1;2)", ["(1", "2)"]),
+            ("0?1;2:3", ["0?1", "2:3"]),
+            ("<(echo 1;2)", ["<(echo 1", "2)"]),
+        ] {
+            assert_eq!(secs(src), want, "{src}");
+        }
+
+        // Each section starts past the space and tab `whitespace()` skips, and
+        // past nothing else: trailing blanks stay, and a leading newline is not
+        // blank enough to go.
+        assert_eq!(secs("  0 ;\t0  ; 0"), ["0 ", "0  ", "0"]);
+        assert_eq!(secs("\n0;0;0"), ["\n0", "0", "0"]);
+
+        // The scan always yields at least one section, so an empty header is
+        // one empty section rather than none — which is what makes `for (( ))`
+        // too *few* sections and not zero of them.
+        assert_eq!(secs(""), [""]);
+        assert_eq!(secs(";;"), ["", "", ""]);
+        assert_eq!(secs("0;0;0;"), ["0", "0", "0", ""]);
+    }
+
+    /// A header that does not carve into exactly three sections is two
+    /// `parser_error` messages, not one: the count decides the first, and the
+    /// second quotes the header back between the `((` and `))` the writer never
+    /// typed twice. Both name the line the `((` was read on, however far below
+    /// the `done` the parser has reached by the time it counts.
+    #[test]
+    fn a_miscounted_arith_for_header_is_two_messages_at_the_double_parens_line() {
+        let diag = |src: &str| {
+            let e = parse(src).expect_err("miscounted header");
+            let at = |i: usize| {
+                let i = u32::try_from(i).unwrap_or(u32::MAX);
+                e.line_at
+                    .iter()
+                    .find(|&&(j, _)| j == i)
+                    .map_or(e.line.unwrap_or(0), |&(_, l)| l)
+            };
+            e.msgs
+                .iter()
+                .enumerate()
+                .map(|(i, m)| format!("{}: {}", at(i), text(m)))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        assert_eq!(
+            diag("for ((0;0)); do :; done"),
+            "1: syntax error: arithmetic expression required\n1: syntax error: `((0;0))'"
+        );
+        assert_eq!(
+            diag("for ((0;0;0;0)); do :; done"),
+            "1: syntax error: `;' unexpected\n1: syntax error: `((0;0;0;0))'"
+        );
+        // The header is quoted back exactly as written — its newlines included,
+        // and the `((`'s own line is the one blamed, not the `done`'s.
+        assert_eq!(
+            diag("echo hi\nfor ((0;\n0)); do :; done"),
+            "2: syntax error: arithmetic expression required\n2: syntax error: `((0;\n0))'"
+        );
+        // A `;` the scan steps over is not a separator, so this one counts.
+        assert!(parse("for (( ${x:-;}; 0; 0 )); do :; done").is_ok());
     }
 
     #[test]

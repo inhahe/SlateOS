@@ -43,6 +43,166 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
+### TD-OILS-AN-UNTERMINATED-BRACE-LEFT-BY-AN-ARITHMETIC-SCAN-IS-NOT-A-BAD-SUBSTITUTION. `echo $[ 1 + ${x:-]} ]` — 2026-08-07 — ✅ FIXED 2026-08-07
+
+**Where:** `userspace/oils/src/interp.rs` — the `'{'` arm of
+`Shell::expand_arith_params` (~line 28620) and the helpers now sitting before
+`Shell::arith_sub`.
+
+**What was wrong.** Neither `$((` nor `$[` skips a `${ … }` when it looks for
+its end (that wants `P_ARRAYSUB|P_DOLBRACE`, parse.y:3929), so a `]` or `)`
+*inside* a brace ends the scan and the text handed on carries an unterminated
+brace. bash expands that text as a word before evaluating it, so the failure is
+the word expansion's; osh reached the arithmetic parser with the `${x:-`
+silently dropped and complained about the hole it left:
+
+```text
+bash: line 1: bad substitution: no closing `}' in  1 + ${x:-              rc=1
+osh : line 1: 1 + : syntax error: operand expected (error token is "+ ")  rc=1
+```
+
+**The rule, which is not about the brace at all.** bash has *two* complaints
+here and both come out of `parameter_brace_expand` (subst.c:9539), which reads
+the name before it ever goes looking for the `}`:
+
+* `string_extract` (subst.c:795) ends the name only at one of `#%^,~:-=?+/@}`
+  — not at a space, and not at any other character a name may not hold — and it
+  steps over a `\c` pair and a balanced `[…]`. A name that runs to the end of
+  the text finishes with `c == 0`, which the `switch` at subst.c:10034 sends to
+  `bad_substitution`. So `${x ` and `${a[x:-` are plain bad substitutions.
+* `valid_brace_expansion_word` (subst.c:9814) then refuses anything that is not
+  an identifier, an all-digit positional, a one-character special parameter or a
+  well-formed `a[…]` reference — also before the brace is missed.
+* The one-character special parameters that are *also* operator characters are
+  re-scanned (`VALID_SPECIAL_LENGTH_PARAM`, subst.c:9605; `VALID_INDIR_PARAM`,
+  subst.c:117 — which holds `# ? @ *` and deliberately not `-`), and `@` is made
+  a name of its own at subst.c:9577. That is why `${@ ` is the missing brace and
+  `${@))` is a bad substitution, and why `${!-` differs from `${!#`.
+* A name behind a `!` is *resolved* first (`parameter_brace_expand_indir`,
+  subst.c:7621), so an unset pointer is `invalid indirect expansion` and a
+  pointer holding a non-name is `invalid variable name` — in the missing brace's
+  place. The target's **value** is not read, which is why
+  `set -u; y=z; echo $(( ${!y- ))` is the missing brace and not `z: unbound`.
+
+Only a valid name stopped by an operator reaches `extract_dollar_brace_string`
+(subst.c:9910), and only that call says ``no closing `}'`` — naming the whole
+arithmetic string, because that is the string it was handed.
+
+**Fixed by** `Shell::unterminated_brace_kind`, which reproduces that front half
+and returns `BadSub` / `NoClosing` / `Indir(name)`; `Shell::brace_name_end` and
+`Shell::brace_subscript_end` for `string_extract`'s stepping;
+`Shell::valid_brace_expansion_word`; `Shell::arith_unclosed_brace` for the
+missing-brace diagnostic (errexit-only, since bash raises it with a bare
+`exp_jump_to_top_level (DISCARD)` that posix mode's hook never sees); and
+`Shell::arith_indir_resolves`, which performs the indirection through the
+existing `indirect_pointer_value`.
+
+Corpus case:
+`tests/corpus/an-unterminated-brace-in-an-arithmetic-string-is-named-by-its-own-rule.sh`.
+Two neighbours found while measuring this are logged separately:
+TD-OILS-A-DOUBLE-QUOTED-DOLLAR-BRACKET-IS-NOT-SKIPPED-BY-THE-QUOTE-EXTRACTOR and
+TD-OILS-AN-ARITHMETIC-STRING-NAMES-ITS-COMMAND-SUBSTITUTION-AS-WRITTEN.
+
+### TD-OILS-AN-ARITHMETIC-STRING-NAMES-ITS-COMMAND-SUBSTITUTION-AS-WRITTEN. `$(echo a>&2)` should come back as `$(echo a 1>&2)` — 2026-08-07
+
+**Where:** `userspace/oils/src/interp.rs` — whatever fills `Shell::bad_sub_word`
+for an arithmetic string (`Shell::expand_arith_params` and its callers), which
+keeps the source text.
+
+**What:** bash does not keep the source text of a `$( … )`. `xparse_dolparen`
+parses the body and stores `make_command_string`'s *re-print* of the parse, so a
+diagnostic that quotes an arithmetic string back shows the reconstruction —
+redirections normalised (`>&2` → `1>&2`), compound commands re-laid-out across
+lines. Backticks are not re-parsed this way and do come back verbatim.
+
+osh already reconstructs on the **subscript** path (`${a[${x!}+$(echo b>&2)]}`
+matches bash exactly), so this is only the `$(( … ))` / `$[ … ]` / `(( … ))` /
+`let` family.
+
+**Repro** (bash 5.2.37 left, osh right):
+
+| input | bash | osh |
+|---|---|---|
+| `echo $(( ${x!} + $(echo a>&2) ))` | `` ${x!} + $(echo a 1>&2) : bad substitution`` | `` ${x!} + $(echo a>&2) : bad substitution`` |
+| `echo $(( ${x!} + $(if true;then echo 1;fi) ))` | re-printed over three lines | one line, as written |
+
+**Proper fix:** run the arithmetic string's `$( … )` bodies through the same
+re-print the subscript path uses when the string is captured for a diagnostic.
+
+### TD-OILS-A-DOUBLE-QUOTED-DOLLAR-BRACKET-IS-NOT-SKIPPED-BY-THE-QUOTE-EXTRACTOR. `echo "$[ ${ ]"` names the wrong string — 2026-08-07
+
+**Where:** `userspace/oils/src/interp.rs` / the double-quote scanner — osh
+recognises `$[ … ]` inside double quotes and hands the arithmetic text to the
+arithmetic expander, where bash never gets that far.
+
+**What:** bash's `string_extract_double_quoted` knows `${`, `$(` and `` ` `` but
+**not** `$[`. So in a double-quoted word it walks straight past the `$[`, meets
+the `${`, and calls `extract_dollar_brace_string` on the *whole word* — which
+runs off the end and reports ``no closing `}'`` naming the word, quotes and all,
+before any arithmetic is involved. `$(( … ))` is skipped properly (it starts
+`$(`), so only the `$[` spelling is affected.
+
+**Repro** (bash 5.2.37 left, osh right):
+
+| input | bash | osh |
+|---|---|---|
+| `echo "$[ ${ ]"` | ``no closing `}' in "$[ ${ ]"`` | `` ${ : bad substitution`` |
+| `echo "x$[ ${x:- ]y"` | ``no closing `}' in "x$[ ${x:- ]y"`` | ``no closing `}' in  ${x:- `` |
+| `echo "$[ ${x:- ]"` | ``no closing `}' in "$[ ${x:- ]"`` | ``no closing `}' in  ${x:- `` |
+| `echo "$(( ${x:- ))"` | ``no closing `}' in  ${x:- `` | same ✓ |
+
+Only an *unterminated* `${` diverges: with the brace closed
+(`echo "$[ ${x!} ]"`) the quote extractor steps over it and both shells report
+the arithmetic string.
+
+**Proper fix:** in the double-quoted-word scanner, do not treat `$[` as an
+arithmetic substitution when looking for the end of the quoted text — let the
+`${` be found first, exactly as bash does.
+
+### TD-OILS-A-C-STYLE-FOR-HEADER-IS-SPLIT-ON-EVERY-SEMICOLON. `for ((${x:-;}; 0;))` is a syntax error — 2026-08-07
+
+**Where:** `userspace/oils/src/parser.rs` — `Parser::parse_for_arith`
+(~line 3431), which does `raw.split(|&b| b == b';')`.
+
+**What:** bash does not split the `for (( … ))` header on raw semicolons. Each
+of the three sections is carved with
+`skip_to_delim (start, 0, ";", SD_NOJMP|SD_NOPROCSUB)` (`make_arith_for_command`,
+make_cmd.c:288), which steps *over* a `\c` pair, `'…'`, `"…"`, `` `…` ``,
+`$( … )` and `${ … }` — so a `;` inside any of those is part of the section, not
+a separator. osh's naive split miscounts every such header.
+
+What it does **not** step over, because the flags say so (subst.c:2181): a
+`[ … ]` subscript (that wants `SD_GLOB`), a `<( … )` / `>( … )` process
+substitution (`SD_NOPROCSUB` is set), and a parenthesised group or a `? :`
+(those want `SD_ARITHEXP`, which this call does not pass). So `a[1;2]` really is
+two sections in bash, and the diagnostic below is what comes out.
+
+Nor is a bad count "not a C-style for loop": bash reports it with two lines and
+status 2 (make_cmd.c:311–319), quoting the header text back —
+
+```
+syntax error: arithmetic expression required      # fewer than 3 sections
+syntax error: `;' unexpected                      # more than 3
+syntax error: `((${; 0;))'                        # always, with the raw text
+```
+
+**Repro** (bash 5.2.37 left, osh right):
+
+| input | bash | osh |
+|---|---|---|
+| `for ((${x:-;}; 0;)); do :; done` | `((: ;: syntax error: operand expected`, rc 1 | `C-style for loop requires …`, rc 2 |
+| `x=1; for ((n=${x:-;}; n<2; n++)); do echo n=$n; done` | `n=1` | `C-style for loop requires …` |
+| `for (("1;2"; 0;)); do :; done` | `((: 1;2: … invalid arithmetic operator` | `C-style for loop requires …` |
+| ``for ((`echo 1;2`; 0;)); do :; done`` | `2: command not found`, then rc 0 | `C-style for loop requires …` |
+| `for (($(echo 1;2); 0;)); do :; done` | `2: command not found`, then rc 0 | `C-style for loop requires …` |
+| `for ((a[1;2]=0; 0;)); do :; done` | ``syntax error: `;' unexpected`` + ``syntax error: `((a[1;2]=0; 0;))'`` | `C-style for loop requires …` |
+| `for ((${; 0;)); do :; done` | `syntax error: arithmetic expression required` + the header echo, rc 2 | `${: bad substitution`, rc 1 |
+
+**Proper fix:** port `skip_to_delim`'s section-carving into `parse_for_arith`
+with exactly that flag set (there is already a `${ … }`/`$( … )`/quote-aware
+scanner in the lexer to reuse), count sections bash's way, and emit bash's
+two-line diagnostic with the raw header quoted back.
+
 ### TD-OILS-AN-UNBRACED-NAME-IN-AN-ARITHMETIC-STRING-IS-NOT-NOUNSET-CHECKED. `set -u; echo $(( $y + 1 ))` printed `1` — 2026-08-07 — ✅ FIXED 2026-08-07
 
 **Where:** `userspace/oils/src/interp.rs` — the `$name` arm of
@@ -347,31 +507,6 @@ special handling.
 Covered by `tests/corpus/an-integer-assignment-keeps-the-status-its-value-left.sh`,
 which also pins the append, `declare`, array-element and `let` spellings, and
 the unwind still passing through `eval` and a function.
-
-### TD-OILS-AN-UNTERMINATED-BRACE-LEFT-BY-AN-ARITHMETIC-SCAN-IS-NOT-A-BAD-SUBSTITUTION. `echo $[ 1 + ${x:-]} ]` — 2026-08-07 — OPEN
-
-**Where:** `userspace/oils/src/interp.rs` — expansion of `Seg::Arith`, and
-whatever reports `bad substitution` for a word.
-
-**What.** Neither `$((` nor `$[` skips a `${ … }` (that wants
-`P_ARRAYSUB|P_DOLBRACE`, parse.y:3929), so the `]` inside the brace ends the
-expansion and the text handed on is `1 + ${x:-` — a word with an unterminated
-brace. bash expands that text as a word first, so the failure is the *word's*:
-
-```text
-bash: line 1: bad substitution: no closing `}' in  1 + ${x:-           rc=1
-osh : line 1: 1 + : syntax error: operand expected (error token is "+ ")  rc=1
-```
-
-osh reaches the arithmetic parser with the `${x:-` already gone. The status
-agrees; the diagnostic names the wrong layer. The `$((` sibling
-(`echo $(( 1 + ${x:-)} ))`) already matches, because there the leftover text
-fails to balance and the whole construct falls back to a command substitution
-instead — a different path entirely.
-
-**Proper fix:** expand the arithmetic text as a word before parsing it as an
-expression, and let the word expansion's own errors out. That is the order bash
-uses (`expand_arith_string` runs before `evalexp`).
 
 ### TD-OILS-A-SUBSTITUTION-INSIDE-A-BRACE-EXPANSION-IS-BLAMED-ON-THE-BODYS-OWN-LINE. `echo ${x:-$(fi)}` from a script names line 1 — 2026-08-07 — ✅ FIXED 2026-08-07
 
@@ -701,11 +836,12 @@ bash: command substitution: line 2: syntax error near unexpected token `fi)' ''
 osh : line 1: 1 + '' : syntax error: operand expected                       rc=1
 ```
 
-Almost certainly the same root cause as
-TD-OILS-AN-UNTERMINATED-BRACE-LEFT-BY-AN-ARITHMETIC-SCAN-IS-NOT-A-BAD-SUBSTITUTION:
-osh hands the arithmetic text straight to the expression parser, where bash runs
-`expand_arith_string` over it first. Fixing that one should fix this; measure
-both together.
+Was filed as "almost certainly the same root cause" as
+TD-OILS-AN-UNTERMINATED-BRACE-LEFT-BY-AN-ARITHMETIC-SCAN-IS-NOT-A-BAD-SUBSTITUTION.
+That one is now fixed and this one is **not** covered by it: osh does expand the
+arithmetic text as a word (`Shell::expand_arith_params`), but that pass keeps
+honouring `'…'` where bash's does not. Re-measure before assuming the old
+diagnosis still holds.
 
 ### TD-OILS-THE-JOBS-CURRENT-AND-PREVIOUS-TEST-IS-FLAKY-UNDER-LOAD. `jobs_marks_the_current_and_previous_job` failed once in a contended run — 2026-08-07 — ✅ FIXED 2026-08-07
 

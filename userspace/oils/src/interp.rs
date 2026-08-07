@@ -1631,6 +1631,24 @@ enum FatalWhen {
     PosixOnly,
 }
 
+/// Which complaint a `${…` that never closed its brace earns, decided by the
+/// name bash read out of it. See [`Shell::unterminated_brace_kind`].
+enum UntermBrace {
+    /// The name is one the brace rules refuse, or nothing followed it: bash
+    /// falls out of `parameter_brace_expand`'s `switch (c)` into
+    /// `bad_substitution` (subst.c:10039) and the missing brace is never
+    /// noticed.
+    BadSub,
+    /// A usable name, stopped by an operator: `extract_dollar_brace_string`
+    /// (subst.c:9910) is reached and runs off the end of the string.
+    NoClosing,
+    /// A usable name behind a `!`, which bash *resolves* before it goes looking
+    /// for the brace — so an unset pointer or a target that is not a name is
+    /// reported in the missing brace's place. Carries the name as written,
+    /// leading `!` and all. See [`Shell::arith_indir_resolves`].
+    Indir(Str),
+}
+
 /// What the DEBUG trap left behind for the command it just announced.
 ///
 /// Under `shopt -s extdebug` the handler's exit status is an instruction rather
@@ -28197,6 +28215,241 @@ impl Shell {
         Str::new()
     }
 
+    /// Report a `${ … }` in an arithmetic string that ran out before its `}`.
+    ///
+    /// The complaint is `extract_dollar_brace_string`'s (subst.c:1980), and like
+    /// the eaten-`))` one above it is *errexit only*: bash raises it with a bare
+    /// `exp_jump_to_top_level (DISCARD)` rather than by returning an error word
+    /// to `expand_word_internal`, so posix mode's "an expansion error ends the
+    /// shell" hook never sees it. Measured: with `set -o posix`,
+    /// `(( 1 + ${x:- ))` complains and the next line still runs, where
+    /// `(( 1 + ${ ))` — a plain bad substitution — ends the shell.
+    ///
+    /// What it names is the string the expansion was handed, which is the
+    /// arithmetic text: `echo "a$(( 1 + ${x:- ))b"` reports ` 1 + ${x:- ` and
+    /// not the quoted word around it. That is [`Shell::bad_sub_word`] exactly.
+    fn arith_unclosed_brace(&mut self) -> Str {
+        if self.expansion_failed() {
+            return Str::new();
+        }
+        let named = self.bad_sub_word.clone().unwrap_or_default();
+        self.emit_stderr(&bfmt![
+            self.err_prefix(),
+            b"bad substitution: no closing `}' in ",
+            &named,
+            b"\n"
+        ]);
+        self.arm_discard(1);
+        self.note_shell_error(FatalWhen::ErrexitOnly);
+        Str::new()
+    }
+
+    /// A `${…` in an arithmetic string ran out before its `}`: does bash report
+    /// the missing brace, or a plain "bad substitution"?
+    ///
+    /// Both come out of `parameter_brace_expand` (subst.c:9539), which reads the
+    /// name *before* it goes looking for the closing brace — so which one is
+    /// raised is settled by two questions about the name, and not by the brace
+    /// at all:
+    ///
+    /// * Is the name usable? `valid_brace_expansion_word` (subst.c:9814) accepts
+    ///   an identifier, an all-digit positional, a one-character special
+    ///   parameter and a well-formed `a[…]` reference, and nothing else. A name
+    ///   that fails there is refused before the brace is ever missed, so
+    ///   `${a[x:-` and `${x\:-` are plain "bad substitution"s even though an
+    ///   operator does follow.
+    /// * Is anything *left* after it? `string_extract` (subst.c:795) stops only
+    ///   at one of `#%^,~:-=?+/@}` — not at a space, and not at any other
+    ///   character an identifier may not hold — so `${x ` and `${x!` take the
+    ///   whole remainder as the name and end with bash's `c == 0`, which the
+    ///   `switch (c)` at subst.c:10034 sends to `bad_substitution`. Only an
+    ///   operator character ending the name reaches
+    ///   `extract_dollar_brace_string` (subst.c:9910), and only that call says
+    ///   `no closing '}'`.
+    ///
+    /// A third question follows for a name that indirects, because bash resolves
+    /// the pointer before it looks for the brace: see [`UntermBrace::Indir`].
+    ///
+    /// `body` is the text after the `${`, and by construction holds no `}`.
+    fn unterminated_brace_kind(body: BStr<'_>) -> UntermBrace {
+        // The characters `string_extract` stops the name at, less the `}` that
+        // cannot occur here (subst.c:9568).
+        const OPS: &[u8] = b"#%^,~:-=?+/@";
+        // The shorter list the special-parameter re-scans use (subst.c:9612,
+        // subst.c:9617) — it drops the case-modification operators.
+        const SHORT: &[u8] = b"#%:-=?+/@";
+        // `${#name…}` is read with `}` as the *only* stop (subst.c:9561), so
+        // here the name runs to the end and the length branch refuses it
+        // (subst.c:9694).
+        if body.first() == Some(&b'#')
+            && body
+                .get(1)
+                .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_')
+        {
+            return UntermBrace::BadSub;
+        }
+        let end = Self::brace_name_end(body, 0, OPS);
+        let stop = body.get(end).copied();
+        let (name_end, c) = if end == 0 && stop == Some(b'@') {
+            // `${@…` — bash makes `@` a name of its own (subst.c:9577), so what
+            // follows it is the operator rather than more of the name. This is
+            // the one form where a trailing space decides it: `(( ${@ ))` is the
+            // missing brace and `(( ${@))` is a bad substitution.
+            (1, body.get(1).copied())
+        } else if end == 0 && matches!(stop, Some(b'-' | b'?' | b'#')) {
+            // `${-…`, `${?…`, `${#…` — a special parameter that is also an
+            // operator character, so bash steps over it and re-scans
+            // (`VALID_SPECIAL_LENGTH_PARAM`, subst.c:110, tested at
+            // subst.c:9605). `@` is not in that set; it was taken above.
+            let e2 = Self::brace_name_end(body, 1, SHORT);
+            (e2, body.get(e2).copied())
+        } else if end == 1
+            && body.first() == Some(&b'!')
+            && matches!(stop, Some(b'#' | b'?' | b'@' | b'*'))
+        {
+            // `${!@…`, `${!#…` — an indirection through a special parameter
+            // (`VALID_INDIR_PARAM`, subst.c:9608). `-` is deliberately not in
+            // that set, which is why `${!-` is the missing brace where `${!#`
+            // is a bad substitution.
+            let e2 = Self::brace_name_end(body, 2, SHORT);
+            (e2, body.get(e2).copied())
+        } else {
+            (end, stop)
+        };
+        let name = body.get(..name_end).unwrap_or_default();
+        if c.is_none() {
+            return UntermBrace::BadSub;
+        }
+        // `want_indir` (subst.c:9837): a leading `!` makes the *rest* the name to
+        // check, but only when what follows it could be one — otherwise the `!`
+        // is just the special parameter `$!` and the name is checked whole.
+        let want_indir = name.first() == Some(&b'!')
+            && name.get(1).is_some_and(|c| {
+                c.is_ascii_alphanumeric() || *c == b'_' || b"#?@*".contains(c)
+            });
+        let checked = if want_indir {
+            name.get(1..).unwrap_or_default()
+        } else {
+            name
+        };
+        if !Self::valid_brace_expansion_word(checked) {
+            return UntermBrace::BadSub;
+        }
+        if want_indir {
+            UntermBrace::Indir(name.to_vec())
+        } else {
+            UntermBrace::NoClosing
+        }
+    }
+
+    /// Resolve the pointer of a `${!ref…` whose brace never closed, and say
+    /// whether the missing brace is still the thing left to report.
+    ///
+    /// bash reaches `parameter_brace_expand_indir` (subst.c:7621) *before*
+    /// `extract_dollar_brace_string`, so the indirection is really performed and
+    /// its own failures come out in the missing brace's place: an unset pointer
+    /// is `invalid indirect expansion`, and a pointer holding something that is
+    /// not a name is `invalid variable name`. What is *not* done here is reading
+    /// the target's value — that happens after the extraction bash never gets to
+    /// — which is why `set -u; y=z; echo $(( ${!y- ))` is the missing brace and
+    /// not `z: unbound variable`.
+    fn arith_indir_resolves(&mut self, name: BStr<'_>) -> bool {
+        let Ok(WordPart::Indirect { refname, index }) =
+            crate::parser::parse_braced_param(name, self.parse_opts())
+        else {
+            return true;
+        };
+        // A nameref is answered by its own target's *name* and never followed
+        // (subst.c:7642), so `declare -n r=q` resolves even with `q` unset. Only
+        // a chain that closes on itself has no name to give.
+        if index.is_none() && self.nameref_attr.contains(&refname) {
+            if self.resolve_ref_name(&refname).is_some() {
+                return true;
+            }
+            self.perrln(&format!("{refname}: invalid indirect expansion"));
+            self.arm_discard(1);
+            return false;
+        }
+        let Ok(target) = self.indirect_pointer_value(&refname, &index) else {
+            return false;
+        };
+        // A reference that points nowhere in particular — an absent element —
+        // is not an error on its own; only reading through it would have been.
+        let Some(target) = target else { return true };
+        if bytes::as_str(&target).is_some_and(is_valid_indirect_target) {
+            return true;
+        }
+        self.emit_stderr(&bfmt![
+            self.err_prefix(),
+            &target,
+            b": invalid variable name\n"
+        ]);
+        self.arm_discard(1);
+        self.note_shell_error(FatalWhen::ErrexitOrPosix);
+        false
+    }
+
+    /// bash's `string_extract (…, SX_VARNAME)` (subst.c:795): the index of the
+    /// first character of `ops` at or after `from`, or `body.len()` if there is
+    /// none. A `\c` pair and a balanced `[…]` subscript are stepped *over*
+    /// rather than looked at, so the `:` of `${a[x:y]…` belongs to the
+    /// subscript and not to the name.
+    fn brace_name_end(body: BStr<'_>, from: usize, ops: &[u8]) -> usize {
+        let mut i = from;
+        while let Some(&c) = body.get(i) {
+            if c == b'\\' {
+                if i.saturating_add(1) >= body.len() {
+                    break;
+                }
+                i = i.saturating_add(1);
+            } else if c == b'[' {
+                // Only a subscript that really closes is skipped — bash takes
+                // `skipsubscript`'s answer only when it landed on a `]`.
+                if let Some(k) = Self::brace_subscript_end(body, i) {
+                    i = k;
+                }
+            } else if ops.contains(&c) {
+                return i;
+            }
+            i = i.saturating_add(1);
+        }
+        body.len()
+    }
+
+    /// The index of the `]` closing the subscript opening at `i`, if it has one.
+    fn brace_subscript_end(body: BStr<'_>, i: usize) -> Option<usize> {
+        let mut depth = 0usize;
+        let mut j = i;
+        while let Some(&c) = body.get(j) {
+            match c {
+                b'\\' => j = j.saturating_add(1),
+                b'[' => depth = depth.saturating_add(1),
+                b']' if depth <= 1 => return Some(j),
+                b']' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            j = j.saturating_add(1);
+        }
+        None
+    }
+
+    /// bash's `valid_brace_expansion_word` (subst.c): the names a `${ … }` may
+    /// be built on at all.
+    fn valid_brace_expansion_word(name: BStr<'_>) -> bool {
+        if name.first().is_some_and(u8::is_ascii_digit) && name.iter().all(u8::is_ascii_digit) {
+            return true;
+        }
+        // `SPECIAL_VAR` (subst.c:125), whose one-character set is `CSPECVAR`
+        // (mksyntax.c:247) — the digits and `_` are covered above and below.
+        if name.len() == 1 && b"@*#?-$!".contains(&name[0]) {
+            return true;
+        }
+        if bytes::as_str(name).is_some_and(|s| Self::split_array_ref(s).is_some()) {
+            return true;
+        }
+        lexer::is_valid_name(name)
+    }
+
     fn arith_sub(&mut self, expr: BStr<'_>, bracket: bool) -> Str {
         // `$[ … ]` is read by a different extractor, one with no comment rule,
         // so only the `$(( … ))` spelling can lose its closer this way.
@@ -28396,6 +28649,29 @@ impl Shell {
                     );
                     if i < chars.len() {
                         i += 1; // consume the closing '}'
+                    } else {
+                        // The brace never closed. Nothing was scanned as a word
+                        // beforehand — an arithmetic scan does not step over a
+                        // `${ … }` (that wants `P_ARRAYSUB|P_DOLBRACE`,
+                        // parse.y:3929) — so this text reaches expansion with
+                        // the brace still open, and bash complains about it
+                        // here. Which complaint it is depends on the name and
+                        // not on the brace; see
+                        // [`Shell::unterminated_brace_kind`].
+                        match Self::unterminated_brace_kind(&inner) {
+                            UntermBrace::BadSub => {
+                                self.bad_substitution_with(&inner, false);
+                            }
+                            UntermBrace::NoClosing => {
+                                self.arith_unclosed_brace();
+                            }
+                            UntermBrace::Indir(name) => {
+                                if self.arith_indir_resolves(&name) {
+                                    self.arith_unclosed_brace();
+                                }
+                            }
+                        }
+                        continue;
                     }
                     let val = match crate::parser::parse_braced_param(&inner, self.parse_opts()) {
                         Ok(part) => {

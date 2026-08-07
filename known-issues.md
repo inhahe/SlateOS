@@ -202,7 +202,7 @@ rather than deriving it from the enclosing context. The rest of that family is
 worth doing in the same change — trap.c uses `"exit trap"`, `"debug trap"`,
 `"error trap"`, `"return trap"` and `"trap"` by signal, and `eval` uses `"eval"`.
 
-### TD-OILS-A-DOLLAR-QUOTE-IN-AN-ARITHMETIC-STRING-IS-NOT-TRANSLATED-AT-PARSE-TIME. `echo $(( $"a" ))` — 2026-08-07
+### TD-OILS-A-DOLLAR-QUOTE-IN-AN-ARITHMETIC-STRING-IS-NOT-TRANSLATED-AT-PARSE-TIME. `echo $(( $"a" ))` — 2026-08-07 — ✅ FIXED 2026-08-07
 
 **Where:** `userspace/oils/src/lexer.rs` — whatever reads the body of a `$(( … ))`
 / `$[ … ]`. osh hands the raw text on with the `$'…'` and `$"…"` still in it.
@@ -238,36 +238,45 @@ with parse.y's re-quoting rule — `sh_single_quote` for `$'…'`, the double-qu
 form for `$"…"` — rather than leaving them for the arithmetic evaluator, which
 by then cannot tell them from text the writer quoted themselves.
 
-**Status 2026-08-07 — mostly fixed, one shape left.** `Lexer::read_opaque_span`
-now translates both forms in every grouping construct (commit "a dollar-quote
-inside a grouping construct is translated at parse time"), which closes rows 1–4
-of the table above. An earlier commit message claimed this entry was closed
-outright; that was wrong, and row 5 is why.
+**Fixed 2026-08-07, in three steps.** The first was
+`Lexer::read_opaque_span`, which now translates both forms in every grouping
+construct (commit "a dollar-quote inside a grouping construct is translated at
+parse time"); that closed rows 1–4. Row 5 — a `$'…'` in a `${ … }` body inside
+arithmetic — took two more, and the interesting part is that only *one* of them
+is about translation at all.
 
-**What is left:** a `$'…'` inside a `${ … }` body that is itself inside an
-arithmetic context. `Lexer::read_dollar_brace_body` still *copies* the run via
-`take_ansi_c_run` instead of translating it:
+**The other half of row 5 was not the dollar-quote.** Measuring first showed
+`echo $(( ${x:-'5'} ))` — plain quotes, no `$` — diverging the same way: bash
+errors on `'5'`, osh printed `5`. So osh was doing quote *removal* on a
+single-quoted run in an arithmetic `${ … }` operand. bash does not: it expands
+an arithmetic string with `Q_DOUBLE_QUOTES|Q_ARITH` (subst.c:8134), and
+`expand_word_internal`'s `'` arm is `if (quoted & (Q_DOUBLE_QUOTES|
+Q_HERE_DOCUMENT)) goto add_character` (subst.c:11577) — a `'` in the operand is
+an ordinary character handed to the evaluator, which rejects it. Fixed by
+threading the quoting through `parser::parse_braced_param`, which had it
+hard-coded to `Quoting::Bare`; `interp.rs`'s `expand_arith_params` and
+`arith_indir_resolves` now pass `Quoting::Dquote`. This is the same rule the
+pass around it already followed for quotes written *outside* a `${ … }`.
 
-```
-echo $(( ${x:-$'5'} + 0 ))    bash: '5' + 0 : syntax error…    osh: 5
-echo $(( ${x:-$'a'} ))        bash: 'a' : syntax error…        osh: 0
-```
+**Then the translation itself**, in `read_dollar_brace_body`: a `$'…'` is
+`ansiexpand`ed and re-quoted with `sh_single_quote` when the enclosing scan
+carries no `P_DQUOTE` (parse.y:3882), and still copied when it does. With the
+quoting fix already in place, arithmetic then falls out for free — the
+translation lands as `'5'`, which the operand rule above already rejects.
+Deciding before the `$` is written to the body is `retind -= 2` (parse.y:3893)
+without the rewind.
 
-`$( … )` is unaffected — `echo $(echo ${x:-$'a\tb'})` already agrees — because
-that body is re-lexed as commands and the run is handled on the ordinary word
-path. Only arithmetic, which consumes the text directly, can see the
-difference.
+The translation is observable outside arithmetic too, and the new corpus case
+`an-ansi-c-string-in-a-brace-body-is-translated-at-parse-time.sh` pins it: a NUL
+ends the string (`${x:-$'a\0b'}` is `${x:-'a'}`), a `$'\x27'` becomes `\'`
+(shquote.c:103), the body that reaches `declare -f` holds no `$'` at all, and a
+`$'x\ny'` puts a real newline where the source had none — so a `$LINENO` after
+it in the same `$( … )` body sits one line lower.
 
-**Why it is tractable, and why it is not the deferred brace defect.** The
-`${ … }` body is read by `parse_matched_pair` too, so it reaches the *same* arm
-(parse.y:3855). With no `P_DQUOTE` the third branch fires — plain
-`sh_single_quote`, no `dolbrace_state` involved — which is exactly what
-`read_opaque_span` already does. `dolbrace_state` only matters in the first two
-branches, both gated on `P_DQUOTE`, and the second of those is the `#if 0
-/* TAG:bash-5.3 */` defect tracked separately as
-`TD-OILS-AN-ANSI-C-STRING-IS-NOT-REQUOTED-AFTER-A-BRACE-BODY-TRANSLATES-IT`. So
-the fix is: in `read_dollar_brace_body`, translate and re-quote when the
-enclosing scan is *not* double-quoted, and keep copying when it is.
+**Still open, and deliberately so:** the same `$'…'` written *inside* double
+quotes, where bash 5.2 translates but does not re-quote (branch 4,
+parse.y:3887). That is the `#if 0 /* TAG:bash-5.3 */` defect, tracked separately
+as `TD-OILS-AN-ANSI-C-STRING-IS-NOT-REQUOTED-AFTER-A-BRACE-BODY-TRANSLATES-IT`.
 
 ### TD-OILS-A-C-STYLE-FOR-LOOPS-STATUS-FOLLOWED-ITS-HEADER. `for (( $(exit 7); 0; 0 ))` returned 7 — 2026-08-07 — ✅ FIXED 2026-08-07
 
@@ -962,8 +971,14 @@ Corpus case:
 
 ### TD-OILS-AN-ANSI-C-STRING-IS-NOT-REQUOTED-AFTER-A-BRACE-BODY-TRANSLATES-IT. `"${h[$'a]b']}"` is a bad substitution in bash — 2026-08-07 — OPEN
 
-**Where:** `userspace/oils/src/lexer.rs` — `read_dollar_brace_body`, which copies
-a `$'…'` in a `${ … }` body through unchanged.
+**Where:** `userspace/oils/src/lexer.rs` — `read_dollar_brace_body`, whose `'`
+arm copies a `$'…'` through unchanged when the enclosing scan is double-quoted
+(the `in_dquote` branch). The *unquoted* case is done — it translates and
+re-quotes; see
+`TD-OILS-A-DOLLAR-QUOTE-IN-AN-ARITHMETIC-STRING-IS-NOT-TRANSLATED-AT-PARSE-TIME`
+and the corpus case
+`an-ansi-c-string-in-a-brace-body-is-translated-at-parse-time.sh`. What is left
+here is only the fourth branch: translate *without* re-quoting.
 
 **What.** bash does not carry a `$'…'` through a `${ … }` body as text. It
 **translates** it where it reads it — `ansiexpand`, parse.y:3854, backing the
@@ -994,6 +1009,37 @@ early and the `'` swallows the `}`, and bash reports a `bad substitution` that
 quotes the *translated* text back — which is how the mechanism is visible at
 all.
 
+More of the same hole, measured 2026-08-07 while doing the unquoted case (`x`
+unset throughout):
+
+```text
+                    bash                                       osh
+"${x:-$'a\0b'}"     no closing `}' in "${x:-a          a
+"${x:-$'\x27'}"     no closing `}' in "${x:-           '
+"${x:-$'a}b'}"      ab}                                a}b
+"${x:-$'a\'b'}"     no closing `}' in "${x:-a'b}"      a'b
+```
+
+Row 3 is the sharpest: the bare `}` in the translation closes the brace where
+the source had it quoted, so bash's word is `a` followed by a literal `b}`.
+Rows 1, 2 and 4 all end the same way — the lone `'` the translation contains
+opens a quote that eats the closing brace.
+
+The **splitting** shape is the same defect wearing different clothes:
+
+```text
+                                bash              osh
+"$(echo ${x:-$'a\tb'})"         a b               a<TAB>b
+```
+
+The `$( … )` is inside double quotes, so bash's `dstack` still holds the `"`
+when `read_token_word` reaches the `${`; `cd == '"'` makes `rflags` `P_DQUOTE`
+(parse.y:3696) and the body takes branch 4. The translated tab is spliced
+unquoted into the command that the `$( … )` re-parses, so it splits — and a
+`$'a*b'` there would glob. Written *outside* quotes, or inside `$(( … ))` (where
+`parse_comsub` drops the incoming flags for bare `P_ARITH`, parse.y:4083), the
+same text is re-quoted and does neither.
+
 **Note the disposition question.** The `#if 0` block is tagged `TAG:bash-5.3`:
 bash itself considers this a bug and has the fix written and disabled pending
 the next release. Matching bash 5.2.37 here means implementing a defect that is
@@ -1002,13 +1048,17 @@ ones. Recorded rather than fixed for that reason; the corpus case
 `a-subscript-close-is-found-at-one-level-only.sh` documents it in a comment and
 deliberately does not exercise it.
 
-**Proper fix, if taken:** translate `$'…'` in `read_dollar_brace_body` rather
-than copying it, tracking bash's `dolbrace_state` across the body (parse.y:3811
-–3828 is the whole state machine — `#`/`%`/`^`/`,` after the first character go
-to `QUOTE`, `/` to `QUOTE2`, the `#%^,~:-=?+/` set to `OP`, anything after `OP`
-to `WORD`) and whether the enclosing word is double-quoted, then re-single-quote
-the result in every case except `DOLBRACE_PARAM`/`DOLBRACE_WORD` under double
-quotes.
+**Proper fix, if taken:** in `read_dollar_brace_body`'s `in_dquote` case,
+translate the run instead of copying it, and splice the result **raw** —
+tracking bash's `dolbrace_state` across the body (parse.y:3811–3828 is the whole
+state machine — `#`/`%`/`^`/`,` after the first character go to `QUOTE`, `/` to
+`QUOTE2`, the `#%^,~:-=?+/` set to `OP`, anything after `OP` to `WORD`) so that
+`QUOTE`/`QUOTE2` still take the `sh_single_quote` path (branch 1, parse.y:3866),
+which is what already makes row 4 of the first table agree. Only
+`DOLBRACE_PARAM`/`DOLBRACE_WORD` under `P_DQUOTE` get the bare splice. Note the
+knock-on: the raw splice must reach the *reader* of the body — the `$( … )`
+re-parse, the subscript scan — as unquoted text, so this is not a change local
+to the lexer's output buffer.
 
 ### TD-OILS-A-SUBSTITUTION-IN-A-BRACE-BODY-IS-NOT-PARSED-WHEN-THE-BODY-IS-REJECTED. `echo ${#x:-$(fi)}` says `bad substitution` — 2026-08-07 — ✅ FIXED 2026-08-07
 

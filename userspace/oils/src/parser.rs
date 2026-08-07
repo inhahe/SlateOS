@@ -2066,7 +2066,11 @@ fn map_segs(segs: &mut [Seg], map: &LineMap) {
                 }
             }
             Seg::Arith(_, _, nested) => map_arith_comsubs(nested, map),
-            Seg::ParamBraced(_, open) | Seg::ProcSub(_, _, open) => *open = map.map(*open),
+            Seg::ParamBraced(_, open, nested) => {
+                *open = map.map(*open);
+                map_arith_comsubs(nested, map);
+            }
+            Seg::ProcSub(_, _, open) => *open = map.map(*open),
             Seg::Dq(inner) => map_segs(inner, map),
             _ => {}
         }
@@ -4670,6 +4674,19 @@ fn parse_arith_comsubs(nested: &[CmdSubSpan], opts: ParseOpts) -> Result<(), Par
     Ok(())
 }
 
+/// Whether a successfully parsed `${ … }` kept its body as *unparsed text*
+/// rather than building operand words from it — the verdicts that answer the
+/// whole expansion (with a runtime `bad substitution`) without ever looking
+/// inside. A body that failed to parse outright never built them either, so the
+/// caller treats an `Err` the same way.
+fn defers_its_body(part: &WordPart) -> bool {
+    match part {
+        WordPart::BadSubst(_) | WordPart::BadTransform { .. } => true,
+        WordPart::ArrayBulk { op, .. } => matches!(op, BulkOp::BadTransform { .. }),
+        _ => false,
+    }
+}
+
 fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, ParseError> {
     Ok(match seg {
         Seg::Lit(s) => WordPart::Literal(s.clone()),
@@ -4688,7 +4705,20 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
         // The body is lexed again in here, from its own line 1, so every
         // fragment of it has to be told the physical line it starts on — see
         // [`frag_line`] and [`map_frag_segs`].
-        Seg::ParamBraced(raw, open) => parse_braced_param_in(raw, opts, q, *open)?,
+        Seg::ParamBraced(raw, open, nested) => {
+            let part = parse_braced_param_in(raw, opts, q, *open);
+            // A `$( … )` in the body is parsed by bash where it *reads* it, so
+            // its syntax error beats every verdict the `${ … }` could reach —
+            // a runtime `bad substitution`, an outright refusal of the body's
+            // shape, and the branch never being taken. On the paths that do
+            // build operand words the body's substitutions are parsed with
+            // them, and parsing here as well would gather a nested
+            // here-document twice; so this runs only where they are not.
+            if part.as_ref().map_or(true, defers_its_body) {
+                parse_arith_comsubs(nested, opts)?;
+            }
+            part?
+        }
         // Only the `$( … )` spelling is parsed here: bash reads the other two
         // when the word is expanded, as an input of their own. See
         // [`CmdSubBody`].

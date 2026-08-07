@@ -348,7 +348,13 @@ pub enum Seg {
     /// `${` on line 3, `echo ${x:-$(\nfi\n)}` is named (and echoed) at line 4.
     /// The body's line 1 is the line the `${` opens on, so the two differ by a
     /// plain offset, which is what this field supplies.
-    ParamBraced(Str, u32),
+    ///
+    /// The third field holds the `$( … )` bodies met while the body was read.
+    /// bash parses each of them *there*, as it reads the body, so their syntax
+    /// errors beat every verdict the enclosing `${ … }` could reach — see
+    /// [`Lexer::read_dollar_brace`] and the `ParamBraced` arm of the parser's
+    /// `seg_to_part`.
+    ParamBraced(Str, u32, Vec<CmdSubSpan>),
     /// `$( … )` / `` ` … ` `` — raw inner source, parsed later, plus the 1-based
     /// source line of the substitution's *closing* delimiter.
     ///
@@ -4005,8 +4011,8 @@ impl Lexer {
             Some('{') => {
                 self.pos += 1;
                 let open = self.cur_line();
-                let raw = self.read_dollar_brace()?;
-                Ok(Some(Seg::ParamBraced(raw, open)))
+                let (raw, nested) = self.read_dollar_brace()?;
+                Ok(Some(Seg::ParamBraced(raw, open, nested)))
             }
             Some('[') => {
                 // `$[ … ]` — the deprecated (pre-`$(( ))`) arithmetic expansion.
@@ -4323,7 +4329,11 @@ impl Lexer {
                         }
                         Some('$') if self.peek_at(1) == Some('{') => {
                             self.pos += 2;
-                            let inner = self.read_dollar_brace()?;
+                            // The body's own eager parses join this scan's: a
+                            // `${ … }` is read by `parse_matched_pair` too, so
+                            // nothing in it is deferred by sitting one level in.
+                            let (inner, nested) = self.read_dollar_brace()?;
+                            self.arith_comsubs.extend(nested);
                             raw.extend_from_slice(b"${");
                             raw.extend_from_slice(&inner);
                             raw.push(b'}');
@@ -4355,17 +4365,19 @@ impl Lexer {
                             self.pos += 2;
                             // Commands, and so copied for a re-lex — its own
                             // collections stay with it. But the body itself is
-                            // one bash parses in place when *this* scan is
-                            // arithmetic: `echo $(( "$(fi)" ))` is fatal.
+                            // one bash parses in place: `echo $(( "$(fi)" ))`
+                            // and `echo ${#x:-"$(fi)"}` are both fatal. Recorded
+                            // unconditionally, because whether the record is
+                            // *wanted* is the enclosing scan's question — a
+                            // scan that already parses this text downstream
+                            // (a `$( … )` body) drops the whole collection.
                             let outer = std::mem::take(&mut self.arith_comsubs);
                             let inner = self.read_balanced_inner('(', ')', true)?;
                             self.arith_comsubs = outer;
-                            if !command {
-                                self.arith_comsubs.push(CmdSubSpan {
-                                    src: inner.clone(),
-                                    close_line: self.cur_line(),
-                                });
-                            }
+                            self.arith_comsubs.push(CmdSubSpan {
+                                src: inner.clone(),
+                                close_line: self.cur_line(),
+                            });
                             raw.extend_from_slice(b"$(");
                             raw.extend_from_slice(&inner);
                             raw.push(b')');
@@ -4399,7 +4411,8 @@ impl Lexer {
             // `)` it wanted rather than the `}`.
             '$' if command && self.peek() == Some('{') => {
                 self.pos += 1;
-                let inner = self.read_dollar_brace()?;
+                let (inner, nested) = self.read_dollar_brace()?;
+                self.arith_comsubs.extend(nested);
                 raw.extend_from_slice(b"${");
                 raw.extend_from_slice(&inner);
                 raw.push(b'}');
@@ -4855,16 +4868,21 @@ impl Lexer {
     /// `${`, `$(`, `$((`, and backtick command substitutions start nested
     /// spans that must balance with their own terminators; single/double
     /// quotes protect their contents; a backslash escapes the next character.
-    fn read_dollar_brace(&mut self) -> Result<Str, LexError> {
-        // Like a substitution body, this text is copied for a re-lex that meets
-        // every construct in it again — so nothing collected inside may escape
-        // to an arithmetic scan out here. `echo ${x:-$(( 1 + $(fi) ))}` is fatal
-        // in bash because that *re-lex* reaches the `$(fi)`, not because this
-        // scan did. See [`Lexer::arith_comsubs`].
+    ///
+    /// Returns the raw text and the `$( … )` bodies met while reading it, which
+    /// bash parses **here**, as it reads them — `parse_dollar_word` hands the
+    /// `$(` to `parse_comsub` (parse.y:3954) exactly as it does under `P_ARITH`.
+    /// They are returned rather than left in [`Lexer::arith_comsubs`] because
+    /// they belong to *this* scan and not to an arithmetic one enclosing it:
+    /// `echo $(( 1 + ${x:-$(fi)} ))` is fatal, but the `$(fi)` is the `${ … }`'s
+    /// to report. The caller decides — an enclosing raw-text scan folds them
+    /// into its own collection, while the parser runs them only where the body
+    /// itself was never parsed (`seg_to_part`'s `ParamBraced` arm).
+    fn read_dollar_brace(&mut self) -> Result<(Str, Vec<CmdSubSpan>), LexError> {
         let outer = std::mem::take(&mut self.arith_comsubs);
         let r = self.read_dollar_brace_body();
-        self.arith_comsubs = outer;
-        r
+        let nested = std::mem::replace(&mut self.arith_comsubs, outer);
+        r.map(|raw| (raw, nested))
     }
 
     /// The scan proper for [`Lexer::read_dollar_brace`].
@@ -4908,26 +4926,14 @@ impl Lexer {
                         }
                     }
                 }
-                // Double quotes: copy to the closing quote, honoring `\`.
+                // Double quotes, read by the same scan every other grouping
+                // construct uses: a `"` is a `shellquote` to `parse_matched_pair`
+                // wherever it stands (parse.y:3844), so a `$( … )` inside one is
+                // still met — and still parsed here and now, which is why
+                // `echo ${#x:-"$(fi)"}` is a syntax error and not a
+                // `bad substitution`.
                 '"' => {
-                    let q_open = self.cur_line();
-                    raw.push(b'"');
-                    loop {
-                        match self.peek() {
-                            Some('\\') => {
-                                self.pos += 1;
-                                raw.push(b'\\');
-                                self.take_into(&mut raw);
-                            }
-                            Some('"') => {
-                                self.pos += 1;
-                                raw.push(b'"');
-                                break;
-                            }
-                            Some(_) => self.take_into(&mut raw),
-                            None => return Err(eof_matching('"').at(q_open)),
-                        }
-                    }
+                    self.read_opaque_span('"', &mut raw, true)?;
                 }
                 // Backtick command substitution: copy verbatim to the closing
                 // backtick (honoring `\``).
@@ -4960,7 +4966,12 @@ impl Lexer {
                         Some('{') => {
                             raw.push(b'{');
                             self.pos += 1;
-                            let inner = self.read_dollar_brace()?;
+                            // A nested body's eager parses are this body's too:
+                            // `echo ${#x:-${y:-$(fi)}}` is a syntax error, not a
+                            // `bad substitution`, so the record has to travel out
+                            // past the level that collected it.
+                            let (inner, nested) = self.read_dollar_brace()?;
+                            self.arith_comsubs.extend(nested);
                             raw.extend_from_slice(&inner);
                             raw.push(b'}');
                         }
@@ -4985,6 +4996,16 @@ impl Lexer {
                                 // text, right where the nested re-lex expects them.
                                 let inner =
                                     self.read_subst_body().map_err(|e| e.at(self.eof_line()))?;
+                                // …and bash parses it here and now, from
+                                // `parse_dollar_word` (parse.y:3954). Only the
+                                // text survives that parse, so the body is read
+                                // again at expansion; what is recorded is just
+                                // enough for the parser to run it on the paths
+                                // that never build an operand word from it.
+                                self.arith_comsubs.push(CmdSubSpan {
+                                    src: inner.clone(),
+                                    close_line: self.cur_line(),
+                                });
                                 raw.extend_from_slice(&inner);
                                 raw.push(b')');
                             }

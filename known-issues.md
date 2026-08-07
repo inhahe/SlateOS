@@ -398,7 +398,7 @@ to `WORD`) and whether the enclosing word is double-quoted, then re-single-quote
 the result in every case except `DOLBRACE_PARAM`/`DOLBRACE_WORD` under double
 quotes.
 
-### TD-OILS-A-SUBSTITUTION-IN-A-BRACE-BODY-IS-NOT-PARSED-WHEN-THE-BODY-IS-REJECTED. `echo ${#x:-$(fi)}` says `bad substitution` — 2026-08-07 — OPEN
+### TD-OILS-A-SUBSTITUTION-IN-A-BRACE-BODY-IS-NOT-PARSED-WHEN-THE-BODY-IS-REJECTED. `echo ${#x:-$(fi)}` says `bad substitution` — 2026-08-07 — ✅ FIXED 2026-08-07
 
 **Where:** `userspace/oils/src/lexer.rs` — `read_dollar_brace`; `userspace/oils/src/parser.rs` — `seg_to_part`'s `Seg::ParamBraced` arm and `parse_braced_param_in`'s `BadSubst`/`BadTransform` returns.
 
@@ -434,13 +434,32 @@ A well-formed body is still only *text*: it is parsed here and **run** at
 expansion, once — `n=0; inc() { n=$((n+1)); }; echo ${x:-$(inc)}` leaves `n=1`,
 not 2.
 
-**Proper fix:** record the nested `$( … )` bodies during the `${` scan in
-`read_dollar_brace` (as `arith_comsubs` already does for `$(( … ))`) and attach
-them to `Seg::ParamBraced`. In `seg_to_part`, parse them **only on the paths
-that do not already parse the body** — the `Err` return, and the `BadSubst` /
-`BadTransform` returns — so that a well-formed `${x:-$(echo 2)}` is never parsed
-twice (a double parse would gather a nested here-document twice). Where both a
-nested parse error and a `BadSubst` are available, the parse error wins.
+**Fixed by** recording the nested `$( … )` bodies during the `${` scan and
+parsing them where the enclosing body is *not* parsed:
+
+- `Seg::ParamBraced` gained a third field, `Vec<CmdSubSpan>` — the substitutions
+  met while the body was read. `read_dollar_brace` now returns it alongside the
+  raw text, collecting it in the same `arith_comsubs` field the `$(( … ))` scan
+  already uses, with the same save/restore at every `$( … )` body boundary (a
+  scan whose text is re-lexed downstream drops the whole collection, because that
+  re-lex will parse it again).
+- A nested `${ … }` hands its collection **outwards** (`arith_comsubs.extend`),
+  because a body one level in is read by `parse_matched_pair` too — nothing in it
+  is deferred by the nesting, so `echo ${#x:-${y:-$(fi)}}` is fatal.
+- The `"` arm of `read_dollar_brace_body` was a 20-line dumb copy loop that saw
+  nothing inside the quotes; it now routes through `read_opaque_span`, the same
+  scan every other grouping construct uses (a `"` is a `shellquote` to
+  `parse_matched_pair` wherever it stands, parse.y:3844). That is what makes
+  `echo ${#x:-"$(fi)"}` a syntax error rather than a `bad substitution`.
+- In `seg_to_part`, the collection is parsed only when the `${ … }` **deferred
+  its body** — the new `defers_its_body` predicate: an `Err` return, `BadSubst`,
+  `BadTransform`, or an `ArrayBulk` with a `BulkOp::BadTransform`. On every other
+  path the body's substitutions are parsed with the operand words, and parsing
+  here as well would gather a nested here-document twice.
+
+A backtick body still is not parsed eagerly, and neither is anything inside a
+`'…'`; both fall out of `read_opaque_span` unchanged. Corpus case:
+`tests/corpus/a-substitution-in-a-brace-body-is-parsed-where-it-is-read.sh`.
 
 ### TD-OILS-A-SINGLE-QUOTE-IS-NOT-A-QUOTE-WHEN-AN-ARITHMETIC-EXPANSION-IS-EVALUATED. `echo $(( 1 + '$(fi)' ))` — 2026-08-07 — OPEN
 

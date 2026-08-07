@@ -42,8 +42,9 @@ without the check a sweep can report a previous build green. `--allow-stale`
 downgrades the refusal to a warning; `--osh <path>` skips the check entirely.
 
 Exit status: 0 if every case matched (or diverged exactly as waived), 1 if any
-case diverged unexpectedly or a waived case unexpectedly matched, 2 on a setup
-error (no osh binary, no reference bash, a stale one).
+case diverged unexpectedly, a waived case unexpectedly matched, or a case could
+not be measured at all, 2 on a setup error (no osh binary, no reference bash, a
+stale one).
 
 Failure reports
 ---------------
@@ -68,6 +69,19 @@ host can run out of room for one. Both a timeout and a failure to *start* a
 child (Windows `ERROR_COMMITMENT_LIMIT`, POSIX `EAGAIN`) are treated as a
 failed measurement rather than an answer, and the case is measured once more;
 only the second failure is reported, and it says which kind it was.
+
+A per-case budget is there to bound a *hang*, and on a host that is already at
+100% CPU for other reasons it stops measuring the shell and starts measuring the
+load: the reference bash — MSYS, so fork-heavy — is the first to miss it, and
+every case it misses reads as a divergence it did not have. `--timeout-scale N`
+multiplies every case's budget, so a sweep run alongside something big can keep
+the gate honest without editing 490 cases:
+
+    python scripts/osh-bash-diff.py --timeout-scale 5
+
+A case whose *measurement* failed both times is counted and reported apart from
+the cases that diverged, because the two need opposite responses: a divergence
+is a bug in osh, an unmeasured case is a bug in the conditions.
 """
 
 from __future__ import annotations
@@ -137,7 +151,14 @@ class Run:
     timed_out: bool = False
 
 
-def load_cases(pattern: str | None) -> list[Case]:
+def load_cases(pattern: str | None, timeout_scale: float = 1.0) -> list[Case]:
+    """The corpus, filtered by `pattern`, with every budget scaled.
+
+    `timeout_scale` multiplies both the default budget and any a case set for
+    itself, because a loaded host slows the two proportionally — the case that
+    declared `# TIMEOUT: 60` because it waits on jobs needs the same relief as
+    the ones on the 20s default.
+    """
     cases: list[Case] = []
     for path in sorted(CORPUS.glob("*.sh")):
         if pattern and pattern not in path.stem:
@@ -167,7 +188,9 @@ def load_cases(pattern: str | None) -> list[Case]:
                 source=source,
                 stdin=stdin,
                 expect_diff=expect_diff,
-                timeout=timeout,
+                # Never below a second: a scale of 0 would make every case a
+                # timeout, which is the one outcome that cannot be an answer.
+                timeout=max(1, round(timeout * timeout_scale)),
             )
         )
     return cases
@@ -428,7 +451,16 @@ def main() -> int:
         action="store_true",
         help="run even if the osh binary is older than its sources (warns instead of refusing)",
     )
+    ap.add_argument(
+        "--timeout-scale",
+        type=float,
+        default=1.0,
+        metavar="N",
+        help="multiply every case's time budget by N, for a sweep that has to share the host",
+    )
     args = ap.parse_args()
+    if args.timeout_scale <= 0:
+        sys.exit("osh-bash-diff: --timeout-scale must be greater than zero")
 
     # Cases (and their `# EXPECT-DIFF:` reasons) are UTF-8; the Windows console's
     # default code page would mangle any non-ASCII in them, which reads as a
@@ -445,13 +477,13 @@ def main() -> int:
     if not args.osh:
         check_not_stale(osh, args.allow_stale)
     bash = find_shell(args.bash, BASH_CANDIDATES, "bash")
-    cases = load_cases(args.filter)
+    cases = load_cases(args.filter, args.timeout_scale)
     if not cases:
         sys.exit(f"osh-bash-diff: no cases found in {CORPUS}")
 
     print(f"osh : {osh}")
     print(f"bash: {bash}")
-    print(f"{len(cases)} case(s)\n")
+    print(f"{len(cases)} case(s)" + (f", budgets ×{args.timeout_scale:g}" if args.timeout_scale != 1.0 else "") + "\n")
 
     # Older runs' reports are kept (see `run_report_dir`); only the oldest are
     # retired, so the directory cannot grow without bound.
@@ -459,9 +491,29 @@ def main() -> int:
 
     failures = 0
     waived = 0
+    unmeasured: list[str] = []
     for case in cases:
         bash_run = measure(bash, case)
         osh_run = measure(osh, case)
+        # A shell that never finished did not answer, so there is nothing to
+        # compare and the whole of the other shell's output would be printed as
+        # a difference it does not have. `measure` has already retried, so this
+        # is the second miss: either the host is too busy to measure anything
+        # (`--timeout-scale`) or the case really does hang that shell.
+        if bash_run.timed_out or osh_run.timed_out:
+            failures += 1
+            which = " and ".join(
+                name
+                for name, run in (("bash", bash_run), ("osh", osh_run))
+                if run.timed_out
+            )
+            unmeasured.append(case.name)
+            print(f"T {case.name}: {which} did not finish within {case.timeout}s, twice")
+            report = write_report(
+                case, bash_run, osh_run, [f"    unmeasured: {which} timed out twice"]
+            )
+            print(f"    (full report: {report})" if report else "    (no report written)")
+            continue
         diffs = compare(case, bash_run, osh_run)
         if case.expect_diff and diffs:
             waived += 1
@@ -492,6 +544,15 @@ def main() -> int:
 
     matched = len(cases) - failures - waived
     print(f"\n{matched} matched, {waived} waived, {failures} failed")
+    if unmeasured:
+        # Said again at the end, because these are the ones that are probably
+        # not about osh at all, and a long sweep's per-case lines have scrolled.
+        print(
+            f"{len(unmeasured)} of those never finished and so were never measured:"
+            f" {', '.join(unmeasured)}"
+        )
+        print("  re-run them with a bigger budget (`--timeout-scale 5`) before reading")
+        print("  anything into them — a busy host misses a budget the shell would make.")
     return 1 if failures else 0
 
 

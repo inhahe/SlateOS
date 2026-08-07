@@ -23,6 +23,9 @@ e 'echo $(( "$(fi)" ))'
 # A `${ … }` is not opaque to an arithmetic scan, so the `$(` in one is met the
 # same way.
 e 'echo $(( ${x:-$(fi)} ))'
+# The other nesting order is the `${ … }`'s own re-lex reaching the `$(`, not
+# this scan — but it is the same fatal error either way.
+e 'echo ${x:-$(( 1 + $(fi) ))}'
 
 echo "=== …at parse time, so an untaken branch does not save it ==="
 # Unlike a backtick, whose body is not read until it runs.

@@ -339,8 +339,16 @@ pub enum Seg {
     Dq(Vec<Seg>),
     /// `$name` / `$1` / `$?` … a bare parameter reference.
     Param(String),
-    /// `${ … }` — raw inner text, parsed later.
-    ParamBraced(Str),
+    /// `${ … }` — raw inner text, parsed later, plus the 1-based source line the
+    /// opening `${` sits on.
+    ///
+    /// The body is lexed again when it is parsed, and that second lex numbers
+    /// its lines from 1 — so an error in it would be blamed on the body's own
+    /// line rather than the script's. bash blames the physical line: with the
+    /// `${` on line 3, `echo ${x:-$(\nfi\n)}` is named (and echoed) at line 4.
+    /// The body's line 1 is the line the `${` opens on, so the two differ by a
+    /// plain offset, which is what this field supplies.
+    ParamBraced(Str, u32),
     /// `$( … )` / `` ` … ` `` — raw inner source, parsed later, plus the 1-based
     /// source line of the substitution's *closing* delimiter.
     ///
@@ -3996,8 +4004,9 @@ impl Lexer {
             }
             Some('{') => {
                 self.pos += 1;
+                let open = self.cur_line();
                 let raw = self.read_dollar_brace()?;
-                Ok(Some(Seg::ParamBraced(raw)))
+                Ok(Some(Seg::ParamBraced(raw, open)))
             }
             Some('[') => {
                 // `$[ … ]` — the deprecated (pre-`$(( ))`) arithmetic expansion.

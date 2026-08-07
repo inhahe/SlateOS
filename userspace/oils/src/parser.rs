@@ -83,6 +83,48 @@ fn syn_at(chs: &[Ch], i: usize) -> char {
     chs.get(i).copied().map_or('\0', syn)
 }
 
+/// The physical source line `chs[at]` sits on, given that `chs[0]` sits on
+/// `line`.
+///
+/// A `${ … }` body is carved into fragments — a pattern, a replacement, an
+/// operand — that are each lexed on their own, from their own line 1. bash keeps
+/// no such second coordinate system: it reads one stream and reports the
+/// physical line, so a `$( … )` that fails in the *replacement* half of
+/// `${x/aaa`/`bbb/$(fi)}` is blamed on the line the `$(fi)` is really on. The
+/// difference between a fragment's numbering and the physical one is just the
+/// newlines in the body before it, which is what this counts.
+///
+/// Only [`Ch::U`] can hold a newline — [`Ch::B`] is a byte that is *not* part of
+/// any valid UTF-8 sequence, and `\n` always is — so [`syn`] sees every one.
+fn frag_line(chs: &[Ch], at: usize, line: u32) -> u32 {
+    let skipped = chs
+        .get(..at)
+        .unwrap_or_default()
+        .iter()
+        .filter(|&&c| syn(c) == '\n')
+        .count();
+    line.saturating_add(u32::try_from(skipped).unwrap_or(u32::MAX))
+}
+
+/// The line to parse text that was *built at runtime* against — the quoted form
+/// `${x@Q}` produces, a `PS4` after expansion, the value an indirection
+/// resolved to. Such text came from no script line, and bash reports nothing
+/// about it, so leaving the fragment's own numbering alone is the honest answer.
+const RUNTIME_TEXT: u32 = 1;
+
+/// Renumber a freshly-lexed `${ … }` fragment's segments from the fragment's own
+/// line 1 to the physical line it starts on.
+///
+/// This is the whole of the coordinate fix, and it is deliberately applied to
+/// the *segments* rather than to the error that comes back: a segment carries
+/// the line a nested body is numbered against (a `$( … )`'s closing delimiter,
+/// say), so mapping here fixes both the parse error a bad body raises and the
+/// line a well-formed one reports when it fails at *run* time — the
+/// `command substitution: line N` of a backtick in `${x:-`/`fi`/`}`.
+fn map_frag_segs(segs: &mut [Seg], line: u32) {
+    map_segs(segs, &LineMap::Offset(line.saturating_sub(1)));
+}
+
 /// A parse error with a human-readable message and, when known, the 1-based
 /// source line the error occurred on.
 ///
@@ -2024,7 +2066,7 @@ fn map_segs(segs: &mut [Seg], map: &LineMap) {
                 }
             }
             Seg::Arith(_, _, nested) => map_arith_comsubs(nested, map),
-            Seg::ProcSub(_, _, open) => *open = map.map(*open),
+            Seg::ParamBraced(_, open) | Seg::ProcSub(_, _, open) => *open = map.map(*open),
             Seg::Dq(inner) => map_segs(inner, map),
             _ => {}
         }
@@ -4643,7 +4685,10 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
             WordPart::DoubleQuoted(parts)
         }
         Seg::Param(n) => WordPart::Param { name: n.clone(), braced: false },
-        Seg::ParamBraced(raw) => parse_braced_param_in(raw, opts, q)?,
+        // The body is lexed again in here, from its own line 1, so every
+        // fragment of it has to be told the physical line it starts on — see
+        // [`frag_line`] and [`map_frag_segs`].
+        Seg::ParamBraced(raw, open) => parse_braced_param_in(raw, opts, q, *open)?,
         // Only the `$( … )` spelling is parsed here: bash reads the other two
         // when the word is expanded, as an input of their own. See
         // [`CmdSubBody`].
@@ -4750,7 +4795,11 @@ fn matching_subscript_close(chs: &[Ch], open: usize) -> Option<usize> {
 enum NameSubscript {
     /// The body split cleanly into a name, an optional `[subscript]`, and
     /// whatever text followed the subscript.
-    Split(String, Option<ArrayIndex>, Vec<Ch>),
+    ///
+    /// The last field is the physical line that remainder *starts* on: a
+    /// subscript may span lines (`${a[$(`/`echo 1`/`)]#p}`), so it is not in
+    /// general the line the body opened on. See [`frag_line`].
+    Split(String, Option<ArrayIndex>, Vec<Ch>, u32),
     /// The body is well-formed enough to *parse* but cannot be interpreted, so
     /// bash defers the complaint to expansion time. The only such case here is
     /// an empty subscript (`${a[]}`), which bash parses happily — a guarded
@@ -4765,7 +4814,11 @@ enum NameSubscript {
     Deferred,
 }
 
-fn split_name_subscript(chs: &[Ch], opts: ParseOpts) -> Result<NameSubscript, ParseError> {
+fn split_name_subscript(
+    chs: &[Ch],
+    opts: ParseOpts,
+    line: u32,
+) -> Result<NameSubscript, ParseError> {
     if chs.is_empty() {
         return Err(ParseError::new("empty '${}' expansion"));
     }
@@ -4808,15 +4861,22 @@ fn split_name_subscript(chs: &[Ch], opts: ParseOpts) -> Result<NameSubscript, Pa
             // Verbatim so an associative read `${h[ x ]}` keys on the literal
             // ` x ` (bash preserves subscript whitespace); indexed reads
             // arithmetic-evaluate, which ignores the whitespace.
-            _ => ArrayIndex::Index(Box::new(word_verbatim_from_source(&inner, opts)?)),
+            _ => ArrayIndex::Index(Box::new(word_verbatim_from_source_at(
+                &inner,
+                opts,
+                frag_line(chs, i + 1, line),
+            )?)),
         };
         return Ok(NameSubscript::Split(
             name,
             Some(index),
             chs.get(close + 1..).unwrap_or_default().to_vec(),
+            frag_line(chs, close + 1, line),
         ));
     }
-    Ok(NameSubscript::Split(name, None, chs.get(i..).unwrap_or_default().to_vec()))
+    // A name has no newline in it, so the remainder starts on the body's own
+    // line; only the subscript branch above can push it further down.
+    Ok(NameSubscript::Split(name, None, chs.get(i..).unwrap_or_default().to_vec(), line))
 }
 
 /// Parse the `offset[:length]` portion of a substring/slice expansion (the
@@ -4825,23 +4885,26 @@ fn split_name_subscript(chs: &[Ch], opts: ParseOpts) -> Result<NameSubscript, Pa
 fn parse_slice_bounds(
     rest: &[Ch],
     opts: ParseOpts,
+    line: u32,
 ) -> Result<(Box<Word>, Option<Box<Word>>), ParseError> {
     let (off, len) = match rest.iter().position(|&c| syn(c) == ':') {
         Some(idx) => (
             rest.get(..idx).unwrap_or_default(),
-            Some(rest.get(idx + 1..).unwrap_or_default()),
+            // The offset it follows may span lines — `${x:$(`/`echo 1`/`):2}` —
+            // so the length's own line is counted past it, not assumed.
+            Some((rest.get(idx + 1..).unwrap_or_default(), frag_line(rest, idx + 1, line))),
         ),
         None => (rest, None),
     };
     let length = match len {
-        Some(s) => {
+        Some((s, len_line)) => {
             let text = bytes::from_chars(s.iter().copied());
-            Some(Box::new(word_from_source(&text, opts)?))
+            Some(Box::new(word_from_source(&text, opts, len_line)?))
         }
         None => None,
     };
     let off_text = bytes::from_chars(off.iter().copied());
-    Ok((Box::new(word_from_source(&off_text, opts)?), length))
+    Ok((Box::new(word_from_source(&off_text, opts, line)?), length))
 }
 
 /// Is `name` a parameter that `${#…}` may take the length of?
@@ -4857,15 +4920,18 @@ fn is_length_target(name: &str) -> bool {
 }
 
 pub(crate) fn parse_braced_param(raw: BStr<'_>, opts: ParseOpts) -> Result<WordPart, ParseError> {
-    parse_braced_param_in(raw, opts, Quoting::Bare)
+    parse_braced_param_in(raw, opts, Quoting::Bare, RUNTIME_TEXT)
 }
 
 /// [`parse_braced_param`] with the quoting the `${…}` was written in, which
-/// only its operand cares about. See [`Quoting`].
+/// only its operand cares about (see [`Quoting`]), and the physical line the
+/// body starts on, which every fragment of it is numbered from (see
+/// [`frag_line`]).
 fn parse_braced_param_in(
     raw: BStr<'_>,
     opts: ParseOpts,
     q: Quoting,
+    line: u32,
 ) -> Result<WordPart, ParseError> {
     if let Some(after_hash) = raw.strip_prefix(b"#") {
         if after_hash.is_empty() {
@@ -4878,8 +4944,11 @@ fn parse_braced_param_in(
         // operator on it: `${#+x}` is `$#` with `+x`, and `${##a}` strips a
         // leading `a` from `$#`. Hence the fall-through to the general path
         // below rather than an immediate refusal.
+        // The `#` just stripped is not a newline, so the rest still starts on
+        // the body's own line; the same holds for the `!` stripped below.
         let chs: Vec<Ch> = bytes::chars(after_hash).collect();
-        if let NameSubscript::Split(name, subscript, remaining) = split_name_subscript(&chs, opts)?
+        if let NameSubscript::Split(name, subscript, remaining, _) =
+            split_name_subscript(&chs, opts, line)?
             && remaining.is_empty()
             && is_length_target(&name)
         {
@@ -4928,8 +4997,8 @@ fn parse_braced_param_in(
         }
         // `${!name[@]}` / `${!name[*]}` — the keys/indices of an array.
         let chs: Vec<Ch> = bytes::chars(after_bang).collect();
-        let NameSubscript::Split(name, subscript, remaining) =
-            split_name_subscript(&chs, opts)?
+        let NameSubscript::Split(name, subscript, remaining, remaining_line) =
+            split_name_subscript(&chs, opts, line)?
         else {
             return Ok(WordPart::BadSubst(raw.to_vec()));
         };
@@ -4997,7 +5066,9 @@ fn parse_braced_param_in(
                 name.clone().into_bytes()
             };
             modifier_src.extend(bytes::from_chars(remaining.iter().copied()));
-            let mut target = parse_braced_param_in(&modifier_src, opts, q)?;
+            // The name spliced on the front is a stand-in with no newline in it,
+            // so the modifier text still begins where it did in the real body.
+            let mut target = parse_braced_param_in(&modifier_src, opts, q, remaining_line)?;
             if positional {
                 if name == "@" && matches!(target, WordPart::ParamCase { .. }) {
                     return Ok(WordPart::BadSubst(raw.to_vec()));
@@ -5025,9 +5096,19 @@ fn parse_braced_param_in(
         return Ok(WordPart::BadSubst(raw.to_vec()));
     }
     let chs: Vec<Ch> = bytes::chars(raw).collect();
-    let NameSubscript::Split(name, subscript, rest) = split_name_subscript(&chs, opts)? else {
+    let NameSubscript::Split(name, subscript, rest, rest_line) =
+        split_name_subscript(&chs, opts, line)?
+    else {
         return Ok(WordPart::BadSubst(raw.to_vec()));
     };
+    // Every fragment carved out of `rest` below starts on `rest_line` too: what
+    // is skipped to reach one is only ever operator characters (`:`, `#`, `%`,
+    // `^`, `,`, `~`, `/`, `-`, `=`, `+`, `?`), and none of those is a newline.
+    // A fragment moves to a later line in exactly three places, each of which
+    // counts the newlines itself: past a multi-line subscript
+    // ([`split_name_subscript`]), past a slice's offset ([`parse_slice_bounds`]),
+    // and past a replacement's pattern ([`parse_replace_pieces`]).
+    //
     // `$#`, `$?` and `$-` are the three specials that `${#…}` also spells as a
     // length, and bash lets only an operator follow one — anything else is a bad
     // substitution, so `${#^}` and `${?[0]}` are refused where `${@^}` and
@@ -5067,7 +5148,7 @@ fn parse_braced_param_in(
             // followed by a `-=+?` operator char).
             if syn_at(&rest, 0) == ':' && !matches!(syn_at(&rest, 1), '-' | '=' | '+' | '?') {
                 let (offset, length) =
-                    parse_slice_bounds(rest.get(1..).unwrap_or_default(), opts)?;
+                    parse_slice_bounds(rest.get(1..).unwrap_or_default(), opts, rest_line)?;
                 return Ok(WordPart::ArraySlice {
                     name,
                     star: matches!(index, ArrayIndex::Star),
@@ -5077,7 +5158,7 @@ fn parse_braced_param_in(
             }
             // `${a[@]#pat}` / `${a[*]/x/y}` / `${a[@]^^}` / `${a[@]@Q}` — an
             // element-wise transform applied to every element.
-            if let Some(op) = parse_bulk_op(&rest, opts)? {
+            if let Some(op) = parse_bulk_op(&rest, opts, rest_line)? {
                 return Ok(WordPart::ArrayBulk {
                     name,
                     star: matches!(index, ArrayIndex::Star),
@@ -5121,7 +5202,7 @@ fn parse_braced_param_in(
                 star,
                 op,
                 colon,
-                arg: Box::new(operand_from_source(&arg_str, opts, q)?),
+                arg: Box::new(operand_from_source(&arg_str, opts, q, rest_line)?),
             });
         }
     };
@@ -5132,7 +5213,8 @@ fn parse_braced_param_in(
         && syn_at(&rest, 0) == ':'
         && !matches!(syn_at(&rest, 1), '-' | '=' | '+' | '?')
     {
-        let (offset, length) = parse_slice_bounds(rest.get(1..).unwrap_or_default(), opts)?;
+        let (offset, length) =
+            parse_slice_bounds(rest.get(1..).unwrap_or_default(), opts, rest_line)?;
         return Ok(WordPart::ArraySlice {
             name: name.clone(),
             star: name == "*",
@@ -5144,7 +5226,7 @@ fn parse_braced_param_in(
     // positional parameters.
     if (name == "@" || name == "*")
         && !rest.is_empty()
-        && let Some(op) = parse_bulk_op(&rest, opts)?
+        && let Some(op) = parse_bulk_op(&rest, opts, rest_line)?
     {
         return Ok(WordPart::ArrayBulk {
             name: name.clone(),
@@ -5191,7 +5273,7 @@ fn parse_braced_param_in(
                 name,
                 op,
                 colon,
-                arg: Box::new(operand_from_source(&arg_str, opts, q)?),
+                arg: Box::new(operand_from_source(&arg_str, opts, q, rest_line)?),
             });
         }
     }
@@ -5210,7 +5292,7 @@ fn parse_braced_param_in(
                 index: elem_index,
                 suffix,
                 longest,
-                pattern: Box::new(word_verbatim_from_source(&pat, opts)?),
+                pattern: Box::new(word_verbatim_from_source_at(&pat, opts, rest_line)?),
             })
         }
         // Case modification: `^`/`^^` (upper), `,`/`,,` (lower), `~`/`~~` (toggle).
@@ -5228,7 +5310,7 @@ fn parse_braced_param_in(
                 index: elem_index,
                 mode,
                 all,
-                pattern: Box::new(word_verbatim_from_source(&pat, opts)?),
+                pattern: Box::new(word_verbatim_from_source_at(&pat, opts, rest_line)?),
             })
         }
         // Parameter transformation: `${name@Q}`, `${name@U}`, etc.
@@ -5252,11 +5334,18 @@ fn parse_braced_param_in(
             })
         }
         // Pattern substitution: `/pat/repl`, `//pat/repl`, `/#…`, `/%…`.
-        '/' => parse_param_replace(name, elem_index, rest.get(1..).unwrap_or_default(), opts),
+        '/' => parse_param_replace(
+            name,
+            elem_index,
+            rest.get(1..).unwrap_or_default(),
+            opts,
+            rest_line,
+        ),
         // Substring `:offset[:length]` — but `:` followed by one of -=+? is the
         // use/assign/alt/error operator, handled below.
         ':' if !matches!(syn_at(&rest, 1), '-' | '=' | '+' | '?') => {
-            let (offset, length) = parse_slice_bounds(rest.get(1..).unwrap_or_default(), opts)?;
+            let (offset, length) =
+                parse_slice_bounds(rest.get(1..).unwrap_or_default(), opts, rest_line)?;
             Ok(WordPart::ParamSubstr {
                 name,
                 index: elem_index,
@@ -5291,7 +5380,7 @@ fn parse_braced_param_in(
                 index: elem_index,
                 op,
                 colon,
-                arg: Box::new(operand_from_source(&arg_str, opts, q)?),
+                arg: Box::new(operand_from_source(&arg_str, opts, q, rest_line)?),
                 // Written directly, the name read and the name complained about
                 // are the same one; only indirection separates them.
                 label: None,
@@ -5308,6 +5397,7 @@ fn parse_braced_param_in(
 fn parse_replace_pieces(
     body: &[Ch],
     opts: ParseOpts,
+    line: u32,
 ) -> Result<(bool, ReplaceAnchor, Box<Word>, Box<Word>), ParseError> {
     let mut i = 0;
     let mut all = false;
@@ -5331,6 +5421,11 @@ fn parse_replace_pieces(
     let mut pattern = Str::new();
     let mut replacement = Str::new();
     let mut in_repl = false;
+    // The pattern may span lines, so the replacement's own line is counted past
+    // it rather than assumed: in `${x/aaa`/`bbb/$(fi)}` the `$(fi)` is a line
+    // below the `${`, and bash blames the line it is really on.
+    let pat_start_line = frag_line(body, i, line);
+    let mut repl_line = pat_start_line;
     while let Some(&c) = body.get(i) {
         if !in_repl && syn(c) == '\\' && syn_at(body, i + 1) == '/' {
             pattern.push(b'/');
@@ -5340,6 +5435,7 @@ fn parse_replace_pieces(
         if !in_repl && syn(c) == '/' {
             in_repl = true;
             i += 1;
+            repl_line = frag_line(body, i, line);
             continue;
         }
         if in_repl {
@@ -5352,8 +5448,8 @@ fn parse_replace_pieces(
     Ok((
         all,
         anchor,
-        Box::new(word_verbatim_from_source(&pattern, opts)?),
-        Box::new(word_replacement_from_source(&replacement, opts)?),
+        Box::new(word_verbatim_from_source_at(&pattern, opts, pat_start_line)?),
+        Box::new(word_replacement_from_source(&replacement, opts, repl_line)?),
     ))
 }
 
@@ -5362,8 +5458,9 @@ fn parse_param_replace(
     index: Option<Box<Word>>,
     body: &[Ch],
     opts: ParseOpts,
+    line: u32,
 ) -> Result<WordPart, ParseError> {
-    let (all, anchor, pattern, replacement) = parse_replace_pieces(body, opts)?;
+    let (all, anchor, pattern, replacement) = parse_replace_pieces(body, opts, line)?;
     Ok(WordPart::ParamReplace {
         name,
         index,
@@ -5377,7 +5474,7 @@ fn parse_param_replace(
 /// Parse the operator portion of a bulk array expansion (`${a[@]OP}`) into a
 /// [`BulkOp`], or `None` when `rest` is not a recognized element-wise operator
 /// (e.g. the `:-`/`:=` default operators, which do not apply to `[@]`).
-fn parse_bulk_op(rest: &[Ch], opts: ParseOpts) -> Result<Option<BulkOp>, ParseError> {
+fn parse_bulk_op(rest: &[Ch], opts: ParseOpts, line: u32) -> Result<Option<BulkOp>, ParseError> {
     if rest.is_empty() {
         return Ok(None);
     }
@@ -5390,7 +5487,7 @@ fn parse_bulk_op(rest: &[Ch], opts: ParseOpts) -> Result<Option<BulkOp>, ParseEr
             Ok(Some(BulkOp::Trim {
                 suffix,
                 longest,
-                pattern: Box::new(word_verbatim_from_source(&pat, opts)?),
+                pattern: Box::new(word_verbatim_from_source_at(&pat, opts, line)?),
             }))
         }
         '^' | ',' | '~' => {
@@ -5405,12 +5502,12 @@ fn parse_bulk_op(rest: &[Ch], opts: ParseOpts) -> Result<Option<BulkOp>, ParseEr
             Ok(Some(BulkOp::Case {
                 mode,
                 all,
-                pattern: Box::new(word_verbatim_from_source(&pat, opts)?),
+                pattern: Box::new(word_verbatim_from_source_at(&pat, opts, line)?),
             }))
         }
         '/' => {
             let (all, anchor, pattern, replacement) =
-                parse_replace_pieces(rest.get(1..).unwrap_or_default(), opts)?;
+                parse_replace_pieces(rest.get(1..).unwrap_or_default(), opts, line)?;
             Ok(Some(BulkOp::Replace {
                 all,
                 anchor,
@@ -5446,10 +5543,21 @@ fn is_valid_transform_op(op: char) -> bool {
 /// or operator tokenization) — for the pattern and replacement of
 /// `${var/pat/repl}`, where bash applies only expansion and quote removal.
 pub(crate) fn word_verbatim_from_source(s: BStr<'_>, opts: ParseOpts) -> Result<Word, ParseError> {
+    word_verbatim_from_source_at(s, opts, RUNTIME_TEXT)
+}
+
+/// [`word_verbatim_from_source`] for a fragment of a `${ … }` body, which sits
+/// on a known physical line. See [`frag_line`].
+fn word_verbatim_from_source_at(
+    s: BStr<'_>,
+    opts: ParseOpts,
+    line: u32,
+) -> Result<Word, ParseError> {
     if s.is_empty() {
         return Ok(Word::default());
     }
-    let segs = crate::lexer::lex_word_verbatim(s).map_err(|e| ParseError::new(&e.msg))?;
+    let mut segs = crate::lexer::lex_word_verbatim(s).map_err(|e| ParseError::new(&e.msg))?;
+    map_frag_segs(&mut segs, line);
     let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
     for seg in &segs {
         parts.push(seg_to_part(seg, opts, Quoting::Bare)?);
@@ -5462,14 +5570,20 @@ pub(crate) fn word_verbatim_from_source(s: BStr<'_>, opts: ParseOpts) -> Result<
 /// is; written inside `"…"` it is read with double-quote rules instead, because
 /// the quotes around the substitution never stopped applying. See [`Quoting`]
 /// and [`crate::lexer::lex_operand_in_dquote`].
-fn operand_from_source(s: BStr<'_>, opts: ParseOpts, q: Quoting) -> Result<Word, ParseError> {
+fn operand_from_source(
+    s: BStr<'_>,
+    opts: ParseOpts,
+    q: Quoting,
+    line: u32,
+) -> Result<Word, ParseError> {
     if q == Quoting::Bare {
-        return word_verbatim_from_source(s, opts);
+        return word_verbatim_from_source_at(s, opts, line);
     }
     if s.is_empty() {
         return Ok(Word::default());
     }
-    let segs = crate::lexer::lex_operand_in_dquote(s).map_err(|e| ParseError::new(&e.msg))?;
+    let mut segs = crate::lexer::lex_operand_in_dquote(s).map_err(|e| ParseError::new(&e.msg))?;
+    map_frag_segs(&mut segs, line);
     let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
     for seg in &segs {
         // Still inside the quotes: a substitution nested in the operand is read
@@ -5504,11 +5618,16 @@ pub(crate) fn dquote_word_from_source(s: BStr<'_>, opts: ParseOpts) -> Result<Wo
 /// `${var/pat/repl}`: a literal `\&`/`\\` is preserved (not consumed at lex
 /// time) so the runtime `&`-substitution can distinguish an escaped ampersand
 /// from an active one. See [`crate::lexer::lex_replacement_verbatim`].
-fn word_replacement_from_source(s: BStr<'_>, opts: ParseOpts) -> Result<Word, ParseError> {
+fn word_replacement_from_source(
+    s: BStr<'_>,
+    opts: ParseOpts,
+    line: u32,
+) -> Result<Word, ParseError> {
     if s.is_empty() {
         return Ok(Word::default());
     }
-    let segs = crate::lexer::lex_replacement_verbatim(s).map_err(|e| ParseError::new(&e.msg))?;
+    let mut segs = crate::lexer::lex_replacement_verbatim(s).map_err(|e| ParseError::new(&e.msg))?;
+    map_frag_segs(&mut segs, line);
     let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
     for seg in &segs {
         parts.push(seg_to_part(seg, opts, Quoting::Bare)?);
@@ -5516,11 +5635,16 @@ fn word_replacement_from_source(s: BStr<'_>, opts: ParseOpts) -> Result<Word, Pa
     Ok(Word { parts })
 }
 
-fn word_from_source(s: BStr<'_>, opts: ParseOpts) -> Result<Word, ParseError> {
+fn word_from_source(s: BStr<'_>, opts: ParseOpts, line: u32) -> Result<Word, ParseError> {
     if s.is_empty() {
         return Ok(Word::default());
     }
-    let toks = tokenize(s, opts).map_err(|e| ParseError::new(&e.msg))?;
+    let mut toks = tokenize(s, opts).map_err(|e| ParseError::new(&e.msg))?;
+    for t in &mut toks {
+        if let Tok::Word(segs) = t {
+            map_frag_segs(segs, line);
+        }
+    }
     let mut parts: Vec<WordPart> = Vec::new();
     let mut first = true;
     for t in &toks {

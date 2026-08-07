@@ -148,7 +148,7 @@ instead — a different path entirely.
 expression, and let the word expansion's own errors out. That is the order bash
 uses (`expand_arith_string` runs before `evalexp`).
 
-### TD-OILS-A-SUBSTITUTION-INSIDE-A-BRACE-EXPANSION-IS-BLAMED-ON-THE-BODYS-OWN-LINE. `echo ${x:-$(fi)}` from a script names line 1 — 2026-08-07 — OPEN
+### TD-OILS-A-SUBSTITUTION-INSIDE-A-BRACE-EXPANSION-IS-BLAMED-ON-THE-BODYS-OWN-LINE. `echo ${x:-$(fi)}` from a script names line 1 — 2026-08-07 — ✅ FIXED 2026-08-07
 
 **Where:** `userspace/oils/src/parser.rs` — `Seg::ParamBraced` / the
 `parse_braced_param_in` re-lex, and `map_segs`.
@@ -177,13 +177,95 @@ because there the two coordinate systems coincide. The arithmetic sibling
 with it (see
 TD-OILS-A-NESTED-SUBSTITUTION-INSIDE-AN-ARITHMETIC-SCAN-IS-NOT-PARSED-WHEN-IT-CLOSES).
 
-**Proper fix:** give `Seg::ParamBraced` the line its `${` sits on, renumber it in
-`map_segs` like every other recorded line, and have `parse_braced_param_in`
-apply the resulting offset to the body's own lex — the same shape as
-`parse_procsub_body`'s `LineMap::Offset`. Once done, add
-`e 'echo ${x:-$(( 1 + $(fi) ))}'` back to
-`tests/corpus/arith-scan-parses-a-nested-substitution-in-place.sh`, where it was
-removed for exactly this reason.
+**Fixed.** `Seg::ParamBraced` now carries the line its `${` sits on, `map_segs`
+renumbers it like every other recorded line, and that line is threaded down
+through the whole `${ … }` parse as the physical line each *fragment* starts on
+— `parse_braced_param_in` → `split_name_subscript` / `parse_slice_bounds` /
+`parse_replace_pieces` / `parse_bulk_op` → the `*_from_source` family, each of
+which now calls `map_frag_segs` on its freshly-lexed segments.
+
+Per-fragment rather than one offset for the whole body, because a fragment is
+not in general on the body's first line. Three carves can push one further down,
+and each counts the newlines it steps over (`frag_line`): past a multi-line
+subscript, past a slice's offset, and past a replacement's pattern. Everything
+else is reached over operator characters only (`:`, `#`, `%`, `^`, `,`, `~`,
+`/`, `-`, `=`, `+`, `?`), none of which is a newline, so it inherits its
+parent's line unchanged.
+
+Mapping the *segments* rather than rebasing the returned error is what makes the
+runtime case work too: a segment carries the line a nested body is numbered
+against, so ``${v/aaa/`fi`}`` — which parses fine and fails only when the
+expansion runs — now reports `command substitution: line N` with the physical
+`N`. An error-only rebase could never reach that.
+
+`e 'echo ${x:-$(( 1 + $(fi) ))}'` is back in
+`tests/corpus/arith-scan-parses-a-nested-substitution-in-place.sh`. Regression
+test: `tests/corpus/brace-body-fragments-are-numbered-from-the-physical-line.sh`.
+
+### TD-OILS-A-SLASH-INSIDE-A-SUBSTITUTION-SPLITS-A-REPLACEMENT-PATTERN. `${s/$(echo a/b)aaa/Y}` fails to lex — 2026-08-07 — OPEN
+
+**Where:** `userspace/oils/src/parser.rs` — `parse_replace_pieces`.
+
+**What.** The pattern of a `${var/pat/repl}` runs to the next unescaped `/`, and
+`parse_replace_pieces` finds it with a flat scan that honours only `\/`. It does
+not step over a nested `$( … )`, `${ … }`, `` `…` ``, `'…'` or `"…"`, so a `/`
+inside one of those ends the pattern early. The two halves are then each lexed,
+and the truncated pattern is an unterminated substitution:
+
+```text
+s=zaaaz; echo "[${s/$(echo a/b)aaa/Y}]"
+bash: [zaaaz]
+osh : line 4: unexpected EOF while looking for matching `)'
+```
+
+A `/` in the *replacement* half is fine (`${s/aaa/$(echo a/b)}` matches), because
+nothing splits that half further. Backticks fail the same way
+(``${s/`echo a/b`aaa/Y}``), and so does a nested brace (`${s/${x:-p/q}aaa/Y}`).
+
+bash has no such scan: `parse_matched_pair` already recorded where each nested
+construct ends while reading the body, and the pattern/replacement split in
+`expand_word_internal` walks that structure rather than raw characters.
+
+**Proper fix:** replace the flat loop in `parse_replace_pieces` with one that
+skips a nested construct whole — the same nesting the `${ … }` scan in
+`lexer.rs` already implements for finding the body's `}`. It must remain a
+*character* scan (the halves are lexed separately afterwards), so what is needed
+is a "skip one balanced construct starting at `i`" helper over `&[Ch]`, shared
+with `matching_subscript_close`. Note this interacts with `frag_line`: skipping
+a multi-line construct must still count its newlines, which falls out for free
+since `frag_line` counts over the parent slice by index.
+
+### TD-OILS-A-PATTERN-IS-EXPANDED-EVEN-WHEN-THE-PARAMETER-IS-UNSET. `${u/aaa/$(cmd)}` runs `cmd` — 2026-08-07 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — expansion of `WordPart::ParamReplace`,
+`WordPart::ParamTrim` and their `BulkOp` equivalents.
+
+**What.** bash does not expand the pattern or the replacement of a substitution,
+nor the pattern of a trim, when the parameter is **unset**: the whole expansion
+is short-circuited to empty before either operand is looked at. osh expands them
+unconditionally, so their side effects happen where bash has none. Measured by
+counting how often a `$( … )` in each position runs:
+
+```text
+                        bash   osh
+unset,     replacement    0     1     ${u/aaa/$(cmd)Y}
+unset,     pattern        0     1     ${u/$(cmd)aaa/Y}
+unset,     trim pattern   0     1     ${u#$(cmd)a}
+set/empty, replacement    1     1     ${n/aaa/$(cmd)Y}   (empty, not unset)
+set no match              1     1
+set matching              1     1
+```
+
+Only *unset* short-circuits — an empty-but-set parameter expands both operands,
+so the test is `unset`-ness, not emptiness. Beyond the side effects this is also
+observable as a spurious diagnostic: ``${u/aaa/`fi`}`` prints a
+`command substitution:` syntax error in osh and nothing in bash.
+
+**Proper fix:** check the parameter's *unset*-ness before evaluating either
+operand word, for all of `ParamReplace`, `ParamTrim`, `BulkOp::Replace` and
+`BulkOp::Trim`. Care is needed to keep `nounset` ordering intact: `set -u` must
+still fire on the unset parameter itself, which it does today by a different
+path.
 
 ### TD-OILS-A-SINGLE-QUOTE-IS-NOT-A-QUOTE-WHEN-AN-ARITHMETIC-EXPANSION-IS-EVALUATED. `echo $(( 1 + '$(fi)' ))` — 2026-08-07 — OPEN
 

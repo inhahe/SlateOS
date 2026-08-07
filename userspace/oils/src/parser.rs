@@ -4745,50 +4745,107 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
 /// must not be mistaken for the subscript's close. Brackets inside any valid
 /// nested `${…}`/`$(…)` are themselves balanced, so plain depth counting over
 /// `[`/`]` handles those correctly too.
-fn matching_subscript_close(chs: &[Ch], open: usize) -> Option<usize> {
-    // Scan for the `]` that closes the subscript opened at `open`, tracking
-    // `[`/`]` nesting and *skipping quoted spans* so a quoted `]` inside an
-    // associative key (`${h["a]b"]}`, `${h['a]b']}`) is not mistaken for the
-    // terminator — matching bash's subscript scanner, which does not treat a
-    // quoted `]` as the close. Without this the subscript would split mid-quote
-    // (`"a` for `"a]b"`), leaving an unbalanced quote that trips the re-lexer
-    // (`unexpected EOF while looking for matching '"'`). See known-issues
-    // TD-OILS-SUBSCRIPT-QUOTED-BRACKET.
-    let mut depth = 0usize;
-    let mut i = open;
+/// If a quoted run or a substitution starts at `chs[i]`, the index just past it;
+/// otherwise `None`.
+///
+/// A `${ … }` body reaches the parser as raw text, but the characters in it are
+/// not all at the same level: a `/`, a `]` or a `:` inside a nested `$( … )`,
+/// `${ … }`, `` `…` `` or a quoted run belongs to that construct and must not be
+/// mistaken for the enclosing body's own operator. bash never has to ask —
+/// `parse_matched_pair` recorded where each nested construct ended as it read
+/// the body — so this recovers the same structure from the text.
+///
+/// The scan is deliberately shallow: it finds each construct's *extent* and
+/// nothing else, which is all a split needs. The halves are lexed properly
+/// afterwards, and the body as a whole was already balanced by the lexer, so a
+/// construct that does not close here (`None`) is left to be copied a character
+/// at a time and reported by that later lex.
+fn skip_construct(chs: &[Ch], i: usize) -> Option<usize> {
+    match syn_at(chs, i) {
+        // An escape covers the next character whatever it is, so a `\'` opens no
+        // quoted run and a `\/` ends no pattern.
+        '\\' if i + 1 < chs.len() => Some(i + 2),
+        // Verbatim to the close: a single-quoted run honours no escape.
+        '\'' => skip_quoted(chs, i + 1, '\'', false),
+        '"' => skip_quoted(chs, i + 1, '"', true),
+        '`' => skip_quoted(chs, i + 1, '`', true),
+        // `$((` needs no case of its own: the inner `(` is counted by the outer
+        // one, and the `))` closes both. `$[ … ]` deliberately gets none either
+        // — bash's `skip_to_delim` does not know it, so `${s/$[4/2]aaa/Y}` really
+        // does split at the inner `/` and leaves `$[4` to fail on its own.
+        '$' => match syn_at(chs, i + 1) {
+            '(' => skip_balanced(chs, i + 2, '(', ')'),
+            '{' => skip_balanced(chs, i + 2, '{', '}'),
+            // `$'…'` is not a single-quoted run: its `\'` is an ANSI-C escape,
+            // and `skip_to_delim` reads it with one (subst.c, the `$` arm's
+            // `string[i+1] == '\''` case). Without this, `${s/$'a\'/b'aaa/Y}`
+            // splits inside the string and leaves an unbalanced quote.
+            '\'' => skip_quoted(chs, i + 2, '\'', true),
+            '"' => skip_quoted(chs, i + 2, '"', true),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The index just past the `quote` that closes a run starting at `from`, or
+/// `None` if the run does not close. With `escapes`, a `\` covers the next
+/// character — which is how `"a\"b"` and `` `echo \`x\`` `` stay whole.
+fn skip_quoted(chs: &[Ch], from: usize, quote: char, escapes: bool) -> Option<usize> {
+    let mut i = from;
     while i < chs.len() {
-        match syn_at(chs, i) {
-            // A backslash escapes the next character (skip both).
-            '\\' => i += 1,
-            // Single-quoted run: verbatim to the closing quote (no escapes).
-            '\'' => {
-                i += 1;
-                while i < chs.len() && syn_at(chs, i) != '\'' {
-                    i += 1;
-                }
-            }
-            // Double-quoted run: to the closing quote, honoring `\`.
-            '"' => {
-                i += 1;
-                while i < chs.len() && syn_at(chs, i) != '"' {
-                    if syn_at(chs, i) == '\\' {
-                        i += 1;
-                    }
-                    i += 1;
-                }
-            }
-            '[' => depth += 1,
-            ']' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i);
-                }
-            }
-            _ => {}
+        let c = syn_at(chs, i);
+        if c == quote {
+            return Some(i + 1);
         }
-        i += 1;
+        i += usize::from(escapes && c == '\\') + 1;
     }
     None
+}
+
+/// The index just past the `close` matching an `open` already consumed, counting
+/// nesting and stepping over any construct met on the way — so a `)` inside a
+/// quoted run or a nested `${ … }` closes nothing.
+fn skip_balanced(chs: &[Ch], from: usize, open: char, close: char) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut i = from;
+    while i < chs.len() {
+        let c = syn_at(chs, i);
+        if c == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i + 1);
+            }
+            i += 1;
+        } else if c == open {
+            depth += 1;
+            i += 1;
+        } else if let Some(next) = skip_construct(chs, i) {
+            // Always past `i`, so the scan cannot stall.
+            i = next;
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+fn matching_subscript_close(chs: &[Ch], open: usize) -> Option<usize> {
+    // The `]` that closes the subscript is the first one *at the subscript's own
+    // level*: `[`/`]` nest, and a `]` inside a quoted run or a substitution
+    // belongs to that construct. bash never has to look — `parse_matched_pair`
+    // recorded where each nested construct ended as it read the body — so
+    // `${h["a]b"]}` keys on `a]b` and `${a[$(echo 1])]}` has the whole
+    // `$(echo 1])` for a subscript, which bash then fails to evaluate as
+    // *arithmetic* (`1]: invalid arithmetic operator`), not as a truncated
+    // substitution. Splitting mid-construct would instead leave an unbalanced
+    // one that trips the re-lexer (`unexpected EOF while looking for matching
+    // ')'`). See known-issues TD-OILS-SUBSCRIPT-QUOTED-BRACKET and
+    // TD-OILS-A-SLASH-INSIDE-A-SUBSTITUTION-SPLITS-A-REPLACEMENT-PATTERN.
+    //
+    // The caller has already checked that `chs[open]` is the `[`, so the close
+    // is one before the index `skip_balanced` reports.
+    skip_balanced(chs, open + 1, '[', ']').map(|past| past - 1)
 }
 
 /// The verdict of [`split_name_subscript`].
@@ -5417,7 +5474,8 @@ fn parse_replace_pieces(
         }
         _ => {}
     }
-    // Pattern runs to the next unescaped '/'; the remainder is the replacement.
+    // Pattern runs to the next unescaped '/' *at this level*; the remainder is
+    // the replacement.
     let mut pattern = Str::new();
     let mut replacement = Str::new();
     let mut in_repl = false;
@@ -5427,6 +5485,10 @@ fn parse_replace_pieces(
     let pat_start_line = frag_line(body, i, line);
     let mut repl_line = pat_start_line;
     while let Some(&c) = body.get(i) {
+        // Only in the pattern, and only for `/`: this is the one place the
+        // backslash is *consumed* rather than passed on, because it is escaping
+        // this scan's own delimiter. Every other escape is the later lex's to
+        // interpret and is copied whole by `skip_construct` below.
         if !in_repl && syn(c) == '\\' && syn_at(body, i + 1) == '/' {
             pattern.push(b'/');
             i += 2;
@@ -5436,6 +5498,18 @@ fn parse_replace_pieces(
             in_repl = true;
             i += 1;
             repl_line = frag_line(body, i, line);
+            continue;
+        }
+        // A nested construct is copied whole, so a `/` inside one ends nothing:
+        // `${s/$(echo a/b)aaa/Y}` has a single separator and its pattern is the
+        // whole `$(echo a/b)aaa`. Doing this in the replacement half too is a
+        // no-op on the bytes, and keeps the two halves scanned by one rule.
+        if let Some(next) = skip_construct(body, i) {
+            let dst = if in_repl { &mut replacement } else { &mut pattern };
+            for &ch in body.get(i..next).unwrap_or_default() {
+                ch.push_to(dst);
+            }
+            i = next;
             continue;
         }
         if in_repl {

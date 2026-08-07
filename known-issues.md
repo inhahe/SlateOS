@@ -202,7 +202,7 @@ expansion runs — now reports `command substitution: line N` with the physical
 `tests/corpus/arith-scan-parses-a-nested-substitution-in-place.sh`. Regression
 test: `tests/corpus/brace-body-fragments-are-numbered-from-the-physical-line.sh`.
 
-### TD-OILS-A-SLASH-INSIDE-A-SUBSTITUTION-SPLITS-A-REPLACEMENT-PATTERN. `${s/$(echo a/b)aaa/Y}` fails to lex — 2026-08-07 — OPEN
+### TD-OILS-A-SLASH-INSIDE-A-SUBSTITUTION-SPLITS-A-REPLACEMENT-PATTERN. `${s/$(echo a/b)aaa/Y}` fails to lex — 2026-08-07 — ✅ FIXED 2026-08-07
 
 **Where:** `userspace/oils/src/parser.rs` — `parse_replace_pieces`.
 
@@ -226,14 +226,33 @@ bash has no such scan: `parse_matched_pair` already recorded where each nested
 construct ends while reading the body, and the pattern/replacement split in
 `expand_word_internal` walks that structure rather than raw characters.
 
-**Proper fix:** replace the flat loop in `parse_replace_pieces` with one that
-skips a nested construct whole — the same nesting the `${ … }` scan in
-`lexer.rs` already implements for finding the body's `}`. It must remain a
-*character* scan (the halves are lexed separately afterwards), so what is needed
-is a "skip one balanced construct starting at `i`" helper over `&[Ch]`, shared
-with `matching_subscript_close`. Note this interacts with `frag_line`: skipping
-a multi-line construct must still count its newlines, which falls out for free
-since `frag_line` counts over the parent slice by index.
+**Fixed by** a "skip one construct starting at `i`" helper over `&[Ch]` —
+`skip_construct`, with `skip_quoted` and `skip_balanced` under it — which
+`parse_replace_pieces` now consults at every position, copying any construct it
+finds into the current half whole. The scan stays a *character* scan (the halves
+are lexed separately afterwards) and deliberately shallow: it finds each
+construct's extent and nothing else, which is all a split needs.
+
+The backslash keeps exactly one special case: `\/` in the pattern half, which is
+the one place a backslash escapes *this scan's own* delimiter and so is consumed.
+Every other escape is the later lex's to interpret and is copied whole. A
+construct that does not close (`None`) is copied a character at a time and left
+to that later lex — unreachable in practice, since an unterminated quote or
+substitution inside a `${ … }` is already a lexer error before the body is
+handed over.
+
+`frag_line` needed no change: it counts newlines over the parent slice by index,
+so skipping a multi-line construct still counts its newlines.
+
+Corpus case:
+`userspace/oils/tests/corpus/a-replacement-separator-is-found-at-one-level-only.sh`.
+
+**Sibling, fixed with it:** `matching_subscript_close` had the same shape — it
+skipped quoted runs but not substitutions, so `${a[$(echo 1])]}` split at the
+inner `]`. It is now one line over `skip_balanced`. See
+`a-subscript-close-is-found-at-one-level-only.sh`; the divergence there is
+visible in the *kind* of failure, since bash fails the whole `$(echo 1])`
+subscript as arithmetic (rc=1) where osh failed to lex the truncated one (rc=2).
 
 ### TD-OILS-AN-ANSI-C-STRING-IN-A-BODY-IS-READ-AS-A-SINGLE-QUOTED-RUN. `$(echo $'a\'b')` fails to lex — 2026-08-07 — ✅ FIXED 2026-08-07
 
@@ -298,6 +317,56 @@ operand word, for all of `ParamReplace`, `ParamTrim`, `BulkOp::Replace` and
 `BulkOp::Trim`. Care is needed to keep `nounset` ordering intact: `set -u` must
 still fire on the unset parameter itself, which it does today by a different
 path.
+
+### TD-OILS-AN-ANSI-C-STRING-IS-NOT-REQUOTED-AFTER-A-BRACE-BODY-TRANSLATES-IT. `"${h[$'a]b']}"` is a bad substitution in bash — 2026-08-07 — OPEN
+
+**Where:** `userspace/oils/src/lexer.rs` — `read_dollar_brace_body`, which copies
+a `$'…'` in a `${ … }` body through unchanged.
+
+**What.** bash does not carry a `$'…'` through a `${ … }` body as text. It
+**translates** it where it reads it — `ansiexpand`, parse.y:3854, backing the
+write index up over the `$'` — and then decides whether to put single quotes
+back around the result. That decision is a three-way one, and in one of the
+three the quotes are *not* restored, so a `]` or a `'` that the source had
+protected is suddenly bare:
+
+| where the `$'…'` sits | requoted? | parse.y |
+|---|---|---|
+| word is unquoted (`(rflags & P_DQUOTE) == 0`) | yes, `sh_single_quote` | 3881 |
+| in double quotes, after an operator — `dolbrace_state` is `DOLBRACE_QUOTE`/`QUOTE2`, i.e. past a `#`, `%`, `/`, `^` or `,` | yes, `sh_single_quote` (compat > 42) | 3865 |
+| in double quotes, still in the parameter part or in a `:-`-style word — `DOLBRACE_PARAM` / `DOLBRACE_WORD` | **no**, spliced bare | 3875, inside `#if 0 /* TAG:bash-5.3 */` |
+
+Measured (`h` is an associative array with an `a]b` key, `q="za'bz"`):
+
+```text
+                              bash                              osh
+"${h[$'a]b']}"    ${h[a]b]}: bad substitution                    W
+${h[$'a]b']}      W                                              W
+"${q:-$'a\'b'}"   no closing `}' in "${q:-a'b}"                   za'bz
+"${q/$'a\'b'/Y}"  zYz                                            zYz
+```
+
+Rows 2 and 4 are the requoted cases and already match. Rows 1 and 3 are the
+`#if 0` hole: the translated text is spliced bare, the `]` closes the subscript
+early and the `'` swallows the `}`, and bash reports a `bad substitution` that
+quotes the *translated* text back — which is how the mechanism is visible at
+all.
+
+**Note the disposition question.** The `#if 0` block is tagged `TAG:bash-5.3`:
+bash itself considers this a bug and has the fix written and disabled pending
+the next release. Matching bash 5.2.37 here means implementing a defect that is
+already repaired upstream, and the current osh answers happen to be the 5.3
+ones. Recorded rather than fixed for that reason; the corpus case
+`a-subscript-close-is-found-at-one-level-only.sh` documents it in a comment and
+deliberately does not exercise it.
+
+**Proper fix, if taken:** translate `$'…'` in `read_dollar_brace_body` rather
+than copying it, tracking bash's `dolbrace_state` across the body (parse.y:3811
+–3828 is the whole state machine — `#`/`%`/`^`/`,` after the first character go
+to `QUOTE`, `/` to `QUOTE2`, the `#%^,~:-=?+/` set to `OP`, anything after `OP`
+to `WORD`) and whether the enclosing word is double-quoted, then re-single-quote
+the result in every case except `DOLBRACE_PARAM`/`DOLBRACE_WORD` under double
+quotes.
 
 ### TD-OILS-A-SINGLE-QUOTE-IS-NOT-A-QUOTE-WHEN-AN-ARITHMETIC-EXPANSION-IS-EVALUATED. `echo $(( 1 + '$(fi)' ))` — 2026-08-07 — OPEN
 

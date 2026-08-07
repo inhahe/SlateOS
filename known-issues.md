@@ -178,7 +178,7 @@ Not probed in `tests/corpus/arith-expansion-scan-and-classify.sh` — the sectio
 on the scan's skip table notes the exclusion — because the rest of that probe
 matches and only the line number would fail.
 
-### TD-OILS-A-FAILING-SUBSTITUTIONS-STATUS-IS-LOST-WHEN-AN-INTEGER-ASSIGNMENT-ALSO-FAILS. `` declare -i n; n=1+`fi` `` — 2026-08-07 — OPEN
+### TD-OILS-A-FAILING-SUBSTITUTIONS-STATUS-IS-LOST-WHEN-AN-INTEGER-ASSIGNMENT-ALSO-FAILS. `` declare -i n; n=1+`fi` `` — 2026-08-07 — ✅ FIXED 2026-08-07
 
 **Where:** `userspace/oils/src/interp.rs` — the status an assignment returns when
 the variable is integer-attributed and the arithmetic evaluation of its value
@@ -229,17 +229,33 @@ when there is none (eval.c:103):
 So the 2 the failed substitution left in `last_command_exit_value` survives, and
 the 1 that `declare -i b=2+` produces is merely the `== 0` fallback.
 
-**Proper fix:** `Shell::arm_int_bind_discard` (`interp.rs`) hardcodes
-`status: 1`. It should carry `1` only when `self.last_status` is 0, and the
-current status otherwise — the direct transcription of the C above. (bash
-decides this at the reader loop rather than at the raise, but nothing runs in
-between, so arming with the resolved status is equivalent; `arm_discard`'s
-explicit-status contract is unaffected.) Note this makes
-[`Shell::arm_int_bind_discard`]'s doc example — `` eval 'declare -i b=2+' ``
-leaving `$?` at 1 — the fallback case rather than the rule, so that doc needs
-amending with it. Deliberately excluded from
-`tests/corpus/a-backtick-that-fails-to-parse-is-blamed-before-the-arithmetic-is.sh`
-so that case could land green; add a row there when this is fixed.
+**Fixed by** `Shell::arm_int_bind_discard` (`interp.rs`) carrying `1` only when
+`self.last_status` is 0, and the current status otherwise — the direct
+transcription of the C above. bash decides this at the reader loop rather than
+at the raise, but nothing runs in between, so arming with the resolved status is
+equivalent; `arm_discard`'s explicit-status contract is untouched.
+
+**The rule is wider than this entry first recorded.** Written up as "bash keeps
+the substitution's status", it looked like a fixed 2. Measuring the shape space
+before touching anything showed it is *any* status the value's expansion left:
+
+```text
+declare -i n; n=2+                  rc=1   nothing ran; the fallback
+declare -i n; n=1+`false`           rc=1   the substitution's own 1
+declare -i n; n=1+`fi`              rc=2   a parse failure's 2
+declare -i n; n=1+`exit 3`          rc=3   and any other status too
+```
+
+The same measurement disposed of a plausible wrong reading of eval.c:103 —
+that an *earlier* non-zero status would survive too. `(exit 7); declare -i n;
+n=2+` is 1, not 7, because the `declare` between them succeeds and resets the
+status; reading `last_status` at the raise reads it after the value was
+expanded, which is where bash reads it, so this falls out rather than needing
+special handling.
+
+Covered by `tests/corpus/an-integer-assignment-keeps-the-status-its-value-left.sh`,
+which also pins the append, `declare`, array-element and `let` spellings, and
+the unwind still passing through `eval` and a function.
 
 ### TD-OILS-AN-UNTERMINATED-BRACE-LEFT-BY-AN-ARITHMETIC-SCAN-IS-NOT-A-BAD-SUBSTITUTION. `echo $[ 1 + ${x:-]} ]` — 2026-08-07 — OPEN
 

@@ -10105,9 +10105,42 @@ impl Shell {
     /// `eval 'a[-9]=x'` — an expansion error, armed by [`Self::arm_discard`] —
     /// does print it. The flag becomes a [`Flow::Abort`] rather than a
     /// [`Flow::Discard`]; see [`Self::take_discard_flow`].
+    ///
+    /// The 1 in that example is a *fallback*, not the rule. bash does not report
+    /// this failure as a status at all — it unwinds, and the reader loop supplies
+    /// a status only when the unwind arrives without one (eval.c:103):
+    ///
+    /// ```c
+    ///     case DISCARD:
+    ///       /* Make sure the exit status is reset to a non-zero value, but
+    ///          leave existing non-zero values (e.g., > 128 on signal)
+    ///          alone. */
+    ///       if (last_command_exit_value == 0)
+    ///         set_exit_status (EXECUTION_FAILURE);
+    /// ```
+    ///
+    /// So whatever the value's own expansion left behind outlives the arithmetic
+    /// failure that follows it, and it is the substitution's status rather than
+    /// a fixed 2 — measured against bash 5.2.37:
+    ///
+    /// ```text
+    /// declare -i n; n=2+                  rc=1   nothing ran; the fallback
+    /// declare -i n; n=1+`false`           rc=1   the substitution's own 1
+    /// declare -i n; n=1+`fi`              rc=2   a parse failure's 2
+    /// declare -i n; n=1+`exit 3`          rc=3   and any other status too
+    /// ```
+    ///
+    /// `(exit 7); declare -i n; n=2+` is 1, not 7, for the ordinary reason: the
+    /// `declare` between them succeeded and reset the status. Nothing special is
+    /// needed to get that — reading `last_status` here reads it after the value
+    /// was expanded, which is exactly where bash reads it.
     fn arm_int_bind_discard(&mut self) {
         self.discard_error = Some(DiscardAbort {
-            status: 1,
+            status: if self.last_status == 0 {
+                1
+            } else {
+                self.last_status
+            },
             past_eval: true,
         });
     }

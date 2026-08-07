@@ -71,10 +71,17 @@ osh            -c 's="a…b"; echo "${#s}" "${s:0:2}"'        ->  3  a…
 ```
 
 Also `${v^^}`: `aéb` is `AéB` under C (bash leaves the é alone, having no
-character to upcase) but `AÉB` under UTF-8 and in osh. And `printf %q` on a byte
-that is no character: bash writes `$'a\377b'`, osh writes the raw `a\xffb` — a
-real divergence in *both* locales, and the narrowest thing here worth fixing on
-its own.
+character to upcase) but `AÉB` under UTF-8 and in osh.
+
+And `printf %q` / `${v@Q}` on a byte that is no character, which is the sharpest
+illustration of why this is a *fork* and not simply an osh bug. bash's
+`ansic_shouldquote` (lib/sh/strtrans.c) sends any non-basic byte to
+`ansic_wshouldquote`, which quotes when `mbstowcs` fails. Under UTF-8 `a\xffb`
+does not decode, so bash writes `$'a\377b'`; under C every byte is a character
+and `iswprint(0xff)` holds, so bash writes the raw `a\xffb`. osh writes the raw
+form — so it is *correct against the harness today* and wrong against a UTF-8
+bash. Resolving Q38 decides which of those two is the bug; until then there is
+nothing to fix here, and this row must not be turned into a corpus case.
 
 **Not** in this class, though they look like it: `printf`'s field width and
 `%c`. Those are byte-counted in *every* locale, because bash hands them to C

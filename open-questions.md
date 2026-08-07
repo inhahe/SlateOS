@@ -303,10 +303,18 @@ and pinned by a corpus case verified identical under both locales.
 
 **Where it bites.** `scripts/osh-bash-diff.py:274`;
 `userspace/oils/src/bytes.rs` (`char_count`, `char_slice`, `char_at`) and its
-callers. Tracked as `TD-OILS-THE-CORPUS-HARNESS-RUNS-THE-REFERENCE-BASH-IN-THE-C-LOCALE`
-in `known-issues.md`, which also records the one divergence here that is real in
-*both* locales and worth fixing independently: `printf %q` on a byte that is no
-character (bash `$'a\377b'`, osh a raw `a\xffb`).
+callers. Tracked as
+`TD-OILS-THE-CORPUS-HARNESS-RUNS-THE-REFERENCE-BASH-IN-THE-C-LOCALE` in
+`known-issues.md`.
+
+**Why this is a fork and not a bug list.** `printf %q` on a byte that is no
+character shows it cleanly. bash's `ansic_shouldquote` sends any non-basic byte
+to `ansic_wshouldquote`, which quotes when `mbstowcs` fails: under UTF-8 `a\xffb`
+does not decode and bash writes `$'a\377b'`, but under C every byte is a
+character and bash writes the raw `a\xffb`. osh writes the raw form — so osh is
+*correct against the harness as configured today* and incorrect against a UTF-8
+bash. There is no edit to osh that is right under both; only choosing A or B
+makes one of them the answer. That is precisely why I have not touched it.
 
 ---
 

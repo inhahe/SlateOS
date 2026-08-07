@@ -48,6 +48,27 @@ echo "=== the scan skips a backtick; the check does not ==="
 # which is why `1` is looked up as a command.
 e 'echo $(( 1 + `echo 2)3` ))'
 
+echo "=== the search for a substitution's own ) skips what it cannot read ==="
+# `extract_delimited_string` (subst.c:1359) finds the `)` of a `$( … )` by
+# character, not by grammar — but it passes over quotes, backticks, escapes and
+# nested substitutions on the way (subst.c:1422-1487), so a `)` standing inside
+# one closes nothing and the body survives whole. The side effect is what proves
+# the *whole* body ran rather than a prefix of it: a scan that stopped at the
+# quoted `)` would leave `>&2; echo 7)` behind as expression text.
+e 'echo $(( $(echo ")" >&2; echo 7) ))'
+e 'echo $(( $(echo `echo ")"`) ))'
+e 'echo $(( $(echo $(echo ")")) ))'
+e 'echo $(( $(echo \) ) ))'
+# The same skipping settles a nested `$(( … ))`, which bash extracts *without*
+# `SX_COMMAND` (subst.c:1303) — so quotes still hide a `)` from it…
+e 'echo $(( 1 + $(( "2)3" )) ))'
+# …but that table is the whole of the scan, and a `)` closing nothing in the
+# *grammar* is not in it: `echo $(( $(case x in x) echo 5;; esac) ))` ends the
+# substitution at the `case` pattern's `)` in bash too, and `5` is then looked up
+# as a command. Not probed here — the two shells agree on that and disagree only
+# on which line they blame it to; see
+# TD-OILS-A-COMMAND-RUN-FROM-A-CUT-SHORT-ARITHMETIC-SUBSTITUTION-IS-BLAMED-AT-THE-WRONG-LINE.
+
 echo "=== a body that does not balance is a command substitution ==="
 e 'echo $(( echo a ) )'
 e 'echo $(( echo hi ) | cat )'

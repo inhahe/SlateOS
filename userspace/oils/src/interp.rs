@@ -28393,12 +28393,91 @@ impl Shell {
         Some(n)
     }
 
+    /// If `chars[i]` begins a construct the search for a closing delimiter must
+    /// pass *over* rather than look inside, return the index just past it.
+    ///
+    /// bash's `extract_delimited_string` (subst.c:1359) — the scan that finds
+    /// the `)` of a `$( … )` or the `))` of a `$(( … ))` met while expanding a
+    /// word — is not a parser, but it is not blind either. It skips exactly the
+    /// constructs below, so a delimiter standing inside one closes nothing, and
+    /// `$(echo ")")` is a whole substitution rather than one cut short at the
+    /// quoted paren:
+    ///
+    /// | construct | bash | skipped as |
+    /// |---|---|---|
+    /// | `\c` | subst.c:1422 | the next character, whatever it is |
+    /// | `'…'` / `"…"` | subst.c:1481 | passed through verbatim |
+    /// | `` `…` `` | subst.c:1471 | old-style substitution, verbatim |
+    /// | `$( … )` | subst.c:1431 | extracted whole, recursively |
+    /// | `# …` | subst.c:1415 | a comment — but only where a word could start |
+    ///
+    /// The last two are `SX_COMMAND`'s, which the `$(` extraction carries
+    /// (subst.c:1286) and the `$((` one does not — hence `command`. An
+    /// unterminated construct swallows the rest of the text, which is what
+    /// leaves the caller with no closing delimiter to find.
+    ///
+    /// This is a character scan because bash's is, and the table is the whole
+    /// of it: a `)` that closes nothing in the *grammar* but appears in none of
+    /// the rows above still cuts a body short. That is not a shortcoming to be
+    /// fixed — bash does it too. `echo $(( $(case x in x) echo 5;; esac) ))`
+    /// ends the substitution at the `)` of the `case` pattern in both shells,
+    /// which is why `5` is then reported as a command that was not found.
+    fn skip_opaque(chars: &[Ch], i: usize, command: bool) -> Option<usize> {
+        let end = chars.len();
+        let scan_to = |mut j: usize, close: char| {
+            while j < end && syn_at(chars, j) != close {
+                j += 1;
+            }
+            (j + 1).min(end)
+        };
+        match syn_at(chars, i) {
+            // A backslash takes the character after it out of play — including a
+            // delimiter, and including another backslash.
+            '\\' => Some((i + 2).min(end)),
+            // No escapes inside `'…'`: the first `'` ends it.
+            '\'' => Some(scan_to(i + 1, '\'')),
+            '"' => {
+                let mut j = i + 1;
+                while j < end && syn_at(chars, j) != '"' {
+                    // Inside double quotes a backslash still escapes and a
+                    // substitution is still a substitution — either can carry a
+                    // `"` that does not end the span. A `'` cannot: it is an
+                    // ordinary character in here.
+                    j = match syn_at(chars, j) {
+                        '\'' => j + 1,
+                        _ => Self::skip_opaque(chars, j, command).unwrap_or(j + 1),
+                    };
+                }
+                Some((j + 1).min(end))
+            }
+            '`' => Some(scan_to(i + 1, '`')),
+            '$' if command && syn_at(chars, i + 1) == '(' => {
+                Some(Self::scan_paren_group(chars, i + 2).map_or(end, |(_, next)| next))
+            }
+            '#' if command && (i == 0 || matches!(syn_at(chars, i - 1), '\n' | ' ' | '\t')) => {
+                let mut j = i + 1;
+                while j < end && syn_at(chars, j) != '\n' {
+                    j += 1;
+                }
+                Some(j)
+            }
+            _ => None,
+        }
+    }
+
     /// From `chars[start..]` (just past an opening `(`), return the balanced
     /// group's inner text and the index just past its matching `)`.
+    ///
+    /// Quotes, backticks, escapes, nested substitutions and comments are passed
+    /// over rather than counted; see [`Self::skip_opaque`].
     fn scan_paren_group(chars: &[Ch], start: usize) -> Option<(Str, usize)> {
         let mut depth = 0usize;
         let mut i = start;
         while i < chars.len() {
+            if let Some(next) = Self::skip_opaque(chars, i, true) {
+                i = next;
+                continue;
+            }
             match syn_at(chars, i) {
                 '(' => depth += 1,
                 ')' if depth == 0 => {
@@ -28415,10 +28494,20 @@ impl Shell {
 
     /// From `chars[start..]` (just past the `$((`), return the arithmetic
     /// expression text and the index just past its matching `))`.
+    ///
+    /// Quotes, backticks and escapes are passed over rather than counted, so
+    /// `$(( 1 + $(( "2)3" )) ))` reaches its own `))` and evaluates `2)3`. A
+    /// nested `$( … )` and a `#` comment are *not* passed over: bash extracts a
+    /// `$((` without `SX_COMMAND` (subst.c:1303 vs 1286), so those two rows of
+    /// [`Self::skip_opaque`] are off here — hence `command: false`.
     fn scan_arith_sub(chars: &[Ch], start: usize) -> Option<(Str, usize)> {
         let mut depth = 0usize;
         let mut i = start;
         while i < chars.len() {
+            if let Some(next) = Self::skip_opaque(chars, i, false) {
+                i = next;
+                continue;
+            }
             match syn_at(chars, i) {
                 '(' => depth += 1,
                 ')' if depth == 0 => {

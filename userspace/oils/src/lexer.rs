@@ -441,6 +441,10 @@ struct Lexer {
     /// [`Tokenized::heredoc_lines`], which is this in the dense form the reader
     /// indexes by token.
     heredoc_lines: Vec<(usize, u32)>,
+    /// Set when the scan ran out of input inside a `$( … )`, which is the one
+    /// construct that discards the here-documents pending around it. See
+    /// [`Lexer::read_subst_body`] and [`UngatheredHeredoc`].
+    heredocs_forgotten: bool,
 }
 
 /// A warning bash raises from its **reader** rather than from the parse or the
@@ -531,6 +535,44 @@ pub struct SubstHeredoc {
     pub line: u32,
     /// The token the warning is released with; see [`HeredocEof::tok_index`].
     pub tok_index: usize,
+}
+
+/// A here-document that was declared but whose body was never even reached: an
+/// unterminated construct *after* the `<<` swallowed the rest of the input, so
+/// the line that would have ended the introducing line never arrived and the
+/// ordinary gather at the newline never ran.
+///
+/// bash still warns about it, from the *second* gather site — the `simple_list`
+/// yacc action (parse.y:1217) — which fires when the error token reduces the
+/// top-level list. `gather_here_documents()` then finds the pending record,
+/// calls `make_here_document`, and that raises the same
+/// `here-document at line N delimited by end-of-file` warning the newline gather
+/// would have. Two things distinguish it from the newline case, and both are
+/// observable:
+///
+///   * it is printed **after** the syntax error, not before, because the
+///     reduction that gathers happens after the token has been read and
+///     reported;
+///   * both of its line numbers are the *end* of the input ([`Lexer::eof_line`]),
+///     since the reader had already consumed every line looking for the
+///     construct's close.
+///
+/// And it only fires for a *top-level* list: the same action inside
+/// `compound_list` (parse.y:1148) is guarded on the previous token having been a
+/// newline, so `{ cat <<E "` warns not at all. The lexer cannot tell which,
+/// having no reductions of its own, so it records the operator's offset and lets
+/// [`crate::parser::IncrementalParser`] decide by re-parsing the prefix.
+#[derive(Clone, Debug)]
+pub struct UngatheredHeredoc {
+    /// The delimiter that was wanted, in its unquoted form.
+    pub delim: Str,
+    /// The line the warning names, both in its prefix and inside its text: the
+    /// last line the input has, plus one if it did not end in a newline.
+    pub line: u32,
+    /// Character offset into `src` of the `<<` operator's own token. The reader
+    /// re-parses `src[..op_offset]` to find out whether the `<<` stood at the top
+    /// level, which is the only place the reduction that warns can happen.
+    pub op_offset: u32,
 }
 
 /// A here-document awaiting its body (collected when the introducing line ends).
@@ -790,6 +832,7 @@ impl Lexer {
             hd_ahead: None,
             next_tok_index: 0,
             heredoc_lines: Vec::new(),
+            heredocs_forgotten: false,
         }
     }
 
@@ -933,6 +976,12 @@ pub struct Tokenized {
     /// owning each `tok_index` is handed out, since bash's warning comes from its
     /// *reader* and so lands after the output of every earlier line.
     pub warnings: Vec<ReaderWarning>,
+    /// Here-documents still pending when the scan died inside an unclosed
+    /// construct, in declaration order — see [`UngatheredHeredoc`]. Their
+    /// introducing line is cut from `toks` (a `<<` whose placeholder was never
+    /// filled in must not reach the parser), so this is the only trace of them,
+    /// and the reader needs it to reproduce bash's post-error warning.
+    pub ungathered: Vec<UngatheredHeredoc>,
     /// `Some((error, line))` when lexing stopped early. `toks` is then cut back
     /// to the last **complete** logical line, because that is the granularity
     /// at which bash stops executing: in `echo two; echo three 'unterm`
@@ -971,7 +1020,35 @@ pub fn tokenize_deferred(src: BStr<'_>, opts: ParseOpts) -> Tokenized {
         }
     }
     let Err(e) = res else {
-        return Tokenized { toks, lines, offsets, ends, conts, heredoc_lines, warnings, err: None };
+        return Tokenized {
+            toks,
+            lines,
+            offsets,
+            ends,
+            conts,
+            heredoc_lines,
+            warnings,
+            ungathered: Vec::new(),
+            err: None,
+        };
+    };
+    // Record the here-documents the scan never got to collect, before the cut
+    // below removes the tokens that name them. Both numbers in bash's warning are
+    // the end of the input here: the reader ran to EOF looking for the unclosed
+    // construct's close, so `line_number` was already there when the reduction
+    // finally gathered.
+    let eof_line = lx.eof_line();
+    let ungathered: Vec<UngatheredHeredoc> = if lx.heredocs_forgotten {
+        Vec::new()
+    } else {
+        lx.pending_heredocs
+            .iter()
+            .map(|h| UngatheredHeredoc {
+                delim: h.delim.clone(),
+                line: eof_line,
+                op_offset: offsets.get(h.tok_index).copied().unwrap_or(0),
+            })
+            .collect()
     };
     // The failing token's own line is the fallback when the raise site did not
     // name one. `Lexer::line` only advances at the end of each `run_into`
@@ -1005,7 +1082,17 @@ pub fn tokenize_deferred(src: BStr<'_>, opts: ParseOpts) -> Tokenized {
     // but if one ever did, its token is beyond the cut and so names input that
     // never runs. The reader's `tok_index` gate keeps it quiet on its own, which is
     // the same rule that keeps bash quiet after `echo one )`.
-    Tokenized { toks, lines, offsets, ends, conts, heredoc_lines, warnings, err: Some((e, line)) }
+    Tokenized {
+        toks,
+        lines,
+        offsets,
+        ends,
+        conts,
+        heredoc_lines,
+        warnings,
+        ungathered,
+        err: Some((e, line)),
+    }
 }
 
 /// Which quote, if any, the reader is still *inside* after `src` — `Some('\'')`
@@ -3151,7 +3238,18 @@ impl Lexer {
                     // Blamed on the opening line, unlike a plain `$( … )` — bash
                     // has already failed the arithmetic reading by this point, and
                     // that error is stamped where the `$((` is.
-                    let raw = self.read_subst_body().map_err(|e| e.at(open))?;
+                    //
+                    // `read_balanced_inner` rather than [`Lexer::read_subst_body`]
+                    // because this re-read is not where bash's `parse_comsub`
+                    // starts: seeing a second `(`, it returns straight into
+                    // `parse_matched_pair` with `P_ARITH` (parse.y:4103), *above*
+                    // the `need_here_doc = 0`. So a `$((` that runs out of input
+                    // keeps its pending here-documents however it is finally read
+                    // — `cat <<E $((`, `cat <<E $(( 1 +` and `cat <<E $(( echo a )`
+                    // all warn, while `cat <<E $(` does not.
+                    let raw = self
+                        .read_balanced_inner('(', ')', true)
+                        .map_err(|e| e.at(open))?;
                     Ok(Some(Seg::CmdSub(raw, self.cur_line(), None)))
                 } else {
                     self.pos += 1;
@@ -3231,7 +3329,20 @@ impl Lexer {
     /// escape. Those are copied whole rather than character by character, which
     /// incidentally makes `$(echo \))` and `` $(echo `echo )`) `` scan correctly.
     fn read_subst_body(&mut self) -> Result<Str, LexError> {
-        self.read_balanced_inner('(', ')', true)
+        let r = self.read_balanced_inner('(', ')', true);
+        if r.is_err() {
+            // bash reads this body with a whole nested `yyparse`, and `parse_comsub`
+            // (parse.y:4133) zeroes `need_here_doc` before starting it. The saved
+            // copy is put back by `restore_parser_state` — but only on the path that
+            // gets there, and the `EOF_Reached` path (4170) returns before it. So an
+            // input that runs out inside a `$( … )` forgets every here-document
+            // declared before it, and the reduction that would have warned about
+            // them finds nothing pending. No other unclosed construct does this:
+            // `"`, `'`, `` ` ``, `${` and `$((` are all read by `parse_matched_pair`,
+            // which leaves the counter alone. See [`UngatheredHeredoc`].
+            self.heredocs_forgotten = true;
+        }
+        r
     }
 
     fn read_balanced_inner(

@@ -41,7 +41,8 @@ use crate::assoc::AssocArray;
 use crate::bfmt;
 use crate::bytes::{self, BStr, Ch, Str};
 use crate::lexer::{
-    AliasExpansion, ParseOpts, Op, ReaderWarning, Seg, Spanned, Tok, TokSpan, Tokenized,
+    AliasExpansion, HeredocEof, ParseOpts, Op, ReaderWarning, Seg, Spanned, Tok, TokSpan,
+    Tokenized, UngatheredHeredoc,
     expand_aliases_tracked, tokenize,
     tokenize_paren_body, tokenize_deferred, tokenize_spanned, word_is_assignment,
 };
@@ -496,6 +497,10 @@ pub struct IncrementalParser {
     /// body consumed. See [`Tokenized::heredoc_lines`] and
     /// [`Self::heredoc_gather`].
     orig_heredoc_lines: Vec<u32>,
+    /// Here-documents the lex never reached the body of, because an unclosed
+    /// construct after the `<<` swallowed the rest of the input. See
+    /// [`UngatheredHeredoc`] and [`Self::ungathered_warnings`].
+    orig_ungathered: Vec<UngatheredHeredoc>,
     /// Char offset into `src` of the first character not yet handed out as unit
     /// text. Runs ahead of `pos` only in whole tokens, so it survives a
     /// [`Self::relex`] (which rebases offsets onto the same `src`).
@@ -553,6 +558,12 @@ pub struct IncrementalParser {
     /// call, which is why a [`Self::relex`] (that discards `pending_warnings`
     /// wholesale) cannot lose one.
     ready_warnings: Vec<ReaderWarning>,
+    /// Warnings that belong *after* the error they accompany rather than before
+    /// it, awaiting [`Self::take_post_error_warnings`]. Only
+    /// [`UngatheredHeredoc`]s land here: the reduction that gathers them runs
+    /// after the offending token has already been read and reported, so bash
+    /// prints them below the diagnostic instead of above it.
+    post_error_warnings: Vec<ReaderWarning>,
 }
 
 impl IncrementalParser {
@@ -588,9 +599,13 @@ impl IncrementalParser {
             conts: orig_conts,
             heredoc_lines: orig_heredoc_lines,
             warnings,
+            ungathered: mut orig_ungathered,
             err,
         } = tokenize_deferred(src, opts);
         map_lines(&mut orig, &mut orig_lines, &line_map);
+        for u in &mut orig_ungathered {
+            u.line = line_map.map(u.line);
+        }
         let pending_warnings = map_reader_warnings(warnings, &line_map);
         Self {
             src: bytes::chars(src).collect(),
@@ -601,6 +616,7 @@ impl IncrementalParser {
             orig_ends,
             orig_conts,
             orig_heredoc_lines,
+            orig_ungathered,
             hist_cursor: 0,
             expand_cursor: 0,
             unit_lines: Vec::new(),
@@ -620,6 +636,7 @@ impl IncrementalParser {
                 }),
             pending_warnings,
             ready_warnings: Vec::new(),
+            post_error_warnings: Vec::new(),
             line_map,
         }
     }
@@ -663,6 +680,7 @@ impl IncrementalParser {
             conts,
             heredoc_lines,
             warnings,
+            mut ungathered,
             err,
         } = tokenize_deferred(&tail, opts);
         map_lines(&mut orig, &mut orig_lines, &map);
@@ -674,6 +692,14 @@ impl IncrementalParser {
         for o in offsets.iter_mut().chain(ends.iter_mut()) {
             *o = o.saturating_add(delta);
         }
+        // Same rebase, and the same "the re-lex is authoritative" rule: the tail is
+        // where every here-document still ungathered must be, since the head was
+        // read and handed out already.
+        for u in &mut ungathered {
+            u.op_offset = u.op_offset.saturating_add(delta);
+            u.line = map.map(u.line);
+        }
+        self.orig_ungathered = ungathered;
         self.orig = orig;
         self.orig_lines = orig_lines;
         self.orig_offsets = offsets;
@@ -934,6 +960,58 @@ impl IncrementalParser {
         n
     }
 
+    /// Queue the `here-document … delimited by end-of-file` warning for each
+    /// here-document the lex never reached the body of, keeping only the ones the
+    /// gathering reduction can actually reach.
+    ///
+    /// This is [`Self::heredoc_gather`]'s other half. There the reduction moved
+    /// the reader past a body it *did* read; here there is no body at all — an
+    /// unclosed construct after the `<<` swallowed the input, so the newline that
+    /// would have triggered the ordinary gather never arrived. The `simple_list`
+    /// action still runs, because yacc performs its default reductions before it
+    /// discovers the lookahead is an error, and `make_here_document` then raises
+    /// the same warning it would have raised at a newline. Two things about it are
+    /// peculiar to this route, and both are observable:
+    ///
+    /// * it lands **after** the syntax error, since the lexer had already reported
+    ///   the unclosed construct by the time the reduction ran — hence
+    ///   [`Self::take_post_error_warnings`], separate from the ordinary
+    ///   pre-command channel;
+    /// * both of its line numbers are the end of the input, because the reader had
+    ///   run there looking for the close.
+    ///
+    /// The gate is the one `compound_list`'s guard (parse.y:1147) implies: only a
+    /// *top-level* list reduces this way. [`Parser::depth`] cannot answer it —
+    /// the truncation in [`tokenize_deferred`] removes the `<<`'s whole line, so
+    /// the parser is standing at depth 0 whatever enclosed it — so ask the source
+    /// instead: the `<<` stood at the top level exactly when the text in front of
+    /// it is a complete program of its own. `{ cat ` is not one and `echo one`
+    /// followed by `cat ` is, which is the distinction wanted. A prefix that is a
+    /// genuine syntax error is not one either, and rightly: bash would have
+    /// abandoned the parse there, long before any here-document was pending.
+    fn ungathered_warnings(&mut self, aliases: Option<&AssocArray>) {
+        for u in std::mem::take(&mut self.orig_ungathered) {
+            let off = (u.op_offset as usize).min(self.src.len());
+            let head: Str =
+                bytes::from_chars(self.src.get(..off).unwrap_or(&[]).iter().copied());
+            let complete = match aliases {
+                Some(a) => parse_with_aliases(&head, a, self.opts).is_ok(),
+                None => parse_opts(&head, self.opts).is_ok(),
+            };
+            if complete {
+                self.post_error_warnings
+                    .push(ReaderWarning::HeredocEof(HeredocEof {
+                        delim: u.delim,
+                        body_line: u.line,
+                        eof_line: u.line,
+                        // Never consulted: this channel is drained whole, having
+                        // already passed the only gate it has.
+                        tok_index: 0,
+                    }));
+            }
+        }
+    }
+
     /// The physical source line the token `p` is stopped at was written on,
     /// which is what bash echoes under a diagnostic whose line number a
     /// here-document gather has moved past. Keyed off the token's own character
@@ -1118,6 +1196,14 @@ impl IncrementalParser {
         // unterminated here-document inside a `$( … )`), the cut back to the last
         // complete line drops the token the record names.
         let frontier = if lex_err_now { usize::MAX } else { next_orig };
+        // The other half of the same reduction: the here-documents whose bodies the
+        // scan never reached. They are released on exactly the condition that
+        // releases the frontier — this call is the one reporting the parked lexer
+        // error, so the reader has consumed the whole input and the reduction that
+        // gathers them is about to happen.
+        if lex_err_now && !self.orig_ungathered.is_empty() {
+            self.ungathered_warnings(aliases);
+        }
         if !self.pending_warnings.is_empty() {
             let mut keep = Vec::new();
             for h in std::mem::take(&mut self.pending_warnings) {
@@ -1194,6 +1280,13 @@ impl IncrementalParser {
     /// special.
     pub fn take_reader_warnings(&mut self) -> Vec<ReaderWarning> {
         std::mem::take(&mut self.ready_warnings)
+    }
+
+    /// The warnings belonging *below* the error the unit [`Self::next_unit`] last
+    /// returned, drained. See [`Self::ungathered_warnings`] for why these are on
+    /// a channel of their own; warn about each one after printing the error.
+    pub fn take_post_error_warnings(&mut self) -> Vec<ReaderWarning> {
+        std::mem::take(&mut self.post_error_warnings)
     }
 
     /// The top-level lines of the unit [`Self::next_unit`] last returned, for a

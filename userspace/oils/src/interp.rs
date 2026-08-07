@@ -124,6 +124,7 @@ use crate::ast::{
 };
 use crate::histexpand::{Expansion, HistCtx};
 use crate::lexer;
+use crate::lexer::ReaderWarning;
 use crate::parser::{
     IncrementalParser, UnitLine, UnitLineKind, parse_opts, parse_with_aliases,
 };
@@ -7130,27 +7131,7 @@ impl Shell {
             // `<<` is handed out, which is what keeps it behind the output of
             // earlier lines.
             for w in ip.take_reader_warnings() {
-                let msg = match w {
-                    // The delimiter is a shell word, so it goes back out as the
-                    // bytes the user wrote — `<<a\xffb` names the delimiter it
-                    // was actually looking for.
-                    crate::lexer::ReaderWarning::HeredocEof(hd) => bfmt![
-                        self.err_prefix_at(hd.eof_line),
-                        b"warning: here-document at line ",
-                        hd.body_line.to_string(),
-                        b" delimited by end-of-file (wanted `",
-                        &hd.delim,
-                        b"')"
-                    ],
-                    crate::lexer::ReaderWarning::SubstHeredoc(s) => bfmt![
-                        self.err_prefix_at(s.line),
-                        b"warning: command substitution: ",
-                        s.count.to_string(),
-                        b" unterminated here-document",
-                        if s.count == 1 { b"".as_slice() } else { b"s" }
-                    ],
-                };
-                self.berrln(&msg);
+                self.berrln(&self.reader_warning_msg(&w));
             }
             // bash records a line when it *reads* it, before it runs — which is
             // why `history` lists the `history` call that printed the list, and
@@ -7173,6 +7154,13 @@ impl Shell {
                 }
                 Err(e) => {
                     self.berrln(&self.format_parse_error(&e, src, map));
+                    // Below the error, not above it: the reduction that gathered
+                    // these ran only once the offending token had been read and
+                    // reported. See
+                    // [`crate::parser::IncrementalParser::ungathered_warnings`].
+                    for w in ip.take_post_error_warnings() {
+                        self.berrln(&self.reader_warning_msg(&w));
+                    }
                     return self.parse_error_flow(&e);
                 }
             };
@@ -45101,6 +45089,33 @@ impl Shell {
         }
     }
 
+    /// Render one of the reader's here-document warnings. Both channels
+    /// ([`crate::parser::IncrementalParser::take_reader_warnings`] and
+    /// [`crate::parser::IncrementalParser::take_post_error_warnings`]) print the
+    /// same text; only *where* they print it differs.
+    fn reader_warning_msg(&self, w: &ReaderWarning) -> Str {
+        match w {
+            // The delimiter is a shell word, so it goes back out as the bytes the
+            // user wrote — `<<a\xffb` names the delimiter it was actually looking
+            // for.
+            ReaderWarning::HeredocEof(hd) => bfmt![
+                self.err_prefix_at(hd.eof_line),
+                b"warning: here-document at line ",
+                hd.body_line.to_string(),
+                b" delimited by end-of-file (wanted `",
+                &hd.delim,
+                b"')"
+            ],
+            ReaderWarning::SubstHeredoc(s) => bfmt![
+                self.err_prefix_at(s.line),
+                b"warning: command substitution: ",
+                s.count.to_string(),
+                b" unterminated here-document",
+                if s.count == 1 { b"".as_slice() } else { b"s" }
+            ],
+        }
+    }
+
     /// The diagnostic prefix bash prepends to a **syntax error**: like
     /// [`Shell::err_prefix`] but (a) it uses the offending token's line (passed
     /// in from the parser) rather than the current execution line, and (b) it
@@ -55920,6 +55935,92 @@ mod tests {
         ] {
             assert_eq!(fail(src), (Some(1), None), "{src:?}");
         }
+    }
+
+    /// The other half of the same reduction: a here-document whose body the lex
+    /// never even reached, because an unclosed construct after the `<<` swallowed
+    /// the input. bash still warns about it — from the `simple_list` action, which
+    /// yacc's default reductions run before the error token is looked at — and
+    /// because the lexer had already reported the unclosed construct by then, the
+    /// warning lands *below* the diagnostic rather than above it.
+    #[test]
+    fn a_here_document_the_lex_never_reached_is_warned_about_after_the_error() {
+        let opts = crate::lexer::ParseOpts::default();
+        // Drive the parser to the end and report the here-document warnings it
+        // parked behind the error, as `(delimiter, line)` pairs.
+        let after = |src: &str| {
+            let mut ip = crate::parser::IncrementalParser::new(src.as_bytes(), 0, opts);
+            while let Some(unit) = ip.next_unit(None, opts) {
+                if unit.is_err() {
+                    break;
+                }
+                // A unit that parsed carries no post-error warnings: this channel
+                // is only ever filled by the call that reports the error.
+                assert!(
+                    ip.take_post_error_warnings().is_empty(),
+                    "warnings released without an error in {src:?}"
+                );
+            }
+            ip.take_post_error_warnings()
+                .into_iter()
+                .map(|w| match w {
+                    crate::lexer::ReaderWarning::HeredocEof(h) => {
+                        // bash's `line_number` has already run to the end of the
+                        // input by the time the reduction gathers, so the number
+                        // inside the message and the one in its prefix agree.
+                        assert_eq!(h.body_line, h.eof_line, "{src:?}");
+                        (String::from_utf8_lossy(&h.delim).into_owned(), h.eof_line)
+                    }
+                    other => panic!("unexpected warning {other:?} in {src:?}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        let one = |delim: &str, line: u32| vec![(delim.to_string(), line)];
+        // The line is the end of the input, not the `<<`'s own line, and it grows
+        // with the input rather than with the body.
+        assert_eq!(after("cat <<E \"\n"), one("E", 2));
+        assert_eq!(after("cat <<E \"\nbody\nE\n"), one("E", 4));
+        assert_eq!(after("echo one\ncat <<E \"\n"), one("E", 3));
+        // Every construct read by bash's `parse_matched_pair` keeps the pending
+        // record…
+        for open in ["\"", "'", "`", "${", "$((", "$(( 1 +", "$(( echo a )"] {
+            let src = format!("cat <<E {open}\n");
+            assert_eq!(after(&src), one("E", 2), "{src:?}");
+        }
+        // …and `$( … )` alone does not: `parse_comsub` zeroes `need_here_doc`
+        // (parse.y:4133) and the end-of-input path never restores it.
+        for open in ["$(", "<(", ">(", "\"$(", "$(\""] {
+            let src = format!("cat <<E {open}\n");
+            assert_eq!(after(&src), Vec::new(), "{src:?}");
+        }
+        // Two pending are gathered in declaration order, both at the same line.
+        assert_eq!(
+            after("cat <<A <<B \"\n"),
+            vec![("A".to_string(), 2), ("B".to_string(), 2)]
+        );
+        // A here-document already gathered at a newline is not pending any more.
+        assert_eq!(after("cat <<A\na\nA\ncat <<B \"\n"), one("B", 5));
+        // Neither `<<-` nor a quoted delimiter changes anything; the delimiter is
+        // reported in its unquoted form.
+        assert_eq!(after("cat <<-E \"\n"), one("E", 2));
+        assert_eq!(after("cat <<\"E\" \"\n"), one("E", 2));
+        // Inside a compound the guard on `compound_list`'s action (parse.y:1147)
+        // holds, so nothing reduces and nothing warns.
+        for src in [
+            "{ cat <<E \"\n",
+            "if true; then\ncat <<E \"\n",
+            "while cat <<E \"\n",
+            "for x in a; do cat <<E \"\n",
+            "case a in a) cat <<E \"\n",
+            "f() { cat <<E \"\n",
+            "( cat <<E \"\n",
+        ] {
+            assert_eq!(after(src), Vec::new(), "{src:?}");
+        }
+        // Nor when an earlier line was a syntax error: bash abandoned the parse
+        // there and never read this far. The prefix in front of the `<<` is not a
+        // complete program either, which is the same fact seen from this side.
+        assert_eq!(after(") cat <<E \"\n"), Vec::new());
     }
 
     #[test]

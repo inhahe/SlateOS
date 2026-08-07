@@ -108,7 +108,7 @@ Two smaller rules fell out of reading `parse_matched_pair` (parse.y:3775–3781,
 **Left behind:** TD-OILS-A-PENDING-HERE-DOCUMENT-IS-NOT-GATHERED-WHEN-A-TOP-LEVEL-LIST-IS-REDUCED,
 found while writing the corpus case.
 
-### TD-OILS-A-PENDING-HERE-DOCUMENT-IS-NOT-GATHERED-WHEN-A-TOP-LEVEL-LIST-IS-REDUCED. Two symptoms, one missing rule — 2026-08-06 — ◐ SYMPTOM 1 FIXED 2026-08-06, SYMPTOM 2 OPEN
+### TD-OILS-A-PENDING-HERE-DOCUMENT-IS-NOT-GATHERED-WHEN-A-TOP-LEVEL-LIST-IS-REDUCED. Two symptoms, one missing rule — 2026-08-06 — ✅ FIXED 2026-08-06
 
 **Where:** `userspace/oils/src/parser.rs` — `Parser::reader_line` /
 `Parser::reader_echo`, and the lexer/parser split that puts here-document
@@ -239,15 +239,52 @@ lines of input.
 (21 probes; fails on its first without the fix) and the unit test
 `a_pending_here_document_is_gathered_before_a_top_level_list_is_blamed`.
 
-**Still open:** symptom 2, the lost `here-document … delimited by end-of-file`
-warning. It needs the *other* half of the reduction — emitting the pending
-warnings — which the lexer currently drops when an unterminated construct after
-the `<<` swallows the input, and which nothing yet carries to the parser.
+**Symptom 2, as fixed (2026-08-06).** The other half of the same reduction, and
+the same three files:
+
+* `lexer.rs` — a new `UngatheredHeredoc { delim, line, op_offset }`, collected in
+  `tokenize_deferred`'s error path from whatever is still in `pending_heredocs`,
+  *before* the truncation that removes the `<<`'s whole line (which is the only
+  other trace of it). `line` is `Lexer::eof_line()` for both of the warning's
+  numbers, because the reader had already run to the end of the input looking for
+  the unclosed construct's close. Carried out on `Tokenized::ungathered`.
+* `lexer.rs` — `read_subst_body` now sets a `heredocs_forgotten` flag when it
+  fails, and the flag suppresses the whole record. That is bash's `parse_comsub`
+  zeroing `need_here_doc` (parse.y:4133) and never restoring it on the
+  `EOF_Reached` path, which is why `$( … )` — and process substitution, which
+  bash reads with the same function — is the one construct that loses them. The
+  `$((`-backtracks-to-a-substitution site deliberately calls
+  `read_balanced_inner` directly instead: `parse_comsub` returns into
+  `parse_matched_pair` with `P_ARITH` (parse.y:4103) *above* the zeroing, so
+  `cat <<E $((`, `cat <<E $(( 1 +` and `cat <<E $(( echo a )` all warn.
+* `parser.rs` — `IncrementalParser::ungathered_warnings`, called on exactly the
+  condition (`lex_err_now`) that already lifts the ordinary warning frontier, and
+  queueing onto a new `post_error_warnings` channel because these print *below*
+  the diagnostic: the lexer had already reported the unclosed construct by the
+  time yacc's default reductions reached `simple_list`. The top-level gate cannot
+  use `Parser::depth` — the truncation removes the `<<`'s line, so the parser
+  stands at depth 0 whatever enclosed it — so it re-parses the source in front of
+  the `<<` instead: the operator was at the top level exactly when that prefix is
+  a complete program of its own. `{ cat ` is not one, `echo one` + `cat ` is, and
+  `) cat ` is not either — which is right, since bash abandons the parse at the
+  `)` and never reads far enough to have a here-document pending.
+* `interp.rs` — the two channels share one renderer (`reader_warning_msg`); the
+  post-error one is drained in the `Err(e)` arm after `format_parse_error`.
+
+**Pinned by** the two corpus cases
+`a-pending-here-document-is-gathered-before-the-token-that-ends-the-list-is-blamed.sh`
+(21 probes) and
+`a-here-document-the-reader-never-reached-is-warned-about-below-the-error.sh`
+(32 probes), and the unit tests
+`a_pending_here_document_is_gathered_before_a_top_level_list_is_blamed` and
+`a_here_document_the_lex_never_reached_is_warned_about_after_the_error`. Both
+corpus cases fail on their first probe without the fix.
 
 **Left behind:**
-TD-OILS-AN-ALIAS-SPLICED-HERE-DOCUMENT-GETS-NO-BODY and
-TD-OILS-A-STRAY-PAREN-IN-A-CASE-ARM-IS-NOT-DIAGNOSED-WHERE-IT-STANDS, both found
-while measuring shapes for the corpus case.
+TD-OILS-AN-ALIAS-SPLICED-HERE-DOCUMENT-GETS-NO-BODY,
+TD-OILS-A-STRAY-PAREN-IN-A-CASE-ARM-IS-NOT-DIAGNOSED-WHERE-IT-STANDS and
+TD-OILS-A-LINE-THAT-FAILS-TO-LEX-IS-NOT-REPORTED-AS-A-LINE, all found while
+measuring shapes for the corpus cases.
 
 ### TD-OILS-AN-ALIAS-SPLICED-HERE-DOCUMENT-GETS-NO-BODY. A `<<` that arrives through an alias loses its redirection entirely — 2026-08-06 — OPEN
 
@@ -297,6 +334,51 @@ already-landed
 TD-OILS-A-PENDING-HERE-DOCUMENT-IS-NOT-GATHERED-WHEN-A-TOP-LEVEL-LIST-IS-REDUCED
 work has to tolerate an alias-spliced `<<` with no recorded line count
 (`IncrementalParser::heredoc_gather` skips one whose `work_origin` is `None`).
+
+### TD-OILS-A-LINE-THAT-FAILS-TO-LEX-IS-NOT-REPORTED-AS-A-LINE. An unclosed quote hides the syntax error before it and the `set -v` echo of it — 2026-08-06 — OPEN
+
+**Where:** `userspace/oils/src/lexer.rs` — `tokenize_deferred`, which lexes the
+whole input up front and, on an unterminated construct, cuts the tokens back to
+the last *complete* logical line; and `userspace/oils/src/parser.rs` —
+`IncrementalParser`, which therefore never sees a token from the failing line.
+
+**What.** bash's reader hands a physical line over as soon as it has read it, and
+the parser then pulls tokens off it one at a time; the unterminated construct is
+only discovered when the token containing it is *asked for*. osh lexes first and
+parses second, so anything the failing line would have caused before the
+construct was reached is lost. Two measured shapes, neither involving
+here-documents:
+
+```
+                    bash                                    osh
+) echo x            near `)' + echo `) echo x'              same                  ✔
+) echo "            near `)' + echo `) echo "'              unexpected EOF … `"'  ✘
+set -v; echo hi     echoes `echo hi', runs it               same                  ✔
+set -v; echo "      echoes `echo "', then unexpected EOF    the error only        ✘
+```
+
+In the second row bash's yacc reads `)`, errors on it, and never asks for the
+token that would have opened the quote — so the quote is never lexed and never
+reported. In the fourth, `set -v` echoes in the *reader* (bash's `shell_getc`),
+before any token is taken from the line, so the echo happens whatever the line
+turns out to contain.
+
+Found while measuring shapes for
+`tests/corpus/a-here-document-the-reader-never-reached-is-warned-about-below-the-error.sh`
+(where the `) cat <<E "` probe is deliberately left out for it). Note the
+here-document warning itself is *not* affected: it is correctly suppressed there,
+because the prefix in front of the `<<` is not a complete program either.
+
+**Proper fix.** The `set -v` half is the smaller one and can be done alone:
+the echo is driven from a parse unit's line span, so a lexer error needs to carry
+the physical lines it consumed and have them echoed before the error is printed.
+The syntax-error half is the same architectural obstacle as
+TD-OILS-A-COMSUB-THAT-NEVER-CLOSES-HIDES-THE-ERROR-INSIDE-IT: the parked lexer
+error must not pre-empt a grammar error raised on a token that precedes the
+unclosed construct *on the same line*. That needs the failing line's tokens kept
+rather than cut — a lexer bail token standing where the construct opened, so the
+parser can run up to it and stop there — which is the shared fix those two
+entries also want.
 
 ### TD-OILS-A-STRAY-PAREN-IN-A-CASE-ARM-IS-NOT-DIAGNOSED-WHERE-IT-STANDS. `case a in a) echo x( y;; esac` is blamed on the `;;` — 2026-08-06 — OPEN
 

@@ -286,7 +286,7 @@ TD-OILS-A-STRAY-PAREN-IN-A-CASE-ARM-IS-NOT-DIAGNOSED-WHERE-IT-STANDS and
 TD-OILS-A-LINE-THAT-FAILS-TO-LEX-IS-NOT-REPORTED-AS-A-LINE, all found while
 measuring shapes for the corpus cases.
 
-### TD-OILS-AN-ALIAS-SPLICED-HERE-DOCUMENT-GETS-NO-BODY. A `<<` that arrives through an alias loses its redirection entirely — 2026-08-06 — OPEN
+### TD-OILS-AN-ALIAS-SPLICED-HERE-DOCUMENT-GETS-NO-BODY. A `<<` that arrives through an alias loses its redirection entirely — 2026-08-06 — ✅ FIXED 2026-08-06
 
 **Where:** `userspace/oils/src/lexer.rs` — `expand_aliases_tracked` /
 `expand_aliases_inner`, which lex each alias replacement as a *text of its own*
@@ -329,11 +329,116 @@ body to gather, so the pending here-document is discarded with the sub-lexer.
 **Proper fix.** The alias pass has to hand a `<<` it emits back to the outer
 text's pending list rather than resolving it in the replacement's own lexer —
 i.e. `PendingHeredoc` must survive the text boundary, carrying the outer reader
-position, so the outer newline collects it. That the fix is not local is why the
-already-landed
-TD-OILS-A-PENDING-HERE-DOCUMENT-IS-NOT-GATHERED-WHEN-A-TOP-LEVEL-LIST-IS-REDUCED
-work has to tolerate an alias-spliced `<<` with no recorded line count
-(`IncrementalParser::heredoc_gather` skips one whose `work_origin` is `None`).
+position, so the outer newline collects it.
+
+**As fixed.** The pending record does not survive the boundary; it is *replaced*
+by a gather run out of the middle of the real input, which is a closer model of
+what bash does. Reading bash settled the shape:
+
+* `push_string` (parse.y:2694) makes the replacement the current
+  `shell_input_line`, so the `<<` is read by the same reader that will reach the
+  calling line's newline and joins the same `redir_stack`.
+* The **body** is not read by that reader at all. `gather_here_documents` calls
+  `make_here_document` (make_cmd.c:590) → `read_secondary_line` → `read_a_line`
+  (parse.y:2080), and `read_a_line` takes characters from `yy_getc()` —
+  `bash_input.getter`, the underlying *file*. Nothing on that path consults
+  `shell_input_line`. So the body is the next physical line of the file, a body
+  written inside the alias value is **not a body** (the reader reaches that text
+  later, through the ordinary door, and runs it as commands), and an alias `<<`
+  and a `<<` of the calling line share one moving cursor in declaration order.
+* `make_here_document` bumps `line_number` once per line handed over, the
+  delimiter's included, and the gather fires the moment the reader sees a
+  newline. When the value itself contains one, that is the newline — so the rest
+  of the value *and* the rest of the calling line are numbered from where the
+  gather stopped. With no newline in the value the gather waits for the calling
+  line's own and the whole line keeps its number.
+
+The code:
+
+* `Lexer::defer_heredocs` + `tokenize_alias_body` — the alias pass lexes with no
+  newline gather at all, so a `<<` in a value emits an empty placeholder.
+  `expand_aliases_inner` records each such placeholder in `AliasExpansion::
+  heredocs`, which becomes `IncrementalParser::work_alias_heredocs`.
+* `gather_heredocs_at` + `Lexer::at_offset` — collect bodies for a list of
+  `HeredocWant`s starting at an arbitrary character offset, returning the tokens,
+  the lines each took, the end offset, the warnings and the continuations.
+* `IncrementalParser::gather_alias_heredocs` — re-collects **the whole physical
+  line's** here-documents in declaration order (an alias `<<` before a line's own
+  shifts every later body, so the ones the first lex did collect were collected
+  from the wrong place), stamps `work_heredoc_lines` / `orig_heredoc_lines`,
+  re-keys the warnings onto the line's newline, fixes `orig_conts` and
+  `orig_ends`, applies the post-gather line number, and then
+  `relex_tail_from(keep, off)` re-lexes the input past the bodies — because those
+  lines are not commands after all, while the already-expanded line that
+  introduced them has to stay exactly as it is.
+* `IncrementalParser::rebuild` drives this as a bounded multi-pass loop (each
+  pass settles one physical line; the settled prefix of `orig` never changes, so
+  `AliasFills` replays by index). Because the gathering runs *ahead* of the parse,
+  over lines no command has run before yet, a later `alias` can invalidate it —
+  so every `rebuild` first undoes the previous one's gathers by re-lexing the
+  unparsed tail (`alias_gathered`), and sees the input as bash's reader would with
+  the table it has now.
+* `heredoc_gather` no longer skips an alias-spliced `<<`: it reads the count from
+  `work_heredoc_lines` when there is no `orig` slot.
+
+**Pinned by** the corpus case
+`an-alias-spliced-here-document-takes-its-body-from-the-real-input.sh` (which
+fails on its very first probe without the fix, and diverges in almost every line
+of stdout and stderr thereafter) and the unit test
+`an_alias_spliced_here_document_takes_its_body_from_the_real_input`.
+
+**Left behind:**
+TD-OILS-AN-ALIAS-SPLICED-HERE-DOCUMENT-TAKES-NO-DELIMITER-FROM-THE-CALLING-LINE,
+the other half of the second shape above.
+
+### TD-OILS-AN-ALIAS-SPLICED-HERE-DOCUMENT-TAKES-NO-DELIMITER-FROM-THE-CALLING-LINE. `alias B='cat <<'` plus `B E` runs `cat E` — 2026-08-06 — OPEN
+
+**Where:** `userspace/oils/src/lexer.rs` — `Lexer::lex_heredoc_op` /
+`read_heredoc_delim`, which read the delimiter word out of the text the `<<` was
+lexed in, and `expand_aliases_inner`, which lexes an alias replacement as a text
+of its own.
+
+**What.** A here-document operator whose *delimiter* is not in the alias value:
+
+```
+shopt -s expand_aliases
+alias B='cat <<'
+B E2
+body
+E2
+
+bash: body
+osh : cat: E2: No such file or directory        — the operator dropped,
+      line 4: body: command not found             the delimiter an argument
+      line 5: E2: command not found
+```
+
+**Why.** bash reads the delimiter with `read_token_word`, from the same reader
+that read the `<<`; when the pushed string runs dry `pop_string` restores the
+calling line and the scan simply continues into it, so `<<` + `E2` is one
+operator-and-delimiter pair spanning the text boundary. osh sub-lexes the value
+on its own, and `read_heredoc_delim` finds nothing after the `<<`.
+
+The empty delimiter this leaves is not merely useless — it is dangerous, because
+an empty string matches no body line, so gathering for it would swallow the rest
+of the input. `Lexer::dangling_delim` therefore marks the placeholder (the scan
+stopped because the *text* ran out, not because a separator ended the word) and
+`expand_aliases_inner` keeps it out of `AliasExpansion::heredocs`, so
+TD-OILS-AN-ALIAS-SPLICED-HERE-DOCUMENT-GETS-NO-BODY's gather never sees it and
+the old, bounded, wrong behaviour is what remains.
+
+**Proper fix.** The delimiter has to be read from the *source text* that follows
+the alias word, not from a token. `IncrementalParser` has both: the alias word's
+`orig` index, and `self.src`. When the expansion reports a dangling `<<`, the
+parser should run `read_heredoc_delim` over `src` from the end of the alias word,
+patch the placeholder with the delimiter and its quoted-ness, and drop the outer
+tokens that delimiter's characters were lexed into (which is why it cannot be
+done from a `Tok::Word`: `B E$x` wants the literal delimiter `E$x`, and the outer
+word token has already split that into a `Seg::Lit` and a `Seg::Param`). The
+placeholder then joins `work_alias_heredocs` like any other and the existing
+gather does the rest. Note the dropped tokens shift `work` indices, so the
+`AliasFills` replay in `IncrementalParser::rebuild` has to be keyed after the
+drop, not before.
 
 ### TD-OILS-A-LINE-THAT-FAILS-TO-LEX-IS-NOT-REPORTED-AS-A-LINE. An unclosed quote hides the syntax error before it and the `set -v` echo of it — 2026-08-06 — OPEN
 

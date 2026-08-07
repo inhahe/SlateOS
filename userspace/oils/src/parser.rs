@@ -41,9 +41,9 @@ use crate::assoc::AssocArray;
 use crate::bfmt;
 use crate::bytes::{self, BStr, Ch, Str};
 use crate::lexer::{
-    AliasExpansion, HeredocEof, ParseOpts, Op, ReaderWarning, Seg, Spanned, Tok, TokSpan,
-    Tokenized, UngatheredHeredoc,
-    expand_aliases_tracked, tokenize,
+    AliasExpansion, HeredocEof, HeredocWant, ParseOpts, Op, ReaderWarning, Seg, Spanned, Tok,
+    TokSpan, Tokenized, UngatheredHeredoc,
+    expand_aliases_tracked, gather_heredocs_at, tokenize,
     tokenize_paren_body, tokenize_deferred, tokenize_spanned, word_is_assignment,
 };
 
@@ -468,6 +468,22 @@ pub struct RawLine {
     pub line: u32,
 }
 
+/// What a finished [`IncrementalParser::gather_alias_heredocs`] pass has to put
+/// back once the next pass has rebuilt `work` from `orig` again.
+///
+/// The gather changes tokens the *expansion* does not know how to produce: the
+/// here-document bodies it read out of the real input, and the lines a value's
+/// tail is stamped with after the reader moved. Re-expanding the settled prefix
+/// yields the same tokens at the same indices, so replaying these by index is
+/// sound. See [`IncrementalParser::rebuild`].
+#[derive(Default)]
+struct AliasFills {
+    /// `work` index → the collected here-document token and the lines it took.
+    bodies: Vec<(usize, Tok, u32)>,
+    /// `work` index → the source line to stamp on it.
+    lines: Vec<(usize, u32)>,
+}
+
 pub struct IncrementalParser {
     /// The source, kept for re-lexing the tail when [`ParseOpts`] change. Held as
     /// characters because the offsets recorded by the lexer are char indices —
@@ -528,6 +544,18 @@ pub struct IncrementalParser {
     /// Parallel to `work`: the `orig` index each token came from, or `None` for
     /// a token an alias spliced in (which has no original counterpart).
     work_origin: Vec<Option<usize>>,
+    /// Parallel to `work`: for an alias-spliced `HereDoc`, the input lines its
+    /// body took; 0 for every other token. The `orig`-side counterpart is
+    /// `orig_heredoc_lines`, which such a token has no slot in. See
+    /// [`Self::heredoc_gather`].
+    work_heredoc_lines: Vec<u32>,
+    /// Indices into `work` of the `HereDoc` placeholders the last expansion
+    /// spliced in from alias replacements — see [`AliasExpansion::heredocs`].
+    work_alias_heredocs: Vec<usize>,
+    /// Whether [`Self::gather_alias_heredocs`] has taken lines out of the
+    /// still-unparsed tail since the last rebuild, so the next one has to undo
+    /// it first. See [`Self::rebuild`].
+    alias_gathered: bool,
     /// `work`'s view of the source, rebuilt from `work_origin` beside it: the
     /// snapshot of `src` the tokens were lexed from, with each one's end offset
     /// into it. See [`Spans`] for what a diagnostic needs it for.
@@ -624,6 +652,9 @@ impl IncrementalParser {
             work: Vec::new(),
             work_lines: Vec::new(),
             work_origin: Vec::new(),
+            work_heredoc_lines: Vec::new(),
+            work_alias_heredocs: Vec::new(),
+            alias_gathered: false,
             work_spans: Spans::default(),
             wpos: 0,
             pos: 0,
@@ -725,8 +756,62 @@ impl IncrementalParser {
     }
 
     /// Re-expand the unconsumed remainder of the original token stream under
-    /// `aliases`.
+    /// `aliases`, and give any here-document an alias replacement declared the
+    /// body it is owed.
+    ///
+    /// The gathering has to happen here rather than in the lexer because the
+    /// `<<` does not exist until the expansion runs, and it changes what the
+    /// *rest* of the input is — the body's lines are no longer commands — so the
+    /// tail is re-lexed and the expansion redone over it. Each pass settles at
+    /// least one physical line, so the loop is bounded by the line count; the
+    /// already-settled prefix of `orig` never changes, which is what makes the
+    /// bodies collected by an earlier pass still land on the right tokens after a
+    /// later one. See [`Self::gather_alias_heredocs`].
+    ///
+    /// The gathering runs ahead of the parse, over lines no command has run
+    /// before yet — so a later `alias` can invalidate it (`alias A='cat <<E'`,
+    /// used once, then redefined to `cat <<F` and used again: the second use was
+    /// gathered for `E`, and swallowed the input hunting for a delimiter that
+    /// never comes). Every call therefore starts by putting the unparsed tail
+    /// back the way the lexer first read it, so this pass sees the input as
+    /// bash's reader would with the table it has *now*.
     fn rebuild(&mut self, aliases: Option<&AssocArray>) {
+        if std::mem::take(&mut self.alias_gathered) {
+            let off = self.orig_offsets.get(self.pos).map_or(self.src.len(), |&o| o as usize);
+            self.relex_tail_from(self.pos, off);
+        }
+        let mut fills = AliasFills::default();
+        // Work index past the last physical line already settled, so a `<<` that
+        // has had its body is not gathered for a second time.
+        let mut from = 0usize;
+        loop {
+            self.rebuild_once(aliases);
+            for (i, tok, lines) in &fills.bodies {
+                if let Some(slot) = self.work.get_mut(*i) {
+                    *slot = tok.clone();
+                }
+                if let Some(slot) = self.work_heredoc_lines.get_mut(*i) {
+                    *slot = *lines;
+                }
+            }
+            for &(i, line) in &fills.lines {
+                if let Some(slot) = self.work_lines.get_mut(i) {
+                    *slot = line;
+                }
+            }
+            let Some(&at) = self.work_alias_heredocs.iter().find(|&&i| i >= from) else {
+                return;
+            };
+            let Some(next) = self.gather_alias_heredocs(at, &mut fills) else {
+                return;
+            };
+            debug_assert!(next > from, "a gather pass must settle a line");
+            from = next;
+        }
+    }
+
+    /// One alias-expansion pass over `orig[pos..]`.
+    fn rebuild_once(&mut self, aliases: Option<&AssocArray>) {
         // Alias-spliced tokens we are standing in the middle of have no
         // counterpart in `orig`, so carry them over verbatim: re-expanding from
         // `pos` would replay the part of the splice already executed. (Reachable
@@ -754,10 +839,12 @@ impl IncrementalParser {
         // expansion can rewrite `src` later, and these offsets index the text as
         // it was lexed.
         let rest_ends = self.orig_ends.get(self.pos..).unwrap_or(&[]);
+        let mut alias_heredocs = Vec::new();
         let mut spans = match aliases {
             Some(map) if !map.is_empty() => {
                 let x = expand_aliases_tracked(rest, rest_lines, rest_ends, map, self.opts);
                 let spans = Spans::expanded(self.src.clone(), &x);
+                alias_heredocs.extend(x.heredocs.iter().map(|&i| i.saturating_add(carry)));
                 work.extend(x.toks);
                 work_lines.extend(x.lines);
                 work_origin
@@ -775,6 +862,8 @@ impl IncrementalParser {
                 }
             }
         };
+        self.work_heredoc_lines = vec![0; work.len()];
+        self.work_alias_heredocs = alias_heredocs;
         self.work = work;
         self.work_lines = work_lines;
         self.work_origin = work_origin;
@@ -791,6 +880,226 @@ impl IncrementalParser {
         self.work_spans = spans;
         self.wpos = 0;
         self.last_aliases = Some(aliases.cloned());
+    }
+
+    /// The 1-based physical line `off` stands at the end of: the line of the
+    /// character before it, so an offset just past a `\n` names the line that
+    /// newline ended rather than the one after it. That is where a reader that
+    /// has just consumed up to `off` sits.
+    fn line_at(&self, off: usize) -> u32 {
+        let upto = self.src.get(..off.min(self.src.len())).unwrap_or(&[]);
+        let nls = upto.iter().filter(|&&c| c == '\n').count();
+        let n = nls.saturating_add(usize::from(!matches!(upto.last(), Some(&c) if c == '\n')));
+        u32::try_from(n.max(1)).unwrap_or(u32::MAX)
+    }
+
+    /// Whether `work[i]` is a newline of the *input*, as opposed to one an alias
+    /// replacement contained. Only the former ends a physical line, and it is
+    /// physical lines a here-document body is read in.
+    fn is_input_newline(&self, i: usize) -> bool {
+        matches!(self.work.get(i), Some(Tok::Newline))
+            && self.work_origin.get(i).copied().flatten().is_some()
+    }
+
+    /// Give every here-document on the physical input line containing `work[at]`
+    /// its body, taken from the lines after that one, and take those lines away
+    /// from the input still to be parsed.
+    ///
+    /// `at` names a `<<` an alias replacement spliced in, which is the only kind
+    /// the lexer could not gather for itself. The *whole line* is re-collected
+    /// rather than that one operator, because bash gathers from a single moving
+    /// cursor in the real input: an alias `<<` written before a `<<` of the
+    /// line's own takes the earlier body, and the line's own then starts where
+    /// that one stopped — so the ones the first lex did collect were collected
+    /// from the wrong place and have to be done again in declaration order.
+    ///
+    /// Returns the `work` index just past the line, or `None` if the collection
+    /// failed (an unclosed construct inside an expanding body), which parks the
+    /// error and leaves the placeholders empty.
+    fn gather_alias_heredocs(&mut self, at: usize, fills: &mut AliasFills) -> Option<usize> {
+        let nl = (at..self.work.len()).find(|&i| self.is_input_newline(i));
+        let start = (0..at)
+            .rev()
+            .find(|&i| self.is_input_newline(i))
+            .map_or(0, |i| i.saturating_add(1));
+        let last = nl.unwrap_or(self.work.len());
+        // In declaration order, which is `redir_stack` order.
+        let mut idxs = Vec::new();
+        let mut wants = Vec::new();
+        for i in start..=last.min(self.work.len().saturating_sub(1)) {
+            let Some(Tok::HereDoc(_, delim, quoted)) = self.work.get(i) else { continue };
+            // `<<-` is carried by the operator token, not by the placeholder.
+            let strip = matches!(
+                i.checked_sub(1).and_then(|j| self.work.get(j)),
+                Some(Tok::Op(Op::DLessDash))
+            );
+            wants.push(HeredocWant { delim: delim.clone(), strip, expand: !quoted });
+            idxs.push(i);
+        }
+        // Just past the newline that ends the line. bash's reader has the whole
+        // line in `shell_input_line` by now, so `read_a_line` — reading the real
+        // input directly — starts at the line after it.
+        let body_start = match nl.and_then(|i| self.work_origin.get(i).copied().flatten()) {
+            Some(oi) => {
+                let from = self.orig_offsets.get(oi).map_or(self.src.len(), |&o| o as usize);
+                self.src
+                    .get(from..)
+                    .unwrap_or(&[])
+                    .iter()
+                    .position(|&c| c == '\n')
+                    .map_or(self.src.len(), |i| from.saturating_add(i).saturating_add(1))
+            }
+            None => self.src.len(),
+        };
+        let g = match gather_heredocs_at(&self.src, body_start, &wants, self.opts) {
+            Ok(g) => g,
+            Err(e) => {
+                // Earlier in the input than anything already parked, so it wins.
+                self.pending_lex_err = Some(ParseError::from(e));
+                return None;
+            }
+        };
+        for (k, &i) in idxs.iter().enumerate() {
+            let Some(tok) = g.toks.get(k) else { continue };
+            let lines = g.lines.get(k).copied().unwrap_or(0);
+            if let Some(slot) = self.work.get_mut(i) {
+                *slot = tok.clone();
+            }
+            if let Some(slot) = self.work_heredoc_lines.get_mut(i) {
+                *slot = lines;
+            }
+            fills.bodies.push((i, tok.clone(), lines));
+            // A here-document of the line's own keeps its `orig` slot, and the
+            // count there is the one [`Self::heredoc_gather`] reads; the body it
+            // records was collected from the wrong offset, so replace it.
+            if let Some(oi) = self.work_origin.get(i).copied().flatten() {
+                if let Some(slot) = self.orig_heredoc_lines.get_mut(oi) {
+                    *slot = lines;
+                }
+                self.pending_warnings.retain(|w| w.tok_index() != oi);
+            }
+        }
+        // The warnings are the collection's, so they belong to the unit that ends
+        // at this line's newline — which is the token whose release gate they must
+        // pass. See [`Self::next_unit`].
+        let owner = nl
+            .and_then(|i| self.work_origin.get(i).copied().flatten())
+            .unwrap_or(self.orig.len());
+        for mut w in map_reader_warnings(g.warnings, &self.line_map) {
+            w.set_tok_index(owner);
+            self.pending_warnings.push(w);
+        }
+        // Where the collection left bash's reader. `make_here_document` bumps
+        // `line_number` once per line it takes, so after the gather it names the
+        // delimiter's line (or the input's last, when the delimiter never came) —
+        // and it stays there until the next real line is fetched, which is what
+        // every token read after the gather is stamped with.
+        let post = self.line_map.map(self.line_at(g.end));
+        // The line's own newline is the token the reduction that follows it takes
+        // its number from, exactly as for a here-document the lexer gathered
+        // itself (`cat <<E; nosuch` blames `nosuch` on the delimiter's line).
+        if let Some(oi) = nl.and_then(|i| self.work_origin.get(i).copied().flatten())
+            && let Some(slot) = self.orig_lines.get_mut(oi)
+        {
+            *slot = post;
+        }
+        // The gather fires the moment the reader sees a newline. If the alias
+        // value itself contained one, that is the newline — so everything read
+        // after it is read with the reader already moved: the rest of the value,
+        // and then the rest of the calling line, all sit at `post` until the next
+        // real line is fetched. With no newline in the value the gather waits for
+        // the calling line's own, and the whole line keeps its number.
+        if let Some(vnl) = (at..last.min(self.work.len()))
+            .find(|&i| matches!(self.work.get(i), Some(Tok::Newline)) && !self.is_input_newline(i))
+        {
+            for i in vnl.saturating_add(1)..last.min(self.work.len()) {
+                if let Some(slot) = self.work_lines.get_mut(i) {
+                    *slot = post;
+                }
+                fills.lines.push((i, post));
+            }
+        }
+        // The body's text was lexed as commands the first time round, so whatever
+        // continuations that read found there describe nothing; the collection's
+        // are the true ones.
+        self.orig_conts
+            .retain(|&o| (o as usize) < body_start || (o as usize) >= g.end);
+        self.orig_conts.extend(g.conts.iter().copied());
+        self.orig_conts.sort_unstable();
+        self.orig_conts.dedup();
+        if let Some(oi) = nl.and_then(|i| self.work_origin.get(i).copied().flatten()) {
+            // The unit's raw text now runs to the end of the bodies, exactly as it
+            // does for a here-document the lexer gathered itself.
+            if let Some(slot) = self.orig_ends.get_mut(oi) {
+                *slot = u32::try_from(g.end).unwrap_or(u32::MAX);
+            }
+            self.relex_tail_from(oi.saturating_add(1), g.end);
+            self.alias_gathered = true;
+        }
+        Some(last.saturating_add(1))
+    }
+
+    /// Re-lex the source from `off`, keeping the first `keep` tokens of `orig`.
+    ///
+    /// [`Self::relex_from`]'s sibling for the caller that has to drop a *middle*
+    /// of the input rather than a tail: the lines an alias-declared here-document
+    /// body took are not commands after all, so the tokens the first lex made of
+    /// them must go — while the line that introduced them, already expanded and
+    /// about to be parsed, has to stay exactly as it is.
+    fn relex_tail_from(&mut self, keep: usize, off: usize) {
+        let off = off.min(self.src.len());
+        let newlines = u32::try_from(
+            self.src.get(..off).unwrap_or(&[]).iter().filter(|&&c| c == '\n').count(),
+        )
+        .unwrap_or(u32::MAX);
+        let map = self.line_map.shifted(newlines);
+        let tail: Str = bytes::from_chars(self.src.get(off..).unwrap_or(&[]).iter().copied());
+        let Tokenized {
+            toks: mut orig,
+            lines: mut orig_lines,
+            mut offsets,
+            mut ends,
+            conts,
+            heredoc_lines,
+            warnings,
+            mut ungathered,
+            err,
+        } = tokenize_deferred(&tail, self.opts);
+        map_lines(&mut orig, &mut orig_lines, &map);
+        let delta = u32::try_from(off).unwrap_or(u32::MAX);
+        for o in offsets.iter_mut().chain(ends.iter_mut()) {
+            *o = o.saturating_add(delta);
+        }
+        for u in &mut ungathered {
+            u.op_offset = u.op_offset.saturating_add(delta);
+            u.line = map.map(u.line);
+        }
+        self.orig_ungathered = ungathered;
+        // The re-lex is the authoritative read of everything past `keep`, so its
+        // warnings replace the old ones there; the head's are untouched, having
+        // been raised about text this pass did not look at.
+        self.pending_warnings.retain(|w| w.tok_index() < keep);
+        for mut w in map_reader_warnings(warnings, &map) {
+            w.set_tok_index(w.tok_index().saturating_add(keep));
+            self.pending_warnings.push(w);
+        }
+        self.orig.truncate(keep);
+        self.orig.extend(orig);
+        self.orig_lines.truncate(keep);
+        self.orig_lines.extend(orig_lines);
+        self.orig_offsets.truncate(keep);
+        self.orig_offsets.extend(offsets);
+        self.orig_ends.truncate(keep);
+        self.orig_ends.extend(ends);
+        self.orig_heredoc_lines.truncate(keep);
+        self.orig_heredoc_lines.extend(heredoc_lines);
+        self.orig_conts.retain(|&o| (o as usize) < off);
+        self.orig_conts
+            .extend(conts.iter().map(|&o| o.saturating_add(delta)));
+        self.pending_lex_err = err
+            .map(|(e, line)| ParseError::from(e).or_line(line))
+            .map(|e| ParseError { line: e.line.map(|l| map.map(l)), ..e });
+        self.last_aliases = None;
     }
 
     /// Whether every token has been handed out, so a further [`Self::next_unit`]
@@ -948,11 +1257,16 @@ impl IncrementalParser {
             match p.toks.get(i) {
                 Some(Tok::Newline) => break,
                 Some(Tok::HereDoc(..)) => {
-                    // An alias-spliced `<<` has no count to look up, because
-                    // the expansion pass never collected a body for it — see
-                    // TD-OILS-AN-ALIAS-SPLICED-HERE-DOCUMENT-GETS-NO-BODY.
-                    let Some(&Some(oi)) = self.work_origin.get(i) else { continue };
-                    n = n.saturating_add(self.orig_heredoc_lines.get(oi).copied().unwrap_or(0));
+                    // An alias-spliced `<<` has no `orig` slot to look its count
+                    // up in — it was never written in the input. Its body was
+                    // collected out of the real input by
+                    // [`Self::gather_alias_heredocs`], which parked the count on
+                    // the work token itself.
+                    let lines = match self.work_origin.get(i) {
+                        Some(&Some(oi)) => self.orig_heredoc_lines.get(oi).copied().unwrap_or(0),
+                        _ => self.work_heredoc_lines.get(i).copied().unwrap_or(0),
+                    };
+                    n = n.saturating_add(lines);
                 }
                 _ => {}
             }

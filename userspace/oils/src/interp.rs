@@ -56023,6 +56023,79 @@ mod tests {
         assert_eq!(after(") cat <<E \"\n"), Vec::new());
     }
 
+    /// A `<<` an alias spliced in takes its body from the *file*, starting at the
+    /// line after the one the alias word stands on — never from the alias value,
+    /// however the value is written.
+    ///
+    /// bash expands an alias with `push_string`, so the `<<` is read by the
+    /// reader that will reach the calling line's newline and joins the same
+    /// `redir_stack`. The body is not: `make_here_document` →
+    /// `read_secondary_line` → `read_a_line` (parse.y:2080) pulls characters from
+    /// `yy_getc`, the underlying file, and never looks at `shell_input_line`. So
+    /// a body written inside the value is not a body at all — the reader reaches
+    /// that text later, through the ordinary door, and runs it as commands.
+    #[test]
+    fn an_alias_spliced_here_document_takes_its_body_from_the_real_input() {
+        let sh = "shopt -s expand_aliases\n";
+        // The body is the next line of the file.
+        assert_eq!(
+            run(&format!("{sh}alias A='mapfile -t v <<E'\nA\nfrom the file\nE\necho \"[${{v[0]}}]\"\n")).0,
+            "[from the file]\n"
+        );
+        // A body written in the value is read back as commands, and they are
+        // numbered from where the gather left the reader — the delimiter's line.
+        assert_eq!(
+            run(&format!("{sh}alias V='mapfile -t v <<E\necho \"tail at $LINENO\"'\nV\nreal\nE\necho \"[${{v[0]}}]\"\n")).0,
+            "tail at 6\n[real]\n"
+        );
+        // With no newline in the value the gather waits for the calling line's
+        // own, so the whole line keeps the alias word's number.
+        assert_eq!(
+            run(&format!("{sh}alias N='mapfile -t v <<E; echo \"tail at $LINENO\"'\nN\nreal\nE\n")).0,
+            "tail at 3\n"
+        );
+        // One moving cursor in declaration order, whichever text each `<<` was
+        // written in: the calling line's own comes second here and first below.
+        assert_eq!(
+            run(&format!("{sh}alias S='mapfile -t v <<E'\nmapfile -t w <<F; S\nfb\nF\neb\nE\necho \"[${{w[0]}}][${{v[0]}}]\"\n")).0,
+            "[fb][eb]\n"
+        );
+        assert_eq!(
+            run(&format!("{sh}alias S='mapfile -t v <<E'\nS; mapfile -t w <<F\neb\nE\nfb\nF\necho \"[${{v[0]}}][${{w[0]}}]\"\n")).0,
+            "[eb][fb]\n"
+        );
+        // `<<-` and a quoted delimiter travel through the splice unchanged.
+        assert_eq!(
+            run(&format!("{sh}alias D='mapfile -t v <<-E'\nD\n\tstripped\n\tE\necho \"[${{v[0]}}]\"\n")).0,
+            "[stripped]\n"
+        );
+        assert_eq!(
+            run(&format!("{sh}alias Q='mapfile -t v <<\"E\"'\nQ\n$HOME\nE\necho \"[${{v[0]}}]\"\n")).0,
+            "[$HOME]\n"
+        );
+        // Nothing about the enclosing construct matters: the gather happens at a
+        // newline, and a compound has newlines like anything else.
+        for wrap in ["if true; then\n@fi\n", "f() {\n@}\nf\n", "for x in 1; do\n@done\n"] {
+            let body = wrap.replace('@', "S\nnested\nE\n");
+            assert_eq!(
+                run(&format!("{sh}alias S='mapfile -t v <<E'\n{body}echo \"[${{v[0]}}]\"\n")).0,
+                "[nested]\n",
+                "{body:?}"
+            );
+        }
+        // Redefining the alias between two uses re-reads the tail under the new
+        // table: the second use wants `F`, not the `E` the first one wanted.
+        assert_eq!(
+            run(&format!("{sh}alias R='mapfile -t v <<E'\nR\nfirst\nE\nalias R='mapfile -t w <<F'\nR\nsecond\nF\necho \"[${{v[0]}}][${{w[0]}}]\"\n")).0,
+            "[first][second]\n"
+        );
+        // A body is not code, so it need not lex as code.
+        assert_eq!(
+            run(&format!("{sh}alias S='mapfile -t v <<E'\nS\nit's \"fine\nE\necho \"[${{v[0]}}]\"\n")).0,
+            "[it's \"fine]\n"
+        );
+    }
+
     #[test]
     fn unterminated_constructs_report_matching_eof_message() {
         // bash reports unclosed quotes/substitutions as

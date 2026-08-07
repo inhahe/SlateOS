@@ -405,6 +405,20 @@ struct Lexer {
     /// rather than the implicit newline every other input ends with. See
     /// [`tokenize_paren_body`].
     paren_body: bool,
+    /// When `true`, no newline collects a here-document body: the pendings are
+    /// left in [`Lexer::pending_heredocs`] for the caller to hand on. The alias
+    /// pass lexes this way, because bash reads a here-document body with
+    /// `read_a_line`, which calls `yy_getc` — `bash_input.getter`, the *real*
+    /// input stream — and so bypasses `shell_input_line` and the pushed alias
+    /// string entirely. A `<<` written in an alias value therefore takes its body
+    /// from the line after the one the alias word stands on, and a body written
+    /// in the value itself is not a body at all but ordinary commands. See
+    /// [`tokenize_alias_body`].
+    defer_heredocs: bool,
+    /// Index in the token stream of a `HereDoc` placeholder whose delimiter word
+    /// was not in this text at all — the input ended at the `<<` itself. Only
+    /// [`tokenize_alias_body`] has a use for it; see [`AliasBodyToks`].
+    dangling_delim: Option<usize>,
     /// Character offsets of every `\` whose `\<newline>` this lexer *deleted* as
     /// a line continuation. Only the reader — [`crate::parser::IncrementalParser`],
     /// slicing a parse unit's source for the command history — has any use for
@@ -471,6 +485,21 @@ impl ReaderWarning {
         match self {
             Self::HeredocEof(h) => h.tok_index,
             Self::SubstHeredoc(s) => s.tok_index,
+        }
+    }
+
+    /// Re-key this warning onto another token.
+    ///
+    /// A warning raised by a gather run out of the middle of the input — an
+    /// alias-spliced here-document, whose body the expansion pass could not
+    /// read — starts out keyed to the index it had inside that run. The caller
+    /// knows which token of the real input owns the gather and moves it there,
+    /// so the release rule ("once the unit containing the token is handed out")
+    /// still names a token the parser will actually reach.
+    pub fn set_tok_index(&mut self, i: usize) {
+        match self {
+            Self::HeredocEof(h) => h.tok_index = i,
+            Self::SubstHeredoc(s) => s.tok_index = i,
         }
     }
 }
@@ -827,6 +856,8 @@ impl Lexer {
             extpat_next: false,
             strict_heredoc_eof: false,
             paren_body: false,
+            defer_heredocs: false,
+            dangling_delim: None,
             conts: Vec::new(),
             warnings: Vec::new(),
             hd_ahead: None,
@@ -847,6 +878,32 @@ impl Lexer {
     /// [`tokenize_paren_body`].
     fn paren_body(src: BStr<'_>, opts: ParseOpts) -> Self {
         Self { paren_body: true, ..Self::new(src, opts) }
+    }
+
+    /// As [`Lexer::new`], but no newline collects a here-document body. See
+    /// [`tokenize_alias_body`].
+    fn alias_body(src: BStr<'_>, opts: ParseOpts) -> Self {
+        Self { defer_heredocs: true, ..Self::new(src, opts) }
+    }
+
+    /// A lexer poised to collect here-document bodies out of the middle of
+    /// `chars`, for [`gather_heredocs_at`].
+    fn at_offset(chars: &[Ch], from: usize, opts: ParseOpts) -> Self {
+        let mut lx = Self { chars: chars.to_vec(), ..Self::new(b"", opts) };
+        let from = from.min(lx.chars.len());
+        lx.pos = from;
+        lx.iter_start = from;
+        // `cur_line` counts the newlines since `iter_start`, so the base has to
+        // be the physical line the cursor already stands on.
+        let before = lx
+            .chars
+            .get(..from)
+            .unwrap_or(&[])
+            .iter()
+            .filter(|&&c| c == '\n')
+            .count();
+        lx.line = 1u32.saturating_add(u32::try_from(before).unwrap_or(u32::MAX));
+        lx
     }
 }
 
@@ -928,6 +985,126 @@ pub fn tokenize_spanned(src: BStr<'_>, opts: ParseOpts) -> Result<Spanned, LexEr
 pub fn tokenize_paren_body(src: BStr<'_>, opts: ParseOpts) -> Result<Spanned, LexError> {
     let mut lx = Lexer::paren_body(src, opts);
     lx.run()
+}
+
+/// Tokenize an alias replacement, leaving any here-document it declares
+/// *ungathered* — its `HereDoc` token is emitted with an empty body for the
+/// caller to fill in from the real input.
+///
+/// bash expands an alias with `push_string`, which makes the replacement the
+/// current `shell_input_line`; the lexer reads it, and a `<<` in it goes on the
+/// same `redir_stack` as one written on the line itself. But the *body* is read
+/// by `make_here_document` → `read_secondary_line` → `read_a_line`, and
+/// `read_a_line` takes its characters from `yy_getc` — `bash_input.getter`, the
+/// underlying file or string — never from `shell_input_line`. So the pushed
+/// replacement is not a place a body can come from: the body is the next line of
+/// the real input, and a body written inside the alias value is read back as
+/// ordinary commands. See
+/// [`crate::parser::IncrementalParser::gather_alias_heredocs`], which does the
+/// filling.
+///
+/// # Errors
+/// Returns [`LexError`] on an unterminated quote or substitution.
+pub fn tokenize_alias_body(src: BStr<'_>, opts: ParseOpts) -> Result<AliasBodyToks, LexError> {
+    let mut lx = Lexer::alias_body(src, opts);
+    let spanned = lx.run()?;
+    Ok(AliasBodyToks { dangling_delim: lx.dangling_delim.is_some(), spanned })
+}
+
+/// [`tokenize_alias_body`]'s output: the ordinary lex, plus the one thing only
+/// this entry point can observe.
+pub struct AliasBodyToks {
+    pub spanned: Spanned,
+    /// Whether the value ended *at* a `<<`, so the delimiter word is not in it.
+    ///
+    /// bash reads the delimiter with the same reader that reached the `<<`, and
+    /// that reader runs off the end of the pushed string and back into the real
+    /// line — `alias B='cat <<'` followed by `B E` wants `E`. The sub-lex here
+    /// has no such continuation and stops with an empty delimiter, which is a
+    /// different here-document from the one bash builds, so the caller must not
+    /// treat it as one. See
+    /// TD-OILS-AN-ALIAS-SPLICED-HERE-DOCUMENT-TAKES-NO-DELIMITER-FROM-THE-CALLING-LINE.
+    pub dangling_delim: bool,
+}
+
+/// One here-document [`gather_heredocs_at`] is to collect a body for: everything
+/// the operator settled and the delimiter word decided.
+#[derive(Clone, Debug)]
+pub struct HeredocWant {
+    /// The delimiter, already unquoted.
+    pub delim: Str,
+    /// `<<-`: strip leading tabs from each body line and from the delimiter.
+    pub strip: bool,
+    /// The delimiter was written unquoted, so the body expands.
+    pub expand: bool,
+}
+
+/// What [`gather_heredocs_at`] collected.
+pub struct GatheredHeredocs {
+    /// The filled `HereDoc` tokens, one per want, in the order given.
+    pub toks: Vec<Tok>,
+    /// Offset into the input just past the last body line taken.
+    pub end: usize,
+    /// Parallel to `toks`: the input lines each collection consumed, as
+    /// [`Tokenized::heredoc_lines`] records them.
+    pub lines: Vec<u32>,
+    /// The `delimited by end-of-file` warnings the collection raised. Their
+    /// `tok_index` is the want's index; the caller re-keys them.
+    pub warnings: Vec<ReaderWarning>,
+    /// Offsets of the `\` of every `\<newline>` a body joined away, as
+    /// [`Tokenized::conts`].
+    pub conts: Vec<u32>,
+}
+
+/// Collect here-document bodies for already-known delimiters out of `chars`,
+/// starting at `from`.
+///
+/// This is the collection bash's reader performs at a newline, exposed for the
+/// one caller that cannot get it from the ordinary scan: a `<<` that arrived
+/// through an alias, whose body is in the *outer* text and so is not the
+/// sub-lexer's to read. Collection is sequential — each body starts where the
+/// previous one stopped — so passing the whole line's here-documents in
+/// declaration order reproduces bash's `redir_stack` order exactly.
+///
+/// The line numbers the warnings carry are this input's own, unmapped.
+///
+/// # Errors
+/// Returns [`LexError`] if a body's expansion contains an unclosed construct.
+pub fn gather_heredocs_at(
+    chars: &[Ch],
+    from: usize,
+    wants: &[HeredocWant],
+    opts: ParseOpts,
+) -> Result<GatheredHeredocs, LexError> {
+    let mut lx = Lexer::at_offset(chars, from, opts);
+    let mut toks: Vec<Tok> = wants
+        .iter()
+        .map(|w| Tok::HereDoc(Vec::new(), w.delim.clone(), !w.expand))
+        .collect();
+    lx.pending_heredocs = wants
+        .iter()
+        .enumerate()
+        .map(|(i, w)| PendingHeredoc {
+            delim: w.delim.clone(),
+            strip: w.strip,
+            expand: w.expand,
+            tok_index: i,
+        })
+        .collect();
+    lx.collect_heredocs(&mut toks)?;
+    let mut lines = vec![0u32; toks.len()];
+    for (i, n) in std::mem::take(&mut lx.heredoc_lines) {
+        if let Some(slot) = lines.get_mut(i) {
+            *slot = n;
+        }
+    }
+    Ok(GatheredHeredocs {
+        toks,
+        end: lx.pos,
+        lines,
+        warnings: std::mem::take(&mut lx.warnings),
+        conts: std::mem::take(&mut lx.conts),
+    })
 }
 
 /// A whole-source tokenization that keeps the tokens it managed to lex even
@@ -1356,6 +1533,11 @@ pub struct AliasExpansion {
     pub spans: Vec<TokSpan>,
     /// The replacement texts that were pushed, in the order they were pushed.
     pub bodies: Vec<AliasBody>,
+    /// Indices into `toks` of every `HereDoc` placeholder a replacement text
+    /// spliced in, ascending. Their bodies are still to come: they are in the
+    /// *outer* input, which the sub-lex could not read. See
+    /// [`tokenize_alias_body`].
+    pub heredocs: Vec<usize>,
 }
 
 /// The output of an alias pass, plus the running state its command-position
@@ -1371,6 +1553,8 @@ struct AliasOut {
     /// The replacement texts pushed so far; a token's [`TokSpan::src`] of
     /// `n + 1` names `bodies[n]`.
     bodies: Vec<AliasBody>,
+    /// [`AliasExpansion::heredocs`], filled as the replacements are walked.
+    heredocs: Vec<usize>,
     prev: Prev,
     /// bash's `PST_REDIRLIST`: everything read of the simple command so far has
     /// been a redirection, so the word after one is still the *command* word.
@@ -1387,6 +1571,7 @@ impl AliasOut {
             origin: Vec::new(),
             spans: Vec::new(),
             bodies: Vec::new(),
+            heredocs: Vec::new(),
             prev: Prev::Start,
             redir_list: true,
         }
@@ -1539,6 +1724,7 @@ pub fn expand_aliases_tracked(
         origin: out.origin,
         spans: out.spans,
         bodies: out.bodies,
+        heredocs: out.heredocs,
     }
 }
 
@@ -1585,8 +1771,10 @@ fn expand_aliases_inner(
             && let [Seg::Lit(name)] = segs.as_slice()
             && !active.contains(name)
             && let Some(val) = aliases.get(name)
-            && let Ok(Spanned { toks: mut repl, ends: mut repl_ends, .. }) =
-                tokenize_spanned(val, opts)
+            && let Ok(AliasBodyToks {
+                spanned: Spanned { toks: mut repl, ends: mut repl_ends, .. },
+                dangling_delim,
+            }) = tokenize_alias_body(val, opts)
         {
             // Drop a trailing newline the lexer may append so the splice stays
             // within the current command.
@@ -1618,6 +1806,16 @@ fn expand_aliases_inner(
             };
             expand_aliases_inner(&body, aliases, opts, active, out, false);
             active.remove(name);
+            // A `<<` the value ended at is not a here-document this pass can
+            // describe — its delimiter is on the calling line, which the sub-lex
+            // never saw — so it must not be handed to the gather, which would
+            // hunt for an empty delimiter and swallow the rest of the input. It
+            // is necessarily the last token the splice pushed.
+            if dangling_delim
+                && out.heredocs.last() == out.toks.len().checked_sub(1).as_ref()
+            {
+                out.heredocs.pop();
+            }
             // The *first* token of the replacement stands in for the alias word
             // itself, so it keeps the alias word's origin; only the tokens after
             // it are origin-less. Without this, a caller resuming at the start of
@@ -1632,6 +1830,13 @@ fn expand_aliases_inner(
             }
             force = val.ends_with(b" ") || val.ends_with(b"\t");
             continue;
+        }
+        // A `<<` a replacement text spliced in leaves an empty placeholder: the
+        // sub-lex had no body to read, because bash reads one from the real input
+        // and not from the pushed string. Note where it landed so the reader can
+        // fill it in. See [`tokenize_alias_body`].
+        if !from_input && matches!(tok, Tok::HereDoc(..)) {
+            out.heredocs.push(out.toks.len());
         }
         out.toks.push(tok.clone());
         out.lines.push(tok_line);
@@ -2024,7 +2229,7 @@ impl Lexer {
                     // them again.
                     self.sync_ahead();
                     out.push(Tok::Newline);
-                    if !self.pending_heredocs.is_empty() {
+                    if !self.pending_heredocs.is_empty() && !self.defer_heredocs {
                         self.collect_heredocs(out)?;
                     }
                 }
@@ -2292,7 +2497,7 @@ impl Lexer {
         // its own — bash accepts `` `!` `` — so it keeps the newline.)
         if self.paren_body {
             let start_pos = self.pos;
-            if !self.pending_heredocs.is_empty() {
+            if !self.pending_heredocs.is_empty() && !self.defer_heredocs {
                 self.collect_heredocs(out)?;
             }
             out.push(Tok::Op(Op::RParen));
@@ -2300,7 +2505,7 @@ impl Lexer {
         } else if !matches!(out.last(), None | Some(Tok::Newline)) {
             let start_pos = self.pos;
             out.push(Tok::Newline);
-            if !self.pending_heredocs.is_empty() {
+            if !self.pending_heredocs.is_empty() && !self.defer_heredocs {
                 self.collect_heredocs(out)?;
             }
             self.stamp_lines(out, lines, offsets, ends, self.line, start_pos);
@@ -4060,6 +4265,14 @@ impl Lexer {
         let (delim, expand) = self.read_heredoc_delim(true)?;
         out.push(Tok::Op(if strip { Op::DLessDash } else { Op::DLess }));
         let tok_index = out.len();
+        // The scan stopped because the *text* ran out, not because a separator
+        // ended the word: there was no delimiter here to read. For an ordinary
+        // input that is the end of the script and nothing follows; for an alias
+        // replacement bash's reader would have carried on into the calling line,
+        // so the caller has to know. See [`AliasBodyToks::dangling_delim`].
+        if delim.is_empty() && expand && self.peek().is_none() {
+            self.dangling_delim = Some(tok_index);
+        }
         out.push(Tok::HereDoc(Vec::new(), delim.clone(), !expand));
         self.pending_heredocs.push(PendingHeredoc {
             delim,

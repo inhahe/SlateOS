@@ -14482,9 +14482,18 @@ impl Shell {
         } else {
             self.array_elements_walks(name, 2)
         };
+        // No elements, no operands: bash reaches `parameter_brace_patsub` (and
+        // its casemod/trim siblings) with a NULL value for an empty or unset
+        // collection and returns before expanding anything, so
+        // `${empty[@]/$(cmd)/Y}` never runs `cmd`. Everything from one element
+        // up expands the operands exactly once — see [`Shell::ready_bulk_op`].
+        if elems.is_empty() {
+            return Vec::new();
+        }
+        let ready = self.ready_bulk_op(op);
         elems
             .into_iter()
-            .map(|v| self.apply_bulk_op(op, &v))
+            .map(|v| self.apply_bulk_op(&ready, &v))
             .collect()
     }
 
@@ -14791,18 +14800,29 @@ impl Shell {
         }
     }
 
-    /// Apply a single [`BulkOp`] to one element value.
-    fn apply_bulk_op(&mut self, op: &BulkOp, value: BStr<'_>) -> Str {
-        let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
+    /// Expand a [`BulkOp`]'s operand words — once, for the whole collection.
+    ///
+    /// bash does the same: `parameter_brace_patsub` computes `pat` and `rep` and
+    /// only then hands *those two* to `array_patsub`, which walks the elements
+    /// (subst.c:9109); `parameter_brace_casemod` and the pattern-removal path are
+    /// built the same way. The operands can have side effects, so how many times
+    /// they are expanded is observable: over a four-element array
+    /// `${a[@]/$(cmd)/Y}` runs `cmd` once, not four times.
+    ///
+    /// The caller must not reach here when the collection has no elements — bash
+    /// short-circuits an empty or unset array before any operand is looked at,
+    /// so `${empty[@]/$(cmd)/Y}` runs `cmd` no times at all.
+    fn ready_bulk_op(&mut self, op: &BulkOp) -> ReadyBulkOp {
         match op {
             BulkOp::Trim {
                 suffix,
                 longest,
                 pattern,
-            } => {
-                let pat = self.expand_word_pattern(pattern);
-                param_trim(value, &pat, *suffix, *longest, extglob)
-            }
+            } => ReadyBulkOp::Trim {
+                suffix: *suffix,
+                longest: *longest,
+                pat: self.expand_word_pattern(pattern),
+            },
             BulkOp::Replace {
                 all,
                 anchor,
@@ -14811,22 +14831,50 @@ impl Shell {
             } => {
                 let pat = self.expand_word_pattern(pattern);
                 let patsub = self.shopt.get("patsub_replacement").copied().unwrap_or(true);
-                let repl = self.expand_replacement(replacement, patsub);
-                let ci = self.shopt.get("nocasematch").copied().unwrap_or(false);
-                param_replace(value, &pat, &repl, *all, *anchor, extglob, ci)
+                ReadyBulkOp::Replace {
+                    all: *all,
+                    anchor: *anchor,
+                    pat,
+                    repl: self.expand_replacement(replacement, patsub),
+                }
             }
             BulkOp::Case {
                 mode,
                 all,
                 pattern,
-            } => {
-                let pat = self.expand_word_pattern(pattern);
-                param_case(value, &pat, *mode, *all, extglob)
-            }
-            BulkOp::Transform { op } => Self::transform_value(value, *op),
+            } => ReadyBulkOp::Case {
+                mode: *mode,
+                all: *all,
+                pat: self.expand_word_pattern(pattern),
+            },
+            BulkOp::Transform { op } => ReadyBulkOp::Transform { op: *op },
             // Handled collection-wide in `bulk_elements` before per-element
             // dispatch; it never reaches the per-element mapper.
-            BulkOp::BadTransform { .. } => value.to_vec(),
+            BulkOp::BadTransform { .. } => ReadyBulkOp::BadTransform,
+        }
+    }
+
+    /// Apply an already-expanded [`BulkOp`] to one element value.
+    fn apply_bulk_op(&self, op: &ReadyBulkOp, value: BStr<'_>) -> Str {
+        let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
+        match op {
+            ReadyBulkOp::Trim {
+                suffix,
+                longest,
+                pat,
+            } => param_trim(value, pat, *suffix, *longest, extglob),
+            ReadyBulkOp::Replace {
+                all,
+                anchor,
+                pat,
+                repl,
+            } => {
+                let ci = self.shopt.get("nocasematch").copied().unwrap_or(false);
+                param_replace(value, pat, repl, *all, *anchor, extglob, ci)
+            }
+            ReadyBulkOp::Case { mode, all, pat } => param_case(value, pat, *mode, *all, extglob),
+            ReadyBulkOp::Transform { op } => Self::transform_value(value, *op),
+            ReadyBulkOp::BadTransform => value.to_vec(),
         }
     }
 
@@ -15899,6 +15947,40 @@ impl Shell {
             None => {
                 self.note_unbound_modifier(name, index);
                 Str::new()
+            }
+        }
+    }
+
+    /// [`Shell::modifier_operand`] for a modifier that does nothing at all to an
+    /// **unset** parameter — `None` says so, and the caller must then expand no
+    /// operand word.
+    ///
+    /// bash short-circuits a substitution and a case modification on an unset
+    /// parameter before either operand is looked at: `parameter_brace_patsub`
+    /// and `parameter_brace_casemod` both open with `if (value == 0) return
+    /// ((char *)NULL);` (subst.c:9119, 9366), where `value` is the parameter's
+    /// own text. The operands can have side effects, so this is observable —
+    /// `${unset/$(cmd)/Y}` never runs `cmd`, and ``${unset/aaa/`fi`}`` raises no
+    /// syntax error.
+    ///
+    /// The test is set-ness, not emptiness: `x=''` is a value, so `${x/$(cmd)/Y}`
+    /// *does* run `cmd`. (The trim operators differ — theirs is an emptiness test
+    /// applied at the call site, see the `#`/`%` arm of
+    /// [`Shell::expand_dynamic_with`].)
+    ///
+    /// `set -u` is unaffected: the unset parameter is still reported here, on the
+    /// same path [`Shell::modifier_operand`] uses.
+    fn set_modifier_operand(
+        &mut self,
+        operand: Operand,
+        name: &str,
+        index: &Option<Box<Word>>,
+    ) -> Option<Str> {
+        match self.op_operand(operand, name, index) {
+            Some(v) => Some(v),
+            None => {
+                self.note_unbound_modifier(name, index);
+                None
             }
         }
     }
@@ -24771,6 +24853,15 @@ impl Shell {
                 pattern,
             } => {
                 let value = self.modifier_operand(operand, name, index);
+                // Nothing to trim from, nothing to expand: bash's `#`/`%` arm
+                // breaks before `parameter_brace_remove_pattern` when the value
+                // is empty or unset (subst.c:10084, `temp == 0 || *temp ==
+                // '\0'`), so `${empty#$(cmd)}` never runs `cmd`. Unlike the
+                // substitution and case-modification arms below, this one turns
+                // on the *value*, not on set-ness — `x=''` short-circuits too.
+                if value.is_empty() {
+                    return Str::new();
+                }
                 let pat = self.expand_word_pattern(pattern);
                 let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
                 param_trim(&value, &pat, *suffix, *longest, extglob)
@@ -24822,7 +24913,9 @@ impl Shell {
                 pattern,
                 replacement,
             } => {
-                let value = self.modifier_operand(operand, name, index);
+                let Some(value) = self.set_modifier_operand(operand, name, index) else {
+                    return Str::new();
+                };
                 let pat = self.expand_word_pattern(pattern);
                 // bash's `patsub_replacement` (default on) makes an unquoted `&`
                 // in the replacement stand for the matched text. Expand the
@@ -24842,7 +24935,9 @@ impl Shell {
                 all,
                 pattern,
             } => {
-                let value = self.modifier_operand(operand, name, index);
+                let Some(value) = self.set_modifier_operand(operand, name, index) else {
+                    return Str::new();
+                };
                 let pat = self.expand_word_pattern(pattern);
                 let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
                 param_case(&value, &pat, *mode, *all, extglob)
@@ -47867,6 +47962,42 @@ fn glob_match_at(pattern: &[EChar], text: &[Ch], start: usize, extglob: bool) ->
         }
     }
     None
+}
+
+/// A [`BulkOp`] whose operand words have already been expanded, ready to be
+/// applied to element after element.
+///
+/// The split between this and [`BulkOp`] is the whole point: the operands are
+/// expanded **once**, by [`Shell::ready_bulk_op`], and only the result is walked
+/// over the collection by [`Shell::apply_bulk_op`]. bash is built the same way —
+/// `parameter_brace_patsub` computes `pat` and `rep` before calling
+/// `array_patsub` (subst.c:9109) — and it is observable, because an operand may
+/// have side effects.
+enum ReadyBulkOp {
+    /// `${a[@]#pat}` / `##` / `%` / `%%`.
+    Trim {
+        suffix: bool,
+        longest: bool,
+        pat: Vec<EChar>,
+    },
+    /// `${a[@]/pat/repl}`.
+    Replace {
+        all: bool,
+        anchor: ReplaceAnchor,
+        pat: Vec<EChar>,
+        repl: Vec<ReplTok>,
+    },
+    /// `${a[@]^pat}` / `^^` / `,` / `,,` / `~` / `~~`.
+    Case {
+        mode: crate::ast::CaseMode,
+        all: bool,
+        pat: Vec<EChar>,
+    },
+    /// `${a[@]@Q}` etc. — no operand word to expand.
+    Transform { op: char },
+    /// [`BulkOp::BadTransform`], which [`Shell::bulk_elements`] has already
+    /// answered collection-wide; it never reaches the per-element mapper.
+    BadTransform,
 }
 
 /// `${name#pat}` / `${name##pat}` / `${name%pat}` / `${name%%pat}`. The pattern

@@ -286,37 +286,67 @@ because the text is being copied for a re-lex that translates them itself.
 Corpus case:
 `userspace/oils/tests/corpus/an-ansi-c-string-in-a-body-is-not-a-single-quoted-run.sh`.
 
-### TD-OILS-A-PATTERN-IS-EXPANDED-EVEN-WHEN-THE-PARAMETER-IS-UNSET. `${u/aaa/$(cmd)}` runs `cmd` — 2026-08-07 — OPEN
+### TD-OILS-A-MODIFIERS-OPERAND-IS-EXPANDED-MORE-OFTEN-THAN-BASH-EXPANDS-IT. `${u/aaa/$(cmd)}` runs `cmd`, and `${a[@]/$(cmd)/Y}` runs it once per element — 2026-08-07 — ✅ FIXED 2026-08-07
 
-**Where:** `userspace/oils/src/interp.rs` — expansion of `WordPart::ParamReplace`,
-`WordPart::ParamTrim` and their `BulkOp` equivalents.
+**Where:** `userspace/oils/src/interp.rs` — `Shell::expand_dynamic_with`'s
+`ParamReplace` / `ParamCase` / `ParamTrim` arms, and `Shell::bulk_elements` /
+`Shell::apply_bulk_op`.
 
-**What.** bash does not expand the pattern or the replacement of a substitution,
-nor the pattern of a trim, when the parameter is **unset**: the whole expansion
-is short-circuited to empty before either operand is looked at. osh expands them
-unconditionally, so their side effects happen where bash has none. Measured by
-counting how often a `$( … )` in each position runs:
+**What.** A modifier's operand words can have side effects, so *how many times*
+they are expanded is observable. bash expands them exactly as often as it can
+use them; osh expanded them unconditionally, and per element. Three rules, all
+missing. Measured by counting how often a `$( … )` in each position runs:
 
 ```text
-                        bash   osh
-unset,     replacement    0     1     ${u/aaa/$(cmd)Y}
-unset,     pattern        0     1     ${u/$(cmd)aaa/Y}
-unset,     trim pattern   0     1     ${u#$(cmd)a}
-set/empty, replacement    1     1     ${n/aaa/$(cmd)Y}   (empty, not unset)
-set no match              1     1
-set matching              1     1
+                                        bash   osh
+unset, replace pattern                    0      1    ${u/$(c)aaa/Y}
+unset, replace replacement                0      1    ${u/aaa/$(c)Y}
+unset, case                               0      1    ${u^^$(c)}
+unset, trim                               0      1    ${u#$(c)a}
+empty (set), trim                         0      1    ${n#$(c)a}
+empty (set), replace                      2      2    ${n/$(c)/$(c)}   (no change)
+4-element array, bulk replace pattern     1      4    ${g[@]/$(c)p/Y}
+4-element array, bulk trim                1      4    ${g[@]#$(c)p}
+4-element array, bulk case                1      4    ${g[@]^^$(c)}
+empty/unset array, any bulk op            0      0    (no change)
 ```
 
-Only *unset* short-circuits — an empty-but-set parameter expands both operands,
-so the test is `unset`-ness, not emptiness. Beyond the side effects this is also
-observable as a spurious diagnostic: ``${u/aaa/`fi`}`` prints a
-`command substitution:` syntax error in osh and nothing in bash.
+1. **A substitution and a case modification do nothing to an *unset*
+   parameter**, and bash finds that out before looking at either operand:
+   `parameter_brace_patsub` and `parameter_brace_casemod` both open with
+   `if (value == 0) return ((char *)NULL);` (subst.c:9119, 9366), where `value`
+   is the parameter's own text. The test is set-ness, **not** emptiness —
+   `x=''` is a value and its operands do run.
+2. **A trim turns on the value instead.** The `#`/`%` arm of
+   `parameter_brace_expand` breaks on
+   `value == 0 || *value == '\0' || temp == 0 || *temp == '\0'`
+   (subst.c:10084) before reaching `parameter_brace_remove_pattern`, so an
+   empty-but-*set* parameter short-circuits too.
+3. **A bulk operator expands its operands once for the whole collection.**
+   `parameter_brace_patsub` computes `pat` and `rep` and only then calls
+   `array_patsub`, which walks the elements with those two. An empty or unset
+   collection expands them no times at all (the `value == 0` guard again).
 
-**Proper fix:** check the parameter's *unset*-ness before evaluating either
-operand word, for all of `ParamReplace`, `ParamTrim`, `BulkOp::Replace` and
-`BulkOp::Trim`. Care is needed to keep `nounset` ordering intact: `set -u` must
-still fire on the unset parameter itself, which it does today by a different
-path.
+Beyond the run counts this is observable as a spurious diagnostic:
+``${u/aaa/`fi`}`` printed a `command substitution:` syntax error in osh and
+nothing in bash.
+
+**Fixed by** three matching changes:
+
+* `Shell::set_modifier_operand` — `modifier_operand` that answers `None` for an
+  unset parameter instead of an empty string, so the `ParamReplace` and
+  `ParamCase` arms can return before expanding anything. It still reports the
+  unset parameter on the same path, so `set -u` ordering is untouched.
+* The `ParamTrim` arm returns early when the value is empty, which covers unset
+  as well.
+* `ReadyBulkOp` — a `BulkOp` whose operand words are already expanded. The split
+  is the point: `Shell::ready_bulk_op` expands them once, and only the result is
+  walked over the elements by `Shell::apply_bulk_op`, which no longer needs
+  `&mut self`. `bulk_elements` returns before building one when the collection
+  is empty.
+
+Corpus case:
+`userspace/oils/tests/corpus/a-modifiers-operand-is-expanded-only-when-it-is-needed.sh`.
 
 ### TD-OILS-AN-ANSI-C-STRING-IS-NOT-REQUOTED-AFTER-A-BRACE-BODY-TRANSLATES-IT. `"${h[$'a]b']}"` is a bad substitution in bash — 2026-08-07 — OPEN
 
@@ -367,6 +397,50 @@ to `QUOTE`, `/` to `QUOTE2`, the `#%^,~:-=?+/` set to `OP`, anything after `OP`
 to `WORD`) and whether the enclosing word is double-quoted, then re-single-quote
 the result in every case except `DOLBRACE_PARAM`/`DOLBRACE_WORD` under double
 quotes.
+
+### TD-OILS-A-SUBSTITUTION-IN-A-BRACE-BODY-IS-NOT-PARSED-WHEN-THE-BODY-IS-REJECTED. `echo ${#x:-$(fi)}` says `bad substitution` — 2026-08-07 — OPEN
+
+**Where:** `userspace/oils/src/lexer.rs` — `read_dollar_brace`; `userspace/oils/src/parser.rs` — `seg_to_part`'s `Seg::ParamBraced` arm and `parse_braced_param_in`'s `BadSubst`/`BadTransform` returns.
+
+**What.** bash parses a nested `$( … )` **eagerly, as it reads the `${ … }` body**
+— parse.y:3954 hands the `$(` to `parse_dollar_word`, which reaches
+`parse_comsub` — exactly as it does under `P_ARITH` (parse.y:3937 → 3959, the
+already-fixed `arith_comsubs` case). So the nested body's syntax error happens
+*before* anything judges the enclosing `${ … }`, and beats every verdict that
+judgement could reach:
+
+```text
+                                bash                        osh
+${#x:-$(fi)}         syntax error near `fi'      bad substitution
+${x@Z$(fi)}          syntax error near `fi'      bad substitution
+${1[0]$(fi)}         syntax error near `fi'      bad substitution
+${!x@Q$(fi)}         syntax error near `fi'      bad substitution
+${$(fi)}             syntax error near `fi'      bad substitution
+${@[0]$(fi)}         syntax error near `fi'      bad substitution
+if false; then echo ${#x:-$(fi)}; fi
+                     syntax error near `fi'      ok
+```
+
+It beats a runtime `bad substitution` (rows 1–4), it beats an outright parse
+refusal of the body's shape (rows 5–6), and it fires in an **untaken branch**
+(row 7) — because it is a parse-time event, not an expansion-time one.
+
+A **backtick is not** parsed eagerly, and the difference is visible in both
+directions: ``echo ${#x:-`fi`}`` gives bash a runtime `bad substitution` (the
+backtick body is never read), and in an untaken branch it is silent. This is the
+same asymmetry already recorded for the arithmetic scan.
+
+A well-formed body is still only *text*: it is parsed here and **run** at
+expansion, once — `n=0; inc() { n=$((n+1)); }; echo ${x:-$(inc)}` leaves `n=1`,
+not 2.
+
+**Proper fix:** record the nested `$( … )` bodies during the `${` scan in
+`read_dollar_brace` (as `arith_comsubs` already does for `$(( … ))`) and attach
+them to `Seg::ParamBraced`. In `seg_to_part`, parse them **only on the paths
+that do not already parse the body** — the `Err` return, and the `BadSubst` /
+`BadTransform` returns — so that a well-formed `${x:-$(echo 2)}` is never parsed
+twice (a double parse would gather a nested here-document twice). Where both a
+nested parse error and a `BadSubst` are available, the parse error wins.
 
 ### TD-OILS-A-SINGLE-QUOTE-IS-NOT-A-QUOTE-WHEN-AN-ARITHMETIC-EXPANSION-IS-EVALUATED. `echo $(( 1 + '$(fi)' ))` — 2026-08-07 — OPEN
 

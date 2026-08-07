@@ -431,8 +431,63 @@ matches bash exactly), so this is only the `$(( … ))` / `$[ … ]` / `(( … )
 | `echo $(( ${x!} + $(echo a>&2) ))` | `` ${x!} + $(echo a 1>&2) : bad substitution`` | `` ${x!} + $(echo a>&2) : bad substitution`` |
 | `echo $(( ${x!} + $(if true;then echo 1;fi) ))` | re-printed over three lines | one line, as written |
 
-**Proper fix:** run the arithmetic string's `$( … )` bodies through the same
-re-print the subscript path uses when the string is captured for a diagnostic.
+**Confirmed in the source, 2026-08-07.** `parse_comsub` ends
+`tcmd = print_comsub (parsed_command); … return ret;` (parse.y:4219–4241) — the
+text it appends to the enclosing scan **is** the re-print, not the source. The
+comment on osh's `parse_arith_comsubs` (parser.rs) says the opposite ("keeps only
+the *text* (`APPEND_NESTRET`)") and needs correcting along with the code: bash
+throws the *source* away, not the parse.
+
+**Measured shapes (bash 5.2.37, `LC_ALL=C`, `x` unset).** Everything outside the
+`$( … )` is verbatim source; only the bodies are replaced.
+
+```text
+$(( ${x!} + $(echo a>&2) ))            ${x!} + $(echo a 1>&2)
+$(( ${x!} + $(echo a # hi
+) ))                                   ${x!} + $(echo a)          comment dropped
+$(( ${x!} + $(echo "a  b" | cat) ))    ${x!} + $(echo "a  b" | cat)  quoting kept
+$(( ${x!} + `echo a>&2` ))             ${x!} + `echo a>&2`        backtick verbatim
+$(( ${x!} + $( ( echo a ) ) ))         ${x!} + $( ( echo a ))
+$(( ${x!} + $( { echo a; } ) ))        ${x!} + $({ echo a; })
+$(( ${x!} + $(cat <<E
+hi
+E
+) ))                                   ${x!} + $(cat <<E
+                                       hi
+                                       E
+                                       )                          here-doc body follows
+$(( ${x!} + $(if true;then echo 1;fi) ))
+                                       ${x!} + $(if true; then
+                                           echo 1;
+                                       fi)
+$(( ${x!} + $(for i in a b; do echo $i; done) ))
+                                       ${x!} + $(for i in a b;
+                                       do
+                                           echo $i;
+                                       done)
+```
+
+The `$( ( … ))` spacing is bash's own guard: `if (tcmd[0] == '(')` inserts a
+space so the result cannot re-read as `$((` (parse.y:4221–4227). `$[ … ]`,
+`(( … ))` and `let` all show the same re-print.
+
+**Not observable in execution, as far as could be measured.** `$LINENO` inside
+an arithmetic `$( … )` reports the *source* line even when the re-print spans
+more lines than the source did, so the re-print's extra newlines are renumbered
+away. Every other difference measured (dropped comments, normalised redirects)
+is semantics-preserving. So splicing the re-print into the stored text — which
+is what bash literally does, and the simplest faithful model — should be safe;
+there is no need for a diagnostic-only side channel.
+
+**Proper fix:** keep what `parse_arith_comsubs` currently parses and discards.
+`unparse` already has the whole re-print — `part_src`'s
+`CmdSubBody::Parsed` arm is `bfmt![b"$(", &flush_here_docs(&program_inline(prog)), b")"]`,
+which is why the subscript path already agrees. What is missing is the splice
+back into the arithmetic string, and for that `lexer::CmdSubSpan` needs the byte
+range it occupied in the arithmetic source; it currently carries only `src` and
+`close_line`. Add the range, then rewrite `Seg::Arith`'s text at parse time.
+Leave backticks alone — bash does not re-parse those, and the corpus already
+pins that.
 
 ### TD-OILS-A-DOUBLE-QUOTED-DOLLAR-BRACKET-IS-NOT-SKIPPED-BY-THE-QUOTE-EXTRACTOR. `echo "$[ ${ ]"` names the wrong string — 2026-08-07
 

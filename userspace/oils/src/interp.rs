@@ -10244,6 +10244,14 @@ impl Shell {
     /// `update` runs after each iteration (including after `continue`). An
     /// arithmetic error in any section aborts the loop with status 1.
     fn exec_for_arith(&mut self, c: &ForArithClause, out: &mut Out, stdin: &StdinSrc) -> Flow {
+        // bash's `body_status` (execute_cmd.c, `execute_arith_for_command`): the
+        // loop's status is the *body's* alone, starting at success and returned
+        // whatever the header did afterwards. Each of the three sections is a
+        // word expansion that may run commands of its own, and those leave
+        // their own status in `$?` — so without carrying the body's separately,
+        // a loop that never iterates would report its header's last command
+        // substitution: `for (( $(exit 7); 0; 0 )); do :; done` is a success.
+        let mut body_status = 0;
         self.last_status = 0;
         if let Err(flow) = self.run_arith_section(&c.init, out, stdin) {
             return flow;
@@ -10254,7 +10262,9 @@ impl Shell {
                 Ok(_) => {}
                 Err(flow) => return flow,
             }
-            match self.exec_program(&c.body, out, stdin) {
+            let flow = self.exec_program(&c.body, out, stdin);
+            body_status = self.last_status;
+            match flow {
                 Flow::Next => {}
                 Flow::Break(n) => {
                     if n > 1 {
@@ -10274,6 +10284,7 @@ impl Shell {
                 return flow;
             }
         }
+        self.last_status = body_status;
         Flow::Next
     }
 

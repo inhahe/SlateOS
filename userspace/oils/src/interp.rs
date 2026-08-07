@@ -10049,7 +10049,11 @@ impl Shell {
         let saved_abort = self.discard_error.take();
         let expanded = self.expand_arith_params(raw);
         self.arith_cmd = saved_tag;
-        if self.discard_error.is_some() {
+        // Either kind of word-level failure ends it: a discard the expansion
+        // armed, or a whole-shell abort — `set -u` on `for (( $y; 0; ))` is
+        // `y: unbound variable` and the loop never starts, where evaluating the
+        // hole the failure left would have made the section a silent success.
+        if self.expansion_failed() {
             return None;
         }
         self.discard_error = saved_abort;
@@ -28277,6 +28281,13 @@ impl Shell {
         let mut out = Str::new();
         let mut i = 0;
         while i < chars.len() {
+            // One word-level error ends the expansion where it stood — bash's
+            // `expand_arith_string` longjmps out — so the text after it is never
+            // expanded and cannot raise a second complaint: `set -u` on
+            // `$(( $y + $z ))` names `y` alone.
+            if self.expansion_failed() {
+                break;
+            }
             if syn_at(&chars, i) == '\\' {
                 match chars.get(i + 1).copied() {
                     // Line continuation — both characters disappear, so
@@ -28419,7 +28430,19 @@ impl Shell {
                         continue;
                     };
                     i += 1 + n.chars().count();
-                    let val = self.param_value(&n).unwrap_or_default();
+                    // Under `set -u` this is an unbound-variable error like any
+                    // other `$name`: the arithmetic text is expanded by
+                    // `expand_word_internal` (via `expand_arith_string`), so the
+                    // same `err_unboundvar` fires there as in a word, and the
+                    // expression is never evaluated. `set -u; echo $(( $y + 1 ))`
+                    // is `y: unbound variable`, not `1`.
+                    let val = match self.param_value(&n) {
+                        Some(v) => v,
+                        None => {
+                            self.note_unbound_spelled(&n, false);
+                            Str::new()
+                        }
+                    };
                     out.extend_from_slice(bytes::trim(&val));
                 }
             }

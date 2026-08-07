@@ -1418,7 +1418,17 @@ impl IncrementalParser {
             // End of input. If the lexer stopped early on an unclosed
             // construct, this is the point where bash — having executed every
             // complete line before it — reports the error.
-            Ok(()) if items.is_empty() => self.pending_lex_err.take().map(Err),
+            Ok(()) if items.is_empty() => {
+                let err = self.pending_lex_err.take()?;
+                // Everything the reader read looking for the close belongs to
+                // this unit, however many lines that was: bash echoes each one
+                // as `shell_getc` hands it over, so `echo one` / `echo "unterm`
+                // / `echo three` echoes the last *two* lines before reporting
+                // the quote. The tokens for them were cut back at the unclosed
+                // construct, so the span is taken from the input directly.
+                self.split_unit_error_lines(self.orig.len(), self.orig.len());
+                Some(Err(err))
+            }
             Ok(()) => {
                 self.pos = next_orig;
                 self.split_unit_lines(next_orig);
@@ -1442,14 +1452,16 @@ impl IncrementalParser {
                     .next()
                     .copied()
                     .unwrap_or(self.orig.len());
-                self.split_unit_lines(resume);
+                self.split_unit_error_lines(resume, next_orig);
                 self.pos = resume;
                 Some(Err(e))
             }
             Err(e) => {
                 // bash has already *read* the line it could not parse, so it is
-                // in the history before the diagnostic is printed.
-                self.split_unit_lines(next_orig);
+                // in the history before the diagnostic is printed — and, for the
+                // same reason, echoed by `set -v`. See
+                // [`Self::split_unit_error_lines`].
+                self.split_unit_error_lines(next_orig, next_orig);
                 // Abandon the rest of the input, discarding the units parsed so
                 // far in *this* unit — bash never runs a partially-parsed line.
                 self.wpos = self.work.len();
@@ -1516,12 +1528,53 @@ impl IncrementalParser {
     /// the lexer emits no token for a comment, only for the newline ending it,
     /// so the comment's own text lies before that token's offset.
     fn split_unit_lines(&mut self, end_orig: usize) {
-        let Some(last) = end_orig.checked_sub(1) else { return };
+        self.split_unit_span(end_orig, None);
+    }
+
+    /// [`Self::split_unit_lines`], but for a unit that ends in an *error*: the
+    /// span is stretched to the end of the physical line `blame` stands on.
+    ///
+    /// bash's reader hands a whole physical line to the parser and echoes it
+    /// (`set -v`) at that moment, before a single token is taken off it — so by
+    /// the time yacc looks at a token and finds it cannot be shifted, the line
+    /// that token sits on has already been read and echoed. Ending the span at
+    /// the last *successfully consumed* token instead cuts the offender off:
+    ///
+    /// ```text
+    /// set -v; echo a; ) bad        bash echoes `echo a; ) bad'   osh echoed `echo a;'
+    /// set -v; { echo a \n ) bad    bash echoes both lines        osh echoed the first
+    /// ```
+    ///
+    /// The second shape is why this takes the offending token rather than just
+    /// running the existing end out to its line's end: the parse stopped on a
+    /// `Newline`, so the old end was *already* at a line boundary — the reader
+    /// had simply gone on to read the next line before failing on it.
+    fn split_unit_error_lines(&mut self, end_orig: usize, blame: usize) {
+        self.split_unit_span(end_orig, Some(blame));
+    }
+
+    fn split_unit_span(&mut self, end_orig: usize, blame: Option<usize>) {
         let start = self.hist_cursor;
-        let end = self
-            .orig_ends
-            .get(last)
-            .map_or(self.src.len(), |&e| (e as usize).min(self.src.len()));
+        let mut end = end_orig
+            .checked_sub(1)
+            .map_or(0, |last| {
+                self.orig_ends.get(last).map_or(self.src.len(), |&e| e as usize)
+            })
+            .min(self.src.len());
+        if let Some(blame) = blame {
+            // Past the newline ending the blamed token's line — or, when it is
+            // the end of input that is blamed, past everything the reader read.
+            let from = self
+                .orig_offsets
+                .get(blame)
+                .map_or(self.src.len(), |&o| (o as usize).min(self.src.len()));
+            let line_end = self
+                .src
+                .get(from..)
+                .and_then(|rest| rest.iter().position(|&c| c == Ch::U('\n')))
+                .map_or(self.src.len(), |i| from.saturating_add(i).saturating_add(1));
+            end = end.max(line_end);
+        }
         if end <= start {
             return;
         }

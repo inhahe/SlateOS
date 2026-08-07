@@ -910,7 +910,7 @@ probe `<<-`, a quoted delimiter (no lookup), a value *without* the trailing blan
 (no flag), the flag being spent on the delimiter rather than reaching the operand
 after it, a multi-word value, and a delimiter alias that names itself.
 
-### TD-OILS-A-LINE-THAT-FAILS-TO-LEX-IS-NOT-REPORTED-AS-A-LINE. An unclosed quote hides the syntax error before it and the `set -v` echo of it — 2026-08-06 — OPEN
+### TD-OILS-A-LINE-THAT-FAILS-TO-LEX-IS-NOT-REPORTED-AS-A-LINE. An unclosed quote hides the syntax error before it — 2026-08-06 — OPEN (the `set -v` half fixed 2026-08-07)
 
 **Where:** `userspace/oils/src/lexer.rs` — `tokenize_deferred`, which lexes the
 whole input up front and, on an unterminated construct, cuts the tokens back to
@@ -944,10 +944,44 @@ Found while measuring shapes for
 here-document warning itself is *not* affected: it is correctly suppressed there,
 because the prefix in front of the `<<` is not a complete program either.
 
-**Proper fix.** The `set -v` half is the smaller one and can be done alone:
-the echo is driven from a parse unit's line span, so a lexer error needs to carry
-the physical lines it consumed and have them echoed before the error is printed.
-The syntax-error half is the same architectural obstacle as
+**The `set -v` half is ✅ FIXED (2026-08-07)** — in `parser.rs`, not `lexer.rs`.
+Measuring it showed the entry had understated the bug: the echo was wrong for
+*grammar* errors too, not only for a lexer death, in three shapes with one cause.
+
+```
+                           bash echoed        osh echoed
+fi                         the line           nothing
+) echo x                   the line           nothing
+echo a; ) bad              the whole line     `echo a;'   (cut at the error)
+{ echo a / ) bad / }       both lines         the first only
+echo "unterm / echo three  both lines         nothing
+```
+
+`IncrementalParser::split_unit_lines` ended a unit's raw span at the last
+**successfully consumed** token. But `shell_getc` hands the parser a whole
+physical line and echoes it *there*, before a single token is taken off it — so
+by the time yacc finds a token it cannot shift, that token's line has already
+gone out. An error on the unit's first token therefore left the span empty, a
+mid-line one cut the line in half, and an error on a later line of a multi-line
+unit dropped that line entirely.
+
+An error-ending unit now goes through `split_unit_error_lines`, which stretches
+the span to the end of the physical line the **offending token** stands on.
+Taking the offending token — rather than just running the old end out to its own
+line's end — is what the `{ echo a` / `) bad` shape needs: the parse stopped on a
+`Newline`, so the old end was *already* at a line boundary and the reader had
+simply gone on to read the next line before failing on it. The parked-lexer-error
+unit takes the same path with end-of-input as its blame, which is exactly right:
+the reader ran to EOF looking for the close, so every line it passed belongs to
+the unit that reports it. The same span feeds the command history, and bash
+agrees there too (measured through `eval` under `set -o history`).
+
+**Pinned by** `interp.rs::a_unit_that_fails_to_parse_still_covers_the_line_it_failed_on`
+and `tests/corpus/set-v-echoes-a-line-the-parse-then-refuses.sh`.
+
+**Proper fix (the syntax-error half, still open).** Rows 1–2 of the table above
+remain: an unclosed quote still pre-empts a grammar error raised *before* it on
+the same line. That is the same architectural obstacle as
 TD-OILS-A-COMSUB-THAT-NEVER-CLOSES-HIDES-THE-ERROR-INSIDE-IT: the parked lexer
 error must not pre-empt a grammar error raised on a token that precedes the
 unclosed construct *on the same line*. That needs the failing line's tokens kept

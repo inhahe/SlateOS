@@ -55937,6 +55937,65 @@ mod tests {
         }
     }
 
+    /// A unit that ends in an error still covers the whole line the error is on,
+    /// because bash's reader hands a physical line over — and `set -v` echoes it
+    /// — before the parser takes a single token off it.
+    ///
+    /// `shell_getc` reads a line into `shell_input_line` and echoes it there and
+    /// then, so by the time yacc looks at a token and finds it cannot shift it,
+    /// that token's line has already gone out. Ending the unit at the last
+    /// *successfully consumed* token instead loses the offender: the first
+    /// token's error left the span empty, a mid-line one cut the line in half,
+    /// and an error on a later line of a multi-line unit dropped that line
+    /// entirely.
+    #[test]
+    fn a_unit_that_fails_to_parse_still_covers_the_line_it_failed_on() {
+        let opts = crate::lexer::ParseOpts::default();
+        // Every unit's raw span, in order, exactly as `set -v` would echo them.
+        let spans = |src: &str| {
+            let mut ip = crate::parser::IncrementalParser::new(src.as_bytes(), 0, opts);
+            let mut out = Vec::new();
+            while let Some(unit) = ip.next_unit(None, opts) {
+                out.push(String::from_utf8_lossy(ip.last_unit_raw()).into_owned());
+                if unit.is_err() {
+                    break;
+                }
+            }
+            out
+        };
+        // An error on the unit's own first token: the line is read all the same.
+        assert_eq!(spans("fi\n"), ["fi\n"]);
+        assert_eq!(spans(") echo x\n"), [") echo x\n"]);
+        // Mid-line: the whole line, not the part that parsed.
+        assert_eq!(spans("echo a; ) bad\n"), ["echo a; ) bad\n"]);
+        assert_eq!(spans("echo a && ) bad\n"), ["echo a && ) bad\n"]);
+        assert_eq!(spans("echo b;;\n"), ["echo b;;\n"]);
+        // A later line of a multi-line unit — and no further, since the reader
+        // never got to the `}`.
+        assert_eq!(spans("{ echo a\n) bad\n}\n"), ["{ echo a\n) bad\n"]);
+        // Earlier units are untouched, and each still ends at its own line.
+        assert_eq!(spans("echo one\necho two;;\necho three\n"), ["echo one\n", "echo two;;\n"]);
+        // An unclosed construct is the same rule from the other end: the reader
+        // ran to end of input looking for the close, so every line it passed on
+        // the way belongs to the unit that reports it.
+        assert_eq!(spans("echo \"\n"), ["echo \"\n"]);
+        assert_eq!(spans("echo one\necho \"unterm\necho three\n"), [
+            "echo one\n",
+            "echo \"unterm\necho three\n",
+        ]);
+        assert_eq!(spans("echo $(\n"), ["echo $(\n"]);
+        assert_eq!(spans("cat <<E \"\n"), ["cat <<E \"\n"]);
+        // A unit that parses is unaffected: one line, echoed once.
+        assert_eq!(spans("echo a; echo b\n"), ["echo a; echo b\n"]);
+        assert_eq!(spans("if true; then\necho x\nfi\n"), ["if true; then\necho x\nfi\n"]);
+        // Including one whose newline swallowed a here-document body — the span
+        // already ran past the body, so nothing stretches it further.
+        assert_eq!(spans("cat <<E\nbody\nE\necho after\n"), [
+            "cat <<E\nbody\nE\n",
+            "echo after\n",
+        ]);
+    }
+
     /// The other half of the same reduction: a here-document whose body the lex
     /// never even reached, because an unclosed construct after the `<<` swallowed
     /// the input. bash still warns about it — from the `simple_list` action, which

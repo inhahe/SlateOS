@@ -177,6 +177,29 @@ pub struct ParseError {
     /// `None` — the overwhelmingly common case — leaves the caller to echo the
     /// script's own line, which is all it can do for a text it does not hold.
     pub echo: Option<Str>,
+    /// True when this diagnostic is a *sequel* to the lexer's rather than a
+    /// replacement for it: both are printed, this one second.
+    ///
+    /// bash's `read_token_word` does not abort the parse when a matched-pair
+    /// scan runs off the end of the input. It prints its own message and bails
+    /// *to the parser* — `return -1; /* Bail immediately. */` (parse.y:5151) —
+    /// so the parser is handed a token that is not a `WORD` and objects to it in
+    /// turn, from wherever it was. `[[ x =~ ( ]]` is the shape that shows it:
+    ///
+    /// ```text
+    /// line 2: unexpected EOF while looking for matching `)'
+    /// line 3: unexpected argument to conditional binary operator
+    /// ```
+    ///
+    /// The second line is `cond_term`'s `else` branch (parse.y:4780), bare
+    /// because `error_token_from_token(-1)` can name no token; it is reported at
+    /// `line_number`, which the failed scan has by then run to one past the last
+    /// line of the input.
+    ///
+    /// [`IncrementalParser::next_unit`] reads this to know it must print the
+    /// parked lexer error and *then* this one, instead of letting the parked one
+    /// replace it as it does for every other error a truncated stream provokes.
+    pub bail_sequel: bool,
 }
 
 impl ParseError {
@@ -190,6 +213,32 @@ impl ParseError {
             recoverable: false,
             line_at: Vec::new(),
             echo: None,
+            bail_sequel: false,
+        }
+    }
+
+    /// This diagnostic printed *under* `first`, as one error rather than two.
+    ///
+    /// bash has no notion of a compound diagnostic — it simply calls
+    /// `parser_error` twice — but osh carries an error to one place that prints
+    /// it, so the two messages have to travel joined. `first`'s line and echo
+    /// lead, it being the one reported first; this error's own `line_at` entries
+    /// shift past `first`'s message lines so they keep naming the same text.
+    #[must_use]
+    fn under(self, first: Self) -> Self {
+        let lead = u32::try_from(first.msg.iter().filter(|&&b| b == b'\n').count())
+            .unwrap_or(u32::MAX)
+            .saturating_add(1);
+        let mut line_at = first.line_at;
+        line_at.extend(self.line_at.iter().map(|&(i, l)| (i.saturating_add(lead), l)));
+        Self {
+            msg: bfmt![first.msg, b"\n", self.msg],
+            line: first.line,
+            fatal: first.fatal,
+            recoverable: first.recoverable,
+            line_at,
+            echo: first.echo,
+            bail_sequel: false,
         }
     }
 
@@ -273,6 +322,7 @@ impl From<crate::lexer::LexError> for ParseError {
             recoverable: e.recoverable,
             line_at: Vec::new(),
             echo: None,
+            bail_sequel: false,
         }
     }
 }
@@ -1240,6 +1290,23 @@ impl IncrementalParser {
         }
     }
 
+    /// The line bash's reader stands on once it has read the whole input: one
+    /// past its last.
+    ///
+    /// `line_number` counts the lines `shell_getc` has handed over, and a scan
+    /// that runs off the end has handed over every one of them — so a diagnostic
+    /// printed after such a scan (see [`ParseError::bail_sequel`]) names a line
+    /// that does not exist. The input's *last* line is a line even without a
+    /// newline of its own: the reader ends it at EOF just as it would at `\n`,
+    /// which is why a one-line file with no trailing newline still reports 2.
+    fn line_past_end(&self) -> u32 {
+        let nl = self.src.iter().filter(|&&c| c == '\n').count();
+        let last = u32::try_from(nl)
+            .unwrap_or(u32::MAX)
+            .saturating_add(u32::from(self.src.last().is_some_and(|&c| c != '\n')));
+        self.line_map.map(last.max(1)).saturating_add(1)
+    }
+
     /// The physical source line the token `p` is stopped at was written on,
     /// which is what bash echoes under a diagnostic whose line number a
     /// here-document gather has moved past. Keyed off the token's own character
@@ -1301,6 +1368,7 @@ impl IncrementalParser {
             pos: self.wpos,
             opts: self.opts,
             depth: 0,
+            truncated_at: self.pending_lex_err.is_some().then(|| self.line_past_end()),
         };
         let mut items = Vec::new();
         // Whether the parse ended by asking for a token the stream did not have.
@@ -1367,11 +1435,13 @@ impl IncrementalParser {
                 }
                 // An error the *shape* of running out is one: the parser asked
                 // for the token that would close the construct and there was
-                // none. Any other is a real objection to a token it did get —
-                // an eagerly-parsed `$( … )` body's own error, say — raised
-                // before the fetch that would have found the lexer's.
+                // none. So is one raised *because* the stream was cut short and
+                // meant to print under the lexer's own message. Any other is a
+                // real objection to a token the parser did get — an eagerly-parsed
+                // `$( … )` body's own error, say — raised before the fetch that
+                // would have found the lexer's.
                 Err(e) => {
-                    ran_dry = e.is_incomplete();
+                    ran_dry = e.is_incomplete() || e.bail_sequel;
                     break Err(e);
                 }
             }
@@ -1416,8 +1486,16 @@ impl IncrementalParser {
         // itself. What survives is an error raised over a token the parser did
         // get, which bash's would have reached before ever asking for the next:
         // `) echo "` reports the stray `)`.
+        //
+        // The exception is an error that only exists *because* the stream was cut
+        // short — bash's scan bails to the parser rather than aborting the parse,
+        // so the parser objects in its turn and both are printed. That one joins
+        // the parked error instead of being replaced by it.
         let outcome = match self.pending_lex_err.take_if(|_| ran_dry) {
-            Some(e) => Err(e),
+            Some(lex) => Err(match outcome {
+                Err(e) if e.bail_sequel => e.under(lex),
+                _ => lex,
+            }),
             None => outcome,
         };
         // Resume at the first not-yet-consumed token that came from the original
@@ -1975,6 +2053,7 @@ fn parse_tokens_ending(
         pos: 0,
         opts,
         depth: 0,
+        truncated_at: None,
     };
     // The closing `)` is consumed by nothing, so a complete body leaves the
     // cursor on it rather than past it.
@@ -2033,6 +2112,21 @@ struct Parser {
     /// A failing parse leaves this raised: what the question wants is the depth
     /// the error was *raised* at, not the depth the cursor unwound to.
     depth: u32,
+    /// `Some(line)` when this stream stops because the *lexer* gave up inside an
+    /// unclosed construct, rather than because the input ended — carrying the
+    /// line bash's reader had run to by then, one past the input's last.
+    ///
+    /// The distinction matters wherever a diagnostic depends on what the parser
+    /// was handed at the end. bash's scan bails *to the parser* on an
+    /// unterminated construct (see [`ParseError::bail_sequel`]), so the parser
+    /// gets a token — one that is not a `WORD` and cannot be named — where osh's
+    /// truncated stream simply has nothing left. `cond_operand_error` is the one
+    /// place that can tell the two apart from the outside, and it needs this to
+    /// do it: `[[ x =~ ( ]]` is not `[[ x =~` with the file ending.
+    ///
+    /// `None` for every stream whose end is a real end — including a `$( … )`
+    /// body parsed on its own, whose text the enclosing scan already closed.
+    truncated_at: Option<u32>,
 }
 
 /// The text a token stream was lexed from, with each token's end offset into it.
@@ -3547,13 +3641,15 @@ impl Parser {
         // A term may start on a later line than the operator that introduced it.
         self.skip_cond_newlines();
         if self.peek().is_none() {
-            // Waiting for a term and the input ran out. bash names the token it
-            // did not get, rather than reporting a missing `]]` — that message
-            // is reserved for an expression that *was* complete.
-            return Err(CondError::new(
-                "unexpected token `EOF' in conditional command",
-                "syntax error: unexpected end of file",
-            ));
+            // Waiting for a term and nothing came. bash names the token it did
+            // not get, rather than reporting a missing `]]` — that message is
+            // reserved for an expression that *was* complete. Built by
+            // `cond_operand_error` because bash builds it in the same place: the
+            // `else` at the foot of `cond_term` is reached both from here, where
+            // `cond_skip_newlines` hands back the token that begins a term, and
+            // from the operand slots below. Which of its forms this is depends
+            // on whether the stream merely ended or the lexer cut it short.
+            return Err(self.cond_operand_error(CondPos::Primary));
         }
         if self.at_bare_word(b"!") {
             self.pos += 1;
@@ -3579,7 +3675,7 @@ impl Parser {
                 if self.peek().is_none() {
                     return Err(CondError::Cond {
                         clauses: vec![(Some(open), b"unexpected token `EOF', expected `)'".to_vec())],
-                        tail: b"syntax error: unexpected end of file".to_vec(),
+                        tail: Some(b"syntax error: unexpected end of file".to_vec()),
                     });
                 }
                 let tok = self.token_display();
@@ -3588,7 +3684,7 @@ impl Parser {
                         Some(open),
                         bfmt![b"unexpected token `", &tok, b"', expected `)'"],
                     )],
-                    tail: bfmt![b"syntax error near `", &tok, b"'"],
+                    tail: Some(bfmt![b"syntax error near `", &tok, b"'"]),
                 });
             }
             self.pos += 1;
@@ -3782,6 +3878,33 @@ impl Parser {
     /// implicit-`newline` model we don't reproduce, so we fall back to a plain
     /// end-of-file diagnostic there.
     fn cond_operand_error(&self, pos: CondPos) -> CondError {
+        // A stream the *lexer* cut short is not a stream that ended. bash's scan
+        // bails to the parser with `-1` rather than aborting (see
+        // [`ParseError::bail_sequel`]), so `cond_term` is handed a token after
+        // all — one `error_token_from_token` cannot name, which is why the two
+        // operator forms lose their `` `X' `` and the primary form spells it
+        // `%c` of `-1`: the single byte 0xFF. None of the three gets a `near`
+        // line, because `COND_RETURN_ERROR` returns straight out and
+        // `parse_cond_command` prints nothing more once `cond_token` is
+        // `COND_ERROR` (parse.y:4574). Reported where the failed scan left
+        // `line_number` — one past the input's last line, not where the operator
+        // was.
+        if let Some(at) = self.truncated_at.filter(|_| self.peek().is_none()) {
+            return match pos {
+                CondPos::Primary => CondError::sequel(
+                    at,
+                    &bfmt![b"unexpected token `", [0xFF].as_slice(), b"' in conditional command"],
+                ),
+                CondPos::Unary => CondError::sequel(
+                    at,
+                    b"unexpected argument to conditional unary operator".as_slice(),
+                ),
+                CondPos::Binary => CondError::sequel(
+                    at,
+                    b"unexpected argument to conditional binary operator".as_slice(),
+                ),
+            };
+        }
         if self.peek().is_none() {
             // End of input in primary position is the one place bash *does*
             // name the token: `cond_term` calls `read_token`, is handed `EOF`,
@@ -5504,9 +5627,17 @@ enum CondPos {
 enum CondError {
     /// A conditional diagnostic: the clauses in the order bash prints them,
     /// then the last line — `syntax error near \`X'`, or the end-of-input one.
+    ///
+    /// `tail` is `None` for the one failure that has no last line: a scan that
+    /// bailed to the parser (see [`ParseError::bail_sequel`]) leaves nothing to
+    /// point "near", and `report_syntax_error` is never reached at all because
+    /// `cond_term` returns through `COND_RETURN_ERROR` and `parse_cond_command`
+    /// then skips both of its own messages (parse.y:4574). The group clauses
+    /// still accumulate, though — `[[ ( ( x =~ " ) ) ]]` prints the bail message
+    /// and two `expected \`)'` lines under it, and nothing else.
     Cond {
         clauses: Vec<(Option<u32>, Str)>,
-        tail: Str,
+        tail: Option<Str>,
     },
     /// A failure that is not part of that model, raised by something the
     /// conditional grammar merely calls — the word lowering underneath it. bash
@@ -5526,7 +5657,7 @@ impl CondError {
     fn new(clause: &(impl bytes::PushBytes + ?Sized), tail: &(impl bytes::PushBytes + ?Sized)) -> Self {
         CondError::Cond {
             clauses: vec![(None, bfmt![clause])],
-            tail: bfmt![tail],
+            tail: Some(bfmt![tail]),
         }
     }
 
@@ -5536,7 +5667,17 @@ impl CondError {
     fn bare(tail: &(impl bytes::PushBytes + ?Sized)) -> Self {
         CondError::Cond {
             clauses: Vec::new(),
-            tail: bfmt![tail],
+            tail: Some(bfmt![tail]),
+        }
+    }
+
+    /// A diagnostic that is only its *first* line, reported at `line` rather
+    /// than wherever the enclosing error is: what `cond_term` prints when the
+    /// lexer bailed to it. See the `tail` field and [`ParseError::bail_sequel`].
+    fn sequel(line: u32, clause: &(impl bytes::PushBytes + ?Sized)) -> Self {
+        CondError::Cond {
+            clauses: vec![(Some(line), bfmt![clause])],
+            tail: None,
         }
     }
 
@@ -5565,11 +5706,21 @@ impl CondError {
             if let Some(l) = *line {
                 line_at.push((u32::try_from(i).unwrap_or(u32::MAX), l));
             }
+            if i > 0 {
+                msg.push(b'\n');
+            }
             msg.extend_from_slice(text);
-            msg.push(b'\n');
         }
-        msg.extend_from_slice(&tail);
-        ParseError { line_at, ..ParseError::new(&msg) }
+        // No tail is the bail case, which is also the case with no `near` line
+        // to end on — so there is nothing to separate the clauses from either.
+        let bail_sequel = tail.is_none();
+        if let Some(tail) = &tail {
+            if !clauses.is_empty() {
+                msg.push(b'\n');
+            }
+            msg.extend_from_slice(tail);
+        }
+        ParseError { line_at, bail_sequel, ..ParseError::new(&msg) }
     }
 }
 
@@ -6327,6 +6478,130 @@ mod tests {
         assert!(parse("[[ -f /etc ]]").is_ok());
         assert!(parse("[[ a == a && ( b == b || c == c ) ]]").is_ok());
         assert!(parse("[[ ! -z x ]]").is_ok());
+    }
+
+    /// A matched-pair scan that runs off the end of the input does not abort
+    /// bash's parse. `read_token_word` prints its own message and bails *to the
+    /// parser* — `return -1; /* Bail immediately. */` (parse.y:5151) — which is
+    /// handed a token that is not a `WORD` and objects to it in its turn. So a
+    /// `[[ … ]]` whose operand dies at EOF draws two diagnostics where every
+    /// other truncated construct draws one, and the second is reported at the
+    /// line the failed scan ran to: one past the input's last, since `shell_getc`
+    /// counted every line it swallowed looking for the close.
+    ///
+    /// The second names no token, `error_token_from_token(-1)` being able to
+    /// spell none — so the two operator forms lose their `` `X' `` and the
+    /// primary form falls to a `%c` of `-1`, the byte 0xFF. None of them gets a
+    /// `near` line either: `cond_term` leaves through `COND_RETURN_ERROR`, and
+    /// `parse_cond_command` prints nothing more once `cond_token` is
+    /// `COND_ERROR` (parse.y:4574). Every row is measured against bash 5.2.37.
+    #[test]
+    fn a_conditional_operand_that_dies_at_eof_draws_a_second_diagnostic() {
+        /// The error `src` ends on, each message line tagged with the line it is
+        /// reported at — which is the whole point here.
+        ///
+        /// Read through [`IncrementalParser`] because that is where a parked
+        /// lexer error lives; `parse` goes by way of `tokenize_spanned`, which
+        /// gives up on one and so never reaches the parser at all.
+        fn diag(src: &str) -> String {
+            let opts = ParseOpts::default();
+            let mut ip = IncrementalParser::new(src.as_bytes(), 0, opts);
+            while let Some(unit) = ip.next_unit(None, opts) {
+                let Err(e) = unit else { continue };
+                let line = e.line.unwrap_or(0);
+                return e
+                    .msg
+                    .split(|&b| b == b'\n')
+                    .enumerate()
+                    .map(|(i, m)| {
+                        // Latin-1, so the one non-ASCII byte these messages can
+                        // carry — 0xFF — survives the comparison rather than
+                        // being replaced by a decode that cannot spell it.
+                        let m: String = m.iter().map(|&b| char::from(b)).collect();
+                        format!("{}: {m}", e.line_of(i, line))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+            }
+            panic!("{src:?} must fail")
+        }
+        let binary = "unexpected argument to conditional binary operator";
+        let unary = "unexpected argument to conditional unary operator";
+        let primary = "unexpected token `\u{ff}' in conditional command";
+        // Every construct the scan can die inside, in each of the three operand
+        // positions. The first line is the scan's, at the line it gave up on.
+        for (src, close, second) in [
+            ("[[ x =~ ( ]]\n", ")", binary),
+            ("[[ x =~ (a ]]\n", ")", binary),
+            ("[[ x =~ \" ]]\n", "\"", binary),
+            ("[[ x =~ ` ]]\n", "`", binary),
+            ("[[ x =~ ${ ]]\n", "}", binary),
+            ("[[ -n \" ]]\n", "\"", unary),
+            ("[[ \" ]]\n", "\"", primary),
+            // `!` and `&&` reach the same slots.
+            ("[[ ! x =~ ( ]]\n", ")", binary),
+            ("[[ -n x && \" ]]\n", "\"", primary),
+            // The input's last line is a line even with no newline of its own:
+            // the reader ends it at EOF exactly as it would at `\n`.
+            ("[[ x =~ ( ]]", ")", binary),
+        ] {
+            let want = format!(
+                "1: unexpected EOF while looking for matching `{close}'\n2: {second}"
+            );
+            assert_eq!(diag(src), want, "src {src:?}");
+        }
+        // A `$( … )` is scanned by a reader of its own, which has already taken
+        // the newline by the time it gives up — so *both* lines are the one past.
+        assert_eq!(
+            diag("[[ x =~ $(echo a ]]\n"),
+            format!("2: unexpected EOF while looking for matching `)'\n2: {binary}"),
+        );
+        assert_eq!(
+            diag("[[ $(echo a ]]\n"),
+            format!("2: unexpected EOF while looking for matching `)'\n2: {primary}"),
+        );
+        // Each enclosing group still adds the `)` it never reached, after the
+        // bail message and at the line its own `(` was on.
+        assert_eq!(
+            diag("[[ ( ( x =~ \" ) ) ]]\n"),
+            format!(
+                "1: unexpected EOF while looking for matching `\"'\n2: {binary}\n1: expected `)'\n1: expected `)'"
+            ),
+        );
+        // The line is where the reader stopped, not where the operator was, so
+        // every line the scan swallowed counts.
+        assert_eq!(
+            diag("echo A\n[[ x =~ (\none\ntwo\n"),
+            format!("2: unexpected EOF while looking for matching `)'\n5: {binary}"),
+        );
+        assert_eq!(
+            diag("echo A\n[[ x =~ ( ]]\necho B\necho C\n"),
+            format!("2: unexpected EOF while looking for matching `)'\n5: {binary}"),
+        );
+        // Not every unclosed operand is a bail. `[[ x == ( ]]` has no
+        // `PST_REGEXP`, so the `(` is never handed to `parse_matched_pair` and
+        // is an ordinary token the parser objects to where it stands; and an
+        // input that simply *ends* leaves the grammar to report it, with the
+        // end-of-file forms this change must not disturb.
+        for (src, want) in [
+            (
+                "[[ x == ( ]]\n",
+                "1: unexpected argument `(' to conditional binary operator\n1: syntax error near `('",
+            ),
+            ("[[ ( ]]\n", "1: expected `)'\n1: syntax error near `]]'"),
+            (
+                "[[ a == b\n",
+                "1: unexpected EOF while looking for `]]'\n2: syntax error: unexpected end of file",
+            ),
+            (
+                "[[ a &&\n",
+                "2: unexpected token `EOF' in conditional command\n2: syntax error: unexpected end of file",
+            ),
+        ] {
+            assert_eq!(diag(src), want, "src {src:?}");
+        }
+        // And a closed group is no failure at all.
+        assert!(parse("[[ x =~ ( ) ]]").is_ok());
     }
 
     #[test]

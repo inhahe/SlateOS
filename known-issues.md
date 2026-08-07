@@ -1272,7 +1272,7 @@ need. The `SubstBail` path then becomes the special case it should always
 have been: the *last*, unterminated body, parsed on the way out because there
 is no `)` to close it on.
 
-### TD-OILS-A-CONDITIONAL-RHS-THAT-DIES-AT-EOF-GETS-ONLY-ONE-OF-BASHS-TWO-DIAGNOSTICS. `[[ x =~ ( ]]` — 2026-08-06 — OPEN
+### TD-OILS-A-CONDITIONAL-RHS-THAT-DIES-AT-EOF-GETS-ONLY-ONE-OF-BASHS-TWO-DIAGNOSTICS. `[[ x =~ ( ]]` — 2026-08-06 — ✅ FIXED 2026-08-07
 
 **Where:** `userspace/oils/src/parser.rs` — `cond_operand_error` and the
 conditional-expression parser around it; the error is raised by the lexer
@@ -1327,12 +1327,95 @@ by `[[ x == ( ]]` (no `PST_REGEXP`, so `(` is never given to
 `parse_matched_pair`), nor by `[[ ( ]]`, `[[ x =~ ) ]]`, `[[ x =~ ( ) ]]`,
 all of which already match byte for byte.
 
-**Proper fix:** give osh's lexer a bail token. A matched-pair scan that hits
-EOF should print its message and yield a distinguished "erroneous token"
-rather than aborting the parse, so the conditional parser reaches
-`cond_operand_error` and can add bash's second line at the end-of-input
-line number. See the sibling entry above — the comsub ordering bug wants the
-same change.
+**✅ FIXED (2026-08-07)**, and it turned out to want no bail *token*.
+
+The prerequisite was
+TD-OILS-A-LINE-THAT-FAILS-TO-LEX-IS-NOT-REPORTED-AS-A-LINE, which stopped the
+lexer throwing away the failing line's tokens. With `[[`, `x` and `=~` kept,
+osh's conditional parser already reached the RHS slot and already raised an
+error there — it was simply the wrong error, and was then discarded in favour
+of the parked lexer one. So all that was needed was to tell the two apart and
+join them:
+
+- `Parser::truncated_at: Option<u32>` says the stream was cut short by the
+  lexer rather than by the input ending, and carries the line the reader ran
+  to. That is the one fact `cond_operand_error` cannot see from the inside: a
+  bail leaves bash's parser holding a token, where osh's truncated stream just
+  has nothing left. `IncrementalParser::line_past_end` computes the line — the
+  input's last (a final line counts even with no newline of its own) plus one.
+- `cond_operand_error` grew the three bail forms, all bare of any `` `X' ``
+  because `error_token_from_token(-1)` can name none, and all without a `near`
+  line because `COND_RETURN_ERROR` returns before `report_syntax_error`. The
+  primary form is a `%c` of `-1`, i.e. the single byte 0xFF. `parse_cond_not`'s
+  end-of-input arm was routed through the same builder, since bash reaches the
+  same `else` from both places.
+- `CondError::Cond.tail` became `Option<Str>` — the bail is the one conditional
+  diagnostic with no last line. The group clauses still accumulate under it, so
+  `[[ ( ( x =~ " ) ) ]]` prints the bail message and two `expected `)'` lines.
+- `ParseError::bail_sequel` marks such an error, and `next_unit` prints it
+  *under* the parked lexer error (`ParseError::under`) instead of letting the
+  parked one replace it. It also counts as "ran dry", so the parked error is
+  still released.
+
+All three operand positions are covered, not just the binary one the entry was
+written about: `[[ -n " ]]` gets the unary form and `[[ " ]]` the primary one.
+
+**Also pinned by** `parser.rs::a_conditional_operand_that_dies_at_eof_draws_a_second_diagnostic`
+and `tests/corpus/cond-operand-that-dies-at-eof.sh`.
+
+**Found while fixing:** `[[ x =~ $(( ]]` — see
+TD-OILS-AN-UNTERMINATED-ARITHMETIC-EXPANSION-IS-REPARSED-AS-A-SUBSTITUTION-BODY
+below. Its *second* line is right; only the lexer's own first line is wrong,
+and for a reason that has nothing to do with conditionals.
+
+### TD-OILS-AN-UNTERMINATED-ARITHMETIC-EXPANSION-IS-REPARSED-AS-A-SUBSTITUTION-BODY. `echo $(( fi` — 2026-08-07 — OPEN
+
+**Where:** `userspace/oils/src/parser.rs` — `resolve_subst_bail`, and the
+`SubstBail` the lexer raises for it in `userspace/oils/src/lexer.rs`.
+
+**What.** An unterminated `$(( … )` whose text happens not to parse as a
+command list is reported as that text's grammar error instead of as the missing
+paren:
+
+| input | bash | osh |
+|---|---|---|
+| `echo $((` | ``line 1: unexpected EOF while looking for matching `)'`` | same ✅ |
+| `echo a$(( b` | ``… matching `)'`` | same ✅ |
+| `echo $(( fi` | ``… matching `)'`` | ``syntax error near unexpected token `fi'`` + echo |
+| `echo $(( ]]` | ``… matching `)'`` | ``syntax error near unexpected token `]]'`` + echo |
+| `echo $(( )` | ``… matching `)'`` | ``syntax error near unexpected token `)'`` + echo |
+| `[[ x =~ $(( ]]` | ``… matching `)'`` + the conditional sequel | grammar error + the sequel |
+
+The rows that already agree are the ones whose body happens to *be* a valid
+command list, so the two paths coincide by accident.
+
+**Why.** `SubstBail` exists because bash parses a `$( … )` body **as it reads
+it** — `parse_comsub` runs a nested `yyparse` — so a body error comes out before
+the missing `)` is ever noticed (``echo $(fi`` is ``near `fi'``, not ``matching
+`)'``). But `parse_comsub` does not do that for `$((`. Its first act is:
+
+```c
+  /* Posix interp 217 says arithmetic expressions have precedence, so
+     assume $(( introduces arithmetic expansion and parse accordingly. */
+  if (open == '(')		/*)*/
+    {
+      peekc = shell_getc (1);
+      shell_ungetc (peekc);
+      if (peekc == '(')		/*)*/
+	return (parse_matched_pair (qc, open, close, lenp, P_ARITH));
+    }
+```
+
+(parse.y:4095). `parse_matched_pair` is a pure character scan — it never parses
+commands, so there is no body error to come out first and the unterminated-paren
+message stands. osh applies the bail to both.
+
+**Proper fix:** do not raise `SubstBail` for a `$((`. The lexer knows which it
+is at the point it starts the scan (the second `(` is what selects arithmetic),
+so the bail should be suppressed there rather than unpicked afterwards in
+`resolve_subst_bail`. Note the *reverse* case is already right and must stay so:
+a `$((` that closes but is not valid arithmetic is re-read as `$( ( … ) )`, and
+that path is not this one.
 
 ### TD-OILS-THE-BINDING-COMPLETION-ACTION-OFFERED-NOTHING. `compgen -A binding` answered empty where bash lists 174 names — 2026-08-06 — ✅ FIXED 2026-08-06
 

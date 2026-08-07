@@ -127,7 +127,7 @@ use crate::histexpand::{Expansion, HistCtx};
 use crate::lexer;
 use crate::lexer::ReaderWarning;
 use crate::parser::{
-    IncrementalParser, UnitLine, UnitLineKind, parse_opts, parse_with_aliases,
+    IncrementalParser, Quoting, UnitLine, UnitLineKind, parse_opts, parse_with_aliases,
 };
 #[cfg(windows)]
 use crate::wincmd;
@@ -28367,7 +28367,7 @@ impl Shell {
     /// not `z: unbound variable`.
     fn arith_indir_resolves(&mut self, name: BStr<'_>) -> bool {
         let Ok(WordPart::Indirect { refname, index }) =
-            crate::parser::parse_braced_param(name, self.parse_opts())
+            crate::parser::parse_braced_param(name, self.parse_opts(), Quoting::Dquote)
         else {
             return true;
         };
@@ -28685,7 +28685,23 @@ impl Shell {
                         }
                         continue;
                     }
-                    let val = match crate::parser::parse_braced_param(&inner, self.parse_opts()) {
+                    // The operand is read *double-quoted*: bash expands an
+                    // arithmetic string with `expand_arith_string (…,
+                    // Q_DOUBLE_QUOTES|Q_ARITH)` (subst.c:8134), and
+                    // `expand_word_internal`'s `'` arm is `if (quoted &
+                    // (Q_DOUBLE_QUOTES|Q_HERE_DOCUMENT)) goto add_character`
+                    // (subst.c:11577) — so a single quote written in the operand
+                    // is an ordinary character that reaches the evaluator, which
+                    // rejects it. `echo $(( ${x:-'5'} ))` is
+                    // `'5' : syntax error: operand expected`, not 5. It is the
+                    // same rule the pass around this one already follows for the
+                    // quotes written outside a `${ … }` — see the `'"'` arm
+                    // above, and `$(( '5' ))`.
+                    let val = match crate::parser::parse_braced_param(
+                        &inner,
+                        self.parse_opts(),
+                        Quoting::Dquote,
+                    ) {
                         Ok(part) => {
                             let word = Word { parts: vec![part] };
                             // `expand_word_inner`, not `expand_word`: this is

@@ -5097,8 +5097,16 @@ fn is_length_target(name: &str) -> bool {
         || (!name.is_empty() && name.bytes().all(|b| b.is_ascii_digit()))
 }
 
-pub(crate) fn parse_braced_param(raw: BStr<'_>, opts: ParseOpts) -> Result<WordPart, ParseError> {
-    parse_braced_param_in(raw, opts, Quoting::Bare, RUNTIME_TEXT)
+/// Parse a `${ … }` body that reached the expander as *text* rather than as a
+/// segment the word lexer had already lowered — an arithmetic string, or a
+/// `${!ref…` whose brace never closed. `q` is the quoting the text is being
+/// expanded under, which its operand is read with (see [`Quoting`]).
+pub(crate) fn parse_braced_param(
+    raw: BStr<'_>,
+    opts: ParseOpts,
+    q: Quoting,
+) -> Result<WordPart, ParseError> {
+    parse_braced_param_in(raw, opts, q, RUNTIME_TEXT)
 }
 
 /// [`parse_braced_param`] with the quoting the `${…}` was written in, which

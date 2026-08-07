@@ -35,9 +35,15 @@ Usage
     python scripts/osh-bash-diff.py -k trap         # only cases matching "trap"
     python scripts/osh-bash-diff.py -v              # show output for every case
 
+The binary under test is the newest of `target/{release,debug}/osh`, and the run
+is refused outright if that binary is older than anything under
+`userspace/oils` — `cargo test --lib` and `cargo clippy` do not relink it, so
+without the check a sweep can report a previous build green. `--allow-stale`
+downgrades the refusal to a warning; `--osh <path>` skips the check entirely.
+
 Exit status: 0 if every case matched (or diverged exactly as waived), 1 if any
 case diverged unexpectedly or a waived case unexpectedly matched, 2 on a setup
-error (no osh binary, no reference bash).
+error (no osh binary, no reference bash, a stale one).
 
 Failure reports
 ---------------
@@ -184,6 +190,39 @@ def find_shell(explicit: str | None, candidates: list[Path], what: str, newest: 
         + ", ".join(str(c) for c in candidates)
         + "). Build it or pass an explicit path."
     )
+
+
+# Sources whose age decides whether the chosen binary is current.
+OSH_SOURCES = REPO / "userspace" / "oils"
+
+
+def check_not_stale(osh: Path, allow: bool) -> None:
+    """Refuse to run against a binary older than the sources it was built from.
+
+    `cargo test --lib` and `cargo clippy` do **not** relink `osh.exe`, so an
+    edit followed by either of those leaves this harness measuring the previous
+    build — and reporting it green. That is worse than not running at all: a
+    sweep is only ever used as a gate, and a gate that passes on stale evidence
+    passes on nothing. Picking the newest of `release/` and `debug/` (see
+    `OSH_CANDIDATES`) narrows the hazard but cannot see this half of it, because
+    both builds can be equally out of date.
+    """
+    newest: tuple[float, Path] | None = None
+    # Only code: the corpus is `.sh` data and editing a case needs no rebuild.
+    for src in [*OSH_SOURCES.rglob("*.rs"), *OSH_SOURCES.rglob("Cargo.toml")]:
+        mtime = src.stat().st_mtime
+        if newest is None or mtime > newest[0]:
+            newest = (mtime, src)
+    if newest is None or newest[0] <= osh.stat().st_mtime:
+        return
+    msg = (
+        f"osh-bash-diff: {osh} is older than {newest[1].relative_to(REPO)} — "
+        "run `cargo build -p oils` first (note that `cargo test --lib` and "
+        "`cargo clippy` do not relink the binary)."
+    )
+    if not allow:
+        sys.exit(msg + " Pass --allow-stale to run anyway.")
+    print(f"WARNING: {msg}\n")
 
 
 def run_case(shell: Path, case: Case) -> Run:
@@ -384,15 +423,27 @@ def main() -> int:
     ap.add_argument("--bash", help="path to the reference bash")
     ap.add_argument("-k", "--filter", help="only run cases whose name contains this substring")
     ap.add_argument("-v", "--verbose", action="store_true", help="print each case's output")
+    ap.add_argument(
+        "--allow-stale",
+        action="store_true",
+        help="run even if the osh binary is older than its sources (warns instead of refusing)",
+    )
     args = ap.parse_args()
 
     # Cases (and their `# EXPECT-DIFF:` reasons) are UTF-8; the Windows console's
     # default code page would mangle any non-ASCII in them, which reads as a
     # harness bug rather than the cosmetic issue it is.
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    # stderr too: the setup errors below are prose, and one of them quotes a
+    # path, so the same mangling would show up there as a bogus-looking byte.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
 
     osh = find_shell(args.osh, OSH_CANDIDATES, "osh", newest=True)
+    # An explicitly named binary is the caller's business — they may well be
+    # comparing against an older build on purpose.
+    if not args.osh:
+        check_not_stale(osh, args.allow_stale)
     bash = find_shell(args.bash, BASH_CANDIDATES, "bash")
     cases = load_cases(args.filter)
     if not cases:

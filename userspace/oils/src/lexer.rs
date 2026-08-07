@@ -4214,30 +4214,19 @@ impl Lexer {
         })
     }
 
-    /// Consume one span in which a closing delimiter closes nothing: a quoted
-    /// string, a backslash escape, a backtick body, a `${ … }`. `Ok(false)`
-    /// means `c` opened none of these, and nothing was consumed.
-    ///
-    /// bash reaches every one of these from `parse_matched_pair` whatever the
-    /// grouping construct it is scanning: `shellquote (ch)` recurses for `'`,
-    /// `"` and `` ` `` (parse.y:3844), `LEX_PASSNEXT` appends the character
-    /// after a backslash and steps past it (parse.y:3741), and a `${` goes to
-    /// `parse_dollar_word` (parse.y:3954). Not one of them is conditional on
-    /// `P_COMMAND` or `P_ARITH`, which is why the *arithmetic* scan needs them
-    /// exactly as much as the substitution one: in `$(( 1 + "2)3" ))` the
-    /// quoted `)` closes nothing and bash evaluates `1 + 2)3`.
-    ///
-    /// `command` is bash's `P_COMMAND`: true when the text being scanned is a
-    /// body of commands rather than an arithmetic expression. It gates the
-    /// `${ … }` arm below, and travels to a nested `$( … )` met inside a
-    /// double-quoted span, which is read by the balanced scan rather than
-    /// skipped — see the comment on that arm.
     /// Copy a `$'…'` run whose opening `'` is the next character, closing quote
     /// included, honouring the ANSI-C escapes: a `\` covers whatever follows it,
     /// so `\'` stays inside the run.
     ///
-    /// Only the *extent* is wanted — the escapes travel unresolved, because this
-    /// text is being copied for a re-lex that will translate them itself.
+    /// Only the *extent* is wanted — the escapes travel unresolved. That is
+    /// **not** what bash does: it translates a `$'…'` where it reads it, and
+    /// [`Lexer::read_opaque_span`] does the same. This copy is for the one place
+    /// that cannot yet: a `${ … }` body, where whether the translation is
+    /// re-quoted afterwards depends on a `dolbrace_state` osh does not track
+    /// (parse.y:3865–3888), and where bash 5.2's answer is a defect it has
+    /// already fixed behind `#if 0 /* TAG:bash-5.3 */`. Copying leaves osh with
+    /// the 5.3 answer. See `known-issues.md`,
+    /// `TD-OILS-AN-ANSI-C-STRING-IS-NOT-REQUOTED-AFTER-A-BRACE-BODY-TRANSLATES-IT`.
     fn take_ansi_c_run(&mut self, raw: &mut Str) -> Result<(), LexError> {
         let q_open = self.cur_line();
         self.pos += 1;
@@ -4260,6 +4249,24 @@ impl Lexer {
         }
     }
 
+    /// Consume one span in which a closing delimiter closes nothing: a quoted
+    /// string, a backslash escape, a backtick body, a `${ … }`. `Ok(false)`
+    /// means `c` opened none of these, and nothing was consumed.
+    ///
+    /// bash reaches every one of these from `parse_matched_pair` whatever the
+    /// grouping construct it is scanning: `shellquote (ch)` recurses for `'`,
+    /// `"` and `` ` `` (parse.y:3844), `LEX_PASSNEXT` appends the character
+    /// after a backslash and steps past it (parse.y:3741), and a `${` goes to
+    /// `parse_dollar_word` (parse.y:3954). Not one of them is conditional on
+    /// `P_COMMAND` or `P_ARITH`, which is why the *arithmetic* scan needs them
+    /// exactly as much as the substitution one: in `$(( 1 + "2)3" ))` the
+    /// quoted `)` closes nothing and bash evaluates `1 + 2)3`.
+    ///
+    /// `command` is bash's `P_COMMAND`: true when the text being scanned is a
+    /// body of commands rather than an arithmetic expression. It gates the
+    /// `${ … }` arm below, and travels to a nested `$( … )` met inside a
+    /// double-quoted span, which is read by the balanced scan rather than
+    /// skipped — see the comment on that arm.
     fn read_opaque_span(
         &mut self,
         c: char,
@@ -4274,10 +4281,38 @@ impl Lexer {
             // `P_ARITH`, so `$(echo $'a\'b')` and `$(( 0 ))` alike see the run
             // whole. Read as a plain quote instead, the run would end at the `\`
             // and the `'` after it would open another that never closes.
+            //
+            // And it does not travel: bash *translates* it here, in the parser,
+            // and splices the result back over the `$'` it had already written
+            // (`ansiexpand` then `retind -= 2`, parse.y:3858–3893). With no
+            // `P_DQUOTE` — which no grouping construct's own scan carries — the
+            // result is re-quoted by `sh_single_quote` (parse.y:3884), so what
+            // the text downstream sees is an ordinary single-quoted run.
+            //
+            // That is not a formality. A single-quoted run is never valid
+            // arithmetic, so `$(( $'5' ))` is an error in bash naming `'5'`;
+            // the escapes are resolved before anything downstream could resolve
+            // them differently (`$'a\0b'` is `'a'`, the NUL having ended the
+            // string); and the substitution changes the text's *shape*, so a
+            // `$'x\ny'` in a `$( … )` body puts a real newline in it and moves
+            // every `$LINENO` after it down a line, exactly as bash's does.
             '$' if self.peek() == Some('\'') => {
-                raw.push(b'$');
-                self.take_ansi_c_run(raw)?;
+                self.pos += 1;
+                let s = self.read_ansi_c_quote()?;
+                raw.extend_from_slice(&crate::escape::sh_single_quote(&s));
                 Ok(true)
+            }
+            // `$"…"` is translated in the same place and the same way, by
+            // `locale_expand` (parse.y:3901) — and re-quoted, with
+            // `singlequote_translations` off by default, as a *double*-quoted
+            // run (`sh_mkdoublequoted`, parse.y:3919). With no message catalogue
+            // the translation is the identity, so the whole of it is the `$`
+            // coming off: what is left is a double-quoted run like any other,
+            // still expanded and still rescanned. `a=5; echo $(( $"a" ))` prints
+            // 5 because arithmetic is handed `"a"`, and `$(( $"1+2" ))` is 3.
+            '$' if self.peek() == Some('"') => {
+                self.pos += 1;
+                self.read_opaque_span('"', raw, command)
             }
             '\'' => {
                 let q_open = self.cur_line();

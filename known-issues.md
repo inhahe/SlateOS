@@ -43,7 +43,119 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
-### TD-OILS-A-DEFERRED-COMMAND-SUBSTITUTION-BODY-REPORTS-THE-ENCLOSING-INPUTS-NAME. `` eval 'echo `echo 2)3`' `` said `eval:` where bash says `command substitution:` — 2026-08-07 — OPEN
+### TD-OILS-A-NESTED-SUBSTITUTION-INSIDE-AN-ARITHMETIC-SCAN-IS-NOT-PARSED-WHEN-IT-CLOSES. `echo $(( 1 + $(fi) ))` evaluated instead of failing — 2026-08-07 — OPEN
+
+**Where:** `userspace/oils/src/lexer.rs` — `Lexer::read_opaque_span`'s nested
+`$( … )` arm, reached from `read_balanced_body` with `command = false`.
+
+**What.** bash's `P_ARITH` scan does *not* treat a nested `$( … )` as opaque
+text: `parse_matched_pair` calls `parse_comsub` for it (parse.y:3927), which is
+a real nested `yyparse`. So a body that will not parse is a **fatal syntax error
+in the enclosing unit**, found while the enclosing line is still being read —
+long before any arithmetic is evaluated:
+
+```text
+echo $(( 1 + $(fi) ))   bash: eval: line 1: syntax error near unexpected token `fi'   rc=1
+                        osh : line 1: 1 +  : syntax error: operand expected …          rc=1
+echo $(( "$(fi)" ))     bash: eval: line 1: syntax error near unexpected token `fi'   rc=1
+                        osh : 0                                                        rc=0
+```
+
+osh gets the *unclosed* forms right — `echo $(( $(fi` matches bash, because the
+bail path fires — so this is specifically the case where the nested `$(` finds
+its `)`. Then `read_opaque_span` skips it as a span, `is_arith_expr` sees a
+balanced expression, and the whole thing becomes `Seg::Arith`; the body is never
+parsed and its error never happens. The second row is the worse one: osh prints
+`0` and succeeds where bash refuses to run the command at all.
+
+**Proper fix:** parse the nested `$( … )` body during the scan, exactly as the
+command scan already does, and raise its error as fatal. The extent-finding and
+the parse are separate concerns in `read_balanced_body` today; the nested-`$(`
+arm needs to do both regardless of `command`. Note this is bash's *only*
+exception — `` ` ` ``, `'…'`, `"…"` and `${…}` stay opaque to the arithmetic
+scan (see
+TD-OILS-AN-UNTERMINATED-ARITHMETIC-EXPANSION-IS-REPARSED-AS-A-SUBSTITUTION-BODY).
+
+### TD-OILS-A-FAILING-BACKTICK-INSIDE-AN-ARITHMETIC-EXPANSION-LOSES-ITS-DIAGNOSTIC. `` echo $(( 1 + `fi` )) `` printed only the arithmetic error — 2026-08-07 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — the arithmetic evaluator's expansion
+of a command substitution inside an expression.
+
+**What.** A backtick *is* opaque to the arithmetic scan, so unlike the entry
+above it survives to expansion time — and then its body is parsed, fails, and
+bash reports it before going on to fail the arithmetic on the empty result. osh
+reports only the second half:
+
+```text
+bash: command substitution: line 1: syntax error near unexpected token `fi'
+      command substitution: line 1: `fi'
+      line 1: 1 +  : syntax error: operand expected (error token is "+  ")   rc=1
+osh :  line 1: 1 +  : syntax error: operand expected (error token is "+  ")  rc=1
+```
+
+The arithmetic error itself matches byte for byte, including the two spaces
+where the substitution's empty value went — so the expansion happens and the
+value is right; only the body's own diagnostic is swallowed.
+
+**Proper fix:** the substitution inside an arithmetic expression must go through
+the same deferred-body path as one in a word, which reports a parse error rather
+than discarding it. Find where the arith evaluator expands and stop it
+suppressing the body's diagnostics.
+
+### TD-OILS-AN-UNTERMINATED-BRACE-LEFT-BY-AN-ARITHMETIC-SCAN-IS-NOT-A-BAD-SUBSTITUTION. `echo $[ 1 + ${x:-]} ]` — 2026-08-07 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — expansion of `Seg::Arith`, and
+whatever reports `bad substitution` for a word.
+
+**What.** Neither `$((` nor `$[` skips a `${ … }` (that wants
+`P_ARRAYSUB|P_DOLBRACE`, parse.y:3929), so the `]` inside the brace ends the
+expansion and the text handed on is `1 + ${x:-` — a word with an unterminated
+brace. bash expands that text as a word first, so the failure is the *word's*:
+
+```text
+bash: line 1: bad substitution: no closing `}' in  1 + ${x:-           rc=1
+osh : line 1: 1 + : syntax error: operand expected (error token is "+ ")  rc=1
+```
+
+osh reaches the arithmetic parser with the `${x:-` already gone. The status
+agrees; the diagnostic names the wrong layer. The `$((` sibling
+(`echo $(( 1 + ${x:-)} ))`) already matches, because there the leftover text
+fails to balance and the whole construct falls back to a command substitution
+instead — a different path entirely.
+
+**Proper fix:** expand the arithmetic text as a word before parsing it as an
+expression, and let the word expansion's own errors out. That is the order bash
+uses (`expand_arith_string` runs before `evalexp`).
+
+### TD-OILS-THE-JOBS-CURRENT-AND-PREVIOUS-TEST-IS-FLAKY-UNDER-LOAD. `jobs_marks_the_current_and_previous_job` failed once in a contended run — 2026-08-07 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — the
+`jobs_marks_the_current_and_previous_job` unit test.
+
+**What.** One `cargo test -p oils --lib` run reported `1356 passed; 1 failed`
+with this test failing; the same binary passed it alone immediately afterwards,
+and passed the full suite twice more (1357/1357). The failing run was the only
+one executed *concurrently with a full corpus sweep* — 475 cases each forking
+`osh` and `bash`, so the machine was saturated with short-lived processes.
+
+**Why (suspected, not yet proven).** The test starts background jobs and checks
+which is `+` and which is `-`. That ordering depends on the jobs' observed
+states, so a job that is reaped — or not yet reaped — at a different moment than
+the test assumes will flip the marks. Under load the window between spawning a
+job and the shell noticing its exit widens by far more than the test's margin.
+The assertion message was not captured; the next occurrence should be run with
+`--nocapture` to record which mark landed where.
+
+**Proper fix:** make the test's ordering deterministic rather than timing-based
+— hold the jobs open on something the test controls (a fifo/read the test
+releases) instead of letting them race to completion, or assert on the job table
+directly after driving the reap step explicitly. Do not paper over it with a
+retry or a sleep.
+
+**Impact:** test-only. No evidence of a product bug; the marks are correct in
+every corpus case that exercises them.
+
+### TD-OILS-A-DEFERRED-COMMAND-SUBSTITUTION-BODY-REPORTS-THE-ENCLOSING-INPUTS-NAME. `` eval 'echo `echo 2)3`' `` said `eval:` where bash says `command substitution:` — 2026-08-07 — ✅ FIXED 2026-08-07
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::syntax_error_prefix`, and the
 `self.comsub_read_eval && self.at_outermost_read_eval()` test it and
@@ -75,17 +187,20 @@ substitution's subshell *inherits* from the caller (`clone_for_subshell` copies
 `eval_depth`; `source_stack` has to be kept for `BASH_SOURCE`). So the body's
 own loop is not recognised as outermost and the caller's token wins.
 
-**Proper fix:** record where the body's loop sits rather than asking whether the
-shell is globally outermost — turn `comsub_read_eval: bool` into the
-`(eval_depth, source_stack.len())` the body started at, and let
-`at_comsub_read_eval()` compare. A nested `eval` then moves off the base and
-reports as itself, which is what bash does. `syntax_error_prefix`'s token
-cascade must also test the body *before* `eval_depth > 0`, since the body is now
-the innermost source of the two.
+**Fix (2026-08-07).** Record where the body's loop sits rather than asking
+whether the shell is globally outermost. `comsub_read_eval: bool` became
+`Option<(u32, usize)>` — the `(eval_depth, source_stack.len())` the body started
+at — and `at_comsub_read_eval()` compares the current pair against it. A nested
+`eval` moves off the base and reports as itself, which is what bash does.
+`syntax_error_prefix`'s token cascade now tests the body *before*
+`eval_depth > 0`, since the body is the innermost of the two; `parse_error_flow`
+shares the predicate, so the status rule follows the same base.
 
-**Waived by** `tests/corpus/arith-expansion-scan-and-classify.sh`
-(`# EXPECT-DIFF`), whose `the scan skips a backtick` probe runs under `e()`'s
-`eval` and so hits this.
+**Tests.** `tests/corpus/a-substitution-body-is-an-input-source-of-its-own.sh`
+walks the matrix — a bare body, one inside an `eval`, one inside a `.`, an
+`eval` inside a body, a plain `eval`, and the `$((` fallback in each position —
+plus assertions in `interp.rs::a_parse_error_reads_as_bashs_does` that sweep
+`eval_depth` 0..2 with the base at each and one past it.
 
 ### TD-OILS-A-HERE-DOCUMENT-OPERATOR-WITH-NO-DELIMITER-WORD-WAS-NOT-A-GRAMMAR-ERROR. `cat << ; echo hi` ran, and `cat <<#c` took the comment as a delimiter — 2026-08-06 — ✅ FIXED 2026-08-06
 

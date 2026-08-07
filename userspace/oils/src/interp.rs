@@ -3906,24 +3906,30 @@ pub struct Shell {
     /// collected. The job stays in the substitution's table instead, still
     /// owed to whatever `jobs` runs there.
     in_comsub: bool,
-    /// Whether this shell's *top-level* read-eval loop is a command
-    /// substitution's body, re-read at expansion time.
+    /// Where this shell's command-substitution body sits, when it has one: the
+    /// `(eval_depth, source_stack.len())` its own read-eval loop began at.
+    /// `None` in every shell that is not a substitution's.
     ///
-    /// Both spellings get there: bash hands `` `…` `` and `$( … )` alike to
-    /// `parse_and_execute` when the word is expanded, which shows in two places
-    /// — a syntax error is tagged `command substitution` rather than the
-    /// enclosing `-c`, and it yields status 2 (or 1 for a nested `$( … )` body)
-    /// rather than the status a top-level syntax error would. For `$( … )` that
-    /// is a rare path, because its *eager* parse (in the enclosing token stream)
-    /// has already rejected anything ill-formed and done so fatally; it is
-    /// reachable only when the body changes its own parse state mid-body, e.g.
-    /// `x=$(alias q=for` / `q)`.
+    /// All three spellings get here: bash hands `` `…` ``, `$( … )` and a `$((`
+    /// that fell back alike to `parse_and_execute` when the word is expanded,
+    /// which shows in two places — a syntax error is tagged `command
+    /// substitution` rather than the enclosing `-c`, and it yields status 2 (or
+    /// 1 for a nested `$( … )` body) rather than the status a top-level syntax
+    /// error would. For `$( … )` that is a rare path, because its *eager* parse
+    /// (in the enclosing token stream) has already rejected anything ill-formed
+    /// and done so fatally; it is reachable only when the body changes its own
+    /// parse state mid-body, e.g. `x=$(alias q=for` / `q)`.
     ///
-    /// Both effects apply only at [`Shell::at_outermost_read_eval`] — a nested
-    /// `eval`/`source` inside the body reports and scores as its own input — and
-    /// any nested subshell clears the flag (see
-    /// [`Shell::clone_for_subshell`]).
-    comsub_read_eval: bool,
+    /// It is a *base* rather than a flag because `command_substitute` pushes a
+    /// **new input source** for the body, and bash's `report_syntax_error` names
+    /// the innermost one — so the `eval`/`source` frames the caller sat in stop
+    /// counting the moment the body starts, and an `eval` the body runs itself
+    /// starts counting again. The subshell inherits both numbers (it must:
+    /// `source_stack` is what `BASH_SOURCE` reads), so only a recorded base can
+    /// tell the caller's frames from the body's. See
+    /// [`Shell::at_comsub_read_eval`]; a nested subshell clears the field
+    /// outright (see [`Shell::clone_for_subshell`]).
+    comsub_read_eval: Option<(u32, usize)>,
     /// The `>`/`>>` target of the builtin currently running, held open so it can
     /// write in pieces. Installed and restored around each builtin's dispatch by
     /// [`Shell::run_builtin_body`]; `None` whenever no builtin is running or the
@@ -5569,7 +5575,7 @@ impl Shell {
             last_status: 0,
             comsub_count: 0,
             in_comsub: false,
-            comsub_read_eval: false,
+            comsub_read_eval: None,
             builtin_stdout: None,
             subshell_depth: 0,
             subshell_level: 0,
@@ -7711,7 +7717,7 @@ impl Shell {
         // far, and leaves `$?` at 2 — or 1 when the body's error was itself a
         // `$( … )` body's. The enclosing command carries on either way. See
         // [`Shell::comsub_read_eval`].
-        if self.comsub_read_eval && self.at_outermost_read_eval() {
+        if self.at_comsub_read_eval() {
             self.last_status = if e.fatal { 1 } else { 2 };
             return Flow::Next;
         }
@@ -7970,6 +7976,19 @@ impl Shell {
     /// an abort raised under them lands here instead of ending their string.
     fn at_outermost_read_eval(&self) -> bool {
         self.eval_depth == 0 && self.source_stack.is_empty()
+    }
+
+    /// Whether the read-eval loop currently executing is a command
+    /// substitution's *own* body — the input source `command_substitute` pushed,
+    /// with nothing pushed on top of it since.
+    ///
+    /// Not the same question as [`Shell::at_outermost_read_eval`], which asks
+    /// whether the shell is outermost *globally*: a substitution written inside
+    /// an `eval` or a `.`/`source` inherits those frames and is not, yet its
+    /// body is still the innermost input and is still what bash names. See
+    /// [`Shell::comsub_read_eval`].
+    fn at_comsub_read_eval(&self) -> bool {
+        self.comsub_read_eval == Some((self.eval_depth, self.source_stack.len()))
     }
 
     fn exec_items(
@@ -11401,7 +11420,7 @@ impl Shell {
             in_comsub: false,
             // Names *this* shell's top-level input, so a nested subshell — which
             // gets a read-eval loop of its own, or none at all — starts clear.
-            comsub_read_eval: false,
+            comsub_read_eval: None,
             // Belongs to a builtin that is running *now*, in this shell; a
             // subshell starts outside any builtin of its own.
             builtin_stdout: None,
@@ -27464,7 +27483,7 @@ impl Shell {
         }
         let cap = capture_sink();
         let mut sub = self.new_comsub_shell();
-        sub.comsub_read_eval = true;
+        sub.comsub_read_eval = Some((sub.eval_depth, sub.source_stack.len()));
         {
             // The substitution's capture is its fd 1 — bash gives the subshell
             // the write end of the collecting pipe, replacing any persistent
@@ -45141,11 +45160,15 @@ impl Shell {
         // reports `./bad.sh: line 2:`, not `./bad.sh: -c: line 2:`. (An `eval`
         // inside a sourced file still says `eval`, because that is then the
         // innermost source.)
-        let in_backtick = self.comsub_read_eval && self.at_outermost_read_eval();
-        let token = if self.eval_depth > 0 {
-            Some("eval")
-        } else if in_backtick {
+        // Tested *before* `eval`, because a substitution's body is an input
+        // source pushed on top of whatever `eval`/`source` frames enclose it —
+        // and an `eval` the body itself runs is pushed on top again, which moves
+        // the shell off the recorded base and lands on the `eval` arm below.
+        let in_backtick = self.at_comsub_read_eval();
+        let token = if in_backtick {
             Some(SRC_TOKEN_COMMAND_SUB)
+        } else if self.eval_depth > 0 {
+            Some("eval")
         } else if self.command_mode && self.source_stack.is_empty() {
             Some("-c")
         } else {
@@ -55535,6 +55558,34 @@ mod tests {
              osh: eval: line 1: `echo ('"
         );
         sh.eval_depth = 0;
+
+        // A command substitution's body is an input source pushed *on top of*
+        // whatever encloses it, and bash names the innermost one — so an `eval`
+        // the substitution was written inside stops counting once the body
+        // starts, while an `eval` the body itself runs starts counting again.
+        // See `Shell::comsub_read_eval`.
+        let src = "echo (";
+        let e = parse(src.as_bytes()).unwrap_err();
+        for depth in [0, 1, 2] {
+            sh.eval_depth = depth;
+            sh.comsub_read_eval = Some((depth, 0));
+            assert_eq!(
+                parse_error(&sh, &e, src.as_bytes(), &LineMap::Offset(0)),
+                "osh: command substitution: line 1: syntax error near unexpected token `newline'\n\
+                 osh: command substitution: line 1: `echo ('",
+                "at eval_depth {depth}"
+            );
+            // One `eval` deeper than the body began is that `eval`'s error.
+            sh.eval_depth = depth + 1;
+            assert_eq!(
+                parse_error(&sh, &e, src.as_bytes(), &LineMap::Offset(0)),
+                "osh: eval: line 1: syntax error near unexpected token `newline'\n\
+                 osh: eval: line 1: `echo ('",
+                "at eval_depth {depth} + 1"
+            );
+        }
+        sh.eval_depth = 0;
+        sh.comsub_read_eval = None;
 
         // A runtime (non-parse) diagnostic must NOT gain the `-c:` token; that is
         // still driven by `err_prefix`, which omits it.

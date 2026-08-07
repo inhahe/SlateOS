@@ -17,11 +17,6 @@
 # The cases that end without ever closing the construct need an input of their
 # own that ends, so they are `eval`s.
 # Verified against bash 5.2.37.
-#
-# EXPECT-DIFF: TD-OILS-A-DEFERRED-COMMAND-SUBSTITUTION-BODY-REPORTS-THE-ENCLOSING-INPUTS-NAME
-# — the `the scan skips a backtick` probe below prints `eval:` where bash prints
-# `command substitution:`. The gap is the enclosing input's, not this one's: it
-# reproduces with a plain ``eval 'echo `echo 2)3`'`` and no `$((` anywhere.
 
 e() { ( eval "$1" ) 2>&1; echo "  rc=$?"; }
 

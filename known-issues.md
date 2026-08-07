@@ -590,8 +590,9 @@ took `take_dangling_delim`, `read_delim_at`, `DelimAt`, `Dangle`,
 `expand_aliases_inner` and `tokenize_alias_body` back out with it. Every shape in
 the table above still holds — it is now the splice, not a rule, that produces
 them. What remains from the family is
-TD-OILS-AN-UNCLOSED-QUOTE-IN-AN-ALIAS-VALUE-IS-A-LEX-ERROR and
-TD-OILS-A-BLANK-ENDED-ALIAS-VALUE-DOES-NOT-RE-EXPAND-A-HERE-DOCUMENT-DELIMITER.
+TD-OILS-AN-UNCLOSED-QUOTE-IN-AN-ALIAS-VALUE-IS-A-LEX-ERROR;
+TD-OILS-A-BLANK-ENDED-ALIAS-VALUE-DOES-NOT-RE-EXPAND-A-HERE-DOCUMENT-DELIMITER
+was fixed on top of the splice the next day.
 
 ### TD-OILS-AN-ALIAS-SPLICED-OPERATOR-DOES-NOT-EXTEND-INTO-THE-CALLING-LINE. Nothing lexical may cross the alias seam — `alias Q='cat <'` plus `Q< E` is a syntax error — 2026-08-06 — ✅ FIXED 2026-08-06
 
@@ -721,8 +722,10 @@ here-document seam cases (`…-takes-its-body-from-the-real-input.sh`,
 warning keying shows up.
 
 **Left behind:** TD-OILS-AN-UNCLOSED-QUOTE-IN-AN-ALIAS-VALUE-IS-A-LEX-ERROR (rows
-`U`/`D` of the table — a lex-order limitation, not a seam one) and
-TD-OILS-A-BLANK-ENDED-ALIAS-VALUE-DOES-NOT-RE-EXPAND-A-HERE-DOCUMENT-DELIMITER.
+`U`/`D` of the table — a lex-order limitation, not a seam one). The other one it
+left, TD-OILS-A-BLANK-ENDED-ALIAS-VALUE-DOES-NOT-RE-EXPAND-A-HERE-DOCUMENT-DELIMITER,
+was fixed the next day by giving the here-document delimiter a span of its own
+and letting the scan splice over it — a small change *because* of this model.
 
 ### TD-OILS-A-COMMENT-IN-AN-ALIAS-VALUE-DOES-NOT-EAT-THE-CALLING-LINE. `alias A='echo hi #c'` plus `A there` still echoes `there` — 2026-08-06 — ✅ FIXED 2026-08-06
 
@@ -841,7 +844,7 @@ exactly the band-aid the splice replaced.
 `nothing-lexical-stops-at-the-alias-seam.sh` carries a "Not probed" note pointing
 here, because probing it would make the whole script fail to lex.
 
-### TD-OILS-A-BLANK-ENDED-ALIAS-VALUE-DOES-NOT-RE-EXPAND-A-HERE-DOCUMENT-DELIMITER. `alias S='cat << '` plus `S W` takes `W`, not `W`'s value — 2026-08-06 — OPEN
+### TD-OILS-A-BLANK-ENDED-ALIAS-VALUE-DOES-NOT-RE-EXPAND-A-HERE-DOCUMENT-DELIMITER. `alias S='cat << '` plus `S W` takes `W`, not `W`'s value — 2026-08-06 — ✅ FIXED 2026-08-07
 
 **Where:** `userspace/oils/src/lexer.rs` — `expand_aliases_tracked`'s scan, which
 tracks bash's `PST_ALEXPNEXT` (`AliasScan::force`) but does not apply it to the
@@ -870,20 +873,42 @@ special to it. osh's scan clears `force` only on the ordinary command-word path,
 and the delimiter word is consumed by `read_heredoc_delim` inside the lex, below
 the level the scan works at, so no splice is ever attempted there.
 
-**Fix.** The scan must notice that the token it is looking at is the delimiter of a
-`<<` (the `HereDoc` token following a `Tok::Op(DLess | DLessDash)`) and, with
-`force` set, splice the alias value in over the delimiter's *source span* rather
-than over a command word — after which the ordinary re-lex re-reads the operator
-and gets the expanded delimiter for free. The span is available: `starts`/`ends`
-already cover the delimiter's characters.
+**As fixed.** Two changes, and the first is the one that mattered.
 
-**Cost of not fixing:** the here-document runs to end of input, so everything after
-it is silently eaten as body. Rare shape (it needs a blank-ended value *and* an
-aliased delimiter), but the failure is total rather than local.
+*The delimiter is now a word with a span of its own.* `Spanned::starts` records,
+for every token, the offset the *lexer iteration* that produced it began at — so
+the `<<` and the `HereDoc` placeholder after it shared one, the operator's. That
+made the delimiter unreachable in two separate ways: there was no span to write a
+replacement over, and `AliasScan::pop_to`, which takes `PST_ALEXPNEXT` from every
+push whose end lies in `(prev, start]`, never saw the pop, because the pop's end
+sits between the operator and the delimiter and the delimiter claimed to start at
+the operator. `Lexer::lex_heredoc_op` now records the delimiter word's own offset
+(`Lexer::hd_delim`) and `Lexer::stamp_lines` stamps it over the iteration's. The
+documented contract holds — `starts` promises "at or before the token's first
+character", and this is exactly it. The one reader that wanted the *operator*'s
+offset, `UngatheredHeredoc::op_offset` (it re-parses `src[..op_offset]` to ask
+whether the `<<` stood at the top level), now takes it from a new
+`PendingHeredoc::op_at` instead of reading it back off the placeholder token.
 
-**Pinned by** nothing yet; row six of the table under
-TD-OILS-AN-ALIAS-SPLICED-HERE-DOCUMENT-TAKES-NO-DELIMITER-FROM-THE-CALLING-LINE
-records the measurement.
+*The scan asks the question bash asks.* The candidate test was `Tok::Word` with a
+single literal segment; it is now `alias_candidate`, which also answers for
+`Tok::HereDoc(_, delim, false)` — an unquoted delimiter. That mirrors
+parse.y:5266, `if (expand_aliases && quoted == 0) result = alias_expand_token
+(token)`: bash asks it of whatever `read_token_word` just built, and `<<`'s target
+is an ordinary WORD, so the delimiter is not special. Position remains the
+caller's question and needs no change: `at_command()` is already false after a
+redirection operator (`Prev::RedirOp`), so only `st.force` can make a delimiter a
+candidate — which is bash's rule exactly, since reading the `<` clears
+`PST_ALEXPNEXT` (parse.y:3511) and only a pop sets it again. Nothing else was
+needed: the ordinary re-lex re-reads `cat << ` and finds the expanded delimiter,
+and the `taken`/`rebuild` machinery unreads the body under it as it already did.
+
+**Pinned by** `a_blank_ended_alias_value_expands_the_here_document_delimiter_after_it`
+and the corpus case
+`a-blank-ended-alias-value-expands-the-delimiter-after-it.sh`, which between them
+probe `<<-`, a quoted delimiter (no lookup), a value *without* the trailing blank
+(no flag), the flag being spent on the delimiter rather than reaching the operand
+after it, a multi-word value, and a delimiter alias that names itself.
 
 ### TD-OILS-A-LINE-THAT-FAILS-TO-LEX-IS-NOT-REPORTED-AS-A-LINE. An unclosed quote hides the syntax error before it and the `set -v` echo of it — 2026-08-06 — OPEN
 

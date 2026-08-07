@@ -56286,6 +56286,52 @@ mod tests {
         );
     }
 
+    /// A here-document delimiter is an ordinary word to the reader, so a value
+    /// that ends in a blank expands it like any other next word.
+    ///
+    /// `<<`'s target is a WORD in the grammar, read by `read_token_word`, which
+    /// runs the alias check on whatever it just built whenever `quoted == 0`
+    /// (parse.y:5266). Position is the only thing that differs: reading the `<`
+    /// clears `PST_ALEXPNEXT` (parse.y:3511) and nothing about a redirection
+    /// target sets it, so the delimiter is a candidate only when the *pop* of a
+    /// blank-ended value sets the flag again between the operator and it.
+    #[test]
+    fn a_blank_ended_alias_value_expands_the_here_document_delimiter_after_it() {
+        let sh = "shopt -s expand_aliases\nalias W='E9'\n";
+        // The delimiter that is looked for is the value, not the word written.
+        assert_eq!(
+            run(&format!("{sh}alias S='cat << '\nS W\nbody\nE9\n")).0,
+            "body\n"
+        );
+        assert_eq!(
+            run(&format!("{sh}alias T='cat <<- '\nT W\n\tbody\n\tE9\n")).0,
+            "body\n"
+        );
+        // Quoting inhibits the lookup — and a quoted delimiter is exactly the
+        // non-expanding one, so the token already says so.
+        assert_eq!(
+            run(&format!("{sh}alias S='cat << '\nS 'W'\nbody\nW\n")).0,
+            "body\n"
+        );
+        // Without the trailing blank there is no `PST_ALEXPNEXT` to carry over.
+        assert_eq!(
+            run(&format!("{sh}alias U='cat <<'\nU W\nbody\nW\n")).0,
+            "body\n"
+        );
+        // The flag is spent on the delimiter and does not reach the word after.
+        assert_eq!(
+            run(&format!("{sh}alias S='cat << '\nS W E9\nbody\nE9\n")).1,
+            1,
+            "the second `W` should stay a filename"
+        );
+        // A value whose own first word is the delimiter is `AL_BEINGEXPANDED`
+        // there, so it stands for itself rather than recurring.
+        assert_eq!(
+            run(&format!("{sh}alias Z='Z'\nalias S='cat << '\nS Z\nbody\nZ\n")).0,
+            "body\n"
+        );
+    }
+
     #[test]
     fn unterminated_constructs_report_matching_eof_message() {
         // bash reports unclosed quotes/substitutions as

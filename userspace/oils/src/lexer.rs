@@ -377,6 +377,10 @@ struct Lexer {
     iter_start: usize,
     /// Here-documents whose bodies are pending collection at the next newline.
     pending_heredocs: Vec<PendingHeredoc>,
+    /// The `HereDoc` token this iteration emitted and the offset its *delimiter
+    /// word* begins at, for [`Lexer::stamp_lines`] to stamp in place of the
+    /// iteration's own start. See [`Lexer::lex_heredoc_op`].
+    hd_delim: Option<(usize, u32)>,
     /// Nesting depth of open `[[ … ]]` conditionals. Used to enable regex-word
     /// lexing for the RHS of `=~` (where `(`, `)`, `|`, … are literal regex
     /// metacharacters, not shell operators).
@@ -648,6 +652,11 @@ struct PendingHeredoc {
     expand: bool,
     /// Index into the output token stream of the placeholder to fill in.
     tok_index: usize,
+    /// Character offset of the `<<` operator itself. The placeholder's own
+    /// offset is the *delimiter*'s (see [`Lexer::lex_heredoc_op`]), and what
+    /// [`UngatheredHeredoc::op_offset`] wants is the text in front of the
+    /// operator, so it is kept separately rather than read back off the token.
+    op_at: u32,
 }
 
 /// Where a `case` the substitution-extent scan has walked into currently sits.
@@ -883,6 +892,7 @@ impl Lexer {
             line: 1,
             iter_start: 0,
             pending_heredocs: Vec::new(),
+            hd_delim: None,
             cond_depth: 0,
             regex_next: false,
             opts,
@@ -997,6 +1007,12 @@ pub struct Spanned {
     /// out of the calling line from one that began in a spliced-in alias value.
     /// For that the conservative "at or before" is exactly right: a token whose
     /// start falls at or after the splice point began after it.
+    ///
+    /// One token is stamped exactly rather than conservatively: the `HereDoc`
+    /// standing for a `<<`'s delimiter carries that *word*'s offset, not the
+    /// operator's, because the alias pass has to be able to replace the
+    /// delimiter alone and to see the pop that happens between the two. See
+    /// [`Lexer::lex_heredoc_op`].
     pub starts: Vec<u32>,
     /// Parallel to `toks`: the character offset into `src` just past each
     /// token's last character, as [`Tokenized::ends`]. A syntax error needs it
@@ -1194,7 +1210,7 @@ pub fn tokenize_deferred(src: BStr<'_>, opts: ParseOpts) -> Tokenized {
             .map(|h| UngatheredHeredoc {
                 delim: h.delim.clone(),
                 line: eof_line,
-                op_offset: offsets.get(h.tok_index).copied().unwrap_or(0),
+                op_offset: h.op_at,
             })
             .collect()
     };
@@ -1922,6 +1938,32 @@ fn line_at_input(text: &[Ch], starts: &[u32], lines: &[u32], off: usize) -> Opti
     Some(lines.get(k)?.saturating_add(n))
 }
 
+/// The name an alias lookup would be made under for `tok`, if it is a token bash
+/// would make one for at all.
+///
+/// bash asks the question of whatever `read_token_word` just built: `if
+/// (expand_aliases && quoted == 0) result = alias_expand_token (token)`
+/// (parse.y:5266). So it is the *word*-ness of the token that matters, not its
+/// role — and the delimiter of a `<<` is read by `read_token_word` like any
+/// other word, since `<<`'s target is an ordinary WORD in the grammar. Quoting
+/// inhibits the lookup, which for a delimiter is the flag the token already
+/// carries (a quoted delimiter is also a non-expanding one).
+///
+/// Whether such a token is in a *position* where the lookup happens is a
+/// separate question, and the caller's: `assignment_acceptable` for an ordinary
+/// word, and for the delimiter only `PST_ALEXPNEXT` — reading the `<<` clears
+/// that flag (parse.y:3511), and only a value ending in a blank sets it again.
+fn alias_candidate(tok: &Tok) -> Option<&Str> {
+    match tok {
+        Tok::Word(segs) => match segs.as_slice() {
+            [Seg::Lit(name)] => Some(name),
+            _ => None,
+        },
+        Tok::HereDoc(_, delim, false) => Some(delim),
+        _ => None,
+    }
+}
+
 /// Expand shell aliases over a token stream (bash's pre-parse alias pass).
 ///
 /// Only a single unquoted-literal word in command position is a candidate. Its
@@ -2022,8 +2064,7 @@ pub fn expand_aliases_tracked(
             let at_cmd = st.force || out.at_command();
             st.force = false;
             if at_cmd
-                && let Tok::Word(segs) = tok
-                && let [Seg::Lit(name)] = segs.as_slice()
+                && let Some(name) = alias_candidate(tok)
                 && !st.being_expanded(name, start)
                 && let Some(val) = aliases.get(name)
                 && let Some(next) =
@@ -2996,6 +3037,14 @@ impl Lexer {
         }
         while offsets.len() < out.len() {
             offsets.push(start);
+        }
+        // …except a here-document delimiter, which is a word of its own and has
+        // to be replaceable on its own. See [`Lexer::lex_heredoc_op`]. Still "at
+        // or before its first character", so [`Spanned::starts`]'s contract holds.
+        if let Some((i, at)) = self.hd_delim.take()
+            && let Some(slot) = offsets.get_mut(i)
+        {
+            *slot = at;
         }
         // Every token this iteration produced shares the iteration's span, so
         // they all end where the cursor now stands. For the `Newline` that
@@ -4646,6 +4695,10 @@ impl Lexer {
                 break;
             }
         }
+        // Where the delimiter word itself begins, which is where the alias pass
+        // has to write a replacement for it. Taken before the read so that the
+        // blanks and continuations skipped above are not part of it.
+        let delim_at = self.pos;
         let (delim, expand) = self.read_heredoc_delim(true)?;
         out.push(Tok::Op(if strip { Op::DLessDash } else { Op::DLess }));
         let tok_index = out.len();
@@ -4670,11 +4723,18 @@ impl Lexer {
             return Ok(());
         }
         out.push(Tok::HereDoc(Vec::new(), delim.clone(), !expand));
+        // The delimiter is a WORD of its own in the grammar, and bash reads it
+        // with `read_token_word` like any other — so it is alias-expandable when
+        // `PST_ALEXPNEXT` is set (parse.y:5266), and the pop that sets that flag
+        // happens between the `<<` and it. Both need the word's own offset, so
+        // the token that stands for it carries that rather than the iteration's.
+        self.hd_delim = Some((tok_index, u32::try_from(delim_at).unwrap_or(u32::MAX)));
         self.pending_heredocs.push(PendingHeredoc {
             delim,
             strip,
             expand,
             tok_index,
+            op_at: u32::try_from(self.iter_start).unwrap_or(u32::MAX),
         });
         Ok(())
     }

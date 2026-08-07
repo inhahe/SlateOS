@@ -43,6 +43,105 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
+### TD-OILS-THE-CORPUS-HARNESS-RUNS-THE-REFERENCE-BASH-IN-THE-C-LOCALE — 2026-08-07
+
+**Where:** `scripts/osh-bash-diff.py:274` pins `LC_ALL=C` for both shells; osh's
+character handling is `userspace/oils/src/bytes.rs` (`char_count`, `char_slice`,
+`char_at`) and its callers — `${#v}`, `${v:off:len}`, `${v^^}`/`${v,,}`,
+`printf %q`, `\u`/`\U` in `escape.rs`, `select`'s `display_width`.
+
+**What:** bash decides *per locale* whether a string is a sequence of bytes or
+of characters — every multibyte site is behind `HANDLE_MULTIBYTE` and calls
+`mbrlen`/`mbstate`. osh has no such switch: it always does UTF-8 character
+semantics. The harness pins `LC_ALL=C` (deliberately — the comment there wants a
+reproducible environment), so on any multibyte input osh is compared against a
+bash doing *byte* semantics, which is a baseline osh was never built for.
+
+This went unseen because no corpus case had ever put a multibyte string anywhere
+that counts characters. The first one to do it —
+`a-dollar-quote-inside-a-grouping-construct-is-translated-at-parse-time.sh`, via
+a `printf '%-46s'` label containing `…` — failed immediately.
+
+**Repro** (same bash binary, only `LC_ALL` differs):
+
+```
+LC_ALL=C       bash -c 's="a…b"; echo "${#s}" "${s:0:2}"'   ->  5  a\xe2
+LC_ALL=C.UTF-8 bash -c 's="a…b"; echo "${#s}" "${s:0:2}"'   ->  3  a…
+osh            -c 's="a…b"; echo "${#s}" "${s:0:2}"'        ->  3  a…
+```
+
+Also `${v^^}`: `aéb` is `AéB` under C (bash leaves the é alone, having no
+character to upcase) but `AÉB` under UTF-8 and in osh. And `printf %q` on a byte
+that is no character: bash writes `$'a\377b'`, osh writes the raw `a\xffb` — a
+real divergence in *both* locales, and the narrowest thing here worth fixing on
+its own.
+
+**Not** in this class, though they look like it: `printf`'s field width and
+`%c`. Those are byte-counted in *every* locale, because bash hands them to C
+(`PF`, printf.def:124; `getchr`, printf.def:1165) and nothing on that path
+decodes the string. They were osh bugs, are fixed, and are pinned by
+`printfs-field-is-laid-out-in-bytes-not-characters.sh`, which is verified
+identical under both locales.
+
+**Proper fix:** an architectural fork — see `open-questions.md`,
+"Should osh be locale-aware, or UTF-8-only?". Either osh grows a locale switch
+the way bash has one, or osh declares itself UTF-8-only and the harness moves to
+`LC_ALL=C.UTF-8`. Until that is settled, keep multibyte strings out of
+character-counting positions in corpus cases.
+
+### TD-OILS-A-VARIABLE-CAN-HOLD-A-NUL-BYTE. `printf -v v 'a\0b'` gave `${#v}` 3 — 2026-08-07
+
+**Where:** `userspace/oils/src/interp.rs` — `printf -v`'s write to the named
+variable, and probably every other path that stores bytes the shell *produced*
+rather than a word it parsed.
+
+**What:** a bash variable is a C string, so a NUL cannot be in one. `printf -v`
+builds the value in a buffer and assigns it with `bind_variable`, which takes a
+`char *` — the value ends at the first NUL, silently. The lexer already models
+this on the *word* side (`escape::ansi_c_unescape` truncates, so `$'a\0b'` is
+`a`); the builtin side does not.
+
+**Repro** (bash 5.2.37 left, osh right):
+
+| input | bash | osh |
+|---|---|---|
+| `printf -v v 'a\0b'; echo ${#v}` | `1` | `3` |
+| `printf -v w '%b' 'x\0y'; echo ${#w}` | `1` | `3` |
+| `printf -v v 'a\0b'; echo "${v@Q}"` | `'a'` | `$'a\000b'` |
+
+The `@Q` row is a *symptom*, not a second bug — it is quoting a value that could
+not exist in bash. Truncating in the quoter would hide the wrong length instead
+of fixing it, which is why `escape::sh_single_quote` deliberately does not.
+
+**Proper fix:** truncate at the first NUL where the value is *stored*, so that
+`${#v}`, `${v@Q}`, `declare -p` and an expansion all agree. Check `read`,
+`mapfile` and `printf -v` together. `$( … )` is a different rule and stays: it
+warns (`ignored null byte in input`) and strips every NUL, not just the tail.
+
+### TD-OILS-A-PARSE-ERROR-IN-AN-EXIT-TRAP-IS-NOT-LABELLED-AS-ONE. `( trap "'" EXIT )` — 2026-08-07
+
+**Where:** `userspace/oils/src/interp.rs` — wherever a trap handler's string is
+parsed and the failure is turned into a diagnostic. The context label comes from
+the enclosing construct instead of from the trap.
+
+**What:** bash runs a trap handler through
+`parse_and_execute (…, "exit trap", …)` (trap.c), and that third argument is the
+name the error is reported under — so a malformed EXIT handler says
+`bash: exit trap: line 1: …` wherever it runs. osh labels it with whatever it
+happens to be inside, or with nothing at all.
+
+**Repro** (bash 5.2.37 left, osh right):
+
+| input | bash | osh |
+|---|---|---|
+| `( trap "'" EXIT )` | ``exit trap: line 1: unexpected EOF while looking for matching `'`` | the same with no `exit trap: ` |
+| `x=$( trap "'" EXIT )` | `… exit trap: line 1: …` | `… command substitution: line 1: …` |
+
+**Proper fix:** carry the label bash passes to `parse_and_execute` with the parse
+rather than deriving it from the enclosing context. The rest of that family is
+worth doing in the same change — trap.c uses `"exit trap"`, `"debug trap"`,
+`"error trap"`, `"return trap"` and `"trap"` by signal, and `eval` uses `"eval"`.
+
 ### TD-OILS-A-DOLLAR-QUOTE-IN-AN-ARITHMETIC-STRING-IS-NOT-TRANSLATED-AT-PARSE-TIME. `echo $(( $"a" ))` — 2026-08-07
 
 **Where:** `userspace/oils/src/lexer.rs` — whatever reads the body of a `$(( … ))`

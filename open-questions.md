@@ -252,6 +252,62 @@ timing the case under bash alone, and there is plenty of unblocked parity work
 that spawns externals. Note the proper fix is *not* raising `CASE_TIMEOUT`:
 that would make every genuine hang cost minutes instead of seconds.
 
+## Q38 — Should osh be locale-aware, or UTF-8-only? — Status: OPEN
+
+**Question.** bash decides *per locale* whether a string is a sequence of bytes
+or of characters: every multibyte site is behind `HANDLE_MULTIBYTE` and calls
+`mbrlen`/`mbstate`, so `${#s}` on `a…b` is 5 under `LC_ALL=C` and 3 under
+`LC_ALL=C.UTF-8`. osh has no such switch — it always does UTF-8 character
+semantics. Should osh grow one?
+
+This surfaced because `scripts/osh-bash-diff.py:274` pins `LC_ALL=C` for both
+shells (deliberately, for a reproducible environment). So today, on any
+multibyte input, osh is compared against a bash doing byte semantics — a
+baseline osh was never built for. No corpus case had exercised it until one
+happened to put a `…` inside a `printf '%-46s'` label.
+
+**Options.**
+
+- **A — osh is UTF-8-only; move the harness to `LC_ALL=C.UTF-8`.**
+  *Pros:* one line of harness change; osh's existing behaviour becomes correct
+  by definition; UTF-8 is the only locale a modern desktop OS ships, and this OS
+  targets exactly that; no new state on every string operation.
+  *Cons:* a real bash under `LC_ALL=C` is then not reproducible by osh at all,
+  so that whole axis of bash's behaviour goes untested and undocumented; scripts
+  that set `LC_ALL=C` for speed or determinism — a common idiom — would get
+  different answers from osh than from bash.
+
+- **B — make osh locale-aware, as bash is.**
+  *Pros:* actually matches bash, which is the project's stated goal; makes
+  `LC_ALL` observable the way every other shell variable is; lets the corpus
+  test both axes.
+  *Cons:* touches every character-counting site (`${#v}`, `${v:off:len}`,
+  `${v^^}`/`${v,,}`, `printf %q`, `\u`/`\U`, `select`'s `display_width`, and
+  plausibly globbing and `[[ =~ ]]`); needs a locale notion threaded through
+  `bytes.rs`, which is currently free functions with no state; and the C locale
+  is the *easy* half — a non-UTF-8 multibyte locale would be far worse, so the
+  honest scope is "C vs UTF-8", not "all locales".
+
+**Claude's recommendation.** **A**, with the scope of B written down. The OS
+this shell ships in is UTF-8 throughout, and B's cost is spread across the whole
+string layer for an axis nothing in the OS will exercise. But A is a real
+narrowing of the fidelity goal, which is the operator's call, not mine — so I
+have changed nothing and am leaving the harness on `LC_ALL=C`.
+
+**Not blocking.** In the meantime I keep multibyte strings out of
+character-counting positions in corpus cases, which costs nothing. Note that
+`printf`'s field width and `%c` are *not* part of this question: those are
+byte-counted in every locale (bash hands them to C — `PF`, printf.def:124;
+`getchr`, printf.def:1165), they were genuine osh bugs, and they are now fixed
+and pinned by a corpus case verified identical under both locales.
+
+**Where it bites.** `scripts/osh-bash-diff.py:274`;
+`userspace/oils/src/bytes.rs` (`char_count`, `char_slice`, `char_at`) and its
+callers. Tracked as `TD-OILS-THE-CORPUS-HARNESS-RUNS-THE-REFERENCE-BASH-IN-THE-C-LOCALE`
+in `known-issues.md`, which also records the one divergence here that is real in
+*both* locales and worth fixing independently: `printf %q` on a byte that is no
+character (bash `$'a\377b'`, osh a raw `a\xffb`).
+
 ---
 
 Recently resolved (see `design-decisions.md` for the full rationale):

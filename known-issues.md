@@ -581,22 +581,22 @@ the calling line's body.
 (without the fix its very first probe gives `status: bash=0 osh=2`) and the unit
 test `an_alias_spliced_here_document_takes_its_delimiter_from_the_calling_line`.
 
-**Left behind:** this fixed one member of a family. Everything else lexical still
-stops dead at the seam — operators (`<`+`<`, `>`+`>`, `|`+`|`, `&`+`&`, `;`+`;`),
-an unclosed quote or `$(` opened in the value, a comment opened in the value, and
-the blank-ended-value re-expansion (`alias S='cat << '`, row six of the table
-above), which needs the delimiter *word* to be alias-expanded. They are
-TD-OILS-AN-ALIAS-SPLICED-OPERATOR-DOES-NOT-EXTEND-INTO-THE-CALLING-LINE and
-TD-OILS-A-COMMENT-IN-AN-ALIAS-VALUE-DOES-NOT-EAT-THE-CALLING-LINE, and the one
-fix for all of them is the textual splice written up under the first — which also
-takes `take_dangling_delim` and `read_delim_at` back out again. This entry's fix
-is the token-level model's answer to one member; it is correct for that member
-and pinned by tests, but it is not the model bash uses.
+**Left behind — and since superseded.** This fixed one member of a family with a
+hand-written rule at the token level; the rest of the family (operators, comments,
+unclosed quotes, the blank-ended-value re-expansion) needed the model bash
+actually uses. That model — the textual splice — landed the same day under
+TD-OILS-AN-ALIAS-SPLICED-OPERATOR-DOES-NOT-EXTEND-INTO-THE-CALLING-LINE, and it
+took `take_dangling_delim`, `read_delim_at`, `DelimAt`, `Dangle`,
+`expand_aliases_inner` and `tokenize_alias_body` back out with it. Every shape in
+the table above still holds — it is now the splice, not a rule, that produces
+them. What remains from the family is
+TD-OILS-AN-UNCLOSED-QUOTE-IN-AN-ALIAS-VALUE-IS-A-LEX-ERROR and
+TD-OILS-A-BLANK-ENDED-ALIAS-VALUE-DOES-NOT-RE-EXPAND-A-HERE-DOCUMENT-DELIMITER.
 
-### TD-OILS-AN-ALIAS-SPLICED-OPERATOR-DOES-NOT-EXTEND-INTO-THE-CALLING-LINE. Nothing lexical may cross the alias seam — `alias Q='cat <'` plus `Q< E` is a syntax error — 2026-08-06 — OPEN
+### TD-OILS-AN-ALIAS-SPLICED-OPERATOR-DOES-NOT-EXTEND-INTO-THE-CALLING-LINE. Nothing lexical may cross the alias seam — `alias Q='cat <'` plus `Q< E` is a syntax error — 2026-08-06 — ✅ FIXED 2026-08-06
 
 **Where:** `userspace/oils/src/lexer.rs` — `expand_aliases_inner` and
-`tokenize_alias_body`, which lex an alias replacement as a text of its own.
+`tokenize_alias_body`, which lexed an alias replacement as a text of its own.
 
 **What.** Every one of these is one construct in bash, written half in the value
 and half on the calling line, and a syntax error in osh. All measured:
@@ -665,7 +665,66 @@ Two things the concatenation has to carry, and both are already available:
 when this lands — they are the token-level model's answer to one member of the
 family.
 
-### TD-OILS-A-COMMENT-IN-AN-ALIAS-VALUE-DOES-NOT-EAT-THE-CALLING-LINE. `alias A='echo hi #c'` plus `A there` still echoes `there` — 2026-08-06 — OPEN
+**As fixed.** The textual splice, exactly as sketched above. `expand_aliases_tracked`
+now keeps one *assembled text* — the script with every value bash pushed written in
+where its alias word stood — and re-lexes the whole thing from the top of the
+current physical line on every splice, so a construct written half in a value and
+half on the calling line is lexed as the one construct it is. There is no seam
+left to special-case, and `expand_aliases_inner`, `tokenize_alias_body`,
+`take_dangling_delim`, `read_delim_at`, `DelimAt` and `Dangle` are all gone.
+
+* `TextMap` records which run of the assembled text belongs to which source, so
+  every token's `TokSpan` names the text it *ended* in — which is bash's rule for
+  which line a diagnostic echoes, and gives the `B ; B` / `S; echo b` split for
+  free. `AliasExpansion::origin` is `Some(k)` only for a token whose start *and*
+  end map back to the input, which keeps a seam-spanning `;;` from claiming an
+  origin it has no right to.
+* `Lexer::spliced` starts the re-lex at the top of the caller's physical line
+  (`head`), which is as far back as it must go and as far back as it may safely
+  go: everything before is already run, and may no longer even be lexable (a
+  here-document body it consumed is arbitrary text).
+* **Here-document bodies stay in the real input.** bash reads a body with
+  `read_a_line`/`yy_getc`, which bypasses `shell_input_line` and every pushed
+  string, so the body of a `<<` a value brought with it is the line *after* the
+  calling line. `Lexer::raw` is a second cursor for exactly that: `0` means "has
+  not diverged", a gather sets it, and `run_into` skips the token cursor over
+  input the body reader already ate.
+* **The parser unreads what the splice swallowed.** osh lexes the whole script
+  before any alias exists, so those body lines were first read as *commands*.
+  `Spanned::taken` reports every span the splice lex ate as a body;
+  `IncrementalParser::rebuild` loops — expand, find the first `taken` span that
+  still holds unconsumed `orig` tokens (or that the first lex died inside),
+  stretch the owning unit's `orig_ends` over it, `relex_tail_from` past it — with
+  a `settled` watermark so a genuine lexer error in the tail cannot re-trigger the
+  same span forever.
+* **Line numbers follow bash's monotone `line_number`.** It is bumped by *fetching*
+  a line (parse.y:2346) and never wound back, so a gather made while the reader
+  stood inside a value leaves even the rest of the *calling* line numbered from
+  where the gather stopped. `AliasScan::line` takes the max of the token's own
+  line and the reader's, and `line_at_input` counts physical lines from the
+  nearest anchoring token rather than from a token table the unread may have
+  truncated.
+* **Reader warnings from the splice are speculative** past the current unit — the
+  pass gathers over the whole remaining text with the alias table it has *now*,
+  and a later `alias` redefinition changes what it would have gathered. So
+  `IncrementalParser::alias_warnings` is **replaced** by every rebuild rather than
+  added to, and each warning is keyed by the offset its body *began* at
+  (`Spanned::warn_from`), not by a token index into an `orig` the unread
+  truncates. Keying on the body's end would not do: `rebuild` stretches the owning
+  unit's `orig_ends` to that end, so an end-keyed warning falls inside every
+  earlier unit too and goes out far too early.
+
+**Pinned by** the corpus case `nothing-lexical-stops-at-the-alias-seam.sh`, which
+probes every row of the table above that osh can reach, and by the two
+here-document seam cases (`…-takes-its-body-from-the-real-input.sh`,
+`…-takes-its-delimiter-from-the-calling-line.sh`), whose stderr is where the
+warning keying shows up.
+
+**Left behind:** TD-OILS-AN-UNCLOSED-QUOTE-IN-AN-ALIAS-VALUE-IS-A-LEX-ERROR (rows
+`U`/`D` of the table — a lex-order limitation, not a seam one) and
+TD-OILS-A-BLANK-ENDED-ALIAS-VALUE-DOES-NOT-RE-EXPAND-A-HERE-DOCUMENT-DELIMITER.
+
+### TD-OILS-A-COMMENT-IN-AN-ALIAS-VALUE-DOES-NOT-EAT-THE-CALLING-LINE. `alias A='echo hi #c'` plus `A there` still echoes `there` — 2026-08-06 — ✅ FIXED 2026-08-06
 
 **Where:** `userspace/oils/src/lexer.rs` — the alias-value sub-lex
 (`tokenize_alias_body` via `expand_aliases_inner`), which drops a comment at the
@@ -720,11 +779,111 @@ including) the next `Tok::Newline` — which is `discard_until('\n')` spelled at
 the token level, and correct as far as it goes, but it is one more patch on the
 token-level model rather than a fix of it.
 
-**Pinned by** nothing yet; the corpus case
-`an-alias-spliced-here-document-takes-its-delimiter-from-the-calling-line.sh`
-carries a "Not probed" note pointing here, and the unit test
-`an_alias_spliced_here_document_takes_its_delimiter_from_the_calling_line`
-asserts only the *status* for the seam shape, not the message.
+**As fixed.** By the textual splice written up under
+TD-OILS-AN-ALIAS-SPLICED-OPERATOR-DOES-NOT-EXTEND-INTO-THE-CALLING-LINE, with no
+code of its own: the comment and the calling line are one text, so the ordinary
+comment scan runs off the end of the value and on to that line's real newline —
+`discard_until('
+')` reproduced by construction rather than simulated at the
+token level.
+
+**Pinned by** the corpus case `nothing-lexical-stops-at-the-alias-seam.sh`, whose
+`=== a comment opened in the value eats the calling line` section is both shapes
+above.
+
+### TD-OILS-AN-UNCLOSED-QUOTE-IN-AN-ALIAS-VALUE-IS-A-LEX-ERROR. `alias U="echo 'x"` plus `U y'` never reaches the alias pass — 2026-08-06 — OPEN
+
+**Where:** `userspace/oils/src/lexer.rs` — `tokenize_deferred`, which lexes the
+whole script before any alias exists; the alias pass
+(`expand_aliases_tracked`) runs on its output.
+
+**What.** A quote or a `$(` opened in an alias value and closed on the calling
+line. Measured:
+
+```text
+shopt -s expand_aliases
+alias U="echo 'x"
+U y'
+echo next
+
+bash: x y        — one single-quoted word, spanning the seam
+      next
+osh : line 3: unexpected EOF while looking for matching `''     (status 2)
+```
+
+`alias D='echo "x'` with `D y"` is the same shape with double quotes.
+
+**Why.** The textual splice
+(TD-OILS-AN-ALIAS-SPLICED-OPERATOR-DOES-NOT-EXTEND-INTO-THE-CALLING-LINE) makes
+value and calling line one text, so once the pass runs, the quote closes exactly
+as bash's does — a `$(` opened in a value and closed on the calling line already
+works, and is probed in the corpus. But the pass only ever sees *tokens*, and
+those come from a lex of the script that happened before the `alias` builtin ran.
+At that point the value is still just the inside of a string literal on the
+`alias` line, and the calling line's `y'` is a lone unmatched quote. osh lexes
+eagerly and reports it; bash, reading a line at a time, never has an unmatched
+quote to report because by the time it reads that line the value is in front of
+it.
+
+The `$(` case survives only because the *value's* half is what is unclosed there,
+and the value is not lexed on its own — the calling line's `)` closes it during
+the splice's re-lex. The quote case is the reverse: the calling line's own half
+is unbalanced in the pre-pass lex.
+
+**Proper fix.** Lex lazily, a physical line at a time, with the alias pass and the
+parse interleaved — which is bash's structure and is the same change
+TD-OILS-A-LINE-THAT-FAILS-TO-LEX-IS-NOT-REPORTED-AS-A-LINE needs. Anything short
+of that (e.g. deferring an unmatched-quote error until the alias pass has had a
+look) would be a second reading of the same text under a different rule, which is
+exactly the band-aid the splice replaced.
+
+**Pinned by** nothing — the corpus case
+`nothing-lexical-stops-at-the-alias-seam.sh` carries a "Not probed" note pointing
+here, because probing it would make the whole script fail to lex.
+
+### TD-OILS-A-BLANK-ENDED-ALIAS-VALUE-DOES-NOT-RE-EXPAND-A-HERE-DOCUMENT-DELIMITER. `alias S='cat << '` plus `S W` takes `W`, not `W`'s value — 2026-08-06 — OPEN
+
+**Where:** `userspace/oils/src/lexer.rs` — `expand_aliases_tracked`'s scan, which
+tracks bash's `PST_ALEXPNEXT` (`AliasScan::force`) but does not apply it to the
+word a `<<` is about to swallow as its delimiter.
+
+**What.** An alias whose value ends in a blank makes bash try to expand the *next*
+word too. When that next word is a here-document delimiter, it is expanded before
+being taken as the delimiter. Measured:
+
+```text
+shopt -s expand_aliases
+alias W='E9'
+alias S='cat << '
+S W
+body-here
+E9
+
+bash: body-here                       — the delimiter is `E9`
+osh : warning: here-document at line 4 delimited by end-of-file (wanted `W')
+      body-here / E9 / echo "rc=0"    — the rest of the script eaten as body
+```
+
+**Why.** `read_token_word` is what reads the delimiter, and it runs the alias
+check on the word it just read when `PST_ALEXPNEXT` is set — the delimiter is not
+special to it. osh's scan clears `force` only on the ordinary command-word path,
+and the delimiter word is consumed by `read_heredoc_delim` inside the lex, below
+the level the scan works at, so no splice is ever attempted there.
+
+**Fix.** The scan must notice that the token it is looking at is the delimiter of a
+`<<` (the `HereDoc` token following a `Tok::Op(DLess | DLessDash)`) and, with
+`force` set, splice the alias value in over the delimiter's *source span* rather
+than over a command word — after which the ordinary re-lex re-reads the operator
+and gets the expanded delimiter for free. The span is available: `starts`/`ends`
+already cover the delimiter's characters.
+
+**Cost of not fixing:** the here-document runs to end of input, so everything after
+it is silently eaten as body. Rare shape (it needs a blank-ended value *and* an
+aliased delimiter), but the failure is total rather than local.
+
+**Pinned by** nothing yet; row six of the table under
+TD-OILS-AN-ALIAS-SPLICED-HERE-DOCUMENT-TAKES-NO-DELIMITER-FROM-THE-CALLING-LINE
+records the measurement.
 
 ### TD-OILS-A-LINE-THAT-FAILS-TO-LEX-IS-NOT-REPORTED-AS-A-LINE. An unclosed quote hides the syntax error before it and the `set -v` echo of it — 2026-08-06 — OPEN
 

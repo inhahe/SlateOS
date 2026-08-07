@@ -405,16 +405,6 @@ struct Lexer {
     /// rather than the implicit newline every other input ends with. See
     /// [`tokenize_paren_body`].
     paren_body: bool,
-    /// When `true`, no newline collects a here-document body: the pendings are
-    /// left in [`Lexer::pending_heredocs`] for the caller to hand on. The alias
-    /// pass lexes this way, because bash reads a here-document body with
-    /// `read_a_line`, which calls `yy_getc` — `bash_input.getter`, the *real*
-    /// input stream — and so bypasses `shell_input_line` and the pushed alias
-    /// string entirely. A `<<` written in an alias value therefore takes its body
-    /// from the line after the one the alias word stands on, and a body written
-    /// in the value itself is not a body at all but ordinary commands. See
-    /// [`tokenize_alias_body`].
-    defer_heredocs: bool,
     /// Character offsets of every `\` whose `\<newline>` this lexer *deleted* as
     /// a line continuation. Only the reader — [`crate::parser::IncrementalParser`],
     /// slicing a parse unit's source for the command history — has any use for
@@ -429,6 +419,9 @@ struct Lexer {
     /// `strict_heredoc_eof`), since strict mode raises instead. See
     /// [`ReaderWarning`].
     warnings: Vec<ReaderWarning>,
+    /// Parallel to `warnings`: where the gather that raised each one was reading
+    /// the body from. Filled by [`Lexer::warn`]; see [`Spanned::warn_from`].
+    warn_from: Vec<u32>,
     /// Set while the here-document reader has run **ahead** of the token cursor.
     ///
     /// bash reads a line at a time, so gathering a body in the middle of a line
@@ -455,6 +448,37 @@ struct Lexer {
     /// construct that discards the here-documents pending around it. See
     /// [`Lexer::read_subst_body`] and [`UngatheredHeredoc`].
     heredocs_forgotten: bool,
+    /// Which runs of `chars` are the real input and which are alias values
+    /// spliced into it.
+    ///
+    /// A single `src == 0` run covering everything for every ordinary lex, where
+    /// the text *is* the input. Only the alias pass's spliced text has more. See
+    /// [`Lexer::raw`].
+    map: TextMap,
+    /// The **raw-input cursor**: where the next here-document body starts.
+    ///
+    /// bash has two cursors. The parser's (`shell_input_line` plus the pushed
+    /// alias strings layered over it) is `pos`; the raw input's — `bash_input`,
+    /// which both "fetch the next line" and `read_a_line` draw on — is this one.
+    /// They coincide until an alias value is pushed, and again whenever a body is
+    /// read from the middle of a line.
+    ///
+    /// The invariant is that `pos` never lies in the *real input* below `raw`:
+    /// that span is input the body reader has already eaten, so the token scan
+    /// skips it the moment it arrives (see [`Lexer::run_into`]). Inside an alias
+    /// value `pos` is below `raw` all the time, and means nothing of the sort.
+    raw: usize,
+    /// Where the most recent here-document gather *started*, so that
+    /// `raw_from .. raw` is the input the latest gather ate.
+    ///
+    /// Not the same as the alias value's end: bash has the whole calling line in
+    /// `shell_input_line` before it expands anything on it, so a body taken from
+    /// inside a value starts at the line *after* — and the rest of the calling
+    /// line, which the reader still has, is parsed when the value runs dry.
+    raw_from: usize,
+    /// Every `raw_from .. raw` a gather has closed, in order. See
+    /// [`Spanned::taken`].
+    taken: Vec<(u32, u32)>,
 }
 
 /// A warning bash raises from its **reader** rather than from the parse or the
@@ -496,6 +520,19 @@ impl ReaderWarning {
         match self {
             Self::HeredocEof(h) => h.tok_index = i,
             Self::SubstHeredoc(s) => s.tok_index = i,
+        }
+    }
+
+    /// Renumber every line this warning names, for a caller whose lex ran over a
+    /// text that is not the script — an alias pass's assembled input, whose
+    /// replacement values add lines the script does not have.
+    pub fn map_lines(&mut self, f: impl Fn(u32) -> u32) {
+        match self {
+            Self::HeredocEof(h) => {
+                h.body_line = f(h.body_line);
+                h.eof_line = f(h.eof_line);
+            }
+            Self::SubstHeredoc(s) => s.line = f(s.line),
         }
     }
 }
@@ -852,13 +889,17 @@ impl Lexer {
             extpat_next: false,
             strict_heredoc_eof: false,
             paren_body: false,
-            defer_heredocs: false,
             conts: Vec::new(),
             warnings: Vec::new(),
+            warn_from: Vec::new(),
             hd_ahead: None,
             next_tok_index: 0,
             heredoc_lines: Vec::new(),
             heredocs_forgotten: false,
+            map: TextMap::whole(0),
+            raw: 0,
+            raw_from: 0,
+            taken: Vec::new(),
         }
     }
 
@@ -875,31 +916,35 @@ impl Lexer {
         Self { paren_body: true, ..Self::new(src, opts) }
     }
 
-    /// As [`Lexer::new`], but no newline collects a here-document body. See
-    /// [`tokenize_alias_body`].
-    fn alias_body(src: BStr<'_>, opts: ParseOpts) -> Self {
-        Self { defer_heredocs: true, ..Self::new(src, opts) }
-    }
-
-    /// A lexer poised to collect here-document bodies out of the middle of
-    /// `chars`, for [`gather_heredocs_at`].
-    fn at_offset(chars: &[Ch], from: usize, opts: ParseOpts) -> Self {
-        let mut lx = Self { chars: chars.to_vec(), ..Self::new(b"", opts) };
+    /// As [`Lexer::new`], but over a text bash's reader *assembled*: the input
+    /// with alias values bash pushed onto it with `push_string` written in where
+    /// their alias words stood. `map` says which run is which. See
+    /// [`Lexer::raw`].
+    ///
+    /// Reading starts at `from`, which must be the first character of a physical
+    /// line: bash's reader holds one line at a time, and everything a splice has
+    /// to settle — which `<<` on this line is still owed a body, and in what
+    /// order they are owed — is settled within the line the alias word stands
+    /// on. Starting there rather than at the top of the script also keeps the
+    /// re-lex off text the caller has already run, which may no longer *be*
+    /// lexable as code (a here-document body it consumed is arbitrary text).
+    ///
+    /// The raw-input cursor is *not* moved: it stays at 0, meaning "has not
+    /// diverged", until the first gather sets it — so the bodies of this line's
+    /// own here-documents are gathered afresh, from the line after it, in
+    /// `redir_stack` order. See [`Spanned::raws`].
+    fn spliced(chars: Vec<Ch>, map: TextMap, from: usize, opts: ParseOpts) -> Self {
+        let mut lx = Self { chars, map, ..Self::new(b"", opts) };
         let from = from.min(lx.chars.len());
         lx.pos = from;
         lx.iter_start = from;
         // `cur_line` counts the newlines since `iter_start`, so the base has to
         // be the physical line the cursor already stands on.
-        let before = lx
-            .chars
-            .get(..from)
-            .unwrap_or(&[])
-            .iter()
-            .filter(|&&c| c == '\n')
-            .count();
+        let before = lx.chars.get(..from).unwrap_or(&[]).iter().filter(|&&c| c == '\n').count();
         lx.line = 1u32.saturating_add(u32::try_from(before).unwrap_or(u32::MAX));
         lx
     }
+
 }
 
 /// Shell source with its NUL bytes removed — what bash's reader hands the lexer.
@@ -958,6 +1003,47 @@ pub struct Spanned {
     /// because bash names the error site by slicing its *input line*, not by
     /// printing the token — see [`crate::parser`]'s `Spans`.
     pub ends: Vec<u32>,
+    /// Parallel to `toks`: where the **raw-input cursor** stood when each token
+    /// was read — the offset the next here-document body would be taken from.
+    /// See [`Lexer::raw`].
+    ///
+    /// `0` throughout an ordinary lex, which never diverts the cursor. Only the
+    /// alias pass reads it, to learn which input line bash's reader had reached
+    /// while it was standing inside a value: `line_number` is bumped by the
+    /// gather, so a token after one is numbered from the delimiter's line and
+    /// not from the alias word's.
+    pub raws: Vec<u32>,
+    /// The spans of text this lex ate as here-document **bodies**, ascending and
+    /// disjoint — the lines it read as data rather than as commands.
+    ///
+    /// A caller that lexed the same text before under a different reading (the
+    /// alias pass, whose splice can put a `<<` where the first lex saw a plain
+    /// word) needs it to learn which of that first reading's tokens are not
+    /// tokens after all. See [`crate::parser::IncrementalParser::rebuild`].
+    pub taken: Vec<(u32, u32)>,
+    /// What the reader complained about while fetching those bodies. The lines
+    /// are this text's own, so a caller that *assembled* the text has to
+    /// renumber them onto the script. See [`ReaderWarning`].
+    pub warnings: Vec<ReaderWarning>,
+    /// Parallel to `warnings`: the offset into this text the gather that raised
+    /// each one had reached when it began reading the body it was complaining
+    /// about — a point inside the matching [`Self::taken`] span.
+    ///
+    /// A warning's token index says nothing about *where* its body was: the
+    /// `<<` is stamped when it is read, long before the end of the line sends
+    /// the reader off to fetch anything. Only a caller that has to place the
+    /// body in the text wants this; see [`AliasExpansion::warnings`].
+    pub warn_from: Vec<u32>,
+}
+
+/// The per-token parallel vectors a lex fills beside the token stream, carried
+/// together so the one pass that stamps them all takes one argument.
+#[derive(Default)]
+struct Marks {
+    lines: Vec<u32>,
+    starts: Vec<u32>,
+    ends: Vec<u32>,
+    raws: Vec<u32>,
 }
 
 /// Tokenize `src`, keeping each token's source line and end offset.
@@ -991,155 +1077,6 @@ pub fn tokenize_spanned(src: BStr<'_>, opts: ParseOpts) -> Result<Spanned, LexEr
 pub fn tokenize_paren_body(src: BStr<'_>, opts: ParseOpts) -> Result<Spanned, LexError> {
     let mut lx = Lexer::paren_body(src, opts);
     lx.run()
-}
-
-/// Tokenize an alias replacement, leaving any here-document it declares
-/// *ungathered* — its `HereDoc` token is emitted with an empty body for the
-/// caller to fill in from the real input.
-///
-/// bash expands an alias with `push_string`, which makes the replacement the
-/// current `shell_input_line`; the lexer reads it, and a `<<` in it goes on the
-/// same `redir_stack` as one written on the line itself. But the *body* is read
-/// by `make_here_document` → `read_secondary_line` → `read_a_line`, and
-/// `read_a_line` takes its characters from `yy_getc` — `bash_input.getter`, the
-/// underlying file or string — never from `shell_input_line`. So the pushed
-/// replacement is not a place a body can come from: the body is the next line of
-/// the real input, and a body written inside the alias value is read back as
-/// ordinary commands. See
-/// [`crate::parser::IncrementalParser::gather_alias_heredocs`], which does the
-/// filling.
-///
-/// # Errors
-/// Returns [`LexError`] on an unterminated quote or substitution.
-pub fn tokenize_alias_body(src: BStr<'_>, opts: ParseOpts) -> Result<Spanned, LexError> {
-    Lexer::alias_body(src, opts).run()
-}
-
-/// One here-document [`gather_heredocs_at`] is to collect a body for: everything
-/// the operator settled and the delimiter word decided.
-#[derive(Clone, Debug)]
-pub struct HeredocWant {
-    /// The delimiter, already unquoted.
-    pub delim: Str,
-    /// `<<-`: strip leading tabs from each body line and from the delimiter.
-    pub strip: bool,
-    /// The delimiter was written unquoted, so the body expands.
-    pub expand: bool,
-}
-
-/// What [`gather_heredocs_at`] collected.
-pub struct GatheredHeredocs {
-    /// The filled `HereDoc` tokens, one per want, in the order given.
-    pub toks: Vec<Tok>,
-    /// Offset into the input just past the last body line taken.
-    pub end: usize,
-    /// Parallel to `toks`: the input lines each collection consumed, as
-    /// [`Tokenized::heredoc_lines`] records them.
-    pub lines: Vec<u32>,
-    /// The `delimited by end-of-file` warnings the collection raised. Their
-    /// `tok_index` is the want's index; the caller re-keys them.
-    pub warnings: Vec<ReaderWarning>,
-    /// Offsets of the `\` of every `\<newline>` a body joined away, as
-    /// [`Tokenized::conts`].
-    pub conts: Vec<u32>,
-}
-
-/// Collect here-document bodies for already-known delimiters out of `chars`,
-/// starting at `from`.
-///
-/// This is the collection bash's reader performs at a newline, exposed for the
-/// one caller that cannot get it from the ordinary scan: a `<<` that arrived
-/// through an alias, whose body is in the *outer* text and so is not the
-/// sub-lexer's to read. Collection is sequential — each body starts where the
-/// previous one stopped — so passing the whole line's here-documents in
-/// declaration order reproduces bash's `redir_stack` order exactly.
-///
-/// The line numbers the warnings carry are this input's own, unmapped.
-///
-/// # Errors
-/// Returns [`LexError`] if a body's expansion contains an unclosed construct.
-pub fn gather_heredocs_at(
-    chars: &[Ch],
-    from: usize,
-    wants: &[HeredocWant],
-    opts: ParseOpts,
-) -> Result<GatheredHeredocs, LexError> {
-    let mut lx = Lexer::at_offset(chars, from, opts);
-    let mut toks: Vec<Tok> = wants
-        .iter()
-        .map(|w| Tok::HereDoc(Vec::new(), w.delim.clone(), !w.expand))
-        .collect();
-    lx.pending_heredocs = wants
-        .iter()
-        .enumerate()
-        .map(|(i, w)| PendingHeredoc {
-            delim: w.delim.clone(),
-            strip: w.strip,
-            expand: w.expand,
-            tok_index: i,
-        })
-        .collect();
-    lx.collect_heredocs(&mut toks)?;
-    let mut lines = vec![0u32; toks.len()];
-    for (i, n) in std::mem::take(&mut lx.heredoc_lines) {
-        if let Some(slot) = lines.get_mut(i) {
-            *slot = n;
-        }
-    }
-    Ok(GatheredHeredocs {
-        toks,
-        end: lx.pos,
-        lines,
-        warnings: std::mem::take(&mut lx.warnings),
-        conts: std::mem::take(&mut lx.conts),
-    })
-}
-
-/// What [`read_delim_at`] found where a here-document delimiter was expected.
-enum DelimAt {
-    /// A word: its text, whether the body still expands, and the offset just
-    /// past its last character.
-    Word(Str, bool, usize),
-    /// A separator, or a comment — there is no word here, and because the reader
-    /// got that answer *in this text* it does not go looking in the next one
-    /// out. bash's grammar error.
-    None,
-    /// The text ran out first. bash's reader would `pop_string` and carry on in
-    /// whatever text is one level further out, so the caller must try there.
-    Exhausted,
-}
-
-/// Read a here-document delimiter out of `chars` starting at `from`, the way
-/// [`Lexer::lex_heredoc_op`] reads one that follows its `<<` in the same text.
-///
-/// This is for the seam an alias leaves. bash reads the delimiter with the same
-/// reader that read the `<<`, and when the pushed replacement runs dry
-/// `pop_string` restores the calling line *at the character after the alias
-/// word* and the scan simply continues into it — so `alias B='cat <<'` followed
-/// by `B E` is one operator-and-delimiter pair spanning two texts. See
-/// [`expand_aliases_inner`], the only caller.
-///
-/// Continuation offsets are not recorded: the text this reads was lexed already,
-/// and recorded them then.
-fn read_delim_at(chars: &[Ch], from: usize, opts: ParseOpts) -> Result<DelimAt, LexError> {
-    let mut lx = Lexer::at_offset(chars, from, opts);
-    // The blanks and continuations `lex_heredoc_op` skips before the word.
-    loop {
-        while matches!(lx.peek(), Some(' ' | '\t')) {
-            lx.pos += 1;
-        }
-        if !lx.skip_conts(false) {
-            break;
-        }
-    }
-    if lx.peek().is_none() {
-        return Ok(DelimAt::Exhausted);
-    }
-    let (delim, expand) = lx.read_heredoc_delim(false)?;
-    if delim.is_empty() && expand {
-        return Ok(DelimAt::None);
-    }
-    Ok(DelimAt::Word(delim, expand, lx.pos))
 }
 
 /// A whole-source tokenization that keeps the tokens it managed to lex even
@@ -1214,10 +1151,9 @@ pub struct Tokenized {
 pub fn tokenize_deferred(src: BStr<'_>, opts: ParseOpts) -> Tokenized {
     let mut lx = Lexer::new(src, opts);
     let mut toks = Vec::new();
-    let mut lines = Vec::new();
-    let mut offsets = Vec::new();
-    let mut ends = Vec::new();
-    let res = lx.run_into(&mut toks, &mut lines, &mut offsets, &mut ends);
+    let mut marks = Marks::default();
+    let res = lx.run_into(&mut toks, &mut marks);
+    let Marks { mut lines, starts: mut offsets, mut ends, .. } = marks;
     // A here-document body is scanned out of order with respect to the line that
     // introduced it, so sort rather than assume the scan produced them in source
     // order; callers binary-search this list.
@@ -1542,6 +1478,102 @@ impl TokSpan {
     }
 }
 
+/// One run of characters in a spliced text, and where they really live.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TextSeg {
+    /// Offset in the spliced text at which this run begins. It runs until the
+    /// next segment's `at`, or to the end of the text for the last one.
+    at: usize,
+    /// The text those characters were written in, as a [`TokSpan::src`].
+    src: u32,
+    /// Offset in *that* text of this run's first character.
+    base: usize,
+}
+
+/// Where the characters of the text the alias pass is walking came from.
+///
+/// The text is in general a *concatenation*. bash reads an alias by pushing its
+/// value onto the input: `push_string` (parse.y:2694) makes the value the
+/// current `shell_input_line` and stacks the line it displaced together with the
+/// reader's index just past the alias word, and `pop_string` restores that line
+/// *at that index*. So what the one reader goes on to see, uninterrupted, is the
+/// value followed by the tail of the calling line — and since the calling line
+/// may itself be such a concatenation, the splices nest.
+///
+/// A `TextMap` is the run-length record of that concatenation: segments in
+/// ascending `at` order, the first always at `0`. It exists for diagnostics —
+/// bash echoes `shell_input_line` as it stands once the offending token has been
+/// read, i.e. the text that token *ended* in, which is [`Self::at`] of the
+/// token's end offset.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TextMap {
+    segs: Vec<TextSeg>,
+}
+
+impl TextMap {
+    /// A text that is nothing but `src` itself, read from its start.
+    fn whole(src: u32) -> Self {
+        Self { segs: vec![TextSeg { at: 0, src, base: 0 }] }
+    }
+
+    /// Which text the character at `off` was written in, and its offset there.
+    ///
+    /// Offsets past the end of the text answer as the last segment continued,
+    /// which is what a caller asking about a token's *end* offset wants.
+    fn at(&self, off: usize) -> (u32, usize) {
+        let i = self.segs.partition_point(|s| s.at <= off).saturating_sub(1);
+        self.segs.get(i).map_or((0, off), |s| {
+            (s.src, s.base.saturating_add(off.saturating_sub(s.at)))
+        })
+    }
+
+    /// The map of `self[..word] ++ value ++ self[cut..]` — the text bash's
+    /// reader sees once the alias word running from `word` to `cut` has been
+    /// replaced by a `vlen`-character value living in text `src`.
+    ///
+    /// The text *before* the word is kept even though the reader is long past
+    /// it, because the splice is re-read from the beginning: a here-document
+    /// operator standing on an earlier line still has a body to gather, and it
+    /// must gather it before any the value contributes. Keeping the text is what
+    /// lets one lex settle both, in `redir_stack` order.
+    fn spliced(&self, word: usize, cut: usize, vlen: usize, src: u32) -> Self {
+        let mut segs: Vec<TextSeg> = self.segs.iter().copied().filter(|s| s.at < word).collect();
+        segs.push(TextSeg { at: word, src, base: 0 });
+        let moved = word.saturating_add(vlen);
+        for (i, s) in self.segs.iter().enumerate() {
+            // A segment runs until the next one begins; the last runs to the end
+            // of the text, which is at or past `cut` whatever `cut` is.
+            let end = self.segs.get(i.saturating_add(1)).map_or(usize::MAX, |n| n.at);
+            if end <= cut {
+                // Wholly inside the word or behind it; the word is gone.
+                continue;
+            }
+            // Only the segment `cut` falls *inside* loses a prefix.
+            let skip = cut.saturating_sub(s.at);
+            segs.push(TextSeg {
+                at: moved.saturating_add(s.at.saturating_add(skip).saturating_sub(cut)),
+                src: s.src,
+                base: s.base.saturating_add(skip),
+            });
+        }
+        Self { segs }
+    }
+
+    /// Where the next run of *real input* begins at or after `off`.
+    ///
+    /// The body of a here-document is read from the input file, never from a
+    /// pushed alias value (`read_a_line` calls `yy_getc` directly), so a reader
+    /// standing inside a value that meets a `<<` has to know where the input it
+    /// left off reading resumes. That is the first `src == 0` run from here on.
+    /// `None` when the text ends inside a value.
+    fn real_at_or_after(&self, off: usize) -> Option<usize> {
+        if self.at(off).0 == 0 {
+            return Some(off);
+        }
+        self.segs.iter().find(|s| s.at >= off && s.src == 0).map(|s| s.at)
+    }
+}
+
 /// An alias replacement that was spliced into a token stream, and where the
 /// reader returns when it runs off the end of it.
 #[derive(Clone, Debug)]
@@ -1568,11 +1600,18 @@ pub struct AliasExpansion {
     pub spans: Vec<TokSpan>,
     /// The replacement texts that were pushed, in the order they were pushed.
     pub bodies: Vec<AliasBody>,
-    /// Indices into `toks` of every `HereDoc` placeholder a replacement text
-    /// spliced in, ascending. Their bodies are still to come: they are in the
-    /// *outer* input, which the sub-lex could not read. See
-    /// [`tokenize_alias_body`].
-    pub heredocs: Vec<usize>,
+    /// Spans of the **real input** this pass's own lex ate as here-document
+    /// bodies, ascending and disjoint. A `<<` a replacement text brought with it
+    /// does not exist in the input's own reading, so the lines its body takes
+    /// were read there as commands; the caller has to unread them. See
+    /// [`Spanned::taken`] and [`crate::parser::IncrementalParser::rebuild`].
+    pub taken: Vec<(u32, u32)>,
+    /// What the reader complained about while fetching those bodies, each paired
+    /// with the offset in the real input where its body *began* — the start of
+    /// the matching [`Self::taken`] span. The input's own lex never saw the `<<`,
+    /// so it could not have raised these. Lines are already the script's; the
+    /// caller holds each warning until the parse has passed that offset.
+    pub warnings: Vec<(u32, ReaderWarning)>,
 }
 
 /// The output of an alias pass, plus the running state its command-position
@@ -1588,8 +1627,6 @@ struct AliasOut {
     /// The replacement texts pushed so far; a token's [`TokSpan::src`] of
     /// `n + 1` names `bodies[n]`.
     bodies: Vec<AliasBody>,
-    /// [`AliasExpansion::heredocs`], filled as the replacements are walked.
-    heredocs: Vec<usize>,
     prev: Prev,
     /// bash's `PST_REDIRLIST`: everything read of the simple command so far has
     /// been a redirection, so the word after one is still the *command* word.
@@ -1606,7 +1643,6 @@ impl AliasOut {
             origin: Vec::new(),
             spans: Vec::new(),
             bodies: Vec::new(),
-            heredocs: Vec::new(),
             prev: Prev::Start,
             redir_list: true,
         }
@@ -1722,22 +1758,188 @@ fn starts_command(prev: Option<&Tok>) -> bool {
     }
 }
 
+/// The text bash's reader currently has in hand, and the tokens it reads from it.
+///
+/// Expanding an alias does not splice *tokens*: `push_string` (parse.y:2694)
+/// makes the value the current `shell_input_line` and stacks the line it
+/// displaced together with the reader's index just past the alias word, so the
+/// one reader goes straight on into the value and, when the value runs dry,
+/// straight back out into the tail of the calling line. Whatever stands across
+/// that seam it reads as one thing — an operator whose halves lie either side of
+/// it, a here-document delimiter, a comment that runs on past the pop. Modelling
+/// that faithfully means splicing the *text* and reading it again, which is what
+/// this is: the concatenation, the provenance of its characters, and its lex.
+struct AliasView {
+    toks: Vec<Tok>,
+    /// Parallel to `toks`: the 1-based line of each token *in `text`*, which is
+    /// not a line of the script — see [`AliasScan::line`].
+    lines: Vec<u32>,
+    /// Parallel to `toks`: where each token starts and ends in `text`.
+    starts: Vec<u32>,
+    ends: Vec<u32>,
+    /// Parallel to `toks`: where the body reader stood. See [`Spanned::raws`].
+    raws: Vec<u32>,
+    /// What this view's lex ate as bodies, in `text`'s offsets. See
+    /// [`Spanned::taken`].
+    taken: Vec<(u32, u32)>,
+    /// What it complained about while eating them, in `text`'s line numbering.
+    warnings: Vec<ReaderWarning>,
+    /// Parallel to `warnings`: where in `text` each complaint's body was being
+    /// read from. See [`Spanned::warn_from`].
+    warn_from: Vec<u32>,
+    text: Vec<Ch>,
+    /// Which text each offset in `text` really belongs to. See [`TextMap`].
+    map: TextMap,
+}
+
+/// One entry of bash's pushed-string list: the region of the current text an
+/// alias value occupies.
+struct AliasPush {
+    name: Str,
+    /// Where the value begins in the current text, and where it ends — the
+    /// offset at which `pop_string` happens.
+    start: usize,
+    end: usize,
+    /// The alias's `AL_EXPANDNEXT` (its value ended in a blank), which
+    /// `pop_string` turns back into `PST_ALEXPNEXT`.
+    expand_next: bool,
+}
+
+/// The reader state the scan carries from one spliced text to the next.
+struct AliasScan {
+    /// bash's pushed-string list, as *regions*. The reader is inside a push
+    /// while it is reading between its `start` and its `end`, and an alias whose
+    /// push it is inside is `AL_BEINGEXPANDED` and so not a candidate — which is
+    /// what makes `alias ls='ls -l'` terminate.
+    ///
+    /// Regions rather than a stack because every splice re-reads the whole text
+    /// from the beginning, so the reader walks into and out of the same push
+    /// once per pass. A stack would be emptied by the first pass and the guard
+    /// would be gone by the second.
+    pushes: Vec<AliasPush>,
+    /// Offsets in the current text where an alias word stood, each with the
+    /// input token it was.
+    ///
+    /// The first token read at or after such an offset stands in for the word
+    /// and takes its origin: a caller resuming the parse at the start of a
+    /// splice would otherwise find the next `Some` origin *past* the value and
+    /// silently drop the command. An empty value contributes no token of its
+    /// own, and then the mark falls to the token after it — which is right,
+    /// since resuming there re-expands the word to nothing again.
+    marks: Vec<(usize, usize)>,
+    /// The first character of the physical line the scan starts on, which is
+    /// where every re-lex begins. See [`Lexer::spliced`]. Fixed for the whole
+    /// scan: a splice only ever moves text *after* the alias word, and the
+    /// alias word is never before the point the caller handed over.
+    head: usize,
+    /// bash's `PST_ALEXPNEXT`: the next word is a candidate however the structure
+    /// reads. Set by *popping* a value that ended in a blank — that is the pop
+    /// that puts `alias sudo='sudo '`'s argument in expansion position.
+    force: bool,
+    /// The start offset of the token before this one, which bounds the pops that
+    /// happened since: the reader left every push whose end lies between them.
+    prev: usize,
+    /// The source line of the last token emitted. Text pushed by an alias is not
+    /// a line of the script and has none of its own — `line_number` is bumped
+    /// only by *fetching* a line (parse.y:2346), which reading a pushed string
+    /// never does — so every token read out of a value keeps this. Gathering a
+    /// here-document body does fetch lines, and moves it on.
+    line: u32,
+    /// Cursor into the input token stream, for recovering which input token an
+    /// offset in the real input belongs to. Monotone: the reader never goes back.
+    k: usize,
+    /// Cursor into `marks`, likewise monotone.
+    m: usize,
+}
+
+impl AliasScan {
+    /// The input token that begins at `off` in the real input, if the scan has
+    /// not already passed it.
+    ///
+    /// The cursor is monotone because the reader is: the real input's offsets
+    /// come out in order however deeply the values spliced between them nest.
+    /// Matching by position rather than by search also keeps the answers distinct
+    /// where one lexer iteration produced two tokens — a `<<` and the delimiter
+    /// after it share a start.
+    fn take_input_at(&mut self, off: usize, starts: &[u32]) -> Option<usize> {
+        while starts.get(self.k).is_some_and(|&s| (s as usize) < off) {
+            self.k = self.k.saturating_add(1);
+        }
+        if starts.get(self.k).copied()? as usize != off {
+            return None;
+        }
+        let k = self.k;
+        self.k = self.k.saturating_add(1);
+        Some(k)
+    }
+
+    /// The alias word, if any, that the token starting at `off` answers for.
+    fn take_mark(&mut self, off: usize) -> Option<usize> {
+        let mut mark = None;
+        while let Some(&(at, k)) = self.marks.get(self.m) {
+            if at > off {
+                break;
+            }
+            mark.get_or_insert(k);
+            self.m = self.m.saturating_add(1);
+        }
+        mark
+    }
+
+    /// Whether `name` is `AL_BEINGEXPANDED` for a token starting at `off`.
+    fn being_expanded(&self, name: &Str, off: usize) -> bool {
+        self.pushes.iter().any(|p| p.name == *name && p.start <= off && off < p.end)
+    }
+
+    /// Take `PST_ALEXPNEXT` from the pops that happened between the previous
+    /// token and one starting at `off`. The outermost pop — the one whose value
+    /// ends last — decides, exactly as the last assignment in bash's pop chain
+    /// does.
+    fn pop_to(&mut self, off: usize) {
+        let (prev, force) = (self.prev, &mut self.force);
+        if let Some(p) =
+            self.pushes.iter().filter(|p| p.end > prev && p.end <= off).max_by_key(|p| p.end)
+        {
+            *force = p.expand_next;
+        }
+        self.prev = off;
+    }
+}
+
+/// The 1-based script line a reader that has consumed the real input up to `off`
+/// sits on — the line of the character *before* `off`, so a cursor left just past
+/// a newline is still on the line that newline ended.
+///
+/// The input token that most recently began before `off` anchors the count,
+/// because only a token carries the script's own numbering (a fragment lexed on
+/// its own is renumbered by the caller's `LineMap`); the physical lines between
+/// the anchor and `off` are then counted in the text.
+fn line_at_input(text: &[Ch], starts: &[u32], lines: &[u32], off: usize) -> Option<u32> {
+    let k = starts.partition_point(|&s| (s as usize) < off).checked_sub(1)?;
+    let anchor = *starts.get(k)? as usize;
+    let span = text.get(anchor..off.saturating_sub(1)).unwrap_or(&[]);
+    let n = u32::try_from(span.iter().filter(|&&c| c == '\n').count()).unwrap_or(0);
+    Some(lines.get(k)?.saturating_add(n))
+}
+
 /// Expand shell aliases over a token stream (bash's pre-parse alias pass).
 ///
-/// Only a single unquoted-literal word in command position is a candidate. The
-/// alias value is re-tokenized and spliced in; its first word is itself an
-/// expansion candidate (guarded against recursion by `active`, so `alias
-/// ls='ls -l'` terminates). If an alias value ends in a blank, the *next* word
-/// is also checked (bash's trailing-blank rule, enabling `alias sudo='sudo '`).
+/// Only a single unquoted-literal word in command position is a candidate. Its
+/// value is pushed onto the reader's input in front of the rest of the text and
+/// the whole thing read again from there, so the value's first word is itself a
+/// candidate (guarded by [`AliasScan::active`], which is what makes `alias
+/// ls='ls -l'` terminate) and anything written across the seam is read as one
+/// thing. If a value ends in a blank, the word after the pop is a candidate too
+/// (bash's `PST_ALEXPNEXT`, which is what enables `alias sudo='sudo '`).
 ///
-/// `ends` is parallel to `toks`: the offset into the text they were lexed from
-/// just past each token. It is carried through so that a diagnostic raised while
-/// the reader is inside a replacement can quote *that* text — see [`TokSpan`].
-/// Pass an empty slice where no such text exists.
+/// `starts` and `ends` are parallel to `toks`: where in `text` each token begins
+/// and ends. Both are needed — `ends` so that a diagnostic raised while the
+/// reader is inside a value can quote *that* text (see [`TokSpan`]), and
+/// `starts` to recognise a token that came through the splice unchanged.
 ///
 /// Beside the expanded stream comes an *origin* vector: for each output token,
-/// the index of the input token it came from, or `None` when the token was
-/// spliced in by an alias's replacement text.
+/// the index of the input token it came from, or `None` when the token was read
+/// out of an alias value (or across the seam into one).
 /// [`crate::parser::IncrementalParser`] needs it to resume — after executing one
 /// item it must know which *original* token to continue from, and must not
 /// re-expand tokens an alias already produced.
@@ -1745,279 +1947,302 @@ fn starts_command(prev: Option<&Tok>) -> bool {
 pub fn expand_aliases_tracked(
     toks: &[Tok],
     lines: &[u32],
+    starts: &[u32],
     ends: &[u32],
     text: &[Ch],
     aliases: &crate::assoc::AssocArray,
     opts: ParseOpts,
 ) -> AliasExpansion {
-    let mut active = std::collections::BTreeSet::new();
     let mut out = AliasOut::new();
-    let input = AliasInput { toks, lines, ends, text, src: 0 };
-    expand_aliases_inner(&input, aliases, opts, &mut active, &mut out, true);
+    // Where in the real input the stream this call was handed begins. The
+    // caller may be resuming part-way through the script — it has executed
+    // everything before this and wants only what follows — but the *text* it
+    // hands over is the whole script, because a splice is made in place and a
+    // re-lex needs the text on either side of it. Tokens before this point are
+    // re-read, then dropped.
+    let from = starts.first().map_or(0, |&s| s as usize);
+    // Back to the top of the line the resume point stands on, which is where
+    // every re-lex begins: as far back as one needs to go, and as far back as
+    // one may safely go. See [`Lexer::spliced`].
+    let head = text.get(..from).unwrap_or(&[]).iter().rposition(|&c| c == '\n').map_or(0, |i| {
+        i.saturating_add(1)
+    });
+    let mut st = AliasScan {
+        pushes: Vec::new(),
+        marks: Vec::new(),
+        head,
+        force: false,
+        prev: 0,
+        line: lines.first().copied().unwrap_or(1),
+        k: 0,
+        m: 0,
+    };
+    let mut view = AliasView {
+        toks: toks.to_vec(),
+        lines: lines.to_vec(),
+        starts: starts.to_vec(),
+        ends: ends.to_vec(),
+        // The input has no values spliced into it yet, so nothing here is read
+        // out of one and no token needs to ask where the body reader stood — and
+        // whatever bodies the input's own lex took, the caller took too.
+        raws: Vec::new(),
+        taken: Vec::new(),
+        warnings: Vec::new(),
+        warn_from: Vec::new(),
+        text: text.to_vec(),
+        map: TextMap::whole(0),
+    };
+    'splice: loop {
+        // Every splice re-reads the assembled text from the beginning, so the
+        // stream is built afresh each pass. The replacement *texts* are not:
+        // they are already written into `view.text`, and their `TokSpan::src`
+        // numbers are the ones `view.map` records.
+        let bodies = core::mem::take(&mut out.bodies);
+        out = AliasOut::new();
+        out.bodies = bodies;
+        (st.force, st.prev, st.k, st.m) = (false, 0, 0, 0);
+        st.line = lines.first().copied().unwrap_or(1);
+        for (i, tok) in view.toks.iter().enumerate() {
+            let start = view.starts.get(i).map_or(usize::MAX, |&s| s as usize);
+            let end = view.ends.get(i).map_or(usize::MAX, |&e| e as usize);
+            // Every push the reader has left behind pops here, and the outermost
+            // pop decides `PST_ALEXPNEXT` — see [`AliasScan::force`].
+            st.pop_to(start);
+            // A token read wholly out of the real input is the input's own token,
+            // and the parse may resume at it. One that begins inside a value is
+            // not, even if it ends outside: it was never written where it is read.
+            let (ssrc, soff) = view.map.at(start);
+            if ssrc == 0 && soff < from {
+                // Already executed by the caller; re-read only to move the
+                // body reader's cursor. Nothing before the resume point can be
+                // an alias word, because nothing there was spliced.
+                continue;
+            }
+            let origin = if ssrc == 0 { st.take_input_at(soff, starts) } else { None };
+            let at_cmd = st.force || out.at_command();
+            st.force = false;
+            if at_cmd
+                && let Tok::Word(segs) = tok
+                && let [Seg::Lit(name)] = segs.as_slice()
+                && !st.being_expanded(name, start)
+                && let Some(val) = aliases.get(name)
+                && let Some(next) =
+                    splice_alias(&view, &mut st, name, val, start..end, &mut out, opts)
+            {
+                // The word is gone but the parse may still have to resume at it,
+                // so the offset it stood at remembers which input token it was.
+                if let Some(k) = origin {
+                    st.marks.push((start, k));
+                }
+                view = next;
+                continue 'splice;
+            }
+            // A token standing where an alias word stood answers for it, so that
+            // a resume lands on the word and expands it again rather than
+            // skipping past the whole command.
+            let mark = st.take_mark(start);
+            let origin = origin.or(mark);
+            // `line_number` is bumped by *fetching* a line and is never wound
+            // back (parse.y:2346), so a gather made while the reader stood
+            // inside a value leaves even the rest of the *calling* line numbered
+            // from where the gather stopped — the calling line was fetched long
+            // before, and nothing renumbers it on the way back.
+            let line = origin.and_then(|k| lines.get(k).copied()).unwrap_or(st.line).max(st.line);
+            st.line = line;
+            // A `$( … )` remembers the line its `)` sits on, in the numbering of
+            // the text it was lexed from — and a spliced text is not the script.
+            // Put those recorded lines back on the script's numbering, which for
+            // anything read out of a value is the reader's line.
+            let mut tok = tok.clone();
+            let by = i64::from(line) - i64::from(view.lines.get(i).copied().unwrap_or(1));
+            shift_tok_lines(&mut tok, by);
+            // Which text the token was read from is decided by its *last
+            // character*, not by the offset past it — because the pop that the
+            // offset past it would land in has not necessarily happened.
+            // `pop_string` fires on the read that finds the pushed string used
+            // up, and an operator finished by its own lookahead never makes
+            // that read: `alias A='[[ a>>'` with `A b ']]` is still reported
+            // against `[[ a>>`. Whether the read happened is the parser's to
+            // judge (`Spans::reader_stop`, which pops when it did), so what is
+            // recorded here is the span *before* any pop — the token's own
+            // text, with `end` flush against that text's length when the token
+            // ends flush against it.
+            let (esrc, eoff) = view.map.at(end.saturating_sub(1));
+            let end = u32::try_from(eoff).map_or(u32::MAX, |e| e.saturating_add(1));
+            out.advance(&tok, at_cmd);
+            out.toks.push(tok);
+            out.lines.push(line);
+            out.origin.push(origin);
+            out.spans.push(TokSpan { src: esrc, end });
+            // If this token's iteration gathered a here-document body, the reader
+            // fetched those lines and `line_number` went with them — so what is
+            // read *after* it, still inside the value, is numbered from where the
+            // gather stopped rather than from the alias word's line.
+            if ssrc != 0
+                && let Some(r) = view.raws.get(i).copied().filter(|&r| r > 0)
+                && let (0, roff) = view.map.at(r as usize)
+                && let Some(l) = line_at_input(text, starts, lines, roff)
+            {
+                st.line = st.line.max(l);
+            }
+        }
+        break;
+    }
+    // The gathers were made in the assembled text; what the caller has to unread
+    // is the *input* they came out of. A body always is input — that is what
+    // makes it a body — so every span maps back whole.
+    // A body is one unbroken run of input, so mapping its start is enough: no
+    // value can be spliced inside it, and its length is the same on both sides.
+    let taken = view
+        .taken
+        .iter()
+        .filter_map(|&(a, b)| match view.map.at(a as usize) {
+            (0, off) => {
+                let off = u32::try_from(off).unwrap_or(u32::MAX);
+                Some((off, off.saturating_add(b.saturating_sub(a))))
+            }
+            _ => None,
+        })
+        .collect();
+    // A warning is keyed to where the body it complains about was being *read
+    // from*, which is inside one of those spans. The caller releases a warning
+    // once the parse has passed its offset, and a unit that swallowed a body is
+    // stretched to that body's end — so a key at or past the body's end would
+    // fall inside every unit before it too, and the warning would go out far too
+    // early. Its line numbers are the assembled text's and have to be put back on
+    // the script's.
+    let warnings = view
+        .warnings
+        .iter()
+        .zip(&view.warn_from)
+        .filter_map(|(w, &from)| {
+            let (0, off) = view.map.at(from as usize) else { return None };
+            let mut w = w.clone();
+            w.map_lines(|l| script_line(&view, text, starts, lines, l).unwrap_or(l));
+            Some((u32::try_from(off).unwrap_or(u32::MAX), w))
+        })
+        .collect();
     AliasExpansion {
         toks: out.toks,
         lines: out.lines,
         origin: out.origin,
         spans: out.spans,
         bodies: out.bodies,
-        heredocs: out.heredocs,
+        taken,
+        warnings,
     }
 }
 
-/// One text's worth of tokens for the alias pass to walk: the stream, the line
-/// and end offset of each token, and which text those offsets index. The pass
-/// recurses on this — a replacement is just another text to read.
-struct AliasInput<'a> {
-    toks: &'a [Tok],
-    lines: &'a [u32],
-    /// Parallel to `toks`: where each token ends in the text named by `src`.
-    /// Empty when that text is unknown, which makes every token here
-    /// unsliceable.
-    ends: &'a [u32],
-    /// The characters `ends` indexes: the text these tokens were read from.
-    /// Empty when it is unknown. [`read_delim_at`] reads out of it, at the seam
-    /// where a replacement ran dry and bash's reader would have carried on here.
-    text: &'a [Ch],
-    /// Which text these were read from, as a [`TokSpan::src`].
-    src: u32,
-}
-
-fn expand_aliases_inner(
-    inp: &AliasInput<'_>,
-    aliases: &crate::assoc::AssocArray,
-    opts: ParseOpts,
-    active: &mut std::collections::BTreeSet<Str>,
-    out: &mut AliasOut,
-    // False inside an alias's replacement text: those tokens have no counterpart
-    // in the caller's stream, so they record origin `None`.
-    from_input: bool,
-) -> bool {
-    let &AliasInput { toks, lines, ends, text, src } = inp;
-    let span_of = |i: usize| TokSpan {
-        src,
-        end: ends.get(i).copied().unwrap_or(u32::MAX),
-    };
-    // Whether the *next* token must be treated as command position regardless of
-    // structure (carried across an alias whose value ended in a blank).
-    let mut force = false;
-    // Tokens up to here were read as some here-document's delimiter and are not
-    // the pass's to emit again. See `take_dangling_delim`.
-    let mut skip_until = 0usize;
-    // The last dangling `<<` this text was asked about got its answer *here* — a
-    // separator or a comment stands where the word would be — so the chain of
-    // `pop_string`s stops and the caller must not be told to keep looking.
-    let mut sealed = false;
-    let entry = out.toks.len();
-    for (i, tok) in toks.iter().enumerate() {
-        if i < skip_until {
-            continue;
-        }
-        // The source line of this token; expanded replacement tokens inherit it
-        // so post-alias line numbers stay anchored to the alias's call site.
-        let tok_line = lines.get(i).copied().unwrap_or(1);
-        let at_cmd = force || out.at_command();
-        force = false;
-        if at_cmd
-            && let Tok::Word(segs) = tok
-            && let [Seg::Lit(name)] = segs.as_slice()
-            && !active.contains(name)
-            && let Some(val) = aliases.get(name)
-            && let Ok(Spanned { toks: mut repl, ends: mut repl_ends, .. }) =
-                tokenize_alias_body(val, opts)
-        {
-            // Drop a trailing newline the lexer may append so the splice stays
-            // within the current command.
-            while matches!(repl.last(), Some(Tok::Newline)) {
-                repl.pop();
-                repl_ends.pop();
-            }
-            // The lex above numbered the replacement's lines from 1, and a
-            // `$( … )` inside it recorded one of those numbers. It is not a line
-            // of the script, so it becomes the alias word's like everything else
-            // the replacement produces.
-            for t in &mut repl {
-                reline_tok(t, tok_line);
-            }
-            // Replacement tokens all inherit the alias word's source line.
-            let repl_lines = vec![tok_line; repl.len()];
-            let mark = out.toks.len();
-            // bash's `push_string`: the replacement becomes the current input
-            // line, and the line it displaced — with the reader's index just
-            // past the alias word — is stacked for `pop_string` to restore.
-            out.bodies.push(AliasBody { text: val.to_vec(), parent: span_of(i) });
-            let body_src = u32::try_from(out.bodies.len()).unwrap_or(u32::MAX);
-            active.insert(name.clone());
-            let repl_text: Vec<Ch> = bytes::chars(val).collect();
-            let body = AliasInput {
-                toks: &repl,
-                lines: &repl_lines,
-                ends: &repl_ends,
-                text: &repl_text,
-                src: body_src,
-            };
-            let dangling = expand_aliases_inner(&body, aliases, opts, active, out, false);
-            active.remove(name);
-            // The replacement ended *at* a `<<`, so the delimiter that belongs to
-            // it is not in the value: bash's reader ran off the end of the pushed
-            // string and `pop_string` put it back on this text, just past the
-            // alias word, where the scan simply carried on. Do the same. If this
-            // text is spent too, say so and let the caller — one text further
-            // out — try, which is the rest of that `pop_string` chain.
-            let mut took_delim = false;
-            if dangling {
-                let at = ends.get(i).map(|&e| e as usize);
-                match at.map_or(Dangle::Spent, |end| {
-                    take_dangling_delim(out, text, end, tok_line, opts)
-                }) {
-                    // The delimiter's characters were lexed into this text's
-                    // tokens as well; they belong to the delimiter, not to words
-                    // of their own. Skipping by *offset* is safe even if the two
-                    // scans were to disagree about where the word ends, since a
-                    // token reaching past the delimiter is never skipped.
-                    Dangle::Filled(delim_end) => {
-                        took_delim = true;
-                        sealed = false;
-                        skip_until = i.saturating_add(1);
-                        while ends.get(skip_until).is_some_and(|&e| (e as usize) <= delim_end) {
-                            skip_until = skip_until.saturating_add(1);
-                        }
-                    }
-                    Dangle::Sealed => sealed = true,
-                    Dangle::Spent => sealed = false,
-                }
-            }
-            // The *first* token of the replacement stands in for the alias word
-            // itself, so it keeps the alias word's origin; only the tokens after
-            // it are origin-less. Without this, a caller resuming at the start of
-            // the splice would skip the alias word entirely (it would find the
-            // next `Some` origin *past* the replacement) and silently drop the
-            // command. An empty replacement contributes no token and needs no
-            // mark: resuming past it is correct, since it expands to nothing.
-            if from_input
-                && let Some(slot) = out.origin.get_mut(mark)
-            {
-                *slot = Some(i);
-            }
-            // A value ending in a blank makes the *next* word a candidate for
-            // expansion however the structure reads (bash's `PST_ALEXPNEXT`) —
-            // unless the delimiter just above already took that word, since it
-            // was consumed by the same reader that would have expanded it. What
-            // bash does then, and osh does not, is expand it *as the delimiter*:
-            // see TD-OILS-AN-ALIAS-SPLICED-OPERATOR-DOES-NOT-EXTEND-INTO-THE-CALLING-LINE.
-            force = !took_delim && (val.ends_with(b" ") || val.ends_with(b"\t"));
-            continue;
-        }
-        // A `<<` a replacement text spliced in leaves an empty placeholder: the
-        // sub-lex had no body to read, because bash reads one from the real input
-        // and not from the pushed string. Note where it landed so the reader can
-        // fill it in. See [`tokenize_alias_body`].
-        if !from_input && matches!(tok, Tok::HereDoc(..)) {
-            out.heredocs.push(out.toks.len());
-        }
-        out.toks.push(tok.clone());
-        out.lines.push(tok_line);
-        out.origin.push(if from_input { Some(i) } else { None });
-        out.spans.push(span_of(i));
-        out.advance(tok, at_cmd);
+/// The 1-based line `line` of an assembled alias text, in the script's own
+/// numbering: the lines of a replacement value are not lines of the input, so a
+/// text with one spliced in counts more of them than the script has.
+fn script_line(view: &AliasView, text: &[Ch], starts: &[u32], lines: &[u32], line: u32) -> Option<u32> {
+    let mut at = 0usize;
+    for _ in 1..line {
+        let i = view.text.get(at..)?.iter().position(|&c| c == '\n')?;
+        at = at.saturating_add(i).saturating_add(1);
     }
-    // This text ended *at* a `<<` — no delimiter followed it here, and there is
-    // no more text to look in. bash's reader would `pop_string` and go on
-    // reading in the text one level out, so tell the caller to continue the scan
-    // there. At the outermost text nobody is listening, and the bare operator is
-    // then the grammar error bash reports. A `sealed` answer is not that: the
-    // reader already found a separator, so it stops asking.
-    !sealed
-        && out.toks.len() > entry
-        && matches!(out.toks.last(), Some(Tok::Op(Op::DLess | Op::DLessDash)))
+    // A line that begins inside a value belongs to the input line the value
+    // stands on, which is where the reader's own numbering has stayed.
+    let real = view.map.real_at_or_after(at)?;
+    let (0, off) = view.map.at(real) else { return None };
+    line_at_input(text, starts, lines, off.saturating_add(1))
 }
 
-/// What completing a dangling `<<` from the calling text came to.
-enum Dangle {
-    /// The delimiter was found and appended; the offset just past it.
-    Filled(usize),
-    /// A separator or a comment stands where the word would be, in *this* text.
-    /// bash's reader has its answer, so the `pop_string` chain stops here and
-    /// the bare operator is left to the parser as the grammar error it is.
-    Sealed,
-    /// This text is spent; the caller one level out must try.
-    Spent,
-}
-
-/// Complete a `<<` that an alias replacement left without a delimiter, reading
-/// the delimiter out of `text` from `end` — the character just past the alias
-/// word, which is exactly where bash's `pop_string` resumes.
+/// Write `val` into the text in place of the alias word standing at `at`, and
+/// read the whole thing again: bash's `push_string`, done to the text rather
+/// than to the token stream.
 ///
-/// On success the `HereDoc` token is appended (and registered in
-/// [`AliasExpansion::heredocs`], since its *body* still has to come from the
-/// real input) and the offset just past the delimiter is returned.
-///
-/// A delimiter that fails to lex counts as [`Dangle::Sealed`]: the word does
-/// start in this text, so the reader is not going to go looking in the next one
-/// out — the failure belongs here, where the parser will report it.
-fn take_dangling_delim(
+/// Returns `None` — leaving `st` and `out` untouched — when the spliced text will
+/// not lex at all. bash would report that error against the value; osh has
+/// already lexed this input once and has nowhere to put a second failure, so the
+/// word is left unexpanded, exactly as it was before the splice was tried.
+fn splice_alias(
+    view: &AliasView,
+    st: &mut AliasScan,
+    name: &Str,
+    val: &[u8],
+    at: core::ops::Range<usize>,
     out: &mut AliasOut,
-    text: &[Ch],
-    end: usize,
-    line: u32,
     opts: ParseOpts,
-) -> Dangle {
-    let delim_at = match read_delim_at(text, end, opts) {
-        Ok(d) => d,
-        Err(_) => return Dangle::Sealed,
+) -> Option<AliasView> {
+    let head = st.head;
+    let core::ops::Range { start: word, end: cut } = at;
+    let mut text: Vec<Ch> = view.text.get(..word)?.to_vec();
+    let vlen = bytes::chars(val).count();
+    text.extend(bytes::chars(val));
+    text.extend_from_slice(view.text.get(cut..).unwrap_or(&[]));
+    let src = u32::try_from(out.bodies.len().saturating_add(1)).ok()?;
+    let map = view.map.spliced(word, cut, vlen, src);
+    let Spanned { toks, lines, starts, ends, raws, taken, warnings, warn_from } =
+        Lexer::spliced(text.clone(), map.clone(), head, opts).run().ok()?;
+    // bash's `pop_string` restores the displaced line at the saved index, which
+    // is what a diagnostic raised inside the value points back at.
+    let (psrc, poff) = view.map.at(cut);
+    out.bodies.push(AliasBody {
+        text: val.to_vec(),
+        parent: TokSpan { src: psrc, end: u32::try_from(poff).unwrap_or(u32::MAX) },
+    });
+    // What the splice displaced moved along by the difference in length; what
+    // stands in front of it did not move at all.
+    let moved = word.saturating_add(vlen);
+    let shift = |off: usize| {
+        if off <= word { off } else { moved.saturating_add(off.saturating_sub(cut)) }
     };
-    let (delim, expand, delim_end) = match delim_at {
-        DelimAt::Word(delim, expand, delim_end) => (delim, expand, delim_end),
-        DelimAt::None => return Dangle::Sealed,
-        DelimAt::Exhausted => return Dangle::Spent,
-    };
-    // The body is not this pass's to read — it is in the real input, after the
-    // line the alias word stands on, like every other alias-spliced
-    // here-document. See [`tokenize_alias_body`].
-    out.heredocs.push(out.toks.len());
-    let tok = Tok::HereDoc(Vec::new(), delim, !expand);
-    out.advance(&tok, false);
-    out.toks.push(tok);
-    out.lines.push(line);
-    // The delimiter's characters are in the calling text, but the operator they
-    // complete is not, and the pair is one redirection. Recording it as
-    // origin-less keeps it out of the resume scan, exactly as the operator is.
-    out.origin.push(None);
-    out.spans.push(TokSpan { src: 0, end: u32::MAX });
-    Dangle::Filled(delim_end)
+    for p in &mut st.pushes {
+        p.start = shift(p.start);
+        p.end = shift(p.end);
+    }
+    for m in &mut st.marks {
+        m.0 = shift(m.0);
+    }
+    st.pushes.push(AliasPush {
+        name: name.clone(),
+        start: word,
+        end: moved,
+        expand_next: val.ends_with(b" ") || val.ends_with(b"\t"),
+    });
+    Some(AliasView { toks, lines, starts, ends, raws, taken, warnings, warn_from, text, map })
 }
 
-/// Re-anchor every source line recorded *inside* a token to `line`.
+/// Shift every source line recorded *inside* a token by `by` lines.
 ///
-/// A `$( … )` remembers the line its `)` sits on and a `<( … )` the line its `(`
-/// does, in the numbering of whatever text they were lexed from. An alias
-/// replacement is lexed on its own and so numbers from 1 — but a replacement is
-/// not a line of the script and has none of its own: bash reads one by swapping
-/// `shell_input_line` for it, and `line_number` is bumped only by *fetching* a
-/// line (parse.y 2346), which reading a pushed string never does. So a
-/// substitution written in an alias value reports the line the alias word was
-/// on, and this puts that line where the parse will find it.
-///
-/// The counterpart for the tokens themselves is the `repl_lines` the caller
-/// builds; this is for the lines a token carries as payload, which no parallel
-/// array reaches.
-fn reline_tok(tok: &mut Tok, line: u32) {
+/// The alias pass reads a text bash's reader assembled — a value followed by the
+/// tail of the calling line — and that text numbers its own lines from 1. For a
+/// token read out of the tail the difference from the script's numbering is a
+/// constant, so the lines it carries as payload move by the same amount its own
+/// constant. Text read out of a *value* is all on the alias word's line, and
+/// gets the shift that puts it there.
+fn shift_tok_lines(tok: &mut Tok, by: i64) {
+    if by == 0 {
+        return;
+    }
+    let shift = |l: &mut u32| {
+        *l = u32::try_from(i64::from(*l).saturating_add(by).max(1)).unwrap_or(u32::MAX);
+    };
+    walk_tok_lines(tok, &shift);
+}
+
+/// Apply `f` to every source line a token carries as payload: the line a
+/// `$( … )` remembers its `)` on and the one a `<( … )` remembers its `(` on.
+fn walk_tok_lines(tok: &mut Tok, f: &dyn Fn(&mut u32)) {
     match tok {
-        Tok::Word(segs) | Tok::HereDoc(segs, ..) => reline_segs(segs, line),
+        Tok::Word(segs) | Tok::HereDoc(segs, ..) => walk_seg_lines(segs, f),
         Tok::ArrayAssign { elems, .. } => {
             for e in elems {
-                reline_segs(e, line);
+                walk_seg_lines(e, f);
             }
         }
         _ => {}
     }
 }
 
-fn reline_segs(segs: &mut [Seg], line: u32) {
+fn walk_seg_lines(segs: &mut [Seg], f: &dyn Fn(&mut u32)) {
     for seg in segs {
         match seg {
-            Seg::CmdSub(_, close, _) => *close = line,
-            Seg::ProcSub(_, _, open) => *open = line,
-            Seg::Dq(inner) => reline_segs(inner, line),
+            Seg::CmdSub(_, close, _) => f(close),
+            Seg::ProcSub(_, _, open) => f(open),
+            Seg::Dq(inner) => walk_seg_lines(inner, f),
             _ => {}
         }
     }
@@ -2295,28 +2520,32 @@ impl Lexer {
 
     fn run(&mut self) -> Result<Spanned, LexError> {
         let mut toks = Vec::new();
-        // Parallel to `toks`: the 1-based source line each token *ends* on (see
-        // `stamp_lines` — that is what bash's `line_number` holds once the token
-        // has been read).
-        let mut lines: Vec<u32> = Vec::new();
-        let mut ends: Vec<u32> = Vec::new();
-        let mut starts: Vec<u32> = Vec::new();
-        self.run_into(&mut toks, &mut lines, &mut starts, &mut ends)?;
-        Ok(Spanned { toks, lines, starts, ends })
+        let mut m = Marks::default();
+        self.run_into(&mut toks, &mut m)?;
+        Ok(Spanned {
+            toks,
+            lines: m.lines,
+            starts: m.starts,
+            ends: m.ends,
+            raws: m.raws,
+            taken: core::mem::take(&mut self.taken),
+            warnings: core::mem::take(&mut self.warnings),
+            warn_from: core::mem::take(&mut self.warn_from),
+        })
     }
 
-    /// Tokenize the whole input into `out`/`lines`, keeping whatever was lexed
+    /// Tokenize the whole input into `out`/`marks`, keeping whatever was lexed
     /// before an error. Split out of [`Lexer::run`] so [`tokenize_deferred`] can
     /// hold on to the good prefix: bash executes every complete line preceding
     /// an unterminated construct before reporting it.
-    fn run_into(
-        &mut self,
-        out: &mut Vec<Tok>,
-        lines: &mut Vec<u32>,
-        offsets: &mut Vec<u32>,
-        ends: &mut Vec<u32>,
-    ) -> Result<(), LexError> {
+    fn run_into(&mut self, out: &mut Vec<Tok>, marks: &mut Marks) -> Result<(), LexError> {
         loop {
+            // Input the body reader already ate is not there to be parsed: the
+            // token cursor, arriving at the end of the pushed alias value, finds
+            // the raw input already advanced past those lines. See [`Lexer::raw`].
+            if self.pos >= self.raw_from && self.pos < self.raw && self.map.at(self.pos).0 == 0 {
+                self.pos = self.raw;
+            }
             // Skip inline blanks (but not newlines — those are tokens).
             while matches!(self.peek(), Some(' ' | '\t')) {
                 self.pos += 1;
@@ -2353,7 +2582,7 @@ impl Lexer {
                 self.regex_next = false;
                 let segs = self.read_word_regex()?;
                 self.emit_word(out, segs);
-                self.stamp_lines(out, lines, offsets, ends, start_line, start_pos);
+                self.stamp_lines(out, marks, start_line, start_pos);
                 continue;
             }
             self.regex_next = false;
@@ -2370,7 +2599,7 @@ impl Lexer {
                     // them again.
                     self.sync_ahead();
                     out.push(Tok::Newline);
-                    if !self.pending_heredocs.is_empty() && !self.defer_heredocs {
+                    if !self.pending_heredocs.is_empty() {
                         self.collect_heredocs(out)?;
                     }
                 }
@@ -2617,7 +2846,7 @@ impl Lexer {
                     self.emit_word(out, segs);
                 }
             }
-            self.stamp_lines(out, lines, offsets, ends, start_line, start_pos);
+            self.stamp_lines(out, marks, start_line, start_pos);
         }
         // bash's reader hands the parser a newline when the input runs out, so a
         // script with no trailing newline — and every `-c` string, which never
@@ -2638,18 +2867,18 @@ impl Lexer {
         // its own — bash accepts `` `!` `` — so it keeps the newline.)
         if self.paren_body {
             let start_pos = self.pos;
-            if !self.pending_heredocs.is_empty() && !self.defer_heredocs {
+            if !self.pending_heredocs.is_empty() {
                 self.collect_heredocs(out)?;
             }
             out.push(Tok::Op(Op::RParen));
-            self.stamp_lines(out, lines, offsets, ends, self.line, start_pos);
+            self.stamp_lines(out, marks, self.line, start_pos);
         } else if !matches!(out.last(), None | Some(Tok::Newline)) {
             let start_pos = self.pos;
             out.push(Tok::Newline);
-            if !self.pending_heredocs.is_empty() && !self.defer_heredocs {
+            if !self.pending_heredocs.is_empty() {
                 self.collect_heredocs(out)?;
             }
-            self.stamp_lines(out, lines, offsets, ends, self.line, start_pos);
+            self.stamp_lines(out, marks, self.line, start_pos);
         }
         Ok(())
     }
@@ -2743,15 +2972,8 @@ impl Lexer {
     /// be fetched, so a token that ends *at* a newline — the `Newline` token
     /// itself, or the one that swallowed a here-doc body — belongs to the line
     /// it terminates rather than the one after it.
-    fn stamp_lines(
-        &mut self,
-        out: &[Tok],
-        lines: &mut Vec<u32>,
-        offsets: &mut Vec<u32>,
-        ends: &mut Vec<u32>,
-        start_line: u32,
-        start_pos: usize,
-    ) {
+    fn stamp_lines(&mut self, out: &[Tok], marks: &mut Marks, start_line: u32, start_pos: usize) {
+        let Marks { lines, starts: offsets, ends, raws } = marks;
         let inner = self
             .chars
             .get(start_pos..self.pos.saturating_sub(1))
@@ -2782,6 +3004,12 @@ impl Lexer {
         let end = u32::try_from(self.pos).unwrap_or(u32::MAX);
         while ends.len() < out.len() {
             ends.push(end);
+        }
+        // Where the body reader stands now — past anything this iteration's own
+        // here-documents took. See [`Spanned::raws`].
+        let raw = u32::try_from(self.raw).unwrap_or(u32::MAX);
+        while raws.len() < out.len() {
+            raws.push(raw);
         }
         let consumed = self.chars[start_pos..self.pos]
             .iter()
@@ -4072,17 +4300,20 @@ impl Lexer {
         own: usize,
         raw: &mut Str,
     ) -> Result<(), LexError> {
-        if own > 0 {
-            self.warnings.push(ReaderWarning::SubstHeredoc(SubstHeredoc {
+        // The line the warning names is the one the reader has reached *now*,
+        // before this gather moves it; only where the gather will read from has
+        // to wait for `hd_ahead` to be taken.
+        let pending_warning = (own > 0).then(|| {
+            ReaderWarning::SubstHeredoc(SubstHeredoc {
                 count: own,
                 line: self.fetched_line(),
                 tok_index: self.next_tok_index,
-            }));
-        }
+            })
+        });
         let resume = self.pos;
         // An earlier substitution on this line may already have taken lines; carry
         // on from where it stopped rather than re-reading them.
-        self.pos = match self.hd_ahead.take() {
+        let from = match self.hd_ahead.take() {
             Some(a) => a.pos,
             None => {
                 let mut p = self.pos;
@@ -4092,6 +4323,10 @@ impl Lexer {
                 p.saturating_add(usize::from(p < self.chars.len()))
             }
         };
+        if let Some(w) = pending_warning {
+            self.warn(from, w);
+        }
+        self.pos = from;
         // The body belongs where an inline here-document's would have sat: on the
         // lines after the command, which the re-lex of this text finds only if the
         // command is terminated first. The scan stopped at `)`, so it never
@@ -4124,17 +4359,25 @@ impl Lexer {
             // The moment bash's warning names; see [`Lexer::collect_heredocs`],
             // which captures the same thing for a here-document read inline.
             let body_line = self.fetched_line();
+            // Where this body's lines are being read from, for a caller that has
+            // to place it in the text. See [`Spanned::warn_from`].
+            let from = self.pos;
             loop {
                 if self.pos >= self.chars.len() {
                     if self.strict_heredoc_eof {
                         return Err(unterminated_heredoc(&delim));
                     }
-                    self.warnings.push(ReaderWarning::HeredocEof(HeredocEof {
-                        delim: delim.clone(),
-                        body_line,
-                        eof_line: self.fetched_line(),
-                        tok_index: self.next_tok_index,
-                    }));
+                    let eof_line = self.fetched_line();
+                    let tok_index = self.next_tok_index;
+                    self.warn(
+                        from,
+                        ReaderWarning::HeredocEof(HeredocEof {
+                            delim: delim.clone(),
+                            body_line,
+                            eof_line,
+                            tok_index,
+                        }),
+                    );
                     // Close the body off with the delimiter the input never
                     // supplied. This text is re-lexed when the substitution runs,
                     // and that lex would otherwise run out of input in the same
@@ -4420,9 +4663,9 @@ impl Lexer {
         // parser say so — it diagnoses a `<<` with no target exactly as it
         // already diagnoses a `<` with none.
         //
-        // It also leaves the operator visible to the alias pass, which reads the
-        // delimiter that belongs to it out of the calling text. See
-        // [`expand_aliases_inner`].
+        // It also leaves the operator visible to the alias pass, which re-lexes
+        // the assembled text and there finds the delimiter that belongs to it on
+        // the calling line. See [`expand_aliases_tracked`].
         if delim.is_empty() && expand {
             return Ok(());
         }
@@ -4653,6 +4896,29 @@ impl Lexer {
     /// the just-consumed newline, in order, filling in their placeholder tokens.
     fn collect_heredocs(&mut self, out: &mut [Tok]) -> Result<(), LexError> {
         let pending = core::mem::take(&mut self.pending_heredocs);
+        if pending.is_empty() {
+            return Ok(());
+        }
+        // A body comes off the *raw input*, not off the text being parsed:
+        // `make_here_document` calls `read_secondary_line`, which calls
+        // `read_a_line`, which calls `yy_getc` — `bash_input.getter` itself,
+        // under `shell_input_line` and under every string pushed onto it. So
+        // when the token cursor is inside an alias value, the body is taken from
+        // the input after the line the alias word stands on, and the cursor goes
+        // back to the value afterwards. Everywhere else the two are the same
+        // place and this is the identity. See [`Lexer::raw`].
+        //
+        // "After the line the alias word stands on" is where the value's run
+        // ends: bash has the whole calling line in `shell_input_line` before it
+        // ever expands a word on it, so `read_a_line` starts at the line after.
+        // Unless a body was already taken, which left the cursor further on.
+        let resume = self.pos;
+        let in_value = self.map.at(self.pos).0 != 0;
+        if in_value {
+            let tail = self.map.real_at_or_after(self.pos).unwrap_or(self.chars.len());
+            self.pos = self.raw.max(self.line_after(tail));
+        }
+        self.raw_from = self.pos;
         for ph in pending {
             let mut body = Str::new();
             // Captured before the first body line is read, because that is the
@@ -4676,12 +4942,16 @@ impl Lexer {
                     if self.strict_heredoc_eof {
                         return Err(unterminated_heredoc(&ph.delim));
                     }
-                    self.warnings.push(ReaderWarning::HeredocEof(HeredocEof {
-                        delim: ph.delim.clone(),
-                        body_line,
-                        eof_line: self.fetched_line(),
-                        tok_index: ph.tok_index,
-                    }));
+                    let eof_line = self.fetched_line();
+                    self.warn(
+                        from,
+                        ReaderWarning::HeredocEof(HeredocEof {
+                            delim: ph.delim.clone(),
+                            body_line,
+                            eof_line,
+                            tok_index: ph.tok_index,
+                        }),
+                    );
                     break;
                 }
                 let start = self.pos;
@@ -4730,7 +5000,39 @@ impl Lexer {
                 *slot = Tok::HereDoc(segs, ph.delim.clone(), !ph.expand);
             }
         }
+        self.raw = self.raw.max(self.pos);
+        // What the gather ate, for a caller comparing this reading of the text
+        // against an earlier one. See [`Spanned::taken`].
+        if self.pos > self.raw_from {
+            self.taken.push((
+                u32::try_from(self.raw_from).unwrap_or(u32::MAX),
+                u32::try_from(self.pos).unwrap_or(u32::MAX),
+            ));
+        }
+        if in_value {
+            // The token cursor was inside a pushed alias value, which the body
+            // reader never touched; it carries on there.
+            self.pos = resume;
+        }
         Ok(())
+    }
+
+    /// Record a reader warning together with `from`, the offset the gather that
+    /// raised it was reading the body from. See [`Spanned::warn_from`].
+    fn warn(&mut self, from: usize, w: ReaderWarning) {
+        self.warn_from.push(u32::try_from(from).unwrap_or(u32::MAX));
+        self.warnings.push(w);
+    }
+
+    /// The offset just past the newline that ends the line `off` stands on, or
+    /// the end of the text when no newline follows.
+    fn line_after(&self, off: usize) -> usize {
+        self.chars
+            .get(off..)
+            .unwrap_or(&[])
+            .iter()
+            .position(|&c| c == '\n')
+            .map_or(self.chars.len(), |i| off.saturating_add(i).saturating_add(1))
     }
 
     /// Read a `` ` … ` `` body, returning two things: the text to *parse*, with
@@ -5718,5 +6020,81 @@ mod tests {
             })
             .expect("a substitution segment");
         assert_eq!(raw, b"case b in b) echo B)");
+    }
+
+    /// [`TextMap`] — the provenance of a text bash's reader built by pushing an
+    /// alias value onto the input. An unspliced text answers for itself.
+    #[test]
+    fn a_text_map_of_an_unspliced_text_is_that_text() {
+        let m = TextMap::whole(0);
+        assert_eq!(m.at(0), (0, 0));
+        assert_eq!(m.at(7), (0, 7));
+        // Past the end answers as the segment continued: a token's *end* offset
+        // is one past its last character and must still name its text.
+        assert_eq!(m.at(usize::MAX), (0, usize::MAX));
+    }
+
+    /// A splice is `prefix ++ value ++ tail`: the text the reader already passed
+    /// is kept ahead of the value, and the tail resumes just past the alias word.
+    #[test]
+    fn a_text_map_splits_at_the_value_it_spliced_in() {
+        // `echo A rest`, with `A` (running from 5 to 6) replaced by a
+        // 5-character value.
+        let m = TextMap::whole(0).spliced(5, 6, 5, 1);
+        // The prefix is still the input, at its own offsets.
+        assert_eq!(m.at(0), (0, 0));
+        assert_eq!(m.at(4), (0, 4));
+        assert_eq!(m.at(5), (1, 0));
+        assert_eq!(m.at(9), (1, 4));
+        // The tail resumes at the saved index, exactly as `pop_string` does.
+        assert_eq!(m.at(10), (0, 6));
+        assert_eq!(m.at(14), (0, 10));
+    }
+
+    /// Nesting composes, because the calling text is itself a concatenation:
+    /// `alias A='B'` over `alias B='cat <<'` leaves three texts in play at once.
+    #[test]
+    fn a_text_map_composes_under_nesting() {
+        // `A E` — `A` runs from 0 to 1, its value `B` is 1 character, in text 1.
+        let outer = TextMap::whole(0).spliced(0, 1, 1, 1);
+        assert_eq!(outer.at(0), (1, 0));
+        assert_eq!(outer.at(1), (0, 1));
+        // Now `B` (running from 0 to 1 of *that* text) expands to a 6-character
+        // value in text 2. What is left is `<value 2> ++ " E"`, and the `" E"`
+        // is still the original input's.
+        let inner = outer.spliced(0, 1, 6, 2);
+        assert_eq!(inner.at(0), (2, 0));
+        assert_eq!(inner.at(5), (2, 5));
+        assert_eq!(inner.at(6), (0, 1));
+        assert_eq!(inner.at(7), (0, 2));
+    }
+
+    /// A splice whose word covers a whole segment drops it rather than leaving
+    /// an empty run behind, so the map stays as short as the nesting is deep.
+    #[test]
+    fn a_text_map_drops_the_segments_the_word_covered() {
+        // `V W` where `V` (0 to 1) expanded to 3 characters, then the whole
+        // value *and* the space are a second alias word, running from 0 to 4.
+        let m = TextMap::whole(0).spliced(0, 1, 3, 1);
+        assert_eq!(m.segs.len(), 2);
+        let m2 = m.spliced(0, 4, 2, 2);
+        assert_eq!(
+            m2.segs,
+            vec![
+                TextSeg { at: 0, src: 2, base: 0 },
+                TextSeg { at: 2, src: 0, base: 2 },
+            ]
+        );
+        assert_eq!(m2.at(0), (2, 0));
+        assert_eq!(m2.at(2), (0, 2));
+    }
+
+    /// An empty alias value splices nothing, so the tail begins at offset 0 and
+    /// the value's own segment is unreachable — the tail must win there.
+    #[test]
+    fn a_text_map_of_an_empty_value_is_all_tail() {
+        let m = TextMap::whole(0).spliced(0, 2, 0, 1);
+        assert_eq!(m.at(0), (0, 2));
+        assert_eq!(m.at(3), (0, 5));
     }
 }

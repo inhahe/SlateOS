@@ -56157,15 +56157,13 @@ mod tests {
         // is a grammar error at whatever token does stand there.
         let (out, st) = run("shopt -s expand_aliases\nalias B='cat <<'\nB; echo after\n");
         assert_eq!((out.as_str(), st), ("", 2));
-        // The chain only runs while the reader is *out* of text. A separator in
-        // the value is an answer, so it stops there and never reaches the
-        // calling line — even though a perfectly good word stands on it.
+        // A separator standing in the value ends the redirection there, so the
+        // word on the calling line is never reached — the `<<` has no target and
+        // the `;` is the grammar error.
         let (out, st) = run(&format!("{sh}alias P='B ; B'\nP E\none\nE\necho after\n"));
         assert_eq!((out.as_str(), st), ("", 2));
-        // As does a comment, which is likewise not a word. (bash's comment then
-        // runs on past the pop and eats the calling line, so it names the
-        // newline where osh names `E`; both are the same grammar error. See
-        // TD-OILS-A-COMMENT-IN-AN-ALIAS-VALUE-DOES-NOT-EAT-THE-CALLING-LINE.)
+        // A comment likewise leaves the `<<` with no target — and then eats the
+        // rest of the calling line, `E` included, so the error is at the newline.
         let (out, st) = run(&format!("{sh}alias C='B #c'\nC E\none\nE\necho after\n"));
         assert_eq!((out.as_str(), st), ("", 2));
     }
@@ -56240,6 +56238,51 @@ mod tests {
         assert_eq!(
             run(&format!("{sh}alias S='mapfile -t v <<E'\nS\nit's \"fine\nE\necho \"[${{v[0]}}]\"\n")).0,
             "[it's \"fine]\n"
+        );
+    }
+
+    /// An alias value and the line that called it are one text, with no seam
+    /// between them at any level below the token.
+    ///
+    /// `push_string` (parse.y:2694) makes the replacement the current
+    /// `shell_input_line` and stacks the displaced line *with the reader's index
+    /// just past the alias word*; `pop_string` restores it there and the same
+    /// scan continues. So a construct may be written half in the value and half
+    /// on the calling line and still be one construct.
+    #[test]
+    fn nothing_lexical_stops_at_the_alias_seam() {
+        let sh = "shopt -s expand_aliases\n";
+        // `take_operator` extends an operator across the seam.
+        assert_eq!(
+            run(&format!("{sh}alias P='true |'\nP| echo or\necho done\n")).0,
+            "done\n"
+        );
+        assert_eq!(
+            run(&format!("{sh}alias N='false &'\nN& echo and\nwait\necho done\n")).0,
+            "done\n"
+        );
+        // A substitution opened in the value closes on the calling line.
+        assert_eq!(
+            run(&format!("{sh}alias C='echo $(echo'\nC spanned)\n")).0,
+            "spanned\n"
+        );
+        // A comment opened in the value keeps eating there: `discard_until('\n')`
+        // reads through `shell_getc`, which pops transparently.
+        assert_eq!(
+            run(&format!("{sh}alias A='echo hi #c'\nA there\necho next\n")).0,
+            "hi\nnext\n"
+        );
+        // The error a spanned operator causes is the *spanned* operator's: `;`
+        // from the value and `;` from the calling line make one `;;`.
+        let (out, st) = run(&format!("{sh}alias S='echo a ;'\nS; echo b\n"));
+        assert_eq!((out.as_str(), st), ("", 2));
+        // But a word does not reach back — the alias word was ended by a blank or
+        // a metacharacter, which is what made it a word at all.
+        assert_eq!(run(&format!("{sh}alias V='echo ab'\nV cd\n")).0, "ab cd\n");
+        // Nor does the alias word itself extend into what follows it.
+        assert_eq!(
+            run(&format!("{sh}alias W='echo W-ran'\nWx() {{ echo Wx; }}\nWx\n")).0,
+            "Wx\n"
         );
     }
 

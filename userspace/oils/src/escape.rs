@@ -48,7 +48,7 @@ use crate::bytes::Str;
 /// A single-quoted run cannot contain a single quote, so an embedded one is
 /// lifted out and written `'\''` — close the run, escape the quote, open the
 /// next. The exception is a value that is *nothing but* a quote: bash writes
-/// the two characters `\'` for that one (shquote.c:103), rather than the
+/// the two characters `\'` for that one (shquote.c:105), rather than the
 /// `''\'''` the general rule would give, and the difference is visible
 /// everywhere the function is —
 ///
@@ -468,7 +468,7 @@ mod tests {
     }
 
     /// A value that is nothing but a single quote is the one bash writes as a
-    /// bare escape rather than as a quoted run (shquote.c:103) — and it is the
+    /// bare escape rather than as a quoted run (shquote.c:105) — and it is the
     /// *whole* value that has to be the quote, not merely its first character.
     #[test]
     fn a_value_that_is_only_a_quote_is_written_as_a_bare_escape() {

@@ -7,7 +7,7 @@
 #
 # Its general rule is the familiar one: a quote cannot live inside a quoted run,
 # so it is lifted out and written `'\''` — close, escape, reopen. But a value
-# that is *nothing but* a quote is special-cased (shquote.c:103) to the two
+# that is *nothing but* a quote is special-cased (shquote.c:105) to the two
 # characters `\'`, because the general rule would spend six characters writing
 # one. The test is `string[0] == '\'' && string[1] == 0`: the whole value, not
 # merely its first character, so `'x` and `x'` are ordinary.

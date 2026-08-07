@@ -4001,6 +4001,16 @@ impl Lexer {
         let mut cases = CaseScan::new();
         loop {
             let Some(cx) = self.bump_ch() else {
+                // bash reads a whole line at a time, so the input's last line ends
+                // whether or not it carries a newline — and the here-documents that
+                // line declared are gathered, and warned about, at that end, before
+                // the scan's own failure to find `close` is ever noticed. `echo
+                // $(cat <<E` with no trailing newline warns about `E` and *then*
+                // reports the missing `)`. With a newline the `'\n'` arm below has
+                // already done it, which is why only this path needed saying.
+                if !pending.is_empty() {
+                    self.consume_subst_heredoc_bodies(&mut pending, &mut raw)?;
+                }
                 return Err(eof_matching(close));
             };
             let c = syn(cx);
@@ -5848,6 +5858,30 @@ mod tests {
             assert_eq!(e.msg, b"unexpected EOF while looking for matching `)'");
             assert_eq!(*line, 4, "{src:?}");
             assert_eq!(heredoc_eofs(&tk), vec![("EOF", 1, 3)], "{src:?}");
+        }
+        // The `<<`'s own line being the *last* line, with no newline of its own,
+        // changes nothing: bash reads a whole line at a time, so that line still
+        // ends, and the gather still happens there. Both of the warning's numbers
+        // are that line, while the `)` is blamed one past it as always.
+        /// A source, the line its unmatched `)` is blamed on, and the
+        /// `(delimiter, body line, EOF line)` of each warning it raises.
+        type LastLine<'a> = (&'a str, u32, &'a [(&'a str, u32, u32)]);
+        let last_line: &[LastLine<'_>] = &[
+            ("echo $(cat <<E", 2, &[("E", 1, 1)]),
+            ("echo <(cat <<E", 2, &[("E", 1, 1)]),
+            ("echo one\necho $(cat <<E", 3, &[("E", 2, 2)]),
+            // One warning each, in declaration order.
+            ("echo $(cat <<A; cat <<B", 2, &[("A", 1, 1), ("B", 1, 1)]),
+            // The enclosing line's own here-document is not this scan's to gather:
+            // only `B` is warned about, `A` going down with the abandoned parse.
+            ("cat <<A $(cat <<B", 2, &[("B", 1, 1)]),
+        ];
+        for &(src, want_line, want_warnings) in last_line {
+            let tk = tokenize_deferred(src.as_bytes(), ParseOpts::default());
+            let (e, line) = tk.err.as_ref().unwrap_or_else(|| panic!("{src:?} must fail"));
+            assert_eq!(e.msg, b"unexpected EOF while looking for matching `)'", "{src:?}");
+            assert_eq!(*line, want_line, "{src:?}");
+            assert_eq!(heredoc_eofs(&tk), want_warnings, "{src:?}");
         }
     }
 

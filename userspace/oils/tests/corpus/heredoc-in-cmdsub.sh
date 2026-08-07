@@ -117,4 +117,24 @@ EOF
 ); echo "x=[$x]"' 2>&1
 echo "closed rc=$?"
 
+echo "=== …including when the <<'s own line is the last line there is ==="
+# The reader takes a whole line at a time, so the input's final line *ends* even
+# without a newline of its own — the here-document it declared is gathered, and
+# warned about, right there. Both of the warning's numbers are that line, and it
+# still precedes the `)` complaint on the line past it.
+( eval 'echo $(cat <<E' ) 2>&1
+echo "last-line rc=$?"
+( eval 'echo one
+echo $(cat <<E' ) 2>&1
+echo "last-line-after rc=$?"
+# One warning each, in declaration order.
+( eval 'echo $(cat <<A; cat <<B' ) 2>&1
+echo "two rc=$?"
+# The enclosing line's own here-document is not the substitution's to gather:
+# only `B` is warned about, `A` going down with the rest of the abandoned parse.
+( eval 'cat <<A $(cat <<B' ) 2>&1
+echo "outer rc=$?"
+( eval 'echo <(cat <<E' ) 2>&1
+echo "procsub-last-line rc=$?"
+
 echo done

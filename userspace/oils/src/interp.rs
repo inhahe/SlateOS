@@ -56091,6 +56091,85 @@ mod tests {
         assert_eq!(run("cat <<\"\"\nline\n\necho ok\n").0, "line\nok\n");
     }
 
+    /// An alias value may end *at* a `<<`, with the delimiter nowhere in it —
+    /// and bash reads the delimiter anyway, off the calling line.
+    ///
+    /// One reader reads both texts: `push_string` stacks the calling line with
+    /// the reader's index just past the alias word, and when the replacement
+    /// runs dry `pop_string` restores it *there*, so the scan simply continues.
+    /// The pop chain is as deep as the push chain, and when no word stands there
+    /// at all the redirection has no target — bash's grammar error.
+    #[test]
+    fn an_alias_spliced_here_document_takes_its_delimiter_from_the_calling_line() {
+        let sh = "shopt -s expand_aliases\nalias B='mapfile -t v <<'\n";
+        let show = "echo \"[${v[0]}]\"\n";
+        // The word after the alias word is the delimiter.
+        assert_eq!(run(&format!("{sh}B E\nbody one\nE\n{show}")).0, "[body one]\n");
+        // With its quoting: `"E"` and `\E` stop the body expanding, and an
+        // unquoted one leaves it expanding — delimiters are never expanded
+        // themselves, so `E$x` is literal.
+        assert_eq!(
+            run(&format!("{sh}B \"E\"\nlit $PWD\nE\n{show}")).0,
+            "[lit $PWD]\n"
+        );
+        assert_eq!(
+            run(&format!("{sh}B \\E\nalso lit $PWD\nE\n{show}")).0,
+            "[also lit $PWD]\n"
+        );
+        assert_eq!(run(&format!("{sh}x=zz\nB E$x\nnow\nE$x\n{show}")).0, "[now]\n");
+        // The rest of the calling line is still the calling line.
+        assert_eq!(
+            run(&format!("{sh}B E; echo tail\ngathered\nE\n{show}")).0,
+            "tail\n[gathered]\n"
+        );
+        // The pop chain is as deep as the push chain: through a second alias,
+        // and out of the *outer* value when that is where the word is.
+        assert_eq!(
+            run(&format!("{sh}alias A='B'\nA E\nchained\nE\n{show}")).0,
+            "[chained]\n"
+        );
+        assert_eq!(
+            run(&format!("{sh}alias V='B E'\nV\nouter\nE\n{show}")).0,
+            "[outer]\n"
+        );
+        // One moving cursor, in declaration order, across both texts.
+        assert_eq!(
+            run(&format!(
+                "{sh}mapfile -t w <<F; B E\nfb\nF\neb\nE\necho \"[${{w[0]}}][${{v[0]}}]\"\n"
+            ))
+            .0,
+            "[fb][eb]\n"
+        );
+        // `<<-` written in the value still strips the calling line's body.
+        assert_eq!(
+            run(&format!(
+                "{sh}alias D='mapfile -t v <<-'\nD E\n\tstripped\n\tE\n{show}"
+            ))
+            .0,
+            "[stripped]\n"
+        );
+        // The delimiter word is not itself alias-expanded.
+        assert_eq!(
+            run(&format!("{sh}alias W='NOPE'\nB W\nb\nW\n{show}")).0,
+            "[b]\n"
+        );
+        // And with no word standing there the redirection has no target, which
+        // is a grammar error at whatever token does stand there.
+        let (out, st) = run("shopt -s expand_aliases\nalias B='cat <<'\nB; echo after\n");
+        assert_eq!((out.as_str(), st), ("", 2));
+        // The chain only runs while the reader is *out* of text. A separator in
+        // the value is an answer, so it stops there and never reaches the
+        // calling line — even though a perfectly good word stands on it.
+        let (out, st) = run(&format!("{sh}alias P='B ; B'\nP E\none\nE\necho after\n"));
+        assert_eq!((out.as_str(), st), ("", 2));
+        // As does a comment, which is likewise not a word. (bash's comment then
+        // runs on past the pop and eats the calling line, so it names the
+        // newline where osh names `E`; both are the same grammar error. See
+        // TD-OILS-A-COMMENT-IN-AN-ALIAS-VALUE-DOES-NOT-EAT-THE-CALLING-LINE.)
+        let (out, st) = run(&format!("{sh}alias C='B #c'\nC E\none\nE\necho after\n"));
+        assert_eq!((out.as_str(), st), ("", 2));
+    }
+
     /// A `<<` an alias spliced in takes its body from the *file*, starting at the
     /// line after the one the alias word stands on — never from the alias value,
     /// however the value is written.

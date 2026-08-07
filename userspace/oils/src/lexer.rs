@@ -1084,6 +1084,53 @@ pub fn gather_heredocs_at(
     })
 }
 
+/// What [`read_delim_at`] found where a here-document delimiter was expected.
+enum DelimAt {
+    /// A word: its text, whether the body still expands, and the offset just
+    /// past its last character.
+    Word(Str, bool, usize),
+    /// A separator, or a comment — there is no word here, and because the reader
+    /// got that answer *in this text* it does not go looking in the next one
+    /// out. bash's grammar error.
+    None,
+    /// The text ran out first. bash's reader would `pop_string` and carry on in
+    /// whatever text is one level further out, so the caller must try there.
+    Exhausted,
+}
+
+/// Read a here-document delimiter out of `chars` starting at `from`, the way
+/// [`Lexer::lex_heredoc_op`] reads one that follows its `<<` in the same text.
+///
+/// This is for the seam an alias leaves. bash reads the delimiter with the same
+/// reader that read the `<<`, and when the pushed replacement runs dry
+/// `pop_string` restores the calling line *at the character after the alias
+/// word* and the scan simply continues into it — so `alias B='cat <<'` followed
+/// by `B E` is one operator-and-delimiter pair spanning two texts. See
+/// [`expand_aliases_inner`], the only caller.
+///
+/// Continuation offsets are not recorded: the text this reads was lexed already,
+/// and recorded them then.
+fn read_delim_at(chars: &[Ch], from: usize, opts: ParseOpts) -> Result<DelimAt, LexError> {
+    let mut lx = Lexer::at_offset(chars, from, opts);
+    // The blanks and continuations `lex_heredoc_op` skips before the word.
+    loop {
+        while matches!(lx.peek(), Some(' ' | '\t')) {
+            lx.pos += 1;
+        }
+        if !lx.skip_conts(false) {
+            break;
+        }
+    }
+    if lx.peek().is_none() {
+        return Ok(DelimAt::Exhausted);
+    }
+    let (delim, expand) = lx.read_heredoc_delim(false)?;
+    if delim.is_empty() && expand {
+        return Ok(DelimAt::None);
+    }
+    Ok(DelimAt::Word(delim, expand, lx.pos))
+}
+
 /// A whole-source tokenization that keeps the tokens it managed to lex even
 /// when the input ended inside an unclosed construct.
 pub struct Tokenized {
@@ -1688,12 +1735,13 @@ pub fn expand_aliases_tracked(
     toks: &[Tok],
     lines: &[u32],
     ends: &[u32],
+    text: &[Ch],
     aliases: &crate::assoc::AssocArray,
     opts: ParseOpts,
 ) -> AliasExpansion {
     let mut active = std::collections::BTreeSet::new();
     let mut out = AliasOut::new();
-    let input = AliasInput { toks, lines, ends, src: 0 };
+    let input = AliasInput { toks, lines, ends, text, src: 0 };
     expand_aliases_inner(&input, aliases, opts, &mut active, &mut out, true);
     AliasExpansion {
         toks: out.toks,
@@ -1715,6 +1763,10 @@ struct AliasInput<'a> {
     /// Empty when that text is unknown, which makes every token here
     /// unsliceable.
     ends: &'a [u32],
+    /// The characters `ends` indexes: the text these tokens were read from.
+    /// Empty when it is unknown. [`read_delim_at`] reads out of it, at the seam
+    /// where a replacement ran dry and bash's reader would have carried on here.
+    text: &'a [Ch],
     /// Which text these were read from, as a [`TokSpan::src`].
     src: u32,
 }
@@ -1728,8 +1780,8 @@ fn expand_aliases_inner(
     // False inside an alias's replacement text: those tokens have no counterpart
     // in the caller's stream, so they record origin `None`.
     from_input: bool,
-) {
-    let &AliasInput { toks, lines, ends, src } = inp;
+) -> bool {
+    let &AliasInput { toks, lines, ends, text, src } = inp;
     let span_of = |i: usize| TokSpan {
         src,
         end: ends.get(i).copied().unwrap_or(u32::MAX),
@@ -1737,7 +1789,18 @@ fn expand_aliases_inner(
     // Whether the *next* token must be treated as command position regardless of
     // structure (carried across an alias whose value ended in a blank).
     let mut force = false;
+    // Tokens up to here were read as some here-document's delimiter and are not
+    // the pass's to emit again. See `take_dangling_delim`.
+    let mut skip_until = 0usize;
+    // The last dangling `<<` this text was asked about got its answer *here* — a
+    // separator or a comment stands where the word would be — so the chain of
+    // `pop_string`s stops and the caller must not be told to keep looking.
+    let mut sealed = false;
+    let entry = out.toks.len();
     for (i, tok) in toks.iter().enumerate() {
+        if i < skip_until {
+            continue;
+        }
         // The source line of this token; expanded replacement tokens inherit it
         // so post-alias line numbers stay anchored to the alias's call site.
         let tok_line = lines.get(i).copied().unwrap_or(1);
@@ -1773,14 +1836,45 @@ fn expand_aliases_inner(
             out.bodies.push(AliasBody { text: val.to_vec(), parent: span_of(i) });
             let body_src = u32::try_from(out.bodies.len()).unwrap_or(u32::MAX);
             active.insert(name.clone());
+            let repl_text: Vec<Ch> = bytes::chars(val).collect();
             let body = AliasInput {
                 toks: &repl,
                 lines: &repl_lines,
                 ends: &repl_ends,
+                text: &repl_text,
                 src: body_src,
             };
-            expand_aliases_inner(&body, aliases, opts, active, out, false);
+            let dangling = expand_aliases_inner(&body, aliases, opts, active, out, false);
             active.remove(name);
+            // The replacement ended *at* a `<<`, so the delimiter that belongs to
+            // it is not in the value: bash's reader ran off the end of the pushed
+            // string and `pop_string` put it back on this text, just past the
+            // alias word, where the scan simply carried on. Do the same. If this
+            // text is spent too, say so and let the caller — one text further
+            // out — try, which is the rest of that `pop_string` chain.
+            let mut took_delim = false;
+            if dangling {
+                let at = ends.get(i).map(|&e| e as usize);
+                match at.map_or(Dangle::Spent, |end| {
+                    take_dangling_delim(out, text, end, tok_line, opts)
+                }) {
+                    // The delimiter's characters were lexed into this text's
+                    // tokens as well; they belong to the delimiter, not to words
+                    // of their own. Skipping by *offset* is safe even if the two
+                    // scans were to disagree about where the word ends, since a
+                    // token reaching past the delimiter is never skipped.
+                    Dangle::Filled(delim_end) => {
+                        took_delim = true;
+                        sealed = false;
+                        skip_until = i.saturating_add(1);
+                        while ends.get(skip_until).is_some_and(|&e| (e as usize) <= delim_end) {
+                            skip_until = skip_until.saturating_add(1);
+                        }
+                    }
+                    Dangle::Sealed => sealed = true,
+                    Dangle::Spent => sealed = false,
+                }
+            }
             // The *first* token of the replacement stands in for the alias word
             // itself, so it keeps the alias word's origin; only the tokens after
             // it are origin-less. Without this, a caller resuming at the start of
@@ -1793,7 +1887,13 @@ fn expand_aliases_inner(
             {
                 *slot = Some(i);
             }
-            force = val.ends_with(b" ") || val.ends_with(b"\t");
+            // A value ending in a blank makes the *next* word a candidate for
+            // expansion however the structure reads (bash's `PST_ALEXPNEXT`) —
+            // unless the delimiter just above already took that word, since it
+            // was consumed by the same reader that would have expanded it. What
+            // bash does then, and osh does not, is expand it *as the delimiter*:
+            // see TD-OILS-AN-ALIAS-SPLICED-OPERATOR-DOES-NOT-EXTEND-INTO-THE-CALLING-LINE.
+            force = !took_delim && (val.ends_with(b" ") || val.ends_with(b"\t"));
             continue;
         }
         // A `<<` a replacement text spliced in leaves an empty placeholder: the
@@ -1809,6 +1909,70 @@ fn expand_aliases_inner(
         out.spans.push(span_of(i));
         out.advance(tok, at_cmd);
     }
+    // This text ended *at* a `<<` — no delimiter followed it here, and there is
+    // no more text to look in. bash's reader would `pop_string` and go on
+    // reading in the text one level out, so tell the caller to continue the scan
+    // there. At the outermost text nobody is listening, and the bare operator is
+    // then the grammar error bash reports. A `sealed` answer is not that: the
+    // reader already found a separator, so it stops asking.
+    !sealed
+        && out.toks.len() > entry
+        && matches!(out.toks.last(), Some(Tok::Op(Op::DLess | Op::DLessDash)))
+}
+
+/// What completing a dangling `<<` from the calling text came to.
+enum Dangle {
+    /// The delimiter was found and appended; the offset just past it.
+    Filled(usize),
+    /// A separator or a comment stands where the word would be, in *this* text.
+    /// bash's reader has its answer, so the `pop_string` chain stops here and
+    /// the bare operator is left to the parser as the grammar error it is.
+    Sealed,
+    /// This text is spent; the caller one level out must try.
+    Spent,
+}
+
+/// Complete a `<<` that an alias replacement left without a delimiter, reading
+/// the delimiter out of `text` from `end` — the character just past the alias
+/// word, which is exactly where bash's `pop_string` resumes.
+///
+/// On success the `HereDoc` token is appended (and registered in
+/// [`AliasExpansion::heredocs`], since its *body* still has to come from the
+/// real input) and the offset just past the delimiter is returned.
+///
+/// A delimiter that fails to lex counts as [`Dangle::Sealed`]: the word does
+/// start in this text, so the reader is not going to go looking in the next one
+/// out — the failure belongs here, where the parser will report it.
+fn take_dangling_delim(
+    out: &mut AliasOut,
+    text: &[Ch],
+    end: usize,
+    line: u32,
+    opts: ParseOpts,
+) -> Dangle {
+    let delim_at = match read_delim_at(text, end, opts) {
+        Ok(d) => d,
+        Err(_) => return Dangle::Sealed,
+    };
+    let (delim, expand, delim_end) = match delim_at {
+        DelimAt::Word(delim, expand, delim_end) => (delim, expand, delim_end),
+        DelimAt::None => return Dangle::Sealed,
+        DelimAt::Exhausted => return Dangle::Spent,
+    };
+    // The body is not this pass's to read — it is in the real input, after the
+    // line the alias word stands on, like every other alias-spliced
+    // here-document. See [`tokenize_alias_body`].
+    out.heredocs.push(out.toks.len());
+    let tok = Tok::HereDoc(Vec::new(), delim, !expand);
+    out.advance(&tok, false);
+    out.toks.push(tok);
+    out.lines.push(line);
+    // The delimiter's characters are in the calling text, but the operator they
+    // complete is not, and the pair is one redirection. Recording it as
+    // origin-less keeps it out of the resume scan, exactly as the operator is.
+    out.origin.push(None);
+    out.spans.push(TokSpan { src: 0, end: u32::MAX });
+    Dangle::Filled(delim_end)
 }
 
 /// Re-anchor every source line recorded *inside* a token to `line`.

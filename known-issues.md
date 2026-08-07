@@ -479,9 +479,9 @@ of stdout and stderr thereafter) and the unit test
 
 **Left behind:**
 TD-OILS-AN-ALIAS-SPLICED-HERE-DOCUMENT-TAKES-NO-DELIMITER-FROM-THE-CALLING-LINE,
-the other half of the second shape above.
+the other half of the second shape above (since fixed, same day).
 
-### TD-OILS-AN-ALIAS-SPLICED-HERE-DOCUMENT-TAKES-NO-DELIMITER-FROM-THE-CALLING-LINE. `alias B='cat <<'` plus `B E` runs `cat E` — 2026-08-06 — OPEN
+### TD-OILS-AN-ALIAS-SPLICED-HERE-DOCUMENT-TAKES-NO-DELIMITER-FROM-THE-CALLING-LINE. `alias B='cat <<'` plus `B E` runs `cat E` — 2026-08-06 — ✅ FIXED 2026-08-06
 
 **Where:** `userspace/oils/src/lexer.rs` — `Lexer::lex_heredoc_op` /
 `read_heredoc_delim`, which read the delimiter word out of the text the `<<` was
@@ -531,30 +531,71 @@ alias P='cat <<E'  P 8         `E`, and `8` is an argument — the calling line'
                                 leading blank ends the word at the text boundary
 ```
 
-**Proper fix.** The delimiter has to be read from the *source text* that follows
-the alias word, not from a token — `B E$x` wants the literal delimiter `E$x`, and
-the outer word token has already split that into a `Seg::Lit` and a `Seg::Param`.
-`expand_aliases_inner` is the right place: it already walks each text in turn, so
-give `AliasInput` the characters its `ends` index into, and when the recursive
-splice leaves a bare `<<` as its last token, run `read_heredoc_delim` over *this*
-text from `ends[i]` (the end of the alias word), append the `HereDoc` token,
-record it in `AliasExpansion::heredocs`, and skip the outer tokens whose
-characters the delimiter consumed. If this text is exhausted too, propagate the
-condition to the caller, which is one text further out — that is bash's
-`pop_string` chain (`alias A='B'`, `alias B='cat <<'`, `A E` wants `E`). If the
-next token is a metacharacter or a newline instead, leave the bare operator alone
-and let the parser report the grammar error, which is what bash does.
+**As fixed.** The delimiter is read from the *source text* that follows the alias
+word, never from a token — `B E$x` wants the literal delimiter `E$x`, and the
+outer word token has already split that into a `Seg::Lit` and a `Seg::Param`.
 
-Note the skipped tokens shift `work` indices, so the `AliasFills` replay in
-`IncrementalParser::rebuild` has to be keyed after the skip, not before.
+* `AliasInput` carries `text: &[Ch]`, the characters its `lines`/`ends` index
+  into, so `expand_aliases_inner` can look at the text it is walking, not just at
+  its tokens. `expand_aliases_tracked` takes it as a parameter (both call sites in
+  `parser.rs` already had the `Vec<Ch>` to hand).
+* `expand_aliases_inner` returns a `bool`: "this text ended *at* a `<<`", which is
+  true exactly when it emitted something and its last token is a bare
+  `Tok::Op(DLess | DLessDash)`. That is bash's "the pushed string ran dry with the
+  reader mid-redirection".
+* On a `true` from the recursive splice, `take_dangling_delim` runs
+  `read_delim_at` over *this* text from `ends[i]` — the character after the alias
+  word, which is precisely where `pop_string` (parse.y:2694) puts the reader back
+  — and, on a word, appends the `HereDoc` token, records it in
+  `AliasExpansion::heredocs`, and returns the offset it stopped at. The caller
+  then skips every outer token whose characters the delimiter consumed, so the
+  `work` stream never contains them twice.
+* `read_delim_at` distinguishes three outcomes, and the distinction is the whole
+  point: `Word` (a delimiter), `Exhausted` (this text is spent too, so the `bool`
+  propagates to the caller one text further out), and `None` — a separator or a
+  comment stands there. Only `Exhausted` continues the chain. A `None` is an
+  *answer*, obtained inside this text, so the reader stops asking: `Dangle::Sealed`
+  suppresses the propagation, and `alias P='B ; B'` with `P E` is the grammar
+  error at the `;` in the value, never a here-document reading `E` off the calling
+  line. The `Exhausted` recursion *is* the `pop_string` chain, so `alias A='B'`
+  over `alias B='cat <<'` takes `E` from the line that called `A`, and
+  `alias V='B E'` takes it from `V`'s own value.
+* `parse_redirect` now takes a plain `Tok::Word` after `<<`/`<<-` as *no target*
+  rather than as a delimiter. A `<<` whose delimiter was read is always followed
+  by the `HereDoc` token carrying it — that is the lexer's contract — so a bare
+  word there is the token standing where the WORD should be. This only becomes
+  reachable with the seam: `alias C='B #c'` seals in the value while a word still
+  stands on the calling line.
+* A value ending in a blank still sets `force` for the next word (bash's
+  `PST_ALEXPNEXT`) — but not when the delimiter just consumed that word, hence
+  `force = !took_delim && …`.
 
-**Left over even then:** an *operator* can span the boundary the same way —
+Because `read_delim_at` shares `read_heredoc_delim` with the ordinary path, every
+delimiter spelling comes out the same across the seam: quoting (`B "E"`, `B \E`)
+suppresses body expansion, `B E$x` is the literal `E$x`, line continuations
+inside the delimiter are already deleted, and `<<-` written in the value strips
+the calling line's body.
+
+**Pinned by** the corpus case
+`an-alias-spliced-here-document-takes-its-delimiter-from-the-calling-line.sh`
+(without the fix its very first probe gives `status: bash=0 osh=2`) and the unit
+test `an_alias_spliced_here_document_takes_its_delimiter_from_the_calling_line`.
+
+**Left behind:** an *operator* can span the boundary the same way —
 `alias Q='cat <'` with `Q< E` is a here-document in bash, because the reader that
 read the first `<` runs on into the calling line and finds the second. osh lexes
 the value on its own and gets `<` then `<`. The same is true of `|`+`|`, `&`+`&`
-and `;`+`;`. This is the residue of modelling the splice at the token level
-rather than the textual one; it is filed as
+and `;`+`;`, and of the blank-ended-value re-expansion (`alias S='cat << '`, row
+six of the table above), which needs the delimiter *word* to be alias-expanded.
+This is the residue of modelling the splice at the token level rather than the
+textual one; it is filed as
 TD-OILS-AN-ALIAS-SPLICED-OPERATOR-DOES-NOT-EXTEND-INTO-THE-CALLING-LINE.
+
+Found while testing this, and of the same family:
+TD-OILS-A-COMMENT-IN-AN-ALIAS-VALUE-DOES-NOT-EAT-THE-CALLING-LINE — bash's
+`discard_until('\n')` reads through `pop_string`, so a comment opened in a value
+swallows the rest of the calling line. It costs the seam shape above the token
+its error names (`newline` in bash, `E` in osh), though not the error itself.
 
 ### TD-OILS-AN-ALIAS-SPLICED-OPERATOR-DOES-NOT-EXTEND-INTO-THE-CALLING-LINE. `alias Q='cat <'` plus `Q< E` is a syntax error — 2026-08-06 — OPEN
 
@@ -595,6 +636,67 @@ mapping an offset past `value.len()` back to `ends[i] + (off - value.len())` and
 finding the outer token that ends there. Until that is done, a cheaper patch is
 to detect the small closed set of extendable trailing operators and re-lex just
 the seam.
+
+### TD-OILS-A-COMMENT-IN-AN-ALIAS-VALUE-DOES-NOT-EAT-THE-CALLING-LINE. `alias A='echo hi #c'` plus `A there` still echoes `there` — 2026-08-06 — OPEN
+
+**Where:** `userspace/oils/src/lexer.rs` — the alias-value sub-lex
+(`tokenize_alias_body` via `expand_aliases_inner`), which drops a comment at the
+end of a value and then goes on emitting the calling line's tokens.
+
+**What.**
+
+```text
+shopt -s expand_aliases
+alias A='echo hi #c'
+A there
+echo next
+
+bash: hi          — `there` was swallowed by the comment
+      next
+osh : hi there
+      next
+```
+
+Same shape at a here-document seam, where it changes which token the grammar
+error names:
+
+```text
+alias B='cat <<'
+alias A='B #c'
+A E
+
+bash: syntax error near unexpected token `newline'   — the comment ate ` E' too
+osh : syntax error near unexpected token `E'
+```
+
+**Why.** bash's comment test is in `read_token` and its body is
+`discard_until ('\n')`, which reads through `shell_getc` — and `shell_getc` pops
+the pushed alias string transparently when it runs dry (parse.y's `pop_string`).
+So a comment opened inside an alias replacement keeps eating in the *calling*
+line, up to that line's real newline. osh lexes the replacement as a text of its
+own, so the comment can only reach the end of the value; the calling line's
+remaining tokens were lexed separately and survive.
+
+Both shells agree that the `<<` above has no delimiter — osh stops the
+`pop_string` chain on a comment (`DelimAt::None` → `Dangle::Sealed`) exactly as
+it does on a separator — so the status and the fact of the error match. Only the
+token named differs, because osh still has the calling line's `E` to name.
+
+**Proper fix.** The same textual splice that
+TD-OILS-AN-ALIAS-SPLICED-OPERATOR-DOES-NOT-EXTEND-INTO-THE-CALLING-LINE needs:
+lex `value ++ rest-of-this-text-after-the-alias-word` as one text and the comment
+runs on by itself. Short of that, `tokenize_alias_body` would have to report
+"this text ended inside a comment that never met a newline", and
+`expand_aliases_inner` would then drop the calling text's tokens up to (not
+including) the next `Tok::Newline` — which is `discard_until('\n')` spelled at
+the token level, and correct as far as it goes, but it is one more patch on the
+token-level model rather than a fix of it.
+
+**Pinned by** nothing yet; the corpus case
+`an-alias-spliced-here-document-takes-its-delimiter-from-the-calling-line.sh`
+carries a "Not probed" note pointing here, and the unit test
+`an_alias_spliced_here_document_takes_its_delimiter_from_the_calling_line`
+asserts only the *status* for the seam shape, not the message.
 
 ### TD-OILS-A-LINE-THAT-FAILS-TO-LEX-IS-NOT-REPORTED-AS-A-LINE. An unclosed quote hides the syntax error before it and the `set -v` echo of it — 2026-08-06 — OPEN
 

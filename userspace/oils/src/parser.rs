@@ -366,8 +366,9 @@ pub fn parse_with_aliases(
     let (toks, lines, spans) = if aliases.is_empty() {
         (toks, lines, Spans::of(src, ends))
     } else {
-        let x = expand_aliases_tracked(&toks, &lines, &ends, aliases, opts);
-        let spans = Spans::expanded(bytes::chars(src).collect(), &x);
+        let chars: Vec<_> = bytes::chars(src).collect();
+        let x = expand_aliases_tracked(&toks, &lines, &ends, &chars, aliases, opts);
+        let spans = Spans::expanded(chars, &x);
         (x.toks, x.lines, spans)
     };
     parse_tokens(toks, lines, spans, opts)
@@ -842,7 +843,8 @@ impl IncrementalParser {
         let mut alias_heredocs = Vec::new();
         let mut spans = match aliases {
             Some(map) if !map.is_empty() => {
-                let x = expand_aliases_tracked(rest, rest_lines, rest_ends, map, self.opts);
+                let x =
+                    expand_aliases_tracked(rest, rest_lines, rest_ends, &self.src, map, self.opts);
                 let spans = Spans::expanded(self.src.clone(), &x);
                 alias_heredocs.extend(x.heredocs.iter().map(|&i| i.saturating_add(carry)));
                 work.extend(x.toks);
@@ -4021,7 +4023,14 @@ impl Parser {
                 word_from_segs_in(&segs, self.opts, q)
                     .map_err(|e| e.or_echo(self.echo_at(at)))?
             }
-            Some(Tok::Word(segs)) => {
+            // A `<<`/`<<-` whose delimiter was read is *always* followed by the
+            // `HereDoc` token carrying it — that is the lexer's contract. So an
+            // ordinary word standing here is not a delimiter and never was: it
+            // is the token that stands where the operator's WORD should be, and
+            // the redirection has no target. (Reachable only across an alias
+            // seam, where the reader's answer came from the value's text: see
+            // TD-OILS-A-COMMENT-IN-AN-ALIAS-VALUE-DOES-NOT-EAT-THE-CALLING-LINE.)
+            Some(Tok::Word(segs)) if op != RedirectOp::HereDoc => {
                 let segs = segs.clone();
                 let at = self.pos;
                 self.pos = self.pos.saturating_add(1);

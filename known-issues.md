@@ -129,9 +129,9 @@ number would have to be fixed together.
 **Proper fix.** Push the `\` into the delimiter when `peek()` is `None`, and make
 the file reader treat an input that ends in a continuation as an unterminated
 one — `syntax error: unexpected end of file` — rather than as ordinary end of
-input. The two readers have to be told apart, so this wants the same
-lexer-bail-token work as
-TD-OILS-A-LINE-THAT-FAILS-TO-LEX-IS-NOT-REPORTED-AS-A-LINE.
+input. The two readers have to be told apart, which is the only hard part; the
+deferred-lexer-error machinery this used to be blocked behind is now in place
+(see TD-OILS-A-LINE-THAT-FAILS-TO-LEX-IS-NOT-REPORTED-AS-A-LINE, fixed).
 
 ### TD-OILS-A-HERE-DOCUMENT-DELIMITER-STOPPED-AT-THE-FIRST-SEPARATOR-INSIDE-A-GROUP. `<<E$(a b)` was read as a delimiter `E$(a` and a stray word `b)` — 2026-08-06 — ✅ FIXED 2026-08-06
 
@@ -834,8 +834,11 @@ the splice's re-lex. The quote case is the reverse: the calling line's own half
 is unbalanced in the pre-pass lex.
 
 **Proper fix.** Lex lazily, a physical line at a time, with the alias pass and the
-parse interleaved — which is bash's structure and is the same change
-TD-OILS-A-LINE-THAT-FAILS-TO-LEX-IS-NOT-REPORTED-AS-A-LINE needs. Anything short
+parse interleaved — which is bash's structure. (This is *more* than
+TD-OILS-A-LINE-THAT-FAILS-TO-LEX-IS-NOT-REPORTED-AS-A-LINE turned out to need:
+that one was fixed by keeping the failing line's tokens and letting the parser
+run into them, but here the tokens are wrong to begin with, because the alias
+value was never in the text the lex read.) Anything short
 of that (e.g. deferring an unmatched-quote error until the alias pass has had a
 look) would be a second reading of the same text under a different rule, which is
 exactly the band-aid the splice replaced.
@@ -910,7 +913,7 @@ probe `<<-`, a quoted delimiter (no lookup), a value *without* the trailing blan
 (no flag), the flag being spent on the delimiter rather than reaching the operand
 after it, a multi-word value, and a delimiter alias that names itself.
 
-### TD-OILS-A-LINE-THAT-FAILS-TO-LEX-IS-NOT-REPORTED-AS-A-LINE. An unclosed quote hides the syntax error before it — 2026-08-06 — OPEN (the `set -v` half fixed 2026-08-07)
+### TD-OILS-A-LINE-THAT-FAILS-TO-LEX-IS-NOT-REPORTED-AS-A-LINE. An unclosed quote hides the syntax error before it — 2026-08-06 — ✅ FIXED 2026-08-07 (`set -v` half and syntax-error half)
 
 **Where:** `userspace/oils/src/lexer.rs` — `tokenize_deferred`, which lexes the
 whole input up front and, on an unterminated construct, cuts the tokens back to
@@ -979,15 +982,46 @@ agrees there too (measured through `eval` under `set -o history`).
 **Pinned by** `interp.rs::a_unit_that_fails_to_parse_still_covers_the_line_it_failed_on`
 and `tests/corpus/set-v-echoes-a-line-the-parse-then-refuses.sh`.
 
-**Proper fix (the syntax-error half, still open).** Rows 1–2 of the table above
-remain: an unclosed quote still pre-empts a grammar error raised *before* it on
-the same line. That is the same architectural obstacle as the residue of
-TD-OILS-A-COMSUB-THAT-NEVER-CLOSES-HIDES-THE-ERROR-INSIDE-IT: the parked lexer
-error must not pre-empt a grammar error raised on a token that precedes the
-unclosed construct *on the same line*. That needs the failing line's tokens kept
-rather than cut — a lexer bail token standing where the construct opened, so the
-parser can run up to it and stop there — which is the shared fix those two
-entries also want.
+**The syntax-error half is ✅ FIXED (2026-08-07)**, and turned out to want no
+bail token at all — just the removal of the cut, plus a sharper rule for when the
+parked error is due.
+
+`tokenize_deferred` no longer truncates `toks` back to the last complete logical
+line. Everything the scan produced is kept, the failing line's own tokens
+included, because bash's parser has already *been handed* them one at a time by
+the time the reader chokes on what follows. The one surviving cut is a
+here-document still awaiting its body: its `<<` left a placeholder token that was
+never filled in, and that must not reach the parser, so the line it stands on
+goes with it.
+
+`IncrementalParser::next_unit` then decides between the parked error and whatever
+the unit came to on a single question — did the parse **run dry**, i.e. ask for a
+token the stream did not have? That fetch is the one that would have found the
+lexer's error, so a parked error replaces the outcome whenever it happens: a
+grammar error the truncated stream provoked (`if true; then` + `echo 'unterm`), a
+clean parse of the commands in front of the construct (`echo one; echo 'unterm`
+runs neither), or the end of input itself. What survives is an error raised over
+a token the parser did get — `) echo "` reports the stray `)`.
+
+Three details are load-bearing, each measured:
+
+* **"ran dry" is not "stopped at the last token."** A unit ended by a newline
+  that happens to be final fetched nothing past it and is a complete unit that
+  runs: `echo one` / `echo two` / `v='abc` still prints both. So the flag is set
+  by the loop at the two breaks that mean end-of-stream, not by testing the
+  cursor afterwards.
+* **A grammar error counts as dry only if it has the *shape* of running out**
+  (`ParseError::is_incomplete`). An eagerly-parsed `$( … )` body's own objection
+  is a real error over a token that was fetched, and must survive:
+  `echo $(fi) "` reports `fi`, as bash does.
+* The lexer-error arm still spans the whole remaining input for `set -v` and the
+  history (`split_unit_error_lines(orig.len(), orig.len())`) and still abandons
+  the rest of the input, since it is fatal.
+
+**Also pinned by** `parser.rs::a_line_that_fails_to_lex_still_offers_the_tokens_it_had`
+and `tests/corpus/a-line-that-fails-to-lex-still-offers-the-tokens-it-had.sh`
+(27 shapes, including the here-document warnings and the `&`-backgrounded
+output-after-diagnostic ordering).
 
 ### TD-OILS-A-STRAY-PAREN-IN-A-CASE-ARM-IS-NOT-DIAGNOSED-WHERE-IT-STANDS. `case a in a) echo x( y;; esac` is blamed on the `;;` — 2026-08-06 — ✅ FIXED 2026-08-07
 
@@ -1105,7 +1139,7 @@ which measures all four halves of the rule: the thirteen command positions,
 the six word positions, the four quoted spellings, and that `[[ … ]]` still
 closes.
 
-### TD-OILS-A-COMSUB-THAT-NEVER-CLOSES-HIDES-THE-ERROR-INSIDE-IT. bash parses a `$( … )` body as it reads it; osh scans for the `)` first — 2026-08-06 — ✅ MOSTLY FIXED 2026-08-07 (three shapes left, below)
+### TD-OILS-A-COMSUB-THAT-NEVER-CLOSES-HIDES-THE-ERROR-INSIDE-IT. bash parses a `$( … )` body as it reads it; osh scans for the `)` first — 2026-08-06 — ✅ MOSTLY FIXED 2026-08-07 (two shapes left, below)
 
 **Where:** `userspace/oils/src/lexer.rs` — the command-substitution scanner
 (the balanced-paren scan that raises ``unexpected EOF while looking for
@@ -1204,36 +1238,39 @@ stands. Three details that are not obvious and that the tests pin:
 **Pinned by** `parser.rs::an_unterminated_substitutions_body_is_parsed_anyway`
 and `tests/corpus/a-substitution-body-is-read-before-its-closing-paren-is-missed.sh`.
 
-**What is left (three shapes).** All three need the *failing line's tokens
-kept* rather than cut, or the body parsed at the moment the `$(` is scanned
-rather than when the scan runs out:
+**What is left (two shapes), 2026-08-07.** Both want the same thing: a
+`$( … )` body parsed at the moment the `$(` is *scanned*, closed or not.
 
 | script | bash | osh |
 |---|---|---|
 | `echo "$(fi)` | `` near `fi' `` | ``EOF matching `"' `` |
 | `echo $(fi)x$(` | `` near `fi' `` | ``EOF matching `)' `` L2 |
-| `echo $(fi) $(done` | `` near `fi' `` | `` near `done' `` |
 
-The first is the enclosing-quote half: the body *closes*, so no bail is
-raised at all, and the unterminated `"` around it is the only failure the
-scan sees. Reaching bash here means parsing every `$( … )` body where it is
-scanned, closed or not.
+In both the substitution bash blames **closes**, so no `SubstBail` is raised
+for it, and it sits inside a word the outer scan never finished — an unclosed
+`"` in the first, an unclosed `$(` in the second — so the word yields no token
+and the eager body parse the parser does per word never happens either. bash
+has already run its nested `yyparse` over `fi` by then. Reaching it means
+lifting that parse out of the parser and into the scan: every `$( … )`,
+`<( … )` and `>( … )` body parsed left to right as it is read, its error raised
+there and then, instead of after the enclosing word is complete.
 
-The other two are the same blocker as the syntax-error half of
-TD-OILS-A-LINE-THAT-FAILS-TO-LEX-IS-NOT-REPORTED-AS-A-LINE: `tokenize_deferred`
-cuts `toks` back to the last complete logical line, so an error on a token
-that *precedes* the unclosed construct on the same line is never raised and
-the parked lexer error wins by default. That it is not really about
-substitutions at all is shown by `fi; $(done`, which osh blames on `done`
-with no enclosing substitution in sight.
+`echo $(fi) $(done` — previously listed here as a third shape — was fixed by
+the `tokenize_deferred` change under
+TD-OILS-A-LINE-THAT-FAILS-TO-LEX-IS-NOT-REPORTED-AS-A-LINE: the word `$(fi)`
+does complete there, so keeping the failing line's tokens is enough for the
+parser to reach it and raise `` near `fi' `` before the parked error is due.
+The same change fixed `fi; $(done`, which was the proof that half of this
+entry was never really about substitutions.
 
-**Proper fix for the residue:** a lexer bail token standing where the
-unclosed construct opened, so the failing line's tokens survive the cut and
-the parser can run up to it and stop there. That is the same restructuring
-the sibling entry below (`…ONLY-ONE-OF-BASHS-TWO-DIAGNOSTICS`) wants for
-`[[ ]]`, and the two should be done together: bash's rule in each case is
-that a lexer which dies at EOF hands a bail token *back to the parser*,
-which then gets its own say.
+**Proper fix for the residue:** move the eager body parse out of the parser
+and into the scan. `read_balanced_body` already knows where each nested
+`$( … )` / `<( … )` / `>( … )` body begins and ends; parsing each one as the
+scan closes it — and raising its error there, before the enclosing word is
+finished, let alone tokenized — is bash's own order and is what both shapes
+need. The `SubstBail` path then becomes the special case it should always
+have been: the *last*, unterminated body, parsed on the way out because there
+is no `)` to close it on.
 
 ### TD-OILS-A-CONDITIONAL-RHS-THAT-DIES-AT-EOF-GETS-ONLY-ONE-OF-BASHS-TWO-DIAGNOSTICS. `[[ x =~ ( ]]` — 2026-08-06 — OPEN
 

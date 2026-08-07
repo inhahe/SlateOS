@@ -1189,10 +1189,15 @@ pub struct Tokenized {
     /// filled in must not reach the parser), so this is the only trace of them,
     /// and the reader needs it to reproduce bash's post-error warning.
     pub ungathered: Vec<UngatheredHeredoc>,
-    /// `Some((error, line))` when lexing stopped early. `toks` is then cut back
-    /// to the last **complete** logical line, because that is the granularity
-    /// at which bash stops executing: in `echo two; echo three 'unterm`
-    /// nothing on that line runs, but every earlier line already has.
+    /// `Some((error, line))` when lexing stopped early. The tokens the failing
+    /// line did yield are kept: bash's parser pulls tokens one at a time, so it
+    /// has already *seen* them, and a grammar error among them is raised before
+    /// the unclosed construct is ever reached — `) echo "` reports the stray
+    /// `)`, not the quote. What stops at the line boundary is *execution*, and
+    /// that is [`crate::parser::IncrementalParser::next_unit`]'s business: it
+    /// reports the parked error in place of any result once the stream runs
+    /// dry, so in `echo two; echo three 'unterm` nothing on that line runs
+    /// while every earlier line already has.
     pub err: Option<(LexError, u32)>,
 }
 
@@ -1260,34 +1265,35 @@ pub fn tokenize_deferred(src: BStr<'_>, opts: ParseOpts) -> Tokenized {
     // name one. `Lexer::line` only advances at the end of each `run_into`
     // iteration, so mid-token it still holds the line that token started on.
     let line = e.line.unwrap_or(lx.line);
-    // Cut back to the last complete logical line. A here-document still awaiting
-    // its body owns its introducing line, so cut before that line too rather
-    // than leaving a `<<` whose placeholder token was never filled in.
-    let limit = lx
-        .pending_heredocs
-        .iter()
-        .map(|h| h.tok_index)
-        .min()
-        .unwrap_or(toks.len());
-    let keep = toks
-        .get(..limit)
-        .unwrap_or(&toks)
-        .iter()
-        .rposition(|t| matches!(t, Tok::Newline))
-        .map_or(0, |i| i.saturating_add(1));
+    // Everything the scan managed to produce is kept, the failing line's own
+    // tokens included — bash's parser has already been handed them, one at a
+    // time, by the time the reader chokes on what follows. The one exception is
+    // a here-document still awaiting its body: its `<<` left a placeholder token
+    // that was never filled in, so that token must not reach the parser, and the
+    // line it stands on is cut back to along with it.
+    let keep = match lx.pending_heredocs.iter().map(|h| h.tok_index).min() {
+        None => toks.len(),
+        Some(limit) => toks
+            .get(..limit)
+            .unwrap_or(&toks)
+            .iter()
+            .rposition(|t| matches!(t, Tok::Newline))
+            .map_or(0, |i| i.saturating_add(1)),
+    };
     toks.truncate(keep);
     lines.truncate(keep);
     offsets.truncate(keep);
     ends.truncate(keep);
     heredoc_lines.truncate(keep);
     // The continuations are keyed by source offset rather than by token index, so
-    // the ones past the cut simply describe text no caller will slice; leaving
-    // them costs nothing and keeps the list a faithful record of the whole scan.
-    // A here-document that reached EOF cannot coexist with a deferred lexer error
-    // — the scan would have had to run past the unclosed construct to get there —
-    // but if one ever did, its token is beyond the cut and so names input that
-    // never runs. The reader's `tok_index` gate keeps it quiet on its own, which is
-    // the same rule that keeps bash quiet after `echo one )`.
+    // any past a cut simply describe text no caller will slice; leaving them
+    // costs nothing and keeps the list a faithful record of the whole scan.
+    // A here-document that *did* reach EOF can coexist with a deferred lexer
+    // error — an unterminated one inside a `$( … )` is warned about by the scan
+    // that then fails to find the `)` — and its warning is released by the
+    // reader, which lifts its `tok_index` gate entirely on the unit reporting a
+    // parked lexer error. That gate is what keeps bash's silence after
+    // `echo one )`: input abandoned on a syntax error is input never read.
     Tokenized {
         toks,
         lines,

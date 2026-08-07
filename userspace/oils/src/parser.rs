@@ -1303,11 +1303,22 @@ impl IncrementalParser {
             depth: 0,
         };
         let mut items = Vec::new();
+        // Whether the parse ended by asking for a token the stream did not have.
+        // bash's parser pulls tokens one at a time, so an unclosed construct is
+        // only *discovered* at the fetch that runs into it: this is the flag that
+        // says the fetch happened, and so that a parked lexer error is what this
+        // unit really came to. Running dry is not the same as merely stopping at
+        // the last token — a unit ended by a newline that happens to be final has
+        // fetched nothing beyond it, and is a complete unit that runs.
+        let mut ran_dry = false;
         let outcome = loop {
             match p.parse_item(&[]) {
                 // End of the token stream. Anything left over is a token no item
                 // can start with (a stray `)`), reported as `parse_tokens` does.
-                Ok(None) if p.pos == p.toks.len() => break Ok(()),
+                Ok(None) if p.pos == p.toks.len() => {
+                    ran_dry = true;
+                    break Ok(());
+                }
                 Ok(None) => break Err(p.unexpected_here()),
                 Ok(Some(item)) => {
                     items.push(item);
@@ -1347,18 +1358,28 @@ impl IncrementalParser {
                         // detected here, before the items are handed back to be
                         // executed. (`echo one; echo two )` runs nothing in
                         // bash, not even `echo one`.)
-                        _ if p.pos == p.toks.len() => break Ok(()),
+                        _ if p.pos == p.toks.len() => {
+                            ran_dry = true;
+                            break Ok(());
+                        }
                         _ => break Err(p.unexpected_here()),
                     }
                 }
-                Err(e) => break Err(e),
+                // An error the *shape* of running out is one: the parser asked
+                // for the token that would close the construct and there was
+                // none. Any other is a real objection to a token it did get —
+                // an eagerly-parsed `$( … )` body's own error, say — raised
+                // before the fetch that would have found the lexer's.
+                Err(e) => {
+                    ran_dry = e.is_incomplete();
+                    break Err(e);
+                }
             }
         };
         // A grammar error leaves the cursor on the offending token; stamp its
         // line exactly as `parse_tokens` does — including the end-of-file case's
         // extra line, which keys off the message rather than the cursor (an
         // error can name a token from outside this stream).
-        let ran_out = p.peek().is_none();
         let outcome = outcome.map_err(|e| {
             // A here-document still pending at a *top-level* reduction is
             // gathered before the offending token is ever found to be one, and
@@ -1383,21 +1404,21 @@ impl IncrementalParser {
         self.work = p.toks;
         self.work_lines = p.lines;
         self.work_spans = p.spans;
-        // Whether this call is about to end the input by reporting the parked lexer
-        // error — either in place of a grammar error that only happened because the
-        // stream was truncated, or as the end-of-input result itself. Sampled before
-        // the two arms that consume it.
-        let lex_err_now =
-            self.pending_lex_err.is_some() && (items.is_empty() || (outcome.is_err() && ran_out));
-        // A parked lexer error wins over a grammar error that only happened
-        // because the token stream was *truncated* at the unclosed construct
-        // (`if true; then` + `echo 'unterm` leaves a `then` with no body). Such
-        // a failure always runs the stream dry, so requiring `ran_out`
-        // preserves a genuine earlier grammar error — `echo one )` on line 1
-        // still reports the stray `)`, never the bad quote on line 2.
-        let outcome = match outcome {
-            Err(e) if ran_out => Err(self.pending_lex_err.take().unwrap_or(e)),
-            other => other,
+        // Whether this call is about to end the input by reporting the parked
+        // lexer error, which it does exactly when the parse ran dry: the fetch
+        // that found nothing is the fetch that would have found the error.
+        // Sampled before the arm that consumes it.
+        let lex_err_now = self.pending_lex_err.is_some() && ran_dry;
+        // So a parked error replaces whatever this unit came to — a grammar
+        // error the truncated stream provoked (`if true; then` + `echo 'unterm`
+        // leaves a `then` with no body), a clean parse of the commands in front
+        // of it (`echo one; echo 'unterm` runs neither), or the end of the input
+        // itself. What survives is an error raised over a token the parser did
+        // get, which bash's would have reached before ever asking for the next:
+        // `) echo "` reports the stray `)`.
+        let outcome = match self.pending_lex_err.take_if(|_| ran_dry) {
+            Some(e) => Err(e),
+            None => outcome,
         };
         // Resume at the first not-yet-consumed token that came from the original
         // stream; spliced tokens before it stay in `work`.
@@ -1469,19 +1490,23 @@ impl IncrementalParser {
         self.unit_lines.clear();
         self.unit_raw.clear();
         match outcome {
-            // End of input. If the lexer stopped early on an unclosed
-            // construct, this is the point where bash — having executed every
-            // complete line before it — reports the error.
-            Ok(()) if items.is_empty() => {
-                let err = self.pending_lex_err.take()?;
+            // End of input, every unit handed out.
+            Ok(()) if items.is_empty() => None,
+            // The lexer stopped early on an unclosed construct, and this is the
+            // point where bash — having executed every complete line before it —
+            // reports it. Whatever this unit had parsed goes with it: the line
+            // carrying the construct never runs.
+            Err(e) if lex_err_now => {
                 // Everything the reader read looking for the close belongs to
                 // this unit, however many lines that was: bash echoes each one
                 // as `shell_getc` hands it over, so `echo one` / `echo "unterm`
                 // / `echo three` echoes the last *two* lines before reporting
-                // the quote. The tokens for them were cut back at the unclosed
-                // construct, so the span is taken from the input directly.
+                // the quote. The scan gave up mid-token, so the span is taken
+                // from the input directly rather than from where it stopped.
                 self.split_unit_error_lines(self.orig.len(), self.orig.len());
-                Some(Err(err))
+                self.wpos = self.work.len();
+                self.pos = self.orig.len();
+                Some(Err(e))
             }
             Ok(()) => {
                 self.pos = next_orig;
@@ -6650,6 +6675,83 @@ mod tests {
         ] {
             assert_eq!(emsg(&parse(src).unwrap_err()), msg, "{src:?}");
         }
+    }
+
+    /// A line the reader cannot finish lexing still offers the parser every
+    /// token it *did* yield, because bash's parser pulls them one at a time: a
+    /// grammar error among them is raised before the fetch that would have run
+    /// into the unclosed construct, and wins. `) echo "` is reported on the
+    /// stray `)`, the quote behind it never being reached.
+    ///
+    /// The complement is what running dry means. A fetch that finds nothing is
+    /// the fetch that would have found the error, so the parked error replaces
+    /// whatever the unit came to — including a clean parse of the commands in
+    /// front of it, since nothing on the failing line runs. A newline is not
+    /// that fetch: a unit it ended is complete however close the failure sits
+    /// behind it. Every row is measured from bash 5.2.37.
+    #[test]
+    fn a_line_that_fails_to_lex_still_offers_the_tokens_it_had() {
+        /// How many units `src` hands out before the error that ends it.
+        fn units(src: &str) -> (usize, ParseError) {
+            let opts = ParseOpts::default();
+            let mut ip = IncrementalParser::new(src.as_bytes(), 0, opts);
+            let mut ran = 0;
+            while let Some(u) = ip.next_unit(None, opts) {
+                match u {
+                    Ok(_) => ran += 1,
+                    Err(e) => return (ran, e),
+                }
+            }
+            panic!("{src:?} must fail")
+        }
+        let near = |t: &str| format!("syntax error near unexpected token `{t}'");
+        // A token the line already yielded outranks the construct behind it.
+        for (src, tok) in [
+            (") echo \"", ")"),
+            ("echo a; ) echo \"", ")"),
+            ("fi \"", "fi"),
+            ("done \"unterm", "done"),
+            ("esac \"unterm", "esac"),
+            ("then \"unterm", "then"),
+            ("} \"unterm", "}"),
+            // The construct need not be a quote, nor the last thing on the line.
+            (") $(", ")"),
+            (") cat <<E", ")"),
+        ] {
+            let (ran, e) = units(src);
+            assert_eq!(emsg(&e), near(tok), "{src:?}");
+            assert_eq!(e.line, Some(1), "{src:?}");
+            assert_eq!(ran, 0, "{src:?}");
+        }
+        // Nothing objects, so the construct is reported — and the whole line
+        // goes with it, commands parsed before it included.
+        for (src, ran_want, line) in [
+            ("echo \"; )", 0, 1),
+            ("echo one; echo \"unterm", 0, 1),
+            ("echo one && echo \"unterm", 0, 1),
+            ("echo one | echo \"unterm", 0, 1),
+            ("for i in 1; do echo \"unterm", 0, 1),
+            ("echo one; { echo \"unterm", 0, 1),
+            // Earlier lines were handed over whole and have already run.
+            ("echo one\necho two; echo \"unterm", 1, 2),
+            // Including a backgrounded one, whose output then races the
+            // diagnostic — which is why the corpus case leaves this shape here.
+            ("echo one &\necho \"unterm", 1, 2),
+            ("echo one\necho two\necho three; echo four \"unterm", 2, 3),
+            // A truncated compound leaves a grammar error of its own, which the
+            // parked one replaces: bash never saw the truncation, only the quote.
+            ("if true; then\necho 'unterm", 0, 2),
+        ] {
+            let (ran, e) = units(src);
+            assert!(e.is_incomplete(), "{src:?}: {}", emsg(&e));
+            assert_eq!(e.line, Some(line), "{src:?}");
+            assert_eq!(ran, ran_want, "{src:?}");
+        }
+        // The newline that ends a unit ends it however close the failure is: the
+        // parser never fetched past it, so both lines run.
+        let (ran, e) = units("echo one\necho two\nv='abc\n");
+        assert_eq!(emsg(&e), "unexpected EOF while looking for matching `''");
+        assert_eq!((ran, e.line), (2, Some(3)));
     }
 
     #[test]

@@ -170,6 +170,12 @@ e 'until cat <<E(
 body
 E
 done'
-# A `case` arm is left out on purpose: osh does not diagnose a bare `(` after a
-# command word there at all, here-document or no — see
-# TD-OILS-A-STRAY-PAREN-IN-A-CASE-ARM-IS-NOT-DIAGNOSED-WHERE-IT-STANDS.
+# The `case` arm, restored now that a bare `(` after a command word is rejected
+# where it stands there too (it used to be blamed on the `;;`, which moved this
+# probe's expected line — see
+# TD-OILS-A-STRAY-PAREN-IN-A-CASE-ARM-IS-NOT-DIAGNOSED-WHERE-IT-STANDS).
+e 'case a in a) cat <<E(
+body
+E
+;;
+esac'

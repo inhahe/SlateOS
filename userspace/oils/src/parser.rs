@@ -3264,18 +3264,55 @@ impl Parser {
             let line = self.cur_line();
             let list = self.parse_and_or()?;
             let mut background = false;
+            let mut had_sep = false;
             match self.peek() {
                 Some(Tok::Op(Op::Amp)) => {
                     background = true;
+                    had_sep = true;
                     self.pos += 1;
                 }
                 Some(Tok::Newline) => {
+                    had_sep = true;
                     self.pos += 1;
                 }
                 Some(Tok::Op(Op::Semi)) => {
+                    had_sep = true;
                     self.pos += 1;
                 }
                 _ => {}
+            }
+            // Without a separator the only valid follower is one of the things
+            // that *ends the arm*. bash's `compound_list` may reduce with no
+            // trailing `;`/`&`/newline at all (`compound_list: newline_list
+            // list0 | newline_list list1`), which is why `case a in a) { :; }
+            // esac` parses — but what is then allowed after it is fixed by the
+            // productions that receive the arm: `;;`, `;&` and `;;&` from
+            // `case_clause_sequence`, and `esac` from `case_clause`. A `(`, a
+            // `)` or a second command reduces nothing, and bash blames the
+            // abutting token itself:
+            //
+            //     case a in a) echo x( y;; esac
+            //     syntax error near unexpected token `('
+            //
+            // Letting this fall through instead re-entered the loop and parsed
+            // the `( y;; esac` as a subshell, so the error surfaced at the `;;`
+            // — and `case a in a) ( : ) ( : ) ;; esac`, where the second group
+            // is a complete command, was accepted outright.
+            //
+            // `esac` is asked for through [`Parser::reserved_here`], which
+            // already knows it only counts in command position — after a simple
+            // command's word it is an ordinary argument, which is exactly why
+            // `case a in a) echo x esac` runs off the end of the input in bash
+            // rather than closing the `case`.
+            if !had_sep {
+                let at_ender = self.peek().is_none()
+                    || self.at_op(Op::DSemi)
+                    || self.at_op(Op::SemiAmp)
+                    || self.at_op(Op::DSemiAmp)
+                    || self.reserved_here() == Some("esac");
+                if !at_ender {
+                    return Err(self.unexpected_here());
+                }
             }
             items.push(Item { list, background, line });
         }
@@ -5996,6 +6033,56 @@ mod tests {
         }
         // A well-formed `case` still parses (guard against over-eager erroring).
         assert!(parse("case x in a) echo 1;; b) echo 2;; esac").is_ok());
+    }
+
+    /// A `case` arm's body ends where any other command list does.
+    ///
+    /// bash's arm is `pattern ')' compound_list`, and `compound_list` may reduce
+    /// with no trailing `;`/`&`/newline at all (`newline_list list1`) — so a
+    /// body *can* end bare, but only immediately before something that receives
+    /// the arm: `;;`, `;&`, `;;&` (`case_clause_sequence`) or `esac`
+    /// (`case_clause`). Anything else is two commands abutting, which is the
+    /// same syntax error it is anywhere else and is blamed on the abutting
+    /// token — not on the `;;` further along.
+    #[test]
+    fn case_arm_body_ends_like_any_other_list() {
+        for (src, want) in [
+            // The bug this pins: the `(` was counted as an *open* rather than
+            // rejected, so the error only surfaced when the `;;` arrived.
+            ("case a in a) echo x( y;; esac", "syntax error near unexpected token `('"),
+            ("case a in a) echo x) y;; esac", "syntax error near unexpected token `)'"),
+            ("case a in a) { echo x; }( y;; esac", "syntax error near unexpected token `('"),
+            ("case a in a) { echo x; } ) ;; esac", "syntax error near unexpected token `)'"),
+            // Two *complete* commands abutting was accepted outright before.
+            ("case a in a) ( : ) ( : ) ;; esac", "syntax error near unexpected token `('"),
+            ("case a in a) { :; } { :; } ;; esac", "syntax error near unexpected token `{'"),
+            // Nested arms follow the same rule.
+            (
+                "case a in a) case b in b) echo n( m;; esac;; esac",
+                "syntax error near unexpected token `('",
+            ),
+            // `esac` after a simple command's word is an *argument*, not an
+            // ender, so the `case` runs off the end of the input instead.
+            ("case a in a) echo x esac", "syntax error: unexpected end of file"),
+        ] {
+            assert_eq!(emsg(&parse(src).unwrap_err()), want, "src {src:?}");
+        }
+        // A bare body — no separator — is fine before each of the four enders.
+        for src in [
+            "case a in a) { echo x; } esac",
+            "case a in a) ( echo x ) esac",
+            "case a in a) { echo x; } ;; esac",
+            "case a in a) { echo x; } ;& esac",
+            "case a in a) { echo x; } ;;& esac",
+            // …as is any body that does carry one.
+            "case a in a) echo x\nesac",
+            "case a in a) echo x& esac",
+            "case a in a) echo x; esac",
+            // Reserved-looking words after the command word are arguments.
+            "case a in a) echo x fi done then do } y;; esac",
+        ] {
+            assert!(parse(src).is_ok(), "src {src:?}");
+        }
     }
 
     #[test]

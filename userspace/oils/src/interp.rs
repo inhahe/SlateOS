@@ -112,6 +112,7 @@ use crate::arith::{self, VarLookup};
 use crate::assoc::{AssocArray, TableShape};
 use crate::bfmt;
 use crate::bytes::{self, BStr, Ch, Str, StrBuf};
+use crate::escape::sh_single_quote;
 use crate::ast::{
     AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, BulkOp, CaseClause, CaseTerm,
     CmdSubBody, Command,
@@ -19068,7 +19069,7 @@ impl Shell {
             } else {
                 // bash's terse form for an alias is a command that would
                 // recreate it, not the bare name.
-                bfmt![b"alias ", target, b"=", single_quote_bytes(val)]
+                bfmt![b"alias ", target, b"=", sh_single_quote(val)]
             };
             let _ = self.bwrite_line(out, redir, &line);
         } else if SHELL_KEYWORDS.contains(&target) {
@@ -43278,7 +43279,7 @@ impl Shell {
                 && assigned.is_multiple_of(quantum)
                 && let Some(cb) = &callback
             {
-                let cmd = bfmt![cb, b" ", idx.to_string(), b" ", single_quote_bytes(&s)];
+                let cmd = bfmt![cb, b" ", idx.to_string(), b" ", sh_single_quote(&s)];
                 // The callback is text `mapfile` runs, not a source of its own,
                 // so it runs *at the `mapfile` command's line* — `$LINENO`
                 // inside it is that line, and so is any diagnostic raised after
@@ -44150,11 +44151,11 @@ impl Shell {
         let src = bfmt![
             cmd,
             b" ",
-            single_quote_bytes(b"compgen"),
+            sh_single_quote(b"compgen"),
             b" ",
-            single_quote_bytes(word),
+            sh_single_quote(word),
             b" ",
-            single_quote_bytes(b"")
+            sh_single_quote(b"")
         ];
         // Body line 1 is the line `compgen` was reached on, so `$LINENO` inside
         // the command reads as it would in a `$( … )` written there.
@@ -49155,7 +49156,7 @@ fn sigspec_display(spec: &str, posix: bool) -> String {
 /// a handler holding a byte that is not text is printed back exactly as it was
 /// given, and stays re-inputtable.
 fn trap_display_line(spec: &str, action: Option<BStr<'_>>, posix: bool) -> Str {
-    let act = action.map_or_else(|| b"-".to_vec(), single_quote_bytes);
+    let act = action.map_or_else(|| b"-".to_vec(), sh_single_quote);
     bfmt![b"trap -- ", &act, b" ", sigspec_display(spec, posix), b"\n"]
 }
 
@@ -49245,29 +49246,10 @@ fn alias_name_order(a: BStr<'_>, b: BStr<'_>) -> Ordering {
 /// to keep the command re-inputtable and means nothing without one.
 fn alias_line(name: BStr<'_>, val: BStr<'_>, reusable: bool) -> Str {
     if !reusable {
-        return bfmt![name, b"=", &single_quote_bytes(val), b"\n"];
+        return bfmt![name, b"=", &sh_single_quote(val), b"\n"];
     }
     let dashes: &[u8] = if name.first() == Some(&b'-') { b"-- " } else { b"" };
-    bfmt![b"alias ", dashes, name, b"=", &single_quote_bytes(val), b"\n"]
-}
-
-/// Wrap `s` in single quotes for `trap -p` output, escaping embedded quotes the
-/// POSIX way (`'\''`). Always quotes (even simple words), matching bash.
-///
-/// Quoting is a byte-wise operation — the only byte that needs care is the
-/// quote itself — so a value holding bytes that are not text survives it
-/// unchanged, and the quoted form still reproduces the original exactly.
-fn single_quote_bytes(s: BStr<'_>) -> Str {
-    let mut out = Str::from(&b"'"[..]);
-    for &b in s {
-        if b == b'\'' {
-            out.extend_from_slice(b"'\\''");
-        } else {
-            out.push(b);
-        }
-    }
-    out.push(b'\'');
-    out
+    bfmt![b"alias ", dashes, name, b"=", &sh_single_quote(val), b"\n"]
 }
 
 /// The canonical completion-action name for a single-letter `complete` flag
@@ -49615,7 +49597,7 @@ fn comp_quote_name(name: BStr<'_>) -> Str {
         prev = Some(c);
         meta
     });
-    if quote { single_quote_bytes(name) } else { name.to_vec() }
+    if quote { sh_single_quote(name) } else { name.to_vec() }
 }
 
 /// Render a completion spec as a re-executable `complete …` line (matching
@@ -49645,27 +49627,27 @@ fn format_compspec(key: &CompKey, sp: &CompSpec) -> Str {
     }
     if let Some(v) = &sp.globpat {
         s.extend_from_slice(b" -G ");
-        s.extend_from_slice(&single_quote_bytes(v));
+        s.extend_from_slice(&sh_single_quote(v));
     }
     if let Some(v) = &sp.wordlist {
         s.extend_from_slice(b" -W ");
-        s.extend_from_slice(&single_quote_bytes(v));
+        s.extend_from_slice(&sh_single_quote(v));
     }
     if let Some(v) = &sp.prefix {
         s.extend_from_slice(b" -P ");
-        s.extend_from_slice(&single_quote_bytes(v));
+        s.extend_from_slice(&sh_single_quote(v));
     }
     if let Some(v) = &sp.suffix {
         s.extend_from_slice(b" -S ");
-        s.extend_from_slice(&single_quote_bytes(v));
+        s.extend_from_slice(&sh_single_quote(v));
     }
     if let Some(v) = &sp.filterpat {
         s.extend_from_slice(b" -X ");
-        s.extend_from_slice(&single_quote_bytes(v));
+        s.extend_from_slice(&sh_single_quote(v));
     }
     if let Some(v) = &sp.command {
         s.extend_from_slice(b" -C ");
-        s.extend_from_slice(&single_quote_bytes(v));
+        s.extend_from_slice(&sh_single_quote(v));
     }
     // bash prints the -F function name unquoted.
     if let Some(v) = &sp.function {
@@ -49761,17 +49743,10 @@ fn shell_quote(s: BStr<'_>) -> Str {
     }
     // bash's `${v@Q}`/`${v@A}` single-quote every non-empty, control-free value
     // — even a "plain" word like `hi` becomes `'hi'`. (`%q` printf uses a
-    // different, backslash-escaping quoter, `printf_quote`.)
-    let mut out = b"'".to_vec();
-    for c in bytes::chars(s) {
-        if c == '\'' {
-            out.extend_from_slice(b"'\\''");
-        } else {
-            c.push_to(&mut out);
-        }
-    }
-    out.push(b'\'');
-    out
+    // different, backslash-escaping quoter, `printf_quote`.) The quoting itself
+    // is `sh_single_quote`'s, the same one `alias` and `declare -f` print with,
+    // so a lone quote comes out `\'` here too.
+    sh_single_quote(s)
 }
 
 /// One operand of a traced `[[ … ]]` term.
@@ -59731,11 +59706,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(select_menu(&[], 80), "\n");
     }
 
-    /// [`single_quote_bytes`] for a text value, so a test can build shell
+    /// [`sh_single_quote`] for a text value, so a test can build shell
     /// source with `format!`. Quoting only ever inserts ASCII, so quoting text
     /// yields text and the round trip cannot fail.
     fn single_quote(s: &str) -> String {
-        String::from_utf8(single_quote_bytes(s.as_bytes())).unwrap_or_default()
+        String::from_utf8(sh_single_quote(s.as_bytes())).unwrap_or_default()
     }
 
     #[test]
@@ -84785,7 +84760,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         for meta in ["a b", "a|b", "a&b", "a;b", "a(b", "a<b", "a!b", "a*b", "a$b", "a`b"] {
             assert_eq!(
                 comp_quote_name(meta.as_bytes()),
-                single_quote_bytes(meta.as_bytes()),
+                sh_single_quote(meta.as_bytes()),
                 "{meta}"
             );
         }

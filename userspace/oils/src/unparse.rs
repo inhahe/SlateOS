@@ -986,8 +986,10 @@ pub fn name_index(name: &str, index: &Option<ArrayIndex>) -> Str {
 /// was written as `'…'` (or `$'…'`, which bash also prints as `'…'`).
 ///
 /// A single-quoted run cannot contain a single quote, so an embedded one — only
-/// reachable via `$'a\'b'` — is spliced out and re-added as `'\''`, exactly as
-/// bash does.
+/// reachable via `$'a\'b'` — is spliced out and re-added by
+/// [`crate::escape::sh_single_quote`], the one quoter bash prints a word back
+/// with, whose `\'` special case shows here as `f() { : $'\x27'; }` printing
+/// back `: \'`.
 fn quoted_lit_src(text: BStr<'_>, escaped: bool) -> Str {
     if escaped {
         // An escaped run with nothing in it is a backslash that escapes
@@ -1007,17 +1009,7 @@ fn quoted_lit_src(text: BStr<'_>, escaped: bool) -> Str {
         }
         return s;
     }
-    let mut s = Str::with_capacity(text.len() + 2);
-    s.push(b'\'');
-    for &b in text {
-        if b == b'\'' {
-            s.extend_from_slice(b"'\\''");
-        } else {
-            s.push(b);
-        }
-    }
-    s.push(b'\'');
-    s
+    crate::escape::sh_single_quote(text)
 }
 
 fn part_src(p: &WordPart) -> Str {

@@ -1,4 +1,5 @@
-//! Backslash-escape decoding, shared by every place the shell interprets one.
+//! Backslash-escape decoding, shared by every place the shell interprets one —
+//! and, in [`sh_single_quote`], the one way back out.
 //!
 //! bash decodes backslash escapes in four distinct places — the `$'…'` lexer
 //! (and the `${v@E}` transform, which uses the same rules), the `printf` FORMAT
@@ -33,6 +34,46 @@
 //!   word is a byte string, and `\xff` has no code point to be.
 
 use crate::bytes::Str;
+
+/// Wrap `s` in single quotes, the way bash's `sh_single_quote`
+/// (lib/sh/shquote.c:95) does.
+///
+/// bash has exactly one of these, and reaches it from four directions that have
+/// nothing else in common: `${v@Q}` and `${v@A}` (subst.c), `alias` and
+/// `trap -p` printing a definition back (alias.c, trap.c), `declare -f`
+/// re-quoting a word (print_cmd.c), and history's `:q` modifier (readline's
+/// `histexpand.c:847`). They agree because they are the same function; osh's
+/// four callers share this one for the same reason.
+///
+/// A single-quoted run cannot contain a single quote, so an embedded one is
+/// lifted out and written `'\''` — close the run, escape the quote, open the
+/// next. The exception is a value that is *nothing but* a quote: bash writes
+/// the two characters `\'` for that one (shquote.c:103), rather than the
+/// `''\'''` the general rule would give, and the difference is visible
+/// everywhere the function is —
+///
+/// ```text
+/// alias q=\'   →  alias q=\'          the whole value is the quote
+/// alias r=\'x  →  alias r=''\''x'     …so a leading one is not the special case
+/// ${q@Q}       →  \'
+/// $'\x27'      →  \'                  translated at parse time, then printed back
+/// ```
+pub(crate) fn sh_single_quote(s: &[u8]) -> Str {
+    if s == b"'" {
+        return Str::from(&b"\\'"[..]);
+    }
+    let mut out = Str::with_capacity(s.len().saturating_add(2));
+    out.push(b'\'');
+    for &b in s {
+        if b == b'\'' {
+            out.extend_from_slice(b"'\\''");
+        } else {
+            out.push(b);
+        }
+    }
+    out.push(b'\'');
+    out
+}
 
 /// A cursor over the source of an escape sequence.
 ///
@@ -302,7 +343,7 @@ pub(crate) fn unescape_echo(s: &[u8], mode: EscapeMode) -> EchoUnescaped {
 
 #[cfg(test)]
 mod tests {
-    use super::{EscapeMode, ansi_c_unescape, unescape_echo};
+    use super::{EscapeMode, ansi_c_unescape, sh_single_quote, unescape_echo};
     use crate::bytes::Str;
 
     fn hex(s: &[u8]) -> String {
@@ -424,5 +465,21 @@ mod tests {
         let r = unescape_echo(b"a\\xg", EscapeMode::EchoE);
         assert_eq!(r.text, b"a\\xg".to_vec());
         assert!(r.bad.is_empty());
+    }
+
+    /// A value that is nothing but a single quote is the one bash writes as a
+    /// bare escape rather than as a quoted run (shquote.c:103) — and it is the
+    /// *whole* value that has to be the quote, not merely its first character.
+    #[test]
+    fn a_value_that_is_only_a_quote_is_written_as_a_bare_escape() {
+        let q = |s: &[u8]| String::from_utf8_lossy(&sh_single_quote(s)).into_owned();
+        assert_eq!(q(b"'"), r"\'");
+        assert_eq!(q(b"'x"), r"''\''x'");
+        assert_eq!(q(b"x'"), r"'x'\'''");
+        assert_eq!(q(b"''"), r"''\'''\'''");
+        assert_eq!(q(b""), "''");
+        assert_eq!(q(b"hi"), "'hi'");
+        // Byte-wise, so a value that is not text survives it.
+        assert_eq!(sh_single_quote(b"\xff\x00"), b"'\xff\x00'".to_vec());
     }
 }

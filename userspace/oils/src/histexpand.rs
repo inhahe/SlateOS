@@ -695,7 +695,14 @@ fn apply_modifiers(
             // whitespace still separates words. Either way a later expansion
             // pass leaves the text alone. bash uses single quotes for both.
             Some(&c @ (b'q' | b'x')) => {
-                text = if c == b'q' { single_quote(&text) } else { quote_breaks(&text) };
+                // `:q` is bash's `sh_single_quote` (readline's histexpand.c:847),
+                // the same one `${v@Q}` and `alias` print with; `:x` is
+                // readline's own `quote_breaks`, which is not.
+                text = if c == b'q' {
+                    crate::escape::sh_single_quote(&text)
+                } else {
+                    quote_breaks(&text)
+                };
                 i = j.saturating_add(1);
             }
             Some(b's') => {
@@ -748,20 +755,6 @@ fn apply_modifiers(
     Ok((text, i, print_only))
 }
 
-/// Wrap `s` in single quotes, escaping any it contains the way bash's `:q` does.
-fn single_quote(s: BStr<'_>) -> Str {
-    let mut out = Str::with_capacity(s.len().saturating_add(2));
-    out.push(b'\'');
-    for &c in s {
-        if c == b'\'' {
-            out.extend_from_slice(b"'\\''");
-        } else {
-            out.push(c);
-        }
-    }
-    out.push(b'\'');
-    out
-}
 
 /// Quote `s` the way `:x` does — readline's `quote_breaks`.
 ///

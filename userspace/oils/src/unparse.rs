@@ -1128,6 +1128,10 @@ fn part_src(p: &WordPart) -> Str {
             // backslash from a nested `` \` `` and stop it parsing. Echo it as
             // written, which is what bash does.
             CmdSubBody::Backtick { verbatim, .. } => bfmt![b"`", verbatim, b"`"],
+            // Nor was a `$((` that fell back to a substitution — and its text
+            // still carries the inner `(` the scan counted, so a plain `$(` … `)`
+            // around it reproduces the `$(( … )` the source wrote.
+            CmdSubBody::ArithFallback { src, .. } => bfmt![b"$(", src, b")"],
             CmdSubBody::Parsed { prog, .. } => {
                 bfmt![b"$(", &flush_here_docs(&program_inline(prog)), b")"]
             }

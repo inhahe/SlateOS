@@ -27430,11 +27430,14 @@ impl Shell {
                 let path = self.comsub_read_file(prog);
                 self.command_sub(src, map, path)
             }
-            CmdSubBody::Backtick { src, close_line, .. } => {
-                // A backtick body's lines are numbered from `close_line - 1` — a
-                // plain offset, unlike the rank-based renumbering a `$( … )`
-                // body gets (see [`crate::parser::parse_cmdsub_body`]). Both are
-                // bash's, measured.
+            CmdSubBody::Backtick { src, close_line, .. }
+            | CmdSubBody::ArithFallback { src, close_line } => {
+                // A body bash reads only at expansion time is numbered from
+                // `close_line - 1` — a plain offset, unlike the rank-based
+                // renumbering a `$( … )` body gets (see
+                // [`crate::parser::parse_cmdsub_body`]). Both are bash's,
+                // measured, and a `$((` that fell back to a substitution takes
+                // the offset rule with the rest of the backtick path.
                 let map = LineMap::Offset(close_line.saturating_sub(1));
                 let path = self.comsub_text_read_file(src, &map);
                 self.command_sub(src, &map, path)

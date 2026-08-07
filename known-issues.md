@@ -43,6 +43,50 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
+### TD-OILS-A-DEFERRED-COMMAND-SUBSTITUTION-BODY-REPORTS-THE-ENCLOSING-INPUTS-NAME. `` eval 'echo `echo 2)3`' `` said `eval:` where bash says `command substitution:` — 2026-08-07 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::syntax_error_prefix`, and the
+`self.comsub_read_eval && self.at_outermost_read_eval()` test it and
+`Shell::parse_error_flow` share.
+
+**What.** A syntax error in a body bash reads at expansion time (a backtick, or
+a `$((` that fell back — see
+TD-OILS-AN-UNTERMINATED-ARITHMETIC-EXPANSION-IS-REPARSED-AS-A-SUBSTITUTION-BODY)
+is tagged `command substitution` — but only when the substitution is not itself
+inside an `eval` or a `.`/`source`:
+
+```text
+echo `for`                     bash: p.sh: command substitution: line 1: … | osh: same ✅
+eval 'echo `for`'              bash: p.sh: command substitution: line 1: … | osh: p.sh: eval: line 1: …
+. ./inner.sh   (inner: echo `for`)
+                               bash: inner.sh: command substitution: line 1: … | osh: inner.sh: line 1: …
+```
+
+Only the token is wrong; `$?` is 2 in both, and the enclosing command carries on
+in both. A nested `eval` *inside* the body correctly says `eval` in both.
+
+**Why.** bash's `command_substitute` pushes a **new input source** for the body
+(it calls `parse_and_execute`, subst.c), and `report_syntax_error` names the
+*innermost* one — so whatever `eval`/`source` frames the caller sat in are no
+longer in scope. osh models the innermost source as
+`comsub_read_eval && at_outermost_read_eval()`, and `at_outermost_read_eval()`
+is `eval_depth == 0 && source_stack.is_empty()` — both of which the
+substitution's subshell *inherits* from the caller (`clone_for_subshell` copies
+`eval_depth`; `source_stack` has to be kept for `BASH_SOURCE`). So the body's
+own loop is not recognised as outermost and the caller's token wins.
+
+**Proper fix:** record where the body's loop sits rather than asking whether the
+shell is globally outermost — turn `comsub_read_eval: bool` into the
+`(eval_depth, source_stack.len())` the body started at, and let
+`at_comsub_read_eval()` compare. A nested `eval` then moves off the base and
+reports as itself, which is what bash does. `syntax_error_prefix`'s token
+cascade must also test the body *before* `eval_depth > 0`, since the body is now
+the innermost source of the two.
+
+**Waived by** `tests/corpus/arith-expansion-scan-and-classify.sh`
+(`# EXPECT-DIFF`), whose `the scan skips a backtick` probe runs under `e()`'s
+`eval` and so hits this.
+
 ### TD-OILS-A-HERE-DOCUMENT-OPERATOR-WITH-NO-DELIMITER-WORD-WAS-NOT-A-GRAMMAR-ERROR. `cat << ; echo hi` ran, and `cat <<#c` took the comment as a delimiter — 2026-08-06 — ✅ FIXED 2026-08-06
 
 **Where:** `userspace/oils/src/lexer.rs` — `Lexer::lex_heredoc_op` and
@@ -1368,7 +1412,7 @@ TD-OILS-AN-UNTERMINATED-ARITHMETIC-EXPANSION-IS-REPARSED-AS-A-SUBSTITUTION-BODY
 below. Its *second* line is right; only the lexer's own first line is wrong,
 and for a reason that has nothing to do with conditionals.
 
-### TD-OILS-AN-UNTERMINATED-ARITHMETIC-EXPANSION-IS-REPARSED-AS-A-SUBSTITUTION-BODY. `echo $(( fi` — 2026-08-07 — OPEN
+### TD-OILS-AN-UNTERMINATED-ARITHMETIC-EXPANSION-IS-REPARSED-AS-A-SUBSTITUTION-BODY. `echo $(( fi` — 2026-08-07 — ✅ FIXED 2026-08-07
 
 **Where:** `userspace/oils/src/parser.rs` — `resolve_subst_bail`, and the
 `SubstBail` the lexer raises for it in `userspace/oils/src/lexer.rs`.
@@ -1410,12 +1454,47 @@ the missing `)` is ever noticed (``echo $(fi`` is ``near `fi'``, not ``matching
 commands, so there is no body error to come out first and the unterminated-paren
 message stands. osh applies the bail to both.
 
-**Proper fix:** do not raise `SubstBail` for a `$((`. The lexer knows which it
-is at the point it starts the scan (the second `(` is what selects arithmetic),
-so the bail should be suppressed there rather than unpicked afterwards in
-`resolve_subst_bail`. Note the *reverse* case is already right and must stay so:
-a `$((` that closes but is not valid arithmetic is re-read as `$( ( … ) )`, and
-that path is not this one.
+**Fix (2026-08-07).** Suppressing the bail was the *entry point*, not the fix.
+Measuring the rest of `$((` showed the two halves are separate bash mechanisms
+and osh had merged them, so both were rebuilt:
+
+1. **Parse time is extent only.** `parse_matched_pair (…, P_ARITH)` counts
+   parens with `count` starting at 1 (the `$(`'s), which is why `$((` needs
+   *two* `)`. It steps over `'…'`, `"…"`, `` `…` ``, `\X` and a nested
+   `$( … )`, but **not** `${ … }` — that needs `P_ARRAYSUB|P_DOLBRACE`
+   (parse.y:3929), so `echo $(( 1 + ${x:-)} ))` really does end at the `)`
+   inside the brace. `Lexer::read_arith` is gone; the `$((` scan is now
+   `read_balanced_body` with `command = false`, sharing `read_opaque_span`
+   with the command scan and differing only where bash's flags differ.
+2. **Classification happens at expansion time.** `param_expand`'s `LPAREN`
+   case (subst.c:10580) strips the parens and asks `chk_arithsub`
+   (subst.c:9487) whether the text balances; on failure it `goto comsub` and
+   calls `command_substitute` — *the very call a backtick body makes*.
+   `is_arith_expr` is that check, transcribed.
+3. **A failed classification therefore defers the body.** That is the part
+   that was missing: osh parsed the fallback body eagerly through
+   `parse_cmdsub_body`, which both rewrote its `unexpected end of file` into
+   ``near unexpected token `)' `` and marked it `fatal` (→ 127 under `-c`).
+   bash never reads it until the word expands, so
+   `if false; then echo $(( fi ) ); fi` is *silent* — measured, and matching
+   `` `fi` `` rather than `$(fi)`. Modelled as a third `CmdSubBody` variant,
+   `ArithFallback`, fed by a new lexer-side `SubBody` enum (the lexer must
+   not depend on `ast`); it takes the backtick path in `interp.rs` — the
+   plain `close_line - 1` line offset included, also measured — and prints
+   back as `$( … )` in `unparse.rs`, which reproduces the source because the
+   text still carries the `(` the scan counted.
+
+Two smaller facts fell out and are fixed with it: `shell_getc (1)` at
+`parse_matched_pair`'s loop head (parse.y:3705) deletes a `\<newline>` *before*
+the scan sees the backslash, so `read_balanced_body` deletes it too when
+`!command` (a command body keeps the pair for its re-lex to delete again) —
+without that, `echo $((1+1)\<newline>)` ends `raw` on a newline, fails the `)`
+suffix and is misread as a substitution. And `$[ … ]` has **no** fallback at
+all (`echo $[ fi ]` is 0, `echo $[ ( echo a ) ]` an arithmetic error), so it
+stays `Seg::Arith`.
+
+**Tests.** `tests/corpus/arith-expansion-scan-and-classify.sh`, eight sections
+covering each of the above.
 
 ### TD-OILS-THE-BINDING-COMPLETION-ACTION-OFFERED-NOTHING. `compgen -A binding` answered empty where bash lists 174 names — 2026-08-06 — ✅ FIXED 2026-08-06
 

@@ -1010,9 +1010,13 @@ impl LineMap {
 /// bash reads the two spellings at different times, and that is observable:
 ///
 /// ```sh
-/// if false; then echo $(for); fi   # syntax error — the whole unit fails to parse
-/// if false; then echo `for`;  fi   # silence — the body is never read
+/// if false; then echo $(for);     fi   # syntax error — the whole unit fails to parse
+/// if false; then echo `for`;      fi   # silence — the body is never read
+/// if false; then echo $(( for ) ); fi  # silence — nor is this one
 /// ```
+///
+/// The third is a `$((` that turned out not to hold an expression, which bash
+/// runs through the backtick's path — see [`CmdSubBody::ArithFallback`].
 ///
 /// A `$( … )` body is parsed in the enclosing token stream, so its errors are
 /// the enclosing parse's errors. A backtick body is only a *string* until the
@@ -1059,16 +1063,37 @@ pub enum CmdSubBody {
         /// while in `` ` … ` `` it reports one more than each.
         close_line: u32,
     },
+    /// `$(( … )` — a `$((` whose body did not read as an arithmetic expression,
+    /// so bash ran it as a command substitution instead.
+    ///
+    /// The fallback is `param_expand`'s (subst.c:10580): the `$((` scan only
+    /// found the *extent*, and it is `chk_arithsub` at **expansion** time that
+    /// asks whether the text is an expression at all. When it is not, bash hands
+    /// that same text to `command_substitute` — the call a backtick body makes —
+    /// so this behaves as [`CmdSubBody::Backtick`] does in everything that is
+    /// observable, the line numbering included. What differs is only the
+    /// spelling `declare -f` prints back, which is why it is a variant of its
+    /// own rather than a backtick body with the delimiters swapped.
+    ArithFallback {
+        /// The body text, parsed afresh on every expansion. There is no separate
+        /// verbatim form: nothing is unescaped on the way in, so the text that
+        /// runs is also the text that is printed back.
+        src: Str,
+        /// The line the closing `)` sits on, in the enclosing source. The body's
+        /// own lines are numbered from `close_line - 1`, the same plain offset a
+        /// backtick body gets.
+        close_line: u32,
+    },
 }
 
 impl CmdSubBody {
-    /// The parsed body, or `None` for a backtick body that has not been parsed
-    /// (which only happens at expansion time — see the type docs).
+    /// The parsed body, or `None` for a body bash does not read until the word
+    /// is expanded (see the type docs).
     #[must_use]
     pub fn parsed(&self) -> Option<&Program> {
         match self {
             Self::Parsed { prog, .. } => Some(prog),
-            Self::Backtick { .. } => None,
+            Self::Backtick { .. } | Self::ArithFallback { .. } => None,
         }
     }
 }

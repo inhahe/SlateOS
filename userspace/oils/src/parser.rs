@@ -42,7 +42,7 @@ use crate::bfmt;
 use crate::bytes::{self, BStr, Ch, Str};
 use crate::lexer::{
     AliasExpansion, HeredocEof, ParseOpts, Op, ReaderWarning, Seg, Spanned, Tok,
-    TokSpan, Tokenized, UngatheredHeredoc,
+    SubBody, TokSpan, Tokenized, UngatheredHeredoc,
     expand_aliases_tracked, tokenize,
     tokenize_paren_body, tokenize_deferred, tokenize_spanned, word_is_assignment,
 };
@@ -4611,16 +4611,21 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
         }
         Seg::Param(n) => WordPart::Param { name: n.clone(), braced: false },
         Seg::ParamBraced(raw) => parse_braced_param_in(raw, opts, q)?,
-        // A backtick body is not parsed here at all: bash reads it only when the
-        // word is expanded, as an input of its own. See [`CmdSubBody`].
-        Seg::CmdSub(raw, close_line, src) => WordPart::CommandSub {
-            body: match src {
-                Some(verbatim) => CmdSubBody::Backtick {
+        // Only the `$( … )` spelling is parsed here: bash reads the other two
+        // when the word is expanded, as an input of their own. See
+        // [`CmdSubBody`].
+        Seg::CmdSub(raw, close_line, body) => WordPart::CommandSub {
+            body: match body {
+                SubBody::Backtick(verbatim) => CmdSubBody::Backtick {
                     src: raw.clone(),
                     verbatim: verbatim.clone(),
                     close_line: *close_line,
                 },
-                None => {
+                SubBody::ArithFallback => CmdSubBody::ArithFallback {
+                    src: raw.clone(),
+                    close_line: *close_line,
+                },
+                SubBody::Eager => {
                     // The eager parse is kept — it is what found the `)` and
                     // what raises the fatal syntax error — but so is the body
                     // text, because bash re-reads it at expansion time.

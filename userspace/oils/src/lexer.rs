@@ -40,6 +40,51 @@ fn push1(out: &mut Str, c: char) {
     Ch::U(c).push_to(out);
 }
 
+/// Does this text read as an arithmetic expression rather than as commands?
+///
+/// bash's `chk_arithsub` (subst.c:9487), which is what decides whether a
+/// `$(( … ))` is arithmetic at all. Parentheses must balance and must never dip
+/// below zero, with `\X`, `'…'` and `"…"` stepped over.
+///
+/// It is deliberately *not* the set the scan that found the text steps over: a
+/// backtick is skipped there and not here. So `` $(( 1 + `echo 2)3` )) `` — whose
+/// scan the backtick did protect, giving it the `))` it needed — fails this test
+/// and is run as a command substitution, printing `1: command not found`. The
+/// asymmetry is bash's, it is observable, and it is the reason the two steps are
+/// written separately.
+fn is_arith_expr(s: &[u8]) -> bool {
+    let mut depth = 0i64;
+    let mut i = 0usize;
+    while let Some(&c) = s.get(i) {
+        i += 1;
+        match c {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            }
+            // The escaped character travels with its backslash, whatever it is.
+            b'\\' => i += 1,
+            b'\'' | b'"' => {
+                while let Some(&q) = s.get(i) {
+                    i += 1;
+                    // Only a double-quoted span honours the escape; inside single
+                    // quotes a backslash is an ordinary character.
+                    if q == b'\\' && c == b'"' {
+                        i += 1;
+                    } else if q == c {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    depth == 0
+}
+
 /// A here-document body line with its leading tabs removed, for `<<-`.
 fn strip_tabs(line: BStr<'_>) -> BStr<'_> {
     let n = line.iter().take_while(|&&b| b == b'\t').count();
@@ -218,6 +263,45 @@ pub enum Op {
     TLess,
 }
 
+/// When bash reads a command substitution's body, which is what the three
+/// spellings of one actually differ in.
+///
+/// They all run the same command in the end. But only `$( … )` is parsed with
+/// the enclosing input, and the other two are parsed at expansion time, per
+/// expansion — so a body that does not parse is a *syntax error in the
+/// enclosing unit* for the first and a diagnostic from the substitution for the
+/// others, one that leaves the enclosing command running:
+///
+/// ```sh
+/// if false; then echo $(fi);    fi   # syntax error: the `if` never runs
+/// if false; then echo `fi`;     fi   # silence: the body is never read
+/// if false; then echo $(( fi ) ); fi # silence, for the same reason
+/// ```
+///
+/// The line numbering differs with it: a `$( … )` body is renumbered by bash's
+/// rank rule and the other two by a plain offset from the closing delimiter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubBody {
+    /// `$( … )` — parsed in the enclosing token stream, and printed back from
+    /// that parse.
+    Eager,
+    /// `` ` … ` `` — parsed at expansion time. Carries the body *exactly as
+    /// written*, backslashes and all: bash echoes a backtick body rather than
+    /// re-printing it, and re-printing is not merely untidy — a nested `` \` ``
+    /// would lose its backslash and the result would no longer parse.
+    Backtick(Str),
+    /// `$(( … )` — a `$((` whose body did not read as an arithmetic expression,
+    /// so bash ran it as a command substitution instead.
+    ///
+    /// The fallback is `param_expand`'s (subst.c:10580): the `$((` scan only
+    /// ever found the extent, and it is `chk_arithsub` at *expansion* time that
+    /// asks whether the text is an expression at all. When it is not, bash
+    /// hands that same text to `command_substitute` — the very call a backtick
+    /// body makes — so the body is read then and not before, and there is no
+    /// body text to print back other than the one that runs.
+    ArithFallback,
+}
+
 /// A word fragment, preserving quoting for later expansion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Seg {
@@ -247,14 +331,9 @@ pub enum Seg {
     /// first line. The parser needs that line to rebase the body's numbering
     /// (see `parser::parse_cmdsub_body`), and only the lexer knows it.
     ///
-    /// The third field carries a `` ` … ` `` body's *verbatim source*, and is
-    /// `None` for the `$( … )` spelling. The two forms run the same command,
-    /// but bash treats them as different constructs everywhere else: it prints
-    /// a `$( … )` body back from the parse and a backtick body from the source
-    /// text (see [`Lexer::read_backtick`]), and it parses a `$( … )` body in
-    /// the enclosing token stream, which changes how an error in it is
-    /// reported.
-    CmdSub(Str, u32, Option<Str>),
+    /// The third field says *when* bash reads the body, and so how it prints it
+    /// back — see [`SubBody`].
+    CmdSub(Str, u32, SubBody),
     /// `$(( … ))` — raw arithmetic expression text.
     /// The `bool` is `true` when the deprecated `$[ … ]` spelling was used. The
     /// two evaluate identically, but bash prints a stored function body back in
@@ -3326,7 +3405,7 @@ impl Lexer {
                     self.pos += 1;
                     let (raw, src) = self.read_backtick(false)?;
                     let close = self.cur_line();
-                    segs.push(Seg::CmdSub(raw, close, Some(src)));
+                    segs.push(Seg::CmdSub(raw, close, SubBody::Backtick(src)));
                 }
                 '\\' => {
                     // In the inline `=~` regex, a backslash escapes the next
@@ -3395,7 +3474,7 @@ impl Lexer {
                     self.pos += 1;
                     let (raw, src) = self.read_backtick(false)?;
                     let close = self.cur_line();
-                    segs.push(Seg::CmdSub(raw, close, Some(src)));
+                    segs.push(Seg::CmdSub(raw, close, SubBody::Backtick(src)));
                 }
                 // A backslash inside quotes reaches only as far as double
                 // quoting itself does: the four characters that stay live there,
@@ -3657,7 +3736,7 @@ impl Lexer {
                     self.pos += 1;
                     let (raw, src) = self.read_backtick(false)?;
                     let close = self.cur_line();
-                    segs.push(Seg::CmdSub(raw, close, Some(src)));
+                    segs.push(Seg::CmdSub(raw, close, SubBody::Backtick(src)));
                 }
                 '\\' => {
                     self.pos += 1;
@@ -3825,7 +3904,7 @@ impl Lexer {
                     flush_lit(&mut segs, &mut lit);
                     let (raw, src) = self.read_backtick(true)?;
                     let close = self.cur_line();
-                    segs.push(Seg::CmdSub(raw, close, Some(src)));
+                    segs.push(Seg::CmdSub(raw, close, SubBody::Backtick(src)));
                 }
                 '$' => {
                     if let Some(seg) = self.read_dollar(true)? {
@@ -3883,45 +3962,43 @@ impl Lexer {
             }
             Some('(') => {
                 if self.at(self.cont_skip(self.pos + 1)) == Some('(') {
-                    // `$((` is ambiguous: arithmetic, or a substitution whose
-                    // body opens with a parenthesised group (`$(( cmd ) | cmd )`,
-                    // which bash runs). Nothing local tells them apart, so read it
-                    // as arithmetic and, if that does not reach a `))`, rewind and
-                    // read it again as a substitution — the backtrack bash's
-                    // `parse_dollar_paren` does. Note what does *not* backtrack:
-                    // `$(( echo a ))` reaches its `))`, so it stays arithmetic and
-                    // fails at evaluation, in bash too.
-                    let subst_from = self.cont_skip(self.pos.saturating_add(1));
-                    let conts_from = self.conts.len();
+                    // `$((` is ambiguous: arithmetic, or a substitution whose body
+                    // opens with a parenthesised group (`$(( cmd ) | cmd )`, which
+                    // bash runs). bash settles it in *two* steps, and keeping them
+                    // apart is the only way to agree with it.
+                    //
+                    // The first is this scan, which only finds the `)`. Seeing a
+                    // second `(`, `parse_comsub` returns straight into
+                    // `parse_matched_pair` with `P_ARITH` (parse.y:4103) — a
+                    // character scan, above the `need_here_doc = 0` and nowhere
+                    // near a nested parse. So the body is never parsed as commands
+                    // here, a `<<` in it declares nothing, and pending
+                    // here-documents survive: `cat <<E $((`, `cat <<E $(( 1 +` and
+                    // `cat <<E $(( echo a )` all warn about `E`, while `cat <<E $(`
+                    // does not. Blamed on the opening line for the same reason —
+                    // the scan starts and fails in one place, with no re-parse
+                    // afterwards to move the line counter on.
+                    //
+                    // The second step is [`is_arith_expr`], and it does not happen
+                    // until expansion in bash — `param_expand` (subst.c:10580)
+                    // strips the parens and asks `chk_arithsub` whether what is
+                    // left reads as an expression, falling back to
+                    // `command_substitute` when it does not. osh decides here
+                    // instead, which is only safe because the test is a property
+                    // of the text and nothing else.
                     let open = self.cur_line();
                     self.adv();
-                    self.adv();
-                    if let Ok(raw) = self.read_arith() {
-                        return Ok(Some(Seg::Arith(raw, false)));
+                    let raw = self.read_balanced('(', ')').map_err(|e| e.at(open))?;
+                    // `chk_arithsub`'s own preamble: the body must open with the
+                    // `(` this scan counted and close with its mate.
+                    if let Some(expr) = raw
+                        .strip_prefix(b"(")
+                        .and_then(|e| e.strip_suffix(b")"))
+                        .filter(|e| is_arith_expr(e))
+                    {
+                        return Ok(Some(Seg::Arith(expr.into(), false)));
                     }
-                    // `self.pos` and the continuations the abandoned scan deleted
-                    // are all that moved: `cur_line` is derived from the cursor,
-                    // and the arithmetic scan records nothing else. The
-                    // continuations have to go back too — the same text is about
-                    // to be read as a substitution body, which keeps them.
-                    self.conts.truncate(conts_from);
-                    self.pos = subst_from;
-                    // Blamed on the opening line, unlike a plain `$( … )` — bash
-                    // has already failed the arithmetic reading by this point, and
-                    // that error is stamped where the `$((` is.
-                    //
-                    // `read_balanced_inner` rather than [`Lexer::read_subst_body`]
-                    // because this re-read is not where bash's `parse_comsub`
-                    // starts: seeing a second `(`, it returns straight into
-                    // `parse_matched_pair` with `P_ARITH` (parse.y:4103), *above*
-                    // the `need_here_doc = 0`. So a `$((` that runs out of input
-                    // keeps its pending here-documents however it is finally read
-                    // — `cat <<E $((`, `cat <<E $(( 1 +` and `cat <<E $(( echo a )`
-                    // all warn, while `cat <<E $(` does not.
-                    let raw = self
-                        .read_balanced_inner('(', ')', true)
-                        .map_err(|e| e.at(open))?;
-                    Ok(Some(Seg::CmdSub(raw, self.cur_line(), None)))
+                    Ok(Some(Seg::CmdSub(raw, self.cur_line(), SubBody::ArithFallback)))
                 } else {
                     self.pos += 1;
                     // `$( … )` is the one construct bash blames on the *end* of
@@ -3930,7 +4007,7 @@ impl Lexer {
                     // moved on. (An unterminated quote *inside* the body still
                     // reports its own line — `at` will not overwrite.)
                     let raw = self.read_subst_body().map_err(|e| e.at(self.eof_line()))?;
-                    Ok(Some(Seg::CmdSub(raw, self.cur_line(), None)))
+                    Ok(Some(Seg::CmdSub(raw, self.cur_line(), SubBody::Eager)))
                 }
             }
             Some(c) if is_name_start(c) => {
@@ -4030,14 +4107,14 @@ impl Lexer {
         &mut self,
         open: char,
         close: char,
-        heredocs: bool,
+        command: bool,
     ) -> Result<Str, LexError> {
-        if !heredocs {
-            return self.read_balanced_body(open, close, heredocs);
+        if !command {
+            return self.read_balanced_body(open, close, command);
         }
         let body_start = self.pos;
         let open_line = self.cur_line();
-        self.read_balanced_body(open, close, heredocs).map_err(|mut e| {
+        self.read_balanced_body(open, close, command).map_err(|mut e| {
             // Only an error that *is* the missing `)` — this scan's own
             // end-of-input, or one already carrying a bail from a substitution
             // inside it. An unterminated quote in the body is a different
@@ -4055,11 +4132,179 @@ impl Lexer {
         })
     }
 
+    /// Consume one span in which a closing delimiter closes nothing: a quoted
+    /// string, a backslash escape, a backtick body, a `${ … }`. `Ok(false)`
+    /// means `c` opened none of these, and nothing was consumed.
+    ///
+    /// bash reaches every one of these from `parse_matched_pair` whatever the
+    /// grouping construct it is scanning: `shellquote (ch)` recurses for `'`,
+    /// `"` and `` ` `` (parse.y:3844), `LEX_PASSNEXT` appends the character
+    /// after a backslash and steps past it (parse.y:3741), and a `${` goes to
+    /// `parse_dollar_word` (parse.y:3954). Not one of them is conditional on
+    /// `P_COMMAND` or `P_ARITH`, which is why the *arithmetic* scan needs them
+    /// exactly as much as the substitution one: in `$(( 1 + "2)3" ))` the
+    /// quoted `)` closes nothing and bash evaluates `1 + 2)3`.
+    ///
+    /// `command` is bash's `P_COMMAND`: true when the text being scanned is a
+    /// body of commands rather than an arithmetic expression. It gates the
+    /// `${ … }` arm below, and travels to a nested `$( … )` met inside a
+    /// double-quoted span, which is read by the balanced scan rather than
+    /// skipped — see the comment on that arm.
+    fn read_opaque_span(
+        &mut self,
+        c: char,
+        raw: &mut Str,
+        command: bool,
+    ) -> Result<bool, LexError> {
+        match c {
+            '\'' => {
+                let q_open = self.cur_line();
+                raw.push(b'\'');
+                // Copy verbatim to the closing single quote.
+                loop {
+                    match self.peek() {
+                        Some('\'') => {
+                            self.pos += 1;
+                            raw.push(b'\'');
+                            return Ok(true);
+                        }
+                        Some(_) => self.take_into(raw),
+                        None => return Err(eof_matching('\'').at(q_open)),
+                    }
+                }
+            }
+            '"' => {
+                let q_open = self.cur_line();
+                raw.push(b'"');
+                // A double-quoted span is *not* opaque to this scan. Substitution
+                // still happens inside it, so a `)` in there may be a nested
+                // substitution's — and a `<<` in there may be a here-document
+                // whose body has to be fetched from past the enclosing `)`.
+                // bash's `parse_matched_pair` recurses into the same constructs
+                // with the same reader; copying to the closing quote verbatim
+                // instead would lose `"$(cat <<B)"` entirely.
+                loop {
+                    match self.peek() {
+                        Some('\\') => {
+                            self.pos += 1;
+                            raw.push(b'\\');
+                            self.take_into(raw);
+                        }
+                        Some('"') => {
+                            self.pos += 1;
+                            raw.push(b'"');
+                            return Ok(true);
+                        }
+                        // Lexed on its own, exactly as outside the quotes — and
+                        // bash does not fetch a here-document declared in one
+                        // either, so nothing here does.
+                        Some('`') => {
+                            self.pos += 1;
+                            let (_, verbatim) = self.read_backtick(false)?;
+                            raw.push(b'`');
+                            raw.extend_from_slice(&verbatim);
+                            raw.push(b'`');
+                        }
+                        Some('$') if self.peek_at(1) == Some('{') => {
+                            self.pos += 2;
+                            let inner = self.read_dollar_brace()?;
+                            raw.extend_from_slice(b"${");
+                            raw.extend_from_slice(&inner);
+                            raw.push(b'}');
+                        }
+                        // `$(( … ))`: balanced parens with no here-document in
+                        // them — a `<<` there is a left shift. The cursor is left
+                        // on the inner `(`, which the balanced read counts as a
+                        // level of its own, so it stops on the second `)`.
+                        Some('$')
+                            if self.peek_at(1) == Some('(') && self.peek_at(2) == Some('(') =>
+                        {
+                            self.pos += 2;
+                            let inner = self.read_balanced_inner('(', ')', false)?;
+                            raw.extend_from_slice(b"$(");
+                            raw.extend_from_slice(&inner);
+                            raw.push(b')');
+                        }
+                        // A nested substitution, read by this same scan so that
+                        // its here-documents are gathered at *its* `)` like any
+                        // other's. Recursing rather than counting depth in the
+                        // quoted span is what keeps a bare `)` in the text — as
+                        // in `"a)b"` — from closing anything.
+                        //
+                        // A body of commands whatever encloses the quotes: bash
+                        // reaches `parse_comsub` for it from the `open == close`
+                        // branch (parse.y:3954), which no `P_ARITH` is in a
+                        // position to divert.
+                        Some('$') if self.peek_at(1) == Some('(') => {
+                            self.pos += 2;
+                            let inner = self.read_balanced_inner('(', ')', true)?;
+                            raw.extend_from_slice(b"$(");
+                            raw.extend_from_slice(&inner);
+                            raw.push(b')');
+                        }
+                        Some(_) => self.take_into(raw),
+                        None => return Err(eof_matching('"').at(q_open)),
+                    }
+                }
+            }
+            // A backslash escapes the next character, the closing delimiter
+            // included. Both travel, so the span they make is one character
+            // longer than the escape itself.
+            '\\' => {
+                raw.push(b'\\');
+                self.take_into(raw);
+                Ok(true)
+            }
+            '`' => {
+                let (_, verbatim) = self.read_backtick(false)?;
+                raw.push(b'`');
+                raw.extend_from_slice(&verbatim);
+                raw.push(b'`');
+                Ok(true)
+            }
+            // …but only for a body of *commands*. bash skips a `${ … }` under
+            // `P_ARRAYSUB|P_DOLBRACE` only (parse.y:3929); the arithmetic scan
+            // carries neither, so for it a `${ … }` is ordinary text and a
+            // closing delimiter inside one closes the construct. That is why
+            // `echo $[ 1 + ${x:-]} ]` is a `bad substitution` in bash — the `]`
+            // ended the expansion at `${x:-` — and why `echo $(( ${` reports the
+            // `)` it wanted rather than the `}`.
+            '$' if command && self.peek() == Some('{') => {
+                self.pos += 1;
+                let inner = self.read_dollar_brace()?;
+                raw.extend_from_slice(b"${");
+                raw.extend_from_slice(&inner);
+                raw.push(b'}');
+                Ok(true)
+            }
+            // A nested `$( … )`, in an *arithmetic* scan only. bash reaches
+            // `parse_comsub` for one from `P_ARITH` as well (parse.y:3927), and
+            // that is a whole nested parse: its here-documents are gathered as
+            // it goes, and its own body error is raised in place of the missing
+            // `)` out here — `echo $(( $(fi` names `fi`, and
+            // `cat <<E $(( $(cat <<F` warns about `F` while `E` goes down with
+            // the abandoned parse. A `$((` is not one of these: it opens another
+            // arithmetic span, which the depth counting handles. In a *command*
+            // scan the counting downstream already does all of this, with the
+            // enclosing body's own here-document order to keep — see the
+            // `nested` stack in [`Lexer::read_balanced_body`].
+            '$' if !command && self.peek() == Some('(') && self.peek_at(1) != Some('(') => {
+                self.pos += 1;
+                let inner = self.read_subst_body().map_err(|e| e.at(self.eof_line()))?;
+                raw.extend_from_slice(b"$(");
+                raw.extend_from_slice(&inner);
+                raw.push(b')');
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     fn read_balanced_body(
         &mut self,
         open: char,
         close: char,
-        heredocs: bool,
+        command: bool,
     ) -> Result<Str, LexError> {
         let mut depth = 1usize;
         let mut raw = Str::new();
@@ -4101,98 +4346,25 @@ impl Lexer {
                 return Err(eof_matching(close));
             };
             let c = syn(cx);
-            if c == '\'' {
-                let q_open = self.cur_line();
-                cx.push_to(&mut raw);
-                // Copy verbatim to the closing single quote.
-                loop {
-                    match self.peek() {
-                        Some('\'') => {
-                            self.pos += 1;
-                            raw.push(b'\'');
-                            break;
-                        }
-                        Some(_) => self.take_into(&mut raw),
-                        None => return Err(eof_matching('\'').at(q_open)),
-                    }
-                }
+            // `parse_matched_pair` reads with `shell_getc (1)` (parse.y:3705), so
+            // the reader has already deleted a `\<newline>` before the scan sees
+            // the backslash at all. A command body is *copied* for a re-lex that
+            // deletes it again, so there the pair can travel; an arithmetic body's
+            // text is used exactly as it stands, so the deletion has to happen
+            // here. Without it `$((1+1)\<newline>)` leaves `raw` ending on a
+            // newline, the `)` suffix is not found, and the whole thing is
+            // misread as a command substitution.
+            if !command && c == '\\' && self.cont_len_at(self.pos.saturating_sub(1)).is_some() {
+                self.pos = self.pos.saturating_sub(1);
+                self.eat_conts();
+                continue;
+            }
+            if self.read_opaque_span(c, &mut raw, command)? {
                 word_start = false;
                 cases.push_quoted();
                 continue;
             }
-            if c == '"' {
-                let q_open = self.cur_line();
-                cx.push_to(&mut raw);
-                // A double-quoted span is *not* opaque to this scan. Substitution
-                // still happens inside it, so a `)` in there may be a nested
-                // substitution's — and a `<<` in there may be a here-document
-                // whose body has to be fetched from past the enclosing `)`.
-                // bash's `parse_matched_pair` recurses into the same constructs
-                // with the same reader; copying to the closing quote verbatim
-                // instead would lose `"$(cat <<B)"` entirely.
-                loop {
-                    match self.peek() {
-                        Some('\\') => {
-                            self.pos += 1;
-                            raw.push(b'\\');
-                            self.take_into(&mut raw);
-                        }
-                        Some('"') => {
-                            self.pos += 1;
-                            raw.push(b'"');
-                            break;
-                        }
-                        // Lexed on its own, exactly as outside the quotes — and
-                        // bash does not fetch a here-document declared in one
-                        // either, so nothing here does.
-                        Some('`') => {
-                            self.pos += 1;
-                            let (_, verbatim) = self.read_backtick(false)?;
-                            raw.push(b'`');
-                            raw.extend_from_slice(&verbatim);
-                            raw.push(b'`');
-                        }
-                        Some('$') if self.peek_at(1) == Some('{') => {
-                            self.pos += 2;
-                            let inner = self.read_dollar_brace()?;
-                            raw.extend_from_slice(b"${");
-                            raw.extend_from_slice(&inner);
-                            raw.push(b'}');
-                        }
-                        // `$(( … ))`: balanced parens with no here-document in
-                        // them — a `<<` there is a left shift. The cursor is left
-                        // on the inner `(`, which the balanced read counts as a
-                        // level of its own, so it stops on the second `)`.
-                        Some('$')
-                            if self.peek_at(1) == Some('(') && self.peek_at(2) == Some('(') =>
-                        {
-                            self.pos += 2;
-                            let inner = self.read_balanced_inner('(', ')', false)?;
-                            raw.extend_from_slice(b"$(");
-                            raw.extend_from_slice(&inner);
-                            raw.push(b')');
-                        }
-                        // A nested substitution, read by this same scan so that
-                        // its here-documents are gathered at *its* `)` like any
-                        // other's. Recursing rather than counting depth in the
-                        // quoted span is what keeps a bare `)` in the text — as
-                        // in `"a)b"` — from closing anything.
-                        Some('$') if self.peek_at(1) == Some('(') => {
-                            self.pos += 2;
-                            let inner = self.read_balanced_inner('(', ')', heredocs)?;
-                            raw.extend_from_slice(b"$(");
-                            raw.extend_from_slice(&inner);
-                            raw.push(b')');
-                        }
-                        Some(_) => self.take_into(&mut raw),
-                        None => return Err(eof_matching('"').at(q_open)),
-                    }
-                }
-                word_start = false;
-                cases.push_quoted();
-                continue;
-            }
-            if heredocs {
+            if command {
                 let in_arith = arith_from.is_some();
                 match c {
                     '\n' => {
@@ -4213,33 +4385,6 @@ impl Lexer {
                         while !matches!(self.peek(), None | Some('\n')) {
                             self.take_into(&mut raw);
                         }
-                        continue;
-                    }
-                    // A backslash escapes the next character, `)` included.
-                    '\\' => {
-                        raw.push(b'\\');
-                        self.take_into(&mut raw);
-                        word_start = false;
-                        cases.push_quoted();
-                        continue;
-                    }
-                    '`' => {
-                        let (_, verbatim) = self.read_backtick(false)?;
-                        raw.push(b'`');
-                        raw.extend_from_slice(&verbatim);
-                        raw.push(b'`');
-                        word_start = false;
-                        cases.push_quoted();
-                        continue;
-                    }
-                    '$' if self.peek() == Some('{') => {
-                        self.pos += 1;
-                        let inner = self.read_dollar_brace()?;
-                        raw.extend_from_slice(b"${");
-                        raw.extend_from_slice(&inner);
-                        raw.push(b'}');
-                        word_start = false;
-                        cases.push_quoted();
                         continue;
                     }
                     // `$((` / `((` open an arithmetic span. The parens are left to
@@ -4309,7 +4454,7 @@ impl Lexer {
                     _ => {}
                 }
             }
-            if heredocs {
+            if command {
                 // Feed the `case` tracker. Every delimiter ends the word being
                 // read, and the reserved words are only recognised there.
                 match c {
@@ -4338,13 +4483,13 @@ impl Lexer {
             }
             if c == open {
                 // A `case` pattern's optional `(` has no mate of its own.
-                if !(heredocs && cases.is_pattern_open(depth)) {
+                if !(command && cases.is_pattern_open(depth)) {
                     depth += 1;
                     // `$(`, `<(` and `>(` — the sigil is the character before the
                     // paren the cursor has just stepped over. An arithmetic `$((`
                     // is excluded: it opens no reader of its own, and a `<<` in it
                     // is a left shift anyway.
-                    if heredocs
+                    if command
                         && arith_from.is_none()
                         && matches!(self.at(self.pos.wrapping_sub(2)), Some('$' | '<' | '>'))
                     {
@@ -4354,7 +4499,7 @@ impl Lexer {
             } else if c == close {
                 // A pattern's `)` closes the pattern, not a group — this is the
                 // whole reason the scan tracks `case` at all.
-                if !(heredocs && cases.take_pattern_close(depth)) {
+                if !(command && cases.take_pattern_close(depth)) {
                     depth -= 1;
                     if depth == 0 {
                         // A `case` still open here is one bash's parser would have
@@ -4363,7 +4508,7 @@ impl Lexer {
                         // the failure where bash puts it, in the substitution
                         // rather than in the enclosing input (the two exit
                         // differently: 1 for a substitution, 2 for the input).
-                        if heredocs && cases.open_at_close() {
+                        if command && cases.open_at_close() {
                             push1(&mut raw, close);
                         }
                         // A here-document declared in this body but never
@@ -4413,7 +4558,7 @@ impl Lexer {
                 }
             }
             cx.push_to(&mut raw);
-            if heredocs {
+            if command {
                 word_start = matches!(c, ' ' | '\t' | ';' | '&' | '|' | '(' | ')');
             }
         }
@@ -4671,11 +4816,16 @@ impl Lexer {
                             raw.push(b'(');
                             self.pos += 1;
                             if self.peek() == Some('(') {
-                                raw.push(b'(');
-                                self.pos += 1;
-                                let inner = self.read_arith()?;
+                                // Only the extent is wanted — this text is being
+                                // copied for a re-lex, which will run the same scan
+                                // over it and classify it itself. So the balanced
+                                // read rather than the arithmetic *command*'s
+                                // reader: whether the expression is well formed,
+                                // and whether it is an expression at all, are not
+                                // questions this scan has to answer.
+                                let inner = self.read_balanced('(', ')')?;
                                 raw.extend_from_slice(&inner);
-                                raw.extend_from_slice(b"))");
+                                raw.push(b')');
                             } else {
                                 // The same substitution as anywhere else, so it
                                 // reads a here-document declared inside it the same
@@ -4703,31 +4853,22 @@ impl Lexer {
         }
     }
 
-    /// Read a `$(( … ))` body (up to the closing `))`).
-    fn read_arith(&mut self) -> Result<Str, LexError> {
-        self.read_arith_body(false)?
-            .ok_or_else(|| LexError::new("malformed arithmetic expansion"))
-    }
-
-    /// Read an arithmetic body up to its closing `))`.
+    /// Read the body of an arithmetic *command* — `(( … ))` — up to its `))`.
     ///
-    /// `Ok(None)` means the body was balanced but the second `)` was not where
-    /// the caller requires it. That is a plain error for the `$(( … ))`
-    /// expansion, but for the `(( … ))` *command* it is bash's cue to re-read
-    /// the whole thing as nested subshells, so it is reported rather than
-    /// raised. `Err` is reserved for running out of input, which is an error
-    /// either way — bash's `parse_matched_pair` fails outright there and
-    /// `parse_arith_cmd` passes the failure straight on without rewinding.
+    /// `Ok(None)` means the body was balanced but the second `)` was not the
+    /// very next character, which is bash's cue to re-read the whole thing as
+    /// nested subshells; it is reported rather than raised. `Err` is reserved
+    /// for running out of input, which is an error either way, `parse_arith_cmd`
+    /// passing the failure straight on without rewinding.
     ///
-    /// `adjacent` picks which rule the second `)` is held to. The command form
-    /// requires it to be the very next character: bash reads it with
-    /// `shell_getc (0)`, which does *not* delete a `\<newline>`, so nothing at
-    /// all may come between the two — not a space, not a tab, not a newline,
-    /// not a continuation. The expansion form has no such test (it goes through
-    /// `parse_matched_pair`, whose removal is on), so it tolerates a
-    /// continuation there, as `echo $((1+1)\<newline>)` shows. The *body* is
-    /// read the same way for both, which is why `((1 +\<newline>1))` is
-    /// arithmetic.
+    /// bash reads that second `)` with `shell_getc (0)`, which does *not* delete
+    /// a `\<newline>`, so nothing at all may come between the two — not a space,
+    /// not a tab, not a newline, not a continuation. The `$(( … ))` *expansion*
+    /// is held to no such rule, and is not read here at all: it goes through
+    /// [`Lexer::read_balanced`] like the substitution it may yet turn out to be,
+    /// and only afterwards is asked whether it parses as an expression. The
+    /// *body* is read the same way for both, which is why `((1 +\<newline>1))`
+    /// is arithmetic.
     fn read_arith_body(&mut self, adjacent: bool) -> Result<Option<Str>, LexError> {
         let open = self.cur_line();
         let mut depth = 0usize;
@@ -4736,21 +4877,27 @@ impl Lexer {
             let Some(cx) = self.bump_ch() else {
                 return Err(eof_matching(')').at(open));
             };
-            match syn(cx) {
+            let c = syn(cx);
+            // The reader deleted a `\<newline>` before this scan saw it, so it is
+            // neither text of the expression nor something that can come between
+            // the two closing parentheses. Tested ahead of the escape below
+            // because it is not one: nothing follows it to be escaped.
+            if c == '\\' && self.cont_len_at(self.pos.saturating_sub(1)).is_some() {
+                self.pos = self.pos.saturating_sub(1);
+                self.eat_conts();
+                continue;
+            }
+            // A `)` inside a quoted string, a `${ … }` or behind a backslash is
+            // text of the expression and closes nothing — see
+            // [`Lexer::read_opaque_span`], which is the same set bash's
+            // `parse_matched_pair` skips under `P_ARITH`.
+            if self.read_opaque_span(c, &mut raw, false)? {
+                continue;
+            }
+            match c {
                 '(' => {
                     depth += 1;
                     raw.push(b'(');
-                }
-                // The reader deleted a `\<newline>` before this scan saw it, so
-                // it is neither text of the expression nor something that can
-                // come between the two closing parentheses.
-                '\\' => {
-                    if self.cont_len_at(self.pos.saturating_sub(1)).is_some() {
-                        self.pos = self.pos.saturating_sub(1);
-                        self.eat_conts();
-                    } else {
-                        raw.push(b'\\');
-                    }
                 }
                 ')' => {
                     if depth == 0 {
@@ -5292,7 +5439,7 @@ fn scan_heredoc_segs(body: BStr<'_>, expand: bool) -> Result<Vec<Seg>, LexError>
                 // is not inside a double-quoted string, and bash keeps the
                 // backslash there — `<<EOF` … `` `echo \"x\"` `` prints `"x"`.
                 let (raw, src) = lx.read_backtick(false)?;
-                segs.push(Seg::CmdSub(raw, lx.cur_line(), Some(src)));
+                segs.push(Seg::CmdSub(raw, lx.cur_line(), SubBody::Backtick(src)));
             }
             '$' => {
                 if let Some(seg) = lx.read_dollar(true)? {
@@ -5927,7 +6074,7 @@ mod tests {
                 .iter()
                 .find_map(|t| match t {
                     Tok::Word(segs) => segs.iter().find_map(|s| match s {
-                        Seg::CmdSub(raw, _, None) | Seg::ProcSub(_, raw, _) => Some(raw.clone()),
+                        Seg::CmdSub(raw, _, SubBody::Eager) | Seg::ProcSub(_, raw, _) => Some(raw.clone()),
                         _ => None,
                     }),
                     _ => None,
@@ -6036,7 +6183,7 @@ mod tests {
                 })
                 .flatten()
                 .filter_map(|s| match s {
-                    Seg::CmdSub(raw, _, None) => Some(raw.clone()),
+                    Seg::CmdSub(raw, _, SubBody::Eager) => Some(raw.clone()),
                     _ => None,
                 })
                 .collect();
@@ -6175,7 +6322,7 @@ mod tests {
                 .iter()
                 .find_map(|t| match t {
                     Tok::Word(segs) => segs.iter().find_map(|s| match s {
-                        Seg::CmdSub(raw, _, None) | Seg::ProcSub(_, raw, _) => Some(raw.clone()),
+                        Seg::CmdSub(raw, _, SubBody::Eager) | Seg::ProcSub(_, raw, _) => Some(raw.clone()),
                         _ => None,
                     }),
                     _ => None,
@@ -6194,7 +6341,7 @@ mod tests {
             .iter()
             .find_map(|t| match t {
                 Tok::Word(segs) => segs.iter().find_map(|s| match s {
-                    Seg::CmdSub(raw, _, None) => Some(raw.clone()),
+                    Seg::CmdSub(raw, _, SubBody::Eager) => Some(raw.clone()),
                     _ => None,
                 }),
                 _ => None,

@@ -77653,26 +77653,32 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let mut sh = new_shell();
 
         // Two jobs alive at once: the newer is `+`, the older `-`.
-        sh.run_source("sleep 0.4 & sleep 1 &".as_bytes());
+        //
+        // Every job this test needs to see *running* outlives the whole test
+        // and is killed rather than waited for. No wall-clock duration can
+        // guarantee a job is still alive when the next command looks at it: the
+        // spawn of the job after it, on a loaded machine, can take longer than
+        // any short `sleep` runs for, and the listing then reads `Done` and the
+        // assertion fails on a race rather than on the behaviour. `kill` also
+        // makes the teardown immediate, so the long sleeps cost nothing.
+        sh.run_source("sleep 30 & sleep 30 &".as_bytes());
         assert_eq!(
             listing(&mut sh, "jobs"),
-            "[1]-  Running                 sleep 0.4 &\n\
-             [2]+  Running                 sleep 1 &\n"
+            "[1]-  Running                 sleep 30 &\n\
+             [2]+  Running                 sleep 30 &\n"
         );
+        sh.run_source("kill %1 %2".as_bytes());
         sh.run_source("wait".as_bytes());
 
         // The older one keeps its `-` after finishing — and loses its `&`,
         // because there is no longer anything running in the background.
         //
-        // Job 1 is ended by a `kill` rather than by outliving a short `sleep`:
-        // the mark it is given depends on its being *alive* when job 2 is
-        // created, and no wall-clock duration guarantees that — a loaded
-        // machine can spend longer spawning job 2 than a short `sleep` takes to
-        // run, and then job 1 correctly gets no mark and the assertion fails on
-        // a race rather than on the behaviour. `Terminated` in place of `Done`
-        // is incidental; what is under test is that death does not disturb the
+        // Job 1 is ended by a `kill` rather than by outliving a short `sleep`,
+        // for the reason above: the mark it is given depends on its being
+        // *alive* when job 2 is created. `Terminated` in place of `Done` is
+        // incidental; what is under test is that death does not disturb the
         // marker.
-        sh.run_source("sleep 30 & sleep 1 &".as_bytes());
+        sh.run_source("sleep 30 & sleep 30 &".as_bytes());
         sh.run_source("kill %1".as_bytes());
         // Wait for the shell to *admit* job 1 is over rather than for a fixed
         // stretch of wall clock.
@@ -77680,31 +77686,34 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             listing(&mut sh, "jobs"),
             "[1]-  Terminated              sleep 30\n\
-             [2]+  Running                 sleep 1 &\n"
+             [2]+  Running                 sleep 30 &\n"
         );
+        sh.run_source("kill %2".as_bytes());
         sh.run_source("wait".as_bytes());
 
         // A job that had *already* finished when the next one started never
         // gets the `-` at all: with no older job running, previous falls back
         // to current, and only one marker shows.
-        sh.run_source("sleep 0.2 &".as_bytes());
+        sh.run_source("true &".as_bytes());
         settle_job(&mut sh, 1);
-        sh.run_source("sleep 1 &".as_bytes());
+        sh.run_source("sleep 30 &".as_bytes());
         assert_eq!(
             listing(&mut sh, "jobs"),
-            "[1]   Done                    sleep 0.2\n\
-             [2]+  Running                 sleep 1 &\n"
+            "[1]   Done                    true\n\
+             [2]+  Running                 sleep 30 &\n"
         );
+        sh.run_source("kill %2".as_bytes());
         sh.run_source("wait".as_bytes());
 
         // Only ever two markers, however many jobs there are.
-        sh.run_source("sleep 0.4 & sleep 1 & sleep 1 &".as_bytes());
+        sh.run_source("sleep 30 & sleep 30 & sleep 30 &".as_bytes());
         assert_eq!(
             listing(&mut sh, "jobs"),
-            "[1]   Running                 sleep 0.4 &\n\
-             [2]-  Running                 sleep 1 &\n\
-             [3]+  Running                 sleep 1 &\n"
+            "[1]   Running                 sleep 30 &\n\
+             [2]-  Running                 sleep 30 &\n\
+             [3]+  Running                 sleep 30 &\n"
         );
+        sh.run_source("kill %1 %2 %3".as_bytes());
         sh.run_source("wait".as_bytes());
     }
 

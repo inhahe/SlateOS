@@ -185,6 +185,37 @@ with parse.y's re-quoting rule — `sh_single_quote` for `$'…'`, the double-qu
 form for `$"…"` — rather than leaving them for the arithmetic evaluator, which
 by then cannot tell them from text the writer quoted themselves.
 
+**Status 2026-08-07 — mostly fixed, one shape left.** `Lexer::read_opaque_span`
+now translates both forms in every grouping construct (commit "a dollar-quote
+inside a grouping construct is translated at parse time"), which closes rows 1–4
+of the table above. An earlier commit message claimed this entry was closed
+outright; that was wrong, and row 5 is why.
+
+**What is left:** a `$'…'` inside a `${ … }` body that is itself inside an
+arithmetic context. `Lexer::read_dollar_brace_body` still *copies* the run via
+`take_ansi_c_run` instead of translating it:
+
+```
+echo $(( ${x:-$'5'} + 0 ))    bash: '5' + 0 : syntax error…    osh: 5
+echo $(( ${x:-$'a'} ))        bash: 'a' : syntax error…        osh: 0
+```
+
+`$( … )` is unaffected — `echo $(echo ${x:-$'a\tb'})` already agrees — because
+that body is re-lexed as commands and the run is handled on the ordinary word
+path. Only arithmetic, which consumes the text directly, can see the
+difference.
+
+**Why it is tractable, and why it is not the deferred brace defect.** The
+`${ … }` body is read by `parse_matched_pair` too, so it reaches the *same* arm
+(parse.y:3855). With no `P_DQUOTE` the third branch fires — plain
+`sh_single_quote`, no `dolbrace_state` involved — which is exactly what
+`read_opaque_span` already does. `dolbrace_state` only matters in the first two
+branches, both gated on `P_DQUOTE`, and the second of those is the `#if 0
+/* TAG:bash-5.3 */` defect tracked separately as
+`TD-OILS-AN-ANSI-C-STRING-IS-NOT-REQUOTED-AFTER-A-BRACE-BODY-TRANSLATES-IT`. So
+the fix is: in `read_dollar_brace_body`, translate and re-quote when the
+enclosing scan is *not* double-quoted, and keep copying when it is.
+
 ### TD-OILS-A-C-STYLE-FOR-LOOPS-STATUS-FOLLOWED-ITS-HEADER. `for (( $(exit 7); 0; 0 ))` returned 7 — 2026-08-07 — ✅ FIXED 2026-08-07
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::exec_for_arith`.

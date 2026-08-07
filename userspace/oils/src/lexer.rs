@@ -4226,6 +4226,34 @@ impl Lexer {
     /// `${ … }` arm below, and travels to a nested `$( … )` met inside a
     /// double-quoted span, which is read by the balanced scan rather than
     /// skipped — see the comment on that arm.
+    /// Copy a `$'…'` run whose opening `'` is the next character, closing quote
+    /// included, honouring the ANSI-C escapes: a `\` covers whatever follows it,
+    /// so `\'` stays inside the run.
+    ///
+    /// Only the *extent* is wanted — the escapes travel unresolved, because this
+    /// text is being copied for a re-lex that will translate them itself.
+    fn take_ansi_c_run(&mut self, raw: &mut Str) -> Result<(), LexError> {
+        let q_open = self.cur_line();
+        self.pos += 1;
+        raw.push(b'\'');
+        loop {
+            match self.peek() {
+                Some('\\') => {
+                    self.pos += 1;
+                    raw.push(b'\\');
+                    self.take_into(raw);
+                }
+                Some('\'') => {
+                    self.pos += 1;
+                    raw.push(b'\'');
+                    return Ok(());
+                }
+                Some(_) => self.take_into(raw),
+                None => return Err(eof_matching('\'').at(q_open)),
+            }
+        }
+    }
+
     fn read_opaque_span(
         &mut self,
         c: char,
@@ -4233,6 +4261,18 @@ impl Lexer {
         command: bool,
     ) -> Result<bool, LexError> {
         match c {
+            // `$'…'` is not a single-quoted run: a `\'` in it is an ANSI-C escape
+            // and does not end it. bash reads one with `P_ALLOWESC` — the `$'…'
+            // inside group' case of `parse_matched_pair` (parse.y:3847) — in
+            // *every* grouping construct, gated on neither `P_COMMAND` nor
+            // `P_ARITH`, so `$(echo $'a\'b')` and `$(( 0 ))` alike see the run
+            // whole. Read as a plain quote instead, the run would end at the `\`
+            // and the `'` after it would open another that never closes.
+            '$' if self.peek() == Some('\'') => {
+                raw.push(b'$');
+                self.take_ansi_c_run(raw)?;
+                Ok(true)
+            }
             '\'' => {
                 let q_open = self.cur_line();
                 raw.push(b'\'');
@@ -4957,6 +4997,12 @@ impl Lexer {
                             raw.extend_from_slice(&inner);
                             raw.push(b']');
                         }
+                        // Not the single-quoted run the `'` arm above would read:
+                        // a `\'` inside `$'…'` is an ANSI-C escape and keeps the
+                        // run open. bash reads one with `P_ALLOWESC` here as in
+                        // every other grouping construct (parse.y:3847), so
+                        // `${x:-$'a\'b'}` has a body that balances.
+                        Some('\'') => self.take_ansi_c_run(&mut raw)?,
                         _ => {}
                     }
                 }

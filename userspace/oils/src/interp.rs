@@ -44244,13 +44244,24 @@ impl Shell {
                 continue;
             };
             for ent in rd.flatten() {
-                if ent.path().is_dir() {
-                    continue;
-                }
                 // A command name is a filename, and a filename is bytes.
                 let raw = bytes::os_to_bytes(&ent.file_name());
                 #[cfg(windows)]
                 let name = {
+                    // Directories are skipped from the *cached* type — the
+                    // attributes the directory enumeration already returned —
+                    // and never by opening the entry. `Path::is_dir` would open
+                    // it, and on Windows that is both a syscall per entry over
+                    // the whole of `$PATH` (~10k here) and a hazard: an
+                    // app-execution alias in `…\AppData\Local\Microsoft\
+                    // WindowsApps` is a zero-byte `IO_REPARSE_TAG_APPEXECLINK`
+                    // whose open runs the AppX resolver, which can block
+                    // indefinitely. Two unit tests were once found wedged for
+                    // 15 minutes in `GetFileInformationByHandle` underneath
+                    // this loop for exactly that reason.
+                    if ent.file_type().is_ok_and(|t| t.is_dir()) {
+                        continue;
+                    }
                     // No execute bit on Windows: gate on the extension so
                     // non-executable files (e.g. `*.json`) are not offered.
                     let lower = raw.to_ascii_lowercase();
@@ -44269,12 +44280,16 @@ impl Shell {
                 };
                 #[cfg(not(windows))]
                 let name = {
-                    // A command must be executable by someone. `fs::metadata`
-                    // follows symlinks (a symlink to an executable counts).
+                    // bash's `executable_file` (general.c) is one `stat` — which
+                    // follows symlinks, so a symlink to an executable counts —
+                    // and demands both `S_ISREG` and an execute bit. Doing the
+                    // regular-file test from the same `stat` is what rules
+                    // directories out here; opening the entry a second time to
+                    // ask `Path::is_dir` would only repeat the syscall.
                     use std::os::unix::fs::PermissionsExt;
-                    let is_exec = std::fs::metadata(ent.path())
-                        .is_ok_and(|m| m.permissions().mode() & 0o111 != 0);
-                    if !is_exec {
+                    let ok = std::fs::metadata(ent.path())
+                        .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
+                    if !ok {
                         continue;
                     }
                     raw

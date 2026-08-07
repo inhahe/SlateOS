@@ -932,8 +932,8 @@ pub fn tokenize(src: BStr<'_>, opts: ParseOpts) -> Result<Vec<Tok>, LexError> {
     tokenize_spanned(src, opts).map(|s| s.toks)
 }
 
-/// A completed tokenization: the token stream with the two parallel vectors a
-/// parser needs to talk about where each token came from.
+/// A completed tokenization: the token stream with the parallel vectors a parser
+/// needs to talk about where each token came from.
 pub struct Spanned {
     pub toks: Vec<Tok>,
     /// Parallel to `toks`: the 1-based source line each token *ends* on. The
@@ -942,6 +942,17 @@ pub struct Spanned {
     /// swallowed inside quoted strings, here-document bodies, and command
     /// substitutions.
     pub lines: Vec<u32>,
+    /// Parallel to `toks`: the character offset into `src` of the start of the
+    /// lexer iteration each token came out of — so for the first token of an
+    /// iteration its own first character, and for any further ones an offset at
+    /// or before theirs.
+    ///
+    /// Only a caller that needs to know which *region* of the text a token was
+    /// read from wants this; the alias pass uses it to tell a token lexed wholly
+    /// out of the calling line from one that began in a spliced-in alias value.
+    /// For that the conservative "at or before" is exactly right: a token whose
+    /// start falls at or after the splice point began after it.
+    pub starts: Vec<u32>,
     /// Parallel to `toks`: the character offset into `src` just past each
     /// token's last character, as [`Tokenized::ends`]. A syntax error needs it
     /// because bash names the error site by slicing its *input line*, not by
@@ -2289,8 +2300,9 @@ impl Lexer {
         // has been read).
         let mut lines: Vec<u32> = Vec::new();
         let mut ends: Vec<u32> = Vec::new();
-        self.run_into(&mut toks, &mut lines, &mut Vec::new(), &mut ends)?;
-        Ok(Spanned { toks, lines, ends })
+        let mut starts: Vec<u32> = Vec::new();
+        self.run_into(&mut toks, &mut lines, &mut starts, &mut ends)?;
+        Ok(Spanned { toks, lines, starts, ends })
     }
 
     /// Tokenize the whole input into `out`/`lines`, keeping whatever was lexed

@@ -301,7 +301,7 @@ pub fn parse_opts(src: BStr<'_>, opts: ParseOpts) -> Result<Program, ParseError>
     // REPL's "is this line complete yet?" probes judge the same text the run
     // will parse (see [`crate::lexer::strip_nuls`]).
     let src = crate::lexer::strip_nuls(src);
-    let Spanned { toks, lines, ends } =
+    let Spanned { toks, lines, ends, .. } =
         tokenize_spanned(&src, opts).map_err(ParseError::from)?;
     parse_tokens(toks, lines, Spans::of(&src, ends), opts)
 }
@@ -327,7 +327,7 @@ pub fn parse_procsub_body(
     open_line: u32,
     opts: ParseOpts,
 ) -> Result<Program, ParseError> {
-    let Spanned { mut toks, mut lines, ends } = tokenize_paren_body(src, opts)
+    let Spanned { mut toks, mut lines, ends, .. } = tokenize_paren_body(src, opts)
         .map_err(|e| ParseError::from(e).in_paren_body())?;
     map_lines(&mut toks, &mut lines, &LineMap::Offset(open_line.saturating_sub(1)));
     parse_tokens_ending(toks, lines, Spans::of(src, ends), opts, true)
@@ -344,7 +344,7 @@ pub fn parse_procsub_body(
 /// Returns [`ParseError`] on a lexing or grammar error (including an
 /// unterminated here-document).
 pub fn parse_strict_heredoc(src: BStr<'_>, opts: ParseOpts) -> Result<Program, ParseError> {
-    let Spanned { toks, lines, ends } =
+    let Spanned { toks, lines, ends, .. } =
         crate::lexer::tokenize_spanned_strict(src, opts).map_err(ParseError::from)?;
     parse_tokens(toks, lines, Spans::of(src, ends), opts)
 }
@@ -358,7 +358,7 @@ pub fn parse_with_aliases(
     aliases: &AssocArray,
     opts: ParseOpts,
 ) -> Result<Program, ParseError> {
-    let Spanned { toks, lines, ends } = tokenize_spanned(src, opts).map_err(ParseError::from)?;
+    let Spanned { toks, lines, ends, .. } = tokenize_spanned(src, opts).map_err(ParseError::from)?;
     // An alias splices in tokens that were never written where they are being
     // read — but they *were* written somewhere, in the alias's own value, which
     // bash pushes onto the input and reports errors against. So the expansion
@@ -1824,7 +1824,7 @@ pub fn parse_cmdsub_body(
     // implicit trailing newline would otherwise go, because that is the token
     // bash's parser sees after the body's last command. See
     // [`tokenize_paren_body`].
-    let Spanned { mut toks, mut lines, ends } = tokenize_paren_body(src, opts)
+    let Spanned { mut toks, mut lines, ends, .. } = tokenize_paren_body(src, opts)
         .map_err(|e| ParseError::from(e).in_paren_body())?;
     let map = build_cmdsub_line_map(&toks, &lines, close_line);
     // The body's line 1 is the line `$(` sits on: the closing `)` is on the

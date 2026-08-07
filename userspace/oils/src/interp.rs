@@ -23892,7 +23892,7 @@ impl Shell {
                     }
                     self.run_at_unjoins = saved_run;
                     self.dquote = saved_dquote;
-                    self.leave_quoted_run(saved_word);
+                    self.leave_inner_source(saved_word);
                 }
                 other => {
                     // Inside quotes the operand is a double-quoted word, and
@@ -24619,7 +24619,7 @@ impl Shell {
             }
         }
         self.dquote = saved_dquote;
-        self.leave_quoted_run(saved);
+        self.leave_inner_source(saved);
         s
     }
 
@@ -24705,7 +24705,7 @@ impl Shell {
         }
         self.run_at_unjoins = saved_unjoins;
         self.dquote = saved_dquote;
-        self.leave_quoted_run(saved);
+        self.leave_inner_source(saved);
         items
     }
 
@@ -25240,28 +25240,38 @@ impl Shell {
         Str::new()
     }
 
-    /// Enter a double-quoted run, which the two word-level diagnostics name
-    /// differently.
+    /// Enter a stretch of text bash hands to `expand_word_internal` in its own
+    /// right — a double-quoted run's contents ([`Shell::enter_quoted_run`]) or
+    /// an arithmetic string ([`Shell::expand_arith_params`]) — which the two
+    /// word-level diagnostics name differently.
     ///
-    /// bash re-enters `expand_word_internal` on the run's *contents*, so a "bad
-    /// substitution" raised inside quotes names the section without its quote
-    /// characters (`a"b${x@Z}"c` names `b${x@Z}`). The "no closing `)'"
-    /// complaint comes from the scanner one level up and still names the whole
-    /// word — `p"A$(( #5 ))B"q`, quotes and neighbours included. So the outer
-    /// spelling is put aside rather than replaced, and the *outermost* one
-    /// wins: a run nested in a run must not overwrite it.
-    fn enter_quoted_run(&mut self, parts: &[WordPart]) -> (Option<Str>, Option<Str>) {
+    /// The "bad substitution" one names whatever string that call was handed
+    /// (`report_error ("%s: bad substitution", string)`, subst.c:10041), so it
+    /// narrows to `named`. The "no closing `)'" one is raised a level up, by the
+    /// scanner that carved `named` out in the first place, and still names the
+    /// whole word. So the outer spelling is put aside rather than replaced, and
+    /// the *outermost* one wins: a stretch nested in a stretch must not
+    /// overwrite it.
+    fn enter_inner_source(&mut self, named: Str) -> (Option<Str>, Option<Str>) {
         let outer = self
             .quoted_outer_word
             .clone()
             .or_else(|| self.bad_sub_word.clone());
         let saved_outer = std::mem::replace(&mut self.quoted_outer_word, outer);
-        let saved_named = self.bad_sub_word.replace(crate::unparse::parts_src(parts));
+        let saved_named = self.bad_sub_word.replace(named);
         (saved_named, saved_outer)
     }
 
-    /// Undo [`Shell::enter_quoted_run`].
-    fn leave_quoted_run(&mut self, saved: (Option<Str>, Option<Str>)) {
+    /// Enter a double-quoted run: `a"b${x@Z}"c` names `b${x@Z}` — the section
+    /// without its quote characters — where `p"A$(( #5 ))B"q` still names the
+    /// whole word, quotes and neighbours included. See
+    /// [`Shell::enter_inner_source`].
+    fn enter_quoted_run(&mut self, parts: &[WordPart]) -> (Option<Str>, Option<Str>) {
+        self.enter_inner_source(crate::unparse::parts_src(parts))
+    }
+
+    /// Undo [`Shell::enter_inner_source`].
+    fn leave_inner_source(&mut self, saved: (Option<Str>, Option<Str>)) {
         let (named, outer) = saved;
         self.bad_sub_word = named;
         self.quoted_outer_word = outer;
@@ -27970,6 +27980,12 @@ impl Shell {
     /// therefore `$n: syntax error` (a literal `$` that did *not* expand), while
     /// `${a[\1]}` is `\1: syntax error` — the backslash is still there.
     fn expand_to_arith_string(&mut self, w: &Word) -> Str {
+        // `array_expand_index` hands the subscript to `expand_arith_string` on
+        // its own, so it — and not the `${…}` it was written inside — is what a
+        // "bad substitution" met along the way names: `${a[${x!}]}` reports
+        // `${x!}`. Same for a `${x:off:len}` bound, whose two expressions are
+        // expanded one at a time and so name themselves separately.
+        let saved_src = self.enter_inner_source(crate::unparse::word_src(w));
         let mut out = Str::new();
         for part in &w.parts {
             match part {
@@ -27998,6 +28014,7 @@ impl Shell {
                 }
             }
         }
+        self.leave_inner_source(saved_src);
         out
     }
 
@@ -28053,6 +28070,12 @@ impl Shell {
         let s = bytes::trim_start(s);
         if s.is_empty() {
             return Some(0);
+        }
+        // As in [`Shell::arith_sub`]: a subscript whose expansion failed never
+        // reaches bash's `evalexp`, so `${a[1+${x!}]}` reports the bad
+        // substitution alone and not a second complaint about the `1+` it left.
+        if self.expansion_failed() {
+            return None;
         }
         match arith::eval(s, self) {
             Ok(v) => Some(v),
@@ -28179,6 +28202,14 @@ impl Shell {
         // Expand `$name` / `${name}` parameters inside the expression first;
         // bare identifiers are resolved by the evaluator via `VarLookup`.
         let expanded = self.expand_arith_params(expr);
+        // A word-level failure in there ends the expansion where it stood —
+        // bash's `expand_arith_string` longjmps out and `evalexp` is never
+        // called — so the hole the failure left is not then complained about a
+        // second time: `echo ${y:-$(( 1 + ${x!} ))}` is one diagnostic, not the
+        // "bad substitution" plus a `1 + : syntax error` for the gap.
+        if self.expansion_failed() {
+            return Str::new();
+        }
         match arith::eval(&expanded, self) {
             Ok(v) => v.to_string().into_bytes(),
             Err(e) => {
@@ -28216,7 +28247,26 @@ impl Shell {
     /// that to the evaluator would be wrong twice over: the quote would show up in
     /// the diagnostic, and `\$n` would expand instead of reaching the evaluator as
     /// a literal `$n` for it to complain about.
+    ///
+    /// Being a word expansion in its own right, it also takes over the source a
+    /// "bad substitution" names — bash's `expand_arith_string` calls
+    /// `expand_word_internal` on the arithmetic text, so that text, and nothing
+    /// around it, is what the diagnostic quotes:
+    ///
+    /// ```text
+    /// echo $(( 1 + ${x!} + 2 ))    ->   1 + ${x!} + 2 : bad substitution
+    /// echo "p$(( ${x!} ))q"        ->   ${x!} : bad substitution
+    /// for ((i=${x!};i<0;i++))      ->  i=${x!}: bad substitution
+    /// ```
+    ///
+    /// Each names its own arithmetic string exactly as the scanner carved it
+    /// out — which is why the spaces the writer left inside the `$(( … ))` are
+    /// there and the `p`/`q` beside it are not, and why a `for (( … ))` names
+    /// one clause of the header rather than all three. See
+    /// [`Shell::enter_inner_source`] for why the scanner's own "no closing `)'"
+    /// complaint keeps naming the whole word regardless.
     fn expand_arith_params(&mut self, expr: BStr<'_>) -> Str {
+        let saved_src = self.enter_inner_source(expr.to_vec());
         // The source is scanned as characters — an arithmetic expression may
         // hold a non-ASCII variable *value* spliced in by an earlier pass — but
         // every character the scanner acts on is ASCII, so `syn` decides what is
@@ -28339,7 +28389,14 @@ impl Shell {
                     let val = match crate::parser::parse_braced_param(&inner, self.parse_opts()) {
                         Ok(part) => {
                             let word = Word { parts: vec![part] };
-                            self.expand_to_string(&word)
+                            // `expand_word_inner`, not `expand_word`: this is
+                            // not a word bash scanned and then handed to
+                            // `expand_word_internal`, it is the middle of the
+                            // one pass already running over the arithmetic
+                            // string. Entering it as a word of its own would
+                            // hand a "bad substitution" the wrong name —
+                            // `${x!}` where bash says ` 1 + ${x!} + 2 `.
+                            self.expand_word_inner(&word, false).concat()
                         }
                         // Fall back to the bare-name lookup for anything the
                         // param parser rejects (keeps prior behaviour for the
@@ -28367,6 +28424,7 @@ impl Shell {
                 }
             }
         }
+        self.leave_inner_source(saved_src);
         out
     }
 

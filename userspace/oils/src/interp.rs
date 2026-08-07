@@ -56023,6 +56023,74 @@ mod tests {
         assert_eq!(after(") cat <<E \"\n"), Vec::new());
     }
 
+    /// `<<` is a redirection operator whose target is an ordinary WORD, so a
+    /// `<<` with no word after it is a grammar error at whatever token stands in
+    /// the word's place — not a here-document with an empty delimiter.
+    ///
+    /// Which characters can start that word is `read_token`'s business, and its
+    /// first act is the comment test: a `#` that *starts* a token opens a
+    /// comment. So `cat <<#c` has no delimiter, while `cat <<E#c` wants `E#c`
+    /// and `cat <<''#c` — where the quotes started the word without
+    /// contributing to it — wants `#c`.
+    #[test]
+    fn a_here_document_operator_with_no_delimiter_word_is_a_grammar_error() {
+        let mut sh = new_shell();
+        sh.set_command_mode();
+        sh.set_interactive_shell(false);
+        let err = |src: &str| {
+            let e = parse(src.as_bytes()).unwrap_err();
+            parse_error(&sh, &e, src.as_bytes(), &LineMap::Offset(0))
+        };
+
+        // The token in the word's place is the one named.
+        assert_eq!(
+            err("cat << ; echo hi"),
+            "osh: -c: line 1: syntax error near unexpected token `;'\n\
+             osh: -c: line 1: `cat << ; echo hi'"
+        );
+        assert_eq!(
+            err("cat << >f"),
+            "osh: -c: line 1: syntax error near unexpected token `>'\n\
+             osh: -c: line 1: `cat << >f'"
+        );
+        assert_eq!(
+            err("cat << <<"),
+            "osh: -c: line 1: syntax error near unexpected token `<<'\n\
+             osh: -c: line 1: `cat << <<'"
+        );
+        assert_eq!(
+            err("cat 3<< )"),
+            "osh: -c: line 1: syntax error near unexpected token `)'\n\
+             osh: -c: line 1: `cat 3<< )'"
+        );
+        // Nothing at all after it: the newline, and the end of the input.
+        assert_eq!(
+            err("cat <<\necho after\n"),
+            "osh: -c: line 1: syntax error near unexpected token `newline'\n\
+             osh: -c: line 1: `cat <<'"
+        );
+        assert_eq!(
+            err("cat <<-"),
+            "osh: -c: line 1: syntax error near unexpected token `newline'\n\
+             osh: -c: line 1: `cat <<-'"
+        );
+
+        // A `#` that starts the word is a comment, so there is no word.
+        for src in ["cat <<#c", "cat << #c", "cat <<-\t#c"] {
+            assert!(
+                err(src).starts_with("osh: -c: line 1: syntax error near unexpected token `newline'"),
+                "{src:?}"
+            );
+        }
+        // One the word already started is data — these parse, and want a
+        // delimiter with the `#` in it.
+        assert_eq!(run("cat <<E#c\nb\nE#c\necho ok\n").0, "b\nok\n");
+        assert_eq!(run("cat <<''#c\nb\n#c\necho ok\n").0, "b\nok\n");
+        assert_eq!(run("cat << \\#c\nb\n#c\necho ok\n").0, "b\nok\n");
+        // And quoting can still make the delimiter legitimately empty.
+        assert_eq!(run("cat <<\"\"\nline\n\necho ok\n").0, "line\nok\n");
+    }
+
     /// A `<<` an alias spliced in takes its body from the *file*, starting at the
     /// line after the one the alias word stands on — never from the alias value,
     /// however the value is written.

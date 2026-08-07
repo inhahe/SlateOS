@@ -415,10 +415,6 @@ struct Lexer {
     /// in the value itself is not a body at all but ordinary commands. See
     /// [`tokenize_alias_body`].
     defer_heredocs: bool,
-    /// Index in the token stream of a `HereDoc` placeholder whose delimiter word
-    /// was not in this text at all — the input ended at the `<<` itself. Only
-    /// [`tokenize_alias_body`] has a use for it; see [`AliasBodyToks`].
-    dangling_delim: Option<usize>,
     /// Character offsets of every `\` whose `\<newline>` this lexer *deleted* as
     /// a line continuation. Only the reader — [`crate::parser::IncrementalParser`],
     /// slicing a parse unit's source for the command history — has any use for
@@ -857,7 +853,6 @@ impl Lexer {
             strict_heredoc_eof: false,
             paren_body: false,
             defer_heredocs: false,
-            dangling_delim: None,
             conts: Vec::new(),
             warnings: Vec::new(),
             hd_ahead: None,
@@ -1005,26 +1000,8 @@ pub fn tokenize_paren_body(src: BStr<'_>, opts: ParseOpts) -> Result<Spanned, Le
 ///
 /// # Errors
 /// Returns [`LexError`] on an unterminated quote or substitution.
-pub fn tokenize_alias_body(src: BStr<'_>, opts: ParseOpts) -> Result<AliasBodyToks, LexError> {
-    let mut lx = Lexer::alias_body(src, opts);
-    let spanned = lx.run()?;
-    Ok(AliasBodyToks { dangling_delim: lx.dangling_delim.is_some(), spanned })
-}
-
-/// [`tokenize_alias_body`]'s output: the ordinary lex, plus the one thing only
-/// this entry point can observe.
-pub struct AliasBodyToks {
-    pub spanned: Spanned,
-    /// Whether the value ended *at* a `<<`, so the delimiter word is not in it.
-    ///
-    /// bash reads the delimiter with the same reader that reached the `<<`, and
-    /// that reader runs off the end of the pushed string and back into the real
-    /// line — `alias B='cat <<'` followed by `B E` wants `E`. The sub-lex here
-    /// has no such continuation and stops with an empty delimiter, which is a
-    /// different here-document from the one bash builds, so the caller must not
-    /// treat it as one. See
-    /// TD-OILS-AN-ALIAS-SPLICED-HERE-DOCUMENT-TAKES-NO-DELIMITER-FROM-THE-CALLING-LINE.
-    pub dangling_delim: bool,
+pub fn tokenize_alias_body(src: BStr<'_>, opts: ParseOpts) -> Result<Spanned, LexError> {
+    Lexer::alias_body(src, opts).run()
 }
 
 /// One here-document [`gather_heredocs_at`] is to collect a body for: everything
@@ -1771,10 +1748,8 @@ fn expand_aliases_inner(
             && let [Seg::Lit(name)] = segs.as_slice()
             && !active.contains(name)
             && let Some(val) = aliases.get(name)
-            && let Ok(AliasBodyToks {
-                spanned: Spanned { toks: mut repl, ends: mut repl_ends, .. },
-                dangling_delim,
-            }) = tokenize_alias_body(val, opts)
+            && let Ok(Spanned { toks: mut repl, ends: mut repl_ends, .. }) =
+                tokenize_alias_body(val, opts)
         {
             // Drop a trailing newline the lexer may append so the splice stays
             // within the current command.
@@ -1806,16 +1781,6 @@ fn expand_aliases_inner(
             };
             expand_aliases_inner(&body, aliases, opts, active, out, false);
             active.remove(name);
-            // A `<<` the value ended at is not a here-document this pass can
-            // describe — its delimiter is on the calling line, which the sub-lex
-            // never saw — so it must not be handed to the gather, which would
-            // hunt for an empty delimiter and swallow the rest of the input. It
-            // is necessarily the last token the splice pushed.
-            if dangling_delim
-                && out.heredocs.last() == out.toks.len().checked_sub(1).as_ref()
-            {
-                out.heredocs.pop();
-            }
             // The *first* token of the replacement stands in for the alias word
             // itself, so it keeps the alias word's origin; only the tokens after
             // it are origin-less. Without this, a caller resuming at the start of
@@ -4265,13 +4230,25 @@ impl Lexer {
         let (delim, expand) = self.read_heredoc_delim(true)?;
         out.push(Tok::Op(if strip { Op::DLessDash } else { Op::DLess }));
         let tok_index = out.len();
-        // The scan stopped because the *text* ran out, not because a separator
-        // ended the word: there was no delimiter here to read. For an ordinary
-        // input that is the end of the script and nothing follows; for an alias
-        // replacement bash's reader would have carried on into the calling line,
-        // so the caller has to know. See [`AliasBodyToks::dangling_delim`].
-        if delim.is_empty() && expand && self.peek().is_none() {
-            self.dangling_delim = Some(tok_index);
+        // Nothing was read at all: the scan stopped on a separator, or on the end
+        // of the text, before a single delimiter character. Only quoting can
+        // produce an *empty* delimiter that consumed something — and quoting
+        // clears `expand` — so this pair of conditions is exactly "no word here".
+        //
+        // bash's `<<` is a redirection operator whose target is an ordinary WORD
+        // (parse.y's `redirection: … '<' '<' WORD`), so a missing one is not a
+        // here-document with an odd delimiter, it is a grammar error at whatever
+        // token stands in the WORD's place: `cat << ; echo` says ``syntax error
+        // near unexpected token `;'``. Emitting the operator alone, with no
+        // `HereDoc` after it and nothing on `pending_heredocs`, is what makes the
+        // parser say so — it diagnoses a `<<` with no target exactly as it
+        // already diagnoses a `<` with none.
+        //
+        // It also leaves the operator visible to the alias pass, which reads the
+        // delimiter that belongs to it out of the calling text. See
+        // [`expand_aliases_inner`].
+        if delim.is_empty() && expand {
+            return Ok(());
         }
         out.push(Tok::HereDoc(Vec::new(), delim.clone(), !expand));
         self.pending_heredocs.push(PendingHeredoc {
@@ -4310,11 +4287,24 @@ impl Lexer {
     fn read_heredoc_delim(&mut self, record: bool) -> Result<(Str, bool), LexError> {
         let mut delim = Str::new();
         let mut expand = true;
+        // Nothing has gone into the word yet. bash reads the delimiter with
+        // `read_token`, whose first act is the comment test — a `#` that *starts*
+        // a token opens a comment — so `cat <<#c` and `cat << #c` have no
+        // delimiter at all and are grammar errors, while `cat <<E#c` and
+        // `cat <<''#c` want `E#c` and `#c`. A line continuation does not start
+        // the word (the reader deleted it), so a `#` after one is a comment too.
+        let mut first = true;
         loop {
             self.skip_conts(record);
             let Some(c) = self.peek() else { break };
             match c {
                 ' ' | '\t' | '\n' | '\r' | ';' | '&' | '|' | '<' | '>' | '(' | ')' => break,
+                '#' if first => {
+                    while !matches!(self.peek(), None | Some('\n')) {
+                        self.pos += 1;
+                    }
+                    break;
+                }
                 '`' | '$' if self.delim_group_at() => {
                     self.take_delim_group_at(&mut delim, record)?;
                 }
@@ -4340,6 +4330,9 @@ impl Lexer {
                         q.push_to(&mut delim);
                     }
                 }
+                // A `\` that ends the input quotes nothing and is left out of the
+                // word here, which is not what bash does with it — see
+                // TD-OILS-A-HERE-DOCUMENT-DELIMITER-OF-A-LONE-TRAILING-BACKSLASH.
                 '\\' => {
                     expand = false;
                     self.pos += 1;
@@ -4347,6 +4340,7 @@ impl Lexer {
                 }
                 _ => self.take_into(&mut delim),
             }
+            first = false;
         }
         Ok((delim, expand))
     }

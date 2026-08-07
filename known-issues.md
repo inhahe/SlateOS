@@ -43,6 +43,96 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
+### TD-OILS-A-HERE-DOCUMENT-OPERATOR-WITH-NO-DELIMITER-WORD-WAS-NOT-A-GRAMMAR-ERROR. `cat << ; echo hi` ran, and `cat <<#c` took the comment as a delimiter — 2026-08-06 — ✅ FIXED 2026-08-06
+
+**Where:** `userspace/oils/src/lexer.rs` — `Lexer::lex_heredoc_op` and
+`Lexer::read_heredoc_delim`.
+
+**What.** `<<` is a redirection operator and its target is an ordinary WORD —
+bash's grammar says so literally (`redirection: … LESS_LESS WORD`, parse.y). A
+`<<` with no word after it is therefore a *grammar error*, named at whatever
+token turned up in the WORD's place, exactly as a `<` or `>` with no target is.
+osh instead built a here-document with an empty delimiter, which no body line
+can equal, so the gather ran to the end of the input and warned:
+
+```text
+cat << ; echo hi       bash: syntax error near unexpected token `;'
+                       osh:  warning: here-document … (wanted `'), then ran `hi`
+cat << >f              bash: syntax error near unexpected token `>'
+cat <<                 bash: syntax error near unexpected token `newline'
+```
+
+Which characters can *start* that word is `read_token`'s business, and its first
+act is the comment test — a `#` that starts a token opens a comment. So
+`cat <<#c` and `cat << #c` have no delimiter either, and are the same error;
+osh read `#c` as the delimiter. Once one character of the word has been read the
+`#` is data, which is why `<<E#c` wants `E#c` and even `<<''#c` — where the
+quotes contributed *nothing* to the word but did start it — wants `#c`. A line
+continuation does not start the word (the reader deleted it), so a `#` after one
+is still a comment.
+
+**As fixed.** `read_heredoc_delim` tracks whether anything has gone into the word
+yet and treats a leading `#` as a comment, consuming to the newline and stopping.
+`lex_heredoc_op` then tests for "no word at all" — `delim.is_empty() && expand`,
+which is exact, because only quoting can produce an empty delimiter that
+consumed something and quoting clears `expand` — and on it emits the operator
+token *alone*, with no `HereDoc` token after it and nothing pushed on
+`pending_heredocs`. The parser already diagnoses a redirection operator with no
+target, so it now says exactly what bash says, in every construct, with no new
+code on that side.
+
+Leaving the bare operator visible is also what
+TD-OILS-AN-ALIAS-SPLICED-HERE-DOCUMENT-TAKES-NO-DELIMITER-FROM-THE-CALLING-LINE
+needs: an alias value ending at `<<` now ends in a `Tok::Op(Op::DLess)` that the
+alias pass can recognise and complete from the calling text. The stopgap that
+recognition previously needed — `Lexer::dangling_delim`, `AliasBodyToks`, and
+`expand_aliases_inner`'s `out.heredocs.pop()` — is gone with it.
+
+**Pinned by** the corpus case
+`a-here-document-operator-with-no-delimiter-word-is-a-grammar-error.sh` (without
+the fix osh does not even terminate on it) and the unit test
+`a_here_document_operator_with_no_delimiter_word_is_a_grammar_error`.
+
+**Left behind:**
+TD-OILS-A-HERE-DOCUMENT-DELIMITER-OF-A-LONE-TRAILING-BACKSLASH.
+
+### TD-OILS-A-HERE-DOCUMENT-DELIMITER-OF-A-LONE-TRAILING-BACKSLASH. `cat <<\` at the end of the input — 2026-08-06 — OPEN
+
+**Where:** `userspace/oils/src/lexer.rs` — `Lexer::read_heredoc_delim`, the
+`'\\'` arm.
+
+**What.** A `\` with nothing after it quotes nothing. osh drops it, leaving an
+empty (quoted) delimiter; bash keeps it, and what it does next depends on which
+reader is running:
+
+```text
+eval 'cat <<\'          bash: warning: here-document … (wanted `\')
+                        osh : warning: here-document … (wanted `')
+
+a file whose last line  bash: syntax error: unexpected end of file
+is `cat <<\`, no        osh : warning: here-document … (wanted `')
+trailing newline
+```
+
+**Why.** bash's `read_token_word` keeps a trailing `\` as the word's own last
+character, so the delimiter is spelled `\`. For a *file* the reader instead
+treats it as a line continuation and asks for another line, which never comes —
+hence the different diagnostic. osh's `'\\'` arm steps over the backslash and
+calls `take_into`, which has nothing to take.
+
+There is a second, independent divergence in the string case: bash reports the
+warning at a line *past* the `eval`'s own (`line 6` where osh says `line 4`),
+because the continuation attempt moved the global `line_number` on. That is why
+the shape is not in the corpus case above — the delimiter spelling and the line
+number would have to be fixed together.
+
+**Proper fix.** Push the `\` into the delimiter when `peek()` is `None`, and make
+the file reader treat an input that ends in a continuation as an unterminated
+one — `syntax error: unexpected end of file` — rather than as ordinary end of
+input. The two readers have to be told apart, so this wants the same
+lexer-bail-token work as
+TD-OILS-A-LINE-THAT-FAILS-TO-LEX-IS-NOT-REPORTED-AS-A-LINE.
+
 ### TD-OILS-A-HERE-DOCUMENT-DELIMITER-STOPPED-AT-THE-FIRST-SEPARATOR-INSIDE-A-GROUP. `<<E$(a b)` was read as a delimiter `E$(a` and a stray word `b)` — 2026-08-06 — ✅ FIXED 2026-08-06
 
 **Where:** `userspace/oils/src/lexer.rs` — `Lexer::read_heredoc_delim`, and the
@@ -419,26 +509,92 @@ calling line and the scan simply continues into it, so `<<` + `E2` is one
 operator-and-delimiter pair spanning the text boundary. osh sub-lexes the value
 on its own, and `read_heredoc_delim` finds nothing after the `<<`.
 
-The empty delimiter this leaves is not merely useless — it is dangerous, because
-an empty string matches no body line, so gathering for it would swallow the rest
-of the input. `Lexer::dangling_delim` therefore marks the placeholder (the scan
-stopped because the *text* ran out, not because a separator ended the word) and
-`expand_aliases_inner` keeps it out of `AliasExpansion::heredocs`, so
-TD-OILS-AN-ALIAS-SPLICED-HERE-DOCUMENT-GETS-NO-BODY's gather never sees it and
-the old, bounded, wrong behaviour is what remains.
+Since TD-OILS-A-HERE-DOCUMENT-OPERATOR-WITH-NO-DELIMITER-WORD-WAS-NOT-A-GRAMMAR-ERROR
+was fixed, such a value's tokens simply end in a bare `Tok::Op(Op::DLess)` with
+no `HereDoc` after it, so the condition is plain to see in the stream (a `<<`
+that *did* get a delimiter is always followed by one) and nothing marks it
+specially. The bare operator then reaches the parser as a redirection with no
+target, which is bounded but wrong: bash has a here-document here.
+
+The shapes to match, all measured:
+
+```text
+alias B='cat <<'   B E2        delimiter `E2`
+                   B "E2"      quoted — the body does not expand
+                   B E$x       literal delimiter `E$x`; no expansion of it
+                   B E4; echo  `E4`, and the `; echo` still runs
+                   B W         `W` — *not* alias-expanded (not a blank-ended value)
+alias S='cat << '  S W         `E9` — W *is* expanded, S's value ends in a blank
+                   B E\<nl>X   `EX` — the continuation is deleted first
+alias D='cat <<-'  D E3        `<<-` strips tabs as usual
+alias P='cat <<E'  P 8         `E`, and `8` is an argument — the calling line's
+                                leading blank ends the word at the text boundary
+```
 
 **Proper fix.** The delimiter has to be read from the *source text* that follows
-the alias word, not from a token. `IncrementalParser` has both: the alias word's
-`orig` index, and `self.src`. When the expansion reports a dangling `<<`, the
-parser should run `read_heredoc_delim` over `src` from the end of the alias word,
-patch the placeholder with the delimiter and its quoted-ness, and drop the outer
-tokens that delimiter's characters were lexed into (which is why it cannot be
-done from a `Tok::Word`: `B E$x` wants the literal delimiter `E$x`, and the outer
-word token has already split that into a `Seg::Lit` and a `Seg::Param`). The
-placeholder then joins `work_alias_heredocs` like any other and the existing
-gather does the rest. Note the dropped tokens shift `work` indices, so the
-`AliasFills` replay in `IncrementalParser::rebuild` has to be keyed after the
-drop, not before.
+the alias word, not from a token — `B E$x` wants the literal delimiter `E$x`, and
+the outer word token has already split that into a `Seg::Lit` and a `Seg::Param`.
+`expand_aliases_inner` is the right place: it already walks each text in turn, so
+give `AliasInput` the characters its `ends` index into, and when the recursive
+splice leaves a bare `<<` as its last token, run `read_heredoc_delim` over *this*
+text from `ends[i]` (the end of the alias word), append the `HereDoc` token,
+record it in `AliasExpansion::heredocs`, and skip the outer tokens whose
+characters the delimiter consumed. If this text is exhausted too, propagate the
+condition to the caller, which is one text further out — that is bash's
+`pop_string` chain (`alias A='B'`, `alias B='cat <<'`, `A E` wants `E`). If the
+next token is a metacharacter or a newline instead, leave the bare operator alone
+and let the parser report the grammar error, which is what bash does.
+
+Note the skipped tokens shift `work` indices, so the `AliasFills` replay in
+`IncrementalParser::rebuild` has to be keyed after the skip, not before.
+
+**Left over even then:** an *operator* can span the boundary the same way —
+`alias Q='cat <'` with `Q< E` is a here-document in bash, because the reader that
+read the first `<` runs on into the calling line and finds the second. osh lexes
+the value on its own and gets `<` then `<`. The same is true of `|`+`|`, `&`+`&`
+and `;`+`;`. This is the residue of modelling the splice at the token level
+rather than the textual one; it is filed as
+TD-OILS-AN-ALIAS-SPLICED-OPERATOR-DOES-NOT-EXTEND-INTO-THE-CALLING-LINE.
+
+### TD-OILS-AN-ALIAS-SPLICED-OPERATOR-DOES-NOT-EXTEND-INTO-THE-CALLING-LINE. `alias Q='cat <'` plus `Q< E` is a syntax error — 2026-08-06 — OPEN
+
+**Where:** `userspace/oils/src/lexer.rs` — `expand_aliases_inner` and
+`tokenize_alias_body`, which lex an alias replacement as a text of its own.
+
+**What.**
+
+```text
+shopt -s expand_aliases
+alias Q='cat <'
+Q< E
+spanned
+E
+
+bash: spanned
+osh : syntax error near unexpected token `<'
+```
+
+**Why.** bash's `push_string` makes the replacement the current input line and
+`pop_string` restores the calling line *at the character after the alias word*,
+so one reader reads both and `take_operator` extends `<` into `<<` across the
+seam. osh sub-lexes the value alone, ends it with `Op(Less)`, and lexes the
+calling line's `<` separately.
+
+The alias word on the calling line is always followed by a blank or a
+metacharacter (that is what ended the word), so an ordinary *word* can never span
+the seam — only an operator that a following character extends (`<`+`<`, `>`+`>`,
+`|`+`|`, `&`+`&`, `;`+`;`, and `<`/`>` after a `&`), and a here-document delimiter
+that has not started yet (the entry above).
+
+**Proper fix.** The honest one is to splice *textually* rather than at the token
+level: on an alias hit, lex `value ++ rest-of-this-text-after-the-word` as one
+text, exactly as bash reads it. That also subsumes the delimiter case and the
+blank-ended-value re-expansion. The cost is `AliasExpansion::origin`, which
+`IncrementalParser` needs to resume: origins would have to be recovered by
+mapping an offset past `value.len()` back to `ends[i] + (off - value.len())` and
+finding the outer token that ends there. Until that is done, a cheaper patch is
+to detect the small closed set of extendable trailing operators and re-lex just
+the seam.
 
 ### TD-OILS-A-LINE-THAT-FAILS-TO-LEX-IS-NOT-REPORTED-AS-A-LINE. An unclosed quote hides the syntax error before it and the `set -v` echo of it — 2026-08-06 — OPEN
 

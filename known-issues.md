@@ -581,61 +581,89 @@ the calling line's body.
 (without the fix its very first probe gives `status: bash=0 osh=2`) and the unit
 test `an_alias_spliced_here_document_takes_its_delimiter_from_the_calling_line`.
 
-**Left behind:** an *operator* can span the boundary the same way —
-`alias Q='cat <'` with `Q< E` is a here-document in bash, because the reader that
-read the first `<` runs on into the calling line and finds the second. osh lexes
-the value on its own and gets `<` then `<`. The same is true of `|`+`|`, `&`+`&`
-and `;`+`;`, and of the blank-ended-value re-expansion (`alias S='cat << '`, row
-six of the table above), which needs the delimiter *word* to be alias-expanded.
-This is the residue of modelling the splice at the token level rather than the
-textual one; it is filed as
-TD-OILS-AN-ALIAS-SPLICED-OPERATOR-DOES-NOT-EXTEND-INTO-THE-CALLING-LINE.
+**Left behind:** this fixed one member of a family. Everything else lexical still
+stops dead at the seam — operators (`<`+`<`, `>`+`>`, `|`+`|`, `&`+`&`, `;`+`;`),
+an unclosed quote or `$(` opened in the value, a comment opened in the value, and
+the blank-ended-value re-expansion (`alias S='cat << '`, row six of the table
+above), which needs the delimiter *word* to be alias-expanded. They are
+TD-OILS-AN-ALIAS-SPLICED-OPERATOR-DOES-NOT-EXTEND-INTO-THE-CALLING-LINE and
+TD-OILS-A-COMMENT-IN-AN-ALIAS-VALUE-DOES-NOT-EAT-THE-CALLING-LINE, and the one
+fix for all of them is the textual splice written up under the first — which also
+takes `take_dangling_delim` and `read_delim_at` back out again. This entry's fix
+is the token-level model's answer to one member; it is correct for that member
+and pinned by tests, but it is not the model bash uses.
 
-Found while testing this, and of the same family:
-TD-OILS-A-COMMENT-IN-AN-ALIAS-VALUE-DOES-NOT-EAT-THE-CALLING-LINE — bash's
-`discard_until('\n')` reads through `pop_string`, so a comment opened in a value
-swallows the rest of the calling line. It costs the seam shape above the token
-its error names (`newline` in bash, `E` in osh), though not the error itself.
-
-### TD-OILS-AN-ALIAS-SPLICED-OPERATOR-DOES-NOT-EXTEND-INTO-THE-CALLING-LINE. `alias Q='cat <'` plus `Q< E` is a syntax error — 2026-08-06 — OPEN
+### TD-OILS-AN-ALIAS-SPLICED-OPERATOR-DOES-NOT-EXTEND-INTO-THE-CALLING-LINE. Nothing lexical may cross the alias seam — `alias Q='cat <'` plus `Q< E` is a syntax error — 2026-08-06 — OPEN
 
 **Where:** `userspace/oils/src/lexer.rs` — `expand_aliases_inner` and
 `tokenize_alias_body`, which lex an alias replacement as a text of its own.
 
-**What.**
+**What.** Every one of these is one construct in bash, written half in the value
+and half on the calling line, and a syntax error in osh. All measured:
 
 ```text
 shopt -s expand_aliases
-alias Q='cat <'
-Q< E
-spanned
-E
-
-bash: spanned
-osh : syntax error near unexpected token `<'
+alias Q='cat <'        Q< E          `<<` — a here-document           bash: spanned
+alias G='echo hi >'    G> /dev/null  `>>`                             bash: (appends)
+alias P='true |'       P| echo or    `||`                             bash: (no output)
+alias N='true &'       N& echo and   `&&`                             bash: and
+alias S='echo a ;'     S; echo b     `;;` — and bash errors on *that*
+alias U="echo 'x"      U y'          one single-quoted word, `x y`    bash: x y
+alias D='echo "x'      D y"          one double-quoted word, `x y`    bash: x y
+alias C='echo $(echo'  C hi)         one command substitution         bash: hi
 ```
+
+osh reports `syntax error near unexpected token` for the first five, and
+`unexpected EOF while looking for matching` for the quotes — it lexes the value
+on its own, so the value's half of each construct is unterminated and the calling
+line's half is orphaned.
 
 **Why.** bash's `push_string` makes the replacement the current input line and
 `pop_string` restores the calling line *at the character after the alias word*,
-so one reader reads both and `take_operator` extends `<` into `<<` across the
-seam. osh sub-lexes the value alone, ends it with `Op(Less)`, and lexes the
-calling line's `<` separately.
+so one reader reads both: `take_operator` extends `<` into `<<` across the seam,
+and a quote or a `$(` opened in the value is simply still open when the reader
+arrives on the calling line. It is not that a few operators are special — it is
+that there is no seam at all, at any level below the token.
 
-The alias word on the calling line is always followed by a blank or a
-metacharacter (that is what ended the word), so an ordinary *word* can never span
-the seam — only an operator that a following character extends (`<`+`<`, `>`+`>`,
-`|`+`|`, `&`+`&`, `;`+`;`, and `<`/`>` after a `&`), and a here-document delimiter
-that has not started yet (the entry above).
+**Which text a diagnostic quotes** follows from the same model, and is the one
+thing a naive concatenation would get wrong. bash echoes `shell_input_line` as it
+stands when the offending token has been read, i.e. **the text that token ended
+in**: `alias A='B ; B'` with `A E` errors at the `;` and echoes `B ; B`, the
+value; but `alias S='echo a ;'` with `S; echo b` errors at the `;;`, which
+*ended* on the calling line, and echoes `S; echo b`.
 
-**Proper fix.** The honest one is to splice *textually* rather than at the token
-level: on an alias hit, lex `value ++ rest-of-this-text-after-the-word` as one
-text, exactly as bash reads it. That also subsumes the delimiter case and the
-blank-ended-value re-expansion. The cost is `AliasExpansion::origin`, which
-`IncrementalParser` needs to resume: origins would have to be recovered by
-mapping an offset past `value.len()` back to `ends[i] + (off - value.len())` and
-finding the outer token that ends there. Until that is done, a cheaper patch is
-to detect the small closed set of extendable trailing operators and re-lex just
-the seam.
+One thing does *not* span it: an ordinary word begun on the calling line cannot
+reach back, because the alias word is always followed by a blank or a
+metacharacter — that is what ended it. `alias V='echo ab'` with `V cd` is `ab cd`,
+two words, in both shells. Everything that spans does so from the value outward.
+
+**Proper fix.** Splice *textually* rather than at the token level: on an alias
+hit, lex `value ++ rest-of-this-text-after-the-alias-word` as one text, exactly as
+bash reads it, and carry on scanning that. There is then no seam to special-case,
+which is why this one fix covers the whole table above, the comment entry below,
+the blank-ended-value re-expansion, and the here-document delimiter case that is
+currently handled by hand in `take_dangling_delim`.
+
+Two things the concatenation has to carry, and both are already available:
+
+* **Provenance, for diagnostics.** Offsets below `value.len()` belong to the
+  value's text; the rest map to `ends[i] + (off - value.len())` in the text being
+  walked, which is itself possibly a concatenation — so a small segment table
+  per text, composed on each splice. A token's `TokSpan` then comes from the
+  segment its *end* falls in, which is exactly the "text the token ended in" rule
+  measured above, so the `B ; B` / `S; echo b` echoes both fall out for free.
+* **`AliasExpansion::origin`, which `IncrementalParser` needs to resume.** A
+  token gets `Some(k)` only when it lies wholly in the input text — its start
+  *and* its end map to `src == 0` — and `ends[k]` equals its mapped end. The
+  extra start test is what keeps a seam-spanning token (`;;` above, whose end
+  coincides with an input token's) from claiming an origin it has no right to.
+  `Lexer::run_into` already records token starts in its `offsets` argument;
+  `Lexer::run` currently throws them away into a scratch `Vec`, so exposing them
+  on `Spanned` is all that is needed.
+
+`take_dangling_delim`, `read_delim_at`, `DelimAt` and `Dangle` all come out again
+when this lands — they are the token-level model's answer to one member of the
+family.
 
 ### TD-OILS-A-COMMENT-IN-AN-ALIAS-VALUE-DOES-NOT-EAT-THE-CALLING-LINE. `alias A='echo hi #c'` plus `A there` still echoes `there` — 2026-08-06 — OPEN
 

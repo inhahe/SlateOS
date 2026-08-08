@@ -476,50 +476,163 @@ pub enum Tok {
     Invalid(Str),
 }
 
-/// The words after which a reserved word — and so an arithmetic command — is
-/// still recognised. bash's `reserved_word_acceptable` (parse.y), plus `for`.
+/// The conditional's own brackets, whose classification the reserved-word fold
+/// turns on: `[[` is `COND_START` and `]]` is `COND_END` in bash's
+/// `word_token_alist`, and only the second of the two is acceptable after.
+const COND_START: &[u8] = b"[[";
+/// See [`COND_START`].
+const COND_END: &[u8] = b"]]";
+
+/// Every spelling bash will turn into a reserved word: its `word_token_alist`
+/// (parse.y). Membership here decides only that the word *is* one — whether one
+/// may stand here at all is [`RwAccept::ok`], and what it leaves behind is
+/// [`RW_LEAVES_ACCEPTABLE`].
+const RESERVED_WORDS: &[&[u8]] = &[
+    b"if", b"then", b"else", b"elif", b"fi", b"case", b"esac", b"for", b"select", b"while",
+    b"until", b"do", b"done", b"in", b"function", b"time", b"{", b"}", b"!", b"[[", b"]]",
+    b"coproc",
+];
+
+/// The reserved words after which another one — and so an arithmetic command —
+/// is still recognised: bash's `reserved_word_acceptable` (parse.y:5367)
+/// intersected with the table above, plus `for`.
 ///
 /// `for` is there because bash reads the arithmetic `for (( … ))` header by a
 /// route of its own; osh gets the same shape from the ordinary `((` token. The
 /// others bash leaves out are left out here too: after `in`, `case` or `select`
 /// what follows is a pattern or a name, which is why `case x in ((p)` is a
-/// pattern that opens with a paren rather than an arithmetic command.
-const ARITH_CMD_AFTER: &[&str] = &[
-    "{", "}", "!", "do", "done", "elif", "else", "esac", "fi", "for", "if", "then", "time",
-    "until", "while", "coproc",
+/// pattern that opens with a paren rather than an arithmetic command. `[[` is
+/// absent for the same reason and `]]` present — see [`RwAccept::step`].
+const RW_LEAVES_ACCEPTABLE: &[&[u8]] = &[
+    b"{", b"}", b"!", b"do", b"done", b"elif", b"else", b"esac", b"fi", b"for", b"if", b"then",
+    b"time", b"until", b"while", b"coproc", b"]]",
 ];
 
-/// Whether a `((` standing here opens an arithmetic command rather than two
-/// nested subshells.
+/// The part of bash's `token_before_that` that `reserved_word_acceptable` reads.
 ///
-/// bash decides this from the token it has just read: `((` is an `ARITH_CMD`
-/// only where a reserved word would be recognised — the start of the input,
-/// after a separator, and after the words that open or close a compound
-/// command. Anywhere else it hands back a single `(` and reads the second one
-/// again as the next token, so `echo ((1))` is a syntax error near `(` and not
-/// an arithmetic command. An assignment prefix blocks it too (`x=1 ((2))` is
-/// the same error), which falls out of the same rule: bash does not recognise a
-/// reserved word after one either.
-fn arith_cmd_position(prev: Option<&Tok>) -> bool {
-    match prev {
-        None | Some(Tok::Newline) => true,
-        Some(Tok::Op(op)) => matches!(
-            op,
-            Op::Semi
-                | Op::DSemi
-                | Op::SemiAmp
-                | Op::DSemiAmp
-                | Op::LParen
-                | Op::RParen
-                | Op::Pipe
-                | Op::PipeAmp
-                | Op::Amp
-                | Op::AndIf
-                | Op::OrIf
-        ),
-        Some(Tok::Word(segs)) => matches!(segs.as_slice(),
-            [Seg::Lit(s)] if ARITH_CMD_AFTER.iter().any(|w| w.as_bytes() == s.as_slice())),
-        _ => false,
+/// Its default branch accepts a plain WORD when the token before *that* was
+/// `function` or `coproc` (parse.y:5406–5412) — the name in a definition or a
+/// coprocess. That is what lets `function f ((1))` and `coproc c ((1))` reach an
+/// arithmetic command through a name that is not itself a reserved word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RwPrev {
+    Function,
+    Coproc,
+    Other,
+}
+
+/// Whether bash would recognise a reserved word — and so an arithmetic command
+/// — at the next token, carried along the stream instead of re-derived from the
+/// previous token's text.
+///
+/// bash decides this from `last_read_token`, which is the previous token's
+/// *classification*; and a word becomes a reserved word only where one was
+/// already acceptable, because `CHECK_FOR_RESERVED_WORD` (parse.y:2994) is
+/// itself gated on `reserved_word_acceptable (last_read_token)`. The rule is
+/// therefore recursive, and no table keyed on one token's spelling can express
+/// it: `do` opens a loop body after `;` but is an argument after `echo`, so
+/// `; do ((1))` is an arithmetic command while `echo do ((1))` is a syntax error
+/// near `(`.
+///
+/// So this is a fold over the tokens as they are emitted rather than a lookup.
+/// It is folded lazily — `seen` records how far — because its one consumer,
+/// [`Lexer::arith_cmd_position`], only asks at a flush `((`, and the token
+/// stream is only ever appended to.
+#[derive(Debug, Clone, Copy)]
+struct RwAccept {
+    /// How many of the emitted tokens have been folded in.
+    seen: usize,
+    /// bash's `reserved_word_acceptable (last_read_token)`, for the next token.
+    ok: bool,
+    /// The previous token, as far as the two lookbehind cases care.
+    prev: RwPrev,
+    /// Inside a `[[ … ]]`, where `last_read_token` is frozen. Not a depth:
+    /// a `[[` in there is a word, not a second `COND_START`.
+    cond: bool,
+}
+
+impl RwAccept {
+    /// A reserved word is acceptable at the start of the input — bash's `0`
+    /// (parse.y:5402), the value `last_read_token` is initialised to.
+    const fn new() -> Self {
+        Self { seen: 0, ok: true, prev: RwPrev::Other, cond: false }
+    }
+
+    /// Fold in whatever has been emitted since the last look.
+    fn advance(&mut self, out: &[Tok]) {
+        for tok in out.get(self.seen..).unwrap_or_default() {
+            self.step(tok);
+        }
+        self.seen = out.len();
+    }
+
+    /// One token's worth of bash's `yylex` bookkeeping (parse.y:2902–2905).
+    fn step(&mut self, tok: &Tok) {
+        let prev = self.prev;
+        self.prev = RwPrev::Other;
+        // A whole conditional is *one* token to bash: `parse_cond_command` runs
+        // from inside a single `read_token` call (parse.y:3399) and asks for its
+        // own tokens directly, so `last_read_token` never moves off `COND_START`
+        // — which is not acceptable — until the `]]` comes back as `COND_END`,
+        // which is. osh emits that span as ordinary tokens, so the freeze has to
+        // be modelled here. This is why no paren inside a conditional is ever
+        // arithmetic, however deep.
+        if self.cond {
+            self.cond = !matches!(tok, Tok::Word(segs) if bare_word(segs) == Some(COND_END));
+            self.ok = !self.cond;
+            return;
+        }
+        match tok {
+            Tok::Newline => self.ok = true,
+            Tok::Op(op) => {
+                self.ok = matches!(
+                    op,
+                    Op::Semi
+                        | Op::DSemi
+                        | Op::SemiAmp
+                        | Op::DSemiAmp
+                        | Op::LParen
+                        | Op::RParen
+                        | Op::Pipe
+                        | Op::PipeAmp
+                        | Op::Amp
+                        | Op::AndIf
+                        | Op::OrIf
+                );
+            }
+            Tok::ArithCmd(..) => self.ok = true,
+            Tok::Word(segs) => {
+                let lit = bare_word(segs);
+                // bash's `CHECK_FOR_RESERVED_WORD` refuses a word that carries a
+                // `$` or any quoting, which is what "bare" means here too.
+                let word = lit.filter(|w| RESERVED_WORDS.contains(w)).filter(|_| self.ok);
+                match word {
+                    Some(w) if w == COND_START => self.cond = true,
+                    Some(w) if w == b"function" => self.prev = RwPrev::Function,
+                    Some(w) if w == b"coproc" => self.prev = RwPrev::Coproc,
+                    _ => {}
+                }
+                self.ok = match word {
+                    Some(w) => RW_LEAVES_ACCEPTABLE.contains(&w),
+                    // A plain WORD, which is acceptable only as the name that
+                    // follows `function` or `coproc`.
+                    None => prev != RwPrev::Other,
+                };
+            }
+            // Everything else is a NUMBER, a REDIR_WORD, an ASSIGNMENT_WORD or a
+            // redirection target, and none of those is on bash's list — which is
+            // why `x=1 ((2))` is a syntax error near `(` too.
+            _ => self.ok = false,
+        }
+    }
+}
+
+/// A word's text when it is a single unquoted literal segment, which is the
+/// only shape bash will match against a reserved word or an operator spelling.
+fn bare_word(segs: &[Seg]) -> Option<&[u8]> {
+    match segs {
+        [Seg::Lit(s)] => Some(s.as_slice()),
+        _ => None,
     }
 }
 
@@ -575,6 +688,11 @@ struct Lexer {
     /// lexing for the RHS of `=~` (where `(`, `)`, `|`, … are literal regex
     /// metacharacters, not shell operators).
     cond_depth: usize,
+    /// Where a reserved word — and so an arithmetic command — would be
+    /// recognised. Distinct from `cond_depth`, which tracks a *lexing mode* and
+    /// so counts every bare `[[`; this one counts only the `[[` bash would have
+    /// classified as `COND_START`. See [`RwAccept`].
+    rw: RwAccept,
     /// Set immediately after emitting a `=~` word inside `[[ … ]]`; the next
     /// word is read in regex mode.
     regex_next: bool,
@@ -1107,6 +1225,7 @@ impl Lexer {
             pending_heredocs: Vec::new(),
             hd_delim: None,
             cond_depth: 0,
+            rw: RwAccept::new(),
             regex_next: false,
             opts,
             extpat_next: false,
@@ -2931,23 +3050,14 @@ impl Lexer {
                     // is a plain `(`, and the second one is read again as the
                     // next token.
                     //
-                    // Inside `[[ … ]]` no paren ever takes the arithmetic path,
-                    // however deeply nested. bash gates it on
+                    // bash gates the arithmetic reading on
                     // `reserved_word_acceptable (last_read_token)`
-                    // (`parse_dparen`, parse.y:4484), and `last_read_token` is
-                    // updated only by `yylex` (parse.y:2904) — but the whole
-                    // conditional is read by `parse_cond_command` from *inside*
-                    // one `read_token` call (parse.y:3399), and `cond_term` asks
-                    // `read_token` for its tokens directly. So `last_read_token`
-                    // is frozen at `COND_START` for the length of the
-                    // conditional, and `COND_START` is not on the list. Hence
-                    // `[[ ((( a ))) ]]` is three nested groups around the word
-                    // `a`, and `[[ (( 0 )) ]]` tests the *string* `0` rather
-                    // than evaluating it.
-                    if self.peek() == Some('(')
-                        && self.cond_depth == 0
-                        && arith_cmd_position(out.last())
-                    {
+                    // (`parse_dparen`, parse.y:4484), which [`RwAccept`] models
+                    // in full — including the freeze that makes no paren inside
+                    // `[[ … ]]` arithmetic however deeply nested, so that
+                    // `[[ (( 0 )) ]]` tests the *string* `0` rather than
+                    // evaluating it.
+                    if self.peek() == Some('(') && self.arith_cmd_position(out) {
                         // …and so is a `((` whose two closing parentheses are
                         // not adjacent. bash's `parse_arith_cmd` tests for the
                         // second `)` with a read of its own, and on failing it
@@ -3523,6 +3633,22 @@ impl Lexer {
             i = i.saturating_add(1);
         }
         None
+    }
+
+    /// Whether a `((` standing here opens an arithmetic command rather than two
+    /// nested subshells.
+    ///
+    /// bash reads `((` as an `ARITH_CMD` only where a reserved word would be
+    /// recognised — the start of the input, after a separator, and after the
+    /// words that open or close a compound command. Anywhere else it hands back
+    /// a single `(` and reads the second one again as the next token, so
+    /// `echo ((1))` is a syntax error near `(` and not an arithmetic command. An
+    /// assignment prefix blocks it too (`x=1 ((2))` is the same error), which
+    /// falls out of the same rule: bash does not recognise a reserved word after
+    /// one either. [`RwAccept`] is where that rule lives.
+    fn arith_cmd_position(&mut self, out: &[Tok]) -> bool {
+        self.rw.advance(out);
+        self.rw.ok
     }
 
     /// Read one word (until an unquoted operator, blank, or newline).
@@ -6233,8 +6359,63 @@ mod tests {
         assert!(matches!(&toks[2], Tok::Word(s) if matches!(s[0], Seg::CmdSub(..))));
 
         // And a `((` where no command can start is still a plain `(` outside a
-        // conditional, which the `cond_depth` test must not have disturbed.
+        // conditional, which the conditional's own freeze must not have
+        // disturbed.
         for src in ["x=1 ((2))", "echo ((1))"] {
+            assert_eq!(arith_count(src), 0, "{src} must not lex an arithmetic command");
+        }
+    }
+
+    #[test]
+    fn a_reserved_words_spelling_is_not_its_classification() {
+        // bash asks `reserved_word_acceptable (last_read_token)` — the previous
+        // token's *classification*. A word becomes a reserved word only where
+        // one was already acceptable, because `CHECK_FOR_RESERVED_WORD`
+        // (parse.y:2994) is gated on the very same test. So the rule is
+        // recursive and a table keyed on one token's spelling cannot express it.
+        let arith_count =
+            |src: &str| tokenize(src).unwrap().iter().filter(|t| matches!(t, Tok::ArithCmd(..))).count();
+
+        // Where a reserved word may stand, it is one, and `((` is arithmetic.
+        for src in [
+            "; do ((1))",
+            "if ((1)); then :; fi",
+            "while ((1)); do :; done",
+            "until ((1)); do :; done",
+            "{ ((1)); }",
+            "! ((1))",
+            "time ((1))",
+            "for ((i=0;i<2;i++)); do :; done",
+            "echo a | ((1))",
+            "echo a && ((1))",
+            "( ((1)) )",
+        ] {
+            assert_eq!(arith_count(src), 1, "{src} should lex one arithmetic command");
+        }
+
+        // In an argument position the same spellings are plain words, so bash
+        // hands back a single `(` — `echo do ((1))` is a syntax error near `('.
+        for w in ["do", "done", "fi", "then", "esac", "until", "time", "!", "{", "}", "if"] {
+            let src = format!("echo {w} ((1))");
+            assert_eq!(arith_count(&src), 0, "{src} must not lex an arithmetic command");
+        }
+
+        // `]]` is `COND_END`, which *is* on bash's acceptable list — but only
+        // when it closed a conditional. A word merely spelled `]]` is a word.
+        assert_eq!(arith_count("[[ a ]] ((1))"), 1, "`]]` closes a conditional, so `((` is arithmetic");
+        assert_eq!(arith_count("echo ]] ((1))"), 0, "a word spelled `]]` leaves a WORD behind");
+
+        // The two lookbehind cases: `reserved_word_acceptable`'s default branch
+        // accepts a WORD whose predecessor was `function` or `coproc`
+        // (parse.y:5406–5412), which is how a name reaches an arithmetic body.
+        assert_eq!(arith_count("function f ((1))"), 1, "the name after `function`");
+        assert_eq!(arith_count("coproc c ((1))"), 1, "the name after `coproc`");
+        // And they are one word deep, not a mode.
+        assert_eq!(arith_count("function f g ((1))"), 0, "only the first word after `function`");
+
+        // The words bash leaves off the list stay off it: after `case`, `in` or
+        // `select` what follows is a pattern or a name.
+        for src in ["case x in ((p) echo hi;; esac", "for i in ((1))", "select i in ((1))"] {
             assert_eq!(arith_count(src), 0, "{src} must not lex an arithmetic command");
         }
     }

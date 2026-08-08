@@ -3056,6 +3056,14 @@ impl Parser {
             // TD-OILS-ANSIC-ERROR-SPELLING in known-issues.md.)
             Some(Tok::Word(segs)) => word_from_segs(segs, self.opts)
                 .map_or_else(|_| b"word".to_vec(), |w| crate::unparse::word_src(&w)),
+            // An `ARITH_CMD` is named by the expression it collected, not by a
+            // paren: `error_token_from_token` returns
+            // `string_list (yylval.word_list)` (parse.y), which is the same
+            // re-printed text the token already carries — verbatim, inner
+            // spaces and all. So `[[ a ]] ((  ))` is reported near two spaces
+            // and `[[ a ]] (( 1 + 1 ))` near ` 1 + 1 `.
+            Some(Tok::ArithCmd(raw, nested)) => parse_arith_comsubs(nested, self.opts)
+                .map_or_else(|_| raw.clone(), |subs| splice_reprints(raw, subs)),
             // A construct the lexer refused already carries the spelling to
             // blame — the operator that stood where an array element belonged.
             Some(Tok::Invalid(op)) => op.clone(),
@@ -7268,6 +7276,32 @@ mod tests {
         for src in ["echo ((1))", "x=1 ((2))", "case x in ((x) :;; esac"] {
             assert!(parse(src).is_err(), "should not have parsed: {src}");
         }
+    }
+
+    /// An arithmetic command is named in a syntax error by the expression it
+    /// collected, not by a paren.
+    ///
+    /// `error_token_from_token` returns `string_list (yylval.word_list)` for an
+    /// `ARITH_CMD` (parse.y), which is the re-printed body — verbatim, inner
+    /// spaces and all. So the name is also the proof that the `((` really did
+    /// take the arithmetic path: a `((` that stayed two parens is named `(`.
+    /// Every expectation is bash 5.2.37's own.
+    #[test]
+    fn an_arithmetic_command_is_named_by_its_expression() {
+        let err = |src: &str| String::from_utf8_lossy(&parse(src).unwrap_err().msg()).into_owned();
+        // `]]` is `COND_END`, which is on bash's acceptable list, so the `((`
+        // after a conditional is arithmetic and the grammar objects to *it*.
+        assert_eq!(err("[[ a ]] ((1))"), "syntax error near unexpected token `1'");
+        assert_eq!(err("[[ a ]] (( 1 + 1 ))"), "syntax error near unexpected token ` 1 + 1 '");
+        assert_eq!(err("[[ a ]] ((x = 1))"), "syntax error near unexpected token `x = 1'");
+        assert_eq!(
+            err("[[ a ]] (( $(echo 2) ))"),
+            "syntax error near unexpected token ` $(echo 2) '"
+        );
+        assert_eq!(err("[[ a ]] ((  ))"), "syntax error near unexpected token `  '");
+        // Where the `((` was not arithmetic, the paren is still the name.
+        assert_eq!(err("echo ]] ((1))"), "syntax error near unexpected token `('");
+        assert_eq!(err("echo ((1))"), "syntax error near unexpected token `('");
     }
 
     /// bash's `WORD ( )` production accepts any word, and defers the name check

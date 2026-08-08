@@ -9927,6 +9927,19 @@ impl Shell {
             self.last_status = 1;
             return Flow::Discard;
         }
+        // An abort raised by the list itself ends the `for` here, as bash's
+        // `expand_words_no_vars` never returns from one. Whether it showed
+        // depended on what the list expanded *to*: a list with something left in
+        // it runs a body, and the body's own driver consumes the flag, which is
+        // why this stayed hidden. A list that came out empty runs no body at
+        // all, so without this the flag outlived the loop — and the parse unit
+        // with it, to be consumed by a command in the *next* one:
+        // `for i in ${b[0=1]}; do :; done` on a line of its own swallowed the
+        // whole line after it. Same reasoning as [`Self::word_abort_flow`]'s
+        // other two callers.
+        if let Some(flow) = self.word_abort_flow() {
+            return flow;
+        }
         // A `for` over an empty list runs no body and has exit status 0.
         // bash rebuilds the loop header, in source form, before *each*
         // iteration: `set -x` prints it and `$BASH_COMMAND` records it for the
@@ -10153,6 +10166,17 @@ impl Shell {
             }
             None => self.positional.clone(),
         };
+        // A failure expanding the list ends the `select` where it stands, and
+        // ends it *before* the empty-list check below — bash never returns from
+        // `expand_words_no_vars` at all, so `list_len == 0` is never asked and
+        // no menu is printed. `select` shows this sooner than [`Self::exec_for`]
+        // does, because it has side effects of its own before any body runs:
+        // `select i in a "${nope?bad}" c` printed a three-line menu and sat at
+        // its `PS3` prompt waiting for a reply, where bash was already gone.
+        // See [`Self::word_abort_flow`].
+        if let Some(flow) = self.word_abort_flow() {
+            return flow;
+        }
         // An empty item list runs no body and exits with status 0.
         if items.is_empty() {
             self.last_status = 0;

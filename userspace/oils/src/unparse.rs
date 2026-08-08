@@ -844,6 +844,25 @@ fn flush_here_docs(text: BStr<'_>) -> Str {
     out
 }
 
+/// The text bash keeps for a substitution body it parsed: not the source, but
+/// `print_comsub`'s re-print of the parse, wrapped back in the delimiters the
+/// scan around it already wrote. `parse_comsub` ends
+/// `tcmd = print_comsub (parsed_command); … return ret` (parse.y:4219–4241).
+///
+/// `open` is that opening delimiter — `$(`, `<(` or `>(`, the three spellings
+/// parse.y:5028 names and 5042 sends through the one call.
+///
+/// The leading space is bash's own guard (parse.y:4221–4227): a re-print that
+/// starts with `(` gets one prepended so the result cannot be read back as an
+/// arithmetic expansion. Without it `$( (echo a) )` would come back `$((`
+/// `echo a ))`, which is a different construct — and `<( (echo a) )` would come
+/// back as a `<((` that does not parse at all.
+pub(crate) fn comsub_reprint(open: &[u8], prog: &Program) -> Str {
+    let body = flush_here_docs(&program_inline(prog));
+    let gap: &[u8] = if body.first() == Some(&b'(') { b" " } else { b"" };
+    bfmt![open, gap, &body, b")"]
+}
+
 /// Index of the [`HD_CLOSE`] that ends the parked body opened at `open`.
 fn marker_end(text: BStr<'_>, open: usize) -> Option<usize> {
     text.get(open..)?
@@ -1124,16 +1143,15 @@ fn part_src(p: &WordPart) -> Str {
             // still carries the inner `(` the scan counted, so a plain `$(` … `)`
             // around it reproduces the `$(( … )` the source wrote.
             CmdSubBody::ArithFallback { src, .. } => bfmt![b"$(", src, b")"],
-            CmdSubBody::Parsed { prog, .. } => {
-                bfmt![b"$(", &flush_here_docs(&program_inline(prog)), b")"]
-            }
+            CmdSubBody::Parsed { prog, .. } => comsub_reprint(b"$(", prog),
         },
-        WordPart::ProcSub { input, body } => bfmt![
-            if *input { b"<" } else { b">" },
-            b"(",
-            &flush_here_docs(&program_inline(body)),
-            b")"
-        ],
+        // Read by the same `parse_comsub` call the `$( … )` spelling gets —
+        // parse.y:5028's comment names all three, `$(...)`, `<(...)` and
+        // `>(...)`, and 5042 is the one call — so it is re-printed the same way,
+        // leading-space guard included.
+        WordPart::ProcSub { input, body } => {
+            comsub_reprint(if *input { b"<(" } else { b">(" }, body)
+        }
         WordPart::ArithSub { expr, bracket } => {
             if *bracket {
                 bfmt![b"$[", expr, b"]"]

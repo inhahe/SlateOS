@@ -43,6 +43,116 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
+### TD-OILS-A-REPRINTED-SUBSTITUTION-BODY-LOST-BASHS-LEADING-SPACE-GUARD. `$( (echo a) )` came back `$(( echo a ))` — 2026-08-07 — ✅ FIXED 2026-08-07
+
+**Where:** `userspace/oils/src/unparse.rs` — `part_src`'s
+`CmdSubBody::Parsed` and `WordPart::ProcSub` arms.
+
+**What was wrong.** Both wrote the re-print straight after the opening
+delimiter. bash does not: `parse_comsub` checks the re-print's first byte and
+prepends a space when it is `(` (parse.y:4221–4227, comment
+`") need a space to prevent arithmetic expansion"`), because a body that opens
+with a subshell would otherwise make the whole construct start `$((`.
+
+```text
+                            bash 5.2.37            osh (before)
+: $( (echo a) )             : $( ( echo a ))       : $(( echo a ))
+: <( (echo 2) )             : <( ( echo 2 ))       : <(( echo 2 ))
+: ${a[$( (echo 2) )]}       : ${a[$( ( echo 2 ))]} : ${a[$(( echo 2 ))]}
+```
+
+The first is a silent meaning change — the printback is an arithmetic
+expansion of `echo a` — and the second does not parse at all, so
+`eval "$(declare -f g)"` on such a function was a syntax error.
+
+The guard belongs to `parse_comsub`, and `read_token_word` sends all three of
+`$(...)`, `<(...)` and `>(...)` through that one call (parse.y:5028–5042) —
+which is why the process substitution needed it too. A backtick body (never
+re-printed) and a `$((` that fell back to a substitution (whose leading `(` is
+the one the source wrote) are both correctly left alone.
+
+**Fixed** by `unparse::comsub_reprint`, which both arms now share: it takes the
+opening delimiter, renders the body, and inserts the space when the body opens
+with `(`.
+
+Corpus case:
+`tests/corpus/a-re-printed-substitution-body-that-opens-with-a-subshell-keeps-a-space.sh`.
+Found while measuring
+TD-OILS-AN-ARITHMETIC-STRING-NAMES-ITS-COMMAND-SUBSTITUTION-AS-WRITTEN, which
+also turned up TD-OILS-A-REPRINTED-COMPOUND-COMMAND-IS-KEPT-ON-ONE-LINE.
+
+### TD-OILS-A-REPRINTED-COMPOUND-COMMAND-IS-KEPT-ON-ONE-LINE. `$(if true; then echo a; fi)` should come back over three lines — 2026-08-07
+
+**Where:** `userspace/oils/src/unparse.rs` — `program_inline`, which every
+substitution body goes through (`comsub_reprint`, and `part_src`'s `ProcSub`
+arm).
+
+**What.** bash re-prints a `$( … )` body with its ordinary command printer, the
+same one `declare -f` uses for a function body, so a compound command inside a
+substitution is laid out over lines exactly as it would be at the top level.
+osh renders substitution bodies with `program_inline`, which joins statements
+with `; ` on one line. The two agree for everything that is *already* one line;
+they diverge for the seven constructs whose printer emits newlines.
+
+**Repro** (`declare -f` of a function whose body is `: $( … )`; bash 5.2.37
+left, osh right — everything is one `declare -f`, only the body row is shown):
+
+```text
+$(if true; then echo a; fi)      $(if true; then      $(if true; then echo a; fi)
+                                 echo a;
+                                 fi)
+$(for i in a b; do echo $i; done)
+                                 $(for i in a b;      one line
+                                 do
+                                     echo $i;
+                                 done)
+$(while false; do echo a; done)  $(while false; do    one line
+                                     echo a;
+                                 done)
+$(until false; do echo a; done)  (same shape)         one line
+$(select i in a; do echo $i; done)
+                                 (same shape as for)  one line
+$(case x in x) echo a ;; esac)   $(case x in          one line
+                                     x)
+                                         echo a
+                                     ;;
+                                 esac)
+$(f() { echo a; })               $(function f ()      $(f () { echo a; })
+                                 {
+                                     echo a
+                                 })
+```
+
+Measured to agree already: `{ … }`, `( … )`, a `;`-list, a pipeline,
+`[[ … ]] && …`, and `coproc`.
+
+**Where it shows.** Anywhere a substitution body is printed back rather than
+run: `declare -f`, `type`, bare `set`, and the text an arithmetic diagnostic
+quotes back.
+
+**And it is not only cosmetic.** The re-print is spliced into the text the shell
+goes on to read, so its extra newlines are counted:
+
+```sh
+q=$(echo $(( 0 + $(if true; then echo 0; fi) )); echo L=$LINENO)
+#   written on line 19            bash: L=21          osh: L=19
+```
+
+`$LINENO` after a re-printed compound, inside the same body, sits as many lines
+lower as the re-print added. Everything else re-parses to the same command.
+
+**Proper fix:** print a substitution body with the same renderer that prints a
+function body, instead of `program_inline`. That renderer already exists
+(`declare -f` produces exactly bash's layout for all seven constructs above —
+the corpus pins it); what is missing is a form of it that returns the body
+alone, indented relative to the substitution rather than to column 0, so it can
+be spliced inside `$( … )`. The function-definition row wants
+`function f () \n{ \n…\n}`, which is what bash's own function printer emits.
+
+**Found by** the shape survey for
+TD-OILS-A-REPRINTED-SUBSTITUTION-BODY-LOST-BASHS-LEADING-SPACE-GUARD,
+2026-08-07.
+
 ### TD-OILS-COMPGEN-C-OPENED-EVERY-FILE-ON-PATH-AND-COULD-HANG-FOREVER — 2026-08-07 — ✅ FIXED 2026-08-07
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::compgen_path_commands`.

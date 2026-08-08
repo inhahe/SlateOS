@@ -3347,28 +3347,38 @@ impl Parser {
         Ok(Pipeline { negated, timed, time_posix, commands })
     }
 
-    fn parse_command(&mut self) -> Result<Command, ParseError> {
+    /// bash's `shell_command` production: every compound command, and nothing
+    /// else. `Ok(None)` means the current token opens none of them.
+    ///
+    /// This is factored out because `shell_command` appears twice in bash's
+    /// grammar — once inside `command`, and once as the whole of
+    /// `function_body` (`function_body: shell_command | shell_command
+    /// redirection_list`). A function body is therefore *any* of the eleven, not
+    /// just the brace group and the subshell: `f() if true; then echo hi; fi`
+    /// and `f() ((1))` both define. See [`Parser::parse_compound_body`].
+    ///
+    /// The redirection list is deliberately left unconsumed, because the two
+    /// callers attach it to different places — see the same doc comment.
+    fn parse_shell_command(&mut self) -> Result<Option<Command>, ParseError> {
         if let Some(w) = self.reserved_here() {
-            let cmd = match w {
-                "if" => self.parse_if()?,
-                "while" => self.parse_loop(false)?,
-                "until" => self.parse_loop(true)?,
-                "for" => self.parse_for()?,
-                "select" => self.parse_select()?,
-                "case" => self.parse_case()?,
-                "{" => self.parse_brace_group()?,
-                _ => {
-                    // A command that begins with a stray closing/continuation
-                    // keyword (`then`, `do`, `fi`, `done`, `esac`, `else`, …):
-                    // bash reports it as an unexpected token.
-                    return Err(self.unexpected_here());
-                }
+            return match w {
+                "if" => self.parse_if().map(Some),
+                "while" => self.parse_loop(false).map(Some),
+                "until" => self.parse_loop(true).map(Some),
+                "for" => self.parse_for().map(Some),
+                "select" => self.parse_select().map(Some),
+                "case" => self.parse_case().map(Some),
+                "{" => self.parse_brace_group().map(Some),
+                // A command that begins with a stray closing/continuation
+                // keyword (`then`, `do`, `fi`, `done`, `esac`, `else`, …):
+                // bash reports it as an unexpected token. There is no simple
+                // command to fall through to — a reserved word is not a `WORD`
+                // — so this is an error in both of the production's positions.
+                _ => Err(self.unexpected_here()),
             };
-            return self.with_redirects(cmd);
         }
         if self.at_op(Op::LParen) {
-            let cmd = self.parse_subshell()?;
-            return self.with_redirects(cmd);
+            return self.parse_subshell().map(Some);
         }
         // `(( expr ))` arithmetic command (lexed as a single token).
         if let Some(Tok::ArithCmd(raw, nested)) = self.peek() {
@@ -3379,11 +3389,17 @@ impl Parser {
             // `APPEND_NESTRET` puts `print_comsub`'s answer into its buffer.
             let expr = splice_reprints(raw, parse_arith_comsubs(nested, self.opts)?);
             self.pos += 1;
-            return self.with_redirects(Command::Arith(expr));
+            return Ok(Some(Command::Arith(expr)));
         }
         // `[[ expr ]]` conditional expression.
         if self.at_bare_word(b"[[") {
-            let cmd = self.parse_cond()?;
+            return self.parse_cond().map(Some);
+        }
+        Ok(None)
+    }
+
+    fn parse_command(&mut self) -> Result<Command, ParseError> {
+        if let Some(cmd) = self.parse_shell_command()? {
             return self.with_redirects(cmd);
         }
         // Function definition: `WORD ( )`.
@@ -3567,7 +3583,25 @@ impl Parser {
         }
     }
 
-    /// Parse a `{ … }` or `( … )` body used as a function body.
+    /// Parse a function body: bash's `function_body`, which is a whole
+    /// `shell_command` and an optional redirection list.
+    ///
+    /// The brace group is the one arm that is *not* wrapped. bash's
+    /// `make_function_def` takes the group's `command` directly, so `declare -f`
+    /// re-prints one pair of braces rather than two, and a redirection written
+    /// after it lands on the function — which is why the caller keeps consuming
+    /// a list of its own after this returns, and why `f() { :; } >/dev/null`
+    /// prints `} > /dev/null`.
+    ///
+    /// Every other arm keeps its own node and its own redirections, wrapped as
+    /// the body's single statement. That is not a formality: the parentheses of
+    /// a `( … )` body are part of the function, so `f() ( cd /; x=1 )` must leak
+    /// neither the `cd` nor the `x` and an `exit` inside must end only the
+    /// subshell (osh used to unwrap it, which ran every such function in the
+    /// caller's shell). And bash prints the redirection *inside* the braces for
+    /// all of them — `f() ( : ) >/dev/null` re-prints as
+    /// `f () \n{ \n    ( : ) > /dev/null\n}` — which is what consuming the list
+    /// here rather than in the caller produces.
     fn parse_compound_body(&mut self) -> Result<Program, ParseError> {
         if let Some(w) = self.reserved_here()
             && w == "{"
@@ -3575,40 +3609,34 @@ impl Parser {
         {
             return Ok(p);
         }
-        if self.at_op(Op::LParen) {
-            // A `( … )` function body is a *subshell* body, and the parentheses
-            // are part of the function, not a wrapper the definition strips:
-            // `f() ( cd /; x=1 )` must leak neither the `cd` nor the `x`, and an
-            // `exit` inside must end only the subshell. Keep the `Subshell` node
-            // as the body's single statement rather than unwrapping it into the
-            // function's own `Program` — osh used to unwrap, which made every
-            // such function run in the caller's shell. It also renders the way
-            // bash's `declare -f` does: brace-wrapped, `( … )` inside.
-            let line = self.cur_line();
-            let sub = self.parse_subshell()?;
-            return Ok(Program {
-                items: vec![Item {
-                    list: AndOr {
-                        first: Pipeline {
-                            negated: false,
-                            timed: false,
-                            time_posix: false,
-                            commands: vec![sub],
-                        },
-                        rest: Vec::new(),
-                    },
-                    // The sole item of a body: never a connector, so `Semi` —
-                    // the separator that prints as nothing.
-                    sep: ItemSep::Semi,
-                    line,
-                }],
-            });
-        }
-        // Not a valid compound body. bash diagnoses this positionally: at EOF
+        let line = self.cur_line();
+        // Not a `shell_command`. bash diagnoses this positionally: at EOF
         // (`f()` / `function f` with no body) it reports "unexpected end of
         // file"; otherwise it names the offending token (`f() echo hi` →
         // "unexpected token `echo'"), matching both function-definition forms.
-        Err(self.unexpected_here())
+        // A nested definition (`f() f2() { :; }`) and a negation (`f() ! true`)
+        // are errors for the same reason: neither is a `shell_command`.
+        let Some(cmd) = self.parse_shell_command()? else {
+            return Err(self.unexpected_here());
+        };
+        let cmd = self.with_redirects(cmd)?;
+        Ok(Program {
+            items: vec![Item {
+                list: AndOr {
+                    first: Pipeline {
+                        negated: false,
+                        timed: false,
+                        time_posix: false,
+                        commands: vec![cmd],
+                    },
+                    rest: Vec::new(),
+                },
+                // The sole item of a body: never a connector, so `Semi` — the
+                // separator that prints as nothing.
+                sep: ItemSep::Semi,
+                line,
+            }],
+        })
     }
 
     fn parse_brace_group(&mut self) -> Result<Command, ParseError> {

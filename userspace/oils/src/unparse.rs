@@ -1408,6 +1408,59 @@ mod tests {
         assert!(d.contains("} > log 2>&1"), "dump: {d:?}");
     }
 
+    /// A function body is a whole `shell_command`, and `declare -f` shows which
+    /// node it became.
+    ///
+    /// bash's production is `function_body: shell_command | shell_command
+    /// redirection_list` (parse.y), so all eleven compound commands define. The
+    /// brace group is the one arm `make_function_def` takes the command of
+    /// directly, so it comes back as *one* pair of braces and a redirection
+    /// written after it lands on the function; every other arm keeps its own
+    /// node, and its own redirections, inside the braces the printer always
+    /// adds. Every expectation is bash 5.2.37's own `declare -f`.
+    #[test]
+    fn a_function_body_is_a_whole_shell_command() {
+        // The redirection's owner is the whole point: same list, same place in
+        // the source, printed outside the brace group and inside everything
+        // else.
+        assert_eq!(
+            dump_fn("f() { echo out; } >/dev/null", "f"),
+            "f () \n{ \n    echo out\n} > /dev/null\n"
+        );
+        assert_eq!(
+            dump_fn("f() ( echo out ) >/dev/null", "f"),
+            "f () \n{ \n    ( echo out ) > /dev/null\n}\n"
+        );
+        assert_eq!(dump_fn("f() ((1)) >/dev/null", "f"), "f () \n{ \n    ((1)) > /dev/null\n}\n");
+        assert_eq!(
+            dump_fn("f() if true; then echo out; fi >/dev/null", "f"),
+            "f () \n{ \n    if true; then\n        echo out;\n    fi > /dev/null\n}\n"
+        );
+        // The arms osh used to reject outright.
+        assert_eq!(
+            dump_fn("f() case x in x) echo m;; esac", "f"),
+            "f () \n{ \n    case x in \n        x)\n            echo m\n        ;;\n    esac\n}\n"
+        );
+        assert_eq!(dump_fn("f() ((1))", "f"), "f () \n{ \n    ((1))\n}\n");
+        // A one-word conditional is re-printed as the `-n` test it means.
+        assert_eq!(dump_fn("f() [[ a ]]", "f"), "f () \n{ \n    [[ -n a ]]\n}\n");
+        assert_eq!(
+            dump_fn("f() while false; do :; done", "f"),
+            "f () \n{ \n    while false; do\n        :;\n    done\n}\n"
+        );
+        assert_eq!(
+            dump_fn("f() for x in a b; do echo $x; done", "f"),
+            "f () \n{ \n    for x in a b;\n    do\n        echo $x;\n    done\n}\n"
+        );
+        // The `function` keyword form reaches the same bodies, with or without
+        // the optional `()`.
+        assert_eq!(
+            dump_fn("function f if true; then echo hi; fi", "f"),
+            "f () \n{ \n    if true; then\n        echo hi;\n    fi\n}\n"
+        );
+        assert_eq!(dump_fn("function f () ((1))", "f"), "f () \n{ \n    ((1))\n}\n");
+    }
+
     #[test]
     fn input_dup_renders_with_explicit_source_fd() {
         // `<&N` (input dup) must render with its direction preserved and the

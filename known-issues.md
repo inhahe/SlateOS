@@ -327,13 +327,13 @@ The seven specials, digits and identifiers are unaffected, with or without an
 operator: `${#}`, `${@}`, `${*}`, `${?}`, `${!:-n}`, `${-:+s}`, `${$}`, `${1}`,
 `${12:-e}`, `${v}`, `${_v:-u}` all still behave.
 
-### TD-OILS-AN-UNCLOSED-SUBSCRIPT-IN-A-QUOTED-BRACE-BODY-IS-NOT-A-RUNAWAY-SCAN. `echo "${a[}"` names the wrong subject — 2026-08-08 — OPEN
+### TD-OILS-AN-UNCLOSED-SUBSCRIPT-IN-A-QUOTED-BRACE-BODY-IS-NOT-A-RUNAWAY-SCAN. `echo "${a[}"` names the wrong subject — 2026-08-08 — ✅ FIXED 2026-08-08
 
-**Where:** `userspace/oils/src/lexer.rs`, `read_dollar_brace_body` — the `${…}`
-scan, which has no subscript skip and so closes at the first `}` however the
-body started. bash's counterpart is `extract_dollar_brace_string` (subst.c:1813),
-reached from the double-quote extent scanner (`string_extract_double_quoted`,
-subst.c:963).
+**Where:** was `userspace/oils/src/lexer.rs`, `read_dollar_brace_body`; is now
+`userspace/oils/src/wordscan.rs`, a new module, called from
+`Shell::begin_word` (`userspace/oils/src/interp.rs`). bash's counterpart is
+`extract_dollar_brace_string` (subst.c:1813), reached from the double-quote
+extent scanner (`string_extract_double_quoted`, subst.c:963).
 
 **What.** Inside double quotes bash scans the `${…}` twice: once to find the
 extent of the quoted word, once to expand it. The extent scan skips a subscript
@@ -376,19 +376,49 @@ Three things the rows pin down:
   `dolbrace_state` to `DOLBRACE_OP` (subst.c:1998) before the `[` is reached, and
   the skip is gated on `DOLBRACE_PARAM`.
 
-**Proper fix.** Give the `${` scan bash's subscript skip, gated on the same
-"still in the parameter name" state, and let it run off the end of the *word* —
-which means the scan has to be able to see past the closing quote, i.e. the
-double-quote scanner has to hand it the whole word rather than the run it has
-carved out. That is the same restructuring as
-TD-OILS-A-DOUBLE-QUOTED-DOLLAR-BRACKET-IS-NOT-SKIPPED-BY-THE-QUOTE-EXTRACTOR:
-both are places where bash's *extent* pass and its *expansion* pass disagree
-about where a construct ends, and osh's single-pass lexer cannot hold the two
-views at once. Worth doing together with that one.
+**Fixed.** Not in the lexer. The disagreement is between bash's two *reads* of
+a word, and osh's lexer is the first of them — giving it the subscript skip
+would have moved the divergence rather than removed it, because the parser must
+still close `"${a[}"` at the `}` (the word ends where bash's parser says it
+ends). So the second read is now modelled where bash makes it: at expansion
+time, over the word's source text.
 
-**Severity:** low. Every row is a hard error in both shells and all but the
-`"${[}x}"` shape already share the status; what differs is the diagnostic
-wording, and in that one shape the word boundary too.
+`userspace/oils/src/wordscan.rs` is that read — a set of pure byte scanners
+mirroring `expand_word_internal`'s walk (subst.c:9989),
+`string_extract_double_quoted` (subst.c:963), `extract_dollar_brace_string`
+(subst.c:1813), `skip_double_quoted` (subst.c:1020), `string_extract` with
+`SX_VARNAME` (subst.c:795) and `skip_matched_pair` (subst.c:2085). Its one
+entry point, `unclosed_brace`, answers "does the extent pass meet a `${` it
+cannot close, and if so what string does the complaint name?".
+`Shell::begin_word` asks it and, on a hit, calls the new
+`Shell::dq_unclosed_brace`, alongside the `$(( … ))`-comment verdict already
+raised there.
+
+Four things came with it, each measured before it was written:
+
+* **The complaint is the scanner's, so it precedes the word's own side
+  effects.** `echo "$(echo ran >&2)x${a[}"` prints no `ran` in bash, and now
+  none in osh — the check runs in `begin_word`, before any part is expanded.
+* **It is errexit-only.** bash raises it with a bare
+  `exp_jump_to_top_level (DISCARD)` (subst.c:1978) rather than by returning an
+  error word, so posix mode's "an expansion error ends the shell" hook never
+  sees it: `set -o posix; echo "${a[}"` complains and the next line runs, where
+  the plain bad substitution ends the shell. `FatalWhen::ErrexitOnly`.
+* **The name is the string the innermost `expand_word_internal` was handed** —
+  the whole word for a fault the extent scan found (`"a${a[}b"`), the run's
+  contents without quotes for one found a level in (`"${x:-${a[}}"` names
+  `${x:-${a[}}`). The scanner recurses on the run it extracts and carries the
+  name in its `Err`, so this falls out rather than being special-cased.
+* **It subsumes the `$[` divergence** (TD-OILS-A-DOUBLE-QUOTED-DOLLAR-BRACKET-IS-NOT-SKIPPED-BY-THE-QUOTE-EXTRACTOR),
+  which was the same fact from the other side: `$[` is not a construct either
+  double-quote scanner knows, so the `${` after it is met.
+
+The recorded `"${[}x}"` row above was stale by the time the fix was written —
+osh had come to agree with bash's status on it since; re-measured, the whole
+table is now byte-identical.
+
+**Pinned by:** six tests in `wordscan.rs` and
+`tests/corpus/an-unclosed-subscript-in-a-quoted-brace-body-is-a-runaway-scan.sh`.
 
 ### TD-OILS-JOBS-LIFETIME-RACES-ON-THE-CURRENT-JOB-MARKERS. `jobs-lifetime.sh` disagrees about `+`/`-` about 1 run in 5 — 2026-08-08 — ✅ FIXED 2026-08-08 (the case's margin, not the marker code)
 
@@ -1599,7 +1629,7 @@ those the *eager parse* was missing too, which was the larger half; that entry i
 now ✅ FIXED as well. Still open for a `${ … }` body that defers, logged as
 TD-OILS-A-DEFERRED-BRACE-BODY-KEEPS-ITS-SUBSTITUTION-AS-WRITTEN.
 
-### TD-OILS-A-DOUBLE-QUOTED-DOLLAR-BRACKET-IS-NOT-SKIPPED-BY-THE-QUOTE-EXTRACTOR. `echo "$[ ${ ]"` names the wrong string — 2026-08-07
+### TD-OILS-A-DOUBLE-QUOTED-DOLLAR-BRACKET-IS-NOT-SKIPPED-BY-THE-QUOTE-EXTRACTOR. `echo "$[ ${ ]"` names the wrong string — 2026-08-07 — ✅ FIXED 2026-08-08
 
 **Where:** `userspace/oils/src/interp.rs` / the double-quote scanner — osh
 recognises `$[ … ]` inside double quotes and hands the arithmetic text to the
@@ -1625,9 +1655,18 @@ Only an *unterminated* `${` diverges: with the brace closed
 (`echo "$[ ${x!} ]"`) the quote extractor steps over it and both shells report
 the arithmetic string.
 
-**Proper fix:** in the double-quoted-word scanner, do not treat `$[` as an
-arithmetic substitution when looking for the end of the quoted text — let the
-`${` be found first, exactly as bash does.
+**Fixed** as one half of
+TD-OILS-AN-UNCLOSED-SUBSCRIPT-IN-A-QUOTED-BRACE-BODY-IS-NOT-A-RUNAWAY-SCAN,
+which is the same fact from the other side. `userspace/oils/src/wordscan.rs`
+re-runs bash's *extent* pass over the word's source, and the two double-quote
+scanners it mirrors know exactly `${`, `$(` and a backtick — so a `${` written
+after a `$[` inside double quotes is met there, before the arithmetic text is
+ever handed to the evaluator. `scan` (the `expand_word_internal` walk) does
+know `$[`, and skips it; `dquote_run` and `skip_dq` deliberately do not.
+
+**Pinned by:** `a_dollar_bracket_is_not_a_construct_the_quote_scanner_knows` in
+`wordscan.rs`, and the group of the same name in
+`tests/corpus/an-unclosed-subscript-in-a-quoted-brace-body-is-a-runaway-scan.sh`.
 
 ### TD-OILS-AN-UNBRACED-NAME-IN-AN-ARITHMETIC-STRING-IS-NOT-NOUNSET-CHECKED. `set -u; echo $(( $y + 1 ))` printed `1` — 2026-08-07 — ✅ FIXED 2026-08-07
 

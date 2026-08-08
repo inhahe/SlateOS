@@ -3457,6 +3457,18 @@ misidentify the assertion.
 **Impact.** A red full-suite run that is not a real regression, which is the
 worst kind: it teaches the next session to re-run and shrug.
 
+**Note added 2026-08-08.** TD-OILS-THE-COMPGEN-JOB-CORPUS-CASE-IS-FLAKY-UNDER-A-FULL-SWEEP
+called itself "the same shape as" this entry, and it has now been diagnosed —
+but as something else, so **do not carry that link forward**. That one was this
+host's *process-spawn* latency spiking past a 200 ms margin. This test has no
+process in its critical path: the job is thread-backed, and the only spawn
+(`sleep 0.2`) is the thing being waited *for*, so a spike there lengthens the
+margin instead of eating it. The two share only the symptom "a job's state is
+read too early". Measuring the reaping is, however, worth repeating here if it
+recurs: for the compgen case that measurement is what refuted the reaping
+theory outright (osh notices completion 20–30 ms *earlier* than bash in every
+job shape), and the same is likely true here.
+
 ### TD-OILS-THE-PIPELINE-STAGE-ORDER-TEST-ASSERTS-A-PREFERENCE-AS-A-GUARANTEE — 2026-08-08 — OPEN (accepted)
 
 **Where:** the test `a_pipelines_stages_begin_in_pipeline_order`
@@ -3511,7 +3523,7 @@ confirms the lapsed-wait path and the entry can be closed as by-design.
 **Impact.** A red run under artificial oversubscription only. It has never been
 seen in a normal `cargo test -p oils --lib`, which is the gate.
 
-### TD-OILS-THE-COMPGEN-JOB-CORPUS-CASE-IS-FLAKY-UNDER-A-FULL-SWEEP. A finished job is still offered as `running` — 2026-08-08 — OPEN
+### TD-OILS-THE-COMPGEN-JOB-CORPUS-CASE-IS-FLAKY-UNDER-A-FULL-SWEEP. A finished job is still offered as `running` — 2026-08-08 — ✅ FIXED 2026-08-08 (the case's margin, not osh's reaping)
 
 **Where:** `userspace/oils/tests/corpus/compgen-job.sh`, last group ("once they
 have all finished they are still completions; running is not"), against
@@ -3537,6 +3549,48 @@ transition to *done* happen where bash's does (`waitchld` / the notification
 that the shell already performs before the next builtin runs).
 
 **Impact.** An intermittently red sweep, which is the gate on every commit.
+
+**Fixed 2026-08-08 — and the suspicion above was wrong.** It was measured
+rather than reasoned about, and osh's reaping is not late. Both shells were
+asked how long they *think* a two-second background job lasts (busy-polling
+`compgen -A running`, which is a builtin, so the loop spawns nothing); the
+overhead over the job's own 2000 ms, median of 11 runs:
+
+| job | bash | osh |
+|---|---|---|
+| `sleep 2 &` | 85 ms (73–99) | **57 ms** (55–66) |
+| `true \| sleep 2 &` | 100 ms (90–286) | **66 ms** (56–225) |
+| `( sleep 2 ) &` | 92 ms | **67 ms** |
+
+osh notices completion *earlier* than bash in every shape, and its extra cost
+for a thread-backed job over a process-backed one (+9 ms) is smaller than
+bash's for the same shape (+15 ms). So the thread-backed job's wrapper — the
+tempting culprit, since the one observed failure listed `true`, the pipeline
+job — is not the cause. `compgen_job_names` already calls `poll_jobs` first,
+and `JobBody::is_finished` consults `try_wait` for a process and
+`JoinHandle::is_finished` for a thread; neither adds a lag that bash does not
+also pay.
+
+What the same measurement *does* show is the cause: the max column. Both
+shells occasionally take ~200–290 ms longer than their median, which is this
+host's process-spawn latency spiking — the thing
+TD-OILS-CORPUS-SWEEP-IS-UNRUNNABLE-WHEN-PROCESS-SPAWN-LATENCY-SPIKES is about.
+The case settled with `sleep 1.2` against a longest job of `sleep 1.0`: a
+**200 ms margin, exactly the size of a routine spike.** A spike landing on one
+shell's `sleep 1.0` and not the other's is all it took, which is why it showed
+up about once per sweep and never on a re-run.
+
+The settle is now `sleep 4` (a ~3 s margin), with the reasoning in the case.
+`wait` was tried first and is *not* the answer: it sweeps the job table in both
+shells, so `compgen -A job` afterwards lists nothing (rc=1) and there is no
+finished-but-unreaped job left to ask about — which is the whole subject of
+that group. The running-job half of the case needs no such margin and did not
+get one: everything between starting the jobs and the last question about
+running ones is a builtin, so the shell spawns nothing there and no spike can
+reach it.
+
+Verified with 48 runs of the case at 8-way concurrency (0 failures) plus a full
+523-case sweep.
 
 ### TD-OILS-A-HERE-DOCUMENT-DELIMITER-STOPPED-AT-THE-FIRST-SEPARATOR-INSIDE-A-GROUP. `<<E$(a b)` was read as a delimiter `E$(a` and a stray word `b)` — 2026-08-06 — ✅ FIXED 2026-08-06
 

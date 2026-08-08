@@ -25466,13 +25466,48 @@ impl Shell {
     /// `x=5; echo "${x:-$(( #5 ))}"` complain about a branch it never takes,
     /// and what stops `echo "$(touch f)$(( #5 ))"` from running the `touch`.
     ///
+    /// The scanner reaches a second verdict here, for the same reason: a `${`
+    /// that the *parser* closed but the scanner does not — see
+    /// [`crate::wordscan`] — and that too must be raised before the word's
+    /// first `$( … )` runs.
+    ///
     /// Pass the returned value back to [`Shell::end_word`].
     fn begin_word(&mut self, w: &Word) -> Option<Str> {
-        let saved = self.bad_sub_word.replace(crate::unparse::word_src(w));
+        let src = crate::unparse::word_src(w);
+        let unclosed = crate::wordscan::unclosed_brace(&src);
+        let saved = self.bad_sub_word.replace(src);
         if let Some(expr) = Self::arith_hiding_its_closer(w) {
             self.arith_unclosed_by_comment(&expr);
         }
+        if let Some(named) = unclosed {
+            self.dq_unclosed_brace(&named);
+        }
         saved
+    }
+
+    /// Report a `${` the word's *extent* scan could not close — see
+    /// [`crate::wordscan`] for which ones those are and why the name is passed
+    /// in rather than taken from [`Shell::bad_sub_word`].
+    ///
+    /// Like the two arithmetic scanner complaints next to it this is
+    /// *errexit only*: bash raises it with a bare
+    /// `exp_jump_to_top_level (DISCARD)` (subst.c:1978) rather than by
+    /// returning an error word to `expand_word_internal`, so posix mode's "an
+    /// expansion error ends the shell" hook never sees it. Measured against
+    /// bash 5.2.37: `set -o posix; echo "${a[}"; echo next` prints `next`,
+    /// where the plain bad substitution `echo "${a[x}"` does not.
+    fn dq_unclosed_brace(&mut self, named: BStr<'_>) {
+        if self.expansion_failed() {
+            return;
+        }
+        self.emit_stderr(&bfmt![
+            self.err_prefix(),
+            b"bad substitution: no closing `}' in ",
+            named,
+            b"\n"
+        ]);
+        self.arm_discard(1);
+        self.note_shell_error(FatalWhen::ErrexitOnly);
     }
 
     /// Undo [`Shell::begin_word`].

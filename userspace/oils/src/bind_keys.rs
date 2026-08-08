@@ -109,64 +109,76 @@ fn one_escape(spec: &[u8], i: usize) -> (u8, usize) {
 /// `spec` is the sequence alone — a caller that was handed `"…": command` has
 /// already taken the quotes and the target off.
 ///
-/// `\M-` is not a modifier bit here: readline turns it into a leading escape
-/// byte, which is what makes `\ey` and `\M-y` the same two bytes and is why a
-/// listing spells an escape-prefixed sequence with `\M-`. `\C-` *is* a bit
-/// operation, and the two nest — `\C-\M-g` is escape followed by `\C-g`,
-/// exactly like `\M-\C-g`.
+/// Both `\C-` and `\M-` are *bit* operations, gathered as flags and applied to
+/// the character they run into — control first, then meta — so `\C-\M-g` and
+/// `\M-\C-g` are one and the same byte 0x87. A prefix that runs off the end of
+/// `spec` is applied to a NUL, which is why `"y\M-"` binds the two bytes
+/// `y\200` (measured); bash spells the rule out in a comment of its own.
+///
+/// `convert_meta` is readline's variable of that name. It decides the *last*
+/// step only: a byte that came out with the top bit set is split into an escape
+/// and the byte without it while the variable is on, and stored as itself while
+/// it is off. That is the whole difference between `"\M-a"` being `\ea` and
+/// being `\341`, and with it off `\M-a` and `\ea` are two different bindings
+/// rather than one. readline turns it off for every locale that is not `C` or
+/// `POSIX` (nls.c:168–186), which is every locale osh has — see
+/// design-decisions.md §104 and [`crate::bind_tables::VARIABLES`].
+///
+/// The whole of this mirrors `rl_translate_keyseq` (bind.c:523–648).
 #[must_use]
-pub fn decode(spec: &[u8]) -> Vec<u8> {
+pub fn decode(spec: &[u8], convert_meta: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(spec.len());
     let mut i = 0usize;
-    while let Some(&c) = spec.get(i) {
+    let mut has_control = false;
+    let mut has_meta = false;
+    // The loop runs one past the end when a modifier is still pending, so that
+    // it can be applied to the NUL that ends the string.
+    loop {
+        let mut c = match spec.get(i) {
+            Some(&c) => c,
+            None if has_control || has_meta => 0,
+            None => break,
+        };
+        let at_end = spec.get(i).is_none();
         i += 1;
-        if c != b'\\' {
-            out.push(c);
-            continue;
-        }
-        // `\C-` and `\M-` modify what follows rather than standing for a byte,
-        // so they are read before the escape table.
-        if matches!(spec.get(i), Some(b'C' | b'M')) && spec.get(i + 1) == Some(&b'-') {
-            let modifier = spec.get(i).copied().unwrap_or(b'C');
-            i += 2;
-            if modifier == b'M' {
-                // Meta is a prefix byte, and the rest of the sequence is read
-                // as if it had been written on its own.
-                out.push(ESC);
+        // Only a backslash with something after it escapes; a trailing one is
+        // the byte itself.
+        if c == b'\\' && spec.get(i).is_some() {
+            // `\C-` and `\M-` modify what follows rather than standing for a
+            // byte, so they are read before the escape table and the next
+            // character is fetched as if they had not been written.
+            if matches!(spec.get(i), Some(b'C' | b'M')) && spec.get(i + 1) == Some(&b'-') {
+                if spec.get(i) == Some(&b'M') {
+                    has_meta = true;
+                } else {
+                    has_control = true;
+                }
+                i += 2;
                 continue;
             }
-            // `\C-\M-x` — the two written the other way round, meaning the
-            // same thing.
-            if spec.get(i) == Some(&b'\\')
-                && spec.get(i + 1) == Some(&b'M')
-                && spec.get(i + 2) == Some(&b'-')
-            {
-                out.push(ESC);
-                i += 3;
-            }
-            let Some(&k) = spec.get(i) else {
-                // `\C-` with nothing to control: readline has nothing to
-                // produce and neither has this.
-                break;
-            };
-            i += 1;
-            if k == b'?' {
-                // The one control name that is not its letter's bit pattern.
-                out.push(RUBOUT);
-            } else if k == b'\\' {
-                // The controlled character is itself written as an escape, as
-                // in `\C-\\` for the byte 0x1c.
-                let (b, used) = one_escape(spec, i);
-                i += used;
-                out.push(ctrl(b));
-            } else {
-                out.push(ctrl(k));
-            }
-            continue;
+            let (b, used) = one_escape(spec, i);
+            i += used;
+            c = b;
         }
-        let (b, used) = one_escape(spec, i);
-        i += used;
-        out.push(b);
+        if has_control {
+            // `?` is the one control name that is not its letter's bit
+            // pattern.
+            c = if c == b'?' { RUBOUT } else { ctrl(c) };
+            has_control = false;
+        }
+        if has_meta {
+            c |= 0x80;
+            has_meta = false;
+        }
+        if c >= 0x80 && convert_meta {
+            out.push(ESC);
+            out.push(c & 0x7f);
+        } else {
+            out.push(c);
+        }
+        if at_end {
+            break;
+        }
     }
     out
 }
@@ -254,12 +266,63 @@ pub fn encode(seq: &[u8], is_prefix: bool, meta: Meta) -> Vec<u8> {
 /// the keymap rather than of the binding, so it comes off here and is derived
 /// again on the way out. The flag is returned only so a caller checking the
 /// capture against itself can compare like with like.
+///
+/// The marker is taken off *after* decoding rather than before, because the
+/// text in front of it need not stand on its own: the escape sub-map's own
+/// binding prints as `\M-\000`, and a bare `\M-` is a modifier with nothing to
+/// modify — [`decode`] would hand it the NUL that ends the string and return
+/// two bytes rather than one. Decoding the whole entry and dropping the one
+/// NUL the marker contributed is the same reading readline gives it, since
+/// `\000` is only ever the marker: a genuinely bound NUL prints `\C-@`
+/// (`_rl_get_keyname`, bind.c:2592–2660).
+///
+/// A capture is what the *dumper* wrote, and the dumper's dialect is not
+/// [`decode`]'s. `rl_invoking_keyseqs_in_map` (bind.c:2732–2741) emits `\M-`
+/// for one thing only — the sub-map hanging off `ESC`, and only while
+/// `convert-meta` is on — while every key that is not a sub-map goes through
+/// `_rl_get_keyname` (bind.c:2592–2660), which writes a byte with the eighth
+/// bit set in **octal** and never writes `\M-` at all. So in a capture `\M-`
+/// is always exactly `\e`, and `\200` is always exactly one byte.
+///
+/// Reading a capture with `rl_translate_keyseq`'s meta rule would get both
+/// halves of that wrong: it would turn `\200` into `ESC`, `\000` (readline
+/// itself does not round-trip its own listing here — feeding `"\200"` back to
+/// `bind` with `convert-meta` on really does bind `ESC` `NUL`). The capture is
+/// a listing, so the listing's dialect governs: rewrite its `\M-` to the `\e`
+/// it names, then decode with the meta bit standing for nothing but itself.
 #[must_use]
 pub fn table_entry(text: &str) -> (Vec<u8>, bool) {
-    match text.strip_suffix("\\000") {
-        Some(head) => (decode(head.as_bytes()), true),
-        None => (decode(text.as_bytes()), false),
+    let src = text.as_bytes();
+    let mut spec: Vec<u8> = Vec::with_capacity(src.len());
+    let mut i = 0usize;
+    while let Some(&c) = src.get(i) {
+        // A backslash escapes exactly one character, so stepping over the pair
+        // is what keeps `\\M-` — a literal backslash, then `M-` — from being
+        // mistaken for the sub-map's name. Anything longer than the pair (an
+        // octal run, the `-x` of `\C-x`) is plain text from here on and needs
+        // no further care.
+        if c == b'\\' && src.get(i + 1).is_some() {
+            if src.get(i + 1) == Some(&b'M') && src.get(i + 2) == Some(&b'-') {
+                spec.extend_from_slice(b"\\e");
+                i = i.saturating_add(3);
+                continue;
+            }
+            spec.extend_from_slice(&src[i..=i.saturating_add(1)]);
+            i = i.saturating_add(2);
+            continue;
+        }
+        spec.push(c);
+        i = i.saturating_add(1);
     }
+    let mut seq = decode(&spec, false);
+    if text.ends_with("\\000") {
+        // The decode of a `\000` is one NUL wherever it sat, so exactly one
+        // comes off.
+        debug_assert_eq!(seq.last(), Some(&0));
+        seq.pop();
+        return (seq, true);
+    }
+    (seq, false)
 }
 
 /// Order two key sequences as readline walks a keymap.
@@ -523,6 +586,13 @@ impl Maps {
         self.var(name) == b"on"
     }
 
+    /// The live `convert-meta`, for a caller outside this module that has to
+    /// hand it to [`decode`] or [`parse_operand`].
+    #[must_use]
+    pub fn convert_meta(&self) -> bool {
+        self.var_on("convert-meta")
+    }
+
     /// The keymap `bind` reads and writes when `-m` did not name one — the
     /// `keymap` variable, which `set keymap` and `set editing-mode` both move.
     ///
@@ -724,8 +794,13 @@ fn glean_key(name: &[u8]) -> u8 {
 /// target instead, so `"\C-t" : yank` unbinds `\C-t` rather than binding it
 /// (measured). A quoted key sequence is skipped over whole while looking for
 /// that separator, so a colon or a space inside it is part of the key.
+///
+/// `convert_meta` is the live value of readline's variable, which the caller
+/// has to read afresh for every operand: a `set convert-meta off` earlier in
+/// the same file steers the bindings after it, so the flag is not a property of
+/// the call. See [`decode`].
 #[must_use]
-pub fn parse_operand(spec: &[u8]) -> Operand {
+pub fn parse_operand(spec: &[u8], convert_meta: bool) -> Operand {
     let start = spec.iter().position(|&b| !ws(b)).unwrap_or(spec.len());
     let s = spec.get(start..).unwrap_or(&[]);
     match s.first() {
@@ -781,7 +856,10 @@ pub fn parse_operand(spec: &[u8]) -> Operand {
         // one is not an error here: readline takes what there is.
         Some(b'"' | b'\'') => {
             let end = closing_quote(target, 0).unwrap_or(target.len());
-            Some(Target::Macro(decode(target.get(1..end).unwrap_or(&[]))))
+            Some(Target::Macro(decode(
+                target.get(1..end).unwrap_or(&[]),
+                convert_meta,
+            )))
         }
         _ => {
             let end = target.iter().position(|&b| ws(b)).unwrap_or(target.len());
@@ -790,7 +868,7 @@ pub fn parse_operand(spec: &[u8]) -> Operand {
     };
     let seq = if keyname.first() == Some(&b'"') {
         let end = closing_quote(keyname, 0).unwrap_or(keyname.len());
-        decode(keyname.get(1..end).unwrap_or(&[]))
+        decode(keyname.get(1..end).unwrap_or(&[]), convert_meta)
     } else {
         vec![glean_key(keyname)]
     };
@@ -1024,7 +1102,9 @@ impl Maps {
             if off {
                 continue;
             }
-            match parse_operand(line) {
+            // Read afresh: a `set convert-meta off` on an earlier line of this
+            // same file steers every binding after it.
+            match parse_operand(line, self.var_on("convert-meta")) {
                 Operand::Nothing => {}
                 Operand::Error(msg) => errs.push(at(&msg)),
                 Operand::Set(n, v) => {
@@ -1190,28 +1270,50 @@ mod tests {
     #[test]
     fn the_ways_of_writing_one_key_all_decode_to_it() {
         // The same byte spelled five ways: control letter (either case), the
-        // octal it is, the hex it is, and the escape readline prints.
+        // octal it is, the hex it is, and the escape readline prints. No meta
+        // is involved, so `convert-meta` cannot change any of them.
         for spec in [r"\C-y", r"\C-Y", r"\031", r"\x19"] {
-            assert_eq!(decode(spec.as_bytes()), vec![0x19], "{spec}");
+            for cm in [true, false] {
+                assert_eq!(decode(spec.as_bytes(), cm), vec![0x19], "{spec} cm={cm}");
+            }
         }
-        // Meta is an escape prefix, so all three of these are two bytes.
-        for spec in [r"\M-y", r"\ey", r"\033y"] {
-            assert_eq!(decode(spec.as_bytes()), vec![0x1b, b'y'], "{spec}");
+        // `\M-` sets the eighth bit (bind.c:610, `c = META(c)`); it is only
+        // *afterwards* that `convert-meta` splits the result into ESC + the
+        // low seven bits (bind.c:640). So with convert-meta off — which is
+        // where any non-C locale leaves readline — `\M-y` is one byte, and
+        // `\M-y` and `\ey` stop being the same binding.
+        assert_eq!(decode(br"\M-y", true), vec![0x1b, b'y']);
+        assert_eq!(decode(br"\M-y", false), vec![0xf9]);
+        for spec in [r"\ey", r"\033y"] {
+            for cm in [true, false] {
+                assert_eq!(decode(spec.as_bytes(), cm), vec![0x1b, b'y'], "{spec} cm={cm}");
+            }
         }
-        // The two modifiers nest either way round.
+        // The two modifiers commute: both are gathered as flags and applied
+        // control-first (bind.c:600-611), whichever order they were written.
         for spec in [r"\M-\C-g", r"\C-\M-g"] {
-            assert_eq!(decode(spec.as_bytes()), vec![0x1b, 0x07], "{spec}");
+            assert_eq!(decode(spec.as_bytes(), true), vec![0x1b, 0x07], "{spec}");
+            assert_eq!(decode(spec.as_bytes(), false), vec![0x87], "{spec}");
         }
-        assert_eq!(decode(br"\C-?"), vec![0x7f]);
-        assert_eq!(decode(br"\d"), vec![0x7f]);
-        assert_eq!(decode(br"\C-@"), vec![0x00]);
-        assert_eq!(decode(br"\C-\\"), vec![0x1c]);
-        // An unknown escape is the letter itself, and a trailing backslash is
-        // a backslash.
-        assert_eq!(decode(br"\q"), vec![b'q']);
-        assert_eq!(decode(br"a\"), vec![b'a', b'\\']);
-        // `\x` with nothing behind it is an `x`.
-        assert_eq!(decode(br"\xz"), vec![b'x', b'z']);
+        for cm in [true, false] {
+            assert_eq!(decode(br"\C-?", cm), vec![0x7f], "cm={cm}");
+            assert_eq!(decode(br"\d", cm), vec![0x7f], "cm={cm}");
+            assert_eq!(decode(br"\C-@", cm), vec![0x00], "cm={cm}");
+            assert_eq!(decode(br"\C-\\", cm), vec![0x1c], "cm={cm}");
+            // An unknown escape is the letter itself, and a trailing
+            // backslash is a backslash.
+            assert_eq!(decode(br"\q", cm), vec![b'q'], "cm={cm}");
+            assert_eq!(decode(br"a\", cm), vec![b'a', b'\\'], "cm={cm}");
+            // `\x` with nothing behind it is an `x`.
+            assert_eq!(decode(br"\xz", cm), vec![b'x', b'z'], "cm={cm}");
+        }
+        // A modifier that runs off the end has nothing to modify but the NUL
+        // the string ends with, so these bind *two* bytes, not one. Measured
+        // against bash 5.2.37: `"x\C-": yank` lists as `"x\C-@"`, and
+        // `"y\M-": yank` as `"y\200"`.
+        assert_eq!(decode(br"x\C-", false), vec![b'x', 0x00]);
+        assert_eq!(decode(br"y\M-", false), vec![b'y', 0x80]);
+        assert_eq!(decode(br"y\M-", true), vec![b'y', 0x1b, 0x00]);
     }
 
     #[test]
@@ -1330,7 +1432,7 @@ mod tests {
     /// here is measured against bash 5.2.
     #[test]
     fn the_separator_is_the_first_of_a_colon_or_a_space_and_only_one_byte() {
-        let bound = |spec: &str| match super::parse_operand(spec.as_bytes()) {
+        let bound = |spec: &str| match super::parse_operand(spec.as_bytes(), false) {
             super::Operand::Bind(seq, target) => (
                 String::from_utf8_lossy(&encode(&seq, false, Meta::Prefix)).into_owned(),
                 match target {
@@ -1371,7 +1473,8 @@ mod tests {
     /// meta prefixes are only `Meta` and `M-` while `ESC-w` does contain `C-`.
     #[test]
     fn an_unquoted_key_name_gleans_one_key_and_its_modifiers() {
-        let key = |spec: &str| match super::parse_operand(format!("{spec}: yank").as_bytes()) {
+        let key = |spec: &str| match super::parse_operand(format!("{spec}: yank").as_bytes(), false)
+        {
             super::Operand::Bind(seq, _) => seq,
             _ => panic!("{spec}: not a binding"),
         };
@@ -1399,6 +1502,10 @@ mod tests {
                 .collect()
         };
         let mut maps = super::Maps::seeded();
+        // The seeded default is *off* (readline's eight-bit set, which is the
+        // one every locale but `C`/`POSIX` gets — see `VARIABLES`), so the
+        // conversion this test is about has to be asked for.
+        maps.set_var(b"convert-meta", b"on").expect("convert-meta is a variable");
         maps.unbind_function("emacs", "yank");
         maps.bind("emacs", &[0xf4], Target::Function("yank"));
         assert_eq!(listed(&maps), vec!["\\M-t"]);
@@ -1446,7 +1553,7 @@ mod tests {
     /// The lines readline does nothing with, and the two it refuses.
     #[test]
     fn a_line_that_binds_nothing_is_read_as_nothing() {
-        let kind = |spec: &str| match super::parse_operand(spec.as_bytes()) {
+        let kind = |spec: &str| match super::parse_operand(spec.as_bytes(), false) {
             super::Operand::Nothing => "nothing".to_string(),
             super::Operand::Error(e) => String::from_utf8_lossy(&e).into_owned(),
             super::Operand::Set(n, v) => {

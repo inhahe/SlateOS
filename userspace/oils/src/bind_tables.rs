@@ -1164,6 +1164,33 @@ pub const KEYMAPS: [Keymap; 5] = [
 ];
 
 /// readline's variables and their default values, in `bind -v` order.
+///
+/// The four meta variables are the *eight-bit* defaults, not the ones the C
+/// declarations give. readline picks between two sets at startup:
+/// `_rl_init_eightbit` asks `LC_CTYPE` and hands it to `_rl_set_localevars`
+/// (nls.c:168–186), which goes eight-bit for **any** locale that is not exactly
+/// `C` or `POSIX` —
+///
+/// ```c
+/// if (localestr && *localestr && (localestr[0] != 'C' || localestr[1]) && (STREQ (localestr, "POSIX") == 0))
+///   {
+///     _rl_meta_flag = 1;                    /* input-meta, meta-flag  on  */
+///     _rl_convert_meta_chars_to_ascii = 0;  /* convert-meta           off */
+///     _rl_output_meta_chars = 1;            /* output-meta            on  */
+/// ```
+///
+/// so `C.UTF-8` takes that branch on the `localestr[1]` clause. The C
+/// declarations (readline.c:300 and neighbours) are only what survives when the
+/// locale really is `C`/`POSIX`, and osh is never in that locale: see
+/// design-decisions.md §104, which settles that osh is UTF-8-only. Encoding the
+/// C-locale set here made every meta binding land in the escape sub-map —
+/// `"\M-\C-e": yank` came back as `\M-\C-e` where bash, with `convert-meta`
+/// off, binds the single byte `0x85` and lists it `\205` (measured, bash
+/// 5.2.37).
+///
+/// This is the one place the locale reaches the tables. `byte-oriented` is
+/// *not* a second instance: it tracks `MB_CUR_MAX`, and readline reports it
+/// `off` in both locales.
 pub const VARIABLES: [(&str, &str); 46] = [
     ("bind-tty-special-chars", "on"),
     ("blink-matching-paren", "off"),
@@ -1172,7 +1199,7 @@ pub const VARIABLES: [(&str, &str); 46] = [
     ("colored-stats", "off"),
     ("completion-ignore-case", "off"),
     ("completion-map-case", "off"),
-    ("convert-meta", "on"),
+    ("convert-meta", "off"),
     ("disable-completion", "off"),
     ("echo-control-characters", "on"),
     ("enable-active-region", "on"),
@@ -1182,14 +1209,14 @@ pub const VARIABLES: [(&str, &str); 46] = [
     ("expand-tilde", "off"),
     ("history-preserve-point", "off"),
     ("horizontal-scroll-mode", "off"),
-    ("input-meta", "off"),
+    ("input-meta", "on"),
     ("mark-directories", "on"),
     ("mark-modified-lines", "off"),
     ("mark-symlinked-directories", "off"),
     ("match-hidden-files", "on"),
     ("menu-complete-display-prefix", "off"),
-    ("meta-flag", "off"),
-    ("output-meta", "off"),
+    ("meta-flag", "on"),
+    ("output-meta", "on"),
     ("page-completions", "on"),
     ("prefer-visible-bell", "on"),
     ("print-completions-horizontally", "off"),

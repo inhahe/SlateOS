@@ -33344,7 +33344,8 @@ impl Shell {
             // status 0 — but it is still a phase, so it clears a `-q` failure ahead
             // of it.
             if let Some(r) = &rseq {
-                let seq = crate::bind_keys::decode(r);
+                let cm = self.bind_maps.as_deref().is_some_and(crate::bind_keys::Maps::convert_meta);
+                let seq = crate::bind_keys::decode(r, cm);
                 if let Some(maps) = self.bind_maps.as_deref_mut() {
                     let km = maps.keymap();
                     maps.unbind_seq(km, &seq);
@@ -33356,7 +33357,8 @@ impl Shell {
             // handing it to readline: a quoted key sequence, then a colon, then the
             // command. All three diagnostics are reachable with no line editor.
             if let Some(x) = &xspec {
-                status = match Self::bind_x_spec(x) {
+                let cm = self.bind_maps.as_deref().is_some_and(crate::bind_keys::Maps::convert_meta);
+                status = match Self::bind_x_spec(x, cm) {
                     Ok((seq, cmd)) => {
                         if let Some(maps) = self.bind_maps.as_deref_mut() {
                             let km = maps.keymap();
@@ -33375,7 +33377,10 @@ impl Shell {
             // own voice — no shell prefix — and never touches the status, not even
             // for a line it refused outright.
             for spec in args.get(i..).unwrap_or(&[]) {
-                match crate::bind_keys::parse_operand(spec) {
+                // Read afresh each time: a `set convert-meta off` in an earlier
+                // operand of the same call steers the ones after it.
+                let cm = self.bind_maps.as_deref().is_some_and(crate::bind_keys::Maps::convert_meta);
+                match crate::bind_keys::parse_operand(spec, cm) {
                     crate::bind_keys::Operand::Nothing => {}
                     crate::bind_keys::Operand::Error(msg) => {
                         self.berrln(&bfmt![b"readline: ", &msg]);
@@ -33561,7 +33566,7 @@ impl Shell {
     /// than an ordinary operand: the quotes are required, and the colon cannot
     /// be a space. The key sequence comes back decoded and the command with the
     /// whitespace in front of it removed, which is where bash starts it.
-    fn bind_x_spec(spec: &[u8]) -> Result<(Str, Str), Str> {
+    fn bind_x_spec(spec: &[u8], convert_meta: bool) -> Result<(Str, Str), Str> {
         let ws = |b: u8| b == b' ' || b == b'\t';
         let mut k = 0usize;
         while spec.get(k).is_some_and(|b| ws(*b)) {
@@ -33586,7 +33591,7 @@ impl Shell {
                 Some(_) => k += 1,
             }
         }
-        let seq = crate::bind_keys::decode(spec.get(open + 1..k).unwrap_or(&[]));
+        let seq = crate::bind_keys::decode(spec.get(open + 1..k).unwrap_or(&[]), convert_meta);
         k += 1;
         while spec.get(k).is_some_and(|b| ws(*b)) {
             k += 1;

@@ -2603,6 +2603,44 @@ impl Spans {
         Some((TokSpan { src: at.src, end: u32::try_from(i).ok()? }, n))
     }
 
+    /// Whether bash's `shell_input_line` is **empty** where the reader stopped
+    /// after the token at `pos` — the test `report_syntax_error` makes at
+    /// parse.y:6273 before it will look for an offending token to report the
+    /// error "near".
+    ///
+    /// The buffer is emptied by exactly one thing: a fetch that found the end of
+    /// the input — and that is the very fetch [`Spans::reader_stop`] already
+    /// counts, so the test is "the walk crossed something (`n > 0`) and ran off
+    /// the end of the text". Both ways of getting there qualify:
+    ///
+    /// - a `\<newline>` flush against the token with nothing behind it, deleted
+    ///   by the look past the token, which then finds the buffer used up;
+    /// - a `-c` string [`close_last_line`] closed with a *backslash*, which has
+    ///   no newline for the reader to stop on at all.
+    ///
+    /// A token merely *at* the end of the text is not one of them: every other
+    /// input is newline-closed, so the reader stops on that newline with a line
+    /// still in hand. `bash -c '[[ a == b )'` reports near `)` and echoes its
+    /// line; so does `bash -c '[[ a == b )\'`, whose `\` is not a continuation
+    /// (the close doubled it) — the reader stops on it and reports near `)\`.
+    ///
+    /// Only the shell's own input ends this way. An alias replacement is a
+    /// pushed string that `pop_string` ends, restoring a line that still has
+    /// text on it — and `reader_stop` has already popped every replacement the
+    /// look exhausted, so `src != 0` here means the reader is still *inside* one.
+    fn reader_line_empty(&self, pos: usize, r: Reader) -> bool {
+        let Some((stop, n)) = self.reader_stop(pos, r) else {
+            return false;
+        };
+        if stop.src != 0 || n == 0 {
+            return false;
+        }
+        let Some(t) = self.text(stop.src) else {
+            return false;
+        };
+        stop.end as usize >= t.len()
+    }
+
     /// The text bash would echo under the diagnostic for an error at the token
     /// `pos` — `shell_input_line` as it stands where the reader stopped — when
     /// that is an alias replacement rather than the shell's own input.
@@ -2953,7 +2991,7 @@ impl Parser {
 
     /// [`Parser::token_display`] for an arbitrary position, so a diagnostic can
     /// name a token the parser has already moved past (see
-    /// [`Parser::cond_near`]).
+    /// [`Parser::cond_near_at`]).
     fn token_display_at(&self, pos: usize) -> Str {
         match self.toks.get(pos) {
             None => b"end of input".to_vec(),
@@ -3956,7 +3994,7 @@ impl Parser {
             } else {
                 bfmt![b"syntax error in conditional expression"]
             };
-            let near = self.cond_near_at(self.pos);
+            let sequel = self.cond_sequel_at(self.pos);
             // Two `parser_error` calls, so two messages and two `line N:`
             // prefixes — the first at the `[[`'s own line, the second wherever
             // the reader stopped.
@@ -3964,7 +4002,7 @@ impl Parser {
                 line_at: vec![(0, open)],
                 ..ParseError::new(&head)
             };
-            return Err(ParseError::new(&bfmt![b"syntax error near `", near, b"'"]).under(first));
+            return Err(ParseError::new(&sequel).under(first));
         }
         self.pos += 1;
         Ok(Command::Cond(expr))
@@ -4048,12 +4086,22 @@ impl Parser {
                     });
                 }
                 let tok = self.token_display();
+                // The `near` line is the reader's to give, so a group whose
+                // failing token emptied the input line loses it and keeps the
+                // rest: `echo 1⏎[[ ( a ;\⏎` still reports the token and still
+                // reports the group's `expected \`)'` on the `(`'s line, then
+                // prints a bare `syntax error`. See [`Parser::cond_sequel_at`].
+                let tail = if self.reader_line_empty_at(self.pos) {
+                    b"syntax error".to_vec()
+                } else {
+                    bfmt![b"syntax error near `", &tok, b"'"]
+                };
                 return Err(CondError::Cond {
                     clauses: vec![(
                         Some(open),
                         bfmt![b"unexpected token `", &tok, b"', expected `)'"],
                     )],
-                    tail: Some(bfmt![b"syntax error near `", &tok, b"'"]),
+                    tail: Some(tail),
                 });
             }
             self.pos += 1;
@@ -4108,10 +4156,9 @@ impl Parser {
             // parked just past the word, so what comes along is whatever was
             // *written* around it — `[[ a b;c ]]` is near `;`, `[[ a b) ]]`
             // near `b)`, and `[[ a $(echo x) ]]` near `x)`.
-            let near = self.cond_near_at(self.pos);
             return Err(CondError::new(
                 b"conditional binary operator expected".as_slice(),
-                &bfmt![b"syntax error near `", near, b"'"],
+                &self.cond_sequel_at(self.pos),
             ));
         }
         // A newline here is *not* skipped — this is the one position where the
@@ -4122,14 +4169,13 @@ impl Parser {
         // token" clause the word form above does not have.
         if matches!(self.peek(), Some(Tok::Newline)) {
             let tok = self.token_display();
-            let near = self.cond_near();
             return Err(CondError::new(
                 &bfmt![
                     b"unexpected token `",
                     tok,
                     b"', conditional binary operator expected"
                 ],
-                &bfmt![b"syntax error near `", near, b"'"],
+                &self.cond_sequel(),
             ));
         }
         // Any other *operator* here is in the same position and is named the
@@ -4144,14 +4190,13 @@ impl Parser {
             && !matches!(op, Op::AndIf | Op::OrIf | Op::RParen)
         {
             let tok = self.token_display();
-            let near = self.cond_near_at(self.pos);
             return Err(CondError::new(
                 &bfmt![
                     b"unexpected token `",
                     tok,
                     b"', conditional binary operator expected"
                 ],
-                &bfmt![b"syntax error near `", near, b"'"],
+                &self.cond_sequel_at(self.pos),
             ));
         }
         // The end of input is a token in this position like any other. bash's
@@ -4197,13 +4242,13 @@ impl Parser {
         }
     }
 
-    /// The token a conditional error is reported "near".
+    /// The token position a conditional error is reported from.
     ///
     /// bash names the last *word* it read, which is the offending token itself
     /// whenever that is a real word (`[[ -n ]]` reports near `]]`). A newline
     /// never becomes that token, so an error on one is reported near whatever
     /// came before it: `[[ a` reports near `a`, and `[[ a -eq` near `-eq`.
-    fn cond_near(&self) -> Str {
+    fn cond_near_pos(&self) -> usize {
         let mut pos = self.pos;
         if matches!(self.peek(), Some(Tok::Newline)) {
             // Walk back over any newlines to the last real token. That is where
@@ -4213,10 +4258,57 @@ impl Parser {
                 pos -= 1;
             }
         }
-        self.cond_near_at(pos)
+        pos
     }
 
-    /// [`Parser::cond_near`] for a known token position: the source slice bash
+    /// The second `parser_error` of a conditional failure: `report_syntax_error`
+    /// with `current_token` set to the `-1` `read_token` returned after
+    /// `cond_error` (parse.y:3402), which `error_token_from_token` cannot name.
+    ///
+    /// That drops straight past the first branch to the one gated on
+    /// `shell_input_line && *shell_input_line` (parse.y:6273). With text left on
+    /// the line bash finds an offending token in it and reports `syntax error
+    /// near \`X'` — and echoes the line, which `format_parse_error` keys off the
+    /// `near`. With the line emptied it falls to the final `else` and prints a
+    /// bare `syntax error`, with nothing under it:
+    ///
+    /// ```text
+    /// echo 1⏎[[ a == b )⏎     line 2: syntax error near `)'
+    ///                         line 2: `[[ a == b )'
+    /// echo 1⏎[[ a == b )\⏎    line 3: syntax error
+    /// ```
+    ///
+    /// `EOF_Reached` is 0 for both, which is why the second is `syntax error`
+    /// and not `syntax error: unexpected end of file`: the conditional died on a
+    /// token it *had*, and nothing ever asked for one past the close. The slots
+    /// that do run out of input are handled before this is reached.
+    ///
+    /// Note the emptiness is the *reader's*, not the grammar's: it is decided by
+    /// where the offending token left the reader, so the very same conditional
+    /// keeps its `near` line when anything at all follows the backslash —
+    /// `[[ a == b ) \` (a space in between) stops on the space and reports near
+    /// `)`, on the `[[`'s own line.
+    fn cond_sequel_at(&self, pos: usize) -> Str {
+        if self.reader_line_empty_at(pos) {
+            return b"syntax error".to_vec();
+        }
+        bfmt![b"syntax error near `", self.cond_near_at(pos), b"'"]
+    }
+
+    /// Whether the reader has run the input out by the time it finished the
+    /// token at `pos`, leaving `shell_input_line` empty. See
+    /// [`Spans::reader_line_empty`].
+    fn reader_line_empty_at(&self, pos: usize) -> bool {
+        self.spans.reader_line_empty(pos, Reader::of(self.toks.get(pos)))
+    }
+
+    /// [`Parser::cond_sequel_at`] for the current position, with
+    /// [`Parser::cond_near_pos`]'s walk back over newlines.
+    fn cond_sequel(&self) -> Str {
+        self.cond_sequel_at(self.cond_near_pos())
+    }
+
+    /// The text a conditional error is reported "near", for a known token position: the source slice bash
     /// would print, or — when there is no source behind this stream — the
     /// token itself, trimmed the way [`cond_error_near`] describes.
     fn cond_near_at(&self, pos: usize) -> Str {
@@ -4329,7 +4421,7 @@ impl Parser {
         let tok = self.token_display();
         // A newline never becomes the token bash reports "near", so an operand
         // slot that a line end walked into names the operator instead.
-        let near = bfmt![b"syntax error near `", self.cond_near(), b"'"];
+        let near = self.cond_sequel();
         match pos {
             CondPos::Primary => match self.cond_primary_token() {
                 Some(t) => CondError::new(
@@ -7723,6 +7815,140 @@ mod tests {
         ] {
             assert_eq!(diag(src), want, "src {src:?}");
         }
+    }
+
+    /// The line under `syntax error in conditional expression …` is the
+    /// *reader's* to give, and a backslash-closed string leaves it with nothing.
+    ///
+    /// A conditional failure hands the grammar the `-1` of parse.y:3402, which
+    /// `error_token_from_token` cannot name, so `report_syntax_error` skips its
+    /// first branch and tries the one gated on `shell_input_line &&
+    /// *shell_input_line` (parse.y:6273). With text left it reports `syntax
+    /// error near \`X'` and echoes the line; with the line emptied it falls to
+    /// the final `else` and prints a bare `syntax error` with nothing under it.
+    ///
+    /// Only a fetch that found the end of the input empties the buffer, and a
+    /// newline-closed string never provokes one — the reader stops on the
+    /// newline. So the shape needs a `\<newline>` flush against the offending
+    /// token: the look past it deletes the continuation, runs the buffer out and
+    /// fetches nothing. One space in between and the read stops there instead,
+    /// with the whole line — trailing backslash and all — still in hand.
+    ///
+    /// `EOF_Reached` is 0 for every row, which is why these say `syntax error`
+    /// and not `syntax error: unexpected end of file`: the conditional died on a
+    /// token it *had*. Every row is bash 5.2.37.
+    #[test]
+    fn a_backslash_closed_string_leaves_no_line_to_report_near() {
+        fn diag(src: &str) -> String {
+            let opts = ParseOpts::default();
+            let mut ip = IncrementalParser::new(src.as_bytes(), 0, opts);
+            while let Some(unit) = ip.next_unit(None, opts) {
+                let Err(e) = unit else { continue };
+                let line = e.line.unwrap_or(0);
+                return e
+                    .msgs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, m)| {
+                        let m: String = m.iter().map(|&b| char::from(b)).collect();
+                        format!("{}: {m}", e.line_of(i, line))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+            }
+            panic!("{src:?} must fail")
+        }
+        for (src, want) in [
+            // The token ran the input out: no `near` line, and so — since the
+            // echo is keyed off one — nothing echoed either.
+            (
+                "echo 1\n[[ a == b )\\\n",
+                "2: syntax error in conditional expression: unexpected token `)'\n3: syntax error",
+            ),
+            (
+                "echo 1\n[[ a == b ;\\\n",
+                "2: syntax error in conditional expression: unexpected token `;'\n3: syntax error",
+            ),
+            ("echo 1\n[[ -z x y\\\n", "2: syntax error in conditional expression\n3: syntax error"),
+            ("echo 1\n[[ a b\\\n", "3: conditional binary operator expected\n3: syntax error"),
+            // A group keeps its own `expected `)'` — that is a separate
+            // `parser_error` from the frame that read the `(`, reported on the
+            // `(`'s line and untouched by which branch the sequel takes.
+            (
+                "echo 1\n[[ ( a ;\\\n",
+                "3: unexpected token `;', conditional binary operator expected\n2: expected `)'\n3: syntax error",
+            ),
+            // One space, and the read stops on it with the line still there —
+            // backslash included, since the echo is the raw line.
+            (
+                "echo 1\n[[ a == b ) \\\n",
+                "2: syntax error in conditional expression: unexpected token `)'\n2: syntax error near `)'",
+            ),
+            (
+                "echo 1\n[[ ( a ; \\\n",
+                "2: unexpected token `;', conditional binary operator expected\n2: expected `)'\n2: syntax error near `;'",
+            ),
+            // …and so does a token whose own text is not flush against the
+            // continuation, whatever stands between.
+            (
+                "echo 1\n[[ a -eq b -eq c\\\n",
+                "2: syntax error in conditional expression\n2: syntax error near `-eq'",
+            ),
+            (
+                "echo 1\n[[ a b )\\\necho 2\n",
+                "2: conditional binary operator expected\n2: syntax error near `b'",
+            ),
+            // The fetch found a line rather than the end, so the buffer is not
+            // empty — it holds *that* line, which is what gets reported.
+            (
+                "echo 1\n[[ a == b )\\\necho 2\n",
+                "2: syntax error in conditional expression: unexpected token `)'\n3: syntax error near `e'",
+            ),
+            (
+                "echo 1\n[[ a == b ;\\\necho 2\n",
+                "2: syntax error in conditional expression: unexpected token `;'\n3: syntax error near `e'",
+            ),
+            // Not a conditional at all: an ordinary error leaves through
+            // `report_syntax_error`'s *first* branch, whose
+            // `print_offending_line` is unconditional (parse.y:6262). So it
+            // keeps both lines and simply echoes an empty one.
+            ("echo 1\n;;\\\n", "3: syntax error near unexpected token `;;'"),
+            ("echo 1\necho a; )\\\n", "3: syntax error near unexpected token `)'"),
+            ("echo 1\n[[ a == b ]] ;;\\\n", "3: syntax error near unexpected token `;;'"),
+        ] {
+            assert_eq!(diag(src), want, "src {src:?}");
+        }
+
+        // A `-c` string closed with a *backslash* is the other way to leave the
+        // reader with nothing: it has no newline to stop on at all. Which of the
+        // two it is depends on the token, not the input — `[[ a b\` ends on the
+        // word, whose scan takes both backslashes and runs the buffer out, while
+        // `[[ a == b )\` ends on the `)`, whose look stops *on* the first
+        // backslash with the line still in hand. So the same close empties the
+        // buffer in one and not the other, and bash echoes the doubled `\` it
+        // appended:
+        //
+        // ```text
+        // bash -c '[[ a b\'          line 2: conditional binary operator expected
+        //                            line 2: syntax error
+        // bash -c '[[ a == b )\'     line 1: syntax error in conditional …
+        //                            line 1: syntax error near `)\'
+        //                            line 1: `[[ a == b )\\'
+        // ```
+        let closed = |src: &str| -> String {
+            let src = close_last_line(src.as_bytes(), InputKind::Str).into_owned();
+            let text: String = src.iter().map(|&b| char::from(b)).collect();
+            diag(&text)
+        };
+        assert_eq!(closed("[[ a b\\"), "2: conditional binary operator expected\n2: syntax error");
+        assert_eq!(
+            closed("[[ a == b )\\"),
+            "1: syntax error in conditional expression: unexpected token `)'\n1: syntax error near `)\\'"
+        );
+        assert_eq!(
+            closed("[[ a == b ) \\"),
+            "1: syntax error in conditional expression: unexpected token `)'\n1: syntax error near `)'"
+        );
     }
 
     #[test]

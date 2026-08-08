@@ -3421,20 +3421,38 @@ every link is in `interp.rs`:
    boundary's `cleanup_dead_jobs` retains only `status.is_none() || !notified` —
    so the row is swept and the following `jobs` prints nothing.
 
-So the test passes exactly when the `( exit 5 )` thread has finished within the
-200 ms `sleep 0.2`, and fails when it has not. It is a wall-clock race on
-**thread completion**, not on child reaping and not on job state shared between
-tests (there is none — each test builds its own `new_shell()`).
+So the test would fail if the `( exit 5 )` thread had not finished within the
+200 ms `sleep 0.2`. That is the only route to a 0 here — but **measurement says
+it is not the route taken**, and the trace above is recorded as the mechanism
+ruled *out*, not as the diagnosis.
 
-**Proper fix.** The remaining question is why a `( exit 5 )` subshell thread
-would need more than 200 ms, since that is the number that decides it. Measure
-that before touching anything: instrument the elapsed time from `born_at` to
-`is_finished()` for this shape under a loaded machine. If it really is thread
-start-up latency under contention, the test must wait on the condition (poll
-until the body reports finished) rather than on a fixed sleep, because no
-constant is safe on an arbitrarily loaded machine. If instead the body finishes
-promptly and something else is delaying the boundary poll, the *shell* has the
-bug and the sleep is only exposing it.
+**Measured 2026-08-08, after the trace — and it does not reproduce.** Three
+probes, all with the suite's own contention:
+
+- Thread completion for `( exit 5 ) &`, worst of 25 under a full-suite run:
+  **2.3 ms** to spawn, **10.5 ms** to finish. The race it is supposed to lose is
+  against 200 ms — a 20× margin.
+- The test's exact sequence, sampled 8× under a full-suite run: `sleep` works
+  (`rc=0`), the unit takes ~234 ms, and the job comes out `exit_seen: true,
+  status: Some(5), notified: false` with its row kept — every time.
+- **54 full-suite runs with no occurrence:** 14 sequential on a quiet machine,
+  then 40 more as four concurrent copies of the test binary.
+
+**What this entry is now.** The frequency claim ("about one run in three") is
+unreproducible as written, and the `interp.rs:78623` in the original **Where**
+no longer points at this test at all — the file has grown past it, which is what
+sent the first pass down the wrong chain. A likelier reading is that the
+original observation belonged to the scratch-name collision class rather than to
+jobs: `uniq_name`'s own doc records a previous **~1-in-3** flake of exactly that
+frequency (`TD-OILS-TEST-SCRATCH-NAME-COLLISION`), striking "arbitrary tests"
+with unrepeatable failures — and the last six fixed-name scratch files were only
+removed in the commit that follows this one.
+
+**Proper fix.** Do not change the test on this evidence; there is nothing
+measured to fix. Leave it OPEN as a watch item, and if it is ever seen again
+capture the *whole* failure — test name, assertion, `left`/`right` — before
+theorising, since the stale line number is what made the first attempt
+misidentify the assertion.
 
 **Impact.** A red full-suite run that is not a real regression, which is the
 worst kind: it teaches the next session to re-run and shrug.

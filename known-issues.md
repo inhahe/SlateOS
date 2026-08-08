@@ -10050,7 +10050,7 @@ that names a word.
 the `loop_variable_is_any_word` unit test in `src/parser.rs` and
 `unexpected_token_and_identifier_errors_match_bash` in `src/interp.rs`.
 
-### TD-OILS-BUILTIN-TAG-SURVIVES-A-NESTED-COMMAND. `osh` restores a builtin's diagnostic tag after running a nested command; bash's is cleared — 2026-08-03
+### TD-OILS-BUILTIN-TAG-SURVIVES-A-NESTED-COMMAND. `osh` restores a builtin's diagnostic tag after running a nested command; bash's is cleared — 2026-08-03 — ✅ **RESOLVED 2026-08-08**
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::arith_cmd`, saved and
 restored around builtin dispatch (~21366 / ~21909).
@@ -10069,15 +10069,50 @@ mapfile -t -C 'echo cb $1 $2' -c 1 q <<< $'1+1\nq+'
 osh saves and restores the tag, so `mapfile`'s survives the callback. The line
 number is right in both (fixed 2026-08-03); only the tag differs.
 
-**Why deferred:** matching it means changing the tag's *lifetime* globally —
-from a scoped save/restore to "set on dispatch, cleared by any command" — which
-touches every signed diagnostic in the shell for the sake of one exotic corner
-(a `-C` callback plus an integer array plus a malformed element). The scoped
-version is also the more useful answer.
+**Fixed in `HEAD`.** The entry's guess at the mechanism was wrong in a way that
+mattered, so it is worth writing down what bash actually does.
 
-**Proper fix:** if it is ever worth matching, drop the restore at ~21909 and
-clear `arith_cmd` at the top of `run_simple_command` for a non-builtin, which
-is what bash's `execute_command` does.
+bash does not clear the name on the way *in* to a non-builtin, and it does not
+restore it either. It **blanks** it on the way *out* of every simple command:
+
+```c
+ return_result:
+   …
+   this_command_name = (char *)NULL;	/* points to freed memory now */
+                                    	   (execute_cmd.c:4828)
+```
+
+— the counterpart to the one place it is set, `run_builtin:` at
+`execute_cmd.c:4684`, which assigns `words->word->word` *after* word expansion.
+osh already modelled exactly this for the sibling tag `expand_cmd`, at the end
+of `Shell::exec_simple_command`; the fix is the same line for `arith_cmd`,
+immediately beside it. Nothing else changed — in particular the per-builtin
+save/restore in `run_builtin_body` stays, because the clear dominates it on
+every path that runs a nested command, and it is still what carries the tag
+correctly when no command runs at all.
+
+Measured against bash 5.2.37, which pins the rule tighter than the entry did.
+"Cleared" means *any executed simple command*, and only that:
+
+| callback in `mapfile -t -C … -c 1 q <<< 'q+'` | bash's complaint |
+|---|---|
+| `true`, `:` (builtin) | `q+: syntax error…` — unsigned |
+| `f` (function) | unsigned |
+| `no-such-command-at-all` | unsigned — a failed lookup still reaches `return_result:` |
+| `true \| true` (pipeline) | `mapfile: q+: …` — **still signed** |
+
+The pipeline is the load-bearing exception: bash forks for every element of one,
+so the child's blanking never reaches the parent. The same is true of command
+substitution, and that is what keeps the ordinary cases signed —
+`let "x=$(echo 1)+"` is still `let: x=1+: …` and `declare n=$(echo 1)+` is still
+`declare: 1+: …`, even though both run a command inside the expansion. osh runs
+a substitution in-process, so what stands in for bash's fork there is
+`Shell::eval_arith_raw`'s explicit bracketing, which lifts the tag across the
+expansion and puts it back.
+
+Covered by the lib test `running_a_command_takes_the_builtins_signature_away`
+and the corpus case
+`a-builtins-signature-is-taken-away-by-running-a-command.sh`.
 
 ### TD-OILS-INT-BIND-DISCARD-STOPS-AT-EVAL. A bad `-i` value's abort is caught by `eval`/`source` in osh; bash's unwinds past them — 2026-08-03 — ✅ **RESOLVED 2026-08-03**
 
@@ -17318,6 +17353,119 @@ The honest options are to leave it (chosen) or to refuse such an argument with
 a diagnostic rather than corrupt it. Refusing would be a *worse* fit for a
 development host, where the overwhelmingly common case is that the argument is
 text and the spawn should just work.
+
+### TD-OILS-A-DISCARD-OUT-OF-A-COMPOUND-COMMAND-LOSES-BASH-A-LINE. Every line number for the rest of the script is one low per compound level unwound — 2026-08-08 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — the compound-command executors
+(`exec_for`, `exec_while`, `exec_if`, the `{ … }` group) and whatever they do or
+do not do to `Shell`'s current-line field on an abort. osh restores it; bash
+does not.
+
+**What.** bash's `line_number` (`parse.y:1749`) is **one** global shared by the
+lexer and the executor, and a script is read one parse unit at a time — so the
+counter the parser is using when it records `simple_command->line` for the *next*
+unit is whatever the *previous* unit's execution left behind.
+
+Normally that is harmless, because each compound-command executor saves the
+counter on entry and puts it back on exit — `execute_for_command` at
+`execute_cmd.c:2883` / `:3003`, `execute_select_command` at `:3404` / `:3444`,
+and so on. The saved value is where the lexer stopped (the compound's last
+line); the body drives the global *backwards* to each simple command's own line;
+the restore undoes that.
+
+A `jump_to_top_level(DISCARD)` from inside the body is a `longjmp` straight to
+`reader_loop`, and these are plain assignments rather than unwind-protects — so
+the restore never runs. The rule that falls out:
+
+> After an abort, bash's counter is left at **the aborting command's line**
+> instead of **the last line of the parse unit it was in**. Everything parsed
+> afterwards is low by the difference, and it never recovers.
+
+A top-level abort loses nothing, because for it those two lines are the same
+one. An abort out of a function loses nothing either, because bash's function
+call *does* unwind-protect the counter, and a `longjmp` runs unwind-protects.
+
+Measured 2026-08-08 against bash 5.2.37. The abort is a malformed `-i` value,
+which is the deepest of bash's two discards (see
+`TD-OILS-INT-BIND-DISCARD-STOPS-AT-EVAL`):
+
+```sh
+declare -i m
+if true; then
+  m=1+          # line 3 — both shells say 3
+fi
+echo "A $LINENO"  # line 5 — bash says 4, osh says 5
+```
+
+Each shape below aborts on one line and asks `$LINENO` on the next, so the loss
+is the distance from the aborting line to the unit's closing keyword — and it
+accumulates across aborts:
+
+| shape around the abort | loss | why |
+|---|---|---|
+| none (top level) | 0 | aborting line *is* the unit's last line |
+| `while … done`, `{ … }`, `if … fi` | 1 | one closing keyword below it |
+| `if … if … fi fi` | 2 | two |
+| a function call | 0 | bash unwind-protects `line_number` across a call |
+| two aborts, each out of one `if` | 2 by the script's end | the loss is cumulative |
+
+**How it bit.** It cost a rewrite of
+`a-builtins-signature-is-taken-away-by-running-a-command.sh`, whose first draft
+put four probes in a `for` loop: every probe aborts, so from the loop onward the
+two shells disagreed about every line number in the case while agreeing about
+every diagnostic it was actually testing. **A corpus case that aborts must keep
+the aborting command at top level** unless the drift is the thing being
+measured. (bash also abandons the whole `for` there, so only the first iteration
+ever ran — the loop was buying nothing.)
+
+**Why osh does not have it.** osh's `Shell::current_line` is set from
+`sc.line` — the parser's exact record, taken with no shared mutable counter
+between parsing and execution — so there is nothing for an abort to perturb.
+osh is *right* and bash is wrong; byte-fidelity means reproducing bash anyway.
+
+**Proper fix:** carry bash's counter as a bias rather than trying to recreate its
+shared global. Add a signed `line_bias` to `Shell`, subtract it wherever a
+recorded line becomes a reported one (`exec_simple_inner`'s
+`self.current_line = sc.line`, and the same for the compound items), and grow it
+in `run_source_out`'s unit-at-a-time loop: when a unit ends in an abort, add
+(that unit's last source line − the line the abort was raised on). A function
+call adds nothing. The measurement above is the specification; a corpus case
+should assert each row of the table.
+
+### TD-OILS-AN-EMPTY-MAPFILE-CALLBACK-IS-TREATED-AS-NO-CALLBACK. `mapfile -C ""` runs nothing in osh; bash runs the index as a command — 2026-08-08 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::builtin_mapfile`,
+`let fire_callback = callback.as_ref().is_some_and(|c| !c.is_empty()) && …`.
+
+**What.** bash's test is a null-pointer test on a `char *`, not an emptiness
+test — `if (callback && line_count && (line_count % callback_quantum) == 0)`
+(`builtins/mapfile.def:206`) — and the callback string is pasted into a command
+line unconditionally: `snprintf (execstr, execlen, "%s %d %s", callback,
+curindex, qline)` (`:131`). With an empty callback that command line is
+` 0 'a'`, whose command word is the *index*.
+
+```sh
+mapfile -t -C "" -c 1 q <<< $'a\nb'
+# bash: 0: command not found
+#       1: command not found
+# osh : (nothing)
+# both: rc=0, declare -a q=([0]="a" [1]="b")
+```
+
+`-c 0` is refused by both shells before this point (`invalid callback quantum`),
+so the `quantum != 0` half of osh's guard is unreachable and only the emptiness
+half is wrong.
+
+**How it was found.** Probing which kinds of nested command blank bash's
+`this_command_name` for `TD-OILS-BUILTIN-TAG-SURVIVES-A-NESTED-COMMAND`: the
+`-C ""` row was the one place the two shells still differed after that fix, and
+the difference was that osh had not run a command at all.
+
+**Proper fix:** `callback.is_some()`. The one thing to check while doing it is
+that osh builds the callback command line the way `run_callback` does —
+`"%s %d %s"` with a *space* between the three parts — so an empty callback
+yields a leading space and the index becomes the command word, rather than
+yielding an empty command line that parses to nothing.
 
 ### TD-OILS-SELECT-COLS. `select`'s menu never queries the real window size — OPEN (low priority, gated on a terminal-size syscall) — 2026-07-27
 

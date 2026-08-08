@@ -2396,6 +2396,17 @@ impl Spans {
     /// - exactly one character written flush *after* it comes along too, and no
     ///   more: `[[ P;QRS ]]` reports `;Q`, while `[[ P; Q ]]` reports only `;`.
     ///
+    /// The scan is over **one line**, because bash's is: it reads
+    /// `t = shell_input_line`, which holds a single line and is *replaced* —
+    /// not extended — by the fetch that follows a deleted `\<newline>`
+    /// (parse.y's `goto restart_read`). So a reader dragged onto a new line is
+    /// at index 0 of it, where bash's first loop cannot run and its
+    /// one-character branch returns `t[0]`, and no scan can reach back into the
+    /// line before. With a non-blank next line that is the same answer a
+    /// whole-text walk would give, which is why only a blank one shows the
+    /// difference: `[[ a == b )\<newline><newline>` is reported near the
+    /// newline itself.
+    ///
     /// `None` when there is no source to slice — a token with no text of its own,
     /// or one that is not in this stream at all — leaving the caller to name the
     /// token instead.
@@ -2406,8 +2417,22 @@ impl Spans {
         // text it stopped in, since an alias replacement it has run off the end
         // of is no longer the current input line. See [`Spans::reader_stop`].
         let (stop, _) = self.reader_stop(pos, r)?;
-        let t = self.text(stop.src)?;
-        let mut i = stop.end as usize;
+        let full = self.text(stop.src)?;
+        let at = stop.end as usize;
+        if at > full.len() {
+            return None;
+        }
+        // The reader's own line: from just past the previous newline through the
+        // one that ends it. An alias replacement has no newline in it, so this
+        // is the whole of that text and costs nothing there.
+        let start = full.get(..at)?.iter().rposition(|&c| c == Ch::U('\n')).map_or(0, |n| n + 1);
+        let end = full
+            .get(start..)?
+            .iter()
+            .position(|&c| c == Ch::U('\n'))
+            .map_or(full.len(), |n| start.saturating_add(n).saturating_add(1));
+        let t = full.get(start..end)?;
+        let mut i = at.checked_sub(start)?;
         if t.is_empty() || i > t.len() {
             return None;
         }
@@ -7949,6 +7974,80 @@ mod tests {
             closed("[[ a == b ) \\"),
             "1: syntax error in conditional expression: unexpected token `)'\n1: syntax error near `)'"
         );
+    }
+
+    /// `error_token_from_text` scans **one line**, so the scan has a floor.
+    ///
+    /// It reads `t = shell_input_line`, which holds a single line, and
+    /// `shell_getc` *replaces* that buffer — it does not extend it — after
+    /// deleting a `\<newline>` (parse.y's `goto restart_read`). So a reader
+    /// dragged onto a fetched line sits at index 0 of a fresh `t`, where
+    /// bash's back-scan loops (all guarded by `i > 0`) cannot run at all and
+    /// the `token_end == 0` branch returns the single character `t[0]`.
+    ///
+    /// With a non-blank fetched line that is also what a walk over the whole
+    /// input would return — `echo 2` gives `e` either way — so only a blank
+    /// one tells the two apart: there the answer is the fetched line's own
+    /// `\n` or space, never the token back on the line before. Every row is
+    /// bash 5.2.37.
+    #[test]
+    fn the_near_scan_cannot_reach_back_past_the_readers_own_line() {
+        fn diag(src: &str) -> String {
+            let opts = ParseOpts::default();
+            let mut ip = IncrementalParser::new(src.as_bytes(), 0, opts);
+            while let Some(unit) = ip.next_unit(None, opts) {
+                let Err(e) = unit else { continue };
+                let line = e.line.unwrap_or(0);
+                return e
+                    .msgs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, m)| {
+                        let m: String = m.iter().map(|&b| char::from(b)).collect();
+                        format!("{}: {m}", e.line_of(i, line))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+            }
+            panic!("{src:?} must fail")
+        }
+        for (src, want) in [
+            // The fetched line is empty but for its newline, so `t[0]` is that
+            // newline — and the echo under it is the empty line.
+            (
+                "echo 1\n[[ a == b )\\\n\n",
+                "2: syntax error in conditional expression: unexpected token `)'\n3: syntax error near `\n'",
+            ),
+            ("echo 1\n[[ a b\\\n\n", "3: conditional binary operator expected\n3: syntax error near `\n'"),
+            (
+                "echo 1\n[[ ( a ;\\\n\n",
+                "3: unexpected token `;', conditional binary operator expected\n2: expected `)'\n3: syntax error near `\n'",
+            ),
+            // Whitespace is text, so the fetch found a line and `t[0]` is its
+            // first blank — not the `)` a whole-input walk would reach back to.
+            (
+                "echo 1\n[[ a == b )\\\n   \n",
+                "2: syntax error in conditional expression: unexpected token `)'\n3: syntax error near ` '",
+            ),
+            // The agree-by-accident rows: one line or many, the answer is the
+            // same, and they are here to keep the floor from moving.
+            (
+                "echo 1\n[[ a == b )\\\necho 2\n",
+                "2: syntax error in conditional expression: unexpected token `)'\n3: syntax error near `e'",
+            ),
+            (
+                "echo 1\n[[ a == b )\n",
+                "2: syntax error in conditional expression: unexpected token `)'\n2: syntax error near `)'",
+            ),
+            // A read that stopped mid-line never fetched anything, so its line
+            // is still the one it started on, backslash and all.
+            (
+                "echo 1\n[[ a -eq b -eq c\\\n\n",
+                "2: syntax error in conditional expression\n2: syntax error near `-eq'",
+            ),
+        ] {
+            assert_eq!(diag(src), want, "src {src:?}");
+        }
     }
 
     #[test]

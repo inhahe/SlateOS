@@ -2776,7 +2776,7 @@ and the three `-c` string-closed forms) and the corpus case
 **Impact.** One or two extra diagnostic lines on an input that is a syntax error
 either way, only when the string was closed with a backslash.
 
-### TD-OILS-THE-NEAR-SCAN-WALKS-OFF-THE-TOP-OF-THE-READERS-LINE. `near \`)\'` where bash names a newline — 2026-08-08 — OPEN
+### TD-OILS-THE-NEAR-SCAN-WALKS-OFF-THE-TOP-OF-THE-READERS-LINE. `near \`)\'` where bash names a newline — 2026-08-08 — ✅ FIXED 2026-08-08
 
 **Where:** `userspace/oils/src/parser.rs` — `Spans::near`, the port of bash's
 `error_token_from_text` (parse.y). Its only caller is `Parser::cond_near_at`, so
@@ -2811,17 +2811,25 @@ Found while fixing TD-OILS-A-BACKSLASH-CLOSED-STRING-STILL-FINDS-A-TOKEN-TO-REPO
 which removed the *other* half of that report (the emptied-buffer branch). This
 half survives because here the fetch did find a line — a blank one.
 
-**Proper fix.** Give the walk bash's floor: clamp the text to the reader's own
-line (from just past the previous `\n` through the `\n` that ends it) and make
-the offset line-relative, so the `i > 0` tests, the `token_end` sentinel and the
-one-character fallback all mean what they mean in bash. Note the continuation
-case is the same line rule, not a special one: `shell_getc` *replaces*
-`shell_input_line` with the newly fetched line rather than splicing it, so the
-reader really is at index 0 of a fresh line.
+**Fixed.** `Spans::near` was given bash's floor. Where it used to walk the whole
+input text from an absolute offset, it now slices the reader's own line out of it
+first — from just past the previous `\n` through the `\n` that ends it — and
+makes the offset line-relative. The walk below is untouched, but every step of it
+now means what it means in bash: the `i > 0` guards, the `token_end` sentinel and
+the `token_end == 0` one-character fallback.
 
-**Impact.** A wrong token named on the `near` line of a conditional error, only
-when the offending token is flush against a `\<newline>` whose next line begins
-with whitespace. The error, its first line and its echoed line are all correct.
+The continuation case needed no special handling, which is the point: it is the
+same line rule. `shell_getc` *replaces* `shell_input_line` with the fetched line
+rather than splicing it onto the old one, so a reader dragged past a deleted
+`\<newline>` is genuinely at index 0 of a fresh line, and clamping to that line
+reproduces it. An alias replacement has no newline in it, so the clamp is the
+whole of that text and costs nothing there.
+
+**Pinned by** `parser.rs`'s `the_near_scan_cannot_reach_back_past_the_readers_own_line`
+(the three divergent rows plus the agree-by-accident and mid-line-stop rows that
+keep the floor from moving) and the corpus case
+`the-near-scan-cannot-reach-back-past-the-readers-own-line.sh`, which walks the
+blank, space, tab, ` x`, `;` and non-blank continuation lines against bash.
 
 ### TD-OILS-A-RUN-OF-PARENS-IN-A-CONDITIONAL-IS-LEXED-AS-ARITHMETIC. `[[ ((( a ))) ]]` is a syntax error where bash succeeds — 2026-08-08 — ✅ FIXED 2026-08-08
 

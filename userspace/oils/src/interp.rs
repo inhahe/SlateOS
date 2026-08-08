@@ -10451,6 +10451,31 @@ impl Shell {
         self.take_discard_flow().unwrap_or(Flow::Next)
     }
 
+    /// Turn a pending expansion abort of *either* depth into the [`Flow`] it
+    /// unwinds as, for a compound command that expands words of its own.
+    ///
+    /// `case` is the one that needs this. `execute_case_command` expands the
+    /// subject (`expand_word_unsplit`) and then every pattern, and bash never
+    /// returns from a failure in one of them — the expansion
+    /// `jump_to_top_level`s straight out of the case, so no arm is tested and
+    /// nothing after it in the parse unit runs. osh's `exec_case` is an ordinary
+    /// function that *does* return, so it has to ask.
+    ///
+    /// Both flags matter, and they unwind differently: a discard drops one parse
+    /// unit ([`Self::take_discard_flow`]), while a nounset / `${x:?}` / bad
+    /// substitution ends the shell with the status it carried. Asking for only
+    /// the first left `case x in "y${nope?bad}") ;; esac` exiting 0 where bash
+    /// exits 1, because `exec_case` resets `last_status` before matching.
+    fn word_abort_flow(&mut self) -> Option<Flow> {
+        if let Some(flow) = self.take_discard_flow() {
+            return Some(flow);
+        }
+        let code = self.unbound_error.take()?;
+        let status = self.fatal_abort_status(code);
+        self.last_status = status;
+        Some(Flow::Exit(status))
+    }
+
     /// Evaluate an *integer-assignment* initializer — the value bound to a
     /// variable carrying the integer attribute (`declare -i x=EXPR`, a plain
     /// `x=EXPR` when `x` is `-i`, or an element of an `-ia` array). Unlike
@@ -10613,6 +10638,17 @@ impl Shell {
         // side, so both sides are expanded by an entry of their own that keeps
         // the mark a quoted empty in an operand left — see [`keep_marks`].
         let subject: Vec<Ch> = self.expand_case_subject(&c.word);
+        // `case` expands its own words, so it is also the only place that can
+        // turn an abort raised by one of them into control flow. bash's
+        // `execute_case_command` never returns from such a failure at all — the
+        // expansion `jump_to_top_level`s straight out of it — so nothing after
+        // this point runs and the parse unit is dropped. Without this the flag
+        // would stay armed and be consumed by whatever command ran *next*,
+        // swallowing a following line: `case x in "y$(⏎!⏎)z") ;; esac; echo hi`
+        // printed no `hi`. Same reasoning as [`Self::arith_discard_flow`].
+        if let Some(flow) = self.word_abort_flow() {
+            return flow;
+        }
         // `shopt -s nocasematch` makes `case` (and `[[ == ]]`) matching
         // case-insensitive.
         let ci = self.shopt.get("nocasematch").copied().unwrap_or(false);
@@ -10621,13 +10657,28 @@ impl Shell {
         let mut idx = 0;
         while idx < c.items.len() {
             let item = &c.items[idx];
-            let matched = item.patterns.iter().any(|pat| {
+            let mut matched = false;
+            let mut aborted = None;
+            for pat in &item.patterns {
                 // Preserve per-character quoting so an escaped/quoted
                 // metacharacter (`a\*b`, `a'*'b`) matches literally, while a
                 // metacharacter from an unquoted expansion stays live.
                 let pattern = self.expand_case_pattern(pat);
-                glob_match_echars_ci(&pattern, &subject, ci, extglob)
-            });
+                // A pattern's own expansion can abort just as the subject's can,
+                // and it ends the `case` where it stands: the patterns after it
+                // are never looked at, and no arm runs.
+                if let Some(flow) = self.word_abort_flow() {
+                    aborted = Some(flow);
+                    break;
+                }
+                if glob_match_echars_ci(&pattern, &subject, ci, extglob) {
+                    matched = true;
+                    break;
+                }
+            }
+            if let Some(flow) = aborted {
+                return flow;
+            }
             if !matched {
                 idx += 1;
                 continue;

@@ -78495,7 +78495,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // threaded path (it is not "plain external"); the pipe must still feed
         // its stdin while the redirect captures its stdout. Producer `cmd echo`
         // → consumer `findstr` (matches every line) → file.
-        let f = std::env::temp_dir().join("osh_pipe_redir_stdout.txt");
+        let f = std::env::temp_dir().join(format!("{}.txt", uniq_name("pipe_redir_stdout")));
         let _ = std::fs::remove_file(&f);
         let fp = f.to_string_lossy().replace('\\', "/");
         let script = format!(r#"cmd /c "echo hi" | findstr "h" > "{fp}""#);
@@ -78511,7 +78511,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // The last stage's own `2> file` must capture its stderr even though its
         // stdin is the inter-stage pipe. The consumer ignores stdin and writes
         // to its stderr, which the redirect diverts to the file.
-        let f = std::env::temp_dir().join("osh_pipe_redir_stderr.txt");
+        let f = std::env::temp_dir().join(format!("{}.txt", uniq_name("pipe_redir_stderr")));
         let _ = std::fs::remove_file(&f);
         let fp = f.to_string_lossy().replace('\\', "/");
         let script = format!(r#"cmd /c "echo E 1>&2" 2> "{fp}" | cmd /c "sort""#);
@@ -80451,7 +80451,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn noclobber_blocks_overwrite() {
         // `set -C` makes a plain `>` refuse to truncate an existing file.
-        let p = std::env::temp_dir().join("osh_noclobber_1.txt");
+        let p = std::env::temp_dir().join(format!("{}.txt", uniq_name("noclobber_blocks")));
         let _ = std::fs::remove_file(&p);
         let ps = p.to_string_lossy().replace('\\', "/");
         let src = format!("echo one > \"{ps}\"; set -C; echo two > \"{ps}\"; echo status=$?");
@@ -80464,7 +80464,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn clobber_override_bypasses_noclobber() {
         // `>|` overrides noclobber and truncates the existing file.
-        let p = std::env::temp_dir().join("osh_noclobber_2.txt");
+        let p = std::env::temp_dir().join(format!("{}.txt", uniq_name("noclobber_override")));
         let _ = std::fs::remove_file(&p);
         let ps = p.to_string_lossy().replace('\\', "/");
         let src = format!("echo one > \"{ps}\"; set -C; echo two >| \"{ps}\"; echo status=$?");
@@ -80477,7 +80477,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn set_plus_c_re_enables_overwrite() {
         // `set +C` clears noclobber, so `>` may truncate again.
-        let p = std::env::temp_dir().join("osh_noclobber_3.txt");
+        let p = std::env::temp_dir().join(format!("{}.txt", uniq_name("noclobber_reenable")));
         let _ = std::fs::remove_file(&p);
         let ps = p.to_string_lossy().replace('\\', "/");
         let src =
@@ -80795,7 +80795,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     #[test]
     fn noclobber_allows_append() {
         // `>>` is always permitted, even under noclobber.
-        let p = std::env::temp_dir().join("osh_noclobber_4.txt");
+        let p = std::env::temp_dir().join(format!("{}.txt", uniq_name("noclobber_append")));
         let _ = std::fs::remove_file(&p);
         let ps = p.to_string_lossy().replace('\\', "/");
         let src = format!("echo one > \"{ps}\"; set -C; echo two >> \"{ps}\"; echo status=$?");

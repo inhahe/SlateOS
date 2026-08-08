@@ -266,12 +266,24 @@ def run_case(shell: Path, case: Case) -> Run:
         script.write_bytes(case.source.encode("utf-8"))
         # A predictable environment: the case's own output must not depend on
         # the invoking shell's variables, prompt or locale.
+        #
+        # The locale is `C.UTF-8`, not `C`, and that is a decision rather than a
+        # detail — see `design-decisions.md` §104. bash chooses *per locale*
+        # whether a string is a sequence of bytes or of characters: every
+        # multibyte site sits behind `HANDLE_MULTIBYTE` and calls
+        # `mbrlen`/`mbstate`, so `${#s}` on `a…b` is 5 under `C` and 3 under
+        # `C.UTF-8`, and `printf %q` on a byte that is no character writes the
+        # raw byte under `C` but `$'a\377b'` under `C.UTF-8`. osh has no such
+        # switch — it is UTF-8 throughout, as the OS it ships in is — so pinning
+        # `C` here compared it against a baseline it was never built for. There
+        # is no edit to osh that is right under both; choosing which bash to
+        # measure against is the whole of the fix.
         env = dict(os.environ)
         env.update(
             {
                 "PS1": "$ ",
                 "PS2": "> ",
-                "LC_ALL": "C",
+                "LC_ALL": "C.UTF-8",
                 "BASH_ENV": "",
                 "ENV": "",
                 "COLUMNS": "80",

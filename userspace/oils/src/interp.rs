@@ -4261,7 +4261,44 @@ pub struct Shell {
     ppid: u32,
     /// 1-based source line of the item currently executing, backing `$LINENO`.
     /// Updated by [`Shell::exec_program`] before each item runs.
+    ///
+    /// Held *biased*, exactly as bash holds its counter: what is stored is the
+    /// recorded line minus [`Shell::line_bias`], so every reader of it —
+    /// `$LINENO`, the diagnostic prefixes, the `eval`/function line maps — sees
+    /// bash's number without having to know the bias exists.
     current_line: u32,
+    /// How far bash's line counter has fallen behind the true source line.
+    ///
+    /// bash's `line_number` (`parse.y:1749`) is **one** global shared by the
+    /// lexer and the executor. Each compound-command executor saves it on entry
+    /// and restores it on exit with plain assignments (`execute_for_command` at
+    /// `execute_cmd.c:2883`/`:3003`, `execute_select_command` at
+    /// `:3404`/`:3444`, and so on), so a `jump_to_top_level(DISCARD)` — a
+    /// `longjmp` straight to `reader_loop` — skips the restore and leaves the
+    /// counter *below* where the lexer had driven it. The lexer keeps counting
+    /// from there, so every line number for the rest of the script is low by the
+    /// difference, and the losses accumulate.
+    ///
+    /// osh has no shared counter to perturb — the parser records exact lines —
+    /// so the drift is carried here instead: [`Shell::exec_items`] and
+    /// [`Shell::exec_simple_inner`] subtract it when a recorded line becomes the
+    /// current one, and [`Shell::run_source_flow_units`] recomputes it after any
+    /// unit that ended in a discard. Restored by `parse_and_execute`
+    /// ([`Shell::run_source_flow_result`]) and by a function call's teardown,
+    /// which are the two places bash writes `unwind_protect_int (line_number)`
+    /// (`execute_cmd.c:5095`, `builtins/evalstring.c:232`) — and unwind-protects
+    /// *do* run on a `longjmp`. A subshell and a command substitution lose the
+    /// drift for the other reason: bash forks for both, so the abort perturbs
+    /// only the child's copy.
+    ///
+    /// See `TD-OILS-A-DISCARD-OUT-OF-A-COMPOUND-COMMAND-LOSES-BASH-A-LINE`.
+    line_bias: u32,
+    /// Set when [`Shell::exec_items`] absorbs the discard that ends a parse
+    /// unit, and taken by [`Shell::run_source_flow_units`] to recompute
+    /// [`Shell::line_bias`]. A flag rather than a [`Flow`] variant because the
+    /// absorbing arm has to keep returning [`Flow::Next`]: the reader carries on
+    /// with the next unit either way, and only the bias differs.
+    unit_discarded: bool,
     /// Active stderr (fd 2) redirections, innermost last. Empty = real stderr.
     /// Pushed/popped by [`Shell::exec_redirected`] around a compound command's
     /// body so its stderr redirect (`{ …; } 2> err`) covers every command in
@@ -5736,6 +5773,8 @@ impl Shell {
             pid: std::process::id(),
             ppid: parent_pid(),
             current_line: 1,
+            line_bias: 0,
+            unit_discarded: false,
             stderr_stack: Vec::new(),
             exec_stdout: None,
             live_stdout: None,
@@ -7226,8 +7265,18 @@ impl Shell {
         // [`crate::parser::close_last_line`].
         let src = crate::parser::close_last_line(src, crate::parser::InputKind::Str);
         let outer_usage_suppress = std::mem::take(&mut self.usage_suppress);
+        // `parse_and_execute` is one of the two places bash unwind-protects its
+        // line counter (`unwind_protect_int (line_number)`,
+        // `builtins/evalstring.c:232`), and unwind-protects *do* run on the
+        // `longjmp` a discard is — so an abort raised inside an `eval` string
+        // costs the *caller* nothing, however deep in the string's own compound
+        // commands it was raised. Both halves of the counter are saved: the
+        // number bash keeps is `current_line`, and the drift it is measured
+        // against is `line_bias`. See [`Shell::line_bias`].
+        let outer_line = (self.current_line, self.line_bias);
         let mut ran = false;
         let flow = self.run_source_flow_units(&src, out, stdin, map, hist, &mut ran);
+        (self.current_line, self.line_bias) = outer_line;
         self.usage_suppress = outer_usage_suppress;
         // bash's `last_result` starts at success and is written only inside the
         // loop, so an input the loop never entered is a success — whatever `$?`
@@ -7368,11 +7417,40 @@ impl Shell {
             if hist == HistRead::Reader && !self.command_mode {
                 self.command_number = self.command_number.saturating_add(1);
             }
-            match self.exec_program_top(&prog, out, stdin) {
+            // Where the lexer left bash's shared counter for this unit. Read
+            // before the unit runs, because running it is what moves the
+            // counter away.
+            let unit_end = ip.last_unit_end_line();
+            let flow = self.exec_program_top(&prog, out, stdin);
+            // A unit that ended in a `jump_to_top_level(DISCARD)` left bash's
+            // counter wherever the innermost command of this shell frame had
+            // driven it, instead of at the line the lexer had reached — so the
+            // gap between the two is the shell's new drift, and it is measured
+            // afresh (not accumulated) because `current_line` is already biased
+            // by the old one. See [`Shell::line_bias`].
+            if std::mem::take(&mut self.unit_discarded) && self.current_line != 0 {
+                self.line_bias = unit_end.saturating_sub(self.current_line);
+            }
+            match flow {
                 Flow::Next => {}
                 other => return other,
             }
         }
+    }
+
+    /// The *true* source line the shell stands on — [`Shell::current_line`] with
+    /// the drift added back in.
+    ///
+    /// The base of a [`LineMap`] is the one place that needs it. A map's output
+    /// is a *recorded* line, which [`Shell::exec_items`] and
+    /// [`Shell::exec_simple_inner`] bias on the way in exactly as they bias a
+    /// line the parser recorded from the script — so a base taken from the
+    /// already-biased `current_line` would have the drift subtracted twice, and
+    /// an `eval` after an abort would report one line lower than bash does.
+    /// Every *other* reader of `current_line` wants the biased value, because
+    /// that is the number bash prints. See [`Shell::line_bias`].
+    fn source_line(&self) -> u32 {
+        self.current_line.saturating_add(self.line_bias)
     }
 
     /// Perform `!`-style history expansion on the input lines making up the unit
@@ -8193,7 +8271,8 @@ impl Shell {
             // both this sweep and the whole of this item. See
             // [`TrackedCoproc::born_item`].
             self.item_seq = self.item_seq.wrapping_add(1);
-            self.current_line = item.line;
+            // Biased, because bash's counter is: see [`Shell::line_bias`].
+            self.current_line = item.line.saturating_sub(self.line_bias);
             if item.is_background() {
                 // The DEBUG trap hears about the job here, in the parent, before
                 // it is started — see [`Shell::announce_async`].
@@ -8228,7 +8307,15 @@ impl Shell {
                 //      echo no ); echo "[$x]"   # bash: [] — `no` never ran
                 // ( eval 'a[-9]=v'; echo no ); echo "rc=$?"   # bash: rc=1
                 // ```
-                Flow::Discard if top_level && self.subshell_depth == 0 => return Flow::Next,
+                //
+                // The jump is also where bash's line counter loses its place —
+                // the compound executors this longjmp flew past restore it with
+                // plain assignments, not unwind-protects — so tell the reader
+                // loop to remeasure the drift. See [`Shell::line_bias`].
+                Flow::Discard if top_level && self.subshell_depth == 0 => {
+                    self.unit_discarded = true;
+                    return Flow::Next;
+                }
                 // The same, but only once the unwind has left every `eval` and
                 // `source`: inside one it keeps propagating, so the string's
                 // *caller* is what loses the rest of its parse unit.
@@ -8245,6 +8332,7 @@ impl Shell {
                     if self.command_mode {
                         return Flow::Exit(self.last_status);
                     }
+                    self.unit_discarded = true;
                     return Flow::Next;
                 }
                 other => return other,
@@ -11700,6 +11788,12 @@ impl Shell {
             pid: self.pid,
             ppid: self.ppid,
             current_line: self.current_line,
+            // The counter's drift travels into the fork as it stands, but a
+            // drift the *child* then accrues stays there: bash forks for `( … )`
+            // and `$( … )`, so an abort under either one perturbs only the
+            // child's copy of `line_number` and the parent reads on undisturbed.
+            line_bias: self.line_bias,
+            unit_discarded: false,
             // A subshell inherits fd 2 as it stands, which is what an enclosing
             // command's stderr redirect has made of it: `{ echo X >&2 | cat; }
             // 2>&1` sends `X` to the group's fd 2, not to the real stderr, even
@@ -17567,9 +17661,10 @@ impl Shell {
         // bash tracks the line per simple command, so a multi-line pipeline or
         // `&&`/`||` list reports the failing command's line, not the list's
         // first line. A synthetic command (line 0, no source position) leaves
-        // the enclosing item's line in place.
+        // the enclosing item's line in place. Biased, because bash's counter is:
+        // see [`Shell::line_bias`].
         if sc.line != 0 {
-            self.current_line = sc.line;
+            self.current_line = sc.line.saturating_sub(self.line_bias);
         }
         // Clear any stale `failglob` marker so a miss raised in an unchecked
         // expansion context can never misfire on an unrelated later command;
@@ -18332,7 +18427,15 @@ impl Shell {
         }
         // Pop this call from the `FUNCNAME` stack.
         self.fn_stack.pop();
-        self.call_line_stack.pop();
+        // The call site is also what bash's other `unwind_protect_int
+        // (line_number)` (`execute_cmd.c:5095`) restores, and an unwind-protect
+        // runs on the `longjmp` a discard is — so an abort inside a function
+        // body leaves the counter at the *call*, not at the aborting line.
+        // Unobservable except through that drift, since every command after the
+        // call sets `current_line` itself. See [`Shell::line_bias`].
+        if let Some(line) = self.call_line_stack.pop() {
+            self.current_line = line;
+        }
         self.fn_source_stack.pop();
         self.refresh_funcname();
         // Pop this call's BASH_ARGC/BASH_ARGV frame iff we pushed one on entry.
@@ -29154,7 +29257,7 @@ impl Shell {
     /// [`CmdSubBody::Backtick`].
     fn run_command_sub_text(&mut self, text: BStr<'_>) -> Str {
         self.comsub_count = self.comsub_count.wrapping_add(1);
-        let map = LineMap::Offset(self.current_line.saturating_sub(1));
+        let map = LineMap::Offset(self.source_line().saturating_sub(1));
         let path = self.comsub_text_read_file(text, &map);
         self.command_sub(text, &map, path)
     }
@@ -29189,7 +29292,7 @@ impl Shell {
         // on the enclosing line, exactly as a backtick's does — measured both
         // ways, which is why [`Shell::run_command_sub_text`] keeps its own
         // `current_line - 1` base and this does not share it.
-        let map = LineMap::Offset(self.current_line);
+        let map = LineMap::Offset(self.source_line());
         let opts = self.parse_opts();
         let mut ip = IncrementalParser::new(body, map.clone(), opts);
         // The parse opens an input of its own, named the way every other
@@ -29591,7 +29694,7 @@ impl Shell {
         // (`eval` on line 3 running a one-line string reports 3; running a
         // three-line string reports 3, 4, 5.) `current_line` is already
         // absolute, so nested evals compose.
-        let eval_base = self.current_line.saturating_sub(1);
+        let eval_base = self.source_line().saturating_sub(1);
         // Re-reading a string is a level of *indirection* to bash, counted the
         // same way a command substitution's body is: `set -x; eval :` traces
         // `+ eval :` and then `++ :`, and the two nest (`eval 'v=$(echo q)'`
@@ -35947,7 +36050,7 @@ impl Shell {
         let map = if trap_resets_line(name) {
             LineMap::Offset(0)
         } else {
-            LineMap::Offset(self.current_line.saturating_sub(1))
+            LineMap::Offset(self.source_line().saturating_sub(1))
         };
         // A handler body is a level of indirection to the tracer, the way a
         // command substitution is: `set -x; trap b DEBUG; echo one` traces the
@@ -44717,7 +44820,7 @@ impl Shell {
         ];
         // Body line 1 is the line `compgen` was reached on, so `$LINENO` inside
         // the command reads as it would in a `$( … )` written there.
-        let map = LineMap::Offset(self.current_line.saturating_sub(1));
+        let map = LineMap::Offset(self.source_line().saturating_sub(1));
         self.command_sub(&src, &map, None)
             .split(|b| *b == b'\n')
             .filter(|l| !l.is_empty())
@@ -66837,6 +66940,105 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("r=`echo $LINENO; echo $LINENO\necho $LINENO`\necho \"$r\"").0,
             "2\n2\n3\n"
+        );
+    }
+
+    /// A discard out of a compound command leaves bash's line counter below
+    /// where the lexer had driven it, and every line number for the rest of the
+    /// script is low by the difference — cumulatively.
+    ///
+    /// bash's `line_number` (`parse.y:1749`) is one global shared by lexer and
+    /// executor; the compound executors save and restore it with plain
+    /// assignments (`execute_cmd.c:2883`/`:3003` and friends), which a
+    /// `jump_to_top_level(DISCARD)` longjmps straight past. Every row was
+    /// measured against bash 5.2.37; see known-issues.md
+    /// TD-OILS-A-DISCARD-OUT-OF-A-COMPOUND-COMMAND-LOSES-BASH-A-LINE.
+    ///
+    /// The abort is `m=1+` under `declare -i`, which is the deeper of bash's
+    /// two discards; `${a[1-]}` below is the ordinary one, and both drift.
+    #[test]
+    fn a_discard_out_of_a_compound_command_loses_a_line() {
+        // A top-level abort loses nothing: the aborting line *is* the unit's
+        // last line, so the counter is already where the lexer left it.
+        assert_eq!(run("declare -i m\nm=1+\necho \"A $LINENO\"").0, "A 3\n");
+        // One enclosing compound, one line lost — the `fi` the restore never ran
+        // for. `while`/`{ … }` are the same shape and the same loss.
+        assert_eq!(
+            run("declare -i m\nif true; then\n  m=1+\nfi\necho \"A $LINENO\"").0,
+            "A 4\n"
+        );
+        assert_eq!(
+            run("declare -i m\nwhile true; do\n  m=1+\ndone\necho \"A $LINENO\"").0,
+            "A 4\n"
+        );
+        // Two enclosing compounds, two lines.
+        assert_eq!(
+            run("declare -i m\nif true; then\n if true; then\n  m=1+\n fi\nfi\necho \"A $LINENO\"")
+                .0,
+            "A 5\n"
+        );
+        // Cumulative: each abort measures the new gap from the already-shifted
+        // counter, so two `if`s cost two lines by the end.
+        assert_eq!(
+            run("declare -i m\nif true; then\n  m=1+\nfi\nif true; then\n  m=2+\nfi\necho \"A $LINENO\"")
+                .0,
+            "A 6\n"
+        );
+        // The ordinary expansion-error discard drifts exactly the same way.
+        assert_eq!(run("if true; then\n  echo ${a[1-]}\nfi\necho \"A $LINENO\"").0, "A 3\n");
+        // A function call restores the counter — `unwind_protect_int
+        // (line_number)`, `execute_cmd.c:5095`, and unwind-protects *do* run on
+        // a longjmp — but restores it to the *call site*, not to the unit's last
+        // line. So a call made at top level loses nothing…
+        assert_eq!(
+            run("declare -i m\nf() {\n  m=1+\n}\nf\necho \"A $LINENO\"").0,
+            "A 6\n"
+        );
+        // …and a call made from inside an `if` loses exactly what the `if` does.
+        assert_eq!(
+            run("declare -i m\nf() {\n  m=1+\n}\nif true; then\n  f\nfi\necho \"A $LINENO\"").0,
+            "A 7\n"
+        );
+        // `parse_and_execute` unwind-protects it too (`evalstring.c:232`), so an
+        // abort inside an `eval` string costs the caller only what the `eval`
+        // command's *own* surroundings cost — never what the string's do. A
+        // whole `if … fi` built inside the string loses nothing…
+        assert_eq!(
+            run("declare -i m\neval 'if true; then\n  m=1+\nfi'\necho \"A $LINENO\"").0,
+            "A 5\n"
+        );
+        // …while an `eval` written inside an `if` loses that `if`'s one line.
+        assert_eq!(
+            run("declare -i m\nif true; then\n  eval \"m=1+\"\nfi\necho \"A $LINENO\"").0,
+            "A 4\n"
+        );
+        // bash forks for `( … )` and for `$( … )`, so a discard under either
+        // perturbs only the child's copy of the counter.
+        assert_eq!(
+            run("declare -i m\nif true; then\n  ( m=1+ )\nfi\necho \"A $LINENO\"").0,
+            "A 5\n"
+        );
+        assert_eq!(
+            run("declare -i m\nif true; then\n  x=$( m=1+ )\nfi\necho \"A $LINENO\"").0,
+            "A 5\n"
+        );
+        // The drift reaches everything parsed afterwards, including a function
+        // defined *after* it: the body's lines were recorded by the already
+        // shifted counter.
+        assert_eq!(
+            run("declare -i m\nif true; then\n  m=1+\nfi\nf() {\n  echo \"IN $LINENO\"\n}\nf\necho \"A $LINENO\"")
+                .0,
+            "IN 5\nA 8\n"
+        );
+        // And an `eval`/`$( … )` body reached afterwards is numbered from the
+        // shifted counter as well — the base is bash's number, not the true one.
+        assert_eq!(
+            run("declare -i m\nif true; then\n  m=1+\nfi\neval 'echo \"E $LINENO\"'").0,
+            "E 4\n"
+        );
+        assert_eq!(
+            run("declare -i m\nif true; then\n  m=1+\nfi\necho \"C $(echo $LINENO)\"").0,
+            "C 4\n"
         );
     }
 

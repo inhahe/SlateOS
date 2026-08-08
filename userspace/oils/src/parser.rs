@@ -1821,6 +1821,21 @@ impl IncrementalParser {
         &self.unit_lines
     }
 
+    /// The source line the reader stopped on for the unit [`Self::next_unit`]
+    /// last returned — the line of the last token it consumed.
+    ///
+    /// This is where bash's shared `line_number` (`parse.y:1749`) stands once a
+    /// unit has parsed and before it runs, which is the value every *later*
+    /// unit's line numbers are measured from. A caller that has to reproduce
+    /// bash's post-abort line drift needs it; see
+    /// `TD-OILS-A-DISCARD-OUT-OF-A-COMPOUND-COMMAND-LOSES-BASH-A-LINE`.
+    /// Meaningful only just after a successful `next_unit`; `0` before the
+    /// first one.
+    #[must_use]
+    pub fn last_unit_end_line(&self) -> u32 {
+        self.pos.checked_sub(1).and_then(|i| self.orig_lines.get(i).copied()).unwrap_or(0)
+    }
+
     /// The raw source the unit [`Self::next_unit`] last returned occupies,
     /// newline-terminated unless the input itself ended without one. This is
     /// what `set -v` echoes: bash echoes input as its *reader* consumed it, so

@@ -2459,6 +2459,54 @@ gains a stray `\xff`: `bash -c $'cat <<x\nbody\\'` writes `body\\\xff\n` where
 the same bytes in a file write `body`. osh writes the file answer in both cases
 and should keep doing so.
 
+### TD-OILS-AN-ESCAPED-BACKSLASH-BEFORE-A-NEWLINE-WAS-READ-AS-A-CONTINUATION. An even run of backslashes ended a line one line too far down — 2026-08-08 — ✅ FIXED 2026-08-08
+
+**Where:** `userspace/oils/src/parser.rs` — `ends_in_cont`, which
+`Spans::reader_stop` consults for a span the lexer closed *past* a deleted
+`\<newline>`.
+
+**What.** `ends_in_cont` asked only whether the two characters before the span's
+end were `\` and `\n`. It never looked at what stood in front of that backslash,
+so `…\\⏎` — a *quoted* backslash and an ordinary newline — was charged a fetch
+it never cost. Both readers, not just the string one:
+
+```text
+input (a script file)          bash                       osh
+nosuch$LINENO\⏎                line 3                     line 3   (agrees)
+nosuch$LINENO\\⏎               line 1                     line 2
+nosuch$LINENO\\\⏎              line 3                     line 3   (agrees)
+nosuch$LINENO\\\\⏎             line 1                     line 2
+```
+
+**Why.** `shell_getc` deletes `\<newline>` on sight, but `read_token_word` never
+lets it see the character after a backslash: that one is read with
+`shell_getc (0)`, continuation removal *off* (parse.y). So a run inside a word is
+consumed in pairs, each pair yielding one literal backslash, and only an unpaired
+last backslash is left to join with the newline. Parity decides, and the odd case
+is the continuation.
+
+The line only moves where the newline token is the one being placed, which for a
+simple command is the lookahead of a *one-word* command: `simple_command_line`
+takes bash's reduction of the command's first element, and that reduction waits
+for one more token. `nosuch A\\⏎` was right all along because its lookahead is
+the word `A\`, whose span ends before the newline.
+
+Syntax errors hid it by cancelling: with `ends_in_cont` wrongly true the
+end-of-file request was treated as `stowed` and charged nothing, and the two
+mistakes came to the same number.
+
+**Fixed.** `ends_in_cont` counts the run of backslashes ending at the one before
+the newline and answers on its parity.
+
+**Measured, not assumed.** bash 5.2.37 on one-line script files, runs of 1 to 4:
+3, 1, 3, 1. Pinned by four new rows in
+`simple_command_line_follows_bashs_lookahead_rule` and the corpus case
+`a-backslash-before-a-newline-deletes-it-only-in-an-odd-run.sh`, which reads the
+command's line back through a `DEBUG` trap — the only way to see it without
+running a command whose name ends in a backslash, and what such a lookup *says*
+is the host's business rather than the parser's. The corpus case fails on the
+pre-fix build in five places, including two here-document delimiter lines.
+
 ### TD-OILS-A-LIST-TERMINATOR-EOF-IS-REQUESTED-TWICE. `for`/`select` cut off by a continuation report one line low — 2026-08-08 — ✅ FIXED 2026-08-08
 
 **Where:** `userspace/oils/src/parser.rs` — `Parser::parse_in_list`, where the
@@ -2588,6 +2636,80 @@ and whose `]]` is missing.
 
 **Impact.** One diagnostic line, wrong text and wrong line number, for an input
 that is a syntax error either way.
+
+### TD-OILS-AN-ASSIGNMENT-PREFIX-STILL-ADMITS-A-RESERVED-WORD. `v=1 done` is a syntax error where bash runs a command — 2026-08-08 — OPEN
+
+**Where:** `userspace/oils/src/parser.rs` — wherever the command word is matched
+against `RESERVED`. The gate has to be bash's `reserved_word_acceptable`, which
+answers on the *previous token* and not on "no command word yet".
+
+**What.** bash recognises a reserved word only where the token before it is one
+of a fixed list — a separator, an operator, `{`, `}`, `!`, `time`, `coproc`, or
+another reserved word (parse.y, `reserved_word_acceptable`). A plain `WORD` is
+not on that list, and an assignment prefix *is* a plain `WORD`. So after one, a
+reserved word is an ordinary command name:
+
+```text
+input            bash                                osh
+v=1 done         line 1: done: command not found     syntax error near `done'
+v=1 then         line 1: then: command not found     syntax error near `then'
+v=1 fi           …: fi: command not found            syntax error near `fi'
+v=1 do           …: do: command not found            syntax error near `do'
+v=1 esac         …: esac: command not found          syntax error near `esac'
+v=1 in           …: in: command not found            syntax error near `in'
+v=1 {            …: {: command not found             syntax error near `{'
+v=1 }            …: }: command not found             syntax error near `}'
+v=1 !            …: !: command not found             syntax error near `!'
+```
+
+`if`, `while` and the other compound openers are the same rule seen from the
+other side: `v=1 if true; then echo y; fi` runs a command called `if` with the
+argument `true`, and bash's error is then about the `then` that follows a `;` —
+`syntax error near unexpected token 'then'` — where osh blames the `if`.
+
+**Also wrong, and probably the same afternoon's work:** the source line echoed
+under the diagnostic loses two characters when the line was joined by a
+continuation. `printf 'v=1\\echo done\n'` — one physical line reading
+`v=1\echo done` — is echoed by osh as `` `v=1cho done' ``. bash does not reach a
+syntax error there at all, so this is only visible through some *other* error on
+a line holding an escaped character, but the slice is wrong either way.
+
+**Proper fix.** Give the parser bash's `reserved_word_acceptable` predicate over
+the last token handed out, and consult it at the single place `RESERVED` is
+tested. The list is in parse.y and is short; the only care needed is that an
+assignment prefix, a command word and a redirection target all count as "not
+acceptable" while `!`, `{`, `}`, `time` and every reserved word count as
+acceptable.
+
+**Impact.** A syntax error where bash runs a command, so a script that reaches
+one of these lines dies at parse time instead of at that line. Found while
+building the corpus case for
+TD-OILS-AN-ESCAPED-BACKSLASH-BEFORE-A-NEWLINE-WAS-READ-AS-A-CONTINUATION, whose
+`v=1\⏎echo done` probe joins into exactly this shape.
+
+### TD-OILS-WAIT-N-JOB-STATUS-TEST-IS-FLAKY-UNDER-PARALLEL-EXECUTION. `wait_n_ignores_a_job_whose_status_was_already_reported` fails about one run in three — 2026-08-08 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs:78623` — the assertion in
+`interp::tests::wait_n_ignores_a_job_whose_status_was_already_reported`.
+
+**What.** Under the full `cargo test -p oils --lib` run the assertion sometimes
+reports `left: 0, right: 1`; the same test passes every time when run alone
+(`cargo test … wait_n_ignores`). Two full-suite runs in a row: one failure, then
+one clean. Nothing else in the suite failed either time.
+
+**Why (suspected).** The test spawns a real background job and then asks `wait
+-n` about it, so it depends on the child having been reaped by the time the
+assertion runs. With the suite's other tests competing for the machine that
+window can close late. The status it reads is process-global rather than
+per-test, so a job another test left behind could also be answering.
+
+**Proper fix.** Find out which of the two it is before changing anything: if it
+is the reap window, the test must wait on a condition rather than on wall-clock
+progress; if it is shared job state, the job table has to be per-test — and if it
+is the latter, the *shell* has a bug and not just the test.
+
+**Impact.** A red full-suite run that is not a real regression, which is the
+worst kind: it teaches the next session to re-run and shrug.
 
 ### TD-OILS-A-HERE-DOCUMENT-DELIMITER-STOPPED-AT-THE-FIRST-SEPARATOR-INSIDE-A-GROUP. `<<E$(a b)` was read as a delimiter `E$(a` and a stray word `b)` — 2026-08-06 — ✅ FIXED 2026-08-06
 

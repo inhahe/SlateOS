@@ -2591,16 +2591,34 @@ impl Spans {
 /// `\<newline>` the lexer deleted. A *plain* newline is not one: it is the last
 /// character of the line it terminates, and bash bumps `line_number` only on the
 /// fetch that follows.
+///
+/// A backslash standing in front of the newline only makes it a continuation
+/// when the *run* of backslashes it belongs to is odd. `read_token_word` reads
+/// the character after a `\` with `shell_getc (0)` — continuation removal off —
+/// so the run is consumed in pairs, and only an unpaired last backslash is left
+/// to join with the newline. With an even run the newline is an ordinary one and
+/// costs nothing here: `printf 'echo 1\nnosuch$LINENO\\\n'` reports `nosuch2`,
+/// not `nosuch3`.
 fn ends_in_cont(t: &[Ch], end: usize) -> bool {
     if t.get(end.wrapping_sub(1)) != Some(&Ch::U('\n')) {
         return false;
     }
     // `\<newline>`, or the `\<CR><LF>` a CRLF file writes.
-    match t.get(end.wrapping_sub(2)) {
-        Some(&Ch::U('\\')) => true,
-        Some(&Ch::U('\r')) => t.get(end.wrapping_sub(3)) == Some(&Ch::U('\\')),
-        _ => false,
-    }
+    let run_end = match t.get(end.wrapping_sub(2)) {
+        Some(&Ch::U('\\')) => end.wrapping_sub(2),
+        Some(&Ch::U('\r')) if t.get(end.wrapping_sub(3)) == Some(&Ch::U('\\')) => {
+            end.wrapping_sub(3)
+        }
+        _ => return false,
+    };
+    let run = t
+        .get(..run_end.wrapping_add(1))
+        .unwrap_or(&[])
+        .iter()
+        .rev()
+        .take_while(|&&c| c == Ch::U('\\'))
+        .count();
+    run % 2 == 1
 }
 
 /// How far a token's own reading looked past its last character — the two facts
@@ -6567,6 +6585,15 @@ mod tests {
         // An assignment takes no lookahead at all, so the deletion after the
         // command is none of its business.
         assert_eq!(line_of("v=1 echo $LINENO\\\n"), 1);
+        // A backslash in front of the newline only deletes it when the run it
+        // belongs to is odd: `read_token_word` reads the character after a `\`
+        // with continuation removal off, so the run is consumed in pairs and an
+        // even one leaves an ordinary newline behind. bash 5.2.37 numbers the
+        // one-word command 3, 1, 3, 1 for runs of 1 to 4.
+        assert_eq!(line_of("nosuch$LINENO\\\n"), 3);
+        assert_eq!(line_of("nosuch$LINENO\\\\\n"), 1);
+        assert_eq!(line_of("nosuch$LINENO\\\\\\\n"), 3);
+        assert_eq!(line_of("nosuch$LINENO\\\\\\\\\n"), 1);
     }
 
     /// bash's `line_number` counts *fetches*, not lines of text, and deleting a

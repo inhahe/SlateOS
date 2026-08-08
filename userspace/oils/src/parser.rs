@@ -1593,10 +1593,8 @@ impl IncrementalParser {
             // line was raised in a stream of its own (a `$( … )` body), where
             // the reduction never happens.
             let gathered = if e.line.is_none() { self.heredoc_gather(&p) } else { 0 };
-            let line = p
-                .reader_line()
-                .saturating_add(u32::from(e.is_incomplete()))
-                .saturating_add(gathered);
+            let at = if e.is_incomplete() { p.toks.len() } else { p.pos };
+            let line = p.reader_line_at(at).saturating_add(gathered);
             // `read_a_line` (parse.y:2080) reads a here-document body into a
             // buffer of its own and never replaces `shell_input_line`, so the
             // gather moved the *number* and not the text: bash prints the line
@@ -2192,17 +2190,22 @@ fn parse_tokens_ending(
         other => other,
     };
     // Stamp the offending line centrally. `pos` is not advanced past a failing
-    // token, so the parser's cursor still points at the error site. bash reports
-    // the line its *reader* was on for a grammar error — the token's own line
-    // unless a `\<newline>` written flush after it dragged the reader onto the
-    // next one — but for an *unexpected end of file* error it reports one line
-    // past the last token, the position where the missing terminator would go.
-    // Key that off the message, not the cursor:
+    // token, so the parser's cursor still points at the error site, and bash
+    // reports the line its *reader* was on — the token's own line unless a
+    // `\<newline>` written flush after it dragged the reader onto the next one.
+    //
+    // An *unexpected end of file* is the one error whose site is not a token at
+    // all: the parser asked for one and the reader ran out. Ask for the line at
+    // the end of the stream rather than at the cursor, which
+    // [`Parser::reader_line_at`] answers with the fetch that found the end of
+    // file — usually a line past the last token, but not when that token's own
+    // lookahead had already found it. Key that off the message, not the cursor:
     // an error can name a token that is not in this stream at all (a `$( … )`
     // body reports the substitution's closing `)`), and those still belong on
     // the last token's line.
     parsed.map_err(|e| {
-        let line = p.reader_line().saturating_add(u32::from(e.is_incomplete()));
+        let line =
+            if e.is_incomplete() { p.reader_line_at(p.toks.len()) } else { p.reader_line() };
         e.or_line(line).or_echo(p.reader_echo())
     })
 }
@@ -2568,6 +2571,11 @@ struct Reader {
     /// Whether the token came from `read_token_word`, whose terminator peek can
     /// reach one character further than the token itself. See the third case in
     /// [`Spans::reader_stop`].
+    ///
+    /// A here-document body counts as one: the token this parser carries the
+    /// body on stands for the *delimiter word*, and bash reads that delimiter
+    /// with `read_token_word` like any other — `<<` is an operator, but what
+    /// follows it is a word, and `read_token` returns it through the same path.
     word: bool,
 }
 
@@ -2599,6 +2607,7 @@ impl Reader {
                         | Tok::Io(_)
                         | Tok::VarFd(_)
                         | Tok::ArrayAssign { .. }
+                        | Tok::HereDoc(..)
                         | Tok::Invalid(_)
                 )
             ),
@@ -2677,8 +2686,49 @@ impl Parser {
     /// token's own line but the reader's, which is a line further down for every
     /// `\<newline>` written flush after the token. See [`Spans::cont_lines`].
     fn reader_line(&self) -> u32 {
-        let r = Reader::of(self.toks.get(self.pos));
-        self.cur_line().saturating_add(self.spans.cont_lines(self.pos, r))
+        self.reader_line_at(self.pos)
+    }
+
+    /// [`Parser::reader_line`] for an arbitrary position — bash's `line_number`
+    /// as it stands the moment `read_token` hands the token at `at` over.
+    ///
+    /// Past the end of the stream it can be one line *further* still. The read
+    /// finds the input buffer used up and enters `shell_getc`'s fetch block,
+    /// whose first statement is `line_number++` (parse.y:2361) — reached before
+    /// the fetch itself returns end of file, and reached again on every further
+    /// request. So merely asking for a token that is not there costs a line:
+    /// `printf 'echo 1\nnosuch$LINENO\\' > f` reports `nosuch4` out of a two-line
+    /// file — line 2 for the word, line 3 for the continuation the word's own
+    /// terminator scan deleted, line 4 for the lookahead the parser needed before
+    /// it could reduce the command.
+    ///
+    /// It is charged only where the last read really did run out. A word's scan
+    /// stops *on* the character that ended it (`if (character == EOF) goto
+    /// got_token`, parse.y:4904) and pushes nothing back, so the next request is
+    /// a fresh fetch. An operator instead peeks with `shell_getc` and returns the
+    /// peek with `shell_ungetc`, which at the start of a line stows it in
+    /// `eol_ungetc_lookahead` — and `shell_getc` returns that ahead of any fetch.
+    /// The end of file the peek already found is therefore handed over a second
+    /// time for free, which is why `cat >\⏎` at the end of a file is blamed on
+    /// line 3 where `cat <<x\` is blamed on line 4.
+    ///
+    /// The stow is only free where the peek reached the end of input at all,
+    /// which for a token that did not sit against a `\⏎` it means the peek never
+    /// ran the buffer out: it found the newline the reader wrote back, pushed
+    /// *that* back, and the end of file is still to be fetched. So the three
+    /// conditions are read together — the last token peeked, was not a word, and
+    /// its peek deleted a continuation running to the end of the input.
+    fn reader_line_at(&self, at: usize) -> u32 {
+        let Some(tok) = self.toks.get(at) else {
+            let Some(last) = self.toks.len().checked_sub(1) else {
+                return self.cur_line();
+            };
+            let r = Reader::of(self.toks.get(last));
+            let stowed = r.peeks && !r.word && self.spans.cont_lines(last, r) > 0;
+            return self.reader_line_at(last).saturating_add(u32::from(!stowed));
+        };
+        let line = self.lines.get(at).copied().unwrap_or_else(|| self.cur_line());
+        line.saturating_add(self.spans.cont_lines(at, Reader::of(Some(tok))))
     }
 
     /// The text bash would echo under a `syntax error near …` at the current
@@ -4152,6 +4202,13 @@ impl Parser {
     /// | `echo $LINENO "x⏎y"` | 1 |
     /// | `echo \⏎$LINENO` | 2 |
     /// | `v=1 echo "a⏎b" $LINENO` | 1 |
+    ///
+    /// What that lookahead costs is the *reader's* line and not the token's own:
+    /// a `\⏎` written flush after the second token is deleted by the scan that
+    /// finds the token has ended, and the deletion moves `line_number` before the
+    /// token is ever handed over. So `echo L$LINENO\` at the end of a file
+    /// reports 3 out of two lines. See [`Parser::reader_line_at`], which also
+    /// covers the case where the lookahead is not there at all.
     fn simple_command_line(&self) -> u32 {
         let leading_assignment = match self.toks.get(self.pos) {
             Some(Tok::ArrayAssign { .. }) => true,
@@ -4161,10 +4218,7 @@ impl Parser {
         if leading_assignment {
             return self.cur_line();
         }
-        self.lines
-            .get(self.pos.saturating_add(1))
-            .copied()
-            .unwrap_or_else(|| self.cur_line())
+        self.reader_line_at(self.pos.saturating_add(1))
     }
 
     fn parse_simple(&mut self) -> Result<Command, ParseError> {
@@ -6417,6 +6471,87 @@ mod tests {
         // A lone word has only the newline to look ahead at, and reading that
         // never fetches the following line.
         assert_eq!(line_of("echo \"a\nb\"\ncmd\n"), 2);
+        // A `\<newline>` the reader *deletes* still costs a fetch, and the
+        // lookahead word's terminator scan is what walks into it. So the count
+        // rises even though no token spans the two lines …
+        assert_eq!(line_of("echo $LINENO\\\n"), 2);
+        assert_eq!(line_of("echo $LINENO\\\n\\\n"), 3);
+        // … and it does not rise when the lookahead ends before the deletion,
+        // even though a *later* word runs into it.
+        assert_eq!(line_of("echo $LINENO A\\\n"), 1);
+        // An assignment takes no lookahead at all, so the deletion after the
+        // command is none of its business.
+        assert_eq!(line_of("v=1 echo $LINENO\\\n"), 1);
+    }
+
+    /// bash's `line_number` counts *fetches*, not lines of text, and deleting a
+    /// `\<newline>` is a fetch: `shell_getc` bumps the counter and re-reads
+    /// (parse.y:2361). On top of that, the parser's request for a lookahead token
+    /// that is not there enters the same fetch block and costs one more. So an
+    /// input whose last line is one or more continuations blames its syntax error
+    /// several lines past the last line that has any text on it. Every
+    /// expectation below is bash 5.2.37's own message for the same script file.
+    /// See [`Parser::reader_line_at`] and [`Lexer::reader_at_eof`].
+    #[test]
+    fn a_continuation_at_end_of_input_moves_the_reader() {
+        /// The (line, message) of the first failing unit, parsed the way a script
+        /// file is — through the streaming parser, which stamps error lines from
+        /// the reader's position rather than the token's.
+        fn err(src: &str) -> (u32, String) {
+            let opts = ParseOpts::default();
+            let mut ip = IncrementalParser::new(src.as_bytes(), 0, opts);
+            while let Some(unit) = ip.next_unit(None, opts) {
+                let Err(e) = unit else { continue };
+                return (e.line.unwrap_or(0), emsg(&e));
+            }
+            panic!("{src:?} must fail");
+        }
+        let eof = "syntax error: unexpected end of file";
+        // Sources are written as `st_stream` hands them over: a script whose last
+        // line is a lone `\` has a `\n` appended to it, so a trailing continuation
+        // appears here as a complete `\<newline>`.
+        for (src, want) in [
+            // The baseline: no continuation. The `>` has nothing to redirect to,
+            // and the newline it finds is the offending token on line 2.
+            ("echo 1\ncat >\n", (2, "syntax error near unexpected token `newline'")),
+            // One continuation deletes that newline, so the error becomes an
+            // end-of-file — reported one line further on for each deletion.
+            ("echo 1\ncat >\\\n", (3, eof)),
+            ("echo 1\ncat >\\\n\\\n", (4, eof)),
+            ("echo 1\ncat >\\\n\\\n\\\n", (5, eof)),
+            // A compound left open runs out of input either way; the continuations
+            // only move the line. Note the no-continuation form is *already* one
+            // past the text: the parser's request for the token that never comes
+            // is itself a fetch.
+            ("echo 1\nif true; then\n", (3, eof)),
+            ("echo 1\nif true; then\\\n", (4, eof)),
+            ("echo 1\nif true; then\\\n\\\n", (5, eof)),
+            ("echo 1\n{ echo hi\n", (3, eof)),
+            ("echo 1\n{ echo hi\\\n", (4, eof)),
+            ("echo 1\n{ echo hi\\\n\\\n", (5, eof)),
+            // `|` is one character but bash still peeks past it, to tell it from
+            // `||` and `|&`. That peek deletes every trailing continuation and
+            // then finds the end of input — and `shell_ungetc` stows it, since it
+            // is at the start of the line just fetched, so the parser's own
+            // request gets it back for free. The count is therefore exactly the
+            // continuations, with no post-EOF bump on top: the same total as the
+            // no-continuation form, which pays only the bump.
+            ("echo 1\necho a |\n", (3, eof)),
+            ("echo 1\necho a |\\\n", (3, eof)),
+            ("echo 1\necho a |\\\n\\\n", (4, eof)),
+            // A token the grammar rejects outright is blamed on the reader's line
+            // too, so a continuation flush after it moves the blame even though
+            // the token itself did not move.
+            ("echo 1\necho )\n", (2, "syntax error near unexpected token `)'")),
+            ("echo 1\necho )\\\n", (3, "syntax error near unexpected token `)'")),
+            ("echo 1\nesac\\\n", (3, "syntax error near unexpected token `esac'")),
+            ("echo 1\ndone\\\n", (3, "syntax error near unexpected token `done'")),
+            ("echo 1\nfi\\\n", (3, "syntax error near unexpected token `fi'")),
+            ("echo 1\necho a;;\\\n", (3, "syntax error near unexpected token `;;'")),
+        ] {
+            let (line, msg) = err(src);
+            assert_eq!((line, msg.as_str()), want, "src {src:?}");
+        }
     }
 
     /// Every parser diagnostic that quotes a shell construct back quotes the

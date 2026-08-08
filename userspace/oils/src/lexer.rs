@@ -3136,6 +3136,12 @@ impl Lexer {
         // is a perfectly good (false) command. Closing the stream with the `)`
         // reproduces both halves of that. (A backtick body really is lexed on
         // its own — bash accepts `` `!` `` — so it keeps the newline.)
+        // Each of the three tails below is an iteration of its own — it appends
+        // tokens and closes with `stamp_lines`, which takes `self.line` as the
+        // line the iteration *began* on. So the iteration mark has to move with
+        // it, or [`Lexer::cur_line`] adds the previous iteration's newlines to a
+        // `self.line` that has already counted them.
+        self.iter_start = self.pos;
         if self.paren_body {
             let start_pos = self.pos;
             if !self.pending_heredocs.is_empty() {
@@ -3143,15 +3149,53 @@ impl Lexer {
             }
             out.push(Tok::Op(Op::RParen));
             self.stamp_lines(out, marks, self.line, start_pos);
-        } else if !matches!(out.last(), None | Some(Tok::Newline)) {
+        } else if !matches!(out.last(), None | Some(Tok::Newline)) && !self.reader_at_eof() {
             let start_pos = self.pos;
             out.push(Tok::Newline);
             if !self.pending_heredocs.is_empty() {
                 self.collect_heredocs(out)?;
             }
             self.stamp_lines(out, marks, self.line, start_pos);
+        } else if !self.pending_heredocs.is_empty() {
+            let start_pos = self.pos;
+            self.collect_heredocs(out)?;
+            self.stamp_lines(out, marks, self.line, start_pos);
         }
         Ok(())
+    }
+
+    /// Whether bash's reader has run out of input entirely, rather than merely
+    /// reached the end of a last line it still has to close.
+    ///
+    /// `shell_getc` gives a line that came without a newline one of its own
+    /// (parse.y:2567), which is why a script with no final newline parses as
+    /// though it had one — see [`crate::parser::close_last_line`], which is where
+    /// that writing-back is now done. But a `\<newline>` it *deleted* is a line
+    /// it has already consumed: the `goto restart_read` that follows the deletion
+    /// fetches again, and if the deleted newline was the input's last that fetch
+    /// returns end of file. There is no line left to close and so no newline to
+    /// hand over — `read_token` returns `yacc_EOF` instead:
+    ///
+    /// ```text
+    /// echo 1⏎cat >\⏎      line 3: syntax error: unexpected end of file
+    /// echo 1⏎cat >⏎       line 2: syntax error near unexpected token `newline'
+    /// ```
+    ///
+    /// The test is the deletion and not just the text: an input ending in
+    /// `\\<newline>` ends in a real newline — the first backslash quotes the
+    /// second — and that newline is a token, so the question never arises.
+    fn reader_at_eof(&self) -> bool {
+        let n = self.chars.len();
+        if self.pos < n {
+            return false;
+        }
+        // `\<newline>`, or the `\<CR><LF>` a CRLF file writes.
+        [2usize, 3].into_iter().any(|len| {
+            n.checked_sub(len).is_some_and(|at| {
+                self.cont_len_at(at) == Some(len)
+                    && self.conts.contains(&u32::try_from(at).unwrap_or(u32::MAX))
+            })
+        })
     }
 
     /// The 1-based source line the cursor sits on *right now*, mid-token.
@@ -3216,6 +3260,18 @@ impl Lexer {
         // line is blamed past the first one's body rather than on its own line.
         if let Some(a) = &self.hd_ahead {
             return a.line;
+        }
+        // A reader that ran out on a deleted `\<newline>` ([`Lexer::reader_at_eof`])
+        // has no newline token left to gather at, so the gather that raises this
+        // warning can only be the one in the `simple_list` reduction — and that
+        // reduction is driven by the end-of-file token, which the parser has to
+        // *ask* for. The request finds the buffer used up and enters
+        // `shell_getc`'s fetch block, whose first statement is `line_number++`
+        // (parse.y:2361). So the number this warning carries is one past the
+        // cursor's own line: `cat <<x\` at the end of a two-line script is
+        // blamed on line 4.
+        if self.reader_at_eof() {
+            return self.cur_line().saturating_add(1);
         }
         let at_line_start = self.pos == 0 || self.at(self.pos.wrapping_sub(1)) == Some('\n');
         self.cur_line()
@@ -6374,6 +6430,28 @@ mod tests {
             // A here-document inside a construct the input also cuts off still
             // reports its own lines; the syntax error is a separate diagnostic.
             ("if true; then\ncat <<EOF\nbody", &[("EOF", 2, 3)]),
+            // A `\<newline>` after the delimiter word is *deleted* by the reader,
+            // and every deletion costs a fetch — `shell_getc` bumps `line_number`
+            // and re-reads (parse.y:2361). So the two lines here are 3, not 2, and
+            // then the parser's own request for the end-of-file token finds the
+            // buffer used up and pays one more: both numbers are 4. (The source is
+            // written closed, as `st_stream` hands it over — a script whose last
+            // line is a lone `\` has a `\n` appended to it.)
+            ("echo 1\ncat <<x\\\n", &[("x", 4, 4)]),
+            // Each further continuation is one more fetch.
+            ("echo 1\ncat <<x\\\n\\\n", &[("x", 5, 5)]),
+            ("echo 1\ncat <<x\\\n\\\n\\\n", &[("x", 6, 6)]),
+            // Both delimiters of a doubled operator are blamed on the same line:
+            // the deletions happen once, while the reader is past both words.
+            ("echo 1\ncat <<x <<y\\\n", &[("x", 4, 4), ("y", 4, 4)]),
+            // With a real line after it the continuation is still a fetch — line 3
+            // is where body collection starts — but the end of file is then found
+            // by fetching line 4 rather than by the parser's post-EOF bump.
+            ("echo 1\ncat <<x\\\n\necho 3", &[("x", 3, 4)]),
+            // The deletion is invisible to the *word* scan, so a continuation in
+            // the middle of the delimiter splices it: the delimiter wanted is
+            // `xbody`, and it is line 3 that the reader stopped on.
+            ("echo 1\ncat <<x\\\nbody\n", &[("xbody", 3, 3)]),
             // Terminated: no record at all.
             ("cat <<EOF\nbody\nEOF\n", &[]),
         ];

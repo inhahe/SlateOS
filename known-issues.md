@@ -2332,11 +2332,12 @@ test `the_two_readers_close_an_unterminated_last_line_differently`.
 which is what the "second, independent divergence" in this entry's earlier text
 was pointing at.
 
-### TD-OILS-A-CONTINUATION-AT-END-OF-INPUT-DOES-NOT-MOVE-THE-READER. `$LINENO` and EOF diagnostics read one or two lines low — 2026-08-08 — OPEN
+### TD-OILS-A-CONTINUATION-AT-END-OF-INPUT-DOES-NOT-MOVE-THE-READER. `$LINENO` and EOF diagnostics read one or two lines low — 2026-08-08 — ✅ FIXED 2026-08-08
 
-**Where:** `userspace/oils/src/parser.rs` — `Spans`/`stamp_lines` and
-`Parser::simple_command_line`; `userspace/oils/src/lexer.rs` —
-`Lexer::eat_conts` and whatever ends the token stream.
+**Where:** `userspace/oils/src/parser.rs` — `Parser::reader_line_at`,
+`Parser::parse_tokens_ending` and the streaming parser's error stamp;
+`userspace/oils/src/lexer.rs` — the new `Lexer::reader_at_eof`, the three
+terminal branches of `Lexer::run_into`, and `Lexer::fetched_line`.
 
 **What.** Two related divergences, both about what the reader has done by the
 time the parser asks for its next token at end of input.
@@ -2382,16 +2383,52 @@ end of input is `syntax error: unexpected end of file`; osh yields a `Newline`
 token instead and reports `near unexpected token \`newline'` — and one line too
 high, which is the same accounting in the other direction.
 
-**Proper fix.** Two parts, and they should land together because either alone
-moves a line number the other would move back:
+**Fix.** Two parts, landed together because either alone moves a line number the
+other would move back:
 
-1. Make a token's recorded end line include a `\⏎` the scan consumed *after* its
-   last character — the scan does consume it (it must, to discover the word has
-   ended), so this is a stamping question, not a scanning one. Then add bash's
-   post-EOF bump: the parser's request for a lookahead that is not there costs a
-   line.
-2. Make a continuation that ends the input yield end-of-file rather than a
-   newline token, so the grammar error is bash's.
+1. A token's recorded end line now includes a `\⏎` the scan consumed *after* its
+   last character (`Spans::cont_lines`, folded into `Parser::reader_line_at`) —
+   the scan does consume it, it must, to discover the word has ended, so this is
+   a stamping question, not a scanning one. On top of that sits bash's post-EOF
+   bump: the parser's request for a lookahead that is not there costs a line.
+   The bump is *not* unconditional, because `shell_ungetc` at
+   `shell_input_line_index == 0` stows the character into `eol_ungetc_lookahead`,
+   which the next `shell_getc` returns before fetching anything. So the request
+   is free exactly when the last token peeked, was not read by `read_token_word`
+   (that path does `if (character == EOF) goto got_token;` — parse.y:4904 — and
+   pushes nothing back), and its peek deleted a continuation that ran to the end
+   of the input. That is the `stowed` test in `reader_line_at`.
+2. A continuation that ends the input now yields end-of-file rather than a
+   newline token, so the grammar error is bash's. `Lexer::reader_at_eof` answers
+   whether the scan stopped on a deleted `\⏎` (or the `\␍␊` a CRLF file writes),
+   and `run_into` suppresses its synthetic trailing `Newline` when it did.
+   `Lexer::fetched_line` adds the same post-EOF bump for the unterminated
+   here-document warning, whose gather is driven by the `simple_list` reduction
+   and therefore always pays for the end-of-file request.
+
+Two smaller bugs fell out of this. `run_into`'s three terminal branches each
+close with `stamp_lines`, which takes `self.line` as the line the iteration
+*began* on — but `iter_start` was never moved to `self.pos` first, so
+`cur_line()` added the previous iteration's newlines a second time and the
+here-document warning came out at `2n+1` rather than `n+3`.
+
+**Measured, not assumed.** Every number is bash 5.2.37's own output for the same
+input, taken before the C source was read: 35 probe rows across
+`$LINENO`, the here-document warning and the three end-of-file diagnostics, plus
+a 224-case differential against the pre-change build (31 rows fixed, 0
+regressed).
+
+**Pinned by** the corpus case
+`a-continuation-at-the-end-of-input-still-costs-the-reader-a-line.sh`, the new
+unit test `a_continuation_at_end_of_input_moves_the_reader`, four new rows in
+`simple_command_line_follows_bashs_lookahead_rule`, and six new rows in
+`unterminated_heredoc_records_both_warning_lines`.
+
+**Left behind**, all pre-existing and none of them regressions of this change —
+see the three entries directly below:
+TD-OILS-A-LIST-TERMINATOR-EOF-IS-REQUESTED-TWICE,
+TD-OILS-A-STRING-READERS-BACKSLASH-CLOSE-DOES-NOT-COST-A-FETCH and
+TD-OILS-AN-UNFINISHED-CONDITIONAL-AT-END-OF-INPUT-IS-NOT-A-MISSING-BRACKET.
 
 **Deliberately not replicated:** bash's own reader has a bug next door. Reading
 a here-document body from an `st_string` whose last line has no newline,
@@ -2399,6 +2436,122 @@ a here-document body from an `st_string` whose last line has no newline,
 gains a stray `\xff`: `bash -c $'cat <<x\nbody\\'` writes `body\\\xff\n` where
 the same bytes in a file write `body`. osh writes the file answer in both cases
 and should keep doing so.
+
+### TD-OILS-A-LIST-TERMINATOR-EOF-IS-REQUESTED-TWICE. `for`/`select` cut off by a continuation report one line low — 2026-08-08 — OPEN
+
+**Where:** `userspace/oils/src/parser.rs` — `Parser::parse_for` /
+`Parser::parse_select`, where the header's terminator is consumed, and the
+end-of-stream branch of `Parser::reader_line_at` that stamps the error.
+
+**What.** Only `for` and `select`, and only when a `\<newline>` runs the input
+out right after the word list:
+
+```text
+input (a script file)          bash                       osh
+echo 1⏎for i in a\⏎            line 5: syntax error: …    line 4
+echo 1⏎for i in a\⏎\⏎          line 6                     line 5
+echo 1⏎select v in a\⏎         line 5                     line 4
+echo 1⏎for i in a⏎             line 3                     line 3   (agrees)
+echo 1⏎while true\⏎            line 4                     line 4   (agrees)
+```
+
+**Why.** bash's rule is `for` `WORD` `newline_list` `in` `word_list`
+**`list_terminator`** `newline_list` `do_group`, and `list_terminator` is
+`'\n' | ';' | yacc_EOF` — the end-of-file token is a terminator in its own
+right. So with the newline deleted, the EOF the word `a`'s peek produced is
+*consumed* by `list_terminator`, and the `newline_list` after it has to ask for
+another token. That request finds the buffer used up, enters `shell_getc`'s
+fetch block and pays `line_number++` a second time (parse.y:2361). Every other
+compound (`while`, `until`, `case`, `{ … }`, a function body) reaches its EOF
+through a rule that does not accept one, so it asks only once.
+
+`read_token_word` does `if (character == EOF) goto got_token;` (parse.y:4904),
+which is why the first EOF is not pushed back and has to be re-requested at all.
+
+**Proper fix.** The end-of-stream bump in `reader_line_at` is one fetch because
+one token was asked for. `for`/`select` ask twice, so the site that consumes the
+header terminator has to say so — carry a "the terminator was the end of input"
+flag out of the header parse and let the error stamp add the extra fetch, rather
+than special-casing the construct inside `reader_line_at`, which has no idea
+which rule is reducing.
+
+**Impact.** One line in one diagnostic, for an input that is a syntax error
+either way.
+
+### TD-OILS-A-STRING-READERS-BACKSLASH-CLOSE-DOES-NOT-COST-A-FETCH. `-c` input ending in a lone `\` reads two lines low — 2026-08-08 — OPEN
+
+**Where:** `userspace/oils/src/parser.rs` — `Parser::reader_line_at` and
+`Spans::reader_stop`; `userspace/oils/src/lexer.rs` — `Lexer::reader_at_eof`.
+The close itself is `parser::close_last_line`, and it is correct.
+
+**What.** A *string* whose last line ends on a lone backslash is closed with a
+second backslash rather than a newline (parse.y ~2570), so the pair is one
+quoted literal backslash and there is no newline for the scan to stop on. bash
+still counts the fetch that discovers that; osh does not:
+
+```text
+input                                bash                    osh
+-c 'echo 1⏎echo $LINENO\'            3\                      2\
+-c 'echo 1⏎cat <<x\'                 line 4: warning …       line 2: warning …
+-c 'echo 1⏎nosuch$LINENO\'           line 4: nosuch4\: …     line 2: nosuch2\: …
+```
+
+The same inputs read from a *file* agree, because the stream reader appends a
+newline and the trailing `\` becomes an ordinary continuation — which
+TD-OILS-A-CONTINUATION-AT-END-OF-INPUT-DOES-NOT-MOVE-THE-READER now handles.
+
+**Why.** The general rule the fix above implements is: a token's own lookahead
+that exhausts the root input costs a fetch. After the `\\` close there is no
+newline, so the word's terminator scan runs off the end of the buffer and enters
+the fetch block — and then the parser's request for the next token enters it
+again. That is two bumps, and osh currently records neither, because
+`Spans::reader_stop` measures continuations and there is no continuation here:
+the backslash pair is *text*.
+
+**Proper fix.** Generalise the end-of-input accounting from "how many
+continuations did the reader delete" to "how many fetches did it pay for", so a
+scan that simply runs the buffer out counts too. `Lexer::reader_at_eof` already
+asks a version of that question for the continuation case and would become the
+one place to answer it.
+
+**Impact.** Line numbers only, and only for `-c`/`eval`/`.`/trap input whose
+final line ends on an odd run of backslashes.
+
+### TD-OILS-AN-UNFINISHED-CONDITIONAL-AT-END-OF-INPUT-IS-NOT-A-MISSING-BRACKET. `[[ a\` reports the wrong message and line — 2026-08-08 — OPEN
+
+**Where:** `userspace/oils/src/parser.rs` — `Parser::parse_cond` and the
+end-of-input path it takes when the token stream runs out inside `[[ … ]]`.
+
+**What.** osh has one answer for "the input ended inside a conditional"; bash
+has two, and picks by whether the conditional *grammar* still wanted a token:
+
+```text
+echo 1⏎[[ a\⏎    bash: line 4: unexpected token `EOF', conditional binary operator expected
+                       line 4: syntax error: unexpected end of file
+                 osh:  line 2: unexpected EOF while looking for `]]'
+                       line 4: syntax error: unexpected end of file
+```
+
+The second line already agrees. The first does not: bash treats the end of file
+as an ordinary *token* handed to `cond_term`, which rejects it the same way it
+rejects any other wrong token there (`[[ a b ]]` → `conditional binary operator
+expected`), and blames it on the reader's line. osh short-circuits to
+``unexpected EOF while looking for `]]'`` — which *is* bash's message, but only
+for a conditional that is complete and merely unclosed (`[[ a == b⏎` → bash says
+exactly that, on the opening line, and osh agrees).
+
+Without the continuation the two agree as well (`[[ a⏎` → ``unexpected token
+`newline', conditional binary operator expected`` from both), so what is missing
+is only the EOF-as-a-token case.
+
+**Proper fix.** Let the conditional parser see the end of input as a token named
+`EOF` and run it through the same operand/operator expectation machinery every
+other token goes through, keeping ``unexpected EOF while looking for `]]'`` for
+the case it actually belongs to: a conditional whose operands are all present
+and whose `]]` is missing.
+
+**Impact.** One diagnostic line, wrong text and wrong line number, for an input
+that is a syntax error either way.
 
 ### TD-OILS-A-HERE-DOCUMENT-DELIMITER-STOPPED-AT-THE-FIRST-SEPARATOR-INSIDE-A-GROUP. `<<E$(a b)` was read as a delimiter `E$(a` and a stray word `b)` — 2026-08-06 — ✅ FIXED 2026-08-06
 

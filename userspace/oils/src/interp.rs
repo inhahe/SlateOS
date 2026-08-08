@@ -28101,7 +28101,48 @@ impl Shell {
 
     fn command_sub_body_inner(&mut self, body: &CmdSubBody) -> Str {
         match body {
-            CmdSubBody::Parsed { prog, src, close_line } => {
+            CmdSubBody::Parsed { prog, src, close_line, tail } => {
+                // bash reads a `$( … )` body through the parser *twice*, and the
+                // second read is over the re-print rather than the source:
+                // `expand_word_internal` reaches `extract_command_subst`, which
+                // calls `xparse_dolparen` again (subst.c:1290, 1322) with `)` for
+                // `shell_eof_token`. Almost every re-print parses back, so the
+                // second read is normally invisible — but a body whose last
+                // command is a bare `!` or `time` deparses without the list
+                // terminator its own grammar needs, and `! )` does not parse.
+                // A `tail` of `None` says there was no first read to re-print, so
+                // there is no second one either — see
+                // [`crate::ast::CmdSubBody::Parsed::tail`].
+                if let Some((err, nested)) = tail
+                    .as_ref()
+                    .and_then(|tail| self.comsub_reparse_error(src, tail, *close_line))
+                {
+                    self.berrln(&err);
+                    if nested {
+                        // A `$( … )` *inside* the re-print that will not parse is
+                        // `parse_comsub`'s own error, and a non-interactive shell
+                        // does not survive one: `jump_to_top_level (FORCE_EOF)`
+                        // (parse.y:4185) stops the reader outright. The status is
+                        // the syntax error's, which is 2 at the top level and 1
+                        // where an `eval`/`source` is executing the builtin that
+                        // scored it (`EX_BADSYNTAX` against `EX_BADUSAGE`).
+                        let status = if self.at_outermost_read_eval() { 2 } else { 1 };
+                        // `demote: false`: the status stands wherever it is
+                        // raised. A `( … )` around it exits **2**, not the 1 an
+                        // interceptable `jump_to_top_level` would leave.
+                        self.unbound_error = Some(FatalAbort { status, demote: false });
+                    } else {
+                        // The re-print's own failure is `parse_string`'s to
+                        // answer: it returns `-DISCARD` and `xparse_dolparen`
+                        // raises it as `jump_to_top_level (DISCARD)` from the
+                        // *parent*, below `parse_and_execute`'s guard. The rest of
+                        // this parse unit is abandoned with `$?` at 1, but an
+                        // `eval` around it still catches it — so `v=p$(⏎!⏎)q; echo
+                        // hi` prints no `hi` where the two on separate lines would.
+                        self.arm_discard(1);
+                    }
+                    return Str::new();
+                }
                 // Every body is numbered from `close_line - 1` — the line the
                 // closing delimiter sits on carries the body's first command,
                 // whichever spelling it was written in. For `$( … )` that holds
@@ -28122,6 +28163,77 @@ impl Shell {
                 self.command_sub(src, &map, path)
             }
         }
+    }
+
+    /// The diagnostic bash raises when a `$( … )` body's *re-print* does not
+    /// parse back — or `None`, which is the answer for every body but two
+    /// shapes. The flag says the failure came from a `$( … )` *nested* in the
+    /// re-print rather than from the re-print itself, which is what decides how
+    /// far the abort travels; see [`crate::parser::parse_cmdsub_body_unmarked`].
+    ///
+    /// bash's second read of the body (`xparse_dolparen`, subst.c:1290 and 1322)
+    /// is handed the rest of the stored *word*, not the body alone, and reads it
+    /// with `)` for `shell_eof_token`. So the string it parses is `src`, then the
+    /// `)`, then `tail`; a body that parses stops at the `)` and leaves `tail` to
+    /// the word. Only a re-print that does *not* parse runs past it, and then the
+    /// `)` is the token bash reports against.
+    ///
+    /// Two productions can produce such a re-print, because they are the two that
+    /// drop their own terminator: bash's grammar admits a bare prefix only as
+    /// `BANG list_terminator` (or `TIME` …), and the deparse of a lone `!` is `!`
+    /// with nothing after it. Appending the `)` yields `! )`, which is not a
+    /// list terminator — see `tests/corpus/prefix-bang-time.sh`.
+    ///
+    /// The two numbers in the message disagree on purpose, and both are measured
+    /// against bash 5.2.37:
+    ///
+    /// * The **reported line** counts from the *command's* line — `$LINENO`,
+    ///   which is bash's one shared `line_number` — plus the newlines the failed
+    ///   parse consumed, plus one. `parse_string` does not renumber (it calls
+    ///   `push_stream (0)`), so the counter simply runs on from where the
+    ///   executor left it.
+    ///
+    ///   That is usually indistinguishable from counting off the closing `)`,
+    ///   because a simple command's line is stamped in
+    ///   `make_bare_simple_command` at the reduction that needs the *next* word
+    ///   as lookahead — so reading this very word is what set it. Two shapes
+    ///   separate them, and both say `line 2`:
+    ///
+    ///   ```text
+    ///   cat > "/dev/null$(⏎!⏎)x" <<< hi     # stamped at the `>`, so line 1
+    ///   case x in⏎"y$(⏎!⏎)z") …⏎esac        # `case_command->line`, so line 1
+    ///   ```
+    ///
+    /// * The **echoed line** is the line the `)` is on, which is the *last* line
+    ///   of `src` followed by the `)` and the *first* line of `tail` — that is
+    ///   still what `shell_input_line` holds. `echo "a$(⏎!⏎)b⏎c"` reports line
+    ///   5 and echoes `` `! )b' ``.
+    fn comsub_reparse_error(
+        &mut self,
+        src: BStr<'_>,
+        tail: BStr<'_>,
+        close_line: u32,
+    ) -> Option<(Str, bool)> {
+        let opts = self.parse_opts();
+        let e = crate::parser::parse_cmdsub_body_unmarked(src, close_line, opts).err()?;
+        let nl = |s: BStr<'_>| {
+            u32::try_from(s.iter().filter(|&&b| b == b'\n').count()).unwrap_or(u32::MAX)
+        };
+        // Every newline of `src` is consumed before the `)` that fails, and none
+        // of `tail`'s are — the parse never gets that far.
+        let line = self.current_line.saturating_add(nl(src)).saturating_add(1);
+        let last = src.rsplit(|&b| b == b'\n').next().unwrap_or_default();
+        let first = tail.split(|&b| b == b'\n').next().unwrap_or_default();
+        // The body is its own input source for naming purposes, exactly as it is
+        // when it *runs* — bash is inside a `parse_string (…, "command
+        // substitution", …)` either way, so the prefix carries that name.
+        self.input_names.push(InputSource {
+            name: SRC_TOKEN_COMMAND_SUB.as_bytes().to_vec(),
+            nonint: true,
+        });
+        let prefix = self.syntax_error_prefix(line);
+        self.input_names.pop();
+        Some((bfmt![&prefix, e.msg(), b"\n", &prefix, b"`", last, b")", first, b"'"], e.fatal))
     }
 
     /// Run a command substitution's body text, substituting what it wrote to

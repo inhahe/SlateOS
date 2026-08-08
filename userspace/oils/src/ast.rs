@@ -1037,6 +1037,34 @@ pub enum CmdSubBody {
         /// so no rank rule is needed to skip the blank and continuation lines the
         /// source had.
         close_line: u32,
+        /// The rest of the enclosing *word*, as the second pass sees it: what
+        /// follows this substitution's `)` up to the end of the word, closing
+        /// quotes included.
+        ///
+        /// bash does not hand `command_substitute` a body in isolation. At
+        /// expansion time `expand_word_internal` is walking the stored word
+        /// string and passes `extract_command_subst` the whole remainder of it,
+        /// so the input that second parse reads is `src` + `)` + this — and
+        /// when that parse fails, this is part of the line the diagnostic
+        /// echoes back. `echo "A[$(⏎!⏎)]B" more args` reports `` `! )]B"' ``:
+        /// the word's `]B` and its closing quote, and none of `more args`.
+        ///
+        /// `None` means there is **no** second parse — this body was never
+        /// stored as a re-print, so nothing re-reads it. That is the case for
+        /// every word the shell builds at *expansion* time rather than reading
+        /// with the parser: `${x@P}` and `PS4` go through `expand_string`,
+        /// whose `expand_word_internal` hands `command_substitute` the raw text
+        /// straight off, so `parse_comsub` — and with it the re-print — never
+        /// runs. `x=$'$(⏎!⏎)'; echo "${x@P}"` is therefore silent in bash where
+        /// the same substitution written in the script is a syntax error.
+        ///
+        /// `Some` and empty is the common case for one that *is* re-read: a
+        /// substitution ending its word. It is filled by a post-pass over the
+        /// assembled word rather than where the part is built, because a part
+        /// cannot see its own siblings — see `unparse::attach_comsub_tails`,
+        /// which runs only on the parser's own words and so is also what draws
+        /// this distinction.
+        tail: Option<Str>,
     },
     /// `` ` … ` `` — parsed at expansion time, by `Shell::command_sub`.
     Backtick {

@@ -2067,6 +2067,35 @@ pub fn parse_cmdsub_body(
     close_line: u32,
     opts: ParseOpts,
 ) -> Result<Program, ParseError> {
+    parse_cmdsub_body_unmarked(src, close_line, opts).map_err(ParseError::in_paren_body)
+}
+
+/// [`parse_cmdsub_body`] with the "fatal to whoever was reading this body" mark
+/// left off, so [`ParseError::fatal`] still says where the failure came from: an
+/// error that is *already* fatal was raised inside a substitution nested in
+/// `src`, and one that is not is `src`'s own.
+///
+/// bash reports those two from different depths, so the distinction is not
+/// cosmetic. A body's own grammar error is `parse_string`'s to answer — it
+/// returns `-DISCARD` and the caller loses one parse unit — while a *nested*
+/// `$( … )` that will not parse is raised by `parse_comsub` itself:
+///
+/// ```c
+///       /* Non-interactive shells exit on parse error in a command substitution. */
+///       if (interactive_shell == 0)
+///         jump_to_top_level (FORCE_EOF);  /* This is like reader_loop() */
+/// ```
+/// (parse.y:4185)
+///
+/// — which ends the shell. See [`Shell::comsub_reparse_error`].
+///
+/// # Errors
+/// Returns [`ParseError`] on a lexing or grammar error in the body.
+pub fn parse_cmdsub_body_unmarked(
+    src: BStr<'_>,
+    close_line: u32,
+    opts: ParseOpts,
+) -> Result<Program, ParseError> {
     // The body is lexed with the substitution's own `)` standing where the
     // implicit trailing newline would otherwise go, because that is the token
     // bash's parser sees after the body's last command. See
@@ -2092,13 +2121,15 @@ pub fn parse_cmdsub_body(
             // is not continuable, so the REPL must not offer a PS2 prompt for
             // one. Neither form can be completed by more input anyway — the
             // lexer already found the closing delimiter.
+            // Only this parse's own end of input, never a nested body's: a
+            // nested [`parse_cmdsub_body`] has already rewritten that same
+            // message, so an error arriving from one cannot still carry it.
             if e.msg() == b"syntax error: unexpected end of file" {
                 ParseError::new("syntax error near unexpected token `)'")
             } else {
                 e
             }
-        })
-        .map_err(ParseError::in_paren_body)?;
+        })?;
     Ok(prog)
 }
 
@@ -5239,7 +5270,11 @@ fn word_from_segs_in(segs: &[Seg], opts: ParseOpts, q: Quoting) -> Result<Word, 
     for s in segs {
         parts.push(seg_to_part(s, opts, q)?);
     }
-    Ok(Word { parts })
+    let mut word = Word { parts };
+    // Every `$( … )` in the word learns what follows it here, because this is
+    // the first point that knows. See [`crate::unparse::attach_comsub_tails`].
+    crate::unparse::attach_comsub_tails(&mut word);
+    Ok(word)
 }
 
 /// Parse the `$( … )` bodies an arithmetic scan stepped over, and return each
@@ -5393,7 +5428,14 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
                     // reason.
                     let prog = parse_cmdsub_body(raw, *close_line, opts)?;
                     let src = crate::unparse::comsub_body(&prog);
-                    CmdSubBody::Parsed { prog, src, close_line: *close_line }
+                    // The tail is a property of the *word*, not of this part, so
+                    // it is filled by `unparse::attach_comsub_tails` once the
+                    // whole word is assembled — a segment cannot see its own
+                    // siblings from here. It stays `None` for a word the shell
+                    // builds at expansion time (`${x@P}`, `PS4`), which bash
+                    // reads once and never re-prints; see
+                    // [`CmdSubBody::Parsed::tail`].
+                    CmdSubBody::Parsed { prog, src, close_line: *close_line, tail: None }
                 }
             },
         },

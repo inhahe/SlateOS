@@ -1046,6 +1046,206 @@ fn quoted_lit_src(text: BStr<'_>, escaped: bool) -> Str {
     crate::escape::sh_single_quote(text)
 }
 
+/// Fill every [`CmdSubBody::Parsed`]'s `tail` in `word` — the stored word text
+/// that follows each `$( … )`'s closing `)`.
+///
+/// bash never hands a substitution's body to the parser in isolation. At
+/// expansion time `expand_word_internal` is walking the *word's* stored string
+/// and passes `extract_command_subst` the whole remainder of it, so the input
+/// `xparse_dolparen` reads is the body's re-print, then `)`, then everything
+/// left of the word. That only shows when the parse fails, because the
+/// diagnostic echoes the line it was reading:
+///
+/// ```text
+/// echo "a$(<newline>!<newline>)b$(echo c)d"   ->   `! )b$(echo c)d"'
+/// ```
+///
+/// — the word's remaining text and its closing quote, and nothing of the
+/// commands after the word. So the tail is a property of the word rather than
+/// of the part, and cannot be filled where the part is built: `seg_to_part`
+/// sees one segment and not its siblings. This is that post-pass.
+///
+/// It works by rendering the word with one substitution at a time swapped for a
+/// sentinel, so the answer comes out of [`word_src`] itself rather than out of a
+/// second renderer written to agree with it. Rendering the word whole is also
+/// what makes the enclosing quote fall out for free — the `"` that closes a
+/// [`WordPart::DoubleQuoted`] is written by the container, not by anything
+/// inside it, and the same holds for the `}` of a `${x:-$( … )}`.
+///
+/// Running only over the *parser's* words is itself load-bearing, which is why
+/// the field is an `Option`: a word the shell assembles at expansion time
+/// (`${x@P}`, `PS4`) is handed to `command_substitute` raw, never re-printed
+/// and so never re-read, and leaving its `tail` at `None` is what records that.
+/// See [`crate::ast::CmdSubBody::Parsed::tail`].
+pub(crate) fn attach_comsub_tails(word: &mut Word) {
+    let is_comsub =
+        |p: &WordPart| matches!(p, WordPart::CommandSub { body: CmdSubBody::Parsed { .. } });
+    let total = walk_parts(&mut word.parts, &is_comsub, usize::MAX, &mut |_| {});
+    if total == 0 {
+        return;
+    }
+    // The sentinel has to be a byte string the rendering does not already
+    // contain, and a shell word may hold any byte — so it is grown until it is
+    // absent rather than assumed. Locating each substitution by its own rendered
+    // text instead would be ambiguous twice over: two identical `$( … )`s in one
+    // word render alike, and `'$(! )'` renders a literal that looks like one.
+    let mut sent = vec![0u8];
+    while contains(&word_src(word), &sent) {
+        sent.push(0);
+    }
+    // The swapped-in marker is not a substitution any more, so it is found again
+    // by its own shape rather than by the comsub count — which the swap has just
+    // changed under us.
+    let is_marker = |p: &WordPart| matches!(p, WordPart::Literal(s) if *s == sent);
+    for k in 0..total {
+        // Swapping the whole part out — not just its body's text — is what
+        // makes this exact: `part_src` renders a parsed body from `prog`, so
+        // there is nothing in `src` for a marker to ride in on.
+        let mut saved = WordPart::Literal(Str::new());
+        walk_parts(&mut word.parts, &is_comsub, k, &mut |p| {
+            saved = std::mem::replace(p, WordPart::Literal(sent.clone()));
+        });
+        let text = word_src(word);
+        let mut tail = find(&text, &sent)
+            .and_then(|i| text.get(i.saturating_add(sent.len())..))
+            .unwrap_or_default()
+            .to_vec();
+        walk_parts(&mut word.parts, &is_marker, 0, &mut |p| {
+            *p = std::mem::replace(&mut saved, WordPart::Literal(Str::new()));
+            if let WordPart::CommandSub { body: CmdSubBody::Parsed { tail: t, .. } } = p {
+                *t = Some(std::mem::take(&mut tail));
+            }
+        });
+    }
+}
+
+/// Whether `hay` contains `needle`.
+fn contains(hay: BStr<'_>, needle: BStr<'_>) -> bool {
+    find(hay, needle).is_some()
+}
+
+/// The offset of `needle` in `hay`, or `None`.
+fn find(hay: BStr<'_>, needle: BStr<'_>) -> Option<usize> {
+    if needle.is_empty() || needle.len() > hay.len() {
+        return None;
+    }
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Apply `act` to the `n`-th part of `parts` — or of any word nested inside one
+/// — that `want` accepts, and return how many such parts there were in all.
+/// Passing `usize::MAX` for `n` therefore just counts.
+///
+/// The order is the order the parts are written in, which is all this needs:
+/// [`attach_comsub_tails`] addresses one substitution at a time and finds it
+/// again by its sentinel, so nothing depends on the walk agreeing with
+/// `part_src` about *where* a part renders.
+fn walk_parts(
+    parts: &mut [WordPart],
+    want: &dyn Fn(&WordPart) -> bool,
+    n: usize,
+    act: &mut dyn FnMut(&mut WordPart),
+) -> usize {
+    let mut i = 0usize;
+    walk_parts_in(parts, want, n, &mut i, act);
+    i
+}
+
+fn walk_parts_in(
+    parts: &mut [WordPart],
+    want: &dyn Fn(&WordPart) -> bool,
+    n: usize,
+    i: &mut usize,
+    act: &mut dyn FnMut(&mut WordPart),
+) {
+    for p in parts.iter_mut() {
+        if want(p) {
+            if *i == n {
+                act(p);
+            }
+            *i = i.saturating_add(1);
+            continue;
+        }
+        for w in nested_parts_mut(p) {
+            walk_parts_in(w, want, n, i, act);
+        }
+    }
+}
+
+/// Every part list nested inside `p`. The match is deliberately exhaustive: a
+/// new [`WordPart`] that can hold a word has to be considered here, because a
+/// `$( … )` inside one that this missed would be given no tail and would then
+/// echo a truncated line if its re-print ever failed to parse.
+fn nested_parts_mut(p: &mut WordPart) -> Vec<&mut [WordPart]> {
+    fn idx(i: &mut Option<Box<Word>>) -> Option<&mut [WordPart]> {
+        i.as_deref_mut().map(|w| w.parts.as_mut_slice())
+    }
+    fn aidx(i: &mut ArrayIndex) -> Option<&mut [WordPart]> {
+        match i {
+            ArrayIndex::Index(w) => Some(w.parts.as_mut_slice()),
+            ArrayIndex::All | ArrayIndex::Star => None,
+        }
+    }
+    match p {
+        WordPart::DoubleQuoted(parts) => vec![parts.as_mut_slice()],
+        WordPart::ParamOp { index, arg, .. } => {
+            idx(index).into_iter().chain([arg.parts.as_mut_slice()]).collect()
+        }
+        // `ArrayOp` carries no subscript *word*: it applies to the array as a
+        // whole (`[@]`/`[*]`), which is recorded as the `star` flag.
+        WordPart::ArrayOp { arg, .. } => vec![arg.parts.as_mut_slice()],
+        WordPart::ParamTrim { index, pattern, .. }
+        | WordPart::ParamCase { index, pattern, .. } => {
+            idx(index).into_iter().chain([pattern.parts.as_mut_slice()]).collect()
+        }
+        WordPart::ParamSubstr { index, offset, length, .. } => idx(index)
+            .into_iter()
+            .chain([offset.parts.as_mut_slice()])
+            .chain(length.as_deref_mut().map(|w| w.parts.as_mut_slice()))
+            .collect(),
+        WordPart::ParamReplace { index, pattern, replacement, .. } => idx(index)
+            .into_iter()
+            .chain([pattern.parts.as_mut_slice(), replacement.parts.as_mut_slice()])
+            .collect(),
+        WordPart::Indirect { index, .. } => index.as_mut().and_then(aidx).into_iter().collect(),
+        WordPart::ArrayRef { index, .. } => aidx(index).into_iter().collect(),
+        WordPart::IndirectOp { index, target, .. } => index
+            .as_mut()
+            .and_then(aidx)
+            .into_iter()
+            .chain([std::slice::from_mut(target.as_mut())])
+            .collect(),
+        WordPart::ParamTransform { index, .. } | WordPart::BadTransform { index, .. } => {
+            idx(index).into_iter().collect()
+        }
+        WordPart::ArraySlice { offset, length, .. } => [offset.parts.as_mut_slice()]
+            .into_iter()
+            .chain(length.as_deref_mut().map(|w| w.parts.as_mut_slice()))
+            .collect(),
+        WordPart::ArrayBulk { op, .. } => match op {
+            BulkOp::Trim { pattern, .. } | BulkOp::Case { pattern, .. } => {
+                vec![pattern.parts.as_mut_slice()]
+            }
+            BulkOp::Replace { pattern, replacement, .. } => {
+                vec![pattern.parts.as_mut_slice(), replacement.parts.as_mut_slice()]
+            }
+            BulkOp::Transform { .. } | BulkOp::BadTransform { .. } => Vec::new(),
+        },
+        // A process substitution's body is a `Program`, not a word, and bash
+        // never re-reads it through this path anyway.
+        WordPart::Literal(_)
+        | WordPart::SingleQuoted { .. }
+        | WordPart::Param { .. }
+        | WordPart::VarNames { .. }
+        | WordPart::CommandSub { .. }
+        | WordPart::ArithSub { .. }
+        | WordPart::Length(_)
+        | WordPart::ArrayKeys { .. }
+        | WordPart::BadSubst(_)
+        | WordPart::ProcSub { .. } => Vec::new(),
+    }
+}
+
 fn part_src(p: &WordPart) -> Str {
     match p {
         WordPart::Literal(s) => s.clone(),

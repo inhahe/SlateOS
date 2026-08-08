@@ -6518,7 +6518,10 @@ impl Shell {
     /// literal or a `format!` keep reading naturally.
     fn put_var(&mut self, name: impl Into<String>, value: impl Into<Str>) {
         let name = name.into();
-        self.vars.insert(name.clone(), value.into());
+        // A stored value ends at its first NUL — see [`cut_at_nul`]. This is the
+        // only write to `self.vars`, so the invariant "no scalar holds a NUL"
+        // holds for every scalar however it was assigned.
+        self.vars.insert(name.clone(), cut_at_nul(value.into()));
         // After the store, not before: a hook that *derives* something from the
         // name's new state (posix mode, below) has to see the new state.
         self.note_var_change(&name);
@@ -12556,7 +12559,12 @@ impl Shell {
         if self.noassign.contains(dest.base()) {
             return false;
         }
-        self.scalar_write_store(dest, val)
+        // Cut here rather than at the store itself, because the store is where
+        // the value attributes are applied and bash truncates before them — see
+        // [`cut_at_nul`]. `printf -v` is the one writer that can hand over bytes
+        // past a NUL at all, and it reaches both a scalar and an element through
+        // this one guard.
+        self.scalar_write_store(dest, cut_at_nul(val))
     }
 
     /// Where an *arithmetic* scalar write to `name` lands, or the refusal that
@@ -13953,6 +13961,10 @@ impl Shell {
 
     /// Set an associative-array element, creating the array if needed.
     fn assoc_set(&mut self, name: &str, key: Str, val: Str, append: bool) {
+        // The stored value ends at its first NUL — see [`cut_at_nul`]. Cut on
+        // the way in so the two mirrors below get the same value the ordinary
+        // table would, an alias and a hashed path being C strings themselves.
+        let val = cut_at_nul(val);
         // BASH_ALIASES / BASH_CMDS are live mirrors of the alias/command-hash
         // tables. A write like `BASH_ALIASES[ll]="ls -l"` must mutate the source
         // table (creating a real alias), not the mirror — otherwise the next
@@ -15395,7 +15407,12 @@ impl Shell {
                     // that named nowhere leaves the scalar a scalar, which
                     // `printf -v 't[-2]'` on `t=v` shows.
                     self.array_kind_apply(name, false);
-                    self.arrays.entry(name.to_string()).or_default().insert(real, value);
+                    // The stored element ends at its first NUL, like any other
+                    // stored value — see [`cut_at_nul`].
+                    self.arrays
+                        .entry(name.to_string())
+                        .or_default()
+                        .insert(real, cut_at_nul(value));
                 }
             }
         }
@@ -43089,7 +43106,14 @@ impl Shell {
                 // elements and nothing on stderr, unlike `read`, which reports
                 // it. The array is what `mapfile` answers with, and an empty one
                 // is the honest answer either way.
-                let Ok(Some((text, terminated))) = read_record(r, delim, None, false, true) else {
+                // …and it has no NUL skip either: that is the `read` builtin's
+                // own loop (read.def:771), while `mapfile` reads with `zgetline`
+                // (builtins/mapfile.def), which counts bytes and keeps every one
+                // of them. The record therefore reaches the array whole and is
+                // cut at the store instead, which is what makes `mapfile -t a`
+                // on a line `m\0n` store `m` where `read` would have said `mn`.
+                let Ok(Some((text, terminated))) = read_record(r, delim, None, false, true, false)
+                else {
                     break;
                 };
                 let mut bytes = text;
@@ -43428,7 +43452,13 @@ impl Shell {
             // The element is the record as read: a line naming a file whose
             // name is not text has to survive into the array intact (the old
             // `from_utf8_lossy` here silently corrupted it).
-            let mut s = piece;
+            // …but it ends at its first NUL, `mapfile` being the one reader that
+            // can carry one this far at all: `read` skips the byte while
+            // reading, whereas `mapfile` keeps the record whole and only loses
+            // it at the store — see [`cut_at_nul`]. Cut here rather than at the
+            // store so the callback below is handed the value that will be
+            // stored, which is what bash's `char *` line gives it.
+            let mut s = cut_at_nul(piece);
             if strip && s.last() == Some(&delim) {
                 s.pop();
             }
@@ -46483,31 +46513,31 @@ impl Shell {
     ) -> io::Result<Option<(Str, bool)>> {
         if let Some(n) = redir.stdin_from_fd {
             if let Some(rd) = self.coproc_read_fds.get(&n) {
-                return read_record(&mut *lock_coproc(rd), delim, nchars, exact, raw);
+                return read_record(&mut *lock_coproc(rd), delim, nchars, exact, raw, true);
             }
             // As in [`Shell::read_line`]: nothing bound is immediate EOF.
             let Some(c) = self.input_fd_cursor(n) else {
                 return Ok(None);
             };
-            return read_record(&mut *lock_input(&c), delim, nchars, exact, raw);
+            return read_record(&mut *lock_input(&c), delim, nchars, exact, raw, true);
         }
         if let Some(data) = &redir.stdin_data {
             let mut r = io::BufReader::new(&data[..]);
-            return read_record(&mut r, delim, nchars, exact, raw);
+            return read_record(&mut r, delim, nchars, exact, raw, true);
         }
         if let Some(c) = &redir.stdin {
-            return read_record(&mut *lock_input(c), delim, nchars, exact, raw);
+            return read_record(&mut *lock_input(c), delim, nchars, exact, raw, true);
         }
         match stdin {
-            StdinSrc::Fd(c) => read_record(&mut *lock_input(c), delim, nchars, exact, raw),
-            StdinSrc::Pipe(r) => read_record(&mut *r.borrow_mut(), delim, nchars, exact, raw),
+            StdinSrc::Fd(c) => read_record(&mut *lock_input(c), delim, nchars, exact, raw, true),
+            StdinSrc::Pipe(r) => read_record(&mut *r.borrow_mut(), delim, nchars, exact, raw, true),
             StdinSrc::Inherit => {
                 if let Some(cur) = &self.exec_stdin {
-                    return read_record(&mut *lock_input(cur), delim, nchars, exact, raw);
+                    return read_record(&mut *lock_input(cur), delim, nchars, exact, raw, true);
                 }
                 let stdin = io::stdin();
                 let mut lock = stdin.lock();
-                read_record(&mut lock, delim, nchars, exact, raw)
+                read_record(&mut lock, delim, nchars, exact, raw, true)
             }
         }
     }
@@ -53298,7 +53328,7 @@ fn pipe_reader_readable_now(_r: &io::PipeReader) -> bool {
 /// so `read -r p; rm "$p"` names the file the input named.
 fn read_one_line<R: BufRead>(r: &mut R, raw: bool) -> io::Result<Option<(Str, bool)>> {
     if !raw {
-        return read_record(r, b'\n', None, false, false);
+        return read_record(r, b'\n', None, false, false, true);
     }
     let mut line: Str = Vec::new();
     let n = r.read_until(b'\n', &mut line)?;
@@ -53314,6 +53344,10 @@ fn read_one_line<R: BufRead>(r: &mut R, raw: bool) -> io::Result<Option<(Str, bo
     if terminated {
         line.pop();
     }
+    // A NUL is dropped, not kept and not treated as an end — see [`read_record`],
+    // which this path is a shortcut for and must agree with. The delimiter here
+    // is always a newline, so the `delim != '\0'` half of bash's test holds.
+    line.retain(|&b| b != 0);
     Ok(Some((line, terminated)))
 }
 
@@ -53321,8 +53355,9 @@ fn read_one_line<R: BufRead>(r: &mut R, raw: bool) -> io::Result<Option<(Str, bo
 /// as produced. `delim` terminates the record (consumed, not stored) unless
 /// `exact` is set. `nchars` caps the record at that many *characters* (UTF-8
 /// aware: a byte begins a new character when it is not a `10xxxxxx` continuation
-/// byte). `exact` (`-N`) ignores `delim`. Returns `(text, terminated)`;
-/// `Ok(None)` on immediate EOF with no bytes read.
+/// byte). `exact` (`-N`) ignores `delim`. `skip_nul` drops NUL bytes as they are
+/// read, which is the `read` builtin's rule and not `mapfile`'s. Returns
+/// `(text, terminated)`; `Ok(None)` on immediate EOF with no bytes read.
 ///
 /// A descriptor that cannot be read *at all* — the `EBADF` an [`InputSrc::Closed`]
 /// answers with — comes back as `Err`, not as `Ok(None)`. bash tells the two
@@ -53351,6 +53386,7 @@ fn read_record<R: BufRead>(
     nchars: Option<usize>,
     exact: bool,
     raw: bool,
+    skip_nul: bool,
 ) -> io::Result<Option<(Str, bool)>> {
     let mut bytes: Str = Vec::new();
     let mut chars = 0usize;
@@ -53409,6 +53445,29 @@ fn read_record<R: BufRead>(
             any = true;
             break;
         }
+        // With `skip_nul`, a NUL in the input is dropped rather than ending the
+        // record, so `printf 'p\0q\n' | read -r r` leaves two characters in `r`.
+        // Reading is the one place a NUL is lost byte by byte instead of ending
+        // a value, since every *store* truncates at one. bash does this in the
+        // `read` builtin's own loop, read.def:771,
+        //     if (c == '\0' && delim != '\0')
+        //       continue;		/* skip NUL bytes in input */
+        // after the delimiter test, so `read -d ''` still stops at one. The
+        // byte is not counted either, being tested before `-n`/`-N`'s tally.
+        // An *escaped* NUL is kept: bash's `pass_next` arm jumps straight to
+        // `add_char` (read.def:753), past this test — which is why the check
+        // sits here rather than at the top of the loop.
+        //
+        // Nothing records that the byte was there, not even `any`: input that is
+        // only NULs reads as if it were empty, clearing the name and reporting
+        // status 1 — bash's `nr++` sits past this test too (read.def:813).
+        //
+        // `mapfile` clears the flag, reading with `zgetline` instead and keeping
+        // the byte to lose it at the store — see [`Shell::read_records`].
+        if skip_nul && b == 0 && delim != 0 {
+            r.consume(1);
+            continue;
+        }
         r.consume(1);
         any = true;
         bytes.push(b);
@@ -53427,6 +53486,31 @@ fn read_record<R: BufRead>(
         return Ok(None);
     }
     Ok(Some((bytes, hit_delim)))
+}
+
+/// Cut a value at its first NUL, dropping that byte and everything after it.
+///
+/// A variable holds a C string in bash: every store goes through
+/// `bind_variable (name, value, flags)` (variables.c), whose `value` is a
+/// `char *`, so the value ends where the first NUL is regardless of how many
+/// bytes the producer counted. `printf -v v 'a\0b'` leaves `v` one character
+/// long, and `declare -p v` prints `v="a"` — the `b` was never stored, as
+/// against being stored and hidden.
+///
+/// This is the one rule about NULs that is *not* about dropping them. Reading
+/// skips them (see [`read_record`]), a command substitution strips them all and
+/// warns ([`Shell::strip_capture_nuls`]), and an ANSI-C word ends at one in
+/// the lexer; only a store truncates, because only a store is a `char *`.
+///
+/// Applied *before* a value attribute, since bash's truncation happens as the
+/// bytes become a C string and the attribute is the assignment's own work:
+/// `declare -i n; printf -v n '1\0002'` stores 1, not the 1002 the whole byte
+/// string would evaluate to — and not an arithmetic error either.
+fn cut_at_nul(mut v: Str) -> Str {
+    if let Some(i) = v.iter().position(|&b| b == 0) {
+        v.truncate(i);
+    }
+    v
 }
 
 /// Quote a value for a `declare`/`readonly -p` listing: wrap in double quotes
@@ -62547,6 +62631,37 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("printf 'A%cB' '' | cat -v").0, "A^@B");
         assert_eq!(run("printf 'A%cB' | cat -v").0, "A^@B");
         assert_eq!(run("printf '[%3c]' '' | cat -v").0, "[  ^@]");
+    }
+
+    #[test]
+    fn a_stored_value_ends_at_its_first_nul() {
+        // A variable is a C string, so the bytes past the first NUL are not
+        // stored — as against stored and hidden. `printf` is the only writer
+        // that can offer them, `%b` included.
+        assert_eq!(run(r"printf -v v 'a\0b'; echo ${#v} $v").0, "1 a\n");
+        assert_eq!(run(r"printf -v w '%b' 'x\0y'; echo ${#w} $w").0, "1 x\n");
+        // The cut comes before the value attributes, which are the assignment's
+        // own work: `-i` evaluates `1`, not the `1002` the whole string spells.
+        assert_eq!(run(r"declare -i n; printf -v n '1\0002'; echo $n").0, "1\n");
+        // An element is stored no differently, indexed or not.
+        assert_eq!(run(r"declare -A h; printf -v 'h[k]' 'e\0f'; echo ${#h[k]}").0, "1\n");
+        assert_eq!(run(r"printf -v 'a[0]' 'g\0h'; echo ${#a[0]}").0, "1\n");
+        // Nothing is left for a listing to spell, so neither form shows a byte.
+        assert_eq!(run(r"printf -v v 'a\0b'; declare -p v").0, "declare -- v=\"a\"\n");
+    }
+
+    #[test]
+    fn reading_skips_a_nul_rather_than_stopping_at_it() {
+        // `read` is the one place a NUL is dropped byte by byte instead of
+        // ending the value, so the two bytes around it come back adjacent
+        // (bash read.def:771). It is not counted toward `-n`/`-N` either.
+        assert_eq!(run(r"printf 'p\0q\n' | { read -r r; echo ${#r} $r; }").0, "2 pq\n");
+        assert_eq!(run(r"printf 'p\0q\n' | { read -r -N 2 c; echo ${#c} $c; }").0, "2 pq\n");
+        // Unless the NUL is the delimiter, which has to end the record.
+        assert_eq!(run(r"printf 'p\0q\n' | { read -r -d '' d; echo ${#d} $d; }").0, "1 p\n");
+        // Input that is only NULs reads as if it were empty: the name is
+        // cleared and the status is 1.
+        assert_eq!(run(r"x=PRESET; printf '\0\0' | { read -r x; echo $? [$x]; }").0, "1 []\n");
     }
 
     #[test]

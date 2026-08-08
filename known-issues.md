@@ -81,6 +81,89 @@ Found while measuring
 TD-OILS-AN-ARITHMETIC-STRING-NAMES-ITS-COMMAND-SUBSTITUTION-AS-WRITTEN, which
 also turned up TD-OILS-A-REPRINTED-COMPOUND-COMMAND-IS-KEPT-ON-ONE-LINE.
 
+### TD-OILS-AN-ARITHMETIC-COMMAND-DOES-NOT-PARSE-ITS-SUBSTITUTIONS. `(( 1 + $(fi) ))` should be a syntax error — 2026-08-07
+
+**Where:** `userspace/oils/src/lexer.rs` — `Lexer::read_arith_body`, which is
+the only `P_ARITH`-equivalent scan that does not hand its collected
+`CmdSubSpan`s back; `Tok::ArithCmd(Str)` carries none, so `parser.rs`'s
+`Command::Arith(raw)` never sees them.
+
+**What.** `parse_arith_cmd` reads a `(( … ))` body with
+`parse_matched_pair (0, '(', ')', &ttoklen, P_ARITH)` (parse.y:4519–4530) — the
+same scan `$(( … ))` gets. So everything `P_ARITH` implies applies: a nested
+`$( … )` is **parsed where it is read**, its syntax error is the enclosing
+unit's, and what is kept is the parse re-printed rather than the source.
+
+osh's `read_arith_body` calls the same `read_opaque_span(…, command = false)`
+that does the collecting, so the spans are produced — and then dropped on the
+floor, because `read_arith_body` returns only the text. Neither half happens:
+
+```text
+(( 1 + $(fi) ))
+  bash: syntax error near unexpected token `fi'   /  `(( 1 + $(fi) ))'   rc=1
+  osh:  the substitution's own error, then `((: 1 +  : syntax error…'
+
+if false; then (( 1 + $(fi) )); fi
+  bash: the same fatal error, branch untaken       rc=1
+  osh:  rc=0, silence
+
+for ((i=$(fi);;)); do :; done       same shape as the first
+(( ${x!} + $(echo a>&2) ))
+  bash: ` ${x!} + $(echo a 1>&2) : bad substitution'
+  osh:  ` ${x!} + $(echo a>&2) : bad substitution'   (source, not re-print)
+```
+
+There is a second, latent consequence: the dropped spans are not dropped, they
+are *left in* `Lexer::arith_comsubs`. Every other producer swaps that list out
+for the duration; `read_arith_body` does not, so a `(( … ))` leaves entries
+behind and the `None` (nested-subshell) rewind does not remove them either.
+Nothing consumes them today — each `$((` scan saves and restores the outer list
+rather than reading it — so this is not currently reachable, but it is one
+change away from being a real cross-token leak.
+
+**Proper fix:** give `read_arith_body` the same swap-out the other producers
+have, return the spans with the text, carry them on `Tok::ArithCmd` and on the
+`for (( … ))` header, and run them through `parse_arith_comsubs` +
+`splice_reprints` in `parser.rs` exactly as `Seg::Arith` now does. Discard them
+on the rewind path, where the text is read again as `( ( … ) )` and its
+substitutions are parsed by the ordinary command parser. The `for` header is the
+awkward one: it is split into three sections on `;` after the fact, so the
+ranges have to be split with it (or the splice done before the split).
+
+**Found by** the probe matrix for
+TD-OILS-AN-ARITHMETIC-STRING-NAMES-ITS-COMMAND-SUBSTITUTION-AS-WRITTEN,
+2026-08-07.
+
+### TD-OILS-A-DEFERRED-BRACE-BODY-KEEPS-ITS-SUBSTITUTION-AS-WRITTEN. `${#x:-$( (echo a) )}` should come back re-printed — 2026-08-07
+
+**Where:** `userspace/oils/src/parser.rs` — `seg_to_part`'s `Seg::ParamBraced`
+arm, which runs `parse_arith_comsubs` for its side effect and drops the
+re-prints it now returns.
+
+**What.** A `${ … }` body is read by `parse_matched_pair` under `P_DOLBRACE`,
+which sends a nested `$(` to `parse_comsub` (parse.y:3929 → 3959), so the body
+text that travels downstream holds the re-print. osh agrees on every path that
+builds operand *words* from the body — those substitutions become real AST
+nodes that `unparse` re-prints. It diverges on the paths that keep the body as
+unparsed text (`WordPart::BadSubst`, `BadTransform`), where the source survives:
+
+```text
+b() { : ${#x:-$( (echo 2) )}; }; declare -f b
+  bash: : ${#x:-$( ( echo 2 ))}
+  osh:  : ${#x:-$( (echo 2) )}
+```
+
+**Proper fix:** splice into the body text *before* `parse_braced_param_in` reads
+it, so both halves see the same bytes — which is also what bash does, since the
+splice happens during the scan that produces the body. The obstacle is that
+every offset into the body moves with the splice, and `frag_line` derives a
+fragment's physical line from exactly those offsets (see `map_frag_segs`); the
+line map has to be rebuilt against the spliced text in the same change.
+
+**Found by** the probe matrix for
+TD-OILS-AN-ARITHMETIC-STRING-NAMES-ITS-COMMAND-SUBSTITUTION-AS-WRITTEN,
+2026-08-07.
+
 ### TD-OILS-A-REPRINTED-COMPOUND-COMMAND-IS-KEPT-ON-ONE-LINE. `$(if true; then echo a; fi)` should come back over three lines — 2026-08-07
 
 **Where:** `userspace/oils/src/unparse.rs` — `program_inline`, which every
@@ -518,11 +601,15 @@ Two neighbours found while measuring this are logged separately:
 TD-OILS-A-DOUBLE-QUOTED-DOLLAR-BRACKET-IS-NOT-SKIPPED-BY-THE-QUOTE-EXTRACTOR and
 TD-OILS-AN-ARITHMETIC-STRING-NAMES-ITS-COMMAND-SUBSTITUTION-AS-WRITTEN.
 
-### TD-OILS-AN-ARITHMETIC-STRING-NAMES-ITS-COMMAND-SUBSTITUTION-AS-WRITTEN. `$(echo a>&2)` should come back as `$(echo a 1>&2)` — 2026-08-07
+### TD-OILS-AN-ARITHMETIC-STRING-NAMES-ITS-COMMAND-SUBSTITUTION-AS-WRITTEN. `$(echo a>&2)` should come back as `$(echo a 1>&2)` — 2026-08-07 — ✅ FIXED 2026-08-07 for the expansion spellings; the `(( … ))` command is tracked separately
 
-**Where:** `userspace/oils/src/interp.rs` — whatever fills `Shell::bad_sub_word`
-for an arithmetic string (`Shell::expand_arith_params` and its callers), which
-keeps the source text.
+**Where:** `userspace/oils/src/parser.rs` — `parse_arith_comsubs`, which parsed
+each nested body and threw the parse away, and `seg_to_part`'s `Seg::Arith` arm,
+which kept the scan's source text; `userspace/oils/src/lexer.rs` —
+`CmdSubSpan`, which recorded no position for the body it collected.
+
+*(The first note here guessed `interp.rs` and `Shell::bad_sub_word`. Wrong
+layer: the string is fixed at parse time and `interp` only reports it.)*
 
 **What:** bash does not keep the source text of a `$( … )`. `xparse_dolparen`
 parses the body and stores `make_command_string`'s *re-print* of the parse, so a
@@ -581,23 +668,44 @@ The `$( ( … ))` spacing is bash's own guard: `if (tcmd[0] == '(')` inserts a
 space so the result cannot re-read as `$((` (parse.y:4221–4227). `$[ … ]`,
 `(( … ))` and `let` all show the same re-print.
 
-**Not observable in execution, as far as could be measured.** `$LINENO` inside
-an arithmetic `$( … )` reports the *source* line even when the re-print spans
-more lines than the source did, so the re-print's extra newlines are renumbered
-away. Every other difference measured (dropped comments, normalised redirects)
-is semantics-preserving. So splicing the re-print into the stored text — which
-is what bash literally does, and the simplest faithful model — should be safe;
-there is no need for a diagnostic-only side channel.
+**It *is* observable in execution — an earlier note here said otherwise and was
+wrong.** The claim was that `$LINENO` reports the source line regardless. It
+does not; the re-print's extra newlines are counted:
 
-**Proper fix:** keep what `parse_arith_comsubs` currently parses and discards.
-`unparse` already has the whole re-print — `part_src`'s
-`CmdSubBody::Parsed` arm is `bfmt![b"$(", &flush_here_docs(&program_inline(prog)), b")"]`,
-which is why the subscript path already agrees. What is missing is the splice
-back into the arithmetic string, and for that `lexer::CmdSubSpan` needs the byte
-range it occupied in the arithmetic source; it currently carries only `src` and
-`close_line`. Add the range, then rewrite `Seg::Arith`'s text at parse time.
-Leave backticks alone — bash does not re-parse those, and the corpus already
-pins that.
+```sh
+q=$(echo $(( 0 + $(if true; then echo 0; fi) )); echo L=$LINENO)
+#   written on line 19            bash: L=21          osh: L=19
+```
+
+The three-line re-print of the `if` puts the `echo L=$LINENO` after it two lines
+further down inside the same `$( … )` body, and bash counts them. That makes it
+a *consequence* of the layout, not of the splice: every re-print measured that
+stays on one line leaves `$LINENO` alone, so this row moves only when
+TD-OILS-A-REPRINTED-COMPOUND-COMMAND-IS-KEPT-ON-ONE-LINE is fixed, and moves to
+agreement then. Every other difference (dropped comments, normalised redirects)
+is semantics-preserving.
+
+It also confirms the shape of the fix: bash really does splice the re-print into
+the stored text, so a diagnostic-only side channel would have been wrong.
+
+**Fixed 2026-08-07 for `$(( … ))`, `$[ … ]` and the `$((`-that-is-not-an-
+expression fallback.** `lexer::CmdSubSpan` gained the byte range the `$( … )`
+occupied in the scan's buffer (`shift_spans` moves the ranges when one scan's
+buffer is spliced into another's, and the `$((` arm slides them one byte left
+because the expression is the buffer minus the counted `(`).
+`parser::parse_arith_comsubs` now returns each body's re-print beside its range
+instead of discarding it, and `splice_reprints` writes them back right-to-left.
+The `let` and `${a[…]}` spellings already agreed — they reach the string through
+a word, whose parts `unparse` was already re-printing.
+
+Corpus case:
+`tests/corpus/an-arithmetic-string-carries-its-command-substitution-re-printed.sh`.
+
+**Still open: the `(( … ))` command and the `for (( … ))` header** — logged
+separately as TD-OILS-AN-ARITHMETIC-COMMAND-DOES-NOT-PARSE-ITS-SUBSTITUTIONS,
+because for those the *eager parse* is missing too, which is the larger half.
+Also still open for a `${ … }` body that defers, logged as
+TD-OILS-A-DEFERRED-BRACE-BODY-KEEPS-ITS-SUBSTITUTION-AS-WRITTEN.
 
 ### TD-OILS-A-DOUBLE-QUOTED-DOLLAR-BRACKET-IS-NOT-SKIPPED-BY-THE-QUOTE-EXTRACTOR. `echo "$[ ${ ]"` names the wrong string — 2026-08-07
 

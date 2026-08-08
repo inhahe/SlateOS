@@ -309,9 +309,12 @@ pub enum SubBody {
 /// A `$( … )` body an *arithmetic* scan stepped over, which bash parses in place
 /// (parse.y:3937 → 3959) even though the text around it is an expression.
 ///
-/// Only the parse's failure is observable — the body is read again when the
-/// expansion runs — so this carries just what a parse needs. See
-/// [`Lexer::arith_comsubs`].
+/// The parse's failure is not its only lasting effect. `parse_comsub` ends
+/// `tcmd = print_comsub (parsed_command); … return ret` (parse.y:4219–4241), so
+/// what it appends to the enclosing scan is the parse *re-printed*, and the
+/// source text is thrown away. That is what a diagnostic quoting an arithmetic
+/// string back shows, and what the body is read from when the expansion runs.
+/// See [`Lexer::arith_comsubs`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CmdSubSpan {
     /// The body, without the delimiters.
@@ -319,6 +322,26 @@ pub struct CmdSubSpan {
     /// The line the body's own `)` sits on, for the same renumbering an eager
     /// `$( … )` gets.
     pub close_line: u32,
+    /// Where `src` sits in the text the enclosing scan built, *including* the
+    /// `$(` and `)` around it — the range the re-print replaces. Offsets are
+    /// into the buffer this span was collected for, so a scan that splices its
+    /// buffer into a longer one shifts them as it does so.
+    pub range: core::ops::Range<usize>,
+}
+
+/// Move a collection of spans from the buffer they were gathered in to the
+/// buffer that buffer is being spliced into, `by` bytes along.
+///
+/// A range that would run past `usize` is dropped rather than wrapped — it can
+/// only come from a buffer longer than the address space, but the arithmetic
+/// has to be total either way, and a missing span costs a re-print, not
+/// correctness of the parse.
+fn shift_spans(nested: Vec<CmdSubSpan>, by: usize) -> impl Iterator<Item = CmdSubSpan> {
+    nested.into_iter().filter_map(move |s| {
+        let start = s.range.start.checked_add(by)?;
+        let end = s.range.end.checked_add(by)?;
+        Some(CmdSubSpan { range: start..end, ..s })
+    })
 }
 
 /// A word fragment, preserving quoting for later expansion.
@@ -4066,6 +4089,16 @@ impl Lexer {
                         .and_then(|e| e.strip_suffix(b")"))
                         .filter(|e| is_arith_expr(e))
                     {
+                        // The expression is `raw` minus the `(` this scan
+                        // counted, so every range slides one byte left with it.
+                        let nested = nested
+                            .into_iter()
+                            .map(|s| CmdSubSpan {
+                                range: s.range.start.saturating_sub(1)
+                                    ..s.range.end.saturating_sub(1),
+                                ..s
+                            })
+                            .collect();
                         return Ok(Some(Seg::Arith(expr.into(), false, nested)));
                     }
                     // The nested bodies travel with the fallback too: the eager
@@ -4376,8 +4409,11 @@ impl Lexer {
                             // This one is inside the double-quoted run, so it
                             // carries `P_DQUOTE` (parse.y:3696).
                             let (inner, nested) = self.read_dollar_brace(true)?;
-                            self.arith_comsubs.extend(nested);
                             raw.extend_from_slice(b"${");
+                            // Shifted as the body is spliced: the ranges came
+                            // out relative to `inner`, and from here on they
+                            // have to name the same bytes of `raw`.
+                            self.arith_comsubs.extend(shift_spans(nested, raw.len()));
                             raw.extend_from_slice(&inner);
                             raw.push(b'}');
                         }
@@ -4417,13 +4453,15 @@ impl Lexer {
                             let outer = std::mem::take(&mut self.arith_comsubs);
                             let inner = self.read_balanced_inner('(', ')', true)?;
                             self.arith_comsubs = outer;
-                            self.arith_comsubs.push(CmdSubSpan {
-                                src: inner.clone(),
-                                close_line: self.cur_line(),
-                            });
+                            let start = raw.len();
                             raw.extend_from_slice(b"$(");
                             raw.extend_from_slice(&inner);
                             raw.push(b')');
+                            self.arith_comsubs.push(CmdSubSpan {
+                                src: inner,
+                                close_line: self.cur_line(),
+                                range: start..raw.len(),
+                            });
                         }
                         Some(_) => self.take_into(raw),
                         None => return Err(eof_matching('"').at(q_open)),
@@ -4462,8 +4500,10 @@ impl Lexer {
                 // its own, so it sees the 5.3 answer there; see
                 // `TD-OILS-AN-ANSI-C-STRING-IS-NOT-REQUOTED-AFTER-A-BRACE-BODY-TRANSLATES-IT`.)
                 let (inner, nested) = self.read_dollar_brace(false)?;
-                self.arith_comsubs.extend(nested);
                 raw.extend_from_slice(b"${");
+                // See the `"`-run arm above: the body's ranges are relative to
+                // `inner` until it is spliced.
+                self.arith_comsubs.extend(shift_spans(nested, raw.len()));
                 raw.extend_from_slice(&inner);
                 raw.push(b'}');
                 Ok(true)
@@ -4486,16 +4526,20 @@ impl Lexer {
                 // runs `parse_comsub` here and now, and its failure is a syntax
                 // error in the *enclosing* unit — which is why
                 // `if false; then echo $(( 1 + $(fi) )); fi` dies even though the
-                // branch is never taken. Only the text survives the parse
-                // (`APPEND_NESTRET`), so the body is read again at expansion; the
-                // record kept here is just enough for the parser to run it.
-                self.arith_comsubs.push(CmdSubSpan {
-                    src: inner.clone(),
-                    close_line: self.cur_line(),
-                });
+                // branch is never taken. What survives is not the source but the
+                // parse *re-printed* — `parse_comsub` returns
+                // `print_comsub (parsed_command)` (parse.y:4219) — so the range
+                // travels with the record and the parser writes the re-print
+                // back over it.
+                let start = raw.len();
                 raw.extend_from_slice(b"$(");
                 raw.extend_from_slice(&inner);
                 raw.push(b')');
+                self.arith_comsubs.push(CmdSubSpan {
+                    src: inner,
+                    close_line: self.cur_line(),
+                    range: start..raw.len(),
+                });
                 Ok(true)
             }
             _ => Ok(false),
@@ -5055,7 +5099,8 @@ impl Lexer {
                             // `bad substitution`, so the record has to travel out
                             // past the level that collected it.
                             let (inner, nested) = self.read_dollar_brace(in_dquote)?;
-                            self.arith_comsubs.extend(nested);
+                            // `${` is already written, so the body starts here.
+                            self.arith_comsubs.extend(shift_spans(nested, raw.len()));
                             raw.extend_from_slice(&inner);
                             raw.push(b'}');
                         }
@@ -5081,17 +5126,19 @@ impl Lexer {
                                 let inner =
                                     self.read_subst_body().map_err(|e| e.at(self.eof_line()))?;
                                 // …and bash parses it here and now, from
-                                // `parse_dollar_word` (parse.y:3954). Only the
-                                // text survives that parse, so the body is read
-                                // again at expansion; what is recorded is just
-                                // enough for the parser to run it on the paths
-                                // that never build an operand word from it.
-                                self.arith_comsubs.push(CmdSubSpan {
-                                    src: inner.clone(),
-                                    close_line: self.cur_line(),
-                                });
+                                // `parse_dollar_word` (parse.y:3954). What
+                                // survives is the parse re-printed, not the
+                                // source (parse.y:4219), so the range names the
+                                // whole `$( … )` — the `$(` two bytes back, which
+                                // this arm has already written.
+                                let start = raw.len().saturating_sub(2);
                                 raw.extend_from_slice(&inner);
                                 raw.push(b')');
+                                self.arith_comsubs.push(CmdSubSpan {
+                                    src: inner,
+                                    close_line: self.cur_line(),
+                                    range: start..raw.len(),
+                                });
                             }
                         }
                         Some('[') => {

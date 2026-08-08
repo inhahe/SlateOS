@@ -4701,21 +4701,56 @@ fn word_from_segs_in(segs: &[Seg], opts: ParseOpts, q: Quoting) -> Result<Word, 
     Ok(Word { parts })
 }
 
-/// Parse the `$( … )` bodies an arithmetic scan stepped over, and throw the
-/// result away.
+/// Parse the `$( … )` bodies an arithmetic scan stepped over, and return each
+/// one's re-print beside the range of the scan's text it replaces.
 ///
 /// bash parses them where it meets them — `parse_matched_pair` under `P_ARITH`
 /// sends a `$(` to `parse_dollar_word` and from there to `parse_comsub`
-/// (parse.y:3937, 3959) — but keeps only the *text* (`APPEND_NESTRET`), reading
-/// the body again when the expansion runs. So the parse's one lasting effect is
-/// its error, and that error belongs to the enclosing unit: `echo $(( 1 + $(fi)
-/// ))` never reaches the arithmetic evaluator, and
-/// `if false; then echo $(( 1 + $(fi) )); fi` dies with the branch untaken.
-fn parse_arith_comsubs(nested: &[CmdSubSpan], opts: ParseOpts) -> Result<(), ParseError> {
+/// (parse.y:3931, 3959). What `APPEND_NESTRET` then splices into the scan's
+/// buffer is not the source: `parse_comsub` ends
+/// `tcmd = print_comsub (parsed_command); … return ret` (parse.y:4219–4241), so
+/// the source is thrown away and the parse *re-printed* in its place. That
+/// re-print is what a diagnostic quoting the string back shows, and what the
+/// body is read from when the expansion runs.
+///
+/// The parse's other lasting effect is its error, and that error belongs to the
+/// enclosing unit: `echo $(( 1 + $(fi) ))` never reaches the arithmetic
+/// evaluator, and `if false; then echo $(( 1 + $(fi) )); fi` dies with the
+/// branch untaken.
+fn parse_arith_comsubs(
+    nested: &[CmdSubSpan],
+    opts: ParseOpts,
+) -> Result<Vec<(core::ops::Range<usize>, Str)>, ParseError> {
+    let mut out = Vec::with_capacity(nested.len());
     for sub in nested {
-        parse_cmdsub_body(&sub.src, sub.close_line, opts)?;
+        let (prog, _) = parse_cmdsub_body(&sub.src, sub.close_line, opts)?;
+        out.push((sub.range.clone(), crate::unparse::comsub_reprint(b"$(", &prog)));
     }
-    Ok(())
+    Ok(out)
+}
+
+/// Write each re-print from [`parse_arith_comsubs`] back over the text it
+/// replaces.
+///
+/// Right to left, because a re-print is rarely the same length as the source it
+/// stands in for and an earlier range has to still be valid once a later one has
+/// changed size. The ranges are disjoint (each names one `$( … )`) but are
+/// sorted rather than assumed ordered, since they reach here from several scans
+/// spliced together.
+fn splice_reprints(text: &Str, mut reprints: Vec<(core::ops::Range<usize>, Str)>) -> Str {
+    if reprints.is_empty() {
+        return text.clone();
+    }
+    reprints.sort_by_key(|(r, _)| r.start);
+    let mut out = text.clone();
+    for (range, rep) in reprints.into_iter().rev() {
+        // A range that does not fit is not something a correct scan can produce;
+        // dropping the splice keeps the source text rather than corrupting it.
+        if range.start <= range.end && range.end <= out.len() {
+            out.splice(range, rep);
+        }
+    }
+    out
 }
 
 /// Whether a successfully parsed `${ … }` kept its body as *unparsed text*
@@ -4759,7 +4794,15 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
             // them, and parsing here as well would gather a nested
             // here-document twice; so this runs only where they are not.
             if part.as_ref().map_or(true, defers_its_body) {
-                parse_arith_comsubs(nested, opts)?;
+                // The re-prints go unused here. bash splices them into the
+                // `${ … }` body as it does anywhere else, so a deferred body
+                // quoted back should read `${#x:-$( ( echo a ))}` where the
+                // source said `$( (echo a) )`; osh keeps the source. Splicing
+                // would move every offset in the body, which is what
+                // `frag_line` derives a physical line from, so the two have to
+                // change together. See `known-issues.md`,
+                // TD-OILS-A-DEFERRED-BRACE-BODY-KEEPS-ITS-SUBSTITUTION-AS-WRITTEN.
+                drop(parse_arith_comsubs(nested, opts)?);
             }
             part?
         }
@@ -4773,13 +4816,14 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
                     verbatim: verbatim.clone(),
                     close_line: *close_line,
                 },
-                SubBody::ArithFallback(nested) => {
-                    parse_arith_comsubs(nested, opts)?;
-                    CmdSubBody::ArithFallback {
-                        src: raw.clone(),
-                        close_line: *close_line,
-                    }
-                }
+                // Collected by the same `P_ARITH` scan, so its nested bodies
+                // are re-printed into it the same way — the classification
+                // that sent this text back to a command substitution happens
+                // afterwards and does not undo the splice.
+                SubBody::ArithFallback(nested) => CmdSubBody::ArithFallback {
+                    src: splice_reprints(raw, parse_arith_comsubs(nested, opts)?),
+                    close_line: *close_line,
+                },
                 SubBody::Eager => {
                     // The eager parse is kept — it is what found the `)` and
                     // what raises the fatal syntax error — but so is the body
@@ -4789,13 +4833,16 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
                 }
             },
         },
-        Seg::Arith(raw, bracket, nested) => {
-            parse_arith_comsubs(nested, opts)?;
-            WordPart::ArithSub {
-                expr: raw.clone(),
-                bracket: *bracket,
-            }
-        }
+        Seg::Arith(raw, bracket, nested) => WordPart::ArithSub {
+            // The string carries the re-print, not what was written: it is
+            // `APPEND_NESTRET` that puts `parse_comsub`'s answer into the
+            // arithmetic scan's buffer, and there is no copy of the source
+            // left afterwards. So `$(( 1 + $(echo a>&2) ))` names
+            // `1 + $(echo a 1>&2)` when it fails, and re-reads that text when
+            // it runs.
+            expr: splice_reprints(raw, parse_arith_comsubs(nested, opts)?),
+            bracket: *bracket,
+        },
         Seg::ProcSub(input, raw, open_line) => WordPart::ProcSub {
             input: *input,
             body: parse_procsub_body(raw, *open_line, opts)?,

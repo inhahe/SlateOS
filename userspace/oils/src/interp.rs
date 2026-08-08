@@ -76286,6 +76286,40 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     }
 
     #[test]
+    fn a_brace_body_that_opens_no_name_is_a_runtime_bad_substitution() {
+        // A `${…}` whose body cannot begin a parameter name is a bad
+        // substitution, not a reference to a parameter with an odd name. bash
+        // requires the name to be all digits, one of the seven specials
+        // (`@*#?-$!`), an array reference, or a legal identifier
+        // (`valid_brace_expansion_word`, subst.c); a lone `.` or a space is none
+        // of the four. osh used to read the character as the name and expand it
+        // to the empty string, silently and with status 0.
+        for body in [".", " ", "\t", "+", "=", ":", "/", "^", ",", "~", "%", "<", "{"] {
+            let (o, _) = run(&format!("{{ echo \"${{{body}}}\"; }} 2>&1\necho after"));
+            assert_eq!(o, format!("osh: ${{{body}}}: bad substitution\nafter\n"));
+        }
+        // The refusal is of the *name*, so it lands whether or not an operator
+        // follows: the default is never substituted and the suffix never strips.
+        for body in [".:-x", ":-x", ".#p", ".%p", ".^", ".@Q", ".:0:1", "+:-x"] {
+            let (o, _) = run(&format!("{{ echo \"${{{body}}}\"; }} 2>&1\necho after"));
+            assert_eq!(o, format!("osh: ${{{body}}}: bad substitution\nafter\n"));
+        }
+        // An empty body is the same verdict, and — like every bad substitution —
+        // it is reached only when the word is expanded. osh used to reject
+        // `${}` while *parsing*, killing the script with status 2 before it ran.
+        let (o2, _) = run("if false; then echo \"${}\"; fi\necho \"rc=$?\"\necho after");
+        assert_eq!(o2, "rc=0\nafter\n");
+        let (o3, _) = run("{ echo \"${}\"; } 2>&1\necho \"rc=$?\"\necho after");
+        assert_eq!(o3, "osh: ${}: bad substitution\nrc=1\nafter\n");
+        // The seven specials still name themselves, with or without an operator.
+        let (o4, _) = run("set -- p q\necho \"${#}|${@}|${*}|${?}|${!:-n}|${@:-d}\"");
+        assert_eq!(o4, "2|p q|p q|0|n|p q\n");
+        // …and a digit or an identifier is unaffected.
+        let (o5, _) = run("set -- p q\nv=z\necho \"${1}|${12:-e}|${v}|${_v:-u}\"");
+        assert_eq!(o5, "p|e|z|u\n");
+    }
+
+    #[test]
     fn break_continue_level_clamped_to_loop_depth() {
         // `break N`/`continue N` with N larger than the nesting depth act on
         // the outermost enclosing loop and carry on — they do not keep

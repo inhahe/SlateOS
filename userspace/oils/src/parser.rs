@@ -5048,7 +5048,30 @@ enum NameSubscript {
     /// A parameter *name* that is not text takes the same route: the variable
     /// namespace is ASCII, so `${\xff}` names nothing and bash's answer is the
     /// same run-time "bad substitution".
+    ///
+    /// So does a body that names no parameter at all — an empty one (`${}`) or
+    /// one opening on a character that cannot begin a name (`${.}`, `${ }`,
+    /// `${:-x}`). See [`is_special_param_char`].
     Deferred,
+}
+
+/// Whether `c` alone names a parameter — the seven one-character specials.
+///
+/// bash keeps this set in its syntax table under `CSPECVAR`, built by
+/// `mksyntax.c:247`, `addcstr ("@*#?-$!", CSPECVAR); /* omits $0...$9 and $_ */`,
+/// and consults it from `SPECIAL_VAR` (subst.c:125) on the way into
+/// `valid_brace_expansion_word` (subst.c). That gate is what makes `${.}` and
+/// `${ }` errors rather than references to unset parameters named `.` and ` `:
+/// a brace body must be all digits, a special, an array reference, or a legal
+/// identifier, and a lone `.` is none of the four.
+///
+/// The check has to happen here, where the name is carved off, rather than at
+/// expansion — because whether an operator follows makes no difference to it.
+/// `${.}`, `${.:-x}` and `${.#p}` are all equally refused, so the default `x`
+/// is never substituted and the `#p` never strips: bash rejects the *name*
+/// before it ever looks at what is being asked of it.
+fn is_special_param_char(c: char) -> bool {
+    matches!(c, '@' | '*' | '#' | '?' | '-' | '$' | '!')
 }
 
 fn split_name_subscript(
@@ -5057,7 +5080,11 @@ fn split_name_subscript(
     line: u32,
 ) -> Result<NameSubscript, ParseError> {
     if chs.is_empty() {
-        return Err(ParseError::new("empty '${}' expansion"));
+        // `${}` names nothing, and bash says so at expansion time, not while
+        // parsing: `if false; then echo "${}"; fi` is silent. Its
+        // `valid_brace_expansion_word` reads an empty name, and `legal_identifier`
+        // rejects it along with every other body that is not a name.
+        return Ok(NameSubscript::Deferred);
     }
     let mut i = 0;
     // Only a genuine identifier may carry a `[subscript]`. bash refuses
@@ -5074,14 +5101,18 @@ fn split_name_subscript(
         while i < chs.len() && is_name_char(syn_at(chs, i)) {
             i += 1;
         }
-    } else {
-        // A special single-char parameter (`@`, `*`, `?`, `#`, `!`, `$`, …).
+    } else if is_special_param_char(syn_at(chs, 0)) {
+        // A special single-char parameter (`@`, `*`, `?`, `#`, `!`, `$`, `-`).
         i = 1;
+    } else {
+        // Anything else opens no name at all — see [`is_special_param_char`].
+        return Ok(NameSubscript::Deferred);
     }
     let raw_name = bytes::from_chars(chs.get(..i).unwrap_or_default().iter().copied());
-    // Only the special-parameter branch above can pick up a non-ASCII character,
-    // and no such parameter exists — `${\xff}` names nothing, which bash reports
-    // when the word is expanded.
+    // No branch above admits a non-ASCII character any more — `${\xff}` opens no
+    // name and is already gone — but keep the guard so the name a caller is
+    // handed stays text by construction rather than by an argument about which
+    // characters the three branches can reach.
     let Some(name) = name_text(&raw_name) else {
         return Ok(NameSubscript::Deferred);
     };

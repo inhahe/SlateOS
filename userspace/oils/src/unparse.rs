@@ -327,9 +327,18 @@ fn program_block(prog: &Program, fmt: Fmt, indent_first: bool) -> Str {
                     if !was_heredoc {
                         stmt.push(c);
                     }
-                    if fmt.in_func_def {
-                        stmt.push(b'\n');
-                    } else if c == b'\n' && !was_newline {
+                    // bash keeps these as two arms —
+                    //
+                    //     if (inside_function_def) cprintf ("\n");
+                    //     else if (printing_comsub && c == '\n' && was_newline == 0)
+                    //       cprintf ("\n");
+                    //
+                    // — but both write the same byte, so they fold into one. The
+                    // second fires only when a deferred here-document already
+                    // ate the `\n` that `s` would otherwise have been (hence
+                    // `was_newline == 0`); `printing_comsub` is implied, because
+                    // `c` is `\n` only where `fmt.comsub` chose it just above.
+                    if fmt.in_func_def || (c == b'\n' && !was_newline) {
                         stmt.push(b'\n');
                     } else {
                         if c == b';' {

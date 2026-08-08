@@ -22,7 +22,7 @@
 use crate::ast::{
     AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, BulkOp, CaseMode, CmdSubBody,
     Command, DupSpelling, dup_spelling,
-    CondExpr, Item, ParamOp, Pipeline, Program, Redirect, RedirectOp, ReplaceAnchor,
+    CondExpr, Item, ItemSep, ParamOp, Pipeline, Program, Redirect, RedirectOp, ReplaceAnchor,
     SimpleCommand, Word, WordPart,
 };
 use crate::bfmt;
@@ -84,6 +84,91 @@ impl std::ops::Add<usize> for Indent {
     }
 }
 
+/// The two flags bash's deparser carries alongside `indentation`, and which
+/// between them account for every layout difference in its output.
+///
+/// bash has exactly **one** command printer — `make_command_string_internal`
+/// (print_cmd.c:182–378) — and reaches it three ways: `declare -f`/`type` and
+/// the exported-function encoding, both of which set `inside_function_def`;
+/// `print_comsub` (print_cmd.c:167–178), which sets `printing_comsub`; and
+/// `make_command_string` with neither flag, which is the form `jobs` shows. The
+/// flags are independent — a function defined inside a substitution sets both —
+/// so they are two fields rather than one mode.
+///
+/// Everything else about the layout is `indentation`, which travels in
+/// [`Indent`].
+#[derive(Clone, Copy)]
+struct Fmt {
+    /// How deep, and in which shape.
+    level: Indent,
+    /// bash's `inside_function_def`. It decides two things: a `;` connector is
+    /// `";\n"` plus the next line's indent rather than `"; "`
+    /// (print_cmd.c:314–315), and a `{ … }` group is laid out over several
+    /// lines rather than inline (print_cmd.c:698–732).
+    in_func_def: bool,
+    /// bash's `printing_comsub`. It decides one thing: a newline connector
+    /// stays a newline instead of collapsing to `;` (print_cmd.c:302–320). bash
+    /// only ever *records* a newline connector while `PST_CMDSUBST` is set
+    /// (parse.y `list1: list1 '\n' newline_list list1`), so in bash the two
+    /// always travel together; osh records the connector unconditionally and
+    /// lets this flag decide, which comes to the same text.
+    comsub: bool,
+}
+
+impl Fmt {
+    /// `declare -f` / `type`: four spaces per level, inside a function
+    /// definition.
+    const DECLARE: Self = Self { level: Indent::DECLARE, in_func_def: true, comsub: false };
+    /// The exported-function encoding: one space at every depth.
+    const EXPORTED: Self = Self { level: Indent::EXPORTED, in_func_def: true, comsub: false };
+    /// `print_comsub`: the body of `$( … )`, `<( … )` or `>( … )`.
+    ///
+    /// bash computes this at *parse* time, when `indentation` is still 0 and
+    /// `indentation_amount` still its default 4 (print_cmd.c:56–57) — so a
+    /// substitution's body is laid out from column 0 however deep the text that
+    /// ends up carrying it.
+    const COMSUB: Self = Self { level: Indent::DECLARE, in_func_def: false, comsub: true };
+    /// `make_command_string` with both flags clear — the form `jobs` prints.
+    const PLAIN: Self = Self { level: Indent::DECLARE, in_func_def: false, comsub: false };
+
+    /// One nesting level deeper, keeping the flags — bash's
+    /// `indentation += indentation_amount`.
+    fn deeper(self) -> Self {
+        Self { level: self.level + 1, ..self }
+    }
+
+    /// The same shape, now printing a function body — bash's
+    /// `inside_function_def++`.
+    fn in_function(self) -> Self {
+        Self { in_func_def: true, ..self }
+    }
+
+    /// The leading whitespace a line at this depth carries.
+    fn spaces(self) -> Str {
+        self.level.spaces()
+    }
+}
+
+/// bash's `semicolon()` (print_cmd.c:1512–1521): terminate the statement just
+/// printed — unless it already ended in `&` or a newline, each of which is a
+/// terminator in its own right. That is why a backgrounded last statement gets
+/// no `;`, and why a here-document body (which ends in its own newline) is
+/// followed by a blank line rather than a `;`.
+fn semicolon(s: &mut Str) {
+    if matches!(s.last(), Some(&b'&' | &b'\n')) {
+        return;
+    }
+    s.push(b';');
+}
+
+/// bash's `newline()` (print_cmd.c:1486–1494): break the line, indent to the
+/// current depth, then write `text`.
+fn newline(s: &mut Str, level: Indent, text: &[u8]) {
+    s.push(b'\n');
+    s.push_str(&level.spaces());
+    s.push_str(text);
+}
+
 /// Render a function definition in bash's `declare -f` form:
 ///
 /// ```text
@@ -99,22 +184,20 @@ pub fn unparse_function(name: BStr<'_>, body: &Program, redirects: &[Redirect]) 
     // bash prints the opening brace on its own line with a trailing space
     // (`{ \n`), matching `declare -f` / `type` output byte-for-byte.
     s.push_str(" () \n{ \n");
-    let shape = Indent::DECLARE;
-    let inner = program_block(body, shape + 1, false);
+    let fmt = Fmt::DECLARE;
+    let inner = program_block(body, fmt.deeper(), true);
     if inner.is_empty() {
         // An empty body still needs a no-op so it re-parses.
-        s.push_str(&(shape + 1).spaces());
+        s.push_str(&fmt.deeper().spaces());
         s.push(b':');
-        s.push(b'\n');
     } else {
         s.push_str(&inner);
-        if !inner.ends_with(b"\n") {
-            s.push(b'\n');
-        }
     }
     // Redirections attached to the definition (`f() { …; } >log`) render on
-    // the closing-brace line: `} > log`, matching bash's `declare -f`.
-    s.push(b'}');
+    // the closing-brace line: `} > log`, matching bash's `declare -f`. bash
+    // restores the saved `indentation` before `newline ("}")`
+    // (print_cmd.c:1362–1377), so the brace lands at the definition's depth.
+    newline(&mut s, fmt.level, b"}");
     for r in redirects {
         s.push(b' ');
         s.push_str(&redirect_src(r));
@@ -136,19 +219,20 @@ pub fn unparse_function(name: BStr<'_>, body: &Program, redirects: &[Redirect]) 
 /// the header and one from the body's indent.
 #[must_use]
 pub fn unparse_function_exported(body: &Program, redirects: &[Redirect]) -> Str {
-    let shape = Indent::EXPORTED;
+    let fmt = Fmt::EXPORTED;
     let mut s = b"() { ".to_vec();
-    let inner = program_block(body, shape + 1, false);
+    let inner = program_block(body, fmt.deeper(), true);
     if inner.is_empty() {
-        s.push_str(&(shape + 1).spaces());
+        s.push_str(&fmt.deeper().spaces());
         s.push(b':');
-        s.push(b'\n');
     } else {
         s.push_str(&inner);
-        if !inner.ends_with(b"\n") {
-            s.push(b'\n');
-        }
     }
+    // `named_function_string` restores the *saved* `indentation` — the global
+    // 0, not the one space this shape uses — before its `newline ("}")`
+    // (print_cmd.c:1441–1456), so the closing brace lands at column 0 even
+    // though every line of the body carries a space.
+    s.push(b'\n');
     s.push(b'}');
     for r in redirects {
         s.push(b' ');
@@ -157,119 +241,131 @@ pub fn unparse_function_exported(body: &Program, redirects: &[Redirect]) -> Str 
     flush_here_docs(&s)
 }
 
-/// Render a whole program as an indented block: one item per line at `level`.
+/// Render a whole program the way bash's `CONNECTION` printer does
+/// (print_cmd.c:257–334) — no trailing separator and no trailing newline, both
+/// of which belong to the caller (`semicolon()` then `newline()`).
 ///
-/// `terminate_last` controls the trailing separator on the final statement, to
-/// match bash's `declare -f` deparser: a compound *clause* body (`then`/`else`/
-/// `do`) terminates every statement — including the last — with `;`, whereas a
-/// group body (`{ … }`, a subshell, the function body itself, and `case`
-/// clauses) leaves the last statement unterminated. Non-final statements always
-/// take a `;` separator (a backgrounded statement's ` &` is its own separator).
-fn program_block(prog: &Program, level: Indent, terminate_last: bool) -> Str {
+/// `indent_first` is bash's `skip_this_indent` seen from the other side: the
+/// callers that glue a body to text already on the line (`if `, `while `, `{ `,
+/// `( `, `coproc `) pass `false`.
+///
+/// The connector rules, transcribed:
+///
+/// * `&` — ` &` was already written by [`item_stmt`]; the next statement
+///   follows on the same line after a space.
+/// * `;` — `"; "` normally, `";\n"` plus the next line's indent inside a
+///   function definition.
+/// * a newline — the same as `;` *unless* a substitution is being re-printed,
+///   in which case it stays a literal newline and the next statement loses its
+///   indent (bash's `was_newline` guard stops the newline being doubled).
+///
+/// A here-document parked on the statement's last line stands in for bash's
+/// `was_heredoc`: the separator character is dropped (the body must start on
+/// the very next line, so there is nowhere to put one) while the line break
+/// still happens.
+fn program_block(prog: &Program, fmt: Fmt, indent_first: bool) -> Str {
     let mut out = Str::new();
+    let mut indent_this = indent_first;
     let n = prog.items.len();
     for (i, item) in prog.items.iter().enumerate() {
-        // bash keeps a backgrounded statement and the one that follows it on the
-        // same line (`a & b & c`), using ` & ` as an inline connector. So only
-        // indent an item that begins a fresh line: the first, or one whose
-        // predecessor was not backgrounded. (TD-OILS-DECLAREF-QUIRKS item 3.)
         let mut stmt = Str::new();
-        if i == 0 || !prog.items[i - 1].is_background() {
-            stmt.push_str(&level.spaces());
+        if indent_this {
+            stmt.push_str(&fmt.spaces());
         }
-        stmt.push_str(&item_stmt(item, level));
-        // A here-document parked on the statement's *last* line replaces the
-        // statement's separator: bash drops the `;` (the body has to start on
-        // the very next line) and leaves a blank line after the delimiter.
-        let trailing_here = last_line_has_here_doc(&stmt);
-        let is_last = i + 1 == n;
-        if item.is_background() {
-            // `item_stmt` already emitted the trailing ` &`; connect the next
-            // statement inline with a space, and only break the line when this
-            // backgrounded item is the last in the block.
-            stmt.push(if is_last { b'\n' } else { b' ' });
-        } else {
-            // Separate with `;`, terminating the last one only in clause-body
-            // context (`then`/`else`/`do`); group bodies leave it unterminated.
-            if (!is_last || terminate_last) && !trailing_here {
-                stmt.push(b';');
+        indent_this = true;
+        stmt.push_str(&item_stmt(item, fmt));
+        if i + 1 < n {
+            let was_heredoc = last_line_has_here_doc(&stmt);
+            match item.sep {
+                ItemSep::Amp => {
+                    // ` &` is already there; the next statement follows inline.
+                    stmt.push(b' ');
+                    indent_this = false;
+                }
+                ItemSep::Semi | ItemSep::Newline => {
+                    if was_heredoc {
+                        // The parked body has to start on the very next line,
+                        // so the statement's line ends here — which is also
+                        // where `flush_here_docs` hangs it. bash gets to the
+                        // same place from the other direction: the body is
+                        // still deferred when the connector runs, so
+                        // `print_deferred_heredocs` prints it here and
+                        // swallows the `;` on the way past
+                        // (print_cmd.c:1043–1058). Whatever the connector goes
+                        // on to write lands *after* the body either way.
+                        stmt.push(b'\n');
+                    }
+                    // `s[0] = printing_comsub ? c : ';'`.
+                    let c = if fmt.comsub && item.sep == ItemSep::Newline { b'\n' } else { b';' };
+                    // `was_newline` records that `s` *was* the line break, so
+                    // the branch below must not add a second one.
+                    let was_newline = !was_heredoc && c == b'\n';
+                    if !was_heredoc {
+                        stmt.push(c);
+                    }
+                    if fmt.in_func_def {
+                        stmt.push(b'\n');
+                    } else if c == b'\n' && !was_newline {
+                        stmt.push(b'\n');
+                    } else {
+                        if c == b';' {
+                            stmt.push(b' ');
+                        }
+                        indent_this = false;
+                    }
+                }
             }
-            stmt.push(b'\n');
         }
         out.push_str(&flush_here_docs(&stmt));
-        if trailing_here {
-            out.push(b'\n');
-        }
     }
     out
 }
 
-/// Render a program inline (single logical line), items joined by `; `. Used for
-/// conditions (`if <here>; then …`) and command substitutions.
-#[must_use]
-pub fn program_inline(prog: &Program) -> Str {
-    let mut parts: Vec<Str> = Vec::new();
-    for item in &prog.items {
-        let mut s = and_or_inline(&item.list);
-        if item.is_background() {
-            s.push_str(" &");
-        }
-        parts.push(s);
-    }
-    bytes::join(&parts, b"; ")
-}
-
 /// One statement (and-or list, plus a trailing ` &` when backgrounded). The
 /// first line carries no leading indent (the caller supplies it); nested lines
-/// are indented to `level`.
-fn item_stmt(item: &Item, level: Indent) -> Str {
-    let mut s = and_or_block(&item.list, level);
+/// are indented to `fmt`'s depth.
+fn item_stmt(item: &Item, fmt: Fmt) -> Str {
+    let mut s = and_or_block(&item.list, fmt);
     if item.is_background() {
         s.push_str(" &");
     }
     s
 }
 
-/// And-or list where the first pipeline may be a multi-line compound command.
-fn and_or_block(ao: &AndOr, level: Indent) -> Str {
-    let mut s = pipeline_block(&ao.first, level);
+/// And-or list. bash writes ` && ` / ` || ` inline and clears the right-hand
+/// side's indent (print_cmd.c:283–294), so however compound the operands are,
+/// the operator never breaks the line.
+fn and_or_block(ao: &AndOr, fmt: Fmt) -> Str {
+    let mut s = pipeline_block(&ao.first, fmt);
     for (op, pl) in &ao.rest {
         s.push_str(match op {
             AndOrOp::And => " && ",
             AndOrOp::Or => " || ",
         });
-        s.push_str(&pipeline_block(pl, level));
+        s.push_str(&pipeline_block(pl, fmt));
     }
     s
 }
 
-/// And-or list as bash exposes it in a trap's stored command text: rendered
-/// inline, with any here-document body flushed onto its own lines.
+/// And-or list as `make_command_string` renders it with both printer flags
+/// clear — the form `jobs` shows the command a job was started from.
 #[must_use]
 pub fn and_or_src(ao: &AndOr) -> Str {
-    flush_here_docs(&and_or_inline(ao))
+    flush_here_docs(&and_or_block(ao, Fmt::PLAIN))
 }
 
-/// A single command rendered inline, the way `jobs` shows the command a job was
-/// started from. `and_or_src` is the usual entry point — this one exists for the
-/// forms that are a bare [`Command`] with no list around them, such as `coproc`.
+/// A single command in that same form. `and_or_src` is the usual entry point —
+/// this one exists for the shapes that are a bare [`Command`] with no list
+/// around them, such as `coproc`.
 #[must_use]
 pub fn command_src(cmd: &Command) -> Str {
-    flush_here_docs(&command_inline(cmd))
+    flush_here_docs(&command_block(cmd, Fmt::PLAIN))
 }
 
-/// And-or list rendered strictly inline (for conditions / command subs). Any
-/// here-document body stays parked for the caller to flush.
-fn and_or_inline(ao: &AndOr) -> Str {
-    let mut s = pipeline_src(&ao.first);
-    for (op, pl) in &ao.rest {
-        s.push_str(match op {
-            AndOrOp::And => " && ",
-            AndOrOp::Or => " || ",
-        });
-        s.push_str(&pipeline_src(pl));
-    }
-    s
+/// A whole program in that same form.
+#[must_use]
+pub fn program_src(prog: &Program) -> Str {
+    flush_here_docs(&program_block(prog, Fmt::PLAIN, true))
 }
 
 fn pipeline_prefix(pl: &Pipeline) -> Str {
@@ -283,18 +379,12 @@ fn pipeline_prefix(pl: &Pipeline) -> Str {
     s
 }
 
-/// Pipeline where each command may be a multi-line compound command.
-fn pipeline_block(pl: &Pipeline, level: Indent) -> Str {
+/// Pipeline. `|` is written inline and clears the next command's indent, the
+/// same way `&` does — they share one arm of bash's connector switch
+/// (print_cmd.c:264–281).
+fn pipeline_block(pl: &Pipeline, fmt: Fmt) -> Str {
     let mut s = pipeline_prefix(pl);
-    let cmds: Vec<Str> = pl.commands.iter().map(|c| command_block(c, level)).collect();
-    s.push_str(&bytes::join(&cmds, b" | "));
-    s
-}
-
-/// Pipeline rendered strictly inline.
-fn pipeline_src(pl: &Pipeline) -> Str {
-    let mut s = pipeline_prefix(pl);
-    let cmds: Vec<Str> = pl.commands.iter().map(command_inline).collect();
+    let cmds: Vec<Str> = pl.commands.iter().map(|c| command_block(c, fmt)).collect();
     s.push_str(&bytes::join(&cmds, b" | "));
     s
 }
@@ -311,55 +401,60 @@ fn render_if(
     body: &Program,
     elifs: &[(Program, Program)],
     else_body: Option<&Program>,
-    level: Indent,
+    fmt: Fmt,
 ) -> Str {
+    // `cprintf ("if "); skip_this_indent++; <test>; semicolon (); " then\n"`
+    // (print_cmd.c:821–828) — `then` rides the condition's line, which is why a
+    // multi-statement condition inside a function definition still breaks.
     let mut s = b"if ".to_vec();
-    s.push_str(&program_inline(cond));
-    s.push_str("; then\n");
-    s.push_str(&program_block(body, level + 1, true));
+    s.push_str(&program_block(cond, fmt, false));
+    semicolon(&mut s);
+    s.push_str(" then\n");
+    s.push_str(&program_block(body, fmt.deeper(), true));
     if let Some(((econd, ebody), rest)) = elifs.split_first() {
         // `elif …` becomes `else\n  if … fi;` one indent level deeper.
-        s.push_str(&level.spaces());
-        s.push_str("else\n");
-        s.push_str(&(level + 1).spaces());
-        s.push_str(&render_if(econd, ebody, rest, else_body, level + 1));
-        s.push_str(";\n");
-        s.push_str(&level.spaces());
-        s.push_str("fi");
+        semicolon(&mut s);
+        newline(&mut s, fmt.level, b"else\n");
+        s.push_str(&fmt.deeper().spaces());
+        s.push_str(&render_if(econd, ebody, rest, else_body, fmt.deeper()));
+        semicolon(&mut s);
     } else if let Some(eb) = else_body {
-        s.push_str(&level.spaces());
-        s.push_str("else\n");
-        s.push_str(&program_block(eb, level + 1, true));
-        s.push_str(&level.spaces());
-        s.push_str("fi");
+        semicolon(&mut s);
+        newline(&mut s, fmt.level, b"else\n");
+        s.push_str(&program_block(eb, fmt.deeper(), true));
+        semicolon(&mut s);
     } else {
-        s.push_str(&level.spaces());
-        s.push_str("fi");
+        semicolon(&mut s);
     }
+    newline(&mut s, fmt.level, b"fi");
     s
 }
 
-/// Render a command as a (possibly multi-line) block. The first line has no
-/// leading indent; continuation lines are indented at `level`, bodies at
-/// `level + 1`.
-fn command_block(cmd: &Command, level: Indent) -> Str {
+/// Render a command the way `make_command_string_internal` does. The first line
+/// carries no leading indent (the caller supplies it, which is bash's
+/// `skip_this_indent`); continuation lines sit at `fmt`'s depth and bodies one
+/// deeper.
+fn command_block(cmd: &Command, fmt: Fmt) -> Str {
     match cmd {
         Command::Simple(sc) => simple_inline(sc),
-        Command::If(c) => render_if(&c.cond, &c.body, &c.elifs, c.else_body.as_ref(), level),
+        Command::If(c) => render_if(&c.cond, &c.body, &c.elifs, c.else_body.as_ref(), fmt),
         Command::Loop(c) => {
             // `while`/`until` keep `do` on the same line as the condition
-            // (`while COND; do`), unlike `for`/`select` (see below).
+            // (`cprintf (" do\n")`, print_cmd.c:809 — the comment there notes it
+            // "was `newline ("do\n")`"), unlike `for`/`select` below.
             let mut s = if c.until { b"until ".to_vec() } else { b"while ".to_vec() };
-            s.push_str(&program_inline(&c.cond));
-            s.push_str("; do\n");
-            s.push_str(&program_block(&c.body, level + 1, true));
-            s.push_str(&level.spaces());
-            s.push_str("done");
+            s.push_str(&program_block(&c.cond, fmt, false));
+            semicolon(&mut s);
+            s.push_str(" do\n");
+            s.push_str(&program_block(&c.body, fmt.deeper(), true));
+            semicolon(&mut s);
+            newline(&mut s, fmt.level, b"done");
             s
         }
         Command::For(c) => {
-            // bash's deparser puts `do` on its own line for `for` (the word list
-            // is terminated with `;`, then `do` at the loop's indent level).
+            // bash's deparser puts `do` on its own line for `for`: the word list
+            // is terminated with an unconditional `;` (print_cmd.c:628), then
+            // `newline ("do\n")` writes it at the loop's own depth.
             let mut s = bfmt![b"for ", &c.var];
             if let Some(words) = &c.words {
                 s.push_str(" in");
@@ -368,23 +463,21 @@ fn command_block(cmd: &Command, level: Indent) -> Str {
                     s.push_str(&word_src(w));
                 }
             }
-            s.push_str(";\n");
-            s.push_str(&level.spaces());
-            s.push_str("do\n");
-            s.push_str(&program_block(&c.body, level + 1, true));
-            s.push_str(&level.spaces());
-            s.push_str("done");
+            s.push(b';');
+            newline(&mut s, fmt.level, b"do\n");
+            s.push_str(&program_block(&c.body, fmt.deeper(), true));
+            semicolon(&mut s);
+            newline(&mut s, fmt.level, b"done");
             s
         }
         Command::ForArith(c) => {
             // `for ((init; cond; upd))` with no inner-paren padding and `do` on
             // its own line, matching bash.
-            let mut s = bfmt![b"for ((", &c.init, b"; ", &c.cond, b"; ", &c.update, b"))\n"];
-            s.push_str(&level.spaces());
-            s.push_str("do\n");
-            s.push_str(&program_block(&c.body, level + 1, true));
-            s.push_str(&level.spaces());
-            s.push_str("done");
+            let mut s = bfmt![b"for ((", &c.init, b"; ", &c.cond, b"; ", &c.update, b"))"];
+            newline(&mut s, fmt.level, b"do\n");
+            s.push_str(&program_block(&c.body, fmt.deeper(), true));
+            semicolon(&mut s);
+            newline(&mut s, fmt.level, b"done");
             s
         }
         Command::Select(c) => {
@@ -396,27 +489,27 @@ fn command_block(cmd: &Command, level: Indent) -> Str {
                     s.push_str(&word_src(w));
                 }
             }
-            s.push_str(";\n");
-            s.push_str(&level.spaces());
-            s.push_str("do\n");
-            s.push_str(&program_block(&c.body, level + 1, true));
-            s.push_str(&level.spaces());
-            s.push_str("done");
+            s.push(b';');
+            newline(&mut s, fmt.level, b"do\n");
+            s.push_str(&program_block(&c.body, fmt.deeper(), true));
+            semicolon(&mut s);
+            newline(&mut s, fmt.level, b"done");
             s
         }
         Command::Function(f) => {
-            // A function defined *inside* another function body reaches
+            // A function defined *inside* another command reaches
             // `command_block` (top-level definitions go through
             // `unparse_function`). bash's deparser prefixes every such nested
             // definition with the `function` keyword — regardless of the source
             // syntax — while top-level defs omit it. See known-issues.md
-            // TD-OILS-DECLAREF-QUIRKS item 4.
+            // TD-OILS-DECLAREF-QUIRKS item 4. The body is printed with
+            // `inside_function_def` set (print_cmd.c:1349–1361), which is what
+            // splits it over several lines even inside a substitution.
             let mut s = bfmt![b"function ", &f.name, b" () \n"];
-            s.push_str(&level.spaces());
+            s.push_str(&fmt.spaces());
             s.push_str("{ \n");
-            s.push_str(&program_block(&f.body, level + 1, false));
-            s.push_str(&level.spaces());
-            s.push(b'}');
+            s.push_str(&program_block(&f.body, fmt.deeper().in_function(), true));
+            newline(&mut s, fmt.level, b"}");
             for r in &f.redirects {
                 s.push(b' ');
                 s.push_str(&redirect_src(r));
@@ -424,171 +517,61 @@ fn command_block(cmd: &Command, level: Indent) -> Str {
             s
         }
         Command::Case(c) => {
-            // bash prints `case WORD in ` with a trailing space before the
-            // newline.
-            let mut s = bfmt![b"case ", &word_src(&c.word), b" in \n"];
-            for item in &c.items {
-                let pats: Vec<Str> = item.patterns.iter().map(word_src).collect();
-                s.push_str(&(level + 1).spaces());
-                s.push_str(&bytes::join(&pats, b"|"));
-                s.push_str(")\n");
-                s.push_str(&program_block(&item.body, level + 2, false));
-                s.push_str(&(level + 1).spaces());
-                s.push_str(match item.term {
-                    crate::ast::CaseTerm::Break => ";;",
-                    crate::ast::CaseTerm::FallThrough => ";&",
-                    crate::ast::CaseTerm::ContinueMatch => ";;&",
-                });
-                s.push(b'\n');
-            }
-            s.push_str(&level.spaces());
-            s.push_str("esac");
-            s
-        }
-        Command::BraceGroup(prog) => {
-            // bash prints the opening brace with a trailing space (`{ `).
-            let mut s = b"{ \n".to_vec();
-            s.push_str(&program_block(prog, level + 1, false));
-            s.push_str(&level.spaces());
-            s.push(b'}');
-            s
-        }
-        Command::Subshell(prog) => {
-            // bash's deparser keeps a subshell body at the *same* indent as the
-            // `(`, glues the first statement to `( ` and the last to ` )`
-            // (`( echo a;\n<ind>echo b )`) rather than using a deeper indented
-            // block. Render the body as a group (last statement unterminated),
-            // then strip the first line's indent and the trailing newline and
-            // wrap in `( … )`. (TD-OILS-DECLAREF-QUIRKS item 2.)
-            let body = program_block(prog, level, false);
-            if body.is_empty() {
-                return b"( )".to_vec();
-            }
-            let indent = level.spaces();
-            let trimmed = body.strip_prefix(indent.as_slice()).unwrap_or(body.as_slice());
-            let trimmed = trimmed.strip_suffix(b"\n").unwrap_or(trimmed);
-            bfmt![b"( ", trimmed, b" )"]
-        }
-        Command::Cond(expr) => cond_command_src(expr),
-        Command::Arith(text) => bfmt![b"((", text, b"))"],
-        Command::Coproc { name, body } => {
-            let mut s = b"coproc ".to_vec();
-            if let Some(n) = name {
-                s.push_str(n);
-                s.push(b' ');
-            }
-            s.push_str(&command_block(body, level));
-            s
-        }
-        Command::Redirected { inner, redirects } => {
-            let mut s = command_block(inner, level);
-            for r in redirects {
-                s.push(b' ');
-                s.push_str(&redirect_src(r));
-            }
-            s
-        }
-    }
-}
-
-/// Render a command strictly inline (compound commands still use `;` separators,
-/// which is valid bash — just not multi-line).
-fn command_inline(cmd: &Command) -> Str {
-    match cmd {
-        Command::Simple(sc) => simple_inline(sc),
-        Command::If(c) => {
-            let mut s = b"if ".to_vec();
-            s.push_str(&program_inline(&c.cond));
-            s.push_str("; then ");
-            s.push_str(&program_inline(&c.body));
-            s.push(b';');
-            for (econd, ebody) in &c.elifs {
-                s.push_str(" elif ");
-                s.push_str(&program_inline(econd));
-                s.push_str("; then ");
-                s.push_str(&program_inline(ebody));
-                s.push(b';');
-            }
-            if let Some(eb) = &c.else_body {
-                s.push_str(" else ");
-                s.push_str(&program_inline(eb));
-                s.push(b';');
-            }
-            s.push_str(" fi");
-            s
-        }
-        Command::Loop(c) => {
-            let mut s = if c.until { b"until ".to_vec() } else { b"while ".to_vec() };
-            s.push_str(&program_inline(&c.cond));
-            s.push_str("; do ");
-            s.push_str(&program_inline(&c.body));
-            s.push_str("; done");
-            s
-        }
-        Command::For(c) => {
-            let mut s = bfmt![b"for ", &c.var];
-            if let Some(words) = &c.words {
-                s.push_str(" in");
-                for w in words {
-                    s.push(b' ');
-                    s.push_str(&word_src(w));
-                }
-            }
-            s.push_str("; do ");
-            s.push_str(&program_inline(&c.body));
-            s.push_str("; done");
-            s
-        }
-        Command::ForArith(c) => {
-            let mut s = bfmt![b"for (( ", &c.init, b"; ", &c.cond, b"; ", &c.update, b" )); do "];
-            s.push_str(&program_inline(&c.body));
-            s.push_str("; done");
-            s
-        }
-        Command::Select(c) => {
-            let mut s = bfmt![b"select ", &c.var];
-            if let Some(words) = &c.words {
-                s.push_str(" in");
-                for w in words {
-                    s.push(b' ');
-                    s.push_str(&word_src(w));
-                }
-            }
-            s.push_str("; do ");
-            s.push_str(&program_inline(&c.body));
-            s.push_str("; done");
-            s
-        }
-        Command::Function(f) => {
-            let mut s = bfmt![&f.name, b" () { "];
-            s.push_str(&program_inline(&f.body));
-            s.push_str("; }");
-            for r in &f.redirects {
-                s.push(b' ');
-                s.push_str(&redirect_src(r));
-            }
-            s
-        }
-        Command::Case(c) => {
+            // bash prints `case WORD in ` with a trailing space, then
+            // `newline ("")` before each clause's patterns
+            // (print_cmd.c:762–785). Clause bodies are never terminated: the
+            // `;;` follows on its own line with no `semicolon ()` before it.
             let mut s = bfmt![b"case ", &word_src(&c.word), b" in "];
             for item in &c.items {
                 let pats: Vec<Str> = item.patterns.iter().map(word_src).collect();
-                s.push_str(&bytes::join(&pats, b"|"));
-                s.push_str(") ");
-                s.push_str(&program_inline(&item.body));
-                s.push(b' ');
-                s.push_str(match item.term {
-                    crate::ast::CaseTerm::Break => ";;",
-                    crate::ast::CaseTerm::FallThrough => ";&",
-                    crate::ast::CaseTerm::ContinueMatch => ";;&",
-                });
-                s.push(b' ');
+                // `command_print_word_list (clauses->patterns, " | ")`
+                // (print_cmd.c:769) — the alternatives are spaced out, not
+                // glued the way the source usually writes them.
+                newline(&mut s, fmt.level + 1, &bytes::join(&pats, b" | "));
+                s.push_str(")\n");
+                s.push_str(&program_block(&item.body, fmt.deeper().deeper(), true));
+                newline(
+                    &mut s,
+                    fmt.level + 1,
+                    match item.term {
+                        crate::ast::CaseTerm::Break => b";;".as_slice(),
+                        crate::ast::CaseTerm::FallThrough => b";&",
+                        crate::ast::CaseTerm::ContinueMatch => b";;&",
+                    },
+                );
             }
-            s.push_str("esac");
+            newline(&mut s, fmt.level, b"esac");
             s
         }
-        Command::BraceGroup(prog) => bfmt![b"{ ", &program_inline(prog), b"; }"],
-        Command::Subshell(prog) => bfmt![b"( ", &program_inline(prog), b" )"],
+        Command::BraceGroup(prog) => {
+            // `print_group_command` (print_cmd.c:697–732) is the one printer
+            // that reads `inside_function_def` for its *shape*: inside a
+            // definition the group breaks over several lines, everywhere else
+            // it stays on one — `{ echo a; echo b; }`, terminator and all.
+            let mut s = b"{ ".to_vec();
+            if fmt.in_func_def {
+                s.push(b'\n');
+                s.push_str(&program_block(prog, fmt.deeper(), true));
+                newline(&mut s, fmt.level, b"}");
+            } else {
+                s.push_str(&program_block(prog, fmt, false));
+                semicolon(&mut s);
+                s.push_str(" }");
+            }
+            s
+        }
+        Command::Subshell(prog) => {
+            // `cprintf ("( "); skip_this_indent++; <body>; cprintf (" )")`
+            // (print_cmd.c:350–356) — no `semicolon ()`, and the body keeps the
+            // subshell's own depth rather than descending, so a `;` connector
+            // inside a function definition lines the next statement up under
+            // the `(`. (TD-OILS-DECLAREF-QUIRKS item 2.)
+            let body = program_block(prog, fmt, false);
+            if body.is_empty() {
+                return b"( )".to_vec();
+            }
+            bfmt![b"( ", &body, b" )"]
+        }
         Command::Cond(expr) => cond_command_src(expr),
         Command::Arith(text) => bfmt![b"((", text, b"))"],
         Command::Coproc { name, body } => {
@@ -597,11 +580,11 @@ fn command_inline(cmd: &Command) -> Str {
                 s.push_str(n);
                 s.push(b' ');
             }
-            s.push_str(&command_inline(body));
+            s.push_str(&command_block(body, fmt));
             s
         }
         Command::Redirected { inner, redirects } => {
-            let mut s = command_inline(inner);
+            let mut s = command_block(inner, fmt);
             for r in redirects {
                 s.push(b' ');
                 s.push_str(&redirect_src(r));
@@ -858,7 +841,7 @@ fn flush_here_docs(text: BStr<'_>) -> Str {
 /// `echo a ))`, which is a different construct — and `<( (echo a) )` would come
 /// back as a `<((` that does not parse at all.
 pub(crate) fn comsub_reprint(open: &[u8], prog: &Program) -> Str {
-    let body = flush_here_docs(&program_inline(prog));
+    let body = flush_here_docs(&program_block(prog, Fmt::COMSUB, true));
     let gap: &[u8] = if body.first() == Some(&b'(') { b" " } else { b"" };
     bfmt![open, gap, &body, b")"]
 }

@@ -61192,7 +61192,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!((o.as_str(), s), ("", 1));
         // Round-trips through the unparser (`${!ref<op>}`).
         assert_eq!(
-            crate::bytes::trim(&crate::unparse::program_inline(
+            crate::bytes::trim(&crate::unparse::program_src(
                 &parse("echo ${!x:-def}".as_bytes()).unwrap()
             )),
             b"echo ${!x:-def}".as_slice()
@@ -61239,7 +61239,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // Round-trips through the unparser with the subscript intact.
         for src in ["echo ${!a[@]#x}", "echo ${!a[*]#x}", "echo ${!a[0]#x}"] {
             assert_eq!(
-                crate::bytes::trim(&crate::unparse::program_inline(
+                crate::bytes::trim(&crate::unparse::program_src(
                     &parse(src.as_bytes()).unwrap()
                 )),
                 src.as_bytes()
@@ -61271,7 +61271,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         }
         // Round-trips through the unparser.
         assert_eq!(
-            crate::bytes::trim(&crate::unparse::program_inline(
+            crate::bytes::trim(&crate::unparse::program_src(
                 &parse("echo ${!-x}".as_bytes()).unwrap()
             )),
             b"echo ${!-x}".as_slice()
@@ -61330,7 +61330,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // parsed against never reaches the tree.
         for src in ["echo ${!@#O}", "echo ${!*:0:1}"] {
             assert_eq!(
-                crate::bytes::trim(&crate::unparse::program_inline(
+                crate::bytes::trim(&crate::unparse::program_src(
                     &parse(src.as_bytes()).unwrap()
                 )),
                 src.as_bytes()

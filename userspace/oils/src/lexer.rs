@@ -2930,7 +2930,24 @@ impl Lexer {
                     // does `((` standing where no command can start — there it
                     // is a plain `(`, and the second one is read again as the
                     // next token.
-                    if self.peek() == Some('(') && arith_cmd_position(out.last()) {
+                    //
+                    // Inside `[[ … ]]` no paren ever takes the arithmetic path,
+                    // however deeply nested. bash gates it on
+                    // `reserved_word_acceptable (last_read_token)`
+                    // (`parse_dparen`, parse.y:4484), and `last_read_token` is
+                    // updated only by `yylex` (parse.y:2904) — but the whole
+                    // conditional is read by `parse_cond_command` from *inside*
+                    // one `read_token` call (parse.y:3399), and `cond_term` asks
+                    // `read_token` for its tokens directly. So `last_read_token`
+                    // is frozen at `COND_START` for the length of the
+                    // conditional, and `COND_START` is not on the list. Hence
+                    // `[[ ((( a ))) ]]` is three nested groups around the word
+                    // `a`, and `[[ (( 0 )) ]]` tests the *string* `0` rather
+                    // than evaluating it.
+                    if self.peek() == Some('(')
+                        && self.cond_depth == 0
+                        && arith_cmd_position(out.last())
+                    {
                         // …and so is a `((` whose two closing parentheses are
                         // not adjacent. bash's `parse_arith_cmd` tests for the
                         // second `)` with a read of its own, and on failing it
@@ -6157,6 +6174,69 @@ mod tests {
         let toks = tokenize("echo $(( echo a ) | cat) $((1 + 1))\necho done").unwrap();
         assert!(matches!(&toks[1], Tok::Word(s) if matches!(s[0], Seg::CmdSub(..))));
         assert!(matches!(&toks[2], Tok::Word(s) if matches!(s[0], Seg::Arith(_, false, _))));
+    }
+
+    #[test]
+    fn no_paren_inside_a_conditional_is_arithmetic() {
+        // bash reads `((` as an arithmetic command only where
+        // `reserved_word_acceptable (last_read_token)` holds (`parse_dparen`,
+        // parse.y:4484). `last_read_token` is assigned only in `yylex`
+        // (parse.y:2904), and the whole of `[[ … ]]` is read by
+        // `parse_cond_command` from *inside* a single `read_token` call
+        // (parse.y:3399) — `cond_term` asks `read_token` for its tokens
+        // directly, never going through `yylex`. So for the length of a
+        // conditional `last_read_token` is frozen at `COND_START`, which is
+        // not on the list, and no paren in there is ever arithmetic however
+        // deeply nested.
+        let arith_count =
+            |src: &str| tokenize(src).unwrap().iter().filter(|t| matches!(t, Tok::ArithCmd(..))).count();
+
+        for src in [
+            "[[ ((( a ))) ]]",
+            "[[ (((( a )))) ]]",
+            "[[ ((((( a ))))) ]]",
+            "[[ (( 0 )) ]]",
+            "[[ ((( 0 ))) || (( 1 )) ]]",
+            "[[ (( a )) && (( b )) ]]",
+        ] {
+            assert_eq!(arith_count(src), 0, "{src} must not lex an arithmetic command");
+        }
+
+        // `[[ ((( a ))) ]]` is three nested groups around one word.
+        let toks = tokenize("[[ ((( a ))) ]]").unwrap();
+        let shape: Vec<&'static str> = toks
+            .iter()
+            .map(|t| match t {
+                Tok::Op(Op::LParen) => "(",
+                Tok::Op(Op::RParen) => ")",
+                Tok::Word(_) => "w",
+                Tok::Newline => "\\n",
+                other => panic!("unexpected token {other:?}"),
+            })
+            .collect();
+        assert_eq!(shape, ["w", "(", "(", "(", "w", ")", ")", ")", "w", "\\n"]);
+
+        // The conditional's own nesting is what is tracked, so a `((` after
+        // the `]]` is arithmetic again.
+        for src in ["[[ a ]] && ((1))", "((1))", "for ((i=0;i<2;i++)); do :; done"] {
+            assert_eq!(arith_count(src), 1, "{src} should lex one arithmetic command");
+        }
+
+        // A command substitution written inside the conditional is its own
+        // parse — the body travels as raw text and is lexed again from a
+        // command position, where its `((` *is* arithmetic. Nothing at this
+        // level sees it, so the check here is only that the conditional still
+        // ends up as `[[ -n <word> ]]`.
+        let toks = tokenize("[[ -n $( ((1)) ; echo hi ) ]]").unwrap();
+        assert_eq!(arith_count("[[ -n $( ((1)) ; echo hi ) ]]"), 0);
+        assert_eq!(toks.len(), 5, "expected `[[ -n <word> ]]` + newline, got {toks:?}");
+        assert!(matches!(&toks[2], Tok::Word(s) if matches!(s[0], Seg::CmdSub(..))));
+
+        // And a `((` where no command can start is still a plain `(` outside a
+        // conditional, which the `cond_depth` test must not have disturbed.
+        for src in ["x=1 ((2))", "echo ((1))"] {
+            assert_eq!(arith_count(src), 0, "{src} must not lex an arithmetic command");
+        }
     }
 
     #[test]

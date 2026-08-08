@@ -43,11 +43,11 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
-### TD-OILS-JOBS-LIFETIME-RACES-ON-THE-CURRENT-JOB-MARKERS. `jobs-lifetime.sh` disagrees about `+`/`-` about 1 run in 5 — 2026-08-08 — OPEN
+### TD-OILS-JOBS-LIFETIME-RACES-ON-THE-CURRENT-JOB-MARKERS. `jobs-lifetime.sh` disagrees about `+`/`-` about 1 run in 5 — 2026-08-08 — ✅ FIXED 2026-08-08 (the case's margin, not the marker code)
 
-**Where:** `userspace/oils/tests/corpus/jobs-lifetime.sh` lines 68 and 73, and
-whatever in `userspace/oils/src/interp.rs` picks the current (`+`) and previous
-(`-`) job when a finished job is reported and dropped.
+**Where:** `userspace/oils/tests/corpus/jobs-lifetime.sh` line 68. The marker
+code in `userspace/oils/src/interp.rs` — `note_new_job`, `newest_running_before`
+and `reset_job_markers` — was suspected and is exonerated; it is unchanged.
 
 **What.** A full sweep failed this one case where the immediately preceding
 sweep, on the *same binary*, passed it. Re-run in isolation: **1 failure in 5**.
@@ -66,39 +66,54 @@ states the rule being tested: "Dropping the `-` job leaves the `+` job in place,
 yet the listing that follows shows no marker at all: with nothing running there
 is nothing to re-mark."
 
-**Discriminated 2026-08-08: this is osh's bug, not the case's.** The reasoning
-is that bash is *stable* under the same perturbation and osh is not. Across
-every run observed — the sweep failure, 2 of 10 whole-case re-runs, and the
-narrowed probes below — bash printed `[1]-` / `[2] ` every single time, without
-one exception. osh printed the same thing most of the time and `[1] ` / `[2]+`
-about 15% of the time, always that exact wrong answer and never a third one. A
-case with margins too thin for the host would make *both* shells wobble; only
-one wobbles. And an always-identical wrong answer is not the signature of jitter
-— it is a second code path being taken.
+**First diagnosis (2026-08-08) — wrong, and recorded here because the way it
+was wrong is worth keeping.** It read: *this is osh's bug, not the case's*, on
+the grounds that bash was stable under the same perturbation while osh flipped
+~15% of the time, always to the same wrong answer — "a case with margins too
+thin for the host would make *both* shells wobble", and "an always-identical
+wrong answer is not the signature of jitter, it is a second code path". Both
+halves are bad reasoning. The observable here is **binary** — job 1 is either
+alive when job 2 is created or it is not — so jitter can only ever produce one
+wrong answer, and identity proves nothing. And two shells with different spawn
+latencies do not have to wobble at the same margin, or at all.
 
-**Narrowed to the trigger.** Line 68 on its own never fails (0/10 with the
-`sleep 0.6` gate, 0/10 with a 3 s gate), so the state that matters is left
-behind by what precedes it. It reproduces with just the two lines above it:
+**What it actually is: the case's margin, and it was measured.** The line was
+instrumented with `$EPOCHREALTIME` on both sides of each `&`, and the failing
+run was caught in the act:
 
-```sh
-sleep 0.2 & wait %1; sleep 0.4 & jobs; wait; disown -a
-sleep 0.05 & sleep 0.6; sleep 0.4 & jobs; wait; disown -a   # <- the trigger
-sleep 0.05 & sleep 0.06 & sleep 0.6; jobs %1; echo "--"; jobs; disown -a
+```text
+   t1-t0    t2-t1   the listing taken immediately after both spawns
+     5.1    145.8   [1]  Done sleep 0.05  /  [2]+ Running sleep 0.06 &
+     …        7-10  [1]- Running sleep 0.05 & / [2]+ Running sleep 0.06 &   (48 runs)
 ```
 
-That is 1/10. Widening only the *middle* line's gate from `0.6` to `2` takes it
-to 0/10 — so what decides it is whether that line's `sleep 0.05` has been reaped
-by the time its `sleep 0.4 &` starts. osh's marker assignment for the *next*
-line's fresh jobs is therefore sensitive to when a previous, already-disowned
-job got reaped; bash's is not.
+`t2-t1` is the cost of creating job 2. It is normally 7–10 ms, and in the one
+failing run of 49 it was **145.8 ms** — nearly three times job 1's entire 50 ms
+life. So job 1 really had finished before job 2 existed, `newest_running_before`
+really had nothing to return, and osh's `note_new_job` did exactly what bash's
+`set_current_job` does with that table (jobs.c:3425). No second code path.
 
-**Proper fix:** find what in the job table survives `disown -a` and biases the
-next `+`/`-` assignment — most likely the current/previous slots are being left
-pointing at (or being recomputed from) reaped entries rather than being derived
-fresh from the live table the way bash derives them. Note the 0/10 figures above
-are only suggestive on their own (10 runs at a ~15% rate); the load-bearing
-evidence is bash's total stability against osh's flipping, which is not a
-sample-size question.
+bash's stability has a dull explanation too, also measured: over 40 runs its
+*second* spawn cost 12–28 ms with no tail at all, while its *first* cost 92–162
+ms every time. Both shells pay ~150 ms for a process on this host; bash happens
+to pay it where nothing is timing it, osh pays it where something is.
+
+**Fixed 2026-08-08** by giving the line the margin its neighbours already have:
+`sleep 0.6 & sleep 0.61 & sleep 1.5` in place of `0.05 / 0.06 / 0.6`. 20/20
+identical in both shells afterwards, where the old spelling was ~15% divergent.
+The overlap the line asserts — job 1 running when job 2 is created — is now
+0.6 s against a ~150 ms worst-case spawn, and the gate keeps 0.89 s on the other
+side.
+
+**This exact failure mode was already documented**, in `jobs-options.sh` lines
+45–52: "At `sleep 0.05` the margin was the 50 ms between the two forks, and a
+loaded machine spent that too — bash printed `[1] ` where osh printed `[1]-`."
+That line was widened to 0.4 s at the time and `jobs-lifetime.sh` line 68 was
+missed. `jobs-lifetime.sh`'s own header already states the rule ("what eats
+margin is not the sleeps but the **process spawns** between them"); line 68 was
+simply the one place that did not follow it. **Rule for new timing cases: an
+assertion about one job being alive when another is *created* needs ≥ 0.5 s,
+because that margin is spent by a process spawn, not by anything in the script.**
 
 **Found by** the post-Defender-exclusion timing sweep, 2026-08-08 — not by any
 code change; the binary was byte-identical to the one that had just passed a

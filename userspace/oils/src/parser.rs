@@ -4009,9 +4009,25 @@ impl Parser {
     fn parse_cond_primary(&mut self) -> Result<CondExpr, CondError> {
         // Parenthesised sub-expression.
         if self.at_op(Op::LParen) {
-            // bash's `cond_term` saves the line it started on and reports its
-            // own `expected \`)'` there, however far the failure inside is.
-            let open = self.cur_line();
+            // bash's `cond_term` saves `line_number` the moment it has read the
+            // `(` and reports its own `expected \`)'` there, however far down
+            // the failure inside is.
+            //
+            // "The moment it has read it" is not the same as the line the `(`
+            // sits on. `(` is a `shellmeta`, so `read_token` peeks the next
+            // character with `shell_getc (1)` — continuation removal *on* — to
+            // see whether this is `((`, and that peek deletes any `\<newline>`
+            // written flush against the paren, `line_number++` and all, before
+            // pushing the character back. So a group whose `(` is the last thing
+            // on its line is reported a line further down than one that has
+            // anything at all after it:
+            //
+            // ```text
+            // echo 1⏎[[ (\⏎      line 3: expected `)'
+            // echo 1⏎[[ ( (\⏎    line 3: expected `)'   (the inner group)
+            //                    line 2: expected `)'   (the outer one)
+            // ```
+            let open = self.reader_line();
             self.pos += 1;
             let inner = self.parse_cond_or().map_err(|e| e.in_group(open))?;
             if !self.at_op(Op::RParen) {
@@ -4132,6 +4148,31 @@ impl Parser {
                 &bfmt![b"syntax error near `", near, b"'"],
             ));
         }
+        // The end of input is a token in this position like any other. bash's
+        // `cond_term` asks `read_token` for it, is handed `yacc_EOF`, and
+        // rejects it through the same arm a newline goes through —
+        // `error_token_from_token` can name that one, so the clause carries
+        // `` `EOF' ``. What it does *not* get is a `near` line: the fetch that
+        // discovered the end left `shell_input_line` empty, so
+        // `report_syntax_error` falls past both `near` branches to its
+        // end-of-file one (parse.y:6273).
+        //
+        // ```text
+        // echo 1⏎[[ a\⏎   line 4: unexpected token `EOF', conditional binary
+        //                         operator expected
+        //                 line 4: syntax error: unexpected end of file
+        // ```
+        //
+        // This is not the same as a conditional that is *complete* and merely
+        // unclosed: `[[ a == b\⏎` wanted nothing more than `]]` and gets
+        // ``unexpected EOF while looking for `]]'`` from `parse_cond` instead,
+        // on the line the reader gave up rather than on the end-of-file line.
+        if self.peek().is_none() {
+            return Err(CondError::new(
+                b"unexpected token `EOF', conditional binary operator expected".as_slice(),
+                b"syntax error: unexpected end of file".as_slice(),
+            ));
+        }
         Ok(CondExpr::Word(left))
     }
 
@@ -4221,9 +4262,8 @@ impl Parser {
 
     /// Build bash's diagnostic for a missing/`]]`-filled operand slot inside
     /// `[[ … ]]`. When the offending token is present, bash echoes the source
-    /// line (handled by `format_parse_error`); at end of input it uses an
-    /// implicit-`newline` model we don't reproduce, so we fall back to a plain
-    /// end-of-file diagnostic there.
+    /// line (handled by `format_parse_error`); at end of input the token is
+    /// `yacc_EOF`, which bash names `EOF` and reports without a `near` line.
     fn cond_operand_error(&self, pos: CondPos) -> CondError {
         // A stream the *lexer* cut short is not a stream that ended. bash's scan
         // bails to the parser with `-1` rather than aborting (see
@@ -4253,15 +4293,31 @@ impl Parser {
             };
         }
         if self.peek().is_none() {
-            // End of input in primary position is the one place bash *does*
-            // name the token: `cond_term` calls `read_token`, is handed `EOF`,
-            // and falls to the same `else` an operator falls to.
+            // End of input is a token bash can name, so all three slots name it.
+            // `cond_term` calls `read_token`, is handed `yacc_EOF`, and each of
+            // the three arms spells it the way it spells any other token it
+            // rejected there. None of them gets a `near` line: the fetch that
+            // found the end left `shell_input_line` empty and
+            // `report_syntax_error` falls to its end-of-file branch.
+            //
+            // ```text
+            // echo 1⏎[[ a ==\⏎   unexpected argument `EOF' to conditional
+            //                    binary operator
+            // echo 1⏎[[ -f\⏎     unexpected argument `EOF' to conditional
+            //                    unary operator
+            // echo 1⏎[[ a &&\⏎   unexpected token `EOF' in conditional command
+            // ```
             let eof = "syntax error: unexpected end of file";
             return match pos {
                 CondPos::Primary => {
                     CondError::new("unexpected token `EOF' in conditional command", eof)
                 }
-                CondPos::Unary | CondPos::Binary => CondError::bare(eof),
+                CondPos::Unary => {
+                    CondError::new("unexpected argument `EOF' to conditional unary operator", eof)
+                }
+                CondPos::Binary => {
+                    CondError::new("unexpected argument `EOF' to conditional binary operator", eof)
+                }
             };
         }
         let tok = self.token_display();
@@ -7485,6 +7541,100 @@ mod tests {
         }
         // And a closed group is no failure at all.
         assert!(parse("[[ x =~ ( ) ]]").is_ok());
+    }
+
+    /// The end of input is a *token* the conditional grammar rejects like any
+    /// other, not a missing bracket.
+    ///
+    /// bash has two answers for "the input ended inside `[[ … ]]`" and picks by
+    /// whether the conditional grammar still wanted something. If it did,
+    /// `cond_term` is handed `yacc_EOF` and objects to it where it stands —
+    /// `error_token_from_token` spells that one, so the message carries
+    /// `` `EOF' ``. Only a conditional that is *complete* and merely unclosed
+    /// gets ``unexpected EOF while looking for `]]'``, and that one is reported
+    /// on the line the reader gave up rather than on the end-of-file line.
+    ///
+    /// None of the EOF forms carries a `near` line: the fetch that found the
+    /// end left `shell_input_line` empty, so `report_syntax_error` falls past
+    /// both `near` branches (parse.y:6273).
+    ///
+    /// Every row is bash 5.2.37, measured by sourcing a two-line file whose
+    /// second line ends in the given text.
+    #[test]
+    fn the_end_of_input_is_a_token_the_conditional_grammar_rejects() {
+        fn diag(src: &str) -> String {
+            let opts = ParseOpts::default();
+            let mut ip = IncrementalParser::new(src.as_bytes(), 0, opts);
+            while let Some(unit) = ip.next_unit(None, opts) {
+                let Err(e) = unit else { continue };
+                let line = e.line.unwrap_or(0);
+                return e
+                    .msgs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, m)| {
+                        let m: String = m.iter().map(|&b| char::from(b)).collect();
+                        format!("{}: {m}", e.line_of(i, line))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+            }
+            panic!("{src:?} must fail")
+        }
+        let eof = "syntax error: unexpected end of file";
+        for (src, want) in [
+            // The three operand slots, each naming the token it was handed.
+            (
+                "echo 1\n[[ a\\\n",
+                format!("4: unexpected token `EOF', conditional binary operator expected\n4: {eof}"),
+            ),
+            (
+                "echo 1\n[[ a ==\\\n",
+                format!("4: unexpected argument `EOF' to conditional binary operator\n4: {eof}"),
+            ),
+            (
+                "echo 1\n[[ -f\\\n",
+                format!("4: unexpected argument `EOF' to conditional unary operator\n4: {eof}"),
+            ),
+            (
+                "echo 1\n[[ !\\\n",
+                format!("4: unexpected token `EOF' in conditional command\n4: {eof}"),
+            ),
+            // A complete expression wants only `]]`, and says so — on the line
+            // the reader stopped, which is *not* the end-of-file line.
+            (
+                "echo 1\n[[ a == b\\\n",
+                format!("2: unexpected EOF while looking for `]]'\n4: {eof}"),
+            ),
+            // A group adds the `)` it never reached at the line `cond_term`
+            // captured once it had read the `(` — which a peek for `((` has
+            // already carried past a `\<newline>` written flush against it. So
+            // the same group is numbered 3 with the continuation and 2 without.
+            (
+                "echo 1\n[[ (\\\n",
+                format!("3: unexpected token `EOF' in conditional command\n3: expected `)'\n3: {eof}"),
+            ),
+            (
+                "echo 1\n[[ (\n",
+                format!("3: unexpected token `EOF' in conditional command\n2: expected `)'\n3: {eof}"),
+            ),
+            (
+                "echo 1\n[[ ( (\\\n",
+                format!(
+                    "3: unexpected token `EOF' in conditional command\n3: expected `)'\n2: expected `)'\n3: {eof}"
+                ),
+            ),
+            // The failure inside a group is still the group's business, and the
+            // binary-position form reaches it too.
+            (
+                "echo 1\n[[ ( a\\\n",
+                format!(
+                    "4: unexpected token `EOF', conditional binary operator expected\n2: expected `)'\n4: {eof}"
+                ),
+            ),
+        ] {
+            assert_eq!(diag(src), want, "src {src:?}");
+        }
     }
 
     #[test]

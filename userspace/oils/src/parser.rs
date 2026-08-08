@@ -4742,16 +4742,20 @@ fn splice_reprints(text: &Str, mut reprints: Vec<(core::ops::Range<usize>, Str)>
     out
 }
 
-/// Whether a successfully parsed `${ … }` kept its body as *unparsed text*
-/// rather than building operand words from it — the verdicts that answer the
-/// whole expansion (with a runtime `bad substitution`) without ever looking
-/// inside. A body that failed to parse outright never built them either, so the
-/// caller treats an `Err` the same way.
-fn defers_its_body(part: &WordPart) -> bool {
+/// The body text a `${ … }` kept as *unparsed text* rather than building operand
+/// words from it — the verdicts that answer the whole expansion (with a runtime
+/// `bad substitution`) without ever looking inside. `None` for every other
+/// verdict; a body that failed to parse outright never built operand words
+/// either, so the caller treats an `Err` the same way.
+///
+/// All three shapes hold the whole body, exactly the bytes `unparse` puts back
+/// between `${` and `}` — which is why the re-print splice can be applied to
+/// them directly, with offsets that were measured against that same body.
+fn deferred_body_mut(part: &mut WordPart) -> Option<&mut Str> {
     match part {
-        WordPart::BadSubst(_) | WordPart::BadTransform { .. } => true,
-        WordPart::ArrayBulk { op, .. } => matches!(op, BulkOp::BadTransform { .. }),
-        _ => false,
+        WordPart::BadSubst(raw) | WordPart::BadTransform { raw, .. } => Some(raw),
+        WordPart::ArrayBulk { op: BulkOp::BadTransform { raw }, .. } => Some(raw),
+        _ => None,
     }
 }
 
@@ -4774,7 +4778,7 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
         // fragment of it has to be told the physical line it starts on — see
         // [`frag_line`] and [`map_frag_segs`].
         Seg::ParamBraced(raw, open, nested) => {
-            let part = parse_braced_param_in(raw, opts, q, *open);
+            let mut part = parse_braced_param_in(raw, opts, q, *open);
             // A `$( … )` in the body is parsed by bash where it *reads* it, so
             // its syntax error beats every verdict the `${ … }` could reach —
             // a runtime `bad substitution`, an outright refusal of the body's
@@ -4782,16 +4786,29 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
             // build operand words the body's substitutions are parsed with
             // them, and parsing here as well would gather a nested
             // here-document twice; so this runs only where they are not.
-            if part.as_ref().map_or(true, defers_its_body) {
-                // The re-prints go unused here. bash splices them into the
-                // `${ … }` body as it does anywhere else, so a deferred body
-                // quoted back should read `${#x:-$( ( echo a ))}` where the
-                // source said `$( (echo a) )`; osh keeps the source. Splicing
-                // would move every offset in the body, which is what
-                // `frag_line` derives a physical line from, so the two have to
-                // change together. See `known-issues.md`,
+            if part.as_mut().map_or(true, |p| deferred_body_mut(p).is_some()) {
+                // bash splices the re-print into the `${ … }` body during the
+                // scan that produces it (parse.y:3929 → 3959), so a body kept
+                // as text carries the re-print rather than the source: both
+                // `declare -f` and the runtime `bad substitution` quote
+                // `${#x:-$( ( echo 2 ))}` where the source said
+                // `$( (echo 2) )`, and a compound command makes that
+                // diagnostic span lines.
+                //
+                // The body's *lines* stay on the source even so — `frag_line`
+                // is fed the unspliced `raw` above, deliberately. Measured
+                // against bash 5.2.37: a fragment sitting after a
+                // substitution that re-prints to three lines where the source
+                // had one is still blamed to its physical line, so the text
+                // and the line accounting are two coordinate systems and bash
+                // keeps them apart. See `known-issues.md`,
                 // TD-OILS-A-DEFERRED-BRACE-BODY-KEEPS-ITS-SUBSTITUTION-AS-WRITTEN.
-                drop(parse_arith_comsubs(nested, opts)?);
+                let spliced = splice_reprints(raw, parse_arith_comsubs(nested, opts)?);
+                let mut part = part?;
+                if let Some(text) = deferred_body_mut(&mut part) {
+                    *text = spliced;
+                }
+                return Ok(part);
             }
             part?
         }

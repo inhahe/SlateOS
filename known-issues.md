@@ -17354,12 +17354,11 @@ a diagnostic rather than corrupt it. Refusing would be a *worse* fit for a
 development host, where the overwhelmingly common case is that the argument is
 text and the spawn should just work.
 
-### TD-OILS-A-DISCARD-OUT-OF-A-COMPOUND-COMMAND-LOSES-BASH-A-LINE. Every line number for the rest of the script is one low per compound level unwound — 2026-08-08 — OPEN
+### TD-OILS-A-DISCARD-OUT-OF-A-COMPOUND-COMMAND-LOSES-BASH-A-LINE. Every line number for the rest of the script is one low per compound level unwound — 2026-08-08 — ✅ **RESOLVED 2026-08-08**
 
-**Where:** `userspace/oils/src/interp.rs` — the compound-command executors
-(`exec_for`, `exec_while`, `exec_if`, the `{ … }` group) and whatever they do or
-do not do to `Shell`'s current-line field on an abort. osh restores it; bash
-does not.
+**Where:** `userspace/oils/src/interp.rs` — `Shell::line_bias` and the two places
+a recorded line becomes the current one (`Shell::exec_items`,
+`Shell::exec_simple_inner`).
 
 **What.** bash's `line_number` (`parse.y:1749`) is **one** global shared by the
 lexer and the executor, and a script is read one parse unit at a time — so the
@@ -17375,15 +17374,20 @@ the restore undoes that.
 
 A `jump_to_top_level(DISCARD)` from inside the body is a `longjmp` straight to
 `reader_loop`, and these are plain assignments rather than unwind-protects — so
-the restore never runs. The rule that falls out:
+the restore never runs. Two constructs *do* use unwind-protects, and a `longjmp`
+runs those: a function call (`unwind_protect_int (line_number)`,
+`execute_cmd.c:5095`) and `parse_and_execute`, i.e. `eval`/`source`
+(`builtins/evalstring.c:232`). The rule that falls out:
 
-> After an abort, bash's counter is left at **the aborting command's line**
-> instead of **the last line of the parse unit it was in**. Everything parsed
-> afterwards is low by the difference, and it never recovers.
+> After an abort, bash's counter is left at **the line the innermost command of
+> the current shell frame was on**, with the function-call and `eval` restores
+> applied — instead of **the last line of the parse unit it was in**. Everything
+> parsed afterwards is low by the difference, and it never recovers.
 
-A top-level abort loses nothing, because for it those two lines are the same
-one. An abort out of a function loses nothing either, because bash's function
-call *does* unwind-protect the counter, and a `longjmp` runs unwind-protects.
+"Current shell frame" is what makes a subshell and a command substitution lose
+nothing: bash forks for both, so the abort perturbs the *child's* copy of the
+global. A top-level abort loses nothing either, because for it the aborting line
+*is* the unit's last line.
 
 Measured 2026-08-08 against bash 5.2.37. The abort is a malformed `-i` value,
 which is the deepest of bash's two discards (see
@@ -17394,20 +17398,34 @@ declare -i m
 if true; then
   m=1+          # line 3 — both shells say 3
 fi
-echo "A $LINENO"  # line 5 — bash says 4, osh says 5
+echo "A $LINENO"  # line 5 — bash says 4, and osh said 5 before the fix
 ```
 
-Each shape below aborts on one line and asks `$LINENO` on the next, so the loss
-is the distance from the aborting line to the unit's closing keyword — and it
-accumulates across aborts:
+Each shape below aborts inside a compound whose last line is given, and asks
+`$LINENO` on the next line. The loss is *unit's last line − leftover counter*,
+and it accumulates across aborts:
 
-| shape around the abort | loss | why |
+| shape around the abort | leftover is | loss |
 |---|---|---|
-| none (top level) | 0 | aborting line *is* the unit's last line |
-| `while … done`, `{ … }`, `if … fi` | 1 | one closing keyword below it |
-| `if … if … fi fi` | 2 | two |
-| a function call | 0 | bash unwind-protects `line_number` across a call |
-| two aborts, each out of one `if` | 2 by the script's end | the loss is cumulative |
+| none (top level) | the aborting line, which is also the unit's last | 0 |
+| `while … done`, `{ … }`, `if … fi` | the aborting line, one above `done`/`}`/`fi` | 1 |
+| `if … if … fi fi` | the aborting line, two above | 2 |
+| a function call, called at top level | the *call site* — restored by the unwind-protect | 0 |
+| a function call, called from `if … fi` | the call site, one above `fi` | 1 |
+| a function call, called from `if … if … fi fi` | the call site, two above | 2 |
+| `eval "m=1+"` inside `if … fi` | the `eval`'s own line — `parse_and_execute` restores it | 1 |
+| `( m=1+ )` inside `if … fi` | nothing: bash forked, the parent's counter is untouched | 0 |
+| `x=$( m=1+ )` inside `if … fi` | same | 0 |
+| an `if` built inside an `eval` string | same — the restore covers the whole body | 0 |
+| two aborts, each out of one `if` | — | 2 by the script's end |
+
+The function rows are why the first draft of this entry was wrong: it said an
+abort out of a function loses *nothing*, reasoning only from the unwind-protect.
+The unwind-protect restores the *call site*, not the unit's last line, so a call
+made from inside a compound drifts exactly as far as the compound does. A
+later-defined function is affected too, since its body's lines are recorded by
+the already-perturbed parser: after a loss of 1, a function whose body sits on
+line 5 reports `LINENO` 4 from it.
 
 **How it bit.** It cost a rewrite of
 `a-builtins-signature-is-taken-away-by-running-a-command.sh`, whose first draft
@@ -17416,21 +17434,45 @@ two shells disagreed about every line number in the case while agreeing about
 every diagnostic it was actually testing. **A corpus case that aborts must keep
 the aborting command at top level** unless the drift is the thing being
 measured. (bash also abandons the whole `for` there, so only the first iteration
-ever ran — the loop was buying nothing.)
+ever ran — the loop was buying nothing.) That rule is now only about *reading* a
+case: osh reproduces the drift, so an aborting case inside a compound still
+matches — it just measures this entry as well as its own subject.
 
-**Why osh does not have it.** osh's `Shell::current_line` is set from
-`sc.line` — the parser's exact record, taken with no shared mutable counter
-between parsing and execution — so there is nothing for an abort to perturb.
-osh is *right* and bash is wrong; byte-fidelity means reproducing bash anyway.
+**Why osh did not have it.** osh's `Shell::current_line` was set from `sc.line` —
+the parser's exact record, taken with no shared mutable counter between parsing
+and execution — so there was nothing for an abort to perturb. osh was *right* and
+bash is wrong; byte-fidelity means reproducing bash anyway.
 
-**Proper fix:** carry bash's counter as a bias rather than trying to recreate its
-shared global. Add a signed `line_bias` to `Shell`, subtract it wherever a
-recorded line becomes a reported one (`exec_simple_inner`'s
-`self.current_line = sc.line`, and the same for the compound items), and grow it
-in `run_source_out`'s unit-at-a-time loop: when a unit ends in an abort, add
-(that unit's last source line − the line the abort was raised on). A function
-call adds nothing. The measurement above is the specification; a corpus case
-should assert each row of the table.
+**Fixed in `HEAD`.** bash's counter is carried as a bias rather than by
+recreating its shared global:
+
+- `Shell::line_bias` holds how far the counter has fallen behind the true source
+  line. `Shell::exec_items` and `Shell::exec_simple_inner` subtract it when a
+  recorded line becomes the current one, so `current_line` is itself held
+  *biased* — exactly as bash holds its counter — and every downstream reader
+  (`$LINENO`, `err_prefix_at`, `format_parse_error`) needed no change at all.
+- `Shell::exec_items` sets `unit_discarded` in the two arms that absorb a
+  discard, and `Shell::run_source_flow_units` remeasures the bias after such a
+  unit: `line_bias = unit_end - current_line`, where `unit_end` comes from the
+  new `IncrementalParser::last_unit_end_line()` (built from the parser's
+  `orig_lines`, since `UnitLine` carries no line number). The measurement is
+  *absolute*, not accumulated, because `current_line` is already biased by the
+  old value — which is what makes successive aborts add up on their own.
+- The two unwind-protected restores are reproduced where bash has them:
+  `run_source_flow_result` — osh's `parse_and_execute` — saves and restores both
+  halves of the counter, and the function-call teardown restores `current_line`
+  from `call_line_stack`. Neither is observable except through this drift, since
+  every command after them sets `current_line` itself.
+- A `LineMap`'s *base* is the one place that needs the true line back, because a
+  map's output is a recorded line that will be biased again on the way in. The
+  new `Shell::source_line()` adds the drift back for the five bases (`eval`, the
+  two command-substitution forms, a trap body, `compgen -C`). Without it an
+  `eval` reached after a loss of 1 reported one line lower than bash — caught by
+  the differential probe, not by reasoning.
+
+Covered by the lib test `a_discard_out_of_a_compound_command_loses_a_line` and by
+`tests/corpus/a-discard-out-of-a-compound-command-loses-a-line.sh`, whose running
+total climbs 0 → 1 → 2 → 4 → 5 → 6 → 7 across the sections.
 
 ### TD-OILS-AN-EMPTY-MAPFILE-CALLBACK-IS-TREATED-AS-NO-CALLBACK. `mapfile -C ""` runs nothing in osh; bash runs the index as a command — 2026-08-08 — ✅ **RESOLVED 2026-08-08**
 

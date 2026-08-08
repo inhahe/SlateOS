@@ -65,9 +65,15 @@ e 'echo $(( 1 + $(( "2)3" )) ))'
 # …but that table is the whole of the scan, and a `)` closing nothing in the
 # *grammar* is not in it: `echo $(( $(case x in x) echo 5;; esac) ))` ends the
 # substitution at the `case` pattern's `)` in bash too, and `5` is then looked up
-# as a command. Not probed here — the two shells agree on that and disagree only
-# on which line they blame it to; see
-# TD-OILS-A-COMMAND-RUN-FROM-A-CUT-SHORT-ARITHMETIC-SUBSTITUTION-IS-BLAMED-AT-THE-WRONG-LINE.
+# as a command.
+#
+# The line that word is blamed to is the interesting part, and it is not the one
+# the construct is written on: the cut-short text is re-read as a body of its
+# own, so the number counts from the closing delimiter the way every
+# substitution body does. Nesting compounds it — the doubly-nested probe is
+# blamed fourteen lines past where it was written.
+e 'echo $(( $(case x in x) echo 5;; esac) ))'
+e 'echo $(( $(case x in x) $(case y in y) echo 7;; esac) echo 5;; esac) ))'
 
 echo "=== a body that does not balance is a command substitution ==="
 e 'echo $(( echo a ) )'

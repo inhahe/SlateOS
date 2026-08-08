@@ -323,12 +323,40 @@ b() { : ${#x:-$( (echo 2) )}; }; declare -f b
   osh:  : ${#x:-$( (echo 2) )}
 ```
 
-**Proper fix:** splice into the body text *before* `parse_braced_param_in` reads
-it, so both halves see the same bytes — which is also what bash does, since the
-splice happens during the scan that produces the body. The obstacle is that
-every offset into the body moves with the splice, and `frag_line` derives a
-fragment's physical line from exactly those offsets (see `map_frag_segs`); the
-line map has to be rebuilt against the spliced text in the same change.
+**Proper fix — the recorded obstacle is not one; measured 2026-08-07.** The note
+below used to say that splicing moves every offset into the body, that
+`frag_line` derives a fragment's physical line from exactly those offsets, and
+so the line map had to be rebuilt against the spliced text in the same change.
+Measured against bash 5.2.37, that last step is wrong: bash's line accounting
+inside a `${ … }` body follows the **source**, not the spliced re-print.
+
+```sh
+echo one
+unset x
+echo "${x:-$(if true; then echo a; fi)
+`fi`}"
+```
+
+The backtick is on source line 4, and its body is on the brace body's *second*
+line, after a substitution that re-prints to three lines where the source had
+one. If the numbering followed the spliced text the failure would be blamed to
+line 6. bash says `line 4`, and says the same with a plain `$(echo a)` in place
+of the `if` — i.e. the extra re-printed lines do not shift it at all.
+
+So the body travels downstream in two coordinate systems at once, and bash keeps
+them apart: the **text** carries the re-print (which is what the deparse above
+shows), while the **lines** stay on the source. The fix is therefore text-only —
+splice for the paths that keep the body as unparsed text (`WordPart::BadSubst`,
+`BadTransform`, i.e. `defers_its_body`), and deliberately do *not* let the splice
+reach `frag_line`/`map_frag_segs`. That is a much smaller change than the
+original note implies, and it means this entry was never blocked on the same
+work as TD-OILS-A-SPLICED-REPRINT-DOES-NOT-MOVE-LINENO (whose own recorded fix
+also turned out to rest on a false premise — there was no splice there at all).
+
+Still to check before writing it: whether any *other* consumer of the deferred
+body's text derives a position from it, and what happens when the spliced body
+is re-lexed (a re-print can introduce newlines inside what was one line, so a
+here-document delimiter or a comment in the body needs a probe).
 
 **Found by** the probe matrix for
 TD-OILS-AN-ARITHMETIC-STRING-NAMES-ITS-COMMAND-SUBSTITUTION-AS-WRITTEN,

@@ -3416,7 +3416,13 @@ impl Parser {
     fn parse_coproc(&mut self) -> Result<Command, ParseError> {
         self.pos += 1; // consume `coproc`
         let mut name = None;
-        if let Some(w) = self.bare_word_here()
+        // `COPROC` *is* on `reserved_word_acceptable`'s list (parse.y:5367), so
+        // the word after it is looked up in `word_token_alist` like any other
+        // word in a command position. bash's production is `COPROC WORD
+        // compound_command`, and a reserved word is not a `WORD`: `coproc done
+        // { echo y; }` is a syntax error near `done', not a coproc named `done`.
+        if self.reserved_here().is_none()
+            && let Some(w) = self.bare_word_here()
             && is_valid_name(&w)
             && self.compound_starts_at(self.pos + 1)
         {
@@ -4421,16 +4427,19 @@ impl Parser {
         loop {
             match self.peek() {
                 Some(Tok::Word(segs)) => {
-                    // A reserved word ends the simple command (unless it's an
-                    // argument position where reserved words are plain words —
-                    // but at the start of a command a reserved word was already
-                    // dispatched, so here we only stop for list terminators).
-                    if !seen_word
-                        && let [Seg::Lit(s)] = segs.as_slice()
-                        && RESERVED.iter().any(|r| r.as_bytes() == s.as_slice())
-                    {
-                        break;
-                    }
+                    // No reserved-word test here. bash recognises one only where
+                    // `reserved_word_acceptable (last_read_token)` holds
+                    // (parse.y:5367) — after a separator, an operator, or another
+                    // reserved word — and never after a `WORD`. An assignment
+                    // prefix *is* a `WORD`, and so is a redirection's filename,
+                    // so by the time this loop is running a reserved word is an
+                    // ordinary one: `v=1 done` and `>/dev/null then` both run a
+                    // command of that name. Every position where bash *would*
+                    // accept one is reached through [`Parser::reserved_here`],
+                    // which is the single place [`RESERVED`] is consulted; the
+                    // loop's first iteration is not one of them, because
+                    // [`Parser::parse_command`] has already dispatched or
+                    // rejected any reserved word standing there.
                     let segs = segs.clone();
                     // Assignment only valid before the first word.
                     if !seen_word
@@ -7373,6 +7382,85 @@ mod tests {
             "case ]] in ]]) echo hit;; esac",
             "echo \"]]\" ${x-]]}",
             "[[ x ]]",
+        ] {
+            assert!(parse(src).is_ok(), "src {src:?}");
+        }
+    }
+
+    #[test]
+    fn a_prefix_spends_the_position_where_a_reserved_word_would_be_acceptable() {
+        // `CHECK_FOR_RESERVED_WORD` consults `word_token_alist` only where
+        // `reserved_word_acceptable (last_read_token)` holds (parse.y:5367), and
+        // that list is separators, operators and other reserved words — never a
+        // `WORD`. An assignment prefix is a `WORD`, and so is a redirection's
+        // filename, so after either one a reserved word is an ordinary command
+        // name: bash runs it and reports `done: command not found`.
+        for word in [
+            "done", "then", "fi", "do", "esac", "in", "}", "!", "{", "]]", "elif", "else", "while",
+            "until", "if", "for", "case", "select",
+        ] {
+            for src in [format!("v=1 {word}"), format!(">/dev/null {word}")] {
+                let prog = parse(&src).unwrap_or_else(|e| panic!("{src:?}: {}", emsg(&e)));
+                let Command::Simple(sc) = &prog.items[0].list.first.commands[0] else {
+                    panic!("expected a simple command for {src:?}");
+                };
+                let [WordPart::Literal(w)] = sc.words[0].parts.as_slice() else {
+                    panic!("expected one literal part for {src:?}, got {:?}", sc.words[0].parts);
+                };
+                assert_eq!(text(w), word, "src {src:?}");
+            }
+        }
+
+        // The compound openers come along: `v=1 if true; then …` runs a command
+        // called `if` with the argument `true`, and it is the `then` after the
+        // `;` — a position where a reserved word *is* acceptable — that bash
+        // names.
+        assert_eq!(
+            emsg(&parse("v=1 if true; then echo y; fi").unwrap_err()),
+            "syntax error near unexpected token `then'"
+        );
+        // Same rule from the other side for the keyword function form: after
+        // `v=1` the `function` and the name are words, the `{` after them is a
+        // word too, and the `}` after the `;` is the token that has no place.
+        assert_eq!(
+            emsg(&parse("v=1 function f { :; }").unwrap_err()),
+            "syntax error near unexpected token `}'"
+        );
+
+        // Nothing about the positions where a reserved word *is* acceptable
+        // changes: with no prefix in front of it the word still opens (or is
+        // rejected as) a compound, including inside a loop body.
+        assert_eq!(
+            emsg(&parse("for i in 1; do done; done").unwrap_err()),
+            "syntax error near unexpected token `done'"
+        );
+        assert!(parse("for i in 1; do v=1 done; done").is_ok());
+        // And a prefixed `while` is a command called `while`, so its `do` — the
+        // first token in an acceptable position — is what has no place.
+        assert_eq!(
+            emsg(&parse("v=1 while true; do :; done").unwrap_err()),
+            "syntax error near unexpected token `do'"
+        );
+
+        // `COPROC` is itself on the list, so the word after it is looked up like
+        // any other. bash's production is `COPROC WORD compound_command` and a
+        // reserved word is not a `WORD`, so it cannot be a coproc's name.
+        for word in ["done", "esac", "fi", "then"] {
+            let src = format!("coproc {word} {{ echo y; }}");
+            assert_eq!(
+                emsg(&parse(&src).unwrap_err()),
+                format!("syntax error near unexpected token `{word}'"),
+                "src {src:?}"
+            );
+        }
+        // The compound openers after `coproc` still open their compound, and an
+        // ordinary name is still a name.
+        for src in [
+            "coproc if true; then echo y; fi",
+            "coproc while false; do :; done",
+            "coproc { echo y; }",
+            "coproc mine { echo y; }",
+            "coproc echo y",
         ] {
             assert!(parse(src).is_ok(), "src {src:?}");
         }

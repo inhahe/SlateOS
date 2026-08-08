@@ -278,8 +278,10 @@ pub enum Op {
 /// if false; then echo $(( fi ) ); fi # silence, for the same reason
 /// ```
 ///
-/// The line numbering differs with it: a `$( … )` body is renumbered by bash's
-/// rank rule and the other two by a plain offset from the closing delimiter.
+/// The line numbering differs with it, though not in its rule: all three count
+/// from the closing delimiter, but a `$( … )` re-reads bash's *re-print* of the
+/// body rather than the source, and the re-print has no blank or continuation
+/// lines to count.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubBody {
     /// `$( … )` — parsed in the enclosing token stream, and printed back from
@@ -405,9 +407,10 @@ pub enum Seg {
     ///
     /// bash blames a syntax error in the body on the body's own line, counted in
     /// the enclosing source; the body is lexed on its own, so the parser needs
-    /// the opening line to shift it back (`parser::parse_procsub_body`). Unlike
-    /// a `$( … )` body there is no rank-based renumbering — this really is a
-    /// plain offset.
+    /// the opening line to shift it back (`parser::parse_procsub_body`). The
+    /// shift is from the *opening* delimiter, not the closing one: a process
+    /// substitution runs as a child command rather than as a body bash re-reads
+    /// after the enclosing scan.
     ProcSub(bool, Str, u32),
 }
 

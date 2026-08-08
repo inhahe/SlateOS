@@ -7020,12 +7020,11 @@ impl Shell {
     /// `echo hi | { eval "read v"; }` must read from the pipe. Only the outermost
     /// entry point ([`Shell::run_source_out`]) passes `StdinSrc::Inherit`.
     ///
-    /// `map` renumbers every line `src` reports. For input that is a fragment of
-    /// a longer stream (see [`Shell::run_source_at`]) that is a plain
-    /// [`LineMap::Offset`]; a `$( … )` body instead reports bash's ranked
-    /// close-line numbering, so it passes the [`LineMap::CmdSub`] the parser
-    /// built. It is `Offset(0)` for a source that numbers its own lines from 1,
-    /// which is every other internally-generated body here.
+    /// `map` renumbers every line `src` reports: the count of lines already
+    /// consumed for a fragment of a longer stream (see
+    /// [`Shell::run_source_at`]), `close_line - 1` for a substitution body, and
+    /// `Offset(0)` for a source that numbers its own lines from 1 — which is
+    /// every other internally-generated body here.
     ///
     /// `hist` says what the units read here do to the command history. Almost
     /// every caller passes [`HistRead::Off`]: bash records the lines its
@@ -27613,22 +27612,22 @@ impl Shell {
 
     fn command_sub_body_inner(&mut self, body: &CmdSubBody) -> Str {
         match body {
-            CmdSubBody::Parsed { prog, src, map } => {
+            CmdSubBody::Parsed { prog, src, close_line } => {
+                // Every body is numbered from `close_line - 1` — the line the
+                // closing delimiter sits on carries the body's first command,
+                // whichever spelling it was written in. For `$( … )` that holds
+                // because `src` is the *re-print*: it has no blank lines and no
+                // continuation lines, so its line 1 is the first command.
+                let map = LineMap::Offset(close_line.saturating_sub(1));
                 // The `$(< file)` peek reuses the eager parse: for a body of
                 // that shape the re-read would produce the same program (a lone
                 // redirect has no command word for an alias to replace), and it
                 // is already to hand.
                 let path = self.comsub_read_file(prog);
-                self.command_sub(src, map, path)
+                self.command_sub(src, &map, path)
             }
             CmdSubBody::Backtick { src, close_line, .. }
             | CmdSubBody::ArithFallback { src, close_line } => {
-                // A body bash reads only at expansion time is numbered from
-                // `close_line - 1` — a plain offset, unlike the rank-based
-                // renumbering a `$( … )` body gets (see
-                // [`crate::parser::parse_cmdsub_body`]). Both are bash's,
-                // measured, and a `$((` that fell back to a substitution takes
-                // the offset rule with the rest of the backtick path.
                 let map = LineMap::Offset(close_line.saturating_sub(1));
                 let path = self.comsub_text_read_file(src, &map);
                 self.command_sub(src, &map, path)
@@ -66079,11 +66078,12 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
     }
 
-    /// A backtick body numbers its lines by a *plain offset* from `close_line -
-    /// 1` — unlike the rank-based renumbering above — because bash parses it as
-    /// its own input at expansion time rather than folding it back into the
-    /// enclosing scan. The two schemes agree only when the body is one line.
-    /// Measured against bash 5.2; see known-issues.md
+    /// A backtick body numbers its lines by a plain offset from `close_line -
+    /// 1`, like every other body — but from the *source*, which a `$( … )` body
+    /// does not: bash echoes a backtick body verbatim rather than re-printing
+    /// it, so the blank and continuation lines the source had are still there to
+    /// be counted. That is the whole of the difference between the two, and it
+    /// is what these cases pin. Measured against bash 5.2; see known-issues.md
     /// TD-OILS-CMDSUB-ERR-FATALITY item 1.
     #[test]
     fn lineno_inside_backticks_is_a_plain_offset_from_the_closing_tick() {
@@ -66091,12 +66091,13 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("b=`echo $LINENO`; echo $b").0, "1\n");
         // Two body lines, close on line 2 → 2 and 3.
         assert_eq!(run("y=`echo $LINENO\necho $LINENO`\necho \"$y\"").0, "2\n3\n");
-        // A blank body line *does* advance here (rank-based would say 3 and 4).
+        // A blank body line *does* advance here; the same body inside `$( … )`
+        // would have it re-printed away.
         assert_eq!(
             run("q=`echo $LINENO\n\necho $LINENO`\necho \"$q\"").0,
             "3\n5\n"
         );
-        // So does the opening line's empty remainder (rank-based would say 2).
+        // So does the opening line's empty remainder.
         assert_eq!(run("z=`\necho $LINENO`\necho \"$z\"").0, "3\n");
         // Two commands on one body line still share a line, of course.
         assert_eq!(

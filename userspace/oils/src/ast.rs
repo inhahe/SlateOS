@@ -928,35 +928,16 @@ impl WordPart {
 /// right no matter where the function is later called from (bash numbers a body
 /// relative to the source that *defined* it, verified against bash 5.2).
 ///
-/// Two rules are needed because bash uses two. Everything but a `$( … )` body
-/// is a plain offset; a `$( … )` body is renumbered by *rank* — see
-/// [`LineMap::CmdSub`].
+/// One rule covers every fragment: a plain offset. A `$( … )` body needed a
+/// second one only for as long as osh re-read the *source* of the body — bash
+/// re-reads its re-print, whose first command is on its line 1, so the blank and
+/// continuation lines that made a plain offset wrong are not there to skip. See
+/// [`CmdSubBody::Parsed`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LineMap {
     /// Reported line = raw line + this offset. `Offset(0)` is the identity, for
     /// a source that numbers its own lines from 1.
     Offset(u32),
-    /// The `$( … )` rule: reported line = `close_line` + the 0-based **rank** of
-    /// the raw line among the body's command-bearing lines.
-    ///
-    /// bash scans the enclosing command first and only then re-reads the body,
-    /// so the body's lines count up from the line the outer scan had already
-    /// reached — the substitution's *closing* delimiter. A rank, not an offset:
-    /// a blank body line does not advance it, and two commands on one body line
-    /// share a number. Measured against bash 5.x over 11 probes; see
-    /// `crate::parser::parse_cmdsub_body` for the worked example.
-    CmdSub {
-        /// Added to a raw line before the lookup. Non-zero only for a *tail* of
-        /// the body that has been re-lexed on its own (see
-        /// [`LineMap::shifted`]), whose lines restart at 1.
-        pre: u32,
-        /// The line the body's closing `)` sits on, already absolute.
-        close_line: u32,
-        /// `(body line, reported line)` for each distinct command-bearing body
-        /// line, ascending. Small — one entry per body line — so a linear scan
-        /// beats a map.
-        ranked: Vec<(u32, u32)>,
-    },
 }
 
 impl Default for LineMap {
@@ -973,27 +954,10 @@ impl From<u32> for LineMap {
 
 impl LineMap {
     /// The line `raw` is reported as.
-    ///
-    /// Under [`LineMap::CmdSub`], a line between two command-bearing lines (a
-    /// blank line, or the continuation lines of a multi-line token) takes the
-    /// number of the nearest preceding command-bearing line, which is what
-    /// makes a newline token report the line its command was on.
     #[must_use]
     pub fn map(&self, raw: u32) -> u32 {
-        match self {
-            Self::Offset(base) => raw.saturating_add(*base),
-            Self::CmdSub { pre, close_line, ranked } => {
-                let raw = raw.saturating_add(*pre);
-                let mut out = *close_line;
-                for &(body_line, reported) in ranked {
-                    if body_line > raw {
-                        break;
-                    }
-                    out = reported;
-                }
-                out
-            }
-        }
+        let Self::Offset(base) = self;
+        raw.saturating_add(*base)
     }
 
     /// The map for a *tail* of the same source, whose own lines restart at 1
@@ -1005,31 +969,16 @@ impl LineMap {
     /// compose with that shift rather than be replaced by it.
     #[must_use]
     pub fn shifted(&self, n: u32) -> Self {
-        match self {
-            Self::Offset(base) => Self::Offset(base.saturating_add(n)),
-            Self::CmdSub { pre, close_line, ranked } => Self::CmdSub {
-                pre: pre.saturating_add(n),
-                close_line: *close_line,
-                ranked: ranked.clone(),
-            },
-        }
+        let Self::Offset(base) = self;
+        Self::Offset(base.saturating_add(n))
     }
 
     /// The raw line a reported one came from, for echoing the offending source
     /// line back in a diagnostic. `None` when no raw line maps to it.
-    ///
-    /// The inverse is not total: under [`LineMap::CmdSub`] several raw lines can
-    /// share a reported number, and the one wanted is the command-bearing line —
-    /// which is exactly the one `ranked` records.
     #[must_use]
     pub fn unmap(&self, reported: u32) -> Option<u32> {
-        match self {
-            Self::Offset(base) => reported.checked_sub(*base),
-            Self::CmdSub { pre, ranked, .. } => ranked
-                .iter()
-                .find(|&&(_, r)| r == reported)
-                .and_then(|&(body_line, _)| body_line.checked_sub(*pre)),
-        }
+        let Self::Offset(base) = self;
+        reported.checked_sub(*base)
     }
 
     /// Whether this map leaves every line alone, so applying it can be skipped.
@@ -1063,7 +1012,14 @@ impl LineMap {
 /// expansion time as an input of its own. Only the second pass runs, so both
 /// halves are kept here — [`CmdSubBody::Parsed::prog`] is the first pass (whose
 /// errors are the enclosing parse's, and which `declare -f` re-prints), and
-/// `src`/`map` are what the second pass re-reads.
+/// `src` is what the second pass re-reads.
+///
+/// `src` is **not the source**. `parse_comsub` disposes the first parse and
+/// keeps `print_comsub`'s re-print of it (parse.y:4219–4233), so the bytes the
+/// second pass reads are the deparse, not what was written. That is observable
+/// wherever the two differ in *length*: a compound command re-prints over
+/// several lines, so `$LINENO` after one inside the same body sits that much
+/// lower.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CmdSubBody {
     /// `$( … )` — parsed with the enclosing source, then re-read at expansion
@@ -1072,12 +1028,15 @@ pub enum CmdSubBody {
         /// The eager parse: what the enclosing scan produced, and what
         /// `declare -f` re-prints.
         prog: Program,
-        /// The body text, re-read one logical line at a time when the
-        /// substitution is expanded.
+        /// The re-print of `prog`, re-read one logical line at a time when the
+        /// substitution is expanded. See [`crate::unparse::comsub_body`].
         src: Str,
-        /// How that re-read's own line numbers become the numbers the shell
-        /// reports — the rank-based `$( … )` rule, already applied to `prog`.
-        map: LineMap,
+        /// The line the closing `)` sits on, in the enclosing source. `src`'s
+        /// own lines are numbered from `close_line - 1`, exactly as a backtick
+        /// body's are — the re-print puts the body's first command on its line 1,
+        /// so no rank rule is needed to skip the blank and continuation lines the
+        /// source had.
+        close_line: u32,
     },
     /// `` ` … ` `` — parsed at expansion time, by `Shell::command_sub`.
     Backtick {
@@ -1088,13 +1047,8 @@ pub enum CmdSubBody {
         /// merely untidy — a nested `` \` `` would lose its backslash and the
         /// result would no longer parse.
         verbatim: Str,
-        /// The line the closing backtick sits on, in the enclosing source.
-        ///
-        /// The body's own lines are numbered from `close_line - 1` — a plain
-        /// offset, unlike the rank-based renumbering a `$( … )` body gets. Both
-        /// are bash's, measured: with the body spread over two lines,
-        /// `$LINENO` in `$( … )` reports the closing line and the one after,
-        /// while in `` ` … ` `` it reports one more than each.
+        /// The line the closing backtick sits on, in the enclosing source. The
+        /// body's own lines are numbered from `close_line - 1`.
         close_line: u32,
     },
     /// `$(( … )` — a `$((` whose body did not read as an arithmetic expression,

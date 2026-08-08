@@ -860,9 +860,22 @@ fn flush_here_docs(text: BStr<'_>) -> Str {
 /// `echo a ))`, which is a different construct — and `<( (echo a) )` would come
 /// back as a `<((` that does not parse at all.
 pub(crate) fn comsub_reprint(open: &[u8], prog: &Program) -> Str {
+    bfmt![open, &comsub_body(prog), b")"]
+}
+
+/// The same re-print without the delimiters — the bytes bash keeps *as the
+/// body*, and hands to `command_substitute` to read back at expansion time.
+///
+/// `parse_comsub` builds `ret` as (guard space) + `print_comsub`'s text + `)`
+/// and the scan around it has already written the `$(`, so this is `ret` less
+/// its closing delimiter. The guard space belongs to the body, not to the
+/// delimiter: it is inside the substitution and the re-read sees it.
+pub(crate) fn comsub_body(prog: &Program) -> Str {
     let body = flush_here_docs(&program_block(prog, Fmt::COMSUB, true));
-    let gap: &[u8] = if body.first() == Some(&b'(') { b" " } else { b"" };
-    bfmt![open, gap, &body, b")"]
+    if body.first() == Some(&b'(') {
+        return bfmt![b" ", &body];
+    }
+    body
 }
 
 /// Index of the [`HD_CLOSE`] that ends the parked body opened at `open`.

@@ -488,9 +488,9 @@ pub fn parse_opts(src: BStr<'_>, opts: ParseOpts) -> Result<Program, ParseError>
 /// `open_line` is the 1-based line the `<(`/`>(` sits on, in the enclosing
 /// source. The body is lexed on its own and so numbers its lines from 1; bash
 /// blames an error in it on the line it is *written* on, so the body's numbering
-/// is shifted back into the enclosing source's. That is a plain offset, unlike
-/// [`parse_cmdsub_body`]'s rank-based renumbering — a process substitution runs
-/// as a child command, not as a body bash re-reads after the enclosing scan.
+/// is shifted back into the enclosing source's. The shift is from the *opening*
+/// delimiter, unlike [`parse_cmdsub_body`]'s — a process substitution runs as a
+/// child command, not as a body bash re-reads after the enclosing scan.
 ///
 /// # Errors
 /// Returns [`ParseError`] on a lexing or grammar error in the body.
@@ -773,7 +773,7 @@ impl IncrementalParser {
     /// still reports the line numbers of the input it came from. It is
     /// `LineMap::Offset(0)` for a script file or a `-c` string, the count of
     /// lines already consumed for a REPL reading stdin one command at a time,
-    /// and [`LineMap::CmdSub`] for a `$( … )` body re-read at expansion time.
+    /// and `close_line - 1` for a substitution body re-read at expansion time.
     #[must_use]
     pub fn new(src: BStr<'_>, line_map: impl Into<LineMap>, opts: ParseOpts) -> Self {
         // What the reader hands the lexer, not what the caller read: bash drops
@@ -1931,42 +1931,26 @@ impl IncrementalParser {
     }
 }
 
-/// Parse the body of a `$( … )` substitution, renumbering its lines the way
-/// bash does.
+/// Parse the body of a `$( … )` substitution — the *eager* read, the one that
+/// happens in the enclosing token stream.
 ///
-/// bash scans the enclosing command first and only then re-parses the captured
-/// body, so `$LINENO` inside the body does not start at the body's own first
-/// line — it counts up from the line the outer scan had already reached, i.e.
-/// the substitution's *closing* delimiter. Measured against bash 5.x (11
-/// probes), the rule is:
+/// This parse is the one bash throws away. `parse_comsub` keeps only
+/// `print_comsub`'s re-print of it and then calls `dispose_command`
+/// (parse.y:4219–4233); the re-print is what the word carries, and what
+/// `command_substitute` reads back at expansion time. So what this program is
+/// *for* is narrow: to raise the syntax error the enclosing scan raises, to be
+/// re-printed for `declare -f`, to answer the `$(< file)` peek — and to be the
+/// text of the body, via [`crate::unparse::comsub_body`].
 ///
-/// > `$LINENO` = `close_line` + (0-based **rank** of the body line among the
-/// > body lines that carry a command).
+/// Its lines are therefore the enclosing source's, plainly: a syntax error the
+/// enclosing scan raises names the body's true physical line. That is
+/// `close_line` less the body's own newlines. (`close_line` comes from the lexer,
+/// [`Seg::CmdSub`]'s second field.)
 ///
-/// A rank, not an offset: a blank line inside the body does not advance it, and
-/// two commands written on one body line share a number. So
-///
-/// ```text
-/// 1  echo $LINENO     → 1
-/// 2  v=$(
-/// 3  echo $LINENO     → 6   (close_line 6 + rank 0)
-/// 4                         (blank line — carries no command, so no rank)
-/// 5  echo $LINENO     → 7   (close_line 6 + rank 1, not rank 2)
-/// 6  )
-/// ```
-///
-/// `close_line` comes from the lexer ([`Seg::CmdSub`]'s second field).
-///
-/// That rank rule is what the *returned map* describes, and it applies to the
-/// second read — the one at expansion time, which is the one that runs (see
-/// [`CmdSubBody`]). The eager parse this function performs is the *first* read,
-/// which happens in the enclosing token stream, and bash numbers it plainly:
-/// a syntax error the enclosing scan raises names the body's true physical
-/// line, not a ranked one. So the program is renumbered by an ordinary offset
-/// from the line the body opens on, which is `close_line` less the body's own
-/// newlines. (The eager program's lines are otherwise unobservable — it exists
-/// only to raise that error, to be re-printed by `declare -f`, and to answer
-/// the `$(< file)` peek — so this is the only thing they have to get right.)
+/// The lines the body reports when it *runs* are a different question, and they
+/// are not this program's — they belong to the re-print, numbered from
+/// `close_line` like any other body bash reads only at expansion time. See
+/// [`CmdSubBody`].
 ///
 /// Nested substitutions are renumbered through the same offset, so their
 /// recorded close lines are physical too and a nested body computes its own
@@ -1978,14 +1962,13 @@ pub fn parse_cmdsub_body(
     src: BStr<'_>,
     close_line: u32,
     opts: ParseOpts,
-) -> Result<(Program, LineMap), ParseError> {
+) -> Result<Program, ParseError> {
     // The body is lexed with the substitution's own `)` standing where the
     // implicit trailing newline would otherwise go, because that is the token
     // bash's parser sees after the body's last command. See
     // [`tokenize_paren_body`].
     let Spanned { mut toks, mut lines, ends, .. } = tokenize_paren_body(src, opts)
         .map_err(|e| ParseError::from(e).in_paren_body())?;
-    let map = build_cmdsub_line_map(&toks, &lines, close_line);
     // The body's line 1 is the line `$(` sits on: the closing `)` is on the
     // body's last line, so stepping back over the body's newlines lands there.
     let newlines =
@@ -2012,25 +1995,7 @@ pub fn parse_cmdsub_body(
             }
         })
         .map_err(ParseError::in_paren_body)?;
-    Ok((prog, map))
-}
-
-/// Build the rank-based [`LineMap::CmdSub`] for one `$( … )` body.
-fn build_cmdsub_line_map(toks: &[Tok], lines: &[u32], close_line: u32) -> LineMap {
-    let mut ranked: Vec<(u32, u32)> = Vec::new();
-    for (tok, &line) in toks.iter().zip(lines) {
-        // Only lines that actually carry a command count towards the rank;
-        // a `Newline` token is the *end* of a line, not content on one, so a
-        // blank body line contributes nothing.
-        if matches!(tok, Tok::Newline) {
-            continue;
-        }
-        if ranked.last().is_none_or(|&(l, _)| l != line) {
-            let rank = u32::try_from(ranked.len()).unwrap_or(u32::MAX);
-            ranked.push((line, close_line.saturating_add(rank)));
-        }
-    }
-    LineMap::CmdSub { pre: 0, close_line, ranked }
+    Ok(prog)
 }
 
 /// Renumber every line a reader warning carries through `map`, for the same
@@ -4747,7 +4712,7 @@ fn parse_arith_comsubs(
 ) -> Result<Vec<(core::ops::Range<usize>, Str)>, ParseError> {
     let mut out = Vec::with_capacity(nested.len());
     for sub in nested {
-        let (prog, _) = parse_cmdsub_body(&sub.src, sub.close_line, opts)?;
+        let prog = parse_cmdsub_body(&sub.src, sub.close_line, opts)?;
         out.push((sub.range.clone(), crate::unparse::comsub_reprint(b"$(", &prog)));
     }
     Ok(out)
@@ -4850,10 +4815,16 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
                 },
                 SubBody::Eager => {
                     // The eager parse is kept — it is what found the `)` and
-                    // what raises the fatal syntax error — but so is the body
-                    // text, because bash re-reads it at expansion time.
-                    let (prog, map) = parse_cmdsub_body(raw, *close_line, opts)?;
-                    CmdSubBody::Parsed { prog, src: raw.clone(), map }
+                    // what raises the fatal syntax error — but the text that
+                    // *runs* is its re-print, not `raw`. bash disposes this
+                    // parse and keeps only `print_comsub`'s answer
+                    // (parse.y:4219–4233), which is what `command_substitute`
+                    // reads back when the word is expanded. The same rule the
+                    // arithmetic scan follows two arms down, for the same
+                    // reason.
+                    let prog = parse_cmdsub_body(raw, *close_line, opts)?;
+                    let src = crate::unparse::comsub_body(&prog);
+                    CmdSubBody::Parsed { prog, src, close_line: *close_line }
                 }
             },
         },
@@ -7310,16 +7281,15 @@ mod tests {
     }
 
     /// The two reads of a `$( … )` body number its lines differently, and the
-    /// *eager* one — this parse, in the enclosing token stream — is the plain
-    /// one: an error it raises names the body's true physical line. (The
-    /// rank-based numbering belongs to the map this parse returns, which the
-    /// interpreter uses for the expansion-time re-read; see
-    /// `parse_cmdsub_body`.) Getting this wrong is invisible in a one-line
+    /// *eager* one — this parse, in the enclosing token stream — numbers them
+    /// against the source: an error it raises names the body's true physical
+    /// line. (The expansion-time read numbers them against the re-print instead;
+    /// see `parse_cmdsub_body`.) Getting this wrong is invisible in a one-line
     /// script and off by the body's length in a real one.
     #[test]
     fn an_eager_cmdsub_body_error_names_its_physical_line() {
         // `for` is on line 4 of the enclosing source; the body's own numbering
-        // would call it line 3, and the rank rule would call it 7.
+        // would call it line 3.
         let src = "echo one\nx=$(echo a\necho b\nfor\necho d)\n";
         assert_eq!(parse(src).unwrap_err().line, Some(4));
         // The body's first line, and a body that opens on a line of its own.

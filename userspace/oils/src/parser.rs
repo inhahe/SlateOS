@@ -2072,6 +2072,11 @@ fn map_lines(toks: &mut [Tok], lines: &mut [u32], map: &LineMap) {
     for t in toks {
         match t {
             Tok::Word(segs) | Tok::HereDoc(segs, ..) => map_segs(segs, map),
+            // A `(( … ))` collects nested bodies exactly as `$(( … ))` does, so
+            // they are renumbered here for the same reason — they are parsed in
+            // this token stream, and an error in one is blamed on the enclosing
+            // source's line.
+            Tok::ArithCmd(_, nested) => map_arith_comsubs(nested, map),
             Tok::ArrayAssign { elems, .. } => {
                 for e in elems {
                     map_segs(e, map);
@@ -3083,10 +3088,15 @@ impl Parser {
             return self.with_redirects(cmd);
         }
         // `(( expr ))` arithmetic command (lexed as a single token).
-        if let Some(Tok::ArithCmd(raw)) = self.peek() {
-            let raw = raw.clone();
+        if let Some(Tok::ArithCmd(raw, nested)) = self.peek() {
+            // The string carries the re-print, not what was written:
+            // `parse_arith_cmd` reads the body with
+            // `parse_matched_pair (0, '(', ')', &ttoklen, P_ARITH)`
+            // (parse.y:4519–4530), the same scan `$(( … ))` gets, so the same
+            // `APPEND_NESTRET` puts `print_comsub`'s answer into its buffer.
+            let expr = splice_reprints(raw, parse_arith_comsubs(nested, self.opts)?);
             self.pos += 1;
-            return self.with_redirects(Command::Arith(raw));
+            return self.with_redirects(Command::Arith(expr));
         }
         // `[[ expr ]]` conditional expression.
         if self.at_bare_word(b"[[") {
@@ -3213,7 +3223,7 @@ impl Parser {
     /// `coproc` is an explicit array name or the command itself.
     fn compound_starts_at(&self, idx: usize) -> bool {
         match self.toks.get(idx) {
-            Some(Tok::Op(Op::LParen)) | Some(Tok::ArithCmd(_)) => true,
+            Some(Tok::Op(Op::LParen)) | Some(Tok::ArithCmd(..)) => true,
             Some(Tok::Word(segs)) => {
                 if let [Seg::Lit(s)] = segs.as_slice() {
                     matches!(
@@ -3371,9 +3381,16 @@ impl Parser {
     fn parse_for(&mut self) -> Result<Command, ParseError> {
         self.expect_reserved("for")?;
         // C-style `for (( init; cond; update ))` — the `(( … ))` lexes as a
-        // single `ArithCmd` token carrying the raw `init; cond; update` text.
-        if let Some(Tok::ArithCmd(raw)) = self.peek() {
-            let raw = raw.clone();
+        // single `ArithCmd` token carrying the raw `init; cond; update` text
+        // and the `$( … )` bodies its scan stepped over.
+        if let Some(Tok::ArithCmd(raw, nested)) = self.peek() {
+            // The re-prints are spliced in *before* the header is split on `;`,
+            // which is the only order that works: the ranges index into the whole
+            // header text the one `P_ARITH` scan built, and each section's own
+            // substitutions are already re-printed by the time
+            // `parse_for_arith` cuts it into three (parse.y:4519–4530 collects
+            // the header, `ARITH_FOR_EXPRS` splits it afterwards).
+            let raw = splice_reprints(raw, parse_arith_comsubs(nested, self.opts)?);
             // bash stamps `arith_for_lineno` where the `((` is read
             // (parse.y:4469), not where the command is reduced, so a malformed
             // header is blamed here rather than on the `done` far below — and

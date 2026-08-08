@@ -81,7 +81,7 @@ Found while measuring
 TD-OILS-AN-ARITHMETIC-STRING-NAMES-ITS-COMMAND-SUBSTITUTION-AS-WRITTEN, which
 also turned up TD-OILS-A-REPRINTED-COMPOUND-COMMAND-IS-KEPT-ON-ONE-LINE.
 
-### TD-OILS-AN-ARITHMETIC-COMMAND-DOES-NOT-PARSE-ITS-SUBSTITUTIONS. `(( 1 + $(fi) ))` should be a syntax error — 2026-08-07
+### TD-OILS-AN-ARITHMETIC-COMMAND-DOES-NOT-PARSE-ITS-SUBSTITUTIONS. `(( 1 + $(fi) ))` should be a syntax error — 2026-08-07 — ✅ FIXED 2026-08-07
 
 **Where:** `userspace/oils/src/lexer.rs` — `Lexer::read_arith_body`, which is
 the only `P_ARITH`-equivalent scan that does not hand its collected
@@ -121,18 +121,39 @@ Nothing consumes them today — each `$((` scan saves and restores the outer lis
 rather than reading it — so this is not currently reachable, but it is one
 change away from being a real cross-token leak.
 
-**Proper fix:** give `read_arith_body` the same swap-out the other producers
-have, return the spans with the text, carry them on `Tok::ArithCmd` and on the
-`for (( … ))` header, and run them through `parse_arith_comsubs` +
-`splice_reprints` in `parser.rs` exactly as `Seg::Arith` now does. Discard them
-on the rewind path, where the text is read again as `( ( … ) )` and its
-substitutions are parsed by the ordinary command parser. The `for` header is the
-awkward one: it is split into three sections on `;` after the fact, so the
-ranges have to be split with it (or the splice done before the split).
-
 **Found by** the probe matrix for
 TD-OILS-AN-ARITHMETIC-STRING-NAMES-ITS-COMMAND-SUBSTITUTION-AS-WRITTEN,
 2026-08-07.
+
+**Fixed 2026-08-07** exactly as the plan above described.
+`Lexer::read_arith_body` is now a two-line wrapper that `mem::take`s
+`self.arith_comsubs`, runs the old body as `read_arith_body_inner`, and swaps the
+outer list back — so the spans belong to *this* scan and the latent cross-token
+leak is closed with the same change. It returns `(Option<Str>,
+Vec<CmdSubSpan>)`; `Tok::ArithCmd` widened to `ArithCmd(Str, Vec<CmdSubSpan>)`,
+`map_lines` renumbers the nested spans like every other `P_ARITH` producer, and
+`parser.rs` runs them through `parse_arith_comsubs` + `splice_reprints` in both
+`parse_command` (the `(( … ))` command) and `parse_for` (the `for (( … ))`
+header).
+
+Two details settled by measurement rather than by reading:
+
+- **The `for` header is spliced *before* it is cut on `;`.** The ranges index
+  into the one buffer the single `P_ARITH` scan built, so they only mean
+  something while that buffer is whole. bash agrees: parse.y:4519–4530 collects
+  the whole header, and `ARITH_FOR_EXPRS` splits it afterwards. (A recorded
+  guess that section 1 keeps a leading space and section 2 does not was
+  **falsified** — bash trims leading whitespace from all three sections, while
+  `(( … ))` proper does not. The corpus case records the measurement.)
+- **The rewind path may drop the spans.** When the second `)` is not adjacent
+  the text is re-read as `( ( … ) )`, and the ordinary command parser parses
+  each body a second time — so a body that does not parse is still fatal, and
+  one that does is re-printed by `unparse` from the node it produced. Nothing is
+  lost. That bash really does parse the body *before* testing adjacency is
+  measured, not assumed: `((echo $(fi) ) )` is a fatal syntax error at `fi`.
+
+Corpus case:
+`tests/corpus/an-arithmetic-command-carries-its-command-substitution-re-printed.sh`.
 
 ### TD-OILS-A-DEFERRED-BRACE-BODY-KEEPS-ITS-SUBSTITUTION-AS-WRITTEN. `${#x:-$( (echo a) )}` should come back re-printed — 2026-08-07
 
@@ -724,10 +745,10 @@ a word, whose parts `unparse` was already re-printing.
 Corpus case:
 `tests/corpus/an-arithmetic-string-carries-its-command-substitution-re-printed.sh`.
 
-**Still open: the `(( … ))` command and the `for (( … ))` header** — logged
-separately as TD-OILS-AN-ARITHMETIC-COMMAND-DOES-NOT-PARSE-ITS-SUBSTITUTIONS,
-because for those the *eager parse* is missing too, which is the larger half.
-Also still open for a `${ … }` body that defers, logged as
+**The `(( … ))` command and the `for (( … ))` header** were logged separately as
+TD-OILS-AN-ARITHMETIC-COMMAND-DOES-NOT-PARSE-ITS-SUBSTITUTIONS, because for
+those the *eager parse* was missing too, which was the larger half; that entry is
+now ✅ FIXED as well. Still open for a `${ … }` body that defers, logged as
 TD-OILS-A-DEFERRED-BRACE-BODY-KEEPS-ITS-SUBSTITUTION-AS-WRITTEN.
 
 ### TD-OILS-A-DOUBLE-QUOTED-DOLLAR-BRACKET-IS-NOT-SKIPPED-BY-THE-QUOTE-EXTRACTOR. `echo "$[ ${ ]"` names the wrong string — 2026-08-07

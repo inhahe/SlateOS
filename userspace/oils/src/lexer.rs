@@ -434,8 +434,14 @@ pub enum Tok {
     /// records `<<` vs `<<-` — and printing a stored function back out needs a
     /// delimiter to name.
     HereDoc(Vec<Seg>, Str, bool),
-    /// `(( … ))` — an arithmetic command, holding the raw expression text.
-    ArithCmd(Str),
+    /// `(( … ))` — an arithmetic command, holding the raw expression text and
+    /// the `$( … )` bodies the scan that collected it stepped over.
+    ///
+    /// The bodies travel separately for the same reason [`Seg::Arith`]'s do: the
+    /// text bash keeps is not the source but `print_comsub`'s re-print of each
+    /// parsed body spliced back over it, and only the parser can produce that.
+    /// See [`CmdSubSpan`].
+    ArithCmd(Str, Vec<CmdSubSpan>),
     /// `name=( … )` / `name+=( … )` — an array assignment. Each element is a
     /// word captured as its own [`Seg`] list.
     ArrayAssign {
@@ -2942,11 +2948,21 @@ impl Lexer {
                         let conts_from = self.conts.len();
                         self.pos += 1;
                         match self.read_arith_body(true)? {
-                            Some(raw) => out.push(Tok::ArithCmd(raw)),
-                            None if for_header => {
+                            (Some(raw), nested) => out.push(Tok::ArithCmd(raw, nested)),
+                            (None, _) if for_header => {
                                 return Err(LexError::new("malformed arithmetic expansion"));
                             }
-                            None => {
+                            (None, _) => {
+                                // The spans are dropped with the text they index
+                                // into. bash *did* parse those bodies before
+                                // reaching this point, but the same text is about
+                                // to be read again as `( ( … ) )`, and the
+                                // ordinary command parser parses each body a
+                                // second time — so a body that does not parse is
+                                // still fatal, and one that does is re-printed by
+                                // `unparse` from the node it produced. Nothing is
+                                // lost by letting the re-read be the one that
+                                // counts.
                                 self.conts.truncate(conts_from);
                                 self.pos = arith_from;
                                 out.push(Tok::Op(Op::LParen));
@@ -5181,7 +5197,29 @@ impl Lexer {
     /// and only afterwards is asked whether it parses as an expression. The
     /// *body* is read the same way for both, which is why `((1 +\<newline>1))`
     /// is arithmetic.
-    fn read_arith_body(&mut self, adjacent: bool) -> Result<Option<Str>, LexError> {
+    ///
+    /// The `$( … )` bodies met on the way come back with the text, exactly as
+    /// they do for the expansion: `parse_arith_cmd` reads a `(( … ))` with
+    /// `parse_matched_pair (0, '(', ')', &ttoklen, P_ARITH)` (parse.y:4519–4530),
+    /// which is the same scan, so the same `APPEND_NESTRET` splices the same
+    /// re-print into the same buffer. They are returned even when the body is
+    /// abandoned (`Ok(None)`), because bash parses them *before* it tests for
+    /// the second `)` — `((echo $(fi) ) )` is a fatal syntax error at `fi`, not
+    /// a subshell containing a bad substitution.
+    fn read_arith_body(
+        &mut self,
+        adjacent: bool,
+    ) -> Result<(Option<Str>, Vec<CmdSubSpan>), LexError> {
+        // See [`Lexer::arith_comsubs`]: the spans belong to *this* scan, so the
+        // enclosing one's collection is set aside for the duration.
+        let outer = std::mem::take(&mut self.arith_comsubs);
+        let r = self.read_arith_body_inner(adjacent);
+        let nested = std::mem::replace(&mut self.arith_comsubs, outer);
+        r.map(|raw| (raw, nested))
+    }
+
+    /// The scan proper for [`Lexer::read_arith_body`].
+    fn read_arith_body_inner(&mut self, adjacent: bool) -> Result<Option<Str>, LexError> {
         let open = self.cur_line();
         let mut depth = 0usize;
         let mut raw = Str::new();

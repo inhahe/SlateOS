@@ -31,6 +31,13 @@ echo "=== a trap handler is read under the trap's own name"
 ( trap "'" DEBUG; : ); echo "rc=$?"
 ( trap "'" ERR; false ); echo "rc=$?"
 ( f() { trap "'" RETURN; :; }; f ); echo "rc=$?"
+# Every signal shares one bare `trap` tag — bash spells the four names above out
+# at their call sites and passes nothing for a signal — and a signal handler is
+# also the one numbered from 1 rather than from the line it interrupted, since
+# it arrives between commands rather than because of one.
+( trap "'" USR1; kill -USR1 $BASHPID; sleep 0.1 ); echo "rc=$?"
+( trap 'nosuchcmd_x
+echo "in=$LINENO"' USR1; kill -USR1 $BASHPID; sleep 0.1; echo "after=$LINENO" ); echo "rc=$?"
 # A handler that parses is read under the same name, so the failure inside it is
 # blamed there too.
 ( trap 'q=$(fi)' EXIT ); echo "rc=$?"

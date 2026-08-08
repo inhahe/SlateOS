@@ -177,6 +177,19 @@ fn trap_input_name(trap: &str) -> &'static str {
     }
 }
 
+/// Whether a trap handler's body is numbered from 1 rather than from the line
+/// the shell had reached — bash's `SEVAL_RESETLINE`.
+///
+/// It divides the traps the same way [`trap_input_name`] does, and for the same
+/// reason: the three synchronous traps go through `_run_trap_internal`, which
+/// does not pass the flag (trap.c:1117), while a signal goes through
+/// `run_pending_traps`, which does (trap.c:449) — as does the EXIT trap
+/// (trap.c:1010), though that one is run from `Shell::run_exit_trap_out` and
+/// never reaches here.
+fn trap_resets_line(trap: &str) -> bool {
+    !matches!(trap, "DEBUG" | "ERR" | "RETURN")
+}
+
 /// One entry of bash's `bash_input` stack: an open input source.
 ///
 /// See [`Shell::input_names`] for what the stack is and where bash pushes to it.
@@ -35559,15 +35572,28 @@ impl Shell {
         // live and moving — it is only the *caller's* view that is restored —
         // which is why this is saved here rather than suppressed for the body.
         let saved_pipestatus = self.arrays.get("PIPESTATUS").cloned();
-        // A handler's body is numbered from the line the shell had reached when
-        // it fired, not from 1: bash re-reads the handler where it stands, so
-        // `trap 'nosuch' DEBUG` blames the line of the command it announced, and
-        // a two-line handler blames that line and the one after it. The
-        // triggering line is already in `current_line` for all three of these
-        // traps — DEBUG is fired after the command sets it, ERR after the
+        // A *synchronous* handler's body is numbered from the line the shell had
+        // reached when it fired, not from 1: bash re-reads the handler where it
+        // stands, so `trap 'nosuch' DEBUG` blames the line of the command it
+        // announced, and a two-line handler blames that line and the one after
+        // it. The triggering line is already in `current_line` for all three of
+        // these traps — DEBUG is fired after the command sets it, ERR after the
         // command that failed, RETURN after the last line of the function body.
+        //
+        // A *signal* handler is numbered from 1 instead. It is the same
+        // difference in bash: `_run_trap_internal` runs the three synchronous
+        // traps without `SEVAL_RESETLINE` (trap.c:1117) while
+        // `run_pending_traps` passes it (trap.c:449), which is fitting — a
+        // signal arrives between commands rather than because of one, so there
+        // is no line it is speaking about. Either way `line_number` is restored
+        // afterwards (bash unwind-protects it in `parse_and_execute`), so
+        // `$LINENO` after the handler is the interrupted line again.
         let saved_line = self.current_line;
-        let map = LineMap::Offset(self.current_line.saturating_sub(1));
+        let map = if trap_resets_line(name) {
+            LineMap::Offset(0)
+        } else {
+            LineMap::Offset(self.current_line.saturating_sub(1))
+        };
         // A handler body is a level of indirection to the tracer, the way a
         // command substitution is: `set -x; trap b DEBUG; echo one` traces the
         // handler as `++ b` / `++ echo B` and only then the `+ echo one` it was

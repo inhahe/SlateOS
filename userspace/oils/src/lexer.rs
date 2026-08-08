@@ -1428,6 +1428,30 @@ pub fn tokenize_paren_body(src: BStr<'_>, opts: ParseOpts) -> Result<Spanned, Le
     lx.run()
 }
 
+/// Where a `$( … )` ends, for a caller that met one while *expanding* a word
+/// rather than while parsing it. `src` is the text just past the `$(`; the
+/// answer is the body and the character offset one past its `)`, or `None` when
+/// the text runs out with the substitution still open.
+///
+/// The one caller is [`crate::interp::Shell`]'s expansion of an arithmetic
+/// string, which is the only text osh reads a `$( … )` out of after the parse.
+/// bash reads that one with `extract_command_subst` (subst.c:1290), which —
+/// unless what follows the `$(` is another `(` — hands the rest of the string
+/// to `xparse_dolparen` (parse.y:4248) and lets the **parser** say where the
+/// substitution ends. So the answer is not "the matching `)`": in
+/// `$(( '$(case x in x) echo 7;; esac)' + 0 ))` the first unmatched `)` closes
+/// a `case` pattern, and bash's substitution runs to the one after `esac`.
+///
+/// This is the same scan the lexer uses for a `$( … )` written in source, and
+/// it tracks `case` for exactly that reason — so pointing the expansion at it
+/// is what makes the two agree, rather than a second rule for the same text.
+#[must_use]
+pub fn scan_cmdsub_body(src: BStr<'_>, opts: ParseOpts) -> Option<(Str, usize)> {
+    let mut lx = Lexer::new(src, opts);
+    let body = lx.read_subst_body().ok()?;
+    Some((body, lx.pos))
+}
+
 /// A whole-source tokenization that keeps the tokens it managed to lex even
 /// when the input ended inside an unclosed construct.
 pub struct Tokenized {
@@ -7136,5 +7160,39 @@ mod tests {
         let m = TextMap::whole(0).spliced(0, 2, 0, 1);
         assert_eq!(m.at(0), (0, 2));
         assert_eq!(m.at(3), (0, 5));
+    }
+
+    /// [`scan_cmdsub_body`] answers where a `$( … )` met at *expansion* time
+    /// ends, and the answer is the parser's rather than a paren match's — which
+    /// is the whole reason the expansion side calls in here instead of counting
+    /// parentheses of its own. The offset is a **character** index, like the
+    /// cursor it comes from.
+    #[test]
+    fn a_deferred_command_substitution_ends_where_the_parser_says() {
+        let scan = |src: &str| {
+            super::scan_cmdsub_body(src.as_bytes(), ParseOpts::default())
+                .map(|(body, past)| (String::from_utf8(body).expect("body is text"), past))
+        };
+        // The plain case: the body stops at the `)` and the offset is one past
+        // it, so the caller resumes on the ` + 1`.
+        assert_eq!(scan("echo hi) + 1 "), Some(("echo hi".into(), 8)));
+        // A `case` pattern's `)` closes a pattern, not the substitution. A
+        // paren-matching scan stops at the first one and hands `case x in x` to
+        // the shell; the parse runs on to the `)` after `esac`.
+        assert_eq!(
+            scan("case x in x) echo 7;; esac) + 0 "),
+            Some(("case x in x) echo 7;; esac".into(), 27))
+        );
+        // A nested group is balanced through, and a quoted `)` is not a closer.
+        assert_eq!(scan("(echo 8) )x"), Some(("(echo 8) ".into(), 10)));
+        assert_eq!(scan(r#"echo ")")y"#), Some((r#"echo ")""#.into(), 9)));
+        // Text that runs out with the substitution still open has no answer —
+        // the caller then leaves the `$` as a literal, as bash's scan does.
+        assert_eq!(scan("echo hi"), None);
+        assert_eq!(scan("case x in x) echo 7;;"), None);
+        // A body that will not *parse* still has an extent: the parse failure is
+        // the caller's to raise (see `Shell::arith_dolparen`), and it can only
+        // raise it once it knows how much text to parse.
+        assert_eq!(scan("fi) + 1 "), Some(("fi".into(), 3)));
     }
 }

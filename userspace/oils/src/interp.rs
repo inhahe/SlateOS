@@ -1634,6 +1634,38 @@ struct DiscardAbort {
     past_eval: bool,
 }
 
+/// An armed **fatal** abort: the status the shell ends with, and whether a
+/// handler in the way may answer 1 in its place.
+///
+/// The second field is the difference between bash's two ways of ending a
+/// shell from inside an expansion. Nearly all of them `jump_to_top_level`, and
+/// a jump is *interceptable*: whatever `setjmp (top_level)` sits between the
+/// error and the top — a subshell, a command substitution, a compound-command
+/// stage — catches it first and supplies its own status, which is why
+/// `set -u; ( echo $nope )` is 1 where the same reference at the top of a `-c`
+/// shell is 127. [`Shell::fatal_abort_status`] is that rule, and `demote` is
+/// how a site asks for it.
+///
+/// A few do not jump at all. `parser_error` (error.c) ends with
+///
+/// ```c
+///     if (exit_immediately_on_error)
+///       exit_shell (last_command_exit_value = 2);
+/// ```
+///
+/// — a direct call, with nothing in between to intercept. So the 2 stands
+/// wherever it was raised, in a script and inside a subshell alike, and such a
+/// site arms `demote: false`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FatalAbort {
+    /// The status the shell ends with where nothing intercepts the abort.
+    status: i32,
+    /// Whether an intercepting handler replaces that status with 1. True for
+    /// everything raised by a `jump_to_top_level`; false for the handful bash
+    /// raises by calling `exit_shell` outright.
+    demote: bool,
+}
+
 /// What a nested read-eval loop — an `eval`, a `.`/`source`, a trap handler —
 /// yielded: bash's `parse_and_execute` return, which a [`Flow`] alone cannot
 /// carry because it has no room for a status.
@@ -4643,7 +4675,13 @@ pub struct Shell {
     /// wrong is a script-truncation bug: osh used to route bad array subscripts
     /// and bad indirect expansions through here, so a single mistyped subscript
     /// ended the entire script with no further output.
-    unbound_error: Option<i32>,
+    ///
+    /// One non-expansion error rides the same flag, because it ends the shell
+    /// from the same place and needs the same plumbing: a `$( … )` met while
+    /// *expanding* an arithmetic string whose body does not parse, under
+    /// `set -e`. That one is not interceptable — see [`FatalAbort::demote`] and
+    /// [`Shell::arith_dolparen`].
+    unbound_error: Option<FatalAbort>,
     /// The shared **non-fatal** word-expansion error signal, carrying the status
     /// the discarded command reports. bash's rule: the erroring command never
     /// runs, `$?` becomes the carried status, the rest of the current parse unit
@@ -7923,9 +7961,9 @@ impl Shell {
     /// and it, not [`Shell::subshell_depth`], is the test here. Brace groups and
     /// function bodies install none, so they correctly inherit the enclosing
     /// shell's status wherever they run.
-    fn fatal_abort_status(&self, code: i32) -> i32 {
-        if self.abort_catch == 0 && self.command_mode {
-            code
+    fn fatal_abort_status(&self, abort: FatalAbort) -> i32 {
+        if !abort.demote || (self.abort_catch == 0 && self.command_mode) {
+            abort.status
         } else {
             1
         }
@@ -7945,7 +7983,10 @@ impl Shell {
     /// `set -eo posix; echo $((1+))` exits 127 where `set -eu; echo $UNDEF`
     /// exits 1.
     fn arm_unbound_abort(&mut self) {
-        self.unbound_error = Some(if self.errexit { 1 } else { 127 });
+        self.unbound_error = Some(FatalAbort {
+            status: if self.errexit { 1 } else { 127 },
+            demote: true,
+        });
     }
 
     /// Note that a shell diagnostic just went to stderr, and arm a whole-shell
@@ -7964,9 +8005,9 @@ impl Shell {
         // down would have got the chance to pick the higher status. Hence
         // `set -eo posix; readonly r=1; r=x` exits 1 rather than 127.
         if self.errexit && when != FatalWhen::PosixOnly {
-            self.unbound_error = Some(1);
+            self.unbound_error = Some(FatalAbort { status: 1, demote: true });
         } else if when != FatalWhen::ErrexitOnly && self.shell_option_enabled("posix") {
-            self.unbound_error = Some(127);
+            self.unbound_error = Some(FatalAbort { status: 127, demote: true });
         } else {
             return;
         }
@@ -17808,7 +17849,10 @@ impl Shell {
             if self.builtin_failure.take() == Some(BuiltinFailure::Assignment)
                 && self.posix_special_builtin_word_fatal(&argv[0])
             {
-                let status = self.fatal_abort_status(127);
+                let status = self.fatal_abort_status(FatalAbort {
+                    status: 127,
+                    demote: true,
+                });
                 self.last_status = status;
                 return Flow::Exit(status);
             }
@@ -22083,7 +22127,10 @@ impl Shell {
             if let Some(flow) = self.take_discard_flow() {
                 return flow;
             }
-            let code = self.unbound_error.take().unwrap_or(1);
+            let code = self
+                .unbound_error
+                .take()
+                .unwrap_or(FatalAbort { status: 1, demote: true });
             let status = self.fatal_abort_status(code);
             self.last_status = status;
             return Flow::Exit(status);
@@ -25406,7 +25453,7 @@ impl Shell {
             .unwrap_or_else(|| bfmt![b"${", raw, b"}"]);
         self.emit_stderr(&bfmt![self.err_prefix(), &named, b": bad substitution\n"]);
         if fatal {
-            self.unbound_error = Some(1);
+            self.unbound_error = Some(FatalAbort { status: 1, demote: true });
         } else {
             self.arm_discard(1);
             // …unless `set -e` or posix mode promotes the DISCARD to an abort
@@ -28809,11 +28856,33 @@ impl Shell {
                     i += 1;
                 }
                 '(' => {
-                    // `$(cmd)` — command substitution. Find the matching `)`.
-                    if let Some((inner, next)) = Self::scan_paren_group(&chars, i + 2) {
-                        let sub = self.run_command_sub_text(&inner);
+                    // `$(cmd)` — a command substitution met while *expanding* a
+                    // word rather than while parsing one. Where it ends is the
+                    // parser's answer, not a paren match's: bash's
+                    // `extract_command_subst` (subst.c:1290) hands the rest of
+                    // the string to `xparse_dolparen` (parse.y:4248), so a `)`
+                    // that closes a `case` pattern closes nothing here. See
+                    // [`crate::lexer::scan_cmdsub_body`].
+                    let rest = bytes::from_chars(
+                        chars.get(i + 2..).unwrap_or_default().iter().copied(),
+                    );
+                    if let Some((inner, past)) =
+                        crate::lexer::scan_cmdsub_body(&rest, self.parse_opts())
+                    {
+                        // The same hand-off parses the body before running it,
+                        // and gives up the whole expansion when it will not
+                        // parse — see [`Shell::arith_dolparen`].
+                        let Some(sub) = self.arith_dolparen(&rest, &inner) else {
+                            break;
+                        };
                         out.extend_from_slice(bytes::trim(&sub));
-                        i = next;
+                        // `past` counts *characters*, like `i` — the lexer's
+                        // cursor indexes its own `Vec<Ch>`, decoded by the same
+                        // `bytes::chars` this loop used. That matters because an
+                        // arithmetic string can hold a non-ASCII value spliced
+                        // in by an earlier pass, so a byte count would land
+                        // short and re-scan the tail of the body.
+                        i = i + 2 + past;
                         continue;
                     }
                     out.push(b'$');
@@ -28978,6 +29047,102 @@ impl Shell {
         let map = LineMap::Offset(self.current_line.saturating_sub(1));
         let path = self.comsub_text_read_file(text, &map);
         self.command_sub(text, &map, path)
+    }
+
+    /// bash's `xparse_dolparen` (parse.y:4248) for a `$( … )` met while
+    /// *expanding* an arithmetic string rather than while parsing source.
+    /// `rest` is everything past the `$(`; `body` is the extent
+    /// [`crate::lexer::scan_cmdsub_body`] carved out of it. The answer is the
+    /// substituted text, or `None` when the body did not parse and the caller
+    /// must abandon the expansion.
+    ///
+    /// The distinction from an ordinary `$( … )` is the whole of this function.
+    /// One **written** in source is parsed at parse time and run in a subshell
+    /// that re-reads its body a command at a time, so a syntax error half way
+    /// down it is the *child's* to report, after the commands above it have
+    /// already run. One met at expansion time is not: `extract_command_subst`
+    /// (subst.c:1290) hands the rest of the string to `xparse_dolparen`, which
+    /// parses the whole body **here, in the parent**, before
+    /// `command_substitute` forks. Measured, that is visible:
+    /// `$(( '$(echo RAN >&2; fi)' + 0 ))` prints no `RAN`.
+    fn arith_dolparen(&mut self, rest: BStr<'_>, body: BStr<'_>) -> Option<Str> {
+        // Every diagnostic from this parse is one line past the body's true
+        // line. `parse_string` (builtins/evalstring.c:627) opens the string with
+        // `push_stream (0)` — the 0 meaning "do *not* reset the line number" —
+        // and then the first line the parser fetches charges one anyway. Its own
+        // comment says as much ("we have to subtract one, because we will add
+        // one just before executing the next command"), and `xparse_dolparen`
+        // never subtracts. So a body whose first line is bad, written on line 2,
+        // is blamed at line 3.
+        //
+        // Only the parse is shifted. The body's *run* is the child's and lands
+        // on the enclosing line, exactly as a backtick's does — measured both
+        // ways, which is why [`Shell::run_command_sub_text`] keeps its own
+        // `current_line - 1` base and this does not share it.
+        let map = LineMap::Offset(self.current_line);
+        let opts = self.parse_opts();
+        let mut ip = IncrementalParser::new(body, map.clone(), opts);
+        // The parse opens an input of its own, named the way every other
+        // read-eval entry point names one: `parse_string (string, "command
+        // substitution", …)`. So the complaint is tagged `command substitution:`
+        // even when the arithmetic is inside an `eval`, whose own `eval:` tag
+        // this push covers over for the duration. `SEVAL_NONINT` is in the
+        // flags `xparse_dolparen` builds (parse.y:4275), hence `nonint`.
+        self.input_names.push(InputSource {
+            name: SRC_TOKEN_COMMAND_SUB.as_bytes().to_vec(),
+            nonint: true,
+        });
+        // Aliases are deliberately not expanded on this pass: `xparse_dolparen`
+        // sets `expand_aliases = 0` for the whole of it (parse.y:4292), leaving
+        // the expansion to whichever of parse time or the child does it.
+        let failed = loop {
+            let Some(unit) = ip.next_unit(None, opts) else {
+                break None;
+            };
+            match unit {
+                Ok(_) => {}
+                // Formatted while the name is still pushed — it is what supplies
+                // the `command substitution:` tag. What the complaint names is
+                // the string `parse_string` was reading, and that is
+                // `string + *sindex` — everything past the `$(`, not the extent
+                // the scan carved out. Which is why the echoed source line runs
+                // on past the `)` that ended the substitution:
+                // `$(( '$(fi)' + 1 ))` echoes ``  `fi)' + 1 ' ``. `body` is a
+                // prefix of `rest` up to that `)`, so blaming the same line of
+                // `rest` is the whole of the difference.
+                Err(e) => break Some(self.format_parse_error(&e, rest, &map)),
+            }
+        };
+        self.input_names.pop();
+        if let Some(msg) = failed {
+            self.berrln(&msg);
+            // Without errexit the failure is `jump_to_top_level (DISCARD)`
+            // (parse.y:4330, on `parse_string`'s `-DISCARD`): the rest of the
+            // word — and of the command holding it — is given up with `$?` of 1,
+            // and the shell reads on. Posix mode does not promote it; this is a
+            // parse failure, so it never reaches the "an expansion error ends
+            // the shell" hook that [`Shell::note_shell_error`] models.
+            self.arm_discard(1);
+            // Under errexit it never gets that far. `parser_error` (error.c)
+            // ends with `if (exit_immediately_on_error) exit_shell
+            // (last_command_exit_value = 2)`, so the shell is gone at the
+            // *first* diagnostic line — which is why the echoed source line
+            // above is not printed there, and why the status is a parse error's
+            // 2 rather than errexit's usual 1. `format_parse_error` already
+            // drops everything past the first line under errexit, so the two
+            // agree. `exit_shell` is a direct call and not a jump, so nothing
+            // between here and the top may answer 1 in the 2's place — hence
+            // `demote: false`.
+            if self.errexit {
+                self.unbound_error = Some(FatalAbort {
+                    status: 2,
+                    demote: false,
+                });
+                self.discard_error = None;
+            }
+            return None;
+        }
+        Some(self.run_command_sub_text(body))
     }
 
     /// The parameter a bare `$…` in an arithmetic expression names, reading

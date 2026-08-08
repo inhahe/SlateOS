@@ -49714,6 +49714,34 @@ fn capcase(s: BStr<'_>) -> Str {
     out
 }
 
+/// Whether a value has to be rendered in the ANSI-C `$'…'` form rather than
+/// shown as itself — the question bash asks with `ansic_shouldquote`
+/// (lib/sh/strtrans.c), which walks the value and answers yes as soon as a
+/// character is not `isprint`.
+///
+/// Two things force it here, and they are the two every C library agrees on:
+///
+///   * a **byte that decodes to no character at all**. bash reaches this
+///     through `ansic_wshouldquote`, which quotes when `mbstowcs` fails, so a
+///     lone `\xff` comes out `$'\377'` — and it has to, because the raw byte
+///     would not survive a re-read as a character. osh is UTF-8 throughout
+///     (`design-decisions.md` §104), so "decodes to no character" is exactly
+///     [`bytes::Ch::B`].
+///   * a **Unicode control** (`Cc`: `U+0000`–`U+001F`, `U+007F`–`U+009F`). Note
+///     this is a *character* test, not a byte one: `U+009F` is written `\302\237`
+///     and neither of those bytes is an ASCII control.
+///
+/// What deliberately does *not* force it is every other category a libc's
+/// `iswprint` table happens to reject — format characters (`U+00AD`, `U+200B`,
+/// `U+FEFF`), private use, unassigned code points. Those are the host's
+/// character database rather than shell semantics, and §101 decided not to
+/// model one. The reference bash on the development host (newlib) quotes all
+/// three and leaves `U+2028`/`U+2029` alone; glibc does not agree with it on
+/// either count. See `known-issues.md`, `TD-OILS-PRINTF-Q-HIGH-BYTES`.
+fn needs_ansi_c_quote(s: BStr<'_>) -> bool {
+    bytes::chars(s).any(|c| matches!(c, Ch::B(_)) || c.is_control())
+}
+
 /// Quote `s` the way bash's `printf %q` does: an empty string becomes `''`, a
 /// string with control characters uses the ANSI-C `$'…'` form, and otherwise
 /// each shell-special character is backslash-escaped (bash uses backslash
@@ -49723,7 +49751,7 @@ fn printf_quote(s: BStr<'_>) -> Str {
     if s.is_empty() {
         return b"''".to_vec();
     }
-    if s.iter().any(|b| b.is_ascii_control()) {
+    if needs_ansi_c_quote(s) {
         // Reuse the ANSI-C form (matches bash, which emits `$'…'` here too).
         return shell_quote(s);
     }
@@ -49764,8 +49792,9 @@ fn shell_quote(s: BStr<'_>) -> Str {
     if s.is_empty() {
         return b"''".to_vec();
     }
-    if bytes::chars(s).any(Ch::is_control) {
-        // A control byte forces the ANSI-C `$'…'` form. Reuse `ansi_c_quote` so
+    if needs_ansi_c_quote(s) {
+        // A control character — or a byte that is no character — forces the
+        // ANSI-C `$'…'` form. Reuse `ansi_c_quote` so
         // `${v@Q}`/`printf %q` render control chars exactly as bash does — named
         // escapes (`\a \b \t \n \v \f \r \E`) with a 3-digit octal fallback
         // (`\001`, `\177`), not `\xHH` — and so the `@Q`/`%q`/`declare -p`
@@ -53226,9 +53255,12 @@ fn read_record<R: BufRead>(
 /// and backslash-escape the characters that are special inside double quotes
 /// (`"`, `\`, `$`, and backtick), matching bash's re-inputtable output.
 fn quote_declare_value(v: BStr<'_>) -> Str {
-    // A value containing a control character is rendered in ANSI-C `$'…'` form
-    // (bash: `declare -- x=$'a\tb'`), not double-quoted with the literal byte.
-    if bytes::chars(v).any(Ch::is_control) {
+    // A value containing a control character — or a byte that decodes to no
+    // character — is rendered in ANSI-C `$'…'` form (bash: `declare -- x=$'a\tb'`,
+    // `declare -- w=$'a\377b'`), not double-quoted with the literal byte. It is
+    // the same `ansic_shouldquote` question `%q` and `${v@Q}` ask, so it is the
+    // same predicate; see [`needs_ansi_c_quote`].
+    if needs_ansi_c_quote(v) {
         return ansi_c_quote(v);
     }
     let mut out = Str::with_capacity(v.len() + 2);
@@ -53261,15 +53293,39 @@ fn ansi_c_quote(s: BStr<'_>) -> Str {
             Some('\u{1b}') => out.extend_from_slice(b"\\E"),
             Some('\\') => out.extend_from_slice(b"\\\\"),
             Some('\'') => out.extend_from_slice(b"\\'"),
-            // bash renders any other control byte as 3-digit octal (`\001`,
-            // `\177`), matching its own `$'…'` re-input parser — not `\xHH`.
+            // bash renders any other control character as 3-digit octal
+            // (`\001`, `\177`), matching its own `$'…'` re-input parser — not
+            // `\xHH`.
+            //
+            // Per *byte* of the character, not per code point: `ansic_quote`
+            // walks the string with `mbsnrtowcs` but writes the original bytes
+            // back (lib/sh/strtrans.c), so `U+009F` — a control that is written
+            // `\302\237` in UTF-8 — comes out as both escapes and not as
+            // `\237`. Only for ASCII are the two the same.
             _ if c.is_control() => {
-                let v = c.as_char().map_or(0, u32::from);
-                out.extend_from_slice(format!("\\{v:03o}").as_bytes());
+                let mut enc = Str::new();
+                c.push_to(&mut enc);
+                for b in enc {
+                    let v = u32::from(b);
+                    out.extend_from_slice(format!("\\{v:03o}").as_bytes());
+                }
             }
-            // A byte that is no character keeps its own value; `$'…'` passes an
-            // unescaped byte through, so it re-reads as itself.
-            _ => c.push_to(&mut out),
+            _ => match c {
+                // A byte that decodes to no character is written as 3-digit
+                // octal, the same escape a control gets. bash arrives here
+                // through `ansic_wshouldquote` → `ansic_quote`, whose `mbrtowc`
+                // returns `(size_t)-1` and which then falls through to the
+                // `\%03o` arm (lib/sh/strtrans.c) — so `a\xffb` prints
+                // `$'a\377b'`. Passing the raw byte through would re-read as
+                // itself and so round-trip, but it is not what bash writes, and
+                // the escape is the whole point of choosing this form.
+                Ch::B(b) => {
+                    let v = u32::from(b);
+                    out.extend_from_slice(format!("\\{v:03o}").as_bytes());
+                }
+                // Anything else is a character that prints as itself.
+                Ch::U(_) => c.push_to(&mut out),
+            },
         }
     }
     out.push(b'\'');
@@ -53285,7 +53341,9 @@ fn quote_declare_key(k: BStr<'_>) -> Str {
     if k.is_empty() {
         return b"\"\"".to_vec();
     }
-    if bytes::chars(k).any(Ch::is_control) {
+    // The same `ansic_shouldquote` question the value side asks, so the same
+    // predicate: `declare -A m=([$'k\377z']="1" )`. See [`needs_ansi_c_quote`].
+    if needs_ansi_c_quote(k) {
         return ansi_c_quote(k);
     }
     // Metacharacters that would break re-parsing of a bare `[subscript]`, so

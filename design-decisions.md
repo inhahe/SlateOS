@@ -6660,6 +6660,31 @@ OS-boundary data are bytes").
 (`0x00`–`0x1F` and `0x7F`) as non-printable, and every byte from `0x80` up as
 printable and passed through untouched.
 
+> **Narrowed 2026-08-07 by §104.** The rejected alternative below —
+> "ANSI-C-quote anything that is not valid UTF-8" — was rejected on the grounds
+> that it "commits the shell to UTF-8 as *the* encoding". §104 has since made
+> exactly that commitment, on the operator's decision, so the objection no
+> longer holds and **that half is now implemented**: a byte that decodes to no
+> character forces the `$'…'` form, as does a non-ASCII Unicode control
+> (`U+0080`–`U+009F`, which the old byte-level test could not see). The
+> byte-string policy is not contradicted — `$'a\377b'` re-reads as the same
+> bytes, so nothing the user typed is mangled or lost; only its *rendering*
+> changes.
+>
+> What this entry still decides, unchanged, is the **rest** of a libc's
+> `isprint` table: format characters (`U+00AD`, `U+200B`, `U+FEFF`), private use
+> and unassigned code points stay printable to osh even though the reference
+> bash quotes them. The reason is stronger than it was in August: `U+2028`/
+> `U+2029` go the *other* way (newlib prints them, glibc does not), so there is
+> no single table to copy, and `Cn` (unassigned) would mean carrying a full
+> Unicode assignment table that drifts with each release.
+>
+> The four surfaces that ask the question — `printf %q`, `${v@Q}`, a
+> `declare -p` value, and a `declare -p` associative key — now share one
+> predicate, `needs_ansi_c_quote`, so a future category model has exactly one
+> place to land. The measured table is in `known-issues.md` under
+> `TD-OILS-PRINTF-Q-HIGH-BYTES`.
+
 **Rationale.** It is the only rule a shell with no locale can state honestly. It
 agrees with glibc-in-UTF-8 for all *valid* UTF-8 — the case that actually occurs
 — and it never mangles a byte the user typed. Encoding the reference host's

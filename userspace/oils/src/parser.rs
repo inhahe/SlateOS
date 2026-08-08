@@ -1504,6 +1504,7 @@ impl IncrementalParser {
             opts: self.opts,
             depth: 0,
             truncated_at: self.pending_lex_err.is_some().then(|| self.line_past_end()),
+            eof_closed_in_list: false,
         };
         let mut items = Vec::new();
         // Whether the parse ended by asking for a token the stream did not have.
@@ -2177,6 +2178,7 @@ fn parse_tokens_ending(
         opts,
         depth: 0,
         truncated_at: None,
+        eof_closed_in_list: false,
     };
     // The closing `)` is consumed by nothing, so a complete body leaves the
     // cursor on it rather than past it.
@@ -2255,6 +2257,25 @@ struct Parser {
     /// `None` for every stream whose end is a real end — including a `$( … )`
     /// body parsed on its own, whose text the enclosing scan already closed.
     truncated_at: Option<u32>,
+    /// Set when a `for`/`select` word list was terminated by the **end of input
+    /// itself**, which makes the parser ask for one token more than any other
+    /// construct does.
+    ///
+    /// bash's rule is `FOR WORD newline_list IN word_list list_terminator
+    /// newline_list DO …`, and `list_terminator` is `'\n' | ';' | yacc_EOF`
+    /// (parse.y:517) — the end-of-file token is a terminator in its own right.
+    /// So when the input runs out right after the list, the EOF the last word's
+    /// scan produced is *consumed* as the terminator, and the `newline_list`
+    /// behind it still has to look ahead: that request finds the buffer used up
+    /// and pays `line_number++` a second time (parse.y:2361). Every other
+    /// compound reaches its EOF through a rule that cannot accept one, so it
+    /// asks once and stops.
+    ///
+    /// Only the `IN` forms carry a `list_terminator`, so `for i\⏎` — no list at
+    /// all — is charged once like everything else, and a list closed by a real
+    /// `;` or newline leaves the EOF still to be fetched, which is again one
+    /// request. Read by [`Parser::reader_line_at`] past the end of the stream.
+    eof_closed_in_list: bool,
 }
 
 /// The text a token stream was lexed from, with each token's end offset into it.
@@ -2776,6 +2797,10 @@ impl Parser {
             // follows a deletion is the deletion's own `goto restart_read` and
             // is not charged again.
             let bump = if stowed { 0 } else { self.spans.pending_conts(last, r).max(1) };
+            // …and one more when a `for`/`select` list swallowed the end-of-file
+            // token as its `list_terminator`, so that the request being answered
+            // here is the *second* one to run the buffer out.
+            let bump = bump.saturating_add(u32::from(self.eof_closed_in_list));
             return self.reader_line_at(last).saturating_add(bump);
         };
         let line = self.lines.get(at).copied().unwrap_or_else(|| self.cur_line());
@@ -3592,7 +3617,16 @@ impl Parser {
             self.pos += 1;
             ws.push(self.word_from_segs_at(&segs, at)?);
         }
+        // `list_terminator` accepts the end-of-file token itself, so the list is
+        // closed by the end of the input exactly when there was no separator to
+        // skip and nothing left behind it — and then the `newline_list` behind
+        // the terminator still has to ask for a token of its own. A real `;` or
+        // newline took the terminator's place and leaves that end of file still
+        // to be fetched, which is one request like anywhere else. See
+        // `Parser::eof_closed_in_list`.
+        let before = self.pos;
         self.skip_separators();
+        self.eof_closed_in_list |= self.pos == before && before >= self.toks.len();
         Ok(Some(ws))
     }
 
@@ -6616,6 +6650,63 @@ mod tests {
         ] {
             let (line, msg) = err(src);
             assert_eq!((line, msg.as_str()), want, "src {src:?}");
+        }
+    }
+
+    /// `for`/`select` ask for one token more than anything else, because their
+    /// `list_terminator` (parse.y:517) accepts the end-of-file token itself: the
+    /// EOF the word list ran into is *consumed* as the terminator, and the
+    /// `newline_list` behind it has to request another, which enters the fetch
+    /// block a second time. So the same tail costs one more line after a word
+    /// list than after any other header. See [`Parser::eof_closed_in_list`].
+    /// Every expectation is bash 5.2.37's own, measured on a script file.
+    #[test]
+    fn a_for_lists_terminator_can_be_the_end_of_input_itself() {
+        fn line_of(src: &str) -> u32 {
+            let opts = ParseOpts::default();
+            let mut ip = IncrementalParser::new(src.as_bytes(), 0, opts);
+            while let Some(unit) = ip.next_unit(None, opts) {
+                let Err(e) = unit else { continue };
+                assert_eq!(emsg(&e), "syntax error: unexpected end of file", "src {src:?}");
+                return e.line.unwrap_or(0);
+            }
+            panic!("{src:?} must fail");
+        }
+        for (src, want) in [
+            // The reference shape, which has no `list_terminator` at all: one
+            // deletion, then one request that finds nothing.
+            ("echo 1\nwhile true\\\n", 4),
+            ("echo 1\nwhile true\\\n\\\n", 5),
+            // The same tail after a word list is one further along, every time.
+            ("echo 1\nfor i in a\\\n", 5),
+            ("echo 1\nfor i in a\\\n\\\n", 6),
+            ("echo 1\nfor i in a b\\\n", 5),
+            ("echo 1\nfor i in\\\n", 5),
+            ("echo 1\nselect v in a\\\n", 5),
+            ("echo 1\nselect v in\\\n", 5),
+            // …including where the word ended before the run, so that the extra
+            // request is the only thing separating the two.
+            ("echo 1\nwhile true  \\\n", 3),
+            ("echo 1\nfor i in a  \\\n", 4),
+            // `do` is swallowed by the word list (no separator before it), which
+            // is why this is an end-of-file rather than a missing `do`.
+            ("echo 1\nfor i in a do\\\n", 5),
+            // Nesting does not matter: it is the rule being reduced that asks
+            // twice, not the depth it is reduced at.
+            ("echo 1\nif true; then for i in a\\\n", 5),
+            ("echo 1\nfor j in x; do for i in a\\\n", 5),
+            // A real terminator takes the end-of-file token's place, and then the
+            // `newline_list` request is the *first* to run the buffer out.
+            ("echo 1\nfor i in a;\\\n", 3),
+            ("echo 1\nfor i in a ;\\\n", 3),
+            ("echo 1\nfor i in a\n", 3),
+            ("echo 1\nfor i in a", 3),
+            // No `in` at all is not a word list, so no `list_terminator` either.
+            ("echo 1\nfor i\\\n", 4),
+            ("echo 1\nfor i\\\n\\\n", 5),
+            ("echo 1\nselect v\\\n", 4),
+        ] {
+            assert_eq!(line_of(src), want, "src {src:?}");
         }
     }
 

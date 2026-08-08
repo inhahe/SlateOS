@@ -43,6 +43,55 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
+### TD-OILS-JOBS-LIFETIME-RACES-ON-THE-CURRENT-JOB-MARKERS. `jobs-lifetime.sh` disagrees about `+`/`-` about 1 run in 5 — 2026-08-08 — OPEN
+
+**Where:** `userspace/oils/tests/corpus/jobs-lifetime.sh` lines 68 and 73, and
+whatever in `userspace/oils/src/interp.rs` picks the current (`+`) and previous
+(`-`) job when a finished job is reported and dropped.
+
+**What.** A full sweep failed this one case where the immediately preceding
+sweep, on the *same binary*, passed it. Re-run in isolation: **1 failure in 5**.
+The divergence is entirely in the markers — every line of text is otherwise
+identical:
+
+```text
+line 68  `sleep 0.05 & sleep 0.06 & sleep 0.6; jobs %1; echo "--"; jobs; disown -a`
+           bash: [1]-  Done … sleep 0.05      then  [2]   Done … sleep 0.06
+           osh : [1]   Done … sleep 0.05      then  [2]+  Done … sleep 0.06
+```
+
+So bash had job 1 marked `-` and, after `jobs %1` dropped it, showed job 2 with
+*no* marker; osh had job 1 unmarked and job 2 still `+`. The case's own comment
+states the rule being tested: "Dropping the `-` job leaves the `+` job in place,
+yet the listing that follows shows no marker at all: with nothing running there
+is nothing to re-mark."
+
+**Two candidate explanations, not yet discriminated:**
+
+1. **The case races.** The two jobs are 10 ms apart (`sleep 0.05` / `sleep 0.06`)
+   but process spawn on this host costs ~85 ms, so their *completion order* is
+   set by spawn timing rather than by the durations. The gate is `sleep 0.6`,
+   leaving ~0.54 s of margin — normally ample, except that
+   TD-OILS-CORPUS-SWEEP-IS-UNRUNNABLE-WHEN-PROCESS-SPAWN-LATENCY-SPIKES records
+   spawn latency on this host spiking past that. If a job is still running when
+   `jobs %1` executes, the "nothing running to re-mark" premise fails and the
+   markers legitimately differ. This would make it a case bug (too-tight
+   margins), like TD-OILS-CORPUS-BG-DEBUG-TRACE-RACE, which was also the case
+   and not osh.
+2. **osh's marker reassignment is genuinely order-dependent** where bash's is
+   not — i.e. a real fidelity bug that only shows when the two completions land
+   in a particular order.
+
+**How to discriminate:** instrument the case to print whether each job is still
+running at the moment of `jobs %1` (e.g. a bare `jobs` before it, or widen the
+gate to several seconds and see whether the failure rate goes to zero). If
+widening the gate fixes it, it is (1) and the case needs bigger margins; if it
+still fails with a generous gate, it is (2) and the marker logic is wrong.
+
+**Found by** the post-Defender-exclusion timing sweep, 2026-08-08 — not by any
+code change; the binary was byte-identical to the one that had just passed a
+full sweep.
+
 ### TD-OILS-THE-FUNMAP-LISTING-IS-SORTED-BYTEWISE-WHERE-BASH-COLLATES. `bind -P` orders `re-read-init-file` differently under `en_US.UTF-8` — 2026-08-07
 
 **Where:** `userspace/oils/src/bind_tables.rs` — the `FUNCTIONS` list, which is
@@ -304,11 +353,24 @@ Two details settled by measurement rather than by reading:
 Corpus case:
 `tests/corpus/an-arithmetic-command-carries-its-command-substitution-re-printed.sh`.
 
-### TD-OILS-A-DEFERRED-BRACE-BODY-KEEPS-ITS-SUBSTITUTION-AS-WRITTEN. `${#x:-$( (echo a) )}` should come back re-printed — 2026-08-07
+### TD-OILS-A-DEFERRED-BRACE-BODY-KEEPS-ITS-SUBSTITUTION-AS-WRITTEN. `${#x:-$( (echo a) )}` should come back re-printed — 2026-08-07 — ✅ FIXED 2026-08-08
+
+**Fixed** in `ca8b731a5`, text-only, once the recorded blocker turned out not to
+be one (see below). `defers_its_body` became `deferred_body_mut`, returning the
+body text rather than a bool, and the re-prints `parse_arith_comsubs` had always
+computed are now spliced into it instead of dropped. `parse_braced_param_in`
+still receives the *unspliced* `raw`, deliberately, which is what keeps the line
+accounting on the source. Corpus case:
+`tests/corpus/a-deferred-brace-body-carries-the-reprint-but-not-its-lines.sh`,
+which pins the re-printed text, the multi-line diagnostic, the source-based
+lines, and a body that builds operand words as a control (it agrees by a
+different path, so the fix cannot look right for the wrong reason). 1360 unit
+tests, clippy clean, and the 103 brace/param/transform/arith/declare/subst/quote
+corpus cases all pass.
 
 **Where:** `userspace/oils/src/parser.rs` — `seg_to_part`'s `Seg::ParamBraced`
-arm, which runs `parse_arith_comsubs` for its side effect and drops the
-re-prints it now returns.
+arm, which ran `parse_arith_comsubs` for its side effect and dropped the
+re-prints it returns.
 
 **What.** A `${ … }` body is read by `parse_matched_pair` under `P_DOLBRACE`,
 which sends a nested `$(` to `parse_comsub` (parse.y:3929 → 3959), so the body

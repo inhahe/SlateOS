@@ -342,27 +342,46 @@ one is the extent pass and the parser disagreeing about where the `${ … }`
 *ends*, this is them disagreeing about what its *name* is:
 
 ```text
-                    bash                                        osh
-echo "${a[}"x"]}"   }x: syntax error: operand expected …         ${a[}: bad substitution   rc=1 both
+                                bash                          osh
+echo "${a[}"x"]}"               }x: syntax error …            ${a[}: bad substitution
+echo ${a[}x]}                   }x: syntax error …            ${a[}x]}: bad substitution
+h[}x]=HIT; echo "${h[}"x"]}"    HIT                           ${h[}: bad substitution
+h[}x]=HIT; echo "${h[}"x"]:-D}" HIT                           ${h[}: bad substitution
+h[}x]=HIT; echo "${!h[}"x"]}"   (empty, rc=0)                 ${h[}: bad substitution
+echo "${#h[}"x"]}"              ${#h[}: bad substitution      ${#h[}: bad substitution
 ```
 
 The parser reads the name as `a[` and stops at the first `}`, which is not a
 valid brace-expansion word — hence osh's bad substitution. bash's re-read hits
 the `[`, calls `skipsubscript` over the whole word, finds the `]` three
 characters past the closing quote, and comes back with the name `a[}"x"]` — a
-well-formed array reference whose *subscript* is `}"x"]`. That is then
-evaluated as arithmetic, and the arithmetic evaluator is what complains.
+well-formed array reference whose *subscript* is `}"x"`. On an indexed array
+that is evaluated as arithmetic and the arithmetic evaluator complains; on an
+**associative** one it is a key, quote removal makes it `}x`, and the
+expansion *succeeds* — so this is not only a diagnostic difference. Note the
+last two rows: `${!…}` indirects through the re-read reference, and `${#…}`
+is the one shape already matching, because its name scan reports the parser's
+body.
 
-**Proper fix.** Re-derive the name at expansion time from the word's source
-rather than trusting the parser's split, i.e. give `wordscan.rs` a second entry
-point that returns the name `parameter_brace_expand` would read, and have the
-`${ … }` expansion use it. The scanners are already there —
-`extract_name` is `string_extract` with `SX_VARNAME` — so the work is in
-plumbing the result through to the array-reference path, not in the scan.
+Nor is it confined to double quotes (row 2): the re-read is
+`parameter_brace_expand`'s, which runs on every word.
 
-**Severity:** very low. Both shells fail, both with rc=1; only the diagnostic
-differs, and the shape needs an unterminated subscript whose `]` appears later
-in the same word.
+**Proper fix.** bash reads a word twice — the parser decides where it *ends*,
+`expand_word_internal` re-derives everything else from the word's source — and
+`wordscan.rs` already exists to model exactly that second read. Extend it with
+the name scan (`extract_name` is already `string_extract` under `SX_VARNAME`),
+and where the two reads disagree, re-parse the word's source under a
+`ParseOpts` flag that carves a `${ … }` body with the subscript skip, then
+expand *that* word. The swap has to happen at word level, not inside the
+`${ … }`: the text the re-read swallows (`x"]` above) is in sibling parts, and
+expanding those as well would print `HITx]}`. `Shell::begin_word` already
+holds the word's source and is the one place every expansion passes through,
+so it is where the replacement belongs — its seven callers each pick the
+returned word over the parsed one.
+
+**Severity:** low. The indexed-array shapes fail in both shells with rc=1 and
+differ only in the diagnostic; the associative ones differ in output. All of
+them need an unterminated subscript whose `]` appears later in the same word.
 
 ### TD-OILS-AN-UNCLOSED-SUBSCRIPT-IN-A-QUOTED-BRACE-BODY-IS-NOT-A-RUNAWAY-SCAN. `echo "${a[}"` names the wrong subject — 2026-08-08 — ✅ FIXED 2026-08-08
 

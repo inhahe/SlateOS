@@ -6378,7 +6378,7 @@ pub(crate) fn word_verbatim_from_source(s: BStr<'_>, opts: ParseOpts) -> Result<
 
 /// [`word_verbatim_from_source`] for a fragment of a `${ … }` body, which sits
 /// on a known physical line. See [`frag_line`].
-fn word_verbatim_from_source_at(
+pub(crate) fn word_verbatim_from_source_at(
     s: BStr<'_>,
     opts: ParseOpts,
     line: u32,
@@ -6386,7 +6386,13 @@ fn word_verbatim_from_source_at(
     if s.is_empty() {
         return Ok(Word::default());
     }
-    let mut segs = crate::lexer::lex_word_verbatim(s).map_err(|e| ParseError::new(&e.msg))?;
+    // Only [`ParseOpts::reread`] reaches the lexer: this scan has never
+    // consulted `extglob` or `posix` (it was handed `ParseOpts::default()`
+    // outright), and the re-read flag is not a shell option but a mode of
+    // reading, so passing it through changes nothing else.
+    let lex_opts = ParseOpts { reread: opts.reread, ..ParseOpts::default() };
+    let mut segs =
+        crate::lexer::lex_word_verbatim_opts(s, lex_opts).map_err(|e| ParseError::new(&e.msg))?;
     map_frag_segs(&mut segs, line);
     let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
     for seg in &segs {

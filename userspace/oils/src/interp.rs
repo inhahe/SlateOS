@@ -6216,6 +6216,9 @@ impl Shell {
         crate::lexer::ParseOpts {
             extglob: self.shopt.get("extglob").copied().unwrap_or(false),
             posix: self.shell_option_enabled("posix"),
+            // The ordinary read, which is the parser's. Only the word re-read
+            // sets this — see [`crate::lexer::ParseOpts::reread`].
+            reread: false,
         }
     }
 
@@ -21863,7 +21866,8 @@ impl Shell {
         } else {
             (true, true)
         };
-        let saved = self.begin_word(w);
+        let (saved, reread) = self.begin_word(w);
+        let w = reread.as_ref().unwrap_or(w);
         let fields = self.expand_word_fields(w, split, glob);
         self.end_word(saved);
         fields
@@ -23400,7 +23404,8 @@ impl Shell {
     /// (`${y:-${x@Z}}`) is expanded by a recursive call, so the innermost word
     /// in flight wins, exactly as bash's recursive `expand_word_internal` does.
     fn expand_word(&mut self, word: &Word, split: bool) -> Vec<Str> {
-        let saved = self.begin_word(word);
+        let (saved, reread) = self.begin_word(word);
+        let word = reread.as_ref().unwrap_or(word);
         let fields = self.expand_word_inner(word, split);
         self.end_word(saved);
         fields
@@ -24471,7 +24476,8 @@ impl Shell {
     /// [`keep_marks`] for what stands in its place.
     fn expand_case_pattern(&mut self, word: &Word) -> Vec<EChar> {
         let saved_cond = std::mem::replace(&mut self.cond_word, true);
-        let saved = self.begin_word(word);
+        let (saved, reread) = self.begin_word(word);
+        let word = reread.as_ref().unwrap_or(word);
         let out = self.expand_word_pattern_inner(word, true);
         self.end_word(saved);
         self.cond_word = saved_cond;
@@ -24483,7 +24489,8 @@ impl Shell {
     /// what the match reads, so they come back decoded.
     fn expand_case_subject(&mut self, word: &Word) -> Vec<Ch> {
         let saved_cond = std::mem::replace(&mut self.cond_word, true);
-        let saved = self.begin_word(word);
+        let (saved, reread) = self.begin_word(word);
+        let word = reread.as_ref().unwrap_or(word);
         let fields = self.expand_word_joined_annotated(word);
         self.end_word(saved);
         self.cond_word = saved_cond;
@@ -24500,7 +24507,8 @@ impl Shell {
     /// literal text is scanned for colon-delimited tilde positions; a `:`
     /// produced by a parameter/command expansion does not create one.
     fn expand_assignment_value(&mut self, word: &Word) -> Str {
-        let saved = self.begin_word(word);
+        let (saved, reread) = self.begin_word(word);
+        let word = reread.as_ref().unwrap_or(word);
         // An assignment takes its value whole, which is bash's
         // `expand_no_split_dollar_star` — see [`Shell::no_split_star`]. It is
         // *this* path and not the `declare`/`export`/`local` arguments that look
@@ -24632,7 +24640,8 @@ impl Shell {
     /// rules mirror `expand_word_annotated`: unquoted `Literal` and dynamic
     /// expansions are live; single/double-quoted runs are literal.
     fn expand_word_pattern(&mut self, word: &Word) -> Vec<EChar> {
-        let saved = self.begin_word(word);
+        let (saved, reread) = self.begin_word(word);
+        let word = reread.as_ref().unwrap_or(word);
         let buf = self.expand_word_pattern_inner(word, false);
         self.end_word(saved);
         // A pattern is reached through quote removal, so the marks an operand
@@ -24660,7 +24669,8 @@ impl Shell {
         } else {
             SplitMode::Operand
         };
-        let saved = self.begin_word(arg);
+        let (saved, reread) = self.begin_word(arg);
+        let arg = reread.as_ref().unwrap_or(arg);
         // bash expands the operand with `expand_string_unsplit`, so it is one of
         // the contexts that keeps a `$*` whole even unquoted — see
         // [`Shell::no_split_star`]. The fields the operand hands back are the
@@ -25518,10 +25528,17 @@ impl Shell {
     /// [`crate::wordscan`] — and that too must be raised before the word's
     /// first `$( … )` runs.
     ///
-    /// Pass the returned value back to [`Shell::end_word`].
-    fn begin_word(&mut self, w: &Word) -> Option<Str> {
+    /// It reaches a third here, and this one replaces the word rather than
+    /// complaining about it: where the re-read carves a different `${ … }` than
+    /// the parser did, it is the re-read's word that is expanded. See
+    /// [`Shell::reread_word`].
+    ///
+    /// Pass the returned pair back to [`Shell::end_word`] and expand the
+    /// returned word in place of `w`.
+    fn begin_word(&mut self, w: &Word) -> (Option<Str>, Option<Word>) {
         let src = crate::unparse::word_src(w);
         let unclosed = crate::wordscan::unclosed_brace(&src);
+        let reread = self.reread_word(&src);
         let saved = self.bad_sub_word.replace(src);
         if let Some(expr) = Self::arith_hiding_its_closer(w) {
             self.arith_unclosed_by_comment(&expr);
@@ -25529,7 +25546,50 @@ impl Shell {
         if let Some(named) = unclosed {
             self.dq_unclosed_brace(&named);
         }
-        saved
+        (saved, reread)
+    }
+
+    /// The word bash's *expansion* reads out of `src`, when that is not the
+    /// word the parser read.
+    ///
+    /// bash reads a word twice. The parser reads it to find where it ends;
+    /// `expand_word_internal` re-derives the rest from the word's source when
+    /// the word is expanded, and `parameter_brace_expand` (subst.c:9539) carves
+    /// the name of a `${ … }` out again with `string_extract` under
+    /// `SX_VARNAME` (subst.c:795). That scan jumps from a `[` to the matching
+    /// `]` wherever it is, so the `}` the parser closed at can be *inside* the
+    /// name — `"${h[}"x"]}"` names `h[}"x"]`, an array reference whose
+    /// subscript is `}"x"`, and with `h` associative it expands to `h[}x]`
+    /// rather than failing.
+    ///
+    /// osh parses once and expands the tree, so the second read has to be made
+    /// here: re-parse `src` with [`ParseOpts::reread`](crate::lexer::ParseOpts)
+    /// and expand that word instead. The swap is at word level because the text
+    /// the re-read swallows is in the *sibling* parts — expanding those as well
+    /// would print `HITx]}` where bash prints `HIT`.
+    ///
+    /// The control is the same source read the ordinary way. Comparing the two
+    /// reads of the same text isolates the one rule that differs between them,
+    /// which is what "the reads disagree" means; comparing against the
+    /// parser's own word would instead measure how faithfully
+    /// [`crate::unparse`] spells a word back out.
+    fn reread_word(&mut self, src: BStr<'_>) -> Option<Word> {
+        // The jump needs a `${` and a `[` to fire at all, and words holding
+        // both are rare — so this is the gate, and everything below runs only
+        // for them.
+        if !src.contains_str("${") || !src.contains_str("[") {
+            return None;
+        }
+        let opts = self.parse_opts();
+        let line = self.current_line;
+        let plain = crate::parser::word_verbatim_from_source_at(src, opts, line).ok()?;
+        let reread = crate::parser::word_verbatim_from_source_at(
+            src,
+            crate::lexer::ParseOpts { reread: true, ..opts },
+            line,
+        )
+        .ok()?;
+        (reread != plain).then_some(reread)
     }
 
     /// Report a `${` the word's *extent* scan could not close — see

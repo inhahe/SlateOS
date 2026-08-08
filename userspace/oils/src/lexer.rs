@@ -660,6 +660,22 @@ pub struct ParseOpts {
     /// mode `time -p echo hi` is `time: command not found` — and with it goes
     /// `time`'s own `-p`/`--`, which are only ever read in that position.
     pub posix: bool,
+    /// Not a shell option: this read is the **second** one bash gives a word.
+    ///
+    /// bash reads a word twice. The parser reads it to find where it ends, and
+    /// `expand_word_internal` re-derives everything else from the word's source
+    /// when the word is expanded — including the name of a `${ … }`, which
+    /// `parameter_brace_expand` (subst.c:9539) carves out again with
+    /// `string_extract` under `SX_VARNAME` (subst.c:795). That scan has a rule
+    /// the parser has not: at a `[` it jumps to the matching `]` wherever it
+    /// is, and the `}` the parser closed at may be inside the jump.
+    ///
+    /// osh parses once and expands the tree, so it gets that second read by
+    /// re-parsing the word's source with this set — and only where the two
+    /// reads disagree, which [`crate::wordscan`] decides. Off, the `[` is an
+    /// ordinary character and a `${a[}` closes at its `}` as the parser's read
+    /// requires.
+    pub reread: bool,
 }
 
 struct Lexer {
@@ -1736,7 +1752,17 @@ enum Verbatim {
 /// # Errors
 /// Returns [`LexError`] on an unterminated quote or substitution.
 pub fn lex_word_verbatim(src: BStr<'_>) -> Result<Vec<Seg>, LexError> {
-    let mut lx = Lexer::new(src, ParseOpts::default());
+    lex_word_verbatim_opts(src, ParseOpts::default())
+}
+
+/// [`lex_word_verbatim`] with the read's own options — which for this scan is
+/// only ever [`ParseOpts::reread`], the flag that turns a word's source into
+/// the *second* read bash gives it. See [`crate::wordscan`].
+///
+/// # Errors
+/// Returns [`LexError`] on an unterminated quote or substitution.
+pub fn lex_word_verbatim_opts(src: BStr<'_>, opts: ParseOpts) -> Result<Vec<Seg>, LexError> {
+    let mut lx = Lexer::new(src, opts);
     lx.read_word_verbatim(Verbatim::Bare)
 }
 
@@ -2671,6 +2697,19 @@ pub(crate) fn is_valid_name(s: BStr<'_>) -> bool {
         Some(c) if is_name_start(c) => chars.all(is_name_char),
         _ => false,
     }
+}
+
+/// True when a `${ … }` body read so far is still the parameter *name* —
+/// bash's `dolbrace_state == DOLBRACE_PARAM`, for the one question that asks
+/// it: whether a `[` opens a subscript to jump over on the re-read. See
+/// [`ParseOpts::reread`].
+///
+/// An identifier, optionally behind the `!` of an indirection. `!` is in none
+/// of the operator sets the state machine tests, so it leaves the state alone;
+/// every other prefix that could stand here (`#`, `%`, `^`, `,`, …) is in the
+/// first set it tests and moves the scan out of the name.
+fn is_brace_name_so_far(raw: BStr<'_>) -> bool {
+    is_valid_name(raw.strip_prefix(b"!").unwrap_or(raw))
 }
 
 /// True when the previous token leaves us in a position where a leading
@@ -5257,6 +5296,43 @@ impl Lexer {
             match syn(cx) {
                 // First unescaped, unquoted, non-nested `}` closes the span.
                 '}' => return Ok(raw),
+                // A subscript opening while the scan is still in the parameter
+                // *name* is jumped over wholesale, `]` and all — the rule
+                // `string_extract` gets from `SX_VARNAME` (subst.c:795) and
+                // `extract_dollar_brace_string` from `dolbrace_state ==
+                // DOLBRACE_PARAM` (subst.c:1943). It is not the parser's rule,
+                // so it is only in force on the re-read
+                // ([`ParseOpts::reread`]); with it the `}` that closes this
+                // body may be one the parser never saw, since the jump crosses
+                // a `}` — and a `"` — as readily as any other character.
+                //
+                // Which bodies are still "in the name" is bash's state machine,
+                // and it splits `#` from `!`: `#` is in the operator set the
+                // scan checks first (`"#%^,~:-=?+/"`), so `${#h[` has left
+                // `DOLBRACE_PARAM` by the `[` and the jump does not fire, while
+                // `!` is in no set at all and `${!h[` is still a name. Both are
+                // measured — `"${#h[}"x"]}"` is `${#h[}: bad substitution` and
+                // `"${!h[}"x"]}"` indirects through `h[}x]`.
+                '[' if self.opts.reread && is_brace_name_so_far(&raw) => {
+                    // Only a subscript that *closes* is jumped over: bash's
+                    // `if (string[ni] == RBRACK)` leaves the index alone
+                    // otherwise, which is why `echo ${a[}tail` stays an
+                    // ordinary bad substitution. `read_balanced` has consumed
+                    // the hunt by the time it reports one, so the cursor goes
+                    // back before the `[` is written as itself.
+                    let save = self.pos;
+                    match self.read_balanced('[', ']') {
+                        Ok(inner) => {
+                            raw.push(b'[');
+                            raw.extend_from_slice(&inner);
+                            raw.push(b']');
+                        }
+                        Err(_) => {
+                            self.pos = save;
+                            raw.push(b'[');
+                        }
+                    }
+                }
                 // Backslash escapes the next character (both are preserved
                 // verbatim so later re-parsing sees the escape) — unless that
                 // character is a newline, in which case the reader deleted the
@@ -6158,7 +6234,7 @@ mod tests {
                 ],
                 "extglob off: {src}"
             );
-            let mut with = super::tokenize(src.as_bytes(), ParseOpts { extglob: true, posix: false }).unwrap();
+            let mut with = super::tokenize(src.as_bytes(), ParseOpts { extglob: true, posix: false, reread: false }).unwrap();
             with.pop();
             assert_eq!(
                 with,
@@ -7049,7 +7125,7 @@ mod tests {
             ("cat <(case b in b) echo B;; esac)", "case b in b) echo B;; esac"),
         ];
         // `@(a|b)` is only a pattern with `extglob` on.
-        let opts = ParseOpts { extglob: true, posix: false };
+        let opts = ParseOpts { extglob: true, posix: false, reread: false };
         for (src, want) in bodies {
             let tk = tokenize_deferred(src.as_bytes(), opts);
             assert!(tk.err.is_none(), "{src:?} should lex: {:?}", tk.err);
@@ -7194,5 +7270,56 @@ mod tests {
         // the caller's to raise (see `Shell::arith_dolparen`), and it can only
         // raise it once it knows how much text to parse.
         assert_eq!(scan("fi) + 1 "), Some(("fi".into(), 3)));
+    }
+
+    /// The second read bash gives a word carves a `${ … }` differently from
+    /// the parser's: at a `[` still inside the name it jumps to the matching
+    /// `]`, so the body may swallow the `}` the parser closed at, and the
+    /// quote in between with it. See [`ParseOpts::reread`].
+    #[test]
+    fn the_re_read_jumps_from_a_subscript_to_its_bracket() {
+        fn first_braced(segs: &[Seg]) -> Option<String> {
+            for seg in segs {
+                match seg {
+                    Seg::ParamBraced(raw, _, _) => {
+                        return Some(String::from_utf8(raw.clone()).expect("body is text"));
+                    }
+                    Seg::Dq(inner) => {
+                        if let Some(found) = first_braced(inner) {
+                            return Some(found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        let body = |src: &str, reread: bool| {
+            let segs = super::lex_word_verbatim_opts(
+                src.as_bytes(),
+                ParseOpts { reread, ..ParseOpts::default() },
+            )
+            .expect("word lexes");
+            first_braced(&segs).expect("a ${ … } in the word")
+        };
+        // The parser stops at the first `}`; the re-read jumps from the `[` to
+        // the `]` three characters past the closing quote and closes on the
+        // `}` after it.
+        assert_eq!(body(r#""${h[}"x"]}""#, false), "h[");
+        assert_eq!(body(r#""${h[}"x"]}""#, true), r#"h[}"x"]"#);
+        // Unquoted is no different — the re-read is the expansion's, and every
+        // word gets one.
+        assert_eq!(body("${h[}x]}", true), "h[}x]");
+        // `#` is in the first operator set the state machine tests, so the
+        // scan has left the name by the `[` and nothing is jumped. `!` is in
+        // none of them, so an indirection still reads a name.
+        assert_eq!(body(r#""${#h[}"x"]}""#, true), "#h[");
+        assert_eq!(body(r#""${!h[}"x"]}""#, true), r#"!h[}"x"]"#);
+        // Only a subscript that closes is jumped over, so a `[` with no `]`
+        // after it is left where it stands and the two reads agree.
+        assert_eq!(body("${a[}tail", true), "a[");
+        assert_eq!(body("${a[}tail", false), "a[");
+        // A subscript that closes before the `}` was never in dispute.
+        assert_eq!(body("${a[0]}", true), "a[0]");
     }
 }

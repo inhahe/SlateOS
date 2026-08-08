@@ -709,6 +709,29 @@ pub fn close_last_line(src: BStr<'_>, reader: InputKind) -> std::borrow::Cow<'_,
     std::borrow::Cow::Owned(owned)
 }
 
+/// Whether `t` is an input [`close_last_line`] closed with a *backslash* rather
+/// than with a newline — the one shape in which the shell parses text that ends
+/// on no newline at all.
+///
+/// The signature is exact: the close appends a `\` to an odd trailing run,
+/// making the run even, and it appends nothing else without also appending a
+/// newline. So "ends in a non-empty even run of backslashes, and not in a
+/// newline" names that case and no other. An input the user really did write
+/// with two trailing backslashes is newline-closed like anything else — its run
+/// was even, so the string rule did not apply.
+///
+/// It matters because such an input has no newline for a reader to stop on. The
+/// look past its last token runs the buffer out and enters `shell_getc`'s fetch
+/// block — `line_number++` (parse.y:2361) — where a newline-closed input finds
+/// the newline the reader wrote back and pays nothing. And bash has no newline
+/// *token* left to hand the grammar either, so what ends the parse is the
+/// end-of-file token: `bash -c 'case x in  \'` is an unexpected *end of file*
+/// where `bash -c 'case x in  '` is near an unexpected `newline`.
+pub(crate) fn closed_with_backslash(t: &[Ch]) -> bool {
+    let run = t.iter().rev().take_while(|&&c| c == Ch::U('\\')).count();
+    run > 0 && run % 2 == 0
+}
+
 pub struct IncrementalParser {
     /// The source, kept for re-lexing the tail when [`ParseOpts`] change. Held as
     /// characters because the offsets recorded by the lexer are char indices —
@@ -2555,6 +2578,15 @@ impl Spans {
         let mut i = end;
         while let Some(len) = cont_len(t.get(i..).unwrap_or(&[])) {
             i = i.saturating_add(len);
+            n = n.saturating_add(1);
+        }
+        // The look past the *last* token of a backslash-closed string has no
+        // newline to stop on, so it runs the buffer out and enters the fetch
+        // block: one line, charged to the token's own read rather than to the
+        // parser's next request. See [`closed_with_backslash`]. Only the
+        // shell's own input is closed that way — an alias replacement is a
+        // pushed string, and `pop_string` ends it.
+        if at.src == 0 && i >= t.len() && closed_with_backslash(t) {
             n = n.saturating_add(1);
         }
         if n == 0 && r.word && matches!(t.get(end), Some(&Ch::U('<' | '>'))) {
@@ -6594,6 +6626,16 @@ mod tests {
         assert_eq!(line_of("nosuch$LINENO\\\\\n"), 1);
         assert_eq!(line_of("nosuch$LINENO\\\\\\\n"), 3);
         assert_eq!(line_of("nosuch$LINENO\\\\\\\\\n"), 1);
+        // A *string* whose last line ended on an odd run is closed with another
+        // backslash instead of with a newline ([`close_last_line`]), and then
+        // there is no newline for the lookahead's terminator scan to stop on:
+        // it runs the buffer out and enters the fetch block. (These are the
+        // post-close texts — `parse` does not apply the rule itself.) Sourcing
+        // a one-line file `echo $LINENO\` from bash 5.2.37 prints `2\`, and
+        // `echo $LINENO A\` prints `1 A\`: a second word takes the lookahead's
+        // place, so the scan that runs out is no longer the one that stamps.
+        assert_eq!(line_of("echo $LINENO\\\\"), 2);
+        assert_eq!(line_of("echo $LINENO A\\\\"), 1);
     }
 
     /// bash's `line_number` counts *fetches*, not lines of text, and deleting a

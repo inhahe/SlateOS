@@ -2562,22 +2562,28 @@ this. Pinned by `a_for_lists_terminator_can_be_the_end_of_input_itself`
 (parser.rs) and the corpus case
 `a-for-lists-terminator-can-be-the-end-of-input-itself.sh`.
 
-### TD-OILS-A-STRING-READERS-BACKSLASH-CLOSE-DOES-NOT-COST-A-FETCH. `-c` input ending in a lone `\` reads two lines low — 2026-08-08 — OPEN
+### TD-OILS-A-STRING-READERS-BACKSLASH-CLOSE-DOES-NOT-COST-A-FETCH. `-c` input ending in a lone `\` reads two lines low — 2026-08-08 — ✅ FIXED 2026-08-08
 
-**Where:** `userspace/oils/src/parser.rs` — `Parser::reader_line_at` and
-`Spans::reader_stop`; `userspace/oils/src/lexer.rs` — `Lexer::reader_at_eof`.
-The close itself is `parser::close_last_line`, and it is correct.
+**Where:** `userspace/oils/src/parser.rs` — `Spans::reader_stop` and the new
+`parser::closed_with_backslash`; `userspace/oils/src/lexer.rs` —
+`Lexer::reader_at_eof` and `Lexer::fetched_line`; `userspace/oils/src/interp.rs`
+— `Shell::format_parse_error`. The close itself is `parser::close_last_line`,
+and it is correct.
 
 **What.** A *string* whose last line ends on a lone backslash is closed with a
 second backslash rather than a newline (parse.y ~2570), so the pair is one
 quoted literal backslash and there is no newline for the scan to stop on. bash
-still counts the fetch that discovers that; osh does not:
+still counts the fetch that discovers that; osh did not. (Measured by writing
+the probe to a file and sourcing it — a `-c` argument cannot carry a trailing
+backslash through Windows' argv, so the same rows spelled `-c` are artifacts.)
 
 ```text
-input                                bash                    osh
--c 'echo 1⏎echo $LINENO\'            3\                      2\
--c 'echo 1⏎cat <<x\'                 line 4: warning …       line 2: warning …
--c 'echo 1⏎nosuch$LINENO\'           line 4: nosuch4\: …     line 2: nosuch2\: …
+input, sourced                       bash                    osh (before)
+echo 1⏎echo $LINENO\                 3\                      2\
+echo 1⏎cat <<x\                      line 4: warning …       line 2: warning …
+echo 1⏎cd $LINENO\                   line 3: cd: 3\: …       line 2: cd: 2\: …
+echo 1⏎case x in  \                  line 4: unexpected      line 3: near unexpected
+                                     end of file             token `newline'
 ```
 
 The same inputs read from a *file* agree, because the stream reader appends a
@@ -2592,14 +2598,42 @@ again. That is two bumps, and osh currently records neither, because
 `Spans::reader_stop` measures continuations and there is no continuation here:
 the backslash pair is *text*.
 
-**Proper fix.** Generalise the end-of-input accounting from "how many
-continuations did the reader delete" to "how many fetches did it pay for", so a
-scan that simply runs the buffer out counts too. `Lexer::reader_at_eof` already
-asks a version of that question for the continuation case and would become the
-one place to answer it.
+**Fixed.** One predicate names the shape and three sites consult it.
+`parser::closed_with_backslash` is "ends in a non-empty *even* run of
+backslashes and not in a newline" — the exact signature of what
+`close_last_line` writes for `InputKind::Str`, and of nothing else, since an
+even run the user wrote is newline-closed like anything else. Then:
+
+* `Spans::reader_stop` charges one line to the *last* token of such a text: its
+  own look past the token runs the buffer out. This is the fetch a
+  newline-closed input never makes, because it finds the newline the reader
+  wrote back.
+* `Lexer::reader_at_eof` answers true for it, so `run_into` stops appending the
+  synthetic trailing `Tok::Newline` — bash has no newline token to hand over
+  either, which is why `case x in  \` is an unexpected *end of file*. The second
+  fetch is then the parser's own request, already charged by
+  `Parser::reader_line_at`.
+* `Lexer::fetched_line` adds two rather than one, because the continuation case
+  it shares that branch with left its newline in the text and `cur_line` counts
+  that character, while this one has no newline anywhere.
+
+One consequence had to be modelled too: bash echoes the offending source line
+from `shell_input_line`, and the fetch that ran the input out left it *empty* —
+so `syntax error near unexpected token` blamed on a line past the last one is
+followed by a literal `` `' ``. `print_offending_line` is called unconditionally
+on that branch (parse.y:6263) and simply copies the empty buffer.
+`format_parse_error` now echoes the empty line rather than omitting the line
+entirely.
 
 **Impact.** Line numbers only, and only for `-c`/`eval`/`.`/trap input whose
 final line ends on an odd run of backslashes.
+
+**Pinned by** two rows in `simple_command_line_follows_bashs_lookahead_rule`
+(parser.rs) and the corpus case
+`a-string-closed-with-a-backslash-has-no-newline-to-stop-on.sh`, which walks the
+line stamped on a command, the same line in a diagnostic, an unterminated
+here-document, six compounds that never close, three reserved words the close
+turns back into ordinary words, and the end-of-file token itself.
 
 ### TD-OILS-AN-UNFINISHED-CONDITIONAL-AT-END-OF-INPUT-IS-NOT-A-MISSING-BRACKET. `[[ a\` reports the wrong message and line — 2026-08-08 — OPEN
 
@@ -2710,6 +2744,33 @@ is the latter, the *shell* has a bug and not just the test.
 
 **Impact.** A red full-suite run that is not a real regression, which is the
 worst kind: it teaches the next session to re-run and shrug.
+
+### TD-OILS-THE-COMPGEN-JOB-CORPUS-CASE-IS-FLAKY-UNDER-A-FULL-SWEEP. A finished job is still offered as `running` — 2026-08-08 — OPEN
+
+**Where:** `userspace/oils/tests/corpus/compgen-job.sh`, last group ("once they
+have all finished they are still completions; running is not"), against
+`compgen -A running` in `userspace/oils/src/interp.rs`.
+
+**What.** In a full `scripts/osh-bash-diff.py` sweep the case failed once with
+osh listing `true` for `-A running` and exiting 0 where bash listed nothing and
+exited 1 — i.e. osh still thought a job that had finished was running. Re-run on
+its own it matches; the rest of the sweep (510 cases) was clean.
+
+**Why (suspected).** Same shape as
+`TD-OILS-WAIT-N-JOB-STATUS-TEST-IS-FLAKY-UNDER-PARALLEL-EXECUTION` above: the
+case starts background jobs, waits for them, and then asks a question whose
+answer depends on the children having been *reaped*, not merely exited. Under a
+sweep the machine is loaded and that window closes late. If so the bug is in
+osh's reaping — bash gets it right on the same loaded machine — and the case is
+reporting a real race rather than being badly written. Do not "fix" it by
+loosening the case until that is ruled out.
+
+**Proper fix.** Establish first whether `compgen -A running` consults live
+process state or a table updated only on reap, and make the job table's
+transition to *done* happen where bash's does (`waitchld` / the notification
+that the shell already performs before the next builtin runs).
+
+**Impact.** An intermittently red sweep, which is the gate on every commit.
 
 ### TD-OILS-A-HERE-DOCUMENT-DELIMITER-STOPPED-AT-THE-FIRST-SEPARATOR-INSIDE-A-GROUP. `<<E$(a b)` was read as a delimiter `E$(a` and a stray word `b)` — 2026-08-06 — ✅ FIXED 2026-08-06
 

@@ -46120,11 +46120,19 @@ impl Shell {
         // reader is inside it, so an error found there is echoed as the
         // replacement instead — see [`crate::parser::ParseError::echo`], which
         // carries it when that is so.
+        //
+        // And it is echoed whether or not there is anything left to echo. The
+        // buffer is emptied by the fetch that runs the input out, so an error
+        // blamed on a line past the source's last one — the line that very
+        // fetch charged — is echoed as *nothing*: `bash -c 'echo 1⏎case x in\'`
+        // reports `line 3: \`'`. `print_offending_line` is called unconditionally
+        // on this branch (parse.y:6263) and simply copies an empty
+        // `shell_input_line`.
         if e.msgs.iter().any(|m| bytes::contains(m, b"syntax error near "))
             && let Some(text) = e
                 .echo
                 .as_deref()
-                .or_else(|| map.unmap(line).and_then(|n| nth_source_line(src, n)))
+                .or_else(|| map.unmap(line).map(|n| nth_source_line(src, n).unwrap_or(b"")))
         {
             out.push_str(&bfmt![b"\n", &prefix, b"`", text, b"'"]);
         }

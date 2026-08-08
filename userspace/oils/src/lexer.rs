@@ -3184,10 +3184,22 @@ impl Lexer {
     /// The test is the deletion and not just the text: an input ending in
     /// `\\<newline>` ends in a real newline — the first backslash quotes the
     /// second — and that newline is a token, so the question never arises.
+    ///
+    /// The other way to run out is to have been given no newline in the first
+    /// place. A *string* whose last line ends on an odd run of backslashes is
+    /// closed with another backslash rather than with a newline, because a
+    /// newline would be eaten as a continuation — see
+    /// [`crate::parser::closed_with_backslash`]. There too the parser is handed
+    /// the end-of-file token, which is why `bash -c 'case x in  \'` reports an
+    /// unexpected *end of file* where `bash -c 'case x in  '` reports an
+    /// unexpected `newline`.
     fn reader_at_eof(&self) -> bool {
         let n = self.chars.len();
         if self.pos < n {
             return false;
+        }
+        if crate::parser::closed_with_backslash(&self.chars) {
+            return true;
         }
         // `\<newline>`, or the `\<CR><LF>` a CRLF file writes.
         [2usize, 3].into_iter().any(|len| {
@@ -3270,8 +3282,16 @@ impl Lexer {
         // (parse.y:2361). So the number this warning carries is one past the
         // cursor's own line: `cat <<x\` at the end of a two-line script is
         // blamed on line 4.
+        //
+        // Two past it when the reader ran out on a backslash *close* instead of
+        // on a deleted continuation. Both end the input, but the continuation
+        // left its newline in the text and `cur_line` counts that character,
+        // while a backslash-closed string has no newline anywhere; the second
+        // line here is the fetch the last token's own scan made, which the
+        // continuation case has already been charged for by that newline.
         if self.reader_at_eof() {
-            return self.cur_line().saturating_add(1);
+            let no_newline = u32::from(crate::parser::closed_with_backslash(&self.chars));
+            return self.cur_line().saturating_add(1).saturating_add(no_newline);
         }
         let at_line_start = self.pos == 0 || self.at(self.pos.wrapping_sub(1)) == Some('\n');
         self.cur_line()

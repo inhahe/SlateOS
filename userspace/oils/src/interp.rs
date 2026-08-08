@@ -16617,6 +16617,26 @@ impl Shell {
     ///
     /// Tracing is suppressed while expanding, as bash suppresses it, so a
     /// `PS4` containing a command substitution cannot trace itself.
+    ///
+    /// `$?` is suppressed too, and for a reason of bash's own: a prompt is
+    /// expanded *between* commands, so a `$( … )` in it must not become the
+    /// status the next `$?` reports. `decode_prompt_string` brackets the whole
+    /// expansion (parse.y:6091-6098):
+    ///
+    /// ```c
+    ///       last_exit_value = last_command_exit_value;
+    ///       last_comsub_pid = last_command_subst_pid;
+    ///       list = expand_prompt_string (result, Q_DOUBLE_QUOTES, 0);
+    ///       …
+    ///       last_command_exit_value = last_exit_value;
+    ///       last_command_subst_pid = last_comsub_pid;
+    /// ```
+    ///
+    /// `${x@P}` is the same function (subst.c:8490 calls `decode_prompt_string`
+    /// for the `P` transform), so it is silent about its status as well:
+    /// `x='$(exit 7)'; echo "${x@P}"; echo $?` prints `0`, where the same
+    /// substitution written out reports `7`. (There is no `last_comsub_pid`
+    /// half to mirror — osh has no `$!`-of-the-last-substitution analogue.)
     fn prompt_expand(&mut self, s: &str) -> Str {
         let decoded = self.prompt_decode(s);
         // A substitution that cannot even be lexed expands to nothing in bash
@@ -16626,7 +16646,9 @@ impl Shell {
             return decoded;
         };
         let saved = std::mem::replace(&mut self.xtrace, false);
+        let saved_status = self.last_status;
         let out = self.expand_double_quoted(&word.parts);
+        self.last_status = saved_status;
         self.xtrace = saved;
         out
     }

@@ -3064,10 +3064,45 @@ impl Parser {
             // and `[[ a ]] (( 1 + 1 ))` near ` 1 + 1 `.
             Some(Tok::ArithCmd(raw, nested)) => parse_arith_comsubs(nested, self.opts)
                 .map_or_else(|_| raw.clone(), |subs| splice_reprints(raw, subs)),
+            // A `NUMBER` is named by its *value*, not by how it was written:
+            // `error_token_from_token` returns `itos (yylval.number)` (parse.y),
+            // so `f() 007>x` is reported near `7`.
+            Some(Tok::Io(n)) => n.to_string().into_bytes(),
+            // An `ASSIGNMENT_WORD` is named by `yylval.word->word`, and for a
+            // compound literal that word is a *re-print*, not the source:
+            // `read_token_word` builds it as the name, then `=`, `(`, the
+            // `string_list` of the collected elements — joined with one space —
+            // and `)` (parse.y:5168–5181, 6572–6576). So `f() a=(1   2)` is
+            // reported near `a=(1 2)` and `f() a=(  )` near `a=()`, while each
+            // element keeps the spelling it was written with.
+            Some(Tok::ArrayAssign { name, index, append, elems }) => {
+                let mut out = name.as_bytes().to_vec();
+                if let Some(i) = index {
+                    out.push(b'[');
+                    out.extend_from_slice(i);
+                    out.push(b']');
+                }
+                if *append {
+                    out.push(b'+');
+                }
+                out.extend_from_slice(b"=(");
+                for (n, segs) in elems.iter().enumerate() {
+                    if n > 0 {
+                        out.push(b' ');
+                    }
+                    match word_from_segs(segs, self.opts) {
+                        Ok(w) => out.extend_from_slice(&crate::unparse::word_src(&w)),
+                        Err(_) => out.extend_from_slice(b"word"),
+                    }
+                }
+                out.push(b')');
+                out
+            }
             // A construct the lexer refused already carries the spelling to
             // blame — the operator that stood where an array element belonged.
             Some(Tok::Invalid(op)) => op.clone(),
-            // Anything else (a newline, a here-doc body) has no word spelling.
+            // Anything else (a here-doc body, which is not a token to bash at
+            // all) has no word spelling.
             _ => b"word".to_vec(),
         }
     }
@@ -3076,22 +3111,50 @@ impl Parser {
     /// position: at end of input it is `syntax error: unexpected end of file`;
     /// otherwise `syntax error near unexpected token \`TOKEN'` — bash quotes the
     /// offending token with a leading backtick and a trailing single quote.
+    /// bash's `error_token_from_token` (parse.y:6132–6169) — the name a syntax
+    /// error gives the token at `pos` — or `None` where bash's switch has no
+    /// branch for it and the function returns NULL.
+    ///
+    /// `REDIR_WORD` is the case that reaches the `None`: the `{v}` of
+    /// `{v}>file` is a token bash's parser can be holding when it errors, but
+    /// the switch never names it. `report_syntax_error` then falls through to
+    /// its *other* branch, and the message changes shape — see
+    /// [`Parser::unexpected_here`].
+    fn error_token_at(&self, pos: usize) -> Option<Str> {
+        match self.toks.get(pos) {
+            Some(Tok::VarFd(_)) => None,
+            _ => Some(self.token_display_at(pos)),
+        }
+    }
+
+    /// The text bash's text-scanning branch reports an error "near", for a
+    /// token that `error_token_from_token` declined to name.
+    fn near_at(&self, pos: usize) -> Str {
+        self.spans
+            .near(pos, Reader::of(self.toks.get(pos)))
+            .unwrap_or_else(|| self.token_display_at(pos))
+    }
+
     fn unexpected_here(&self) -> ParseError {
         if self.peek().is_none() {
-            ParseError::new("syntax error: unexpected end of file")
+            return ParseError::new("syntax error: unexpected end of file");
+        }
+        // bash tries `error_token_from_token` first and only scans the input
+        // text when that comes back NULL, and the two branches print *different*
+        // messages: `syntax error near unexpected token \`X'` against
+        // `syntax error near \`X'` (parse.y:6251, 6276). So a `{v}>` is reported
+        // with the shorter one, and by the scan's own text rather than by the
+        // token — which is why it comes back with the `>` attached.
+        let Some(name) = self.error_token_at(self.pos) else {
+            return ParseError::new(&bfmt![b"syntax error near `", self.near_at(self.pos), b"'"]);
+        };
+        let e = ParseError::new(&bfmt![b"syntax error near unexpected token `", name, b"'"]);
+        // A refused construct costs only its own unit, where a grammar error
+        // costs the rest of the input. See [`ParseError::recoverable`].
+        if matches!(self.peek(), Some(Tok::Invalid(_))) {
+            e.only_this_unit()
         } else {
-            let e = ParseError::new(&bfmt![
-                b"syntax error near unexpected token `",
-                self.token_display(),
-                b"'"
-            ]);
-            // A refused construct costs only its own unit, where a grammar error
-            // costs the rest of the input. See [`ParseError::recoverable`].
-            if matches!(self.peek(), Some(Tok::Invalid(_))) {
-                e.only_this_unit()
-            } else {
-                e
-            }
+            e
         }
     }
 
@@ -7330,6 +7393,49 @@ mod tests {
         // Where the `((` was not arithmetic, the paren is still the name.
         assert_eq!(err("echo ]] ((1))"), "syntax error near unexpected token `('");
         assert_eq!(err("echo ((1))"), "syntax error near unexpected token `('");
+    }
+
+    /// A `NUMBER` and a compound `ASSIGNMENT_WORD` are named by what
+    /// `error_token_from_token` renders them as, and neither is the source text.
+    ///
+    /// A `NUMBER` goes through `itos (yylval.number)`, so it is the *value*: the
+    /// leading zeros of `007` are gone. A compound assignment goes through
+    /// `yylval.word->word`, which `read_token_word` built as the name, `=`, `(`,
+    /// the `string_list` of the elements — joined with one space, whatever was
+    /// written between them — and `)` (parse.y:5168–5181, 6572–6576). Each
+    /// element keeps its own spelling; only the gaps are normalised. A function
+    /// body is the shortest position that reaches both. Every expectation is
+    /// bash 5.2.37's own.
+    #[test]
+    fn a_number_and_a_compound_assignment_are_named_by_their_reprint() {
+        let err = |src: &str| String::from_utf8_lossy(&parse(src).unwrap_err().msg()).into_owned();
+        // The value, not the spelling.
+        assert_eq!(err("f() 007>x"), "syntax error near unexpected token `7'");
+        assert_eq!(err("f() 2>/dev/null"), "syntax error near unexpected token `2'");
+        assert_eq!(err("f() 12>&1"), "syntax error near unexpected token `12'");
+        // The elements' own spellings, joined by exactly one space.
+        assert_eq!(err("f() a=(1   2)"), "syntax error near unexpected token `a=(1 2)'");
+        assert_eq!(err("f() a=(  )"), "syntax error near unexpected token `a=()'");
+        assert_eq!(
+            err("f() a=('x y' \"z\")"),
+            "syntax error near unexpected token `a=('x y' \"z\")'"
+        );
+        assert_eq!(err("f() a=([2]=v x)"), "syntax error near unexpected token `a=([2]=v x)'");
+        // The name part is carried through whole: the subscript verbatim, and
+        // the `+` of an append still ahead of the `=`.
+        assert_eq!(err("f() a+=(p)"), "syntax error near unexpected token `a+=(p)'");
+        assert_eq!(err("f() a[1+1]=(q)"), "syntax error near unexpected token `a[1+1]=(q)'");
+        assert_eq!(
+            err("f() a=($(echo h) ~/t)"),
+            "syntax error near unexpected token `a=($(echo h) ~/t)'"
+        );
+        // A `REDIR_WORD` has no branch in the switch at all, so
+        // `error_token_from_token` returns NULL and `report_syntax_error` falls
+        // through to its text-scanning branch. Both halves of the message
+        // change: `unexpected token` is gone, and the name is the scan's — which
+        // reaches one character past the token, so the `>` comes along.
+        assert_eq!(err("f() {v}>/dev/null"), "syntax error near `{v}>'");
+        assert_eq!(err("f() {v}<in"), "syntax error near `{v}<'");
     }
 
     /// bash's `WORD ( )` production accepts any word, and defers the name check

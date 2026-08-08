@@ -2259,12 +2259,15 @@ the fix osh does not even terminate on it) and the unit test
 **Left behind:**
 TD-OILS-A-HERE-DOCUMENT-DELIMITER-OF-A-LONE-TRAILING-BACKSLASH.
 
-### TD-OILS-A-HERE-DOCUMENT-DELIMITER-OF-A-LONE-TRAILING-BACKSLASH. `cat <<\` at the end of the input — 2026-08-06 — OPEN
+### TD-OILS-A-HERE-DOCUMENT-DELIMITER-OF-A-LONE-TRAILING-BACKSLASH. `cat <<\` at the end of the input — 2026-08-06 — ✅ FIXED 2026-08-08
 
-**Where:** `userspace/oils/src/lexer.rs` — `Lexer::read_heredoc_delim`, the
-`'\\'` arm.
+**Where:** `userspace/oils/src/parser.rs` — the new `close_last_line` /
+`InputKind`; `userspace/oils/src/interp.rs` — `Shell::run_source_out` and
+`Shell::run_source_flow_result`; `userspace/oils/src/main.rs` —
+`Plan::Command`. **Not** `Lexer::read_heredoc_delim`, where this entry
+originally looked for it.
 
-**What.** A `\` with nothing after it quotes nothing. osh drops it, leaving an
+**What.** A `\` with nothing after it quotes nothing. osh dropped it, leaving an
 empty (quoted) delimiter; bash keeps it, and what it does next depends on which
 reader is running:
 
@@ -2277,24 +2280,125 @@ is `cat <<\`, no        osh : warning: here-document … (wanted `')
 trailing newline
 ```
 
-**Why.** bash's `read_token_word` keeps a trailing `\` as the word's own last
-character, so the delimiter is spelled `\`. For a *file* the reader instead
-treats it as a line continuation and asks for another line, which never comes —
-hence the different diagnostic. osh's `'\\'` arm steps over the backslash and
-calls `take_into`, which has nothing to take.
+**Why — and why the entry was looking in the wrong place.** The delimiter scan
+was never the subject. Measuring the same bytes through a script file, `-c`,
+`.`/`source`, `eval` and a pipe showed the divergence is not about here-documents
+at all: `bash -c 'echo two\'` prints `two\` where a *file* of those bytes prints
+`two`, and osh printed `two` for both. The rule is in the reader, and bash
+states it outright (parse.y:2567):
 
-There is a second, independent divergence in the string case: bash reports the
-warning at a line *past* the `eval`'s own (`line 6` where osh says `line 4`),
-because the continuation attempt moved the global `line_number` on. That is why
-the shape is not in the corpus case above — the delimiter spelling and the line
-number would have to be fixed together.
+```c
+  /* Add the newline to the end of this string, iff the string does
+     not already end in an EOF character.  */
+  if (shell_input_line_terminator != EOF)
+    {
+      /* Don't add a newline to a string that ends with a backslash if we're
+         going to be removing quoted newlines, since that will eat the
+         backslash.  Add another backslash instead (will be removed by
+         word expansion). */
+      if (bash_input.type == st_string && expanding_alias () == 0 &&
+          last_was_backslash && c == EOF && remove_quoted_newline)
+        shell_input_line[shell_input_line_len] = '\\';
+      else
+        shell_input_line[shell_input_line_len] = '\n';
+    }
+```
 
-**Proper fix.** Push the `\` into the delimiter when `peek()` is `None`, and make
-the file reader treat an input that ends in a continuation as an unterminated
-one — `syntax error: unexpected end of file` — rather than as ordinary end of
-input. The two readers have to be told apart, which is the only hard part; the
-deferred-lexer-error machinery this used to be blocked behind is now in place
-(see TD-OILS-A-LINE-THAT-FAILS-TO-LEX-IS-NOT-REPORTED-AS-A-LINE, fixed).
+So a file that stops mid-line is read as though it ended in a newline, and its
+final `\` is an ordinary line continuation onto an input that is not there. A
+*string* is closed with a second backslash instead, and the pair is one quoted,
+literal backslash. (`last_was_backslash` is assigned
+`last_was_backslash == 0 && c == '\\'` for every character, so what it holds at
+end of input is the parity of the trailing run — `echo two\\\` keeps one
+backslash under both readers, `echo two\\\\\` keeps two under the string one.)
+
+**Fix.** The split is exactly `st_stream` vs `st_string`, which osh already had
+in structure: `run_source_flow_result` *is* `parse_and_execute`, so the string
+rule sits there and covers `eval`, `.`/`source`, a trap action, a `mapfile -C`
+callback and an `fc` replay at once; the stream rule sits in `run_source_out`,
+the reader loop for a script file and for stdin. `-c` was the one caller on the
+wrong side of that line — bash runs it through `parse_and_execute` — so it got
+its own entry point, `Shell::run_command_string`. Applying the stream rule first
+leaves the string rule nothing to do for a top-level read, so the two compose
+without a flag.
+
+**Pinned by** the corpus cases
+`the-two-readers-close-an-unterminated-last-line-differently.sh` and
+`a-script-file-that-stops-mid-line-is-read-as-if-it-ended-in-a-newline.sh` (that
+second file deliberately has no final newline — do not add one), and the unit
+test `the_two_readers_close_an_unterminated_last_line_differently`.
+
+**Left behind:** TD-OILS-A-CONTINUATION-AT-END-OF-INPUT-DOES-NOT-MOVE-THE-READER,
+which is what the "second, independent divergence" in this entry's earlier text
+was pointing at.
+
+### TD-OILS-A-CONTINUATION-AT-END-OF-INPUT-DOES-NOT-MOVE-THE-READER. `$LINENO` and EOF diagnostics read one or two lines low — 2026-08-08 — OPEN
+
+**Where:** `userspace/oils/src/parser.rs` — `Spans`/`stamp_lines` and
+`Parser::simple_command_line`; `userspace/oils/src/lexer.rs` —
+`Lexer::eat_conts` and whatever ends the token stream.
+
+**What.** Two related divergences, both about what the reader has done by the
+time the parser asks for its next token at end of input.
+
+```text
+input (a script file)              bash                       osh
+echo 1⏎echo L$LINENO\              L3                         L2
+echo 1⏎echo L$LINENO\⏎             L3                         L2
+echo 1⏎echo L$LINENO\⏎⏎echo 3      L3                         L2
+echo 1⏎nosuch$LINENO\              line 4: nosuch4: …         line 3: nosuch3: …
+echo 1⏎cat <<x\                    line 4: warning … `x'      line 3: warning … `x'
+echo 1⏎cat >\⏎                     line 3: syntax error:      line 4: syntax error near
+                                   unexpected end of file     unexpected token `newline'
+echo 1⏎cat <<\                     line 3: syntax error:      line 4: syntax error near
+                                   unexpected end of file     unexpected token `newline'
+```
+
+Note the third row: this is **not** an end-of-file-only effect. A word whose
+last character is followed by `\⏎` and then a *blank* line is numbered by bash
+one higher, because the scanner asked for another word character, the reader ate
+the continuation to answer, and only then returned the newline that ends the
+word. osh already agrees whenever real characters follow the continuation
+(`echo a\⏎b $LINENO` → 2 in both), so what is missing is only the case where
+nothing does.
+
+**Why.** bash's `line_number` is bumped in two places in `shell_getc` (parse.y):
+
+* 2361, on entry to the block that fetches a new physical line — which is
+  reached **whenever the buffer is exhausted**, including the empty fetches
+  after end of file. Each further token request at EOF therefore bumps it
+  again, which is where the second of the two lines comes from.
+* 2677, when a `\⏎` pair is deleted. This one `goto restart_read`s *past* 2361,
+  so a continuation costs exactly one line, not two.
+
+A simple command is stamped with `line_number` as its first element reduces,
+which is after one token of lookahead has been read — osh models that already
+(`Parser::simple_command_line`), but from the lookahead token's recorded end
+line, and that line stops at the token's last character rather than after the
+continuation the scan consumed to find its end.
+
+Separately, after the continuation bash's reader returns **EOF**, so `cat >\` at
+end of input is `syntax error: unexpected end of file`; osh yields a `Newline`
+token instead and reports `near unexpected token \`newline'` — and one line too
+high, which is the same accounting in the other direction.
+
+**Proper fix.** Two parts, and they should land together because either alone
+moves a line number the other would move back:
+
+1. Make a token's recorded end line include a `\⏎` the scan consumed *after* its
+   last character — the scan does consume it (it must, to discover the word has
+   ended), so this is a stamping question, not a scanning one. Then add bash's
+   post-EOF bump: the parser's request for a lookahead that is not there costs a
+   line.
+2. Make a continuation that ends the input yield end-of-file rather than a
+   newline token, so the grammar error is bash's.
+
+**Deliberately not replicated:** bash's own reader has a bug next door. Reading
+a here-document body from an `st_string` whose last line has no newline,
+`read_a_line` stores `yy_string_get`'s `EOF` (-1) into a `char`, so the body
+gains a stray `\xff`: `bash -c $'cat <<x\nbody\\'` writes `body\\\xff\n` where
+the same bytes in a file write `body`. osh writes the file answer in both cases
+and should keep doing so.
 
 ### TD-OILS-A-HERE-DOCUMENT-DELIMITER-STOPPED-AT-THE-FIRST-SEPARATOR-INSIDE-A-GROUP. `<<E$(a b)` was read as a delimiter `E$(a` and a stray word `b)` — 2026-08-06 — ✅ FIXED 2026-08-06
 

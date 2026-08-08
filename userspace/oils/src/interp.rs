@@ -43762,8 +43762,19 @@ impl Shell {
         let wanted = (count != 0).then(|| skip.saturating_add(count));
         let pieces = self.read_records(mf_stdin, mf_redir, delim, wanted);
 
-        // A callback only fires when `-C` was given and the quantum is non-zero.
-        let fire_callback = callback.as_ref().is_some_and(|c| !c.is_empty()) && quantum != 0;
+        // A callback fires whenever `-C` was *given*, empty or not. bash's test
+        // is a null-pointer test on a `char *` — `if (callback && line_count &&
+        // (line_count % callback_quantum) == 0)` (`builtins/mapfile.def:206`) —
+        // and the string is pasted into a command line unconditionally
+        // (`snprintf (execstr, execlen, "%s %d %s", callback, curindex, qline)`,
+        // `:131`). So `-C ""` runs ` 0 'a'`, whose command word is the *index*:
+        // `mapfile -C "" -c 1 q <<< $'a\nb'` reports `0: command not found` and
+        // `1: command not found`, and still fills the array.
+        //
+        // The quantum guard is separate and merely defensive: `-c 0` is refused
+        // up front (`invalid callback quantum`), and `is_multiple_of(0)` below
+        // would divide by zero if it ever were not.
+        let fire_callback = callback.is_some() && quantum != 0;
 
         // bash discards the array's previous contents before reading — but NOT
         // when `-O origin` was given, where the read overwrites in place and any
@@ -62491,6 +62502,33 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let src = "mapfile -t -C 'echo CB:' -c 2 arr <<< $'1\\n2\\n3\\n4\\n5'\n\
                    echo done";
         assert_eq!(run(src).0, "CB: 1 2\nCB: 3 4\ndone\n");
+    }
+
+    /// `-C ""` is still a callback. bash's test is a null-pointer test on a
+    /// `char *` (`if (callback && …)`, `builtins/mapfile.def:206`) and the
+    /// string is pasted into `"%s %d %s"` unconditionally (`:131`), so an empty
+    /// one yields ` INDEX LINE` — a command line whose command *word* is the
+    /// index. osh used to read the emptiness as "no callback given".
+    #[test]
+    fn mapfile_an_empty_callback_makes_the_index_the_command() {
+        // The index runs as a command and is not found — once per line — and the
+        // array is filled all the same.
+        let (o, _) = run(
+            "{ mapfile -t -C '' -c 1 arr <<< $'a\\nb'; } 2>&1\n\
+             echo \"rc=$? ${arr[*]}\""
+        );
+        assert_eq!(o, "osh: 0: command not found\nosh: 1: command not found\nrc=0 a b\n");
+        // It is the *stored* index, so `-O` moves it…
+        let (o, _) = run("{ mapfile -t -C '' -O 5 -c 1 arr <<< a; } 2>&1");
+        assert_eq!(o, "osh: 5: command not found\n");
+        // …and the quantum still governs which lines fire.
+        let (o, _) = run("{ mapfile -t -C '' -c 2 arr <<< $'a\\nb\\nc\\nd'; } 2>&1");
+        assert_eq!(o, "osh: 1: command not found\nosh: 3: command not found\n");
+        // A callback of one space is no different, and no lines means no fire.
+        let (o, _) = run("{ mapfile -t -C ' ' -c 1 arr <<< a; } 2>&1");
+        assert_eq!(o, "osh: 0: command not found\n");
+        let (o, _) = run("{ mapfile -t -C '' -c 1 arr < /dev/null; } 2>&1; echo \"n=${#arr[@]}\"");
+        assert_eq!(o, "n=0\n");
     }
 
     #[test]

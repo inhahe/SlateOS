@@ -11390,10 +11390,22 @@ impl Shell {
         // [`Shell::expand_cmd`].
         self.expand_cmd = Some(b"[[".to_vec());
         let ok = self.cond_eval(e);
+        // A failure expanding any operand ends the `[[ … ]]` *before it has a
+        // value*: bash's expansion `jump_to_top_level`s out of
+        // `execute_cond_command`, so no test is decided, no `!` is applied and
+        // the status is the abort's own. Asked here rather than after the
+        // status is computed, because the computed one is wrong twice over —
+        // `[[ ! ${nope?bad} == x ]]` inverted the abort's 1 into a 0, and
+        // `[[ x =~ ${nope?bad} ]]` reported the empty pattern as a bad regex
+        // and returned 2. Both depths are asked for, as in [`Self::exec_case`];
+        // the discard one is what the old `arith_discard_flow` here caught.
+        if let Some(flow) = self.word_abort_flow() {
+            return flow;
+        }
         // A `=~` RHS that failed to compile as a regex makes bash return 2, not
         // the ordinary 1 "expression false" — surface that distinct status.
         self.last_status = if self.cond_regex_error { 2 } else { i32::from(!ok) };
-        self.arith_discard_flow()
+        Flow::Next
     }
 
     /// Execute a `(( … ))` arithmetic command: exit 0 if the value is non-zero.

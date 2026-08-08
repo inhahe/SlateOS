@@ -45364,7 +45364,49 @@ commit).
 TD-OILS-COND-ERROR-NEAR-IGNORES-THE-ALIAS-TEXT.
 
 
-### TD-OILS-A-CMDSUB-BODY-IS-RE-READ-AS-WRITTEN-NOT-AS-REPRINTED — 2026-08-05 — the re-print landed; what is left is the *re-parse* of it (re-scoped 2026-08-08)
+### TD-OILS-A-CMDSUB-BODY-IS-RE-READ-AS-WRITTEN-NOT-AS-REPRINTED — 2026-08-05 — ✅ **RESOLVED 2026-08-08**
+
+> **RESOLVED 2026-08-08.** osh now performs bash's second parse. At expansion
+> time `Shell::command_sub_body_inner` runs the stored re-print back through
+> `parser::parse_cmdsub_body_unmarked` (`Shell::comsub_reparse_error`,
+> `interp.rs`), and on failure emits bash's two-line diagnostic and unwinds.
+> Covered byte-for-byte by
+> `tests/corpus/a-cmdsub-body-is-parsed-twice-and-the-second-parse-reads-the-reprint.sh`.
+>
+> Three things the spec below got wrong, all corrected against fresh
+> measurements (the measurement wins):
+>
+> - **The line is not `close_line + N`.** It is the *executing command's*
+>   line plus the newlines the failed parse consumed, plus one — bash's one
+>   shared `line_number`, which `parse_string` does not renumber (it calls
+>   `push_stream (0)`). The old formula agreed in the common case only
+>   because a simple command's line is stamped in `make_bare_simple_command`
+>   (make_cmd.c:505) at the reduction that needs the *next* word as
+>   lookahead, so reading the word holding the substitution is what set it.
+>   Two shapes separate them and both report `line 2`:
+>   `cat > "/dev/null$(⏎!⏎)x" <<< hi` (stamped at the `>`,
+>   execute_cmd.c:864) and a `case` pattern (`case_command->line`,
+>   execute_cmd.c:3545).
+> - **There are two abort classes, not one.** The re-print's *own* grammar
+>   error is `parse_string`'s `-DISCARD` (builtins/evalstring.c:686-694)
+>   re-raised as `jump_to_top_level (DISCARD)` (parse.y:4325) — one parse
+>   unit lost, `$?` 1, caught by `eval`. A `$( … )` **nested** in the
+>   re-print that will not parse is raised by `parse_comsub` itself, which
+>   does `jump_to_top_level (FORCE_EOF)` (parse.y:4185) for a
+>   non-interactive shell — **the shell ends**, `eval` does not contain it,
+>   and a subshell exits 2 rather than the 1 an interceptable abort leaves.
+>   `parse_cmdsub_body_unmarked` exists to keep the two distinguishable.
+> - **The tail is a property of the word, and the post-pass shape guessed
+>   below is what landed** — `unparse::attach_comsub_tails`, called from
+>   `parser::word_from_segs_in`, filling `CmdSubBody::Parsed::tail`. It
+>   works by swapping each substitution out for a byte-string sentinel that
+>   the rendering does not already contain and re-rendering the word, which
+>   is exact because `part_src` renders a parsed body from `prog` and so
+>   there is nothing in `src` for a marker to ride in on.
+>
+> Two things found while measuring this are *not* fixed and have entries of
+> their own: TD-OILS-A-COMPOUND-ARRAY-ASSIGNMENT-IS-RE-PARSED-UNDER-ITS-OWN-INPUT-NAME
+> and TD-OILS-A-COMPOUND-COMMANDS-LINE-IS-STAMPED-AT-ITS-KEYWORD.
 
 > **Re-scoped 2026-08-08.** The heading and the "proper fix" below are both out
 > of date. `CmdSubBody::Parsed::src` **is** the re-print already —
@@ -45488,3 +45530,140 @@ command is a bare `!` or `time`.
 
 **Found by** the probe matrix for
 TD-OILS-A-SUBSTITUTION-INSIDE-AN-ALIAS-IS-BLAMED-ON-ITS-OWN-LINE-1.
+
+
+### TD-OILS-A-COMPOUND-ARRAY-ASSIGNMENT-IS-RE-PARSED-UNDER-ITS-OWN-INPUT-NAME. A `$( … )` inside `a=( … )` that will not parse back is blamed on `command substitution`, not on `array assign` — 2026-08-08 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::comsub_reparse_error` and
+its caller in `Shell::command_sub_body_inner`; the compound-assignment
+expansion path (`exec_declare_with_arrays` / the `a=( … )` operand handling).
+
+**What.** bash re-parses a `$( … )` re-print at expansion time
+(TD-OILS-A-CMDSUB-BODY-IS-RE-READ-AS-WRITTEN-NOT-AS-REPRINTED, resolved), and
+osh now does too. But a **compound array assignment** does not reach that path
+in bash at all: the whole value list is re-parsed first, as a *string*, by
+
+```c
+list = parse_string_to_word_list (val, 1, "array assign");
+```
+
+(arrayfunc.c:587, from `assign_compound_array_list`). That string already holds
+the substitution's re-print — parse-time `parse_comsub` put it there — so the
+`$(` is met by the *tokenizer* of this second parse, and the failure is
+`parse_comsub`'s own: `jump_to_top_level (FORCE_EOF)` (parse.y:4185), which
+ends a non-interactive shell.
+
+Three things differ from the ordinary re-parse, and osh gets all three wrong:
+
+```sh
+a=( "p$(
+!
+)q" r )
+echo "after rc=$?"
+```
+
+```text
+bash: a.sh: array assign: line 1: syntax error near unexpected token `)'
+      a.sh: array assign: line 1: `"p$(! )q" r'
+      (no `after'; exit 2)
+
+osh:  a.sh: command substitution: line 4: syntax error near unexpected token `)'
+      a.sh: command substitution: line 4: `! )q"'
+      after rc=1
+      (exit 0)
+```
+
+- **The input name** is `array assign`, not `command substitution`.
+- **The line is 1**, always: `parse_string_to_word_list` does `push_stream (1)`
+  — the argument that *does* reset `line_number`, unlike the `push_stream (0)`
+  of `parse_string`, which is why the ordinary re-parse's counter runs on from
+  the executing command instead.
+- **The echoed line is the whole re-printed value list** (`"p$(! )q" r`), not
+  the failing substitution's own line plus its word tail, because the reader is
+  standing in the array-assign string rather than in the body.
+- **It is fatal**, FORCE_EOF-class: nothing after it runs and the shell exits 2,
+  where osh discards one parse unit and carries on.
+
+`declare -a b=( "p$(⏎!⏎)q" )` behaves identically (same name, same line 1).
+
+**The proper fix** is to give the compound-assignment expansion its own
+re-parse step rather than letting the substitutions inside it be expanded one
+at a time: render the value list back to a string (the parts already re-print
+correctly — the echoed text above is exactly osh's `word_src` of the list),
+push an `InputSource` named `array assign` with the line counter *reset*, parse
+it as a word list, and on failure take the FORCE_EOF branch
+(`FatalAbort { status: 2, demote: false }`) that
+`Shell::comsub_reparse_error`'s `nested` flag already selects. The per-body
+re-parse must then be suppressed inside it, or the same failure is reported
+twice under two different names.
+
+**Impact.** Confined to a compound array assignment holding a `$( … )` whose
+re-print will not parse back — in practice a body ending in a bare `!` or
+`time`. osh continues where bash exits, and names the wrong source.
+
+**Found by** the probe matrix for
+TD-OILS-A-CMDSUB-BODY-IS-RE-READ-AS-WRITTEN-NOT-AS-REPRINTED (probe `t12`).
+
+
+### TD-OILS-A-COMPOUND-COMMANDS-LINE-IS-STAMPED-AT-ITS-KEYWORD. `case`, `for`, `select` and `[[ … ]]` report the keyword's line where bash reports a later one — 2026-08-08 — OPEN
+
+**Where:** `userspace/oils/src/ast.rs` — `CaseClause`, `ForClause`,
+`SelectClause` and the `Cond` command carry no `line` of their own, so
+`Shell::current_line` stays at the enclosing `Item::line`
+(`ast.rs:65`), which the parser stamps at the item's first token.
+
+**What.** bash stamps these three families *after* reading something, not at
+the keyword:
+
+- `case` / `for` / `select` take `word_lineno[word_top]`, assigned in
+  `read_token_word` **after the controlling word has been read**
+  (parse.y:5356, in the `case CASE: case SELECT: case FOR:` arm), and handed to
+  `make_case_command` / `make_for_command` / `make_select_command`
+  (parse.y:949, 839, 907). `execute_case_command` then does
+  `SET_LINE_NUMBER (case_command->line)` (execute_cmd.c:3545) before expanding
+  either the subject or any pattern.
+- `[[ … ]]` takes its *root* `COND_COM`'s line — `make_cond_node` stamps
+  `line_number` as each node is built (make_cmd.c:463) and
+  `make_cond_command` copies the root's (make_cmd.c:486) — and the root is
+  built **last**, so the line is where the whole `[[ … ]]` finished parsing.
+  `execute_cond_command` does `SET_LINE_NUMBER (cond_command->line)`
+  (execute_cmd.c:4030).
+
+Both are observable through any diagnostic raised while the words are expanded:
+
+```sh
+case "a
+b" in
+"y${nope?bad}") ;;
+esac
+# bash: line 2 (the line the case word ends on)   osh: line 1
+```
+
+```sh
+[[ ${nope?bad} == x &&
+y == y ]]
+# bash: line 2 (the line the `]]' is on)          osh: line 1
+```
+
+The same shift shows up in the command-substitution re-parse diagnostic, whose
+line is the *executing command's* — `case "y$(⏎!⏎)z" in x) ;; esac` reports
+line 5 in bash and line 3 in osh.
+
+**The proper fix** is a real one, not a patch at the reporting site: give
+`CaseClause`, `ForClause`, `SelectClause` and the cond command a `line` field
+of their own, stamp them in the parser where bash does (after the controlling
+word for the first three; at the closing `]]` for the last), and have
+`exec_case` / `exec_for` / `exec_select` / `exec_cond` set `current_line` from
+it the way the simple-command driver already sets it from
+`SimpleCommand::line`. `for (( … ))` wants checking in the same pass —
+`arith_for_lineno` is assigned alongside `word_lineno` at parse.y:4469.
+
+**Impact.** Cosmetic but broad: every diagnostic raised while expanding a
+`case` subject or pattern, a `for`/`select` word list, or a `[[ … ]]` operand
+carries the wrong line whenever the construct spans more than one line.
+`$LINENO` inside the *body* is unaffected (each command there carries its own
+line).
+
+**Found by** the probe matrix for
+TD-OILS-A-CMDSUB-BODY-IS-RE-READ-AS-WRITTEN-NOT-AS-REPRINTED (probes `c3`,
+`d2`, `e3`, `f1`–`f4`).

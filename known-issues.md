@@ -45364,7 +45364,58 @@ commit).
 TD-OILS-COND-ERROR-NEAR-IGNORES-THE-ALIAS-TEXT.
 
 
-### TD-OILS-A-CMDSUB-BODY-IS-RE-READ-AS-WRITTEN-NOT-AS-REPRINTED — 2026-08-05
+### TD-OILS-A-CMDSUB-BODY-IS-RE-READ-AS-WRITTEN-NOT-AS-REPRINTED — 2026-08-05 — the re-print landed; what is left is the *re-parse* of it (re-scoped 2026-08-08)
+
+> **Re-scoped 2026-08-08.** The heading and the "proper fix" below are both out
+> of date. `CmdSubBody::Parsed::src` **is** the re-print already —
+> `parser.rs` builds it with `let src = crate::unparse::comsub_body(&prog);`
+> and osh's re-print is byte-identical to bash's, `declare -f` included:
+> both print `x=$(! );` and `y=$(time );`. So the round trip the entry asked
+> for has been made, and it did not close the divergence.
+>
+> What is actually missing is bash's **second parse**. bash parses a `$( … )`
+> twice: `parse_comsub` at parse time (over the source, keeping the re-print)
+> and `xparse_dolparen` again at *expansion* time (subst.c:1290/1322, over the
+> stored re-print, with `)` as `shell_eof_token`). It is that second parse the
+> bare prefix fails, and osh has no equivalent — it runs `src` straight off.
+> Everything below the horizontal rule still describes the symptom correctly.
+>
+> **Measured spec for the missing check** (bash 5.2.37, all rows verified):
+>
+> - **When.** At expansion, not at parse: `f() { echo $(<newline>!<newline>); }`
+>   defines cleanly and only fails when `f` is called, and a body behind a
+>   short-circuit is never checked at all.
+> - **Effect.** `jump_to_top_level(DISCARD)` in the *parent*, below
+>   `parse_and_execute`'s guard — so it abandons the rest of the enclosing
+>   **parse unit** and leaves `$?` at 1, but an `eval` around it would catch
+>   it. `v=p$(<newline>!<newline>)q; echo after` prints no `after`;
+>   the same two commands on separate lines do print it. This is
+>   `Shell::arm_discard(1)`.
+> - **Line.** `close_line + N`, where `N` is the number of lines in the
+>   re-print — i.e. one *past* the body's last line, since body line 1 is
+>   `close_line`. Verified over `N` = 1, 2 and 4 and four different
+>   `close_line`s.
+> - **Text.** Two lines, both prefixed `<script>: command substitution: line
+>   <close_line + N>:`, reading ``syntax error near unexpected token `)' ``
+>   and then `` `<last line of the re-print>)<rest of the word text>' ``.
+>   The tail is the rest of the **word**, not of the physical line, and it
+>   includes the word's closing quote: `echo "A[$(…)]B" more args` echoes
+>   `` `! )]B"' `` — no `more args`; `echo X$(…)Y $(echo z) tail` echoes
+>   `` `! )Y' ``; `v=p$(…)q; …` echoes `` `! )q' ``. That is
+>   `expand_word_internal` handing `extract_command_subst` the remainder of
+>   the stored word string, and the reporter echoing the current line of it.
+> - **Not this.** The one-line `$( ! )` is rejected by `parse_comsub` at parse
+>   time instead, fatally and with the physical source line echoed — and osh
+>   already matches that byte for byte.
+>
+> **Implementation note.** The tail is the one part osh cannot read off an
+> existing field: `seg_to_part` sees one `Seg` and not its siblings. The natural
+> shape is a post-pass over the assembled `Word` (in `word_from_segs_in`, which
+> does have the whole list) that walks each `CommandSub` and fills a new
+> `CmdSubBody::Parsed::tail` with the unparse of everything after it — siblings
+> first, then the enclosing container's closer, recursively outwards.
+
+---
 
 **Where:** `userspace/oils/src/ast.rs` — `CmdSubBody::Parsed::src`, which holds
 the `$( … )` body *as written*; `userspace/oils/src/parser.rs` —

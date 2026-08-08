@@ -65,7 +65,15 @@ sleep 0.05 & sleep 0.6; sleep 0.4 & jobs; wait; disown -a
 echo "=== losing a marked job costs both markers, losing an unmarked one neither"
 # Dropping the `-` job leaves the `+` job in place, yet the listing that follows
 # shows no marker at all: with nothing running there is nothing to re-mark.
-sleep 0.05 & sleep 0.06 & sleep 0.6; jobs %1; echo "--"; jobs; disown -a
+#
+# Two-sided like the pair below, but the tight side is not in the script: job 1
+# only becomes the `-` by being *running* when job 2 is created, so the margin
+# that has to hold is job 1's whole life against the cost of one background
+# spawn. Measured on this host that spawn is ~8 ms typically and ~150 ms often
+# enough to be seen, which is why the durations here are 0.6 s rather than the
+# 0.05 s they used to be: at 0.05 s the spawn outran the job about one run in
+# seven and job 2 came into a table with nothing running, taking both markers.
+sleep 0.6 & sleep 0.61 & sleep 1.5; jobs %1; echo "--"; jobs; disown -a
 # With something still running, that running job takes both markers. Two-sided
 # again: the gate has to outlast `sleep 0.05` and be outlasted by the first job,
 # which is why the first job is 1.2 s — ~0.55 s of margin below the gate and

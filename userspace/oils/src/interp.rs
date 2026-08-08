@@ -9530,8 +9530,15 @@ impl Shell {
             Command::ForArith(c) => self.in_loop(|s| s.exec_for_arith(c, out, stdin)),
             Command::Select(c) => self.in_loop(|s| s.exec_select(c, out, stdin)),
             Command::Function(f) => self.exec_function_def(f),
-            Command::Case(c) => self.exec_case(c, out, stdin),
-            Command::Cond(e) => self.exec_cond(e, out, stdin),
+            // `case` stands on its own line from its first act — bash saves and
+            // assigns before it even prints the header (execute_cmd.c:3544) —
+            // so unlike `for` and `select`, whose identifier check comes first,
+            // the whole executor goes inside. See [`Shell::on_control_line`].
+            Command::Case(c) => self.on_control_line(c.line, |s| s.exec_case(c, out, stdin)),
+            // `execute_cond_command` saves and assigns before it prints its own
+            // header too (execute_cmd.c:4026-4029), so the whole executor goes
+            // inside — as `case`'s does.
+            Command::Cond(c) => self.on_control_line(c.line, |s| s.exec_cond(&c.expr, out, stdin)),
             Command::Arith(raw) => self.exec_arith(raw, out, stdin),
             Command::BraceGroup(p) => self.exec_program(p, out, stdin),
             Command::Coproc { name, body } => self.exec_coproc(name.as_deref(), body, cmd),
@@ -9829,6 +9836,34 @@ impl Shell {
         r
     }
 
+    /// Run `f` with the shell standing on a compound command's *own* line, and
+    /// put the line back however `f` leaves — bash's
+    ///
+    /// ```c
+    ///   save_line_number = line_number;
+    ///   line_number = case_command->line;
+    ///   …
+    ///   line_number = save_line_number;
+    /// ```
+    ///
+    /// around `case` (execute_cmd.c:3544/3576), `for` (2883/3003), `select`
+    /// (3404/3444) and `[[ … ]]` (4026/4056). The line is *not* the keyword's:
+    /// see [`CaseClause::line`] for where each one is stamped and why.
+    ///
+    /// A `0` line means the parser recorded none, which leaves the enclosing
+    /// item's line standing — the same reading [`SimpleCommand::line`] gets.
+    /// The stored line is a source line, so the same `line_bias` the simple
+    /// command driver applies is applied here.
+    fn on_control_line<R>(&mut self, line: u32, f: impl FnOnce(&mut Self) -> R) -> R {
+        let saved = self.current_line;
+        if line != 0 {
+            self.current_line = line.saturating_sub(self.line_bias);
+        }
+        let r = f(self);
+        self.current_line = saved;
+        r
+    }
+
     fn exec_loop(&mut self, c: &LoopClause, out: &mut Out, stdin: &StdinSrc) -> Flow {
         // POSIX: the loop's exit status is that of the last body execution, or 0
         // if the body never ran. Track it so a failing *condition* test (whose
@@ -9906,6 +9941,18 @@ impl Shell {
             self.for_name_failed = true;
             return Flow::Next;
         };
+        // Everything from the word list on stands on the loop's own line, which
+        // is why the refusal above does *not*: bash assigns
+        // `line_number = for_command->line` only after `check_identifier` has
+        // passed (execute_cmd.c:2883-2897), so a bad loop variable is still
+        // blamed on wherever the shell already stood.
+        self.on_control_line(c.line, |s| s.exec_for_list(c, &var, out, stdin))
+    }
+
+    /// The body of [`Shell::exec_for`] from the word list on, run with the shell
+    /// standing on the loop's own line and with the loop variable already
+    /// accepted.
+    fn exec_for_list(&mut self, c: &ForClause, var: &str, out: &mut Out, stdin: &StdinSrc) -> Flow {
         let items: Vec<Str> = match &c.words {
             Some(words) => {
                 let mut v = Vec::new();
@@ -9958,6 +10005,14 @@ impl Shell {
         };
         let mut body_status = 0;
         for item in items {
+            // Back onto the loop's own line for every header, not just the
+            // first: bash re-assigns `line_number = for_command->line` at the
+            // top of each iteration (execute_cmd.c:2919), so the `set -x`
+            // header and the DEBUG trap below always read it however far the
+            // previous body wandered.
+            if c.line != 0 {
+                self.current_line = c.line.saturating_sub(self.line_bias);
+            }
             if self.xtrace {
                 let prefix = self.xtrace_prefix();
                 let line = bfmt![prefix, &header, b"\n"];
@@ -9991,7 +10046,7 @@ impl Shell {
             // loop with status 1, leaving the variable's value alone. The rest
             // of the command list still runs; only the loop is given up. (The
             // `set -x` header above has already been printed by then.)
-            if self.readonly.contains(&var) {
+            if self.readonly.contains(var) {
                 self.perrln(&format!("{var}: readonly variable"));
                 self.last_status = 1;
                 self.note_shell_error(FatalWhen::ErrexitOrPosix);
@@ -10006,7 +10061,7 @@ impl Shell {
             // the same way, minus the diagnostic — see [`Shell::noassign`]. Like
             // the readonly case this is discovered on the first *iteration*, so
             // a loop over an empty list still succeeds.
-            if self.noassign.contains(&var) {
+            if self.noassign.contains(var) {
                 self.last_status = 1;
                 return Flow::Next;
             }
@@ -10016,7 +10071,7 @@ impl Shell {
             // question in `bind_variable` before it decides where to store, so
             // a chain that closes on itself stops the loop whether or not the
             // store would have gone through the reference.
-            if self.is_circular_ref(&var) {
+            if self.is_circular_ref(var) {
                 self.perrln(&format!("warning: {var}: circular name reference"));
                 self.last_status = 1;
                 return Flow::Next;
@@ -10035,7 +10090,7 @@ impl Shell {
             // `select` does not share any of this: its control variable is
             // bound *through* the reference like an ordinary write, so it never
             // asks the question.
-            if self.nameref_attr.contains(&var) && split_assignment_target(&item).is_none() {
+            if self.nameref_attr.contains(var) && split_assignment_target(&item).is_none() {
                 self.perrln(&bfmt![b"`", &item, b"': not a valid identifier"]);
                 self.last_status = 1;
                 self.for_name_failed = true;
@@ -10046,7 +10101,7 @@ impl Shell {
             // folds its case), an existing array is written at element 0, and
             // `set -a` exports it. A nameref is the one thing *not* followed:
             // bash stores into the reference itself, leaving its target alone.
-            self.scalar_write_store(&ScalarDest::Var(var.clone()), item);
+            self.scalar_write_store(&ScalarDest::Var(var.to_owned()), item);
             match self.exec_program(&c.body, out, stdin) {
                 Flow::Next => {}
                 Flow::Break(n) => {
@@ -10118,6 +10173,23 @@ impl Shell {
             self.for_name_failed = true;
             return Flow::Next;
         };
+        // Everything from the header on stands on the loop's own line, and the
+        // refusal above does not: `execute_select_command` assigns
+        // `line_number = select_command->line` only once `check_identifier` has
+        // passed (execute_cmd.c:3401-3405), exactly as `for` does.
+        self.on_control_line(c.line, |s| s.exec_select_menu(c, &var, out, stdin))
+    }
+
+    /// The body of [`Shell::exec_select`] from the `set -x` header on, run with
+    /// the shell standing on the loop's own line and the menu variable already
+    /// accepted.
+    fn exec_select_menu(
+        &mut self,
+        c: &SelectClause,
+        var: &str,
+        out: &mut Out,
+        stdin: &StdinSrc,
+    ) -> Flow {
         // The `select` header is announced once, and — unlike `for`, which
         // announces its own once per iteration — *before* the word list is
         // expanded: `set -x` prints it ahead of any trace the list's own
@@ -10186,6 +10258,12 @@ impl Shell {
         let redir = RedirPlan::default();
         let mut show_menu = true;
         loop {
+            // Back onto the loop's own line for every prompt, as bash re-assigns
+            // `line_number = select_command->line` at the top of its `while (1)`
+            // (execute_cmd.c:3459) however far the previous body wandered.
+            if c.line != 0 {
+                self.current_line = c.line.saturating_sub(self.line_bias);
+            }
             if show_menu {
                 // bash re-reads `COLS` on every menu print, so a body that
                 // reassigns `COLUMNS` changes the next menu's layout.
@@ -10261,7 +10339,7 @@ impl Shell {
             // a name the shell maintains itself refuses silently. All of them
             // happen once the choice has been read, so the prompt has already
             // been written.
-            if !self.set_scalar_checked(&var, choice) {
+            if !self.set_scalar_checked(var, choice) {
                 self.last_status = 1;
                 return Flow::Next;
             }
@@ -10557,11 +10635,18 @@ impl Shell {
         // substitution: `for (( $(exit 7); 0; 0 )); do :; done` is a success.
         let mut body_status = 0;
         self.last_status = 0;
-        if let Err(flow) = self.run_arith_section(&c.init, out, stdin) {
+        // Each of the three sections is evaluated on the `((`'s own line and the
+        // enclosing line is put straight back immediately after — bash keeps
+        // `arith_lineno` in a local and brackets every `eval_arith_for_expr`
+        // with it (execute_cmd.c:3139-3141, 3171-3174) rather than holding it
+        // over the loop, which is why the *body* runs on its own lines. See
+        // [`ForArithClause::line`].
+        if let Err(flow) = self.on_control_line(c.line, |s| s.run_arith_section(&c.init, out, stdin))
+        {
             return flow;
         }
         loop {
-            match self.run_arith_section(&c.cond, out, stdin) {
+            match self.on_control_line(c.line, |s| s.run_arith_section(&c.cond, out, stdin)) {
                 Ok(0) => break,
                 Ok(_) => {}
                 Err(flow) => return flow,
@@ -10584,7 +10669,9 @@ impl Shell {
                 }
                 other => return other,
             }
-            if let Err(flow) = self.run_arith_section(&c.update, out, stdin) {
+            if let Err(flow) =
+                self.on_control_line(c.line, |s| s.run_arith_section(&c.update, out, stdin))
+            {
                 return flow;
             }
         }

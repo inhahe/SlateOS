@@ -130,7 +130,7 @@ pub enum Command {
     /// `( list )` — a subshell group.
     Subshell(Program),
     /// `[[ expr ]]` — bash conditional expression (exit 0 if true, 1 if false).
-    Cond(CondExpr),
+    Cond(CondClause),
     /// `(( expr ))` — bash arithmetic command (exit 0 if the result is
     /// non-zero, 1 if zero). The payload is the raw arithmetic text.
     Arith(Str),
@@ -150,6 +150,46 @@ pub enum Command {
         inner: Box<Command>,
         redirects: Vec<Redirect>,
     },
+}
+
+/// `[[ expr ]]` — the expression together with the line the shell stands on
+/// while it is evaluated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CondClause {
+    pub expr: CondExpr,
+    /// The line this `[[ … ]]` is *executed* at.
+    ///
+    /// bash has no single stamp for the construct: `make_cond_node` records
+    /// `line_number` as it builds **each** node (make_cmd.c:463) and
+    /// `make_cond_command` keeps the **root**'s (make_cmd.c:486), which
+    /// `execute_cond_command` then installs with
+    /// `SET_LINE_NUMBER (cond_command->line)` (execute_cmd.c:4029). Since the
+    /// root is whatever was built last, the line depends on the expression's
+    /// shape:
+    ///
+    /// * a term — a binary or unary test, a bare word, or a `( … )` group — is
+    ///   built the instant its last token has been read and *before* the
+    ///   `cond_skip_newlines()` that ends `cond_term` (parse.y:4669, 4702,
+    ///   4770, 4786), so it carries the line that token ended on;
+    /// * `&&` and `||` are built by `cond_and`/`cond_or` (parse.y:4603, 4617)
+    ///   *after* the right-hand term's own newline skip has already fetched the
+    ///   token behind it — so they carry the line of whatever closes the
+    ///   expression, normally the `]]`;
+    /// * `!` builds nothing at all: it flips `CMD_INVERT_RETURN` on the node it
+    ///   was given (parse.y:4676-4678), which keeps that node's line.
+    ///
+    /// So it is *not* simply "the `]]`'s line". All four of these were
+    /// measured:
+    ///
+    /// ```text
+    /// [[ ${nope?bad} == x⏎]]                    # line 1 — the term's
+    /// [[ ${nope?bad} == x &&⏎y == y ]]          # line 2 — the `]]`'s
+    /// [[ y == y &&⏎${nope?bad} == x⏎]]          # line 3 — the `]]`'s
+    /// [[ ( ${nope?bad} == x && y == y )⏎]]      # line 1 — the `)`'s
+    /// ```
+    ///
+    /// `0` means "not recorded", as in [`CaseClause::line`].
+    pub line: u32,
 }
 
 /// A `[[ … ]]` conditional expression tree.
@@ -395,6 +435,10 @@ pub struct ForClause {
     /// The `in …` word list; `None` means iterate over `"$@"`.
     pub words: Option<Vec<Word>>,
     pub body: Program,
+    /// The line this loop is *executed* at — the line the loop **variable**
+    /// ends on, not the one the `for` keyword is on. See [`CaseClause::line`],
+    /// which bash stamps by the same rule and from the same place.
+    pub line: u32,
 }
 
 /// `select var [in words]; do body; done` — bash's interactive menu loop.
@@ -410,6 +454,9 @@ pub struct SelectClause {
     /// The `in …` word list; `None` means iterate over `"$@"`.
     pub words: Option<Vec<Word>>,
     pub body: Program,
+    /// The line this loop is *executed* at — the line the menu **variable**
+    /// ends on. See [`CaseClause::line`].
+    pub line: u32,
 }
 
 /// `for (( init; cond; update ))` — the C-style arithmetic for loop. Each
@@ -421,6 +468,23 @@ pub struct ForArithClause {
     pub cond: Str,
     pub update: Str,
     pub body: Program,
+    /// The line the `((` was read on — bash's `arith_for_lineno`, stamped in
+    /// `parse_dparen` before the header is scanned at all (parse.y:4469) and
+    /// alongside the `word_lineno` the other three take (see
+    /// [`CaseClause::line`]).
+    ///
+    /// `execute_arith_for_command` keeps it in a local and restores the
+    /// enclosing line around *each* of the three expressions rather than
+    /// holding it for the whole loop (execute_cmd.c:3120, 3139-3141,
+    /// 3171-3174), so the body runs on its own lines and only the header's
+    /// arithmetic is blamed here:
+    ///
+    /// ```text
+    /// for (( i=0;⏎i<2;⏎i+=${nope?bad} )); do echo b; done   # the `((`'s line
+    /// ```
+    ///
+    /// `0` means "not recorded", as in [`CaseClause::line`].
+    pub line: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -454,6 +518,48 @@ pub struct FunctionDef {
 pub struct CaseClause {
     pub word: Word,
     pub items: Vec<CaseItem>,
+    /// The line this `case` is *executed* at, which is **not** the line the
+    /// `case` keyword is on: it is the line the subject word *ends* on.
+    ///
+    /// bash stamps `case`, `for` and `select` alike, and it is the lexer that
+    /// does it rather than the reduction. `read_token_word` sees that the token
+    /// it has just finished follows a `CASE`/`SELECT`/`FOR` and records the line
+    /// it ended on (parse.y:5352-5357):
+    ///
+    /// ```c
+    ///     case CASE:
+    ///     case SELECT:
+    ///     case FOR:
+    ///       if (word_top < MAX_CASE_NEST)
+    ///         word_top++;
+    ///       word_lineno[word_top] = line_number;
+    /// ```
+    ///
+    /// Every one of the three commands' productions then hands that to its
+    /// `make_*_command` (parse.y:839, 907, 949). So the number is where the
+    /// **controlling word** ends — the `case` subject, or the loop variable —
+    /// and the executors set the shell's one `line_number` from it before
+    /// expanding anything (`line_number = case_command->line`,
+    /// execute_cmd.c:3545, and the same in `execute_for_command` /
+    /// `execute_select_command`), restoring it after. Every diagnostic raised
+    /// while a subject, a pattern or a word list is expanded therefore carries
+    /// that line and not the keyword's. (All three assign `line_number`
+    /// directly, where a simple command and `[[ … ]]` go through
+    /// `SET_LINE_NUMBER`, so these three do not also move the line an ERR trap
+    /// reports.)
+    ///
+    /// The two coincide unless something stands between the keyword and the end
+    /// of the controlling word — a word written across lines, or a line
+    /// continuation before it — which is the only way to see it:
+    ///
+    /// ```text
+    /// case "a⏎b" in "y${nope?bad}") ;; esac        # line 2, not 1
+    /// for \⏎  x \⏎  in "${nope?bad}"; do :; done   # line 2, not 1
+    /// ```
+    ///
+    /// `0` means "not recorded" and leaves the enclosing item's line standing,
+    /// exactly as [`SimpleCommand::line`] does.
+    pub line: u32,
 }
 
 /// How a `case` arm terminates, controlling control flow after its body runs.

@@ -48,10 +48,12 @@ case x in "y$(
 !
 )z") echo arm ;; esac; echo "not reached"
 echo "after rc=$?"
-# (the same shape written as the *subject* is not here on purpose: its
-# diagnostic carries the case command's line, which osh stamps at the `case`
-# keyword where bash stamps it after the controlling word — known-issues
-# TD-OILS-A-COMPOUND-COMMANDS-LINE-IS-STAMPED-AT-ITS-KEYWORD.)
+
+echo "=== and written as the subject, where the line is the case's own"
+case "y$(
+!
+)z" in *) echo arm ;; esac; echo "not reached"
+echo "after rc=$?"
 
 echo "=== a subject that expands cleanly still matches normally"
 n=q

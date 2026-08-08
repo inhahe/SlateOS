@@ -30,7 +30,7 @@ use crate::ast::{
     AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, BulkOp, CaseClause, CaseItem,
     CaseTerm, CmdSubBody,
     Command,
-    CondBinOp, CondBinary, CondUnary, DeclArray,
+    CondBinOp, CondBinary, CondClause, CondUnary, DeclArray,
     CondExpr, ForArithClause, ForClause, FunctionDef, HereDoc, IfClause, Item, ItemSep, LineMap,
     LoopClause,
     ParamOp,
@@ -3843,13 +3843,16 @@ impl Parser {
         // source spelling because that is what bash checks (`"x"` is refused
         // though `x` is fine) and what it quotes back. See `Shell::exec_for`.
         let var = self.token_display();
+        // Stamped from the loop variable and before stepping past it, a token's
+        // line being the one it *ends* on. See [`CaseClause::line`].
+        let line = self.cur_line();
         self.pos += 1;
         self.skip_newlines();
         let words = self.parse_in_list()?;
         self.expect_reserved("do")?;
         let body = self.parse_program(&["done"], false)?;
         self.expect_reserved("done")?;
-        Ok(Command::For(ForClause { var, words, body }))
+        Ok(Command::For(ForClause { var, words, body, line }))
     }
 
     /// Parse the `in …` word list shared by `for` and `select`, positioned at
@@ -3904,13 +3907,16 @@ impl Parser {
         // Same rule as the word-list `for` loop: any word parses and the name is
         // checked where the loop runs; see `parse_for`.
         let var = self.token_display();
+        // Stamped from the menu variable, as `for` and `case` are. See
+        // [`CaseClause::line`].
+        let line = self.cur_line();
         self.pos += 1;
         self.skip_newlines();
         let words = self.parse_in_list()?;
         self.expect_reserved("do")?;
         let body = self.parse_program(&["done"], false)?;
         self.expect_reserved("done")?;
-        Ok(Command::Select(SelectClause { var, words, body }))
+        Ok(Command::Select(SelectClause { var, words, body, line }))
     }
 
     /// Parse the body of a C-style `for (( init; cond; update ))` loop, given
@@ -3949,11 +3955,15 @@ impl Parser {
         let init = secs.first().cloned().unwrap_or_default();
         let cond = secs.get(1).cloned().unwrap_or_default();
         let update = secs.get(2).cloned().unwrap_or_default();
+        // The same line the parse errors above are blamed on: bash stamps
+        // `arith_for_lineno` and the parse-time `line_number` from one and the
+        // same read of the `((`. See [`ForArithClause::line`].
         Ok(Command::ForArith(ForArithClause {
             init,
             cond,
             update,
             body,
+            line,
         }))
     }
 
@@ -3965,6 +3975,11 @@ impl Parser {
             return Err(self.unexpected_here());
         };
         let word = self.word_from_segs_at(&segs.clone(), self.pos)?;
+        // Stamped from the subject word and before stepping past it: a token's
+        // line is the one it *ends* on ([`crate::lexer::Lexer::stamp_lines`]),
+        // which is exactly what bash's lexer records here. See
+        // [`CaseClause::line`].
+        let line = self.cur_line();
         self.pos += 1;
         self.skip_newlines();
         self.expect_reserved("in")?;
@@ -4025,7 +4040,7 @@ impl Parser {
             items.push(CaseItem { patterns, body, term });
         }
         self.expect_reserved("esac")?;
-        Ok(Command::Case(CaseClause { word, items }))
+        Ok(Command::Case(CaseClause { word, items, line }))
     }
 
     /// Parse a `case`-arm body: a command list terminated by `;;` or `esac`.
@@ -4174,8 +4189,33 @@ impl Parser {
             };
             return Err(ParseError::new(&sequel).under(first));
         }
+        // The line the command will *run* on, which bash takes from the root
+        // node and so reads off the expression's shape rather than off the
+        // `]]`. `&&`/`||` are built after the trailing newline skip has already
+        // fetched the closing token, so they take its line; everything else was
+        // built the moment its own last token was read. See [`CondClause::line`].
+        let line = match &expr {
+            CondExpr::And(..) | CondExpr::Or(..) => self.cur_line(),
+            // Back over the newlines `cond_skip_newlines` swallowed, to the
+            // token the term ended on.
+            _ => self.line_before(self.pos),
+        };
         self.pos += 1;
-        Ok(Command::Cond(expr))
+        Ok(Command::Cond(CondClause { expr, line }))
+    }
+
+    /// The line the last real token before `at` ended on, stepping back over
+    /// newline tokens — where `line_number` stood before a `cond_skip_newlines`
+    /// walked past them.
+    fn line_before(&self, at: usize) -> u32 {
+        let mut i = at;
+        while i > 0 && matches!(self.toks.get(i - 1), Some(Tok::Newline)) {
+            i -= 1;
+        }
+        if i == 0 {
+            return self.cur_line();
+        }
+        self.lines.get(i - 1).copied().unwrap_or_else(|| self.cur_line())
     }
 
     fn parse_cond_or(&mut self) -> Result<CondExpr, CondError> {
@@ -8777,7 +8817,8 @@ mod tests {
     #[test]
     fn cond_expression() {
         let prog = parse("[[ $x == foo ]]").unwrap();
-        let Command::Cond(CondExpr::Binary(_, op, _)) = &prog.items[0].list.first.commands[0]
+        let Command::Cond(CondClause { expr: CondExpr::Binary(_, op, _), .. }) =
+            &prog.items[0].list.first.commands[0]
         else {
             panic!("expected cond binary");
         };
@@ -8793,7 +8834,8 @@ mod tests {
     fn cond_operator_keeps_its_spelling() {
         let binop = |src: &str| {
             let prog = parse(src).unwrap();
-            let Command::Cond(CondExpr::Binary(_, op, _)) = &prog.items[0].list.first.commands[0]
+            let Command::Cond(CondClause { expr: CondExpr::Binary(_, op, _), .. }) =
+                &prog.items[0].list.first.commands[0]
             else {
                 panic!("expected cond binary");
             };
@@ -8806,7 +8848,9 @@ mod tests {
 
         let unop = |src: &str| {
             let prog = parse(src).unwrap();
-            let Command::Cond(CondExpr::Unary(op, _)) = &prog.items[0].list.first.commands[0] else {
+            let Command::Cond(CondClause { expr: CondExpr::Unary(op, _), .. }) =
+                &prog.items[0].list.first.commands[0]
+            else {
                 panic!("expected cond unary");
             };
             op.text
@@ -8828,7 +8872,9 @@ mod tests {
     fn cond_logical_precedence() {
         // `||` binds looser than `&&`: a || b && c parses as a || (b && c).
         let prog = parse("[[ 1 -eq 1 || 2 -eq 2 && 3 -eq 3 ]]").unwrap();
-        let Command::Cond(CondExpr::Or(_, right)) = &prog.items[0].list.first.commands[0] else {
+        let Command::Cond(CondClause { expr: CondExpr::Or(_, right), .. }) =
+            &prog.items[0].list.first.commands[0]
+        else {
             panic!("expected top-level Or");
         };
         assert!(matches!(**right, CondExpr::And(_, _)));
@@ -8839,7 +8885,7 @@ mod tests {
         let prog = parse("[[ $x =~ foo ]]").unwrap();
         assert!(matches!(
             prog.items[0].list.first.commands[0],
-            Command::Cond(CondExpr::Regex(_, _))
+            Command::Cond(CondClause { expr: CondExpr::Regex(_, _), .. })
         ));
     }
 
@@ -8850,7 +8896,8 @@ mod tests {
     fn cond_regex_group_spans_blanks_and_operators() {
         let regex_of = |src: &str| -> String {
             let prog = parse(src).unwrap_or_else(|e| panic!("{src}: {}", emsg(&e)));
-            let Command::Cond(CondExpr::Regex(_, rhs)) = &prog.items[0].list.first.commands[0]
+            let Command::Cond(CondClause { expr: CondExpr::Regex(_, rhs), .. }) =
+                &prog.items[0].list.first.commands[0]
             else {
                 panic!("{src}: expected a regex conditional");
             };

@@ -93,6 +93,69 @@ The seven specials, digits and identifiers are unaffected, with or without an
 operator: `${#}`, `${@}`, `${*}`, `${?}`, `${!:-n}`, `${-:+s}`, `${$}`, `${1}`,
 `${12:-e}`, `${v}`, `${_v:-u}` all still behave.
 
+### TD-OILS-AN-UNCLOSED-SUBSCRIPT-IN-A-QUOTED-BRACE-BODY-IS-NOT-A-RUNAWAY-SCAN. `echo "${a[}"` names the wrong subject — 2026-08-08 — OPEN
+
+**Where:** `userspace/oils/src/lexer.rs`, `read_dollar_brace_body` — the `${…}`
+scan, which has no subscript skip and so closes at the first `}` however the
+body started. bash's counterpart is `extract_dollar_brace_string` (subst.c:1813),
+reached from the double-quote extent scanner (`string_extract_double_quoted`,
+subst.c:963).
+
+**What.** Inside double quotes bash scans the `${…}` twice: once to find the
+extent of the quoted word, once to expand it. The extent scan skips a subscript
+wholesale —
+
+```c
+      if (c == LBRACK && dolbrace_state == DOLBRACE_PARAM)   /* subst.c:1943 */
+	{
+	  si = skipsubscript (string, i, 0);
+	  CHECK_STRING_OVERRUN (i, si, slen, c);
+	  if (string[si] == RBRACK)
+	    c = string[i = si];
+	}
+```
+
+— and `skipsubscript` looks for the `]` in the **whole word**, quotes and all,
+not just in the brace body. With no `]` anywhere it runs to the end, and
+`CHECK_STRING_OVERRUN` (subst.c:135) turns that into `ch = 0; break`, which lands
+on the `if (c == 0 && nesting_level)` at subst.c:1975 —
+`bad substitution: no closing `}' in %s`, naming the entire word:
+
+```text
+                    bash                                            osh
+echo "${a[}"        bad substitution: no closing `}' in "${a[}"      ${a[}: bad substitution   rc=1 both
+echo "${a[}"tail    bad substitution: no closing `}' in "${a[}"tail  ${a[}: bad substitution   rc=1 both
+echo "pre${a[}post" no closing `}' in "pre${a[}post"                 ${a[}: bad substitution   rc=1 both
+echo "${a[0}"       bad substitution: no closing `}' in "${a[0}"     ${a[0}: bad substitution  rc=1 both
+echo "${[}x}"       bad substitution: no closing `}' in "${[}x}"     (empty), then `x}'        rc=1 / rc=0
+echo ${a[}tail      ${a[}tail: bad substitution                      same                      rc=1 both
+```
+
+Three things the rows pin down:
+
+* **It only happens inside double quotes.** An unquoted `${a[}` never meets the
+  extent scan — `expand_word_internal` goes straight to `param_expand` — so it
+  is an ordinary bad substitution and osh already agrees (last row).
+* **The subject is the whole word**, not the `${…}`: `"${a[}"tail` and
+  `"pre${a[}post"` name every byte of it, including the quotes.
+* **`${#[}` is exempt** and already agrees, because the leading `#` moves
+  `dolbrace_state` to `DOLBRACE_OP` (subst.c:1998) before the `[` is reached, and
+  the skip is gated on `DOLBRACE_PARAM`.
+
+**Proper fix.** Give the `${` scan bash's subscript skip, gated on the same
+"still in the parameter name" state, and let it run off the end of the *word* —
+which means the scan has to be able to see past the closing quote, i.e. the
+double-quote scanner has to hand it the whole word rather than the run it has
+carved out. That is the same restructuring as
+TD-OILS-A-DOUBLE-QUOTED-DOLLAR-BRACKET-IS-NOT-SKIPPED-BY-THE-QUOTE-EXTRACTOR:
+both are places where bash's *extent* pass and its *expansion* pass disagree
+about where a construct ends, and osh's single-pass lexer cannot hold the two
+views at once. Worth doing together with that one.
+
+**Severity:** low. Every row is a hard error in both shells and all but the
+`"${[}x}"` shape already share the status; what differs is the diagnostic
+wording, and in that one shape the word boundary too.
+
 ### TD-OILS-JOBS-LIFETIME-RACES-ON-THE-CURRENT-JOB-MARKERS. `jobs-lifetime.sh` disagrees about `+`/`-` about 1 run in 5 — 2026-08-08 — ✅ FIXED 2026-08-08 (the case's margin, not the marker code)
 
 **Where:** `userspace/oils/tests/corpus/jobs-lifetime.sh` line 68. The marker

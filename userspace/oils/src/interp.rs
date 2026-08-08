@@ -150,11 +150,58 @@ const BASH_VERSION: &str = "5.2.0(1)-release";
 /// unconditionally and never inherits.
 const SOFT_DEFAULT_VARS: &[&str] = &["PS4"];
 
-/// The input-source token bash tags a syntax error in a backtick body with —
-/// `bash: command substitution: line 3: …`. It replaces the `-c`/`eval` token
-/// the enclosing input would otherwise contribute. See
-/// [`Shell::syntax_error_prefix`].
+/// The input-source name bash reads a substitution body under —
+/// `bash: command substitution: line 3: …` (subst.c). Pushed on
+/// [`Shell::input_names`] for the body's own read-eval loop, so it hides the
+/// `-c`/`eval`/script name the enclosing input contributed for as long as the
+/// body is what is being read.
 const SRC_TOKEN_COMMAND_SUB: &str = "command substitution";
+
+/// The input-source token bash reads a trap handler's text under, by trap name.
+///
+/// bash spells these out at the call sites rather than deriving them: the four
+/// non-signal traps go through `_run_trap_internal (sig, tag)` with a literal
+/// tag each (trap.c:1208, 1244, 1260, 1275), the EXIT trap has its own call
+/// (trap.c:1010), and every signal handler shares the bare `"trap"` that
+/// `run_pending_traps` passes (trap.c:449). So `SIGUSR1` and `SIGINT` are not
+/// distinguished here — `"interrupt trap"` is not a signal's name for itself
+/// but the tag of `run_interrupt_trap`, the separate path bash takes when it
+/// unwinds to the top level on an interrupt.
+fn trap_input_name(trap: &str) -> &'static str {
+    match trap {
+        "EXIT" => "exit trap",
+        "DEBUG" => "debug trap",
+        "ERR" => "error trap",
+        "RETURN" => "return trap",
+        _ => "trap",
+    }
+}
+
+/// One entry of bash's `bash_input` stack: an open input source.
+///
+/// See [`Shell::input_names`] for what the stack is and where bash pushes to it.
+#[derive(Clone)]
+struct InputSource {
+    /// `bash_input.name` — what `yy_input_name()` (parse.y:1468) reports while
+    /// this source is the one being read.
+    name: Str,
+    /// Whether opening this source clears bash's `interactive` flag, which is
+    /// distinct from `interactive_shell`: it means "the shell is reading from
+    /// the user's terminal *right now*", and `parser_error` (error.c:367) tests
+    /// it first, printing the bare `$0: ` form only when it holds.
+    ///
+    /// A trap clears it (`SEVAL_NONINT`, trap.c:449/1010/1117), so does a
+    /// substitution body (subst.c:6545/7054 assign `interactive = 0` directly;
+    /// process substitution passes `SEVAL_NONINT`, subst.c:6741), and so does
+    /// `source` — `source_file` passes `FEVAL_NONINT` (evalfile.c:374) and
+    /// `_evalfile` acts on it at evalfile.c:230. `eval` is the exception: its
+    /// `parse_and_execute` flags are `SEVAL_NOHIST|SEVAL_NOOPTIMIZE` only
+    /// (eval.def:56), and `parse_and_execute` touches `interactive` solely for
+    /// `SEVAL_NONINT`/`SEVAL_INTERACT` (evalstring.c:270). Measured: `bash -i -c
+    /// "eval 'fi'"` says `bash: syntax error …` where `bash -i -c ". f"` says
+    /// `bash: f: line 2: syntax error …`.
+    nonint: bool,
+}
 
 /// Whether `osh` advertises a bash-compatible `$BASH_VERSION`/`$BASH_VERSINFO`
 /// (open-questions Q27). Defaults to **on** — option A — so scripts that
@@ -3949,6 +3996,29 @@ pub struct Shell {
     /// [`Shell::at_comsub_read_eval`]; a nested subshell clears the field
     /// outright (see [`Shell::clone_for_subshell`]).
     comsub_read_eval: Option<(u32, usize)>,
+    /// bash's `bash_input.name`, as a stack: the name of every input source
+    /// currently open, innermost last. `yy_input_name()` (parse.y:1468) reads
+    /// the top of it, and `parser_error` (error.c:367) prints it as the token
+    /// between `$0` and `line N`.
+    ///
+    /// bash pushes a name wherever it opens an input, and every push is a
+    /// literal at the call site: `"-c"` (shell.c:766), `$0` for a script or
+    /// piped stdin (shell.c:1756), the sourced path (`_evalfile`), `"eval"`,
+    /// `"command substitution"`, `"process substitution"` (subst.c:6741), and
+    /// the trap tags — `"exit trap"` (trap.c:1010), `"debug trap"`,
+    /// `"error trap"`, `"return trap"`, `"interrupt trap"` (trap.c:1208-1275)
+    /// and a bare `"trap"` for a signal (trap.c:449).
+    ///
+    /// Empty means the base source, which is `-c` or `$0`; that one is computed
+    /// rather than stored because `$0` is not settled when the shell is built.
+    ///
+    /// The token is *not* printed when it equals the name the diagnostic is
+    /// already labelled with — `parser_error`'s `STREQ (ename, iname)` arm.
+    /// That is what silently drops it for a script file, for piped stdin and
+    /// for a sourced file: in each, bash names the input after the very file
+    /// the error is already being blamed on. See
+    /// [`Shell::syntax_error_prefix`].
+    input_names: Vec<InputSource>,
     /// The `>`/`>>` target of the builtin currently running, held open so it can
     /// write in pieces. Installed and restored around each builtin's dispatch by
     /// [`Shell::run_builtin_body`]; `None` whenever no builtin is running or the
@@ -5595,6 +5665,7 @@ impl Shell {
             comsub_count: 0,
             in_comsub: false,
             comsub_read_eval: None,
+            input_names: Vec::new(),
             builtin_stdout: None,
             subshell_depth: 0,
             subshell_level: 0,
@@ -6324,6 +6395,13 @@ impl Shell {
             fn_depth: self.fn_stack.len(),
             startup: true,
         });
+        // Reading a file is an input source, named after the file — which is
+        // also what the diagnostic is labelled with, so the token cancels out
+        // and a syntax error in a startup file reports the path once.
+        self.input_names.push(InputSource {
+            name: path.to_vec(),
+            nonint: true,
+        });
         self.refresh_funcname();
         let mut out = Out::Inherit;
         // `HistRead::Off`: a startup file's lines are not history, and no `!`
@@ -6336,6 +6414,7 @@ impl Shell {
             HistRead::Off,
         );
         self.source_stack.pop();
+        self.input_names.pop();
         self.refresh_funcname();
         // A `Flow::Abort` (an expansion error, or `exit 3 4`) abandons the rest
         // of the file and nothing more: there is no enclosing unit to discard.
@@ -11487,6 +11566,12 @@ impl Shell {
             // Names *this* shell's top-level input, so a nested subshell — which
             // gets a read-eval loop of its own, or none at all — starts clear.
             comsub_read_eval: None,
+            // The open input sources *are* inherited: bash's `bash_input` is one
+            // process-global stack that a fork copies, so a `( … )` written
+            // inside an `eval` is still being read from the `eval`'s string and
+            // still reports as `eval`. A substitution's body pushes its own name
+            // on top of the copy (see `Shell::command_sub`).
+            input_names: self.input_names.clone(),
             // Belongs to a builtin that is running *now*, in this shell; a
             // subshell starts outside any builtin of its own.
             builtin_stdout: None,
@@ -27655,6 +27740,13 @@ impl Shell {
         let cap = capture_sink();
         let mut sub = self.new_comsub_shell();
         sub.comsub_read_eval = Some((sub.eval_depth, sub.source_stack.len()));
+        // `command_substitute` opens the body as an input source of its own, so
+        // it is what a syntax error in the body is named after, whatever the
+        // caller was reading.
+        sub.input_names.push(InputSource {
+            name: SRC_TOKEN_COMMAND_SUB.as_bytes().to_vec(),
+            nonint: true,
+        });
         {
             // The substitution's capture is its fd 1 — bash gives the subshell
             // the write end of the collecting pipe, replacing any persistent
@@ -29105,9 +29197,20 @@ impl Shell {
     /// path, so nothing in there may return early.
     fn eval_string(&mut self, src: BStr<'_>, out: &mut Out, stdin: &StdinSrc) -> i32 {
         // bash tags a syntax error inside `eval` with the `eval:` input-source
-        // token; `eval_depth` drives that in the parse-error prefix. Restore on
-        // every exit path (the borrow of `self` ends before this returns, so a
-        // plain inc/dec is sufficient).
+        // token — `parse_and_execute (string, "eval", …)` (builtins/eval.def).
+        // It is a *push*, not a flag: a `.`/`source` the string runs opens an
+        // input of its own on top and takes the name back, so
+        // `eval '. ./bad.sh'` reports the file and not the `eval`.
+        // `eval_depth` is the separate question of how deep the unwinding is.
+        // Restore both on every exit path (the borrow of `self` ends before
+        // this returns, so a plain push/pop is sufficient).
+        self.input_names.push(InputSource {
+            name: b"eval".to_vec(),
+            // Alone among the pushes, `eval` leaves `interactive` alone: its
+            // flags are `SEVAL_NOHIST|SEVAL_NOOPTIMIZE` (eval.def:56) and
+            // `parse_and_execute` only touches the flag for `SEVAL_NONINT`.
+            nonint: false,
+        });
         self.eval_depth = self.eval_depth.saturating_add(1);
         // Route the evaluated commands' stdout to *this* command's sink so
         // `x=$(eval echo hi)` captures it, matching bash, and let an `exit`
@@ -29130,6 +29233,7 @@ impl Shell {
             self.run_source_flow_result(src, out, stdin, &LineMap::Offset(eval_base), HistRead::Off);
         self.xtrace_level = self.xtrace_level.saturating_sub(1);
         self.eval_depth = self.eval_depth.saturating_sub(1);
+        self.input_names.pop();
         // A `return` in the string is the caller's, not `eval`'s: the string
         // runs in the calling context, so `f() { eval "return 3"; echo no; }`
         // returns from `f` with 3 and never reaches the `echo`. This is where
@@ -35473,7 +35577,18 @@ impl Shell {
         // (bash's EXIT trap is the exception, but that runs at shutdown, from
         // `run_exit_trap_out`, and traces at the ordinary depth.)
         self.xtrace_level = self.xtrace_level.saturating_add(1);
+        // A handler is read as an input source of its own, named after the trap
+        // — bash's `_run_trap_internal` passes the tag straight to
+        // `parse_and_execute` (trap.c:1123), and `run_pending_traps` passes a
+        // bare `"trap"` for a signal (trap.c:449). So `trap "'" DEBUG` reports
+        // `debug trap: line 1:` wherever it fires, in place of the `-c` or
+        // script name the enclosing input would have contributed.
+        self.input_names.push(InputSource {
+            name: trap_input_name(name).as_bytes().to_vec(),
+            nonint: true,
+        });
         let flow = self.run_source_flow_out(&action, out, stdin, &map, HistRead::Off);
+        self.input_names.pop();
         self.xtrace_level = self.xtrace_level.saturating_sub(1);
         let handler_status = self.last_status;
         // Preserve the pre-trap status unless the handler asked to exit, in
@@ -35639,9 +35754,15 @@ impl Shell {
             // Read-parse-execute a unit at a time like every other handler (see
             // `fire_trap_flow`), which is what bash's `parse_and_execute` does:
             // the commands before a syntax error in the action still run, and
-            // `set -v` echoes each unit as it is read.
+            // `set -v` echoes each unit as it is read. The tag it is read under
+            // is `"exit trap"` (trap.c:1010).
+            self.input_names.push(InputSource {
+                name: trap_input_name("EXIT").as_bytes().to_vec(),
+                nonint: true,
+            });
             let flow =
                 self.run_source_flow_out(&action, out, stdin, &LineMap::Offset(0), HistRead::Off);
+            self.input_names.pop();
             let exited = match flow {
                 Flow::Exit(code) => Some(code),
                 _ => None,
@@ -43444,6 +43565,17 @@ impl Shell {
                     fn_depth: self.fn_stack.len(),
                     startup: false,
                 });
+                // …and it is an input source of its own, named after the file
+                // (`_evalfile`), so it takes the name back from an enclosing
+                // `eval` or trap for as long as it is being read.
+                self.input_names.push(InputSource {
+                    name: path.to_vec(),
+                    // `source_file` passes `FEVAL_NONINT` (evalfile.c:374),
+                    // which `_evalfile` turns into `interactive = 0`
+                    // (evalfile.c:230) — so unlike `eval`, sourcing a file at an
+                    // interactive prompt does report `line N`.
+                    nonint: true,
+                });
                 self.refresh_funcname();
                 // bash treats a sourced script like a function frame for the
                 // DEBUG trap: commands *inside* it fire DEBUG only under
@@ -43476,6 +43608,7 @@ impl Shell {
                 self.xtrace_level = self.xtrace_level.saturating_sub(1);
                 self.trap_suppress.pop();
                 self.source_stack.pop();
+                self.input_names.pop();
                 self.refresh_funcname();
                 if let Some(p) = saved {
                     self.positional = p;
@@ -45782,53 +45915,68 @@ impl Shell {
     /// The diagnostic prefix bash prepends to a **syntax error**: like
     /// [`Shell::err_prefix`] but (a) it uses the offending token's line (passed
     /// in from the parser) rather than the current execution line, and (b) it
-    /// inserts bash's *input-source* token between the name and `line N` —
-    /// `-c` for a `-c` command string, `eval` while inside `eval`, and nothing
-    /// for a script file or interactive input. bash prints, e.g.,
-    /// `bash: -c: line 2: syntax error…` and `bash: eval: line 1: …`; osh
-    /// mirrors the shape with its own `$0` name.
+    /// may insert bash's *input-source* token between the name and `line N` —
+    /// `bash: -c: line 2: syntax error…`, `bash: eval: line 1: …`,
+    /// `bash: exit trap: line 1: …`.
     ///
-    /// A backtick body is a third input source, tagged `command substitution`
-    /// whatever the enclosing one was (`-c`, `eval`, or a script alike) — but
-    /// only for the body's *own* read-eval loop, since an `eval`/`.` run inside
-    /// it reports as itself. See [`Shell::comsub_read_eval`].
+    /// This is a transcription of `parser_error` (error.c:367), which chooses
+    /// between four shapes from two names and two flags:
+    ///
+    /// ```c
+    /// ename = get_name_for_error ();   /* BASH_SOURCE[0], else $0 */
+    /// iname = yy_input_name ();        /* bash_input.name — the innermost source */
+    /// if (interactive)               "%s: "               ename
+    /// else if (interactive_shell)    "%s: %s: line %d: "  ename iname
+    /// else if (STREQ (ename, iname)) "%s: line %d: "      ename
+    /// else                           "%s: %s: line %d: "  ename iname
+    /// ```
+    ///
+    /// `ename` is [`Shell::error_source`] and `iname` the top of
+    /// [`Shell::input_names`]. The third arm is why the token is usually
+    /// *invisible*: for a script file, for piped stdin and for a sourced file
+    /// bash names the input after the very file the error is already blamed on,
+    /// so the two collapse into one. It shows up exactly when they differ —
+    /// under `-c`, inside an `eval`, a substitution body or a trap handler.
+    ///
+    /// The two flags are distinct: `interactive_shell` is "this shell has a
+    /// prompt at all", `interactive` is "it is reading from the terminal right
+    /// now". Opening any input source but `eval` clears the latter (see
+    /// [`InputSource::nonint`]), which is what makes a trap that fires at a
+    /// prompt report a line number where an `eval` typed at the same prompt does
+    /// not. osh has only the one `interactive_shell` flag, so `interactive` is
+    /// reconstructed here as "interactive shell, and no `nonint` source open".
     fn syntax_error_prefix(&self, line: u32) -> Str {
-        let name = self.error_source();
-        // `eval` wins over the outer `-c`/script token (bash reports `eval:`
-        // even for an `eval` run from a script).
-        // The `-c` token names the *input source* being reported, so it drops
-        // away once that source is a file: a `-c` shell running `. ./bad.sh`
-        // reports `./bad.sh: line 2:`, not `./bad.sh: -c: line 2:`. (An `eval`
-        // inside a sourced file still says `eval`, because that is then the
-        // innermost source.)
-        // Tested *before* `eval`, because a substitution's body is an input
-        // source pushed on top of whatever `eval`/`source` frames enclose it —
-        // and an `eval` the body itself runs is pushed on top again, which moves
-        // the shell off the recorded base and lands on the `eval` arm below.
-        let in_backtick = self.at_comsub_read_eval();
-        let token = if in_backtick {
-            Some(SRC_TOKEN_COMMAND_SUB)
-        } else if self.eval_depth > 0 {
-            Some("eval")
-        } else if self.command_mode && self.source_stack.is_empty() {
-            Some("-c")
+        let ename = self.error_source();
+        // The base of the stack is not stored, because it is `$0` for a script
+        // or piped stdin and `$0` is not settled when the shell is built:
+        // `-c` (shell.c:766) or the script name (shell.c:1756).
+        let iname = self.input_names.last().map_or_else(
+            || {
+                if self.command_mode {
+                    b"-c".to_vec()
+                } else {
+                    ename.clone()
+                }
+            },
+            |s| s.name.clone(),
+        );
+        if self.is_interactive() {
+            return if self.input_names.last().is_some_and(|s| s.nonint) {
+                // `interactive_shell` arm: the shell has a prompt but is reading
+                // a string, so the name is printed even when it equals `ename`.
+                bfmt![ename, b": ", iname, b": line ", line.to_string(), b": "]
+            } else {
+                // Interactive tty REPL: bash shows just `<name>: `. (osh's REPL
+                // is line-at-a-time, so even were it non-interactive `line`
+                // would reset per logical line rather than accumulate across a
+                // compound.)
+                bfmt![ename, b": "]
+            };
+        }
+        if iname == ename {
+            bfmt![ename, b": line ", line.to_string(), b": "]
         } else {
-            None
-        };
-        // Any non-interactive input (`-c`, script file, or piped/redirected
-        // stdin) carries the `line N` token; an `eval` or backtick body always
-        // does too — bash clears `interactive` for the duration of a command
-        // substitution, so its errors always show a line.
-        if !self.is_interactive() || self.eval_depth > 0 || in_backtick {
-            match token {
-                Some(t) => bfmt![name, b": ", t, b": line ", line.to_string(), b": "],
-                None => bfmt![name, b": line ", line.to_string(), b": "],
-            }
-        } else {
-            // Interactive tty REPL: bash shows just `<name>: `. (osh's REPL is
-            // line-at-a-time, so even were it non-interactive `line` would reset
-            // per logical line rather than accumulate across a compound.)
-            bfmt![name, b": "]
+            bfmt![ename, b": ", iname, b": line ", line.to_string(), b": "]
         }
     }
 
@@ -56264,46 +56412,75 @@ mod tests {
             "osh: -c: line 4: syntax error: unexpected end of file"
         );
 
-        // Inside `eval`, the input-source token is `eval`, not `-c`. (The `(`
-        // itself is accepted — `WORD (` opens a function definition — so what
-        // the diagnostic names is the newline standing where the `)` should be.)
-        sh.eval_depth = 1;
+        // Input sources nest, and bash names the innermost — `yy_input_name()`
+        // reads the top of one stack. So each push here takes the token over
+        // from the one below, and popping hands it back. (The `(` itself is
+        // accepted — `WORD (` opens a function definition — so what the
+        // diagnostic names is the newline standing where the `)` should be.)
         let src = "echo (";
         let e = parse(src.as_bytes()).unwrap_err();
+        let want = |token: &str| {
+            format!(
+                "osh: {token}: line 1: syntax error near unexpected token `newline'\n\
+                 osh: {token}: line 1: `echo ('"
+            )
+        };
         assert_eq!(
             parse_error(&sh, &e, src.as_bytes(), &LineMap::Offset(0)),
-            "osh: eval: line 1: syntax error near unexpected token `newline'\n\
-             osh: eval: line 1: `echo ('"
+            want("-c"),
+            "the base `-c` source names itself"
         );
-        sh.eval_depth = 0;
-
-        // A command substitution's body is an input source pushed *on top of*
-        // whatever encloses it, and bash names the innermost one — so an `eval`
-        // the substitution was written inside stops counting once the body
-        // starts, while an `eval` the body itself runs starts counting again.
-        // See `Shell::comsub_read_eval`.
-        let src = "echo (";
-        let e = parse(src.as_bytes()).unwrap_err();
-        for depth in [0, 1, 2] {
-            sh.eval_depth = depth;
-            sh.comsub_read_eval = Some((depth, 0));
+        for (name, nonint) in [
+            (b"eval".to_vec(), false),
+            (SRC_TOKEN_COMMAND_SUB.as_bytes().to_vec(), true),
+            (b"eval".to_vec(), false),
+            (b"exit trap".to_vec(), true),
+        ] {
+            let token = String::from_utf8_lossy(&name).into_owned();
+            sh.input_names.push(InputSource { name, nonint });
             assert_eq!(
                 parse_error(&sh, &e, src.as_bytes(), &LineMap::Offset(0)),
-                "osh: command substitution: line 1: syntax error near unexpected token `newline'\n\
-                 osh: command substitution: line 1: `echo ('",
-                "at eval_depth {depth}"
-            );
-            // One `eval` deeper than the body began is that `eval`'s error.
-            sh.eval_depth = depth + 1;
-            assert_eq!(
-                parse_error(&sh, &e, src.as_bytes(), &LineMap::Offset(0)),
-                "osh: eval: line 1: syntax error near unexpected token `newline'\n\
-                 osh: eval: line 1: `echo ('",
-                "at eval_depth {depth} + 1"
+                want(&token),
+                "the innermost source names the error"
             );
         }
-        sh.eval_depth = 0;
-        sh.comsub_read_eval = None;
+        sh.input_names.clear();
+        assert_eq!(
+            parse_error(&sh, &e, src.as_bytes(), &LineMap::Offset(0)),
+            want("-c"),
+            "unwinding hands the name back to the base"
+        );
+
+        // …and the token disappears entirely when it *equals* the name the
+        // diagnostic already carries (`parser_error`'s `STREQ (ename, iname)`
+        // arm), which is what makes a sourced file report its path once.
+        sh.source_stack.push(SourceFrame {
+            path: b"./b1.sh".to_vec(),
+            call_line: 1,
+            fn_depth: 0,
+            startup: false,
+        });
+        sh.input_names.push(InputSource {
+            name: b"./b1.sh".to_vec(),
+            nonint: true,
+        });
+        assert_eq!(
+            parse_error(&sh, &e, src.as_bytes(), &LineMap::Offset(0)),
+            "./b1.sh: line 1: syntax error near unexpected token `newline'\n\
+             ./b1.sh: line 1: `echo ('"
+        );
+        // An `eval` inside that file differs from it again, so it reappears.
+        sh.input_names.push(InputSource {
+            name: b"eval".to_vec(),
+            nonint: false,
+        });
+        assert_eq!(
+            parse_error(&sh, &e, src.as_bytes(), &LineMap::Offset(0)),
+            "./b1.sh: eval: line 1: syntax error near unexpected token `newline'\n\
+             ./b1.sh: eval: line 1: `echo ('"
+        );
+        sh.input_names.clear();
+        sh.source_stack.clear();
 
         // A runtime (non-parse) diagnostic must NOT gain the `-c:` token; that is
         // still driven by `err_prefix`, which omits it.

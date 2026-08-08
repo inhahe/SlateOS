@@ -21,304 +21,97 @@ Format for each entry:
 - **Where it bites** — files/symbols affected, so the resolution can be applied.
 - **Status** — `OPEN` until the operator decides.
 
-Earlier deferred operator decisions (Q1–Q33) have been
+Earlier deferred operator decisions (Q1–Q38) have been
 resolved — see the "Recently resolved" list below and `design-decisions.md` for
-full rationale. New decisions should be appended as `## Q35 …` just above the
+full rationale. New decisions should be appended as `## Q40 …` just above the
 `---` separator that precedes the "Recently resolved" list.
 
-## Q34 — Escalate to a full compiler-instrumented KASAN kernel to catch B-KNULLJUMP? — Status: OPEN
+## Q39 — Where should the *shipping default* point once a fastpy utility clears both bars? — Status: OPEN
 
-**Question.** We built the two *lighter* corruption detectors the Q32→A
-decision called for: a lazily-mapped KASAN **shadow** (`mm/kasan.rs`) and a
-slab **free-quarantine** (`mm/quarantine.rs`), both boot-green and self-tested.
-Neither *passively* catches B-KNULLJUMP's actual failure mode — an arbitrary
-wild **store** into a live scheduler BTree node — unless the corrupting write
-happens to hit a parked/poisoned slot (quarantine) or unless we manually
-`check_access` the exact suspect line (shadow). The *definitive* tool is
-LLVM's `-Zsanitizer=kernel-address`, which auto-instruments **every** load/store
-in the kernel and would flag the faulting instruction directly. Probing
-confirms it **is supported** on our target
-(`x86_64-unknown-none` → `supported-sanitizers: ['kcfi', 'kernel-address']`).
-Should we invest in wiring up full compiler KASAN, or first exhaust the lighter
-shadow + quarantine tools?
+**Question.** §108 settled that fastpy utilities stay additive for now and that
+the trajectory is for them to become real implementations, per command, once
+each has (a) a parity test suite and (b) measured performance that is faster,
+equal, or not significantly slower than the canonical implementation — with the
+user able to opt in. What it deliberately left open is which way the **default**
+points in a stock install: does SlateOS prefer the fastpy implementation
+wherever one has cleared both bars, or prefer the canonical one and make fastpy
+the thing you switch on?
 
-**Options.**
-
-- **A — Try the lighter tools first (current path).** Run the Path-Z stress
-  repro with quarantine (and targeted `kasan::check_access`) enabled; if the
-  corruption vanishes under quarantine that confirms UAF/reuse and likely
-  localizes the culprit free. *Pro:* cheap, low-risk, already built, doesn't
-  touch the kernel build. *Con:* may not pinpoint the exact faulting store if
-  the write lands outside a parked window; intermittent (~1-in-120) so needs
-  many stress iterations.
-- **B — Escalate to full compiler-instrumented KASAN now.** *Pro:* definitive —
-  auto-catches the exact wild store with a backtrace, no guessing. *Con:* large,
-  higher-risk bring-up and a genuine build fork: needs whole-kernel-VA shadow
-  backing (not just heap; Linux uses a shared zero shadow page for untracked
-  regions), in-kernel `__asan_*`/`__kasan_*` runtime callbacks, a fixed
-  compile-time shadow offset matching our layout, `#[no_sanitize]` + careful
-  ordering on all early-boot/shadow-setup paths, and almost certainly a
-  separate debug build profile (whole-kernel instrumentation is a big perf hit).
-  Risk of destabilizing boot if the shadow isn't perfectly ready before
-  instrumented code runs.
-
-**Claude's recommendation.** **A first, B as fallback.** Sequence the lighter
-tools (done) → run the hunt → only escalate to compiler KASAN if quarantine +
-targeted checks fail to localize it. Flagging B because committing the
-kernel to a full instrumented build is a costly, hard-to-reverse fork the
-operator may want to weigh in on — but it does **not** block A.
-
-**UPDATE 2026-07-23 — Path A now effectively exhausted for this bug.** A full
-100-iteration armed hunt campaign (`soak-20260723-190300`, `mm.corruption_hunt=1`,
-KASAN shadow @64 GiB cover + slab free-quarantine) ran to completion with the
-harness now false-positive-free: **100/100 boots PASSED, `[hunt] corruptions=0`
-on every iter, zero wedges.** This is *inconclusive, not exonerating* — at the
-~1-in-120 base rate, a clean 100-run is ~43% likely even if the bug is fully
-present (see known-issues.md B-KNULLJUMP UPDATE (f)). The passive tools did not
-catch the wild store, consistent with their known structural blind spot (they
-only see the write if it lands in a parked/poisoned granule; B-KNULLJUMP stomps
-a *live* BTree node). **Bottom line for the operator:** the cheap Path-A tooling
-has been built, hardened, and run at scale without localizing B-KNULLJUMP, so
-the remaining escalation is **Option B (compiler-instrumented KASAN)** — the one
-tool that instruments *every* store and would flag the exact faulting
-instruction. I am **not** starting B unilaterally (it's the costly build fork
-this question is about) and B-KNULLJUMP does not block other roadmap work, so
-I'm moving on to other tasks until you weigh in.
-
-**Where it bites.** `kernel/src/mm/kasan.rs`, `kernel/src/mm/quarantine.rs`,
-`kernel/src/mm/heap.rs` (alloc/free hooks); a compiler-KASAN escalation would
-add `.cargo/config.toml` rustflags (`-Zsanitizer=kernel-address`,
-`-Cllvm-args=-asan-mapping-offset/scale`), a new `__asan_*` runtime module, and
-whole-VA shadow setup in early boot (`main.rs` mm init).
-
-## Q35 — Should promoted fastpy coreutils ever *replace* the Rust coreutils in the shipping /bin, or stay a parallel demonstration track? — Status: OPEN
-
-**Question.** The fastpy `/bin`-promotion (design-decisions.md §87 follow-on) is
-underway: `cat`, `wc`, `head`, `tail` are now installed at `/bin/<cmd>` and run
-as real commands resolved by name. These are **minimal** implementations (e.g.
-`cat` is ~5 lines of Python) — proof-of-pipeline, not feature-complete. SlateOS
-*already* ships 85 mature Rust coreutils (roadmap §2.7). At some point a single
-shipping `/bin` must decide which `cat` (etc.) is *the* `cat`. Do the fastpy
-utilities eventually replace the Rust ones, coexist under different names, or
-remain a demo track that never lands in the real shipping image?
+This is not the same as "may fastpy ever replace a Rust coreutil" — that is
+answered (yes, per command, gated). This is about what a user who never touches
+the setting gets.
 
 **Options.**
 
-- **A — Demonstration track only (current, default).** Keep promoting fastpy
-  commands additively into the *test* rootfs `/bin` to exercise the pipeline, but
-  never let them shadow the Rust coreutils in a production image. *Pro:* zero
-  regression risk to the mature Rust tools; purely additive/reversible. *Con:*
-  the fastpy build pipeline never becomes the *actual* implementation of anything
-  user-facing — it stays a perpetual demo.
-- **B — Fastpy becomes the real implementation, per-command, as each reaches
-  parity.** Grow each fastpy utility to feature parity, then have it *be* the
-  shipping `/bin/<cmd>`, retiring the Rust one. *Pro:* realises the CLAUDE.md
-  "prefer Python via fastpy for userspace tools" guidance; one implementation to
-  maintain. *Con:* large per-command effort to reach parity + the maturity/perf
-  of the Rust tools is thrown away; user-visible behaviour changes; needs a
-  parity bar + test suite per command before any swap.
-- **C — Coexist under distinct names** (e.g. `/bin/pycat`). *Pro:* both available,
-  no collision. *Con:* clutters `/bin`, no clear "which is canonical" story.
+- **A — canonical by default, fastpy opt-in.** *Pro:* a stock install is always
+  the most-exercised code path, so bug reports and performance numbers describe
+  what almost everyone runs; switching is a deliberate act with a deliberate
+  owner. *Con:* the fastpy implementations stay lightly exercised in the field
+  precisely because they are off, which is the same "perpetual demo" trap §108
+  was trying to leave — just one bar higher.
+- **B — fastpy by default wherever it has cleared both bars, canonical opt-out.**
+  *Pro:* the bars are the whole point; if a fastpy utility is genuinely at parity
+  and not slower, defaulting to it is what makes the two bars mean something, and
+  it gets real-world exercise. *Con:* the bars are measured, not proven — a
+  parity suite is not the same as years of field use, and the failure mode is
+  user-visible behaviour changing under people who never asked for it.
+- **C — per-command, decided at promotion time.** Each utility's swap carries its
+  own default, argued on its own evidence. *Pro:* no blanket rule to be wrong
+  about; a `cat` and a package manager are not the same risk. *Con:* no coherent
+  story for a user to hold ("which of my tools are which?"), and it defers the
+  question forever by construction.
 
-**Claude's recommendation.** **A for now** — the current promotions are
-explicitly proof-of-pipeline and I am keeping them additive (no Rust coreutil is
-touched or shadowed). Do **not** silently swap any Rust coreutil for a fastpy one
-— that's a user-visible policy change and belongs to the operator. Revisit
-toward **B** only per-command, and only once a given fastpy utility has a real
-parity test suite. Not blocking: more commands can be promoted additively (track
-A) without resolving this.
+**Claude's recommendation.** None yet, on purpose. Answering this before a
+single fastpy utility has cleared both bars would be answering it without
+evidence — the honest input is *how close to parity the first one actually gets
+and what it measures*, and that does not exist yet. Ask again then.
 
-**Where it bites.** `scripts/create-ext4-rootfs.sh` (`PROMOTED` map — currently
-maps to the *test* rootfs `/bin`), `kernel/src/proc/spawn.rs`
-(`resolve_command`/`COMMAND_PATH`), the fastpy `services/fastpy-*` sources, and
-whatever eventually assembles the *production* rootfs `/bin` vs. the Rust
-coreutils in `userspace/`.
+**Not blocking.** §108 part 1 (additive-only promotion into the test rootfs) is
+the current behaviour and needs no answer here. This question only becomes live
+at the first real swap.
 
----
+**Where it bites.** `scripts/create-ext4-rootfs.sh` (the `PROMOTED` map, and
+whatever assembles the production rootfs `/bin`), `kernel/src/proc/spawn.rs`
+(`resolve_command` / `COMMAND_PATH`), and wherever the opt-in switch ends up
+living — most likely the settings surface rather than a build flag, since §108
+makes it a user choice.
 
-## Q37 — How far should osh's bash parity go when the behavior being matched is an upstream bash *defect*? — Status: OPEN
-
-**Question.** osh is driven toward byte-exact bash 5.2.37 parity, and until now
-every divergence found has turned out to be *designed* bash behavior once its
-source was read. This one is not. `declare -n q='n[1]'; declare q` — a valueless,
-flagless declaration through a reference to an array element — makes bash bind a
-**null value** into `n[1]`. The element list is untouched, but every reader of
-`n` then stops at the null:
-
-```text
-$ n=(a b c); declare -n q='n[1]'; declare q
-$ declare -p n;  echo "${#n[@]} [${!n[@]}] [${n[@]}]";  echo "${n[1]-UNSET}"
-declare -a n
-0 [] []
-UNSET
-$ n[5]=z; declare -p n
-declare -a n=([0]="a" [1]= [2]="c" [5]="z")     # …and they are all still there
-```
-
-It ignores `readonly` (the bind carries `ASS_FORCE`), it turns a scalar base into
-an *empty* array, and it empties an associative one the same way. No other
-bash-level operation can produce a null element, and nothing in the manual or
-the source comments suggests this state was intended — the chain is
-`bind_variable(q, NULL, ASS_FORCE)` → `assign_array_element("n[1]", NULL, …)` →
-`array_insert(a, 1, NULL)`, i.e. a NULL that was never checked for.
-
-Full detail, probes and the reading of the bash source are in
-`known-issues.md` under
-`TD-OILS-A-DECLARATION-WITH-NOTHING-TO-DO-BINDS-A-NULL-THROUGH-THE-REFERENCE`.
-The *read* half of this path (the subscript really is evaluated as arithmetic,
-which is designed behavior) is already implemented and matched.
-
-**Options.**
-
-- **A — Waive it.** Mark the case `EXPECT-DIFF` in the corpus with the reasoning
-  above, and treat "bash's own bugs" as outside the parity target from here on.
-  *Pro:* costs nothing; keeps osh's value model honest (`Str`, never null);
-  a script that relies on this is relying on a state bash cannot explain.
-  *Con:* a divergence a real script could hit, however absurdly; and it sets a
-  precedent that requires judging "bug vs. design" case by case.
-- **B — Reproduce it.** Make the array element type nullable (`Option<Str>`) and
-  teach every reader — listing, `${!a[@]}`, `${#a[@]}`, `${a[@]}`, `${a[i]-D}`,
-  arithmetic reads, `unset`, iteration — to stop at the first null. *Pro:*
-  byte-exact parity with no exceptions, which is the stated goal; the "stop at
-  the first null" rule is at least uniform. *Con:* a large, invasive change to
-  the core value model (`Shell::arrays` / `Shell::assoc` are threaded through
-  most of `interp.rs`) purely to chase a defect; every future reader has to
-  remember the rule; and if bash fixes it upstream the change becomes dead
-  weight that has to be unwound.
-- **C — Reproduce only the observable surface, not the model.** Keep `Str`
-  elements and instead mark the *variable* "poisoned" with a flag that makes the
-  readers report it as empty until the next store. *Pro:* far smaller than B;
-  no change to the element type. *Con:* the flag is a fiction that will not
-  survive the next edge case (bash's `n[5]=z` recovery already needs a rule of
-  its own), i.e. exactly the band-aid CLAUDE.md forbids.
-
-**Claude's recommendation.** **A.** The parity target is worth a great deal, but
-not the core value model, and this is the first divergence where the thing being
-matched is not a behavior at all — it is an unchecked NULL. If you want B I will
-do it (it is a few focused hours, not a blocker), but I would rather spend that
-on the ~20 genuine divergences still open in `known-issues.md`. **Not blocking:**
-the read half is fixed and committed, and the corpus case that covers it omits
-the store cases, so the sweep stays green either way.
-
-**Where it bites.** `userspace/oils/src/interp.rs` —
-`Shell::declare_ref_bind_read` (the read that would have to become a store),
-`Shell::arrays` / `Shell::assoc` and every reader of them. Probes:
-`/d/tmp/hh/bo.sh` (T-series), `/d/tmp/hh/bp.sh` (U-series).
-
-## Q38 — Add antivirus exclusions so the osh corpus sweep is runnable again? — Status: OPEN
-
-**Question.** Process creation on this machine currently costs **~390 ms per
-spawn** through the MSYS runtime — roughly 20× normal, and stable across
-back-to-back measurements. `bash -c 'for i in $(seq 1 100); do /usr/bin/true;
-done'` takes 36–41 s. That makes `scripts/osh-bash-diff.py` unusable: the sweep
-of 2026-08-06 05:58 produced seven failures that were all `status: bash=-1`
-(the *reference* shell timing out with osh completing correctly), and the
-failures cascade, because each timed-out case leaves its bash tree behind.
-Individual cases that should take a second now take 13–53 s against a 20 s
-budget. Full measurements are in `known-issues.md` under
-`TD-OILS-CORPUS-SWEEP-IS-UNRUNNABLE-WHEN-PROCESS-SPAWN-LATENCY-SPIKES`.
-
-Windows Defender real-time protection is on and its exclusion list cannot be
-read or written without admin — hence this question rather than a fix.
-
-**Options.**
-
-- **A — Add Defender exclusions** for `C:\Program Files\Git\usr\bin\`, the
-  repo's `target\` tree, and `osh.exe`. *Pro:* directly targets the most likely
-  cause (real-time scanning of every short-lived MSYS process); restores the
-  sweep as a trustworthy gate, which is the only cross-checking tool osh parity
-  work has. *Con:* needs admin; narrows AV coverage over a build tree and a
-  shell — a real, if small, security tradeoff, and one on paths that execute
-  downloaded toolchain code.
-- **B — Diagnose further before excluding anything.** The cause is not proven:
-  Defender was equally on during the green 444-case sweep at 05:15 the same
-  morning, so something *changed*. *Pro:* avoids weakening AV for a guess.
-  *Con:* costs operator time, and the sweep stays unusable meanwhile.
-- **C — Live with it.** Rely on the 1384-case unit suite plus targeted
-  single-case corpus runs, and treat full sweeps as occasional. *Pro:* free.
-  *Con:* the unit suite does not compare against real bash at all; single-case
-  runs cannot catch a regression in a case you did not think to run.
-
-**Claude's recommendation.** **A**, scoped as narrowly as it will go — ideally
-a *process* exclusion for `bash.exe`/`osh.exe` rather than blanket path
-exclusions, which keeps file scanning intact. If you would rather not touch
-Defender at all, **C** is survivable and is what I am doing meanwhile.
-**Not blocking:** I discriminate `bash=-1` timeouts from real regressions by
-timing the case under bash alone, and there is plenty of unblocked parity work
-(~42 open `TD-OILS-*` entries).
-
-**Where it bites.** `scripts/osh-bash-diff.py` (`CASE_TIMEOUT = 20`, the
-`# TIMEOUT: N` per-case override) and every `userspace/oils/tests/corpus/*.sh`
-that spawns externals. Note the proper fix is *not* raising `CASE_TIMEOUT`:
-that would make every genuine hang cost minutes instead of seconds.
-
-## Q38 — Should osh be locale-aware, or UTF-8-only? — Status: OPEN
-
-**Question.** bash decides *per locale* whether a string is a sequence of bytes
-or of characters: every multibyte site is behind `HANDLE_MULTIBYTE` and calls
-`mbrlen`/`mbstate`, so `${#s}` on `a…b` is 5 under `LC_ALL=C` and 3 under
-`LC_ALL=C.UTF-8`. osh has no such switch — it always does UTF-8 character
-semantics. Should osh grow one?
-
-This surfaced because `scripts/osh-bash-diff.py:274` pins `LC_ALL=C` for both
-shells (deliberately, for a reproducible environment). So today, on any
-multibyte input, osh is compared against a bash doing byte semantics — a
-baseline osh was never built for. No corpus case had exercised it until one
-happened to put a `…` inside a `printf '%-46s'` label.
-
-**Options.**
-
-- **A — osh is UTF-8-only; move the harness to `LC_ALL=C.UTF-8`.**
-  *Pros:* one line of harness change; osh's existing behaviour becomes correct
-  by definition; UTF-8 is the only locale a modern desktop OS ships, and this OS
-  targets exactly that; no new state on every string operation.
-  *Cons:* a real bash under `LC_ALL=C` is then not reproducible by osh at all,
-  so that whole axis of bash's behaviour goes untested and undocumented; scripts
-  that set `LC_ALL=C` for speed or determinism — a common idiom — would get
-  different answers from osh than from bash.
-
-- **B — make osh locale-aware, as bash is.**
-  *Pros:* actually matches bash, which is the project's stated goal; makes
-  `LC_ALL` observable the way every other shell variable is; lets the corpus
-  test both axes.
-  *Cons:* touches every character-counting site (`${#v}`, `${v:off:len}`,
-  `${v^^}`/`${v,,}`, `printf %q`, `\u`/`\U`, `select`'s `display_width`, and
-  plausibly globbing and `[[ =~ ]]`); needs a locale notion threaded through
-  `bytes.rs`, which is currently free functions with no state; and the C locale
-  is the *easy* half — a non-UTF-8 multibyte locale would be far worse, so the
-  honest scope is "C vs UTF-8", not "all locales".
-
-**Claude's recommendation.** **A**, with the scope of B written down. The OS
-this shell ships in is UTF-8 throughout, and B's cost is spread across the whole
-string layer for an axis nothing in the OS will exercise. But A is a real
-narrowing of the fidelity goal, which is the operator's call, not mine — so I
-have changed nothing and am leaving the harness on `LC_ALL=C`.
-
-**Not blocking.** In the meantime I keep multibyte strings out of
-character-counting positions in corpus cases, which costs nothing. Note that
-`printf`'s field width and `%c` are *not* part of this question: those are
-byte-counted in every locale (bash hands them to C — `PF`, printf.def:124;
-`getchr`, printf.def:1165), they were genuine osh bugs, and they are now fixed
-and pinned by a corpus case verified identical under both locales.
-
-**Where it bites.** `scripts/osh-bash-diff.py:274`;
-`userspace/oils/src/bytes.rs` (`char_count`, `char_slice`, `char_at`) and its
-callers. Tracked as
-`TD-OILS-THE-CORPUS-HARNESS-RUNS-THE-REFERENCE-BASH-IN-THE-C-LOCALE` in
-`known-issues.md`.
-
-**Why this is a fork and not a bug list.** `printf %q` on a byte that is no
-character shows it cleanly. bash's `ansic_shouldquote` sends any non-basic byte
-to `ansic_wshouldquote`, which quotes when `mbstowcs` fails: under UTF-8 `a\xffb`
-does not decode and bash writes `$'a\377b'`, but under C every byte is a
-character and bash writes the raw `a\xffb`. osh writes the raw form — so osh is
-*correct against the harness as configured today* and incorrect against a UTF-8
-bash. There is no edit to osh that is right under both; only choosing A or B
-makes one of them the answer. That is precisely why I have not touched it.
 
 ---
 
 Recently resolved (see `design-decisions.md` for the full rationale):
+
+- Q38 Should osh be locale-aware, or UTF-8-only? — resolved 2026-08-07 (§104):
+  **option A — osh is UTF-8-only**, and `scripts/osh-bash-diff.py` moves to a
+  UTF-8 locale so the reference bash agrees. The rejected scope (making osh
+  locale-aware as bash is) stays written down in `known-issues.md` under
+  `TD-OILS-THE-CORPUS-HARNESS-RUNS-THE-REFERENCE-BASH-IN-THE-C-LOCALE`, at the
+  operator's request, so a future change of mind starts from a survey.
+
+- Q38 Add antivirus exclusions so the osh corpus sweep is runnable again? —
+  resolved 2026-08-07 (§106): **option A**, scoped to *process* exclusions for
+  `bash.exe` and `osh.exe` rather than blanket path exclusions. The command
+  itself still needs an elevated shell and is written out in §106.
+
+- Q37 How far osh's bash parity goes when the behaviour is an upstream bash
+  *defect* — resolved 2026-08-07 (§105): **option A — waive it.** A divergence
+  is waivable only when the bash side has been traced to its source and found
+  to be an unchecked error path with nothing suggesting intent; anything short
+  of that is designed behaviour and gets matched.
+
+- Q35 Whether promoted fastpy coreutils replace the Rust ones — resolved
+  2026-08-07 (§108): **option A for now**, with a stated trajectory toward B
+  per command, gated on a parity suite *and* a performance bar, and surfaced as
+  a user opt-in rather than a silent swap. fastpy's scope is explicitly not
+  coreutils — the operator's intent is OS functions such as a file explorer or
+  a settings dialog. The remaining sub-question (which way the shipping default
+  points) is carried forward as Q39.
+
+- Q34 Escalate to a full compiler-instrumented KASAN kernel to catch
+  B-KNULLJUMP? — resolved 2026-08-07 (§107): **option B.** The lighter shadow +
+  quarantine path was built, hardened and run at scale (100/100 clean, which is
+  inconclusive at a ~1-in-120 base rate) without localizing the wild store, so
+  the escalation lands as a separate instrumented debug build profile.
 
 - Q36 How osh splits `$PATH` on the Windows dev host — resolved 2026-08-04
   (§103): **option B — split at the `$PATH` boundary only, with a drive-letter

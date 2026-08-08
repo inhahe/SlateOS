@@ -642,6 +642,73 @@ pub struct RawLine {
     pub line: u32,
 }
 
+/// Which of bash's two input readers a piece of shell source arrived through.
+///
+/// The distinction is `bash_input.type` (parse.y), and it is observable at
+/// exactly one place: how the reader closes a last line that has no newline of
+/// its own. See [`close_last_line`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputKind {
+    /// `st_stream` — the script file named on the command line, or stdin (the
+    /// REPL, a pipe, `-s`). bash's `reader_loop` reads these.
+    Stream,
+    /// `st_string` — everything `parse_and_execute` runs: the `-c` command
+    /// string, an `eval` argument, a `.`/`source`d file (read whole, then parsed
+    /// as a string), a trap action, a `mapfile -C` callback, an `fc` replay.
+    Str,
+}
+
+/// Close the last line of an input the way bash's reader does.
+///
+/// `shell_getc` (parse.y) reads one physical line at a time and, before any
+/// scanner sees it, writes back the newline the line did not come with
+/// (parse.y:2567):
+///
+/// ```c
+///   /* Add the newline to the end of this string, iff the string does
+///      not already end in an EOF character.  */
+///   if (shell_input_line_terminator != EOF)
+///     {
+///       /* Don't add a newline to a string that ends with a backslash if we're
+///          going to be removing quoted newlines, since that will eat the
+///          backslash.  Add another backslash instead (will be removed by
+///          word expansion). */
+///       if (bash_input.type == st_string && expanding_alias() == 0 &&
+///           last_was_backslash && c == EOF && remove_quoted_newline)
+///         shell_input_line[shell_input_line_len] = '\\';
+///       else
+///         shell_input_line[shell_input_line_len] = '\n';
+///     }
+/// ```
+///
+/// So a file that stops mid-line is read as though it ended in a newline — and
+/// a final `\` in it is therefore a line continuation, joining it to an input
+/// that is not there. `printf 'echo two\' > f; bash f` prints `two`.
+///
+/// A *string* is the exception, and only when its last backslash is unescaped
+/// (`last_was_backslash` is the parity of the trailing run, being reset by every
+/// other character). Closing it with a newline would make that backslash a
+/// continuation too and eat it, so bash closes it with a second backslash
+/// instead: the pair is one quoted, literal backslash. `bash -c 'echo two\'`
+/// prints `two\`, and `bash -c 'esac\'` sees the *word* `esac\` rather than the
+/// reserved word `esac`.
+///
+/// The two rules are applied in that order — a stream input is newline-closed
+/// first, which leaves nothing for the string rule to do — so every input the
+/// rest of the shell parses ends in a newline or in an escaped backslash.
+#[must_use]
+pub fn close_last_line(src: BStr<'_>, reader: InputKind) -> std::borrow::Cow<'_, [u8]> {
+    if src.is_empty() || src.last() == Some(&b'\n') {
+        return std::borrow::Cow::Borrowed(src);
+    }
+    // `last_was_backslash` toggles on `\` and is cleared by anything else, so
+    // what it holds at end of input is the parity of the trailing run.
+    let odd_backslash = src.iter().rev().take_while(|&&b| b == b'\\').count() % 2 == 1;
+    let mut owned = src.to_vec();
+    owned.push(if reader == InputKind::Str && odd_backslash { b'\\' } else { b'\n' });
+    std::borrow::Cow::Owned(owned)
+}
+
 pub struct IncrementalParser {
     /// The source, kept for re-lexing the tail when [`ParseOpts`] change. Held as
     /// characters because the offsets recorded by the lexer are char indices —

@@ -6988,10 +6988,25 @@ impl Shell {
             .unwrap_or_else(|| self.shopt_default("expand_aliases"))
     }
 
-    /// Parse and execute `src` as *top-level* shell input (the `-c` string, a
-    /// script file, or one logical REPL command), returning its exit status.
+    /// Parse and execute `src` as *top-level* shell input — a script file, or
+    /// one logical REPL command — returning its exit status.
+    ///
+    /// This is bash's `reader_loop`, reading `st_stream`. The `-c` string is
+    /// **not** this: it goes to [`Shell::run_command_string`], because bash runs
+    /// it through `parse_and_execute` as an `st_string`, and the two readers
+    /// close an unterminated last line differently (see
+    /// [`crate::parser::close_last_line`]).
     pub fn run_source(&mut self, src: BStr<'_>) -> i32 {
         self.run_source_at(src, 0)
+    }
+
+    /// `bash -c 'string'`: bash's `run_one_command`, which is `parse_and_execute`
+    /// on an `st_string` — so a trailing unescaped backslash in the string is a
+    /// literal backslash rather than a line continuation. See
+    /// [`crate::parser::close_last_line`].
+    pub fn run_command_string(&mut self, src: BStr<'_>) -> i32 {
+        let mut out = Out::Inherit;
+        self.run_top_flow(src, &mut out, &LineMap::Offset(0))
     }
 
     /// [`Shell::run_source`] for input that is a *fragment* of a longer stream:
@@ -7080,18 +7095,22 @@ impl Shell {
     /// [`Shell::run_source`] with an explicit stdout sink, so a caller that
     /// captures the shell's output (the test harness) sees it.
     ///
-    /// This is the outermost entry point, so a `Flow::Exit` reaching it has
-    /// unwound everything there is to unwind: it collapses to the returned
-    /// status *and* latches [`Shell::exit_requested`] so the read-eval loop
-    /// stops reading further input.
+    /// The stream reader's own step happens here: bash's `shell_getc` gives a
+    /// last line that came without one a newline of its own, which is what makes
+    /// a `\` at end of file a line continuation rather than a backslash. See
+    /// [`crate::parser::close_last_line`].
     fn run_source_out(&mut self, src: BStr<'_>, out: &mut Out, line_base: u32) -> i32 {
-        match self.run_source_flow_out(
-            src,
-            out,
-            &StdinSrc::Inherit,
-            &LineMap::Offset(line_base),
-            HistRead::Reader,
-        ) {
+        let src = crate::parser::close_last_line(src, crate::parser::InputKind::Stream);
+        self.run_top_flow(&src, out, &LineMap::Offset(line_base))
+    }
+
+    /// The outermost entry point's flow handling, shared by the two readers: a
+    /// `Flow::Exit` reaching here has unwound everything there is to unwind, so
+    /// it collapses to the returned status *and* latches
+    /// [`Shell::exit_requested`] so the read-eval loop stops reading further
+    /// input.
+    fn run_top_flow(&mut self, src: BStr<'_>, out: &mut Out, map: &LineMap) -> i32 {
+        match self.run_source_flow_out(src, out, &StdinSrc::Inherit, map, HistRead::Reader) {
             Flow::Exit(code) => {
                 self.exit_requested = true;
                 self.last_status = code;
@@ -7156,9 +7175,18 @@ impl Shell {
         // POSIX special-builtin usage rule: `eval 'unset -q' || true` ends the
         // shell, `eval 'unset -q || true'` does not. See
         // [`Shell::usage_suppress`].
+        //
+        // Being `parse_and_execute` is also what fixes the reader: its input is
+        // an `st_string`, so a last line that ends in an unescaped backslash is
+        // closed with a *second* backslash rather than a newline, and the pair
+        // is a literal backslash instead of a continuation. `eval 'echo two\'`
+        // prints `two\`. A stream reader closed its input with a newline before
+        // it ever got here, so for the top-level read this is a no-op. See
+        // [`crate::parser::close_last_line`].
+        let src = crate::parser::close_last_line(src, crate::parser::InputKind::Str);
         let outer_usage_suppress = std::mem::take(&mut self.usage_suppress);
         let mut ran = false;
-        let flow = self.run_source_flow_units(src, out, stdin, map, hist, &mut ran);
+        let flow = self.run_source_flow_units(&src, out, stdin, map, hist, &mut ran);
         self.usage_suppress = outer_usage_suppress;
         // bash's `last_result` starts at success and is written only inside the
         // loop, so an input the loop never entered is a success — whatever `$?`
@@ -56265,6 +56293,44 @@ mod tests {
         };
         let buf = take_capture(&buf);
         (String::from_utf8_lossy(&buf).into_owned(), status)
+    }
+
+    #[test]
+    fn the_two_readers_close_an_unterminated_last_line_differently() {
+        // bash's reader hands the scanner a last line that came without a
+        // newline of its own — except that a *string* whose last backslash is
+        // unescaped is closed with a second backslash instead, since a newline
+        // there would be eaten as a continuation and take the backslash with it
+        // (parse.y:2567). See [`crate::parser::close_last_line`].
+        //
+        // `run` is the stream reader (a script file), so here the trailing
+        // backslash is a continuation onto an input that is not there.
+        assert_eq!(run("echo 1\necho two\\").0, "1\ntwo\n");
+        assert_eq!(run("echo two\\\\").0, "two\\\n");
+        assert_eq!(run("echo two\\\\\\").0, "two\\\n");
+        // `eval` is the string reader, and keeps the backslash — quoted, so it
+        // survives expansion as one literal backslash.
+        assert_eq!(run("eval 'echo two\\'").0, "two\\\n");
+        assert_eq!(run("eval 'echo two\\\\'").0, "two\\\n");
+        assert_eq!(run("eval 'echo two\\\\\\'").0, "two\\\\\n");
+        // It is the *word* that gains the backslash, so what the word says
+        // changes too: `esac\` is no longer the reserved word, and the `case`
+        // is left unfinished. (Only the status is pinned here: the diagnostic
+        // bash prints for it — `syntax error: unexpected end of file`, at a
+        // line two past the input's last — still differs. See
+        // TD-OILS-A-CONTINUATION-AT-END-OF-INPUT-DOES-NOT-MOVE-THE-READER.)
+        assert_eq!(run("eval 'case a in a) echo hit;; esac\\' 2>/dev/null\necho rc=$?").0, "rc=2\n");
+        assert_eq!(run("eval 'case a in a) echo hit;; esac'").0, "hit\n");
+        // A `.`/`source`d file is read as a string too — bash reads it whole
+        // and hands it to `parse_and_execute` — so it keeps the backslash a
+        // script *file* of the same bytes would drop.
+        assert_eq!(run("printf 'echo two\\\\' >f\n. ./f").0, "two\\\n");
+        // An input that already ends in a newline is closed by neither rule,
+        // and one that ends in an *even* run of backslashes has no live
+        // continuation for the newline to eat, so both readers agree.
+        for src in ["echo two\\\\", "echo two\n", "echo two"] {
+            assert_eq!(run(src).0, run(&format!("eval '{src}'")).0, "{src:?}");
+        }
     }
 
     /// The REPL's multi-line continuation gate ([`Shell::parse_incomplete`]):

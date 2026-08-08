@@ -587,7 +587,11 @@ fn run(args: &[Str], stack_size: usize) -> i32 {
         status
     } else {
         match plan {
-            Plan::Command(command) => sh.run_source(command),
+            // `-c` is bash's `run_one_command`: `parse_and_execute` on a
+            // *string*, not the stream `reader_loop` a script file gets. The
+            // two close an unterminated last line differently, so `-c 'echo x\'`
+            // keeps the backslash where a file of the same bytes drops it.
+            Plan::Command(command) => sh.run_command_string(command),
             // The script is opened only now: bash reads the startup files first,
             // so `osh -l nosuchfile` runs `~/.bash_profile` before reporting 127.
             // The path is opened as *bytes*, so a script whose name is not text

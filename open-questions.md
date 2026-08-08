@@ -76,6 +76,77 @@ whatever assembles the production rootfs `/bin`), `kernel/src/proc/spawn.rs`
 living — most likely the settings surface rather than a build flag, since §108
 makes it a user choice.
 
+## Q40 — Should osh reproduce bash's *null array element*, which looks like an upstream defect? — Status: OPEN
+
+**Question.** osh (`userspace/oils`) is held to byte-fidelity with bash 5.2.37.
+One measured bash behaviour is reachable only through a nameref and appears to
+be a bug rather than a design: a valueless `declare` on a nameref that points at
+an array *element* stores a **null pointer** in that element, and every later
+reader of the array trips over it.
+
+```text
+$ n=(a b c); declare -n q='n[1]'; declare q
+$ declare -p n                      # bash: declare -a n
+$ echo "${#n[@]} [${!n[@]}] [${n[@]}]"   # bash: 0 [] []
+$ echo "${n[1]-UNSET}"              # bash: UNSET
+$ n[5]=z; declare -p n              # bash: declare -a n=([0]="a" [1]= [2]="c" [5]="z")
+```
+
+The array reads as empty while its elements are demonstrably still there; one
+store past the end makes the readers able to walk it again. The path is
+`bind_variable("q", NULL, ASS_FORCE)` → `bind_variable_internal` →
+`assign_array_element("n[1]", NULL, …)` → `make_array_variable_value` returns
+`NULL` → `array_insert(…, NULL)`. The same happens to an associative base, to a
+scalar base, and — because the bind carries `ASS_FORCE` — to a **readonly** one,
+with no `readonly variable` reported.
+
+**Options.**
+
+- **A — reproduce it.** osh's array element type becomes `Option<Str>`, and every
+  reader (`declare -p` listing, `${!a[@]}`, `${#a[@]}`, `${a[@]}`, `${a[i]-D}`,
+  iteration, `unset`, …) learns to stop at the first null. *Pro:* byte-fidelity
+  is the project's stated bar, and this is the only place the bar is knowingly
+  not met for a *measured* behaviour; whatever a real script does that lands here
+  keeps working the same way. *Con:* a large, invasive change to the core value
+  model — every array reader in `interp.rs` — bought entirely to preserve a state
+  no bash-level operation can otherwise produce or explain. It would make the
+  value model permanently harder to reason about for the sake of a defect, and if
+  bash ever fixes it the change becomes dead weight that must be unwound.
+- **B — do not reproduce it; waive it in the corpus.** osh keeps `Str` elements
+  and the array reads normally (`declare -a n=([0]="a" [1]="b" [2]="c")`). *Pro:*
+  no cost, and the divergence is confined to a construct that is hard to reach on
+  purpose. *Con:* a knowing, documented deviation from measured bash — the first
+  of its kind in oils, which so far has treated "the measurement wins" as
+  absolute. Once one exists, "is this one worth reproducing?" becomes a judgement
+  call on every future oddity rather than a settled rule.
+- **C — reproduce only the *visible* half.** Make the element read as unset
+  without a nullable element type (e.g. an out-of-band "poisoned index" marker
+  the readers stop at). *Pro:* much smaller than A. *Con:* it is a second,
+  parallel representation of emptiness that exists for one construct, and it has
+  to be threaded through the same readers anyway — most of A's cost for a less
+  honest model.
+
+**Claude's recommendation.** **B** — do not reproduce it, waive it in the corpus,
+and keep the full write-up in `known-issues.md` so the decision is reversible if
+a real script is ever found that depends on it. The behaviour is not documented,
+not otherwise reachable, and leaves the array in a state bash itself cannot
+describe; paying a core-value-model refactor for it inverts the usual
+cost/benefit. But this is the operator's call precisely because it sets the
+precedent for *whether byte-fidelity has an "unless it's a bug" clause at all* —
+and that is a policy, not a bug fix.
+
+**Meanwhile.** osh does the sane thing (the array keeps its elements). Nothing is
+blocked; the corpus case
+`a-declaration-with-nothing-to-do-evaluates-the-subscript-the-reference-carries.sh`
+covers the *evaluated-subscript* half, which osh does match, and stops short of
+the store.
+
+**Where it bites.** `userspace/oils/src/interp.rs` —
+`Shell::declare_ref_bind_read` (the read with no store), `Shell::arrays` /
+`Shell::assoc` (element type `Str`), and every array reader named under option A.
+Full write-up:
+`known-issues.md` → `TD-OILS-A-DECLARATION-WITH-NOTHING-TO-DO-BINDS-A-NULL-THROUGH-THE-REFERENCE`.
+
 
 ---
 

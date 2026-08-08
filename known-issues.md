@@ -5698,7 +5698,7 @@ What that bind then *stores* is still not modelled — see
 `TD-OILS-A-DECLARATION-WITH-NOTHING-TO-DO-BINDS-A-NULL-THROUGH-THE-REFERENCE`
 below.
 
-### TD-OILS-A-DECLARATION-WITH-NOTHING-TO-DO-BINDS-A-NULL-THROUGH-THE-REFERENCE. `declare -n q='n[1]'; declare q` makes bash's `n` read as empty — 2026-08-06 — OPEN
+### TD-OILS-A-DECLARATION-WITH-NOTHING-TO-DO-BINDS-A-NULL-THROUGH-THE-REFERENCE. `declare -n q='n[1]'; declare q` makes bash's `n` read as empty — 2026-08-06 — OPEN, operator-gated (`open-questions.md` Q40)
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::declare_ref_bind_read` reads
 the element the reference designates but performs no store; the store would have
@@ -5742,8 +5742,10 @@ left in a state no bash-level operation can produce or explain. Reproducing it
 would mean making osh's element type nullable (`Option<Str>`) and teaching every
 array reader — listing, `${!a[@]}`, `${#a[@]}`, `${a[@]}`, `${a[i]-D}` — to stop
 at the first null, which is a large change to the value model in service of a
-defect. **Ask the operator before doing it** (`open-questions.md`), and prefer
-waiving it in the corpus if the answer is no. Probes: `/d/tmp/hh/bo.sh` (T-series)
+defect. **Asked** — `open-questions.md` **Q40**, with the three options (reproduce
+it, waive it, or reproduce only the visible half) and the recommendation to
+waive. Nothing here is blocked on the answer; osh does the sane thing meanwhile
+and the array keeps its elements. Probes: `/d/tmp/hh/bo.sh` (T-series)
 and `/d/tmp/hh/bp.sh` (U-series).
 
 ### TD-OILS-AN-ARRAY-A-FAILED-ELEMENT-STORE-BROUGHT-INTO-BEING-IS-INVISIBLE-IN-OSH-AND-VISIBLE-IN-BASH. `declare 'z[]=v'` leaves `declare -a z=()` in bash and `declare -a z` in osh — 2026-08-06 — ✅ FIXED 2026-08-06

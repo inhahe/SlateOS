@@ -23,12 +23,38 @@ pub struct Program {
     pub items: Vec<Item>,
 }
 
+/// How one item is joined to the next — bash's `CONNECTION` connector.
+///
+/// bash builds a list as a tree of `Connection` nodes whose `connector` is one
+/// of `&`, `;` or `\n`, and its deparser prints all three differently
+/// (print_cmd.c:296–326): `&` runs the next command in inline (` & `), `;` is
+/// `"; "` outside a function definition and `";\n"` inside one, and a `\n` is
+/// *kept* as a newline while the printer is re-printing a command substitution
+/// (`printing_comsub`). So `$(echo a; echo b)` comes back on one line and
+/// `$(echo a<newline>echo b)` comes back on two, and the difference is not
+/// recoverable from the line numbers: a `;` followed by a newline is still a
+/// `;` connector.
+///
+/// osh's list is flat, so the separator is kept on the item it *followed*,
+/// which carries the same information. The last item's separator is never a
+/// connector — bash's grammar reduces a trailing `;` through `list_terminator`,
+/// building no node — so it only ever matters for a non-final item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ItemSep {
+    /// `;`, or no separator at all: the two parse alike and print alike.
+    Semi,
+    /// A newline.
+    Newline,
+    /// `&` — the item runs asynchronously.
+    Amp,
+}
+
 /// One top-level item: an and-or list plus how it was terminated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
     pub list: AndOr,
-    /// `true` when the item ended with `&` (run asynchronously).
-    pub background: bool,
+    /// How this item was separated from the one after it.
+    pub sep: ItemSep,
     /// 1-based source line on which this item begins. Used to maintain the
     /// `$LINENO` special parameter as the interpreter executes each item. The
     /// line is taken from the lexer's per-token line stamp (see
@@ -37,6 +63,14 @@ pub struct Item {
     /// substitution. (Line tracking is per-item, not per-simple-command; see
     /// known-issues TD-OILS20 for the remaining per-command-granularity gap.)
     pub line: u32,
+}
+
+impl Item {
+    /// Whether the item runs asynchronously — it ended with `&`.
+    #[must_use]
+    pub fn is_background(&self) -> bool {
+        self.sep == ItemSep::Amp
+    }
 }
 
 /// A pipeline joined to further pipelines by `&&` / `||`, evaluated

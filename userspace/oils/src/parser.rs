@@ -31,7 +31,7 @@ use crate::ast::{
     CaseTerm, CmdSubBody,
     Command,
     CondBinOp, CondBinary, CondUnary, DeclArray,
-    CondExpr, ForArithClause, ForClause, FunctionDef, HereDoc, IfClause, Item, LineMap,
+    CondExpr, ForArithClause, ForClause, FunctionDef, HereDoc, IfClause, Item, ItemSep, LineMap,
     LoopClause,
     ParamOp,
     Pipeline, Program,
@@ -2897,15 +2897,19 @@ impl Parser {
         // for any newlines hidden inside earlier tokens).
         let line = self.cur_line();
         let list = self.parse_and_or()?;
-        let mut background = false;
+        // Which of the three bash keeps as the connector matters to the
+        // deparser, not to execution: see [`ItemSep`]. No separator at all
+        // records as `Semi`, which is what it parses and prints as.
+        let mut sep = ItemSep::Semi;
         let mut had_sep = false;
         match self.peek() {
             Some(Tok::Op(Op::Amp)) => {
-                background = true;
+                sep = ItemSep::Amp;
                 had_sep = true;
                 self.pos += 1;
             }
             Some(Tok::Newline) => {
+                sep = ItemSep::Newline;
                 had_sep = true;
                 self.pos += 1;
             }
@@ -2931,7 +2935,7 @@ impl Parser {
                 return Err(self.unexpected_here());
             }
         }
-        Ok(Some(Item { list, background, line }))
+        Ok(Some(Item { list, sep, line }))
     }
 
     fn parse_and_or(&mut self) -> Result<AndOr, ParseError> {
@@ -3308,7 +3312,9 @@ impl Parser {
                         },
                         rest: Vec::new(),
                     },
-                    background: false,
+                    // The sole item of a body: never a connector, so `Semi` —
+                    // the separator that prints as nothing.
+                    sep: ItemSep::Semi,
                     line,
                 }],
             });
@@ -3617,15 +3623,16 @@ impl Parser {
             }
             let line = self.cur_line();
             let list = self.parse_and_or()?;
-            let mut background = false;
+            let mut sep = ItemSep::Semi;
             let mut had_sep = false;
             match self.peek() {
                 Some(Tok::Op(Op::Amp)) => {
-                    background = true;
+                    sep = ItemSep::Amp;
                     had_sep = true;
                     self.pos += 1;
                 }
                 Some(Tok::Newline) => {
+                    sep = ItemSep::Newline;
                     had_sep = true;
                     self.pos += 1;
                 }
@@ -3668,7 +3675,7 @@ impl Parser {
                     return Err(self.unexpected_here());
                 }
             }
-            items.push(Item { list, background, line });
+            items.push(Item { list, sep, line });
         }
         Ok(Program { items })
     }

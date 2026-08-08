@@ -6680,7 +6680,7 @@ impl Shell {
         let src = bfmt![name, b" ", value];
         let def = match crate::parser::parse(&src) {
             Ok(prog) => match prog.items.as_slice() {
-                [item] if item.list.rest.is_empty() && !item.background => {
+                [item] if item.list.rest.is_empty() && !item.is_background() => {
                     match item.list.first.commands.as_slice() {
                         [Command::Function(f)] => Some(f.clone()),
                         _ => None,
@@ -8028,7 +8028,7 @@ impl Shell {
             // [`TrackedCoproc::born_item`].
             self.item_seq = self.item_seq.wrapping_add(1);
             self.current_line = item.line;
-            if item.background {
+            if item.is_background() {
                 // The DEBUG trap hears about the job here, in the parent, before
                 // it is started — see [`Shell::announce_async`].
                 let announced = match self.announce_async(&item.list, out, stdin) {
@@ -27819,7 +27819,7 @@ impl Shell {
             return None;
         }
         let item = &prog.items[0];
-        if item.background || !item.list.rest.is_empty() {
+        if item.is_background() || !item.list.rest.is_empty() {
             return None;
         }
         let pipe = &item.list.first;

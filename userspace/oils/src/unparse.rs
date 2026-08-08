@@ -174,7 +174,7 @@ fn program_block(prog: &Program, level: Indent, terminate_last: bool) -> Str {
         // indent an item that begins a fresh line: the first, or one whose
         // predecessor was not backgrounded. (TD-OILS-DECLAREF-QUIRKS item 3.)
         let mut stmt = Str::new();
-        if i == 0 || !prog.items[i - 1].background {
+        if i == 0 || !prog.items[i - 1].is_background() {
             stmt.push_str(&level.spaces());
         }
         stmt.push_str(&item_stmt(item, level));
@@ -183,7 +183,7 @@ fn program_block(prog: &Program, level: Indent, terminate_last: bool) -> Str {
         // the very next line) and leaves a blank line after the delimiter.
         let trailing_here = last_line_has_here_doc(&stmt);
         let is_last = i + 1 == n;
-        if item.background {
+        if item.is_background() {
             // `item_stmt` already emitted the trailing ` &`; connect the next
             // statement inline with a space, and only break the line when this
             // backgrounded item is the last in the block.
@@ -211,7 +211,7 @@ pub fn program_inline(prog: &Program) -> Str {
     let mut parts: Vec<Str> = Vec::new();
     for item in &prog.items {
         let mut s = and_or_inline(&item.list);
-        if item.background {
+        if item.is_background() {
             s.push_str(" &");
         }
         parts.push(s);
@@ -224,7 +224,7 @@ pub fn program_inline(prog: &Program) -> Str {
 /// are indented to `level`.
 fn item_stmt(item: &Item, level: Indent) -> Str {
     let mut s = and_or_block(&item.list, level);
-    if item.background {
+    if item.is_background() {
         s.push_str(" &");
     }
     s

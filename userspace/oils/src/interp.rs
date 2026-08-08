@@ -17499,6 +17499,24 @@ impl Shell {
         // is expanded with no name in force at all. See
         // [`Shell::expand_cmd`].
         self.expand_cmd = None;
+        // The arithmetic-error tag is the *same* `this_command_name`, blanked by
+        // the same line of bash (`execute_simple_command`'s `return_result:`,
+        // `this_command_name = (char *)NULL; /* points to freed memory now */`),
+        // so it has to be blanked here too. It shows when a builtin runs shell
+        // code and only *then* raises an arithmetic error: the code it ran was a
+        // simple command, and returning from that command took the name away.
+        //
+        //   declare -ai q
+        //   mapfile -t -C 'echo cb' -c 1 q <<< $'1+1\nq+'
+        //   # q+: syntax error … — not `mapfile: q+: …`
+        //
+        // A command substitution does *not* do this, and must not: bash forks
+        // for one, so the child's blanking never reaches the parent and
+        // `let "x=$(echo 1)+"` is still tagged `let`. osh runs a substitution in
+        // this same process, so the bracketing that keeps it invisible is
+        // [`Shell::eval_arith_raw`]'s, which lifts the tag across the expansion
+        // and puts it back. See [`Shell::arith_cmd`].
+        self.arith_cmd = None;
         // Whatever the command was — a function whose body refused a `for`
         // variable, an `eval` of one, or something else entirely — the status it
         // hands back is its own, and an ordinary failure. See
@@ -76575,6 +76593,71 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             o,
             "osh: getopts: ?: syntax error: operand expected (error token is \"?\")\n"
+        );
+    }
+
+    /// …but the signature is not the builtin's for as long as the builtin runs.
+    /// bash's `this_command_name` is one global that `execute_simple_command`
+    /// *blanks* on the way out (`return_result:`, `this_command_name =
+    /// (char *)NULL; /* points to freed memory now */`) rather than putting the
+    /// old one back, so **running any simple command takes the signature away**
+    /// — and a builtin that runs shell code and only then complains complains
+    /// unsigned.
+    ///
+    /// `mapfile -C` is the reachable case: the callback is a whole command, so
+    /// by the time the line it was called for is stored the name is gone.
+    #[test]
+    fn running_a_command_takes_the_builtins_signature_away() {
+        // The callback runs a simple command, so the store that follows it is
+        // unsigned — where the very same store one line earlier, before any
+        // callback has run, still carries `mapfile`.
+        let (o, _) = run(
+            "declare -ai q; { mapfile -t -C 'echo cb' -c 1 q <<< $'1+1\\nq+'; } 2>&1"
+        );
+        assert_eq!(
+            o,
+            "cb 0 1+1\ncb 1 q+\n\
+             osh: q+: syntax error: operand expected (error token is \"+\")\n"
+        );
+        // Any simple command will do it — a builtin, a function, even a command
+        // word that is not found at all. (bash reaches `return_result:` on a
+        // failed lookup too.)
+        for cb in ["true", ":", "f", "no-such-command-here"] {
+            let (o, _) = run(&format!(
+                "f() {{ :; }}\ndeclare -ai q\n{{ mapfile -t -C '{cb} >/dev/null 2>&1' -c 1 q <<< 'q+'; }} 2>&1"
+            ));
+            assert_eq!(
+                o,
+                "osh: q+: syntax error: operand expected (error token is \"+\")\n",
+                "{cb}"
+            );
+        }
+        // A *pipeline* does not, because bash forks for every element of one and
+        // the child's blanking never reaches the parent.
+        let (o, _) = run(
+            "declare -ai q; { mapfile -t -C 'true | true' -c 1 q <<< 'q+'; } 2>&1"
+        );
+        assert_eq!(
+            o,
+            "osh: mapfile: q+: syntax error: operand expected (error token is \"+\")\n"
+        );
+        // Nor does a command substitution, for the same reason — which is what
+        // stops this from unsigning the ordinary cases: the expansion of a
+        // `let`/`((` operand runs commands, and both stay signed.
+        let (o, _) = run("{ let \"x=$(echo 1)+\"; } 2>&1");
+        assert_eq!(
+            o,
+            "osh: let: x=1+: syntax error: operand expected (error token is \"+\")\n"
+        );
+        let (o, _) = run("{ (( $(echo 1) + )); } 2>&1");
+        assert_eq!(
+            o,
+            "osh: ((: 1 + : syntax error: operand expected (error token is \"+ \")\n"
+        );
+        let (o, _) = run("declare -i n; { declare n=$(echo 1)+; } 2>&1");
+        assert_eq!(
+            o,
+            "osh: declare: 1+: syntax error: operand expected (error token is \"+\")\n"
         );
     }
 

@@ -327,6 +327,43 @@ The seven specials, digits and identifiers are unaffected, with or without an
 operator: `${#}`, `${@}`, `${*}`, `${?}`, `${!:-n}`, `${-:+s}`, `${$}`, `${1}`,
 `${12:-e}`, `${v}`, `${_v:-u}` all still behave.
 
+### TD-OILS-A-PARAMETER-NAME-IS-NOT-RE-READ-BY-THE-EXPANSION-PASS. `echo "${a[}"x"]}"` expands the wrong name — 2026-08-08 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs`, the `${ … }` expansion, which uses
+the name the *parser* carved out. bash's `parameter_brace_expand`
+(subst.c:9539) carves it out again with `string_extract` under `SX_VARNAME`
+(subst.c:795), and that scan skips a closed subscript wherever the `]` is —
+including past a closing double quote.
+
+**What.** The sibling of
+TD-OILS-AN-UNCLOSED-SUBSCRIPT-IN-A-QUOTED-BRACE-BODY-IS-NOT-A-RUNAWAY-SCAN,
+found while fixing it, and the one shape that fix does not reach. Where that
+one is the extent pass and the parser disagreeing about where the `${ … }`
+*ends*, this is them disagreeing about what its *name* is:
+
+```text
+                    bash                                        osh
+echo "${a[}"x"]}"   }x: syntax error: operand expected …         ${a[}: bad substitution   rc=1 both
+```
+
+The parser reads the name as `a[` and stops at the first `}`, which is not a
+valid brace-expansion word — hence osh's bad substitution. bash's re-read hits
+the `[`, calls `skipsubscript` over the whole word, finds the `]` three
+characters past the closing quote, and comes back with the name `a[}"x"]` — a
+well-formed array reference whose *subscript* is `}"x"]`. That is then
+evaluated as arithmetic, and the arithmetic evaluator is what complains.
+
+**Proper fix.** Re-derive the name at expansion time from the word's source
+rather than trusting the parser's split, i.e. give `wordscan.rs` a second entry
+point that returns the name `parameter_brace_expand` would read, and have the
+`${ … }` expansion use it. The scanners are already there —
+`extract_name` is `string_extract` with `SX_VARNAME` — so the work is in
+plumbing the result through to the array-reference path, not in the scan.
+
+**Severity:** very low. Both shells fail, both with rc=1; only the diagnostic
+differs, and the shape needs an unterminated subscript whose `]` appears later
+in the same word.
+
 ### TD-OILS-AN-UNCLOSED-SUBSCRIPT-IN-A-QUOTED-BRACE-BODY-IS-NOT-A-RUNAWAY-SCAN. `echo "${a[}"` names the wrong subject — 2026-08-08 — ✅ FIXED 2026-08-08
 
 **Where:** was `userspace/oils/src/lexer.rs`, `read_dollar_brace_body`; is now

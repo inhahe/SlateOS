@@ -25574,10 +25574,7 @@ impl Shell {
     /// parser's own word would instead measure how faithfully
     /// [`crate::unparse`] spells a word back out.
     fn reread_word(&mut self, src: BStr<'_>) -> Option<Word> {
-        // The jump needs a `${` and a `[` to fire at all, and words holding
-        // both are rare — so this is the gate, and everything below runs only
-        // for them.
-        if !src.contains_str("${") || !src.contains_str("[") {
+        if !Self::reread_may_differ(src) {
             return None;
         }
         let opts = self.parse_opts();
@@ -25590,6 +25587,41 @@ impl Shell {
         )
         .ok()?;
         (reread != plain).then_some(reread)
+    }
+
+    /// Whether the two reads of `src` could carve a different `${ … }` — the
+    /// byte scan that keeps [`Shell::reread_word`]'s two extra parses off the
+    /// path every other word in the world takes.
+    ///
+    /// The jump fires at a `[` inside a parameter name and lands on the
+    /// matching `]`, so it can only change the word when that `]` lies *past*
+    /// the `}` the parser closed at. That is the question asked of each `[`
+    /// after the first `${`: of the first `]` and the first `}` following it,
+    /// which comes first. `]` first and the subscript closed inside the body
+    /// the parser already read — `${a[0]}`, the way an array element is
+    /// written every time anyone writes one — so both reads agree and the next
+    /// `[` is tried. `}` first and the jump crosses it, which is the whole
+    /// divergence. No `]` at all and bash leaves the `[` as an ordinary
+    /// character (`if (string[ni] == RBRACK)`), and since a later `[` could not
+    /// find one either the scan is over.
+    ///
+    /// Pairing by proximity rather than by matching brackets is what keeps this
+    /// a scan, and it can only ever be too generous: a word it lets through is
+    /// parsed twice and found to read the same. The answer comes from comparing
+    /// those two reads, never from here.
+    fn reread_may_differ(src: BStr<'_>) -> bool {
+        let Some(brace) = src.find("${") else { return false };
+        let mut at = brace.saturating_add(2);
+        while let Some(rest) = src.get(at..) {
+            let Some(open) = rest.find_byte(b'[') else { return false };
+            let after = rest.get(open.saturating_add(1)..).unwrap_or_default();
+            let Some(close) = after.find_byte(b']') else { return false };
+            if after.find_byte(b'}').is_some_and(|brk| brk < close) {
+                return true;
+            }
+            at = at.saturating_add(open).saturating_add(close).saturating_add(2);
+        }
+        false
     }
 
     /// Report a `${` the word's *extent* scan could not close — see
@@ -85580,5 +85612,33 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(comp_key_label(&CompKey::Empty), b"_EmptycmD_");
         assert_eq!(comp_key_label(&CompKey::Initial), b"_InitialWorD_");
         assert_eq!(comp_key_label(&CompKey::Name(b"foo".to_vec())), b"foo");
+    }
+
+    /// The gate in front of the word re-read: it must let every shape whose
+    /// subscript closes *after* the brace through, and it must turn away the
+    /// ordinary array reference, which is the whole reason it exists.
+    #[test]
+    fn only_a_subscript_closing_after_the_brace_is_worth_a_second_read() {
+        let gate = Shell::reread_may_differ;
+        // `]` after the `}` — the shapes the second read can carve differently.
+        assert!(gate(br#""${h[}"x"]}""#));
+        assert!(gate(b"${h[}x]}"));
+        assert!(gate(b"pre${h[}x]}post"));
+        assert!(gate(b"${a[}0]:-D}"));
+        // The array reference everyone writes: its `]` precedes its `}`, and a
+        // `]` later in the word does not resurrect it.
+        assert!(!gate(b"${a[0]}"));
+        assert!(!gate(b"${a[@]}${a[1]}"));
+        assert!(!gate(b"${#a[@]}"));
+        assert!(!gate(b"${a[0]}]"));
+        // A `[` with no `]` anywhere after is left alone by bash too.
+        assert!(!gate(b"${a[}tail"));
+        // Nothing to jump from, or nowhere to jump from it.
+        assert!(!gate(b"plain"));
+        assert!(!gate(b"${a}"));
+        assert!(!gate(b"a[0]"));
+        assert!(!gate(b"a[0]${b}"));
+        // A closed reference does not hide a divergent one after it.
+        assert!(gate(b"${a[0]}${h[}x]}"));
     }
 }

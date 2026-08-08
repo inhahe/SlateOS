@@ -169,6 +169,30 @@ fn newline(s: &mut Str, level: Indent, text: &[u8]) {
     s.push_str(text);
 }
 
+/// The `in …` list of a `for` or `select` head, as bash's deparser writes it.
+///
+/// bash has no wordless case here. `print_for_command_head` (print_cmd.c:605–610)
+/// is unconditional —
+///
+/// ```c
+///   cprintf ("for %s in ", for_command->name->word);
+///   command_print_word_list (for_command->map_list, " ");
+/// ```
+///
+/// — because the *grammar* fills the gap: a `for x; do …` with no `in` at all has
+/// its `map_list` synthesised as the single word `"$@"` (parse.y:839–854; `select`
+/// at 907–922), which is also exactly what the loop iterates. So `None` here (osh
+/// records the absence rather than synthesising) prints `"$@"`, while an explicit
+/// but empty list prints nothing — leaving the trailing space of `in ` against the
+/// `;`, which is why bash really does emit `for i in ;`.
+fn in_list_src(words: Option<&[Word]>) -> Str {
+    let Some(words) = words else {
+        return b"\"$@\"".to_vec();
+    };
+    let ws: Vec<Str> = words.iter().map(word_src).collect();
+    bytes::join(&ws, b" ")
+}
+
 /// Render a function definition in bash's `declare -f` form:
 ///
 /// ```text
@@ -455,14 +479,7 @@ fn command_block(cmd: &Command, fmt: Fmt) -> Str {
             // bash's deparser puts `do` on its own line for `for`: the word list
             // is terminated with an unconditional `;` (print_cmd.c:628), then
             // `newline ("do\n")` writes it at the loop's own depth.
-            let mut s = bfmt![b"for ", &c.var];
-            if let Some(words) = &c.words {
-                s.push_str(" in");
-                for w in words {
-                    s.push(b' ');
-                    s.push_str(&word_src(w));
-                }
-            }
+            let mut s = bfmt![b"for ", &c.var, b" in ", &in_list_src(c.words.as_deref())];
             s.push(b';');
             newline(&mut s, fmt.level, b"do\n");
             s.push_str(&program_block(&c.body, fmt.deeper(), true));
@@ -481,14 +498,7 @@ fn command_block(cmd: &Command, fmt: Fmt) -> Str {
             s
         }
         Command::Select(c) => {
-            let mut s = bfmt![b"select ", &c.var];
-            if let Some(words) = &c.words {
-                s.push_str(" in");
-                for w in words {
-                    s.push(b' ');
-                    s.push_str(&word_src(w));
-                }
-            }
+            let mut s = bfmt![b"select ", &c.var, b" in ", &in_list_src(c.words.as_deref())];
             s.push(b';');
             newline(&mut s, fmt.level, b"do\n");
             s.push_str(&program_block(&c.body, fmt.deeper(), true));

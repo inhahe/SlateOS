@@ -66,27 +66,39 @@ states the rule being tested: "Dropping the `-` job leaves the `+` job in place,
 yet the listing that follows shows no marker at all: with nothing running there
 is nothing to re-mark."
 
-**Two candidate explanations, not yet discriminated:**
+**Discriminated 2026-08-08: this is osh's bug, not the case's.** The reasoning
+is that bash is *stable* under the same perturbation and osh is not. Across
+every run observed — the sweep failure, 2 of 10 whole-case re-runs, and the
+narrowed probes below — bash printed `[1]-` / `[2] ` every single time, without
+one exception. osh printed the same thing most of the time and `[1] ` / `[2]+`
+about 15% of the time, always that exact wrong answer and never a third one. A
+case with margins too thin for the host would make *both* shells wobble; only
+one wobbles. And an always-identical wrong answer is not the signature of jitter
+— it is a second code path being taken.
 
-1. **The case races.** The two jobs are 10 ms apart (`sleep 0.05` / `sleep 0.06`)
-   but process spawn on this host costs ~85 ms, so their *completion order* is
-   set by spawn timing rather than by the durations. The gate is `sleep 0.6`,
-   leaving ~0.54 s of margin — normally ample, except that
-   TD-OILS-CORPUS-SWEEP-IS-UNRUNNABLE-WHEN-PROCESS-SPAWN-LATENCY-SPIKES records
-   spawn latency on this host spiking past that. If a job is still running when
-   `jobs %1` executes, the "nothing running to re-mark" premise fails and the
-   markers legitimately differ. This would make it a case bug (too-tight
-   margins), like TD-OILS-CORPUS-BG-DEBUG-TRACE-RACE, which was also the case
-   and not osh.
-2. **osh's marker reassignment is genuinely order-dependent** where bash's is
-   not — i.e. a real fidelity bug that only shows when the two completions land
-   in a particular order.
+**Narrowed to the trigger.** Line 68 on its own never fails (0/10 with the
+`sleep 0.6` gate, 0/10 with a 3 s gate), so the state that matters is left
+behind by what precedes it. It reproduces with just the two lines above it:
 
-**How to discriminate:** instrument the case to print whether each job is still
-running at the moment of `jobs %1` (e.g. a bare `jobs` before it, or widen the
-gate to several seconds and see whether the failure rate goes to zero). If
-widening the gate fixes it, it is (1) and the case needs bigger margins; if it
-still fails with a generous gate, it is (2) and the marker logic is wrong.
+```sh
+sleep 0.2 & wait %1; sleep 0.4 & jobs; wait; disown -a
+sleep 0.05 & sleep 0.6; sleep 0.4 & jobs; wait; disown -a   # <- the trigger
+sleep 0.05 & sleep 0.06 & sleep 0.6; jobs %1; echo "--"; jobs; disown -a
+```
+
+That is 1/10. Widening only the *middle* line's gate from `0.6` to `2` takes it
+to 0/10 — so what decides it is whether that line's `sleep 0.05` has been reaped
+by the time its `sleep 0.4 &` starts. osh's marker assignment for the *next*
+line's fresh jobs is therefore sensitive to when a previous, already-disowned
+job got reaped; bash's is not.
+
+**Proper fix:** find what in the job table survives `disown -a` and biases the
+next `+`/`-` assignment — most likely the current/previous slots are being left
+pointing at (or being recomputed from) reaped entries rather than being derived
+fresh from the live table the way bash derives them. Note the 0/10 figures above
+are only suggestive on their own (10 runs at a ~15% rate); the load-bearing
+evidence is bash's total stability against osh's flipping, which is not a
+sample-size question.
 
 **Found by** the post-Defender-exclusion timing sweep, 2026-08-08 — not by any
 code change; the binary was byte-identical to the one that had just passed a

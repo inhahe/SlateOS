@@ -49451,16 +49451,6 @@ fn number_len(n: usize) -> usize {
     }
 }
 
-/// The display width of a menu item — bash's `displen`, which is `wcswidth` of
-/// the decoded string (falling back to the byte length when it will not
-/// decode). [`bytes::char_count`] reproduces that fallback exactly: a byte that
-/// does not decode counts as one character on its own. It agrees with bash for
-/// everything except zero-width and double-width characters, where bash's
-/// `wcswidth` is finer. See known-issues TD-OILS-SELECT-DISPLEN.
-fn display_width(s: BStr<'_>) -> usize {
-    bytes::char_count(s)
-}
-
 /// bash's `indent`: pad from column `from` to column `to`, emitting a *tab*
 /// whenever one would land at or before `to` and single spaces otherwise. The
 /// tab stop is hard-coded to 8 in bash 5.2 (the `TABSIZE` variable lookup is
@@ -49506,7 +49496,11 @@ fn select_menu(items: &[Str], cols_avail: usize) -> Str {
     }
     let list_len = items.len();
     let indices_len = number_len(list_len);
-    let widest = items.iter().map(|s| display_width(s)).max().unwrap_or(0);
+    let widest = items
+        .iter()
+        .map(|s| crate::width::display_width(s))
+        .max()
+        .unwrap_or(0);
     // At least 5, so the divisions below cannot trap.
     let max_elem_len = widest + indices_len + ") ".len() + 2;
     let cols = (cols_avail / max_elem_len).max(1);
@@ -49530,7 +49524,7 @@ fn select_menu(items: &[Str], cols_avail: usize) -> Str {
             buf.extend_from_slice(label.as_bytes());
             buf.extend_from_slice(b") ");
             buf.extend_from_slice(item);
-            let elem_len = display_width(item) + width + ") ".len();
+            let elem_len = crate::width::display_width(item) + width + ") ".len();
             ind += rows;
             if ind >= list_len {
                 break;

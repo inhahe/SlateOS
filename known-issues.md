@@ -2418,6 +2418,28 @@ input, taken before the C source was read: 35 probe rows across
 a 224-case differential against the pre-change build (31 rows fixed, 0
 regressed).
 
+**Follow-up, same day: a request can cost more than one line.** The fix above
+charged the end-of-file request a flat one fetch, which is right only when the
+reader has nothing in front of it. A token bash completed *by* its own lookahead
+— `&&`, `||`, `>&` — never looked again, so the whole trailing run of
+continuations is still there and the request deletes them all, one
+`line_number++` each (parse.y:2677):
+
+```text
+echo 1⏎echo a &&\⏎        line 3   (osh 3, agreed already)
+echo 1⏎echo a &&\⏎\⏎      line 4   (osh was 3)
+echo 1⏎echo a &&\⏎\⏎\⏎    line 5   (osh was 3)
+echo 1⏎echo a 2>&\⏎\⏎     line 4   (osh was 3)
+```
+
+`Spans::pending_conts` counts that run and `reader_line_at` charges
+`max(run, 1)` — never both a deletion and a fetch, since the fetch after a
+deletion is the deletion's own `goto restart_read` and is not charged again.
+Only a run that reaches the end of the input counts: if anything follows, that
+free fetch brings the line in and its newline is the last token instead, which
+is why `echo a &&\⏎␣␣⏎` was already right. Verified over 17 operator/compound
+shapes × 4 tails — 0 diffs, from 6.
+
 **Pinned by** the corpus case
 `a-continuation-at-the-end-of-input-still-costs-the-reader-a-line.sh`, the new
 unit test `a_continuation_at_end_of_input_moves_the_reader`, four new rows in

@@ -90,6 +90,30 @@ mk d2 'if true; then\
 mk e1 'echo )\
 '
 . ./e1; echo "rc=$?"
+# `&&` is the other shape: bash completed it *by* its own lookahead and never
+# looked again, so the reader is parked in front of the whole run of
+# continuations and the request for the next token has to delete them — one
+# line each, and one line even when there is nothing to delete.
+mk g1 'echo a &&
+'
+. ./g1; echo "rc=$?"
+mk g2 'echo a &&\
+'
+. ./g2; echo "rc=$?"
+mk g3 'echo a &&\
+\
+'
+. ./g3; echo "rc=$?"
+mk g4 'echo a 2>&\
+\
+'
+. ./g4; echo "rc=$?"
+# A run that does not reach the end of input is none of the request's business:
+# the fetch after the last deletion brings that line in for free.
+mk g5 'echo a &&\
+
+'
+. ./g5; echo "rc=$?"
 
 echo "=== eval reads a string, and counts the caller's lines"
 eval 'echo $LINENO'

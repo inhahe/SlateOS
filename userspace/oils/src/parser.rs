@@ -2427,6 +2427,45 @@ impl Spans {
         self.reader_stop(pos, r).map_or(0, |(_, n)| n)
     }
 
+    /// How many `\<newline>` pairs are still standing in front of the reader
+    /// after the token at `pos`, with nothing but further continuations between
+    /// them and the end of the shell's input.
+    ///
+    /// These are the ones [`Spans::cont_lines`] does *not* count: a token bash
+    /// completed by its own lookahead (`&&`, `||`, `>&`) never looked again, so
+    /// the reader is parked in front of the run rather than past it, and it is
+    /// whoever asks for the next token that deletes them — one `line_number++`
+    /// each (parse.y:2677). A token that did look has already had its whole run
+    /// walked by `reader_stop`, and this answers zero for it.
+    ///
+    /// Only a run that reaches the end of the input is the *asker's* to pay for.
+    /// If anything follows it, the fetch after the last deletion brings that line
+    /// in for free and the tokens on it are stamped by their own scan; a blank
+    /// last line still ends in a newline, so it is a token here even when bash
+    /// discards it.
+    ///
+    /// Answers zero inside an alias replacement, whose end is not the end of the
+    /// shell's input: the read that runs off it pops back to the line the alias
+    /// word was written on and carries on there.
+    fn pending_conts(&self, pos: usize, r: Reader) -> u32 {
+        let Some((stop, _)) = self.reader_stop(pos, r) else {
+            return 0;
+        };
+        if stop.src != 0 {
+            return 0;
+        }
+        let Some(t) = self.text(stop.src) else {
+            return 0;
+        };
+        let mut i = stop.end as usize;
+        let mut n = 0u32;
+        while let Some(len) = cont_len(t.get(i..).unwrap_or(&[])) {
+            i = i.saturating_add(len);
+            n = n.saturating_add(1);
+        }
+        if i >= t.len() { n } else { 0 }
+    }
+
     /// Where bash's reader had got to when the token at `pos` was handed over:
     /// the text it was reading and the offset into it it stopped at, plus how
     /// many input lines it fetched getting there.
@@ -2718,6 +2757,13 @@ impl Parser {
     /// *that* back, and the end of file is still to be fetched. So the three
     /// conditions are read together — the last token peeked, was not a word, and
     /// its peek deleted a continuation running to the end of the input.
+    ///
+    /// A request that is *not* free can cost more than one line, because it has
+    /// to get past whatever the reader is parked in front of first. Every
+    /// `\<newline>` it deletes on the way is its own `line_number++`, so a token
+    /// bash completed by its own lookahead — `&&`, `||`, `>&`, which never looked
+    /// again — leaves the whole trailing run to be charged to the request:
+    /// [`Spans::pending_conts`].
     fn reader_line_at(&self, at: usize) -> u32 {
         let Some(tok) = self.toks.get(at) else {
             let Some(last) = self.toks.len().checked_sub(1) else {
@@ -2725,7 +2771,12 @@ impl Parser {
             };
             let r = Reader::of(self.toks.get(last));
             let stowed = r.peeks && !r.word && self.spans.cont_lines(last, r) > 0;
-            return self.reader_line_at(last).saturating_add(u32::from(!stowed));
+            // The deletions the request makes, or the one fetch it enters when
+            // there is nothing to delete — never both, since the fetch that
+            // follows a deletion is the deletion's own `goto restart_read` and
+            // is not charged again.
+            let bump = if stowed { 0 } else { self.spans.pending_conts(last, r).max(1) };
+            return self.reader_line_at(last).saturating_add(bump);
         };
         let line = self.lines.get(at).copied().unwrap_or_else(|| self.cur_line());
         line.saturating_add(self.spans.cont_lines(at, Reader::of(Some(tok))))
@@ -6539,6 +6590,20 @@ mod tests {
             ("echo 1\necho a |\n", (3, eof)),
             ("echo 1\necho a |\\\n", (3, eof)),
             ("echo 1\necho a |\\\n\\\n", (4, eof)),
+            // `&&` is the other shape: bash completed it *by* its own lookahead
+            // and never looked again, so the reader is parked in front of the
+            // whole run and the request has to delete it — one line each, and
+            // one line even when there is nothing to delete.
+            ("echo 1\necho a &&\n", (3, eof)),
+            ("echo 1\necho a &&\\\n", (3, eof)),
+            ("echo 1\necho a &&\\\n\\\n", (4, eof)),
+            ("echo 1\necho a &&\\\n\\\n\\\n", (5, eof)),
+            ("echo 1\necho a 2>&\\\n\\\n", (4, eof)),
+            // A run that does *not* reach the end of input is none of the
+            // request's business: the fetch after the last deletion brings that
+            // line in, and its own newline is the last token instead.
+            ("echo 1\necho a &&\\\n   \n", (4, eof)),
+            ("echo 1\necho a &&\\\n\\\n   \n", (5, eof)),
             // A token the grammar rejects outright is blamed on the reader's line
             // too, so a continuation flush after it moves the blame even though
             // the token itself did not move.

@@ -3390,24 +3390,51 @@ TD-OILS-AN-ESCAPED-BACKSLASH-BEFORE-A-NEWLINE-WAS-READ-AS-A-CONTINUATION, whose
 
 ### TD-OILS-WAIT-N-JOB-STATUS-TEST-IS-FLAKY-UNDER-PARALLEL-EXECUTION. `wait_n_ignores_a_job_whose_status_was_already_reported` fails about one run in three — 2026-08-08 — OPEN
 
-**Where:** `userspace/oils/src/interp.rs:78623` — the assertion in
-`interp::tests::wait_n_ignores_a_job_whose_status_was_already_reported`.
+**Where:** the `jobs`-listing assertion in
+`interp::tests::wait_n_ignores_a_job_whose_status_was_already_reported`
+(`userspace/oils/src/interp.rs`, `assert_eq!(listing(&mut sh,
+"jobs").lines().count(), 1)`).
 
 **What.** Under the full `cargo test -p oils --lib` run the assertion sometimes
 reports `left: 0, right: 1`; the same test passes every time when run alone
 (`cargo test … wait_n_ignores`). Two full-suite runs in a row: one failure, then
 one clean. Nothing else in the suite failed either time.
 
-**Why (suspected).** The test spawns a real background job and then asks `wait
--n` about it, so it depends on the child having been reaped by the time the
-assertion runs. With the suite's other tests competing for the machine that
-window can close late. The status it reads is process-global rather than
-per-test, so a job another test left behind could also be answering.
+**Why — traced 2026-08-08, and neither of the two originally suspected.** The
+count that comes back 0 is a `jobs` listing, so what varies is not a status but
+whether the job's *row is still there*. The chain that keeps it is exact, and
+every link is in `interp.rs`:
 
-**Proper fix.** Find out which of the two it is before changing anything: if it
-is the reap window, the test must wait on a condition rather than on wall-clock
-progress; if it is shared job state, the job table has to be per-test — and if it
-is the latter, the *shell* has a bug and not just the test.
+1. `( exit 5 ) & p=$!; sleep 0.2` starts a thread-backed job. Nothing polls the
+   table during a command — every `poll_jobs` call site is inside a job builtin
+   (`jobs`, `wait`, `kill`, `disown`, `fg`, `bg`, `compgen`) — so the only poll
+   before the `wait` is the read-parse-execute loop's own
+   `cleanup_dead_jobs` at the unit boundary (`run_source_flow_result`, the
+   `if !self.in_comsub` sweep).
+2. That poll is what sets `exit_seen`, and it sets it only for a body that is
+   *already* finished (`JobBody::is_finished`), plus `born_at.elapsed() >=
+   JOB_EXIT_NOTICE_GRACE` (20 ms).
+3. `drain_jobs` snapshots `known` — the `exit_seen` jobs — **before** its own
+   `poll_jobs`, deliberately, so that the `wait`'s instantaneous glance does not
+   count as prior knowledge. A job in `known` is skipped and stays unnotified.
+4. A job *not* in `known` is waited for, marked `notified`, and the next unit
+   boundary's `cleanup_dead_jobs` retains only `status.is_none() || !notified` —
+   so the row is swept and the following `jobs` prints nothing.
+
+So the test passes exactly when the `( exit 5 )` thread has finished within the
+200 ms `sleep 0.2`, and fails when it has not. It is a wall-clock race on
+**thread completion**, not on child reaping and not on job state shared between
+tests (there is none — each test builds its own `new_shell()`).
+
+**Proper fix.** The remaining question is why a `( exit 5 )` subshell thread
+would need more than 200 ms, since that is the number that decides it. Measure
+that before touching anything: instrument the elapsed time from `born_at` to
+`is_finished()` for this shape under a loaded machine. If it really is thread
+start-up latency under contention, the test must wait on the condition (poll
+until the body reports finished) rather than on a fixed sleep, because no
+constant is safe on an arbitrarily loaded machine. If instead the body finishes
+promptly and something else is delaying the boundary poll, the *shell* has the
+bug and the sleep is only exposing it.
 
 **Impact.** A red full-suite run that is not a real regression, which is the
 worst kind: it teaches the next session to re-run and shrug.

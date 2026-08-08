@@ -1385,7 +1385,7 @@ TD-OILS-A-FAILING-SUBSTITUTIONS-STATUS-IS-LOST-WHEN-AN-INTEGER-ASSIGNMENT-ALSO-F
 
 Covered by `tests/corpus/a-backtick-that-fails-to-parse-is-blamed-before-the-arithmetic-is.sh`.
 
-### TD-OILS-A-COMMAND-RUN-FROM-A-CUT-SHORT-ARITHMETIC-SUBSTITUTION-IS-BLAMED-AT-THE-WRONG-LINE. `` echo $(( $(case x in x) echo 5;; esac) )) `` — 2026-08-07 — OPEN
+### TD-OILS-A-COMMAND-RUN-FROM-A-CUT-SHORT-ARITHMETIC-SUBSTITUTION-IS-BLAMED-AT-THE-WRONG-LINE. `` echo $(( $(case x in x) echo 5;; esac) )) `` — 2026-08-07 — ✅ FIXED 2026-08-07 by `ecd8e610d`
 
 **Where:** `userspace/oils/src/interp.rs` — the line a command inherits when it
 is run from text the arithmetic scan left over.
@@ -1406,14 +1406,19 @@ a body-line-vs-physical-line question of the kind
 TD-OILS-A-FAILING-BACKTICK-INSIDE-AN-ARITHMETIC-EXPANSION-LOSES-ITS-DIAGNOSTIC
 settled.
 
-**Proper fix:** measure what bash counts here before changing anything — the 25
-needs explaining first. Probe with a helper whose `eval` sits at a known line
-and vary the distance between it and the failing word; the difference between 21
-and 25 should identify what is being added.
+**The 25 explained, and closed with it.** The recorded next step was to measure
+what bash counts before changing anything. It turned out to need no change of
+its own: the text the arithmetic scan cuts short is re-read as a substitution
+body, so it is numbered from the closing delimiter the way every substitution
+body is — and once `src` became the re-print
+(TD-OILS-A-SPLICED-REPRINT-DOES-NOT-MOVE-LINENO, commit `ecd8e610d`) the count
+started from the same place bash's does. Both shells now agree on the recorded
+shape and on three more, including a doubly-nested one blamed fourteen lines
+past where it was written.
 
-Not probed in `tests/corpus/arith-expansion-scan-and-classify.sh` — the section
-on the scan's skip table notes the exclusion — because the rest of that probe
-matches and only the line number would fail.
+Now probed in `tests/corpus/arith-expansion-scan-and-classify.sh`, which had
+excluded this shape for exactly this reason; the exclusion note was replaced by
+the two live probes in commit `3bf18529e`.
 
 ### TD-OILS-A-FAILING-SUBSTITUTIONS-STATUS-IS-LOST-WHEN-AN-INTEGER-ASSIGNMENT-ALSO-FAILS. `` declare -i n; n=1+`fi` `` — 2026-08-07 — ✅ FIXED 2026-08-07
 

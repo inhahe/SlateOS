@@ -8,10 +8,14 @@
 #
 # The resumption cases run their input through an `eval` at the top level of the
 # main shell, which is a read-eval loop just like the script's own, and drop the
-# diagnostic — bash's line counter does not survive one of these jumps (it loses
-# every line of the unit that went unrun and never resynchronises), which osh
-# deliberately does not reproduce, so a line number here would not compare.
-e() { sed 's/^.*: line [0-9]*: //'; }
+# diagnostic, because what they are asking is only which commands still ran.
+#
+# Everything else keeps its line number. bash's counter does not survive one of
+# these jumps — it is left below where the lexer had driven it and never
+# resynchronises — and osh reproduces that (known-issues
+# TD-OILS-A-DISCARD-OUT-OF-A-COMPOUND-COMMAND-LOSES-BASH-A-LINE), so the numbers
+# compare byte for byte. They used to be stripped through a `sed` helper; this
+# drift was the only reason for it, and it is gone.
 
 echo "=== reading resumes with the next unit"
 eval 'a[-9]=v; echo no
@@ -37,25 +41,25 @@ eval 'x=abc
 echo next' 2>/dev/null
 
 echo "=== a subshell is ended, not merely trimmed"
-( ( a[-9]=v; echo no ); echo "rc=$?" ) 2>&1 | e
-( ( eval 'a[-9]=v'; echo no ); echo "rc=$?" ) 2>&1 | e
+( ( a[-9]=v; echo no ); echo "rc=$?" ) 2>&1
+( ( eval 'a[-9]=v'; echo no ); echo "rc=$?" ) 2>&1
 ( x=$( { a[-9]=v
-echo no ; } 2>&1 ); echo "[$x] rc=$?" ) 2>&1 | e
+echo no ; } 2>&1 ); echo "[$x] rc=$?" ) 2>&1
 ( x=`{ a[-9]=v
-echo no ; } 2>&1`; echo "[$x] rc=$?" ) 2>&1 | e
-( true | { a[-9]=v; echo no; }; echo "rc=$?" ) 2>&1 | e
+echo no ; } 2>&1`; echo "[$x] rc=$?" ) 2>&1
+( true | { a[-9]=v; echo no; }; echo "rc=$?" ) 2>&1
 
 echo "=== a function and a brace group are not subshells"
-( f() { eval 'a[-9]=v'; echo yes; }; f; echo "rc=$?" ) 2>&1 | e
-( { eval 'a[-9]=v'; echo yes; }; echo "rc=$?" ) 2>&1 | e
+( f() { eval 'a[-9]=v'; echo yes; }; f; echo "rc=$?" ) 2>&1
+( { eval 'a[-9]=v'; echo yes; }; echo "rc=$?" ) 2>&1
 
 echo "=== an eval at the main shell's top level ends the jump"
-( eval 'a[-9]=v'; echo "rc=$?" ) 2>&1 | e
+( eval 'a[-9]=v'; echo "rc=$?" ) 2>&1
 
 echo "=== which errors discard at all"
-( declare -i z; z=1/0; echo no ) 2>&1 | e
-( echo "${nosucharr[@]=v}"; echo no ) 2>&1 | e
-( declare -a q=(1); echo "[${q[-9]}]"; echo "rc=$?" ) 2>&1 | e
-( q2=(1); q2[-9]=v true; echo "rc=$?" ) 2>&1 | e
+( declare -i z; z=1/0; echo no ) 2>&1
+( echo "${nosucharr[@]=v}"; echo no ) 2>&1
+( declare -a q=(1); echo "[${q[-9]}]"; echo "rc=$?" ) 2>&1
+( q2=(1); q2[-9]=v true; echo "rc=$?" ) 2>&1
 
 echo "=== done"

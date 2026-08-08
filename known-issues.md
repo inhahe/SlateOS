@@ -28110,7 +28110,7 @@ hand-probed scenarios across `-g`/`local`/`readonly`/`export`/`-p`, the kind,
 readonly, nameref and destroy refusals, expansion failures, and the
 `2>/dev/null` split — all byte-exact.
 
-### TD-OILS-DISCARD-LINENO-DRIFT. bash's `$LINENO` never recovers from a discard; osh deliberately keeps counting correctly — WONTFIX 2026-07-31
+### TD-OILS-DISCARD-LINENO-DRIFT. bash's `$LINENO` never recovers from a discard; osh deliberately keeps counting correctly — WONTFIX 2026-07-31 — ✅ **SUPERSEDED AND FIXED 2026-08-08**
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::run_source_flow_out` /
 `Shell::exec_program_top`, which abandon the current parse unit and read the
@@ -28132,14 +28132,34 @@ osh reports 3. Every diagnostic after a discard therefore differs by the same
 drift, which is why `tests/corpus/discard-scope.sh` strips line numbers with
 `sed` and says so in its header comment.
 
-**Proper fix.** None wanted. Reproducing it would mean deliberately
+**Proper fix.** ~~None wanted. Reproducing it would mean deliberately
 mis-counting lines and would corrupt `$LINENO`, `caller`, `BASH_LINENO` and
-every error message after the first discard in a script. Logged so the
-difference is not mistaken for an osh counting bug. If bash ever fixes it the
-two agree automatically.
+every error message after the first discard in a script.~~
 
-**Impact.** Line numbers in diagnostics (and `$LINENO`) after a discarded parse
-unit. osh's are right; bash's are not.
+**✅ Superseded 2026-08-08 by
+`TD-OILS-A-DISCARD-OUT-OF-A-COMPOUND-COMMAND-LOSES-BASH-A-LINE`, which measured
+the drift properly and fixed it.** The WONTFIX reasoning above was wrong on its
+premise: reproducing bash's counter does *not* mean corrupting the shell's own
+idea of where it is. `Shell::line_bias` carries the drift as a separate quantity
+and `current_line` is simply held biased — so `$LINENO`, `caller`, `BASH_LINENO`
+and every diagnostic report bash's number, which for a byte-fidelity shell *is*
+the right one. There was no tradeoff to decline.
+
+The probe in this entry now agrees:
+
+```
+$ printf '{ a[-9]=v
+echo no; }
+echo $LINENO
+' > f; osh f
+f: line 1: a[-9]: bad array subscript
+2
+```
+
+`tests/corpus/discard-scope.sh` lost the `sed` helper that had been stripping
+line numbers out of its comparison for this reason; it now compares them.
+
+**Impact.** None any more.
 
 ### TD-OILS-ASSIGN-WORD-SUBSCRIPT-EQ. `a[x=3]=1` is taken for a command name because assignment-word detection stops at the first `=` — 2026-07-28 — ✅ RESOLVED 2026-07-28
 

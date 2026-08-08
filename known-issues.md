@@ -17432,7 +17432,7 @@ in `run_source_out`'s unit-at-a-time loop: when a unit ends in an abort, add
 call adds nothing. The measurement above is the specification; a corpus case
 should assert each row of the table.
 
-### TD-OILS-AN-EMPTY-MAPFILE-CALLBACK-IS-TREATED-AS-NO-CALLBACK. `mapfile -C ""` runs nothing in osh; bash runs the index as a command — 2026-08-08 — OPEN
+### TD-OILS-AN-EMPTY-MAPFILE-CALLBACK-IS-TREATED-AS-NO-CALLBACK. `mapfile -C ""` runs nothing in osh; bash runs the index as a command — 2026-08-08 — ✅ **RESOLVED 2026-08-08**
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::builtin_mapfile`,
 `let fire_callback = callback.as_ref().is_some_and(|c| !c.is_empty()) && …`.
@@ -17461,11 +17461,29 @@ half is wrong.
 `-C ""` row was the one place the two shells still differed after that fix, and
 the difference was that osh had not run a command at all.
 
-**Proper fix:** `callback.is_some()`. The one thing to check while doing it is
-that osh builds the callback command line the way `run_callback` does —
-`"%s %d %s"` with a *space* between the three parts — so an empty callback
-yields a leading space and the index becomes the command word, rather than
-yielding an empty command line that parses to nothing.
+**Fixed in `HEAD`.** The guard is now `callback.is_some() && quantum != 0`.
+osh already built the callback command line the way `run_callback` does —
+`bfmt![cb, b" ", idx, b" ", sh_single_quote(line)]`, i.e. `"%s %d %s"` — so an
+empty callback needed nothing else: it yields a leading space and the index
+becomes the command word. (The quantum half of the guard is defensive only:
+`-c 0` is refused up front by both shells, and `is_multiple_of(0)` would divide
+by zero.)
+
+Measured against bash 5.2.37 — every row matched after the change, including
+the ones that pin *which* index is used and *when* it fires:
+
+| | bash and osh |
+|---|---|
+| `-C '' -c 1 a <<< $'x\ny'` | `0: command not found`, `1: …`; `a=(x y)`, rc 0 |
+| `-C '' -O 5 -c 1` | `5: command not found` — the *stored* index |
+| `-C '' -c 2` over five lines | fires at `1` and `3` |
+| `-C ' '` | same as `-C ''` |
+| `-C '' < /dev/null` | nothing fires |
+| `-C '' ` without `-t` | array keeps its delimiters; callback unaffected |
+
+Covered by the lib test `mapfile_an_empty_callback_makes_the_index_the_command`
+and the corpus case
+`an-empty-mapfile-callback-makes-the-index-the-command.sh`.
 
 ### TD-OILS-SELECT-COLS. `select`'s menu never queries the real window size — OPEN (low priority, gated on a terminal-size syscall) — 2026-07-27
 

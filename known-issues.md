@@ -2698,6 +2698,106 @@ three operand slots, a complete-but-unclosed conditional, nine group shapes for
 the `(`-peek line rule, and the same set again without the continuation, where a
 newline is the token instead.
 
+### TD-OILS-A-BACKSLASH-CLOSED-STRING-STILL-FINDS-A-TOKEN-TO-REPORT-NEAR. `[[ a == b )\` gets a `near` line bash does not print — 2026-08-08 — OPEN
+
+**Where:** `userspace/oils/src/parser.rs` — `Parser::cond_operand_error` and the
+`syntax error near` construction it shares with the rest of the parser
+(`Parser::cond_near`, `Parser::token_display`), plus whatever decides that a
+diagnostic gets an echoed source line.
+
+**What.** The message *after* a `syntax error in conditional expression` is
+chosen by which branch of `report_syntax_error` (parse.y:6232) the input reaches.
+When the conditional's own error left the reader mid-line, bash finds the
+offending text and prints `syntax error near` + the line; when the string was
+closed with a backslash, the fetch that discovered the end left
+`shell_input_line` empty, so bash falls past *both* `near` branches (the
+`current_token` one at 6251 and the `error_token_from_text` one at 6273) to the
+final `else`, and prints a bare `syntax error` with no line under it:
+
+```text
+echo 1⏎[[ a == b )⏎     both:  line 2: syntax error in conditional expression: unexpected token `)'
+                               line 2: syntax error near `)'
+                               line 2: `[[ a == b )'
+
+echo 1⏎[[ a == b )\⏎    bash:  line 2: syntax error in conditional expression: unexpected token `)'
+                               line 3: syntax error
+                        osh:   line 2: syntax error in conditional expression: unexpected token `)'
+                               line 3: syntax error near `)\'
+                               line 3: `'
+```
+
+Two things are wrong on osh's side. It still produces a `near` line where bash
+has no input line left to find a token in — and the token it names is `)\`, with
+the closing backslash glued on, where the token is just `)`. (The empty echoed
+line is *correct* on the branches that do echo — see the entry above — but this
+branch does not echo at all.)
+
+Note `EOF_Reached` is 0 here, which is why bash says `syntax error` and not
+`syntax error: unexpected end of file`: the conditional died on the `)` before
+the reader was asked for anything past the close.
+
+**Proper fix.** Make the `near` line conditional on there being input text left
+on the reader's line — the same emptiness test that already decides the
+end-of-file spelling — rather than on there being a token to name. And take the
+trailing backslash out of the token text: a string's closing `\` is the reader's,
+not the token's.
+
+**Impact.** One or two extra diagnostic lines on an input that is a syntax error
+either way, only when the string was closed with a backslash.
+
+### TD-OILS-A-RUN-OF-PARENS-IN-A-CONDITIONAL-IS-LEXED-AS-ARITHMETIC. `[[ ((( a ))) ]]` is a syntax error where bash succeeds — 2026-08-08 — OPEN
+
+**Where:** `userspace/oils/src/lexer.rs` — wherever a flush `((` becomes
+`Tok::ArithCmd`. The gate has to be bash's, which is the *same*
+`reserved_word_acceptable (last_read_token)` this file's other conditional-paren
+entry turns on.
+
+**What.** bash only tries the arithmetic reading of `((` when `read_token` is at
+a position where a reserved word would be acceptable: `parse_dparen`
+(parse.y:4457) runs `parse_arith_cmd` under `if (reserved_word_acceptable
+(last_read_token))` and otherwise returns `-2`, which makes `read_token` `break`
+out of the `shellmeta` switch and hand back a plain `(`. `COND_START` — the token
+`[[` — is **not** in `reserved_word_acceptable`'s list (parse.y:5367), but `'('`
+**is**. So the first `(` after `[[` is always an ordinary group opener, and only
+a `((` *nested inside* a group takes the arithmetic path.
+
+osh lexes a flush `((` as an arithmetic command wherever it sees one, so a run of
+three or more parens is mis-split:
+
+```text
+input                    bash    osh
+[[ ((( a ))) ]]          ok      line 2: expected `)'
+                                 line 2: syntax error near `)))'
+                                 line 2: `[[ ((( a ))) ]]'
+[[ (((( a )))) ]]        ok      … syntax error near `))))'
+[[ ( ( ( a ))) ]]        ok      ok      (open run broken up — no `((`)
+[[ ((( a ) ) ) ]]        ok      ok
+[[ (( a )) ]]            ok      ok
+[[ (( ]]                 both: two `expected `)'` + `syntax error near `]]''
+```
+
+The unterminated form shows the same split from the other side, and adds a raw
+end-of-input sentinel leaking into a message as `\xff`:
+
+```text
+echo 1⏎[[ (((⏎    bash:  line 3: unexpected token `EOF' in conditional command
+                         line 2: expected `)'      (three times)
+                         line 3: syntax error: unexpected end of file
+                  osh:   line 2: unexpected EOF while looking for matching `)'
+                         line 3: unexpected token `M-^?' in conditional command
+                         line 2: expected `)'
+```
+
+**Proper fix.** Carry the acceptability answer into the lexer's `((` decision so
+that a `(` whose predecessor is `[[` opens a group and nothing else. The `\xff`
+in the second message is separate and worse: an end-of-input sentinel is being
+formatted as if it were a token's text, and should be named `EOF` (see the
+conditional end-of-input entry above) or not reached at all.
+
+**Impact.** A conditional written with three or more nested groups and no space
+between the parens fails to parse. Rare in practice, but it is a *valid* program
+rejected, not just a differently-worded error.
+
 ### TD-OILS-AN-ASSIGNMENT-PREFIX-STILL-ADMITS-A-RESERVED-WORD. `v=1 done` is a syntax error where bash runs a command — 2026-08-08 — OPEN
 
 **Where:** `userspace/oils/src/parser.rs` — wherever the command word is matched

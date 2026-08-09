@@ -6667,7 +6667,7 @@ impl Shell {
             quoted.push(b);
         }
         quoted.push(b'"');
-        let Ok(word) = crate::parser::word_verbatim_from_source(&quoted, self.parse_opts()) else {
+        let Ok(word) = crate::parser::word_verbatim_from_source(&quoted, self.parse_opts(), Quoting::Bare) else {
             return Ok(false);
         };
         let path = self.expand_to_string(&word);
@@ -26434,7 +26434,7 @@ impl Shell {
     fn expander_word(&mut self, w: &Word, src: BStr<'_>) -> Option<Word> {
         if let [WordPart::TokenText(_)] = w.parts.as_slice() {
             let opts = self.parse_opts();
-            return crate::parser::word_tolerant_from_source_at(src, opts, self.current_line).ok();
+            return crate::parser::word_tolerant_from_source_at(src, opts, Quoting::Bare, self.current_line).ok();
         }
         self.reread_word(src)
     }
@@ -26469,10 +26469,11 @@ impl Shell {
         }
         let opts = self.parse_opts();
         let line = self.current_line;
-        let plain = crate::parser::word_verbatim_from_source_at(src, opts, line).ok()?;
+        let plain = crate::parser::word_verbatim_from_source_at(src, opts, Quoting::Bare, line).ok()?;
         let reread = crate::parser::word_verbatim_from_source_at(
             src,
             crate::lexer::ParseOpts { reread: true, ..opts },
+            Quoting::Bare,
             line,
         )
         .ok()?;
@@ -27312,7 +27313,7 @@ impl Shell {
             return false;
         };
         let Ok(word) =
-            crate::parser::word_verbatim_from_source(sub_src.as_bytes(), self.parse_opts())
+            crate::parser::word_verbatim_from_source(sub_src.as_bytes(), self.parse_opts(), Quoting::Bare)
         else {
             return false;
         };
@@ -27789,7 +27790,7 @@ impl Shell {
     /// bash refuses `n[*]` before expanding anything, while `n[$s]` with
     /// `s='*'` is an ordinary expression. See [`Self::whole_array_sub`].
     fn sub_word(&mut self, sub: BStr<'_>) -> Word {
-        crate::parser::word_verbatim_from_source(sub, self.parse_opts())
+        crate::parser::word_verbatim_from_source(sub, self.parse_opts(), Quoting::Bare)
             .unwrap_or_else(|_| Word::literal(sub.to_vec()))
     }
 
@@ -43476,7 +43477,7 @@ impl Shell {
         // text so that `unset 'm[$k]'` and `unset 'a[$(f)]'` behave like the
         // same subscript written in an assignment. An unbalanced quote makes it
         // unparseable; bash silently matches nothing in that case.
-        let Ok(word) = crate::parser::word_verbatim_from_source(sub_src, self.parse_opts()) else {
+        let Ok(word) = crate::parser::word_verbatim_from_source(sub_src, self.parse_opts(), Quoting::Bare) else {
             return true;
         };
         if is_assoc {

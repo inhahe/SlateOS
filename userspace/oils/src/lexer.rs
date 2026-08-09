@@ -1035,26 +1035,49 @@ struct Lexer {
     /// at. Only the `${ … }` reader raises it and only the segment builder
     /// consumes it, which clears it as it goes; nothing else looks.
     bare_splice: bool,
-    /// The text this scan is reading is a here-document **body**, which bash
-    /// never read as a word.
+    /// The text this scan is reading is text bash **never read as a word** — a
+    /// here-document body, a `PS4`, a `${x@P}` value.
     ///
-    /// A body is collected by `read_secondary_line` into
+    /// A here-document body is collected by `read_secondary_line` into
     /// `make_here_document` (make_cmd.c:621) as plain lines: no
-    /// `read_token_word`, so no `parse_matched_pair`, so **no translation at
-    /// all** — a `$'…'` in it is still `$'…'` when `expand_word_internal`
-    /// reaches it, and there (a here-document expands as if double-quoted,
-    /// `Q_HERE_DOCUMENT`) a `$` before a `'` is not a quote introducer, so it
-    /// stays literal. Measured: `` cat <<E `` / `${x:-$'a\tb'}` prints
-    /// `$'a\tb'`, where the same word in a real double-quoted string prints a
-    /// tab.
-    ///
-    /// It also means the delimiter stack is *empty* for anything in the body
-    /// that does get parsed: a `$( … )` there is parsed by `command_substitute`
-    /// at expansion time, from a fresh reader, so its `${ … }` re-quotes. That
-    /// is why the flag is cleared going into a substitution body — see
-    /// [`Lexer::read_subst_body`] — and why `` cat <<E `` /
+    /// `read_token_word`, so no `parse_matched_pair`, so nothing in it was
+    /// translated at parse time and no delimiter was pushed for it. A `$( … )`
+    /// here is therefore parsed by `command_substitute` at expansion time, from
+    /// a fresh reader — [`SubBody::Unread`] rather than [`SubBody::Eager`] — and
+    /// the delimiter stack that reader starts from is *empty*, so its `${ … }`
+    /// re-quotes. That is why the flag is cleared going into a substitution body
+    /// — see [`Lexer::read_subst_body`] — and why `` cat <<E `` /
     /// `$(echo ${x:-$'a\tb'})` prints a tab rather than splitting on one.
+    ///
+    /// This is the *reader's* half of the question only. Whether a `$'…'` in the
+    /// text survives as written is [`Lexer::dq_context`]'s, and the two come
+    /// apart — see there.
     here_text: bool,
+    /// The text this scan is reading expands in `Q_DOUBLE_QUOTES` or
+    /// `Q_HERE_DOCUMENT` **as a whole**, without any quote characters
+    /// delimiting it.
+    ///
+    /// `expand_word_internal` takes the ANSI-C branch only when
+    /// `(quoted & (Q_HERE_DOCUMENT|Q_DOUBLE_QUOTES)) == 0`, so in such text a
+    /// `$` before a `'` is not a quote introducer and the `$'…'` stays literal.
+    /// Combined with [`Lexer::here_text`] — nothing translated it at parse time
+    /// either — that is why `` cat <<E `` / `${x:-$'a\tb'}` prints `$'a\tb'`
+    /// where the same word in a real double-quoted string prints a tab.
+    ///
+    /// It is a *separate* flag from `here_text` because bash drops these bits
+    /// for one construct inside such text: a **pattern**. `getpattern`
+    /// (subst.c:5751-5754) expands it with
+    ///
+    /// ```c
+    ///   (quoted & (Q_HERE_DOCUMENT|Q_DOUBLE_QUOTES)) ? Q_PATQUOTE : quoted
+    /// ```
+    ///
+    /// — so the two context bits are replaced outright, the ANSI-C branch is
+    /// reachable again, and the pattern translates its `$'…'` even though the
+    /// text around it does not. Measured against bash 5.2.37, in a here-document
+    /// body with `y=$'a\tb'`: `${nope:-$'a\tb'}` prints `$'a\tb'` while
+    /// `${y#$'a\tb'}` prints nothing at all, the trim having matched.
+    dq_context: bool,
 }
 
 /// A warning bash raises from its **reader** rather than from the parse or the
@@ -1487,6 +1510,7 @@ impl Lexer {
             taken: Vec::new(),
             bare_splice: false,
             here_text: false,
+            dq_context: false,
         }
     }
 
@@ -1558,10 +1582,17 @@ pub fn strip_nuls(src: BStr<'_>) -> std::borrow::Cow<'_, [u8]> {
 
 /// Tokenize `src` into a token stream.
 ///
+/// `unread` says `src` is text no parser read as a word — the substring bounds
+/// of a `${x:off:len}` written in a here-document body, say. It is
+/// [`Lexer::here_text`]; every other caller reads real source and passes
+/// `false`.
+///
 /// # Errors
 /// Returns [`LexError`] on an unterminated quote or substitution.
-pub fn tokenize(src: BStr<'_>, opts: ParseOpts) -> Result<Vec<Tok>, LexError> {
-    tokenize_spanned(src, opts).map(|s| s.toks)
+pub fn tokenize(src: BStr<'_>, opts: ParseOpts, unread: bool) -> Result<Vec<Tok>, LexError> {
+    let mut lx = Lexer::new(src, opts);
+    lx.here_text = unread;
+    lx.run().map(|s| s.toks)
 }
 
 /// A completed tokenization: the token stream with the parallel vectors a parser
@@ -1982,17 +2013,39 @@ enum Verbatim {
 /// # Errors
 /// Returns [`LexError`] on an unterminated quote or substitution.
 pub fn lex_word_verbatim(src: BStr<'_>) -> Result<Vec<Seg>, LexError> {
-    lex_word_verbatim_opts(src, ParseOpts::default())
+    lex_word_verbatim_opts(src, ParseOpts::default(), false)
 }
 
 /// [`lex_word_verbatim`] with the read's own options — which for this scan is
 /// only ever [`ParseOpts::reread`], the flag that turns a word's source into
 /// the *second* read bash gives it. See [`crate::wordscan`].
 ///
+/// `unread` says the `${ … }` this fragment was written in is text no parser
+/// read — a here-document body, a `PS4`, a `${x@P}`. That is the *reader's*
+/// question and it applies to a pattern exactly as it does to an operand: see
+/// [`Lexer::here_text`]. What does *not* carry over is the quoting, because a
+/// pattern is expanded by `getpattern`, which throws the enclosing context away:
+///
+/// ```text
+///   pat = expand_string_for_pat (value,
+///           (quoted & (Q_HERE_DOCUMENT|Q_DOUBLE_QUOTES)) ? Q_PATQUOTE : quoted,
+///           (int *)NULL, (int *)NULL);        /* subst.c:5751-5754 */
+/// ```
+///
+/// so a pattern's `$'…'` *is* translated where the operand beside it is not.
+/// Measured in a here-document body with `v` holding a real tab: `${nope:-$'a\tb'}`
+/// prints the `$'…'` back, while `${v#$'a\tb'}` trims it away — hence
+/// [`Lexer::dq_context`] stays clear here.
+///
 /// # Errors
 /// Returns [`LexError`] on an unterminated quote or substitution.
-pub fn lex_word_verbatim_opts(src: BStr<'_>, opts: ParseOpts) -> Result<Vec<Seg>, LexError> {
+pub fn lex_word_verbatim_opts(
+    src: BStr<'_>,
+    opts: ParseOpts,
+    unread: bool,
+) -> Result<Vec<Seg>, LexError> {
     let mut lx = Lexer::new(src, opts);
+    lx.here_text = unread;
     lx.read_word_verbatim(Verbatim::Bare)
 }
 
@@ -2013,6 +2066,7 @@ pub fn lex_word_verbatim_opts(src: BStr<'_>, opts: ParseOpts) -> Result<Vec<Seg>
 pub fn lex_dquote_body(src: BStr<'_>) -> Result<Vec<Seg>, LexError> {
     let mut lx = Lexer::new(src, ParseOpts::default());
     lx.here_text = true;
+    lx.dq_context = true;
     lx.read_double_quote_until(false)
 }
 
@@ -2023,10 +2077,14 @@ pub fn lex_dquote_body(src: BStr<'_>) -> Result<Vec<Seg>, LexError> {
 /// Every other backslash escape is still consumed at lex time (`\n` → `n`),
 /// matching bash's replacement quote-removal.
 ///
+/// `unread` is [`lex_word_verbatim_opts`]'s: the `${ … }` around this
+/// replacement is text no parser read.
+///
 /// # Errors
 /// Returns [`LexError`] on an unterminated quote or substitution.
-pub fn lex_replacement_verbatim(src: BStr<'_>) -> Result<Vec<Seg>, LexError> {
+pub fn lex_replacement_verbatim(src: BStr<'_>, unread: bool) -> Result<Vec<Seg>, LexError> {
     let mut lx = Lexer::new(src, ParseOpts::default());
+    lx.here_text = unread;
     lx.read_word_verbatim(Verbatim::Replacement)
 }
 
@@ -2051,6 +2109,10 @@ pub fn lex_replacement_verbatim(src: BStr<'_>) -> Result<Vec<Seg>, LexError> {
 pub fn lex_operand_in_dquote(src: BStr<'_>, unread: bool) -> Result<Vec<Seg>, LexError> {
     let mut lx = Lexer::new(src, ParseOpts::default());
     lx.here_text = unread;
+    // An operand is *not* a pattern, so nothing drops the enclosing
+    // `Q_DOUBLE_QUOTES`/`Q_HERE_DOCUMENT` before it expands and its `$'…'` stays
+    // as written. See [`Lexer::dq_context`].
+    lx.dq_context = unread;
     lx.read_word_verbatim(Verbatim::Dquote)
 }
 
@@ -4607,16 +4669,18 @@ impl Lexer {
     /// double-quote scanner (bash: `"a$'b'"` is the 6 literal chars `a$'b'`,
     /// and a `$` right before the closing `"` is a literal `$`).
     ///
-    /// [`Lexer::here_text`] blocks those two forms for a different reason and
+    /// [`Lexer::dq_context`] blocks those two forms for a different reason and
     /// reaches the same place: an operand written in text no parser read is a
     /// word to *this* scan but was never one to bash's, so nothing in it was
     /// translated at parse time and `expand_word_internal` — which takes the
     /// ANSI-C branch only when `(quoted & (Q_HERE_DOCUMENT|Q_DOUBLE_QUOTES)) ==
     /// 0` — meets the `$'` still spelled out. Measured: `cat <<E` /
     /// `${x:-$'a\x2Cb'}` prints `$'a\x2Cb'`, where `"${x:-$'a\x2Cb'}"` prints
-    /// `a,b`.
+    /// `a,b`. A **pattern** in the same text is the exception, because
+    /// `getpattern` drops those bits before expanding it — see
+    /// [`Lexer::dq_context`].
     fn read_dollar(&mut self, in_dquote: bool) -> Result<Option<Seg>, LexError> {
-        let quote_form = !in_dquote && !self.here_text;
+        let quote_form = !in_dquote && !self.dq_context;
         // Where the construct starts, for a scan that runs off the end of text
         // no parser read — see [`Lexer::unread_eof`].
         let dollar = self.pos;
@@ -6599,6 +6663,10 @@ fn scan_heredoc_segs(body: BStr<'_>, expand: bool) -> Result<Vec<Seg>, LexError>
     }
     let mut lx = Lexer::new(body, ParseOpts::default());
     lx.here_text = true;
+    // A here-document expands as if double-quoted (`Q_HERE_DOCUMENT`), which is
+    // the half of the question that decides whether a `$'…'` in it survives as
+    // written. See [`Lexer::dq_context`].
+    lx.dq_context = true;
     let mut segs: Vec<Seg> = Vec::new();
     let mut lit = Str::new();
     while let Some(c) = lx.peek() {
@@ -6665,7 +6733,7 @@ mod tests {
     /// option-specific tests want. Shadows [`super::tokenize`] so the option
     /// argument does not have to be spelled out 30 times.
     fn tokenize(src: &str) -> Result<Vec<Tok>, LexError> {
-        super::tokenize(src.as_bytes(), ParseOpts::default())
+        super::tokenize(src.as_bytes(), ParseOpts::default(), false)
     }
 
     /// As [`tokenize`], with per-token line numbers.
@@ -6763,7 +6831,7 @@ mod tests {
                 ],
                 "extglob off: {src}"
             );
-            let mut with = super::tokenize(src.as_bytes(), ParseOpts { extglob: true, posix: false, reread: false, tolerant: false }).unwrap();
+            let mut with = super::tokenize(src.as_bytes(), ParseOpts { extglob: true, posix: false, reread: false, tolerant: false }, false).unwrap();
             with.pop();
             assert_eq!(
                 with,
@@ -7827,6 +7895,7 @@ mod tests {
             let segs = super::lex_word_verbatim_opts(
                 src.as_bytes(),
                 ParseOpts { reread, ..ParseOpts::default() },
+                false,
             )
             .expect("word lexes");
             first_braced(&segs).expect("a ${ … } in the word")
@@ -7877,7 +7946,7 @@ mod tests {
             None
         }
         let braced = |src: &str| {
-            let segs = super::lex_word_verbatim_opts(src.as_bytes(), ParseOpts::default())
+            let segs = super::lex_word_verbatim_opts(src.as_bytes(), ParseOpts::default(), false)
                 .expect("word lexes");
             first_braced(&segs).expect("a ${ … } in the word")
         };

@@ -5071,7 +5071,7 @@ impl Parser {
                     // see `Self::try_assignment` for why nothing in it is split
                     // or trimmed.
                     let index = match &index {
-                        Some(src) => Some(word_verbatim_from_source(src, self.opts)?),
+                        Some(src) => Some(word_verbatim_from_source(src, self.opts, Quoting::Bare)?),
                         None => None,
                     };
                     let assign = Assignment {
@@ -5282,7 +5282,7 @@ impl Parser {
                     // (bash: `h[ x ]=v` keys on ` x `). For an indexed array the
                     // arithmetic evaluator ignores the whitespace, so preserving
                     // it is harmless.
-                    let idx = word_verbatim_from_source(idx_src, self.opts)?;
+                    let idx = word_verbatim_from_source(idx_src, self.opts, Quoting::Bare)?;
                     (Some(idx), lhs_tail.get(close + 1..).unwrap_or_default())
                 }
             }
@@ -5440,7 +5440,8 @@ fn parse_array_elem(segs: &[Seg], opts: ParseOpts) -> Result<ArrayElem, ParseErr
         // Verbatim: an associative keyed element `[ x ]=v` keys on the literal
         // ` x ` (bash preserves subscript whitespace); indexed elements
         // arithmetic-evaluate, which ignores it.
-        let index = word_verbatim_from_source(first.get(1..close).unwrap_or_default(), opts)?;
+        let index =
+            word_verbatim_from_source(first.get(1..close).unwrap_or_default(), opts, Quoting::Bare)?;
         let mut value_segs: Vec<Seg> = Vec::new();
         let after = first.get(val_at..).unwrap_or_default();
         if !after.is_empty() {
@@ -5573,9 +5574,24 @@ fn cond_error_near(tok: BStr<'_>) -> Str {
 /// delimiter is the same context — but not the same *read*, which is what
 /// [`Quoting::Unread`] is for.
 ///
-/// Nothing else about the parse depends on it: the patterns, replacements and
-/// subscripts beside the operand are read bare either way, because bash's
-/// pattern reader does its own quote removal regardless of the quotes outside.
+/// The patterns, replacements and subscripts beside the operand are read *bare*
+/// either way, because a pattern is expanded by `getpattern`, which throws the
+/// enclosing context away before it starts:
+///
+/// ```text
+///   pat = expand_string_for_pat (value,
+///           (quoted & (Q_HERE_DOCUMENT|Q_DOUBLE_QUOTES)) ? Q_PATQUOTE : quoted,
+///           (int *)NULL, (int *)NULL);        /* subst.c:5751-5754 */
+/// ```
+///
+/// But *bare* is only half of what this carries. The other half is whether a
+/// parser ever read the text, and that half does reach the patterns — so the
+/// four states below are two independent bits, not a ladder. Measured in a
+/// here-document body with `v=$'a\tb'`: `${nope:-$'a\tb'}` prints `$'a\tb'`
+/// back (operand: still `Q_HERE_DOCUMENT`, no ANSI-C branch) while `${v#$'a\tb'}`
+/// trims to nothing (pattern: `Q_PATQUOTE`, so the branch fires) — and the same
+/// split holds one level down, where `${v#${z:-$'a\tb'}}` also trims, because the
+/// operand *inside a pattern* inherits the pattern's `Q_PATQUOTE`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Quoting {
     Bare,
@@ -5592,6 +5608,35 @@ pub(crate) enum Quoting {
     /// [`crate::ast::CmdSubBody::Unread`]. See [`crate::lexer::Lexer::here_text`],
     /// which is what this variant selects.
     Unread,
+    /// [`Quoting::Unread`]'s read with [`Quoting::Bare`]'s quoting: a pattern,
+    /// replacement, subscript or substring offset of a `${ … }` that itself sits
+    /// in unread text. `getpattern` has dropped the double-quoting, but nothing
+    /// gives the text back a parse it never had — so a `$'…'` here *is*
+    /// translated while a `$( … )` here is still
+    /// [`crate::ast::CmdSubBody::Unread`].
+    BareUnread,
+}
+
+impl Quoting {
+    /// Whether a double-quoted run is in force — the half that decides how a
+    /// character is spelled.
+    fn dquoted(self) -> bool {
+        matches!(self, Self::Dquote | Self::Unread)
+    }
+
+    /// Whether the text was read by no parser — the half that decides whether a
+    /// `$'…'` was already translated and whether a `$( … )` has a parse. See
+    /// [`crate::lexer::Lexer::here_text`].
+    fn unread(self) -> bool {
+        matches!(self, Self::Unread | Self::BareUnread)
+    }
+
+    /// This read, with the quoting a *pattern* beside the operand is read with:
+    /// `getpattern` drops the `Q_DOUBLE_QUOTES`/`Q_HERE_DOCUMENT` bits, and
+    /// nothing restores the parse.
+    fn as_pattern(self) -> Self {
+        if self.unread() { Self::BareUnread } else { Self::Bare }
+    }
 }
 
 /// Lower lexer segments into an [`ast::Word`] (stateless).
@@ -6146,6 +6191,7 @@ fn is_special_param_char(c: char) -> bool {
 fn split_name_subscript(
     chs: &[Ch],
     opts: ParseOpts,
+    q: Quoting,
     line: u32,
 ) -> Result<NameSubscript, ParseError> {
     if chs.is_empty() {
@@ -6201,6 +6247,7 @@ fn split_name_subscript(
             _ => ArrayIndex::Index(Box::new(word_verbatim_from_source_at(
                 &inner,
                 opts,
+                q.as_pattern(),
                 frag_line(chs, i + 1, line),
             )?)),
         };
@@ -6222,6 +6269,7 @@ fn split_name_subscript(
 fn parse_slice_bounds(
     rest: &[Ch],
     opts: ParseOpts,
+    q: Quoting,
     line: u32,
 ) -> Result<(Box<Word>, Option<Box<Word>>), ParseError> {
     let (off, len) = match rest.iter().position(|&c| syn(c) == ':') {
@@ -6236,12 +6284,12 @@ fn parse_slice_bounds(
     let length = match len {
         Some((s, len_line)) => {
             let text = bytes::from_chars(s.iter().copied());
-            Some(Box::new(word_from_source(&text, opts, len_line)?))
+            Some(Box::new(word_from_source(&text, opts, q.as_pattern(), len_line)?))
         }
         None => None,
     };
     let off_text = bytes::from_chars(off.iter().copied());
-    Ok((Box::new(word_from_source(&off_text, opts, line)?), length))
+    Ok((Box::new(word_from_source(&off_text, opts, q.as_pattern(), line)?), length))
 }
 
 /// Is `name` a parameter that `${#…}` may take the length of?
@@ -6293,7 +6341,7 @@ fn parse_braced_param_in(
         // the body's own line; the same holds for the `!` stripped below.
         let chs: Vec<Ch> = bytes::chars(after_hash).collect();
         if let NameSubscript::Split(name, subscript, remaining, _) =
-            split_name_subscript(&chs, opts, line)?
+            split_name_subscript(&chs, opts, q, line)?
             && remaining.is_empty()
             && is_length_target(&name)
         {
@@ -6343,7 +6391,7 @@ fn parse_braced_param_in(
         // `${!name[@]}` / `${!name[*]}` — the keys/indices of an array.
         let chs: Vec<Ch> = bytes::chars(after_bang).collect();
         let NameSubscript::Split(name, subscript, remaining, remaining_line) =
-            split_name_subscript(&chs, opts, line)?
+            split_name_subscript(&chs, opts, q, line)?
         else {
             return Ok(WordPart::BadSubst(raw.to_vec()));
         };
@@ -6442,7 +6490,7 @@ fn parse_braced_param_in(
     }
     let chs: Vec<Ch> = bytes::chars(raw).collect();
     let NameSubscript::Split(name, subscript, rest, rest_line) =
-        split_name_subscript(&chs, opts, line)?
+        split_name_subscript(&chs, opts, q, line)?
     else {
         return Ok(WordPart::BadSubst(raw.to_vec()));
     };
@@ -6493,7 +6541,7 @@ fn parse_braced_param_in(
             // followed by a `-=+?` operator char).
             if syn_at(&rest, 0) == ':' && !matches!(syn_at(&rest, 1), '-' | '=' | '+' | '?') {
                 let (offset, length) =
-                    parse_slice_bounds(rest.get(1..).unwrap_or_default(), opts, rest_line)?;
+                    parse_slice_bounds(rest.get(1..).unwrap_or_default(), opts, q, rest_line)?;
                 return Ok(WordPart::ArraySlice {
                     name,
                     star: matches!(index, ArrayIndex::Star),
@@ -6503,7 +6551,7 @@ fn parse_braced_param_in(
             }
             // `${a[@]#pat}` / `${a[*]/x/y}` / `${a[@]^^}` / `${a[@]@Q}` — an
             // element-wise transform applied to every element.
-            if let Some(op) = parse_bulk_op(&rest, opts, rest_line)? {
+            if let Some(op) = parse_bulk_op(&rest, opts, q, rest_line)? {
                 return Ok(WordPart::ArrayBulk {
                     name,
                     star: matches!(index, ArrayIndex::Star),
@@ -6559,7 +6607,7 @@ fn parse_braced_param_in(
         && !matches!(syn_at(&rest, 1), '-' | '=' | '+' | '?')
     {
         let (offset, length) =
-            parse_slice_bounds(rest.get(1..).unwrap_or_default(), opts, rest_line)?;
+            parse_slice_bounds(rest.get(1..).unwrap_or_default(), opts, q, rest_line)?;
         return Ok(WordPart::ArraySlice {
             name: name.clone(),
             star: name == "*",
@@ -6571,7 +6619,7 @@ fn parse_braced_param_in(
     // positional parameters.
     if (name == "@" || name == "*")
         && !rest.is_empty()
-        && let Some(op) = parse_bulk_op(&rest, opts, rest_line)?
+        && let Some(op) = parse_bulk_op(&rest, opts, q, rest_line)?
     {
         return Ok(WordPart::ArrayBulk {
             name: name.clone(),
@@ -6637,7 +6685,12 @@ fn parse_braced_param_in(
                 index: elem_index,
                 suffix,
                 longest,
-                pattern: Box::new(word_verbatim_from_source_at(&pat, opts, rest_line)?),
+                pattern: Box::new(word_verbatim_from_source_at(
+                    &pat,
+                    opts,
+                    q.as_pattern(),
+                    rest_line,
+                )?),
             })
         }
         // Case modification: `^`/`^^` (upper), `,`/`,,` (lower), `~`/`~~` (toggle).
@@ -6655,7 +6708,12 @@ fn parse_braced_param_in(
                 index: elem_index,
                 mode,
                 all,
-                pattern: Box::new(word_verbatim_from_source_at(&pat, opts, rest_line)?),
+                pattern: Box::new(word_verbatim_from_source_at(
+                    &pat,
+                    opts,
+                    q.as_pattern(),
+                    rest_line,
+                )?),
             })
         }
         // Parameter transformation: `${name@Q}`, `${name@U}`, etc.
@@ -6684,13 +6742,14 @@ fn parse_braced_param_in(
             elem_index,
             rest.get(1..).unwrap_or_default(),
             opts,
+            q,
             rest_line,
         ),
         // Substring `:offset[:length]` — but `:` followed by one of -=+? is the
         // use/assign/alt/error operator, handled below.
         ':' if !matches!(syn_at(&rest, 1), '-' | '=' | '+' | '?') => {
             let (offset, length) =
-                parse_slice_bounds(rest.get(1..).unwrap_or_default(), opts, rest_line)?;
+                parse_slice_bounds(rest.get(1..).unwrap_or_default(), opts, q, rest_line)?;
             Ok(WordPart::ParamSubstr {
                 name,
                 index: elem_index,
@@ -6749,6 +6808,7 @@ fn parse_braced_param_in(
 fn parse_replace_pieces(
     body: &[Ch],
     opts: ParseOpts,
+    q: Quoting,
     line: u32,
 ) -> Result<(bool, ReplaceAnchor, Box<Word>, Option<Box<Word>>), ParseError> {
     let mut i = 0;
@@ -6821,6 +6881,7 @@ fn parse_replace_pieces(
         Some(Box::new(word_replacement_from_source(
             &replacement,
             opts,
+            q.as_pattern(),
             repl_line,
         )?))
     } else {
@@ -6832,7 +6893,12 @@ fn parse_replace_pieces(
     Ok((
         all,
         anchor,
-        Box::new(word_verbatim_from_source_at(&pattern, opts, pat_start_line)?),
+        Box::new(word_verbatim_from_source_at(
+            &pattern,
+            opts,
+            q.as_pattern(),
+            pat_start_line,
+        )?),
         repl,
     ))
 }
@@ -6842,9 +6908,10 @@ fn parse_param_replace(
     index: Option<Box<Word>>,
     body: &[Ch],
     opts: ParseOpts,
+    q: Quoting,
     line: u32,
 ) -> Result<WordPart, ParseError> {
-    let (all, anchor, pattern, replacement) = parse_replace_pieces(body, opts, line)?;
+    let (all, anchor, pattern, replacement) = parse_replace_pieces(body, opts, q, line)?;
     Ok(WordPart::ParamReplace {
         name,
         index,
@@ -6858,7 +6925,12 @@ fn parse_param_replace(
 /// Parse the operator portion of a bulk array expansion (`${a[@]OP}`) into a
 /// [`BulkOp`], or `None` when `rest` is not a recognized element-wise operator
 /// (e.g. the `:-`/`:=` default operators, which do not apply to `[@]`).
-fn parse_bulk_op(rest: &[Ch], opts: ParseOpts, line: u32) -> Result<Option<BulkOp>, ParseError> {
+fn parse_bulk_op(
+    rest: &[Ch],
+    opts: ParseOpts,
+    q: Quoting,
+    line: u32,
+) -> Result<Option<BulkOp>, ParseError> {
     if rest.is_empty() {
         return Ok(None);
     }
@@ -6871,7 +6943,7 @@ fn parse_bulk_op(rest: &[Ch], opts: ParseOpts, line: u32) -> Result<Option<BulkO
             Ok(Some(BulkOp::Trim {
                 suffix,
                 longest,
-                pattern: Box::new(word_verbatim_from_source_at(&pat, opts, line)?),
+                pattern: Box::new(word_verbatim_from_source_at(&pat, opts, q.as_pattern(), line)?),
             }))
         }
         '^' | ',' | '~' => {
@@ -6886,12 +6958,12 @@ fn parse_bulk_op(rest: &[Ch], opts: ParseOpts, line: u32) -> Result<Option<BulkO
             Ok(Some(BulkOp::Case {
                 mode,
                 all,
-                pattern: Box::new(word_verbatim_from_source_at(&pat, opts, line)?),
+                pattern: Box::new(word_verbatim_from_source_at(&pat, opts, q.as_pattern(), line)?),
             }))
         }
         '/' => {
             let (all, anchor, pattern, replacement) =
-                parse_replace_pieces(rest.get(1..).unwrap_or_default(), opts, line)?;
+                parse_replace_pieces(rest.get(1..).unwrap_or_default(), opts, q, line)?;
             Ok(Some(BulkOp::Replace {
                 all,
                 anchor,
@@ -6926,15 +6998,26 @@ fn is_valid_transform_op(op: char) -> bool {
 /// Parse `s` as a single word preserving literal whitespace (no word-splitting
 /// or operator tokenization) — for the pattern and replacement of
 /// `${var/pat/repl}`, where bash applies only expansion and quote removal.
-pub(crate) fn word_verbatim_from_source(s: BStr<'_>, opts: ParseOpts) -> Result<Word, ParseError> {
-    word_verbatim_from_source_at(s, opts, RUNTIME_TEXT)
+pub(crate) fn word_verbatim_from_source(
+    s: BStr<'_>,
+    opts: ParseOpts,
+    q: Quoting,
+) -> Result<Word, ParseError> {
+    word_verbatim_from_source_at(s, opts, q, RUNTIME_TEXT)
 }
 
 /// [`word_verbatim_from_source`] for a fragment of a `${ … }` body, which sits
 /// on a known physical line. See [`frag_line`].
+///
+/// `q` is always a *bare* [`Quoting`] — a pattern's quoting is `Q_PATQUOTE`
+/// whatever surrounded it — but it still carries the read the enclosing text
+/// had, so a `$( … )` in the pattern of an unread `${ … }` stays
+/// [`crate::ast::CmdSubBody::Unread`] like the operand beside it. Callers pass
+/// `q.as_pattern()`.
 pub(crate) fn word_verbatim_from_source_at(
     s: BStr<'_>,
     opts: ParseOpts,
+    q: Quoting,
     line: u32,
 ) -> Result<Word, ParseError> {
     if s.is_empty() {
@@ -6946,12 +7029,12 @@ pub(crate) fn word_verbatim_from_source_at(
     // changes nothing else.
     let lex_opts =
         ParseOpts { reread: opts.reread, tolerant: opts.tolerant, ..ParseOpts::default() };
-    let mut segs =
-        crate::lexer::lex_word_verbatim_opts(s, lex_opts).map_err(|e| ParseError::new(&e.msg))?;
+    let mut segs = crate::lexer::lex_word_verbatim_opts(s, lex_opts, q.unread())
+        .map_err(|e| ParseError::new(&e.msg))?;
     map_frag_segs(&mut segs, line);
     let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
     for seg in &segs {
-        parts.push(seg_to_part(seg, opts, Quoting::Bare)?);
+        parts.push(seg_to_part(seg, opts, q)?);
     }
     Ok(Word { parts })
 }
@@ -6976,9 +7059,10 @@ pub(crate) fn word_verbatim_from_source_at(
 pub(crate) fn word_tolerant_from_source_at(
     s: BStr<'_>,
     opts: ParseOpts,
+    q: Quoting,
     line: u32,
 ) -> Result<Word, ParseError> {
-    word_verbatim_from_source_at(s, ParseOpts { tolerant: true, ..opts }, line)
+    word_verbatim_from_source_at(s, ParseOpts { tolerant: true, ..opts }, q, line)
 }
 
 /// Parse the *operand* of a substitution — the `w` of `${x:-w}`, `${x:=w}`,
@@ -6992,14 +7076,14 @@ fn operand_from_source(
     q: Quoting,
     line: u32,
 ) -> Result<Word, ParseError> {
-    if q == Quoting::Bare {
-        return word_verbatim_from_source_at(s, opts, line);
+    if !q.dquoted() {
+        return word_verbatim_from_source_at(s, opts, q, line);
     }
     if s.is_empty() {
         return Ok(Word::default());
     }
-    let mut segs = crate::lexer::lex_operand_in_dquote(s, q == Quoting::Unread)
-        .map_err(|e| ParseError::new(&e.msg))?;
+    let mut segs =
+        crate::lexer::lex_operand_in_dquote(s, q.unread()).map_err(|e| ParseError::new(&e.msg))?;
     map_frag_segs(&mut segs, line);
     let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
     for seg in &segs {
@@ -7048,25 +7132,32 @@ pub(crate) fn dquote_word_from_source(s: BStr<'_>, opts: ParseOpts) -> Result<Wo
 fn word_replacement_from_source(
     s: BStr<'_>,
     opts: ParseOpts,
+    q: Quoting,
     line: u32,
 ) -> Result<Word, ParseError> {
     if s.is_empty() {
         return Ok(Word::default());
     }
-    let mut segs = crate::lexer::lex_replacement_verbatim(s).map_err(|e| ParseError::new(&e.msg))?;
+    let mut segs =
+        crate::lexer::lex_replacement_verbatim(s, q.unread()).map_err(|e| ParseError::new(&e.msg))?;
     map_frag_segs(&mut segs, line);
     let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
     for seg in &segs {
-        parts.push(seg_to_part(seg, opts, Quoting::Bare)?);
+        parts.push(seg_to_part(seg, opts, q)?);
     }
     Ok(Word { parts })
 }
 
-fn word_from_source(s: BStr<'_>, opts: ParseOpts, line: u32) -> Result<Word, ParseError> {
+fn word_from_source(
+    s: BStr<'_>,
+    opts: ParseOpts,
+    q: Quoting,
+    line: u32,
+) -> Result<Word, ParseError> {
     if s.is_empty() {
         return Ok(Word::default());
     }
-    let mut toks = tokenize(s, opts).map_err(|e| ParseError::new(&e.msg))?;
+    let mut toks = tokenize(s, opts, q.unread()).map_err(|e| ParseError::new(&e.msg))?;
     for t in &mut toks {
         if let Tok::Word(segs) = t {
             map_frag_segs(segs, line);
@@ -7081,7 +7172,7 @@ fn word_from_source(s: BStr<'_>, opts: ParseOpts, line: u32) -> Result<Word, Par
             }
             first = false;
             for seg in segs {
-                parts.push(seg_to_part(seg, opts, Quoting::Bare)?);
+                parts.push(seg_to_part(seg, opts, q)?);
             }
         }
     }
@@ -7521,8 +7612,8 @@ mod tests {
         // word and so refuses text that runs out inside a quote.
         let opts = ParseOpts::default();
         let src = br#""${x:-a}b"}""#;
-        assert!(super::word_verbatim_from_source_at(src, opts, 1).is_err());
-        assert!(super::word_tolerant_from_source_at(src, opts, 1).is_ok());
+        assert!(super::word_verbatim_from_source_at(src, opts, super::Quoting::Bare, 1).is_err());
+        assert!(super::word_tolerant_from_source_at(src, opts, super::Quoting::Bare, 1).is_ok());
 
         // A splice that writes nothing the expansion reads differently leaves
         // the tree alone.

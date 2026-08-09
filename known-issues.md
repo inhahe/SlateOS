@@ -382,7 +382,7 @@ TD-OILS-A-FAILED-EXTENT-PARSE-CONSUMES-THE-REST-OF-THE-STRING.
 
 ---
 
-### TD-OILS-A-BRACE-PATTERN-OPERAND-IS-PARSED-EAGERLY. `${y#$(fi)}` is read as source at parse time, so it either kills the whole script or vanishes without a word — 2026-08-09 — OPEN
+### TD-OILS-A-BRACE-PATTERN-OPERAND-IS-PARSED-EAGERLY. `${y#$(fi)}` is read as source at parse time, so it either kills the whole script or vanishes without a word — 2026-08-09 — ✅ FIXED 2026-08-09
 
 **Where:** `userspace/oils/src/parser.rs`. The pattern/replacement/offset
 fragments of a `${ … }` all go through `word_verbatim_from_source_at`, which
@@ -420,39 +420,94 @@ what makes these report, and it cannot see these substitutions because the parse
 never produced a `WordPart::CommandSub` for them — it produced a `ParseError`
 that the caller swallowed by falling back to the raw text.
 
-**Proper fix.** Give `crate::lexer::lex_word_verbatim_opts` an `unread` flag, the
-way `lex_operand_in_dquote` already has one, and thread the caller's `Quoting`
-into `word_verbatim_from_source_at` so the pattern/offset fragments of an unread
-`${ … }` produce `CmdSubBody::Unread` bodies. Then the existing brace scan and
-the existing string-level extent read both reach them with no further work.
+**Fixed.** `crate::lexer::lex_word_verbatim_opts`, `lex_replacement_verbatim` and
+`tokenize` each grew an `unread` flag, the way `lex_operand_in_dquote` already
+had one, and the caller's `Quoting` is threaded through
+`word_verbatim_from_source_at` / `word_replacement_from_source` /
+`word_from_source` to every fragment of a `${ … }`. The fragments then produce
+`CmdSubBody::Unread` bodies, and the existing brace scan and the existing
+string-level extent read reach them with no further work.
+
+**What the plan above got wrong: the two questions are independent.** "Was this
+text read by a parser" and "what quoting does it expand under" are *not* the same
+bit, and a pattern answers them differently from the operand beside it. bash's
+`getpattern` throws the enclosing context away before the pattern expands:
+
+```text
+  pat = expand_string_for_pat (value,
+          (quoted & (Q_HERE_DOCUMENT|Q_DOUBLE_QUOTES)) ? Q_PATQUOTE : quoted,
+          (int *)NULL, (int *)NULL);          /* subst.c:5751-5754 */
+```
+
+so in a here-document body `${nope:-$'a\tb'}` prints `$'a\tb'` back (operand:
+still `Q_HERE_DOCUMENT`, so no ANSI-C branch) while `${v#$'a\tb'}` trims to
+nothing (pattern: `Q_PATQUOTE`, so the branch fires) — and the same split holds
+one level down, because an operand *inside a pattern* has inherited the
+pattern's `Q_PATQUOTE`: `${v#${z:-$'a\tb'}}` trims too. Naively marking a
+pattern as here-doc text would have broken all three, which osh already had
+right.
+
+So `Lexer::here_text` was split into the two flags it had been standing in for —
+`here_text` (the reader's half: no parser read this, so a `$'…'` is untranslated
+and a `$( … )` has no parse) and the new `Lexer::dq_context` (the quoting half:
+this text expands in `Q_DOUBLE_QUOTES`/`Q_HERE_DOCUMENT` as a whole) — and
+`parser::Quoting` grew its fourth state, `Quoting::BareUnread`, with
+`Quoting::as_pattern` naming the transition every fragment call site takes.
+
+**Two fragments the write-up above missed**, both fixed with the rest:
+
+- **The substring bounds** go through `word_from_source`, which reaches the
+  general `lexer::tokenize` rather than the verbatim reader — so `tokenize` took
+  the flag too. bash expands the bounds with `expand_arith_string (substr,
+  Q_DOUBLE_QUOTES|Q_ARITH)` (subst.c:8134), which is a *runtime* read of a
+  string like the pattern's.
+- **The `[ … ]` subscript**, via `split_name_subscript`. It now holds a
+  `CmdSubBody::Unread` and so reports at all, which is half of
+  TD-OILS-A-BRACE-SUBSCRIPT-IS-NOT-EXPANDED-AS-A-STRING-OF-ITS-OWN — see that
+  entry for what is still wrong (the tail is the whole word's, not the
+  subscript's).
+
+**Corpus:**
+`a-pattern-of-an-unread-brace-is-read-with-the-brace-s-own-read.sh`.
 
 **Found by** the corpus pass for
 `a-failed-extent-parse-inside-a-brace-operand-does-not-kill-the-brace.sh`.
 
 ---
 
-### TD-OILS-A-BRACE-SUBSCRIPT-IS-NOT-EXPANDED-AS-A-STRING-OF-ITS-OWN. `${a[$(fi)]}` reports nothing where bash reports twice and still answers `A0B` — 2026-08-09 — OPEN
+### TD-OILS-A-BRACE-SUBSCRIPT-IS-NOT-EXPANDED-AS-A-STRING-OF-ITS-OWN. `${a[$(fi)]}` names the whole word where bash names only the subscript — 2026-08-09 — OPEN
 
-**Where:** `userspace/oils/src/parser.rs:6201`, the `ArrayIndex::Index` arm of
-the name/subscript split, which calls `word_verbatim_from_source_at` — the same
-eager read as TD-OILS-A-BRACE-PATTERN-OPERAND-IS-PARSED-EAGERLY, so the two
-share a fix.
+**Where:** `userspace/oils/src/interp.rs`, the extent read behind
+`Shell::extent_consumed` and `unparse::attach_comsub_tails`, which have no
+notion of a subscript being its own string scope.
+
+The *parse* half is fixed: `split_name_subscript` now takes the enclosing
+`Quoting` and passes `q.as_pattern()`, so a subscript in unread text holds a
+`CmdSubBody::Unread` and the reads happen at all (see
+TD-OILS-A-BRACE-PATTERN-OPERAND-IS-PARSED-EAGERLY). What is left is the scope
+they run at.
 
 **Reproduce** (`declare -a a=(0 1 2)`, `y=Y`, expanded with `@P`):
 
 ```text
 A${a[$(fi)]}B
-  bash: command substitution: line 11: syntax error near unexpected token `fi'
-        command substitution: line 11: `fi)'
-        command substitution: line 10: syntax error near unexpected token `fi'
-        command substitution: line 10: `fi'
+  bash: command substitution: line 4: syntax error near unexpected token `fi'
+        command substitution: line 4: `fi)'
+        command substitution: line 3: syntax error near unexpected token `fi'
+        command substitution: line 3: `fi'
         A0B
-  osh:  A${a[$(fi)]}B          (no diagnostics)
+  osh:  … same two reports, but the tails are `fi)]}B' and `fi)]}'
+        A0                     ← the trailing `B` is eaten
 
 A${y:-${a[$(fi)]}}B
   bash: AYB                    (no diagnostics — see below)
-  osh:  A${y:-${a[$(fi)]}}B
+  osh:  AYB                    ✅ matches since the parse fix
 ```
+
+Both defects are the same one: the reads are run against the *word's* remaining
+text instead of the subscript's, so the tail names too much and
+`Shell::extent_consumed` swallows the word's remainder rather than the
+subscript's.
 
 **Why.** Two separate rules meet here.
 
@@ -469,13 +524,13 @@ A${y:-${a[$(fi)]}}B
    subscript is its own scope. The arithmetic evaluation of the empty result
    then yields index 0, hence `A0B`.
 
-**Proper fix.** The lexer change described in
-TD-OILS-A-BRACE-PATTERN-OPERAND-IS-PARSED-EAGERLY makes the subscript hold a
-`CmdSubBody::Unread`; the second rule then needs the subscript's expansion to run
-the extent read at its own scope, with the subscript's remainder as the tail.
+**Proper fix.** The subscript's expansion has to run the extent read at its own
+scope, with the subscript's remainder as the tail.
 `unparse::attach_comsub_tails` already computes a per-part tail by rendering the
 enclosing container, so the piece to add is a container boundary at the
-subscript rather than new tail machinery.
+subscript rather than new tail machinery — and `Shell::extent_consumed` needs the
+same boundary, so an `Abandoned` read inside a subscript consumes the subscript
+and not the word.
 
 ---
 

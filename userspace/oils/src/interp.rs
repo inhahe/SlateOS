@@ -25995,6 +25995,50 @@ impl Shell {
         if matches!(part, WordPart::DoubleQuoted(_)) {
             return false;
         }
+        // Nor is a `$(( … ))` or a `$[ … ]`. Its own arm scans it —
+        // [`Self::arith_extent_scan`] — and the ending there is *nothing*, not a
+        // `bad substitution`: either spelling's own extent is a delimiter count
+        // that cannot fail (`extract_delimited_string`, subst.c:1284-1286 and
+        // 1299-1304), so there is no brace left waiting to close. An arithmetic
+        // nested *inside* a `${ … }` still reaches this ending, because
+        // [`Self::brace_scanned_subs`] descends into its parts on the way.
+        if matches!(part, WordPart::ArithSub { .. }) {
+            return false;
+        }
+        match self.extent_read_of(part) {
+            ExtentRead::Closed => false,
+            // The jump stands, so the enclosing command is abandoned before
+            // the brace is ever asked to close.
+            ExtentRead::Aborted => true,
+            ExtentRead::Abandoned => {
+                // The scan ran off the end of the string, which is both why
+                // the brace cannot close and why nothing after it is looked
+                // at — see [`Shell::extent_consumed`].
+                self.extent_consumed = true;
+                let text = self.bad_sub_word.clone().unwrap_or_default();
+                self.emit_stderr(&bfmt![
+                    self.err_prefix(),
+                    &text,
+                    b": bad substitution\n"
+                ]);
+                // Only a prompt expansion suppresses the jump, and that is
+                // the one caller that keeps the undecoded text rather than
+                // the expansion — the same ending as any other unclosed
+                // `${ … }` there. See [`Shell::expand_unclosed`].
+                self.prompt_failed = true;
+                true
+            }
+        }
+    }
+
+    /// The extent read bash's scan makes of every `$( … )` in `part`, stopping
+    /// at the first that does not close — see [`Shell::brace_extent_scan`], the
+    /// `${ … }` half, and [`Shell::arith_extent_scan`], the `$(( … ))` one.
+    ///
+    /// The two share the reading and differ only in the ending they give a read
+    /// that ran off the end: a `${ … }` that cannot close is a `bad
+    /// substitution`, an arithmetic that cannot close is simply nothing.
+    fn extent_read_of(&mut self, part: &WordPart) -> ExtentRead {
         let mut subs: Vec<&WordPart> = Vec::new();
         Self::brace_scanned_subs(part, &mut subs);
         for sub in subs {
@@ -26020,40 +26064,63 @@ impl Shell {
                 //
                 // A `$( … )` *nested inside* the arithmetic is another matter —
                 // `extract_delimited_string` carries `SX_COMMAND` too and
-                // recurses into one, so `A${y:-$((1+$(fi)))}B` does report. That
-                // is not reachable from here because the arithmetic body is kept
-                // as raw text; see
-                // TD-OILS-A-RAW-TEXT-BRACE-CONSTRUCT-IS-INVISIBLE-TO-THE-EXTENT-SCAN.
+                // recurses into one, so `A${y:-$((1+$(fi)))}B` does report. It
+                // reaches this loop as a part of the arithmetic's own text; see
+                // [`crate::ast::WordPart::ArithSub::parts`].
                 CmdSubBody::Backtick { .. } | CmdSubBody::ArithFallback { .. } => {
                     ExtentRead::Closed
                 }
             };
-            match read {
-                ExtentRead::Closed => {}
-                // The jump stands, so the enclosing command is abandoned before
-                // the brace is ever asked to close.
-                ExtentRead::Aborted => return true,
-                ExtentRead::Abandoned => {
-                    // The scan ran off the end of the string, which is both why
-                    // the brace cannot close and why nothing after it is looked
-                    // at — see [`Shell::extent_consumed`].
-                    self.extent_consumed = true;
-                    let text = self.bad_sub_word.clone().unwrap_or_default();
-                    self.emit_stderr(&bfmt![
-                        self.err_prefix(),
-                        &text,
-                        b": bad substitution\n"
-                    ]);
-                    // Only a prompt expansion suppresses the jump, and that is
-                    // the one caller that keeps the undecoded text rather than
-                    // the expansion — the same ending as any other unclosed
-                    // `${ … }` there. See [`Shell::expand_unclosed`].
-                    self.prompt_failed = true;
-                    return true;
-                }
+            if read != ExtentRead::Closed {
+                return read;
             }
         }
-        false
+        ExtentRead::Closed
+    }
+
+    /// The `$(( … ))` counterpart of [`Shell::brace_extent_scan`]: the extent
+    /// read bash makes of the arithmetic *before* any of it is expanded, and
+    /// before the expression is evaluated.
+    ///
+    /// `param_expand`'s `case LPAREN` reaches a `$((` through
+    /// `extract_command_subst` (subst.c:10575), which for a body starting `(`
+    /// is `extract_delimited_string (string, sindex, "$(", "(", ")",
+    /// SX_COMMAND)` (subst.c:1284-1286) — a paren count, so the arithmetic's own
+    /// extent cannot fail. What can fail is a `$( … )` *inside* it, which that
+    /// scan does not step over: `SX_COMMAND` sends it to `extract_command_subst`
+    /// over the whole enclosing string (subst.c:1431-1437), a real parse whose
+    /// diagnostic quotes the string's remainder.
+    ///
+    /// The ending differs from the brace's. There is no `bad substitution` here
+    /// — nothing was asked to close but the parens, and they did — so a read
+    /// that ran off the end simply leaves the expansion with what it had:
+    /// measured, `v='A$((1+$(fi)))B'; echo "[${v@P}]"` prints one command
+    /// substitution diagnostic and then `[A]`, where the same failure under a
+    /// `${ … }` prints the whole undecoded word.
+    ///
+    /// The deprecated `$[ … ]` spelling makes no such read at all: it is
+    /// `extract_delimited_string (string, sindex, "$[", "[", "]", 0)`
+    /// (`extract_arithmetic_subst`, subst.c:1299-1304) — flags `0`, so no
+    /// `SX_COMMAND` and no recursion into what it passes. Its `$( … )` is read
+    /// only when the expression itself is expanded, against the expression's own
+    /// text: measured, `v='A$[1+$(fi)]B'; echo "${v@P}"` quotes `` `fi)' ``
+    /// where the `$((` spelling quotes `` `fi)]B' ``. The parts are still
+    /// recorded for it, because an *enclosing* `${ … }` scan does read them.
+    fn arith_extent_scan(&mut self, part: &WordPart, bracket: bool) -> bool {
+        if bracket {
+            return false;
+        }
+        match self.extent_read_of(part) {
+            ExtentRead::Closed => false,
+            ExtentRead::Aborted => true,
+            ExtentRead::Abandoned => {
+                // The read swallowed the rest of the string, so nothing after
+                // the `$((` is looked at either — see
+                // [`Shell::extent_consumed`].
+                self.extent_consumed = true;
+                true
+            }
+        }
     }
 
     /// Every command substitution bash's `${ … }` scan meets, in the order it
@@ -26363,7 +26430,17 @@ impl Shell {
             // so it is ASCII by construction — the only place a value's bytes are
             // known to be text.
             WordPart::ProcSub { input, body } => self.proc_sub(*input, body).into_bytes(),
-            WordPart::ArithSub { expr, bracket } => self.arith_sub(expr, *bracket),
+            // The extent read comes first, exactly as it does for a `${ … }`:
+            // `param_expand` extracts the whole `$(( … ))` before it expands a
+            // byte of it, and a `$( … )` inside is really parsed there. See
+            // [`Shell::arith_extent_scan`].
+            WordPart::ArithSub { expr, bracket, .. } => {
+                if self.arith_extent_scan(part, *bracket) {
+                    Str::new()
+                } else {
+                    self.arith_sub(expr, *bracket)
+                }
+            }
             WordPart::ArrayRef {
                 name,
                 index,

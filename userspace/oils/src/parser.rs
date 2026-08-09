@@ -5816,16 +5816,83 @@ fn word_expanded_from_its_text(word: Word, segs: &[Seg]) -> Word {
 /// enclosing unit: `echo $(( 1 + $(fi) ))` never reaches the arithmetic
 /// evaluator, and `if false; then echo $(( 1 + $(fi) )); fi` dies with the
 /// branch untaken.
+/// A span the scan met in text no parser read is not parsed here at all — there
+/// is no eager parse to make an error out of and no re-print to splice. It is
+/// read when the text is expanded instead, and reaches that read through
+/// [`arith_unread_subs`].
 fn parse_arith_comsubs(
     nested: &[CmdSubSpan],
     opts: ParseOpts,
 ) -> Result<Vec<(core::ops::Range<usize>, Str)>, ParseError> {
     let mut out = Vec::with_capacity(nested.len());
     for sub in nested {
+        if sub.kind != SubBody::Eager {
+            continue;
+        }
         let prog = parse_cmdsub_body(&sub.src, sub.close_line, opts)?;
         out.push((sub.range.clone(), crate::unparse::comsub_reprint(b"$(", &prog)));
     }
     Ok(out)
+}
+
+/// The arithmetic text `expr` cut into the parts the *expansion-time* scan walks
+/// it as: literal runs, and one [`CmdSubBody::Unread`] command substitution for
+/// each `$( … )` the scan will read there.
+///
+/// bash reads them from inside the arithmetic's own extent read —
+/// `extract_delimited_string` carries `SX_COMMAND` and hands a nested `$(` to
+/// `extract_command_subst` over the *whole enclosing string* (subst.c:1431-1437)
+/// — so the body is parsed a second time there, and when it will not parse the
+/// diagnostic quotes the enclosing string's remainder, not the expression's.
+/// Rendering them back as parts is what gets both: the scan
+/// ([`crate::interp::Shell::brace_scanned_subs`]) can reach them, and
+/// [`crate::unparse::attach_comsub_tails`] measures each one's remainder by
+/// rendering the whole word around it.
+///
+/// The parts render back to exactly `expr` — an unread body is printed as its
+/// source, there being no re-print — which is the invariant
+/// [`crate::ast::WordPart::ArithSub::parts`] states.
+///
+/// A span the parser *did* read eagerly contributes no part: its second read is
+/// of the re-print already spliced into `expr`, and that read is the arithmetic
+/// expansion's own (see `Shell::expand_arith_params`), not the scan's.
+///
+/// Both arithmetic spellings get parts, because the parts are what any *enclosing*
+/// scan walks: a `${ … }` around either one reads every `$( … )` it passes,
+/// however deeply spelled. Which of the two scans its own parts is the
+/// arithmetic's question, answered in `Shell::arith_extent_scan`.
+fn arith_unread_subs(expr: &Str, nested: &[CmdSubSpan]) -> Vec<WordPart> {
+    let mut spans: Vec<&CmdSubSpan> =
+        nested.iter().filter(|s| matches!(s.kind, SubBody::Unread { .. })).collect();
+    if spans.is_empty() {
+        return vec![WordPart::Literal(expr.clone())];
+    }
+    spans.sort_by_key(|s| s.range.start);
+    let mut parts = Vec::with_capacity(spans.len() * 2 + 1);
+    let mut at = 0usize;
+    for s in spans {
+        // A range that does not fit is not something a correct scan produces;
+        // skipping it keeps the text whole rather than corrupting it, at the
+        // cost of one substitution the scan will not see.
+        if s.range.start < at || s.range.end > expr.len() {
+            continue;
+        }
+        let SubBody::Unread { closed } = s.kind else { continue };
+        parts.push(WordPart::Literal(expr.get(at..s.range.start).unwrap_or_default().to_vec()));
+        parts.push(WordPart::CommandSub {
+            body: CmdSubBody::Unread {
+                src: s.src.clone(),
+                // Filled by `unparse::attach_comsub_tails`, once the word this
+                // arithmetic sits in has been assembled.
+                tail: Str::new(),
+                close_line: s.close_line,
+                closed,
+            },
+        });
+        at = s.range.end;
+    }
+    parts.push(WordPart::Literal(expr.get(at..).unwrap_or_default().to_vec()));
+    parts
 }
 
 /// Write each re-print from [`parse_arith_comsubs`] back over the text it
@@ -6025,16 +6092,21 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
                 }
             },
         },
-        Seg::Arith(raw, bracket, nested) => WordPart::ArithSub {
+        Seg::Arith(raw, bracket, nested) => {
             // The string carries the re-print, not what was written: it is
             // `APPEND_NESTRET` that puts `parse_comsub`'s answer into the
             // arithmetic scan's buffer, and there is no copy of the source
             // left afterwards. So `$(( 1 + $(echo a>&2) ))` names
             // `1 + $(echo a 1>&2)` when it fails, and re-reads that text when
             // it runs.
-            expr: splice_reprints(raw, parse_arith_comsubs(nested, opts)?),
-            bracket: *bracket,
-        },
+            let expr = splice_reprints(raw, parse_arith_comsubs(nested, opts)?);
+            // The same text in parts, which is how the expansion-time scan
+            // walks it. A collection is all of one kind (see
+            // [`CmdSubSpan::kind`]), so the splice above and this never both
+            // have work to do and the ranges cannot have moved under it.
+            let parts = arith_unread_subs(&expr, nested);
+            WordPart::ArithSub { expr, bracket: *bracket, parts }
+        }
         Seg::ProcSub(input, raw, open_line) => WordPart::ProcSub {
             input: *input,
             body: parse_procsub_body(raw, *open_line, opts)?,

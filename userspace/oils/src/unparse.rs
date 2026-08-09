@@ -1546,6 +1546,10 @@ macro_rules! nested_parts_fn {
                     BulkOp::Transform { .. } => Vec::new(),
                     BulkOp::BadTransform { op } => vec![arg(op.parts.$slice())],
                 },
+                // The arithmetic text in parts — literal runs and the `$( … )`
+                // the expansion-time scan reads in it. See
+                // [`crate::ast::WordPart::ArithSub::parts`].
+                WordPart::ArithSub { parts, .. } => vec![arg(parts.$slice())],
                 // A process substitution's body is a `Program`, not a word, and
                 // bash never re-reads it through this path anyway.
                 WordPart::Literal(_)
@@ -1553,7 +1557,6 @@ macro_rules! nested_parts_fn {
                 | WordPart::Param { .. }
                 | WordPart::VarNames { .. }
                 | WordPart::CommandSub { .. }
-                | WordPart::ArithSub { .. }
                 | WordPart::Length(_)
                 | WordPart::ArrayKeys { .. }
                 | WordPart::BadSubst(_)
@@ -1702,11 +1705,17 @@ fn part_src(p: &WordPart) -> Str {
         WordPart::ProcSub { input, body } => {
             comsub_reprint(if *input { b"<(" } else { b">(" }, body)
         }
-        WordPart::ArithSub { expr, bracket } => {
+        // Rendered from the parts rather than from `expr`, which is the same
+        // bytes: that is what lets `attach_comsub_tails` swap one of the
+        // `$( … )` in here for its sentinel and read the remainder off the
+        // rendering of the whole word. See
+        // [`crate::ast::WordPart::ArithSub::parts`].
+        WordPart::ArithSub { bracket, parts, .. } => {
+            let text = parts_src(parts);
             if *bracket {
-                bfmt![b"$[", expr, b"]"]
+                bfmt![b"$[", &text, b"]"]
             } else {
-                bfmt![b"$((", expr, b"))"]
+                bfmt![b"$((", &text, b"))"]
             }
         }
         WordPart::BadSubst(raw) => bfmt![b"${", raw, b"}"],

@@ -826,10 +826,30 @@ pub enum WordPart {
     },
     /// `$(command)` / `` `command` `` command substitution.
     CommandSub { body: CmdSubBody },
-    /// `$(( expr ))` arithmetic substitution (raw expression text for now).
-    /// `bracket` records the deprecated `$[ expr ]` spelling, which evaluates
-    /// identically but is printed back as written (bash `declare -f`).
-    ArithSub { expr: Str, bracket: bool },
+    /// `$(( expr ))` arithmetic substitution. `bracket` records the deprecated
+    /// `$[ expr ]` spelling, which evaluates identically but is printed back as
+    /// written (bash `declare -f`).
+    ArithSub {
+        /// The expression, flat — what the evaluator reads and what a
+        /// diagnostic quotes. Carries the *re-print* of any `$( … )` a parser
+        /// read eagerly in it, not the source; see `parse_arith_comsubs`.
+        expr: Str,
+        bracket: bool,
+        /// The same bytes as `expr`, cut into the parts the *expansion-time*
+        /// scan walks it as: literal runs, and one
+        /// [`CmdSubBody::Unread`] for each `$( … )` that scan will read.
+        ///
+        /// Two views of one string, not two strings — `parts_src(parts)` is
+        /// `expr`, because an unread body is printed back as its source. `expr`
+        /// is kept beside them because the evaluator wants the flat text on
+        /// every evaluation, and because a `hides_closer` question is asked of
+        /// it by reference.
+        ///
+        /// Text a parser read has no unread bodies in it, so `parts` there is
+        /// the one literal run — the eager parse already happened, and its
+        /// second read is the arithmetic expansion's own rather than the scan's.
+        parts: Vec<WordPart>,
+    },
     /// `${#name}` — the length of the parameter's value.
     Length(String),
     /// `${name[index]}`, `${name[@]}`, `${name[*]}`, and their `${#…}` length
@@ -1047,7 +1067,7 @@ impl WordPart {
 
         match self {
             // The one that answers the question.
-            WordPart::ArithSub { expr, bracket } => {
+            WordPart::ArithSub { expr, bracket, .. } => {
                 // `$[ … ]` is read by an extractor with no comment rule at all,
                 // so only the `$(( … ))` spelling can lose its closer this way.
                 (!*bracket && hides_closer(expr)).then_some(expr)

@@ -458,6 +458,25 @@ pub struct CmdSubSpan {
     /// into the buffer this span was collected for, so a scan that splices its
     /// buffer into a longer one shifts them as it does so.
     pub range: core::ops::Range<usize>,
+    /// Whether a parser read the text this span was found in.
+    ///
+    /// [`SubBody::Eager`] is the ordinary case described above: bash parsed the
+    /// body where it met it, so the parse's error is the enclosing unit's and
+    /// its re-print replaces `range`.
+    ///
+    /// [`SubBody::Unread`] is the same `$( … )` written in text no parser ever
+    /// read as a word — a here-document body, a `PS4`, a `${x@P}`. There was no
+    /// eager parse, so no re-print and no parse-time error. It is recorded all
+    /// the same, because the *expansion-time* scan has to be able to see it:
+    /// `extract_delimited_string` carries `SX_COMMAND` and recurses into a
+    /// `$( … )` with a real parse (subst.c:1431-1437), so a body that will not
+    /// parse is reported from inside the arithmetic's extent read —
+    /// `A$((1+$(fi)))B` under `${x@P}` names the *string's* remainder,
+    /// `` `fi)))B' ``.
+    ///
+    /// One collection is all of one kind: the question is [`Lexer::here_text`],
+    /// which nothing changes under a scan that is already running.
+    pub kind: SubBody,
 }
 
 /// Move a collection of spans from the buffer they were gathered in to the
@@ -5271,6 +5290,7 @@ impl Lexer {
                                 src: inner,
                                 close_line: self.cur_line(),
                                 range: start..raw.len(),
+                                kind: self.subst_kind(),
                             });
                         }
                         Some(_) => self.take_into(raw),
@@ -5352,14 +5372,16 @@ impl Lexer {
                 // arithmetic expansion written in a here-document body is found
                 // by `expand_word_internal`, not by `read_token_word`, so
                 // nothing in it was ever handed to `parse_comsub` and there is
-                // no re-print to write back. See [`Lexer::here_text`].
-                if !self.here_text {
-                    self.arith_comsubs.push(CmdSubSpan {
-                        src: inner,
-                        close_line: self.cur_line(),
-                        range: start..raw.len(),
-                    });
-                }
+                // no re-print to write back. See [`Lexer::here_text`]. The span
+                // is still recorded — marked [`SubBody::Unread`] — because the
+                // scan that walks that text at expansion time reads the body
+                // there instead; see [`CmdSubSpan::kind`].
+                self.arith_comsubs.push(CmdSubSpan {
+                    src: inner,
+                    close_line: self.cur_line(),
+                    range: start..raw.len(),
+                    kind: self.subst_kind(),
+                });
                 Ok(true)
             }
             _ => Ok(false),
@@ -6074,14 +6096,13 @@ impl Lexer {
                                 // …unless nothing here was read by a parser at
                                 // all, in which case there is no parse to
                                 // re-print and the source is what stands. See
-                                // [`Lexer::here_text`].
-                                if !self.here_text {
-                                    self.arith_comsubs.push(CmdSubSpan {
-                                        src: inner,
-                                        close_line: self.cur_line(),
-                                        range: start..raw.len(),
-                                    });
-                                }
+                                // [`Lexer::here_text`] and [`CmdSubSpan::kind`].
+                                self.arith_comsubs.push(CmdSubSpan {
+                                    src: inner,
+                                    close_line: self.cur_line(),
+                                    range: start..raw.len(),
+                                    kind: self.subst_kind(),
+                                });
                             }
                         }
                         Some('[') => {

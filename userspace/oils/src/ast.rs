@@ -919,45 +919,45 @@ pub enum WordPart {
     /// current parse unit without exiting the shell). The stored string is the
     /// text *between* the braces, so the diagnostic reproduces `${raw}`.
     BadSubst(Str),
-    /// A whole word, as *text*, cut short by a NUL byte — the only shape a word
-    /// carrying one can have, because a word that carries one does not survive
-    /// to be a word.
+    /// A whole word held as the *text of its token buffer*, because that text is
+    /// not what the parser read and so cannot be described as a tree. It is read
+    /// back at expansion time by `Shell::expander_word`, with
+    /// `crate::parser::word_tolerant_from_source_at`.
     ///
-    /// bash's word is a C string: `read_token_word` accumulates the token into a
-    /// byte buffer and then hands it to `make_word`, which copies it with
-    /// `savestring` — so the token ends at its first NUL. Exactly one thing can
-    /// put a NUL in that buffer, and only in bash 5.2: a `$'…'` containing one,
-    /// spliced into a double-quoted `${ … }` body **bare**, where
-    /// `parse_matched_pair` copies `ttranslen` bytes rather than `strlen`'s
-    /// (parse.y:3892). Every other spelling re-quotes the translation through
-    /// `sh_single_quote`, which takes a `char *` and so loses the NUL — and with
-    /// it the rest of the *translation* — while leaving the word intact:
+    /// One thing writes text into a token buffer that was never read out of the
+    /// source: a `$'…'` inside a double-quoted `${ … }` body, translated and
+    /// spliced back **bare** (parse.y:3887) rather than re-quoted through
+    /// `sh_single_quote`. Every character the translation produced is then live
+    /// when the word is expanded, and two of them change the word:
     ///
-    /// ```text
-    /// f() { echo A"${x:-$'a\0b'}"B C; echo second; }; declare -f f
-    ///     →   echo A"${x:-a C
-    ///         echo second
-    /// ```
+    /// * A **NUL** ends the buffer. bash's word is a C string — `read_token_word`
+    ///   accumulates the token into a byte buffer with an explicit length and
+    ///   hands it to `make_word`, which copies it with `savestring`. Only the
+    ///   bare splice can put one there, because it alone copies `ttranslen`
+    ///   bytes rather than `strlen`'s (parse.y:3892):
     ///
-    /// The word's *extent* is untouched — the scan read `A"${x:-a\0b}"B` and
-    /// stopped where it always would, so `C` is still the next word and the rest
-    /// of the command still parses. Only the text it kept is shorter.
+    ///   ```text
+    ///   f() { echo A"${x:-$'a\0b'}"B C; echo second; }; declare -f f
+    ///       →   echo A"${x:-a C
+    ///           echo second
+    ///   ```
     ///
-    /// The text is held unparsed because the cut lands inside the `${ … }` body
-    /// the splice was in, so what is normally left is an unterminated `${`
-    /// inside an unterminated `"` — not a word any reader built for source
-    /// accepts. bash does not re-read it as source either: it expands the text
-    /// it has, and `Shell::begin_word`'s extent scan over that same text is what
-    /// answers for it, with the ``bad substitution: no closing `}'`` bash raises
-    /// there.
+    ///   The word's *extent* is untouched — the scan read `A"${x:-a\0b}"B` and
+    ///   stopped where it always would, so `C` is still the next word and the
+    ///   rest of the command still parses. Only the text it kept is shorter.
     ///
-    /// A translation holding a `}` *before* its NUL is the exception — the `}`
-    /// closes the expansion at the second read, and the cut text is then a
-    /// well-formed word bash expands normally. osh does not yet read that back;
-    /// it wants a reader with `expand_word_internal`'s tolerance for the
-    /// unterminated `"`. See `known-issues.md`
-    /// TD-OILS-A-CUT-WORD-IS-EXPANDED-AS-LITERAL-TEXT.
-    CutAtNul(Str),
+    /// * A **quote or a `}`** changes where the constructs in the buffer begin
+    ///   and end, and neither boundary is the parser's any more: `"${x:-$'a}b"c'}"`
+    ///   is the word `"${x:-a}b"c}"`, whose expansion is `${x:-a}`, whose
+    ///   double-quoted run ends at the spliced `"`, and whose last `"` opens a
+    ///   run nothing closes. It prints `abc}`.
+    ///
+    /// Both leave text whose quoting no parse tree describes, which is why the
+    /// text is kept whole rather than lowered. The reader that answers for it is
+    /// `expand_word_internal`'s, not the parser's, and it differs in exactly one
+    /// way that matters here: an unterminated `'` or `"` runs to the end of the
+    /// word instead of being an error.
+    TokenText(Str),
     /// Process substitution `<(cmd)` (input) / `>(cmd)` (output). Expands to the
     /// pathname of a file the shell connects to `cmd`: for `<(cmd)` the file holds
     /// `cmd`'s output (read by the enclosing command); for `>(cmd)` the file's
@@ -1106,13 +1106,11 @@ impl WordPart {
             // closing" rather than "bad substitution"), but finding it here
             // would mean re-scanning raw source — see the note above.
             | WordPart::BadSubst(_)
-            // `CutAtNul` is unparsed source for the same reason. Where the cut
-            // leaves the `${ … }` it landed in unclosed the question never
-            // arrives, because the extent scan over this same text reports that
-            // before any of the word is expanded; where it does not, the whole
-            // text still wants re-reading (TD-OILS-A-CUT-WORD-IS-EXPANDED-AS-
-            // LITERAL-TEXT) and this answer will come from the re-read.
-            | WordPart::CutAtNul(_) => None,
+            // `TokenText` is unparsed source for the same reason — and here the
+            // silence is right rather than merely cheap: the word it stands for
+            // is re-read at expansion time, and the tree that read builds is
+            // what carries any `$(( … ))` it holds.
+            | WordPart::TokenText(_) => None,
 
             // Not reached: raised by the substitution's own expansion instead.
             WordPart::CommandSub { .. } | WordPart::ProcSub { .. } => None,

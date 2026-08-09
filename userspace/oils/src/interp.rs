@@ -130,6 +130,7 @@ use crate::parser::{
     IncrementalParser, Quoting, UnitLine, UnitLineKind, parse_opts, parse_with_aliases,
 };
 use crate::unparse::elem_src;
+use crate::wordscan::WordFault;
 #[cfg(windows)]
 use crate::wincmd;
 
@@ -6310,6 +6311,10 @@ impl Shell {
             // The ordinary read, which is the parser's. Only the word re-read
             // sets this — see [`crate::lexer::ParseOpts::reread`].
             reread: false,
+            // Likewise: the parser is looking for the end of the word, so an
+            // unterminated quote is its error to raise. Only the expander's
+            // re-read of a finished word tolerates one.
+            tolerant: false,
         }
     }
 
@@ -25984,20 +25989,17 @@ impl Shell {
                 self.join_derived(&names, *star)
             }
             WordPart::BadSubst(raw) => self.bad_substitution(raw),
-            // A word a NUL cut short is text bash then expands. Where the cut
-            // leaves the `${ … }` it landed in *open* — the usual case — the
-            // extent scan [`Shell::begin_word`] ran over this same text has
-            // already reported the unclosed `${` and armed the DISCARD that
-            // throws the command away, so nothing downstream can observe what is
-            // returned here; the text is returned rather than nothing so that it
-            // is the *word* that is wrong and not this part's contribution to
-            // it. Where a spliced `}` closed the expansion *before* the NUL the
-            // text is a well-formed word, and returning it literally is wrong —
-            // it wants the re-read of [`Shell::reread_word`], which in turn wants
-            // a reader with `expand_word_internal`'s tolerance for the
-            // unterminated `"` the cut left. See `known-issues.md`
-            // TD-OILS-A-CUT-WORD-IS-EXPANDED-AS-LITERAL-TEXT.
-            WordPart::CutAtNul(raw) => raw.clone(),
+            // Reached only for a token text the expander could not read back
+            // even with `expand_word_internal`'s tolerance: `Shell::begin_word`
+            // hands every one of these to `Shell::expander_word`, and a text
+            // that reads back is *replaced* by the word that read carved, so it
+            // never arrives here. What is left is a construct nothing closes —
+            // and the extent scan `Shell::begin_word` ran over this same text
+            // has already named it and armed the DISCARD that throws the
+            // command away, so nothing downstream can observe what is returned
+            // here. The text is returned rather than nothing so that it is the
+            // *word* that is wrong and not this part's contribution to it.
+            WordPart::TokenText(raw) => raw.clone(),
             // Literal/quoted handled by callers.
             WordPart::Literal(s) | WordPart::SingleQuoted { text: s, .. } => s.clone(),
             WordPart::DoubleQuoted(parts) => self.expand_double_quoted(parts),
@@ -26092,33 +26094,61 @@ impl Shell {
     /// and what stops `echo "$(touch f)$(( #5 ))"` from running the `touch`.
     ///
     /// The scanner reaches a second verdict here, for the same reason: a `${`
-    /// that the *parser* closed but the scanner does not — see
+    /// or a `` ` `` that the *parser* closed but the scanner does not — see
     /// [`crate::wordscan`] — and that too must be raised before the word's
     /// first `$( … )` runs.
     ///
     /// It reaches a third here, and this one replaces the word rather than
-    /// complaining about it: where the re-read carves a different `${ … }` than
-    /// the parser did, it is the re-read's word that is expanded. See
-    /// [`Shell::reread_word`].
+    /// complaining about it: where the expander's own read of the word's text
+    /// carves something different from what the parser built, it is that read's
+    /// word that is expanded. See [`Shell::expander_word`].
     ///
     /// Pass the returned pair back to [`Shell::end_word`] and expand the
     /// returned word in place of `w`.
     fn begin_word(&mut self, w: &Word) -> (Option<Str>, Option<Word>) {
         let src = crate::unparse::word_src(w);
-        let unclosed = crate::wordscan::unclosed_brace(&src);
-        let reread = self.reread_word(&src);
+        let fault = crate::wordscan::word_fault(&src);
+        let reread = self.expander_word(w, &src);
         let saved = self.bad_sub_word.replace(src);
         if let Some(expr) = Self::arith_hiding_its_closer(w) {
             self.arith_unclosed_by_comment(&expr);
         }
-        if let Some(named) = unclosed {
-            self.dq_unclosed_brace(&named);
+        match fault {
+            Some(WordFault::Brace(named)) => self.dq_unclosed_brace(&named),
+            Some(WordFault::Backquote(named)) => self.dq_unclosed_backquote(&named),
+            None => {}
         }
         (saved, reread)
     }
 
     /// The word bash's *expansion* reads out of `src`, when that is not the
-    /// word the parser read.
+    /// word the parser built — whichever of the two reasons applies.
+    ///
+    /// The reasons are independent. [`Shell::reread_word`] is about a rule the
+    /// expander's read has and the parser's has not, on text both of them read.
+    /// A [`WordPart::TokenText`] word is about text the parser never read at
+    /// all: a bare splice wrote it into the token buffer, and the quoting it
+    /// carries is nothing the tree describes. The expander reads it, and it is
+    /// [`crate::parser::word_tolerant_from_source_at`] — the reader that stops
+    /// at the end of the word rather than demanding a quote it never gets —
+    /// that answers for it.
+    ///
+    /// Such a word that will not read back even tolerantly keeps its text. That
+    /// is an unterminated `` ` `` or `${`, each of which bash answers with a
+    /// runtime diagnostic of its own; the `${` one is
+    /// [`Shell::dq_unclosed_brace`], raised from the same [`Shell::begin_word`]
+    /// over this same text, and it has already armed the DISCARD that throws
+    /// the command away before anything can observe what the text expanded to.
+    fn expander_word(&mut self, w: &Word, src: BStr<'_>) -> Option<Word> {
+        if let [WordPart::TokenText(_)] = w.parts.as_slice() {
+            let opts = self.parse_opts();
+            return crate::parser::word_tolerant_from_source_at(src, opts, self.current_line).ok();
+        }
+        self.reread_word(src)
+    }
+
+    /// The word bash's *expansion* reads out of `src`, when the one rule that
+    /// separates its read from the parser's changes where a `${ … }` ends.
     ///
     /// bash reads a word twice. The parser reads it to find where it ends;
     /// `expand_word_internal` re-derives the rest from the word's source when
@@ -26195,24 +26225,39 @@ impl Shell {
     /// Report a `${` the word's *extent* scan could not close — see
     /// [`crate::wordscan`] for which ones those are and why the name is passed
     /// in rather than taken from [`Shell::bad_sub_word`].
-    ///
-    /// Like the two arithmetic scanner complaints next to it this is
-    /// *errexit only*: bash raises it with a bare
-    /// `exp_jump_to_top_level (DISCARD)` (subst.c:1978) rather than by
-    /// returning an error word to `expand_word_internal`, so posix mode's "an
-    /// expansion error ends the shell" hook never sees it. Measured against
-    /// bash 5.2.37: `set -o posix; echo "${a[}"; echo next` prints `next`,
-    /// where the plain bad substitution `echo "${a[x}"` does not.
     fn dq_unclosed_brace(&mut self, named: BStr<'_>) {
+        self.unclosed_in_word(b"bad substitution: no closing `}' in ", named);
+    }
+
+    /// Report a `` ` `` the same scan could not close (subst.c:11290).
+    ///
+    /// `named` starts *at* the backquote rather than at the word, because the
+    /// call is `report_error (…, string + t_index)` — the one place in this
+    /// family where bash narrows the name.
+    ///
+    /// Only a word whose text the parser never read can get here: an unclosed
+    /// backquote is a parse error in anything read as source. See
+    /// [`WordPart::TokenText`].
+    fn dq_unclosed_backquote(&mut self, named: BStr<'_>) {
+        self.unclosed_in_word(b"bad substitution: no closing \"`\" in ", named);
+    }
+
+    /// The mechanism both of the above share.
+    ///
+    /// Like the two arithmetic scanner complaints next to them this is
+    /// *errexit only*: bash raises it with a bare
+    /// `exp_jump_to_top_level (DISCARD)` — directly for the brace
+    /// (subst.c:1978), by way of `&expand_word_error` (subst.c:4334) for the
+    /// backquote — rather than by returning an error word to
+    /// `expand_word_internal`, so posix mode's "an expansion error ends the
+    /// shell" hook never sees either. Measured against bash 5.2.37:
+    /// `set -o posix; echo "${a[}"; echo next` prints `next`, where the plain
+    /// bad substitution `echo "${a[x}"` does not.
+    fn unclosed_in_word(&mut self, lead: BStr<'_>, named: BStr<'_>) {
         if self.expansion_failed() {
             return;
         }
-        self.emit_stderr(&bfmt![
-            self.err_prefix(),
-            b"bad substitution: no closing `}' in ",
-            named,
-            b"\n"
-        ]);
+        self.emit_stderr(&bfmt![self.err_prefix(), lead, named, b"\n"]);
         self.arm_discard(1);
         self.note_shell_error(FatalWhen::ErrexitOnly);
     }
@@ -28596,7 +28641,7 @@ impl Shell {
     ///   lone `!` is `!` with nothing after it. Appending the `)` yields `! )`,
     ///   which is not a list terminator — see `tests/corpus/prefix-bang-time.sh`.
     /// * A body a NUL cut short, which leaves an unclosed construct where the cut
-    ///   landed — see [`crate::ast::WordPart::CutAtNul`].
+    ///   landed — see [`crate::ast::WordPart::TokenText`].
     /// * A nested `$( … )` in either of those.
     ///
     /// This shell's part is only the two numbers, and both are measured against
@@ -28692,7 +28737,7 @@ impl Shell {
     ///   [`Shell::comsub_reparse_error`] already selects — so nothing after it
     ///   runs, where a scalar `v="p$(⏎!⏎)q"` only discards its own parse unit.
     ///
-    /// A listing a NUL cut short (see [`crate::ast::WordPart::CutAtNul`]) fails
+    /// A listing a NUL cut short (see [`crate::ast::WordPart::TokenText`]) fails
     /// the same read one stage earlier — in the tokenizer itself, on the
     /// construct the cut left open — and that failure is *not* fatal. It is
     /// `parse_matched_pair`'s own `parser_error` (parse.y:3711), which suppresses

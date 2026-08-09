@@ -32,8 +32,8 @@
 //! was handed: the whole word for a fault the extent scan found, and the run's
 //! contents — quotes stripped — for one found while expanding them. That is
 //! why `echo "a${a[}b"` names `"a${a[}b"` but `echo "${x:-${a[}}"` names
-//! `${x:-${a[}}`. So [`unclosed_brace`] returns the string to name rather than
-//! a bare flag, and the recursion carries it.
+//! `${x:-${a[}}`. So [`word_fault`] returns the string to name rather than a
+//! bare flag, and the recursion carries it.
 //!
 //! Everything here is a pure function of the word's source bytes, mirroring
 //! bash function for bash function; nothing needs shell state, because the
@@ -104,15 +104,37 @@ const MAX_DEPTH: u32 = 64;
 /// (subst.c:1969 and the `strchr` calls around it).
 const OPS: BStr<'static> = b"#%^,~:-=?+/";
 
-/// The string bash names in ``bad substitution: no closing `}' in %s`` when the
-/// extent pass over `word` meets a `${` it cannot close, or `None` when it
-/// closes every one.
+/// A construct the expansion's walk over a word never closed.
+///
+/// Both are raised the same way — `report_error` naming a string, then
+/// `exp_jump_to_top_level (DISCARD)` — and both are found by the same
+/// left-to-right walk, so whichever comes first is the one bash reports.
+#[derive(Debug, PartialEq, Eq)]
+pub enum WordFault {
+    /// ``bad substitution: no closing `}' in %s`` (subst.c:1980), naming the
+    /// string the innermost `expand_word_internal` was handed.
+    Brace(Str),
+    /// ``bad substitution: no closing "`" in %s`` (subst.c:11290), naming that
+    /// string only from the offending backquote onward: the call is
+    /// `report_error (…, string + t_index)`.
+    Backquote(Str),
+}
+
+/// The fault the expansion's walk over `word` meets, or `None` when it closes
+/// everything it opens.
 ///
 /// `word` is the word's *source* — what the parser read, quotes included —
 /// because that is the string `expand_word_internal` is handed.
-pub fn unclosed_brace(word: BStr<'_>) -> Option<Str> {
-    // No `${` in the word, no brace to leave unclosed. This is the fast path
-    // for the overwhelming majority of words.
+///
+/// The `${` fast path below is what keeps the backquote fault honest as well as
+/// cheap. A backquote nothing closes is an outright *parse* error in any word
+/// the parser read as source, so the only way one can survive to be expanded is
+/// in a word whose text the parser did not read — and the one thing that writes
+/// such text is the bare splice of a translated `$'…'` into a `${ … }` body
+/// (see `crate::ast::WordPart::TokenText`), which cannot happen without a `${`.
+pub fn word_fault(word: BStr<'_>) -> Option<WordFault> {
+    // No `${` in the word, nothing either fault can arise from. This is the
+    // fast path for the overwhelming majority of words.
     word.find(b"${")?;
     scan(word, false, 0).err()
 }
@@ -157,8 +179,8 @@ pub(crate) enum BraceEnd {
     /// with the parser's `}` restored on the end, is ordinary word text.
     Early(usize),
     /// It never closes the brace — the word is a runtime
-    /// ``bad substitution: no closing `}'``, which [`unclosed_brace`] raises
-    /// from the word as a whole.
+    /// ``bad substitution: no closing `}'``, which [`word_fault`] raises from
+    /// the word as a whole.
     Unclosed,
 }
 
@@ -166,9 +188,11 @@ pub(crate) enum BraceEnd {
 /// that consume text. `quoted` is bash's `Q_DOUBLE_QUOTES`: set when `s` is a
 /// double-quoted run's contents rather than a word.
 ///
-/// The error carries the string to name, which is `s` itself — every scanner
-/// reached from here is handed `s`, so a fault at any depth below names it.
-fn scan(s: BStr<'_>, quoted: bool, d: u32) -> Result<(), Str> {
+/// A [`WordFault::Brace`] carries `s` itself — every scanner reached from here
+/// is handed `s`, so a fault at any depth below names it — while a
+/// [`WordFault::Backquote`] carries `s` from the backquote onward, which is the
+/// one place bash narrows the name.
+fn scan(s: BStr<'_>, quoted: bool, d: u32) -> Result<(), WordFault> {
     if d > MAX_DEPTH {
         return Ok(());
     }
@@ -178,16 +202,32 @@ fn scan(s: BStr<'_>, quoted: bool, d: u32) -> Result<(), Str> {
             b'\\' => i += 2,
             // A single quote is only a quote outside double quotes.
             b'\'' if !quoted => i = skip_single(s, i + 1),
-            b'`' => i = skip_backquote(s, i + 1),
+            // `string_extract (…, "`", SX_REQMATCH)` (subst.c:11278): the one
+            // call in the walk that insists on its delimiter.
+            b'`' => match backquote_extent(s, i + 1) {
+                Ok(close) => i = past(close, s),
+                // "The test of sindex against t_index is to allow bare
+                // instances of ` to pass through, for backwards
+                // compatibility" (subst.c:11279). The scan stopping where it
+                // started means there was nothing after the backquote to
+                // scan, so it is emitted as an ordinary character.
+                Err(stop) if stop == i + 1 => i += 1,
+                Err(_) => {
+                    return Err(WordFault::Backquote(s.get(i..).unwrap_or_default().to_vec()));
+                }
+            },
             b'"' => {
-                let (run, next) = dquote_run(s, i + 1, d + 1).map_err(|()| s.to_vec())?;
+                let (run, next) =
+                    dquote_run(s, i + 1, d + 1).map_err(|()| WordFault::Brace(s.to_vec()))?;
                 // `expand_word_internal` re-enters itself on the run's
                 // contents, and a fault found there names *them*.
                 scan(&run, true, d + 1)?;
                 i = next;
             }
             b'$' => match s.get(i + 1) {
-                Some(b'{') => i = brace(s, i, quoted, d + 1).map_err(|()| s.to_vec())?,
+                Some(b'{') => {
+                    i = brace(s, i, quoted, d + 1).map_err(|()| WordFault::Brace(s.to_vec()))?;
+                }
                 Some(b'(') => i = past(skip_matched(s, i + 2, b'(', b')', d + 1), s),
                 // `param_expand` does know `$[ … ]` (the deprecated
                 // arithmetic spelling), even though neither double-quote
@@ -502,18 +542,27 @@ fn skip_single(s: BStr<'_>, start: usize) -> usize {
     past(skip_to(s, start, b'\''), s)
 }
 
-/// The index just past the backtick that closes a command substitution, where
-/// a `\`` does not close it.
-fn skip_backquote(s: BStr<'_>, start: usize) -> usize {
+/// `string_extract (…, "`", SX_REQMATCH)` (subst.c:794): the index of the
+/// backtick that closes the one just before `start`, where a `` \` `` does not
+/// close it; `Err` carries the index the scan stopped at when there is none.
+///
+/// The stop index is not a detail the caller can drop: bash's test for a *bare*
+/// backquote is `sindex - 1 == t_index`, which is this index against the
+/// backquote's own, so a scan that got nowhere is told apart from one that ran
+/// out further along.
+fn backquote_extent(s: BStr<'_>, start: usize) -> Result<usize, usize> {
     let mut i = start;
-    while i < s.len() {
-        match s[i] {
-            b'\\' => i += 2,
-            b'`' => return i + 1,
+    while let Some(&c) = s.get(i) {
+        match c {
+            // `if (string[i + 1]) i++; else break;`: a backslash with nothing
+            // after it ends the scan *on the backslash*, not past it.
+            b'\\' if i + 1 < s.len() => i += 2,
+            b'\\' => return Err(i),
+            b'`' => return Ok(i),
             _ => i += 1,
         }
     }
-    s.len()
+    Err(i)
 }
 
 /// The index of the first `ch` at or after `start`, or `s.len()`.
@@ -585,10 +634,26 @@ fn skip_matched(s: BStr<'_>, start: usize, open: u8, close: u8, d: u32) -> usize
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::{BraceEnd, expansion_body_len, unclosed_brace};
+    use super::{BraceEnd, WordFault, expansion_body_len, word_fault};
 
+    /// The string a `` no closing `}' `` diagnostic would name, for a word whose
+    /// fault is a brace.
     fn named(src: &str) -> Option<String> {
-        unclosed_brace(src.as_bytes()).map(|s| String::from_utf8(s).unwrap())
+        match word_fault(src.as_bytes()) {
+            Some(WordFault::Brace(s)) => Some(String::from_utf8(s).unwrap()),
+            Some(WordFault::Backquote(s)) => {
+                panic!("expected a brace fault, got a backquote one naming {:?}", s.as_slice())
+            }
+            None => None,
+        }
+    }
+
+    /// The string a ``no closing "`"`` diagnostic would name.
+    fn backquote_named(src: &str) -> Option<String> {
+        match word_fault(src.as_bytes()) {
+            Some(WordFault::Backquote(s)) => Some(String::from_utf8(s).unwrap()),
+            _ => None,
+        }
     }
 
     /// Where `parameter_brace_expand` closes the body the parser read as `body`.
@@ -727,12 +792,34 @@ mod tests {
         // can end the scan.
         let n = 100_000;
         let src = format!("\"{}x{}\"", "${\"".repeat(n), "\"}".repeat(n));
-        let deep = unclosed_brace(src.as_bytes());
+        let deep = word_fault(src.as_bytes());
         // Reaching this line *is* the assertion — a stack overflow aborts the
         // process rather than failing a test. Which answer comes back past the
         // cap is deliberately unpinned: this is far past any word bash would
         // still be scanning (it caps `${ … }` nesting at 32), so there is no
         // measurement to be faithful to.
-        assert!(deep.is_none_or(|named| named.len() <= src.len()));
+        assert!(deep.is_none_or(|fault| match fault {
+            WordFault::Brace(named) | WordFault::Backquote(named) => named.len() <= src.len(),
+        }));
+    }
+
+    #[test]
+    fn a_backquote_the_walk_never_closes_is_named_from_the_backquote_on() {
+        // Only reachable in a word whose text the parser did not read, which
+        // is why every case here carries a `${ … }`: the walk's fast path is
+        // the `${`, and a bare splice is the one thing that writes such text.
+        assert_eq!(
+            backquote_named(r#""${x:-a}b"c`echo Z}""#),
+            Some("`echo Z}\"".to_string())
+        );
+        // Closed, so nothing to report.
+        assert_eq!(backquote_named(r#""${x:-a}b"c`echo Z`}""#), None);
+        // "Bare instances of ` … pass through, for backwards compatibility":
+        // the backquote is the word's last character.
+        assert_eq!(backquote_named("\"${x:-a}\"`"), None);
+        // A `\`` does not close it.
+        assert_eq!(backquote_named(r#""${x:-a}"`echo \`z"#), Some("`echo \\`z".to_string()));
+        // The brace fault comes first in the walk, so it is the one reported.
+        assert_eq!(named("\"${a[}\"`echo"), Some("\"${a[}\"`echo".to_string()));
     }
 }

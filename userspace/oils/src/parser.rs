@@ -2283,7 +2283,7 @@ pub struct ComsubReprintError {
 /// `read_token` and accepts anything that comes back a `WORD`. A listing built
 /// from words bash already read can only fail by *lexing*, which it does when a
 /// construct in it is left unclosed — the shape a NUL cut leaves behind. See
-/// [`crate::ast::WordPart::CutAtNul`], and `Shell::array_assign_reparse_error`
+/// [`crate::ast::WordPart::TokenText`], and `Shell::array_assign_reparse_error`
 /// for the caller.
 ///
 /// [`ParseError::fatal`] distinguishes the two failures the way it does
@@ -5541,10 +5541,11 @@ fn word_from_segs_in(segs: &[Seg], opts: ParseOpts, q: Quoting) -> Result<Word, 
     // Every `$( … )` in the word learns what follows it here, because this is
     // the first point that knows. See [`crate::unparse::attach_comsub_tails`].
     crate::unparse::attach_comsub_tails(&mut word);
-    // Only a bare splice can have written a NUL into the word's text, so only a
-    // word that had one needs its re-print built to look for one.
-    if segs_hold_a_nul(segs) {
-        word = word_cut_at_nul(word);
+    // Only a bare splice can have written text into the word's buffer that the
+    // parser did not read out of the source, so only a word that had one pays
+    // for its re-print to be built and looked at.
+    if segs_hold_a_nul(segs) || segs_splice_past_the_brace(segs) {
+        word = word_expanded_from_its_text(word, segs);
     }
     Ok(word)
 }
@@ -5569,26 +5570,53 @@ fn segs_hold_a_nul(segs: &[Seg]) -> bool {
     })
 }
 
-/// bash's `make_word`: the word is a C string, so it ends at its first NUL.
+/// Whether a bare splice wrote a `}` that closes the `${ … }` earlier than the
+/// parser did — the second way the splice makes the word's text disagree with
+/// the tree, asked of the segments for the same reason
+/// [`segs_hold_a_nul`] is.
 ///
-/// `read_token_word` accumulates a token into a byte buffer with an explicit
-/// length and then calls `make_word (token)`, which copies it with `savestring`
-/// — one `strlen` and the rest of the buffer is gone. This is the *token*
-/// boundary and nowhere else: a `${ … }` operand, a pattern, a subscript are all
-/// carved back out of the word's text afterwards, so applying the cut to them
-/// separately would cut words bash never cut.
+/// Where it does, everything after that `}` is ordinary word text, and the
+/// quotes in it are the *word's* quotes: a spliced `"` closes the run the
+/// `${ … }` was written in, and may go on to swallow the run's own closing
+/// quote and run into the word's tail. No split of the segment models that,
+/// which is why the whole word goes back to being text — see
+/// [`WordPart::TokenText`].
+fn segs_splice_past_the_brace(segs: &[Seg]) -> bool {
+    segs.iter().any(|s| match s {
+        // The splice only happens inside double quotes, so the scan that
+        // decides where the expansion ends is the double-quoted one.
+        Seg::ParamBraced(raw, _, _, true) => {
+            matches!(crate::wordscan::expansion_body_len(raw, true), BraceEnd::Early(_))
+        }
+        Seg::Dq(inner) => segs_splice_past_the_brace(inner),
+        _ => false,
+    })
+}
+
+/// Hand the word back as the text of its own token buffer, for the expander to
+/// read — see [`WordPart::TokenText`].
 ///
-/// Only one thing puts a NUL in that buffer — see [`WordPart::CutAtNul`] — and
-/// what the cut leaves is normally unparseable, so the word becomes its own
-/// text. The word's *extent* is not affected: everything the scan consumed it
-/// still consumed, and the next word starts where it always did.
-fn word_cut_at_nul(word: Word) -> Word {
+/// The cut is bash's `make_word`: `read_token_word` accumulates a token into a
+/// byte buffer with an explicit length and then calls `make_word (token)`, which
+/// copies it with `savestring` — one `strlen` and the rest of the buffer is
+/// gone. This is the *token* boundary and nowhere else: a `${ … }` operand, a
+/// pattern, a subscript are all carved back out of the word's text afterwards,
+/// so applying the cut to them separately would cut words bash never cut. The
+/// word's *extent* is not affected either: everything the scan consumed it still
+/// consumed, and the next word starts where it always did.
+///
+/// A word whose text holds no NUL after all keeps its tree unless the other
+/// producer applies, so the byte scan above staying a scan costs nothing.
+fn word_expanded_from_its_text(word: Word, segs: &[Seg]) -> Word {
     let src = crate::unparse::word_src(&word);
-    let Some(nul) = src.iter().position(|&b| b == 0) else {
-        return word;
-    };
-    Word {
-        parts: vec![WordPart::CutAtNul(src.get(..nul).unwrap_or_default().to_vec())],
+    match src.iter().position(|&b| b == 0) {
+        Some(nul) => Word {
+            parts: vec![WordPart::TokenText(src.get(..nul).unwrap_or_default().to_vec())],
+        },
+        None if segs_splice_past_the_brace(segs) => {
+            Word { parts: vec![WordPart::TokenText(src)] }
+        }
+        None => word,
     }
 }
 
@@ -5661,9 +5689,9 @@ fn deferred_body_mut(part: &mut WordPart) -> Option<&mut Str> {
     }
 }
 
-/// Lower one segment onto `out` — normally one part, but two or more for the
-/// `${ … }` whose body the *expansion* closes earlier than the scan that read
-/// it did.
+/// Lower one segment onto `out` — one part, except for the `${ … }` whose body
+/// the *expansion* does not read the way the scan that built it did, which is
+/// kept as text.
 ///
 /// bash reads a word twice, and only the second read decides where a `${ … }`
 /// ends. The first — `parse_matched_pair` — is looking for the end of the
@@ -5679,50 +5707,33 @@ fn deferred_body_mut(part: &mut WordPart) -> Option<&mut Str> {
 /// x=; echo "${x:-$'a}b'}"   →   ab}
 /// ```
 ///
-/// the expansion being `${x:-a}` and `b}` a literal that follows it. Splitting
-/// here rather than re-parsing the whole word keeps every sibling part — and
-/// its physical line — exactly as the scan left it; the leftover is read with
-/// the enclosing double quotes' rules, because that is where it sits.
+/// the expansion being `${x:-a}` and `b}` a literal that follows it. Neither
+/// half of that is a tree the parser can build: the leftover's quotes are the
+/// *word's*, so a spliced `"` closes the run the `${ … }` was written in and
+/// can go on to swallow that run's own closing quote. The body therefore stays
+/// text here, and [`word_from_segs_in`] hands the whole word back as text for
+/// the expander to read — see [`WordPart::TokenText`].
 fn seg_to_parts(
     seg: &Seg,
     opts: ParseOpts,
     q: Quoting,
     out: &mut Vec<WordPart>,
 ) -> Result<(), ParseError> {
-    if let Seg::ParamBraced(raw, open, nested, spliced) = seg
+    if let Seg::ParamBraced(raw, _, nested, spliced) = seg
         && *spliced
-    {
         // The splice only happens inside double quotes, so the scan that
         // decides is the double-quoted one.
-        match crate::wordscan::expansion_body_len(raw, true) {
-            BraceEnd::Same => {}
-            BraceEnd::Early(len) => {
-                let body = raw.get(..len).unwrap_or_default().to_vec();
-                // The parser's `}` is text now: it is past the close, so it
-                // goes on the end of the leftover rather than closing anything.
-                let mut tail = raw.get(len.saturating_add(1)..).unwrap_or_default().to_vec();
-                tail.push(b'}');
-                // A `$( … )` beyond the close belongs to the leftover, which
-                // parses it as it reads it; keeping it here too would parse it
-                // twice.
-                let kept: Vec<CmdSubSpan> =
-                    nested.iter().filter(|s| s.range.end <= len).cloned().collect();
-                out.push(seg_to_part(&Seg::ParamBraced(body, *open, kept, false), opts, q)?);
-                out.extend(dquote_word_from_source(&tail, opts)?.parts);
-                return Ok(());
-            }
-            // Nothing about the body's *shape* can be asked of a `${ … }` the
-            // expansion will not close: `"${x:-$'a"b'}"` is the word
-            // `"${x:-a"b}"`, whose `"` bash's parser never re-read and whose
-            // expansion dies on the missing `}` — so the body is kept as text,
-            // and the word-level scan in `Shell::begin_word` speaks for it.
-            // The `$( … )` in it is still parsed, where bash parsed it.
-            BraceEnd::Unclosed => {
-                let text = splice_reprints(raw, parse_arith_comsubs(nested, opts)?);
-                out.push(WordPart::BadSubst(text));
-                return Ok(());
-            }
-        }
+        && !matches!(crate::wordscan::expansion_body_len(raw, true), BraceEnd::Same)
+    {
+        // Nothing about the body's *shape* can be asked once the expansion
+        // stops reading it the parser's way — whether it closes early
+        // (`"${x:-$'a}b'}"`, the word `"${x:-a}b}"`) or never closes at all
+        // (`"${x:-$'a"b'}"`, the word `"${x:-a"b}"`, which dies on the missing
+        // `}`). Either way the body is kept as text. The `$( … )` in it is
+        // still parsed, where bash parsed it.
+        let text = splice_reprints(raw, parse_arith_comsubs(nested, opts)?);
+        out.push(WordPart::BadSubst(text));
+        return Ok(());
     }
     out.push(seg_to_part(seg, opts, q)?);
     Ok(())
@@ -6847,11 +6858,12 @@ pub(crate) fn word_verbatim_from_source_at(
     if s.is_empty() {
         return Ok(Word::default());
     }
-    // Only [`ParseOpts::reread`] reaches the lexer: this scan has never
+    // Only the two *modes of reading* reach the lexer: this scan has never
     // consulted `extglob` or `posix` (it was handed `ParseOpts::default()`
-    // outright), and the re-read flag is not a shell option but a mode of
-    // reading, so passing it through changes nothing else.
-    let lex_opts = ParseOpts { reread: opts.reread, ..ParseOpts::default() };
+    // outright), and neither flag is a shell option, so passing them through
+    // changes nothing else.
+    let lex_opts =
+        ParseOpts { reread: opts.reread, tolerant: opts.tolerant, ..ParseOpts::default() };
     let mut segs =
         crate::lexer::lex_word_verbatim_opts(s, lex_opts).map_err(|e| ParseError::new(&e.msg))?;
     map_frag_segs(&mut segs, line);
@@ -6860,6 +6872,31 @@ pub(crate) fn word_verbatim_from_source_at(
         parts.push(seg_to_part(seg, opts, Quoting::Bare)?);
     }
     Ok(Word { parts })
+}
+
+/// The word `expand_word_internal` reads out of `s` — [`word_verbatim_from_source_at`]
+/// with [`ParseOpts::tolerant`](crate::lexer::ParseOpts::tolerant) set.
+///
+/// This is the reader for text bash never read as *source*. A word's token
+/// buffer can hold characters the scan wrote into it rather than read out of
+/// it — the bare splice of a translated `$'…'` (parse.y:3887) — and can be cut
+/// short of its own closing quote by a NUL the same splice carried
+/// ([`crate::ast::WordPart::TokenText`]). Either way the expander meets quoting
+/// the parse tree does not describe, and reading the buffer back is the only
+/// way to get the expander's answer.
+///
+/// The tolerance is exactly `string_extract_single_quoted`'s and
+/// `string_extract_double_quoted`'s: they stop at the end of the string they
+/// were handed. An unterminated `` ` `` or `${` is *not* tolerated — bash has a
+/// runtime diagnostic for each (subst.c:11290 and subst.c:1980) rather than a
+/// silent run to the end — so those still come back `Err` and the caller falls
+/// back to the text it had.
+pub(crate) fn word_tolerant_from_source_at(
+    s: BStr<'_>,
+    opts: ParseOpts,
+    line: u32,
+) -> Result<Word, ParseError> {
+    word_verbatim_from_source_at(s, ParseOpts { tolerant: true, ..opts }, line)
 }
 
 /// Parse the *operand* of a substitution — the `w` of `${x:-w}`, `${x:=w}`,
@@ -7333,7 +7370,7 @@ mod tests {
         // `}` the script wrote, and not the closing `"`.
         let w = words(r#"echo "${x:-$'a\0b'}" second"#);
         assert_eq!(w.len(), 3);
-        let [WordPart::CutAtNul(raw)] = w[1].parts.as_slice() else {
+        let [WordPart::TokenText(raw)] = w[1].parts.as_slice() else {
             panic!("expected one cut part, got {:?}", w[1].parts);
         };
         assert_eq!(text(raw), r#""${x:-a"#);
@@ -7342,7 +7379,7 @@ mod tests {
 
         // A NUL that is the whole translation cuts just as hard.
         let w = words(r#"echo "${x:-$'\0'}""#);
-        let [WordPart::CutAtNul(raw)] = w[1].parts.as_slice() else {
+        let [WordPart::TokenText(raw)] = w[1].parts.as_slice() else {
             panic!("expected one cut part, got {:?}", w[1].parts);
         };
         assert_eq!(text(raw), r#""${x:-"#);
@@ -7352,8 +7389,55 @@ mod tests {
         for src in [r#"echo "${q#$'z\0z'}""#, r#"echo ${x:-$'a\0b'}"#, r#"echo x$'a\0b'y"#] {
             let w = words(src);
             assert!(
-                !w[1].parts.iter().any(|p| matches!(p, WordPart::CutAtNul(_))),
+                !w[1].parts.iter().any(|p| matches!(p, WordPart::TokenText(_))),
                 "{src} should not cut"
+            );
+        }
+    }
+
+    /// The splice's *other* effect: a `}` or a quote it wrote lands in the
+    /// token buffer live, so the expansion's read of the buffer carves
+    /// something the parser's read did not. The word goes back to being text
+    /// for the expander to read.
+    #[test]
+    fn a_brace_body_a_splice_closes_early_is_held_as_text() {
+        let words = |src: &str| -> Vec<Word> {
+            let prog = super::parse(src.as_bytes()).expect("parses");
+            let Command::Simple(sc) = &prog.items[0].list.first.commands[0] else {
+                panic!("expected a simple command");
+            };
+            sc.words.clone()
+        };
+        let held = |src: &str| -> String {
+            let w = words(src);
+            let [WordPart::TokenText(raw)] = w[1].parts.as_slice() else {
+                panic!("expected one text part, got {:?}", w[1].parts);
+            };
+            text(raw)
+        };
+
+        // `$'a}b'` is spliced bare, so its `}` closes the expansion where the
+        // parser's `}` did not, and `b}` is ordinary word text.
+        assert_eq!(held(r#"echo "${x:-$'a}b'}""#), r#""${x:-a}b}""#);
+        // A spliced `"` closes the run the `${ … }` was written in, and the
+        // script's own closing `"` then *opens* one that nothing closes — the
+        // shape only a tolerant reader gets through.
+        assert_eq!(held(r#"echo "${x:-$'a}b"'}""#), r#""${x:-a}b"}""#);
+        // …and reading it is exactly what the tolerant mode is for: the
+        // ordinary reader is the parser's, which is still hunting the end of a
+        // word and so refuses text that runs out inside a quote.
+        let opts = ParseOpts::default();
+        let src = br#""${x:-a}b"}""#;
+        assert!(super::word_verbatim_from_source_at(src, opts, 1).is_err());
+        assert!(super::word_tolerant_from_source_at(src, opts, 1).is_ok());
+
+        // A splice that writes nothing the expansion reads differently leaves
+        // the tree alone.
+        for src in [r#"echo "${x:-$'ab'}""#, r#"echo "${x:-$'a{b'}""#] {
+            let w = words(src);
+            assert!(
+                !w[1].parts.iter().any(|p| matches!(p, WordPart::TokenText(_))),
+                "{src} should keep its tree"
             );
         }
     }

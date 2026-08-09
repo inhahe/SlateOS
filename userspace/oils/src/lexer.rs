@@ -703,6 +703,28 @@ pub struct ParseOpts {
     /// ordinary character and a `${a[}` closes at its `}` as the parser's read
     /// requires.
     pub reread: bool,
+    /// Not a shell option either: read this text with `expand_word_internal`'s
+    /// **tolerance** for a construct that never closes.
+    ///
+    /// The parser refuses a word with an unterminated `'` or `"` because it is
+    /// still looking for the end of the *word* and the input ran out. The
+    /// expander is not looking for anything — it was handed a finished word —
+    /// so `string_extract_single_quoted` (subst.c:1131) and
+    /// `string_extract_double_quoted` (subst.c:963) simply stop at the end of
+    /// it and the run they carved is whatever they got. Nothing complains.
+    ///
+    /// That only matters for text bash never read as source: the token buffer
+    /// can hold characters the scan wrote into it rather than read out of it —
+    /// the bare splice of a translated `$'…'` (parse.y:3887) — and the buffer
+    /// can be cut short of its closing quote by a NUL the same splice carried
+    /// (see [`crate::ast::WordPart::TokenText`]). Either way the expander meets
+    /// a quote the parser never saw, and it is the expander's rules that
+    /// answer for it.
+    ///
+    /// A `` ` `` and a `${` are *not* tolerated — each has its own runtime
+    /// diagnostic rather than a silent run to the end — so those still fail the
+    /// read. See [`crate::parser::word_tolerant_from_source_at`].
+    pub tolerant: bool,
 }
 
 struct Lexer {
@@ -4253,6 +4275,11 @@ impl Lexer {
                     return Ok(s);
                 }
                 Some(_) => self.take_into(&mut s),
+                // `string_extract_single_quoted` stops at the end of what it
+                // was given and says nothing; only the parser, still hunting
+                // the end of the word, calls that an error. See
+                // [`ParseOpts::tolerant`].
+                None if self.opts.tolerant => return Ok(s),
                 None => return Err(eof_matching('\'').at(open)),
             }
         }
@@ -4311,13 +4338,19 @@ impl Lexer {
     /// character — which is how bash expands a string that is *implicitly* in
     /// double-quote context rather than delimited by quotes (`Q_DOUBLE_QUOTES`:
     /// `PS4`, `${x@P}`), where a bare `"` in the value stays a `"`.
+    ///
+    /// A third shape sits between the two: `closed` with
+    /// [`ParseOpts::tolerant`], where a `"` still ends the run but so does the
+    /// end of the input. That is `string_extract_double_quoted` itself, which
+    /// is handed a finished word rather than a stream and has nothing to be
+    /// short of.
     fn read_double_quote_until(&mut self, closed: bool) -> Result<Vec<Seg>, LexError> {
         let open = self.cur_line();
         let mut segs: Vec<Seg> = Vec::new();
         let mut lit = Str::new();
         loop {
             let Some(c) = self.peek() else {
-                if closed {
+                if closed && !self.opts.tolerant {
                     return Err(eof_matching('"').at(open));
                 }
                 flush_lit(&mut segs, &mut lit);
@@ -6321,7 +6354,7 @@ mod tests {
                 ],
                 "extglob off: {src}"
             );
-            let mut with = super::tokenize(src.as_bytes(), ParseOpts { extglob: true, posix: false, reread: false }).unwrap();
+            let mut with = super::tokenize(src.as_bytes(), ParseOpts { extglob: true, posix: false, reread: false, tolerant: false }).unwrap();
             with.pop();
             assert_eq!(
                 with,
@@ -7212,7 +7245,7 @@ mod tests {
             ("cat <(case b in b) echo B;; esac)", "case b in b) echo B;; esac"),
         ];
         // `@(a|b)` is only a pattern with `extglob` on.
-        let opts = ParseOpts { extglob: true, posix: false, reread: false };
+        let opts = ParseOpts { extglob: true, posix: false, reread: false, tolerant: false };
         for (src, want) in bodies {
             let tk = tokenize_deferred(src.as_bytes(), opts);
             assert!(tk.err.is_none(), "{src:?} should lex: {:?}", tk.err);

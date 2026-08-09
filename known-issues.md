@@ -2462,17 +2462,15 @@ rest as ordinary word text. Modelled as:
   out), landing as the fourth field of `Seg::ParamBraced`. A splice at any depth
   inside is that segment's, because it is that segment's raw text a leftover has
   to be carved out of.
-- `parser::seg_to_parts` — one segment, normally one part, but two or more where
-  the flag is up and `expansion_body_len` says `Early`: the `${ … }` is rebuilt
-  on the shortened body (nested `$( … )` spans past the close are dropped, since
-  the leftover parses them as it reads them) and the leftover is read with the
-  enclosing double quotes' rules, because that is where it sits. Splitting here
-  rather than re-parsing the whole word keeps every sibling part — and its
-  physical line — exactly as the scan left it. On `Unclosed` nothing about the
-  body's *shape* can be asked (`"${x:-$'a"b'}"` is the word `"${x:-a"b}"`, whose
-  `"` bash's parser never re-read either), so the body is deferred as
-  `WordPart::BadSubst` text and the word-level scan in `Shell::begin_word` raises
-  bash's ``no closing `}'`` naming the word *as translated*.
+- `parser::seg_to_parts` — one segment, one part, except where the flag is up and
+  `expansion_body_len` says anything but `Same`. Then nothing about the body's
+  *shape* can be asked (`"${x:-$'a"b'}"` is the word `"${x:-a"b}"`, whose `"`
+  bash's parser never re-read either), so the body is deferred as
+  `WordPart::BadSubst` text — and `word_from_segs_in` hands the **whole word**
+  back as `WordPart::TokenText`, for `Shell::expander_word` to re-read at
+  expansion time. See
+  `TD-OILS-A-DOUBLE-QUOTE-IN-A-BARE-SPLICE-DOES-NOT-CLOSE-THE-ENCLOSING-RUN`
+  below for why the leftover cannot be carved out of the segment instead.
 
 Divergence 4 of the first table (`"${h[$'a]b']}"`) fell out of stage A on its own
 — the bare `]` closes the subscript early, which the re-read scan already models.
@@ -2486,19 +2484,24 @@ decision. `TD-OILS-A-NUL-IN-AN-ANSI-C-STRING-DOES-NOT-TRUNCATE-THE-TRANSLATION`
 cut at the token boundary rather than the splice-local truncation that entry
 predicted, which is why fixing it also pulled in the `$( … )` second read and the
 compound-array re-read.
-`TD-OILS-A-DOUBLE-QUOTE-IN-A-BARE-SPLICE-DOES-NOT-CLOSE-THE-ENCLOSING-RUN` is
-still open (the `"` case, which needs a word reader modelling
-`expand_word_internal`'s tolerance). The splitting shape above —
-`"$(echo ${x:-$'a\tb'})"` — is a third: bash keeps `P_DQUOTE` for a `${ }` in a
-`$( )` body enclosed by quotes because its `dstack` is never popped for the `(`;
-noted in a comment at `lexer.rs`'s `read_dollar_brace_body` and not yet modelled.
+`TD-OILS-A-DOUBLE-QUOTE-IN-A-BARE-SPLICE-DOES-NOT-CLOSE-THE-ENCLOSING-RUN` (the
+`"` case) is now fixed too — and its fix **replaced** the segment split described
+above: where the splice makes the expansion's read of the word disagree with the
+parser's *at all*, the whole word is now handed back as text for the expander to
+re-read. The splitting shape above — `"$(echo ${x:-$'a\tb'})"` — is a third: bash
+keeps `P_DQUOTE` for a `${ }` in a `$( )` body enclosed by quotes because its
+`dstack` is never popped for the `(`; noted in a comment at `lexer.rs`'s
+`read_dollar_brace_body` and not yet modelled.
 
-### TD-OILS-A-DOUBLE-QUOTE-IN-A-BARE-SPLICE-DOES-NOT-CLOSE-THE-ENCLOSING-RUN. `"${x:-$'a}b"c'}"` is `abc}` in bash — 2026-08-08 — OPEN
+### TD-OILS-A-DOUBLE-QUOTE-IN-A-BARE-SPLICE-DOES-NOT-CLOSE-THE-ENCLOSING-RUN. `"${x:-$'a}b"c'}"` is `abc}` in bash — 2026-08-08 — ✅ FIXED 2026-08-09
 
-**Where:** `userspace/oils/src/parser.rs` — `seg_to_parts`, the `BraceEnd::Early`
-arm; and ultimately `userspace/oils/src/wordscan.rs` +
-`userspace/oils/src/interp.rs`'s `reread_word`, which is where the missing
-machinery belongs.
+**Where:** `userspace/oils/src/lexer.rs` (`ParseOpts::tolerant`),
+`userspace/oils/src/parser.rs` (`word_tolerant_from_source_at`,
+`segs_splice_past_the_brace`, `word_expanded_from_its_text`, `seg_to_parts`),
+`userspace/oils/src/ast.rs` (`WordPart::TokenText`),
+`userspace/oils/src/wordscan.rs` (`WordFault`, `word_fault`,
+`backquote_extent`), `userspace/oils/src/interp.rs` (`Shell::expander_word`,
+`Shell::dq_unclosed_backquote`).
 
 **What.** Split out of
 `TD-OILS-AN-ANSI-C-STRING-IS-NOT-REQUOTED-AFTER-A-BRACE-BODY-TRANSLATES-IT`,
@@ -2534,23 +2537,47 @@ the segment — the leftover swallows the enclosing `Seg::Dq`'s *own* closing `"
 (row 8's trailing `}"`), and row 10's backtick runs past it into the rest of the
 word. No seg-local split models that.
 
-**Proper fix.** A word reader that models `expand_word_internal`'s **tolerance**:
-an unterminated `'`, `"`, `` ` `` or `${` each runs to the end of the word, each
-with its own runtime diagnostic, and the word's quoting state is a property of
-the whole expansion pass rather than of the parse tree the scan built. That is
-the same architecture that would subsume `wordscan::scan` and
-`interp::reread_word`, both of which today re-derive a piece of it. Until then
-the parser's split is right for `}` and wrong for `"`; the corpus case
-`an-ansi-c-string-in-a-double-quoted-brace-body-is-spliced-bare.sh` deliberately
-exercises only the former.
+**Fixed by** giving the *expander* its own read of the word's text, with
+`expand_word_internal`'s tolerance, and letting the parser stop trying to
+describe text it never read:
+
+- `lexer::ParseOpts::tolerant` — a reader mode in which an unterminated `'` or
+  `"` runs to the end of the string and says nothing, which is what
+  `string_extract_single_quoted` (subst.c:1131) and
+  `string_extract_double_quoted` (subst.c:963) do. Made a mode rather than a
+  forked reader because the sibling entry needs the same one.
+- `ast::WordPart::TokenText(Str)` (the renamed `CutAtNul`) — a whole word held as
+  the **text of its token buffer**, because that text is not what the parser read
+  and so cannot be described as a tree. Both producers now land here:
+  `parser::segs_hold_a_nul` (the NUL cut) and `parser::segs_splice_past_the_brace`
+  (a spliced `}` or quote), joined in `parser::word_expanded_from_its_text`.
+  `unparse::word_src` already reproduces bash's token buffer byte for byte —
+  verified by `declare -f` — so no new text-building machinery was needed.
+- `parser::seg_to_parts`'s `BraceEnd::Early` segment split was **deleted**;
+  `Early` and `Unclosed` now share one text path. That split was the wrong shape
+  in principle, not merely incomplete: rows 7–10 show the leftover swallowing the
+  enclosing `Seg::Dq`'s own closing `"` and running into the word's tail.
+- `interp::Shell::expander_word`, called from `begin_word`, re-reads a
+  `TokenText` word with `parser::word_tolerant_from_source_at` and expands *that*
+  word. A text that will not read back even tolerantly keeps its text — that is a
+  construct nothing closes, which the word-level scan has already reported.
+- `wordscan::word_fault` replaces `unclosed_brace` and returns a `WordFault`, so
+  the one left-to-right walk reports whichever fault comes first. `WordFault::
+  Backquote` is row 10 (subst.c:11290), named from the backquote on because the
+  call is `report_error (…, string + t_index)`; `wordscan::backquote_extent` is
+  `string_extract (…, "`", SX_REQMATCH)` including its bare-trailing-backquote
+  compatibility case. `interp::Shell::dq_unclosed_backquote` raises it with the
+  same `arm_discard(1)` + errexit-only shape as the brace fault — measured: rc=1,
+  the command DISCARDed, the shell continuing, `set -o posix` identical.
+
+All eleven rows of the table above now match byte for byte.
 
 **Relationship to the NUL cut.** A spliced NUL is the *other* character the bare
-splice makes live, and it was fixed
-(`TD-OILS-A-NUL-IN-AN-ANSI-C-STRING-DOES-NOT-TRUNCATE-THE-TRANSLATION`) without
-needing that reader for the shapes where the cut leaves a construct **open** —
-there the word is doomed before any of the splitting/globbing questions rows 5
-and 6 turn on. Where the cut leaves the word's text **well-formed**, the same
-reader is needed, and that residue is
+splice makes live. It was fixed first
+(`TD-OILS-A-NUL-IN-AN-ANSI-C-STRING-DOES-NOT-TRUNCATE-THE-TRANSLATION`) for the
+shapes where the cut leaves a construct **open**, where the word is doomed before
+any of the splitting/globbing questions rows 5 and 6 turn on. The well-formed
+shapes needed this same reader, and were fixed with it —
 `TD-OILS-A-CUT-WORD-IS-EXPANDED-AS-LITERAL-TEXT` below.
 
 ### TD-OILS-A-NUL-IN-AN-ANSI-C-STRING-DOES-NOT-TRUNCATE-THE-TRANSLATION. `"${x:-$'a\0b'}"` is a bad substitution in bash — 2026-08-08 — ✅ FIXED 2026-08-08
@@ -2558,8 +2585,9 @@ reader is needed, and that residue is
 **Where:** `userspace/oils/src/escape.rs` (`ansi_c_translate` / `ansi_c_unescape`
 / `cut_at_nul`), `userspace/oils/src/lexer.rs` (`read_ansi_c_source`, and
 `read_dollar_brace_body`'s bare-splice arm), `userspace/oils/src/parser.rs`
-(`segs_hold_a_nul`, `word_cut_at_nul`, `comsub_reprint_error`,
-`word_list_lex_error`), `userspace/oils/src/ast.rs` (`WordPart::CutAtNul`),
+(`segs_hold_a_nul`, `word_expanded_from_its_text`, `comsub_reprint_error`,
+`word_list_lex_error`), `userspace/oils/src/ast.rs` (`WordPart::TokenText`,
+then named `CutAtNul`),
 `userspace/oils/src/interp.rs` (`comsub_reparse_error`,
 `array_assign_reparse_error`).
 
@@ -2603,9 +2631,10 @@ cannot produce it.
 - `lexer::read_ansi_c_source` is split out of `read_ansi_c_quote` so the
   bare-splice arm of `read_dollar_brace_body` can ask for the untruncated
   translation; every other arm still re-quotes through `sh_single_quote`.
-- `parser::word_cut_at_nul`, run at the end of `word_from_segs_in` when
-  `segs_hold_a_nul`, replaces the word's parts with a single
-  `ast::WordPart::CutAtNul(raw)` holding the word's source text up to the NUL.
+- `parser::word_expanded_from_its_text` (then named `word_cut_at_nul`), run at
+  the end of `word_from_segs_in` when `segs_hold_a_nul`, replaces the word's
+  parts with a single `ast::WordPart::TokenText(raw)` holding the word's source
+  text up to the NUL.
   It is unparsed source, so `declare -f` prints the cut word back exactly as bash
   does, and the expander re-reads it as text.
 - The cut leaves constructs open, and three readers meet the wreckage. Each is
@@ -2626,17 +2655,18 @@ Corpus cases:
 and the new sections of
 `userspace/oils/tests/corpus/a-cmdsub-body-is-parsed-twice-and-the-second-parse-reads-the-reprint.sh`.
 
-### TD-OILS-A-CUT-WORD-IS-EXPANDED-AS-LITERAL-TEXT. `"${x:-$'a}b\0c'}"` is `ab` in bash, `"${x:-a}b` in osh — 2026-08-08 — OPEN
+### TD-OILS-A-CUT-WORD-IS-EXPANDED-AS-LITERAL-TEXT. `"${x:-$'a}b\0c'}"` is `ab` in bash, `"${x:-a}b` in osh — 2026-08-08 — ✅ FIXED 2026-08-09
 
-**Where:** `userspace/oils/src/interp.rs` — the `WordPart::CutAtNul` arm of the
-part expander (~line 25994), and `Shell::begin_word` / `Shell::reread_word`,
-which is where the swap belongs.
+**Where:** `userspace/oils/src/interp.rs` — `Shell::expander_word`, called from
+`Shell::begin_word`; `userspace/oils/src/lexer.rs` (`ParseOpts::tolerant`) and
+`userspace/oils/src/parser.rs` (`word_tolerant_from_source_at`).
 
 **What.** The residue of
 `TD-OILS-A-NUL-IN-AN-ANSI-C-STRING-DOES-NOT-TRUNCATE-THE-TRANSLATION`. A NUL cut
 leaves the *word's text* short, and bash then expands that text with
 `expand_word_internal` like any other. osh models the cut as
-`ast::WordPart::CutAtNul(raw)` and expands `raw` as **literal text**.
+`ast::WordPart::TokenText(raw)` (then named `CutAtNul`) and expands `raw` as
+**literal text**.
 
 That is right whenever the cut leaves a construct open, because the word-level
 scan `Shell::begin_word` runs over the same text has already raised
@@ -2655,15 +2685,16 @@ printf '[%s]' "${x:-$'a}b\0c'}" second        [ab][second][ "${x:-a}b][second]
 (The `B` and the `c'}"` really are gone in bash too — that is the cut, and it is
 modelled correctly. What is wrong is only that the remaining text is not read.)
 
-**Proper fix.** Expand a `CutAtNul` word by *re-reading* `raw` as a word, which
-is what `Shell::reread_word` already does for a different second-read rule — but
-`raw` is by construction unterminated (the cut removed the closing `"`), so the
-re-read needs a reader with `expand_word_internal`'s **tolerance**: an
-unterminated `'`, `"`, `` ` `` or `${` runs to the end of the word. That is the
-same reader
-`TD-OILS-A-DOUBLE-QUOTE-IN-A-BARE-SPLICE-DOES-NOT-CLOSE-THE-ENCLOSING-RUN` needs,
-and the two should be fixed together; doing it for `CutAtNul` alone would fork
-the word reader for one part kind.
+**Fixed by** re-reading the word's text at expansion time, with the tolerant
+reader the sibling entry needed. `Shell::expander_word` sends a
+`WordPart::TokenText` word (the renamed `CutAtNul`) through
+`parser::word_tolerant_from_source_at` and expands the word *that* read carves;
+the cut text is by construction unterminated (the cut removed the closing `"`),
+which is exactly what the tolerance is for. Doing this for the cut alone would
+have forked the word reader for one part kind, so it was built as a `ParseOpts`
+mode and both entries were closed together — see
+`TD-OILS-A-DOUBLE-QUOTE-IN-A-BARE-SPLICE-DOES-NOT-CLOSE-THE-ENCLOSING-RUN` above
+for the full account. All four rows of the table above now match byte for byte.
 
 ### TD-OILS-A-CMDSUB-REPRINT-IS-RE-READ-WITH-ITS-TAIL. `"$(echo "${x:-$'a\0b'}")"` names `"` in bash, `}` in osh — 2026-08-08 — ✅ FIXED 2026-08-08
 

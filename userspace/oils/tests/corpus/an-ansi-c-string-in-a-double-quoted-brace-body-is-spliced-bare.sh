@@ -28,6 +28,17 @@
 # the user wrote, the scan runs off the end of the word, and the expansion dies
 # with ``bad substitution: no closing `}'`` naming the word *as translated*.
 #
+# In between those two is the case where the splice closes the expansion early
+# *and* the word survives: everything past the spliced `}` is ordinary word
+# text, and the quotes in it are the **word's** quotes. A spliced `"` closes the
+# run the `${ … }` was written in, so the text after it is unquoted — it splits
+# on `$IFS` and globs — and the script's own closing `"` then opens a run of its
+# own that nothing closes, which `expand_word_internal` simply lets run out
+# (`string_extract_double_quoted`, subst.c:963, stops at the end of what it was
+# handed and says nothing). The two constructs it does *not* let run out are a
+# `${` (``no closing `}'``, subst.c:1980) and a `` ` `` (``no closing "`"``,
+# subst.c:11290, naming the text from the backquote on).
+#
 # `dolbrace_state` is what tells the second row from the third, and it is the
 # machine parse.y and subst.c share ("This logic must agree", parse.y:3803):
 # `DOLBRACE_PARAM` until an operator, `DOLBRACE_QUOTE` on a `#`/`%`/`/`/`^`/`,`
@@ -76,6 +87,26 @@ e 'echo "${x:-$'\''a\x27b'\''}"'
 # where the second read runs out of word.
 e 'echo "${x:-$'\''a"b'\''}"'
 e 'echo "${x:-$'\''a`b'\''}"'
+
+echo "=== a spliced double quote closes the run the brace was written in ==="
+# The `}` closes the expansion, the `"` closes the run, and `c` is bare text —
+# then the script's own `"` opens a run that nothing closes, which the expansion
+# lets run out.
+e 'echo "${x:-$'\''a}b"c'\''}"'
+# Bare text really is bare: it splits on $IFS…
+e 'echo "${x:-$'\''a}b"c d'\''}"'
+e 'y="p q"; printf "[%s]" "${x:-$'\''a}b"$y'\''}"; echo'
+# …and it globs, so an unmatched pattern stays as it was written.
+e 'printf "[%s]" "${x:-$'\''a}b"*'\''}"; echo'
+# An expansion in the leftover is expanded, unquoted.
+e 'y=Y; echo "${x:-$'\''a}b"$y'\''}"'
+# A second spliced `"` opens a run that swallows the script's closing quote.
+e 'printf "[%s]" "${x:-$'\''a}b"c"d'\''}"; echo'
+e 'printf "[%s]" "${x:-$'\''a}b"c"d"e'\''}"; echo'
+# The two constructs the run-out is not extended to. The backquote names the
+# text from the backquote on; the brace names the whole word.
+e 'printf "[%s]" "${x:-$'\''a}b"c`echo Z'\''}"; echo'
+e 'printf "[%s]" "${x:-$'\''a}b"c${'\''}"; echo'
 
 echo "=== nesting: a fresh state inside, the same P_DQUOTE ==="
 # The inner `${` recurses into `DOLBRACE_PARAM`, so its `:-` word is row three

@@ -1432,7 +1432,7 @@ fn nested_parts_mut(p: &mut WordPart) -> Vec<&mut [WordPart]> {
         | WordPart::Length(_)
         | WordPart::ArrayKeys { .. }
         | WordPart::BadSubst(_)
-        | WordPart::CutAtNul(_)
+        | WordPart::TokenText(_)
         | WordPart::ProcSub { .. } => Vec::new(),
     }
 }
@@ -1569,7 +1569,7 @@ fn part_src(p: &WordPart) -> Str {
         }
         WordPart::BadSubst(raw) => bfmt![b"${", raw, b"}"],
         // The whole word's text, already cut — nothing to put back around it.
-        WordPart::CutAtNul(raw) => raw.clone(),
+        WordPart::TokenText(raw) => raw.clone(),
         WordPart::Length(name) => bfmt![b"${#", name, b"}"],
         WordPart::ArrayRef { name, index, length } => {
             let idx = match index {

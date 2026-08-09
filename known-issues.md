@@ -683,7 +683,7 @@ and expands to `AB`. An indexed one leaves an empty arithmetic string, which is
 
 **Found while fixing it**, both pre-existing and both filed separately:
 TD-OILS-AN-ARITHMETIC-ERROR-UNDER-@P-STILL-ABANDONS-THE-COMMAND and
-TD-OILS-AN-INDIRECT-BRACE-EXPANDS-ITS-SUBSCRIPT-TWICE.
+TD-OILS-AN-INDIRECT-BRACE-EXPANDS-ITS-POINTER-THE-WRONG-NUMBER-OF-TIMES.
 
 ---
 
@@ -726,35 +726,77 @@ TD-OILS-A-BRACE-SUBSCRIPT-IS-NOT-EXPANDED-AS-A-STRING-OF-ITS-OWN.
 
 ---
 
-### TD-OILS-AN-INDIRECT-BRACE-EXPANDS-ITS-SUBSCRIPT-TWICE. `${!m[$(f)]}` runs `f` twice — 2026-08-09 — OPEN
+### TD-OILS-AN-INDIRECT-BRACE-EXPANDS-ITS-POINTER-THE-WRONG-NUMBER-OF-TIMES. `${!m[$(f)]}` runs `f` three times, `${!p[$(f)]#x}` once, where bash runs it once and twice — 2026-08-09 — OPEN
 
-**Where:** `userspace/oils/src/interp.rs`, the `${!name[sub]}` indirection path.
-It resolves the reference once to *recognise* what it names and again to read
-it, and the subscript word is expanded on both walks — so any side effect in the
-subscript happens twice.
+**Where:** `userspace/oils/src/interp.rs`, the `${!name[sub]}` indirection path —
+`Shell::indirect_ref_part` / `Shell::indirect_op_part` (the silent recognisers)
+and `Shell::expand_indirect`, all of which reach `Shell::pointer_lookup` and so
+expand the subscript word again. Every classification pass osh makes costs one
+more expansion of the pointer; bash's count is fixed by its own structure and
+does not track osh's passes in either direction.
 
-**Reproduce:**
+**Values are correct everywhere** — this is purely how many times a side effect
+in the pointer's subscript happens.
 
-```sh
-declare -A m=([k]=K)
-f(){ echo x >> /tmp/cnt; echo k; }
-: > /tmp/cnt; r="${!m[$(f)]}"; wc -l < /tmp/cnt   # bash: 1   osh: 2
-: > /tmp/cnt; r="${m[$(f)]}";  wc -l < /tmp/cnt   # bash: 1   osh: 1
+**Reproduce** — `f` appends a line to `/tmp/cnt` and echoes `k`, and `n` counts
+the lines:
+
+```text
+                          bash   osh
+declare -A m=([k]=K)       -      -      # referent K names an unset scalar
+${!m[$(f k)]}              1      3
+"${!m[$(f k)]}"            1      3
+${!m[$(f k)]:-D}           1      3
+declare -A s=([k]=sv)      -      -      # referent names a set scalar
+${!s[$(f k)]}              1      3
+${!s[$(f k)]#S}            2      3
+${!s[$(f k)]:1:1}          2      3
+${!s[$(f k)]@Q}            2      3
+declare -A p=([k]='n[@]')  -      -      # referent names a whole array
+${!p[$(f k)]}              1      1
+${!p[$(f k)]#x}            2      1
+${!p[$(f k)]@Q}            2      1
 ```
 
-Visible without side effects too, under `@P`, where the doubled expansion prints
-its command-substitution report twice as often as bash:
-`v='A${!m[$(fi)q]}B'; echo "[${v@P}]"` gives two reports in bash and four in osh
-(the value, `[AB]`, is the same).
+**Why — bash's rule, exactly.** The pointer is expanded
 
-**Why.** `Shell::param_elem_lookup` already documents that a subscript costs a
-second nameref walk and that "resolving twice must not complain twice"; the
-indirection path has the same shape but re-expands the *subscript word* rather
-than reusing the text it already produced.
+1. **once, always**, by `parameter_brace_expand_indir` (subst.c:9825), which is
+   the `want_indir` branch of `parameter_brace_expand`; and
+2. **once more** by `get_var_and_type`, which re-resolves it itself —
+   `want_indir = *varname == '!' … ; vname = parameter_brace_find_indir
+   (varname+1, …)` (subst.c:8261-8265).
 
-**Proper fix.** Expand the subscript once and carry the resulting key/index
-through both walks — the same treatment `Shell::param_elem_lookup` gives the
-name.
+Only five handlers call `get_var_and_type`, and each of them **early-returns on
+a NULL value before doing so**, which is why an unset referent costs only one:
+
+| handler | operators | guard |
+|---|---|---|
+| `parameter_brace_remove_pattern` | `#` `##` `%` `%%` | `if (value == 0) return NULL;` (subst.c:5874) |
+| `parameter_brace_substring` | `:off:len` | subst.c:8799 (`$@`/`$*` exempt) |
+| `parameter_brace_patsub` | `/pat/rep` | subst.c:9159 |
+| `parameter_brace_casemod` | `^` `^^` `,` `,,` | subst.c:9366 |
+| `parameter_brace_transform` | `@op` | subst.c:8665 (`@a`/`@A` exempt) |
+
+The `:-`/`:+`/`:=`/`:?` family, the bare form and `${#…}` never reach
+`get_var_and_type`, so they are always one.
+
+**Proper fix.** Make osh's classification passes cost nothing, which is what
+bash's single-pass structure gives for free: resolve the pointer **once** per
+evaluation of the `${!…}` — bash's `parameter_brace_expand_indir` — and hand the
+referent to the recognisers instead of letting each of them look it up. The
+natural shape is to rewrite the part up front, the way bash does: a resolved
+`${!ref[sub]}` is just a name, so turning it into a concrete `WordPart` (an
+`ArrayRef` for an `x[@]`/`x[*]` referent, the named parameter otherwise) before
+`split_items` / `quoted_per_element_parts` / `joined_value` /
+`cond_word_indirect` / `expand_dynamic` ever see it leaves nothing for them to
+re-resolve. The look-through operators then add their **one** extra lookup
+explicitly, gated on a non-null value, mirroring the table above — it is a real
+part of bash's observable behaviour, not an accident to be optimised away.
+
+This is a structural change across those five entry points plus
+`Shell::expand_indirect`'s reporting and nounset rules
+(`indirect_special_unbound`, `indirect_whole_set_unbound`), so it wants doing in
+one piece rather than patched per call site.
 
 **Found by** the probe series for
 TD-OILS-A-BRACE-SUBSCRIPT-IS-NOT-EXPANDED-AS-A-STRING-OF-ITS-OWN.

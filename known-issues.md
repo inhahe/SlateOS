@@ -294,7 +294,18 @@ A$((1+$(fi⏎echo x⏎)Y))B   -> [A)B]     consumed `…)Y)`, left `)B`
 A$((1+$(fi⏎echo x⏎Z)))B   -> [A)B]     consumed `…Z))`, left `)B`
 ```
 
-All four report the same two pairs and echo `` `(1+$(fi' `` for the second, and
+osh's answers to the same four, for the diff the fix has to close — note case 2
+already reaches the `ArithFallback` shape (it reports `` `(1+$(fi' ``), so that
+half of the ending exists and is reached by the wrong route:
+
+```text
+1  osh [A]     one report,  `fi'          bash [A)B]   two, `fi' then `(1+$(fi'
+2  osh [AB]    one report,  `(1+$(fi'     bash [AX)B]  two, `fi' then `(1+$(fi'
+3  osh [A]     one report,  `fi'          bash [A)B]   two, `fi' then `(1+$(fi'
+4  osh [A]     one report,  `fi'          bash [A)B]   two, `fi' then `(1+$(fi'
+```
+
+All four bash runs report the same two pairs and echo `` `(1+$(fi' `` for the second, and
 **none prints `f: command not found`** — the failed read inside the count is
 `SX_NOALLOC`, so it finds an extent and runs nothing. So the count resumes at
 `stop + 1` and closes on the **second** closer it meets, which is the `$((`'s own

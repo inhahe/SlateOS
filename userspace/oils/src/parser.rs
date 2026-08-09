@@ -6430,12 +6430,19 @@ fn parse_braced_param_in(
 /// Parse the `[/|#|%]pat/repl` body of a substitution into its component pieces
 /// (`all`, anchor, pattern, replacement), shared by the scalar and bulk-array
 /// substitution parsers.
+///
+/// The replacement is `None` where the body carried **no separator at all**.
+/// That is not the same fact as an empty one: the two expand alike, but bash
+/// prints a word back from its saved source text, so `${q/ab}` keeps its shape
+/// under `declare -f` while `${q/ab/}` keeps its trailing slash. Folding the
+/// two together here is what used to put a slash in the printback that the
+/// source never had.
 #[allow(clippy::type_complexity)]
 fn parse_replace_pieces(
     body: &[Ch],
     opts: ParseOpts,
     line: u32,
-) -> Result<(bool, ReplaceAnchor, Box<Word>, Box<Word>), ParseError> {
+) -> Result<(bool, ReplaceAnchor, Box<Word>, Option<Box<Word>>), ParseError> {
     let mut i = 0;
     let mut all = false;
     let mut anchor = ReplaceAnchor::None;
@@ -6499,11 +6506,23 @@ fn parse_replace_pieces(
         }
         i += 1;
     }
+    let repl = if in_repl {
+        Some(Box::new(word_replacement_from_source(
+            &replacement,
+            opts,
+            repl_line,
+        )?))
+    } else {
+        // No separator was reached, so there is no replacement *text* to parse
+        // — not even an empty one. `${q/ab}` deletes the match, which is what
+        // the expansion does with `None`.
+        None
+    };
     Ok((
         all,
         anchor,
         Box::new(word_verbatim_from_source_at(&pattern, opts, pat_start_line)?),
-        Box::new(word_replacement_from_source(&replacement, opts, repl_line)?),
+        repl,
     ))
 }
 

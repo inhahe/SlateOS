@@ -957,6 +957,19 @@ pub fn word_src(w: &Word) -> Str {
     parts_src(&w.parts)
 }
 
+/// Reconstruct the replacement half of a `${name/pat/repl}` — the separator
+/// **and** the text, or nothing at all.
+///
+/// bash prints a word back from the source it saved, so the two bodies that
+/// expand alike do not print alike: `${q/ab}` has no separator to print, while
+/// `${q/ab/}` has one and an empty replacement after it. Keeping the slash with
+/// the `Option` here is what makes the caller unable to print one the source
+/// never had.
+fn repl_src(repl: &Option<Box<Word>>) -> Str {
+    repl.as_deref()
+        .map_or_else(Str::new, |w| bfmt![b"/", &word_src(w)])
+}
+
 /// Reconstruct source text for a run of word parts *without* any enclosing
 /// quotes — the inside of a `WordPart::DoubleQuoted`, say. bash's
 /// "bad substitution" diagnostic names exactly this: the string its
@@ -1380,7 +1393,8 @@ fn nested_parts_mut(p: &mut WordPart) -> Vec<&mut [WordPart]> {
             .collect(),
         WordPart::ParamReplace { index, pattern, replacement, .. } => idx(index)
             .into_iter()
-            .chain([pattern.parts.as_mut_slice(), replacement.parts.as_mut_slice()])
+            .chain([pattern.parts.as_mut_slice()])
+            .chain(replacement.as_deref_mut().map(|w| w.parts.as_mut_slice()))
             .collect(),
         WordPart::Indirect { index, .. } => index.as_mut().and_then(aidx).into_iter().collect(),
         WordPart::ArrayRef { index, .. } => aidx(index).into_iter().collect(),
@@ -1401,9 +1415,10 @@ fn nested_parts_mut(p: &mut WordPart) -> Vec<&mut [WordPart]> {
             BulkOp::Trim { pattern, .. } | BulkOp::Case { pattern, .. } => {
                 vec![pattern.parts.as_mut_slice()]
             }
-            BulkOp::Replace { pattern, replacement, .. } => {
-                vec![pattern.parts.as_mut_slice(), replacement.parts.as_mut_slice()]
-            }
+            BulkOp::Replace { pattern, replacement, .. } => [pattern.parts.as_mut_slice()]
+                .into_iter()
+                .chain(replacement.as_deref_mut().map(|w| w.parts.as_mut_slice()))
+                .collect(),
             BulkOp::Transform { .. } | BulkOp::BadTransform { .. } => Vec::new(),
         },
         // A process substitution's body is a `Program`, not a word, and bash
@@ -1486,13 +1501,15 @@ fn part_src(p: &WordPart) -> Str {
                     }
                 }
             };
+            // The separator is printed only where the source had one: bash
+            // re-prints a word from its saved text, so `${q/ab}` keeps its
+            // shape and does not acquire the slash of `${q/ab/}`.
             bfmt![
                 b"${",
                 &name_sub(name, index),
                 op,
                 &word_src(pattern),
-                b"/",
-                &word_src(replacement),
+                &repl_src(replacement),
                 b"}"
             ]
         }
@@ -1621,7 +1638,7 @@ fn part_src(p: &WordPart) -> Str {
                             }
                         }
                     };
-                    bfmt![o, &word_src(pattern), b"/", &word_src(replacement)]
+                    bfmt![o, &word_src(pattern), &repl_src(replacement)]
                 }
                 BulkOp::Case { mode, all, pattern } => {
                     bfmt![case_op_src(*mode, *all), &word_src(pattern)]

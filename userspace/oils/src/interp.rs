@@ -15524,7 +15524,13 @@ impl Shell {
                     all: *all,
                     anchor: *anchor,
                     pat,
-                    repl: self.expand_replacement(replacement, patsub),
+                    // No separator in the source is the empty replacement at
+                    // expansion time — the distinction the `Option` keeps is
+                    // the printback's, not this one's.
+                    repl: replacement
+                        .as_deref()
+                        .map(|w| self.expand_replacement(w, patsub))
+                        .unwrap_or_default(),
                 }
             }
             BulkOp::Case {
@@ -25716,8 +25722,14 @@ impl Shell {
                 // replacement into `&`/literal tokens so the substitution can
                 // splice the match per occurrence; when the shopt is off, `&`
                 // is an ordinary literal.
+                // A body with no separator at all (`${x/pat}`) deletes the
+                // match, which is the empty replacement: the `Option` is the
+                // printback's distinction, not this one's.
                 let patsub = self.shopt.get("patsub_replacement").copied().unwrap_or(true);
-                let repl = self.expand_replacement(replacement, patsub);
+                let repl = replacement
+                    .as_deref()
+                    .map(|w| self.expand_replacement(w, patsub))
+                    .unwrap_or_default();
                 let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
                 let ci = self.shopt.get("nocasematch").copied().unwrap_or(false);
                 param_replace(&value, &pat, &repl, *all, *anchor, extglob, ci)

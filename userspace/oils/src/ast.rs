@@ -759,7 +759,12 @@ pub enum WordPart {
         all: bool,
         anchor: ReplaceAnchor,
         pattern: Box<Word>,
-        replacement: Box<Word>,
+        /// `None` where the source gave no separator at all (`${name/pat}`),
+        /// which **expands** exactly like an empty replacement but does not
+        /// *print back* like one: bash re-prints a word from its saved source
+        /// text, so `${q/ab}` stays `${q/ab}` under `declare -f` and only
+        /// `${q/ab/}` grows the trailing slash.
+        replacement: Option<Box<Word>>,
     },
     /// `${name^pat}` / `${name^^pat}` (upper-case) / `${name,pat}` /
     /// `${name,,pat}` (lower-case) / `${name~pat}` / `${name~~pat}` (toggle) —
@@ -1022,7 +1027,7 @@ impl WordPart {
                 ..
             } => in_opt(index, hides_closer)
                 .or_else(|| in_word(pattern, hides_closer))
-                .or_else(|| in_word(replacement, hides_closer)),
+                .or_else(|| in_opt(replacement, hides_closer)),
             WordPart::ParamTransform { index, .. } | WordPart::BadTransform { index, .. } => {
                 in_opt(index, hides_closer)
             }
@@ -1044,7 +1049,7 @@ impl WordPart {
                     replacement,
                     ..
                 } => in_word(pattern, hides_closer)
-                    .or_else(|| in_word(replacement, hides_closer)),
+                    .or_else(|| in_opt(replacement, hides_closer)),
                 BulkOp::Transform { .. } | BulkOp::BadTransform { .. } => None,
             },
             WordPart::ArrayOp { arg, .. } => in_word(arg, hides_closer),
@@ -1299,7 +1304,9 @@ pub enum BulkOp {
         all: bool,
         anchor: ReplaceAnchor,
         pattern: Box<Word>,
-        replacement: Box<Word>,
+        /// `None` where the source gave no separator — see
+        /// [`WordPart::ParamReplace`]'s field of the same name.
+        replacement: Option<Box<Word>>,
     },
     /// `${a[@]^pat}` / `^^` / `,` / `,,` / `~` / `~~` — case mod per element.
     Case {

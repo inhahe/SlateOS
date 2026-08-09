@@ -135,6 +135,24 @@ next )) B';        printf 'p5 [%s] rc=%s\n' "${pe@P}" "$?"
 pf='A$(( 1 # ))
 echo Z )) B';      printf 'p6 [%s] rc=%s\n' "${pf@P}" "$?"
 
+# The `${ … }` scan reads a `$((` through the very same count — its `$(` row is
+# `string[i] == '$' && string[i+1] == LPAREN` calling `extract_command_subst`
+# (subst.c:1894-1903). Under a prompt the count is silent and merely overruns the
+# scan's index, so `CHECK_STRING_OVERRUN` breaks the loop with `c = 0` and the
+# brace is the thing left with nothing to close: the complaint that comes out is
+# the *brace's*, naming the whole word. Outside a prompt the count reports and
+# longjmps first, so the brace never gets an ending of its own — one complaint
+# either way, but not the same one.
+echo '--- inside a brace it is the brace that cannot close'
+pg='A${x:-$(( #5 ))}B';   printf 'p7 [%s] rc=%s\n' "${pg@P}" "$?"
+ph='A${x:-$(( 1 # ))}B';  printf 'p8 [%s] rc=%s\n' "${ph@P}" "$?"
+pi='A${x:-${x:-$(( #5 ))}}B'; printf 'p9 [%s] rc=%s\n' "${pi@P}" "$?"
+# A `$[ … ]` is not that row — `string[i+1]` is `[` — so the scan never reads it
+# and walks its bytes plainly.
+pj='A${x:-$[ #5 ]}B';     printf 'p10 [%s] rc=%s\n' "${pj@P}" "$?"
+# A comment the scan steps over inside a `' … '` run is not read at all.
+pk="A\${x:-'p\$(( #5 ))q'}B"; printf 'p11 [%s] rc=%s\n' "${pk@P}" "$?"
+
 echo '--- PS4 is the same door'
 PS4='+A$(( #5 ))B '
 set -x

@@ -26018,13 +26018,16 @@ impl Shell {
         if matches!(part, WordPart::DoubleQuoted(_)) {
             return false;
         }
-        // Nor is a `$(( … ))` or a `$[ … ]`. Its own arm scans it —
-        // [`Self::arith_extent_scan`] — and the ending there is *nothing*, not a
-        // `bad substitution`: either spelling's own extent is a delimiter count
-        // that cannot fail (`extract_delimited_string`, subst.c:1284-1286 and
-        // 1299-1304), so there is no brace left waiting to close. An arithmetic
-        // nested *inside* a `${ … }` still reaches this ending, because
-        // [`Self::brace_scanned_subs`] descends into its parts on the way.
+        // Nor is a `$(( … ))` or a `$[ … ]`. Its own arm reads it —
+        // [`Self::arith_extent_expand`] — and the ending for a count that ran
+        // the string out is `no closing `)'` and a jump, not a `bad
+        // substitution`: there is no brace left waiting to close.
+        //
+        // An arithmetic nested *inside* a `${ … }` is another matter, and does
+        // reach this ending. The scan's `$(` row hands it to the same count,
+        // whose overrun leaves the brace with no `}` to find; it arrives
+        // through [`Self::extent_read_of`], which [`Self::brace_scanned_subs`]
+        // hands the whole arithmetic rather than its parts.
         if matches!(part, WordPart::ArithSub { .. }) {
             return false;
         }
@@ -26067,17 +26070,54 @@ impl Shell {
         }
     }
 
-    /// The extent read bash's scan makes of every `$( … )` in `part`, stopping
-    /// at the first that does not close — see [`Shell::brace_extent_scan`], the
-    /// `${ … }` half, and [`Shell::arith_extent_scan`], the `$(( … ))` one.
+    /// The extent read `extract_dollar_brace_string` makes of every construct
+    /// in `part` it does not merely step over, in the order it meets them,
+    /// stopping at the first that does not close — see
+    /// [`Shell::brace_extent_scan`], which turns the answer into the brace's
+    /// ending.
     ///
-    /// The two share the reading and differ only in the ending they give a read
-    /// that ran off the end: a `${ … }` that cannot close is a `bad
-    /// substitution`, an arithmetic that cannot close is simply nothing.
+    /// A `$( … )` is a real parse (`xparse_dolparen`); a `$(( … ))` is the
+    /// paren count, run over the whole enclosing string, which recurses into
+    /// its own nested `$( … )` itself.
     fn extent_read_of(&mut self, part: &WordPart) -> ExtentRead {
         let mut subs: Vec<&WordPart> = Vec::new();
         Self::brace_scanned_subs(part, &mut subs);
         for sub in subs {
+            // The scan does not step over a `$((` either — its `$(` row is
+            // spelled `string[i] == '$' && string[i+1] == LPAREN` and goes to
+            // `extract_command_subst` (subst.c:1894-1903), which for a body
+            // starting `(` is the paren count. So the count runs *here*, over
+            // the whole enclosing string, and a count that runs the string out
+            // overruns the scan's index: `CHECK_STRING_OVERRUN` then sets
+            // `i = len`, `c = 0` and breaks the loop (subst.c:135-141), landing
+            // on the `if (c == 0 && nesting_level)` ending — the same `bad
+            // substitution: no closing '}'` any other unclosed brace gets
+            // (subst.c:1975-1988). Measured: `A${x:-$(( #5 ))}B` under `${…@P}`
+            // is `bad substitution` and the undecoded word, where the same
+            // arithmetic outside a brace is silent.
+            if let WordPart::ArithSub { bracket: false, expr, parts, tail } = sub {
+                let s = bfmt![b"(", &crate::unparse::parts_src(parts), b"))", tail];
+                match self.arith_extent_frame(&s, 0) {
+                    ArithFrame::Closed(_) => continue,
+                    ArithFrame::Aborted => return ExtentRead::Aborted,
+                    // Outside a prompt the count's *own* ending runs first and
+                    // wins: `report_error ("no closing `)'")` then
+                    // `exp_jump_to_top_level (DISCARD)` (subst.c:1493-1506), so
+                    // the brace scan never reaches an ending of its own and
+                    // there is no second complaint. Under a prompt the count is
+                    // silent and only overruns the index, which is what leaves
+                    // the brace with no `}` to find.
+                    ArithFrame::RanOut => {
+                        let expr = expr.clone();
+                        self.arith_unclosed_by_comment(&expr);
+                        return if self.prompt_expanding {
+                            ExtentRead::Abandoned { body: Str::new(), rest: Str::new() }
+                        } else {
+                            ExtentRead::Aborted
+                        };
+                    }
+                }
+            }
             let WordPart::CommandSub { body } = sub else {
                 continue;
             };
@@ -26092,17 +26132,11 @@ impl Shell {
                 }
                 // Neither of these two spellings is *parsed* by the scan that
                 // finds it. A backquote is `string_extract (string, &si, "`",
-                // …)` (subst.c:1886), a plain byte hunt for the closer; and a
-                // `$((` goes to `extract_delimited_string` instead of
-                // `xparse_dolparen` (subst.c:1284), which counts parentheses.
-                // So their own extents cannot fail: ``A${y:-p`fi`q}B`` and
-                // `A${y:-p$((1+))q}B` both expand quietly to `AYB`.
-                //
-                // A `$( … )` *nested inside* the arithmetic is another matter —
-                // `extract_delimited_string` carries `SX_COMMAND` too and
-                // recurses into one, so `A${y:-$((1+$(fi)))}B` does report. It
-                // reaches this loop as a part of the arithmetic's own text; see
-                // [`crate::ast::WordPart::ArithSub::parts`].
+                // …)` (subst.c:1886), a plain byte hunt for the closer, so its
+                // extent cannot fail: ``A${y:-p`fi`q}B`` expands quietly to
+                // `AYB`. An `ArithFallback` body is an arithmetic osh's lexer
+                // has already decided is a command substitution, and the
+                // `ArithSub` arm above is where that text's count belongs.
                 CmdSubBody::Backtick { .. } | CmdSubBody::ArithFallback { .. } => {
                     ExtentRead::Closed
                 }
@@ -26467,7 +26501,13 @@ impl Shell {
             }
             for p in parts {
                 match p {
-                    WordPart::CommandSub { .. } => {
+                    // A `$(( … ))` is read whole rather than descended into:
+                    // the scan's `$(` row hands it to `extract_command_subst`,
+                    // whose paren count steps into its own nested `$( … )` in
+                    // its own order (subst.c:1431-1437). A `$[ … ]` is not that
+                    // row — `string[i+1]` is `[`, not `(` — so nothing reads it
+                    // and the scan meets what is inside it directly.
+                    WordPart::CommandSub { .. } | WordPart::ArithSub { bracket: false, .. } => {
                         if !*squote {
                             out.push(p);
                         }
@@ -26739,7 +26779,7 @@ impl Shell {
             // The extent read comes first, exactly as it does for a `${ … }`:
             // `param_expand` extracts the whole `$(( … ))` before it expands a
             // byte of it, and a `$( … )` inside is really parsed there. See
-            // [`Shell::arith_extent_scan`].
+            // [`Shell::arith_extent_expand`].
             WordPart::ArithSub {
                 expr,
                 bracket,

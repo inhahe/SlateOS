@@ -43,7 +43,7 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
-### TD-OILS-A-BRACKET-ARITHMETIC-GIVES-UP-AFTER-A-FAILED-SUBSTITUTION. `v='A$[1+$(fi)]B'; echo "${v@P}"` stops at the first diagnostic where bash reports twice and evaluates on — 2026-08-09 — OPEN
+### TD-OILS-A-BRACKET-ARITHMETIC-GIVES-UP-AFTER-A-FAILED-SUBSTITUTION. `v='A$[1+$(fi)]B'; echo "${v@P}"` stops at the first diagnostic where bash reports twice and evaluates on — 2026-08-09 — ✅ FIXED 2026-08-09
 
 **Where:** `userspace/oils/src/interp.rs`, `Shell::arith_dolparen` — the tail of
 it, which answers a body that will not parse with an unconditional
@@ -87,87 +87,125 @@ evaluates what is left — `1+` — giving the arithmetic error and, the expansi
 having failed, the whole undecoded word. osh instead treats the first failure as
 fatal to the word.
 
-**Proper fix.** Give `Shell::arith_dolparen`'s failure tail the `prompt_expanding`
-branch `Shell::comsub_reparse_read` already has — the same guard, from the same
-two lines:
+**Fixed, 2026-08-09.** `Shell::arith_dolparen`'s failure tail was given the
+`prompt_expanding` branch `Shell::comsub_reparse_read` already had — the same
+guard, from the same two lines:
 
 ```c
 if ((flags & SX_NOLONGJMP) == 0)
   jump_to_top_level (-nc);              /* parse.y:4330 */
 ```
 
-Under a prompt expansion it should report (as it already does), set
-`Shell::extent_consumed`, and then run `Shell::failed_extent_body` over **`rest`**
-— everything past the `$(`, which is what `parse_string` was handed, not the
-extent `scan_cmdsub_body` carved out — returning that child's output rather than
-`None`. That accounts for both quoted texts exactly: the parse names `rest`'s
-remainder (`` `fi)+3' ``) and the child runs it less a byte (`` `fi)+' ``).
-`expand_arith_params_inner` then needs the `extent_consumed` break/restore pair
-that `Shell::expand_word_parts` already uses, so the rest of the *expression* is
+Under a prompt expansion it now reports (as it already did), sets
+`Shell::extent_consumed`, and runs `Shell::failed_extent_body` over **`rest`** —
+everything past the `$(`, which is what `parse_string` was handed, not the extent
+`scan_cmdsub_body` carved out — returning that child's output rather than `None`.
+That accounts for both quoted texts exactly: the parse names `rest`'s remainder
+(`` `fi)+3' ``) and the child runs it less a byte (`` `fi)+' ``).
+`expand_arith_params_inner` gained the `extent_consumed` break/restore pair
+`Shell::expand_word_parts` already used, so the rest of the *expression* is
 consumed rather than expanded, and `Shell::arith_sub` evaluates what was
 accumulated before the `$(` — `1+`, hence bash's operand-expected error, or
-nothing at all, hence `[A0B]` for `A$[$(fi)]B`. Corpus
-`an-arithmetic-extent-read-parses-a-command-substitution-inside-it.sh` covers the
-`$((` half and deliberately omits this one.
+nothing at all, hence `[A0B]` for `A$[$(fi)]B`.
+
+Two things the measurement settled that the fix had to respect:
+
+* **errexit still wins**, and is therefore asked first. It does not go through
+  the suppressed jump at all — `parser_error` ends with a direct `exit_shell` —
+  so `set -e` on the same line prints the first diagnostic line and nothing else.
+* **The consumption stops at the expression.** `expand_arith_string` is one
+  `expand_word_internal` call over the expression alone, so it owns its own
+  `sindex`: `A$[$(fi)]B${y}C` is `[A0BYC]`, the `${y}` after the arithmetic
+  expanding normally. Hence the save/restore rather than a bare set.
+
+Corpus:
+`a-bracket-arithmetic-reads-its-substitutions-when-the-expression-is-expanded.sh`
+(12 probes, including the pair's two texts, the truncated evaluation, a
+substitution before the bad one having already run, the brace's ending when one
+is wrapped in `${z:- … }`, and a here-document body — unread text, but not a
+prompt — where the jump still stands).
 
 ---
 
-### TD-OILS-A-FAILED-EXTENT-READ-WITH-A-HERE-DOCUMENT-REPORTS-THE-WRONG-EXTENT. `v='A$(fi <<E'…; echo "${v@P}"` quotes to the end of the string where bash stops at the newline — 2026-08-09 — OPEN
+### TD-OILS-A-FAILED-EXTENT-READ-RUNS-TO-THE-END-OF-THE-STRING. `v='A$(fi⏎echo x⏎)B'; echo "${v@P}"` quotes and consumes to the end where bash stops at the error's own line — 2026-08-09 — OPEN
 
 **Where:** `userspace/oils/src/interp.rs`, `Shell::comsub_reparse_read` /
-`Shell::failed_extent_body`, and the tail measurement in
-`unparse::attach_comsub_tails`. Not specific to arithmetic — it shows at the bare
-string level too.
+`Shell::failed_extent_body` / `Shell::arith_dolparen`, and
+`crate::parser::comsub_reprint_error`'s `line_off`. Not specific to arithmetic
+and **not specific to here-documents** — it shows on any body whose failure is
+not on its last line, at the bare string level too.
 
 **Reproduce:**
 
 ```text
-p='A$(fi <<E
-hi
-E
-)B'; printf '1 [%s]\n' "${p@P}"
+a='A$(fi
+echo x
+)B';  printf '1 [%s]\n' "${a@P}"        # printf on line 3
 
-  bash: command substitution: line 5: syntax error near unexpected token `fi'
-        command substitution: line 5: `fi <<E'
-        command substitution: line 4: syntax error near unexpected token `fi'
-        command substitution: line 4: `fi <<'
+  bash: command substitution: line 4: syntax error near unexpected token `fi'
+        command substitution: line 4: `fi'
+        line 3: f: command not found
         1 [A
-        hi
-        E
+        echo x
         )B]
-  osh:  command substitution: line 8: syntax error near unexpected token `fi'
-        command substitution: line 8: `)B'
-        command substitution: line 4: syntax error near unexpected token `fi'
-        command substitution: line 4: `fi <<E'
+  osh:  command substitution: line 6: syntax error near unexpected token `fi'
+        command substitution: line 6: `)B'
+        command substitution: line 3: syntax error near unexpected token `fi'
+        command substitution: line 3: `fi'
         1 [A]
 ```
 
-The same shape appears under a brace (`A${z:-$(fi <<E …)}B`, where bash reports
-the pair four times and expands to the text) and inside an arithmetic
-(`A$((1+$(fi <<E …)))B`, bash: `` `fi <<E' `` then `` `(1+$(fi <<E' `` and
-`[A)B]`).
+Three things are wrong at once, and all three are the same wrong number: the
+reported **line**, the **echoed** line, and where the read **stopped** — which
+decides both the text the child runs (`f`, not `fi⏎echo x⏎)`) and how much of
+the string is consumed (bash expands `⏎echo x⏎)B` afterwards, osh drops it).
 
-**Why (hypothesis, not yet confirmed against the source).** `xparse_dolparen`'s
-failure path is
+**Why (measured against bash 5.2.37, then read back in the source).** bash's
+string reader is line-at-a-time: `shell_getc` fills `shell_input_line` with one
+line and `line_number++` counts it (parse.y:2361). A syntax error is reported at
+whatever `line_number` then holds and echoes whatever `shell_input_line` then
+holds, so **both name the line the error was found on** — and `parse_string`
+leaves its pointer just past that line's newline, which is what
+`xparse_dolparen` reads back:
 
 ```c
+if (nc < 0) { … }                          /* parse.y:4330 */
 if (ep[-1] != ')')
-  { while (ep > ostring && ep[-1] == '\n') ep--; }      /* parse.y:4338-4377 */
+  { while (ep > ostring && ep[-1] == '\n') ep--; }
+nc = ep - ostring;
+*indp = ep - base - 1;
+ret = (nc == 0) ? "" : substring (ostring, 0, nc - 1);   /* parse.y:4348-4376 */
 ```
 
-and with a here-document redirection the string reader has already handed the
-parser the body, so `ep` lands at the end of the *first line* rather than the end
-of the string — which both truncates the quoted text at the newline and leaves
-the rest of the string unconsumed, hence bash printing `hi`, `E`, `)B` after the
-`A`. osh's reader swallows the whole text as one line unconditionally.
+So one position `ep` — the end of the error's line, backed up over trailing
+newlines — gives the child's text (`ostring[0 .. ep-1]`) *and* the resume point
+(`sindex = ep`). Measured across six shapes (error on line 1, on a later line,
+with a here-document on the error line, with a here-document above it, on one
+line, after a leading newline) the rule holds without a here-document special
+case; a here-doc only matters because gathering its body advances the reader, so
+the error's line number counts the body's lines too. The remainder is expanded,
+not copied: `a='A$(fi⏎$y⏎)B'` with `y=Y` gives `A⏎Y⏎)B`.
 
-**Proper fix.** Make the failed-read stop position depend on how far the reader
-actually got, rather than assuming end-of-string, and derive both the quoted tail
-and the consumption from that one position. Read parse.y:4248-4377 and
-`read_secondary_line`/`gather_here_documents` before committing to a rule —
-measure first. Corpus
-`an-arithmetic-extent-read-parses-a-command-substitution-inside-it.sh` documents
-the omission at its case 15/16 boundary.
+osh instead assumes the reader ran to the end of the text in all three places:
+`comsub_reprint_error`'s `line_off = newlines(src) + 1`, `failed_extent_body`'s
+"last non-newline, less one", and `extent_consumed`'s "the rest of the string is
+gone". Single-line bodies are unaffected, which is why the whole corpus passes.
+
+**Proper fix.** Make `line_off` the line the parse error was actually found on
+(it already is on the `comsub_unclosed_error` and `reprint_read_past_paren`
+paths — only `comsub_reprint_error`'s `Ok` branch fabricates it, and there the
+error's line is mapped to a *physical* line by `parse_paren_body_tokens`, so it
+needs unmapping or a second return value). Then derive `ep` from it, split the
+composite `src + ")" + tail` at `ep` into the child's text and the leftover, and
+give `Shell::extent_consumed` the leftover so the three `ExtentRead::Abandoned`
+sites can expand it — `crate::parser::dquote_word_from_source` +
+`Shell::expand_double_quoted`, the same route `Shell::prompt_expand` uses — and
+append it to the substitution's (empty) value before the enclosing walk stops.
+`Shell::arith_dolparen` needs the same split over `rest`, where the leftover
+belongs to the *expression* (see
+`a-bracket-arithmetic-reads-its-substitutions-when-the-expression-is-expanded.sh`).
+Corpus `an-arithmetic-extent-read-parses-a-command-substitution-inside-it.sh`
+documents the omission at its case 15/16 boundary.
 
 ---
 
@@ -1204,7 +1242,7 @@ gets the brace's ending, `brace_scanned_subs` having descended into its parts.
 Corpus: `an-arithmetic-extent-read-parses-a-command-substitution-inside-it.sh`.
 Two divergences uncovered on the way are **not** this entry and are filed
 separately: TD-OILS-A-BRACKET-ARITHMETIC-GIVES-UP-AFTER-A-FAILED-SUBSTITUTION and
-TD-OILS-A-FAILED-EXTENT-READ-WITH-A-HERE-DOCUMENT-REPORTS-THE-WRONG-EXTENT.
+TD-OILS-A-FAILED-EXTENT-READ-RUNS-TO-THE-END-OF-THE-STRING.
 
 ---
 

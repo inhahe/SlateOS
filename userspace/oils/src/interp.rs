@@ -30712,6 +30712,12 @@ impl Shell {
     /// mark the call as a nested one.
     fn expand_arith_params_inner(&mut self, expr: BStr<'_>) -> Str {
         let saved_src = self.enter_inner_source(expr.to_vec());
+        // `expand_arith_string` is one `expand_word_internal` call over the
+        // expression alone, so it owns a `sindex` of its own: an extent read that
+        // gave up in here consumes the rest of the *expression* and nothing of
+        // the word the arithmetic sits in. Measured, `v='A$[$(fi)]B'` still
+        // expands the `B` after it — `[A0B]`. See [`Shell::extent_consumed`].
+        let saved_consumed = std::mem::replace(&mut self.extent_consumed, false);
         // The source is scanned as characters — an arithmetic expression may
         // hold a non-ASCII variable *value* spliced in by an earlier pass — but
         // every character the scanner acts on is ASCII, so `syn` decides what is
@@ -30727,6 +30733,13 @@ impl Shell {
             // expanded and cannot raise a second complaint: `set -u` on
             // `$(( $y + $z ))` names `y` alone.
             if self.expansion_failed() {
+                break;
+            }
+            // A failed extent read is not that failure — the jump was suppressed
+            // — but it left `sindex` at the end of the string all the same, so
+            // the walk over the rest of the expression is simply over: literals
+            // and further expansions alike.
+            if self.extent_consumed {
                 break;
             }
             if syn_at(&chars, i) == '\\' {
@@ -30950,6 +30963,7 @@ impl Shell {
             }
         }
         self.leave_inner_source(saved_src);
+        self.extent_consumed = saved_consumed;
         out
     }
 
@@ -31061,6 +31075,32 @@ impl Shell {
         self.input_names.pop();
         if let Some(msg) = failed {
             self.berrln(&msg);
+            // …unless the jump is suppressed, which is the one thing
+            // `no_longjmp_on_fatal_error` reaches here:
+            //
+            //     if ((flags & SX_NOLONGJMP) == 0)
+            //       jump_to_top_level (-nc);       /* parse.y:4330 */
+            //
+            // So a prompt expansion prints the diagnostic and carries straight
+            // on to `command_substitute` — the same ending
+            // [`Shell::comsub_reparse_read`] gives, and for the same reason.
+            // What that runs is the whole remainder less a byte, over `rest`
+            // rather than the extent, because `rest` is what `parse_string` was
+            // handed: measured, `v='A$[1+$(fi)+3]B'; echo "${v@P}"` names
+            // `` `fi)+3' `` on the parse and runs `fi)+` in the child. And the
+            // read left the caller's index at the end of the string, so the rest
+            // of the *arithmetic* is consumed — see [`Shell::extent_consumed`],
+            // which [`Shell::expand_arith_params_inner`] answers.
+            //
+            // errexit is asked first because it does not go through the jump at
+            // all: `parser_error` ends with a direct `exit_shell`, before the
+            // guard above is reached. Measured, `set -e` on the same line prints
+            // the first diagnostic and nothing else.
+            if self.prompt_expanding && !self.errexit {
+                self.extent_consumed = true;
+                let body = Self::failed_extent_body(rest, false, b"");
+                return Some(self.run_command_sub_text(&body));
+            }
             // Without errexit the failure is `jump_to_top_level (DISCARD)`
             // (parse.y:4330, on `parse_string`'s `-DISCARD`): the rest of the
             // word — and of the command holding it — is given up with `$?` of 1,

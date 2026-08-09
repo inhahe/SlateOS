@@ -1,9 +1,13 @@
 # `extract_command_subst` finds a `$( … )`'s extent by running a real parse over
 # everything after the `$(` — `xparse_dolparen` (parse.y:4248). When that parse
-# *fails* the read still has to say where it stopped, and it stopped at the end
-# of the string: `parse_string`'s `SEVAL_NOLONGJMP` branch does `reset_parser ();
-# break;` (builtins/evalstring.c:688-695) with the string reader having already
-# swallowed the whole text as one "line". Two things follow, from parse.y:4338-4377:
+# *fails* the read still has to say where it stopped, and for every shape here it
+# stopped at the end of the string: `parse_string`'s `SEVAL_NOLONGJMP` branch does
+# `reset_parser (); break;` (builtins/evalstring.c:688-695) with the string reader
+# having already swallowed the whole text — which for a one-line body is one
+# "line". A body with a newline in it stops earlier, on the line the reader was
+# holding; that is the general rule, and
+# `a-failed-extent-read-stops-on-the-line-the-reader-reached.sh` is it.
+# Two things follow, from parse.y:4338-4377:
 #
 #     if (ep[-1] != ')')
 #       { while (ep > ostring && ep[-1] == '\n') ep--; }

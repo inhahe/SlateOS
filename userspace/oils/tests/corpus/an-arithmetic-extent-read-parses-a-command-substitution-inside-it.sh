@@ -59,11 +59,14 @@ o='A$((1+$(cat <<E
 hi
 E
 )))B';                         printf '15 [%s]\n' "${o@P}"
-# A here-document under a body that *fails* to parse is left out on purpose: the
-# extent both reads then report is cut at the first newline rather than running
-# to the end of the string, and osh does not reproduce that yet. See
-# `TD-OILS-A-FAILED-EXTENT-READ-WITH-A-HERE-DOCUMENT-REPORTS-THE-WRONG-EXTENT`
-# in known-issues.md.
+# A body that *fails* to parse with a newline in it is left out on purpose. The
+# read stops on the line the reader reached rather than at the end of the string
+# (`a-failed-extent-read-stops-on-the-line-the-reader-reached.sh`), which here
+# leaves the paren count to carry on from there and close early — bash gives
+# `[A)B]` for `A$((1+$(fi⏎echo x⏎)))B` where the one-line shape gives `[A]`, and
+# reports a second time from the fallback child. osh does not reproduce that yet;
+# see `TD-OILS-AN-ARITHMETIC-EXTENT-CARRIES-ON-COUNTING-AFTER-A-FAILED-READ` in
+# known-issues.md.
 
 echo "=== a single-quoted run inside the arithmetic is still parsed, being a real parse"
 q='A$((1+$(echo "x" ; fi)))B'; printf '17 [%s]\n' "${q@P}"

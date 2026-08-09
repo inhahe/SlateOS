@@ -82,7 +82,7 @@ That read is an ordinary *string-level* one, and the two quoted texts are the
 string-level pair this repo already models: the extent read echoes the whole
 remainder and the child that runs it echoes one byte less (see
 TD-OILS-A-FAILED-EXTENT-PARSE-CONSUMES-THE-REST-OF-THE-STRING and
-`Shell::failed_extent_body`). bash then carries on with the empty result and
+`Shell::failed_extent_split`). bash then carries on with the empty result and
 evaluates what is left — `1+` — giving the arithmetic error and, the expansion
 having failed, the whole undecoded word. osh instead treats the first failure as
 fatal to the word.
@@ -97,7 +97,7 @@ if ((flags & SX_NOLONGJMP) == 0)
 ```
 
 Under a prompt expansion it now reports (as it already did), sets
-`Shell::extent_consumed`, and runs `Shell::failed_extent_body` over **`rest`** —
+`Shell::extent_consumed`, and runs `Shell::failed_extent_split` over **`rest`** —
 everything past the `$(`, which is what `parse_string` was handed, not the extent
 `scan_cmdsub_body` carved out — returning that child's output rather than `None`.
 That accounts for both quoted texts exactly: the parse names `rest`'s remainder
@@ -127,7 +127,7 @@ prompt — where the jump still stands).
 
 ---
 
-### TD-OILS-A-FAILED-EXTENT-READ-RUNS-TO-THE-END-OF-THE-STRING. `v='A$(fi⏎echo x⏎)B'; echo "${v@P}"` quotes and consumes to the end where bash stops at the error's own line — 2026-08-09 — OPEN
+### TD-OILS-A-FAILED-EXTENT-READ-RUNS-TO-THE-END-OF-THE-STRING. `v='A$(fi⏎echo x⏎)B'; echo "${v@P}"` quotes and consumes to the end where bash stops at the error's own line — 2026-08-09 — ✅ FIXED 2026-08-09
 
 **Where:** `userspace/oils/src/interp.rs`, `Shell::comsub_reparse_read` /
 `Shell::failed_extent_body` / `Shell::arith_dolparen`, and
@@ -191,21 +191,218 @@ osh instead assumes the reader ran to the end of the text in all three places:
 "last non-newline, less one", and `extent_consumed`'s "the rest of the string is
 gone". Single-line bodies are unaffected, which is why the whole corpus passes.
 
-**Proper fix.** Make `line_off` the line the parse error was actually found on
-(it already is on the `comsub_unclosed_error` and `reprint_read_past_paren`
-paths — only `comsub_reprint_error`'s `Ok` branch fabricates it, and there the
-error's line is mapped to a *physical* line by `parse_paren_body_tokens`, so it
-needs unmapping or a second return value). Then derive `ep` from it, split the
-composite `src + ")" + tail` at `ep` into the child's text and the leftover, and
-give `Shell::extent_consumed` the leftover so the three `ExtentRead::Abandoned`
-sites can expand it — `crate::parser::dquote_word_from_source` +
-`Shell::expand_double_quoted`, the same route `Shell::prompt_expand` uses — and
-append it to the substitution's (empty) value before the enclosing walk stops.
-`Shell::arith_dolparen` needs the same split over `rest`, where the leftover
-belongs to the *expression* (see
-`a-bracket-arithmetic-reads-its-substitutions-when-the-expression-is-expanded.sh`).
-Corpus `an-arithmetic-extent-read-parses-a-command-substitution-inside-it.sh`
-documents the omission at its case 15/16 boundary.
+**Fixed, 2026-08-09.** The one position `ep` is now computed once and both halves
+taken from it.
+
+* `crate::parser::ComsubReprintError` gained **`stop_line`** beside `line_off`.
+  The two are usually the same number and differ exactly where the *reported*
+  line is not the reader's: a `parse_matched_pair` complaint is blamed on the
+  line the construct opened, and an `unexpected end of file` on the line the
+  `)` was wanted from, while in both the reader really did run the text out —
+  those answer `u32::MAX`. `comsub_reprint_error`'s `Ok` branch stopped
+  fabricating a line: it now parses through the new `parse_paren_body_mapped`
+  with `LineMap::default()`, so `err.line` comes back numbered from 1 *within
+  the read's own text*, which is both the line bash reports and the line its
+  reader stopped on. That made `close_line` dead on the whole reprint path, and
+  it was removed from `comsub_reprint_error`, `Shell::comsub_reparse_error` and
+  `Shell::comsub_reparse_read`.
+* `Shell::failed_extent_body` became **`Shell::failed_extent_split`**, which
+  builds the composite `src + ")" + tail`, walks `stop_line` newlines into it
+  (`Shell::reader_stop`), backs up over trailing newlines exactly as parse.y
+  does, and returns the pair `(ostring[0 .. ep-1], composite[ep ..])`.
+  `ExtentRead::Abandoned` carries both halves.
+* `Shell::run_abandoned_extent` runs the first half and appends the second,
+  expanded — `crate::parser::dquote_word_from_source` +
+  `Shell::expand_double_quoted`, with `extent_consumed` saved across it so a
+  leftover holding its own failing `$(` composes rather than truncates. The
+  remainder being empty is now what `extent_consumed` means, and it is the only
+  case in which a `${ … }` scan is left with no `}` to find.
+* `Shell::arith_dolparen` returns `(Str, Option<usize>)` — the child's output
+  and, for a read that gave up, the byte of `rest` the scan resumes on.
+  `expand_arith_params_inner` moves its cursor there instead of stopping, so the
+  leftover is re-scanned *as arithmetic*: `A$[1+$(fi⏎echo x⏎)]B` evaluates
+  `1+⏎echo x⏎)` and complains of the error token `x⏎)`, as bash does. The stop
+  line comes from the parse error's own line unmapped, or `u32::MAX` when the
+  diagnostic has no source echo — the same rule as above, and the same test
+  `Shell::format_parse_error` already uses to decide whether to echo one.
+* `Shell::brace_extent_scan` gained an arm for a read that stopped part way: the
+  brace scan carries on from `ep` and finds the `}`, so there is no `bad
+  substitution`. Measured, `y=Y; A${y:-p$(fi⏎q)r}B` reports once and still gives
+  `AYB`.
+
+Corpus `a-failed-extent-read-stops-on-the-line-the-reader-reached.sh` (10
+probes: the reader's line, the child's byte, the leftover expanded, a recursive
+leftover, a here-document body, a body that runs the string out, a stray `)`
+coming back, the `$[` expression's leftover, and the brace scan's `}`).
+`a-failed-extent-parse-consumes-the-rest-of-the-string.sh` had its header
+corrected — it documents the one-line shape, not the rule.
+
+Two follow-ons the measurement turned up are **not** fixed and have entries of
+their own: TD-OILS-AN-ARITHMETIC-EXTENT-CARRIES-ON-COUNTING-AFTER-A-FAILED-READ
+and TD-OILS-A-BRACE-OPERAND-IS-SCANNED-AGAIN-BEFORE-IT-IS-EXPANDED.
+
+---
+
+### TD-OILS-AN-ARITHMETIC-EXTENT-CARRIES-ON-COUNTING-AFTER-A-FAILED-READ. `v='A$((1+$(fi⏎echo x⏎)))B'; echo "${v@P}"` gives `[A]` where bash gives `[A)B]` and reports twice — 2026-08-09 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs`, `Shell::arith_extent_scan`'s
+`ExtentRead::Abandoned` arm, which sets `Shell::extent_consumed` and stops. Only
+the multi-line shape is wrong; the one-line `A$((1+$(fi)))B` is `[A]` in both
+shells and is covered by
+`an-arithmetic-extent-read-parses-a-command-substitution-inside-it.sh`.
+
+**Reproduce:**
+
+```text
+a='A$((1+$(fi
+echo x
+)))B';  printf '[%s]\n' "${a@P}"        # printf on line 4
+
+  bash: command substitution: line 5: syntax error near unexpected token `fi'
+        command substitution: line 5: `fi'
+        command substitution: line 4: syntax error near unexpected token `fi'
+        command substitution: line 4: `(1+$(fi'
+        [A)B]
+  osh:  command substitution: line 5: syntax error near unexpected token `fi'
+        command substitution: line 5: `fi'
+        [A]
+```
+
+**Why (measured against bash 5.2.37, then read back in the source).** A `$((` is
+extracted by `extract_delimited_string (string, sindex, "$(", "(", ")",
+xflags|SX_COMMAND)` (subst.c:1284-1286), a *paren count*. The count recurses into
+the nested `$(fi` through `xparse_dolparen` — the first report — and that read
+now stops on the reader's line (see
+TD-OILS-A-FAILED-EXTENT-READ-RUNS-TO-THE-END-OF-THE-STRING) rather than at the
+end of the string, so `*sindex` comes back mid-string and **the count carries
+on**. It meets two of the three `)`s and closes there, leaving `)B` for the
+enclosing walk. The extent it hands back is `(1+$(fi⏎echo x⏎)`, and
+`param_expand`'s `case LPAREN` then finds it does not end in `)` after the
+opening one is stripped, so it is not arithmetic at all: bash falls through to
+`command_substitute`, whose child parses `(1+$(fi⏎…` and reports it a second
+time, blamed on the enclosing line and echoing that text's *first* line. That
+second report is osh's `CmdSubBody::ArithFallback` shape.
+
+**Proper fix.** `arith_extent_scan` cannot answer this from the parsed part
+alone: the extent has to be re-derived by resuming the paren count at the read's
+stop point (`ExtentRead::Abandoned`'s `rest` already carries the text). The
+result then needs the `*temp == '(' && temp[len-1] != ')'` test
+`param_expand` makes, routing to the `ArithFallback` body when it fails, with
+whatever the count did not reach expanded as the leftover — the same
+`Shell::run_abandoned_extent` ending the string level uses.
+
+---
+
+### TD-OILS-A-BRACE-OPERAND-IS-SCANNED-AGAIN-BEFORE-IT-IS-EXPANDED. A `${x:-word}` whose `word` is used reports a failed extent read three times, not two — 2026-08-09 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs`, the `${ … }` operand path
+(`Shell::brace_extent_scan` scans the operand once, and expanding it reads it a
+second time). Two shapes are wrong, and the second is the more visible.
+
+**Reproduce:**
+
+```text
+unset z
+a='A${z:-p$(fi
+q)r}B';  printf '[%s]\n' "${a@P}"       # printf on line 4
+
+  bash: three copies of
+          command substitution: line 4: syntax error near unexpected token `fi'
+          command substitution: line 4: `fi'
+        then  line 3: f: command not found
+        [Ap
+        q)rB]
+  osh:  two copies, then the same command-not-found
+        [Ap
+        q)r}BB]
+
+y=Y; the same word          bash and osh agree: one report, [AYB]
+```
+
+**Why (measured against bash 5.2.37, then read back in the source).** Three
+reads, not two, and only when the operand is actually used:
+
+1. `extract_dollar_brace_string`'s scan of the whole `${ … }` — the one
+   `brace_extent_scan` models. This is the only read when the parameter is set.
+2. `parameter_brace_expand_rhs` (subst.c:7726-7731) opens with
+   ```c
+   if ((quoted & (Q_HERE_DOCUMENT|Q_DOUBLE_QUOTES)) && *value)
+     { sindex = 0; temp = string_extract_double_quoted (value, &sindex, SX_STRIPDQ); }
+   ```
+   — another *scan*, over the operand alone, which reads a `$(` it meets
+   (subst.c:955-963) and so reports without running anything.
+3. `expand_string_for_rhs` (subst.c:7737), the real expansion, which reports a
+   third time and runs the child once.
+
+That two of the three are scans is measured, not inferred: with the body
+`$(echo RAN >&2; fi⏎q)` the diagnostic appears three times and `RAN` once.
+
+The `Q_DOUBLE_QUOTES` gate on 2 is **unobservable from a script** and osh may
+apply the scan unconditionally: a failed extent read survives only under
+`no_longjmp_on_fatal_error`, which only `expand_prompt_string` raises, and
+`decode_prompt_string` calls it as `expand_prompt_string (result,
+Q_DOUBLE_QUOTES, 0)` (parse.y:6094). Measured — the same word gives three
+reports whether the `${a@P}` holding it is quoted or not.
+
+The `}BB` is a second, independent defect on the same path, and the more
+interesting one: **one `tail` cannot serve both reads.** `CmdSubBody`'s `tail` is
+"the rest of the enclosing word", filled by `unparse::attach_comsub_tails_in`,
+which treats a `[ … ]` subscript as a string scope of its own but not a brace
+operand. For read 1 that is exactly right — `extract_dollar_brace_string` is
+walking the whole word, and bash's echo proves it: `A${z:-p$(fi)q}B` quotes
+`` `fi)q}B' ``, the `}B` included. For reads 2 and 3 it is wrong, because those
+are handed the *operand* alone (`value`, a string cut out by the scan), so their
+composite is `fi⏎q)r` and their leftover `⏎q)r`. osh reuses the word-scoped tail
+and its leftover runs over the `}`, hence `q)r}B` and then the word's own `B`
+again.
+
+**Proper fix.** Two parts, in this order:
+
+1. Make the brace operand a string scope in `attach_comsub_tails_in` — the same
+   treatment `Nested::Index` already gets — so a part inside it carries the
+   *operand's* remainder, and have `Shell::brace_extent_scan` compose the
+   word-level remainder itself for its own scan, which is the only reader that
+   wants it. (`Shell::extent_read_of` already walks the whole part via
+   `brace_scanned_subs`, so it is the natural place to know the difference.)
+   This is worth doing on its own: it is the only reason the leftover escapes
+   the operand.
+2. Add the double-quoted pre-scan of 2 above, gated on the expansion being
+   quoted, as a scan that reports without running. **It is not only a scan: it
+   rewrites the operand**, and read 3 expands the rewrite, not the original.
+   `string_extract_double_quoted` copies a `$( … )` through by *its extent*
+   (subst.c:955-993), and on a failed read takes the fallback
+
+   ```c
+   ret = extract_command_subst (string, &si, (flags & SX_COMPLETE));
+   temp[j++] = '$'; temp[j++] = string[i + 1];
+   /* Just paranoia; ret will not be 0 unless no_longjmp_on_fatal_error is set. */
+   if (ret == 0 && no_longjmp_on_fatal_error)
+     { free_ret = 0; ret = string + i + 2; }        /* the WHOLE remainder */
+   for (t = 0; ret[t]; t++, j++) temp[j] = ret[t];
+   temp[j] = string[si];
+   if (si < i + 2) i += 2;
+   else if (string[si]) { j++; i = si + 1; }
+   else i = si;
+   ```
+
+   — so the remainder is copied once as the body *and* again by the loop
+   resuming at `si + 1`, with `string[si]` between them. The leftover is
+   **duplicated**.
+
+**Worked example**, derived from the source and agreeing byte-for-byte with the
+measured `[Ap⏎q)rB]` above. Operand `p$(fi⏎q)r` (indices `p`0 `$`1 `(`2 `f`3
+`i`4 `⏎`5 `q`6 `)`7 `r`8):
+
+| read | over | reports | leaves |
+|---|---|---|---|
+| 1 | the word after `$(`: `fi⏎q)r}B` | `` `fi' `` | scan resumes at `i`, counts on, finds `}`; operand = `p$(fi⏎q)r` |
+| 2 | the operand: `fi⏎q)r`, `si` = 4 | `` `fi' `` | `temp` = `p` + `$(` + `fi⏎q)r` + `i` + `⏎q)r` = `p$(fi⏎q)ri⏎q)r` |
+| 3 | `temp` after `$(`: `fi⏎q)ri⏎q)r` | `` `fi' `` | body `f` (run: `f: command not found`), resume at `temp[5]` |
+
+Expansion = `temp[0]` + `temp[5..]` = `p⏎q)r`, i.e. `[Ap⏎q)rB]`. Each read stops
+one line in (`ep` past `fi⏎`, newline-stripped to past `fi`), which is
+`Shell::failed_extent_split` — the three differ only in *what string* they are
+handed, which is the whole of part 1.
 
 ---
 

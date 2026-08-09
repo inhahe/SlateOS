@@ -2117,13 +2117,29 @@ fn parse_paren_body_tokens(
     close_line: u32,
     opts: ParseOpts,
 ) -> Result<Program, ParseError> {
-    let Spanned { mut toks, mut lines, ends, .. } = spanned;
     // The body's line 1 is the line `$(` sits on: the closing `)` is on the
     // body's last line, so stepping back over the body's newlines lands there.
     let newlines =
         u32::try_from(src.iter().filter(|&&b| b == b'\n').count()).unwrap_or(u32::MAX);
     let phys = LineMap::Offset(close_line.saturating_sub(newlines).saturating_sub(1));
-    map_lines(&mut toks, &mut lines, &phys);
+    parse_paren_body_mapped(spanned, src, &phys, opts)
+}
+
+/// [`parse_paren_body_tokens`] with the renumbering spelled out, for the caller
+/// that wants the body's *own* lines rather than the enclosing source's.
+///
+/// [`comsub_reprint_error`] is that caller: it never reports the error it gets
+/// back — only its message — and it needs the line the failure was found on
+/// counted from 1, because that is what tells it where bash's reader stopped.
+/// See [`ComsubReprintError::stop_line`].
+fn parse_paren_body_mapped(
+    spanned: Spanned,
+    src: BStr<'_>,
+    phys: &LineMap,
+    opts: ParseOpts,
+) -> Result<Program, ParseError> {
+    let Spanned { mut toks, mut lines, ends, .. } = spanned;
+    map_lines(&mut toks, &mut lines, phys);
     let prog = parse_tokens_ending(toks, lines, Spans::of(src, ends), opts, true)
         .map_err(|e| {
             // A body that ends mid-construct is not an end of file in bash
@@ -2169,7 +2185,6 @@ fn parse_paren_body_tokens(
 pub fn comsub_reprint_error(
     src: BStr<'_>,
     tail: BStr<'_>,
-    close_line: u32,
     opts: ParseOpts,
 ) -> Option<ComsubReprintError> {
     match tokenize_paren_body(src, opts) {
@@ -2177,12 +2192,18 @@ pub fn comsub_reprint_error(
         // command and `tail` is out of reach: this is the ordinary re-parse,
         // and any error is the body's own grammar error, named on a token.
         Ok(spanned) => {
-            let err = parse_paren_body_tokens(spanned, src, close_line, opts).err()?;
+            // Renumbered from 1, not from the enclosing source: the line wanted
+            // here is the one *within* the text the read was handed, which is
+            // both the line bash reports and the line its reader stopped on.
+            let err = parse_paren_body_mapped(spanned, src, &LineMap::default(), opts).err()?;
             let fatal = err.fatal;
-            // Every newline of `src` is consumed before the `)` that fails, and
-            // none of `tail`'s are — the parse never gets that far.
-            let line_off = newlines(src).saturating_add(1);
-            Some(ComsubReprintError { err, echo: true, line_off, fatal })
+            // A failure on the body's last line — which is where the `!`/`time`
+            // shapes put it, at the `)` the re-print cannot reach — is the whole
+            // of `src` consumed and then the composite line the `)` sits on. An
+            // error further up stops there instead; see
+            // [`ComsubReprintError::stop_line`].
+            let line_off = err.line.unwrap_or_else(|| newlines(src).saturating_add(1));
+            Some(ComsubReprintError { err, echo: true, line_off, stop_line: line_off, fatal })
         }
         // The body ran out with a construct still open, so bash's lexer did
         // *not* stop at the `)`: it swallowed it and read on into `tail`.
@@ -2209,7 +2230,10 @@ pub fn comsub_unclosed_error(src: BStr<'_>, opts: ParseOpts) -> ComsubReprintErr
             let line_off = lex.line.unwrap_or(1);
             let err = resolve_subst_bail(lex, opts);
             let fatal = err.fatal;
-            return ComsubReprintError { err, echo: fatal, line_off, fatal };
+            // The line named is the one the unclosed construct *opened* on, not
+            // where the reader gave up — that ran the text out looking for the
+            // closer. So the two numbers part company here.
+            return ComsubReprintError { err, echo: fatal, line_off, stop_line: u32::MAX, fatal };
         }
     };
     let Spanned { toks, lines, ends, .. } = spanned;
@@ -2219,7 +2243,7 @@ pub fn comsub_unclosed_error(src: BStr<'_>, opts: ParseOpts) -> ComsubReprintErr
         Err(e) if !e.is_incomplete() => {
             let line_off = e.line.unwrap_or_else(|| eof_line_off(src));
             let fatal = e.fatal;
-            ComsubReprintError { err: e, echo: true, line_off, fatal }
+            ComsubReprintError { err: e, echo: true, line_off, stop_line: line_off, fatal }
         }
         // Otherwise the read simply ran out with `shell_eof_token` outstanding —
         // whether the text was a complete command (`$(echo`) or not (`$(if`),
@@ -2229,6 +2253,7 @@ pub fn comsub_unclosed_error(src: BStr<'_>, opts: ParseOpts) -> ComsubReprintErr
             err: ParseError::new("unexpected EOF while looking for matching `)'"),
             echo: false,
             line_off: eof_line_off(src),
+            stop_line: u32::MAX,
             fatal: false,
         },
     }
@@ -2271,7 +2296,9 @@ fn reprint_read_past_paren(
             // (parse.y:6251-6264).
             let err = resolve_subst_bail(lex, opts);
             let fatal = err.fatal;
-            return ComsubReprintError { err, echo: fatal, line_off, fatal };
+            // As in [`comsub_unclosed_error`]: the opening line is named, but the
+            // reader itself ran the text out.
+            return ComsubReprintError { err, echo: fatal, line_off, stop_line: u32::MAX, fatal };
         }
     };
     let Spanned { toks, lines, ends, .. } = spanned;
@@ -2281,7 +2308,7 @@ fn reprint_read_past_paren(
         Err(e) if !e.is_incomplete() => {
             let line_off = e.line.unwrap_or_else(|| newlines(&combined).saturating_add(1));
             let fatal = e.fatal;
-            ComsubReprintError { err: e, echo: true, line_off, fatal }
+            ComsubReprintError { err: e, echo: true, line_off, stop_line: line_off, fatal }
         }
         // The text either parsed or merely ran out — but either way the `)` the
         // `comsub` production needs was consumed by something else and never
@@ -2301,6 +2328,7 @@ fn reprint_read_past_paren(
             err: ParseError::new("unexpected EOF while looking for matching `)'"),
             echo: false,
             line_off: eof_line_off(&combined),
+            stop_line: u32::MAX,
             fatal: false,
         },
     }
@@ -2323,6 +2351,36 @@ pub struct ComsubReprintError {
     /// read on. `parse_string` does not renumber (it calls `push_stream (0)`),
     /// so bash's one `line_number` simply runs on from there.
     pub line_off: u32,
+    /// Which line of the read's text bash's **reader** had consumed when it
+    /// stopped, counted from 1 — or [`u32::MAX`] where it ran the text out.
+    ///
+    /// This is not the same question as [`Self::line_off`], though the two
+    /// usually agree. bash reads a string one line at a time (`shell_getc` fills
+    /// `shell_input_line`, `line_number++` counts it — parse.y:2361), so a
+    /// diagnostic naming a *token* is reported at the line the reader is on and
+    /// echoes that same line: both numbers are this one. A diagnostic naming
+    /// something else is not — `parse_matched_pair` names the line its construct
+    /// *opened* on while the reader is at the end of the text, and the
+    /// `shell_eof_token` message is raised there too.
+    ///
+    /// It matters because it is the only thing that says how much of the string
+    /// a failed read consumed. `xparse_dolparen` reads its own reader's position
+    /// back out and hands the caller both the text to run and the index to
+    /// resume from:
+    ///
+    /// ```c
+    ///   if (ep[-1] != ')')
+    ///     { while (ep > ostring && ep[-1] == '\n') ep--; }
+    ///   nc = ep - ostring;
+    ///   *indp = ep - base - 1;
+    ///   ret = (nc == 0) ? "" : substring (ostring, 0, nc - 1);  /* parse.y:4348-4376 */
+    /// ```
+    ///
+    /// So a body whose failure is not on its last line leaves the rest of the
+    /// string to be expanded: measured, `a='A$(fi⏎echo x⏎)B'` under `@P` runs
+    /// `f` and expands to `A⏎echo x⏎)B`. See
+    /// [`crate::interp::Shell::failed_extent_split`].
+    pub stop_line: u32,
     /// Whether the failure ends the shell rather than one parse unit — true
     /// only for a `$( … )` nested in the re-print, which `parse_comsub` answers
     /// with `jump_to_top_level (FORCE_EOF)` (parse.y:4185). The re-print's own
@@ -7802,7 +7860,7 @@ mod tests {
     fn a_reprint_that_will_not_read_back_is_read_with_its_tail() {
         let opts = ParseOpts::default();
         let err = |src: &str, tail: &str| {
-            super::comsub_reprint_error(src.as_bytes(), tail.as_bytes(), 1, opts)
+            super::comsub_reprint_error(src.as_bytes(), tail.as_bytes(), opts)
                 .map(|f| (emsg(&f.err), f.echo, f.line_off, f.fatal))
         };
 

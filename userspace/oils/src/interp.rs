@@ -1708,7 +1708,7 @@ struct DiscardAbort {
 /// A failed read *reports* either way; only the jump it raises afterwards is
 /// conditional, on `SX_NOLONGJMP`. So the three answers differ in what the
 /// caller does next, not in what the user saw.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ExtentRead {
     /// The read found the `)` where the stored word says it is, so the body is
     /// the body and the rest of the word is the word's.
@@ -1717,11 +1717,18 @@ enum ExtentRead {
     /// substitution never runs and the enclosing command is abandoned.
     Aborted,
     /// It did not parse, but the jump was suppressed (a prompt expansion), so
-    /// `command_substitute` still runs what the read handed back — the whole
-    /// remainder less one byte ([`Shell::failed_extent_body`]) — and the
-    /// caller's index is left at the end of the string
-    /// ([`Shell::extent_consumed`]).
-    Abandoned,
+    /// `command_substitute` still runs what the read handed back and the
+    /// caller's index is left where the read stopped. Both come out of
+    /// [`Shell::failed_extent_split`].
+    Abandoned {
+        /// The text `command_substitute` is handed: everything up to one byte
+        /// short of where the reader stopped.
+        body: Str,
+        /// The text after that, which the caller's scan resumes on. Empty
+        /// exactly when the read ran the string out — the only case in which
+        /// the enclosing `${ … }` is left with no `}` to find.
+        rest: Str,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25972,8 +25979,8 @@ impl Shell {
     /// ```
     ///
     /// So the operand never expands and the failed body is never *run* — unlike
-    /// at the string level, where the same failure runs the remainder less a byte
-    /// ([`Self::failed_extent_body`]). Nothing between the braces happens at all:
+    /// at the string level, where the same failure runs what it read less a byte
+    /// ([`Self::failed_extent_split`]). Nothing between the braces happens at all:
     /// measured against bash 5.2.37, `A${y:-$(echo in >&2)p$(fi)q}B` prints no
     /// `in`, while a substitution *before* the brace still runs.
     ///
@@ -26010,7 +26017,20 @@ impl Shell {
             // The jump stands, so the enclosing command is abandoned before
             // the brace is ever asked to close.
             ExtentRead::Aborted => true,
-            ExtentRead::Abandoned => {
+            // A read that stopped part way down its text left `si` in the
+            // middle of the string, so the brace scan simply carries on from
+            // there — and finds the `}` the lexer found, since that is what
+            // counting brackets from a point before it does. Nothing is
+            // consumed and there is no `bad substitution`: the brace closes and
+            // expands as it stands. Measured, `y=Y; A${y:-p$(fi⏎q)r}B` reports
+            // once, from this scan, and still expands to `AYB`.
+            //
+            // An operand that is actually *used* is read again — twice more,
+            // in fact — and osh does not reproduce that yet; see
+            // TD-OILS-A-BRACE-OPERAND-IS-SCANNED-AGAIN-BEFORE-IT-IS-EXPANDED
+            // in known-issues.md.
+            ExtentRead::Abandoned { rest, .. } if !rest.is_empty() => false,
+            ExtentRead::Abandoned { .. } => {
                 // The scan ran off the end of the string, which is both why
                 // the brace cannot close and why nothing after it is looked
                 // at — see [`Shell::extent_consumed`].
@@ -26046,13 +26066,13 @@ impl Shell {
                 continue;
             };
             let read = match body {
-                CmdSubBody::Parsed { src, close_line, tail, .. } => {
+                CmdSubBody::Parsed { src, tail, .. } => {
                     tail.as_ref().map_or(ExtentRead::Closed, |tail| {
-                        self.comsub_reparse_read(src, tail, *close_line, true)
+                        self.comsub_reparse_read(src, tail, true)
                     })
                 }
-                CmdSubBody::Unread { src, tail, close_line, closed } => {
-                    self.comsub_reparse_read(src, tail, *close_line, *closed)
+                CmdSubBody::Unread { src, tail, closed, .. } => {
+                    self.comsub_reparse_read(src, tail, *closed)
                 }
                 // Neither of these two spellings is *parsed* by the scan that
                 // finds it. A backquote is `string_extract (string, &si, "`",
@@ -26113,10 +26133,17 @@ impl Shell {
         match self.extent_read_of(part) {
             ExtentRead::Closed => false,
             ExtentRead::Aborted => true,
-            ExtentRead::Abandoned => {
+            ExtentRead::Abandoned { .. } => {
                 // The read swallowed the rest of the string, so nothing after
                 // the `$((` is looked at either — see
                 // [`Shell::extent_consumed`].
+                //
+                // A read that stopped part way down leaves the paren count to
+                // carry on from there, which is a different ending — measured,
+                // `A$((1+$(fi⏎echo x⏎)))B` gives `[A)B]` where the one-line
+                // shape gives `[A]`. Not reproduced yet; see
+                // TD-OILS-AN-ARITHMETIC-EXTENT-CARRIES-ON-COUNTING-AFTER-A-FAILED-READ
+                // in known-issues.md.
                 self.extent_consumed = true;
                 true
             }
@@ -29263,7 +29290,7 @@ impl Shell {
 
     fn command_sub_body_inner(&mut self, body: &CmdSubBody) -> Str {
         match body {
-            CmdSubBody::Parsed { prog, src, close_line, tail } => {
+            CmdSubBody::Parsed { prog, src, tail, .. } => {
                 // bash reads a `$( … )` body through the parser *twice*, and the
                 // second read is over the re-print rather than the source:
                 // `expand_word_internal` reaches `extract_command_subst`, which
@@ -29276,7 +29303,7 @@ impl Shell {
                 // there is no second one either — see
                 // [`crate::ast::CmdSubBody::Parsed::tail`].
                 let read = tail.as_ref().map_or(ExtentRead::Closed, |tail| {
-                    self.comsub_reparse_read(src, tail, *close_line, true)
+                    self.comsub_reparse_read(src, tail, true)
                 });
                 match read {
                     ExtentRead::Closed => {}
@@ -29285,13 +29312,8 @@ impl Shell {
                     // re-print instead of the source. bash runs the identical
                     // `xparse_dolparen`, so a failed read here is abandoned the
                     // identical way.
-                    ExtentRead::Abandoned => {
-                        let tail = tail.as_deref().unwrap_or_default();
-                        let body = Self::failed_extent_body(src, true, tail);
-                        self.extent_consumed = true;
-                        let map = LineMap::Offset(self.source_line().saturating_sub(1));
-                        let path = self.comsub_text_read_file(&body, &map);
-                        return self.command_sub(&body, &map, path);
+                    ExtentRead::Abandoned { body, rest } => {
+                        return self.run_abandoned_extent(&body, &rest);
                     }
                 }
                 // Every body is numbered from the *shell's* current line — see
@@ -29316,14 +29338,14 @@ impl Shell {
                 let path = self.comsub_read_file(prog);
                 self.command_sub(src, &map, path)
             }
-            CmdSubBody::Unread { src, tail, close_line, closed } => {
+            CmdSubBody::Unread { src, tail, closed, .. } => {
                 // No first read to re-print, but the *second* one happens all
                 // the same: `expand_word_internal` reaches
                 // `extract_command_subst`, which runs `xparse_dolparen` over the
                 // source to find the `)`. So a body that will not parse fails
                 // exactly where a re-print that will not parse fails — see
                 // [`crate::ast::CmdSubBody::Unread`].
-                match self.comsub_reparse_read(src, tail, *close_line, *closed) {
+                match self.comsub_reparse_read(src, tail, *closed) {
                     ExtentRead::Closed => {}
                     ExtentRead::Aborted => return Str::new(),
                     // The read gave up but the jump was suppressed, so bash
@@ -29331,12 +29353,8 @@ impl Shell {
                     // caller's index at the end of the string. A body with no
                     // `)` is only ever this case — that read cannot succeed —
                     // which is why it needs no branch of its own.
-                    ExtentRead::Abandoned => {
-                        let body = Self::failed_extent_body(src, *closed, tail);
-                        self.extent_consumed = true;
-                        let map = LineMap::Offset(self.source_line().saturating_sub(1));
-                        let path = self.comsub_text_read_file(&body, &map);
-                        return self.command_sub(&body, &map, path);
+                    ExtentRead::Abandoned { body, rest } => {
+                        return self.run_abandoned_extent(&body, &rest);
                     }
                 }
                 // The body is numbered from the *shell's* current line, not from
@@ -29369,40 +29387,113 @@ impl Shell {
         }
     }
 
-    /// The text a `$( … )` whose extent read **failed** actually runs, on the one
-    /// path that gets that far — a prompt expansion, where the jump is
-    /// suppressed.
+    /// The text a `$( … )` whose extent read **failed** actually runs, and the
+    /// text after it the caller's scan resumes on — on the one path that gets
+    /// that far, a prompt expansion, where the jump is suppressed.
     ///
-    /// `xparse_dolparen` reports where its read stopped and then hands the
-    /// caller everything up to one byte short of it:
+    /// `xparse_dolparen` reads its own reader's position back out and derives
+    /// both from it:
     ///
     /// ```c
     ///   if (ep[-1] != ')')
     ///     { while (ep > ostring && ep[-1] == '\n') ep--; }
     ///   nc = ep - ostring;
+    ///   *indp = ep - base - 1;
     ///   ret = (nc == 0) ? "" : substring (ostring, 0, nc - 1);   /* parse.y:4348-4376 */
     /// ```
     ///
-    /// The `nc - 1` is there to drop the `)` a *successful* read ends on. A
-    /// failed one stopped at the end of the string instead, so it drops a real
-    /// character — and `ostring` is the whole remainder after the `$(`, not the
-    /// body, because that is what `extract_command_subst` was handed. Hence the
-    /// `)` and the `tail`: measured against bash 5.2.37, `d='A$(fi)B'` runs
-    /// `fi)` and `g='A$(fi)B$(echo hi)C'` runs `fi)B$(echo hi)`.
+    /// `ostring` is the whole remainder after the `$(`, not the body, because
+    /// that is what `extract_command_subst` was handed — hence the `)` and the
+    /// `tail`: measured against bash 5.2.37, `d='A$(fi)B'` runs `fi)` and
+    /// `g='A$(fi)B$(echo hi)C'` runs `fi)B$(echo hi)`.
     ///
-    /// The newline strip is guarded on `ep[-1] != ')'`, but the guard cannot
-    /// change the answer: if the last byte is a `)` there are no trailing
-    /// newlines to strip, so taking the last non-newline either way is the same
-    /// text.
-    fn failed_extent_body(src: BStr<'_>, closed: bool, tail: BStr<'_>) -> Str {
-        let mut s = src.to_vec();
-        if closed {
-            s.push(b')');
+    /// `ep` is **not** the end of that text unless the read really ran it out.
+    /// bash's string reader works a line at a time, so a failure met part way
+    /// down stops at the end of *its own* line — see
+    /// [`crate::parser::ComsubReprintError::stop_line`], which is that line's
+    /// number. `a='A$(fi⏎echo x⏎)B'` runs `f` and leaves `⏎echo x⏎)B` to be
+    /// expanded where `a='A$(fi)B'` runs `fi)` and leaves nothing.
+    ///
+    /// The `nc - 1` is there to drop the `)` a *successful* read ends on; a
+    /// failed one drops a real character instead. The newline strip is guarded
+    /// on `ep[-1] != ')'`, but the guard cannot change the answer: a `)` there
+    /// has no trailing newlines behind it to strip.
+    fn failed_extent_split(
+        src: BStr<'_>,
+        closed: bool,
+        tail: BStr<'_>,
+        stop_line: u32,
+    ) -> (Str, Str) {
+        let mut s = Self::extent_composite(src, closed, tail);
+        let mut ep = Self::reader_stop(&s, stop_line);
+        while ep > 0 && s.get(ep.saturating_sub(1)) == Some(&b'\n') {
+            ep = ep.saturating_sub(1);
         }
-        s.extend_from_slice(tail);
-        let end = s.iter().rposition(|&b| b != b'\n').map_or(0, |i| i.saturating_add(1));
-        s.truncate(end.saturating_sub(1));
-        s
+        let rest = s.get(ep..).unwrap_or_default().to_vec();
+        s.truncate(ep.saturating_sub(1));
+        (s, rest)
+    }
+
+    /// The ending a failed extent read gets where the jump was suppressed: bash
+    /// runs what the read handed back, and then carries on expanding the string
+    /// from where the read stopped.
+    ///
+    /// The two are one `expand_word_internal` walk, so the text after the read
+    /// is *expanded* and not copied — measured, `a='A$(fi⏎$y⏎)B'` with `y=Y`
+    /// gives `A⏎Y⏎)B` — and it goes on being read as the string it is, so a
+    /// `$( … )` in it is a substitution of its own that may fail the same way.
+    /// It is re-lexed for the reason [`Shell::prompt_expand`] lexes a prompt:
+    /// `Q_DOUBLE_QUOTES` is the quoting in force either way, and none of this
+    /// text was read by a parser.
+    ///
+    /// The caller's walk over the word's *parts* is over regardless
+    /// ([`Shell::extent_consumed`]) — `sindex` is past all of them now, and
+    /// whatever they held is text this remainder already covers.
+    fn run_abandoned_extent(&mut self, body: BStr<'_>, rest: BStr<'_>) -> Str {
+        self.extent_consumed = true;
+        let map = LineMap::Offset(self.source_line().saturating_sub(1));
+        let path = self.comsub_text_read_file(body, &map);
+        let out = self.command_sub(body, &map, path);
+        let rest = self.expand_extent_rest(rest);
+        bfmt![&out, &rest]
+    }
+
+    /// Expand the text a failed extent read left behind. See
+    /// [`Shell::run_abandoned_extent`].
+    fn expand_extent_rest(&mut self, rest: BStr<'_>) -> Str {
+        if rest.is_empty() {
+            return Str::new();
+        }
+        // A remainder that will not lex is not a second diagnostic: bash is
+        // reading it with the same scanner that produced it, so this can only be
+        // a shape osh's lexer is stricter about. Keep the text.
+        let Ok(word) = crate::parser::dquote_word_from_source(rest, self.parse_opts()) else {
+            return rest.to_vec();
+        };
+        // This walk owns its own `sindex`, so a read that gives up *inside* the
+        // remainder ends the remainder and not the caller — which has already
+        // ended anyway.
+        let saved = std::mem::replace(&mut self.extent_consumed, false);
+        let out = self.expand_double_quoted(&word.parts);
+        self.extent_consumed = saved;
+        out
+    }
+
+    /// Where a reader that stopped on line `stop_line` of `s` left its pointer:
+    /// just past that line's newline, or the end of `s` when there is none —
+    /// which is also the answer for [`u32::MAX`], the "ran the text out" line.
+    fn reader_stop(s: BStr<'_>, stop_line: u32) -> usize {
+        let mut seen = 0u32;
+        for (i, &b) in s.iter().enumerate() {
+            if b != b'\n' {
+                continue;
+            }
+            seen = seen.saturating_add(1);
+            if seen >= stop_line {
+                return i.saturating_add(1);
+            }
+        }
+        s.len()
     }
 
     /// Run bash's `xparse_dolparen` read over a `$( … )` body and, if it does
@@ -29417,10 +29508,9 @@ impl Shell {
         &mut self,
         src: BStr<'_>,
         tail: BStr<'_>,
-        close_line: u32,
         closed: bool,
     ) -> ExtentRead {
-        let Some((err, nested)) = self.comsub_reparse_error(src, tail, close_line, closed) else {
+        let Some((err, nested, stop_line)) = self.comsub_reparse_error(src, tail, closed) else {
             return ExtentRead::Closed;
         };
         self.berrln(&err);
@@ -29440,7 +29530,8 @@ impl Shell {
         // second time in the child and reports it a second time. See
         // [`Shell::prompt_expanding`].
         if self.prompt_expanding {
-            return ExtentRead::Abandoned;
+            let (body, rest) = Self::failed_extent_split(src, closed, tail, stop_line);
+            return ExtentRead::Abandoned { body, rest };
         }
         if nested {
             // A `$( … )` *inside* the text that will not parse is
@@ -29532,12 +29623,11 @@ impl Shell {
         &mut self,
         src: BStr<'_>,
         tail: BStr<'_>,
-        close_line: u32,
         closed: bool,
-    ) -> Option<(Str, bool)> {
+    ) -> Option<(Str, bool, u32)> {
         let opts = self.parse_opts();
         let fail = if closed {
-            crate::parser::comsub_reprint_error(src, tail, close_line, opts)?
+            crate::parser::comsub_reprint_error(src, tail, opts)?
         } else {
             crate::parser::comsub_unclosed_error(src, opts)
         };
@@ -29553,25 +29643,33 @@ impl Shell {
         self.input_names.pop();
         let mut out = bfmt![&prefix, fail.err.msg()];
         if fail.echo {
-            // `print_offending_line` echoes `shell_input_line`, which for this
-            // read is the line of `src`+`)`+`tail` the failure was found on —
-            // and that is the last line of `src`, since every newline of `src`
-            // is consumed before the `)` and none of `tail`'s are.
+            // `print_offending_line` echoes `shell_input_line`, which holds the
+            // one line of the read's text the failure was found on — and the
+            // read's text is `src`, then the `)` it was told to stop at, then
+            // `tail`. A body with no `)` has no `tail` to run into either, so
+            // the composite is `src` alone.
             //
-            // A body with no `)` has no `tail` to run into either, so what is
-            // echoed is simply the line of `src` the failure was found on, which
-            // `line_off` numbers from 1.
-            let line = if closed {
-                let last = src.rsplit(|&b| b == b'\n').next().unwrap_or_default();
-                let first = tail.split(|&b| b == b'\n').next().unwrap_or_default();
-                bfmt![last, b")", first]
-            } else {
-                let nth = usize::try_from(fail.line_off).unwrap_or(usize::MAX).saturating_sub(1);
-                src.split(|&b| b == b'\n').nth(nth).unwrap_or_default().to_vec()
-            };
+            // That the `)` and the first line of `tail` come out on the same
+            // line as the last line of `src` is the ordinary case rather than a
+            // rule of its own: a re-print's failure is normally at the `)`.
+            let comp = Self::extent_composite(src, closed, tail);
+            let nth = usize::try_from(fail.line_off).unwrap_or(usize::MAX).saturating_sub(1);
+            let line = comp.split(|&b| b == b'\n').nth(nth).unwrap_or_default().to_vec();
             out = bfmt![out, b"\n", &prefix, b"`", &line, b"'"];
         }
-        Some((self.errexit_first_line(out), fail.fatal))
+        Some((self.errexit_first_line(out), fail.fatal, fail.stop_line))
+    }
+
+    /// The text `xparse_dolparen` is handed: the body, the `)` it was told to
+    /// stop at, and the rest of the enclosing word after it. See
+    /// [`Shell::failed_extent_split`].
+    fn extent_composite(src: BStr<'_>, closed: bool, tail: BStr<'_>) -> Str {
+        let mut s = src.to_vec();
+        if closed {
+            s.push(b')');
+        }
+        s.extend_from_slice(tail);
+        s
     }
 
     /// The diagnostic bash raises when a **compound array assignment**'s value
@@ -30830,7 +30928,7 @@ impl Shell {
                         // The same hand-off parses the body before running it,
                         // and gives up the whole expansion when it will not
                         // parse — see [`Shell::arith_dolparen`].
-                        let Some(sub) = self.arith_dolparen(&rest, &inner) else {
+                        let Some((sub, stop)) = self.arith_dolparen(&rest, &inner) else {
                             break;
                         };
                         out.extend_from_slice(bytes::trim(&sub));
@@ -30840,7 +30938,18 @@ impl Shell {
                         // arithmetic string can hold a non-ASCII value spliced
                         // in by an earlier pass, so a byte count would land
                         // short and re-scan the tail of the body.
-                        i = i + 2 + past;
+                        //
+                        // A read that gave up did not stop at the extent's end,
+                        // so it answers with its own resume point instead, in
+                        // bytes of `rest`; recount it in characters for the same
+                        // reason.
+                        i = i + 2
+                            + match stop {
+                                Some(off) => {
+                                    bytes::chars(rest.get(..off).unwrap_or_default()).count()
+                                }
+                                None => past,
+                            };
                         continue;
                     }
                     out.push(b'$');
@@ -31015,6 +31124,19 @@ impl Shell {
     /// substituted text, or `None` when the body did not parse and the caller
     /// must abandon the expansion.
     ///
+    /// The second half of the answer is where the caller's scan resumes, as a
+    /// byte offset into `rest`, and is `None` for every read that closed —
+    /// there the extent's own end is the resume point. It is `Some` only for a
+    /// read that gave up under a suppressed jump, which leaves `*indp` wherever
+    /// the reader stopped rather than at a `)`:
+    ///
+    /// ```c
+    ///     nc = ep - ostring;
+    ///     *indp = ep - base - 1;          /* parse.y:4341-4342 */
+    /// ```
+    ///
+    /// The one `ep` gives both halves — see [`Self::failed_extent_split`].
+    ///
     /// The distinction from an ordinary `$( … )` is the whole of this function.
     /// One **written** in source is parsed at parse time and run in a subshell
     /// that re-reads its body a command at a time, so a syntax error half way
@@ -31024,7 +31146,11 @@ impl Shell {
     /// parses the whole body **here, in the parent**, before
     /// `command_substitute` forks. Measured, that is visible:
     /// `$(( '$(echo RAN >&2; fi)' + 0 ))` prints no `RAN`.
-    fn arith_dolparen(&mut self, rest: BStr<'_>, body: BStr<'_>) -> Option<Str> {
+    fn arith_dolparen(
+        &mut self,
+        rest: BStr<'_>,
+        body: BStr<'_>,
+    ) -> Option<(Str, Option<usize>)> {
         // Every diagnostic from this parse is one line past the body's true
         // line. `parse_string` (builtins/evalstring.c:627) opens the string with
         // `push_stream (0)` — the 0 meaning "do *not* reset the line number" —
@@ -31069,11 +31195,37 @@ impl Shell {
                 // `$(( '$(fi)' + 1 ))` echoes ``  `fi)' + 1 ' ``. `body` is a
                 // prefix of `rest` up to that `)`, so blaming the same line of
                 // `rest` is the whole of the difference.
-                Err(e) => break Some(self.format_parse_error(&e, rest, &map)),
+                Err(e) => {
+                    // And that same line is where the reader stopped, which is
+                    // what a suppressed jump leaves `*indp` on. bash's string
+                    // reader fills `shell_input_line` one line at a time,
+                    // charging `line_number++` for each (parse.y:2361), so an
+                    // error reported *near* a token is reported at — and echoes
+                    // — the line the reader is holding, and `parse_string`
+                    // leaves `ep` just past that line's newline.
+                    //
+                    // A diagnostic with no echo is not one of those. An
+                    // `unexpected EOF while looking for matching …` is blamed on
+                    // the line the construct *opened*, far behind a reader that
+                    // really did run the string out; `u32::MAX` asks
+                    // [`Self::reader_stop`] for the end rather than for that
+                    // line. The test is the one `format_parse_error` already
+                    // uses to decide whether there is a source line to echo.
+                    let near = e
+                        .msgs
+                        .iter()
+                        .any(|m| bytes::contains(m, b"syntax error near "));
+                    let stop = e
+                        .line
+                        .filter(|_| near)
+                        .and_then(|l| map.unmap(l))
+                        .unwrap_or(u32::MAX);
+                    break Some((self.format_parse_error(&e, rest, &map), stop));
+                }
             }
         };
         self.input_names.pop();
-        if let Some(msg) = failed {
+        if let Some((msg, stop_line)) = failed {
             self.berrln(&msg);
             // …unless the jump is suppressed, which is the one thing
             // `no_longjmp_on_fatal_error` reaches here:
@@ -31084,22 +31236,29 @@ impl Shell {
             // So a prompt expansion prints the diagnostic and carries straight
             // on to `command_substitute` — the same ending
             // [`Shell::comsub_reparse_read`] gives, and for the same reason.
-            // What that runs is the whole remainder less a byte, over `rest`
-            // rather than the extent, because `rest` is what `parse_string` was
-            // handed: measured, `v='A$[1+$(fi)+3]B'; echo "${v@P}"` names
-            // `` `fi)+3' `` on the parse and runs `fi)+` in the child. And the
-            // read left the caller's index at the end of the string, so the rest
-            // of the *arithmetic* is consumed — see [`Shell::extent_consumed`],
-            // which [`Shell::expand_arith_params_inner`] answers.
+            // What that runs is the remainder up to where the reader stopped,
+            // less a byte, over `rest` rather than the extent — because `rest`
+            // is what `parse_string` was handed: measured,
+            // `v='A$[1+$(fi)+3]B'; echo "${v@P}"` names `` `fi)+3' `` on the
+            // parse and runs `fi)+` in the child.
+            //
+            // Whatever is left after that is the *expression's* again. The read
+            // moved `sindex` to `ep` and no further, and `expand_arith_string`
+            // is one `expand_word_internal` over the expression, so the walk
+            // simply carries on from there — a leftover is scanned as
+            // arithmetic, not pasted in as text. For a read that ran the string
+            // out that resume point is the end and the walk is over, which is
+            // the shape every one-line body has: `A$[1+$(fi)]B` evaluates `1+`
+            // and complains of a missing operand.
             //
             // errexit is asked first because it does not go through the jump at
             // all: `parser_error` ends with a direct `exit_shell`, before the
             // guard above is reached. Measured, `set -e` on the same line prints
             // the first diagnostic and nothing else.
             if self.prompt_expanding && !self.errexit {
-                self.extent_consumed = true;
-                let body = Self::failed_extent_body(rest, false, b"");
-                return Some(self.run_command_sub_text(&body));
+                let (body, leftover) = Self::failed_extent_split(rest, false, b"", stop_line);
+                let stop = rest.len().saturating_sub(leftover.len());
+                return Some((self.run_command_sub_text(&body), Some(stop)));
             }
             // Without errexit the failure is `jump_to_top_level (DISCARD)`
             // (parse.y:4330, on `parse_string`'s `-DISCARD`): the rest of the
@@ -31127,7 +31286,7 @@ impl Shell {
             }
             return None;
         }
-        Some(self.run_command_sub_text(body))
+        Some((self.run_command_sub_text(body), None))
     }
 
     /// The parameter a bare `$…` in an arithmetic expression names, reading

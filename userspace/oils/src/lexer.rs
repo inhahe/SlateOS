@@ -4275,6 +4275,13 @@ impl Lexer {
     /// that single byte, as bash does, and the word keeps it — `$'\xa9'` is one
     /// byte `a9`, not the two of U+00A9 and not the three of U+FFFD.
     fn read_ansi_c_quote(&mut self) -> Result<Str, LexError> {
+        Ok(crate::escape::ansi_c_unescape(&self.read_ansi_c_source()?))
+    }
+
+    /// [`Lexer::read_ansi_c_quote`]'s scan alone: the run's *undecoded* bytes,
+    /// for the one caller that needs the translation's length as well as its
+    /// text (the bare splice of `Lexer::read_dollar_brace_body`).
+    fn read_ansi_c_source(&mut self) -> Result<Str, LexError> {
         let open = self.cur_line();
         let mut raw = Str::new();
         loop {
@@ -4282,7 +4289,7 @@ impl Lexer {
                 return Err(eof_matching('\'').at(open));
             };
             if c == '\'' {
-                return Ok(crate::escape::ansi_c_unescape(&raw));
+                return Ok(raw);
             }
             c.push_to(&mut raw);
             if c == '\\' {
@@ -5492,14 +5499,25 @@ impl Lexer {
                         // the machine over it before reading the run.
                         state = state.step(b'\'', true);
                         self.pos += 1;
-                        let s = self.read_ansi_c_quote()?;
+                        let s = crate::escape::ansi_c_translate(&self.read_ansi_c_source()?);
                         if in_dquote && state != crate::wordscan::DolBrace::Quote {
                             // Text this scan will not read back — see
                             // [`Lexer::bare_splice`] and
                             // [`crate::wordscan::expansion_body_len`].
+                            //
+                            // `nestlen = ttranslen` (parse.y:3892), so a NUL the
+                            // translation produced is *kept*: this row is the one
+                            // place a shell word carries one, and the word it
+                            // lands in ends there rather than the translation. See
+                            // `parser::word_cut_at_nul`.
                             self.bare_splice = true;
                             raw.extend_from_slice(&s);
                         } else {
+                            // `nestlen = strlen (nestret)` (parse.y:3870, 3886)
+                            // after `sh_single_quote` took the translation as a
+                            // `char *`, so here the *translation* is what a NUL
+                            // ends.
+                            let s = crate::escape::cut_at_nul(s);
                             raw.extend_from_slice(&crate::escape::sh_single_quote(&s));
                         }
                         continue;

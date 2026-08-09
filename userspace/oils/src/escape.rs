@@ -284,8 +284,16 @@ pub(crate) fn decode_escape(chars: &mut Cursor<'_>, out: &mut Str, mode: EscapeM
     Decoded::default()
 }
 
-/// ANSI-C (`$'…'` / `${v@E}`) backslash-escape expansion.
-pub(crate) fn ansi_c_unescape(s: &[u8]) -> Str {
+/// ANSI-C (`$'…'` / `${v@E}`) backslash-escape expansion, as bash's `ansiexpand`
+/// leaves it — **with** any NUL the escapes produced.
+///
+/// bash's translation is a `(char *, size_t)` pair, and which of the two the
+/// caller keeps is the whole of the difference between this and
+/// [`ansi_c_unescape`]: `ansiexpand` reports `ttranslen`, and a caller that
+/// hands the result on as a C string loses everything past the first NUL while
+/// one that copies `ttranslen` bytes does not. Both callers exist
+/// (parse.y:3870 and 3886 vs 3892), so both answers are needed.
+pub(crate) fn ansi_c_translate(s: &[u8]) -> Str {
     let mut out = Str::new();
     let mut chars = cursor(s);
     while let Some(c) = chars.next() {
@@ -295,14 +303,26 @@ pub(crate) fn ansi_c_unescape(s: &[u8]) -> Str {
         }
         decode_escape(&mut chars, &mut out, EscapeMode::AnsiC);
     }
-    // A NUL byte terminates the ANSI-C string (a shell word cannot hold a NUL),
-    // so bytes produced after the first NUL are dropped — `$'a\0b'` is just `a`.
-    // This is specific to ANSI-C quoting: `printf %b '\0'` really does write a
-    // NUL to stdout.
-    if let Some(nul) = out.iter().position(|&b| b == 0) {
-        out.truncate(nul);
-    }
     out
+}
+
+/// [`ansi_c_translate`] cut at the first NUL — the answer wherever the
+/// translation is handed on as a C string, which is everywhere but the bare
+/// splice of parse.y:3892.
+///
+/// `$'a\0b'` is the one-character word `a`: `sh_single_quote` and `make_word`
+/// alike take a `char *`. This is specific to ANSI-C *quoting*; `printf %b '\0'`
+/// really does write a NUL to stdout.
+pub(crate) fn ansi_c_unescape(s: &[u8]) -> Str {
+    cut_at_nul(ansi_c_translate(s))
+}
+
+/// `s` up to its first NUL — C's idea of how long a string is.
+pub(crate) fn cut_at_nul(mut s: Str) -> Str {
+    if let Some(nul) = s.iter().position(|&b| b == 0) {
+        s.truncate(nul);
+    }
+    s
 }
 
 /// The result of decoding one `echo`-family string (`printf %b` or `echo -e`).
@@ -343,7 +363,7 @@ pub(crate) fn unescape_echo(s: &[u8], mode: EscapeMode) -> EchoUnescaped {
 
 #[cfg(test)]
 mod tests {
-    use super::{EscapeMode, ansi_c_unescape, sh_single_quote, unescape_echo};
+    use super::{EscapeMode, ansi_c_translate, ansi_c_unescape, sh_single_quote, unescape_echo};
     use crate::bytes::Str;
 
     fn hex(s: &[u8]) -> String {
@@ -396,6 +416,31 @@ mod tests {
         assert_eq!(hex(&ansi_c_unescape(b"\\xff\\377")), "ff ff");
         // A NUL anywhere truncates the rest of the string.
         assert_eq!(hex(&ansi_c_unescape(b"a\\0b")), "61");
+    }
+
+    /// bash's `ansiexpand` returns a pointer *and* a length, and the two answers
+    /// differ exactly when the translation contains a NUL. Every splice but the
+    /// bare one of parse.y:3892 keeps the pointer only.
+    #[test]
+    fn the_translation_keeps_a_nul_that_the_c_string_loses() {
+        // No NUL: the two are the same string, so nothing downstream can tell
+        // which one it was handed.
+        for src in [&b"abc"[..], b"a\\tb", b"\\xff\\377", b"a\xffb"] {
+            assert_eq!(ansi_c_translate(src), ansi_c_unescape(src));
+        }
+        // With one, the length-carrying answer keeps everything.
+        assert_eq!(hex(&ansi_c_translate(b"a\\0b")), "61 00 62");
+        assert_eq!(hex(&ansi_c_unescape(b"a\\0b")), "61");
+        // `\400` masks to 8 bits, so it is a NUL like any other, and `\u0000`
+        // is one too even though it goes through the UTF-8 encoder.
+        assert_eq!(hex(&ansi_c_translate(b"a\\400b")), "61 00 62");
+        assert_eq!(hex(&ansi_c_translate(b"a\\u0000b")), "61 00 62");
+        assert_eq!(hex(&ansi_c_translate(b"a\\x00b")), "61 00 62");
+        // A leading NUL leaves the C string empty but not the translation.
+        assert_eq!(hex(&ansi_c_translate(b"\\0ab")), "00 61 62");
+        assert_eq!(hex(&ansi_c_unescape(b"\\0ab")), "");
+        // Only the *first* one is a cut, and both survive the length answer.
+        assert_eq!(hex(&ansi_c_translate(b"a\\0b\\0c")), "61 00 62 00 63");
     }
 
     #[test]

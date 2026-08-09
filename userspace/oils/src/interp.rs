@@ -13714,14 +13714,28 @@ impl Shell {
         // (measured), because `assign_compound_array_list` is not reached until
         // the variable itself has been found.
         if let AssignRhs::Array(items) = &a.value
-            && let Some(err) = self.array_assign_reparse_error(items)
+            && let Some((err, fatal)) = self.array_assign_reparse_error(items)
         {
             self.berrln(&err);
-            // `jump_to_top_level (FORCE_EOF)` — see [`Self::force_eof_status`]
-            // for the status, which already accounts for the interception a
-            // `( … )` around this performs, hence `demote: false` here.
-            let status = self.force_eof_status();
-            self.unbound_error = Some(FatalAbort { status, demote: false });
+            if fatal {
+                // `jump_to_top_level (FORCE_EOF)` — see
+                // [`Self::force_eof_status`] for the status, which already
+                // accounts for the interception a `( … )` around this performs,
+                // hence `demote: false` here.
+                let status = self.force_eof_status();
+                self.unbound_error = Some(FatalAbort { status, demote: false });
+            } else if self.errexit {
+                // `parser_error` (error.c:386) ends with a direct
+                // `exit_shell (last_command_exit_value = 2)` under errexit,
+                // before the class of the failure has been decided at all — the
+                // same shape [`Self::comsub_reparse_error`]'s caller handles.
+                self.unbound_error = Some(FatalAbort { status: 2, demote: false });
+            } else {
+                // `set_exit_status (EXECUTION_FAILURE); … jump_to_top_level
+                // (DISCARD)` (parse.y:6472-6480): this parse unit is abandoned
+                // with `$?` at 1, and the reader carries on with the next.
+                self.arm_discard(1);
+            }
             return false;
         }
         match &a.value {
@@ -25970,6 +25984,20 @@ impl Shell {
                 self.join_derived(&names, *star)
             }
             WordPart::BadSubst(raw) => self.bad_substitution(raw),
+            // A word a NUL cut short is text bash then expands. Where the cut
+            // leaves the `${ … }` it landed in *open* — the usual case — the
+            // extent scan [`Shell::begin_word`] ran over this same text has
+            // already reported the unclosed `${` and armed the DISCARD that
+            // throws the command away, so nothing downstream can observe what is
+            // returned here; the text is returned rather than nothing so that it
+            // is the *word* that is wrong and not this part's contribution to
+            // it. Where a spliced `}` closed the expansion *before* the NUL the
+            // text is a well-formed word, and returning it literally is wrong —
+            // it wants the re-read of [`Shell::reread_word`], which in turn wants
+            // a reader with `expand_word_internal`'s tolerance for the
+            // unterminated `"` the cut left. See `known-issues.md`
+            // TD-OILS-A-CUT-WORD-IS-EXPANDED-AS-LITERAL-TEXT.
+            WordPart::CutAtNul(raw) => raw.clone(),
             // Literal/quoted handled by callers.
             WordPart::Literal(s) | WordPart::SingleQuoted { text: s, .. } => s.clone(),
             WordPart::DoubleQuoted(parts) => self.expand_double_quoted(parts),
@@ -28548,32 +28576,37 @@ impl Shell {
     }
 
     /// The diagnostic bash raises when a `$( … )` body's *re-print* does not
-    /// parse back — or `None`, which is the answer for every body but two
+    /// parse back — or `None`, which is the answer for all but a handful of
     /// shapes. The flag says the failure came from a `$( … )` *nested* in the
     /// re-print rather than from the re-print itself, which is what decides how
-    /// far the abort travels; see [`crate::parser::parse_cmdsub_body_unmarked`].
+    /// far the abort travels; see [`crate::parser::comsub_reprint_error`], which
+    /// owns the reading and the three shapes the failure can take.
     ///
     /// bash's second read of the body (`xparse_dolparen`, subst.c:1290 and 1322)
     /// is handed the rest of the stored *word*, not the body alone, and reads it
     /// with `)` for `shell_eof_token`. So the string it parses is `src`, then the
     /// `)`, then `tail`; a body that parses stops at the `)` and leaves `tail` to
-    /// the word. Only a re-print that does *not* parse runs past it, and then the
-    /// `)` is the token bash reports against.
+    /// the word. Only a re-print that does *not* parse runs past it.
     ///
-    /// Two productions can produce such a re-print, because they are the two that
-    /// drop their own terminator: bash's grammar admits a bare prefix only as
-    /// `BANG list_terminator` (or `TIME` …), and the deparse of a lone `!` is `!`
-    /// with nothing after it. Appending the `)` yields `! )`, which is not a
-    /// list terminator — see `tests/corpus/prefix-bang-time.sh`.
+    /// Three kinds of re-print do not read back:
     ///
-    /// The two numbers in the message disagree on purpose, and both are measured
-    /// against bash 5.2.37:
+    /// * A body ending in a bare `!` or `time`, because those are the two
+    ///   productions that drop their own terminator: bash's grammar admits a bare
+    ///   prefix only as `BANG list_terminator` (or `TIME` …), and the deparse of a
+    ///   lone `!` is `!` with nothing after it. Appending the `)` yields `! )`,
+    ///   which is not a list terminator — see `tests/corpus/prefix-bang-time.sh`.
+    /// * A body a NUL cut short, which leaves an unclosed construct where the cut
+    ///   landed — see [`crate::ast::WordPart::CutAtNul`].
+    /// * A nested `$( … )` in either of those.
+    ///
+    /// This shell's part is only the two numbers, and both are measured against
+    /// bash 5.2.37:
     ///
     /// * The **reported line** counts from the *command's* line — `$LINENO`,
-    ///   which is bash's one shared `line_number` — plus the newlines the failed
-    ///   parse consumed, plus one. `parse_string` does not renumber (it calls
-    ///   `push_stream (0)`), so the counter simply runs on from where the
-    ///   executor left it.
+    ///   which is bash's one shared `line_number` — by
+    ///   [`crate::parser::ComsubReprintError::line_off`]. `parse_string` does not
+    ///   renumber (it calls `push_stream (0)`), so the counter simply runs on
+    ///   from where the executor left it.
     ///
     ///   That is usually indistinguishable from counting off the closing `)`,
     ///   because a simple command's line is stamped in
@@ -28589,7 +28622,8 @@ impl Shell {
     /// * The **echoed line** is the line the `)` is on, which is the *last* line
     ///   of `src` followed by the `)` and the *first* line of `tail` — that is
     ///   still what `shell_input_line` holds. `echo "a$(⏎!⏎)b⏎c"` reports line
-    ///   5 and echoes `` `! )b' ``.
+    ///   5 and echoes `` `! )b' ``. Only a diagnostic that names a *token* gets
+    ///   one; see [`crate::parser::ComsubReprintError::echo`].
     fn comsub_reparse_error(
         &mut self,
         src: BStr<'_>,
@@ -28597,15 +28631,8 @@ impl Shell {
         close_line: u32,
     ) -> Option<(Str, bool)> {
         let opts = self.parse_opts();
-        let e = crate::parser::parse_cmdsub_body_unmarked(src, close_line, opts).err()?;
-        let nl = |s: BStr<'_>| {
-            u32::try_from(s.iter().filter(|&&b| b == b'\n').count()).unwrap_or(u32::MAX)
-        };
-        // Every newline of `src` is consumed before the `)` that fails, and none
-        // of `tail`'s are — the parse never gets that far.
-        let line = self.current_line.saturating_add(nl(src)).saturating_add(1);
-        let last = src.rsplit(|&b| b == b'\n').next().unwrap_or_default();
-        let first = tail.split(|&b| b == b'\n').next().unwrap_or_default();
+        let fail = crate::parser::comsub_reprint_error(src, tail, close_line, opts)?;
+        let line = self.current_line.saturating_add(fail.line_off);
         // The body is its own input source for naming purposes, exactly as it is
         // when it *runs* — bash is inside a `parse_string (…, "command
         // substitution", …)` either way, so the prefix carries that name.
@@ -28615,13 +28642,23 @@ impl Shell {
         });
         let prefix = self.syntax_error_prefix(line);
         self.input_names.pop();
-        let out = bfmt![&prefix, e.msg(), b"\n", &prefix, b"`", last, b")", first, b"'"];
-        Some((self.errexit_first_line(out), e.fatal))
+        let mut out = bfmt![&prefix, fail.err.msg()];
+        if fail.echo {
+            // `print_offending_line` echoes `shell_input_line`, which for this
+            // read is the line of `src`+`)`+`tail` the failure was found on —
+            // and that is the last line of `src`, since every newline of `src`
+            // is consumed before the `)` and none of `tail`'s are.
+            let last = src.rsplit(|&b| b == b'\n').next().unwrap_or_default();
+            let first = tail.split(|&b| b == b'\n').next().unwrap_or_default();
+            out = bfmt![out, b"\n", &prefix, b"`", last, b")", first, b"'"];
+        }
+        Some((self.errexit_first_line(out), fail.fatal))
     }
 
     /// The diagnostic bash raises when a **compound array assignment**'s value
-    /// list will not parse back — or `None`, which is the answer for every list
-    /// but the two substitution shapes [`Shell::comsub_reparse_error`] names.
+    /// list will not read back, and whether it ends the shell — or `None`, which
+    /// is the answer for every list but the shapes
+    /// [`Shell::comsub_reparse_error`] names and a list a NUL cut short.
     ///
     /// A compound assignment does not reach the ordinary re-parse at all. bash
     /// keeps the whole literal as one string (`parse_compound_assignment` joins
@@ -28655,15 +28692,42 @@ impl Shell {
     ///   [`Shell::comsub_reparse_error`] already selects — so nothing after it
     ///   runs, where a scalar `v="p$(⏎!⏎)q"` only discards its own parse unit.
     ///
+    /// A listing a NUL cut short (see [`crate::ast::WordPart::CutAtNul`]) fails
+    /// the same read one stage earlier — in the tokenizer itself, on the
+    /// construct the cut left open — and that failure is *not* fatal. It is
+    /// `parse_matched_pair`'s own `parser_error` (parse.y:3711), which suppresses
+    /// the parser's follow-up with `PST_NOERROR`, so it prints alone with no
+    /// echoed line; `parse_string_to_word_list` then sets `$?` to 1 and raises
+    /// `jump_to_top_level (DISCARD)` (parse.y:6472-6480), costing one parse unit:
+    ///
+    /// ```text
+    /// a=("${x:-$'a\0b'}" tail)   →   array assign: line 1: unexpected EOF while looking for matching `}'
+    /// echo three                 →   three
+    /// ```
+    ///
     /// Backticks are not re-read here: bash's tokenizer takes a `` ` … ` `` body
     /// as a matched pair without parsing it, so `a=("p`` ` ``!`` ` ``q")` is fine.
     /// Neither is a `$( … )` a word *outside* a compound literal carries — that
     /// one is [`Shell::comsub_reparse_error`]'s, under its own name and line.
-    fn array_assign_reparse_error(&mut self, items: &[ArrayElem]) -> Option<Str> {
+    fn array_assign_reparse_error(&mut self, items: &[ArrayElem]) -> Option<(Str, bool)> {
         let opts = self.parse_opts();
-        // The cheap pass first: almost every list either has no substitution at
-        // all or has only ones that parse, and locating a substitution in the
-        // rendered listing costs a clone of the list.
+        let listing = crate::unparse::array_listing(items);
+        // The tokenizer runs over the whole listing before any word in it is
+        // handed back, so an unclosed construct in it is met first — and it
+        // swallows everything after itself, so no substitution beyond it is ever
+        // reached as one. (A substitution *before* it would be, which is the one
+        // ordering this does not reproduce; see `known-issues.md`
+        // TD-OILS-ARRAY-ASSIGN-REREAD-ORDER.)
+        if let Some(e) = crate::parser::word_list_lex_error(&listing, opts) {
+            let fatal = e.fatal;
+            let line = e.line.unwrap_or(1);
+            // No echoed line: this class is `parse_matched_pair`'s own message,
+            // printed under `PST_NOERROR` so the parser adds nothing.
+            return Some((self.array_assign_diag(line, &e.msg(), None), fatal));
+        }
+        // Then the substitutions, cheap pass first: almost every list either has
+        // no substitution at all or has only ones that parse, and locating a
+        // substitution in the rendered listing costs a clone of the list.
         let (k, e) = crate::unparse::array_listing_comsubs(items)
             .into_iter()
             .enumerate()
@@ -28679,14 +28743,24 @@ impl Shell {
         );
         let last = before.rsplit(|&b| b == b'\n').next().unwrap_or_default();
         let first = after.split(|&b| b == b'\n').next().unwrap_or_default();
+        let echo = bfmt![b"`", last, b")", first, b"'"];
+        Some((self.array_assign_diag(line, &e.msg(), Some(&echo)), true))
+    }
+
+    /// One `array assign` diagnostic, with `echo` printed under it when the
+    /// failure named a token. See [`Shell::array_assign_reparse_error`].
+    fn array_assign_diag(&mut self, line: u32, msg: BStr<'_>, echo: Option<BStr<'_>>) -> Str {
         self.input_names.push(InputSource {
             name: SRC_TOKEN_ARRAY_ASSIGN.as_bytes().to_vec(),
             nonint: true,
         });
         let prefix = self.syntax_error_prefix(line);
         self.input_names.pop();
-        let out = bfmt![&prefix, e.msg(), b"\n", &prefix, b"`", last, b")", first, b"'"];
-        Some(self.errexit_first_line(out))
+        let mut out = bfmt![&prefix, msg];
+        if let Some(echo) = echo {
+            out = bfmt![out, b"\n", &prefix, echo];
+        }
+        self.errexit_first_line(out)
     }
 
     /// Run a command substitution's body text, substituting what it wrote to

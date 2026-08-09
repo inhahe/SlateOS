@@ -2480,16 +2480,18 @@ Divergence 4 of the first table (`"${h[$'a]b']}"`) fell out of stage A on its ow
 Corpus case:
 `userspace/oils/tests/corpus/an-ansi-c-string-in-a-double-quoted-brace-body-is-spliced-bare.sh`.
 
-**Two rows are still open and are split out below**, because neither is about
-the re-quote decision:
-`TD-OILS-A-DOUBLE-QUOTE-IN-A-BARE-SPLICE-DOES-NOT-CLOSE-THE-ENCLOSING-RUN`
-(the `"` case, which needs a word reader modelling `expand_word_internal`'s
-tolerance) and
-`TD-OILS-A-NUL-IN-AN-ANSI-C-STRING-DOES-NOT-TRUNCATE-THE-TRANSLATION` (row 1 of
-the second table). The splitting shape above — `"$(echo ${x:-$'a\tb'})"` — is a
-third: bash keeps `P_DQUOTE` for a `${ }` in a `$( )` body enclosed by quotes
-because its `dstack` is never popped for the `(`; noted in a comment at
-`lexer.rs`'s `read_dollar_brace_body` and not yet modelled.
+**Two rows were split out below**, because neither is about the re-quote
+decision. `TD-OILS-A-NUL-IN-AN-ANSI-C-STRING-DOES-NOT-TRUNCATE-THE-TRANSLATION`
+(row 1 of the second table) is now fixed — and turned out to be a *word*-scoped
+cut at the token boundary rather than the splice-local truncation that entry
+predicted, which is why fixing it also pulled in the `$( … )` second read and the
+compound-array re-read.
+`TD-OILS-A-DOUBLE-QUOTE-IN-A-BARE-SPLICE-DOES-NOT-CLOSE-THE-ENCLOSING-RUN` is
+still open (the `"` case, which needs a word reader modelling
+`expand_word_internal`'s tolerance). The splitting shape above —
+`"$(echo ${x:-$'a\tb'})"` — is a third: bash keeps `P_DQUOTE` for a `${ }` in a
+`$( )` body enclosed by quotes because its `dstack` is never popped for the `(`;
+noted in a comment at `lexer.rs`'s `read_dollar_brace_body` and not yet modelled.
 
 ### TD-OILS-A-DOUBLE-QUOTE-IN-A-BARE-SPLICE-DOES-NOT-CLOSE-THE-ENCLOSING-RUN. `"${x:-$'a}b"c'}"` is `abc}` in bash — 2026-08-08 — OPEN
 
@@ -2542,27 +2544,200 @@ the parser's split is right for `}` and wrong for `"`; the corpus case
 `an-ansi-c-string-in-a-double-quoted-brace-body-is-spliced-bare.sh` deliberately
 exercises only the former.
 
-### TD-OILS-A-NUL-IN-AN-ANSI-C-STRING-DOES-NOT-TRUNCATE-THE-TRANSLATION. `"${x:-$'a\0b'}"` is a bad substitution in bash — 2026-08-08 — OPEN
+**Relationship to the NUL cut.** A spliced NUL is the *other* character the bare
+splice makes live, and it was fixed
+(`TD-OILS-A-NUL-IN-AN-ANSI-C-STRING-DOES-NOT-TRUNCATE-THE-TRANSLATION`) without
+needing that reader for the shapes where the cut leaves a construct **open** —
+there the word is doomed before any of the splitting/globbing questions rows 5
+and 6 turn on. Where the cut leaves the word's text **well-formed**, the same
+reader is needed, and that residue is
+`TD-OILS-A-CUT-WORD-IS-EXPANDED-AS-LITERAL-TEXT` below.
 
-**Where:** `userspace/oils/src/lexer.rs` — `read_dollar_brace_body`'s `$'…'` arm,
-and whatever `ansiexpand` equivalent it calls.
+### TD-OILS-A-NUL-IN-AN-ANSI-C-STRING-DOES-NOT-TRUNCATE-THE-TRANSLATION. `"${x:-$'a\0b'}"` is a bad substitution in bash — 2026-08-08 — ✅ FIXED 2026-08-08
+
+**Where:** `userspace/oils/src/escape.rs` (`ansi_c_translate` / `ansi_c_unescape`
+/ `cut_at_nul`), `userspace/oils/src/lexer.rs` (`read_ansi_c_source`, and
+`read_dollar_brace_body`'s bare-splice arm), `userspace/oils/src/parser.rs`
+(`segs_hold_a_nul`, `word_cut_at_nul`, `comsub_reprint_error`,
+`word_list_lex_error`), `userspace/oils/src/ast.rs` (`WordPart::CutAtNul`),
+`userspace/oils/src/interp.rs` (`comsub_reparse_error`,
+`array_assign_reparse_error`).
 
 **What.** Also split out of
 `TD-OILS-AN-ANSI-C-STRING-IS-NOT-REQUOTED-AFTER-A-BRACE-BODY-TRANSLATES-IT`.
-bash's `ansiexpand` yields a **C string**, so a `\0` in the source ends it: the
-translation spliced back is `a`, the `}` never arrives, and the expansion dies.
+bash's `ansiexpand` yields a `(char *, size_t)` pair, and which of the two a
+caller keeps is the whole story. Almost every caller keeps the pointer, so a
+`\0` in the source ends the *translation* and the word runs on unharmed. Exactly
+one keeps the length —
+
+```c
+      nestret = ansiexpand (…, &ttranslen);   /* parse.y:3890 */
+      …
+      nestlen = ttranslen;                    /* parse.y:3892 */
+```
+
+— the **bare** splice of a `$'…'` into a double-quoted `${ … }` body, row three
+of the sibling entry's table. That is the one path that puts a NUL in the token
+buffer, and `make_word` then copies the buffer with `savestring`, so the **word**
+ends at it: the `}` and the closing `"` the script wrote are gone.
 
 ```text
-                    bash                                osh
+                    bash                                osh (before)
 "${x:-$'a\0b'}"     no closing `}' in "${x:-a           a
 ```
 
-osh carries the NUL in a `Vec<u8>` — which is the right representation for every
-*other* purpose (paths and OS-boundary data are bytes, per CLAUDE.md) — and so
-never truncates. The fix is narrow and local: truncate at the first NUL **at the
-splice**, where bash's C string boundary actually is, not in the byte buffer
-generally. Left open only because it is a different mechanism from the re-quote
-decision that entry was about.
+**The recorded hypothesis was wrong, and the measurement won.** The old text
+said the fix was "narrow and local: truncate at the first NUL **at the splice**".
+That is right for every *other* row — and is what `ansi_c_unescape` now does —
+but it is not what happens here. The cut is **word-scoped, at the token
+boundary**: the word's *text* is truncated while its *extent* is not, so the
+words and commands after it are read exactly as they would have been. That
+distinction is the whole of the observable behaviour, and a splice-local truncate
+cannot produce it.
+
+**Fixed by** carrying both answers and cutting where bash cuts:
+
+- `escape::ansi_c_translate` is `ansiexpand`'s length answer;
+  `escape::ansi_c_unescape` is `cut_at_nul` of it, the C-string answer. Every
+  pre-existing caller keeps the latter, so nothing else moved.
+- `lexer::read_ansi_c_source` is split out of `read_ansi_c_quote` so the
+  bare-splice arm of `read_dollar_brace_body` can ask for the untruncated
+  translation; every other arm still re-quotes through `sh_single_quote`.
+- `parser::word_cut_at_nul`, run at the end of `word_from_segs_in` when
+  `segs_hold_a_nul`, replaces the word's parts with a single
+  `ast::WordPart::CutAtNul(raw)` holding the word's source text up to the NUL.
+  It is unparsed source, so `declare -f` prints the cut word back exactly as bash
+  does, and the expander re-reads it as text.
+- The cut leaves constructs open, and three readers meet the wreckage. Each is
+  now modelled where bash models it:
+  - `parameter_brace_expand`'s scan, at expansion time — ``bad substitution: no
+    closing `}'`` naming the word *as cut*. This already fell out of the existing
+    word-level scan.
+  - `xparse_dolparen`, when the cut fell inside a `$( … )` body, whose re-print
+    is then unclosed — `parser::comsub_reprint_error`, see the sibling entry
+    `TD-OILS-A-CMDSUB-REPRINT-IS-RE-READ-WITH-ITS-TAIL` below.
+  - `parse_string_to_word_list`, when the cut word is an element of a compound
+    array assignment — `parser::word_list_lex_error` +
+    `interp::array_assign_reparse_error`.
+
+Corpus cases:
+`userspace/oils/tests/corpus/a-nul-in-a-bare-spliced-translation-cuts-the-word.sh`,
+`userspace/oils/tests/corpus/a-compound-array-assignments-value-list-is-re-read-as-a-word-list.sh`,
+and the new sections of
+`userspace/oils/tests/corpus/a-cmdsub-body-is-parsed-twice-and-the-second-parse-reads-the-reprint.sh`.
+
+### TD-OILS-A-CUT-WORD-IS-EXPANDED-AS-LITERAL-TEXT. `"${x:-$'a}b\0c'}"` is `ab` in bash, `"${x:-a}b` in osh — 2026-08-08 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — the `WordPart::CutAtNul` arm of the
+part expander (~line 25994), and `Shell::begin_word` / `Shell::reread_word`,
+which is where the swap belongs.
+
+**What.** The residue of
+`TD-OILS-A-NUL-IN-AN-ANSI-C-STRING-DOES-NOT-TRUNCATE-THE-TRANSLATION`. A NUL cut
+leaves the *word's text* short, and bash then expands that text with
+`expand_word_internal` like any other. osh models the cut as
+`ast::WordPart::CutAtNul(raw)` and expands `raw` as **literal text**.
+
+That is right whenever the cut leaves a construct open, because the word-level
+scan `Shell::begin_word` runs over the same text has already raised
+``no closing `}'`` and armed the DISCARD — nothing downstream can observe what
+the part contributed. But a spliced `}` can close the expansion *before* the NUL
+arrives, and then the cut text is a perfectly good word:
+
+```text
+                                              bash        osh
+printf '[%s]' "${x:-$'a}b\0c'}"               [ab]        ["${x:-a}b]
+printf '[%s]' A"${x:-$'a}b\0c'}"B             [Aab]       [A"${x:-a}b]
+printf '[%s]' "${x:-$'}\0c'}"                 []          ["${x:-}]
+printf '[%s]' "${x:-$'a}b\0c'}" second        [ab][second][ "${x:-a}b][second]
+```
+
+(The `B` and the `c'}"` really are gone in bash too — that is the cut, and it is
+modelled correctly. What is wrong is only that the remaining text is not read.)
+
+**Proper fix.** Expand a `CutAtNul` word by *re-reading* `raw` as a word, which
+is what `Shell::reread_word` already does for a different second-read rule — but
+`raw` is by construction unterminated (the cut removed the closing `"`), so the
+re-read needs a reader with `expand_word_internal`'s **tolerance**: an
+unterminated `'`, `"`, `` ` `` or `${` runs to the end of the word. That is the
+same reader
+`TD-OILS-A-DOUBLE-QUOTE-IN-A-BARE-SPLICE-DOES-NOT-CLOSE-THE-ENCLOSING-RUN` needs,
+and the two should be fixed together; doing it for `CutAtNul` alone would fork
+the word reader for one part kind.
+
+### TD-OILS-A-CMDSUB-REPRINT-IS-RE-READ-WITH-ITS-TAIL. `"$(echo "${x:-$'a\0b'}")"` names `"` in bash, `}` in osh — 2026-08-08 — ✅ FIXED 2026-08-08
+
+**Where:** `userspace/oils/src/parser.rs` — `comsub_reprint_error`,
+`reprint_read_past_paren`, `ComsubReprintError`, `parse_paren_body_tokens`;
+`userspace/oils/src/interp.rs` — `Shell::comsub_reparse_error`.
+
+**What.** Found while fixing
+`TD-OILS-A-NUL-IN-AN-ANSI-C-STRING-DOES-NOT-TRUNCATE-THE-TRANSLATION`, whose cut
+is the only thing that can leave a `$( … )` re-print with a construct still open.
+`xparse_dolparen` (parse.y:4248) is handed a pointer **into the stored word** —
+`extract_command_subst` passes `string + *sindex` (subst.c:1290) — so the text
+being read is the re-print, the `)`, and the rest of the word after it, with
+`shell_eof_token = ')'`. osh parsed the re-print **alone**, which is
+indistinguishable for every re-print that reads back and wrong for every one that
+does not.
+
+Three failures are possible, and osh got all three wrong:
+
+| the re-print… | bash | osh (before) |
+|---|---|---|
+| reads back, grammar error | names a token, echoes the line | ✅ (this part was right) |
+| is unclosed, still unclosed at the word's end | `parse_matched_pair`'s own `parser_error (start_lineno, …)` (parse.y:3711), printed **alone** — it sets `PST_NOERROR` "avoid redundant error message" | named `}` instead of `"`, and echoed an offending line under it |
+| is unclosed, the tail closes it | the `)` was spent on the construct, so `comsub` never gets one: `unexpected EOF while looking for matching `)'` (parse.y:6289), also alone | not modelled at all |
+
+Two further errors of the same shape were fixed with it: osh echoed an offending
+source line under an end-of-input diagnostic (bash calls `print_offending_line`
+only from the branches of `report_syntax_error` that *name a token*,
+parse.y:6251-6264), and osh treated a re-parse lex error as fatal (rc 2, shell
+aborted) where bash does a `DISCARD` (rc 1, script continues) — the lex path of
+`parse_cmdsub_body_unmarked` called `.in_paren_body()` on *every* lex error,
+contradicting its own contract.
+
+The line numbering falls out of `line_number` being incremented as a line is
+**fetched** (parse.y:2361), including the fetch that discovers EOF, so the third
+row is numbered exactly one further on than the second for the same shape.
+
+**Fixed by** `parser::comsub_reprint_error(src, tail, close_line, opts) ->
+Option<ComsubReprintError>`, which distinguishes the three by *whether the lex of
+`src` alone succeeded* and returns the message, whether the line is echoed, the
+line offset, and whether the failure is fatal. `parse_cmdsub_body_unmarked` was
+split so its tokenize step is separable (`parse_paren_body_tokens`).
+
+### TD-OILS-ARRAY-ASSIGN-REREAD-ORDER. A compound assignment's two re-read failures are not ordered by position — 2026-08-08 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::array_assign_reparse_error`.
+
+**What.** `assign_compound_array_list` re-reads a compound assignment's joined
+value list with `parse_string_to_word_list` (arrayfunc.c:587), and that read can
+fail two ways: the listing's own tokenizer meets an unclosed construct
+(a `DISCARD`, `$?` = 1), or a `$( … )` in it has a re-print that will not parse
+back (`parse_comsub`'s `FORCE_EOF`, the shell ends). bash meets whichever comes
+**first in the listing**, because it is one left-to-right read.
+
+osh runs the two checks in sequence instead: `parser::word_list_lex_error` over
+the whole listing first, then a scan of the listing's command substitutions. That
+is correct whenever the unclosed construct precedes the bad re-print — an
+unclosed construct swallows everything after itself, so no substitution beyond it
+is ever reached as one — but it is **wrong when a bad re-print precedes an
+unclosed construct**, where osh reports the unclosed construct (and discards)
+where bash reports the substitution (and ends the shell).
+
+```sh
+# not yet reproduced against bash; the shape is
+a=("$(
+!
+)" "${x:-$'a\0b'}")
+```
+
+**Proper fix.** Carry a byte offset on `lexer::LexError` — it already carries a
+line — so the tokenizer's failure can be ordered against the offset of the first
+bad substitution in the rendered listing, and the earlier of the two reported.
+The offset is worth having on its own account: several other diagnostics
+currently re-derive a position from the line.
 
 ### TD-OILS-A-PATTERN-REPLACEMENT-WITH-NO-REPLACEMENT-DEPARSES-A-SPURIOUS-SLASH. `${q/ab}` prints back as `${q/ab/}` — 2026-08-08 — ✅ FIXED 2026-08-08
 

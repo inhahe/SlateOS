@@ -80,6 +80,49 @@ echo "[$v] rc=$?"
 v=$( { time true; } 2>/dev/null )
 echo "[$v] rc=$?"
 
+# `xparse_dolparen` is handed a pointer *into the stored word*, not a copy of
+# the body: `extract_command_subst` (subst.c:1290) passes `string + *sindex`,
+# and the parse simply stops when it reaches the `)` the `comsub` production
+# wants. So the text actually being read is the re-print, the `)`, and the rest
+# of the word after it — and a re-print that reads back never sees past the `)`.
+#
+# One that does *not* read back does. If the re-print is left with a construct
+# open, the lexer swallows the `)` looking for the end of it and reads on into
+# the tail, which changes both the message and the line it is numbered on:
+#
+#   * still unterminated at the true end of the word — `parse_matched_pair`'s
+#     own `parser_error (start_lineno, …)` (parse.y:3711), naming the character
+#     the *innermost* open construct wants. It then sets `PST_NOERROR` "avoid
+#     redundant error message", so it prints alone, with no offending line.
+#   * the tail closes it, and then the input runs out with the `)` already
+#     spent: `unexpected EOF while looking for matching `)'` (parse.y:6289),
+#     `shell_eof_token`'s own message, raised from the branch reached only when
+#     `shell_input_line` is empty — so no offending line under this one either.
+#
+# The second is numbered one line further on than the first, because the reader
+# counts a line as it *fetches* it (parse.y:2361): reading the last line and
+# then finding no more costs one increment each.
+#
+# A re-print can only be left open by a NUL cutting a word inside the body short
+# — see `a-nul-in-a-bare-spliced-translation-cuts-the-word.sh`.
+
+echo "=== an unclosed re-print swallows the ) and runs into the tail"
+echo "L $LINENO"
+unset x
+v="$(echo "${x:-$'a\0b'}")"
+echo "after rc=$?"
+
+echo "=== a tail that closes it spends the ) instead, so the comsub never ends"
+echo "L $LINENO"
+v="$(echo "${x:-$'a\0b'}")}"
+echo "after rc=$?"
+v="$(echo "${x:-$'a\0b'}")}"more
+echo "after rc=$?"
+
+echo "=== both are the re-print's own failure, so eval contains them"
+eval 'v="$(echo "${x:-$'"'"'a\0b'"'"'}")"; echo "not reached"'
+echo "after eval rc=$?"
+
 echo "=== a word the shell builds at expansion time is read once, not twice"
 # `${x@P}` and the prompt strings never reach `parse_comsub` at all:
 # `expand_string` walks the value with `expand_word_internal`, which hands

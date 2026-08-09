@@ -2102,8 +2102,21 @@ pub fn parse_cmdsub_body_unmarked(
     // implicit trailing newline would otherwise go, because that is the token
     // bash's parser sees after the body's last command. See
     // [`tokenize_paren_body`].
-    let Spanned { mut toks, mut lines, ends, .. } = tokenize_paren_body(src, opts)
+    let spanned = tokenize_paren_body(src, opts)
         .map_err(|e| ParseError::from(e).in_paren_body())?;
+    parse_paren_body_tokens(spanned, src, close_line, opts)
+}
+
+/// [`parse_cmdsub_body_unmarked`] from its tokens on, split out for the one
+/// caller that has to know *whether the lex failed* before it decides what to do
+/// next — see [`comsub_reprint_error`].
+fn parse_paren_body_tokens(
+    spanned: Spanned,
+    src: BStr<'_>,
+    close_line: u32,
+    opts: ParseOpts,
+) -> Result<Program, ParseError> {
+    let Spanned { mut toks, mut lines, ends, .. } = spanned;
     // The body's line 1 is the line `$(` sits on: the closing `)` is on the
     // body's last line, so stepping back over the body's newlines lands there.
     let newlines =
@@ -2133,6 +2146,160 @@ pub fn parse_cmdsub_body_unmarked(
             }
         })?;
     Ok(prog)
+}
+
+/// What bash's **second** read of a `$( … )` body finds wrong with the re-print
+/// — or `None`, which is the answer for all but a handful of shapes.
+///
+/// `src` is the re-print and `tail` the rest of the stored word after the `)`.
+/// bash hands `xparse_dolparen` (parse.y:4248) the whole of that — `string` is a
+/// pointer *into* the word, not a copy of the body — and reads it with
+/// `token_to_read = DOLPAREN`, so the grammar in force is
+///
+/// ```text
+/// comsub: DOLPAREN compound_list ')'
+/// ```
+///
+/// A re-print that reads back stops at that `)` and never looks at `tail`, which
+/// is why `tail` is normally invisible. Only a re-print that does *not* is
+/// affected by it — and then it is affected in one of three ways, which is what
+/// [`ComsubReprintError`] distinguishes.
+#[must_use]
+pub fn comsub_reprint_error(
+    src: BStr<'_>,
+    tail: BStr<'_>,
+    close_line: u32,
+    opts: ParseOpts,
+) -> Option<ComsubReprintError> {
+    match tokenize_paren_body(src, opts) {
+        // The body lexed, so the `)` really was the token after its last
+        // command and `tail` is out of reach: this is the ordinary re-parse,
+        // and any error is the body's own grammar error, named on a token.
+        Ok(spanned) => {
+            let err = parse_paren_body_tokens(spanned, src, close_line, opts).err()?;
+            let fatal = err.fatal;
+            // Every newline of `src` is consumed before the `)` that fails, and
+            // none of `tail`'s are — the parse never gets that far.
+            let line_off = newlines(src).saturating_add(1);
+            Some(ComsubReprintError { err, echo: true, line_off, fatal })
+        }
+        // The body ran out with a construct still open, so bash's lexer did
+        // *not* stop at the `)`: it swallowed it and read on into `tail`.
+        Err(_) => Some(reprint_read_past_paren(src, tail, opts)),
+    }
+}
+
+/// [`comsub_reprint_error`] for a re-print whose lex runs past the `)`.
+fn reprint_read_past_paren(
+    src: BStr<'_>,
+    tail: BStr<'_>,
+    opts: ParseOpts,
+) -> ComsubReprintError {
+    let combined = bfmt![src, b")", tail];
+    let spanned = match tokenize_spanned(&combined, opts) {
+        Ok(spanned) => spanned,
+        // Still unterminated at the true end of input. This is
+        // `parse_matched_pair`'s own diagnostic (parse.y:3711), a bare
+        // `parser_error` that then sets `PST_NOERROR` "avoid redundant error
+        // message" — so it is printed alone, with no offending line under it,
+        // and it names `start_lineno`: the line the *innermost* unclosed
+        // construct opened on, which is what [`crate::lexer::LexError::line`]
+        // holds.
+        Err(lex) => {
+            let line_off = lex.line.unwrap_or(1);
+            // `resolve_subst_bail` marks an error it found *inside* an
+            // unterminated `$( … )` fatal and leaves the plain
+            // unterminated-construct message alone, so the flag doubles as
+            // "this one names a token" — and a diagnostic that names a token is
+            // the one class bash echoes the offending line under
+            // (parse.y:6251-6264).
+            let err = resolve_subst_bail(lex, opts);
+            let fatal = err.fatal;
+            return ComsubReprintError { err, echo: fatal, line_off, fatal };
+        }
+    };
+    let Spanned { toks, lines, ends, .. } = spanned;
+    match parse_tokens(toks, lines, Spans::of(&combined, ends), opts) {
+        // A grammar error found before the input ran out: bash names the token
+        // and echoes the line, from `report_syntax_error`'s first branch.
+        Err(e) if !e.is_incomplete() => {
+            let line_off = e.line.unwrap_or_else(|| newlines(&combined).saturating_add(1));
+            let fatal = e.fatal;
+            ComsubReprintError { err: e, echo: true, line_off, fatal }
+        }
+        // The text either parsed or merely ran out — but either way the `)` the
+        // `comsub` production needs was consumed by something else and never
+        // arrived, so the parse ends at end of input with `shell_eof_token`
+        // still outstanding:
+        //
+        // ```c
+        //   if (EOF_Reached && shell_eof_token && current_token != shell_eof_token)
+        //     parser_error (line_number, _("unexpected EOF while looking for matching `%c'"), shell_eof_token);
+        // ```
+        // (parse.y:6289 — reached with `shell_input_line` empty, so nothing is
+        // echoed under it.)
+        //
+        // `line_number` has by then run one line past the text: the reader
+        // counts a line as it *fetches* it (parse.y:2361), so reading the last
+        // line and then finding no more costs one increment each.
+        _ => ComsubReprintError {
+            err: ParseError::new("unexpected EOF while looking for matching `)'"),
+            echo: false,
+            line_off: newlines(&combined).saturating_add(2),
+            fatal: false,
+        },
+    }
+}
+
+/// How bash's second read of a `$( … )` re-print failed. See
+/// [`comsub_reprint_error`].
+pub struct ComsubReprintError {
+    /// The diagnostic.
+    pub err: ParseError,
+    /// Whether bash echoes the offending input line under the message.
+    ///
+    /// Only the branch of `report_syntax_error` that names a token calls
+    /// `print_offending_line` (parse.y:6262). An end-of-input diagnostic never
+    /// does: `parse_matched_pair` prints its own and suppresses the parser's
+    /// with `PST_NOERROR`, and the `shell_eof_token` message is raised from the
+    /// branch reached only when `shell_input_line` is already empty.
+    pub echo: bool,
+    /// The reported line, counted from the line the enclosing command is being
+    /// read on. `parse_string` does not renumber (it calls `push_stream (0)`),
+    /// so bash's one `line_number` simply runs on from there.
+    pub line_off: u32,
+    /// Whether the failure ends the shell rather than one parse unit — true
+    /// only for a `$( … )` nested in the re-print, which `parse_comsub` answers
+    /// with `jump_to_top_level (FORCE_EOF)` (parse.y:4185). The re-print's own
+    /// failure is `parse_string`'s, and costs a `DISCARD`.
+    pub fatal: bool,
+}
+
+/// What bash's tokenizer finds wrong with `src` when it is read as a bare *word
+/// list* — `parse_string_to_word_list` (parse.y:6398), the read a compound
+/// assignment's value list gets — or `None` when it lexes.
+///
+/// No grammar is consulted, because that reader consults none: it loops on
+/// `read_token` and accepts anything that comes back a `WORD`. A listing built
+/// from words bash already read can only fail by *lexing*, which it does when a
+/// construct in it is left unclosed — the shape a NUL cut leaves behind. See
+/// [`crate::ast::WordPart::CutAtNul`], and `Shell::array_assign_reparse_error`
+/// for the caller.
+///
+/// [`ParseError::fatal`] distinguishes the two failures the way it does
+/// everywhere: an error found *inside* an unterminated `$( … )` is
+/// `parse_comsub`'s `jump_to_top_level (FORCE_EOF)`, while the listing's own
+/// unclosed construct costs only the `DISCARD` `parse_string_to_word_list`
+/// raises at parse.y:6480.
+#[must_use]
+pub fn word_list_lex_error(src: BStr<'_>, opts: ParseOpts) -> Option<ParseError> {
+    tokenize_spanned(src, opts).err().map(|e| resolve_subst_bail(e, opts))
+}
+
+/// The number of newlines in `s` — how far a reader that consumed all of it has
+/// advanced its line counter.
+fn newlines(s: BStr<'_>) -> u32 {
+    u32::try_from(s.iter().filter(|&&b| b == b'\n').count()).unwrap_or(u32::MAX)
 }
 
 /// Renumber every line a reader warning carries through `map`, for the same
@@ -5374,7 +5541,55 @@ fn word_from_segs_in(segs: &[Seg], opts: ParseOpts, q: Quoting) -> Result<Word, 
     // Every `$( … )` in the word learns what follows it here, because this is
     // the first point that knows. See [`crate::unparse::attach_comsub_tails`].
     crate::unparse::attach_comsub_tails(&mut word);
+    // Only a bare splice can have written a NUL into the word's text, so only a
+    // word that had one needs its re-print built to look for one.
+    if segs_hold_a_nul(segs) {
+        word = word_cut_at_nul(word);
+    }
     Ok(word)
+}
+
+/// Whether the token's text carries a NUL byte, asked of the segments so that
+/// the word that does not — every word anyone ever writes — pays a byte scan
+/// rather than a re-print.
+///
+/// A `$( … )` body is the one part of a token that is *not* this token's text:
+/// bash parses it with a reader of its own and splices back `print_comsub`'s
+/// answer (parse.y:4219–4241), so its words are cut by that parse and what
+/// arrives here is already a C string. osh reaches the same place from the other
+/// side — the body is re-lexed by [`parse_cmdsub_body`], and the cut happens on
+/// *its* words — so the body must not also cut the word holding it.
+fn segs_hold_a_nul(segs: &[Seg]) -> bool {
+    segs.iter().any(|s| match s {
+        Seg::Lit(t) | Seg::Sq(t, _) | Seg::ParamBraced(t, ..) | Seg::Arith(t, ..) => {
+            t.contains(&0)
+        }
+        Seg::Dq(inner) => segs_hold_a_nul(inner),
+        Seg::Param(_) | Seg::CmdSub(..) | Seg::ProcSub(..) => false,
+    })
+}
+
+/// bash's `make_word`: the word is a C string, so it ends at its first NUL.
+///
+/// `read_token_word` accumulates a token into a byte buffer with an explicit
+/// length and then calls `make_word (token)`, which copies it with `savestring`
+/// — one `strlen` and the rest of the buffer is gone. This is the *token*
+/// boundary and nowhere else: a `${ … }` operand, a pattern, a subscript are all
+/// carved back out of the word's text afterwards, so applying the cut to them
+/// separately would cut words bash never cut.
+///
+/// Only one thing puts a NUL in that buffer — see [`WordPart::CutAtNul`] — and
+/// what the cut leaves is normally unparseable, so the word becomes its own
+/// text. The word's *extent* is not affected: everything the scan consumed it
+/// still consumed, and the next word starts where it always did.
+fn word_cut_at_nul(word: Word) -> Word {
+    let src = crate::unparse::word_src(&word);
+    let Some(nul) = src.iter().position(|&b| b == 0) else {
+        return word;
+    };
+    Word {
+        parts: vec![WordPart::CutAtNul(src.get(..nul).unwrap_or_default().to_vec())],
+    }
 }
 
 /// Parse the `$( … )` bodies an arithmetic scan stepped over, and return each
@@ -7099,6 +7314,126 @@ mod tests {
             lines.push(sc.line);
         }
         assert_eq!(lines, vec![1, 3]);
+    }
+
+    /// The one NUL a token buffer can hold ends the *word* there, because
+    /// `make_word` copies the buffer with `savestring`. The word's extent is
+    /// untouched: what follows it is read exactly as it would have been.
+    #[test]
+    fn a_nul_spliced_into_a_brace_body_cuts_the_word() {
+        let words = |src: &str| -> Vec<Word> {
+            let prog = super::parse(src.as_bytes()).expect("parses");
+            let Command::Simple(sc) = &prog.items[0].list.first.commands[0] else {
+                panic!("expected a simple command");
+            };
+            sc.words.clone()
+        };
+
+        // The cut word keeps its text up to the NUL and nothing after — not the
+        // `}` the script wrote, and not the closing `"`.
+        let w = words(r#"echo "${x:-$'a\0b'}" second"#);
+        assert_eq!(w.len(), 3);
+        let [WordPart::CutAtNul(raw)] = w[1].parts.as_slice() else {
+            panic!("expected one cut part, got {:?}", w[1].parts);
+        };
+        assert_eq!(text(raw), r#""${x:-a"#);
+        // …while the words after it are read as if nothing had happened.
+        assert_eq!(text(&crate::unparse::word_src(&w[2])), "second");
+
+        // A NUL that is the whole translation cuts just as hard.
+        let w = words(r#"echo "${x:-$'\0'}""#);
+        let [WordPart::CutAtNul(raw)] = w[1].parts.as_slice() else {
+            panic!("expected one cut part, got {:?}", w[1].parts);
+        };
+        assert_eq!(text(raw), r#""${x:-"#);
+
+        // The re-quoted rows hand the translation on as a C string, so no NUL
+        // ever reaches the buffer and no word is cut.
+        for src in [r#"echo "${q#$'z\0z'}""#, r#"echo ${x:-$'a\0b'}"#, r#"echo x$'a\0b'y"#] {
+            let w = words(src);
+            assert!(
+                !w[1].parts.iter().any(|p| matches!(p, WordPart::CutAtNul(_))),
+                "{src} should not cut"
+            );
+        }
+    }
+
+    /// bash's second read of a `$( … )` is handed a pointer *into* the stored
+    /// word, so what it reads is the re-print, the `)`, and the word's tail.
+    #[test]
+    fn a_reprint_that_will_not_read_back_is_read_with_its_tail() {
+        let opts = ParseOpts::default();
+        let err = |src: &str, tail: &str| {
+            super::comsub_reprint_error(src.as_bytes(), tail.as_bytes(), 1, opts)
+                .map(|f| (emsg(&f.err), f.echo, f.line_off, f.fatal))
+        };
+
+        // The overwhelmingly common answer: the re-print reads back, stops at
+        // the `)`, and never looks at the tail.
+        assert!(err("echo hi", "\"").is_none());
+        assert!(err("! false", "").is_none());
+
+        // A re-print that reads back but will not parse names a token, and the
+        // offending line is echoed under it.
+        let (msg, echo, off, fatal) = err("!", "x").expect("fails");
+        assert_eq!(msg, "syntax error near unexpected token `)'");
+        assert!(echo);
+        assert_eq!(off, 1);
+        assert!(!fatal);
+
+        // A re-print left unclosed swallows the `)` and reads on into the tail.
+        // Still unterminated at the end of it: `parse_matched_pair`'s own
+        // message, printed alone.
+        let (msg, echo, off, fatal) = err(r#"echo "${x:-a"#, "\"").expect("fails");
+        assert_eq!(msg, "unexpected EOF while looking for matching `\"'");
+        assert!(!echo);
+        assert_eq!(off, 1);
+        assert!(!fatal);
+
+        // A tail that closes it spends the `)` on the construct, so the `comsub`
+        // production never gets one — and `line_number` has by then run one line
+        // past the text, because the reader counts a line as it fetches it.
+        let (msg, echo, off, fatal) = err(r#"echo "${x:-a"#, "}\"").expect("fails");
+        assert_eq!(msg, "unexpected EOF while looking for matching `)'");
+        assert!(!echo);
+        assert_eq!(off, 2);
+        assert!(!fatal);
+        assert_eq!(err("echo one\necho \"${x:-a", "}\"").expect("fails").2, 3);
+
+        // A `$( … )` nested in the re-print is `parse_comsub`'s own failure, and
+        // that one ends the shell.
+        let (_, _, _, fatal) = err(r#"echo "y$(! )z""#, "").expect("fails");
+        assert!(fatal);
+    }
+
+    /// A compound assignment's value list is re-read by a reader that consults
+    /// no grammar, so it can only fail by lexing.
+    #[test]
+    fn a_word_list_can_only_fail_by_lexing() {
+        let opts = ParseOpts::default();
+        let err = |src: &str| {
+            super::word_list_lex_error(src.as_bytes(), opts).map(|e| (emsg(&e), e.fatal))
+        };
+
+        // Anything that lexes is a word list, however little sense it makes as a
+        // command.
+        assert!(err("one two three").is_none());
+        assert!(err("do done esac ) ;;").is_none());
+        assert!(err(r#"one "two three" $'four\tfive' "$(echo six)""#).is_none());
+
+        // An unclosed construct is the listing's own failure: a discard.
+        assert_eq!(
+            err(r#""${x:-a tail"#),
+            Some(("unexpected EOF while looking for matching `}'".into(), false))
+        );
+        assert_eq!(
+            err("one $(echo two"),
+            Some(("unexpected EOF while looking for matching `)'".into(), false))
+        );
+
+        // An error found *inside* an unterminated `$( … )` is `parse_comsub`'s,
+        // and ends the shell instead.
+        assert_eq!(err("one $(!;;").map(|(_, fatal)| fatal), Some(true));
     }
 
     #[test]

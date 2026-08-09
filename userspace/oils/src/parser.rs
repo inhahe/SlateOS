@@ -6472,15 +6472,18 @@ fn parse_replace_pieces(
     let pat_start_line = frag_line(body, i, line);
     let mut repl_line = pat_start_line;
     while let Some(&c) = body.get(i) {
-        // Only in the pattern, and only for `/`: this is the one place the
-        // backslash is *consumed* rather than passed on, because it is escaping
-        // this scan's own delimiter. Every other escape is the later lex's to
-        // interpret and is copied whole by `skip_construct` below.
-        if !in_repl && syn(c) == '\\' && syn_at(body, i + 1) == '/' {
-            pattern.push(b'/');
-            i += 2;
-            continue;
-        }
+        // A `\/` needs no case of its own: `skip_construct` below already copies
+        // an escape and the character it covers whole, which both hides the `/`
+        // from the separator test and keeps the backslash in the pattern text.
+        //
+        // Keeping it is the point. bash's `skip_to_delim` (subst.c:9157) only
+        // *locates* the separator — it never rewrites `lpatsub` — so the `\/` is
+        // still there when `getpattern` runs `expand_string_for_pat` and
+        // `quote_string_for_globbing` over it (subst.c:5754, 5764) and comes out
+        // as a glob escape matching a literal `/`. Consuming the backslash here
+        // matched the same text but lost it from the printback, and
+        // `${q/a\/b/Y}` printed as `${q/a/b/Y}` — which does not even re-parse to
+        // the same expansion, since the printed `/` reads as the separator.
         if !in_repl && syn(c) == '/' {
             in_repl = true;
             i += 1;

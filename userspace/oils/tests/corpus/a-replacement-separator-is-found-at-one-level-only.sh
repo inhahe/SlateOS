@@ -56,9 +56,9 @@ p 'sub in replacement'   "${t/a\/b/$(echo x/y)}"
 p 'brace in replacement' "${t/a\/b/${sl}}"
 
 echo "=== the replacement half keeps every escape for the later lex ==="
-# Only `\/` in the *pattern* is this scan's own delimiter and consumed by it;
-# everything else — including a `/` in the replacement, which nothing splits
-# further — is passed on whole and interpreted where it belongs.
+# Only `\/` in the *pattern* hides this scan's own delimiter; everything else —
+# including a `/` in the replacement, which nothing splits further — is passed
+# on whole and interpreted where it belongs.
 p 'escaped slash in repl' "${s/aaa/x\/y}"
 p 'escaped slash in both' "${t/a\/b/x\/y}"
 p 'bare slash in repl'    "${s/aaa/x//y}"
@@ -73,6 +73,20 @@ echo "=== nesting inside the construct still closes correctly ==="
 p 'quoted paren'         "${s/$(echo 'a/)b')aaa/Y}"
 p 'nested substitution'  "${s/$(echo $(echo a/b))aaa/Y}"
 p 'nested brace'         "${s/${x:-${sl}}aaa/Y}"
+
+echo "=== and the backslash survives into the printback ==="
+# Locating the separator is not the same as removing what hid it: bash's
+# `skip_to_delim` only reports where the `/` is (subst.c:9157) and leaves
+# `lpatsub` alone, so the `\/` is still in the pattern when `getpattern` runs
+# `expand_string_for_pat` over it — and still in the text `declare -f` re-prints.
+# A shell that ate the backslash while splitting would print `${t/a/b/Y}`, which
+# is not even the same expansion: the printed `/` reads as the separator.
+f() {
+  echo "${t/a\/b/Y}" "${t/a\/b}" "${t//a\/b/Y}" "${t/#a\/b/Y}" "${t/%a\/b/Y}"
+  echo "${arr[@]/a\/b/Y}" "${t/a\/b/x\/y}" "${s//a/\/}"
+  echo "${t/$'a\/b'/Y}" "${t/'a/b'/Y}" "${t/"a/b"/Y}"
+}
+declare -f f
 
 echo "=== an unterminated construct is still the later lex's error ==="
 e() { ( eval "$1" ) 2>&1; echo "  rc=$?"; }

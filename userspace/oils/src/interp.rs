@@ -28738,8 +28738,11 @@ impl Shell {
     ///   runs, where a scalar `v="p$(⏎!⏎)q"` only discards its own parse unit.
     ///
     /// A listing a NUL cut short (see [`crate::ast::WordPart::TokenText`]) fails
-    /// the same read one stage earlier — in the tokenizer itself, on the
-    /// construct the cut left open — and that failure is *not* fatal. It is
+    /// the same read in the tokenizer itself, on the construct the cut left
+    /// open — and at the *end* of the listing, because that is where the input
+    /// runs out and `parse_matched_pair` gives up. That is why it is tried
+    /// second and not first: a substitution can only stand earlier. The failure
+    /// is also *not* fatal. It is
     /// `parse_matched_pair`'s own `parser_error` (parse.y:3711), which suppresses
     /// the parser's follow-up with `PST_NOERROR`, so it prints alone with no
     /// echoed line; `parse_string_to_word_list` then sets `$?` to 1 and raises
@@ -28756,29 +28759,40 @@ impl Shell {
     /// one is [`Shell::comsub_reparse_error`]'s, under its own name and line.
     fn array_assign_reparse_error(&mut self, items: &[ArrayElem]) -> Option<(Str, bool)> {
         let opts = self.parse_opts();
-        let listing = crate::unparse::array_listing(items);
-        // The tokenizer runs over the whole listing before any word in it is
-        // handed back, so an unclosed construct in it is met first — and it
-        // swallows everything after itself, so no substitution beyond it is ever
-        // reached as one. (A substitution *before* it would be, which is the one
-        // ordering this does not reproduce; see `known-issues.md`
-        // TD-OILS-ARRAY-ASSIGN-REREAD-ORDER.)
-        if let Some(e) = crate::parser::word_list_lex_error(&listing, opts) {
+        // The order is the order bash's *one* read of the listing meets the two
+        // failures, and it is not the order they stand in. `parse_comsub` fails
+        // where the `$( … )` stands; the tokenizer's own failure is an *end of
+        // input* failure by construction — `parse_matched_pair` only gives up
+        // once the listing runs out — so it is always the later of the two, and
+        // the substitution always wins. Measured against bash 5.2.37, both ways
+        // round, where `⏎!⏎` is a body that cannot parse and `$'a\0b'` is a
+        // splice whose NUL cuts the word (see [`crate::ast::WordPart::TokenText`]):
+        //
+        // ```text
+        // a=("$(⏎!⏎)" "${x:-$'a\0b'}")   syntax error near unexpected token `)'
+        // a=("${x:-$'a\0b'}" "$(⏎!⏎)")   syntax error near unexpected token `)'
+        // ```
+        //
+        // The second is the telling one: the reader is standing inside the `${`
+        // the cut left open and still recurses into the `$(` past it. Nothing
+        // can hide a substitution from the read either — the constructs bash
+        // scans opaquely, `'…'` and `` `…` ``, are exactly the ones it does not
+        // translate a `$'…'` inside (parse.y takes the matched pair whole), so a
+        // NUL can never be spliced into one and a cut can never leave one open.
+        let comsub = crate::unparse::array_listing_comsubs(items).into_iter().enumerate().find_map(
+            |(k, src)| {
+                crate::parser::parse_cmdsub_body_unmarked(&src, 1, opts).err().map(|e| (k, e))
+            },
+        );
+        let Some((k, e)) = comsub else {
+            let listing = crate::unparse::array_listing(items);
+            let e = crate::parser::word_list_lex_error(&listing, opts)?;
             let fatal = e.fatal;
             let line = e.line.unwrap_or(1);
             // No echoed line: this class is `parse_matched_pair`'s own message,
             // printed under `PST_NOERROR` so the parser adds nothing.
             return Some((self.array_assign_diag(line, &e.msg(), None), fatal));
-        }
-        // Then the substitutions, cheap pass first: almost every list either has
-        // no substitution at all or has only ones that parse, and locating a
-        // substitution in the rendered listing costs a clone of the list.
-        let (k, e) = crate::unparse::array_listing_comsubs(items)
-            .into_iter()
-            .enumerate()
-            .find_map(|(k, src)| {
-                crate::parser::parse_cmdsub_body_unmarked(&src, 1, opts).err().map(|e| (k, e))
-            })?;
+        };
         // The reader stops at the `)` the failed body was supposed to end on —
         // both known shapes (`!` and `time`) deparse without the list terminator
         // their own grammar needs, so it is that `)` they run onto.

@@ -37,6 +37,18 @@
 # The unclosed-construct half is reachable because a NUL cut can leave a word
 # short — see `a-nul-in-a-bare-spliced-translation-cuts-the-word.sh`.
 #
+# A listing can hold both faults at once, and then the substitution wins —
+# always, and not because of where the two stand. The read is one left-to-right
+# pass: `parse_comsub` fails where the `$( … )` stands, whereas the tokenizer's
+# own failure is an *end of input* failure by construction, since
+# `parse_matched_pair` only gives up once the listing runs out. So the
+# substitution is always the earlier of the two, even when it is written second
+# and the reader reaches it standing inside the `${` the cut left open. Nothing
+# can hide a substitution from the read either: the constructs the tokenizer
+# scans opaquely — `'…'` and `` ` … ` `` — are exactly the ones it does not
+# translate a `$'…'` inside, so a NUL can never be spliced into one and a cut can
+# never leave one open.
+#
 # Verified against bash 5.2.37.
 
 unset x
@@ -81,6 +93,29 @@ echo "=== errexit takes the parser's own exit, before the class is decided"
 # the discard never happens and the status is 2, not 1.
 ( set -e; a=("${x:-$'a\0b'}" tail); echo "not reached" )
 echo "errexit rc=$?"
+
+echo "=== with both faults in one listing the substitution wins, either order"
+( a=("$(
+!
+)" "${x:-$'a\0b'}"); echo "not reached" )
+echo "subshell rc=$?"
+( a=("${x:-$'a\0b'}" "$(
+!
+)"); echo "not reached" )
+echo "subshell rc=$?"
+
+echo "=== and it wins the class with it, so eval stops containing the failure"
+g() { eval 'a=("${x:-$'"'"'a\0b'"'"'}" "$(
+!
+)"); echo "not reached"'; echo "not reached either"; }
+( g; echo "not reached" )
+echo "subshell rc=$?"
+
+echo "=== a backquote body is not re-read, so it hides nothing and fails nothing"
+( a=("${x:-$'a\0b'}" "p`
+!
+`q"); echo "not reached" )
+echo "subshell rc=$?"
 
 echo "=== a listing that re-reads cleanly is silent, however it was written"
 c=(one "two three" $'four\tfive' "$(echo six)")

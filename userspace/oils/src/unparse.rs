@@ -1270,6 +1270,31 @@ fn quoted_lit_src(text: BStr<'_>, escaped: bool) -> Str {
 /// [`CmdSubBody::Unread`] bodies exactly as the parser's words are run over
 /// theirs.
 pub(crate) fn attach_comsub_tails(word: &mut Word) {
+    attach_comsub_tails_in(&mut word.parts);
+}
+
+/// [`attach_comsub_tails`] for **one string scope**.
+///
+/// A `[ … ]` subscript is not part of the word's string for this purpose. The
+/// `${ … }` scan steps over one whole ([`Nested::Index`]) and the text is
+/// expanded later as a string in its own right, so `extract_command_subst` there
+/// is walking the *subscript*, and the remainder it echoes is the subscript's.
+/// Measured against bash 5.2.37 with `a=(0 1 2)` and `${b@P}`:
+///
+/// ```text
+/// b='A${a[p$(fi)q]}B'   ->   `fi)q'    and   `fi)'
+/// ```
+///
+/// — `q` and nothing else, where the word's remainder would have been
+/// `q]}B`. (The second line is the body's own run, one byte shorter because the
+/// extent read gave up at the end of the string and `xparse_dolparen` returns
+/// `ep - base - 1`; see [`crate::interp::Shell::extent_consumed`].) The word's
+/// `B` is still printed, `A0B`, because the scope that was consumed was the
+/// subscript's.
+fn attach_comsub_tails_in(parts: &mut [WordPart]) {
+    // Each subscript first, as its own string; the pass below then leaves them
+    // alone.
+    index_scopes(parts, &mut attach_comsub_tails_in);
     // A body no parser read is re-read the same way, from the same
     // `extract_command_subst`, so it wants the same remainder — see
     // [`crate::ast::CmdSubBody::Unread`].
@@ -1281,7 +1306,7 @@ pub(crate) fn attach_comsub_tails(word: &mut Word) {
             }
         )
     };
-    let total = walk_parts(&mut word.parts, &is_comsub, usize::MAX, &mut |_| {});
+    let total = walk_parts(parts, &is_comsub, usize::MAX, &mut |_| {});
     if total == 0 {
         return;
     }
@@ -1291,7 +1316,7 @@ pub(crate) fn attach_comsub_tails(word: &mut Word) {
     // text instead would be ambiguous twice over: two identical `$( … )`s in one
     // word render alike, and `'$(! )'` renders a literal that looks like one.
     let mut sent = vec![0u8];
-    while contains(&word_src(word), &sent) {
+    while contains(&parts_src(parts), &sent) {
         sent.push(0);
     }
     // The swapped-in marker is not a substitution any more, so it is found again
@@ -1303,15 +1328,15 @@ pub(crate) fn attach_comsub_tails(word: &mut Word) {
         // makes this exact: `part_src` renders a parsed body from `prog`, so
         // there is nothing in `src` for a marker to ride in on.
         let mut saved = WordPart::Literal(Str::new());
-        walk_parts(&mut word.parts, &is_comsub, k, &mut |p| {
+        walk_parts(parts, &is_comsub, k, &mut |p| {
             saved = std::mem::replace(p, WordPart::Literal(sent.clone()));
         });
-        let text = word_src(word);
+        let text = parts_src(parts);
         let mut tail = find(&text, &sent)
             .and_then(|i| text.get(i.saturating_add(sent.len())..))
             .unwrap_or_default()
             .to_vec();
-        walk_parts(&mut word.parts, &is_marker, 0, &mut |p| {
+        walk_parts(parts, &is_marker, 0, &mut |p| {
             *p = std::mem::replace(&mut saved, WordPart::Literal(Str::new()));
             match p {
                 WordPart::CommandSub { body: CmdSubBody::Parsed { tail: t, .. } } => {
@@ -1339,9 +1364,30 @@ fn find(hay: BStr<'_>, needle: BStr<'_>) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
 }
 
+/// Apply `act` to every `[ … ]` subscript reachable from `parts` **without
+/// crossing another one** — the string scopes nested one level inside this one.
+///
+/// A subscript inside a subscript is not visited here; it is reached by the
+/// recursion `act` itself makes, so each scope is walked by the call that owns
+/// it. See [`Nested::Index`].
+fn index_scopes(parts: &mut [WordPart], act: &mut dyn FnMut(&mut [WordPart])) {
+    for p in parts.iter_mut() {
+        for (kind, w) in nested_parts_mut(p) {
+            if kind == Nested::Index {
+                act(w);
+            } else {
+                index_scopes(w, act);
+            }
+        }
+    }
+}
+
 /// Apply `act` to the `n`-th part of `parts` — or of any word nested inside one
 /// — that `want` accepts, and return how many such parts there were in all.
 /// Passing `usize::MAX` for `n` therefore just counts.
+///
+/// A `[ … ]` subscript is **not** walked into: it is its own string scope, and
+/// [`index_scopes`] hands it to its own pass. See [`attach_comsub_tails_in`].
 ///
 /// The order is the order the parts are written in, which is all this needs:
 /// [`attach_comsub_tails`] addresses one substitution at a time and finds it
@@ -1373,7 +1419,10 @@ fn walk_parts_in(
             *i = i.saturating_add(1);
             continue;
         }
-        for (_, w) in nested_parts_mut(p) {
+        for (kind, w) in nested_parts_mut(p) {
+            if kind == Nested::Index {
+                continue;
+            }
             walk_parts_in(w, want, n, i, act);
         }
     }

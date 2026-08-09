@@ -13900,7 +13900,7 @@ impl Shell {
                     }
                     if is_assoc {
                         // `name[key]=val` — associative element (string key).
-                        let key = self.expand_to_string(idx_word);
+                        let key = self.expand_subscript_key(idx_word);
                         // An empty key is rejected, not stored: bash has no
                         // representation for it. The diagnostic quotes the
                         // subscript's *source* (`m['']`, `m[""]`, `m[$blank]`),
@@ -13986,7 +13986,7 @@ impl Shell {
                             // (status 1) and the rest of the parse unit, but does
                             // NOT end the shell; as a `declare`/`local` operand
                             // it only fails the builtin and the line carries on.
-                            let src = self.expand_to_string(idx_word);
+                            let src = self.expand_subscript_key(idx_word);
                             let line = bfmt![
                                 self.err_prefix(),
                                 &a.name,
@@ -14165,7 +14165,7 @@ impl Shell {
                                 // literal separators, so expanding the two
                                 // halves and rejoining is exactly what bash
                                 // gets from expanding the whole word.
-                                let idx = self.expand_to_string(index);
+                                let idx = self.expand_subscript_key(index);
                                 let val = self.expand_to_string(value);
                                 let eq: &[u8] = if *append { b"]+=" } else { b"]=" };
                                 words.push(bfmt![b"[", &idx, eq, &val]);
@@ -14246,7 +14246,7 @@ impl Shell {
                     for e in items {
                         match e {
                             ArrayElem::Keyed { index, value, append } => {
-                                let key = self.expand_to_string(index);
+                                let key = self.expand_subscript_key(index);
                                 let val = self.expand_to_string(value);
                                 bail_if_expansion_failed!();
                                 self.xtrace_compound_elem(Some(&key), &val, *append);
@@ -14288,7 +14288,7 @@ impl Shell {
                         let elem_append = matches!(e, ArrayElem::Keyed { append: true, .. });
                         let (key, val) = match e {
                             ArrayElem::Keyed { index, value, .. } => {
-                                let key = self.expand_to_string(index);
+                                let key = self.expand_subscript_key(index);
                                 let val = self.expand_to_string(value);
                                 (Some(key), val)
                             }
@@ -15836,7 +15836,7 @@ impl Shell {
                 if self.assoc.contains_key(name) {
                     // An empty key names nothing an associative array can hold,
                     // and is reported exactly as an out-of-range index is.
-                    let key = self.expand_to_string(w);
+                    let key = self.expand_subscript_key(w);
                     if key.is_empty() {
                         return ElemValue::BadSubscript(name.clone());
                     }
@@ -15962,7 +15962,7 @@ impl Shell {
                     // array. The complaint quotes the subscript's *source*, so
                     // `m[$blank]` reports `$blank` rather than the nothing it
                     // expanded to.
-                    let key = self.expand_to_string(w);
+                    let key = self.expand_subscript_key(w);
                     if key.is_empty() {
                         self.berrln(&bfmt![
                             self.err_prefix(),
@@ -16001,7 +16001,7 @@ impl Shell {
                     };
                     let bound = self.elem_write_bound(name);
                     if idx < 0 && Self::resolve_index(idx, bound).is_none() {
-                        let src = self.expand_to_string(w);
+                        let src = self.expand_subscript_key(w);
                         let line =
                             bfmt![self.err_prefix(), name, b"[", &src, b"]: bad array subscript"];
                         self.berrln(&line);
@@ -17965,7 +17965,7 @@ impl Shell {
             ArrayIndex::Index(w) => {
                 // Associative subscripts are string keys, not arithmetic.
                 let val = if self.assoc.contains_key(name) {
-                    let key = self.expand_to_string(w);
+                    let key = self.expand_subscript_key(w);
                     // An empty key has no representation in an associative
                     // array, so reading one is "bad array subscript" — with the
                     // same two shapes as the negative-index case below: the
@@ -18003,7 +18003,7 @@ impl Shell {
                         if length {
                             // The echoed subscript is the *expansion* of the
                             // subscript word, so it can hold any byte.
-                            let src = self.expand_to_string(w);
+                            let src = self.expand_subscript_key(w);
                             let line =
                                 bfmt![self.err_prefix(), &src, b"]: bad array subscript\n"];
                             self.emit_stderr(&line);
@@ -24167,6 +24167,12 @@ impl Shell {
         // business, which [`Shell::expand_operand_fields`] already keeps there.
         let outer_at = std::mem::replace(&mut self.saw_at_list, false);
         let outer_q = std::mem::replace(&mut self.saw_quoted_at_list, false);
+        // A whole word is one `expand_word_internal` call and so owns its own
+        // `sindex` — see [`Shell::expand_word_annotated`], whose bookkeeping
+        // this is. It is *this* walk that an associative subscript's key comes
+        // out of, so it is here that the text after an abandoned extent read
+        // stops contributing.
+        let saved_consumed = std::mem::replace(&mut self.extent_consumed, false);
         for (idx, part) in word.parts.iter().enumerate() {
             match part {
                 WordPart::Literal(s) => {
@@ -24216,7 +24222,13 @@ impl Shell {
                     started = true;
                 }
             }
+            // The read left `sindex` at the end of the string, so the walk over
+            // it is simply over — literals and further expansions alike.
+            if self.extent_consumed {
+                break;
+            }
         }
+        self.extent_consumed = saved_consumed;
         let saw_at = std::mem::replace(&mut self.saw_at_list, outer_at);
         let saw_q = std::mem::replace(&mut self.saw_quoted_at_list, outer_q);
         broken.push(cur);
@@ -24644,7 +24656,23 @@ impl Shell {
             // and each run below sets its own.
             SplitMode::Fields | SplitMode::Text => false,
         };
+        // A whole word *is* one `expand_word_internal` call, so it owns a
+        // `sindex` of its own: an extent read that gave up in here consumes the
+        // rest of this word and nothing of whatever string it was expanded for.
+        // That is what makes an associative subscript's trailing text vanish —
+        // `c='A${m[$(fi)qq]}B'; echo "${c@P}"` reports twice, then
+        // `m: bad array subscript` for the *empty* key the abandoned read left,
+        // then `AB`. See [`Shell::extent_consumed`].
+        let saved_consumed = std::mem::replace(&mut self.extent_consumed, false);
         for (idx, part) in word.parts.iter().enumerate() {
+            // Asked at the *top* rather than at the tail, because the arms
+            // below reach the next part by `continue` as often as by falling
+            // off the end. Either way the read left `sindex` at the end of the
+            // string and the walk over it is simply over — literals and further
+            // expansions alike.
+            if self.extent_consumed {
+                break;
+            }
             match part {
                 WordPart::Literal(s) => {
                     self.push_literal_annotated(&mut cur, s, idx == 0);
@@ -25075,6 +25103,7 @@ impl Shell {
         if open {
             fields.push(cur);
         }
+        self.extent_consumed = saved_consumed;
         self.run_at_unjoins = saved_unjoins;
         fields
     }
@@ -29738,6 +29767,12 @@ impl Shell {
         // `${x!}`. Same for a `${x:off:len}` bound, whose two expressions are
         // expanded one at a time and so name themselves separately.
         let saved_src = self.enter_inner_source(crate::unparse::word_src(w));
+        // `expand_arith_string` is its own `expand_word_internal` call, so it is
+        // its own `sindex` — an extent read that gave up in here consumes the
+        // rest of *this* string and nothing of the word around it. Measured:
+        // `b='A${a[$(fi)]}B'; echo "${b@P}"` is `A0B`, the `B` surviving a
+        // subscript that swallowed itself. See [`Shell::extent_consumed`].
+        let saved_consumed = std::mem::replace(&mut self.extent_consumed, false);
         let mut out = Str::new();
         for part in &w.parts {
             match part {
@@ -29765,7 +29800,11 @@ impl Shell {
                     out.extend_from_slice(&s);
                 }
             }
+            if self.extent_consumed {
+                break;
+            }
         }
+        self.extent_consumed = saved_consumed;
         self.leave_inner_source(saved_src);
         out
     }
@@ -29773,6 +29812,24 @@ impl Shell {
     fn eval_arith_index(&mut self, w: &Word) -> i64 {
         let s = self.expand_to_arith_string(w);
         self.eval_arith_index_text(&s)
+    }
+
+    /// An **associative** subscript, expanded as the string key it is.
+    ///
+    /// bash's `expand_subscript_string (sub, 0)` (arrayfunc.c:1145), which is
+    /// ordinary word expansion — so unlike an index it is not arithmetic and
+    /// both quote forms come off. What it shares with an index is the *scope*:
+    /// it is a fresh `expand_word_internal` over a string of its own, so an
+    /// extent read that gave up in here consumes the subscript and nothing of
+    /// the word around it. Measured with `declare -A m`:
+    /// `c='A${m[$(fi)qq]}B'; echo "${c@P}"` reports twice, then
+    /// `m: bad array subscript` for the empty key it was left with, then `AB`.
+    /// The scope is the word walk's own ([`Shell::expand_word_joined_annotated`]),
+    /// so this adds nothing to it but the name — which is the point: the ten
+    /// callers all mean bash's `expand_subscript_string`, not "some string".
+    /// See [`Shell::extent_consumed`].
+    fn expand_subscript_key(&mut self, w: &Word) -> Str {
+        self.expand_to_string(w)
     }
 
     /// [`Self::eval_arith_index`] on a subscript that has *already* been word-

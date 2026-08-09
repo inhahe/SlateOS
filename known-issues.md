@@ -595,7 +595,7 @@ this text expands in `Q_DOUBLE_QUOTES`/`Q_HERE_DOCUMENT` as a whole) — and
 
 ---
 
-### TD-OILS-A-BRACE-SUBSCRIPT-IS-NOT-EXPANDED-AS-A-STRING-OF-ITS-OWN. `${a[$(fi)]}` names the whole word where bash names only the subscript — 2026-08-09 — OPEN
+### TD-OILS-A-BRACE-SUBSCRIPT-IS-NOT-EXPANDED-AS-A-STRING-OF-ITS-OWN. `${a[$(fi)]}` names the whole word where bash names only the subscript — 2026-08-09 — ✅ FIXED 2026-08-09
 
 **Where:** `userspace/oils/src/interp.rs`, the extent read behind
 `Shell::extent_consumed` and `unparse::attach_comsub_tails`, which have no
@@ -651,6 +651,113 @@ enclosing container, so the piece to add is a container boundary at the
 subscript rather than new tail machinery — and `Shell::extent_consumed` needs the
 same boundary, so an `Abandoned` read inside a subscript consumes the subscript
 and not the word.
+
+**Fixed** exactly as sketched, in two independent halves.
+
+*The tail.* `unparse::attach_comsub_tails` was split into a per-scope
+`attach_comsub_tails_in`, and a new `index_scopes` walks into every
+`Nested::Index` and runs that scope separately, while `walk_parts_in` now skips
+an `Index` so the enclosing scope never sees the parts inside one. Each scope
+therefore renders only its own text, and the tail a report quotes is the
+subscript's remainder. The retry's one-byte-shorter tail falls out of the
+existing `ep - base - 1` modelling, so `A${a[p$(fi)q]}B` gives `` `fi)q' `` then
+`` `fi)' `` and three reports come out of `${a[$(fi)+$(fi)]}` in the right order.
+
+*The consumption.* Three walks are bash's `expand_word_internal` and so own a
+`sindex`: `Shell::expand_double_quoted` (already did), `expand_to_arith_string`
+and `expand_word_joined_annotated` / `expand_word_annotated` — the last two now
+save-and-clear `Shell::extent_consumed` around their part loop and break out of
+it when the flag comes back set. `expand_word_annotated` asks at the *top* of
+the loop because its arms reach the next part by `continue` as often as by
+falling off the end. A new `Shell::expand_subscript_key` names bash's
+`expand_subscript_string` at the ten associative-key call sites; it adds nothing
+to the word walk's scope but the name.
+
+That second half is what makes an associative subscript report at all:
+`A${m[$(fi)qq]}B` leaves an **empty** key, which is `m: bad array subscript`,
+and expands to `AB`. An indexed one leaves an empty arithmetic string, which is
+0 — `A${a[$(fi)]}B${a[1]}C` is `A0B1C`, the word after the subscript untouched.
+
+**Corpus:**
+`a-brace-subscript-is-a-string-of-its-own-and-eats-its-own-tail.sh`.
+
+**Found while fixing it**, both pre-existing and both filed separately:
+TD-OILS-AN-ARITHMETIC-ERROR-UNDER-@P-STILL-ABANDONS-THE-COMMAND and
+TD-OILS-AN-INDIRECT-BRACE-EXPANDS-ITS-SUBSCRIPT-TWICE.
+
+---
+
+### TD-OILS-AN-ARITHMETIC-ERROR-UNDER-@P-STILL-ABANDONS-THE-COMMAND. `v='A${a[0p]}B'; echo "[${v@P}]"` prints nothing where bash prints `[A0B]` — 2026-08-09 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs`. `Shell::prompt_expanding` /
+`Shell::prompt_failed` stop the *jump* for a failed expansion, but an
+**arithmetic** error raised while evaluating a subscript (or any arithmetic
+inside the re-read prompt string) is not routed through them, so it aborts the
+enclosing command.
+
+**Reproduce** (`a=(0 1 2)`):
+
+```text
+v='A${a[0p]}B';           echo "[${v@P}]"
+w='A${a[${a[9x]}p]}B';    echo "[${w@P}]"
+i='A${a[\`fi\`]}B';       echo "[${i@P}]"      # value has a literal backslash-backquote
+```
+
+Both shells print the same `0p: value too great for base (error token is "0p")`
+diagnostics — bash then prints `[A0B]` (the failed subscript evaluating to 0,
+the word around it intact), osh prints nothing at all: the `echo` never runs.
+The third row is the same defect reached through the arithmetic tokenizer's
+`` `fi` ``: `` syntax error: operand expected ``, then bash `[A0B]` and osh
+nothing.
+
+**Why.** bash's prompt expansion runs under `SEVAL_NOLONGJMP`-equivalent
+protection for the *whole* string, so `expand_prompt_string` gets a NULL list
+back and `decode_prompt_string` shows what it had. osh models that only for the
+expansion-level failures `prompt_failed` covers.
+
+**Proper fix.** Route the arithmetic evaluator's fatal path through the same
+`prompt_failed` gate the expansion failures use, so under
+`Shell::prompt_expanding` it records the failure and returns 0 instead of
+raising. Note the *diagnostic* is unconditional in both shells — it is only the
+jump that `@P` suppresses.
+
+**Found by** the probe series for
+TD-OILS-A-BRACE-SUBSCRIPT-IS-NOT-EXPANDED-AS-A-STRING-OF-ITS-OWN.
+
+---
+
+### TD-OILS-AN-INDIRECT-BRACE-EXPANDS-ITS-SUBSCRIPT-TWICE. `${!m[$(f)]}` runs `f` twice — 2026-08-09 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs`, the `${!name[sub]}` indirection path.
+It resolves the reference once to *recognise* what it names and again to read
+it, and the subscript word is expanded on both walks — so any side effect in the
+subscript happens twice.
+
+**Reproduce:**
+
+```sh
+declare -A m=([k]=K)
+f(){ echo x >> /tmp/cnt; echo k; }
+: > /tmp/cnt; r="${!m[$(f)]}"; wc -l < /tmp/cnt   # bash: 1   osh: 2
+: > /tmp/cnt; r="${m[$(f)]}";  wc -l < /tmp/cnt   # bash: 1   osh: 1
+```
+
+Visible without side effects too, under `@P`, where the doubled expansion prints
+its command-substitution report twice as often as bash:
+`v='A${!m[$(fi)q]}B'; echo "[${v@P}]"` gives two reports in bash and four in osh
+(the value, `[AB]`, is the same).
+
+**Why.** `Shell::param_elem_lookup` already documents that a subscript costs a
+second nameref walk and that "resolving twice must not complain twice"; the
+indirection path has the same shape but re-expands the *subscript word* rather
+than reusing the text it already produced.
+
+**Proper fix.** Expand the subscript once and carry the resulting key/index
+through both walks — the same treatment `Shell::param_elem_lookup` gives the
+name.
+
+**Found by** the probe series for
+TD-OILS-A-BRACE-SUBSCRIPT-IS-NOT-EXPANDED-AS-A-STRING-OF-ITS-OWN.
 
 ---
 

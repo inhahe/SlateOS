@@ -1702,6 +1702,28 @@ struct DiscardAbort {
 /// — a direct call, with nothing in between to intercept. So the 2 stands
 /// wherever it was raised, in a script and inside a subshell alike, and such a
 /// site arms `demote: false`.
+/// How `xparse_dolparen`'s read of a `$( … )` extent came out — see
+/// [`Shell::comsub_reparse_read`].
+///
+/// A failed read *reports* either way; only the jump it raises afterwards is
+/// conditional, on `SX_NOLONGJMP`. So the three answers differ in what the
+/// caller does next, not in what the user saw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExtentRead {
+    /// The read found the `)` where the stored word says it is, so the body is
+    /// the body and the rest of the word is the word's.
+    Closed,
+    /// It did not parse, and the `jump_to_top_level` it raises stands: the
+    /// substitution never runs and the enclosing command is abandoned.
+    Aborted,
+    /// It did not parse, but the jump was suppressed (a prompt expansion), so
+    /// `command_substitute` still runs what the read handed back — the whole
+    /// remainder less one byte ([`Shell::failed_extent_body`]) — and the
+    /// caller's index is left at the end of the string
+    /// ([`Shell::extent_consumed`]).
+    Abandoned,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FatalAbort {
     /// The status the shell ends with where nothing intercepts the abort.
@@ -4623,6 +4645,25 @@ pub struct Shell {
     /// the text it started with, undecoded past that point. Measured:
     /// `v='a${x:-b'; echo "${v@P}"` prints the diagnostic and then `a${x:-b`.
     prompt_failed: bool,
+    /// Set when an extent-finding read gave up and left the caller's index at
+    /// the **end of the string**, so everything after the substitution is
+    /// consumed rather than expanded.
+    ///
+    /// Only reachable under [`Shell::prompt_expanding`], because otherwise the
+    /// failure jumps before the index matters. `xparse_dolparen` computes
+    /// `*indp = ep - base - 1` (parse.y:4349) from wherever the read stopped,
+    /// and a read that failed stopped at the end of the string —
+    /// `parse_string`'s `SEVAL_NOLONGJMP` branch does `reset_parser (); break;`
+    /// (builtins/evalstring.c:688-695) with the string reader having already
+    /// swallowed the whole text as one "line". So `param_expand` returns with
+    /// `sindex` past everything and `expand_word_internal` simply ends.
+    ///
+    /// Measured: `b='A$(fi)B${y}C'; echo "${b@P}"` is `A` — not only the literal
+    /// `B` and `C` but the `${y}` in between contribute nothing. The flag is
+    /// therefore honoured by the *string level* ([`Shell::expand_double_quoted`],
+    /// which is bash's `expand_word_internal`) rather than by any one part, and
+    /// is cleared there, since that is the scope bash's `sindex` belongs to.
+    extent_consumed: bool,
     /// The descriptor `$BASH_XTRACEFD` names, when it names a usable one — where
     /// the `set -x` trace goes instead of stderr. `None` is stderr.
     ///
@@ -5879,6 +5920,7 @@ impl Shell {
             xtrace: false,
             prompt_expanding: false,
             prompt_failed: false,
+            extent_consumed: false,
             xtrace_fd: None,
             xtrace_level: 0,
             noglob: false,
@@ -12256,6 +12298,7 @@ impl Shell {
             // other global.
             prompt_expanding: self.prompt_expanding,
             prompt_failed: false,
+            extent_consumed: false,
             xtrace: self.xtrace,
             // A fork inherits both the descriptor table and the variable, so it
             // inherits the diversion too — `BASH_XTRACEFD=8; ( set -x; … )`
@@ -25436,6 +25479,10 @@ impl Shell {
         // The quotes are part of the context the parts expand in, not just of
         // how their results are joined — see [`Shell::dquote`].
         let saved_dquote = std::mem::replace(&mut self.dquote, true);
+        // This call *is* bash's `expand_word_internal`, so it is the scope an
+        // abandoned extent read's `sindex` belongs to — see
+        // [`Shell::extent_consumed`].
+        let saved_consumed = std::mem::replace(&mut self.extent_consumed, false);
         let mut s = Str::new();
         for part in parts {
             match part {
@@ -25446,7 +25493,13 @@ impl Shell {
                     s.extend_from_slice(&self.expand_dynamic(other));
                 }
             }
+            // The read left `sindex` at the end of the string, so the walk over
+            // it is simply over — literals and further expansions alike.
+            if self.extent_consumed {
+                break;
+            }
         }
+        self.extent_consumed = saved_consumed;
         self.dquote = saved_dquote;
         self.leave_inner_source(saved);
         s
@@ -28667,11 +28720,24 @@ impl Shell {
                 // A `tail` of `None` says there was no first read to re-print, so
                 // there is no second one either — see
                 // [`crate::ast::CmdSubBody::Parsed::tail`].
-                if tail
-                    .as_ref()
-                    .is_some_and(|tail| self.comsub_reparse_fail(src, tail, *close_line, true))
-                {
-                    return Str::new();
+                let read = tail.as_ref().map_or(ExtentRead::Closed, |tail| {
+                    self.comsub_reparse_read(src, tail, *close_line, true)
+                });
+                match read {
+                    ExtentRead::Closed => {}
+                    ExtentRead::Aborted => return Str::new(),
+                    // The same suppression the `Unread` arm describes, over the
+                    // re-print instead of the source. bash runs the identical
+                    // `xparse_dolparen`, so a failed read here is abandoned the
+                    // identical way.
+                    ExtentRead::Abandoned => {
+                        let tail = tail.as_deref().unwrap_or_default();
+                        let body = Self::failed_extent_body(src, true, tail);
+                        self.extent_consumed = true;
+                        let map = LineMap::Offset(self.source_line().saturating_sub(1));
+                        let path = self.comsub_text_read_file(&body, &map);
+                        return self.command_sub(&body, &map, path);
+                    }
                 }
                 // Every body is numbered from the *shell's* current line — see
                 // the `Unread` arm below for the mechanism, which is the same
@@ -28702,18 +28768,21 @@ impl Shell {
                 // source to find the `)`. So a body that will not parse fails
                 // exactly where a re-print that will not parse fails — see
                 // [`crate::ast::CmdSubBody::Unread`].
-                if self.comsub_reparse_fail(src, tail, *close_line, *closed) {
-                    return Str::new();
-                }
-                // A body with no `)` always fails that read, so the only way
-                // past it is a prompt expansion, where the jump is suppressed
-                // and bash carries on to run what `xparse_dolparen` returns —
-                // one character less than the text, per its own arithmetic.
-                if !*closed {
-                    let src = Self::unclosed_comsub_body(src);
-                    let map = LineMap::Offset(self.source_line().saturating_sub(1));
-                    let path = self.comsub_text_read_file(&src, &map);
-                    return self.command_sub(&src, &map, path);
+                match self.comsub_reparse_read(src, tail, *close_line, *closed) {
+                    ExtentRead::Closed => {}
+                    ExtentRead::Aborted => return Str::new(),
+                    // The read gave up but the jump was suppressed, so bash
+                    // carries on to run what it handed back and leaves the
+                    // caller's index at the end of the string. A body with no
+                    // `)` is only ever this case — that read cannot succeed —
+                    // which is why it needs no branch of its own.
+                    ExtentRead::Abandoned => {
+                        let body = Self::failed_extent_body(src, *closed, tail);
+                        self.extent_consumed = true;
+                        let map = LineMap::Offset(self.source_line().saturating_sub(1));
+                        let path = self.comsub_text_read_file(&body, &map);
+                        return self.command_sub(&body, &map, path);
+                    }
                 }
                 // The body is numbered from the *shell's* current line, not from
                 // anything in the text it was written in — because there is no
@@ -28745,8 +28814,9 @@ impl Shell {
         }
     }
 
-    /// The text a `$( … )` with no closing `)` actually runs, on the one path
-    /// that gets that far — a prompt expansion, where the jump is suppressed.
+    /// The text a `$( … )` whose extent read **failed** actually runs, on the one
+    /// path that gets that far — a prompt expansion, where the jump is
+    /// suppressed.
     ///
     /// `xparse_dolparen` reports where its read stopped and then hands the
     /// caller everything up to one byte short of it:
@@ -28758,33 +28828,45 @@ impl Shell {
     ///   ret = (nc == 0) ? "" : substring (ostring, 0, nc - 1);   /* parse.y:4348-4376 */
     /// ```
     ///
-    /// The `nc - 1` is there to drop the `)` a body that closed would end with.
-    /// One that did not close has no `)` to drop, so it loses a real character
-    /// instead — measured against bash 5.2.37: `v='a$(echo'; : "${v@P}"` reports
-    /// the unterminated read and then complains that `ech` is not a command.
-    fn unclosed_comsub_body(src: BStr<'_>) -> Str {
-        let end = src.iter().rposition(|&b| b != b'\n').map_or(0, |i| i.saturating_add(1));
-        src.get(..end.saturating_sub(1)).unwrap_or_default().to_vec()
+    /// The `nc - 1` is there to drop the `)` a *successful* read ends on. A
+    /// failed one stopped at the end of the string instead, so it drops a real
+    /// character — and `ostring` is the whole remainder after the `$(`, not the
+    /// body, because that is what `extract_command_subst` was handed. Hence the
+    /// `)` and the `tail`: measured against bash 5.2.37, `d='A$(fi)B'` runs
+    /// `fi)` and `g='A$(fi)B$(echo hi)C'` runs `fi)B$(echo hi)`.
+    ///
+    /// The newline strip is guarded on `ep[-1] != ')'`, but the guard cannot
+    /// change the answer: if the last byte is a `)` there are no trailing
+    /// newlines to strip, so taking the last non-newline either way is the same
+    /// text.
+    fn failed_extent_body(src: BStr<'_>, closed: bool, tail: BStr<'_>) -> Str {
+        let mut s = src.to_vec();
+        if closed {
+            s.push(b')');
+        }
+        s.extend_from_slice(tail);
+        let end = s.iter().rposition(|&b| b != b'\n').map_or(0, |i| i.saturating_add(1));
+        s.truncate(end.saturating_sub(1));
+        s
     }
 
     /// Run bash's `xparse_dolparen` read over a `$( … )` body and, if it does
-    /// not parse, report it and arm the abort it raises. `true` says the body
-    /// never ran.
+    /// not parse, report it and arm the abort it raises. See [`ExtentRead`].
     ///
     /// The read is the same one whether it is a re-print ([`CmdSubBody::Parsed`])
     /// or the source ([`CmdSubBody::Unread`]) that is being re-read, because in
     /// bash it is literally the same call: `extract_command_subst` runs
     /// `xparse_dolparen` over whatever text the stored word holds. `closed` says
     /// whether that text ever held a `)`; see [`CmdSubBody::Unread::closed`].
-    fn comsub_reparse_fail(
+    fn comsub_reparse_read(
         &mut self,
         src: BStr<'_>,
         tail: BStr<'_>,
         close_line: u32,
         closed: bool,
-    ) -> bool {
+    ) -> ExtentRead {
         let Some((err, nested)) = self.comsub_reparse_error(src, tail, close_line, closed) else {
-            return false;
+            return ExtentRead::Closed;
         };
         self.berrln(&err);
         // The report is unconditional; only the *jump* can be suppressed.
@@ -28803,7 +28885,7 @@ impl Shell {
         // second time in the child and reports it a second time. See
         // [`Shell::prompt_expanding`].
         if self.prompt_expanding {
-            return false;
+            return ExtentRead::Abandoned;
         }
         if nested {
             // A `$( … )` *inside* the text that will not parse is
@@ -28839,7 +28921,7 @@ impl Shell {
             // no `hi` where the two on separate lines would.
             self.arm_discard(1);
         }
-        true
+        ExtentRead::Aborted
     }
 
     /// The diagnostic bash raises when a `$( … )` body's *re-print* does not

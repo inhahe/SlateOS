@@ -176,7 +176,7 @@ all below.
 
 ---
 
-### TD-OILS-A-FAILED-EXTENT-PARSE-CONSUMES-THE-REST-OF-THE-STRING. `v='$(fi)tail'; echo "${v@P}"` prints `tail`; bash prints nothing — 2026-08-09 — OPEN
+### TD-OILS-A-FAILED-EXTENT-PARSE-CONSUMES-THE-REST-OF-THE-STRING. `v='$(fi)tail'; echo "${v@P}"` prints `tail`; bash prints nothing — 2026-08-09 — ✅ RESOLVED 2026-08-09
 
 **Where:** `userspace/oils/src/interp.rs`, `command_sub_body_inner`'s
 `CmdSubBody::Unread` arm — the `self.prompt_expanding` path, which today runs
@@ -232,6 +232,82 @@ with text after it, inside a prompt string) that nothing else reaches.
 
 **Corpus:** `a-here-document-body-is-not-a-word-the-parser-read.sh` deliberately
 puts nothing after the substitution on its prompt rows, and says so.
+
+**Resolved.** Both halves, and the second turned out far less invasive than the
+sketch feared. `Shell::comsub_reparse_read` now answers with an `ExtentRead`
+rather than a bool, so the caller can tell "the read found its `)`" from "the
+read failed but the jump was suppressed"; the latter runs
+`Shell::failed_extent_body` — the whole remainder (`src`, then `)` if it closed,
+then `tail`) less its last byte — and sets `Shell::extent_consumed`.
+`expand_double_quoted`, which *is* bash's `expand_word_internal`, breaks its
+part walk on that flag and clears it, which is exactly the scope bash's `sindex`
+belongs to. No general word-expansion surgery was needed.
+
+**This subsumed the unclosed-`$(` case.** `Shell::unclosed_comsub_body` is gone:
+a body with no `)` is simply a read that cannot succeed, so it is the same
+`ExtentRead::Abandoned` path with an empty `tail`, and the same one-byte
+arithmetic. Two branches became one rule.
+
+**The consumption is the string's, not the word's.** Measured:
+`b='A$(fi)B${y}C'; echo "${b@P}"` is `A` — the `${y}` between the literals is
+skipped too, so the flag had to be honoured by the part *loop* rather than by
+literal concatenation. Likewise `g='A$(fi)B$(echo hi)C'` is `A`, the second
+substitution never running because its text is inside the body the first one
+swallowed (bash echoes that body as `` `fi)B$(echo hi)' ``).
+
+**Corpus:** `a-failed-extent-parse-consumes-the-rest-of-the-string.sh`.
+
+---
+
+### TD-OILS-A-FAILED-EXTENT-PARSE-INSIDE-A-BRACE-OPERAND-DOES-NOT-KILL-THE-BRACE. `v='A${y:-p$(fi)q}B'; echo "${v@P}"` expands the brace; bash calls the whole thing a bad substitution — 2026-08-09 — OPEN
+
+**Where:** `userspace/oils/src/parser.rs`, `dquote_word_from_source` — which lexes
+the whole string into parts *before* anything is expanded, so a `${ … }` finds
+its `}` at lex time and the body's parse failure is only discovered later, in
+`Shell::command_sub_body_inner`.
+
+**Reproduce** (prompt expansion only — `${x@P}`, `PS1`, `PS4`):
+
+| value | bash | osh |
+|---|---|---|
+| `A${y:-p$(fi)q}B` | `A${y:-p$(fi)q}B` + `bad substitution` | `AYB` |
+| `A${y:+m$(fi)n}B` | `A${y:+m$(fi)n}B` + `bad substitution` | `Amn` |
+| `A${y/$(fi)/z}B` | `A${y/$(fi)/z}B` + `bad substitution` | matches ✓ |
+
+(with `y=Y`. bash also emits the extent read's own
+`command substitution: … syntax error near unexpected token `fi'` first.)
+
+**Why.** This is the same mechanism as
+TD-OILS-A-FAILED-EXTENT-PARSE-CONSUMES-THE-REST-OF-THE-STRING, one level in.
+`extract_dollar_brace_string` carries `SX_COMMAND`, so on meeting the `$(` it
+calls `extract_command_subst` *during its own scan*. That read fails and leaves
+the index at the end of the string, so the brace scan resumes past everything
+and never finds its `}`. Under `no_longjmp_on_fatal_error` its EOF branch sets
+`*sindex` past the text and returns NULL instead of jumping, and `param_expand`
+turns the NULL into its own `bad substitution` naming the whole text — after
+which `expand_prompt_string` returns NULL and the caller keeps the *undecoded*
+string. Hence the text coming back unchanged.
+
+osh cannot reach that shape because its scan and its body-parse happen at
+different times: by the time the `$(fi)` is known to be unparseable, the brace
+has long since been matched and turned into a `WordPart`. Note the third row
+matches anyway — a pattern operand takes a different path that already fails.
+
+**Proper fix.** Run the extent parse *during* the scan for text no parser read,
+i.e. have `dquote_word_from_source`'s lexer call `parser::comsub_reprint_error`'s
+machinery when it meets a `$(` in unread text, and on failure consume to end of
+string so the enclosing `${` scan runs off the end exactly as bash's does. That
+is a real inversion of osh's lex-then-expand order for this one path, which is
+why it is not done here — it wants its own change, with the `Seg`/`Unclosed`
+plumbing from the unterminated-constructs work reused for the "brace ran off the
+end" outcome.
+
+**Impact.** Prompt expansions only, and only where a syntax-error `$( … )` sits
+inside a `${ … }` operand. The top-level shapes — by far the reachable ones —
+are byte-exact.
+
+**Found by** the measurement pass for
+TD-OILS-A-FAILED-EXTENT-PARSE-CONSUMES-THE-REST-OF-THE-STRING.
 
 ---
 

@@ -849,6 +849,19 @@ pub enum WordPart {
         /// the one literal run — the eager parse already happened, and its
         /// second read is the arithmetic expansion's own rather than the scan's.
         parts: Vec<WordPart>,
+        /// The word's text *after* this arithmetic, as the expansion sees it.
+        ///
+        /// bash does not read a `$((` as a unit at all: `param_expand`'s `case
+        /// LPAREN` hands the whole remaining string to
+        /// `extract_delimited_string` (subst.c:1284-1286), a paren count that
+        /// runs on into whatever follows. Where that count stops is therefore
+        /// not a property of the arithmetic — a `#` comment inside it eats the
+        /// `))` and keeps going, and a nested `$( … )` that will not parse
+        /// leaves the count somewhere in the middle of the string. So the
+        /// scan needs its remainder, exactly as a `$( … )` needs
+        /// [`CmdSubBody::Unread::tail`], and it is filled by the same pass —
+        /// `unparse::attach_comsub_tails`, once the whole word is assembled.
+        tail: Str,
     },
     /// `${#name}` — the length of the parameter's value.
     Length(String),

@@ -1323,7 +1323,37 @@ fn attach_comsub_tails_in(parts: &mut [WordPart]) {
             }
         )
     };
-    let total = walk_parts(parts, &is_comsub, usize::MAX, &mut |_| {});
+    attach_tails_by(parts, &is_comsub, &mut |p, tail| match p {
+        WordPart::CommandSub { body: CmdSubBody::Parsed { tail: t, .. } } => *t = Some(tail),
+        WordPart::CommandSub { body: CmdSubBody::Unread { tail: t, .. } } => *t = tail,
+        _ => {}
+    });
+    // A `$(( … ))` wants the same remainder, and for a stronger reason: its
+    // extent is not the parser's `))` at all but wherever
+    // `extract_delimited_string`'s paren count stops, which depends on
+    // everything after it. See [`crate::ast::WordPart::ArithSub::tail`].
+    //
+    // A second pass rather than a second row in `is_comsub`, because
+    // [`walk_parts`] does not descend into a part it has matched — and a
+    // `$( … )` *inside* the arithmetic needs its own remainder too, which runs
+    // past the `))`.
+    let is_arith = |p: &WordPart| matches!(p, WordPart::ArithSub { .. });
+    attach_tails_by(parts, &is_arith, &mut |p, tail| {
+        if let WordPart::ArithSub { tail: t, .. } = p {
+            *t = tail;
+        }
+    });
+}
+
+/// The sentinel-swap [`attach_comsub_tails_in`] runs once per kind of part that
+/// needs to know what follows it: replace the `k`-th part `want` accepts by a
+/// marker, render the whole word, and hand `set` everything after the marker.
+fn attach_tails_by(
+    parts: &mut [WordPart],
+    want: &dyn Fn(&WordPart) -> bool,
+    set: &mut dyn FnMut(&mut WordPart, Str),
+) {
+    let total = walk_parts(parts, want, usize::MAX, &mut |_| {});
     if total == 0 {
         return;
     }
@@ -1345,7 +1375,7 @@ fn attach_comsub_tails_in(parts: &mut [WordPart]) {
         // makes this exact: `part_src` renders a parsed body from `prog`, so
         // there is nothing in `src` for a marker to ride in on.
         let mut saved = WordPart::Literal(Str::new());
-        walk_parts(parts, &is_comsub, k, &mut |p| {
+        walk_parts(parts, want, k, &mut |p| {
             saved = std::mem::replace(p, WordPart::Literal(sent.clone()));
         });
         let text = parts_src(parts);
@@ -1355,15 +1385,7 @@ fn attach_comsub_tails_in(parts: &mut [WordPart]) {
             .to_vec();
         walk_parts(parts, &is_marker, 0, &mut |p| {
             *p = std::mem::replace(&mut saved, WordPart::Literal(Str::new()));
-            match p {
-                WordPart::CommandSub { body: CmdSubBody::Parsed { tail: t, .. } } => {
-                    *t = Some(std::mem::take(&mut tail));
-                }
-                WordPart::CommandSub { body: CmdSubBody::Unread { tail: t, .. } } => {
-                    *t = std::mem::take(&mut tail);
-                }
-                _ => {}
-            }
+            set(p, std::mem::take(&mut tail));
         });
     }
 }

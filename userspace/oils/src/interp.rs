@@ -1731,6 +1731,22 @@ enum ExtentRead {
     },
 }
 
+/// How one frame of a `$(( … ))`'s paren count came out — see
+/// [`Shell::arith_extent_frame`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArithFrame {
+    /// The count met the `)` that closed it, at this index. bash's `*sindex`
+    /// exactly: the *last byte of the closer*, which every caller resumes one
+    /// past.
+    Closed(usize),
+    /// The string ran out with the count still open — bash's
+    /// `c == 0 && nesting_level` (subst.c:1493).
+    RanOut,
+    /// A nested `$( … )` would not parse and its `jump_to_top_level` stands, so
+    /// the count never returns at all.
+    Aborted,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FatalAbort {
     /// The status the shell ends with where nothing intercepts the abort.
@@ -26126,26 +26142,289 @@ impl Shell {
     /// text: measured, `v='A$[1+$(fi)]B'; echo "${v@P}"` quotes `` `fi)' ``
     /// where the `$((` spelling quotes `` `fi)]B' ``. The parts are still
     /// recorded for it, because an *enclosing* `${ … }` scan does read them.
-    fn arith_extent_scan(&mut self, part: &WordPart, bracket: bool) -> bool {
+    ///
+    /// So the count is run here for real, over the arithmetic's own text
+    /// *followed by the rest of the word* ([`WordPart::ArithSub::tail`]), and
+    /// what it hands back drives the rest of `param_expand`'s `case LPAREN`:
+    ///
+    /// ```c
+    ///   temp = extract_command_subst (string, &t_index, …);
+    ///   zindex = t_index;
+    ///   if (temp && *temp == LPAREN)
+    ///     {
+    ///       temp1 = temp + 1;  temp2 = savestring (temp1);
+    ///       t_index = strlen (temp2) - 1;
+    ///       if (temp2[t_index] != RPAREN)   goto comsub;
+    ///       temp2[t_index] = '\0';
+    ///       if (chk_arithsub (temp2, t_index) == 0)  goto comsub;
+    ///       …evaluate temp2 as arithmetic…
+    ///     }
+    ///  comsub:
+    ///   tdesc = command_substitute (temp, quoted, …);   /* subst.c:10575-10640 */
+    /// ```
+    ///
+    /// Where the count agrees with the parser — which is every ordinary
+    /// `$(( … ))` — the extent is `(expr)`, the two tests pass and `expr` is
+    /// evaluated exactly as before, with the caller left to walk on over the
+    /// word's remaining parts. Where it does not, this takes the whole
+    /// remainder over: the parts after it are text the count already crossed.
+    fn arith_extent_expand(
+        &mut self,
+        expr: BStr<'_>,
+        bracket: bool,
+        parts: &[WordPart],
+        tail: BStr<'_>,
+    ) -> Str {
         if bracket {
-            return false;
+            return self.arith_sub(expr, true);
         }
-        match self.extent_read_of(part) {
-            ExtentRead::Closed => false,
-            ExtentRead::Aborted => true,
-            ExtentRead::Abandoned { .. } => {
-                // The read swallowed the rest of the string, so nothing after
-                // the `$((` is looked at either — see
-                // [`Shell::extent_consumed`].
-                //
-                // A read that stopped part way down leaves the paren count to
-                // carry on from there, which is a different ending — measured,
-                // `A$((1+$(fi⏎echo x⏎)))B` gives `[A)B]` where the one-line
-                // shape gives `[A]`. Not reproduced yet; see
-                // TD-OILS-AN-ARITHMETIC-EXTENT-CARRIES-ON-COUNTING-AFTER-A-FAILED-READ
-                // in known-issues.md.
+        // What `extract_command_subst` is handed: the string from the byte
+        // after the `$(`, which for a `$((` is its second `(`.
+        let s = bfmt![b"(", &crate::unparse::parts_src(parts), b"))", tail];
+        let end = match self.arith_extent_frame(&s, 0) {
+            // A nested read whose jump stands abandons the enclosing command
+            // before any of this matters.
+            ArithFrame::Aborted => {
                 self.extent_consumed = true;
-                true
+                return Str::new();
+            }
+            // `c == 0 && nesting_level`, the one ending this count has:
+            // subst.c:1493-1506. See [`Shell::arith_unclosed_by_comment`].
+            ArithFrame::RanOut => return self.arith_unclosed_by_comment(expr),
+            ArithFrame::Closed(end) => end,
+        };
+        // `temp1 = temp + 1` — the extent less its opening `(`.
+        let temp1 = s.get(1..end).unwrap_or_default();
+        let arith = temp1.split_last().and_then(|(last, head)| {
+            (*last == b')' && Self::chk_arithsub(head)).then(|| head.to_vec())
+        });
+        let rest = s.get(end.saturating_add(1)..).unwrap_or_default().to_vec();
+        match arith {
+            // The ordinary shape, and the only one that leaves the caller's
+            // walk alone: the count stopped where the parser's `))` is, so the
+            // parts after it are still the parts to expand.
+            Some(t2) if t2 == expr && rest == tail => self.arith_sub(expr, false),
+            Some(t2) => {
+                let out = self.arith_sub(&t2, false);
+                self.extent_consumed = true;
+                let rest = self.expand_extent_rest(&rest);
+                bfmt![&out, &rest]
+            }
+            // `goto comsub`, with `temp` — the extent *including* its leading
+            // `(`, which is why the child's diagnostic echoes `` `(1+$(fi' ``
+            // and not `` `1+$(fi' ``.
+            None => {
+                let out = self.run_command_sub_text(s.get(..end).unwrap_or_default());
+                self.extent_consumed = true;
+                let rest = self.expand_extent_rest(&rest);
+                bfmt![&out, &rest]
+            }
+        }
+    }
+
+    /// bash's `chk_arithsub` (subst.c:9487-9528): are the parens in `s`
+    /// balanced, counting only those a quote does not hide?
+    ///
+    /// A negative running count returns 0 early — "a valid arithmetic
+    /// expression must always have a `(` before a matching `)`" — so the answer
+    /// is not simply "equal numbers".
+    fn chk_arithsub(s: BStr<'_>) -> bool {
+        let mut count = 0i64;
+        let mut i = 0usize;
+        while let Some(&c) = s.get(i) {
+            match c {
+                b'(' => count = count.saturating_add(1),
+                b')' => {
+                    count = count.saturating_sub(1);
+                    if count < 0 {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+            i = match c {
+                // The escaped byte is stepped over whatever it is.
+                b'\\' => i.saturating_add(2),
+                b'\'' => Self::skip_single_quoted(s, i.saturating_add(1)),
+                b'"' => Self::skip_double_quoted(s, i.saturating_add(1)),
+                _ => i.saturating_add(1),
+            };
+        }
+        count == 0
+    }
+
+    /// One frame of bash's `extract_delimited_string (string, sindex, "$(",
+    /// "(", ")", SX_COMMAND)` (subst.c:1359-1519) over `s`, entered with
+    /// `sindex == from`.
+    ///
+    /// The frame's `nesting_level` never rises above 1 here, because every
+    /// nested opener is handed to a recursive call rather than counted — so the
+    /// answer is "the index of the first `)` this frame reaches", and the
+    /// caller resumes at `si + 1` exactly as bash does.
+    ///
+    /// The rows that make this more than a paren match are `SX_COMMAND`'s: a
+    /// `#` where a word could start opens a comment that runs to the end of the
+    /// line — taking a `))` with it — and a nested `$( … )` is handed to a real
+    /// parse ([`Shell::arith_nested_read`]) rather than stepped over. Quotes,
+    /// backslashes and backquotes are passed through verbatim.
+    ///
+    /// One gap against the C: `skip_double_quoted` (subst.c:1023-1083) reads a
+    /// `${ … }` inside the quotes with `extract_dollar_brace_string`, and this
+    /// does not — a `"` written inside such a brace ends the run here where
+    /// bash would step over the whole brace.
+    fn arith_extent_frame(&mut self, s: BStr<'_>, from: usize) -> ArithFrame {
+        let mut i = from;
+        let mut in_comment = false;
+        let mut pass = false;
+        loop {
+            let Some(&c) = s.get(i) else {
+                return ArithFrame::RanOut;
+            };
+            if in_comment {
+                in_comment = c != b'\n';
+                i = i.saturating_add(1);
+                continue;
+            }
+            if pass {
+                pass = false;
+                i = i.saturating_add(1);
+                continue;
+            }
+            // `(flags & SX_COMMAND) && c == '#' && (i == 0 || string[i-1] ==
+            // '\n' || shellblank (string[i-1]))` — subst.c:1415. The `i == 0`
+            // half is the *word's* first byte, which is the `$` of the `$((`
+            // and so never this; a recursive frame does not get its own, which
+            // is why `$((#5))` is arithmetic and not a comment.
+            if c == b'#'
+                && matches!(s.get(i.wrapping_sub(1)), Some(b'\n' | b' ' | b'\t'))
+            {
+                in_comment = true;
+                i = i.saturating_add(1);
+                continue;
+            }
+            if c == b'\\' {
+                pass = true;
+                i = i.saturating_add(1);
+                continue;
+            }
+            if c == b'$' && s.get(i.saturating_add(1)) == Some(&b'(') {
+                let si = i.saturating_add(2);
+                // `extract_command_subst` splits on what follows the `$(`: a
+                // second `(` is another delimited count, anything else is a
+                // parse. Either way `i = si + 1` (subst.c:1431-1437).
+                let inner = if s.get(si) == Some(&b'(') {
+                    self.arith_extent_frame(s, si)
+                } else {
+                    self.arith_nested_read(s, si)
+                };
+                match inner {
+                    ArithFrame::Closed(j) => i = j.saturating_add(1),
+                    other => return other,
+                }
+                continue;
+            }
+            // The alt_opener row: a bare `(` opens a count of its own
+            // (subst.c:1449-1456).
+            if c == b'(' {
+                match self.arith_extent_frame(s, i.saturating_add(1)) {
+                    ArithFrame::Closed(j) => i = j.saturating_add(1),
+                    other => return other,
+                }
+                continue;
+            }
+            if c == b')' {
+                return ArithFrame::Closed(i);
+            }
+            // `string_extract (string, &si, "`", …)` leaves `si` on the closing
+            // backquote, or at the end of the string; then `i = si + 1`, which
+            // is how an unclosed one runs the count out.
+            if c == b'`' {
+                let mut j = i.saturating_add(1);
+                while s.get(j).is_some_and(|&b| b != b'`') {
+                    j = j.saturating_add(1);
+                }
+                i = j.saturating_add(1);
+                continue;
+            }
+            i = match c {
+                b'\'' => Self::skip_single_quoted(s, i.saturating_add(1)),
+                b'"' => Self::skip_double_quoted(s, i.saturating_add(1)),
+                _ => i.saturating_add(1),
+            };
+        }
+    }
+
+    /// bash's `skip_single_quoted` (subst.c:997): the index just past the `'`
+    /// closing the run that starts at `sind`, or the end of `s`. Nothing
+    /// escapes inside single quotes.
+    fn skip_single_quoted(s: BStr<'_>, sind: usize) -> usize {
+        let mut i = sind;
+        while s.get(i).is_some_and(|&b| b != b'\'') {
+            i = i.saturating_add(1);
+        }
+        i.saturating_add(1).min(s.len())
+    }
+
+    /// bash's `skip_double_quoted` (subst.c:1023): the index just past the `"`
+    /// closing the run that starts at `sind`, or the end of `s`. A backslash
+    /// escapes and a backquote hides a `"`; see [`Shell::arith_extent_frame`]
+    /// for the `${ … }` row this leaves out.
+    fn skip_double_quoted(s: BStr<'_>, sind: usize) -> usize {
+        let mut i = sind;
+        let mut pass = false;
+        let mut backquote = false;
+        while let Some(&c) = s.get(i) {
+            if pass {
+                pass = false;
+            } else if c == b'\\' {
+                pass = true;
+            } else if backquote {
+                backquote = c != b'`';
+            } else if c == b'`' {
+                backquote = true;
+            } else if c == b'"' {
+                return i.saturating_add(1);
+            }
+            i = i.saturating_add(1);
+        }
+        s.len()
+    }
+
+    /// The nested-`$( … )` row of [`Shell::arith_extent_frame`]: a *real* parse
+    /// of the substitution at `si`, run for its extent alone.
+    ///
+    /// `SX_NOALLOC` means the extent is thrown away, so nothing here runs —
+    /// measured, none of the `A$((1+$(fi⏎echo x⏎)))B` shapes prints a
+    /// `command not found` from the body, only the parse's own diagnostic.
+    /// Where the parse fails and the jump is suppressed, `*indp` comes back on
+    /// the byte before the reader's stop and the count resumes there; that is
+    /// the whole of why a multi-line failure ends differently from a one-line
+    /// one. See [`Shell::comsub_reparse_read`].
+    fn arith_nested_read(&mut self, s: BStr<'_>, si: usize) -> ArithFrame {
+        let rest = s.get(si..).unwrap_or_default().to_vec();
+        let opts = self.parse_opts();
+        let (src, tail, closed) = match crate::lexer::scan_cmdsub_body(&rest, opts) {
+            Some((body, past)) => {
+                let tail = rest.get(past..).unwrap_or_default().to_vec();
+                (body, tail, true)
+            }
+            None => (rest.clone(), Str::new(), false),
+        };
+        match self.comsub_reparse_read(&src, &tail, closed) {
+            // `*sindex` comes back on the `)` the read ended at.
+            ExtentRead::Closed => ArithFrame::Closed(si.saturating_add(src.len())),
+            ExtentRead::Aborted => ArithFrame::Aborted,
+            ExtentRead::Abandoned { rest: leftover, .. } => {
+                // `*indp = ep - base - 1`, so the caller's `i = si + 1` lands
+                // on `ep` — the first byte of what the read did not take.
+                let ep = rest.len().saturating_sub(leftover.len());
+                match ep.checked_sub(1) {
+                    Some(j) => ArithFrame::Closed(si.saturating_add(j)),
+                    // A read that took nothing at all leaves `*indp` before the
+                    // `$(`; the count then re-reads from there, which cannot
+                    // terminate, so treat it as the string running out.
+                    None => ArithFrame::RanOut,
+                }
             }
         }
     }
@@ -26461,13 +26740,12 @@ impl Shell {
             // `param_expand` extracts the whole `$(( … ))` before it expands a
             // byte of it, and a `$( … )` inside is really parsed there. See
             // [`Shell::arith_extent_scan`].
-            WordPart::ArithSub { expr, bracket, .. } => {
-                if self.arith_extent_scan(part, *bracket) {
-                    Str::new()
-                } else {
-                    self.arith_sub(expr, *bracket)
-                }
-            }
+            WordPart::ArithSub {
+                expr,
+                bracket,
+                parts,
+                tail,
+            } => self.arith_extent_expand(expr, *bracket, parts, tail),
             WordPart::ArrayRef {
                 name,
                 index,
@@ -30444,8 +30722,31 @@ impl Shell {
     /// `set -e; echo $(( #5 ))` exits; `set -o posix; echo $(( #5 ))` complains
     /// and runs the next line — the mirror image of an ordinary arithmetic
     /// error, which posix mode makes fatal and errexit lets through.
+    ///
+    /// A prompt expansion gets neither the report nor the jump. Both live in the
+    /// same `if` and the flag chooses between them:
+    ///
+    /// ```c
+    ///   if (c == 0 && nesting_level)
+    ///     {
+    ///       if (no_longjmp_on_fatal_error == 0)
+    ///         { … report_error (…); exp_jump_to_top_level (DISCARD); }
+    ///       else
+    ///         { *sindex = i; return (char *)NULL; }   /* subst.c:1493-1506 */
+    ///     }
+    /// ```
+    ///
+    /// `i` is the end of the string, so the `$((` contributes nothing *and*
+    /// takes everything after it with it — [`Shell::extent_consumed`], the same
+    /// ending a `$( … )` extent that ran the string out gets. Measured against
+    /// bash 5.2.37: `a='A$(( 1 # )) B'; "${a@P}"` is `[A]` in silence, and
+    /// `c='A$(( 1 # )) B$(echo Z)C'` is `[A]` too — the `echo Z` never runs.
     fn arith_unclosed_by_comment(&mut self, expr: BStr<'_>) -> Str {
         if self.unbound_error.is_some() || self.discard_error.is_some() {
+            return Str::new();
+        }
+        if self.prompt_expanding {
+            self.extent_consumed = true;
             return Str::new();
         }
         // Not `bad_sub_word`: this complaint is the scanner's, and the scanner

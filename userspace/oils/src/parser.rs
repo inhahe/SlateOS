@@ -6163,7 +6163,10 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
             // [`CmdSubSpan::kind`]), so the splice above and this never both
             // have work to do and the ranges cannot have moved under it.
             let parts = arith_unread_subs(&expr, nested);
-            WordPart::ArithSub { expr, bracket: *bracket, parts }
+            // The remainder is filled by `unparse::attach_comsub_tails` once
+            // the word is assembled — a segment cannot see its own siblings
+            // from here. See [`crate::ast::WordPart::ArithSub::tail`].
+            WordPart::ArithSub { expr, bracket: *bracket, parts, tail: Str::new() }
         }
         Seg::ProcSub(input, raw, open_line) => WordPart::ProcSub {
             input: *input,

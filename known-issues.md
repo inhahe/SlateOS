@@ -45131,7 +45131,9 @@ back to — `for` cannot be followed by a subshell — so a header that fails th
 test is simply an error.
 
 **Pinned by**
-`tests/corpus/an-arithmetic-command-needs-its-closing-parentheses-adjacent.sh`.
+`tests/corpus/an-arithmetic-command-needs-its-closing-parentheses-adjacent.sh`,
+and — for how the `for` header's failure reads —
+`tests/corpus/an-arithmetic-for-header-that-fails-the-adjacency-test-is-blamed-by-position.sh`.
 What is left over is message-only, and is
 TD-OILS-A-REWOUND-ARITHMETIC-COMMAND-IS-NOT-REWOUND-THE-WAY-BASH-REWINDS-IT.
 
@@ -45145,8 +45147,9 @@ is what put it there).
 **What.** osh rewinds a non-adjacent `(( … ) )` by moving the cursor back and
 re-lexing the *original source*. bash instead pushes a **reconstructed string**
 — `(` + body + `)` + the one character its adjacency test read — into the input
-and parses that. The two agree on everything that parses, and differ in four
-places where something does not:
+and parses that. The two agree on everything that parses, and differed in four
+places where something does not. **The fourth — the `for` header — is fixed as
+of 2026-08-08** (see *Fixed: the `for` header* below); three remain:
 
 ```text
 (( ) )                    bash: line 1: syntax error near unexpected token `)'
@@ -45163,11 +45166,7 @@ places where something does not:
 
 ((1+1)\<nl>) && echo hit  bash: line 2: syntax error near unexpected token `'
                                 line 2: `) && echo hit'
-                          osh:  line 1: 1+1: command not found
-
-for ((i=0;i<1;i++) ) ; …  bash: line 1: syntax error near `)'
-                                line 1: `for ((i=0;i<1;i++) ) ; do echo $i; done'
-                          osh:  line 1: syntax error: malformed arithmetic expansion
+                          osh:  line 2: 1+1: command not found
 ```
 
 **Why each one.**
@@ -45191,24 +45190,51 @@ re-parse desynchronises and reports `unexpected token `'` — with an **empty**
 token name — on the line the second `)` ended up on. osh's rewind loses nothing
 and simply runs the subshells.
 
-*The `for` header.* Failing the adjacency test in a `for` header makes
-`parse_dparen` return −1, which yylex hands to yacc as a value ≤ 0 — i.e. as
-the EOF token, though `EOF_Reached` is not set. So `report_syntax_error` takes
-its ordinary path and `error_token_from_text` slices the input at
-`shell_input_line_index`, which is parked one past the character the test read.
-That index lands *on* the second `)`, the scan back stops immediately at the
-space before it, and the slice is the single character `)`. osh raises a lexer
-error whose text is `malformed arithmetic expansion` and echoes no source line.
+**Fixed: the `for` header** — 2026-08-08. Failing the adjacency test in a `for`
+header makes `parse_dparen` return −1 (parse.y:4478), which `read_token` hands
+to bison as a value ≤ 0 — i.e. as the EOF token, though `EOF_Reached` is not
+set. bash's own `current_token` is that −1, for which `error_token_from_token`
+has no branch and returns NULL, so `report_syntax_error` falls past its naming
+branch (parse.y:6251) into the *text-scanning* one (6276): `syntax error near
+\`X'` with `X` sliced by `error_token_from_text` around `shell_input_line_index`
+— parked one past the single character the test read — and the offending line
+echoed underneath. osh used to raise a bare `LexError` reading `malformed
+arithmetic expansion`, with no slice and no echoed line.
 
-**The proper fix** for the first three is to model bash's substitute input
+Modelled with a new **`Tok::Refused`**: a refusal with no name, which
+`Parser::error_token_at` answers `None` for (as it already did for `VarFd`, the
+other token bash's switch declines to name), sending `unexpected_here` down the
+`near_at` path that was already a faithful port of `error_token_from_text`. The
+lexer emits it in place of the error, consuming the one character the adjacency
+test read so the token's recorded end *is* `shell_input_line_index`, and then
+stops the scan — bash's reader never fetches another line, because bison has
+already errored. `Reader::of` gives it `peeks: false`: the look past the
+construct is the `shell_getc (0)` already counted in its span.
+
+One correction to `Spans::near` came with it. An offset sitting **one past a
+newline** is ambiguous in a flat buffer and was always resolved as the start of
+the next line, but bash's `shell_input_line` holds *one* line plus its NUL, so
+an index of `strlen` is still that line — which is exactly why
+`error_token_from_text`'s first test steps back onto the newline. Only a *fetch*
+replaces the buffer, and `reader_stop` already counts those, so the count now
+settles it: `for ((i=0;i<1;i++)⏎)` is reported near `;i++)` against line 1,
+while a deleted `\⏎` — which did fetch — still reports against line 2.
+
+Pinned by `tests/corpus/an-arithmetic-for-header-that-fails-the-adjacency-test-is-blamed-by-position.sh`
+and `parser::tests::a_for_header_that_fails_the_adjacency_test_is_blamed_by_position`.
+
+**The proper fix** for the three that remain is to model bash's substitute input
 buffer rather than rewinding the cursor: record the reconstructed text and the
 region of source it stands for, lex *that*, and let a diagnostic raised inside
 the region echo it instead of the real line. That also gets the continuation row
 for free, since the reconstruction is what loses the `\<newline>`, and it gives
 the string-vs-stream row a place to live if it is ever worth reproducing. The
-`for` header is separable and smaller: it needs the failure to carry a
-`near`-slice and an offending line, i.e. to be raised as a parse error at the
-source position rather than as a bare `LexError`.
+`TextMap`/`AliasView` machinery in `lexer.rs` is the same shape — it is how an
+alias's `push_string` is already modelled — but it drives a *pass above* the
+tokenizer, re-lexing spliced text from the top of the physical line, whereas
+this push happens mid-token inside `run_into`. So the work is to give the
+tokenizer a "splice and restart" result the way the alias pass has one, not to
+add a new mechanism.
 
 **Impact.** Cosmetic. Every shape here is one bash also rejects, or one where
 the divergence is bash disagreeing with itself; nothing osh accepts is wrong,

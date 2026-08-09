@@ -283,6 +283,36 @@ opening one is stripped, so it is not arithmetic at all: bash falls through to
 time, blamed on the enclosing line and echoing that text's *first* line. That
 second report is osh's `CmdSubBody::ArithFallback` shape.
 
+**How many closers the resumed count wants, measured.** Four variants, all with
+the same failed body, differing only in what follows it — the leftover says
+exactly where the count stopped:
+
+```text
+A$((1+$(fi⏎echo x⏎)))B    -> [A)B]     consumed `…))`,  left `)B`
+A$((1+$(fi⏎echo x⏎))X)B   -> [AX)B]    consumed `…))`,  left `X)B`
+A$((1+$(fi⏎echo x⏎)Y))B   -> [A)B]     consumed `…)Y)`, left `)B`
+A$((1+$(fi⏎echo x⏎Z)))B   -> [A)B]     consumed `…Z))`, left `)B`
+```
+
+All four report the same two pairs and echo `` `(1+$(fi' `` for the second, and
+**none prints `f: command not found`** — the failed read inside the count is
+`SX_NOALLOC`, so it finds an extent and runs nothing. So the count resumes at
+`stop + 1` and closes on the **second** closer it meets, which is the `$((`'s own
+two levels: the `)` that would have closed the nested `$(` was never consumed,
+so the three `)`s of a well-formed `$((1+$(…)))` now have one to spare.
+
+The extent **excludes** its closer — `si = i - *sindex - len_closer + 1` and
+`*sindex = i` (subst.c:1508-1518) — which is what routes all four to
+`command_substitute`:
+
+| case | extent `temp` | why not arithmetic |
+|---|---|---|
+| 1, 2, 4 | `(1+$(fi⏎echo x⏎)` | ends in `)`, so the `)` is cut and `chk_arithsub` sees `1+$(fi⏎echo x⏎` — one unmatched `(`, `count != 0` → 0 (subst.c:9487-9528) |
+| 3 | `(1+$(fi⏎echo x⏎)Y` | `temp2[t_index] != RPAREN`, the earlier of the two `goto comsub`s (subst.c:10586-10591) |
+
+Either way `command_substitute` is handed `temp` *with* its leading `(`, which
+is why the second echo is `` `(1+$(fi' `` and not `` `1+$(fi' ``.
+
 **Proper fix.** `arith_extent_scan` cannot answer this from the parsed part
 alone: the extent has to be re-derived by resuming the paren count at the read's
 stop point (`ExtentRead::Abandoned`'s `rest` already carries the text). The

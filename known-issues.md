@@ -235,10 +235,10 @@ puts nothing after the substitution on its prompt rows, and says so.
 
 ---
 
-### TD-OILS-A-BACKQUOTE-IN-A-HERE-DOCUMENT-BODY-IS-NUMBERED-FROM-THE-BODY. `` `fi` `` in a here-doc is blamed to line 1 — 2026-08-09 — OPEN
+### TD-OILS-A-BACKQUOTE-IN-A-HERE-DOCUMENT-BODY-IS-NUMBERED-FROM-THE-BODY. `` `fi` `` in a here-doc is blamed to line 1 — 2026-08-09 — ✅ FIXED 2026-08-09
 
 **Where:** `userspace/oils/src/interp.rs`, `command_sub_body_inner`'s
-`CmdSubBody::Backtick | CmdSubBody::ArithFallback` arm, which numbers the body
+`CmdSubBody::Backtick | CmdSubBody::ArithFallback` arm, which numbered the body
 `LineMap::Offset(close_line - 1)`.
 
 **Reproduce:**
@@ -263,53 +263,96 @@ in an ordinary word, which both shells blame to line 5 — but a here-document
 body is scanned by `scan_heredoc_segs` from a fresh `Lexer` over the body alone,
 so its `close_line` is body-relative and the coincidence breaks.
 
-`CmdSubBody::Unread` already sidesteps this: it numbers from
-`self.current_line`, which is what bash's `line_number` holds. The same is
-almost certainly right for `Backtick` and `ArithFallback` everywhere, since it
-is bash's actual rule rather than a coincidence — but changing the general
-backquote path is a separate, corpus-wide change and wants its own sweep.
+`CmdSubBody::Unread` already sidestepped this: it numbers from the shell's own
+line, which is what bash's `line_number` holds. The same turned out to be right
+for `Backtick`, `ArithFallback` **and `Parsed`** — `close_line` was a
+coincidence everywhere, not a rule.
 
-**Proper fix.** Number `Backtick`/`ArithFallback` from `self.current_line` too,
-and delete `close_line` from those variants if nothing else wants it. Verify
-against the multi-line-backquote-in-a-word shape above before and after.
+**Fixed.** All three arms now take `LineMap::Offset(self.source_line() - 1)`.
+Two further things fell out of the measurement:
+
+* **The base is the *true* line, not the reported one.** A `LineMap` base is one
+  of the few readers that wants `Shell::source_line()` rather than
+  `Shell::current_line`, because the child re-applies `Shell::line_bias` to
+  whatever the map produces. Using the biased value subtracted the drift twice,
+  which showed up as `declare -i m; if true; then m=1+; fi; echo "$(echo
+  $LINENO)"` printing 3 where bash prints 4 — caught by the existing
+  `a_discard_out_of_a_compound_command_loses_a_line` test. `Unread` had the same
+  bug and is fixed with the rest.
+* **The shapes that tell the two schemes apart** are the ones where the word is
+  not on the line its command is numbered by: an element of a compound
+  assignment (`arr=(` … `)` takes the *closing* line; `declare -A m=(` … `)`
+  takes the *opening* one) and a here-document body (takes the redirecting
+  command's line). Pinned in
+  `tests/corpus/a-substitution-body-is-numbered-from-the-line-the-shell-is-on.sh`
+  and in the two `lineno_inside_*` unit tests, both renamed off "the closing
+  paren/tick".
+
+`close_line` is gone from `Backtick` and `ArithFallback`, which had no other
+reader. It stays on `Parsed` and `Unread`, where `comsub_reparse_error` still
+needs it to name the line of the *extent-finding* read — that one really is a
+property of the text rather than of the shell, and it lands one line above the
+child's.
 
 ---
 
-### TD-OILS-AN-UNTERMINATED-DOLLAR-PAREN-IN-A-HERE-DOCUMENT-BODY-IS-A-PARSE-ERROR. `$(echo` in a here-doc kills the script — 2026-08-09 — OPEN
+### TD-OILS-AN-UNTERMINATED-CONSTRUCT-IN-TEXT-NO-PARSER-READ-IS-A-PARSE-ERROR. `$(echo`, `${x:-a`, `` `echo `` and `$((1+` in a here-doc all kill the script — 2026-08-09 — OPEN
 
-**Where:** `userspace/oils/src/lexer.rs`, `read_dollar`'s `$(` arm — an
-unbalanced `read_subst_body` is a `LexError`, which becomes a script syntax
-error even when `here_text` is set. `CmdSubBody::Unread` has nowhere to record
-"the `)` was never found".
+**Where:** `userspace/oils/src/lexer.rs` — every scan that ends in
+`eof_matching(…)` returns a `LexError`, which becomes a script syntax error even
+when `here_text` is set. The AST has nowhere to record "this construct was never
+closed", so the failure cannot be deferred to expansion time.
 
-**Reproduce:**
+**Reproduce** — five rows, all with the body on line 2 of the script and
+`echo after=$?` on line 4. bash prints the diagnostic, sets `$?` to 1 and runs
+the rest of the script; osh dies with a parse error and nothing after runs.
 
-```
-$ cat -n hd3.sh
-     1  cat <<E
-     2  $(echo
-     3  E
-     4  echo "after rc=$?"
+| body | bash |
+|---|---|
+| `$(echo` | `S: command substitution: line 3: unexpected EOF while looking for matching `)'` |
+| `${x:-a` | ``S: line 1: bad substitution: no closing `}' in ${x:-a`` |
+| `` `echo `` | ``S: line 1: bad substitution: no closing "`" in `echo`` |
+| `$((1+` | ``S: line 1: bad substitution: no closing `)' in $((1+`` |
+| `$[1+` | ``S: line 1: bad substitution: no closing `]' in $[1+`` |
+| `"abc` | *(no error — an unterminated quote in unread text is just text; osh already agrees)* |
 
-bash: hd3.sh: command substitution: line 3: unexpected EOF while looking for matching `)'
-      after rc=1                                    (script exits 0)
-osh:  hd3.sh: line 2: unexpected EOF while looking for matching `)'
-      (script exits 2, nothing after runs)
-```
+**Why.** Nothing in the text was read by a parser, so an unclosed construct in it
+cannot be a parse error — the scanner that meets it is the *expansion-time* one
+in `subst.c`, and it reports at run time. Two different reporters, by construct:
 
-**Why.** Nothing in the body is read at parse time, so an unclosed `$(` in it
-cannot be a parse error. `xparse_dolparen` finds it at expansion time and, when
-`base[*indp] != ')'`, calls `parser_error (start_lineno, "unexpected EOF while
-looking for matching `%c'", ')')` and `jump_to_top_level (DISCARD)`
-(parse.y:4360-4365) — the recoverable class, so the enclosing command dies with
-`$?` at 1 and the script carries on. Note `start_lineno`, captured on entry: the
-blame is the line the read *started* from, not where it ran out.
+* **`$( … )`** goes through `xparse_dolparen`. When `base[*indp] != ')'` it calls
+  `parser_error (start_lineno, "unexpected EOF while looking for matching `%c'",
+  ')')` and `jump_to_top_level (DISCARD)` (parse.y:4360-4365) — recoverable, so
+  the enclosing command dies with `$?` at 1. The message carries the
+  `command substitution` input name because it is raised from inside
+  `parse_string (…, "command substitution", …)`, and its line is
+  `current_line + newlines(rest-of-text-after-the-`$(`) + 1`: `parse_string` does
+  `push_stream (0)` and so numbers the string's line *k* as `line_number + k`.
+  Measured: `cat <<E` on line 1 with body `$(echo⏎` reports line 3; on line 2
+  with body `x⏎$(echo⏎y⏎` reports line 5.
+* **`${ … }`, `$(( … ))`, `$[ … ]` and `` ` … ` ``** are found by
+  `extract_dollar_brace_string` (subst.c:1785, 1980), `extract_delimited_string`
+  (subst.c:1498) and `param_expand`'s backquote arm (subst.c:11290). All four say
+  `bad substitution: no closing `%s' in %s`, at plain `current_line`, then
+  `exp_jump_to_top_level (DISCARD)`. The `%s` is the **whole text being
+  expanded**, not the construct — `cat <<E⏎q${x:-a⏎E` echoes `q${x:-a⏎`, and a
+  three-line body echoes all three lines — *except* the backquote site, which
+  prints only the text after the backtick.
 
-**Proper fix.** Carry a `closed: bool` on `CmdSubBody::Unread` (the lexer knows
-it) and take the whole body to end of text when it is false. The re-read input
-is then `src` alone rather than `src` + `)` + `tail`, and the failure is the
-`unexpected EOF` diagnostic above rather than whatever `comsub_reprint_error`
-would say. Same `arm_discard(1)` as the ordinary failure.
+**Under `no_longjmp_on_fatal_error`** (a prompt expansion — `PS4`, `${x@P}`) all
+four take the `else` branch instead: they set `*sindex = i` and return NULL, and
+what the caller then reports differs per construct. Measured on `v='a${x:-b'`:
+`${v@P}` prints `S: line 3: a${x:-b: bad substitution` and yields the text
+*unchanged*; the backquote form still prints its `no closing` message and yields
+the text unchanged; and `v='a$((1+'` prints nothing at all and yields `a`.
+
+**Proper fix.** Give the lexer, when `here_text` is set, a way to end a scan
+"unterminated" rather than erroring: a `closed: bool` on `CmdSubBody::Unread`
+(with the body running to end of text) for the `$(` case, and a new `WordPart`
+carrying the closer and the text for the other four. Expansion then reports as
+above and `arm_discard(1)`, with the `Shell::prompt_expanding` branch selecting
+the `no_longjmp_on_fatal_error` behaviour. The unterminated-quote row needs
+nothing: an unread `"` really is just a character.
 
 ---
 

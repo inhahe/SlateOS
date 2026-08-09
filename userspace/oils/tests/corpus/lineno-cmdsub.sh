@@ -1,8 +1,11 @@
 # $LINENO inside a command substitution. bash's rule here is a parser artifact:
-# the value is (line of the closing paren) + (0-based rank of the body line
-# among the body's command-bearing lines), so blank body lines do not advance
-# it. The numbers below therefore look off even for bash, but they are what
-# bash 5.x prints and are therefore the target. See known-issues.md
+# the value is (the line the shell is on when the substitution is expanded) +
+# (0-based rank of the body line among the body's command-bearing lines), so
+# blank body lines do not advance it. On every shape in this file that base is
+# also the closing paren's line; the shapes that tell the two apart are in
+# `a-substitution-body-is-numbered-from-the-line-the-shell-is-on.sh`. The
+# numbers below therefore look off even for bash, but they are what bash 5.x
+# prints and are therefore the target. See known-issues.md
 # BUG-OILS-LINENO-IN-CMDSUB for the probe table this was derived from.
 echo "L7=$LINENO"
 v=$(

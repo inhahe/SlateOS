@@ -278,10 +278,13 @@ pub enum Op {
 /// if false; then echo $(( fi ) ); fi # silence, for the same reason
 /// ```
 ///
-/// The line numbering differs with it, though not in its rule: all three count
-/// from the closing delimiter, but a `$( … )` re-reads bash's *re-print* of the
-/// body rather than the source, and the re-print has no blank or continuation
-/// lines to count.
+/// What the body's lines are numbered from is the same for all three — the line
+/// the *shell* stands on when the word is expanded, which is what `$LINENO`
+/// reports there — because it is `command_substitute` that does the numbering
+/// and all three reach it (subst.c:6986; see `Shell::command_sub_body_inner`).
+/// What differs is the text those lines are counted over: a `$( … )` re-reads
+/// bash's *re-print* of the body, which has no blank or continuation lines to
+/// count, and the other two re-read the source, which does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SubBody {
     /// `$( … )` — parsed in the enclosing token stream, and printed back from
@@ -336,8 +339,10 @@ pub enum SubBody {
 pub struct CmdSubSpan {
     /// The body, without the delimiters.
     pub src: Str,
-    /// The line the body's own `)` sits on, for the same renumbering an eager
-    /// `$( … )` gets.
+    /// The line the body's own `)` sits on, for the same *parse-time*
+    /// renumbering an eager `$( … )` gets — the one that puts a syntax error in
+    /// the body on its true physical line. What the body reports when it *runs*
+    /// comes from elsewhere; see [`crate::parser::parse_cmdsub_body`].
     pub close_line: u32,
     /// Where `src` sits in the text the enclosing scan built, *including* the
     /// `$(` and `)` around it — the range the re-print replaces. Offsets are
@@ -403,11 +408,13 @@ pub enum Seg {
     /// `$( … )` / `` ` … ` `` — raw inner source, parsed later, plus the 1-based
     /// source line of the substitution's *closing* delimiter.
     ///
-    /// bash re-parses a substitution body only after the enclosing command has
-    /// been scanned, so `$LINENO` inside the body counts up from the line the
-    /// scan had reached — the closing `)` — rather than from the body's own
-    /// first line. The parser needs that line to rebase the body's numbering
-    /// (see `parser::parse_cmdsub_body`), and only the lexer knows it.
+    /// The parser needs that line to number the body *physically*, so that a
+    /// syntax error the enclosing scan raises in it names the body's true line
+    /// in the enclosing source rather than its own line 1 (see
+    /// [`crate::parser::parse_cmdsub_body`]); only the lexer knows it. What the
+    /// body reports when it *runs* is a different line entirely — the one the
+    /// shell stands on at expansion time — and comes from the run, not from
+    /// here.
     ///
     /// The third field says *when* bash reads the body, and so how it prints it
     /// back — see [`SubBody`].

@@ -865,7 +865,8 @@ impl IncrementalParser {
     /// still reports the line numbers of the input it came from. It is
     /// `LineMap::Offset(0)` for a script file or a `-c` string, the count of
     /// lines already consumed for a REPL reading stdin one command at a time,
-    /// and `close_line - 1` for a substitution body re-read at expansion time.
+    /// and the shell's own line less one for a substitution body re-read at
+    /// expansion time.
     #[must_use]
     pub fn new(src: BStr<'_>, line_map: impl Into<LineMap>, opts: ParseOpts) -> Self {
         // What the reader hands the lexer, not what the caller read: bash drops
@@ -2054,9 +2055,9 @@ impl IncrementalParser {
 /// [`Seg::CmdSub`]'s second field.)
 ///
 /// The lines the body reports when it *runs* are a different question, and they
-/// are not this program's — they belong to the re-print, numbered from
-/// `close_line` like any other body bash reads only at expansion time. See
-/// [`CmdSubBody`].
+/// are not this program's — they belong to the re-print, numbered from the line
+/// the *shell* stands on at expansion time like any other body bash reads only
+/// then. See [`CmdSubBody`].
 ///
 /// Nested substitutions are renumbered through the same offset, so their
 /// recorded close lines are physical too and a nested body computes its own
@@ -5825,7 +5826,6 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
                 SubBody::Backtick(verbatim) => CmdSubBody::Backtick {
                     src: raw.clone(),
                     verbatim: verbatim.clone(),
-                    close_line: *close_line,
                 },
                 // Collected by the same `P_ARITH` scan, so its nested bodies
                 // are re-printed into it the same way — the classification
@@ -5833,7 +5833,6 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
                 // afterwards and does not undo the splice.
                 SubBody::ArithFallback(nested) => CmdSubBody::ArithFallback {
                     src: splice_reprints(raw, parse_arith_comsubs(nested, opts)?),
-                    close_line: *close_line,
                 },
                 SubBody::Eager => {
                     // The eager parse is kept — it is what found the `)` and
@@ -9187,11 +9186,11 @@ mod tests {
     }
 
     /// Parse a backtick body the way `Shell::command_sub_body` does at expansion
-    /// time: as an input of its own, numbered from `close_line - 1`, one unit
-    /// at a time.
-    fn backtick_unit(src: &str, close_line: u32) -> Result<Program, ParseError> {
+    /// time: as an input of its own, numbered from one below the line the shell
+    /// stands on, one unit at a time.
+    fn backtick_unit(src: &str, base_line: u32) -> Result<Program, ParseError> {
         let opts = ParseOpts::default();
-        IncrementalParser::new(src.as_bytes(), LineMap::Offset(close_line.saturating_sub(1)), opts)
+        IncrementalParser::new(src.as_bytes(), LineMap::Offset(base_line.saturating_sub(1)), opts)
             .next_unit(None, opts)
             .unwrap_or_else(|| Ok(Program { items: Vec::new() }))
     }

@@ -7288,7 +7288,8 @@ impl Shell {
     ///
     /// `map` renumbers every line `src` reports: the count of lines already
     /// consumed for a fragment of a longer stream (see
-    /// [`Shell::run_source_at`]), `close_line - 1` for a substitution body, and
+    /// [`Shell::run_source_at`]), one below the shell's own line for a
+    /// substitution body, and
     /// `Offset(0)` for a source that numbers its own lines from 1 — which is
     /// every other internally-generated body here.
     ///
@@ -28585,12 +28586,21 @@ impl Shell {
                 {
                     return Str::new();
                 }
-                // Every body is numbered from `close_line - 1` — the line the
-                // closing delimiter sits on carries the body's first command,
-                // whichever spelling it was written in. For `$( … )` that holds
-                // because `src` is the *re-print*: it has no blank lines and no
-                // continuation lines, so its line 1 is the first command.
-                let map = LineMap::Offset(close_line.saturating_sub(1));
+                // Every body is numbered from the *shell's* current line — see
+                // the `Unread` arm below for the mechanism, which is the same
+                // one: `command_substitute` never resets `line_number` in a
+                // non-interactive shell (subst.c:6986), so the child starts
+                // from whatever line the command being expanded is on, less the
+                // `line_number--` that `parse_and_execute` does
+                // (evalstring.c:329). That line is exactly what `$LINENO`
+                // reports, so `arr=(` … `"$(echo $LINENO)"` … `)` prints the
+                // line of the *assignment*, not the line the element sits on.
+                //
+                // A [`LineMap`] base is one of the few places that wants the
+                // *true* line rather than the reported one, because the child
+                // re-applies the drift to whatever the map produces — see
+                // [`Shell::source_line`].
+                let map = LineMap::Offset(self.source_line().saturating_sub(1));
                 // The `$(< file)` peek reuses the eager parse: for a body of
                 // that shape the re-read would produce the same program (a lone
                 // redirect has no command word for an alias to replace), and it
@@ -28619,13 +28629,19 @@ impl Shell {
                 // line lands back on it. That is one lower than the extent-
                 // finding read reports, which goes through `parse_string` and
                 // omits the decrement — see [`crate::ast::CmdSubBody::Unread`].
-                let map = LineMap::Offset(self.current_line.saturating_sub(1));
+                let map = LineMap::Offset(self.source_line().saturating_sub(1));
                 let path = self.comsub_text_read_file(src, &map);
                 self.command_sub(src, &map, path)
             }
-            CmdSubBody::Backtick { src, close_line, .. }
-            | CmdSubBody::ArithFallback { src, close_line } => {
-                let map = LineMap::Offset(close_line.saturating_sub(1));
+            CmdSubBody::Backtick { src, .. } | CmdSubBody::ArithFallback { src, .. } => {
+                // Numbered from the shell's current line, like every other body
+                // — a backquote reaches `command_substitute` by the same route,
+                // and the route is what does the numbering. Unlike `$( … )` the
+                // text here is the *source*, so a body written across lines
+                // keeps its own blank and continuation lines and counts from
+                // that base: `` `<newline>echo $LINENO` `` on a word ending at
+                // line 8 prints 9.
+                let map = LineMap::Offset(self.source_line().saturating_sub(1));
                 let path = self.comsub_text_read_file(src, &map);
                 self.command_sub(src, &map, path)
             }
@@ -67704,14 +67720,22 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("echo $LINENO; echo $LINENO").0, "1\n1\n");
     }
 
-    /// `$LINENO` inside `$( … )` counts up from the *closing* delimiter's line,
+    /// `$LINENO` inside `$( … )` counts up from the line the *shell* is on when
+    /// the substitution is expanded — the line `$LINENO` itself reports there —
     /// by the 0-based rank of the body line among the body's command-bearing
-    /// lines — bash re-parses the captured body after the outer scan has already
+    /// lines. bash re-parses the captured body after the outer scan has already
     /// passed the substitution, and the body's own blank lines never took part in
-    /// that scan. Every expectation here was measured against bash 5.x; see
-    /// known-issues.md BUG-OILS-LINENO-IN-CMDSUB for the full probe table.
+    /// that scan; `command_substitute` then hands it to `parse_and_execute`
+    /// without a `SEVAL_RESETLINE` (subst.c:6986), so the child inherits
+    /// `line_number` and pays the one `line_number--` at evalstring.c:329.
+    ///
+    /// For a one-line command that base is also the closing `)`'s line, which is
+    /// why the two schemes are indistinguishable on most shapes; the array- and
+    /// here-document cases at the end are the ones that tell them apart. Every
+    /// expectation here was measured against bash 5.x; see known-issues.md
+    /// BUG-OILS-LINENO-IN-CMDSUB for the full probe table.
     #[test]
-    fn lineno_inside_command_substitution_counts_from_the_closing_paren() {
+    fn lineno_inside_command_substitution_counts_from_the_shells_current_line() {
         // Single line: close line 1, rank 0.
         assert_eq!(run("x=$(echo $LINENO); echo $x").0, "1\n");
         // Two body lines, close on line 2 → 2 and 3, *not* 1 and 2.
@@ -67737,17 +67761,30 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("echo $LINENO\nv=$(\necho $LINENO\n)\necho \"$v\"\necho $LINENO").0,
             "1\n4\n6\n"
         );
+        // An element of a compound assignment is numbered from the assignment's
+        // line, not its own: the closing `)` is on line 3 and so is the answer,
+        // but the element sits on line 2.
+        assert_eq!(run("arr=(\n\"$(echo $LINENO)\"\n)\necho ${arr[0]}").0, "3\n");
+        // …and `declare` takes its line from the *opening* line, which is where
+        // the two disagree in the other direction: close line 3, answer 1.
+        assert_eq!(
+            run("declare -A m=(\n[k]=\"$(echo $LINENO)\"\n)\necho ${m[k]}").0,
+            "1\n"
+        );
+        // A here-document body is numbered from the redirecting command's line,
+        // however far down the body the substitution sits.
+        assert_eq!(run("cat <<E\n\n$(echo $LINENO)\nE").0, "\n1\n");
     }
 
-    /// A backtick body numbers its lines by a plain offset from `close_line -
-    /// 1`, like every other body — but from the *source*, which a `$( … )` body
-    /// does not: bash echoes a backtick body verbatim rather than re-printing
-    /// it, so the blank and continuation lines the source had are still there to
-    /// be counted. That is the whole of the difference between the two, and it
-    /// is what these cases pin. Measured against bash 5.2; see known-issues.md
-    /// TD-OILS-CMDSUB-ERR-FATALITY item 1.
+    /// A backtick body numbers its lines by a plain offset from the shell's
+    /// current line, like every other body — but from the *source*, which a
+    /// `$( … )` body does not: bash echoes a backtick body verbatim rather than
+    /// re-printing it, so the blank and continuation lines the source had are
+    /// still there to be counted. That is the whole of the difference between
+    /// the two, and it is what these cases pin. Measured against bash 5.2; see
+    /// known-issues.md TD-OILS-CMDSUB-ERR-FATALITY item 1.
     #[test]
-    fn lineno_inside_backticks_is_a_plain_offset_from_the_closing_tick() {
+    fn lineno_inside_backticks_is_a_plain_offset_from_the_current_line() {
         // One line: close line 1 → 1, same answer either scheme would give.
         assert_eq!(run("b=`echo $LINENO`; echo $b").0, "1\n");
         // Two body lines, close on line 2 → 2 and 3.
@@ -67765,6 +67802,11 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("r=`echo $LINENO; echo $LINENO\necho $LINENO`\necho \"$r\"").0,
             "2\n2\n3\n"
         );
+        // The same two shapes that tell the base apart for `$( … )`: an element
+        // of a compound assignment takes the assignment's line, and a
+        // here-document body takes the redirecting command's.
+        assert_eq!(run("arr=(\n\"`echo $LINENO`\"\n)\necho ${arr[0]}").0, "3\n");
+        assert_eq!(run("cat <<E\n\n`echo $LINENO`\nE").0, "\n1\n");
     }
 
     /// A discard out of a compound command leaves bash's line counter below

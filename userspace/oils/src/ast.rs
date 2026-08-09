@@ -1251,11 +1251,12 @@ pub enum CmdSubBody {
         /// The re-print of `prog`, re-read one logical line at a time when the
         /// substitution is expanded. See [`crate::unparse::comsub_body`].
         src: Str,
-        /// The line the closing `)` sits on, in the enclosing source. `src`'s
-        /// own lines are numbered from `close_line - 1`, exactly as a backtick
-        /// body's are — the re-print puts the body's first command on its line 1,
-        /// so no rank rule is needed to skip the blank and continuation lines the
-        /// source had.
+        /// The line the closing `)` sits on, in the enclosing source. This is
+        /// **not** what `src`'s own lines are numbered from — that is the line
+        /// the shell stands on when the word is expanded, see
+        /// `Shell::command_sub_body_inner`. It is what the
+        /// *extent-finding* re-read is blamed to, which is a property of the
+        /// text rather than of the run.
         close_line: u32,
         /// The rest of the enclosing *word*, as the second pass sees it: what
         /// follows this substitution's `)` up to the end of the word, closing
@@ -1324,9 +1325,6 @@ pub enum CmdSubBody {
         /// merely untidy — a nested `` \` `` would lose its backslash and the
         /// result would no longer parse.
         verbatim: Str,
-        /// The line the closing backtick sits on, in the enclosing source. The
-        /// body's own lines are numbered from `close_line - 1`.
-        close_line: u32,
     },
     /// `$(( … )` — a `$((` whose body did not read as an arithmetic expression,
     /// so bash ran it as a command substitution instead.
@@ -1344,10 +1342,6 @@ pub enum CmdSubBody {
         /// verbatim form: nothing is unescaped on the way in, so the text that
         /// runs is also the text that is printed back.
         src: Str,
-        /// The line the closing `)` sits on, in the enclosing source. The body's
-        /// own lines are numbered from `close_line - 1`, the same plain offset a
-        /// backtick body gets.
-        close_line: u32,
     },
 }
 

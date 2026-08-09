@@ -53741,12 +53741,21 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##       (`echo a |`⏎`grep a |`⏎`no_such` -> line 3), and and-or lists likewise.
 ##       Verified against bash for first/middle/last pipeline stages and and-or
 ##       lists; regression test interp::tests::line_number_is_tracked_per_simple_command.
-##   One case still differs from bash:
-##   (2) A single simple command with an argument that itself contains an
-##       embedded newline (e.g. a double-quoted arg spanning two lines): bash
-##       reports the line the command finishes on, osh the line it starts on.
-##       Niche; would need the command node to record its END line as well as
-##       its start line. Deferred as very low value.
+##   (2) RESOLVED 2026-08-08 — and the premise was wrong. Re-measured against
+##       bash 5.2.37: bash stamps a simple command in make_bare_simple_command
+##       (make_cmd.c:505) at *reduce* time, i.e. once bison has fetched the one
+##       lookahead token it needs after the first element — not where the
+##       command finishes. So `echo one \`⏎`  "a`⏎`b" "$LINENO"` reports 1 (the
+##       lookahead `one` is still on line 1), while `echo "a`⏎`b" "$LINENO"`
+##       reports 2 (the lookahead is the multi-line word itself). osh's
+##       Parser::simple_command_line already implements exactly this rule and
+##       answers identically in both shapes, and for a leading assignment too.
+##       See known-issues TD-OILS20 and
+##       parser::tests::simple_command_line_follows_bashs_lookahead_rule.
+##   Line tracking as a whole is now closed: see known-issues TD-OILS20 and
+##   TD-OILS-AN-UNSTAMPED-COMMAND-IS-BLAMED-AT-ITS-FIRST-TOKEN-NOT-WHERE-THE-READER-STOPPED,
+##   which removed Item.line entirely (bash has no per-item stamp — its
+##   line_number is one register the reader leaves at the parse unit's end).
 
 ## DONE (initiative-F / native mprotect) — 2026-07-22
 ##   Implemented the native SYS_MPROTECT handler (native syscall #22). Took the

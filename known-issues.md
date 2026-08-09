@@ -24076,7 +24076,23 @@ command-substitution parse path. Deferred because it touches the top-level
 execution driver; the current behavior covers interactive use and the common
 "aliases defined in an rc file, used at the prompt" workflow.
 
-### TD-OILS20. `$LINENO` counts only top-level newline tokens — lines inside multi-line quotes/substitutions/here-docs are undercounted — FIXED 2026-07-19 (embedded-newline undercount); two narrow sub-gaps remain
+### TD-OILS20. `$LINENO` counts only top-level newline tokens — lines inside multi-line quotes/substitutions/here-docs are undercounted — ✅ RESOLVED 2026-08-08 (embedded-newline undercount fixed 2026-07-19; both sub-gaps closed since)
+
+**Status (2026-08-08, RESOLVED):** both sub-gaps recorded below are closed.
+
+- **(a) per-command granularity.** `SimpleCommand::line` was added and is what
+  `Shell::exec_simple_inner` stamps from, so a multi-line pipeline's failing
+  stage reports the stage's line. `Item::line` is now gone entirely — see
+  TD-OILS-AN-UNSTAMPED-COMMAND-IS-BLAMED-AT-ITS-FIRST-TOKEN-NOT-WHERE-THE-READER-STOPPED,
+  which removed it because bash has no per-item stamp at all.
+- **(b) function-relative numbering.** Re-measured against bash 5.2.37 and the
+  premise is wrong: bash does **not** renumber `$LINENO` relative to a
+  function's definition. `echo "top $LINENO"⏎f() {⏎  echo "in $LINENO"⏎}⏎f⏎echo
+  "after $LINENO"` gives `1 / 3 / 6` in a script file, under `-c`, and on stdin
+  alike, and a function defined inside an `eval` reports the eval string's own
+  numbering (`in 4` for a 4-line string). osh answers identically in all four.
+  (bash's `function_line_number` exists, but it feeds `declare -F` under
+  extdebug and the DEBUG trap's `showing_function_line`, not `$LINENO`.)
 
 **Status (2026-07-19, FIXED):** the embedded-newline undercount is resolved. The
 lexer now tracks a running source line and stamps every token with its true
@@ -24096,9 +24112,10 @@ absolute to the parsed unit.
 
 **Where:** `userspace/oils/src/lexer.rs` (`Lexer.line`/`stamp_lines`/
 `tokenize_spanned`), `userspace/oils/src/parser.rs` (`Parser.lines`/`cur_line`),
-`userspace/oils/src/ast.rs` (`Item.line`),
-`userspace/oils/src/interp.rs` (`Shell.current_line`, set in `exec_program`,
-read in `param_value` as `"LINENO"`).
+`userspace/oils/src/ast.rs` (`SimpleCommand.line` and the compound clauses'
+`line` fields; `Item.line` no longer exists),
+`userspace/oils/src/interp.rs` (`Shell.current_line`, seeded per parse unit in
+`run_source_flow_units`, read in `param_value` as `"LINENO"`).
 
 **What:** `$LINENO` is implemented by having the parser count the top-level
 `Tok::Newline` tokens it consumes and stamp the current 1-based line onto each
@@ -45699,7 +45716,7 @@ evaluations with it separately (execute_cmd.c:3120, 3139-3141, 3171-3174), so
 all three sections are blamed on the `((`'s line while the body keeps its own.
 
 
-### TD-OILS-AN-UNSTAMPED-COMMAND-IS-BLAMED-AT-ITS-FIRST-TOKEN-NOT-WHERE-THE-READER-STOPPED. bash's `line_number` is a register the *reader* seeds, and osh seeds it per command — 2026-08-08 — OPEN
+### TD-OILS-AN-UNSTAMPED-COMMAND-IS-BLAMED-AT-ITS-FIRST-TOKEN-NOT-WHERE-THE-READER-STOPPED. bash's `line_number` is a register the *reader* seeds, and osh seeds it per command — 2026-08-08 — ✅ RESOLVED 2026-08-08
 
 **Where:** `userspace/oils/src/interp.rs:8275` — the list driver does
 `self.current_line = item.line.saturating_sub(self.line_bias)` before every
@@ -45768,3 +45785,59 @@ right.
 **Found by** the probe matrix for
 TD-OILS-A-COMPOUND-COMMANDS-LINE-IS-STAMPED-AT-ITS-KEYWORD (probes `m2`,
 `e1`–`e7`).
+
+**Resolved 2026-08-08.** `Item::line` is gone — the field, its two parser stamp
+sites and the `exec_items` assignment — and bash's register is modelled
+directly:
+
+- `Shell::run_source_flow_units` seeds `current_line` from
+  `IncrementalParser::last_unit_end_line()` before each unit runs, which is
+  where the reader left it.
+- `Shell::exec_simple` brackets the simple command's own stamp with a
+  save/restore, mirroring `cm_simple`'s
+  `save_line_number = line_number; … line_number = save_line_number;`
+  (execute_cmd.c:849, 863, 867). Without the restore a preceding command on the
+  same unit would leave its line behind for the `for` after it.
+- `Command::Subshell` grew a line of its own (`SubshellClause::line`, the `)`'s
+  line — make_cmd.c:824, installed at execute_cmd.c:650) and runs through
+  `Shell::on_control_line`.
+- `FunctionDef::body_line` records where the body's `{` opened
+  (`function_bstart`, parse.y:3271 → make_cmd.c:791); `Shell::call_function`
+  installs it as bash's `line_number = function_line_number = tc->line`
+  (execute_cmd.c:5205), before the entry DEBUG trap at 5238. The existing
+  `call_line_stack` pop is the matching `unwind_protect_int (line_number)`
+  (execute_cmd.c:5095).
+
+Seeding `current_line` from the unit's end exposed one thing that had been
+riding on the old per-item stamp: `declare -F NAME` under `extdebug` reports the
+line a function was *defined* on, and `exec_function_def` was reading it from
+`self.current_line`, which is now the unit's last line — so `g()⏎{⏎:⏎}` reported
+the closing brace. Fixed properly by giving `FunctionDef` its own `line`, stamped
+where bash stamps `function_dstart`: on a `)` closing a `(` after a WORD
+(parse.y:3580), or on the word after the `function` keyword (parse.y:5349), the
+later write winning. Measured against bash 5.2.37 for all five spellings
+(`w()`, `w \⏎ ()`, `w( \⏎ )`, `function \⏎ w`, `function w \⏎ ()`); covered by
+the extended `declare-F-under-extdebug` corpus case.
+
+Two corrections to the hypotheses recorded above:
+
+1. The claim that `execute_command_internal` "saves and restores `line_number`
+   around the simple command (execute_cmd.c:648, 703)" named the wrong lines —
+   648/703 are the **subshell** bracket. The simple-command bracket is 849/863/
+   867 in the `cm_simple` arm. Both exist; the conclusion was right for the
+   wrong reason.
+2. The restores are **bare assignments**, not unwind-protects, so a
+   `jump_to_top_level` flies past them. Implementing them unconditionally broke
+   `a_discard_out_of_a_compound_command_loses_a_line`, which measures exactly
+   that drift. `Shell::on_control_line` and `Shell::exec_simple` now consult the
+   new `LineJump` trait and skip the restore for `Flow::Discard`/`Flow::Abort`.
+   The function-call restore is *not* skipped, because bash's really is an
+   unwind-protect — which is why a discard inside a function costs the caller
+   only what the call's own surroundings cost.
+
+**Regression cover:**
+`userspace/oils/tests/corpus/an-unstamped-command-is-blamed-where-the-reader-stopped-not-at-its-first-token.sh`
+— both windows, an enclosing group/`if`/`while`, three subshell shapes, three
+function-definition shapes (including `g()⏎{` where the `{` is on its own line,
+which discriminates the body line from the definition line), and the simple
+command's own reduce-time stamp.

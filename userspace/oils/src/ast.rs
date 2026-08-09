@@ -1286,6 +1286,35 @@ pub enum CmdSubBody {
         /// this distinction.
         tail: Option<Str>,
     },
+    /// `$( … )` in text no parser read as a *word* — a here-document body, a
+    /// `PS4`, a `${x@P}`. There was no first read: bash collected the text
+    /// without `read_token_word` (a here-doc body arrives from
+    /// `read_secondary_line` in `make_here_document`, make_cmd.c:621), so
+    /// `parse_comsub` never ran and nothing was re-printed. What
+    /// `expand_word_internal` finds when the text is expanded is therefore the
+    /// **source**, and it is `extract_command_subst` that finds it —
+    /// `xparse_dolparen` (parse.y:4248) for the extent, then
+    /// `command_substitute` for the run.
+    ///
+    /// The extent-finding parse is the same one [`CmdSubBody::Parsed`] does over
+    /// its re-print, so a body that does not parse fails the same way: a
+    /// `command substitution:` diagnostic and `jump_to_top_level (DISCARD)`,
+    /// which abandons the enclosing command with `$?` at 1 and lets the script
+    /// carry on. What differs is the line it is blamed to, by exactly one:
+    /// `xparse_dolparen` goes through `parse_string`, which does *not* do
+    /// `parse_and_execute`'s `line_number--` (evalstring.c:329), so a `$( … )`
+    /// in a here-document body reports one line further down than a
+    /// `` ` … ` `` in the same body does.
+    Unread {
+        /// The body exactly as written — there is no re-print to stand in for it.
+        src: Str,
+        /// The rest of the enclosing word, as [`CmdSubBody::Parsed::tail`], and
+        /// for the same reason: `xparse_dolparen` is handed the remainder of the
+        /// text, not the body alone.
+        tail: Str,
+        /// The line the closing `)` sits on, in the enclosing source.
+        close_line: u32,
+    },
     /// `` ` … ` `` — parsed at expansion time, by `Shell::command_sub`.
     Backtick {
         /// The body with `` \` ``/`\\`/`\$` unescaped: what actually gets parsed.
@@ -1329,7 +1358,7 @@ impl CmdSubBody {
     pub fn parsed(&self) -> Option<&Program> {
         match self {
             Self::Parsed { prog, .. } => Some(prog),
-            Self::Backtick { .. } | Self::ArithFallback { .. } => None,
+            Self::Unread { .. } | Self::Backtick { .. } | Self::ArithFallback { .. } => None,
         }
     }
 }

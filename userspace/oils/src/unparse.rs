@@ -1260,14 +1260,27 @@ fn quoted_lit_src(text: BStr<'_>, escaped: bool) -> Str {
 /// [`WordPart::DoubleQuoted`] is written by the container, not by anything
 /// inside it, and the same holds for the `}` of a `${x:-$( … )}`.
 ///
-/// Running only over the *parser's* words is itself load-bearing, which is why
-/// the field is an `Option`: a word the shell assembles at expansion time
-/// (`${x@P}`, `PS4`) is handed to `command_substitute` raw, never re-printed
-/// and so never re-read, and leaving its `tail` at `None` is what records that.
-/// See [`crate::ast::CmdSubBody::Parsed::tail`].
+/// A [`CmdSubBody::Parsed`] whose `tail` stays `None` is one there was no
+/// re-print for, and so nothing for this pass to measure a remainder against;
+/// see [`crate::ast::CmdSubBody::Parsed::tail`]. That is not the same thing as
+/// "the parser never saw the word": a word the shell assembles at expansion time
+/// (`${x@P}`, `PS4`) has no re-print either, but its substitutions *are* re-read
+/// — `extract_command_subst` is walking that string too — so
+/// [`crate::parser::dquote_word_from_source`] runs this pass over its
+/// [`CmdSubBody::Unread`] bodies exactly as the parser's words are run over
+/// theirs.
 pub(crate) fn attach_comsub_tails(word: &mut Word) {
-    let is_comsub =
-        |p: &WordPart| matches!(p, WordPart::CommandSub { body: CmdSubBody::Parsed { .. } });
+    // A body no parser read is re-read the same way, from the same
+    // `extract_command_subst`, so it wants the same remainder — see
+    // [`crate::ast::CmdSubBody::Unread`].
+    let is_comsub = |p: &WordPart| {
+        matches!(
+            p,
+            WordPart::CommandSub {
+                body: CmdSubBody::Parsed { .. } | CmdSubBody::Unread { .. }
+            }
+        )
+    };
     let total = walk_parts(&mut word.parts, &is_comsub, usize::MAX, &mut |_| {});
     if total == 0 {
         return;
@@ -1300,8 +1313,14 @@ pub(crate) fn attach_comsub_tails(word: &mut Word) {
             .to_vec();
         walk_parts(&mut word.parts, &is_marker, 0, &mut |p| {
             *p = std::mem::replace(&mut saved, WordPart::Literal(Str::new()));
-            if let WordPart::CommandSub { body: CmdSubBody::Parsed { tail: t, .. } } = p {
-                *t = Some(std::mem::take(&mut tail));
+            match p {
+                WordPart::CommandSub { body: CmdSubBody::Parsed { tail: t, .. } } => {
+                    *t = Some(std::mem::take(&mut tail));
+                }
+                WordPart::CommandSub { body: CmdSubBody::Unread { tail: t, .. } } => {
+                    *t = std::mem::take(&mut tail);
+                }
+                _ => {}
             }
         });
     }
@@ -1551,6 +1570,11 @@ fn part_src(p: &WordPart) -> Str {
             // still carries the inner `(` the scan counted, so a plain `$(` … `)`
             // around it reproduces the `$(( … )` the source wrote.
             CmdSubBody::ArithFallback { src, .. } => bfmt![b"$(", src, b")"],
+            // Nor was one written in text no parser read as a word — a
+            // here-document body. bash prints the here-document back from the
+            // very text its reader collected, and `parse_comsub` never ran over
+            // any of it, so there is no re-print to print instead.
+            CmdSubBody::Unread { src, .. } => bfmt![b"$(", src, b")"],
             CmdSubBody::Parsed { prog, .. } => comsub_reprint(b"$(", prog),
         },
         // Read by the same `parse_comsub` call the `$( … )` spelling gets —

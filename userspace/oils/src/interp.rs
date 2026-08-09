@@ -4604,6 +4604,19 @@ pub struct Shell {
     /// `set -x` (xtrace): print each simple command (prefixed `+ `) before
     /// executing it — to stderr, or to whatever [`Shell::xtrace_fd`] names.
     xtrace: bool,
+    /// bash's `no_longjmp_on_fatal_error`, which `expand_prompt_string` sets
+    /// around the whole expansion (subst.c:4459) — so a `PS1`/`PS4`/`${x@P}`
+    /// survives what would otherwise abandon the enclosing command.
+    ///
+    /// The one place it is observable is a `$( … )` in the expanded text whose
+    /// body will not parse ([`crate::ast::CmdSubBody::Unread`]):
+    /// `extract_command_subst` passes the flag on as `SX_NOLONGJMP`
+    /// (subst.c:1285), so `xparse_dolparen` reports the failure and returns
+    /// instead of raising `DISCARD` — and `command_substitute` then runs the
+    /// body anyway, whose own parse reports it a *second* time, one line lower.
+    /// `w='$(fi)'; echo "${w@P}"; echo $?` prints two diagnostics, an empty
+    /// expansion and `0`.
+    prompt_expanding: bool,
     /// The descriptor `$BASH_XTRACEFD` names, when it names a usable one — where
     /// the `set -x` trace goes instead of stderr. `None` is stderr.
     ///
@@ -5858,6 +5871,7 @@ impl Shell {
             errexit: false,
             nounset: false,
             xtrace: false,
+            prompt_expanding: false,
             xtrace_fd: None,
             xtrace_level: 0,
             noglob: false,
@@ -12227,6 +12241,12 @@ impl Shell {
             srng_device: std::cell::Cell::new(self.srng_device.get()),
             errexit: self.errexit,
             nounset: self.nounset,
+            // `no_longjmp_on_fatal_error` is a plain global that
+            // `expand_prompt_string` (subst.c:4459) raises around the *whole*
+            // expansion, and the fork `command_substitute` does happens inside
+            // it — so the child inherits the raised flag, as it inherits every
+            // other global.
+            prompt_expanding: self.prompt_expanding,
             xtrace: self.xtrace,
             // A fork inherits both the descriptor table and the variable, so it
             // inherits the diversion too — `BASH_XTRACEFD=8; ( set -x; … )`
@@ -16968,7 +16988,12 @@ impl Shell {
         };
         let saved = std::mem::replace(&mut self.xtrace, false);
         let saved_status = self.last_status;
+        // `expand_prompt_string` runs the whole expansion under
+        // `no_longjmp_on_fatal_error` (subst.c:4459) — see
+        // [`Shell::prompt_expanding`].
+        let saved_prompt = std::mem::replace(&mut self.prompt_expanding, true);
         let out = self.expand_double_quoted(&word.parts);
+        self.prompt_expanding = saved_prompt;
         self.last_status = saved_status;
         self.xtrace = saved;
         out
@@ -28554,48 +28579,10 @@ impl Shell {
                 // A `tail` of `None` says there was no first read to re-print, so
                 // there is no second one either — see
                 // [`crate::ast::CmdSubBody::Parsed::tail`].
-                if let Some((err, nested)) = tail
+                if tail
                     .as_ref()
-                    .and_then(|tail| self.comsub_reparse_error(src, tail, *close_line))
+                    .is_some_and(|tail| self.comsub_reparse_fail(src, tail, *close_line))
                 {
-                    self.berrln(&err);
-                    if nested {
-                        // A `$( … )` *inside* the re-print that will not parse is
-                        // `parse_comsub`'s own error, and a non-interactive shell
-                        // does not survive one: `jump_to_top_level (FORCE_EOF)`
-                        // (parse.y:4185) stops the reader outright. See
-                        // [`Self::force_eof_status`] for the status that class
-                        // carries — it is not the syntax error's everywhere,
-                        // because `-c` scores the whole class 127.
-                        let status = self.force_eof_status();
-                        // `demote: false`: `force_eof_status` has already
-                        // accounted for whatever is in the way, so the answer
-                        // stands wherever it is raised.
-                        self.unbound_error = Some(FatalAbort { status, demote: false });
-                    } else if self.errexit {
-                        // Under errexit neither jump is reached: `parser_error`
-                        // (error.c) ends with a *direct* call, before the class
-                        // of the failure has been decided at all —
-                        //
-                        //     if (exit_immediately_on_error)
-                        //       exit_shell (last_command_exit_value = 2);
-                        //
-                        // — so there is nothing for a `||` to catch and the 2 is
-                        // not the assignment's status but the syntax error's:
-                        // `set -e; v=p$(⏎!⏎)q || echo B` prints no `B` and exits
-                        // 2. Same shape as the FORCE_EOF branch above, which is
-                        // why [`Self::force_eof_status`] answers 2 here too.
-                        self.unbound_error = Some(FatalAbort { status: 2, demote: false });
-                    } else {
-                        // The re-print's own failure is `parse_string`'s to
-                        // answer: it returns `-DISCARD` and `xparse_dolparen`
-                        // raises it as `jump_to_top_level (DISCARD)` from the
-                        // *parent*, below `parse_and_execute`'s guard. The rest of
-                        // this parse unit is abandoned with `$?` at 1, but an
-                        // `eval` around it still catches it — so `v=p$(⏎!⏎)q; echo
-                        // hi` prints no `hi` where the two on separate lines would.
-                        self.arm_discard(1);
-                    }
                     return Str::new();
                 }
                 // Every body is numbered from `close_line - 1` — the line the
@@ -28611,6 +28598,31 @@ impl Shell {
                 let path = self.comsub_read_file(prog);
                 self.command_sub(src, &map, path)
             }
+            CmdSubBody::Unread { src, tail, close_line } => {
+                // No first read to re-print, but the *second* one happens all
+                // the same: `expand_word_internal` reaches
+                // `extract_command_subst`, which runs `xparse_dolparen` over the
+                // source to find the `)`. So a body that will not parse fails
+                // exactly where a re-print that will not parse fails — see
+                // [`crate::ast::CmdSubBody::Unread`].
+                if self.comsub_reparse_fail(src, tail, *close_line) {
+                    return Str::new();
+                }
+                // The body is numbered from the *shell's* current line, not from
+                // anything in the text it was written in — because there is no
+                // such thing here. bash never read this text as a word, so it
+                // never renumbered for it: `line_number` still holds the line of
+                // the command being expanded, and `parse_and_execute` in the
+                // child does `line_number--` (evalstring.c:329, since a
+                // non-interactive `command_substitute` passes no
+                // `SEVAL_RESETLINE` — subst.c:6986) so that the body's first
+                // line lands back on it. That is one lower than the extent-
+                // finding read reports, which goes through `parse_string` and
+                // omits the decrement — see [`crate::ast::CmdSubBody::Unread`].
+                let map = LineMap::Offset(self.current_line.saturating_sub(1));
+                let path = self.comsub_text_read_file(src, &map);
+                self.command_sub(src, &map, path)
+            }
             CmdSubBody::Backtick { src, close_line, .. }
             | CmdSubBody::ArithFallback { src, close_line } => {
                 let map = LineMap::Offset(close_line.saturating_sub(1));
@@ -28618,6 +28630,74 @@ impl Shell {
                 self.command_sub(src, &map, path)
             }
         }
+    }
+
+    /// Run bash's `xparse_dolparen` read over a `$( … )` body and, if it does
+    /// not parse, report it and arm the abort it raises. `true` says the body
+    /// never ran.
+    ///
+    /// The read is the same one whether it is a re-print ([`CmdSubBody::Parsed`])
+    /// or the source ([`CmdSubBody::Unread`]) that is being re-read, because in
+    /// bash it is literally the same call: `extract_command_subst` runs
+    /// `xparse_dolparen` over whatever text the stored word holds.
+    fn comsub_reparse_fail(&mut self, src: BStr<'_>, tail: BStr<'_>, close_line: u32) -> bool {
+        let Some((err, nested)) = self.comsub_reparse_error(src, tail, close_line) else {
+            return false;
+        };
+        self.berrln(&err);
+        // The report is unconditional; only the *jump* can be suppressed.
+        // `extract_command_subst` (subst.c:1289) turns the global
+        // `no_longjmp_on_fatal_error` into `SX_NOLONGJMP`, and all that flag
+        // reaches in `xparse_dolparen` is the one guard around the raise:
+        //
+        //     if ((flags & SX_NOLONGJMP) == 0)
+        //       jump_to_top_level (-nc);       /* parse.y:4330 */
+        //
+        // (The `SEVAL_NOLONGJMP` it also sets on `parse_string`'s flags is not
+        // read by anything in evalstring.c, so it changes nothing.) So a prompt
+        // expansion — the one caller that raises the global, in
+        // `expand_prompt_string`, subst.c:4459 — prints the diagnostic and
+        // carries straight on to `command_substitute`, which parses the body a
+        // second time in the child and reports it a second time. See
+        // [`Shell::prompt_expanding`].
+        if self.prompt_expanding {
+            return false;
+        }
+        if nested {
+            // A `$( … )` *inside* the text that will not parse is
+            // `parse_comsub`'s own error, and a non-interactive shell does not
+            // survive one: `jump_to_top_level (FORCE_EOF)` (parse.y:4185) stops
+            // the reader outright. See [`Self::force_eof_status`] for the status
+            // that class carries — it is not the syntax error's everywhere,
+            // because `-c` scores the whole class 127.
+            let status = self.force_eof_status();
+            // `demote: false`: `force_eof_status` has already accounted for
+            // whatever is in the way, so the answer stands wherever it is raised.
+            self.unbound_error = Some(FatalAbort { status, demote: false });
+        } else if self.errexit {
+            // Under errexit neither jump is reached: `parser_error` (error.c)
+            // ends with a *direct* call, before the class of the failure has
+            // been decided at all —
+            //
+            //     if (exit_immediately_on_error)
+            //       exit_shell (last_command_exit_value = 2);
+            //
+            // — so there is nothing for a `||` to catch and the 2 is not the
+            // assignment's status but the syntax error's: `set -e; v=p$(⏎!⏎)q ||
+            // echo B` prints no `B` and exits 2. Same shape as the FORCE_EOF
+            // branch above, which is why [`Self::force_eof_status`] answers 2
+            // here too.
+            self.unbound_error = Some(FatalAbort { status: 2, demote: false });
+        } else {
+            // The read's own failure is `parse_string`'s to answer: it returns
+            // `-DISCARD` and `xparse_dolparen` raises it as `jump_to_top_level
+            // (DISCARD)` from the *parent*, below `parse_and_execute`'s guard.
+            // The rest of this parse unit is abandoned with `$?` at 1, but an
+            // `eval` around it still catches it — so `v=p$(⏎!⏎)q; echo hi` prints
+            // no `hi` where the two on separate lines would.
+            self.arm_discard(1);
+        }
+        true
     }
 
     /// The diagnostic bash raises when a `$( … )` body's *re-print* does not

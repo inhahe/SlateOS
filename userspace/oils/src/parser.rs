@@ -5136,8 +5136,10 @@ impl Parser {
                 let at = self.pos;
                 self.pos = self.pos.saturating_add(1);
                 // An unquoted delimiter makes the body a double-quoted run, so a
-                // substitution's operand in it is read with the quotes' rules.
-                let q = if quoted { Quoting::Bare } else { Quoting::Dquote };
+                // substitution's operand in it is read with the quotes' rules —
+                // but by no parser, which is the other half of
+                // [`Quoting::Unread`].
+                let q = if quoted { Quoting::Bare } else { Quoting::Unread };
                 word_from_segs_in(&segs, self.opts, q)
                     .map_err(|e| e.or_echo(self.echo_at(at)))?
             }
@@ -5513,7 +5515,8 @@ fn cond_error_near(tok: BStr<'_>) -> Str {
 /// a `'` there is an ordinary character and only the characters double-quoting
 /// leaves live can be backslash-escaped, so `"${x:-'a b'}"` keeps its quotes
 /// where a bare `${x:-'a b'}` loses them. A here-document body with an unquoted
-/// delimiter is the same context, and hands [`Quoting::Dquote`] down too.
+/// delimiter is the same context — but not the same *read*, which is what
+/// [`Quoting::Unread`] is for.
 ///
 /// Nothing else about the parse depends on it: the patterns, replacements and
 /// subscripts beside the operand are read bare either way, because bash's
@@ -5522,6 +5525,18 @@ fn cond_error_near(tok: BStr<'_>) -> Str {
 pub(crate) enum Quoting {
     Bare,
     Dquote,
+    /// A double-quoted run in text **no parser read as a word** — a
+    /// here-document body with an unquoted delimiter, a `PS4`, a `${x@P}`.
+    ///
+    /// Quoting-wise it is [`Quoting::Dquote`] and is treated as such everywhere
+    /// that asks about quotes. What differs is that `read_token_word` never ran
+    /// over it (a here-document body goes from `read_secondary_line` straight
+    /// into `make_here_document`, make_cmd.c:621), so nothing in it was
+    /// translated at parse time and no delimiter was pushed for it: a `$'…'` or
+    /// `$"…"` in an operand here stays as written, and a `$( … )` in it is
+    /// [`crate::ast::CmdSubBody::Unread`]. See [`crate::lexer::Lexer::here_text`],
+    /// which is what this variant selects.
+    Unread,
 }
 
 /// Lower lexer segments into an [`ast::Word`] (stateless).
@@ -5797,6 +5812,16 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
         // [`CmdSubBody`].
         Seg::CmdSub(raw, close_line, body) => WordPart::CommandSub {
             body: match body {
+                // No parser read the text this one was written in, so there is
+                // no eager parse to keep and no re-print to run in place of the
+                // source. The `tail` is filled by
+                // `unparse::attach_comsub_tails` once the word is assembled,
+                // exactly as a `Parsed` body's is.
+                SubBody::Unread => CmdSubBody::Unread {
+                    src: raw.clone(),
+                    tail: Str::new(),
+                    close_line: *close_line,
+                },
                 SubBody::Backtick(verbatim) => CmdSubBody::Backtick {
                     src: raw.clone(),
                     verbatim: verbatim.clone(),
@@ -6916,13 +6941,15 @@ fn operand_from_source(
     if s.is_empty() {
         return Ok(Word::default());
     }
-    let mut segs = crate::lexer::lex_operand_in_dquote(s).map_err(|e| ParseError::new(&e.msg))?;
+    let mut segs = crate::lexer::lex_operand_in_dquote(s, q == Quoting::Unread)
+        .map_err(|e| ParseError::new(&e.msg))?;
     map_frag_segs(&mut segs, line);
     let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
     for seg in &segs {
-        // Still inside the quotes: a substitution nested in the operand is read
-        // the same way its host was.
-        parts.push(seg_to_part(seg, opts, Quoting::Dquote)?);
+        // Still inside the quotes, and still inside whichever *read* they came
+        // from: a substitution nested in the operand is read the same way its
+        // host was, unread host included.
+        parts.push(seg_to_part(seg, opts, q)?);
     }
     Ok(Word { parts })
 }
@@ -6941,11 +6968,20 @@ pub(crate) fn dquote_word_from_source(s: BStr<'_>, opts: ParseOpts) -> Result<Wo
     let segs = crate::lexer::lex_dquote_body(s).map_err(|e| ParseError::new(&e.msg))?;
     let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
     for seg in &segs {
-        // The whole point of this entry is that `s` is a double-quoted run, so
-        // an operand inside it is read as one too.
-        parts.push(seg_to_part(seg, opts, Quoting::Dquote)?);
+        // The whole point of this entry is that `s` is a double-quoted run that
+        // reached the shell as a *value*, so an operand inside it is read as one
+        // too — quotes in force, and no parser having read any of it.
+        parts.push(seg_to_part(seg, opts, Quoting::Unread)?);
     }
-    Ok(Word { parts })
+    let mut word = Word { parts };
+    // A word the shell assembles from a *value* has no re-print, but its
+    // substitutions are still re-read: `expand_word_internal` walks this string
+    // and hands `extract_command_subst` the whole remainder of it, so a
+    // `$( … )` in it wants the same tail a parser's word would give it. Every
+    // body here is [`crate::ast::CmdSubBody::Unread`] — that is what
+    // [`crate::lexer::lex_dquote_body`] produces — so nothing else is touched.
+    crate::unparse::attach_comsub_tails(&mut word);
+    Ok(word)
 }
 
 /// Like [`word_verbatim_from_source`] but for the *replacement* half of

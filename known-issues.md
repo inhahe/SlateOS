@@ -43,6 +43,276 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
+### TD-OILS-BROKEN-DOWN-TIME-IS-ALWAYS-UTC. `printf '%(%T)T' -1` and `PS1='\t'` are hours off — 2026-08-09 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs`, `format_strftime` (~55980) — it does
+`epoch.div_euclid(86_400)` / `rem_euclid` straight off the epoch seconds, i.e.
+UTC. Every caller inherits it: `push_prompt_strftime` (the `\t` `\T` `\@` `\A`
+`\d` `\D{…}` prompt escapes, ~17063) and the `printf '%(FORMAT)T'` builtin.
+
+**Reproduce** (dev host is UTC-4):
+
+```
+$ bash -c "printf '%(%T)T\n' -1"   ->  04:11:48
+$ osh  -c "printf '%(%T)T\n' -1"   ->  08:11:48
+
+$ bash -c "printf '%(%T)T\n' 0"    ->  19:00:00     (1969-12-31 19:00 local)
+$ osh  -c "printf '%(%T)T\n' 0"    ->  00:00:00
+
+$ v='\t'; "${v@P}"                 ->  bash 04:11:32,  osh 08:11:32
+```
+
+`date +%T` agrees with bash in both shells, so it is not the clock.
+
+**Why.** bash's `printf` builtin and `decode_prompt_string` both format
+`localtime (&t)`; osh formats the epoch directly. `%z`/`%Z` are wrong for the
+same reason — they answer `+0000`/`UTC` unconditionally.
+
+**Why it has not shown up in a sweep.** Every corpus and unit-test case that
+renders a time pins `TZ=UTC` first (`interp.rs` tests ~63898-63965), which makes
+the two agree. Any case that does *not* pin it is nondeterministic across
+machines, so the corpus cannot simply stop pinning.
+
+**Proper fix.** Give `format_strftime` a zone offset argument and a single
+resolver for it:
+
+* `TZ` set to a POSIX zone string (`EST5EDT,M3.2.0/2,M11.1.0/2`) — parse it,
+  including the DST rule, which is enough for `%z`/`%Z` too.
+* `TZ` set to a zoneinfo name (`America/New_York`) — needs a tzdata reader; on
+  SlateOS that means shipping tzdata, which is a decision of its own.
+* `TZ` unset — the host's current offset (`GetTimeZoneInformation` on the
+  Windows dev build; a system setting on SlateOS).
+* `TZ` empty or `UTC` — today's behaviour.
+
+Then the corpus can drop its `TZ=UTC` pins for the POSIX-string cases and gain a
+case that sets `TZ` explicitly to a fixed offset, which is deterministic
+everywhere.
+
+**Note:** `format_strftime`'s doc comment says "see known-issues TD-OILS" with
+no tag — this entry is the referent; point it here when fixing.
+
+---
+
+### TD-OILS-A-SUBSTITUTION-IN-TEXT-NO-PARSER-READ-WAS-PARSED-AT-PARSE-TIME. A `$( … )` in a here-document body was re-printed, and its errors were the script's — 2026-08-09 — ✅ FIXED 2026-08-09
+
+**Where:** `userspace/oils/src/lexer.rs` (`Lexer::subst_kind`, `read_dollar`'s
+`$(` arm, `read_subst_body`), `src/ast.rs` (`CmdSubBody::Unread`),
+`src/parser.rs` (`seg_to_parts`, `dquote_word_from_source`), `src/unparse.rs`
+(`part_src`, `attach_comsub_tails`), `src/interp.rs`
+(`command_sub_body_inner`, `comsub_reparse_fail`, `Shell::prompt_expanding`).
+Corpus: `tests/corpus/a-here-document-body-is-not-a-word-the-parser-read.sh`.
+
+**What.** osh lexed a here-document body as though the body were a word, so a
+`$( … )` in it got the ordinary eager parse: its body was re-printed for
+`declare -f`, and a syntax error in it was a *parse* error that killed the
+script. bash does neither.
+
+**Why.** bash's reader never calls `read_token_word` over a here-document body.
+`read_secondary_line` collects the lines and `make_here_document`
+(make_cmd.c:621) takes them as text, so `parse_matched_pair` never runs, the
+delimiter stack is empty for the body, and nothing in it is translated at parse
+time (`expand_word_internal` takes the ANSI-C branch only when
+`(quoted & (Q_HERE_DOCUMENT|Q_DOUBLE_QUOTES)) == 0`). Every substitution in the
+body is therefore found only at *expansion* time, by `extract_command_subst`
+(subst.c:1278) — and because `param_expand`'s `case LPAREN` (subst.c:10570)
+sets `t_index = zindex + 1`, i.e. *past* the `(`, that takes the
+`xparse_dolparen` branch rather than `extract_delimited_string`.
+
+The same holds for every other string the shell expands as a double-quoted run
+without a parser having read it as a word: `PS4` before an xtrace line, and
+`${x@P}`.
+
+**Fix, as landed.** A third `$( … )` spelling, `CmdSubBody::Unread`, carrying
+the **source** rather than a re-print:
+
+* `Lexer::here_text` — already set by `scan_heredoc_segs`, `lex_dquote_body`
+  and `lex_operand_in_dquote` — now also selects the body kind, and is no
+  longer cleared on the way into `read_subst_body`. Keeping it set is what made
+  the printback verbatim: the balanced read is only finding the `)`, so it must
+  not translate or re-quote what it passes over. `arith_comsubs` is likewise not
+  recorded for such a scan, there being no parse to re-print.
+* `declare -f` prints `$(` + the source + `)`.
+* At expansion time the body is re-read exactly as a `Parsed` body's re-print is
+  — same `comsub_reparse_fail`, since in bash it is literally the same
+  `xparse_dolparen` call over whatever text the word holds — so a body that will
+  not parse is a runtime `command substitution:` diagnostic and a
+  `jump_to_top_level (DISCARD)` that leaves `$?` at 1 and lets the script go on.
+* Two line numbers, one apart. The extent-finding read goes through
+  `parse_string`, which does `push_stream (0)` and **omits**
+  `parse_and_execute`'s `line_number--` (evalstring.c:329); the child that
+  actually runs the body goes through `parse_and_execute`, which does not omit
+  it (a non-interactive `command_substitute` passes no `SEVAL_RESETLINE` —
+  subst.c:6986). So the run is numbered from the shell's *current* line and the
+  extent read one higher. Measured on `hd4`, `ha`, `s3`, `hb`, `t1`, `t2`: the
+  base is the owning simple command's line and is independent of where in the
+  body the substitution sits.
+* `Shell::prompt_expanding` models `no_longjmp_on_fatal_error`, which
+  `expand_prompt_string` (subst.c:4459) raises around the whole expansion and
+  `extract_command_subst` (subst.c:1289) passes down as `SX_NOLONGJMP`. All that
+  flag reaches is the one guard around the raise in `xparse_dolparen`
+  (parse.y:4330) — so a failing body in a `PS1`/`PS4`/`${x@P}` is *reported* and
+  then handed to `command_substitute` anyway, whose child reports it a second
+  time one line lower. Result: two diagnostics, an empty expansion, and `$?`
+  untouched. The flag is inherited by `clone_for_subshell`, as a fork inherits
+  every global.
+* `dquote_word_from_source` now runs `attach_comsub_tails`. A word the shell
+  assembles from a *value* has no re-print, but `expand_word_internal` is still
+  walking its string, so `extract_command_subst` still gets the whole remainder
+  and a failing body still echoes it.
+* A third `parser::Quoting`, `Unread`. Unread-ness is *not* a property of the
+  operand text — `${x:-$'a\x2Cb'}` reaches `lex_operand_in_dquote` identically
+  from `"…"` and from a here-document body — so it has to be carried down from
+  the read, exactly as `Dquote` already is. Setting `here_text` unconditionally
+  in `lex_operand_in_dquote` instead cost a corpus case
+  (`a-quoted-operands-quoting-is-the-quotes-it-sits-in`, the `locale` row:
+  `"${nope:-$"hi"}"` must still translate, because there the operand *is* a word
+  a parser read). `read_dollar`'s `$'…'`/`$"…"` arms are gated on
+  `!in_dquote && !here_text` — two different reasons for the same answer.
+
+**Left behind:** TD-OILS-A-FAILED-EXTENT-PARSE-CONSUMES-THE-REST-OF-THE-STRING,
+TD-OILS-A-BACKQUOTE-IN-A-HERE-DOCUMENT-BODY-IS-NUMBERED-FROM-THE-BODY and
+TD-OILS-AN-UNTERMINATED-DOLLAR-PAREN-IN-A-HERE-DOCUMENT-BODY-IS-A-PARSE-ERROR,
+all below.
+
+---
+
+### TD-OILS-A-FAILED-EXTENT-PARSE-CONSUMES-THE-REST-OF-THE-STRING. `v='$(fi)tail'; echo "${v@P}"` prints `tail`; bash prints nothing — 2026-08-09 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs`, `command_sub_body_inner`'s
+`CmdSubBody::Unread` arm — the `self.prompt_expanding` path, which today runs
+`src` and lets the parts after it expand normally.
+
+**Reproduce** (bash 5.2.37 left, osh right):
+
+```
+$ cat vt.sh
+u='$(fi)tail'
+printf '3 [%s]\n' "${u@P}"
+
+bash: vt.sh: command substitution: line 2: syntax error near unexpected token `fi'
+      vt.sh: command substitution: line 2: `fi)tail'
+      vt.sh: command substitution: line 1: syntax error near unexpected token `fi'
+      vt.sh: command substitution: line 1: `fi)tai'      <-- body is `fi)tai'
+      3 []                                               <-- `tail' was eaten
+
+osh:  … line 2: `fi)tail'
+      … line 1: `fi'                                     <-- body is `fi'
+      3 [tail]
+```
+
+**Why.** Only reachable under `no_longjmp_on_fatal_error` (a prompt expansion),
+because otherwise the failure aborts before any of this matters. There,
+`parse_string` takes the `SEVAL_NOLONGJMP` branch on a syntax error — it calls
+`reset_parser ()` and `break`s (builtins/evalstring.c:688-695) — with
+`bash_input.location.string` already at the end of the string, since a string
+input's reader swallows the whole thing as one "line". So:
+
+* `nc = ep - ostring` is the **whole remainder**, and `xparse_dolparen` returns
+  `substring (ostring, 0, nc - 1)` (parse.y:4377) — the remainder **less its
+  last byte**. That is the text `command_substitute` gets, hence the child's
+  echoed `` `fi)tai' ``.
+* `*indp = ep - base - 1` (parse.y:4348) leaves the caller's index at the last
+  byte, so `param_expand` consumes everything after the substitution and the
+  expansion contributes nothing but the (empty) substitution result. Hence
+  `[]`, and hence a `PS4` of `'$(fi)+ '` printing xtrace lines with no `+ `.
+
+Note the `ep[-1] != ')'` guard just above (parse.y:4338) strips trailing
+*newlines* only, so a body ending in a newline loses them before the `nc - 1`.
+
+**Proper fix.** In the `prompt_expanding` branch: run
+`src + ")" + tail`, minus trailing newlines when the last byte is not `)`, minus
+one final byte; and signal the enclosing expansion that the rest of *its* string
+is consumed. The second half is the invasive part — it needs a `Shell` flag the
+word-part loop honours and the enclosing string level clears, where a "string
+level" is the top-level word `expand_double_quoted` was given or a nested
+operand word (bash recurses `expand_word_internal` per operand, so the
+consumption is bounded by the level the substitution sits in). Deferred because
+it touches the general word-expansion loop for a corner (a syntax-error `$( … )`
+with text after it, inside a prompt string) that nothing else reaches.
+
+**Corpus:** `a-here-document-body-is-not-a-word-the-parser-read.sh` deliberately
+puts nothing after the substitution on its prompt rows, and says so.
+
+---
+
+### TD-OILS-A-BACKQUOTE-IN-A-HERE-DOCUMENT-BODY-IS-NUMBERED-FROM-THE-BODY. `` `fi` `` in a here-doc is blamed to line 1 — 2026-08-09 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs`, `command_sub_body_inner`'s
+`CmdSubBody::Backtick | CmdSubBody::ArithFallback` arm, which numbers the body
+`LineMap::Offset(close_line - 1)`.
+
+**Reproduce:**
+
+```
+$ cat -n s1.sh
+     1  echo one
+     2  cat <<E
+     3  `fi`
+     4  E
+     5  echo "after rc=$?"
+
+bash: s1.sh: command substitution: line 2: syntax error near unexpected token `fi'
+osh:  s1.sh: command substitution: line 1: syntax error near unexpected token `fi'
+```
+
+**Why.** bash numbers *every* substitution's run from the global `line_number`
+at expansion time, less one (`parse_and_execute` does `line_number--`,
+evalstring.c:329). For a substitution in a word the parser read, osh's
+`close_line` happens to coincide with that — verified on a multi-line backquote
+in an ordinary word, which both shells blame to line 5 — but a here-document
+body is scanned by `scan_heredoc_segs` from a fresh `Lexer` over the body alone,
+so its `close_line` is body-relative and the coincidence breaks.
+
+`CmdSubBody::Unread` already sidesteps this: it numbers from
+`self.current_line`, which is what bash's `line_number` holds. The same is
+almost certainly right for `Backtick` and `ArithFallback` everywhere, since it
+is bash's actual rule rather than a coincidence — but changing the general
+backquote path is a separate, corpus-wide change and wants its own sweep.
+
+**Proper fix.** Number `Backtick`/`ArithFallback` from `self.current_line` too,
+and delete `close_line` from those variants if nothing else wants it. Verify
+against the multi-line-backquote-in-a-word shape above before and after.
+
+---
+
+### TD-OILS-AN-UNTERMINATED-DOLLAR-PAREN-IN-A-HERE-DOCUMENT-BODY-IS-A-PARSE-ERROR. `$(echo` in a here-doc kills the script — 2026-08-09 — OPEN
+
+**Where:** `userspace/oils/src/lexer.rs`, `read_dollar`'s `$(` arm — an
+unbalanced `read_subst_body` is a `LexError`, which becomes a script syntax
+error even when `here_text` is set. `CmdSubBody::Unread` has nowhere to record
+"the `)` was never found".
+
+**Reproduce:**
+
+```
+$ cat -n hd3.sh
+     1  cat <<E
+     2  $(echo
+     3  E
+     4  echo "after rc=$?"
+
+bash: hd3.sh: command substitution: line 3: unexpected EOF while looking for matching `)'
+      after rc=1                                    (script exits 0)
+osh:  hd3.sh: line 2: unexpected EOF while looking for matching `)'
+      (script exits 2, nothing after runs)
+```
+
+**Why.** Nothing in the body is read at parse time, so an unclosed `$(` in it
+cannot be a parse error. `xparse_dolparen` finds it at expansion time and, when
+`base[*indp] != ')'`, calls `parser_error (start_lineno, "unexpected EOF while
+looking for matching `%c'", ')')` and `jump_to_top_level (DISCARD)`
+(parse.y:4360-4365) — the recoverable class, so the enclosing command dies with
+`$?` at 1 and the script carries on. Note `start_lineno`, captured on entry: the
+blame is the line the read *started* from, not where it ran out.
+
+**Proper fix.** Carry a `closed: bool` on `CmdSubBody::Unread` (the lexer knows
+it) and take the whole body to end of text when it is false. The re-read input
+is then `src` alone rather than `src` + `)` + `tail`, and the failure is the
+`unexpected EOF` diagnostic above rather than whatever `comsub_reprint_error`
+would say. Same `arm_discard(1)` as the ordinary failure.
+
+---
+
 ### TD-OILS-A-FORCE-EOF-REPARSE-ABORT-KEEPS-ITS-SCRIPT-STATUS-UNDER-DASH-C. `bash -c` ends a re-parse abort with 127; osh ends it with 2 — 2026-08-08 — ✅ RESOLVED 2026-08-08
 
 **Where:** `userspace/oils/src/interp.rs` — the two sites that arm a

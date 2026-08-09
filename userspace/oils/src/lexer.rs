@@ -287,6 +287,21 @@ pub enum SubBody {
     /// `$( … )` — parsed in the enclosing token stream, and printed back from
     /// that parse.
     Eager,
+    /// `$( … )` written in text that no parser ever read as a *word* — a
+    /// here-document body, a `PS4`, a `${x@P}`. bash collected that text without
+    /// calling `read_token_word` (a here-doc body comes from
+    /// `read_secondary_line` straight into `make_here_document`,
+    /// make_cmd.c:621), so `parse_matched_pair` never ran over it and
+    /// `parse_comsub` — with it the re-print — never ran either. The body is
+    /// found only when the text is *expanded*, by `extract_command_subst`, and
+    /// what it hands on is the **source**.
+    ///
+    /// Same spelling as [`SubBody::Eager`], then, but the whole of its parse
+    /// happens at expansion time, which is observable three ways: `declare -f`
+    /// prints the body back as written rather than re-printed, a syntax error in
+    /// it is a runtime `command substitution:` diagnostic rather than a parse
+    /// error, and the enclosing script survives it.
+    Unread,
     /// `` ` … ` `` — parsed at expansion time. Carries the body *exactly as
     /// written*, backslashes and all: bash echoes a backtick body rather than
     /// re-printing it, and re-printing is not merely untidy — a nested `` \` ``
@@ -894,6 +909,26 @@ struct Lexer {
     /// at. Only the `${ … }` reader raises it and only the segment builder
     /// consumes it, which clears it as it goes; nothing else looks.
     bare_splice: bool,
+    /// The text this scan is reading is a here-document **body**, which bash
+    /// never read as a word.
+    ///
+    /// A body is collected by `read_secondary_line` into
+    /// `make_here_document` (make_cmd.c:621) as plain lines: no
+    /// `read_token_word`, so no `parse_matched_pair`, so **no translation at
+    /// all** — a `$'…'` in it is still `$'…'` when `expand_word_internal`
+    /// reaches it, and there (a here-document expands as if double-quoted,
+    /// `Q_HERE_DOCUMENT`) a `$` before a `'` is not a quote introducer, so it
+    /// stays literal. Measured: `` cat <<E `` / `${x:-$'a\tb'}` prints
+    /// `$'a\tb'`, where the same word in a real double-quoted string prints a
+    /// tab.
+    ///
+    /// It also means the delimiter stack is *empty* for anything in the body
+    /// that does get parsed: a `$( … )` there is parsed by `command_substitute`
+    /// at expansion time, from a fresh reader, so its `${ … }` re-quotes. That
+    /// is why the flag is cleared going into a substitution body — see
+    /// [`Lexer::read_subst_body`] — and why `` cat <<E `` /
+    /// `$(echo ${x:-$'a\tb'})` prints a tab rather than splitting on one.
+    here_text: bool,
 }
 
 /// A warning bash raises from its **reader** rather than from the parse or the
@@ -1325,6 +1360,7 @@ impl Lexer {
             raw_from: 0,
             taken: Vec::new(),
             bare_splice: false,
+            here_text: false,
         }
     }
 
@@ -1840,10 +1876,17 @@ pub fn lex_word_verbatim_opts(src: BStr<'_>, opts: ParseOpts) -> Result<Vec<Seg>
 /// line, and `${x@P}`). `$…`, `` `…` `` and the double-quote backslash escapes
 /// are live; a `"`, a `'` and any other backslash are literal.
 ///
+/// Nothing in it was translated by a parser either — the string reached the
+/// expansion as a *value*, not as source `read_token_word` had read — so the
+/// scan runs with [`Lexer::here_text`] set, and a `$'…'` inside a `${ … }` here
+/// stays as written. Measured: `v='${y:-$'\''a\x2Cb'\''}'` makes `"${v@P}"`
+/// print `$'a\x2Cb'` back.
+///
 /// # Errors
 /// Returns [`LexError`] on an unterminated substitution.
 pub fn lex_dquote_body(src: BStr<'_>) -> Result<Vec<Seg>, LexError> {
     let mut lx = Lexer::new(src, ParseOpts::default());
+    lx.here_text = true;
     lx.read_double_quote_until(false)
 }
 
@@ -1871,10 +1914,17 @@ pub fn lex_replacement_verbatim(src: BStr<'_>) -> Result<Vec<Seg>, LexError> {
 /// `$'…'` and `$"…"` alone, but an operand still expands them, because it is a
 /// *word* being read — the quoting only says how its characters are spelled.
 ///
+/// `unread` says the text this operand was written in is text no parser read —
+/// a here-document body, a `PS4`, a `${x@P}` — in which case that last sentence
+/// stops applying, because there is no read: see [`Lexer::here_text`]. It is the
+/// caller's to know, since the same operand spelling reaches here from both
+/// (`crate::parser::Quoting::Dquote` and `Quoting::Unread`).
+///
 /// # Errors
 /// Returns [`LexError`] on an unterminated quote or substitution.
-pub fn lex_operand_in_dquote(src: BStr<'_>) -> Result<Vec<Seg>, LexError> {
+pub fn lex_operand_in_dquote(src: BStr<'_>, unread: bool) -> Result<Vec<Seg>, LexError> {
     let mut lx = Lexer::new(src, ParseOpts::default());
+    lx.here_text = unread;
     lx.read_word_verbatim(Verbatim::Dquote)
 }
 
@@ -4419,20 +4469,30 @@ impl Lexer {
     /// character and the following quote is handled by the enclosing
     /// double-quote scanner (bash: `"a$'b'"` is the 6 literal chars `a$'b'`,
     /// and a `$` right before the closing `"` is a literal `$`).
+    ///
+    /// [`Lexer::here_text`] blocks those two forms for a different reason and
+    /// reaches the same place: an operand written in text no parser read is a
+    /// word to *this* scan but was never one to bash's, so nothing in it was
+    /// translated at parse time and `expand_word_internal` — which takes the
+    /// ANSI-C branch only when `(quoted & (Q_HERE_DOCUMENT|Q_DOUBLE_QUOTES)) ==
+    /// 0` — meets the `$'` still spelled out. Measured: `cat <<E` /
+    /// `${x:-$'a\x2Cb'}` prints `$'a\x2Cb'`, where `"${x:-$'a\x2Cb'}"` prints
+    /// `a,b`.
     fn read_dollar(&mut self, in_dquote: bool) -> Result<Option<Seg>, LexError> {
+        let quote_form = !in_dquote && !self.here_text;
         // Consume the `$`. What follows it is judged after the reader's
         // deletions, so `$<backslash><newline>(` opens a substitution and
         // `$<backslash><newline>{` a braced parameter. See [`Lexer::eat_conts`].
         self.adv();
         match self.peek() {
-            Some('\'') if !in_dquote => {
+            Some('\'') if quote_form => {
                 // `$'…'` — ANSI-C quoting: a literal string with backslash
                 // escapes processed (no expansion/splitting — like `'…'`).
                 self.pos += 1;
                 let s = self.read_ansi_c_quote()?;
                 Ok(Some(Seg::Sq(s, false)))
             }
-            Some('"') if !in_dquote => {
+            Some('"') if quote_form => {
                 // `$"…"` — locale translation. We have no message catalogs, so
                 // it behaves as a plain double-quoted string (bash's fallback).
                 self.pos += 1;
@@ -4537,10 +4597,16 @@ impl Lexer {
                     // The body stands in this scan's delimiter: bash pushes a
                     // `(` for a `$(` it meets in `read_token_word` (parse.y:5041)
                     // but none for one inside a `"…"` (parse.y:3960), so only the
-                    // unquoted one gets a delimiter of its own.
-                    let raw =
-                        self.read_subst_body(in_dquote).map_err(|e| e.at(self.eof_line()))?;
-                    Ok(Some(Seg::CmdSub(raw, self.cur_line(), SubBody::Eager)))
+                    // unquoted one gets a delimiter of its own. A here-document
+                    // body has no delimiter stack at all — its substitutions are
+                    // parsed at expansion time, from a fresh reader — so a `"`
+                    // this scan is nominally inside is not one of bash's. See
+                    // [`Lexer::here_text`].
+                    let raw = self
+                        .read_subst_body(in_dquote && !self.here_text)
+                        .map_err(|e| e.at(self.eof_line()))?;
+                    let kind = self.subst_kind();
+                    Ok(Some(Seg::CmdSub(raw, self.cur_line(), kind)))
                 }
             }
             Some(c) if is_name_start(c) => {
@@ -4587,6 +4653,13 @@ impl Lexer {
         self.read_balanced_inner(open, close, false, false)
     }
 
+    /// Which of the two `$( … )` variants this scan is producing: the ordinary
+    /// eager one, or [`SubBody::Unread`] when the text being scanned is not one
+    /// a parser ever read as a word. See [`Lexer::here_text`].
+    fn subst_kind(&self) -> SubBody {
+        if self.here_text { SubBody::Unread } else { SubBody::Eager }
+    }
+
     /// [`Lexer::read_balanced`] for the body of a `$( … )` or `<( … )`
     /// substitution, which bash reads in the **enclosing** input stream — so a
     /// here-document declared inside the body takes its body from the lines that
@@ -4619,6 +4692,12 @@ impl Lexer {
         // `$(( $(echo "$(( $(fi) ))") ))` would parse the innermost body twice.
         // See [`Lexer::arith_comsubs`].
         let outer = std::mem::take(&mut self.arith_comsubs);
+        // The flag travels *into* the body, because this scan is only finding the
+        // `)`: a substitution written in text no parser read is itself unread,
+        // and what has to survive to expansion time is its source. The body is
+        // read as a word then — `command_substitute` parses it, `$'…'` and all —
+        // and that read starts from the source this collects. See
+        // [`Lexer::here_text`] and [`crate::ast::CmdSubBody::Unread`].
         let r = self.read_balanced_inner('(', ')', true, dq);
         self.arith_comsubs = outer;
         if r.is_err() {
@@ -4936,11 +5015,18 @@ impl Lexer {
                 raw.extend_from_slice(b"$(");
                 raw.extend_from_slice(&inner);
                 raw.push(b')');
-                self.arith_comsubs.push(CmdSubSpan {
-                    src: inner,
-                    close_line: self.cur_line(),
-                    range: start..raw.len(),
-                });
+                // …but only where a parser read this text in the first place: an
+                // arithmetic expansion written in a here-document body is found
+                // by `expand_word_internal`, not by `read_token_word`, so
+                // nothing in it was ever handed to `parse_comsub` and there is
+                // no re-print to write back. See [`Lexer::here_text`].
+                if !self.here_text {
+                    self.arith_comsubs.push(CmdSubSpan {
+                        src: inner,
+                        close_line: self.cur_line(),
+                        range: start..raw.len(),
+                    });
+                }
                 Ok(true)
             }
             _ => Ok(false),
@@ -5569,7 +5655,12 @@ impl Lexer {
                     // newline where the source had none, so a `$LINENO` after it
                     // in the same `$( … )` body moves down a line, exactly as
                     // bash's does.
-                    if self.peek() == Some('\'') {
+                    // …in every grouping construct `read_token_word` reads, which
+                    // a here-document body is not: nothing translates it, so the
+                    // `$'…'` falls through to the `'` arm below and is copied
+                    // verbatim, exactly as `${x:-'q'}` in a body is. See
+                    // [`Lexer::here_text`].
+                    if !self.here_text && self.peek() == Some('\'') {
                         // The `'` is a character of the body too, and bash steps
                         // the machine over it before reading the run.
                         state = state.step(b'\'', true);
@@ -5632,8 +5723,12 @@ impl Lexer {
                                 // reads a here-document declared inside it the same
                                 // way — the body lines land in this `${ … }`'s raw
                                 // text, right where the nested re-lex expects them.
-                                let inner =
-                                    self.read_subst_body(in_dquote).map_err(|e| e.at(self.eof_line()))?;
+                                // …and, like every `$(`, in this scan's delimiter
+                                // — which a here-document body does not have one
+                                // of. See [`Lexer::here_text`].
+                                let inner = self
+                                    .read_subst_body(in_dquote && !self.here_text)
+                                    .map_err(|e| e.at(self.eof_line()))?;
                                 // …and bash parses it here and now, from
                                 // `parse_dollar_word` (parse.y:3954). What
                                 // survives is the parse re-printed, not the
@@ -5643,11 +5738,17 @@ impl Lexer {
                                 let start = raw.len().saturating_sub(2);
                                 raw.extend_from_slice(&inner);
                                 raw.push(b')');
-                                self.arith_comsubs.push(CmdSubSpan {
-                                    src: inner,
-                                    close_line: self.cur_line(),
-                                    range: start..raw.len(),
-                                });
+                                // …unless nothing here was read by a parser at
+                                // all, in which case there is no parse to
+                                // re-print and the source is what stands. See
+                                // [`Lexer::here_text`].
+                                if !self.here_text {
+                                    self.arith_comsubs.push(CmdSubSpan {
+                                        src: inner,
+                                        close_line: self.cur_line(),
+                                        range: start..raw.len(),
+                                    });
+                                }
                             }
                         }
                         Some('[') => {
@@ -6239,11 +6340,17 @@ fn flush_lit(segs: &mut Vec<Seg>, lit: &mut Str) {
 /// Lower a here-document body into segments. When `expand` is false (quoted
 /// delimiter) the whole body is a single literal; otherwise it is scanned like a
 /// double-quoted context (parameter/command/arith expansion, `"` literal).
+///
+/// A double-quoted *context* is not a double-quoted *word*, though: bash's
+/// reader collected this text without ever calling `read_token_word`, so no
+/// `$'…'` in it was translated at parse time and no delimiter was pushed for the
+/// quotes around it. [`Lexer::here_text`] is that difference.
 fn scan_heredoc_segs(body: BStr<'_>, expand: bool) -> Result<Vec<Seg>, LexError> {
     if !expand {
         return Ok(vec![Seg::Lit(body.to_vec())]);
     }
     let mut lx = Lexer::new(body, ParseOpts::default());
+    lx.here_text = true;
     let mut segs: Vec<Seg> = Vec::new();
     let mut lit = Str::new();
     while let Some(c) = lx.peek() {

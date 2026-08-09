@@ -579,13 +579,13 @@ fn command_block(cmd: &Command, fmt: Fmt) -> Str {
             }
             s
         }
-        Command::Subshell(prog) => {
+        Command::Subshell(sub) => {
             // `cprintf ("( "); skip_this_indent++; <body>; cprintf (" )")`
             // (print_cmd.c:350–356) — no `semicolon ()`, and the body keeps the
             // subshell's own depth rather than descending, so a `;` connector
             // inside a function definition lines the next statement up under
             // the `(`. (TD-OILS-DECLAREF-QUIRKS item 2.)
-            let body = program_block(prog, fmt, false);
+            let body = program_block(&sub.body, fmt, false);
             if body.is_empty() {
                 return b"( )".to_vec();
             }

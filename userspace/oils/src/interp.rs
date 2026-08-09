@@ -1616,6 +1616,43 @@ enum Flow {
     Abort,
 }
 
+/// Whether a value unwinding out of an executor stands for one of bash's
+/// `jump_to_top_level` longjmps — the ones that fly *past* a plain
+/// `line_number = save_line_number` restore instead of running it.
+///
+/// bash brackets a compound command's own line with two bare assignments
+/// (`execute_for_command`, execute_cmd.c:2883/3003, and its `case`/`select`/
+/// `[[ … ]]` siblings), not with an `unwind_protect_int`. A `longjmp` therefore
+/// skips the second one and leaves the shell's counter wherever the innermost
+/// command drove it — the drift that
+/// TD-OILS-A-DISCARD-OUT-OF-A-COMPOUND-COMMAND-LOSES-BASH-A-LINE measures. So
+/// every bracket that mirrors a bare-assignment restore consults this to decide
+/// whether to run it; see [`Shell::on_control_line`] and [`Shell::exec_simple`].
+///
+/// Only [`Flow::Discard`] and [`Flow::Abort`] are longjmps. `break`/`continue`
+/// are return values in bash (the `breaking`/`continuing` counters), so the
+/// restores do run for them. `return` *is* a longjmp, but only as far as
+/// `execute_function`'s `return_catch`, whose frame carries a real
+/// `unwind_protect_int (line_number)` (execute_cmd.c:5095) that puts the call
+/// site's line back — so unwinding it normally reaches the same state. `exit`
+/// ends the shell (or, in a subshell, a copy of the counter the parent never
+/// sees), so the register's fate is unobservable.
+trait LineJump {
+    fn is_jump(&self) -> bool;
+}
+
+impl LineJump for Flow {
+    fn is_jump(&self) -> bool {
+        matches!(self, Flow::Discard | Flow::Abort)
+    }
+}
+
+impl<T> LineJump for Result<T, Flow> {
+    fn is_jump(&self) -> bool {
+        matches!(self, Err(f) if f.is_jump())
+    }
+}
+
 /// An armed non-fatal abort: the status the discarded command reports, and
 /// which of bash's two `jump_to_top_level(DISCARD)` depths raised it.
 ///
@@ -3966,6 +4003,12 @@ pub struct Shell {
     /// reports it, which is why it is kept beside the source label rather than
     /// on the definition itself.
     func_lines: HashMap<Str, u32>,
+    /// The line each function's *body* opens on — bash's `function_bstart`,
+    /// which `execute_function` installs as the shell's line for the call
+    /// (execute_cmd.c:5205). Kept beside the other two for the same reason:
+    /// the many `self.funcs.get()` sites stay unchanged. See
+    /// [`crate::ast::FunctionDef::body_line`].
+    func_body_lines: HashMap<Str, u32>,
     /// Redirections attached to a function *definition* (`f() { …; } >log`).
     /// bash applies these on every invocation of the function, wrapping the
     /// body execution. Kept as a parallel map (rather than folding into
@@ -5744,6 +5787,7 @@ impl Shell {
             funcs: HashMap::new(),
             func_sources: HashMap::new(),
             func_lines: HashMap::new(),
+            func_body_lines: HashMap::new(),
             func_redirects: HashMap::new(),
             positional: Vec::new(),
             name: b"osh".to_vec(),
@@ -6894,6 +6938,7 @@ impl Shell {
         self.funcs.insert(name.to_vec(), f.body);
         self.func_sources.insert(name.to_vec(), b"environment".to_vec());
         self.func_lines.insert(name.to_vec(), 0);
+        self.func_body_lines.insert(name.to_vec(), f.body_line);
         if f.redirects.is_empty() {
             self.func_redirects.remove(name);
         } else {
@@ -7421,6 +7466,25 @@ impl Shell {
             // before the unit runs, because running it is what moves the
             // counter away.
             let unit_end = ip.last_unit_end_line();
+            // And where the unit *starts* running from, because bash's
+            // `line_number` is one register that the **reader** leaves at the
+            // last line it read — not something re-seeded per command. Every
+            // executor that needs its own line assigns it and puts it back
+            // (see [`Shell::on_control_line`]), so this value is what shows
+            // through the windows bash leaves unstamped: the `for`/`select`
+            // identifier check, which runs *before* the assignment
+            // (execute_cmd.c:2884 vs 2897), and a redirection on a group,
+            // `while`, `until` or `if`, none of which stamp themselves.
+            //
+            // ```sh
+            // for 'a[0]' in x; do :; done; echo \
+            //   tail                       # blamed on line 2, not line 1
+            // ```
+            //
+            // Biased like every other write to it: see [`Shell::line_bias`].
+            if unit_end != 0 {
+                self.current_line = unit_end.saturating_sub(self.line_bias);
+            }
             let flow = self.exec_program_top(&prog, out, stdin);
             // A unit that ended in a `jump_to_top_level(DISCARD)` left bash's
             // counter wherever the innermost command of this shell frame had
@@ -8271,8 +8335,11 @@ impl Shell {
             // both this sweep and the whole of this item. See
             // [`TrackedCoproc::born_item`].
             self.item_seq = self.item_seq.wrapping_add(1);
-            // Biased, because bash's counter is: see [`Shell::line_bias`].
-            self.current_line = item.line.saturating_sub(self.line_bias);
+            // No line is stamped here. bash has no per-item stamp: its
+            // `line_number` is a single register the reader left at the end of
+            // this parse unit, which each command assigns over and puts back —
+            // see the seeding in [`Shell::run_source_flow_units`] and
+            // [`Shell::on_control_line`].
             if item.is_background() {
                 // The DEBUG trap hears about the job here, in the parent, before
                 // it is started — see [`Shell::announce_async`].
@@ -9545,10 +9612,16 @@ impl Shell {
             Command::Redirected { inner, redirects } => {
                 self.exec_redirected(inner, redirects, out, stdin)
             }
-            Command::Subshell(p) => {
+            Command::Subshell(c) => {
                 // A subshell gets a clone of the state; mutations don't escape.
                 let mut sub = self.clone_for_subshell();
-                let flow = sub.exec_program(p, out, stdin);
+                // The child stands on the `)`'s line from its first act:
+                // `execute_command_internal` saves the enclosing line, assigns
+                // `SET_LINE_NUMBER (Subshell->line)` in the forking branch and
+                // puts it back after (execute_cmd.c:648, 650, 703). The clone
+                // is what puts it back here — the parent's own line is
+                // untouched. See [`SubshellClause::line`].
+                let flow = sub.on_control_line(c.line, |s| s.exec_program(&c.body, out, stdin));
                 // An explicit `exit` from the subshell body propagates outward as
                 // a status only — but it must land *before* the EXIT trap runs, so
                 // the handler sees it as `$?` and can override it.
@@ -9614,8 +9687,16 @@ impl Shell {
             let src = self.current_source();
             self.func_sources.insert(f.name.clone(), src);
             // …and which line of it the definition began on, the other
-            // half of what `declare -F NAME` reports under extdebug.
-            self.func_lines.insert(f.name.clone(), self.current_line);
+            // half of what `declare -F NAME` reports under extdebug. Taken
+            // from the definition's own stamp rather than from the shell's
+            // current line, because the latter is the reader's — the *end* of
+            // the parse unit — and a multi-line definition would report its
+            // closing brace. See [`crate::ast::FunctionDef::line`].
+            self.func_lines.insert(f.name.clone(), f.line.saturating_sub(self.line_bias));
+            // …and where its *body* opens, which is a different number and a
+            // different job: a call stands on it. See
+            // [`crate::ast::FunctionDef::body_line`].
+            self.func_body_lines.insert(f.name.clone(), f.body_line);
             // Redirections attached to the definition apply on every
             // invocation (bash semantics). Store them, or clear a
             // prior set when the function is redefined without any.
@@ -9854,13 +9935,21 @@ impl Shell {
     /// item's line standing — the same reading [`SimpleCommand::line`] gets.
     /// The stored line is a source line, so the same `line_bias` the simple
     /// command driver applies is applied here.
-    fn on_control_line<R>(&mut self, line: u32, f: impl FnOnce(&mut Self) -> R) -> R {
+    ///
+    /// The restore is a *plain assignment*, not an unwind-protect, so a
+    /// `jump_to_top_level` out of the body flies straight past it and leaves
+    /// the counter low — which is the whole of
+    /// TD-OILS-A-DISCARD-OUT-OF-A-COMPOUND-COMMAND-LOSES-BASH-A-LINE. See
+    /// [`LineJump`].
+    fn on_control_line<R: LineJump>(&mut self, line: u32, f: impl FnOnce(&mut Self) -> R) -> R {
         let saved = self.current_line;
         if line != 0 {
             self.current_line = line.saturating_sub(self.line_bias);
         }
         let r = f(self);
-        self.current_line = saved;
+        if !r.is_jump() {
+            self.current_line = saved;
+        }
         r
     }
 
@@ -11898,6 +11987,7 @@ impl Shell {
             funcs: self.funcs.clone(),
             func_sources: self.func_sources.clone(),
             func_lines: self.func_lines.clone(),
+            func_body_lines: self.func_body_lines.clone(),
             func_redirects: self.func_redirects.clone(),
             positional: self.positional.clone(),
             name: self.name.clone(),
@@ -17782,7 +17872,21 @@ impl Shell {
         // the commands run inside this one each fill and empty it in turn, and
         // the restore puts this command's own word back for the bind below.
         let outer = self.pending_last_arg.take();
+        // A simple command's line is *borrowed*, not kept: bash's `cm_simple`
+        // arm brackets it with `save_line_number = line_number; …
+        // SET_LINE_NUMBER (Simple->line); … line_number = save_line_number;`
+        // (execute_cmd.c:849, 863, 867), so the register goes back to whatever
+        // the reader or an enclosing command left it at. That is what keeps
+        // `echo two; for \⏎ 'a[0]' \⏎ in x; do :; done` blaming the loop
+        // variable on the *unit's* last line rather than on `echo two`'s.
+        //
+        // Bare assignments, so a `jump_to_top_level` skips the restore: see
+        // [`LineJump`].
+        let saved_line = self.current_line;
         let flow = self.exec_simple_inner(sc, out, stdin);
+        if !flow.is_jump() {
+            self.current_line = saved_line;
+        }
         // A finished simple command leaves no name behind — bash blanks
         // `this_command_name` on the way out rather than putting back the one it
         // found, so a command that runs *after* another inside the same `eval`
@@ -18478,6 +18582,30 @@ impl Shell {
             self.push_arg_frame(args);
         }
         self.arg_frame_pushed.push(pushed_arg_frame);
+        // A call stands on the line the function *body* opens on, not on the
+        // call site's: `execute_function` does
+        // `line_number = function_line_number = tc->line` (execute_cmd.c:5205),
+        // i.e. the `{`'s line recorded at parse time (parse.y:3271,
+        // make_cmd.c:791). It happens *before* the entry DEBUG trap
+        // (execute_cmd.c:5238) and before the body, so both see the body line.
+        // Note this must come *after* `call_line_stack.push`, which records the
+        // call site's line for `BASH_LINENO`. See
+        // [`crate::ast::FunctionDef::body_line`].
+        //
+        // Unlike a compound command's bracket, this one is a real
+        // `unwind_protect_int (line_number)` (execute_cmd.c:5095), so it is put
+        // back on *every* way out — a `return`, an `errexit`, or a
+        // `jump_to_top_level` that flew past every restore inside the body. That
+        // is why a discard inside a function costs the caller only what the
+        // call's own surroundings cost. The restore is the `call_line_stack`
+        // pop in this frame's teardown below — the same value, since that stack
+        // holds precisely the `current_line` this assignment is about to
+        // overwrite. See [`LineJump`].
+        if let Some(&body_line) = self.func_body_lines.get(name)
+            && body_line != 0
+        {
+            self.current_line = body_line.saturating_sub(self.line_bias);
+        }
         // The `DEBUG`/`RETURN`/`ERR` traps are, by default, NOT inherited by a
         // called function. bash propagates DEBUG/RETURN into a function only when
         // `functrace` (`set -T`) is on or the function carries the trace
@@ -42064,6 +42192,7 @@ impl Shell {
                 self.funcs.remove(a.as_slice());
                 self.func_sources.remove(a.as_slice());
                 self.func_lines.remove(a.as_slice());
+                self.func_body_lines.remove(a.as_slice());
                 self.fn_trace_attr.remove(a.as_slice());
                 // The export attribute goes with the definition: measured, a
                 // redefinition after `unset -f` is *not* exported again, so a
@@ -42273,6 +42402,7 @@ impl Shell {
             self.funcs.remove(a.as_bytes());
             self.func_sources.remove(a.as_bytes());
             self.func_lines.remove(a.as_bytes());
+            self.func_body_lines.remove(a.as_bytes());
             self.fn_trace_attr.remove(a.as_bytes());
             return true;
         }

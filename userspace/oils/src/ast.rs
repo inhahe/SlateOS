@@ -50,19 +50,18 @@ pub enum ItemSep {
 }
 
 /// One top-level item: an and-or list plus how it was terminated.
+///
+/// An item carries no line of its own. bash has nothing to stamp one from: its
+/// `line_number` is a single register that the reader leaves at the end of the
+/// parse unit, and only the *commands* inside an item ever assign over it —
+/// [`SimpleCommand::line`], [`CaseClause::line`] and their siblings. Seeding a
+/// per-item line would blame the item's first token for a diagnostic bash
+/// blames on the unit's last.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
     pub list: AndOr,
     /// How this item was separated from the one after it.
     pub sep: ItemSep,
-    /// 1-based source line on which this item begins. Used to maintain the
-    /// `$LINENO` special parameter as the interpreter executes each item. The
-    /// line is taken from the lexer's per-token line stamp (see
-    /// `Parser::cur_line`), so it stays exact even when earlier tokens swallowed
-    /// newlines inside a here-doc body, a multi-line quoted string, or a command
-    /// substitution. (Line tracking is per-item, not per-simple-command; see
-    /// known-issues TD-OILS20 for the remaining per-command-granularity gap.)
-    pub line: u32,
 }
 
 impl Item {
@@ -128,7 +127,7 @@ pub enum Command {
     /// `{ list; }` — a brace group (runs in the current shell).
     BraceGroup(Program),
     /// `( list )` — a subshell group.
-    Subshell(Program),
+    Subshell(SubshellClause),
     /// `[[ expr ]]` — bash conditional expression (exit 0 if true, 1 if false).
     Cond(CondClause),
     /// `(( expr ))` — bash arithmetic command (exit 0 if the result is
@@ -150,6 +149,33 @@ pub enum Command {
         inner: Box<Command>,
         redirects: Vec<Redirect>,
     },
+}
+
+/// `( list )` — the body together with the line the shell stands on while it
+/// runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubshellClause {
+    pub body: Program,
+    /// The line the closing `)` is on.
+    ///
+    /// `make_subshell_command` stamps `line_number` as it builds the node
+    /// (make_cmd.c:824), and the node is built at the reduction — once the `)`
+    /// has been read — so the line is the `)`'s and not the `(`'s.
+    /// `execute_command_internal` installs it in the child before running
+    /// anything, with `SET_LINE_NUMBER (command->value.Subshell->line)`
+    /// (execute_cmd.c:650), having saved the enclosing one at 648 and put it
+    /// back at 703.
+    ///
+    /// Only visible where the body raises a diagnostic bash does not stamp
+    /// over — see [`ForClause::line`], whose identifier check runs before the
+    /// loop's own line is assigned:
+    ///
+    /// ```text
+    /// ( for 'a[0]' in x⏎do :; done⏎); echo tail   # line 3 — the `)`'s
+    /// ```
+    ///
+    /// `0` means "not recorded", as in [`CaseClause::line`].
+    pub line: u32,
 }
 
 /// `[[ expr ]]` — the expression together with the line the shell stands on
@@ -505,6 +531,45 @@ pub struct FunctionDef {
     /// carries on. Always true for a name written as a bare word.
     pub definable: bool,
     pub body: Program,
+    /// The line the *definition* is on — bash's `function_dstart`, which is
+    /// what `declare -F NAME` reports under `extdebug` (`make_function_def`
+    /// stores it as `FUNCTION_DEF->line`, make_cmd.c:789).
+    ///
+    /// The lexer stamps it in two places, and the later one wins:
+    ///
+    ///   * on a `)` that closes a `(` following a WORD (parse.y:3580) — the
+    ///     POSIX `NAME ()` form;
+    ///   * on the word right after the `function` keyword (parse.y:5349).
+    ///
+    /// So it is the `)`'s line for `NAME ()`, the name's line for a bare
+    /// `function NAME`, and — because the first rule fires again — the `)`'s
+    /// line for `function NAME ()`. Measured against bash 5.2.37 for all three,
+    /// with `\<newline>` continuations moving each one independently.
+    ///
+    /// Distinct from [`Self::body_line`], which is where the body's `{` opened
+    /// and is what a *call* stands on: `g \⏎ () \⏎ {` has a definition line of
+    /// 2 and a body line of 3.
+    pub line: u32,
+    /// The line the body *starts* on — bash's `function_bstart`, recorded where
+    /// the opening `{` is read (parse.y:3271) and stored on the body command by
+    /// `make_function_def` (`command->line = lstart`, make_cmd.c:791).
+    ///
+    /// A call installs it: `execute_function` does
+    /// `line_number = function_line_number = tc->line` (execute_cmd.c:5205),
+    /// so a body that raises a diagnostic bash does not stamp over is blamed
+    /// there rather than at the call site:
+    ///
+    /// ```text
+    /// f() {⏎  for 'a[0]' in x; do :; done⏎}⏎echo one; f    # line 1
+    /// ```
+    ///
+    /// bash only ever writes `function_bstart` when it reads a `{`, so a
+    /// function whose body is any other shell command keeps whatever the last
+    /// brace-bodied definition left — a quirk not worth reproducing. osh
+    /// records the body's own first line in every case, which agrees wherever
+    /// bash's value is meaningful; a `( … )` body re-stamps itself anyway (see
+    /// [`SubshellClause::line`]).
+    pub body_line: u32,
     /// Redirections attached to the function definition itself, e.g.
     /// `f() { …; } >log`. bash applies these every time the function is invoked,
     /// wrapping the body's execution (they are stored with the function, not run

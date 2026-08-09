@@ -30,6 +30,30 @@ declare -F g
 h() { :; }; i() { :; }
 declare -F h i
 
+# bash's `function_dstart` is written by the lexer in two places and the later
+# one wins: on a `)` that closes a `(` following a WORD (parse.y:3580), and on
+# the word right after the `function` keyword (parse.y:5349). A `\<newline>`
+# between the pieces tells the two rules apart — and `function NAME ()` shows
+# the first rule firing again on top of the second. None of them is the line the
+# *body* opens on, which is what a call stands on instead.
+echo "=== which token carries the stamp"
+w1 \
+  () { :; }
+declare -F w1
+w2( \
+  ) { :; }
+declare -F w2
+function \
+  w3 { :; }
+declare -F w3
+function w4 \
+  () { :; }
+declare -F w4
+function w5 \
+  () \
+  { :; }
+declare -F w5
+
 echo "=== a redefinition moves it, and unset -f forgets it"
 declare -F f
 f() { echo again; }

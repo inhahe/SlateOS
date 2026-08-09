@@ -35,7 +35,8 @@ use crate::ast::{
     LoopClause,
     ParamOp,
     Pipeline, Program,
-    Redirect, RedirectOp, ReplaceAnchor, SelectClause, SimpleCommand, Word, WordPart,
+    Redirect, RedirectOp, ReplaceAnchor, SelectClause, SimpleCommand, SubshellClause, Word,
+    WordPart,
 };
 use crate::assoc::AssocArray;
 use crate::bfmt;
@@ -2901,6 +2902,12 @@ impl Parser {
             .unwrap_or(1)
     }
 
+    /// The line the token at `at` sits on, falling back to [`Self::cur_line`]
+    /// when the index is past the end.
+    fn line_of(&self, at: usize) -> u32 {
+        self.lines.get(at).copied().unwrap_or_else(|| self.cur_line())
+    }
+
     /// The line bash would *report* an error at the current token on: not the
     /// token's own line but the reader's, which is a line further down for every
     /// `\<newline>` written flush after the token. See [`Spans::cont_lines`].
@@ -3281,9 +3288,6 @@ impl Parser {
         if self.at_op(Op::Semi) || self.at_op(Op::Amp) {
             return Err(self.unexpected_here());
         }
-        // Stamp the line on which this item begins (the lexer already accounts
-        // for any newlines hidden inside earlier tokens).
-        let line = self.cur_line();
         let list = self.parse_and_or()?;
         // Which of the three bash keeps as the connector matters to the
         // deparser, not to execution: see [`ItemSep`]. No separator at all
@@ -3323,7 +3327,7 @@ impl Parser {
                 return Err(self.unexpected_here());
             }
         }
-        Ok(Some(Item { list, sep, line }))
+        Ok(Some(Item { list, sep }))
     }
 
     fn parse_and_or(&mut self) -> Result<AndOr, ParseError> {
@@ -3545,8 +3549,16 @@ impl Parser {
             // error, so its source spelling (a `String` until step 10 of
             // TD-OILS-BYTE-STRINGS) is what there is to store.
             let name = bare.unwrap_or_else(|| self.token_display());
+            // The definition's own line is the `)`'s, not the name's: bash sets
+            // `function_dstart = line_number` in the lexer at the moment it
+            // reads a `)` that closes a `(` after a WORD (parse.y:3580). See
+            // [`FunctionDef::line`].
+            let line = self.line_of(self.pos + 2);
             self.pos += 3;
             self.skip_newlines();
+            // Where the body *opens*, which is what a call stands on. See
+            // [`FunctionDef::body_line`].
+            let body_line = self.cur_line();
             let body = self.parse_compound_body()?;
             // bash allows redirections after the body (`f() { …; } >log`); they
             // are stored with the function and applied on every invocation.
@@ -3554,7 +3566,14 @@ impl Parser {
             while self.at_redirect_start() {
                 redirects.push(self.parse_redirect()?);
             }
-            return Ok(Command::Function(FunctionDef { name, definable, body, redirects }));
+            return Ok(Command::Function(FunctionDef {
+                name,
+                definable,
+                body,
+                line,
+                body_line,
+                redirects,
+            }));
         }
         // `function NAME [()] body` — bash keyword form of a function
         // definition (recognised only at command start).
@@ -3584,15 +3603,26 @@ impl Parser {
         let bare = self.bare_word_here();
         let definable = bare.is_some();
         let name = bare.unwrap_or_else(|| self.token_display());
+        // With the `function` keyword the definition's line is the *name*'s:
+        // bash stamps `function_dstart = line_number` from `read_token_word`'s
+        // `case FUNCTION:` arm, i.e. on the word right after the keyword
+        // (parse.y:5349). See [`FunctionDef::line`].
+        let mut line = self.cur_line();
         self.pos += 1; // consume the name word
         // Optional `()` after the name.
         if self.at_op(Op::LParen) {
             if !matches!(self.toks.get(self.pos + 1), Some(Tok::Op(Op::RParen))) {
                 return Err(self.unexpected_here());
             }
+            // …but a `)` closing a `(` after a WORD stamps it *again*
+            // (parse.y:3580), and that arm does not care that the keyword form
+            // already set it — so `function g \⏎ () { :; }` is line 2, measured.
+            line = self.line_of(self.pos + 1);
             self.pos += 2;
         }
         self.skip_newlines();
+        // Where the body *opens*; see [`FunctionDef::body_line`].
+        let body_line = self.cur_line();
         let body = self.parse_compound_body()?;
         // bash allows redirections after the body (`function f { …; } >log`);
         // they are stored with the function and applied on every invocation.
@@ -3600,7 +3630,7 @@ impl Parser {
         while self.at_redirect_start() {
             redirects.push(self.parse_redirect()?);
         }
-        Ok(Command::Function(FunctionDef { name, definable, body, redirects }))
+        Ok(Command::Function(FunctionDef { name, definable, body, line, body_line, redirects }))
     }
 
     /// Parse a `coproc [NAME] command`. Grammar (matches bash):
@@ -3718,7 +3748,6 @@ impl Parser {
         {
             return Ok(p);
         }
-        let line = self.cur_line();
         // Not a `shell_command`. bash diagnoses this positionally: at EOF
         // (`f()` / `function f` with no body) it reports "unexpected end of
         // file"; otherwise it names the offending token (`f() echo hi` →
@@ -3743,7 +3772,6 @@ impl Parser {
                 // The sole item of a body: never a connector, so `Semi` — the
                 // separator that prints as nothing.
                 sep: ItemSep::Semi,
-                line,
             }],
         })
     }
@@ -3765,8 +3793,12 @@ impl Parser {
             // for `( )`, `unexpected end of file` for an unclosed `( echo hi`).
             return Err(self.unexpected_here());
         }
+        // Stamped from the `)` and before stepping past it, because bash builds
+        // the node at the reduction — once the `)` has been read. See
+        // [`SubshellClause::line`].
+        let line = self.cur_line();
         self.pos += 1;
-        Ok(Command::Subshell(body))
+        Ok(Command::Subshell(SubshellClause { body, line }))
     }
 
     fn parse_if(&mut self) -> Result<Command, ParseError> {
@@ -4067,7 +4099,6 @@ impl Parser {
             {
                 break;
             }
-            let line = self.cur_line();
             let list = self.parse_and_or()?;
             let mut sep = ItemSep::Semi;
             let mut had_sep = false;
@@ -4121,7 +4152,7 @@ impl Parser {
                     return Err(self.unexpected_here());
                 }
             }
-            items.push(Item { list, sep, line });
+            items.push(Item { list, sep });
         }
         Ok(Program { items })
     }
@@ -6943,7 +6974,11 @@ mod tests {
         let opts = ParseOpts::default();
         let mut lines = Vec::new();
         while let Some(u) = ip.next_unit(None, opts) {
-            lines.push(u.expect("parses").items[0].line);
+            let prog = u.expect("parses");
+            let Command::Simple(sc) = &prog.items[0].list.first.commands[0] else {
+                panic!("expected a simple command");
+            };
+            lines.push(sc.line);
         }
         assert_eq!(lines, vec![1, 3]);
     }

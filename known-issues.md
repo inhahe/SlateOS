@@ -293,14 +293,54 @@ different times: by the time the `$(fi)` is known to be unparseable, the brace
 has long since been matched and turned into a `WordPart`. Note the third row
 matches anyway — a pattern operand takes a different path that already fails.
 
-**Proper fix.** Run the extent parse *during* the scan for text no parser read,
-i.e. have `dquote_word_from_source`'s lexer call `parser::comsub_reprint_error`'s
-machinery when it meets a `$(` in unread text, and on failure consume to end of
-string so the enclosing `${` scan runs off the end exactly as bash's does. That
-is a real inversion of osh's lex-then-expand order for this one path, which is
-why it is not done here — it wants its own change, with the `Seg`/`Unclosed`
-plumbing from the unterminated-constructs work reused for the "brace ran off the
-end" outcome.
+**It is a *scan*-time failure, not an expansion-time one — measured 2026-08-09,
+and this rules out the cheap fix.** With `y=Y` set, `${y:-…}` never evaluates its
+operand, yet bash reports all the same:
+
+```text
+y=Y; a='A${y:-p$(fi)q}B'; printf '1 [%s]\n' "${a@P}"
+    command substitution: line 5: syntax error near unexpected token `fi'
+    command substitution: line 5: `fi)q}B'
+    line 4: A${y:-p$(fi)q}B: bad substitution
+    1 [A${y:-p$(fi)q}B]
+```
+
+So the obvious-looking fix — reusing `Shell::extent_consumed` and letting the
+*enclosing* `${ }` observe it — cannot work: the operand is never expanded, so
+nothing on the expansion path runs at all. (I tried to take this shortcut and
+the measurement refused it.) Two further details the same probe pins:
+
+- **The body never runs.** Only *one* `command substitution:` pair appears, where
+  the top-level shapes produce two. `param_expand` returns NULL from the failed
+  brace scan before it ever reaches `command_substitute`.
+- **The text handed to the extent read is the rest of the *whole string*,** not
+  of the operand: `fi)q}B` runs out through the `}` and the trailing `B`. That is
+  exactly `src + ")" + tail` with the `tail` that `unparse::attach_comsub_tails`
+  already computes, since it renders the whole word around the part.
+
+**Proper fix.** The extent parse has to happen while the *word* is being built,
+not while it is being expanded — but that does not require inverting the lexer,
+because the natural home is a post-lex pass in `parser.rs`, beside the one that
+already exists. `dquote_word_from_source` runs `unparse::attach_comsub_tails`
+over its parts; a second pass can walk the same parts and, for each
+`CmdSubBody::Unread`, run the extent read over `src + ")" + tail` (the tail the
+first pass just computed, which is already the rest of the whole string). Then:
+
+- **at the top level** — nothing to do; the failure is reported and consumed at
+  expansion time, which is what `Shell::extent_consumed` now models correctly.
+- **nested inside a `${ }`** — the brace can never close, so the word is
+  rebuilt as the scan would have left it: the substitution part, marked as
+  reporting-but-not-running, followed by a
+  `Seg::Unclosed(Unclosed::BadSubst { close: '}', text: <whole text> })`. Both
+  reports then come out at expansion time, in bash's order, from machinery that
+  already exists — `Shell::expand_unclosed`'s `BadSubst` arm is *already* an
+  exact match for the second one, including the `prompt_failed` that makes the
+  caller keep the undecoded text.
+
+The one genuinely new thing is the "reports but does not run" mark on the
+substitution, since today a reported extent failure either aborts or runs the
+truncated body. Deferred only because it is a prompt-only corner and wants its
+own change with its own sweep, not because the shape is unclear.
 
 **Impact.** Prompt expansions only, and only where a syntax-error `$( … )` sits
 inside a `${ … }` operand. The top-level shapes — by far the reachable ones —

@@ -4840,6 +4840,10 @@ impl Parser {
                     for segs in &elems {
                         items.push(parse_array_elem(segs, self.opts)?);
                     }
+                    // The elements were parsed one at a time and so were given
+                    // tails one at a time, but bash keeps the whole literal as a
+                    // single word. Re-attach them across it.
+                    crate::unparse::attach_compound_comsub_tails(&mut items);
                     // A subscript is parsed verbatim, as the scalar form's is —
                     // see `Self::try_assignment` for why nothing in it is split
                     // or trimmed.

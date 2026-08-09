@@ -129,6 +129,7 @@ use crate::lexer::ReaderWarning;
 use crate::parser::{
     IncrementalParser, Quoting, UnitLine, UnitLineKind, parse_opts, parse_with_aliases,
 };
+use crate::unparse::elem_src;
 #[cfg(windows)]
 use crate::wincmd;
 
@@ -156,6 +157,13 @@ const SOFT_DEFAULT_VARS: &[&str] = &["PS4"];
 /// `-c`/`eval`/script name the enclosing input contributed for as long as the
 /// body is what is being read.
 const SRC_TOKEN_COMMAND_SUB: &str = "command substitution";
+
+/// The input-source token bash reads a compound assignment's value list under:
+/// `bash: array assign: line 1: …`. `assign_compound_array_list` names it in
+/// its `parse_string_to_word_list (val, 1, "array assign")` (arrayfunc.c:587),
+/// and that name displaces whatever the enclosing input was called for as long
+/// as the re-parse runs. See [`Shell::array_assign_reparse_error`].
+const SRC_TOKEN_ARRAY_ASSIGN: &str = "array assign";
 
 /// The input-source token bash reads a trap handler's text under, by trap name.
 ///
@@ -13640,6 +13648,24 @@ impl Shell {
                     return false;
                 }
             };
+        }
+        // A compound literal is re-parsed *whole*, before a single element of it
+        // is expanded — see [`Self::array_assign_reparse_error`]. It comes after
+        // the refusals above, which is the order bash reports them in: a
+        // readonly name and a reference designating an element both object first
+        // (measured), because `assign_compound_array_list` is not reached until
+        // the variable itself has been found.
+        if let AssignRhs::Array(items) = &a.value
+            && let Some(err) = self.array_assign_reparse_error(items)
+        {
+            self.berrln(&err);
+            // `jump_to_top_level (FORCE_EOF)`: the status is the syntax error's,
+            // 2 at the top level and 1 where an `eval`/`source` is executing the
+            // builtin that scored it — and `demote: false`, so a `( … )` around
+            // it exits 2 rather than the 1 an interceptable abort would leave.
+            let status = if self.at_outermost_read_eval() { 2 } else { 1 };
+            self.unbound_error = Some(FatalAbort { status, demote: false });
+            return false;
         }
         match &a.value {
             AssignRhs::Scalar(w) => {
@@ -28507,6 +28533,75 @@ impl Shell {
         let prefix = self.syntax_error_prefix(line);
         self.input_names.pop();
         Some((bfmt![&prefix, e.msg(), b"\n", &prefix, b"`", last, b")", first, b"'"], e.fatal))
+    }
+
+    /// The diagnostic bash raises when a **compound array assignment**'s value
+    /// list will not parse back — or `None`, which is the answer for every list
+    /// but the two substitution shapes [`Shell::comsub_reparse_error`] names.
+    ///
+    /// A compound assignment does not reach the ordinary re-parse at all. bash
+    /// keeps the whole literal as one string (`parse_compound_assignment` joins
+    /// its words with single spaces — see [`crate::unparse::array_listing`]),
+    /// and `assign_compound_array_list` re-reads *that* before expanding any of
+    /// it:
+    ///
+    /// ```c
+    /// list = parse_string_to_word_list (val, 1, "array assign");
+    /// ```
+    ///
+    /// (arrayfunc.c:587.) The string already holds each substitution's re-print,
+    /// put there by parse-time `parse_comsub`, so a `$( … )` in it is met by
+    /// this second read's *tokenizer* — and the failure is `parse_comsub`'s own
+    /// `jump_to_top_level (FORCE_EOF)` (parse.y:4185), not `parse_string`'s
+    /// recoverable `DISCARD`. Four things follow, and all four are measured
+    /// against bash 5.2.37:
+    ///
+    /// * The **input name** is `array assign`, not `command substitution`.
+    /// * The **line** is counted inside the listing, from 1:
+    ///   `parse_string_to_word_list` does `push_stream (1)`, the argument that
+    ///   *does* reset `line_number` — where the `push_stream (0)` of
+    ///   `parse_string` leaves the ordinary re-parse's counter running on from
+    ///   the executing command. A single-line listing is therefore always
+    ///   `line 1`, however far down the script it was written.
+    /// * The **echoed line** is the listing's own line, whole: the reader is
+    ///   standing in that string, so `shell_input_line` is a line of it and not
+    ///   of the script. `a=(one⏎two⏎"p$(⏎!⏎)q"⏎four)` echoes
+    ///   `` `one two "p$(! )q" four' ``.
+    /// * It is **fatal** — the FORCE_EOF class the `nested` flag of
+    ///   [`Shell::comsub_reparse_error`] already selects — so nothing after it
+    ///   runs, where a scalar `v="p$(⏎!⏎)q"` only discards its own parse unit.
+    ///
+    /// Backticks are not re-read here: bash's tokenizer takes a `` ` … ` `` body
+    /// as a matched pair without parsing it, so `a=("p`` ` ``!`` ` ``q")` is fine.
+    /// Neither is a `$( … )` a word *outside* a compound literal carries — that
+    /// one is [`Shell::comsub_reparse_error`]'s, under its own name and line.
+    fn array_assign_reparse_error(&mut self, items: &[ArrayElem]) -> Option<Str> {
+        let opts = self.parse_opts();
+        // The cheap pass first: almost every list either has no substitution at
+        // all or has only ones that parse, and locating a substitution in the
+        // rendered listing costs a clone of the list.
+        let (k, e) = crate::unparse::array_listing_comsubs(items)
+            .into_iter()
+            .enumerate()
+            .find_map(|(k, src)| {
+                crate::parser::parse_cmdsub_body_unmarked(&src, 1, opts).err().map(|e| (k, e))
+            })?;
+        // The reader stops at the `)` the failed body was supposed to end on —
+        // both known shapes (`!` and `time`) deparse without the list terminator
+        // their own grammar needs, so it is that `)` they run onto.
+        let (before, after) = crate::unparse::array_listing_split(items, k)?;
+        let line = 1u32.saturating_add(
+            u32::try_from(before.iter().filter(|&&b| b == b'\n').count()).unwrap_or(u32::MAX),
+        );
+        let last = before.rsplit(|&b| b == b'\n').next().unwrap_or_default();
+        let first = after.split(|&b| b == b'\n').next().unwrap_or_default();
+        self.input_names.push(InputSource {
+            name: SRC_TOKEN_ARRAY_ASSIGN.as_bytes().to_vec(),
+            nonint: true,
+        });
+        let prefix = self.syntax_error_prefix(line);
+        self.input_names.pop();
+        Some(bfmt![&prefix, e.msg(), b"\n", &prefix, b"`", last, b")", first, b"'"])
     }
 
     /// Run a command substitution's body text, substituting what it wrote to
@@ -51070,23 +51165,6 @@ struct AssocElem {
     val: Str,
     src: Str,
     append: bool,
-}
-
-/// Source text for one element of a compound assignment, keyed or not.
-///
-/// A bare `m=(…)` names an element it refuses by the text it was *written* with
-/// — `m=([$e]=v)` reports `[$e]=v` and not the `[]=v` it expanded to — so the
-/// brackets and `=` have to be put back around the two halves' own source.
-fn elem_src(e: &ArrayElem) -> Str {
-    match e {
-        ArrayElem::Positional(w) => crate::unparse::word_src(w),
-        ArrayElem::Keyed { index, value, append } => bfmt![
-            b"[",
-            &crate::unparse::word_src(index),
-            if *append { b"]+=".as_slice() } else { b"]=".as_slice() },
-            &crate::unparse::word_src(value)
-        ],
-    }
 }
 
 /// `$'…'` ANSI-C quoting, bash's `ansic_quote`: the eight escapes it spells with

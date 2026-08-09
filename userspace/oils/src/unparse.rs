@@ -971,6 +971,181 @@ pub fn parts_src(parts: &[WordPart]) -> Str {
     s
 }
 
+/// Source text for one element of a compound assignment, keyed or not.
+///
+/// A bare `m=(…)` names an element it refuses by the text it was *written* with
+/// — `m=([$e]=v)` reports `[$e]=v` and not the `[]=v` it expanded to — so the
+/// brackets and `=` have to be put back around the two halves' own source.
+pub(crate) fn elem_src(e: &ArrayElem) -> Str {
+    match e {
+        ArrayElem::Positional(w) => word_src(w),
+        ArrayElem::Keyed { index, value, append } => bfmt![
+            b"[",
+            &word_src(index),
+            if *append { b"]+=".as_slice() } else { b"]=".as_slice() },
+            &word_src(value)
+        ],
+    }
+}
+
+/// The whole value list of a compound assignment as bash's reader holds it.
+///
+/// bash does not keep a compound assignment's elements apart. Its tokenizer
+/// reads them with `read_token` under `PST_COMPASSIGN` and
+/// `parse_compound_assignment` (parse.y:4715) writes them back out into one
+/// string joined by a **single space** — which is why the newlines a multi-line
+/// literal was written with are gone from every diagnostic that echoes it, and
+/// why `a=(one⏎two)` echoes `one two`. That string is what
+/// `assign_compound_array_list` re-parses; see
+/// [`crate::interp::Shell::array_assign_reparse_error`].
+pub(crate) fn array_listing(items: &[ArrayElem]) -> Str {
+    let mut s = Str::new();
+    for (i, e) in items.iter().enumerate() {
+        if i > 0 {
+            s.push(b' ');
+        }
+        s.push_str(&elem_src(e));
+    }
+    s
+}
+
+/// [`array_listing`] split around the closing `)` of the `k`-th `$( … )` in it:
+/// everything before that `)`, and everything after. `None` when the list holds
+/// no `k`-th substitution.
+///
+/// This is where a reader tokenizing the listing stops if that substitution's
+/// body will not parse back, so it is what the diagnostic's line number and
+/// echoed line are measured from — and both are measured in the *listing*, not
+/// in the script, because that string is the reader's `shell_input_line` for as
+/// long as the re-parse runs.
+///
+/// Located the same way [`attach_comsub_tails`] locates a tail — by rendering
+/// the list with the one substitution swapped for a sentinel — so the answer
+/// comes out of [`array_listing`] itself rather than out of a second renderer
+/// written to agree with it. Two identical `$( … )`s in one list render alike
+/// and `'$(! )'` renders a literal that looks like one, so searching for the
+/// rendered text would be ambiguous twice over.
+pub(crate) fn array_listing_split(items: &[ArrayElem], k: usize) -> Option<(Str, Str)> {
+    let is_comsub =
+        |p: &WordPart| matches!(p, WordPart::CommandSub { body: CmdSubBody::Parsed { .. } });
+    let mut items: Vec<ArrayElem> = items.to_vec();
+    let mut sent = vec![0u8];
+    while contains(&array_listing(&items), &sent) {
+        sent.push(0);
+    }
+    let mut saved = WordPart::Literal(Str::new());
+    let total = walk_elems(&mut items, &is_comsub, k, &mut |p| {
+        saved = std::mem::replace(p, WordPart::Literal(sent.clone()));
+    });
+    if k >= total {
+        return None;
+    }
+    let text = array_listing(&items);
+    // Put the substitution back, and take its own rendering while it is to
+    // hand: the text before the `)` is the listing up to the sentinel followed
+    // by all of that rendering but its last character.
+    let is_marker = |p: &WordPart| matches!(p, WordPart::Literal(s) if *s == sent);
+    let mut whole = Str::new();
+    walk_elems(&mut items, &is_marker, 0, &mut |p| {
+        *p = std::mem::replace(&mut saved, WordPart::Literal(Str::new()));
+        whole = part_src(p);
+    });
+    let at = find(&text, &sent)?;
+    let mut before = text.get(..at)?.to_vec();
+    before.push_str(whole.get(..whole.len().checked_sub(1)?)?);
+    let after = text.get(at.checked_add(sent.len())?..)?.to_vec();
+    Some((before, after))
+}
+
+/// Re-attach every `$( … )`'s tail across a whole compound assignment, in place
+/// of the per-element tails [`attach_comsub_tails`] gave them.
+///
+/// A compound assignment is *one* word to bash, so a substitution inside one of
+/// its elements is followed by the rest of that element, then the elements after
+/// it, then the `)` that closes the literal — and that is what the re-parse of
+/// its re-print is handed, so that is what a failure echoes:
+///
+/// ```text
+/// a=( "p$(⏎!⏎)q" r ) echo hi     ->   `! )q" r)'
+/// ```
+///
+/// Only a literal used as a **command prefix** ever shows it. A literal that is
+/// really assigned never reaches the per-substitution re-parse at all — the
+/// whole list is re-parsed first, under its own name; see
+/// [`crate::interp::Shell::array_assign_reparse_error`].
+pub(crate) fn attach_compound_comsub_tails(items: &mut [ArrayElem]) {
+    let is_comsub =
+        |p: &WordPart| matches!(p, WordPart::CommandSub { body: CmdSubBody::Parsed { .. } });
+    let total = walk_elems(items, &is_comsub, usize::MAX, &mut |_| {});
+    if total == 0 {
+        return;
+    }
+    let mut sent = vec![0u8];
+    while contains(&array_listing(items), &sent) {
+        sent.push(0);
+    }
+    let is_marker = |p: &WordPart| matches!(p, WordPart::Literal(s) if *s == sent);
+    for k in 0..total {
+        let mut saved = WordPart::Literal(Str::new());
+        walk_elems(items, &is_comsub, k, &mut |p| {
+            saved = std::mem::replace(p, WordPart::Literal(sent.clone()));
+        });
+        let text = array_listing(items);
+        let mut tail = find(&text, &sent)
+            .and_then(|i| text.get(i.saturating_add(sent.len())..))
+            .unwrap_or_default()
+            .to_vec();
+        // The `)` the container writes, exactly as `attach_comsub_tails` picks
+        // up the `"` that closes a double-quoted run it was standing in.
+        tail.push(b')');
+        walk_elems(items, &is_marker, 0, &mut |p| {
+            *p = std::mem::replace(&mut saved, WordPart::Literal(Str::new()));
+            if let WordPart::CommandSub { body: CmdSubBody::Parsed { tail: t, .. } } = p {
+                *t = Some(std::mem::take(&mut tail));
+            }
+        });
+    }
+}
+
+/// Every `$( … )` in a compound assignment's value list, in the order
+/// [`array_listing_split`] numbers them, each given as its stored re-print.
+pub(crate) fn array_listing_comsubs(items: &[ArrayElem]) -> Vec<Str> {
+    let mut out = Vec::new();
+    let mut items: Vec<ArrayElem> = items.to_vec();
+    let want = |p: &WordPart| matches!(p, WordPart::CommandSub { body: CmdSubBody::Parsed { .. } });
+    let total = walk_elems(&mut items, &want, usize::MAX, &mut |_| {});
+    for k in 0..total {
+        walk_elems(&mut items, &want, k, &mut |p| {
+            if let WordPart::CommandSub { body: CmdSubBody::Parsed { src, .. } } = p {
+                out.push(src.clone());
+            }
+        });
+    }
+    out
+}
+
+/// [`walk_parts`] over every word of a compound assignment's element list, with
+/// one shared counter — the order the listing writes them in, a keyed element's
+/// subscript before its value.
+fn walk_elems(
+    items: &mut [ArrayElem],
+    want: &dyn Fn(&WordPart) -> bool,
+    n: usize,
+    act: &mut dyn FnMut(&mut WordPart),
+) -> usize {
+    let mut i = 0usize;
+    for e in items.iter_mut() {
+        match e {
+            ArrayElem::Positional(w) => walk_parts_in(&mut w.parts, want, n, &mut i, act),
+            ArrayElem::Keyed { index, value, .. } => {
+                walk_parts_in(&mut index.parts, want, n, &mut i, act);
+                walk_parts_in(&mut value.parts, want, n, &mut i, act);
+            }
+        }
+    }
+    i
+}
+
 /// `$name` when `name` is a plain identifier or a single special parameter,
 /// otherwise the braced `${name}` form (always valid).
 fn dollar_name(name: &str) -> Str {
@@ -1514,6 +1689,93 @@ mod tests {
             .expect("function in dump");
         let second = text(unparse_function(&f.name, &f.body, &f.redirects));
         assert_eq!(first, second, "round-trip differs for {name}");
+    }
+
+    /// The elements of `a=( … )` in the one program `src` parses to.
+    fn items_of(src: &str) -> Vec<ArrayElem> {
+        let prog = parse(src.as_bytes()).expect("parse");
+        for item in &prog.items {
+            for cmd in &item.list.first.commands {
+                if let Command::Simple(sc) = cmd {
+                    for a in sc.assignments.iter().chain(sc.decl_arrays.iter().map(|d| &d.assign)) {
+                        if let AssignRhs::Array(items) = &a.value {
+                            return items.clone();
+                        }
+                    }
+                }
+            }
+        }
+        panic!("no compound assignment in {src:?}");
+    }
+
+    /// The `tail` every `$( … )` in a compound assignment was given, in walk
+    /// order.
+    fn elem_tails(items: &[ArrayElem]) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut items = items.to_vec();
+        let want =
+            |p: &WordPart| matches!(p, WordPart::CommandSub { body: CmdSubBody::Parsed { .. } });
+        let total = walk_elems(&mut items, &want, usize::MAX, &mut |_| {});
+        for k in 0..total {
+            walk_elems(&mut items, &want, k, &mut |p| {
+                if let WordPart::CommandSub { body: CmdSubBody::Parsed { tail, .. } } = p {
+                    out.push(text(tail.clone().expect("a parsed word has a tail")));
+                }
+            });
+        }
+        out
+    }
+
+    /// bash keeps a compound assignment as **one word**, joined by single
+    /// spaces — `parse_compound_assignment` (parse.y:4715) writes the elements
+    /// back that way — so a `$( … )` in it is followed by the rest of the whole
+    /// *literal*, closing `)` and all, and not merely by the rest of its own
+    /// element. Measured against bash 5.2.37.
+    #[test]
+    fn a_compound_assignments_tail_runs_to_the_literals_closing_paren() {
+        let items = items_of("a=( one\n  two\n  \"p$(\n!\n)q\"\n  four )");
+        assert_eq!(text(array_listing(&items)), r#"one two "p$(! )q" four"#);
+        assert_eq!(elem_tails(&items), vec![r#"q" four)"#]);
+
+        // What a prefix assignment's failed re-parse echoes, which is where the
+        // tail is observable: bash gives `! )q" r)'.
+        assert_eq!(elem_tails(&items_of("a=( \"p$(\n!\n)q\" r ) echo hi")), vec![r#"q" r)"#]);
+
+        // A subscript is walked before its value, and the `]=` between them is
+        // part of the listing — so a substitution in a *subscript* runs on
+        // through the value, and a later one still ends at the same `)`. bash,
+        // for `a=( [$(⏎!⏎)]=x $(⏎!⏎) ) echo hi`:  `! )]=x $(! ))'
+        let keyed = items_of("a=( [$(echo k)]=$(echo v) )");
+        assert_eq!(text(array_listing(&keyed)), "[$(echo k)]=$(echo v)");
+        assert_eq!(elem_tails(&keyed), vec!["]=$(echo v))", ")"]);
+    }
+
+    /// `assign_compound_array_list` re-reads the listing before expanding any of
+    /// it (arrayfunc.c:587), so a substitution whose re-print will not parse is
+    /// blamed at *its* place in the listing. The split is what locates it: the
+    /// line is the newlines the listing kept before it, and the echoed line runs
+    /// from the last of them to the first one after.
+    #[test]
+    fn a_compound_assignment_is_split_at_the_failing_substitution() {
+        let items = items_of("a=( one\n  two\n  \"p$(\n!\n)q\"\n  four )");
+        let (before, after) = array_listing_split(&items, 0).expect("one substitution");
+        assert_eq!(text(before), r#"one two "p$(! "#);
+        assert_eq!(text(after), r#"q" four"#);
+        assert_eq!(array_listing_split(&items, 1), None, "there is only the one");
+        assert_eq!(comsub_srcs(&items), vec!["! "]);
+
+        // Walk order is subscript before value, and the last substitution's
+        // `after` is empty because nothing follows it in the listing.
+        let keyed = items_of("a=( [$(echo k)]=$(echo v) )");
+        assert_eq!(comsub_srcs(&keyed), vec!["echo k", "echo v"]);
+        let (before, after) = array_listing_split(&keyed, 1).expect("two substitutions");
+        assert_eq!(text(before), "[$(echo k)]=$(echo v");
+        assert_eq!(text(after), "");
+    }
+
+    /// The re-print of every `$( … )` in a compound assignment, in walk order.
+    fn comsub_srcs(items: &[ArrayElem]) -> Vec<String> {
+        array_listing_comsubs(items).into_iter().map(text).collect()
     }
 
     #[test]

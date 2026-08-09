@@ -2463,7 +2463,7 @@ impl Spans {
         // `[[ P;\<newline>Q ]]` is reported near `Q`, not near `;\`. And *which*
         // text it stopped in, since an alias replacement it has run off the end
         // of is no longer the current input line. See [`Spans::reader_stop`].
-        let (stop, _) = self.reader_stop(pos, r)?;
+        let (stop, fetched) = self.reader_stop(pos, r)?;
         let full = self.text(stop.src)?;
         let at = stop.end as usize;
         if at > full.len() {
@@ -2472,7 +2472,24 @@ impl Spans {
         // The reader's own line: from just past the previous newline through the
         // one that ends it. An alias replacement has no newline in it, so this
         // is the whole of that text and costs nothing there.
-        let start = full.get(..at)?.iter().rposition(|&c| c == Ch::U('\n')).map_or(0, |n| n + 1);
+        //
+        // An offset sitting *one past* a newline is the one ambiguous case, and
+        // the fetch count settles it. `shell_input_line` holds one line
+        // including its newline, and an index of `strlen` is the NUL after it —
+        // still that line, which is why `error_token_from_text`'s first test
+        // steps back onto the newline. Only a **fetch** replaces the buffer and
+        // puts the reader at index 0 of the next line, and that is exactly what
+        // [`Spans::reader_stop`] counts: with none, an offset past a newline
+        // belongs to the line that newline ends. So `for ((i=0;i<1;i++)⏎)` is
+        // reported near `;i++)` against line 1, while a deleted `\⏎` — which
+        // did fetch — reports against line 2.
+        let line_at = if fetched == 0 && full.get(at.wrapping_sub(1)) == Some(&Ch::U('\n')) {
+            at.saturating_sub(1)
+        } else {
+            at
+        };
+        let start =
+            full.get(..line_at)?.iter().rposition(|&c| c == Ch::U('\n')).map_or(0, |n| n + 1);
         let end = full
             .get(start..)?
             .iter()
@@ -2787,6 +2804,11 @@ struct Reader {
     /// not — each peeks once more (for `<<-`/`<<<`, for `;;&`, for `&>>`) and
     /// pushes that peek back — so they cross, as do the one-character
     /// metacharacters and every word, whose scan reads its own terminator.
+    ///
+    /// A [`Tok::Refused`] does not cross either: the read that made it *is* the
+    /// look past the construct — `parse_arith_cmd`'s `shell_getc (0)`, with
+    /// continuation removal explicitly off — and it is already counted in the
+    /// token's own span, so nothing follows it to be looked at.
     peeks: bool,
     /// Whether the token came from `read_token_word`, whose terminator peek can
     /// reach one character further than the token itself. See the third case in
@@ -2818,7 +2840,7 @@ impl Reader {
                         | Op::DLessDash
                         | Op::TLess
                         | Op::AmpDGreat
-                ))
+                )) | Some(Tok::Refused)
             ),
             word: matches!(
                 t,
@@ -3175,7 +3197,9 @@ impl Parser {
     /// [`Parser::unexpected_here`].
     fn error_token_at(&self, pos: usize) -> Option<Str> {
         match self.toks.get(pos) {
-            Some(Tok::VarFd(_)) => None,
+            // A refusal reaches bison as its EOF token and has no name at all —
+            // the switch has no branch for it either. See [`Tok::Refused`].
+            Some(Tok::VarFd(_) | Tok::Refused) => None,
             _ => Some(self.token_display_at(pos)),
         }
     }
@@ -7267,6 +7291,56 @@ mod tests {
         assert_eq!(err("[[ \"a b\" -q c ]]"), format!("{want}`-q'"));
         // Outside a conditional, an operator token still names itself.
         assert_eq!(err("echo hi; ;"), "syntax error near unexpected token `;'");
+    }
+
+    /// An arithmetic `for` header whose closing parentheses are not adjacent is
+    /// the one construct outside `[[ … ]]` that bash blames **by position**
+    /// rather than by name: `parse_dparen` returns −1, bison reads that as EOF,
+    /// `error_token_from_token` declines to name it, and `report_syntax_error`
+    /// falls through to slicing the input around where the reader stopped. Every
+    /// expectation here is bash 5.2.37's own wording. See [`Tok::Refused`] and
+    /// the corpus case of the same name.
+    #[test]
+    fn a_for_header_that_fails_the_adjacency_test_is_blamed_by_position() {
+        fn err(src: &str) -> (String, Option<u32>, Option<String>) {
+            let e = parse(src).expect_err("expected a parse error");
+            (emsg(&e), e.line, e.echo.as_deref().map(text))
+        }
+        // The slice runs back to the nearest ` `, `\n`, `\t`, `;`, `|` or `&`
+        // and forward to the one character `parse_arith_cmd`'s test read, so a
+        // space before the stray `)` cuts it down to that character alone …
+        let near = "syntax error near ";
+        assert_eq!(
+            err("for ((i=0;i<1;i++) ) ; do echo $i; done").0,
+            format!("{near}`)'")
+        );
+        // … while text written flush against the body drags in the tail of the
+        // expression, back to the `;` inside it.
+        assert_eq!(err("for ((i=0;i<1;i++)x ; do :; done").0, format!("{near}`;i++)x'"));
+        assert_eq!(err("for ((i=0;i<1;i++)  ; do :; done").0, format!("{near}`;i++)'"));
+        assert_eq!(err("for ((1)  ; do :; done").0, format!("{near}`((1)'"));
+        // The character read may be the end of the line. `shell_getc (0)` does
+        // not fetch, so the reader is left at the NUL past the line it is on and
+        // both the slice and the echoed line are still that line's — a plain
+        // newline and a `\<newline>` alike.
+        assert_eq!(err("for ((1)").0, format!("{near}`((1)'"));
+        let (msg, line, echo) = err("for ((i=0;i<1;i++)\n) ; do :; done");
+        assert_eq!(msg, format!("{near}`;i++)'"));
+        assert_eq!(line, Some(1));
+        assert_eq!(echo, None, "the shell's own input is echoed by line number");
+        assert_eq!(err("for ((i=0;i<1;i++)\\\n) ; do :; done").0, format!("{near}`;i++)\\'"));
+        // It is a whole-input failure, not a recoverable one: bison is holding
+        // EOF and there is nothing to resume from.
+        assert!(!parse("for ((1) )").expect_err("error").recoverable);
+        assert!(!parse("for ((1) )").expect_err("error").is_incomplete());
+        // Only a `for` header. Everywhere else the same failed test falls back
+        // to nested subshells, and `((` after a word is not arithmetic at all.
+        assert_eq!(
+            err("select x in ((1) ) ; do :; done").0,
+            "syntax error near unexpected token `('"
+        );
+        assert!(parse("((1) )").is_ok());
+        assert!(parse("for ((i=0;i<2;i++)); do :; done").is_ok());
     }
 
     /// Inside `[[ ]]` bash treats an *operator* it finds in the wrong place

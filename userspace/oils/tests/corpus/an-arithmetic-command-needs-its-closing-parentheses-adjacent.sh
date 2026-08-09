@@ -71,8 +71,10 @@ echo $((1+1)\
 x=$((1+1) ); echo "x=$x"
 
 echo "=== but a for header has nothing to fall back to"
-# Only that it *fails* is pinned here; osh spells the failure differently from
-# bash, which reports `syntax error near `)'` — see the same known issue.
+# Only that it *fails* is pinned here. How the failure reads — `syntax error
+# near `)'`, sliced out of the input around where the reader stopped rather than
+# named after a token — is
+# an-arithmetic-for-header-that-fails-the-adjacency-test-is-blamed-by-position.sh.
 ( for ((i=0;i<2;i++)); do echo "i=$i"; done )
 ( eval 'for ((i=0;i<1;i++) ) ; do echo $i; done' ) 2>/dev/null; echo "for-status=$?"
 echo done

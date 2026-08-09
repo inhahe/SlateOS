@@ -474,6 +474,28 @@ pub enum Tok {
     /// Returning `Err` here instead would end the whole token stream and take
     /// every later line with it. See [`crate::parser::ParseError::recoverable`].
     Invalid(Str),
+    /// A construct the lexer refused with **no name to blame it on**, ending the
+    /// token stream where it stands.
+    ///
+    /// bash's `read_token` returns −1 for one (parse.y:3531–3534), which bison
+    /// reads as its EOF token while `EOF_Reached` stays clear. So
+    /// `report_syntax_error` finds `current_token` non-zero but
+    /// `error_token_from_token` with no branch for it, returning NULL
+    /// (parse.y:6251), and falls through to its *text-scanning* branch: `syntax
+    /// error near \`X'` — with `X` sliced out of the input around the offset the
+    /// reader stopped at — and the offending line echoed under it (parse.y:6276).
+    /// That is the whole difference from [`Tok::Invalid`], which carries a name
+    /// and so gets `near unexpected token \`X'`.
+    ///
+    /// Only an arithmetic `for` header produces one: `for ((i=0;i<1;i++) )`
+    /// fails `parse_arith_cmd`'s adjacency test inside the `ARITH_FOR_EXPRS` arm
+    /// of `parse_dparen`, which — unlike the arithmetic *command* arm right
+    /// below it — has no nested subshell to fall back to and simply returns −1
+    /// (parse.y:4463–4478). It costs the whole input rather than just its own
+    /// unit, because bison is holding EOF and there is nothing left to resume
+    /// from; the lexer stops reading here for the same reason bash's reader
+    /// never fetches another line.
+    Refused,
 }
 
 /// The conditional's own brackets, whose classification the reserved-word fold
@@ -799,6 +821,13 @@ struct Lexer {
     /// construct that discards the here-documents pending around it. See
     /// [`Lexer::read_subst_body`] and [`UngatheredHeredoc`].
     heredocs_forgotten: bool,
+    /// Set once a [`Tok::Refused`] has been emitted, which ends the scan.
+    ///
+    /// bash reads a line at a time and hands each token to bison as it goes, so
+    /// a token that makes bison error is the last one the reader is ever asked
+    /// for — nothing after it is fetched, let alone lexed. Our scan reads the
+    /// whole input up front, so the stop has to be explicit.
+    refused: bool,
     /// Which runs of `chars` are the real input and which are alias values
     /// spliced into it.
     ///
@@ -1255,6 +1284,7 @@ impl Lexer {
             next_tok_index: 0,
             heredoc_lines: Vec::new(),
             heredocs_forgotten: false,
+            refused: false,
             map: TextMap::whole(0),
             raw: 0,
             raw_from: 0,
@@ -3143,7 +3173,18 @@ impl Lexer {
                         match self.read_arith_body(true)? {
                             (Some(raw), nested) => out.push(Tok::ArithCmd(raw, nested)),
                             (None, _) if for_header => {
-                                return Err(LexError::new("malformed arithmetic expansion"));
+                                // …and that error is reported by *position*, not
+                                // by name: `parse_dparen` returns −1 and bison
+                                // errors on what it reads as EOF. See
+                                // [`Tok::Refused`]. The one character the
+                                // adjacency test read is consumed here as
+                                // `shell_getc` consumed it, so the token ends
+                                // where `shell_input_line_index` is parked and
+                                // the slice around it comes out of the same
+                                // offset bash's does.
+                                self.pos = self.pos.saturating_add(1).min(self.chars.len());
+                                out.push(Tok::Refused);
+                                self.refused = true;
                             }
                             (None, _) => {
                                 // The spans are dropped with the text they index
@@ -3308,6 +3349,13 @@ impl Lexer {
                 }
             }
             self.stamp_lines(out, marks, start_line, start_pos);
+            // Nothing after a refusal is ever read — see [`Lexer::refused`].
+            // Not even the closing newline below: the reader that would have
+            // fetched it is the parser asking for another token, and the parser
+            // has already errored.
+            if self.refused {
+                return Ok(());
+            }
         }
         // bash's reader hands the parser a newline when the input runs out, so a
         // script with no trailing newline — and every `-c` string, which never

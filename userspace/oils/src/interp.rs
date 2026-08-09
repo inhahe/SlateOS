@@ -8122,6 +8122,64 @@ impl Shell {
         }
     }
 
+    /// The status a **FORCE_EOF**-class abort ends the shell with — the class a
+    /// failed *re-parse* raises, from `parse_comsub`'s
+    /// `jump_to_top_level (FORCE_EOF)` (parse.y:4185).
+    ///
+    /// This is not [`Shell::fatal_abort_status`]'s rule, because the 127 comes
+    /// from somewhere else. A nounset abort carries 127 as its own status and
+    /// asks to be *demoted* where a handler intercepts it; a FORCE_EOF carries
+    /// the syntax error's status and is *promoted* to 127 by the handler `-c`
+    /// installs, which scores the whole class alike:
+    ///
+    /// ```c
+    ///     case FORCE_EOF:
+    ///       ...
+    ///       return last_command_exit_value = 127;   /* shell.c:1446, run_one_command */
+    /// ```
+    ///
+    /// A script's `reader_loop` has no such arm, so there the syntax error's own
+    /// `last_command_exit_value` stands: `EX_BADSYNTAX` (2) at the top level,
+    /// `EX_BADUSAGE` (1) where an `eval`/`source` is executing the builtin that
+    /// scored it. Measured against bash 5.2.37:
+    ///
+    /// | context | `bash -c` | script / stdin |
+    /// |---|---|---|
+    /// | top level | 127 | 2 |
+    /// | under `eval`/`source` | 127 | 1 |
+    /// | brace group, function body | 127 | 2 |
+    /// | inside `( … )` or `$( … )` | 2 | 2 |
+    /// | inside `( … )` under `eval` | 1 | 1 |
+    ///
+    /// The fourth and fifth rows are why the test is
+    /// [`Shell::abort_catch`] and not `command_mode` alone: the 127 belongs to
+    /// `-c`'s own `setjmp`, so anything that catches the jump first answers in
+    /// its place, and a `-c` shell then falls back to the script rule exactly.
+    /// A brace group and a function body install no handler and so keep the 127.
+    ///
+    /// Two contexts answer before any of that:
+    ///
+    /// * **A backtick body** has no reader to unwind to and no invocation mode
+    ///   to key off. bash abandons the rest of the body, substitutes what it
+    ///   captured, and leaves `$?` at 1 — the same 1
+    ///   [`Shell::parse_error_flow`] gives a fatal error read there.
+    /// * **Under errexit** the shell leaves through errexit's own exit, which
+    ///   carries the syntax error's `$?` of 2, rather than through the fatality
+    ///   path that would carry 127 or 1.
+    fn force_eof_status(&self) -> i32 {
+        if self.at_comsub_read_eval() {
+            1
+        } else if self.errexit {
+            2
+        } else if self.command_mode && self.abort_catch == 0 {
+            127
+        } else if self.at_outermost_read_eval() {
+            2
+        } else {
+            1
+        }
+    }
+
     /// Arm the fatal abort for a `nounset` reference or a `${var:?word}`.
     ///
     /// Both carry 127, *except* under errexit, where bash treats the failure as
@@ -13659,11 +13717,10 @@ impl Shell {
             && let Some(err) = self.array_assign_reparse_error(items)
         {
             self.berrln(&err);
-            // `jump_to_top_level (FORCE_EOF)`: the status is the syntax error's,
-            // 2 at the top level and 1 where an `eval`/`source` is executing the
-            // builtin that scored it — and `demote: false`, so a `( … )` around
-            // it exits 2 rather than the 1 an interceptable abort would leave.
-            let status = if self.at_outermost_read_eval() { 2 } else { 1 };
+            // `jump_to_top_level (FORCE_EOF)` — see [`Self::force_eof_status`]
+            // for the status, which already accounts for the interception a
+            // `( … )` around this performs, hence `demote: false` here.
+            let status = self.force_eof_status();
             self.unbound_error = Some(FatalAbort { status, demote: false });
             return false;
         }
@@ -28421,15 +28478,29 @@ impl Shell {
                         // A `$( … )` *inside* the re-print that will not parse is
                         // `parse_comsub`'s own error, and a non-interactive shell
                         // does not survive one: `jump_to_top_level (FORCE_EOF)`
-                        // (parse.y:4185) stops the reader outright. The status is
-                        // the syntax error's, which is 2 at the top level and 1
-                        // where an `eval`/`source` is executing the builtin that
-                        // scored it (`EX_BADSYNTAX` against `EX_BADUSAGE`).
-                        let status = if self.at_outermost_read_eval() { 2 } else { 1 };
-                        // `demote: false`: the status stands wherever it is
-                        // raised. A `( … )` around it exits **2**, not the 1 an
-                        // interceptable `jump_to_top_level` would leave.
+                        // (parse.y:4185) stops the reader outright. See
+                        // [`Self::force_eof_status`] for the status that class
+                        // carries — it is not the syntax error's everywhere,
+                        // because `-c` scores the whole class 127.
+                        let status = self.force_eof_status();
+                        // `demote: false`: `force_eof_status` has already
+                        // accounted for whatever is in the way, so the answer
+                        // stands wherever it is raised.
                         self.unbound_error = Some(FatalAbort { status, demote: false });
+                    } else if self.errexit {
+                        // Under errexit neither jump is reached: `parser_error`
+                        // (error.c) ends with a *direct* call, before the class
+                        // of the failure has been decided at all —
+                        //
+                        //     if (exit_immediately_on_error)
+                        //       exit_shell (last_command_exit_value = 2);
+                        //
+                        // — so there is nothing for a `||` to catch and the 2 is
+                        // not the assignment's status but the syntax error's:
+                        // `set -e; v=p$(⏎!⏎)q || echo B` prints no `B` and exits
+                        // 2. Same shape as the FORCE_EOF branch above, which is
+                        // why [`Self::force_eof_status`] answers 2 here too.
+                        self.unbound_error = Some(FatalAbort { status: 2, demote: false });
                     } else {
                         // The re-print's own failure is `parse_string`'s to
                         // answer: it returns `-DISCARD` and `xparse_dolparen`
@@ -28532,7 +28603,8 @@ impl Shell {
         });
         let prefix = self.syntax_error_prefix(line);
         self.input_names.pop();
-        Some((bfmt![&prefix, e.msg(), b"\n", &prefix, b"`", last, b")", first, b"'"], e.fatal))
+        let out = bfmt![&prefix, e.msg(), b"\n", &prefix, b"`", last, b")", first, b"'"];
+        Some((self.errexit_first_line(out), e.fatal))
     }
 
     /// The diagnostic bash raises when a **compound array assignment**'s value
@@ -28601,7 +28673,8 @@ impl Shell {
         });
         let prefix = self.syntax_error_prefix(line);
         self.input_names.pop();
-        Some(bfmt![&prefix, e.msg(), b"\n", &prefix, b"`", last, b")", first, b"'"])
+        let out = bfmt![&prefix, e.msg(), b"\n", &prefix, b"`", last, b")", first, b"'"];
+        Some(self.errexit_first_line(out))
     }
 
     /// Run a command substitution's body text, substituting what it wrote to
@@ -47093,29 +47166,39 @@ impl Shell {
         {
             out.push_str(&bfmt![b"\n", &prefix, b"`", text, b"'"]);
         }
-        // Under **errexit** only the *first* line of the whole diagnostic
-        // survives, whatever its shape — the echoed source line, a follow-on
-        // `syntax error near …`, and a trailing `syntax error: unexpected end of
-        // file` are all dropped alike. That uniformity is what shows the rule is
-        // "stop after the first line" rather than "suppress the source echo":
-        // `[[ a b ]]` goes from three lines to one, and `[[ -n a` from two to
-        // one, even though neither of the dropped lines is a source echo.
-        //
-        // The test is the option's state at the moment the error is *reported*,
-        // which is what makes the behaviour consistent rather than arbitrary:
-        //
-        //   * `-c 'set -e; for'` keeps all its lines, because `set -e` and `for`
-        //     are one `;`-separated list and so are parsed together — `set -e`
-        //     has not run yet when the parse fails;
-        //   * the same two commands separated by a *newline* lose them, because
-        //     input is parsed and executed command by command, so `set -e` has
-        //     run by then. (The same reason a script file with `set -e` on its
-        //     first line loses them.)
-        //   * `-e -c 'x=$(eval "for")'` gets them back, because errexit is unset
-        //     inside a command substitution (see `inherit_errexit`), while
-        //     `-e -c '(eval "for")'` does not, because a plain subshell inherits
-        //     it. This last pair looks like a bash bug until you notice `$-`
-        //     really is `hBc` inside `$( … )`.
+        self.errexit_first_line(out)
+    }
+
+    /// Under **errexit**, only the *first* line of a syntax diagnostic survives.
+    ///
+    /// It holds whatever the shape — the echoed source line, a follow-on
+    /// `syntax error near …`, and a trailing `syntax error: unexpected end of
+    /// file` are all dropped alike. That uniformity is what shows the rule is
+    /// "stop after the first line" rather than "suppress the source echo":
+    /// `[[ a b ]]` goes from three lines to one, and `[[ -n a` from two to one,
+    /// even though neither of the dropped lines is a source echo.
+    ///
+    /// The test is the option's state at the moment the error is *reported*,
+    /// which is what makes the behaviour consistent rather than arbitrary:
+    ///
+    ///   * `-c 'set -e; for'` keeps all its lines, because `set -e` and `for`
+    ///     are one `;`-separated list and so are parsed together — `set -e`
+    ///     has not run yet when the parse fails;
+    ///   * the same two commands separated by a *newline* lose them, because
+    ///     input is parsed and executed command by command, so `set -e` has
+    ///     run by then. (The same reason a script file with `set -e` on its
+    ///     first line loses them.)
+    ///   * `-e -c 'x=$(eval "for")'` gets them back, because errexit is unset
+    ///     inside a command substitution (see `inherit_errexit`), while
+    ///     `-e -c '(eval "for")'` does not, because a plain subshell inherits
+    ///     it. This last pair looks like a bash bug until you notice `$-`
+    ///     really is `hBc` inside `$( … )`.
+    ///
+    /// A *re-parse* diagnostic goes through the same rule — it is reported by
+    /// the same `report_syntax_error` — but is assembled by
+    /// [`Shell::comsub_reparse_error`] / [`Shell::array_assign_reparse_error`]
+    /// rather than by [`Shell::format_parse_error`], so they call this too.
+    fn errexit_first_line(&self, mut out: Str) -> Str {
         if self.errexit && let Some(nl) = bytes::find(&out, b"\n") {
             out.truncate(nl);
         }

@@ -919,6 +919,10 @@ pub enum WordPart {
     /// current parse unit without exiting the shell). The stored string is the
     /// text *between* the braces, so the diagnostic reproduces `${raw}`.
     BadSubst(Str),
+    /// A construct left open in text no parser read, which is a failure of the
+    /// *expansion* rather than of any parse — see [`crate::lexer::Unclosed`],
+    /// which this carries whole. Reported by `Shell::expand_unclosed`.
+    Unclosed(crate::lexer::Unclosed),
     /// A whole word held as the *text of its token buffer*, because that text is
     /// not what the parser read and so cannot be described as a tree. It is read
     /// back at expansion time by `Shell::expander_word`, with
@@ -1114,6 +1118,11 @@ impl WordPart {
 
             // Not reached: raised by the substitution's own expansion instead.
             WordPart::CommandSub { .. } | WordPart::ProcSub { .. } => None,
+
+            // The scan that met this one never got as far as a `$((`, because it
+            // ran out of text first — and its own diagnostic is the one bash
+            // raises.
+            WordPart::Unclosed(_) => None,
         }
     }
 
@@ -1313,8 +1322,23 @@ pub enum CmdSubBody {
         /// for the same reason: `xparse_dolparen` is handed the remainder of the
         /// text, not the body alone.
         tail: Str,
-        /// The line the closing `)` sits on, in the enclosing source.
+        /// The line the closing `)` sits on, in the enclosing source — or, when
+        /// `closed` is false, the line the text ran out on.
         close_line: u32,
+        /// Whether a `)` was ever found. `extract_command_subst` is handed the
+        /// text from the `$(` to the **end** of what is being expanded and lets
+        /// `xparse_dolparen` decide where the body stops, so a `$(` with no mate
+        /// is not a lexing failure of the enclosing text at all: it simply makes
+        /// a body of everything that follows, which then fails to read back.
+        ///
+        /// That failure is the ordinary one — `parse_string` finds end of input
+        /// with `shell_eof_token` still `)` and reports `unexpected EOF while
+        /// looking for matching `)'` — so nothing here is special-cased beyond
+        /// where the body ends. The two lasting differences: the stored word
+        /// prints back without a `)` (there was none to print), and a prompt
+        /// expansion, which suppresses the jump, goes on to *run* a body one
+        /// character shorter than `src` (see `Shell::unclosed_comsub_body`).
+        closed: bool,
     },
     /// `` ` … ` `` — parsed at expansion time, by `Shell::command_sub`.
     Backtick {

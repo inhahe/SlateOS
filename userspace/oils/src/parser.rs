@@ -2190,6 +2190,61 @@ pub fn comsub_reprint_error(
     }
 }
 
+/// What bash's read of a `$( … )` body finds wrong when the text it was written
+/// in ran out before the `)` did — always something, because the `)` the
+/// `comsub` production needs can never arrive.
+///
+/// This is the same `xparse_dolparen` read [`comsub_reprint_error`] models, and
+/// the same three shapes of failure; only the string differs. There is no `)`
+/// to append and no `tail` to run into, because `extract_command_subst` handed
+/// the read everything that was left. See [`crate::ast::CmdSubBody::Unread`].
+#[must_use]
+pub fn comsub_unclosed_error(src: BStr<'_>, opts: ParseOpts) -> ComsubReprintError {
+    let spanned = match tokenize_spanned(src, opts) {
+        Ok(spanned) => spanned,
+        // A construct inside the body left open too, which `parse_matched_pair`
+        // reports first and against its own opening line — the same diagnostic
+        // and the same accounting as in [`reprint_read_past_paren`].
+        Err(lex) => {
+            let line_off = lex.line.unwrap_or(1);
+            let err = resolve_subst_bail(lex, opts);
+            let fatal = err.fatal;
+            return ComsubReprintError { err, echo: fatal, line_off, fatal };
+        }
+    };
+    let Spanned { toks, lines, ends, .. } = spanned;
+    match parse_tokens(toks, lines, Spans::of(src, ends), opts) {
+        // A grammar error found before the input ran out is named on its token
+        // and echoed, exactly as in a body that did close.
+        Err(e) if !e.is_incomplete() => {
+            let line_off = e.line.unwrap_or_else(|| eof_line_off(src));
+            let fatal = e.fatal;
+            ComsubReprintError { err: e, echo: true, line_off, fatal }
+        }
+        // Otherwise the read simply ran out with `shell_eof_token` outstanding —
+        // whether the text was a complete command (`$(echo`) or not (`$(if`),
+        // since neither can produce the `)`. parse.y:6289, with
+        // `shell_input_line` already empty, so nothing is echoed under it.
+        _ => ComsubReprintError {
+            err: ParseError::new("unexpected EOF while looking for matching `)'"),
+            echo: false,
+            line_off: eof_line_off(src),
+            fatal: false,
+        },
+    }
+}
+
+/// Which line of `s` a reader that consumed all of it then met end of input on.
+///
+/// The reader counts a line as it *fetches* it (parse.y:2361), so reading the
+/// last line and then finding no more costs one increment each — but text
+/// ending in a newline has no partial line after it to fetch, and stops one
+/// short.
+fn eof_line_off(s: BStr<'_>) -> u32 {
+    let lines = newlines(s).saturating_add(1);
+    if s.last() == Some(&b'\n') { lines } else { lines.saturating_add(1) }
+}
+
 /// [`comsub_reprint_error`] for a re-print whose lex runs past the `)`.
 fn reprint_read_past_paren(
     src: BStr<'_>,
@@ -2240,13 +2295,12 @@ fn reprint_read_past_paren(
         // (parse.y:6289 — reached with `shell_input_line` empty, so nothing is
         // echoed under it.)
         //
-        // `line_number` has by then run one line past the text: the reader
-        // counts a line as it *fetches* it (parse.y:2361), so reading the last
-        // line and then finding no more costs one increment each.
+        // `line_number` has by then run one line past the text — see
+        // [`eof_line_off`].
         _ => ComsubReprintError {
             err: ParseError::new("unexpected EOF while looking for matching `)'"),
             echo: false,
-            line_off: newlines(&combined).saturating_add(2),
+            line_off: eof_line_off(&combined),
             fatal: false,
         },
     }
@@ -5582,7 +5636,9 @@ fn segs_hold_a_nul(segs: &[Seg]) -> bool {
             t.contains(&0)
         }
         Seg::Dq(inner) => segs_hold_a_nul(inner),
-        Seg::Param(_) | Seg::CmdSub(..) | Seg::ProcSub(..) => false,
+        // An unclosed construct's text is echoed back by a diagnostic rather
+        // than expanded, and the diagnostic writes bytes rather than a C string.
+        Seg::Param(_) | Seg::CmdSub(..) | Seg::ProcSub(..) | Seg::Unclosed(_) => false,
     })
 }
 
@@ -5770,6 +5826,7 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
             WordPart::DoubleQuoted(parts)
         }
         Seg::Param(n) => WordPart::Param { name: n.clone(), braced: false },
+        Seg::Unclosed(u) => WordPart::Unclosed(u.clone()),
         // The body is lexed again in here, from its own line 1, so every
         // fragment of it has to be told the physical line it starts on — see
         // [`frag_line`] and [`map_frag_segs`].
@@ -5818,10 +5875,11 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
                 // source. The `tail` is filled by
                 // `unparse::attach_comsub_tails` once the word is assembled,
                 // exactly as a `Parsed` body's is.
-                SubBody::Unread => CmdSubBody::Unread {
+                SubBody::Unread { closed } => CmdSubBody::Unread {
                     src: raw.clone(),
                     tail: Str::new(),
                     close_line: *close_line,
+                    closed: *closed,
                 },
                 SubBody::Backtick(verbatim) => CmdSubBody::Backtick {
                     src: raw.clone(),

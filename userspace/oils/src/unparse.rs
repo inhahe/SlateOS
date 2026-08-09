@@ -1452,6 +1452,8 @@ fn nested_parts_mut(p: &mut WordPart) -> Vec<&mut [WordPart]> {
         | WordPart::ArrayKeys { .. }
         | WordPart::BadSubst(_)
         | WordPart::TokenText(_)
+        // An unclosed construct holds only the text a diagnostic echoes back.
+        | WordPart::Unclosed(_)
         | WordPart::ProcSub { .. } => Vec::new(),
     }
 }
@@ -1574,7 +1576,11 @@ fn part_src(p: &WordPart) -> Str {
             // here-document body. bash prints the here-document back from the
             // very text its reader collected, and `parse_comsub` never ran over
             // any of it, so there is no re-print to print instead.
-            CmdSubBody::Unread { src, .. } => bfmt![b"$(", src, b")"],
+            // A `$(` with no mate prints back with none either: the source held
+            // no `)` and this text *is* the source.
+            CmdSubBody::Unread { src, closed, .. } => {
+                bfmt![b"$(", src, if *closed { b")".as_slice() } else { b"" }]
+            }
             CmdSubBody::Parsed { prog, .. } => comsub_reprint(b"$(", prog),
         },
         // Read by the same `parse_comsub` call the `$( … )` spelling gets —
@@ -1592,6 +1598,9 @@ fn part_src(p: &WordPart) -> Str {
             }
         }
         WordPart::BadSubst(raw) => bfmt![b"${", raw, b"}"],
+        // Held as written, delimiters and all — there is no closing one to put
+        // back, which is the whole point of it.
+        WordPart::Unclosed(u) => u.src().to_vec(),
         // The whole word's text, already cut — nothing to put back around it.
         WordPart::TokenText(raw) => raw.clone(),
         WordPart::Length(name) => bfmt![b"${#", name, b"}"],

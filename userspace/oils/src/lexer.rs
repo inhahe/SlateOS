@@ -128,6 +128,91 @@ pub struct LexError {
     /// The body of the `$( … )` / `<( … )` this error ran out of input inside,
     /// and the line its `(` sat on. See [`SubstBail`].
     pub bail: Option<SubstBail>,
+    /// Set when the construct that ran out of input was written in text no
+    /// parser read, which makes the failure a *runtime* one rather than this
+    /// error. See [`UnreadEof`]; the scan that meets it turns the error back
+    /// into a segment.
+    ///
+    /// Boxed because it is the largest thing an error can carry and the rarest:
+    /// only text no parser read can set it, so the allocation never happens
+    /// while lexing a script, and every other error stays cheap to move.
+    pub unclosed: Option<Box<UnreadEof>>,
+}
+
+/// Which segment a scan that ran out of input in unread text becomes.
+///
+/// Both are failures of the *expansion* rather than of any parse — see
+/// [`Unclosed`] — but they are reported by different parts of bash and so by
+/// different parts of this shell, which is the whole of the distinction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnreadEof {
+    /// A `${ … }`, `$(( … ))`, `$[ … ]` or `` ` … ` `` — one of `subst.c`'s own
+    /// scanners, reported by `Shell::expand_unclosed`.
+    Subst(Unclosed),
+    /// A `$( … )`, carrying everything after its `$(`. This one is not a scan at
+    /// all: `extract_command_subst` runs `xparse_dolparen`, a real parse, over
+    /// the rest of the text, so the failure and its diagnostic are the ordinary
+    /// ones an unreadable body earns — see [`crate::ast::CmdSubBody::Unread`].
+    ///
+    /// It wins over any [`UnreadEof::Subst`] an enclosing scan would have
+    /// raised, because that scan is what *reaches* the `$(`: a `${ … }` whose
+    /// body holds one is abandoned mid-scan by the nested parse's own jump.
+    CmdSub(Str),
+}
+
+/// A construct left open in text no parser ever read as a word — a
+/// here-document body, a `PS4`, a `${x@P}`.
+///
+/// It cannot be a *parse* error, because no parse ever looked at the text. The
+/// scanner that meets it is the expansion-time one in `subst.c`, so the failure
+/// happens when the word is expanded: it kills only the enclosing command and
+/// lets the script carry on. Two reporters share the job, and which of them
+/// fires is decided by whichever scan gives up first — reading left to right and
+/// innermost-out, except that a scan which *skips* a nested construct rather
+/// than reading it never reports at all. `${x:-`echo` is the brace's failure,
+/// not the backquote's, because `extract_dollar_brace_string` steps over a
+/// backquote with `string_extract`, which runs quietly to the end of the text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unclosed {
+    /// `${ … }` (`extract_dollar_brace_string`, subst.c:1785, 1980),
+    /// `$(( … ))` and `$[ … ]` (`extract_delimited_string`, subst.c:1498). All
+    /// three say ``bad substitution: no closing `%s' in %s`` at the shell's
+    /// plain line and then `exp_jump_to_top_level (DISCARD)`.
+    BadSubst {
+        /// The delimiter the scan was still looking for: `}`, `)` or `]`.
+        close: char,
+        /// The construct as written, from its `$` to the end of the text — what
+        /// a `declare -f` prints back, and the only part of the text this
+        /// segment stands for.
+        src: Str,
+        /// The `%s`, which is the **whole text being expanded** — bash's
+        /// `string`, not the construct — so a body of three lines echoes all
+        /// three, and text before the construct is echoed with it.
+        text: Str,
+    },
+    /// `` ` … ` `` met at the top level of the text, which `param_expand`
+    /// reports itself (subst.c:11290) with a message of its own:
+    /// ``bad substitution: no closing "`" in %s``. Unlike the other three it
+    /// does not test `no_longjmp_on_fatal_error`, so a prompt expansion prints
+    /// it too.
+    Backquote {
+        /// The construct as written, from the backquote to the end of the text.
+        /// It is also the `%s`, which here is `string + t_index` — only the text
+        /// from the backquote on, where the other reporter echoes the whole
+        /// of it.
+        src: Str,
+    },
+}
+
+impl Unclosed {
+    /// The text this stands for, as written — so that a here-document body
+    /// holding one prints back unchanged.
+    #[must_use]
+    pub fn src(&self) -> BStr<'_> {
+        match self {
+            Self::BadSubst { src, .. } | Self::Backquote { src } => src,
+        }
+    }
 }
 
 /// A substitution body the scan never found the `)` of, kept so that the error
@@ -171,7 +256,14 @@ pub struct SubstBail {
 impl LexError {
     /// A lexer error with no line preference; the caller's fallback applies.
     pub(crate) fn new(msg: &(impl bytes::PushBytes + ?Sized)) -> Self {
-        Self { msg: bfmt![msg], line: None, looking_for: None, recoverable: false, bail: None }
+        Self {
+            msg: bfmt![msg],
+            line: None,
+            looking_for: None,
+            recoverable: false,
+            bail: None,
+            unclosed: None,
+        }
     }
 
     /// Fill in the reporting line if the raise site did not already choose one.
@@ -186,12 +278,18 @@ impl LexError {
         self.recoverable = true;
         self
     }
+
+    /// Mark this error as a construct left open in unread text, naming the
+    /// reporter that will raise it at expansion time. Always *overwrites*: an
+    /// enclosing scan that runs off the end after an inner one did is the one
+    /// bash reports from, because the inner one it stepped over said nothing.
+    /// See [`UnreadEof`].
+    pub(crate) fn unclosed(mut self, what: UnreadEof) -> Self {
+        self.unclosed = Some(Box::new(what));
+        self
+    }
 }
 
-/// bash's end-of-input diagnostic for an unclosed quote, substitution, or group.
-/// bash names the delimiter it was scanning for, e.g. `unexpected EOF while
-/// looking for matching `)'` — a single backtick, the closing char, then a
-/// single quote — so a `$(`/`(` reports `)`, `${` reports `}`, `"` reports `"`.
 /// bash's end-of-input diagnostic for a here-document whose delimiter never
 /// arrived.
 ///
@@ -202,6 +300,10 @@ fn unterminated_heredoc(delim: BStr<'_>) -> LexError {
     LexError::new(&bfmt![b"unexpected EOF while looking for `", delim, b"'"])
 }
 
+/// bash's end-of-input diagnostic for an unclosed quote, substitution, or group.
+/// bash names the delimiter it was scanning for, e.g. `unexpected EOF while
+/// looking for matching `)'` — a single backtick, the closing char, then a
+/// single quote — so a `$(`/`(` reports `)`, `${` reports `}`, `"` reports `"`.
 fn eof_matching(close: char) -> LexError {
     LexError {
         msg: bfmt![b"unexpected EOF while looking for matching `", close, b"'"],
@@ -209,6 +311,7 @@ fn eof_matching(close: char) -> LexError {
         looking_for: Some(close),
         recoverable: false,
         bail: None,
+        unclosed: None,
     }
 }
 
@@ -304,7 +407,13 @@ pub enum SubBody {
     /// prints the body back as written rather than re-printed, a syntax error in
     /// it is a runtime `command substitution:` diagnostic rather than a parse
     /// error, and the enclosing script survives it.
-    Unread,
+    ///
+    /// `closed` is false for a `$(` this scan never found a `)` for, which in
+    /// unread text is not a failure of *this* scan either: `extract_command_subst`
+    /// takes the body to be everything up to the end of the text and leaves the
+    /// complaint to the expansion's own read. See
+    /// [`crate::ast::CmdSubBody::Unread::closed`].
+    Unread { closed: bool },
     /// `` ` … ` `` — parsed at expansion time. Carries the body *exactly as
     /// written*, backslashes and all: bash echoes a backtick body rather than
     /// re-printing it, and re-printing is not merely untidy — a nested `` \` ``
@@ -439,6 +548,16 @@ pub enum Seg {
     /// substitution runs as a child command rather than as a body bash re-reads
     /// after the enclosing scan.
     ProcSub(bool, Str, u32),
+    /// A construct left open in text no parser read, which is not a lexing
+    /// failure at all but a *runtime* one — see [`Unclosed`].
+    ///
+    /// Always the last segment of the run it appears in, because a construct
+    /// only fails to close by running out of text. The segments before it stand
+    /// and are expanded: bash walks the text left to right, so a whole `$( … )`
+    /// written before the offending construct has already run by the time the
+    /// scan gives up. Measured: `cat <<E` / `$(touch f) ${x:-a` / `E` reports
+    /// the bad substitution *and* leaves `f` behind.
+    Unclosed(Unclosed),
 }
 
 /// One token.
@@ -4451,18 +4570,29 @@ impl Lexer {
                 '`' => {
                     self.pos += 1;
                     flush_lit(&mut segs, &mut lit);
-                    let (raw, src) = self.read_backtick(true)?;
-                    let close = self.cur_line();
-                    segs.push(Seg::CmdSub(raw, close, SubBody::Backtick(src)));
-                }
-                '$' => {
-                    if let Some(seg) = self.read_dollar(true)? {
-                        flush_lit(&mut segs, &mut lit);
-                        segs.push(seg);
-                    } else {
-                        lit.push(b'$');
+                    match self.read_backtick(true) {
+                        Ok((raw, src)) => {
+                            let close = self.cur_line();
+                            segs.push(Seg::CmdSub(raw, close, SubBody::Backtick(src)));
+                        }
+                        Err(e) => {
+                            segs.push(self.unclosed_seg(e)?);
+                            return Ok(segs);
+                        }
                     }
                 }
+                '$' => match self.read_dollar(true) {
+                    Ok(Some(seg)) => {
+                        flush_lit(&mut segs, &mut lit);
+                        segs.push(seg);
+                    }
+                    Ok(None) => lit.push(b'$'),
+                    Err(e) => {
+                        flush_lit(&mut segs, &mut lit);
+                        segs.push(self.unclosed_seg(e)?);
+                        return Ok(segs);
+                    }
+                },
                 _ => self.take_into(&mut lit),
             }
         }
@@ -4487,6 +4617,9 @@ impl Lexer {
     /// `a,b`.
     fn read_dollar(&mut self, in_dquote: bool) -> Result<Option<Seg>, LexError> {
         let quote_form = !in_dquote && !self.here_text;
+        // Where the construct starts, for a scan that runs off the end of text
+        // no parser read — see [`Lexer::unread_eof`].
+        let dollar = self.pos;
         // Consume the `$`. What follows it is judged after the reader's
         // deletions, so `$<backslash><newline>(` opens a substitution and
         // `$<backslash><newline>{` a braced parameter. See [`Lexer::eat_conts`].
@@ -4520,7 +4653,8 @@ impl Lexer {
                 // that one — is this segment's, because it is this segment's raw
                 // text the leftover has to be carved out of.
                 self.bare_splice = false;
-                let (raw, nested) = self.read_dollar_brace(in_dquote)?;
+                let (raw, nested) =
+                    self.read_dollar_brace(in_dquote).map_err(|e| self.unread_eof(e, '}', dollar, true))?;
                 let spliced = std::mem::take(&mut self.bare_splice);
                 Ok(Some(Seg::ParamBraced(raw, open, nested, spliced)))
             }
@@ -4530,7 +4664,9 @@ impl Lexer {
                 self.pos += 1;
                 let open = self.cur_line();
                 let outer = std::mem::take(&mut self.arith_comsubs);
-                let raw = self.read_balanced('[', ']').map_err(|e| e.at(open))?;
+                let raw = self
+                    .read_balanced('[', ']')
+                    .map_err(|e| self.unread_eof(e.at(open), ']', dollar, false))?;
                 let nested = std::mem::replace(&mut self.arith_comsubs, outer);
                 Ok(Some(Seg::Arith(raw, true, nested)))
             }
@@ -4563,7 +4699,9 @@ impl Lexer {
                     let open = self.cur_line();
                     self.adv();
                     let outer = std::mem::take(&mut self.arith_comsubs);
-                    let raw = self.read_balanced('(', ')').map_err(|e| e.at(open))?;
+                    let raw = self
+                        .read_balanced('(', ')')
+                        .map_err(|e| self.unread_eof(e.at(open), ')', dollar, true))?;
                     let nested = std::mem::replace(&mut self.arith_comsubs, outer);
                     // `chk_arithsub`'s own preamble: the body must open with the
                     // `(` this scan counted and close with its mate.
@@ -4609,9 +4747,23 @@ impl Lexer {
                     // parsed at expansion time, from a fresh reader — so a `"`
                     // this scan is nominally inside is not one of bash's. See
                     // [`Lexer::here_text`].
-                    let raw = self
-                        .read_subst_body(in_dquote && !self.here_text)
-                        .map_err(|e| e.at(self.eof_line()))?;
+                    let body = self.pos;
+                    let raw = match self.read_subst_body(in_dquote && !self.here_text) {
+                        Ok(raw) => raw,
+                        // In unread text there is no scan to fail: `$(` hands
+                        // `extract_command_subst` the rest of the string and
+                        // `xparse_dolparen` decides where the body stops, which
+                        // for a `$(` with no mate is the end of it. See
+                        // [`SubBody::Unread`].
+                        Err(e) if self.unread_comsub(&e) => {
+                            let src = self.slice(body, self.chars.len());
+                            self.pos = self.chars.len();
+                            let close = self.cur_line();
+                            let kind = SubBody::Unread { closed: false };
+                            return Ok(Some(Seg::CmdSub(src, close, kind)));
+                        }
+                        Err(e) => return Err(e.at(self.eof_line())),
+                    };
                     let kind = self.subst_kind();
                     Ok(Some(Seg::CmdSub(raw, self.cur_line(), kind)))
                 }
@@ -4642,6 +4794,76 @@ impl Lexer {
         }
     }
 
+    /// The whole of the text this lexer is reading — bash's `string`, which is
+    /// what the "no closing" diagnostics echo back. See [`Unclosed::BadSubst`].
+    fn whole_text(&self) -> Str {
+        self.slice(0, self.chars.len())
+    }
+
+    /// Reconsider a scan that ran out of input, when the text being scanned is
+    /// text no parser read.
+    ///
+    /// The failure is then not a lexing one at all: it is
+    /// `extract_dollar_brace_string`'s or `extract_delimited_string`'s, raised
+    /// when the *word is expanded*. `close` is the delimiter this construct was
+    /// looking for, and it is stamped over whatever an inner construct wanted —
+    /// bash's brace and arithmetic scanners step over a nested quote or
+    /// backquote with `string_extract`/`skip_*_quoted`, which run to the end of
+    /// the text without a word, so it is the enclosing scan that reports.
+    ///
+    /// A `$( … )` inside is the exception, but only for a scan that reads one.
+    /// `extract_delimited_string` parses a nested command substitution — with
+    /// `extract_command_subst`, whose failure is its own and abandons this scan
+    /// where it stands — under one condition:
+    ///
+    /// ```c
+    ///   if ((flags & SX_COMMAND) && string[i] == '$' && string[i+1] == LPAREN)
+    ///     { si = i + 2; t = extract_command_subst (…); }   /* subst.c:1429 */
+    /// ```
+    ///
+    /// `$((` and `${` are read with `SX_COMMAND`; `$[` is not — subst.c:1303
+    /// passes a bare `0` — so a `$(` inside one is just so much text and the
+    /// `$[` keeps its own complaint. `command` is that flag. The error carrying
+    /// a nested parse is the one carrying a [`SubstBail`], whose body is the
+    /// text that parse was handed.
+    fn unread_eof(&self, e: LexError, close: char, from: usize, command: bool) -> LexError {
+        if !self.here_text || e.looking_for.is_none() {
+            return e;
+        }
+        if let Some(bail) = e.bail.as_ref().filter(|_| command) {
+            let src = bail.body.clone();
+            return e.unclosed(UnreadEof::CmdSub(src));
+        }
+        let src = self.slice(from, self.chars.len());
+        let what = Unclosed::BadSubst { close, src, text: self.whole_text() };
+        e.unclosed(UnreadEof::Subst(what))
+    }
+
+    /// Take a scan's failure as the *segment* that carries it, for the two loops
+    /// that read text no parser ever read. A construct left open there is a
+    /// runtime failure rather than a lexing one, so the scan keeps what it has
+    /// and records the reporter; anything else is still an error. See
+    /// [`UnreadEof`].
+    fn unclosed_seg(&self, mut e: LexError) -> Result<Seg, LexError> {
+        match e.unclosed.take().map(|b| *b) {
+            Some(UnreadEof::Subst(u)) => Ok(Seg::Unclosed(u)),
+            Some(UnreadEof::CmdSub(src)) => {
+                Ok(Seg::CmdSub(src, self.cur_line(), SubBody::Unread { closed: false }))
+            }
+            None => Err(e),
+        }
+    }
+
+    /// Whether a `$( … )` scan that ran out of input is one bash never made:
+    /// in text no parser read, `extract_command_subst` simply takes the rest of
+    /// the string for the body. See [`SubBody::Unread`].
+    ///
+    /// Only an *end of input* qualifies. A scan that stopped on something else
+    /// found the trouble the same way bash's would and keeps its own error.
+    fn unread_comsub(&self, e: &LexError) -> bool {
+        self.here_text && e.looking_for.is_some()
+    }
+
     /// Read text until the matching `close`, honoring nested `open`/`close`
     /// and skipping quoted spans. `self.pos` is just past the initial `open`.
     ///
@@ -4664,7 +4886,7 @@ impl Lexer {
     /// eager one, or [`SubBody::Unread`] when the text being scanned is not one
     /// a parser ever read as a word. See [`Lexer::here_text`].
     fn subst_kind(&self) -> SubBody {
-        if self.here_text { SubBody::Unread } else { SubBody::Eager }
+        if self.here_text { SubBody::Unread { closed: true } } else { SubBody::Eager }
     }
 
     /// [`Lexer::read_balanced`] for the body of a `$( … )` or `<( … )`
@@ -4758,6 +4980,11 @@ impl Lexer {
                 cx.push_to(&mut body);
             }
             e.bail = Some(SubstBail { body, open_line });
+            // Whatever construct inside the body noticed the end of input first,
+            // this is now the `$( … )`'s failure, and bash reads *that* one with
+            // a real parse whose diagnostic is its own. Drop any claim an inner
+            // scan staked — see [`Unclosed`].
+            e.unclosed = None;
             e
         })
     }
@@ -6326,7 +6553,21 @@ impl Lexer {
                     }
                 }
                 Some(_) => self.take_into(&mut raw),
-                None => return Err(eof_matching('`').at(open)),
+                None => {
+                    let e = eof_matching('`').at(open);
+                    // In text no parser read this is `param_expand`'s own
+                    // failure rather than a lexing one, and it echoes the text
+                    // from the backquote on. An enclosing `${ … }` or `$(( … ))`
+                    // stamps its own over it — see [`Lexer::unread_eof`] — so
+                    // this survives only where bash's reporter is reached, which
+                    // is the top level of the text.
+                    return Err(if self.here_text {
+                        let src = bfmt![b"`", &self.slice(start, self.chars.len())];
+                        e.unclosed(UnreadEof::Subst(Unclosed::Backquote { src }))
+                    } else {
+                        e
+                    });
+                }
             }
         }
     }
@@ -6387,17 +6628,28 @@ fn scan_heredoc_segs(body: BStr<'_>, expand: bool) -> Result<Vec<Seg>, LexError>
                 // `false`: a here-doc body is a double-quoted *context*, but it
                 // is not inside a double-quoted string, and bash keeps the
                 // backslash there — `<<EOF` … `` `echo \"x\"` `` prints `"x"`.
-                let (raw, src) = lx.read_backtick(false)?;
-                segs.push(Seg::CmdSub(raw, lx.cur_line(), SubBody::Backtick(src)));
-            }
-            '$' => {
-                if let Some(seg) = lx.read_dollar(true)? {
-                    flush_lit(&mut segs, &mut lit);
-                    segs.push(seg);
-                } else {
-                    lit.push(b'$');
+                match lx.read_backtick(false) {
+                    Ok((raw, src)) => {
+                        segs.push(Seg::CmdSub(raw, lx.cur_line(), SubBody::Backtick(src)));
+                    }
+                    Err(e) => {
+                        segs.push(lx.unclosed_seg(e)?);
+                        break;
+                    }
                 }
             }
+            '$' => match lx.read_dollar(true) {
+                Ok(Some(seg)) => {
+                    flush_lit(&mut segs, &mut lit);
+                    segs.push(seg);
+                }
+                Ok(None) => lit.push(b'$'),
+                Err(e) => {
+                    flush_lit(&mut segs, &mut lit);
+                    segs.push(lx.unclosed_seg(e)?);
+                    break;
+                }
+            },
             _ => lx.take_into(&mut lit),
         }
     }

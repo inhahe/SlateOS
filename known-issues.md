@@ -296,7 +296,7 @@ child's.
 
 ---
 
-### TD-OILS-AN-UNTERMINATED-CONSTRUCT-IN-TEXT-NO-PARSER-READ-IS-A-PARSE-ERROR. `$(echo`, `${x:-a`, `` `echo `` and `$((1+` in a here-doc all kill the script — 2026-08-09 — OPEN
+### TD-OILS-AN-UNTERMINATED-CONSTRUCT-IN-TEXT-NO-PARSER-READ-IS-A-PARSE-ERROR. `$(echo`, `${x:-a`, `` `echo `` and `$((1+` in a here-doc all kill the script — 2026-08-09 — ✅ RESOLVED 2026-08-09
 
 **Where:** `userspace/oils/src/lexer.rs` — every scan that ends in
 `eof_matching(…)` returns a `LexError`, which becomes a script syntax error even
@@ -353,6 +353,47 @@ carrying the closer and the text for the other four. Expansion then reports as
 above and `arm_discard(1)`, with the `Shell::prompt_expanding` branch selecting
 the `no_longjmp_on_fatal_error` behaviour. The unterminated-quote row needs
 nothing: an unread `"` really is just a character.
+
+**Resolved**, by the fix sketched above. A scan that runs off the end of unread
+text now ends in `LexError::unclosed`, carrying an `UnreadEof` that says which
+of bash's two reporters owns the failure; `Lexer::unclosed_seg` turns that back
+into a segment — a `Seg::Unclosed` for the four `subst.c` scanners, a
+`Seg::CmdSub(…, SubBody::Unread { closed: false })` for `$( … )`, whose body is
+simply the rest of the text. `Shell::expand_unclosed` reports the first and
+`comsub_unclosed_error` the second. Covered by
+`tests/corpus/an-unterminated-construct-in-text-no-parser-read-is-a-runtime-failure.sh`
+(32 rows, plus the `declare -f` print-back and the four `@P` prompt shapes).
+
+**Three things the entry above had wrong or missing**, all found by measuring
+rather than by reading:
+
+- **Promotion is errexit-only.** The first draft armed `FatalWhen::ErrexitOrPosix`
+  on the `subst.c` sites by analogy with the assignment-error paths. It is
+  wrong: all five sites report through `report_error`, whose entire promotion
+  rule is `if (exit_immediately_on_error) exit_shell (…)` (error.c:201), and
+  none of them consults `posixly_correct`. `set -o posix` still reaches the
+  `echo after=$?`; `set -e` does not.
+- **`$( … )` is never scanned for at all.** `extract_command_subst` hands
+  `xparse_dolparen` everything from the `$(` to the end of the text and lets a
+  *real parse* decide where the body stops — so the failure is whatever that
+  parse hits first, not necessarily the missing `)`: a `$(fi` names the token,
+  an unclosed `'` inside it names the quote, and a nested `$( … )` is
+  `parse_comsub`'s own `jump_to_top_level (FORCE_EOF)` and stops the shell
+  outright (`after=127`). Only when the body parses cleanly to its end is the
+  message the `unexpected EOF` one, whose line is the shell's line plus the
+  1-based line of the failure *within the body*.
+- **Which reporter fires turns on `SX_COMMAND`.** An enclosing scan that meets a
+  nested `$(` hands it over and reports as a command substitution — but only if
+  it carries `SX_COMMAND`, since that is what `extract_delimited_string` tests
+  before parsing one (subst.c:1429). `${` and `$((` carry it; `$[` passes a bare
+  `0` (subst.c:1303), so `$[1+$(echo` steps over the `$(` as text and keeps its
+  own ``no closing `]'``.
+
+**And one prediction that held.** The `no_longjmp_on_fatal_error` branch really
+does report unconditionally and suppress only the jump, so a prompt expansion
+carries on to *run* an unclosed `$( … )`'s body — and `xparse_dolparen`'s
+`substring (ostring, 0, nc - 1)`, which is there to drop the `)`, costs a real
+character when there was none. Hence `v='a$(echo'; ${v@P}` runs `ech`.
 
 ---
 

@@ -4617,6 +4617,12 @@ pub struct Shell {
     /// `w='$(fi)'; echo "${w@P}"; echo $?` prints two diagnostics, an empty
     /// expansion and `0`.
     prompt_expanding: bool,
+    /// Set when an expansion under [`Shell::prompt_expanding`] failed anyway —
+    /// the flag stops the *jump*, not the failure. `expand_prompt_string` then
+    /// hands `decode_prompt_string` a NULL list, and what the prompt shows is
+    /// the text it started with, undecoded past that point. Measured:
+    /// `v='a${x:-b'; echo "${v@P}"` prints the diagnostic and then `a${x:-b`.
+    prompt_failed: bool,
     /// The descriptor `$BASH_XTRACEFD` names, when it names a usable one — where
     /// the `set -x` trace goes instead of stderr. `None` is stderr.
     ///
@@ -5872,6 +5878,7 @@ impl Shell {
             nounset: false,
             xtrace: false,
             prompt_expanding: false,
+            prompt_failed: false,
             xtrace_fd: None,
             xtrace_level: 0,
             noglob: false,
@@ -12248,6 +12255,7 @@ impl Shell {
             // it — so the child inherits the raised flag, as it inherits every
             // other global.
             prompt_expanding: self.prompt_expanding,
+            prompt_failed: false,
             xtrace: self.xtrace,
             // A fork inherits both the descriptor table and the variable, so it
             // inherits the diversion too — `BASH_XTRACEFD=8; ( set -x; … )`
@@ -16993,7 +17001,16 @@ impl Shell {
         // `no_longjmp_on_fatal_error` (subst.c:4459) — see
         // [`Shell::prompt_expanding`].
         let saved_prompt = std::mem::replace(&mut self.prompt_expanding, true);
+        let saved_failed = std::mem::replace(&mut self.prompt_failed, false);
         let out = self.expand_double_quoted(&word.parts);
+        // `expand_prompt_string` returning NULL is not an empty prompt: the
+        // caller keeps the text it was going to expand. See
+        // [`Shell::prompt_failed`].
+        let out = if std::mem::replace(&mut self.prompt_failed, saved_failed) {
+            decoded
+        } else {
+            out
+        };
         self.prompt_expanding = saved_prompt;
         self.last_status = saved_status;
         self.xtrace = saved;
@@ -26015,6 +26032,7 @@ impl Shell {
                 self.join_derived(&names, *star)
             }
             WordPart::BadSubst(raw) => self.bad_substitution(raw),
+            WordPart::Unclosed(u) => self.expand_unclosed(u),
             // Reached only for a token text the expander could not read back
             // even with `expand_word_internal`'s tolerance: `Shell::begin_word`
             // hands every one of these to `Shell::expander_word`, and a text
@@ -26346,6 +26364,75 @@ impl Shell {
     /// [`Shell::bad_substitution_with`].
     fn bad_substitution(&mut self, raw: BStr<'_>) -> Str {
         self.bad_substitution_with(raw, false)
+    }
+
+    /// Report a construct left open in text no parser read — see
+    /// [`crate::lexer::Unclosed`], which says who reports what.
+    ///
+    /// It is not a parse error: no parser ever read the text, so the scanner
+    /// that meets it is the expansion-time one, and the failure costs only the
+    /// command whose word was being expanded.
+    ///
+    /// `no_longjmp_on_fatal_error` — [`Shell::prompt_expanding`] — is tested by
+    /// three of the four sites and changes each of them differently. A `${ … }`
+    /// scan returns NULL instead of reporting, and the *caller* then raises its
+    /// own `bad substitution`, which names the whole string rather than the
+    /// missing brace (subst.c:1785, 1980 → `param_expand`'s `bad_substitution`
+    /// label). A `$(( … ))` or `$[ … ]` scan returns NULL too and its caller
+    /// says nothing at all, so the construct simply expands to nothing
+    /// (subst.c:1498). The backquote site never tests the flag (subst.c:11290),
+    /// so it reports either way. Measured: `v='a${x:-b'`, `w='a`echo'` and
+    /// `u='a$((1+'` expanded with `@P` give `a${x:-b`, `a`echo` and `a`, with a
+    /// diagnostic for the first two and none for the third.
+    fn expand_unclosed(&mut self, u: &crate::lexer::Unclosed) -> Str {
+        use crate::lexer::Unclosed;
+        if self.unbound_error.is_some() || self.discard_error.is_some() {
+            return Str::new();
+        }
+        match u {
+            Unclosed::BadSubst { close, text, .. } => {
+                if self.prompt_expanding {
+                    if *close == '}' {
+                        self.emit_stderr(&bfmt![
+                            self.err_prefix(),
+                            text,
+                            b": bad substitution\n"
+                        ]);
+                        self.prompt_failed = true;
+                    }
+                    return Str::new();
+                }
+                self.emit_stderr(&bfmt![
+                    self.err_prefix(),
+                    b"bad substitution: no closing `",
+                    *close,
+                    b"' in ",
+                    text,
+                    b"\n"
+                ]);
+            }
+            Unclosed::Backquote { src } => {
+                self.emit_stderr(&bfmt![
+                    self.err_prefix(),
+                    b"bad substitution: no closing \"`\" in ",
+                    src,
+                    b"\n"
+                ]);
+                if self.prompt_expanding {
+                    self.prompt_failed = true;
+                    return Str::new();
+                }
+            }
+        }
+        self.arm_discard(1);
+        // …unless `set -e` promotes the DISCARD to an abort. Errexit *only*: all
+        // four sites report through `report_error`, whose whole promotion rule is
+        // `if (exit_immediately_on_error) exit_shell (…)` (error.c:201). None of
+        // them consults `posixly_correct`, unlike the assignment-error paths that
+        // earn `ErrexitOrPosix`. Measured: `set -o posix` still reaches the
+        // `echo after=$?` after `cat <<E`/`${x:-a`/`E`, while `set -e` does not.
+        self.note_shell_error(FatalWhen::ErrexitOnly);
+        Str::new()
     }
 
     /// The fatal "bad substitution" raised by an unrecognised `@` transform
@@ -28582,7 +28669,7 @@ impl Shell {
                 // [`crate::ast::CmdSubBody::Parsed::tail`].
                 if tail
                     .as_ref()
-                    .is_some_and(|tail| self.comsub_reparse_fail(src, tail, *close_line))
+                    .is_some_and(|tail| self.comsub_reparse_fail(src, tail, *close_line, true))
                 {
                     return Str::new();
                 }
@@ -28608,15 +28695,25 @@ impl Shell {
                 let path = self.comsub_read_file(prog);
                 self.command_sub(src, &map, path)
             }
-            CmdSubBody::Unread { src, tail, close_line } => {
+            CmdSubBody::Unread { src, tail, close_line, closed } => {
                 // No first read to re-print, but the *second* one happens all
                 // the same: `expand_word_internal` reaches
                 // `extract_command_subst`, which runs `xparse_dolparen` over the
                 // source to find the `)`. So a body that will not parse fails
                 // exactly where a re-print that will not parse fails — see
                 // [`crate::ast::CmdSubBody::Unread`].
-                if self.comsub_reparse_fail(src, tail, *close_line) {
+                if self.comsub_reparse_fail(src, tail, *close_line, *closed) {
                     return Str::new();
+                }
+                // A body with no `)` always fails that read, so the only way
+                // past it is a prompt expansion, where the jump is suppressed
+                // and bash carries on to run what `xparse_dolparen` returns —
+                // one character less than the text, per its own arithmetic.
+                if !*closed {
+                    let src = Self::unclosed_comsub_body(src);
+                    let map = LineMap::Offset(self.source_line().saturating_sub(1));
+                    let path = self.comsub_text_read_file(&src, &map);
+                    return self.command_sub(&src, &map, path);
                 }
                 // The body is numbered from the *shell's* current line, not from
                 // anything in the text it was written in — because there is no
@@ -28648,6 +28745,28 @@ impl Shell {
         }
     }
 
+    /// The text a `$( … )` with no closing `)` actually runs, on the one path
+    /// that gets that far — a prompt expansion, where the jump is suppressed.
+    ///
+    /// `xparse_dolparen` reports where its read stopped and then hands the
+    /// caller everything up to one byte short of it:
+    ///
+    /// ```c
+    ///   if (ep[-1] != ')')
+    ///     { while (ep > ostring && ep[-1] == '\n') ep--; }
+    ///   nc = ep - ostring;
+    ///   ret = (nc == 0) ? "" : substring (ostring, 0, nc - 1);   /* parse.y:4348-4376 */
+    /// ```
+    ///
+    /// The `nc - 1` is there to drop the `)` a body that closed would end with.
+    /// One that did not close has no `)` to drop, so it loses a real character
+    /// instead — measured against bash 5.2.37: `v='a$(echo'; : "${v@P}"` reports
+    /// the unterminated read and then complains that `ech` is not a command.
+    fn unclosed_comsub_body(src: BStr<'_>) -> Str {
+        let end = src.iter().rposition(|&b| b != b'\n').map_or(0, |i| i.saturating_add(1));
+        src.get(..end.saturating_sub(1)).unwrap_or_default().to_vec()
+    }
+
     /// Run bash's `xparse_dolparen` read over a `$( … )` body and, if it does
     /// not parse, report it and arm the abort it raises. `true` says the body
     /// never ran.
@@ -28655,9 +28774,16 @@ impl Shell {
     /// The read is the same one whether it is a re-print ([`CmdSubBody::Parsed`])
     /// or the source ([`CmdSubBody::Unread`]) that is being re-read, because in
     /// bash it is literally the same call: `extract_command_subst` runs
-    /// `xparse_dolparen` over whatever text the stored word holds.
-    fn comsub_reparse_fail(&mut self, src: BStr<'_>, tail: BStr<'_>, close_line: u32) -> bool {
-        let Some((err, nested)) = self.comsub_reparse_error(src, tail, close_line) else {
+    /// `xparse_dolparen` over whatever text the stored word holds. `closed` says
+    /// whether that text ever held a `)`; see [`CmdSubBody::Unread::closed`].
+    fn comsub_reparse_fail(
+        &mut self,
+        src: BStr<'_>,
+        tail: BStr<'_>,
+        close_line: u32,
+        closed: bool,
+    ) -> bool {
+        let Some((err, nested)) = self.comsub_reparse_error(src, tail, close_line, closed) else {
             return false;
         };
         self.berrln(&err);
@@ -28770,9 +28896,14 @@ impl Shell {
         src: BStr<'_>,
         tail: BStr<'_>,
         close_line: u32,
+        closed: bool,
     ) -> Option<(Str, bool)> {
         let opts = self.parse_opts();
-        let fail = crate::parser::comsub_reprint_error(src, tail, close_line, opts)?;
+        let fail = if closed {
+            crate::parser::comsub_reprint_error(src, tail, close_line, opts)?
+        } else {
+            crate::parser::comsub_unclosed_error(src, opts)
+        };
         let line = self.current_line.saturating_add(fail.line_off);
         // The body is its own input source for naming purposes, exactly as it is
         // when it *runs* — bash is inside a `parse_string (…, "command
@@ -28789,9 +28920,19 @@ impl Shell {
             // read is the line of `src`+`)`+`tail` the failure was found on —
             // and that is the last line of `src`, since every newline of `src`
             // is consumed before the `)` and none of `tail`'s are.
-            let last = src.rsplit(|&b| b == b'\n').next().unwrap_or_default();
-            let first = tail.split(|&b| b == b'\n').next().unwrap_or_default();
-            out = bfmt![out, b"\n", &prefix, b"`", last, b")", first, b"'"];
+            //
+            // A body with no `)` has no `tail` to run into either, so what is
+            // echoed is simply the line of `src` the failure was found on, which
+            // `line_off` numbers from 1.
+            let line = if closed {
+                let last = src.rsplit(|&b| b == b'\n').next().unwrap_or_default();
+                let first = tail.split(|&b| b == b'\n').next().unwrap_or_default();
+                bfmt![last, b")", first]
+            } else {
+                let nth = usize::try_from(fail.line_off).unwrap_or(usize::MAX).saturating_sub(1);
+                src.split(|&b| b == b'\n').nth(nth).unwrap_or_default().to_vec()
+            };
+            out = bfmt![out, b"\n", &prefix, b"`", &line, b"'"];
         }
         Some((self.errexit_first_line(out), fail.fatal))
     }

@@ -47,8 +47,13 @@
 # (parse.y:3785 → 3809), so its `retind > 1` test is satisfied by a name as
 # short as one letter — `"${q#$'…'}"` re-quotes exactly as `"${qq#$'…'}"` does.
 # A nested `${` recurses (parse.y:3928) and so starts a fresh `DOLBRACE_PARAM`
-# while inheriting `P_DQUOTE`; a nested `$(` strips `P_DQUOTE` instead
-# (parse.y:3959).
+# while inheriting `P_DQUOTE`. A nested `$(` clears `P_DQUOTE` in the flags it
+# passes down (parse.y:3960) — but that buys nothing, because `parse_comsub`
+# runs a whole nested `yyparse` (parse.y:4153) and the flag never reaches the
+# body's own `read_token_word`. What that read consults is the delimiter stack,
+# which still has the enclosing `"` on top, so a `${ … }` in the body of a
+# `$( … )` *written inside quotes* is `P_DQUOTE` after all — see
+# `a-brace-body-in-a-quoted-command-substitution-stands-in-the-quote.sh`.
 #
 # Verified against bash 5.2.37.
 

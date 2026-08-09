@@ -1530,7 +1530,9 @@ pub fn tokenize_paren_body(src: BStr<'_>, opts: ParseOpts) -> Result<Spanned, Le
 #[must_use]
 pub fn scan_cmdsub_body(src: BStr<'_>, opts: ParseOpts) -> Option<(Str, usize)> {
     let mut lx = Lexer::new(src, opts);
-    let body = lx.read_subst_body().ok()?;
+    // A fresh read of a string the expansion handed over, so bash's delimiter
+    // stack is empty for it: `xparse_dolparen` runs its own parser.
+    let body = lx.read_subst_body(false).ok()?;
     Some((body, lx.pos))
 }
 
@@ -4178,7 +4180,10 @@ impl Lexer {
                 // 3-line script reports line 4). A nested construct that closed
                 // first stamps its own line and `at` will not overwrite it.
                 let open_line = self.cur_line();
-                let raw = self.read_subst_body().map_err(|e| e.at(self.eof_line()))?;
+                // Word level, and `read_token_word` pushes the `(` for a `<(`
+                // like any other (parse.y:5071), so the body's delimiter is that
+                // `(` and never an enclosing `"`.
+                let raw = self.read_subst_body(false).map_err(|e| e.at(self.eof_line()))?;
                 segs.push(Seg::ProcSub(input, raw, open_line));
                 continue;
             }
@@ -4528,7 +4533,13 @@ impl Lexer {
                     // after the outer scan, by which point the line counter has
                     // moved on. (An unterminated quote *inside* the body still
                     // reports its own line — `at` will not overwrite.)
-                    let raw = self.read_subst_body().map_err(|e| e.at(self.eof_line()))?;
+                    //
+                    // The body stands in this scan's delimiter: bash pushes a
+                    // `(` for a `$(` it meets in `read_token_word` (parse.y:5041)
+                    // but none for one inside a `"…"` (parse.y:3960), so only the
+                    // unquoted one gets a delimiter of its own.
+                    let raw =
+                        self.read_subst_body(in_dquote).map_err(|e| e.at(self.eof_line()))?;
                     Ok(Some(Seg::CmdSub(raw, self.cur_line(), SubBody::Eager)))
                 }
             }
@@ -4571,7 +4582,9 @@ impl Lexer {
     /// at the quote's own opening line, and `LexError::at` never overwrites, so
     /// the caller's stamp cannot displace them.
     fn read_balanced(&mut self, open: char, close: char) -> Result<Str, LexError> {
-        self.read_balanced_inner(open, close, false)
+        // An arithmetic scan carries no `P_DOLBRACE`, so it reads no `${ … }` of
+        // its own and has nothing for the delimiter to decide.
+        self.read_balanced_inner(open, close, false, false)
     }
 
     /// [`Lexer::read_balanced`] for the body of a `$( … )` or `<( … )`
@@ -4598,7 +4611,7 @@ impl Lexer {
     /// business, and its closing backtick is found lexically), and a backslash
     /// escape. Those are copied whole rather than character by character, which
     /// incidentally makes `$(echo \))` and `` $(echo `echo )`) `` scan correctly.
-    fn read_subst_body(&mut self) -> Result<Str, LexError> {
+    fn read_subst_body(&mut self, dq: bool) -> Result<Str, LexError> {
         // A body of commands is *text* to this scan: it is copied out and lexed
         // again later, and that re-lex meets every arithmetic expansion in it a
         // second time. So whatever nested substitutions the copy collects belong
@@ -4606,7 +4619,7 @@ impl Lexer {
         // `$(( $(echo "$(( $(fi) ))") ))` would parse the innermost body twice.
         // See [`Lexer::arith_comsubs`].
         let outer = std::mem::take(&mut self.arith_comsubs);
-        let r = self.read_balanced_inner('(', ')', true);
+        let r = self.read_balanced_inner('(', ')', true, dq);
         self.arith_comsubs = outer;
         if r.is_err() {
             // bash reads this body with a whole nested `yyparse`, and `parse_comsub`
@@ -4638,13 +4651,14 @@ impl Lexer {
         open: char,
         close: char,
         command: bool,
+        dq: bool,
     ) -> Result<Str, LexError> {
         if !command {
-            return self.read_balanced_body(open, close, command);
+            return self.read_balanced_body(open, close, command, dq);
         }
         let body_start = self.pos;
         let open_line = self.cur_line();
-        self.read_balanced_body(open, close, command).map_err(|mut e| {
+        self.read_balanced_body(open, close, command, dq).map_err(|mut e| {
             // Only an error that *is* the missing `)` — this scan's own
             // end-of-input, or one already carrying a bail from a substitution
             // inside it. An unterminated quote in the body is a different
@@ -4680,11 +4694,16 @@ impl Lexer {
     /// `${ … }` arm below, and travels to a nested `$( … )` met inside a
     /// double-quoted span, which is read by the balanced scan rather than
     /// skipped — see the comment on that arm.
+    ///
+    /// `dq` is bash's `current_delimiter (dstack)`, narrowed to the one question
+    /// it decides: is the delimiter this scan is standing in a `"`? See
+    /// [`Lexer::read_balanced_body`] for why it is not simply "inside quotes".
     fn read_opaque_span(
         &mut self,
         c: char,
         raw: &mut Str,
         command: bool,
+        dq: bool,
     ) -> Result<bool, LexError> {
         match c {
             // `$'…'` is not a single-quoted run: a `\'` in it is an ANSI-C escape
@@ -4725,7 +4744,7 @@ impl Lexer {
             // 5 because arithmetic is handed `"a"`, and `$(( $"1+2" ))` is 3.
             '$' if self.peek() == Some('"') => {
                 self.pos += 1;
-                self.read_opaque_span('"', raw, command)
+                self.read_opaque_span('"', raw, command, dq)
             }
             '\'' => {
                 let q_open = self.cur_line();
@@ -4799,7 +4818,7 @@ impl Lexer {
                             if self.peek_at(1) == Some('(') && self.peek_at(2) == Some('(') =>
                         {
                             self.pos += 2;
-                            let inner = self.read_balanced_inner('(', ')', false)?;
+                            let inner = self.read_balanced_inner('(', ')', false, true)?;
                             raw.extend_from_slice(b"$(");
                             raw.extend_from_slice(&inner);
                             raw.push(b')');
@@ -4825,7 +4844,12 @@ impl Lexer {
                             // scan that already parses this text downstream
                             // (a `$( … )` body) drops the whole collection.
                             let outer = std::mem::take(&mut self.arith_comsubs);
-                            let inner = self.read_balanced_inner('(', ')', true)?;
+                            // The delimiter this scan stands in *is* the `"`, and
+                            // bash pushes none for a `$(` it reaches from
+                            // `parse_matched_pair` (parse.y:3960 has no
+                            // `push_delimiter`, unlike `read_token_word`'s
+                            // parse.y:5041). So the body inherits the `"`.
+                            let inner = self.read_balanced_inner('(', ')', true, true)?;
                             self.arith_comsubs = outer;
                             let start = raw.len();
                             raw.extend_from_slice(b"$(");
@@ -4866,14 +4890,14 @@ impl Lexer {
             // `)` it wanted rather than the `}`.
             '$' if command && self.peek() == Some('{') => {
                 self.pos += 1;
-                // Not inside a double-quoted run: the `"` arm above is the one
-                // that reads those, and it passes `true`. (bash would still say
-                // `P_DQUOTE` for a `${ … }` in a `$( … )` body that *encloses*
-                // this scan and was itself written in quotes — its delimiter
-                // stack is never popped for the `(`. osh reads such a body on
-                // its own, so it sees the 5.3 answer there; see
-                // `TD-OILS-AN-ANSI-C-STRING-IS-NOT-REQUOTED-AFTER-A-BRACE-BODY-TRANSLATES-IT`.)
-                let (inner, nested) = self.read_dollar_brace(false)?;
+                // Not inside a double-quoted *run* — the `"` arm above reads
+                // those and passes `true` — but possibly standing in one all the
+                // same: `parse_matched_pair (cd, '{', '}', …)` (parse.y:5033)
+                // hands the `${` the delimiter stack's top, and a `$( … )`
+                // reached from inside a `"…"` pushes nothing over it
+                // (parse.y:3960). So `"$(echo ${x:-$'a\tb'})"` splices bare,
+                // where the same body written unquoted re-quotes. See `dq`.
+                let (inner, nested) = self.read_dollar_brace(dq)?;
                 raw.extend_from_slice(b"${");
                 // See the `"`-run arm above: the body's ranges are relative to
                 // `inner` until it is spliced.
@@ -4895,7 +4919,10 @@ impl Lexer {
             // `nested` stack in [`Lexer::read_balanced_body`].
             '$' if !command && self.peek() == Some('(') && self.peek_at(1) != Some('(') => {
                 self.pos += 1;
-                let inner = self.read_subst_body().map_err(|e| e.at(self.eof_line()))?;
+                // `parse_dollar_word` again (parse.y:3931), and again with no
+                // `push_delimiter`, so the body stands in whatever delimiter the
+                // arithmetic scan does.
+                let inner = self.read_subst_body(dq).map_err(|e| e.at(self.eof_line()))?;
                 // The parse is bash's, not ours to defer: `parse_dollar_word`
                 // runs `parse_comsub` here and now, and its failure is a syntax
                 // error in the *enclosing* unit — which is why
@@ -4920,11 +4947,21 @@ impl Lexer {
         }
     }
 
+    /// `dq` is bash's `current_delimiter (dstack)` for the words *this* body
+    /// reads directly — true when the delimiter the scan stands in is a `"`.
+    /// It is not "inside quotes": bash pushes a delimiter in
+    /// `read_token_word` only (parse.y:4952 for a quote, 5041 for a `$(`, 5071
+    /// for a `<(`), and `parse_matched_pair`'s own nested `$(` arm
+    /// (parse.y:3960) pushes none — so a `$( … )` written inside `"…"` hands its
+    /// body the enclosing `"`, while one written at word level hands it a `(`.
+    /// A nested `$(`/`<(`/`>(` inside this body is therefore the thing that
+    /// clears it, which is what the `nested` stack below is consulted for.
     fn read_balanced_body(
         &mut self,
         open: char,
         close: char,
         command: bool,
+        dq: bool,
     ) -> Result<Str, LexError> {
         let mut depth = 1usize;
         let mut raw = Str::new();
@@ -4979,7 +5016,10 @@ impl Lexer {
                 self.eat_conts();
                 continue;
             }
-            if self.read_opaque_span(c, &mut raw, command)? {
+            // `nested` is bash's `push_delimiter (dstack, '(')`: a `${ … }` under
+            // a nested `$(`/`<(`/`>(` stands in that `(` and not in this body's
+            // delimiter, so it never inherits the enclosing `"`.
+            if self.read_opaque_span(c, &mut raw, command, dq && nested.is_empty())? {
                 word_start = false;
                 cases.push_quoted();
                 continue;
@@ -5461,7 +5501,9 @@ impl Lexer {
                 // `echo ${#x:-"$(fi)"}` is a syntax error and not a
                 // `bad substitution`.
                 '"' => {
-                    self.read_opaque_span('"', &mut raw, true)?;
+                    // Inside the run, so the delimiter is that `"` whatever
+                    // the `${` itself stands in.
+                    self.read_opaque_span('"', &mut raw, true, true)?;
                 }
                 // Backtick command substitution: copy verbatim to the closing
                 // backtick (honoring `\``).
@@ -5542,7 +5584,8 @@ impl Lexer {
                             // translation produced is *kept*: this row is the one
                             // place a shell word carries one, and the word it
                             // lands in ends there rather than the translation. See
-                            // `parser::word_cut_at_nul`.
+                            // `parser::segs_hold_a_nul` and
+                            // `parser::word_expanded_from_its_text`.
                             self.bare_splice = true;
                             raw.extend_from_slice(&s);
                         } else {
@@ -5590,7 +5633,7 @@ impl Lexer {
                                 // way — the body lines land in this `${ … }`'s raw
                                 // text, right where the nested re-lex expects them.
                                 let inner =
-                                    self.read_subst_body().map_err(|e| e.at(self.eof_line()))?;
+                                    self.read_subst_body(in_dquote).map_err(|e| e.at(self.eof_line()))?;
                                 // …and bash parses it here and now, from
                                 // `parse_dollar_word` (parse.y:3954). What
                                 // survives is the parse re-printed, not the
@@ -5683,7 +5726,7 @@ impl Lexer {
             // text of the expression and closes nothing — see
             // [`Lexer::read_opaque_span`], which is the same set bash's
             // `parse_matched_pair` skips under `P_ARITH`.
-            if self.read_opaque_span(c, &mut raw, false)? {
+            if self.read_opaque_span(c, &mut raw, false, false)? {
                 continue;
             }
             match c {

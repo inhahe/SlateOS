@@ -334,6 +334,94 @@ whatever the count did not reach expanded as the leftover — the same
 
 ---
 
+### TD-OILS-AN-EXPANSION-TIME-ARITHMETIC-SCAN-IGNORES-THE-COMMENT-RULE. `a='A$(( 1 # )) B'; "${a@P}"` reports and keeps the text where bash is silent and drops it — 2026-08-09 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs`, `Shell::scan_arith_sub` (~31434),
+called from `expand_arith_params_inner` (~30904) when a `$((` is met while
+expanding text no parser read. It passes `command: false` to
+`Shell::skip_opaque`, which turns off two rows of that table: the `#` comment
+and the nested `$( … )` real-parse.
+
+**Reproduce:**
+
+```text
+f='A$(( 1 # )) B';          printf '[%s]\n' "${f@P}"
+  bash: [A]                                     (silent)
+  osh:  bad substitution: no closing `)' in "${f@P}"
+        [A$(( 1 # )) B]
+
+e='A$(( 1 + 2 B';           printf '[%s]\n' "${e@P}"   # both [A], silent
+```
+
+`e` is the same *ending* reached without a comment, and the two shells agree
+there — so this is the comment rule alone, not the unclosed-extent ending.
+
+**Why.** The doc comment on `scan_arith_sub` justifies `command: false` by
+citing subst.c:1303, but that line is `extract_arithmetic_subst` — the **`$[`**
+spelling, which really does pass flags `0`. A `$((` does not go through it.
+`param_expand`'s `case LPAREN` calls `extract_command_subst (string, &t_index,
+…)` (subst.c:10575), and because `string[*sindex] == LPAREN` that is
+
+```c
+return (extract_delimited_string (string, sindex, "$(", "(", ")", xflags|SX_COMMAND));
+                                                                         /* subst.c:1284-1286 */
+```
+
+— `SX_COMMAND` **is** set. So `#` at a word boundary starts a comment
+(subst.c:1415) that eats the rest of the line, `))` included, and the extent
+then runs the string out: `no_longjmp_on_fatal_error` takes the silent `*sindex
+= i; return NULL;` branch (subst.c:1493-1506), which is why bash prints no
+diagnostic and the `$((` contributes nothing.
+
+That the two spellings genuinely differ here is measured, not assumed —
+`k='A$[ 1 # ] B'` gives the *same* arithmetic error in both shells (`invalid
+arithmetic operator (error token is "# ")`), i.e. no comment, confirming `$[`
+is the flags-`0` case `command: false` was written for.
+
+**Proper fix.** Split the two: the `$((` scan wants `command: true`, the `$[`
+scan `command: false`. `scan_arith_sub` is currently used for both, so it needs
+the flag as a parameter (and its doc comment corrected — it cites the wrong
+extractor). Note that turning `command` on also enables the nested-`$( … )` row,
+which is the same `SX_COMMAND` bit and is what
+TD-OILS-AN-ARITHMETIC-EXTENT-CARRIES-ON-COUNTING-AFTER-A-FAILED-READ is about;
+the two should be done together.
+
+---
+
+### TD-OILS-AN-UNCLOSED-BRACKET-ARITHMETIC-DROPS-THE-STRING-INSTEAD-OF-REPEATING-IT. `j='X$[9]Y$[ 1 + 2 Z'; "${j@P}"` gives `X9Y` where bash gives `X9YX$[9]Y$[ 1 + 2 Z` — 2026-08-09 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs`, the `$[ … ]` arm of the
+expansion-time scan — the ending taken when `extract_arithmetic_subst` finds no
+closing `]`. osh contributes nothing and stops; bash appends the **whole
+original string** to whatever it had already accumulated.
+
+**Reproduce** (all under `${x@P}`, i.e. a prompt expansion):
+
+```text
+h='A$[ 1 + 2 B'        bash [AA$[ 1 + 2 B]              osh [A]
+i='$[ 1 + 2'           bash [$[ 1 + 2]                  osh []
+j='X$[9]Y$[ 1 + 2 Z'   bash [X9YX$[9]Y$[ 1 + 2 Z]       osh [X9Y]
+```
+
+The rule is plain in the third: the output is *everything expanded so far*
+(`X9Y`, the closed `$[9]` included) followed by the original string entire —
+not the remainder, and not the failing construct alone. Neither shell reports
+anything; the difference is only what comes out.
+
+**Why (not yet traced).** The shape is measured; the exact bash path is not
+confirmed. The likely route is the failure return of the `$[` extraction —
+`extract_delimited_string` with flags `0` runs the string out and, under
+`no_longjmp_on_fatal_error`, returns NULL with `*sindex` at the end
+(subst.c:1493-1506) — after which `param_expand`'s `LBRACK` case falls back to
+adding the whole word rather than the fragment. **Confirm this against
+subst.c before implementing**; the "original string entire" shape is unusual
+enough that it should not be reproduced on a guess.
+
+**Note:** the closed case is unaffected (`$[9]` gives `9` in both), so this is
+only the no-closing-`]` ending.
+
+---
+
 ### TD-OILS-A-BRACE-OPERAND-IS-SCANNED-AGAIN-BEFORE-IT-IS-EXPANDED. A `${x:-word}` whose `word` is used reports a failed extent read three times, not two — 2026-08-09 — OPEN
 
 **Where:** `userspace/oils/src/interp.rs`, the `${ … }` operand path

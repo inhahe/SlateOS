@@ -4645,6 +4645,48 @@ pub struct Shell {
     /// the text it started with, undecoded past that point. Measured:
     /// `v='a${x:-b'; echo "${v@P}"` prints the diagnostic and then `a${x:-b`.
     prompt_failed: bool,
+    /// Set when a diagnostic's own `set -e` promotion armed the abort — see
+    /// [`Shell::note_shell_error`].
+    ///
+    /// This is the one abort a prompt expansion cannot intercept. bash's
+    /// `report_error` exits *at the diagnostic*
+    /// (`if (exit_immediately_on_error) … exit_shell (…)`, error.c:201), so
+    /// there is no `expand_word_internal` return left for
+    /// `expand_prompt_string` to catch — see [`Shell::prompt_expand`].
+    /// Measured: `q=QQ; set -e; v='A${q@}B'; echo "${v@P}"` exits 1, where
+    /// without `-e` the same line prints the untouched `A${q@}B` and carries on.
+    ///
+    /// The *posix* promotion is deliberately not marked: bash spells that one
+    /// as the return value (`(posixly_correct && interactive_shell == 0) ?
+    /// &expand_wdesc_fatal : &expand_wdesc_error`, subst.c:10051), which a
+    /// prompt does intercept — measured, `set -o posix` keeps going and prints
+    /// the literal. Nor is an *arithmetic* error, which does not go through
+    /// `report_error` at all: `set -e; v='A$((1+))B'; echo "${v@P}"` still
+    /// prints `A$((1+))B` and leaves the shell running.
+    shell_error_exit: bool,
+    /// Set when the failure was raised inside a **nested** entry into
+    /// `expand_word_internal`, which a prompt expansion cannot intercept either.
+    ///
+    /// A prompt keeps its text because `expand_prompt_string` inspects the
+    /// *return value* of its own `expand_word_internal` call (subst.c:4463-4467).
+    /// Every other entry goes through `call_expand_word_internal`, which turns
+    /// those same two returns into `exp_jump_to_top_level (DISCARD)` /
+    /// `(FORCE_EOF)` (subst.c:4326-4334) — and `exp_jump_to_top_level` always
+    /// ends in `jump_to_top_level (v)` (subst.c:12141-12157), never consulting
+    /// `no_longjmp_on_fatal_error`. So the error longjmps straight past the
+    /// prompt's frame and the command is abandoned.
+    ///
+    /// Measured: `y=Y; v='A${y#$((1+))}B'; printf '[%s]' "${v@P}"` prints only
+    /// the diagnostic and `rc=1` — the `printf` never runs — where the same
+    /// arithmetic written at word level, `v='A$((1+))B'`, comes back as text.
+    /// The pattern of `${y#…}` is a nested call; the word itself is not.
+    ///
+    /// `expand_arith_string` (subst.c:4019-4059) is the reason an arithmetic
+    /// string is sometimes one and sometimes the other: it scans for
+    /// `ARITH_EXP_CHAR` and only calls `call_expand_word_internal` when the text
+    /// actually contains an expansion. `${a[0p]}` has none, so `evalexp`'s
+    /// failure is a plain return in the caller's frame — interceptable.
+    expansion_jumped: bool,
     /// Set when an extent-finding read gave up and left the caller's index at
     /// the **end of the string**, so everything after the substitution is
     /// consumed rather than expanded.
@@ -5920,6 +5962,8 @@ impl Shell {
             xtrace: false,
             prompt_expanding: false,
             prompt_failed: false,
+            shell_error_exit: false,
+            expansion_jumped: false,
             extent_consumed: false,
             xtrace_fd: None,
             xtrace_level: 0,
@@ -8267,6 +8311,25 @@ impl Shell {
             status: if self.errexit { 1 } else { 127 },
             demote: true,
         });
+        self.note_report_error_exit();
+    }
+
+    /// Note that the diagnostic being written is one of bash's `report_error`
+    /// ones, whose `set -e` exit happens at the diagnostic and so cannot be
+    /// intercepted by a prompt expansion — see [`Shell::shell_error_exit`].
+    ///
+    /// [`Shell::note_shell_error`] marks its own errexit branch; this is for
+    /// the two sites that arm a `report_error`-class abort directly instead of
+    /// going through it — `err_unboundvar`/`${x?word}`
+    /// ([`Shell::arm_unbound_abort`]) and the fatal `@`-transform spelling of
+    /// "bad substitution" ([`Shell::bad_substitution_with`]). An *arithmetic*
+    /// diagnostic must not call this: bash raises those through
+    /// `internal_error` (`evalerror`, expr.c:1130-1141), which has no errexit
+    /// clause at all.
+    fn note_report_error_exit(&mut self) {
+        if self.errexit {
+            self.shell_error_exit = true;
+        }
     }
 
     /// Note that a shell diagnostic just went to stderr, and arm a whole-shell
@@ -8286,6 +8349,11 @@ impl Shell {
         // `set -eo posix; readonly r=1; r=x` exits 1 rather than 127.
         if self.errexit && when != FatalWhen::PosixOnly {
             self.unbound_error = Some(FatalAbort { status: 1, demote: true });
+            // This half of the promotion is `report_error`'s own exit, taken at
+            // the diagnostic rather than carried back as a return value, so a
+            // prompt expansion cannot intercept it — see
+            // [`Shell::shell_error_exit`].
+            self.shell_error_exit = true;
         } else if when != FatalWhen::ErrexitOnly && self.shell_option_enabled("posix") {
             self.unbound_error = Some(FatalAbort { status: 127, demote: true });
         } else {
@@ -12298,6 +12366,8 @@ impl Shell {
             // other global.
             prompt_expanding: self.prompt_expanding,
             prompt_failed: false,
+            shell_error_exit: false,
+            expansion_jumped: false,
             extent_consumed: false,
             xtrace: self.xtrace,
             // A fork inherits both the descriptor table and the variable, so it
@@ -15837,6 +15907,20 @@ impl Shell {
                     // An empty key names nothing an associative array can hold,
                     // and is reported exactly as an out-of-range index is.
                     let key = self.expand_subscript_key(w);
+                    // Unless the key is empty because expanding it *failed*:
+                    // bash's `expand_subscript_string` is a nested
+                    // `expand_word_internal`, so the fault longjmps out of the
+                    // word and the key is never judged at all. Measured:
+                    // `declare -A m; echo "A${m[${q!}]}B"` reports the bad
+                    // substitution alone, with no `m: bad array subscript`
+                    // after it — where `m[$blank]` on a *successfully* empty
+                    // expansion does report. (A subscript whose read merely ran
+                    // off the end is different again — it leaves no error at
+                    // all, so `${m[$(fi)qq]}` does report the empty key; see
+                    // [`Shell::extent_consumed`].)
+                    if self.expansion_failed() {
+                        return ElemValue::Absent;
+                    }
                     if key.is_empty() {
                         return ElemValue::BadSubscript(name.clone());
                     }
@@ -17045,16 +17129,69 @@ impl Shell {
         // [`Shell::prompt_expanding`].
         let saved_prompt = std::mem::replace(&mut self.prompt_expanding, true);
         let saved_failed = std::mem::replace(&mut self.prompt_failed, false);
+        // …and it is also the only caller that *keeps* the two error returns
+        // rather than jumping on them:
+        //
+        //     if (value == &expand_word_error || value == &expand_word_fatal)
+        //       {
+        //         value = make_word_list (make_bare_word (string), …);
+        //         return value;                        /* subst.c:4463-4467 */
+        //       }
+        //
+        // Every other caller reaches `call_expand_word_internal`, which turns
+        // the same two into `exp_jump_to_top_level (DISCARD)` / `(FORCE_EOF)`
+        // unconditionally (subst.c:4326-4334) — the flag is not consulted
+        // there, which is why an expansion error inside a `$( … )` run *by* a
+        // prompt still ends that command substitution. So the interception is
+        // a property of this boundary, not of the flag, and osh scopes the two
+        // abort flags here for exactly that reason. Measured: every class that
+        // ends `expand_word_internal` early — a bad substitution of either
+        // class, a nounset or `${x?w}` abort, an arithmetic error in a word or
+        // in a substring bound — leaves `${v@P}` as the text it was handed,
+        // with `$?` still 0.
+        let saved_unbound = self.unbound_error.take();
+        let saved_discard = self.discard_error.take();
+        let saved_exit = std::mem::replace(&mut self.shell_error_exit, false);
+        let saved_jumped = std::mem::replace(&mut self.expansion_jumped, false);
         let out = self.expand_double_quoted(&word.parts);
+        let failed = std::mem::replace(&mut self.prompt_failed, saved_failed)
+            || self.unbound_error.is_some()
+            || self.discard_error.is_some();
+        // Two aborts are not return values and so stand: a diagnostic that
+        // exited at the `set -e` promotion ([`Shell::shell_error_exit`]), and a
+        // failure raised inside a nested `expand_word_internal` call, which
+        // longjmped past this frame ([`Shell::expansion_jumped`]).
+        let promoted = self.shell_error_exit;
+        self.shell_error_exit = saved_exit || promoted;
+        let jumped = std::mem::replace(&mut self.expansion_jumped, saved_jumped);
+        self.expansion_jumped |= jumped;
+        if !promoted && !jumped {
+            self.unbound_error = saved_unbound;
+            self.discard_error = saved_discard;
+        }
         // `expand_prompt_string` returning NULL is not an empty prompt: the
         // caller keeps the text it was going to expand. See
         // [`Shell::prompt_failed`].
-        let out = if std::mem::replace(&mut self.prompt_failed, saved_failed) {
-            decoded
-        } else {
-            out
-        };
-        self.prompt_expanding = saved_prompt;
+        let out = if failed { decoded } else { out };
+        // `expand_prompt_string` lowers the flag on the line *after* the
+        // expansion returns:
+        //
+        //     no_longjmp_on_fatal_error = 1;
+        //     value = expand_word_internal (&td, quoted, 0, …);
+        //     no_longjmp_on_fatal_error = 0;          /* subst.c:4459-4461 */
+        //
+        // so a failure that longjmped past that line never lowers it, and it
+        // stays raised for the rest of the shell's life. The leak is visible
+        // wherever the flag is read *directly* — chiefly `array_expand_index`,
+        // which thereafter answers a bad subscript with 0 instead of jumping.
+        // Measured: `a=(9 8 7); ( echo "${a[1+]}" )` is a status-1 subshell that
+        // prints nothing, but run the same line again after
+        // `v='${y#$((1+))}'; : "${v@P}"` and it reports the syntax error and
+        // then prints `9`. The two error *returns* are unaffected, being turned
+        // into jumps by `call_expand_word_internal` without consulting the flag.
+        if !jumped {
+            self.prompt_expanding = saved_prompt;
+        }
         self.last_status = saved_status;
         self.xtrace = saved;
         out
@@ -17966,6 +18103,18 @@ impl Shell {
                 // Associative subscripts are string keys, not arithmetic.
                 let val = if self.assoc.contains_key(name) {
                     let key = self.expand_subscript_key(w);
+                    // Unless the key is empty because expanding it *failed*.
+                    // `expand_subscript_string` is a nested
+                    // `expand_word_internal`, so a fault in there longjmps out
+                    // of the word and the key is never judged at all. Measured:
+                    // `declare -A m; echo "A${m[${q!}]}B"` reports the bad
+                    // substitution alone. A subscript whose extent read merely
+                    // ran off the end leaves no error, and so still reports the
+                    // empty key it was left with — see [`Shell::extent_consumed`]
+                    // and `${m[$(fi)qq]}`.
+                    if self.expansion_failed() {
+                        return Str::new();
+                    }
                     // An empty key has no representation in an associative
                     // array, so reading one is "bad array subscript" — with the
                     // same two shapes as the negative-index case below: the
@@ -25110,9 +25259,20 @@ impl Shell {
 
     /// Expand a word to a single string (no field splitting) — used for
     /// assignment values and redirection targets.
+    ///
+    /// Also for every *sub*-word a `${ … }` operator expands on its own: an
+    /// operand, a `${x:?word}` message, an associative subscript. Each of those
+    /// is bash's `expand_string*`, hence a nested `expand_word_internal`, so a
+    /// failure in one jumps — see [`Shell::expand_call`]. The outermost uses
+    /// (an assignment value, a redirection target) are nested too, being reached
+    /// from `expand_words` rather than from a word walk of their own; nothing
+    /// reads the mark there, so saying so costs nothing and saves splitting the
+    /// helper in two.
     fn expand_to_string(&mut self, word: &Word) -> Str {
-        let fields = self.expand_word(word, false);
-        fields.concat()
+        self.expand_call(|sh| {
+            let fields = sh.expand_word(word, false);
+            fields.concat()
+        })
     }
 
     /// A here-string's body: the word taken whole, with the newline bash adds.
@@ -25318,15 +25478,19 @@ impl Shell {
     /// rules mirror `expand_word_annotated`: unquoted `Literal` and dynamic
     /// expansions are live; single/double-quoted runs are literal.
     fn expand_word_pattern(&mut self, word: &Word) -> Vec<EChar> {
-        let (saved, reread) = self.begin_word(word);
-        let word = reread.as_ref().unwrap_or(word);
-        let buf = self.expand_word_pattern_inner(word, false);
-        self.end_word(saved);
-        // A pattern is reached through quote removal, so the marks an operand
-        // put in it stop here: `${w#${x:-''a''}}` strips the one-character
-        // pattern `a`. Every pattern but a `case` arm's — see
-        // [`Shell::expand_case_pattern`].
-        drop_marks(&buf).into_owned()
+        // A pattern is a nested entry into word expansion, so a failure in it
+        // jumps rather than returning — see [`Shell::expand_call`].
+        self.expand_call(|sh| {
+            let (saved, reread) = sh.begin_word(word);
+            let word = reread.as_ref().unwrap_or(word);
+            let buf = sh.expand_word_pattern_inner(word, false);
+            sh.end_word(saved);
+            // A pattern is reached through quote removal, so the marks an
+            // operand put in it stop here: `${w#${x:-''a''}}` strips the
+            // one-character pattern `a`. Every pattern but a `case` arm's —
+            // see [`Shell::expand_case_pattern`].
+            drop_marks(&buf).into_owned()
+        })
     }
 
     /// Expand the operand of a `${x:-w}`/`${x:+w}` as the word it is, keeping
@@ -25339,32 +25503,37 @@ impl Shell {
     /// in flight wins and `${y:-pre${x@Z}post}` names `pre${x@Z}post`, not the
     /// substitution around it.
     fn expand_operand_fields(&mut self, arg: &Word) -> Vec<Vec<EChar>> {
-        // The quotes around the substitution are part of the context the
-        // operand expands in, not just of how its result is used — see
-        // [`Shell::dquote`] and [`SplitMode::QuotedOperand`].
-        let mode = if self.dquote {
-            SplitMode::QuotedOperand
-        } else {
-            SplitMode::Operand
-        };
-        let (saved, reread) = self.begin_word(arg);
-        let arg = reread.as_ref().unwrap_or(arg);
-        // bash expands the operand with `expand_string_unsplit`, so it is one of
-        // the contexts that keeps a `$*` whole even unquoted — see
-        // [`Shell::no_split_star`]. The fields the operand hands back are the
-        // *enclosing* word's to split, which is a different question.
-        let saved_star = std::mem::replace(&mut self.no_split_star, true);
-        // Scoped to this operand, and reported to whoever joins its fields:
-        // a list inside a *nested* operand is that operand's own business, and
-        // this restore is what keeps it there. See [`Shell::saw_quoted_list`].
-        let outer = std::mem::replace(&mut self.saw_quoted_list, false);
-        let outer_at = std::mem::replace(&mut self.saw_at_list, false);
-        let fields = self.expand_word_annotated(arg, mode);
-        self.operand_saw_list = std::mem::replace(&mut self.saw_quoted_list, outer);
-        self.operand_saw_at_list = std::mem::replace(&mut self.saw_at_list, outer_at);
-        self.no_split_star = saved_star;
-        self.end_word(saved);
-        fields
+        // An operand is a nested entry into word expansion, so a failure in it
+        // jumps rather than returning — see [`Shell::expand_call`].
+        self.expand_call(|sh| {
+            // The quotes around the substitution are part of the context the
+            // operand expands in, not just of how its result is used — see
+            // [`Shell::dquote`] and [`SplitMode::QuotedOperand`].
+            let mode = if sh.dquote {
+                SplitMode::QuotedOperand
+            } else {
+                SplitMode::Operand
+            };
+            let (saved, reread) = sh.begin_word(arg);
+            let arg = reread.as_ref().unwrap_or(arg);
+            // bash expands the operand with `expand_string_unsplit`, so it is
+            // one of the contexts that keeps a `$*` whole even unquoted — see
+            // [`Shell::no_split_star`]. The fields the operand hands back are
+            // the *enclosing* word's to split, which is a different question.
+            let saved_star = std::mem::replace(&mut sh.no_split_star, true);
+            // Scoped to this operand, and reported to whoever joins its fields:
+            // a list inside a *nested* operand is that operand's own business,
+            // and this restore is what keeps it there. See
+            // [`Shell::saw_quoted_list`].
+            let outer = std::mem::replace(&mut sh.saw_quoted_list, false);
+            let outer_at = std::mem::replace(&mut sh.saw_at_list, false);
+            let fields = sh.expand_word_annotated(arg, mode);
+            sh.operand_saw_list = std::mem::replace(&mut sh.saw_quoted_list, outer);
+            sh.operand_saw_at_list = std::mem::replace(&mut sh.saw_at_list, outer_at);
+            sh.no_split_star = saved_star;
+            sh.end_word(saved);
+            fields
+        })
     }
 
     /// The one field an operand that met an **unquoted** `[@]` comes to, for the
@@ -25646,6 +25815,28 @@ impl Shell {
     /// * When `patsub` is off, `&` is an ordinary literal everywhere and
     ///   unquoted expansions are copied verbatim (no `&`/`\&` rewriting).
     fn expand_replacement(&mut self, word: &Word, patsub: bool) -> Vec<ReplTok> {
+        // A replacement is a nested entry into word expansion, so a failure in
+        // it jumps rather than returning — see [`Shell::expand_call`] — and,
+        // being an entry, it is also what a "bad substitution" met inside it
+        // names. bash expands the replacement on its own with
+        // `expand_string_if_necessary (rep, …, expand_string_unsplit)`
+        // (subst.c:9180-9187), whose `make_word (rep)` is the word the nested
+        // `expand_word_internal` is handed — so `${y//Y/${q!}}` reports `${q!}`
+        // and not the substitution around it. (The *pattern* side is carved out
+        // with the operator still on it, which is why the same word written
+        // `${y%%${q!}}` reports `%%${q!}`.)
+        self.expand_call(|sh| {
+            let (saved, reread) = sh.begin_word(word);
+            let word = reread.as_ref().unwrap_or(word);
+            let out = sh.expand_replacement_inner(word, patsub);
+            sh.end_word(saved);
+            out
+        })
+    }
+
+    /// The body of [`Shell::expand_replacement`], split out so the wrapper can
+    /// mark the call as a nested one.
+    fn expand_replacement_inner(&mut self, word: &Word, patsub: bool) -> Vec<ReplTok> {
         let mut out: Vec<ReplTok> = Vec::new();
         for part in &word.parts {
             match part {
@@ -25725,6 +25916,25 @@ impl Shell {
     /// being dropped, so neither leaves anything for a later part to contribute.
     fn expansion_failed(&self) -> bool {
         self.unbound_error.is_some() || self.discard_error.is_some()
+    }
+
+    /// Run a **nested** entry into word expansion — a pattern, an operand, a
+    /// replacement, an arithmetic string — recording that a failure raised in it
+    /// is a *jump*, not a return.
+    ///
+    /// bash routes every such call through `call_expand_word_internal`, which
+    /// answers the two error returns with `exp_jump_to_top_level` (subst.c:
+    /// 4326-4334); that function always longjmps (subst.c:12141-12157). Only
+    /// `expand_prompt_string`'s own call keeps its return value, so only a
+    /// failure raised on the prompt's own walk can come back as text. See
+    /// [`Shell::expansion_jumped`].
+    fn expand_call<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let prior = self.expansion_failed();
+        let out = f(self);
+        if !prior && self.expansion_failed() {
+            self.expansion_jumped = true;
+        }
+        out
     }
 
     /// bash's `${ … }` scan, reduced to the one thing in it this shell has not
@@ -26355,6 +26565,7 @@ impl Shell {
         self.emit_stderr(&bfmt![self.err_prefix(), &named, b": bad substitution\n"]);
         if fatal {
             self.unbound_error = Some(FatalAbort { status: 1, demote: true });
+            self.note_report_error_exit();
         } else {
             self.arm_discard(1);
             // …unless `set -e` or posix mode promotes the DISCARD to an abort
@@ -26782,6 +26993,16 @@ impl Shell {
                         return SplitItems::List(Vec::new());
                     }
                     let v = self.expand_to_string(arg);
+                    // Expanding the default is a nested `expand_word_internal`
+                    // (`expand_string` inside `parameter_brace_expand_word`), so
+                    // a failure in there longjmps and the store never happens.
+                    // The distinction is observable well past the diagnostic:
+                    // `echo "${u:=$((1+))}"; echo "${u-unset}"` leaves `u`
+                    // *unset*, where the fabricated `0` would have been assigned.
+                    // See [`Shell::expand_call`].
+                    if self.expansion_failed() {
+                        return SplitItems::List(Vec::new());
+                    }
                     // Reached through a reference, the default is stored under
                     // the name the reference *resolved to*, and bash insists
                     // that be a plain identifier: `ptr=b[1]` can be read
@@ -26845,6 +27066,16 @@ impl Shell {
                     SplitItems::List(Vec::new())
                 } else {
                     let msg = self.expand_to_string(arg);
+                    // …and the same corner again for a fault raised *inside* the
+                    // message. bash builds the diagnostic from `expand_string
+                    // (value, 0)` (`parameter_brace_expand_error`, subst.c:7275),
+                    // which is a nested `expand_word_internal` — so a failure in
+                    // there longjmps and `report_error` is never reached.
+                    // Measured: `echo "A${u:?$((1+))}B"` prints the arithmetic
+                    // error alone, with no `u: 0` after it.
+                    if self.expansion_failed() {
+                        return SplitItems::List(Vec::new());
+                    }
                     // bash's default diagnostic distinguishes the two forms: the
                     // colon form (`:?`) tests null-or-unset ("parameter null or
                     // not set"); the colon-less form (`?`) tests only unset
@@ -29761,6 +29992,22 @@ impl Shell {
     /// therefore `$n: syntax error` (a literal `$` that did *not* expand), while
     /// `${a[\1]}` is `\1: syntax error` — the backslash is still there.
     fn expand_to_arith_string(&mut self, w: &Word) -> Str {
+        // bash's `expand_arith_string` scans for `ARITH_EXP_CHAR` — `$`, a
+        // backquote, `CTLESC` or `~` (subst.c:3824) — and only when it finds one
+        // does it hand the text to `call_expand_word_internal`
+        // (subst.c:4033-4051). A word with something to expand always has one,
+        // and a word without cannot fail here, so marking the whole call is the
+        // same test: what jumps is a failure raised *while expanding the
+        // subscript*, not the `evalexp` afterwards, which is the caller's own.
+        // Measured: `${a[$((1+))]}` under `@P` abandons the command, while
+        // `${a[0p]}` and `${a[$z p]}` come back as text (the latter having
+        // expanded `$z` successfully first). See [`Shell::expand_call`].
+        self.expand_call(|sh| sh.expand_to_arith_string_inner(w))
+    }
+
+    /// The body of [`Shell::expand_to_arith_string`], split out so the wrapper
+    /// can mark the call as a nested one.
+    fn expand_to_arith_string_inner(&mut self, w: &Word) -> Str {
         // `array_expand_index` hands the subscript to `expand_arith_string` on
         // its own, so it — and not the `${…}` it was written inside — is what a
         // "bad substitution" met along the way names: `${a[${x!}]}` reports
@@ -29858,8 +30105,38 @@ impl Shell {
     /// here rather than at each of the call sites. See [`Shell::arith_cmd`].
     fn eval_arith_index_text_checked(&mut self, s: BStr<'_>) -> Option<i64> {
         let saved = self.arith_cmd.take();
+        // Whether anything had *already* gone wrong, so the answer below is
+        // known to be this subscript's own and not an older failure passing
+        // through untouched.
+        let prior = self.expansion_failed();
         let v = self.eval_arith_expr_checked(s);
         self.arith_cmd = saved;
+        // A subscript is the one arithmetic context that reads
+        // `no_longjmp_on_fatal_error` for itself:
+        //
+        //     val = evalexp (t, eflag, &expok);
+        //     …
+        //     if (expok == 0)
+        //       {
+        //         set_exit_status (EXECUTION_FAILURE);
+        //         if (no_longjmp_on_fatal_error)
+        //           return 0;                      /* arrayfunc.c:1363-1375 */
+        //         top_level_cleanup ();
+        //         jump_to_top_level (DISCARD);
+        //       }
+        //
+        // so under a prompt expansion it answers **0** and the word around it
+        // is expanded in full — the shell is not even given an error return for
+        // [`Shell::prompt_expand`] to intercept. Measured: `a=(0 1 2);
+        // v='A${a[0p]}B'; echo "${v@P}"` reports the bad token and then prints
+        // `A0B`, and still does under `set -e`, where every *reported*
+        // expansion error exits. The same text written out drops the command.
+        // A `${p:0p:1}` bound is not this case — it has no such guard, so it
+        // fails the expansion and the prompt keeps its literal text.
+        if v.is_none() && !prior && self.prompt_expanding {
+            self.discard_error = None;
+            return Some(0);
+        }
         v
     }
 
@@ -30254,12 +30531,35 @@ impl Shell {
         if self.expansion_failed() {
             return Str::new();
         }
-        match arith::eval(&expanded, self) {
-            Ok(v) => v.to_string().into_bytes(),
+        // A `$(( … ))` evaluates with no name tag at all — bash blanks
+        // `this_command_name` across exactly this `evalexp` and puts it back:
+        //
+        //     arithsub:
+        //       /* No error messages. */
+        //       savecmd = this_command_name;
+        //       this_command_name = (char *)NULL;
+        //       number = evalexp (temp1, eflag, &expok);
+        //       this_command_name = savecmd;      /* subst.c:10610-10617 */
+        //
+        // It shows wherever the substitution sits inside something that *does*
+        // carry a name. A `${s:off:len}` bound is the one such place: its own
+        // arithmetic is tagged (`parameter_brace_substring` sets
+        // `this_command_name = varname`, subst.c:8802-8803, and that is still in
+        // force through `verify_substring_values`), so `${s:1+:1}` reports
+        // `s: 1+: syntax error` — but `${s:$((1+)):1}` reports plain `1+:
+        // syntax error`, the inner substitution having taken the name off first.
+        let saved_tag = self.arith_cmd.take();
+        let evaluated = arith::eval(&expanded, self);
+        match evaluated {
+            Ok(v) => {
+                self.arith_cmd = saved_tag;
+                v.to_string().into_bytes()
+            }
             Err(e) => {
                 // Route through `emit_arith_error` so an active `2>`/`2>&1`
                 // redirect on the command silences the diagnostic, matching bash.
                 self.emit_arith_error(&expanded, &e);
+                self.arith_cmd = saved_tag;
                 // An arithmetic error in a `$(( … ))` word/value substitution
                 // makes the whole simple command abort (bash) rather than run
                 // with a fabricated value; the driver consumes this flag.
@@ -30310,6 +30610,18 @@ impl Shell {
     /// [`Shell::enter_inner_source`] for why the scanner's own "no closing `)'"
     /// complaint keeps naming the whole word regardless.
     fn expand_arith_params(&mut self, expr: BStr<'_>) -> Str {
+        // The longjmp the doc comment below names is exactly what a prompt
+        // expansion cannot intercept, so mark it: a failure raised *here* ends
+        // the command even under `@P`, while the `evalexp` that follows is the
+        // caller's own frame and comes back as text. Measured: `A$((1+))B` and
+        // `A$((1+$z+))B` both print themselves, but `A$(( ${q@} ))B` abandons
+        // the command. See [`Shell::expand_call`].
+        self.expand_call(|sh| sh.expand_arith_params_inner(expr))
+    }
+
+    /// The body of [`Shell::expand_arith_params`], split out so the wrapper can
+    /// mark the call as a nested one.
+    fn expand_arith_params_inner(&mut self, expr: BStr<'_>) -> Str {
         let saved_src = self.enter_inner_source(expr.to_vec());
         // The source is scanned as characters — an arithmetic expression may
         // hold a non-ASCII variable *value* spliced in by an earlier pass — but

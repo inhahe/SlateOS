@@ -5636,6 +5636,30 @@ pub(crate) enum Quoting {
     /// [`crate::ast::CmdSubBody::Unread`], read at expansion time by
     /// `extract_command_subst`.
     BareUnread,
+    /// A string handed straight to `expand_word_internal` with no quoting at
+    /// all: a **runtime array subscript**, the `sub` of an already-expanded
+    /// `name[sub]` that reached `unset`, `[ -v ]`, `[[ -v ]]`, `printf -v`,
+    /// `read` or a `declare -n` target as a value.
+    ///
+    /// Quoting-wise it is [`Quoting::Bare`] — bash expands it with
+    /// `expand_subscript_string (sub, 0)` for an associative key
+    /// (arrayfunc.c:1145) and `expand_arith_string (exp,
+    /// Q_DOUBLE_QUOTES|Q_ARITH|Q_ARRAYSUB)` for an index (arrayfunc.c:1354), and
+    /// quote *removal* runs either way, so `m['x y']` and `m[x y]` name the same
+    /// key. Read-wise it is [`Quoting::Unread`]: no parser saw it, so a `$( … )`
+    /// in it is [`crate::ast::CmdSubBody::Unread`].
+    ///
+    /// What it has that [`Quoting::BareUnread`] does not is that **no reader ever
+    /// translates it, at any depth** — there is no here-document here, so the
+    /// `SX_POSIXEXP` re-extraction that gives a here-document's pattern its
+    /// ANSI-C back never runs. Measured with `declare -A m; m[$'a\tb']=TAB` and
+    /// `v=$'a\tb'`: `[[ -v "m[\$'a\tb']" ]]` is false, because the `$` stays a
+    /// `$` and the `'…'` is an ordinary single-quoted string that quote removal
+    /// then strips — the key named is `$a\tb`. And `[[ -v
+    /// 'm[${v#$'\''a\tb'\''}]' ]]` is *true*, the nested pattern having been
+    /// untranslated too and so matched nothing. Hence [`Self::as_pattern`]
+    /// leaves this state alone.
+    Runtime,
 }
 
 impl Quoting {
@@ -5646,19 +5670,35 @@ impl Quoting {
     }
 
     /// Whether the text was read by no parser — the half that decides whether a
-    /// `$( … )` has a parse, and (with [`Self::dquoted`]) whether a `$'…'` was
-    /// ever translated. See [`crate::lexer::Lexer::here_text`].
+    /// `$( … )` has a parse. See [`crate::lexer::Lexer::here_text`].
     fn unread(self) -> bool {
-        matches!(self, Self::Unread | Self::BareUnread)
+        matches!(self, Self::Unread | Self::BareUnread | Self::Runtime)
+    }
+
+    /// The pair the lexer needs: was this read, and was it translated. See
+    /// [`crate::lexer::ReadCtx`].
+    fn read_ctx(self) -> crate::lexer::ReadCtx {
+        crate::lexer::ReadCtx {
+            unread: self.unread(),
+            // Every state but the two value-shaped ones was translated by
+            // whichever reader produced it — the parse for source, the
+            // `SX_POSIXEXP` re-extraction for a here-document's fragment.
+            ansi_c: !matches!(self, Self::Unread | Self::Runtime),
+        }
     }
 
     /// This read, with the quoting a *pattern* beside the operand is read with:
     /// `getpattern` drops the `Q_DOUBLE_QUOTES`/`Q_HERE_DOCUMENT` bits
-    /// (subst.c:5751-5754) and the `SX_POSIXEXP` extraction restores the ANSI-C
-    /// translation the text never got (subst.c:1828-1832), but nothing restores
-    /// the parse.
+    /// (subst.c:5751-5754) and, in a here-document, the `SX_POSIXEXP` extraction
+    /// restores the ANSI-C translation the text never got (subst.c:1828-1832) —
+    /// but nothing restores the parse. A [`Quoting::Runtime`] string is in no
+    /// here-document, so it has no second reader to gain and stays as it is.
     fn as_pattern(self) -> Self {
-        if self.unread() { Self::BareUnread } else { Self::Bare }
+        match self {
+            Self::Runtime => Self::Runtime,
+            _ if self.unread() => Self::BareUnread,
+            _ => Self::Bare,
+        }
     }
 }
 
@@ -7052,7 +7092,7 @@ pub(crate) fn word_verbatim_from_source_at(
     // changes nothing else.
     let lex_opts =
         ParseOpts { reread: opts.reread, tolerant: opts.tolerant, ..ParseOpts::default() };
-    let mut segs = crate::lexer::lex_word_verbatim_opts(s, lex_opts, q.unread())
+    let mut segs = crate::lexer::lex_word_verbatim_opts(s, lex_opts, q.read_ctx())
         .map_err(|e| ParseError::new(&e.msg))?;
     map_frag_segs(&mut segs, line);
     let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
@@ -7106,7 +7146,7 @@ fn operand_from_source(
         return Ok(Word::default());
     }
     let mut segs =
-        crate::lexer::lex_operand_in_dquote(s, q.unread()).map_err(|e| ParseError::new(&e.msg))?;
+        crate::lexer::lex_operand_in_dquote(s, q.read_ctx()).map_err(|e| ParseError::new(&e.msg))?;
     map_frag_segs(&mut segs, line);
     let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
     for seg in &segs {
@@ -7162,7 +7202,7 @@ fn word_replacement_from_source(
         return Ok(Word::default());
     }
     let mut segs =
-        crate::lexer::lex_replacement_verbatim(s, q.unread()).map_err(|e| ParseError::new(&e.msg))?;
+        crate::lexer::lex_replacement_verbatim(s, q.read_ctx()).map_err(|e| ParseError::new(&e.msg))?;
     map_frag_segs(&mut segs, line);
     let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
     for seg in &segs {
@@ -7180,7 +7220,7 @@ fn word_from_source(
     if s.is_empty() {
         return Ok(Word::default());
     }
-    let mut toks = tokenize(s, opts, q.unread()).map_err(|e| ParseError::new(&e.msg))?;
+    let mut toks = tokenize(s, opts, q.read_ctx()).map_err(|e| ParseError::new(&e.msg))?;
     for t in &mut toks {
         if let Tok::Word(segs) = t {
             map_frag_segs(segs, line);

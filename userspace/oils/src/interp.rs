@@ -27312,9 +27312,11 @@ impl Shell {
         let Some(name) = self.resolve_ref_use(base).and_then(RefTarget::into_name) else {
             return false;
         };
-        let Ok(word) =
-            crate::parser::word_verbatim_from_source(sub_src.as_bytes(), self.parse_opts(), Quoting::Bare)
-        else {
+        let Ok(word) = crate::parser::word_verbatim_from_source(
+            sub_src.as_bytes(),
+            self.parse_opts(),
+            Quoting::Runtime,
+        ) else {
             return false;
         };
         if self.assoc.contains_key(&name) {
@@ -27790,7 +27792,7 @@ impl Shell {
     /// bash refuses `n[*]` before expanding anything, while `n[$s]` with
     /// `s='*'` is an ordinary expression. See [`Self::whole_array_sub`].
     fn sub_word(&mut self, sub: BStr<'_>) -> Word {
-        crate::parser::word_verbatim_from_source(sub, self.parse_opts(), Quoting::Bare)
+        crate::parser::word_verbatim_from_source(sub, self.parse_opts(), Quoting::Runtime)
             .unwrap_or_else(|_| Word::literal(sub.to_vec()))
     }
 
@@ -43477,7 +43479,9 @@ impl Shell {
         // text so that `unset 'm[$k]'` and `unset 'a[$(f)]'` behave like the
         // same subscript written in an assignment. An unbalanced quote makes it
         // unparseable; bash silently matches nothing in that case.
-        let Ok(word) = crate::parser::word_verbatim_from_source(sub_src, self.parse_opts(), Quoting::Bare) else {
+        let Ok(word) =
+            crate::parser::word_verbatim_from_source(sub_src, self.parse_opts(), Quoting::Runtime)
+        else {
             return true;
         };
         if is_assoc {

@@ -43,7 +43,7 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
-### TD-OILS-A-RUNTIME-SUBSCRIPT-IS-READ-AS-SOURCE. `unset 'a[$(fi)]'` succeeds silently where bash reports and abandons the command — 2026-08-09 — OPEN
+### TD-OILS-A-RUNTIME-SUBSCRIPT-IS-READ-AS-SOURCE. `unset 'a[$(fi)]'` succeeds silently where bash reports and abandons the command — 2026-08-09 — ✅ FIXED 2026-08-09
 
 **Where:** `userspace/oils/src/interp.rs` — the three readers that turn an
 already-expanded `name[sub]` string back into a `Word`:
@@ -112,6 +112,39 @@ not "this text is double-quoted". Renaming it positively (`ansi_c_quote`) makes
 the fifth state expressible, and the lexer entry points that currently take a
 bare `unread: bool` (`lex_word_verbatim_opts`, `lex_replacement_verbatim`,
 `tokenize`, `lex_operand_in_dquote`) should take the pair instead.
+
+**Fixed** exactly as sketched. The two questions the four lexer entry points
+were being asked with one `bool` are now asked with two, as a `lexer::ReadCtx
+{ unread, ansi_c }`, and the three named values name the three kinds of text
+oils reads:
+
+| `ReadCtx` | what it is | who passes it |
+|---|---|---|
+| `SOURCE` | text a parser read | the parse, `@P`, `PS4` |
+| `HEREDOC_FRAGMENT` | unread, but re-read by `extract_heredoc_dolbrace_string` | a `${ … }` pattern in a here-document body |
+| `VALUE` | a string handed straight to `expand_word_internal` | a here-document body, a runtime subscript |
+
+`Lexer::dq_context` became `ansi_c_quote` (positive sense — it gates exactly
+`read_dollar`'s `quote_form = !in_dquote && self.ansi_c_quote`), and
+`Lexer::apply_ctx` sets both fields from a `ReadCtx` so every entry point
+starts the same way. `parser::Quoting` grew its fifth state, `Quoting::Runtime`,
+whose `read_ctx()` is `VALUE` and whose `as_pattern()` is itself — that last
+part is what makes the nested-`${ … }` row above come out right, since a
+pattern inside a runtime subscript is no more translated than the subscript is.
+The three `interp.rs` readers now pass `Quoting::Runtime`.
+
+**Corpus:** `a-runtime-subscript-is-unread-text-and-reads-its-own-comsub.sh` —
+the five name-operand builtins in subshells with `after=$?`, the backquote
+contrast, the untranslated `$'…'` at both depths (with the resulting key set
+printed, so the `$a\tb` that quote removal leaves behind is visible), the four
+quote-removal rows, the arithmetic error tokens, and a nameref target.
+
+**Still `Quoting::Bare` on purpose**, because nothing measured says otherwise
+yet: `interp.rs`'s other runtime word readers at ~6670 (`BASH_ENV`), ~26437,
+~26472 and the `parse_braced_param(name, opts, Quoting::Dquote)` pair at ~30085
+and ~30440. Each wants its own measurement before it moves.
+
+---
 
 ### TD-OILS-BROKEN-DOWN-TIME-IS-ALWAYS-UTC. `printf '%(%T)T' -1` and `PS1='\t'` are hours off — 2026-08-09 — OPEN
 

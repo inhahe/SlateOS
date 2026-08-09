@@ -43,7 +43,7 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
-### TD-OILS-A-FORCE-EOF-REPARSE-ABORT-KEEPS-ITS-SCRIPT-STATUS-UNDER-DASH-C. `bash -c` ends a re-parse abort with 127; osh ends it with 2 — 2026-08-08 — OPEN
+### TD-OILS-A-FORCE-EOF-REPARSE-ABORT-KEEPS-ITS-SCRIPT-STATUS-UNDER-DASH-C. `bash -c` ends a re-parse abort with 127; osh ends it with 2 — 2026-08-08 — ✅ RESOLVED 2026-08-08
 
 **Where:** `userspace/oils/src/interp.rs` — the two sites that arm a
 FORCE_EOF-class `FatalAbort` for a *re-parse* failure:
@@ -116,6 +116,27 @@ already byte-exact.
 
 **Found by** the measurement pass for
 TD-OILS-A-COMPOUND-ARRAY-ASSIGNMENT-IS-RE-PARSED-UNDER-ITS-OWN-INPUT-NAME.
+
+**Resolved.** `Shell::force_eof_status` carries the table above and is used by
+both sites; the errexit line-drop is now `Shell::errexit_first_line`, factored
+out of `format_parse_error` and called by both as well. Covered by
+`tests/corpus/a-force-eof-reparse-abort-is-scored-127-by-a-c-string.sh` (22
+shapes).
+
+**The errexit row was understated.** It is not only that the status is 2 and
+one diagnostic line is dropped: under errexit *neither* jump is reached at
+all, because `parser_error` (error.c) ends with a **direct** call, made before
+the class of the failure has been decided —
+
+```c
+    if (exit_immediately_on_error)
+      exit_shell (last_command_exit_value = 2);
+```
+
+— so there is nothing for a `||` to catch. `set -e; v=p$(⏎!⏎)q || echo B; echo
+C` prints no `B` and no `C` and exits 2, where osh printed both and exited 0.
+That applies to the *recoverable* DISCARD shape too, which is why the fix
+touches three branches and not two.
 
 
 ### TD-OILS-THREE-TOKEN-KINDS-ARE-NAMED-WORD-IN-A-SYNTAX-ERROR. `f() 007>x` and `f() a=(1   2)` name the wrong token, and `f() {v}>x` the wrong message — 2026-08-08 — ✅ FIXED 2026-08-08

@@ -47,6 +47,7 @@ use crate::lexer::{
     expand_aliases_tracked, tokenize,
     tokenize_paren_body, tokenize_deferred, tokenize_spanned, word_is_assignment,
 };
+use crate::wordscan::BraceEnd;
 
 /// Whether `s` is a syntactically valid shell identifier.
 ///
@@ -2198,7 +2199,7 @@ fn map_segs(segs: &mut [Seg], map: &LineMap) {
                 }
             }
             Seg::Arith(_, _, nested) => map_arith_comsubs(nested, map),
-            Seg::ParamBraced(_, open, nested) => {
+            Seg::ParamBraced(_, open, nested, _) => {
                 *open = map.map(*open);
                 map_arith_comsubs(nested, map);
             }
@@ -5367,7 +5368,7 @@ fn word_from_segs(segs: &[Seg], opts: ParseOpts) -> Result<Word, ParseError> {
 fn word_from_segs_in(segs: &[Seg], opts: ParseOpts, q: Quoting) -> Result<Word, ParseError> {
     let mut parts = Vec::with_capacity(segs.len());
     for s in segs {
-        parts.push(seg_to_part(s, opts, q)?);
+        seg_to_parts(s, opts, q, &mut parts)?;
     }
     let mut word = Word { parts };
     // Every `$( … )` in the word learns what follows it here, because this is
@@ -5445,6 +5446,73 @@ fn deferred_body_mut(part: &mut WordPart) -> Option<&mut Str> {
     }
 }
 
+/// Lower one segment onto `out` — normally one part, but two or more for the
+/// `${ … }` whose body the *expansion* closes earlier than the scan that read
+/// it did.
+///
+/// bash reads a word twice, and only the second read decides where a `${ … }`
+/// ends. The first — `parse_matched_pair` — is looking for the end of the
+/// *word*, and everything it consumes on the way is accumulated as text,
+/// including a `$'…'` it translates and, inside double quotes with the body
+/// still in `DOLBRACE_PARAM`/`OP`/`WORD`, splices back **unquoted**
+/// (parse.y:3887). It does not re-read what it wrote, so a `}` the translation
+/// contributed never terminates anything there. `parameter_brace_expand` then
+/// scans the finished word, meets that `}` like any other, and closes on it —
+/// leaving the rest as ordinary word text:
+///
+/// ```text
+/// x=; echo "${x:-$'a}b'}"   →   ab}
+/// ```
+///
+/// the expansion being `${x:-a}` and `b}` a literal that follows it. Splitting
+/// here rather than re-parsing the whole word keeps every sibling part — and
+/// its physical line — exactly as the scan left it; the leftover is read with
+/// the enclosing double quotes' rules, because that is where it sits.
+fn seg_to_parts(
+    seg: &Seg,
+    opts: ParseOpts,
+    q: Quoting,
+    out: &mut Vec<WordPart>,
+) -> Result<(), ParseError> {
+    if let Seg::ParamBraced(raw, open, nested, spliced) = seg
+        && *spliced
+    {
+        // The splice only happens inside double quotes, so the scan that
+        // decides is the double-quoted one.
+        match crate::wordscan::expansion_body_len(raw, true) {
+            BraceEnd::Same => {}
+            BraceEnd::Early(len) => {
+                let body = raw.get(..len).unwrap_or_default().to_vec();
+                // The parser's `}` is text now: it is past the close, so it
+                // goes on the end of the leftover rather than closing anything.
+                let mut tail = raw.get(len.saturating_add(1)..).unwrap_or_default().to_vec();
+                tail.push(b'}');
+                // A `$( … )` beyond the close belongs to the leftover, which
+                // parses it as it reads it; keeping it here too would parse it
+                // twice.
+                let kept: Vec<CmdSubSpan> =
+                    nested.iter().filter(|s| s.range.end <= len).cloned().collect();
+                out.push(seg_to_part(&Seg::ParamBraced(body, *open, kept, false), opts, q)?);
+                out.extend(dquote_word_from_source(&tail, opts)?.parts);
+                return Ok(());
+            }
+            // Nothing about the body's *shape* can be asked of a `${ … }` the
+            // expansion will not close: `"${x:-$'a"b'}"` is the word
+            // `"${x:-a"b}"`, whose `"` bash's parser never re-read and whose
+            // expansion dies on the missing `}` — so the body is kept as text,
+            // and the word-level scan in `Shell::begin_word` speaks for it.
+            // The `$( … )` in it is still parsed, where bash parsed it.
+            BraceEnd::Unclosed => {
+                let text = splice_reprints(raw, parse_arith_comsubs(nested, opts)?);
+                out.push(WordPart::BadSubst(text));
+                return Ok(());
+            }
+        }
+    }
+    out.push(seg_to_part(seg, opts, q)?);
+    Ok(())
+}
+
 fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, ParseError> {
     Ok(match seg {
         Seg::Lit(s) => WordPart::Literal(s.clone()),
@@ -5455,7 +5523,7 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
         Seg::Dq(inner) => {
             let mut parts = Vec::with_capacity(inner.len());
             for s in inner {
-                parts.push(seg_to_part(s, opts, Quoting::Dquote)?);
+                seg_to_parts(s, opts, Quoting::Dquote, &mut parts)?;
             }
             WordPart::DoubleQuoted(parts)
         }
@@ -5463,7 +5531,7 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
         // The body is lexed again in here, from its own line 1, so every
         // fragment of it has to be told the physical line it starts on — see
         // [`frag_line`] and [`map_frag_segs`].
-        Seg::ParamBraced(raw, open, nested) => {
+        Seg::ParamBraced(raw, open, nested, _) => {
             let mut part = parse_braced_param_in(raw, opts, q, *open);
             // A `$( … )` in the body is parsed by bash where it *reads* it, so
             // its syntax error beats every verdict the `${ … }` could reach —

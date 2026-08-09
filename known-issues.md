@@ -2354,7 +2354,7 @@ nothing in bash.
 Corpus case:
 `userspace/oils/tests/corpus/a-modifiers-operand-is-expanded-only-when-it-is-needed.sh`.
 
-### TD-OILS-AN-ANSI-C-STRING-IS-NOT-REQUOTED-AFTER-A-BRACE-BODY-TRANSLATES-IT. `"${h[$'a]b']}"` is a bad substitution in bash — 2026-08-07 — OPEN
+### TD-OILS-AN-ANSI-C-STRING-IS-NOT-REQUOTED-AFTER-A-BRACE-BODY-TRANSLATES-IT. `"${h[$'a]b']}"` is a bad substitution in bash — 2026-08-07 — ✅ FIXED 2026-08-08
 
 **Where:** `userspace/oils/src/lexer.rs` — `read_dollar_brace_body`, whose `'`
 arm copies a `$'…'` through unchanged when the enclosing scan is double-quoted
@@ -2425,25 +2425,144 @@ unquoted into the command that the `$( … )` re-parses, so it splits — and a
 `parse_comsub` drops the incoming flags for bare `P_ARITH`, parse.y:4083), the
 same text is re-quoted and does neither.
 
-**Note the disposition question.** The `#if 0` block is tagged `TAG:bash-5.3`:
-bash itself considers this a bug and has the fix written and disabled pending
-the next release. Matching bash 5.2.37 here means implementing a defect that is
-already repaired upstream, and the current osh answers happen to be the 5.3
-ones. Recorded rather than fixed for that reason; the corpus case
-`a-subscript-close-is-found-at-one-level-only.sh` documents it in a comment and
-deliberately does not exercise it.
+**The disposition, settled.** The `#if 0` block is tagged `TAG:bash-5.3`: bash
+has the fix written and *disabled*. Under §105 of `design-decisions.md` that is
+the opposite of a waivable divergence — an unchecked error path may be waived,
+but a guard deliberately keeping the 5.2 answer is behaviour, and behaviour gets
+matched. So this was implemented rather than waived.
 
-**Proper fix, if taken:** in `read_dollar_brace_body`'s `in_dquote` case,
-translate the run instead of copying it, and splice the result **raw** —
-tracking bash's `dolbrace_state` across the body (parse.y:3811–3828 is the whole
-state machine — `#`/`%`/`^`/`,` after the first character go to `QUOTE`, `/` to
-`QUOTE2`, the `#%^,~:-=?+/` set to `OP`, anything after `OP` to `WORD`) so that
-`QUOTE`/`QUOTE2` still take the `sh_single_quote` path (branch 1, parse.y:3866),
-which is what already makes row 4 of the first table agree. Only
-`DOLBRACE_PARAM`/`DOLBRACE_WORD` under `P_DQUOTE` get the bare splice. Note the
-knock-on: the raw splice must reach the *reader* of the body — the `$( … )`
-re-parse, the subscript scan — as unquoted text, so this is not a change local
-to the lexer's output buffer.
+**Fixed in two stages.**
+
+*Stage A — the re-quote decision.* `read_dollar_brace_body` now translates the
+run in the `in_dquote` case too, and picks between `sh_single_quote` and a bare
+splice on bash's own `dolbrace_state`, which `wordscan.rs` models as
+`DolBrace` + `DolBrace::step` (parse.y:3809–3828, the same machine subst.c:1957
+runs — "This logic must agree", parse.y:3803). Two details the C makes easy to
+misread: the character is appended **before** the machine runs (parse.y:3785 →
+3809), so `retind > 1` means "not the body's first character" and a one-letter
+name like `"${q#$'z'}"` still reaches `QUOTE`; and a nested `${` **recurses**
+(parse.y:3928) into a fresh `PARAM` while inheriting `P_DQUOTE`, whereas a
+nested `$(` strips `P_DQUOTE` (parse.y:3959).
+
+*Stage B — what the bare splice then costs.* Splicing bare puts text into the
+body that the scan never reads back, so the body can reach past the `}` the
+*expansion* will stop at. bash gets this for free because **it reads a word
+twice**: `parse_matched_pair` only looks for the end of the *word* and never
+re-reads what it accumulated, so a `}` the translation contributed terminates
+nothing there; `parameter_brace_expand` (subst.c:9539) then scans the finished
+word text fresh, meets that `}` like any other, and closes on it — leaving the
+rest as ordinary word text. Modelled as:
+
+- `wordscan::expansion_body_len(body, quoted) -> BraceEnd` — runs the
+  *expansion's* scan over `${body}` and answers `Same`, `Early(len)` (the
+  expansion closes at `len`; `body[len+1..]` plus the parser's `}` is word text)
+  or `Unclosed` (a spliced quote swallowed the `}`).
+- `Lexer::bare_splice`, a flag `read_dollar_brace_body` raises only on the third
+  row and `read_dollar` scopes to one `${ … }` (cleared going in, taken coming
+  out), landing as the fourth field of `Seg::ParamBraced`. A splice at any depth
+  inside is that segment's, because it is that segment's raw text a leftover has
+  to be carved out of.
+- `parser::seg_to_parts` — one segment, normally one part, but two or more where
+  the flag is up and `expansion_body_len` says `Early`: the `${ … }` is rebuilt
+  on the shortened body (nested `$( … )` spans past the close are dropped, since
+  the leftover parses them as it reads them) and the leftover is read with the
+  enclosing double quotes' rules, because that is where it sits. Splitting here
+  rather than re-parsing the whole word keeps every sibling part — and its
+  physical line — exactly as the scan left it. On `Unclosed` nothing about the
+  body's *shape* can be asked (`"${x:-$'a"b'}"` is the word `"${x:-a"b}"`, whose
+  `"` bash's parser never re-read either), so the body is deferred as
+  `WordPart::BadSubst` text and the word-level scan in `Shell::begin_word` raises
+  bash's ``no closing `}'`` naming the word *as translated*.
+
+Divergence 4 of the first table (`"${h[$'a]b']}"`) fell out of stage A on its own
+— the bare `]` closes the subscript early, which the re-read scan already models.
+
+Corpus case:
+`userspace/oils/tests/corpus/an-ansi-c-string-in-a-double-quoted-brace-body-is-spliced-bare.sh`.
+
+**Two rows are still open and are split out below**, because neither is about
+the re-quote decision:
+`TD-OILS-A-DOUBLE-QUOTE-IN-A-BARE-SPLICE-DOES-NOT-CLOSE-THE-ENCLOSING-RUN`
+(the `"` case, which needs a word reader modelling `expand_word_internal`'s
+tolerance) and
+`TD-OILS-A-NUL-IN-AN-ANSI-C-STRING-DOES-NOT-TRUNCATE-THE-TRANSLATION` (row 1 of
+the second table). The splitting shape above — `"$(echo ${x:-$'a\tb'})"` — is a
+third: bash keeps `P_DQUOTE` for a `${ }` in a `$( )` body enclosed by quotes
+because its `dstack` is never popped for the `(`; noted in a comment at
+`lexer.rs`'s `read_dollar_brace_body` and not yet modelled.
+
+### TD-OILS-A-DOUBLE-QUOTE-IN-A-BARE-SPLICE-DOES-NOT-CLOSE-THE-ENCLOSING-RUN. `"${x:-$'a}b"c'}"` is `abc}` in bash — 2026-08-08 — OPEN
+
+**Where:** `userspace/oils/src/parser.rs` — `seg_to_parts`, the `BraceEnd::Early`
+arm; and ultimately `userspace/oils/src/wordscan.rs` +
+`userspace/oils/src/interp.rs`'s `reread_word`, which is where the missing
+machinery belongs.
+
+**What.** Split out of
+`TD-OILS-AN-ANSI-C-STRING-IS-NOT-REQUOTED-AFTER-A-BRACE-BODY-TRANSLATES-IT`,
+which fixed the `}` case. The residue is the `"` case. When bash splices a
+translated `$'…'` into a `${ … }` body **bare** (parse.y:3887), every character
+of the translation is live at expansion time — including a `"`, which *closes*
+the enclosing double-quoted run rather than sitting inside it as text. `osh`
+carves the leftover out of the segment and re-reads it under the enclosing
+quotes' rules, so its `"` stays literal. Measured (`x` unset throughout):
+
+```text
+                                            bash            osh
+"${x:-$'a}b"c'}"                            abc}            ab"c}
+"${x:-$'a}b"c d'}"                          abc d}          ab"c d}
+y=Y; "${x:-$'a}b"$y'}"                      abY}            ab"Y}
+"${x:-$'a}b"'}"                             ab}             ab"}
+y='p q'; printf '[%s]' "${x:-$'a}b"$y'}"    [abp][q}]       [ab"p q}]
+printf '[%s]' "${x:-$'a}b"*'}"              [ab*}]          [ab"*}]
+printf '[%s]' "${x:-$'a}b"c"d'}"            [abcd}]         [ab"c"d}]
+printf '[%s]' "${x:-$'a}b"c$'\x27'd'}"      [abcd}"]        [ab"c'd}]
+printf '[%s]' "${x:-$'a}b"c"d"e'}"          [abcde}]        [ab"c"d"e}]
+printf '[%s]' "${x:-$'a}b"c`echo Z'}"
+      bash: bad substitution: no closing "`" in `echo Z}"
+      osh : unexpected EOF while looking for matching `` ` ``
+printf '[%s]' "${x:-$'a}b"c${'}"
+      bash: "${x:-$'a}b"c${}": bad substitution
+      osh : ${x:-a}b"c${}: bad substitution
+```
+
+Rows 5 and 6 are the ones with teeth: the leftover leaves the quoted run, so it
+**splits** and **globs**. Rows 8 and 10 show why this cannot be repaired inside
+the segment — the leftover swallows the enclosing `Seg::Dq`'s *own* closing `"`
+(row 8's trailing `}"`), and row 10's backtick runs past it into the rest of the
+word. No seg-local split models that.
+
+**Proper fix.** A word reader that models `expand_word_internal`'s **tolerance**:
+an unterminated `'`, `"`, `` ` `` or `${` each runs to the end of the word, each
+with its own runtime diagnostic, and the word's quoting state is a property of
+the whole expansion pass rather than of the parse tree the scan built. That is
+the same architecture that would subsume `wordscan::scan` and
+`interp::reread_word`, both of which today re-derive a piece of it. Until then
+the parser's split is right for `}` and wrong for `"`; the corpus case
+`an-ansi-c-string-in-a-double-quoted-brace-body-is-spliced-bare.sh` deliberately
+exercises only the former.
+
+### TD-OILS-A-NUL-IN-AN-ANSI-C-STRING-DOES-NOT-TRUNCATE-THE-TRANSLATION. `"${x:-$'a\0b'}"` is a bad substitution in bash — 2026-08-08 — OPEN
+
+**Where:** `userspace/oils/src/lexer.rs` — `read_dollar_brace_body`'s `$'…'` arm,
+and whatever `ansiexpand` equivalent it calls.
+
+**What.** Also split out of
+`TD-OILS-AN-ANSI-C-STRING-IS-NOT-REQUOTED-AFTER-A-BRACE-BODY-TRANSLATES-IT`.
+bash's `ansiexpand` yields a **C string**, so a `\0` in the source ends it: the
+translation spliced back is `a`, the `}` never arrives, and the expansion dies.
+
+```text
+                    bash                                osh
+"${x:-$'a\0b'}"     no closing `}' in "${x:-a           a
+```
+
+osh carries the NUL in a `Vec<u8>` — which is the right representation for every
+*other* purpose (paths and OS-boundary data are bytes, per CLAUDE.md) — and so
+never truncates. The fix is narrow and local: truncate at the first NUL **at the
+splice**, where bash's C string boundary actually is, not in the byte buffer
+generally. Left open only because it is a different mechanism from the re-quote
+decision that entry was about.
 
 ### TD-OILS-A-SUBSTITUTION-IN-A-BRACE-BODY-IS-NOT-PARSED-WHEN-THE-BODY-IS-REJECTED. `echo ${#x:-$(fi)}` says `bad substitution` — 2026-08-07 — ✅ FIXED 2026-08-07
 

@@ -45,12 +45,49 @@ use bstr::ByteSlice;
 /// `dolbrace_state` (parse.y / subst.c): how far into a `${ … }` the scan has
 /// got. Only [`DolBrace::Param`] — still inside the parameter name — enables
 /// the subscript skip, which is why `${#[}` and `${x:-[}` are unaffected.
+///
+/// bash has a fifth value, `DOLBRACE_QUOTE2` — the state a `/` moves to, kept
+/// apart from `DOLBRACE_QUOTE` so that `singlequote_translations` can
+/// single-quote a `$"…"` under `${p/…}` and not under `${p#…}` (parse.y:3912).
+/// That is the only test in either file that separates them, it needs a
+/// *changed* locale translation to fire, and osh carries no message catalogs
+/// (`$"…"` is always its own text), so the two are folded into [`DolBrace::Quote`]
+/// here. Every other test — parse.y:3854, parse.y:3866, subst.c:1580,
+/// subst.c:1596 — asks `QUOTE || QUOTE2`.
+///
+/// bash keeps this machine in two places and warns that they must agree
+/// ("This logic must agree with subst.c:extract_dollar_brace_string since they
+/// share the same defines", parse.y:3803). osh keeps it in one:
+/// [`DolBrace::step`] is run both by the *extent* pass below and by the lexer's
+/// `${ … }` reader, which needs it to decide whether a `$'…'` in the body is
+/// re-quoted after it is translated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DolBrace {
+pub(crate) enum DolBrace {
     Param,
     Op,
     Word,
     Quote,
+}
+
+impl DolBrace {
+    /// The transition for the character just consumed (parse.y:3809–3828,
+    /// subst.c:1957–1972).
+    ///
+    /// `started` is bash's `retind > 1` / `i > start`: the character is not the
+    /// body's first. It is what keeps `${#x}`'s leading `#` an operator rather
+    /// than the `${p#word}` one — and, because bash tests it *after* appending
+    /// the character, it is satisfied by a parameter name as short as one
+    /// letter, so `${q#…}` is [`DolBrace::Quote`] just as `${qq#…}` is.
+    pub(crate) fn step(self, c: u8, started: bool) -> Self {
+        match self {
+            // `/` is bash's DOLBRACE_QUOTE2; see the type's doc for why it is
+            // not kept apart here.
+            Self::Param if started && matches!(c, b'%' | b'#' | b'^' | b',' | b'/') => Self::Quote,
+            Self::Param if OPS.contains(&c) => Self::Op,
+            Self::Op if !OPS.contains(&c) => Self::Word,
+            other => other,
+        }
+    }
 }
 
 /// How deep the mutually recursive scanners below may go before they stop
@@ -78,6 +115,51 @@ pub fn unclosed_brace(word: BStr<'_>) -> Option<Str> {
     // for the overwhelming majority of words.
     word.find(b"${")?;
     scan(word, false, 0).err()
+}
+
+/// Where the *expansion* ends a `${ … }` body the parser read as `body`.
+///
+/// The two can only disagree where the parser's scan wrote text into the body
+/// that it did not read back: an ANSI-C string spliced in unquoted (see the
+/// `$'…'` arm of [`crate::lexer::Lexer::read_dollar_brace_body`]). bash never
+/// re-reads what `parse_matched_pair` accumulated either — the `}` that closes
+/// the expansion is picked out later, by `parameter_brace_expand` scanning the
+/// *word*, and a `}` the splice contributed is as good a terminator there as
+/// one the user wrote. Everything past it is ordinary word text; a quote the
+/// splice contributed can equally swallow the `}` and leave the brace open.
+///
+/// `body` is the text between `${` and the parser's `}`. `quoted` is bash's
+/// `Q_DOUBLE_QUOTES`, always set here (a bare splice happens only inside
+/// double quotes).
+pub(crate) fn expansion_body_len(body: BStr<'_>, quoted: bool) -> BraceEnd {
+    // The scan below is `parameter_brace_expand`'s, so it is handed the same
+    // string that one is: the whole `${ … }` as it stands in the word.
+    let mut s: Str = Str::with_capacity(body.len().saturating_add(3));
+    s.extend_from_slice(b"${");
+    s.extend_from_slice(body);
+    s.push(b'}');
+    let Ok(end) = brace(&s, 0, quoted, 0) else {
+        return BraceEnd::Unclosed;
+    };
+    // One past the closing `}`, so the body ran from 2 to `end - 1`.
+    match end.checked_sub(3) {
+        Some(len) if len < body.len() => BraceEnd::Early(len),
+        _ => BraceEnd::Same,
+    }
+}
+
+/// The answer [`expansion_body_len`] reaches.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum BraceEnd {
+    /// The expansion closes the brace where the parser closed it.
+    Same,
+    /// It closes earlier, after this many bytes of `body`; `body[len + 1 ..]`,
+    /// with the parser's `}` restored on the end, is ordinary word text.
+    Early(usize),
+    /// It never closes the brace — the word is a runtime
+    /// ``bad substitution: no closing `}'``, which [`unclosed_brace`] raises
+    /// from the word as a whole.
+    Unclosed,
 }
 
 /// `expand_word_internal`'s walk over `s`, far enough to find the constructs
@@ -359,13 +441,7 @@ fn edbs(s: BStr<'_>, start: usize, state0: DolBrace, d: u32) -> Result<usize, ()
         // length guard is against the body's own start (subst.c:1957).
         let started = i > start;
         i += 1;
-        state = match state {
-            DolBrace::Param if started && matches!(c, b'%' | b'#' | b'^' | b',') => DolBrace::Quote,
-            DolBrace::Param if started && c == b'/' => DolBrace::Quote,
-            DolBrace::Param if OPS.contains(&c) => DolBrace::Op,
-            DolBrace::Op if !OPS.contains(&c) => DolBrace::Word,
-            other => other,
-        };
+        state = state.step(c, started);
     }
     Err(())
 }
@@ -509,10 +585,51 @@ fn skip_matched(s: BStr<'_>, start: usize, open: u8, close: u8, d: u32) -> usize
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::unclosed_brace;
+    use super::{BraceEnd, expansion_body_len, unclosed_brace};
 
     fn named(src: &str) -> Option<String> {
         unclosed_brace(src.as_bytes()).map(|s| String::from_utf8(s).unwrap())
+    }
+
+    /// Where `parameter_brace_expand` closes the body the parser read as `body`.
+    fn ends(body: &str) -> BraceEnd {
+        expansion_body_len(body.as_bytes(), true)
+    }
+
+    #[test]
+    fn a_body_the_expansion_reads_the_same_way_ends_where_the_parser_ended_it() {
+        assert_eq!(ends("x:-a"), BraceEnd::Same);
+        assert_eq!(ends("x"), BraceEnd::Same);
+        assert_eq!(ends(""), BraceEnd::Same);
+        // A `}` the *user* wrote inside a nested construct is not a terminator
+        // for either read.
+        assert_eq!(ends("x:-$(echo })"), BraceEnd::Same);
+        assert_eq!(ends("a:-${b:-x}"), BraceEnd::Same);
+    }
+
+    #[test]
+    fn a_spliced_brace_closes_the_expansion_early() {
+        // `"${x:-$'a}b'}"` — the scan wrote `a}b` into the body and never read
+        // it back, so the expansion is `${x:-a}` and `b}` is word text.
+        assert_eq!(ends("x:-a}b"), BraceEnd::Early(4));
+        // The first one wins; the rest is text however many there are.
+        assert_eq!(ends("x:-a}b}c"), BraceEnd::Early(4));
+        // A splice in the *name* is the same row of bash's table.
+        assert_eq!(ends("a}b"), BraceEnd::Early(1));
+        // `"${a:-${b:-$'x}y'}}"`: the inner splice closes the *outer* brace, so
+        // the leftover is just the parser's own `}`.
+        assert_eq!(ends("a:-${b:-x}y}"), BraceEnd::Early(11));
+    }
+
+    #[test]
+    fn a_spliced_quote_swallows_the_brace_instead() {
+        // The run opened by the spliced quote never ends, so the scan runs off
+        // the end of the word and the expansion dies on the missing `}`.
+        assert_eq!(ends("x:-a'b"), BraceEnd::Unclosed);
+        assert_eq!(ends("x:-'"), BraceEnd::Unclosed);
+        // Inside double quotes a `"` and a backtick are as live as the quote.
+        assert_eq!(ends("x:-a\"b"), BraceEnd::Unclosed);
+        assert_eq!(ends("x:-a`b"), BraceEnd::Unclosed);
     }
 
     #[test]

@@ -1057,26 +1057,33 @@ struct Lexer {
     /// `Q_HERE_DOCUMENT` **as a whole**, without any quote characters
     /// delimiting it.
     ///
-    /// `expand_word_internal` takes the ANSI-C branch only when
-    /// `(quoted & (Q_HERE_DOCUMENT|Q_DOUBLE_QUOTES)) == 0`, so in such text a
-    /// `$` before a `'` is not a quote introducer and the `$'…'` stays literal.
-    /// Combined with [`Lexer::here_text`] — nothing translated it at parse time
-    /// either — that is why `` cat <<E `` / `${x:-$'a\tb'}` prints `$'a\tb'`
-    /// where the same word in a real double-quoted string prints a tab.
+    /// `expand_word_internal` translates no `$'…'` — that is the reader's job,
+    /// which is why bash carries a separate `expand_string_dollar_quote` "for
+    /// code paths that don't do it" (subst.c:4171-4172). So in text with no
+    /// reader a `$` before a `'` is not a quote introducer and the `$'…'` stays
+    /// literal: `` cat <<E `` / `${x:-$'a\tb'}` prints `$'a\tb'` where the same
+    /// word in a real double-quoted string — which *was* read — prints a tab.
     ///
-    /// It is a *separate* flag from `here_text` because bash drops these bits
-    /// for one construct inside such text: a **pattern**. `getpattern`
-    /// (subst.c:5751-5754) expands it with
+    /// It is a *separate* flag from [`Lexer::here_text`] because bash puts the
+    /// translation back for one span inside such text: the fragment after a
+    /// **pattern-ish operator**. `parameter_brace_expand` re-extracts it with
+    /// `SX_POSIXEXP` when the operator is `#`, `%`, `/`, `^`, `,` or a substring
+    /// `:` (subst.c:9913), and an `SX_POSIXEXP` extraction inside a
+    /// here-document is routed (subst.c:1828-1832) to
+    /// `extract_heredoc_dolbrace_string`, which exists "to handle `$'...'` and
+    /// `$"..."` quoting in here-documents, since the here-document read path
+    /// doesn't" (subst.c:1522-1530). `:-`/`:+`/`:=`/`:?` are not on that list —
+    /// the `:` is consumed as the null-check before the operator is read — so an
+    /// operand keeps its text.
     ///
-    /// ```c
-    ///   (quoted & (Q_HERE_DOCUMENT|Q_DOUBLE_QUOTES)) ? Q_PATQUOTE : quoted
-    /// ```
+    /// Measured against bash 5.2.37, in a here-document body with `y=$'a\tb'`:
+    /// `${nope:-$'a\tb'}` prints `$'a\tb'` while `${y#$'a\tb'}` prints nothing at
+    /// all, the trim having matched.
     ///
-    /// — so the two context bits are replaced outright, the ANSI-C branch is
-    /// reachable again, and the pattern translates its `$'…'` even though the
-    /// text around it does not. Measured against bash 5.2.37, in a here-document
-    /// body with `y=$'a\tb'`: `${nope:-$'a\tb'}` prints `$'a\tb'` while
-    /// `${y#$'a\tb'}` prints nothing at all, the trim having matched.
+    /// The flag still names the *quoting*, not the operator, because that is what
+    /// the two answers have in common: the fragment is also expanded outside
+    /// `Q_DOUBLE_QUOTES`/`Q_HERE_DOCUMENT` (`getpattern`, subst.c:5751-5754), and
+    /// clearing one flag gives both.
     dq_context: bool,
 }
 
@@ -2023,19 +2030,16 @@ pub fn lex_word_verbatim(src: BStr<'_>) -> Result<Vec<Seg>, LexError> {
 /// `unread` says the `${ … }` this fragment was written in is text no parser
 /// read — a here-document body, a `PS4`, a `${x@P}`. That is the *reader's*
 /// question and it applies to a pattern exactly as it does to an operand: see
-/// [`Lexer::here_text`]. What does *not* carry over is the quoting, because a
-/// pattern is expanded by `getpattern`, which throws the enclosing context away:
-///
-/// ```text
-///   pat = expand_string_for_pat (value,
-///           (quoted & (Q_HERE_DOCUMENT|Q_DOUBLE_QUOTES)) ? Q_PATQUOTE : quoted,
-///           (int *)NULL, (int *)NULL);        /* subst.c:5751-5754 */
-/// ```
-///
-/// so a pattern's `$'…'` *is* translated where the operand beside it is not.
-/// Measured in a here-document body with `v` holding a real tab: `${nope:-$'a\tb'}`
-/// prints the `$'…'` back, while `${v#$'a\tb'}` trims it away — hence
-/// [`Lexer::dq_context`] stays clear here.
+/// [`Lexer::here_text`]. What does *not* carry over is the quoting: a pattern is
+/// expanded by `getpattern`, which replaces the enclosing context outright
+/// (`(quoted & (Q_HERE_DOCUMENT|Q_DOUBLE_QUOTES)) ? Q_PATQUOTE : quoted`,
+/// subst.c:5751-5754), and it is extracted by
+/// `extract_heredoc_dolbrace_string`, which puts back the ANSI-C translation the
+/// unread text never got (subst.c:1828-1832). So a pattern's `$'…'` *is*
+/// translated where the operand beside it is not: measured in a here-document
+/// body with `v` holding a real tab, `${nope:-$'a\tb'}` prints the `$'…'` back
+/// while `${v#$'a\tb'}` trims it away — hence [`Lexer::dq_context`] stays clear
+/// here.
 ///
 /// # Errors
 /// Returns [`LexError`] on an unterminated quote or substitution.
@@ -4672,13 +4676,13 @@ impl Lexer {
     /// [`Lexer::dq_context`] blocks those two forms for a different reason and
     /// reaches the same place: an operand written in text no parser read is a
     /// word to *this* scan but was never one to bash's, so nothing in it was
-    /// translated at parse time and `expand_word_internal` — which takes the
-    /// ANSI-C branch only when `(quoted & (Q_HERE_DOCUMENT|Q_DOUBLE_QUOTES)) ==
-    /// 0` — meets the `$'` still spelled out. Measured: `cat <<E` /
-    /// `${x:-$'a\x2Cb'}` prints `$'a\x2Cb'`, where `"${x:-$'a\x2Cb'}"` prints
-    /// `a,b`. A **pattern** in the same text is the exception, because
-    /// `getpattern` drops those bits before expanding it — see
-    /// [`Lexer::dq_context`].
+    /// translated at parse time and `expand_word_internal`, which translates no
+    /// `$'…'` of its own, meets the `$'` still spelled out. Measured:
+    /// `cat <<E` / `${x:-$'a\x2Cb'}` prints `$'a\x2Cb'`, where
+    /// `"${x:-$'a\x2Cb'}"` prints `a,b`. A **pattern** in the same text is the
+    /// exception, because its extraction is routed to
+    /// `extract_heredoc_dolbrace_string`, which does the translation the read
+    /// path skipped — see [`Lexer::dq_context`].
     fn read_dollar(&mut self, in_dquote: bool) -> Result<Option<Seg>, LexError> {
         let quote_form = !in_dquote && !self.dq_context;
         // Where the construct starts, for a scan that runs off the end of text

@@ -430,22 +430,39 @@ string-level extent read reach them with no further work.
 
 **What the plan above got wrong: the two questions are independent.** "Was this
 text read by a parser" and "what quoting does it expand under" are *not* the same
-bit, and a pattern answers them differently from the operand beside it. bash's
-`getpattern` throws the enclosing context away before the pattern expands:
+bit, and a pattern answers them differently from the operand beside it. Measured
+in a here-document body with `v=$'a\tb'`: `${nope:-$'a\tb'}` prints `$'a\tb'`
+back while `${v#$'a\tb'}` trims to nothing, and the split holds one level down —
+`${v#${z:-$'a\tb'}}` trims too. Naively marking a pattern as here-doc text would
+have broken all three, which osh already had right.
 
-```text
-  pat = expand_string_for_pat (value,
-          (quoted & (Q_HERE_DOCUMENT|Q_DOUBLE_QUOTES)) ? Q_PATQUOTE : quoted,
-          (int *)NULL, (int *)NULL);          /* subst.c:5751-5754 */
-```
+The mechanism is **not** `getpattern`, though that is what the first write-up of
+this fix claimed. `getpattern` (subst.c:5751-5754) does replace the enclosing
+`Q_HERE_DOCUMENT`/`Q_DOUBLE_QUOTES` with `Q_PATQUOTE`, and that is the *quoting*
+half — but it cannot be the ANSI-C half, because `expand_word_internal`
+translates no `$'…'` at all. That is exactly why bash carries a separate
+`expand_string_dollar_quote` "for code paths that don't do it"
+(subst.c:4171-4172), and it is confirmed by a second measurement: a runtime array
+subscript is expanded with `expand_subscript_string (sub, 0)` — quoting-wise as
+bare as a pattern — and `[[ -v "m[\$'a\tb']" ]]` is still *false* against a real-tab
+key, so nothing translated it.
 
-so in a here-document body `${nope:-$'a\tb'}` prints `$'a\tb'` back (operand:
-still `Q_HERE_DOCUMENT`, so no ANSI-C branch) while `${v#$'a\tb'}` trims to
-nothing (pattern: `Q_PATQUOTE`, so the branch fires) — and the same split holds
-one level down, because an operand *inside a pattern* has inherited the
-pattern's `Q_PATQUOTE`: `${v#${z:-$'a\tb'}}` trims too. Naively marking a
-pattern as here-doc text would have broken all three, which osh already had
-right.
+Translation is the reader's, and a here-document body had no reader. bash puts it
+back for exactly one span: the fragment after a `#`, `%`, `/`, `^`, `,` or a
+substring `:`, which `parameter_brace_expand` re-extracts with `SX_POSIXEXP`
+(subst.c:9913), and which — inside a here-document — is routed (subst.c:1828-1832)
+to `extract_heredoc_dolbrace_string`, a function whose own comment says it exists
+"to handle `$'...'` and `$"..."` quoting in here-documents, since the
+here-document read path doesn't" (subst.c:1522-1530). `:-`, `:+`, `:=` and `:?`
+are not on that list — the `:` is eaten as the null-check before the operator is
+read — so an operand keeps its text. And the one-level-down case falls out of the
+same function: it scans the whole fragment with `dolbrace_state` pinned at
+`DOLBRACE_QUOTE` (every transition it has leaves `DOLBRACE_PARAM`, which it never
+reaches), so a nested operand is translated along with the pattern around it.
+
+osh's flag still names the *quoting* rather than the operator, because clearing
+one flag gives both answers: the fragment is extracted with the translation and
+expanded outside the double-quoting, and no fragment gets one without the other.
 
 So `Lexer::here_text` was split into the two flags it had been standing in for —
 `here_text` (the reader's half: no parser read this, so a `$'…'` is untranslated

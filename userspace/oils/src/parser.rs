@@ -5586,12 +5586,31 @@ fn cond_error_near(tok: BStr<'_>) -> Str {
 ///
 /// But *bare* is only half of what this carries. The other half is whether a
 /// parser ever read the text, and that half does reach the patterns — so the
-/// four states below are two independent bits, not a ladder. Measured in a
-/// here-document body with `v=$'a\tb'`: `${nope:-$'a\tb'}` prints `$'a\tb'`
-/// back (operand: still `Q_HERE_DOCUMENT`, no ANSI-C branch) while `${v#$'a\tb'}`
-/// trims to nothing (pattern: `Q_PATQUOTE`, so the branch fires) — and the same
-/// split holds one level down, where `${v#${z:-$'a\tb'}}` also trims, because the
-/// operand *inside a pattern* inherits the pattern's `Q_PATQUOTE`.
+/// four states below are two independent bits, not a ladder.
+///
+/// The two halves have separate causes, and the ANSI-C one is **not**
+/// `getpattern`: `expand_word_internal` translates no `$'…'` at all, which is
+/// the whole reason bash carries a separate `expand_string_dollar_quote` "for
+/// code paths that don't do it" (subst.c:4171-4172). Translation is the
+/// *reader's*, and a here-document body had no reader. bash puts it back for
+/// exactly one span — the fragment after a pattern-ish operator, which
+/// `parameter_brace_expand` re-extracts with `SX_POSIXEXP` when the operator is
+/// `#`, `%`, `/`, `^`, `,` or a substring `:` (subst.c:9913) — because such an
+/// extraction inside a here-document is routed to
+/// `extract_heredoc_dolbrace_string` (subst.c:1828-1832), a function that exists
+/// "to handle `$'...'` and `$"..."` quoting in here-documents, since the
+/// here-document read path doesn't" (subst.c:1522-1530). `:-`, `:+`, `:=`, `:?`
+/// and their `:`-less forms are not on that list — the `:` is consumed as the
+/// null-check before `c` is read — so an operand keeps its text.
+///
+/// Measured in a here-document body with `v=$'a\tb'`: `${v#$'a\tb'}` and
+/// `${v%$'a\tb'}` trim to nothing and `${v/$'a\tb'/X}` gives `X`, while
+/// `${nope:-$'a\tb'}`, `${nope-$'a\tb'}`, `${v:+$'a\tb'}` and `${nope2:=$'a\tb'}`
+/// all print `$'a\tb'` back. The split holds one level down too —
+/// `${v#${z:-$'a\tb'}}` trims — because `extract_heredoc_dolbrace_string` scans
+/// the whole fragment with `dolbrace_state` pinned at `DOLBRACE_QUOTE` (its only
+/// transitions leave `DOLBRACE_PARAM`, which it never reaches), so a nested
+/// operand is translated along with the pattern around it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Quoting {
     Bare,
@@ -5610,10 +5629,12 @@ pub(crate) enum Quoting {
     Unread,
     /// [`Quoting::Unread`]'s read with [`Quoting::Bare`]'s quoting: a pattern,
     /// replacement, subscript or substring offset of a `${ … }` that itself sits
-    /// in unread text. `getpattern` has dropped the double-quoting, but nothing
-    /// gives the text back a parse it never had — so a `$'…'` here *is*
-    /// translated while a `$( … )` here is still
-    /// [`crate::ast::CmdSubBody::Unread`].
+    /// in unread text. `getpattern` has dropped the double-quoting and
+    /// `extract_heredoc_dolbrace_string` puts the ANSI-C translation back — so a
+    /// `$'…'` here *is* translated — but nothing gives the text back a parse it
+    /// never had, so a `$( … )` here is still
+    /// [`crate::ast::CmdSubBody::Unread`], read at expansion time by
+    /// `extract_command_subst`.
     BareUnread,
 }
 
@@ -5625,15 +5646,17 @@ impl Quoting {
     }
 
     /// Whether the text was read by no parser — the half that decides whether a
-    /// `$'…'` was already translated and whether a `$( … )` has a parse. See
-    /// [`crate::lexer::Lexer::here_text`].
+    /// `$( … )` has a parse, and (with [`Self::dquoted`]) whether a `$'…'` was
+    /// ever translated. See [`crate::lexer::Lexer::here_text`].
     fn unread(self) -> bool {
         matches!(self, Self::Unread | Self::BareUnread)
     }
 
     /// This read, with the quoting a *pattern* beside the operand is read with:
-    /// `getpattern` drops the `Q_DOUBLE_QUOTES`/`Q_HERE_DOCUMENT` bits, and
-    /// nothing restores the parse.
+    /// `getpattern` drops the `Q_DOUBLE_QUOTES`/`Q_HERE_DOCUMENT` bits
+    /// (subst.c:5751-5754) and the `SX_POSIXEXP` extraction restores the ANSI-C
+    /// translation the text never got (subst.c:1828-1832), but nothing restores
+    /// the parse.
     fn as_pattern(self) -> Self {
         if self.unread() { Self::BareUnread } else { Self::Bare }
     }

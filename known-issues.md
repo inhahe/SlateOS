@@ -45447,9 +45447,10 @@ TD-OILS-COND-ERROR-NEAR-IGNORES-THE-ALIAS-TEXT.
 >   is exact because `part_src` renders a parsed body from `prog` and so
 >   there is nothing in `src` for a marker to ride in on.
 >
-> Two things found while measuring this are *not* fixed and have entries of
-> their own: TD-OILS-A-COMPOUND-ARRAY-ASSIGNMENT-IS-RE-PARSED-UNDER-ITS-OWN-INPUT-NAME
-> and TD-OILS-A-COMPOUND-COMMANDS-LINE-IS-STAMPED-AT-ITS-KEYWORD.
+> Two things found while measuring this got entries of their own —
+> TD-OILS-A-COMPOUND-ARRAY-ASSIGNMENT-IS-RE-PARSED-UNDER-ITS-OWN-INPUT-NAME
+> and TD-OILS-A-COMPOUND-COMMANDS-LINE-IS-STAMPED-AT-ITS-KEYWORD — and both
+> are now resolved.
 
 > **Re-scoped 2026-08-08.** The heading and the "proper fix" below are both out
 > of date. `CmdSubBody::Parsed::src` **is** the re-print already —
@@ -45575,7 +45576,7 @@ command is a bare `!` or `time`.
 TD-OILS-A-SUBSTITUTION-INSIDE-AN-ALIAS-IS-BLAMED-ON-ITS-OWN-LINE-1.
 
 
-### TD-OILS-A-COMPOUND-ARRAY-ASSIGNMENT-IS-RE-PARSED-UNDER-ITS-OWN-INPUT-NAME. A `$( … )` inside `a=( … )` that will not parse back is blamed on `command substitution`, not on `array assign` — 2026-08-08 — OPEN
+### TD-OILS-A-COMPOUND-ARRAY-ASSIGNMENT-IS-RE-PARSED-UNDER-ITS-OWN-INPUT-NAME. A `$( … )` inside `a=( … )` that will not parse back is blamed on `command substitution`, not on `array assign` — 2026-08-08 — ✅ RESOLVED 2026-08-08
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::comsub_reparse_error` and
 its caller in `Shell::command_sub_body_inner`; the compound-assignment
@@ -45646,6 +45647,43 @@ re-print will not parse back — in practice a body ending in a bare `!` or
 
 **Found by** the probe matrix for
 TD-OILS-A-CMDSUB-BODY-IS-RE-READ-AS-WRITTEN-NOT-AS-REPRINTED (probe `t12`).
+
+**Resolved.** `Shell::array_assign_reparse_error` (interp.rs) runs before any
+part of a compound assignment is expanded: it re-parses each stored `$( … )`
+re-print in walk order, and on the first failure reports it under a
+`SRC_TOKEN_ARRAY_ASSIGN` (`array assign`) input source, with the line counted
+**from 1 inside the rendered listing** and the echoed line taken from the
+listing rather than from the body — then aborts FORCE_EOF-class (status 2 at
+the outermost read-eval, 1 under `eval`). The listing itself is rendered by
+`unparse::array_listing`, which joins the elements with a *single space* the
+way `parse_compound_assignment` (parse.y:4715) writes them back, and
+`unparse::array_listing_split` cuts it at the failing substitution's closing
+`)` using the same grown-NUL sentinel trick `attach_comsub_tails` uses.
+Covered by
+`tests/corpus/a-compound-array-assignment-is-re-parsed-under-its-own-input-name.sh`.
+
+Four corrections to this entry, all from measurement:
+
+- The failure is **not** always reported: a readonly name and a nameref
+  designating an element are both refused *before*
+  `assign_compound_array_list` is reached, so those still succeed with the
+  ordinary "readonly variable" / "invalid variable name" diagnostic.
+- A backtick body is a matched pair to the tokenizer, never re-parsed, so
+  ``a=( "p`⏎!⏎`q" )`` assigns cleanly.
+- A compound literal used as a **command prefix** never reaches
+  `assign_compound_array_list` at all — it is expanded as an ordinary word, so
+  `command substitution` *is* the right name there, and it is not fatal.
+- The line is 1 only because the listing is one line; a newline the listing
+  *kept* (one inside a quoted element, or a heredoc body in a re-print) moves
+  both the number and the echoed line, so the fix counts newlines rather than
+  hard-coding 1.
+
+Fixing this also exposed a pre-existing divergence in the prefix case, fixed
+in the same commit: tails were attached to a `$( … )` per *element word*, but
+bash keeps the whole literal as one word, so the echo stopped at the element's
+end instead of running on to the literal's closing `)`.
+`unparse::attach_compound_comsub_tails`, called from the parser once the
+element list is complete, re-attaches every tail across the whole listing.
 
 
 ### TD-OILS-A-COMPOUND-COMMANDS-LINE-IS-STAMPED-AT-ITS-KEYWORD. `case`, `for`, `select` and `[[ … ]]` report the keyword's line where bash reports a later one — 2026-08-08 — RESOLVED 2026-08-08

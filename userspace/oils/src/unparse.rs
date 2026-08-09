@@ -1200,6 +1200,23 @@ pub fn name_index(name: &str, index: &Option<ArrayIndex>) -> Str {
     }
 }
 
+/// The way a whole *collection* is spelled: `name[@]` / `name[*]`, or the bare
+/// `@` / `*` when the collection is the positional parameters.
+///
+/// The third of the [`name_sub`] family, for the parts that name a whole array
+/// or the positionals in the same breath — [`WordPart::ArraySlice`],
+/// [`WordPart::ArrayBulk`], and the diagnostic
+/// [`crate::interp::Shell::bulk_elements`] rebuilds for a bad `@` transform,
+/// which has to agree with what `part_src` would have printed.
+#[must_use]
+pub fn name_bulk(name: &str, star: bool) -> Str {
+    if name == "@" || name == "*" {
+        name.as_bytes().to_vec()
+    } else {
+        bfmt![name, b"[", if star { "*" } else { "@" }, b"]"]
+    }
+}
+
 /// Re-quote a [`WordPart::SingleQuoted`] run.
 ///
 /// `escaped` text was written with backslashes in the source, so it goes back
@@ -1723,11 +1740,7 @@ fn part_src(p: &WordPart) -> Str {
             bfmt![b"${", &name_sub(name, index), b"@", &word_src(op), b"}"]
         }
         WordPart::ArraySlice { name, star, offset, length } => {
-            let sub = if name == "@" || name == "*" {
-                name.as_bytes().to_vec()
-            } else {
-                bfmt![name, b"[", if *star { "*" } else { "@" }, b"]"]
-            };
+            let sub = name_bulk(name, *star);
             let mut s = bfmt![b"${", &sub, b":", &word_src(offset)];
             if let Some(len) = length {
                 s.push(b':');
@@ -1737,11 +1750,7 @@ fn part_src(p: &WordPart) -> Str {
             s
         }
         WordPart::ArrayBulk { name, star, op } => {
-            let sub = if name == "@" || name == "*" {
-                name.as_bytes().to_vec()
-            } else {
-                bfmt![name, b"[", if *star { "*" } else { "@" }, b"]"]
-            };
+            let sub = name_bulk(name, *star);
             let opstr = match op {
                 BulkOp::Trim { suffix, longest, pattern } => {
                     let o = match (suffix, longest) {

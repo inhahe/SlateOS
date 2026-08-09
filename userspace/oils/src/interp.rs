@@ -15323,12 +15323,13 @@ impl Shell {
                 self.array_elements_walks(name, 2).len()
             };
             if count > 0 {
-                let sub = if name == "@" || name == "*" {
-                    name.as_bytes().to_vec()
-                } else {
-                    bfmt![name, b"[", if star { "*" } else { "@" }, b"]"]
-                };
-                let raw = bfmt![&sub, b"@", &crate::unparse::word_src(op)];
+                // The same spelling `part_src` would have printed — the
+                // diagnostic quotes the word back, so the two have to agree.
+                let raw = bfmt![
+                    &crate::unparse::name_bulk(name, star),
+                    b"@",
+                    &crate::unparse::word_src(op)
+                ];
                 self.bad_transform_substitution(&raw);
             }
             return Vec::new();

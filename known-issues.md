@@ -910,49 +910,65 @@ TD-OILS-A-BRACE-SUBSCRIPT-IS-NOT-EXPANDED-AS-A-STRING-OF-ITS-OWN.
 
 ---
 
-### TD-OILS-A-RAW-TEXT-BRACE-CONSTRUCT-IS-INVISIBLE-TO-THE-EXTENT-SCAN. `${y@$(fi)}` reports one diagnostic short — 2026-08-09 — OPEN
+### TD-OILS-A-RAW-TEXT-BRACE-CONSTRUCT-IS-INVISIBLE-TO-THE-EXTENT-SCAN. `${y@$(fi)}` reports one diagnostic short — 2026-08-09 — 🔧 PARTLY FIXED 2026-08-09 (the `@`-transform half; `$(( … ))` still open)
 
-**Where:** `userspace/oils/src/ast.rs`. `WordPart::BadTransform { raw: Str }`,
-`BulkOp::BadTransform { raw: Str }` and `WordPart::ArithSub { expr }` keep
+**Where:** `userspace/oils/src/ast.rs`. `WordPart::ArithSub { expr }` keeps
 **unparsed source**, so a `$( … )` inside one is not a `WordPart::CommandSub` and
-`Shell::brace_scanned_subs` cannot find it.
+`Shell::brace_scanned_subs` cannot find it. `WordPart::BadTransform` and
+`BulkOp::BadTransform` were the same defect and are fixed — see below.
 
-**Reproduce** (`y=Y`, `q=QQ`, `n=(1 2)`, expanded with `@P`):
+**Reproduce** (`y=Y`, `q=QQ`, `n=(1 2)`, expanded with `@P`) — the two
+`@`-transform rows that opened this entry (`A${q@$(fi)}B` and
+`A${n[@]@$(fi)}B`) now match; what is left is the arithmetic body:
 
 ```text
-A${q@$(fi)}B
-  bash: command substitution: line 4: syntax error near unexpected token `fi'
-        command substitution: line 4: `fi)}B'
-        line 3: A${q@$(fi)}B: bad substitution
-        A${q@$(fi)}B
-  osh:  line 3: A${q@$(fi)}B: bad substitution
-        A${q@$(fi)}B                       … the two extent reports are missing
-
-A${n[@]@$(fi)}B                            … same, through BulkOp::BadTransform
+A${x@$((1+$(fi)))}B                        … a `$((` inside a bad transform's
+  bash: command substitution: line 3: syntax error near unexpected token `fi'
+        command substitution: line 3: `fi)))}B'
+        line 2: A${x@$((1+$(fi)))}B: bad substitution
+        A${x@$((1+$(fi)))}B
+  osh:  line 2: A${x@$((1+$(fi)))}B: bad substitution
+        A${x@$((1+$(fi)))}B                  operand — the operand is a parsed
+                                             Word now, but its ArithSub inside
+                                             it is still raw text
 
 A${y:-$((1+$(fi)))}B
-  bash: command substitution: line 10: syntax error near unexpected token `fi'
-        command substitution: line 10: `fi)))}B'
-        line 9: A${y:-$((1+$(fi)))}B: bad substitution
-        A${y:-$((1+$(fi)))}B
-  osh:  AYB                                (no diagnostics at all)
+  bash: command substitution: line 3: syntax error near unexpected token `fi'
+        command substitution: line 3: `fi)))}B'
+        line 2: A${y:-$((1+$(fi)))}B: bad substitution
+        [A${y:-$((1+$(fi)))}B]
+  osh:  [AYB]                              (no diagnostics at all)
 
 A$((1+$(fi)))B                             … the same construct at string level
-  bash: command substitution: line 12: syntax error near unexpected token `fi'
-        command substitution: line 12: `fi)))B'
-        A
-  osh:  command substitution: line 12: syntax error near unexpected token `fi'
-        command substitution: line 12: `fi)'
-        A$((1+$(fi)))B
+  bash: command substitution: line 2: syntax error near unexpected token `fi'
+        command substitution: line 2: `fi)))B'
+        [A]
+        rc=0
+  osh:  command substitution: line 2: syntax error near unexpected token `fi'
+        command substitution: line 2: `fi)'
+        (nothing — neither the `[…]` nor the `rc=` after it runs)
 ```
+
+Note the same construct written *directly in a script* — `echo "A$((1+$(fi)))B"`
+— is a parse-time error in **both** shells, blaming the whole line, and they
+agree there. Only the expansion-time reading (`@P`, and by extension anything
+that re-reads text) differs; `eval` agrees too, because it re-parses.
 
 The last row is the same defect seen from the other side: osh *does* find that
 `$( … )`, but only by parsing the arithmetic expression on its own, so the tail
 it blames is the expression's remainder (`` `fi)' ``) rather than the enclosing
-string's (`` `fi)))B' ``), and the failure does not consume the rest of the
-string. bash reaches it during the scan, where `extract_delimited_string` carries
-`SX_COMMAND` and recurses into a `$( … )` — which is also the correction to the
-comment in `Shell::brace_extent_scan` that says a `$((`'s extent "cannot fail".
+string's (`` `fi)))B' ``). bash reaches it during the scan, where
+`extract_delimited_string` carries `SX_COMMAND` and recurses into a `$( … )` —
+which is also the correction to the comment in `Shell::brace_extent_scan` that
+says a `$((`'s extent "cannot fail". The consumption differs too, and in the
+opposite direction from the brace case: bash consumed the rest of the string and
+still finished the command (`[A]`, `rc=0`), where osh's failure ends it.
+
+Measured fresh 2026-08-09 (the earlier note here had osh printing the text back;
+it does not any more — the nested-call jump model of
+TD-OILS-AN-ARITHMETIC-ERROR-UNDER-@P-STILL-ABANDONS-THE-COMMAND now makes this
+one jump. Whether the jump or the text is right is exactly what part 2b decides:
+bash's is a *scan* failure, which does not jump, not an expansion failure.)
 
 **`WordPart::BadSubst(Str)` is *not* part of this** — measured, and it is bash's
 own structure rather than an accident. The operand scan is
@@ -971,8 +987,49 @@ See TD-OILS-AN-ARITHMETIC-ERROR-UNDER-@P-STILL-ABANDONS-THE-COMMAND, which
 records the boundary rule (`expand_prompt_string` keeps the two error returns)
 that covers the fatal `@`-transform along with every other class.
 
-**Proper fix.** Give the raw-text constructs enough structure for the scan to
-walk — preferably by lexing their bodies into parts (as the fix for
+**Fixed (the `@`-transform half), 2026-08-09.** `WordPart::BadTransform` and
+`BulkOp::BadTransform` no longer carry the whole `${ … }` as raw text; the
+operand after the `@` is now a parsed `op: Box<Word>` (`ast.rs`), built by the
+new `parser.rs` helper `bad_transform_operand`, which reads the text after the
+`@` with `word_verbatim_from_source_at` under the *enclosing* text's quoting
+(there is no `getpattern` here — nothing ever expands the operand). That is
+enough structure for the scan: `first_scanned_arith` now descends into the
+operand, and `Shell::brace_scanned_subs` finds a `$( … )` in it like any other.
+
+The rule this implements, and the reason it is the *operand* rather than the
+operator that decides: bash's `extract_dollar_brace_string` walks the whole body
+looking for the `}` and reads a `$( … )` on the way with a **real parse**
+(`extract_command_subst`, subst.c:1896-1902) *before* `parameter_brace_transform`
+ever looks at the operator. So both things happen, in that order — the failed
+extent is reported, and only then the `bad substitution`. And a failed extent
+read consumes to the end of the string, so the brace never closes and
+
+```c
+value = extract_dollar_brace_string (string, &sindex, quoted, …);
+if (string[sindex] == RBRACE) sindex++;
+else goto bad_substitution;                     /* subst.c:9913-9918 */
+```
+
+fires — which is why the diagnostic names the *whole* word, and why even an
+**unset** parameter complains (`${nope@$(fi)}` reports; `${nope@Z}` is quietly
+empty), the verdict having been reached before the parameter was looked up. Two
+spellings are only stepped over rather than read, so neither reports: a
+backquote (`string_extract`, subst.c:1886) and a single-quoted run
+(`skip_single_quoted`, subst.c:1926-1938).
+
+Dropping the raw text also removed the `deferred_body_mut` special case for this
+construct (so `parse_arith_comsubs` no longer double-parses it, and cannot
+double-gather here-documents through it), and the re-print splice came for free
+through the parsed operand — `declare -f` prints `$( ( echo 2 ))` where the
+source said `$( (echo 2) )`, byte-identical to bash, because `part_src` now
+rebuilds `${name[sub]@op}` from its parts like every other operator's.
+`Shell::bulk_elements` gained a `star: bool` parameter so the bulk arm can name
+`x[@]` vs `x[*]` in the diagnostic it rebuilds. Corpus:
+`a-bad-transform-operand-is-read-before-the-operator-is-judged.sh`.
+
+**Proper fix (what is left).** `WordPart::ArithSub { expr }` still keeps
+unparsed source. Give it enough structure for the scan to walk — preferably by
+lexing the body into parts (as the fix for
 TD-OILS-A-BRACE-PATTERN-OPERAND-IS-PARSED-EAGERLY does for patterns) rather than
 by giving `Shell::brace_scanned_subs` a second raw-text scanner that would have
 to agree with the first. Note the collector's `Vec<&'a WordPart>` cannot hold

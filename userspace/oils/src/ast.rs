@@ -862,12 +862,20 @@ pub enum WordPart {
     /// `${name@QU}` (multi-char operator) — an *invalid* parameter
     /// transformation. bash defers the decision to expansion time: if the
     /// parameter is **unset** the result is empty (status 0), but if it is
-    /// **set** it is a runtime "bad substitution". `raw` is the exact source
-    /// text between `${` and `}` (e.g. `x@`, `a[0]@Z`) for the diagnostic.
+    /// **set** it is a runtime "bad substitution".
+    ///
+    /// `op` is the text after the `@`, as a word. Nothing ever *expands* it —
+    /// the operator is rejected as a whole — but bash's `${ … }` scan reads the
+    /// body before deciding anything, so a `$( … )` in there is read there too
+    /// and can fail on its own (`A${q@$(fi)}B` reports the extent error before
+    /// the bad substitution). Keeping it as a word is what puts it in front of
+    /// [`crate::interp::Shell::brace_extent_scan`]; raw text was invisible to
+    /// it. The diagnostic's spelling is rebuilt from the name, the subscript
+    /// and this word, as it is for every other operator.
     BadTransform {
         name: String,
         index: Option<Box<Word>>,
-        raw: Str,
+        op: Box<Word>,
     },
     /// `${name[@]:off:len}` / `${name[*]:off:len}` — array slice, and the
     /// positional-parameter forms `${@:off:len}` / `${*:off:len}`. Selects a
@@ -1071,8 +1079,12 @@ impl WordPart {
             } => in_opt(index, hides_closer)
                 .or_else(|| in_word(pattern, hides_closer))
                 .or_else(|| in_opt(replacement, hides_closer)),
-            WordPart::ParamTransform { index, .. } | WordPart::BadTransform { index, .. } => {
-                in_opt(index, hides_closer)
+            WordPart::ParamTransform { index, .. } => in_opt(index, hides_closer),
+            // The operand of a *bad* transform is text the scan still walks
+            // over, so a `$((` in it hides a `}` exactly as one in any other
+            // operand does — the operator is not judged until the body is read.
+            WordPart::BadTransform { index, op, .. } => {
+                in_opt(index, hides_closer).or_else(|| in_word(op, hides_closer))
             }
             WordPart::Indirect { index, .. } => in_index(index, hides_closer),
             WordPart::IndirectOp { index, target, .. } => in_index(index, hides_closer)
@@ -1093,7 +1105,8 @@ impl WordPart {
                     ..
                 } => in_word(pattern, hides_closer)
                     .or_else(|| in_opt(replacement, hides_closer)),
-                BulkOp::Transform { .. } | BulkOp::BadTransform { .. } => None,
+                BulkOp::Transform { .. } => None,
+                BulkOp::BadTransform { op } => in_word(op, hides_closer),
             },
             WordPart::ArrayOp { arg, .. } => in_word(arg, hides_closer),
 
@@ -1411,9 +1424,9 @@ pub enum BulkOp {
     /// transform (empty, unknown, or multi-char operator). Like the scalar
     /// [`WordPart::BadTransform`], bash defers it: a whole-array/positional
     /// reference with **no elements** expands empty, but with one or more
-    /// elements it is a runtime "bad substitution". `raw` is the source text
-    /// between `${` and `}` for the diagnostic.
-    BadTransform { raw: Str },
+    /// elements it is a runtime "bad substitution". `op` is the text after the
+    /// `@`, kept as a word for the same reason the scalar form's is.
+    BadTransform { op: Box<Word> },
 }
 
 /// An array subscript inside `${name[…]}`.

@@ -5858,13 +5858,16 @@ fn splice_reprints(text: &Str, mut reprints: Vec<(core::ops::Range<usize>, Str)>
 /// verdict; a body that failed to parse outright never built operand words
 /// either, so the caller treats an `Err` the same way.
 ///
-/// All three shapes hold the whole body, exactly the bytes `unparse` puts back
-/// between `${` and `}` — which is why the re-print splice can be applied to
-/// them directly, with offsets that were measured against that same body.
+/// The one shape holds the whole body, exactly the bytes `unparse` puts back
+/// between `${` and `}` — which is why the re-print splice can be applied to it
+/// directly, with offsets that were measured against that same body.
+///
+/// A bad `@` **transform** used to be one of these and no longer is: its
+/// operand is a word now ([`WordPart::BadTransform`]), so the substitutions in
+/// it are parsed with it and re-printed from the parse like any other operand's.
 fn deferred_body_mut(part: &mut WordPart) -> Option<&mut Str> {
     match part {
-        WordPart::BadSubst(raw) | WordPart::BadTransform { raw, .. } => Some(raw),
-        WordPart::ArrayBulk { op: BulkOp::BadTransform { raw }, .. } => Some(raw),
+        WordPart::BadSubst(raw) => Some(raw),
         _ => None,
     }
 }
@@ -6628,7 +6631,9 @@ fn parse_braced_param_in(
                 return Ok(WordPart::ArrayBulk {
                     name,
                     star: matches!(index, ArrayIndex::Star),
-                    op: BulkOp::BadTransform { raw: raw.to_vec() },
+                    op: BulkOp::BadTransform {
+                        op: Box::new(bad_transform_operand(&rest, opts, q, rest_line)?),
+                    },
                 });
             }
             // `${a[@]:-x}` / `${a[*]:+x}` / `${a[@]:?msg}` — use/alternate/error
@@ -6696,7 +6701,9 @@ fn parse_braced_param_in(
         return Ok(WordPart::ArrayBulk {
             name: name.clone(),
             star: name == "*",
-            op: BulkOp::BadTransform { raw: raw.to_vec() },
+            op: BulkOp::BadTransform {
+                op: Box::new(bad_transform_operand(&rest, opts, q, rest_line)?),
+            },
         });
     }
     // `${@:-w}` / `${*:+w}` / `${@?msg}` — use/alternate/error on the
@@ -6785,7 +6792,7 @@ fn parse_braced_param_in(
             // (`${x@QU}`) operator is *not* a parse-time error in bash: it is
             // deferred to expansion, where it yields empty for an unset
             // parameter but a "bad substitution" for a set one. `BadTransform`
-            // carries the raw source so the runtime can reproduce that split.
+            // keeps the operand so the runtime can reproduce that split.
             if rest.len() == 2 && is_valid_transform_op(syn_at(&rest, 1)) {
                 return Ok(WordPart::ParamTransform {
                     name,
@@ -6796,7 +6803,7 @@ fn parse_braced_param_in(
             Ok(WordPart::BadTransform {
                 name,
                 index: elem_index,
-                raw: raw.to_vec(),
+                op: Box::new(bad_transform_operand(&rest, opts, q, rest_line)?),
             })
         }
         // Pattern substitution: `/pat/repl`, `//pat/repl`, `/#…`, `/%…`.
@@ -7043,6 +7050,34 @@ fn parse_bulk_op(
         }
         _ => Ok(None),
     }
+}
+
+/// The operand of an *invalid* `${x@…}` transform — everything after the `@` —
+/// as a word.
+///
+/// `rest` starts at the `@` itself, so the operand is `rest[1..]`.
+///
+/// Nothing ever expands this word: the operator is rejected whole, and the only
+/// two things ever asked of it are its source text (for the `bad substitution`
+/// diagnostic and for `declare -f`) and the substitutions in it, which bash's
+/// `${ … }` scan reads before it judges anything — `extract_dollar_brace_string`
+/// walks the body to find the `}` and reads a `$( … )` on the way
+/// (subst.c:1896-1902), so `A${q@$(fi)}B` reports the failed extent *before* the
+/// bad substitution. Reading it as a word rather than keeping it as text is what
+/// puts it in front of that scan; see
+/// [`crate::interp::Shell::brace_extent_scan`].
+///
+/// The quoting is the enclosing text's, unchanged: there is no `getpattern` here
+/// to drop the double-quoting, and no second reader to give the text a parse or
+/// a translation it did not already have.
+fn bad_transform_operand(
+    rest: &[Ch],
+    opts: ParseOpts,
+    q: Quoting,
+    line: u32,
+) -> Result<Word, ParseError> {
+    let text = bytes::from_chars(rest.get(1..).unwrap_or_default().iter().copied());
+    word_verbatim_from_source_at(&text, opts, q, line)
 }
 
 /// The single-character operators accepted by a `${var@OP}` transform. Any

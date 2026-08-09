@@ -15292,7 +15292,7 @@ impl Shell {
     /// the quoted `[@]` form field-splits the declaration it builds, and every
     /// other context joins the items it had before any splitting. See
     /// [`Shell::split_transform_items`].
-    fn bulk_elements(&mut self, name: &str, op: &BulkOp, fields: bool) -> Vec<Str> {
+    fn bulk_elements(&mut self, name: &str, star: bool, op: &BulkOp, fields: bool) -> Vec<Str> {
         // `@k` / `@K` are key-aware: they interleave subscripts and values
         // rather than transforming each value in place. This is an *array*-only
         // transform, though: on the positional parameters (`${@@k}`/`${*@K}`)
@@ -15316,14 +15316,20 @@ impl Shell {
         // positionals): empty when the collection has no elements, but a "bad
         // substitution" when it has ≥1 element (matches bash's set/unset split
         // for scalars, generalised to "the collection is non-empty").
-        if let BulkOp::BadTransform { raw } = op {
+        if let BulkOp::BadTransform { op } = op {
             let count = if name == "@" || name == "*" {
                 self.positional.len()
             } else {
                 self.array_elements_walks(name, 2).len()
             };
             if count > 0 {
-                self.bad_transform_substitution(raw);
+                let sub = if name == "@" || name == "*" {
+                    name.as_bytes().to_vec()
+                } else {
+                    bfmt![name, b"[", if star { "*" } else { "@" }, b"]"]
+                };
+                let raw = bfmt![&sub, b"@", &crate::unparse::word_src(op)];
+                self.bad_transform_substitution(&raw);
             }
             return Vec::new();
         }
@@ -24464,7 +24470,7 @@ impl Shell {
                 star: false,
                 op,
             } if !bulk_joins_with_ifs(op) => {
-                let items = self.bulk_elements(name, op, false);
+                let items = self.bulk_elements(name, false, op, false);
                 Some(self.join_derived_nosplit(&items))
             }
             // `a=${!r:1:2}` where `ref` names a whole array is `by cz` under
@@ -24643,7 +24649,7 @@ impl Shell {
                 // single `declare` line the whole array deparses to, where the
                 // `[@]` spelling is one line per element. Unjoining splits what
                 // the items were glued with; it does not make more of them.
-                Some(self.bulk_elements(name, op, !*star))
+                Some(self.bulk_elements(name, *star, op, !*star))
             }
             // `"${a[@]:-word}"` / `"${a[@]:+word}"` — one field per element
             // when active, and otherwise the fields the operand word made,
@@ -26300,11 +26306,16 @@ impl Shell {
             WordPart::ParamTransform { name, index, op } => {
                 self.param_transform(name, index, *op, operand)
             }
-            WordPart::BadTransform { name, index, raw } => {
+            WordPart::BadTransform { name, index, op } => {
                 // Empty/unknown/multi-char `@` operator: empty for an unset
                 // parameter (status 0), "bad substitution" for a set one.
                 if self.op_operand(operand, name, index).is_some() {
-                    self.bad_transform_substitution(raw)
+                    let raw = bfmt![
+                        &crate::unparse::name_sub(name, index),
+                        b"@",
+                        &crate::unparse::word_src(op)
+                    ];
+                    self.bad_transform_substitution(&raw)
                 } else {
                     Str::new()
                 }
@@ -26323,7 +26334,7 @@ impl Shell {
                 // spelling it used: `x="${n[@]@A}"` is the whole declaration
                 // under every `$IFS`, not the pieces a quoted `[@]` would split
                 // it into. See [`Shell::split_transform_items`].
-                let items = self.bulk_elements(name, op, false);
+                let items = self.bulk_elements(name, *star, op, false);
                 self.join_derived(&items, *star)
             }
             WordPart::ArrayOp {
@@ -28889,13 +28900,13 @@ impl Shell {
                 },
                 Operand::Param,
             )),
-            WordPart::ArrayBulk { name, star: _, op } => {
+            WordPart::ArrayBulk { name, star, op } => {
                 // `true`: `@A` builds its declaration out of several *items*
                 // (`declare`, `-a`, `n=(…)`), and those items are what this
                 // context's fields are made of — see
                 // [`Shell::split_transform_items`]. Every other transform is
                 // one item per element either way.
-                let items = self.bulk_elements(name, op, true);
+                let items = self.bulk_elements(name, *star, op, true);
                 let trims_an_array =
                     matches!(op, BulkOp::Trim { .. }) && name != "@" && name != "*";
                 Some(if trims_an_array {
@@ -55911,10 +55922,10 @@ fn array_target_part(part: &WordPart, name: String, star: bool) -> Option<WordPa
             star,
             op: BulkOp::Transform { op: *op },
         },
-        WordPart::BadTransform { raw, .. } => WordPart::ArrayBulk {
+        WordPart::BadTransform { op, .. } => WordPart::ArrayBulk {
             name,
             star,
-            op: BulkOp::BadTransform { raw: raw.clone() },
+            op: BulkOp::BadTransform { op: op.clone() },
         },
         WordPart::ParamSubstr { offset, length, .. } => WordPart::ArraySlice {
             name,

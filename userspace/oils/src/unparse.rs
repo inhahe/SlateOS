@@ -1507,9 +1507,11 @@ macro_rules! nested_parts_fn {
                     .into_iter()
                     .chain([arg(std::slice::$from(target.$asref()))])
                     .collect(),
-                WordPart::ParamTransform { index, .. } | WordPart::BadTransform { index, .. } => {
-                    idx(index).into_iter().collect()
-                }
+                WordPart::ParamTransform { index, .. } => idx(index).into_iter().collect(),
+                WordPart::BadTransform { index, op, .. } => idx(index)
+                    .into_iter()
+                    .chain([arg(op.parts.$slice())])
+                    .collect(),
                 WordPart::ArraySlice { offset, length, .. } => [arg(offset.parts.$slice())]
                     .into_iter()
                     .chain(length.$deref().map(|w| arg(w.parts.$slice())))
@@ -1524,7 +1526,8 @@ macro_rules! nested_parts_fn {
                             .chain(replacement.$deref().map(|w| arg(w.parts.$slice())))
                             .collect()
                     }
-                    BulkOp::Transform { .. } | BulkOp::BadTransform { .. } => Vec::new(),
+                    BulkOp::Transform { .. } => Vec::new(),
+                    BulkOp::BadTransform { op } => vec![arg(op.parts.$slice())],
                 },
                 // A process substitution's body is a `Program`, not a word, and
                 // bash never re-reads it through this path anyway.
@@ -1714,10 +1717,10 @@ fn part_src(p: &WordPart) -> Str {
         WordPart::ParamTransform { name, index, op } => {
             bfmt![b"${", &name_sub(name, index), b"@", *op, b"}"]
         }
-        WordPart::BadTransform { raw, .. } => {
-            // The raw source already includes the name, any subscript, and the
-            // (empty/unknown/multi-char) operator, e.g. `x@`, `a[0]@Z`.
-            bfmt![b"${", raw, b"}"]
+        // Rebuilt like every other operator's — name, any subscript, the `@`,
+        // then the operand text that was not a valid operator (`x@`, `a[0]@Z`).
+        WordPart::BadTransform { name, index, op } => {
+            bfmt![b"${", &name_sub(name, index), b"@", &word_src(op), b"}"]
         }
         WordPart::ArraySlice { name, star, offset, length } => {
             let sub = if name == "@" || name == "*" {
@@ -1734,11 +1737,6 @@ fn part_src(p: &WordPart) -> Str {
             s
         }
         WordPart::ArrayBulk { name, star, op } => {
-            // `BadTransform` carries the full raw inner source, so reproduce it
-            // verbatim rather than re-synthesising a subscript + operator.
-            if let BulkOp::BadTransform { raw } = op {
-                return bfmt![b"${", raw, b"}"];
-            }
             let sub = if name == "@" || name == "*" {
                 name.as_bytes().to_vec()
             } else {
@@ -1772,8 +1770,7 @@ fn part_src(p: &WordPart) -> Str {
                     bfmt![case_op_src(*mode, *all), &word_src(pattern)]
                 }
                 BulkOp::Transform { op } => bfmt![b"@", *op],
-                // Short-circuited via the early return above.
-                BulkOp::BadTransform { .. } => Str::new(),
+                BulkOp::BadTransform { op } => bfmt![b"@", &word_src(op)],
             };
             bfmt![b"${", &sub, &opstr, b"}"]
         }

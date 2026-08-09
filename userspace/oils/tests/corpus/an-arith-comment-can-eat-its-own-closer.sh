@@ -111,6 +111,36 @@ set +o posix
 
 echo done
 
+# `extract_delimited_string`'s "ran out of string" ending is a `report_error` and
+# a longjmp *only* when `no_longjmp_on_fatal_error` is clear; when it is set the
+# scan just hands back a NULL with `*sindex` at the end (subst.c:1493-1506). The
+# one caller that sets it is `expand_prompt_string` (parse.y:6094), so under
+# `PS1`/`PS4`/`${x@P}` the same comment is silent and the expansion simply keeps
+# what it had built before the `$((`, dropping the rest of the string with it.
+echo '--- under a prompt the very same comment is silent'
+pa='A$(( #5 ))B';   printf 'p1 [%s] rc=%s\n' "${pa@P}" "$?"
+pb='A$(( 1 # ))B';  printf 'p2 [%s] rc=%s\n' "${pb@P}" "$?"
+pc='$(( #5 ))';     printf 'p3 [%s] rc=%s\n' "${pc@P}" "$?"
+
+echo '--- a newline further down the string closes it after all, so it is arithmetic again'
+pd='A$(( 1 #
++ 2 ))B';          printf 'p4 [%s] rc=%s\n' "${pd@P}" "$?"
+
+# Here the count closes on a `)` that is not the arithmetic's own, so the extent
+# does not end `)`: `param_expand` takes `goto comsub` and runs the text as a
+# command substitution, leaving what the count never reached in the word.
+echo '--- and a closer found late makes it a command substitution instead'
+pe='A$(( 1 # ))
+next )) B';        printf 'p5 [%s] rc=%s\n' "${pe@P}" "$?"
+pf='A$(( 1 # ))
+echo Z )) B';      printf 'p6 [%s] rc=%s\n' "${pf@P}" "$?"
+
+echo '--- PS4 is the same door'
+PS4='+A$(( #5 ))B '
+set -x
+: marker
+set +x
+
 echo '--- errexit ends the shell, so nothing below runs'
 set -e
 echo $(( #5 ))

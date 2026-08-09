@@ -59,14 +59,28 @@ o='A$((1+$(cat <<E
 hi
 E
 )))B';                         printf '15 [%s]\n' "${o@P}"
-# A body that *fails* to parse with a newline in it is left out on purpose. The
-# read stops on the line the reader reached rather than at the end of the string
-# (`a-failed-extent-read-stops-on-the-line-the-reader-reached.sh`), which here
-# leaves the paren count to carry on from there and close early — bash gives
-# `[A)B]` for `A$((1+$(fi⏎echo x⏎)))B` where the one-line shape gives `[A]`, and
-# reports a second time from the fallback child. osh does not reproduce that yet;
-# see `TD-OILS-AN-ARITHMETIC-EXTENT-CARRIES-ON-COUNTING-AFTER-A-FAILED-READ` in
-# known-issues.md.
+echo "=== a body with a newline in it stops the read early, and the count carries on"
+# The failed read stops on the line the *reader* reached, not at the end of the
+# string (`a-failed-extent-read-stops-on-the-line-the-reader-reached.sh`), so the
+# paren count resumes from there — mid-`)))` — and closes on a `)` the one-line
+# shape never reaches. The extent is then `(1+$(fi⏎echo x⏎)` , whose last byte is
+# not `)`, so `param_expand` takes `goto comsub` (subst.c:10600) and runs the
+# same text as a command substitution: a *second* report, from the child. What
+# the count did not reach — here a bare `)` — is left in the word.
+r='A$((1+$(fi
+echo x
+)))B';                        printf '18 [%s]\n' "${r@P}"
+s='A$((1+$(fi
+echo x
+)))B${y}C';                   printf '19 [%s]\n' "${s@P}"
+t='A$(($(fi
+echo x
+)))B';                        printf '20 [%s]\n' "${t@P}"
+# `A$((1+$(fi⏎echo x⏎))X)B` — one closer fewer, so the resumed count reads `X)`
+# as part of the extent and the leftover is `X)B` — is left out: osh's lexer
+# decides arith-vs-comsub before expansion sees the word, so no arithmetic part
+# exists to re-count. See TD-OILS-AN-ARITHMETIC-EXTENT-CARRIES-ON-COUNTING-AFTER-
+# A-FAILED-READ in known-issues.md.
 
 echo "=== a single-quoted run inside the arithmetic is still parsed, being a real parse"
 q='A$((1+$(echo "x" ; fi)))B'; printf '17 [%s]\n' "${q@P}"

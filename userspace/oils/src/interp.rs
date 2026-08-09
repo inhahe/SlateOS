@@ -24417,6 +24417,16 @@ impl Shell {
     }
 
     fn quoted_per_element_parts(&mut self, parts: &[WordPart]) -> Option<Vec<Str>> {
+        // The `${ … }` scan runs before any of the substitution is expanded, and
+        // the arms below expand one without going through
+        // [`Self::expand_dynamic_with`] — so the scan is asked here too. See
+        // [`Self::brace_extent_scan`]. A failed scan leaves the substitution
+        // contributing nothing, which inside quotes is one empty field.
+        if let [part] = parts
+            && self.brace_extent_scan(part)
+        {
+            return Some(vec![Str::new()]);
+        }
         match parts {
             [
                 WordPart::ArrayRef {
@@ -25688,6 +25698,185 @@ impl Shell {
         self.unbound_error.is_some() || self.discard_error.is_some()
     }
 
+    /// bash's `${ … }` scan, reduced to the one thing in it this shell has not
+    /// already done while parsing: reading the *extent* of a `$( … )` between the
+    /// braces. Answers whether the scan failed, in which case the substitution
+    /// contributes nothing.
+    ///
+    /// The scan is over text, so it runs whether or not the operand is ever used
+    /// — `y=Y; ${y:-p$(fi)q}` reports even though the `:-` word is not
+    /// substituted — and it reads a nested `$(` with a real parse:
+    ///
+    /// ```c
+    ///   if (string[i] == '$' && string[i+1] == LPAREN)
+    ///     { si = i + 2; t = extract_command_subst (string, &si, flags|SX_NOALLOC); }
+    ///                                              /* subst.c:1896-1902 */
+    /// ```
+    ///
+    /// A failed read whose jump is suppressed leaves `si` on the last byte of the
+    /// *whole* string ([`Shell::extent_consumed`]), so `i = si + 1` walks the scan
+    /// off the end with `nesting_level` still 1. `extract_dollar_brace_string`
+    /// then returns NULL, and `parameter_brace_expand` makes that its own
+    /// diagnostic naming the whole text:
+    ///
+    /// ```c
+    ///   value = extract_dollar_brace_string (string, &sindex, quoted, …);
+    ///   if (string[sindex] == RBRACE) sindex++;
+    ///   else goto bad_substitution;                /* subst.c:9913-9918 */
+    /// ```
+    ///
+    /// So the operand never expands and the failed body is never *run* — unlike
+    /// at the string level, where the same failure runs the remainder less a byte
+    /// ([`Self::failed_extent_body`]). Nothing between the braces happens at all:
+    /// measured against bash 5.2.37, `A${y:-$(echo in >&2)p$(fi)q}B` prints no
+    /// `in`, while a substitution *before* the brace still runs.
+    ///
+    /// Only a `$( … )` spelling can fail this way — see the arms below.
+    ///
+    /// Because the scan comes *before* any of the expansion, it has to be asked
+    /// at every door into one — [`Self::expand_dynamic_with`] is the usual one,
+    /// but the two list recognisers ([`Self::split_items`] and
+    /// [`Self::quoted_per_element_parts`]) reach `${x:-w}` and its relatives
+    /// directly and would otherwise expand a `${ … }` the scan had never read.
+    /// A scan that *succeeds* changes nothing at all, so the recognisers' `None`
+    /// answers may safely be scanned a second time on the way through
+    /// `expand_dynamic_with`.
+    fn brace_extent_scan(&mut self, part: &WordPart) -> bool {
+        // A double-quoted run is not a `${ }`. Its parts belong to the string
+        // the scan would be *inside*, and the substitutions in them are read
+        // where they stand — by [`Self::command_sub_body_inner`], which answers
+        // the string-level rule instead.
+        if matches!(part, WordPart::DoubleQuoted(_)) {
+            return false;
+        }
+        let mut subs: Vec<&WordPart> = Vec::new();
+        Self::brace_scanned_subs(part, &mut subs);
+        for sub in subs {
+            let WordPart::CommandSub { body } = sub else {
+                continue;
+            };
+            let read = match body {
+                CmdSubBody::Parsed { src, close_line, tail, .. } => {
+                    tail.as_ref().map_or(ExtentRead::Closed, |tail| {
+                        self.comsub_reparse_read(src, tail, *close_line, true)
+                    })
+                }
+                CmdSubBody::Unread { src, tail, close_line, closed } => {
+                    self.comsub_reparse_read(src, tail, *close_line, *closed)
+                }
+                // Neither of these two spellings is *parsed* by the scan that
+                // finds it. A backquote is `string_extract (string, &si, "`",
+                // …)` (subst.c:1886), a plain byte hunt for the closer; and a
+                // `$((` goes to `extract_delimited_string` instead of
+                // `xparse_dolparen` (subst.c:1284), which counts parentheses.
+                // So their own extents cannot fail: ``A${y:-p`fi`q}B`` and
+                // `A${y:-p$((1+))q}B` both expand quietly to `AYB`.
+                //
+                // A `$( … )` *nested inside* the arithmetic is another matter —
+                // `extract_delimited_string` carries `SX_COMMAND` too and
+                // recurses into one, so `A${y:-$((1+$(fi)))}B` does report. That
+                // is not reachable from here because the arithmetic body is kept
+                // as raw text; see
+                // TD-OILS-A-RAW-TEXT-BRACE-CONSTRUCT-IS-INVISIBLE-TO-THE-EXTENT-SCAN.
+                CmdSubBody::Backtick { .. } | CmdSubBody::ArithFallback { .. } => {
+                    ExtentRead::Closed
+                }
+            };
+            match read {
+                ExtentRead::Closed => {}
+                // The jump stands, so the enclosing command is abandoned before
+                // the brace is ever asked to close.
+                ExtentRead::Aborted => return true,
+                ExtentRead::Abandoned => {
+                    // The scan ran off the end of the string, which is both why
+                    // the brace cannot close and why nothing after it is looked
+                    // at — see [`Shell::extent_consumed`].
+                    self.extent_consumed = true;
+                    let text = self.bad_sub_word.clone().unwrap_or_default();
+                    self.emit_stderr(&bfmt![
+                        self.err_prefix(),
+                        &text,
+                        b": bad substitution\n"
+                    ]);
+                    // Only a prompt expansion suppresses the jump, and that is
+                    // the one caller that keeps the undecoded text rather than
+                    // the expansion — the same ending as any other unclosed
+                    // `${ … }` there. See [`Shell::expand_unclosed`].
+                    self.prompt_failed = true;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Every command substitution bash's `${ … }` scan meets, in the order it
+    /// meets them — see [`Self::brace_extent_scan`].
+    ///
+    /// Two things the scan steps over rather than reads, and so are left out
+    /// here: a `[ … ]` subscript at any depth (see
+    /// [`crate::unparse::Nested::Index`]) and a `' … '` run.
+    ///
+    /// The single-quote rule is the scan's own and not the expansion's, so the
+    /// two disagree in plain sight: `${x:-'p$(echo Q)q'}` inside double quotes
+    /// *expands* the substitution and keeps the quotes as text (bash 5.2.37 gives
+    /// `'pQq'`), because `expand_word_internal` is past the point where a `'`
+    /// could quote anything — but `extract_dollar_brace_string` still walked over
+    /// it with `skip_single_quoted` (subst.c:1926-1938) and so never read the
+    /// extent. Hence `${y:-'p$(fi)q'}` reports nothing at all.
+    ///
+    /// The state is the scan's single pass over the text, so it runs on across
+    /// parts and into nested braces; a `\` hides the byte after it, exactly as
+    /// the scan's `pass_character` does. A double-quoted run is handed to
+    /// `skip_double_quoted` instead, which reads a `$(` but knows nothing of
+    /// single quotes — so the run starts fresh and leaves the outer state as it
+    /// found it.
+    fn brace_scanned_subs<'a>(part: &'a WordPart, out: &mut Vec<&'a WordPart>) {
+        Self::brace_scanned_subs_in(part, out, &mut false);
+    }
+
+    fn brace_scanned_subs_in<'a>(
+        part: &'a WordPart,
+        out: &mut Vec<&'a WordPart>,
+        squote: &mut bool,
+    ) {
+        let dq = matches!(part, WordPart::DoubleQuoted(_));
+        let saved = dq.then(|| std::mem::replace(squote, false));
+        for (kind, parts) in crate::unparse::nested_parts(part) {
+            if kind == crate::unparse::Nested::Index {
+                continue;
+            }
+            for p in parts {
+                match p {
+                    WordPart::CommandSub { .. } => {
+                        if !*squote {
+                            out.push(p);
+                        }
+                    }
+                    // The literal runs *are* the raw text between the
+                    // constructs, which is the only text the scan reads a quote
+                    // out of.
+                    WordPart::Literal(t) => {
+                        let mut it = t.iter();
+                        while let Some(&b) = it.next() {
+                            match b {
+                                b'\\' => {
+                                    it.next();
+                                }
+                                b'\'' => *squote = !*squote,
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => Self::brace_scanned_subs_in(p, out, squote),
+                }
+            }
+        }
+        if let Some(s) = saved {
+            *squote = s;
+        }
+    }
+
     /// [`Self::expand_dynamic`] with the text a modifier works on supplied by
     /// the caller — see [`Operand`]. Only the parameter-modifier parts consult
     /// it; every other part expands the same either way.
@@ -25698,6 +25887,12 @@ impl Shell {
         // substitution inside a later part, a subscript, and the operand of a
         // modifier all arrive back through this one door.
         if self.expansion_failed() {
+            return Str::new();
+        }
+        // A `${ … }` is *scanned* before any of it is expanded, and the scan
+        // does one thing this shell's parse did not: it reads the extent of a
+        // `$( … )` between the braces. See [`Self::brace_extent_scan`].
+        if self.brace_extent_scan(part) {
             return Str::new();
         }
         match part {
@@ -28360,6 +28555,14 @@ impl Shell {
         // with, repeated because this path reaches the element helpers directly.
         if self.expansion_failed() {
             return None;
+        }
+        // And the `${ … }` scan for the same reason: the arms below expand a
+        // substitution without going through [`Self::expand_dynamic_with`], so
+        // this is one of the doors the scan has to be asked at. See
+        // [`Self::brace_extent_scan`]. A failed scan contributes nothing, which
+        // here is the one empty string an unquoted expansion splits away to.
+        if self.brace_extent_scan(part) {
+            return Some(SplitItems::Joined(vec![Str::new()]));
         }
         match part {
             WordPart::ArrayRef {

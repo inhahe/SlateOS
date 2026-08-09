@@ -1373,90 +1373,133 @@ fn walk_parts_in(
             *i = i.saturating_add(1);
             continue;
         }
-        for w in nested_parts_mut(p) {
+        for (_, w) in nested_parts_mut(p) {
             walk_parts_in(w, want, n, i, act);
         }
     }
 }
 
-/// Every part list nested inside `p`. The match is deliberately exhaustive: a
-/// new [`WordPart`] that can hold a word has to be considered here, because a
-/// `$( … )` inside one that this missed would be given no tail and would then
-/// echo a truncated line if its re-print ever failed to parse.
-fn nested_parts_mut(p: &mut WordPart) -> Vec<&mut [WordPart]> {
-    fn idx(i: &mut Option<Box<Word>>) -> Option<&mut [WordPart]> {
-        i.as_deref_mut().map(|w| w.parts.as_mut_slice())
-    }
-    fn aidx(i: &mut ArrayIndex) -> Option<&mut [WordPart]> {
-        match i {
-            ArrayIndex::Index(w) => Some(w.parts.as_mut_slice()),
-            ArrayIndex::All | ArrayIndex::Star => None,
-        }
-    }
-    match p {
-        WordPart::DoubleQuoted(parts) => vec![parts.as_mut_slice()],
-        WordPart::ParamOp { index, arg, .. } => {
-            idx(index).into_iter().chain([arg.parts.as_mut_slice()]).collect()
-        }
-        // `ArrayOp` carries no subscript *word*: it applies to the array as a
-        // whole (`[@]`/`[*]`), which is recorded as the `star` flag.
-        WordPart::ArrayOp { arg, .. } => vec![arg.parts.as_mut_slice()],
-        WordPart::ParamTrim { index, pattern, .. }
-        | WordPart::ParamCase { index, pattern, .. } => {
-            idx(index).into_iter().chain([pattern.parts.as_mut_slice()]).collect()
-        }
-        WordPart::ParamSubstr { index, offset, length, .. } => idx(index)
-            .into_iter()
-            .chain([offset.parts.as_mut_slice()])
-            .chain(length.as_deref_mut().map(|w| w.parts.as_mut_slice()))
-            .collect(),
-        WordPart::ParamReplace { index, pattern, replacement, .. } => idx(index)
-            .into_iter()
-            .chain([pattern.parts.as_mut_slice()])
-            .chain(replacement.as_deref_mut().map(|w| w.parts.as_mut_slice()))
-            .collect(),
-        WordPart::Indirect { index, .. } => index.as_mut().and_then(aidx).into_iter().collect(),
-        WordPart::ArrayRef { index, .. } => aidx(index).into_iter().collect(),
-        WordPart::IndirectOp { index, target, .. } => index
-            .as_mut()
-            .and_then(aidx)
-            .into_iter()
-            .chain([std::slice::from_mut(target.as_mut())])
-            .collect(),
-        WordPart::ParamTransform { index, .. } | WordPart::BadTransform { index, .. } => {
-            idx(index).into_iter().collect()
-        }
-        WordPart::ArraySlice { offset, length, .. } => [offset.parts.as_mut_slice()]
-            .into_iter()
-            .chain(length.as_deref_mut().map(|w| w.parts.as_mut_slice()))
-            .collect(),
-        WordPart::ArrayBulk { op, .. } => match op {
-            BulkOp::Trim { pattern, .. } | BulkOp::Case { pattern, .. } => {
-                vec![pattern.parts.as_mut_slice()]
-            }
-            BulkOp::Replace { pattern, replacement, .. } => [pattern.parts.as_mut_slice()]
-                .into_iter()
-                .chain(replacement.as_deref_mut().map(|w| w.parts.as_mut_slice()))
-                .collect(),
-            BulkOp::Transform { .. } | BulkOp::BadTransform { .. } => Vec::new(),
-        },
-        // A process substitution's body is a `Program`, not a word, and bash
-        // never re-reads it through this path anyway.
-        WordPart::Literal(_)
-        | WordPart::SingleQuoted { .. }
-        | WordPart::Param { .. }
-        | WordPart::VarNames { .. }
-        | WordPart::CommandSub { .. }
-        | WordPart::ArithSub { .. }
-        | WordPart::Length(_)
-        | WordPart::ArrayKeys { .. }
-        | WordPart::BadSubst(_)
-        | WordPart::TokenText(_)
-        // An unclosed construct holds only the text a diagnostic echoes back.
-        | WordPart::Unclosed(_)
-        | WordPart::ProcSub { .. } => Vec::new(),
-    }
+/// Where a nested part list sits inside the part that holds it, which is what
+/// decides whether bash's `${ … }` scan walks through it. See [`nested_parts`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Nested {
+    /// A `[ … ]` subscript. `extract_dollar_brace_string` steps over one whole —
+    ///
+    /// ```c
+    ///   if (c == LBRACK && dolbrace_state == DOLBRACE_PARAM)
+    ///     { si = skipsubscript (string, i, 0); … }     /* subst.c:1940-1946 */
+    /// ```
+    ///
+    /// — at any depth, because `${` sets `DOLBRACE_PARAM` again for each nested
+    /// brace. The subscript text is expanded later as a string in its own right,
+    /// so a `$( … )` in one is read there instead: measured against bash 5.2.37,
+    /// `${a[$(fi)]}` reports twice at the *subscript's* scope and the brace still
+    /// closes (`A0B`), where `${y:-${a[$(fi)]}}` reports not at all.
+    Index,
+    /// Anything the scan walks through: an operand, a pattern, a replacement,
+    /// the bounds of a substring, the contents of a double-quoted run.
+    Operand,
 }
+
+/// Define [`nested_parts`] and [`nested_parts_mut`] from one match.
+///
+/// The two walks want the same answer with opposite mutability, and the match
+/// carries a rule that has to be obeyed in exactly one place: it is deliberately
+/// exhaustive, because a new [`WordPart`] that can hold a word has to be
+/// *considered* here. A `$( … )` inside one this missed would be given no tail
+/// by [`attach_comsub_tails`] — and so would echo a truncated line if its
+/// re-print ever failed to parse — and would be stepped over by
+/// [`crate::interp::Shell::brace_extent_scan`], which is bash's `${ … }` scan
+/// and reads every `$(` between the braces however deeply it is nested.
+macro_rules! nested_parts_fn {
+    ($name:ident, $slice:ident, $deref:ident, $asref:ident, $from:ident, $($m:tt)?) => {
+        pub(crate) fn $name(p: &$($m)? WordPart) -> Vec<(Nested, &$($m)? [WordPart])> {
+            fn idx(i: &$($m)? Option<Box<Word>>) -> Option<(Nested, &$($m)? [WordPart])> {
+                i.$deref().map(|w| (Nested::Index, w.parts.$slice()))
+            }
+            fn aidx(i: &$($m)? ArrayIndex) -> Option<(Nested, &$($m)? [WordPart])> {
+                match i {
+                    ArrayIndex::Index(w) => Some((Nested::Index, w.parts.$slice())),
+                    ArrayIndex::All | ArrayIndex::Star => None,
+                }
+            }
+            fn arg(p: &$($m)? [WordPart]) -> (Nested, &$($m)? [WordPart]) {
+                (Nested::Operand, p)
+            }
+            match p {
+                WordPart::DoubleQuoted(parts) => vec![arg(parts.$slice())],
+                WordPart::ParamOp { index, arg: a, .. } => {
+                    idx(index).into_iter().chain([arg(a.parts.$slice())]).collect()
+                }
+                // `ArrayOp` carries no subscript *word*: it applies to the array
+                // as a whole (`[@]`/`[*]`), recorded as the `star` flag.
+                WordPart::ArrayOp { arg: a, .. } => vec![arg(a.parts.$slice())],
+                WordPart::ParamTrim { index, pattern, .. }
+                | WordPart::ParamCase { index, pattern, .. } => {
+                    idx(index).into_iter().chain([arg(pattern.parts.$slice())]).collect()
+                }
+                WordPart::ParamSubstr { index, offset, length, .. } => idx(index)
+                    .into_iter()
+                    .chain([arg(offset.parts.$slice())])
+                    .chain(length.$deref().map(|w| arg(w.parts.$slice())))
+                    .collect(),
+                WordPart::ParamReplace { index, pattern, replacement, .. } => idx(index)
+                    .into_iter()
+                    .chain([arg(pattern.parts.$slice())])
+                    .chain(replacement.$deref().map(|w| arg(w.parts.$slice())))
+                    .collect(),
+                WordPart::Indirect { index, .. } => {
+                    index.$asref().and_then(aidx).into_iter().collect()
+                }
+                WordPart::ArrayRef { index, .. } => aidx(index).into_iter().collect(),
+                WordPart::IndirectOp { index, target, .. } => index
+                    .$asref()
+                    .and_then(aidx)
+                    .into_iter()
+                    .chain([arg(std::slice::$from(target.$asref()))])
+                    .collect(),
+                WordPart::ParamTransform { index, .. } | WordPart::BadTransform { index, .. } => {
+                    idx(index).into_iter().collect()
+                }
+                WordPart::ArraySlice { offset, length, .. } => [arg(offset.parts.$slice())]
+                    .into_iter()
+                    .chain(length.$deref().map(|w| arg(w.parts.$slice())))
+                    .collect(),
+                WordPart::ArrayBulk { op, .. } => match op {
+                    BulkOp::Trim { pattern, .. } | BulkOp::Case { pattern, .. } => {
+                        vec![arg(pattern.parts.$slice())]
+                    }
+                    BulkOp::Replace { pattern, replacement, .. } => {
+                        [arg(pattern.parts.$slice())]
+                            .into_iter()
+                            .chain(replacement.$deref().map(|w| arg(w.parts.$slice())))
+                            .collect()
+                    }
+                    BulkOp::Transform { .. } | BulkOp::BadTransform { .. } => Vec::new(),
+                },
+                // A process substitution's body is a `Program`, not a word, and
+                // bash never re-reads it through this path anyway.
+                WordPart::Literal(_)
+                | WordPart::SingleQuoted { .. }
+                | WordPart::Param { .. }
+                | WordPart::VarNames { .. }
+                | WordPart::CommandSub { .. }
+                | WordPart::ArithSub { .. }
+                | WordPart::Length(_)
+                | WordPart::ArrayKeys { .. }
+                | WordPart::BadSubst(_)
+                | WordPart::TokenText(_)
+                // An unclosed construct holds only the text a diagnostic echoes
+                // back.
+                | WordPart::Unclosed(_)
+                | WordPart::ProcSub { .. } => Vec::new(),
+            }
+        }
+    };
+}
+
+nested_parts_fn!(nested_parts, as_slice, as_deref, as_ref, from_ref,);
+nested_parts_fn!(nested_parts_mut, as_mut_slice, as_deref_mut, as_mut, from_mut, mut);
 
 fn part_src(p: &WordPart) -> Str {
     match p {

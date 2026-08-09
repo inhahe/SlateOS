@@ -259,7 +259,7 @@ swallowed (bash echoes that body as `` `fi)B$(echo hi)' ``).
 
 ---
 
-### TD-OILS-A-FAILED-EXTENT-PARSE-INSIDE-A-BRACE-OPERAND-DOES-NOT-KILL-THE-BRACE. `v='A${y:-p$(fi)q}B'; echo "${v@P}"` expands the brace; bash calls the whole thing a bad substitution — 2026-08-09 — OPEN
+### TD-OILS-A-FAILED-EXTENT-PARSE-INSIDE-A-BRACE-OPERAND-DOES-NOT-KILL-THE-BRACE. `v='A${y:-p$(fi)q}B'; echo "${v@P}"` expands the brace; bash calls the whole thing a bad substitution — 2026-08-09 — ✅ FIXED 2026-08-09
 
 **Where:** `userspace/oils/src/parser.rs`, `dquote_word_from_source` — which lexes
 the whole string into parts *before* anything is expanded, so a `${ … }` finds
@@ -318,36 +318,214 @@ the measurement refused it.) Two further details the same probe pins:
   exactly `src + ")" + tail` with the `tail` that `unparse::attach_comsub_tails`
   already computes, since it renders the whole word around the part.
 
-**Proper fix.** The extent parse has to happen while the *word* is being built,
-not while it is being expanded — but that does not require inverting the lexer,
-because the natural home is a post-lex pass in `parser.rs`, beside the one that
-already exists. `dquote_word_from_source` runs `unparse::attach_comsub_tails`
-over its parts; a second pass can walk the same parts and, for each
-`CmdSubBody::Unread`, run the extent read over `src + ")" + tail` (the tail the
-first pass just computed, which is already the rest of the whole string). Then:
+**Fixed** by `Shell::brace_extent_scan` (`userspace/oils/src/interp.rs`) — but
+*not* by the post-lex pass sketched below, and the write-up above was wrong in
+several places. Recording both, because the corrections are the interesting part.
 
-- **at the top level** — nothing to do; the failure is reported and consumed at
-  expansion time, which is what `Shell::extent_consumed` now models correctly.
-- **nested inside a `${ }`** — the brace can never close, so the word is
-  rebuilt as the scan would have left it: the substitution part, marked as
-  reporting-but-not-running, followed by a
-  `Seg::Unclosed(Unclosed::BadSubst { close: '}', text: <whole text> })`. Both
-  reports then come out at expansion time, in bash's order, from machinery that
-  already exists — `Shell::expand_unclosed`'s `BadSubst` arm is *already* an
-  exact match for the second one, including the `prompt_failed` that makes the
-  caller keep the undecoded text.
+**What the plan above got wrong.**
 
-The one genuinely new thing is the "reports but does not run" mark on the
-substitution, since today a reported extent failure either aborts or runs the
-truncated body. Deferred only because it is a prompt-only corner and wants its
-own change with its own sweep, not because the shape is unclear.
+- It was scoped to `dquote_word_from_source`, i.e. to prompt expansions and
+  `CmdSubBody::Unread` bodies. That is far too narrow. **Every** word reaches the
+  same scan, and a body the parser *did* read fails it just as readily when its
+  re-print will not parse back: `y=Y; echo "A${y:-p$(`↵`!`↵`)q}B"` is a plain
+  command, and bash reports `` `! )q}B"' `` and exits 1. A `CmdSubBody::Parsed`
+  needed handling too.
+- It wanted the scan modelled as a lex-time rewrite into
+  `Unclosed::BadSubst`. Wrong shape: the failure is a *runtime* one (the extent
+  read runs commands' parsers, honours `errexit`, and its jump depends on
+  `Shell::prompt_expanding`), so it belongs on the expansion path after all —
+  just *before* the operand rather than inside it.
+- It said the "reports but does not run" mark was the one genuinely new thing.
+  It was not needed: a brace-level scan failure simply returns early, and the
+  body is never handed to `command_sub` at all.
+- The `${y/$(fi)/z}` row in the table above is marked "matches ✓". **It does
+  not.** osh produces the right *text* but emits no diagnostics whatsoever,
+  because a pattern operand is parsed eagerly — see
+  TD-OILS-A-BRACE-PATTERN-OPERAND-IS-PARSED-EAGERLY.
 
-**Impact.** Prompt expansions only, and only where a syntax-error `$( … )` sits
-inside a `${ … }` operand. The top-level shapes — by far the reachable ones —
-are byte-exact.
+**What the fix actually is.** `brace_extent_scan(part)` walks the substitutions
+bash's `extract_dollar_brace_string` would meet between the braces and runs the
+extent read on each, *before* the substitution is expanded. It runs at every door
+into an expansion, because there are three and only one of them is the obvious
+one:
+
+- `Shell::expand_dynamic_with` — the general one;
+- `Shell::split_items` — the unquoted list recogniser, which reaches
+  `expand_param_op` directly for `${x:-w}` and its relatives;
+- `Shell::quoted_per_element_parts` — the same recogniser inside double quotes.
+
+Missing the latter two is what made `"${y:-…}"` and `${y:-…}` silently skip the
+scan while `${y:=…}` — which has no list form and so falls through to
+`expand_dynamic_with` — behaved correctly. A scan that *succeeds* has no effect
+at all, so the recognisers' `None` answers being scanned a second time on the way
+through `expand_dynamic_with` is harmless.
+
+**Two things the scan steps over,** both measured against bash 5.2.37 and both
+absent from the original write-up:
+
+- **A `' … '` run.** `skip_single_quoted` (subst.c:1926-1938) steps over one, so
+  `A${y:-'p$(fi)q'}B` reports *nothing* — even though the quotes are not quotes to
+  the expansion, which happily runs `A${nope:-'p$(echo Q)q'}B` into `A'pQq'B`. The
+  scan and the expansion disagree in plain sight. Modelled by threading a
+  single-quote toggle through `Shell::brace_scanned_subs_in`, because in unread
+  double-quote text the lexer emits `Literal("'")` parts rather than a
+  `SingleQuoted` part.
+- **A `[ … ]` subscript, at any depth** (`skipsubscript`, subst.c:1940-1946) —
+  see `unparse::Nested::Index`. A `" … "` run, by contrast, goes to
+  `skip_double_quoted`, which *does* read a `$(`.
+
+**Corpus:**
+`a-failed-extent-parse-inside-a-brace-operand-does-not-kill-the-brace.sh`.
 
 **Found by** the measurement pass for
 TD-OILS-A-FAILED-EXTENT-PARSE-CONSUMES-THE-REST-OF-THE-STRING.
+
+---
+
+### TD-OILS-A-BRACE-PATTERN-OPERAND-IS-PARSED-EAGERLY. `${y#$(fi)}` is read as source at parse time, so it either kills the whole script or vanishes without a word — 2026-08-09 — OPEN
+
+**Where:** `userspace/oils/src/parser.rs`. The pattern/replacement/offset
+fragments of a `${ … }` all go through `word_verbatim_from_source_at`, which
+always passes `Quoting::Bare` to `seg_to_part` (parser.rs:6954). `Quoting::Bare`
+means "the parser read this", so a nested `$( … )` is parsed **now**. The operand
+of `${x:-w}` does not have this problem: `operand_from_source` (parser.rs:6989)
+routes a non-bare read to `lex_operand_in_dquote(s, q == Quoting::Unread)` and
+keeps the body as `CmdSubBody::Unread`. The call sites that want the same
+treatment are parser.rs:6640, 6658, 6835, 6874, 6889 (patterns, replacement,
+case-modification pattern, substring offset).
+
+**Reproduce** (`y=Y`, bash 5.2.37):
+
+| value, expanded with `@P` | bash | osh |
+|---|---|---|
+| `A${y#$(fi)}B` | 2 × `command substitution: … `fi)}B'` + `A${y#$(fi)}B: bad substitution`, result `A${y#$(fi)}B` | result `A${y#$(fi)}B`, **no diagnostics at all** |
+| `A${y/$(fi)/z}B` | same shape, tail `` `fi)/z}B' `` | same silence |
+| `A${y/Y/$(fi)}B` | same shape | same silence |
+| `A${y^$(fi)}B` | same shape | same silence |
+| `A${y:$(fi):1}B` | same shape, tail `` `fi):1}B' `` | same silence |
+
+In a here-document body the same eagerness is worse than silent — it kills the
+*whole script*:
+
+```
+$ printf 'y=Y\ncat <<E\nA${y#$(fi)}B\nE\n' > s.sh
+bash: (runs; reports the substitution and prints `A${y#$(fi)}B`)
+osh:  s.sh: line 1: syntax error near unexpected token `fi'
+      s.sh: line 1: `y=Y'
+```
+
+**Why it matters now.** `Shell::brace_extent_scan` (added for
+TD-OILS-A-FAILED-EXTENT-PARSE-INSIDE-A-BRACE-OPERAND-DOES-NOT-KILL-THE-BRACE) is
+what makes these report, and it cannot see these substitutions because the parse
+never produced a `WordPart::CommandSub` for them — it produced a `ParseError`
+that the caller swallowed by falling back to the raw text.
+
+**Proper fix.** Give `crate::lexer::lex_word_verbatim_opts` an `unread` flag, the
+way `lex_operand_in_dquote` already has one, and thread the caller's `Quoting`
+into `word_verbatim_from_source_at` so the pattern/offset fragments of an unread
+`${ … }` produce `CmdSubBody::Unread` bodies. Then the existing brace scan and
+the existing string-level extent read both reach them with no further work.
+
+**Found by** the corpus pass for
+`a-failed-extent-parse-inside-a-brace-operand-does-not-kill-the-brace.sh`.
+
+---
+
+### TD-OILS-A-BRACE-SUBSCRIPT-IS-NOT-EXPANDED-AS-A-STRING-OF-ITS-OWN. `${a[$(fi)]}` reports nothing where bash reports twice and still answers `A0B` — 2026-08-09 — OPEN
+
+**Where:** `userspace/oils/src/parser.rs:6201`, the `ArrayIndex::Index` arm of
+the name/subscript split, which calls `word_verbatim_from_source_at` — the same
+eager read as TD-OILS-A-BRACE-PATTERN-OPERAND-IS-PARSED-EAGERLY, so the two
+share a fix.
+
+**Reproduce** (`declare -a a=(0 1 2)`, `y=Y`, expanded with `@P`):
+
+```text
+A${a[$(fi)]}B
+  bash: command substitution: line 11: syntax error near unexpected token `fi'
+        command substitution: line 11: `fi)'
+        command substitution: line 10: syntax error near unexpected token `fi'
+        command substitution: line 10: `fi'
+        A0B
+  osh:  A${a[$(fi)]}B          (no diagnostics)
+
+A${y:-${a[$(fi)]}}B
+  bash: AYB                    (no diagnostics — see below)
+  osh:  A${y:-${a[$(fi)]}}B
+```
+
+**Why.** Two separate rules meet here.
+
+1. `extract_dollar_brace_string` **steps over** a `[ … ]` at any depth
+   (`skipsubscript`, subst.c:1940-1946), so the brace scan never reads the
+   `$( … )` inside one — which is why the second row is silent even though the
+   `$( … )` is unparseable. See `unparse::Nested::Index`, which already models
+   this for `Shell::brace_scanned_subs`.
+2. The subscript text is later expanded as a **string in its own right**, and the
+   ordinary string-level rule applies there: one report from the extent read and
+   one from the body's real run (see
+   TD-OILS-A-FAILED-EXTENT-PARSE-CONSUMES-THE-REST-OF-THE-STRING). The tail is
+   the subscript's own remainder (`` `fi)' ``), not the whole word's — the
+   subscript is its own scope. The arithmetic evaluation of the empty result
+   then yields index 0, hence `A0B`.
+
+**Proper fix.** The lexer change described in
+TD-OILS-A-BRACE-PATTERN-OPERAND-IS-PARSED-EAGERLY makes the subscript hold a
+`CmdSubBody::Unread`; the second rule then needs the subscript's expansion to run
+the extent read at its own scope, with the subscript's remainder as the tail.
+`unparse::attach_comsub_tails` already computes a per-part tail by rendering the
+enclosing container, so the piece to add is a container boundary at the
+subscript rather than new tail machinery.
+
+---
+
+### TD-OILS-A-RAW-TEXT-BRACE-CONSTRUCT-IS-INVISIBLE-TO-THE-EXTENT-SCAN. `${y@$(fi)}` exits the shell where bash reports and carries on — 2026-08-09 — OPEN
+
+**Where:** `userspace/oils/src/ast.rs`. `WordPart::BadTransform { raw: Str }`,
+`BulkOp::BadTransform { raw: Str }`, `WordPart::BadSubst(Str)` and
+`WordPart::ArithSub { expr }` all keep **unparsed source**, so a `$( … )` inside
+one is not a `WordPart::CommandSub` and `Shell::brace_scanned_subs` cannot find
+it.
+
+**Reproduce** (`y=Y`, expanded with `@P`):
+
+```text
+A${y@$(fi)}B
+  bash: command substitution: line 14: syntax error near unexpected token `fi'
+        command substitution: line 14: `fi)}B'
+        line 13: A${y@$(fi)}B: bad substitution
+        A${y@$(fi)}B                       … and the script continues
+  osh:  line 13: A${y@$(fi)}B: bad substitution
+                                           … and the shell *exits*
+
+A${y:-$((1+$(fi)))}B
+  bash: command substitution: line 16: syntax error near unexpected token `fi'
+        command substitution: line 16: `fi)))}B'
+        line 15: A${y:-$((1+$(fi)))}B: bad substitution
+        A${y:-$((1+$(fi)))}B
+  osh:  A${y:-$((1+$(fi)))}B               (no diagnostics)
+```
+
+Two distinct defects in the first row: the missing extent report, *and* osh
+treating the bad transform as fatal (`bad_substitution_with(fatal = true)`,
+interp.rs) where bash reports it as an ordinary bad substitution and keeps going.
+
+**Note the second row corrects a comment in `Shell::brace_extent_scan`.** It says
+a `$((` "goes to `extract_delimited_string` … which counts parentheses", so its
+extent cannot fail — true of `${y:-p$((1+))q}B`, which is quiet, but *not* of a
+`$( … )` nested inside the arithmetic: `extract_delimited_string` carries
+`SX_COMMAND` too and recurses into one. So `CmdSubBody::ArithFallback` needs its
+*contents* scanned even though its own extent cannot fail.
+
+**Proper fix.** Two parts, independent of each other:
+
+1. Make a bad transform non-fatal, matching bash's `bad_substitution` path.
+2. Give the raw-text constructs enough structure for the scan to walk — either by
+   lexing their bodies into parts (as the fix for
+   TD-OILS-A-BRACE-PATTERN-OPERAND-IS-PARSED-EAGERLY does for patterns), or by
+   giving `Shell::brace_scanned_subs` a raw-text scanner that finds `$(` runs in
+   them the way bash's own single pass does. The first is preferable: it keeps
+   one reader rather than two that must agree.
 
 ---
 

@@ -43,6 +43,138 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
+### TD-OILS-A-SINGLE-QUOTED-RUN-IN-A-BARE-SUB-WORD-OF-A-BRACE-IS-A-QUOTE. `"${a['$(echo 1)']}"` leaves the substitution unexpanded — 2026-08-10
+
+**Where:** `userspace/oils/src/parser.rs` — the sub-words of a `${ … }` that are
+read *bare* (`Quoting::Bare`): a `[ … ]` subscript, a substring offset/length, a
+pattern, a replacement. A `' … '` in one becomes a `WordPart::SingleQuoted`, so
+nothing inside it is parsed. The operand after `:-`/`:+`/… is not affected — it
+inherits the enclosing quoting, and
+`tests/corpus/a-single-quoted-run-in-a-double-quoted-brace-operand-is-an-extent-not-a-quote.sh`
+covers it.
+
+**Reproduce.**
+
+```sh
+a=(A B C)
+echo "[${a['$(echo 1)']}]"
+echo [${a['$(echo 1)']}]
+```
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| both lines | `'1': syntax error: operand expected (error token is "'1'")` | `'$(echo 1)': syntax error: operand expected (error token is "'$(echo 1)'")` |
+
+**What bash does.** A subscript is not parsed when the word is; it is carved out
+as text and expanded at run time, and *which* expander gets it decides whether a
+`'` quotes. An **index** goes to `expand_arith_string (exp,
+Q_DOUBLE_QUOTES|Q_ARITH|Q_ARRAYSUB)` (arrayfunc.c:1354) — `Q_DOUBLE_QUOTES`, so
+a `'` is an ordinary character, the `$( … )` inside it *is* expanded, and the
+quotes survive into the arithmetic as text. An **associative key** goes to
+`expand_subscript_string (sub, 0)` (arrayfunc.c:1145) — quoting 0, so a `'` is a
+real quote and is removed; `declare -A m; m['x y']=K; echo "${m['x y']}"` gives
+`K` in osh already, by the other route.
+
+So the same text takes two quoting modes depending on the *array's* type, which
+is not known until run time. osh currently picks the associative one at parse
+time and so gets the index case wrong; it happens to agree for `${a['1']}`
+because a `SingleQuoted` part with no expansion in it re-prints with its quotes.
+
+**The fix.** Keep a bare sub-word's `' … '` as an *extent* — parse what is
+inside it, and record that the quotes are text — so the choice of quote removal
+can be made by the expander that receives it rather than by the lexer. That is
+the same shape `read_word_verbatim`'s second `'` arm already gives a
+double-quoted operand; what is missing is a per-sub-word flag saying which of
+the two modes applies.
+
+Until then two rows are missing from
+`tests/corpus/the-brace-scanner-reads-the-command-substitutions-a-single-quote-hid.sh`
+— `echo "[${a['$(fi)']}]"` and `echo "[${z:'$(fi)':1}]"`, both of which bash
+answers from `brace_gobbler` with the *word's* remainder (`` `fi)']}]"' `` and
+`` `fi)':1}]"' ``). `Shell::gobble_scan` would report them correctly today if
+the substitutions were in the parse at all; it cannot see into a
+`WordPart::SingleQuoted`, and must not, because at the top level that part is
+exactly what the gobbler skips.
+
+### TD-OILS-A-BACKQUOTE-BODY-INSIDE-DOUBLE-QUOTES-IS-NOT-GOBBLED. A backquote body inside `" … "` is run where bash only scanned it — 2026-08-10
+
+**Where:** `userspace/oils/src/interp.rs`, `Shell::gobbled_subs` — the walk that
+lists the substitutions `brace_gobbler` reads. It is structural, over
+`WordPart`s, and a backquote body is kept by osh as text
+(`CmdSubBody::Backtick`), not as parts, so the walk cannot descend into one.
+
+**Reproduce.** With `z` unset, a word holding a backquote whose body is
+`${z:-'$(fi)'}`, inside double quotes. bash reports `command substitution: line
+N: syntax error near unexpected token `fi'` and then the word's remainder, and
+prints nothing; osh instead runs the backquote, whose body expands to the text
+`$(fi)`, and reports `$(fi): command not found`.
+
+**What bash does.** The gobbler's `quoted` is set by a backquote only from the
+unquoted state:
+
+```c
+  if (quoted)
+    {
+      if (c == quoted) quoted = 0;
+      if (quoted == '"' && c == '$' && text[i+1] == '(') goto comsub;
+      ADVANCE_CHAR (text, tlen, i); continue;
+    }
+  if (c == '"' || c == '\'' || c == '`') { quoted = c; i++; continue; }
+                                                   /* braces.c:660-675 */
+```
+
+Inside `" … "` the `quoted` branch is taken first, so a backquote is only a
+character and the scan reads straight on into the body — where the `${` is
+treated like `\{`, the `'` is not a quote, and the `$( … )` is handed to
+`extract_command_subst`. At the *top* level the backquote does set `quoted`, and
+then no `$(` row is reached, so the body is skipped; leaving backquotes out of
+the walk is right there and wrong only inside double quotes.
+
+**The fix.** Give a backquote body parts — or a lazily-parsed view of them — so
+`gobbled_subs` can walk into one when the enclosing state is `"`. Descending
+must stay off at the top level, which is where the current `gobbler_reads`
+answer (`false` for every `CmdSubBody::Backtick`) is already correct.
+
+Note the same walk reaches nothing inside a `<( … )` / `>( … )` body either,
+because `crate::unparse::nested_parts` returns no scope for a `ProcSub`.
+
+### TD-OILS-A-REDIRECTION-TARGET-IS-NOT-BRACE-EXPANDED. `> f{1,2}` writes a file called `f{1,2}` where bash calls it ambiguous — 2026-08-10
+
+**Where:** `userspace/oils/src/interp.rs` — wherever a redirection's target word
+is expanded. Every other word list that bash brace-expands goes through
+`Shell::expand_braces_opt`; a redirection target does not, and it should.
+
+**Reproduce.**
+
+```sh
+echo hi > f{1,2}
+echo "rc=$?"
+ls f*
+```
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| stderr | `line 1: f{1,2}: ambiguous redirect` | — |
+| `rc` | 1 | 0 |
+| files | none | `f{1,2}` |
+
+**What bash does.** `redirection_expand` calls `expand_words_no_vars`, which is
+`expand_word_list_internal (list, WEXP_NOVARS)`, and `WEXP_NOVARS` is
+`WEXP_ALL & ~WEXP_VARASSIGN` — so `WEXP_BRACEEXP` is still set. The word is
+brace-expanded like any other, and a target that expands to more than one word
+is the `ambiguous redirect` error.
+
+**The fix.** Expand the target through `Shell::expand_braces_opt` before the
+word expansion, and refuse with `ambiguous redirect` when the result is not
+exactly one field.
+
+Note this also brings the target under `Shell::gobble_scan`: bash reports
+`command substitution: line N:` for `echo hi > "/dev/null${z:-'$(fi)'}"` quoting
+the *word's* remainder (`` `fi)'}"' ``), where osh reports the operand's shorter
+one (`` `fi)'' ``). That row belongs in
+`tests/corpus/the-brace-scanner-reads-the-command-substitutions-a-single-quote-hid.sh`
+once this is done.
+
 ### TD-OILS-ARITHMETIC-NEVER-ASKS-WHETHER-A-SUBSCRIPT-NAMES-NOWHERE. `(( a[-7] ))` and `(( a[-7]=1 ))` are silent where bash refuses both — 2026-08-10 — ✅ FIXED 2026-08-10
 
 **Where:** `userspace/oils/src/interp.rs`, the `VarLookup for Shell` impl —
@@ -1658,6 +1790,34 @@ path that dies.
    table above it would only ever re-parse substitutions the parser already
    parsed, which is unobservable, so collecting the skipped ones where they are
    skipped is exactly equivalent and does not risk re-parsing a re-print.
+
+#### Both pieces are in — ⏳ MOSTLY FIXED 2026-08-10
+
+Piece 1 is `Lexer::read_word_verbatim`'s second `'` arm
+(`tests/corpus/a-single-quoted-run-in-a-double-quoted-brace-operand-is-an-extent-not-a-quote.sh`);
+piece 2 is `Shell::gobble_scan` and `crate::unparse::gobbler_word`
+(`tests/corpus/the-brace-scanner-reads-the-command-substitutions-a-single-quote-hid.sh`).
+The abort is gone, `declare -f` gives the source back, and the diagnostic, its
+line, its whole-word remainder, its `set -B` gate, its stop-at-the-first-failure
+and its reach across word kinds all match bash 5.2.37.
+
+The walk that piece 2 does is structural rather than a second pass over the
+text, and three shapes fall outside what the parse can hand it. Each has its own
+entry:
+
+* a `' … '` in a **subscript or a substring bound** is still a quote, so the
+  substitution it hides is not in the parse for the scan to find —
+  TD-OILS-A-SINGLE-QUOTED-RUN-IN-A-BARE-SUB-WORD-OF-A-BRACE-IS-A-QUOTE;
+* a **backquote body inside `" … "`** is text, not parts —
+  TD-OILS-A-BACKQUOTE-BODY-INSIDE-DOUBLE-QUOTES-IS-NOT-GOBBLED (which also notes
+  that a `<( … )` / `>( … )` body is not descended into);
+* a **redirection target** is not brace-expanded at all, so the scan never
+  reaches one — TD-OILS-A-REDIRECTION-TARGET-IS-NOT-BRACE-EXPANDED.
+
+The `$' … '` splice named above is a fourth: bash stores the *translation* and
+the gobbler meets a bare `$( … )` in it, echoing `` `fi)}]"' `` with no `'`. osh
+sets `bare_splice` when it reads one but the spliced text is not given
+`CmdSubBody::Unread` bodies, so `"${z:-$'$(fi)'}"` is still a parse error.
 
 ---
 

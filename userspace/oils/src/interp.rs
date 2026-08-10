@@ -24404,11 +24404,160 @@ impl Shell {
     /// Brace-expand `word` when `set -B` (braceexpand, the default) is enabled;
     /// otherwise return the word unchanged so braces stay literal (`set +B`).
     /// This is the single gate consulted at every brace-expansion call site.
-    fn expand_braces_opt(&self, word: &Word) -> Vec<Word> {
-        if self.braceexpand {
-            crate::brace::expand_braces(word)
-        } else {
-            vec![word.clone()]
+    ///
+    /// The gate covers more than the expansion: bash's scanner for the `{` reads
+    /// every command substitution it walks past, so turning brace expansion off
+    /// silences a *diagnostic* as well. See [`Self::gobble_scan`].
+    fn expand_braces_opt(&mut self, word: &Word) -> Vec<Word> {
+        if !self.braceexpand {
+            return vec![word.clone()];
+        }
+        if self.gobble_scan(word) {
+            return Vec::new();
+        }
+        crate::brace::expand_braces(word)
+    }
+
+    /// The extent reads `brace_gobbler` makes over the word's own text, before
+    /// any of it is expanded — `true` when one of them failed and the command is
+    /// on its way out.
+    ///
+    /// The scanner that looks for the `{` a brace expansion starts at is also a
+    /// reader of command substitutions, and the earliest one there is:
+    ///
+    /// ```c
+    ///   /* If compiling for the shell, treat ${...} like \{...} */
+    ///   if (c == '$' && text[i+1] == '{' && quoted != '\'')
+    ///     { pass_next = 1; i++; if (quoted == 0) level++; continue; }
+    ///   if (quoted)
+    ///     {
+    ///       if (c == quoted) quoted = 0;
+    ///       /* The shell allows quoted command substitutions */
+    ///       if (quoted == '"' && c == '$' && text[i+1] == '(') goto comsub;
+    ///       ADVANCE_CHAR (text, tlen, i); continue;
+    ///     }
+    ///   if (c == '"' || c == '\'' || c == '`') { quoted = c; i++; continue; }
+    ///   if ((c == '$' || c == '<' || c == '>') && text[i+1] == '(')
+    ///     {
+    /// comsub:
+    ///       si = i + 2;
+    ///       t = extract_command_subst (text, &si, 0);
+    ///       i = si; free (t); i++; continue;
+    ///     }                                        /* braces.c:637-682 */
+    /// ```
+    ///
+    /// A `${` opens no state of its own — it is treated *like* `\{`, so the
+    /// characters between the braces are scanned in whatever quoting was already
+    /// in force. Inside `" … "` that means a `'` is not a quote, and every
+    /// `$( … )` it was hiding is parsed here. That is the one construct bash's
+    /// *parser* never read (see [`crate::lexer::Lexer::read_word_verbatim`]'s
+    /// second `'` arm) and this scan does, which is why a body that will not
+    /// parse is not a script syntax error but a runtime diagnostic:
+    ///
+    /// ```text
+    ///   unset z
+    ///   echo "p${z:-'$(fi)'}q"      ->  command substitution: line N: syntax
+    ///                                   error near unexpected token `fi'
+    ///                                   command substitution: line N: `fi)'}q"'
+    ///                                   (no output, $? = 1, the shell goes on)
+    /// ```
+    ///
+    /// Three properties of that ending are the scan's and no other reader's, and
+    /// all three are measured against bash 5.2.37:
+    ///
+    /// * It is gated on `set -B` — with `set +B` the same word reports from the
+    ///   operand's own read instead, whose remainder is the *operand's* (`` `fi)'
+    ///   ``) and not the word's.
+    /// * It reaches only the words brace expansion reaches. A plain assignment
+    ///   (`v="p${z:-'$(fi)'}q"`), a `case` word and a here-document body are not
+    ///   among them and report the operand-scoped message; a command word, a
+    ///   `for` list, a `declare` argument and a redirection target are.
+    /// * It stops at the first failure — `jump_to_top_level (DISCARD)` — so a
+    ///   word with two failing substitutions reports once, where the same word
+    ///   under a prompt expansion (which suppresses the jump) reports twice.
+    fn gobble_scan(&mut self, word: &Word) -> bool {
+        // bash never reaches the scanner for a word with no `{` in it at all
+        // (`brace_expand_word_list`'s `mbschr (…, LBRACE)`, subst.c:9905), and a
+        // word with no substitution in it has nothing for the scan to read
+        // either way. The second test is the cheap one and subsumes the first
+        // for this purpose: a `${` carries its own `{`.
+        if self.expansion_failed() || !Self::has_gobbled_sub(&word.parts) {
+            return false;
+        }
+        // The tails have to be re-measured, because the gobbler's string is the
+        // whole word — brackets included — and the parsed word carries the
+        // scopes every other reader wants. See [`crate::unparse::gobbler_word`].
+        let scoped = crate::unparse::gobbler_word(word);
+        let mut subs: Vec<&WordPart> = Vec::new();
+        Self::gobbled_subs(&scoped.parts, &mut subs);
+        // Whatever the read complains about, it is the scanner complaining and
+        // the scanner was handed the whole word. See [`Shell::enter_scanned_word`].
+        let saved = self.enter_scanned_word(crate::unparse::word_src(word));
+        let read = self.extent_read_of_subs(&subs);
+        self.leave_inner_source(saved);
+        matches!(read, ExtentRead::Aborted)
+    }
+
+    /// Whether anything in `parts` is a substitution [`Shell::gobble_scan`]
+    /// would read — the cheap pre-test that keeps the scan off every word that
+    /// cannot produce a diagnostic.
+    fn has_gobbled_sub(parts: &[WordPart]) -> bool {
+        parts.iter().any(|p| {
+            Self::gobbler_reads(p)
+                || crate::unparse::nested_parts(p)
+                    .into_iter()
+                    .any(|(_, w)| Self::has_gobbled_sub(w))
+        })
+    }
+
+    /// The substitutions `brace_gobbler` reads, in the order it meets them.
+    ///
+    /// The walk is structural rather than a second pass over the text, because
+    /// the parse has already sorted the two states that decide the answer. A
+    /// `' … '` run the gobbler skips whole (`quoted == '\''`) is exactly a
+    /// [`WordPart::SingleQuoted`], which only exists where a parser saw a real
+    /// quote — and a parser saw one in precisely the places the gobbler's
+    /// `quoted` is 0. Inside `" … "` there is no such part, because a `'` there
+    /// is a character; and the gobbler agrees, since its `quoted` is `"` and no
+    /// `'` row is reached.
+    ///
+    /// A `` ` … ` `` is left out for the same structural reason, and is *not*
+    /// exact: at the top level the gobbler's `quoted` becomes `` ` `` and the
+    /// body is skipped, which is what leaving it out gives — but inside `" … "`
+    /// a backquote is only a character to it, so a `$( … )` in the body is read
+    /// there. osh keeps a backquote body as text rather than as parts, so this
+    /// scan cannot reach it; see TD-OILS-A-BACKQUOTE-BODY-INSIDE-DOUBLE-QUOTES-
+    /// IS-NOT-GOBBLED in known-issues.md.
+    fn gobbled_subs<'a>(parts: &'a [WordPart], out: &mut Vec<&'a WordPart>) {
+        for p in parts {
+            if Self::gobbler_reads(p) {
+                out.push(p);
+                continue;
+            }
+            if matches!(p, WordPart::SingleQuoted { .. }) {
+                continue;
+            }
+            // Every other scope, a `[ … ]` subscript included: the gobbler has
+            // no bracket row, so it simply reads on through them.
+            for (_, w) in crate::unparse::nested_parts(p) {
+                Self::gobbled_subs(w, out);
+            }
+        }
+    }
+
+    /// One part, and whether the gobbler's `$(` row reads it whole.
+    ///
+    /// The row is spelled `(c == '$' || c == '<' || c == '>') && text[i+1] ==
+    /// '('`, so a `$(( … ))` is caught by it — and `extract_command_subst` for a
+    /// body starting `(` is the paren count, which recurses into its own nested
+    /// substitutions. A `$[ … ]` is not the row (`text[i+1]` is `[`), so nothing
+    /// reads it and the scan meets what is inside it directly. A `` ` … ` `` is
+    /// not the row either; see [`Shell::gobbled_subs`].
+    fn gobbler_reads(p: &WordPart) -> bool {
+        match p {
+            WordPart::CommandSub { body } => !matches!(body, CmdSubBody::Backtick { .. }),
+            WordPart::ArithSub { bracket, .. } => !*bracket,
+            _ => false,
         }
     }
 
@@ -27772,11 +27921,32 @@ impl Shell {
         self.enter_inner_source(crate::unparse::parts_src(parts))
     }
 
-    /// Undo [`Shell::enter_inner_source`].
+    /// Undo [`Shell::enter_inner_source`] and [`Shell::enter_scanned_word`].
     fn leave_inner_source(&mut self, saved: (Option<Str>, Option<Str>)) {
         let (named, outer) = saved;
         self.bad_sub_word = named;
         self.quoted_outer_word = outer;
+    }
+
+    /// Enter a *scanner's* pass over a whole word — [`Shell::gobble_scan`].
+    ///
+    /// A scanner is handed the word's raw text and nothing smaller, so every
+    /// complaint it raises names that text: `extract_command_subst (text, …)`
+    /// gets `text`, and `extract_delimited_string`'s `report_error (_("bad
+    /// substitution: no closing `%s' in %s"), …, string)` (subst.c:1516) echoes
+    /// it back whole. Measured against bash 5.2.37, `echo "A$(( #5 ))B"` reports
+    /// `no closing `)' in "A$(( #5 ))B"` — the neighbours and the quotes
+    /// included, exactly as [`Shell::begin_word`] names the same word once
+    /// expansion starts.
+    ///
+    /// Unlike [`Shell::enter_inner_source`] the outer spelling is *dropped*
+    /// rather than kept: there is no enclosing string here to narrow from, and
+    /// leaving one behind would let a word being expanded somewhere up the stack
+    /// (an enclosing command substitution's) name this scan's complaint.
+    fn enter_scanned_word(&mut self, src: Str) -> (Option<Str>, Option<Str>) {
+        let saved_named = self.bad_sub_word.replace(src);
+        let saved_outer = self.quoted_outer_word.take();
+        (saved_named, saved_outer)
     }
 
     /// Begin expanding `w`: name it, and deliver the verdict bash's word
@@ -31521,9 +31691,10 @@ impl Shell {
     /// it is a "no closing `)'" complaint naming the whole word.
     ///
     /// bash raises it while *scanning*, so it reports even for an arithmetic
-    /// substitution nothing ever evaluates (`x=5; echo "${x:-$(( #5 ))}"`);
-    /// this check runs at evaluation, so that one corner still diverges — see
-    /// `known-issues.md`, `TD-OILS-THE-COMMENT-CHECK-IS-EVALUATION-TIME-WHERE-BASHS-IS-SCAN-TIME`.
+    /// substitution nothing ever evaluates (`x=5; echo "${x:-$(( #5 ))}"`) and
+    /// before the word's first `$( … )` runs. This is asked at scan time for
+    /// that reason — from [`Shell::begin_word`], not from the evaluation — and
+    /// the answer is named by the word the scanner was handed.
     ///
     /// Deciding it from the parser's already-extracted body is exact, because
     /// the two scans differ in exactly one rule: a comment opens at a `#` whose

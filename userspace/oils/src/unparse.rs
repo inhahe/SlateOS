@@ -1149,10 +1149,12 @@ fn walk_elems(
     let mut i = 0usize;
     for e in items.iter_mut() {
         match e {
-            ArrayElem::Positional(w) => walk_parts_in(&mut w.parts, want, n, &mut i, act),
+            // `false`: a `[ … ]` subscript here is an element's *own* word, not
+            // a nested string scope, so the flag has nothing to say about it.
+            ArrayElem::Positional(w) => walk_parts_in(&mut w.parts, want, false, n, &mut i, act),
             ArrayElem::Keyed { index, value, .. } => {
-                walk_parts_in(&mut index.parts, want, n, &mut i, act);
-                walk_parts_in(&mut value.parts, want, n, &mut i, act);
+                walk_parts_in(&mut index.parts, want, false, n, &mut i, act);
+                walk_parts_in(&mut value.parts, want, false, n, &mut i, act);
             }
         }
     }
@@ -1312,6 +1314,30 @@ fn attach_comsub_tails_in(parts: &mut [WordPart]) {
     // Each subscript first, as its own string; the pass below then leaves them
     // alone.
     index_scopes(parts, &mut attach_comsub_tails_in);
+    attach_tails_scoped(parts, false);
+}
+
+/// The three sentinel-swap passes themselves, over **one** string scope.
+///
+/// `index` says whether a `[ … ]` subscript belongs to that scope's string. It
+/// does not for `extract_dollar_brace_string`, which steps over one whole
+/// ([`Nested::Index`]) — that is [`attach_comsub_tails_in`], which walks each
+/// subscript separately with `false`. It does for `brace_gobbler`, which has no
+/// subscript row at all and simply reads on through the brackets: measured
+/// against bash 5.2.37, `a=(A B C); echo "[${a['$(fi)']}]"` echoes
+/// `` `fi)']}]"' `` — the `]}]` and the word's closing quote, where the
+/// subscript's own scope would have stopped at the `'`. See
+/// [`gobbler_word`].
+///
+/// That measurement is not yet reproducible here, because osh still reads a
+/// `' … '` in a subscript as a quote and so has no `$( … )` in the parse for the
+/// scan to reach — TD-OILS-A-SINGLE-QUOTED-RUN-IN-A-BARE-SUB-WORD-OF-A-BRACE-IS-
+/// A-QUOTE in known-issues.md. An *unquoted* subscript substitution does reach
+/// the gobbler in bash, but bash's parser reads that one and dies on it first
+/// (`echo "[${a[$(fi)]}]"` is a script syntax error, and osh agrees), so nothing
+/// observable rides on `index` today. It is kept exact so the row works the
+/// moment the parse can supply it.
+fn attach_tails_scoped(parts: &mut [WordPart], index: bool) {
     // A body no parser read is re-read the same way, from the same
     // `extract_command_subst`, so it wants the same remainder — see
     // [`crate::ast::CmdSubBody::Unread`].
@@ -1323,7 +1349,7 @@ fn attach_comsub_tails_in(parts: &mut [WordPart]) {
             }
         )
     };
-    attach_tails_by(parts, &is_comsub, &mut |p, tail| match p {
+    attach_tails_by(parts, &is_comsub, index, &mut |p, tail| match p {
         WordPart::CommandSub { body: CmdSubBody::Parsed { tail: t, .. } } => *t = Some(tail),
         WordPart::CommandSub { body: CmdSubBody::Unread { tail: t, .. } } => *t = tail,
         _ => {}
@@ -1338,7 +1364,7 @@ fn attach_comsub_tails_in(parts: &mut [WordPart]) {
     // `$( … )` *inside* the arithmetic needs its own remainder too, which runs
     // past the `))`.
     let is_arith = |p: &WordPart| matches!(p, WordPart::ArithSub { .. });
-    attach_tails_by(parts, &is_arith, &mut |p, tail| {
+    attach_tails_by(parts, &is_arith, index, &mut |p, tail| {
         if let WordPart::ArithSub { tail: t, .. } = p {
             *t = tail;
         }
@@ -1354,22 +1380,40 @@ fn attach_comsub_tails_in(parts: &mut [WordPart]) {
     let is_fallback = |p: &WordPart| {
         matches!(p, WordPart::CommandSub { body: CmdSubBody::ArithFallback { .. } })
     };
-    attach_tails_by(parts, &is_fallback, &mut |p, tail| {
+    attach_tails_by(parts, &is_fallback, index, &mut |p, tail| {
         if let WordPart::CommandSub { body: CmdSubBody::ArithFallback { tail: t, .. } } = p {
             *t = tail;
         }
     });
 }
 
-/// The sentinel-swap [`attach_comsub_tails_in`] runs once per kind of part that
+/// `word` with every substitution's tail measured against the string
+/// **`brace_gobbler` walks** — the whole word, brackets included.
+///
+/// The gobbler is a reader of command substitutions that comes before all of
+/// them, and its scope is not any of the ones [`attach_comsub_tails`] fills for:
+/// it is handed the word's own text with nothing cut out of it, so a `$( … )` in
+/// a subscript takes the rest of the *word* for its remainder and not the rest
+/// of the subscript. Nothing is written back into the parsed word, because the
+/// scopes the parsed word carries are the ones every *other* reader wants; this
+/// is a copy made for the one scan. See
+/// [`crate::interp::Shell::gobble_scan`].
+pub(crate) fn gobbler_word(word: &Word) -> Word {
+    let mut w = word.clone();
+    attach_tails_scoped(&mut w.parts, true);
+    w
+}
+
+/// The sentinel-swap [`attach_tails_scoped`] runs once per kind of part that
 /// needs to know what follows it: replace the `k`-th part `want` accepts by a
 /// marker, render the whole word, and hand `set` everything after the marker.
 fn attach_tails_by(
     parts: &mut [WordPart],
     want: &dyn Fn(&WordPart) -> bool,
+    index: bool,
     set: &mut dyn FnMut(&mut WordPart, Str),
 ) {
-    let total = walk_parts(parts, want, usize::MAX, &mut |_| {});
+    let total = walk_parts(parts, want, index, usize::MAX, &mut |_| {});
     if total == 0 {
         return;
     }
@@ -1391,7 +1435,7 @@ fn attach_tails_by(
         // makes this exact: `part_src` renders a parsed body from `prog`, so
         // there is nothing in `src` for a marker to ride in on.
         let mut saved = WordPart::Literal(Str::new());
-        walk_parts(parts, want, k, &mut |p| {
+        walk_parts(parts, want, index, k, &mut |p| {
             saved = std::mem::replace(p, WordPart::Literal(sent.clone()));
         });
         let text = parts_src(parts);
@@ -1399,7 +1443,7 @@ fn attach_tails_by(
             .and_then(|i| text.get(i.saturating_add(sent.len())..))
             .unwrap_or_default()
             .to_vec();
-        walk_parts(parts, &is_marker, 0, &mut |p| {
+        walk_parts(parts, &is_marker, index, 0, &mut |p| {
             *p = std::mem::replace(&mut saved, WordPart::Literal(Str::new()));
             set(p, std::mem::take(&mut tail));
         });
@@ -1508,8 +1552,11 @@ fn index_scopes(parts: &mut [WordPart], act: &mut dyn FnMut(&mut [WordPart])) {
 /// — that `want` accepts, and return how many such parts there were in all.
 /// Passing `usize::MAX` for `n` therefore just counts.
 ///
-/// A `[ … ]` subscript is **not** walked into: it is its own string scope, and
-/// [`index_scopes`] hands it to its own pass. See [`attach_comsub_tails_in`].
+/// A `[ … ]` subscript is walked into only when `index` says it belongs to this
+/// scope's string. It does not for the `${ … }` scan, which steps over one
+/// whole and leaves it to its own pass ([`index_scopes`]); it does for
+/// `brace_gobbler`, which reads straight through the brackets. See
+/// [`attach_tails_scoped`].
 ///
 /// The order is the order the parts are written in, which is all this needs:
 /// [`attach_comsub_tails`] addresses one substitution at a time and finds it
@@ -1518,17 +1565,19 @@ fn index_scopes(parts: &mut [WordPart], act: &mut dyn FnMut(&mut [WordPart])) {
 fn walk_parts(
     parts: &mut [WordPart],
     want: &dyn Fn(&WordPart) -> bool,
+    index: bool,
     n: usize,
     act: &mut dyn FnMut(&mut WordPart),
 ) -> usize {
     let mut i = 0usize;
-    walk_parts_in(parts, want, n, &mut i, act);
+    walk_parts_in(parts, want, index, n, &mut i, act);
     i
 }
 
 fn walk_parts_in(
     parts: &mut [WordPart],
     want: &dyn Fn(&WordPart) -> bool,
+    index: bool,
     n: usize,
     i: &mut usize,
     act: &mut dyn FnMut(&mut WordPart),
@@ -1542,10 +1591,10 @@ fn walk_parts_in(
             continue;
         }
         for (kind, w) in nested_parts_mut(p) {
-            if kind == Nested::Index {
+            if kind == Nested::Index && !index {
                 continue;
             }
-            walk_parts_in(w, want, n, i, act);
+            walk_parts_in(w, want, index, n, i, act);
         }
     }
 }

@@ -121,7 +121,7 @@ use crate::ast::{
     ForArithClause, ForClause, FunctionDef, IfClause, LineMap, LoopClause, ParamOp, Pipeline,
     Program, Redirect,
     RedirectOp,
-    ReplaceAnchor, SelectClause, SimpleCommand, Word, WordPart,
+    ReplaceAnchor, SelectClause, SimpleCommand, SubshellClause, Word, WordPart,
 };
 use crate::histexpand::{Expansion, HistCtx};
 use crate::lexer;
@@ -9058,7 +9058,13 @@ impl Shell {
                 .collect();
             self.finish_pipeline(&started);
         }
-        if pipe.negated {
+        // …unless the pipeline left by a `jump_to_top_level`. bash negates at the
+        // bottom of `execute_command_internal` (execute_cmd.c:1123), which a
+        // longjmp flies straight past, so the status the abort carried arrives
+        // unturned: `f() { eval 'q[1x]=v'; }; ! f` is 1, not 0, and so is a bare
+        // `! q[-9]=x`. A `( ! … )` looks like an exception and is not — see
+        // [`Shell::subshell_hoists_invert`].
+        if pipe.negated && !flow.is_jump() {
             self.last_status = i32::from(self.last_status == 0);
         }
         if let Some((start, (user0, sys0))) = start {
@@ -10008,6 +10014,12 @@ impl Shell {
                 if let Flow::Exit(c) = flow {
                     sub.last_status = c;
                 }
+                // A `!` on the subshell's *lone* command is applied out here, so
+                // an unwind that skipped the pipeline's own negation still gets
+                // one. See [`Self::subshell_hoists_invert`].
+                if flow.is_jump() && Self::subshell_hoists_invert(c) {
+                    sub.last_status = i32::from(sub.last_status == 0);
+                }
                 // Fire the subshell's own EXIT trap (if it set one) before its
                 // state is discarded — matching bash, which runs an EXIT trap for
                 // every exiting shell environment, not only the top level. An
@@ -10021,6 +10033,42 @@ impl Shell {
         };
         self.undo_varfds(varfd_mark);
         flow
+    }
+
+    /// Whether a `( … )` carries bash's hoisted `!` — the one case where a
+    /// negation survives an unwind out of the body.
+    ///
+    /// `execute_in_subshell` takes the flag off the subshell's single top-level
+    /// command *before* establishing its own jump target, and puts the negation
+    /// back afterwards, so the longjmp lands between the two:
+    ///
+    /// ```c
+    ///   invert = (tcom->flags & CMD_INVERT_RETURN) != 0;
+    ///   tcom->flags &= ~CMD_INVERT_RETURN;
+    ///
+    ///   result = setjmp_nosigs (top_level);
+    ///   …
+    ///   else if (result)
+    ///     return_code = (last_command_exit_value == EXECUTION_SUCCESS) ? EXECUTION_FAILURE : last_command_exit_value;
+    ///   …
+    ///   if (invert)
+    ///     return_code = (return_code == EXECUTION_SUCCESS) ? EXECUTION_FAILURE
+    ///                                                      : EXECUTION_SUCCESS;
+    ///                                          /* execute_cmd.c:1701-1726 */
+    /// ```
+    ///
+    /// `tcom` is the whole command between the parens, so the flag is there only
+    /// when that command *is* the negated pipeline. Measured: `( ! q[1x]=v )` is
+    /// 0 while `( ! q[1x]=v; echo after )` is 1 — in the second the `!` sits on
+    /// an inner pipeline of a list, which the jump passes without touching. An
+    /// `&&`/`||` chain is such a list too. A `$( … )` is not a `user_subshell`
+    /// and gets no hoist at all, so `x=$( ! q[1x]=v )` is 1.
+    ///
+    /// Only asked when the body unwound: for an ordinary return the pipeline
+    /// negated its own status on the way out, which is the same answer.
+    fn subshell_hoists_invert(c: &SubshellClause) -> bool {
+        matches!(c.body.items.as_slice(),
+            [item] if item.list.rest.is_empty() && item.list.first.negated)
     }
 
     /// Run a `NAME() { … }` / `function NAME { … }` definition.
@@ -81964,6 +82012,66 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("x=$( q[1x]=v 2>/dev/null; echo NOT-REACHED )\necho \"rc=$? x=[$x]\"").0,
             "rc=1 x=[]\n"
         );
+    }
+
+    #[test]
+    fn a_bang_does_not_negate_a_status_an_unwind_carried() {
+        // bash negates at the bottom of `execute_command_internal`
+        // (execute_cmd.c:1123), which a `jump_to_top_level` flies past — so the
+        // status the unwind carried arrives unturned.
+        for src in [
+            "! q[1x]=v",
+            "! { q[1x]=v; }",
+            "! eval 'q[1x]=v'",
+            "! declare -i n=2+",
+            "f() { ! eval 'q[1x]=v'; }; f",
+            "f() { eval 'q[1x]=v'; }; ! f",
+            "f() { ! eval 'declare -i n=2+'; }; f",
+        ] {
+            assert_eq!(
+                run(&format!("{src} 2>/dev/null\necho \"rc=$?\"")).0,
+                "rc=1\n",
+                "{src}"
+            );
+        }
+        // A discard the `eval` *caught* is not an unwind at the `!` any more.
+        assert_eq!(
+            run("f() { eval 'q[-9]=v'; }\n! f 2>/dev/null\necho \"rc=$?\"").0,
+            "rc=0\n"
+        );
+        assert_eq!(run("! false\necho \"rc=$?\"").0, "rc=0\n");
+        assert_eq!(run("! true\necho \"rc=$?\"").0, "rc=1\n");
+        // `execute_in_subshell` hoists the `!` off the subshell's lone command
+        // above its own jump target, so there the negation does run.
+        for src in [
+            "( ! q[1x]=v )",
+            "( ! ( q[1x]=v ) )",
+            "( ! { q[1x]=v; } )",
+            "( ! declare -i n=2+ )",
+        ] {
+            assert_eq!(
+                run(&format!("{src} 2>/dev/null\necho \"rc=$?\"")).0,
+                "rc=0\n",
+                "{src}"
+            );
+        }
+        // …but only when the `!` is on the whole of it, and never for a `$( … )`,
+        // which is not a `user_subshell`.
+        for src in [
+            "( ! q[1x]=v; echo after )",
+            "( ! q[1x]=v && echo b )",
+            "( ! q[1x]=v || echo b )",
+            "x=$( ! q[1x]=v )",
+        ] {
+            assert_eq!(
+                run(&format!("{src} 2>/dev/null\necho \"rc=$?\"")).0,
+                "rc=1\n",
+                "{src}"
+            );
+        }
+        // `EXITPROG` sets `invert = 0` outright.
+        assert_eq!(run("( ! exit 3 )\necho \"rc=$?\"").0, "rc=3\n");
+        assert_eq!(run("( ! exit 0 )\necho \"rc=$?\"").0, "rc=0\n");
     }
 
     #[test]

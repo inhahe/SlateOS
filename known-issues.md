@@ -495,7 +495,7 @@ Found while probing TD-OILS-AN-UNCLOSED-SUBSCRIPT-IN-AN-ASSIGNMENT-POSITION-IS-N
 (row 6 of its probe put the failing assignment inside an `eval` and the
 difference showed up as an extra `rc=` line).
 
-### TD-OILS-A-BANG-NEGATES-AN-ABORTS-STATUS-INSTEAD-OF-LETTING-IT-PASS. `! f` turns a discarded frame's 1 into a 0 — 2026-08-10 — OPEN
+### TD-OILS-A-BANG-NEGATES-AN-ABORTS-STATUS-INSTEAD-OF-LETTING-IT-PASS. `! f` turns a discarded frame's 1 into a 0 — 2026-08-10 — ✅ FIXED 2026-08-10
 
 **Where:** `userspace/oils/src/interp.rs`, `exec_pipeline`:
 
@@ -569,6 +569,18 @@ bash's hoist explicitly: when its body is a single negated pipeline, take the
 `!` off it and apply it to the subshell's own result, including the one a
 longjmp produced. Doing only the first half would regress `( ! q[1x]=v )`.
 Both arming paths are affected, so this is one fix, not two.
+
+**Fixed** as described, and the hoist needed no AST surgery. `exec_pipeline`'s
+negation is now guarded by `!flow.is_jump()`, and the `Command::Subshell` arm
+applies the negation to the subshell's own status when — and only when — the
+body unwound *and* `Shell::subshell_hoists_invert` says the `!` was on the
+whole of it (one item, no `&&`/`||` rest, the pipeline negated). Asking only on
+an unwind is exactly equivalent to bash's strip-then-reapply: for an ordinary
+return the pipeline already negated its own status on the way out, which is the
+same answer.
+
+Corpus: `a-bang-does-not-negate-a-status-an-unwind-carried.sh`, 25 rows.
+Unit test: `interp::tests::a_bang_does_not_negate_a_status_an_unwind_carried`.
 
 Found while measuring TD-OILS-A-DISCARD-STOPS-AT-THE-EVAL-OR-FUNCTION-IT-WAS-RAISED-IN;
 it was the one row of that probe still diverging after the fix, and it diverged

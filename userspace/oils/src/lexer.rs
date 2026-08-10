@@ -4445,7 +4445,21 @@ impl Lexer {
     fn read_word_verbatim(&mut self, mode: Verbatim) -> Result<Vec<Seg>, LexError> {
         let mut segs: Vec<Seg> = Vec::new();
         let mut lit = Str::new();
+        // Where the `' … '` run the cursor is inside ends, in [`Verbatim::Dquote`]
+        // — see the second `'` arm below — and what [`Lexer::here_text`] was
+        // before the run started.
+        let mut sq_close: Option<usize> = None;
+        let outside_run = self.here_text;
         while let Some(c) = self.peek() {
+            // The run's own closing quote: a literal like its mate, and past it
+            // a parser was reading again.
+            if sq_close == Some(self.pos) {
+                sq_close = None;
+                self.here_text = outside_run;
+                lit.push(b'\'');
+                self.pos += 1;
+                continue;
+            }
             match c {
                 // Inside quotes a `'` opens nothing — it is a character like any
                 // other, and `"${nope:-'a b'}"` keeps both of them.
@@ -4454,6 +4468,34 @@ impl Lexer {
                     self.pos += 1;
                     let s = self.read_single_quote()?;
                     segs.push(Seg::Sq(s, false));
+                }
+                // …but bash's *parser* never read what lies between one and its
+                // mate. A `${ … }` is a grouping construct (`open != close`), so
+                // `parse_matched_pair` meets the `'` as one of that construct's
+                // shell quotes and hands the run to a `parse_matched_pair ('\'',
+                // '\'', '\'', …)` of its own (parse.y:3840-3846), which reads to
+                // the mate and reads *nothing* in between. The rule that would
+                // instead have stepped over the `'` and left the run's characters
+                // to the outer scan is the posix one (parse.y:3836), and it is
+                // off here.
+                //
+                // So the characters stay live — the enclosing double quotes are
+                // still in force and the operand is expanded with a `'` for an
+                // ordinary character — while nothing in the run was read *as
+                // source*: a `$( … )` here is [`SubBody::Unread`], exactly as one
+                // in a here-document body is. Two things follow, both measured
+                // against bash 5.2.37: `declare -f` prints such an operand back
+                // as written rather than re-printed, and a body that does not
+                // parse is not a script syntax error — bash meets that one only
+                // later, when `brace_gobbler` scans the raw word text
+                // (braces.c:646-683).
+                '\'' if mode == Verbatim::Dquote => {
+                    // Without a mate the run is the rest of the text — what a
+                    // `read_single_quote` that ran out would have taken.
+                    sq_close = (self.pos + 1..self.chars.len()).find(|&i| self.at(i) == Some('\''));
+                    self.here_text = true;
+                    lit.push(b'\'');
+                    self.pos += 1;
                 }
                 '"' => {
                     flush_lit(&mut segs, &mut lit);
@@ -4544,12 +4586,16 @@ impl Lexer {
                     Err(e) => {
                         flush_lit(&mut segs, &mut lit);
                         segs.push(self.unclosed_seg(e)?);
+                        self.here_text = outside_run;
                         return Ok(segs);
                     }
                 },
                 _ => self.take_into(&mut lit),
             }
         }
+        // A run with no mate reaches here still open; the flag is the cursor's,
+        // not the text's, so it does not outlive the scan.
+        self.here_text = outside_run;
         flush_lit(&mut segs, &mut lit);
         Ok(segs)
     }

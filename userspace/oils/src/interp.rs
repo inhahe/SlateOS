@@ -1207,6 +1207,84 @@ enum SpawnDiag {
     Bare(Str),
 }
 
+/// What the file a failed spawn named turned out to *be*.
+///
+/// bash does not take the kernel's word for why an `execve` failed. It asks the
+/// filesystem first, and words the failure off the answer:
+///
+///     last_command_exit_value = (i == ENOENT) ?  EX_NOTFOUND : EX_NOEXEC;
+///     if (file_isdir (command))
+///       internal_error (_("%s: %s"), command, strerror (EISDIR));
+///     else if (executable_file (command) == 0)
+///       { errno = i; file_error (command); }    /* execute_cmd.c:5970-5981 */
+///
+/// so a directory reads `Is a directory` however the kernel spelled its
+/// refusal — and both hosts spell it the same wrong way, Linux `execve` on a
+/// directory giving EACCES and Windows `CreateProcess` giving
+/// ERROR_ACCESS_DENIED. Without asking, `./dir` printed `Permission denied`.
+///
+/// The other two arms exist because a program path with a *trailing separator*
+/// never reaches the host at all. The standard library refuses it up front:
+///
+///     // Early return if there is no filename.
+///     if exe_path.is_empty() || path::has_trailing_slash(exe_path) {
+///         return Err(… InvalidInput, "program path has no file name") }
+///                                     // std::sys::pal::windows::process
+///
+/// and that error says nothing about the file, so `b\`, `nosuch/` and `dir/`
+/// all came out as one unrecognisable message and 126. POSIX does have an
+/// answer: a trailing `/` demands that the name in front of it resolve to a
+/// directory, so a missing name is ENOENT and a plain file is ENOTDIR. Those
+/// are the two errnos this reconstructs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum SpawnTarget {
+    /// `file_isdir (command)` — a directory, whatever the host error said.
+    Dir,
+    /// Nothing of that name. ENOENT is the one errno bash exits 127 for.
+    Missing,
+    /// A trailing separator on something that is not a directory: ENOTDIR.
+    NotDir,
+    /// Not asked, or nothing the host's own error needs correcting by.
+    #[default]
+    Other,
+}
+
+/// Ask the filesystem what the program path a failed spawn named is.
+///
+/// `resolved` is the file a `$PATH` search chose, when there was one.
+/// Otherwise a word that spelled a path is joined onto the shell's own
+/// directory — which is where the spawn would have run it from, the child
+/// having been given `current_dir` — and a bare word that resolved to nothing
+/// named no file at all and is not asked about.
+fn spawn_target(cwd: BStr<'_>, word: BStr<'_>, resolved: Option<&std::path::Path>) -> SpawnTarget {
+    let path: Str = match resolved {
+        Some(p) => bytes::path_to_bytes(p),
+        None if word.contains(&b'/') || word.contains(&b'\\') => exec_path_name(cwd, word),
+        None => return SpawnTarget::Other,
+    };
+    if let Ok(m) = std::fs::metadata(bytes::bytes_to_path(&path)) {
+        return if m.is_dir() { SpawnTarget::Dir } else { SpawnTarget::Other };
+    }
+    // The host would not even look at it. Where that is the trailing separator
+    // talking, the name in front of it is what POSIX resolves and what decides
+    // the errno; where it is not, the host's error stands as it came.
+    let cut = path
+        .iter()
+        .rposition(|c| *c != b'/' && *c != b'\\')
+        .map_or(0, |i| i.saturating_add(1));
+    let Some(base) = path.get(..cut) else {
+        return SpawnTarget::Other;
+    };
+    if base.len() == path.len() || base.is_empty() {
+        return SpawnTarget::Other;
+    }
+    match std::fs::metadata(bytes::bytes_to_path(base)) {
+        Ok(m) if m.is_dir() => SpawnTarget::Dir,
+        Ok(_) => SpawnTarget::NotDir,
+        Err(_) => SpawnTarget::Missing,
+    }
+}
+
 /// Diagnostic + exit status for a failed `PCommand::spawn` of a command word.
 ///
 /// bash distinguishes two cases:
@@ -1249,6 +1327,7 @@ fn spawn_error_message(
     word: BStr<'_>,
     interp: Option<BStr<'_>>,
     e: &std::io::Error,
+    target: SpawnTarget,
     as_exec: bool,
 ) -> (Vec<SpawnDiag>, i32) {
     use std::io::ErrorKind;
@@ -1277,16 +1356,21 @@ fn spawn_error_message(
         }
         return (lines, 126);
     }
-    if e.kind() == ErrorKind::NotFound {
+    // ENOENT, whether the host said so or the trailing separator did (see
+    // [`SpawnTarget`]) — and the only errno bash exits 127 for.
+    if e.kind() == ErrorKind::NotFound || target == SpawnTarget::Missing {
         let msg = if !is_path && as_exec {
             bfmt![b"exec: ", word, b": not found"]
         } else if is_path {
-            bfmt![word, b": ", io_error_message(e)]
+            bfmt![word, b": No such file or directory"]
         } else {
             bfmt![word, b": command not found"]
         };
         return (vec![SpawnDiag::Line(msg)], 127);
     }
+    // `file_isdir (command)` — asked before anything is read off the errno,
+    // because on both hosts the errno for running a directory is EACCES.
+    let is_dir = target == SpawnTarget::Dir || e.kind() == ErrorKind::IsADirectory;
     // A file the OS refuses to run as a program image. Reaching here means the
     // file is *binary*: text would have been handed to this shell instead of
     // the OS in the first place (see [`shell_script_indirection`]), which is
@@ -1297,7 +1381,7 @@ fn spawn_error_message(
     // An `exec` adds its own second line, and does so with EACCES: bash
     // overwrites `errno` before returning its "binary file" verdict, so that
     // line reads "Permission denied" and says nothing about the format.
-    if is_exec_format_error(e) {
+    if !is_dir && target != SpawnTarget::NotDir && is_exec_format_error(e) {
         let mut lines = vec![SpawnDiag::Line(bfmt![
             word,
             b": cannot execute binary file: Exec format error"
@@ -1311,10 +1395,14 @@ fn spawn_error_message(
         }
         return (lines, 126);
     }
-    let text = io_error_message(e);
+    let text = match target {
+        SpawnTarget::Dir => "Is a directory".to_string(),
+        SpawnTarget::NotDir => "Not a directory".to_string(),
+        _ => io_error_message(e),
+    };
     if as_exec {
         let mut lines = Vec::new();
-        if e.kind() == ErrorKind::IsADirectory {
+        if is_dir {
             lines.push(SpawnDiag::Line(bfmt![word, b": ", &text]));
         }
         lines.push(SpawnDiag::Line(bfmt![
@@ -9783,7 +9871,9 @@ impl Shell {
                     children.push(child);
                 }
                 Err(e) => {
-                    let (msgs, status) = spawn_error_message(program, interp.as_deref(), &e, false);
+                    let target = spawn_target(&self.cwd, program, resolved.as_deref());
+                    let (msgs, status) =
+                        spawn_error_message(program, interp.as_deref(), &e, target, false);
                     for msg in &msgs {
                         self.berrln(&self.spawn_diag(msg));
                     }
@@ -21217,8 +21307,9 @@ impl Shell {
         let mut child = match spawn_resolved(&mut cmd, &argv[0], resolved.as_deref(), closed) {
             Ok(c) => c,
             Err(e) => {
+                let target = spawn_target(&self.cwd, &argv[0], resolved.as_deref());
                 let (msgs, status) =
-                    spawn_error_message(&reported, interp.as_deref(), &e, xopts.is_some());
+                    spawn_error_message(&reported, interp.as_deref(), &e, target, xopts.is_some());
                 for msg in &msgs {
                     let line = self.spawn_diag(msg);
                     self.bemit_cmd_stderr(out, redir, &line);
@@ -21429,7 +21520,9 @@ impl Shell {
                     // without execute permission, a bad executable format. bash
                     // reports this from the child it already forked, so the job
                     // exists and has already exited with the failure status.
-                    let (msgs, code) = spawn_error_message(&argv[0], interp.as_deref(), &e, false);
+                    let target = spawn_target(&self.cwd, &argv[0], Some(&path));
+                    let (msgs, code) =
+                        spawn_error_message(&argv[0], interp.as_deref(), &e, target, false);
                     for msg in &msgs {
                         self.berrln(&self.spawn_diag(msg));
                     }
@@ -70686,7 +70779,10 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         };
         assert_eq!(e.kind(), std::io::ErrorKind::NotFound);
         // …which is what makes it `command not found` rather than an errno.
-        assert_eq!(spawn_error_message(host_name.as_bytes(), None, &e, false).1, 127);
+        assert_eq!(
+            spawn_error_message(host_name.as_bytes(), None, &e, SpawnTarget::Other, false).1,
+            127
+        );
 
         // A word that spelled a path is handed over unresolved on purpose: only
         // the OS can say why that particular file will not run. Here it does not
@@ -77561,32 +77657,140 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let text = |m: &(Vec<SpawnDiag>, i32)| diag_text(m);
         // A name that resolved to nothing: `exec` names itself and says only
         // "not found", where an ordinary command word says "command not found".
-        let plain = spawn_error_message(b"zz", None, &Error::from(ErrorKind::NotFound), false);
+        let miss = &Error::from(ErrorKind::NotFound);
+        let plain = spawn_error_message(b"zz", None, miss, SpawnTarget::Other, false);
         assert_eq!(text(&plain), ["zz: command not found"]);
         assert_eq!(plain.1, 127);
-        let ex = spawn_error_message(b"zz", None, &Error::from(ErrorKind::NotFound), true);
+        let ex = spawn_error_message(b"zz", None, miss, SpawnTarget::Other, true);
         assert_eq!(text(&ex), ["exec: zz: not found"]);
         assert_eq!(ex.1, 127);
         // ENOENT on something spelled as a path keeps the bare errno wording in
         // both, because the word said where to look and nothing was there.
-        let ex = spawn_error_message(b"/a/zz", None, &Error::from(ErrorKind::NotFound), true);
+        let ex = spawn_error_message(b"/a/zz", None, miss, SpawnTarget::Other, true);
         assert_eq!(text(&ex), ["/a/zz: No such file or directory"]);
         assert_eq!(ex.1, 127);
         // A file that exists but will not run is `cannot execute` under `exec`.
-        let ex = spawn_error_message(b"/a/zz", None, &Error::from(ErrorKind::PermissionDenied), true);
+        let ex = spawn_error_message(
+            b"/a/zz",
+            None,
+            &Error::from(ErrorKind::PermissionDenied),
+            SpawnTarget::Other,
+            true,
+        );
         assert_eq!(text(&ex), ["exec: /a/zz: cannot execute: Permission denied"]);
         assert_eq!(ex.1, 126);
         let plain =
-            spawn_error_message(b"/a/zz", None, &Error::from(ErrorKind::PermissionDenied), false);
+            spawn_error_message(
+            b"/a/zz",
+            None,
+            &Error::from(ErrorKind::PermissionDenied),
+            SpawnTarget::Other,
+            false,
+        );
         assert_eq!(text(&plain), ["/a/zz: Permission denied"]);
         // A directory says so twice: once as the plain error of trying to run
         // it, and once in the `cannot execute` form.
-        let ex = spawn_error_message(b"/a/d", None, &Error::from(ErrorKind::IsADirectory), true);
+        let ex = spawn_error_message(
+            b"/a/d",
+            None,
+            &Error::from(ErrorKind::IsADirectory),
+            SpawnTarget::Other,
+            true,
+        );
         assert_eq!(
             text(&ex),
             ["/a/d: Is a directory", "exec: /a/d: cannot execute: Is a directory"]
         );
         assert_eq!(ex.1, 126);
+    }
+
+    #[test]
+    fn a_failed_spawn_is_worded_off_the_file_rather_than_the_errno() {
+        use std::io::{Error, ErrorKind};
+        let text = |m: &(Vec<SpawnDiag>, i32)| diag_text(m);
+        // `file_isdir (command)` wins over whatever the kernel said, and both
+        // hosts say the same wrong thing there — EACCES on Linux,
+        // ERROR_ACCESS_DENIED on Windows.
+        let dir = spawn_error_message(
+            b"./d",
+            None,
+            &Error::from(ErrorKind::PermissionDenied),
+            SpawnTarget::Dir,
+            false,
+        );
+        assert_eq!(text(&dir), ["./d: Is a directory"]);
+        assert_eq!(dir.1, 126);
+        // `exec` still says it twice, and the second line quotes the corrected
+        // wording too.
+        let dir_exec = spawn_error_message(
+            b"/a/d",
+            None,
+            &Error::from(ErrorKind::PermissionDenied),
+            SpawnTarget::Dir,
+            true,
+        );
+        assert_eq!(
+            text(&dir_exec),
+            ["/a/d: Is a directory", "exec: /a/d: cannot execute: Is a directory"]
+        );
+        // A trailing separator never reaches the host: the error it fails with
+        // says nothing about the file, so the two POSIX answers are supplied.
+        // Missing is the ENOENT one, and ENOENT is the only 127.
+        let missing = spawn_error_message(
+            b"nosuch/",
+            None,
+            &Error::from(ErrorKind::InvalidInput),
+            SpawnTarget::Missing,
+            false,
+        );
+        assert_eq!(text(&missing), ["nosuch/: No such file or directory"]);
+        assert_eq!(missing.1, 127);
+        let notdir = spawn_error_message(
+            b"f/",
+            None,
+            &Error::from(ErrorKind::InvalidInput),
+            SpawnTarget::NotDir,
+            false,
+        );
+        assert_eq!(text(&notdir), ["f/: Not a directory"]);
+        assert_eq!(notdir.1, 126);
+        // A bare word that resolved to nothing is a `$PATH` miss whatever the
+        // filesystem would have said, so `Missing` does not turn it into a path.
+        let bare = spawn_error_message(
+            b"zz",
+            None,
+            &Error::from(ErrorKind::NotFound),
+            SpawnTarget::Missing,
+            false,
+        );
+        assert_eq!(text(&bare), ["zz: command not found"]);
+        assert_eq!(bare.1, 127);
+    }
+
+    #[test]
+    fn a_program_path_is_asked_about_relative_to_the_shells_own_directory() {
+        // The child is given `current_dir`, so a relative word is resolved
+        // against the shell's tracked directory and not the process's.
+        let dir = ScratchDir::new("spawn_target");
+        let root = bytes::path_to_bytes(&dir.path).replace(b"\\", b"/");
+        std::fs::create_dir(dir.path.join("sub")).expect("mkdir");
+        std::fs::write(dir.path.join("reg"), b"hi\n").expect("write");
+        let t = |w: &[u8]| spawn_target(&root, w, None);
+        assert_eq!(t(b"./sub"), SpawnTarget::Dir);
+        // A trailing separator is answered by the name in front of it.
+        assert_eq!(t(b"./sub/"), SpawnTarget::Dir);
+        assert_eq!(t(b"./sub\\"), SpawnTarget::Dir);
+        assert_eq!(t(b"./nosuch/"), SpawnTarget::Missing);
+        assert_eq!(t(b"./nosuch\\"), SpawnTarget::Missing);
+        assert_eq!(t(b"./reg/"), SpawnTarget::NotDir);
+        // Without one the host's own error is left to speak.
+        assert_eq!(t(b"./nosuch"), SpawnTarget::Other);
+        assert_eq!(t(b"./reg"), SpawnTarget::Other);
+        // A word with no separator in it named no file to ask about.
+        assert_eq!(t(b"sub"), SpawnTarget::Other);
+        assert_eq!(t(b""), SpawnTarget::Other);
+        // A `$PATH` search's answer is asked about directly.
+        assert_eq!(spawn_target(b"", b"sub", Some(&dir.path.join("sub"))), SpawnTarget::Dir);
     }
 
     #[test]
@@ -77599,6 +77803,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             b"./s.sh",
             Some(b"/no/such/interp"),
             &Error::from(ErrorKind::NotFound),
+            SpawnTarget::Other,
             false,
         );
         assert_eq!(diag_text(&miss), ["./s.sh: cannot execute: required file not found"]);
@@ -77609,6 +77814,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             b"./s.sh",
             Some(b"/tmp"),
             &Error::from(ErrorKind::PermissionDenied),
+            SpawnTarget::Other,
             false,
         );
         assert_eq!(diag_text(&bad), ["!./s.sh: /tmp: bad interpreter: Permission denied"]);
@@ -77620,6 +77826,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             b"/a/s.sh",
             Some(b"/tmp"),
             &Error::from(ErrorKind::PermissionDenied),
+            SpawnTarget::Other,
             true,
         );
         assert_eq!(
@@ -77632,6 +77839,7 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             b"/a/s.sh",
             Some(b"/no/such"),
             &Error::from(ErrorKind::NotFound),
+            SpawnTarget::Other,
             true,
         );
         assert_eq!(diag_text(&miss_exec), ["/a/s.sh: cannot execute: required file not found"]);
@@ -77683,13 +77891,13 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // second line about EACCES — see the doc comment for why.
         let e = std::io::Error::from_raw_os_error(if cfg!(windows) { 193 } else { 8 });
         let text = |m: &(Vec<SpawnDiag>, i32)| diag_text(m);
-        let plain = spawn_error_message(b"./bin.elf", None, &e, false);
+        let plain = spawn_error_message(b"./bin.elf", None, &e, SpawnTarget::Other, false);
         assert_eq!(
             text(&plain),
             ["./bin.elf: cannot execute binary file: Exec format error"]
         );
         assert_eq!(plain.1, 126);
-        let ex = spawn_error_message(b"/a/bin.elf", None, &e, true);
+        let ex = spawn_error_message(b"/a/bin.elf", None, &e, SpawnTarget::Other, true);
         assert_eq!(
             text(&ex),
             [

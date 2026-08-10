@@ -24415,8 +24415,11 @@ impl Shell {
             match part {
                 WordPart::Literal(s) => {
                     // A tilde expands to `$HOME`/a home directory — a path, and
-                    // so bytes; the literal text around it is source.
-                    if idx == 0 {
+                    // so bytes; the literal text around it is source. Not under
+                    // double quotes, which is the other half of the same guard —
+                    // see [`Shell::push_literal_annotated`]. `"${z=~}"` reaches
+                    // this walk and assigns the tilde as it stands.
+                    if idx == 0 && !self.dquote {
                         let home = self.tilde_expand(s.as_bytes());
                         push_chars(&mut cur, &home, false);
                     } else {
@@ -25697,7 +25700,33 @@ impl Shell {
     /// A tilde expansion's result is pushed **quoted** and the remainder
     /// unquoted, which is bash's own split — see [`Shell::tilde_split`] for why
     /// the two halves must not be conflated.
+    ///
+    /// "First" is not the whole of it: `expand_word_internal`'s `case '~'` also
+    /// asks what the *expansion* is quoted as, and a double-quoted one has no
+    /// tilde at all.
+    ///
+    /// ```c
+    ///   if ((word->flags & W_NOTILDE) ||
+    ///       (sindex > 0 && (internal_tilde == 0)) ||
+    ///       (quoted & (Q_DOUBLE_QUOTES|Q_HERE_DOCUMENT)))
+    ///     { … goto add_character; }              /* subst.c:11182-11192 */
+    /// ```
+    ///
+    /// A word inside `" … "` never reaches here — its literal runs are the
+    /// contents of a [`WordPart::DoubleQuoted`] and go their own way — but a
+    /// **brace operand** does: `parameter_brace_expand_rhs` passes its own
+    /// `quoted` straight down (`expand_string_for_rhs (temp, quoted, …)`,
+    /// subst.c:7737), so the quotes around the substitution reach the operand's
+    /// own leading `~`. Measured against bash 5.2.37 with `z` unset:
+    ///
+    /// ```text
+    ///   echo ${z:-~}      /home/…    unquoted: the ordinary leading tilde
+    ///   echo "${z:-~}"    ~          quoted: no tilde expansion at all
+    ///   echo "${z:-~/a}"  ~/a        …however much of a path follows it
+    ///   echo "${z=~}"     ~          and the same for the other operators
+    /// ```
     fn push_literal_annotated(&mut self, buf: &mut Vec<EChar>, s: BStr<'_>, leading: bool) {
+        let leading = leading && !self.dquote;
         match if leading { self.tilde_split(s) } else { None } {
             Some((dir, rest)) => {
                 push_chars(buf, &dir, true);

@@ -24637,6 +24637,11 @@ impl Shell {
         {
             return Some(vec![Str::new()]);
         }
+        // The scan is the last reader of the word's own string; the sub-words
+        // below are expanded on their own. See
+        // [`crate::unparse::rescoped_part`].
+        let rescoped = crate::unparse::rescoped_parts(parts);
+        let parts = rescoped.as_deref().unwrap_or(parts);
         match parts {
             [
                 WordPart::ArrayRef {
@@ -25676,7 +25681,21 @@ impl Shell {
         // like the subject, and take the word-list path on the same terms.
         let outer_at = std::mem::replace(&mut self.saw_at_list, false);
         let outer_q = std::mem::replace(&mut self.saw_quoted_at_list, false);
+        // Every caller of this hands bash a *string it cut out* and lets a fresh
+        // `expand_word_internal` read it: `parameter_brace_remove_pattern` is
+        // handed `patstr` (subst.c), `cond_expand_word` is handed the arm's or
+        // operand's word. So this walk owns a `sindex` of its own, exactly as a
+        // whole word's does in [`Shell::expand_word_annotated`] — an extent read
+        // that gave up in here consumes the rest of *this* pattern and nothing
+        // of the word the pattern was cut out of. Without the scope,
+        // `v=zz; b='A${z#p$(fi'$'\n''q)r}B'; "${b@P}"` loses the `B`: bash
+        // answers `AzzB`, the failed `$(` in the pattern having ended the
+        // pattern's walk only.
+        let saved_consumed = std::mem::replace(&mut self.extent_consumed, false);
         for (idx, part) in word.parts.iter().enumerate() {
+            if self.extent_consumed {
+                break;
+            }
             match part {
                 WordPart::Literal(s) => self.push_literal_annotated(&mut buf, s, idx == 0),
                 WordPart::SingleQuoted { text, .. } => push_chars(&mut buf, text.as_bytes(), true),
@@ -25713,6 +25732,7 @@ impl Shell {
                 }
             }
         }
+        self.extent_consumed = saved_consumed;
         let saw_at = std::mem::replace(&mut self.saw_at_list, outer_at);
         let saw_q = std::mem::replace(&mut self.saw_quoted_at_list, outer_q);
         let quoted_path = saw_q && self.cond_quoted_list_on();
@@ -25887,7 +25907,18 @@ impl Shell {
     /// mark the call as a nested one.
     fn expand_replacement_inner(&mut self, word: &Word, patsub: bool) -> Vec<ReplTok> {
         let mut out: Vec<ReplTok> = Vec::new();
+        // `expand_string_if_necessary (rep, …)` is its own `expand_word_internal`
+        // over its own string, so this walk owns a `sindex` of its own — see
+        // [`Shell::extent_consumed`] and the same scoping in
+        // [`Shell::expand_word_pattern_inner`]. `printf -v z 'p\nq)rX'` with
+        // `b='A${z//X/$(fi'$'\n''q)r}B'` is `Ap⏎q)r⏎q)rB` in bash: the failed
+        // read leaves `⏎q)r` and ends the *replacement's* walk, so the `r` after
+        // the `$( … )` is not read again and the word's own `B` still is.
+        let saved_consumed = std::mem::replace(&mut self.extent_consumed, false);
         for part in &word.parts {
+            if self.extent_consumed {
+                break;
+            }
             match part {
                 WordPart::Literal(s) => {
                     // Unquoted literal text. The replacement lexer preserved
@@ -25945,6 +25976,7 @@ impl Shell {
                 }
             }
         }
+        self.extent_consumed = saved_consumed;
         out
     }
 
@@ -26676,6 +26708,12 @@ impl Shell {
         if self.brace_extent_scan(part) {
             return Str::new();
         }
+        // …and it is the last reader that sees the *word's* string. Everything
+        // below is handed a sub-word the scan cut out and expands it on its own,
+        // so a `$( … )` in one wants that sub-word's remainder rather than the
+        // word's. See [`crate::unparse::rescoped_part`].
+        let rescoped = crate::unparse::rescoped_part(part);
+        let part = rescoped.as_ref().unwrap_or(part);
         match part {
             WordPart::Param { name, braced } => match self.param_value(name) {
                 Some(v) => v,
@@ -29413,6 +29451,10 @@ impl Shell {
         if self.brace_extent_scan(part) {
             return Some(SplitItems::Joined(vec![Str::new()]));
         }
+        // …and the re-scoping that goes with it, for the same reason. See
+        // [`crate::unparse::rescoped_part`].
+        let rescoped = crate::unparse::rescoped_part(part);
+        let part = rescoped.as_ref().unwrap_or(part);
         match part {
             WordPart::ArrayRef {
                 name,

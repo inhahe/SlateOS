@@ -1406,6 +1406,73 @@ fn attach_tails_by(
     }
 }
 
+/// `part` with the tails inside each of its `${ … }` sub-words re-measured
+/// against that sub-word alone — or `None` when there is nothing in one to
+/// re-measure, which is the usual case and costs no clone.
+///
+/// [`attach_comsub_tails`] fills every tail against the **word**, because the
+/// reader it is filled for is `extract_dollar_brace_string`
+/// ([`crate::interp::Shell::brace_extent_scan`]), which is walking the word's
+/// own string and reads a `$(` between the braces at any depth. That is the
+/// only reader with that view. Every other one is handed a sub-word that the
+/// scan already cut out — `parameter_brace_expand_word` gets `value`,
+/// `parameter_brace_remove_pattern` gets `patstr` — and calls
+/// `expand_word_internal` on *that*, so `extract_command_subst` there walks the
+/// sub-word and stops at its end.
+///
+/// Measured against bash 5.2.37, with `z=zz` and `${b@P}`:
+///
+/// ```text
+/// b='A${z#p$(fi⏎q)r}B'   ->   `fi⏎q)r}B'   from the scan
+///                             `fi⏎q)r'     from the pattern's own expansion
+///                        and  AzzB
+/// ```
+///
+/// — the `}B` belongs to the first read only. Reusing the word-scoped tail for
+/// the second ran its leftover past the `}` and swallowed the word's `B`.
+///
+/// Applied where the scan is, and for the same reason: the scan is the last
+/// reader that sees the word's string, so everything after it is scoped to a
+/// sub-word.
+pub(crate) fn rescoped_part(part: &WordPart) -> Option<WordPart> {
+    if !operand_holds_sub(part) {
+        return None;
+    }
+    let mut out = part.clone();
+    for (kind, w) in nested_parts_mut(&mut out) {
+        if kind == Nested::Operand {
+            attach_comsub_tails_in(w);
+        }
+    }
+    Some(out)
+}
+
+/// [`rescoped_part`] for a slice, for the two list recognisers that reach a
+/// `${ … }` without going through
+/// [`crate::interp::Shell::expand_dynamic_with`].
+pub(crate) fn rescoped_parts(parts: &[WordPart]) -> Option<Vec<WordPart>> {
+    if !parts.iter().any(operand_holds_sub) {
+        return None;
+    }
+    Some(parts.iter().map(|p| rescoped_part(p).unwrap_or_else(|| p.clone())).collect())
+}
+
+/// Whether any `${ … }` sub-word of `part` holds a construct that carries a
+/// tail, which is the only thing [`rescoped_part`] would change.
+fn operand_holds_sub(part: &WordPart) -> bool {
+    nested_parts(part).into_iter().any(|(kind, w)| kind == Nested::Operand && holds_sub(w))
+}
+
+/// Whether `parts` holds a `$( … )` or a `$(( … ))` anywhere in this string
+/// scope — a `[ … ]` subscript is one of its own and is not looked into, having
+/// had its tails measured against itself all along.
+fn holds_sub(parts: &[WordPart]) -> bool {
+    parts.iter().any(|p| {
+        matches!(p, WordPart::CommandSub { .. } | WordPart::ArithSub { .. })
+            || nested_parts(p).into_iter().any(|(k, w)| k != Nested::Index && holds_sub(w))
+    })
+}
+
 /// Whether `hay` contains `needle`.
 fn contains(hay: BStr<'_>, needle: BStr<'_>) -> bool {
     find(hay, needle).is_some()
@@ -1500,9 +1567,20 @@ pub(crate) enum Nested {
     /// `${a[$(fi)]}` reports twice at the *subscript's* scope and the brace still
     /// closes (`A0B`), where `${y:-${a[$(fi)]}}` reports not at all.
     Index,
-    /// Anything the scan walks through: an operand, a pattern, a replacement,
-    /// the bounds of a substring, the contents of a double-quoted run.
+    /// A sub-word of a `${ … }`: an operand, a pattern, a replacement, the
+    /// bounds of a substring. The scan walks *through* one — it is between the
+    /// braces, and `extract_dollar_brace_string` reads every `$(` there — but
+    /// the expansion does not: `parameter_brace_expand` cuts the sub-word out as
+    /// a string (`value`, `patstr`, `substr`) and hands it to a fresh
+    /// `expand_word_internal`. So the two readers walk different strings, and a
+    /// `$( … )` in here has a different remainder for each. See
+    /// [`rescoped_part`].
     Operand,
+    /// A `" … "` run, which the scan walks through *and* the expansion does:
+    /// there is no second string, the quotes are simply characters
+    /// `expand_word_internal` passes over. `echo "a$(⏎!⏎)b$(echo c)d"` echoes
+    /// `` `! )b$(echo c)d"' `` — the word's remainder and its closing quote.
+    Quoted,
 }
 
 /// Define [`nested_parts`] and [`nested_parts_mut`] from one match.
@@ -1531,7 +1609,7 @@ macro_rules! nested_parts_fn {
                 (Nested::Operand, p)
             }
             match p {
-                WordPart::DoubleQuoted(parts) => vec![arg(parts.$slice())],
+                WordPart::DoubleQuoted(parts) => vec![(Nested::Quoted, parts.$slice())],
                 WordPart::ParamOp { index, arg: a, .. } => {
                     idx(index).into_iter().chain([arg(a.parts.$slice())]).collect()
                 }

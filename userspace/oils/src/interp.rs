@@ -3468,6 +3468,24 @@ enum PersistentBind {
     VarfdClose(i32),
 }
 
+/// The shell's *persistent* fd table, saved whole so a redirection-only `exec`
+/// whose list fails partway can be put back — see [`Shell::save_exec_fds`] and
+/// [`Shell::restore_exec_fds`].
+///
+/// This is every field a persistent redirect can bind, and nothing else: fd 0's
+/// two halves, fd 1's and fd 2's write halves (fd 2's with the stack depth its
+/// target shadows to), and the two tables that hold every other descriptor's
+/// read and write halves — fd 1's and fd 2's read halves among them.
+struct ExecFdTable {
+    stdin: Option<InputFd>,
+    stdin_write: Option<Arc<File>>,
+    stdout: Option<WriteFd>,
+    stderr: Option<WriteFd>,
+    stderr_depth: usize,
+    open_fds: std::collections::HashMap<i32, InputFd>,
+    open_write_fds: std::collections::HashMap<i32, WriteFd>,
+}
+
 /// The one coproc a shell keeps track of (see [`Shell::coproc_tracked`]).
 ///
 /// The two descriptors are recorded here rather than read back out of `NAME`
@@ -24308,8 +24326,37 @@ impl Shell {
     /// the *current* sink of its source fd (as already mutated by earlier
     /// redirects in the same `exec`), matching bash's dup-at-that-moment
     /// semantics. Returns the resulting status (1 if any redirect failed).
+    ///
+    /// A *redirection failure* ends the list and puts back what the list had
+    /// already done. Both halves are bash's:
+    ///
+    /// ```c
+    ///   for (temp = list; temp; temp = temp->next)
+    ///     { … if (error) { redirection_error (temp, error, fn); … return (error); } }
+    ///                                                   /* redir.c:260-271 */
+    ///   if (do_redirections (redirects, RX_ACTIVE|RX_UNDOABLE) != 0)
+    ///     { undo_partial_redirects (); dispose_exec_redirects (); … }
+    ///                                             /* execute_cmd.c:5457-5465 */
+    /// ```
+    ///
+    /// — `do_redirections` returns at the *first* error, so the redirects after
+    /// it are never performed, and `execute_builtin` then runs the undo list
+    /// `add_undo_redirect`/`add_undo_close_redirect` built as it went. Measured
+    /// against bash 5.2.37: `exec 4>e1 3>&9 5>e2` opens `e1` but leaves fd 4
+    /// unbound and never creates `e2`, and `exec 3>/dev/null; exec 3>&- 4>&9`
+    /// leaves fd 3 still open — the close was undone too.
+    ///
+    /// A *fatal expansion* error is not that path — it unwinds rather than
+    /// returning an error code, so the undo list is discarded unrun and the
+    /// prefix stands. `exec 4>s1 3>"/dev/null${z:-'$(fi)'}" 5>s2` leaves fd 4
+    /// bound. That is the `break` below, which restores nothing.
     fn apply_exec_redirects(&mut self, redirs: &[Redirect], out: &Out) -> i32 {
-        let mut rc = 0;
+        let saved = self.save_exec_fds();
+        // The descriptors a `{name}` redirect allocated, which the undo leaves
+        // alone: bash saves the redirector it just assigned and restores it to
+        // itself, so `exec {v}>v1 3>&9` still leaves `$v` open on `v1`. See
+        // [`Shell::restore_exec_fds`].
+        let mut keep: Vec<i32> = Vec::new();
         let mut reserved: Vec<i32> = Vec::new();
         for r in redirs {
             self.dup_save_note = DupSaveNote::None;
@@ -24320,8 +24367,8 @@ impl Shell {
                 Err(e) => {
                     let line = bfmt![self.err_prefix(), &e];
                     self.berrln(&line);
-                    rc = 1;
-                    continue;
+                    self.restore_exec_fds(saved, &keep);
+                    return 1;
                 }
             };
             let bind = self.apply_persistent_redirect(r, fd, out);
@@ -24344,7 +24391,9 @@ impl Shell {
             if let Err(e) = res {
                 // A fatal expansion error inside the word is not a redirection
                 // failure: it has already been reported, and it abandons the
-                // whole list rather than moving on to the next redirect.
+                // whole list rather than moving on to the next redirect. It
+                // also unwinds past the undo list rather than running it, so
+                // what the list already did stands.
                 if self.expansion_failed() {
                     break;
                 }
@@ -24361,10 +24410,112 @@ impl Shell {
                 }
                 let line = bfmt![self.err_prefix(), &e];
                 self.berrln(&line);
-                rc = 1;
+                self.restore_exec_fds(saved, &keep);
+                return 1;
+            }
+            // Past every way this one could have failed. A `{name}` redirect
+            // that *bound* a descriptor keeps it across a later failure's undo,
+            // unless `varredir_close` is set — bash tests the option first and
+            // adds a plain close instead:
+            //
+            // ```c
+            //   if (fd != redirector && (redirect->rflags & REDIR_VARASSIGN) &&
+            //         varassign_redir_autoclose)
+            //     r = add_undo_close_redirect (redirector);
+            //   else if ((fd != redirector) && (fcntl (redirector, F_GETFD, 0) != -1))
+            //     r = add_undo_redirect (redirector, ri, -1);   /* redir.c:959-962 */
+            // ```
+            //
+            // Measured: `shopt -s varredir_close; exec {v}>w1 3>&9` leaves `$v`
+            // set to 10 but fd 10 closed, where without the option a write to
+            // it still reaches `w1`. A `{name}>&-` is not this case — it closed
+            // a descriptor rather than allocating one, and bash's `r_close_this`
+            // arm has no `REDIR_VARASSIGN` test, so the close is undone.
+            if bound
+                && r.varfd.is_some()
+                && !self.shopt.get("varredir_close").copied().unwrap_or(false)
+            {
+                keep.push(fd);
             }
         }
-        rc
+        0
+    }
+
+    /// Copy the persistent fd table, for [`Shell::restore_exec_fds`] to put
+    /// back if the redirection list this precedes fails partway.
+    ///
+    /// bash saves one descriptor at a time, into a spare fd ≥ 10 that the undo
+    /// list dups back (`add_undo_redirect`, redir.c:1286); osh keeps the same
+    /// table as a handful of fields and two maps, so copying it whole says the
+    /// same thing more directly. Both are cheap — every entry is an `Arc`, so
+    /// this shares handles rather than reopening anything.
+    fn save_exec_fds(&self) -> ExecFdTable {
+        ExecFdTable {
+            stdin: self.exec_stdin.as_ref().map(Arc::clone),
+            stdin_write: self.exec_stdin_write.clone(),
+            stdout: self.exec_stdout.clone(),
+            stderr: self.exec_stderr.clone(),
+            stderr_depth: self.exec_stderr_depth,
+            open_fds: self
+                .open_fds
+                .iter()
+                .map(|(&fd, c)| (fd, Arc::clone(c)))
+                .collect(),
+            open_write_fds: self
+                .open_write_fds
+                .iter()
+                .map(|(&fd, w)| (fd, w.clone()))
+                .collect(),
+        }
+    }
+
+    /// Put back a [`Shell::save_exec_fds`] table, leaving the descriptors named
+    /// in `keep` as they now stand.
+    ///
+    /// `keep` is the `{name}` allocations of the list being undone. A varfd
+    /// redirect's redirector is a *fresh* descriptor ≥ 10, so it appears in
+    /// neither map in the saved table and never collides with fd 0/1/2 — which
+    /// is why lifting the live entries out and dropping them back in afterwards
+    /// is enough, and why the three `exec_std*` fields need no exception.
+    fn restore_exec_fds(&mut self, saved: ExecFdTable, keep: &[i32]) {
+        let live: Vec<(i32, Option<InputFd>, Option<WriteFd>)> = keep
+            .iter()
+            .map(|&fd| {
+                (
+                    fd,
+                    self.open_fds.get(&fd).map(Arc::clone),
+                    self.open_write_fds.get(&fd).cloned(),
+                )
+            })
+            .collect();
+        self.exec_stdin = saved.stdin;
+        self.exec_stdin_write = saved.stdin_write;
+        self.exec_stdout = saved.stdout;
+        // The depth is restored with the target it belongs to, so a failed
+        // `exec 2>…` cannot leave fd 2 shadowing a stack entry it no longer
+        // has a target for — see [`Shell::set_exec_stderr`].
+        self.exec_stderr = saved.stderr;
+        self.exec_stderr_depth = saved.stderr_depth;
+        self.open_fds = saved.open_fds;
+        self.open_write_fds = saved.open_write_fds;
+        for (fd, rd, wr) in live {
+            match rd {
+                Some(c) => {
+                    self.open_fds.insert(fd, c);
+                }
+                None => {
+                    self.open_fds.remove(&fd);
+                }
+            }
+            match wr {
+                Some(w) => {
+                    self.open_write_fds.insert(fd, w);
+                }
+                None => {
+                    self.open_write_fds.remove(&fd);
+                }
+            }
+        }
     }
 
     /// Resolve the current write sink of source fd `n` for an `exec M>&N` dup:

@@ -1747,6 +1747,25 @@ enum ArithFrame {
     Aborted,
 }
 
+/// Which arm `param_expand`'s `case LPAREN` takes once the count has an extent
+/// — see [`Shell::arith_extent_route`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ArithRoute {
+    /// The extent ended `)` and `chk_arithsub` accepted what was inside it: the
+    /// expression `evalexp` is handed (bash's `temp2`), and the text the count
+    /// left after the extent.
+    Arith(Str, Str),
+    /// `goto comsub` — either test failed. The text `command_substitute` is
+    /// handed is the extent **including** its leading `(` (bash's `temp`),
+    /// which is why the child's diagnostic echoes `` `(1+$(fi' ``; then the
+    /// same remainder.
+    Comsub(Str, Str),
+    /// The count ran the string out: `c == 0 && nesting_level` (subst.c:1493).
+    RanOut,
+    /// A nested read's jump stands, so nothing here is reached.
+    Aborted,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FatalAbort {
     /// The status the shell ends with where nothing intercepts the abort.
@@ -26097,30 +26116,26 @@ impl Shell {
             // arithmetic outside a brace is silent.
             if let WordPart::ArithSub { bracket: false, expr, parts, tail } = sub {
                 let s = bfmt![b"(", &crate::unparse::parts_src(parts), b"))", tail];
-                match self.arith_extent_frame(&s, 0) {
-                    ArithFrame::Closed(_) => continue,
-                    ArithFrame::Aborted => return ExtentRead::Aborted,
-                    // Outside a prompt the count's *own* ending runs first and
-                    // wins: `report_error ("no closing `)'")` then
-                    // `exp_jump_to_top_level (DISCARD)` (subst.c:1493-1506), so
-                    // the brace scan never reaches an ending of its own and
-                    // there is no second complaint. Under a prompt the count is
-                    // silent and only overruns the index, which is what leaves
-                    // the brace with no `}` to find.
-                    ArithFrame::RanOut => {
-                        let expr = expr.clone();
-                        self.arith_unclosed_by_comment(&expr);
-                        return if self.prompt_expanding {
-                            ExtentRead::Abandoned { body: Str::new(), rest: Str::new() }
-                        } else {
-                            ExtentRead::Aborted
-                        };
-                    }
+                let expr = expr.clone();
+                match self.arith_scan_count(&s, &expr) {
+                    None => continue,
+                    Some(read) => return read,
                 }
             }
             let WordPart::CommandSub { body } = sub else {
                 continue;
             };
+            // The same count over the same `$(` row, for the same reason: bash
+            // never decided this text was a substitution, so what the scan meets
+            // here is still a `$((`.
+            if let CmdSubBody::ArithFallback { src, tail } = body {
+                let s = bfmt![src, b")", tail];
+                let expr = src.get(1..).unwrap_or_default().to_vec();
+                if let Some(read) = self.arith_scan_count(&s, &expr) {
+                    return read;
+                }
+                continue;
+            }
             let read = match body {
                 CmdSubBody::Parsed { src, tail, .. } => {
                     tail.as_ref().map_or(ExtentRead::Closed, |tail| {
@@ -26130,22 +26145,49 @@ impl Shell {
                 CmdSubBody::Unread { src, tail, closed, .. } => {
                     self.comsub_reparse_read(src, tail, *closed)
                 }
-                // Neither of these two spellings is *parsed* by the scan that
-                // finds it. A backquote is `string_extract (string, &si, "`",
-                // …)` (subst.c:1886), a plain byte hunt for the closer, so its
-                // extent cannot fail: ``A${y:-p`fi`q}B`` expands quietly to
-                // `AYB`. An `ArithFallback` body is an arithmetic osh's lexer
-                // has already decided is a command substitution, and the
-                // `ArithSub` arm above is where that text's count belongs.
-                CmdSubBody::Backtick { .. } | CmdSubBody::ArithFallback { .. } => {
-                    ExtentRead::Closed
-                }
+                // A backquote is not *parsed* by the scan that finds it:
+                // `string_extract (string, &si, "`", …)` (subst.c:1886), a plain
+                // byte hunt for the closer, so its extent cannot fail —
+                // ``A${y:-p`fi`q}B`` expands quietly to `AYB`. The two arms
+                // above have taken every other unparsed spelling.
+                CmdSubBody::Backtick { .. } => ExtentRead::Closed,
+                CmdSubBody::ArithFallback { .. } => ExtentRead::Closed,
             };
             if read != ExtentRead::Closed {
                 return read;
             }
         }
         ExtentRead::Closed
+    }
+
+    /// The `$((` count a `${ … }` scan runs over `s`, for the two spellings
+    /// that reach it — `None` where it closed and the scan walks on.
+    ///
+    /// A count that runs the string out overruns the scan's index:
+    /// `CHECK_STRING_OVERRUN` then sets `i = len`, `c = 0` and breaks the loop
+    /// (subst.c:135-141), landing on the `if (c == 0 && nesting_level)` ending
+    /// — the same `bad substitution: no closing '}'` any other unclosed brace
+    /// gets (subst.c:1975-1988).
+    ///
+    /// Outside a prompt the count's *own* ending runs first and wins:
+    /// `report_error ("no closing `)'")` then `exp_jump_to_top_level (DISCARD)`
+    /// (subst.c:1493-1506), so the brace scan never reaches an ending of its own
+    /// and there is no second complaint. Under a prompt the count is silent and
+    /// only overruns the index, which is what leaves the brace with no `}` to
+    /// find.
+    fn arith_scan_count(&mut self, s: BStr<'_>, expr: BStr<'_>) -> Option<ExtentRead> {
+        match self.arith_extent_frame(s, 0) {
+            ArithFrame::Closed(_) => None,
+            ArithFrame::Aborted => Some(ExtentRead::Aborted),
+            ArithFrame::RanOut => {
+                self.arith_unclosed_by_comment(expr);
+                Some(if self.prompt_expanding {
+                    ExtentRead::Abandoned { body: Str::new(), rest: Str::new() }
+                } else {
+                    ExtentRead::Aborted
+                })
+            }
+        }
     }
 
     /// The `$(( … ))` counterpart of [`Shell::brace_extent_scan`]: the extent
@@ -26215,40 +26257,120 @@ impl Shell {
         // What `extract_command_subst` is handed: the string from the byte
         // after the `$(`, which for a `$((` is its second `(`.
         let s = bfmt![b"(", &crate::unparse::parts_src(parts), b"))", tail];
-        let end = match self.arith_extent_frame(&s, 0) {
+        match self.arith_extent_route(&s) {
             // A nested read whose jump stands abandons the enclosing command
             // before any of this matters.
-            ArithFrame::Aborted => {
+            ArithRoute::Aborted => {
                 self.extent_consumed = true;
-                return Str::new();
+                Str::new()
             }
-            // `c == 0 && nesting_level`, the one ending this count has:
-            // subst.c:1493-1506. See [`Shell::arith_unclosed_by_comment`].
-            ArithFrame::RanOut => return self.arith_unclosed_by_comment(expr),
-            ArithFrame::Closed(end) => end,
-        };
-        // `temp1 = temp + 1` — the extent less its opening `(`.
-        let temp1 = s.get(1..end).unwrap_or_default();
-        let arith = temp1.split_last().and_then(|(last, head)| {
-            (*last == b')' && Self::chk_arithsub(head)).then(|| head.to_vec())
-        });
-        let rest = s.get(end.saturating_add(1)..).unwrap_or_default().to_vec();
-        match arith {
+            // See [`Shell::arith_unclosed_by_comment`].
+            ArithRoute::RanOut => self.arith_unclosed_by_comment(expr),
             // The ordinary shape, and the only one that leaves the caller's
             // walk alone: the count stopped where the parser's `))` is, so the
             // parts after it are still the parts to expand.
-            Some(t2) if t2 == expr && rest == tail => self.arith_sub(expr, false),
-            Some(t2) => {
+            ArithRoute::Arith(t2, rest) if t2 == expr && rest == tail => {
+                self.arith_sub(expr, false)
+            }
+            ArithRoute::Arith(t2, rest) => {
                 let out = self.arith_sub(&t2, false);
                 self.extent_consumed = true;
                 let rest = self.expand_extent_rest(&rest);
                 bfmt![&out, &rest]
             }
-            // `goto comsub`, with `temp` — the extent *including* its leading
-            // `(`, which is why the child's diagnostic echoes `` `(1+$(fi' ``
-            // and not `` `1+$(fi' ``.
-            None => {
-                let out = self.run_command_sub_text(s.get(..end).unwrap_or_default());
+            ArithRoute::Comsub(text, rest) => {
+                let out = self.run_command_sub_text(&text);
+                self.extent_consumed = true;
+                let rest = self.expand_extent_rest(&rest);
+                bfmt![&out, &rest]
+            }
+        }
+    }
+
+    /// `param_expand`'s `case LPAREN` from the byte after the `$(` — the count,
+    /// then the two tests that pick the arm (subst.c:10570-10640).
+    ///
+    /// ```c
+    ///   temp2 = savestring (temp + 1);          /* the extent less its `(` */
+    ///   temp1 = temp2 + len - 1;
+    ///   if (*temp1 != RPAREN) goto comsub;
+    ///   *temp1 = '\0';
+    ///   if (chk_arithsub (temp2, len - 1) == 0) goto comsub;
+    /// ```
+    ///
+    /// Both callers want the same answer over a different string: an
+    /// arithmetic's is rebuilt from its expression, a fallback's is the text
+    /// the lexer already carved out. See [`Shell::arith_fallback_expand`].
+    fn arith_extent_route(&mut self, s: BStr<'_>) -> ArithRoute {
+        let end = match self.arith_extent_frame(s, 0) {
+            ArithFrame::Aborted => return ArithRoute::Aborted,
+            // `c == 0 && nesting_level`, the one ending this count has:
+            // subst.c:1493-1506.
+            ArithFrame::RanOut => return ArithRoute::RanOut,
+            ArithFrame::Closed(end) => end,
+        };
+        let rest = s.get(end.saturating_add(1)..).unwrap_or_default().to_vec();
+        // `temp1 = temp + 1` — the extent less its opening `(`.
+        let temp1 = s.get(1..end).unwrap_or_default();
+        match temp1.split_last() {
+            Some((b')', head)) if Self::chk_arithsub(head) => {
+                ArithRoute::Arith(head.to_vec(), rest)
+            }
+            _ => ArithRoute::Comsub(s.get(..end).unwrap_or_default().to_vec(), rest),
+        }
+    }
+
+    /// The same read for a `$((` osh's lexer has already decided is a command
+    /// substitution — a body whose parens do not balance, so it can never be an
+    /// expression.
+    ///
+    /// bash makes no such decision when it parses: the word carries one `$(`
+    /// and `param_expand` counts an extent out of it before `chk_arithsub` is
+    /// asked anything. So the count runs here too, and where it stops need not
+    /// be where the lexer's balance stopped — a nested `$( … )` that will not
+    /// parse stops the count on the line the *reader* reached, mid-`))`, and
+    /// the count then closes on a `)` the lexer had already crossed:
+    ///
+    /// ```text
+    /// v='A$((1+$(fi⏎echo x⏎))X)B'; printf '[%s]\n' "${v@P}"    ->  [AX)B]
+    /// ```
+    ///
+    /// — the extent is `(1+$(fi⏎echo x⏎)`, whose last byte is not `)`, so
+    /// `goto comsub` runs that text (a *second* report, from the child) and
+    /// `X)B` is what the count never reached.
+    fn arith_fallback_expand(&mut self, body: &CmdSubBody, src: BStr<'_>, tail: BStr<'_>) -> Str {
+        // The lexer's `src` runs from the byte after the `$(` up to — but not
+        // including — the `)` it matched, so the string the count is handed is
+        // that closer put back and the word's remainder after it.
+        let s = bfmt![src, b")", tail];
+        match self.arith_extent_route(&s) {
+            ArithRoute::Aborted => {
+                self.extent_consumed = true;
+                Str::new()
+            }
+            // Named as the arithmetic it was written as: `src` still carries
+            // the inner `(`.
+            ArithRoute::RanOut => {
+                let expr = src.get(1..).unwrap_or_default().to_vec();
+                self.arith_unclosed_by_comment(&expr)
+            }
+            // The count agreed with the lexer, which is every ordinary case:
+            // run the body exactly as it stands and leave the caller's walk
+            // alone.
+            ArithRoute::Comsub(text, rest) if text == src && rest == tail => {
+                self.command_sub_body(body)
+            }
+            ArithRoute::Comsub(text, rest) => {
+                let out = self.run_command_sub_text(&text);
+                self.extent_consumed = true;
+                let rest = self.expand_extent_rest(&rest);
+                bfmt![&out, &rest]
+            }
+            // A count that stops short can leave an extent the lexer's whole-
+            // body balance rejected but `chk_arithsub` accepts, in which case
+            // bash evaluates it — the decision is the extent's, not the word's.
+            ArithRoute::Arith(t2, rest) => {
+                let out = self.arith_sub(&t2, false);
                 self.extent_consumed = true;
                 let rest = self.expand_extent_rest(&rest);
                 bfmt![&out, &rest]
@@ -26770,6 +26892,12 @@ impl Shell {
                         self.join_elements(&fields, *star)
                     }
                 }
+            }
+            // A `$((` that osh's lexer routed to a substitution still owes bash's
+            // extent read, which can stop somewhere else entirely. See
+            // [`Shell::arith_fallback_expand`].
+            WordPart::CommandSub { body: body @ CmdSubBody::ArithFallback { src, tail } } => {
+                self.arith_fallback_expand(body, src, tail)
             }
             WordPart::CommandSub { body } => self.command_sub_body(body),
             // The substitution's path is a temp file name this shell generates,

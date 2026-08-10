@@ -6127,6 +6127,9 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
                 // afterwards and does not undo the splice.
                 SubBody::ArithFallback(nested) => CmdSubBody::ArithFallback {
                     src: splice_reprints(raw, parse_arith_comsubs(nested, opts)?),
+                    // Filled by `unparse::attach_comsub_tails` once the word is
+                    // assembled, as every other extent-reading part's is.
+                    tail: Str::new(),
                 },
                 SubBody::Eager => {
                     // The eager parse is kept — it is what found the `)` and

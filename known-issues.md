@@ -238,28 +238,27 @@ coming back, the `$[` expression's leftover, and the brace scan's `}`).
 corrected — it documents the one-line shape, not the rule.
 
 Two follow-ons the measurement turned up have entries of their own:
-TD-OILS-AN-ARITHMETIC-EXTENT-CARRIES-ON-COUNTING-AFTER-A-FAILED-READ (mostly
-fixed since, narrowed to one shape) and
+TD-OILS-AN-ARITHMETIC-EXTENT-CARRIES-ON-COUNTING-AFTER-A-FAILED-READ (fixed
+since) and
 TD-OILS-A-BRACE-OPERAND-IS-SCANNED-AGAIN-BEFORE-IT-IS-EXPANDED (still open).
 
 ---
 
-### TD-OILS-AN-ARITHMETIC-EXTENT-CARRIES-ON-COUNTING-AFTER-A-FAILED-READ. `v='A$((1+$(fi⏎echo x⏎))X)B'; echo "${v@P}"` gives `[AB]` where bash gives `[AX)B]` and reports twice — 2026-08-09 — OPEN (narrowed 2026-08-09)
+### TD-OILS-AN-ARITHMETIC-EXTENT-CARRIES-ON-COUNTING-AFTER-A-FAILED-READ. `v='A$((1+$(fi⏎echo x⏎))X)B'; echo "${v@P}"` gives `[AB]` where bash gives `[AX)B]` and reports twice — 2026-08-09 — FIXED 2026-08-09
 
-**Narrowed.** Three of the four variants below were fixed by commit `a1a0518ee`
-(see TD-OILS-AN-EXPANSION-TIME-ARITHMETIC-SCAN-IGNORES-THE-COMMENT-RULE), which
-re-derives the extent with a real port of the paren count. Only variant 2 — the
-one with a closer *missing* rather than a byte added — still diverges, and it
-fails for a different reason than the other three ever did: it never reaches the
-count at all.
+**Fixed in two steps.** Three of the four variants below went with commit
+`a1a0518ee` (see TD-OILS-AN-EXPANSION-TIME-ARITHMETIC-SCAN-IGNORES-THE-COMMENT-RULE),
+which re-derives the extent with a real port of the paren count. Variant 2 — the
+one with a closer *missing* rather than a byte added — went with the follow-up
+below, which gives the count the one shape it could not previously see.
 
 **Where:** `userspace/oils/src/lexer.rs` (~4810-4850). After
 `read_balanced('(', ')')` the lexer applies `is_arith_expr` and emits either
 `Seg::Arith(expr, false, nested)` or `Seg::CmdSub(raw, line,
 SubBody::ArithFallback(nested))` — the arith-vs-comsub decision `param_expand`
-makes at expansion time, made at *lex* time instead. For variant 2 the brackets
-do not balance the way the lexer expects, so no `WordPart::ArithSub` is built,
-`Shell::arith_extent_expand` never runs, and the text goes straight to the
+makes at expansion time, made at *lex* time instead. For variant 2 the parens do
+not balance the way the lexer expects, so no `WordPart::ArithSub` was built,
+`Shell::arith_extent_expand` never ran, and the text went straight to the
 fallback body with no leftover.
 
 **Reproduce:**
@@ -317,9 +316,11 @@ osh's answers to the same four, re-measured after `a1a0518ee`:
 4  osh [A)B]   two reports, matches bash
 ```
 
-Cases 1, 3 and 4 are now pinned by
-`an-arithmetic-extent-read-parses-a-command-substitution-inside-it.sh`; case 2
-is called out in that file's text as the one deliberately left out.
+All four are now pinned by
+`an-arithmetic-extent-read-parses-a-command-substitution-inside-it.sh` (1, 3 and
+4 as probes 18-20; 2 as probes 21-23, the third of which is the same shape with
+a body that *parses*, where the count still runs past the `))` and the extent
+still ends `X`).
 
 All four bash runs report the same two pairs and echo `` `(1+$(fi' `` for the second, and
 **none prints `f: command not found`** — the failed read inside the count is
@@ -340,19 +341,37 @@ The extent **excludes** its closer — `si = i - *sindex - len_closer + 1` and
 Either way `command_substitute` is handed `temp` *with* its leading `(`, which
 is why the second echo is `` `(1+$(fi' `` and not `` `1+$(fi' ``.
 
-**Proper fix.** Re-deriving the extent — done, and it is what fixed 1, 3 and 4 —
-is not enough on its own, because for variant 2 there is nothing to re-derive:
-the lexer has already decided the text is a command substitution. The remaining
-fix is to stop making that decision at lex time and let expansion make it, as
-bash does: emit one segment for every `$( … )` spelling and let
-`Shell::arith_extent_expand`'s `chk_arithsub` routing pick the arm. That is a
-real refactor — `Seg::Arith` and `Seg::CmdSub` collapse into one, and
-`unparse`/`declare -f` re-printing has to keep telling them apart from the AST
-rather than from the lexer's verdict — which is why it is not folded into
-`a1a0518ee`. The lexer's own comment already concedes the point: *"osh decides
-here instead, which is only safe because the test is a property of the text and
-nothing else."* Variant 2 is the input where that is untrue, because the text
-the test runs on is not the text the count would have produced.
+**Fix, and a hypothesis the measurement overturned.** This entry previously said
+the remaining fix was to stop deciding arith-vs-comsub at lex time altogether —
+"a real refactor: `Seg::Arith` and `Seg::CmdSub` collapse into one". A fresh
+probe says otherwise. osh's *choice of construct* already matches bash in every
+shape measured, including ones where the nested read succeeds
+(`A$((1+$(echo q⏎echo x⏎))X)B` is `[AB]` with one report in both shells). The
+lexer's verdict was never the divergence; the **extent** was. Where a recorded
+hypothesis and a fresh measurement disagree, the measurement wins.
+
+So the fix is the same one the `ArithSub` arm already had, given to the fallback
+arm as well:
+
+* `CmdSubBody::ArithFallback` gained a `tail` (`ast.rs`), filled by a third
+  `attach_tails_by` pass in `unparse::attach_comsub_tails_in` — separate from the
+  arithmetic's pass because `walk_parts` stops at the part it matched and an
+  arithmetic can hold one of these.
+* `Shell::arith_extent_expand`'s body became `Shell::arith_extent_route` →
+  `ArithRoute::{Arith, Comsub, RanOut, Aborted}`: the count, then the two tests
+  `param_expand` runs on the extent. Both callers want the same answer over a
+  different string.
+* `Shell::arith_fallback_expand` runs it over `src + ")" + tail` — the lexer's
+  `src` is the text from the byte after the `$(` up to but not including the
+  closer it matched, so putting that closer back reconstructs exactly the string
+  `extract_command_subst` is handed. The count agreeing with the lexer is the
+  ordinary case and delegates to `command_sub_body` unchanged; a count that stops
+  earlier runs its own extent and expands the leftover, and a count that runs the
+  string out reports as the arithmetic it was written as.
+* `Shell::extent_read_of` runs the same count for a fallback met inside a `${ … }`
+  scan, for the reason the arithmetic already did — bash's `$(` row does not know
+  which of the two it is looking at. The shared half is
+  `Shell::arith_scan_count`.
 
 ---
 
@@ -438,9 +457,10 @@ prompt ending, a closer found on a later line, `PS4`, and the five brace shapes)
 `an-arithmetic-extent-read-parses-a-command-substitution-inside-it.sh` grew the
 multi-line ones.
 
-**What remains** is one shape, narrowed into
-TD-OILS-AN-ARITHMETIC-EXTENT-CARRIES-ON-COUNTING-AFTER-A-FAILED-READ, and it is
-not a scan-flag problem either.
+One shape was left over and narrowed into
+TD-OILS-AN-ARITHMETIC-EXTENT-CARRIES-ON-COUNTING-AFTER-A-FAILED-READ — not a
+scan-flag problem either, and fixed there since by giving the same count to a
+`$((` osh's lexer had routed to a command substitution.
 
 ---
 

@@ -4812,8 +4812,13 @@ impl Lexer {
                     // strips the parens and asks `chk_arithsub` whether what is
                     // left reads as an expression, falling back to
                     // `command_substitute` when it does not. osh decides here
-                    // instead, which is only safe because the test is a property
-                    // of the text and nothing else.
+                    // instead, which is safe because the test is a property of
+                    // the text and nothing else — and because the decision does
+                    // not stick: both arms re-derive the extent at expansion time
+                    // through the same paren count, so a count that stops
+                    // somewhere the balance above did not takes the arm the
+                    // *extent* calls for. See [`crate::interp::Shell::
+                    // arith_extent_route`] and its two callers.
                     let open = self.cur_line();
                     self.adv();
                     let outer = std::mem::take(&mut self.arith_comsubs);

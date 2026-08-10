@@ -76,11 +76,23 @@ echo x
 t='A$(($(fi
 echo x
 )))B';                        printf '20 [%s]\n' "${t@P}"
-# `A$((1+$(fi⏎echo x⏎))X)B` — one closer fewer, so the resumed count reads `X)`
-# as part of the extent and the leftover is `X)B` — is left out: osh's lexer
-# decides arith-vs-comsub before expansion sees the word, so no arithmetic part
-# exists to re-count. See TD-OILS-AN-ARITHMETIC-EXTENT-CARRIES-ON-COUNTING-AFTER-
-# A-FAILED-READ in known-issues.md.
+# One closer fewer and the count, resuming mid-`))`, reads `X)` as part of the
+# extent instead — so the extent is the same `(1+$(fi⏎echo x⏎)` and the leftover
+# is `X)B`. bash never decided this text was an arithmetic *or* a substitution
+# when it parsed; only the extent decides, which is why the same read serves a
+# shape whose parens do not balance at all.
+u='A$((1+$(fi
+echo x
+))X)B';                       printf '21 [%s]\n' "${u@P}"
+v='A$((1+$(fi
+echo x
+))X)B${y}C';                  printf '22 [%s]\n' "${v@P}"
+# A read that *closes* leaves the count to run on to the same place, and the
+# extent then ends `X` rather than `)`, so this is `goto comsub` too — the body
+# it runs is `(1+$(echo q⏎echo x⏎))X`, which is what the child complains about.
+w='A$((1+$(echo q
+echo x
+))X)B';                       printf '23 [%s]\n' "${w@P}"
 
 echo "=== a single-quoted run inside the arithmetic is still parsed, being a real parse"
 q='A$((1+$(echo "x" ; fi)))B'; printf '17 [%s]\n' "${q@P}"

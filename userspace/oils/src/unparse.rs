@@ -1343,6 +1343,22 @@ fn attach_comsub_tails_in(parts: &mut [WordPart]) {
             *t = tail;
         }
     });
+    // And so does a `$((` whose body osh's lexer read as a command substitution
+    // instead: bash makes no such decision at parse time, so the count still has
+    // to be run over it here — and it can stop somewhere the lexer's balance did
+    // not. See [`crate::ast::CmdSubBody::ArithFallback::tail`].
+    //
+    // A third pass for the same reason the second is separate from the first: an
+    // arithmetic can hold one of these, and [`walk_parts`] stops at the part it
+    // matched.
+    let is_fallback = |p: &WordPart| {
+        matches!(p, WordPart::CommandSub { body: CmdSubBody::ArithFallback { .. } })
+    };
+    attach_tails_by(parts, &is_fallback, &mut |p, tail| {
+        if let WordPart::CommandSub { body: CmdSubBody::ArithFallback { tail: t, .. } } = p {
+            *t = tail;
+        }
+    });
 }
 
 /// The sentinel-swap [`attach_comsub_tails_in`] runs once per kind of part that

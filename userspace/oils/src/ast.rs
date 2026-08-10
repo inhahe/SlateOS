@@ -1403,15 +1403,33 @@ pub enum CmdSubBody {
     /// found the *extent*, and it is `chk_arithsub` at **expansion** time that
     /// asks whether the text is an expression at all. When it is not, bash hands
     /// that same text to `command_substitute` — the call a backtick body makes —
-    /// so this behaves as [`CmdSubBody::Backtick`] does in everything that is
-    /// observable, the line numbering included. What differs is only the
-    /// spelling `declare -f` prints back, which is why it is a variant of its
-    /// own rather than a backtick body with the delimiters swapped.
+    /// so once the arm is settled this runs as a [`CmdSubBody::Backtick`] does,
+    /// the line numbering included.
+    ///
+    /// Two things keep it a variant of its own rather than a backtick body with
+    /// the delimiters swapped. One is the spelling `declare -f` prints back. The
+    /// other is that the arm is *not* settled: osh's lexer picks it from a paren
+    /// balance over the whole body, and bash picks it from an extent that is
+    /// counted afresh at expansion time — so this body still owes that count,
+    /// which is what the `tail` is for. See
+    /// [`crate::interp::Shell::arith_fallback_expand`].
     ArithFallback {
         /// The body text, parsed afresh on every expansion. There is no separate
         /// verbatim form: nothing is unescaped on the way in, so the text that
         /// runs is also the text that is printed back.
+        ///
+        /// It is the text between the `$(` and the closer osh's lexer matched,
+        /// so it still carries the inner `(` — for `$((1+$(fi))X)` it is
+        /// `(1+$(fi))X`.
         src: Str,
+        /// The rest of the enclosing word, as [`CmdSubBody::Unread::tail`] —
+        /// and for the same reason a `$(( … ))` needs one. bash never decided
+        /// this text was a command substitution at parse time; it read an
+        /// *extent* with `extract_delimited_string`'s paren count and only then
+        /// asked `chk_arithsub` which arm to take. So the count has to be run
+        /// again here, over `src` + `)` + this, and where it stops need not be
+        /// where the lexer's balance stopped.
+        tail: Str,
     },
 }
 

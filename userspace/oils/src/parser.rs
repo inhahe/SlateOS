@@ -42,8 +42,8 @@ use crate::assoc::AssocArray;
 use crate::bfmt;
 use crate::bytes::{self, BStr, Ch, Str};
 use crate::lexer::{
-    AliasExpansion, CmdSubSpan, HeredocEof, ParseOpts, Op, ReaderWarning, Seg, Spanned, Tok,
-    SubBody, TokSpan, Tokenized, UngatheredHeredoc,
+    AliasExpansion, CmdSubSpan, DparenCopy, HeredocEof, ParseOpts, Op, ReaderWarning, Seg, Spanned,
+    Tok, SubBody, TokSpan, Tokenized, UngatheredHeredoc,
     expand_aliases_tracked, tokenize,
     tokenize_paren_body, tokenize_deferred, tokenize_spanned, word_is_assignment,
 };
@@ -431,12 +431,12 @@ fn resolve_subst_bail(e: crate::lexer::LexError, opts: ParseOpts) -> ParseError 
 /// `(`, so each step is a strictly shorter suffix of the input.
 fn bail_body_error(bail: &crate::lexer::SubstBail, opts: ParseOpts) -> Option<ParseError> {
     let base = bail.open_line.saturating_sub(1);
-    let Tokenized { toks: mut t, lines: mut l, ends, err, .. } =
+    let Tokenized { toks: mut t, lines: mut l, ends, err, dparens, .. } =
         crate::lexer::tokenize_deferred(&bail.body, opts);
     // The body's line 1 is the line its `(` sits on, the two being on the same
     // physical line by construction.
     map_lines(&mut t, &mut l, &LineMap::Offset(base));
-    if let Err(inner) = parse_tokens(t, l, Spans::of(&bail.body, ends), opts) {
+    if let Err(inner) = parse_tokens(t, l, Spans::of(&bail.body, ends, &dparens), opts) {
         // An end-of-input error means the body merely ran out, which is bash's
         // `EOF_Reached` path (parse.y:4170) — the one on which the missing `)`
         // is what gets reported. Blaming a token here would also have to invent
@@ -475,9 +475,9 @@ pub fn parse_opts(src: BStr<'_>, opts: ParseOpts) -> Result<Program, ParseError>
     // REPL's "is this line complete yet?" probes judge the same text the run
     // will parse (see [`crate::lexer::strip_nuls`]).
     let src = crate::lexer::strip_nuls(src);
-    let Spanned { toks, lines, ends, .. } =
+    let Spanned { toks, lines, ends, dparens, .. } =
         tokenize_spanned(&src, opts).map_err(|e| resolve_subst_bail(e, opts))?;
-    parse_tokens(toks, lines, Spans::of(&src, ends), opts)
+    parse_tokens(toks, lines, Spans::of(&src, ends, &dparens), opts)
 }
 
 /// Parse the body of a `<( … )` / `>( … )` process substitution.
@@ -501,10 +501,10 @@ pub fn parse_procsub_body(
     open_line: u32,
     opts: ParseOpts,
 ) -> Result<Program, ParseError> {
-    let Spanned { mut toks, mut lines, ends, .. } = tokenize_paren_body(src, opts)
+    let Spanned { mut toks, mut lines, ends, dparens, .. } = tokenize_paren_body(src, opts)
         .map_err(|e| ParseError::from(e).in_paren_body())?;
     map_lines(&mut toks, &mut lines, &LineMap::Offset(open_line.saturating_sub(1)));
-    parse_tokens_ending(toks, lines, Spans::of(src, ends), opts, true)
+    parse_tokens_ending(toks, lines, Spans::of(src, ends, &dparens), opts, true)
         .map_err(ParseError::in_paren_body)
 }
 
@@ -518,9 +518,9 @@ pub fn parse_procsub_body(
 /// Returns [`ParseError`] on a lexing or grammar error (including an
 /// unterminated here-document).
 pub fn parse_strict_heredoc(src: BStr<'_>, opts: ParseOpts) -> Result<Program, ParseError> {
-    let Spanned { toks, lines, ends, .. } =
+    let Spanned { toks, lines, ends, dparens, .. } =
         crate::lexer::tokenize_spanned_strict(src, opts).map_err(|e| resolve_subst_bail(e, opts))?;
-    parse_tokens(toks, lines, Spans::of(src, ends), opts)
+    parse_tokens(toks, lines, Spans::of(src, ends, &dparens), opts)
 }
 
 /// Parse shell source, expanding shell aliases over the token stream first.
@@ -532,18 +532,18 @@ pub fn parse_with_aliases(
     aliases: &AssocArray,
     opts: ParseOpts,
 ) -> Result<Program, ParseError> {
-    let Spanned { toks, lines, starts, ends, .. } =
+    let Spanned { toks, lines, starts, ends, dparens, .. } =
         tokenize_spanned(src, opts).map_err(|e| resolve_subst_bail(e, opts))?;
     // An alias splices in tokens that were never written where they are being
     // read — but they *were* written somewhere, in the alias's own value, which
     // bash pushes onto the input and reports errors against. So the expansion
     // carries its replacement texts along and they become further sources.
     let (toks, lines, spans) = if aliases.is_empty() {
-        (toks, lines, Spans::of(src, ends))
+        (toks, lines, Spans::of(src, ends, &dparens))
     } else {
         let chars: Vec<_> = bytes::chars(src).collect();
         let x = expand_aliases_tracked(&toks, &lines, &starts, &ends, &chars, aliases, opts);
-        let spans = Spans::expanded(chars, &x);
+        let spans = Spans::expanded(chars, &x, &dparens);
         (x.toks, x.lines, spans)
     };
     parse_tokens(toks, lines, spans, opts)
@@ -830,6 +830,16 @@ pub struct IncrementalParser {
     /// the complete lines before it have been handed out and executed, because
     /// bash reports it only after running them.
     pending_lex_err: Option<ParseError>,
+    /// The lowest line an end-of-input diagnostic may name, in *mapped* lines.
+    /// See [`crate::lexer::Tokenized::dparen_eof_floor`]. Only ever raised — a
+    /// re-lex of the tail cannot un-buy a request an earlier `((` already made.
+    dparen_eof_floor: u32,
+    /// Every `((` handed back to the ordinary grammar as `( ( … ) )`, in push
+    /// order, as character offsets into `src`. See [`DparenCopy`]. Kept beside
+    /// `orig_conts` and rebased the same way, since like a continuation a copy is
+    /// a fact about text that was *read*, which a re-lex of the tail cannot undo
+    /// for the head.
+    orig_dparens: Vec<DparenCopy>,
     /// Warnings the reader raised about here-document bodies (see
     /// [`ReaderWarning`]), with their line numbers already run through
     /// `line_map`. Held back for the same reason as `pending_lex_err` and
@@ -887,6 +897,8 @@ impl IncrementalParser {
             warnings,
             ungathered: mut orig_ungathered,
             err,
+            dparen_eof_floor,
+            dparens,
         } = tokenize_deferred(src, opts);
         map_lines(&mut orig, &mut orig_lines, &line_map);
         for u in &mut orig_ungathered {
@@ -923,6 +935,8 @@ impl IncrementalParser {
                     line: e.line.map(|l| line_map.map(l)),
                     ..e
                 }),
+            dparen_eof_floor: map_floor(dparen_eof_floor, &line_map),
+            orig_dparens: dparens,
             pending_warnings,
             ready_warnings: Vec::new(),
             post_error_warnings: Vec::new(),
@@ -971,8 +985,11 @@ impl IncrementalParser {
             warnings,
             mut ungathered,
             err,
+            dparen_eof_floor,
+            dparens,
         } = tokenize_deferred(&tail, opts);
         map_lines(&mut orig, &mut orig_lines, &map);
+        self.dparen_eof_floor = self.dparen_eof_floor.max(map_floor(dparen_eof_floor, &map));
         // The re-lex is the authoritative read of the tail, so its record replaces
         // the old one outright — the `tok_index`es are indices into the *new*
         // stream, and `pos` is about to restart at 0 to match.
@@ -1000,6 +1017,7 @@ impl IncrementalParser {
         self.orig_conts.retain(|&o| (o as usize) < off);
         self.orig_conts
             .extend(conts.iter().map(|&o| o.saturating_add(delta)));
+        self.rebase_dparens(off, delta, &dparens);
         self.pos = 0;
         self.opts = opts;
         self.pending_lex_err = err
@@ -1123,7 +1141,7 @@ impl IncrementalParser {
                     map,
                     self.opts,
                 );
-                let spans = Spans::expanded(self.src.clone(), &x);
+                let spans = Spans::expanded(self.src.clone(), &x, &self.orig_dparens);
                 taken = x.taken;
                 warnings = x.warnings;
                 work.extend(x.toks);
@@ -1136,11 +1154,14 @@ impl IncrementalParser {
                 work.extend_from_slice(rest);
                 work_lines.extend_from_slice(rest_lines);
                 work_origin.extend((self.pos..self.orig.len()).map(Some));
-                Spans {
+                let mut spans = Spans {
                     srcs: vec![self.src.clone()],
                     parents: Vec::new(),
                     ends: rest_ends.iter().map(|&end| TokSpan { src: 0, end }).collect(),
-                }
+                    dparen_bases: Vec::new(),
+                };
+                spans.push_dparens(&self.orig_dparens);
+                spans
             }
         };
         self.work_taken = taken;
@@ -1188,8 +1209,11 @@ impl IncrementalParser {
             warnings,
             mut ungathered,
             err,
+            dparen_eof_floor,
+            dparens,
         } = tokenize_deferred(&tail, self.opts);
         map_lines(&mut orig, &mut orig_lines, &map);
+        self.dparen_eof_floor = self.dparen_eof_floor.max(map_floor(dparen_eof_floor, &map));
         let delta = u32::try_from(off).unwrap_or(u32::MAX);
         for o in offsets.iter_mut().chain(ends.iter_mut()) {
             *o = o.saturating_add(delta);
@@ -1220,10 +1244,22 @@ impl IncrementalParser {
         self.orig_conts.retain(|&o| (o as usize) < off);
         self.orig_conts
             .extend(conts.iter().map(|&o| o.saturating_add(delta)));
+        self.rebase_dparens(off, delta, &dparens);
         self.pending_lex_err = err
             .map(|(e, line)| resolve_subst_bail(e, self.opts).or_line(line))
             .map(|e| ParseError { line: e.line.map(|l| map.map(l)), ..e });
         self.last_aliases = None;
+    }
+
+    /// Replace the record of the `((`s pushed back past `off` with the re-lex's,
+    /// keeping the head's — see [`Self::orig_dparens`]. `delta` is `off` as an
+    /// offset, which the tail's own offsets restart before.
+    fn rebase_dparens(&mut self, off: usize, delta: u32, dparens: &[DparenCopy]) {
+        self.orig_dparens.retain(|c| (c.start as usize) < off);
+        self.orig_dparens.extend(dparens.iter().map(|c| DparenCopy {
+            start: c.start.saturating_add(delta),
+            end: c.end.saturating_add(delta),
+        }));
     }
 
     /// Whether every token has been handed out, so a further [`Self::next_unit`]
@@ -1531,6 +1567,7 @@ impl IncrementalParser {
             depth: 0,
             truncated_at: self.pending_lex_err.is_some().then(|| self.line_past_end()),
             eof_closed_in_list: false,
+            eof_floor: self.dparen_eof_floor,
         };
         let mut items = Vec::new();
         // Whether the parse ended by asking for a token the stream did not have.
@@ -1627,7 +1664,12 @@ impl IncrementalParser {
             // gather moved the *number* and not the text: bash prints the line
             // the error was written on under a prefix naming a later one.
             let pinned = (gathered > 0).then(|| self.tok_line_text(&p)).flatten();
-            let echo = p.reader_echo().or(pinned);
+            // An error that already names a line was raised in a stream of its
+            // own — a `$( … )` body — which bash parses while still *scanning*,
+            // before a `((` copy could have been pushed. See
+            // [`Spans::echo_line_at_scan`].
+            let echo = if e.line.is_some() { p.reader_echo_at_scan() } else { p.reader_echo() };
+            let echo = echo.or(pinned);
             e.or_line(line).or_echo(echo)
         });
         self.wpos = p.pos;
@@ -2138,9 +2180,9 @@ fn parse_paren_body_mapped(
     phys: &LineMap,
     opts: ParseOpts,
 ) -> Result<Program, ParseError> {
-    let Spanned { mut toks, mut lines, ends, .. } = spanned;
+    let Spanned { mut toks, mut lines, ends, dparens, .. } = spanned;
     map_lines(&mut toks, &mut lines, phys);
-    let prog = parse_tokens_ending(toks, lines, Spans::of(src, ends), opts, true)
+    let prog = parse_tokens_ending(toks, lines, Spans::of(src, ends, &dparens), opts, true)
         .map_err(|e| {
             // A body that ends mid-construct is not an end of file in bash
             // either: the next token is the `)`, and that is what bash names.
@@ -2236,8 +2278,8 @@ pub fn comsub_unclosed_error(src: BStr<'_>, opts: ParseOpts) -> ComsubReprintErr
             return ComsubReprintError { err, echo: fatal, line_off, stop_line: u32::MAX, fatal };
         }
     };
-    let Spanned { toks, lines, ends, .. } = spanned;
-    match parse_tokens(toks, lines, Spans::of(src, ends), opts) {
+    let Spanned { toks, lines, ends, dparens, .. } = spanned;
+    match parse_tokens(toks, lines, Spans::of(src, ends, &dparens), opts) {
         // A grammar error found before the input ran out is named on its token
         // and echoed, exactly as in a body that did close.
         Err(e) if !e.is_incomplete() => {
@@ -2301,8 +2343,8 @@ fn reprint_read_past_paren(
             return ComsubReprintError { err, echo: fatal, line_off, stop_line: u32::MAX, fatal };
         }
     };
-    let Spanned { toks, lines, ends, .. } = spanned;
-    match parse_tokens(toks, lines, Spans::of(&combined, ends), opts) {
+    let Spanned { toks, lines, ends, dparens, .. } = spanned;
+    match parse_tokens(toks, lines, Spans::of(&combined, ends, &dparens), opts) {
         // A grammar error found before the input ran out: bash names the token
         // and echoes the line, from `report_syntax_error`'s first branch.
         Err(e) if !e.is_incomplete() => {
@@ -2444,6 +2486,13 @@ fn map_reader_warnings(mut ws: Vec<ReaderWarning>, map: &LineMap) -> Vec<ReaderW
 /// alone would reset the body's numbering back to the fragment's. For a nested
 /// `$( $( … ) )` that means the inner body is numbered against the outer body's
 /// *already-rebased* lines rather than against its own first line.
+/// Run an end-of-input floor ([`crate::lexer::Tokenized::dparen_eof_floor`])
+/// through `map`, leaving the "no floor" sentinel 0 alone — it is not a line and
+/// must not be renumbered into one.
+fn map_floor(floor: u32, map: &LineMap) -> u32 {
+    if floor == 0 { 0 } else { map.map(floor) }
+}
+
 fn map_lines(toks: &mut [Tok], lines: &mut [u32], map: &LineMap) {
     if map.is_identity() {
         return;
@@ -2530,6 +2579,7 @@ fn parse_tokens_ending(
         depth: 0,
         truncated_at: None,
         eof_closed_in_list: false,
+        eof_floor: 0,
     };
     // The closing `)` is consumed by nothing, so a complete body leaves the
     // cursor on it rather than past it.
@@ -2559,7 +2609,11 @@ fn parse_tokens_ending(
     parsed.map_err(|e| {
         let line =
             if e.is_incomplete() { p.reader_line_at(p.toks.len()) } else { p.reader_line() };
-        e.or_line(line).or_echo(p.reader_echo())
+        // See the same test in `IncrementalParser::parse_next`: an error already
+        // carrying a line came from a `$( … )` body, which bash's scan parsed
+        // before any `((` copy was pushed.
+        let echo = if e.line.is_some() { p.reader_echo_at_scan() } else { p.reader_echo() };
+        e.or_line(line).or_echo(echo)
     })
 }
 
@@ -2627,6 +2681,10 @@ struct Parser {
     /// `;` or newline leaves the EOF still to be fetched, which is again one
     /// request. Read by [`Parser::reader_line_at`] past the end of the stream.
     eof_closed_in_list: bool,
+    /// The lowest line an end-of-input diagnostic may name, from
+    /// [`crate::lexer::Tokenized::dparen_eof_floor`]. 0 where nothing constrains
+    /// it.
+    eof_floor: u32,
 }
 
 /// The text a token stream was lexed from, with each token's end offset into it.
@@ -2671,27 +2729,92 @@ struct Spans {
     /// `u32::MAX` marks a token with no text of its own, for which no slice can
     /// be taken.
     ends: Vec<TokSpan>,
+    /// Which entries of `srcs` are `((` copies (see
+    /// [`crate::lexer::DparenCopy`]), and where in `srcs[0]` each was cut from.
+    /// A copy is a *slice* of the shell's own input, unlike an alias
+    /// replacement, so an offset in one can be turned back into the offset it
+    /// had before the push — which is what [`Spans::echo_line_at_scan`] needs.
+    dparen_bases: Vec<(u32, u32)>,
 }
 
 impl Spans {
-    fn of(src: BStr<'_>, ends: Vec<u32>) -> Self {
-        Self {
+    fn of(src: BStr<'_>, ends: Vec<u32>, dparens: &[DparenCopy]) -> Self {
+        let mut s = Self {
             srcs: vec![bytes::chars(src).collect()],
             parents: Vec::new(),
             ends: ends.into_iter().map(|end| TokSpan { src: 0, end }).collect(),
-        }
+            dparen_bases: Vec::new(),
+        };
+        s.push_dparens(dparens);
+        s
     }
 
     /// The spans of an alias-expanded stream: the shell's own text first, then
     /// every replacement the pass pushed into it, in the order it pushed them —
     /// which is the numbering [`crate::lexer::TokSpan::src`] uses.
-    fn expanded(src: Vec<Ch>, x: &AliasExpansion) -> Self {
-        Self {
+    fn expanded(src: Vec<Ch>, x: &AliasExpansion, dparens: &[DparenCopy]) -> Self {
+        let mut s = Self {
             srcs: std::iter::once(src)
                 .chain(x.bodies.iter().map(|b| bytes::chars(&b.text).collect()))
                 .collect(),
             parents: x.bodies.iter().map(|b| b.parent).collect(),
             ends: x.spans.clone(),
+            dparen_bases: Vec::new(),
+        };
+        s.push_dparens(dparens);
+        s
+    }
+
+    /// Add each `((` copy as a text of its own and move the tokens read out of
+    /// it onto that text. See [`DparenCopy`]: bash re-reads the rebuilt text as
+    /// a *pushed string*, so it is `shell_input_line` for as long as it lasts —
+    /// which is what makes a diagnostic echo the whole copy, embedded newlines
+    /// and all, rather than the physical line it was cut from.
+    ///
+    /// The copies are laid over whatever texts are already here (the shell's
+    /// input, plus any alias replacements), so the numbering both schemes hand
+    /// out stays disjoint. A token already labelled with a replacement is left
+    /// alone: it was read from the alias's own pushed string, which sits *above*
+    /// the copy on the same stack.
+    fn push_dparens(&mut self, dparens: &[DparenCopy]) {
+        if dparens.is_empty() {
+            return;
+        }
+        let base = u32::try_from(self.srcs.len()).unwrap_or(u32::MAX);
+        let Some(input) = self.srcs.first().cloned() else {
+            return;
+        };
+        for (i, c) in dparens.iter().enumerate() {
+            let from = c.start as usize;
+            let to = (c.end as usize).saturating_add(1).min(input.len());
+            self.dparen_bases
+                .push((u32::try_from(self.srcs.len()).unwrap_or(u32::MAX), c.start));
+            self.srcs.push(input.get(from..to).unwrap_or(&[]).to_vec());
+            // `pop_string` puts the reader back where the scan left it: just past
+            // the character the adjacency test rejected. For a copy pushed while
+            // another was being read that offset is *inside the enclosing copy*,
+            // since that is the text the scan was reading.
+            let back = c.end.saturating_add(1);
+            self.parents.push(
+                match crate::lexer::dparen_at(dparens.get(..i).unwrap_or(&[]), back) {
+                    Some((j, off)) => TokSpan {
+                        src: base.saturating_add(u32::try_from(j).unwrap_or(u32::MAX)),
+                        end: off,
+                    },
+                    None => TokSpan { src: 0, end: back },
+                },
+            );
+        }
+        for s in &mut self.ends {
+            if s.src != 0 || s.end == u32::MAX {
+                continue;
+            }
+            if let Some((i, off)) = crate::lexer::dparen_at(dparens, s.end) {
+                *s = TokSpan {
+                    src: base.saturating_add(u32::try_from(i).unwrap_or(u32::MAX)),
+                    end: off,
+                };
+            }
         }
     }
 
@@ -3018,12 +3141,51 @@ impl Spans {
     /// `None` for the shell's own input, which the caller echoes by line number
     /// instead: that is the physical line, and the reader's `src` says nothing
     /// about which of them it is on.
+    ///
+    /// Trailing newlines go, as `print_offending_line` drops them
+    /// (`while (token_end && msg[token_end - 1] == '\n') --token_end;`,
+    /// parse.y:6218-6226). *Embedded* ones stay, which is what makes a `((`
+    /// copy spanning lines echo whole — see [`DparenCopy`].
     fn echo_line(&self, pos: usize, r: Reader) -> Option<Str> {
         let (stop, _) = self.reader_stop(pos, r)?;
+        self.echo_of(stop)
+    }
+
+    /// [`Spans::echo_line`] as it stood *before* any `((` copy was pushed.
+    ///
+    /// bash parses a `$( … )` body inside an arithmetic command while it is
+    /// still **scanning** for the closing `))`: `parse_matched_pair` hands each
+    /// one to `extract_command_subst`, which parses it then and there. A body
+    /// that does not parse is therefore reported before `parse_arith_cmd` has
+    /// run the adjacency test that would push the copy, with `shell_input_line`
+    /// still the physical line — `(( $(fi ))` echoes `(( $(fi ))`, not the copy
+    /// `( $(fi ))`. osh lowers those bodies later, while the copy is being
+    /// re-read, so the copy has to be unwound to reach the same answer. Every
+    /// copy is a slice of `srcs[0]`, so one step does it however deeply the
+    /// pushes stacked.
+    fn echo_line_at_scan(&self, pos: usize, r: Reader) -> Option<Str> {
+        let (stop, _) = self.reader_stop(pos, r)?;
+        self.echo_of(self.before_the_push(stop))
+    }
+
+    /// A span inside a `((` copy, as the offset it held in the text the copy was
+    /// cut from; anything else unchanged. See [`Spans::dparen_bases`].
+    fn before_the_push(&self, s: TokSpan) -> TokSpan {
+        match self.dparen_bases.iter().find(|&&(src, _)| src == s.src) {
+            Some(&(_, base)) => TokSpan { src: 0, end: base.saturating_add(s.end) },
+            None => s,
+        }
+    }
+
+    /// The text `shell_input_line` holds where the reader stopped, or `None` for
+    /// the shell's own input — which the caller echoes by line number instead.
+    fn echo_of(&self, stop: TokSpan) -> Option<Str> {
         if stop.src == 0 {
             return None;
         }
-        Some(bytes::from_chars(self.text(stop.src)?.iter().copied()))
+        let t = self.text(stop.src)?;
+        let keep = t.len() - t.iter().rev().take_while(|&&c| c == Ch::U('\n')).count();
+        Some(bytes::from_chars(t.get(..keep).unwrap_or(&[]).iter().copied()))
     }
 }
 
@@ -3270,7 +3432,11 @@ impl Parser {
             // token as its `list_terminator`, so that the request being answered
             // here is the *second* one to run the buffer out.
             let bump = bump.saturating_add(u32::from(self.eof_closed_in_list));
-            return self.reader_line_at(last).saturating_add(bump);
+            // …and a floor under the lot when a `((` handed its text back as
+            // `( ( … ) )`: the copy bought one extra empty request, which shows
+            // only where no real line answered it. See
+            // [`crate::lexer::Tokenized::dparen_eof_floor`].
+            return self.reader_line_at(last).saturating_add(bump).max(self.eof_floor);
         };
         let line = self.lines.get(at).copied().unwrap_or_else(|| self.cur_line());
         line.saturating_add(self.spans.cont_lines(at, Reader::of(Some(tok))))
@@ -3285,6 +3451,14 @@ impl Parser {
         self.spans.echo_line(self.pos, r)
     }
 
+    /// [`Parser::reader_echo`] for an error raised in a `$( … )` body of its
+    /// own, which bash's *scan* found — before any `((` copy was pushed. See
+    /// [`Spans::echo_line_at_scan`].
+    fn reader_echo_at_scan(&self) -> Option<Str> {
+        let r = Reader::of(self.toks.get(self.pos));
+        self.spans.echo_line_at_scan(self.pos, r)
+    }
+
     /// [`Parser::reader_echo`] for an error found while lowering the token at
     /// `at`, rather than at the token the parser has since moved on to.
     ///
@@ -3295,8 +3469,12 @@ impl Parser {
     /// script's own line and `alias A="echo $( for ) tail"` against the
     /// replacement — a distinction taking the echo one token later cannot make,
     /// because by then the reader has left the token in every case.
+    ///
+    /// Both callers lower a word, and a word's substitutions are parsed by
+    /// bash's *scan*, so the echo is the one from before any `((` copy was
+    /// pushed: see [`Spans::echo_line_at_scan`].
     fn echo_at(&self, at: usize) -> Option<Str> {
-        self.spans.echo_line(at, Reader::of(self.toks.get(at)))
+        self.spans.echo_line_at_scan(at, Reader::of(self.toks.get(at)))
     }
 
     fn bump(&mut self) -> Option<Tok> {

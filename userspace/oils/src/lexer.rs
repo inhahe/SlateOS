@@ -887,6 +887,41 @@ pub struct ParseOpts {
     pub tolerant: bool,
 }
 
+/// One `push_string` bash performed when a `(( … ))` failed the test for its
+/// second closing parenthesis and was handed back to the ordinary grammar as
+/// `( ( … ) )`.
+///
+/// `parse_arith_cmd` (parse.y:4519-4562) rebuilds the text it has just scanned —
+/// with the *first* `(` dropped and the character that failed the test appended
+/// — and hands it to the reader with `push_string (wval, 0, NULL)`. Reading it
+/// back is not reading input: `line_number` is neither rewound before the push
+/// nor advanced by the newlines the copy contains, so it stands at the line the
+/// scan gave up on for the whole re-read.
+#[derive(Clone, Copy, Debug)]
+struct DparenPush {
+    /// Offset of the copy's first character: the *second* `(`, one past the
+    /// dropped one.
+    start: usize,
+    /// Offset of the copy's last character: the one the adjacency test read and
+    /// rejected, which the rebuilt text ends with.
+    end: usize,
+    /// The line `line_number` was parked on when the scan gave up — the line
+    /// every token inside the copy is blamed on.
+    line: u32,
+    /// Whether the rejected character was the last of its input line — a
+    /// newline, or the end of input.
+    ///
+    /// When it was, the copy is exhausted with the reader's index parked on the
+    /// buffer's terminating NUL, and `shell_getc`'s pop path
+    /// (`uc = shell_input_line[shell_input_line_index]`, parse.y:2667-2669)
+    /// hands that NUL straight back instead of fetching. read_token_word takes
+    /// it for a word, so end of input is discovered *twice* — once ending that
+    /// spurious empty word, once answering the request after it — and each
+    /// discovery is its own `line_number++`. A real line answers the first for
+    /// free; only at the end of input does the extra ask cost a line.
+    eof_charge: bool,
+}
+
 struct Lexer {
     chars: Vec<Ch>,
     pos: usize,
@@ -1015,6 +1050,9 @@ struct Lexer {
     /// for — nothing after it is fetched, let alone lexed. Our scan reads the
     /// whole input up front, so the stop has to be explicit.
     refused: bool,
+    /// Every `((` that failed its closing adjacency test and was handed back to
+    /// the ordinary grammar, innermost last. See [`DparenPush`].
+    dparens: Vec<DparenPush>,
     /// Which runs of `chars` are the real input and which are alias values
     /// spliced into it.
     ///
@@ -1529,6 +1567,7 @@ impl Lexer {
             heredoc_lines: Vec::new(),
             heredocs_forgotten: false,
             refused: false,
+            dparens: Vec::new(),
             map: TextMap::whole(0),
             raw: 0,
             raw_from: 0,
@@ -1720,6 +1759,54 @@ pub struct Spanned {
     /// the reader off to fetch anything. Only a caller that has to place the
     /// body in the text wants this; see [`AliasExpansion::warnings`].
     pub warn_from: Vec<u32>,
+    /// Every `((` this lex handed back to the ordinary grammar, outermost first.
+    /// See [`DparenCopy`].
+    pub dparens: Vec<DparenCopy>,
+}
+
+/// The extent of the text bash re-read after a `((` failed the test for its
+/// second closing parenthesis: `parse_arith_cmd` rebuilds what it scanned and
+/// `push_string`s the copy (parse.y:4498), so what the reader is working from
+/// there is a *string*, not the script.
+///
+/// Two things follow, and neither can be had from the physical text alone: a
+/// diagnostic echoes `shell_input_line`, which is now the whole copy however
+/// many physical lines it spans; and no line is fetched while it is being read,
+/// so `line_number` stands still — see [`DparenPush`], which is this plus the
+/// line it stood at.
+///
+/// Offsets are into the text that was lexed. `start` is the copy's first
+/// character (the *second* `(`, the first having been dropped from the rebuild)
+/// and `end` its last (the character the test rejected, which the rebuild
+/// appends), so the copy is `src[start ..= end]`.
+#[derive(Clone, Copy, Debug)]
+pub struct DparenCopy {
+    pub start: u32,
+    pub end: u32,
+}
+
+impl DparenCopy {
+    /// Where a token whose text ends at `at` sits inside this copy, if it does.
+    /// `at` is one past the token's last character, so it runs from `start + 1`
+    /// (the copy's first character consumed) to `end + 1` (its last).
+    #[must_use]
+    fn offset_of(self, at: u32) -> Option<u32> {
+        (at > self.start && at <= self.end.saturating_add(1)).then(|| at.saturating_sub(self.start))
+    }
+}
+
+/// Which of `copies` owns the offset `at`, innermost first.
+///
+/// A `((` met while re-reading another's copy pushes its own on top of it
+/// (bash's `pushed_string_list` is a stack), and the innermost is the one the
+/// reader is in — so the *last* recorded copy containing the offset wins,
+/// the list being in push order.
+pub(crate) fn dparen_at(copies: &[DparenCopy], at: u32) -> Option<(usize, u32)> {
+    copies
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(i, c)| c.offset_of(at).map(|off| (i, off)))
 }
 
 /// The per-token parallel vectors a lex fills beside the token stream, carried
@@ -1853,6 +1940,19 @@ pub struct Tokenized {
     /// dry, so in `echo two; echo three 'unterm` nothing on that line runs
     /// while every earlier line already has.
     pub err: Option<(LexError, u32)>,
+    /// The lowest line an *end of input* diagnostic may be reported on, or 0
+    /// when nothing constrains it.
+    ///
+    /// A `((` handed back to the grammar as `( ( … ) )` buys the reader one
+    /// extra empty request when its copy ended on the last character of a line
+    /// — see [`DparenPush::eof_charge`]. The request is free wherever a real
+    /// line answers it, so the charge shows only as a floor under the end of
+    /// input: the scan's last line, plus the line the fetch after it would have
+    /// been, plus the extra one.
+    pub dparen_eof_floor: u32,
+    /// Every `((` this lex handed back to the ordinary grammar, outermost first.
+    /// See [`DparenCopy`].
+    pub dparens: Vec<DparenCopy>,
 }
 
 /// Tokenize `src`, deferring an unterminated-construct error instead of
@@ -1884,6 +1984,14 @@ pub fn tokenize_deferred(src: BStr<'_>, opts: ParseOpts) -> Tokenized {
             *slot = n;
         }
     }
+    let dparen_eof_floor = lx
+        .dparens
+        .iter()
+        .filter(|p| p.eof_charge)
+        .map(|p| p.line.saturating_add(2))
+        .max()
+        .unwrap_or(0);
+    let dparens = lx.dparen_copies();
     let Err(e) = res else {
         return Tokenized {
             toks,
@@ -1895,6 +2003,8 @@ pub fn tokenize_deferred(src: BStr<'_>, opts: ParseOpts) -> Tokenized {
             warnings,
             ungathered: Vec::new(),
             err: None,
+            dparen_eof_floor,
+            dparens,
         };
     };
     // Record the here-documents the scan never got to collect, before the cut
@@ -1958,6 +2068,8 @@ pub fn tokenize_deferred(src: BStr<'_>, opts: ParseOpts) -> Tokenized {
         warnings,
         ungathered,
         err: Some((e, line)),
+        dparen_eof_floor,
+        dparens,
     }
 }
 
@@ -2964,7 +3076,12 @@ fn splice_alias(
     text.extend_from_slice(view.text.get(cut..).unwrap_or(&[]));
     let src = u32::try_from(out.bodies.len().saturating_add(1)).ok()?;
     let map = view.map.spliced(word, cut, vlen, src);
-    let Spanned { toks, lines, starts, ends, raws, taken, warnings, warn_from } =
+    // `dparens` is dropped: it indexes the *spliced* text, whose offsets this
+    // pass immediately re-labels through `map` into the alias source table, so a
+    // copy pushed back inside a replacement cannot be named in that table's terms.
+    // The line freeze it also carries is applied by the lex that produced it, so
+    // only the echoed text of a `((` written inside an alias value is affected.
+    let Spanned { toks, lines, starts, ends, raws, taken, warnings, warn_from, dparens: _ } =
         Lexer::spliced(text.clone(), map.clone(), head, opts).run().ok()?;
     // bash's `pop_string` restores the displaced line at the saved index, which
     // is what a diagnostic raised inside the value points back at.
@@ -3321,6 +3438,17 @@ impl Lexer {
         Some((name, i))
     }
 
+    /// The extents of every copy this lex pushed back, in push order.
+    fn dparen_copies(&self) -> Vec<DparenCopy> {
+        self.dparens
+            .iter()
+            .map(|p| DparenCopy {
+                start: u32::try_from(p.start).unwrap_or(u32::MAX),
+                end: u32::try_from(p.end).unwrap_or(u32::MAX),
+            })
+            .collect()
+    }
+
     fn run(&mut self) -> Result<Spanned, LexError> {
         let mut toks = Vec::new();
         let mut m = Marks::default();
@@ -3334,6 +3462,7 @@ impl Lexer {
             taken: core::mem::take(&mut self.taken),
             warnings: core::mem::take(&mut self.warnings),
             warn_from: core::mem::take(&mut self.warn_from),
+            dparens: self.dparen_copies(),
         })
     }
 
@@ -3527,6 +3656,23 @@ impl Lexer {
                                 // `unparse` from the node it produced. Nothing is
                                 // lost by letting the re-read be the one that
                                 // counts.
+                                //
+                                // What *is* lost by re-reading the physical text
+                                // is that bash re-reads a **copy** — the rebuilt
+                                // string it pushed — and a pushed string is not
+                                // input: no line is fetched for it, so every line
+                                // inside it is blamed on the line the scan gave
+                                // up on. Record the copy's extent and that line
+                                // so [`Lexer::stamp_lines`] can freeze it. The
+                                // cursor sits *at* the rejected character, which
+                                // is the copy's last, so the copy is exactly
+                                // `chars[arith_from ..= self.pos]`.
+                                self.dparens.push(DparenPush {
+                                    start: arith_from,
+                                    end: self.pos,
+                                    line: self.cur_line(),
+                                    eof_charge: matches!(self.peek(), None | Some('\n')),
+                                });
                                 self.conts.truncate(conts_from);
                                 self.pos = arith_from;
                                 out.push(Tok::Op(Op::LParen));
@@ -3904,6 +4050,20 @@ impl Lexer {
         // $LINENO` over a two-line body reports 3.) See [`Lexer::gather_ahead`].
         if let Some(a) = &self.hd_ahead {
             end_line = end_line.max(a.line);
+        }
+        // A token re-read out of a `((`'s pushed copy is blamed on the line the
+        // abandoned scan gave up on, not on the line it physically sits on: the
+        // copy is a string, and reading a string fetches no input line. See
+        // [`DparenPush`]. Every copy ends at its own scan's last line, so the
+        // frozen line is never below the physical one and the resync after the
+        // copy is exhausted needs nothing — `self.line` has been advancing
+        // underneath all along. Nested copies are read while the enclosing one
+        // is still frozen, which is what taking the widest containing push
+        // reproduces.
+        for p in &self.dparens {
+            if (p.start..=p.end).contains(&start_pos) {
+                end_line = end_line.max(p.line);
+            }
         }
         let start = u32::try_from(start_pos).unwrap_or(u32::MAX);
         while lines.len() < out.len() {

@@ -47918,7 +47918,7 @@ What is left over is message-only, and is
 TD-OILS-A-REWOUND-ARITHMETIC-COMMAND-IS-NOT-REWOUND-THE-WAY-BASH-REWINDS-IT.
 
 
-### TD-OILS-A-REWOUND-ARITHMETIC-COMMAND-IS-NOT-REWOUND-THE-WAY-BASH-REWINDS-IT — 2026-08-05
+### TD-OILS-A-REWOUND-ARITHMETIC-COMMAND-IS-NOT-REWOUND-THE-WAY-BASH-REWINDS-IT — 2026-08-05 — ⏳ MOSTLY FIXED 2026-08-10
 
 **Where:** `userspace/oils/src/lexer.rs`, the rewind in the `'('` arm of the
 tokenizer (see TD-OILS-AN-ARITHMETIC-COMMAND-NEEDS-ITS-CLOSERS-ADJACENT, which
@@ -47929,7 +47929,7 @@ re-lexing the *original source*. bash instead pushes a **reconstructed string**
 — `(` + body + `)` + the one character its adjacency test read — into the input
 and parses that. The two agree on everything that parses, and differed in four
 places where something does not. **The fourth — the `for` header — is fixed as
-of 2026-08-08** (see *Fixed: the `for` header* below); three remain:
+of 2026-08-08** (see *Fixed: the `for` header* below); three remained:
 
 ```text
 (( ) )                    bash: line 1: syntax error near unexpected token `)'
@@ -47948,6 +47948,12 @@ of 2026-08-08** (see *Fixed: the `for` header* below); three remain:
                                 line 2: `) && echo hit'
                           osh:  line 2: 1+1: command not found
 ```
+
+**The first of those, and the two further families measured below, are fixed as
+of 2026-08-10** — see *Fixed: the copy is a real substitute input buffer*. What
+is left is the continuation row, the string-vs-stream row, and one more found
+while fixing the rest (the exit status a newline-terminated copy leaves behind);
+all three are listed under *Still open* at the end.
 
 **Why each one.**
 
@@ -48069,37 +48075,104 @@ and the two agree (`(( (1 )) fi`, `(( (1 ))x`). And the pushes **stack**, as
 re-read meets `((` again and pushes `( fi ) ` on top of it — and that innermost
 copy is what bash echoes.
 
-**The proper fix** for all of it is to model bash's substitute input buffer
-rather than rewinding the cursor: record the reconstructed text and the region
-of source it stands for, lex *that*, and let a diagnostic raised inside the
-region echo it and be blamed on the scan's last line. That also gets the
-continuation row for free, since the reconstruction is what loses the
-`\<newline>`, and it gives the string-vs-stream row a place to live if it is
-ever worth reproducing.
-
-Concretely, `Spans::srcs`/`Spans::parents` (`parser.rs:2659-2707`) is already a
-faithful `push_string`/`pop_string` stack — it is what alias replacements use,
-and `Spans::reader_stop` already pops it. So:
-
-- give the base lexer a source table of its own so a copy can be a `src`
-  (`Tokenized` yields `ends: Vec<u32>`, implying `src` 0; only the alias pass
-  builds `TokSpan`s today), with the copy's parent the offset just past the
-  tested character — for a nested push, an offset *into the enclosing copy*;
-- freeze the stamped line at the scan's last line while the cursor is inside a
-  copy (`Lexer::stamp_lines`, `lexer.rs:3893`), letting `self.line` advance
-  underneath so the resync after the copy is automatic;
-- charge one extra empty request at end of input when the copy ended on a
-  consumed newline — `Parser::reader_line_at`'s `bump` (`parser.rs:3268`)
-  already has exactly this shape in `eof_closed_in_list`.
-
-The `TextMap`/`AliasView` machinery in `lexer.rs` is the same shape as the first
-of those, but it drives a *pass above* the tokenizer, re-lexing spliced text
-from the top of the physical line, whereas this push happens mid-token inside
-`run_into`.
-
 **Impact.** Not cosmetic, as first recorded. The syntax-error rows are shapes
 bash also rejects, but the two line-number families are ordinary runtime
 diagnostics on scripts that run to completion.
+
+**Fixed: the copy is a real substitute input buffer** — 2026-08-10. The cursor
+is still rewound — re-reading the physical text is what makes the copy's
+*content* right without synthesising anything, since the reconstruction is
+always exactly `src[start+1 ..= scan_end]` — but the region is now *recorded*,
+so everything that reads off `shell_input_line` can be answered from it.
+
+- `Lexer::dparens` (`lexer.rs`) collects a `DparenPush { start, end, line,
+  eof_charge }` at the `(None, _)` arm of the `'('` case: the copy's extent, the
+  line `line_number` was parked on, and whether the tested character was the last
+  of its input line.
+- `Lexer::stamp_lines` raises a token's stamped line to the enclosing push's
+  `line` — the *innermost* containing push, since a nested copy is read while the
+  enclosing one is still frozen. `self.line` keeps advancing underneath, so the
+  resync after the copy needs no separate step.
+- `Spans::push_dparens` (`parser.rs`) adds each copy to `Spans::srcs` and moves
+  the tokens read out of it onto that text, with `parents` pointing just past the
+  tested character — for a nested push, at an offset *inside the enclosing copy*,
+  which is what makes `reader_stop` unwind them in `push_string`'s own order.
+  `Spans::echo_line` already returned the whole text for any `src != 0`; it now
+  also strips trailing newlines, as `print_offending_line` does.
+- `Tokenized::dparen_eof_floor` carries `scan_end + 2` for every copy that ended
+  on a consumed newline, and `Parser::reader_line_at` floors its end-of-input
+  answer at it — beside the `bump` `eof_closed_in_list` already had.
+- `Spans::echo_line_at_scan` unwinds the copies again for the one error the
+  *scan* raises. bash parses each `$( … )` body inside the arithmetic while
+  still looking for the closing `))` (`parse_matched_pair` →
+  `extract_command_subst`), so a body that does not parse is reported before
+  `parse_arith_cmd` has decided anything and `shell_input_line` is still the
+  physical line: `(( $(fi ))` echoes `(( $(fi ))`, not the copy `( $(fi ))`.
+  osh lowers those bodies later, while the copy is being re-read, so the two
+  central stamping sites ask for the pre-push echo whenever the error already
+  names a line — which is exactly an error raised in a `$( … )` body of its own.
+
+Pinned by `tests/corpus/a-rewound-arithmetic-command-is-re-read-from-a-copy.sh`.
+
+**Still open.**
+
+*A copy pushed inside an alias replacement is echoed as the physical line.* The
+alias pass re-lexes spliced text and re-labels its offsets through its own
+`TextMap` into the alias source table, so a push recorded against the *spliced*
+text cannot be named in that table's terms and is dropped
+(`lexer.rs`, the `Spanned { … dparens: _ }` in the alias splice). The line
+freeze still applies, since the lex that records the push is the one that stamps
+the lines; only the echoed text is affected:
+
+```text
+shopt -s expand_aliases; alias a='(( fi ) )'; a
+    bash: line 3: `( fi ) '        osh: line 3: `(( fi ) )'
+```
+
+*A copy that ends on a newline leaves an extra empty command behind.* The NUL
+the reader takes for a word after `pop_string` is an **unquoted empty word**,
+which word splitting removes, so bash runs a simple command with no words at all
+— status 0 — right after the copy. That is the same extra request the end-of-
+input floor is charged for, seen in `$?` instead of in a line number:
+
+```text
+((1+1)<nl>)      bash: 1+1: command not found, rc=0    osh: rc=127
+((nosuch)<nl>)   bash: rc=0                            osh: rc=127
+((exit 3)<nl>)   bash: rc=0                            osh: rc=3
+((exit 3) )      bash: rc=3                            osh: rc=3   (space: no charge)
+```
+
+The fix is to emit that empty word from the lexer when the copy's last character
+was a newline — the same `DparenPush::eof_charge` condition — rather than only
+counting it at end of input.
+
+*The continuation row.* bash's rebuild is lossy where the reader had already
+deleted a `\<newline>`: the copy cannot put it back, so bash's own re-parse
+desynchronises and reports `unexpected token `'` — with an **empty** token name
+— on the line the second `)` ended up on. Reproducing it needs the *content* of
+the copy to be synthesised rather than re-read, which is the one thing the
+recorded-region model does not do.
+
+*The string-vs-stream row.* `bash -c`, `eval` and `.` still disagree with `bash
+file` and `bash < file` whenever the copy ends on a newline *at end of input*:
+the string reader stops with the physical line still current and its index past
+the tested newline, so the diagnostic is `syntax error near \`X'` against the
+scan's last line with that physical line echoed, rather than `unexpected end of
+file` at `scan_end + 2`:
+
+```text
+                              bash -c / eval / .          bash file / bash < file
+(( (1 ))                      line 1: near `))'           line 3: unexpected EOF
+                                      `(( (1 ))'
+(( (1⏎))⏎                     line 2: near `))'           line 4: unexpected EOF
+                                      `))'
+(( (1 ) ) ; (( (2 ) )         line 1: near `)'            line 3: unexpected EOF
+(( (1 ));                     line 2: unexpected EOF      line 2: unexpected EOF
+```
+
+The last row is the control: a copy ending on `;` agrees, so the split is
+exactly the newline-terminated copy. osh follows the stream answer, which is the
+one that is not a self-contradiction.
 
 
 ### TD-OILS-A-CAPTURED-2-TO-1-CONCATENATES-THE-STREAMS-INSTEAD-OF-INTERLEAVING-THEM — 2026-08-05 — ✅ FIXED 2026-08-05

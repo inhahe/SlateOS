@@ -267,7 +267,12 @@ fn dquote_run(s: BStr<'_>, start: usize, d: u32) -> Result<(Str, usize), ()> {
     let mut backquote = false;
     while i < s.len() {
         let c = s[i];
-        if !backquote && c == b'\\' {
+        // Before the backquote arm, not after it: bash tests `c == '\\'`
+        // (subst.c:925) ahead of `if (backquote)` (subst.c:936), so a `` \` ``
+        // *inside* a backquote is an escaped backtick and does not close it —
+        // ``the characters up to the next backquote that is not preceded by a
+        // backslash … defines that command''.
+        if c == b'\\' {
             // The backslash is kept in front of everything but a `"`; the
             // string is expanded again afterwards and must still be quoted.
             let Some(&n) = s.get(i + 1) else { break };
@@ -442,8 +447,12 @@ fn edbs(s: BStr<'_>, start: usize, state0: DolBrace, d: u32) -> Result<usize, ()
             continue;
         }
         if c == b'`' {
-            // `string_extract (string, &si, "`", …)`: to the next backtick.
-            i = past(skip_to(s, i + 1, b'`'), s);
+            // `string_extract (string, &si, "`", …)` (subst.c:1884): to the
+            // next backtick — and that one "understand[s] about backslashes in
+            // the string" (subst.c:788, 812), so a `` \` `` does not end it.
+            // Without a match it stops where it ran out and the caller still
+            // steps one past, which is what `Err`'s index is for.
+            i = past(backquote_extent(s, i + 1).unwrap_or_else(|stop| stop), s);
             continue;
         }
         if c == b'$' && s.get(i + 1) == Some(&b'(')
@@ -501,7 +510,9 @@ fn skip_dq(s: BStr<'_>, start: usize, report: bool, d: u32) -> Result<usize, ()>
     let mut backquote = false;
     while i < s.len() {
         let c = s[i];
-        if !backquote && c == b'\\' {
+        // `else if (c == '\\')` at subst.c:1044, ahead of `else if (backquote)`
+        // at subst.c:1050: a `` \` `` does not close a backquote.
+        if c == b'\\' {
             i += 2;
             continue;
         }
@@ -587,7 +598,11 @@ fn skip_matched(s: BStr<'_>, start: usize, open: u8, close: u8, d: u32) -> usize
     let mut backquote = false;
     while i < s.len() {
         let c = s[i];
-        if !backquote && c == b'\\' {
+        // `else if ((flags & 1) == 0 && c == '\\')` at subst.c:2093, ahead of
+        // `else if (backq)` at subst.c:2099. (Flag 1 is the associative-array
+        // key, whose subscript is taken literally; every `skipsubscript` call on
+        // this path passes 0 — subst.c:824, 1945, 10861.)
+        if c == b'\\' {
             i += 2;
             continue;
         }
@@ -821,5 +836,32 @@ mod tests {
         assert_eq!(backquote_named(r#""${x:-a}"`echo \`z"#), Some("`echo \\`z".to_string()));
         // The brace fault comes first in the walk, so it is the one reported.
         assert_eq!(named("\"${a[}\"`echo"), Some("\"${a[}\"`echo".to_string()));
+    }
+
+    #[test]
+    fn a_backslash_is_honoured_inside_a_backquote_by_every_scanner() {
+        // ``the characters up to the next backquote that is not preceded by a
+        // backslash'' — all three scanners test `c == '\\'` before they test
+        // their backquote flag (subst.c:925/936, 1044/1050, 2093/2099), so the
+        // `` \` `` below is an escaped backtick and the backquote runs past it
+        // to the real one. Read the other way round the backquote closes early,
+        // the `"` after it is taken for the run's own close, and the scan walks
+        // out of step with the parser into a fault nothing is wrong with.
+        for src in [
+            // `string_extract_double_quoted`: the run is the word's own.
+            r#""${z:-q}`echo m\`echo n\``B""#,
+            // `skip_double_quoted`: the run is inside a `${ … }` operand.
+            r#""${z:-A"`echo m\`echo n\``"B}""#,
+            // `skip_matched_pair`: the backquote is inside a subscript.
+            r#""${a[`echo 1\`echo \``]}""#,
+            // The escaped backtick is the last thing before the closing one.
+            r#""${z:-a}`echo \``""#,
+        ] {
+            assert_eq!(named(src), None, "{src}");
+            assert_eq!(backquote_named(src), None, "{src}");
+        }
+        // And the flag is still a flag: an *unescaped* backtick inside the run
+        // does close it, so this word's `${` is the one left open.
+        assert_eq!(named(r#""${z:-A`echo m`${a[}""#).as_deref(), Some(r#""${z:-A`echo m`${a[}""#));
     }
 }

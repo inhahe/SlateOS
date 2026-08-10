@@ -25599,8 +25599,10 @@ impl Shell {
     fn expand_operand_fields(&mut self, arg: &Word) -> Vec<Vec<EChar>> {
         // Every caller of this is a `-` or a `+` whose operand is used, which
         // is exactly `parameter_brace_expand_rhs` — so the operand is read once
-        // more before it is expanded. See [`Shell::operand_rhs_read`].
-        self.operand_rhs_read(arg);
+        // more before it is expanded, and what is expanded is what that read
+        // built. See [`Shell::operand_rhs_read`].
+        let rewritten = self.operand_rhs_read(arg);
+        let arg = rewritten.as_ref().unwrap_or(arg);
         // An operand is a nested entry into word expansion, so a failure in it
         // jumps rather than returning — see [`Shell::expand_call`].
         self.expand_call(|sh| {
@@ -26302,17 +26304,17 @@ impl Shell {
     /// *here* and by no one else — `A${z:-p'$(fi⏎q)'r}B` reports twice, once
     /// from this scan and once from the expansion, and never from the brace
     /// scan.
-    fn operand_rhs_read(&mut self, arg: &Word) {
+    fn operand_rhs_read(&mut self, arg: &Word) -> Option<Word> {
         // Outside double quotes there is no scan: `temp = value`, and the
         // operand goes to `expand_string_for_rhs` as it stands.
         if !self.dquote {
-            return;
+            return None;
         }
         let src = crate::unparse::word_src(arg);
         // `&& *value` — an empty operand is not scanned. Nothing observable
         // hangs on it, since there would be nothing in it to read.
         if src.is_empty() {
-            return;
+            return None;
         }
         // The scan is handed the operand's *own* text, so a `$( … )` in it has
         // the rest of the operand for its remainder and not the rest of the
@@ -26320,7 +26322,7 @@ impl Shell {
         // [`Shell::extent_read_of_rest`] does — and lexing it as a double-quoted
         // body is also what drops the single-quote rule the parser applied.
         let Ok(word) = crate::parser::dquote_word_from_source(&src, self.parse_opts()) else {
-            return;
+            return None;
         };
         let mut subs: Vec<&WordPart> = Vec::new();
         Self::rhs_scanned_subs(&word.parts, &mut subs);
@@ -26331,6 +26333,115 @@ impl Shell {
         // Only a read whose jump stands propagates, and it does so through the
         // flags it set rather than through this return.
         drop(self.extent_read_of_subs(&subs));
+        Self::stripdq_operand(arg)
+    }
+
+    /// The `SX_STRIPDQ` half of the same call: what read 2 hands on to read 3.
+    ///
+    /// `string_extract_double_quoted` does not only report — it builds a new
+    /// string, and `parameter_brace_expand_rhs` expands *that*
+    /// (`expand_string_for_rhs (temp, …)`, subst.c:7737). One byte rule of the
+    /// rewrite is visible in ordinary scripts, with no failed read and no `@P`
+    /// anywhere: a backslash inside an *embedded* `" … "` is dropped unless the
+    /// character after it is one bash keeps it for.
+    ///
+    /// ```c
+    ///   if ((stripdq == 0 && c != '"') ||
+    ///       (stripdq && ((dquote && (sh_syntaxtab[c] & CBSDQUOTE)) || dquote == 0)))
+    ///     temp[j++] = '\\';                      /* subst.c:906-911 */
+    /// ```
+    ///
+    /// With `SX_STRIPDQ` set the backslash is re-emitted only inside an embedded
+    /// quote before a `CBSDQUOTE` character — `$`, `` ` ``, `"`, `\` or a newline
+    /// — or anywhere outside one, where `dquote == 0`. `dquote` starts at 0 and
+    /// only a `"` *in the operand* raises it, so the operand's own top level
+    /// counts as outside however the enclosing word was quoted. Measured with
+    /// `z` unset:
+    ///
+    /// ```text
+    ///   echo "${z:-p"\x"r}"      pxr     the backslash goes
+    ///   echo "${z:-p\xr}"        p\xr    no embedded quote, so it stays
+    ///   echo ${z:-p"\x"r}        p\xr    unquoted: `temp = value`, no rewrite
+    ///   echo "${z:-p"\\"r}"      p\r     `\` is CBSDQUOTE, so it stays
+    ///   echo "${z:-p"\$"r}"      p$r     …as are `$`, `` ` ``, `"` and a newline
+    /// ```
+    ///
+    /// This falls out of the parse rather than needing a byte walk of its own.
+    /// The lexer already sorts the two cases when it reads a double-quoted run:
+    /// a backslash before one of `"` `\` `$` `` ` `` becomes a one-character
+    /// [`WordPart::SingleQuoted`] with `escaped` set, a backslash before a
+    /// newline is dropped, and every *other* backslash is pushed into the
+    /// literal run as a plain byte. So a bare `\` byte in a `Literal` under a
+    /// [`WordPart::DoubleQuoted`] is exactly the backslash this rule drops, and
+    /// nothing else is.
+    ///
+    /// Only the operand's own quoted runs are walked. A `$( … )` and a nested
+    /// `${ … }` are copied through by their extent (subst.c:955-993), so what is
+    /// inside them is untouched here — a nested brace gets the rule applied by
+    /// its own `parameter_brace_expand_rhs`, which is what makes
+    /// `echo "${z:-${w:-p"\x"r}}"` say `pxr` too.
+    fn stripdq_operand(arg: &Word) -> Option<Word> {
+        let parts = Self::stripdq_parts(&arg.parts)?;
+        Some(Word { parts })
+    }
+
+    /// The rewrite of [`Shell::stripdq_operand`], or `None` where it changes
+    /// nothing — which is the common case, and worth not rebuilding the word for.
+    fn stripdq_parts(parts: &[WordPart]) -> Option<Vec<WordPart>> {
+        let mut out: Option<Vec<WordPart>> = None;
+        for (i, p) in parts.iter().enumerate() {
+            let WordPart::DoubleQuoted(inner) = p else {
+                continue;
+            };
+            let Some(stripped) = Self::stripdq_quoted(inner) else {
+                continue;
+            };
+            let acc = out.get_or_insert_with(|| parts.to_vec());
+            if let Some(slot) = acc.get_mut(i) {
+                *slot = WordPart::DoubleQuoted(stripped);
+            }
+        }
+        out
+    }
+
+    /// One embedded `" … "`, with the backslashes the lexer left standing in its
+    /// literal runs taken out.
+    fn stripdq_quoted(parts: &[WordPart]) -> Option<Vec<WordPart>> {
+        let mut out: Option<Vec<WordPart>> = None;
+        for (i, p) in parts.iter().enumerate() {
+            let WordPart::Literal(text) = p else {
+                continue;
+            };
+            if !text.contains(&b'\\') {
+                continue;
+            }
+            let mut lit = Str::with_capacity(text.len());
+            let mut rest = text.as_slice();
+            while let Some((&c, tail)) = rest.split_first() {
+                // The backslash goes and the character after it is copied as it
+                // stands — it is not looked at again, so a `\\x` whose first
+                // backslash the lexer already took as an escape cannot have its
+                // second one read as one too.
+                if c == b'\\' {
+                    if let Some((&next, after)) = tail.split_first() {
+                        lit.push(next);
+                        rest = after;
+                        continue;
+                    }
+                    // A backslash with nothing after it sets `pass_next` and the
+                    // loop then ends on the NUL, so it reaches `temp` no more
+                    // than the character it was waiting for does.
+                    break;
+                }
+                lit.push(c);
+                rest = tail;
+            }
+            let acc = out.get_or_insert_with(|| parts.to_vec());
+            if let Some(slot) = acc.get_mut(i) {
+                *slot = WordPart::Literal(lit);
+            }
+        }
+        out
     }
 
     /// Every substitution `string_extract_double_quoted` reads, in the order it
@@ -27817,7 +27928,8 @@ impl Shell {
                     // positionals, `A${1=p$(fi⏎q)r}B` under `${…@P}` reports
                     // *once* — the refusal above comes first and the second
                     // read never happens. See [`Shell::operand_rhs_read`].
-                    self.operand_rhs_read(arg);
+                    let rewritten = self.operand_rhs_read(arg);
+                    let arg = rewritten.as_ref().unwrap_or(arg);
                     let v = self.expand_to_string(arg);
                     // Expanding the default is a nested `expand_word_internal`
                     // (`expand_string` inside `parameter_brace_expand_word`), so
@@ -28069,7 +28181,8 @@ impl Shell {
                     // associative store and the indexed refusal alike expand the
                     // operand, and so read it once more first. See
                     // [`Shell::operand_rhs_read`].
-                    self.operand_rhs_read(arg);
+                    let rewritten = self.operand_rhs_read(arg);
+                    let arg = rewritten.as_ref().unwrap_or(arg);
                     if let Some(resolved) = resolved.filter(|r| self.assoc.contains_key(r)) {
                         let val = self.expand_to_string(arg);
                         self.assoc_set(&resolved, sub.as_bytes().to_vec(), val.clone(), false);

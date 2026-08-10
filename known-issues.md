@@ -868,7 +868,7 @@ reports and discards as it always did).
 
 ---
 
-### TD-OILS-A-BRACE-OPERAND-IS-SCANNED-AGAIN-BEFORE-IT-IS-EXPANDED. A `${x:-word}` whose `word` is used reports a failed extent read three times, not two — 2026-08-09 — ⚠️ PART 1 FIXED 2026-08-09, PART 2's REPORTS FIXED 2026-08-10, PART 2's TEXT OPEN
+### TD-OILS-A-BRACE-OPERAND-IS-SCANNED-AGAIN-BEFORE-IT-IS-EXPANDED. A `${x:-word}` whose `word` is used reports a failed extent read three times, not two — 2026-08-09 — ⚠️ PART 1 AND PART 2 FIXED 2026-08-09/10 EXCEPT WHAT A *FAILED* READ LEAVES IN `temp`
 
 **Status.** Both defects in the reproduce block below are **fixed**. The `}BB` —
 the leftover escaping the sub-word — went with part 1 (see "Part 1, as landed");
@@ -876,19 +876,25 @@ the three-vs-two report count went with the report half of part 2 (see "Part 2's
 report half, as landed"). `unset z; a='A${z:-p$(fi⏎q)r}B'; "${a@P}"` now gives
 three reports and `[Ap⏎q)rB]` in both shells, byte for byte.
 
-What is still open is the **text** half of part 2: read 2 does not only report,
-it *rewrites* the operand (`SX_STRIPDQ` strips the `"`s and rewrites the
-backslashes between them), and read 3 expands the rewrite. osh still expands the
-original. **This half is not prompt-only** — it is an everyday divergence with
-no `@P` and no failed read anywhere in sight:
+The **text** half of part 2 — read 2 does not only report, it *rewrites* the
+operand, and read 3 expands the rewrite — is now half done too. The rewrite has
+two independent pieces:
 
-```text
-unset z; echo "${z:-p"\x"r}"     bash: pxr        osh: p\xr
-```
+- ✅ **The `SX_STRIPDQ` byte rules, fixed 2026-08-10.** This was the piece that
+  mattered: an everyday divergence with no `@P` and no failed read anywhere in
+  sight —
 
-because inside the operand's embedded `" … "` a backslash before a character
-that is *not* one of `` $ ` " \ ``⏎ is **removed**, where osh keeps it. That is
-the `stripdq` arm of subst.c:906-911:
+  ```text
+  unset z; echo "${z:-p"\x"r}"     bash: pxr     osh (before): p\xr
+  ```
+
+  — because inside the operand's embedded `" … "` a backslash before a character
+  that is *not* one of `` $ ` " \ ``⏎ is **removed**, where osh kept it. See
+  "Part 2's `SX_STRIPDQ` rules, as landed".
+- ⚠️ **What a *failed* read leaves in `temp`, still open.** That piece is
+  prompt-only, and is the table further down.
+
+The rule is the `stripdq` arm of subst.c:906-911:
 
 ```c
   if ((stripdq == 0 && c != '"') ||
@@ -899,7 +905,7 @@ the `stripdq` arm of subst.c:906-911:
 — with `stripdq` set, the backslash is re-emitted only inside an embedded quote
 before a `CBSDQUOTE` character, or anywhere outside one. Measured, `z` unset:
 
-| | bash 5.2.37 | osh |
+| `z` unset | bash 5.2.37 | osh before the fix |
 |---|---|---|
 | `echo "${z:-p"\x"r}"` | `pxr` | `p\xr` ❌ |
 | `echo ${z:-p"\x"r}` (unquoted — no `Q_DOUBLE_QUOTES`, so `temp = value`) | `p\xr` | same ✅ |
@@ -908,9 +914,9 @@ before a `CBSDQUOTE` character, or anywhere outside one. Measured, `z` unset:
 | `echo "${z:-p"\$"r}"`, `"\\"`, `"\`"`, `"\`⏎`"` (the `CBSDQUOTE` set) | `p$r`, `p\r`, `` p`r ``, `pr` | same ✅ |
 
 It is the same six operators as the report half — `:-`, `-`, `:=`, `=`, `:+`, `+`
-all give `pxr`/`p\xr`, while `:?`, `#`, `/` and a `/` replacement all agree — and
-it shows in every quoted context (`echo "…"`, an assignment RHS, a here-document
-body, `printf %s`), not just `@P`.
+all gave `pxr`/`p\xr`, while `:?`, `#`, `%`, `/`, a `/` replacement and `:off`
+all agree — and it shows in every quoted context (`echo "…"`, an assignment RHS,
+a here-document body, `printf %s`), not just `@P`.
 
 The failed-read half of the same rewrite is the prompt-only one, and there the
 divergence is confined to operands containing a `"`:
@@ -1031,12 +1037,12 @@ again.
    quoted, as a scan that reports without running. ✅ **Report half done
    2026-08-10** — see "Part 2's report half, as landed". **It is not only a
    scan: it rewrites the operand**, and read 3 expands the rewrite, not the
-   original — that half is still open, and has two independent pieces. The
-   *first* is the `SX_STRIPDQ` rewrite of the ordinary bytes — strip the
-   unescaped `"`s and drop a backslash that is inside one of them and not before
-   a `CBSDQUOTE` character (see Status). That piece needs no failed read at all,
-   is what shows up in ordinary scripts, and should be done first. The *second*
-   is what a failed read leaves in `temp`:
+   original. That half has two independent pieces. The *first* is the
+   `SX_STRIPDQ` rewrite of the ordinary bytes — strip the unescaped `"`s and
+   drop a backslash that is inside one of them and not before a `CBSDQUOTE`
+   character (see Status). ✅ **Done 2026-08-10**; it needed no failed read at
+   all and was what showed up in ordinary scripts. The *second*, still open, is
+   what a failed read leaves in `temp`:
    `string_extract_double_quoted` copies a `$( … )` through by *its extent*
    (subst.c:955-993), and on a failed read takes the fallback
 
@@ -1142,6 +1148,103 @@ Corpus case `a-used-brace-operand-is-scanned-once-more-before-it-expands.sh`
 (5 sections). Two shapes were deliberately left out of it: a `"` in the operand,
 which is the text half above; and a `\$`, which is *also* a prompt escape and
 renders through `$EUID` — osh reports root by design, see open-questions Q28.
+
+**Part 2's `SX_STRIPDQ` rules, as landed** (commit "oils: strip the quotes off a
+used brace operand before expanding it"). `Shell::operand_rhs_read` now returns
+the operand read 3 should expand, and its three call sites use it in place of the
+one the parser gave. The rewrite is `Shell::stripdq_operand` /
+`stripdq_parts` / `stripdq_quoted`.
+
+It needed no byte walk, because **the lexer has already sorted the two cases.**
+Reading a double-quoted run (`userspace/oils/src/lexer.rs`), a backslash before
+one of `"` `\` `$` `` ` `` becomes a one-character `WordPart::SingleQuoted` with
+`escaped` set, a backslash before a newline is dropped, and every *other*
+backslash is pushed into the literal run as a plain byte. So a bare `\` byte in a
+`Literal` under a `WordPart::DoubleQuoted` is exactly the backslash `SX_STRIPDQ`
+drops, and nothing else is — the fix is to walk the operand's top-level
+`DoubleQuoted` parts and take those bytes out. Descending no further is what
+gives the extent rule for free: a `$( … )` and a nested `${ … }` are other kinds
+of part, so what is inside them is untouched, and a nested brace gets the rule
+from its own `parameter_brace_expand_rhs`.
+
+Two rules that fall out of this and are pinned rather than assumed: the operand's
+*own* top level is `dquote == 0` however the enclosing word was quoted (a
+top-level `\x` is a `Literal` too, but not under a `DoubleQuoted`, so the walk
+does not reach it); and a `'` is not special to
+`string_extract_double_quoted` at all, so `"${z:-p'\x'r}"` is `p'\x'r` — quotes,
+backslash and all.
+
+Corpus case `a-used-brace-operands-embedded-quotes-lose-their-backslashes.sh`
+(6 sections, 30 probes: the rule, the `CBSDQUOTE` set, the outside-the-quotes
+controls, quoted vs unquoted, all eleven operators, four quoted contexts, and
+the extent-copied shapes).
+
+---
+
+### TD-OILS-A-BACKQUOTE-WHOSE-BODY-SWALLOWS-A-BRACE-IS-A-LEX-ERROR-RATHER-THAN-A-FAILED-READ — 2026-08-10
+
+**Where:** `userspace/oils/src/lexer.rs`, `read_backtick` and whatever raises
+`bad substitution: no closing "`"`.
+
+**What is wrong.** A `` ` … ` `` whose body runs over a `${ … }` and then fails to
+parse is, to bash, a *command substitution whose read failed* — reported and
+carried on from, exactly as
+TD-OILS-A-BRACE-SCAN-CARRIES-ON-PAST-A-FAILED-EXTENT-READ describes for `$( … )`.
+osh raises a lex error instead and abandons the whole script.
+
+**Reproduce** (two lines; the bytes matter, so they are spelled out):
+
+```text
+line 1:  echo "a\\`x";  echo ${z:-p"\`"r}
+line 2:  echo "b\\`y"
+
+  bash: command substitution: line 2: unexpected EOF while looking for matching `` ` ``'
+        a\y
+        rc=0
+  osh:  line 2: bad substitution: no closing "`" in `x";  echo ${z:-p"\`
+        rc=1
+```
+
+Line 1's `\\` is an escaped backslash, so the `` ` `` after it opens a
+substitution; the `` ` `` on line 2 closes it, and the body in between holds an
+unterminated `"`. bash reports that and goes on to run both lines. Two controls
+that already agree: the same unterminated `"` in a backquote body with no `${`
+in it (`echo "a`echo "u`b"`) and a plain syntax error in one (`` echo "a`for`b" ``)
+— both give bash's wording and `rc=0` in osh too. So it is the `${` inside the
+swallowed body that turns osh's failed read into a lex error.
+
+**What the proper fix looks like.** The backquote reader must report and yield a
+failed read the way the `$( … )` path does, rather than refusing the word.
+
+---
+
+### TD-OILS-AN-UNRESOLVABLE-COMMAND-PATH-EXITS-126-WHERE-BASH-EXITS-127 — 2026-08-10
+
+**Where:** `userspace/oils/src/interp.rs`, where a spawn failure is turned into a
+diagnostic and an exit status.
+
+**Reproduce:**
+
+```text
+x=$(printf 'b\\'); "$x"; echo rc=$?
+
+  bash: b\: No such file or directory        rc=127
+  osh:  b\: program path has no file name    rc=126
+```
+
+**What is wrong.** Two things, and the status is the one that matters. A command
+word ending in a `\` is, on Windows, a path with no file name, and osh reports
+the OS's own words for that and charges it to 126 — the "found but not
+executable" status. bash treats the failure as ENOENT and exits **127**. The
+message text is the lesser half (osh is naming a Windows error where bash names a
+POSIX one), but the status is observable to every caller.
+
+`nosuchcmd` — a name with no separator in it at all — already agrees
+(`command not found`, 127) in both, so this is specifically the path-shaped word.
+
+**What the proper fix looks like.** Map the Windows "no file name"/invalid-path
+spawn errors onto the same ENOENT arm that produces 127, and say
+`No such file or directory`.
 
 ---
 

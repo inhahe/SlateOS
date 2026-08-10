@@ -18582,7 +18582,29 @@ impl Shell {
                 return flow;
             }
             if is_decl && wi > 0 && is_assignment_word(w) {
-                argv.push(self.expand_decl_assignment(w));
+                // Brace expansion still runs, and it runs *first*, on the whole
+                // word — the `NAME=` prefix included. `brace_expand_word_list`
+                // excuses only two kinds of word, and a scalar assignment
+                // operand is neither:
+                //
+                // ```c
+                //   if (tlist->word->flags & W_NOBRACE) …continue;
+                //   if ((tlist->word->flags & (W_COMPASSIGN|W_ASSIGNARG)) ==
+                //         (W_COMPASSIGN|W_ASSIGNARG)) …continue;
+                //           /* subst.c:12427-12439 */
+                // ```
+                //
+                // So a *compound* operand (`declare -A m=([k{1,2}]=v)`, which is
+                // both flags) is left alone — that is `sc.decl_arrays` above, and
+                // its elements brace-expand as words of their own — while a
+                // scalar one becomes several assignment words that are then each
+                // performed. Measured against bash 5.2.37: `declare w=a{1,2}`
+                // leaves `w=a2` (both assignments run, the last wins),
+                // `declare c+=q{1,2}` leaves `c=q1q2` (both append), and
+                // `declare -A m=([k{1,2}]=v)` keeps the brace in the key.
+                for bw in self.expand_braces_opt(w) {
+                    argv.push(self.expand_decl_assignment(&bw));
+                }
                 continue;
             }
             // Brace expansion runs first (textually, before parameter/other

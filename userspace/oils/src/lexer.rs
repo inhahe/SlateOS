@@ -672,147 +672,30 @@ const COND_END: &[u8] = b"]]";
 
 /// Every spelling bash will turn into a reserved word: its `word_token_alist`
 /// (parse.y). Membership here decides only that the word *is* one — whether one
-/// may stand here at all is [`RwAccept::ok`], and what it leaves behind is
-/// [`RW_LEAVES_ACCEPTABLE`].
+/// may stand here at all is [`CmdPos::reserved_ok`], and what it leaves behind
+/// is [`RW_LEAVES_ACCEPTABLE`].
 const RESERVED_WORDS: &[&[u8]] = &[
     b"if", b"then", b"else", b"elif", b"fi", b"case", b"esac", b"for", b"select", b"while",
     b"until", b"do", b"done", b"in", b"function", b"time", b"{", b"}", b"!", b"[[", b"]]",
     b"coproc",
 ];
 
-/// The reserved words after which another one — and so an arithmetic command —
-/// is still recognised: bash's `reserved_word_acceptable` (parse.y:5367)
-/// intersected with the table above, plus `for`.
+/// The reserved words after which another one is still recognised: bash's
+/// `reserved_word_acceptable` (parse.y:5367) intersected with the table above.
 ///
-/// `for` is there because bash reads the arithmetic `for (( … ))` header by a
-/// route of its own; osh gets the same shape from the ordinary `((` token. The
-/// others bash leaves out are left out here too: after `in`, `case` or `select`
-/// what follows is a pattern or a name, which is why `case x in ((p)` is a
-/// pattern that opens with a paren rather than an arithmetic command. `[[` is
-/// absent for the same reason and `]]` present — see [`RwAccept::step`].
+/// The ones bash leaves out are left out here too: after `in`, `case`, `for` or
+/// `select` what follows is a pattern or a name. So `case x in ((p)` never
+/// reaches `parse_dparen`'s second branch, and the `((` stays two `(` tokens —
+/// of which a `case` arm may take only one, which is why bash reports a syntax
+/// error at the second. `[[` is absent for the same reason and `]]` present —
+/// see [`CmdPos::advance`].
+///
+/// `for` is the one that is *also* an arithmetic-command position, by a branch
+/// of its own rather than by this list — see [`Prev::For`].
 const RW_LEAVES_ACCEPTABLE: &[&[u8]] = &[
-    b"{", b"}", b"!", b"do", b"done", b"elif", b"else", b"esac", b"fi", b"for", b"if", b"then",
-    b"time", b"until", b"while", b"coproc", b"]]",
+    b"{", b"}", b"!", b"do", b"done", b"elif", b"else", b"esac", b"fi", b"if", b"then", b"time",
+    b"until", b"while", b"coproc", b"]]",
 ];
-
-/// The part of bash's `token_before_that` that `reserved_word_acceptable` reads.
-///
-/// Its default branch accepts a plain WORD when the token before *that* was
-/// `function` or `coproc` (parse.y:5406–5412) — the name in a definition or a
-/// coprocess. That is what lets `function f ((1))` and `coproc c ((1))` reach an
-/// arithmetic command through a name that is not itself a reserved word.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RwPrev {
-    Function,
-    Coproc,
-    Other,
-}
-
-/// Whether bash would recognise a reserved word — and so an arithmetic command
-/// — at the next token, carried along the stream instead of re-derived from the
-/// previous token's text.
-///
-/// bash decides this from `last_read_token`, which is the previous token's
-/// *classification*; and a word becomes a reserved word only where one was
-/// already acceptable, because `CHECK_FOR_RESERVED_WORD` (parse.y:2994) is
-/// itself gated on `reserved_word_acceptable (last_read_token)`. The rule is
-/// therefore recursive, and no table keyed on one token's spelling can express
-/// it: `do` opens a loop body after `;` but is an argument after `echo`, so
-/// `; do ((1))` is an arithmetic command while `echo do ((1))` is a syntax error
-/// near `(`.
-///
-/// So this is a fold over the tokens as they are emitted rather than a lookup.
-/// It is folded lazily — `seen` records how far — because its one consumer,
-/// [`Lexer::arith_cmd_position`], only asks at a flush `((`, and the token
-/// stream is only ever appended to.
-#[derive(Debug, Clone, Copy)]
-struct RwAccept {
-    /// How many of the emitted tokens have been folded in.
-    seen: usize,
-    /// bash's `reserved_word_acceptable (last_read_token)`, for the next token.
-    ok: bool,
-    /// The previous token, as far as the two lookbehind cases care.
-    prev: RwPrev,
-    /// Inside a `[[ … ]]`, where `last_read_token` is frozen. Not a depth:
-    /// a `[[` in there is a word, not a second `COND_START`.
-    cond: bool,
-}
-
-impl RwAccept {
-    /// A reserved word is acceptable at the start of the input — bash's `0`
-    /// (parse.y:5402), the value `last_read_token` is initialised to.
-    const fn new() -> Self {
-        Self { seen: 0, ok: true, prev: RwPrev::Other, cond: false }
-    }
-
-    /// Fold in whatever has been emitted since the last look.
-    fn advance(&mut self, out: &[Tok]) {
-        for tok in out.get(self.seen..).unwrap_or_default() {
-            self.step(tok);
-        }
-        self.seen = out.len();
-    }
-
-    /// One token's worth of bash's `yylex` bookkeeping (parse.y:2902–2905).
-    fn step(&mut self, tok: &Tok) {
-        let prev = self.prev;
-        self.prev = RwPrev::Other;
-        // A whole conditional is *one* token to bash: `parse_cond_command` runs
-        // from inside a single `read_token` call (parse.y:3399) and asks for its
-        // own tokens directly, so `last_read_token` never moves off `COND_START`
-        // — which is not acceptable — until the `]]` comes back as `COND_END`,
-        // which is. osh emits that span as ordinary tokens, so the freeze has to
-        // be modelled here. This is why no paren inside a conditional is ever
-        // arithmetic, however deep.
-        if self.cond {
-            self.cond = !matches!(tok, Tok::Word(segs) if bare_word(segs) == Some(COND_END));
-            self.ok = !self.cond;
-            return;
-        }
-        match tok {
-            Tok::Newline => self.ok = true,
-            Tok::Op(op) => {
-                self.ok = matches!(
-                    op,
-                    Op::Semi
-                        | Op::DSemi
-                        | Op::SemiAmp
-                        | Op::DSemiAmp
-                        | Op::LParen
-                        | Op::RParen
-                        | Op::Pipe
-                        | Op::PipeAmp
-                        | Op::Amp
-                        | Op::AndIf
-                        | Op::OrIf
-                );
-            }
-            Tok::ArithCmd(..) => self.ok = true,
-            Tok::Word(segs) => {
-                let lit = bare_word(segs);
-                // bash's `CHECK_FOR_RESERVED_WORD` refuses a word that carries a
-                // `$` or any quoting, which is what "bare" means here too.
-                let word = lit.filter(|w| RESERVED_WORDS.contains(w)).filter(|_| self.ok);
-                match word {
-                    Some(w) if w == COND_START => self.cond = true,
-                    Some(w) if w == b"function" => self.prev = RwPrev::Function,
-                    Some(w) if w == b"coproc" => self.prev = RwPrev::Coproc,
-                    _ => {}
-                }
-                self.ok = match word {
-                    Some(w) => RW_LEAVES_ACCEPTABLE.contains(&w),
-                    // A plain WORD, which is acceptable only as the name that
-                    // follows `function` or `coproc`.
-                    None => prev != RwPrev::Other,
-                };
-            }
-            // Everything else is a NUMBER, a REDIR_WORD, an ASSIGNMENT_WORD or a
-            // redirection target, and none of those is on bash's list — which is
-            // why `x=1 ((2))` is a syntax error near `(` too.
-            _ => self.ok = false,
-        }
-    }
-}
 
 /// A word's text when it is a single unquoted literal segment, which is the
 /// only shape bash will match against a reserved word or an operator spelling.
@@ -948,11 +831,6 @@ struct Lexer {
     /// lexing for the RHS of `=~` (where `(`, `)`, `|`, … are literal regex
     /// metacharacters, not shell operators).
     cond_depth: usize,
-    /// Where a reserved word — and so an arithmetic command — would be
-    /// recognised. Distinct from `cond_depth`, which tracks a *lexing mode* and
-    /// so counts every bare `[[`; this one counts only the `[[` bash would have
-    /// classified as `COND_START`. See [`RwAccept`].
-    rw: RwAccept,
     /// Set immediately after emitting a `=~` word inside `[[ … ]]`; the next
     /// word is read in regex mode.
     regex_next: bool,
@@ -1146,12 +1024,17 @@ struct Lexer {
     /// real-tab key, the trim having matched nothing.
     ansi_c_quote: bool,
     /// Where in a simple command the token loop stands, which is what decides
-    /// whether a `[` at the head of a word opens a subscript. See [`CmdPos`] and
-    /// [`Lexer::assignment_acceptable`].
+    /// whether a `[` at the head of a word opens a subscript, whether an alias is
+    /// looked up, and whether a `((` opens an arithmetic command. See [`CmdPos`],
+    /// [`Lexer::assignment_acceptable`] and [`Lexer::arith_cmd_position`].
+    ///
+    /// Distinct from `cond_depth`, which tracks a *lexing mode* and so counts
+    /// every bare `[[`; [`CmdPos::cond`] holds only the `[[` bash would have
+    /// classified as `COND_START`.
     cmd_pos: CmdPos,
     /// How many of the output tokens [`Lexer::cmd_pos`] has been advanced over.
     /// The scan pushes tokens from a dozen places, so the state is brought up to
-    /// date lazily at the one place that reads it rather than at every push.
+    /// date lazily at the places that read it rather than at every push.
     cmd_pos_upto: usize,
 }
 
@@ -1564,7 +1447,6 @@ impl Lexer {
             pending_heredocs: Vec::new(),
             hd_delim: None,
             cond_depth: 0,
-            rw: RwAccept::new(),
             regex_next: false,
             opts,
             extpat_next: false,
@@ -2297,33 +2179,19 @@ pub fn lex_operand_in_dquote(src: BStr<'_>, ctx: ReadCtx) -> Result<Vec<Seg>, Le
     lx.read_word_verbatim(Verbatim::Dquote)
 }
 
-/// Reserved words after which a new command begins, so a word following one of
-/// them is in "command position". bash's `reserved_word_acceptable` list, less
-/// `time` (whose own `-p`/`--` extend it, and which is refused behind a pipe —
-/// see [`Prev::Time`]) and less the punctuation, which is matched as operators.
-///
-/// `}`, `done`, `esac` and `fi` are in the list even though the grammar always
-/// wants a separator after them; bash lists them, and a word can never actually
-/// follow one without a syntax error, so they cost nothing either way.
-const CMD_INTRODUCERS: &[&[u8]] = &[
-    b"if", b"then", b"elif", b"else", b"fi", b"while", b"until", b"do", b"done", b"esac", b"{",
-    b"}", b"!",
-];
-
-/// What the previously kept token was, to the precision the command-position
-/// test needs. This is osh's reading of bash's `last_read_token`, which is a
+/// What the previously read token was, to the precision the command-position
+/// tests need. This is osh's reading of bash's `last_read_token`, which is a
 /// *parser* token — so a word's classification depends on where it sat, and the
 /// state has to be carried rather than read back off the output stream.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Prev {
-    /// Nothing yet, or a separator: a command begins here.
+    /// Nothing yet, a separator, or a reserved word after which a command
+    /// begins.
     Start,
     /// `;;`, `;&` or `;;&`. A reserved word would be accepted here, but what
     /// actually follows is the *next `case` arm's pattern* — which is why bash
     /// excludes these three from `command_token_position` alone.
     CaseArmEnd,
-    /// A reserved word from [`CMD_INTRODUCERS`].
-    Introducer,
     /// bash's TIME: the `time` reserved word.
     ///
     /// It and its two options are all in `reserved_word_acceptable`, so a
@@ -2344,21 +2212,41 @@ enum Prev {
     /// be followed by a word without a syntax error anyway.
     Time,
     /// bash's TIMEOPT: a `-p` directly after a [`Prev::Time`], and nowhere else
-    /// (`special_case_tokens`, parse.y:3292-3302).
+    /// (`special_case_tokens`, parse.y:3292-3302). `--` after a TIME or a
+    /// TIMEOPT is TIMEIGN, which needs no state of its own: nothing after *it*
+    /// is special, so it is only a [`Prev::Start`]. Keeping the two apart is
+    /// what makes `time -p -- x` reach `x` in command position while
+    /// `time -- -p x` does not.
     TimeOpt,
-    /// bash's TIMEIGN: a `--` after a [`Prev::Time`] or a [`Prev::TimeOpt`].
+    /// bash's FUNCTION. The *name* after one is acceptable even though it is a
+    /// plain WORD (parse.y:5406-5412), which is what lets `function f ((1))`
+    /// reach an arithmetic command through a word that is not reserved.
+    Function,
+    /// bash's COPROC, whose name is acceptable for the same reason.
+    Coproc,
+    /// bash's FOR. Not in `reserved_word_acceptable` — `for f[1` is no command
+    /// position and `for do` is a syntax error — but `parse_dparen` tests it
+    /// *before* asking that question, in a branch of its own for the arithmetic
+    /// `for (( … ))` header (parse.y:4464-4480):
     ///
-    /// After one, neither option is anything but an ordinary word — which is
-    /// why the three states are kept apart rather than collapsed into one:
-    /// `time -p -- x` reaches `x` in command position, and `time -- -p x` does
-    /// not.
-    TimeIgn,
+    /// ```c
+    ///   if (last_read_token == FOR)
+    ///     { ... return (ARITH_FOR_EXPRS); }
+    ///   if (reserved_word_acceptable (last_read_token))
+    ///     { ... return (ARITH_CMD); }
+    /// ```
+    ///
+    /// osh reads both shapes with the one `((` token, so the two branches meet
+    /// in [`Lexer::arith_cmd_position`].
+    For,
     /// An assignment word (`n=v`, `n+=v`, `n=(…)`) in a position where one was
     /// accepted. A command word may still follow it.
     Assignment,
-    /// A redirection operator: what follows is its target, never a command.
+    /// A redirection operator, or one of the two prefixes that introduce one: an
+    /// io number (`2>&1`) or a varfd (`{v}>f`). What follows is the
+    /// redirection's target, never a command.
     RedirOp,
-    /// The word that was a redirection's target.
+    /// The word that was a redirection's target, or a here-document body.
     RedirTarget,
     /// An ordinary word, or anything else after which no command begins.
     Other,
@@ -2544,20 +2432,49 @@ pub struct AliasExpansion {
 /// produced, and [`Self::at_command`] and [`Self::reserved_ok`] read it off.
 ///
 /// One machine, several readers: the alias pass drives it over the tokens it
-/// re-emits, and the scan that has to decide whether a `[` opens a subscript
-/// drives it over the ones it is producing. They are the same question — bash
-/// asks it with the same macro — so they must not be two approximations of it.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// re-emits, the scan that has to decide whether a `[` opens a subscript drives
+/// it over the ones it is producing, and a flush `((` asks it whether an
+/// arithmetic command may stand here. bash answers all three from the one
+/// `last_read_token`, so they must not be several approximations of it.
+///
+/// The fold is recursive, which is why no table keyed on the previous token's
+/// *spelling* can express it: a word becomes a reserved word only where one was
+/// already acceptable (`CHECK_FOR_RESERVED_WORD`, parse.y:2994, is itself gated
+/// on `reserved_word_acceptable`), so `do` opens a loop body after `;` but is an
+/// argument after `echo` — `; do ((1))` is an arithmetic command while
+/// `echo do ((1))` is a syntax error near `(`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CmdPos {
     prev: Prev,
-    /// bash's `PST_REDIRLIST`: everything read of the simple command so far has
-    /// been a redirection, so the word after one is still the *command* word.
-    /// Reading any other word clears it, which is why `>f c` alias-expands `c`
-    /// but `x=1 >f c` does not.
+    /// bash's `reserved_word_acceptable (last_read_token)` (parse.y:5367), for
+    /// the token about to be read.
+    ok: bool,
+    /// bash's `PST_REDIRLIST`: this simple command was *created* by a
+    /// redirection, so nothing of it has been read but redirections and the word
+    /// after one is still the command word.
+    ///
+    /// `make_simple_command` sets it only on the branch that makes the bare
+    /// command, and clears it the moment a word joins one (make_cmd.c:526-535),
+    /// so it is the command's *first* element that decides — which is why `>f c`
+    /// alias-expands `c` while `x=1 >f c` does not. [`Self::first`] is that
+    /// "command not made yet".
     redir_list: bool,
+    /// Whether the next element read would be the first of its simple command,
+    /// the one whose kind sets [`Self::redir_list`].
+    first: bool,
     /// Whether a `|` is close enough behind to disqualify a `time`. See
     /// [`AfterPipe`].
     after_pipe: AfterPipe,
+    /// Inside a `[[ … ]]`, where `last_read_token` is frozen. Not a depth: a
+    /// `[[` in there is a word, not a second `COND_START`.
+    ///
+    /// A whole conditional is *one* token to bash: `parse_cond_command` runs
+    /// from inside a single `read_token` call (parse.y:3399) and asks for its own
+    /// tokens directly, so `last_read_token` never moves off `COND_START` — which
+    /// is not acceptable — until the `]]` comes back as `COND_END`, which is. osh
+    /// emits that span as ordinary tokens, so the freeze has to be modelled here.
+    /// This is why no paren inside a conditional is ever arithmetic, however deep.
+    cond: bool,
 }
 
 /// How close behind the nearest `|` is, to the one token's depth
@@ -2586,7 +2503,7 @@ struct CmdPos {
 /// Only `time` is fussy about a pipe: `true | h[1 2]=v` *does* slurp its
 /// subscript, so a pipe is a command position for an assignment. That is why
 /// this is a field of its own rather than another [`Prev`].
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AfterPipe {
     /// No pipe within reach.
     No,
@@ -2626,31 +2543,43 @@ impl AliasOut {
 }
 
 impl CmdPos {
-    /// The state at the very start of the input, where a command begins and no
-    /// redirection has been read yet.
-    fn new() -> Self {
-        Self { prev: Prev::Start, redir_list: true, after_pipe: AfterPipe::No }
+    /// The state at the very start of the input, which is bash's
+    /// `last_read_token = 0` — a value its own list names (parse.y:5403), so a
+    /// reserved word is acceptable and a command begins.
+    const fn new() -> Self {
+        Self {
+            prev: Prev::Start,
+            ok: true,
+            redir_list: false,
+            first: true,
+            after_pipe: AfterPipe::No,
+            cond: false,
+        }
     }
 
     /// True when a reserved word would be recognised here — bash's
     /// `reserved_word_acceptable`. It is *not* the same question as command
     /// position: `x=1 if` is a command named `if`, and `case x in y) …` accepts
     /// a pattern rather than a reserved word after `;;`.
-    fn reserved_ok(&self) -> bool {
-        matches!(
-            self.prev,
-            Prev::Start
-                | Prev::CaseArmEnd
-                | Prev::Introducer
-                | Prev::Time
-                | Prev::TimeOpt
-                | Prev::TimeIgn
-        )
+    const fn reserved_ok(&self) -> bool {
+        self.ok
+    }
+
+    /// True where a `((` opens an arithmetic command — the two branches
+    /// `parse_dparen` tries, in its order. See [`Prev::For`].
+    const fn arith_ok(&self) -> bool {
+        matches!(self.prev, Prev::For) || self.reserved_ok()
+    }
+
+    /// True where `time` is the reserved word — bash's
+    /// `time_command_acceptable`, which is `reserved_word_acceptable` less a
+    /// pipe. See [`AfterPipe`].
+    const fn time_ok(&self) -> bool {
+        self.reserved_ok() && matches!(self.after_pipe, AfterPipe::No)
     }
 
     /// True when a word here is the command word of a simple command — bash's
-    /// `command_token_position`, which is `reserved_word_acceptable` plus an
-    /// assignment word and a leading run of redirections, less three:
+    /// `command_token_position`, whose three clauses this is, in order:
     ///
     /// ```c
     /// #define command_token_position(token) \
@@ -2660,103 +2589,170 @@ impl CmdPos {
     ///                                                                        /* parse.y:2983-2986 */
     /// ```
     ///
-    /// `;;`, `;&` and `;;&` are named there because a reserved word *would* be
-    /// accepted after one, but what actually follows is the next `case` arm's
-    /// pattern — so `case x in y) :;; f[1 2]=v` is two words, not an assignment
-    /// with a subscript that swallowed the blank. See [`Prev::CaseArmEnd`].
+    /// `;;`, `;&` and `;;&` are named in the third because a reserved word
+    /// *would* be accepted after one, but what actually follows is the next
+    /// `case` arm's pattern — so `case x in y) :;; f[1 2]=v` is two words, not an
+    /// assignment with a subscript that swallowed the blank. The other two
+    /// clauses do not reach one: no `case` arm ends in an assignment, and
+    /// `PST_REDIRLIST` belongs to a simple command the `;;` has already ended.
     ///
     /// Two callers ask it, and bash asks it with this same macro for both: an
     /// alias lookup happens only here (`alias_expand_token`), and an unquoted
     /// blank is only subscript content here (`assignment_acceptable`, which is
-    /// this *less* `case` patterns — [`Prev::CaseArmEnd`] and the `in` before
-    /// the first arm both leave the state out of command position anyway).
+    /// this *less* `case` patterns — and a pattern position is out of command
+    /// position by the third clause anyway).
     fn at_command(&self) -> bool {
-        match self.prev {
-            // A reserved word is accepted after `;;`, but a *command* is not.
-            Prev::CaseArmEnd => false,
-            // Assignments precede the command word: `x=1 c` expands `c`.
-            Prev::Assignment => true,
-            // Only while nothing but redirections has been read.
-            Prev::RedirTarget => self.redir_list,
-            _ => self.reserved_ok(),
+        matches!(self.prev, Prev::Assignment)
+            || (self.redir_list && !matches!(self.prev, Prev::RedirOp))
+            || (!matches!(self.prev, Prev::CaseArmEnd) && self.reserved_ok())
+    }
+
+    /// Record the token just read: what it leaves behind for the next one, and
+    /// whether a reserved word may stand there.
+    ///
+    /// `PST_REDIRLIST` follows from the same answer, which is why every event
+    /// goes through here rather than assigning [`Self::prev`].
+    fn set(&mut self, prev: Prev, ok: bool, after_pipe: AfterPipe) {
+        match prev {
+            // The redirection that *made* the simple command is the one that
+            // sets the flag; a later one only leaves it as it stands.
+            Prev::RedirOp if self.first => {
+                self.redir_list = true;
+                self.first = false;
+            }
+            Prev::RedirOp | Prev::RedirTarget => {}
+            // A separator, or a reserved word: whatever command follows has not
+            // been made yet, so its first element is still to come.
+            Prev::Start
+            | Prev::CaseArmEnd
+            | Prev::Time
+            | Prev::TimeOpt
+            | Prev::Function
+            | Prev::Coproc
+            | Prev::For => {
+                self.redir_list = false;
+                self.first = true;
+            }
+            // A word joined the command, which is what clears the flag.
+            Prev::Assignment | Prev::Other => {
+                self.redir_list = false;
+                self.first = false;
+            }
         }
+        self.prev = prev;
+        self.ok = ok;
+        self.after_pipe = after_pipe;
     }
 
     /// Record `tok`, which has just been pushed, as the new previous token.
     /// `was_cmd` is what [`Self::at_command`] said about it before the push —
     /// a word is only a reserved word, or an assignment, where one was allowed.
     fn advance(&mut self, tok: &Tok, was_cmd: bool) {
-        let reserved_ok = self.reserved_ok();
-        // `time` alone is refused behind a pipe. See [`AfterPipe`].
-        let time_ok = reserved_ok && self.after_pipe == AfterPipe::No;
-        self.prev = match tok {
-            Tok::Newline => Prev::Start,
+        if self.cond {
+            self.cond = !matches!(tok, Tok::Word(segs) if bare_word(segs) == Some(COND_END));
+            if self.cond {
+                self.set(Prev::Other, false, AfterPipe::No);
+            } else {
+                self.set(Prev::Start, true, AfterPipe::No);
+            }
+            return;
+        }
+        match tok {
+            Tok::Newline => {
+                let carried = if matches!(self.after_pipe, AfterPipe::Pipe) {
+                    AfterPipe::Newline
+                } else {
+                    AfterPipe::No
+                };
+                self.set(Prev::Start, true, carried);
+            }
+            Tok::Op(Op::Pipe | Op::PipeAmp) => self.set(Prev::Start, true, AfterPipe::Pipe),
+            Tok::Op(Op::DSemi | Op::SemiAmp | Op::DSemiAmp) => {
+                self.set(Prev::CaseArmEnd, true, AfterPipe::No);
+            }
             Tok::Op(
-                Op::Pipe
-                | Op::PipeAmp
-                | Op::AndIf
-                | Op::OrIf
-                | Op::Amp
-                | Op::Semi
-                | Op::LParen
+                Op::AndIf | Op::OrIf | Op::Amp | Op::Semi | Op::LParen
                 // `)` is in bash's list, commented there `/* only valid in case
                 // statement */` — a `case` arm's pattern close, after which the
                 // arm's first command begins. It is also a subshell's close,
                 // where no word may follow; that is a *grammar* error, and the
                 // reader reaches the `[` first either way, so `(:) f[1` is
-                // still `unexpected EOF … `]''.
+                // still the reader's unclosed-subscript failure.
                 | Op::RParen,
-            ) => Prev::Start,
-            Tok::Op(Op::DSemi | Op::SemiAmp | Op::DSemiAmp) => Prev::CaseArmEnd,
-            // A redirection, or one of the two prefixes that introduce one: an
-            // io number (`2>&1`) or a varfd (`{v}>f`). The prefixes are part of
-            // the redirection, so they must not end a run of them — `2>&1 c`
-            // alias-expands `c` exactly as `>f c` does.
-            Tok::Op(_) | Tok::Io(_) | Tok::VarFd(_) => Prev::RedirOp,
-            Tok::ArrayAssign { .. } if was_cmd => Prev::Assignment,
-            Tok::Word(_) if self.prev == Prev::RedirOp => Prev::RedirTarget,
-            Tok::Word(segs) => match segs.as_slice() {
-                [Seg::Lit(w)] if time_ok && w.as_slice() == b"time" => Prev::Time,
-                // `time`'s own options, which bash lexes as TIMEOPT/TIMEIGN and
-                // accepts a command after just as it does after `time` itself.
-                // Each stands in exactly one place, so they are three states and
-                // not one: see [`Prev::TimeIgn`].
-                [Seg::Lit(w)] if self.prev == Prev::Time && w.as_slice() == b"-p" => Prev::TimeOpt,
-                [Seg::Lit(w)]
-                    if matches!(self.prev, Prev::Time | Prev::TimeOpt)
-                        && w.as_slice() == b"--" =>
-                {
-                    Prev::TimeIgn
-                }
-                [Seg::Lit(w)] if reserved_ok && CMD_INTRODUCERS.contains(&w.as_slice()) => {
-                    Prev::Introducer
-                }
-                _ if was_cmd && word_is_assignment(segs) => Prev::Assignment,
-                _ => Prev::Other,
-            },
+            ) => self.set(Prev::Start, true, AfterPipe::No),
+            // A redirection, or one of the two prefixes that introduce one.
+            Tok::Op(_) | Tok::Io(_) | Tok::VarFd(_) => {
+                self.set(Prev::RedirOp, false, AfterPipe::No);
+            }
+            // bash's ARITH_CMD, which is on its list.
+            Tok::ArithCmd(..) => self.set(Prev::Start, true, AfterPipe::No),
+            Tok::ArrayAssign { .. } => {
+                let prev = if was_cmd { Prev::Assignment } else { Prev::Other };
+                self.set(prev, false, AfterPipe::No);
+            }
+            Tok::Word(segs) => self.word(bare_word(segs), word_is_assignment(segs), was_cmd),
             // The body arrives after the delimiter word, and is the tail of the
-            // same redirection — so it leaves the run of them running.
-            Tok::HereDoc(..) => Prev::RedirTarget,
-            // An arithmetic command, an array assignment out of position, …
-            _ => Prev::Other,
-        };
-        // A new command can begin here, so its redirections start over; reading
-        // an actual word of one ends the run.
-        self.redir_list = match self.prev {
-            Prev::Start
-            | Prev::CaseArmEnd
-            | Prev::Introducer
-            | Prev::Time
-            | Prev::TimeOpt
-            | Prev::TimeIgn => true,
-            Prev::RedirOp | Prev::RedirTarget => self.redir_list,
-            Prev::Assignment | Prev::Other => false,
-        };
-        self.after_pipe = match tok {
-            Tok::Op(Op::Pipe | Op::PipeAmp) => AfterPipe::Pipe,
-            Tok::Newline if self.after_pipe == AfterPipe::Pipe => AfterPipe::Newline,
-            _ => AfterPipe::No,
-        };
+            // same redirection — so it leaves a run of them running.
+            Tok::HereDoc(..) => self.set(Prev::RedirTarget, false, AfterPipe::No),
+            // A construct the lexer refused: nothing follows it.
+            _ => self.set(Prev::Other, false, AfterPipe::No),
+        }
+    }
+
+    /// One word's worth of the fold. `lit` is its spelling when it is a single
+    /// unquoted literal segment and `None` otherwise — bash's
+    /// `CHECK_FOR_RESERVED_WORD` refuses a word that carries a `$` or any
+    /// quoting, so only that shape can be a reserved word. `assign` is whether it
+    /// is an assignment as *written*.
+    fn word(&mut self, lit: Option<&[u8]>, assign: bool, was_cmd: bool) {
+        // A redirection's target: the tail of the redirection, so it neither
+        // ends a run of them nor is ever a reserved word.
+        if matches!(self.prev, Prev::RedirOp) {
+            self.set(Prev::RedirTarget, false, AfterPipe::No);
+            return;
+        }
+        // `time`'s own options, which bash lexes as TIMEOPT and TIMEIGN and
+        // accepts a command after just as it does after `time` itself. Each
+        // stands in exactly one place: see [`Prev::TimeOpt`].
+        match (lit, self.prev) {
+            (Some(b"-p"), Prev::Time) => {
+                self.set(Prev::TimeOpt, true, AfterPipe::No);
+                return;
+            }
+            (Some(b"--"), Prev::Time | Prev::TimeOpt) => {
+                self.set(Prev::Start, true, AfterPipe::No);
+                return;
+            }
+            _ => {}
+        }
+        let reserved = lit
+            .filter(|_| self.reserved_ok())
+            .filter(|w| RESERVED_WORDS.contains(w))
+            // `time` alone is refused behind a pipe. See [`AfterPipe`].
+            .filter(|w| *w != b"time" || self.time_ok());
+        if let Some(w) = reserved {
+            if w == COND_START {
+                self.cond = true;
+                self.set(Prev::Other, false, AfterPipe::No);
+                return;
+            }
+            let leaves = RW_LEAVES_ACCEPTABLE.contains(&w);
+            let prev = match w {
+                b"time" => Prev::Time,
+                b"function" => Prev::Function,
+                b"coproc" => Prev::Coproc,
+                b"for" => Prev::For,
+                _ if leaves => Prev::Start,
+                _ => Prev::Other,
+            };
+            self.set(prev, leaves, AfterPipe::No);
+            return;
+        }
+        // A plain WORD, which is acceptable only as the name that follows
+        // `function` or `coproc` (parse.y:5406-5412).
+        let name = matches!(self.prev, Prev::Function | Prev::Coproc);
+        let prev = if was_cmd && assign { Prev::Assignment } else { Prev::Other };
+        self.set(prev, name, AfterPipe::No);
     }
 }
 
@@ -3374,12 +3370,20 @@ impl Lexer {
     /// `out` is append-only within a scan, so the state is folded forward over
     /// whatever has been pushed since the last question and the cursor moved up.
     fn assignment_acceptable(&mut self, out: &[Tok]) -> bool {
+        self.fold_cmd_pos(out).at_command()
+    }
+
+    /// Bring [`Lexer::cmd_pos`] up to date with everything pushed since it was
+    /// last asked. `out` is only ever appended to within a scan, so folding
+    /// lazily here costs the same as folding at every push and keeps the
+    /// bookkeeping in one place.
+    fn fold_cmd_pos(&mut self, out: &[Tok]) -> CmdPos {
         for tok in out.get(self.cmd_pos_upto..).unwrap_or_default() {
             let was_cmd = self.cmd_pos.at_command();
             self.cmd_pos.advance(tok, was_cmd);
         }
         self.cmd_pos_upto = out.len();
-        self.cmd_pos.at_command()
+        self.cmd_pos
     }
 
     /// The character at `i` as shell syntax. See [`syn`].
@@ -3753,7 +3757,7 @@ impl Lexer {
                     //
                     // bash gates the arithmetic reading on
                     // `reserved_word_acceptable (last_read_token)`
-                    // (`parse_dparen`, parse.y:4484), which [`RwAccept`] models
+                    // (`parse_dparen`, parse.y:4484), which [`CmdPos`] models
                     // in full — including the freeze that makes no paren inside
                     // `[[ … ]]` arithmetic however deeply nested, so that
                     // `[[ (( 0 )) ]]` tests the *string* `0` rather than
@@ -4448,10 +4452,13 @@ impl Lexer {
     /// `echo ((1))` is a syntax error near `(` and not an arithmetic command. An
     /// assignment prefix blocks it too (`x=1 ((2))` is the same error), which
     /// falls out of the same rule: bash does not recognise a reserved word after
-    /// one either. [`RwAccept`] is where that rule lives.
+    /// one either. The one place that is *not* the rule is an arithmetic `for`
+    /// header, which `parse_dparen` tries first — see [`Prev::For`].
+    ///
+    /// The same fold answers this and the subscript question, so both go through
+    /// [`Lexer::fold_cmd_pos`].
     fn arith_cmd_position(&mut self, out: &[Tok]) -> bool {
-        self.rw.advance(out);
-        self.rw.ok
+        self.fold_cmd_pos(out).arith_ok()
     }
 
     /// Read one word (until an unquoted operator, blank, or newline).

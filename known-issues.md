@@ -668,6 +668,68 @@ and `true |⏎⏎time x` (TD-OILS-A-RUN-OF-NEWLINES-AFTER-A-PIPE-MAKES-TIME-RESE
 Corpus: `where-a-command-begins-decides-whether-a-bracket-is-a-subscript.sh`
 (23 rows).
 
+**Superseded.** `starts_command`, `time_tok` and `pipe_refuses_time` are all
+gone: the look-back-at-the-token-tail model they shared was replaced by a
+carried `CmdPos` (a fold over the tokens as they are pushed), and then `CmdPos`
+absorbed `RwAccept` as well. See
+TD-OILS-COMMAND-POSITION-WAS-GUESSED-FROM-THE-TOKEN-TAIL-IN-TWO-PLACES-AT-ONCE.
+
+### TD-OILS-COMMAND-POSITION-WAS-GUESSED-FROM-THE-TOKEN-TAIL-IN-TWO-PLACES-AT-ONCE. `coproc f[1`, `(( 0 )) f[1`, `[[ a == a ]] f[1`, `time -p (( 1 ))` — 2026-08-10 — ✅ FIXED 2026-08-10
+
+**Where:** `userspace/oils/src/lexer.rs`. The lexer answered bash's one question
+— what `last_read_token` is and what it permits — with **two** independent
+approximations that had grown up separately:
+
+* `starts_command`/`time_tok`/`pipe_refuses_time`, a backwards walk over the
+  token tail, answering `command_token_position` for the subscript slurp; and
+* `RwAccept`, a forward fold over a hard-coded `CMD_INTRODUCERS` list, answering
+  `reserved_word_acceptable` for `arith_cmd_position`.
+
+Neither carried the other's entries, so each was wrong exactly where the other
+was right. Five divergences fell out of that split, all measured:
+
+**Reproduce.**
+
+```sh
+eval 'coproc f1[1';                  echo "1 rc=$?"
+eval '(( 0 )) f2[1';                 echo "2 rc=$?"
+eval '[[ a == a ]] f3[1';            echo "3 rc=$?"
+eval 'time -p (( 1 ))';              echo "4 rc=$?"
+eval 'true | time (( 1 ))';          echo "5 rc=$?"
+```
+
+| row | bash 5.2.37 | osh (before) |
+|---|---|---|
+| 1–3 | `` …unexpected EOF while looking for matching `]' ``, `rc=2` | 1: `rc=0`; 2, 3: `` syntax error near unexpected token `f…[1' `` |
+| 4 | the arithmetic command runs, `rc=0` | `1: command not found`, `rc=127` |
+| 5 | `` syntax error near unexpected token `(' `` | `` syntax error near unexpected token ` 1 ' `` |
+
+Rows 1–3 are `COPROC`, `ARITH_CMD` and `COND_END` — all three are in
+`reserved_word_acceptable` (parse.y:5367-5415) and none was in the subscript
+model's list. Rows 4–5 are `TIMEOPT`/`TIMEIGN` and the pipe: both are in
+`time_command_acceptable` but were known only to the subscript model, so the
+arithmetic one could not see them.
+
+**The fix** was to stop having two models. `RwAccept` is deleted and `CmdPos` —
+the fold introduced by the previous commit — now carries everything: `ok`
+(`reserved_word_acceptable` for the token about to be read), `redir_list` +
+`first` (`PST_REDIRLIST`, set only by a redirection that is a simple command's
+*first* element, per make_cmd.c:526-535), `after_pipe` (`time`'s extra
+restriction) and `cond` (the `[[ … ]]` freeze). The three questions are three
+readers of that one state — `reserved_ok`, `arith_ok` (which adds
+`parse_dparen`'s `for` branch) and `at_command` (bash's three
+`command_token_position` clauses, written out literally).
+
+Corpus: `the-rest-of-reserved-word-acceptable-is-command-position-too.sh`
+(22 rows).
+
+`CaseScan::cmd_pos` is a **third** approximation, still standing: it is a bare
+`bool` set from a hand-written reserved-word list in `CaseScan::finish_word`,
+driven by `read_balanced_body`'s character scan rather than by tokens. Folding
+it into `CmdPos` too is the prerequisite for
+TD-OILS-A-COMMAND-SUBSTITUTION-NAMES-ITS-OWN-PAREN-BEFORE-THE-BODYS-BRACKET,
+which needs a real `at_command()` inside a `$( … )` body.
+
 ### TD-OILS-A-COMMAND-SUBSTITUTION-NAMES-ITS-OWN-PAREN-BEFORE-THE-BODYS-BRACKET. `echo $(f[1` says `)` where bash says `]` — 2026-08-10 — OPEN
 
 **Where:** `userspace/oils/src/lexer.rs`, `read_dollar`/the `$(`…`)` body scan.
@@ -731,7 +793,8 @@ Found while fixing TD-OILS-STARTS-COMMAND-DIVERGES-FROM-COMMAND-TOKEN-POSITION.
 
 ### TD-OILS-A-RUN-OF-NEWLINES-AFTER-A-PIPE-MAKES-TIME-RESERVED-AGAIN. `true |⏎⏎time x` — 2026-08-10 — OPEN
 
-**Where:** `userspace/oils/src/lexer.rs`, `pipe_refuses_time`. bash's
+**Where:** `userspace/oils/src/lexer.rs`, `CmdPos::time_ok` and the `AfterPipe`
+it reads (formerly `pipe_refuses_time`). bash's
 `time_command_acceptable` throws out a newline only when `token_before_that` was
 a pipe (parse.y:3128-3134), which is exactly one token back — so a *second*
 newline hides the pipe and `time` becomes the reserved word again. At that point
@@ -758,7 +821,9 @@ eval $'true |\n\ntime true';       echo "4 rc=$?"
 
 **The fix** is in two parts, and neither is small. The lexer would have to keep a
 run of newlines as separate tokens (or record the run length) for
-`pipe_refuses_time` to see past the first; and the parser would then have to
+`CmdPos::advance` to see past the first — its `Tok::Newline` arm is what carries
+`AfterPipe::Pipe` forward as `AfterPipe::Newline`, and a second newline would
+have to clear it; and the parser would then have to
 reject `timespec` after a `|`, which it currently accepts. Both only pay off for
 this one corner — bash is arguably misbehaving here, since `true |⏎time x` and
 `true |⏎⏎time x` differ only in a blank line. Worth doing only if the newline

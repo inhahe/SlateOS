@@ -107,10 +107,15 @@ pub trait VarLookup {
     /// [`VarLookup::get_str`], the value is recursively arithmetic-evaluated.
     /// The default ignores subscripts — array-backed implementors override it.
     ///
-    /// `&mut` for [`VarLookup::get_str`]'s reason and one more: a scalar answers
+    /// `&mut` for [`VarLookup::get_str`]'s reason and two more: a scalar answers
     /// `name[0]`, and a scalar whose value is *computed* answers it by computing
     /// — so `$(( PPID[0] ))` is the pid and `$(( RANDOM[0] ))` draws a number,
-    /// exactly as the unsubscripted spellings do.
+    /// exactly as the unsubscripted spellings do — and a subscript that names
+    /// nowhere is complained about here. That last is a *read* refusal and so
+    /// spells only the name (`a: bad array subscript`, no subscript quoted),
+    /// unlike the store's; the read is then worth 0, exactly as an absent
+    /// element is. It is asked with a stricter bound than the store's, which is
+    /// why `c=9; (( c[-1] ))` complains while `c=9; (( c[-1] = 4 ))` succeeds.
     fn get_index_str(&mut self, name: &str, index: i64) -> Option<Str> {
         let _ = (name, index);
         None
@@ -148,8 +153,21 @@ pub trait VarLookup {
     }
 
     /// Assign `value` to the indexed element `name[index]` (`a[i] = …`).
-    fn set_index(&mut self, name: &str, index: i64, value: i64) -> Result<(), ArithError> {
-        let _ = (name, index, value);
+    ///
+    /// `sub` is the subscript's *source text*, which `index` is what it
+    /// evaluated to. Both are needed because the store may be refused — a
+    /// negative subscript reaching past the start of the array names nowhere —
+    /// and bash's refusal spells the source back verbatim, whitespace and all
+    /// (`a[ -7 ]: bad array subscript`), however the index was arrived at. See
+    /// [`Ix`] for why even a read-modify-write, whose index was already
+    /// resolved, still has the text to hand.
+    ///
+    /// A refusal is a complaint rather than an error: the expression carries on
+    /// with the value it was going to have, so `x=$(( a[-7] = 1 ))` still yields
+    /// 1 and succeeds. The `Err` is for a target the *shell* refuses (readonly),
+    /// which does abandon the expression.
+    fn set_index(&mut self, name: &str, sub: BStr<'_>, index: i64, value: i64) -> Result<(), ArithError> {
+        let _ = (name, sub, index, value);
         Ok(())
     }
 
@@ -392,7 +410,8 @@ enum Lv {
     WholeSub(String, u8),
 }
 
-/// An indexed array's subscript, which is evaluated at most once.
+/// An indexed array's subscript: its source text, and the index it evaluated to
+/// once the reference has been read.
 ///
 /// bash evaluates it inside `expr_streval` — that is, when the reference is
 /// *read* — and caches the answer in `curlval.ind`, which `expassign` reuses for
@@ -403,12 +422,20 @@ enum Lv {
 /// machinery, **after** the right-hand side. That ordering is observable:
 /// `unset a q; (( a[q=1] = (q+9) ))` leaves `a[1]` = 9, because `q` was still
 /// unset when the right-hand side read it.
+///
+/// The source text is kept whether or not the reference was read, because a
+/// store the target refuses spells it back *verbatim* — `a[ -7 ]`, `a[-3-4]`,
+/// `a[-q]` — even after a read that had already evaluated it. That is the same
+/// `lind == -1` branch: a read whose subscript named nowhere never reaches
+/// `curlval.ind` either, so it too leaves the whole `a[sub]` text to
+/// `expr_bind_variable` rather than the `vname[ind]` that
+/// `expr_bind_array_element` would have rewritten it to (expr.c:365-388).
 #[derive(Clone)]
-enum Ix {
-    /// Read, and the subscript evaluated to this index.
-    Done(i64),
-    /// Never read; the subscript's source text, still unevaluated.
-    Raw(Str),
+struct Ix {
+    /// The subscript exactly as written, between the brackets.
+    raw: Str,
+    /// The index the subscript evaluated to, once the reference has been read.
+    done: Option<i64>,
 }
 
 /// Mark `e` as having come from evaluating a subscript, and blame the
@@ -823,15 +850,16 @@ impl AParser<'_> {
             }
             Lv::Index(n, ix) => {
                 self.vars.note_arith_unbound(&n, true)?;
-                let i = match ix {
-                    Ix::Done(i) => i,
-                    Ix::Raw(raw) => self.eval_sub(&raw)?,
+                let i = match ix.done {
+                    Some(i) => i,
+                    None => self.eval_sub(&ix.raw)?,
                 };
                 let v = match self.vars.get_index_str(&n, i) {
                     Some(s) => self.str_val(&s)?,
                     None => 0,
                 };
-                Ok((v, Lv::Index(n, Ix::Done(i))))
+                let ix = Ix { raw: ix.raw, done: Some(i) };
+                Ok((v, Lv::Index(n, ix)))
             }
             Lv::Assoc(n, k) => {
                 self.vars.note_arith_unbound(&n, true)?;
@@ -884,12 +912,15 @@ impl AParser<'_> {
         }
         match lv {
             Lv::Var(n) => self.vars.set(n, v),
-            Lv::Index(n, Ix::Done(i)) => self.vars.set_index(n, *i, v),
-            // Never read, so the subscript is still text and this is the moment
-            // bash evaluates it — see [`Ix`].
-            Lv::Index(n, Ix::Raw(raw)) => {
-                let i = self.eval_sub(&raw.clone())?;
-                self.vars.set_index(n, i, v)
+            Lv::Index(n, ix) => {
+                // A subscript the read already evaluated is not evaluated again;
+                // one belonging to a reference that was never read is still text,
+                // and this is the moment bash evaluates it — see [`Ix`].
+                let i = match ix.done {
+                    Some(i) => i,
+                    None => self.eval_sub(&ix.raw.clone())?,
+                };
+                self.vars.set_index(n, &ix.raw, i, v)
             }
             Lv::Assoc(n, k) => self.vars.set_assoc(n, k, v),
             // Nowhere to store — but not an error: bash complains and carries on
@@ -1365,7 +1396,7 @@ impl AParser<'_> {
                         // expr.c:1348-1358), and whether it is ever evaluated —
                         // and when — depends on whether the reference is read.
                         // See [`Ix`].
-                        Lv::Index(name, Ix::Raw(raw.to_vec()))
+                        Lv::Index(name, Ix { raw: raw.to_vec(), done: None })
                     };
                     return self.reference(lv, forced);
                 }
@@ -1670,6 +1701,10 @@ mod tests {
     struct ArrMap {
         scalars: HashMap<String, i64>,
         a: Vec<i64>,
+        /// Every `(name, sub, index)` a store was asked for, in order — the
+        /// subscript's *source text* beside what it evaluated to, which is the
+        /// pair a refusing implementor needs. See [`Ix`].
+        stores: Vec<(String, Str, i64)>,
     }
     impl VarLookup for ArrMap {
         fn get_str(&mut self, name: &str) -> Option<Str> {
@@ -1693,7 +1728,14 @@ mod tests {
                 .and_then(|i| self.a.get(i))
                 .map(|v| v.to_string().into_bytes())
         }
-        fn set_index(&mut self, name: &str, index: i64, value: i64) -> Result<(), ArithError> {
+        fn set_index(
+            &mut self,
+            name: &str,
+            sub: BStr<'_>,
+            index: i64,
+            value: i64,
+        ) -> Result<(), ArithError> {
+            self.stores.push((name.to_string(), sub.to_vec(), index));
             if name != "a" {
                 return Ok(());
             }
@@ -1713,6 +1755,7 @@ mod tests {
         let mut m = ArrMap {
             scalars,
             a: vec![10, 20, 30, 40],
+            stores: Vec::new(),
         };
         assert_eq!(eval(b"a[0]", &mut m).unwrap(), 10);
         assert_eq!(eval(b"a[i]", &mut m).unwrap(), 30); // i = 2
@@ -1732,6 +1775,7 @@ mod tests {
         let mut m = ArrMap {
             scalars: HashMap::new(),
             a: vec![10, 20, 30],
+            stores: Vec::new(),
         };
         for src in ["a[1/0] = 9", "a[1/0]", "b = a[1/0]", "a[1/0]++", "a[1/0] += 2"] {
             let e = eval(src.as_bytes(), &mut m).expect_err(src);
@@ -1767,6 +1811,7 @@ mod tests {
         let mut m = ArrMap {
             scalars: HashMap::new(),
             a: vec![10, 20, 30],
+            stores: Vec::new(),
         };
         assert_eq!(eval(b"a[0] = 99", &mut m).unwrap(), 99);
         assert_eq!(m.a[0], 99);
@@ -1775,6 +1820,41 @@ mod tests {
         // Post-increment yields the old value, then mutates.
         assert_eq!(eval(b"a[2]++", &mut m).unwrap(), 30);
         assert_eq!(m.a[2], 31);
+    }
+
+    #[test]
+    fn a_store_is_handed_the_subscripts_source_as_well_as_its_value() {
+        // The implementor needs both, because bash's refusal spells the source
+        // back verbatim while the store itself uses the value — and it does so
+        // whether or not the reference was read first, since a store bash
+        // refuses is one no cached index ever reached. See [`Ix`].
+        let mut scalars = HashMap::new();
+        scalars.insert("q".to_string(), 1);
+        let mut m = ArrMap {
+            scalars,
+            a: vec![10, 20, 30],
+            stores: Vec::new(),
+        };
+        // A plain assignment never reads, so the subscript is evaluated here —
+        // and the text kept is what stood between the brackets, spacing and all.
+        assert_eq!(eval(b"a[ q + 1 ] = 7", &mut m).unwrap(), 7);
+        // A read-modify-write evaluated it during the read, and still spells it.
+        assert_eq!(eval(b"a[q+1] += 1", &mut m).unwrap(), 8);
+        assert_eq!(eval(b"a[q]++", &mut m).unwrap(), 20);
+        let got: Vec<(&str, &[u8], i64)> = m
+            .stores
+            .iter()
+            .map(|(n, s, i)| (n.as_str(), s.as_slice(), *i))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("a", b" q + 1 ".as_slice(), 2),
+                ("a", b"q+1".as_slice(), 2),
+                ("a", b"q".as_slice(), 1),
+            ]
+        );
+        assert_eq!(m.a, [10, 21, 8]);
     }
 
     /// A lookup that refuses to be written through — the shape a readonly

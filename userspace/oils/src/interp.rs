@@ -13454,16 +13454,44 @@ impl Shell {
         }
     }
 
+    /// How many times bash walks a nameref chain for an arithmetic *element*
+    /// write — and so how many warnings a circular one earns: once to reach the
+    /// variable, once to measure the subscript against it, once to bind. A store
+    /// the subscript refuses stops after the second and warns one time fewer,
+    /// which is measurable because the reference survives that one.
+    const ARITH_ELEM_WRITE_WALKS: usize = 3;
+
     /// The array an arithmetic *element* write to `name` should subscript, or
     /// `None` when there is none and the complaint has already been made.
     ///
-    /// A circular chain does not abandon the store: bash warns — three times
-    /// here, one walk more than a read, for the bind — and lands it on the name
-    /// the walk started from, which stops being a reference. See
-    /// [`Shell::resolve_ref_array_write`]; this is the same rule `c1[0]=v`
-    /// follows, with arithmetic's own walk count.
+    /// A circular chain does not abandon the store: bash warns —
+    /// [`Self::ARITH_ELEM_WRITE_WALKS`] times, one walk more than a read, for
+    /// the bind — and lands it on the name the walk started from, which stops
+    /// being a reference. See [`Shell::resolve_ref_array_write`]; this is the
+    /// same rule `c1[0]=v` follows, with arithmetic's own walk count.
     fn arith_elem_write_base(&mut self, name: &str) -> Option<String> {
-        let target = self.resolve_ref_write_walks(name, 3);
+        let target = self.resolve_ref_name(name);
+        self.arith_elem_write_commit(name, target)
+    }
+
+    /// [`Self::arith_elem_write_base`] for a caller that has already resolved
+    /// the target — the *indexed* store, which has to measure the array before
+    /// it can judge the subscript, and must not walk the chain twice to do it.
+    ///
+    /// `target` is [`Self::resolve_ref_name`]'s answer, so `None` means the
+    /// chain closes on itself. Everything a walk *costs* is here rather than in
+    /// the resolution: the warnings, and the unmaking of a circular reference.
+    /// That is what lets a refused store stop short of paying for the bind it
+    /// never performs — see [`Shell::warn_circular_ref`].
+    fn arith_elem_write_commit(&mut self, name: &str, target: Option<RefTarget>) -> Option<String> {
+        let Some(target) = target else {
+            // One walk more than a read, for the bind. See
+            // [`Shell::resolve_ref_array_write`]; this is the same rule
+            // `c1[0]=v` follows, with arithmetic's own count.
+            self.warn_circular_ref(name, Self::ARITH_ELEM_WRITE_WALKS);
+            self.break_circular_ref(name);
+            return Some(name.to_string());
+        };
         if target.sub.is_some() {
             // Nowhere to put it: the reference already names an element, so the
             // subscript that was written has nothing to apply to. bash
@@ -28485,18 +28513,37 @@ impl Shell {
         if let Some(target) = self.resolve_ref_name(name) {
             return target;
         }
+        self.warn_circular_ref(name, walks);
+        self.break_circular_ref(name);
+        RefTarget::plain(name.to_string())
+    }
+
+    /// The warnings a write through a circular chain earns — one per walk.
+    ///
+    /// Split out from [`Self::resolve_ref_write_walks`] because a write that is
+    /// *refused* pays for only the walks it actually took: the arithmetic
+    /// `(( c1[-1] = 5 ))` measures the array it cannot store into, finds the
+    /// subscript names nowhere, and stops — two warnings, where the `(( c1[3] =
+    /// 5 ))` beside it goes on to bind and earns a third. See
+    /// [`Shell::arith_elem_write_commit`].
+    fn warn_circular_ref(&mut self, name: &str, walks: usize) {
         for _ in 0..walks {
             self.perrln(&format!("warning: {name}: circular name reference"));
         }
+    }
+
+    /// Unmake a circular reference, which is what a write that goes through with
+    /// it does: the name stops being a reference and becomes the variable the
+    /// store creates.
+    ///
+    /// The value goes with the attribute. A reference's value is the *name* it
+    /// points at, which means nothing once it is no longer a reference — and a
+    /// store that left it behind would find it again as element 0 of the array
+    /// it is making. bash keeps nothing of it either: `c1[3]=v` through the cycle
+    /// is `declare -a c1=([3]="v")`, not `([0]="c2" [3]="v")`.
+    fn break_circular_ref(&mut self, name: &str) {
         self.nameref_attr.remove(name);
-        // The value goes with the attribute. A reference's value is the *name*
-        // it points at, which means nothing once it is no longer a reference —
-        // and a store that leaves it behind would find it again as element 0 of
-        // the array it is making. bash keeps nothing of it either: `c1[3]=v`
-        // through the cycle is `declare -a c1=([3]="v")`, not `([0]="c2"
-        // [3]="v")`.
         self.vars.remove(name);
-        RefTarget::plain(name.to_string())
     }
 
     /// Whether `name` heads a nameref chain that closes on itself, asked
@@ -49570,15 +49617,36 @@ impl VarLookup for Shell {
     }
 
     fn get_index_str(&mut self, name: &str, index: i64) -> Option<Str> {
-        match self.arith_elem_read(name) {
+        // Whichever of the three the reference reaches, a negative subscript
+        // that reaches back past the start of what is there names nowhere, and
+        // is refused before it is looked up. The name blamed is the one the
+        // reference *resolved* to when it found an array (`declare -n r=a;
+        // (( r[-7] ))` blames `a`) and the one written when it did not — a
+        // reference that lands on an element or closes on itself reaches no
+        // array, so there is no other name to give.
+        let elem = self.arith_elem_read(name);
+        let (blame, bound) = match &elem {
+            ArithElem::Array(base) => (base.as_str(), self.highest_index_bound(base)),
+            // Nothing there to count back over, so *every* negative subscript
+            // on one is bad.
+            ArithElem::Element | ArithElem::Circular => (name, 0),
+        };
+        if index < 0 && Self::resolve_index(index, bound).is_none() {
+            let line = format!("{blame}: bad array subscript");
+            self.perrln(&line);
+            // Not a discard on its own — the read is worth 0 and the expression
+            // carries on — but `set -e` ends the shell over the diagnostic, as
+            // it does for the same complaint on the expansion path.
+            self.note_shell_error(FatalWhen::ErrexitOnly);
+            return None;
+        }
+        match elem {
             // `array_element` already applies bash negative-index semantics.
             ArithElem::Array(base) => self.array_element(&base, index),
             // A subscript on a nameref that already designates an element names
-            // nothing. Reading it is silent (bash yields 0); only *writing*
-            // draws the complaint — see `set_index`.
-            ArithElem::Element => None,
-            // The warning is out; the read is worth 0.
-            ArithElem::Circular => None,
+            // nothing, and neither does one on a chain that closes on itself.
+            // Both read as 0.
+            ArithElem::Element | ArithElem::Circular => None,
         }
     }
 
@@ -49617,18 +49685,61 @@ impl VarLookup for Shell {
         Ok(())
     }
 
-    fn set_index(&mut self, name: &str, index: i64, value: i64) -> Result<(), arith::ArithError> {
-        let Some(base) = self.arith_elem_write_base(name) else {
+    fn set_index(
+        &mut self,
+        name: &str,
+        sub: BStr<'_>,
+        index: i64,
+        value: i64,
+    ) -> Result<(), arith::ArithError> {
+        // The subscript is judged against the array *before* the reference is
+        // resolved for the bind, which is the order bash's `assign_array_element`
+        // works in and is measurable through a circular chain: `(( c1[-1] = 5 ))`
+        // warns twice and leaves `c1` a reference, where `(( c1[3] = 5 ))` beside
+        // it warns a third time and replaces it with an array. So the walk here
+        // is the silent one, and only the commit below pays for itself.
+        let target = self.resolve_ref_name(name);
+        let bound = match &target {
+            // A reference that lands on an element, or one that closes on
+            // itself, reaches no array at all — nothing to count back over.
+            None => 0,
+            Some(t) if t.sub.is_some() => 0,
+            Some(t) => self.elem_write_bound(&t.base),
+        };
+        if index < 0 && Self::resolve_index(index, bound).is_none() {
+            // The walks that *measured* the name are paid for even though the
+            // store is not: a circular chain warns for them and then survives,
+            // because only the bind would have unmade it.
+            if target.is_none() {
+                self.warn_circular_ref(name, Self::ARITH_ELEM_WRITE_WALKS - 1);
+            }
+            // Spelled with the name as *written* and the subscript's own source
+            // text, verbatim — bash never rewrote it to its value, because a
+            // store it refuses is one the read never cached an index for. See
+            // [`arith::Ix`].
+            let line = bfmt![self.err_prefix(), name, b"[", sub, b"]: bad array subscript"];
+            self.berrln(&line);
+            // The store is dropped, but the expression keeps its value and the
+            // command its status; only `set -e` makes anything of it.
+            self.note_shell_error(FatalWhen::ErrexitOnly);
+            return Ok(());
+        }
+        let Some(base) = self.arith_elem_write_commit(name, target) else {
             return Ok(());
         };
         self.arith_elem_writable(name, &base)?;
-        // Mirror the indexed branch of `assign_elem`: negative indices count
-        // back from `highest_index + 1` (bash sparse semantics).
-        let arr = self.arrays.entry(base.clone()).or_default();
-        let bound = arr.keys().next_back().map_or(0, |k| k.saturating_add(1));
-        if let Some(real) = Self::resolve_index(index, bound) {
-            arr.insert(real, value.to_string().into_bytes());
-        }
+        // Only now that the store is certain: a scalar becomes element 0 of the
+        // array this write brings into being, which is why `c=9; (( c[1] = 4 ))`
+        // keeps the 9. A refused subscript above never gets here, so it leaves
+        // the scalar a scalar and an unset name unset.
+        self.array_kind_apply(&base, false);
+        let Some(real) = Self::resolve_index(index, bound) else {
+            return Ok(());
+        };
+        self.arrays
+            .entry(base.clone())
+            .or_default()
+            .insert(real, value.to_string().into_bytes());
         self.after_var_write(&base);
         Ok(())
     }

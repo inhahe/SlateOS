@@ -1251,9 +1251,13 @@ struct CaseFrame {
 /// "Just enough" is: which words are the reserved `case`, `in` and `esac`, and
 /// where a clause body ends. That in turn needs command position — `case`,
 /// `esac` and `do` are reserved words only there, and `$(printf %s case in f)`
-/// must keep its `)` — so this tracks the word being read and whether a word
-/// starting here would begin a command. Quoting is what makes `"esac"` a plain
-/// word, so a word with any quoted character in it is never reserved.
+/// must keep its `)` — so this tracks the word being read and where a command
+/// begins. Quoting is what makes `"esac"` a plain word, so a word with any
+/// quoted character in it is never reserved.
+///
+/// The position is the same [`CmdPos`] the token stream is folded through, and
+/// not a second model of it: this scan reads characters rather than tokens, so
+/// [`Self::feed`] is where a character run becomes the one [`Ev`] it stands for.
 struct CaseScan {
     /// The `case`s the scan is inside, innermost last.
     frames: Vec<CaseFrame>,
@@ -1267,8 +1271,12 @@ struct CaseScan {
     /// where `esac` is reserved. Sampled when the word *begins*, because its own
     /// first character is what ends [`CaseFrame::pat_start`].
     word_pat_start: bool,
-    /// Whether a word starting here would be in command position.
-    cmd_pos: bool,
+    /// Where a command begins, and what a word standing here may be.
+    pos: CmdPos,
+    /// Characters of a multi-character operator still to step over. An operator
+    /// is one token however it is spelled, so [`Self::feed`] recognises the whole
+    /// of it at its first character and then swallows the rest.
+    skip: u8,
 }
 
 impl CaseScan {
@@ -1278,7 +1286,8 @@ impl CaseScan {
             word: Str::new(),
             word_pure: true,
             word_pat_start: false,
-            cmd_pos: true,
+            pos: CmdPos::new(),
+            skip: 0,
         }
     }
 
@@ -1317,41 +1326,37 @@ impl CaseScan {
         }
     }
 
-    /// The word being read has ended (a delimiter was reached). `depth` is the
-    /// scan's current parenthesis depth, which a `case` found here is recorded
-    /// at.
-    fn finish_word(&mut self, depth: usize) {
+    /// The word being read has ended, `delim` being the character that ended it.
+    /// `depth` is the scan's current parenthesis depth, which a `case` found here
+    /// is recorded at.
+    fn finish_word(&mut self, depth: usize, delim: Option<char>) {
         if self.between_words() {
             return;
         }
-        let word = if self.word_pure {
-            core::mem::take(&mut self.word)
-        } else {
-            Str::new()
-        };
-        self.word.clear();
+        let pure = self.word_pure;
+        let word = core::mem::take(&mut self.word);
         self.word_pure = true;
-        let cmd_pos = self.cmd_pos;
         let pat_first = self.word_pat_start;
         self.word_pat_start = false;
-        // A word ends a command position unless it is one of the reserved words
-        // a command follows.
-        self.cmd_pos = matches!(
-            word.as_slice(),
-            b"if" | b"then"
-                | b"elif"
-                | b"else"
-                | b"while"
-                | b"until"
-                | b"do"
-                | b"{"
-                | b"!"
-                | b"time"
-                | b"coproc"
-        );
+        // Only an unquoted single literal can be a reserved word — the same
+        // shape `bare_word` picks out of a token's segments.
+        let lit = if pure { Some(word.as_slice()) } else { None };
+        // An IO number (`2>f`) or a `{name}` descriptor variable (`{v}>f`), which
+        // `read_token_word` returns as its own token rather than as a WORD. It
+        // belongs to the redirection that follows, so it is not the first *word*
+        // of the command and must not end a leading run of redirections; the
+        // operator behind it speaks for the whole thing.
+        if matches!(delim, Some('<' | '>')) && lit.is_some_and(is_redir_prefix) {
+            return;
+        }
+        // Sampled before the word is folded in: `case` and `esac` are reserved
+        // words only where one was already acceptable.
+        let cmd_pos = self.pos.reserved_ok();
+        self.pos.word(lit, false, false);
+        let word = lit.unwrap_or_default();
         if let Some(f) = self.frames.last_mut() {
             match f.phase {
-                CasePhase::AwaitIn if word.as_slice() == b"in" => {
+                CasePhase::AwaitIn if word == b"in" => {
                     f.phase = CasePhase::Pattern;
                     f.pat_start = true;
                     return;
@@ -1359,18 +1364,18 @@ impl CaseScan {
                 // `esac` is reserved wherever a pattern could start, which is why
                 // `case esac in …` is a syntax error in bash rather than a match
                 // against the word `esac`. An empty `case x in esac` ends here.
-                CasePhase::Pattern if pat_first && word.as_slice() == b"esac" => {
+                CasePhase::Pattern if pat_first && word == b"esac" => {
                     self.frames.pop();
                     return;
                 }
-                CasePhase::Body if cmd_pos && word.as_slice() == b"esac" => {
+                CasePhase::Body if cmd_pos && word == b"esac" => {
                     self.frames.pop();
                     return;
                 }
                 _ => {}
             }
         }
-        if word.as_slice() == b"case" && cmd_pos {
+        if word == b"case" && cmd_pos {
             self.frames.push(CaseFrame {
                 depth,
                 phase: CasePhase::AwaitIn,
@@ -1379,27 +1384,94 @@ impl CaseScan {
         }
     }
 
-    /// A delimiter that ends a command, so the next word is in command position.
-    fn command_end(&mut self) {
-        self.cmd_pos = true;
-    }
-
-    /// A redirection operator: the word after it names a file, never a command.
-    fn redirect(&mut self) {
-        self.cmd_pos = false;
-    }
-
-    /// A `;` was reached, `next` being the character after it: `;;`, `;&` and
-    /// `;;&` all end a clause body and start the next pattern list.
-    fn semi(&mut self, next: Option<char>) {
-        self.cmd_pos = true;
-        if matches!(next, Some(';' | '&'))
-            && let Some(f) = self.frames.last_mut()
+    /// A `;;`, `;&` or `;;&`: the clause body ends and the next pattern list
+    /// begins.
+    fn arm_end(&mut self) {
+        if let Some(f) = self.frames.last_mut()
             && f.phase == CasePhase::Body
         {
             f.phase = CasePhase::Pattern;
             f.pat_start = true;
         }
+    }
+
+    /// One character of the body, with the two that follow it, at parenthesis
+    /// depth `depth`.
+    ///
+    /// Every delimiter ends the word being read and stands for one token of the
+    /// fold. An operator spelled with more than one character is recognised
+    /// whole here — `&&` is not two `&`, and `&>` is a redirection rather than a
+    /// background `&` — and [`Self::skip`] then steps over its tail so it counts
+    /// once. The tails are only ever `>`, `&`, `|` or `;`, none of which the
+    /// caller handles before this, so nothing can slip past a pending skip.
+    fn feed(&mut self, c: char, n1: Option<char>, n2: Option<char>, depth: usize) {
+        if self.skip > 0 {
+            self.skip -= 1;
+            return;
+        }
+        if !matches!(c, ' ' | '\t' | '\n' | ';' | '&' | '|' | '<' | '>' | '(' | ')') {
+            self.push(c);
+            return;
+        }
+        self.finish_word(depth, Some(c));
+        let ev = match c {
+            ' ' | '\t' => return,
+            '\n' => Ev::Newline,
+            ';' => {
+                let arm = match (n1, n2) {
+                    (Some(';'), Some('&')) => Some(2),
+                    (Some(';' | '&'), _) => Some(1),
+                    _ => None,
+                };
+                if let Some(skip) = arm {
+                    self.skip = skip;
+                    self.arm_end();
+                    Ev::CaseArmEnd
+                } else {
+                    Ev::Sep
+                }
+            }
+            // `&>` and `&>>` are redirections; `&&` is a separator like a lone
+            // `&`, but two characters wide.
+            '&' => match (n1, n2) {
+                (Some('>'), Some('>')) => {
+                    self.skip = 2;
+                    Ev::RedirOp
+                }
+                (Some('>'), _) => {
+                    self.skip = 1;
+                    Ev::RedirOp
+                }
+                (Some('&'), _) => {
+                    self.skip = 1;
+                    Ev::Sep
+                }
+                _ => Ev::Sep,
+            },
+            '|' => match n1 {
+                Some('|') => {
+                    self.skip = 1;
+                    Ev::Sep
+                }
+                Some('&') => {
+                    self.skip = 1;
+                    Ev::Pipe
+                }
+                _ => Ev::Pipe,
+            },
+            // `<<` and `<<<` never arrive here: the here-document arm of
+            // `read_balanced_body` consumes them and announces them itself.
+            '<' | '>' => {
+                if matches!((c, n1), ('<', Some('&' | '>')) | ('>', Some('>' | '&' | '|'))) {
+                    self.skip = 1;
+                }
+                Ev::RedirOp
+            }
+            // Both a group's `(`/`)` and a `case` pattern's are LPAREN/RPAREN to
+            // bash, and both are in `reserved_word_acceptable`.
+            _ => Ev::Sep,
+        };
+        self.pos.ev(ev);
     }
 
     /// Whether an `(` at `depth` is a pattern's optional open, which takes no
@@ -1425,7 +1497,6 @@ impl CaseScan {
         }
         f.phase = CasePhase::Body;
         f.pat_start = false;
-        self.cmd_pos = true;
         true
     }
 
@@ -2513,6 +2584,42 @@ enum AfterPipe {
     Newline,
 }
 
+/// One token's worth of [`CmdPos`]'s fold, for everything that is not a word.
+///
+/// A word carries too much with it to reduce to a tag — its spelling decides
+/// whether it is reserved, and its shape whether it is an assignment — so
+/// [`CmdPos::word`] takes those directly. Everything else collapses to one of
+/// these, which is what lets a *character* scan drive the same fold a token
+/// stream does: [`CaseScan`] never builds a [`Tok`], it just says which of these
+/// the operator it has just read stands for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ev {
+    /// A newline, which is the one token that can carry a pipe forward. See
+    /// [`AfterPipe`].
+    Newline,
+    /// `|` or `|&`.
+    Pipe,
+    /// `;;`, `;&` or `;;&` — after which a reserved word *would* be accepted,
+    /// but what follows is the next `case` arm's pattern. See
+    /// [`CmdPos::at_command`].
+    CaseArmEnd,
+    /// `;`, `&`, `&&`, `||`, `(` or `)`: a command begins after it.
+    Sep,
+    /// A redirection operator, or one of the two tokens that may prefix one — an
+    /// IO number (`2>`) or a `{name}` descriptor variable.
+    RedirOp,
+    /// A here-document body, which is the tail of the redirection its delimiter
+    /// opened.
+    RedirTarget,
+    /// A `(( … ))` arithmetic command, bash's ARITH_CMD.
+    ArithCmd,
+    /// An array literal in a command position (`h=( … )`), bash's
+    /// ASSIGNMENT_WORD.
+    Assignment,
+    /// Anything else: nothing is acceptable after it.
+    Other,
+}
+
 /// The output of an alias pass, plus the running state its command-position
 /// test needs. The four vectors are parallel and always pushed together.
 struct AliasOut {
@@ -2647,29 +2754,18 @@ impl CmdPos {
     /// Record `tok`, which has just been pushed, as the new previous token.
     /// `was_cmd` is what [`Self::at_command`] said about it before the push —
     /// a word is only a reserved word, or an assignment, where one was allowed.
+    ///
+    /// Every token but a word reduces to one [`Ev`], which is the form a driver
+    /// with no [`Tok`] to hand emits. See [`CaseScan`].
     fn advance(&mut self, tok: &Tok, was_cmd: bool) {
-        if self.cond {
-            self.cond = !matches!(tok, Tok::Word(segs) if bare_word(segs) == Some(COND_END));
-            if self.cond {
-                self.set(Prev::Other, false, AfterPipe::No);
-            } else {
-                self.set(Prev::Start, true, AfterPipe::No);
+        let ev = match tok {
+            Tok::Word(segs) => {
+                self.word(bare_word(segs), word_is_assignment(segs), was_cmd);
+                return;
             }
-            return;
-        }
-        match tok {
-            Tok::Newline => {
-                let carried = if matches!(self.after_pipe, AfterPipe::Pipe) {
-                    AfterPipe::Newline
-                } else {
-                    AfterPipe::No
-                };
-                self.set(Prev::Start, true, carried);
-            }
-            Tok::Op(Op::Pipe | Op::PipeAmp) => self.set(Prev::Start, true, AfterPipe::Pipe),
-            Tok::Op(Op::DSemi | Op::SemiAmp | Op::DSemiAmp) => {
-                self.set(Prev::CaseArmEnd, true, AfterPipe::No);
-            }
+            Tok::Newline => Ev::Newline,
+            Tok::Op(Op::Pipe | Op::PipeAmp) => Ev::Pipe,
+            Tok::Op(Op::DSemi | Op::SemiAmp | Op::DSemiAmp) => Ev::CaseArmEnd,
             Tok::Op(
                 Op::AndIf | Op::OrIf | Op::Amp | Op::Semi | Op::LParen
                 // `)` is in bash's list, commented there `/* only valid in case
@@ -2679,23 +2775,46 @@ impl CmdPos {
                 // reader reaches the `[` first either way, so `(:) f[1` is
                 // still the reader's unclosed-subscript failure.
                 | Op::RParen,
-            ) => self.set(Prev::Start, true, AfterPipe::No),
+            ) => Ev::Sep,
             // A redirection, or one of the two prefixes that introduce one.
-            Tok::Op(_) | Tok::Io(_) | Tok::VarFd(_) => {
-                self.set(Prev::RedirOp, false, AfterPipe::No);
-            }
+            Tok::Op(_) | Tok::Io(_) | Tok::VarFd(_) => Ev::RedirOp,
             // bash's ARITH_CMD, which is on its list.
-            Tok::ArithCmd(..) => self.set(Prev::Start, true, AfterPipe::No),
-            Tok::ArrayAssign { .. } => {
-                let prev = if was_cmd { Prev::Assignment } else { Prev::Other };
-                self.set(prev, false, AfterPipe::No);
-            }
-            Tok::Word(segs) => self.word(bare_word(segs), word_is_assignment(segs), was_cmd),
+            Tok::ArithCmd(..) => Ev::ArithCmd,
+            Tok::ArrayAssign { .. } if was_cmd => Ev::Assignment,
             // The body arrives after the delimiter word, and is the tail of the
             // same redirection — so it leaves a run of them running.
-            Tok::HereDoc(..) => self.set(Prev::RedirTarget, false, AfterPipe::No),
-            // A construct the lexer refused: nothing follows it.
-            _ => self.set(Prev::Other, false, AfterPipe::No),
+            Tok::HereDoc(..) => Ev::RedirTarget,
+            // A construct the lexer refused, or an array literal that is not an
+            // assignment: nothing follows it.
+            _ => Ev::Other,
+        };
+        self.ev(ev);
+    }
+
+    /// One non-word token's worth of the fold.
+    fn ev(&mut self, ev: Ev) {
+        // Inside a conditional nothing but the `]]` moves `last_read_token`, and
+        // a `]]` arrives as a word. See [`Self::cond`].
+        if self.cond {
+            self.set(Prev::Other, false, AfterPipe::No);
+            return;
+        }
+        match ev {
+            Ev::Newline => {
+                let carried = if matches!(self.after_pipe, AfterPipe::Pipe) {
+                    AfterPipe::Newline
+                } else {
+                    AfterPipe::No
+                };
+                self.set(Prev::Start, true, carried);
+            }
+            Ev::Pipe => self.set(Prev::Start, true, AfterPipe::Pipe),
+            Ev::CaseArmEnd => self.set(Prev::CaseArmEnd, true, AfterPipe::No),
+            Ev::Sep | Ev::ArithCmd => self.set(Prev::Start, true, AfterPipe::No),
+            Ev::RedirOp => self.set(Prev::RedirOp, false, AfterPipe::No),
+            Ev::RedirTarget => self.set(Prev::RedirTarget, false, AfterPipe::No),
+            Ev::Assignment => self.set(Prev::Assignment, false, AfterPipe::No),
+            Ev::Other => self.set(Prev::Other, false, AfterPipe::No),
         }
     }
 
@@ -2705,6 +2824,17 @@ impl CmdPos {
     /// quoting, so only that shape can be a reserved word. `assign` is whether it
     /// is an assignment as *written*.
     fn word(&mut self, lit: Option<&[u8]>, assign: bool, was_cmd: bool) {
+        // A conditional is one token to bash, and the `]]` that ends it is the
+        // only word in there that moves `last_read_token`. See [`Self::cond`].
+        if self.cond {
+            self.cond = lit != Some(COND_END);
+            if self.cond {
+                self.set(Prev::Other, false, AfterPipe::No);
+            } else {
+                self.set(Prev::Start, true, AfterPipe::No);
+            }
+            return;
+        }
         // A redirection's target: the tail of the redirection, so it neither
         // ends a run of them nor is ever a reserved word.
         if matches!(self.prev, Prev::RedirOp) {
@@ -3295,6 +3425,23 @@ pub(crate) fn is_valid_name(s: BStr<'_>) -> bool {
         Some(c) if is_name_start(c) => chars.all(is_name_char),
         _ => false,
     }
+}
+
+/// True for a word `read_token_word` hands back as something other than a WORD
+/// when a redirection operator follows it: an IO number (`2>f`), or a `{name}`
+/// file-descriptor variable (`{v}>f`).
+///
+/// Neither is a word *of* the command — both belong to the redirection — so
+/// neither ends a leading run of redirections, which is what keeps
+/// `2>/dev/null h[1 2]=v` in command position. See
+/// [`CaseScan::finish_word`].
+fn is_redir_prefix(w: &[u8]) -> bool {
+    if !w.is_empty() && w.iter().all(u8::is_ascii_digit) {
+        return true;
+    }
+    w.strip_prefix(b"{")
+        .and_then(|r| r.strip_suffix(b"}"))
+        .is_some_and(is_valid_name)
 }
 
 /// True when a `${ … }` body read so far is still the parameter *name* —
@@ -5877,6 +6024,10 @@ impl Lexer {
         // `<<` in there is a left shift and a `#` a base marker (`16#ff`), so
         // neither introduces anything.
         let mut arith_from: Option<usize> = None;
+        // Whether that span is a `(( … ))` *command* rather than a `$(( … ))`
+        // expansion — bash's ARITH_CMD, which a command may follow, against an
+        // expansion which is part of the word being read.
+        let mut arith_cmd = false;
         // The depths opened by a *nested* `$(`, `<(` or `>(`, each paired with the
         // length `pending` had when it opened — so the entries declared inside it
         // are the ones from that mark on. A plain `( … )` group is not on this
@@ -5921,7 +6072,11 @@ impl Lexer {
             // delimiter, so it never inherits the enclosing `"`.
             if self.read_opaque_span(c, &mut raw, command, dq && nested.is_empty())? {
                 word_start = false;
-                cases.push_quoted();
+                // Inside an arithmetic span there are no words to spoil: see the
+                // `cases.feed` call below.
+                if arith_from.is_none() {
+                    cases.push_quoted();
+                }
                 continue;
             }
             if command {
@@ -5934,8 +6089,7 @@ impl Lexer {
                             own = 0;
                         }
                         word_start = true;
-                        cases.finish_word(depth);
-                        cases.command_end();
+                        cases.feed('\n', None, None, depth);
                         continue;
                     }
                     // Copied verbatim so the re-lex still sees the comment, but not
@@ -5951,14 +6105,23 @@ impl Lexer {
                     // the depth counting below, which is what tells us where the
                     // span ends; only the suppression is recorded here.
                     '$' if self.peek() == Some('(') && self.peek_at(1) == Some('(') => {
-                        arith_from = arith_from.or(Some(depth));
+                        if arith_from.is_none() {
+                            arith_from = Some(depth);
+                            // An *expansion*, so it is part of the word being
+                            // read rather than a command of its own.
+                            arith_cmd = false;
+                            cases.push_quoted();
+                        }
                         raw.push(b'$');
                         word_start = false;
-                        cases.push_quoted();
                         continue;
                     }
-                    '(' if word_start && self.peek() == Some('(') => {
-                        arith_from = arith_from.or(Some(depth));
+                    // A `((` already inside an arithmetic span opens no span of
+                    // its own — it is a nested grouping the depth counting
+                    // handles — so it falls through to the `_` arm.
+                    '(' if word_start && self.peek() == Some('(') && arith_from.is_none() => {
+                        arith_from = Some(depth);
+                        arith_cmd = true;
                     }
                     // A `<<<` here-string is consumed whole, so that its second `<`
                     // is never mistaken for the first of a `<<`.
@@ -5966,7 +6129,8 @@ impl Lexer {
                         self.pos += 2;
                         raw.extend_from_slice(b"<<<");
                         word_start = false;
-                        cases.finish_word(depth);
+                        cases.finish_word(depth, Some('<'));
+                        cases.pos.ev(Ev::RedirOp);
                         continue;
                     }
                     // `<<`: a here-document, whose body the next newline brings from
@@ -5974,7 +6138,8 @@ impl Lexer {
                     '<' if !in_arith && self.peek() == Some('<') => {
                         self.pos += 1;
                         raw.extend_from_slice(b"<<");
-                        cases.finish_word(depth);
+                        cases.finish_word(depth, Some('<'));
+                        cases.pos.ev(Ev::RedirOp);
                         // Read past the reader's deletions the way
                         // `lex_heredoc_op` does. Nothing is recorded as deleted
                         // here: this scan is copying source for a later re-lex,
@@ -6008,38 +6173,27 @@ impl Lexer {
                         if nested.is_empty() {
                             own += 1;
                         }
+                        // The delimiter is the redirection's target word, and
+                        // leaves the run of redirections running.
+                        cases.pos.ev(Ev::RedirTarget);
                         word_start = false;
                         continue;
                     }
                     _ => {}
                 }
             }
-            if command {
-                // Feed the `case` tracker. Every delimiter ends the word being
-                // read, and the reserved words are only recognised there.
-                match c {
-                    ' ' | '\t' => cases.finish_word(depth),
-                    ';' => {
-                        cases.finish_word(depth);
-                        cases.semi(self.peek());
-                    }
-                    '&' | '|' => {
-                        cases.finish_word(depth);
-                        cases.command_end();
-                    }
-                    // A redirection: the word after it names a file, not a
-                    // command, so `case` there is not the reserved word.
-                    '<' | '>' => {
-                        cases.finish_word(depth);
-                        cases.redirect();
-                    }
-                    '(' => {
-                        cases.finish_word(depth);
-                        cases.command_end();
-                    }
-                    ')' => cases.finish_word(depth),
-                    _ => cases.push(c),
-                }
+            // Feed the `case` tracker. Every delimiter ends the word being read,
+            // and the reserved words are only recognised there.
+            //
+            // Not inside an arithmetic span: its text is an *expression*, in
+            // which `<` is a comparison and `&&` a conjunction rather than
+            // anything the shell grammar would recognise, and no `case` can
+            // stand there. bash never reaches it with `read_token` at all — the
+            // whole span is one `parse_matched_pair` — so feeding it here would
+            // be inventing tokens, and `(( case ))` would open a frame that
+            // never closes.
+            if command && arith_from.is_none() {
+                cases.feed(c, self.peek(), self.peek_at(1), depth);
             }
             if c == open {
                 // A `case` pattern's optional `(` has no mate of its own.
@@ -6114,6 +6268,10 @@ impl Lexer {
                     }
                     if arith_from == Some(depth) {
                         arith_from = None;
+                        if arith_cmd {
+                            cases.pos.ev(Ev::ArithCmd);
+                            arith_cmd = false;
+                        }
                     }
                 }
             }

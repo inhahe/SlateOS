@@ -723,12 +723,54 @@ readers of that one state — `reserved_ok`, `arith_ok` (which adds
 Corpus: `the-rest-of-reserved-word-acceptable-is-command-position-too.sh`
 (22 rows).
 
-`CaseScan::cmd_pos` is a **third** approximation, still standing: it is a bare
-`bool` set from a hand-written reserved-word list in `CaseScan::finish_word`,
-driven by `read_balanced_body`'s character scan rather than by tokens. Folding
-it into `CmdPos` too is the prerequisite for
-TD-OILS-A-COMMAND-SUBSTITUTION-NAMES-ITS-OWN-PAREN-BEFORE-THE-BODYS-BRACKET,
-which needs a real `at_command()` inside a `$( … )` body.
+`CaseScan::cmd_pos` was a **third** approximation, and is now folded in as well
+— see
+TD-OILS-A-CASE-SPELLED-INSIDE-AN-ARITHMETIC-SPAN-OPENED-A-PATTERN-LIST-THAT-NEVER-CLOSED.
+
+### TD-OILS-A-CASE-SPELLED-INSIDE-AN-ARITHMETIC-SPAN-OPENED-A-PATTERN-LIST-THAT-NEVER-CLOSED. `echo $(echo $(( case )))` — 2026-08-10 — ✅ FIXED 2026-08-10
+
+**Where:** `userspace/oils/src/lexer.rs`, `read_balanced_body` and `CaseScan`.
+`read_balanced_body` fed *every* character of a `$( … )` body to the `case`
+tracker, arithmetic spans included. A word spelled `case` inside a `$(( … ))`
+therefore opened a pattern list, `open_at_close()` then said the substitution's
+`)` belonged to that list, and the `)` was pushed into the body instead of
+closing it.
+
+**Reproduce.**
+
+```sh
+echo $(echo $(( case )))
+```
+
+| | bash 5.2.37 | osh (before) |
+|---|---|---|
+| output | `0`, `rc=0` | `` syntax error near unexpected token `)' ``, `rc=127` |
+
+Only the *nested* form diverged: a top-level `$(( … ))` never reaches
+`read_balanced_body` with `command = true`, so `echo $(( case ))` was already
+right.
+
+bash cannot make this mistake because it never runs `read_token` over the span
+at all. `parse_comsub` peeks one character past the `$(` and, if it is a second
+`(`, hands the whole thing to `parse_matched_pair` with `P_ARITH`
+(parse.y:4096-4104), which only counts parens. The text is an *expression*:
+`case` is a name worth 0, `<` a comparison, `&&` a conjunction.
+
+**The fix** is the third fold of `last_read_token`, finishing the merge above.
+`CaseScan` no longer keeps a `cmd_pos: bool`; it holds a `CmdPos` — the same one
+the token stream is folded through — and drives it with a new `Ev` event enum
+that a *character* scan can produce, so `CaseScan::feed` and `CmdPos::advance`
+reduce to the same nine events. `read_balanced_body` then simply does not call
+`feed` while an arithmetic span is open, and emits one `Ev::ArithCmd` when a
+`(( … ))` *command* closes.
+
+Four latent bugs in that character scan went with it, none of which had been
+observable (they cancelled out on every probe): `&&` counted as two `&`; `&>`
+counted as a background `&` rather than a redirection; `>&` as a redirection
+then a separator; `;;&` as three tokens. `feed` now recognises each operator
+whole and steps over its tail.
+
+Corpus: `an-arithmetic-span-is-not-shell-text.sh` (18 rows).
 
 ### TD-OILS-A-COMMAND-SUBSTITUTION-NAMES-ITS-OWN-PAREN-BEFORE-THE-BODYS-BRACKET. `echo $(f[1` says `)` where bash says `]` — 2026-08-10 — OPEN
 
@@ -790,6 +832,15 @@ has to be the substitution's own when *it* is the construct left open (row 3 of
 the first table), which `LexError::at`'s never-overwrite rule already gives.
 
 Found while fixing TD-OILS-STARTS-COMMAND-DIVERGES-FROM-COMMAND-TOKEN-POSITION.
+
+**Prerequisite met.** The body scan now carries a real `CmdPos`, so it can
+answer `at_command()` where it used to have only a hand-set `bool` — see
+TD-OILS-A-CASE-SPELLED-INSIDE-AN-ARITHMETIC-SPAN-OPENED-A-PATTERN-LIST-THAT-NEVER-CLOSED.
+What is still missing is the assignment shape: `CmdPos::word`'s `assign`
+argument is fed `false` from the character scan, so `Prev::Assignment` and
+`at_command`'s first clause are inert in there. That wants an `AssignHead`
+state machine over the word being read (a quoted character in the *name* spoils
+it, one in the value does not).
 
 ### TD-OILS-A-RUN-OF-NEWLINES-AFTER-A-PIPE-MAKES-TIME-RESERVED-AGAIN. `true |⏎⏎time x` — 2026-08-10 — OPEN
 

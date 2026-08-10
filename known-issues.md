@@ -171,7 +171,7 @@ token is a *leftover* the parse never consumed — bash's one-token lookahead.
 
 ---
 
-### TD-OILS-ARITHMETIC-PARSES-BEFORE-IT-EVALUATES-SO-A-NAMES-OWN-ERROR-NEVER-SURFACES. `x='1 + '; echo $(( 4 x ))` blames the leftover `x` where bash blames the `+` inside `x` — 2026-08-09 — ⚠️ PART 1 (SINGLE-PASS EVALUATOR) FIXED 2026-08-09, PART 2 (ONE-TOKEN LOOKAHEAD) OPEN
+### TD-OILS-ARITHMETIC-PARSES-BEFORE-IT-EVALUATES-SO-A-NAMES-OWN-ERROR-NEVER-SURFACES. `x='1 + '; echo $(( 4 x ))` blames the leftover `x` where bash blames the `+` inside `x` — 2026-08-09 — ✅ FIXED 2026-08-09 (PART 1 SINGLE-PASS EVALUATOR, PART 2 ONE-TOKEN LOOKAHEAD)
 
 **Where:** `userspace/oils/src/arith.rs`. The module *was* deliberately two-phase —
 `fn parse(expr, vars: &dyn VarLookup) -> Expr` built an AST, then
@@ -284,57 +284,80 @@ build, so 128 levels wanted 3-4 MiB and overflowed a `std` thread's 2 MiB
 default. bash's own bound is 1024 (`MAX_EXPR_RECURSION_LEVEL`, expr.c:101) but
 its frames are far smaller. Nothing legitimate goes past a handful.
 
-**Part 2, what is left.** D and E are the *lookahead*, and the note that used to
-end this entry — "the same one-token lookahead osh's parser already has" — was
-wrong. osh's parser peeks at *characters* to choose a production; it never lexes
-the token it declines, so a NAME sitting where an operator was expected is never
-evaluated. bash's `readtok` runs after every consumed token, so by the time
-`subexpr` reaches `if (curtok != 0) evalerror ("syntax error in expression")`
-the leftover has already been evaluated — and its own error came first.
+**Part 2, as landed (2026-08-09).** D and E are the *lookahead*, and the note
+that used to end this entry — "the same one-token lookahead osh's parser already
+has" — was wrong. osh's parser peeked at *characters* to choose a production; it
+never lexed the token it declined, so a NAME sitting where an operator was
+expected was never evaluated. bash's `readtok` runs after every consumed token,
+so by the time `subexpr` reaches `if (curtok != 0) evalerror ("syntax error in
+expression")` the leftover has already been lexed — and lexing it is not free.
 
-The place to put it is a single site: `parse_binary`'s loop, where it breaks
-because the next token is not a binary operator. Every operand in the grammar
-flows through that loop (`parse_comma` → `parse_assign` → `parse_ternary` →
-`parse_binary`), so that break is the one place a NAME can be reached in
-operator position. A `fn lex_here(&mut self) -> Result<(), ArithError>` there —
-performing the *evaluation side effect* of lexing whatever token starts at the
-cursor, under the same `noeval`/`eq_follows` rules as `reference`, and
-discarding the value — is bash's behaviour rather than a special case for it.
+Landed as prescribed: a `fn lex_here(&mut self) -> Result<(), ArithError>` at the
+one site `parse_binary`'s loop breaks because the next token is not a binary
+operator. Every operand in the grammar flows through that loop (`parse_comma` →
+`parse_assign` → `parse_ternary` → `parse_binary`), so that break is the one
+place a leftover can be reached. `lex_here` skips whitespace, lexes exactly one
+token there, and restores the cursor; a `lexed_at: Option<usize>` guard makes it
+lex the once, as bash's `curtok` is lexed once and then held — without it the
+leftover would be re-evaluated at every grammar level that unwinds past it. The
+lexer proper is now `fn lex_token(&mut self) -> Result<(Tk, Option<Lv>),
+ArithError>`, which names the error token (`mark_tok`, bash's `lasttp = tp = cp
+- 1`) for every token *but* end-of-input — bash returns before that assignment
+(expr.c:1326-1333), which is what makes `$(( 2 ** -1 ))` blame the `1`.
 
-Measured 2026-08-09, `bad='1 + '` throughout; every row is the lookahead:
+Four things the lookahead does, all of them now reproduced and covered by
+`tests/corpus/arithmetic-lexes-one-token-past-the-parse-and-lexing-is-not-free.sh`:
 
-| | bash 5.2.37 | osh |
-|---|---|---|
-| `$(( 4 bad ))` | `1 + : … operand expected ("+ ")` | `4 bad : syntax error in expression ("bad ")` |
-| `$(( x bad ))`, `x=9` | `1 + : … operand expected ("+ ")` | `x bad : syntax error in expression ("bad ")` |
-| `$(( 4 bad, 7 ))` | `1 + : … operand expected ("+ ")` | `4 bad, 7 : syntax error in expression ("bad, 7 ")` |
-| `$(( (4 bad) ))` | `1 + : … operand expected ("+ ")` | `(4 bad) : missing `)' ("bad) ")` |
-| `$(( 4 a[e] ))`, `e='1 + '` | `1 + : … operand expected ("+ ")` | `4 a[e] : syntax error in expression ("a[e] ")` |
-| `$(( 1 ? 2 bad : 3 ))` | `1 + : … operand expected ("+ ")` | ``1 ? 2 bad : 3 : `:' expected … ("2 bad : 3 ")`` |
-| `$(( 0 ? 2 bad : 3 ))` | ``… `:' expected … ("bad : 3 ")`` | ``… `:' expected … ("2 bad : 3 ")`` |
+* a **NAME** is evaluated (`$(( 4 bad ))` is `1 + : … operand expected`), which
+  recurses and answers to the recursion limit, obeys `set -u`, and performs
+  whatever assignments the value contains — `x='y=5'; (( 4 x ))` leaves `y` at 5
+  even though the expression failed;
+* a **number** is converted, and can fail to convert (`$(( 4 5x ))` is `value
+  too great for base`) — see below;
+* a **subscript** is scanned, and an indexed one evaluated (`$(( 4 zzz[1+] ))`);
+* a character the lexer has **no token for** is refused where it is met
+  (`$(( 4 @ ))` is `syntax error: invalid arithmetic operator`).
 
-The last row is the same cause with the evaluation suppressed and so nothing to
-report from inside `bad`: what is left is that bash's error token starts at the
-token the lexer is *holding* (`bad`), not at the start of the branch. Any fix
-has to move `last_tok_start` as well as evaluate.
+`noeval` suppresses only the *read* (`expr_streval` short-circuits at
+expr.c:1157-1160), so a leftover in an untaken `&&`/`||`/`?:` branch is still
+lexed there — `$(( 0 && 4 5x ))` fails, `$(( 0 && 4 bad ))` does not — and the
+error token still moves, which is what fixes the `$(( 0 ? 2 bad : 3 ))` row.
 
-Two shapes bash reaches through the same lookahead but that are a **separate**
-divergence — a leftover *number*, which `readtok`'s digit branch validates the
-moment it lexes it (`strlong`, expr.c:1400-1450) — and which want their own
-entry once part 2 is in:
+**Two layers measurement added that the prescription above did not predict:**
 
-| | bash 5.2.37 | osh |
-|---|---|---|
-| `$(( 4 5x ))` | `4 5x: value too great for base ("5x")` | `4 5x : syntax error in expression ("5x ")` |
-| `$(( 4 0x8#1 ))` | `4 0x8#1: invalid number ("0x8#1")` | `4 0x8#1 : syntax error in expression ("0x8#1 ")` |
-| `$(( 4 099 ))` | `4 099: value too great for base ("099")` | `4 099 : syntax error in expression ("099 ")` |
-| `$(( 4 2#12 ))` | `4 2#12: value too great for base ("2#12")` | `4 2#12 : syntax error in expression ("2#12 ")` |
+* **A NAME's own peek for `=` is a whole token, lexed with evaluation
+  suppressed** — not the character peek `eq_follows` was. bash does `SAVETOK
+  (&ec); noeval = 1; curtok = STR; readtok (); peektok = curtok; RESTORETOK
+  (&ec);` before deciding whether to read the name at all (expr.c:1375-1391).
+  `noeval` stops the *read* and nothing else, so that peek can still fail on a
+  literal or a stray character, and its failure **precedes the name's own read**:
+  `set -u; echo $(( zzz 5x ))` is `value too great for base`, not `unbound
+  variable`. Suppression applies inside the peek too, so a run of names is walked
+  to its end (`x y z 5x` fails on the literal three names later). osh implements
+  the walk as a **loop** (`peek_chain`), not a recursion, because a suppressed
+  pass reads nothing and does nothing on the way back out — recursing overflowed
+  the stack at 50 000 chained names where bash survives (bash itself dies
+  silently around 20 000; osh matches it exactly at 5 000 and 10 000). And
+  `SAVETOK`/`RESTORETOK` carry `lasttp`, so a peek that succeeds leaves no
+  trace: neither the cursor nor the error-token position moves.
+* **`++`/`--` in operator position is a prefix increment, not two operators.**
+  When the left operand cannot take a postfix, bash's lexer looks *forward*
+  (expr.c:1466-1487): a `legal_variable_starter` after it makes the token
+  PREINC/PREDEC — which, sitting where a binary operator was expected, ends the
+  expression — and anything else does `cp--`, splitting it into a binary sign and
+  a unary one. So `$(( 4 ++ 5 ))` is 9 while `$(( 4 ++ y ))` is a syntax error.
 
-Note bash's echo and token both stop at the end of the *lexeme* there, with no
-trailing blank, where every other diagnostic in this entry keeps the rest of the
-string. That is not a second rule but an accident of `readtok`'s digit branch,
-which NUL-terminates the lexeme *in place* across the `strlong` call
-(expr.c:1398-1409):
+Part 3 of the old entry — a leftover *number* — was recorded as "a **separate**
+divergence … which want their own entry once part 2 is in". The measurement
+disagreed: it is the same `readtok`, the same lookahead, and the same `lex_here`
+fixes it, so there is no second entry. `$(( 4 5x ))`, `$(( 4 0x8#1 ))`,
+`$(( 4 099 ))` and `$(( 4 2#12 ))` are all byte-identical now.
+
+One detail of those rows worth keeping: bash's echo and error token both stop at
+the end of the *lexeme*, with no trailing blank, where every other diagnostic in
+this entry keeps the rest of the string. That is not a rule but an accident of
+`readtok`'s digit branch, which NUL-terminates the lexeme *in place* across the
+`strlong` call (expr.c:1398-1409):
 
 ```c
       else if (DIGIT(c))
@@ -350,10 +373,8 @@ which NUL-terminates the lexeme *in place* across the `strlong` call
 `strlong` is where "invalid number"/"value too great for base" are raised, so
 `evalerror` — which echoes `expression` and prints `lasttp` (expr.c:1517-1530) —
 observes the string while that temporary NUL is in it, and both are truncated at
-the lexeme end. osh already reproduces this exactly for a number reached in
-*operand* position (`$(( 5x ))`, `$(( 5x + 1 ))`, `$(( 1 + 099 + 2 ))` are all
-byte-identical); only the lookahead position above diverges, which is why this
-waits on part 2.
+the lexeme end. osh already reproduced this for a number in *operand* position;
+it now does so in lookahead position too, by the same code path.
 
 ---
 

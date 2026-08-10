@@ -562,8 +562,8 @@ fn run(expr: BStr<'_>, vars: &mut dyn VarLookup, depth: u32) -> Result<i64, Arit
         src: expr,
         pos: 0,
         last_op_start: 0,
-        last_atom_start: 0,
         last_tok_start: 0,
+        lexed_at: None,
         vars,
         noeval: 0,
         depth,
@@ -592,6 +592,18 @@ fn run(expr: BStr<'_>, vars: &mut dyn VarLookup, depth: u32) -> Result<i64, Arit
     Ok(e.n)
 }
 
+/// A token of bash's arithmetic lexer, told apart only as far as anything
+/// outside the lexer needs. See [`AParser::lex_ahead`].
+#[derive(PartialEq, Eq)]
+enum Tk {
+    /// End of input — bash's `curtok = 0`.
+    End,
+    /// A bare `=`, the one token a NAME's own lookahead is asking about.
+    Eq,
+    /// Any other token.
+    Other,
+}
+
 struct AParser<'a> {
     /// The expression source. Bytes, not characters: every token arithmetic has
     /// is ASCII, so a byte that begins no character begins no token either.
@@ -602,14 +614,15 @@ struct AParser<'a> {
     /// that trailing operator, not the (empty) text at the cursor — so the
     /// operand-expected diagnostic falls back to this position at EOF.
     last_op_start: usize,
-    /// Start position of the most recently begun leaf atom (number/variable).
-    /// Used for the `name[` subscript diagnostic, which reports from the name.
-    last_atom_start: usize,
     /// Start position of the most recently consumed token of *any* kind —
     /// operand, operator or parenthesis. A missing `)` reported at end of input
     /// names this token, because that is the one bash's lexer is still holding:
     /// `(2+3` names `3`, but `((2+3)` names the `)`.
     last_tok_start: usize,
+    /// Cursor position of the token the parser has already lexed ahead, if any
+    /// — bash's `curtok`, which is lexed once and then held. See
+    /// [`AParser::lex_here`].
+    lexed_at: Option<usize>,
     vars: &'a mut dyn VarLookup,
     /// Suppression depth — bash's `noeval`, raised over the operand a `&&`,
     /// `||` or `?:` has already decided it does not need. It is a *counter*
@@ -740,14 +753,8 @@ impl AParser<'_> {
         self.last_tok_start = self.pos;
     }
 
-    /// Record the leaf atom (number, or name with its optional subscript)
-    /// starting at `start`.
-    fn mark_atom(&mut self, start: usize) {
-        self.last_atom_start = start;
-        self.last_tok_start = start;
-    }
-
-    /// Record a token that is neither operand nor operator — a parenthesis.
+    /// Record the token starting at `start` — bash's `lasttp = tp = cp - 1`
+    /// (expr.c:1334), which every token but end-of-input performs.
     fn mark_tok(&mut self, start: usize) {
         self.last_tok_start = start;
     }
@@ -779,18 +786,159 @@ impl AParser<'_> {
 
     /// Does an assignment `=` — and not the `==` comparison — follow the cursor?
     ///
-    /// This is bash's `peektok != EQ` test (expr.c:1387): its lexer reads one
-    /// token past a NAME, with evaluation suppressed, purely to decide whether
-    /// the name is about to be *assigned* rather than read. That is what makes
-    /// `bad='1 + '; (( bad = 5 ))` a silent store while `(( bad += 5 ))` and
-    /// `(( bad == 5 ))` both report the error inside `bad` — only the first has
-    /// a bare `=` after the name.
-    fn eq_follows(&self) -> bool {
-        let mut i = self.pos;
-        while matches!(self.src.get(i), Some(&c) if is_arith_space(c)) {
-            i += 1;
+    /// This is bash's `peektok != EQ` test (expr.c:1375-1391): after forming a
+    /// NAME its lexer *lexes a whole further token*, with evaluation suppressed,
+    /// purely to decide whether the name is about to be assigned rather than
+    /// read. That is what makes `bad='1 + '; (( bad = 5 ))` a silent store while
+    /// `(( bad += 5 ))` and `(( bad == 5 ))` both report the error inside `bad`
+    /// — only the first has a bare `=` after the name.
+    ///
+    /// What is suppressed is `expr_streval`, not the lexing, so the peek can
+    /// still fail on its own account — and its failure precedes everything the
+    /// name would have done, including `set -u`:
+    ///
+    /// ```text
+    /// x=1; $(( x 5x ))            5x: value too great for base
+    /// set -u; $(( zzz @ ))        syntax error: invalid arithmetic operator
+    /// bad='1 + '; $(( bad 5x ))   5x: value too great for base
+    /// ```
+    ///
+    /// bash restores `lasttp` along with the rest of the token state
+    /// (`SAVETOK`/`RESTORETOK`, expr.c:229-254), so a peek that *succeeds*
+    /// leaves no trace at all — the cursor and the error-token position are
+    /// both put back.
+    fn peek_is_eq(&mut self) -> Result<bool, ArithError> {
+        let save_pos = self.pos;
+        let save_tok = self.last_tok_start;
+        let r = self.peek_chain();
+        self.pos = save_pos;
+        self.last_tok_start = save_tok;
+        r
+    }
+
+    /// The suppressed lookahead itself, run to its end.
+    ///
+    /// A NAME lexed here has a suppressed lookahead of its own, and so on down
+    /// a run of them: `$(( x y z 5x ))` fails on the literal three names past
+    /// the one being asked about. bash writes that as `readtok` calling itself,
+    /// but nothing is *read* on a suppressed pass and nothing is done on the way
+    /// back out, so the chain is a loop rather than a recursion — which is what
+    /// keeps a long run of names off the stack. Only the first token's identity
+    /// is wanted; the rest are lexed purely for what lexing them does.
+    fn peek_chain(&mut self) -> Result<bool, ArithError> {
+        let mut eq = None;
+        loop {
+            let (tk, lv) = self.lex_token()?;
+            if eq.is_none() {
+                eq = Some(tk == Tk::Eq);
+            }
+            if lv.is_none() {
+                return Ok(eq == Some(true));
+            }
         }
-        self.src.get(i) == Some(&b'=') && self.src.get(i + 1) != Some(&b'=')
+    }
+
+    /// Lex the token at the cursor the way bash's `readtok` does — performing
+    /// what lexing it does, but *without consuming it*.
+    ///
+    /// bash's evaluator runs its lexer one token ahead of its parser: `subexpr`
+    /// primes it with a `readtok ()` and every production that consumes a token
+    /// calls `readtok ()` again straight away (expr.c:472). So the token after a
+    /// finished operand is already lexed by the time the parse notices it has no
+    /// use for it — and lexing a token is not free. A NAME is *evaluated* as it
+    /// is lexed (`expr_streval`, expr.c:1385-1390), a numeric literal is
+    /// converted (`strlong`), a subscript is scanned, and a character the lexer
+    /// has no token for is refused. All of that therefore happens to a leftover
+    /// the parse is about to reject, and beats the rejection:
+    ///
+    /// ```text
+    /// bad='1 + '; $(( 4 bad ))    1 + : syntax error: operand expected
+    /// $(( 4 5x ))                 5x: value too great for base
+    /// set -u; $(( 4 zzz ))        zzz: unbound variable
+    /// $(( 1 / 0 bad ))            1 + : syntax error: operand expected
+    /// x='y=5'; (( 4 x ))          leaves y at 5, then fails to parse
+    /// ```
+    ///
+    /// `eval` distinguishes this real lookahead from the suppressed one
+    /// [`AParser::peek_is_eq`] makes: only the former reads a NAME. Suppression
+    /// by `noeval` is honoured on top of it, since `expr_streval` short-circuits
+    /// before it looks anything up (expr.c:1157-1160) — but only the *read* is
+    /// suppressed, so `$(( 0 && x 5x ))` still fails on the literal.
+    fn lex_ahead(&mut self, eval: bool) -> Result<Tk, ArithError> {
+        let (tk, lv) = self.lex_token()?;
+        let Some(lv) = lv else { return Ok(tk) };
+        let eq = self.peek_is_eq()?;
+        if eval && self.noeval == 0 && !eq {
+            self.read_ref(lv)?;
+        }
+        Ok(tk)
+    }
+
+    /// Lex exactly one token at the cursor, consuming it and naming it as the
+    /// error token, and hand back the location a NAME names — *unread*, since
+    /// whether to read it is a decision one token later.
+    fn lex_token(&mut self) -> Result<(Tk, Option<Lv>), ArithError> {
+        self.skip_ws();
+        let start = self.pos;
+        let Some(c) = self.peek() else {
+            // End of input. bash returns before its `lasttp = tp = cp - 1`
+            // (expr.c:1326-1333), so the previously lexed token stays named —
+            // which is what makes `$(( 2 ** -1 ))` blame the `1`.
+            return Ok((Tk::End, None));
+        };
+        self.mark_tok(start);
+        if c.is_ascii_alphabetic() || c == b'_' {
+            return Ok((Tk::Other, Some(self.lex_reference()?)));
+        }
+        if c.is_ascii_digit() {
+            self.parse_number()?;
+            return Ok((Tk::Other, None));
+        }
+        if !is_arith_token_char(c) {
+            // bash's `_is_arithop (c) == 0` (expr.c:1495-1502). The alternative
+            // there — "operand expected" — belongs to the case where the token
+            // *before* this one was an operator, and no caller of this is in it:
+            // every lookahead here follows a finished operand.
+            return Err(ArithError::with_token(
+                "syntax error: invalid arithmetic operator",
+                self.rest_from(start),
+            ));
+        }
+        match self.read_op() {
+            // The one distinction a caller can want: a bare `=`, which is what
+            // tells a NAME it is about to be assigned rather than read.
+            Some("=") => {
+                self.pos += 1;
+                Ok((Tk::Eq, None))
+            }
+            Some(op) => {
+                self.pos += op.len();
+                Ok((Tk::Other, None))
+            }
+            // `(`, `)`, `?`, `:`, `,` — real tokens with nothing to do here.
+            None => {
+                self.pos += 1;
+                Ok((Tk::Other, None))
+            }
+        }
+    }
+
+    /// Lex the token the parser is about to reject, once.
+    ///
+    /// bash holds its lookahead token in `curtok` and only ever lexes it the
+    /// once, so the guard is not an optimisation: without it a leftover NAME
+    /// would be evaluated again at every level of the expression grammar that
+    /// unwinds past it. See [`AParser::lex_ahead`].
+    fn lex_here(&mut self) -> Result<(), ArithError> {
+        self.skip_ws();
+        if self.lexed_at == Some(self.pos) {
+            return Ok(());
+        }
+        let save = self.pos;
+        let r = self.lex_ahead(true);
+        self.pos = save;
+        self.lexed_at = Some(save);
+        r.map(|_| ())
     }
 
     /// Evaluate a subscript's source text as an expression of its own, blaming
@@ -820,7 +968,8 @@ impl AParser<'_> {
     /// A declined read is worth 0 (`tokval = 0`) and leaves an indexed
     /// subscript unevaluated, which is what defers it past the right-hand side.
     fn reference(&mut self, lv: Lv, forced: bool) -> Result<V, ArithError> {
-        let read = self.noeval == 0 && (forced || !self.eq_follows());
+        let eq = self.peek_is_eq()?;
+        let read = self.noeval == 0 && (forced || !eq);
         if !read {
             return Ok(V { n: 0, lv: Some(lv) });
         }
@@ -1099,13 +1248,26 @@ impl AParser<'_> {
         let mut lhs = self.parse_unary()?;
         loop {
             self.skip_ws();
-            let Some(op) = self.read_op() else { break };
-            // A `++`/`--` that reached here is not an increment — `parse_postfix`
-            // declined it because the operand slot to its left is not
-            // assignable. bash's lexer would never have formed the two-character
-            // token at all, so read only its first character as the binary
-            // operator and leave the second to the operand that follows.
+            let Some(op) = self.read_op() else {
+                // Nothing here is a binary operator, so the operand just parsed
+                // ends this expression — but bash's lexer has already read the
+                // token anyway, one ahead of its parser, and reading it is not
+                // free. See [`AParser::lex_here`].
+                self.lex_here()?;
+                break;
+            };
+            // A `++`/`--` whose operand slot to the left is not assignable is
+            // not a postfix increment — `parse_postfix` declined it. bash's
+            // lexer then looks *forward* instead: an assignable name after it
+            // makes it a prefix increment (which, in operator position, ends the
+            // expression), and anything else splits it into a binary `+`/`-`
+            // and a unary one. So `$(( 4 ++ 5 ))` is 9 while `$(( 4 ++ y ))` is
+            // a syntax error (expr.c:1466-1487).
             let op = match op {
+                "++" | "--" if self.lvalue_follows(2) => {
+                    self.lex_here()?;
+                    break;
+                }
                 "++" => "+",
                 "--" => "-",
                 other => other,
@@ -1319,88 +1481,16 @@ impl AParser<'_> {
                 Ok(V::num(e.n))
             }
             Some(c) if c.is_ascii_digit() => {
-                self.mark_atom(atom_start);
+                self.mark_tok(atom_start);
                 Ok(V::num(self.parse_number()?))
             }
             Some(c) if c.is_ascii_alphabetic() || c == b'_' => {
-                self.mark_atom(atom_start);
+                self.mark_tok(atom_start);
                 // Consume the prefix-`++`/`--` flag here, where the name it
                 // applies to is being lexed. See [`AParser::pre_incr`].
                 let forced = core::mem::take(&mut self.pre_incr);
-                // A shell identifier is ASCII by its own syntax, so reading the
-                // name back as text is exact however the rest of the expression
-                // is spelled.
-                let name_start = self.pos;
-                while matches!(self.peek(), Some(c) if c.is_ascii_alphanumeric() || c == b'_') {
-                    self.pos += 1;
-                }
-                let name = self
-                    .src
-                    .get(name_start..self.pos)
-                    .and_then(bytes::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                // Array subscript `name[sub]`: for an indexed array the
-                // subscript is an arithmetic expression (`a[i+1]`, negatives);
-                // for an associative array it is a literal string key
-                // (`m[foo]`). Capture the raw bracketed text (balanced
-                // brackets), then dispatch on the array kind. No whitespace is
-                // allowed between the name and `[`.
-                if self.peek() == Some(b'[') {
-                    self.pos += 1;
-                    let sub_start = self.pos;
-                    let mut depth = 1usize;
-                    while let Some(c) = self.peek() {
-                        match c {
-                            b'[' => depth += 1,
-                            b']' => {
-                                depth -= 1;
-                                if depth == 0 {
-                                    break;
-                                }
-                            }
-                            _ => {}
-                        }
-                        self.pos += 1;
-                    }
-                    if self.peek() != Some(b']') {
-                        // bash: "bad array subscript"; the error token runs from
-                        // the array name (`foo[` → token `foo[`).
-                        return Err(ArithError::with_token(
-                            "bad array subscript",
-                            self.rest_from(atom_start),
-                        ));
-                    }
-                    let raw = self.src.get(sub_start..self.pos).unwrap_or_default();
-                    self.pos += 1; // consume the closing ']'
-                    let lv = if raw.is_empty() {
-                        // `a[]` — see [`Lv::EmptySub`]. Deliberately ahead of the
-                        // indexed/associative split, because bash refuses it
-                        // without looking at the name.
-                        Lv::EmptySub(name)
-                    } else if self.vars.is_assoc(&name) {
-                        // An associative subscript is a literal *key*, not an
-                        // expression, so it may hold any byte — the same key
-                        // the `m[$k]=v` that stored the element carried.
-                        Lv::Assoc(name, bytes::trim(raw).to_vec())
-                    } else if let [sym @ (b'@' | b'*')] = raw {
-                        // `a[@]`, `a[*]` — see [`Lv::WholeSub`]. Necessarily
-                        // after the question above, since those are perfectly
-                        // good *keys*, and matched on the exact bytes: bash reads
-                        // `a[ @]` and `a['@']` as ordinary expressions and fails
-                        // them as syntax errors.
-                        Lv::WholeSub(name, *sym)
-                    } else {
-                        // Indexed. The subscript is kept as *text*: bash's lexer
-                        // scans past it without parsing it (`expr_skipsubscript`,
-                        // expr.c:1348-1358), and whether it is ever evaluated —
-                        // and when — depends on whether the reference is read.
-                        // See [`Ix`].
-                        Lv::Index(name, Ix { raw: raw.to_vec(), done: None })
-                    };
-                    return self.reference(lv, forced);
-                }
-                self.reference(Lv::Var(name), forced)
+                let lv = self.lex_reference()?;
+                self.reference(lv, forced)
             }
             other => {
                 // bash: "syntax error: operand expected". The error token is
@@ -1418,6 +1508,87 @@ impl AParser<'_> {
                 ))
             }
         }
+    }
+
+    /// Lex the NAME — and its optional subscript — that begins at the cursor,
+    /// consuming it, and hand back the location it names.
+    ///
+    /// Forming the token is all that happens here. Whether the location is then
+    /// *read* is a decision bash's lexer takes one token later, once it knows
+    /// whether an `=` follows — see [`AParser::reference`] — and a name reached
+    /// as the parser's one-token lookahead is lexed here without ever being an
+    /// operand at all (see [`AParser::lex_ahead`]).
+    fn lex_reference(&mut self) -> Result<Lv, ArithError> {
+        let atom_start = self.pos;
+        // A shell identifier is ASCII by its own syntax, so reading the name
+        // back as text is exact however the rest of the expression is spelled.
+        let name_start = self.pos;
+        while matches!(self.peek(), Some(c) if c.is_ascii_alphanumeric() || c == b'_') {
+            self.pos += 1;
+        }
+        let name = self
+            .src
+            .get(name_start..self.pos)
+            .and_then(bytes::as_str)
+            .unwrap_or_default()
+            .to_string();
+        // Array subscript `name[sub]`: for an indexed array the subscript is an
+        // arithmetic expression (`a[i+1]`, negatives); for an associative array
+        // it is a literal string key (`m[foo]`). Capture the raw bracketed text
+        // (balanced brackets), then dispatch on the array kind. No whitespace is
+        // allowed between the name and `[`.
+        if self.peek() != Some(b'[') {
+            return Ok(Lv::Var(name));
+        }
+        self.pos += 1;
+        let sub_start = self.pos;
+        let mut depth = 1usize;
+        while let Some(c) = self.peek() {
+            match c {
+                b'[' => depth += 1,
+                b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            self.pos += 1;
+        }
+        if self.peek() != Some(b']') {
+            // bash: "bad array subscript"; the error token runs from the array
+            // name (`foo[` → token `foo[`).
+            return Err(ArithError::with_token(
+                "bad array subscript",
+                self.rest_from(atom_start),
+            ));
+        }
+        let raw = self.src.get(sub_start..self.pos).unwrap_or_default();
+        self.pos += 1; // consume the closing ']'
+        Ok(if raw.is_empty() {
+            // `a[]` — see [`Lv::EmptySub`]. Deliberately ahead of the
+            // indexed/associative split, because bash refuses it without
+            // looking at the name.
+            Lv::EmptySub(name)
+        } else if self.vars.is_assoc(&name) {
+            // An associative subscript is a literal *key*, not an expression,
+            // so it may hold any byte — the same key the `m[$k]=v` that stored
+            // the element carried.
+            Lv::Assoc(name, bytes::trim(raw).to_vec())
+        } else if let [sym @ (b'@' | b'*')] = raw {
+            // `a[@]`, `a[*]` — see [`Lv::WholeSub`]. Necessarily after the
+            // question above, since those are perfectly good *keys*, and matched
+            // on the exact bytes: bash reads `a[ @]` and `a['@']` as ordinary
+            // expressions and fails them as syntax errors.
+            Lv::WholeSub(name, *sym)
+        } else {
+            // Indexed. The subscript is kept as *text*: bash's lexer scans past
+            // it without parsing it (`expr_skipsubscript`, expr.c:1348-1358),
+            // and whether it is ever evaluated — and when — depends on whether
+            // the reference is read. See [`Ix`].
+            Lv::Index(name, Ix { raw: raw.to_vec(), done: None })
+        })
     }
 
     fn parse_number(&mut self) -> Result<i64, ArithError> {

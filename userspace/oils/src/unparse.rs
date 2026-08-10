@@ -1741,6 +1741,11 @@ macro_rules! nested_parts_fn {
                 // back.
                 | WordPart::Unclosed(_)
                 | WordPart::ProcSub { .. } => Vec::new(),
+                // A subscript the expander expanded in place is not re-read:
+                // bash backslash-quotes its result precisely so that nothing
+                // reads it a second time. See
+                // [`crate::ast::WordPart::ArithSubscript`].
+                WordPart::ArithSubscript(_) => Vec::new(),
             }
         }
     };
@@ -1749,7 +1754,7 @@ macro_rules! nested_parts_fn {
 nested_parts_fn!(nested_parts, as_slice, as_deref, as_ref, from_ref,);
 nested_parts_fn!(nested_parts_mut, as_mut_slice, as_deref_mut, as_mut, from_mut, mut);
 
-fn part_src(p: &WordPart) -> Str {
+pub(crate) fn part_src(p: &WordPart) -> Str {
     match p {
         WordPart::Literal(s) => s.clone(),
         // The source is the run as written — `text` between two quotes. Where
@@ -1775,6 +1780,10 @@ fn part_src(p: &WordPart) -> Str {
             s.push(b'"');
             s
         }
+        // The brackets came off the source and go back on it: the parts are the
+        // subscript's own text, re-read as a bare word. See
+        // [`crate::ast::WordPart::ArithSubscript`].
+        WordPart::ArithSubscript(parts) => bfmt![b"[", &parts_src(parts), b"]"],
         // bash reproduces a parameter reference with the braces the source
         // wrote — `declare -f` on a body containing `${x}` prints `${x}`, not
         // `$x` — so the spelling is taken from the AST, not re-derived.

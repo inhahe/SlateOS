@@ -12259,7 +12259,17 @@ impl Shell {
         // bash expands the operand, traces what it expanded to, and only then
         // runs the test — so any substitution in the operand has already happened
         // by the time the trace line appears.
-        let arg = self.expand_cond_string(w);
+        //
+        // `-v` is the one operator whose operand is expanded under `Q_ARITH`
+        // (`cond_expand_word (cond->left->op, varop ? 3 : 0)`,
+        // execute_cmd.c:3913-3919) — see [`Shell::expand_cond_arith_string`].
+        // The `test`/`[` spelling of the same primary does not get it, its
+        // operand being an ordinary command word.
+        let arg = if op.text == "-v" {
+            self.expand_cond_arith_string(w)
+        } else {
+            self.expand_cond_string(w)
+        };
         self.cond_trace_unary(invert, op.text, &arg);
         self.eval_test_unary(op.text.as_bytes(), &arg)
     }
@@ -25865,6 +25875,173 @@ impl Shell {
         out
     }
 
+    /// The same again for the one operand bash expands under `Q_ARITH` — the
+    /// `[[ -v ]]` one, whose subscript is expanded *in place* first.
+    ///
+    /// ```c
+    ///   varop = cond->op->word[0] == '-' && cond->op->word[2] == '\0' &&
+    ///           cond->op->word[1] == 'v';
+    ///   arg = cond_expand_word (cond->left->op, varop ? 3 : 0);
+    ///                                       /* execute_cmd.c:3913-3919 */
+    /// ```
+    ///
+    /// `special == 3` is `qflags = Q_ARITH` and nothing else (subst.c:4130) —
+    /// the two branches join up again for the quoted-null removal and the
+    /// dequoting — so the flag's whole effect is to open
+    /// `expand_word_internal`'s `[` row, which is
+    /// [`Shell::arith_subscript_parts`]. There is no gate on it here: however
+    /// plain the operand, `[[ -v "a['1']" ]]` takes the row and so answers about
+    /// element 1, where `test -v "a['1']"` — an ordinary word — reports `'1':
+    /// syntax error`. See [`crate::ast::WordPart::ArithSubscript`].
+    fn expand_cond_arith_string(&mut self, word: &Word) -> Str {
+        let word = Word { parts: self.arith_subscript_parts(&word.parts) };
+        self.expand_cond_string(&word)
+    }
+
+    /// Rewrite a run of word parts so that each top-level `[ … ]` in it becomes
+    /// a [`WordPart::ArithSubscript`] — `expand_word_internal`'s `[` row
+    /// (subst.c:11103-11115) and the `expand_array_subscript` behind it
+    /// (subst.c:10836-10894).
+    ///
+    /// A rewrite rather than an expansion, because the row is *part of* the
+    /// word's own left-to-right expansion and has to stay in that order: bash
+    /// runs `f` before `g` in `[[ -v "$(f)[$(g)]" ]]`, which expanding the
+    /// subscripts up front would reverse.
+    ///
+    /// The bracket run is found on the parts' **source**, because that is what
+    /// bash scans: `skipsubscript` walks the raw string, stepping over a quoted
+    /// run, a backslash, a `` `…` `` and a `$( … )`/`${ … }` alike, so the `]`
+    /// that closes the subscript is always a character no other construct owns —
+    /// which is why splicing at those two offsets only ever cuts a literal run.
+    /// A `[` inside a construct is never a candidate for the same reason, and
+    /// here that falls out of the shape of the parts: only a
+    /// [`WordPart::Literal`] holds text the expansion scan reads directly. A
+    /// `" … "` run is descended into because `Q_ARITH` survives the recursion
+    /// (`expand_word_internal (tword, Q_DOUBLE_QUOTES|(quoted&Q_ARITH), …)`,
+    /// subst.c:11426) — which is what makes `[[ -v "a['1']" ]]` differ from
+    /// `[[ -v a['1'] ]]`, the `'` being a quote in only one of them.
+    fn arith_subscript_parts(&mut self, parts: &[WordPart]) -> Vec<WordPart> {
+        let mut src = Str::new();
+        let mut spans: Vec<(usize, usize)> = Vec::with_capacity(parts.len());
+        for p in parts {
+            let start = src.len();
+            src.extend_from_slice(&crate::unparse::part_src(p));
+            spans.push((start, src.len()));
+        }
+        let mut out: Vec<WordPart> = Vec::new();
+        // The flat offset of the first byte not yet accounted for. A subscript
+        // can swallow the parts that follow the one it opened in, so this runs
+        // ahead of the loop rather than with it.
+        let mut cur = 0usize;
+        for (part, &(ps, pe)) in parts.iter().zip(&spans) {
+            if cur >= pe {
+                continue;
+            }
+            let WordPart::Literal(text) = part else {
+                out.push(match part {
+                    WordPart::DoubleQuoted(inner) => {
+                        WordPart::DoubleQuoted(self.arith_subscript_parts(inner))
+                    }
+                    other => other.clone(),
+                });
+                cur = pe;
+                continue;
+            };
+            let mut at = cur.saturating_sub(ps);
+            let mut o = at;
+            while let Some(&c) = text.get(o) {
+                if c != b'[' {
+                    o = o.saturating_add(1);
+                    continue;
+                }
+                let open = ps.saturating_add(o);
+                let close = crate::wordscan::skip_subscript(&src, open);
+                // `expand_array_subscript`'s own checks (subst.c:10861-10874):
+                // a subscript that never closes, and an empty one, are not
+                // subscripts — bash returns the bare `[` and carries on one
+                // character along. (Its third check, that the `]` ends the
+                // string, applies only when `Q_ARITH` is *clear*, which here it
+                // never is.)
+                if src.get(close) != Some(&b']') || close == open.saturating_add(1) {
+                    o = o.saturating_add(1);
+                    continue;
+                }
+                if let Some(lit) = text.get(at..o).filter(|t| !t.is_empty()) {
+                    out.push(WordPart::Literal(lit.to_vec()));
+                }
+                let sub = src.get(open.saturating_add(1)..close).unwrap_or_default();
+                out.push(self.arith_subscript_part(sub));
+                cur = close.saturating_add(1);
+                if cur >= pe {
+                    break;
+                }
+                at = cur.saturating_sub(ps);
+                o = at;
+            }
+            if cur < pe {
+                if let Some(tail) = text.get(cur.saturating_sub(ps)..).filter(|t| !t.is_empty()) {
+                    out.push(WordPart::Literal(tail.to_vec()));
+                }
+                cur = pe;
+            }
+        }
+        out
+    }
+
+    /// One subscript's source, read back as the bare word bash expands it as.
+    ///
+    /// `expand_subscript_string (exp, quoted & ~(Q_ARITH|Q_DOUBLE_QUOTES))`
+    /// (subst.c:10879) — quoting **0**, so a `'` in here *is* a quote, which is
+    /// the whole of what `[[ -v "a['1']" ]]` turns on. No parser read this text
+    /// as a word ([`Quoting::Runtime`]): the read is
+    /// `call_expand_word_internal`'s own, at expansion time.
+    fn arith_subscript_part(&mut self, sub: BStr<'_>) -> WordPart {
+        let opts = self.parse_opts();
+        match crate::parser::word_verbatim_from_source(sub, opts, Quoting::Runtime) {
+            Ok(w) => WordPart::ArithSubscript(w.parts),
+            // A construct the read cannot close is bash's own fatal expansion
+            // error rather than anything to expand. Leaving the source as it
+            // stands hands it to the reading that follows, which raises it.
+            Err(_) => WordPart::Literal(bfmt![b"[", sub, b"]"]),
+        }
+    }
+
+    /// The same for the arithmetic-string builder that works on raw source
+    /// rather than on a parsed word ([`Shell::expand_arith_params_inner`], the
+    /// `(( … ))`/`$(( … ))`/`for (( … ))` reader): the subscript's text in, the
+    /// bracketed and backslash-quoted expansion out.
+    fn arith_subscript_text(&mut self, sub: BStr<'_>) -> Str {
+        match self.arith_subscript_part(sub) {
+            WordPart::ArithSubscript(parts) => self.expand_arith_subscript(&parts),
+            // The read failed; the source stands as it was written.
+            _ => bfmt![b"[", sub, b"]"],
+        }
+    }
+
+    /// Expand one, and quote the result so nothing expands it again.
+    ///
+    /// ```c
+    ///   exp = substring (string, si+1, ni);
+    ///   t = expand_subscript_string (exp, quoted & ~(Q_ARITH|Q_DOUBLE_QUOTES));
+    ///   free (exp);
+    ///   exp = t ? sh_backslash_quote (t, abstab, 0) : savestring ("");
+    ///                                                  /* subst.c:10878-10881 */
+    /// ```
+    ///
+    /// The brackets go back on around it (subst.c:10884-10889), and the whole
+    /// thing is `add_string`ed into the word being built — unquoted text, the
+    /// backslashes in it ordinary characters that survive the dequoting
+    /// `cond_expand_word` finishes with.
+    fn expand_arith_subscript(&mut self, parts: &[WordPart]) -> Str {
+        // `expand_subscript_string` sets `expand_no_split_dollar_star` around
+        // its call (subst.c:10801-10812), so an unquoted `$*` in a subscript
+        // joins rather than splitting.
+        let saved_star = std::mem::replace(&mut self.no_split_star, true);
+        let val = self.expand_to_string(&Word { parts: parts.to_vec() });
+        self.no_split_star = saved_star;
+        bfmt![b"[", &backslash_quote_subscript(&val), b"]"]
+    }
+
     /// The pattern side of that context — a `case` arm's pattern, or the right
     /// operand of `[[ == ]]`/`[[ != ]]`. `${x#pat}`'s pattern is *not* one of
     /// these: it is a modifier's operand, not a word in a command.
@@ -28030,6 +28207,11 @@ impl Shell {
             // Literal/quoted handled by callers.
             WordPart::Literal(s) | WordPart::SingleQuoted { text: s, .. } => s.clone(),
             WordPart::DoubleQuoted(parts) => self.expand_double_quoted(parts),
+            // Not handled by callers: the text this produces is `add_string`ed
+            // into the word being built, so it joins as ordinary *unquoted*
+            // characters — which is what every walk's fall-through arm does with
+            // what comes back from here.
+            WordPart::ArithSubscript(parts) => self.expand_arith_subscript(parts),
         }
     }
 
@@ -29092,24 +29274,20 @@ impl Shell {
         let base = text
             .get(..open)
             .filter(|b| crate::parser::is_valid_name(b.as_bytes()))?;
-        let mut depth = 0usize;
-        for (i, c) in text.char_indices().skip_while(|&(i, _)| i < open) {
-            match c {
-                '[' => depth = depth.saturating_add(1),
-                ']' => {
-                    depth = depth.saturating_sub(1);
-                    if depth == 0 {
-                        if i.saturating_add(1) != text.len() {
-                            return None;
-                        }
-                        let sub = text.get(open.saturating_add(1)..i)?;
-                        return (!sub.is_empty()).then_some((base, sub));
-                    }
-                }
-                _ => {}
-            }
+        // Where the subscript closes is `skipsubscript`'s question, not a
+        // bracket count's: a backslash hides the character after it and a quoted
+        // run is stepped over whole. That matters here above all others, because
+        // the operand this reads has usually just been *written* by a word
+        // expansion that backslash-quoted the subscript it expanded in place —
+        // `k='['; [[ -v "m[$k]" ]]` reaches this as `m[\[]`, which a count reads
+        // as two opens and one close and gives up on. See [`skip_subscript`] and
+        // [`Shell::expand_cond_arith_string`].
+        let close = skip_subscript(text.as_bytes(), open)?;
+        if close.checked_add(1)? != text.len() {
+            return None;
         }
-        None
+        let sub = text.get(open.checked_add(1)?..close)?;
+        (!sub.is_empty()).then_some((base, sub))
     }
 
     /// Whether `base[sub_src]` addresses an element that exists.
@@ -31662,12 +31840,30 @@ impl Shell {
     /// The body of [`Shell::expand_to_arith_string`], split out so the wrapper
     /// can mark the call as a nested one.
     fn expand_to_arith_string_inner(&mut self, w: &Word) -> Str {
+        let src = crate::unparse::word_src(w);
+        // The gate. `expand_arith_string` scans for an `ARITH_EXP_CHAR` and only
+        // when it finds one runs the *word* expansion — with `Q_ARITH`, so with
+        // `expand_word_internal`'s `[` row (subst.c:4032-4051). Finding none it
+        // takes `string_quote_removal (string, quoted)` instead
+        // (subst.c:4073-4074), which has no such row: a plain
+        // `(( a['1'] ))` keeps its quotes and reports `'1': syntax error`,
+        // while `(( ~q['1'] ))` — one `~` further along the same string —
+        // expands the subscript in place and reads `q[1]`. See
+        // [`Shell::arith_subscript_parts`] and [`arith_exp_char`].
+        let rewritten;
+        let w = if arith_exp_char(&src) {
+            rewritten = Word { parts: self.arith_subscript_parts(&w.parts) };
+            &rewritten
+        } else {
+            w
+        };
         // `array_expand_index` hands the subscript to `expand_arith_string` on
         // its own, so it — and not the `${…}` it was written inside — is what a
         // "bad substitution" met along the way names: `${a[${x!}]}` reports
         // `${x!}`. Same for a `${x:off:len}` bound, whose two expressions are
-        // expanded one at a time and so name themselves separately.
-        let saved_src = self.enter_inner_source(crate::unparse::word_src(w));
+        // expanded one at a time and so name themselves separately. The name is
+        // the string bash was *handed*, so it is the source and not the rewrite.
+        let saved_src = self.enter_inner_source(src);
         // `expand_arith_string` is its own `expand_word_internal` call, so it is
         // its own `sindex` — an extent read that gave up in here consumes the
         // rest of *this* string and nothing of the word around it. Measured:
@@ -32357,6 +32553,14 @@ impl Shell {
         // The source is bytes, and so is what this pass substitutes into it —
         // variable values, command-substitution output — so the result is bytes.
         let mut out = Str::new();
+        // The gate `expand_arith_string` opens the *word* expansion with
+        // (subst.c:4032-4051): finding no character that could start one it
+        // takes `string_quote_removal` instead, which has no `[` row. Asked once
+        // over the whole expression, as bash asks it — so a `~` at the far end
+        // of the string decides how a subscript at the near end is read:
+        // `(( q['1'] ))` reports `'1': syntax error` where `(( ~q['1'] ))`
+        // reads element 1. See [`arith_exp_char`].
+        let expand_subscripts = arith_exp_char(expr);
         let mut i = 0;
         while i < chars.len() {
             // One word-level error ends the expansion where it stood — bash's
@@ -32407,6 +32611,29 @@ impl Shell {
                 // expansion happens either way.
                 i += 1;
                 continue;
+            }
+            // `expand_word_internal`'s `[` row (subst.c:11103-11115): under
+            // `Q_ARITH` a subscript is expanded *in place*, with quoting of its
+            // own, and quoted against the reading that comes after. Reached from
+            // inside `" … "` as well as outside — the quotes were dropped just
+            // above, and `Q_ARITH` survives the recursion bash does there
+            // (subst.c:11426). See [`Shell::arith_subscript_text`].
+            if expand_subscripts && syn_at(&chars, i) == '[' {
+                let rest = bytes::from_chars(chars.get(i..).unwrap_or_default().iter().copied());
+                let close = crate::wordscan::skip_subscript(&rest, 0);
+                // `expand_array_subscript`'s own checks (subst.c:10861-10874):
+                // one that never closes, and an empty one, are not subscripts,
+                // and bash emits the bare `[` and carries on one along.
+                if rest.get(close) == Some(&b']') && close != 1 {
+                    let sub = rest.get(1..close).unwrap_or_default();
+                    let text = self.arith_subscript_text(sub);
+                    out.extend_from_slice(&text);
+                    // `close` counts bytes of `rest`; `i` counts characters, and
+                    // a subscript can hold a non-ASCII value an earlier pass
+                    // spliced in.
+                    i += bytes::chars(rest.get(..=close).unwrap_or_default()).count();
+                    continue;
+                }
             }
             if syn_at(&chars, i) == '`' {
                 // Backtick command substitution: consume up to the next backtick.
@@ -50556,6 +50783,26 @@ impl VarLookup for Shell {
         self.param_value(name)
     }
 
+    fn expand_index_subscript(&mut self, sub: BStr<'_>) -> Str {
+        // `expand_arith_string (exp, Q_DOUBLE_QUOTES|Q_ARITH|Q_ARRAYSUB)`
+        // (arrayfunc.c:1358) — the same reading the arithmetic string around it
+        // got, so the same builder answers it. See
+        // [`VarLookup::expand_index_subscript`].
+        self.expand_arith_params(sub)
+    }
+
+    fn expand_assoc_subscript(&mut self, sub: BStr<'_>) -> Str {
+        // `expand_subscript_string (t, 0)` (arrayfunc.c:1593) — quoting 0, an
+        // ordinary word expansion, which is what [`Shell::arith_subscript_text`]
+        // performs (minus the brackets and the quoting it wraps the result in).
+        // See [`VarLookup::expand_assoc_subscript`].
+        match crate::parser::word_verbatim_from_source(sub, self.parse_opts(), Quoting::Runtime) {
+            Ok(w) => self.expand_to_string(&w),
+            // The read failed; the source stands as it was written.
+            Err(_) => sub.to_vec(),
+        }
+    }
+
     fn get_index_str(&mut self, name: &str, index: i64) -> Option<Str> {
         // Whichever of the three the reference reaches, a negative subscript
         // that reaches back past the start of what is there names nowhere, and
@@ -56187,6 +56434,60 @@ fn split_assignment_target(s: BStr<'_>) -> Option<(&str, Option<BStr<'_>>)> {
         }
         None => Some((name(s)?, None)),
     }
+}
+
+/// Whether an arithmetic string holds a character that could start an
+/// expansion, which is what decides whether it gets a *word* expansion at all:
+///
+/// ```c
+/// /* We don't perform process substitution in arithmetic expressions, so don't
+///    bother checking for it. */
+/// #define ARITH_EXP_CHAR(s) (s == '$' || s == '`' || s == CTLESC || s == '~')
+///                                                    /* subst.c:3822-3824 */
+/// ```
+///
+/// `CTLESC` is `\001`, which is a character of the string like any other where
+/// the string is source text — and bash reads it as its own marker there too.
+fn arith_exp_char(s: BStr<'_>) -> bool {
+    s.iter().any(|&c| matches!(c, b'$' | b'`' | b'~' | 0x01))
+}
+
+/// The characters `expand_array_subscript` backslash-quotes an expanded
+/// subscript against — its `abstab`, built once at subst.c:10848-10857:
+///
+/// ```c
+///       /* These are basically the characters that start shell expansions plus
+///          the characters that delimit subscripts. */
+///       memset (abstab, '\0', sizeof (abstab));
+///       abstab[LBRACK] = abstab[RBRACK] = 1;
+///       abstab['$'] = abstab['`'] = abstab['~'] = 1;
+///       abstab['\\'] = abstab['\''] = 1;
+///       abstab['"'] = 1;    /* XXX */
+///       /* We don't quote `@' or `*' in the subscript at all. */
+/// ```
+const SUBSCRIPT_QUOTE_CHARS: &[u8] = b"[]$`~\\'\"";
+
+/// `sh_backslash_quote (s, abstab, 0)` (lib/sh/shquote.c:262-307): a backslash
+/// before every table character, and before a `#` that opens the string — the
+/// comment character, which would otherwise start a comment where the subscript
+/// is spliced back into the word. Flag 1 (tildes after a `:` or `=`) and flag 2
+/// (shell blanks) are not passed, and the table already holds `~`.
+///
+/// Every table character is escaped alike, so the asymmetry the error tokens
+/// show — `(( a[\~] ))` reports `\~` and `(( a[\'] ))` reports `\'`, while
+/// `(( a[\$] ))` reports a bare `$` and `` (( a[\`] )) `` a bare `` ` `` —
+/// arrives *after* this, from the reading that follows: that one runs under
+/// `Q_DOUBLE_QUOTES`, where a `\` is dropped before `$`, `` ` ``, `"` and `\`
+/// and kept before anything else.
+fn backslash_quote_subscript(s: BStr<'_>) -> Str {
+    let mut out = Str::with_capacity(s.len());
+    for (i, &c) in s.iter().enumerate() {
+        if SUBSCRIPT_QUOTE_CHARS.contains(&c) || (c == b'#' && i == 0) {
+            out.push(b'\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Where the `]` closing the subscript that opens at `start` is, or `None` when

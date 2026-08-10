@@ -583,6 +583,15 @@ fn skip_to(s: BStr<'_>, start: usize, ch: u8) -> usize {
         .map_or(s.len(), |off| start + off)
 }
 
+/// `skipsubscript (string, start, 0)` (subst.c:2166) — where the `]` that
+/// matches the `[` at `start` is, or `s.len()` when there is none.
+///
+/// `start` addresses the `[` itself, which is bash's calling convention when it
+/// does not pass flag 2 (`i = (flags & 2) ? start : start + 1`, subst.c:2093).
+pub(crate) fn skip_subscript(s: BStr<'_>, start: usize) -> usize {
+    skip_matched(s, start.saturating_add(1), b'[', b']', 0)
+}
+
 /// `skip_matched_pair` (subst.c:2085), which `skipsubscript` is a `[`/`]`
 /// instance of: the index of the `close` that matches an already-consumed
 /// `open`, or `s.len()` when there is none.
@@ -649,7 +658,36 @@ fn skip_matched(s: BStr<'_>, start: usize, open: u8, close: u8, d: u32) -> usize
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use super::{BraceEnd, WordFault, expansion_body_len, word_fault};
+    use super::{BraceEnd, WordFault, expansion_body_len, skip_subscript, word_fault};
+
+    /// The subscript `skipsubscript` reads out of `src`, whose `[` is at `open`,
+    /// or `None` when it never closes.
+    fn subscript(src: &str, open: usize) -> Option<&str> {
+        let close = skip_subscript(src.as_bytes(), open);
+        (src.as_bytes().get(close) == Some(&b']')).then(|| src.get(open + 1..close))?
+    }
+
+    #[test]
+    fn a_subscript_closes_where_skip_matched_pair_says_and_not_where_a_count_would() {
+        assert_eq!(subscript("a[1]", 1), Some("1"));
+        // Brackets nest, so the *last* `]` closes the outer one.
+        assert_eq!(subscript("a[b[0]]", 1), Some("b[0]"));
+        // A backslash hides the character after it — both an open and a close.
+        // This is the shape an arithmetic word expansion writes, having
+        // backslash-quoted the subscript it expanded in place.
+        assert_eq!(subscript(r"a[\[]", 1), Some(r"\["));
+        assert_eq!(subscript(r"a[\]]", 1), Some(r"\]"));
+        assert_eq!(subscript(r"a[1\]]", 1), Some(r"1\]"));
+        // …and a quoted run is stepped over whole.
+        assert_eq!(subscript(r#"a["]"]"#, 1), Some(r#""]""#));
+        assert_eq!(subscript("a[']']", 1), Some("']'"));
+        assert_eq!(subscript("a[$(echo ])]", 1), Some("$(echo ])"));
+        assert_eq!(subscript("a[`echo ]`]", 1), Some("`echo ]`"));
+        // One that never closes is not a subscript at all.
+        assert_eq!(subscript("a[[]", 1), None);
+        assert_eq!(subscript(r"a[\]", 1), None);
+        assert_eq!(subscript("a[\"]", 1), None);
+    }
 
     /// The string a `` no closing `}' `` diagnostic would name, for a word whose
     /// fault is a brace.

@@ -722,6 +722,36 @@ pub enum WordPart {
     },
     /// Double-quoted run of parts (expansion, but no splitting/globbing).
     DoubleQuoted(Vec<WordPart>),
+    /// An array subscript that an **arithmetic** word expansion met in the word
+    /// itself and expands *in place*, ahead of any second reading — bash's
+    /// `expand_array_subscript` (subst.c:10836-10894), reached from
+    /// `expand_word_internal`'s `[` row:
+    ///
+    /// ```c
+    ///     case '[':        /*]*/
+    ///       if ((quoted & Q_ARITH) == 0 || shell_compatibility_level <= 51)
+    ///         { … goto add_character; }
+    ///       else
+    ///         {
+    ///           temp = expand_array_subscript (string, &sindex, quoted, word->flags);
+    ///           goto add_string;
+    ///         }                                        /* subst.c:11103-11115 */
+    /// ```
+    ///
+    /// The parts are the subscript's *source* re-read as an ordinary bare word,
+    /// because that is the reading bash gives it — `expand_subscript_string (exp,
+    /// quoted & ~(Q_ARITH|Q_DOUBLE_QUOTES))`, quoting **0**, where a `'` is a
+    /// quote and comes off. The result is then backslash-quoted against
+    /// `abstab` so the evaluator's own read of the subscript cannot expand it a
+    /// second time, and the two brackets are put back around it — `abstab`
+    /// being `[`, `]`, `$`, `` ` ``, `~`, `\`, `'` and `"` (subst.c:10848-10857).
+    ///
+    /// This is a part the *parser* never builds: it is spliced into a word by
+    /// the expander, for the two places bash's word expansion runs under
+    /// `Q_ARITH` — a `[[ -v ]]` operand (always) and an arithmetic string whose
+    /// source holds a character that could start an expansion (`$`, `` ` ``,
+    /// `~`).
+    ArithSubscript(Vec<WordPart>),
     /// `$name` / `${name}` parameter reference. `braced` records which of the
     /// two spellings the source used. The two expand alike, but the spelling
     /// survives into what the shell prints and says: `declare -f` reproduces a
@@ -1182,6 +1212,11 @@ impl WordPart {
 
             // Not reached: raised by the substitution's own expansion instead.
             WordPart::CommandSub { .. } | WordPart::ProcSub { .. } => None,
+
+            // Not reached either, for a plainer reason: the parser never builds
+            // one — the expander splices it into a word it is about to expand,
+            // long after any scan of the parse tree has run.
+            WordPart::ArithSubscript(_) => None,
 
             // The scan that met this one never got as far as a `$((`, because it
             // ran out of text first — and its own diagnostic is the one bash

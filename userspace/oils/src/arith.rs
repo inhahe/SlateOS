@@ -121,6 +121,52 @@ pub trait VarLookup {
         None
     }
 
+    /// Expand an **indexed** subscript's source text once more, before it is
+    /// evaluated as an expression.
+    ///
+    /// This is the expansion inside `array_expand_index` (arrayfunc.c:1339-1378),
+    /// which every array reference the *evaluator* forms goes through:
+    ///
+    /// ```c
+    ///   t = expand_arith_string (exp, Q_DOUBLE_QUOTES|Q_ARITH|Q_ARRAYSUB);
+    ///   …
+    ///   val = evalexp (t, eflag, &expok);
+    /// ```
+    ///
+    /// It is a *second* reading: the string the evaluator was handed had already
+    /// been expanded once, as a whole. What is left for this one to do is the
+    /// backslash rule of `Q_DOUBLE_QUOTES` — a `\` is dropped before `$`,
+    /// `` ` ``, `"` and `\`, and kept before anything else — because the first
+    /// reading backslash-quoted the subscript it expanded in place precisely so
+    /// that nothing here could expand it again. Measured: `(( a[\$] ))` reports
+    /// the error token `$` while `(( a[\~] ))` reports `\~`, and with `x='$y'`
+    /// both `(( a[$x] ))` and `(( a["$x"] ))` report `$y` — expanded once, never
+    /// twice.
+    ///
+    /// An *associative* subscript is not this: it is a literal key, read by
+    /// `expand_subscript_string (t, 0)` (arrayfunc.c:1593) with quoting 0, where
+    /// a backslash comes off before anything at all. See
+    /// [`VarLookup::expand_assoc_subscript`].
+    ///
+    /// The default hands the text back unchanged, for implementors with no word
+    /// expansion to offer.
+    fn expand_index_subscript(&mut self, sub: BStr<'_>) -> Str {
+        sub.to_vec()
+    }
+
+    /// Expand an **associative** subscript's source text into the key it names.
+    ///
+    /// `akey = expand_subscript_string (t, 0)` (arrayfunc.c:1593) — an ordinary
+    /// word expansion at quoting 0, so a `'` is a quote and a backslash comes off
+    /// before any character, not just the four `Q_DOUBLE_QUOTES` would allow.
+    /// See [`VarLookup::expand_index_subscript`] for the indexed counterpart and
+    /// why there is a second reading at all.
+    ///
+    /// The default hands the text back unchanged.
+    fn expand_assoc_subscript(&mut self, sub: BStr<'_>) -> Str {
+        sub.to_vec()
+    }
+
     /// Return `true` if `name` is an associative array. Bash evaluates the
     /// subscript of an associative array as a *string key* (not arithmetic),
     /// so the evaluator consults this before deciding how to read `name[sub]`.
@@ -943,8 +989,15 @@ impl AParser<'_> {
 
     /// Evaluate a subscript's source text as an expression of its own, blaming
     /// the subscript for anything that goes wrong. See [`tag_subscript`].
+    ///
+    /// The text is expanded once more first — `array_expand_index` expands
+    /// before it evaluates (arrayfunc.c:1358-1363) — and it is the *expanded*
+    /// text the blame names: `x='$y'; (( a[$x] ))` reports `$y`, and
+    /// `(( a[b[1]] ))` under an open gate reports `b\[1\]`, both of them strings
+    /// the source never spelled. See [`VarLookup::expand_index_subscript`].
     fn eval_sub(&mut self, raw: BStr<'_>) -> Result<i64, ArithError> {
-        run(raw, &mut *self.vars, self.depth).map_err(|e| tag_subscript(e, raw))
+        let sub = self.vars.expand_index_subscript(raw);
+        run(&sub, &mut *self.vars, self.depth).map_err(|e| tag_subscript(e, &sub))
     }
 
     /// Evaluate a variable's raw value as arithmetic at the current depth.
@@ -1540,22 +1593,15 @@ impl AParser<'_> {
         if self.peek() != Some(b'[') {
             return Ok(Lv::Var(name));
         }
-        self.pos += 1;
-        let sub_start = self.pos;
-        let mut depth = 1usize;
-        while let Some(c) = self.peek() {
-            match c {
-                b'[' => depth += 1,
-                b']' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
-                    }
-                }
-                _ => {}
-            }
-            self.pos += 1;
-        }
+        // `expr_skipsubscript` (expr.c:1348-1358) is `skipsubscript (cp, 0, 0)`,
+        // which is `skip_matched_pair` — so the run is not a bare bracket count:
+        // a backslash hides the character after it, and a `' … '`, a `" … "`, a
+        // `` ` … ` `` and a `$( … )`/`${ … }` are each skipped whole. Measured,
+        // `(( ~a[\[] ))` reads the subscript `\[` and `(( ~a["]"] ))` the
+        // subscript `"]"`, where a plain count would run off the end of both and
+        // report `bad array subscript`.
+        let sub_start = self.pos.saturating_add(1);
+        self.pos = crate::wordscan::skip_subscript(self.src, self.pos).min(self.src.len());
         if self.peek() != Some(b']') {
             // bash: "bad array subscript"; the error token runs from the array
             // name (`foo[` → token `foo[`).
@@ -1574,8 +1620,10 @@ impl AParser<'_> {
         } else if self.vars.is_assoc(&name) {
             // An associative subscript is a literal *key*, not an expression,
             // so it may hold any byte — the same key the `m[$k]=v` that stored
-            // the element carried.
-            Lv::Assoc(name, bytes::trim(raw).to_vec())
+            // the element carried. It is read once more all the same, at quoting
+            // 0 — see [`VarLookup::expand_assoc_subscript`].
+            let key = self.vars.expand_assoc_subscript(bytes::trim(raw));
+            Lv::Assoc(name, key)
         } else if let [sym @ (b'@' | b'*')] = raw {
             // `a[@]`, `a[*]` — see [`Lv::WholeSub`]. Necessarily after the
             // question above, since those are perfectly good *keys*, and matched

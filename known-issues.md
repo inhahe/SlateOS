@@ -183,7 +183,7 @@ restored to
 from `brace_gobbler` with the *word's* remainder (`` `fi)']}]"' `` and
 `` `fi)':1}]"' ``).
 
-### TD-OILS-A-SUBSCRIPT-IN-AN-ARITHMETIC-WORD-IS-NOT-EXPANDED-IN-PLACE-FIRST. `[[ -v "a['1']" ]]` and `(( ~q['1'] ))` report where bash accepts — 2026-08-10 — OPEN
+### TD-OILS-A-SUBSCRIPT-IN-AN-ARITHMETIC-WORD-IS-NOT-EXPANDED-IN-PLACE-FIRST. `[[ -v "a['1']" ]]` and `(( ~q['1'] ))` report where bash accepts — 2026-08-10 — ✅ FIXED 2026-08-10
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::element_is_set` (the `[[ -v ]]`
 operand) and `Shell::expand_to_arith_string` / `Shell::arith_string_parts`
@@ -274,43 +274,84 @@ varop ? 3 : 0)` (execute_cmd.c:3913-3919, `varop` is `-v` alone) reaches
 rows 1-3 take the `[` row however plain the operand is. `test -v` is *not* `[[ -v
 ]]` — it takes an ordinary word and reports `'1'`, which osh matches.
 
-**The fix.** Add an `expand_array_subscript` equivalent — parse the subscript's
-source as an ordinary word, expand it to a string (a `'` is a quote), then
-backslash-quote against bash's `abstab` set — and call it from two places:
+**The fix — done.** `WordPart::ArithSubscript(Vec<WordPart>)` (`ast.rs`) is a
+part the parser never builds: the expander splices it into a word it is about to
+expand, and its parts are the subscript's *source* re-read as an ordinary bare
+word. `Shell::arith_subscript_parts` does the splicing — it finds each top-level
+bracket run on the word's own source with `wordscan::skip_subscript` (new, a
+`skipsubscript` wrapper over the existing `skip_matched`), recursing into
+`DoubleQuoted` because `Q_ARITH` survives that recursion (subst.c:11426) — and
+`Shell::expand_arith_subscript` expands one, with `no_split_star` set as
+`expand_subscript_string` sets `expand_no_split_dollar_star`
+(subst.c:10801-10812), and wraps the result in `backslash_quote_subscript`
+(`SUBSCRIPT_QUOTE_CHARS` = bash's `abstab`) and its two brackets. Keeping it a
+*part* rather than expanding eagerly is what preserves ordering: bash runs `f`
+before `g` in `[[ -v "$(f)[$(g)]" ]]`, which a pre-pass would reverse.
 
-* `Shell::element_is_set`, for every `[[ -v ]]` operand, before the arithmetic or
-  associative-key reading picks the subscript up;
-* the arithmetic-string builder, for each top-level `[ … ]` of a word whose
-  *source* holds a `$`, a `` ` `` or a `~`. The bracket run has to be found on the
-  source text (bash uses `skipsubscript` on it), so the natural home is the
-  parser: `word_subscript_from_source_at` already re-reads a fragment's `' … '`
-  runs, and this is the same shape — a second reading attached to a source span.
+Three callers:
 
-`sh_backslash_quote` (lib/sh/shquote.c:262-307) escapes every table character
-alike, so the asymmetry in the error tokens — `\~` and `\'` keep their backslash
-while `$` and `` ` `` come back bare — arrives *after* it, from the second read:
-that one runs under `Q_DOUBLE_QUOTES`, where a `\` is dropped before `$`,
-`` ` ``, `"` and `\` and kept before anything else. Measured directly, so the
-escaping the fix emits has to survive the same rule:
+* `Shell::expand_cond_arith_string`, reached from `cond_unary` for `-v` alone —
+  ungated, as `cond_expand_word (…, 3)` is;
+* `Shell::expand_to_arith_string_inner`, gated on `arith_exp_char` over the
+  word's source;
+* `Shell::expand_arith_params_inner`, the raw-source scanner that `(( … ))`,
+  `$(( … ))`, `$[ … ]` and `for (( … ))` actually use — gated the same way, over
+  the whole expression, so a `~` at the far end opens the near end's subscript.
 
-```sh
-a=(A B C D E)
-(( a[\~] ))   # error token "\~"    — backslash kept
-(( a[\$] ))   # error token "$"     — backslash eaten
-(( a[\'] ))   # error token "\'"    — kept
-(( a[\`] ))   # error token "`"     — eaten
-```
+The **second reading** is now modelled too, which is what makes the backslashes
+come out right: `VarLookup::expand_index_subscript` /
+`VarLookup::expand_assoc_subscript` (`arith.rs`), called from `AParser::eval_sub`
+and from the `Lv::Assoc` arm of `lex_reference`, are `array_expand_index`'s
+`expand_arith_string (exp, Q_DOUBLE_QUOTES|Q_ARITH|Q_ARRAYSUB)`
+(arrayfunc.c:1358) and `array_value_internal`'s `expand_subscript_string (t, 0)`
+(arrayfunc.c:1593). `Shell` answers them with `expand_arith_params` and with an
+ordinary word expansion. The blame names the *expanded* text, so `x='$y'; ((
+a[$x] ))` reports `$y` and `(( ~a[b[1]] ))` reports `b\[1\]`.
+
+Two bracket counters had to become `skipsubscript`es for any of it to be
+readable back: `AParser::lex_reference` (bash's `expr_skipsubscript`,
+expr.c:1348-1358) and `Shell::split_array_ref` (bash's `valid_array_reference`).
+Without them `(( ~a[\[] ))` and `k='['; [[ -v "m[$k]" ]]` both give up on
+subscripts the expansion had just backslash-quoted. That also fixed
+`(( a[1\]] ))`, which used to be `((: a[1\]] : …` and is now bash's `1\]`.
+
+Corpus:
+`tests/corpus/a-subscript-in-an-arithmetic-word-is-expanded-in-place-first.sh`
+(74 rows: the ungated `[[ -v ]]` path including the `$(f)`/`$(g)` ordering row,
+both sides of the gate, the backslash asymmetry, the assoc second reading, the
+name check, and the already-agreeing rows that pin the gate down).
 
 **Not caused by the `' … '` work of 2026-08-10** (TD-OILS-A-SINGLE-QUOTED-RUN-IN-
 A-BARE-SUB-WORD-OF-A-BRACE-IS-A-QUOTE); it was measured during it, and every row
-above diverges identically before and after.
+above diverged identically before and after.
 
-**A second bug found in the same probe.** `c[b['1']]=R` — a nested bracket in an
-assignment's left-hand side — is `'1': syntax error` in bash but
-`c[b[1]]=R: command not found` in osh: the word is not recognised as an
-assignment at all, so it is run as a command. `Parser::split_name_subscript` and
-the assignment sniffing around it stop at the first `]` rather than matching
-brackets.
+### TD-OILS-A-NESTED-BRACKET-IN-AN-ASSIGNMENT-TARGET-IS-NOT-AN-ASSIGNMENT. `c[b['1']]=R` runs as a command — 2026-08-10 — OPEN
+
+**Where:** `userspace/oils/src/parser.rs`, `Parser::split_name_subscript` and the
+assignment sniffing around it. They stop at the first `]` rather than matching
+brackets, so a word whose subscript holds a nested one is not recognised as an
+assignment at all and is run as a command.
+
+**Reproduce.**
+
+```sh
+declare -a c b
+c[b['1']]=R; echo "rc=$?"
+```
+
+| bash 5.2.37 | osh |
+|---|---|
+| `'1': syntax error: operand expected (error token is "'1'")`, `rc=1` | `c[b[1]]=R: command not found`, `rc=127` |
+
+**The fix.** Both should find the closing `]` the way every other subscript
+reader in the tree now does — `skipsubscript`, i.e. `skip_matched_pair` on
+`[`/`]`, which counts nested brackets and steps over a backslash, a quoted run
+and a `` `…` ``/`$(…)`/`${…}` whole. `wordscan::skip_subscript` is that function;
+`interp.rs`'s `skip_subscript` and `attr_assignment_split` are the two callers
+that already get it right and are worth copying.
+
+Found while measuring TD-OILS-A-SUBSCRIPT-IN-AN-ARITHMETIC-WORD-IS-NOT-EXPANDED-
+IN-PLACE-FIRST; it is the one row of that probe still diverging.
 
 ### TD-OILS-A-BACKQUOTE-BODY-INSIDE-DOUBLE-QUOTES-IS-NOT-GOBBLED. A backquote body inside `" … "` is run where bash only scanned it — 2026-08-10
 

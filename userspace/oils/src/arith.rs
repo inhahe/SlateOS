@@ -1004,7 +1004,6 @@ impl AParser<'_> {
             }
             _ => {}
         }
-        let then_start = self.pos;
         // The middle branch is a full expression: bash parses it with
         // EXP_LOWEST (expcomma), so it may be an assignment or even a comma
         // expression (`1 ? 2,3 : 4` → 3, `c ? x = 1 : y`). The else branch, by
@@ -1020,11 +1019,13 @@ impl AParser<'_> {
         let then_e = self.with_noeval(cond.n == 0, Self::parse_comma)?;
         self.skip_ws();
         if self.peek() != Some(b':') {
-            // bash: "`:' expected for conditional expression"; the error token is
-            // the then-branch source (`1 ? 2` → `2`).
+            // bash: "`:' expected for conditional expression", reported from the
+            // token its lexer is *holding* (`lasttp`), which after a middle
+            // branch is that branch's last token — not its first: `1 ? 2+3`
+            // names `3`, `1 ? (2+3)` names the `)`, `1 ? x=5` names `5`.
             return Err(ArithError::with_token(
                 "`:' expected for conditional expression",
-                self.rest_from(then_start),
+                self.rest_from(self.last_tok_start),
             ));
         }
         let colon_pos = self.pos;
@@ -2256,6 +2257,45 @@ mod tests {
             (
                 "1 ? 2",
                 "`:' expected for conditional expression (error token is \"2\")",
+            ),
+            // …and the token is the *last* one the middle branch lexed, not the
+            // branch itself: bash reports `lasttp`, whatever its lexer is
+            // holding when it looks for the `:`.
+            (
+                "1 ? 2+3",
+                "`:' expected for conditional expression (error token is \"3\")",
+            ),
+            (
+                "1 ? 2+3*4",
+                "`:' expected for conditional expression (error token is \"4\")",
+            ),
+            (
+                "1 ? (2+3)",
+                "`:' expected for conditional expression (error token is \")\")",
+            ),
+            (
+                "1 ? (2)+3",
+                "`:' expected for conditional expression (error token is \"3\")",
+            ),
+            (
+                "1 ? 2, 3",
+                "`:' expected for conditional expression (error token is \"3\")",
+            ),
+            (
+                "1 ? -2",
+                "`:' expected for conditional expression (error token is \"2\")",
+            ),
+            // Trailing whitespace belongs to the token, since the token is the
+            // rest of the string from where it began.
+            (
+                "1 ?  2  ",
+                "`:' expected for conditional expression (error token is \"2  \")",
+            ),
+            // The suppressed branch marks its tokens too, so a false condition
+            // reports the same place.
+            (
+                "0 ? 2+3",
+                "`:' expected for conditional expression (error token is \"3\")",
             ),
             // A missing operand after a comma reports the comma as the error
             // token (bash: `3 ,` → `, `), not the whole expression.

@@ -5307,7 +5307,7 @@ impl Parser {
                     // see `Self::try_assignment` for why nothing in it is split
                     // or trimmed.
                     let index = match &index {
-                        Some(src) => Some(word_verbatim_from_source(src, self.opts, Quoting::Bare)?),
+                        Some(src) => Some(word_subscript_from_source(src, self.opts, Quoting::Bare)?),
                         None => None,
                     };
                     let assign = Assignment {
@@ -5518,7 +5518,7 @@ impl Parser {
                     // (bash: `h[ x ]=v` keys on ` x `). For an indexed array the
                     // arithmetic evaluator ignores the whitespace, so preserving
                     // it is harmless.
-                    let idx = word_verbatim_from_source(idx_src, self.opts, Quoting::Bare)?;
+                    let idx = word_subscript_from_source(idx_src, self.opts, Quoting::Bare)?;
                     (Some(idx), lhs_tail.get(close + 1..).unwrap_or_default())
                 }
             }
@@ -5631,9 +5631,15 @@ impl Parser {
         let Some(name) = name_text(name) else {
             return Ok(None);
         };
+        // The subscript arrived as segments rather than as source text, but it
+        // is the same subscript and wants the same second reading — a `'` in it
+        // is not a quote once it reaches arithmetic. See
+        // [`attach_subscript_reads`].
+        let mut index = self.word_from_segs_at(&sub_segs, self.pos)?;
+        attach_subscript_reads(&mut index, self.opts, Quoting::Bare, RUNTIME_TEXT)?;
         Ok(Some(Assignment {
             name,
-            index: Some(self.word_from_segs_at(&sub_segs, self.pos)?),
+            index: Some(index),
             append,
             value: AssignRhs::Scalar(self.word_from_segs_at(&value_segs, self.pos)?),
         }))
@@ -5676,8 +5682,11 @@ fn parse_array_elem(segs: &[Seg], opts: ParseOpts) -> Result<ArrayElem, ParseErr
         // Verbatim: an associative keyed element `[ x ]=v` keys on the literal
         // ` x ` (bash preserves subscript whitespace); indexed elements
         // arithmetic-evaluate, which ignores it.
-        let index =
-            word_verbatim_from_source(first.get(1..close).unwrap_or_default(), opts, Quoting::Bare)?;
+        let index = word_subscript_from_source(
+            first.get(1..close).unwrap_or_default(),
+            opts,
+            Quoting::Bare,
+        )?;
         let mut value_segs: Vec<Seg> = Vec::new();
         let after = first.get(val_at..).unwrap_or_default();
         if !after.is_empty() {
@@ -5934,6 +5943,20 @@ impl Quoting {
             Self::Runtime => Self::Runtime,
             _ if self.unread() => Self::BareUnread,
             _ => Self::Bare,
+        }
+    }
+
+    /// This read, for text the parser stepped *over* rather than through — the
+    /// interior of a `' … '` in a subscript, which `parse_matched_pair` skips
+    /// from the quote to its mate. Whatever the quoting around it was, nothing
+    /// in here has a parse, so a `$( … )` is
+    /// [`crate::ast::CmdSubBody::Unread`]. See
+    /// [`word_subscript_from_source_at`].
+    fn as_unread(self) -> Self {
+        match self {
+            Self::Runtime => Self::Runtime,
+            Self::Dquote | Self::Unread => Self::Unread,
+            Self::Bare | Self::BareUnread => Self::BareUnread,
         }
     }
 }
@@ -6231,6 +6254,9 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
         Seg::Sq(s, escaped) => WordPart::SingleQuoted {
             text: s.clone(),
             escaped: *escaped,
+            // Filled in afterwards, and only for a subscript or a substring
+            // bound. See [`word_subscript_from_source_at`].
+            parts: None,
         },
         Seg::Dq(inner) => {
             let mut parts = Vec::with_capacity(inner.len());
@@ -6624,7 +6650,7 @@ fn split_name_subscript(
             // Verbatim so an associative read `${h[ x ]}` keys on the literal
             // ` x ` (bash preserves subscript whitespace); indexed reads
             // arithmetic-evaluate, which ignores the whitespace.
-            _ => ArrayIndex::Index(Box::new(word_verbatim_from_source_at(
+            _ => ArrayIndex::Index(Box::new(word_subscript_from_source_at(
                 &inner,
                 opts,
                 q.as_pattern(),
@@ -6661,15 +6687,21 @@ fn parse_slice_bounds(
         ),
         None => (rest, None),
     };
+    // Both bounds are arithmetic, so a `' … '` in either has the second reading
+    // a subscript's does — see [`attach_subscript_reads`].
     let length = match len {
         Some((s, len_line)) => {
             let text = bytes::from_chars(s.iter().copied());
-            Some(Box::new(word_from_source(&text, opts, q.as_pattern(), len_line)?))
+            let mut w = word_from_source(&text, opts, q.as_pattern(), len_line)?;
+            attach_subscript_reads(&mut w, opts, q.as_pattern(), len_line)?;
+            Some(Box::new(w))
         }
         None => None,
     };
     let off_text = bytes::from_chars(off.iter().copied());
-    Ok((Box::new(word_from_source(&off_text, opts, q.as_pattern(), line)?), length))
+    let mut offset = word_from_source(&off_text, opts, q.as_pattern(), line)?;
+    attach_subscript_reads(&mut offset, opts, q.as_pattern(), line)?;
+    Ok((Box::new(offset), length))
 }
 
 /// Is `name` a parameter that `${#…}` may take the length of?
@@ -7449,6 +7481,100 @@ pub(crate) fn word_verbatim_from_source_at(
         parts.push(seg_to_part(seg, opts, q)?);
     }
     Ok(Word { parts })
+}
+
+/// [`word_verbatim_from_source_at`] for an **array subscript** or a **substring
+/// bound** — the two fragments that may reach the arithmetic evaluator, where a
+/// `'` is not a quote.
+///
+/// Both readings of the fragment are built here, because which one applies is
+/// not decided until expansion time: an *index* goes to `expand_arith_string
+/// (exp, Q_DOUBLE_QUOTES|Q_ARITH|Q_ARRAYSUB)` (arrayfunc.c:1354) and an
+/// *associative key* to `expand_subscript_string (sub, 0)` (arrayfunc.c:1145),
+/// and only the array's runtime type says which. The verbatim parse is the
+/// key's — a `'` opens a quote whose contents are literal. Beside it, each
+/// top-level `' … '` run gets its interior parsed as the surrounding subscript
+/// already is, which is the index's reading: `Q_DOUBLE_QUOTES` merely switches
+/// the single quote off, so everything else in the run is read exactly as it
+/// would be one character to the left of the `'`. Measured, all as `${a[…]}`
+/// against bash 5.2.37:
+///
+/// | written | error token | what it says |
+/// |---|---|---|
+/// | `'$(echo 1)'` | `'1'` | the substitution ran |
+/// | `'$(echo 1 >&2; echo 1)'` | `'1'` (after `1` on stderr) | …really ran |
+/// | `'$n'` with `n=2` | `'2'` | a parameter expands too |
+/// | `` '`echo 1`' `` | `'1'` | so does a backquote |
+/// | `'"1"'` | `'1'` | a *double* quote is still a quote, and comes off |
+/// | `'"'` | `''` | …even unterminated, which eats the rest |
+/// | `'\1'` | `'\1'` | a backslash follows double-quoting's rules |
+/// | `'\$n'` | `'$n'` | …so it disappears before a `$` |
+/// | `'~'` | `'~'` | no tilde expansion in an arithmetic string |
+///
+/// The interior is read as **unread** text. bash's parser stops at the `'` and
+/// resumes at its mate (`parse_matched_pair` reads nothing between them), so a
+/// `$( … )` in there has no parse and is read by `extract_command_subst` at
+/// expansion time: `${a[$(fi)]}` is a script syntax error that never runs,
+/// while `${a['$(fi)']}` runs the script and reports `command substitution:
+/// line N:` quoting the rest of the *subscript*. An ANSI-C `$'…'` cannot occur
+/// in here at all — its own `'` would end the run — so the translation half of
+/// the read has nothing to decide.
+pub(crate) fn word_subscript_from_source(
+    s: BStr<'_>,
+    opts: ParseOpts,
+    q: Quoting,
+) -> Result<Word, ParseError> {
+    word_subscript_from_source_at(s, opts, q, RUNTIME_TEXT)
+}
+
+/// [`word_subscript_from_source`] for a subscript that sits on a known physical
+/// line. See [`frag_line`].
+pub(crate) fn word_subscript_from_source_at(
+    s: BStr<'_>,
+    opts: ParseOpts,
+    q: Quoting,
+    line: u32,
+) -> Result<Word, ParseError> {
+    let mut w = word_verbatim_from_source_at(s, opts, q, line)?;
+    attach_subscript_reads(&mut w, opts, q, line)?;
+    Ok(w)
+}
+
+/// Give every top-level `' … '` of an already-parsed subscript or substring
+/// bound its arithmetic reading. See [`word_subscript_from_source_at`], which
+/// documents what the reading is; this is the half [`parse_slice_bounds`] needs
+/// too, its two bounds being tokenized rather than read verbatim.
+fn attach_subscript_reads(
+    w: &mut Word,
+    opts: ParseOpts,
+    q: Quoting,
+    line: u32,
+) -> Result<(), ParseError> {
+    let inner_q = q.as_unread();
+    let mut any = false;
+    for part in &mut w.parts {
+        let WordPart::SingleQuoted { text, escaped: false, parts } = part else {
+            continue;
+        };
+        if text.is_empty() {
+            continue;
+        }
+        // Tolerant, because the run's interior can be cut short of a quote it
+        // opened — `'"'` is a `"` with no mate, and bash's expander runs it to
+        // the end of the string rather than complaining.
+        *parts = Some(word_tolerant_from_source_at(text, opts, inner_q, line)?.parts);
+        any = true;
+    }
+    // The interior was parsed on its own and so knows nothing of what follows
+    // it. Re-measure the whole fragment now that the run is walkable, which is
+    // what gives a `$( … )` in there the rest of the *subscript* — its closing
+    // `'` first — for the remainder a failed re-read echoes. A caller that is
+    // itself part of a larger word measures again over that word; this is the
+    // scope for the ones that are not (a `name[sub]=v` left-hand side).
+    if any {
+        crate::unparse::attach_comsub_tails(w);
+    }
+    Ok(())
 }
 
 /// The word `expand_word_internal` reads out of `s` — [`word_verbatim_from_source_at`]

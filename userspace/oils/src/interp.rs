@@ -129,6 +129,7 @@ use crate::lexer::ReaderWarning;
 use crate::parser::{
     IncrementalParser, Quoting, UnitLine, UnitLineKind, parse_opts, parse_with_aliases,
 };
+use crate::unparse::Nested;
 use crate::unparse::elem_src;
 use crate::wordscan::WordFault;
 #[cfg(windows)]
@@ -24644,7 +24645,7 @@ impl Shell {
         // word with no substitution in it has nothing for the scan to read
         // either way. The second test is the cheap one and subsumes the first
         // for this purpose: a `${` carries its own `{`.
-        if self.expansion_failed() || !Self::has_gobbled_sub(&word.parts) {
+        if self.expansion_failed() || !Self::has_gobbled_sub(&word.parts, false) {
             return false;
         }
         // The tails have to be re-measured, because the gobbler's string is the
@@ -24652,7 +24653,7 @@ impl Shell {
         // scopes every other reader wants. See [`crate::unparse::gobbler_word`].
         let scoped = crate::unparse::gobbler_word(word);
         let mut subs: Vec<&WordPart> = Vec::new();
-        Self::gobbled_subs(&scoped.parts, &mut subs);
+        Self::gobbled_subs(&scoped.parts, false, &mut subs);
         // Whatever the read complains about, it is the scanner complaining and
         // the scanner was handed the whole word. See [`Shell::enter_scanned_word`].
         let saved = self.enter_scanned_word(crate::unparse::word_src(word));
@@ -24664,12 +24665,17 @@ impl Shell {
     /// Whether anything in `parts` is a substitution [`Shell::gobble_scan`]
     /// would read — the cheap pre-test that keeps the scan off every word that
     /// cannot produce a diagnostic.
-    fn has_gobbled_sub(parts: &[WordPart]) -> bool {
+    fn has_gobbled_sub(parts: &[WordPart], dquoted: bool) -> bool {
         parts.iter().any(|p| {
-            Self::gobbler_reads(p)
-                || crate::unparse::nested_parts(p)
-                    .into_iter()
-                    .any(|(_, w)| Self::has_gobbled_sub(w))
+            if Self::gobbler_reads(p) {
+                return true;
+            }
+            if let WordPart::SingleQuoted { parts: sub, .. } = p {
+                return dquoted && sub.as_ref().is_some_and(|w| Self::has_gobbled_sub(w, true));
+            }
+            crate::unparse::nested_parts(p)
+                .into_iter()
+                .any(|(kind, w)| Self::has_gobbled_sub(w, dquoted || kind == Nested::Quoted))
         })
     }
 
@@ -24678,11 +24684,13 @@ impl Shell {
     /// The walk is structural rather than a second pass over the text, because
     /// the parse has already sorted the two states that decide the answer. A
     /// `' … '` run the gobbler skips whole (`quoted == '\''`) is exactly a
-    /// [`WordPart::SingleQuoted`], which only exists where a parser saw a real
-    /// quote — and a parser saw one in precisely the places the gobbler's
-    /// `quoted` is 0. Inside `" … "` there is no such part, because a `'` there
-    /// is a character; and the gobbler agrees, since its `quoted` is `"` and no
-    /// `'` row is reached.
+    /// [`WordPart::SingleQuoted`] met with `dquoted` false — the gobbler's
+    /// `quoted` is 0 there, its `'` row is reached, and the run goes by unread.
+    /// Inside `" … "` the `quoted` is `"`, that row is never reached, and the
+    /// run is read straight through; the parse can follow it because a subscript
+    /// and a substring bound carry the run's arithmetic reading beside its text
+    /// (see [`crate::ast::WordPart::SingleQuoted`]), which is precisely where
+    /// bash's own parser left a `'` standing as a character.
     ///
     /// A `` ` … ` `` is left out for the same structural reason, and is *not*
     /// exact: at the top level the gobbler's `quoted` becomes `` ` `` and the
@@ -24691,19 +24699,28 @@ impl Shell {
     /// there. osh keeps a backquote body as text rather than as parts, so this
     /// scan cannot reach it; see TD-OILS-A-BACKQUOTE-BODY-INSIDE-DOUBLE-QUOTES-
     /// IS-NOT-GOBBLED in known-issues.md.
-    fn gobbled_subs<'a>(parts: &'a [WordPart], out: &mut Vec<&'a WordPart>) {
+    fn gobbled_subs<'a>(parts: &'a [WordPart], dquoted: bool, out: &mut Vec<&'a WordPart>) {
         for p in parts {
             if Self::gobbler_reads(p) {
                 out.push(p);
                 continue;
             }
-            if matches!(p, WordPart::SingleQuoted { .. }) {
+            // …and inside `" … "` the `'` row is not reached, so the run is read
+            // straight through. The only such run the parse carries is a
+            // subscript's or a substring bound's, which is exactly where bash's
+            // own parser left a `'` standing as a character; its interior is the
+            // second reading beside the text. See
+            // [`crate::ast::WordPart::SingleQuoted`].
+            if let WordPart::SingleQuoted { parts: sub, .. } = p {
+                if let (true, Some(w)) = (dquoted, sub.as_ref()) {
+                    Self::gobbled_subs(w, true, out);
+                }
                 continue;
             }
             // Every other scope, a `[ … ]` subscript included: the gobbler has
             // no bracket row, so it simply reads on through them.
-            for (_, w) in crate::unparse::nested_parts(p) {
-                Self::gobbled_subs(w, out);
+            for (kind, w) in crate::unparse::nested_parts(p) {
+                Self::gobbled_subs(w, dquoted || kind == Nested::Quoted, out);
             }
         }
     }
@@ -29610,7 +29627,7 @@ impl Shell {
     /// bash refuses `n[*]` before expanding anything, while `n[$s]` with
     /// `s='*'` is an ordinary expression. See [`Self::whole_array_sub`].
     fn sub_word(&mut self, sub: BStr<'_>) -> Word {
-        crate::parser::word_verbatim_from_source(sub, self.parse_opts(), Quoting::Runtime)
+        crate::parser::word_subscript_from_source(sub, self.parse_opts(), Quoting::Runtime)
             .unwrap_or_else(|_| Word::literal(sub.to_vec()))
     }
 
@@ -31658,22 +31675,54 @@ impl Shell {
         // subscript that swallowed itself. See [`Shell::extent_consumed`].
         let saved_consumed = std::mem::replace(&mut self.extent_consumed, false);
         let mut out = Str::new();
-        for part in &w.parts {
+        self.arith_string_parts(&w.parts, &mut out);
+        self.extent_consumed = saved_consumed;
+        self.leave_inner_source(saved_src);
+        out
+    }
+
+    /// The walk [`Shell::expand_to_arith_string_inner`] does, over one run of
+    /// parts — which is also what it does over the *interior* of a `' … '`,
+    /// hence the recursion.
+    fn arith_string_parts(&mut self, parts: &[WordPart], out: &mut Str) {
+        for part in parts {
             match part {
                 WordPart::Literal(s) => out.extend_from_slice(s.as_bytes()),
                 WordPart::SingleQuoted {
                     text: s,
                     escaped: true,
+                    ..
                 } => {
                     if !matches!(s.as_slice(), b"$" | b"`" | b"\"" | b"\\") {
                         out.push(b'\\');
                     }
                     out.extend_from_slice(s.as_bytes());
                 }
-                WordPart::SingleQuoted { text: s, .. } => {
+                // The quotes are two characters of the string and nothing more:
+                // `Q_DOUBLE_QUOTES` is set, so `expand_word_internal` never
+                // treats a `'` as an opener and simply copies it, expanding what
+                // lies between the pair along the way. `${a['$(echo 1)']}` is
+                // therefore `'1': syntax error: operand expected`, the
+                // substitution having run and its quotes having survived. The
+                // interior's parse is the one
+                // [`crate::parser::word_subscript_from_source`] attached; where
+                // there is none — every run that cannot reach arithmetic — the
+                // text is its own reading.
+                WordPart::SingleQuoted { text: s, parts, .. } => {
                     out.push(b'\'');
-                    out.extend_from_slice(s.as_bytes());
-                    out.push(b'\'');
+                    match parts {
+                        Some(ps) => self.arith_string_parts(ps, out),
+                        None => out.extend_from_slice(s.as_bytes()),
+                    }
+                    // …unless a read inside gave up, which consumes the rest of
+                    // the string it was walking — and that string is the
+                    // subscript, so the closing quote goes with it. Measured
+                    // with `c='A${a['"'"'$(fi)'"'"']}B'`: `${c@P}` ends
+                    // `': syntax error: operand expected (error token is "'")`,
+                    // one quote and not two.
+                    if !self.extent_consumed {
+                        out.push(b'\'');
+                    }
                 }
                 WordPart::DoubleQuoted(parts) => {
                     let s = self.expand_double_quoted(parts);
@@ -31688,9 +31737,6 @@ impl Shell {
                 break;
             }
         }
-        self.extent_consumed = saved_consumed;
-        self.leave_inner_source(saved_src);
-        out
     }
 
     fn eval_arith_index(&mut self, w: &Word) -> i64 {
@@ -36145,6 +36191,7 @@ impl Shell {
                 parts: vec![WordPart::SingleQuoted {
                     text: a.clone(),
                     escaped: false,
+                    parts: None,
                 }],
             });
         }
@@ -40124,6 +40171,7 @@ impl Shell {
                 parts: vec![WordPart::SingleQuoted {
                     text: value,
                     escaped: false,
+                    parts: None,
                 }],
             }),
         };
@@ -45641,7 +45689,7 @@ impl Shell {
         // same subscript written in an assignment. An unbalanced quote makes it
         // unparseable; bash silently matches nothing in that case.
         let Ok(word) =
-            crate::parser::word_verbatim_from_source(sub_src, self.parse_opts(), Quoting::Runtime)
+            crate::parser::word_subscript_from_source(sub_src, self.parse_opts(), Quoting::Runtime)
         else {
             return true;
         };

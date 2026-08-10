@@ -701,7 +701,25 @@ pub enum WordPart {
     /// `escaped` is `true` for the backslash spelling. Expansion treats both
     /// identically; only [`crate::unparse`] cares, because bash prints a
     /// stored function body back in whichever form the source wrote.
-    SingleQuoted { text: Str, escaped: bool },
+    ///
+    /// `parts` is the *other* reading of the same run, for the one place a `'`
+    /// is not a quote at all: an **array subscript** or a **substring bound**.
+    /// bash hands those to `expand_arith_string (exp,
+    /// Q_DOUBLE_QUOTES|Q_ARITH|Q_ARRAYSUB)` (arrayfunc.c:1354), and
+    /// `Q_DOUBLE_QUOTES` switches single quotes off — so `${a['$(echo 1)']}`
+    /// runs the substitution and keeps the two `'` as text, reporting `'1':
+    /// syntax error: operand expected`. The very same string reaches
+    /// `expand_subscript_string (sub, 0)` (arrayfunc.c:1145) when the array
+    /// turns out to be *associative*, and there a `'` **is** a quote — so which
+    /// reading applies is not known until the array's runtime type is, and both
+    /// have to be carried. `text` is the quote's reading, `parts` the
+    /// arithmetic one, `None` everywhere a run cannot reach arithmetic. See
+    /// [`crate::parser::word_subscript_from_source_at`].
+    SingleQuoted {
+        text: Str,
+        escaped: bool,
+        parts: Option<Vec<WordPart>>,
+    },
     /// Double-quoted run of parts (expansion, but no splitting/globbing).
     DoubleQuoted(Vec<WordPart>),
     /// `$name` / `${name}` parameter reference. `braced` records which of the
@@ -1679,9 +1697,11 @@ pub fn dup_move_source(target: &Word) -> Option<Word> {
         WordPart::SingleQuoted {
             text,
             escaped: true,
+            ..
         } => Some(WordPart::SingleQuoted {
             text: text.strip_suffix(b"-")?.to_vec(),
             escaped: true,
+            parts: None,
         }),
         _ => return None,
     };
@@ -1841,7 +1861,8 @@ mod tests {
                 WordPart::Literal(b"x".to_vec()),
                 WordPart::SingleQuoted {
                     text: Vec::new(),
-                    escaped: true
+                    escaped: true,
+                    parts: None
                 },
             ]
         );
@@ -1851,7 +1872,8 @@ mod tests {
             src.parts,
             vec![WordPart::SingleQuoted {
                 text: Vec::new(),
-                escaped: true
+                escaped: true,
+                parts: None
             }]
         );
 

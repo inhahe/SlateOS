@@ -1329,14 +1329,12 @@ fn attach_comsub_tails_in(parts: &mut [WordPart]) {
 /// subscript's own scope would have stopped at the `'`. See
 /// [`gobbler_word`].
 ///
-/// That measurement is not yet reproducible here, because osh still reads a
-/// `' … '` in a subscript as a quote and so has no `$( … )` in the parse for the
-/// scan to reach — TD-OILS-A-SINGLE-QUOTED-RUN-IN-A-BARE-SUB-WORD-OF-A-BRACE-IS-
-/// A-QUOTE in known-issues.md. An *unquoted* subscript substitution does reach
-/// the gobbler in bash, but bash's parser reads that one and dies on it first
-/// (`echo "[${a[$(fi)]}]"` is a script syntax error, and osh agrees), so nothing
-/// observable rides on `index` today. It is kept exact so the row works the
-/// moment the parse can supply it.
+/// The `$( … )` that measurement reaches is one a `' … '` was hiding, which the
+/// parse carries as the run's second reading (see
+/// [`crate::ast::WordPart::SingleQuoted`]) and which [`walk_parts_in`] descends
+/// into. An *unquoted* subscript substitution never gets this far: bash's parser
+/// reads that one and dies on it first — `echo "[${a[$(fi)]}]"` is a script
+/// syntax error, and osh agrees.
 fn attach_tails_scoped(parts: &mut [WordPart], index: bool) {
     // A body no parser read is re-read the same way, from the same
     // `extract_command_subst`, so it wants the same remainder — see
@@ -1590,6 +1588,19 @@ fn walk_parts_in(
             *i = i.saturating_add(1);
             continue;
         }
+        // A `' … '` of a subscript is not a scope of its own: the string the
+        // reader walks runs straight through the quotes, so what is between them
+        // takes the rest of that string for its remainder — the closing `'`
+        // included. Measured against bash 5.2.37, `a=(A B C); echo "${a['$(fi)']}"`
+        // echoes `` `fi)'' ``, the quote after the `)` being the run's own.
+        // [`nested_parts_mut`] has no row for it because the two *other* walkers
+        // must not follow it: `extract_dollar_brace_string` steps over the whole
+        // subscript, and the gobbler follows only under `" … "`
+        // ([`crate::interp::Shell::gobbled_subs`]).
+        if let WordPart::SingleQuoted { parts: Some(ps), .. } = p {
+            walk_parts_in(ps, want, index, n, i, act);
+            continue;
+        }
         for (kind, w) in nested_parts_mut(p) {
             if kind == Nested::Index && !index {
                 continue;
@@ -1741,7 +1752,21 @@ nested_parts_fn!(nested_parts_mut, as_mut_slice, as_deref_mut, as_mut, from_mut,
 fn part_src(p: &WordPart) -> Str {
     match p {
         WordPart::Literal(s) => s.clone(),
-        WordPart::SingleQuoted { text, escaped } => quoted_lit_src(text, *escaped),
+        // The source is the run as written — `text` between two quotes. Where
+        // the run carries its arithmetic reading beside the text, that reading
+        // is printed instead: it re-prints to the same bytes (nothing in it was
+        // expanded at parse time), and it is the only spelling a sentinel swapped
+        // *inside* the quotes can show through. See [`attach_tails_by`] and
+        // [`crate::ast::WordPart::SingleQuoted`].
+        WordPart::SingleQuoted { text, escaped, parts } => match parts {
+            Some(ps) => {
+                let mut s = b"'".to_vec();
+                s.push_str(&parts_src(ps));
+                s.push(b'\'');
+                s
+            }
+            None => quoted_lit_src(text, *escaped),
+        },
         WordPart::DoubleQuoted(parts) => {
             let mut s = b"\"".to_vec();
             for p in parts {

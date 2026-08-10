@@ -94,7 +94,7 @@ whole is cheap, every entry being an `Arc`.
 
 **Tests.** `tests/corpus/a-failed-exec-redirection-stops-the-list-and-undoes-what-it-did.sh`.
 
-### TD-OILS-A-SINGLE-QUOTED-RUN-IN-A-BARE-SUB-WORD-OF-A-BRACE-IS-A-QUOTE. `"${a['$(echo 1)']}"` leaves the substitution unexpanded — 2026-08-10
+### TD-OILS-A-SINGLE-QUOTED-RUN-IN-A-BARE-SUB-WORD-OF-A-BRACE-IS-A-QUOTE. `"${a['$(echo 1)']}"` leaves the substitution unexpanded — 2026-08-10 — ✅ FIXED 2026-08-10
 
 **Where:** `userspace/oils/src/parser.rs` — the sub-words of a `${ … }` that are
 read *bare* (`Quoting::Bare`): a `[ … ]` subscript, a substring offset/length, a
@@ -131,21 +131,142 @@ is not known until run time. osh currently picks the associative one at parse
 time and so gets the index case wrong; it happens to agree for `${a['1']}`
 because a `SingleQuoted` part with no expansion in it re-prints with its quotes.
 
-**The fix.** Keep a bare sub-word's `' … '` as an *extent* — parse what is
-inside it, and record that the quotes are text — so the choice of quote removal
-can be made by the expander that receives it rather than by the lexer. That is
-the same shape `read_word_verbatim`'s second `'` arm already gives a
-double-quoted operand; what is missing is a per-sub-word flag saying which of
-the two modes applies.
+**The fix — done.** A run now carries *both* readings, because which one applies
+is not knowable at parse time. `WordPart::SingleQuoted` gained a third field,
+`parts: Option<Vec<WordPart>>` — `text` is the quote's reading, `parts` the
+arithmetic one, `None` everywhere a run cannot reach arithmetic.
+`parser::word_subscript_from_source_at` builds a subscript exactly as before and
+then `attach_subscript_reads` fills each top-level run's `parts` by re-reading
+its interior with `Quoting::as_unread()` — whatever the quoting around it was,
+bash's `parse_matched_pair` read *nothing* between a `'` and its mate, so a
+`$( … )` in there is `CmdSubBody::Unread` and its diagnostic is a runtime one.
+The re-read is *tolerant*, because the interior can be cut short of a quote it
+opened (`'"'` is a `"` with no mate, which bash's expander runs to the end of the
+string rather than complaining).
 
-Until then two rows are missing from
+`Shell::arith_string_parts` is the expander side: it copies the two `'` out as
+characters and recurses into `parts` between them, dropping the closing one when
+a read gave up, since that consumes the rest of the string it was walking — the
+subscript, closing quote included. Measured with `c='A${a['"'"'$(fi)'"'"']}B'`,
+`${c@P}` ends `': syntax error: operand expected (error token is "'")`, one
+quote and not two.
+
+Four call sites got the new builder (the `ArrayAssign` index, `try_assignment`'s
+index, `parse_array_elem`'s keyed index, and `${a[sub]}`), `parse_slice_bounds`
+attaches to both bounds, `spanning_subscript_assignment` attaches to the index
+it builds from segments (`a['$(fi)']=X` takes that path), and the two runtime
+subscript readers (`sub_word`, the `unset` element path) moved to it as well.
+
+The gobbler's walk now threads a `dquoted` flag: at the top level its `quoted` is
+0, the `'` row is reached and the run goes by unread; inside `" … "` its `quoted`
+is `"`, that row is never reached, and it reads straight through — so
+`Shell::gobbled_subs` descends into `parts` only when `dquoted`.
+`unparse::walk_parts_in` descends unconditionally (the sentinel swap must reach
+inside the quotes) while `nested_parts_mut` deliberately has no row for it, since
+`extract_dollar_brace_string` steps over a whole subscript.
+
+**Two divergences this measured but did not fix** — both predate the change and
+are filed separately: `[[ -v "a['1']" ]]` (quote removal on the `-v` operand's
+subscript) and `(( a["'"$s"'"] ))` (CTLESC-quoted quotes in an already-expanded
+arithmetic string).
+
+**Tests.** `tests/corpus/a-single-quote-in-a-subscript-is-not-a-quote.sh` (64
+rows: the substitution running, side effects, parameters, backquotes, a nested
+`" … "`, backslash-under-double-quoting, an unterminated quote, no tilde
+expansion, the unparsable body's runtime diagnostic in bare / double-quoted /
+`set +B` form, a substring bound, an assignment subscript, associative keys
+taking the *other* reading, runtime subscripts through `${!s}` / `unset` /
+`printf -v` / `read`, `declare`'s own operand, and `${x@P}`), plus the two rows
+restored to
 `tests/corpus/the-brace-scanner-reads-the-command-substitutions-a-single-quote-hid.sh`
-— `echo "[${a['$(fi)']}]"` and `echo "[${z:'$(fi)':1}]"`, both of which bash
-answers from `brace_gobbler` with the *word's* remainder (`` `fi)']}]"' `` and
-`` `fi)':1}]"' ``). `Shell::gobble_scan` would report them correctly today if
-the substitutions were in the parse at all; it cannot see into a
-`WordPart::SingleQuoted`, and must not, because at the top level that part is
-exactly what the gobbler skips.
+— `echo "[${a['$(fi)']}]"` and `echo "[${y:'$(fi)':1}]"`, which bash answers
+from `brace_gobbler` with the *word's* remainder (`` `fi)']}]"' `` and
+`` `fi)':1}]"' ``).
+
+### TD-OILS-A-SUBSCRIPT-INSIDE-AN-ARITHMETIC-WORD-IS-NOT-EXPANDED-IN-PLACE-FIRST. `[[ -v "a['1']" ]]` and `(( a['1'] ))` report where bash accepts — 2026-08-10 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::element_is_set` (the `[[ -v ]]`
+operand) and the `(( … ))` / `let` string reader. osh hands the subscript text
+straight to the arithmetic reading, which is right for `${a[…]}` but wrong for a
+word that reaches arithmetic *as a whole word*: bash expands such a word's
+subscript **once, in place, before the arithmetic sees it**, and with a quoting
+in which a `'` is a real quote.
+
+**Reproduce.**
+
+```sh
+a=(A B C D E)
+[[ -v "a['1']" ]];        echo "1 rc=$?"
+[[ -v "a['\$(echo 1)']" ]];  echo "2 rc=$?"
+[[ -v "a['x y']" ]];      echo "3 rc=$?"
+s='$(echo 1)'
+(( a["'"$s"'"] ));        echo "4 rc=$?"
+[[ -v "a[\$s]" ]];        echo "5 rc=$?"
+t='~'; (( a[$t] ));       echo "6 rc=$?"
+```
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| 1 | `rc=0`, no diagnostic | `'1': syntax error: operand expected (error token is "'1'")` |
+| 2 | `\$(echo 1): syntax error: operand expected (error token is "\$(echo 1)")` | `'$(echo 1)': …` |
+| 3 | `x y: syntax error in expression (error token is "y")` | `'x y': syntax error: operand expected …` |
+| 4 | `\'$(echo 1)\': syntax error: operand expected …` | `'$(echo 1)': …` |
+| 5 | `$s: …` — the `$s` was **not** expanded | `$(echo 1): …` — osh expanded it |
+| 6 | `\~: …` | `~: …` |
+
+**What bash does.** `expand_word_internal`'s `[` row fires only when the word is
+being expanded with `Q_ARITH` (subst.c:11103-11115), and then it calls
+`expand_array_subscript` (subst.c:10836-10894):
+
+```c
+  exp = substring (string, si+1, ni);
+  t = expand_subscript_string (exp, quoted & ~(Q_ARITH|Q_DOUBLE_QUOTES));
+  free (exp);
+  exp = t ? sh_backslash_quote (t, abstab, 0) : savestring ("");
+                                                  /* subst.c:10878-10881 */
+```
+
+Two things follow. The subscript is expanded with `Q_ARITH` and `Q_DOUBLE_QUOTES`
+**masked off** — quoting 0 — so a `'` there *is* a quote and is removed, which is
+why row 1 succeeds and rows 2-4 show no quotes (or backslashed ones). And the
+result is `sh_backslash_quote`d against `abstab`, which holds `[`, `]`, `$`,
+`` ` ``, `~`, `\`, `'` and `"` (subst.c:10848-10857) — the characters that would
+start *another* expansion — so the arithmetic evaluator's own second read cannot
+expand it again. Row 5 is that guard observed directly.
+
+`Q_ARITH` reaches the word from `cond_expand_word (cond->left->op, varop ? 3 : 0)`
+for `[[ -v ]]` (execute_cmd.c:3919, `special == 3` → `qflags = Q_ARITH`,
+subst.c:4130) and from `expand_arith_string (…, Q_DOUBLE_QUOTES|Q_ARITH)` for
+`(( … ))`. A `${a[…]}` subscript never comes this way — it is carved out by
+`extract_dollar_brace_string` and handed to `expand_arith_string (exp,
+Q_DOUBLE_QUOTES|Q_ARITH|Q_ARRAYSUB)` (arrayfunc.c:1354) — which is why the two
+readings differ and why
+`tests/corpus/a-single-quote-in-a-subscript-is-not-a-quote.sh` is right for the
+brace form while these rows are wrong.
+
+**The fix.** Give osh an `expand_array_subscript` equivalent: when a word is
+expanded *as an arithmetic string* (the `[[ -v ]]` operand, `(( … ))`, `let`),
+walk it for a `[ … ]`, expand the contents with ordinary quoting (a `'` is a
+quote), backslash-quote the result against bash's `abstab` set, and splice it
+back before the arithmetic reader runs. `sh_backslash_quote` (lib/sh/shquote.c:262-307)
+escapes every table character alike, so the asymmetry in the measured error
+tokens — `\~` and `\'` keep their backslash (rows 4, 6) while `$` comes back bare
+(rows 3-5) — comes *after* it, from the **second** read: that one runs under
+`Q_DOUBLE_QUOTES`, where a `\` is dropped before `$`, `` ` ``, `"` and `\` and
+kept before anything else. Measured directly, so the escaping the fix emits must
+survive the same rule:
+
+```sh
+a=(A B C D E)
+(( a[\~] ))   # error token "\~"    — backslash kept
+(( a[\$] ))   # error token "$"     — backslash eaten
+(( a[\'] ))   # error token "\'"    — kept
+(( a[\`] ))   # error token "`"     — eaten
+```
+
+**Not caused by the `' … '` work of 2026-08-10** (TD-OILS-A-SINGLE-QUOTED-RUN-IN-
+A-BARE-SUB-WORD-OF-A-BRACE-IS-A-QUOTE); it was measured during it, and rows 1-3
+diverge identically before and after.
 
 ### TD-OILS-A-BACKQUOTE-BODY-INSIDE-DOUBLE-QUOTES-IS-NOT-GOBBLED. A backquote body inside `" … "` is run where bash only scanned it — 2026-08-10
 
@@ -1866,16 +1987,18 @@ The walk that piece 2 does is structural rather than a second pass over the
 text, and some shapes fall outside what the parse can hand it. Each has its own
 entry:
 
-* a `' … '` in a **subscript or a substring bound** is still a quote, so the
-  substitution it hides is not in the parse for the scan to find —
-  TD-OILS-A-SINGLE-QUOTED-RUN-IN-A-BARE-SUB-WORD-OF-A-BRACE-IS-A-QUOTE;
 * a **backquote body inside `" … "`** is text, not parts —
   TD-OILS-A-BACKQUOTE-BODY-INSIDE-DOUBLE-QUOTES-IS-NOT-GOBBLED (which also notes
   that a `<( … )` / `>( … )` body is not descended into).
 
-(A **redirection target** was a third — the scan never reached one because the
-target was not brace-expanded at all. That is fixed:
-TD-OILS-A-REDIRECTION-TARGET-IS-NOT-BRACE-EXPANDED.)
+(Two were fixed since. A **redirection target** was one — the scan never reached
+it because the target was not brace-expanded at all:
+TD-OILS-A-REDIRECTION-TARGET-IS-NOT-BRACE-EXPANDED. A `' … '` in a **subscript
+or a substring bound** was the other — it was read as a quote, so the
+substitution it hides was not in the parse for the scan to find; the run now
+carries its arithmetic reading beside its text, and the scan follows that reading
+when it is inside `" … "`:
+TD-OILS-A-SINGLE-QUOTED-RUN-IN-A-BARE-SUB-WORD-OF-A-BRACE-IS-A-QUOTE.)
 
 The `$' … '` splice named above is a further one: bash stores the *translation* and
 the gobbler meets a bare `$( … )` in it, echoing `` `fi)}]"' `` with no `'`. osh

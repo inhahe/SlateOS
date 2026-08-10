@@ -43,6 +43,83 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
+### TD-OILS-ARITHMETIC-PARSES-BEFORE-IT-EVALUATES-SO-A-NAMES-OWN-ERROR-NEVER-SURFACES. `x='1 + '; echo $(( 4 x ))` blames the leftover `x` where bash blames the `+` inside `x` — 2026-08-09 — OPEN
+
+**Where:** `userspace/oils/src/arith.rs`. The module is deliberately two-phase —
+`fn parse(expr, vars: &dyn VarLookup) -> Expr` (~543) builds an AST, then
+`fn eval_expr(e, vars: &mut dyn VarLookup, depth)` (~1343) walks it — and the
+module doc says why: "The two-phase design is what makes assignment possible …
+and `&&`/`||`/`?:` short-circuit so side effects only happen on the branch
+actually taken." bash is single-phase: its recursive-descent parser *is* the
+evaluator, and it suppresses the untaken branch with a `noeval` counter instead.
+
+**Reproduce.**
+
+```sh
+bad='1 + '
+w=$' 3 bad '
+echo "D [$(( $w ))]"        # the leftover arrives by splicing
+echo "E [$(( 4 bad ))]"     # …and written in the source
+echo "F [$(( 4 zzz ))]"     # zzz unset
+```
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| D | `1 + : syntax error: operand expected (error token is "+ ")` | `3 bad  : syntax error in expression (error token is "bad  ")` |
+| E | `1 + : syntax error: operand expected (error token is "+ ")` | `4 bad : syntax error in expression (error token is "bad ")` |
+| F | `4 zzz : syntax error in expression (error token is "zzz ")` | same ✅ |
+
+Both abandon the `echo` and continue the script, so only the diagnostic differs.
+The short-circuit shapes already agree — `$(( 0 ? bad : 5 ))`, `$(( 1 ? 5 : bad ))`
+and `$(( 0 && bad ))` are `5`, `5`, `0` with no report on both.
+
+**Why (read in the source, after measuring).** `readtok` evaluates a NAME **the
+moment it lexes it**, not when the parser consumes it:
+
+```c
+      /* The tests for PREINC and PREDEC aren't strictly correct, but they
+	 preserve old behavior if a construct like --x=9 is given. */
+      if (lasttok == PREINC || lasttok == PREDEC || peektok != EQ)
+        {
+          lastlval = curlval;
+	  tokval = expr_streval (tokstr, e, &curlval);   /* expr.c:1385-1390 */
+        }
+```
+
+and `expr_streval` recurses into the value: `tval = (value && *value) ?
+subexpr (value) : 0` (expr.c:1231). Lexing runs one token ahead of the parse, so
+a *leftover* NAME has already been evaluated by the time `subexpr` reaches its
+`if (curtok != 0) evalerror ("syntax error in expression")`. Whichever error
+comes first wins, and the inner one always does.
+
+Three sub-rules fall out, and F above measures the third:
+
+* the suppression is `noeval`, checked at the very top of `expr_streval`
+  ("If we are suppressing evaluation, just short-circuit here", expr.c:1157-1160)
+  — so a NAME in an untaken branch is lexed but never recursed into;
+* a NAME immediately followed by `=` is not evaluated either (`peektok != EQ`),
+  which is what makes `x=1` an assignment rather than a read;
+* an unset or **empty** value does not recurse at all (`value && *value`), so
+  `$(( 4 zzz ))` reports the leftover — which is why osh gets F right by
+  accident.
+
+**Proper fix.** Interleave the two phases: make `arith.rs` a single-pass
+recursive-descent *evaluator* with a `noeval` depth counter, the way expr.c is,
+so a NAME resolves (and recurses through `str_to_val`) at the point it is lexed
+and `&&`/`||`/`?:` raise `noeval` over the branch they skip instead of relying
+on a not-yet-walked AST. That deletes the `Expr` AST and merges `parse`/
+`eval_expr` — a real refactor of the file, but the two-phase split is the whole
+cause and no smaller change reaches it. (Half-measures do not work: eagerly
+resolving names during the current parse would evaluate untaken branches, which
+is the very thing the AST was introduced to avoid.)
+
+Note the assignment guard has to survive the merge: expr.c manages it by
+lexing one token ahead with `noeval = 1` and looking for `EQ` (`SAVETOK`/
+`RESTORETOK` around a recursive `readtok`, expr.c:1373-1382), which is the same
+one-token lookahead osh's parser already has.
+
+---
+
 ### TD-OILS-A-BRACKET-ARITHMETIC-GIVES-UP-AFTER-A-FAILED-SUBSTITUTION. `v='A$[1+$(fi)]B'; echo "${v@P}"` stops at the first diagnostic where bash reports twice and evaluates on — 2026-08-09 — ✅ FIXED 2026-08-09
 
 **Where:** `userspace/oils/src/interp.rs`, `Shell::arith_dolparen` — the tail of

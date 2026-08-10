@@ -18447,6 +18447,12 @@ impl Shell {
             .and_then(word_as_plain_literal)
             .is_some_and(is_declaration_builtin);
         let mut argv: Vec<Str> = Vec::new();
+        // Sampled *before* the words are expanded rather than after: a command
+        // whose words all vanish has no name either, and its status is the last
+        // substitution's just the same — so a substitution written in the word
+        // list counts, not only one written in an assignment. See the
+        // `argv.is_empty()` branch below.
+        let comsub_before = self.comsub_count;
         // A compound operand is *performed* where it stands in the word list, so
         // it binds here rather than after the list has expanded, and the words
         // written after it are expanded with it bound. See [`CompoundBinding`].
@@ -18480,16 +18486,22 @@ impl Shell {
             return flow;
         }
 
-        // Pure assignment (no command word): persist the variables/arrays.
+        // No command name: persist the variables/arrays and stop. Reached by a
+        // pure assignment, and by a command whose words all expanded to nothing.
         // A readonly-variable rejection makes the whole command fail (status 1).
         if argv.is_empty() {
-            // The exit status of a pure assignment is that of the last command
-            // substitution performed while expanding its values (bash), or 0 if
-            // there was none — so `x=$(false); echo $?` reports 1 while
-            // `false; x=1; echo $?` reports 0. `$?` read inside the value still
-            // sees the prior status (expansion happens before the reset below).
-            // A readonly-variable rejection fails the whole command (status 1).
-            let comsub_before = self.comsub_count;
+            // The exit status is that of the last command substitution the
+            // command performed (bash), or 0 if it performed none — so
+            // `x=$(false); echo $?` reports 1 while `false; x=1; echo $?`
+            // reports 0. `$?` read inside a value still sees the prior status
+            // (expansion happens before the reset below). A readonly-variable
+            // rejection fails the whole command (status 1).
+            //
+            // The word list counts as much as the assignments do, which is why
+            // `comsub_before` is sampled above them both: `$(exit 5)` alone is
+            // 5, and `x=1 $(exit 5)` is 5 as well. Where both have one the
+            // assignments' wins, because bash performs them second —
+            // `x=$(exit 7) $(exit 5)` is 7.
             let refused_outer = self.assign_refused_maintained.take();
             let mut ok = true;
             // An assignment statement is applied with no command name in force:

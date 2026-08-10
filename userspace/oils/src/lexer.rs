@@ -4656,6 +4656,12 @@ impl Lexer {
         // literal content; only balanced `]` closes it. Quotes/expansions inside
         // are still processed normally.
         let mut sub_depth = 0usize;
+        // The line the outermost `[` stood on, for the diagnostic if it never
+        // closes. bash reports a matched pair at its *opening* line —
+        // `parser_error (start_lineno, …)` with `start_lineno = line_number`
+        // taken on entry (parse.y:3701, 3711) — so a subscript that runs off the
+        // end over several lines still names the line it began on.
+        let mut sub_line = 0u32;
         // Depth of nested `extglob` groups. Inside a group the pattern
         // metacharacters `(`, `)`, `|`, whitespace, etc. are literal word content
         // rather than word/operator delimiters, so the whole `@(a|b c)` stays one
@@ -4682,6 +4688,7 @@ impl Lexer {
                 && segs.is_empty()
                 && ((assign_ok && is_valid_name(&lit)) || (array_elem && lit.is_empty()))
             {
+                sub_line = self.cur_line();
                 lit.push(b'[');
                 self.pos += 1;
                 sub_depth += 1;
@@ -4850,6 +4857,17 @@ impl Lexer {
                 }
                 _ => self.take_into(&mut lit),
             }
+        }
+        // A subscript in assignment position is one of the reader's matched
+        // pairs, not text that happens to hold a `[`: bash reads it with
+        // `parse_matched_pair (cd, '[', ']', &ttoklen, P_ARRAYSUB)` and, when
+        // that comes back `&matched_pair_error`, does `return -1; /* Bail
+        // immediately. */` (parse.y:5145-5149). So running off the end here is
+        // the reader's `unexpected EOF while looking for matching `]'` — the
+        // input up to the `[` has already been read and run, and everything
+        // after it is swallowed by the search.
+        if sub_depth > 0 {
+            return Err(eof_matching(']').at(sub_line));
         }
         flush_lit(&mut segs, &mut lit);
         Ok(segs)

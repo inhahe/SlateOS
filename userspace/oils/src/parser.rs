@@ -5589,6 +5589,17 @@ impl Parser {
         // segments, up to the segment that carries the closing `]`.
         let mut sub_segs: Vec<Seg> = Vec::new();
         let after_open = first.get(open + 1..).unwrap_or_default();
+        // How many brackets the scan below stands inside. `[`/`]` nest — bash
+        // finds the close with `skipsubscript` (general.c's `assignment`), never
+        // with the first `]` it meets — so `c[b[$i]]=R` is an assignment to
+        // `c[b[$i]]` and not a command named `c[b[1]]=R`.
+        let mut depth = 1usize;
+        // The close cannot be in this seg: [`balanced_subscript_end`] counts the
+        // same brackets over the same bytes and reported none, which is why this
+        // function was called at all. What the seg *can* hold is further opens
+        // (`c[b[` stands at depth 2), which is the whole reason for the call.
+        let closed_here = subscript_close_in_lit(after_open, &mut depth);
+        debug_assert!(closed_here.is_none());
         if !after_open.is_empty() {
             sub_segs.push(Seg::Lit(after_open.to_vec()));
         }
@@ -5600,8 +5611,11 @@ impl Parser {
                 value_segs.push(seg.clone());
                 continue;
             }
+            // Only a literal run can carry the close: a `'…'`, a `"…"`, a
+            // `$(…)` and a `${…}` are each one segment, and `skipsubscript`
+            // steps over each of them whole — `p["b[1]"]=R` keys on `b[1]`.
             if let Seg::Lit(s) = seg
-                && let Some(close) = s.iter().position(|&b| b == b']')
+                && let Some(close) = subscript_close_in_lit(s, &mut depth)
             {
                 let before = s.get(..close).unwrap_or_default();
                 if !before.is_empty() {
@@ -7774,6 +7788,33 @@ fn balanced_subscript_end(s: BStr<'_>) -> Option<usize> {
     None
 }
 
+/// Where the `]` closing an already-open subscript falls in the literal run
+/// `s`, or `None` when the run does not close it. `depth` arrives holding how
+/// many brackets are open and leaves holding how many still are — so a caller
+/// walking a word's segments can carry it from one literal run to the next.
+///
+/// This is [`balanced_subscript_end`]'s counting, resumable: the same rule that
+/// `[`/`]` nest, applied to a subscript whose text is spread over several
+/// segments because it holds an expansion. The segments in between are quoted
+/// runs and substitutions, which `skipsubscript` steps over whole and which
+/// therefore contribute no brackets at all — so counting the literal runs is
+/// the whole of the job. See [`Parser::spanning_subscript_assignment`].
+fn subscript_close_in_lit(s: BStr<'_>, depth: &mut usize) -> Option<usize> {
+    for (i, &b) in s.iter().enumerate() {
+        match b {
+            b'[' => *depth = depth.saturating_add(1),
+            b']' => {
+                *depth = depth.saturating_sub(1);
+                if *depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// The stand-in name a `${!@<op>}` / `${!*<op>}` modifier is parsed against, so
 /// that it comes out as the scalar operator bash applies rather than the
 /// whole-list one the same text would mean written directly. It never survives
@@ -9779,6 +9820,32 @@ mod tests {
         assert!(sc.assignments[0].index.is_some());
         assert!(!sc.assignments[0].append);
         assert!(sc.words.is_empty());
+    }
+
+    /// The subscript closes where `skipsubscript` says, so a bracket nested
+    /// inside it does not end the word early and leave a command behind. bash
+    /// measures it with `skipsubscript` (general.c:469), and it is only the
+    /// *spanning* form that ever had to count across segments.
+    #[test]
+    fn a_nested_bracket_in_a_spanning_subscript_is_still_an_assignment() {
+        let assigns_to = |src: &str| {
+            let prog = parse(src).unwrap();
+            let Command::Simple(sc) = &prog.items[0].list.first.commands[0] else {
+                panic!("{src}");
+            };
+            (sc.assignments.len(), sc.words.len())
+        };
+        // The nested `[` raises the depth the closing `]` has to come back
+        // through; taking the first `]` instead leaves `]=R` and a command.
+        assert_eq!(assigns_to("c[b[$i]]=R"), (1, 0));
+        assert_eq!(assigns_to("c[b[$i]]+=R"), (1, 0));
+        assert_eq!(assigns_to("c[b[b[$i]]]=R"), (1, 0));
+        assert_eq!(assigns_to("c[b[$i]x]=R"), (1, 0));
+        // A quoted run is one segment and carries no brackets at all.
+        assert_eq!(assigns_to(r#"c["b[1]"$i]=R"#), (1, 0));
+        assert_eq!(assigns_to(r#"c[b[$i]"]"]=R"#), (1, 0));
+        // Still not an assignment when the `]` is not what the `=` follows.
+        assert_eq!(assigns_to("c[b[$i]]x=R"), (0, 1));
     }
 
     #[test]

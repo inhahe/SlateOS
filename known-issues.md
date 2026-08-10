@@ -325,12 +325,16 @@ name check, and the already-agreeing rows that pin the gate down).
 A-BARE-SUB-WORD-OF-A-BRACE-IS-A-QUOTE); it was measured during it, and every row
 above diverged identically before and after.
 
-### TD-OILS-A-NESTED-BRACKET-IN-AN-ASSIGNMENT-TARGET-IS-NOT-AN-ASSIGNMENT. `c[b['1']]=R` runs as a command — 2026-08-10 — OPEN
+### TD-OILS-A-NESTED-BRACKET-IN-AN-ASSIGNMENT-TARGET-IS-NOT-AN-ASSIGNMENT. `c[b['1']]=R` runs as a command — 2026-08-10 — ✅ FIXED 2026-08-10
 
-**Where:** `userspace/oils/src/parser.rs`, `Parser::split_name_subscript` and the
-assignment sniffing around it. They stop at the first `]` rather than matching
-brackets, so a word whose subscript holds a nested one is not recognised as an
-assignment at all and is run as a command.
+**Where:** `userspace/oils/src/parser.rs`,
+`Parser::spanning_subscript_assignment` — the branch that recognises an
+assignment whose subscript holds an expansion and so arrives as several lexer
+segments rather than as one literal. It took the first `]` in a later literal
+segment, so a word whose subscript held a nested bracket was not recognised as
+an assignment at all and was run as a command. (The all-literal branch,
+`balanced_subscript_end`, already counted brackets and was always right — which
+is why `c[b[1]]=R` worked and `c[b[$i]]=R` did not.)
 
 **Reproduce.**
 
@@ -343,15 +347,130 @@ c[b['1']]=R; echo "rc=$?"
 |---|---|
 | `'1': syntax error: operand expected (error token is "'1'")`, `rc=1` | `c[b[1]]=R: command not found`, `rc=127` |
 
-**The fix.** Both should find the closing `]` the way every other subscript
-reader in the tree now does — `skipsubscript`, i.e. `skip_matched_pair` on
-`[`/`]`, which counts nested brackets and steps over a backslash, a quoted run
-and a `` `…` ``/`$(…)`/`${…}` whole. `wordscan::skip_subscript` is that function;
-`interp.rs`'s `skip_subscript` and `attr_assignment_split` are the two callers
-that already get it right and are worth copying.
+**The fix — done.** bash measures the subscript with `skipsubscript`
+(`newi = skipsubscript (string, indx, (flags & 2) ? 1 : 0);`, general.c:469),
+which is `skip_matched_pair`: `[`/`]` nest, and a quoted run or a substitution
+is stepped over whole. In a segmented word the second half is free — a `'…'`,
+`"…"`, `$(…)` or `${…}` *is* one segment, so it contributes no brackets — and
+the first half is a bracket count that has to survive from one literal run to
+the next. That is the new `subscript_close_in_lit(s, &mut depth)`, a resumable
+`balanced_subscript_end`; `spanning_subscript_assignment` now carries `depth`
+across its segments instead of taking the first `]`.
+
+Fixing the recognition was the whole of it: once the word is an assignment,
+osh's existing subscript reading already reproduced bash's answers for every
+shape probed, including the ones where the two array kinds diverge. An indexed
+subscript takes `array_expand_index` → `expand_arith_string (exp,
+Q_DOUBLE_QUOTES|Q_ARITH|Q_ARRAYSUB)` (arrayfunc.c:1358), whose gate is closed
+for a subscript with no `$`/`` ` ``/CTLESC/`~` — so it goes to
+`string_quote_removal (string, quoted)` (subst.c:11892), where under
+`Q_DOUBLE_QUOTES` a `'` is an ordinary character that *stays* while a `"` is a
+quote that goes. Hence `c[b['1']]=R` is `'1': syntax error` but
+`c[b["1"]]=R` assigns. An associative subscript takes `expand_subscript_string
+(t, 0)` (arrayfunc.c:1593) instead, quoting 0, where the `'` is a real quote —
+so `m[b['x']]=R` is simply the key `b[x]`.
+
+Corpus: `a-nested-bracket-in-an-assignment-target-is-still-an-assignment.sh`.
+Unit test: `parser::tests::a_nested_bracket_in_a_spanning_subscript_is_still_an_assignment`.
 
 Found while measuring TD-OILS-A-SUBSCRIPT-IN-AN-ARITHMETIC-WORD-IS-NOT-EXPANDED-
-IN-PLACE-FIRST; it is the one row of that probe still diverging.
+IN-PLACE-FIRST; it was the one row of that probe still diverging.
+
+### TD-OILS-AN-UNCLOSED-SUBSCRIPT-IN-AN-ASSIGNMENT-POSITION-IS-NOT-A-READER-ERROR. `f[1=R` is a command, not `unexpected EOF` — 2026-08-10 — OPEN
+
+**Where:** `userspace/oils/src/lexer.rs`, the word reader. A `[` that follows a
+name at the head of a word — where an assignment could stand — is one of bash's
+*reader* constructs: `read_token_word` calls
+`parse_matched_pair (0, '[', ']', &dollar_present, P_ARRAYSUB)`, so an unclosed
+one is a syntax error found while reading, not a word that happens to hold a
+`[`. osh reads it as ordinary text and runs it as a command.
+
+**Reproduce.** (Behind `eval` so the search for the `]` swallows only the
+string.)
+
+```sh
+i=1
+eval 'f2[b[$i]=R';   echo "1 rc=$?"
+eval 'f3[1=R';       echo "2 rc=$?"
+eval 'f6[1 x';       echo "3 rc=$?"
+eval 'echo x; f7[1'; echo "4 rc=$?"
+eval 'echo a[1';     echo "5 rc=$?"
+eval '1[1=R';        echo "6 rc=$?"
+```
+
+| row | bash 5.2.37 | osh |
+|---|---|---|
+| 1–4 | `eval: line N: unexpected EOF while looking for matching `]'`, `rc=2` | `f…: command not found`, `rc=127` |
+| 5 | `a[1`, `rc=0` — past the first word there is no assignment to test for | same |
+| 6 | `1[1=R: command not found` — `1` is not a legal variable starter | same |
+
+Row 4 shows the reader really does swallow the rest of the input: `echo x` runs
+first, and then the error. Row 3 shows it swallows past a blank, so the `[` run
+is not word-terminated by one.
+
+osh's diagnostic also carries a stray newline (`f2[b[1]=R⏎: command not
+found`), which suggests the lexer already scans for the `]`, runs off the end,
+and then keeps the text instead of failing — so the fix may be as small as
+turning that give-up into the reader error.
+
+**The fix.** Read the `[` as a matched pair when the word so far is a name and
+the word is in assignment position (bash's `assignment_acceptable`), and raise
+`unexpected EOF while looking for matching `]'` when it does not close.
+Corpus row: `a-nested-bracket-in-an-assignment-target-is-still-an-assignment.sh`
+row 20 is the *unaffected* half, and points here.
+
+Found while writing that case.
+
+### TD-OILS-A-COMPOUND-ASSIGNMENT-WITH-A-BAD-SUBSCRIPT-CREATES-NOTHING. `z=([0]=A [1x]=B)` leaves `z` unset — 2026-08-10 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs`, the array-literal assignment path
+(the `AssignRhs::Array` / `decl_arrays` handling). A keyed element whose
+subscript fails to evaluate aborts the whole assignment, so the variable is
+never created. bash creates it, keeps every element assigned *before* the bad
+one, and drops the bad element and everything after it — `assign_compound_array_list`
+(arrayfunc.c) has already made the variable by the time it walks the list, and
+`array_expand_index`'s failure only breaks the walk.
+
+**Reproduce.**
+
+```sh
+declare -a y=([1x]=R);            echo "1 rc=$?"; declare -p y
+declare -a z=([0]=A [1x]=B [2]=C); echo "2 rc=$?"; declare -p z
+q=([1x]=R);                        echo "4 rc=$?"; declare -p q
+```
+
+| row | bash 5.2.37 | osh |
+|---|---|---|
+| 1 | `declare -a y` | `declare: y: not found` |
+| 2 | `declare -a z=([0]="A")` | `declare: z: not found` |
+| 4 | `declare -a q=()` | `declare: q: not found` |
+
+The error text and the `rc=1` already match; only the variable's existence and
+its surviving elements differ. An *associative* compound assignment does not
+enter this at all — its subscripts are keys, so `declare -A k=([a]=A [1x]=B)`
+succeeds with both keys in both shells.
+
+Under `set -x` a second half of the same bug shows: bash traces the whole
+operand *before* it evaluates any subscript, so
+`set -x; declare -a z=([0]=A [1x]=B [2]=C)` prints
+`+ z=(['0']='A' ['1x']='B' ['2']='C')` and *then* the error. osh prints the
+error alone — the trace is emitted by `compound_expansion_done`, which the bail
+jumps over. (The prefix-assignment spelling `w=(…)` traces correctly in both,
+because its line is written from the source rather than from the expansion.)
+
+**The fix.** The two phases in `AssignRhs::Array` are right, but the subscript
+*arithmetic* is in the wrong one. bash expands the whole word list first
+(`expand_words_no_vars`), and only then walks it in
+`assign_compound_array_list`, calling `array_expand_index` per element — so a
+subscript that will not evaluate is a phase-2 failure, not a phase-1 one. Move
+`eval_arith_index_text` out of phase 1 (phase 1 keeps expanding the subscript's
+*text*, which is what the trace needs), and on a failing element break the
+phase-2 walk rather than unwinding the assignment. Everything phase 2 has
+already done then stands: the trace, the array's creation, the clear, and the
+elements bound before the failure. Note row 4's `q=([1x]=R)`: the variable is
+created *empty*, so the creation is not conditional on any element succeeding.
+
+Found while probing TD-OILS-A-NESTED-BRACKET-IN-AN-ASSIGNMENT-TARGET-IS-NOT-AN-ASSIGNMENT.
 
 ### TD-OILS-A-BACKQUOTE-BODY-INSIDE-DOUBLE-QUOTES-IS-NOT-GOBBLED. A backquote body inside `" … "` is run where bash only scanned it — 2026-08-10
 

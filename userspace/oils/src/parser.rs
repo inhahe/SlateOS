@@ -329,8 +329,41 @@ impl ParseError {
 
     /// Mark this error as raised from inside a `$( … )`/`<( … )` body, so the
     /// caller unwinds instead of merely recording status 2. See [`Self::fatal`].
+    ///
+    /// Unless the body simply *ran out*. bash decides this on `EOF_Reached`, and
+    /// only the other branch ends the shell (parse.y:4169-4194):
+    ///
+    /// ```c
+    ///   if (EOF_Reached)
+    ///     {
+    ///       ...
+    ///       /* yyparse() has already called yyerror() and reset_parser() */
+    ///       parser_state |= PST_NOERROR;
+    ///       return (&matched_pair_error);
+    ///     }
+    ///   else if (r != 0)
+    ///     {
+    ///       /* Non-interactive shells exit on parse error in a command substitution. */
+    ///       ...
+    ///       if (interactive_shell == 0)
+    ///         jump_to_top_level (FORCE_EOF);  /* This is like reader_loop() */
+    /// ```
+    ///
+    /// `&matched_pair_error` is what the *enclosing* reader gets back from any
+    /// pair it left open, so a body that ends inside one costs the enclosing
+    /// command and nothing more: `echo $(f[1)` is status 2 and the script goes
+    /// on, exactly as a bare `f[1` is. A body whose *grammar* is wrong —
+    /// `echo $(fi)` — ends the shell instead.
+    ///
+    /// [`Self::is_incomplete`] is that same distinction read off the message,
+    /// which is sound here because bash's two end-of-input diagnostics are
+    /// precisely the ones `EOF_Reached` accompanies. Note the normalisation in
+    /// [`parse_paren_body_mapped`] runs first: a body that ends mid-construct
+    /// with the `)` still in the stream is renamed to an error *on* that `)`,
+    /// and so is fatal — which is what bash does with it too, the `)` being a
+    /// token `yyparse` really did get.
     fn in_paren_body(mut self) -> Self {
-        self.fatal = true;
+        self.fatal = self.fatal || !self.is_incomplete();
         self
     }
 
@@ -501,9 +534,10 @@ pub fn parse_procsub_body(
     open_line: u32,
     opts: ParseOpts,
 ) -> Result<Program, ParseError> {
-    let Spanned { mut toks, mut lines, ends, dparens, .. } = tokenize_paren_body(src, opts)
-        .map_err(|e| ParseError::from(e).in_paren_body())?;
-    map_lines(&mut toks, &mut lines, &LineMap::Offset(open_line.saturating_sub(1)));
+    let phys = LineMap::Offset(open_line.saturating_sub(1));
+    let Spanned { mut toks, mut lines, ends, dparens, .. } =
+        tokenize_paren_body(src, opts).map_err(|e| paren_body_lex_error(e, &phys))?;
+    map_lines(&mut toks, &mut lines, &phys);
     parse_tokens_ending(toks, lines, Spans::of(src, ends, &dparens), opts, true)
         .map_err(ParseError::in_paren_body)
 }
@@ -2141,33 +2175,38 @@ pub fn parse_cmdsub_body_unmarked(
     close_line: u32,
     opts: ParseOpts,
 ) -> Result<Program, ParseError> {
+    let phys = cmdsub_body_lines(src, close_line);
     // The body is lexed with the substitution's own `)` standing where the
     // implicit trailing newline would otherwise go, because that is the token
     // bash's parser sees after the body's last command. See
     // [`tokenize_paren_body`].
-    let spanned = tokenize_paren_body(src, opts)
-        .map_err(|e| ParseError::from(e).in_paren_body())?;
-    parse_paren_body_tokens(spanned, src, close_line, opts)
-}
-
-/// [`parse_cmdsub_body_unmarked`] from its tokens on, split out for the one
-/// caller that has to know *whether the lex failed* before it decides what to do
-/// next — see [`comsub_reprint_error`].
-fn parse_paren_body_tokens(
-    spanned: Spanned,
-    src: BStr<'_>,
-    close_line: u32,
-    opts: ParseOpts,
-) -> Result<Program, ParseError> {
-    // The body's line 1 is the line `$(` sits on: the closing `)` is on the
-    // body's last line, so stepping back over the body's newlines lands there.
-    let newlines =
-        u32::try_from(src.iter().filter(|&&b| b == b'\n').count()).unwrap_or(u32::MAX);
-    let phys = LineMap::Offset(close_line.saturating_sub(newlines).saturating_sub(1));
+    let spanned = tokenize_paren_body(src, opts).map_err(|e| paren_body_lex_error(e, &phys))?;
     parse_paren_body_mapped(spanned, src, &phys, opts)
 }
 
-/// [`parse_paren_body_tokens`] with the renumbering spelled out, for the caller
+/// The renumbering that puts a `$( … )` body's lines back into the enclosing
+/// source's.
+///
+/// The body's line 1 is the line `$(` sits on: the closing `)` is on the body's
+/// last line, so stepping back over the body's newlines lands there.
+fn cmdsub_body_lines(src: BStr<'_>, close_line: u32) -> LineMap {
+    LineMap::Offset(close_line.saturating_sub(newlines(src)).saturating_sub(1))
+}
+
+/// A paren body's *lexing* error, renumbered and marked.
+///
+/// A body that lexes has its tokens renumbered by [`map_lines`] afterwards; one
+/// that does not never reaches that, so the shift is applied to the error's own
+/// line here. Without it a subscript left open inside a substitution — the one
+/// reader error a body can raise once the enclosing scan has already found the
+/// `)` — would name the body's line 1 rather than the line it is written on.
+fn paren_body_lex_error(e: crate::lexer::LexError, phys: &LineMap) -> ParseError {
+    let e = ParseError::from(e);
+    ParseError { line: e.line.map(|l| phys.map(l)), ..e }.in_paren_body()
+}
+
+/// [`parse_cmdsub_body_unmarked`] from its tokens on, with the renumbering
+/// spelled out, for the caller
 /// that wants the body's *own* lines rather than the enclosing source's.
 ///
 /// [`comsub_reprint_error`] is that caller: it never reports the error it gets

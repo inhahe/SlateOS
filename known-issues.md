@@ -697,10 +697,35 @@ eval 'echo $(h[1 2]=v';   echo "3 rc=$?"
 
 Row 3 is the control: when the body holds nothing unclosed, both name `)`.
 
+**The same root cause, the other way round.** The pre-scan also stops the
+subscript *too early* when the `)` is present. bash's `[` scan does not know
+about the substitution at all — it keeps reading, so it swallows the `)` and
+whatever follows, and the pair that ends up unclosed is whichever one the text
+after the `)` opens:
+
+```sh
+eval 'echo "$(f[1)""';    echo "1 rc=$?"
+eval 'echo "$(f[1)"a"b"'; echo "2 rc=$?"
+eval 'echo $(f[1)"';      echo "3 rc=$?"
+```
+
+| row | bash 5.2.37 | osh |
+|---|---|---|
+| 1 | `` …matching `]' `` — the two `"` after the `)` pair up, so the `[` scan runs to the end | `` …matching `"' `` |
+| 2 | `` …matching `"' `` — three `"`, so the last one is the pair left open | `` …matching `]' `` |
+| 3 | `` …matching `"' `` | same |
+
+Row 3 matches only because osh's body error and bash's quote error happen to
+name the same delimiter. All three are `rc=2` in both shells: the *fatality* of
+a body that runs out is settled — see
+`a-substitution-body-that-runs-out-costs-only-the-command.sh` — and what is left
+is which delimiter gets named.
+
 **The fix.** Read the `$(` body with the real reader and let its error out,
-rather than pre-scanning for the `)`. Note the reporting line still has to be
-the substitution's own when *it* is the construct left open (row 3), which
-`LexError::at`'s never-overwrite rule already gives.
+rather than pre-scanning for the `)` — and let a subscript the reader opens
+inside it run past that `)` the way bash's does. Note the reporting line still
+has to be the substitution's own when *it* is the construct left open (row 3 of
+the first table), which `LexError::at`'s never-overwrite rule already gives.
 
 Found while fixing TD-OILS-STARTS-COMMAND-DIVERGES-FROM-COMMAND-TOKEN-POSITION.
 

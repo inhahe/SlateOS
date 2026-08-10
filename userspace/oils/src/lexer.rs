@@ -4292,14 +4292,32 @@ impl Lexer {
                         }
                     }
                 }
-                '$' => {
-                    if let Some(seg) = self.read_dollar(false)? {
+                '$' => match self.read_dollar(false) {
+                    Ok(Some(seg)) => {
                         flush_lit(&mut segs, &mut lit);
                         segs.push(seg);
-                    } else {
-                        lit.push(b'$');
                     }
-                }
+                    Ok(None) => lit.push(b'$'),
+                    // A construct left open in text that reached the shell as a
+                    // *value* is a runtime failure, not a lexing one — this loop
+                    // included, which reads the operand of a `${ … }`. bash has
+                    // no operand re-lex at all: the operand of a
+                    // `${x:-w}` is handed straight back to `expand_word_internal`
+                    // (`parameter_brace_expand_word`, subst.c:7078), so a
+                    // construct left open in it fails exactly where one left open
+                    // in the enclosing string does — at expansion, not at a scan.
+                    // Measured: `a='A${x:-$[ 1 + 2 }B'; "${a@P}"` is `A$[ 1 + 2 B`
+                    // in bash, the operand keeping itself whole
+                    // ([`crate::interp::Shell::expand_unclosed`]); it is only an
+                    // error when a *parser* read the same text, and
+                    // [`Lexer::unclosed_seg`] keeps that case an error by only
+                    // answering to a carrier [`Lexer::unread_eof`] raised.
+                    Err(e) => {
+                        flush_lit(&mut segs, &mut lit);
+                        segs.push(self.unclosed_seg(e)?);
+                        return Ok(segs);
+                    }
+                },
                 _ => self.take_into(&mut lit),
             }
         }
@@ -4962,8 +4980,11 @@ impl Lexer {
         e.unclosed(UnreadEof::Subst(what))
     }
 
-    /// Take a scan's failure as the *segment* that carries it, for the two loops
-    /// that read text no parser ever read. A construct left open there is a
+    /// Take a scan's failure as the *segment* that carries it, for the three
+    /// loops that read text no parser ever read — a double-quoted run
+    /// ([`Lexer::read_double_quote_until`]), a here-document body, and the
+    /// operand of a `${ … }` ([`Lexer::read_word_verbatim`]). A construct left
+    /// open there is a
     /// runtime failure rather than a lexing one, so the scan keeps what it has
     /// and records the reporter; anything else is still an error. See
     /// [`UnreadEof`].
@@ -6110,7 +6131,20 @@ impl Lexer {
                                 });
                             }
                         }
-                        Some('[') => {
+                        // `$[ … ]` is a row of `parse_matched_pair`'s and **not**
+                        // one of `extract_dollar_brace_string`'s: the
+                        // expansion-time scan has rows for `` ` ``, `$(`, `<(`,
+                        // `"`, `'` and a `[` subscript, and nothing for `$[`
+                        // (subst.c:1881-1950). So which scan is reading this text
+                        // decides whether a `$[` with no `]` may swallow the `}`.
+                        // Measured, `"${x:-$[ 1 + 2 }B"` written in a script is a
+                        // parse error in both shells — the parser's row does
+                        // swallow the quote — while the same text under `@P`
+                        // closes its brace at the `}` and expands the operand
+                        // `$[ 1 + 2 ` on its own, which then keeps itself whole
+                        // (see [`crate::interp::Shell::expand_unclosed`]):
+                        // `A${x:-$[ 1 + 2 }B` is `A$[ 1 + 2 B`.
+                        Some('[') if !self.here_text => {
                             raw.push(b'[');
                             self.pos += 1;
                             let sub_open = self.cur_line();

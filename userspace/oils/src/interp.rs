@@ -27450,6 +27450,30 @@ impl Shell {
                             b": bad substitution\n"
                         ]);
                         self.prompt_failed = true;
+                        return Str::new();
+                    }
+                    // `$[`'s NULL is the one `param_expand` answers by keeping
+                    // the string it was handed — all of it, from before the
+                    // construct as well as after:
+                    //
+                    // ```c
+                    //   temp = extract_arithmetic_subst (string, &t_index);
+                    //   if (temp == 0)
+                    //     { temp = savestring (string);
+                    //       if (expanded_something) *expanded_something = 0;
+                    //       goto return0; }        /* subst.c:10650-10661 */
+                    // ```
+                    //
+                    // So the answer is everything expanded so far *plus* the
+                    // original string entire, and `*sindex = zindex` leaves the
+                    // caller at the end with nothing more to walk. Measured:
+                    // `j='X$[9]Y$[ 1 + 2 Z'; "${j@P}"` is
+                    // `X9YX$[9]Y$[ 1 + 2 Z`. A `$((` that ran out has no such
+                    // arm — its NULL falls through to `comsub` and
+                    // `command_substitute` does nothing with it — which is why
+                    // the two spellings disagree here and nowhere else.
+                    if *close == ']' {
+                        return text.clone();
                     }
                     return Str::new();
                 }

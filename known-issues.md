@@ -48111,6 +48111,20 @@ so everything that reads off `shell_input_line` can be answered from it.
   osh lowers those bodies later, while the copy is being re-read, so the two
   central stamping sites ask for the pre-push echo whenever the error already
   names a line — which is exactly an error raised in a `$( … )` body of its own.
+- `Lexer::take_nul_word` emits the word the popped buffer's NUL starts. A copy
+  whose last character was its line's newline is exhausted with the reader's
+  saved index on that NUL, which `shell_getc` hands back as input and
+  `read_token_word` takes for the start of a word — so the token buffer opens
+  with a NUL and the word's *value* is `""` however much text is appended after
+  it. The run up to the next delimiter is therefore read and lost
+  (`((:)<nl>echo A)` runs `A`), and the empty unquoted word is removed by
+  splitting, so a copy followed by nothing but its `)` leaves a command with no
+  words and status 0. osh reads that run as the word it is and writes a
+  `Seg::Lit(b"\0")` in front of it, which is what bash's buffer holds; the cut
+  is then the ordinary `make_word` one `word_expanded_from_its_text` already
+  models. Keeping the segments is what keeps a `$( … )` in the run *parsed*
+  where the scan meets it — `((:)<nl>$(fi))` is fatal — while the cut is what
+  keeps it from being performed.
 
 Pinned by `tests/corpus/a-rewound-arithmetic-command-is-re-read-from-a-copy.sh`.
 
@@ -48128,23 +48142,6 @@ the lines; only the echoed text is affected:
 shopt -s expand_aliases; alias a='(( fi ) )'; a
     bash: line 3: `( fi ) '        osh: line 3: `(( fi ) )'
 ```
-
-*A copy that ends on a newline leaves an extra empty command behind.* The NUL
-the reader takes for a word after `pop_string` is an **unquoted empty word**,
-which word splitting removes, so bash runs a simple command with no words at all
-— status 0 — right after the copy. That is the same extra request the end-of-
-input floor is charged for, seen in `$?` instead of in a line number:
-
-```text
-((1+1)<nl>)      bash: 1+1: command not found, rc=0    osh: rc=127
-((nosuch)<nl>)   bash: rc=0                            osh: rc=127
-((exit 3)<nl>)   bash: rc=0                            osh: rc=3
-((exit 3) )      bash: rc=3                            osh: rc=3   (space: no charge)
-```
-
-The fix is to emit that empty word from the lexer when the copy's last character
-was a newline — the same `DparenPush::eof_charge` condition — rather than only
-counting it at end of input.
 
 *The continuation row.* bash's rebuild is lossy where the reader had already
 deleted a `\<newline>`: the copy cannot put it back, so bash's own re-parse

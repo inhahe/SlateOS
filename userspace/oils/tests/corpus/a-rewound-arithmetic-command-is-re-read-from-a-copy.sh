@@ -1,7 +1,7 @@
 # A `(( … ))` whose two closing parentheses are not adjacent is handed back to
 # the ordinary grammar as `( ( … ) )` — see
 # an-arithmetic-command-needs-its-closing-parentheses-adjacent.sh for *that*
-# rule. This file pins how the hand-back is done, which is visible in three
+# rule. This file pins how the hand-back is done, which is visible in four
 # separate ways.
 #
 # bash does not rewind its cursor. `parse_arith_cmd` (parse.y:4519-4562) rebuilds
@@ -32,6 +32,16 @@
 #    line answers the extra request for free — only at end of input does it cost
 #    a line, which is why the floor below is `scan_end + 2`.
 #
+# 4. **That NUL is a word, and the word swallows what follows it.** The token
+#    buffer opens with the NUL, so whatever is appended after it is past the end
+#    of the C string `make_word`'s `savestring` copies: the word's value is `""`
+#    however much text was read into it. Everything up to the next delimiter is
+#    therefore read *and lost* — `((:)<nl>echo A)` runs `A`, not `echo A` — and
+#    an unquoted empty word is removed by splitting, so a copy followed by
+#    nothing but its `)` leaves a command with no words at all, status 0.
+#    Reading is not running: a `$( … )` in the swallowed run is parsed where the
+#    scan meets it (so a bad one is still fatal) and never performed.
+#
 # The pushes stack, as `push_string`'s list does: a `((` met while a copy is
 # being read pushes its own copy on top, and the innermost is what gets echoed.
 #
@@ -41,8 +51,8 @@
 # `extract_command_subst` as it goes past — see group 1b.
 #
 # Not pinned here: a copy that has to reproduce a `\<newline>` the reader
-# already deleted, which it cannot — bash's own re-parse desynchronises there —
-# and the exit status a copy ending on a newline leaves behind. Nor is this:
+# already deleted, which it cannot — bash's own re-parse desynchronises there.
+# Nor is this:
 # `bash -c`, `eval` and `.` disagree with `bash file` and
 # `bash < file` about a copy that ends on a newline at end of input — the string
 # reader stops with the physical line still current and reports `syntax error
@@ -112,6 +122,68 @@ r '(( (1 ));'
 # Again, no `((` and so no charge.
 r '( (1 )\n'
 r '(( (1 ) ) ; (( (2 ) )\n'
+
+echo "=== 3b. the newline the copy ends on leaves a word behind"
+# Nothing follows it, so the word is empty on its own and the command it makes
+# has no words: status 0, whatever the copy's last command left.
+r '((exit 3)\n)\n'
+r '((nosuch)\n)\n'
+r '((1+1)\n)\n'
+r '(( (exit 3) )\n)\n'
+r '(( (( exit 3 )\n) )\n)\n'
+r '((exit 3)\n) ; ((exit 4)\n) ; echo end=$?\n'
+r '((exit 3)\n) | cat; echo PS=${PIPESTATUS[*]}\n'
+# The controls: the tested character has to be the newline. A space or a `)`
+# leaves the reader mid-line, where there is no NUL to read.
+r '((exit 3) )\n'
+r '(( (exit 3 )) ) ; echo z=$?\n'
+# The word swallows the run that follows it with no delimiter in between…
+r '((exit 3)\necho A)\n'
+r '((:)\nfoo bar)\n'
+r '((:)\nprintf "[%s]" x y; echo)\n'
+r '((:)\nA"B C" D)\n'
+r "((:)\n'echo' A)\n"
+r '((:)\nX=1 echo A)\n'
+r '((:)\n\\\necho A)\n'
+r '((:)\n2>out echo A)\ncat out\n'
+# …but a delimiter of any kind ends it at once, and then nothing is lost.
+r '((:)\n echo one two)\n'
+r '((:)\n\techo one two)\n'
+r '((:)\n\necho one two)\n'
+r '((:)\n;echo A)\n'
+r '((:)\n&&echo A)\n'
+r '((:)\n|cat)\n'
+r '((:)\n>out echo A)\ncat out\n'
+r '((:)\n<nosuch)\necho rc=$?\n'
+# A `#` is not a delimiter: a comment only opens at the start of a word, and
+# the NUL already started this one.
+r '((:)\n#foo bar)\necho rc=$?\n'
+r '((:)\n#foo)\necho rc=$?\n'
+# Read, not run: the substitution in the swallowed run is parsed where the scan
+# meets it and never performed.
+r '((:)\n$(echo X) A)\n'
+r '((:)\n$(exit 9))\necho rc=$?\n'
+r '((:)\n$(fi))\necho rc=$?\n'
+r '((:)\n`fi`)\necho rc=$?\n'
+r '((:)\n$(echo)$(fi))\n'
+r '((:)\n$((1+)))\necho rc=$?\n'
+r '((:)\n"unclosed)\n'
+# And it is a word, not a name: no assignment is made and no keyword is met.
+r '((:)\nfoo=bar)\necho rc=$? x=$foo\n'
+r '((:)\nesac)\necho rc=$?\n'
+r '((:)\nthen echo A)\n'
+r '((:)\n*)\necho rc=$?\n'
+# The swallowed run is a word like any other: its here-document operator is
+# still an operator, and an alias name in it is still looked up (and lost).
+r '((:)\ncat<<EOF)\nbody\nEOF\n'
+r '((cat<<EOF)\n)\nbody\nEOF\n'
+r '((:)\ncat<<EOF cat)\nbody\nEOF\n'
+r 'shopt -s expand_aliases\nalias a=echo\n((:)\na hi)\n'
+# It re-prints as nothing, being empty, and traces as nothing, never running.
+r 'f() { ((1+1)\n) ; }\ndeclare -f f\n'
+r 'f() { ((exit 3)\necho A) ; }\ndeclare -f f\n'
+r 'set -x\n((exit 3)\n)\n'
+r 'set -x\n((:)\necho one two)\n'
 
 echo "=== 4. what still runs"
 r '(( (1) ))\necho ok\n'

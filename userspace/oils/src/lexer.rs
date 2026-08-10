@@ -1053,6 +1053,10 @@ struct Lexer {
     /// Every `((` that failed its closing adjacency test and was handed back to
     /// the ordinary grammar, innermost last. See [`DparenPush`].
     dparens: Vec<DparenPush>,
+    /// Set when the newline just consumed was a copy's last character, so the
+    /// word that starts on the popped buffer's NUL is still owed. See
+    /// [`DparenPush::eof_charge`] and [`Lexer::take_nul_word`].
+    nul_word: bool,
     /// Which runs of `chars` are the real input and which are alias values
     /// spliced into it.
     ///
@@ -1568,6 +1572,7 @@ impl Lexer {
             heredocs_forgotten: false,
             refused: false,
             dparens: Vec::new(),
+            nul_word: false,
             map: TextMap::whole(0),
             raw: 0,
             raw_from: 0,
@@ -3478,6 +3483,12 @@ impl Lexer {
             if self.pos >= self.raw_from && self.pos < self.raw && self.map.at(self.pos).0 == 0 {
                 self.pos = self.raw;
             }
+            // Before the blank skip: a blank is what *delimits* the owed word,
+            // so it has to be seen rather than stepped over.
+            if self.nul_word {
+                self.take_nul_word(out, marks)?;
+                continue;
+            }
             // Skip inline blanks (but not newlines — those are tokens).
             while matches!(self.peek(), Some(' ' | '\t')) {
                 self.pos += 1;
@@ -3525,6 +3536,11 @@ impl Lexer {
             match c {
                 '\n' => {
                     self.pos += 1;
+                    // A `((` copy that ends on this newline is exhausted by
+                    // reading it, and what the reader finds next is not input
+                    // but the popped buffer's own NUL. See
+                    // [`Lexer::take_nul_word`].
+                    self.nul_word = self.dparens.iter().any(|p| p.end.saturating_add(1) == self.pos);
                     // Before the collection below, so a here-document still
                     // pending from earlier on the line reads from *after* the
                     // bodies a `$( … )` on it already took, not from the top of
@@ -4011,6 +4027,59 @@ impl Lexer {
         self.cur_line()
             .saturating_sub(u32::from(at_line_start))
             .max(1)
+    }
+
+    /// Emit the word a `((` copy's terminating newline owes, swallowing whatever
+    /// follows it without a delimiter in between.
+    ///
+    /// `pop_string` restores the reader's saved index into the physical line
+    /// (parse.y:2667-2669), and for a copy whose last character was that line's
+    /// newline the saved index is the buffer's own terminating NUL — which
+    /// `shell_getc`'s pop path hands back as if it were input. `read_token_word`
+    /// takes it for the start of a word, so the token buffer opens with a NUL and
+    /// the word's value is the empty string however much text is appended after
+    /// it. Everything up to the next delimiter is therefore read *and lost*:
+    ///
+    /// ```text
+    /// ((:)<nl>echo one two)      one: command not found   ("echo" swallowed)
+    /// ((:)<nl> echo one two)     one two                  (a blank delimits it)
+    /// ((:)<nl>$(exit 9))         rc=0                     (never performed)
+    /// ((:)<nl>#foo bar)          bar: command not found   (no comment starts)
+    /// ```
+    ///
+    /// The word is unquoted and empty, so splitting removes it and it does not
+    /// become an `argv[0]` of its own — a copy followed by nothing but its `)`
+    /// leaves a command with no words at all, whose status is 0. That is the
+    /// same extra read the end-of-input floor is charged for
+    /// ([`DparenPush::eof_charge`]), seen in `$?` instead of in a line number.
+    ///
+    /// Losing the value is not the same as not reading the text. The run is
+    /// delimited exactly as any word is — quotes, `$( … )` and `\<newline>` all
+    /// hold it together — and a `$( … )` in it is *parsed* where the scan meets
+    /// it, so `((:)<nl>$(fi))` is a syntax error even though nothing would ever
+    /// have run. So the run is read as the word it is and the NUL is written in
+    /// front of it, which is literally what bash's token buffer holds; the cut
+    /// that makes the value empty is then the ordinary one every word gets —
+    /// `make_word`'s `savestring`, modelled by `word_expanded_from_its_text`.
+    fn take_nul_word(&mut self, out: &mut Vec<Tok>, marks: &mut Marks) -> Result<(), LexError> {
+        self.nul_word = false;
+        let start_line = self.line;
+        let start_pos = self.pos;
+        self.iter_start = start_pos;
+        self.next_tok_index = out.len();
+        let mut segs = vec![Seg::Lit(vec![0])];
+        // bash's word delimiters: end of input, a shell blank, or a shellmeta.
+        // A `#` is not one of them — a comment only opens at the start of a
+        // word, and the NUL already started this one.
+        if !matches!(
+            self.peek(),
+            None | Some(' ' | '\t' | '\n' | '\r' | '|' | '&' | ';' | '(' | ')' | '<' | '>')
+        ) {
+            segs.extend(self.read_word(false)?);
+        }
+        out.push(Tok::Word(segs));
+        self.stamp_lines(out, marks, start_line, start_pos);
+        Ok(())
     }
 
     /// After one `run` iteration, stamp every token appended since the iteration

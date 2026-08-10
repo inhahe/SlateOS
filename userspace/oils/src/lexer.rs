@@ -2289,8 +2289,9 @@ pub fn lex_operand_in_dquote(src: BStr<'_>, ctx: ReadCtx) -> Result<Vec<Seg>, Le
 
 /// Reserved words after which a new command begins, so a word following one of
 /// them is in "command position". bash's `reserved_word_acceptable` list, less
-/// `time` (which is [`Prev::Time`], because its own `-p`/`--` extend it) and
-/// less the punctuation, which is matched as operators.
+/// `time` (which needs the run of tokens rather than just the previous one,
+/// because its own `-p`/`--` extend it — see [`time_tok`] and [`Prev::Time`])
+/// and less the punctuation, which is matched as operators.
 ///
 /// `}`, `done`, `esac` and `fi` are in the list even though the grammar always
 /// wants a separator after them; bash lists them, and a word can never actually
@@ -2612,15 +2613,41 @@ impl AliasOut {
     }
 }
 
-/// A coarse "does a command begin after `prev`?" test, from the previous token
-/// alone. The *lexer* needs one while tokenizing, where none of the parser state
-/// [`AliasOut`] carries exists yet, and its one caller only wants to know
-/// whether to slurp an unquoted-space array subscript. The alias pass uses
-/// [`AliasOut::at_command`] instead, which is bash's real test.
-fn starts_command(prev: Option<&Tok>) -> bool {
+/// A coarse "does a command begin at the end of `out`?" test. The *lexer* needs
+/// one while tokenizing, where none of the parser state [`AliasOut`] carries
+/// exists yet, and its one caller only wants to know whether to slurp an
+/// unquoted-space array subscript. The alias pass uses [`AliasOut::at_command`]
+/// instead, which is bash's real test.
+///
+/// This is bash's `command_token_position`, which is `reserved_word_acceptable`
+/// less three:
+///
+/// ```c
+/// #define command_token_position(token) \
+///   (((token) == ASSIGNMENT_WORD) || \
+///    ((parser_state&PST_REDIRLIST) && parsing_redirection(token) == 0) || \
+///    ((token) != SEMI_SEMI && (token) != SEMI_AND && (token) != SEMI_SEMI_AND && reserved_word_acceptable(token)))
+///                                                                        /* parse.y:2983-2986 */
+/// ```
+///
+/// `;;`, `;&` and `;;&` are named there because a reserved word *would* be
+/// accepted after one, but what actually follows is the next `case` arm's
+/// pattern — so `case x in y) :;; f[1 2]=v` is two words, not an assignment with
+/// a subscript that swallowed the blank. See [`Prev::CaseArmEnd`].
+///
+/// The whole token run is taken rather than just the last token because the
+/// `time` family needs more than one: `time -p` is two tokens, and whether the
+/// `-p` is `time`'s own option depends on what precedes it. See [`time_tok`].
+fn starts_command(out: &[Tok]) -> bool {
+    let Some(prev) = out.last() else { return true };
     match prev {
-        None | Some(Tok::Newline) => true,
-        Some(Tok::Op(op)) => matches!(
+        Tok::Newline => true,
+        // `)` is in bash's list, commented there `/* only valid in case
+        // statement */` — a `case` arm's pattern close, after which the arm's
+        // first command begins. It is also a subshell's close, where no word may
+        // follow; that is a *grammar* error, and the reader reaches the `[`
+        // first either way, so `(:) f[1` is still `unexpected EOF … `]''.
+        Tok::Op(op) => matches!(
             op,
             Op::Pipe
                 | Op::PipeAmp
@@ -2628,16 +2655,97 @@ fn starts_command(prev: Option<&Tok>) -> bool {
                 | Op::OrIf
                 | Op::Amp
                 | Op::Semi
-                | Op::DSemi
-                | Op::SemiAmp
-                | Op::DSemiAmp
                 | Op::LParen
+                | Op::RParen
         ),
-        Some(Tok::Word(segs)) => {
+        Tok::Word(segs) => {
             matches!(segs.as_slice(), [Seg::Lit(w)] if CMD_INTRODUCERS.contains(&w.as_slice()))
+                || time_tok(out).is_some()
         }
         _ => false,
     }
+}
+
+/// Which of bash's three `time`-family reserved words the last token of `out`
+/// would have been lexed as, if any. All three are in
+/// `reserved_word_acceptable`, so a command — and so an assignment — still
+/// begins after any of them (`time_command_acceptable`, parse.y:3140-3153):
+///
+/// ```c
+///     case BANG:      /* ! time pipeline */
+///     case TIME:      /* time time pipeline */
+///     case TIMEOPT:   /* time -p time pipeline */
+///     case TIMEIGN:   /* time -p -- ... */
+///       return 1;
+/// ```
+///
+/// The two options are `time`'s own only in the one place each can stand
+/// (`special_case_tokens`, parse.y:3292-3302): `-p` is TIMEOPT directly after
+/// TIME, `--` is TIMEIGN after TIME or TIMEOPT, and after a TIMEIGN neither is
+/// anything but an ordinary word. So `time -p -- x` reaches `x` in command
+/// position while `time -- -p x` does not.
+///
+/// `time` itself is gated on `time_command_acceptable`, which is *narrower* than
+/// `reserved_word_acceptable`: it does not list `|`, and after a newline it
+/// refuses when `token_before_that` was one. The rest of what it leaves out
+/// (`;;`, `fi`, `done`, `esac`, `}`) cannot be followed by a word without a
+/// syntax error anyway. That is why the pipe test lives here and not in
+/// [`starts_command`] — `true | h[1 2]=v` *does* slurp its subscript, so a pipe
+/// is a command position for an assignment and only `time` is fussy about it.
+fn time_tok(out: &[Tok]) -> Option<TimeTok> {
+    let [rest @ .., Tok::Word(segs)] = out else {
+        return None;
+    };
+    let [Seg::Lit(w)] = segs.as_slice() else {
+        return None;
+    };
+    match w.as_slice() {
+        b"time" if starts_command(rest) && !pipe_refuses_time(rest) => Some(TimeTok::Time),
+        b"-p" if time_tok(rest) == Some(TimeTok::Time) => Some(TimeTok::Opt),
+        b"--" if matches!(time_tok(rest), Some(TimeTok::Time | TimeTok::Opt)) => {
+            Some(TimeTok::Ign)
+        }
+        _ => None,
+    }
+}
+
+/// bash's `time_command_acceptable` exclusion for a pipe. `|` is simply not in
+/// its case list, and a newline is thrown out when a pipe stands immediately
+/// before it (parse.y:3128-3134):
+///
+/// ```c
+///     case 0:
+///     case ';':
+///     case '\n':
+///       if (token_before_that == '|')
+///         return (0);
+///       /* FALLTHROUGH */
+/// ```
+///
+/// `token_before_that` is exactly one token back, so this is *not* a run: after
+/// two newlines the test no longer sees the pipe and `time` becomes the reserved
+/// word again — at which point bash's own grammar rejects it, because `pipeline
+/// '|' newline_list pipeline` yields a `pipeline` and `timespec` only appears in
+/// `pipeline_command`. `true |⏎time x` is therefore `time: command not found`
+/// while `true |⏎⏎time x` is `` syntax error near unexpected token `time' ``.
+/// Modelled as measured, one token back.
+fn pipe_refuses_time(out: &[Tok]) -> bool {
+    matches!(
+        out,
+        [.., Tok::Op(Op::Pipe | Op::PipeAmp)]
+            | [.., Tok::Op(Op::Pipe | Op::PipeAmp), Tok::Newline]
+    )
+}
+
+/// One of the three reserved words `time` can produce. See [`time_tok`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TimeTok {
+    /// `time`.
+    Time,
+    /// `-p`, directly after a [`TimeTok::Time`].
+    Opt,
+    /// `--`, after a [`TimeTok::Time`] or a [`TimeTok::Opt`].
+    Ign,
 }
 
 /// The text bash's reader currently has in hand, and the tokens it reads from it.
@@ -3199,11 +3307,11 @@ fn is_brace_name_so_far(raw: BStr<'_>) -> bool {
 /// tokenizer only slurps an unquoted-space array subscript (`h[a b]=v`) here.
 /// This holds at the start of a command *and* immediately after another
 /// assignment word (so `h[a b]=1 h[c d]=2` chains).
-fn assignment_acceptable(prev: Option<&Tok>) -> bool {
-    if starts_command(prev) {
+fn assignment_acceptable(out: &[Tok]) -> bool {
+    if starts_command(out) {
         return true;
     }
-    matches!(prev, Some(Tok::Word(segs)) if word_is_assignment(segs))
+    matches!(out.last(), Some(Tok::Word(segs)) if word_is_assignment(segs))
 }
 
 /// Heuristic: does this word token have the shape of an assignment
@@ -3799,7 +3907,7 @@ impl Lexer {
                     if let Some(tok) = self.try_array_assign()? {
                         out.push(tok);
                     } else {
-                        let assign_ok = assignment_acceptable(out.last());
+                        let assign_ok = assignment_acceptable(out);
                         let segs = self.read_word_inner(assign_ok, false, extpat)?;
                         self.emit_word(out, segs);
                     }

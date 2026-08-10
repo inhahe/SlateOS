@@ -535,7 +535,7 @@ TD-OILS-TIME-DOES-NOT-EXTEND-COMMAND-POSITION-FOR-THE-LEXER, below.
 Corpus: `an-unclosed-subscript-in-an-assignment-position-is-a-reader-error.sh`
 (33 rows).
 
-### TD-OILS-STARTS-COMMAND-DIVERGES-FROM-COMMAND-TOKEN-POSITION. `time h[1 2]=v` and `case … ;; h[1 2]=v` read the wrong `[` — 2026-08-10 — OPEN
+### TD-OILS-STARTS-COMMAND-DIVERGES-FROM-COMMAND-TOKEN-POSITION. `time h[1 2]=v` and `case … ;; h[1 2]=v` read the wrong `[` — 2026-08-10 — ✅ FIXED 2026-08-10
 
 **Where:** `userspace/oils/src/lexer.rs:2620`, `starts_command`. This is the
 lexer's own coarse "does a command begin after `prev`?" test, and its one
@@ -642,6 +642,104 @@ for `time` — so the pipe test belongs in the `time` classifier, not in
 `starts_command`.
 
 Found while fixing TD-OILS-AN-UNCLOSED-SUBSCRIPT-IN-AN-ASSIGNMENT-POSITION-IS-NOT-A-READER-ERROR.
+
+**Fixed**, and a third divergence turned up while measuring: `)` was missing
+too. `reserved_word_acceptable` has it, commented `/* only valid in case
+statement */` — a `case` arm's pattern close, after which the arm's first
+command begins. A subshell's close is the same token, and though no word may
+follow one, the *reader* reaches the `[` before the grammar reaches the word, so
+`(:) f[1` is `` unexpected EOF … `]' `` and not a syntax error. `case x in x)
+h[1 2]=v;; esac` was the visible cost: the blank ended the word, so nothing was
+assigned.
+
+`starts_command` now takes the token run rather than the previous token alone,
+drops the three case-arm terminators, adds `Op::RParen`, and defers to a new
+`time_tok` for the `time` family. `time_tok` returns which of TIME/TIMEOPT/
+TIMEIGN bash would have lexed, `None` otherwise, and the two call each other —
+each step shortens the slice, so it terminates. The pipe test lives in
+`time_tok`, not in `starts_command`, because `true | h[1 2]=v` *does* slurp its
+subscript: a pipe is a command position for an assignment and only `time` is
+fussy about it.
+
+Two rows measured during this are *not* fixed and are logged separately:
+`echo $(f[1` (TD-OILS-A-COMMAND-SUBSTITUTION-NAMES-ITS-OWN-PAREN-BEFORE-THE-BODYS-BRACKET)
+and `true |⏎⏎time x` (TD-OILS-A-RUN-OF-NEWLINES-AFTER-A-PIPE-MAKES-TIME-RESERVED-AGAIN).
+
+Corpus: `where-a-command-begins-decides-whether-a-bracket-is-a-subscript.sh`
+(23 rows).
+
+### TD-OILS-A-COMMAND-SUBSTITUTION-NAMES-ITS-OWN-PAREN-BEFORE-THE-BODYS-BRACKET. `echo $(f[1` says `)` where bash says `]` — 2026-08-10 — OPEN
+
+**Where:** `userspace/oils/src/lexer.rs`, `read_dollar`/the `$(`…`)` body scan.
+osh scans the substitution's text for its closing `)` before lexing the body, so
+when the body holds an unclosed construct of its own the *outer* one is named.
+bash reads the body with the same reader (`parse_comsub` → `parse_matched_pair`,
+which recurses into the reader rather than counting parens), so the inner
+failure is raised first.
+
+This is the same shape as the `a=([1` row under
+TD-OILS-AN-UNCLOSED-SUBSCRIPT-IN-AN-ASSIGNMENT-POSITION-IS-NOT-A-READER-ERROR,
+which fixed itself when the subscript check landed because the array-literal
+element reader already goes through `read_word_inner`. The `$(` body does not.
+
+**Reproduce.**
+
+```sh
+eval 'echo $(f1[1';       echo "1 rc=$?"
+eval 'echo $(time f2[1';  echo "2 rc=$?"
+eval 'echo $(h[1 2]=v';   echo "3 rc=$?"
+```
+
+| row | bash 5.2.37 | osh |
+|---|---|---|
+| 1, 2 | `` …unexpected EOF while looking for matching `]' ``, `rc=2` | `` …matching `)' `` |
+| 3 | `` …matching `)' `` — the subscript closes, so the substitution is the one left open | same |
+
+Row 3 is the control: when the body holds nothing unclosed, both name `)`.
+
+**The fix.** Read the `$(` body with the real reader and let its error out,
+rather than pre-scanning for the `)`. Note the reporting line still has to be
+the substitution's own when *it* is the construct left open (row 3), which
+`LexError::at`'s never-overwrite rule already gives.
+
+Found while fixing TD-OILS-STARTS-COMMAND-DIVERGES-FROM-COMMAND-TOKEN-POSITION.
+
+### TD-OILS-A-RUN-OF-NEWLINES-AFTER-A-PIPE-MAKES-TIME-RESERVED-AGAIN. `true |⏎⏎time x` — 2026-08-10 — OPEN
+
+**Where:** `userspace/oils/src/lexer.rs`, `pipe_refuses_time`. bash's
+`time_command_acceptable` throws out a newline only when `token_before_that` was
+a pipe (parse.y:3128-3134), which is exactly one token back — so a *second*
+newline hides the pipe and `time` becomes the reserved word again. At that point
+bash's own grammar rejects it, because `pipeline '|' newline_list pipeline`
+yields a `pipeline` and `timespec` appears only in `pipeline_command`.
+
+osh models the one-token rule faithfully, but its lexer collapses a run of
+newlines into a single `Tok::Newline`, so the pipe is still visible two newlines
+later and `time` stays an ordinary word.
+
+**Reproduce.**
+
+```sh
+eval $'true |\ntime x1[1 2]=v';    echo "1 rc=$?"
+eval $'true |\n\ntime x2[1 2]=v';  echo "2 rc=$?"
+eval $'true |\n\n\ntime x3[1 2]=v'; echo "3 rc=$?"
+eval $'true |\n\ntime true';       echo "4 rc=$?"
+```
+
+| row | bash 5.2.37 | osh |
+|---|---|---|
+| 1 | `time: command not found`, `rc=127` | same |
+| 2–4 | `` syntax error near unexpected token `time' ``, `rc=2` | `time: command not found`, `rc=127` |
+
+**The fix** is in two parts, and neither is small. The lexer would have to keep a
+run of newlines as separate tokens (or record the run length) for
+`pipe_refuses_time` to see past the first; and the parser would then have to
+reject `timespec` after a `|`, which it currently accepts. Both only pay off for
+this one corner — bash is arguably misbehaving here, since `true |⏎time x` and
+`true |⏎⏎time x` differ only in a blank line. Worth doing only if the newline
+run is needed for something else too.
+
+Found while fixing TD-OILS-STARTS-COMMAND-DIVERGES-FROM-COMMAND-TOKEN-POSITION.
 
 ### TD-OILS-A-COMPOUND-ASSIGNMENT-WITH-A-BAD-SUBSCRIPT-CREATES-NOTHING. `z=([0]=A [1x]=B)` leaves `z` unset — 2026-08-10 — ✅ FIXED 2026-08-10
 

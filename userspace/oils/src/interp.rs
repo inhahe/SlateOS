@@ -1764,8 +1764,10 @@ struct DiscardAbort {
     /// The status the discarded command reports.
     status: i32,
     /// Whether the unwind passes *through* a nested read-eval loop rather than
-    /// being caught by it. Only an arithmetic error while binding an
-    /// integer-attribute value sets this; see [`Shell::eval_int_assign`].
+    /// being caught by it. Two arithmetic failures set it, both of them raised
+    /// below the depth `parse_and_execute` guards: binding an integer-attribute
+    /// value ([`Shell::arm_int_bind_discard`]) and evaluating an array subscript
+    /// ([`Shell::arm_subscript_discard`]).
     past_eval: bool,
 }
 
@@ -10917,12 +10919,12 @@ impl Shell {
                 // `declare -i k="3 x" 2>/dev/null`, `(( 3 x )) 2>/dev/null`, etc.
                 self.emit_arith_error(expanded, &e);
                 // An ordinary arithmetic error only gives `let` / `(( … ))` a
-                // non-zero status, but one raised inside a *subscript* is fatal
-                // to the command list, as an expansion error is — bash reaches
-                // the subscript through the same path. The driver turns the flag
-                // into a `Flow::Exit(1)`.
+                // non-zero status, but one raised inside a *subscript* unwinds:
+                // bash evaluates it from `array_expand_index`, which cleans up
+                // and jumps whatever depth it stands at, so an enclosing `eval`
+                // does not catch it either. See [`Self::arm_subscript_discard`].
                 if e.in_subscript {
-                    self.arm_discard(1);
+                    self.arm_subscript_discard();
                 }
                 None
             }
@@ -10932,14 +10934,54 @@ impl Shell {
     /// Arm the ordinary non-fatal abort: the one a nested read-eval loop
     /// catches, so an `eval` or a sourced file confines it to itself.
     ///
-    /// This is the kind every *expansion* error raises. For the one exception —
-    /// an arithmetic error while binding an integer-attribute value, which
-    /// unwinds past such a loop — see [`Self::arm_int_bind_discard`].
+    /// This is the kind every *expansion* error raises. For the two exceptions —
+    /// an arithmetic error while binding an integer-attribute value
+    /// ([`Self::arm_int_bind_discard`]) and one while evaluating an array
+    /// *subscript* ([`Self::arm_subscript_discard`]) — which unwind past such a
+    /// loop, see those.
     fn arm_discard(&mut self, status: i32) {
-        self.discard_error = Some(DiscardAbort {
-            status,
-            past_eval: false,
-        });
+        self.arm_with(status, false);
+    }
+
+    /// The one place a [`DiscardAbort`] is built, so the three arming paths
+    /// differ only in the two values they choose.
+    fn arm_with(&mut self, status: i32, past_eval: bool) {
+        self.discard_error = Some(DiscardAbort { status, past_eval });
+    }
+
+    /// Arm the abort an *array subscript* raises, which a nested read-eval loop
+    /// does not catch either.
+    ///
+    /// A subscript is the one arithmetic context bash evaluates from
+    /// `array_expand_index`, and that function cleans up before it jumps rather
+    /// than leaving the decision to the depth it is standing at:
+    ///
+    /// ```c
+    ///   val = evalexp (t, eflag, &expok);
+    ///   …
+    ///   if (expok == 0)
+    ///     {
+    ///       set_exit_status (EXECUTION_FAILURE);
+    ///       if (no_longjmp_on_fatal_error)
+    ///         return 0;
+    ///       top_level_cleanup ();
+    ///       jump_to_top_level (DISCARD);     /* arrayfunc.c:1363-1375 */
+    ///     }
+    /// ```
+    ///
+    /// where an ordinary expansion error reaches `exp_jump_to_top_level`, which
+    /// runs `top_level_cleanup ()` **only** `if (parse_and_execute_level == 0)`
+    /// (subst.c:12151-12153) — the test that lets an `eval` or a sourced file
+    /// confine it. So `f() { eval 'a[1x]=v'; echo yes; }; f` prints no `yes`,
+    /// where the same function around `eval 'a[-9]=x'` — a *non*-arithmetic bad
+    /// subscript, which is an ordinary expansion error — does print it.
+    ///
+    /// Unlike [`Self::arm_int_bind_discard`] the status is a fixed 1: bash calls
+    /// `set_exit_status (EXECUTION_FAILURE)` on the line above the jump, so
+    /// whatever the subscript's own expansion left behind is overwritten.
+    /// Measured: `f() { eval 'a[$(exit 3)1x]=v'; }; f; echo $?` is 1, not 3.
+    fn arm_subscript_discard(&mut self) {
+        self.arm_with(1, true);
     }
 
     /// Arm the abort that a nested read-eval loop does *not* catch.
@@ -10981,14 +11023,12 @@ impl Shell {
     /// needed to get that — reading `last_status` here reads it after the value
     /// was expanded, which is exactly where bash reads it.
     fn arm_int_bind_discard(&mut self) {
-        self.discard_error = Some(DiscardAbort {
-            status: if self.last_status == 0 {
-                1
-            } else {
-                self.last_status
-            },
-            past_eval: true,
-        });
+        let status = if self.last_status == 0 {
+            1
+        } else {
+            self.last_status
+        };
+        self.arm_with(status, true);
     }
 
     /// Consume an armed abort and report the [`Flow`] it unwinds as, leaving
@@ -31826,9 +31866,11 @@ impl Shell {
             Ok(v) => Some(v),
             Err(e) => {
                 self.emit_arith_error(s, &e);
-                // …unless it came from a subscript, which is fatal even here.
+                // …unless it came from a subscript, which unwinds even here —
+                // and past an enclosing `eval` with it. See
+                // [`Self::arm_subscript_discard`].
                 if e.in_subscript {
-                    self.arm_discard(1);
+                    self.arm_subscript_discard();
                 }
                 None
             }
@@ -32034,7 +32076,7 @@ impl Shell {
         // known to be this subscript's own and not an older failure passing
         // through untouched.
         let prior = self.expansion_failed();
-        let v = self.eval_arith_expr_checked(s);
+        let v = self.eval_arith_expr_at(s, true);
         self.arith_cmd = saved;
         // A subscript is the one arithmetic context that reads
         // `no_longjmp_on_fatal_error` for itself:
@@ -32070,6 +32112,20 @@ impl Shell {
     /// `${param:off:len}` bound, which bash blames on the parameter reference.
     /// See [`Self::eval_arith_substr_bound`].
     fn eval_arith_expr_checked(&mut self, s: BStr<'_>) -> Option<i64> {
+        self.eval_arith_expr_at(s, false)
+    }
+
+    /// [`Self::eval_arith_expr_checked`] told which of bash's two evaluation
+    /// sites this text arrived from, because they unwind to different depths.
+    ///
+    /// `subscript` is `array_expand_index` (arrayfunc.c:1363-1375), whose jump
+    /// is past an enclosing `eval` — see [`Self::arm_subscript_discard`]. `false`
+    /// is `verify_substring_values`, an ordinary expansion error the `eval`
+    /// catches. A subscript *nested inside* a bound is the first either way, so
+    /// the flag is only the outermost expression's kind: `v=abcdef; f() { eval
+    /// 'echo ${v:t[1x]}'; echo yes; }; f` prints no `yes`, where the same
+    /// function around `eval 'echo ${v:1x}'` does.
+    fn eval_arith_expr_at(&mut self, s: BStr<'_>, subscript: bool) -> Option<i64> {
         // bash's `subexpr` steps over the leading blanks *only to decide whether
         // the expression is empty* — the string it then evaluates and echoes is
         // the one it was handed, untouched:
@@ -32105,7 +32161,11 @@ impl Shell {
             Ok(v) => Some(v),
             Err(e) => {
                 self.emit_arith_error(s, &e);
-                self.arm_discard(1);
+                if subscript || e.in_subscript {
+                    self.arm_subscript_discard();
+                } else {
+                    self.arm_discard(1);
+                }
                 None
             }
         }
@@ -81835,6 +81895,74 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run_cmd_mode("a[-9]=x 2>/dev/null\necho after"),
             ("after\n".to_string(), 0)
+        );
+    }
+
+    #[test]
+    fn an_arithmetic_error_in_a_subscript_unwinds_past_eval() {
+        // bash evaluates every array subscript through `array_expand_index`,
+        // which runs `top_level_cleanup ()` before its `jump_to_top_level
+        // (DISCARD)` no matter what depth it stands at (arrayfunc.c:1363-1375),
+        // where an ordinary expansion error asks `parse_and_execute_level == 0`
+        // first (subst.c:12151). So an `eval` does not confine this one, nor a
+        // sourced file, nor the function around either.
+        for src in [
+            "q[1x]=v",
+            "eval 'q[1x]=v'",
+            "eval 'echo ${q[1x]}'",
+            "eval '(( q[1x] ))'",
+            "eval '[[ 1 -eq q[1x] ]]'",
+            "eval 'let \"q[1x]\"'",
+            "eval 'q=( [1x]=v )'",
+            "eval 'declare \"q[1x]=v\"'",
+            "eval 'printf -v \"q[1x]\" %s v'",
+            // A subscript written inside a `${v:off:len}` bound is still one.
+            "v=abcdef; eval 'echo ${v:q[1x]}'",
+            "v=abcdef; eval 'echo ${v:1:q[1x]}'",
+            // Nesting does not slow it down.
+            "eval 'eval \"q[1x]=v\"; echo NOT-REACHED'",
+        ] {
+            assert_eq!(
+                run(&format!(
+                    "f() {{ {src} 2>/dev/null; echo NOT-REACHED; }}\nf; echo NOT-REACHED\necho next"
+                ))
+                .0,
+                "next\n",
+                "{src}"
+            );
+        }
+        // The status is a fixed 1: `set_exit_status (EXECUTION_FAILURE)` stands
+        // above the jump, so what the subscript's own expansion left is gone.
+        assert_eq!(
+            run("f() { eval 'q[$(exit 3)1x]=v' 2>/dev/null; }\nf\necho \"rc=$?\"").0,
+            "rc=1\n"
+        );
+        // `unset` never reaches `array_expand_index`, and a bound that is not
+        // itself a subscript is `verify_substring_values` — the ordinary depth,
+        // which the `eval` does catch.
+        for src in [
+            "eval 'unset \"q[1x]\"'",
+            "v=abcdef; eval 'echo ${v:1x}'",
+            "v=abcdef; eval 'echo ${v:1:1x}'",
+            "eval 'q[-9]=x'",
+        ] {
+            assert_eq!(
+                run(&format!(
+                    "f() {{ {src} >/dev/null 2>&1; echo yes; }}\nf; echo \"rc=$?\""
+                ))
+                .0,
+                "yes\nrc=0\n",
+                "{src}"
+            );
+        }
+        // A fork is its own top level, so it loses only its own side.
+        assert_eq!(
+            run("( q[1x]=v 2>/dev/null; echo NOT-REACHED )\necho \"rc=$?\"").0,
+            "rc=1\n"
+        );
+        assert_eq!(
+            run("x=$( q[1x]=v 2>/dev/null; echo NOT-REACHED )\necho \"rc=$? x=[$x]\"").0,
+            "rc=1 x=[]\n"
         );
     }
 

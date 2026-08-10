@@ -48003,22 +48003,103 @@ while a deleted `\⏎` — which did fetch — still reports against line 2.
 Pinned by `tests/corpus/an-arithmetic-for-header-that-fails-the-adjacency-test-is-blamed-by-position.sh`
 and `parser::tests::a_for_header_that_fails_the_adjacency_test_is_blamed_by_position`.
 
-**The proper fix** for the three that remain is to model bash's substitute input
-buffer rather than rewinding the cursor: record the reconstructed text and the
-region of source it stands for, lex *that*, and let a diagnostic raised inside
-the region echo it instead of the real line. That also gets the continuation row
-for free, since the reconstruction is what loses the `\<newline>`, and it gives
-the string-vs-stream row a place to live if it is ever worth reproducing. The
-`TextMap`/`AliasView` machinery in `lexer.rs` is the same shape — it is how an
-alias's `push_string` is already modelled — but it drives a *pass above* the
-tokenizer, re-lexing spliced text from the top of the physical line, whereas
-this push happens mid-token inside `run_into`. So the work is to give the
-tokenizer a "splice and restart" result the way the alias pass has one, not to
-add a new mechanism.
+**Two more families, measured 2026-08-10.** The three rows above are all
+*syntax errors*, which made the divergence look message-only. It is not. The
+same substitute buffer decides what line every command inside the re-read text
+is blamed on, and what line the end of input is blamed on.
 
-**Impact.** Cosmetic. Every shape here is one bash also rejects, or one where
-the divergence is bash disagreeing with itself; nothing osh accepts is wrong,
-and nothing bash accepts is rejected.
+*Every line inside the copy collapses onto the line the scan ended on.*
+`push_string` hands the reader a string, and `line_number` is neither rewound
+before the push nor advanced by the newlines inside it — it stands wherever
+`parse_arith_cmd`'s scan left it for the whole re-read:
+
+```text
+(( (nosuch⏎) ) )              bash: line 2: nosuch: command not found
+                              osh:  line 1: nosuch: command not found
+(( (nosuch⏎⏎) ) )             bash: line 3: …          osh: line 1: …
+(( (echo A=$LINENO⏎) ) )      bash: A=2                osh: A=1
+(( (1 ⏎)) )                   bash: line 2: 1: command not found
+                              osh:  line 1: …
+f() { (( (nosuch⏎) ) ); }; f  bash: line 2: …          osh: line 1: …
+```
+
+The plain spelling `( (nosuch⏎) )` — no `((`, so no push — reports line 1 in
+both, which isolates the cause. `$LINENO` *after* the construct is right in
+both: the counter resyncs on the next real fetch.
+
+*At end of input the line is floored at the scan's last line plus two.* The copy
+ends with the newline it took as its one tested character, so that newline is
+handed over twice and the reader asks for a line once more than it otherwise
+would. Where a real line answers the extra ask nothing shows; at end of input it
+costs a line:
+
+| script | scan ends on | bash | osh |
+|---|---|---|---|
+| `(( (1 ))` (no final newline) | 1 | 3 | 2 |
+| `(( (1 ))⏎` | 1 | 3 | 2 |
+| `(( (1 ))⏎⏎` | 1 | 3 | 3 |
+| `(( (1 ))⏎⏎⏎` | 1 | 4 | 4 |
+| `(( (1⏎))⏎` | 2 | 4 | 3 |
+| `(( (1⏎))⏎⏎` | 2 | 4 | 4 |
+| `(( (1⏎⏎))⏎` | 3 | 5 | 4 |
+
+so bash reports `max(normal, scan_end_line + 2)`. The charge is owed only when
+the tested character was a newline: `(( (1 ));`, `(( (1 )) `, `(( (1 ))&` and
+`(( (1 ));` with no final newline all agree with osh. The plain `( (1 )⏎` agrees
+too, which again isolates the push as the cause.
+
+*The echoed-line row generalises, and the pushes stack.* The reconstruction is
+always exactly `src[start+1 ..= scan_end]` — the physical text with the first
+`(` dropped, run through the character that failed the adjacency test — so no
+text has to be synthesised to model it, only re-labelled:
+
+```text
+(( 1 + (2 ))       bash echoes `( 1 + (2 ))'     osh: `(( 1 + (2 ))'
+(( fi ) )          bash echoes `( fi ) '         osh: `(( fi ) )'
+(( 1; done ) )     bash echoes `( 1; done ) '    osh: `(( 1; done ) )'
+(( 1⏎+ (2 ))       bash echoes `( 1⏎+ (2 ))'     osh: `+ (2 ))'
+```
+
+Note `(( fi ) )` → `( fi ) `: the final `)` is not in the copy — it is the
+tested character that follows the space — and the multi-line row shows the copy
+is echoed whole, embedded newline and all, where osh echoes one physical line. A
+token read *after* the copy is exhausted is echoed from the physical line again
+and the two agree (`(( (1 )) fi`, `(( (1 ))x`). And the pushes **stack**, as
+`push_string`'s list does: `(( (( fi ) ) ) )` pushes `( (( fi ) ) ) `, whose
+re-read meets `((` again and pushes `( fi ) ` on top of it — and that innermost
+copy is what bash echoes.
+
+**The proper fix** for all of it is to model bash's substitute input buffer
+rather than rewinding the cursor: record the reconstructed text and the region
+of source it stands for, lex *that*, and let a diagnostic raised inside the
+region echo it and be blamed on the scan's last line. That also gets the
+continuation row for free, since the reconstruction is what loses the
+`\<newline>`, and it gives the string-vs-stream row a place to live if it is
+ever worth reproducing.
+
+Concretely, `Spans::srcs`/`Spans::parents` (`parser.rs:2659-2707`) is already a
+faithful `push_string`/`pop_string` stack — it is what alias replacements use,
+and `Spans::reader_stop` already pops it. So:
+
+- give the base lexer a source table of its own so a copy can be a `src`
+  (`Tokenized` yields `ends: Vec<u32>`, implying `src` 0; only the alias pass
+  builds `TokSpan`s today), with the copy's parent the offset just past the
+  tested character — for a nested push, an offset *into the enclosing copy*;
+- freeze the stamped line at the scan's last line while the cursor is inside a
+  copy (`Lexer::stamp_lines`, `lexer.rs:3893`), letting `self.line` advance
+  underneath so the resync after the copy is automatic;
+- charge one extra empty request at end of input when the copy ended on a
+  consumed newline — `Parser::reader_line_at`'s `bump` (`parser.rs:3268`)
+  already has exactly this shape in `eof_closed_in_list`.
+
+The `TextMap`/`AliasView` machinery in `lexer.rs` is the same shape as the first
+of those, but it drives a *pass above* the tokenizer, re-lexing spliced text
+from the top of the physical line, whereas this push happens mid-token inside
+`run_into`.
+
+**Impact.** Not cosmetic, as first recorded. The syntax-error rows are shapes
+bash also rejects, but the two line-number families are ordinary runtime
+diagnostics on scripts that run to completion.
 
 
 ### TD-OILS-A-CAPTURED-2-TO-1-CONCATENATES-THE-STREAMS-INSTEAD-OF-INTERLEAVING-THEM — 2026-08-05 — ✅ FIXED 2026-08-05

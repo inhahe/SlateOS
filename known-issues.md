@@ -1537,6 +1537,128 @@ cleanest probe for: bash's `string_extract_double_quoted` (subst.c:966-985) has
 no single-quote rule at all, so read 2 is the *only* reader that ever looks
 inside it.
 
+#### Which reader it actually is — `brace_gobbler`, not an expansion — 2026-08-10
+
+The reading above has the *phase* right and the *reader* wrong, and the reader
+is what decides the fix's shape. Measured first, then found in the C source.
+
+**The measurements that rule out every expansion.** With `z` unset, bash reports
+for **all five** of these, identically, and prints nothing else for any of them:
+
+```sh
+echo "R [${z:+'$(fi)'}]"      # ${…} branch never taken
+echo "R [${z'$(fi)'}]"        # not a substitution at all — a bad one
+echo "R [${z//x/'$(fi)'}]"    # a replacement
+echo "R [${z#'$(fi)'}]"       # a pattern
+echo "R [${a['$(fi)']}]"      # a subscript
+```
+
+Every one gives `command substitution: line 3: syntax error near unexpected
+token `fi'` and `` command substitution: line 3: `fi)'}]"' ``, then carries on to
+the next command with `$?` = 1. So the reader is not the operand's expansion
+(`:+` unset never expands one), not the `${ … }` evaluation (the second line
+would be `bad substitution` otherwise, and osh does say that), and not the
+subscript's arithmetic. It also runs *before* all three of them: its diagnostic
+beats every verdict they reach.
+
+It is nevertheless execution-time, not parse-time: a `false && echo "…"` on the
+same line reports nothing, and neither does the same word in a function body
+that is never called.
+
+**The decisive experiment.** `set +B` suppresses it outright:
+
+```sh
+unset z
+set +B; echo "braces off [${z:+'$(fi)'}]"   # bash: `braces off []`
+set -B; echo "braces on  [${z:+'$(fi)'}]"   # bash: the two error lines, no output
+```
+
+So the reader is **brace expansion** — `brace_gobbler`, braces.c:646-683. It
+scans the *raw word text* with a quoting model much cruder than the parser's:
+
+```c
+      /* If compiling for the shell, treat ${...} like \{...} */
+      if (c == '$' && text[i+1] == '{' && quoted != '\'')		/* } */
+	{ pass_next = 1; i++; if (quoted == 0) level++; continue; }
+      if (quoted)
+	{
+	  if (c == quoted) quoted = 0;
+	  /* The shell allows quoted command substitutions */
+	  if (quoted == '"' && c == '$' && text[i+1] == '(')	/*)*/
+	    goto comsub;
+	  ADVANCE_CHAR (text, tlen, i); continue;
+	}
+      if (c == '"' || c == '\'' || c == '`') { quoted = c; i++; continue; }
+      if ((c == '$' || c == '<' || c == '>') && text[i+1] == '(')
+	{ comsub: si = i + 2; t = extract_command_subst (text, &si, 0); … }
+```
+
+A `${` does not open a state of its own — it is passed over like `\{`. So inside
+`" … "` the state stays `'"'` for the whole `${ … }` body, a `'` there is not a
+quote at all, and every `$(` in it goes to `extract_command_subst` →
+`xparse_dolparen`. That is the parse whose failure is reported, and its
+`jump_to_top_level (DISCARD)` is what drops the command.
+
+**Why exactly this shape and no other.** Line the two readers up:
+
+| the `$( … )` sits in | bash's parser (`parse_matched_pair`) | `brace_gobbler` |
+|---|---|---|
+| `' … '` at top level | skipped | `quoted == '\''` — skipped |
+| `' … '` inside `" … "` | read (a `'` is not a quote in double quotes) | read |
+| `' … '` inside an **unquoted** `${ … }` | skipped (grouping construct, parse.y:3840-3846) | `quoted == '\''` — skipped |
+| `' … '` inside a **double-quoted** `${ … }` | **skipped** | **read** ← the only disagreement |
+| `\$( … )` | skipped | `pass_next` — skipped |
+
+So `brace_gobbler` parses exactly one thing the parser did not: a `$( … )` the
+`${ … }` body's own quoting hid. Everything else it re-parses was parsed already
+and parses again silently.
+
+**A second instance of the same shape:** `$' … '`. bash's parser translates it
+where it stands (parse.y:3852-3893) and splices the *result* into the body
+without re-reading it, so `"${z:-$'$(fi)'}"` stores the word `"[${z:-$(fi)}]"`
+and the gobbler meets a bare `$( … )` — the echoed remainder is `` `fi)}]"' ``,
+with no `'`, which is how the splice shows through. osh dies at parse time here
+too.
+
+**What `declare -f` shows, with nothing failing at all.** The same disagreement
+is visible without any error, and this is the cheapest regression probe:
+
+```sh
+f1() { echo "[${z:-'$( (echo 2) )'}]"; }
+declare -f f1
+```
+
+bash prints the operand **as written** — `'$( (echo 2) )'` — because its parser
+never read that substitution and so never re-printed it. osh prints
+`'$( ( echo 2 ))'`, its own re-print. Measured across nine body shapes
+(`:-`, `//`, `#`, `%`, `:off:len`, `[sub]`, `^`, `:+`, `/`), bash keeps all nine
+verbatim and osh matches on seven — only the `:-`/`:+`-class **operand** path
+(`operand_from_source` → `lex_operand_in_dquote`) re-prints, which is the same
+path that dies.
+
+**So the fix is two pieces, and the first is a prerequisite for the second:**
+
+1. **Stop reading what the parser skipped.** `operand_from_source`'s
+   double-quoted path must carry a `' … '` run's `$( … )` as
+   [`CmdSubBody::Unread`] rather than parsing it, and must not re-print the run
+   — `declare -f` has to give the source back. Same for the text a `$' … '`
+   translation spliced in. This alone stops the fatal abort and fixes the
+   `declare -f` rows, but leaves osh *silent* where bash reports.
+2. **Add the gobble pre-scan.** At `Shell::expand_braces_opt` (interp.rs:24385)
+   — which is already the single `set -B` gate — the substitutions the parser
+   skipped have to be parsed, in word order, before anything in the word is
+   expanded, with a failure reported as `command substitution: line N:` and the
+   command discarded (`$?` = 1). The line is the runtime line plus the error's
+   offset inside the body, and the text echoed back is the substitution's
+   remainder *of the whole word*, closing quote included — the same remainder
+   [`CmdSubBody::Unread::tail`] already carries, since bash hands
+   `extract_command_subst` the raw word from just past the `$(`.
+
+   The pre-scan does **not** need to be a general port of `brace_gobbler`: by the
+   table above it would only ever re-parse substitutions the parser already
+   parsed, which is unobservable, so collecting the skipped ones where they are
+   skipped is exactly equivalent and does not risk re-parsing a re-print.
+
 ---
 
 ### TD-OILS-A-RUNTIME-SUBSCRIPT-IS-READ-AS-SOURCE. `unset 'a[$(fi)]'` succeeds silently where bash reports and abandons the command — 2026-08-09 — ✅ FIXED 2026-08-09

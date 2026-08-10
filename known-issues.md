@@ -183,26 +183,27 @@ restored to
 from `brace_gobbler` with the *word's* remainder (`` `fi)']}]"' `` and
 `` `fi)':1}]"' ``).
 
-### TD-OILS-A-SUBSCRIPT-INSIDE-AN-ARITHMETIC-WORD-IS-NOT-EXPANDED-IN-PLACE-FIRST. `[[ -v "a['1']" ]]` and `(( a['1'] ))` report where bash accepts — 2026-08-10 — OPEN
+### TD-OILS-A-SUBSCRIPT-IN-AN-ARITHMETIC-WORD-IS-NOT-EXPANDED-IN-PLACE-FIRST. `[[ -v "a['1']" ]]` and `(( ~q['1'] ))` report where bash accepts — 2026-08-10 — OPEN
 
 **Where:** `userspace/oils/src/interp.rs` — `Shell::element_is_set` (the `[[ -v ]]`
-operand) and the `(( … ))` / `let` string reader. osh hands the subscript text
-straight to the arithmetic reading, which is right for `${a[…]}` but wrong for a
-word that reaches arithmetic *as a whole word*: bash expands such a word's
-subscript **once, in place, before the arithmetic sees it**, and with a quoting
-in which a `'` is a real quote.
+operand) and `Shell::expand_to_arith_string` / `Shell::arith_string_parts`
+(`(( … ))`, `$(( … ))`, a subscript, a substring bound). osh always hands a
+subscript's text to the *arithmetic* reading, in which a `'` is not a quote.
+bash does that too — but only when the string reached arithmetic **without** a
+full word expansion. When there was one, a `[ … ]` in the word is expanded in
+place first, with ordinary quoting where a `'` *is* a quote, and the result is
+backslash-escaped so the arithmetic's own read cannot expand it a second time.
 
 **Reproduce.**
 
 ```sh
-a=(A B C D E)
-[[ -v "a['1']" ]];        echo "1 rc=$?"
+a=(A B C D E); q=(9 8 7 6 5); s='$(echo 1)'
+[[ -v "a['1']" ]];           echo "1 rc=$?"
 [[ -v "a['\$(echo 1)']" ]];  echo "2 rc=$?"
-[[ -v "a['x y']" ]];      echo "3 rc=$?"
-s='$(echo 1)'
-(( a["'"$s"'"] ));        echo "4 rc=$?"
-[[ -v "a[\$s]" ]];        echo "5 rc=$?"
-t='~'; (( a[$t] ));       echo "6 rc=$?"
+[[ -v "a['x y']" ]];         echo "3 rc=$?"
+(( a["'"$s"'"] ));           echo "4 rc=$?"
+(( ~q['1'] ));               echo "5 rc=$?"
+(( q['1'] + $# ));           echo "6 rc=$?"
 ```
 
 | | bash 5.2.37 | osh |
@@ -211,12 +212,45 @@ t='~'; (( a[$t] ));       echo "6 rc=$?"
 | 2 | `\$(echo 1): syntax error: operand expected (error token is "\$(echo 1)")` | `'$(echo 1)': …` |
 | 3 | `x y: syntax error in expression (error token is "y")` | `'x y': syntax error: operand expected …` |
 | 4 | `\'$(echo 1)\': syntax error: operand expected …` | `'$(echo 1)': …` |
-| 5 | `$s: …` — the `$s` was **not** expanded | `$(echo 1): …` — osh expanded it |
-| 6 | `\~: …` | `~: …` |
+| 5 | `rc=0` — the subscript became `1`, `q[1]` is `8`, `~8` is nonzero | `'1': syntax error …` |
+| 6 | `rc=0` | `'1': syntax error …` |
 
-**What bash does.** `expand_word_internal`'s `[` row fires only when the word is
-being expanded with `Q_ARITH` (subst.c:11103-11115), and then it calls
-`expand_array_subscript` (subst.c:10836-10894):
+**These already match, and they are what pins the gate down.** Drop the `~` from
+row 5 and the `$#` from row 6 and bash reports `'1'` exactly as osh does; so do
+`(( a['1'] ))`, `(( a["1"] ))`, `let "a['1']"`, `echo $(( a['1'] ))`,
+`echo "${a[b['1']]}"`, `${z:b['1']:1}`, `a['1']=Q` and `declare -a d; d['1']=S`.
+A backslash in the string is right too: `(( a[\~] ))` reports `\~`, `(( a[\'] ))`
+reports `\'`, while `(( a[\$] ))` reports a bare `$` and `` (( a[\`] )) `` a bare
+`` ` ``.
+
+**What bash does.** An arithmetic string goes to `expand_arith_string (s,
+Q_DOUBLE_QUOTES|Q_ARITH)` → `expand_string_if_necessary` (subst.c:4018-4079),
+which first scans for a character that could start an expansion:
+
+```c
+#define ARITH_EXP_CHAR(s) (s == '$' || s == '`' || s == CTLESC || s == '~')
+                                                        /* subst.c:3824 */
+```
+
+Finding none, it takes `string_quote_removal (string, quoted)` (subst.c:4073-4074)
+— a plain pass with `Q_DOUBLE_QUOTES` still set, so a `'` stays a character and
+nothing else happens. That is the case osh already matches, and it is most of
+them. Finding one, it runs the whole of `call_expand_word_internal (…, Q_ARITH)`
+instead (subst.c:4052) — and *that* has a `[` row:
+
+```c
+	case '[':		/*]*/
+	  if ((quoted & Q_ARITH) == 0 || shell_compatibility_level <= 51)
+	    { … goto add_character; }
+	  else
+	    {
+	      temp = expand_array_subscript (string, &sindex, quoted, word->flags);
+	      goto add_string;
+	    }                                        /* subst.c:11103-11115 */
+```
+
+`expand_array_subscript` (subst.c:10836-10894) is where the two properties come
+from:
 
 ```c
   exp = substring (string, si+1, ni);
@@ -226,35 +260,38 @@ being expanded with `Q_ARITH` (subst.c:11103-11115), and then it calls
                                                   /* subst.c:10878-10881 */
 ```
 
-Two things follow. The subscript is expanded with `Q_ARITH` and `Q_DOUBLE_QUOTES`
-**masked off** — quoting 0 — so a `'` there *is* a quote and is removed, which is
-why row 1 succeeds and rows 2-4 show no quotes (or backslashed ones). And the
-result is `sh_backslash_quote`d against `abstab`, which holds `[`, `]`, `$`,
+The subscript is expanded with `Q_ARITH` and `Q_DOUBLE_QUOTES` **masked off** —
+quoting 0 — so a `'` there *is* a quote and comes off, which is rows 1-5. And the
+result is `sh_backslash_quote`d against `abstab`, holding `[`, `]`, `$`,
 `` ` ``, `~`, `\`, `'` and `"` (subst.c:10848-10857) — the characters that would
-start *another* expansion — so the arithmetic evaluator's own second read cannot
-expand it again. Row 5 is that guard observed directly.
+start *another* expansion — so the evaluator's own second read of the subscript
+cannot expand it again. `[[ -v "a[\$s]" ]]` shows that guard directly: bash
+reports `$s`, unexpanded, where osh expands it.
 
-`Q_ARITH` reaches the word from `cond_expand_word (cond->left->op, varop ? 3 : 0)`
-for `[[ -v ]]` (execute_cmd.c:3919, `special == 3` → `qflags = Q_ARITH`,
-subst.c:4130) and from `expand_arith_string (…, Q_DOUBLE_QUOTES|Q_ARITH)` for
-`(( … ))`. A `${a[…]}` subscript never comes this way — it is carved out by
-`extract_dollar_brace_string` and handed to `expand_arith_string (exp,
-Q_DOUBLE_QUOTES|Q_ARITH|Q_ARRAYSUB)` (arrayfunc.c:1354) — which is why the two
-readings differ and why
-`tests/corpus/a-single-quote-in-a-subscript-is-not-a-quote.sh` is right for the
-brace form while these rows are wrong.
+`[[ -v ]]` is the one place with no gate at all: `cond_expand_word (cond->left->op,
+varop ? 3 : 0)` (execute_cmd.c:3913-3919, `varop` is `-v` alone) reaches
+`call_expand_word_internal (w, Q_ARITH)` unconditionally (subst.c:4117-4131), so
+rows 1-3 take the `[` row however plain the operand is. `test -v` is *not* `[[ -v
+]]` — it takes an ordinary word and reports `'1'`, which osh matches.
 
-**The fix.** Give osh an `expand_array_subscript` equivalent: when a word is
-expanded *as an arithmetic string* (the `[[ -v ]]` operand, `(( … ))`, `let`),
-walk it for a `[ … ]`, expand the contents with ordinary quoting (a `'` is a
-quote), backslash-quote the result against bash's `abstab` set, and splice it
-back before the arithmetic reader runs. `sh_backslash_quote` (lib/sh/shquote.c:262-307)
-escapes every table character alike, so the asymmetry in the measured error
-tokens — `\~` and `\'` keep their backslash (rows 4, 6) while `$` comes back bare
-(rows 3-5) — comes *after* it, from the **second** read: that one runs under
-`Q_DOUBLE_QUOTES`, where a `\` is dropped before `$`, `` ` ``, `"` and `\` and
-kept before anything else. Measured directly, so the escaping the fix emits must
-survive the same rule:
+**The fix.** Add an `expand_array_subscript` equivalent — parse the subscript's
+source as an ordinary word, expand it to a string (a `'` is a quote), then
+backslash-quote against bash's `abstab` set — and call it from two places:
+
+* `Shell::element_is_set`, for every `[[ -v ]]` operand, before the arithmetic or
+  associative-key reading picks the subscript up;
+* the arithmetic-string builder, for each top-level `[ … ]` of a word whose
+  *source* holds a `$`, a `` ` `` or a `~`. The bracket run has to be found on the
+  source text (bash uses `skipsubscript` on it), so the natural home is the
+  parser: `word_subscript_from_source_at` already re-reads a fragment's `' … '`
+  runs, and this is the same shape — a second reading attached to a source span.
+
+`sh_backslash_quote` (lib/sh/shquote.c:262-307) escapes every table character
+alike, so the asymmetry in the error tokens — `\~` and `\'` keep their backslash
+while `$` and `` ` `` come back bare — arrives *after* it, from the second read:
+that one runs under `Q_DOUBLE_QUOTES`, where a `\` is dropped before `$`,
+`` ` ``, `"` and `\` and kept before anything else. Measured directly, so the
+escaping the fix emits has to survive the same rule:
 
 ```sh
 a=(A B C D E)
@@ -265,8 +302,15 @@ a=(A B C D E)
 ```
 
 **Not caused by the `' … '` work of 2026-08-10** (TD-OILS-A-SINGLE-QUOTED-RUN-IN-
-A-BARE-SUB-WORD-OF-A-BRACE-IS-A-QUOTE); it was measured during it, and rows 1-3
-diverge identically before and after.
+A-BARE-SUB-WORD-OF-A-BRACE-IS-A-QUOTE); it was measured during it, and every row
+above diverges identically before and after.
+
+**A second bug found in the same probe.** `c[b['1']]=R` — a nested bracket in an
+assignment's left-hand side — is `'1': syntax error` in bash but
+`c[b[1]]=R: command not found` in osh: the word is not recognised as an
+assignment at all, so it is run as a command. `Parser::split_name_subscript` and
+the assignment sniffing around it stop at the first `]` rather than matching
+brackets.
 
 ### TD-OILS-A-BACKQUOTE-BODY-INSIDE-DOUBLE-QUOTES-IS-NOT-GOBBLED. A backquote body inside `" … "` is run where bash only scanned it — 2026-08-10
 

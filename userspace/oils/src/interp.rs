@@ -26173,6 +26173,11 @@ impl Shell {
     fn extent_read_of(&mut self, part: &WordPart) -> ExtentRead {
         let mut subs: Vec<&WordPart> = Vec::new();
         Self::brace_scanned_subs(part, &mut subs);
+        self.extent_read_of_subs(&subs)
+    }
+
+    /// The reads themselves, over the substitutions a scan has collected.
+    fn extent_read_of_subs(&mut self, subs: &[&WordPart]) -> ExtentRead {
         for sub in subs {
             // The scan does not step over a `$((` either — its `$(` row is
             // spelled `string[i] == '$' && string[i+1] == LPAREN` and goes to
@@ -26225,11 +26230,49 @@ impl Shell {
                 CmdSubBody::Backtick { .. } => ExtentRead::Closed,
                 CmdSubBody::ArithFallback { .. } => ExtentRead::Closed,
             };
+            if let ExtentRead::Abandoned { rest, .. } = &read {
+                // The scan is not over. bash's `i = si + 1` puts it back one
+                // past where the read stopped and the loop carries on looking
+                // for another `$(`, so *every* failing substitution in the word
+                // is reported and not just the first. Measured: `z=ZZ;
+                // A${z:-p$(fi⏎q)r$(for⏎s)t}B` under `${…@P}` reports twice,
+                // though the operand is never used.
+                //
+                // What is left to scan is text, not parts — which is the whole
+                // reason to hand the remainder back to a fresh scan rather than
+                // walk on through `subs`. A `$(` the failed read swallowed is
+                // *not* reached again (`A${z:-p$(fi $(for⏎x)q)r}B` reports
+                // once), and one nested inside the failed body but past the
+                // stop point *is* (`A${z:-p$(fi⏎$(for⏎x)q)r}B` reports twice) —
+                // neither of which the part tree can answer, since it never
+                // took the failed body apart.
+                if !rest.is_empty() {
+                    return self.extent_read_of_rest(&rest.clone());
+                }
+                return read;
+            }
             if read != ExtentRead::Closed {
                 return read;
             }
         }
         ExtentRead::Closed
+    }
+
+    /// Carry the `${ … }` scan on over the text a failed extent read left
+    /// behind. See the `Abandoned` arm of [`Shell::extent_read_of`].
+    ///
+    /// The remainder is lexed for the same reason [`Shell::expand_extent_rest`]
+    /// lexes its own: none of this text was read by a parser, and the scan that
+    /// produced it is the one about to read it again.
+    fn extent_read_of_rest(&mut self, rest: BStr<'_>) -> ExtentRead {
+        // A remainder that will not lex holds nothing this scan can read, and is
+        // not a diagnostic of its own — see [`Shell::expand_extent_rest`].
+        let Ok(word) = crate::parser::dquote_word_from_source(rest, self.parse_opts()) else {
+            return ExtentRead::Closed;
+        };
+        let mut subs: Vec<&WordPart> = Vec::new();
+        Self::brace_scanned_subs_slice(&word.parts, &mut subs, &mut false);
+        self.extent_read_of_subs(&subs)
     }
 
     /// The `$((` count a `${ … }` scan runs over `s`, for the two spellings
@@ -26693,40 +26736,51 @@ impl Shell {
             if kind == crate::unparse::Nested::Index {
                 continue;
             }
-            for p in parts {
-                match p {
-                    // A `$(( … ))` is read whole rather than descended into:
-                    // the scan's `$(` row hands it to `extract_command_subst`,
-                    // whose paren count steps into its own nested `$( … )` in
-                    // its own order (subst.c:1431-1437). A `$[ … ]` is not that
-                    // row — `string[i+1]` is `[`, not `(` — so nothing reads it
-                    // and the scan meets what is inside it directly.
-                    WordPart::CommandSub { .. } | WordPart::ArithSub { bracket: false, .. } => {
-                        if !*squote {
-                            out.push(p);
-                        }
-                    }
-                    // The literal runs *are* the raw text between the
-                    // constructs, which is the only text the scan reads a quote
-                    // out of.
-                    WordPart::Literal(t) => {
-                        let mut it = t.iter();
-                        while let Some(&b) = it.next() {
-                            match b {
-                                b'\\' => {
-                                    it.next();
-                                }
-                                b'\'' => *squote = !*squote,
-                                _ => {}
-                            }
-                        }
-                    }
-                    _ => Self::brace_scanned_subs_in(p, out, squote),
-                }
-            }
+            Self::brace_scanned_subs_slice(parts, out, squote);
         }
         if let Some(s) = saved {
             *squote = s;
+        }
+    }
+
+    /// The same walk over a bare run of parts — the shape a remainder lexed
+    /// back out of a failed read comes in, where a `$( … )` stands at the top
+    /// level rather than inside a construct. See
+    /// [`Shell::extent_read_of_rest`].
+    fn brace_scanned_subs_slice<'a>(
+        parts: &'a [WordPart],
+        out: &mut Vec<&'a WordPart>,
+        squote: &mut bool,
+    ) {
+        for p in parts {
+            match p {
+                // A `$(( … ))` is read whole rather than descended into: the
+                // scan's `$(` row hands it to `extract_command_subst`, whose
+                // paren count steps into its own nested `$( … )` in its own
+                // order (subst.c:1431-1437). A `$[ … ]` is not that row —
+                // `string[i+1]` is `[`, not `(` — so nothing reads it and the
+                // scan meets what is inside it directly.
+                WordPart::CommandSub { .. } | WordPart::ArithSub { bracket: false, .. } => {
+                    if !*squote {
+                        out.push(p);
+                    }
+                }
+                // The literal runs *are* the raw text between the constructs,
+                // which is the only text the scan reads a quote out of.
+                WordPart::Literal(t) => {
+                    let mut it = t.iter();
+                    while let Some(&b) = it.next() {
+                        match b {
+                            b'\\' => {
+                                it.next();
+                            }
+                            b'\'' => *squote = !*squote,
+                            _ => {}
+                        }
+                    }
+                }
+                _ => Self::brace_scanned_subs_in(p, out, squote),
+            }
         }
     }
 

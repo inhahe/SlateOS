@@ -925,6 +925,35 @@ apply the scan unconditionally: a failed extent read survives only under
 Q_DOUBLE_QUOTES, 0)` (parse.y:6094). Measured — the same word gives three
 reports whether the `${a@P}` holding it is quoted or not.
 
+**A rule of read 1 the entry did not have, found on the way in and fixed
+2026-08-10: the scan carries on past a failed read.** `extract_dollar_brace_string`
+does not test how the read came out —
+
+```c
+  if (string[i] == '$' && string[i+1] == LPAREN)
+    { si = i + 2; t = extract_command_subst (string, &si, flags|SX_NOALLOC);
+      i = si + 1; continue; }                  /* subst.c:1896-1903 */
+```
+
+— so a read that failed leaves `si` where its reader stopped and the loop looks
+for the next `$(` one past it. *Every* failing substitution in the word is
+reported, not just the first, and the brace still finds its `}`. osh stopped at
+the first: `z=ZZ; A${z:-p$(fi⏎q)r$(for⏎s)t}B` under `${…@P}` reported once where
+bash reports twice, and a third failing substitution added nothing.
+
+What is scanned on is **text**, which is what makes the resume point visible and
+is why the fix could not be "walk on through the part list": a `$(` the failed
+read swallowed is not reached again (`p$(fi $(for⏎x)q)r` reports once, and the
+error token `` `fi $(for' `` shows why), while one nested *inside* the failed
+body but past the stop point is (`p$(fi⏎$(for⏎x)q)r` reports twice) — and the
+part tree never took the failed body apart, so it can answer neither. Fixed by
+handing the remainder to a fresh scan: `Shell::extent_read_of_rest` lexes it
+with `dquote_word_from_source` the way `expand_extent_rest` already lexes its
+own, and `brace_scanned_subs_slice` collects from a bare parts run (a top-level
+`$( … )` is not reachable through `unparse::nested_parts`, which was why the
+first attempt at this changed nothing). Corpus case
+`a-brace-scan-carries-on-past-a-failed-extent-read.sh`.
+
 The `}BB` is a second, independent defect on the same path, and the more
 interesting one: **one `tail` cannot serve both reads.** `CmdSubBody`'s `tail` is
 "the rest of the enclosing word", filled by `unparse::attach_comsub_tails_in`,
@@ -1020,6 +1049,148 @@ Measured byte-identical with bash 5.2.37 for `#`, `%`, `##`, `/pat/`,
 `a-brace-sub-word-is-expanded-on-its-own-string.sh` (16 probes plus a `PS4`
 block). The `:-`/`:=`/`:+` operand is *not* covered: it is the one shape whose
 leftover is duplicated rather than merely misscoped, and that is part 2.
+
+---
+
+### TD-OILS-A-BRACE-SCAN-THAT-NEVER-FINISHES-LOSES-THE-READS-IT-ALREADY-DID. A word whose `${` or `$(` is never closed reports nothing from the extent scan — 2026-08-10
+
+**Where:** `userspace/oils/src/interp.rs` — `Shell::brace_extent_scan` and the
+`extent_read_of*` family it drives, and the parser that has to produce a `Word`
+before any of them run.
+
+**What is wrong.** bash's `extract_dollar_brace_string` (subst.c:1874-1960) is a
+**single forward pass that reports as it goes**. Each `$( … )` it meets is handed
+to `extract_command_subst` *at the point the scan reaches it*, so a body that
+does not parse has already been reported by the time the scan discovers, later,
+that the word it is scanning has no closing `}` — or that a subsequent `$(` runs
+off the end of the string. The failures of the earlier reads are not retracted.
+
+osh inverts the order: `brace_extent_scan` is reached only from an expansion of
+an already-parsed `Word`, so a word that never parses runs no reads at all and
+every report the scan would have made is lost. Two shapes show it.
+
+**(a) A later `$(` that is never closed.** The first read fails and is reported
+by bash; osh drops it, and then diverges again on what the unterminated second
+one leaves behind:
+
+```sh
+z=ZZ; v='A${z:-p$(fi
+q)r$(for
+s}B'; printf '[%s]\n' "${v@P}"
+```
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| reports | `` near unexpected token `fi' `` **then** `` near `for' `` | `` near `for' `` only |
+| then | — | `fo: command not found` (the unterminated body is *run*) |
+| value | `[AZZB]` | `[A⏎s}B]` |
+
+Two separate faults here: the lost `fi` report, and — because osh's parser
+recovers differently from a `$(` with no `)` — an unterminated body that gets
+executed and a brace that never yields its value. bash's scan runs off the end
+of the string looking for the `}` and still hands back the operand's value.
+
+**(b) An unterminated `${` in the remainder.** The read that already failed is
+reported by bash before the word is condemned; osh emits only the condemnation:
+
+```sh
+z=ZZ; v='A${z:-p$(fi
+q)r${w'; printf '[%s]\n' "${v@P}"
+```
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| reports | `` near unexpected token `fi' `` **then** `A${z:-p$(fi⏎q)r${w: bad substitution` | the `bad substitution` only |
+| value | `[A${z:-p$(fi⏎q)r${w]` | same |
+
+Only the diagnostics differ in (b); the value already agrees.
+
+**Both are pre-existing** — verified by `git stash` against the read-1
+continuation fix of 2026-08-10, which neither caused nor touched them. They are
+a *different* rule from that fix: the continuation is about a read that failed
+inside a word that is otherwise well-formed, whereas this is about a scan that
+never reaches its own end.
+
+**What the proper fix looks like.** The reports have to be emitted by the
+**scan**, not by an expansion downstream of a successful parse. That means the
+extent scan must run over the word's *source text* at the point the lexer meets
+the `${`, in the same forward pass that is looking for the `}` — which is what
+bash does and is a genuine restructuring, not a patch: today `brace_extent_scan`
+takes a `&WordPart` and presupposes a parse. Doing it properly means the brace
+lexer growing the scan, reporting each `$( … )` as it steps over it, and only
+afterwards deciding whether the word is well-formed. That would fix (a)'s and
+(b)'s lost reports together, and is also the natural place to make (a)'s
+unterminated body stop being executed.
+
+**Not urgent:** both shapes need `@P` to be visible at all (any other context
+takes the `longjmp` on the first failure), and both are malformed input.
+
+---
+
+### TD-OILS-A-SINGLE-QUOTED-COMMAND-SUBSTITUTION-IN-A-BRACE-OPERAND-IS-PARSED. `"${z:-'$(fi⏎q)'}"` is a parse error where bash defers it to expansion — 2026-08-10
+
+**Where:** `userspace/oils/src/parser.rs` — the lexing of a `${ … }` met inside a
+double-quoted string, where the operand's `' … '` is being treated as *not*
+quoting the `$( … )` inside it.
+
+**What is wrong.** Inside `${ … }`, bash's `parse_matched_pair` tracks
+`dolbrace_state`, and once the state is `DOLBRACE_QUOTE`/`DOLBRACE_WORD` a `'`
+opens a single-quoted run that the parser passes over whole — it never hands
+what is inside to `xparse_dolparen`. The `$( … )` in there is only met later, at
+expansion time, and by then it is a *string* being scanned rather than source
+being parsed. So bash's diagnostic comes from the expansion (`command
+substitution: line N:`) and the failure is an `exp_jump_to_top_level (DISCARD)`
+— the one command is dropped and the shell carries on.
+
+osh parses it at word-parse time and dies:
+
+```sh
+unset z
+echo "A: start"
+echo "[${z:-'$(fi
+q)'}]"
+echo "B: after rc=$?"
+```
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| reports | `` command substitution: line 5: syntax error near unexpected token `fi' `` | `` line 3: syntax error near unexpected token `fi' `` + `` line 3: `echo "[${z:-'$(fi' `` |
+| then | `A: start` … `B: after rc=1` | nothing after `A: start` |
+| exit | 0 | 2 |
+
+Two things wrong at once: the error is raised a whole phase early (so it is a
+*script* syntax error rather than a discarded command), and the line it names
+and the text it echoes are the physical line rather than the substitution's own.
+
+**Not** merely cosmetic — the shell aborts where bash continues.
+
+**Controls that already agree:** a single-quoted substitution that *parses* is
+handled correctly at every level, because bash and osh end up expanding it the
+same way (`extract_dollar_brace_string` skips the `' … '` at scan time, but
+`expand_word_internal` is past the point where a `'` quotes anything, so the
+substitution runs and the quotes stay as text):
+
+```sh
+unset z
+echo "1[${z:-'$(echo Q)'}]"      # both: 1['Q']
+echo "2[${z:-'a b'}]"            # both: 2['a b']
+echo "3[${z:-'$(echo Q
+)'}]"                            # both: 3['Q']
+```
+
+So the divergence is confined to a body that does not parse.
+
+**Pre-existing** — found 2026-08-10 while measuring read 2 of
+TD-OILS-A-BRACE-OPERAND-IS-SCANNED-AGAIN-BEFORE-IT-IS-EXPANDED, and untouched by
+that work (it is a parse-time failure; the extent machinery never runs).
+
+**What the proper fix looks like.** The `${ … }` lexer has to treat a `'` in the
+operand as opening an unparsed run, exactly as `parse_matched_pair` does, so the
+`$( … )` inside it is carried as text and only read when an expansion asks for
+it. Fixing it also unblocks the read-2 corpus row that this shape is the
+cleanest probe for: bash's `string_extract_double_quoted` (subst.c:966-985) has
+no single-quote rule at all, so read 2 is the *only* reader that ever looks
+inside it.
 
 ---
 

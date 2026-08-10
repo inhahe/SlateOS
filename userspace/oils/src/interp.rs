@@ -30802,16 +30802,29 @@ impl Shell {
     /// `${param:off:len}` bound, which bash blames on the parameter reference.
     /// See [`Self::eval_arith_substr_bound`].
     fn eval_arith_expr_checked(&mut self, s: BStr<'_>) -> Option<i64> {
-        // Only the *leading* blanks go. bash's `subexpr` steps over them to
-        // decide whether the expression is empty and then keeps the string from
-        // there on, trailing blanks included — so `${a[ 1 z ]}` blames
-        // `"z "`, with the two spaces, and the expression it names is `1 z `.
-        // Every other arithmetic context already reaches the evaluator
-        // untrimmed at the end; a subscript is not the exception it looked
-        // like. The evaluator ignores trailing blanks in a *valid* expression,
-        // so this changes nothing but the diagnostic.
-        let s = bytes::trim_start(s);
-        if s.is_empty() {
+        // bash's `subexpr` steps over the leading blanks *only to decide whether
+        // the expression is empty* — the string it then evaluates and echoes is
+        // the one it was handed, untouched:
+        //
+        // ```c
+        //   for (p = expr; p && *p && cr_whitespace (*p); p++)
+        //     ;
+        //   if (p == NULL || *p == '\0')
+        //     return (0);
+        //   pushexp ();
+        //   expression = savestring (expr);   /* expr.c:457-464 */
+        // ```
+        //
+        // so the trim must not travel any further than this test. What the
+        // diagnostic drops off the front is a *different* set —
+        // `evalerror`'s ` `/`\t` (expr.c:1524, [`Shell::emit_arith_error`]) —
+        // and the skip here is `cr_whitespace`, ` `/`\t`/`\n` (expr.c:93),
+        // narrower than `isspace`. Measured: `m=$'\t\n 3 x'; $(( $m ))` echoes
+        // `⏎ 3 x`, the tab gone and the newline kept, which only holds if the
+        // evaluator was handed the whole string. Trailing blanks are simply part
+        // of what is lexed, so `${a[ 1 z ]}` blames `"z "` with its two spaces
+        // and names the expression `1 z `.
+        if s.iter().all(|b| arith::is_arith_space(*b)) {
             return Some(0);
         }
         // As in [`Shell::arith_sub`]: a subscript whose expansion failed never
@@ -31380,7 +31393,17 @@ impl Shell {
                 );
                 i = if j < chars.len() { j + 1 } else { j };
                 let sub = self.run_command_sub_text(&inner);
-                out.extend_from_slice(bytes::trim(&sub));
+                // Spliced in **verbatim**. This pass is `expand_arith_string`,
+                // ordinary word expansion — it has no whitespace rule of its
+                // own, and the evaluator's own is the only one that applies.
+                // Trimming here was invisible while every answer was a number,
+                // but it is not invisible in a diagnostic: `` $(( `printf ' 3 x '` )) ``
+                // reports `3 x  : … (error token is "x  ")` in bash, both
+                // trailing spaces intact — the value's and the source's. (A
+                // command substitution's own trailing newlines are already gone;
+                // that stripping is `command_sub`'s, and it is the *only*
+                // whitespace rule between here and the evaluator.)
+                out.extend_from_slice(&sub);
                 continue;
             }
             if syn_at(&chars, i) != '$' {
@@ -31396,7 +31419,10 @@ impl Shell {
                     // `$((expr))` — nested arithmetic. Find the matching `))`.
                     if let Some((inner, next)) = Self::scan_arith_sub(&chars, i + 3) {
                         let val = self.arith_sub(&inner, false);
-                        out.extend_from_slice(bytes::trim(&val));
+                        // Verbatim, as above — a nested arithmetic answers with
+                        // digits and nothing else, so there was never anything
+                        // for a trim to remove.
+                        out.extend_from_slice(&val);
                         i = next;
                         continue;
                     }
@@ -31424,7 +31450,7 @@ impl Shell {
                         let Some((sub, stop)) = self.arith_dolparen(&rest, &inner) else {
                             break;
                         };
-                        out.extend_from_slice(bytes::trim(&sub));
+                        out.extend_from_slice(&sub);
                         // `past` counts *characters*, like `i` — the lexer's
                         // cursor indexes its own `Vec<Ch>`, decoded by the same
                         // `bytes::chars` this loop used. That matters because an
@@ -31535,7 +31561,8 @@ impl Shell {
                             .and_then(|n| self.param_value(n))
                             .unwrap_or_default(),
                     };
-                    out.extend_from_slice(bytes::trim(&val));
+                    // Verbatim — see the backtick arm above.
+                    out.extend_from_slice(&val);
                 }
                 _ => {
                     let Some(n) = Self::scan_arith_param(&chars, i + 1) else {
@@ -31560,7 +31587,10 @@ impl Shell {
                             Str::new()
                         }
                     };
-                    out.extend_from_slice(bytes::trim(&val));
+                    // Verbatim — see the backtick arm above. `y=$' 3 x ';
+                    // $(( $y ))` reports `3 x  `, the value's own trailing
+                    // space kept and the source's beside it.
+                    out.extend_from_slice(&val);
                 }
             }
         }
@@ -49058,7 +49088,22 @@ impl Shell {
         // The echoed source is *bytes*: an expression assembled from a variable
         // value can hold any of them, and a mangled echo would name something
         // other than what the user wrote.
-        let mut expr = bytes::trim_start(e.expr_override.as_deref().unwrap_or(expr));
+        //
+        // The skip is bash's own, and it is *not* `isspace`:
+        //
+        // ```c
+        //   for (t = expression; t && whitespace (*t); t++)
+        //     ;                                        /* expr.c:1524-1525 */
+        // ```
+        //
+        // and `whitespace(c)` is `((c) == ' ' || (c) == '\t')` (general.h:77).
+        // So a newline in front of the expression stays: `m=$'\t\n 3 x'; $(( $m ))`
+        // echoes `⏎ 3 x`, the tab gone and the newline kept.
+        let mut expr = {
+            let s = e.expr_override.as_deref().unwrap_or(expr);
+            let i = s.iter().position(|b| !matches!(b, b' ' | b'\t')).unwrap_or(s.len());
+            s.get(i..).unwrap_or_default()
+        };
         // A rejected number literal (`2#12`, `099`) truncates the echoed source
         // at the literal's end — bash reports `5+2#12+9` as `5+2#12`. Ordinary
         // parse/eval errors echo the whole source unchanged.

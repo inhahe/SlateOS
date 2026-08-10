@@ -474,16 +474,21 @@ const RECURSION_LIMIT: u32 = 128;
 /// way bash does: `b="a"` with `a=5` yields `5`, `x="2+3"` yields `5`, and an
 /// unset/empty value yields `0`. `depth` guards against reference cycles.
 fn str_to_val(s: BStr<'_>, vars: &mut dyn VarLookup, depth: u32) -> Result<i64, ArithError> {
-    // Only the *front* is trimmed. bash's lexer skips leading whitespace as a
-    // matter of course, and its diagnostic skips it again when echoing the
-    // failing value — but trailing whitespace is simply part of the string
-    // being lexed, so an error token that runs to the end of the value carries
-    // it: `x='1 + '; $(( x ))` reports `1 + : … (error token is "+ ")`, with
-    // both the echoed expression and the token keeping the final space.
-    let t = bytes::trim_start(s);
+    // The value goes to the evaluator *whole*. bash's `expr_streval` does
+    // `tval = (value && *value) ? subexpr (value) : 0` (expr.c:1231) and
+    // `subexpr` keeps what it was handed — `expression = savestring (expr)`
+    // (expr.c:464) — skipping the leading blanks only to decide the expression
+    // is empty. What drops them off the *echo* is `evalerror`'s own, narrower
+    // skip (expr.c:1524), so a value that begins with a newline still shows it:
+    // `a=$'\n3 x'; $(( a ))` reports `⏎3 x: syntax error in expression`. Trailing
+    // whitespace is simply part of the string being lexed, so an error token
+    // that runs to the end of the value carries it: `x='1 + '; $(( x ))` reports
+    // `1 + : … (error token is "+ ")`, with both the echo and the token keeping
+    // the final space. See [`crate::interp::Shell::emit_arith_error`].
+    let t = s;
     // The fast paths ask about the value's *content*, so they look past the
-    // trailing whitespace that only the diagnostics care about.
-    let core = bytes::trim_end(t);
+    // whitespace that only the diagnostics care about.
+    let core = trim_arith_end(trim_arith_start(t));
     if core.is_empty() {
         return Ok(0);
     }
@@ -496,7 +501,7 @@ fn str_to_val(s: BStr<'_>, vars: &mut dyn VarLookup, depth: u32) -> Result<i64, 
     if depth >= RECURSION_LIMIT {
         // bash reports the offending value token here, and uses the innermost
         // value as the `<expr>:` prefix (recorded via `expr_override`).
-        let mut e = ArithError::with_token("expression recursion level exceeded", t);
+        let mut e = ArithError::with_token("expression recursion level exceeded", trim_arith_start(t));
         e.expr_override = Some(t.to_vec());
         return Err(e);
     }
@@ -644,9 +649,43 @@ fn assign_base(sym: &str) -> Option<String> {
     }
 }
 
+/// Is `c` whitespace to bash's *arithmetic* lexer?
+///
+/// It is not `isspace`. expr.c has one macro for it, and only three characters
+/// in it:
+///
+/// ```c
+///   /* Here is a macro which accepts newlines, tabs and spaces as whitespace. */
+///   #define cr_whitespace(c) (whitespace(c) || ((c) == '\n'))   /* expr.c:92-93 */
+/// ```
+///
+/// with `whitespace(c)` being `((c) == ' ' || (c) == '\t')` (general.h:77). So a
+/// vertical tab, a carriage return and a form feed are *characters* here, not
+/// separators: `c=$'\v3 x'; $(( $c ))` is `^K3 x : syntax error: operand
+/// expected (error token is "^K3 x ")` — the `\v` inside the token — where a
+/// leading `\t` or `\n` would have been skipped. Every whitespace test in the
+/// evaluator is this one (expr.c:457, 1321, 1470); the two that are *not* are
+/// the diagnostics' (expr.c:911, 1524), which use bare `whitespace` and so keep
+/// a leading newline. See [`crate::interp::Shell::emit_arith_error`].
+pub(crate) fn is_arith_space(c: u8) -> bool {
+    matches!(c, b' ' | b'\t' | b'\n')
+}
+
+/// `s` with its leading arithmetic whitespace dropped. See [`is_arith_space`].
+fn trim_arith_start(s: BStr<'_>) -> BStr<'_> {
+    let i = s.iter().position(|b| !is_arith_space(*b)).unwrap_or(s.len());
+    s.get(i..).unwrap_or_default()
+}
+
+/// `s` with its trailing arithmetic whitespace dropped. See [`is_arith_space`].
+fn trim_arith_end(s: BStr<'_>) -> BStr<'_> {
+    let i = s.iter().rposition(|b| !is_arith_space(*b)).map_or(0, |i| i + 1);
+    s.get(..i).unwrap_or_default()
+}
+
 impl AParser<'_> {
     fn skip_ws(&mut self) {
-        while matches!(self.src.get(self.pos), Some(&c) if bytes::is_space(c)) {
+        while matches!(self.src.get(self.pos), Some(&c) if is_arith_space(c)) {
             self.pos += 1;
         }
     }
@@ -935,7 +974,7 @@ impl AParser<'_> {
     /// so anything else means the two characters are separate operators.
     fn lvalue_follows(&self, n: usize) -> bool {
         let mut i = self.pos + n;
-        while matches!(self.src.get(i), Some(&c) if bytes::is_space(c)) {
+        while matches!(self.src.get(i), Some(&c) if is_arith_space(c)) {
             i += 1;
         }
         matches!(self.src.get(i), Some(c) if c.is_ascii_alphabetic() || *c == b'_')
@@ -1868,26 +1907,30 @@ mod tests {
 
     #[test]
     fn a_values_trailing_whitespace_survives_into_the_diagnostic() {
-        // bash lexes a variable's value exactly as stored. Its lexer skips
-        // leading whitespace, and `evalerror` skips it again when echoing the
-        // value — but trailing whitespace is simply part of the string, so an
-        // error token running to the end of the value carries it. Trimming the
-        // tail (as trimming the head would suggest) loses a space bash prints:
-        // `x='1 + '; $(( x ))` reports `1 + : … (error token is "+ ")`.
+        // bash lexes a variable's value exactly as stored, and records it for the
+        // diagnostic exactly as stored too: `expr_streval` hands `subexpr` the
+        // whole value and `subexpr` keeps it (`expression = savestring (expr)`,
+        // expr.c:464). Only the *printing* drops leading blanks, and with a
+        // narrower rule than the lexer's — see [`crate::interp::Shell::emit_arith_error`].
+        // Trailing whitespace is simply part of the string, so an error token
+        // running to the end of the value carries it: `x='1 + '; $(( x ))`
+        // reports `1 + : … (error token is "+ ")`.
         let mut m = StrMap::default();
         m.0.insert("x".into(), "  1 +  ".into());
         let e = eval(b"x", &mut m).unwrap_err();
-        assert_eq!(e.expr_override.as_deref(), Some(&b"1 +  "[..]));
+        assert_eq!(e.expr_override.as_deref(), Some(&b"  1 +  "[..]));
         assert_eq!(e.body(), b"syntax error: operand expected (error token is \"+  \")");
         // Same for a failure raised during evaluation rather than parsing.
         m.0.insert("d".into(), " 1/0 ".into());
         let e = eval(b"d", &mut m).unwrap_err();
-        assert_eq!(e.expr_override.as_deref(), Some(&b"1/0 "[..]));
+        assert_eq!(e.expr_override.as_deref(), Some(&b" 1/0 "[..]));
         assert_eq!(e.body(), b"division by 0 (error token is \"0 \")");
-        // …and for the recursion guard, whose token is the value itself.
+        // …and for the recursion guard, whose token is the value itself — the
+        // one place the head *is* trimmed, because a token is what the lexer
+        // holds and the lexer had already stepped over the blanks.
         m.0.insert("r".into(), " r ".into());
         let e = eval(b"r", &mut m).unwrap_err();
-        assert_eq!(e.expr_override.as_deref(), Some(&b"r "[..]));
+        assert_eq!(e.expr_override.as_deref(), Some(&b" r "[..]));
         assert_eq!(e.token.as_deref(), Some(&b"r "[..]));
         // The whitespace is cosmetic only: a value that evaluates still does,
         // including through the octal and plain-decimal fast paths.

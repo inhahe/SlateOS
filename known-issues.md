@@ -772,7 +772,7 @@ whole and steps over its tail.
 
 Corpus: `an-arithmetic-span-is-not-shell-text.sh` (18 rows).
 
-### TD-OILS-A-COMMAND-SUBSTITUTION-NAMES-ITS-OWN-PAREN-BEFORE-THE-BODYS-BRACKET. `echo $(f[1` says `)` where bash says `]` — 2026-08-10 — OPEN
+### TD-OILS-A-COMMAND-SUBSTITUTION-NAMES-ITS-OWN-PAREN-BEFORE-THE-BODYS-BRACKET. `echo $(f[1` says `)` where bash says `]` — 2026-08-10 — ✅ FIXED 2026-08-10
 
 **Where:** `userspace/oils/src/lexer.rs`, `read_dollar`/the `$(`…`)` body scan.
 osh scans the substitution's text for its closing `)` before lexing the body, so
@@ -833,14 +833,75 @@ the first table), which `LexError::at`'s never-overwrite rule already gives.
 
 Found while fixing TD-OILS-STARTS-COMMAND-DIVERGES-FROM-COMMAND-TOKEN-POSITION.
 
-**Prerequisite met.** The body scan now carries a real `CmdPos`, so it can
-answer `at_command()` where it used to have only a hand-set `bool` — see
-TD-OILS-A-CASE-SPELLED-INSIDE-AN-ARITHMETIC-SPAN-OPENED-A-PATTERN-LIST-THAT-NEVER-CLOSED.
-What is still missing is the assignment shape: `CmdPos::word`'s `assign`
-argument is fed `false` from the character scan, so `Prev::Assignment` and
-`at_command`'s first clause are inert in there. That wants an `AssignHead`
-state machine over the word being read (a quoted character in the *name* spoils
-it, one in the value does not).
+**Fixed**, though not by the rewrite proposed above — see below for why that is
+not a deferral.
+
+The body scan exists because a `$( … )`'s extent has to be known before its text
+can be re-lexed, and it already mirrors every construct in which a `)` closes
+nothing: quotes, `${ … }`, backticks, comments, here-documents, `case` patterns,
+arithmetic spans, nested substitutions. An array subscript is simply the last
+member of that set, and the *only* one that can run past the substitution's own
+`)` and take it as text. Adding it completes the enumeration rather than
+patching around a missing one, which is why it is the right shape of fix; the
+one-pass rewrite would delete the scan altogether and is tracked as
+TD-OILS-A-SUBSTITUTIONS-EXTENT-IS-FOUND-BY-A-SECOND-SCAN-RATHER-THAN-BY-PARSING.
+
+`read_balanced_body` now carries a `sub_depth`/`sub_line` pair. It opens when
+`CaseScan::at_subscript()` says so — bash's parse.y:5145-5146, which is
+`assignment_acceptable (last_read_token) && token_is_ident (token, token_index)`
+— and while it is up, nothing else in the scan runs: no `#`, no `<<`, no
+here-document collection at a newline, no paren counting, no `case` feed. Only
+`read_opaque_span` still runs ahead of it, which is what keeps `f[a"]"b`
+looking for its `]`. At end of input a `sub_depth > 0` returns
+`eof_matching(']').at(sub_line)` *before* the pending here-documents are
+drained, because `read_token_word` bails on `&matched_pair_error` without ever
+reaching the reduction that warns (parse.y:5150) — measured: `$(cat <<E; f[1`
+names the `]` and warns about nothing.
+
+Answering `at_command()` in there also needed the assignment shape, which
+`CmdPos::word`'s `assign` argument had been fed `false` for. `AssignHead` is
+bash's `assignment` (general.c) as a state machine over the characters —
+`Name`, `Sub(depth)`, `SubEnd`, `Plus`, `Yes`, `No`. It has to be per-character
+rather than a test on the finished word because bash runs `assignment` over the
+token buffer *as written*: a quoted character in the name spoils it (`"v"=1` is
+a command, so `$("v"=1 f[2` names `)`) while one in the value cannot (`v="a b"`
+is an assignment, so `$(v="a b" f[2` names `]`).
+
+Corpus: `a-subscript-in-a-substitution-body-outruns-the-substitution.sh`
+(32 rows).
+
+### TD-OILS-A-SUBSTITUTIONS-EXTENT-IS-FOUND-BY-A-SECOND-SCAN-RATHER-THAN-BY-PARSING — 2026-08-10 — OPEN (design debt)
+
+**Where:** `userspace/oils/src/lexer.rs`, `read_balanced_body` and its re-lex of
+the body it returns. bash reads a `$( … )` body **once**, with the real parser
+(`parse_comsub`, parse.y:4133, a whole nested `yyparse`), and the body's extent
+is wherever that parse stops. osh reads it **twice**: a character scan finds the
+`)`, then the text between is lexed again.
+
+The scan is therefore a model of the parser, and every construct in which a `)`
+closes nothing has to be taught to it separately. The list is now complete as
+far as anything measured reaches — quotes, `$'…'`, `${ … }`, backticks,
+comments, here-documents (including their ordering across nesting and their
+end-of-input warnings), `case` patterns, `(( … ))` and `$(( … ))` spans, nested
+`$(`/`<(`/`>(`, and array subscripts — and each was added because a measurement
+demanded it, not speculatively. But the shape is still one pass too many, and
+its cost is real: the re-lex has to be told what the first pass already ate
+(`Spanned::taken`, `heredocs_forgotten`, `SubstBail`), and a construct nobody
+has measured yet will be wrong in the same way each of the above was.
+
+**The fix** is to read the body with the ordinary reader and let its error out,
+taking the extent from where that reader stopped. What makes it a large change
+rather than a small one is that the here-document machinery currently depends on
+the two-pass shape: `gather_ahead` moves the cursor onto later lines and records
+a read-ahead, and it is called at the *nested* `)` as well as the outer one so
+that bash's warning order and line numbers come out right. Doing that from
+inside a single reader means the reader itself has to carry the substitution
+nesting, which is roughly what bash's `save_parser_state`/`restore_parser_state`
+pair is for.
+
+Not urgent: nothing measured is currently wrong because of it. Logged so the
+next construct that turns out to need teaching is recognised as the third
+reminder rather than as a one-off.
 
 ### TD-OILS-A-RUN-OF-NEWLINES-AFTER-A-PIPE-MAKES-TIME-RESERVED-AGAIN. `true |⏎⏎time x` — 2026-08-10 — OPEN
 

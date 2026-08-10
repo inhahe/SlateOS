@@ -1239,6 +1239,109 @@ struct CaseFrame {
     pat_start: bool,
 }
 
+/// How far along an assignment's head the word being scanned has got — bash's
+/// `assignment` (general.c), run over the token buffer as it stands:
+///
+/// ```c
+/// if (legal_variable_starter (c) == 0)  return (0);
+/// while (c = string[indx])
+///   {
+///     if (c == '=')  return (indx);           /* `=' at index 0 is not one */
+///     if (c == '[')
+///       {
+///         newi = skipsubscript (string, indx, 0);
+///         if (string[newi++] != ']')  return (0);
+///         if (string[newi] == '+' && string[newi+1] == '=')  return (newi + 1);
+///         return ((string[newi] == '=') ? newi : 0);
+///       }
+///     if (c == '+' && string[indx+1] == '=')  return (indx + 1);
+///     if (legal_variable_char (c) == 0)  return (0);
+///     indx++;
+///   }
+/// ```
+///
+/// It reads the buffer bash keeps, which holds the source *as written* — quotes
+/// and all. So a quoted character in the **name** spoils the assignment
+/// (`"h"=v` starts on a `"`, which is no variable starter) while one in the
+/// **value** cannot (`h="v"` has already returned at the `=`). That asymmetry is
+/// the whole reason this is a state machine over the characters rather than a
+/// test on the finished word: [`CaseScan`] keeps only the unquoted ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssignHead {
+    /// Reading the name. Empty so far when [`CaseScan::word`] is empty, which is
+    /// where a `=` is just a character.
+    Name,
+    /// Inside the `[ … ]`, at this bracket depth.
+    Sub(usize),
+    /// Just past the `]`, where only `=` or `+=` may follow.
+    SubEnd,
+    /// A `+` that is an assignment only if a `=` follows it.
+    Plus,
+    /// The `=` has been read: an assignment whatever comes after.
+    Yes,
+    /// Not one, and nothing later can make it one.
+    No,
+}
+
+impl AssignHead {
+    /// One unquoted character of the word.
+    fn push(self, c: char, first: bool) -> Self {
+        match self {
+            Self::Name if first => {
+                if is_name_start(c) {
+                    Self::Name
+                } else {
+                    Self::No
+                }
+            }
+            Self::Name => match c {
+                '=' => Self::Yes,
+                '[' => Self::Sub(1),
+                '+' => Self::Plus,
+                _ if is_name_char(c) => Self::Name,
+                _ => Self::No,
+            },
+            Self::Sub(d) => match c {
+                '[' => Self::Sub(d + 1),
+                ']' if d == 1 => Self::SubEnd,
+                ']' => Self::Sub(d - 1),
+                _ => Self::Sub(d),
+            },
+            Self::SubEnd => match c {
+                '=' => Self::Yes,
+                '+' => Self::Plus,
+                _ => Self::No,
+            },
+            Self::Plus => {
+                if c == '=' {
+                    Self::Yes
+                } else {
+                    Self::No
+                }
+            }
+            Self::Yes => Self::Yes,
+            Self::No => Self::No,
+        }
+    }
+
+    /// A quoted or substituted span. Content of the value or of the subscript,
+    /// which the scan is past caring about; anywhere else it is a character that
+    /// is not the one the head needed.
+    const fn push_quoted(self) -> Self {
+        match self {
+            Self::Sub(d) => Self::Sub(d),
+            Self::Yes => Self::Yes,
+            _ => Self::No,
+        }
+    }
+
+    /// Whether the word so far is exactly a name — bash's `token_is_ident`,
+    /// which is where a `[` opens a subscript rather than being text.
+    const fn is_name(self, empty: bool) -> bool {
+        matches!(self, Self::Name) && !empty
+    }
+}
+
 /// The `case`-awareness of [`Lexer::read_subst_body`].
 ///
 /// A `case` pattern's `)` has no opening mate, so a scan that finds the end of a
@@ -1277,6 +1380,9 @@ struct CaseScan {
     /// is one token however it is spelled, so [`Self::feed`] recognises the whole
     /// of it at its first character and then swallows the rest.
     skip: u8,
+    /// How far the word being read has got along an assignment's head, which is
+    /// what makes the *next* word a command word as well.
+    head: AssignHead,
 }
 
 impl CaseScan {
@@ -1288,6 +1394,7 @@ impl CaseScan {
             word_pat_start: false,
             pos: CmdPos::new(),
             skip: 0,
+            head: AssignHead::Name,
         }
     }
 
@@ -1306,6 +1413,7 @@ impl CaseScan {
     /// A character of the word being read.
     fn push(&mut self, c: char) {
         self.begin_word();
+        self.head = self.head.push(c, self.word.is_empty() && self.word_pure);
         push1(&mut self.word, c);
         self.pattern_seen();
     }
@@ -1314,8 +1422,27 @@ impl CaseScan {
     /// cannot be part of a reserved one.
     fn push_quoted(&mut self) {
         self.begin_word();
+        self.head = self.head.push_quoted();
         self.word_pure = false;
         self.pattern_seen();
+    }
+
+    /// Whether a `[` here opens an array subscript, which the scan must then read
+    /// to its `]` however many `)` or newlines stand in the way — bash's
+    /// (parse.y:5145-5146):
+    ///
+    /// ```c
+    /// else if MBTEST(character == '[' &&      /* ] */
+    ///                ((token_index > 0 && assignment_acceptable (last_read_token) &&
+    ///                  token_is_ident (token, token_index)) || …
+    /// ```
+    ///
+    /// `assignment_acceptable` is `command_token_position` minus a `case`
+    /// pattern, and a pattern is already out of command position by that macro's
+    /// third clause — so [`CmdPos::at_command`] answers both. `token_is_ident` is
+    /// [`AssignHead::is_name`].
+    fn at_subscript(&self) -> bool {
+        self.head.is_name(self.word.is_empty()) && self.pos.at_command()
     }
 
     /// Note that the current pattern is no longer empty, so a `(` from here on
@@ -1336,6 +1463,8 @@ impl CaseScan {
         let pure = self.word_pure;
         let word = core::mem::take(&mut self.word);
         self.word_pure = true;
+        let assign = self.head == AssignHead::Yes;
+        self.head = AssignHead::Name;
         let pat_first = self.word_pat_start;
         self.word_pat_start = false;
         // Only an unquoted single literal can be a reserved word — the same
@@ -1350,9 +1479,11 @@ impl CaseScan {
             return;
         }
         // Sampled before the word is folded in: `case` and `esac` are reserved
-        // words only where one was already acceptable.
+        // words only where one was already acceptable, and an assignment is one
+        // only where an assignment could have stood.
         let cmd_pos = self.pos.reserved_ok();
-        self.pos.word(lit, false, false);
+        let was_cmd = self.pos.at_command();
+        self.pos.word(lit, assign, was_cmd);
         let word = lit.unwrap_or_default();
         if let Some(f) = self.frames.last_mut() {
             match f.phase {
@@ -6039,8 +6170,26 @@ impl Lexer {
         let mut own = 0usize;
         // Which `)` closes a group and which terminates a `case` pattern.
         let mut cases = CaseScan::new();
+        // Bracket depth inside a `name[ … ]` array subscript, and the line the
+        // outermost `[` stood on. bash reads one with `parse_matched_pair (cd,
+        // '[', ']', &ttoklen, P_ARRAYSUB)` (parse.y:5148), a scan that knows
+        // nothing about the `$( … )` it is standing in — so it runs *past* the
+        // substitution's own `)` and takes it as subscript text. See
+        // [`CaseScan::at_subscript`].
+        let mut sub_depth = 0usize;
+        let mut sub_line = 0u32;
         loop {
             let Some(cx) = self.bump_ch() else {
+                // A subscript still open is the pair bash reports, and it reports
+                // it *instead of* the missing `)` — and before the here-documents
+                // this body declared are ever missed, so `$(cat <<E; f[1` names
+                // the `]` and warns about nothing. `parse_matched_pair` fails at
+                // the end of input and `read_token_word` bails immediately
+                // (`return -1`, parse.y:5150) without ever reaching the reduction
+                // that would have noticed the pending here-document.
+                if sub_depth > 0 {
+                    return Err(eof_matching(']').at(sub_line));
+                }
                 // bash reads a whole line at a time, so the input's last line ends
                 // whether or not it carries a newline — and the here-documents that
                 // line declared are gathered, and warned about, at that end, before
@@ -6077,6 +6226,32 @@ impl Lexer {
                 if arith_from.is_none() {
                     cases.push_quoted();
                 }
+                continue;
+            }
+            // A `[` at the head of a name in command position. Everything up to
+            // the matching `]` is one word's text: no delimiter, no operator and
+            // no `)` of ours ends it, which is why this sits ahead of every other
+            // arm and why the depth counting below never sees those characters.
+            // Quoting still nests — the arm above ran first — so `f[a"]"b` is
+            // still looking for its `]`.
+            if command && arith_from.is_none() && sub_depth == 0 && c == '[' && cases.at_subscript()
+            {
+                sub_line = self.cur_line();
+                sub_depth = 1;
+                cases.push('[');
+                raw.push(b'[');
+                word_start = false;
+                continue;
+            }
+            if sub_depth > 0 {
+                match c {
+                    '[' => sub_depth += 1,
+                    ']' => sub_depth -= 1,
+                    _ => {}
+                }
+                cases.push(c);
+                cx.push_to(&mut raw);
+                word_start = false;
                 continue;
             }
             if command {

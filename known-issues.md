@@ -43,15 +43,18 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
-### TD-OILS-ARITHMETIC-PARSES-BEFORE-IT-EVALUATES-SO-A-NAMES-OWN-ERROR-NEVER-SURFACES. `x='1 + '; echo $(( 4 x ))` blames the leftover `x` where bash blames the `+` inside `x` — 2026-08-09 — OPEN
+### TD-OILS-ARITHMETIC-PARSES-BEFORE-IT-EVALUATES-SO-A-NAMES-OWN-ERROR-NEVER-SURFACES. `x='1 + '; echo $(( 4 x ))` blames the leftover `x` where bash blames the `+` inside `x` — 2026-08-09 — ⚠️ PART 1 (SINGLE-PASS EVALUATOR) FIXED 2026-08-09, PART 2 (ONE-TOKEN LOOKAHEAD) OPEN
 
-**Where:** `userspace/oils/src/arith.rs`. The module is deliberately two-phase —
-`fn parse(expr, vars: &dyn VarLookup) -> Expr` (~543) builds an AST, then
-`fn eval_expr(e, vars: &mut dyn VarLookup, depth)` (~1343) walks it — and the
-module doc says why: "The two-phase design is what makes assignment possible …
+**Where:** `userspace/oils/src/arith.rs`. The module *was* deliberately two-phase —
+`fn parse(expr, vars: &dyn VarLookup) -> Expr` built an AST, then
+`fn eval_expr(e, vars: &mut dyn VarLookup, depth)` walked it — and the
+module doc said why: "The two-phase design is what makes assignment possible …
 and `&&`/`||`/`?:` short-circuit so side effects only happen on the branch
 actually taken." bash is single-phase: its recursive-descent parser *is* the
 evaluator, and it suppresses the untaken branch with a `noeval` counter instead.
+That half is now done — see "Part 1, as landed" below — and what is left is the
+*other* half of the same sentence: bash's lexer runs one token **ahead** of the
+parse, so it has already evaluated the token the parse is about to stop on.
 
 **Reproduce.**
 
@@ -111,12 +114,118 @@ on a not-yet-walked AST. That deletes the `Expr` AST and merges `parse`/
 `eval_expr` — a real refactor of the file, but the two-phase split is the whole
 cause and no smaller change reaches it. (Half-measures do not work: eagerly
 resolving names during the current parse would evaluate untaken branches, which
-is the very thing the AST was introduced to avoid.)
+is the very thing the AST was introduced to avoid.) — **done, part 1 below.**
 
-Note the assignment guard has to survive the merge: expr.c manages it by
-lexing one token ahead with `noeval = 1` and looking for `EQ` (`SAVETOK`/
-`RESTORETOK` around a recursive `readtok`, expr.c:1373-1382), which is the same
-one-token lookahead osh's parser already has.
+Then make the walk *lex the token it stops on*, which is what D and E actually
+turn on. See "Part 2, what is left".
+
+**Part 1, as landed (2026-08-09).** `arith.rs` is now the single-pass evaluator:
+`Expr`/`Lvalue`/`ResolvedLv`/`Sub` and `eval_expr` are gone, every `parse_*`
+method returns a `V { n: i64, lv: Option<Lv> }` — bash's `tokval`/`curlval`
+pair — and `AParser` carries `vars`, a `noeval` counter and the recursion
+`depth`. The read happens in `AParser::reference`, at the point the name is
+lexed, under exactly bash's condition (`forced || !eq_follows()`, and not at all
+while `noeval > 0`).
+
+Merging the phases settled five things that the AST had had wrong, none of them
+previously logged, all now measured and covered by
+`tests/corpus/arithmetic-evaluates-a-name-as-it-lexes-it.sh`:
+
+* `**` is *not* suppressed. `exppower` (expr.c:960-978) has no `noeval` guard
+  where `expmuldiv` does, so `$(( 0 ? 2**-1 : 5 ))` and `$(( 0 && 2**-1 ))` are
+  "exponent less than 0" in bash. osh used to answer `5` and `0`.
+* A prefix `++`/`--` **forces** the read a following `=` would suppress
+  (`lasttok == PREINC || lasttok == PREDEC`, expr.c:1384-1391), and stores the
+  increment before refusing the assignment: `x=5; (( --x=9 ))` leaves `x` at 4.
+  osh left it at 5.
+* An unread reference's subscript is evaluated by the *assignment*, i.e. after
+  the right-hand side (`lind = curlval.ind`, expr.c:535-536; the unread case
+  falls to `expr_bind_variable`, expr.c:600-604). `unset a q; (( a[q=1] = (q+9) ))`
+  leaves `a[1]` = 9; osh left 10.
+* A parenthesised group names no location (`lasttok = NUM`, `curlval`
+  untouched), so `x=5; (( (x) = 3 ))` is "attempted assignment to non-variable"
+  and `(( (x)++ ))` is "operand expected". osh assigned and incremented.
+* A value that fails to evaluate is the expression the diagnostic is reported
+  *from*: `bad='1 + '; $(( bad + ))` says `1 + : …` in bash, where osh said
+  `bad + : …`.
+
+One cost, taken deliberately: `RECURSION_LIMIT` dropped from 128 to 32. A
+level's whole recursive-descent walk is now still on the stack while the value
+it read is evaluated beneath it — measured at ~28 KiB per level in the debug
+build, so 128 levels wanted 3-4 MiB and overflowed a `std` thread's 2 MiB
+default. bash's own bound is 1024 (`MAX_EXPR_RECURSION_LEVEL`, expr.c:101) but
+its frames are far smaller. Nothing legitimate goes past a handful.
+
+**Part 2, what is left.** D and E are the *lookahead*, and the note that used to
+end this entry — "the same one-token lookahead osh's parser already has" — was
+wrong. osh's parser peeks at *characters* to choose a production; it never lexes
+the token it declines, so a NAME sitting where an operator was expected is never
+evaluated. bash's `readtok` runs after every consumed token, so by the time
+`subexpr` reaches `if (curtok != 0) evalerror ("syntax error in expression")`
+the leftover has already been evaluated — and its own error came first.
+
+The place to put it is a single site: `parse_binary`'s loop, where it breaks
+because the next token is not a binary operator. Every operand in the grammar
+flows through that loop (`parse_comma` → `parse_assign` → `parse_ternary` →
+`parse_binary`), so that break is the one place a NAME can be reached in
+operator position. A `fn lex_here(&mut self) -> Result<(), ArithError>` there —
+performing the *evaluation side effect* of lexing whatever token starts at the
+cursor, under the same `noeval`/`eq_follows` rules as `reference`, and
+discarding the value — is bash's behaviour rather than a special case for it.
+
+Measured 2026-08-09, `bad='1 + '` throughout; every row is the lookahead:
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| `$(( 4 bad ))` | `1 + : … operand expected ("+ ")` | `4 bad : syntax error in expression ("bad ")` |
+| `$(( x bad ))`, `x=9` | `1 + : … operand expected ("+ ")` | `x bad : syntax error in expression ("bad ")` |
+| `$(( 4 bad, 7 ))` | `1 + : … operand expected ("+ ")` | `4 bad, 7 : syntax error in expression ("bad, 7 ")` |
+| `$(( (4 bad) ))` | `1 + : … operand expected ("+ ")` | `(4 bad) : missing `)' ("bad) ")` |
+| `$(( 4 a[e] ))`, `e='1 + '` | `1 + : … operand expected ("+ ")` | `4 a[e] : syntax error in expression ("a[e] ")` |
+| `$(( 1 ? 2 bad : 3 ))` | `1 + : … operand expected ("+ ")` | ``1 ? 2 bad : 3 : `:' expected … ("2 bad : 3 ")`` |
+| `$(( 0 ? 2 bad : 3 ))` | ``… `:' expected … ("bad : 3 ")`` | ``… `:' expected … ("2 bad : 3 ")`` |
+
+The last row is the same cause with the evaluation suppressed and so nothing to
+report from inside `bad`: what is left is that bash's error token starts at the
+token the lexer is *holding* (`bad`), not at the start of the branch. Any fix
+has to move `last_tok_start` as well as evaluate.
+
+Two shapes bash reaches through the same lookahead but that are a **separate**
+divergence — a leftover *number*, which `readtok`'s digit branch validates the
+moment it lexes it (`strlong`, expr.c:1400-1450) — and which want their own
+entry once part 2 is in:
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| `$(( 4 5x ))` | `4 5x: value too great for base ("5x")` | `4 5x : syntax error in expression ("5x ")` |
+| `$(( 4 0x8#1 ))` | `4 0x8#1: invalid number ("0x8#1")` | `4 0x8#1 : syntax error in expression ("0x8#1 ")` |
+| `$(( 4 099 ))` | `4 099: value too great for base ("099")` | `4 099 : syntax error in expression ("099 ")` |
+| `$(( 4 2#12 ))` | `4 2#12: value too great for base ("2#12")` | `4 2#12 : syntax error in expression ("2#12 ")` |
+
+Note bash's echo and token both stop at the end of the *lexeme* there, with no
+trailing blank, where every other diagnostic in this entry keeps the rest of the
+string. That is not a second rule but an accident of `readtok`'s digit branch,
+which NUL-terminates the lexeme *in place* across the `strlong` call
+(expr.c:1398-1409):
+
+```c
+      else if (DIGIT(c))
+	{
+	  while (ISALNUM (c) || c == '#' || c == '@' || c == '_')
+	    c = *cp++;
+	  c = *--cp;
+	  *cp = '\0';
+	  tokval = strlong (tp);
+	  *cp = c;
+```
+
+`strlong` is where "invalid number"/"value too great for base" are raised, so
+`evalerror` — which echoes `expression` and prints `lasttp` (expr.c:1517-1530) —
+observes the string while that temporary NUL is in it, and both are truncated at
+the lexeme end. osh already reproduces this exactly for a number reached in
+*operand* position (`$(( 5x ))`, `$(( 5x + 1 ))`, `$(( 1 + 099 + 2 ))` are all
+byte-identical); only the lookahead position above diverges, which is why this
+waits on part 2.
 
 ---
 

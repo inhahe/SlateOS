@@ -9,11 +9,25 @@
 //! index, `m[key]` associative string key) resolve and assign via
 //! [`VarLookup`]. Numbers are 64-bit signed.
 //!
-//! Expressions are parsed into a small [`Expr`] AST and then evaluated against
-//! a mutable [`VarLookup`]. The two-phase design is what makes assignment
-//! possible: an lvalue (`x`, `a[i]`, `m[key]`) can be recognised structurally
-//! before its right-hand side is evaluated, and `&&`/`||`/`?:` short-circuit so
-//! side effects only happen on the branch actually taken.
+//! There is **no parse phase**. Like bash's expr.c, the recursive-descent walk
+//! *is* the evaluation: a name is resolved (and, through `str_to_val`,
+//! recursively evaluated as an expression of its own) the moment it is lexed,
+//! and every `parse_*` method hands back a `V` — a value together with the
+//! location it names, which is bash's `tokval`/`curlval` pair. Assignment,
+//! `++` and `--` consult that location, which is why `1 = 2` is "attempted
+//! assignment to non-variable" while `x = 2` is a store.
+//!
+//! An operand the expression has already decided against is still *walked* —
+//! `&&`, `||` and `?:` do not skip it, they raise the `noeval` counter over it,
+//! exactly as `expland`/`explor`/`expcond` do (expr.c:630-718).
+//! Under it nothing is read, nothing is stored and a zero divisor is quietly 1,
+//! so the untaken branch is checked for its syntax and never for its value.
+//!
+//! The one thing the walk does not do is bash's *lookahead*: bash's lexer runs
+//! one token ahead of the parse, so a name sitting where an operator was
+//! expected has already been evaluated by the time the parse gives up on it.
+//! See known-issues
+//! TD-OILS-ARITHMETIC-PARSES-BEFORE-IT-EVALUATES-SO-A-NAMES-OWN-ERROR-NEVER-SURFACES.
 //!
 //! Everything here is **byte-native**. Arithmetic syntax is entirely ASCII, so
 //! the lexer reads bytes and a byte that decodes to no character is simply one
@@ -147,7 +161,7 @@ pub trait VarLookup {
 
     /// Complain about *reading* through an empty subscript (`(( a[] ))`) — bash
     /// prints `NAME[]: bad array subscript`, untagged, and the read then yields
-    /// 0. See [`Expr::EmptySub`].
+    /// 0. See [`Lv::EmptySub`].
     ///
     /// bash emits that line **twice** for each such read (it validates the
     /// subscript once when resolving the reference and again when fetching the
@@ -160,7 +174,7 @@ pub trait VarLookup {
     /// Refuse a *store* through an empty subscript (`(( a[]=9 ))`) — bash prints
     /// `` `NAME[]': not a valid identifier ``, tagged with the enclosing builtin,
     /// and drops the store while letting the expression keep its value. See
-    /// [`Expr::EmptySub`].
+    /// [`Lv::EmptySub`].
     fn refuse_empty_subscript_store(&mut self, name: &str) {
         let _ = name;
     }
@@ -168,7 +182,7 @@ pub trait VarLookup {
     /// Refuse a whole-array subscript (`(( a[@] ))`, `(( a[*]=9 ))`) — bash
     /// prints `NAME[@]: bad array subscript`, untagged, once per read and once
     /// per store, and then carries on: the read is worth 0 and the store is
-    /// dropped. See [`Expr::WholeSub`].
+    /// dropped. See [`Lv::WholeSub`].
     ///
     /// Unlike the empty-subscript hooks above, bash gets as far as *finding*
     /// the array before it refuses the subscript, so an implementation that
@@ -325,103 +339,76 @@ impl ArithError {
     }
 }
 
-/// A parsed arithmetic expression.
-#[derive(Debug, Clone)]
-enum Expr {
-    Num(i64),
-    /// Bare scalar variable.
+/// The value of a sub-expression, together with the location it names when the
+/// expression is exactly an assignable reference.
+///
+/// bash keeps the same pair in two globals: `tokval`, the value its lexer
+/// computed for the token it is holding, and `curlval`, the `struct lvalue`
+/// saying where that token came from. Assignment, `++` and `--` all consult the
+/// latter, which is why `1 = 2` is "attempted assignment to non-variable" and
+/// `x = 2` is a store — the difference is whether the operand *had* a location,
+/// not what its value was.
+#[derive(Clone)]
+struct V {
+    n: i64,
+    lv: Option<Lv>,
+}
+
+impl V {
+    /// A value naming no location — a literal, a parenthesised group, the
+    /// result of an operator.
+    fn num(n: i64) -> Self {
+        Self { n, lv: None }
+    }
+}
+
+/// An assignable location, with its subscript resolved if the reference was
+/// read.
+#[derive(Clone)]
+enum Lv {
     Var(String),
-    /// Indexed array element `name[index]` (subscript is arithmetic).
-    Index(String, Box<Sub>),
+    /// Indexed array element `name[index]` (subscript is arithmetic) — see
+    /// [`Ix`] for when the subscript is evaluated.
+    Index(String, Ix),
     /// Associative array element `name[key]` (subscript is a literal key, and
     /// so arbitrary bytes).
     Assoc(String, Str),
     /// A reference whose subscript is *lexically empty* — `a[]`. bash refuses
     /// this rather than reading it as index 0, and the refusal is a complaint
     /// rather than an error: the expression carries on with the value 0 (a read)
-    /// or with the store dropped (a write). Which of the two it is only becomes
-    /// clear later, so the emptiness is recorded here and acted on by
-    /// [`eval_expr`] / [`store_rlv`]. The check is purely lexical, so `a[  ]` is
-    /// *not* this — whitespace arithmetic-evaluates to index 0 as usual — and it
-    /// does not depend on the name at all: an unset name, a scalar and an
-    /// associative array are all refused identically.
+    /// or with the store dropped (a write). The check is purely lexical, so
+    /// `a[  ]` is *not* this — whitespace arithmetic-evaluates to index 0 as
+    /// usual — and it does not depend on the name at all: an unset name, a
+    /// scalar and an associative array are all refused identically.
     EmptySub(String),
     /// A subscript that is exactly `@` or `*` — `a[@]`. Legal *bytes* as far as
-    /// the parser is concerned, and an associative array reads them as ordinary
+    /// the lexer is concerned, and an associative array reads them as ordinary
     /// keys, but an indexed one has no index there and refuses them at lookup
-    /// time. Like [`Expr::EmptySub`] the refusal is a complaint rather than an
+    /// time. Like [`Lv::EmptySub`] the refusal is a complaint rather than an
     /// error (the read is worth 0, the store is dropped), and like it the check
     /// is purely lexical — but on the *exact* bytes: bash rejects `a[ @]` and
     /// `a['@']` as ordinary syntax errors. The byte is kept because it is echoed
     /// back in the complaint.
     WholeSub(String, u8),
-    Neg(Box<Expr>),
-    Not(Box<Expr>),
-    BitNot(Box<Expr>),
-    /// A binary operation; the operator is one of the [`apply`]/short-circuit
-    /// tokens (`+`, `-`, `*`, `/`, `%`, `**`, `<<`, `>>`, comparisons, `&`,
-    /// `^`, `|`, `&&`, `||`). The final field is bash's "error token" for an
-    /// eval-time failure — a slice of the source running to the end of the
-    /// expression, whose start bash picks differently per operator (see
-    /// `parse_binary`): the right operand's for `/` and `%`, the token
-    /// *following* the exponent for `**`. `None` for operators that cannot fail
-    /// at evaluation.
-    Bin(String, Box<Expr>, Box<Expr>, Option<Box<[u8]>>),
-    /// `cond ? then : else`.
-    Ternary(Box<Expr>, Box<Expr>, Box<Expr>),
-    /// `left , right` — evaluate both, yield `right`.
-    Comma(Box<Expr>, Box<Expr>),
-    /// Assignment. `op` is `None` for plain `=`, or `Some(base)` for a compound
-    /// assignment whose base binary operator is `base` (e.g. `+=` → `"+"`).
-    Assign(Lvalue, Option<String>, Box<Expr>),
-    /// Pre-increment/decrement (`++x`/`--x`): mutate, then yield the new value.
-    /// `true` = increment, `false` = decrement.
-    PreIncr(Lvalue, bool),
-    /// Post-increment/decrement (`x++`/`x--`): yield the old value, then mutate.
-    PostIncr(Lvalue, bool),
 }
 
-/// An assignable location (the left side of `=`, `+=`, `++`, …).
-#[derive(Debug, Clone)]
-enum Lvalue {
-    Var(String),
-    Index(String, Box<Sub>),
-    Assoc(String, Str),
-    /// `a[] = …` — see [`Expr::EmptySub`]. Assignable only in the sense that
-    /// bash parses it and then drops the store.
-    EmptySub(String),
-    /// `a[@] = …` — see [`Expr::WholeSub`]. Assignable in the same nominal
-    /// sense: parsed, complained about, and dropped.
-    WholeSub(String, u8),
-}
-
-/// An array subscript: the parsed expression together with its raw source text.
+/// An indexed array's subscript, which is evaluated at most once.
 ///
-/// bash evaluates a subscript through an entry point of its own rather than as
-/// part of the expression around it, and that shows in every diagnostic it
-/// produces — see [`ArithError::in_subscript`]. Keeping the raw text beside the
-/// AST is what lets [`Sub`] restore the context the separate entry point would
-/// have carried.
-#[derive(Debug, Clone)]
-struct Sub {
-    expr: Expr,
-    raw: Str,
-}
-
-impl Sub {
-    /// Parse `raw` as a subscript expression. A *parse* failure is a subscript
-    /// failure too: `((a[1+]=9))` reports `1+: syntax error: operand expected`.
-    fn parse(raw: BStr<'_>, vars: &dyn VarLookup) -> Result<Self, ArithError> {
-        let expr = parse(raw, vars).map_err(|e| tag_subscript(e, raw))?;
-        Ok(Self {
-            expr,
-            raw: raw.to_vec(),
-        })
-    }
-
-    fn eval(&self, vars: &mut dyn VarLookup, depth: u32) -> Result<i64, ArithError> {
-        eval_expr(&self.expr, vars, depth).map_err(|e| tag_subscript(e, &self.raw))
-    }
+/// bash evaluates it inside `expr_streval` — that is, when the reference is
+/// *read* — and caches the answer in `curlval.ind`, which `expassign` reuses for
+/// the store (`lind = curlval.ind; /* save ind in case rhs is string var … */`,
+/// expr.c:535-536). A reference that was never read has no cached index, and
+/// then the whole `a[sub]` *text* goes to `expr_bind_variable` instead
+/// (expr.c:600-604) — so its subscript is evaluated by the assignment
+/// machinery, **after** the right-hand side. That ordering is observable:
+/// `unset a q; (( a[q=1] = (q+9) ))` leaves `a[1]` = 9, because `q` was still
+/// unset when the right-hand side read it.
+#[derive(Clone)]
+enum Ix {
+    /// Read, and the subscript evaluated to this index.
+    Done(i64),
+    /// Never read; the subscript's source text, still unevaluated.
+    Raw(Str),
 }
 
 /// Mark `e` as having come from evaluating a subscript, and blame the
@@ -438,19 +425,6 @@ fn tag_subscript(mut e: ArithError, raw: BStr<'_>) -> ArithError {
     e
 }
 
-/// A resolved location — array subscripts already evaluated to a concrete
-/// index/key, so load and store don't re-evaluate (and re-trigger side
-/// effects) the subscript expression.
-enum ResolvedLv {
-    Var(String),
-    Index(String, i64),
-    Assoc(String, Str),
-    /// `a[]` — see [`Expr::EmptySub`]. There is no index to resolve.
-    EmptySub(String),
-    /// `a[@]` — see [`Expr::WholeSub`]. There is no index to resolve.
-    WholeSub(String, u8),
-}
-
 /// Evaluate an arithmetic expression string against a mutable variable
 /// environment (assignment/increment operators mutate `vars`).
 ///
@@ -458,17 +432,22 @@ enum ResolvedLv {
 /// Returns [`ArithError`] on a syntax error, division/modulo by zero, a
 /// negative exponent, or assignment to a non-lvalue.
 pub fn eval(expr: BStr<'_>, vars: &mut dyn VarLookup) -> Result<i64, ArithError> {
-    // Parse with an immutable borrow, then evaluate with the mutable borrow.
-    let ast = parse(expr, &*vars)?;
-    eval_expr(&ast, vars, 0)
+    run(expr, vars, 0)
 }
 
 /// Maximum depth of recursive variable evaluation (`b=a; a=b` would loop
-/// forever). bash reports "expression recursion level exceeded" at a similar
-/// bound. Each level re-parses the value string (itself a recursive-descent
-/// walk), so this is kept well below what would overflow the native stack; no
-/// legitimate variable-indirection chain approaches it.
-const RECURSION_LIMIT: u32 = 128;
+/// forever). bash reports "expression recursion level exceeded" at the same
+/// point, from a counter of its own (`MAX_EXPR_RECURSION_LEVEL`, expr.c:101),
+/// but its bound is 1024 and ours cannot be: bash's evaluator is a single-pass
+/// one, and so is ours, which means a level's whole recursive-descent walk is
+/// still *on the stack* while the value it read is evaluated beneath it.
+///
+/// Measured on the debug build: about 28 KiB of stack per level, so 128 levels
+/// need between 3 and 4 MiB — more than a `std` thread's 2 MiB default. 32
+/// keeps the worst case near 900 KiB, which leaves room under every stack this
+/// runs on, and no legitimate variable-indirection chain comes near it (the
+/// deepest plausible use is a handful).
+const RECURSION_LIMIT: u32 = 32;
 
 /// Evaluate a variable's raw string *value* as an arithmetic expression, the
 /// way bash does: `b="a"` with `a=5` yields `5`, `x="2+3"` yields `5`, and an
@@ -510,8 +489,7 @@ fn str_to_val(s: BStr<'_>, vars: &mut dyn VarLookup, depth: u32) -> Result<i64, 
     // `5 apples:`, not `x:`). Record the innermost failing value so the shell's
     // diagnostic matches — the deepest level sets it first as errors unwind, and
     // outer levels leave it in place.
-    parse(t, vars)
-        .and_then(|expr| eval_expr(&expr, vars, depth + 1))
+    run(t, vars, depth + 1)
         .map_err(|mut e| {
             if e.expr_override.is_none() {
                 e.expr_override = Some(t.to_vec());
@@ -539,8 +517,12 @@ fn plain_decimal(t: BStr<'_>) -> Option<i64> {
     bytes::as_str(t)?.parse::<i64>().ok()
 }
 
-/// Parse an arithmetic expression into an AST (no evaluation, no mutation).
-fn parse(expr: BStr<'_>, vars: &dyn VarLookup) -> Result<Expr, ArithError> {
+/// Lex-and-evaluate an arithmetic expression in a single pass, the way bash's
+/// `subexpr` does.
+///
+/// `depth` is the recursive-variable depth — see [`str_to_val`], which is the
+/// only caller that raises it.
+fn run(expr: BStr<'_>, vars: &mut dyn VarLookup, depth: u32) -> Result<i64, ArithError> {
     let mut p = AParser {
         // Quotes reach here only if something *upstream* left them, and then
         // they are ordinary (invalid) characters. It is the expansion pass in
@@ -556,12 +538,15 @@ fn parse(expr: BStr<'_>, vars: &dyn VarLookup) -> Result<Expr, ArithError> {
         last_atom_start: 0,
         last_tok_start: 0,
         vars,
+        noeval: 0,
+        depth,
+        pre_incr: false,
     };
     p.skip_ws();
     // An empty (or whitespace-only) arithmetic expression is `0` in bash:
     // `$(( ))`, and — after expansion — `n=; echo $((n))` / `$(( $x ))`.
     if p.pos == p.src.len() {
-        return Ok(Expr::Num(0));
+        return Ok(0);
     }
     let e = p.parse_comma()?;
     p.skip_ws();
@@ -577,7 +562,7 @@ fn parse(expr: BStr<'_>, vars: &dyn VarLookup) -> Result<Expr, ArithError> {
         };
         return Err(ArithError::with_token(body, token));
     }
-    Ok(e)
+    Ok(e.n)
 }
 
 struct AParser<'a> {
@@ -598,7 +583,28 @@ struct AParser<'a> {
     /// names this token, because that is the one bash's lexer is still holding:
     /// `(2+3` names `3`, but `((2+3)` names the `)`.
     last_tok_start: usize,
-    vars: &'a dyn VarLookup,
+    vars: &'a mut dyn VarLookup,
+    /// Suppression depth — bash's `noeval`, raised over the operand a `&&`,
+    /// `||` or `?:` has already decided it does not need. It is a *counter*
+    /// rather than a flag because the suppressed operand may contain more of
+    /// them. While it is non-zero nothing is read, nothing is stored, and no
+    /// division by zero is an error (expr.c:906-916: "if (noeval == 0)
+    /// evalerror … else val2 = 1").
+    noeval: u32,
+    /// Recursive-variable depth, carried so that a value read mid-walk
+    /// ([`str_to_val`]) counts against the same [`RECURSION_LIMIT`] as the walk
+    /// that reached it.
+    depth: u32,
+    /// Is the name about to be lexed the operand of a prefix `++`/`--`?
+    ///
+    /// bash's `lasttok == PREINC || lasttok == PREDEC` (expr.c:1384-1391), which
+    /// *forces* the read that a following `=` would otherwise suppress. The
+    /// comment there calls it deliberate — "the tests for PREINC and PREDEC
+    /// aren't strictly correct, but they preserve old behavior if a construct
+    /// like `--x=9` is given" — and it is observable: `x=5; (( --x=9 ))` leaves
+    /// `x` at 4, the decrement of the value that was read, before failing on the
+    /// assignment to a non-variable.
+    pre_incr: bool,
 }
 
 /// Does `c` begin a token bash's arithmetic lexer recognises? Used to classify
@@ -744,8 +750,165 @@ impl AParser<'_> {
         .find(|op| rest.starts_with(op.as_bytes()))
     }
 
+    /// Does an assignment `=` — and not the `==` comparison — follow the cursor?
+    ///
+    /// This is bash's `peektok != EQ` test (expr.c:1387): its lexer reads one
+    /// token past a NAME, with evaluation suppressed, purely to decide whether
+    /// the name is about to be *assigned* rather than read. That is what makes
+    /// `bad='1 + '; (( bad = 5 ))` a silent store while `(( bad += 5 ))` and
+    /// `(( bad == 5 ))` both report the error inside `bad` — only the first has
+    /// a bare `=` after the name.
+    fn eq_follows(&self) -> bool {
+        let mut i = self.pos;
+        while matches!(self.src.get(i), Some(&c) if is_arith_space(c)) {
+            i += 1;
+        }
+        self.src.get(i) == Some(&b'=') && self.src.get(i + 1) != Some(&b'=')
+    }
+
+    /// Evaluate a subscript's source text as an expression of its own, blaming
+    /// the subscript for anything that goes wrong. See [`tag_subscript`].
+    fn eval_sub(&mut self, raw: BStr<'_>) -> Result<i64, ArithError> {
+        run(raw, &mut *self.vars, self.depth).map_err(|e| tag_subscript(e, raw))
+    }
+
+    /// Evaluate a variable's raw value as arithmetic at the current depth.
+    fn str_val(&mut self, s: BStr<'_>) -> Result<i64, ArithError> {
+        str_to_val(s, &mut *self.vars, self.depth)
+    }
+
+    /// Finish lexing a reference: decide whether bash would *read* it here, and
+    /// hand back the token's value together with the location it names.
+    ///
+    /// bash's lexer reads the name the moment it forms the token, and it only
+    /// declines in two cases (expr.c:1384-1391):
+    ///
+    ///  * an `=` — and not `==` — follows, so the name is about to be assigned
+    ///    rather than read, unless a prefix `++`/`--` forces it anyway
+    ///    (`forced`; see [`AParser::pre_incr`]);
+    ///  * evaluation is suppressed, which `expr_streval` short-circuits on
+    ///    before it even looks the variable up (expr.c:1157-1160) — so a
+    ///    suppressed read is not a `set -u` error either.
+    ///
+    /// A declined read is worth 0 (`tokval = 0`) and leaves an indexed
+    /// subscript unevaluated, which is what defers it past the right-hand side.
+    fn reference(&mut self, lv: Lv, forced: bool) -> Result<V, ArithError> {
+        let read = self.noeval == 0 && (forced || !self.eq_follows());
+        if !read {
+            return Ok(V { n: 0, lv: Some(lv) });
+        }
+        let (n, lv) = self.read_ref(lv)?;
+        Ok(V { n, lv: Some(lv) })
+    }
+
+    /// Read the reference `lv` names, resolving an indexed subscript on the way
+    /// and handing it back cached.
+    ///
+    /// Every one of the five is a *variable* read and so answers to `set -u`
+    /// first — see [`VarLookup::note_arith_unbound`], and note that the
+    /// subscripted forms ask before evaluating their subscript. The order is
+    /// bash's and it is observable: `(( nada[nope] += 1 ))` reads the whole
+    /// `nada[nope]` through `expr_streval` and so reports the missing array
+    /// `nada`, while the plain `(( nada[nope] = 1 ))` beside it is never read
+    /// at all and reaches the subscript first, reporting `nope`.
+    fn read_ref(&mut self, lv: Lv) -> Result<(i64, Lv), ArithError> {
+        match lv {
+            Lv::Var(n) => {
+                self.vars.note_arith_unbound(&n, false)?;
+                let v = match self.vars.get_str(&n) {
+                    Some(s) => self.str_val(&s)?,
+                    None => 0,
+                };
+                Ok((v, Lv::Var(n)))
+            }
+            Lv::Index(n, ix) => {
+                self.vars.note_arith_unbound(&n, true)?;
+                let i = match ix {
+                    Ix::Done(i) => i,
+                    Ix::Raw(raw) => self.eval_sub(&raw)?,
+                };
+                let v = match self.vars.get_index_str(&n, i) {
+                    Some(s) => self.str_val(&s)?,
+                    None => 0,
+                };
+                Ok((v, Lv::Index(n, Ix::Done(i))))
+            }
+            Lv::Assoc(n, k) => {
+                self.vars.note_arith_unbound(&n, true)?;
+                let v = match self.vars.get_assoc_str(&n, &k) {
+                    Some(s) => self.str_val(&s)?,
+                    None => 0,
+                };
+                Ok((v, Lv::Assoc(n, k)))
+            }
+            // Complained about only when actually read, so a short-circuited
+            // `(( 1 ? 7 : a[] ))` is silent.
+            //
+            // Deliberately *not* asked about `set -u`, unlike the whole-array
+            // subscript below. bash does ask, but its `array_variable_name`
+            // returns a null pointer for a subscript it has already refused, so
+            // what comes out is the literal text `(null): unbound variable` — a
+            // printed C null, which is a defect rather than a behaviour. See
+            // known-issues TD-OILS-AN-EMPTY-ARITHMETIC-SUBSCRIPT-IS-NAMED-(null)-BY-BASH.
+            Lv::EmptySub(n) => {
+                self.vars.warn_empty_subscript_read(&n);
+                Ok((0, Lv::EmptySub(n)))
+            }
+            // Same shape as the empty subscript beside it. `set -u` is asked
+            // first and *replaces* the refusal when it fires, because bash
+            // reaches the array's own variable before it looks at what the
+            // subscript says: `declare -a a; (( a[@] ))` is `a: unbound
+            // variable` alone, where the same expression with `a` assigned — or
+            // with nounset off — is the bad-subscript refusal alone.
+            Lv::WholeSub(n, s) => {
+                self.vars.note_arith_unbound(&n, true)?;
+                self.vars.refuse_whole_array_subscript(&n, s);
+                Ok((0, Lv::WholeSub(n, s)))
+            }
+        }
+    }
+
+    /// Write `v` through `lv`.
+    ///
+    /// Nothing at all happens under suppression — bash guards the whole bind
+    /// with `if (noeval == 0)` (expr.c:596-604) — so a short-circuited
+    /// `(( 0 && (x = 1) ))` neither assigns nor complains.
+    ///
+    /// The store can be refused (a readonly target), and the refusal propagates
+    /// as an ordinary evaluation error, so the rest of the expression is
+    /// abandoned — which is what makes `(( y=1, x=2 ))` against a readonly `x`
+    /// leave `y` assigned and `x` alone.
+    fn store(&mut self, lv: &Lv, v: i64) -> Result<(), ArithError> {
+        if self.noeval > 0 {
+            return Ok(());
+        }
+        match lv {
+            Lv::Var(n) => self.vars.set(n, v),
+            Lv::Index(n, Ix::Done(i)) => self.vars.set_index(n, *i, v),
+            // Never read, so the subscript is still text and this is the moment
+            // bash evaluates it — see [`Ix`].
+            Lv::Index(n, Ix::Raw(raw)) => {
+                let i = self.eval_sub(&raw.clone())?;
+                self.vars.set_index(n, i, v)
+            }
+            Lv::Assoc(n, k) => self.vars.set_assoc(n, k, v),
+            // Nowhere to store — but not an error: bash complains and carries on
+            // with the value, so `x=$(( a[]=3 ))` still yields 3 and succeeds.
+            Lv::EmptySub(n) => {
+                self.vars.refuse_empty_subscript_store(n);
+                Ok(())
+            }
+            // The same complaint as the read, and a second time: `(( a[@]++ ))`
+            // reads and stores, and bash prints the line for each.
+            Lv::WholeSub(n, s) => {
+                self.vars.refuse_whole_array_subscript(n, *s);
+                Ok(())
+            }
+        }
+    }
+
     /// Comma operator (`e1, e2, …`) — the loosest-binding arithmetic operator.
-    fn parse_comma(&mut self) -> Result<Expr, ArithError> {
+    fn parse_comma(&mut self) -> Result<V, ArithError> {
         let mut e = self.parse_assign()?;
         loop {
             self.skip_ws();
@@ -755,8 +918,7 @@ impl AParser<'_> {
                 // comma) rather than the whole expression.
                 self.mark_op();
                 self.pos += 1;
-                let r = self.parse_assign()?;
-                e = Expr::Comma(Box::new(e), Box::new(r));
+                e = self.parse_assign()?;
             } else {
                 break;
             }
@@ -767,7 +929,7 @@ impl AParser<'_> {
     /// Assignment (`lv = e`, `lv += e`, …) — right-associative, binds looser
     /// than the ternary. If no assignment operator follows, this is just the
     /// ternary it parsed.
-    fn parse_assign(&mut self) -> Result<Expr, ArithError> {
+    fn parse_assign(&mut self) -> Result<V, ArithError> {
         let lhs = self.parse_ternary()?;
         self.skip_ws();
         if let Some(op) = self.read_op()
@@ -775,25 +937,46 @@ impl AParser<'_> {
         {
             // The assignment operator's position is the error token bash reports
             // when the left side is not an lvalue (`1 = 2` → token `= 2`).
-            let lv = lvalue_of(lhs).map_err(|_| {
-                ArithError::with_token(
+            let Some(lv) = lhs.lv else {
+                return Err(ArithError::with_token(
                     "attempted assignment to non-variable",
                     self.rest_from(self.pos),
-                )
-            })?;
+                ));
+            };
             // Record the assignment operator's position: if its right-hand side
             // is missing (`x = `, `y += `), bash's operand-expected error token
             // runs from the operator (`= `, `+= `), not the whole expression.
             self.mark_op();
             self.pos += op.len();
+            let base = assign_base(op);
             let rhs = self.parse_assign()?;
-            return Ok(Expr::Assign(lv, assign_base(op), Box::new(rhs)));
+            let v = match &base {
+                None => rhs.n,
+                // The old value is the one the *lexer* already read: a compound
+                // operator is not a bare `=`, so `eq_follows` was false and the
+                // reference was resolved and loaded when its token was formed.
+                // bash keeps it in `lvalue` the same way (`lvalue = value`,
+                // expr.c:526-528).
+                Some(o) => self.apply_here(o, lhs.n, rhs.n)?,
+            };
+            self.store(&lv, v)?;
+            return Ok(V::num(v));
         }
         Ok(lhs)
     }
 
+    /// [`apply`], with the suppression rule bash applies at every arithmetic
+    /// operator: under `noeval` a zero divisor is not an error, it is 1
+    /// (expr.c:542-548 for `/=` and `%=`, expr.c:906-916 for `/` and `%`).
+    fn apply_here(&self, op: &str, a: i64, b: i64) -> Result<i64, ArithError> {
+        if self.noeval > 0 && b == 0 && matches!(op, "/" | "%") {
+            return apply(op, a, 1);
+        }
+        apply(op, a, b)
+    }
+
     /// Ternary conditional `cond ? then : else` — right-associative.
-    fn parse_ternary(&mut self) -> Result<Expr, ArithError> {
+    fn parse_ternary(&mut self) -> Result<V, ArithError> {
         let cond = self.parse_binary(0)?;
         self.skip_ws();
         if self.peek() != Some(b'?') {
@@ -823,11 +1006,18 @@ impl AParser<'_> {
         }
         let then_start = self.pos;
         // The middle branch is a full expression: bash parses it with
-        // EXP_HIGHEST (expcomma), so it may be an assignment or even a comma
+        // EXP_LOWEST (expcomma), so it may be an assignment or even a comma
         // expression (`1 ? 2,3 : 4` → 3, `c ? x = 1 : y`). The else branch, by
         // contrast, recurses at ternary level (right-associative), so a trailing
         // comma there belongs to the enclosing expression (`1 ? 2 : 4,5` → 5).
-        let then_e = self.parse_comma()?;
+        //
+        // Each branch is *read* whichever way the condition went — the walk has
+        // to reach the `:` and the end of the expression either way — and it is
+        // `noeval` that keeps the untaken one from happening, exactly as in
+        // `expcond` (expr.c:630-663). Suppression is what makes
+        // `(( 0 ? (x=1) : 2 ))` leave `x` alone and `bad='1 + '; $(( 0 ? bad : 5 ))`
+        // silent.
+        let then_e = self.with_noeval(cond.n == 0, Self::parse_comma)?;
         self.skip_ws();
         if self.peek() != Some(b':') {
             // bash: "`:' expected for conditional expression"; the error token is
@@ -850,16 +1040,30 @@ impl AParser<'_> {
                 self.rest_from(colon_pos),
             ));
         }
-        let else_e = self.parse_ternary()?;
-        Ok(Expr::Ternary(
-            Box::new(cond),
-            Box::new(then_e),
-            Box::new(else_e),
-        ))
+        let else_e = self.with_noeval(cond.n != 0, Self::parse_ternary)?;
+        // bash's `lasttok = COND` — the result of a ternary names no location,
+        // so `(( (c ? x : y) = 1 ))` is "attempted assignment to non-variable".
+        Ok(V::num(if cond.n != 0 { then_e.n } else { else_e.n }))
+    }
+
+    /// Run `f` with suppression raised when `skip`, lowering it again however
+    /// `f` ends. bash's `set_noeval` idiom.
+    fn with_noeval(
+        &mut self,
+        skip: bool,
+        f: impl FnOnce(&mut Self) -> Result<V, ArithError>,
+    ) -> Result<V, ArithError> {
+        if !skip {
+            return f(self);
+        }
+        self.noeval += 1;
+        let r = f(self);
+        self.noeval -= 1;
+        r
     }
 
     /// Precedence-climbing parse of binary operators (`||` … `**`).
-    fn parse_binary(&mut self, min_bp: u8) -> Result<Expr, ArithError> {
+    fn parse_binary(&mut self, min_bp: u8) -> Result<V, ArithError> {
         let mut lhs = self.parse_unary()?;
         loop {
             self.skip_ws();
@@ -883,6 +1087,21 @@ impl AParser<'_> {
             self.mark_op();
             self.pos += op.len();
             let next_min = if right { bp } else { bp + 1 };
+            // Short-circuit: the right operand is still *walked* — the parse has
+            // to get past it either way — but under suppression, so its reads,
+            // its stores and its zero divisors are all skipped
+            // (`expland`/`explor`, expr.c:668-718).
+            if matches!(op, "&&" | "||") {
+                let decided = if op == "&&" { lhs.n == 0 } else { lhs.n != 0 };
+                let rhs = self.with_noeval(decided, |p| p.parse_binary(next_min))?;
+                let n = if op == "&&" {
+                    i64::from(lhs.n != 0 && rhs.n != 0)
+                } else {
+                    i64::from(lhs.n != 0 || rhs.n != 0)
+                };
+                lhs = V::num(n);
+                continue;
+            }
             self.skip_ws();
             // `/` and `%` report a division by zero against the right operand:
             // bash's `exp2` saves the cursor just before reading it and points
@@ -908,17 +1127,22 @@ impl AParser<'_> {
             } else {
                 rhs_tok
             };
-            lhs = Expr::Bin(
-                op.to_string(),
-                Box::new(lhs),
-                Box::new(rhs),
-                rhs_tok.map(Vec::into_boxed_slice),
-            );
+            // Attach the RHS source as bash's "error token" for an eval-time
+            // failure (division by zero, negative exponent).
+            let n = self.apply_here(op, lhs.n, rhs.n).map_err(|mut e| {
+                if e.token.is_none()
+                    && let Some(t) = rhs_tok
+                {
+                    e.token = Some(t);
+                }
+                e
+            })?;
+            lhs = V::num(n);
         }
         Ok(lhs)
     }
 
-    fn parse_unary(&mut self) -> Result<Expr, ArithError> {
+    fn parse_unary(&mut self) -> Result<V, ArithError> {
         self.skip_ws();
         // A unary operator that consumes its operand slot becomes the "last
         // operator": if the operand is missing (`1 + + `, `~ `), bash's
@@ -938,30 +1162,46 @@ impl AParser<'_> {
         {
             self.mark_op();
             self.pos += 2;
-            let operand = self.parse_unary()?;
-            let lv = lvalue_of(operand)?;
-            return Ok(Expr::PreIncr(lv, op == "++"));
+            // The operand's read is forced past a following `=` — see
+            // [`AParser::pre_incr`]. Cleared unconditionally afterwards: the
+            // lookahead above guarantees a name begins the operand, so the flag
+            // is always consumed by the atom below it.
+            self.pre_incr = true;
+            let operand = self.parse_unary();
+            self.pre_incr = false;
+            let operand = operand?;
+            let Some(lv) = operand.lv else {
+                return Err(ArithError::new("attempted assignment to non-variable"));
+            };
+            let v = operand.n.wrapping_add(if op == "++" { 1 } else { -1 });
+            self.store(&lv, v)?;
+            // bash's `lasttok = NUM` — an incremented reference names no
+            // location afterwards, so `(( ++x = 9 ))` is an assignment to a
+            // non-variable (having already stored the increment).
+            return Ok(V::num(v));
         }
         match self.peek() {
             Some(b'-') => {
                 self.mark_op();
                 self.pos += 1;
-                Ok(Expr::Neg(Box::new(self.parse_unary()?)))
+                Ok(V::num(self.parse_unary()?.n.wrapping_neg()))
             }
             Some(b'+') => {
                 self.mark_op();
                 self.pos += 1;
-                self.parse_unary()
+                // Unary `+` still discards the operand's location: `(( +x = 1 ))`
+                // is an assignment to a non-variable, exactly like `(( -x = 1 ))`.
+                Ok(V::num(self.parse_unary()?.n))
             }
             Some(b'!') => {
                 self.mark_op();
                 self.pos += 1;
-                Ok(Expr::Not(Box::new(self.parse_unary()?)))
+                Ok(V::num(i64::from(self.parse_unary()?.n == 0)))
             }
             Some(b'~') => {
                 self.mark_op();
                 self.pos += 1;
-                Ok(Expr::BitNot(Box::new(self.parse_unary()?)))
+                Ok(V::num(!self.parse_unary()?.n))
             }
             _ => self.parse_postfix(),
         }
@@ -981,8 +1221,8 @@ impl AParser<'_> {
     }
 
     /// A primary atom followed by an optional postfix `++`/`--`.
-    fn parse_postfix(&mut self) -> Result<Expr, ArithError> {
-        let e = self.parse_atom()?;
+    fn parse_postfix(&mut self) -> Result<V, ArithError> {
+        let mut e = self.parse_atom()?;
         self.skip_ws();
         // Only an lvalue can be incremented, and bash does not make the attempt
         // otherwise: `2--3` is `2 - (-3)` = 5, not a decrement of `2`. Leaving
@@ -990,16 +1230,19 @@ impl AParser<'_> {
         // first character as the binary operator it is.
         if let Some(op) = self.read_op()
             && (op == "++" || op == "--")
-            && is_lvalue(&e)
+            && let Some(lv) = e.lv.take()
         {
-            let lv = lvalue_of(e)?;
             self.pos += 2;
-            return Ok(Expr::PostIncr(lv, op == "++"));
+            self.store(&lv, e.n.wrapping_add(if op == "++" { 1 } else { -1 }))?;
+            // bash's `lasttok = NUM`: the postfix result is the *old* value and
+            // names no location, so `(( x++ = 1 ))` is an assignment to a
+            // non-variable.
+            return Ok(V::num(e.n));
         }
         Ok(e)
     }
 
-    fn parse_atom(&mut self) -> Result<Expr, ArithError> {
+    fn parse_atom(&mut self) -> Result<V, ArithError> {
         self.skip_ws();
         // Remember where this atom begins: `name[` reports the subscript
         // expression from the name, and a name with a subscript is one token.
@@ -1036,14 +1279,22 @@ impl AParser<'_> {
                 }
                 self.mark_tok(self.pos);
                 self.pos += 1;
-                Ok(e)
+                // bash's `exp0` leaves `lasttok = NUM` after the closing `)`
+                // without touching `curlval`, so a parenthesised reference is
+                // not assignable: `x=5; (( (x) = 3 ))` is "attempted assignment
+                // to non-variable" and `(( (x)++ ))` is "operand expected"
+                // (the `++` splitting into two `+`).
+                Ok(V::num(e.n))
             }
             Some(c) if c.is_ascii_digit() => {
                 self.mark_atom(atom_start);
-                Ok(Expr::Num(self.parse_number()?))
+                Ok(V::num(self.parse_number()?))
             }
             Some(c) if c.is_ascii_alphabetic() || c == b'_' => {
                 self.mark_atom(atom_start);
+                // Consume the prefix-`++`/`--` flag here, where the name it
+                // applies to is being lexed. See [`AParser::pre_incr`].
+                let forced = core::mem::take(&mut self.pre_incr);
                 // A shell identifier is ASCII by its own syntax, so reading the
                 // name back as text is exact however the rest of the expression
                 // is spelled.
@@ -1090,32 +1341,34 @@ impl AParser<'_> {
                     }
                     let raw = self.src.get(sub_start..self.pos).unwrap_or_default();
                     self.pos += 1; // consume the closing ']'
-                    if raw.is_empty() {
-                        // `a[]` — see `Expr::EmptySub`. Deliberately ahead of the
+                    let lv = if raw.is_empty() {
+                        // `a[]` — see [`Lv::EmptySub`]. Deliberately ahead of the
                         // indexed/associative split, because bash refuses it
                         // without looking at the name.
-                        return Ok(Expr::EmptySub(name));
-                    }
-                    if self.vars.is_assoc(&name) {
+                        Lv::EmptySub(name)
+                    } else if self.vars.is_assoc(&name) {
                         // An associative subscript is a literal *key*, not an
                         // expression, so it may hold any byte — the same key
                         // the `m[$k]=v` that stored the element carried.
-                        return Ok(Expr::Assoc(name, bytes::trim(raw).to_vec()));
-                    }
-                    // `a[@]`, `a[*]` — see `Expr::WholeSub`. Necessarily after
-                    // the question above, since those are perfectly good
-                    // *keys*, and matched on the exact bytes: bash reads `a[ @]`
-                    // and `a['@']` as ordinary expressions and fails them as
-                    // syntax errors.
-                    if let [sym @ (b'@' | b'*')] = raw {
-                        return Ok(Expr::WholeSub(name, *sym));
-                    }
-                    // Indexed: parse the subscript as its own arithmetic
-                    // expression (evaluated later against the live environment).
-                    let sub = Sub::parse(raw, self.vars)?;
-                    return Ok(Expr::Index(name, Box::new(sub)));
+                        Lv::Assoc(name, bytes::trim(raw).to_vec())
+                    } else if let [sym @ (b'@' | b'*')] = raw {
+                        // `a[@]`, `a[*]` — see [`Lv::WholeSub`]. Necessarily
+                        // after the question above, since those are perfectly
+                        // good *keys*, and matched on the exact bytes: bash reads
+                        // `a[ @]` and `a['@']` as ordinary expressions and fails
+                        // them as syntax errors.
+                        Lv::WholeSub(name, *sym)
+                    } else {
+                        // Indexed. The subscript is kept as *text*: bash's lexer
+                        // scans past it without parsing it (`expr_skipsubscript`,
+                        // expr.c:1348-1358), and whether it is ever evaluated —
+                        // and when — depends on whether the reference is read.
+                        // See [`Ix`].
+                        Lv::Index(name, Ix::Raw(raw.to_vec()))
+                    };
+                    return self.reference(lv, forced);
                 }
-                Ok(Expr::Var(name))
+                self.reference(Lv::Var(name), forced)
             }
             other => {
                 // bash: "syntax error: operand expected". The error token is
@@ -1316,252 +1569,6 @@ fn digit_value(c: u8, base: u32) -> Option<u32> {
         _ => return None,
     };
     if v < base { Some(v) } else { None }
-}
-
-/// Is `e` assignable — that is, would [`lvalue_of`] accept it? Lets the parser
-/// ask before committing an expression it may still need.
-fn is_lvalue(e: &Expr) -> bool {
-    matches!(
-        e,
-        Expr::Var(_) | Expr::Index(..) | Expr::Assoc(..) | Expr::EmptySub(_) | Expr::WholeSub(..)
-    )
-}
-
-/// Convert a parsed expression into an lvalue, or error if it is not
-/// assignable (bash: "attempted assignment to non-variable").
-fn lvalue_of(e: Expr) -> Result<Lvalue, ArithError> {
-    match e {
-        Expr::Var(n) => Ok(Lvalue::Var(n)),
-        Expr::Index(n, ix) => Ok(Lvalue::Index(n, ix)),
-        Expr::Assoc(n, k) => Ok(Lvalue::Assoc(n, k)),
-        Expr::EmptySub(n) => Ok(Lvalue::EmptySub(n)),
-        Expr::WholeSub(n, s) => Ok(Lvalue::WholeSub(n, s)),
-        _ => Err(ArithError::new("attempted assignment to non-variable")),
-    }
-}
-
-fn eval_expr(e: &Expr, vars: &mut dyn VarLookup, depth: u32) -> Result<i64, ArithError> {
-    match e {
-        Expr::Num(n) => Ok(*n),
-        // A variable read resolves the raw value string and (like bash)
-        // recursively evaluates it as an arithmetic expression. Every one of
-        // the three is a *variable* read and so answers to `set -u` first — see
-        // [`VarLookup::note_arith_unbound`], and note that the subscripted forms
-        // ask before evaluating their subscript.
-        Expr::Var(n) => {
-            vars.note_arith_unbound(n, false)?;
-            match vars.get_str(n) {
-                Some(s) => str_to_val(&s, vars, depth),
-                None => Ok(0),
-            }
-        }
-        Expr::Index(n, ix) => {
-            vars.note_arith_unbound(n, true)?;
-            let i = ix.eval(vars, depth)?;
-            match vars.get_index_str(n, i) {
-                Some(s) => str_to_val(&s, vars, depth),
-                None => Ok(0),
-            }
-        }
-        Expr::Assoc(n, k) => {
-            vars.note_arith_unbound(n, true)?;
-            match vars.get_assoc_str(n, k) {
-                Some(s) => str_to_val(&s, vars, depth),
-                None => Ok(0),
-            }
-        }
-        // Complained about only when actually reached, so a short-circuited
-        // `(( 1 ? 7 : a[] ))` is silent.
-        //
-        // Deliberately *not* asked about `set -u`, unlike the whole-array
-        // subscript below. bash does ask, but its `array_variable_name` returns
-        // a null pointer for a subscript it has already refused, so what comes
-        // out is the literal text `(null): unbound variable` — a printed C null,
-        // which is a defect rather than a behaviour. See known-issues
-        // TD-OILS-AN-EMPTY-ARITHMETIC-SUBSCRIPT-IS-NAMED-(null)-BY-BASH.
-        Expr::EmptySub(n) => {
-            vars.warn_empty_subscript_read(n);
-            Ok(0)
-        }
-        // Same shape as the empty subscript beside it: reached only when the
-        // operand is actually evaluated, so `(( 1 ? 7 : a[@] ))` is silent.
-        //
-        // `set -u` is asked first and *replaces* the refusal when it fires,
-        // because bash reaches the array's own variable before it looks at what
-        // the subscript says: `declare -a a; (( a[@] ))` is `a: unbound
-        // variable` alone, where the same expression with `a` assigned — or with
-        // nounset off — is the bad-subscript refusal alone.
-        Expr::WholeSub(n, s) => {
-            vars.note_arith_unbound(n, true)?;
-            vars.refuse_whole_array_subscript(n, *s);
-            Ok(0)
-        }
-        Expr::Neg(x) => Ok(eval_expr(x, vars, depth)?.wrapping_neg()),
-        Expr::Not(x) => Ok(i64::from(eval_expr(x, vars, depth)? == 0)),
-        Expr::BitNot(x) => Ok(!eval_expr(x, vars, depth)?),
-        Expr::Bin(op, l, r, rhs_tok) => match op.as_str() {
-            // Short-circuit: the right operand's side effects only happen when
-            // the left doesn't already decide the result.
-            "&&" => {
-                if eval_expr(l, vars, depth)? == 0 {
-                    Ok(0)
-                } else {
-                    Ok(i64::from(eval_expr(r, vars, depth)? != 0))
-                }
-            }
-            "||" => {
-                if eval_expr(l, vars, depth)? != 0 {
-                    Ok(1)
-                } else {
-                    Ok(i64::from(eval_expr(r, vars, depth)? != 0))
-                }
-            }
-            _ => {
-                let a = eval_expr(l, vars, depth)?;
-                let b = eval_expr(r, vars, depth)?;
-                // Attach the RHS source as bash's "error token" for an eval-time
-                // failure (division by zero, negative exponent).
-                apply(op, a, b).map_err(|mut e| {
-                    if e.token.is_none()
-                        && let Some(t) = rhs_tok
-                    {
-                        e.token = Some(t.to_vec());
-                    }
-                    e
-                })
-            }
-        },
-        Expr::Ternary(c, t, f) => {
-            if eval_expr(c, vars, depth)? != 0 {
-                eval_expr(t, vars, depth)
-            } else {
-                eval_expr(f, vars, depth)
-            }
-        }
-        Expr::Comma(l, r) => {
-            eval_expr(l, vars, depth)?;
-            eval_expr(r, vars, depth)
-        }
-        Expr::Assign(lv, base, rhs) => {
-            if base.is_some() {
-                note_lv_unbound(lv, vars)?;
-            }
-            let loc = resolve_lv(lv, vars, depth)?;
-            let v = match base {
-                None => eval_expr(rhs, vars, depth)?,
-                Some(op) => {
-                    let cur = load_rlv(&loc, vars, depth)?;
-                    let b = eval_expr(rhs, vars, depth)?;
-                    apply(op, cur, b)?
-                }
-            };
-            store_rlv(&loc, v, vars)?;
-            Ok(v)
-        }
-        Expr::PreIncr(lv, inc) => {
-            note_lv_unbound(lv, vars)?;
-            let loc = resolve_lv(lv, vars, depth)?;
-            let step = if *inc { 1 } else { -1 };
-            let v = load_rlv(&loc, vars, depth)?.wrapping_add(step);
-            store_rlv(&loc, v, vars)?;
-            Ok(v)
-        }
-        Expr::PostIncr(lv, inc) => {
-            note_lv_unbound(lv, vars)?;
-            let loc = resolve_lv(lv, vars, depth)?;
-            let old = load_rlv(&loc, vars, depth)?;
-            let step = if *inc { 1 } else { -1 };
-            store_rlv(&loc, old.wrapping_add(step), vars)?;
-            Ok(old)
-        }
-    }
-}
-
-/// The `set -u` check a read-modify-write owes for the variable it is about to
-/// read, asked *before* the location is resolved.
-///
-/// The order is bash's and it is observable: `(( nada[nope] += 1 ))` reads the
-/// whole `nada[nope]` through `expr_streval` and so reports the missing array
-/// `nada`, while the plain `(( nada[nope] = 1 ))` beside it never reads and
-/// reaches the subscript first, reporting `nope`.
-fn note_lv_unbound(lv: &Lvalue, vars: &mut dyn VarLookup) -> Result<(), ArithError> {
-    match lv {
-        Lvalue::Var(n) => vars.note_arith_unbound(n, false),
-        Lvalue::Index(n, _) | Lvalue::Assoc(n, _) => vars.note_arith_unbound(n, true),
-        // Neither addresses an element; the complaint each earns is its own and
-        // is made where it is read.
-        Lvalue::EmptySub(_) | Lvalue::WholeSub(..) => Ok(()),
-    }
-}
-
-/// Resolve an lvalue's location once (evaluating an index subscript), so a
-/// read-modify-write op doesn't evaluate the subscript twice.
-fn resolve_lv(lv: &Lvalue, vars: &mut dyn VarLookup, depth: u32) -> Result<ResolvedLv, ArithError> {
-    Ok(match lv {
-        Lvalue::Var(n) => ResolvedLv::Var(n.clone()),
-        Lvalue::Index(n, ix) => {
-            let i = ix.eval(vars, depth)?;
-            ResolvedLv::Index(n.clone(), i)
-        }
-        Lvalue::Assoc(n, k) => ResolvedLv::Assoc(n.clone(), k.clone()),
-        Lvalue::EmptySub(n) => ResolvedLv::EmptySub(n.clone()),
-        Lvalue::WholeSub(n, s) => ResolvedLv::WholeSub(n.clone(), *s),
-    })
-}
-
-fn load_rlv(loc: &ResolvedLv, vars: &mut dyn VarLookup, depth: u32) -> Result<i64, ArithError> {
-    // The `set -u` question this read owes was asked by `note_lv_unbound`
-    // before the location was resolved, because bash asks about the variable
-    // before it evaluates the subscript.
-    match loc {
-        ResolvedLv::Var(n) => match vars.get_str(n) {
-            Some(s) => str_to_val(&s, vars, depth),
-            None => Ok(0),
-        },
-        ResolvedLv::Index(n, i) => match vars.get_index_str(n, *i) {
-            Some(s) => str_to_val(&s, vars, depth),
-            None => Ok(0),
-        },
-        ResolvedLv::Assoc(n, k) => match vars.get_assoc_str(n, k) {
-            Some(s) => str_to_val(&s, vars, depth),
-            None => Ok(0),
-        },
-        // A read-modify-write (`a[]++`, `a[]+=2`) reads first, so it earns the
-        // read complaint *and* the store refusal `store_rlv` adds below — which
-        // is what bash prints for it too.
-        ResolvedLv::EmptySub(n) => {
-            vars.warn_empty_subscript_read(n);
-            Ok(0)
-        }
-        ResolvedLv::WholeSub(n, s) => {
-            vars.refuse_whole_array_subscript(n, *s);
-            Ok(0)
-        }
-    }
-}
-
-/// Write through a resolved lvalue. The store can be refused (a readonly
-/// target), and the refusal propagates as an ordinary evaluation error, so the
-/// rest of the expression is abandoned — which is what makes `(( y=1, x=2 ))`
-/// against a readonly `x` leave `y` assigned and `x` alone.
-fn store_rlv(loc: &ResolvedLv, v: i64, vars: &mut dyn VarLookup) -> Result<(), ArithError> {
-    match loc {
-        ResolvedLv::Var(n) => vars.set(n, v),
-        ResolvedLv::Index(n, i) => vars.set_index(n, *i, v),
-        ResolvedLv::Assoc(n, k) => vars.set_assoc(n, k, v),
-        // Nowhere to store — but not an error: bash complains and carries on
-        // with the value, so `x=$(( a[]=3 ))` still yields 3 and succeeds.
-        ResolvedLv::EmptySub(n) => {
-            vars.refuse_empty_subscript_store(n);
-            Ok(())
-        }
-        // The same complaint as the read, and a second time: `(( a[@]++ ))`
-        // reads and stores, and bash prints the line for each.
-        ResolvedLv::WholeSub(n, s) => {
-            vars.refuse_whole_array_subscript(n, *s);
-            Ok(())
-        }
-    }
 }
 
 /// `base ** exp` the way bash computes it: binary exponentiation over the full

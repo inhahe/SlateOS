@@ -533,7 +533,13 @@ reports and discards as it always did).
 
 ---
 
-### TD-OILS-A-BRACE-OPERAND-IS-SCANNED-AGAIN-BEFORE-IT-IS-EXPANDED. A `${x:-word}` whose `word` is used reports a failed extent read three times, not two — 2026-08-09 — OPEN
+### TD-OILS-A-BRACE-OPERAND-IS-SCANNED-AGAIN-BEFORE-IT-IS-EXPANDED. A `${x:-word}` whose `word` is used reports a failed extent read three times, not two — 2026-08-09 — ⚠️ PART 1 FIXED 2026-08-09, PART 2 OPEN
+
+**Status.** The `}BB` defect — the leftover escaping the sub-word — is **fixed**
+for every sub-word reader *except* the `:-`/`:=`/`:+` operand, which needs part 2
+below because its third read is what duplicates the leftover. See
+"Part 1, as landed" at the end of the entry. The three-vs-two report count and
+the operand's own `}BB` are still open.
 
 **Where:** `userspace/oils/src/interp.rs`, the `${ … }` operand path
 (`Shell::brace_extent_scan` scans the operand once, and expanding it reads it a
@@ -598,14 +604,11 @@ again.
 
 **Proper fix.** Two parts, in this order:
 
-1. Make the brace operand a string scope in `attach_comsub_tails_in` — the same
-   treatment `Nested::Index` already gets — so a part inside it carries the
-   *operand's* remainder, and have `Shell::brace_extent_scan` compose the
-   word-level remainder itself for its own scan, which is the only reader that
-   wants it. (`Shell::extent_read_of` already walks the whole part via
-   `brace_scanned_subs`, so it is the natural place to know the difference.)
-   This is worth doing on its own: it is the only reason the leftover escapes
-   the operand.
+1. ✅ **Done** (with the ordering inverted — see "Part 1, as landed"). Make the
+   sub-word a string scope, so a part inside it carries the *sub-word's*
+   remainder, and let the scan keep the word-level one, which is the only reader
+   that wants it. This is worth doing on its own: it is the only reason the
+   leftover escapes the sub-word.
 2. Add the double-quoted pre-scan of 2 above, gated on the expansion being
    quoted, as a scan that reports without running. **It is not only a scan: it
    rewrites the operand**, and read 3 expands the rewrite, not the original.
@@ -643,6 +646,45 @@ Expansion = `temp[0]` + `temp[5..]` = `p⏎q)r`, i.e. `[Ap⏎q)rB]`. Each read s
 one line in (`ep` past `fi⏎`, newline-stripped to past `fi`), which is
 `Shell::failed_extent_split` — the three differ only in *what string* they are
 handed, which is the whole of part 1.
+
+**Part 1, as landed** (commit "oils: a brace sub-word is expanded on its own
+string"). The prescription above was **inverted in the implementation**, and
+deliberately:
+
+> …have `Shell::brace_extent_scan` compose the word-level remainder itself…
+
+it cannot. `brace_extent_scan(&mut self, part: &WordPart)` is handed one part
+and has no word context at all — the parts after it are not reachable from it —
+so the word-level remainder is *only* computable in the unparse pass, which is
+where `attach_comsub_tails_in` already computes it. So the tail attached in
+unparse stays the **word-scoped** one (the scan's, which is right for the scan),
+and the *sub-word*'s remainder is re-derived on demand at the expansion sites by
+a new `unparse::rescoped_part` / `rescoped_parts` (`userspace/oils/src/unparse.rs`),
+which rebuilds the part with its nested strings re-tailed as their own scopes.
+`Nested` grew `Index` and `Quoted` to name the two shapes that already were
+their own strings. Call sites (`userspace/oils/src/interp.rs`), each immediately
+after its `brace_extent_scan`: `quoted_per_element_parts`, `expand_dynamic_with`,
+`split_items`.
+
+That is only half of it, and the second half was not in the prescription at all:
+**`Shell::extent_consumed` must be scoped to the sub-word too.** A failed read
+sets the flag to mean "this walk is over"; if the sub-word's walk shares the
+word's flag, the word's own tail is dropped as well. bash prints `AzzB` for
+`z=zz; b='A${z#p$(fi⏎q)r}B'; "${b@P}"`, not `Azz`, because
+`parameter_brace_remove_pattern` is handed `patstr` and reads it with a fresh
+`expand_word_internal` owning its own `sindex`. So `expand_word_pattern_inner`
+and `expand_replacement_inner` now save/restore `extent_consumed` exactly as
+`expand_word_annotated` does. Every sub-word reader is its own
+`expand_word_internal` for this purpose — `parameter_brace_remove_pattern`,
+`parameter_brace_patsub`'s `expand_string_if_necessary (rep, …)`
+(subst.c:9180-9187), `array_expand_index`'s `expand_arith_string`, and
+`cond_expand_word` for a `case` arm.
+
+Measured byte-identical with bash 5.2.37 for `#`, `%`, `##`, `/pat/`,
+`//x/repl`, `^^`, `${z:off}`, `${z:off:len}` and `${a[…]}`; corpus case
+`a-brace-sub-word-is-expanded-on-its-own-string.sh` (16 probes plus a `PS4`
+block). The `:-`/`:=`/`:+` operand is *not* covered: it is the one shape whose
+leftover is duplicated rather than merely misscoped, and that is part 2.
 
 ---
 

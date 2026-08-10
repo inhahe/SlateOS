@@ -868,19 +868,73 @@ reports and discards as it always did).
 
 ---
 
-### TD-OILS-A-BRACE-OPERAND-IS-SCANNED-AGAIN-BEFORE-IT-IS-EXPANDED. A `${x:-word}` whose `word` is used reports a failed extent read three times, not two — 2026-08-09 — ⚠️ PART 1 FIXED 2026-08-09, PART 2 OPEN
+### TD-OILS-A-BRACE-OPERAND-IS-SCANNED-AGAIN-BEFORE-IT-IS-EXPANDED. A `${x:-word}` whose `word` is used reports a failed extent read three times, not two — 2026-08-09 — ⚠️ PART 1 FIXED 2026-08-09, PART 2's REPORTS FIXED 2026-08-10, PART 2's TEXT OPEN
 
-**Status.** The `}BB` defect — the leftover escaping the sub-word — is **fixed**
-for every sub-word reader *except* the `:-`/`:=`/`:+` operand, which needs part 2
-below because its third read is what duplicates the leftover. See
-"Part 1, as landed" at the end of the entry. The three-vs-two report count and
-the operand's own `}BB` are still open.
+**Status.** Both defects in the reproduce block below are **fixed**. The `}BB` —
+the leftover escaping the sub-word — went with part 1 (see "Part 1, as landed");
+the three-vs-two report count went with the report half of part 2 (see "Part 2's
+report half, as landed"). `unset z; a='A${z:-p$(fi⏎q)r}B'; "${a@P}"` now gives
+three reports and `[Ap⏎q)rB]` in both shells, byte for byte.
+
+What is still open is the **text** half of part 2: read 2 does not only report,
+it *rewrites* the operand (`SX_STRIPDQ` strips the `"`s and rewrites the
+backslashes between them), and read 3 expands the rewrite. osh still expands the
+original. **This half is not prompt-only** — it is an everyday divergence with
+no `@P` and no failed read anywhere in sight:
+
+```text
+unset z; echo "${z:-p"\x"r}"     bash: pxr        osh: p\xr
+```
+
+because inside the operand's embedded `" … "` a backslash before a character
+that is *not* one of `` $ ` " \ ``⏎ is **removed**, where osh keeps it. That is
+the `stripdq` arm of subst.c:906-911:
+
+```c
+  if ((stripdq == 0 && c != '"') ||
+      (stripdq && ((dquote && (sh_syntaxtab[c] & CBSDQUOTE)) || dquote == 0)))
+    temp[j++] = '\\';
+```
+
+— with `stripdq` set, the backslash is re-emitted only inside an embedded quote
+before a `CBSDQUOTE` character, or anywhere outside one. Measured, `z` unset:
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| `echo "${z:-p"\x"r}"` | `pxr` | `p\xr` ❌ |
+| `echo ${z:-p"\x"r}` (unquoted — no `Q_DOUBLE_QUOTES`, so `temp = value`) | `p\xr` | same ✅ |
+| `echo "${z:-p\xr}"` (no embedded quote — `dquote == 0`) | `p\xr` | same ✅ |
+| `echo ${z:-p\xr}` | `pxr` | same ✅ |
+| `echo "${z:-p"\$"r}"`, `"\\"`, `"\`"`, `"\`⏎`"` (the `CBSDQUOTE` set) | `p$r`, `p\r`, `` p`r ``, `pr` | same ✅ |
+
+It is the same six operators as the report half — `:-`, `-`, `:=`, `=`, `:+`, `+`
+all give `pxr`/`p\xr`, while `:?`, `#`, `/` and a `/` replacement all agree — and
+it shows in every quoted context (`echo "…"`, an assignment RHS, a here-document
+body, `printf %s`), not just `@P`.
+
+The failed-read half of the same rewrite is the prompt-only one, and there the
+divergence is confined to operands containing a `"`:
+
+| operand under `${z:-…}`, `z` unset | bash 5.2.37 | osh |
+|---|---|---|
+| `p$(fi⏎q)r` | `[Ap⏎q)rB]` | same ✅ |
+| `p"$(fi⏎q)"r` | `[Ap⏎q)rB]` | `[Ap⏎q)"rB]` |
+| `p"a$(fi⏎q)b"r` | `[Apa⏎q)brB]` | `[Apa⏎q)b"rbB]` |
+| `"$(fi⏎q)"` | `[A⏎q)B]` | `[A⏎q)"B]` |
+
+with two controls that already agree in both shells and isolate the rewrite to
+`parameter_brace_expand_rhs`: a pattern operand `A${z#p"$(fi⏎q)"r}B` → `[AB]`,
+and the same text outside a brace `Ap"$(fi⏎q)"rB` → `[Ap"⏎q)"rB]`. Note the `b"rb`
+in row 3 — the leftover really is copied twice, exactly as the worked example
+below predicts; what osh is missing is the strip and the second copy's boundary,
+not the duplication.
 
 **Where:** `userspace/oils/src/interp.rs`, the `${ … }` operand path
 (`Shell::brace_extent_scan` scans the operand once, and expanding it reads it a
 second time). Two shapes are wrong, and the second is the more visible.
 
-**Reproduce:**
+**Reproduce** (the original 2026-08-09 measurement; the `osh` column is now
+history — see Status):
 
 ```text
 unset z
@@ -974,8 +1028,15 @@ again.
    that wants it. This is worth doing on its own: it is the only reason the
    leftover escapes the sub-word.
 2. Add the double-quoted pre-scan of 2 above, gated on the expansion being
-   quoted, as a scan that reports without running. **It is not only a scan: it
-   rewrites the operand**, and read 3 expands the rewrite, not the original.
+   quoted, as a scan that reports without running. ✅ **Report half done
+   2026-08-10** — see "Part 2's report half, as landed". **It is not only a
+   scan: it rewrites the operand**, and read 3 expands the rewrite, not the
+   original — that half is still open, and has two independent pieces. The
+   *first* is the `SX_STRIPDQ` rewrite of the ordinary bytes — strip the
+   unescaped `"`s and drop a backslash that is inside one of them and not before
+   a `CBSDQUOTE` character (see Status). That piece needs no failed read at all,
+   is what shows up in ordinary scripts, and should be done first. The *second*
+   is what a failed read leaves in `temp`:
    `string_extract_double_quoted` copies a `$( … )` through by *its extent*
    (subst.c:955-993), and on a failed read takes the fallback
 
@@ -1049,6 +1110,38 @@ Measured byte-identical with bash 5.2.37 for `#`, `%`, `##`, `/pat/`,
 `a-brace-sub-word-is-expanded-on-its-own-string.sh` (16 probes plus a `PS4`
 block). The `:-`/`:=`/`:+` operand is *not* covered: it is the one shape whose
 leftover is duplicated rather than merely misscoped, and that is part 2.
+
+**Part 2's report half, as landed** (commit "oils: read a used brace operand once
+more before it expands"). `Shell::operand_rhs_read` runs the second read, and
+`Shell::rhs_scanned_subs` collects what that read would have reported. Three
+things had to be got right, and each is measured:
+
+- **Which operators reach it.** `parameter_brace_expand_rhs` is called by exactly
+  `-`, `=` and `+` (subst.c:7724-7732 is its opening), and the call sites are the
+  four in `expand_operand_fields` plus the two `ParamOp::AssignDefault` arms
+  (scalar and array). `:?` expands its operand through
+  `parameter_brace_expand_error` and every pattern operator through a reader of
+  its own, so those stay at **two** reads, not three. `${z:+…}` with `z` unset,
+  and `${z:-…}` with `z` set, leave the operand unused and stay at **one**.
+- **The refusal comes first.** With no positionals, `A${1=p$(fi⏎q)r}B` reports
+  **once**, not twice: bash says `cannot assign in this way` before
+  `parameter_brace_expand_rhs` is called at all. So the call goes *after* the
+  refusal in both `AssignDefault` arms, not at the top.
+- **It is the same kind of scan, so it carries on.** Two failing substitutions in
+  a used operand are two extra reports; a nested `${ … }` does its own second
+  read of *its* operand, for two extra rather than one; a backquote is a byte
+  hunt and cannot fail; a `$((` is the same `$(` row. All of which falls out of
+  reusing `extent_read_of_subs`, i.e. read 1's machinery, over the operand alone.
+
+The rules of *which* parts the second read looks at are the double-quoted
+string's rather than the brace's (subst.c:850-1000): no single-quote row at all,
+`` ` `` a byte hunt, `$(` read, `${` handed to the brace scan. Hence
+`rhs_scanned_subs` rather than `brace_scanned_subs`.
+
+Corpus case `a-used-brace-operand-is-scanned-once-more-before-it-expands.sh`
+(5 sections). Two shapes were deliberately left out of it: a `"` in the operand,
+which is the text half above; and a `\$`, which is *also* a prompt escape and
+renders through `$EUID` — osh reports root by design, see open-questions Q28.
 
 ---
 

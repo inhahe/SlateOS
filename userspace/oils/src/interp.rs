@@ -25597,6 +25597,10 @@ impl Shell {
     /// in flight wins and `${y:-pre${x@Z}post}` names `pre${x@Z}post`, not the
     /// substitution around it.
     fn expand_operand_fields(&mut self, arg: &Word) -> Vec<Vec<EChar>> {
+        // Every caller of this is a `-` or a `+` whose operand is used, which
+        // is exactly `parameter_brace_expand_rhs` — so the operand is read once
+        // more before it is expanded. See [`Shell::operand_rhs_read`].
+        self.operand_rhs_read(arg);
         // An operand is a nested entry into word expansion, so a failure in it
         // jumps rather than returning — see [`Shell::expand_call`].
         self.expand_call(|sh| {
@@ -26256,6 +26260,103 @@ impl Shell {
             }
         }
         ExtentRead::Closed
+    }
+
+    /// bash's *second* read of a `${x-w}` / `${x=w}` / `${x+w}` operand, made
+    /// only when the operand is used and before any of it is expanded.
+    ///
+    /// `parameter_brace_expand_rhs` opens by scanning the operand as if it were
+    /// the body of a double-quoted string:
+    ///
+    /// ```c
+    ///   if ((quoted & (Q_HERE_DOCUMENT|Q_DOUBLE_QUOTES)) && *value)
+    ///     {
+    ///       sindex = 0;
+    ///       temp = string_extract_double_quoted (value, &sindex, SX_STRIPDQ);
+    ///     }
+    ///   else
+    ///     temp = value;                            /* subst.c:7724-7732 */
+    /// ```
+    ///
+    /// That is a *scan*: it reads the extent of every `$( … )` it meets and runs
+    /// none of them, so an operand that is used costs one extra diagnostic per
+    /// failing substitution in it — on top of the whole-word scan
+    /// ([`Shell::brace_extent_scan`]) and the expansion that follows. Only a
+    /// prompt expansion lets any of the three be counted, and there they are
+    /// three: measured under `${…@P}` with `z` unset, `A${z:-p$(fi⏎q)r}B`
+    /// reports three times, where `A${z:+p$(fi⏎q)r}B` — same operand, never used
+    /// — reports once and `A${z#p$(fi⏎q)r}B`, whose operator never reaches
+    /// `parameter_brace_expand_rhs` at all, reports twice.
+    ///
+    /// The operators are exactly `-`, `=` and `+`; `:?` and every pattern
+    /// operator read their operand twice, not three times. And the read comes
+    /// *after* whatever refusal decides there is no destination: with no
+    /// positionals `A${1=p$(fi⏎q)r}B` reports once, the `cannot assign in this
+    /// way` having come first.
+    ///
+    /// Its rules are the double-quoted string's rather than the brace's, and
+    /// they differ in one visible way: `string_extract_double_quoted` has no
+    /// single-quote row at all (subst.c:930-985 reads `` ` ``, `$(` and `${`,
+    /// and copies every other byte), where the brace scan walks a `' … '` over
+    /// with `skip_single_quoted`. So a substitution inside single quotes is read
+    /// *here* and by no one else — `A${z:-p'$(fi⏎q)'r}B` reports twice, once
+    /// from this scan and once from the expansion, and never from the brace
+    /// scan.
+    fn operand_rhs_read(&mut self, arg: &Word) {
+        // Outside double quotes there is no scan: `temp = value`, and the
+        // operand goes to `expand_string_for_rhs` as it stands.
+        if !self.dquote {
+            return;
+        }
+        let src = crate::unparse::word_src(arg);
+        // `&& *value` — an empty operand is not scanned. Nothing observable
+        // hangs on it, since there would be nothing in it to read.
+        if src.is_empty() {
+            return;
+        }
+        // The scan is handed the operand's *own* text, so a `$( … )` in it has
+        // the rest of the operand for its remainder and not the rest of the
+        // enclosing word. Re-lexing the text is what gives that, the same way
+        // [`Shell::extent_read_of_rest`] does — and lexing it as a double-quoted
+        // body is also what drops the single-quote rule the parser applied.
+        let Ok(word) = crate::parser::dquote_word_from_source(&src, self.parse_opts()) else {
+            return;
+        };
+        let mut subs: Vec<&WordPart> = Vec::new();
+        Self::rhs_scanned_subs(&word.parts, &mut subs);
+        // There is no brace waiting on this scan, so neither of the endings
+        // [`Shell::brace_extent_scan`] gives applies: a read that stopped part
+        // way is carried on from (which [`Shell::extent_read_of_subs`] does of
+        // its own accord), and one that ran the text out just ends the loop.
+        // Only a read whose jump stands propagates, and it does so through the
+        // flags it set rather than through this return.
+        drop(self.extent_read_of_subs(&subs));
+    }
+
+    /// Every substitution `string_extract_double_quoted` reads, in the order it
+    /// meets them — see [`Shell::operand_rhs_read`].
+    fn rhs_scanned_subs<'a>(parts: &'a [WordPart], out: &mut Vec<&'a WordPart>) {
+        for p in parts {
+            match p {
+                // `if (c == '$' && ((string[i+1] == LPAREN) || (string[i+1] ==
+                // LBRACE)))` — the `$(` half, which for a body starting `(` is
+                // the paren count and so takes a `$(( … ))` too. A `$[ … ]` is
+                // not that row, exactly as in the brace scan.
+                WordPart::CommandSub { .. } | WordPart::ArithSub { bracket: false, .. } => {
+                    out.push(p);
+                }
+                // The bytes between the constructs are copied, and — this being
+                // a double-quoted body — a `'` among them is one of them.
+                WordPart::Literal(_) => {}
+                // A `"` is stripped and what it held is scanned by the same
+                // loop, which is the state this walk is already in.
+                WordPart::DoubleQuoted(inner) => Self::rhs_scanned_subs(inner, out),
+                // The `${` half of the same row hands the brace to
+                // `extract_dollar_brace_string` — the brace scan, entered fresh,
+                // so its single-quote state neither inherits nor leaks.
+                _ => Self::brace_scanned_subs_in(p, out, &mut false),
+            }
+        }
     }
 
     /// Carry the `${ … }` scan on over the text a failed extent read left
@@ -27710,6 +27811,13 @@ impl Shell {
                         self.arm_discard(1);
                         return SplitItems::List(Vec::new());
                     }
+                    // …and only once a destination has been named does bash
+                    // reach `parameter_brace_expand_rhs`, which reads the
+                    // operand again before expanding it. Measured: with no
+                    // positionals, `A${1=p$(fi⏎q)r}B` under `${…@P}` reports
+                    // *once* — the refusal above comes first and the second
+                    // read never happens. See [`Shell::operand_rhs_read`].
+                    self.operand_rhs_read(arg);
                     let v = self.expand_to_string(arg);
                     // Expanding the default is a nested `expand_word_internal`
                     // (`expand_string` inside `parameter_brace_expand_word`), so
@@ -27956,6 +28064,12 @@ impl Shell {
                     // assigns the literal key `@` (bash: `declare -A m=(["@"]="v")`)
                     // rather than erroring. Only an indexed (or undeclared) array
                     // rejects `[@]`/`[*]` as a subscript to write through.
+                    // Past the positional refusal, this is
+                    // `parameter_brace_expand_rhs` for both endings below — the
+                    // associative store and the indexed refusal alike expand the
+                    // operand, and so read it once more first. See
+                    // [`Shell::operand_rhs_read`].
+                    self.operand_rhs_read(arg);
                     if let Some(resolved) = resolved.filter(|r| self.assoc.contains_key(r)) {
                         let val = self.expand_to_string(arg);
                         self.assoc_set(&resolved, sub.as_bytes().to_vec(), val.clone(), false);

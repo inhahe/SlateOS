@@ -1,18 +1,19 @@
-add to 
-
-add to roadmap-detailed that the dialog to pick an app when i file is attempted to be launched that has no app association with its extension type shows what process, application and user tried to launch the file and what the full command was.
-  [DONE 2026-08-07 — roadmap-detailed.md §2.3 "File Type Associations" → "The
-   'pick an app' dialog names who asked": process (PID / name / start time),
-   owning installed application (package + display name + icon, falling back to
-   the executable path when the process belongs to no package), user (+ its
-   sandbox/namespace label, with a cross-user request called out visibly), and
-   the full command line plus the launch request's own path and arguments. All
-   four are derived from the launch IPC's kernel-attested sender identity rather
-   than from a self-reported field in the message, so a requester cannot lie
-   about them; control characters and bidi overrides are escaped on render so a
-   crafted argv cannot forge dialog chrome. The same block appears in
-   "Open With → Choose another app", and every shown request is logged
-   JSON-lines whether or not the user goes on to pick an app.]
+add to roadmap-detailed the following capabilities in the capabilities list if they're not already in there:
+shut down, reboot, log out, reload os without rebooting, hibernate
+  [DONE 2026-08-09 — none of them were there; roadmap-detailed.md §1.5 gained a
+   new "Capability Types — Power / Session Control" block (between Resource
+   Limits and the elevated Administration block) with `power.shutdown`,
+   `power.reboot`, `power.logout`, `power.reload` (the kexec-style no-hardware-
+   reboot one), `power.sleep`, `power.hibernate`, and `power.inhibit` (block a
+   transition rather than cause one). Each is separate rather than one
+   `power.control`, because the blast radii differ; force-shutdown and
+   reboot-into-an-alternate-entry are *scopes* on their grants rather than
+   capabilities of their own, matching how `fs.*`/`net.*` scope. The section
+   spells out that the desktop shell driving the Start-menu power options on a
+   direct user gesture is not what this gates — it holds them itself; what needs
+   a grant is any other program driving the same transitions unattended.
+   Cross-references added at §3.3 → Start Menu (power options) and at the
+   kexec-reload note beneath it.]
 
 do the speed benchmarks on fastpy again since OS had to do some fixes.
   [FOR THE FASTPY SESSION, NOT THIS ONE — the benchmarks live in the fastpy repo

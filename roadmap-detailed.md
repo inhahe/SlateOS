@@ -578,6 +578,47 @@ _Scoping mechanics: the grant carries a list of extension strings (or `*` if the
 - [ ] `resource.disk` — disk space limit
 - [ ] `resource.io_priority` — set I/O priority (realtime requires elevated grant)
 
+#### Capability Types — Power / Session Control
+
+_Gates a **program** asking the system to end or restart the session or the
+machine. A human choosing "Shut down" from the Start menu's power options
+(§3.3 → Start Menu) is not this: that is the desktop shell acting on a direct
+user gesture, and the shell holds these capabilities itself. What needs a grant
+is any *other* program driving the same transitions unattended — an updater, a
+kiosk supervisor, a power-management daemon, a remote-admin agent, a script.
+Each is separate because the blast radius differs: logging one user out is not
+the same as powering the box down under everyone. All of them are audit-logged
+JSON-lines (who asked, when, with what reason string), and all of them go through
+the structured-shutdown IPC path (§2.1 → "Structured shutdown via IPC message"),
+never a Unix signal._
+
+- [ ] `power.shutdown` — power the machine off. Covers the orderly sequence
+      (notify services, flush, unmount) and the "force" variant that skips the
+      grace period; force is a **scope** on the grant, not a capability of its
+      own.
+- [ ] `power.reboot` — restart the machine. Scoped to separate a plain reboot
+      from a reboot into an alternate entry (safe mode, or a previous generation
+      — §5 Package Manager), so a program allowed to reboot for an update cannot
+      silently redirect the next boot somewhere else.
+- [ ] `power.logout` — end a user session. The caller's own session needs only
+      this; ending *another user's* session needs this **and**
+      `admin.cross_user`.
+- [ ] `power.reload` — kexec-style reload of the OS **without rebooting the
+      hardware** (the power-menu option noted under §3.3 → Start Menu). Distinct
+      from `power.reboot`: it skips firmware/POST and keeps the machine powered,
+      and the image it loads is chosen by the caller — a different trust question,
+      which is why it does not fall out of `power.reboot`.
+- [ ] `power.sleep` — suspend to RAM.
+- [ ] `power.hibernate` — suspend to disk. Separate from `power.sleep` because
+      hibernation writes the whole of RAM to persistent storage, so it has a
+      confidentiality dimension sleep does not (the hibernation image must land
+      inside the encrypted volume — see §2.4 full-disk encryption).
+- [ ] `power.inhibit` — **block** one of the above rather than cause it ("do not
+      sleep or shut down while I am busy": a disc burn, a long build, a
+      presentation). Held as a lease with a mandatory reason string the shutdown
+      UI shows the user, who can always override it — a program can never veto a
+      user-initiated transition, only ask for a delay.
+
 #### Capability Types — User / System Administration (elevated)
 - [ ] `admin.user` — create/delete/modify users
 - [ ] `admin.user_caps` — change other users' capabilities
@@ -1118,10 +1159,15 @@ _2D library: Vello (Rust-native, GPU compute shaders) + HarfBuzz FFI for complex
 - [ ] Settings icon
 - [ ] Terminal shortcut
 - [ ] Power options: off, logout, reboot, hibernate, sleep, reboot in safe mode
+      _(the shell drives these directly as the user's own gesture; a program
+      asking for the same transition needs the matching `power.*` capability —
+      §1.5 → Capability Types — Power / Session Control)_
 - [ ] Input field for finding and running apps
 - [ ] Start menu icon: round, shrunken version of the XOR logo (`xor2.png`)
 
-_Kexec-style OS reboot without rebooting the PC, available as a power menu option._
+_Kexec-style OS reboot without rebooting the PC, available as a power menu option.
+Gated for programs by `power.reload` (§1.5), which is deliberately not implied by
+`power.reboot` — the caller picks the image._
 
 #### Other Desktop Features
 - [ ] Notification pane (per-app disable option)

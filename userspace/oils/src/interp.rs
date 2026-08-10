@@ -14651,16 +14651,18 @@ impl Shell {
                             }
                         }
                         ArrayElem::Keyed { index, value, append } => {
-                            // The subscript's expanded *text* is kept alongside
-                            // the number it evaluates to, because that is what
-                            // `set -x` traces (`['1+1']`, `[' 1 ']`) and what a
-                            // refusal in phase 2 names.
+                            // The subscript's expanded *text*, and only that:
+                            // its arithmetic is phase 2's, because bash's is —
+                            // `array_expand_index` is called from the walk in
+                            // `assign_compound_array_list`, not from the
+                            // expansion before it. The text is what `set -x`
+                            // traces (`['1+1']`, `[' 1 ']`) and what a refusal
+                            // in phase 2 names. See [`IndexedElem`].
                             let text = self.expand_to_arith_string(index);
-                            let idx = self.eval_arith_index_text(&text);
                             let val = self.expand_to_string(value);
                             self.xtrace_compound_elem(Some(&text), &val, *append);
                             expanded.push(IndexedElem {
-                                sub: Some((idx, text)),
+                                sub: Some(text),
                                 val,
                                 append: *append,
                             });
@@ -14678,7 +14680,30 @@ impl Shell {
                 // recorded here rather than before phase 1, so an assignment
                 // abandoned by a failed expansion leaves an unvalued array
                 // unvalued.
-                self.array_valued.insert(a.name.clone());
+                //
+                // A name that is *invisible* has to wait for the walk, though:
+                // bash sheds `att_invisible` per element bound
+                // (`bind_array_var_internal`, arrayfunc.c:245) and again when the
+                // assignment completes (`assign_array_var_from_string`,
+                // arrayfunc.c:896) — and a walk the `DISCARD` cuts short reaches
+                // neither. Both belong on the far side of this point: the
+                // per-element one is recorded in the loop below, and this line
+                // stands for the completion one, repeated after the loop.
+                //
+                // Which leaves *creation*: a name that does not exist yet is born
+                // visible when a bare compound assignment makes it
+                // (`find_or_make_array_variable` runs before the walk, so `q` is
+                // already there and already visible when the `DISCARD` fires) and
+                // born invisible when a `declare`/`local` operand does. So
+                // `q=([1x]=R)` leaves `declare -a q=()` while `declare -a
+                // y=([1x]=R)` leaves the bare `declare -a y`, and an invisible
+                // name keeps its invisibility either way: `declare -a v; v=([1x]=R)`
+                // is still bare. See [`Shell::var_binding_is_visible`].
+                let born_visible = self.var_binding_is_visible(&a.name)
+                    || (!self.decl_builtin_ctx && !self.has_stored_binding(&a.name));
+                if born_visible {
+                    self.array_valued.insert(a.name.clone());
+                }
                 // A compound assignment onto a name that currently holds a
                 // *scalar* widens the type, carrying the old value in as element
                 // 0 — which an append then continues after, so `w=5; w+=(9)` is
@@ -14714,31 +14739,42 @@ impl Shell {
                         // counts from the highest index rather than from the
                         // element count. Only reaching back past the start has
                         // nowhere to live.
-                        Some((idx, text)) => match Self::resolve_index(
-                            idx,
-                            self.highest_index_bound(&a.name),
-                        ) {
-                            Some(i) if !text.is_empty() => i,
-                            _ => {
-                                // Named by its *expanded* halves, unquoted, and
-                                // the same way whether the literal is a `declare`
-                                // operand or bare — where an associative literal
-                                // requotes for the one and quotes the raw source
-                                // for the other. Not fatal: the element is
-                                // skipped (without consuming the running index),
-                                // the rest binds, and the status stays 0.
-                                let eq: &[u8] = if elem_append { b"]+=" } else { b"]=" };
-                                self.berrln(&bfmt![
-                                    self.err_prefix(),
-                                    b"[",
-                                    &text,
-                                    eq,
-                                    &val,
-                                    b": bad array subscript"
-                                ]);
-                                continue;
+                        Some(text) => {
+                            // `array_expand_index` (arrayfunc.c:1358-1375),
+                            // called from the walk. Its failure is a
+                            // `jump_to_top_level (DISCARD)` taken from inside
+                            // the walk, so the rest of the list is abandoned but
+                            // everything the walk has already done stands: the
+                            // trace, the array's creation, the clear a
+                            // non-append literal did, and the elements bound
+                            // before this one.
+                            let Some(idx) = self.eval_arith_index_text_checked(&text) else {
+                                return false;
+                            };
+                            match Self::resolve_index(idx, self.highest_index_bound(&a.name)) {
+                                Some(i) if !text.is_empty() => i,
+                                _ => {
+                                    // Named by its *expanded* halves, unquoted,
+                                    // and the same way whether the literal is a
+                                    // `declare` operand or bare — where an
+                                    // associative literal requotes for the one
+                                    // and quotes the raw source for the other.
+                                    // Not fatal: the element is skipped (without
+                                    // consuming the running index), the rest
+                                    // binds, and the status stays 0.
+                                    let eq: &[u8] = if elem_append { b"]+=" } else { b"]=" };
+                                    self.berrln(&bfmt![
+                                        self.err_prefix(),
+                                        b"[",
+                                        &text,
+                                        eq,
+                                        &val,
+                                        b": bad array subscript"
+                                    ]);
+                                    continue;
+                                }
                             }
-                        },
+                        }
                     };
                     // `[i]+=v` concatenates onto whatever the slot holds *now*
                     // (`-i` adds instead), and phase 2 writes straight into the
@@ -14756,8 +14792,18 @@ impl Shell {
                         return false;
                     };
                     self.arrays.entry(a.name.clone()).or_default().insert(at, val);
+                    // `bind_array_var_internal`'s `VUNSETATTR (entry,
+                    // att_invisible)` (arrayfunc.c:245). Recorded rather than
+                    // inferred from the array being non-empty, because bash's
+                    // flag is sticky: `declare -a f; f=(A [1x]=B); unset 'f[0]'`
+                    // leaves `declare -a f=()`, not the bare `declare -a f` the
+                    // now-empty array would otherwise read as.
+                    self.array_valued.insert(a.name.clone());
                     next = at.saturating_add(1);
                 }
+                // The walk finished, so `att_invisible` comes off even where the
+                // guard above left it on.
+                self.array_valued.insert(a.name.clone());
             }
         }
         true
@@ -54434,10 +54480,17 @@ fn xtrace_compound_quote(s: BStr<'_>) -> Str {
 /// bash expands a literal in full before binding any of it, so `a=(9 ${a[0]})`
 /// still reads the old `a`; phase 2 then binds these. `sub` is `None` for a
 /// positional element, which takes the running index when it is bound, and
-/// otherwise carries both the number the subscript evaluated to and the text it
-/// evaluated *from* — the text is what `set -x` traces and what a refusal names.
+/// otherwise carries the subscript's expanded *text* — what `set -x` traces and
+/// what a refusal names.
+///
+/// The text and not the number it evaluates to: bash's
+/// `assign_compound_array_list` calls `array_expand_index` as it *walks* the
+/// list, so the arithmetic belongs to phase 2. Evaluating it in phase 1 instead
+/// would let a subscript that will not evaluate abandon the assignment whole,
+/// where bash leaves behind the trace, the array, and every element bound
+/// before the bad one.
 struct IndexedElem {
-    sub: Option<(i64, Str)>,
+    sub: Option<Str>,
     val: Str,
     append: bool,
 }

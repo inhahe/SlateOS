@@ -376,6 +376,60 @@ Unit test: `parser::tests::a_nested_bracket_in_a_spanning_subscript_is_still_an_
 Found while measuring TD-OILS-A-SUBSCRIPT-IN-AN-ARITHMETIC-WORD-IS-NOT-EXPANDED-
 IN-PLACE-FIRST; it was the one row of that probe still diverging.
 
+### TD-OILS-A-DISCARD-STOPS-AT-THE-EVAL-OR-FUNCTION-IT-WAS-RAISED-IN. A bad array subscript unwinds one frame, not to the top — 2026-08-10 — OPEN
+
+**Where:** `userspace/oils/src/interp.rs`, `Shell::arm_discard` and whatever
+consumes it. osh's discard abandons the *current parse unit*; bash's
+`jump_to_top_level (DISCARD)` abandons everything up to the top level of the
+shell, and `top_level_cleanup` explicitly tears the intervening frames down
+first:
+
+```c
+  while (parse_and_execute_level)
+    parse_and_execute_cleanup (-1);
+  ...
+  run_unwind_protects ();
+```
+
+`parse_and_execute_level` is `eval`/`source`/`-c`/trap nesting, and
+`run_unwind_protects` pops the function-call frames — so neither an `eval` nor
+a shell function contains it. Only a *subshell* does, the longjmp being
+per-process.
+
+**Reproduce.**
+
+```sh
+echo "--- 1"
+eval 'f1[1x]=R'; echo "rc=$? reached"
+echo "--- 3"
+( eval 'f3[1x]=R' ); echo "rc=$? reached"
+echo "--- 4"
+f() { eval 'f4[1x]=R'; echo "in-func"; }
+f; echo "rc=$? reached"
+```
+
+| row | bash 5.2.37 | osh |
+|---|---|---|
+| 1 | error alone; `; echo …` never runs | error, then `rc=1 reached` |
+| 3 | error, then `rc=1 reached` (the subshell stops it) | same |
+| 4 | error alone; neither `in-func` nor the outer `echo` runs | error, then `in-func`, then `rc=0 reached` |
+
+The error text and the exit status already match at the point of failure; only
+how far the abandonment reaches differs. Without `eval`/a function — a bare
+`f[1x]=R; echo hi` at script top level — osh already discards correctly, which
+is why this went unnoticed.
+
+**The fix.** Give the discard a scope of "up to the top level, stopping only at
+a subshell boundary", rather than the parse unit it was raised in. The
+`arm_discard` flag has to survive being handed back through `eval`/`source`/a
+function return, and each of those has to re-raise it instead of consuming it.
+Note this is *not* the same as an errexit or a `return`: those unwind one
+level, and this one unwinds all of them.
+
+Found while probing TD-OILS-AN-UNCLOSED-SUBSCRIPT-IN-AN-ASSIGNMENT-POSITION-IS-NOT-A-READER-ERROR
+(row 6 of its probe put the failing assignment inside an `eval` and the
+difference showed up as an extra `rc=` line).
+
 ### TD-OILS-AN-UNCLOSED-SUBSCRIPT-IN-AN-ASSIGNMENT-POSITION-IS-NOT-A-READER-ERROR. `f[1=R` is a command, not `unexpected EOF` — 2026-08-10 — OPEN
 
 **Where:** `userspace/oils/src/lexer.rs`, the word reader. A `[` that follows a
@@ -413,15 +467,50 @@ found`), which suggests the lexer already scans for the `]`, runs off the end,
 and then keeps the text instead of failing — so the fix may be as small as
 turning that give-up into the reader error.
 
+A second round of probing (2026-08-10) pinned the guard and widened the row
+set. bash's condition is parse.y:5145-5149:
+
+```c
+      else if MBTEST(character == '[' &&		/* ] */
+		     ((token_index > 0 && assignment_acceptable (last_read_token) && token_is_ident (token, token_index)) ||
+		      (token_index == 0 && (parser_state&PST_COMPASSIGN))))
+        {
+	  ttok = parse_matched_pair (cd, '[', ']', &ttoklen, P_ARRAYSUB);
+	  if (ttok == &matched_pair_error)
+	    return -1;		/* Bail immediately. */
+```
+
+with `assignment_acceptable(t)` = `command_token_position(t) && (parser_state &
+PST_CASEPAT) == 0` (parse.y:2989) and `token_is_ident` = `legal_identifier` on
+the token so far (parse.y:4846). Further measured rows, all `eval`-wrapped:
+
+| source | bash 5.2.37 | osh |
+|---|---|---|
+| `if f[1; then :; fi` | `` …matching `]' ``, `rc=2` | `syntax error: unexpected end of file`, `rc=2` |
+| `{ f[1; }` | `` …matching `]' ``, `rc=2` | same wrong shape |
+| `x=1 f[1` | `` …matching `]' ``, `rc=2` | `f[1⏎: command not found` |
+| `f[']'` | `` …matching `]' ``, `rc=2` | `f[]⏎: command not found` — a quoted `]` does not close it |
+| `f["]` | `` …matching `"' ``, `rc=2` | same (already right) |
+| `f[$(echo 1` | `` …matching `)' ``, `rc=2` | same (already right) |
+| `case x in f[1) :;; esac` | `rc=0`, no error — `PST_CASEPAT` | same |
+| `f[1⏎echo hi]=R` | subscript spans the newline; arithmetic error on `1⏎echo hi` | same |
+| `a=([1` | `` …matching `]' ``, `rc=1` | `` …matching `)' ``, `rc=1` — osh scans the literal for its `)` before lexing elements, so it names the wrong bracket |
+
 **The fix.** Read the `[` as a matched pair when the word so far is a name and
 the word is in assignment position (bash's `assignment_acceptable`), and raise
 `unexpected EOF while looking for matching `]'` when it does not close.
+`Lexer::read_word_inner` (lexer.rs:4646) already slurps the subscript with a
+`sub_depth` counter that treats newlines, `;`, `#` and unquoted spaces as
+content, so almost all of the reading is right: what is missing is the check at
+the end of the loop (lexer.rs:4853) that `sub_depth > 0` is
+`Err(eof_matching(']'))` rather than a word. The `a=([1` row is a separate,
+smaller ordering difference and may be left as-is.
 Corpus row: `a-nested-bracket-in-an-assignment-target-is-still-an-assignment.sh`
 row 20 is the *unaffected* half, and points here.
 
 Found while writing that case.
 
-### TD-OILS-A-COMPOUND-ASSIGNMENT-WITH-A-BAD-SUBSCRIPT-CREATES-NOTHING. `z=([0]=A [1x]=B)` leaves `z` unset — 2026-08-10 — OPEN
+### TD-OILS-A-COMPOUND-ASSIGNMENT-WITH-A-BAD-SUBSCRIPT-CREATES-NOTHING. `z=([0]=A [1x]=B)` leaves `z` unset — 2026-08-10 — ✅ FIXED 2026-08-10
 
 **Where:** `userspace/oils/src/interp.rs`, the array-literal assignment path
 (the `AssignRhs::Array` / `decl_arrays` handling). A keyed element whose
@@ -471,6 +560,27 @@ elements bound before the failure. Note row 4's `q=([1x]=R)`: the variable is
 created *empty*, so the creation is not conditional on any element succeeding.
 
 Found while probing TD-OILS-A-NESTED-BRACKET-IN-AN-ASSIGNMENT-TARGET-IS-NOT-AN-ASSIGNMENT.
+
+**Fixed** as described: `IndexedElem::sub` now carries the subscript's expanded
+*text*, phase 1 only expands it (which is what `set -x` traces), and phase 2's
+walk calls `eval_arith_index_text_checked` per element and `return false`s on
+the element that fails — bash's `jump_to_top_level (DISCARD)` taken from inside
+`assign_compound_array_list`.
+
+Row 1's `declare -a y` turned out to be a second, separable rule that the fix
+had to model: the array's *visibility*. bash sheds `att_invisible` per element
+bound (`bind_array_var_internal`, arrayfunc.c:245) and again when the
+assignment completes (`assign_array_var_from_string`, arrayfunc.c:896), and a
+`DISCARD` reaches neither — so what survives is whatever the *creation* chose. A
+bare `q=(…)` creates through `find_or_make_array_variable` before the walk and
+is therefore already visible (`declare -a q=()`), while a `declare`/`local`
+operand's name is created invisible and stays so (`declare -a y`). An
+already-invisible name keeps its invisibility under either spelling, and the
+per-element clear is sticky — `declare -a f; f=(A [1x]=B); unset 'f[0]'` leaves
+`declare -a f=()`, so it is recorded in `array_valued` rather than inferred from
+the array being non-empty.
+
+Corpus: `a-compound-assignment-binds-up-to-the-subscript-that-fails.sh`.
 
 ### TD-OILS-A-BACKQUOTE-BODY-INSIDE-DOUBLE-QUOTES-IS-NOT-GOBBLED. A backquote body inside `" … "` is run where bash only scanned it — 2026-08-10
 

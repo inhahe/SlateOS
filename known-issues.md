@@ -868,7 +868,7 @@ reports and discards as it always did).
 
 ---
 
-### TD-OILS-A-BRACE-OPERAND-IS-SCANNED-AGAIN-BEFORE-IT-IS-EXPANDED. A `${x:-word}` whose `word` is used reports a failed extent read three times, not two — 2026-08-09 — ⚠️ PART 1 AND PART 2 FIXED 2026-08-09/10 EXCEPT WHAT A *FAILED* READ LEAVES IN `temp`
+### TD-OILS-A-BRACE-OPERAND-IS-SCANNED-AGAIN-BEFORE-IT-IS-EXPANDED. A `${x:-word}` whose `word` is used reports a failed extent read three times, not two — 2026-08-09 — ✅ FIXED 2026-08-09/10
 
 **Status.** Both defects in the reproduce block below are **fixed**. The `}BB` —
 the leftover escaping the sub-word — went with part 1 (see "Part 1, as landed");
@@ -877,8 +877,8 @@ report half, as landed"). `unset z; a='A${z:-p$(fi⏎q)r}B'; "${a@P}"` now gives
 three reports and `[Ap⏎q)rB]` in both shells, byte for byte.
 
 The **text** half of part 2 — read 2 does not only report, it *rewrites* the
-operand, and read 3 expands the rewrite — is now half done too. The rewrite has
-two independent pieces:
+operand, and read 3 expands the rewrite — is fixed too. The rewrite had two
+independent pieces:
 
 - ✅ **The `SX_STRIPDQ` byte rules, fixed 2026-08-10.** This was the piece that
   mattered: an everyday divergence with no `@P` and no failed read anywhere in
@@ -891,8 +891,8 @@ two independent pieces:
   — because inside the operand's embedded `" … "` a backslash before a character
   that is *not* one of `` $ ` " \ ``⏎ is **removed**, where osh kept it. See
   "Part 2's `SX_STRIPDQ` rules, as landed".
-- ⚠️ **What a *failed* read leaves in `temp`, still open.** That piece is
-  prompt-only, and is the table further down.
+- ✅ **What a *failed* read leaves in `temp`, fixed 2026-08-10.** Prompt-only, and
+  it is the table further down. See "Part 2's failed-read copy, as landed".
 
 The rule is the `stripdq` arm of subst.c:906-911:
 
@@ -918,26 +918,26 @@ all gave `pxr`/`p\xr`, while `:?`, `#`, `%`, `/`, a `/` replacement and `:off`
 all agree — and it shows in every quoted context (`echo "…"`, an assignment RHS,
 a here-document body, `printf %s`), not just `@P`.
 
-The failed-read half of the same rewrite is the prompt-only one, and there the
-divergence is confined to operands containing a `"`:
+The failed-read half of the same rewrite is the prompt-only one, and the
+divergence was confined to operands containing a `"`:
 
-| operand under `${z:-…}`, `z` unset | bash 5.2.37 | osh |
+| operand under `${z:-…}`, `z` unset | bash 5.2.37 | osh before the fix |
 |---|---|---|
 | `p$(fi⏎q)r` | `[Ap⏎q)rB]` | same ✅ |
-| `p"$(fi⏎q)"r` | `[Ap⏎q)rB]` | `[Ap⏎q)"rB]` |
-| `p"a$(fi⏎q)b"r` | `[Apa⏎q)brB]` | `[Apa⏎q)b"rbB]` |
-| `"$(fi⏎q)"` | `[A⏎q)B]` | `[A⏎q)"B]` |
+| `p"$(fi⏎q)"r` | `[Ap⏎q)rB]` | `[Ap⏎q)"rB]` ❌ |
+| `p"a$(fi⏎q)b"r` | `[Apa⏎q)brB]` | `[Apa⏎q)b"rbB]` ❌ |
+| `"$(fi⏎q)"` | `[A⏎q)B]` | `[A⏎q)"B]` ❌ |
 
-with two controls that already agree in both shells and isolate the rewrite to
+with two controls that already agreed in both shells and isolate the rewrite to
 `parameter_brace_expand_rhs`: a pattern operand `A${z#p"$(fi⏎q)"r}B` → `[AB]`,
-and the same text outside a brace `Ap"$(fi⏎q)"rB` → `[Ap"⏎q)"rB]`. Note the `b"rb`
-in row 3 — the leftover really is copied twice, exactly as the worked example
-below predicts; what osh is missing is the strip and the second copy's boundary,
-not the duplication.
+and the same text outside a brace `Ap"$(fi⏎q)"rB` → `[Ap"⏎q)"rB]`. (The
+pattern control is not just an observation: a modifier's pattern is expanded
+under `Q_PATQUOTE` and so never reaches the `SX_STRIPDQ` scan at all — see
+TD-OILS-A-MODIFIERS-PATTERN-IS-EXPANDED-AS-A-DOUBLE-QUOTED-STRING.)
 
 **Where:** `userspace/oils/src/interp.rs`, the `${ … }` operand path
 (`Shell::brace_extent_scan` scans the operand once, and expanding it reads it a
-second time). Two shapes are wrong, and the second is the more visible.
+second time). Two shapes were wrong, and the second is the more visible.
 
 **Reproduce** (the original 2026-08-09 measurement; the `osh` column is now
 history — see Status):
@@ -1152,8 +1152,8 @@ renders through `$EUID` — osh reports root by design, see open-questions Q28.
 **Part 2's `SX_STRIPDQ` rules, as landed** (commit "oils: strip the quotes off a
 used brace operand before expanding it"). `Shell::operand_rhs_read` now returns
 the operand read 3 should expand, and its three call sites use it in place of the
-one the parser gave. The rewrite is `Shell::stripdq_operand` /
-`stripdq_parts` / `stripdq_quoted`.
+one the parser gave. The rewrite is `Shell::stripdq_text` /
+`stripdq_quoted_text`.
 
 It needed no byte walk, because **the lexer has already sorted the two cases.**
 Reading a double-quoted run (`userspace/oils/src/lexer.rs`), a backslash before
@@ -1178,6 +1178,34 @@ Corpus case `a-used-brace-operands-embedded-quotes-lose-their-backslashes.sh`
 (6 sections, 30 probes: the rule, the `CBSDQUOTE` set, the outside-the-quotes
 controls, quoted vs unquoted, all eleven operators, four quoted contexts, and
 the extent-copied shapes).
+
+**Part 2's failed-read copy, as landed** (commit "oils: build a used brace
+operand's rewrite as text, not as parts"). The rewrite above was first written as
+an edit of the operand's *parts*, which gives the same answer for every operand
+that expands cleanly. It does not for one whose `$( … )` fails to read: that path
+takes its remainder from the **source text after the substitution**, and the
+parts still spell the embedded `"` that `SX_STRIPDQ` had removed — hence the
+stray `"` and the doubled tail in the table above.
+
+bash hands on a *string*, so osh now does too: `stripdq_text` builds `temp` and
+`operand_rhs_read` re-lexes it with `dquote_word_from_source`, exactly as
+`expand_string_for_rhs (temp, quoted, …)` re-reads it from the start
+(subst.c:7737). Where `temp` comes out equal to the operand's own source there is
+no rewrite and the parser's word is kept, so the common case costs one comparison.
+
+What the copy itself does needed no code: `$` + `string[i+1]` + `ret` +
+`string[si]` is the original text from the `$(` through `si` byte for byte
+(parse.y:4348-4376 hands back the read text less its last byte and leaves `si` on
+that byte), so a failed read copies its region exactly as a successful one does —
+only over a shorter region — and then **carries on with its ordinary rules** from
+`si + 1`. That last part is what the old code got wrong by treating the remainder
+as opaque: measured, `A${z:-p"$(fi⏎q)"\y"\z"r}B` under `@P` is `[Ap⏎q)\yzrB]`, the
+`"` after the failure still closing the run that decides the two backslashes.
+
+Corpus case `a-failed-read-in-a-used-brace-operand-is-copied-and-the-scan-goes-on.sh`
+(4 sections, 13 probes). One of them, `now set`, falls out of the `=` row before
+it and is worth keeping: an operand that is *not* used is still read once by the
+brace scan (one report) and never by the rhs (no second or third).
 
 ---
 

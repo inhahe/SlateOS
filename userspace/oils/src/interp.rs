@@ -26465,7 +26465,17 @@ impl Shell {
         // Only a read whose jump stands propagates, and it does so through the
         // flags it set rather than through this return.
         drop(self.extent_read_of_subs(&subs));
-        Self::stripdq_operand(arg)
+        // …and what the same scan *builds* is what read 3 expands, in place of
+        // the operand as it was written. See [`Shell::stripdq_text`].
+        let temp = Self::stripdq_text(&arg.parts);
+        if temp == src {
+            return None;
+        }
+        // `expand_string_for_rhs (temp, quoted, …)` (subst.c:7737) reads the
+        // built string, not the parts it came from, so a `$( … )` in it takes
+        // its remainder from *that* text — which is how the closing `"` of an
+        // embedded quote stops being part of what a failed read leaves behind.
+        crate::parser::dquote_word_from_source(&temp, self.parse_opts()).ok()
     }
 
     /// The `SX_STRIPDQ` half of the same call: what read 2 hands on to read 3.
@@ -26512,42 +26522,51 @@ impl Shell {
     /// inside them is untouched here — a nested brace gets the rule applied by
     /// its own `parameter_brace_expand_rhs`, which is what makes
     /// `echo "${z:-${w:-p"\x"r}}"` say `pxr` too.
-    fn stripdq_operand(arg: &Word) -> Option<Word> {
-        let parts = Self::stripdq_parts(&arg.parts)?;
-        Some(Word { parts })
-    }
-
-    /// The rewrite of [`Shell::stripdq_operand`], or `None` where it changes
-    /// nothing — which is the common case, and worth not rebuilding the word for.
-    fn stripdq_parts(parts: &[WordPart]) -> Option<Vec<WordPart>> {
-        let mut out: Option<Vec<WordPart>> = None;
-        for (i, p) in parts.iter().enumerate() {
-            let WordPart::DoubleQuoted(inner) = p else {
-                continue;
-            };
-            let Some(stripped) = Self::stripdq_quoted(inner) else {
-                continue;
-            };
-            let acc = out.get_or_insert_with(|| parts.to_vec());
-            if let Some(slot) = acc.get_mut(i) {
-                *slot = WordPart::DoubleQuoted(stripped);
+    ///
+    /// The rewrite is built as **text**, because that is what bash hands on:
+    /// `temp` is a string and `expand_string_for_rhs` re-reads it from the
+    /// start. Keeping the operand's parts and editing them in place would give
+    /// the same answer for every operand that expands cleanly, but not for one
+    /// whose `$( … )` fails to read — that path takes its remainder from the
+    /// source text after the substitution, and in `temp` the embedded quotes
+    /// are no longer in it. Measured, with `z` unset:
+    ///
+    /// ```text
+    ///   u='A${z:-p"$(fi⏎q)"r}B'; printf '[%s]\n' "${u@P}"     ->  [Ap⏎q)rB]
+    ///   u='A${z:-p"$(fi⏎q)\x"r}B'                             ->  [Ap⏎q)xrB]
+    ///   u='A${z:-p"$(fi⏎q)"\y"\z"r}B'                         ->  [Ap⏎q)\yzrB]
+    /// ```
+    ///
+    /// — the scan carries straight on with its ordinary rules from where the
+    /// failed read stopped: the `"` after the `)` still closes the embedded run,
+    /// the `\x` before it is still inside one, and the `\y` after it is not.
+    fn stripdq_text(parts: &[WordPart]) -> Str {
+        let mut out = Str::new();
+        for p in parts {
+            // `if (c == '"') { dquote = !dquote; i++; continue; }` — the quote
+            // itself never reaches `temp`, and what it held is scanned by the
+            // same loop with `dquote` raised.
+            if let WordPart::DoubleQuoted(inner) = p {
+                Self::stripdq_quoted_text(inner, &mut out);
+            } else {
+                out.push_str(&crate::unparse::parts_src(std::slice::from_ref(p)));
             }
         }
         out
     }
 
     /// One embedded `" … "`, with the backslashes the lexer left standing in its
-    /// literal runs taken out.
-    fn stripdq_quoted(parts: &[WordPart]) -> Option<Vec<WordPart>> {
-        let mut out: Option<Vec<WordPart>> = None;
-        for (i, p) in parts.iter().enumerate() {
+    /// literal runs taken out — the `dquote != 0` half of subst.c:906-911.
+    fn stripdq_quoted_text(parts: &[WordPart], out: &mut Str) {
+        for p in parts {
+            // Only a literal run holds a backslash this rule drops. An escape
+            // the lexer already took — a `\` before one of `"` `\` `$` `` ` ``
+            // — is a `SingleQuoted` part, and it is exactly the `CBSDQUOTE` set
+            // the rule keeps, so its source goes back as it stands.
             let WordPart::Literal(text) = p else {
+                out.push_str(&crate::unparse::parts_src(std::slice::from_ref(p)));
                 continue;
             };
-            if !text.contains(&b'\\') {
-                continue;
-            }
-            let mut lit = Str::with_capacity(text.len());
             let mut rest = text.as_slice();
             while let Some((&c, tail)) = rest.split_first() {
                 // The backslash goes and the character after it is copied as it
@@ -26556,7 +26575,7 @@ impl Shell {
                 // second one read as one too.
                 if c == b'\\' {
                     if let Some((&next, after)) = tail.split_first() {
-                        lit.push(next);
+                        out.push(next);
                         rest = after;
                         continue;
                     }
@@ -26565,15 +26584,10 @@ impl Shell {
                     // than the character it was waiting for does.
                     break;
                 }
-                lit.push(c);
+                out.push(c);
                 rest = tail;
             }
-            let acc = out.get_or_insert_with(|| parts.to_vec());
-            if let Some(slot) = acc.get_mut(i) {
-                *slot = WordPart::Literal(lit);
-            }
         }
-        out
     }
 
     /// Every substitution `string_extract_double_quoted` reads, in the order it

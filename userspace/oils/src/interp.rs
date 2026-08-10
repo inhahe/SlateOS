@@ -5139,6 +5139,29 @@ pub struct Shell {
     /// [`Shell::cond_word`]: `"$(f)"` quotes the substitution's *result*, not
     /// the words `f` runs.
     dquote: bool,
+    /// bash's `Q_PATQUOTE` (0x008): [`Shell::dquote`] is set, but by a
+    /// *pattern* rather than by a `" … "`. `getpattern` swaps the bit out
+    /// before it expands a modifier's pattern operand,
+    ///
+    /// ```c
+    ///   l = *value ? expand_string_for_pat (value,
+    ///         (quoted & (Q_HERE_DOCUMENT|Q_DOUBLE_QUOTES)) ? Q_PATQUOTE : quoted,
+    ///         …)                                  /* subst.c:5754-5756 */
+    /// ```
+    ///
+    /// and the swap matters because `Q_PATQUOTE` is a bit of its own. The whole
+    /// of bash names it in three places — subst.c:3020, 10358 and 10365, all
+    /// about `$*`/`$@` — so a pattern keeps the joining half of double quoting
+    /// and *loses* every other test that asks `quoted & (Q_HERE_DOCUMENT |
+    /// Q_DOUBLE_QUOTES)`. Those tests ask [`Shell::dquote_bits`] rather than
+    /// reading `dquote`, and that is the whole of what this field is for.
+    ///
+    /// Raised only by [`Shell::expand_modifier_pattern`], and only where the
+    /// quoting it replaces was there to begin with — `quoted` passes through
+    /// unchanged when neither bit was set. A `"` written *inside* the pattern
+    /// starts an ordinary quoted run and puts `Q_DOUBLE_QUOTES` back, which is
+    /// why [`Shell::enter_dquote`] clears it.
+    pat_quote: bool,
     /// bash's `expand_no_split_dollar_star`: a context that takes the word
     /// *whole*, so an unquoted `$*` joins with `$IFS`'s first character instead
     /// of coming apart into fields — an assignment's value, a here-string, the
@@ -6043,6 +6066,7 @@ impl Shell {
             saw_quoted_at_list: false,
             run_at_unjoins: false,
             dquote: false,
+            pat_quote: false,
             no_split_star: false,
             cond_regex_error: false,
             arith_cmd: None,
@@ -12462,6 +12486,7 @@ impl Shell {
             saw_quoted_at_list: false,
             run_at_unjoins: false,
             dquote: false,
+            pat_quote: false,
             no_split_star: false,
             cond_regex_error: false,
             arith_cmd: None,
@@ -15748,7 +15773,7 @@ impl Shell {
             } => ReadyBulkOp::Trim {
                 suffix: *suffix,
                 longest: *longest,
-                pat: self.expand_word_pattern(pattern),
+                pat: self.expand_modifier_pattern(pattern),
             },
             BulkOp::Replace {
                 all,
@@ -15756,7 +15781,7 @@ impl Shell {
                 pattern,
                 replacement,
             } => {
-                let pat = self.expand_word_pattern(pattern);
+                let pat = self.expand_modifier_pattern(pattern);
                 let patsub = self.shopt.get("patsub_replacement").copied().unwrap_or(true);
                 ReadyBulkOp::Replace {
                     all: *all,
@@ -15778,7 +15803,7 @@ impl Shell {
             } => ReadyBulkOp::Case {
                 mode: *mode,
                 all: *all,
-                pat: self.expand_word_pattern(pattern),
+                pat: self.expand_modifier_pattern(pattern),
             },
             BulkOp::Transform { op } => ReadyBulkOp::Transform { op: *op },
             // Handled collection-wide in `bulk_elements` before per-element
@@ -24419,7 +24444,7 @@ impl Shell {
                     // double quotes, which is the other half of the same guard —
                     // see [`Shell::push_literal_annotated`]. `"${z=~}"` reaches
                     // this walk and assigns the tilde as it stands.
-                    if idx == 0 && !self.dquote {
+                    if idx == 0 && !self.dquote_bits() {
                         let home = self.tilde_expand(s.as_bytes());
                         push_chars(&mut cur, &home, false);
                     } else {
@@ -24961,7 +24986,7 @@ impl Shell {
                     // not just of how their results are joined — see
                     // [`Shell::dquote`]. Set once here, so the per-part
                     // recogniser is asked in the state it expects.
-                    let saved_dquote = std::mem::replace(&mut self.dquote, true);
+                    let saved_dquote = self.enter_dquote();
                     // A quoted `[@]` anywhere in *this run* unjoins the derived
                     // `[*]` forms in it, and one in a neighbouring run does not:
                     // `"${n[*]@Q} ${n[@]}"` is three fields where the same two
@@ -25042,7 +25067,7 @@ impl Shell {
                         cur.push(EChar::MARK);
                     }
                     self.run_at_unjoins = saved_run;
-                    self.dquote = saved_dquote;
+                    self.leave_dquote(saved_dquote);
                     self.leave_inner_source(saved_word);
                 }
                 other => {
@@ -25561,10 +25586,35 @@ impl Shell {
         out
     }
 
+    /// `getpattern (value, quoted, 1)` (subst.c:5728) — the pattern operand of
+    /// a `${x#…}`/`${x%…}`/`${x/…/…}`/`${x^…}` modifier.
+    ///
+    /// [`Shell::expand_word_pattern`] with one thing more: the quoting the word
+    /// around it had is swapped for `Q_PATQUOTE` before the pattern is
+    /// expanded. That swap is the whole of the difference between this and a
+    /// `case` arm or a `[[ == ]]` operand, which are ordinary words in a
+    /// command and get none. See [`Shell::pat_quote`] for what it changes.
+    fn expand_modifier_pattern(&mut self, word: &Word) -> Vec<EChar> {
+        // `(quoted & (Q_HERE_DOCUMENT|Q_DOUBLE_QUOTES)) ? Q_PATQUOTE : quoted`
+        // — with neither bit set `quoted` goes through untouched, so a pattern
+        // reached from no quoting at all is not given the flag either. Nor is
+        // one already inside a pattern robbed of it: in `${w#${z:-${v#~}}}` the
+        // inner `#` sees `Q_PATQUOTE` and passes it on.
+        let saved = self.pat_quote;
+        if self.dquote {
+            self.pat_quote = true;
+        }
+        let out = self.expand_word_pattern(word);
+        self.pat_quote = saved;
+        out
+    }
+
     /// Expand `word` into a glob-pattern character sequence, tagging each
     /// character with whether it was *quoted* (single/double-quoted or
     /// backslash-escaped) and therefore a literal, versus unquoted — a live
-    /// pattern metacharacter. Used by `case` and `[[ == ]]`, where quoting must
+    /// pattern metacharacter. Used by `case` and `[[ == ]]` — and, through
+    /// [`Shell::expand_modifier_pattern`], by a `${x#…}` family operand too —
+    /// where quoting must
     /// suppress metacharacter meaning (so `a\*b` / `a'*'b` / `a"*"b` match a
     /// literal `*`), while a character produced by an *unquoted* parameter or
     /// command expansion stays live (`pat='a*'; [[ aXb == $pat ]]` matches).
@@ -25725,8 +25775,12 @@ impl Shell {
     ///   echo "${z:-~/a}"  ~/a        …however much of a path follows it
     ///   echo "${z=~}"     ~          and the same for the other operators
     /// ```
+    ///
+    /// The mask is the one that leaves `Q_PATQUOTE` out, so the same operand
+    /// written in a *pattern* does expand its tilde — `"${w#${z:-~}}"` with
+    /// `w=$HOME` strips the lot. See [`Shell::dquote_bits`].
     fn push_literal_annotated(&mut self, buf: &mut Vec<EChar>, s: BStr<'_>, leading: bool) {
-        let leading = leading && !self.dquote;
+        let leading = leading && !self.dquote_bits();
         match if leading { self.tilde_split(s) } else { None } {
             Some((dir, rest)) => {
                 push_chars(buf, &dir, true);
@@ -25823,6 +25877,33 @@ impl Shell {
         }
     }
 
+    /// Enter a `" … "`: `quoted` becomes `Q_DOUBLE_QUOTES`, whatever it was
+    /// outside.
+    ///
+    /// The second half is what makes this a pair rather than one assignment. A
+    /// quoted run written *inside* a pattern is an ordinary run and bash gives
+    /// it `Q_DOUBLE_QUOTES` like any other, so the pattern's `Q_PATQUOTE` does
+    /// not reach through it: `"${w#${z:-~}}"` expands the tilde where
+    /// `"${w#"${z:-~}"}"` does not. See [`Shell::pat_quote`].
+    fn enter_dquote(&mut self) -> (bool, bool) {
+        (
+            std::mem::replace(&mut self.dquote, true),
+            std::mem::replace(&mut self.pat_quote, false),
+        )
+    }
+
+    /// Undo [`Shell::enter_dquote`].
+    fn leave_dquote(&mut self, saved: (bool, bool)) {
+        (self.dquote, self.pat_quote) = saved;
+    }
+
+    /// `quoted & (Q_HERE_DOCUMENT|Q_DOUBLE_QUOTES)` — double quoting as the
+    /// tests that leave `Q_PATQUOTE` out of their mask see it, which is every
+    /// test in bash but three. See [`Shell::pat_quote`].
+    fn dquote_bits(&self) -> bool {
+        self.dquote && !self.pat_quote
+    }
+
     fn expand_double_quoted(&mut self, parts: &[WordPart]) -> Str {
         // bash re-enters `expand_word_internal` on the quoted section's
         // *contents*, so a "bad substitution" inside quotes names the section
@@ -25830,7 +25911,7 @@ impl Shell {
         let saved = self.enter_quoted_run(parts);
         // The quotes are part of the context the parts expand in, not just of
         // how their results are joined — see [`Shell::dquote`].
-        let saved_dquote = std::mem::replace(&mut self.dquote, true);
+        let saved_dquote = self.enter_dquote();
         // This call *is* bash's `expand_word_internal`, so it is the scope an
         // abandoned extent read's `sindex` belongs to — see
         // [`Shell::extent_consumed`].
@@ -25852,7 +25933,7 @@ impl Shell {
             }
         }
         self.extent_consumed = saved_consumed;
-        self.dquote = saved_dquote;
+        self.leave_dquote(saved_dquote);
         self.leave_inner_source(saved);
         s
     }
@@ -25878,7 +25959,7 @@ impl Shell {
         // *contents* — see [`Shell::expand_double_quoted`], whose bookkeeping
         // this is.
         let saved = self.enter_quoted_run(parts);
-        let saved_dquote = std::mem::replace(&mut self.dquote, true);
+        let saved_dquote = self.enter_dquote();
         // A `[[ ]]`/`case` run is a run like any other, and a quoted `[@]` in it
         // unjoins the derived `[*]` forms beside it just the same:
         // `[[ P:Q"${n[*]@Q} ${n[@]}" =~ ^(.*)$ ]]` matches `P:Q'a:b' 'c d' 'e'
@@ -25938,7 +26019,7 @@ impl Shell {
             }
         }
         self.run_at_unjoins = saved_unjoins;
-        self.dquote = saved_dquote;
+        self.leave_dquote(saved_dquote);
         self.leave_inner_source(saved);
         items
     }
@@ -25969,13 +26050,32 @@ impl Shell {
         // and not the substitution around it. (The *pattern* side is carved out
         // with the operator still on it, which is why the same word written
         // `${y%%${q!}}` reports `%%${q!}`.)
-        self.expand_call(|sh| {
+        //
+        // The quoting the word around it had does not come with it. Where the
+        // pattern side swaps the bit for `Q_PATQUOTE`
+        // ([`Shell::expand_modifier_pattern`]), this side simply drops it:
+        //
+        // ```c
+        //   rep = expand_string_for_patsub (rep,
+        //           quoted & ~(Q_DOUBLE_QUOTES|Q_HERE_DOCUMENT));
+        //                                             /* subst.c:9183 */
+        // ```
+        //
+        // So `"${w/hh/${z:-~}}"` expands the tilde, and the operand of a
+        // `${z:-…}` written in a replacement is not scanned for its quotes —
+        // see [`Shell::operand_rhs_read`].
+        let saved_dquote = std::mem::replace(&mut self.dquote, false);
+        let saved_pat_quote = std::mem::replace(&mut self.pat_quote, false);
+        let out = self.expand_call(|sh| {
             let (saved, reread) = sh.begin_word(word);
             let word = reread.as_ref().unwrap_or(word);
             let out = sh.expand_replacement_inner(word, patsub);
             sh.end_word(saved);
             out
-        })
+        });
+        self.pat_quote = saved_pat_quote;
+        self.dquote = saved_dquote;
+        out
     }
 
     /// The body of [`Shell::expand_replacement`], split out so the wrapper can
@@ -26335,8 +26435,11 @@ impl Shell {
     /// scan.
     fn operand_rhs_read(&mut self, arg: &Word) -> Option<Word> {
         // Outside double quotes there is no scan: `temp = value`, and the
-        // operand goes to `expand_string_for_rhs` as it stands.
-        if !self.dquote {
+        // operand goes to `expand_string_for_rhs` as it stands. The mask is the
+        // one that leaves `Q_PATQUOTE` out, so an operand written in a pattern
+        // is not scanned either and keeps the backslashes this would drop —
+        // see [`Shell::dquote_bits`].
+        if !self.dquote_bits() {
             return None;
         }
         let src = crate::unparse::word_src(arg);
@@ -27126,7 +27229,7 @@ impl Shell {
                 if value.is_empty() {
                     return Str::new();
                 }
-                let pat = self.expand_word_pattern(pattern);
+                let pat = self.expand_modifier_pattern(pattern);
                 let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
                 param_trim(&value, &pat, *suffix, *longest, extglob)
             }
@@ -27180,7 +27283,7 @@ impl Shell {
                 let Some(value) = self.set_modifier_operand(operand, name, index) else {
                     return Str::new();
                 };
-                let pat = self.expand_word_pattern(pattern);
+                let pat = self.expand_modifier_pattern(pattern);
                 // bash's `patsub_replacement` (default on) makes an unquoted `&`
                 // in the replacement stand for the matched text. Expand the
                 // replacement into `&`/literal tokens so the substitution can
@@ -27208,7 +27311,7 @@ impl Shell {
                 let Some(value) = self.set_modifier_operand(operand, name, index) else {
                     return Str::new();
                 };
-                let pat = self.expand_word_pattern(pattern);
+                let pat = self.expand_modifier_pattern(pattern);
                 let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
                 param_case(&value, &pat, *mode, *all, extglob)
             }
@@ -30156,14 +30259,18 @@ impl Shell {
         // own. See [`Shell::cond_word`].
         let saved_cond_word = std::mem::replace(&mut self.cond_word, false);
         // Nor is the quoting: `"$(f)"` quotes the substitution's result, and
-        // leaves `f`'s own words unquoted. See [`Shell::dquote`].
+        // leaves `f`'s own words unquoted. See [`Shell::dquote`], and
+        // [`Shell::pat_quote`] for the pattern spelling of the same bit: the
+        // words `f` runs are not the pattern the substitution sits in either.
         let saved_dquote = std::mem::replace(&mut self.dquote, false);
+        let saved_pat_quote = std::mem::replace(&mut self.pat_quote, false);
         // Nor is the splitting: `v=$(f)` takes the *substitution* whole, and
         // leaves `f`'s own words to split as they would anywhere. See
         // [`Shell::no_split_star`].
         let saved_star = std::mem::replace(&mut self.no_split_star, false);
         let out = self.command_sub_body_inner(body);
         self.no_split_star = saved_star;
+        self.pat_quote = saved_pat_quote;
         self.dquote = saved_dquote;
         self.cond_word = saved_cond_word;
         out

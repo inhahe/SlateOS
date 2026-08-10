@@ -22883,10 +22883,22 @@ impl Shell {
         } else {
             (true, true)
         };
-        let (saved, reread) = self.begin_word(w);
-        let w = reread.as_ref().unwrap_or(w);
-        let fields = self.expand_word_fields(w, split, glob);
-        self.end_word(saved);
+        // Brace expansion comes first, here as everywhere: `redirection_expand`
+        // calls `expand_words_no_vars`, which is `expand_word_list_internal
+        // (list, WEXP_NOVARS)`, and `WEXP_NOVARS` is `WEXP_ALL &
+        // ~WEXP_VARASSIGN` — `WEXP_BRACEEXP` survives. So the one word becomes
+        // several, and *that* is what the caller's single-field rule then judges:
+        // `echo hi > f{1,2}` is `f{1,2}: ambiguous redirect`, quoting the word as
+        // written. Going through [`Shell::expand_braces_opt`] also brings the
+        // target under `brace_gobbler`'s read, which reaches it in bash for the
+        // same reason — see [`Shell::gobble_scan`].
+        let mut fields = Vec::new();
+        for bw in self.expand_braces_opt(w) {
+            let (saved, reread) = self.begin_word(&bw);
+            let ew = reread.as_ref().unwrap_or(&bw);
+            fields.extend(self.expand_word_fields(ew, split, glob));
+            self.end_word(saved);
+        }
         fields
     }
 

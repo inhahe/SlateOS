@@ -138,7 +138,7 @@ answer (`false` for every `CmdSubBody::Backtick`) is already correct.
 Note the same walk reaches nothing inside a `<( … )` / `>( … )` body either,
 because `crate::unparse::nested_parts` returns no scope for a `ProcSub`.
 
-### TD-OILS-A-REDIRECTION-TARGET-IS-NOT-BRACE-EXPANDED. `> f{1,2}` writes a file called `f{1,2}` where bash calls it ambiguous — 2026-08-10
+### TD-OILS-A-REDIRECTION-TARGET-IS-NOT-BRACE-EXPANDED. `> f{1,2}` writes a file called `f{1,2}` where bash calls it ambiguous — 2026-08-10 — ✅ FIXED 2026-08-10
 
 **Where:** `userspace/oils/src/interp.rs` — wherever a redirection's target word
 is expanded. Every other word list that bash brace-expands goes through
@@ -164,16 +164,26 @@ ls f*
 brace-expanded like any other, and a target that expands to more than one word
 is the `ambiguous redirect` error.
 
-**The fix.** Expand the target through `Shell::expand_braces_opt` before the
-word expansion, and refuse with `ambiguous redirect` when the result is not
-exactly one field.
+**The fix — done.** `Shell::expand_redirect_word` now loops over
+`self.expand_braces_opt(w)` and expands each word that comes back, so the field
+count `Shell::expand_redirect_word_once` already enforced is the count *after*
+brace expansion. Nothing else moved: the ambiguity complaint, the single-field
+rule and the `RedirWord::Dup` quoting all sit above this and were already right.
 
-Note this also brings the target under `Shell::gobble_scan`: bash reports
-`command substitution: line N:` for `echo hi > "/dev/null${z:-'$(fi)'}"` quoting
-the *word's* remainder (`` `fi)'}"' ``), where osh reports the operand's shorter
-one (`` `fi)'' ``). That row belongs in
-`tests/corpus/the-brace-scanner-reads-the-command-substitutions-a-single-quote-hid.sh`
-once this is done.
+Two consequences worth naming, both measured:
+
+* The count is what matters, not the braces. `> h{a,a}` makes two words that
+  happen to be equal and is still ambiguous; `> g{1}` was never a brace
+  expansion (no comma) and just opens that file.
+* It brings the target under `Shell::gobble_scan`, which is what bash does for
+  the same reason. A scan abort makes `expand_braces_opt` hand back *no* words,
+  and that lands on the fatal-expansion-error path rather than the ambiguity
+  one — matching bash, which reports only `command substitution: line N:` for
+  `echo hi > "/dev/null${z:-'$(fi)'}"`, quoting the whole word (`` `fi)'}"' ``).
+
+**Tests.** `tests/corpus/a-redirection-target-is-brace-expanded-and-then-must-be-one-word.sh`,
+plus the redirection row restored to
+`tests/corpus/the-brace-scanner-reads-the-command-substitutions-a-single-quote-hid.sh`.
 
 ### TD-OILS-ARITHMETIC-NEVER-ASKS-WHETHER-A-SUBSCRIPT-NAMES-NOWHERE. `(( a[-7] ))` and `(( a[-7]=1 ))` are silent where bash refuses both — 2026-08-10 — ✅ FIXED 2026-08-10
 
@@ -1802,7 +1812,7 @@ line, its whole-word remainder, its `set -B` gate, its stop-at-the-first-failure
 and its reach across word kinds all match bash 5.2.37.
 
 The walk that piece 2 does is structural rather than a second pass over the
-text, and three shapes fall outside what the parse can hand it. Each has its own
+text, and some shapes fall outside what the parse can hand it. Each has its own
 entry:
 
 * a `' … '` in a **subscript or a substring bound** is still a quote, so the
@@ -1810,11 +1820,13 @@ entry:
   TD-OILS-A-SINGLE-QUOTED-RUN-IN-A-BARE-SUB-WORD-OF-A-BRACE-IS-A-QUOTE;
 * a **backquote body inside `" … "`** is text, not parts —
   TD-OILS-A-BACKQUOTE-BODY-INSIDE-DOUBLE-QUOTES-IS-NOT-GOBBLED (which also notes
-  that a `<( … )` / `>( … )` body is not descended into);
-* a **redirection target** is not brace-expanded at all, so the scan never
-  reaches one — TD-OILS-A-REDIRECTION-TARGET-IS-NOT-BRACE-EXPANDED.
+  that a `<( … )` / `>( … )` body is not descended into).
 
-The `$' … '` splice named above is a fourth: bash stores the *translation* and
+(A **redirection target** was a third — the scan never reached one because the
+target was not brace-expanded at all. That is fixed:
+TD-OILS-A-REDIRECTION-TARGET-IS-NOT-BRACE-EXPANDED.)
+
+The `$' … '` splice named above is a further one: bash stores the *translation* and
 the gobbler meets a bare `$( … )` in it, echoing `` `fi)}]"' `` with no `'`. osh
 sets `bare_splice` when it reads one but the spliced text is not given
 `CmdSubBody::Unread` bodies, so `"${z:-$'$(fi)'}"` is still a parse error.

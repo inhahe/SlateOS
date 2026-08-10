@@ -16,12 +16,11 @@
 #
 #   * it is gated on `set -B`, because it *is* brace expansion's scanner;
 #   * it reaches only the words brace expansion reaches — a command word, a
-#     `for` list and a `declare` argument, but not a plain assignment, a `case`
-#     word or a here-document body, which report from the operand's own read
-#     instead and quote the operand's shorter remainder. (A redirection target
-#     is one of the words it reaches too — `WEXP_NOVARS` keeps `WEXP_BRACEEXP`
-#     — but osh does not brace-expand one yet; see
-#     TD-OILS-A-REDIRECTION-TARGET-IS-NOT-BRACE-EXPANDED in known-issues.md.)
+#     `for` list, a `declare` argument and a redirection target — the last
+#     because `expand_words_no_vars` is `WEXP_NOVARS`, which is `WEXP_ALL &
+#     ~WEXP_VARASSIGN` and so still carries `WEXP_BRACEEXP` — but not a plain
+#     assignment, a `case` word or a here-document body, which report from the
+#     operand's own read instead and quote the operand's shorter remainder.
 #   * it stops at the first failure, so a word with two failing substitutions
 #     reports once.
 #
@@ -68,6 +67,8 @@ for i in "p${z:-'$(fi)'}q"; do echo "9 body $i"; done
 echo "9 rc=$?"
 case "p${z:-'$(fi)'}q" in *) echo "10 body";; esac
 echo "10 rc=$?"
+echo hi > "/dev/null${z:-'$(fi)'}"
+echo "11 rc=$?"
 cat <<EOF
 p${z:-'$(fi)'}q
 EOF

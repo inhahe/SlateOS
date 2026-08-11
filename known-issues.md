@@ -43,60 +43,166 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
-### TD-OILS-A-GLOBAL-SUBSCRIPTED-DECLARATION-IN-A-FUNCTION-ASSIGNS-TO-WHICHEVER-BINDING-IS-LIVE. `declare -g g[1]=9` over a local `g` declares the global an array but stores in the local — 2026-08-11
+### TD-OILS-A-GLOBAL-ARRAY-DECLARATION-IN-A-FUNCTION-STORES-INTO-WHICHEVER-BINDING-IS-LIVE. `declare -g -a g=9` over a local `g` declares the global an array but puts the element in the local — 2026-08-11
 
-**Where:** `userspace/oils/src/interp.rs`, `Shell::builtin_declare_scoped`. The
-`-g`/`-G` scope entry wraps the *whole* operand — the array conversion and the
-store together — so both land on the global. bash splits them.
+**Where:** `userspace/oils/src/interp.rs`, `Shell::builtin_declare_scoped`, the
+`assoc || indexed` store branch and the `attr_store` beside it. Both write the
+variable the declaration is about, which under `-g` is the global. The
+subscripted spelling was split in
+TD-OILS-A-GLOBAL-SUBSCRIPTED-DECLARATION-IN-A-FUNCTION-ASSIGNS-TO-WHICHEVER-BINDING-IS-LIVE;
+the **whole-array** spelling splits the same way and was missed.
 
-`-g` takes the operand off the local branch (`variable_context && mkglobal == 0`
-is false, declare.def:601), so the variable the declaration is *about* is
-`declare_find_variable (name, 1, 0)` → `find_global_variable (name)`, and a
-subscripted operand with no global of the name makes one with
-`make_new_array_variable`. The **assignment** that follows is scope-normal,
-though, and finds whichever binding is live — the frame's local. So the command
-declares one variable an array and fills a different one.
+The store is declare.def:970, and it is made by **name**:
+
+```c
+      else if (simple_array_assign)
+	{
+	  /* let bind_{array,assoc}_variable take care of this. */
+	  if (assoc_p (var))
+	    bind_assoc_variable (var, name, savestring ("0"), value, aflags|ASS_FORCE);
+	  else
+	    bind_array_variable (name, 0, value, aflags|ASS_FORCE);
+	}
+```
+
+`bind_array_variable` begins `entry = find_shell_variable (name)`
+(arrayfunc.c:266) — an ordinary lookup, where everything above it held the
+`find_global_variable` one. The **assoc** half of the same branch is handed
+`var` itself, so `-A` does *not* split. `simple_array_assign` is chosen at
+declare.def:885 by `(making_array_special || creating_array || array_exists) &&
+offset` with a value that is not a `(…)` compound — and `array_exists` is judged
+on `var`, i.e. on the **global**, so a global that is already an array makes an
+element store out of a flagless `declare -g g=9`.
+
+`ASS_FORCE` is passed, so a readonly live binding does not stop the store and
+raises nothing; an assoc live binding is converted (`array_p (entry) == 0` →
+`convert_var_to_array`, arrayfunc.c:284), discarding its keys.
 
 **Reproduce.**
 
 ```sh
-f() { local g=5; declare -g g[1]=9; declare -p g; }; f; echo AFTER; declare -p g
+f() { local g=5; declare -g -a g=9; declare -p g; }; f; echo AFTER; declare -p g
 ```
 
 | | bash 5.2.37 | osh |
 |---|---|---|
-| inside the frame | `declare -a g=([0]="5" [1]="9")` | `declare -- g="5"` |
-| after the return | `declare -a g=()` | `declare -a g=([1]="9")` |
+| inside `f` | `declare -a g=([0]="9")` | `declare -- g="5"` |
+| after `f` | `declare -a g=()` | `declare -a g=([0]="9")` |
 
-With a global already there the split is plainer still — the global is converted
-but never stored into:
+`readonly -a g=9` and `export -a g=9` reach it too: setattr.def:237 rewrites
+them into `declare -gra …` / `declare -gxa …`, adding the `-g` itself — "only
+local/declare/typeset create local variables" — so osh does not even make the
+global for them (`declare -p g` afterwards says `g: not found`).
+
+Everything the subscripted split measured holds here: the fold is the **live**
+variable's (`declare -g -a -i g=4+4` stores the raw `4+4` and leaves the global
+`declare -ai g=()`, while `local -i g=5; declare -g -a g=4+4` stores `8`), a
+live nameref is followed, and only the operand carrying the array kind splits.
+
+**Proper fix.** Route the indexed element store through
+`Shell::with_live_binding`, the helper the subscripted split already uses, and
+leave the assoc one and the compound literal on the declaration's own variable.
+
+**Found alongside:** TD-OILS-A-DECLARE-ARRAY-STORE-BRANCH-IS-CHOSEN-BY-THE-FLAGS-ALONE.
+
+---
+
+### TD-OILS-A-DECLARE-ARRAY-STORE-BRANCH-IS-CHOSEN-BY-THE-FLAGS-ALONE. `declare -a g; declare g='(1 2)'` stores the parentheses where bash re-parses them — 2026-08-11
+
+**Where:** `userspace/oils/src/interp.rs`, `Shell::builtin_declare_scoped` — the
+store branch is `} else if assoc || indexed {`, i.e. the `-a`/`-A` **flags** of
+this command. A name that is already an array but carries no flag falls past it
+to `attr_store`.
+
+bash chooses by `creating_array || array_exists` (declare.def:885), where
+`array_exists = var && (array_p (var) || assoc_p (var))` — the variable's
+current kind, flag or no flag. So a parenthesised value assigned to an existing
+array is a **compound literal**, re-parsed and re-expanded:
 
 ```sh
-g=7; f() { local g=5; declare -g g[1]=9; declare -p g; }; f; echo AFTER; declare -p g
-#  bash: declare -a g=([0]="5" [1]="9")  /  declare -a g=([0]="7")
-#  osh : declare -- g="5"                /  declare -a g=([0]="7" [1]="9")
+declare -a g; declare g='(1 2)'; declare -p g
+#  bash: declare -a g=([0]="1" [1]="2")
+#  osh : declare -a g=([0]="(1 2)")
 ```
 
-`local -g g[1]=9` spells the same thing and differs the same way. Two spellings
-that look adjacent are **not** affected, and both already agree:
+| | bash 5.2.37 | osh |
+|---|---|---|
+| `declare -a g; declare g='(1 2)'` | `declare -a g=([0]="1" [1]="2")` | `declare -a g=([0]="(1 2)")` |
+| `declare -a g=(7 8); declare g='(1 2)'` | `declare -a g=([0]="1" [1]="2")` | `declare -a g=([0]="(1 2)" [1]="8")` |
+| `declare -A g; declare g='(1 2)'` | `declare -A g=([1]="2" )` | `declare -A g=([0]="(1 2)" )` |
 
-* no local of the name — `f() { local -g g[1]=9; }` — there is only one binding
-  to land on, and both shells give `declare -a g=([1]="9")` inside and after.
-* no subscript — `f() { local g=5; declare -g g=9; }` — the store is a plain
-  scalar bind, which bash also sends to the global.
+(No deprecation warning: declare.def:899 prints it only when `array_exists == 0
+&& creating_array == 0`, which is exactly the case that is not this one.)
 
-So the trigger is exactly: `-g`, a subscript, and a local of that name already
-bound in the frame.
+The *unparenthesised* neighbours already agree — `declare -a g=(7 8); declare
+g=9` gives `([0]="9" [1]="8")` in both — because `attr_store` reaches element 0
+by another road. It is only the compound spelling that needs the branch.
 
-**Proper fix.** Narrow the `-g` scope swap for a subscripted operand to the
-array *declaration* — the kind conversion and the creation of the name — and
-leave the element store at live scope, which is where bash's
-`assign_array_element` runs. The `declare -p` shapes above are the measurement
-to hold it to: an empty global array when there was no global, and an unfilled
-converted one when there was.
+**Proper fix.** Widen the branch condition to bash's: the flags **or** the
+name's current array/assoc kind.
 
-**How it was found:** probing the local/global boundary of
-TD-OILS-A-SUBSCRIPTED-LOCAL-DECLARATION-REBINDS-THE-NAME-RATHER-THAN-WIDENING-IT.
+**How it was found:** reading declare.def:880-906 for
+TD-OILS-A-GLOBAL-ARRAY-DECLARATION-IN-A-FUNCTION-STORES-INTO-WHICHEVER-BINDING-IS-LIVE.
+
+---
+
+### TD-OILS-A-READONLY-LOCAL-IS-NOT-WIDENED-BY-THE-DECLARATION-THAT-IS-ABOUT-TO-BE-REFUSED. `f() { local -r g=5; declare g[1]=9; }` leaves `declare -r g="5"` where bash leaves `declare -ar g=()` — 2026-08-11
+
+**Where:** `userspace/oils/src/interp.rs`, `Shell::builtin_declare_scoped` —
+`drop_local_scalar` (the local array widening) sits *below* the readonly
+refusals, which `continue` before it is ever reached.
+
+bash puts the two in the other order. The local branch widens at
+declare.def:614, long before the assign-to-readonly refusal at :849:
+
+```c
+  if (variable_context && mkglobal == 0)		/* :601 */
+    {
+      …
+      var = making_array_special || (flags_on & (att_array|att_assoc))
+	      ? make_local_array_variable (newname, …)		/* :614 */
+	      : make_local_variable (…);
+```
+
+`making_array_special` is set by a subscripted operand, so a subscript asks for
+the widening just as plainly as `-a` does. The refusal that follows then
+`NEXT_VARIABLE ()`s — with the array already made, and empty, the readonly
+scalar it replaced gone.
+
+**Reproduce.** Six spellings, all measured, all differing the same way:
+
+```sh
+f() { local -r g=5; declare g[1]=9;  declare -p g; }; f  # bash declare -ar g=()
+f() { local -r g=5; local   g[1]=9;  declare -p g; }; f  # bash declare -ar g=()
+f() { local -r g=5; local -a g=5;    declare -p g; }; f  # bash declare -ar g=()
+f() { local -r g=5; local -A g=5;    declare -p g; }; f  # bash declare -Ar g=()
+f() { local -r g=5; declare -i g[1]=9; declare -p g; }; f  # bash declare -ar g=()
+f() { local -r g=5; declare g[1]=9 h=2; declare -p g h; }; f
+#   bash declare -ar g=()  /  declare -- h="2"
+```
+
+osh answers `declare -r g="5"` for every one. The status (1) and the
+diagnostic (`local: g: readonly variable` / `declare: g: …`) already match; only
+the shape of the variable left behind is wrong.
+
+**Not this, and already right:** a *valueless* subscripted operand
+(`declare g[1]`), a readonly local that is already an array
+(`local -r g=(1)`) or already associative (`local -Ar g=([k]=1)`), a readonly
+**global** with no local of the name (`declare -r g=5; f() { declare g[1]=9; }`
+— there is no local branch to widen), and the plain `local g=9`.
+
+**Proper fix.** Move `drop_local_scalar` — and the `array_valued` insert that
+goes with it — ahead of the three readonly refusals, so the widening lands the
+way bash's :614 does and the refusal at :849 finds an array. Take care that the
+refusal's `continue` still skips the *store*; only the kind is supposed to
+survive it. This is the same rule the array kind already obeys against the
+nameref refusal (`local -a g=5` through a cycle leaves `declare -an g=()`, see
+TD-OILS-A-LOCAL-REDECLARATION-OF-A-CIRCULAR-REFERENCE-ACCEPTS-ANY-VALUE) — the
+readonly refusals simply were not covered by it.
+
+**How it was found:** the readonly probes taken while landing
+TD-OILS-A-GLOBAL-SUBSCRIPTED-DECLARATION-IN-A-FUNCTION-ASSIGNS-TO-WHICHEVER-BINDING-IS-LIVE,
+which needed to know which of the two bindings a readonly refusal was about.
 
 ---
 
@@ -40175,6 +40281,84 @@ deny — are now fixed; see F8 and F9.)_
 ---
 
 ## Fixed Bugs
+
+### TD-OILS-A-GLOBAL-SUBSCRIPTED-DECLARATION-IN-A-FUNCTION-ASSIGNS-TO-WHICHEVER-BINDING-IS-LIVE. `declare -g g[1]=9` over a local `g` declared the global an array *and* stored in it, where bash splits the two — FIXED 2026-08-11
+
+**Where:** `userspace/oils/src/interp.rs` — a new `Shell::declare_global_swap`
+field, a new `Shell::with_live_binding`, and the subscripted store in
+`Shell::builtin_declare_scoped`.
+
+**What it was.** osh wrapped the *whole* operand in the `-g` scope swap — the
+array conversion and the element store together — so both landed on the global.
+bash reaches **two variables** with the one command.
+
+**The measurement that explains it.** `-g` takes the operand off the local
+branch (`variable_context && mkglobal == 0` is false, declare.def:601), so the
+variable the declaration is *about* is `find_global_variable (name)`. The
+element store is not about that variable at all:
+
+```c
+      else if (simple_array_assign && subscript_start)
+	{
+	  …
+	  local_aflags = aflags & ASS_APPEND;
+	  …
+	  var = assign_array_element (name, value, local_aflags, …);   /* :960 */
+```
+
+and `assign_array_element` begins `entry = find_variable (vname)`
+(arrayfunc.c:363) — an ordinary lookup, which finds the frame's local.
+
+```sh
+f() { local g=5; declare -g g[1]=9; declare -p g; }; f; echo AFTER; declare -p g
+#  bash: declare -a g=([0]="5" [1]="9")  /  declare -a g=()
+#  osh : declare -- g="5"                /  declare -a g=([1]="9")
+```
+
+Four things were measured about the split, and all four now hold:
+
+* **The global keeps the declaration and stays empty**, carrying every letter:
+  `declare -g -i g[1]=4+4` leaves `declare -ai g=()` global and the *raw* `4+4`
+  local, since only `ASS_APPEND` is carried over (declare.def:957) and the fold
+  is by the live variable's own attributes.
+* **It is left visible.** declare.def:802 re-hides a variable it just made only
+  `if (offset == 0)`, and the operand has a value — hence `=()` and not the bare
+  form. A global that already existed keeps what it had (`declare -A g` stays
+  bare) and one that was a scalar is converted but never stored into
+  (`g=7` → `declare -a g=([0]="7")`).
+* **The two halves need not agree on the kind.** `declare -g -A g[k]=9` over a
+  local scalar makes the *global* associative and widens the *local* to an
+  **indexed** array, where `k` arith-evaluates to 0. Conversely `local -A g;
+  declare -g g[k]=9` stores the key `k` locally and leaves an indexed global.
+* **The store follows a live nameref**, which the declaration does not:
+  `local -n g=w; local w=1; declare -g g[1]=9` fills `w` and still makes a
+  global `g`.
+
+**Found with it — a readonly store fails nothing.** `bind_array_variable`
+(arrayfunc.c:280) and `bind_assoc_variable` (:311) `err_readonly` and then
+`return (entry)` — **non-NULL** — so declare.def:962's `if (var == 0)` never
+bumps `assign_error`. Only a bad subscript returns NULL. So
+`f() { local -r g=5; declare -g g[1]=9; }` prints `g: readonly variable` and
+exits **0**, where the unsplit `f() { local -r g=5; declare g[1]=9; }` exits 1 —
+that one is refused by declare.def:849, against the very variable it is about,
+and never reaches the store.
+
+**The fix.** `enter_global_scope`'s displaced bindings are now parked on the
+shell as `declare_global_swap` for the length of the builtin, and
+`with_live_binding` undoes the swap for one name around the element store —
+osh's one-table equivalent of bash simply looking the name up again. The
+visibility insert moved out of the store's failure branch, since the global is
+visible whether the store failed *or* went somewhere else entirely; and the
+store's readonly refusal no longer sets the status.
+
+**Not this, and unchanged.** An operand with no subscript (`declare -g g=9`),
+one whose name nothing shadows, and `-G`/`export`/`readonly`, which skip the
+swap when this very frame holds the name and so reach one variable either way.
+
+**Corpus:** `a-global-subscripted-declaration-reaches-two-variables-at-once.sh`.
+Unit test: `a_global_subscripted_declaration_reaches_two_variables_at_once`.
+
+---
 
 ### TD-OILS-A-PLUS-N-DECLARATION-STORES-THROUGH-THE-REFERENCE-IT-IS-REMOVING. `local +n g=5` on a circular reference bound `5` where bash refuses the store and keeps the reference — FIXED 2026-08-11
 

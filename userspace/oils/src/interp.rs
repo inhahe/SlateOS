@@ -5438,6 +5438,22 @@ pub struct Shell {
     ///
     /// Saved and restored around the inner `apply_assignment` call.
     decl_builtin_ctx: bool,
+    /// The bindings [`Shell::enter_global_scope`] displaced for the declaration
+    /// builtin currently running under `-g`/`-G` — empty otherwise.
+    ///
+    /// bash does not swap scopes: it holds two variables at once. `declare -g`
+    /// takes the operand off the local branch (declare.def:601), so the variable
+    /// the declaration is *about* is `find_global_variable (name)` — but the
+    /// **element store** a subscripted operand makes is
+    /// `assign_array_element (name, …)` (declare.def:960), which begins with a
+    /// plain `entry = find_variable (vname)` (arrayfunc.c:363) and so lands on
+    /// whichever binding is live. One command, two variables.
+    ///
+    /// osh keeps one table and reaches a shadowed global by swapping, so the
+    /// second of those two is reached by *undoing* the swap for the length of
+    /// the store — which is what [`Shell::with_live_binding`] does, and why the
+    /// list it needs has to be visible from inside the builtin.
+    declare_global_swap: Vec<(String, usize, VarSnapshot)>,
     /// Collects the `set -x` rendering of a compound assignment's elements while
     /// the literal is being expanded. `Some` only while `apply_assignment` binds a
     /// *declaration builtin's* compound operand with tracing on.
@@ -6269,6 +6285,7 @@ impl Shell {
             arith_cmd: None,
             expand_cmd: None,
             decl_builtin_ctx: false,
+            declare_global_swap: Vec::new(),
             xtrace_compound: None,
             compound_expanded: false,
             glob_error: None,
@@ -12812,6 +12829,7 @@ impl Shell {
             // substitution's body. See [`Shell::expand_cmd`].
             expand_cmd: self.expand_cmd.clone(),
             decl_builtin_ctx: false,
+            declare_global_swap: Vec::new(),
             xtrace_compound: None,
             compound_expanded: false,
             glob_error: None,
@@ -20975,6 +20993,45 @@ impl Shell {
         let saved = self.enter_scope_at(std::slice::from_ref(&name.to_owned()), depth, false);
         let out = f(self);
         self.leave_global_scope(saved);
+        out
+    }
+
+    /// Run `f` with the binding a `-g`/`-G` declaration *displaced* back in the
+    /// live tables — the inverse of the swap [`Shell::enter_global_scope`] made,
+    /// undone for one name and put straight back afterwards.
+    ///
+    /// This is how a subscripted operand's element store reaches the live
+    /// binding while the declaration around it stays about the global. bash has
+    /// no swap to undo: `assign_array_element` simply looks the name up again
+    /// (`entry = find_variable (vname)`, arrayfunc.c:363), so the two halves of
+    /// `f() { local g=5; declare -g g[1]=9; }` land on two different variables —
+    /// the global becomes an empty array, the local becomes
+    /// `([0]="5" [1]="9")`. See [`Shell::declare_global_swap`].
+    ///
+    /// Whatever `f` makes of the live binding is parked back where the swap
+    /// keeps it, so `leave_global_scope` still restores the *updated* local at
+    /// the end of the command. A name that was never swapped (no local shadows
+    /// it, or `-G` skipped it because this very frame holds it) is already the
+    /// live one, and `f` runs untouched.
+    fn with_live_binding<T>(&mut self, name: &str, f: impl FnOnce(&mut Self) -> T) -> T {
+        let Some(pos) = self
+            .declare_global_swap
+            .iter()
+            .position(|(n, _, _)| n == name)
+        else {
+            return f(self);
+        };
+        let Some(displaced) = self.declare_global_swap.get(pos).map(|(_, _, s)| s.clone()) else {
+            return f(self);
+        };
+        let swapped_in = self.snapshot_var(name);
+        self.restore_var(name, displaced);
+        let out = f(self);
+        let updated = self.snapshot_var(name);
+        if let Some(slot) = self.declare_global_swap.get_mut(pos) {
+            slot.2 = updated;
+        }
+        self.restore_var(name, swapped_in);
         out
     }
 
@@ -43619,7 +43676,9 @@ impl Shell {
             return self.builtin_declare_scoped(args, is_local, tag, flag_limit, &[]);
         }
         let saved = self.enter_global_scope(&Self::declare_operand_names(args), chklocal);
+        let prev = std::mem::replace(&mut self.declare_global_swap, saved);
         let status = self.builtin_declare_scoped(args, is_local, tag, flag_limit, &[]);
+        let saved = std::mem::replace(&mut self.declare_global_swap, prev);
         self.leave_global_scope(saved);
         status
     }
@@ -45329,9 +45388,52 @@ impl Shell {
                     // to report without arming `discard_error`. Arithmetic
                     // *syntax* errors (bad `-i` value / bad subscript
                     // expression) still discard, in either context.
+                    // …and it lands on whichever binding is **live**, not on the
+                    // global a `-g` declaration is about. bash makes this store
+                    // with `assign_array_element (name, …)` (declare.def:960),
+                    // which begins `entry = find_variable (vname)`
+                    // (arrayfunc.c:363) — an ordinary lookup, where everything
+                    // above it held the `find_global_variable` one. So one
+                    // command reaches two variables:
+                    //
+                    // ```sh
+                    // f() { local g=5; declare -g g[1]=9; declare -p g; }; f
+                    // #     declare -a g=([0]="5" [1]="9")   ← the local, stored
+                    // declare -p g
+                    // #     declare -a g=()                  ← the global, declared
+                    // ```
+                    //
+                    // The declaration half keeps the global: the array kind and
+                    // every letter land there and stay unvalued (`declare -g -i
+                    // g[1]=4+4` leaves `declare -ai g=()` global and the raw
+                    // `4+4` local, since the store carries only `ASS_APPEND`
+                    // over — declare.def:957 — and folds by the *live*
+                    // variable's attributes, which have none). The store half
+                    // keeps the live one, kind and all: `declare -g -A g[k]=9`
+                    // over a local scalar makes the **global** associative and
+                    // the local an *indexed* array with `k` evaluated to 0, and
+                    // a live nameref is followed (`local -n g=w` sends it to
+                    // `w`). See [`Shell::with_live_binding`].
                     let saved_decl_ctx = self.decl_builtin_ctx;
                     self.decl_builtin_ctx = true;
-                    let ok = self.apply_assignment(&assignment, false);
+                    // Whether the binding actually written was readonly is read
+                    // *inside* the swap, because under `-g` it need not be the
+                    // one the readonly refusal above tested. bash's store
+                    // reports such a refusal without failing the builtin: both
+                    // `bind_array_variable` (arrayfunc.c:280) and
+                    // `bind_assoc_variable` (:311) `err_readonly` and then
+                    // `return (entry)` — non-NULL, so declare.def:962's
+                    // `if (var == 0)` never bumps `assign_error`. Only a bad
+                    // subscript returns NULL. So
+                    // `f() { local -r g=5; declare -g g[1]=9; }` prints
+                    // `g: readonly variable` and still exits **0**, where the
+                    // unsplit `f() { local -r g=5; declare g[1]=9; }` exits 1 —
+                    // that one is refused by declare.def:849, against the very
+                    // variable it is about, and never reaches the store.
+                    let (ok, live_readonly) = self.with_live_binding(base_name, |sh| {
+                        let ro = sh.readonly.contains(base_name);
+                        (sh.apply_assignment(&assignment, false), ro)
+                    });
                     self.decl_builtin_ctx = saved_decl_ctx;
                     if self.discard_error.is_some() {
                         // Malformed subscript/value expression: the command driver
@@ -45343,35 +45445,37 @@ impl Shell {
                         self.array_valued.insert(base_name.to_string());
                         break;
                     }
-                    if !ok {
-                        // The store failed ("bad array subscript"), but the
-                        // array it was going to store into is still there —
-                        // and bash makes it *visible*. `declare.def:786`
-                        // creates the variable for a subscripted operand with
-                        // `make_new_array_variable`, which leaves it visible,
-                        // and only re-hides it `if (offset == 0)` — i.e. only
-                        // when the operand carried no value at all. So
-                        // `declare 'z[]=v'` reports the empty-but-valued
-                        // `declare -a z=()` even though nothing was stored,
-                        // exactly like the `cannot destroy`/`cannot convert`
-                        // refusals above.
-                        //
-                        // Two limits, both measured. A name that was *already*
-                        // bound keeps whatever visibility it had, because bash
-                        // never reaches the creation branch at all: `declare -a
-                        // z; declare 'z[-5]=v'` still prints `declare -a z`,
-                        // and so does `declare -i z; declare 'z[-5]=v'`, whose
-                        // `z` is only an invisible *scalar* — it is the
-                        // variable that has to be absent, not the array. And a
-                        // local one is made by `make_local_array_variable`,
-                        // which hides it unconditionally, so `f() { declare
-                        // 'z[]=v'; }` and the `local` spelling both print
-                        // `declare -a z` — while `declare -g 'z[]=v'` in the
-                        // same function is back on the global path and prints
-                        // `=()`.
-                        if !name_existed && !make_local {
-                            self.array_valued.insert(base_name.to_string());
-                        }
+                    // The array the operand asked for is visible whatever the
+                    // store did with it — and, under `-g`, whether or not the
+                    // store even went there. `declare.def:786` creates the
+                    // variable for a subscripted operand with
+                    // `make_new_array_variable`, which leaves it visible, and
+                    // only re-hides it `if (offset == 0)` (:802) — i.e. only
+                    // when the operand carried no value at all. So a store that
+                    // failed still reports the empty-but-valued form
+                    // (`declare 'z[]=v'` gives `declare -a z=()`), exactly like
+                    // the `cannot destroy`/`cannot convert` refusals above, and
+                    // so does a store the `-g` split sent to a different
+                    // variable entirely (`f() { local g=5; declare -g g[1]=9; }`
+                    // leaves the global `declare -a g=()` while the local takes
+                    // the element).
+                    //
+                    // Two limits, both measured. A name that was *already* bound
+                    // keeps whatever visibility it had, because bash never
+                    // reaches the creation branch at all: `declare -a z; declare
+                    // 'z[-5]=v'` still prints `declare -a z`, and so does
+                    // `declare -i z; declare 'z[-5]=v'`, whose `z` is only an
+                    // invisible *scalar* — it is the variable that has to be
+                    // absent, not the array. And a local one is made by
+                    // `make_local_array_variable`, which hides it
+                    // unconditionally, so `f() { declare 'z[]=v'; }` and the
+                    // `local` spelling both print `declare -a z` — while
+                    // `declare -g 'z[]=v'` in the same function is back on the
+                    // global path and prints `=()`.
+                    if !name_existed && !make_local {
+                        self.array_valued.insert(base_name.to_string());
+                    }
+                    if !ok && !live_readonly {
                         status = 1;
                     }
                 }
@@ -45926,7 +46030,9 @@ impl Shell {
             }
         }
         let saved = self.enter_global_scope(&names, chklocal);
+        let prev = std::mem::replace(&mut self.declare_global_swap, saved);
         let outcome = body(self);
+        let saved = std::mem::replace(&mut self.declare_global_swap, prev);
         self.leave_global_scope(saved);
         outcome
     }
@@ -73458,6 +73564,101 @@ st=1
             let out = run(&format!("f() {{ {src} 2>/dev/null; declare -p g; }}; f")).0;
             assert_eq!(out, format!("{shape}\n"), "{src}");
         }
+    }
+
+    /// `declare -g name[sub]=value` reaches two variables: the declaration is
+    /// about `find_global_variable (name)` (declare.def:601 takes the operand
+    /// off the local branch), while the element store is
+    /// `assign_array_element (name, …)` (:960), whose first act is a plain
+    /// `entry = find_variable (vname)` (arrayfunc.c:363). osh wrapped the whole
+    /// operand in the global-scope swap, so both halves landed on the global.
+    /// Corpus: `a-global-subscripted-declaration-reaches-two-variables-at-once.sh`.
+    #[test]
+    fn a_global_subscripted_declaration_reaches_two_variables_at_once() {
+        // The local takes the element; the global is declared, left empty, and
+        // left *visible* — declare.def:802 re-hides only when there was no
+        // value at all.
+        for (src, inside, after) in [
+            ("local g=5; declare -g g[1]=9", r#"declare -a g=([0]="5" [1]="9")"#, "declare -a g=()"),
+            ("local g=5; local -g g[1]=9", r#"declare -a g=([0]="5" [1]="9")"#, "declare -a g=()"),
+            ("local g=5; typeset -g g[1]=9", r#"declare -a g=([0]="5" [1]="9")"#, "declare -a g=()"),
+            ("local g=5; declare -g g[1]+=9", r#"declare -a g=([0]="5" [1]="9")"#, "declare -a g=()"),
+            // The widening puts the old scalar at [0], which [0]=9 then takes.
+            ("local g=5; declare -g g[0]=9", r#"declare -a g=([0]="9")"#, "declare -a g=()"),
+            // Every letter goes on the global, and folds nothing on the way
+            // past: `local_aflags = aflags & ASS_APPEND` (declare.def:957), so
+            // the store folds by the *live* variable's attributes.
+            ("local g=5; declare -g -r g[1]=9", r#"declare -a g=([0]="5" [1]="9")"#, "declare -ar g=()"),
+            ("local g=5; declare -g -i g[1]=4+4", r#"declare -a g=([0]="5" [1]="4+4")"#, "declare -ai g=()"),
+            ("local g=5; declare -g -x g[1]=9", r#"declare -a g=([0]="5" [1]="9")"#, "declare -ax g=()"),
+            ("local g=5; declare -g -u g[1]=ab", r#"declare -a g=([0]="5" [1]="ab")"#, "declare -au g=()"),
+            // The two halves need not agree on the kind: `-A` makes the global
+            // associative while the live scalar widens to an *indexed* array,
+            // where the key `k` arith-evaluates to 0.
+            ("local g=5; declare -g -A g[k]=9", r#"declare -a g=([0]="9")"#, "declare -A g=()"),
+            ("local -A g; declare -g g[k]=9", r#"declare -A g=([k]="9" )"#, "declare -a g=()"),
+            // A valueless operand leaves the global unvalued (`offset == 0`).
+            ("local g=5; declare -g g[1]", r#"declare -- g="5""#, "declare -a g"),
+            // Only the operand carrying a subscript is split.
+            ("local g=5; declare -g g=9", r#"declare -- g="5""#, r#"declare -- g="9""#),
+        ] {
+            let (out, _) = run(&format!(
+                "f() {{ {src}; declare -p g; }}; f; echo AFTER; declare -p g"
+            ));
+            assert_eq!(out, format!("{inside}\nAFTER\n{after}\n"), "{src}");
+        }
+
+        // A global that was already there is converted by the declaration and
+        // still never stored into.
+        for (pre, inside, after) in [
+            ("g=7;", r#"declare -a g=([0]="5" [1]="9")"#, r#"declare -a g=([0]="7")"#),
+            ("declare -a g=(7 8);", r#"declare -a g=([0]="5" [1]="9")"#, r#"declare -a g=([0]="7" [1]="8")"#),
+        ] {
+            let (out, _) = run(&format!(
+                "{pre} f() {{ local g=5; declare -g g[1]=9; declare -p g; }}; f; echo AFTER; declare -p g"
+            ));
+            assert_eq!(out, format!("{inside}\nAFTER\n{after}\n"), "{pre}");
+        }
+
+        // The store follows a live *reference*, which the declaration does not.
+        let (out, _) = run(
+            "f() { local -n g=w; local w=1; declare -g g[1]=9; declare -p g w; }; f; \
+             echo AFTER; declare -p g",
+        );
+        assert_eq!(
+            out,
+            "declare -n g=\"w\"\ndeclare -a w=([0]=\"1\" [1]=\"9\")\nAFTER\ndeclare -a g=()\n"
+        );
+
+        // A readonly binding the *store* meets is reported and fails nothing:
+        // `bind_array_variable` (arrayfunc.c:280) `err_readonly`s and then
+        // `return (entry)`, so declare.def:962's `if (var == 0)` never bumps
+        // `assign_error`. One the *declaration* is about is refused at :849
+        // instead, which does fail.
+        let (out, _) = run(
+            "f() { local -r g=5; declare -g g[1]=9; echo \"st=$?\"; declare -p g; }; f 2>&1; \
+             echo AFTER; declare -p g",
+        );
+        assert_eq!(
+            out,
+            "main: g: readonly variable\nst=0\ndeclare -r g=\"5\"\nAFTER\ndeclare -a g=()\n"
+        );
+        let (out, _) = run(
+            "declare -r g=7; f() { local g=5; declare -g g[1]=9; echo \"st=$?\"; }; f 2>&1; \
+             echo AFTER; declare -p g",
+        );
+        // (The `local` is refused too — the global is readonly — so the frame
+        // never holds `g`, and the declaration is about that same readonly one.)
+        assert_eq!(
+            out,
+            "main: local: g: readonly variable\nmain: declare: g: readonly variable\n\
+             st=1\nAFTER\ndeclare -r g=\"7\"\n"
+        );
+
+        // With nothing to shadow it there is only one variable to reach, and
+        // both halves land on it.
+        let (out, _) = run("f() { declare -g g[1]=9; declare -p g; }; f; echo AFTER; declare -p g");
+        assert_eq!(out, "declare -a g=([1]=\"9\")\nAFTER\ndeclare -a g=([1]=\"9\")\n");
     }
 
     /// `+n` is excluded from declare.def:817 outright by

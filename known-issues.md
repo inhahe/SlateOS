@@ -43,89 +43,48 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
-### TD-OILS-A-COMPOUND-DECLARATION-WITH-NO-KIND-LETTER-DOES-NOT-REACH-FOR-AN-ARRAY. `declare g=(1 2)` through a circular reference walks once where bash walks three times, and inside a function leaks the value to a global — 2026-08-11
+### TD-OILS-A-COMPOUND-DECLARATION-BY-A-CHKLOCAL-BUILTIN-BINDS-THE-FRAMES-REFERENCE. `readonly g=(1 2)` in a function puts the array and its attributes on the local reference, not on the global the escape names — 2026-08-11
 
-**Where:** `userspace/oils/src/interp.rs`, the compound-operand loop in
-`Shell::builtin_declare_compound` — `let resolved = if follow {
-self.resolve_ref_use(&a.name) } else { None };`. One walk, whatever the
-declaration is.
+**Where:** `userspace/oils/src/interp.rs`, `Shell::declare_compounds_scoped` —
+the `(None, Some(RefTarget { base, sub: None, .. })) => base` arm of the target
+match drops `RefTarget::scope`, so everything below it (`declare_local`,
+`array_kind_apply`, the `readonly`/`export`/`integer` attribute sites) operates
+on the **live** tables while only `apply_assignment` re-resolves and stores at
+the scope the walk named.
 
-bash charges a compound operand that names its kind (`-a`/`-A`) **one** walk and
-one that leaves the kind to the `(` **three**: with no kind letter the operand
-goes through `find_or_make_array_variable` (declare.def's
-`making_array_special`/`compound_array_assign` path), which looks the name up
-again on its own account. A function-local declaration adds the local branch's
-own pair on top — see
-TD-OILS-REDECLARING-A-SELF-NAMING-NAMEREF-WARNS-TOO-FEW-TIMES for that half.
+`readonly` and `export` are `W_ASSNGLOBAL|W_CHKLOCAL` (execute_cmd.c:4220), so
+even inside a function they declare a *global*: step 1 of
+`expand_declaration_argument` is `declare -gG NAME`, and a nameref cycle's
+escape really is where the literal lands, with the frame's own reference left
+untouched.
 
-**Reproduce.** All against the cycle `declare -n gq=zq; declare -n zq=gq`
-(global) or `local -n g=z; local -n z=g` (in a function):
-
-| form | bash walks | osh walks | state |
-|---|---|---|---|
-| global `declare -a gq=(1 2)` | 1 | 1 | agrees |
-| global `declare -A gq=([k]=v)` | 1 | 1 | agrees |
-| global `declare gq=(1 2)` | 3 | 1 | **differs** |
-| global `declare -i gq=(1 2)` | 3 | 1 | **differs** |
-| global `declare -g gq=(1 2)` | 3 | 1 | **differs** |
-| local `local -a g=(1 2)` | 2 | 2 | agrees — the local pair, fixed |
-| local `local -A g=([k]=v)` | 2 | 2 | agrees — likewise |
-| local `local g=(1 2)` | 4 | 3 | **differs** |
-| local `local -i g=(1 2)` | 4 | 3 | **differs** |
-| local `local -g g=(1 2)` | 0 | 0 | agrees |
-
-The two function-local rows that differ also **put the value in the wrong
-scope**, which is the serious half. bash leaves `declare -an g=([0]="1"
-[1]="2")` in the frame and nothing behind after the function returns; osh leaves
-the reference untouched at `declare -n g="z"` and creates a **global** `g`:
+**Reproduce.**
 
 ```sh
-f() { local -n g=z; local -n z=g; local g=(1 2); declare -p g; }; f
-declare -p g          # bash: `declare: g: not found`;  osh: declare -a g=([0]="1" [1]="2")
+f() { local -n g=z; local -n z=g; readonly g=(1 2); declare -p g; }; f
+echo AFTER; declare -p g
 ```
 
-The cause is the cycle's global escape being honoured where bash does not reach
-for it. It is **not** that the escape itself is wrong — measured, an ordinary
-store through a circular chain creates the global in both shells, so
-`walk_ref_name`'s `RefWalk::closed(… RefTarget::global_of(cur))` must stand:
+| | bash 5.2.37 | osh |
+|---|---|---|
+| inside the frame | `declare -n g="z"` | `declare -nr g="z"` |
+| after the return | `declare -ar g=([0]="1" [1]="2")` | `declare -a g=([0]="1" [1]="2")` |
 
-```sh
-f() { local -n g=z; local -n z=g; g=5;     }; f; declare -p g   # both: declare -- g="5"
-f() { local -n g=z; local -n z=g; g=(1 2); }; f; declare -p g   # both: declare -a g=([0]="1" [1]="2")
-f() { local -n g=z; local -n z=g; declare g=(1 2); }; f; declare -p g
-                                                # bash: not found;  osh: declare -a g=(…)
-```
+`export g=(1 2)` differs the same way (`-nx` in the frame, `-ax` lost after).
+With a kind letter it is worse still: `readonly -a g=(1 2)` binds the **array
+itself** locally in osh, and the walk count stays 1 against bash's 3.
 
-The *declaration* is what differs: it reaches for an array under the operand's
-own name before the reference is ever followed, so the escape never gets a
-chance. (This also rules out a shared root cause with
-TD-OILS-A-LOCAL-REDECLARATION-OF-A-CIRCULAR-REFERENCE-ACCEPTS-ANY-VALUE, which
-needs the scalar `-n` refusal rather than a change to the walk.) `resolve_ref_use_walks` answers `Some(RefTarget { base: "g", scope:
-GLOBAL })` for the circular chain, so the `(None, None) if follow` arm at
-`interp.rs:46251` — which calls `unreference_for_declare` and falls back to the
-operand's own name — is never taken, and `apply_assignment` then follows the
-surviving nameref attribute out to global scope. The kind-letter forms escape
-this by accident: `array_kind_apply` on the target makes the array before the
-store, so `-a`/`-A` are correct in scope *and* count (verified: nothing survives
-the function in either shell). A
-declaration with no kind letter and a compound value *is* an array declaration
-in bash, and reaching for the array is what the extra walks are; osh's compound
-loop resolves the reference, gets nothing back from the cycle, and drops the
-operand instead of falling back to the operand's own name.
+**Proper fix.** Thread `RefTarget::scope` through the whole second half of the
+compound loop rather than only into `apply_assignment` — or route the chklocal
+builtins through the same scope entry `-g` already uses, so `declare_local`,
+`array_kind_apply` and the attribute sites all run at the scope the walk named.
+The walk accounting for these builtins is already right (step 1 walks once as a
+`declare -gG`, step 2 once, and step 3's truncated builtin once more, for 3);
+only the scope of the binding is wrong.
 
-**Proper fix.** Give the compound loop the same shape the scalar one has: the
-walk count is 1 for an operand whose kind is named and 3 for one whose kind
-comes from the `(`, plus **one** more when the declaration binds a local (not
-the scalar path's pair — `make_local_array_variable`/`make_local_assoc_variable`
-stand in for `make_local_variable` and do not walk, so only
-`declare_transform_name`'s walk is added: global `-a` 1 → local `-a` 2, global
-no-kind 3 → local no-kind 4); and a chain that answers nothing makes the array
-under the operand's own name, as `unreference_for_declare` already does for the
-scalar path. `local -g g=(1 2)` on a *local* cycle walks nothing in either
-shell and is already right.
-
-**How it was found:** measuring the walk counts for
-TD-OILS-REDECLARING-A-SELF-NAMING-NAMEREF-WARNS-TOO-FEW-TIMES.
+**How it was found:** the 25-case differential sweep that landed
+TD-OILS-A-COMPOUND-DECLARATION-WITH-NO-KIND-LETTER-DOES-NOT-REACH-FOR-AN-ARRAY
+(`ok=23 bad=2`; these were the two).
 
 ---
 
@@ -40208,6 +40167,90 @@ deny — are now fixed; see F8 and F9.)_
 ---
 
 ## Fixed Bugs
+
+### TD-OILS-A-COMPOUND-DECLARATION-WITH-NO-KIND-LETTER-DOES-NOT-REACH-FOR-AN-ARRAY. `local g=(1 2)` through a circular reference leaked the value to a global, and the walk counts were wrong on every route — FIXED 2026-08-11
+
+**Where:** `userspace/oils/src/interp.rs`, `Shell::declare_compounds_scoped` —
+the `follow`/`resolved` block, the `(None, None) if follow` arm of the target
+match, and the array-kind site below it.
+
+**What it was.** `f() { local -n g=z; local -n z=g; local g=(1 2); }` left the
+frame's reference untouched at `declare -n g="z"` and created a **global**
+`declare -a g=([0]="1" [1]="2")`; bash leaves `declare -an g=([0]="1" [1]="2")`
+in the frame and creates nothing. The walk counts were wrong alongside it: local
+no-kind 3 where bash walks 4, top-level no-kind 1 where bash walks 3,
+`readonly`/`export` in a function 2 where bash walks 3.
+
+**The measurement that explains it.** A compound operand of a declaration
+builtin is **three commands**, not one — `expand_declaration_argument`
+(subst.c:12655):
+
+```c
+  if (make_internal_declare (tlist->word->word, opts, cmd) != 0) …
+  …
+  t = do_word_assignment (tlist->word, 0);
+  …
+  tlist->word->word[t] = '\0';        /* the builtin sees the name alone */
+```
+
+1. `make_internal_declare` runs the builtin over the **name alone**, under a
+   rebuilt option string carrying only the array kind (`-a`/`-A`), the scope
+   (`-g`, `-G` for the chklocal builtins) and the value-transforming letters
+   (`i`,`l`,`u`,`c`,`I`) — `--` when there is nothing to carry.
+2. `do_word_assignment` → `do_assignment_internal` (subst.c:3545) →
+   `do_compound_assignment` (subst.c:3459) performs the compound assignment.
+3. the word is truncated and handed to the real builtin, which by then finds an
+   array and follows nothing.
+
+Inside a function step 1 is a `local`, so the array step 2 fills is the
+**frame's**: the cycle's escape to global scope is never taken. (A *bare*
+`g=(1 2)` through the same cycle does take it — the two paths genuinely differ,
+and both were measured.) A kind letter costs step 2 nothing because step 1 has
+already converted the name to an array (`make_local_array_variable`,
+arrayfunc.c:471), overwriting the nameref's value cell with the `ARRAY *`, so
+there is no name left to follow.
+
+Each step walks the operand's chain and each walk warns once, which is what the
+decomposition is measured by. Every count below is against bash 5.2.37:
+
+| | step 1 | step 2 | total |
+|---|---|---|---|
+| local, `-a`/`-A` | 2 | 0 | **2** |
+| local, no kind letter (incl. `-i`) | 2 | 2 | **4** |
+| top level, `-a`/`-A` | 1 | 0 | **1** |
+| top level, no kind letter | 2 | 1 | **3** |
+| `readonly`/`export` in a function | 1 | 1 (+1 from step 3) | **3** |
+| `-g` in a function | 0 | 0 | **0** |
+| fresh local shadowing a *global* cycle | 2 | 0 | **2** |
+
+`declare -a gq` at top level costs only one walk because
+`find_variable_last_nameref` returns NULL on a cycle (it spins to `NAMEREF_MAX`,
+variables.h:172) and is **silent**, so declare.def:731 finds no refvar and falls
+through to `:774`. `declare -- gq` costs two: `declare_find_variable` at `:774`
+plus the `bind_variable (name, NULL, ASS_FORCE)` that creates the name, which
+`-a`/`-A` skip by calling `make_new_array_variable` instead.
+
+**The fix.** The walk count is now derived from that decomposition rather than
+from an ad-hoc formula — three branches, `escapes` (a chklocal builtin in a
+frame, whose store walks the surviving chain itself), `make_local`, and top
+level — and a local declaration whose chain led nowhere drops the escape and
+binds the operand's own name, as `make_local_array_variable` does. The reference
+keeps its attribute and loses the name it held: `self.vars.remove(&target)`
+before `array_kind_apply`, so the held name cannot come back as element 0 of an
+**append** (`local g+=(1 2)`, where bash gives `[0]="1" [1]="2"`). A chain longer
+than the walk limit now keeps the reference attribute too (`declare -an n1=(…)`),
+where osh used to strip it.
+
+**Not replicated on purpose.** bash *reading* a `declare -an` array-with-nameref
+(`${g[0]}`, `g[0]=9`) returns garbage out of the `ARRAY *` value cell — an empty
+string, then `` `': not a valid identifier ``. osh reads the array sensibly.
+
+**Corpus:**
+`a-compound-declaration-binds-the-local-a-nameref-cycle-cannot-reach.sh`. Unit
+test: `a_compound_declaration_binds_the_local_a_nameref_cycle_cannot_reach`,
+beside `a_function_local_declaration_walks_a_nameref_chain_twice`.
+
+---
 
 ### TD-OILS-REDECLARING-A-SELF-NAMING-NAMEREF-WARNS-TOO-FEW-TIMES. A function-local declaration walks the operand's nameref chain a fixed number of times — FIXED 2026-08-11
 

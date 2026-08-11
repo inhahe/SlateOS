@@ -14151,6 +14151,31 @@ impl Shell {
     /// one by the name it resolved to — see
     /// [`Self::apply_assignment_spelled`]. Without a nameref in the way the two
     /// are the same name and the distinction does not show.
+    /// The name an element write's `bad array subscript` diagnostics are
+    /// spelled with — the same seam [`Self::assignment_write_refused`] reads,
+    /// one field along.
+    ///
+    /// bash's element store keeps the word it was handed only to complain with:
+    ///
+    /// ```c
+    /// static SHELL_VAR *
+    /// assign_array_element_internal (entry, name, vname, sub, sublen, …)
+    ///      char *name;             /* only used for error messages */
+    /// ```
+    ///
+    /// so what decides is which word `assign_array_element` was called with.
+    /// An operand that carried its **own** subscript is passed through whole,
+    /// reference and all (`declare -n r=g; g=(1 2); r[-9]=9` says `r[-9]`), and
+    /// so is a declaration builtin's subscripted operand. A subscript that came
+    /// from the **reference** instead was built into a new name first, so that
+    /// name is what is reported (`t=v; declare -n r=t[-2]; r=w` says `t[-2]`).
+    /// `spelled.index` is exactly that question: the rewrite at
+    /// [`Self::apply_assignment_inner`] puts the reference's subscript on the
+    /// assignment it runs and leaves the spelling's own empty.
+    fn elem_blame<'a>(a: &'a Assignment, spelled: &'a Assignment) -> &'a str {
+        if spelled.index.is_some() { &spelled.name } else { &a.name }
+    }
+
     fn assignment_write_refused(&mut self, a: &Assignment, spelled: &Assignment) -> bool {
         if !self.readonly.contains(&a.name) {
             return false;
@@ -14589,6 +14614,14 @@ impl Shell {
                     self.fold_case_attr(&a.name, val)
                 };
                 if let Some(idx_word) = &a.index {
+                    // Every diagnostic below is spelled by [`Self::elem_blame`]
+                    // rather than by the name the store resolved to: a
+                    // subscript the *writer* wrote reaches bash's
+                    // `assign_array_element` inside the word it was written in,
+                    // reference and all, so `declare -n r=g; g=(1 2);
+                    // r[-9]=9` says `r[-9]`, and so do `r[]`, `r[*]` and an
+                    // associative `r['']`.
+                    let blame = Self::elem_blame(a, spelled);
                     // `a[]=v` — a subscript with no source text at all. bash
                     // refuses it before it looks at the array's type, so this
                     // check precedes the assoc/indexed split, and it is about
@@ -14597,7 +14630,7 @@ impl Shell {
                     // by arithmetic as 0. An empty *key* on an associative
                     // array is a separate rejection, below.
                     if crate::unparse::word_src(idx_word).is_empty() {
-                        self.perrln(&format!("{}[]: bad array subscript", a.name));
+                        self.perrln(&format!("{blame}[]: bad array subscript"));
                         if !self.decl_builtin_ctx {
                             self.arm_discard(1);
                             self.note_shell_error(FatalWhen::ErrexitOrPosix);
@@ -14614,7 +14647,7 @@ impl Shell {
                         && let Some(c) =
                             Self::whole_array_sub(&crate::unparse::word_src(idx_word))
                     {
-                        self.warn_whole_array_sub(&a.name, c);
+                        self.warn_whole_array_sub(blame, c);
                         if !self.decl_builtin_ctx {
                             self.arm_discard(1);
                             self.note_shell_error(FatalWhen::ErrexitOrPosix);
@@ -14631,7 +14664,7 @@ impl Shell {
                         if key.is_empty() {
                             self.berrln(&bfmt![
                                 self.err_prefix(),
-                                &a.name,
+                                blame,
                                 b"[",
                                 crate::unparse::word_src(idx_word),
                                 b"]: bad array subscript"
@@ -14709,7 +14742,7 @@ impl Shell {
                             let src = self.expand_subscript_key(idx_word);
                             let line = bfmt![
                                 self.err_prefix(),
-                                &a.name,
+                                blame,
                                 b"[",
                                 &src,
                                 b"]: bad array subscript"
@@ -44921,10 +44954,19 @@ impl Shell {
             let spelled = target
                 .as_ref()
                 .and_then(|t| Self::spelled_local_name(t, make_local));
-            let (base_name, subscript) = match (&spelled, &target) {
-                (Some(s), _) => (s.as_str(), None),
-                (None, Some(t)) => (t.base.as_str(), t.sub.as_deref().or(subscript)),
-                (None, None) => (base_name, subscript),
+            // …and whether the subscript the store ends up using is one the
+            // **operand** carried, or one the *reference* supplied. bash keeps
+            // the two apart because only the first reaches
+            // `assign_array_element` inside the word it was written in; the
+            // second was built into a new name first, and that new name is what
+            // the store then quotes. See [`Self::elem_blame`].
+            let (base_name, subscript, sub_from_operand) = match (&spelled, &target) {
+                (Some(s), _) => (s.as_str(), None, false),
+                (None, Some(t)) => match &t.sub {
+                    Some(ts) => (t.base.as_str(), Some(ts.as_slice()), false),
+                    None => (t.base.as_str(), subscript, subscript.is_some()),
+                },
+                (None, None) => (base_name, subscript, subscript.is_some()),
             };
             // The name the array-kind conversion refusal quotes. Ordinarily it
             // is the operand as written, reference and all — `declare -n r=t;
@@ -45157,8 +45199,31 @@ impl Shell {
             // below come from lookups on the resolved name and quote that
             // instead, so `readonly t; declare -n r=t` gives `declare r=9` →
             // `r: readonly variable` but `declare +r r` → `t: readonly variable`.
+            //
+            // …unless a **local shadow** is what is being refused, in which case
+            // the refusal is not declare.def:849's at all but
+            // `make_local_variable`'s, three hundred lines above it
+            // (declare.def:614 → variables.c:2683):
+            //
+            // ```c
+            //   if (old_var && (noassign_p (old_var) ||
+            //                  (readonly_p (old_var) && old_var->context == 0)))
+            //     { if (readonly_p (old_var)) sh_readonly (name); … return NULL; }
+            // ```
+            //
+            // — and the name it is handed is `newname`, the operand run through
+            // `declare_transform_name`, i.e. the **resolved target**. So inside a
+            // function `local -n r=g; declare r=9` on a readonly *global* `g`
+            // says `declare: g: readonly variable`, where the same command at
+            // top level says `r`. `shadow_new && readonly_blocks` is exactly the
+            // case that reaches it: a name the frame already holds comes back
+            // from `make_local_variable` early (`local_p (old_var) &&
+            // old_var->context == variable_context`), before the check, and a
+            // readonly *local* of an outer frame is one bash shadows quite
+            // happily — both of which fall through to :849 with the word.
+            let readonly_blame = if shadow_new { base_name } else { operand_name };
             if value.is_some() && readonly_blocks && !ref_value_refused {
-                self.perrln(&format!("{tag}: {operand_name}: readonly variable"));
+                self.perrln(&format!("{tag}: {readonly_blame}: readonly variable"));
                 status = 1;
                 continue;
             }
@@ -45696,6 +45761,26 @@ impl Shell {
                         append,
                         value: AssignRhs::Scalar(Word::literal(v)),
                     };
+                    // …but the operand as *written*, reference and all, is what
+                    // the store's own diagnostics quote. bash hands
+                    // `assign_array_element` the raw word (declare.def:960) and
+                    // that function keeps it "only ... for error messages"
+                    // (arrayfunc.c:394), finding the variable through a follow
+                    // of its own — so inside a function
+                    // `local -n r=g; declare -r 'r[1]=9'` says `r: readonly
+                    // variable` while the element it refused belongs to `g`.
+                    // Only the *builtin's* refusals name the resolved target.
+                    //
+                    // A subscript the *reference* supplied is the other case,
+                    // and goes the other way: `declare -n r='n[@]'; declare r=v`
+                    // says `n[@]`, not `r[@]`, because bash built that name
+                    // before the store ever saw it. `sub_from_operand` is the
+                    // seam.
+                    let written =
+                        (sub_from_operand && operand_name != base_name).then(|| Assignment {
+                            name: operand_name.to_string(),
+                            ..assignment.clone()
+                        });
                     // A range-underflow "bad array subscript" discards the
                     // command in command position, but as a `declare`/`local`
                     // operand it only fails the builtin — the rest of the line
@@ -45750,8 +45835,9 @@ impl Shell {
                     // bash applies it) — and under `-g` the store need not even
                     // have gone to the binding that flag landed on.
                     self.readonly_kept_entry = false;
-                    let ok = self
-                        .with_live_binding(base_name, |sh| sh.apply_assignment(&assignment, false));
+                    let ok = self.with_live_binding(base_name, |sh| {
+                        sh.apply_assignment_spelled(&assignment, false, written.as_ref())
+                    });
                     self.decl_builtin_ctx = saved_decl_ctx;
                     if self.discard_error.is_some() {
                         // Malformed subscript/value expression: the command driver
@@ -74680,6 +74766,111 @@ st=1
         let (out, _) =
             run("f() { local g=5; export -a g=9; }; ( f; env | grep '^g=' || echo none )");
         assert_eq!(out, "none\n");
+    }
+
+    /// A declaration builtin's operand can name two variables at once, and the
+    /// diagnostics say which of them each refusal is about.
+    ///
+    /// Inside a function the builtin declares the **resolved target**
+    /// (`declare_transform_name`, declare.def:205), and it is
+    /// `make_local_variable` that refuses to shadow a readonly *global*
+    /// (variables.c:2683) — with the name it was handed, i.e. that target. That
+    /// refusal is three hundred lines above declare.def:849's, which quotes the
+    /// operand as written, so `local -n r=g; declare r=9` says `g` inside a
+    /// function and `r` at top level. A name the frame already holds is no
+    /// shadow (`make_local_variable` returns it before the check), and a
+    /// readonly *local* of an outer frame is one bash shadows happily, so both
+    /// fall back to :849 and the written name.
+    ///
+    /// The element **store** goes the other way. `assign_array_element` finds
+    /// its variable through a follow of its own and carries the raw word beside
+    /// it — `char *name; /* only used for error messages */` (arrayfunc.c:394)
+    /// — so its readonly refusal and all three spellings of `bad array
+    /// subscript` name the reference as written, whatever variable the element
+    /// belonged to. osh had both of these backwards. Corpus:
+    /// `a-declaration-operands-nameref-is-followed-at-two-ends-at-once.sh`.
+    #[test]
+    fn a_declaration_operands_nameref_is_followed_at_two_ends_at_once() {
+        // The builtin's own refusal, inside a function: the resolved target.
+        for (decl, tag) in [
+            ("declare r=5", "declare"),
+            ("local r=5", "local"),
+            ("typeset r=9", "typeset"),
+            ("declare -x r=5", "declare"),
+        ] {
+            let (out, _) = run(&format!(
+                "f() {{ local -n r=g; {decl}; echo \"st=$?\"; declare -p r g; }}; \
+                 ( g=1; readonly g; f 2>&1 )"
+            ));
+            assert_eq!(
+                out,
+                format!(
+                    "main: {tag}: g: readonly variable\nst=1\n\
+                     declare -n r=\"g\"\ndeclare -r g=\"1\"\n"
+                ),
+                "{decl}"
+            );
+        }
+        // …to the *end* of the chain, not one hop along it.
+        let (out, _) = run(
+            "f() { local -n r=g; declare -n r2=r; declare r2=5; echo \"st=$?\"; }; \
+             ( g=1; readonly g; f 2>&1 )",
+        );
+        assert_eq!(out, "main: declare: g: readonly variable\nst=1\n");
+
+        // …and the operand as written where no local shadow is made at all,
+        // which at top level is every operand.
+        let (out, _) =
+            run("( declare -n r=g; g=1; readonly g; declare r=5; echo \"st=$?\" ) 2>&1");
+        assert_eq!(out, "osh: declare: r: readonly variable\nst=1\n");
+        // A name the frame already holds is a re-declaration, not a shadow, so
+        // it meets :849 and the written name too.
+        let (out, _) = run(
+            "f() { local -r g=1; local -n r=g; declare r=9; echo \"st=$?\"; }; ( f 2>&1 )",
+        );
+        assert_eq!(out, "main: declare: r: readonly variable\nst=1\n");
+
+        // The element store names the reference, whatever it stored into — and
+        // the refusal is the store's own, so it is untagged and exits 0.
+        for src in [
+            "declare -r 'r[1]=9'",
+            "declare -ri 'r[1]=4+4'",
+            "declare -r 'r[1]+=9'",
+        ] {
+            let (out, _) = run(&format!(
+                "f() {{ local -n r=g; {src}; echo \"st=$?\"; }}; ( g=(1 2); f 2>&1 )"
+            ));
+            assert_eq!(out, "main: r: readonly variable\nst=0\n", "{src}");
+        }
+        let (out, _) = run(
+            "f() { local -n r=g; local -n g=q; declare -r 'r[1]=9'; echo \"st=$?\"; \
+             declare -p q; }; ( f 2>&1 )",
+        );
+        assert_eq!(out, "main: r: readonly variable\nst=0\ndeclare -ar q\n");
+
+        // …and so does every spelling of `bad array subscript`, through a
+        // declaration operand or written out on its own.
+        for (write, blame) in [
+            ("r[-9]=9", "r[-9]"),
+            ("r[]=9", "r[]"),
+            ("r[*]=9", "r[*]"),
+        ] {
+            let (out, _) = run(&format!("( declare -n r=g; g=(1 2); {write} ) 2>&1"));
+            assert_eq!(out, format!("osh: {blame}: bad array subscript\n"), "{write}");
+        }
+        let (out, _) = run("( declare -A m=([k]=1); declare -n r=m; r['']=9 ) 2>&1");
+        assert_eq!(out, "osh: r['']: bad array subscript\n");
+        let (out, _) = run(
+            "f() { local -n r=g; declare 'r[-9]=9'; echo \"st=$?\"; declare -p g; }; \
+             ( g=(1 2); f 2>&1 )",
+        );
+        assert_eq!(out, "main: r[-9]: bad array subscript\nst=1\ndeclare -a g\n");
+
+        // The store itself still goes where the chain points.
+        let (out, _) = run(
+            "f() { local -n r=g; declare -i 'r[1]=4+4'; declare -p r g; }; ( g=(1 2); f 2>&1 )",
+        );
+        assert_eq!(out, "declare -n r=\"g\"\ndeclare -ai g=([1]=\"8\")\n");
     }
 
     /// A declaration builtin applies its attributes **before** it stores a

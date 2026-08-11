@@ -43,85 +43,70 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
-### TD-OILS-READONLY-A-AND-EXPORT-A-ARE-DECLARATIONS-WITH-G-ADDED. `readonly -a g=9` in a function makes a **local** where bash makes a global — 2026-08-11
+### TD-OILS-A-READONLY-DECLARATION-MARKS-BEFORE-IT-STORES-SO-IT-REFUSES-ITS-OWN-ELEMENT. `declare -r 'a[1]=9'` stores the element where bash refuses it — 2026-08-11
 
-**Where:** `userspace/oils/src/interp.rs`, `Shell::builtin_readonly` and
-`Shell::builtin_export`. Both are complete implementations of their own,
-reached without ever passing through `Shell::builtin_declare` — which is right
-for the ordinary spellings, and wrong for the two that bash hands *to* it.
-
-An `-a`/`-A` operand **with a value** is not run by `set_or_show_attributes` at
-all. It is rewritten into a `declare` command, and the rewrite adds `-g`
-itself (setattr.def:234):
-
-```c
-	      /* Let's try something here.  Turn readonly -a xxx=yyy into
-		 declare -ra xxx=yyy and see what that gets us. */
-	      if (arrays_only || assoc_only)
-		{
-		  …
-		  /* Add -g to avoid readonly/export creating local variables:
-		     only local/declare/typeset create local variables */
-		  opti = 0;
-		  optw[opti++] = '-';
-		  optw[opti++] = 'g';
-		  if (attribute & att_readonly)
-		    optw[opti++] = 'r';
-		  if (attribute & att_exported)
-		    optw[opti++] = 'x';
-		  if (arrays_only)
-		    optw[opti++] = 'a';
-		  else
-		    optw[opti++] = 'A';
-		  …
-		  opt = declare_builtin (nlist);
-```
-
-So `readonly -a g=9` **is** `declare -gra g=9`, and everything that spelling
-does follows — including the whole-array store split fixed in
-TD-OILS-A-GLOBAL-ARRAY-DECLARATION-IN-A-FUNCTION-STORES-INTO-WHICHEVER-BINDING-IS-LIVE:
-the global is declared an array and left empty, and the element goes to the
-live binding.
-
-**Reproduce.**
+**Where:** `userspace/oils/src/interp.rs`, `Shell::builtin_declare_scoped`, the
+subscripted-operand branch. The element store is
+`self.with_live_binding(base_name, … apply_assignment …)`; the attribute
+application is ~55 lines *below* it (`if readonly && !unset_readonly {
+self.readonly.insert(base_name.to_string()); }`). bash has them the other way
+round: `VSETATTR (var, flags_on)` is declare.def:944 and
+`assign_array_element` is :960 — so the `r` is already on the variable when
+the store arrives, and that store carries **no `ASS_FORCE`**. A `-r`
+declaration therefore refuses its own element.
 
 ```sh
-f() { local g=5; readonly -a g=9; declare -p g; }; f; echo AFTER; declare -p g
+declare -a a=(x y); declare -r 'a[1]=9'; echo "st=$?"; declare -p a
 ```
 
 | | bash 5.2.37 | osh |
 |---|---|---|
-| `local g=5; readonly -a g=9` after | `declare -ar g=()` | `declare: g: not found` |
-| `local g=5; export -a g=9` after | `declare -ax g=()` | `declare: g: not found` |
-| `local g=5; readonly -A g=9` inside | `declare -r g="5"` | `declare -Ar g=([0]="9" )` |
-| `local -r g=5; readonly -a g=9` | `st=0`, `declare -ar g=([0]="9")` | `readonly: g: readonly variable`, `st=1` |
+| `declare -r 'a[1]=9'` (fresh) | `a: readonly variable`, `st=0`, `declare -ar a=()` | `st=0`, `declare -ar a=([1]="9")` |
+| `declare -a a=(x y); declare -r 'a[1]=9'` | `declare -ar a=([0]="x" [1]="y")` | `… [1]="9"` |
+| `declare -a a=(x y); declare -r 'a[5]=9'` | `declare -ar a=([0]="x" [1]="y")` | `… [5]="9"` |
+| `declare -a a=(x y); declare -r 'a[1]+=9'` | `declare -ar a=([0]="x" [1]="y")` | `… [1]="y9"` |
+| `declare -A m=([k]=1); declare -r 'm[j]=9'` | `declare -Ar m=([k]="1" )` | `… [j]="9"` |
+| `declare -i n=1; declare -r 'n[1]=4+4'` | `declare -air n=([0]="1")` | `… [1]="8"` |
+| `declare -a arr=(x y); declare -n r=arr[1]; declare -r r=9` | `arr: readonly variable`, `declare -ar arr=([0]="x" [1]="y")` | `… [1]="9"` |
 
-The last row is the `ASS_FORCE` of the store the rewrite reaches: a readonly
-live binding takes the element anyway and raises nothing, where osh's own
-`readonly` refuses it.
+The diagnostic is **untagged** (`a: readonly variable`, not `declare: a:
+…`) and the status stays **0** — both already right in osh for a store the
+`-g` split sent to a readonly binding, because `bind_array_variable`
+(arrayfunc.c:280) `err_readonly`s and then `return (entry)`, non-NULL, so
+declare.def:962's `if (var == 0)` never bumps `assign_error`. The only thing
+missing is that the `r` is not yet on.
 
-Three conditions gate the rewrite, and osh must gate on the same three:
+Two things fix the shape of the entry rather than the fault:
 
-* **a value.** `if (assign)` encloses it — `readonly -a g` with no `=` is an
-  ordinary attribute marking and stays local, which osh already matches.
-* **`-a` or `-A`.** `readonly g=9` is not rewritten either, and also already
-  matches.
-* the letters carried over are `attribute`'s, not the command's, and `-n`
-  edits `attribute` **asymmetrically**: `if (undo && (attribute &
-  att_readonly)) attribute &= ~att_readonly;` (setattr.def:174) drops the `r`
-  but leaves the `x`. Measured: `readonly -an g=9` leaves the global `declare
-  -a g=()`, while `export -an g=9` leaves it `declare -ax g=()`.
+* **only `-r`.** Every other letter already lands before the store in osh and
+  agrees with bash: `declare -a a=(x y); declare -i 'a[1]=2+3'` gives `5` in
+  both, `declare -u 'q[0]=ab'` gives `AB` in both, and `declare -x 'a[1]=9'`
+  stores normally. So this is not a general "the whole `VSETATTR` is late" —
+  it is the readonly set alone.
+* **the whole-array form is untouched**, because that store carries
+  `ASS_FORCE`: `declare -a a=(x y); declare -r a=9` agrees, and so does
+  `declare -r q=9`.
 
-**Proper fix.** In `builtin_readonly`/`builtin_export`, detect the
-`(-a|-A) name=value` operand and route it through `Shell::builtin_declare`
-with a synthesised `-g[r|x][a|A]` flag word, exactly as the rewrite does —
-per operand, since bash rewrites each one on its own (`list->next` is unhooked
-and restored around the call).
+The second operand of the *same command* then meets the ordinary tagged
+refusal, which is a neat proof of the ordering:
 
-**How it was found:** measuring
-`a-global-array-declaration-stores-into-whichever-binding-is-live.sh`, whose
-`readonly -a`/`export -a` rows had to be dropped from the corpus because this
-is a second, separate mechanism.
+```
+$ declare -a a=(x y); declare -r 'a[1]=9' 'a[0]=7'; echo "st=$?"
+bash: a: readonly variable            # the first operand's own store, untagged, st unchanged
+bash: declare: a: readonly variable   # the second operand, refused at :849, st=1
+```
+
+**Proper fix.** Hoist the `readonly`/`export` application of the subscripted
+branch above the `with_live_binding` store, so it stands where bash's :944
+does. Take care with the `-g` split: bash's `VSETATTR` is applied to the
+declaration's *own* variable while the store is a live lookup, so
+`f() { local a=(x y); declare -gr 'a[1]=9'; }` marks the global and lets the
+local take the element — measure that before assuming one flat `readonly`
+set can express it.
+
+**How it was found:** measuring the `readonly -a`/`export -a` rewrite
+(TD-OILS-READONLY-A-AND-EXPORT-A-ARE-DECLARATIONS-WITH-G-ADDED), whose
+nameref-to-an-element row could not be made to agree because of this.
 
 ---
 
@@ -40200,6 +40185,115 @@ deny — are now fixed; see F8 and F9.)_
 ---
 
 ## Fixed Bugs
+
+### TD-OILS-READONLY-A-AND-EXPORT-A-ARE-DECLARATIONS-WITH-G-ADDED. `readonly -a g=9` in a function makes a **local** where bash makes a global — FIXED 2026-08-11
+
+**Where:** `userspace/oils/src/interp.rs`, `Shell::builtin_readonly` and
+`Shell::builtin_export`. Both are complete implementations of their own,
+reached without ever passing through `Shell::builtin_declare` — which is right
+for the ordinary spellings, and wrong for the two that bash hands *to* it.
+
+An `-a`/`-A` operand **with a value** is not run by `set_or_show_attributes` at
+all. It is rewritten into a `declare` command, and the rewrite adds `-g`
+itself (setattr.def:234):
+
+```c
+	      /* Let's try something here.  Turn readonly -a xxx=yyy into
+		 declare -ra xxx=yyy and see what that gets us. */
+	      if (arrays_only || assoc_only)
+		{
+		  …
+		  /* Add -g to avoid readonly/export creating local variables:
+		     only local/declare/typeset create local variables */
+		  opti = 0;
+		  optw[opti++] = '-';
+		  optw[opti++] = 'g';
+		  if (attribute & att_readonly)
+		    optw[opti++] = 'r';
+		  if (attribute & att_exported)
+		    optw[opti++] = 'x';
+		  if (arrays_only)
+		    optw[opti++] = 'a';
+		  else
+		    optw[opti++] = 'A';
+		  …
+		  opt = declare_builtin (nlist);
+```
+
+So `readonly -a g=9` **is** `declare -gra g=9`, and everything that spelling
+does follows — including the whole-array store split fixed in
+TD-OILS-A-GLOBAL-ARRAY-DECLARATION-IN-A-FUNCTION-STORES-INTO-WHICHEVER-BINDING-IS-LIVE:
+the global is declared an array and left empty, and the element goes to the
+live binding.
+
+**Reproduce.**
+
+```sh
+f() { local g=5; readonly -a g=9; declare -p g; }; f; echo AFTER; declare -p g
+```
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| `local g=5; readonly -a g=9` after | `declare -ar g=()` | `declare: g: not found` |
+| `local g=5; export -a g=9` after | `declare -ax g=()` | `declare: g: not found` |
+| `local g=5; readonly -A g=9` inside | `declare -r g="5"` | `declare -Ar g=([0]="9" )` |
+| `local -r g=5; readonly -a g=9` | `st=0`, `declare -ar g=([0]="9")` | `readonly: g: readonly variable`, `st=1` |
+
+The last row is the `ASS_FORCE` of the store the rewrite reaches: a readonly
+live binding takes the element anyway and raises nothing, where osh's own
+`readonly` refuses it.
+
+Three conditions gate the rewrite, and osh must gate on the same three:
+
+* **a value.** `if (assign)` encloses it — `readonly -a g` with no `=` is an
+  ordinary attribute marking and stays local, which osh already matches.
+* **`-a` or `-A`.** `readonly g=9` is not rewritten either, and also already
+  matches.
+* the letters carried over are `attribute`'s, not the command's, and `-n`
+  edits `attribute` **asymmetrically**: `if (undo && (attribute &
+  att_readonly)) attribute &= ~att_readonly;` (setattr.def:174) drops the `r`
+  but leaves the `x`. Measured: `readonly -an g=9` leaves the global `declare
+  -a g=()`, while `export -an g=9` leaves it `declare -ax g=()`.
+
+**Fixed** in `272101af3`, exactly as the entry proposed: two new helpers,
+`Shell::setattr_declared_name` (answers the two gates and returns the name the
+marking should still use) and `Shell::setattr_declare` (builds the `-g[r|x][a|A]`
+flag word and calls `Shell::builtin_declare`), wired into the operand loop of
+both builtins — per operand, since bash rewrites each one on its own.
+
+Three things the entry did not anticipate, all measured:
+
+* **`-a` beats `-A` here**, the opposite of `declare`. The rewrite tests
+  `arrays_only` first, so `readonly -aA g=9` is `declare -gra g=9` — an
+  *indexed* array — where `declare -aA g=9` makes an associative one and then
+  refuses the `-a` against it. The flag the helper takes is therefore
+  `indexed`, not `assoc`.
+* **the diagnostics keep the calling builtin's tag.** `declare_builtin` is a
+  plain C call, so `this_command_name` is never changed for it: a kind
+  conflict raised by the rewritten declaration says `readonly: q: cannot
+  convert indexed to associative array`. And the kind it collides with is the
+  **global**'s — `-g` looks straight past a local of the other kind, which is
+  not in its way at all.
+* **a failed rewrite is an assignment error.** `if (opt != EXECUTION_SUCCESS)
+  assign_error++;`, and `assign_error` is what returns `EX_BADASSIGN` rather
+  than a plain failure — which in posix mode ends a non-interactive shell,
+  both builtins being special. So `set -o posix; declare -a q=(1 2);
+  readonly -A q=9` exits at the kind conflict. The fix sets
+  `BuiltinFailure::Assignment` for it.
+
+Corpus: `tests/corpus/readonly-a-and-export-a-are-declarations-with-g-added.sh`.
+
+One row that belongs to this entry had to stay out of the corpus:
+`declare -a arr=(x y); declare -n r=arr[1]; readonly -a r=9` still diverges,
+but for a *separate* reason — see
+TD-OILS-A-READONLY-DECLARATION-MARKS-BEFORE-IT-STORES-SO-IT-REFUSES-ITS-OWN-ELEMENT.
+
+**How it was found:** measuring
+`a-global-array-declaration-stores-into-whichever-binding-is-live.sh`, whose
+`readonly -a`/`export -a` rows had to be dropped from the corpus because this
+is a second, separate mechanism.
+
+---
 
 ### TD-OILS-A-READONLY-LOCAL-IS-NOT-WIDENED-BY-THE-DECLARATION-THAT-IS-ABOUT-TO-BE-REFUSED. `f() { local -r g=5; declare g[1]=9; }` leaves `declare -r g="5"` where bash leaves `declare -ar g=()` — FIXED 2026-08-11
 

@@ -16750,15 +16750,38 @@ impl Shell {
         }
         match self.pointer_lookup(refname, index) {
             ElemValue::Value(v) => Ok(Some(v)),
-            // A plain pointer that is unset is the fatal case; an absent element
-            // — or an empty list, or one whose subscript was called bad — leaves
-            // the reference pointing nowhere, which is not an error.
-            ElemValue::Absent if index.is_none() => {
-                self.perrln(&format!("{refname}: invalid indirect expansion"));
-                self.arm_discard(1);
-                Err(())
+            // Reading the pointer found nothing. That is the fatal case only
+            // when there was nothing to read it *out of*: bash asks after the
+            // variable, not after its value.
+            //
+            // ```c
+            // if (var_is_special == 0 && (v = find_variable_last_nameref (name, 0)))
+            //   { … }
+            // if (legal_identifier (name) && v == 0)
+            //   report_error (_("%s: invalid indirect expansion"), name);
+            // ```
+            //
+            // So a name that exists but reads as nothing — an associative array,
+            // an array built from `[1]` upwards, an empty `a=()`, a bare
+            // `declare z`, an `export E` never assigned — has a perfectly good
+            // pointer that points nowhere, and the whole `${!x…}` is an *unset
+            // parameter*: `${!s}` is empty at status 0 and `${!s:-D}` takes the
+            // default. Only a name with no cell at all earns the complaint.
+            //
+            // `legal_identifier` is the other half of it: a pointer that is a
+            // positional or special parameter is never complained about either,
+            // so `set --; ${!9:-D}` is `D` rather than an error.
+            ElemValue::Absent => {
+                if index.is_none()
+                    && crate::parser::is_valid_name(refname.as_bytes())
+                    && !self.ref_name_exists(refname)
+                {
+                    self.perrln(&format!("{refname}: invalid indirect expansion"));
+                    self.arm_discard(1);
+                    return Err(());
+                }
+                Ok(None)
             }
-            ElemValue::Absent => Ok(None),
             ElemValue::BadSubscript(base) => {
                 self.perrln(&format!("{base}: bad array subscript"));
                 // Reading through a bad subscript is not a discard on its own,
@@ -16782,20 +16805,11 @@ impl Shell {
         // ${!r[0]}` is `${!a[0]}` — the element points, and the pointer's own
         // name never becomes the answer.
         if index.is_none() && self.nameref_attr.contains(refname) {
-            match self.resolve_ref_name(refname) {
-                // The answer is the target *as spelled* — `arr[0]`, subscript
-                // and all — so it goes out as the bytes the reference carries.
-                Some(target) => return target.spelling(),
-                None => {
-                    // A circular chain has no final name to report. bash does
-                    // *not* warn here — it raises the same "invalid indirect
-                    // expansion" error as an unset pointer (status 1, the rest
-                    // of the parse unit discarded).
-                    self.perrln(&format!("{refname}: invalid indirect expansion"));
-                    self.arm_discard(1);
-                    return Str::new();
-                }
-            }
+            // The answer is the target *as spelled* — `arr[0]`, subscript and
+            // all — and a reference with no name to give raises the same fatal
+            // "invalid indirect expansion" an unset pointer does, without a
+            // warning. See [`Shell::nameref_pointer_spelling`].
+            return self.nameref_pointer_spelling(refname).unwrap_or_default();
         }
         let target = match self.indirect_pointer_value(refname, index) {
             Ok(Some(t)) => t,
@@ -17112,8 +17126,14 @@ impl Shell {
         index: &Option<ArrayIndex>,
     ) -> Option<(String, bool)> {
         let referent: Str = if index.is_none() && self.nameref_attr.contains(refname) {
-            // What the reference points *at*, spelled as it holds it.
-            self.resolve_ref_name(refname)?.spelling()
+            // What the reference points *at*, spelled as it holds it — and
+            // nothing at all when the walk ends on a reference, which names no
+            // array here any more than it names a variable on the general path.
+            let target = self.resolve_ref_name(refname)?;
+            if self.ref_walk_stopped_on_a_reference(&target) {
+                return None;
+            }
+            target.spelling()
         } else {
             if index.is_some() && !self.ref_name_exists(refname) {
                 return None;
@@ -28625,15 +28645,12 @@ impl Shell {
                 }
                 let nameref = index.is_none() && self.nameref_attr.contains(refname);
                 let pointed_at: Option<Str> = if nameref {
-                    match self.resolve_ref_name(refname) {
-                        // What the reference points *at*, spelled as it holds
-                        // it — `arr[0]`, subscript bytes and all.
-                        Some(t) => Some(t.spelling()),
-                        None => {
-                            self.perrln(&format!("{refname}: invalid indirect expansion"));
-                            self.arm_discard(1);
-                            return Str::new();
-                        }
+                    // What the reference points *at*, spelled as it holds it —
+                    // `arr[0]`, subscript bytes and all — or nothing, fatally.
+                    // See [`Shell::nameref_pointer_spelling`].
+                    match self.nameref_pointer_spelling(refname) {
+                        Some(t) => Some(t),
+                        None => return Str::new(),
                     }
                 } else {
                     match self.indirect_pointer_value(refname, index) {
@@ -29855,14 +29872,79 @@ impl Shell {
     /// reads a bare array name as that array's element 0, whereas indirecting
     /// through an array whose element 0 is missing is still a valid indirection
     /// — bash's `q=(); echo "${!q[0]}"` is empty rather than an error.
+    ///
+    /// A declaration is enough, because bash's question is
+    /// `find_variable_last_nameref (name, 0) != 0` — the existence of a
+    /// `SHELL_VAR`, which `invisible_p` does not veto. So `declare z` and
+    /// `declare -a d` both give `${!z}` / `${!d[0]}` something to point with,
+    /// and reading it simply finds nothing.
+    ///
+    /// A walk that ends *on a reference* is the one thing the same question
+    /// answers `false` for; see [`Self::ref_walk_stopped_on_a_reference`].
     fn ref_name_exists(&mut self, name: &str) -> bool {
-        let Some(name) = &self.resolve_ref_use(name).and_then(RefTarget::into_name) else {
+        let Some(target) = self.resolve_ref_use(name) else {
             return false;
         };
-        self.vars.contains_key(name)
-            || self.arrays.contains_key(name)
-            || self.assoc.contains_key(name)
-            || self.named_param_is_set(name)
+        if self.ref_walk_stopped_on_a_reference(&target) {
+            return false;
+        }
+        let Some(name) = &target.into_name() else {
+            return false;
+        };
+        self.has_stored_binding(name) || self.named_param_is_set(name)
+    }
+
+    /// Did the nameref walk stop *on a reference* — one with nothing in its
+    /// cell to follow?
+    ///
+    /// bash's `find_variable_last_nameref` hands back the last link it walked,
+    /// which is what makes `declare -n r=nosuch` a perfectly good pointer:
+    /// the chain ends because `nosuch` names nothing, and `r` itself is
+    /// returned. A reference with an *empty* cell ends it differently
+    /// (variables.c):
+    ///
+    /// ```text
+    /// newname = nameref_cell (v);
+    /// if (newname == 0 || *newname == '\0')
+    ///   return ((vflags && invisible_p (v)) ? v : (SHELL_VAR *)0);
+    /// ```
+    ///
+    /// and every question an indirection asks goes through `vflags == 0`
+    /// (subst.c:7642, subst.c:7547), so the answer is a null variable — the
+    /// name is treated as though it did not exist at all. `declare -n n`,
+    /// a chain that reaches one (`declare -n m=n`), and a local reference that
+    /// names itself all leave the walk here, and `${!n}` / `${!m}` / `${!r}`
+    /// are each `invalid indirect expansion` naming the reference the walk
+    /// *started* from.
+    ///
+    /// In osh the walk stopping on a name that still carries the attribute is
+    /// exactly that state: [`Self::resolve_ref_name`] follows a reference only
+    /// while it has a non-empty cell to follow.
+    fn ref_walk_stopped_on_a_reference(&self, target: &RefTarget) -> bool {
+        target.sub.is_none() && self.nameref_attr.contains(&target.base)
+    }
+
+    /// The name a bare `${!ref}` through a nameref yields — or `None`, once the
+    /// complaint that it yields none is already out.
+    ///
+    /// bash reads the reference's own cell rather than indirecting a second
+    /// time (subst.c:7642-7651), so the answer is the target *as spelled*,
+    /// `arr[0]` and all. The one way that fails is a walk that ends on a
+    /// reference — either a circular chain, which has no final name, or one
+    /// with no cell; see [`Self::ref_walk_stopped_on_a_reference`]. Both raise
+    /// the same fatal `invalid indirect expansion`, against the reference the
+    /// walk started from, and neither warns.
+    fn nameref_pointer_spelling(&mut self, refname: &str) -> Option<Str> {
+        match self.resolve_ref_name(refname) {
+            Some(target) if !self.ref_walk_stopped_on_a_reference(&target) => {
+                Some(target.spelling())
+            }
+            _ => {
+                self.perrln(&format!("{refname}: invalid indirect expansion"));
+                self.arm_discard(1);
+                None
+            }
+        }
     }
 
     /// Split a runtime array reference `name[subscript]` the way bash's
@@ -32980,14 +33062,11 @@ impl Shell {
         };
         // A nameref is answered by its own target's *name* and never followed
         // (subst.c:7642), so `declare -n r=q` resolves even with `q` unset. Only
-        // a chain that closes on itself has no name to give.
+        // a walk that ends on a reference has no name to give — a chain that
+        // closes on itself, or one with nothing in its cell. See
+        // [`Shell::nameref_pointer_spelling`].
         if index.is_none() && self.nameref_attr.contains(&refname) {
-            if self.resolve_ref_name(&refname).is_some() {
-                return true;
-            }
-            self.perrln(&format!("{refname}: invalid indirect expansion"));
-            self.arm_discard(1);
-            return false;
+            return self.nameref_pointer_spelling(&refname).is_some();
         }
         let Ok(target) = self.indirect_pointer_value(&refname, &index) else {
             return false;
@@ -66320,6 +66399,128 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run(r#"a=("a b" c); ref='a[@]'; for x in "${!ref}"; do echo "<$x>"; done"#).0,
             "<a b>\n<c>\n"
         );
+    }
+
+    #[test]
+    fn an_indirect_pointer_asks_only_that_the_variable_exist() {
+        // bash's question is the existence of a `SHELL_VAR`
+        // (`find_variable_last_nameref (name, 0) != 0`, subst.c:7642,7657), not
+        // whether reading the pointer produced any text. So a name whose cell
+        // is empty — an associative array, an array built from `[1]` upwards,
+        // an empty `a=()`, a bare `declare`, an `export` never assigned —
+        // points perfectly well, and the whole `${!ptr}` is then just an unset
+        // parameter.
+        let vars = "declare -A s=([k]=v); t[1]=v; declare -a e0=() d0; \
+                    declare z; export EU; declare -i di; declare -r rr; fn() { :; }; ";
+        let e = |body: &str| run(&format!("{vars}{{ printf '<%s>' {body}; }} 2>&1")).0;
+        for p in ["s", "t", "e0", "d0", "z", "EU", "di", "rr"] {
+            assert_eq!(e(&format!("${{!{p}}}")), "<>", "{p}");
+            assert_eq!(e(&format!("${{!{p}:-D}}")), "<D>", "{p}");
+        }
+        // A name with no cell at all does not — nor a *function*, which is no
+        // variable.
+        for p in ["nope", "fn"] {
+            assert_eq!(
+                e(&format!("${{!{p}:-D}}")),
+                format!("osh: {p}: invalid indirect expansion\n"),
+                "{p}"
+            );
+        }
+        // A local counts while its frame is live, and stops when it returns.
+        assert_eq!(
+            run("g() { local lv; printf '<%s>' \"${!lv}\"; }; g; \
+                 { printf '<%s>' ${!lv}; } 2>&1")
+            .0,
+            "<>osh: lv: invalid indirect expansion\n"
+        );
+        // The complaint is about the pointer, never about what it points at: a
+        // pointer naming an unset variable is simply an unset parameter.
+        assert_eq!(run("p=one; printf '<%s>' \"${!p}${!p:-x}\"").0, "<x>");
+        // `legal_identifier` is the other half of the gate, so a positional or
+        // special pointer is never complained about.
+        assert_eq!(run("set --; printf '<%s>' \"${!9:-D}\"").0, "<D>");
+        assert_eq!(run("set --; printf '<%s>' \"${!9}\"").0, "<>");
+        // A subscripted pointer asks the same of the array part alone.
+        for p in ["s[k]", "e0[0]", "d0[0]", "z[0]"] {
+            assert_eq!(e(&format!("${{!{p}}}")), "<>", "{p}");
+        }
+        assert_eq!(
+            e("${!nope[0]}"),
+            "osh: nope[0]: invalid indirect expansion\n"
+        );
+        // Under `set -u` a pointer that exists but reads as nothing is an
+        // unbound parameter instead, named after the reference as written.
+        let u = |body: &str| run(&format!("{vars}set -u; {{ printf '<%s>' {body}; }} 2>&1")).0;
+        assert_eq!(u("${!s}"), "osh: !s: unbound variable\n");
+        assert_eq!(u("${!nope}"), "osh: nope: invalid indirect expansion\n");
+    }
+
+    #[test]
+    fn a_reference_with_no_cell_points_nowhere() {
+        // `find_variable_last_nameref` hands back the *last link* it followed,
+        // so a chain whose end names nothing still points — but a reference
+        // with an empty cell ends the walk with nothing at all (variables.c):
+        //
+        //     newname = nameref_cell (v);
+        //     if (newname == 0 || *newname == '\0')
+        //       return ((vflags && invisible_p (v)) ? v : (SHELL_VAR *)0);
+        //
+        // and the indirection asks with `vflags == 0`.
+        let e = |setup: &str, body: &str| {
+            run(&format!("{setup}{{ printf '<%s>' {body}; }} 2>&1")).0
+        };
+        let cell_less = "declare -n n1; declare -n n3=n1; ";
+        for body in ["${!n1}", "${!n1:-D}", "${!n1-D}", "${!n1@Q}", "${!n1#x}"] {
+            assert_eq!(
+                e(cell_less, body),
+                "osh: n1: invalid indirect expansion\n",
+                "{body}"
+            );
+        }
+        // A chain that *reaches* one is refused under the name the walk started
+        // from, not the one it stopped at.
+        assert_eq!(
+            e(cell_less, "${!n3}"),
+            "osh: n3: invalid indirect expansion\n"
+        );
+        // Reading the reference itself is untouched — it is unset, not fatal.
+        assert_eq!(e(cell_less, "\"${n1}\" \"${n3:-D}\""), "<><D>");
+        // The `${!x@}`/`${!x*}`/`${!x[@]}` forms are not indirections at all.
+        for body in ["${!n1[@]}", "${!n1@}", "${!n1*}"] {
+            assert_eq!(e(cell_less, body), "<>", "{body}");
+        }
+        // A chain whose end merely names nothing does point.
+        assert_eq!(e("declare -n n2=nosuch; ", "${!n2}"), "<nosuch>");
+        assert_eq!(e("declare u1; declare -n n6=u1; ", "${!n6:-D}"), "<u1>");
+        assert_eq!(e("declare -n n7=tgt; tgt=T; unset tgt; ", "${!n7}"), "<tgt>");
+        assert_eq!(e("v=V; declare -n n4=v; declare -n n5=n4; ", "${!n5}"), "<v>");
+        assert_eq!(
+            e(
+                "declare -a ar=(x y); declare -n er=ar[1]; declare -n er2=er; ",
+                "${!er2}"
+            ),
+            "<ar[1]>"
+        );
+        // A local reference with no cell finds nothing to give either. The
+        // prologue is the *function's* definition source, as it is for every
+        // diagnostic raised inside one; see [`Shell::err_prefix_at`].
+        assert_eq!(
+            run("g() { local -n l1; { printf '<%s>' ${!l1}; } 2>&1; }; g").0,
+            "main: l1: invalid indirect expansion\n"
+        );
+        // A subscripted reference through one is the array question instead,
+        // and asks it of the name the walk stopped on.
+        for (setup, body, shown) in [
+            (cell_less, "${!n1[0]}", "n1[0]"),
+            (cell_less, "${!n3[0]}", "n3[0]"),
+            ("declare -n n2=nosuch; ", "${!n2[0]}", "n2[0]"),
+        ] {
+            assert_eq!(
+                e(setup, body),
+                format!("osh: {shown}: invalid indirect expansion\n"),
+                "{body}"
+            );
+        }
     }
 
     #[test]

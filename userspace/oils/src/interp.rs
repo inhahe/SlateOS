@@ -44414,9 +44414,32 @@ impl Shell {
                 status = 1;
                 continue;
             }
+            // Whether a *local* declaration's chain led nowhere, leaving the
+            // command about the operand's own name at the live scope.
+            //
+            // bash never re-scopes a local declaration onto what the chain
+            // found. The name it declares comes from `declare_transform_name`
+            // (declare.def:205), and the branch that consults the chain reads
+            //
+            // ```c
+            //   v = find_variable_last_nameref (name, 1);
+            //   newname = (v && v->context != variable_context) ? name : name_cell (var);
+            // ```
+            //
+            // — `name_cell (var)`, the found variable's **name**, not its
+            // value. A cycle's escape is `find_global_variable_noref (v->name)`
+            // (variables.c:2104), whose `v->name` is the operand's own again,
+            // and a chain past the link cap finds nothing at all, so
+            // `declare_transform_name` answers the operand's own name either
+            // way and `make_local_variable` hands back the frame's own
+            // reference unchanged. What follows is then a declaration *about a
+            // nameref*, which is what the refusal below is for.
+            let mut local_ref_fallback = false;
             let mut target = if follow {
-                self.resolve_ref_use_walks(
+                let walk = self.walk_ref_name(base_name);
+                self.warn_circular_walks(
                     base_name,
+                    &walk,
                     if make_local {
                         local_walks
                     } else if makes_array {
@@ -44424,7 +44447,13 @@ impl Shell {
                     } else {
                         2
                     },
-                )
+                );
+                if make_local && !walk.ended_on_a_name() {
+                    local_ref_fallback = true;
+                    None
+                } else {
+                    walk.target
+                }
             } else {
                 // The walks are made whatever the declaration asks of the name,
                 // so an operand that follows *nothing* still makes them: the
@@ -44443,7 +44472,7 @@ impl Shell {
                 }
                 None
             };
-            if follow && target.is_none() {
+            if follow && target.is_none() && !local_ref_fallback {
                 // A circular chain names nothing to declare. The warning is
                 // out; an operand with nowhere of its own to go is then dropped
                 // with the status left alone (`declare -n a=b; declare -n b=a;
@@ -44687,6 +44716,42 @@ impl Shell {
             // declaration is about to shadow it with a local of its own.
             let readonly_blocks =
                 self.readonly.contains(base_name) && !(shadow_new && held_outer);
+            // Whether declare.def:817 is going to refuse this operand's value
+            // for not naming anything — see the refusal itself, far below.
+            //
+            // Decided here because it *outranks* every refusal between: bash
+            // makes the local at :614, judges the nameref at :807-:832, and only
+            // then reaches the readonly checks at :842-:849 and the array ones
+            // at :861-:874. osh checks readonly ahead of its own local-binding
+            // step, so the question has to be settled before them.
+            //
+            // `held_here` is `make_local_variable`'s answer: a name the frame
+            // already holds comes back as the binding it has — the reference —
+            // where a fresh local is made anew and is no reference at all. That
+            // is why a cycle living at *global* scope is not this: the local
+            // shadowing it is plain (`declare -n g=z; declare -n z=g;
+            // f() { local g=5; }` binds `declare -- g="5"`).
+            //
+            // The question is only ever about `var`, never about how the chain
+            // failed, so the walk does not come into it: a reference whose value
+            // cell has been overwritten by an `ARRAY *` follows nothing and
+            // still refuses (`local -a g; local +a g=5` says `` `5' ``, not
+            // "cannot destroy"). It is `base_name` that the walk decides, and a
+            // chain that *reached* a name left that name here instead — one
+            // which is no reference, so nothing is refused.
+            //
+            // At global scope there is no such variable to find: the widening
+            // is `find_or_make_array_variable`, which takes the reference
+            // attribute off, so `declare -n g=z; declare -n z=g; declare -a g;
+            // declare +a g=5` really does say "cannot destroy".
+            let ref_value_refused = make_local
+                && held_here
+                && self.nameref_attr.contains(base_name)
+                && !nameref
+                && !unset_nameref
+                && value
+                    .as_ref()
+                    .is_some_and(|v| split_assignment_target(v).is_none());
             // Reassigning a value to an existing readonly variable is an error.
             // bash tags the diagnostic with the invoking builtin's name
             // (`declare: y: readonly variable`, `local: …`, `typeset: …`) and
@@ -44695,7 +44760,7 @@ impl Shell {
             // below come from lookups on the resolved name and quote that
             // instead, so `readonly t; declare -n r=t` gives `declare r=9` →
             // `r: readonly variable` but `declare +r r` → `t: readonly variable`.
-            if value.is_some() && readonly_blocks {
+            if value.is_some() && readonly_blocks && !ref_value_refused {
                 self.perrln(&format!("{tag}: {operand_name}: readonly variable"));
                 status = 1;
                 continue;
@@ -44712,7 +44777,7 @@ impl Shell {
             // function reports it whichever of the two objects — unless the
             // shadow is one bash allows, where `+r` meets a fresh local that was
             // never readonly and is the plain no-op again.
-            if unset_readonly && readonly_blocks {
+            if unset_readonly && readonly_blocks && !ref_value_refused {
                 self.perrln(&format!("{tag}: {base_name}: readonly variable"));
                 status = 1;
                 continue;
@@ -44730,7 +44795,7 @@ impl Shell {
             // `variable may not be assigned value`. Without the readonly the
             // other refusal is still the right one, which is why this is an
             // ordering rather than a wider condition.
-            if shadow_new && readonly_blocks {
+            if shadow_new && readonly_blocks && !ref_value_refused {
                 self.perrln(&format!("{tag}: {base_name}: readonly variable"));
                 status = 1;
                 continue;
@@ -44748,7 +44813,10 @@ impl Shell {
             // `local GROUPS` reports it, tagged with the builtin's name. Either
             // way only this operand is skipped — the ones after it still bind,
             // and the rest of the parse unit still runs.
-            if self.noassign.contains(base_name) && (value.is_some() || make_local) {
+            if self.noassign.contains(base_name)
+                && (value.is_some() || make_local)
+                && !ref_value_refused
+            {
                 if make_local {
                     self.perrln(&format!(
                         "{tag}: {base_name}: variable may not be assigned value"
@@ -44893,6 +44961,58 @@ impl Shell {
                     // clobbers an existing associative array of the same name.
                     self.array_kind_apply(base_name, false);
                 }
+            }
+            // A reference the chain could not get past is still a reference,
+            // and a declaration that would store *through* it has to supply a
+            // name — declare.def:817, the last of the nameref checks the
+            // builtin makes against the variable it found:
+            //
+            // ```c
+            //   else if (nameref_p (var) && (flags_on & att_nameref) == 0 &&
+            //            (flags_off & att_nameref) == 0 && offset &&
+            //            valid_nameref_value (value, 1) == 0)
+            //     { builtin_error (_("`%s': invalid variable name for name reference"), value);
+            //       any_failed++; NEXT_VARIABLE (); }
+            // ```
+            //
+            // So `f() { local -n g=z; local -n z=g; local g=5; }` refuses `5`
+            // and leaves `declare -n g="z"` standing, where `local g=h` is
+            // accepted because `h` is a name. The quoted text is the operand's
+            // raw right-hand side, so an append quotes what it brought and not
+            // the joined result (`local g+=5` says `` `5' ``).
+            //
+            // Placement is bash's: ahead of the `+a`/`+A` destroy refusal, both
+            // conversion refusals and the readonly ones, all of which this
+            // outranks (`local -a g; local -A g=5` through the cycle says
+            // `` `5' ``, not "cannot convert"; `local -r g; local g=5` says it
+            // rather than `readonly variable`). The readonly and un-assignable
+            // refusals are checked further up, so they consult
+            // `ref_value_refused` where they stand; the array ones are below
+            // and need no guard.
+            //
+            // It is *behind* the array kind, which `make_local_array_variable`
+            // applied at declare.def:614 — hence `local -a g=5` leaving
+            // `declare -an g=()` — while the value-transforming letters are
+            // applied further down and so never land at all (`local -i g=5`
+            // stays `declare -n g="z"`).
+            if ref_value_refused
+                && let Some(v) = &value
+            {
+                self.emit_stderr(&bfmt![
+                    self.err_prefix(),
+                    tag,
+                    b": `",
+                    v.as_slice(),
+                    b"': invalid variable name for name reference\n"
+                ]);
+                // As with the array refusals below, an operand that carried a
+                // value leaves an array it made *valued*, so `declare -p`
+                // prints the empty `=()`.
+                if self.arrays.contains_key(base_name) || self.assoc.contains_key(base_name) {
+                    self.array_valued.insert(base_name.to_string());
+                }
+                status = 1;
+                continue;
             }
             // `+a`/`+A` ask for the one thing that cannot be undone: an array
             // never becomes a scalar again. Each letter answers only for its own
@@ -53568,6 +53688,18 @@ impl RefWalk {
             target,
             circular: true,
         }
+    }
+
+    /// Whether the walk ended on a name the chain really designates — bash's
+    /// `find_variable (name) != 0` **without** the escape a cycle takes.
+    ///
+    /// The two failures read alike from here: a cycle answers the *global* of
+    /// the name it started from, whose own name is the operand's again
+    /// (`name_cell`, not the value), and a chain past the link cap answers
+    /// nothing. Either way the declaration that follows is about the operand's
+    /// own name. See [`Shell::builtin_declare_scoped`].
+    fn ended_on_a_name(&self) -> bool {
+        !self.circular && self.target.is_some()
     }
 }
 
@@ -73013,6 +73145,154 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (out, st) =
             run("f() { local -a g=(1 2); local g[5]=9; declare -p g; }; f 2>&1");
         assert_eq!(out, "declare -a g=([0]=\"1\" [1]=\"2\" [5]=\"9\")\n");
+        assert_eq!(st, 0);
+    }
+
+    /// A *local* declaration never re-scopes onto whatever its chain found:
+    /// `declare_transform_name` (declare.def:205) answers `name_cell (var)` —
+    /// the found variable's **name**, not its value — and a cycle's escape is
+    /// `find_global_variable_noref (v->name)`, whose `v->name` is the operand's
+    /// own name again. So the frame's reference comes back unchanged from
+    /// `make_local_variable`, and declare.def:817 refuses a value that names
+    /// nothing. osh treated the escape as a target and stored *through* the
+    /// reference, overwriting it. Corpus:
+    /// `a-local-redeclaration-of-a-circular-reference-refuses-a-value-that-is-not-a-name.sh`.
+    #[test]
+    fn a_local_redeclaration_of_a_circular_reference_refuses_a_value_that_is_not_a_name() {
+        let w = "main: warning: g: circular name reference\n";
+        let cyc = "local -n g=z; local -n z=g;";
+
+        // The value is refused, the reference stands, and the letters that
+        // would transform a value are applied after the refusal, so none land.
+        // The array kind is applied *before* it and does, leaving an empty
+        // valued array. An append quotes the text it brought, not the join.
+        for (src, msg, shape) in [
+            ("local g=5", "local: `5'", "declare -n g=\"z\""),
+            ("declare g=5", "declare: `5'", "declare -n g=\"z\""),
+            ("typeset g=5", "typeset: `5'", "declare -n g=\"z\""),
+            ("local g=\"a b\"", "local: `a b'", "declare -n g=\"z\""),
+            ("local g=", "local: `'", "declare -n g=\"z\""),
+            ("local g+=5", "local: `5'", "declare -n g=\"z\""),
+            ("local -i g=5", "local: `5'", "declare -n g=\"z\""),
+            ("local -x g=5", "local: `5'", "declare -n g=\"z\""),
+            ("local -a g=5", "local: `5'", "declare -an g=()"),
+            ("local -A g=5", "local: `5'", "declare -An g=()"),
+            ("local g[1]=5", "local: `5'", "declare -an g=()"),
+            ("local -a g[1]=5", "local: `5'", "declare -an g=()"),
+            // Ahead of every refusal bash makes after it.
+            ("local -aA g=5", "local: `5'", "declare -An g=()"),
+        ] {
+            let out = run(&format!(
+                "f() {{ {cyc} {src}; echo \"st=$?\"; declare -p g; }}; f 2>&1"
+            ))
+            .0;
+            assert_eq!(
+                out,
+                format!(
+                    "{}main: {msg}: invalid variable name for name reference\nst=1\n{shape}\n",
+                    w.repeat(2)
+                ),
+                "{src}"
+            );
+        }
+
+        // It outranks every refusal bash makes after it — the `+a`/`+A`
+        // destroy, both conversions, and the readonly ones. A reference whose
+        // value cell an array has overwritten follows nothing and still
+        // refuses, which is what shows the question is only ever about the
+        // variable and never about how the chain failed.
+        for (pre, src, shape) in [
+            ("local -a g;", "local +a g=5", "declare -an g=()"),
+            ("local -a g;", "local -A g=5", "declare -an g=()"),
+            ("local -A g;", "local -a g=5", "declare -An g=()"),
+            ("local -r g;", "local g=5", "declare -nr g=\"z\""),
+        ] {
+            let out = run(&format!(
+                "f() {{ {cyc} {pre} {src}; echo \"st=$?\"; declare -p g; }}; f 2>&1"
+            ))
+            .0;
+            assert!(
+                out.ends_with(&format!(
+                    "main: local: `5': invalid variable name for name reference
+st=1
+{shape}
+"
+                )),
+                "{pre} {src} -> {out:?}"
+            );
+        }
+
+        // A value that *is* a name is stored through the reference as always,
+        // and the check judges it as written — a fold lands only after it
+        // passes.
+        for (src, shape) in [
+            ("local g=h", "declare -n g=\"h\""),
+            ("local g=\"a[1]\"", "declare -n g=\"a[1]\""),
+            ("local -u g=ab", "declare -nu g=\"AB\""),
+            // Valueless: `offset` is 0, so there is nothing to refuse.
+            ("local g", "declare -n g=\"z\""),
+            ("local -i g", "declare -in g=\"z\""),
+            ("local -a g", "declare -an g=()"),
+        ] {
+            let out = run(&format!(
+                "f() {{ {cyc} {src}; echo \"st=$?\"; declare -p g; }}; f 2>&1"
+            ))
+            .0;
+            assert_eq!(out, format!("{}st=0\n{shape}\n", w.repeat(2)), "{src}");
+        }
+
+        // A chain past the link cap ends on no name either — and gives up
+        // silently, so the refusal comes on its own.
+        let deep: String = (1..=9)
+            .map(|i| format!("local -n n{i}=n{};", i + 1))
+            .collect::<String>()
+            + "local -n n10=n1;";
+        let out = run(&format!(
+            "f() {{ {deep} local n1=5; echo \"st=$?\"; declare -p n1; }}; f 2>&1"
+        ))
+        .0;
+        assert_eq!(
+            out,
+            "main: local: `5': invalid variable name for name reference\nst=1\ndeclare -n n1=\"n2\"\n"
+        );
+
+        // Only the operand that carried the value is dropped.
+        let out = run(&format!(
+            "f() {{ {cyc} local g=5 h=6; echo \"st=$?\"; declare -p g h; }}; f 2>&1"
+        ))
+        .0;
+        assert_eq!(
+            out,
+            format!(
+                "{}main: local: `5': invalid variable name for name reference\n\
+                 st=1\ndeclare -n g=\"z\"\ndeclare -- h=\"6\"\n",
+                w.repeat(2)
+            )
+        );
+
+        // Three neighbours are not this. A chain that reaches a name stores
+        // through it; a fresh local shadowing a cycle that lives at *global*
+        // scope binds a plain local, because `make_local_variable` makes a new
+        // one rather than handing back a reference; and an operand taken off
+        // the local branch altogether follows the escape as it always did.
+        let (out, st) = run("f() { local w=1; local -n g=w; local g=5; declare -p g w; }; f 2>&1");
+        assert_eq!(out, "declare -n g=\"w\"\ndeclare -- w=\"5\"\n");
+        assert_eq!(st, 0);
+
+        let gcyc = "declare -n g=z; declare -n z=g;";
+        let (out, st) = run(&format!(
+            "{gcyc} f() {{ local g=5; declare -p g; }}; f 2>&1; echo AFTER; declare -p g"
+        ));
+        assert_eq!(
+            out,
+            format!("{}declare -- g=\"5\"\nAFTER\ndeclare -n g=\"z\"\n", w.repeat(2))
+        );
+        assert_eq!(st, 0);
+
+        let (out, st) = run(&format!(
+            "f() {{ {cyc} local -g g=5; declare -p g; }}; f 2>&1; echo AFTER; declare -p g"
+        ));
+        assert_eq!(out, "declare -n g=\"z\"\nAFTER\ndeclare -- g=\"5\"\n");
         assert_eq!(st, 0);
     }
 

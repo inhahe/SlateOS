@@ -10080,7 +10080,13 @@ impl Shell {
             // header too (execute_cmd.c:4026-4029), so the whole executor goes
             // inside — as `case`'s does.
             Command::Cond(c) => self.on_control_line(c.line, |s| s.exec_cond(&c.expr, out, stdin)),
-            Command::Arith(raw) => self.exec_arith(raw, out, stdin),
+            // `execute_arith_command` saves the enclosing line and installs the
+            // node's own before it prints its header or evaluates anything
+            // (execute_cmd.c:3795-3797), so — as `case` and `[[ ]]` do — the
+            // whole executor goes inside. See [`ArithClause::line`].
+            Command::Arith(a) => {
+                self.on_control_line(a.line, |s| s.exec_arith(&a.expr, out, stdin))
+            }
             Command::BraceGroup(p) => self.exec_program(p, out, stdin),
             Command::Coproc { name, body } => self.exec_coproc(name.as_deref(), body, cmd),
             Command::Redirected { inner, redirects } => {
@@ -73334,6 +73340,43 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("# comment\necho $LINENO").0, "2\n");
         // Semicolon-separated commands on one line share a line number.
         assert_eq!(run("echo $LINENO; echo $LINENO").0, "1\n1\n");
+    }
+
+    /// `(( … ))` stands on its own line, and that line is the one its **closing**
+    /// `))` sits on.
+    ///
+    /// `make_arith_command` (make_cmd.c:438) stamps `line_number` at the
+    /// reduction of `arith_command: ARITH_CMD`, and `ARITH_CMD` is a single
+    /// token that `parse_arith_cmd` scans whole with `parse_matched_pair`
+    /// (parse.y:4519) — so the reader has already been carried to the `))`.
+    /// `execute_arith_command` then installs it around the whole evaluation:
+    ///
+    /// ```c
+    ///   save_line_number = line_number;
+    ///   this_command_name = "((";  /* )) */
+    ///   SET_LINE_NUMBER (arith_command->line);
+    /// ```
+    ///
+    /// Without a line of its own the command inherited whatever the enclosing
+    /// construct had reached, which came out one line *late* inside a brace
+    /// group and one *early* inside a `for`, an `if` or a function body.
+    #[test]
+    fn an_arithmetic_command_stands_on_the_line_its_closing_paren_is_on() {
+        assert_eq!(run("{\necho one\n(( x = LINENO ))\n}\necho \"x=$x\"").0, "one\nx=3\n");
+        // The `((` is on line 2 and the `))` on line 3; bash says 3.
+        assert_eq!(run("for i in 1; do\n(( y =\n   LINENO ))\ndone\necho \"y=$y\"").0, "y=3\n");
+        // A function body is no different, and the enclosing line comes back
+        // afterwards — `echo $LINENO` on line 6 still reads 6.
+        assert_eq!(
+            run("f() { echo z\n(( w = LINENO ))\n}\nf\necho \"w=$w\"\necho \"after=$LINENO\"").0,
+            "z\nw=2\nafter=6\n",
+        );
+        // An arithmetic *expansion* is not a command and so has no line of its
+        // own: it reads the enclosing item's.
+        assert_eq!(run("{\necho one\necho $(( LINENO ))\n}").0, "one\n3\n");
+        // (The line a *diagnostic* out of the evaluation is blamed on is the
+        // same stamp; that needs a script name to show, so it is pinned by the
+        // corpus case rather than here.)
     }
 
     /// `$LINENO` inside `$( … )` counts up from the line the *shell* is on when

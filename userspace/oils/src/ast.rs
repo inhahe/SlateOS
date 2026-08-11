@@ -131,8 +131,8 @@ pub enum Command {
     /// `[[ expr ]]` — bash conditional expression (exit 0 if true, 1 if false).
     Cond(CondClause),
     /// `(( expr ))` — bash arithmetic command (exit 0 if the result is
-    /// non-zero, 1 if zero). The payload is the raw arithmetic text.
-    Arith(Str),
+    /// non-zero, 1 if zero).
+    Arith(ArithClause),
     /// `coproc [NAME] command` — run `command` asynchronously with its
     /// stdin/stdout wired to two pipes. Exposes an array `NAME` (default
     /// `COPROC`) where `NAME[0]` reads the coproc's stdout and `NAME[1]`
@@ -173,6 +173,35 @@ pub struct SubshellClause {
     /// ```text
     /// ( for 'a[0]' in x⏎do :; done⏎); echo tail   # line 3 — the `)`'s
     /// ```
+    ///
+    /// `0` means "not recorded", as in [`CaseClause::line`].
+    pub line: u32,
+}
+
+/// `(( expr ))` — the raw arithmetic text together with the line the shell
+/// stands on while it is evaluated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArithClause {
+    /// The raw arithmetic text, as bash re-prints it.
+    pub expr: Str,
+    /// The line this `(( … ))` is *executed* at, which is the line its closing
+    /// `))` sits on — not the line it starts on.
+    ///
+    /// bash builds the node in `make_arith_command` (make_cmd.c:438) with
+    /// `temp->line = line_number`, at the reduction of `arith_command:
+    /// ARITH_CMD` — and `ARITH_CMD` is one token, scanned whole by
+    /// `parse_matched_pair` (parse.y:4519), so by then the reader has been
+    /// carried to wherever the `))` was found. `execute_arith_command` installs
+    /// it with `SET_LINE_NUMBER (arith_command->line)` (execute_cmd.c:3797) and
+    /// puts the enclosing line back on the way out. Hence
+    ///
+    /// ```sh
+    /// (( a =
+    ///    1 ))
+    /// ```
+    ///
+    /// blames line 2, while the enclosing construct's own line — the `}` of a
+    /// brace group, the `fi` of an `if` — never shows through.
     ///
     /// `0` means "not recorded", as in [`CaseClause::line`].
     pub line: u32,

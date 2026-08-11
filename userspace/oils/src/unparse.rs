@@ -592,7 +592,7 @@ fn command_block(cmd: &Command, fmt: Fmt) -> Str {
             bfmt![b"( ", &body, b" )"]
         }
         Command::Cond(c) => cond_command_src(&c.expr),
-        Command::Arith(text) => bfmt![b"((", text, b"))"],
+        Command::Arith(a) => bfmt![b"((", &a.expr, b"))"],
         Command::Coproc { name, body } => {
             let mut s = b"coproc ".to_vec();
             if let Some(n) = name {

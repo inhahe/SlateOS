@@ -27,7 +27,8 @@
 //! stray byte reads as `'\0'` and matches no operator.
 
 use crate::ast::{
-    AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, BulkOp, CaseClause, CaseItem,
+    AndOr, AndOrOp, ArithClause, ArrayElem, ArrayIndex, AssignRhs, Assignment, BulkOp, CaseClause,
+    CaseItem,
     CaseTerm, CmdSubBody,
     Command,
     CondBinOp, CondBinary, CondClause, CondUnary, DeclArray,
@@ -4023,8 +4024,12 @@ impl Parser {
             // (parse.y:4519–4530), the same scan `$(( … ))` gets, so the same
             // `APPEND_NESTRET` puts `print_comsub`'s answer into its buffer.
             let expr = splice_reprints(raw, parse_arith_comsubs(nested, self.opts)?);
+            // The line the token *ends* on, which is the one bash stamps: the
+            // whole `(( … ))` is scanned into a single `ARITH_CMD` before the
+            // reduction that records `line_number`. See [`ArithClause::line`].
+            let line = self.line_of(self.pos);
             self.pos += 1;
-            return Ok(Some(Command::Arith(expr)));
+            return Ok(Some(Command::Arith(ArithClause { expr, line })));
         }
         // `[[ expr ]]` conditional expression.
         if self.at_bare_word(b"[[") {
@@ -10472,10 +10477,10 @@ mod tests {
     #[test]
     fn arith_command() {
         let prog = parse("(( x + 1 ))").unwrap();
-        let Command::Arith(raw) = &prog.items[0].list.first.commands[0] else {
+        let Command::Arith(a) = &prog.items[0].list.first.commands[0] else {
             panic!("expected arith command");
         };
-        assert_eq!(text(bytes::trim(raw)), "x + 1");
+        assert_eq!(text(bytes::trim(&a.expr)), "x + 1");
     }
 
     /// The three sections of a `for (( … ))` header are not `;`-separated

@@ -13257,7 +13257,7 @@ impl Shell {
     /// it ended on a subscript naming a whole array. Either way the warning has
     /// already been given, and the caller's `false` is what reports it further.
     fn scalar_write_dest(&mut self, name: &str) -> Option<ScalarDest> {
-        let target = self.resolve_ref_use(name)?;
+        let target = self.resolve_ref_write(name)?;
         let Some(sub) = target.sub else {
             return Some(ScalarDest { place: ScalarPlace::Var(target.base), scope: target.scope });
         };
@@ -13626,12 +13626,21 @@ impl Shell {
     /// readonly -a q=(1); declare -n r=q; ((r=5))  # r: readonly variable
     /// ```
     fn arith_write_dest(&mut self, name: &str) -> Result<Option<ScalarDest>, arith::ArithError> {
-        // Two walks, because bash resolves the name once to find the variable
-        // and again to bind it. Unlike the element write above, a circular chain
-        // keeps its nameref attribute: nothing is stored, so there is no array
-        // being made for the attribute to be incompatible with, and `declare -p
-        // c1` after `(( c1 = 5 ))` still says `declare -n c1="c2"`.
-        let Some(target) = self.resolve_ref_use_walks(name, 2) else {
+        // Two walks, and not the same walk twice. `bind_int_variable`
+        // (variables.c:3392) asks `find_variable` what *kind* of variable the
+        // name designates — integer attribute, indexed array — and only then
+        // `bind_variable` where to put the value, which descends the variable
+        // contexts one table at a time and so may name a different binding
+        // altogether. See [`Self::walk_ref_name_writing`]. The first walk is
+        // charged here only for what it says about a circular chain; the
+        // destination is the second walk's.
+        //
+        // Unlike the element write above, a circular chain keeps its nameref
+        // attribute: nothing is stored, so there is no array being made for the
+        // attribute to be incompatible with, and `declare -p c1` after
+        // `(( c1 = 5 ))` still says `declare -n c1="c2"`.
+        drop(self.resolve_ref_use_walks(name, 1));
+        let Some(target) = self.resolve_ref_write(name) else {
             return Ok(None);
         };
         // The base of an element destination is bound where it is written, so a
@@ -14149,6 +14158,12 @@ impl Shell {
         // A **compound literal** is the exception, and bash's own: it is not
         // expanded until `assign_compound_array_list`, which every one of those
         // refusals comes before — `readonly ra=1; ra=($(f))` never runs `f`.
+        //
+        // Expanding first is also what keeps a nameref redirection honest about
+        // *when* it reads: the chain a write follows is not the one a read
+        // follows (see [`Self::walk_ref_name_writing`]), so a value that reads
+        // the same names must be expanded where the writer stands rather than
+        // wherever the write ends up landing.
         let pre = match pre {
             Some(v) => Some(v),
             None => match &a.value {
@@ -14176,7 +14191,7 @@ impl Shell {
         } else if matches!(a.value, AssignRhs::Array(_)) {
             self.resolve_ref_array_write(&a.name)
         } else {
-            let Some(target) = self.resolve_ref_use(&a.name) else {
+            let Some(target) = self.resolve_ref_write(&a.name) else {
                 return false;
             };
             target
@@ -14239,6 +14254,15 @@ impl Shell {
             return false;
         }
         if target.sub.is_some() || target.base != a.name {
+            // The chain may have named a binding in some *outer* variable
+            // context (see [`Self::walk_ref_name_writing`]), and the rewritten
+            // assignment resolves its name afresh — in the live tables, which
+            // hold the innermost binding. Running it under the swap is what
+            // makes the two agree: the binding the walk named is the live one
+            // for as long as the store takes. It is not itself a reference (the
+            // walk stopped because it was not), so the second pass walks
+            // nothing.
+            let scope = target.scope;
             let mut a2 = a.clone();
             match target.sub {
                 // A nameref may point at an array element (`declare -n
@@ -14260,7 +14284,11 @@ impl Shell {
                 }
                 None => a2.name = target.base,
             }
-            return self.apply_assignment_expanded(&a2, trace, Some(spelled), pre);
+            let base = a2.name.clone();
+            let spelled = spelled.clone();
+            return self.in_scope(scope, &base, |sh| {
+                sh.apply_assignment_expanded(&a2, trace, Some(&spelled), pre)
+            });
         }
         // A chain that escaped a cycle binds the **global** of the same name,
         // and everything left to do — the readonly guard, the value attributes,
@@ -30743,6 +30771,243 @@ impl Shell {
         }
     }
 
+    /// The walk a **write** through `name` takes.
+    ///
+    /// bash resolves a nameref differently on the two sides. A read uses
+    /// [`Self::walk_ref_name`], which looks each link up the ordinary way —
+    /// innermost binding first, every scope at once. A write goes through
+    /// `bind_variable` (variables.c:3275), which descends the *stack of variable
+    /// contexts* one table at a time and never climbs back:
+    ///
+    /// ```c
+    ///   for (vc = shell_variables; vc; vc = vc->down)
+    ///     if (vc_isfuncenv (vc) || vc_isbltnenv (vc))
+    ///       {
+    ///         v = hash_lookup (name, vc->table);
+    ///         nvc = vc;
+    ///         if (v && nameref_p (v))
+    ///           { nv = find_variable_nameref_context (v, vc, &nvc); … }
+    ///         if (v)
+    ///           return (bind_variable_internal (v->name, value, nvc->table, 0, flags));
+    ///       }
+    ///   return (bind_variable_internal (name, value, global_variables->table, 0, flags));
+    /// ```
+    ///
+    /// So this applies only where the name is a reference bound by some `local`;
+    /// a purely global one falls out of that loop and is bound by
+    /// `bind_variable_internal`, which resolves with the ordinary read walk. The
+    /// caller gets `None` in that case and uses [`Self::walk_ref_name`].
+    ///
+    /// Three things follow from resolving a table at a time, all measured:
+    ///
+    /// * The write can land in a context the read would never name.
+    ///   `outer() { local -n p=q; local q=OUTER; inner; }` with
+    ///   `inner() { local q=INNER; p=X; }` writes **`outer`'s** `q`, because the
+    ///   walk starts where `p` is bound and `inner`'s context is already behind
+    ///   it. Reading `$p` from `inner` still gives `INNER`.
+    /// * A link whose target that context does not have drops the walk to the
+    ///   next context down, so `f() { local -n b=z; g; }` with a global `z`
+    ///   writes the **global** even when `g` has a `local z` of its own.
+    /// * The link counter restarts in each context, and starts one higher
+    ///   (`find_nameref_at_context`, variables.c:2173, sets `level = 1` where
+    ///   `find_variable_nameref` sets it to 0), so a single context follows
+    ///   **seven** links where a read follows eight — while a chain crossing
+    ///   contexts may be followed further than a read ever would. Thirteen links
+    ///   spread over two contexts resolve for a write and read as empty.
+    ///
+    /// Running past the cap is not silent the way it is on the read side. The
+    /// walk answers `&nameref_maxloop_value`, which `bind_variable` turns into a
+    /// warning **and a global bind of the name the walk started from**:
+    ///
+    /// ```c
+    ///   else if (nv == &nameref_maxloop_value)
+    ///     {
+    ///       internal_warning (_("%s: circular name reference"), v->name);
+    ///       return (bind_global_variable (v->name, value, flags));
+    ///     }
+    /// ```
+    ///
+    /// which is [`RefWalk::closed`] on the start name — the same outcome a cycle
+    /// that escaped to global scope gets, and for the same reason: the reference
+    /// survives, because bash found somewhere to put the value. There is no
+    /// cycle *test* here at all, so a cycle among locals reaches this by
+    /// spinning to the cap rather than by being recognised.
+    fn walk_ref_name_writing(&self, name: &str) -> Option<RefWalk> {
+        // Contexts are numbered as `RefScope::Context` numbers them: local frame
+        // `i` is context `i + 1`, the global table is context 0. The walk starts
+        // in the context that binds the name, which is where `bind_variable`'s
+        // outer loop found it.
+        let start = self
+            .local_frames
+            .iter()
+            .rposition(|f| f.iter().any(|(n, _)| n == name))?;
+        let start_ctx = start.checked_add(1)?;
+        self.nameref_cell_in(name, start_ctx)?;
+
+        let maxloop = || RefWalk::closed(Some(RefTarget::global_of(name.to_string())));
+        let mut cur = name.to_string();
+        let mut cur_ctx = start_ctx;
+        // bash's `nvc`, which `bind_variable` sets to the starting context and
+        // `find_variable_nameref_context` moves down as the walk goes: the
+        // context whose table the store finally uses.
+        let mut landed_ctx = start_ctx;
+        for ctx in (0..=start_ctx).rev() {
+            // `find_nameref_at_context`, which follows as much of the chain as
+            // this one table holds.
+            let mut level = 1usize;
+            let mut empty_cell = false;
+            while let Some(cell) = self.nameref_cell_in(&cur, cur_ctx) {
+                level = level.saturating_add(1);
+                if level > NAMEREF_MAX {
+                    return Some(maxloop());
+                }
+                // A cell that names nothing is bash's `newname == 0 || *newname
+                // == '\0'`, which answers NULL for this context and leaves the
+                // walk where it stood — so every context answers the same and
+                // `nvc` is never moved.
+                let Some(next) = bytes::as_str(cell).filter(|n| !n.is_empty()) else {
+                    empty_cell = true;
+                    break;
+                };
+                // "We don't accommodate array subscripts here" (variables.c:2166)
+                // — the cell is looked up as a whole name, so `arr[0]` matches
+                // only a variable literally called that. Where it matches
+                // nothing the walk moves on to the next context down.
+                if !self.bound_in_context(next, ctx) {
+                    break;
+                }
+                cur = next.to_owned();
+                cur_ctx = ctx;
+            }
+            if empty_cell {
+                continue;
+            }
+            landed_ctx = ctx;
+            if self.nameref_cell_in(&cur, cur_ctx).is_none() {
+                return Some(RefWalk::reached(RefTarget {
+                    base: cur,
+                    sub: None,
+                    scope: RefScope::Context(landed_ctx),
+                }));
+            }
+        }
+        // Every context is behind the walk and the chain is still a reference:
+        // bash retries with `find_variable_last_nameref_context`, whose body is
+        // this one minus the "stop on a non-reference" test and so reaches the
+        // same place, and binds through the last reference's cell.
+        Some(RefWalk::reached(self.last_ref_write_target(
+            &cur,
+            cur_ctx,
+            landed_ctx,
+        )))
+    }
+
+    /// Where a write lands when the nameref chain ran out without reaching a
+    /// variable — `bind_variable`'s three-way tail (variables.c:3290), which
+    /// decides from the *last reference's cell* rather than from anything it
+    /// found:
+    ///
+    /// ```c
+    ///   if (nameref_cell (nv) == 0)
+    ///     return (bind_variable_internal (nv->name, value, nvc->table, 0, flags));
+    ///   else if (valid_array_reference (nameref_cell (nv), 0))
+    ///     return (assign_array_element (nameref_cell (nv), value, flags, 0));
+    ///   else
+    ///     return (bind_variable_internal (nameref_cell (nv), value, nvc->table, 0, flags));
+    /// ```
+    ///
+    /// A cell naming nothing leaves the store on the reference itself; one
+    /// naming an element goes through `assign_array_element`, which resolves the
+    /// base the ordinary innermost-first way and so names no context of its own;
+    /// and a plain name is *created* in the context the walk ended in — which is
+    /// the global table whenever the name was looked for and not found, since
+    /// looking for it is what carried the walk down there. `f() { local -n
+    /// a=nosuch; a=X; }` therefore leaves a global `nosuch`.
+    fn last_ref_write_target(&self, cur: &str, cur_ctx: usize, landed_ctx: usize) -> RefTarget {
+        let scoped = |base: String| RefTarget {
+            base,
+            sub: None,
+            scope: RefScope::Context(landed_ctx),
+        };
+        let Some(cell) = self.nameref_cell_in(cur, cur_ctx) else {
+            return scoped(cur.to_string());
+        };
+        if let Some((base, Some(sub))) = split_assignment_target(cell)
+            && !self.name_is_bound(cell)
+        {
+            return RefTarget {
+                base: base.to_string(),
+                sub: Some(sub.to_vec()),
+                scope: RefScope::Live,
+            };
+        }
+        match bytes::as_str(cell).filter(|n| !n.is_empty()) {
+            Some(next) => scoped(next.to_owned()),
+            None => scoped(cur.to_string()),
+        }
+    }
+
+    /// The frame parking `name`'s binding in variable context `depth`: the
+    /// outermost frame at index `depth` or deeper that shadows the name. `None`
+    /// where no such frame does, in which case that context's binding is the
+    /// live one.
+    ///
+    /// The same rule [`Self::enter_scope_at`] swaps by, asked without swapping.
+    fn shadowing_frame(&self, name: &str, depth: usize) -> Option<&VarSnapshot> {
+        self.local_frames
+            .iter()
+            .skip(depth)
+            .find_map(|f| f.iter().find(|(n, _)| n == name).map(|(_, snap)| snap))
+    }
+
+    /// The nameref cell of `name`'s binding in variable context `depth` — the
+    /// name it points at — or `None` where that context has no binding of the
+    /// name or the binding is not a reference. bash's
+    /// `nameref_p (hash_lookup (name, vc->table))`.
+    fn nameref_cell_in(&self, name: &str, depth: usize) -> Option<BStr<'_>> {
+        match self.shadowing_frame(name, depth) {
+            None => self
+                .nameref_attr
+                .contains(name)
+                .then(|| self.vars.get(name).map_or(&[][..], Vec::as_slice)),
+            Some(snap) => snap
+                .nameref
+                .then(|| snap.scalar.as_deref().unwrap_or(&[])),
+        }
+    }
+
+    /// Whether variable context `depth`'s **own table** holds `name` — bash's
+    /// `hash_lookup (name, vc->table) != 0`, which is what decides whether a
+    /// link is followed here or the walk drops to the next context down.
+    ///
+    /// "Own table", not "visible from here": a function context holds only the
+    /// names that context declared, so a link naming a global is *not* found in
+    /// it and the walk moves down — which is why a write can pass straight over
+    /// a `local` of the very name it is looking for. osh records a declaration
+    /// by parking the displaced binding in the frame that made it, so frame
+    /// `depth - 1` holding an entry is exactly `local name` having run there.
+    /// The global table is the one context that holds names it never declared.
+    fn bound_in_context(&self, name: &str, depth: usize) -> bool {
+        if let Some(frame) = depth.checked_sub(1)
+            && !self
+                .local_frames
+                .get(frame)
+                .is_some_and(|f| f.iter().any(|(n, _)| n == name))
+        {
+            return false;
+        }
+        match self.shadowing_frame(name, depth) {
+            None => self.name_is_bound(name.as_bytes()),
+            Some(snap) => {
+                snap.scalar.is_some()
+                    || snap.indexed.is_some()
+                    || snap.assoc.is_some()
+                    || snap.nameref
+                    || snap.declared
+            }
+        }
+    }
+
     /// Whether some binding is visible under exactly these bytes as a name.
     ///
     /// Asked of text that *looks* like an element reference, to tell the
@@ -30830,6 +31095,30 @@ impl Shell {
     fn resolve_ref_use_walks(&self, name: &str, walks: usize) -> Option<RefTarget> {
         let walk = self.walk_ref_name(name);
         self.warn_circular_walks(name, &walk, walks);
+        walk.target
+    }
+
+    /// Resolve a nameref chain for a plain **scalar store**, which reaches the
+    /// variable through `bind_variable` and so descends the variable contexts one
+    /// table at a time — [`Self::walk_ref_name_writing`].
+    ///
+    /// That machinery only runs where some `local` binds the name: bash's
+    /// context loop skips the global table (it is neither a function nor a
+    /// builtin environment), so a purely global reference falls out of it and is
+    /// resolved by `bind_variable_internal`, which walks the chain the ordinary
+    /// read way. The write walk answers `None` in exactly that case, and this
+    /// falls back to it.
+    ///
+    /// Unlike [`Self::resolve_ref_use`] this never answers `None` for a chain
+    /// that failed: `bind_variable` has a place to put the value however badly
+    /// the walk went — the last reference's own name, or, past the link cap, the
+    /// global of the name it started from. What a failed chain costs is the
+    /// warning, not the store.
+    fn resolve_ref_write(&self, name: &str) -> Option<RefTarget> {
+        let walk = self
+            .walk_ref_name_writing(name)
+            .unwrap_or_else(|| self.walk_ref_name(name));
+        self.warn_circular_walks(name, &walk, 1);
         walk.target
     }
 
@@ -79173,6 +79462,74 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run(&format!("{cyc} printf '[%s]' \"$c1\"; f() {{ printf '[%s]' \"$c1\"; }}; f")).0,
             "[][]",
         );
+    }
+
+    /// A **write** does not resolve a reference the way a read does. A read
+    /// looks each link up the ordinary way — every scope at once, innermost
+    /// binding first. `bind_variable` (variables.c:3275) descends the stack of
+    /// variable contexts one hash table at a time:
+    ///
+    /// ```c
+    ///   for (vc = shell_variables; vc; vc = vc->down)
+    ///     if (vc_isfuncenv (vc) || vc_isbltnenv (vc))
+    ///       {
+    ///         v = hash_lookup (name, vc->table);
+    ///         nvc = vc;
+    ///         if (v && nameref_p (v))
+    ///           { nv = find_variable_nameref_context (v, vc, &nvc); … }
+    ///         if (v)
+    ///           return (bind_variable_internal (v->name, value, nvc->table, 0, flags));
+    ///       }
+    /// ```
+    ///
+    /// and `find_nameref_at_context` (variables.c:2172) follows only as much of
+    /// the chain as *one* table holds (`hash_lookup (newname, vc->table)`, and
+    /// `break` when it is not there). Three things follow, and none of them is
+    /// what a read does: the write can land in a context the read never names,
+    /// the walk never climbs back up, and the counter restarts per context —
+    /// starting at `level = 1` where a read starts at 0, so one context follows
+    /// **seven** links where a read follows eight.
+    #[test]
+    fn a_write_follows_a_nameref_chain_one_variable_context_at_a_time() {
+        // The read finds the innermost `q`; the write descends to the context
+        // that holds the reference and binds *that* context's `q`.
+        assert_eq!(
+            run("q=GLOBQ
+                 o() { local -n p=q; local q=OUTERQ; i; printf '[o=%s]' \"$q\"; }
+                 i() { local q=INNERQ; printf '[r=%s]' \"$p\"; p=W; printf '[i=%s]' \"$q\"; }
+                 o; printf '[g=%s]' \"$q\"")
+            .0,
+            "[r=INNERQ][i=INNERQ][o=W][g=GLOBQ]",
+        );
+        // And the walk never climbs back up: `G1` names `zz`, which the local
+        // context holds — but the walk started in the global table, so the
+        // *global* `zz` is what is bound.
+        assert_eq!(
+            run("declare -n G1=zz
+                 i1() { local -n a=G1; local zz=INNERZZ; a=X; printf '[i=%s]' \"$zz\"; }
+                 i1; printf '[g=%s]' \"${zz-UNSET}\"")
+            .0,
+            "[i=INNERZZ][g=X]",
+        );
+        // Seven links resolve inside one context…
+        assert_eq!(
+            run("sev() { local -n s1=s2 s2=s3 s3=s4 s4=s5 s5=s6 s6=s7 s7=s8; local s8=EIGHT
+                        s1=W; printf '[st=%s][%s]' \"$?\" \"$s8\"; }
+                 sev 2>&1; printf '[g=%s]' \"${s1-UNSET}\"")
+            .0,
+            "[st=0][W][g=UNSET]",
+        );
+        // …and the eighth is the cap: `find_variable_nameref_context` hands
+        // `&nameref_maxloop_value` back, and `bind_variable` warns and binds
+        // the **global** of the name the walk started from, leaving the local
+        // reference intact.
+        let out = run("cap() { local -n u1=u2 u2=u3 u3=u4 u4=u5 u5=u6 u6=u7 u7=u8 u8=u9
+                               local u10=TEN
+                               u1=W; printf '[st=%s][u10=%s][u1=%s]' \"$?\" \"$u10\" \"$u1\"; }
+                       cap 2>&1; printf '[g=%s]' \"${u1-UNSET}\"")
+        .0;
+        assert!(out.contains("circular name reference"), "{out:?}");
+        assert!(out.ends_with("[st=0][u10=TEN][u1=][g=W]"), "{out:?}");
     }
 
     /// `do_assignment_internal` (subst.c:396) has the value in hand before it

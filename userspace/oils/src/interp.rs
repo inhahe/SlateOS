@@ -44837,8 +44837,19 @@ impl Shell {
             // rather than a global one this `local` is about to hide: with a
             // global `g=9`, `local -a g` reports the unvalued `declare -a g`,
             // because by then there is no local scalar left to drop.
-            let drop_local_scalar =
-                make_local && (assoc || indexed) && self.vars.contains_key(base_name);
+            //
+            // A **subscript** asks for the array just as plainly as `-a` does —
+            // bash's `making_array_special` sends the operand down the same
+            // `make_local_array_variable` call — so `f() { local g=5; local
+            // g[1]=9; }` is `declare -a g=([1]="9")` and `f() { local g=5;
+            // local g[1]; }` is `declare -a g=()`. Only the *same* context's
+            // scalar is lost: `f() { g=5; local g[1]=9; }` shadows a global that
+            // is still `declare -- g="5"` afterwards, and at global scope the
+            // widening is `find_or_make_array_variable`, which keeps the scalar
+            // (`g=5; declare g[1]=9` is `([0]="5" [1]="9")` in both shells).
+            let drop_local_scalar = make_local
+                && (assoc || indexed || subscript.is_some())
+                && self.vars.contains_key(base_name);
             if drop_local_scalar {
                 self.vars.remove(base_name);
             }
@@ -72952,6 +72963,56 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             out,
             format!("{w}declare -n g=\"z\"\nAFTER\ndeclare -a g=([0]=\"1\" [1]=\"2\")\n")
         );
+        assert_eq!(st, 0);
+    }
+
+    /// A subscript asks a declaration for an array as plainly as `-a` does, and
+    /// inside a function that array comes from `make_local_array_variable`
+    /// (declare.def:614, reached by `making_array_special` for any subscripted
+    /// operand, valued or not), which **rebinds** the name rather than widening
+    /// the variable in place. The scalar the frame already held is therefore
+    /// lost, where the same widening at global scope
+    /// (`find_or_make_array_variable`) keeps it as element 0. osh carried it in
+    /// as element 0 in both places. Corpus:
+    /// `a-subscripted-local-declaration-rebinds-the-name-rather-than-widening-it.sh`.
+    #[test]
+    fn a_subscripted_local_declaration_rebinds_the_name_rather_than_widening_it() {
+        // The same context's scalar is lost, with a value or without one, and
+        // `declare`/`typeset` bind locals inside a function too.
+        for (src, want) in [
+            ("local g[1]=9", "declare -a g=([1]=\"9\")\n"),
+            ("local g[1]", "declare -a g=()\n"),
+            ("declare g[1]=9", "declare -a g=([1]=\"9\")\n"),
+            ("typeset g[1]=9", "declare -a g=([1]=\"9\")\n"),
+            // The letter that asks outright has always behaved this way.
+            ("local -a g", "declare -a g=()\n"),
+            ("local -a g[1]=9", "declare -a g=([1]=\"9\")\n"),
+            ("local -A g[k]=9", "declare -A g=([k]=\"9\" )\n"),
+        ] {
+            let (out, st) = run(&format!("f() {{ local g=5; {src}; declare -p g; }}; f 2>&1"));
+            assert_eq!(out, want, "{src}");
+            assert_eq!(st, 0, "{src}");
+        }
+
+        // A scalar bound at an *outer* context is only shadowed, so it survives
+        // the return untouched.
+        let (out, st) =
+            run("g=5; f() { local g[1]=9; declare -p g; }; f 2>&1; echo AFTER; declare -p g");
+        assert_eq!(out, "declare -a g=([1]=\"9\")\nAFTER\ndeclare -- g=\"5\"\n");
+        assert_eq!(st, 0);
+
+        // At global scope the widening converts the variable and keeps its
+        // value as element 0 — the declaration form and the bare one alike.
+        for src in ["declare g[1]=9", "g[1]=9"] {
+            let (out, st) = run(&format!("g=5; {src}; declare -p g"));
+            assert_eq!(out, "declare -a g=([0]=\"5\" [1]=\"9\")\n", "{src}");
+            assert_eq!(st, 0, "{src}");
+        }
+
+        // An array already of the asked-for kind is not rebound at all.
+        let (out, st) =
+            run("f() { local -a g=(1 2); local g[5]=9; declare -p g; }; f 2>&1");
+        assert_eq!(out, "declare -a g=([0]=\"1\" [1]=\"2\" [5]=\"9\")\n");
         assert_eq!(st, 0);
     }
 

@@ -43,204 +43,74 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
-### TD-OILS-A-WRITE-THROUGH-A-CHAIN-OF-LOCALS-GIVES-UP-ONE-LINK-EARLIER. bash's write-side walk caps at seven, warns, and binds a global — 2026-08-10
+### TD-OILS-AN-ARITHMETIC-COMMANDS-DIAGNOSTIC-REPORTS-THE-WRONG-LINE. `(( … ))` inside a compound construct is off by one — 2026-08-10
 
-**Where:** `userspace/oils/src/interp.rs`, `Shell::resolve_ref_write_walks` and
-the scalar store below it. Both use `Shell::walk_ref_name`, whose cap is eight —
-which is right for the *read* side and for a write at global scope, but not for a
-write from inside a function whose chain is made of locals.
+**Where:** `userspace/oils/src/interp.rs`, wherever the line number carried into
+a diagnostic is stamped for an arithmetic *command* (`(( … ))`), as opposed to an
+arithmetic *expansion* or a plain assignment. A plain assignment in the same
+position reports correctly, so what is mis-stamped is specific to the `(( ))`
+command word.
 
-**The rule.** `bind_variable`
-(variables.c:3290) walks with `find_variable_last_nameref_context`, whose helper
-`find_nameref_at_context` starts its counter at `level = 1` rather than 0 — so it
-gives up one link *earlier*, at seven — and answers with the sentinel
-`&nameref_maxloop_value`, which the caller turns into a warning **and a global
-bind**:
+**Measured.** One script, four constructs, each holding a `(( … ))` whose
+evaluation warns (a nameref cycle is the easiest warning to provoke):
 
-```c
-  else if (nv == &nameref_maxloop_value)
-    {
-      internal_warning (_("%s: circular name reference"), v->name);
-      return (bind_global_variable (v->name, value, flags));
-    }
-```
+| construct | bash line | osh line |
+|---|---|---|
+| `{ … }` | 5 | 6 |
+| `for … do … done` | 8 | 7 |
+| `f() {` newline `(( ))` newline `}` | 11 | 10 |
+| `g() { echo x` newline `(( )) }` | 15 | 14 |
 
-That path is only reached from inside a function whose chain is made of *locals*
-— `bind_variable`'s outer loop enters it only for a `vc_isfuncenv`/`vc_isbltnenv`
-context, so a chain at global scope goes through `bind_variable_internal`
-instead, which walks with the ordinary eight-deep `find_variable_nameref` and
-fails silently. Measured:
+Note the sign differs by construct — a brace group reports one line **late**, the
+other three one line **early** — so this is not a single off-by-one applied
+uniformly but a stamp taken at the wrong moment relative to how each construct
+advances the line counter.
 
-```sh
-f() { local -n u1=u2 u2=u3 u3=u4 u4=u5 u5=u6 u6=u7 u7=u8 u8=u9; local u9=NINE
-      printf '[%s]
-' "${u1}"      # bash: [NINE]  — eight links, the read is fine
-      u1=X; declare -p u9; }        # bash: warning: u1: circular name reference
-f                                   #       declare -- u9="NINE"  (nothing stored;
-                                    #       a *global* u1=X is made instead)
-```
+**Pre-existing and unrelated to the write walk:** it reproduces through the
+untouched global-cycle *read*-walk warning, i.e. with no write-side code on the
+path at all.
 
-So the same chain reads through and fails to write, and osh reads through and
-writes: `[NINE]` then `declare -- u9="X"`, with nothing said.
+**Proper fix:** find where the `(( ))` command's word is parsed and make it
+record the line of its own first token, the way a simple command's does, rather
+than inheriting whatever line the enclosing construct had reached. Until then,
+corpus cases that need a warning out of `(( ))` keep the construct on one line.
 
-**Proper fix:** the write-side resolvers need their own walk — same shape, cap
-seven, and a third outcome that is neither "reached" nor "gave up quietly" but
-"warn and bind the global of the name the walk started from". `RefWalk` is the
-place to put it; a `gave_up_writing` variant beside `gave_up` would keep the read
-side untouched. The gate is a function context with the chain in locals, which is
-what `Shell::is_locally_shadowed` already answers for the escape rule.
+**How it was found:** writing the corpus case for the per-context write walk
+(`a-write-follows-a-nameref-chain-one-variable-context-at-a-time.sh`), whose
+`(( w1 = 5 ))` form put the diagnostic on the wrong line inside a function body.
 
-**How it was found:** reading `find_nameref_at_context` (variables.c:2173) while
-fixing TD-OILS-A-NAMEREF-CHAIN-IS-FOLLOWED-PAST-THE-DEPTH-BASH-GIVES-UP-AT (see
-Fixed Bugs), and confirming the seven-link difference by measurement..
+### TD-OILS-READ-A-AND-MAPFILE-DO-NOT-TAKE-A-NAMEREF-CYCLES-GLOBAL-ESCAPE. The array-filling builtins write the reference itself — 2026-08-10
 
-
-### TD-OILS-A-NAMEREF-CYCLE-THAT-CLOSES-ON-A-LOCAL-IS-NOT-RESOLVED-AT-GLOBAL-SCOPE. `local -n r=r` reads the string `r` where bash reads the global `r` — 2026-08-10 — ✅ FIXED 2026-08-10
-
-**Where:** `userspace/oils/src/interp.rs`, `Shell::resolve_ref_name` — the arm
-that deliberately exempts a self-naming reference from the cycle test:
-
-```rust
-// A nameref naming *itself* is not a cycle: inside a function
-// `local -n r=r` legitimately means the caller's `r`, and bash
-// rejects the global form at declaration time instead.
-Some(v) if !v.is_empty() && v != cur.as_bytes() => {
-```
-
-The comment is right that the shape is legitimate and wrong about what it
-means. bash *does* treat it as a cycle — and then resolves it specially, at
-**global** scope with namerefs not followed. osh does neither: it falls out of
-the walk with `RefTarget::plain("r")`, so the reference reads and writes its own
-cell, and none of the resolution-time warnings are emitted.
-
-**Reproduce.**
+**Where:** `userspace/oils/src/interp.rs`, the name resolution `read -a` and
+`mapfile`/`readarray` use to find the array they fill. Every other write form
+takes the escape a cycle that closes on a *function-local* variable earns
+(`find_global_variable_noref`, variables.c:2098): a scalar store, a compound
+literal, an element write and a scalar `read` all bind the **global** and leave
+the local reference intact. The two array-filling builtins do not — they bind
+the reference's own cell, and set `-a` *on top of* `-n`:
 
 ```sh
-r=GLOBALR
-h() { local -n r=r; r=W; declare -p r; printf 'read=<%s>\n' "$r"; }
-h
-echo "after: global r=<$r>"; declare -p r
+g1=(A B); f1() { local -n g1=g1; read -a g1 <<< "P Q"; declare -p g1; }
+f1 2>/dev/null; declare -p g1
+# bash: declare -n g1="g1"                 osh: declare -an g1=([0]="P" [1]="Q")
+#       declare -a g1=([0]="P" [1]="Q")         declare -a g1=([0]="A" [1]="B")
 ```
 
-bash 5.2.37:
+`mapfile -t g4 <<< P` diverges identically. `declare -an` is a shape bash never
+produces: `nameref` and `array` are mutually exclusive attributes, so the wrong
+answer here is visible twice over — the value went to the wrong variable, and
+the reference stopped being a reference.
 
-```
-line 2: local: warning: r: circular name reference
-line 2: warning: r: circular name reference
-line 2: warning: r: circular name reference
-declare -n r="r"
-line 2: warning: r: circular name reference
-read=<W>
-after: global r=<W>
-declare -- r="W"
-```
+**Proper fix:** route both builtins' target lookup through the same resolver the
+scalar store uses, so the cycle escape (and the `-n`/`-a` exclusion) applies. The
+escape itself is already implemented — see
+TD-OILS-A-NAMEREF-CYCLE-THAT-CLOSES-ON-A-LOCAL-IS-NOT-RESOLVED-AT-GLOBAL-SCOPE
+in Fixed Bugs — these two call sites simply do not go through it.
 
-osh:
-
-```
-line 2: local: warning: r: circular name reference
-declare -n r="W"
-read=<>
-after: global r=<GLOBALR>
-declare -- r="GLOBALR"
-```
-
-Three separate departures, in order of how much they cost:
-
-1. **The write lands in the reference's own cell.** osh's `r=W` overwrites the
-   nameref's value, so the variable stops pointing at anything meaningful
-   (`declare -n r="W"`) while the global it should have written keeps its old
-   value. bash binds the *global* `r` and leaves the local a reference
-   (`declare -n r="r"`). With no global of that name at all bash creates one —
-   `g() { local -n q=q; q=W2; }; g; declare -p q` prints `declare -- q="W2"`,
-   where osh says `q: not found`.
-2. **A read yields the reference's own value as a string.** `$r` is `r` in osh
-   and `GLOBALR` in bash. Note the resolution really is *global*, not "the
-   caller's": with `outer() { local r=OUTER; inner; }` and `inner() { local -n
-   r=r; echo "$r"; }`, bash prints `GLOBALR`, not `OUTER`.
-3. **The resolution-time warnings are missing.** bash warns once per walk, the
-   same way it does for a mutual cycle — which osh already implements for
-   `a→b→a` in `resolve_ref_use_walks` / `warn_circular_ref`. It also warns
-   *twice* at declaration where osh warns once: `declare.def`'s `check_selfref`
-   (prefixed `local:`/`declare:`) and then `bind_variable_internal`'s, which
-   repeats the test as it binds (variables.c:3382).
-
-**In bash's own words.** `find_variable_nameref` closes the walk on `oldv`, not
-only on the name it started from, which is exactly the self-naming case
-(variables.c:2098):
-
-```c
-      v = find_variable_internal (newname, flags);
-      if (v == orig || v == oldv)
-	{
-	  internal_warning (_("%s: circular name reference"), orig->name);
-#if 1
-	  /* XXX - provisional change - circular refs go to
-	     global scope for resolution, without namerefs. */
-	  if (variable_context && v->context)
-	    return (find_global_variable_noref (v->name));
-	  else
-#endif
-	  return ((SHELL_VAR *)0);
-	}
-```
-
-`variable_context && v->context` is what makes this a *function-local*
-provision: a self-naming reference at global scope has nowhere to escape to and
-resolves to nothing — which is the answer both shells already agree on for
-`${!r}` (`r: invalid indirect expansion`), since an indirection asks through
-`find_variable_last_nameref`, which has no such provision.
-
-**Proper fix.** Close `resolve_ref_name`'s cycle test over the self-naming case
-too — `seen` already catches `a→b→a`, so this is one arm to delete — and give
-the resolver the escape bash has: when the walk closes and the reference is
-*local*, resolve the name once more in the global table **without following
-namerefs** and hand that back; when it is global, keep answering `None`. The
-write side (`resolve_ref_write_walks`) must then stop calling
-`break_circular_ref` for this shape, since bash keeps the reference intact and
-binds the global instead. The warning counts fall out of the existing per-walk
-machinery once the case reaches it, plus one more `check_selfref` at bind time
-in the declaration builtins (`interp.rs`'s existing site is only the first of
-bash's two).
-
-**Found by** the corpus case `a-reference-with-no-cell-points-nowhere.sh`, which
-originally carried a `local -n r=r` row. The row was dropped from that case —
-its subject is a reference with an *empty* cell, which this is not — rather
-than encoding the wrong answer; it belongs in a case of its own once this is
-fixed.
-
-**Fixed 2026-08-10.** The cycle test now closes over the self-naming shape, and
-a walk that closes on a *function-local* variable re-resolves the name in the
-global table with namerefs not followed — bash's `find_global_variable_noref`
-escape — while one that closes on a global still answers nothing. Reads, writes,
-`declare -p`, `[ -v ]`, arithmetic and element access all go through the escape;
-a write binds the global (creating it if absent) and leaves the reference
-intact.
-
-Measuring the warning counts that fall out of it turned up a second, larger
-rule that had to be implemented for this to match byte-for-byte: bash asks after
-a variable *again* after reading its value, and how many times it walks a
-nameref chain doing so depends on how the parameter is spelled and on what the
-name reached. That is `get_var_and_type` (subst.c), now modelled by
-`Shell::var_and_type_walks` / `VarForm` / `ResolvedKind`: an element subscript
-costs 2, `[@]`/`[*]` costs 1 where the variable exists and 2 where it does not,
-and a bare name costs 1 plus one more where the value is set and the name did
-not reach an array, plus one more again for `@a`/`@A` on a name that reached
-nothing.
-
-`export`/`readonly` mark the global the escape names, at the cost bash's
-`set_var_attribute` pays for it (`Shell::attr_ref_walks`), and an unsubscripted
-arithmetic operand asks `set -u` about that global rather than about the
-reference standing in front of it, sharing bash's single `find_variable`
-between the check and the read (`Shell::arith_unbound_name`). The residual gaps
-this measurement left are logged separately as
-`TD-OILS-REDECLARING-A-SELF-NAMING-NAMEREF-WARNS-TOO-FEW-TIMES` and
-`TD-OILS-A-SUBSCRIPTED-ARITHMETIC-OPERAND-DOES-NOT-FOLLOW-A-NAMEREF-CYCLES-ESCAPE`.
-
-**Corpus:** `a-nameref-cycle-that-closes-on-a-local-resolves-at-global-scope.sh`
-and `export-and-readonly-mark-the-global-a-nameref-cycle-escaped-to.sh`.
-
----
+**How it was found:** probing which assignment forms go through `bind_variable`
+while implementing the per-context write walk; `read -a` was set aside then as
+belonging to the cycle-escape entry, and re-measured afterwards to confirm it is
+a separate, still-open gap.
 
 ### TD-OILS-A-SUBSCRIPTED-ARITHMETIC-OPERAND-DOES-NOT-FOLLOW-A-NAMEREF-CYCLES-ESCAPE. `(( arr[1] ))` through an escaped cycle reads 0 and writes nowhere — 2026-08-10
 
@@ -40340,6 +40210,334 @@ deny — are now fixed; see F8 and F9.)_
 ---
 
 ## Fixed Bugs
+
+### TD-OILS-A-NAMEREF-CYCLE-THAT-CLOSES-ON-A-LOCAL-IS-NOT-RESOLVED-AT-GLOBAL-SCOPE. `local -n r=r` reads the string `r` where bash reads the global `r` — FIXED 2026-08-10
+
+**Where:** `userspace/oils/src/interp.rs`, `Shell::resolve_ref_name` — the arm
+that deliberately exempts a self-naming reference from the cycle test:
+
+```rust
+// A nameref naming *itself* is not a cycle: inside a function
+// `local -n r=r` legitimately means the caller's `r`, and bash
+// rejects the global form at declaration time instead.
+Some(v) if !v.is_empty() && v != cur.as_bytes() => {
+```
+
+The comment is right that the shape is legitimate and wrong about what it
+means. bash *does* treat it as a cycle — and then resolves it specially, at
+**global** scope with namerefs not followed. osh does neither: it falls out of
+the walk with `RefTarget::plain("r")`, so the reference reads and writes its own
+cell, and none of the resolution-time warnings are emitted.
+
+**Reproduce.**
+
+```sh
+r=GLOBALR
+h() { local -n r=r; r=W; declare -p r; printf 'read=<%s>\n' "$r"; }
+h
+echo "after: global r=<$r>"; declare -p r
+```
+
+bash 5.2.37:
+
+```
+line 2: local: warning: r: circular name reference
+line 2: warning: r: circular name reference
+line 2: warning: r: circular name reference
+declare -n r="r"
+line 2: warning: r: circular name reference
+read=<W>
+after: global r=<W>
+declare -- r="W"
+```
+
+osh:
+
+```
+line 2: local: warning: r: circular name reference
+declare -n r="W"
+read=<>
+after: global r=<GLOBALR>
+declare -- r="GLOBALR"
+```
+
+Three separate departures, in order of how much they cost:
+
+1. **The write lands in the reference's own cell.** osh's `r=W` overwrites the
+   nameref's value, so the variable stops pointing at anything meaningful
+   (`declare -n r="W"`) while the global it should have written keeps its old
+   value. bash binds the *global* `r` and leaves the local a reference
+   (`declare -n r="r"`). With no global of that name at all bash creates one —
+   `g() { local -n q=q; q=W2; }; g; declare -p q` prints `declare -- q="W2"`,
+   where osh says `q: not found`.
+2. **A read yields the reference's own value as a string.** `$r` is `r` in osh
+   and `GLOBALR` in bash. Note the resolution really is *global*, not "the
+   caller's": with `outer() { local r=OUTER; inner; }` and `inner() { local -n
+   r=r; echo "$r"; }`, bash prints `GLOBALR`, not `OUTER`.
+3. **The resolution-time warnings are missing.** bash warns once per walk, the
+   same way it does for a mutual cycle — which osh already implements for
+   `a→b→a` in `resolve_ref_use_walks` / `warn_circular_ref`. It also warns
+   *twice* at declaration where osh warns once: `declare.def`'s `check_selfref`
+   (prefixed `local:`/`declare:`) and then `bind_variable_internal`'s, which
+   repeats the test as it binds (variables.c:3382).
+
+**In bash's own words.** `find_variable_nameref` closes the walk on `oldv`, not
+only on the name it started from, which is exactly the self-naming case
+(variables.c:2098):
+
+```c
+      v = find_variable_internal (newname, flags);
+      if (v == orig || v == oldv)
+	{
+	  internal_warning (_("%s: circular name reference"), orig->name);
+#if 1
+	  /* XXX - provisional change - circular refs go to
+	     global scope for resolution, without namerefs. */
+	  if (variable_context && v->context)
+	    return (find_global_variable_noref (v->name));
+	  else
+#endif
+	  return ((SHELL_VAR *)0);
+	}
+```
+
+`variable_context && v->context` is what makes this a *function-local*
+provision: a self-naming reference at global scope has nowhere to escape to and
+resolves to nothing — which is the answer both shells already agree on for
+`${!r}` (`r: invalid indirect expansion`), since an indirection asks through
+`find_variable_last_nameref`, which has no such provision.
+
+**Proper fix.** Close `resolve_ref_name`'s cycle test over the self-naming case
+too — `seen` already catches `a→b→a`, so this is one arm to delete — and give
+the resolver the escape bash has: when the walk closes and the reference is
+*local*, resolve the name once more in the global table **without following
+namerefs** and hand that back; when it is global, keep answering `None`. The
+write side (`resolve_ref_write_walks`) must then stop calling
+`break_circular_ref` for this shape, since bash keeps the reference intact and
+binds the global instead. The warning counts fall out of the existing per-walk
+machinery once the case reaches it, plus one more `check_selfref` at bind time
+in the declaration builtins (`interp.rs`'s existing site is only the first of
+bash's two).
+
+**Found by** the corpus case `a-reference-with-no-cell-points-nowhere.sh`, which
+originally carried a `local -n r=r` row. The row was dropped from that case —
+its subject is a reference with an *empty* cell, which this is not — rather
+than encoding the wrong answer; it belongs in a case of its own once this is
+fixed.
+
+**Fixed 2026-08-10.** The cycle test now closes over the self-naming shape, and
+a walk that closes on a *function-local* variable re-resolves the name in the
+global table with namerefs not followed — bash's `find_global_variable_noref`
+escape — while one that closes on a global still answers nothing. Reads, writes,
+`declare -p`, `[ -v ]`, arithmetic and element access all go through the escape;
+a write binds the global (creating it if absent) and leaves the reference
+intact.
+
+Measuring the warning counts that fall out of it turned up a second, larger
+rule that had to be implemented for this to match byte-for-byte: bash asks after
+a variable *again* after reading its value, and how many times it walks a
+nameref chain doing so depends on how the parameter is spelled and on what the
+name reached. That is `get_var_and_type` (subst.c), now modelled by
+`Shell::var_and_type_walks` / `VarForm` / `ResolvedKind`: an element subscript
+costs 2, `[@]`/`[*]` costs 1 where the variable exists and 2 where it does not,
+and a bare name costs 1 plus one more where the value is set and the name did
+not reach an array, plus one more again for `@a`/`@A` on a name that reached
+nothing.
+
+`export`/`readonly` mark the global the escape names, at the cost bash's
+`set_var_attribute` pays for it (`Shell::attr_ref_walks`), and an unsubscripted
+arithmetic operand asks `set -u` about that global rather than about the
+reference standing in front of it, sharing bash's single `find_variable`
+between the check and the read (`Shell::arith_unbound_name`). The residual gaps
+this measurement left are logged separately as
+`TD-OILS-REDECLARING-A-SELF-NAMING-NAMEREF-WARNS-TOO-FEW-TIMES`,
+`TD-OILS-A-SUBSCRIPTED-ARITHMETIC-OPERAND-DOES-NOT-FOLLOW-A-NAMEREF-CYCLES-ESCAPE`
+and `TD-OILS-READ-A-AND-MAPFILE-DO-NOT-TAKE-A-NAMEREF-CYCLES-GLOBAL-ESCAPE`.
+
+**Corpus:** `a-nameref-cycle-that-closes-on-a-local-resolves-at-global-scope.sh`
+and `export-and-readonly-mark-the-global-a-nameref-cycle-escaped-to.sh`.
+
+---
+
+### TD-OILS-A-WRITE-THROUGH-A-CHAIN-OF-LOCALS-GIVES-UP-ONE-LINK-EARLIER. bash's write walk descends variable contexts one hash table at a time — FIXED 2026-08-10
+
+**Where:** `userspace/oils/src/interp.rs`, `Shell::scalar_write_dest`,
+`Shell::apply_assignment_inner` and `Shell::arith_write_dest` — all three
+resolved a write target with `Shell::walk_ref_name`, the **read** walk. They now
+go through `Shell::resolve_ref_write`, which tries the new
+`Shell::walk_ref_name_writing` first and falls back to the read walk when no
+local context holds the name (bash's own fallback: `bind_variable`'s loop enters
+only `vc_isfuncenv`/`vc_isbltnenv` contexts, so a purely global reference drops
+through to `bind_variable_internal` and the ordinary walk).
+
+**The rule.** A read resolves a reference by looking each link up the ordinary
+way — every scope at once, innermost binding first (`find_variable_nameref`). A
+write does not. `bind_variable` (variables.c:3275) descends the stack of variable
+contexts one hash table at a time:
+
+```c
+  for (vc = shell_variables; vc; vc = vc->down)
+    if (vc_isfuncenv (vc) || vc_isbltnenv (vc))
+      {
+	v = hash_lookup (name, vc->table);
+	nvc = vc;
+	if (v && nameref_p (v))
+	  { nv = find_variable_nameref_context (v, vc, &nvc); … }
+	if (v)
+	  return (bind_variable_internal (v->name, value, nvc->table, 0, flags));
+      }
+```
+
+and `find_nameref_at_context` (variables.c:2172) follows only as much of the
+chain as *one* table holds — `nv2 = hash_lookup (newname, vc->table); if (nv2 ==
+0) break;`. Three things follow, and none of them is what a read does. The
+original entry recorded only the third.
+
+**(a) The write lands in a context the read never names.** The walk stops in
+whichever context resolved the chain, and binds there:
+
+```sh
+q=GLOBQ
+o() { local -n p=q; local q=OUTERQ; i; echo "o=$q"; }
+i() { local q=INNERQ; echo "r=$p"; p=W; echo "i=$q"; }
+o; echo "g=$q"      # bash: r=INNERQ i=INNERQ o=W g=GLOBQ
+```
+
+The read finds the innermost `q`; the write binds the *outer* function's.
+
+**(b) The walk never climbs back up.** A reference in the global table resolves
+against the global table, even where a local of that name exists:
+
+```sh
+declare -n G1=zz
+i1() { local -n a=G1; local zz=INNERZZ; a=X; echo "i=$zz"; }
+i1; echo "g=${zz-UNSET}"      # bash: i=INNERZZ g=X
+```
+
+**(c) The counter restarts per context, one higher.** `find_nameref_at_context`
+sets `level = 1` where `find_variable_nameref` sets it to 0, so one context
+follows **seven** links where a read follows eight — and past the cap
+`&nameref_maxloop_value` comes back to `bind_variable`, which is the one place a
+write says anything at all about giving up (the read walk gives up silently):
+
+```c
+  else if (nv == &nameref_maxloop_value)
+    {
+      internal_warning (_("%s: circular name reference"), v->name);
+      return (bind_global_variable (v->name, value, flags));
+    }
+```
+
+— the value goes to the **global** of the name the walk started from, and the
+local reference survives. A corollary of the per-context restart is that a chain
+*spread over two contexts* is followed **further** than a read would follow it.
+
+**The fix.** `walk_ref_name_writing` mirrors the C loop: it starts at the
+innermost context that holds the name, and for each context from there down runs
+an inner walk capped at seven that follows a link only while
+`bound_in_context(next, ctx)` — bash's `hash_lookup (name, vc->table) != 0`, the
+context's **own** table rather than what is visible from it. That distinction is
+the whole of (b), and getting it wrong was the one real trap: osh's scope model
+is a flat map plus a stack of `local_frames` holding the *parked* outer binding,
+so "context `d`'s own table holds `name`" is "`local_frames[d-1]` has an entry
+for it", not "looking up `name` from depth `d` finds something". Past the cap the
+walk answers `RefWalk::closed(RefTarget::global_of(name))`, which reproduces the
+warning-and-global-bind without a new `RefWalk` variant.
+
+`arith_write_dest` needed a second change: `bind_int_variable` calls
+`find_variable(lhs)` for the *kind* (integer attribute, implicit array) and then
+`bind_variable(lhs, …)` for the store, so `(( x = … ))` takes a read walk and
+then a write walk. It now does exactly that — one `resolve_ref_use_walks(name, 1)`
+for the warning, then `resolve_ref_write`.
+
+**Corpus:** `a-write-follows-a-nameref-chain-one-variable-context-at-a-time.sh`,
+which also pins down which assignment forms go through `bind_variable` at all
+(scalar, `+=`, `read`, `printf -v`, `(( ))`, `${x:=v}`) and which do not (element
+write, `read -a`, `for`, compound literal, `unset`, `declare`).
+
+**How it was found:** reading `find_nameref_at_context` (variables.c:2173) while
+fixing TD-OILS-A-NAMEREF-CHAIN-IS-FOLLOWED-PAST-THE-DEPTH-BASH-GIVES-UP-AT, and
+confirming the seven-link difference by measurement. (a) and (b) turned up only
+once the walk was written and measured against bash form by form.
+
+### TD-OILS-AN-ASSIGNMENTS-VALUE-IS-EXPANDED-AFTER-THE-VARIABLE-IS-LOOKED-FOR. bash expands first and judges the name second — FIXED 2026-08-10
+
+**Where:** `userspace/oils/src/interp.rs`, `Shell::apply_assignment_inner` —
+which resolved the target (and could refuse it) before expanding the right-hand
+side. `do_assignment_internal` (subst.c:396) has the value in hand before it goes
+looking for anything to put it in:
+
+```c
+  if (t = mbschr (name, '['))	/* ] */
+    { … entry = assign_array_element (name, value, aflags, &estate); … }
+  else
+    entry = bind_variable (name, value, aflags);
+```
+
+So every objection the *name* earns — a reference designating a whole array, one
+designating an element that a written subscript has nowhere to go on, a readonly
+target — is reported only after the value's side effects have run:
+
+```sh
+f() { echo "  RAN($1)" >&2; echo "v$1"; }
+declare -a n=(1 2); declare -n r1='n[@]'
+r1=$(f whole)      # bash: RAN(whole) *then* n[@]: bad array subscript
+readonly ro=1
+ro=$(f ro)         # bash: RAN(ro) *then* ro: readonly variable
+```
+
+A **compound literal** is the one exception, and bash's own: it is not expanded
+until `assign_compound_array_list`, which all of those come before — so
+`readonly ra=1; ra=($(f c))` refuses without running `f`.
+
+**The fix.** `apply_assignment_inner` gained a `pre: Option<Str>` parameter and
+expands a scalar right-hand side at the top, before anything is resolved; the
+scope-swap re-entry (`apply_assignment_expanded`) threads the already-expanded
+value through instead of re-expanding it. That last part is not cosmetic:
+`i1=${i1:=V}` re-expanded under the swap read the *target's* scope and answered
+`V` where bash answers the value the caller's scope held.
+
+**Corpus:** `an-assignments-value-is-expanded-before-the-variable-is-looked-for.sh`.
+
+**How it was found:** measuring the per-context write walk (see the entry above),
+whose `${x:=v}` form came out wrong for a reason that had nothing to do with the
+walk.
+
+### TD-OILS-AN-ELEMENT-ASSIGNMENT-IS-TRACED-WITH-ITS-SUBSCRIPT-EXPANDED. bash traces the target as written and the value as expanded — FIXED 2026-08-10
+
+**Where:** `userspace/oils/src/interp.rs`, the `set -x` line emitted by
+`Shell::apply_assignment_inner`, and `userspace/oils/src/unparse.rs`, which had
+no way to render an assignment's left-hand side alone (`assignment_src` rendered
+the whole thing, so a subscripted assignment could only be traced in source
+form, value included).
+
+**The rule.** `set -x` shows an assignment's two halves from two different
+places. The target is the word bash **scanned** for a name; the value is the
+string it **expanded** — because by the time `do_assignment_internal` traces,
+only the value has been through expansion. The subscript has not: it is
+evaluated later still, inside `assign_array_element`. So:
+
+```sh
+f() { echo "v$1"; }
+i=2; set -x
+a[$i]=$(f e)      # bash: + a[$i]=ve
+a[1+1]=$(f a)     # bash: + a[1+1]=va
+```
+
+A subscript makes no difference to which of the two forms the trace takes — that
+is decided by the value alone, and a compound literal is the one traced whole in
+source form, since none of it has been expanded yet.
+
+**The fix.** `unparse::assignment_src` was split so `assignment_target_src`
+renders just the name and, when there is one, the subscript as written;
+the trace line is that plus the operator plus the *expanded* value. The
+`trace_scalar` predicate dropped its `spelled.index.is_none()` clause, which was
+what previously pushed subscripted assignments onto the whole-source path.
+
+**Corpus:** `an-element-assignment-is-traced-with-its-value-expanded.sh`.
+
+**How it was found:** the corpus case for the expansion-order fix above traced
+`tr3[0]=$(f tracedelem)` where bash traced `tr3[0]=vtracedelem`.
 
 ### TD-OILS-A-NAMEREF-CHAIN-IS-FOLLOWED-PAST-THE-DEPTH-BASH-GIVES-UP-AT. bash follows 8 links and then quits, silently — FIXED 2026-08-10
 

@@ -30727,15 +30727,41 @@ impl Shell {
     }
 
     /// [`Self::resolve_ref_array_write`] for a *subscripted* target
-    /// (`ref[i]=v`, `read 'ref[i]'`, `printf -v 'ref[i]'`), which warns twice.
+    /// (`ref[i]=v`, `read 'ref[i]'`, `printf -v 'ref[i]'`), which warns twice —
+    /// once where bash finds the array (`array_variable_part`) and once where it
+    /// binds the element — except on an **associative** one, which is bound
+    /// through the variable already in hand and so walks nothing a second time
+    /// (`assign_array_element_internal`, arrayfunc.c:411):
     ///
-    /// The count is not decoration: bash resolves the name once to find the
-    /// array (`array_variable_part`) and again to bind the element, and each
-    /// walk of a circular chain reports it. A whole-array fill resolves once
-    /// and warns once, which is what makes `read -a c1` and `read 'c1[0]'`
-    /// differ by a line.
+    /// ```c
+    ///   if (entry && assoc_p (entry))
+    ///     {
+    ///       …
+    ///       entry = bind_assoc_variable (entry, vname, akey, value, flags);
+    ///     }
+    ///   else
+    ///     {
+    ///       …
+    ///       entry = bind_array_variable (vname, ind, value, flags);
+    ///     }
+    /// ```
+    ///
+    /// `bind_array_variable` finds the variable by name again where
+    /// `bind_assoc_variable` takes it as an argument, and `entry` is the *first*
+    /// walk's answer — so what decides the count is what that walk reached, not
+    /// how the subscript was written. A chain reaching nothing takes the indexed
+    /// arm and pays both walks; one that escapes a cycle to an associative
+    /// global pays one, which is why the two are told apart in the scope the
+    /// walk named rather than in the frame the reference sits in.
+    ///
+    /// A whole-array fill resolves once and warns once either way, which is what
+    /// makes `read -a c1` and `read 'c1[0]'` differ by a line.
     fn resolve_ref_elem_write(&mut self, name: &str) -> RefTarget {
-        self.resolve_ref_write_walks(name, 2)
+        let assoc = self.resolve_ref_name(name).is_some_and(|t| {
+            let base = t.base.clone();
+            self.in_target_scope(&t, |sh| sh.assoc.contains_key(&base))
+        });
+        self.resolve_ref_write_walks(name, if assoc { 1 } else { 2 })
     }
 
     /// The body of the two write-side resolvers, differing only in how many
@@ -78729,6 +78755,85 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run(&format!("{cyc} printf '[%s]' \"$c1\"; f() {{ printf '[%s]' \"$c1\"; }}; f")).0,
             "[][]",
         );
+    }
+
+    /// An element write walks the chain *twice* — once to find the array and
+    /// once to bind the element — except where the first walk reached an
+    /// **associative** one, which is bound through the variable already in hand
+    /// (`assign_array_element_internal`, arrayfunc.c:411):
+    ///
+    /// ```c
+    ///   if (entry && assoc_p (entry))
+    ///     {
+    ///       …
+    ///       entry = bind_assoc_variable (entry, vname, akey, value, flags);
+    ///     }
+    ///   else
+    ///     {
+    ///       …
+    ///       entry = bind_array_variable (vname, ind, value, flags);
+    ///     }
+    /// ```
+    ///
+    /// `bind_array_variable` finds the name again where `bind_assoc_variable`
+    /// takes the variable as an argument. So what decides the count is what the
+    /// first walk *found*, not how the subscript was written — and a cycle
+    /// escaping to global scope is what makes the difference observable, since
+    /// the array being counted sits a frame away from the reference counting it.
+    #[test]
+    fn an_element_write_through_an_escaped_cycle_walks_once_on_an_associative_array() {
+        // The declaration warns twice on its own — `check_selfref` tags the
+        // first and `bind_variable_internal` repeats it untagged — so that is
+        // the floor every row below is counted from.
+        let out = run("declare -a v=(1 2); f() { local -n v=v; :; }; f 2>&1").0;
+        assert_eq!(out.matches("circular").count(), 2, "{out:?}");
+
+        // An associative array pays one walk for the store…
+        for src in ["m[j]=W", "read 'm[j]' <<< W", "printf -v 'm[j]' W", "m[j]+=W"] {
+            let out =
+                run(&format!("declare -A m=([k]=V); f() {{ local -n m=m; {src}; }}; f 2>&1")).0;
+            assert_eq!(out.matches("circular").count(), 2 + 1, "{src} -> {out:?}");
+        }
+        assert_eq!(
+            run("declare -A m=([k]=V); f() { local -n m=m; m[j]=W; }; f 2>/dev/null
+                 declare -p m")
+                .0,
+            "declare -A m=([k]=\"V\" [j]=\"W\" )\n",
+        );
+        // …and everything the first walk did *not* find one in takes the
+        // indexed arm and pays a second: an indexed array, a scalar the store
+        // converts, and a name with nothing behind it at all.
+        for (setup, want) in [
+            ("declare -a v=(1 2);", "declare -a v=([0]=\"1\" [1]=\"W\")\n"),
+            ("v=S;", "declare -a v=([0]=\"S\" [1]=\"W\")\n"),
+            ("", "declare -a v=([1]=\"W\")\n"),
+        ] {
+            for src in ["v[1]=W", "v[1]+=W"] {
+                let full = format!("{setup} f() {{ local -n v=v; {src}; }}; f");
+                let out = run(&format!("{full} 2>&1")).0;
+                assert_eq!(out.matches("circular").count(), 2 + 2, "{full} -> {out:?}");
+            }
+            let full = format!("{setup} f() {{ local -n v=v; v[1]=W; }}; f");
+            assert_eq!(run(&format!("{full} 2>/dev/null; declare -p v")).0, want, "{setup}");
+        }
+        // A whole-array fill resolves once whatever it lands on, which is what
+        // makes it differ from the element store beside it by a line.
+        for (setup, src) in [
+            ("declare -a v=(1);", "v=(a b)"),
+            ("declare -a v=(1);", "read -a v <<< 'a b'"),
+            ("declare -a v=(1);", "mapfile -t v <<< a"),
+            ("declare -A v=([k]=V);", "v=(a b)"),
+        ] {
+            let out = run(&format!("{setup} f() {{ local -n v=v; {src}; }}; f 2>&1")).0;
+            assert_eq!(out.matches("circular").count(), 2 + 1, "{src} -> {out:?}");
+        }
+        // An associative array the escape does not reach decides nothing: a
+        // cycle closing on a *global* has nowhere to go, so the first walk
+        // finds no variable at all and the indexed arm takes it.
+        let out = run("declare -A m=([k]=V); declare -n c1=c2; declare -n c2=c1
+                       { c1[j]=W; } 2>&1")
+            .0;
+        assert_eq!(out.matches("circular").count(), 2, "{out:?}");
     }
 
     /// `${name:=word}` through a circular chain parts along the seam the

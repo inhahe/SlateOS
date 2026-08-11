@@ -43,6 +43,58 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
+### TD-OILS-A-WRITE-THROUGH-A-CHAIN-OF-LOCALS-GIVES-UP-ONE-LINK-EARLIER. bash's write-side walk caps at seven, warns, and binds a global — 2026-08-10
+
+**Where:** `userspace/oils/src/interp.rs`, `Shell::resolve_ref_write_walks` and
+the scalar store below it. Both use `Shell::walk_ref_name`, whose cap is eight —
+which is right for the *read* side and for a write at global scope, but not for a
+write from inside a function whose chain is made of locals.
+
+**The rule.** `bind_variable`
+(variables.c:3290) walks with `find_variable_last_nameref_context`, whose helper
+`find_nameref_at_context` starts its counter at `level = 1` rather than 0 — so it
+gives up one link *earlier*, at seven — and answers with the sentinel
+`&nameref_maxloop_value`, which the caller turns into a warning **and a global
+bind**:
+
+```c
+  else if (nv == &nameref_maxloop_value)
+    {
+      internal_warning (_("%s: circular name reference"), v->name);
+      return (bind_global_variable (v->name, value, flags));
+    }
+```
+
+That path is only reached from inside a function whose chain is made of *locals*
+— `bind_variable`'s outer loop enters it only for a `vc_isfuncenv`/`vc_isbltnenv`
+context, so a chain at global scope goes through `bind_variable_internal`
+instead, which walks with the ordinary eight-deep `find_variable_nameref` and
+fails silently. Measured:
+
+```sh
+f() { local -n u1=u2 u2=u3 u3=u4 u4=u5 u5=u6 u6=u7 u7=u8 u8=u9; local u9=NINE
+      printf '[%s]
+' "${u1}"      # bash: [NINE]  — eight links, the read is fine
+      u1=X; declare -p u9; }        # bash: warning: u1: circular name reference
+f                                   #       declare -- u9="NINE"  (nothing stored;
+                                    #       a *global* u1=X is made instead)
+```
+
+So the same chain reads through and fails to write, and osh reads through and
+writes: `[NINE]` then `declare -- u9="X"`, with nothing said.
+
+**Proper fix:** the write-side resolvers need their own walk — same shape, cap
+seven, and a third outcome that is neither "reached" nor "gave up quietly" but
+"warn and bind the global of the name the walk started from". `RefWalk` is the
+place to put it; a `gave_up_writing` variant beside `gave_up` would keep the read
+side untouched. The gate is a function context with the chain in locals, which is
+what `Shell::is_locally_shadowed` already answers for the escape rule.
+
+**How it was found:** reading `find_nameref_at_context` (variables.c:2173) while
+fixing TD-OILS-A-NAMEREF-CHAIN-IS-FOLLOWED-PAST-THE-DEPTH-BASH-GIVES-UP-AT (see
+Fixed Bugs), and confirming the seven-link difference by measurement..
+
+
 ### TD-OILS-A-NAMEREF-CYCLE-THAT-CLOSES-ON-A-LOCAL-IS-NOT-RESOLVED-AT-GLOBAL-SCOPE. `local -n r=r` reads the string `r` where bash reads the global `r` — 2026-08-10 — ✅ FIXED 2026-08-10
 
 **Where:** `userspace/oils/src/interp.rs`, `Shell::resolve_ref_name` — the arm
@@ -40288,6 +40340,111 @@ deny — are now fixed; see F8 and F9.)_
 ---
 
 ## Fixed Bugs
+
+### TD-OILS-A-NAMEREF-CHAIN-IS-FOLLOWED-PAST-THE-DEPTH-BASH-GIVES-UP-AT. bash follows 8 links and then quits, silently — FIXED 2026-08-10
+
+**Where:** `userspace/oils/src/interp.rs`, `Shell::resolve_ref_name` — the loop
+walked the chain to its end, keeping a `seen` list and reporting a cycle whenever
+a name repeated. bash's `find_variable_nameref` (variables.c:2074) is a different
+loop:
+
+```c
+  level = 0;
+  orig = v;
+  while (v && nameref_p (v))
+    {
+      level++;
+      if (level > NAMEREF_MAX)
+	return ((SHELL_VAR *)0);	/* error message here? */
+      newname = nameref_cell (v);
+      if (newname == 0 || *newname == ' ')
+	return ((SHELL_VAR *)0);
+      oldv = v;
+      ...
+      v = find_variable_internal (newname, flags);
+      if (v == orig || v == oldv)
+	{
+	  internal_warning (_("%s: circular name reference"), orig->name);
+	  if (variable_context && v->context)
+	    return (find_global_variable_noref (v->name));
+	  else
+	    return ((SHELL_VAR *)0);
+	}
+    }
+```
+
+`NAMEREF_MAX` is 8 (variables.h:172). Two things follow, and osh gets both wrong:
+
+**(a) The depth cap.** A chain of more than eight links resolves to *nothing*,
+with no diagnostic at all — it is not a cycle, just too long. Measured:
+
+```sh
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do eval "declare -n n$i=n$((i+1))"; done
+n13=DEEP
+echo "[${n5}]"   # bash: [DEEP]   osh: [DEEP]     (8 links)
+echo "[${n4}]"   # bash: []       osh: [DEEP]     (9 links)
+echo "[${n1}]"   # bash: []       osh: [DEEP]     (12 links)
+```
+
+**(b) Which cycles warn.** bash notices a cycle only when the walk lands back on
+the variable it *started* from (`v == orig`) or on the one it has just left
+(`v == oldv`, i.e. `declare -n x=x`). A cycle that closes further along is never
+recognised as one: bash simply spins until the depth cap and gives up quietly.
+osh's `seen` list reports every repeat. Measured:
+
+```sh
+declare -n a1=a2; declare -n a2=a3; declare -n a3=a2
+echo "${a1}"     # bash: empty, silent
+                 # osh : empty, plus "warning: a1: circular name reference"
+a1=X             # bash: silent, nothing stored — and the rest of the command
+                 #       list is abandoned, exactly as a store through a cycle
+                 #       bash *does* recognise is
+                 # osh : stores through to the end of the chain, and warns
+unset a1         # bash: silent; a1 unset, a2/a3 intact — and osh agrees on the
+                 #       effect, so only the diagnostic differs
+```
+
+The abandoned command list is the sharpest of the three, because it changes what
+runs. Measured with `exec 2>&1`:
+
+```sh
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do eval "declare -n n$i=n$((i+1))"; done
+n13=DEEP
+n4=X; echo "st=$?"; declare -p n13     # bash: prints nothing at all — the `echo`
+                                       #       and the `declare` never run
+n5=Y; echo "st=$?"; declare -p n13     # bash: st=0, declare -- n13="Y"
+```
+
+Note that the *escape* rule in (b) is keyed to the same test: only a cycle bash
+recognises can escape to global scope, so `a1` above does not escape either. osh
+already models the escape (TD-OILS-A-NAMEREF-CYCLE-THAT-CLOSES-ON-A-LOCAL-…), but
+it applies it to cycles bash would not have noticed.
+
+**Fixed** in `Shell::walk_ref_name`, which is now bash's loop link for link: a
+`level` counter capped at `NAMEREF_MAX` = 8, and a cycle test comparing the name
+just reached against the name the walk started from and against the name it came
+from. The answer is a `RefWalk` — what the chain named, plus whether it closed on
+itself — because the two ways of reaching nothing are not equally loud, and only
+the second says anything. `resolve_ref_name` is a one-line wrapper handing back
+the target, so its twenty-odd callers were untouched; `warn_circular_walks` and
+`resolve_ref_write_walks` take the flag instead of inferring it from a `None`,
+and the `for`-loop control variable asks the walk directly (`is_circular_ref` is
+gone). `last_nameref_of` — bash's `find_variable_last_nameref`, which `declare
++n` walks — counts its links the same way and gives up at the same eight, so it
+returns `Option<String>` now.
+
+Everything downstream of "the chain named nothing" was already right, which is
+why the fix is confined to the walk: a store through a too-deep chain fails and
+abandons the command list exactly as one through a cycle does, an element store
+falls back on the reference's own name and takes the attribute off it, and
+`for n4 in p q` reports 1 without running a body. Only the diagnostic differed.
+
+Corpus: `a-nameref-chain-is-followed-eight-links-and-no-further.sh`. Unit test:
+`a_nameref_chain_is_followed_eight_links_and_no_further`.
+
+**How it was found:** while modelling `unset name[sub]`'s two walks
+(`unset-removes-an-element-through-the-variable-the-walk-found.sh`), probing what
+`find_variable_last_nameref` does with a cycle that does not include the operand.
 
 ### BUG-TRYWAKE-FALSE-CONFLATES-CONTENTION. `sched::try_wake` returned `false` both for "lock contended, retry" and for "already recorded as `pending_wake`", so every wake aimed at a not-yet-parked task queued a duplicate deferred wake that later fired against an unrelated park — FIXED 2026-07-27
 

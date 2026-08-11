@@ -10670,16 +10670,26 @@ impl Shell {
                 self.last_status = 1;
                 return Flow::Next;
             }
-            // A *circular* nameref is abandoned like a readonly name — one
-            // warning, status 1, no iteration at all — even though the bind
-            // below does not otherwise follow a reference. bash asks the
-            // question in `bind_variable` before it decides where to store, so
-            // a chain that closes on itself stops the loop whether or not the
-            // store would have gone through the reference.
-            if self.is_circular_ref(var) {
-                self.perrln(&format!("warning: {var}: circular name reference"));
-                self.last_status = 1;
-                return Flow::Next;
+            // A nameref chain that names nothing is abandoned like a readonly
+            // name — status 1, no iteration at all — even though the bind below
+            // does not otherwise follow a reference. bash asks the question in
+            // `bind_variable` before it decides where to store, so a chain that
+            // reaches nowhere stops the loop whether or not the store would
+            // have gone through the reference.
+            //
+            // Only a chain that closed *on itself* says so. One abandoned for
+            // depth is just as fatal and just as quiet: with `n1…n12` each
+            // naming the next, `for n4 in p q` reports 1, runs no body and
+            // leaves `n4` the reference it was. See [`Self::walk_ref_name`].
+            if self.nameref_attr.contains(var) {
+                let walk = self.walk_ref_name(var);
+                if walk.target.is_none() {
+                    if walk.circular {
+                        self.perrln(&format!("warning: {var}: circular name reference"));
+                    }
+                    self.last_status = 1;
+                    return Flow::Next;
+                }
             }
             // …and because the reference itself is what gets bound (see below),
             // each word becomes its new *referent*, so each word has to name
@@ -13750,7 +13760,8 @@ impl Shell {
     /// front of it, so it is unbound when no global exists however plainly the
     /// reference itself is there.
     fn arith_unbound_name(&mut self, name: &str, subscripted: bool) -> Option<String> {
-        let target = self.resolve_ref_name(name);
+        let walk = self.walk_ref_name(name);
+        let target = walk.target.clone();
         // The written base names the failure for a subscripted operand, however
         // far a nameref would have reached — bash's `array_variable_name` gives
         // back the token's own base, so `declare -n r=nada; (( r[0] ))` reports
@@ -13774,7 +13785,7 @@ impl Shell {
             }
             None => false,
         };
-        self.warn_circular_walks(name, target.as_ref(), usize::from(subscripted || !found));
+        self.warn_circular_walks(name, &walk, usize::from(subscripted || !found));
         if found {
             return None;
         }
@@ -30539,16 +30550,69 @@ impl Shell {
     /// A cycle closing on a *global* still names nothing, function or not.
     /// See [`RefTarget::global`] and [`Self::with_global_binding`].
     fn resolve_ref_name(&self, name: &str) -> Option<RefTarget> {
+        self.walk_ref_name(name).target
+    }
+
+    /// [`Self::resolve_ref_name`] with the second thing the walk learned: not
+    /// only where the chain led, but whether it *closed on itself* getting
+    /// there. See [`RefWalk`], which is where the two questions are pulled
+    /// apart and why.
+    ///
+    /// The loop is bash's, link for link (`find_variable_nameref`,
+    /// variables.c:2074):
+    ///
+    /// ```c
+    ///   level = 0;
+    ///   orig = v;
+    ///   while (v && nameref_p (v))
+    ///     {
+    ///       level++;
+    ///       if (level > NAMEREF_MAX)
+    ///         return ((SHELL_VAR *)0);    /* error message here? */
+    ///       newname = nameref_cell (v);
+    ///       …
+    ///       oldv = v;
+    ///       v = find_variable_internal (newname, flags);
+    ///       if (v == orig || v == oldv)
+    ///         {
+    ///           internal_warning (_("%s: circular name reference"), orig->name);
+    ///           if (variable_context && v->context)
+    ///             return (find_global_variable_noref (v->name));
+    ///           else
+    ///             return ((SHELL_VAR *)0);
+    ///         }
+    ///     }
+    /// ```
+    ///
+    /// Two rules there are narrower than "a name came round again", which is
+    /// what osh used to test:
+    ///
+    /// * The walk is **bounded**. `NAMEREF_MAX` is 8 (variables.h:172) and
+    ///   `level` counts the links followed, so a chain of more than eight
+    ///   resolves to nothing — with no diagnostic at all, because it is not a
+    ///   cycle, merely too long.
+    /// * A cycle is recognised only where the variable just reached is the one
+    ///   the walk **started from** (`v == orig`) or the one it has just
+    ///   **left** (`v == oldv`). One closing anywhere else — `a→b→c→b` read
+    ///   from `a` — is never seen as one: the walk spins to the cap and gives
+    ///   up quietly, so `${a}` is empty and nothing is said. Read from `b` the
+    ///   same chain closes on the start name and does warn.
+    ///
+    /// The pointer comparisons are name comparisons here because every step
+    /// looks its name up the way the walk's own start did — innermost binding
+    /// first — so the same name is always the same binding.
+    fn walk_ref_name(&self, name: &str) -> RefWalk {
         let mut cur = name.to_string();
-        let mut seen: Vec<String> = Vec::new();
+        let mut level = 0usize;
         loop {
             if !self.nameref_attr.contains(&cur) {
-                return Some(RefTarget::plain(cur));
+                return RefWalk::reached(RefTarget::plain(cur));
             }
-            if seen.contains(&cur) {
-                return self
-                    .is_locally_shadowed(&cur)
-                    .then(|| RefTarget::global_of(cur));
+            // Counted and checked before the cell is even read, as bash does:
+            // a ninth link is not followed however it is spelled.
+            level += 1;
+            if level > NAMEREF_MAX {
+                return RefWalk::gave_up();
             }
             match self.vars.get(&cur).map(Vec::as_slice) {
                 Some(v) if !v.is_empty() => {
@@ -30574,7 +30638,7 @@ impl Shell {
                     if let Some((base, Some(sub))) = split_assignment_target(v)
                         && !self.name_is_bound(v)
                     {
-                        return Some(RefTarget {
+                        return RefWalk::reached(RefTarget {
                             base: base.to_string(),
                             sub: Some(sub.to_vec()),
                             global: false,
@@ -30584,12 +30648,24 @@ impl Shell {
                     // text, so a value that is not text names nothing and the
                     // walk stops there exactly as it does on an empty target.
                     let Some(target) = bytes::as_str(v) else {
-                        return Some(RefTarget::plain(cur));
+                        return RefWalk::reached(RefTarget::plain(cur));
                     };
                     let target = target.to_owned();
-                    seen.push(std::mem::replace(&mut cur, target));
+                    let left = std::mem::replace(&mut cur, target);
+                    // bash's `v == orig || v == oldv`, tested where bash tests
+                    // it: after the step, before the loop condition. The name
+                    // the escape is keyed to is the one just *reached*
+                    // (`v->name`), which is why `f() { local -n a=b; local -n
+                    // b=b; }` reads `$a` out of the global `b` and not out of
+                    // the global `a`.
+                    if cur == name || cur == left {
+                        return RefWalk::closed(
+                            self.is_locally_shadowed(&cur)
+                                .then(|| RefTarget::global_of(cur)),
+                        );
+                    }
                 }
-                _ => return Some(RefTarget::plain(cur)),
+                _ => return RefWalk::reached(RefTarget::plain(cur)),
             }
         }
     }
@@ -30679,9 +30755,9 @@ impl Shell {
     /// element, so `(( c1[0] ))` through a cycle warns twice where `(( c1 ))`
     /// warns once. A chain that resolves costs one walk either way.
     fn resolve_ref_use_walks(&self, name: &str, walks: usize) -> Option<RefTarget> {
-        let target = self.resolve_ref_name(name);
-        self.warn_circular_walks(name, target.as_ref(), walks);
-        target
+        let walk = self.walk_ref_name(name);
+        self.warn_circular_walks(name, &walk, walks);
+        walk.target
     }
 
     /// [`Self::resolve_ref_use_walks`]'s reporting on its own, for a caller that
@@ -30689,12 +30765,14 @@ impl Shell {
     /// arithmetic operand, whose walk is charged to the read *or* to the `set -u`
     /// check depending on which of them bash gets as far as. See
     /// [`Shell::arith_unbound_name`].
-    fn warn_circular_walks(&self, name: &str, target: Option<&RefTarget>, walks: usize) {
+    fn warn_circular_walks(&self, name: &str, walk: &RefWalk, walks: usize) {
         // A cycle that *escaped* to global scope is still a cycle and still
         // warns, once per walk, exactly as one that reached nothing does — the
         // warning is emitted where the walk closes, before bash decides whether
-        // there is a global to fall back on. See [`Self::resolve_ref_name`].
-        if target.is_none_or(|t| t.global) {
+        // there is a global to fall back on. And a walk that reached nothing is
+        // not by that fact a cycle: one that ran past the eighth link reached
+        // nothing too, and says nothing. See [`Self::walk_ref_name`].
+        if walk.circular {
             for _ in 0..walks {
                 self.perrln(&format!("warning: {name}: circular name reference"));
             }
@@ -30768,19 +30846,27 @@ impl Shell {
     /// times bash walks the chain — and so in how many warnings a circular one
     /// earns.
     fn resolve_ref_write_walks(&mut self, name: &str, walks: usize) -> RefTarget {
-        match self.resolve_ref_name(name) {
+        // A chain the walk gave up on for *depth* leaves the write exactly
+        // where a circular one does — the store falls on the reference's own
+        // name and takes the attribute off it — and differs only in saying
+        // nothing about it. Measured: with `n1…n12` each naming the next and
+        // `n13=DEEP`, `n4[0]=X` leaves `declare -a n4=([0]="X")` and `n13`
+        // untouched, silently. See [`Self::walk_ref_name`].
+        let walk = self.walk_ref_name(name);
+        let warnings = if walk.circular { walks } else { 0 };
+        match walk.target {
             // A cycle that escaped to global scope warns like any other, but
             // the reference *survives* it: bash has somewhere to put the value,
             // so it never reaches the code that unmakes a useless reference.
             // `g=5; f() { local -n g=g; g[1]=Z; }` leaves the local
             // `declare -n g="g"` in place and makes the **global** an array.
             Some(target) if target.global => {
-                self.warn_circular_ref(name, walks);
+                self.warn_circular_ref(name, warnings);
                 target
             }
             Some(target) => target,
             None => {
-                self.warn_circular_ref(name, walks);
+                self.warn_circular_ref(name, warnings);
                 self.break_circular_ref(name);
                 RefTarget::plain(name.to_string())
             }
@@ -30815,17 +30901,6 @@ impl Shell {
         self.vars.remove(name);
     }
 
-    /// Whether `name` heads a nameref chain that closes on itself, asked
-    /// *without* the warning [`Self::resolve_ref_use`] would give.
-    ///
-    /// For the handful of writes that neither follow a nameref nor may store
-    /// through one — a `for`/`select` control variable, which bash binds into
-    /// the reference cell itself — the cycle is still fatal to the write, so
-    /// the question has to be asked separately from the resolution.
-    fn is_circular_ref(&self, name: &str) -> bool {
-        self.nameref_attr.contains(name) && self.resolve_ref_name(name).is_none()
-    }
-
     /// Walk a nameref chain to the *last* reference in it — the one whose value
     /// names something that is not itself a reference.
     ///
@@ -30841,14 +30916,26 @@ impl Shell {
     /// [`Self::resolve_ref_use`] has already refused such a chain. The caller is
     /// expected to have checked that `name` carries the attribute at all —
     /// otherwise the answer is just `name`.
-    fn last_nameref_of(&self, name: &str) -> String {
+    ///
+    /// `None` where the chain is longer than the walk will follow. bash's
+    /// `find_variable_last_nameref` (variables.c:2116) counts its links exactly
+    /// as [`Self::walk_ref_name`] does and gives up at the same eight, just as
+    /// quietly — so with `k1…k9` each naming the next, `declare +n k1` takes
+    /// the attribute off nothing at all, where `declare +n` on the eight-link
+    /// chain beside it reaches its last link and strips that.
+    fn last_nameref_of(&self, name: &str) -> Option<String> {
         let mut cur = name.to_string();
         let mut seen: Vec<String> = Vec::new();
+        let mut level = 0usize;
         loop {
+            level += 1;
+            if level > NAMEREF_MAX {
+                return None;
+            }
             // `cur` is a reference; the step below only ever advances onto
             // another one, so this holds for every iteration.
             let Some(v) = self.vars.get(&cur).map(Vec::as_slice) else {
-                return cur;
+                return Some(cur);
             };
             // The same stopping conditions [`Self::resolve_ref_name`] uses: an
             // empty or self-naming value, an element reference (nothing is
@@ -30856,16 +30943,16 @@ impl Shell {
             // value that is not text at all.
             let elem_ref = matches!(split_assignment_target(v), Some((_, Some(_))));
             if v.is_empty() || v == cur.as_bytes() || elem_ref {
-                return cur;
+                return Some(cur);
             }
             let Some(next) = bytes::as_str(v).filter(|n| self.nameref_attr.contains(*n)) else {
-                return cur;
+                return Some(cur);
             };
             // A chain that closes on itself has no last link — every name in it
             // refers to another reference — so there is nothing for the walk to
             // answer with but the name it was asked about.
             if next == name || seen.iter().any(|s| s == next) {
-                return name.to_string();
+                return Some(name.to_string());
             }
             let next = next.to_owned();
             seen.push(std::mem::replace(&mut cur, next));
@@ -43824,11 +43911,14 @@ impl Shell {
             // `None` where the declaration followed *because* the target does
             // not exist: the letter is then about that target, which cannot be
             // carrying a nameref attribute, so nothing comes off anywhere and
-            // the operand's own reference survives.
+            // the operand's own reference survives. And `None` again where the
+            // walk gave the chain up for depth, which leaves the attribute
+            // everywhere it was for the same reason — see
+            // [`Self::last_nameref_of`].
             let nameref_off_name = if unset_nameref_follows {
                 None
             } else if unset_nameref && follow {
-                Some(self.last_nameref_of(base_name))
+                self.last_nameref_of(base_name)
             } else {
                 Some(base_name.to_string())
             };
@@ -46941,7 +47031,8 @@ impl Shell {
                 // So the chain is walked once where that lookup answered and
                 // twice where it did not, which a circular chain makes visible
                 // by warning once per walk.
-                let target = self.resolve_ref_name(base);
+                let walk = self.walk_ref_name(base);
+                let target = walk.target.clone();
                 // Whether it answered. A chain ending at an *element* reference
                 // answers nothing: the spelling is looked up as a name, and
                 // [`Self::resolve_ref_name`] hands back the element form only
@@ -46953,7 +47044,7 @@ impl Shell {
                     }
                     _ => false,
                 };
-                self.warn_circular_walks(base, target.as_ref(), 1);
+                self.warn_circular_walks(base, &walk, 1);
                 if found {
                     let name = target.as_ref().map_or_else(String::new, |t| t.base.clone());
                     // Some names the shell can never do without, and the
@@ -52727,6 +52818,64 @@ enum ElemUnset {
     /// The removal failed and has already said why — `-1`, or the `-2` the
     /// caller turns into "not an array variable".
     Failed,
+}
+
+/// How far bash follows a nameref chain — `NAMEREF_MAX` (variables.h:172).
+///
+/// It counts the *links followed*, not the names seen, so a chain of eight
+/// references resolves and one of nine does not. See [`Shell::walk_ref_name`].
+const NAMEREF_MAX: usize = 8;
+
+/// What one walk of a nameref chain found: where it led, and whether it closed
+/// on itself getting there.
+///
+/// The two are separate questions because bash's walk has two ways to reach
+/// nothing and they are not equally loud. A chain that closes on itself warns —
+/// once per walk, and the caller decides how many walks it is paying for. A
+/// chain merely *longer* than [`NAMEREF_MAX`] is abandoned without a word: it
+/// is not a cycle, only too long. Everything downstream treats the two the
+/// same — the read is empty, the scalar store fails and takes the command list
+/// with it, the element store falls back on the reference's own name — so
+/// `target` alone is what the resolvers hand on, and `circular` exists purely
+/// to decide whether anything is said about it.
+///
+/// A cycle that escaped to global scope carries *both*: a target to read
+/// through and the warning it earned on the way. See [`Shell::walk_ref_name`].
+#[derive(Debug, Clone)]
+struct RefWalk {
+    /// The variable or element the chain named, or `None` where it named
+    /// nothing.
+    target: Option<RefTarget>,
+    /// Whether the walk closed on itself, which is the only thing that warns.
+    circular: bool,
+}
+
+impl RefWalk {
+    /// A walk that ended on a name — the ordinary case, cycle or not.
+    fn reached(target: RefTarget) -> Self {
+        Self {
+            target: Some(target),
+            circular: false,
+        }
+    }
+
+    /// A walk abandoned for depth: nothing reached, nothing said.
+    fn gave_up() -> Self {
+        Self {
+            target: None,
+            circular: false,
+        }
+    }
+
+    /// A walk that closed on itself. `Some` where the cycle shut on a
+    /// function-local variable and so escaped to global scope, `None` where it
+    /// reached nothing at all.
+    fn closed(target: Option<RefTarget>) -> Self {
+        Self {
+            target,
+            circular: true,
+        }
+    }
 }
 
 /// Where a nameref chain ends: the variable, or the single array *element*,
@@ -79128,6 +79277,110 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
                        unset 'e1[0]' 2>&1; echo \"st=$?\"; declare -p e1 2>&1")
             .0;
         assert!(out.ends_with("st=0\nosh: declare: e1: not found\n"), "{out:?}");
+    }
+
+    /// A nameref chain is followed eight links and no further, and a cycle is
+    /// recognised only where it closes on the variable the walk started from or
+    /// on the one it has just left (`find_variable_nameref`, variables.c:2074):
+    ///
+    /// ```c
+    ///   level = 0;
+    ///   orig = v;
+    ///   while (v && nameref_p (v))
+    ///     {
+    ///       level++;
+    ///       if (level > NAMEREF_MAX)
+    ///         return ((SHELL_VAR *)0);    /* error message here? */
+    ///       …
+    ///       oldv = v;
+    ///       v = find_variable_internal (newname, flags);
+    ///       if (v == orig || v == oldv)
+    ///         {
+    ///           internal_warning (_("%s: circular name reference"), orig->name);
+    ///           …
+    ///         }
+    ///     }
+    /// ```
+    ///
+    /// So a chain of more than eight links names nothing *and says nothing* —
+    /// it is not a cycle, only too long — and a cycle closing anywhere further
+    /// along than those two places is never seen as one: the walk spins to the
+    /// cap and gives up just as quietly. Both reach nothing, which is why every
+    /// use of such a name behaves exactly as it does through a cycle, minus the
+    /// line of diagnostic.
+    #[test]
+    fn a_nameref_chain_is_followed_eight_links_and_no_further() {
+        // `n1…n12` each name the next; `n13` holds the value. So `n5` is eight
+        // links from it and reads through, `n4` is nine and does not.
+        let chain = "for i in 1 2 3 4 5 6 7 8 9 10 11 12; do eval \"declare -n n$i=n$((i+1))\"; done
+                     n13=DEEP;";
+        let out = run(&format!(
+            "{chain} exec 2>&1
+             printf '[%s]' \"$n1\" \"$n3\" \"$n4\" \"$n5\" \"$n6\" \"$n12\""
+        ))
+        .0;
+        assert_eq!(out, "[][][][DEEP][DEEP][DEEP]", "{out:?}");
+
+        // The cap counts the links *followed*, not the names seen — eight
+        // resolves, nine does not.
+        let eight = "declare -n m1=m2 m2=m3 m3=m4 m4=m5 m5=m6 m6=m7 m7=m8 m8=m9; m9=NINE;";
+        let nine = "declare -n k1=k2 k2=k3 k3=k4 k4=k5 k5=k6 k6=k7 k7=k8 k8=k9 k9=k10; k10=TEN;";
+        assert_eq!(run(&format!("{eight} printf '[%s]' \"$m1\"")).0, "[NINE]");
+        assert_eq!(run(&format!("{nine} printf '[%s]' \"$k1\"")).0, "[]");
+        // …and `declare +n`'s walk to the last reference gives up at the same
+        // depth, so the attribute comes off nothing at all.
+        assert_eq!(
+            run(&format!("{eight} declare +n m1; declare -p m8")).0,
+            "declare -- m8=\"m9\"\n",
+        );
+        assert_eq!(
+            run(&format!("{nine} declare +n k1; declare -p k9")).0,
+            "declare -n k9=\"k10\"\n",
+        );
+
+        // A *scalar* store through a chain it gave up on fails and takes the
+        // command list with it, exactly as one through a cycle does — without
+        // the warning, and leaving the far end of the chain untouched.
+        let out = run(&format!(
+            "{chain} exec 2>&1
+             n4=X; echo 'never runs'
+             declare -p n13"
+        ))
+        .0;
+        assert_eq!(out, "declare -- n13=\"DEEP\"\n", "{out:?}");
+        // An *element* store has the reference's own name to fall back on, so
+        // it lands there and takes the attribute off it — again silently.
+        let out = run(&format!("{chain} n4[0]=X 2>&1; declare -p n13 n4")).0;
+        assert_eq!(
+            out,
+            "declare -- n13=\"DEEP\"\ndeclare -a n4=([0]=\"X\")\n",
+            "{out:?}",
+        );
+
+        // A cycle closing further along than the start name or the name just
+        // left is not one bash notices: `a1→a2→a3→a2` read from `a1` reaches
+        // the cap in silence, where the same chain read from `a2` closes on its
+        // own start and does warn.
+        let far = "declare -n a1=a2; declare -n a2=a3; declare -n a3=a2;";
+        let out = run(&format!("{far} exec 2>&1; printf '[%s]' \"$a1\"")).0;
+        assert_eq!(out, "[]", "{out:?}");
+        let out = run(&format!("{far} exec 2>&1; printf '[%s]' \"$a2\"")).0;
+        assert_eq!(out.matches("circular").count(), 1, "{out:?}");
+
+        // The escape to global scope is keyed to the same narrow test: a
+        // reference naming itself closes on the name it just left and finds the
+        // global, while one closing two links away finds nothing.
+        assert_eq!(
+            run("declare -a g=(G); f1() { local -n g=g; printf '[%s]' \"${g}\"; }; f1 2>/dev/null")
+                .0,
+            "[G]",
+        );
+        let out = run("declare -a h3=(H)
+                       f2() { local -n h1=h2; local -n h2=h3; local -n h3=h2
+                              printf '[%s]' \"${h1}\"; }
+                       f2 2>&1")
+            .0;
+        assert_eq!(out, "[]", "{out:?}");
     }
 
     /// `${name:=word}` through a circular chain parts along the seam the

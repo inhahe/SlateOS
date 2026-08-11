@@ -171,7 +171,11 @@ pub trait VarLookup {
     /// subscript of an associative array as a *string key* (not arithmetic),
     /// so the evaluator consults this before deciding how to read `name[sub]`.
     /// The default (`false`) means every array is treated as indexed.
-    fn is_assoc(&self, name: &str) -> bool {
+    ///
+    /// `&mut` because answering means following a nameref, and a chain that
+    /// closes on a function-local reference escapes to global scope — reaching
+    /// that binding is a scope swap in the implementor, not a plain lookup.
+    fn is_assoc(&mut self, name: &str) -> bool {
         let _ = name;
         false
     }
@@ -182,7 +186,10 @@ pub trait VarLookup {
     /// **bytes**: the same arbitrary key `m[$k]=v` would have stored. The value
     /// is recursively arithmetic-evaluated. Only consulted when
     /// [`VarLookup::is_assoc`] returns `true`.
-    fn get_assoc_str(&self, name: &str, key: BStr<'_>) -> Option<Str> {
+    ///
+    /// `&mut` for [`VarLookup::is_assoc`]'s reason, and because the walk it
+    /// makes is one a circular chain is charged a warning for.
+    fn get_assoc_str(&mut self, name: &str, key: BStr<'_>) -> Option<Str> {
         let _ = (name, key);
         None
     }
@@ -252,8 +259,14 @@ pub trait VarLookup {
     /// the array before it refuses the subscript, so an implementation that
     /// reports anything about resolving the name (a circular nameref) does that
     /// first. The name is blamed as written, not as the reference resolves it.
-    fn refuse_whole_array_subscript(&mut self, name: &str, sym: u8) {
-        let _ = (name, sym);
+    ///
+    /// `walks` is how many of those resolutions this call is the one to pay for:
+    /// two on the store side, which reaches the name cold, but only one on the
+    /// read side, where [`VarLookup::note_arith_unbound`] has already made the
+    /// first. Both sides cost two in total, which `(( a[@]++ ))` shows by
+    /// printing the refusal twice with two warnings before each.
+    fn refuse_whole_array_subscript(&mut self, name: &str, sym: u8, walks: usize) {
+        let _ = (name, sym, walks);
     }
 }
 
@@ -1092,7 +1105,8 @@ impl AParser<'_> {
             // with nounset off — is the bad-subscript refusal alone.
             Lv::WholeSub(n, s) => {
                 self.vars.note_arith_unbound(&n, true)?;
-                self.vars.refuse_whole_array_subscript(&n, s);
+                // One walk: the check above already made the other.
+                self.vars.refuse_whole_array_subscript(&n, s, 1);
                 Ok((0, Lv::WholeSub(n, s)))
             }
         }
@@ -1134,7 +1148,9 @@ impl AParser<'_> {
             // The same complaint as the read, and a second time: `(( a[@]++ ))`
             // reads and stores, and bash prints the line for each.
             Lv::WholeSub(n, s) => {
-                self.vars.refuse_whole_array_subscript(n, *s);
+                // Nothing has resolved the name on this side, so both walks are
+                // this call's to pay for.
+                self.vars.refuse_whole_array_subscript(n, *s, 2);
                 Ok(())
             }
         }
@@ -2123,10 +2139,10 @@ mod tests {
         fn get_str(&mut self, _name: &str) -> Option<Str> {
             None
         }
-        fn is_assoc(&self, name: &str) -> bool {
+        fn is_assoc(&mut self, name: &str) -> bool {
             name == "m"
         }
-        fn get_assoc_str(&self, name: &str, key: BStr<'_>) -> Option<Str> {
+        fn get_assoc_str(&mut self, name: &str, key: BStr<'_>) -> Option<Str> {
             if name != "m" {
                 return None;
             }

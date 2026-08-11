@@ -43,64 +43,6 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
-### TD-OILS-A-SUBSCRIPTED-ARITHMETIC-OPERAND-DOES-NOT-FOLLOW-A-NAMEREF-CYCLES-ESCAPE. `(( arr[1] ))` through an escaped cycle reads 0 and writes nowhere — 2026-08-10
-
-**Where:** `userspace/oils/src/interp.rs`. A cycle that closes on a
-function-local reference resolves at global scope
-(`Shell::resolve_ref_name`, `RefTarget::global`), and the unsubscripted
-arithmetic operand now follows it — `Shell::arith_unbound_name` asks about
-visibility inside `Shell::in_opt_target_scope`, and the read that follows walks
-the same escape. The **subscripted** operand does not: `ArithElem::Array`
-carries only a name, so every caller of `Shell::arith_elem_read`
-(`VarLookup::get_index_str`, `get_assoc_str`, `is_assoc`) then looks the array
-up in the *current* scope, where the local reference stands in front of the
-global. `Shell::arith_elem_write_base` has the same shape on the write side.
-
-**Reproduce.**
-
-```sh
-declare -a ga=(4 5); gs=42; declare -A gm=([k]=v)
-f() { declare -n ga=z; declare -n z=ga; echo "$(( ga[1] ))"; }; f
-g() { declare -n gs=z; declare -n z=gs; echo "$(( gs[0] ))"; }; g
-h() { declare -n gm=z; declare -n z=gm; echo "$(( gm[k] ))"; }; h
-w() { declare -n ga=z; declare -n z=ga; (( ga[1] = 9 )); }; w; declare -p ga
-```
-
-bash 5.2.37 reads `5`, `42` and then fails on the *value* `v`
-(`v: unbound variable`, the recursive evaluation of what `gm[k]` holds), and
-the store leaves `declare -a ga=([0]="4" [1]="9")`. osh reads `0`, `0` and
-fails on the *subscript* `k` (`k: unbound variable`, because `is_assoc` looked
-in the wrong scope and the key was read as an index), and the store lands on the
-local reference — turning it into `declare -an ga=([0]="ga" [1]="9")`, an array
-that has kept the nameref attribute, which is a thing bash has no such thing as
-(`declare -a a; declare -n a=x` is `a: reference variable cannot be an array`).
-
-The warning counts follow the same fault — measured with a two-link cycle
-declared inside a function, counting `circular name reference` lines:
-
-| operand | bash | osh |
-|---|---|---|
-| `set +u; (( z1[0] ))`, nothing behind it | 2 | 3 |
-| `set -u; (( z1[0] ))`, nothing behind it | 1 | 1 |
-| `set +u; (( gs[0] ))`, scalar global | 2 | 3 |
-| `set -u; (( gs[0] ))`, scalar global | 2 | 4 |
-| `set +u; (( ga[1] ))`, array global | 2 | 2 |
-| `set -u; (( ga[1] ))`, array global | 2 | 3 |
-| `set +u; (( ga[1] = 5 ))`, array global | 3 | 0 |
-
-**Proper fix.** Make `ArithElem::Array` carry the resolved `RefTarget` rather
-than a bare `String`, and wrap each table lookup that follows it in
-`Shell::in_target_scope`, so the array, its bounds, its element and its
-index-vs-key kind all come from the scope the walk named. `VarLookup::is_assoc`
-is `&self` and cannot swap scopes, so it needs either a `&mut self` signature or
-a read-only peek at the parked global snapshot (`Shell::enter_global_scope`
-already knows how to find it). Once the lookups are single and scoped, the walk
-counts collapse to bash's: `array_variable_part` for the `set -u` check and one
-more for `get_array_value`, which is 1 when the check ends the expression and 2
-otherwise (expr.c:1180).
-
----
-
 ### TD-OILS-REDECLARING-A-SELF-NAMING-NAMEREF-WARNS-TOO-FEW-TIMES. The second `local -n g=g` warns twice where bash warns four times — 2026-08-10
 
 **Where:** `userspace/oils/src/interp.rs`, the `declare`/`local` builtin's
@@ -40141,6 +40083,71 @@ deny — are now fixed; see F8 and F9.)_
 ---
 
 ## Fixed Bugs
+
+### TD-OILS-A-SUBSCRIPTED-ARITHMETIC-OPERAND-DOES-NOT-FOLLOW-A-NAMEREF-CYCLES-ESCAPE. `(( arr[1] ))` through an escaped cycle read 0 and wrote nowhere — FIXED 2026-08-11
+
+**Where:** `userspace/oils/src/interp.rs` (`ArithElem`, `Shell::arith_elem_read`,
+`arith_elem_write_base`/`_commit`, `VarLookup::{note_arith_unbound, get_index_str,
+is_assoc, get_assoc_str, set_index, set_assoc, refuse_whole_array_subscript}`) and
+`userspace/oils/src/arith.rs` (the three trait signatures those needed).
+
+A cycle that closes on a function-local reference resolves at *global* scope
+(`find_variable_nameref`, variables.c:2074), and the unsubscripted operand
+already followed that escape. The subscripted one did not: `ArithElem::Array`
+carried a bare `String`, so every lookup behind it — the array's kind, its
+negative-subscript bound, the element, the store — was made in the *current*
+scope, where the local reference stands in front of the global. Reading a scalar
+global that way read the reference's own value (`"z"`) and recursively
+arithmetic-evaluated it, which is where the spurious third `z: circular name
+reference` came from.
+
+**The fix.** `ArithElem::Array { base, scope }` carries the `RefScope` the walk
+named, and each of the four lookups goes through `Shell::in_scope`; the two
+stores resolve to a `(String, RefScope)` and wrap their readonly guard and their
+table work in one swap, as `Shell::in_dest_scope` does.
+
+**And the walk counts, which are the other half of the measurement.** bash reads
+a subscripted operand through *two* lookups and an unsubscripted one through
+*one* (expr.c:1180):
+
+```c
+  v = (e == ']') ? array_variable_part (tok, tflag, …) : find_variable (tok);
+  …
+  value = (e == ']') ? get_array_value (tok, aflag, &es) : get_variable_value (v);
+```
+
+`array_variable_part` runs whatever `set -u` says, but osh's
+`note_arith_unbound` early-returned when `!nounset` — so `arith_elem_read`
+walked *twice* to compensate, which was right with `+u` and one too many with
+`-u`. Now the check makes the first walk unconditionally for a subscripted
+operand (and none of its own for an unsubscripted one, which shares bash's
+single `find_variable` with the read), `arith_elem_read` makes one, and
+`refuse_whole_array_subscript` takes the count as a parameter — 1 on the read
+side, where the check already paid, and 2 on the store side, where nothing has.
+On the write side the warnings moved out of the `target.is_none()` branch and
+into `warn_circular_walks`, so a circular chain that *escaped* warns as often as
+one that reached nothing — it just keeps its reference, having found somewhere
+to put the value.
+
+Every count below is measured against bash 5.2.37, not reasoned:
+
+| form (through an escaped cycle) | walks |
+|---|---|
+| read `a[i]`, read `m[k]` | 2 |
+| read `x` | 1 |
+| write `a[i]` | 3 |
+| write `m[k]` (no subscript to measure) | 2 |
+| write `x` | 2 |
+| `a[i] += 5` | 5 |
+| `m[k] += 4` | 4 |
+| `a[@]` read, `a[@]` store | 2 each |
+| `a[]` | 0 |
+| write `a[i]` the subscript refuses | 2, and the reference survives |
+
+**Corpus:** `a-subscripted-arithmetic-operand-follows-a-nameref-cycles-escape.sh`.
+Unit test: `a_subscripted_arithmetic_operand_follows_a_nameref_cycles_escape`,
+beside `arithmetic_through_a_circular_nameref_warns_once_per_walk`, which pins
+the non-escaping counts and is unchanged.
 
 ### TD-OILS-AN-ARITHMETIC-COMMANDS-DIAGNOSTIC-REPORTS-THE-WRONG-LINE. `(( … ))` had no line of its own — FIXED 2026-08-11
 

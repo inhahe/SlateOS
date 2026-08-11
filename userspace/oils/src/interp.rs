@@ -13736,14 +13736,17 @@ impl Shell {
     }
 
     /// [`Self::arith_elem`] for a *read* (`(( a[i] ))`, `(( m[k] ))`), which
-    /// reports a circular chain — twice, because bash resolves the name once to
-    /// find the array and again to fetch the element.
+    /// reports a circular chain once — this being the second of the two walks
+    /// bash makes, `get_array_value` after `array_variable_part`. The first is
+    /// charged to [`Self::arith_unbound_name`], which every subscripted operand
+    /// passes through whatever `set -u` says, so `(( c1[0] ))` through a cycle
+    /// warns twice all told.
     ///
     /// The silent form above stays for the question the *parser* asks
     /// ([`VarLookup::is_assoc`]), which bash settles without walking anything a
     /// second time.
     fn arith_elem_read(&self, name: &str) -> ArithElem {
-        Self::arith_elem_of(self.resolve_ref_use_walks(name, 2))
+        Self::arith_elem_of(self.resolve_ref_use(name))
     }
 
     /// The name an arithmetic operand's `set -u` complaint should carry, or
@@ -13783,7 +13786,7 @@ impl Shell {
         // `r` where the unsubscripted `(( r ))` beside it reports `nada`.
         let asked = if subscripted {
             match Self::arith_elem_of(target.clone()) {
-                ArithElem::Array(base) => Some(base),
+                ArithElem::Array { base, .. } => Some(base),
                 // Neither designates an array, so there is none to find.
                 ArithElem::Element | ArithElem::Circular => None,
             }
@@ -13847,7 +13850,10 @@ impl Shell {
     fn arith_elem_of(target: Option<RefTarget>) -> ArithElem {
         match target {
             None => ArithElem::Circular,
-            Some(t) if t.sub.is_none() => ArithElem::Array(t.base),
+            Some(t) if t.sub.is_none() => ArithElem::Array {
+                base: t.base,
+                scope: t.scope,
+            },
             Some(_) => ArithElem::Element,
         }
     }
@@ -13859,36 +13865,55 @@ impl Shell {
     /// which is measurable because the reference survives that one.
     const ARITH_ELEM_WRITE_WALKS: usize = 3;
 
-    /// The array an arithmetic *element* write to `name` should subscript, or
-    /// `None` when there is none and the complaint has already been made.
+    /// [`Self::ARITH_ELEM_WRITE_WALKS`] for an **associative** store, which is
+    /// one walk cheaper: there is no subscript to measure against the array, so
+    /// `assign_array_element_internal` (arrayfunc.c:411) binds through the
+    /// variable it already holds. Measured — `f() { declare -n m=z; declare -n
+    /// z=m; (( m[k] = 3 )); }` over a global `declare -A m` warns twice, where
+    /// the indexed `(( a[1] = 9 ))` beside it warns three times.
+    const ARITH_ASSOC_WRITE_WALKS: usize = 2;
+
+    /// The array an arithmetic *element* write to `name` should subscript, and
+    /// the context to subscript it in — or `None` when there is none and the
+    /// complaint has already been made.
     ///
-    /// A circular chain does not abandon the store: bash warns —
-    /// [`Self::ARITH_ELEM_WRITE_WALKS`] times, one walk more than a read, for
-    /// the bind — and lands it on the name the walk started from, which stops
-    /// being a reference. See [`Shell::resolve_ref_array_write`]; this is the
-    /// same rule `c1[0]=v` follows, with arithmetic's own walk count.
-    fn arith_elem_write_base(&mut self, name: &str) -> Option<String> {
-        let target = self.resolve_ref_name(name);
-        self.arith_elem_write_commit(name, target)
+    /// A circular chain does not abandon the store: bash warns — `walks` times,
+    /// one more than a read for the bind — and lands it on the name the walk
+    /// started from, which stops being a reference. See
+    /// [`Shell::resolve_ref_array_write`]; this is the same rule `c1[0]=v`
+    /// follows, with arithmetic's own walk count.
+    ///
+    /// A cycle that *escaped* to global scope is the other half of the same
+    /// rule and warns just as often, but it found somewhere to put the value, so
+    /// the reference survives and the store lands in the context the escape
+    /// named — which is what [`RefScope`] carries back to the caller.
+    fn arith_elem_write_base(&mut self, name: &str, walks: usize) -> Option<(String, RefScope)> {
+        let walk = self.walk_ref_name(name);
+        self.arith_elem_write_commit(name, &walk, walks)
     }
 
-    /// [`Self::arith_elem_write_base`] for a caller that has already resolved
-    /// the target — the *indexed* store, which has to measure the array before
-    /// it can judge the subscript, and must not walk the chain twice to do it.
+    /// [`Self::arith_elem_write_base`] for a caller that has already walked the
+    /// chain — the *indexed* store, which has to measure the array before it can
+    /// judge the subscript, and must not walk twice to do it.
     ///
-    /// `target` is [`Self::resolve_ref_name`]'s answer, so `None` means the
-    /// chain closes on itself. Everything a walk *costs* is here rather than in
-    /// the resolution: the warnings, and the unmaking of a circular reference.
-    /// That is what lets a refused store stop short of paying for the bind it
-    /// never performs — see [`Shell::warn_circular_ref`].
-    fn arith_elem_write_commit(&mut self, name: &str, target: Option<RefTarget>) -> Option<String> {
-        let Some(target) = target else {
-            // One walk more than a read, for the bind. See
+    /// Everything a walk *costs* is here rather than in the resolution: the
+    /// warnings, and the unmaking of a circular reference. That is what lets a
+    /// refused store stop short of paying for the bind it never performs — see
+    /// [`Shell::warn_circular_walks`].
+    fn arith_elem_write_commit(
+        &mut self,
+        name: &str,
+        walk: &RefWalk,
+        walks: usize,
+    ) -> Option<(String, RefScope)> {
+        self.warn_circular_walks(name, walk, walks);
+        let Some(target) = walk.target.clone() else {
+            // Nowhere at all to put it, so bash falls back on the name the walk
+            // started from and the reference is unmade. See
             // [`Shell::resolve_ref_array_write`]; this is the same rule
-            // `c1[0]=v` follows, with arithmetic's own count.
-            self.warn_circular_ref(name, Self::ARITH_ELEM_WRITE_WALKS);
+            // `c1[0]=v` follows.
             self.break_circular_ref(name);
-            return Some(name.to_string());
+            return Some((name.to_string(), RefScope::Live));
         };
         if target.sub.is_some() {
             // Nowhere to put it: the reference already names an element, so the
@@ -13899,7 +13924,7 @@ impl Shell {
             self.warn_elem_not_identifier(&spelling);
             return None;
         }
-        Some(target.base)
+        Some((target.base, target.scope))
     }
 
     /// bash's complaint when a *further* subscript is put on a nameref that
@@ -52770,7 +52795,21 @@ impl Shell {
 /// Let the arithmetic evaluator read shell variables.
 impl VarLookup for Shell {
     fn note_arith_unbound(&mut self, name: &str, subscripted: bool) -> Result<(), arith::ArithError> {
-        if !self.nounset || self.expansion_failed() {
+        // An error already raised is an expression already abandoned; nothing
+        // here is reached in bash either.
+        if self.expansion_failed() {
+            return Ok(());
+        }
+        if !self.nounset {
+            // bash reads a subscripted operand through `array_variable_part`
+            // whatever `set -u` says (expr.c:1180), so its walk is made — and
+            // paid for — even where there is no check to run. An unsubscripted
+            // operand is read through the single `find_variable` that would
+            // *also* have answered the check, so that walk belongs to the read
+            // and is charged there.
+            if subscripted {
+                drop(self.resolve_ref_use(name));
+            }
             return Ok(());
         }
         let Some(shown) = self.arith_unbound_name(name, subscripted) else {
@@ -52838,7 +52877,12 @@ impl VarLookup for Shell {
         // array, so there is no other name to give.
         let elem = self.arith_elem_read(name);
         let (blame, bound) = match &elem {
-            ArithElem::Array(base) => (base.as_str(), self.highest_index_bound(base)),
+            ArithElem::Array { base, scope } => {
+                // Measured against the array the chain *named*, which a cycle's
+                // escape puts in another context. See [`ArithElem::Array`].
+                let bound = self.in_scope(*scope, base, |sh| sh.highest_index_bound(base));
+                (base.as_str(), bound)
+            }
             // Nothing there to count back over, so *every* negative subscript
             // on one is bad.
             ArithElem::Element | ArithElem::Circular => (name, 0),
@@ -52854,7 +52898,9 @@ impl VarLookup for Shell {
         }
         match elem {
             // `array_element` already applies bash negative-index semantics.
-            ArithElem::Array(base) => self.array_element(&base, index),
+            ArithElem::Array { base, scope } => {
+                self.in_scope(scope, &base, |sh| sh.array_element(&base, index))
+            }
             // A subscript on a nameref that already designates an element names
             // nothing, and neither does one on a chain that closes on itself.
             // Both read as 0.
@@ -52862,25 +52908,32 @@ impl VarLookup for Shell {
         }
     }
 
-    fn is_assoc(&self, name: &str) -> bool {
+    fn is_assoc(&mut self, name: &str) -> bool {
         // Which kind of subscript `name[sub]` has is decided by the array the
         // name ultimately reaches, so a nameref has to be followed before the
         // question can be answered. A reference that reaches an element reaches
         // no array at all, so the subscript is read as an index and the refusal
         // is raised on the indexed path.
         match self.arith_elem(name) {
-            ArithElem::Array(base) => self.assoc.contains_key(&base),
+            // Asked of the binding the chain named: a cycle escaping out of a
+            // function reaches the global, and it is the global's kind that
+            // decides whether `g[k]` is a key or an expression.
+            ArithElem::Array { base, scope } => {
+                self.in_scope(scope, &base, |sh| sh.assoc.contains_key(&base))
+            }
             // Neither reaches an array, so the subscript is read as an index and
             // whatever refusal is owed is raised on the indexed path.
             ArithElem::Element | ArithElem::Circular => false,
         }
     }
 
-    fn get_assoc_str(&self, name: &str, key: BStr<'_>) -> Option<Str> {
+    fn get_assoc_str(&mut self, name: &str, key: BStr<'_>) -> Option<Str> {
         match self.arith_elem_read(name) {
             // An unset key (or empty value) evaluates to 0; a non-empty value is
             // recursively arithmetic-evaluated by the caller.
-            ArithElem::Array(base) => self.assoc_element(&base, key),
+            ArithElem::Array { base, scope } => {
+                self.in_scope(scope, &base, |sh| sh.assoc_element(&base, key))
+            }
             ArithElem::Element | ArithElem::Circular => None,
         }
     }
@@ -52911,21 +52964,24 @@ impl VarLookup for Shell {
         // warns twice and leaves `c1` a reference, where `(( c1[3] = 5 ))` beside
         // it warns a third time and replaces it with an array. So the walk here
         // is the silent one, and only the commit below pays for itself.
-        let target = self.resolve_ref_name(name);
-        let bound = match &target {
+        let walk = self.walk_ref_name(name);
+        let bound = match &walk.target {
             // A reference that lands on an element, or one that closes on
             // itself, reaches no array at all — nothing to count back over.
             None => 0,
             Some(t) if t.sub.is_some() => 0,
-            Some(t) => self.elem_write_bound(&t.base),
+            // Measured against the binding the chain named, which a cycle's
+            // escape puts in an outer context.
+            Some(t) => {
+                let base = t.base.clone();
+                self.in_scope(t.scope, &base, |sh| sh.elem_write_bound(&base))
+            }
         };
         if index < 0 && Self::resolve_index(index, bound).is_none() {
             // The walks that *measured* the name are paid for even though the
             // store is not: a circular chain warns for them and then survives,
             // because only the bind would have unmade it.
-            if target.is_none() {
-                self.warn_circular_ref(name, Self::ARITH_ELEM_WRITE_WALKS - 1);
-            }
+            self.warn_circular_walks(name, &walk, Self::ARITH_ELEM_WRITE_WALKS - 1);
             // Spelled with the name as *written* and the subscript's own source
             // text, verbatim — bash never rewrote it to its value, because a
             // store it refuses is one the read never cached an index for. See
@@ -52937,33 +52993,42 @@ impl VarLookup for Shell {
             self.note_shell_error(FatalWhen::ErrexitOnly);
             return Ok(());
         }
-        let Some(base) = self.arith_elem_write_commit(name, target) else {
+        let Some((base, scope)) =
+            self.arith_elem_write_commit(name, &walk, Self::ARITH_ELEM_WRITE_WALKS)
+        else {
             return Ok(());
         };
-        self.arith_elem_writable(name, &base)?;
-        // Only now that the store is certain: a scalar becomes element 0 of the
-        // array this write brings into being, which is why `c=9; (( c[1] = 4 ))`
-        // keeps the 9. A refused subscript above never gets here, so it leaves
-        // the scalar a scalar and an unset name unset.
-        self.array_kind_apply(&base, false);
-        let Some(real) = Self::resolve_index(index, bound) else {
-            return Ok(());
-        };
-        self.arrays
-            .entry(base.clone())
-            .or_default()
-            .insert(real, value.to_string().into_bytes());
-        self.after_var_write(&base);
-        Ok(())
+        // One swap around the guard and the store together — see
+        // [`Shell::in_dest_scope`], whose rule this follows.
+        self.in_scope(scope, &base, |sh| {
+            sh.arith_elem_writable(name, &base)?;
+            // Only now that the store is certain: a scalar becomes element 0 of
+            // the array this write brings into being, which is why `c=9;
+            // (( c[1] = 4 ))` keeps the 9. A refused subscript above never gets
+            // here, so it leaves the scalar a scalar and an unset name unset.
+            sh.array_kind_apply(&base, false);
+            let Some(real) = Self::resolve_index(index, bound) else {
+                return Ok(());
+            };
+            sh.arrays
+                .entry(base.clone())
+                .or_default()
+                .insert(real, value.to_string().into_bytes());
+            sh.after_var_write(&base);
+            Ok(())
+        })
     }
 
     fn set_assoc(&mut self, name: &str, key: BStr<'_>, value: i64) -> Result<(), arith::ArithError> {
-        let Some(base) = self.arith_elem_write_base(name) else {
+        let Some((base, scope)) = self.arith_elem_write_base(name, Self::ARITH_ASSOC_WRITE_WALKS)
+        else {
             return Ok(());
         };
-        self.arith_elem_writable(name, &base)?;
-        self.assoc_set(&base, key.to_vec(), value.to_string().into_bytes(), false);
-        Ok(())
+        self.in_scope(scope, &base, |sh| {
+            sh.arith_elem_writable(name, &base)?;
+            sh.assoc_set(&base, key.to_vec(), value.to_string().into_bytes(), false);
+            Ok(())
+        })
     }
 
     fn warn_empty_subscript_read(&mut self, name: &str) {
@@ -52983,14 +53048,15 @@ impl VarLookup for Shell {
         self.warn_elem_not_identifier(&bfmt![name, b"[]"]);
     }
 
-    fn refuse_whole_array_subscript(&mut self, name: &str, sym: u8) {
+    fn refuse_whole_array_subscript(&mut self, name: &str, sym: u8, walks: usize) {
         // bash finds the array before it refuses the subscript, so a circular
-        // chain is reported by that walk — twice, as any element lookup's is —
-        // ahead of the line below. The array itself is then thrown away: what
-        // the name resolves to has no bearing on the complaint, which blames the
-        // name exactly as written (`declare -n r=a; (( r[@] ))` is `r[@]`) and
-        // is untagged, unlike the empty subscript's store-side refusal.
-        drop(self.arith_elem_read(name));
+        // chain is reported by that walk — as many times as this side of the
+        // operand still owes — ahead of the line below. The array itself is then
+        // thrown away: what the name resolves to has no bearing on the
+        // complaint, which blames the name exactly as written (`declare -n r=a;
+        // (( r[@] ))` is `r[@]`) and is untagged, unlike the empty subscript's
+        // store-side refusal.
+        drop(self.resolve_ref_use_walks(name, walks));
         self.perrln(&bfmt![name, b"[", &[sym][..], b"]: bad array subscript"]);
     }
 }
@@ -53169,8 +53235,15 @@ enum ResolvedKind {
 /// cases differ there only in the complaint they have already made, which is
 /// [`Shell::arith_elem_write_base`]'s business rather than its caller's.
 enum ArithElem {
-    /// An array (or associative array) to subscript, by name.
-    Array(String),
+    /// An array (or associative array) to subscript, by name — and in the
+    /// variable context the walk named it in, which a cycle that escaped to
+    /// global scope makes observable: `f() { declare -n g=z; declare -n z=g;
+    /// (( g[1] )); }` subscripts the **global** `g`, not the local reference
+    /// standing in front of it. Every question the operand asks — which kind of
+    /// array it is, how far a negative subscript may reach back, the element
+    /// itself — is asked there, so each lookup goes through
+    /// [`Shell::in_scope`].
+    Array { base: String, scope: RefScope },
     /// A single element, already designated by the nameref — leaving the `[sub]`
     /// that was written with nothing to apply to. Reading it is silent (bash
     /// yields 0); only a write draws a complaint, and that names the target as
@@ -79369,6 +79442,124 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("declare -a u=(1 2); declare -n r=u; (( r[1] += 4 )); declare -p u").0,
             "declare -a u=([0]=\"1\" [1]=\"6\")\n",
         );
+    }
+
+    /// A *subscripted* arithmetic operand follows a nameref cycle's global
+    /// escape, exactly as the unsubscripted one does.
+    ///
+    /// A cycle closing on a function-local reference does not resolve to
+    /// nothing: `find_variable_nameref` (variables.c:2074) warns and then
+    /// escapes —
+    ///
+    /// ```c
+    ///   if (v == orig || v == oldv)
+    ///     {
+    ///       internal_warning (_("%s: circular name reference"), orig->name);
+    ///       if (variable_context && v->context)
+    ///         return (find_global_variable_noref (v->name));
+    /// ```
+    ///
+    /// — so every question the operand asks has to be asked of the *global*: the
+    /// kind of array it is, how far a negative subscript may reach back, the
+    /// element itself, and where a store lands. [`ArithElem::Array`] carries the
+    /// [`RefScope`] that says where.
+    #[test]
+    fn a_subscripted_arithmetic_operand_follows_a_nameref_cycles_escape() {
+        // `z` closes the cycle on a local, so the walk escapes to the global.
+        let cyc = "declare -n ga=z; declare -n z=ga;";
+        // Inside a function, which is where a cycle has a local to close on.
+        let w = "main: warning: ga: circular name reference\n";
+
+        // The read lands on the global the escape named — a walk to find the
+        // array and a walk to fetch out of it, so two warnings.
+        assert_eq!(
+            run(&format!(
+                "declare -a ga=(4 5); r() {{ {cyc} echo \"[$(( ga[1] ))]\"; }}; r 2>&1"
+            ))
+            .0,
+            format!("{w}{w}[5]\n"),
+        );
+        // Including the index-vs-key question: a key is not an expression, so
+        // `gm[k]` reads the entry `k` rather than evaluating the name `k` to 0.
+        assert_eq!(
+            run(&format!(
+                "declare -A ga=([k]=11); r() {{ {cyc} echo \"[$(( ga[k] ))]\"; }}; r 2>&1"
+            ))
+            .0,
+            format!("{w}{w}[11]\n"),
+        );
+        // And the negative-subscript bound, which is the escaped array's.
+        assert_eq!(
+            run(&format!(
+                "declare -a ga=(4 5); r() {{ {cyc} echo \"[$(( ga[-1] ))]\"; }}; r 2>&1"
+            ))
+            .0,
+            format!("{w}{w}[5]\n"),
+        );
+        assert_eq!(
+            run(&format!(
+                "declare -a ga=(4 5); r() {{ {cyc} echo \"[$(( ga[-7] ))]\"; }}; r 2>&1"
+            ))
+            .0,
+            format!("{w}{w}main: ga: bad array subscript\n[0]\n"),
+        );
+
+        // The store lands there too, and — having found somewhere to put the
+        // value — leaves the reference standing, unlike a cycle that reached
+        // nothing at all.
+        assert_eq!(
+            run(&format!(
+                "declare -a ga=(4 5); w() {{ {cyc} (( ga[1] = 9 )); declare -p ga; }}; \
+                 w 2>&1; declare -p ga"
+            ))
+            .0,
+            format!("{w}{w}{w}declare -n ga=\"z\"\ndeclare -a ga=([0]=\"4\" [1]=\"9\")\n"),
+        );
+        // An associative store is one walk cheaper: there is no subscript to
+        // measure against the array. See [`Shell::ARITH_ASSOC_WRITE_WALKS`].
+        assert_eq!(
+            run(&format!(
+                "declare -A ga=([k]=v); w() {{ {cyc} (( ga[k2] = 3 )); }}; w 2>&1; declare -p ga"
+            ))
+            .0,
+            format!("{w}{w}declare -A ga=([k]=\"v\" [k2]=\"3\" )\n"),
+        );
+        // A read-modify-write walks both ways, so the counts add: 2 + 3 for the
+        // indexed one, 2 + 2 for the associative.
+        assert_eq!(
+            run(&format!(
+                "declare -a ga=(4 5); w() {{ {cyc} (( ga[0] += 10 )); }}; w 2>&1; declare -p ga"
+            ))
+            .0,
+            format!("{}declare -a ga=([0]=\"14\" [1]=\"5\")\n", w.repeat(5)),
+        );
+        assert_eq!(
+            run(&format!(
+                "declare -A ga=([k]=11); w() {{ {cyc} (( ga[k] += 10 )); }}; w 2>&1; declare -p ga"
+            ))
+            .0,
+            format!("{}declare -A ga=([k]=\"21\" )\n", w.repeat(4)),
+        );
+
+        // `set -u` asks about the escaped variable, not about the reference
+        // standing in front of it, so the read succeeds — and the walk it makes
+        // is the same one it would make with nounset off.
+        assert_eq!(
+            run(&format!(
+                "declare -a ga=(4 5); set -u; r() {{ {cyc} echo \"[$(( ga[1] ))]\"; }}; r 2>&1"
+            ))
+            .0,
+            format!("{w}{w}[5]\n"),
+        );
+        // A chain that reaches nothing at all is unbound, and is named after the
+        // written base rather than after wherever a nameref would have led.
+        let (out, st) = run("set -u; r() { declare -n z1=z2; declare -n z2=z1; \
+                             echo \"[$(( z1[0] ))]\"; }; r 2>&1");
+        assert_eq!(
+            out,
+            "main: warning: z1: circular name reference\nmain: z1: unbound variable\n"
+        );
+        assert_eq!(st, 1);
     }
 
     /// The same rule on the expansion side: a plain read walks a circular chain

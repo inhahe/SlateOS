@@ -45588,13 +45588,41 @@ impl Shell {
                     if self.allexport {
                         self.mark_exported(name.to_string());
                     }
-                } else if assoc || indexed {
+                } else if assoc
+                    || indexed
+                    || self.arrays.contains_key(name)
+                    || self.assoc.contains_key(name)
+                {
+                    // Whether the operand's value is stored *as an array* is not
+                    // a question about this command's letters. bash asks
+                    // `creating_array || array_exists` (declare.def:885) —
+                    //
+                    // ```c
+                    //   var_exists = var != 0;
+                    //   array_exists = var && (array_p (var) || assoc_p (var));
+                    //   creating_array = flags_on & (att_array|att_assoc);
+                    //   …
+                    //   else if ((making_array_special || creating_array || array_exists) && offset)
+                    // ```
+                    //
+                    // — so the name's *current* kind answers just as well as the
+                    // flag does, and a flagless operand on a name that is
+                    // already an array takes this branch too.
+                    //
                     // A string value assigned to an array via `declare`. bash
                     // treats a parenthesized string as a *compound array
                     // literal* — re-parsed and re-expanded, so globbing,
                     // word-splitting, quoting and `$var` all apply a second
                     // time — while any other string becomes a single element at
                     // index/key 0 (`declare -a a=x` → `([0]="x")`).
+                    //
+                    // The kind test is what makes the compound half reachable
+                    // without a letter: `declare -a g; declare g='(1 2)'` is
+                    // `([0]="1" [1]="2")`, not the parentheses stored whole, and
+                    // `declare -A g; declare g='(1 2)'` is `([1]="2" )`. No
+                    // deprecation warning goes with it — declare.def:899 prints
+                    // that only when `array_exists == 0 && creating_array == 0`,
+                    // which is exactly the case this is not.
                     let trimmed = bytes::trim(&v);
                     if trimmed.starts_with(b"(") && trimmed.ends_with(b")") {
                         // Re-parse `name=(...)` and drive it through the normal
@@ -45636,7 +45664,12 @@ impl Shell {
                             self.array_valued.insert(name.to_string());
                             break;
                         };
-                        if assoc {
+                        // Which of the two element stores bash makes is decided
+                        // by the variable, not by the letters either:
+                        // declare.def:972 is `if (assoc_p (var))`. The kind
+                        // this command asked for has already been applied to it
+                        // above, so the two agree wherever a letter was given.
+                        if self.assoc.contains_key(name) {
                             self.assoc_set(name, b"0".to_vec(), stored, false);
                         } else {
                             self.array_valued.insert(name.to_string());
@@ -73564,6 +73597,59 @@ st=1
             let out = run(&format!("f() {{ {src} 2>/dev/null; declare -p g; }}; f")).0;
             assert_eq!(out, format!("{shape}\n"), "{src}");
         }
+    }
+
+    /// Whether a declaration's `NAME=value` operand is stored as an array
+    /// element is decided by `creating_array || array_exists`
+    /// (declare.def:885) — the letters **or** the variable's current kind — and
+    /// which of the two element stores is made by `if (assoc_p (var))` (:972),
+    /// the variable again. osh asked only about this command's `-a`/`-A`, so a
+    /// parenthesised value on a name that was already an array was stored whole
+    /// instead of re-parsed as a compound literal. Corpus:
+    /// `a-declare-array-store-is-chosen-by-the-variables-kind-not-the-letters.sh`.
+    #[test]
+    fn a_declare_array_store_is_chosen_by_the_variables_kind_not_the_letters() {
+        // A parenthesised value on a name that is already an array is a
+        // compound array literal, with no letter on the command at all.
+        for (src, shape) in [
+            (r#"declare -a g; declare g='(1 2)'"#, r#"declare -a g=([0]="1" [1]="2")"#),
+            (r#"declare -a g=(7 8); declare g='(1 2)'"#, r#"declare -a g=([0]="1" [1]="2")"#),
+            (r#"declare -A g; declare g='(1 2)'"#, r#"declare -A g=([1]="2" )"#),
+            (r#"declare -A g=([k]=1); declare g='(1 2)'"#, r#"declare -A g=([1]="2" )"#),
+            (r#"declare -a g; typeset g='(1 2)'"#, r#"declare -a g=([0]="1" [1]="2")"#),
+            (
+                r#"declare -a g=(7 8); declare g+='(1 2)'"#,
+                r#"declare -a g=([0]="7" [1]="8" [2]="1" [3]="2")"#,
+            ),
+            // The letter says the same thing on a name that has no kind yet…
+            (r#"declare -a g='(1 2)'"#, r#"declare -a g=([0]="1" [1]="2")"#),
+            // …and without either, the parentheses are just text.
+            (r#"declare g='(1 2)'"#, r#"declare -- g="(1 2)""#),
+            (r#"g=5; declare g='(1 2)'"#, r#"declare -- g="(1 2)""#),
+            // An unparenthesised value is element zero, letter or no letter.
+            (r#"declare -a g=(7 8); declare g=9"#, r#"declare -a g=([0]="9" [1]="8")"#),
+            (r#"declare -a g=(7 8); declare g+=9"#, r#"declare -a g=([0]="79" [1]="8")"#),
+            (r#"declare -A g=([k]=1); declare g=9"#, r#"declare -A g=([0]="9" [k]="1" )"#),
+            (r#"declare -ai g=(7 8); declare g=4+4"#, r#"declare -ai g=([0]="8" [1]="8")"#),
+            (r#"declare -au g=(7 8); declare g=ab"#, r#"declare -au g=([0]="AB" [1]="8")"#),
+        ] {
+            let out = run(&format!("{src}; declare -p g")).0;
+            assert_eq!(out, format!("{shape}\n"), "{src}");
+        }
+
+        // The question is about the binding that is live, so a local scalar
+        // shadowing a global array answers as a scalar — and a local array
+        // shadowing a global scalar answers as an array.
+        let (out, _) = run(
+            "declare -a g=(7 8); f() { local g=5; declare g='(1 2)'; declare -p g; }; f; \
+             echo AFTER; declare -p g",
+        );
+        assert_eq!(out, "declare -- g=\"(1 2)\"\nAFTER\ndeclare -a g=([0]=\"7\" [1]=\"8\")\n");
+        let (out, _) = run(
+            "g=5; f() { local -a g=(7 8); declare g='(1 2)'; declare -p g; }; f; \
+             echo AFTER; declare -p g",
+        );
+        assert_eq!(out, "declare -a g=([0]=\"1\" [1]=\"2\")\nAFTER\ndeclare -- g=\"5\"\n");
     }
 
     /// `declare -g name[sub]=value` reaches two variables: the declaration is

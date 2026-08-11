@@ -42085,6 +42085,106 @@ impl Shell {
         }
     }
 
+    /// The name an `-a`/`-A` operand of `readonly`/`export` is a **declaration**
+    /// about, or `None` when it is one of those builtins' own markings after
+    /// all.
+    ///
+    /// bash does not run such an operand through `set_or_show_attributes` at
+    /// all. It rewrites it into a `declare` command and calls the declare
+    /// builtin on it — adding the `-g` itself, so that the binding it makes is
+    /// a global (setattr.def:234):
+    ///
+    /// ```c
+    /// /* Let's try something here.  Turn readonly -a xxx=yyy into
+    ///    declare -ra xxx=yyy and see what that gets us. */
+    /// if (arrays_only || assoc_only)
+    ///   {
+    ///     tlist = list->next;
+    ///     list->next = (WORD_LIST *)NULL;
+    ///     /* Add -g to avoid readonly/export creating local variables:
+    ///        only local/declare/typeset create local variables */
+    ///     opti = 0;
+    ///     optw[opti++] = '-';
+    ///     optw[opti++] = 'g';
+    ///     …
+    ///     opt = declare_builtin (nlist);
+    /// ```
+    ///
+    /// Two conditions gate it, and this answers both:
+    ///
+    /// * **a value.** `if (assign)` encloses the whole rewrite, so a valueless
+    ///   `readonly -a name` is an ordinary attribute marking and stays local.
+    /// * **a legal identifier.** `legal_identifier (name)` is checked above it
+    ///   and refuses the operand outright, so `readonly -a 'g[1]=9'` never
+    ///   reaches the rewrite and gets these builtins' own
+    ///   `` `g[1]': not a valid identifier `` instead.
+    ///
+    /// The caller passes the operand *whole* to the declaration — bash hands
+    /// over the same `WORD_LIST` element, `+=` and all — and uses the name
+    /// returned here for the marking that still follows it.
+    fn setattr_declared_name(word: BStr<'_>, array_letter: bool) -> Option<BStr<'_>> {
+        if !array_letter {
+            return None;
+        }
+        let eq = attr_assignment_split(word)?;
+        let end = if eq > 0 && word.get(eq - 1) == Some(&b'+') { eq - 1 } else { eq };
+        let name = word.get(..end).unwrap_or_default();
+        crate::parser::is_valid_name(name).then_some(name)
+    }
+
+    /// Run the rewrite [`Shell::setattr_declared_name`] describes: the operand
+    /// as a `declare -g[r|x][a|A] name=value` command.
+    ///
+    /// `mark` is the letter `attribute` carries, and is `None` when `-n` has
+    /// taken it away. The two builtins differ there, because the `undo` arm
+    /// edits `attribute` **asymmetrically** (setattr.def:174):
+    ///
+    /// ```c
+    ///   /* Cannot undo readonly status, silently disallowed. */
+    ///   if (undo && (attribute & att_readonly))
+    ///     attribute &= ~att_readonly;
+    /// ```
+    ///
+    /// So `readonly -an g=9` declares a plain `declare -ga g=9` while
+    /// `export -an g=9` keeps its `x` and declares `declare -gxa g=9` — and
+    /// only then takes the attribute off the live binding again.
+    ///
+    /// The diagnostics keep **this** builtin's tag: `declare_builtin` is called
+    /// as a plain C function, so `this_command_name` is never changed for it.
+    /// `declare -a q=(1 2); readonly -A q=9` therefore reports
+    /// `readonly: q: cannot convert indexed to associative array` — a
+    /// `declare` refusal, spoken in `readonly`'s name.
+    fn setattr_declare(
+        &mut self,
+        tag: &str,
+        word: &Str,
+        mark: Option<u8>,
+        indexed: bool,
+    ) -> i32 {
+        let mut flag = b"-g".to_vec();
+        if let Some(c) = mark {
+            flag.push(c);
+        }
+        // The rewrite tests `arrays_only` first, so naming **both** letters
+        // gives the declaration an `a` — the other way round from `declare`,
+        // which tests `att_assoc` first and lets `-A` win. `readonly -aA g=9`
+        // is `declare -gra g=9`, an indexed array, where `declare -aA g=9`
+        // makes an associative one and then refuses the `-a` against it.
+        flag.push(if indexed { b'a' } else { b'A' });
+        let argv = [flag, word.clone()];
+        let status = self.builtin_declare(&argv, false, tag, argv.len());
+        // `if (opt != EXECUTION_SUCCESS) assign_error++;` — and `assign_error`
+        // is what makes the builtin return `EX_BADASSIGN` rather than a plain
+        // failure, which in posix mode ends a non-interactive shell because
+        // both builtins are special. So `set -o posix; declare -a q=(1 2);
+        // readonly -A q=9` exits at the kind conflict. See
+        // [`Shell::posix_special_builtin_abort`].
+        if status != 0 {
+            self.builtin_failure = Some(BuiltinFailure::Assignment);
+        }
+        status
+    }
+
     /// Follow an `export`/`readonly` operand that carries the nameref attribute
     /// to what it points at, the way bash does before it marks anything:
     ///
@@ -42378,6 +42478,23 @@ impl Shell {
         let _ = print; // `-p` with operands behaves like plain `export`.
         let mut status = 0;
         for a in operands {
+            // An `-a`/`-A` operand carrying a value is a **declaration**, not a
+            // marking: bash rewrites it into `declare -gxa name=value` and runs
+            // the declare builtin on it. See [`Shell::setattr_declared_name`].
+            // What is left for this loop is the `set_var_attribute` that still
+            // follows the rewrite (setattr.def:279, outside the `if`) — the
+            // marking, on the live binding, of the name alone.
+            let declared = Self::setattr_declared_name(a, assoc || indexed);
+            let a: BStr<'_> = match declared {
+                Some(name) => {
+                    // `-n` does not take the `x` out of `attribute`, so the
+                    // declaration still exports the global it makes and only
+                    // the live binding is unexported afterwards.
+                    status |= self.setattr_declare("export", a, Some(b'x'), indexed);
+                    name
+                }
+                None => a,
+            };
             let rule = AttrRefRule {
                 array: assoc || indexed,
                 unexport,
@@ -47585,6 +47702,24 @@ impl Shell {
         }
         let mut status = 0;
         for name_val in names {
+            // An `-a`/`-A` operand carrying a value is a **declaration**, not a
+            // marking: bash rewrites it into `declare -gra name=value` and runs
+            // the declare builtin on it. See [`Shell::setattr_declared_name`].
+            // What is left for this loop is the `set_var_attribute` that still
+            // follows the rewrite (setattr.def:279, outside the `if`) — the
+            // marking, on the live binding, of the name alone.
+            let declared = Self::setattr_declared_name(name_val, assoc || indexed);
+            let name_val: BStr<'_> = match declared {
+                Some(name) => {
+                    // `-n` clears `att_readonly` from `attribute` outright
+                    // (setattr.def:174), so the declaration it builds carries
+                    // no `r` — and the marking below then has nothing to do.
+                    let mark = (!no_mark).then_some(b'r');
+                    status |= self.setattr_declare("readonly", name_val, mark, indexed);
+                    name
+                }
+                None => name_val.as_slice(),
+            };
             // Supports `NAME=value` and the `NAME+=value` append form; anything
             // that is not a plain identifier is refused here, and only that
             // operand is lost.
@@ -74174,6 +74309,223 @@ st=1
              declare -p g w; }; f 2>&1",
         );
         assert_eq!(out, "st=0\ndeclare -nr g=\"w\"\ndeclare -a w=([0]=\"9\")\n");
+    }
+
+    /// An `-a`/`-A` operand of `readonly`/`export` **carrying a value** is not
+    /// marked by `set_or_show_attributes` at all: bash rewrites it into a
+    /// `declare` command and calls the declare builtin on it, adding `-g`
+    /// itself (setattr.def:234) — `readonly -a g=9` *is* `declare -gra g=9`.
+    /// So the declaration is about the global while the store is the split
+    /// `bind_array_variable (name, 0, …)`, a live lookup; the marking that
+    /// follows (:279, outside the `if`) is `set_var_attribute` on whichever
+    /// binding is live. osh marked and stored in one place, on the local.
+    /// Corpus: `readonly-a-and-export-a-are-declarations-with-g-added.sh`.
+    #[test]
+    fn readonly_a_and_export_a_are_declarations_with_g_added() {
+        // The declaration is the global's; the element goes to the live
+        // binding, and every conversion it meets there is the live one's.
+        for (src, inside, after) in [
+            ("readonly -a g=9", "declare -ar g=([0]=\"9\")", "declare -ar g=()"),
+            ("export -a g=9", "declare -ax g=([0]=\"9\")", "declare -ax g=()"),
+            // `+=` appends to what the *local* holds, not to the empty global.
+            ("readonly -a g+=9", "declare -ar g=([0]=\"59\")", "declare -ar g=()"),
+        ] {
+            let (out, _) = run(&format!(
+                "f() {{ local g=5; {src}; declare -p g; }}; ( f 2>&1; echo AFTER; declare -p g )"
+            ));
+            assert_eq!(out, format!("{inside}\nAFTER\n{after}\n"), "{src}");
+        }
+        // The live binding's own letters keep working on the element.
+        for (decl, src, inside) in [
+            ("local -a g=(1 2)", "readonly -a g=9", "declare -ar g=([0]=\"9\" [1]=\"2\")"),
+            ("local -i g=5", "readonly -a g=4+4", "declare -air g=([0]=\"8\")"),
+            ("local -u g=5", "readonly -a g=ab", "declare -aru g=([0]=\"AB\")"),
+        ] {
+            let (out, _) = run(&format!(
+                "f() {{ {decl}; {src}; declare -p g; }}; ( f 2>&1; echo AFTER; declare -p g )"
+            ));
+            assert_eq!(out, format!("{inside}\nAFTER\ndeclare -ar g=()\n"), "{src}");
+        }
+
+        // The split store carries `ASS_FORCE`, so a readonly live binding
+        // takes the element and says nothing.
+        let (out, _) = run(
+            "f() { local -r g=5; readonly -a g=9; echo \"st=$?\"; declare -p g; }; \
+             ( f 2>&1; echo AFTER; declare -p g )",
+        );
+        assert_eq!(
+            out,
+            "st=0\ndeclare -ar g=([0]=\"9\")\nAFTER\ndeclare -ar g=()\n"
+        );
+
+        // The assoc half of the rewritten declaration is handed the
+        // declaration's *own* variable, so `-A` does not split: the local is
+        // left alone and the whole array lands on the global.
+        for (src, inside, after) in [
+            ("readonly -A g=9", "declare -r g=\"5\"", "declare -Ar g=([0]=\"9\" )"),
+            ("export -A g=9", "declare -x g=\"5\"", "declare -Ax g=([0]=\"9\" )"),
+        ] {
+            let (out, _) = run(&format!(
+                "f() {{ local g=5; {src}; echo \"st=$?\"; declare -p g; }}; \
+                 ( f 2>&1; echo AFTER; declare -p g )"
+            ));
+            assert_eq!(out, format!("st=0\n{inside}\nAFTER\n{after}\n"), "{src}");
+        }
+
+        // The rewrite tests `arrays_only` first, so naming both letters gives
+        // the declaration an `a` — the other way round from `declare`, which
+        // tests `att_assoc` first at :610 and lets `-A` win.
+        let (out, _) = run("f() { readonly -aA g=9; echo \"st=$?\"; declare -p g; }; ( f 2>&1 )");
+        assert_eq!(out, "st=0\ndeclare -ar g=([0]=\"9\")\n");
+        let (out, _) = run("f() { export -Aa g=9; echo \"st=$?\"; declare -p g; }; ( f 2>&1 )");
+        assert_eq!(out, "st=0\ndeclare -ax g=([0]=\"9\")\n");
+
+        // `-n` edits `attribute` asymmetrically (setattr.def:174): `readonly`
+        // loses its `r` outright, so the declaration carries none; `export`
+        // keeps its `x`, so the declaration still exports the global it makes
+        // and only the live binding is unexported afterwards.
+        let (out, _) = run(
+            "f() { local g=5; readonly -an g=9; echo \"st=$?\"; declare -p g; }; \
+             ( f 2>&1; echo AFTER; declare -p g )",
+        );
+        assert_eq!(out, "st=0\ndeclare -a g=([0]=\"9\")\nAFTER\ndeclare -a g=()\n");
+        let (out, _) = run(
+            "f() { local g=5; export -an g=9; echo \"st=$?\"; declare -p g; }; \
+             ( f 2>&1; echo AFTER; declare -p g )",
+        );
+        assert_eq!(out, "st=0\ndeclare -a g=([0]=\"9\")\nAFTER\ndeclare -ax g=()\n");
+
+        // A refusal from the declaration is spoken in the *calling* builtin's
+        // name: `declare_builtin` is a plain C call, so `this_command_name` is
+        // never changed for it. The kind it collides with has to be the
+        // **global**'s, `-g` having been added to the rewrite.
+        let (out, _) = run(
+            "f() { declare -ga q=(1 2); readonly -A q=9; echo \"st=$?\"; declare -p q; }; \
+             ( f 2>&1 )",
+        );
+        assert_eq!(
+            out,
+            "main: readonly: q: cannot convert indexed to associative array\nst=1\n\
+             declare -ar q=([0]=\"1\" [1]=\"2\")\n"
+        );
+        let (out, _) = run(
+            "( declare -A m=([k]=1); export -a m=9; echo \"st=$?\"; declare -p m ) 2>&1",
+        );
+        assert_eq!(
+            out,
+            "osh: export: m: cannot convert associative to indexed array\nst=1\n\
+             declare -Ax m=([k]=\"1\" )\n"
+        );
+        // A *local* of the other kind is not in the declaration's way at all:
+        // `-g` looks past it, and the marking that follows still finds it.
+        let (out, _) = run(
+            "f() { declare -a q=(1 2); readonly -A q=9; echo \"st=$?\"; declare -p q; }; \
+             ( f 2>&1 )",
+        );
+        assert_eq!(out, "st=0\ndeclare -ar q=([0]=\"1\" [1]=\"2\")\n");
+
+        // `if (opt != EXECUTION_SUCCESS) assign_error++;` — and `assign_error`
+        // is what returns `EX_BADASSIGN` rather than a plain failure, which in
+        // posix mode ends the shell, both builtins being special.
+        let (out, st) = run_script(
+            "set -o posix; declare -a q=(1 2); readonly -A q=9; echo \"st=$?\"; echo REACHED",
+        );
+        assert_eq!(out, "");
+        assert_eq!(st, 1);
+
+        // The rewrite is gated on a value and on a legal identifier; neither
+        // of these reaches it, so both are ordinary markings of the local.
+        for src in ["readonly -a g", "export -a g"] {
+            let (out, _) = run(&format!(
+                "f() {{ local g=5; {src}; echo \"st=$?\"; declare -p g; }}; \
+                 ( f; echo AFTER; declare -p g ) 2>&1"
+            ));
+            let shape = if src.starts_with("readonly") { "-r" } else { "-x" };
+            assert_eq!(
+                out,
+                format!("st=0\ndeclare {shape} g=\"5\"\nAFTER\nosh: declare: g: not found\n"),
+                "{src}"
+            );
+        }
+        let (out, _) = run(
+            "f() { local g=5; readonly -a g[1]=9; echo \"st=$?\"; declare -p g; }; ( f 2>&1 )",
+        );
+        assert_eq!(
+            out,
+            "main: readonly: `g[1]': not a valid identifier\nst=1\ndeclare -- g=\"5\"\n"
+        );
+        let (out, _) = run("f() { readonly -a 1bad=9; echo \"st=$?\"; }; ( f 2>&1 )");
+        assert_eq!(out, "main: readonly: `1bad=9': not a valid identifier\nst=1\n");
+
+        // Neither is a plain scalar operand, nor a compound literal.
+        let (out, _) = run(
+            "f() { local g=5; readonly g=9; echo \"st=$?\"; declare -p g; }; \
+             ( f; echo AFTER; declare -p g ) 2>&1",
+        );
+        assert_eq!(out, "st=0\ndeclare -r g=\"9\"\nAFTER\nosh: declare: g: not found\n");
+        let (out, _) = run(
+            "f() { local g=5; readonly -a g=(1 2); declare -p g; }; \
+             ( f; echo AFTER; declare -p g ) 2>&1",
+        );
+        assert_eq!(
+            out,
+            "declare -ar g=([0]=\"1\" [1]=\"2\")\nAFTER\nosh: declare: g: not found\n"
+        );
+
+        // Each operand is rewritten on its own — `list->next` is unhooked and
+        // restored around the call — so a neighbour without a value is still
+        // an ordinary marking.
+        let (out, _) = run(
+            "f() { local g=5; readonly -a g=9 h=8; declare -p g h; }; \
+             ( f 2>&1; echo AFTER; declare -p g h )",
+        );
+        assert_eq!(
+            out,
+            "declare -ar g=([0]=\"9\")\ndeclare -ar h=([0]=\"8\")\n\
+             AFTER\ndeclare -ar g=()\ndeclare -ar h=([0]=\"8\")\n"
+        );
+        let (out, _) = run("f() { export -a g h=9; declare -p g h; }; ( f 2>&1 )");
+        assert_eq!(out, "declare -x g\ndeclare -ax h=([0]=\"9\")\n");
+
+        // A nameref operand is handed to the declaration whole, and the
+        // marking that follows finds the same chain.
+        let (out, _) = run("f() { w=5; declare -n r=w; export -a r=9; declare -p r w; }; ( f 2>&1 )");
+        assert_eq!(out, "declare -n r=\"w\"\ndeclare -ax w=([0]=\"9\")\n");
+        let (out, _) = run(
+            "f() { w=5; declare -n r=w; readonly -a r+=9; declare -p r w; }; ( f 2>&1 )",
+        );
+        assert_eq!(out, "declare -n r=\"w\"\ndeclare -ar w=([0]=\"59\")\n");
+        let (out, _) = run(
+            "f() { declare -n c1=c2; declare -n c2=c1; export -a c1=5; echo \"st=$?\"; \
+             declare -p c1 c2; }; ( f 2>&1 )",
+        );
+        assert_eq!(
+            out,
+            "main: warning: c1: circular name reference\n\
+             main: warning: c1: circular name reference\n\
+             st=0\ndeclare -n c1=\"c2\"\ndeclare -n c2=\"c1\"\n"
+        );
+        let (out, _) = run(
+            "f() { local -n z=z; readonly -a z=5; echo \"st=$?\"; declare -p z; }; \
+             ( f 2>&1; echo AFTER; declare -p z )",
+        );
+        assert_eq!(
+            out,
+            "main: local: warning: z: circular name reference\n\
+             main: warning: z: circular name reference\n\
+             main: warning: z: circular name reference\n\
+             main: warning: z: circular name reference\n\
+             st=0\ndeclare -n z=\"z\"\nAFTER\ndeclare -ar z=([0]=\"5\")\n"
+        );
+
+        // What the global keeps once the function is gone: the `r` the
+        // declaration gave it, which the assignment after the return meets —
+        // and the `x`, which an array still never puts in the environment.
+        let (out, _) = run("f() { local g=5; readonly -a g=9; }; ( f; g=7; echo \"st=$?\" )");
+        assert_eq!(out, "");
+        let (out, _) =
+            run("f() { local g=5; export -a g=9; }; ( f; env | grep '^g=' || echo none )");
+        assert_eq!(out, "none\n");
     }
 
     /// `+n` is excluded from declare.def:817 outright by

@@ -43,6 +43,63 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
+### TD-OILS-A-GLOBAL-SUBSCRIPTED-DECLARATION-IN-A-FUNCTION-ASSIGNS-TO-WHICHEVER-BINDING-IS-LIVE. `declare -g g[1]=9` over a local `g` declares the global an array but stores in the local — 2026-08-11
+
+**Where:** `userspace/oils/src/interp.rs`, `Shell::builtin_declare_scoped`. The
+`-g`/`-G` scope entry wraps the *whole* operand — the array conversion and the
+store together — so both land on the global. bash splits them.
+
+`-g` takes the operand off the local branch (`variable_context && mkglobal == 0`
+is false, declare.def:601), so the variable the declaration is *about* is
+`declare_find_variable (name, 1, 0)` → `find_global_variable (name)`, and a
+subscripted operand with no global of the name makes one with
+`make_new_array_variable`. The **assignment** that follows is scope-normal,
+though, and finds whichever binding is live — the frame's local. So the command
+declares one variable an array and fills a different one.
+
+**Reproduce.**
+
+```sh
+f() { local g=5; declare -g g[1]=9; declare -p g; }; f; echo AFTER; declare -p g
+```
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| inside the frame | `declare -a g=([0]="5" [1]="9")` | `declare -- g="5"` |
+| after the return | `declare -a g=()` | `declare -a g=([1]="9")` |
+
+With a global already there the split is plainer still — the global is converted
+but never stored into:
+
+```sh
+g=7; f() { local g=5; declare -g g[1]=9; declare -p g; }; f; echo AFTER; declare -p g
+#  bash: declare -a g=([0]="5" [1]="9")  /  declare -a g=([0]="7")
+#  osh : declare -- g="5"                /  declare -a g=([0]="7" [1]="9")
+```
+
+`local -g g[1]=9` spells the same thing and differs the same way. Two spellings
+that look adjacent are **not** affected, and both already agree:
+
+* no local of the name — `f() { local -g g[1]=9; }` — there is only one binding
+  to land on, and both shells give `declare -a g=([1]="9")` inside and after.
+* no subscript — `f() { local g=5; declare -g g=9; }` — the store is a plain
+  scalar bind, which bash also sends to the global.
+
+So the trigger is exactly: `-g`, a subscript, and a local of that name already
+bound in the frame.
+
+**Proper fix.** Narrow the `-g` scope swap for a subscripted operand to the
+array *declaration* — the kind conversion and the creation of the name — and
+leave the element store at live scope, which is where bash's
+`assign_array_element` runs. The `declare -p` shapes above are the measurement
+to hold it to: an empty global array when there was no global, and an unfilled
+converted one when there was.
+
+**How it was found:** probing the local/global boundary of
+TD-OILS-A-SUBSCRIPTED-LOCAL-DECLARATION-REBINDS-THE-NAME-RATHER-THAN-WIDENING-IT.
+
+---
+
 ### TD-OILS-A-COMPOUND-DECLARATION-BY-A-CHKLOCAL-BUILTIN-BINDS-THE-FRAMES-REFERENCE. `readonly g=(1 2)` in a function puts the array and its attributes on the local reference, not on the global the escape names — 2026-08-11
 
 **Where:** `userspace/oils/src/interp.rs`, `Shell::declare_compounds_scoped` —
@@ -40167,6 +40224,44 @@ deny — are now fixed; see F8 and F9.)_
 ---
 
 ## Fixed Bugs
+
+### TD-OILS-A-SUBSCRIPTED-LOCAL-DECLARATION-REBINDS-THE-NAME-RATHER-THAN-WIDENING-IT. `local g=5; local g[1]=9` kept the scalar as element 0 — FIXED 2026-08-11
+
+**Where:** `userspace/oils/src/interp.rs`, `Shell::builtin_declare_scoped` —
+`drop_local_scalar`, which asked only about `-a`/`-A`.
+
+A subscript asks a declaration for an array as plainly as `-a` does:
+declare.def:614 sends both spellings down the one call, and
+`making_array_special` is set for any subscripted operand, valued or not.
+
+```c
+  else if ((flags_on & att_array) || making_array_special)
+    var = make_local_array_variable (newname, MKLOC_ASSOCOK|inherit_flag);
+```
+
+`make_local_array_variable` **rebinds** the name as a fresh array rather than
+widening the variable in place, so the scalar the frame already held is lost:
+
+```sh
+f() { local g=5; local g[1]=9; declare -p g; }; f   # declare -a g=([1]="9")
+f() { local g=5; local g[1];   declare -p g; }; f   # declare -a g=()
+```
+
+osh gave `([0]="5" [1]="9")` and `([0]="5")`. `declare` and `typeset` bind
+locals inside a function too and were wrong the same way.
+
+Three neighbours are **not** this, and were already right: at global scope the
+widening is `find_or_make_array_variable`, which converts the variable and keeps
+its value as element 0 (`g=5; declare g[1]=9` is `([0]="5" [1]="9")`); a scalar
+bound at an *outer* context is merely shadowed and survives the return; and an
+array already of the asked-for kind is not rebound at all.
+
+**Corpus:**
+`a-subscripted-local-declaration-rebinds-the-name-rather-than-widening-it.sh`.
+Unit test:
+`a_subscripted_local_declaration_rebinds_the_name_rather_than_widening_it`.
+
+---
 
 ### TD-OILS-A-COMPOUND-DECLARATION-WITH-NO-KIND-LETTER-DOES-NOT-REACH-FOR-AN-ARRAY. `local g=(1 2)` through a circular reference leaked the value to a global, and the walk counts were wrong on every route — FIXED 2026-08-11
 

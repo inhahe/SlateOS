@@ -13259,7 +13259,7 @@ impl Shell {
     fn scalar_write_dest(&mut self, name: &str) -> Option<ScalarDest> {
         let target = self.resolve_ref_use(name)?;
         let Some(sub) = target.sub else {
-            return Some(ScalarDest { place: ScalarPlace::Var(target.base), global: target.global });
+            return Some(ScalarDest { place: ScalarPlace::Var(target.base), scope: target.scope });
         };
         // The base of an element destination is bound where it is written, so a
         // reference there is stripped rather than followed — and stripped
@@ -13549,9 +13549,9 @@ impl Shell {
         // keeps its reference and takes the subscript to the global instead, so
         // the escape rides along on the destination.
         let target = self.resolve_ref_elem_write(base);
-        let global = target.global;
+        let scope = target.scope;
         let landed = target.into_name().unwrap_or_else(|| base.to_string());
-        let dest = ScalarDest { place: ScalarPlace::Elem(landed, sub.to_vec()), global };
+        let dest = ScalarDest { place: ScalarPlace::Elem(landed, sub.to_vec()), scope };
         self.scalar_write_checked(&dest, Some(base), val)
     }
 
@@ -13654,7 +13654,7 @@ impl Shell {
         }
         let dest = match target.sub {
             Some(sub) => ScalarDest::elem(target.base, sub),
-            None => ScalarDest { place: ScalarPlace::Var(target.base), global: target.global },
+            None => ScalarDest { place: ScalarPlace::Var(target.base), scope: target.scope },
         };
         // Both guards ask about the *destination's* scope, since an escaped
         // chain names the global and it is the global's attributes that decide.
@@ -14201,11 +14201,13 @@ impl Shell {
         // redirection), and the swap takes the reference attribute out of the
         // live tables with it, so the second pass walks no chain, warns nothing,
         // and falls straight through to the store. See
-        // [`Self::with_global_binding`].
-        if target.global {
+        // [`Self::with_binding_at`].
+        if target.scope != RefScope::Live {
             let (a, spelled, base) = (a.clone(), spelled.clone(), target.base.clone());
-            return self
-                .with_global_binding(&base, |sh| sh.apply_assignment_inner(&a, trace, &spelled));
+            let scope = target.scope;
+            return self.in_scope(scope, &base, |sh| {
+                sh.apply_assignment_inner(&a, trace, &spelled)
+            });
         }
         // `set -x`: a plain scalar assignment is traced with its *expanded* value
         // (emitted at the scalar store below); everything else (indexed element,
@@ -20759,6 +20761,30 @@ impl Shell {
         names: &[String],
         chklocal: bool,
     ) -> Vec<(String, usize, VarSnapshot)> {
+        self.enter_scope_at(names, 0, chklocal)
+    }
+
+    /// [`Shell::enter_global_scope`] for any variable context, not just the
+    /// global one: make each name's binding in context `depth` the live one.
+    ///
+    /// Contexts are numbered as [`RefScope::Context`] numbers them — the global
+    /// table 0, local frame `i` as `i + 1` — so the binding wanted is the one
+    /// parked by the innermost frame at index `depth` or deeper that shadows the
+    /// name, and a name no such frame shadows is already the right one. `depth`
+    /// 0 admits every frame and so reaches the true global, which is why the
+    /// global case needs no code of its own.
+    ///
+    /// Only the *write* side of a nameref walk ever names a context between the
+    /// two: bash looks each link up in one particular table and never climbs
+    /// back, so `outer() { local -n p=q; local q=OUTER; inner; }` assigning
+    /// through `p` from `inner` — which has a `local q` of its own — writes
+    /// `outer`'s. See [`Shell::walk_ref_name_writing`].
+    fn enter_scope_at(
+        &mut self,
+        names: &[String],
+        depth: usize,
+        chklocal: bool,
+    ) -> Vec<(String, usize, VarSnapshot)> {
         let mut saved = Vec::new();
         for name in names {
             if chklocal
@@ -20769,17 +20795,21 @@ impl Shell {
             {
                 continue;
             }
-            // The *outermost* shadowing frame, so a name localized at several
-            // call depths still resolves to the true global (bash writes the
-            // global from any depth).
+            // The *outermost* shadowing frame at or inside `depth`, so a name
+            // localized at several call depths still resolves to the one
+            // binding wanted: at depth 0 the true global, which bash writes
+            // from any call depth.
             let Some(idx) = self
                 .local_frames
                 .iter()
-                .position(|f| f.iter().any(|(n, _)| n == name))
+                .enumerate()
+                .skip(depth)
+                .find(|(_, f)| f.iter().any(|(n, _)| n == name))
+                .map(|(i, _)| i)
             else {
                 continue;
             };
-            let Some(global) = self
+            let Some(outer) = self
                 .local_frames
                 .get(idx)
                 .and_then(|f| f.iter().find(|(n, _)| n == name))
@@ -20788,7 +20818,7 @@ impl Shell {
                 continue;
             };
             let live = self.snapshot_var(name);
-            self.restore_var(name, global);
+            self.restore_var(name, outer);
             saved.push((name.clone(), idx, live));
         }
         saved
@@ -20811,39 +20841,41 @@ impl Shell {
         }
     }
 
-    /// Run `f` with `name`'s **global** binding in the live tables, then put the
-    /// local one back — the dereference a [`RefTarget::global`] asks for.
+    /// Run `f` with `name`'s binding in variable context `depth` in the live
+    /// tables, then put the innermost one back — the dereference a
+    /// [`RefTarget::scope`] asks for.
     ///
-    /// bash reaches the global directly (`find_global_variable_noref`) because
-    /// its scopes are a stack of tables. osh keeps one table and parks what a
-    /// `local` displaced in the frame that displaced it, so the same reach is a
-    /// swap: [`Self::enter_global_scope`] already knows how to make it and how
-    /// to find the *outermost* shadowing frame, which is the one holding the
-    /// true global. Reads and writes both go through here, so a store inside
-    /// `f` lands on the global and survives the function's return — which is
-    /// what `f() { local -n g=g; g=W; }` does to a global `g`.
+    /// bash reaches such a binding directly (`find_global_variable_noref`, or a
+    /// `hash_lookup` in one context's table) because its scopes are a stack of
+    /// tables. osh keeps one table and parks what a `local` displaced in the
+    /// frame that displaced it, so the same reach is a swap:
+    /// [`Self::enter_scope_at`] already knows how to make it and how to find the
+    /// frame holding the wanted binding. Reads and writes both go through here,
+    /// so a store inside `f` lands there and survives the function's return —
+    /// which is what `f() { local -n g=g; g=W; }` does to a global `g`.
     ///
-    /// A name with no local shadow is already global, and the swap is then a
-    /// no-op that costs one scan of the frames.
-    fn with_global_binding<T>(&mut self, name: &str, f: impl FnOnce(&mut Self) -> T) -> T {
-        let saved = self.enter_global_scope(std::slice::from_ref(&name.to_owned()), false);
+    /// A name nothing shadows at that depth already has the right binding live,
+    /// and the swap is then a no-op that costs one scan of the frames.
+    fn with_binding_at<T>(
+        &mut self,
+        name: &str,
+        depth: usize,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let saved = self.enter_scope_at(std::slice::from_ref(&name.to_owned()), depth, false);
         let out = f(self);
         self.leave_global_scope(saved);
         out
     }
 
-    /// Run `f` in the scope a resolved reference names — the ordinary one, or
-    /// the global [`Self::with_global_binding`] reaches for a target that
-    /// escaped a cycle. Every path that *dereferences* a [`RefTarget`] wraps its
-    /// table work in this; the ones that only quote the target's name back in a
-    /// diagnostic do not, the name being the same either way.
+    /// Run `f` in the scope a resolved reference names — the one the caller is
+    /// already in, or the outer context [`Self::with_binding_at`] reaches for.
+    /// Every path that *dereferences* a [`RefTarget`] wraps its table work in
+    /// this; the ones that only quote the target's name back in a diagnostic do
+    /// not, the name being the same either way.
     fn in_target_scope<T>(&mut self, target: &RefTarget, f: impl FnOnce(&mut Self) -> T) -> T {
-        if target.global {
-            let base = target.base.clone();
-            self.with_global_binding(&base, f)
-        } else {
-            f(self)
-        }
+        let base = target.base.clone();
+        self.in_scope(target.scope, &base, f)
     }
 
     /// [`Self::in_target_scope`] where the caller may have had no chain to walk
@@ -20859,19 +20891,13 @@ impl Shell {
         }
     }
 
-    /// [`Self::in_target_scope`] where the escape has already been reduced to a
-    /// flag and a name — what an `export`/`readonly` operand carries. See
+    /// [`Self::in_target_scope`] where the reference has already been reduced to
+    /// a scope and a name — what an `export`/`readonly` operand carries. See
     /// [`AttrOperand::Mark`].
-    fn in_global_scope_if<T>(
-        &mut self,
-        global: bool,
-        name: &str,
-        f: impl FnOnce(&mut Self) -> T,
-    ) -> T {
-        if global {
-            self.with_global_binding(name, f)
-        } else {
-            f(self)
+    fn in_scope<T>(&mut self, scope: RefScope, name: &str, f: impl FnOnce(&mut Self) -> T) -> T {
+        match scope {
+            RefScope::Live => f(self),
+            RefScope::Context(depth) => self.with_binding_at(name, depth, f),
         }
     }
 
@@ -20884,12 +20910,8 @@ impl Shell {
     /// would pair each `leave` with the wrong `enter`, so the inner steps do not
     /// swap for themselves.
     fn in_dest_scope<T>(&mut self, dest: &ScalarDest, f: impl FnOnce(&mut Self) -> T) -> T {
-        if dest.global {
-            let base = dest.base().to_owned();
-            self.with_global_binding(&base, f)
-        } else {
-            f(self)
-        }
+        let base = dest.base().to_owned();
+        self.in_scope(dest.scope, &base, f)
     }
 
     /// Whether a declaration builtin's leading flags put it in global scope, and
@@ -30548,7 +30570,7 @@ impl Shell {
     /// itself a reference, its raw value is the answer (`declare -n ptr=tgt`
     /// outside, `local -n ptr=ptr` inside, and `$ptr` is the string `tgt`).
     /// A cycle closing on a *global* still names nothing, function or not.
-    /// See [`RefTarget::global`] and [`Self::with_global_binding`].
+    /// See [`RefScope`] and [`Self::with_binding_at`].
     fn resolve_ref_name(&self, name: &str) -> Option<RefTarget> {
         self.walk_ref_name(name).target
     }
@@ -30641,7 +30663,7 @@ impl Shell {
                         return RefWalk::reached(RefTarget {
                             base: base.to_string(),
                             sub: Some(sub.to_vec()),
-                            global: false,
+                            scope: RefScope::Live,
                         });
                     }
                     // Otherwise the value is a plain name to follow. A *name* is
@@ -30860,7 +30882,7 @@ impl Shell {
             // so it never reaches the code that unmakes a useless reference.
             // `g=5; f() { local -n g=g; g[1]=Z; }` leaves the local
             // `declare -n g="g"` in place and makes the **global** an array.
-            Some(target) if target.global => {
+            Some(target) if target.scope != RefScope::Live => {
                 self.warn_circular_ref(name, warnings);
                 target
             }
@@ -41606,7 +41628,7 @@ impl Shell {
             name: text.to_string(),
             append,
             value,
-            global: false,
+            scope: RefScope::Live,
         }
     }
 
@@ -41718,7 +41740,7 @@ impl Shell {
                 name: target.base,
                 append,
                 value,
-                global: target.global,
+                scope: target.scope,
             };
         }
         if let Some(v) = value {
@@ -41907,8 +41929,8 @@ impl Shell {
                 array: assoc || indexed,
                 unexport,
             };
-            let (k, append, value, global) = match self.attr_operand("export", a, rule) {
-                AttrOperand::Mark { name, append, value, global } => (name, append, value, global),
+            let (k, append, value, scope) = match self.attr_operand("export", a, rule) {
+                AttrOperand::Mark { name, append, value, scope } => (name, append, value, scope),
                 AttrOperand::Done { status: s } => {
                     status |= s;
                     continue;
@@ -41916,9 +41938,9 @@ impl Shell {
             };
             // A name reached through a cycle that escaped to global scope is
             // marked *there*: the local reference the cycle closed on keeps
-            // none of it. See [`Shell::in_global_scope_if`].
+            // none of it. See [`Shell::in_scope`].
             let swap = k.clone();
-            let step = self.in_global_scope_if(global, &swap, move |sh| {
+            let step = self.in_scope(scope, &swap, move |sh| {
                 sh.export_operand(&k, append, value, unexport, assoc, indexed)
             });
             match step {
@@ -46450,18 +46472,18 @@ impl Shell {
                 array: assoc || indexed,
                 unexport: false,
             };
-            let (name, append, value, global) = match self.attr_operand("readonly", name_val, rule)
+            let (name, append, value, scope) = match self.attr_operand("readonly", name_val, rule)
             {
-                AttrOperand::Mark { name, append, value, global } => (name, append, value, global),
+                AttrOperand::Mark { name, append, value, scope } => (name, append, value, scope),
                 AttrOperand::Done { status: s } => {
                     status |= s;
                     continue;
                 }
             };
             // Marked in the scope the resolution named, exactly as `export` is.
-            // See [`Shell::in_global_scope_if`].
+            // See [`Shell::in_scope`].
             let swap = name.clone();
-            let step = self.in_global_scope_if(global, &swap, move |sh| {
+            let step = self.in_scope(scope, &swap, move |sh| {
                 sh.readonly_operand(&name, append, value, no_mark, assoc, indexed)
             });
             match step {
@@ -47123,7 +47145,7 @@ impl Shell {
                 // a circular chain, and what is unbound is then the operand
                 // itself rather than any cell.
                 let whole = match target {
-                    Some(t) if !t.global => t.base,
+                    Some(t) if t.scope == RefScope::Live => t.base,
                     _ => base.to_string(),
                 };
                 self.unbind_var_through_ref(&whole);
@@ -52895,12 +52917,40 @@ struct RefTarget {
     /// The subscript, when the reference designates one element of `base`
     /// (`declare -n r=arr[0]`) rather than the whole variable.
     sub: Option<Str>,
-    /// Whether the walk *escaped a cycle* and so names the **global** binding of
-    /// `base` rather than the one in scope. See [`Shell::resolve_ref_name`]; the
-    /// dereference goes through [`Shell::with_global_binding`], which is what
-    /// makes the escaped target reach past the local reference that closed the
-    /// cycle. Never set together with `sub`: the escape is a whole variable.
-    global: bool,
+    /// Which binding of `base` the walk named — the one in scope, or one
+    /// belonging to an outer variable context. See [`RefScope`]; the
+    /// dereference goes through [`Shell::in_target_scope`], which is what makes
+    /// such a target reach past the locals standing in front of it. Never
+    /// anything but [`RefScope::Live`] together with `sub`: a walk that names a
+    /// context names a whole variable.
+    scope: RefScope,
+}
+
+/// Which variable context a resolved reference names.
+///
+/// bash's scopes are a stack of hash tables and a resolved nameref names a
+/// variable *in one of them* — not necessarily the innermost, because the walk
+/// looks each link up in one particular table. osh keeps one live table and
+/// parks what a `local` displaced in the frame that displaced it, so naming an
+/// outer context is a swap: [`Shell::with_binding_at`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefScope {
+    /// The binding the name has now — the innermost one, which is what a plain
+    /// read or write finds. No swap.
+    Live,
+    /// The binding belonging to the variable context numbered `depth`, counting
+    /// the global table as 0 and local frame `i` as `i + 1`. Reaching it means
+    /// stepping over every `local` of the name made at frame index `depth` or
+    /// deeper.
+    ///
+    /// [`RefScope::GLOBAL`] is the only one a *read* ever names: it is where a
+    /// nameref cycle that closed on a local escapes to.
+    Context(usize),
+}
+
+impl RefScope {
+    /// The global table, which is the outermost context and so context 0.
+    const GLOBAL: Self = Self::Context(0);
 }
 
 impl RefTarget {
@@ -52909,7 +52959,7 @@ impl RefTarget {
         Self {
             base,
             sub: None,
-            global: false,
+            scope: RefScope::Live,
         }
     }
 
@@ -52919,7 +52969,7 @@ impl RefTarget {
         Self {
             base,
             sub: None,
-            global: true,
+            scope: RefScope::GLOBAL,
         }
     }
 
@@ -52962,13 +53012,12 @@ enum AttrOperand {
         name: String,
         append: bool,
         value: Option<Str>,
-        /// Carried over from [`RefTarget::global`]: the operand was a nameref
-        /// whose chain closed on a function-local variable, so the name it
-        /// reached is the **global** binding and everything this operand does —
-        /// the store, the mark, the `declared` note — has to reach past the
-        /// local reference that closed the cycle. See
-        /// [`Shell::in_global_scope_if`].
-        global: bool,
+        /// Carried over from [`RefTarget::scope`]: the operand was a nameref
+        /// whose walk named a binding outside the scope the command runs in, so
+        /// everything this operand does — the store, the mark, the `declared`
+        /// note — has to reach past the locals standing in front of it. See
+        /// [`Shell::in_scope`].
+        scope: RefScope,
     },
     /// Nothing left to mark. Any diagnostic is already out and any store the
     /// operand carried has already happened; `status` is what this operand
@@ -53023,11 +53072,11 @@ impl AttrRefRule {
 #[derive(Debug, Clone)]
 struct ScalarDest {
     place: ScalarPlace,
-    /// Carried over from [`RefTarget::global`]. An escaped chain never
-    /// *designates* an element itself, but the caller's own subscript still
-    /// applies to it — `f() { local -n g=g; g[1]=Z; }` makes the **global** `g`
-    /// an array — so this rides on both kinds of place.
-    global: bool,
+    /// Carried over from [`RefTarget::scope`]. A walk that named an outer
+    /// context never *designates* an element itself, but the caller's own
+    /// subscript still applies to it — `f() { local -n g=g; g[1]=Z; }` makes the
+    /// **global** `g` an array — so this rides on both kinds of place.
+    scope: RefScope,
 }
 
 /// Which kind of place a [`ScalarDest`] names.
@@ -53053,13 +53102,13 @@ enum ScalarPlace {
 impl ScalarDest {
     /// A whole-variable destination in the scope the caller is already in.
     fn var(name: String) -> Self {
-        Self { place: ScalarPlace::Var(name), global: false }
+        Self { place: ScalarPlace::Var(name), scope: RefScope::Live }
     }
 
-    /// An element destination, which is never an escaped one — see the
-    /// [`ScalarDest::global`] field.
+    /// An element destination, which never names a context of its own — see the
+    /// [`ScalarDest::scope`] field.
     fn elem(name: String, sub: Str) -> Self {
-        Self { place: ScalarPlace::Elem(name, sub), global: false }
+        Self { place: ScalarPlace::Elem(name, sub), scope: RefScope::Live }
     }
 
     /// The variable a destination belongs to — what the readonly attribute is

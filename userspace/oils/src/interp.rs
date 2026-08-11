@@ -14040,11 +14040,29 @@ impl Shell {
         trace: bool,
         spelled: Option<&Assignment>,
     ) -> bool {
+        self.apply_assignment_expanded(a, trace, spelled, None)
+    }
+
+    /// [`Self::apply_assignment_spelled`] with the scalar value **already
+    /// expanded**, for the re-run a nameref redirection makes.
+    ///
+    /// bash expands an assignment's value once, before it goes looking for the
+    /// variable to put it in, so the chain the name resolves through must not
+    /// send the word round for a second expansion — `declare -n r=x; r=$(f)`
+    /// runs `f` exactly once. `None` means there is nothing expanded yet, which
+    /// is every entry from outside.
+    fn apply_assignment_expanded(
+        &mut self,
+        a: &Assignment,
+        trace: bool,
+        spelled: Option<&Assignment>,
+        pre: Option<Str>,
+    ) -> bool {
         // bash scans the assignment word before it does anything with it.
         if self.assignment_scan_failed(a) {
             return false;
         }
-        let ok = self.apply_assignment_inner(a, trace, spelled.unwrap_or(a));
+        let ok = self.apply_assignment_inner(a, trace, spelled.unwrap_or(a), pre);
         // A name the shell also keeps somewhere else takes the write back out of
         // the variable table again — see [`Shell::after_var_write`]. Run whether
         // or not the assignment succeeded, since a literal that failed part-way
@@ -14083,6 +14101,7 @@ impl Shell {
         a: &Assignment,
         trace: bool,
         spelled: &Assignment,
+        pre: Option<Str>,
     ) -> bool {
         // One element is no place for a list, and the objection is raised on the
         // word *as written* — before the name is resolved, the subscript
@@ -14092,6 +14111,56 @@ impl Shell {
             self.arm_discard(1);
             return false;
         }
+        // A failing expansion in the value arms an abort; what it *returns* is a
+        // fabricated stand-in (`0` for arithmetic, nothing at all for `${u?}`).
+        // Storing that would overwrite the variable with a fiction, so the
+        // assignment has to be abandoned instead — bash leaves the old value in
+        // place, traces nothing, and asks the variable nothing. Snapshot both
+        // flags so an abort already armed before this assignment is not mistaken
+        // for one this value raised.
+        //
+        // The two are different aborts and both have to be watched:
+        // `discard_error` is the recoverable one an arithmetic error leaves
+        // behind, `unbound_error` the whole-shell one `${u?word}` and `set -u`
+        // raise (see [`Shell::arm_unbound_abort`]).
+        let armed = self.discard_error;
+        let armed_unbound = self.unbound_error;
+        macro_rules! bail_if_expansion_failed {
+            () => {
+                if (armed.is_none() && self.discard_error.is_some())
+                    || (armed_unbound.is_none() && self.unbound_error.is_some())
+                {
+                    return false;
+                }
+            };
+        }
+        // A **scalar** value is expanded here, before the name is resolved at
+        // all. bash's `do_assignment_internal` has the expanded string in hand
+        // when it calls `bind_variable`, so every objection the *name* earns is
+        // raised after the value's side effects have run. Measured:
+        //
+        // ```sh
+        // f() { echo RAN >&2; echo v; }
+        // declare -a n=(1 2); declare -n r='n[@]'; r=$(f)   # RAN, then `n[@]: bad array subscript`
+        // declare -a m=(1 2); declare -n r2='m[1]'; r2[0]=$(f)  # RAN, then `m[1]: not a valid identifier`
+        // readonly ro=1; ro=$(f)                            # RAN, then `ro: readonly variable`
+        // ```
+        //
+        // A **compound literal** is the exception, and bash's own: it is not
+        // expanded until `assign_compound_array_list`, which every one of those
+        // refusals comes before — `readonly ra=1; ra=($(f))` never runs `f`.
+        let pre = match pre {
+            Some(v) => Some(v),
+            None => match &a.value {
+                AssignRhs::Scalar(w) => {
+                    let w = w.clone();
+                    let val = self.expand_assignment_value(&w);
+                    bail_if_expansion_failed!();
+                    Some(val)
+                }
+                AssignRhs::Array(_) => None,
+            },
+        };
         // A nameref (`declare -n ref=target`) redirects the assignment to its
         // target: rewrite the name and re-run. `resolve_ref_name` follows the
         // whole chain, so the rewritten name is not itself a nameref (no loop).
@@ -14191,7 +14260,7 @@ impl Shell {
                 }
                 None => a2.name = target.base,
             }
-            return self.apply_assignment_spelled(&a2, trace, Some(spelled));
+            return self.apply_assignment_expanded(&a2, trace, Some(spelled), pre);
         }
         // A chain that escaped a cycle binds the **global** of the same name,
         // and everything left to do — the readonly guard, the value attributes,
@@ -14206,7 +14275,7 @@ impl Shell {
             let (a, spelled, base) = (a.clone(), spelled.clone(), target.base.clone());
             let scope = target.scope;
             return self.in_scope(scope, &base, |sh| {
-                sh.apply_assignment_inner(&a, trace, &spelled)
+                sh.apply_assignment_inner(&a, trace, &spelled, pre)
             });
         }
         // `set -x`: a **scalar** value is traced expanded (emitted at the store
@@ -14304,29 +14373,6 @@ impl Shell {
             self.mark_exported(a.name.clone());
         }
         let is_assoc = self.assoc.contains_key(&a.name);
-        // A failing expansion in the value arms an abort; what it *returns* is a
-        // fabricated stand-in (`0` for arithmetic, nothing at all for `${u?}`).
-        // Storing that would overwrite the variable with a fiction, so the
-        // assignment has to be abandoned instead — bash leaves the old value in
-        // place, traces nothing, and asks the variable nothing. Snapshot both
-        // flags so an abort already armed before this assignment is not mistaken
-        // for one this value raised.
-        //
-        // The two are different aborts and both have to be watched:
-        // `discard_error` is the recoverable one an arithmetic error leaves
-        // behind, `unbound_error` the whole-shell one `${u?word}` and `set -u`
-        // raise (see [`Shell::arm_unbound_abort`]).
-        let armed = self.discard_error;
-        let armed_unbound = self.unbound_error;
-        macro_rules! bail_if_expansion_failed {
-            () => {
-                if (armed.is_none() && self.discard_error.is_some())
-                    || (armed_unbound.is_none() && self.unbound_error.is_some())
-                {
-                    return false;
-                }
-            };
-        }
         // A compound literal is re-parsed *whole*, before a single element of it
         // is expanded — see [`Self::array_assign_reparse_error`]. It comes after
         // the refusals above, which is the order bash reports them in: a
@@ -14359,11 +14405,11 @@ impl Shell {
             return false;
         }
         match &a.value {
-            AssignRhs::Scalar(w) => {
-                let val = self.expand_assignment_value(w);
-                // Before the `set -x` trace, because bash does not trace an
-                // assignment it did not make.
-                bail_if_expansion_failed!();
+            AssignRhs::Scalar(_) => {
+                // Expanded at the top, before the name was resolved — and where
+                // a failing expansion already abandoned the assignment, since
+                // bash does not trace, ask or store one it did not make.
+                let val = pre.unwrap_or_default();
                 // `set -x` trace for a plain scalar (`x=…`/`x+=…`): the expanded
                 // RHS, minimally quoted, emitted once here so no re-expansion.
                 if trace_scalar {
@@ -79127,6 +79173,47 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run(&format!("{cyc} printf '[%s]' \"$c1\"; f() {{ printf '[%s]' \"$c1\"; }}; f")).0,
             "[][]",
         );
+    }
+
+    /// `do_assignment_internal` (subst.c:396) has the value in hand before it
+    /// goes looking for anything to put it in:
+    ///
+    /// ```c
+    ///   if (t = mbschr (name, '['))  /* ] */
+    ///     { … entry = assign_array_element (name, value, aflags, &estate); … }
+    ///   else
+    ///     entry = bind_variable (name, value, aflags);
+    /// ```
+    ///
+    /// So every objection the *name* earns is reported only after the value's
+    /// side effects have run. A **compound literal** is the exception, and
+    /// bash's own: it is not expanded until `assign_compound_array_list`, which
+    /// all of those come before.
+    #[test]
+    fn an_assignments_value_is_expanded_before_the_variable_is_looked_for() {
+        let out = run("exec 2>&1
+             f() { printf 'RAN(%s)' \"$1\" >&2; echo \"v$1\"; }
+             declare -a n=(1 2); declare -n r1='n[@]'
+             r1=$(f whole)
+             readonly ro=1
+             ro=$(f ro)
+             readonly ra=1
+             ra=($(f compound))
+             echo DONE")
+        .0;
+        // Every objection the *name* earns is reported after the value ran…
+        let at = |needle: &str| out.find(needle).unwrap_or_else(|| panic!("{out:?}"));
+        assert!(at("RAN(whole)") < at("bad array subscript"), "{out:?}");
+        assert!(at("RAN(ro)") < at("ro: readonly variable"), "{out:?}");
+        // …but the compound literal is refused without being expanded at all,
+        // so only the two scalar values ever ran.
+        assert!(out.contains("ra: readonly variable"), "{out:?}");
+        assert_eq!(out.matches("RAN(").count(), 2, "{out:?}");
+        assert!(out.ends_with("DONE\n"), "{out:?}");
+        // A value that will not expand is not stored, and nothing is asked.
+        let out = run("exec 2>&1\n readonly rb=1\n rb=$((1/0))\n declare -p rb").0;
+        assert!(out.contains("division by 0"), "{out:?}");
+        assert!(out.ends_with("declare -r rb=\"1\"\n"), "{out:?}");
     }
 
     /// `set -x` shows an assignment's two halves from two different places. The

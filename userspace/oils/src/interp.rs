@@ -44345,9 +44345,102 @@ impl Shell {
             // turns to the operand's own name) and earns one. See
             // [`Self::resolve_ref_use_walks`]; the model is `known-issues.md`'s
             // TD-OILS-NAMEREF-WARNING-COUNT.
+            //
+            // A declaration that binds a **local** pays a fixed price instead,
+            // and pays it whatever it asks for. `declare.def:601` puts the whole
+            // function-scope branch behind `if (variable_context && mkglobal ==
+            // 0)`, and inside it the chain is walked twice before anything is
+            // bound — once by `declare_transform_name` (declare.def:212), to
+            // decide which name the declaration is really about, and once by
+            // `make_local_variable` (variables.c:2607), which needs the same
+            // answer to know whether the `local` is a no-op:
+            //
+            // ```c
+            //   newname = declare_transform_name (name, flags_on, flags_off);
+            //   …
+            //     var = make_local_variable ((flags_on & att_nameref) ? name : newname, …);
+            // ```
+            //
+            // Neither walk looks at the letters or at whether an array is being
+            // made, so `local -n g`, `local +n g`, `local g[1]` and
+            // `local -a g=(1 2)` all warn as often as the plain `local g` —
+            // measured against bash 5.2.37, where osh had been warning twice for
+            // some of those forms, once for the array-making ones and not at all
+            // for the `-n`/`+n` ones.
+            //
+            // A *valueless* `-n` takes a third, from a branch of its own
+            // (declare.def:618): `find_variable_last_nameref (name, 1)` makes no
+            // cycle test and says nothing, so the branch falls through to
+            // `else if ((var = find_variable (name)) == 0 …)`, which is a full
+            // walk, and then to `make_local_variable`.
+            let local_walks = if nameref && value.is_none() { 3 } else { 2 };
+            // A `-n` declaration's value is the *name* it refers to, and bash
+            // judges it **first of all**: the whole lexical block sits at
+            // declare.def:520, above the `restart_new_var_name` label and so
+            // above every walk, every follow and every readonly check below.
+            //
+            // ```c
+            //   /* Do some lexical error checking on the LHS and RHS of the
+            //      assignment that is specific to nameref variables. */
+            //   if (flags_on & att_nameref)
+            //     {
+            //       …
+            //       if (check_selfref (name, value, 0))
+            //         …  builtin_warning (_("%s: circular name reference"), name);
+            //       if (value && *value && (aflags & ASS_APPEND) == 0 &&
+            //           valid_nameref_value (value, 1) == 0)
+            //         { builtin_error (…); NEXT_VARIABLE (); }
+            //     }
+            // ```
+            //
+            // Order is the whole of what that placement buys, and it is
+            // visible whenever the operand's chain is circular. The
+            // builtin-tagged self-reference warning comes out ahead of the two
+            // walks a local declaration makes below, so
+            // `f() { local -n g=g; local -n g=g; }` reads *warning, walk, walk,
+            // walk* and not *walk, walk, warning, walk*; and a refused value
+            // costs no walk at all, because `NEXT_VARIABLE` leaves the loop
+            // body before the branch that makes them
+            // (`f() { declare -n g=z; declare -n z=g; declare -n g="a b"; }`
+            // says only `` `a b': invalid variable name for name reference ``).
+            //
+            // The name it judges is the operand as written: `follow` is false
+            // for every `-n` operand, so nothing has been followed yet either.
+            if nameref
+                && let Some(v) = &value
+                && let Some(msg) = self.nameref_value_error(tag, base_name, v, append)
+            {
+                self.emit_stderr(&msg);
+                status = 1;
+                continue;
+            }
             let mut target = if follow {
-                self.resolve_ref_use_walks(base_name, if makes_array { 1 } else { 2 })
+                self.resolve_ref_use_walks(
+                    base_name,
+                    if make_local {
+                        local_walks
+                    } else if makes_array {
+                        1
+                    } else {
+                        2
+                    },
+                )
             } else {
+                // The walks are made whatever the declaration asks of the name,
+                // so an operand that follows *nothing* still makes them: the
+                // `-n`/`+n` forms, and a fresh local shadowing a reference that
+                // is not the frame's own — `find_variable` follows whichever
+                // binding of the name is live, not just a local one. A listing
+                // is the one spelling that never reaches the branch, because
+                // `declare -p` is answered and returned from at declare.def:354,
+                // before the operand loop.
+                //
+                // A name that is no reference can start no cycle, so the walk is
+                // only worth making for one that is.
+                if make_local && !print_mode && self.nameref_attr.contains(base_name) {
+                    let walk = self.walk_ref_name(base_name);
+                    self.warn_circular_walks(base_name, &walk, local_walks);
+                }
                 None
             };
             if follow && target.is_none() {
@@ -44539,18 +44632,6 @@ impl Shell {
             } else {
                 operand_name
             };
-            // A `-n` declaration's value is the *name* it refers to, so bash
-            // validates it here — before the readonly check below, which it
-            // therefore pre-empts (`readonly r; declare -n r='a b'` reports the
-            // nameref error). Nothing is bound when it fails.
-            if nameref
-                && let Some(v) = &value
-                && let Some(msg) = self.nameref_value_error(tag, base_name, v, append)
-            {
-                self.emit_stderr(&msg);
-                status = 1;
-                continue;
-            }
             // …and then of the name itself, which may not already be an array.
             // A *valueless* `-n` asks the same question further down, where it
             // can also judge the value the binding already holds; here it comes
@@ -46004,7 +46085,28 @@ impl Shell {
             // `apply_assignment` already follows when it stores the values.
             let follow =
                 self.nameref_attr.contains(&a.name) && (!make_local || self.local_binds_here(&a.name));
-            let resolved = if follow { self.resolve_ref_use(&a.name) } else { None };
+            // A declaration that binds a local walks the chain **twice**, here
+            // as on the scalar path: `declare_transform_name` and
+            // `make_local_variable` each make a `find_variable` of their own
+            // before anything is bound, and neither cares that the value is a
+            // compound. See [`Shell::builtin_declare_scoped`], where the same
+            // pair is spelled out against declare.def:601. The second walk is
+            // the one this loop was missing, so `f() { local -n g=z; local -n
+            // z=g; local -a g=(1 2); }` warned once where bash warns twice.
+            //
+            // They are made whether or not the reference is the frame's own —
+            // `find_variable` follows whichever binding of the name is live —
+            // so a fresh local shadowing a global cycle pays them too, which is
+            // the `!follow` arm below.
+            let resolved = if follow {
+                self.resolve_ref_use_walks(&a.name, if make_local { 2 } else { 1 })
+            } else {
+                if make_local && self.nameref_attr.contains(&a.name) {
+                    let walk = self.walk_ref_name(&a.name);
+                    self.warn_circular_walks(&a.name, &walk, 2);
+                }
+                None
+            };
             // A binding made through a reference to an element is named by the
             // whole spelling — see [`Shell::spelled_local_name`], which the
             // scalar operand path asks the same question. The literal then
@@ -72525,6 +72627,130 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // The listing forms already answered for it and still do.
         assert_eq!(run("declare -p \"\" 2>&1").0, "osh: declare: : not found\n");
         assert_eq!(run("f(){ local -p \"\"; }; f 2>&1").0, "main: local: : not found\n");
+    }
+
+    /// A `declare`/`local` that binds a **function-local** pays a fixed price
+    /// for the operand's chain — two walks, three for a valueless `-n` — and
+    /// pays it whatever the declaration asks for. `declare.def:601` puts the
+    /// whole branch behind `if (variable_context && mkglobal == 0)`, and inside
+    /// it the chain is walked once by `declare_transform_name`
+    /// (declare.def:212, `var = find_variable (name)`) to decide what name the
+    /// declaration is really about and once by `make_local_variable`
+    /// (variables.c:2607, `old_var = find_variable (name)`) to decide whether
+    /// the `local` is a no-op. Neither looks at the letters, so `local -n g`,
+    /// `local +n g` and `local g[1]` warn as often as the plain `local g`.
+    ///
+    /// The third belongs to the valueless `-n` alone (declare.def:618): its
+    /// `find_variable_last_nameref (name, 1)` makes no cycle test and says
+    /// nothing, so the branch falls through to `else if ((var = find_variable
+    /// (name)) == 0 …)` and then to `make_local_variable`.
+    ///
+    /// At global scope, and under `-g`, the branch is skipped and none of it is
+    /// paid. Corpus:
+    /// `a-function-local-declaration-walks-a-nameref-chain-twice.sh`.
+    #[test]
+    fn a_function_local_declaration_walks_a_nameref_chain_twice() {
+        // Two walks for every spelling that binds a local, whichever letters it
+        // carries and whether or not it makes an array. `declare` and `typeset`
+        // bind locals inside a function too, so the two cycle spellings below
+        // are the same cycle written twice.
+        for cyc in ["local -n g=z; local -n z=g;", "declare -n g=z; declare -n z=g;"] {
+            for src in [
+                "local g",
+                "local -i g",
+                "local -x g",
+                "local -r g",
+                "local -I g",
+                "local -a g",
+                "local -A g",
+                "local g[1]",
+                "local -a g=(1 2)",
+                "local -A g=([k]=v)",
+                "local -n g=h",
+                "local +n g",
+                "local -rn g=h",
+                "declare g",
+                "typeset g",
+            ] {
+                let out = run(&format!("f() {{ {cyc} {src}; }}; f 2>&1")).0;
+                assert_eq!(out.matches("circular").count(), 2, "{cyc} {src} -> {out:?}");
+            }
+
+            // The valueless `-n` alone takes a third.
+            for src in ["local -n g", "local -nr g", "local -In g", "declare -n g"] {
+                let out = run(&format!("f() {{ {cyc} {src}; }}; f 2>&1")).0;
+                assert_eq!(out.matches("circular").count(), 3, "{cyc} {src} -> {out:?}");
+            }
+
+            // `-g` picks the global binding, and a listing is no declaration at
+            // all: neither enters the branch.
+            for src in ["declare -g g", "local -g g", "declare -p g"] {
+                let out = run(&format!("f() {{ {cyc} {src}; }}; f 2>&1")).0;
+                assert_eq!(out.matches("circular").count(), 0, "{cyc} {src} -> {out:?}");
+            }
+        }
+
+        // The reference need not be one of the frame's own: `find_variable`
+        // follows whichever binding of the name is live, so a fresh local
+        // shadowing a *global* cycle is walked exactly as often.
+        let global_cyc = "declare -n g=z; declare -n z=g;";
+        for (src, want) in [
+            ("local g", 2),
+            ("local -i g", 2),
+            ("local g=5", 2),
+            ("local -a g=(1 2)", 2),
+            ("local -n g", 3),
+            // `-g` skips the branch, but the global binding it writes *is* the
+            // reference, so the ordinary follow walks the chain twice anyway.
+            ("local -g g", 2),
+        ] {
+            let out = run(&format!("{global_cyc} f() {{ {src}; }}; f 2>&1")).0;
+            assert_eq!(out.matches("circular").count(), want, "{src} -> {out:?}");
+        }
+
+        // At global scope the branch is skipped, so the only walks are the ones
+        // the declaration itself makes.
+        let out = run(&format!("{{ {global_cyc} declare g; }} 2>&1")).0;
+        assert_eq!(out.matches("circular").count(), 2, "{out:?}");
+        let out = run(&format!("{{ {global_cyc} declare -n g; }} 2>&1")).0;
+        assert_eq!(out.matches("circular").count(), 0, "{out:?}");
+
+        // The walks change nothing: the operand is declared as it would have
+        // been without them.
+        let (out, st) =
+            run("f() { local -n g=z; local -n z=g; local -i g; declare -p g z; }; f 2>&1");
+        assert_eq!(
+            out,
+            "main: warning: g: circular name reference\n".repeat(2)
+                + "declare -in g=\"z\"\ndeclare -n z=\"g\"\n"
+        );
+        assert_eq!(st, 0);
+
+        // A chain that reaches something is walked as often and says nothing.
+        let (out, st) = run("f() { local w=1; local -n g=w; local -n g; declare -p g w; }; f 2>&1");
+        assert_eq!(out, "declare -n g=\"w\"\ndeclare -- w=\"1\"\n");
+        assert_eq!(st, 0);
+
+        // The lexical `-n` checks (declare.def:520) sit above the branch that
+        // walks, so a value the reference cannot name costs no walk at all…
+        let w = "main: warning: g: circular name reference\n";
+        let cyc = "declare -n g=z; declare -n z=g;";
+        let (out, st) = run(&format!("f() {{ {cyc} declare -n g=\"a b\"; }}; f 2>&1"));
+        assert_eq!(out, "main: declare: `a b': invalid variable name for name reference\n");
+        assert_eq!(st, 1);
+
+        // …while the self-reference warning, whose value *is* accepted, is
+        // printed ahead of the two the local branch then makes, plus the one
+        // the assignment itself makes.
+        let (out, st) = run(&format!("f() {{ {cyc} declare -n g=g; }}; f 2>&1"));
+        assert_eq!(out, format!("main: declare: warning: g: circular name reference\n{}", w.repeat(3)));
+        assert_eq!(st, 0);
+
+        // The append form skips `valid_nameref_value` entirely and names no
+        // self, so it is only the two walks.
+        let (out, st) = run(&format!("f() {{ {cyc} declare -n g+=x; }}; f 2>&1"));
+        assert_eq!(out, w.repeat(2));
+        assert_eq!(st, 0);
     }
 
     /// A bad option letter is refused before the routing that decides what the

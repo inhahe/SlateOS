@@ -44752,6 +44752,60 @@ impl Shell {
                 && value
                     .as_ref()
                     .is_some_and(|v| split_assignment_target(v).is_none());
+            // `+n` asks something else again, and is refused somewhere else
+            // again — declare.def:817 excludes it outright with
+            // `(flags_off & att_nameref) == 0`, so the complaint comes from the
+            // **store**, which bash still makes with the attribute in force
+            // (declare.def:982):
+            //
+            // ```c
+            //       if (onref || nameref_p (var))
+            //         aflags |= ASS_NAMEREF;
+            //       v = bind_variable_value (var, value, aflags);
+            //       if (v == 0 && (onref || nameref_p (var)))
+            //         { if (valid_nameref_value (value, 1) == 0)
+            //             sh_invalidid (value);
+            //           assign_error++;
+            //           …
+            //           flags_on |= onref;  /* undo change from above */
+            //           flags_off |= offref;
+            // ```
+            //
+            // A store through a reference has to name something, so `local +n
+            // g=5` on a chain that leads nowhere is refused — and the removal
+            // is *deferred* past the store (`VUNSETATTR (var, offref)`,
+            // declare.def:1034), so `NEXT_VARIABLE ()` here leaves the
+            // reference standing. The wording is the generic `sh_invalidid`
+            // one, not the nameref-specific line `-n` and the plain spelling
+            // give.
+            //
+            // Four limits, all measured. The declaration must be the one that
+            // *found* the frame's reference, so a fresh local shadowing a cycle
+            // that lives at global scope is not this (`held_here`), and neither
+            // is a chain whose target does not exist, which re-scopes the whole
+            // declaration onto that target instead (`unset_nameref_follows` —
+            // `local -n g=nosuch; local +n g=5` binds `nosuch`). An **append**
+            // is not validated at all, because it goes on the reference's own
+            // text: `local +n g+=5` through a cycle leaves `declare -- g="z5"`.
+            // And an array spelling (`local +n -a g=5`, `local +n g[1]=5`) is
+            // left alone: bash refuses those too, but the name it is refusing
+            // it *built*, from a buffer the array path never filled, so it
+            // quotes uninitialised bytes doing it — and even the status
+            // disagrees between the two. See
+            // TD-OILS-DECL-UNSET-NAMEREF-BASH-CORNERS in `known-issues.md`.
+            let ref_store_refused = unset_nameref
+                && make_local
+                && held_here
+                && !nameref
+                && !unset_nameref_follows
+                && !append
+                && subscript.is_none()
+                && !indexed
+                && !assoc
+                && self.nameref_attr.contains(base_name)
+                && value
+                    .as_ref()
+                    .is_some_and(|v| split_assignment_target(v).is_none());
             // Reassigning a value to an existing readonly variable is an error.
             // bash tags the diagnostic with the invoking builtin's name
             // (`declare: y: readonly variable`, `local: …`, `typeset: …`) and
@@ -45144,12 +45198,17 @@ impl Shell {
             // reference name and a subscript on it is still refused — because
             // that judgement happens while the flag is being parsed, not when
             // the attribute lands.
-            if unset_nameref {
+            if unset_nameref && !ref_store_refused {
                 // Not `base_name`, which by here is the target the reference
                 // led to: the letter is about the reference itself — unless the
                 // declaration followed *because* that target does not exist,
                 // and then it is about the target and there is nothing to take
                 // off. See `nameref_off_name` above.
+                //
+                // `ref_store_refused` holds it back because bash defers the
+                // removal past the store it is about to fail
+                // (`VUNSETATTR (var, offref)`, declare.def:1034), which the
+                // failure's `NEXT_VARIABLE ()` never reaches.
                 if let Some(off) = &nameref_off_name {
                     self.nameref_attr.remove(off);
                 }
@@ -45342,7 +45401,30 @@ impl Shell {
                 self.declared.insert(name.to_string());
                 break;
             }
-            let value = if nameref_int_refusal { None } else { value };
+            // The `+n` store bash makes with the reference still in force, and
+            // refuses when the value names nothing — see `ref_store_refused`.
+            // Shaped like `nameref_int_refusal` above: the attributes have
+            // landed and this operand's value does not bind, while the flags
+            // below still apply (`local +n -x g=5` leaves `declare -nx g="z"`)
+            // and the operands after it are still read.
+            if ref_store_refused
+                && let Some(v) = &value
+            {
+                self.emit_stderr(&bfmt![
+                    self.err_prefix(),
+                    tag,
+                    b": `",
+                    v.as_slice(),
+                    b"': not a valid identifier
+"
+                ]);
+                status = 1;
+            }
+            let value = if nameref_int_refusal || ref_store_refused {
+                None
+            } else {
+                value
+            };
             if let Some(v) = value {
                 if self.nameref_attr.contains(name) {
                     // `declare -n ref=target` — store the target *name*, bypassing
@@ -73376,6 +73458,128 @@ st=1
             let out = run(&format!("f() {{ {src} 2>/dev/null; declare -p g; }}; f")).0;
             assert_eq!(out, format!("{shape}\n"), "{src}");
         }
+    }
+
+    /// `+n` is excluded from declare.def:817 outright by
+    /// `(flags_off & att_nameref) == 0`, so a value that names nothing is
+    /// refused by the **store** instead — declare.def:982, which bash makes
+    /// with the reference still in force. The removal is deferred past it
+    /// (`VUNSETATTR (var, offref)`, :1034), so the failure's `NEXT_VARIABLE ()`
+    /// leaves the reference standing. osh took the attribute off and bound the
+    /// value as an ordinary scalar, silently, at status 0. Corpus:
+    /// `a-plus-n-local-declaration-refuses-a-store-through-the-reference-it-is-removing.sh`.
+    #[test]
+    fn a_plus_n_local_declaration_refuses_a_store_through_the_reference_it_is_removing() {
+        let w = "main: warning: g: circular name reference\n";
+        let cyc = "local -n g=z; local -n z=g;";
+
+        // The value is refused with the *generic* wording, the reference
+        // stands, and every other letter has already landed.
+        for (src, tag, shape) in [
+            ("local +n g=5", "local: `5'", "declare -n g=\"z\""),
+            ("declare +n g=5", "declare: `5'", "declare -n g=\"z\""),
+            ("typeset +n g=5", "typeset: `5'", "declare -n g=\"z\""),
+            ("local +n g=\"a b\"", "local: `a b'", "declare -n g=\"z\""),
+            ("local +n g=", "local: `'", "declare -n g=\"z\""),
+            ("local +n -i g=5", "local: `5'", "declare -in g=\"z\""),
+            ("local +n -x g=5", "local: `5'", "declare -nx g=\"z\""),
+            ("local +n -r g=5", "local: `5'", "declare -nr g=\"z\""),
+            ("local +n -l g=5", "local: `5'", "declare -nl g=\"z\""),
+            ("local +n -t g=5", "local: `5'", "declare -nt g=\"z\""),
+        ] {
+            let out = run(&format!(
+                "f() {{ {cyc} {src}; echo \"st=$?\"; declare -p g; }}; f 2>&1"
+            ))
+            .0;
+            assert_eq!(
+                out,
+                format!("{}main: {tag}: not a valid identifier\nst=1\n{shape}\n", w.repeat(2)),
+                "{src}"
+            );
+        }
+
+        // It is no cycle the store asks about — a chain that reaches a live
+        // name is refused the same way, and leaves that name alone.
+        let (out, _) = run(
+            "f() { local w=1; local -n g=w; local +n g=5; echo \"st=$?\"; declare -p g w; }; f 2>&1",
+        );
+        assert_eq!(
+            out,
+            "main: local: `5': not a valid identifier\nst=1\ndeclare -n g=\"w\"\ndeclare -- w=\"1\"\n"
+        );
+
+        // A chain past the link cap reaches nothing at all, and gives up
+        // silently, so the refusal comes on its own.
+        let deep: String = (1..=9)
+            .map(|i| format!("local -n n{i}=n{};", i + 1))
+            .collect::<String>()
+            + "local -n n10=n1;";
+        let (out, _) = run(&format!(
+            "f() {{ {deep} local +n n1=5; echo \"st=$?\"; declare -p n1; }}; f 2>&1"
+        ));
+        assert_eq!(
+            out,
+            "main: local: `5': not a valid identifier\nst=1\ndeclare -n n1=\"n2\"\n"
+        );
+
+        // Only the operand that carried it is dropped.
+        let (out, _) = run(&format!(
+            "f() {{ {cyc} local +n g=5 h=6; echo \"st=$?\"; declare -p g h; }}; f 2>&1"
+        ));
+        assert_eq!(
+            out,
+            format!(
+                "{}main: local: `5': not a valid identifier\n\
+                 st=1\ndeclare -n g=\"z\"\ndeclare -- h=\"6\"\n",
+                w.repeat(2)
+            )
+        );
+
+        // A value that *is* a name retargets the reference and the removal
+        // then stands; an append goes on the reference's own text and is never
+        // validated; a valueless one makes no store to fail.
+        for (src, shape) in [
+            ("local +n g=h", "declare -- g=\"h\""),
+            ("local +n g=\"a[1]\"", "declare -- g=\"a[1]\""),
+            ("local +n g+=5", "declare -- g=\"z5\""),
+            ("local +n g", "declare -- g=\"z\""),
+        ] {
+            let out = run(&format!(
+                "f() {{ {cyc} {src}; echo \"st=$?\"; declare -p g; }}; f 2>&1"
+            ))
+            .0;
+            assert_eq!(out, format!("{}st=0\n{shape}\n", w.repeat(2)), "{src}");
+        }
+
+        // Three neighbours are not this. A chain whose target does not exist
+        // re-scopes the declaration onto that target; a fresh local shadowing
+        // a cycle that lives at global scope is a plain local; and a readonly
+        // reference is refused earlier, with the other wording.
+        let (out, _) = run(
+            "f() { local -n g=nosuch; local +n g=5; echo \"st=$?\"; declare -p g nosuch; }; f 2>&1",
+        );
+        assert_eq!(out, "st=0\ndeclare -n g=\"nosuch\"\ndeclare -- nosuch=\"5\"\n");
+
+        let (out, _) = run(
+            "declare -n gg=zz; declare -n zz=gg; \
+             f() { local +n gg=5; echo \"st=$?\"; declare -p gg; }; f 2>&1; \
+             echo AFTER; declare -p gg",
+        );
+        assert_eq!(
+            out,
+            format!(
+                "{}st=0\ndeclare -- gg=\"5\"\nAFTER\ndeclare -n gg=\"zz\"\n",
+                "main: warning: gg: circular name reference\n".repeat(2)
+            )
+        );
+
+        let (out, _) = run(
+            "f() { local -nr g=z; local -n z=g; local +n g=5; echo \"st=$?\"; declare -p g; }; f 2>&1",
+        );
+        assert_eq!(
+            out,
+            format!("{}main: local: g: readonly variable\nst=1\ndeclare -nr g=\"z\"\n", w.repeat(2))
+        );
     }
 
     /// A bad option letter is refused before the routing that decides what the

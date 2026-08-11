@@ -43,7 +43,7 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
-### TD-OILS-A-SELF-NAMING-NAMEREF-IS-NOT-RESOLVED-AT-GLOBAL-SCOPE. `local -n r=r` reads the string `r` where bash reads the global `r` — 2026-08-10
+### TD-OILS-A-NAMEREF-CYCLE-THAT-CLOSES-ON-A-LOCAL-IS-NOT-RESOLVED-AT-GLOBAL-SCOPE. `local -n r=r` reads the string `r` where bash reads the global `r` — 2026-08-10 — ✅ FIXED 2026-08-10
 
 **Where:** `userspace/oils/src/interp.rs`, `Shell::resolve_ref_name` — the arm
 that deliberately exempts a self-naming reference from the cycle test:
@@ -156,6 +156,121 @@ originally carried a `local -n r=r` row. The row was dropped from that case —
 its subject is a reference with an *empty* cell, which this is not — rather
 than encoding the wrong answer; it belongs in a case of its own once this is
 fixed.
+
+**Fixed 2026-08-10.** The cycle test now closes over the self-naming shape, and
+a walk that closes on a *function-local* variable re-resolves the name in the
+global table with namerefs not followed — bash's `find_global_variable_noref`
+escape — while one that closes on a global still answers nothing. Reads, writes,
+`declare -p`, `[ -v ]`, arithmetic and element access all go through the escape;
+a write binds the global (creating it if absent) and leaves the reference
+intact.
+
+Measuring the warning counts that fall out of it turned up a second, larger
+rule that had to be implemented for this to match byte-for-byte: bash asks after
+a variable *again* after reading its value, and how many times it walks a
+nameref chain doing so depends on how the parameter is spelled and on what the
+name reached. That is `get_var_and_type` (subst.c), now modelled by
+`Shell::var_and_type_walks` / `VarForm` / `ResolvedKind`: an element subscript
+costs 2, `[@]`/`[*]` costs 1 where the variable exists and 2 where it does not,
+and a bare name costs 1 plus one more where the value is set and the name did
+not reach an array, plus one more again for `@a`/`@A` on a name that reached
+nothing.
+
+`export`/`readonly` mark the global the escape names, at the cost bash's
+`set_var_attribute` pays for it (`Shell::attr_ref_walks`), and an unsubscripted
+arithmetic operand asks `set -u` about that global rather than about the
+reference standing in front of it, sharing bash's single `find_variable`
+between the check and the read (`Shell::arith_unbound_name`). The residual gaps
+this measurement left are logged separately as
+`TD-OILS-REDECLARING-A-SELF-NAMING-NAMEREF-WARNS-TOO-FEW-TIMES` and
+`TD-OILS-A-SUBSCRIPTED-ARITHMETIC-OPERAND-DOES-NOT-FOLLOW-A-NAMEREF-CYCLES-ESCAPE`.
+
+**Corpus:** `a-nameref-cycle-that-closes-on-a-local-resolves-at-global-scope.sh`
+and `export-and-readonly-mark-the-global-a-nameref-cycle-escaped-to.sh`.
+
+---
+
+### TD-OILS-A-SUBSCRIPTED-ARITHMETIC-OPERAND-DOES-NOT-FOLLOW-A-NAMEREF-CYCLES-ESCAPE. `(( arr[1] ))` through an escaped cycle reads 0 and writes nowhere — 2026-08-10
+
+**Where:** `userspace/oils/src/interp.rs`. A cycle that closes on a
+function-local reference resolves at global scope
+(`Shell::resolve_ref_name`, `RefTarget::global`), and the unsubscripted
+arithmetic operand now follows it — `Shell::arith_unbound_name` asks about
+visibility inside `Shell::in_opt_target_scope`, and the read that follows walks
+the same escape. The **subscripted** operand does not: `ArithElem::Array`
+carries only a name, so every caller of `Shell::arith_elem_read`
+(`VarLookup::get_index_str`, `get_assoc_str`, `is_assoc`) then looks the array
+up in the *current* scope, where the local reference stands in front of the
+global. `Shell::arith_elem_write_base` has the same shape on the write side.
+
+**Reproduce.**
+
+```sh
+declare -a ga=(4 5); gs=42; declare -A gm=([k]=v)
+f() { declare -n ga=z; declare -n z=ga; echo "$(( ga[1] ))"; }; f
+g() { declare -n gs=z; declare -n z=gs; echo "$(( gs[0] ))"; }; g
+h() { declare -n gm=z; declare -n z=gm; echo "$(( gm[k] ))"; }; h
+w() { declare -n ga=z; declare -n z=ga; (( ga[1] = 9 )); }; w; declare -p ga
+```
+
+bash 5.2.37 reads `5`, `42` and then fails on the *value* `v`
+(`v: unbound variable`, the recursive evaluation of what `gm[k]` holds), and
+the store leaves `declare -a ga=([0]="4" [1]="9")`. osh reads `0`, `0` and
+fails on the *subscript* `k` (`k: unbound variable`, because `is_assoc` looked
+in the wrong scope and the key was read as an index), and the store lands on the
+local reference — turning it into `declare -an ga=([0]="ga" [1]="9")`, an array
+that has kept the nameref attribute, which is a thing bash has no such thing as
+(`declare -a a; declare -n a=x` is `a: reference variable cannot be an array`).
+
+The warning counts follow the same fault — measured with a two-link cycle
+declared inside a function, counting `circular name reference` lines:
+
+| operand | bash | osh |
+|---|---|---|
+| `set +u; (( z1[0] ))`, nothing behind it | 2 | 3 |
+| `set -u; (( z1[0] ))`, nothing behind it | 1 | 1 |
+| `set +u; (( gs[0] ))`, scalar global | 2 | 3 |
+| `set -u; (( gs[0] ))`, scalar global | 2 | 4 |
+| `set +u; (( ga[1] ))`, array global | 2 | 2 |
+| `set -u; (( ga[1] ))`, array global | 2 | 3 |
+| `set +u; (( ga[1] = 5 ))`, array global | 3 | 0 |
+
+**Proper fix.** Make `ArithElem::Array` carry the resolved `RefTarget` rather
+than a bare `String`, and wrap each table lookup that follows it in
+`Shell::in_target_scope`, so the array, its bounds, its element and its
+index-vs-key kind all come from the scope the walk named. `VarLookup::is_assoc`
+is `&self` and cannot swap scopes, so it needs either a `&mut self` signature or
+a read-only peek at the parked global snapshot (`Shell::enter_global_scope`
+already knows how to find it). Once the lookups are single and scoped, the walk
+counts collapse to bash's: `array_variable_part` for the `set -u` check and one
+more for `get_array_value`, which is 1 when the check ends the expression and 2
+otherwise (expr.c:1180).
+
+---
+
+### TD-OILS-REDECLARING-A-SELF-NAMING-NAMEREF-WARNS-TOO-FEW-TIMES. The second `local -n g=g` warns twice where bash warns four times — 2026-08-10
+
+**Where:** `userspace/oils/src/interp.rs`, the `declare`/`local` builtin's
+`check_selfref` plus bind-time warning. A *first* `local -n g=g` matches bash at
+two warnings; a second one in the same function warns twice in osh and four
+times in bash, because by then the name already holds a self-naming reference
+and bash's re-declaration walks it on the way to rebinding it.
+
+**Reproduce.**
+
+```sh
+f() { local -n g=g; local -n g=g; }
+f
+```
+
+bash 5.2.37 prints six warnings in all (`local:`, plain, `local:`, plain, plain,
+plain); osh prints four (`local:`, plain, `local:`, plain).
+
+**Proper fix.** Work out which lookups `declare.def` makes when the name being
+declared is already a nameref — `make_local_variable` finds the existing local,
+and the assignment path then resolves it — and reproduce them. Low value on its
+own; worth doing alongside the other two escape residuals since they share the
+declaration path.
 
 ---
 

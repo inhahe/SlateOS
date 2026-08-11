@@ -10706,7 +10706,7 @@ impl Shell {
             // folds its case), an existing array is written at element 0, and
             // `set -a` exports it. A nameref is the one thing *not* followed:
             // bash stores into the reference itself, leaving its target alone.
-            self.scalar_write_store(&ScalarDest::Var(var.to_owned()), item);
+            self.scalar_write_store(&ScalarDest::var(var.to_owned()), item);
             match self.exec_program(&c.body, out, stdin) {
                 Flow::Next => {}
                 Flow::Break(n) => {
@@ -13249,7 +13249,7 @@ impl Shell {
     fn scalar_write_dest(&mut self, name: &str) -> Option<ScalarDest> {
         let target = self.resolve_ref_use(name)?;
         let Some(sub) = target.sub else {
-            return Some(ScalarDest::Var(target.base));
+            return Some(ScalarDest { place: ScalarPlace::Var(target.base), global: target.global });
         };
         // The base of an element destination is bound where it is written, so a
         // reference there is stripped rather than followed — and stripped
@@ -13265,7 +13265,7 @@ impl Shell {
             self.warn_whole_array_sub(&target.base, c);
             return None;
         }
-        Some(ScalarDest::Elem(target.base, sub))
+        Some(ScalarDest::elem(target.base, sub))
     }
 
     /// The dynamic special that would take a subscript-less write to `name`, or
@@ -13425,7 +13425,7 @@ impl Shell {
         //
         // [`Shell::after_var_write`] is not owed anything here — the only name
         // it syncs is `DIRSTACK`, which is an ordinary array.
-        if let ScalarDest::Var(n) = dest
+        if let ScalarPlace::Var(n) = &dest.place
             && self.dyn_special_write(n, &val, false)
         {
             return true;
@@ -13436,7 +13436,7 @@ impl Shell {
         // passes it over: `set -a; read 'zz[1]' <<< 9` leaves `declare -a zz`
         // where `set -a; read zz <<< 9` gives `declare -x zz`. A write a dynamic
         // special took makes no variable at all and has already returned above.
-        if matches!(dest, ScalarDest::Var(_)) && self.allexport {
+        if dest.is_var() && self.allexport {
             self.mark_exported(base.clone());
         }
         let stored = match self.apply_value_attrs(&base, val) {
@@ -13446,17 +13446,17 @@ impl Shell {
                 // …but a whole-variable write still counts as assigned. See
                 // [`Shell::note_int_refusal_assigned`]; an element destination
                 // does not, which is why this asks.
-                if matches!(dest, ScalarDest::Var(_)) {
+                if dest.is_var() {
                     self.note_int_refusal_assigned(&base);
                 }
                 false
             }
-            Some(val) => match dest {
-                ScalarDest::Var(n) => {
+            Some(val) => match &dest.place {
+                ScalarPlace::Var(n) => {
                     self.set_scalar_store(n, val);
                     true
                 }
-                ScalarDest::Elem(n, sub) => {
+                ScalarPlace::Elem(n, sub) => {
                     // The subscript arrived as bytes (a `printf -v`/`read` name
                     // operand, or a nameref target), so it still has to be read
                     // as the word it spells — see [`Shell::sub_word`].
@@ -13535,12 +13535,14 @@ impl Shell {
         // A circular chain leaves the element write on the name as written —
         // with the warning, and with the reference attribute gone, since the
         // store is about to make it an array. See
-        // [`Shell::resolve_ref_array_write`].
-        let landed = self
-            .resolve_ref_elem_write(base)
-            .into_name()
-            .unwrap_or_else(|| base.to_string());
-        self.scalar_write_checked(&ScalarDest::Elem(landed, sub.to_vec()), Some(base), val)
+        // [`Shell::resolve_ref_array_write`]. One that *escaped* to global scope
+        // keeps its reference and takes the subscript to the global instead, so
+        // the escape rides along on the destination.
+        let target = self.resolve_ref_elem_write(base);
+        let global = target.global;
+        let landed = target.into_name().unwrap_or_else(|| base.to_string());
+        let dest = ScalarDest { place: ScalarPlace::Elem(landed, sub.to_vec()), global };
+        self.scalar_write_checked(&dest, Some(base), val)
     }
 
     /// The readonly guard and the store, shared by every checked scalar write.
@@ -13550,6 +13552,17 @@ impl Shell {
     /// `blame` is the name a refusal is reported under when that is not the
     /// destination's own — see [`Self::set_scalar_target_checked`].
     fn scalar_write_checked(
+        &mut self,
+        dest: &ScalarDest,
+        blame: Option<&str>,
+        val: Str,
+    ) -> bool {
+        self.in_dest_scope(dest, |sh| sh.scalar_write_guarded(dest, blame, val))
+    }
+
+    /// [`Self::scalar_write_checked`] with the destination's scope already in
+    /// place — see [`Self::in_dest_scope`].
+    fn scalar_write_guarded(
         &mut self,
         dest: &ScalarDest,
         blame: Option<&str>,
@@ -13630,21 +13643,30 @@ impl Shell {
             return Ok(None);
         }
         let dest = match target.sub {
-            Some(sub) => ScalarDest::Elem(target.base, sub),
-            None => ScalarDest::Var(target.base),
+            Some(sub) => ScalarDest::elem(target.base, sub),
+            None => ScalarDest { place: ScalarPlace::Var(target.base), global: target.global },
         };
-        if self.readonly.contains(dest.base()) {
-            return Err(arith::ArithError::about_var(
-                self.arith_blame(name, &dest),
-                "readonly variable",
-            ));
-        }
-        // A variable the shell maintains is refused the same way, minus the
-        // diagnostic — see [`Shell::noassign`] and [`arith::ArithError::silent`].
-        if self.noassign.contains(dest.base()) {
-            return Err(arith::ArithError::silently_refused(
-                self.arith_blame(name, &dest),
-            ));
+        // Both guards ask about the *destination's* scope, since an escaped
+        // chain names the global and it is the global's attributes that decide.
+        // See [`Self::in_dest_scope`].
+        if let Some(err) = self.in_dest_scope(&dest, |sh| {
+            if sh.readonly.contains(dest.base()) {
+                return Some(arith::ArithError::about_var(
+                    sh.arith_blame(name, &dest),
+                    "readonly variable",
+                ));
+            }
+            // A variable the shell maintains is refused the same way, minus the
+            // diagnostic — see [`Shell::noassign`] and
+            // [`arith::ArithError::silent`].
+            if sh.noassign.contains(dest.base()) {
+                return Some(arith::ArithError::silently_refused(
+                    sh.arith_blame(name, &dest),
+                ));
+            }
+            None
+        }) {
+            return Err(err);
         }
         Ok(Some(dest))
     }
@@ -13669,8 +13691,8 @@ impl Shell {
     /// array-shaped write: nothing about it makes an array, so it is blamed on
     /// the target like any other scalar store.
     fn arith_blame<'a>(&self, spelled: &'a str, dest: &'a ScalarDest) -> &'a str {
-        match dest {
-            ScalarDest::Var(base) if self.arrays.contains_key(base) => spelled,
+        match &dest.place {
+            ScalarPlace::Var(base) if self.arrays.contains_key(base) => spelled,
             _ => dest.base(),
         }
     }
@@ -13703,38 +13725,63 @@ impl Shell {
     /// `None` when there is a variable there to read. See
     /// [`VarLookup::note_arith_unbound`], which is the only caller.
     ///
-    /// Resolution here is the *warning* [`Shell::resolve_ref_use`], one walk,
-    /// and that is deliberate: a circular chain always fails this check, so the
-    /// read that would have warned never happens and this walk is the only one
-    /// left to carry the warning. bash prints exactly one — for both spellings —
-    /// where with `set -u` off `(( c1[0] ))` prints two, because there the read
-    /// does happen and resolves twice. A chain that is *not* circular warns
-    /// nothing here, so the counts the read owns are untouched.
+    /// How much of the chain-walking this check pays for is decided by which of
+    /// bash's two lookups the operand is read through (expr.c:1180):
+    ///
+    /// ```c
+    ///   v = (e == ']') ? array_variable_part (tok, tflag, …) : find_variable (tok);
+    ///   …
+    ///   if ((v == 0 || invisible_p (v)) && unbound_vars_is_error) … err_unboundvar …
+    ///   value = (e == ']') ? get_array_value (tok, aflag, &es) : get_variable_value (v);
+    /// ```
+    ///
+    /// Unsubscripted, the one `find_variable` answers *both* questions —
+    /// `get_variable_value (v)` walks nothing further — so the walk belongs to
+    /// the read and this check makes none of its own. The exception is a check
+    /// that *fails*: it abandons the expression before the read happens, which
+    /// leaves this walk the only one there is. Either way exactly one is
+    /// reported. Subscripted, `array_variable_part` is a lookup of its own and
+    /// the read walks again on top of it, so `(( c1[0] ))` through a cycle warns
+    /// twice where it reaches a variable and once where the check ends it.
+    ///
+    /// Visibility is asked **in the target's scope**, which is what a cycle that
+    /// escaped to global scope makes observable: `f() { local -n g=g; (( g )); }`
+    /// asks about the *global* `g`, not about the local reference standing in
+    /// front of it, so it is unbound when no global exists however plainly the
+    /// reference itself is there.
     fn arith_unbound_name(&mut self, name: &str, subscripted: bool) -> Option<String> {
+        let target = self.resolve_ref_name(name);
         // The written base names the failure for a subscripted operand, however
         // far a nameref would have reached — bash's `array_variable_name` gives
         // back the token's own base, so `declare -n r=nada; (( r[0] ))` reports
         // `r` where the unsubscripted `(( r ))` beside it reports `nada`.
         let asked = if subscripted {
-            match Self::arith_elem_of(self.resolve_ref_use(name)) {
-                ArithElem::Array(base) => base,
+            match Self::arith_elem_of(target.clone()) {
+                ArithElem::Array(base) => Some(base),
                 // Neither designates an array, so there is none to find.
-                ArithElem::Element | ArithElem::Circular => return Some(name.to_owned()),
+                ArithElem::Element | ArithElem::Circular => None,
             }
         } else {
-            match self.resolve_ref_use(name) {
-                // An element reference asks about the array holding it.
-                Some(t) => t.base,
-                // A chain that closes on itself reaches nothing, whatever the
-                // name it started from still holds — that name's own value is
-                // the next link, not a value. bash reports where it started.
-                None => return Some(name.to_owned()),
-            }
+            // An element reference asks about the array holding it. A chain that
+            // closes on itself reaches nothing, whatever the name it started
+            // from still holds — that name's own value is the next link, not a
+            // value — and bash reports where it started.
+            target.as_ref().map(|t| t.base.clone())
         };
-        if self.arith_var_visible(&asked) {
+        let found = match &asked {
+            Some(base) => {
+                self.in_opt_target_scope(target.as_ref(), |sh| sh.arith_var_visible(base))
+            }
+            None => false,
+        };
+        self.warn_circular_walks(name, target.as_ref(), usize::from(subscripted || !found));
+        if found {
             return None;
         }
-        Some(if subscripted { name.to_owned() } else { asked })
+        match asked {
+            Some(base) if !subscripted => Some(base),
+            _ => Some(name.to_owned()),
+        }
     }
 
     /// Whether `name` is a variable arithmetic can read — bash's
@@ -14134,6 +14181,20 @@ impl Shell {
                 None => a2.name = target.base,
             }
             return self.apply_assignment_spelled(&a2, trace, Some(spelled));
+        }
+        // A chain that escaped a cycle binds the **global** of the same name,
+        // and everything left to do — the readonly guard, the value attributes,
+        // the store — has to see that binding rather than the local reference
+        // standing in front of it. Re-entering under the swap is the whole of
+        // the change: the assignment is not rewritten (an escape is not a
+        // redirection), and the swap takes the reference attribute out of the
+        // live tables with it, so the second pass walks no chain, warns nothing,
+        // and falls straight through to the store. See
+        // [`Self::with_global_binding`].
+        if target.global {
+            let (a, spelled, base) = (a.clone(), spelled.clone(), target.base.clone());
+            return self
+                .with_global_binding(&base, |sh| sh.apply_assignment_inner(&a, trace, &spelled));
         }
         // `set -x`: a plain scalar assignment is traced with its *expanded* value
         // (emitted at the scalar store below); everything else (indexed element,
@@ -15434,10 +15495,21 @@ impl Shell {
     fn array_elements_walks(&mut self, name: &str, walks: usize) -> Vec<Str> {
         // A reference designating one *element* names no array to enumerate, so
         // it yields nothing — the same answer the lookups below would give.
-        let Some(name) = &self.resolve_ref_use_walks(name, walks).and_then(RefTarget::into_name)
-        else {
+        let Some(target) = self.resolve_ref_use_walks(name, walks) else {
             return Vec::new();
         };
+        let Some(name) = target.as_name().map(str::to_owned) else {
+            return Vec::new();
+        };
+        self.in_target_scope(&target, move |sh| sh.resolved_elements(&name))
+    }
+
+    /// [`Self::array_elements_walks`]'s enumeration on its own, for a `name` a
+    /// chain has already been walked to and a scope already entered for. A
+    /// caller that has resolved must not resolve again: the second walk would
+    /// warn a second time about a circular chain the first walk already
+    /// reported.
+    fn resolved_elements(&mut self, name: &str) -> Vec<Str> {
         if let Some(m) = self.assoc.get(name) {
             return m.iter().map(|(_, v)| v.clone()).collect();
         }
@@ -15500,11 +15572,39 @@ impl Shell {
         } else {
             bfmt![name, b"[", all, b"]"]
         };
-        let target = if positional {
+        // Two walks of a nameref chain for the read — `[@]`/`[*]` is a subscript
+        // like any other, see [`Self::array_elements_walks`] — plus the one
+        // asking after the variable costs a modifier with something to work on
+        // ([`Self::var_and_type_walks`]). Both come before either bound is
+        // evaluated, which is where bash makes them.
+        let resolved = if positional {
             None
         } else {
-            self.resolve_ref_use(name).and_then(RefTarget::into_name)
+            let walks = 2 + usize::from(self.whole_value_set(name));
+            self.resolve_ref_use_walks(name, walks)
         };
+        // Everything past here reads the parameter, so it all belongs in the
+        // scope the chain named — including the offset and length arithmetic,
+        // which is faithful rather than merely convenient: inside the swap the
+        // escaped name resolves straight to the global, which is exactly what
+        // bash's own walk does for it. See [`Self::in_target_scope`].
+        let target = resolved.clone().and_then(RefTarget::into_name);
+        self.in_opt_target_scope(resolved.as_ref(), move |sh| {
+            sh.slice_elements_resolved(target, positional, param_ref, offset, length)
+        })
+    }
+
+    /// [`Self::slice_elements`] once the chain has been walked and the scope it
+    /// named is in place. `target` is the variable the walk reached, `name` the
+    /// one the writer typed.
+    fn slice_elements_resolved(
+        &mut self,
+        target: Option<String>,
+        positional: bool,
+        param_ref: Str,
+        offset: &Word,
+        length: &Option<Box<Word>>,
+    ) -> Vec<Str> {
         // A name that is no array at all is not a one-element list: bash falls
         // through to the plain `${v:off:len}` substring operator, so `v=scalar`
         // answers `${v[@]:1}` with `calar` and `${v[@]: -1}` with `r`.
@@ -15540,8 +15640,12 @@ impl Shell {
                     let mut v = vec![self.param_value("0").unwrap_or_default()];
                     v.extend(self.positional.iter().cloned());
                     v
+                } else if let Some(t) = target {
+                    // Already walked to, and already in its scope: enumerating
+                    // it is the rest of the *same* read, not a second one.
+                    self.resolved_elements(&t)
                 } else {
-                    self.array_elements(name)
+                    Vec::new()
                 };
                 list.into_iter()
                     .enumerate()
@@ -15798,6 +15902,14 @@ impl Shell {
         if elems.is_empty() {
             return Vec::new();
         }
+        // …and past that guard it asks after the variable, exactly as the scalar
+        // modifier does — one walk, since the name reached a collection whose
+        // cell `get_var_and_type` takes whole. A trim with no pattern text is
+        // the one exemption, and it is the scalar rule again. See
+        // [`Self::modifier_var_walks`].
+        if !matches!(op, BulkOp::Trim { pattern, .. } if pattern.parts.is_empty()) {
+            self.modifier_var_walks(name, VarForm::Whole, true, false);
+        }
         let ready = self.ready_bulk_op(op);
         elems
             .into_iter()
@@ -15832,14 +15944,25 @@ impl Shell {
     /// field — or as no field at all when that answer is empty. See the comment
     /// on the branch below.
     fn bulk_attr_transform(&mut self, name: &str, op: char, fields: bool) -> Vec<Str> {
-        // Four walks of a nameref chain, and so four reports of a circular one:
-        // the same two the operand read costs ([@]/[*] is a subscript — see
-        // [`Self::array_elements_walks`]) plus the two that asking after the
-        // variable costs ([`Self::attr_report_target`]). One resolution answers
-        // both here, so the count is stated rather than accumulated.
-        let Some(name) = &self.resolve_ref_use_walks(name, 4).and_then(RefTarget::into_name) else {
+        // Two walks of a nameref chain for the operand read ([@]/[*] is a
+        // subscript — see [`Self::array_elements_walks`]), plus what asking
+        // after the variable costs ([`Self::var_and_type_walks`]): one more on a
+        // name that reaches something, two on one that does not. One resolution
+        // answers all of them here, so the count is summed rather than walked
+        // twice over.
+        let walks = 2 + self.var_and_type_walks(name, VarForm::Whole, true, true);
+        let Some(target) = self.resolve_ref_use_walks(name, walks) else {
             return Vec::new();
         };
+        let Some(name) = target.as_name().map(str::to_owned) else {
+            return Vec::new();
+        };
+        self.in_target_scope(&target, |sh| sh.bulk_attr_transform_resolved(&name, op, fields))
+    }
+
+    /// [`Self::bulk_attr_transform`] once the chain has been walked and the
+    /// scope it named is in place — see [`Self::in_target_scope`].
+    fn bulk_attr_transform_resolved(&mut self, name: &String, op: char, fields: bool) -> Vec<Str> {
         let positional = name == "@" || name == "*";
         // A scalar has one element and `[@]` names it, so the collection forms
         // degenerate to the *scalar* transform — `${s[@]@A}` is `s='a b'`, the
@@ -16194,21 +16317,27 @@ impl Shell {
 
     /// The keys (associative) or indices (indexed) of `name`, in order.
     fn array_keys(&mut self, name: &str) -> Vec<Str> {
-        let Some(name) = &self.resolve_ref_use(name).and_then(RefTarget::into_name) else {
+        let Some(target) = self.resolve_ref_use(name) else {
             return Vec::new();
         };
-        if let Some(m) = self.assoc.get(name) {
-            return m.iter().map(|(k, _)| k.clone()).collect();
-        }
-        if let Some(a) = self.arrays.get(name) {
-            return a.keys().map(|k| k.to_string().into_bytes()).collect();
-        }
-        // A scalar's one index is `0` — including a computed one, so
-        // `${!SECONDS[@]}` is `0`. See [`Shell::scalar_for_subscript`].
-        if self.scalar_for_subscript(name).is_some() {
-            return vec![b"0".to_vec()];
-        }
-        Vec::new()
+        let Some(name) = target.as_name().map(str::to_owned) else {
+            return Vec::new();
+        };
+        self.in_target_scope(&target, |sh| {
+            let name = &name;
+            if let Some(m) = sh.assoc.get(name) {
+                return m.iter().map(|(k, _)| k.clone()).collect();
+            }
+            if let Some(a) = sh.arrays.get(name) {
+                return a.keys().map(|k| k.to_string().into_bytes()).collect();
+            }
+            // A scalar's one index is `0` — including a computed one, so
+            // `${!SECONDS[@]}` is `0`. See [`Shell::scalar_for_subscript`].
+            if sh.scalar_for_subscript(name).is_some() {
+                return vec![b"0".to_vec()];
+            }
+            Vec::new()
+        })
     }
 
     /// Resolve a possibly-negative array subscript against a length, using bash
@@ -16355,9 +16484,15 @@ impl Shell {
         {
             return self.ref_target_value(&target.base, sub);
         }
-        let Some(name) = &target.into_name() else {
+        let Some(name) = target.as_name().map(str::to_owned) else {
             return ElemValue::Absent;
         };
+        self.in_target_scope(&target, |sh| sh.param_elem_resolved(&name, index))
+    }
+
+    /// [`Self::param_elem_lookup`] once the chain has been walked and the scope
+    /// it named is in place — see [`Self::in_target_scope`].
+    fn param_elem_resolved(&mut self, name: &String, index: Option<&Word>) -> ElemValue {
         let found = match index {
             None => self.param_value(name),
             Some(w) => {
@@ -17284,6 +17419,143 @@ impl Shell {
         }
     }
 
+    /// What a lookup of `name` finds once its nameref chain has been walked and
+    /// the scope that walk named is in place — see [`Self::in_target_scope`].
+    ///
+    /// The distinction is bash's `find_variable` plus the `array_p (v) ||
+    /// assoc_p (v)` test its callers make of what it answered; a name brought
+    /// into being unvalued (`declare q`) is found, as it is everywhere else
+    /// ([`Self::name_is_bound`]).
+    fn resolved_kind(&mut self, name: &str) -> ResolvedKind {
+        let Some(target) = self.resolve_ref_name(name) else {
+            return ResolvedKind::Absent;
+        };
+        let Some(found) = target.as_name().map(str::to_owned) else {
+            return ResolvedKind::Absent;
+        };
+        self.in_target_scope(&target, |sh| {
+            if sh.arrays.contains_key(&found) || sh.assoc.contains_key(&found) {
+                ResolvedKind::Collection
+            } else if sh.name_is_bound(found.as_bytes()) {
+                ResolvedKind::Scalar
+            } else {
+                ResolvedKind::Absent
+            }
+        })
+    }
+
+    /// Whether `${name[@]}` has anything to expand to — bash's `value` for a
+    /// whole-collection modifier, which is `NULL` both for a name that reaches
+    /// nothing and for a collection holding no elements at all.
+    fn whole_value_set(&mut self, name: &str) -> bool {
+        let Some(target) = self.resolve_ref_name(name) else {
+            return false;
+        };
+        let Some(found) = target.as_name().map(str::to_owned) else {
+            return false;
+        };
+        self.in_target_scope(&target, |sh| {
+            if let Some(m) = sh.assoc.get(&found) {
+                !m.is_empty()
+            } else if let Some(a) = sh.arrays.get(&found) {
+                !a.is_empty()
+            } else {
+                // A scalar is a one-element collection, and `[@]` names it.
+                sh.vars.contains_key(&found)
+            }
+        })
+    }
+
+    /// How many times bash's `get_var_and_type` (subst.c:8250) walks `name`'s
+    /// nameref chain on behalf of a modifier that has decided to apply itself —
+    /// and so how many times a *circular* chain is reported from in there, on
+    /// top of whatever the operand read already cost.
+    ///
+    /// Every modifier that does more than hand its operand back asks after the
+    /// **variable** as well as the value, and the count is the shape of that one
+    /// function. A bare name is looked up once, and once more to dequote the
+    /// value the caller already read:
+    ///
+    /// ```c
+    /// else if ((v = find_variable (vname)) && (invisible_p (v) == 0) && (assoc_p (v) || array_p (v)))
+    ///   { vtype = VT_ARRAYMEMBER; … }            /* one walk: element 0 is the value */
+    /// else
+    ///   {
+    ///     if (value && vtype == VT_VARIABLE)
+    ///       { *varp = find_variable (vname); … }  /* a second, only with a value in hand */
+    /// ```
+    ///
+    /// A *subscripted* one goes the other way, through `valid_array_reference`:
+    /// `array_variable_part` walks it once and `array_value` walks it again to
+    /// fetch the element — except for `[@]`/`[*]` on a variable that exists,
+    /// whose cell is taken whole. So `${g[0]@Q}` costs two where `${g[@]@Q}`
+    /// costs one, and `${g[@]@Q}` on a name reaching nothing costs two again
+    /// (there is no cell to take, so `array_value` runs after all).
+    ///
+    /// `attrs` is `@a`/`@A`, the two operators bash lets through with no value
+    /// at all — and which then look once more for the `SHELL_VAR`
+    /// `get_var_and_type` was never given (`parameter_brace_transform`,
+    /// subst.c:8693).
+    ///
+    /// Which modifiers get this far is exactly [`Self::indirect_op_reresolves`]'s
+    /// question: the same call, seen from the indirect side, where what shows is
+    /// the pointer's subscript running twice rather than a warning repeating.
+    fn var_and_type_walks(
+        &mut self,
+        name: &str,
+        form: VarForm,
+        value_set: bool,
+        attrs: bool,
+    ) -> usize {
+        match form {
+            VarForm::Element => 2,
+            VarForm::Whole => 1 + usize::from(self.resolved_kind(name) == ResolvedKind::Absent),
+            VarForm::Name => {
+                let kind = self.resolved_kind(name);
+                let mut walks = 1;
+                if value_set && kind != ResolvedKind::Collection {
+                    walks += 1;
+                }
+                if attrs && kind == ResolvedKind::Absent {
+                    walks += 1;
+                }
+                walks
+            }
+        }
+    }
+
+    /// Report a circular chain for the walks [`Self::var_and_type_walks`]
+    /// counts, and throw the answer away: what the modifier works on is the
+    /// operand the caller already read, so this is the *asking* and not a second
+    /// answer.
+    ///
+    /// Only a modifier written against the name directly pays here. Through an
+    /// indirection the name bash re-reads is the pointer's own `!ref[…]` text,
+    /// which [`Self::indirect_reresolve`] re-reads instead.
+    fn modifier_var_walks(&mut self, name: &str, form: VarForm, value_set: bool, attrs: bool) {
+        if !self.nameref_attr.contains(name) {
+            return;
+        }
+        let walks = self.var_and_type_walks(name, form, value_set, attrs);
+        drop(self.resolve_ref_use_walks(name, walks));
+    }
+
+    /// [`Self::modifier_var_walks`] for a scalar modifier, which pays only where
+    /// it names the parameter itself — the `!ref[…]` an indirection was written
+    /// as is what bash re-reads there, and [`Self::indirect_reresolve`] does it.
+    fn scalar_modifier_var_walks(
+        &mut self,
+        operand: Operand<'_>,
+        name: &str,
+        index: &Option<Box<Word>>,
+        value_set: bool,
+        attrs: bool,
+    ) {
+        if matches!(operand, Operand::Param) {
+            self.modifier_var_walks(name, VarForm::of(index), value_set, attrs);
+        }
+    }
+
     /// Make the second pointer resolution `${!ref<op>}` owes, if it owes one —
     /// **once** for this part, however many of osh's expansion paths ask.
     ///
@@ -17487,17 +17759,17 @@ impl Shell {
     /// bash reports it at the point of use), or one naming an array *element*
     /// (nothing is *named* `arr[1]`, so it carries no attributes of its own and
     /// there is no declaration to recreate).
-    fn attr_report_target(&self, name: &str) -> Option<String> {
+    fn attr_report_target(&mut self, name: &str, form: VarForm, value_set: bool) -> Option<String> {
         if !self.nameref_attr.contains(name) {
             return Some(name.to_string());
         }
-        // Asking after the *variable* is its own pair of walks, on top of
-        // whatever the operand read already cost: bash resolves the name once to
-        // reach the variable and again to read what it is. So a circular chain
-        // is reported three times for `${c1@a}` (one for the read, two here) and
-        // four for `${c1[0]@a}`, whose read is subscripted and pays two of its
-        // own. See [`Self::resolve_ref_use_walks`].
-        let target = self.resolve_ref_use_walks(name, 2)?.into_name()?;
+        // Asking after the *variable* is its own walk or two, on top of whatever
+        // the operand read already cost. So a circular chain is reported three
+        // times for `${c1@a}` (one for the read, two here) and four for
+        // `${c1[0]@a}`, whose read is subscripted and pays two of its own. See
+        // [`Self::var_and_type_walks`], which counts them.
+        let walks = self.var_and_type_walks(name, form, value_set, true);
+        let target = self.resolve_ref_use_walks(name, walks)?.into_name()?;
         // The walk stops on a reference that names nothing, answering with the
         // reference itself; that is "nowhere", not "this variable".
         (!self.nameref_attr.contains(&target)).then_some(target)
@@ -17636,7 +17908,18 @@ impl Shell {
             // answers `${!r@a}` with the array's `a` and `${!r@A}` with
             // `declare -a n='by'`, the element the reference already read.
             let subscripted = subscript_base(name).filter(|b| is_identifier(b));
-            let Some(target) = self.attr_report_target(subscripted.unwrap_or(name)) else {
+            // The base carries the subscript's form with it: it is still
+            // `${!r@a}` on an `r` naming `n[1]` that bash resolves, so the walk
+            // count is the element's. See [`Self::var_and_type_walks`].
+            let form = if subscripted.is_some() {
+                VarForm::Element
+            } else {
+                VarForm::of(index)
+            };
+            let value_set = elem.is_some();
+            let Some(target) =
+                self.attr_report_target(subscripted.unwrap_or(name), form, value_set)
+            else {
                 return Str::new();
             };
             // Reuse that ask — but only when it was an ask about this element
@@ -17681,6 +17964,9 @@ impl Shell {
             self.note_unbound_modifier(name, index);
             return Str::new();
         };
+        // Past the unset guard every transform asks after the variable, whether
+        // or not it has any use for one. See [`Self::modifier_var_walks`].
+        self.scalar_modifier_var_walks(operand, name, index, true, false);
         if op == 'P' {
             // TD-OILS-BYTE-STRINGS step 8: a prompt string is re-lexed as
             // double-quoted *source*, which the lexer still types as text. A
@@ -18763,13 +19049,31 @@ impl Shell {
         // `${#c1}` is the one that walks twice and `${c1}` the one that walks
         // once.
         let walks = usize::from(!length) + 1;
-        let Some(name) = &self.resolve_ref_use_walks(name, walks).and_then(RefTarget::into_name)
-        else {
+        let Some(target) = self.resolve_ref_use_walks(name, walks) else {
             // A circular chain is unset, and so is a reference that already
             // designates one element (there is no array left to subscript):
             // `${a[@]}` is empty, `${#a[@]}` is 0.
             return if length { b"0".to_vec() } else { Str::new() };
         };
+        let Some(name) = target.as_name().map(str::to_owned) else {
+            return if length { b"0".to_vec() } else { Str::new() };
+        };
+        let written = written.to_owned();
+        self.in_target_scope(&target, |sh| {
+            sh.expand_array_ref_resolved(&written, &name, index, length)
+        })
+    }
+
+    /// [`Self::expand_array_ref`] once the chain has been walked and the scope
+    /// it named is in place — see [`Self::in_target_scope`]. `written` is the
+    /// name as the writer typed it, `name` the array the walk reached.
+    fn expand_array_ref_resolved(
+        &mut self,
+        written: &str,
+        name: &String,
+        index: &ArrayIndex,
+        length: bool,
+    ) -> Str {
         // A subscripted *length* does not go through the ordinary read at all:
         // bash answers it out of `array_length_reference` (`subst.c:7213`),
         // which opens with two rules of its own —
@@ -20493,6 +20797,87 @@ impl Shell {
                 slot.1 = updated;
             }
             self.restore_var(&name, live);
+        }
+    }
+
+    /// Run `f` with `name`'s **global** binding in the live tables, then put the
+    /// local one back — the dereference a [`RefTarget::global`] asks for.
+    ///
+    /// bash reaches the global directly (`find_global_variable_noref`) because
+    /// its scopes are a stack of tables. osh keeps one table and parks what a
+    /// `local` displaced in the frame that displaced it, so the same reach is a
+    /// swap: [`Self::enter_global_scope`] already knows how to make it and how
+    /// to find the *outermost* shadowing frame, which is the one holding the
+    /// true global. Reads and writes both go through here, so a store inside
+    /// `f` lands on the global and survives the function's return — which is
+    /// what `f() { local -n g=g; g=W; }` does to a global `g`.
+    ///
+    /// A name with no local shadow is already global, and the swap is then a
+    /// no-op that costs one scan of the frames.
+    fn with_global_binding<T>(&mut self, name: &str, f: impl FnOnce(&mut Self) -> T) -> T {
+        let saved = self.enter_global_scope(std::slice::from_ref(&name.to_owned()), false);
+        let out = f(self);
+        self.leave_global_scope(saved);
+        out
+    }
+
+    /// Run `f` in the scope a resolved reference names — the ordinary one, or
+    /// the global [`Self::with_global_binding`] reaches for a target that
+    /// escaped a cycle. Every path that *dereferences* a [`RefTarget`] wraps its
+    /// table work in this; the ones that only quote the target's name back in a
+    /// diagnostic do not, the name being the same either way.
+    fn in_target_scope<T>(&mut self, target: &RefTarget, f: impl FnOnce(&mut Self) -> T) -> T {
+        if target.global {
+            let base = target.base.clone();
+            self.with_global_binding(&base, f)
+        } else {
+            f(self)
+        }
+    }
+
+    /// [`Self::in_target_scope`] where the caller may have had no chain to walk
+    /// at all — `$@`/`$*`, or a name whose resolution was refused.
+    fn in_opt_target_scope<T>(
+        &mut self,
+        target: Option<&RefTarget>,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        match target {
+            Some(t) => self.in_target_scope(t, f),
+            None => f(self),
+        }
+    }
+
+    /// [`Self::in_target_scope`] where the escape has already been reduced to a
+    /// flag and a name — what an `export`/`readonly` operand carries. See
+    /// [`AttrOperand::Mark`].
+    fn in_global_scope_if<T>(
+        &mut self,
+        global: bool,
+        name: &str,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        if global {
+            self.with_global_binding(name, f)
+        } else {
+            f(self)
+        }
+    }
+
+    /// [`Self::in_target_scope`] for a write destination, which carries the same
+    /// escape once the reference that produced it has been resolved away.
+    ///
+    /// Applied *once* per write, at the outermost step that touches the tables —
+    /// the readonly guard and the store together, since the readonly attribute
+    /// is itself part of what a `local` shadows. Nesting two swaps of one name
+    /// would pair each `leave` with the wrong `enter`, so the inner steps do not
+    /// swap for themselves.
+    fn in_dest_scope<T>(&mut self, dest: &ScalarDest, f: impl FnOnce(&mut Self) -> T) -> T {
+        if dest.global {
+            let base = dest.base().to_owned();
+            self.with_global_binding(&base, f)
+        } else {
+            f(self)
         }
     }
 
@@ -28363,13 +28748,12 @@ impl Shell {
             }
             // `${#x}` counts *characters*; a byte that is not part of any
             // character counts as one, which is what bash's C locale does too.
-            // Two walks of any nameref chain: bash asks after the parameter and
-            // then reads the value to measure. See [`Self::param_value_walks`].
             // A reference designating an element answers apart, and does not
-            // walk at all — see [`Self::ref_length`].
+            // walk at all — see [`Self::ref_length`]. Otherwise the walk count
+            // is [`Self::length_walks`]'s.
             WordPart::Length(name) => match self.ref_length(name) {
                 Some(v) => v,
-                None => match self.param_value_walks(name, 2) {
+                None => match self.param_length_value(name) {
                     Some(v) => bytes::char_count(&v).to_string().into_bytes(),
                     None => {
                         // `${#!}` answers 0 rather than faulting: asking how
@@ -28425,6 +28809,12 @@ impl Shell {
                 if value.is_empty() {
                     return Str::new();
                 }
+                // …and the same guard reads the pattern's *unexpanded* text, so
+                // `${g#}` never asks after the variable either. See
+                // [`Self::modifier_var_walks`].
+                if !pattern.parts.is_empty() {
+                    self.scalar_modifier_var_walks(operand, name, index, true, false);
+                }
                 let pat = self.expand_modifier_pattern(pattern);
                 let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
                 param_trim(&value, &pat, *suffix, *longest, extglob)
@@ -28452,6 +28842,10 @@ impl Shell {
                         Str::new()
                     }
                     Some(value) => {
+                        // Asked after the variable before either bound is
+                        // evaluated, which is where bash asks. See
+                        // [`Self::modifier_var_walks`].
+                        self.scalar_modifier_var_walks(operand, name, index, true, false);
                         // The rule is [`Shell::scalar_slice`]'s, and deliberately
                         // not a second copy of it: `${v[@]:off:len}` on a name
                         // that is no array reaches the very same operator. The
@@ -28489,6 +28883,7 @@ impl Shell {
                 let Some(value) = self.set_modifier_operand(operand, name, index) else {
                     return Str::new();
                 };
+                self.scalar_modifier_var_walks(operand, name, index, true, false);
                 let pat = self.expand_modifier_pattern(pattern);
                 // bash's `patsub_replacement` (default on) makes an unquoted `&`
                 // in the replacement stand for the matched text. Expand the
@@ -28517,6 +28912,7 @@ impl Shell {
                 let Some(value) = self.set_modifier_operand(operand, name, index) else {
                     return Str::new();
                 };
+                self.scalar_modifier_var_walks(operand, name, index, true, false);
                 let pat = self.expand_modifier_pattern(pattern);
                 let extglob = self.shopt.get("extglob").copied().unwrap_or(false);
                 param_case(&value, &pat, *mode, *all, extglob)
@@ -30068,9 +30464,19 @@ impl Shell {
         // always does. A target naming an array *element* (`declare -n
         // e=arr[1]`) names no variable and so is never set, and a circular chain
         // names nothing at all (both bash).
-        let Some(name) = &self.resolve_ref_use(name).and_then(RefTarget::into_name) else {
+        let Some(target) = self.resolve_ref_use(name) else {
             return false;
         };
+        let Some(name) = target.as_name().map(str::to_owned) else {
+            return false;
+        };
+        let target = target.clone();
+        self.in_target_scope(&target, |sh| sh.name_is_set_here(&name))
+    }
+
+    /// [`Self::var_is_set`] for a name already resolved and already in the scope
+    /// its reference named.
+    fn name_is_set_here(&mut self, name: &String) -> bool {
         if self.vars.contains_key(name) {
             return true;
         }
@@ -30105,6 +30511,33 @@ impl Shell {
     /// prints belongs to the *use* of the name, so it lives in
     /// [`Self::resolve_ref_use`] and the few paths that must not warn (`${!a}`,
     /// which reports `invalid indirect expansion` instead) call this directly.
+    ///
+    /// …unless the variable the cycle closed *on* is a function-local one, in
+    /// which case bash resolves the name once more at global scope, with
+    /// namerefs not followed (variables.c):
+    ///
+    /// ```text
+    ///       v = find_variable_internal (newname, flags);
+    ///       if (v == orig || v == oldv)
+    ///         {
+    ///           internal_warning (_("%s: circular name reference"), orig->name);
+    ///           /* XXX - provisional change - circular refs go to
+    ///              global scope for resolution, without namerefs. */
+    ///           if (variable_context && v->context)
+    ///             return (find_global_variable_noref (v->name));
+    ///           else
+    ///             return ((SHELL_VAR *)0);
+    ///         }
+    /// ```
+    ///
+    /// So `f() { local -n g=g; }` makes `g` an alias for the *global* `g` — and
+    /// so does the mutual `f() { local -n a=b; local -n b=a; }`, in which `$a`
+    /// is the global `a` and `$b` the global `b`, each named after the variable
+    /// its own walk closed on. "Without namerefs" is literal: if the global is
+    /// itself a reference, its raw value is the answer (`declare -n ptr=tgt`
+    /// outside, `local -n ptr=ptr` inside, and `$ptr` is the string `tgt`).
+    /// A cycle closing on a *global* still names nothing, function or not.
+    /// See [`RefTarget::global`] and [`Self::with_global_binding`].
     fn resolve_ref_name(&self, name: &str) -> Option<RefTarget> {
         let mut cur = name.to_string();
         let mut seen: Vec<String> = Vec::new();
@@ -30113,13 +30546,12 @@ impl Shell {
                 return Some(RefTarget::plain(cur));
             }
             if seen.contains(&cur) {
-                return None;
+                return self
+                    .is_locally_shadowed(&cur)
+                    .then(|| RefTarget::global_of(cur));
             }
             match self.vars.get(&cur).map(Vec::as_slice) {
-                // A nameref naming *itself* is not a cycle: inside a function
-                // `local -n r=r` legitimately means the caller's `r`, and bash
-                // rejects the global form at declaration time instead.
-                Some(v) if !v.is_empty() && v != cur.as_bytes() => {
+                Some(v) if !v.is_empty() => {
                     // An element reference ends the walk: its subscript is a
                     // shell word whose bytes have to reach the caller intact.
                     //
@@ -30145,6 +30577,7 @@ impl Shell {
                         return Some(RefTarget {
                             base: base.to_string(),
                             sub: Some(sub.to_vec()),
+                            global: false,
                         });
                     }
                     // Otherwise the value is a plain name to follow. A *name* is
@@ -30247,12 +30680,25 @@ impl Shell {
     /// warns once. A chain that resolves costs one walk either way.
     fn resolve_ref_use_walks(&self, name: &str, walks: usize) -> Option<RefTarget> {
         let target = self.resolve_ref_name(name);
-        if target.is_none() {
+        self.warn_circular_walks(name, target.as_ref(), walks);
+        target
+    }
+
+    /// [`Self::resolve_ref_use_walks`]'s reporting on its own, for a caller that
+    /// resolved first and only then learned what the resolution was worth — an
+    /// arithmetic operand, whose walk is charged to the read *or* to the `set -u`
+    /// check depending on which of them bash gets as far as. See
+    /// [`Shell::arith_unbound_name`].
+    fn warn_circular_walks(&self, name: &str, target: Option<&RefTarget>, walks: usize) {
+        // A cycle that *escaped* to global scope is still a cycle and still
+        // warns, once per walk, exactly as one that reached nothing does — the
+        // warning is emitted where the walk closes, before bash decides whether
+        // there is a global to fall back on. See [`Self::resolve_ref_name`].
+        if target.is_none_or(|t| t.global) {
             for _ in 0..walks {
                 self.perrln(&format!("warning: {name}: circular name reference"));
             }
         }
-        target
     }
 
     /// Resolve a nameref chain for a write that names an *array*, which a
@@ -30296,12 +30742,23 @@ impl Shell {
     /// times bash walks the chain — and so in how many warnings a circular one
     /// earns.
     fn resolve_ref_write_walks(&mut self, name: &str, walks: usize) -> RefTarget {
-        if let Some(target) = self.resolve_ref_name(name) {
-            return target;
+        match self.resolve_ref_name(name) {
+            // A cycle that escaped to global scope warns like any other, but
+            // the reference *survives* it: bash has somewhere to put the value,
+            // so it never reaches the code that unmakes a useless reference.
+            // `g=5; f() { local -n g=g; g[1]=Z; }` leaves the local
+            // `declare -n g="g"` in place and makes the **global** an array.
+            Some(target) if target.global => {
+                self.warn_circular_ref(name, walks);
+                target
+            }
+            Some(target) => target,
+            None => {
+                self.warn_circular_ref(name, walks);
+                self.break_circular_ref(name);
+                RefTarget::plain(name.to_string())
+            }
         }
-        self.warn_circular_ref(name, walks);
-        self.break_circular_ref(name);
-        RefTarget::plain(name.to_string())
     }
 
     /// The warnings a write through a circular chain earns — one per walk.
@@ -31504,23 +31961,54 @@ impl Shell {
         self.param_value_walks(name, 1)
     }
 
-    /// [`Self::param_value`] for a path that walks a nameref chain more than
-    /// once, and so reports a circular one more than once.
+    /// The value `${#name}` measures, with the walks bash's own two lookups make
+    /// of a nameref chain — and so the reports a circular one draws.
     ///
-    /// The one caller that does is `${#name}`, which asks after the parameter
-    /// before it reads the value to measure — so `${#c1}` warns twice where a
-    /// plain `${c1}` warns once. Note that this is the *opposite* way round from
-    /// the subscripted forms, where the value read walks twice
+    /// `parameter_brace_expand_length` looks the variable up, and then, *only*
+    /// where that came back empty-handed, looks again (subst.c:8055):
+    ///
+    /// ```c
+    /// else if ((var = find_variable (name + 1)) && … && (array_p (var) || assoc_p (var)))
+    ///   …
+    /// else if ((var || (var = find_variable (name + 1))) && …)
+    ///   number = value_cell (var) ? MB_STRLEN (value_cell (var)) : 0;
+    /// ```
+    ///
+    /// The `||` short-circuits on a variable that was found, so `${#g}` costs
+    /// one walk where the name reaches something and two where it reaches
+    /// nothing — `f() { local -n g=g; echo ${#g}; }` warns once with a global
+    /// `g` behind it and twice without one. Note that this is the *opposite* way
+    /// round from the subscripted forms, where the value read walks twice
     /// ([`Self::param_elem_lookup`]) and the length walks once
     /// ([`Self::expand_array_ref`]): the two questions are answered by different
     /// routes, and each route walks what it walks.
+    fn param_length_value(&mut self, name: &str) -> Option<Str> {
+        let walks = if self.nameref_attr.contains(name)
+            && self.resolved_kind(name) == ResolvedKind::Absent
+        {
+            2
+        } else {
+            1
+        };
+        self.param_value_walks(name, walks)
+    }
+
+    /// [`Self::param_value`] for a path that walks a nameref chain more than
+    /// once, and so reports a circular one more than once.
     fn param_value_walks(&mut self, name: &str, walks: usize) -> Option<Str> {
         if let Some(v) = self.nameref_elem_value(name) {
             return Some(v);
         }
         // A reference designating an *element* names no variable, and the
         // element's own value was already answered by `nameref_elem_value`.
-        let name = &self.resolve_ref_use_walks(name, walks).and_then(RefTarget::into_name)?;
+        let target = self.resolve_ref_use_walks(name, walks)?;
+        let name = &target.as_name()?.to_owned();
+        self.in_target_scope(&target.clone(), |sh| sh.param_value_resolved(name))
+    }
+
+    /// [`Self::param_value_walks`] once the chain has been walked and the scope
+    /// it named is in place: the value of one already-resolved name.
+    fn param_value_resolved(&mut self, name: &String) -> Option<Str> {
         match name.as_str() {
             "?" => Some(self.last_status.to_string().into_bytes()),
             "#" => Some(self.positional.len().to_string().into_bytes()),
@@ -41005,6 +41493,7 @@ impl Shell {
             name: text.to_string(),
             append,
             value,
+            global: false,
         }
     }
 
@@ -41041,6 +41530,57 @@ impl Shell {
     ///
     /// How many times the chain is walked — and so how many times a circular one
     /// is reported — is [`AttrRefRule::use_walks`].
+    /// How many times an `export`/`readonly` operand walks its nameref chain,
+    /// and so how many times a circular one is reported.
+    ///
+    /// The store, when the operand carries a value, looks the name up for
+    /// itself: one walk. The mark is bash's `set_var_attribute`, whose lookup is
+    /// a single `find_variable_notempenv` — and which only asks a *second* time
+    /// when that first one answered nothing (builtins/setattr.def):
+    ///
+    /// ```c
+    ///   var = find_variable_notempenv (name);
+    ///   if (var == 0)
+    ///     {
+    ///       /* We might have a nameref pointing to something that we can't
+    ///          resolve to a shell variable.  If we do, skip it. … */
+    ///       refvar = find_variable_nameref_for_create (name, 0);
+    /// ```
+    ///
+    /// So the retry is what a *broken* chain pays and a chain that reaches a
+    /// variable does not — and since the store runs first, a valued operand has
+    /// already created what the mark then finds. `export -n` is the `undo` arm
+    /// above it, a lone `find_variable` with no retry.
+    ///
+    /// Measured against bash 5.2.37. A cycle that closes on a **global** reaches
+    /// nothing, so every marking form pays the retry:
+    ///
+    /// ```text
+    /// declare -n c1=c2; declare -n c2=c1
+    /// export c1        2    export -n c1     1
+    /// export c1=5      3    export -n c1=5   2
+    /// readonly c1      2    readonly c1=5    3
+    /// ```
+    ///
+    /// …while one that closes on a **local** escapes to global scope and finds
+    /// something there, so it does not — except where the global does not exist
+    /// yet and the operand has no value to create it with:
+    ///
+    /// ```text
+    /// e=E; f() { local -n e=e; export e; }        1 walk (+2 for the declaration)
+    /// v=V; f() { local -n v=v; export v=V1; }     2
+    /// f() { local -n z=z; export z; }             2  — nothing there to find
+    /// ```
+    fn attr_ref_walks(&mut self, name: &str, rule: AttrRefRule, valued: bool) -> usize {
+        let store = usize::from(valued);
+        // A valued operand stores before it marks, so what the mark looks for
+        // exists by then whenever the chain named anywhere at all.
+        let found = (valued && self.resolve_ref_name(name).is_some())
+            || self.resolved_kind(name) != ResolvedKind::Absent;
+        let retry = usize::from(rule.marking() && !found);
+        store + 1 + retry
+    }
+
     fn attr_nameref(
         &mut self,
         tag: &str,
@@ -41052,8 +41592,8 @@ impl Shell {
         let target = if rule.array && value.is_some() {
             self.resolve_ref_array_write(name)
         } else {
-            let Some(target) = self.resolve_ref_use_walks(name, rule.use_walks(value.is_some()))
-            else {
+            let walks = self.attr_ref_walks(name, rule, value.is_some());
+            let Some(target) = self.resolve_ref_use_walks(name, walks) else {
                 return AttrOperand::Done {
                     status: i32::from(value.is_some()),
                 };
@@ -41065,6 +41605,7 @@ impl Shell {
                 name: target.base,
                 append,
                 value,
+                global: target.global,
             };
         }
         if let Some(v) = value {
@@ -41253,85 +41794,108 @@ impl Shell {
                 array: assoc || indexed,
                 unexport,
             };
-            let (k, append, value) = match self.attr_operand("export", a, rule) {
-                AttrOperand::Mark { name, append, value } => (name, append, value),
+            let (k, append, value, global) = match self.attr_operand("export", a, rule) {
+                AttrOperand::Mark { name, append, value, global } => (name, append, value, global),
                 AttrOperand::Done { status: s } => {
                     status |= s;
                     continue;
                 }
             };
-            if let Some(v) = value {
-                // `export NAME=value` is an assignment, so a readonly target is
-                // an error and the value is left unchanged — but the *export
-                // attribute is still applied*, because bash marks the name
-                // before it tries the store: `readonly q=1; export q=2` reports
-                // `q: readonly variable`, exits 1 and leaves `declare -rx q="1"`.
-                // `export -n q=2` takes it off the same way. Only the value is
-                // refused. (`declare -x q=2` differs — it applies nothing — and
-                // so does the `noassign` refusal below, which reports 0.)
-                if self.readonly.contains(&k) {
-                    self.perrln(&format!("{}{k}: readonly variable", Self::attr_tag(assoc, indexed, "export")));
-                    // In posix mode this refusal ends a non-interactive shell:
-                    // `export` is a special builtin, and an assignment error in
-                    // one is fatal. See [`Shell::posix_special_builtin_abort`].
-                    self.builtin_failure = Some(BuiltinFailure::Assignment);
-                    if unexport {
-                        self.exported.remove(&k);
-                    } else {
-                        self.mark_exported(k);
-                    }
-                    status = 1;
-                    continue;
-                }
-                // A variable the shell maintains keeps its value — but, unlike
-                // the readonly case above, still takes the export attribute and
-                // still reports success: `export GROUPS=5` leaves
-                // `declare -ax GROUPS=(…)` and status 0. Only the *store* is
-                // refused, and silently. See [`Shell::noassign`]; the shape
-                // differs from `declare`'s (which reports 1 and applies nothing)
-                // because bash reaches the refusal from a different place in each.
-                if self.noassign.contains(&k) {
-                    if unexport {
-                        self.exported.remove(&k);
-                    } else {
-                        self.mark_exported(k);
-                    }
-                    continue;
-                }
-                // `-a`/`-A` take effect only on an operand that carries a
-                // value, the same rule `readonly` follows: the array is created
-                // by the *assignment*, so `export -a fresh` leaves the name the
-                // plain scalar it was. Applied before the store so the value
-                // lands in the new array rather than beside it.
-                if assoc || indexed {
-                    self.array_kind_apply(&k, assoc);
-                }
-                if !self.attr_store(&k, append, v, true) {
-                    break;
-                }
-                if unexport {
-                    self.exported.remove(&k);
-                } else {
-                    self.mark_exported(k);
-                }
-            } else if unexport {
-                self.exported.remove(&k);
-            } else {
-                if !self.vars.contains_key(&k)
-                    && !self.arrays.contains_key(&k)
-                    && !self.assoc.contains_key(&k)
-                    // …unless it is a dynamic special variable, which already
-                    // exists and must keep computing its value.
-                    && !self.declare_dynamic_special(&k)
-                {
-                    // A bare `export n` declares the name without assigning it —
-                    // still unset, but reportable. See [`Shell::declared`].
-                    self.declared.insert(k.clone());
-                }
-                self.mark_exported(k);
+            // A name reached through a cycle that escaped to global scope is
+            // marked *there*: the local reference the cycle closed on keeps
+            // none of it. See [`Shell::in_global_scope_if`].
+            let swap = k.clone();
+            let step = self.in_global_scope_if(global, &swap, move |sh| {
+                sh.export_operand(&k, append, value, unexport, assoc, indexed)
+            });
+            match step {
+                AttrStep::Next(s) => status |= s,
+                AttrStep::Stop => break,
             }
         }
         status
+    }
+
+    /// Mark one already-resolved `export` operand, in the scope the resolution
+    /// named. Split out of [`Shell::builtin_export`]'s loop so that the whole of
+    /// it — the store, the mark and the `declared` note alike — happens inside
+    /// the one scope swap an escaped nameref cycle asks for.
+    fn export_operand(
+        &mut self,
+        k: &str,
+        append: bool,
+        value: Option<Str>,
+        unexport: bool,
+        assoc: bool,
+        indexed: bool,
+    ) -> AttrStep {
+        let mark = |sh: &mut Self| {
+            if unexport {
+                sh.exported.remove(k);
+            } else {
+                sh.mark_exported(k.to_string());
+            }
+        };
+        let Some(v) = value else {
+            if unexport {
+                self.exported.remove(k);
+                return AttrStep::Next(0);
+            }
+            if !self.vars.contains_key(k)
+                && !self.arrays.contains_key(k)
+                && !self.assoc.contains_key(k)
+                // …unless it is a dynamic special variable, which already
+                // exists and must keep computing its value.
+                && !self.declare_dynamic_special(k)
+            {
+                // A bare `export n` declares the name without assigning it —
+                // still unset, but reportable. See [`Shell::declared`].
+                self.declared.insert(k.to_string());
+            }
+            mark(self);
+            return AttrStep::Next(0);
+        };
+        // `export NAME=value` is an assignment, so a readonly target is
+        // an error and the value is left unchanged — but the *export
+        // attribute is still applied*, because bash marks the name
+        // before it tries the store: `readonly q=1; export q=2` reports
+        // `q: readonly variable`, exits 1 and leaves `declare -rx q="1"`.
+        // `export -n q=2` takes it off the same way. Only the value is
+        // refused. (`declare -x q=2` differs — it applies nothing — and
+        // so does the `noassign` refusal below, which reports 0.)
+        if self.readonly.contains(k) {
+            self.perrln(&format!("{}{k}: readonly variable", Self::attr_tag(assoc, indexed, "export")));
+            // In posix mode this refusal ends a non-interactive shell:
+            // `export` is a special builtin, and an assignment error in
+            // one is fatal. See [`Shell::posix_special_builtin_abort`].
+            self.builtin_failure = Some(BuiltinFailure::Assignment);
+            mark(self);
+            return AttrStep::Next(1);
+        }
+        // A variable the shell maintains keeps its value — but, unlike
+        // the readonly case above, still takes the export attribute and
+        // still reports success: `export GROUPS=5` leaves
+        // `declare -ax GROUPS=(…)` and status 0. Only the *store* is
+        // refused, and silently. See [`Shell::noassign`]; the shape
+        // differs from `declare`'s (which reports 1 and applies nothing)
+        // because bash reaches the refusal from a different place in each.
+        if self.noassign.contains(k) {
+            mark(self);
+            return AttrStep::Next(0);
+        }
+        // `-a`/`-A` take effect only on an operand that carries a
+        // value, the same rule `readonly` follows: the array is created
+        // by the *assignment*, so `export -a fresh` leaves the name the
+        // plain scalar it was. Applied before the store so the value
+        // lands in the new array rather than beside it.
+        if assoc || indexed {
+            self.array_kind_apply(k, assoc);
+        }
+        if !self.attr_store(k, append, v, true) {
+            return AttrStep::Stop;
+        }
+        mark(self);
+        AttrStep::Next(0)
     }
 
     /// The attribute line a function carries in a `declare -F` / `export -pf`
@@ -44065,6 +44629,34 @@ impl Shell {
                     let Some(v) = self.apply_value_attrs(name, v) else {
                         break;
                     };
+                    // The self-reference is judged a *second* time here, and
+                    // this is bash's other voice for it: `declare -n g=g` inside
+                    // a function warns once from the builtin's own check
+                    // ([`Shell::nameref_value_error`], which carries the
+                    // `local:`/`declare:` tag) and once from the bind beneath it
+                    // (variables.c:3382, untagged) —
+                    //
+                    // ```c
+                    // if ((aflags & (ASS_NAMEREF|ASS_FORCE)) == ASS_NAMEREF &&
+                    //     check_selfref (name_cell (var), t, 0))
+                    //   { if (variable_context)
+                    //       internal_warning (_("%s: circular name reference"),
+                    //                         name_cell (var));
+                    // ```
+                    //
+                    // The two see *different* values, which is measurable: bash
+                    // checks the word as written before the value attributes run
+                    // and the made value after, so `declare -nu g=g` warns only
+                    // once — the fold turns the value into `G`, which no longer
+                    // names `g`. Only the tagged half is a refusal at global
+                    // scope; by here that has already been reported and this
+                    // operand skipped, so the frame test never fails for the
+                    // reason the other one does.
+                    if !self.local_frames.is_empty()
+                        && split_assignment_target(&v).is_some_and(|(b, _)| b == name)
+                    {
+                        self.perrln(&format!("warning: {name}: circular name reference"));
+                    }
                     self.put_var(name.to_string(), v);
                     // A reference is a scalar variable like any other, and this
                     // is the one write that does not go through
@@ -44976,12 +45568,12 @@ impl Shell {
             }
             let target = match (&spelled, resolved) {
                 (Some(s), _) => s.clone(),
-                (None, Some(RefTarget { base, sub: None })) => base,
+                (None, Some(RefTarget { base, sub: None, .. })) => base,
                 // An element reference names no variable a whole array literal
                 // could bind to. bash refuses it in the compound-assignment
                 // machinery's untagged spelling — the reference's own text, not
                 // the operand's — and discards the rest of the parse unit.
-                (None, Some(RefTarget { base, sub: Some(sub) })) => {
+                (None, Some(RefTarget { base, sub: Some(sub), .. })) => {
                     // A reference to a *whole* array is complained about twice,
                     // and the first line comes from a step before the refusal:
                     // the machinery hands the operand to `declare` itself to get
@@ -45742,63 +46334,88 @@ impl Shell {
                 array: assoc || indexed,
                 unexport: false,
             };
-            let (name, append, value) = match self.attr_operand("readonly", name_val, rule) {
-                AttrOperand::Mark { name, append, value } => (name, append, value),
+            let (name, append, value, global) = match self.attr_operand("readonly", name_val, rule)
+            {
+                AttrOperand::Mark { name, append, value, global } => (name, append, value, global),
                 AttrOperand::Done { status: s } => {
                     status |= s;
                     continue;
                 }
             };
-            if value.is_some() && self.readonly.contains(&name) {
-                self.perrln(&format!(
-                    "{}{name}: readonly variable",
-                    Self::attr_tag(assoc, indexed, "readonly")
-                ));
-                // Fatal in posix mode, as for `export` — see
-                // [`Shell::posix_special_builtin_abort`].
-                self.builtin_failure = Some(BuiltinFailure::Assignment);
-                status = 1;
-                continue;
-            }
-            // A variable the shell maintains keeps its value, silently — but
-            // still takes the readonly attribute and still reports success,
-            // exactly as `export` does and unlike `declare`. Dropping the value
-            // here rather than skipping the operand is what leaves the rest of
-            // this iteration (the `readonly` insert) to run. See
-            // [`Shell::noassign`].
-            let value = value.filter(|_| !self.noassign.contains(&name));
-            // `-a`/`-A` here take effect only when the operand carries a value:
-            // the array is created by the *assignment*, so a bare `readonly -a
-            // name` leaves the name the plain scalar it was (`x=5; readonly -a x`
-            // still reports `declare -r x="5"`, and `readonly -a fresh` reports
-            // `declare -r fresh`), while `readonly -a x=5` reports
-            // `declare -ar x=([0]="5")`. An array literal operand
-            // (`readonly a=(1 2)`) never reaches here — it is a `decl_arrays`
-            // entry, handled by `exec_declare_with_arrays`.
-            if value.is_some() && (assoc || indexed) {
-                self.array_kind_apply(&name, assoc);
-            }
-            if let Some(v) = value {
-                if !self.attr_store(&name, append, v, true) {
-                    break;
-                }
-            } else if !no_mark
-                && !self.vars.contains_key(&name)
-                && !self.arrays.contains_key(&name)
-                && !self.assoc.contains_key(&name)
-                // …unless it is a dynamic special variable, which already
-                // exists and must keep computing its value.
-                && !self.declare_dynamic_special(&name)
-            {
-                // A bare `readonly n` declares the name without assigning it —
-                // still unset, but reportable. See [`Shell::declared`].
-                self.declared.insert(name.clone());
-            }
-            if !no_mark {
-                self.readonly.insert(name);
+            // Marked in the scope the resolution named, exactly as `export` is.
+            // See [`Shell::in_global_scope_if`].
+            let swap = name.clone();
+            let step = self.in_global_scope_if(global, &swap, move |sh| {
+                sh.readonly_operand(&name, append, value, no_mark, assoc, indexed)
+            });
+            match step {
+                AttrStep::Next(s) => status |= s,
+                AttrStep::Stop => break,
             }
         }
         status
+    }
+
+    /// Mark one already-resolved `readonly` operand, in the scope the
+    /// resolution named. [`Shell::export_operand`]'s counterpart; see it for why
+    /// the loop body lives in a method of its own.
+    fn readonly_operand(
+        &mut self,
+        name: &str,
+        append: bool,
+        value: Option<Str>,
+        no_mark: bool,
+        assoc: bool,
+        indexed: bool,
+    ) -> AttrStep {
+        if value.is_some() && self.readonly.contains(name) {
+            self.perrln(&format!(
+                "{}{name}: readonly variable",
+                Self::attr_tag(assoc, indexed, "readonly")
+            ));
+            // Fatal in posix mode, as for `export` — see
+            // [`Shell::posix_special_builtin_abort`].
+            self.builtin_failure = Some(BuiltinFailure::Assignment);
+            return AttrStep::Next(1);
+        }
+        // A variable the shell maintains keeps its value, silently — but
+        // still takes the readonly attribute and still reports success,
+        // exactly as `export` does and unlike `declare`. Dropping the value
+        // here rather than skipping the operand is what leaves the rest of
+        // this iteration (the `readonly` insert) to run. See
+        // [`Shell::noassign`].
+        let value = value.filter(|_| !self.noassign.contains(name));
+        // `-a`/`-A` here take effect only when the operand carries a value:
+        // the array is created by the *assignment*, so a bare `readonly -a
+        // name` leaves the name the plain scalar it was (`x=5; readonly -a x`
+        // still reports `declare -r x="5"`, and `readonly -a fresh` reports
+        // `declare -r fresh`), while `readonly -a x=5` reports
+        // `declare -ar x=([0]="5")`. An array literal operand
+        // (`readonly a=(1 2)`) never reaches here — it is a `decl_arrays`
+        // entry, handled by `exec_declare_with_arrays`.
+        if value.is_some() && (assoc || indexed) {
+            self.array_kind_apply(name, assoc);
+        }
+        if let Some(v) = value {
+            if !self.attr_store(name, append, v, true) {
+                return AttrStep::Stop;
+            }
+        } else if !no_mark
+            && !self.vars.contains_key(name)
+            && !self.arrays.contains_key(name)
+            && !self.assoc.contains_key(name)
+            // …unless it is a dynamic special variable, which already
+            // exists and must keep computing its value.
+            && !self.declare_dynamic_special(name)
+        {
+            // A bare `readonly n` declares the name without assigning it —
+            // still unset, but reportable. See [`Shell::declared`].
+            self.declared.insert(name.to_string());
+        }
+        if !no_mark {
+            self.readonly.insert(name.to_string());
+        }
+        AttrStep::Next(0)
     }
 
     /// `readonly -f [name …]` — operate on the function namespace. With names,
@@ -51600,7 +52217,8 @@ impl VarLookup for Shell {
         if let Some(dest) = self.arith_write_dest(name)? {
             // The store runs the dynamic write-back hook itself — see
             // [`Shell::scalar_write_store`].
-            self.scalar_write_store(&dest, value.to_string().into_bytes());
+            let val = value.to_string().into_bytes();
+            self.in_dest_scope(&dest, |sh| sh.scalar_write_store(&dest, val));
         }
         Ok(())
     }
@@ -51832,6 +52450,44 @@ enum Operand<'a> {
     Value(Option<BStr<'a>>),
 }
 
+/// How a modifier's parameter is spelled, which is what decides how many times
+/// bash's `get_var_and_type` walks a nameref chain on it. See
+/// [`Shell::var_and_type_walks`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VarForm {
+    /// A bare name — `${g@Q}`.
+    Name,
+    /// A name with an element subscript — `${g[0]@Q}`.
+    Element,
+    /// A name subscripted `[@]` or `[*]` — `${g[@]@Q}`.
+    Whole,
+}
+
+impl VarForm {
+    /// The form a scalar modifier's parameter takes. `[@]`/`[*]` never reach one
+    /// — the parser gives those their own whole-collection nodes — so a
+    /// subscript here is always an element's.
+    fn of(index: &Option<Box<Word>>) -> Self {
+        if index.is_some() {
+            Self::Element
+        } else {
+            Self::Name
+        }
+    }
+}
+
+/// What a name reaches once its nameref chain has been walked. See
+/// [`Shell::resolved_kind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResolvedKind {
+    /// No variable of that name at all.
+    Absent,
+    /// An ordinary variable — valued or merely declared.
+    Scalar,
+    /// An indexed or associative array, whose element 0 stands in for its value.
+    Collection,
+}
+
 /// What an arithmetic element *read* `name[sub]` turns out to name, once any
 /// nameref on `name` has been followed. See [`Shell::arith_elem_read`]. The
 /// write side answers with the array to subscript alone — the two "nothing"
@@ -51895,12 +52551,32 @@ struct RefTarget {
     /// The subscript, when the reference designates one element of `base`
     /// (`declare -n r=arr[0]`) rather than the whole variable.
     sub: Option<Str>,
+    /// Whether the walk *escaped a cycle* and so names the **global** binding of
+    /// `base` rather than the one in scope. See [`Shell::resolve_ref_name`]; the
+    /// dereference goes through [`Shell::with_global_binding`], which is what
+    /// makes the escaped target reach past the local reference that closed the
+    /// cycle. Never set together with `sub`: the escape is a whole variable.
+    global: bool,
 }
 
 impl RefTarget {
     /// A reference to a whole variable.
     fn plain(base: String) -> Self {
-        Self { base, sub: None }
+        Self {
+            base,
+            sub: None,
+            global: false,
+        }
+    }
+
+    /// The **global** binding of a name — what a nameref cycle that closed on a
+    /// function-local variable resolves to.
+    fn global_of(base: String) -> Self {
+        Self {
+            base,
+            sub: None,
+            global: true,
+        }
     }
 
     /// The target as a variable *name* — `None` when it designates an element,
@@ -51942,11 +52618,31 @@ enum AttrOperand {
         name: String,
         append: bool,
         value: Option<Str>,
+        /// Carried over from [`RefTarget::global`]: the operand was a nameref
+        /// whose chain closed on a function-local variable, so the name it
+        /// reached is the **global** binding and everything this operand does —
+        /// the store, the mark, the `declared` note — has to reach past the
+        /// local reference that closed the cycle. See
+        /// [`Shell::in_global_scope_if`].
+        global: bool,
     },
     /// Nothing left to mark. Any diagnostic is already out and any store the
     /// operand carried has already happened; `status` is what this operand
     /// contributes to the builtin's exit status.
     Done { status: i32 },
+}
+
+/// What one marked `export`/`readonly` operand leaves the builtin to do next.
+///
+/// Two outcomes rather than a bare status because a malformed arithmetic value
+/// discards the whole command — see [`Shell::attr_store`] — so the operands
+/// after it never run.
+enum AttrStep {
+    /// Go on to the next operand, folding `0` in this operand's contribution to
+    /// the exit status.
+    Next(i32),
+    /// Abandon the rest of the command.
+    Stop,
 }
 
 /// How an `export`/`readonly` operand follows a nameref chain, which its
@@ -51965,30 +52661,34 @@ struct AttrRefRule {
 }
 
 impl AttrRefRule {
-    /// How many times a *read* of the chain walks it, and so how many times a
-    /// circular one is reported. Measured against bash 5.2.37 with
-    /// `declare -n c1=c2; declare -n c2=c1`:
-    ///
-    /// ```text
-    /// export c1        2    export -n c1     1
-    /// export c1=5      3    export -n c1=5   2
-    /// readonly c1      2    readonly c1=5    3
-    /// ```
-    ///
-    /// A value costs one more walk because the store looks the name up for
-    /// itself; `-n` saves one because it never reaches the marking lookup. This
-    /// is the once-per-walk model of `known-issues.md`'s
-    /// TD-OILS-NAMEREF-WARNING-COUNT, on the declaration-builtin side.
-    fn use_walks(self, valued: bool) -> usize {
-        let marking = usize::from(!self.unexport);
-        1 + marking + usize::from(valued)
+    /// Whether this operand reaches the *marking* lookup at all. `export -n`
+    /// takes the attribute off, which is bash's `undo` arm of
+    /// `set_var_attribute` — one plain `find_variable` and no retry.
+    fn marking(self) -> bool {
+        !self.unexport
     }
 }
 
 /// The place a plain scalar assignment ends up, after namerefs are followed.
 /// See [`Shell::scalar_write_dest`].
+///
+/// The scope is part of the destination, not just the name: a chain that
+/// escaped a cycle names the **global** binding even where a local of the same
+/// name is live, and the store has to reach past it. See
+/// [`Shell::in_dest_scope`].
 #[derive(Debug, Clone)]
-enum ScalarDest {
+struct ScalarDest {
+    place: ScalarPlace,
+    /// Carried over from [`RefTarget::global`]. An escaped chain never
+    /// *designates* an element itself, but the caller's own subscript still
+    /// applies to it — `f() { local -n g=g; g[1]=Z; }` makes the **global** `g`
+    /// an array — so this rides on both kinds of place.
+    global: bool,
+}
+
+/// Which kind of place a [`ScalarDest`] names.
+#[derive(Debug, Clone)]
+enum ScalarPlace {
     /// A variable, written by name (which may still land on element 0 of an
     /// existing array — see [`Shell::set_scalar_store`]).
     Var(String),
@@ -52007,14 +52707,30 @@ enum ScalarDest {
 }
 
 impl ScalarDest {
+    /// A whole-variable destination in the scope the caller is already in.
+    fn var(name: String) -> Self {
+        Self { place: ScalarPlace::Var(name), global: false }
+    }
+
+    /// An element destination, which is never an escaped one — see the
+    /// [`ScalarDest::global`] field.
+    fn elem(name: String, sub: Str) -> Self {
+        Self { place: ScalarPlace::Elem(name, sub), global: false }
+    }
+
     /// The variable a destination belongs to — what the readonly attribute is
     /// checked against, and what an assignment reports when it is refused. For
     /// an element that is the *array*, since it is the array that carries the
     /// attribute.
     fn base(&self) -> &str {
-        match self {
-            ScalarDest::Var(n) | ScalarDest::Elem(n, _) => n,
+        match &self.place {
+            ScalarPlace::Var(n) | ScalarPlace::Elem(n, _) => n,
         }
+    }
+
+    /// Whether the destination is a whole variable rather than one element.
+    fn is_var(&self) -> bool {
+        matches!(self.place, ScalarPlace::Var(_))
     }
 }
 
@@ -62982,6 +63698,42 @@ mod tests {
         assert_eq!(
             run_cmd("set -u; declare -n r=nada; { echo $((r[0])); } 2>&1"),
             "osh: line 1: r: unbound variable\n"
+        );
+        // A cycle that closes on a function-local reference escapes to global
+        // scope, so the question is asked of the *global* — not of the local
+        // reference standing in front of it, which is plainly there either way.
+        // The one walk bash makes serves the check and the read both, so exactly
+        // one warning comes out however the check answers. See
+        // [`Shell::arith_unbound_name`].
+        // (A function's diagnostics carry `environment` rather than the shell's
+        // own name, which is bash's spelling for a `-c` frame and is not what is
+        // being measured here.)
+        let cyc = "f() { declare -n z=w; declare -n w=z; echo $((z)); }; { f; } 2>&1";
+        assert_eq!(
+            run_cmd(&format!("set -u; {cyc}")),
+            "environment: line 1: warning: z: circular name reference\n\
+             environment: line 1: z: unbound variable\n"
+        );
+        assert_eq!(
+            run_cmd(&format!("set -u; z=7; {cyc}")),
+            "environment: line 1: warning: z: circular name reference\n7\n"
+        );
+        assert_eq!(
+            run_cmd(&format!("set -u; declare -a z=(4 5); {cyc}")),
+            "environment: line 1: warning: z: circular name reference\n4\n"
+        );
+        // With nounset off the read is the only walk there ever was, so the
+        // count is the same and the escape is all that shows.
+        assert_eq!(
+            run_cmd(&format!("z=7; {cyc}")),
+            "environment: line 1: warning: z: circular name reference\n7\n"
+        );
+        // A cycle that closes on a *global* escapes nowhere and is unbound with
+        // the same single warning.
+        assert_eq!(
+            run_cmd("set -u; declare -n c1=c2; declare -n c2=c1; { echo $((c1)); } 2>&1"),
+            "osh: line 1: warning: c1: circular name reference\n\
+             osh: line 1: c1: unbound variable\n"
         );
         // With nounset off it is simply zero.
         assert_eq!(run_cmd("{ echo $((nope + 1)); } 2>&1"), "1\n");
@@ -77896,6 +78648,89 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
     }
 
+    /// A cycle that closes on a *function-local* variable is not the dead end a
+    /// global one is: bash resolves the name once more at global scope with
+    /// namerefs not followed, so `local -n r=r` is an alias for the global `r`
+    /// (variables.c:2098):
+    ///
+    /// ```c
+    ///   if (v == orig || v == oldv)
+    ///     {
+    ///       internal_warning (_("%s: circular name reference"), orig->name);
+    ///       if (variable_context && v->context)
+    ///         return (find_global_variable_noref (v->name));
+    /// ```
+    ///
+    /// `variable_context && v->context` is the whole of the provision: a cycle
+    /// closing on a global has nowhere to escape to and still reaches nothing.
+    #[test]
+    fn a_nameref_cycle_that_closes_on_a_local_resolves_at_global_scope() {
+        // The escape is to the *global*, not to the caller's frame.
+        assert_eq!(
+            run("g=GVAL; f() { local -n g=g; printf '[%s]' \"$g\"; }; f 2>/dev/null").0,
+            "[GVAL]",
+        );
+        assert_eq!(
+            run("g=GVAL; i() { local -n g=g; printf '[%s]' \"$g\"; }
+                 o() { local g=OUTER; i; }; o 2>/dev/null")
+                .0,
+            "[GVAL]",
+        );
+        // A mutual cycle between two locals escapes the same way, each name to
+        // the global of its own spelling.
+        assert_eq!(
+            run("a1=GA; a2=GB; f() { local -n a1=a2; local -n a2=a1
+                 printf '[%s][%s]' \"$a1\" \"$a2\"; }; f 2>/dev/null")
+                .0,
+            "[GA][GB]",
+        );
+        // …and the global it lands on is taken as it stands, reference or not:
+        // `find_global_variable_noref` does not follow one.
+        assert_eq!(
+            run("t=TGT; declare -n p=t; f() { local -n p=p; printf '[%s]' \"$p\"; }; f 2>/dev/null")
+                .0,
+            // The global `p` is itself a reference; its *cell* is the answer.
+            "[t]",
+        );
+        // An array behind it answers every array question.
+        assert_eq!(
+            run("n=(x y z); f() { local -n n=n
+                 printf '[%s]' \"${n[@]}\" \"${n[1]}\" \"${!n[@]}\" \"${#n[@]}\"; }; f 2>/dev/null")
+                .0,
+            "[x][y][z][y][0][1][2][3]",
+        );
+        // A write binds the global and leaves the reference intact…
+        assert_eq!(
+            run("g=GVAL; f() { local -n g=g; g=W; declare -p g; }; f 2>/dev/null; declare -p g").0,
+            "declare -n g=\"g\"\ndeclare -- g=\"W\"\n",
+        );
+        // …creating it where there is none.
+        assert_eq!(
+            run("f() { local -n q=q; q=W2; }; f 2>/dev/null; declare -p q").0,
+            "declare -- q=\"W2\"\n",
+        );
+        // With no global of that name there is nothing to find.
+        assert_eq!(
+            run("f() { local -n z=z; printf '[%s]' \"$z\"; [ -v z ] || printf '<unset>'; }
+                 f 2>/dev/null")
+                .0,
+            "[]<unset>",
+        );
+        // Every walk warns, declaration included: `check_selfref` tags the
+        // first, `bind_variable_internal` repeats it untagged, and the read
+        // that follows adds its own.
+        let out = run("g=GVAL; f() { local -n g=g; printf '[%s]' \"$g\"; }; f 2>&1").0;
+        assert_eq!(out.matches("circular").count(), 3, "{out:?}");
+        assert_eq!(out.matches("local: warning").count(), 1, "{out:?}");
+        // A cycle closing on a *global* keeps answering nothing, inside a
+        // function or out of one.
+        let cyc = "declare -n c1=c2; declare -n c2=c1;";
+        assert_eq!(
+            run(&format!("{cyc} printf '[%s]' \"$c1\"; f() {{ printf '[%s]' \"$c1\"; }}; f")).0,
+            "[][]",
+        );
+    }
+
     /// `${name:=word}` through a circular chain parts along the seam the
     /// arithmetic writes part along: whether the store has anything to fall back
     /// on. An unsubscripted one has not, so it walks once more, stores nothing,
@@ -78179,11 +79014,12 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
     }
 
-    /// `export`/`readonly` look a nameref operand up once to find it, once to
-    /// mark it and — with a value — once more for the store, so a circular chain
-    /// is reported two or three times. `export -n` skips the marking lookup, and
-    /// an operand that makes an array is a *write*, which does not give up on a
-    /// circular chain at all.
+    /// `export`/`readonly` look a nameref operand up once to mark it, once more
+    /// when that lookup found nothing, and — with a value — once more again for
+    /// the store, so a chain that reaches nothing is reported two or three
+    /// times. `export -n` never makes the retry, and an operand that makes an
+    /// array is a *write*, which does not give up on a circular chain at all.
+    /// See [`Shell::attr_ref_walks`].
     #[test]
     fn export_and_readonly_walk_a_nameref_chain_once_for_the_store_and_once_for_the_mark() {
         let cyc = "declare -n c1=c2; declare -n c2=c1";
@@ -78238,6 +79074,60 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         ] {
             assert_eq!(run(&format!("w=5; declare -n r=w; {src}; declare -p r w")).0, want, "{src}");
         }
+    }
+
+    /// A chain that closed on a function-local variable escaped to global scope,
+    /// and the mark goes with it: `set_var_attribute` applies the attribute to
+    /// whatever its one lookup answered, which is the global. The local
+    /// reference the cycle closed on keeps none of it, and the retry that a
+    /// chain reaching nothing pays is not paid here — unless the global does not
+    /// exist yet and the operand has no value to create it with.
+    #[test]
+    fn export_and_readonly_mark_the_global_a_nameref_cycle_escaped_to() {
+        // The mark lands on the global, and the reference stays a reference.
+        for (src, want) in [
+            ("export e", "declare -x e=\"E\"\n"),
+            ("readonly e", "declare -r e=\"E\"\n"),
+            ("export e=V1", "declare -x e=\"V1\"\n"),
+            ("readonly e=V1", "declare -r e=\"V1\"\n"),
+        ] {
+            assert_eq!(
+                run(&format!("e=E; f() {{ local -n e=e; {src}; }}; f 2>/dev/null; declare -p e")).0,
+                want,
+                "{src}"
+            );
+        }
+        // `export -n` takes the attribute off the global the same way.
+        assert_eq!(
+            run("x=X; export x; f() { local -n x=x; export -n x; }; f 2>/dev/null; declare -p x").0,
+            "declare -- x=\"X\"\n",
+        );
+        // With no global of that name the mark creates one…
+        assert_eq!(
+            run("f() { local -n z=z; export z; }; f 2>/dev/null; declare -p z").0,
+            "declare -x z\n",
+        );
+        // …and the reference itself is unmarked even while it is still live.
+        assert_eq!(
+            run("e=E; f() { local -n e=e; export e; declare -p e; }; f 2>/dev/null").0,
+            "declare -n e=\"e\"\n",
+        );
+        // The walk count follows the retry: a lookup that finds the global does
+        // not make it, one that finds nothing does, and a value makes the store
+        // walk once for itself *before* the mark looks.
+        for (src, walks) in [
+            ("export e", 1),
+            ("readonly e", 1),
+            ("export -n e", 1),
+            ("export e=V1", 2),
+            ("readonly e=V1", 2),
+        ] {
+            let out = run(&format!("e=E; f() {{ local -n e=e; {src}; }}; f 2>&1")).0;
+            // Two of them are the declaration's own.
+            assert_eq!(out.matches("circular").count(), walks + 2, "{src} -> {out:?}");
+        }
+        let out = run("f() { local -n z=z; export z; }; f 2>&1").0;
+        assert_eq!(out.matches("circular").count(), 4, "{out:?}");
     }
 
     /// A circular chain names nothing to declare, so most operands are dropped

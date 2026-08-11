@@ -48,9 +48,9 @@ declare -a ar=(x y); declare -n er=ar[1]; declare -n er2=er
 b '${!er}' '${!er}'
 b '${!er2}' '${!er2}'
 # A reference that names *itself* is a different question — its cell is not
-# empty, so this is not the shape being measured here — and osh answers it
-# wrongly for reasons of its own; see known-issues.md's
-# TD-OILS-A-SELF-NAMING-LOCAL-NAMEREF-IS-NOT-RESOLVED-AT-GLOBAL-SCOPE.
+# empty, so this is not the shape being measured here. A cycle closing on a
+# local escapes to global scope instead; see
+# a-nameref-cycle-that-closes-on-a-local-resolves-at-global-scope.sh.
 echo "--- a local reference with no cell"
 g() { local -n l1; b '${!l1}' '${!l1}'; }
 g

@@ -45033,11 +45033,23 @@ impl Shell {
                 self.perrln(&format!(
                     "{tag}: {operand_name}: cannot destroy array variables in this way"
                 ));
-                // The value never lands, but an operand that carried one still
-                // leaves the array *valued*, so `declare -p` prints the empty
-                // `=()` rather than a bare declaration — the same shape a bad
-                // `-i` value leaves behind. See [`Shell::array_valued`].
-                if value.is_some() {
+                // The value never lands, and the refusal itself never changes
+                // the array's visibility: bash decides that once, when the
+                // variable is made. Only the *global* creation branch leaves it
+                // visible, and only for an operand that carried a value —
+                // declare.def:802 sets `att_invisible` inside the `var == 0`
+                // block and only when `offset == 0`. So `declare +a 'g[1]=5'`
+                // prints `declare -a g=()` while `declare -a g; declare +a g=5`
+                // prints the bare `declare -a g`, the array having been made
+                // invisible by the first command and merely *found* by the
+                // second. A local one is never visible either way:
+                // `make_local_variable` returns an existing same-context local
+                // untouched ("local foo; local foo; is a no-op",
+                // variables.c:2623) and flags a fresh one invisible, so
+                // `f() { local +a 'g[1]=5'; }` and
+                // `f() { local -a g; local +a g=5; }` both print bare.
+                // See [`Shell::array_valued`].
+                if value.is_some() && !name_existed && !make_local {
                     self.array_valued.insert(base_name.to_string());
                 }
                 status = 1;
@@ -45076,10 +45088,13 @@ impl Shell {
                 self.perrln(&format!(
                     "{tag}: {named}: cannot convert associative to indexed array"
                 ));
-                // As in the `cannot destroy` refusal above, an operand that
-                // carried a value still leaves the array *valued*, so
-                // `declare -p` prints the empty `=()`.
-                if value.is_some() {
+                // Visibility is the creation's to decide, exactly as in the
+                // `cannot destroy` refusal above: `declare -aA fresh=5` prints
+                // `declare -A fresh=()` because this command made `fresh` and
+                // gave it a value, while `declare -A ex; declare -aA ex=5`
+                // prints the bare `declare -A ex` and every local spelling
+                // (`f() { local -aA fresh=5; }`) prints bare too.
+                if value.is_some() && !name_existed && !make_local {
                     self.array_valued.insert(base_name.to_string());
                 }
                 status = 1;
@@ -73294,6 +73309,73 @@ st=1
         ));
         assert_eq!(out, "declare -n g=\"z\"\nAFTER\ndeclare -- g=\"5\"\n");
         assert_eq!(st, 0);
+    }
+
+    /// Whether `declare -p` prints an array as `=()` or bare is decided once,
+    /// when the variable is made — declare.def:802 sets `att_invisible` only
+    /// inside the `var == 0` block and only for a valueless operand, and
+    /// `make_local_variable` returns an existing same-context local untouched
+    /// (variables.c:2622) while flagging a fresh one invisible (:2757). A
+    /// refusal raised afterwards never changes the answer. osh made the array
+    /// valued from the `cannot destroy` and `-aA` self-conflict refusals
+    /// whenever the operand carried a value, so `declare -a g; declare +a g=5`
+    /// printed `declare -a g=()`. Corpus:
+    /// `an-array-refusals-visibility-is-decided-when-the-array-was-made.sh`.
+    #[test]
+    fn an_array_refusals_visibility_is_decided_when_the_array_was_made() {
+        // An array the command merely *found* keeps the visibility it had,
+        // whichever refusal is raised against it.
+        for (src, shape) in [
+            ("declare -a g; declare +a g=5", r#"declare -a g"#),
+            ("declare -a g; declare +a g", r#"declare -a g"#),
+            ("declare -a g=(); declare +a g=5", r#"declare -a g=()"#),
+            ("declare -a g=(1); declare +a g=5", r#"declare -a g=([0]="1")"#),
+            ("declare -A g; declare +A g=5", r#"declare -A g"#),
+            ("declare -A g; declare -aA g=5", r#"declare -A g"#),
+            ("declare -A g; declare -aA g", r#"declare -A g"#),
+            // The conversion refusal beside them never made an array at all.
+            ("declare -a g; declare -aA g=5", r#"declare -a g"#),
+            ("declare -a g; declare -A g=5", r#"declare -a g"#),
+            ("declare -A g; declare -a g=5", r#"declare -A g"#),
+            // But one this command created *with* a value was visible before
+            // the refusal was ever raised.
+            (r#"declare +a "g[1]=5""#, r#"declare -a g=()"#),
+            (r#"declare +a "g[1]""#, r#"declare -a g"#),
+            ("declare -aA g=5", r#"declare -A g=()"#),
+            ("declare -aA g", r#"declare -A g"#),
+            ("declare -aA -l g=AB", r#"declare -A g=()"#),
+        ] {
+            let out = run(&format!("{src} 2>/dev/null; declare -p g")).0;
+            assert_eq!(out, format!("{shape}\n"), "{src}");
+        }
+
+        // A *local* array is invisible however it was made — a fresh one is
+        // flagged so, and one the frame already holds comes back untouched.
+        // `declare`/`typeset` bind locals inside a function too.
+        for (src, shape) in [
+            ("local -a g; local +a g=5", r#"declare -a g"#),
+            (r#"local +a "g[1]=5""#, r#"declare -a g"#),
+            ("local -aA g=5", r#"declare -A g"#),
+            ("local -A g; local -aA g=5", r#"declare -A g"#),
+            ("local -aA -l g=AB", r#"declare -A g"#),
+            ("declare -a g; declare +a g=5", r#"declare -a g"#),
+            ("declare -aA g=5", r#"declare -A g"#),
+            ("typeset -aA g=5", r#"declare -A g"#),
+        ] {
+            let out = run(&format!("f() {{ {src} 2>/dev/null; declare -p g; }}; f")).0;
+            assert_eq!(out, format!("{shape}\n"), "{src}");
+        }
+
+        // `-g` is off the local branch, and so answers like the global
+        // spellings even from inside a function.
+        for (src, shape) in [
+            ("declare -g -a g; declare -g +a g=5", r#"declare -a g"#),
+            (r#"declare -g +a "g[1]=5""#, r#"declare -a g=()"#),
+            ("declare -g -aA g=5", r#"declare -A g=()"#),
+        ] {
+            let out = run(&format!("f() {{ {src} 2>/dev/null; declare -p g; }}; f")).0;
+            assert_eq!(out, format!("{shape}\n"), "{src}");
+        }
     }
 
     /// A bad option letter is refused before the routing that decides what the

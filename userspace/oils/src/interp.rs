@@ -17068,7 +17068,40 @@ impl Shell {
         };
         // The store itself, though, goes where the chain pointed — and where it
         // pointed at nothing, back to the name as written.
-        let name = target.as_name().unwrap_or(name);
+        let name = target.as_name().unwrap_or(name).to_string();
+        // …and it goes there in the scope the walk *escaped to*, not in the
+        // frame the reference was spelled in. bash's two binds look the name up
+        // again from scratch — `bind_variable`, and `bind_array_variable` →
+        // `find_variable_nameref_for_create` — so a frame-local reference is no
+        // candidate for what they find: a cycle written inside a function
+        // stores in the global and leaves the frame's own bindings standing.
+        //
+        // The bound a negative subscript counts back from and the readonly
+        // attribute that guards the store are read off that same binding, so
+        // all three have to move together; entering the scope once, here, is
+        // what keeps them in step. [`Shell::scalar_write_checked`] is this rule
+        // for the writes that are not expansions, and those callers arrive with
+        // the swap already in place — the re-walk above then answers
+        // [`RefScope::Live`] and this nests nothing.
+        let scope = target.scope;
+        let base = target.base.clone();
+        self.in_scope(scope, &base, |sh| {
+            sh.assign_elem_placed(&name, index, value, &blame, elem_invalid_name.as_deref(), &mut debt)
+        })
+    }
+
+    /// [`Self::assign_elem_owing`] with the destination's scope already in
+    /// place — see [`Self::in_scope`]. `blame` is the name every diagnostic
+    /// quotes (the operand as *written*), `name` the one the store lands on.
+    fn assign_elem_placed(
+        &mut self,
+        name: &str,
+        index: Option<&Word>,
+        value: Str,
+        blame: &str,
+        elem_invalid_name: Option<BStr<'_>>,
+        debt: &mut RefWriteDebt,
+    ) -> bool {
         match index {
             None => {
                 if self.refuse_readonly_store(name) {
@@ -17091,7 +17124,7 @@ impl Shell {
                 // The lookup — `entry = find_variable (vname)` (arrayfunc.c:363),
                 // the first of the two walks and the one every refusal below it
                 // stops short of the second. See [`RefWriteDebt`].
-                self.ref_debt_found(&mut debt);
+                self.ref_debt_found(debt);
                 if self.assoc.contains_key(name) {
                     // An empty key has no representation in an associative
                     // array. The complaint quotes the subscript's *source*, so
@@ -17101,7 +17134,7 @@ impl Shell {
                     if key.is_empty() {
                         self.berrln(&bfmt![
                             self.err_prefix(),
-                            &blame,
+                            blame,
                             b"[",
                             crate::unparse::word_src(w),
                             b"]: bad array subscript"
@@ -17110,8 +17143,8 @@ impl Shell {
                     }
                     // The bind, which for an associative array takes the entry
                     // already in hand and so walks nothing further.
-                    self.ref_debt_bound(&mut debt);
-                    if self.refuse_elem_store(name, &blame) {
+                    self.ref_debt_bound(debt);
+                    if self.refuse_elem_store(name, blame) {
                         return false;
                     }
                     self.assoc_set(name, key, value, false);
@@ -17124,7 +17157,7 @@ impl Shell {
                     // `*` being a key there like any other. See
                     // [`Shell::warn_whole_array_sub`].
                     if let Some(c) = Self::whole_array_sub(&crate::unparse::word_src(w)) {
-                        self.warn_whole_array_sub(&blame, c);
+                        self.warn_whole_array_sub(blame, c);
                         return false;
                     }
                     // An expression that will not evaluate has been reported and
@@ -17150,7 +17183,7 @@ impl Shell {
                     if idx < 0 && Self::resolve_index(idx, bound).is_none() {
                         let src = self.expand_subscript_key(w);
                         let line =
-                            bfmt![self.err_prefix(), &blame, b"[", &src, b"]: bad array subscript"];
+                            bfmt![self.err_prefix(), blame, b"[", &src, b"]: bad array subscript"];
                         self.berrln(&line);
                         return false;
                     }
@@ -17161,15 +17194,15 @@ impl Shell {
                     // finds the variable again, and so is where a circular
                     // chain's second warning falls and where a useless reference
                     // is finally unmade.
-                    self.ref_debt_bound(&mut debt);
+                    self.ref_debt_bound(debt);
                     // …and where the reference that designates an element is
                     // refused, below every complaint the subscript owed and
                     // above the readonly one.
-                    if let Some(spelling) = &elem_invalid_name {
+                    if let Some(spelling) = elem_invalid_name {
                         self.warn_elem_not_identifier(spelling);
                         return false;
                     }
-                    if self.refuse_elem_store(name, &blame) {
+                    if self.refuse_elem_store(name, blame) {
                         return false;
                     }
                     // Only now that the store is certain to happen: a subscript
@@ -75596,6 +75629,115 @@ st=1
         // answers a null `var` with 0 before looking at it.
         let (out, _) = run("( declare -n r=yy; echo \"[${#r[-1]}]\"; echo \"st=$?\" ) 2>&1");
         assert_eq!(out, "[0]\nst=0\n");
+    }
+
+    /// `${name:=value}` and `${name[sub]:=value}` are the two expansions that
+    /// *write*, and a circular chain designates nothing for them to write to —
+    /// so the store falls back on the name the walk started from. It falls back
+    /// on it in the scope the walk **escaped to**, though, not in the frame the
+    /// reference was spelled in: bash's two binds (`bind_variable`, and
+    /// `bind_array_variable` → `find_variable_nameref_for_create`) look the name
+    /// up again from scratch, and the frame's own reference is no candidate for
+    /// what they find. So `f() { declare -n a=b; declare -n b=a; ${a[0]:=w}; }`
+    /// leaves `declare -n a="b"` standing inside `f` and puts
+    /// `declare -a a=([0]="w")` in the global.
+    ///
+    /// Two things ride on that binding besides the store. The bound a negative
+    /// subscript counts back from is read off the entry the walk handed back
+    /// (`if (entry && ind < 0)`, arrayfunc.c:398), and the readonly attribute
+    /// that guards the store is the outer one — so all three have to move
+    /// together.
+    ///
+    /// osh entered no scope for these two: [`Shell::assign_elem_owing`] stored
+    /// in the live frame where its sibling writes — `read 'a[i]'`,
+    /// `printf -v 'a[i]'`, `a[i]=v`, all of which go through
+    /// [`Shell::scalar_write_checked`] — already went where the walk pointed.
+    /// The local scalar the reference happened to be then supplied a bound of
+    /// 1, so `${a[-1]:=w}` landed on element 0 instead of underflowing.
+    #[test]
+    fn a_default_assignment_through_a_cycle_stores_in_the_frame_it_ran_in() {
+        let w = "main: warning: a: circular name reference\n";
+        let cyc = "declare -n a=b; declare -n b=a;";
+
+        // The store lands where the walk escaped to; the frame's own bindings
+        // come through untouched.
+        let (out, _) = run(&format!(
+            "f() {{ {cyc} echo \"[${{a[0]:=w}}]\"; declare -p a b; }}; \
+             ( f; echo --; declare -p a ) 2>&1"
+        ));
+        assert_eq!(
+            out,
+            format!(
+                "{}[w]\ndeclare -n a=\"b\"\ndeclare -n b=\"a\"\n--\ndeclare -a a=([0]=\"w\")\n",
+                w.repeat(4)
+            )
+        );
+        let (out, _) = run(&format!(
+            "f() {{ {cyc} echo \"[${{a:=w}}]\"; declare -p a b; }}; \
+             ( f; echo --; declare -p a ) 2>&1"
+        ));
+        assert_eq!(
+            out,
+            format!(
+                "{}[w]\ndeclare -n a=\"b\"\ndeclare -n b=\"a\"\n--\ndeclare -- a=\"w\"\n",
+                w.repeat(2)
+            )
+        );
+
+        // A chain that reached nothing has no bound to count back from, so the
+        // frame-local scalar the reference is does not supply one.
+        let (out, _) = run(&format!(
+            "f() {{ {cyc} echo \"[${{a[-1]:=w}}]\"; }}; ( f; echo --; declare -p a ) 2>&1"
+        ));
+        assert_eq!(
+            out,
+            format!(
+                "{}main: a: bad array subscript\n{w}main: a[-1]: bad array subscript\n",
+                w.repeat(2)
+            )
+        );
+
+        // The outer binding is the one the store adds to, and the one the read
+        // in front of it draws from.
+        let (out, _) = run(&format!(
+            "f() {{ {cyc} echo \"[${{a[9]:=w}}]\"; }}; \
+             ( declare -a a=(p q); f; echo --; declare -p a ) 2>&1"
+        ));
+        assert_eq!(
+            out,
+            format!("{}[w]\n--\ndeclare -a a=([0]=\"p\" [1]=\"q\" [9]=\"w\")\n", w.repeat(4))
+        );
+        let (out, _) = run(&format!(
+            "f() {{ {cyc} echo \"[${{a[-1]:=w}}]\"; }}; \
+             ( declare -a a=(p q); f; echo --; declare -p a ) 2>&1"
+        ));
+        assert_eq!(
+            out,
+            format!("{}[q]\n--\ndeclare -a a=([0]=\"p\" [1]=\"q\")\n", w.repeat(2))
+        );
+        // An associative outer binding is bound through the entry already in
+        // hand, so it walks once fewer — and the key still lands in the global.
+        let (out, _) = run(&format!(
+            "f() {{ {cyc} echo \"[${{a[k]:=w}}]\"; }}; \
+             ( declare -A a=([j]=1); f; echo --; declare -p a ) 2>&1"
+        ));
+        assert_eq!(
+            out,
+            format!("{}[w]\n--\ndeclare -A a=([k]=\"w\" [j]=\"1\" )\n", w.repeat(3))
+        );
+
+        // The sibling writes already went where the walk pointed.
+        let (out, _) = run(&format!(
+            "f() {{ {cyc} read 'a[0]' <<< Z; declare -p a b; }}; \
+             ( f; echo --; declare -p a ) 2>&1"
+        ));
+        assert_eq!(
+            out,
+            format!(
+                "{}declare -n a=\"b\"\ndeclare -n b=\"a\"\n--\ndeclare -a a=([0]=\"Z\")\n",
+                w.repeat(2)
+            )
+        );
     }
 
     /// A declaration builtin applies its attributes **before** it stores a

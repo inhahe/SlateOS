@@ -79,39 +79,6 @@ corpus cases that need a warning out of `(( ))` keep the construct on one line.
 (`a-write-follows-a-nameref-chain-one-variable-context-at-a-time.sh`), whose
 `(( w1 = 5 ))` form put the diagnostic on the wrong line inside a function body.
 
-### TD-OILS-READ-A-AND-MAPFILE-DO-NOT-TAKE-A-NAMEREF-CYCLES-GLOBAL-ESCAPE. The array-filling builtins write the reference itself — 2026-08-10
-
-**Where:** `userspace/oils/src/interp.rs`, the name resolution `read -a` and
-`mapfile`/`readarray` use to find the array they fill. Every other write form
-takes the escape a cycle that closes on a *function-local* variable earns
-(`find_global_variable_noref`, variables.c:2098): a scalar store, a compound
-literal, an element write and a scalar `read` all bind the **global** and leave
-the local reference intact. The two array-filling builtins do not — they bind
-the reference's own cell, and set `-a` *on top of* `-n`:
-
-```sh
-g1=(A B); f1() { local -n g1=g1; read -a g1 <<< "P Q"; declare -p g1; }
-f1 2>/dev/null; declare -p g1
-# bash: declare -n g1="g1"                 osh: declare -an g1=([0]="P" [1]="Q")
-#       declare -a g1=([0]="P" [1]="Q")         declare -a g1=([0]="A" [1]="B")
-```
-
-`mapfile -t g4 <<< P` diverges identically. `declare -an` is a shape bash never
-produces: `nameref` and `array` are mutually exclusive attributes, so the wrong
-answer here is visible twice over — the value went to the wrong variable, and
-the reference stopped being a reference.
-
-**Proper fix:** route both builtins' target lookup through the same resolver the
-scalar store uses, so the cycle escape (and the `-n`/`-a` exclusion) applies. The
-escape itself is already implemented — see
-TD-OILS-A-NAMEREF-CYCLE-THAT-CLOSES-ON-A-LOCAL-IS-NOT-RESOLVED-AT-GLOBAL-SCOPE
-in Fixed Bugs — these two call sites simply do not go through it.
-
-**How it was found:** probing which assignment forms go through `bind_variable`
-while implementing the per-context write walk; `read -a` was set aside then as
-belonging to the cycle-escape entry, and re-measured afterwards to confirm it is
-a separate, still-open gap.
-
 ### TD-OILS-A-SUBSCRIPTED-ARITHMETIC-OPERAND-DOES-NOT-FOLLOW-A-NAMEREF-CYCLES-ESCAPE. `(( arr[1] ))` through an escaped cycle reads 0 and writes nowhere — 2026-08-10
 
 **Where:** `userspace/oils/src/interp.rs`. A cycle that closes on a
@@ -40210,6 +40177,49 @@ deny — are now fixed; see F8 and F9.)_
 ---
 
 ## Fixed Bugs
+
+### TD-OILS-READ-A-AND-MAPFILE-DO-NOT-TAKE-A-NAMEREF-CYCLES-GLOBAL-ESCAPE. A whole-array fill lands where the walk named the array — FIXED 2026-08-10
+
+**Where:** `userspace/oils/src/interp.rs`, `Shell::whole_array_write_target` —
+which resolved the operand with `Shell::resolve_ref_array_write` (correctly) and
+then **threw the scope away**, returning a bare name. Its two callers,
+`Shell::builtin_read`'s `-a` arm and `Shell::builtin_mapfile`, filled whatever
+that name meant *live*, so a chain that escaped a cycle to global scope filled
+the local reference instead of the global — and, filling it, set `-a` on top of
+`-n`, a shape bash never produces:
+
+```sh
+g1=(A B); f1() { local -n g1=g1; read -a g1 <<< "P Q"; declare -p g1; }
+f1 2>/dev/null; declare -p g1
+# bash: declare -n g1="g1"                 osh was: declare -an g1=([0]="P" [1]="Q")
+#       declare -a g1=([0]="P" [1]="Q")             declare -a g1=([0]="A" [1]="B")
+```
+
+**The rule.** `builtin_find_indexed_array` (builtins/common.c:1029) opens with
+`find_or_make_array_variable` (arrayfunc.c:465), whose first line is a plain
+`find_variable (name)` — the *read* walk, which takes a local cycle's
+`find_global_variable_noref` escape — and which then holds the `SHELL_VAR *` for
+the whole fill. So every question the builtin asks (readonly, noassign, "not an
+indexed array") is asked of **that** variable, the value attributes applied are
+that variable's, and the elements land there. The one thing that is *not* asked
+that way is a `mapfile -C` callback: it is ordinary shell code, so inside it the
+name still means the local reference.
+
+**The fix.** `whole_array_write_target` now answers `(name, RefScope)` and asks
+its three questions under `Shell::in_scope`. `read -a` takes one swap around the
+whole fill; `mapfile` takes a swap around each store — the flush, each element
+(with its value attributes) and `after_var_write` — and deliberately leaves the
+callback outside, which is what makes `cb` above read the global one element
+behind the fill rather than the element being stored.
+
+**Corpus:** `a-whole-array-fill-lands-where-the-walk-named-the-array.sh`.
+
+**How it was found:** probing which assignment forms go through `bind_variable`
+while implementing the per-context write walk (see
+TD-OILS-A-WRITE-THROUGH-A-CHAIN-OF-LOCALS-GIVES-UP-ONE-LINK-EARLIER). `read -a`
+was set aside then as belonging to the cycle-escape entry, and re-measured
+afterwards — at which point it turned out to be neither, but a scope dropped on
+the floor between the resolver and the fill.
 
 ### TD-OILS-A-NAMEREF-CYCLE-THAT-CLOSES-ON-A-LOCAL-IS-NOT-RESOLVED-AT-GLOBAL-SCOPE. `local -n r=r` reads the string `r` where bash reads the global `r` — FIXED 2026-08-10
 

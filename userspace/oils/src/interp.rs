@@ -49133,7 +49133,7 @@ impl Shell {
             // because the input has already been consumed by the time bash
             // looks at where to put it: a refused `read -a` still eats its
             // record, where a refused `mapfile` leaves the input untouched.
-            let Some(name) = self.whole_array_write_target(&arr, "read") else {
+            let Some((name, scope)) = self.whole_array_write_target(&arr, "read") else {
                 return 1;
             };
             // The record replaces whatever the array held rather than merging
@@ -49146,26 +49146,32 @@ impl Shell {
             } else {
                 read_split(&line, &ifs, raw, None)
             };
-            self.vars.remove(&name);
-            self.assoc.remove(&name);
-            self.array_valued.insert(name.clone());
-            self.arrays.insert(name.clone(), BTreeMap::new());
-            // Each field is stored as its own assignment, so the array's value
-            // attributes reach every one of them — `declare -ai k; read -a k`
-            // stores `7` for the field `3+4`, and `declare -au k` uppercases.
-            // A malformed `-i` field abandons the command where it stands, so
-            // the fields before it stay and the ones after it are never read
-            // (bash).
-            for (idx, field) in fields.into_iter().enumerate() {
-                let Some(field) = self.apply_value_attrs(&name, field) else {
-                    return 1;
-                };
-                self.arrays.entry(name.clone()).or_default().insert(idx, field);
-            }
-            // `read -a DIRSTACK` writes through the dynamic hook like any other
-            // assignment — see [`Shell::after_var_write`].
-            self.after_var_write(&name);
-            return eof_status;
+            // The fill happens in the scope the walk named the array in — the
+            // binding `find_or_make_array_variable` held, which for a chain that
+            // escaped a cycle is the global rather than the local reference. See
+            // [`Shell::whole_array_write_target`].
+            return self.in_scope(scope, &name, |sh| {
+                sh.vars.remove(&name);
+                sh.assoc.remove(&name);
+                sh.array_valued.insert(name.clone());
+                sh.arrays.insert(name.clone(), BTreeMap::new());
+                // Each field is stored as its own assignment, so the array's
+                // value attributes reach every one of them — `declare -ai k;
+                // read -a k` stores `7` for the field `3+4`, and `declare -au k`
+                // uppercases. A malformed `-i` field abandons the command where
+                // it stands, so the fields before it stay and the ones after it
+                // are never read (bash).
+                for (idx, field) in fields.into_iter().enumerate() {
+                    let Some(field) = sh.apply_value_attrs(&name, field) else {
+                        return 1;
+                    };
+                    sh.arrays.entry(name.clone()).or_default().insert(idx, field);
+                }
+                // `read -a DIRSTACK` writes through the dynamic hook like any
+                // other assignment — see [`Shell::after_var_write`].
+                sh.after_var_write(&name);
+                eof_status
+            });
         }
 
         if names.is_empty() {
@@ -49302,7 +49308,22 @@ impl Shell {
     /// the readonly complaint names the variable alone (the attribute is the
     /// variable's, not the builtin's doing), while the other two are the
     /// builtin's own objections and carry its name.
-    fn whole_array_write_target(&mut self, operand: &[u8], tag: &str) -> Option<String> {
+    ///
+    /// The answer carries the **scope** the walk named the array in, not just
+    /// its name. `find_or_make_array_variable` (arrayfunc.c:465) opens with a
+    /// plain `find_variable (name)` and holds the `SHELL_VAR *` it gets, so a
+    /// chain that escaped a cycle to global scope is filled *there* — the fill
+    /// never goes near the local reference standing in front of it:
+    ///
+    /// ```sh
+    /// g=(A B); f() { local -n g=g; read -a g <<< "P Q"; declare -p g; }
+    /// f 2>/dev/null; declare -p g
+    /// # bash: declare -n g="g"  /  declare -a g=([0]="P" [1]="Q")
+    /// ```
+    ///
+    /// Every question below is asked of that same binding, which is why they
+    /// are asked under the swap rather than of whatever is live.
+    fn whole_array_write_target(&mut self, operand: &[u8], tag: &str) -> Option<(String, RefScope)> {
         // The variable tables are keyed by `String` and an identifier is
         // spelled in the shell's identifier syntax, so a name that is not text
         // is not a valid identifier — the complaint it already gets, quoting
@@ -49339,19 +49360,24 @@ impl Shell {
             ]);
             return None;
         };
-        if self.readonly.contains(&array) {
-            self.perrln(&format!("{blame}: readonly variable"));
-            return None;
-        }
-        // …and one the shell maintains, silently — see [`Shell::noassign`].
-        if self.noassign.contains(&array) {
-            return None;
-        }
-        if self.assoc.contains_key(&array) {
-            self.berrln(&bfmt![self.err_prefix(), tag, b": ", blame.as_str(), b": not an indexed array"]);
-            return None;
-        }
-        Some(array)
+        let scope = target.scope;
+        let ok = self.in_scope(scope, &array, |sh| {
+            if sh.readonly.contains(&array) {
+                sh.perrln(&format!("{blame}: readonly variable"));
+                return false;
+            }
+            // …and one the shell maintains, silently — see [`Shell::noassign`].
+            if sh.noassign.contains(&array) {
+                return false;
+            }
+            if sh.assoc.contains_key(&array) {
+                let tail: &[u8] = b": not an indexed array";
+                sh.berrln(&bfmt![sh.err_prefix(), tag, b": ", blame.as_str(), tail]);
+                return false;
+            }
+            true
+        });
+        ok.then_some((array, scope))
     }
 
     /// The `mapfile`/`readarray [-d delim] [-n count] [-O origin] [-s skip] [-t]
@@ -49530,7 +49556,7 @@ impl Shell {
         // read: a refused `mapfile` leaves the input where it was, so a `read`
         // sharing the same redirection still sees the first line. (`read -a` is
         // the other caller and cannot do that — see [`Shell::builtin_read`].)
-        let Some(array) = self.whole_array_write_target(&array, tag) else {
+        let Some((array, scope)) = self.whole_array_write_target(&array, tag) else {
             return 1;
         };
 
@@ -49579,13 +49605,21 @@ impl Shell {
         // way the name becomes array-valued, so a scalar binding of the same
         // name is dropped. (An *associative* one cannot be here — that is the
         // "not an indexed array" refusal above.)
-        self.vars.remove(&array);
-        self.array_valued.insert(array.clone());
-        if origin_given {
-            self.arrays.entry(array.clone()).or_default();
-        } else {
-            self.arrays.insert(array.clone(), BTreeMap::new());
-        }
+        //
+        // Every one of these touches the binding the walk named — the global,
+        // where the chain escaped a cycle — so each is taken under the swap. The
+        // *callback* below is not: it is ordinary shell code running in the
+        // ordinary scope, where the local reference is still what the name
+        // means. See [`Shell::whole_array_write_target`].
+        self.in_scope(scope, &array, |sh| {
+            sh.vars.remove(&array);
+            sh.array_valued.insert(array.clone());
+            if origin_given {
+                sh.arrays.entry(array.clone()).or_default();
+            } else {
+                sh.arrays.insert(array.clone(), BTreeMap::new());
+            }
+        });
         let mut idx = origin;
         // Number of elements assigned so far (1-based when checking the quantum),
         // matching bash's `line_count % quantum == 0` boundary test.
@@ -49649,18 +49683,24 @@ impl Shell {
             // line abandons the command where it stands: the lines before it
             // stay, and the ones after it are never assigned. The callback has
             // already fired for this one, as it fires before the assignment.
-            let Some(s) = self.apply_value_attrs(&array, s) else {
+            let stored = self.in_scope(scope, &array, |sh| {
+                let Some(s) = sh.apply_value_attrs(&array, s) else {
+                    return false;
+                };
+                // Re-look up the array every iteration: the callback is
+                // arbitrary shell code and may have inserted, removed or
+                // replaced it, so a reference held across the call could dangle.
+                sh.arrays.entry(array.clone()).or_default().insert(idx, s);
+                true
+            });
+            if !stored {
                 return 1;
-            };
-            // Re-look up the array every iteration: the callback is arbitrary
-            // shell code and may have inserted, removed or replaced it, so a
-            // reference held across the call could dangle.
-            self.arrays.entry(array.clone()).or_default().insert(idx, s);
+            }
             idx = idx.saturating_add(1);
         }
         // `mapfile DIRSTACK` writes through the dynamic hook like any other
         // assignment — see [`Shell::after_var_write`].
-        self.after_var_write(&array);
+        self.in_scope(scope, &array, |sh| sh.after_var_write(&array));
         0
     }
 
@@ -79530,6 +79570,59 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         .0;
         assert!(out.contains("circular name reference"), "{out:?}");
         assert!(out.ends_with("[st=0][u10=TEN][u1=][g=W]"), "{out:?}");
+    }
+
+    /// `read -a` and `mapfile` hand their operand to
+    /// `builtin_find_indexed_array`, which opens with `find_or_make_array_
+    /// variable` (arrayfunc.c:465) and so with a plain `find_variable (name)` —
+    /// the *read* walk — and then holds the `SHELL_VAR *` for the whole fill.
+    /// Every question the builtin asks is asked of that variable, and the fill
+    /// lands there; where the chain escaped a cycle to global scope the two
+    /// differ from what the name means where the builtin stands.
+    #[test]
+    fn a_whole_array_fill_lands_where_the_walk_named_the_array() {
+        // The fill lands on the global, and the local reference survives it.
+        assert_eq!(
+            run("g1=(A B)
+                 f1() { local -n g1=g1; read -a g1 <<< \"P Q\"; declare -p g1; }
+                 f1 2>/dev/null; declare -p g1")
+            .0,
+            "declare -n g1=\"g1\"\ndeclare -a g1=([0]=\"P\" [1]=\"Q\")\n",
+        );
+        assert_eq!(
+            run("g4=(A B)
+                 f4() { local -n g4=g4; mapfile -t g4 <<< P; }
+                 f4 2>/dev/null; declare -p g4")
+            .0,
+            "declare -a g4=([0]=\"P\")\n",
+        );
+        // The refusals are that variable's too — and so are the value
+        // attributes it carries.
+        assert_eq!(
+            run("declare -A ag=([k]=v)
+                 c2() { local -n ag=ag; read -a ag <<< P; echo \"st=$?\"; }
+                 c2 2>/dev/null; declare -p ag")
+            .0,
+            "st=1\ndeclare -A ag=([k]=\"v\" )\n",
+        );
+        assert_eq!(
+            run("declare -ai ig=(1)
+                 c5() { local -n ig=ig; read -a ig <<< \"3+4 5*2\"; }
+                 c5 2>/dev/null; declare -p ig")
+            .0,
+            "declare -ai ig=([0]=\"7\" [1]=\"10\")\n",
+        );
+        // A `-C` callback is ordinary shell code, so *it* reads the name the
+        // ordinary way: the local reference, which escapes to the global being
+        // filled one element behind.
+        assert_eq!(
+            run("cg=(x)
+                 cb() { printf '[%s]' \"${cg[*]}\"; }
+                 c4() { local -n cg=cg; mapfile -t -C cb -c 1 cg <<< $'a\\nb'; }
+                 c4 2>/dev/null; declare -p cg")
+            .0,
+            "[][a]declare -a cg=([0]=\"a\" [1]=\"b\")\n",
+        );
     }
 
     /// `do_assignment_internal` (subst.c:396) has the value in hand before it

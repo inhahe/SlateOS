@@ -46919,34 +46919,123 @@ impl Shell {
                 (!sub.is_empty()).then_some((base, sub))
             });
             if let Some((base, sub_src)) = subscript {
-                // A circular chain names nothing for the subscript to apply to,
-                // so bash gives up on the element and unsets the *reference*
-                // whole — and never reads the subscript at all, which is
+                // `unset name[sub]` looks the base up **once**, and removes the
+                // element through the variable that walk handed back
+                // (`unset_builtin`, builtins/set.def:927):
+                //
+                // ```c
+                //   var = unset_function ? find_function (name)
+                //                        : (nameref ? find_variable_last_nameref (name, 0)
+                //                                   : find_variable (name));
+                //   …
+                //   if (var && unset_array)
+                //     tem = unbind_array_element (var, t, vflags);
+                //   …
+                //   else if (var == 0 && nameref == 0 && unset_function == 0)
+                //     {
+                //       var = find_variable_last_nameref (name, 0);
+                //       …
+                //     }
+                // ```
+                //
+                // So the chain is walked once where that lookup answered and
+                // twice where it did not, which a circular chain makes visible
+                // by warning once per walk.
+                let target = self.resolve_ref_name(base);
+                // Whether it answered. A chain ending at an *element* reference
+                // answers nothing: the spelling is looked up as a name, and
+                // [`Self::resolve_ref_name`] hands back the element form only
+                // when no such name is bound.
+                let found = match target.as_ref() {
+                    Some(t) if t.sub.is_none() => {
+                        let n = t.base.clone();
+                        self.in_target_scope(t, |sh| sh.find_variable_answers(&n))
+                    }
+                    _ => false,
+                };
+                self.warn_circular_walks(base, target.as_ref(), 1);
+                if found {
+                    let name = target.as_ref().map_or_else(String::new, |t| t.base.clone());
+                    // Some names the shell can never do without, and the
+                    // refusal comes straight after the lookup — before the
+                    // subscript has meant anything at all. It names the operand
+                    // as written, `non_unsettable_p` being consulted before
+                    // bash re-points `name` at what it found.
+                    if NOUNSET_VARS.contains(&name.as_str()) {
+                        self.perrln(&format!("unset: {base}: cannot unset"));
+                        status = 1;
+                        continue;
+                    }
+                    let outcome = self
+                        .in_opt_target_scope(target.as_ref(), |sh| sh.unset_element(&name, sub_src));
+                    match outcome {
+                        ElemUnset::Done => {}
+                        ElemUnset::Whole => self.unbind_var_through_ref(&name),
+                        ElemUnset::Failed => {
+                            if self.discard_error.is_some() {
+                                // A malformed arithmetic subscript (`unset
+                                // 'a[x y]'`) is a discarding expansion error:
+                                // the diagnostic is already out and the command
+                                // driver abandons the parse unit.
+                                return 1;
+                            }
+                            status = 1;
+                        }
+                    }
+                    continue;
+                }
+                // Posix says variables first and functions second, and bash
+                // makes that fall-back *before* the array branch — so where a
+                // function answers, the subscript is applied to it. A function
+                // is not an array: index 0 unbinds the (absent) variable of
+                // that name, and every other subscript is "not an array
+                // variable". Either way the function itself stands.
+                if !vars_only && self.funcs.contains_key(base.as_bytes()) {
+                    if self.readonly_funcs.contains(base.as_bytes()) {
+                        self.perrln(&format!("unset: {base}: cannot unset: readonly function"));
+                        status = 1;
+                        continue;
+                    }
+                    match self.unset_element_unchecked(base, sub_src) {
+                        ElemUnset::Done => {}
+                        ElemUnset::Whole => self.unbind_var_through_ref(base),
+                        ElemUnset::Failed => {
+                            if self.discard_error.is_some() {
+                                return 1;
+                            }
+                            status = 1;
+                        }
+                    }
+                    continue;
+                }
+                // Otherwise the second walk goes looking for the last *nameref*
+                // in the chain and removes what its cell names — discarding the
+                // subscript that was written, which is never even read. That is
                 // measurable: `unset 'c1[x y]'` through a cycle is silent about
                 // the arithmetic that would otherwise be a syntax error, and
                 // `unset 'c1[@]'` does not complain that `c1` is no array.
-                let Some(target) = self.resolve_ref_use_walks(base, 2) else {
-                    if !self.unset_resolved_name(base, vars_only) {
+                //
+                // A reference designating an element removes that element…
+                if let Some(sub) = target.as_ref().and_then(|t| t.sub.clone()) {
+                    let base = target.map_or_else(String::new, |t| t.base);
+                    if !self.unset_ref_element(&base, &sub) {
+                        if self.discard_error.is_some() {
+                            return 1;
+                        }
                         status = 1;
                     }
                     continue;
+                }
+                // …and one designating a plain name unbinds it whole — by name,
+                // so the walk starts over and a circular chain closes (and
+                // warns) a second time. `find_variable_last_nameref` gives up on
+                // a circular chain, and what is unbound is then the operand
+                // itself rather than any cell.
+                let whole = match target {
+                    Some(t) if !t.global => t.base,
+                    _ => base.to_string(),
                 };
-                // A reference already designating an element leaves this
-                // subscript nothing to apply to, so it names no array to remove
-                // from: the removal finds nothing, which is what the lookup
-                // through the target's spelling answered before it was split.
-                if let Some(name) = target.into_name()
-                    && self.unset_element(&name, sub_src)
-                {
-                    continue;
-                }
-                if self.discard_error.is_some() {
-                    // A malformed arithmetic subscript (`unset 'a[x y]'`) is a
-                    // discarding expansion error: the diagnostic is already out
-                    // and the command driver abandons the parse unit.
-                    return 1;
-                }
-                status = 1;
+                self.unbind_var_through_ref(&whole);
                 continue;
             }
             // Every remaining *variable* table `unset` reaches — scalars,
@@ -46976,21 +47065,13 @@ impl Shell {
                 // The base is a **name**, and is followed through a nameref
                 // chain of its own before the subscript applies to anything:
                 // `unset` reaches the array the way a *read* does (see
-                // [`Self::ref_target_value`]), not the way a store does, which
+                // [`Self::unset_ref_element`]), not the way a store does, which
                 // binds the base where it is written. One walk — the name is
                 // resolved once — so a circular base is reported once, removes
                 // nothing, and is not an error; nor is a base that resolves
                 // nowhere, or that designates an element itself and so leaves
                 // this subscript nothing to apply to.
-                let Some(base) = self.resolve_ref_use(&base).and_then(RefTarget::into_name) else {
-                    continue;
-                };
-                // Unchecked: bash consults the readonly guard for a subscript
-                // the writer *wrote* and not for one arriving through a
-                // reference. `unset 'n[0]'` on a readonly `n` is refused, and
-                // `declare -n r='n[0]'; unset -v r` performs the very same
-                // removal — a readonly *scalar* is removed outright this way.
-                if !self.unset_element_unchecked(&base, &sub) {
+                if !self.unset_ref_element(&base, &sub) {
                     status = 1;
                 }
                 continue;
@@ -47253,17 +47334,20 @@ impl Shell {
     /// `unset name[sub]` — remove one element (or, for `name[@]`/`name[*]` on an
     /// *indexed* array, every element while keeping the array declared).
     ///
-    /// Returns `false` when the reference failed; the caller then either
-    /// propagates `discard_error` (a malformed arithmetic subscript) or records
-    /// status 1. The diagnostics deliberately name the subscript's **source**
-    /// text rather than its expansion, as bash does (`unset: [$k]: bad array
-    /// subscript`), because the expansion is by definition unusable.
-    fn unset_element(&mut self, name: &str, sub_src: BStr<'_>) -> bool {
+    /// The caller has already established that the base *is* a variable — bash's
+    /// `unbind_array_element` is only ever reached with a `SHELL_VAR` in hand and
+    /// asks nothing about whether it exists — and, where the base was reached
+    /// through a reference, has entered the scope that reference names.
+    ///
+    /// The diagnostics deliberately name the subscript's **source** text rather
+    /// than its expansion, as bash does (`unset: [$k]: bad array subscript`),
+    /// because the expansion is by definition unusable.
+    fn unset_element(&mut self, name: &str, sub_src: BStr<'_>) -> ElemUnset {
         // An element of a readonly array cannot be unset either — bash reports
         // the base name as the readonly variable.
         if self.readonly.contains(name) {
             self.perrln(&format!("unset: {name}: cannot unset: readonly variable"));
-            return false;
+            return ElemUnset::Failed;
         }
         self.unset_element_unchecked(name, sub_src)
     }
@@ -47278,15 +47362,9 @@ impl Shell {
     /// variable outright. The `unset_builtin` path for a nameref whose value
     /// carries a subscript reaches `unbind_array_element` directly, and nothing
     /// on the way asks about the attribute.
-    fn unset_element_unchecked(&mut self, name: &str, sub_src: BStr<'_>) -> bool {
-        // An unset variable is not probed at all: bash never even evaluates the
-        // subscript, so `unset 'nosuch[x y]'` is silently fine.
+    fn unset_element_unchecked(&mut self, name: &str, sub_src: BStr<'_>) -> ElemUnset {
         let is_assoc = self.assoc.contains_key(name);
         let is_indexed = self.arrays.contains_key(name);
-        let is_scalar = self.vars.contains_key(name);
-        if !is_assoc && !is_indexed && !is_scalar {
-            return true;
-        }
         // The subscript is re-parsed from the (already once-expanded) argument
         // text so that `unset 'm[$k]'` and `unset 'a[$(f)]'` behave like the
         // same subscript written in an assignment. An unbalanced quote makes it
@@ -47294,7 +47372,7 @@ impl Shell {
         let Ok(word) =
             crate::parser::word_subscript_from_source(sub_src, self.parse_opts(), Quoting::Runtime)
         else {
-            return true;
+            return ElemUnset::Done;
         };
         if is_assoc {
             // A subscript is a string key here, so `[@]` and `[*]` are ordinary
@@ -47307,12 +47385,12 @@ impl Shell {
                     sub_src,
                     b"]: bad array subscript"
                 ]);
-                return false;
+                return ElemUnset::Failed;
             }
             if let Some(map) = self.assoc.get_mut(name) {
                 map.remove(&key);
             }
-            return true;
+            return ElemUnset::Done;
         }
         if sub_src == b"@" || sub_src == b"*" {
             if !is_indexed {
@@ -47320,39 +47398,34 @@ impl Shell {
                 // arithmetic expression, so this is reported before any
                 // evaluation is attempted.
                 self.perrln(&format!("unset: {name}: not an array variable"));
-                return false;
+                return ElemUnset::Failed;
             }
             // `unset a[@]` empties the array but leaves it declared (and keeps
             // its attributes): bash prints `declare -a a=()` afterwards.
             if let Some(arr) = self.arrays.get_mut(name) {
                 arr.clear();
             }
-            return true;
+            return ElemUnset::Done;
         }
         // Indexed (and scalar-as-one-element) subscripts are arithmetic.
         let raw = self.eval_arith_index(&word);
         if self.discard_error.is_some() {
-            return false;
+            return ElemUnset::Failed;
         }
         if !is_indexed {
             // A scalar is addressable as `name[0]` only, and unsetting that
-            // element unsets the whole variable. Any other index — including a
+            // element unsets the whole *variable*. Any other index — including a
             // negative one — is "not an array variable".
             if raw != 0 {
                 self.perrln(&format!("unset: {name}: not an array variable"));
-                return false;
+                return ElemUnset::Failed;
             }
-            self.vars.remove(name);
-            self.exported.remove(name);
-            self.integer_attr.remove(name);
-            self.lower_attr.remove(name);
-            self.upper_attr.remove(name);
-            self.capcase_attr.remove(name);
-            self.nameref_attr.remove(name);
-            self.trace_attr.remove(name);
-            self.array_valued.remove(name);
-            self.declared.remove(name);
-            return true;
+            // …and it does so **by name**, which is a fresh walk landing on
+            // whatever binding is nearest the command rather than on the one
+            // this removal was handed. The caller owes that walk: it has to
+            // happen outside whatever scope the reference reached into, so it
+            // cannot be made from here. See [`ElemUnset::Whole`].
+            return ElemUnset::Whole;
         }
         // A negative index counts back from `highest_index + 1`; underflowing
         // past 0 is a "bad array subscript". An in-range-but-absent index is
@@ -47369,7 +47442,7 @@ impl Shell {
                 sub_src,
                 b"]: bad array subscript"
             ]);
-            return false;
+            return ElemUnset::Failed;
         };
         if let Some(arr) = self.arrays.get_mut(name) {
             // Sparse: remove only that index (leaves a gap, bash semantics — no
@@ -47380,7 +47453,84 @@ impl Shell {
         // filled straight back in: `unset 'DIRSTACK[1]'` succeeds and changes
         // nothing. See [`Shell::after_var_write`].
         self.after_var_write(name);
-        true
+        ElemUnset::Done
+    }
+
+    /// The whole-variable removal an [`ElemUnset::Whole`] owes — bash's
+    /// `unbind_variable (var->name)` (arrayfunc.c:1198), which is a *name*
+    /// lookup and so starts over from the innermost binding:
+    ///
+    /// ```c
+    ///   v = var_lookup (name, shell_variables);
+    ///   nv = (v && nameref_p (v)) ? find_variable_nameref (v) : (SHELL_VAR *)0;
+    ///   r = nv ? makunbound (nv->name, shell_variables) : makunbound (name, shell_variables);
+    /// ```
+    ///
+    /// `var_lookup` sees whatever is nearest the command, so a reference that
+    /// escaped a cycle to reach a *global* scalar removes the local reference
+    /// standing in front of it and leaves the global it just reached alone —
+    /// and pays a second circular warning on the way, because the walk closes
+    /// again. That is why this cannot be done from inside the removal: the
+    /// scope swap the reference asked for has to be gone first.
+    fn unbind_var_through_ref(&mut self, name: &str) {
+        let whole = self
+            .resolve_ref_use_walks(name, 1)
+            .and_then(RefTarget::into_name)
+            .unwrap_or_else(|| name.to_string());
+        self.unbind_var(&whole);
+    }
+
+    /// The removal a nameref whose value carries a *subscript* performs —
+    /// `declare -n r='a[1]'`, reached either by `unset -v r` or by `unset
+    /// 'r[whatever]'`, which discards the subscript that was written.
+    ///
+    /// bash finds the base with `array_variable_part` (arrayfunc.c:250), which
+    /// is one ordinary read-side walk and which rejects an **invisible**
+    /// variable — so a base that has only been `declare`d answers nothing here,
+    /// unlike the written `unset 'iv[0]'` that removes it. Returns `false` with
+    /// the complaint already made when the removal failed.
+    fn unset_ref_element(&mut self, base: &str, sub: BStr<'_>) -> bool {
+        let Some(base) = self.resolve_ref_use(base).and_then(RefTarget::into_name) else {
+            return true;
+        };
+        if !self.find_variable_visible(&base) {
+            return true;
+        }
+        // Unchecked: bash consults the readonly guard for a subscript the
+        // writer *wrote* and not for one arriving through a reference.
+        match self.unset_element_unchecked(&base, sub) {
+            ElemUnset::Done => true,
+            ElemUnset::Whole => {
+                self.unbind_var_through_ref(&base);
+                true
+            }
+            ElemUnset::Failed => false,
+        }
+    }
+
+    /// Whether bash's `find_variable` would answer with a variable for `name` —
+    /// the question `unset_builtin`'s `var` asks, and the one that decides
+    /// whether the subscripted form walks the chain once or twice.
+    ///
+    /// A name brought into being unvalued (`declare iv`) counts: bash hands
+    /// back an *invisible* variable and `unset 'iv[0]'` goes on to remove it.
+    /// So does one the shell answers with a value function, which is why
+    /// `unset 'RANDOM[0]'` takes `RANDOM` away.
+    fn find_variable_answers(&self, name: &str) -> bool {
+        self.has_stored_binding(name)
+            || self.noassign.contains(name)
+            || self.dynamic_special(name).is_some()
+    }
+
+    /// [`Self::find_variable_answers`] for the callers that reject an invisible
+    /// variable as well — `array_variable_part` does, so a merely-`declare`d
+    /// base is nothing for a reference's subscript to apply to.
+    fn find_variable_visible(&self, name: &str) -> bool {
+        self.vars.contains_key(name)
+            || self.arrays.contains_key(name)
+            || self.assoc.contains_key(name)
+            || self.noassign.contains(name)
+            || self.dynamic_special(name).is_some()
     }
 
     fn builtin_set(&mut self, args: &[Str], out: &mut Out, redir: &RedirPlan) -> i32 {
@@ -52558,6 +52708,25 @@ struct ParamOpNode<'a> {
     /// `name`: through an indirection bash blames the reference the writer
     /// wrote (`ptr=b[1]; ${!ptr:?}` says `ptr`), not the name it resolved to.
     label: Option<BStr<'a>>,
+}
+
+/// What removing one element left for the caller to do — the return of
+/// [`Shell::unset_element`], which stands for bash's `unbind_array_element`
+/// (arrayfunc.c:1115) and its three-valued `int`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ElemUnset {
+    /// The element is gone (or there was none to remove, which bash also calls
+    /// success) — `0`.
+    Done,
+    /// The subscript was index 0 of something that is not an array, which bash
+    /// answers by unbinding the **whole variable** — but *by name*, starting the
+    /// lookup over. The caller owes that walk, because it has to be made from
+    /// where the command stands rather than from the scope a reference reached
+    /// into. See [`Shell::unbind_var_through_ref`].
+    Whole,
+    /// The removal failed and has already said why — `-1`, or the `-2` the
+    /// caller turns into "not an array variable".
+    Failed,
 }
 
 /// Where a nameref chain ends: the variable, or the single array *element*,
@@ -78834,6 +79003,131 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
                        { c1[j]=W; } 2>&1")
             .0;
         assert_eq!(out.matches("circular").count(), 2, "{out:?}");
+    }
+
+    /// `unset name[sub]` looks the base up **once** and removes the element
+    /// through the variable that walk handed back (builtins/set.def:927):
+    ///
+    /// ```c
+    ///   var = unset_function ? find_function (name)
+    ///                        : (nameref ? find_variable_last_nameref (name, 0) : find_variable (name));
+    ///   …
+    ///   if (var && unset_array)
+    ///     tem = unbind_array_element (var, t, vflags);
+    ///   …
+    ///   else if (var == 0 && nameref == 0 && unset_function == 0)
+    ///     {
+    ///       var = find_variable_last_nameref (name, 0);
+    ///       …
+    ///     }
+    /// ```
+    ///
+    /// So the walk count is one where the lookup answered and two where it did
+    /// not. `unbind_array_element` (arrayfunc.c:1115) then decides the rest from
+    /// what it was *handed*, not from what was written: index 0 of anything that
+    /// is not an array unbinds the whole variable **by name**, which is one more
+    /// walk and lands on the binding nearest the command rather than on the one
+    /// the escape reached.
+    #[test]
+    fn a_subscripted_unset_walks_once_where_the_lookup_answered_and_twice_where_it_did_not() {
+        // Counted from the two warnings `local -n v=v` makes on its own.
+        for (label, body) in [
+            ("declare -a ea=(1 2 3);", "unset 'ea[1]'"),
+            ("declare -A ea=([k]=V);", "unset 'ea[k]'"),
+            ("declare -a ea=(1 2 3);", "unset 'ea[@]'"),
+            ("ea=S;", "unset 'ea[1]'"),
+        ] {
+            let out = run(&format!("{label} f() {{ local -n ea=ea; {body}; }}; f 2>&1")).0;
+            assert_eq!(out.matches("circular").count(), 2 + 1, "{label} {body} -> {out:?}");
+        }
+        // Index 0 of a non-array is a whole-variable unbind *by name*, which
+        // walks again; so is a lookup that answered nothing at all.
+        for (label, body) in [("ea=S;", "unset 'ea[0]'"), ("", "unset 'ea[0]'")] {
+            let out = run(&format!("{label} f() {{ local -n ea=ea; {body}; }}; f 2>&1")).0;
+            assert_eq!(out.matches("circular").count(), 2 + 2, "{label} {body} -> {out:?}");
+        }
+
+        // The removal lands in the scope the walk named — the global the escape
+        // reached, not the frame the reference sits in.
+        assert_eq!(
+            run("declare -a ea=(1 2 3); f() { local -n ea=ea; unset 'ea[1]'; }
+                 f 2>/dev/null; declare -p ea")
+                .0,
+            "declare -a ea=([0]=\"1\" [2]=\"3\")\n",
+        );
+        assert_eq!(
+            run("declare -a ea=(1 2 3); f() { local -n ea=ea; unset 'ea[@]'; }
+                 f 2>/dev/null; declare -p ea")
+                .0,
+            "declare -a ea=()\n",
+        );
+        // …but the by-name unbind does not: what goes is the local reference in
+        // front of the global, and the global it escaped to is left standing.
+        assert_eq!(
+            run("es=S; f() { local -n es=es; unset 'es[0]'; declare -p es; }
+                 f 2>/dev/null; declare -p es")
+                .0,
+            "declare -- es\ndeclare -- es=\"S\"\n",
+        );
+
+        // A name declared but never assigned is still a variable to find, so
+        // index 0 takes it away and any other subscript is an error…
+        assert_eq!(
+            run("declare iv0; unset 'iv0[0]'; echo \"st=$?\"; declare -p iv0 2>&1").0,
+            "st=0\nosh: declare: iv0: not found\n",
+        );
+        assert_eq!(
+            run("declare iv1; unset 'iv1[1]' 2>&1; echo \"st=$?\"").0,
+            "osh: unset: iv1: not an array variable\nst=1\n",
+        );
+        // …and so is one the shell answers with a value function.
+        assert_eq!(
+            run("unset 'RANDOM[0]'; echo \"st=$?\"; echo \"[${RANDOM:+set}]\"").0,
+            "st=0\n[]\n",
+        );
+        // A name with no binding at all is never even probed: the subscript is
+        // not evaluated, so arithmetic that would be a syntax error is silent.
+        assert_eq!(
+            run("unset 'nosuch1[x y]' 2>&1; echo \"st=$?\"; unset 'nosuch2[@]' 2>&1; echo \"st=$?\"")
+                .0,
+            "st=0\nst=0\n",
+        );
+        // A function answers where no variable does, and the subscript applies
+        // to *it* — but a function is not an array, so index 0 unbinds the
+        // (absent) variable of that name and the function stands either way.
+        assert_eq!(
+            run("f() { :; }; unset 'f[0]'; echo \"st=$?\"; declare -F f
+                 g() { :; }; unset 'g[1]' 2>&1; echo \"st=$?\"; declare -F g")
+                .0,
+            "st=0\nf\nosh: unset: g: not an array variable\nst=1\ng\n",
+        );
+
+        // A reference designating an element discards the subscript that was
+        // written and removes the one its own cell names.
+        assert_eq!(
+            run("declare -a a1=(1 2 3); declare -n r1='a1[2]'
+                 unset 'r1[0]'; echo \"st=$?\"; declare -p a1")
+                .0,
+            "st=0\ndeclare -a a1=([0]=\"1\" [1]=\"2\")\n",
+        );
+        assert_eq!(
+            run("s4=S; declare -n r4='s4[0]'; unset 'r4[1]'; echo \"st=$?\"; declare -p s4 2>&1").0,
+            "st=0\nosh: declare: s4: not found\n",
+        );
+        // A cycle at global scope reaches nothing and pays both walks, and what
+        // goes is the operand the walk started from.
+        let out = run("declare -n c1=c2; declare -n c2=c1
+                       unset 'c1[0]' 2>&1; echo \"st=$?\"; declare -p c1 c2 2>&1")
+            .0;
+        assert_eq!(out.matches("circular").count(), 2, "{out:?}");
+        assert!(out.ends_with("st=0\nosh: declare: c1: not found\ndeclare -n c2=\"c1\"\n"), "{out:?}");
+        // …and nothing was found to consult the readonly attribute on, so the
+        // attribute does not refuse the removal the way it refuses a written
+        // element of a readonly array.
+        let out = run("{ declare -n e1=e2; declare -n e2=e1; readonly e1; } 2>/dev/null
+                       unset 'e1[0]' 2>&1; echo \"st=$?\"; declare -p e1 2>&1")
+            .0;
+        assert!(out.ends_with("st=0\nosh: declare: e1: not found\n"), "{out:?}");
     }
 
     /// `${name:=word}` through a circular chain parts along the seam the

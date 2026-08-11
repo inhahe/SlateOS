@@ -1213,11 +1213,13 @@ enum SpawnDiag {
 /// bash does not take the kernel's word for why an `execve` failed. It asks the
 /// filesystem first, and words the failure off the answer:
 ///
-///     last_command_exit_value = (i == ENOENT) ?  EX_NOTFOUND : EX_NOEXEC;
-///     if (file_isdir (command))
-///       internal_error (_("%s: %s"), command, strerror (EISDIR));
-///     else if (executable_file (command) == 0)
-///       { errno = i; file_error (command); }    /* execute_cmd.c:5970-5981 */
+/// ```text
+/// last_command_exit_value = (i == ENOENT) ?  EX_NOTFOUND : EX_NOEXEC;
+/// if (file_isdir (command))
+///   internal_error (_("%s: %s"), command, strerror (EISDIR));
+/// else if (executable_file (command) == 0)
+///   { errno = i; file_error (command); }    /* execute_cmd.c:5970-5981 */
+/// ```
 ///
 /// so a directory reads `Is a directory` however the kernel spelled its
 /// refusal — and both hosts spell it the same wrong way, Linux `execve` on a
@@ -1227,10 +1229,12 @@ enum SpawnDiag {
 /// The other two arms exist because a program path with a *trailing separator*
 /// never reaches the host at all. The standard library refuses it up front:
 ///
-///     // Early return if there is no filename.
-///     if exe_path.is_empty() || path::has_trailing_slash(exe_path) {
-///         return Err(… InvalidInput, "program path has no file name") }
-///                                     // std::sys::pal::windows::process
+/// ```text
+/// // Early return if there is no filename.
+/// if exe_path.is_empty() || path::has_trailing_slash(exe_path) {
+///     return Err(… InvalidInput, "program path has no file name") }
+///                                 // std::sys::pal::windows::process
+/// ```
 ///
 /// and that error says nothing about the file, so `b\`, `nosuch/` and `dir/`
 /// all came out as one unrecognisable message and 126. POSIX does have an

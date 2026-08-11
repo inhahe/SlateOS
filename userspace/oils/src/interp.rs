@@ -13297,7 +13297,12 @@ impl Shell {
     fn scalar_write_dest(&mut self, name: &str) -> Option<ScalarDest> {
         let target = self.resolve_ref_write(name)?;
         let Some(sub) = target.sub else {
-            return Some(ScalarDest { place: ScalarPlace::Var(target.base), scope: target.scope });
+            return Some(ScalarDest {
+                place: ScalarPlace::Var(target.base),
+                scope: target.scope,
+                debt: RefWriteDebt::none(),
+                written: None,
+            });
         };
         // The base of an element destination is bound where it is written, so a
         // reference there is stripped rather than followed — and stripped
@@ -13504,13 +13509,23 @@ impl Shell {
                     self.set_scalar_store(n, val);
                     true
                 }
-                ScalarPlace::Elem(n, sub) => {
+                ScalarPlace::Elem(_, sub) => {
                     // The subscript arrived as bytes (a `printf -v`/`read` name
                     // operand, or a nameref target), so it still has to be read
                     // as the word it spells — see [`Shell::sub_word`].
-                    let (n, sub) = (n.clone(), sub.clone());
+                    let sub = sub.clone();
                     let idx = self.sub_word(&sub);
-                    self.assign_elem(&n, &Some(Box::new(idx)), val)
+                    // …and the walk this destination was found by pays here,
+                    // where bash's two lookups sit. See [`RefWriteDebt`].
+                    let debt = dest.debt.clone();
+                    // The store runs under the operand as *written*, which is
+                    // bash's `vname`: `array_variable_name` cut the subscript
+                    // off the word the caller gave, and the chain is followed
+                    // below that, inside the store. Re-walking it here is what
+                    // gives the refusals the spelling they quote — see
+                    // [`ScalarDest::written`].
+                    let written = dest.blame().to_string();
+                    self.assign_elem_owing(&written, &Some(Box::new(idx)), val, Some(debt))
                 }
             },
         };
@@ -13539,7 +13554,7 @@ impl Shell {
         let Some(dest) = self.scalar_write_dest(name) else {
             return false;
         };
-        self.scalar_write_checked(&dest, None, val)
+        self.scalar_write_checked(&dest, val)
     }
 
     /// The same store as [`Self::set_scalar_checked`], for a target that the
@@ -13578,57 +13593,64 @@ impl Shell {
             let Some(dest) = self.scalar_write_dest(base) else {
                 return false;
             };
-            return self.scalar_write_checked(&dest, None, val);
+            return self.scalar_write_checked(&dest, val);
         };
         // A circular chain leaves the element write on the name as written —
-        // with the warning, and with the reference attribute gone, since the
+        // and, if it goes through, with the reference attribute gone, since the
         // store is about to make it an array. See
         // [`Shell::resolve_ref_array_write`]. One that *escaped* to global scope
         // keeps its reference and takes the subscript to the global instead, so
         // the escape rides along on the destination.
-        let target = self.resolve_ref_elem_write(base);
+        //
+        // What the walk *costs* does not: the warnings, and the unmaking, fall
+        // either side of the subscript's own refusals down in
+        // [`Self::assign_elem`], so they travel with the destination as a debt
+        // and are paid there. `read 'c1[-1]'` through a cycle warns once and
+        // leaves `declare -n c1` standing. See [`RefWriteDebt`].
+        let (target, debt) = self.resolve_ref_elem_write_deferred(base);
         let scope = target.scope;
         let landed = target.into_name().unwrap_or_else(|| base.to_string());
-        let dest = ScalarDest { place: ScalarPlace::Elem(landed, sub.to_vec()), scope };
-        self.scalar_write_checked(&dest, Some(base), val)
+        let dest = ScalarDest {
+            place: ScalarPlace::Elem(landed, sub.to_vec()),
+            scope,
+            debt,
+            written: Some(base.to_string()),
+        };
+        self.scalar_write_checked(&dest, val)
     }
 
     /// The readonly guard and the store, shared by every checked scalar write.
     /// Returns `false` with the diagnostic already emitted when the write was
     /// refused.
-    ///
-    /// `blame` is the name a refusal is reported under when that is not the
-    /// destination's own — see [`Self::set_scalar_target_checked`].
-    fn scalar_write_checked(
-        &mut self,
-        dest: &ScalarDest,
-        blame: Option<&str>,
-        val: Str,
-    ) -> bool {
-        self.in_dest_scope(dest, |sh| sh.scalar_write_guarded(dest, blame, val))
+    fn scalar_write_checked(&mut self, dest: &ScalarDest, val: Str) -> bool {
+        self.in_dest_scope(dest, |sh| sh.scalar_write_guarded(dest, val))
     }
 
     /// [`Self::scalar_write_checked`] with the destination's scope already in
     /// place — see [`Self::in_dest_scope`].
-    fn scalar_write_guarded(
-        &mut self,
-        dest: &ScalarDest,
-        blame: Option<&str>,
-        val: Str,
-    ) -> bool {
-        if self.readonly.contains(dest.base()) {
-            let base = blame.unwrap_or_else(|| dest.base()).to_string();
-            self.perrln(&format!("{base}: readonly variable"));
-            return false;
-        }
-        // A variable the shell maintains refuses the write *silently* (see
-        // [`Shell::noassign`]) and the refusal is a failure, which is how every
-        // caller that writes through a variable name — `read`, a `for` loop's
-        // control variable, `printf -v`, `mapfile` — comes to report status 1
-        // for it, as bash does. The one write that reports *success* is the bare
-        // `NAME=value` command, which does not come through here.
-        if self.noassign.contains(dest.base()) {
-            return false;
+    fn scalar_write_guarded(&mut self, dest: &ScalarDest, val: Str) -> bool {
+        // Only a *whole-variable* destination is refused here. An element's own
+        // refusal is `bind_array_variable`'s (arrayfunc.c:273), which bash
+        // reaches only after the subscript has been through all four of its own
+        // tests — so `readonly q; read 'q[-9]'` is a bad subscript and not a
+        // readonly variable. [`Shell::refuse_elem_store`] is that check, made
+        // where the bind is.
+        if dest.is_var() {
+            if self.readonly.contains(dest.base()) {
+                let base = dest.blame().to_string();
+                self.perrln(&format!("{base}: readonly variable"));
+                return false;
+            }
+            // A variable the shell maintains refuses the write *silently* (see
+            // [`Shell::noassign`]) and the refusal is a failure, which is how
+            // every caller that writes through a variable name — `read`, a
+            // `for` loop's control variable, `printf -v`, `mapfile` — comes to
+            // report status 1 for it, as bash does. The one write that reports
+            // *success* is the bare `NAME=value` command, which does not come
+            // through here.
+            if self.noassign.contains(dest.base()) {
+                return false;
+            }
         }
         // Cut here rather than at the store itself, because the store is where
         // the value attributes are applied and bash truncates before them — see
@@ -13701,7 +13723,12 @@ impl Shell {
         }
         let dest = match target.sub {
             Some(sub) => ScalarDest::elem(target.base, sub),
-            None => ScalarDest { place: ScalarPlace::Var(target.base), scope: target.scope },
+            None => ScalarDest {
+                place: ScalarPlace::Var(target.base),
+                scope: target.scope,
+                debt: RefWriteDebt::none(),
+                written: None,
+            },
         };
         // Both guards ask about the *destination's* scope, since an escaped
         // chain names the global and it is the global's attributes that decide.
@@ -14134,7 +14161,7 @@ impl Shell {
         if self.assignment_scan_failed(a) {
             return false;
         }
-        let ok = self.apply_assignment_inner(a, trace, spelled.unwrap_or(a), pre);
+        let ok = self.apply_assignment_inner(a, trace, spelled.unwrap_or(a), pre, None);
         // A name the shell also keeps somewhere else takes the write back out of
         // the variable table again — see [`Shell::after_var_write`]. Run whether
         // or not the assignment succeeded, since a literal that failed part-way
@@ -14143,14 +14170,6 @@ impl Shell {
         ok
     }
 
-    /// Refuse a write to a readonly variable, with the diagnostic it owes and
-    /// the failure that ends the command. `true` means the store must not
-    /// happen.
-    ///
-    /// An *array-shaped* write is blamed by the name the writer wrote, a scalar
-    /// one by the name it resolved to — see
-    /// [`Self::apply_assignment_spelled`]. Without a nameref in the way the two
-    /// are the same name and the distinction does not show.
     /// The name an element write's `bad array subscript` diagnostics are
     /// spelled with — the same seam [`Self::assignment_write_refused`] reads,
     /// one field along.
@@ -14176,6 +14195,14 @@ impl Shell {
         if spelled.index.is_some() { &spelled.name } else { &a.name }
     }
 
+    /// Refuse a write to a readonly variable, with the diagnostic it owes and
+    /// the failure that ends the command. `true` means the store must not
+    /// happen.
+    ///
+    /// An *array-shaped* write is blamed by the name the writer wrote, a scalar
+    /// one by the name it resolved to — see
+    /// [`Self::apply_assignment_spelled`]. Without a nameref in the way the two
+    /// are the same name and the distinction does not show.
     fn assignment_write_refused(&mut self, a: &Assignment, spelled: &Assignment) -> bool {
         if !self.readonly.contains(&a.name) {
             return false;
@@ -14228,12 +14255,19 @@ impl Shell {
     /// The body of [`Shell::apply_assignment`], which wraps it only to run the
     /// dynamic-variable write-back hook on every exit. `spelled` is the
     /// assignment as written — see [`Self::apply_assignment_spelled`].
+    ///
+    /// `debt` is what a walk already taken still owes, which only the re-entry a
+    /// chain escaping a cycle makes has to carry: the swap that re-entry runs
+    /// under takes the reference out of the live tables, so a second resolution
+    /// would find no chain and charge for nothing. Every entry from outside
+    /// passes `None`. See [`RefWriteDebt`].
     fn apply_assignment_inner(
         &mut self,
         a: &Assignment,
         trace: bool,
         spelled: &Assignment,
         pre: Option<Str>,
+        debt: Option<RefWriteDebt>,
     ) -> bool {
         // One element is no place for a list, and the objection is raised on the
         // word *as written* — before the name is resolved, the subscript
@@ -14309,15 +14343,20 @@ impl Shell {
         // a failed variable assignment, that ends the shell). An **array**
         // one — a subscripted element or a compound literal — warns and lands
         // on the reference itself; see [`Shell::resolve_ref_array_write`].
-        let target = if a.index.is_some() {
-            self.resolve_ref_elem_write(&a.name)
+        //
+        // What a *subscripted* store's walk costs is not paid here at all: bash
+        // takes its two walks either side of the subscript's own refusals, so
+        // the write pays as it goes. See [`RefWriteDebt`].
+        let (target, mut debt) = if a.index.is_some() {
+            let (target, owed) = self.resolve_ref_elem_write_deferred(&a.name);
+            (target, debt.unwrap_or(owed))
         } else if matches!(a.value, AssignRhs::Array(_)) {
-            self.resolve_ref_array_write(&a.name)
+            (self.resolve_ref_array_write(&a.name), RefWriteDebt::none())
         } else {
             let Some(target) = self.resolve_ref_write(&a.name) else {
                 return false;
             };
-            target
+            (target, RefWriteDebt::none())
         };
         // A compound literal makes a whole array, and a reference designating
         // one **element** — or a whole array — names none. bash refuses it in
@@ -14376,7 +14415,36 @@ impl Shell {
             }
             return false;
         }
-        if target.sub.is_some() || target.base != a.name {
+        // `ref[i]=v` through a reference that already designates one element is a
+        // subscript on a subscript, which is no identifier — but bash does not
+        // *learn* that until the bind, so nothing here goes anywhere yet.
+        //
+        // `find_variable ("r")` hands `assign_array_element` a null entry for
+        // such a reference (`find_variable_nameref` refuses a target that is not
+        // a name), and a null entry is one the whole store treats as an absent
+        // variable: the array kind is the indexed one whatever the target's is,
+        // and a negative subscript has nothing to count back from. The complaint
+        // comes from `bind_array_variable` (arrayfunc.c:266) at the very end —
+        //
+        // ```c
+        //   entry = find_variable_nameref_for_create (name, 0);
+        //   if (entry == INVALID_NAMEREF_VALUE) return (0);
+        // ```
+        //
+        // — where `find_variable_nameref_for_create` runs `legal_identifier
+        // (nameref_cell (var))` and calls `sh_invalidid` on it (variables.c:2276).
+        // So `declare -n r='n[1]'` takes every one of the subscript's own
+        // refusals first: `r[-1]=9` is a bad array subscript, `r[1+]=9` an
+        // arithmetic syntax error, `r[]=9` a bad subscript above even the
+        // lookup — and only `r[0]=9`, which has nothing left to object to,
+        // reaches `` `n[1]': not a valid identifier ``.
+        let elem_base_invalid = a.index.is_some() && target.sub.is_some();
+        // The name that complaint blames is the *last* reference in the chain,
+        // since that is the one whose value is not a name —
+        // `find_variable_last_nameref` is what `find_variable_nameref_for_create`
+        // reaches for. [`RefTarget::spelling`] is exactly that spelling.
+        let elem_invalid_name = elem_base_invalid.then(|| target.spelling());
+        if !elem_base_invalid && (target.sub.is_some() || target.base != a.name) {
             // The chain may have named a binding in some *outer* variable
             // context (see [`Self::walk_ref_name_writing`]), and the rewritten
             // assignment resolves its name afresh — in the live tables, which
@@ -14384,28 +14452,18 @@ impl Shell {
             // makes the two agree: the binding the walk named is the live one
             // for as long as the store takes. It is not itself a reference (the
             // walk stopped because it was not), so the second pass walks
-            // nothing.
+            // nothing — and owes nothing either, a chain that resolved to some
+            // other name being one that never closed on itself.
             let scope = target.scope;
             let mut a2 = a.clone();
-            match target.sub {
-                // A nameref may point at an array element (`declare -n
-                // ref=arr[0]`): convert `ref=v` into `arr[0]=v`. The subscript
-                // is a shell word rather than the bytes the reference carried,
-                // and is read as one — see [`Shell::sub_word`].
-                Some(sub) if a.index.is_none() => {
-                    a2.name = target.base;
-                    a2.index = Some(self.sub_word(&sub));
-                }
-                // `ref[i]=v` through a reference that already designates one
-                // element is a subscript on a subscript, which bash has no room
-                // for: it refuses and stores nothing (the same refusal the
-                // arithmetic path gives — see [`Shell::arith_elem`]).
-                Some(_) => {
-                    let spelled = target.spelling();
-                    self.warn_elem_not_identifier(&spelled);
-                    return false;
-                }
-                None => a2.name = target.base,
+            // A nameref may point at an array element (`declare -n ref=arr[0]`):
+            // convert `ref=v` into `arr[0]=v`. The subscript is a shell word
+            // rather than the bytes the reference carried, and is read as one —
+            // see [`Shell::sub_word`]. `elem_base_invalid` already took the case
+            // where a subscript was written beside it, so this one is bare.
+            a2.name = target.base;
+            if let Some(sub) = target.sub {
+                a2.index = Some(self.sub_word(&sub));
             }
             let base = a2.name.clone();
             let spelled = spelled.clone();
@@ -14422,11 +14480,14 @@ impl Shell {
         // live tables with it, so the second pass walks no chain, warns nothing,
         // and falls straight through to the store. See
         // [`Self::with_binding_at`].
-        if target.scope != RefScope::Live {
+        //
+        // What the walk owes travels with it, since there is no chain left on
+        // the other side of the swap to charge for — see [`RefWriteDebt`].
+        if !elem_base_invalid && target.scope != RefScope::Live {
             let (a, spelled, base) = (a.clone(), spelled.clone(), target.base.clone());
             let scope = target.scope;
             return self.in_scope(scope, &base, |sh| {
-                sh.apply_assignment_inner(&a, trace, &spelled, pre)
+                sh.apply_assignment_inner(&a, trace, &spelled, pre, Some(debt))
             });
         }
         // `set -x`: a **scalar** value is traced expanded (emitted at the store
@@ -14629,6 +14690,19 @@ impl Shell {
                     // and `a[$unset]=v` both expand to nothing and are indexed
                     // by arithmetic as 0. An empty *key* on an associative
                     // array is a separate rejection, below.
+                    //
+                    // It is the *bracket structure* that is being judged, and
+                    // `array_variable_name` (arrayfunc.c:1413) judges it above
+                    // even the lookup —
+                    //
+                    // ```c
+                    //   ni = skipsubscript (s, ind, ssflags);
+                    //   if (ni <= ind + 1 || s[ni] != ']')
+                    //     { err_badarraysub (s); … return ((char *)NULL); }
+                    // ```
+                    //
+                    // — so a circular chain costs no walk here at all, and the
+                    // reference it would have fallen back on survives.
                     if crate::unparse::word_src(idx_word).is_empty() {
                         self.perrln(&format!("{blame}[]: bad array subscript"));
                         if !self.decl_builtin_ctx {
@@ -14637,6 +14711,12 @@ impl Shell {
                         }
                         return false;
                     }
+                    // The lookup itself — `entry = find_variable (vname)`
+                    // (arrayfunc.c:363). It sits below the bracket test and
+                    // above every other refusal, so this is where the first of
+                    // a circular chain's warnings falls and where the ones
+                    // below stop. See [`RefWriteDebt`].
+                    self.ref_debt_found(&mut debt);
                     // `n[*]=v` — the subscript names the array whole, which is
                     // no place to put one value. Refused before it is evaluated,
                     // and refused as a *token*: `n["*"]=v` and `n[ * ]=v` are
@@ -14674,6 +14754,12 @@ impl Shell {
                             }
                             return false;
                         }
+                        // The bind — `bind_assoc_variable`, which takes the
+                        // entry the lookup already found and so walks nothing a
+                        // second time. What is left of the debt is nothing, but
+                        // it is settled here for the same reason the indexed arm
+                        // settles it: this is where bash's store begins.
+                        self.ref_debt_bound(&mut debt);
                         // The subscript is settled, so the variable can be
                         // asked — after every complaint the subscript itself
                         // owes, and before the `-i` value is evaluated (a bad
@@ -14729,7 +14815,20 @@ impl Shell {
                         // itself has to wait until below the readonly check, so
                         // it cannot supply this — see
                         // [`Shell::negative_index_bound`].
-                        let bound = self.negative_index_bound(&a.name);
+                        //
+                        // "The variable it found" is the *walk's* answer, not
+                        // the table's: a chain that reached nothing, and a
+                        // reference designating an element, both leave `entry`
+                        // null however much the name itself still holds. So
+                        // `declare -n a=b; declare -n b=a; a[-1]=9` and
+                        // `declare -n r='n[1]'; r[-1]=9` are both bad
+                        // subscripts, where the scalar each name carries would
+                        // have bounded them at 1.
+                        let bound = if elem_base_invalid || debt.unmade {
+                            0
+                        } else {
+                            self.negative_index_bound(&a.name)
+                        };
                         let Some(idx) = Self::resolve_index(raw, bound) else {
                             // A negative subscript that underflows below 0 is a
                             // "bad array subscript" in bash, naming the full
@@ -14754,6 +14853,23 @@ impl Shell {
                             }
                             return false;
                         };
+                        // The bind — `bind_array_variable` (arrayfunc.c:258),
+                        // which begins by finding the variable **again**, so
+                        // the second of a circular chain's warnings falls here
+                        // and nowhere earlier. It is also the last thing a
+                        // useless reference survives: the store about to happen
+                        // is what unmakes it. See [`RefWriteDebt`].
+                        self.ref_debt_bound(&mut debt);
+                        // …and it is that second lookup which learns that a
+                        // reference designating an element is no name to bind
+                        // under. `find_variable_nameref_for_create` runs
+                        // `legal_identifier` on the chain's last reference and
+                        // refuses it (variables.c:2276), below every complaint
+                        // the subscript itself owed and above the readonly one.
+                        if let Some(name) = &elem_invalid_name {
+                            self.warn_elem_not_identifier(name);
+                            return false;
+                        }
                         // The subscript is settled, so the variable can be
                         // asked — see the associative branch above.
                         if deferred && self.assignment_write_refused(a, spelled) {
@@ -16795,6 +16911,21 @@ impl Shell {
     /// stored where it is not. The array is not brought into being either: a
     /// write that never happened should leave no trace of having been tried.
     fn assign_elem(&mut self, name: &str, index: &Option<Box<Word>>, value: Str) -> bool {
+        self.assign_elem_owing(name, index, value, None)
+    }
+
+    /// [`Self::assign_elem`] for a caller that has *already walked* the chain
+    /// and so holds the walk's unpaid cost — see [`RefWriteDebt`]. Passing
+    /// `None` walks here instead, which comes to the same thing for every chain
+    /// that does not escape its own scope; one that does can only be told apart
+    /// from where it was resolved, so `read`/`printf -v` hand theirs down.
+    fn assign_elem_owing(
+        &mut self,
+        name: &str,
+        index: &Option<Box<Word>>,
+        value: Str,
+        owed: Option<RefWriteDebt>,
+    ) -> bool {
         // A circular chain parts the two destinations, exactly as it parts the
         // two arithmetic writes.
         //
@@ -16802,19 +16933,28 @@ impl Shell {
         // (once to find the array, once to bind the element), lands the store on
         // the name the walk started from, and takes the nameref attribute off it
         // — so `${c1[0]:=v}` through a cycle really does assign, and breaks the
-        // cycle doing it. See [`Self::resolve_ref_elem_write`].
+        // cycle doing it. See [`Self::resolve_ref_elem_write_deferred`].
+        //
+        // What those two walks *cost* is not paid here, though: they fall either
+        // side of the subscript's own refusals, so a write refused for its
+        // subscript pays for one and leaves the reference standing — `read
+        // 'c1[-1]'` warns once and `declare -p c1` still says `declare -n`. See
+        // [`RefWriteDebt`].
         //
         // An *unsubscripted* one has no array to make, so there is nothing for
         // the store to fall back on: bash walks once more, stores nothing, and
         // the caller discards the command. Either way the read that led here has
         // already paid for its own walks.
-        let mut target = match index {
-            Some(_) => self.resolve_ref_elem_write(name),
+        let (mut target, mut debt) = match index {
+            Some(_) => {
+                let (target, walked) = self.resolve_ref_elem_write_deferred(name);
+                (target, owed.unwrap_or(walked))
+            }
             None => {
                 let Some(target) = self.resolve_ref_use_walks(name, 1) else {
                     return false;
                 };
-                target
+                (target, RefWriteDebt::none())
             }
         };
         // A reference designating one element *is* the destination when nothing
@@ -16851,23 +16991,33 @@ impl Shell {
         };
         let index = derived.as_ref().or(index.as_deref());
         // A reference that already designates one element leaves the subscript
-        // written here nothing to apply to — bash refuses and stores nothing,
-        // naming the target as the reference spells it. A reference naming an
-        // array *whole* is refused too, but as the bad subscript it is:
-        // `${g[1]:=v}` through `declare -n g='k[*]'` says `k[*]: bad array
-        // subscript`, and says it whatever kind of array `k` is. See
-        // [`Shell::warn_whole_array_sub`].
-        let Some(name) = target.as_name() else {
-            if let Some(sub) = &target.sub
-                && let Some(c) = Self::whole_array_sub(sub)
-            {
-                self.warn_whole_array_sub(&target.base, c);
-                return false;
-            }
-            let spelled = target.spelling();
-            self.warn_elem_not_identifier(&spelled);
-            return false;
+        // written here nothing to apply to — but bash does not *learn* that
+        // until the bind, and until then the store runs on under the name as
+        // **written**, over a variable `find_variable` handed back nothing for.
+        // So every one of the subscript's own refusals comes first, and a whole
+        // array is no exception: `${g[1]:=v}` through `declare -n g='k[*]'` says
+        // `` `k[*]': not a valid identifier ``, not `bad array subscript` — the
+        // reference is refused for not being a name, never for its subscript.
+        // See [`Shell::apply_assignment_inner`], which is the same rule for
+        // `r[i]=v`.
+        let elem_invalid_name = target.sub.as_ref().map(|_| target.spelling());
+        // Every diagnostic a subscripted store makes quotes the name as
+        // **written** — bash's `assign_array_element` keeps the word it was
+        // given for exactly that (`char *name; /* only used for error
+        // messages */`, arrayfunc.c:394) and follows the chain underneath it,
+        // in `find_variable`/`find_shell_variable`. So `readonly q; declare -n
+        // r=q; ${r[j]:=v}` says `r`, not `q`.
+        //
+        // A subscript the *reference* supplied is the other case: bash built
+        // that name before the store ever saw it, so `declare -n r='n[-9]'; r=v`
+        // is `assign_array_element ("n[-9]", …)` and blames `n[-9]`.
+        let blame = match &derived {
+            Some(_) => target.base.clone(),
+            None => name.to_string(),
         };
+        // The store itself, though, goes where the chain pointed — and where it
+        // pointed at nothing, back to the name as written.
+        let name = target.as_name().unwrap_or(name);
         match index {
             None => {
                 if self.refuse_readonly_store(name) {
@@ -16887,6 +17037,10 @@ impl Shell {
                 }
             }
             Some(w) => {
+                // The lookup — `entry = find_variable (vname)` (arrayfunc.c:363),
+                // the first of the two walks and the one every refusal below it
+                // stops short of the second. See [`RefWriteDebt`].
+                self.ref_debt_found(&mut debt);
                 if self.assoc.contains_key(name) {
                     // An empty key has no representation in an associative
                     // array. The complaint quotes the subscript's *source*, so
@@ -16896,14 +17050,17 @@ impl Shell {
                     if key.is_empty() {
                         self.berrln(&bfmt![
                             self.err_prefix(),
-                            name,
+                            &blame,
                             b"[",
                             crate::unparse::word_src(w),
                             b"]: bad array subscript"
                         ]);
                         return false;
                     }
-                    if self.refuse_readonly_store(name) {
+                    // The bind, which for an associative array takes the entry
+                    // already in hand and so walks nothing further.
+                    self.ref_debt_bound(&mut debt);
+                    if self.refuse_elem_store(name, &blame) {
                         return false;
                     }
                     self.assoc_set(name, key, value, false);
@@ -16916,8 +17073,7 @@ impl Shell {
                     // `*` being a key there like any other. See
                     // [`Shell::warn_whole_array_sub`].
                     if let Some(c) = Self::whole_array_sub(&crate::unparse::word_src(w)) {
-                        let name = name.to_string();
-                        self.warn_whole_array_sub(&name, c);
+                        self.warn_whole_array_sub(&blame, c);
                         return false;
                     }
                     // An expression that will not evaluate has been reported and
@@ -16929,18 +17085,40 @@ impl Shell {
                     let Some(idx) = self.eval_arith_index_text_checked(&src) else {
                         return false;
                     };
-                    let bound = self.elem_write_bound(name);
+                    // What a negative subscript counts back from is read off the
+                    // entry the *walk* handed back, so a chain that reached
+                    // nothing — and a reference designating an element — leaves
+                    // it null and every negative subscript underflows. See
+                    // [`Shell::negative_index_bound`], which is the same rule in
+                    // the assignment path.
+                    let bound = if elem_invalid_name.is_some() || debt.unmade {
+                        0
+                    } else {
+                        self.elem_write_bound(name)
+                    };
                     if idx < 0 && Self::resolve_index(idx, bound).is_none() {
                         let src = self.expand_subscript_key(w);
                         let line =
-                            bfmt![self.err_prefix(), name, b"[", &src, b"]: bad array subscript"];
+                            bfmt![self.err_prefix(), &blame, b"[", &src, b"]: bad array subscript"];
                         self.berrln(&line);
                         return false;
                     }
                     let Some(real) = Self::resolve_index(idx, bound) else {
                         return false;
                     };
-                    if self.refuse_readonly_store(name) {
+                    // The bind — `bind_array_variable` (arrayfunc.c:258), which
+                    // finds the variable again, and so is where a circular
+                    // chain's second warning falls and where a useless reference
+                    // is finally unmade.
+                    self.ref_debt_bound(&mut debt);
+                    // …and where the reference that designates an element is
+                    // refused, below every complaint the subscript owed and
+                    // above the readonly one.
+                    if let Some(spelling) = &elem_invalid_name {
+                        self.warn_elem_not_identifier(spelling);
+                        return false;
+                    }
+                    if self.refuse_elem_store(name, &blame) {
                         return false;
                     }
                     // Only now that the store is certain to happen: a subscript
@@ -16977,26 +17155,52 @@ impl Shell {
         self.highest_index_bound(name)
     }
 
-    /// The readonly guard [`Self::assign_elem`] puts in front of each of its
-    /// three stores. Returns `true` — with the complaint already made — when the
-    /// write must not happen.
+    /// The readonly guard [`Self::assign_elem`] puts in front of an
+    /// *unsubscripted* store — bash's `bind_variable`. Returns `true`, with the
+    /// complaint already made, when the write must not happen.
     ///
-    /// It sits *after* the subscript has been judged, which is measurable: a
-    /// readonly array given an out-of-range index reports the bad subscript and
-    /// says nothing about the readonly. It sits after the default word has been
-    /// expanded too, so that word's side effects have already happened by the
-    /// time the refusal is printed.
+    /// It sits after the default word has been expanded, so that word's side
+    /// effects have already happened by the time the refusal is printed.
     ///
     /// The name blamed is the one the write resolved *to*, not the one the
     /// writer wrote: `readonly t; declare -n r=t; ${r:=v}` reports `t`. That is
-    /// the opposite of the convention a subscripted target uses elsewhere (see
-    /// [`Self::set_scalar_target_checked`]), and it is what bash does here.
+    /// the opposite of the convention a subscripted store uses — see
+    /// [`Self::refuse_elem_store`], which is the other of bash's two binds.
     fn refuse_readonly_store(&mut self, name: &str) -> bool {
         if !self.readonly.contains(name) {
             return false;
         }
         self.perrln(&format!("{name}: readonly variable"));
         true
+    }
+
+    /// The same guard for a *subscripted* store, which is bash's
+    /// `bind_array_variable` (arrayfunc.c:273) rather than `bind_variable`:
+    ///
+    /// ```c
+    ///   else if ((readonly_p (entry) && (flags&ASS_FORCE) == 0) || noassign_p (entry))
+    ///     {
+    ///       if (readonly_p (entry))
+    ///         err_readonly (name);
+    ///       return (entry);
+    ///     }
+    /// ```
+    ///
+    /// Three things follow from where that sits. It runs *below* every one of
+    /// the subscript's own tests, which is measurable: `declare -a q=(1 2);
+    /// readonly q; read 'q[-9]'` reports the bad subscript and says nothing
+    /// about the readonly. It asks about the variable the walk **found** but
+    /// complains under the name the caller **wrote**, which are different names
+    /// through a reference (`readonly q; declare -n r=q; read 'r[0]'` says
+    /// `r`). And a variable the shell maintains is refused here too, silently,
+    /// in the same breath — so `read 'GROUPS[1]'` fails without a word where
+    /// `read 'GROUPS[-9]'` reaches the subscript's own complaint first.
+    fn refuse_elem_store(&mut self, store: &str, blame: &str) -> bool {
+        if self.readonly.contains(store) {
+            self.perrln(&format!("{blame}: readonly variable"));
+            return true;
+        }
+        self.noassign.contains(store)
     }
 
     /// How a `${!ref}` reference reads back as text — `ref`, or `ref[src]` when
@@ -31421,12 +31625,67 @@ impl Shell {
     ///
     /// A whole-array fill resolves once and warns once either way, which is what
     /// makes `read -a c1` and `read 'c1[0]'` differ by a line.
-    fn resolve_ref_elem_write(&mut self, name: &str) -> RefTarget {
+    fn ref_elem_write_walks(&mut self, name: &str) -> usize {
         let assoc = self.resolve_ref_name(name).is_some_and(|t| {
             let base = t.base.clone();
             self.in_target_scope(&t, |sh| sh.assoc.contains_key(&base))
         });
-        self.resolve_ref_write_walks(name, if assoc { 1 } else { 2 })
+        if assoc { 1 } else { 2 }
+    }
+
+    /// [`Self::resolve_ref_array_write`] for a *subscripted* target, with
+    /// everything the walk *costs* held back for the caller to pay as it goes —
+    /// the warnings a circular chain earns (however many of them
+    /// [`Self::ref_elem_write_walks`] says are owed) and the unmaking of a
+    /// reference the store falls back on.
+    ///
+    /// A subscripted store can be refused at four points between bash's two
+    /// walks, and each of them stops it one walk in rather than two, so a
+    /// resolver that charges for both up front reports a cycle too loudly and
+    /// unmakes a reference that survived. See [`RefWriteDebt`].
+    fn resolve_ref_elem_write_deferred(&mut self, name: &str) -> (RefTarget, RefWriteDebt) {
+        let walks = self.ref_elem_write_walks(name);
+        let walk = self.walk_ref_name(name);
+        let owed = if walk.circular { walks } else { 0 };
+        let debt = |unmade| RefWriteDebt { name: name.to_string(), walks: owed, unmade };
+        match walk.target {
+            // A cycle that escaped to global scope found somewhere to put the
+            // value, so the reference survives however far the store gets —
+            // only the warnings are owed. See [`Self::resolve_ref_write_walks`].
+            Some(target) if target.scope != RefScope::Live => (target, debt(false)),
+            Some(target) => (target, RefWriteDebt::none()),
+            None => (RefTarget::plain(name.to_string()), debt(true)),
+        }
+    }
+
+    /// The first walk of a deferred [`RefWriteDebt`] — bash's
+    /// `find_variable (vname)` in `assign_array_element` (arrayfunc.c:363),
+    /// which every element write reaches once the bracket structure has been
+    /// checked and none reaches before it.
+    fn ref_debt_found(&mut self, debt: &mut RefWriteDebt) {
+        if debt.walks > 0 {
+            debt.walks -= 1;
+            self.perrln(&format!("warning: {}: circular name reference", debt.name));
+        }
+    }
+
+    /// The rest of a deferred [`RefWriteDebt`] — the bind's own walk, and with
+    /// it the unmaking of a reference the store fell back on. Only a store that
+    /// gets as far as the bind pays this, which is why a cycle refused for its
+    /// subscript is still a reference afterwards.
+    ///
+    /// It has to run *before* the store, since unmaking the reference drops the
+    /// name it held and the store is about to put an array there.
+    fn ref_debt_bound(&mut self, debt: &mut RefWriteDebt) {
+        for _ in 0..debt.walks {
+            self.perrln(&format!("warning: {}: circular name reference", debt.name));
+        }
+        debt.walks = 0;
+        if debt.unmade {
+            debt.unmade = false;
+            let name = debt.name.clone();
+            self.break_circular_ref(&name);
+        }
     }
 
     /// The body of the two write-side resolvers, differing only in how many
@@ -54426,6 +54685,55 @@ enum ElemUnset {
     Failed,
 }
 
+/// What an element write's nameref walk still *costs*, held back so the write
+/// pays only for the walks bash actually took.
+///
+/// bash spreads the two walks a subscripted store makes across the whole of
+/// `assign_array_element`, and the tests in between can stop it before either
+/// is reached. The bracket structure is checked in `array_variable_name`
+/// (arrayfunc.c:1413) — above `find_variable`, so `a[]=9` on a cycle costs no
+/// warning at all. `find_variable (vname)` is the first walk. The subscript's
+/// own refusals (`[*]`/`[@]`, an arithmetic error, a negative underflow) all
+/// sit below it and above the bind, so they end the write one walk in. Only
+/// the bind — `bind_array_variable`'s `find_shell_variable` (arrayfunc.c:266)
+/// — takes the second, and only a store that reaches it unmakes the reference
+/// it fell back on.
+///
+/// So the same cycle costs a different number of warnings depending on how far
+/// the write got, and leaves a different variable behind:
+///
+/// ```sh
+/// declare -n a=b; declare -n b=a; trap 'declare -p a b' EXIT
+/// a[]=9    # no warning at all
+/// a[-1]=9  # one warning,  and `a` is still declare -n a="b"
+/// a[1]=9   # two warnings, and `a` is now  declare -a a=([1]="9")
+/// ```
+///
+/// See [`Shell::ref_debt_found`] and [`Shell::ref_debt_bound`], which are the
+/// two payment points, and [`Shell::resolve_ref_elem_write_deferred`], which
+/// is where the debt is incurred.
+#[derive(Debug, Clone)]
+struct RefWriteDebt {
+    /// The name the walk started from, which the warnings blame.
+    name: String,
+    /// Warnings still unpaid — the full walk count for a circular chain (two
+    /// for an indexed store, one for an associative one, which binds through
+    /// the variable it already holds), and none for a chain that resolved.
+    walks: usize,
+    /// Whether the chain reached nothing at all, so bash's `entry` is null:
+    /// every negative subscript underflows, and the store that goes through
+    /// unmakes the reference it landed on. See [`Shell::break_circular_ref`].
+    unmade: bool,
+}
+
+impl RefWriteDebt {
+    /// The debt of a chain that resolved — nothing owed. Also what a write with
+    /// no reference in front of it carries.
+    fn none() -> Self {
+        Self { name: String::new(), walks: 0, unmade: false }
+    }
+}
+
 /// How far bash follows a nameref chain — `NAMEREF_MAX` (variables.h:172).
 ///
 /// It counts the *links followed*, not the names seen, so a chain of eight
@@ -54673,6 +54981,21 @@ struct ScalarDest {
     /// subscript still applies to it — `f() { local -n g=g; g[1]=Z; }` makes the
     /// **global** `g` an array — so this rides on both kinds of place.
     scope: RefScope,
+    /// What the walk that found this destination still *owes* — see
+    /// [`RefWriteDebt`]. Held back rather than paid at the resolution because
+    /// bash's walks fall either side of the subscript's own refusals, and only
+    /// an element destination can reach them: a whole-variable one is bound by
+    /// the walk that named it and owes nothing.
+    debt: RefWriteDebt,
+    /// The operand's own spelling, when the caller wrote a name that is not the
+    /// one the walk landed on. Every diagnostic an *element* store makes quotes
+    /// this rather than [`ScalarDest::base`], because bash's
+    /// `assign_array_element` keeps the written word for exactly that purpose
+    /// (`char *name; /* only used for error messages */`, arrayfunc.c:394) and
+    /// follows the chain inside the store instead. A whole-variable store is
+    /// the other way round and blames what it resolved to, so it leaves this
+    /// `None`.
+    written: Option<String>,
 }
 
 /// Which kind of place a [`ScalarDest`] names.
@@ -54698,13 +55021,23 @@ enum ScalarPlace {
 impl ScalarDest {
     /// A whole-variable destination in the scope the caller is already in.
     fn var(name: String) -> Self {
-        Self { place: ScalarPlace::Var(name), scope: RefScope::Live }
+        Self {
+            place: ScalarPlace::Var(name),
+            scope: RefScope::Live,
+            debt: RefWriteDebt::none(),
+            written: None,
+        }
     }
 
     /// An element destination, which never names a context of its own — see the
     /// [`ScalarDest::scope`] field.
     fn elem(name: String, sub: Str) -> Self {
-        Self { place: ScalarPlace::Elem(name, sub), scope: RefScope::Live }
+        Self {
+            place: ScalarPlace::Elem(name, sub),
+            scope: RefScope::Live,
+            debt: RefWriteDebt::none(),
+            written: None,
+        }
     }
 
     /// The variable a destination belongs to — what the readonly attribute is
@@ -54714,6 +55047,16 @@ impl ScalarDest {
     fn base(&self) -> &str {
         match &self.place {
             ScalarPlace::Var(n) | ScalarPlace::Elem(n, _) => n,
+        }
+    }
+
+    /// The spelling a refusal quotes — the operand as written when the caller
+    /// recorded one, and the destination's own name otherwise. See the
+    /// [`ScalarDest::written`] field.
+    fn blame(&self) -> &str {
+        match &self.written {
+            Some(w) => w,
+            None => self.base(),
         }
     }
 
@@ -74871,6 +75214,137 @@ st=1
             "f() { local -n r=g; declare -i 'r[1]=4+4'; declare -p r g; }; ( g=(1 2); f 2>&1 )",
         );
         assert_eq!(out, "declare -n r=\"g\"\ndeclare -ai g=([1]=\"8\")\n");
+    }
+
+    /// An element write `X[sub]=v` is a *sequence* of refusals, and bash's
+    /// order for them is fixed by where each one sits in
+    /// `assign_array_element`. Nothing about the **reference** `X` may be
+    /// judged before a test that comes earlier:
+    ///
+    /// 1. `array_variable_name` (arrayfunc.c:1413) validates the bracket
+    ///    structure — `ni = skipsubscript (s, ind, ssflags); if (ni <= ind + 1
+    ///    || s[ni] != ']') { err_badarraysub (s); … return NULL; }` — and it
+    ///    runs *before* `find_variable`, so `a[]=9` on a circular chain costs
+    ///    no lookup and warns not at all.
+    /// 2. `entry = find_variable (vname)` (arrayfunc.c:363) — exactly one
+    ///    nameref walk, hence exactly one circular warning.
+    /// 3. the `[*]`/`[@]` refusal (`ALL_ELEMENT_SUB (sub[0]) && sub[1] == ']'`,
+    ///    arrayfunc.c:370) — after the walk, so one warning precedes it.
+    /// 4. `array_expand_index` (arrayfunc.c:398) — arithmetic, so `1+` is a
+    ///    syntax error here.
+    /// 5. the negative-underflow refusal (arrayfunc.c:437).
+    /// 6. only then `bind_array_variable` → `find_variable_nameref_for_create`
+    ///    → `legal_identifier (nameref_cell (var)) == 0` → `sh_invalidid`
+    ///    (variables.c:2276), and below that the readonly refusal
+    ///    (arrayfunc.c:273).
+    ///
+    /// `legal_identifier` rejects `n[1]`, where the `valid_nameref_value` used
+    /// when the nameref was *created* accepts it — which is how a name can be
+    /// stored and then refused only at the point of use, and how
+    /// `declare -n r='n[1]'` gets as far as being asked about its subscript at
+    /// all. osh judged the reference first and paid the whole walk up front;
+    /// it now defers both, so 0 walks fall below the bracket test, 1 below the
+    /// subscript's own refusals, and the full count only at the bind — which
+    /// is also the only place a reference the store fell back on is unmade.
+    /// Corpus:
+    /// `a-nameref-to-an-element-is-judged-before-the-subscript-it-was-written-with.sh`.
+    #[test]
+    fn a_nameref_to_an_element_is_judged_before_the_subscript_it_was_written_with() {
+        // Steps 1-5 all come before the reference's own refusal, step 6.
+        for (write, msg) in [
+            ("r[-1]=9", "r[-1]: bad array subscript"),
+            ("r[]=9", "r[]: bad array subscript"),
+            ("r[*]=9", "r[*]: bad array subscript"),
+            ("r[@]=9", "r[@]: bad array subscript"),
+            (
+                "r[1+]=9",
+                "1+: syntax error: operand expected (error token is \"+\")",
+            ),
+        ] {
+            let (out, _) = run(&format!("( declare -n r='n[1]'; n=(a b c); {write} ) 2>&1"));
+            assert_eq!(out, format!("osh: {msg}\n"), "{write}");
+        }
+        // …and it is reached only when every one of them has passed.
+        let (out, _) = run("( declare -n r='n[1]'; n=(a b c); r[0]=9 ) 2>&1");
+        assert_eq!(out, "osh: `n[1]': not a valid identifier\n");
+
+        // Every other caller that writes an element *by name* is the same, and
+        // none of them reaches its own complaint, so the message is untagged.
+        for w in ["read 'r[-1]' <<< x", "printf -v 'r[-1]' x"] {
+            let (out, _) = run(&format!(
+                "( declare -n r='n[1]'; n=(a b c); {w}; echo \"st=$?\" ) 2>&1"
+            ));
+            assert_eq!(out, "osh: r[-1]: bad array subscript\nst=1\n", "{w}");
+        }
+
+        // What a circular chain's walks cost is spread over the same order:
+        // none at all below the bracket test…
+        let w = "osh: warning: a: circular name reference\n";
+        let cyc = "declare -n a=b; declare -n b=a;";
+        let (out, _) = run(&format!("( {cyc} a[]=9 ) 2>&1"));
+        assert_eq!(out, "osh: a[]: bad array subscript\n");
+        // …one below every refusal the subscript makes for itself…
+        for (write, msg) in [
+            ("a[*]=9", "a[*]: bad array subscript"),
+            ("a[@]=9", "a[@]: bad array subscript"),
+            ("a[-1]=9", "a[-1]: bad array subscript"),
+            (
+                "a[1+]=9",
+                "1+: syntax error: operand expected (error token is \"+\")",
+            ),
+            (
+                "a[x y]=9",
+                "x y: syntax error in expression (error token is \"y\")",
+            ),
+        ] {
+            let (out, _) = run(&format!("( {cyc} {write} ) 2>&1"));
+            assert_eq!(out, format!("{w}osh: {msg}\n"), "{write}");
+        }
+        // …and the full count only at the bind, which is also the only place
+        // the reference the store fell back on is unmade.
+        let (out, _) = run(&format!("( {cyc} a[1]=9; declare -p a b ) 2>&1"));
+        assert_eq!(
+            out,
+            format!("{}declare -a a=([1]=\"9\")\ndeclare -n b=\"a\"\n", w.repeat(2))
+        );
+        let (out, _) = run(&format!(
+            "( {cyc} read 'a[-1]' <<< x; echo \"st=$?\"; declare -p a b ) 2>&1"
+        ));
+        assert_eq!(
+            out,
+            format!(
+                "{w}osh: a[-1]: bad array subscript\nst=1\n\
+                 declare -n a=\"b\"\ndeclare -n b=\"a\"\n"
+            )
+        );
+
+        // The readonly refusal is the bind's, so it waits for the subscript
+        // too — and blames the reference **as written**, because the store
+        // keeps that word for its messages alone (`char *name; /* only used
+        // for error messages */`, arrayfunc.c:394).
+        let ro = "declare -a q=(1 2); readonly q; declare -n r=q;";
+        let (out, _) = run(&format!("( {ro} read 'r[-9]' <<< x; echo \"st=$?\" ) 2>&1"));
+        assert_eq!(out, "osh: r[-9]: bad array subscript\nst=1\n");
+        for w in ["read 'r[0]' <<< x", "printf -v 'r[0]' x"] {
+            let (out, _) = run(&format!("( {ro} {w}; echo \"st=$?\" ) 2>&1"));
+            assert_eq!(out, "osh: r: readonly variable\nst=1\n", "{w}");
+        }
+        let (out, _) = run(&format!("( {ro} declare -n s=r; read 's[0]' <<< x ) 2>&1"));
+        assert_eq!(out, "osh: s: readonly variable\n");
+        let (out, _) = run(
+            "( declare -A q=([k]=1); readonly q; declare -n r=q; echo \"${r[j]:=v}\" ) 2>&1",
+        );
+        assert_eq!(out, "osh: r: readonly variable\n");
+        // An *unsubscripted* write is the other way round: it is bound by the
+        // walk that named it, and so blames what it resolved to.
+        let (out, _) = run("( q=1; readonly q; declare -n r=q; read r <<< x; echo \"st=$?\" ) 2>&1");
+        assert_eq!(out, "osh: q: readonly variable\nst=1\n");
+
+        // A variable the shell maintains is refused at that same bind.
+        let (out, _) = run("( read 'GROUPS[-9]' <<< x; echo \"st=$?\" ) 2>&1");
+        assert_eq!(out, "osh: GROUPS[-9]: bad array subscript\nst=1\n");
+        let (out, _) = run("( read 'GROUPS[1]' <<< x; echo \"st=$?\" ) 2>&1");
+        assert_eq!(out, "st=1\n");
     }
 
     /// A declaration builtin applies its attributes **before** it stores a

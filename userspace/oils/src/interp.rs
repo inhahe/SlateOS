@@ -44890,6 +44890,69 @@ impl Shell {
                 && value
                     .as_ref()
                     .is_some_and(|v| split_assignment_target(v).is_none());
+            // bash widens the binding to an array **before** it reaches any of
+            // the refusals below. The local branch's whole job is to find or
+            // make the frame's binding, and the letters decide which kind it
+            // makes (declare.def:601-616):
+            //
+            // ```c
+            //   if (variable_context && mkglobal == 0)
+            //     {
+            //       newname = declare_transform_name (name, flags_on, flags_off);
+            //       if (flags_on & att_assoc)
+            //         var = make_local_assoc_variable (newname, MKLOC_ARRAYOK|inherit_flag);
+            //       else if ((flags_on & att_array) || making_array_special)
+            //         var = make_local_array_variable (newname, MKLOC_ASSOCOK|inherit_flag);
+            // ```
+            //
+            // The readonly refusals are at :842-:849, a long way below, so a
+            // refused `f() { local -r g=5; declare g[1]=9; }` still leaves
+            // `declare -ar g=()` behind: the kind landed, the *value* never
+            // did. osh does its widening below the refusals — see
+            // `drop_local_scalar`, where it is equivalent for every operand
+            // that gets that far — so the one path that loses it is the
+            // refusal's `continue`. It is reproduced here for that path alone.
+            //
+            // Only for a name the frame already holds. bash's :614 is itself
+            // what refuses a *shadow* of a readonly global — `make_local_
+            // variable` returns 0 rather than widening anything — so
+            // `declare -r g=5; f() { declare g[1]=9; }` leaves the global
+            // `declare -r g="5"` untouched; and at global scope there is no
+            // local branch at all, so `declare -r g=5; declare -a g=9` is a
+            // plain attribute update that the refusal abandons whole.
+            //
+            // The letters that are not about the *kind* do not land, because
+            // `VSETATTR` is at :944, past the refusal: `declare -ax g=9` on a
+            // readonly local leaves an unexported `declare -ar g=()`, and
+            // `declare -al g=AB` leaves it unfolded.
+            if make_local
+                && held_here
+                && readonly_blocks
+                && !ref_value_refused
+                && (value.is_some() || unset_readonly)
+                && (assoc || indexed || subscript.is_some())
+                && self.array_kind_conflict(base_name, assoc, indexed).is_none()
+            {
+                // The scalar is discarded rather than carried in as element 0,
+                // exactly as at the widening below: the local branch rebinds
+                // the name as a fresh array instead of converting one in place.
+                // The name still counts as valued, which is what prints the
+                // empty `=()`.
+                let had_scalar = self.vars.remove(base_name).is_some();
+                // `-A` outranks `-a` here as it does everywhere else — bash
+                // tests `att_assoc` first at :610 — so `local -r g=5;
+                // declare -aA g=5` leaves `declare -Ar g=()`.
+                if assoc {
+                    self.array_kind_apply(base_name, true);
+                } else if indexed
+                    || (subscript.is_some() && !self.assoc.contains_key(base_name))
+                {
+                    self.array_kind_apply(base_name, false);
+                }
+                if had_scalar {
+                    self.array_valued.insert(base_name.to_string());
+                }
+            }
             // Reassigning a value to an existing readonly variable is an error.
             // bash tags the diagnostic with the invoking builtin's name
             // (`declare: y: readonly variable`, `local: …`, `typeset: …`) and
@@ -73978,6 +74041,139 @@ st=1
             out,
             "declare -a g=([0]=\"9\")\nAFTER\nosh: declare: g: not found\n"
         );
+    }
+
+    /// A declaration inside a function finds-or-makes the frame's binding
+    /// first, and the array letters decide which kind it makes — `declare -a`
+    /// and a subscript alike go to `make_local_array_variable`
+    /// (declare.def:601-616). The readonly refusals are at :842-:849, far
+    /// below it, so a readonly local that refuses the *value* has already been
+    /// widened by the time it does: `local -r g=5; declare g[1]=9` reports,
+    /// exits 1 and leaves `declare -ar g=()`. osh widened below the refusals,
+    /// where the `continue` skipped it, and left `declare -r g="5"`. Corpus:
+    /// `a-readonly-local-is-widened-by-the-declaration-that-is-about-to-be-refused.sh`.
+    #[test]
+    fn a_readonly_local_is_widened_by_the_declaration_that_is_about_to_be_refused() {
+        // The kind lands, the value does not — under every spelling of the
+        // builtin, and whether the array is asked for by a letter or by a
+        // subscript.
+        for (src, tag, printed) in [
+            ("declare g[1]=9", "declare", "declare -ar g=()"),
+            ("local g[1]=9", "local", "declare -ar g=()"),
+            ("typeset g[1]=9", "typeset", "declare -ar g=()"),
+            ("declare -a g=9", "declare", "declare -ar g=()"),
+            ("local -a g=5", "local", "declare -ar g=()"),
+            ("typeset -a g=9", "typeset", "declare -ar g=()"),
+            ("declare -A g=9", "declare", "declare -Ar g=()"),
+            ("local -A g=5", "local", "declare -Ar g=()"),
+            ("declare -i g[1]=9", "declare", "declare -ar g=()"),
+            // `-A` outranks `-a`, as it does at :610 — and the `-a`'s own
+            // refusal never happens, because the readonly one comes first.
+            ("declare -aA g=5", "declare", "declare -Ar g=()"),
+            // Only the *kind* survives. `VSETATTR (var, flags_on)` is at :944,
+            // past the refusal, so the declaration's other letters are lost
+            // with the value: the array is unexported and unfolded.
+            ("declare -ar g=9", "declare", "declare -ar g=()"),
+            ("declare -ax g=9", "declare", "declare -ar g=()"),
+            ("declare -al g=AB", "declare", "declare -ar g=()"),
+        ] {
+            let (out, _) = run(&format!(
+                "f() {{ local -r g=5; {src}; echo \"st=$?\"; declare -p g; }}; f 2>&1"
+            ));
+            assert_eq!(
+                out,
+                format!("main: {tag}: g: readonly variable\nst=1\n{printed}\n"),
+                "{src}"
+            );
+        }
+
+        // A *valueless* one asks for the widening on its own account, is
+        // refused nothing, and keeps it.
+        for (src, printed) in [
+            ("declare g[1]", "declare -ar g=()"),
+            ("declare -a g", "declare -ar g=()"),
+            ("declare -A g", "declare -Ar g=()"),
+        ] {
+            let (out, _) = run(&format!(
+                "f() {{ local -r g=5; {src}; echo \"st=$?\"; declare -p g; }}; f 2>&1"
+            ));
+            assert_eq!(out, format!("st=0\n{printed}\n"), "{src}");
+        }
+
+        // Each operand is judged on its own, so the ones after the refused
+        // name still bind.
+        let (out, _) = run(
+            "f() { local -r g=5; declare g[1]=9 h=2; echo \"st=$?\"; declare -p g h; }; f 2>&1",
+        );
+        assert_eq!(
+            out,
+            "main: declare: g: readonly variable\nst=1\ndeclare -ar g=()\ndeclare -- h=\"2\"\n"
+        );
+        let (out, _) = run(
+            "f() { local -r g=5; declare -a g=5 h=(1); echo \"st=$?\"; declare -p g h; }; f 2>&1",
+        );
+        assert_eq!(
+            out,
+            "main: declare: g: readonly variable\nst=1\ndeclare -ar g=()\n\
+             declare -a h=([0]=\"1\")\n"
+        );
+
+        // An array already there keeps its elements: the widening is a no-op
+        // and the refusal only ever stopped the store.
+        let (out, _) = run(
+            "f() { local -r g=(1); declare g[1]=9; echo \"st=$?\"; declare -p g; }; f 2>&1",
+        );
+        assert_eq!(
+            out,
+            "main: declare: g: readonly variable\nst=1\ndeclare -ar g=([0]=\"1\")\n"
+        );
+        let (out, _) = run(
+            "f() { local -Ar g=([k]=1); declare g[j]=9; echo \"st=$?\"; declare -p g; }; f 2>&1",
+        );
+        assert_eq!(
+            out,
+            "main: declare: g: readonly variable\nst=1\ndeclare -Ar g=([k]=\"1\" )\n"
+        );
+
+        // `-g` takes the operand off the local branch entirely, so there is no
+        // widening to make — and the store is the split one, which `ASS_FORCE`
+        // lets the readonly local take. See
+        // `a_global_array_declaration_stores_into_whichever_binding_is_live`.
+        let (out, _) = run(
+            "f() { local -r g=5; declare -g -a g=9; echo \"st=$?\"; declare -p g; }; f 2>&1; \
+             echo AFTER; declare -p g",
+        );
+        assert_eq!(out, "st=0\ndeclare -ar g=([0]=\"9\")\nAFTER\ndeclare -a g=()\n");
+
+        // :614 is itself what refuses a *shadow* of a readonly global —
+        // `make_local_variable` returns 0 rather than widening anything — so
+        // the global is left exactly as it stood.
+        let (out, _) = run(
+            "declare -r g=5; f() { declare g[1]=9; echo \"st=$?\"; declare -p g; }; f 2>&1; \
+             echo AFTER; declare -p g",
+        );
+        assert_eq!(
+            out,
+            "main: declare: g: readonly variable\nst=1\ndeclare -r g=\"5\"\n\
+             AFTER\ndeclare -r g=\"5\"\n"
+        );
+
+        // Neighbours that ask for no array at all are untouched by any of it.
+        let (out, _) = run(
+            "f() { local -r g=5; local g=9; echo \"st=$?\"; declare -p g; }; f 2>&1",
+        );
+        assert_eq!(
+            out,
+            "main: local: g: readonly variable\nst=1\ndeclare -r g=\"5\"\n"
+        );
+        // A readonly *reference* is not the readonly binding the store meets:
+        // the declaration re-scopes onto what the chain names, which widens
+        // and takes the value.
+        let (out, _) = run(
+            "f() { local -nr g=w; local w=1; declare -a g=9; echo \"st=$?\"; \
+             declare -p g w; }; f 2>&1",
+        );
+        assert_eq!(out, "st=0\ndeclare -nr g=\"w\"\ndeclare -a w=([0]=\"9\")\n");
     }
 
     /// `+n` is excluded from declare.def:817 outright by

@@ -43,41 +43,46 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
-### TD-OILS-A-NEGATIVE-SUBSCRIPT-ON-A-CALL-STACK-ARRAY-IS-NOT-JUDGED-AT-ALL. `BASH_SOURCE[-1]=9` is silently discarded where bash calls it a bad subscript — 2026-08-11
+### TD-OILS-BASH_ARGV-AND-BASH_ARGC-ARE-NOT-LISTABLE-AT-ALL. `declare -p BASH_ARGV` says "not found" where bash prints an empty array — 2026-08-11
 
-**Where:** `userspace/oils/src/interp.rs`. The three call-stack specials
-(`FUNCNAME`, `BASH_SOURCE`, `BASH_LINENO` — `DynListing::BareArray` /
-`EmptyArray`, `DynAssign::Discard` in the `DYNAMIC_SPECIALS` table) have their
-element writes thrown away before the subscript is ever resolved, so a
-subscript that names nowhere is not reported.
+**Where:** `userspace/oils/src/interp.rs`, [`Shell::DYNAMIC_SPECIALS`]. The
+extended-debugging argument stack has a row in [`NOASSIGN_VARS`] — so writes
+to it are refused correctly — but no row in the dynamic-specials table, so
+nothing lists it and `declare -p` cannot name it.
 
 ```sh
-$ BASH_SOURCE[-1]=9; echo "st=$?"; declare -p BASH_SOURCE
-bash: BASH_SOURCE[-1]: bad array subscript      # and the line is discarded
-osh : st=0
-      declare -a BASH_SOURCE=()
+$ declare -p BASH_ARGV; echo "st=$?"
+bash: declare -a BASH_ARGV=()
+      st=0
+osh : declare: BASH_ARGV: not found
+      st=1
+
+$ declare -p BASH_ARGC
+bash: declare -a BASH_ARGC=([0]="0")
+osh : declare: BASH_ARGC: not found
+
+$ declare -p | grep -c BASH_ARG
+bash: 4       # both names, in the unfiltered listing too
+osh : 2
 ```
 
-bash reaches the diagnostic because `assign_array_element` resolves the
-subscript first (arrayfunc.c:398) and these variables really are `array_p`:
-an empty one has `array_max_index` − 1, so the bound is 0 and every negative
-subscript underflows. The *discard* only happens afterwards, in the
-assignment function the variable carries.
+Reading them already agrees — `${BASH_ARGV[@]}` is empty and
+`${#BASH_ARGV[@]}` is 0 in both — so this is the *listing* alone. Note the two
+list differently: `BASH_ARGV` prints as `=()` where `BASH_ARGC` prints with an
+element, which is the [`DynListing::EmptyArray`] / element-bearing distinction
+the three call-stack views already draw.
 
-Non-negative subscripts already agree — `FUNCNAME[0]=9` and
-`BASH_LINENO[3]=9` are both silent no-ops in both shells — so this is the
-negative case alone. osh also leaves a real empty entry behind in
-[`Shell::arrays`] (`declare -a BASH_SOURCE=()` above), which bash does not.
+**Proper fix.** Give both names a [`DynamicSpecial`] row with `listed_flags:
+"a"`. `BASH_ARGV` is [`DynListing::EmptyArray`]; `BASH_ARGC` needs a live
+listing whose element 0 is the current frame's argument count (0 at a script's
+top level), which is a shape [`DynListing::Live`] already covers. Both keep
+`assign: DynAssign::Discard`, the `noassign` refusal being independent of the
+listing.
 
-**Proper fix.** Route an element write to an array-listed dynamic special
-through the ordinary subscript resolution ([`Shell::negative_index_bound`]
-already answers 0 for them) and only discard the *store*, not the whole
-assignment — and do not create an [`Shell::arrays`] entry for the name while
-discarding.
-
-**How it was found:** measuring the bound a negative subscript counts back
-from, for
-TD-OILS-A-READONLY-DECLARATION-MARKS-BEFORE-IT-STORES-SO-IT-REFUSES-ITS-OWN-ELEMENT.
+**How it was found:** writing the corpus for
+TD-OILS-AN-ELEMENT-WRITE-TO-A-MAINTAINED-NAME-SKIPS-ITS-SUBSCRIPTS-OWN-REFUSALS,
+whose `BASH_ARGV[0]=9` row wanted to show that a refused element widens
+nothing.
 
 ---
 
@@ -40156,6 +40161,71 @@ deny — are now fixed; see F8 and F9.)_
 ---
 
 ## Fixed Bugs
+
+### TD-OILS-AN-ELEMENT-WRITE-TO-A-MAINTAINED-NAME-SKIPS-ITS-SUBSCRIPTS-OWN-REFUSALS. `GROUPS[-9]=9` was silently discarded where bash calls it a bad subscript — 2026-08-11 — FIXED 2026-08-11
+
+**Where:** `userspace/oils/src/interp.rs`, the `noassign` short-circuit at the
+head of the scalar arm of an assignment statement. It had no
+`a.index.is_none()` guard, so an *element* write to a name the shell maintains
+returned before the subscript was so much as looked at.
+
+```sh
+$ ( GROUPS[-9]=9; echo "st=$?" )
+bash: GROUPS[-9]: bad array subscript
+osh : st=0
+
+$ ( i=0; GROUPS[i++]=9; echo "i=$i" )
+bash: i=1
+osh : i=0
+
+$ ( BASH_LINENO[-1]=9 )   # and the same for FUNCNAME, BASH_SOURCE, BASH_ARGV
+```
+
+**Why bash does it.** The `att_noassign` refusal is `bind_array_variable`'s
+(arrayfunc.c:280), not the assignment's:
+
+```c
+  else if ((readonly_p (entry) && (flags&ASS_FORCE) == 0) || noassign_p (entry))
+    { if (readonly_p (entry)) err_readonly (name); return (entry); }
+  else if (array_p (entry) == 0)
+    entry = convert_var_to_array (entry);
+```
+
+It sits *below* every test the subscript owes and *above* the widening. So an
+element write reaches its own complaints first — the negative subscript,
+`GROUPS[]`, `GROUPS[*]`, a malformed arithmetic subscript — and its side
+effects happen either way. And because the refusal is above
+`convert_var_to_array`, a refused element leaves no array entry behind for a
+name that had none.
+
+The refusal itself is silent and is not an error: `return (entry)` is non-NULL,
+so the write simply does not happen. The status an assignment-only command
+answers with still moves, a refusal being one more thing that sets it —
+`FUNCNAME[0]=$(exit 3)` is 1 where the same on an ordinary array is 3.
+
+The sibling writers (`read`, `printf -v`, `(( … ))`) reach that same line
+through [`Shell::refuse_elem_store`] and already had it right; a declaration
+builtin refuses the whole name earlier and louder ("variable may not be
+assigned value").
+
+**Fixed** in this commit. The head-of-arm refusal is now subscript-less, like
+the readonly guard beside it, and the two element arms call the new
+[`Shell::refused_maintained_elem`] where bash's `bind_array_variable` does —
+below the subscript's judgements, below the readonly check, above
+[`Shell::array_kind_apply`].
+
+Corpus: `an-element-write-to-a-maintained-name-still-answers-for-its-subscript.sh`.
+Unit test:
+`an_element_write_to_a_maintained_name_still_answers_for_its_subscript`.
+
+**How it was found:** measuring the bound a negative subscript counts back
+from, for
+TD-OILS-A-READONLY-DECLARATION-MARKS-BEFORE-IT-STORES-SO-IT-REFUSES-ITS-OWN-ELEMENT.
+Filed then as a call-stack-array bug; it turned out to be every `att_noassign`
+name, `GROUPS` included, and to be about the assignment statement rather than
+the `DynAssign::Discard` table row.
+
+---
 
 ### TD-OILS-AN-INDIRECT-THROUGH-A-SUBSCRIPT-SKIPS-THE-SUBSCRIPTS-OWN-REFUSAL. `${!nosuch[-9]}` reported only `invalid indirect expansion` where bash refuses the subscript first — 2026-08-11 — FIXED 2026-08-11
 

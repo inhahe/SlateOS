@@ -14654,7 +14654,17 @@ impl Shell {
                 // but an assignment-only command notes *where* it happened,
                 // because a refusal is one more thing that sets that command's
                 // status. See [`Shell::assign_refused_maintained`].
-                if self.noassign.contains(&a.name) {
+                //
+                // Subscript-less, like the readonly guard just above and for the
+                // same reason: bash's is inside `bind_array_variable`
+                // (arrayfunc.c:280), below every test the subscript owes, so an
+                // element write to a maintained name reaches its own complaints
+                // first — `GROUPS[-9]=9` is a bad array subscript and
+                // `GROUPS[i++]=9` still increments. See
+                // [`Shell::refuse_elem_store`], which is the same line for the
+                // sibling writers, and the element arms further down for this
+                // one.
+                if a.index.is_none() && self.noassign.contains(&a.name) {
                     self.assign_refused_maintained = Some(self.comsub_count);
                     return true;
                 }
@@ -14771,6 +14781,9 @@ impl Shell {
                         if deferred && self.assignment_write_refused(a, spelled) {
                             return false;
                         }
+                        if self.refused_maintained_elem(&a.name) {
+                            return true;
+                        }
                         let stored = if is_int {
                             let base = if a.append {
                                 self.assoc_element(&a.name, &key)
@@ -14878,6 +14891,12 @@ impl Shell {
                         // asked — see the associative branch above.
                         if deferred && self.assignment_write_refused(a, spelled) {
                             return false;
+                        }
+                        // …and the maintained name is refused in the same
+                        // breath, above the widening below — which is why a
+                        // refused element leaves no array entry behind at all.
+                        if self.refused_maintained_elem(&a.name) {
+                            return true;
                         }
                         // An element assignment onto a name that is not an array
                         // yet widens it, carrying what it held in as element 0 —
@@ -17285,6 +17304,28 @@ impl Shell {
             return true;
         }
         self.noassign.contains(store)
+    }
+
+    /// The `noassign_p` half of that same guard, for the one writer that reaches
+    /// it from an *assignment statement* rather than through
+    /// [`Self::refuse_elem_store`]: `GROUPS[0]=9`, `FUNCNAME[1]+=x`.
+    ///
+    /// Silent, and a *success* — `bind_array_variable` returns the entry it
+    /// found, so nothing above it counts an error. The status an
+    /// assignment-only command answers with is still moved, though, a refusal
+    /// being one more thing that sets it: `FUNCNAME[0]=$(exit 3)` is 1, where
+    /// the same on an ordinary array is 3. See
+    /// [`Shell::assign_refused_maintained`].
+    ///
+    /// It sits where bash's does, below every complaint the subscript owed and
+    /// above `convert_var_to_array` — so a refused element neither hides a bad
+    /// subscript nor leaves an array entry behind for a name that had none.
+    fn refused_maintained_elem(&mut self, name: &str) -> bool {
+        if !self.noassign.contains(name) {
+            return false;
+        }
+        self.assign_refused_maintained = Some(self.comsub_count);
+        true
     }
 
     /// How a `${!ref}` reference reads back as text — `ref`, or `ref[src]` when
@@ -75868,6 +75909,82 @@ st=1
         // one fatal complaint, no read, no warning.
         let (out, _) = run(&format!("( {cyc} echo \"[${{!a}}]\" ) 2>&1"));
         assert_eq!(out, "osh: a: invalid indirect expansion\n");
+    }
+
+    /// The `att_noassign` refusal is `bind_array_variable`'s (arrayfunc.c:280),
+    /// not the assignment's:
+    ///
+    /// ```text
+    ///   else if ((readonly_p (entry) && (flags&ASS_FORCE) == 0) || noassign_p (entry))
+    ///     { if (readonly_p (entry)) err_readonly (name); return (entry); }
+    ///   else if (array_p (entry) == 0)
+    ///     entry = convert_var_to_array (entry);
+    /// ```
+    ///
+    /// So it sits *below* every test the subscript owes and *above* the
+    /// widening. An element write to a name the shell maintains therefore
+    /// reaches its own complaints first — `GROUPS[-9]=9` is a bad array
+    /// subscript, `GROUPS[]`/`GROUPS[*]`/`GROUPS[1+]` are their own refusals,
+    /// and `GROUPS[i++]=9` still increments — and, being refused above the
+    /// widening, leaves no array entry behind for a name that had none.
+    ///
+    /// The refusal itself is silent and is *not* an error: `return (entry)` is
+    /// non-NULL, so the write simply does not happen. The status an
+    /// assignment-only command answers with still moves, a refusal being one
+    /// more thing that sets it. See [`Shell::assign_refused_maintained`].
+    ///
+    /// osh refused an assignment statement's element write at the top, next to
+    /// the scalar one, so none of the subscript's own judgements happened —
+    /// where the sibling writers (`read`, `printf -v`, `(( … ))`), which go
+    /// through [`Shell::refuse_elem_store`], already had it right.
+    #[test]
+    fn an_element_write_to_a_maintained_name_still_answers_for_its_subscript() {
+        // The subscript is judged before the name is turned away.
+        let (out, _) = run("( GROUPS[-9]=9; echo \"st=$?\" ) 2>&1");
+        assert_eq!(out, "osh: GROUPS[-9]: bad array subscript\n");
+        let (out, _) = run("( GROUPS[]=9 ) 2>&1");
+        assert_eq!(out, "osh: GROUPS[]: bad array subscript\n");
+        let (out, _) = run("( GROUPS[*]=9 ) 2>&1");
+        assert_eq!(out, "osh: GROUPS[*]: bad array subscript\n");
+        let (out, _) = run("( GROUPS[1+]=9 ) 2>&1");
+        assert_eq!(out, "osh: 1+: syntax error: operand expected (error token is \"+\")\n");
+        // …and its side effects happen, refusal or not.
+        let (out, _) = run("( i=0; GROUPS[i++]=9; echo \"i=$i\" ) 2>&1");
+        assert_eq!(out, "i=1\n");
+        let (out, _) = run("( i=0; GROUPS[i++]+=9; echo \"i=$i\" ) 2>&1");
+        assert_eq!(out, "i=1\n");
+
+        // A subscript that is fine is refused in silence, succeeds, and widens
+        // nothing — the three call-stack views keep exactly what they had.
+        let (out, _) = run("( BASH_LINENO[3]=9; echo \"st=$?\"; declare -p BASH_LINENO ) 2>&1");
+        assert_eq!(out, "st=0\ndeclare -a BASH_LINENO=()\n");
+        let (out, _) = run("f() { FUNCNAME[9]=9; echo \"st=$?\"; declare -p FUNCNAME; }; ( f ) 2>&1");
+        assert_eq!(out, "st=0\ndeclare -a FUNCNAME=([0]=\"f\")\n");
+
+        // Silent and successful, but still one more thing that sets an
+        // assignment-only command's status.
+        let (out, _) = run("( FUNCNAME[0]=$(exit 3); echo \"st=$?\" ) 2>&1");
+        assert_eq!(out, "st=1\n");
+        let (out, _) = run("( FUNCNAME[0]=1 z=$(exit 3); echo \"st=$?\" ) 2>&1");
+        assert_eq!(out, "st=3\n");
+        let (out, _) = run("( z=$(exit 3) FUNCNAME[0]=1; echo \"st=$?\" ) 2>&1");
+        assert_eq!(out, "st=1\n");
+
+        // An unsubscripted write is still refused at the top, where bash's
+        // `bind_variable` has nothing above it to reach.
+        let (out, _) = run("( GROUPS=5; echo \"st=$?\" ) 2>&1");
+        assert_eq!(out, "st=0\n");
+
+        // The sibling writers reach the same line by another road and always
+        // did: the subscript first, then the silent refusal.
+        let (out, _) = run("( read 'GROUPS[-9]' <<< Z; echo \"st=$?\" ) 2>&1");
+        assert_eq!(out, "osh: GROUPS[-9]: bad array subscript\nst=1\n");
+        let (out, _) = run("( printf -v 'GROUPS[-9]' Z; echo \"st=$?\" ) 2>&1");
+        assert_eq!(out, "osh: GROUPS[-9]: bad array subscript\nst=1\n");
+        // …and the arithmetic one, whose own status is the *expression's*, so a
+        // refused subscript leaves it at 0 where the two builtins fail.
+        let (out, _) = run("( (( GROUPS[-9] = 9 )); echo \"st=$?\" ) 2>&1");
+        assert_eq!(out, "osh: GROUPS[-9]: bad array subscript\nst=0\n");
     }
 
     /// A declaration builtin applies its attributes **before** it stores a

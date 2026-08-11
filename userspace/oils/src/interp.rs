@@ -16861,7 +16861,8 @@ impl Shell {
         let Some(name) = target.as_name().map(str::to_owned) else {
             return self.param_elem_unfound(written, index);
         };
-        self.in_target_scope(&target, |sh| sh.param_elem_resolved(&name, index))
+        let written = written.to_owned();
+        self.in_target_scope(&target, |sh| sh.param_elem_resolved(&name, &written, index))
     }
 
     /// [`Self::param_elem_lookup`] where the walk reached no variable at all —
@@ -16891,8 +16892,19 @@ impl Shell {
     }
 
     /// [`Self::param_elem_lookup`] once the chain has been walked and the scope
-    /// it named is in place — see [`Self::in_target_scope`].
-    fn param_elem_resolved(&mut self, name: &String, index: Option<&Word>) -> ElemValue {
+    /// it named is in place — see [`Self::in_target_scope`]. `written` is the
+    /// name as the writer typed it, which a complaint falls back on where the
+    /// walk named a variable that is not there — `INDEX_ERROR()` blames the
+    /// variable `find_variable` *handed back*, and that lookup answers nothing
+    /// for a name with no entry, however the walk arrived at it. See
+    /// [`Self::expand_array_ref_resolved`], which reads the same rule off the
+    /// other read path.
+    fn param_elem_resolved(
+        &mut self,
+        name: &String,
+        written: &str,
+        index: Option<&Word>,
+    ) -> ElemValue {
         let found = match index {
             None => self.param_value(name),
             Some(w) => {
@@ -16921,6 +16933,14 @@ impl Shell {
                 } else {
                     let idx = self.eval_arith_index(w);
                     if self.subscript_is_bad(name, idx) {
+                        // The associative branch above has its variable in hand
+                        // and so always blames it; only this one can be reached
+                        // with nothing there — `declare -n r=yy; ${r[-9]:-D}`
+                        // blames `r`, where `zz=(a b); declare -n r=zz;
+                        // ${r[-9]:-D}` blames `zz`.
+                        if !self.var_entry_exists(name) {
+                            return ElemValue::BadSubscript(written.to_string());
+                        }
                         return ElemValue::BadSubscript(name.clone());
                     }
                     self.array_element(name, idx)
@@ -19631,7 +19651,16 @@ impl Shell {
                 // Which name a complaint quotes is `INDEX_ERROR()`'s choice:
                 // the variable the walk found, or — where it found none — the
                 // word as written. See [`Self::expand_array_ref`].
-                let blame = name.unwrap_or(written).to_owned();
+                //
+                // "Found" is `find_variable`'s answer, not the walk's: bash's
+                // `var` is what came *back* from the lookup, so a chain that
+                // named a variable which is not there is a null `var` like any
+                // other and blames the word as written. `declare -n r=yy;
+                // ${r[-9]}` reports `r` while `zz=(a b); declare -n r=zz;
+                // ${r[-9]}` reports `zz` — and a name merely declared counts as
+                // found, since `find_variable` hands the invisible variable
+                // back (see [`Shell::var_entry_exists`]).
+                let blame = name.filter(|n| self.var_entry_exists(n)).unwrap_or(written).to_owned();
                 // Associative subscripts are string keys, not arithmetic. A
                 // name that is not there is not an associative one either, so
                 // this is the arithmetic branch for it, exactly as bash's
@@ -75505,6 +75534,68 @@ st=1
         );
         let (out, _) = run(&format!("( {cyc} set -u; echo \"[${{#a[0]}}]\" ) 2>&1"));
         assert_eq!(out, format!("{w}osh: a: unbound variable\n"));
+    }
+
+    /// `INDEX_ERROR()`'s `if (var)` is asking what the **lookup** answered, not
+    /// what the walk named. `var` came back from `array_variable_part` →
+    /// `find_variable`, which follows a nameref itself, so a chain that lands on
+    /// a name with an entry blames the name it landed on (`zz=(a b);
+    /// declare -n r=zz; ${r[-9]}` says `zz`) — and one that lands on a name with
+    /// *no* entry hands back a null `var` like any other failed lookup, so it
+    /// blames the word as written (the same reference with `zz` unset says `r`,
+    /// exactly as `${nope[-9]}` says `nope`).
+    ///
+    /// The distinction is `find_variable`'s and not `invisible_p`'s: a bare
+    /// `declare zz` leaves an invisible variable, which is still found.
+    ///
+    /// osh blamed the name the walk landed on whether or not anything was there,
+    /// so a reference into nothing quoted its target instead of itself. Both
+    /// read paths had it — [`Shell::expand_array_ref_resolved`] and
+    /// [`Shell::param_elem_resolved`], the second being the one every operator
+    /// (`:-`, `:=`, a trim, a slice, `@Q`) reads its base value through.
+    #[test]
+    fn a_bad_subscript_blames_the_variable_the_lookup_found_not_the_walk() {
+        // Landed on nothing: the word as written.
+        let (out, _) = run("( declare -n r=yy; echo \"[${r[-1]}]\" ) 2>&1");
+        assert_eq!(out, "osh: r: bad array subscript\n[]\n");
+        // Landed on something: the name it landed on — including the invisible
+        // variable a bare declaration leaves behind.
+        let (out, _) = run("( zz=(a b); declare -n r=zz; echo \"[${r[-9]}]\" ) 2>&1");
+        assert_eq!(out, "osh: zz: bad array subscript\n[]\n");
+        let (out, _) = run("( declare zz; declare -n r=zz; echo \"[${r[-1]}]\" ) 2>&1");
+        assert_eq!(out, "osh: zz: bad array subscript\n[]\n");
+        let (out, _) = run("( zz=; declare -n r=zz; echo \"[${r[-9]}]\" ) 2>&1");
+        assert_eq!(out, "osh: zz: bad array subscript\n[]\n");
+
+        // A longer chain is the same one question: the lookup failed, so the
+        // name blamed is the one the *read* was written with, not the link
+        // before the end of the chain.
+        let (out, _) = run("( declare -n r=yy; declare -n s=r; echo \"[${s[-1]}]\" ) 2>&1");
+        assert_eq!(out, "osh: s: bad array subscript\n[]\n");
+
+        // The operators read their base value through the other path, which
+        // asks it too — and the `:=` write below still quotes the reference
+        // whole, as every write does.
+        for (form, tail) in [("-D", "[D]\n"), (":-D", "[D]\n"), ("+S", "[]\n"), ("#x", "[]\n")] {
+            let (out, _) = run(&format!("( declare -n r=yy; echo \"[${{r[-1]{form}}}]\" ) 2>&1"));
+            assert_eq!(out, format!("osh: r: bad array subscript\n{tail}"), "{form}");
+        }
+        let (out, _) = run("( declare -n r=yy; echo \"[${r[-1]:=w}]\" ) 2>&1");
+        assert_eq!(out, "osh: r: bad array subscript\nosh: r[-1]: bad array subscript\n");
+        let (out, _) = run("( declare -n r=yy; set -u; echo \"[${r[-1]}]\" ) 2>&1");
+        assert_eq!(out, "osh: r: bad array subscript\nosh: r[-1]: unbound variable\n");
+
+        // Which frame the entry is in makes no difference to the question, only
+        // to its answer: the lookup happens where the walk arrived.
+        let (out, _) = run("f() { local zz=1; echo \"[${r[-9]}]\"; }; ( declare -n r=zz; f ) 2>&1");
+        assert_eq!(out, "main: zz: bad array subscript\n[]\n");
+        let (out, _) = run("f() { echo \"[${r[-9]}]\"; }; ( declare -n r=zz; f ) 2>&1");
+        assert_eq!(out, "main: r: bad array subscript\n[]\n");
+
+        // The length form quotes neither — it names the subscript source — and
+        // answers a null `var` with 0 before looking at it.
+        let (out, _) = run("( declare -n r=yy; echo \"[${#r[-1]}]\"; echo \"st=$?\" ) 2>&1");
+        assert_eq!(out, "[0]\nst=0\n");
     }
 
     /// A declaration builtin applies its attributes **before** it stores a

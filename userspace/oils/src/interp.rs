@@ -4126,6 +4126,90 @@ impl StageKind {
     }
 }
 
+/// A `${!ref[…]}` pointer an assignment operator still owes a second reading —
+/// the one bash makes in `parameter_brace_expand_rhs` (subst.c:7838-7845) to
+/// name the destination it stores through.
+///
+/// The pointer is carried rather than its answer: the whole point of the second
+/// reading is that the subscript *runs again*, so what the store needs is the
+/// reference as written, not a remembered result. See
+/// [`PointerPart::rebind`], which holds one, and
+/// [`Shell::indirect_rebind_store`], which spends it.
+#[derive(Debug, Clone)]
+struct PointerRebind {
+    /// The pointer variable's name — `el` in `${!el[$(f)]:=D}`.
+    refname: String,
+    /// Its subscript, unevaluated. Evaluating it is the observable half of this.
+    index: Option<ArrayIndex>,
+    /// How the reference was written (`!el[$(f)]`), for a complaint that
+    /// reaches nothing at all. Every other complaint here quotes the *target*
+    /// the pointer named, not the pointer.
+    label: Str,
+}
+
+/// What the `${!…}` part now being expanded has resolved of its pointer.
+///
+/// bash resolves a pointer **once** per `${!…}`, in
+/// `parameter_brace_expand_indir` (subst.c:9825), and hands the resolved text
+/// on; osh instead asks the same part several classification questions
+/// (`split_items`, `quoted_per_element_parts`, then `expand_dynamic`) before
+/// expanding it, and each of them used to resolve the pointer again. That is
+/// not free: the pointer's subscript is a word, so `${!m[$(f)]}` ran `f` once
+/// per pass. Resolving the pointer is a *step of the expansion*, not part of
+/// each question about it, so its answer belongs to the part's evaluation —
+/// which is what this holds.
+///
+/// All three fields share one lifetime, the part's, which is why they travel
+/// together: [`Shell::enter_pointer_walk`] sets the whole value aside and
+/// [`Shell::begin_pointer_part`] starts each part from
+/// [`PointerPart::default`]. A part evaluated twice resolves twice, and a
+/// `${!…}` nested inside another's subscript gets a scope of its own.
+#[derive(Debug, Default)]
+struct PointerPart {
+    /// The referent this part's one [`Shell::pointer_lookup`] answered with.
+    ///
+    /// `None` means "not resolved yet". The *second* resolution the
+    /// look-through operators make is bash's own (`get_var_and_type`,
+    /// subst.c:8261-8265) and is deliberately not served from here — see
+    /// [`Shell::indirect_op_reresolves`].
+    resolved: Option<ElemValue>,
+
+    /// Whether this part has already made the *second* pointer resolution its
+    /// operator calls for — the one bash makes in `get_var_and_type`
+    /// (subst.c:8261-8265). See [`Shell::indirect_op_reresolves`], which
+    /// decides whether there is one to make. For the same reason the first
+    /// resolution is remembered, the second must be, since osh reaches the same
+    /// modifier from four classification paths where bash reaches it once.
+    reresolved: bool,
+
+    /// The pointer a `${!ref[…]:=word}` still owes a second reading — armed by
+    /// the `IndirectOp` arm of [`Shell::expand_dynamic_with`] and taken by the
+    /// operator that performs the store.
+    ///
+    /// The assignment operators make their second resolution in bash's *other*
+    /// place: `parameter_brace_expand_rhs` (subst.c:7838-7845) re-reads the
+    /// pointer to name the destination it stores through, and does it **after**
+    /// the right-hand side has expanded rather than before it —
+    /// `${!el[$(f)]:=$(o D)}` reports `f D f`. So unlike the look-through
+    /// operators' second reading (made on the spot by
+    /// [`Shell::indirect_reresolve`]) this one cannot be made where it is
+    /// decided on: it has to travel to the store and be made there.
+    ///
+    /// It is armed only where a store could happen at all — the pointer
+    /// resolved to a real target name, and is not a nameref (which the
+    /// `${x:=w}` family never looks through). A pointer that reached nothing,
+    /// or whose text is no kind of variable reference, was refused during the
+    /// indirection itself and never gets this far, which is why
+    /// `${!nope[$(f)]:=D}` and `${!bad[$(f)]:=D}` read the subscript once where
+    /// `${!el[$(f)]:=D}` reads it twice.
+    ///
+    /// Whether the store is *reached* is left to the operator: the arming says
+    /// nothing about whether the operator is active, and an active one simply
+    /// drops this. That is bash's own shape — the re-read lives inside the
+    /// branch that assigns.
+    rebind: Option<PointerRebind>,
+}
+
 /// The shell interpreter and its mutable session state.
 pub struct Shell {
     vars: HashMap<String, Str>,
@@ -5083,6 +5167,9 @@ pub struct Shell {
     /// on an unset target reports `!r`. Saved/restored around the nested
     /// expansion, like [`Shell::bad_sub_word`].
     ref_label: Option<Str>,
+    /// What the `${!…}` part now being expanded has resolved of its pointer,
+    /// and what it still owes. See [`PointerPart`].
+    pointer_part: PointerPart,
     /// Inside a `[[ ]]` operand or a `case` word/pattern. It is a *joined*
     /// context like an assignment's value, but not the same one — its `[@]` half
     /// does not consult `$IFS` at all:
@@ -6167,6 +6254,7 @@ impl Shell {
             bad_sub_word: None,
             quoted_outer_word: None,
             ref_label: None,
+            pointer_part: PointerPart::default(),
             cond_word: false,
             saw_quoted_list: false,
             operand_saw_list: false,
@@ -12272,7 +12360,10 @@ impl Shell {
         // the same reason: a `=~` right-hand side is a cond word too.
         let outer_at = std::mem::replace(&mut self.saw_at_list, false);
         let outer_q = std::mem::replace(&mut self.saw_quoted_at_list, false);
+        let saved_ptr = self.enter_pointer_walk();
         for part in &word.parts {
+            // One `${!…}` resolution per part — see [`PointerPart`].
+            self.begin_pointer_part();
             match part {
                 // Unquoted literal text is live regex syntax.
                 WordPart::Literal(s) => push_chars(&mut pattern, s.as_bytes(), false),
@@ -12321,6 +12412,7 @@ impl Shell {
                 }
             }
         }
+        self.leave_pointer_walk(saved_ptr);
         let saw_at = std::mem::replace(&mut self.saw_at_list, outer_at);
         let saw_q = std::mem::replace(&mut self.saw_quoted_at_list, outer_q);
         broken.push(pattern);
@@ -12685,6 +12777,7 @@ impl Shell {
             bad_sub_word: None,
             quoted_outer_word: None,
             ref_label: None,
+            pointer_part: PointerPart::default(),
             cond_word: false,
             saw_quoted_list: false,
             operand_saw_list: false,
@@ -16537,7 +16630,31 @@ impl Shell {
     /// `${!mt[@]:-d}` takes the default — while one empty *element*
     /// (`earr=('')`) really does resolve to the empty name and earns
     /// "invalid variable name".
+    /// This part's *one* resolution — bash's `parameter_brace_expand_indir`.
+    /// The first caller does the work and every later question about the same
+    /// part is answered from [`PointerPart::resolved`], so a subscript with a
+    /// side effect in it (`${!m[$(f)]}`) runs `f` once and not once per
+    /// classification pass. See that field.
     fn pointer_lookup(&mut self, refname: &str, index: &Option<ArrayIndex>) -> ElemValue {
+        if let Some(v) = &self.pointer_part.resolved {
+            return v.clone();
+        }
+        let v = self.pointer_lookup_now(refname, index);
+        self.pointer_part.resolved = Some(v.clone());
+        v
+    }
+
+    /// [`Shell::pointer_lookup`] with the memo bypassed: the subscript really is
+    /// evaluated, whatever this part has already resolved.
+    ///
+    /// Used for the resolution bash makes a *second* time — `get_var_and_type`
+    /// (subst.c:8261-8265) for the look-through operators, and
+    /// `parameter_brace_expand_rhs` (subst.c:7841-7845) for a `:=` that
+    /// assigns. Those are real, observable expansions of the pointer, not
+    /// repeats of the first, so they must not be served from the memo (nor
+    /// overwrite it — the value the modifier works on is the *first*
+    /// resolution's, which bash passes down as `value`).
+    fn pointer_lookup_now(&mut self, refname: &str, index: &Option<ArrayIndex>) -> ElemValue {
         match index {
             None => self.param_elem_lookup(refname, None),
             Some(ArrayIndex::Index(w)) => self.param_elem_lookup(refname, Some(w)),
@@ -16551,6 +16668,29 @@ impl Shell {
                 }
             }
         }
+    }
+
+    /// Begin a walk over a word's parts: the pointer resolution in force around
+    /// it is set aside, so nothing inside reads it and nothing resolved inside
+    /// escapes into it. Paired with [`Shell::leave_pointer_walk`], and the loop
+    /// between them clears [`PointerPart`] as it reaches each part
+    /// — one resolution per part, never shared with its neighbours.
+    ///
+    /// A walk nested inside a pointer's own subscript is covered by the same
+    /// pairing, which is why a `${!…}` written there gets a scope of its own.
+    fn enter_pointer_walk(&mut self) -> PointerPart {
+        std::mem::take(&mut self.pointer_part)
+    }
+
+    /// End a walk begun by [`Shell::enter_pointer_walk`].
+    fn leave_pointer_walk(&mut self, saved: PointerPart) {
+        self.pointer_part = saved;
+    }
+
+    /// Reach the next part of a walk: it has resolved nothing of its own yet,
+    /// and owes nothing of its own either.
+    fn begin_pointer_part(&mut self) {
+        self.pointer_part = PointerPart::default();
     }
 
     /// The value a `${!ref}` expansion points *with*: `ref`'s own value, or —
@@ -17018,7 +17158,7 @@ impl Shell {
         refname: &str,
         index: &Option<ArrayIndex>,
         target: &WordPart,
-    ) -> Option<WordPart> {
+    ) -> Option<(WordPart, Option<Str>)> {
         if index.is_none()
             && self.nameref_attr.contains(refname)
             && matches!(target, WordPart::ParamOp { .. })
@@ -17041,7 +17181,205 @@ impl Shell {
         {
             return None;
         }
-        array_target_part(target, name, star)
+        // What bash's `parameter_brace_expand_indir` handed the modifier as
+        // `value` — the *array's* expansion, since that is what the reference
+        // resolved to. An array with no elements at all expands to nothing and
+        // is `NULL` there, where one holding a single empty element expands to
+        // the empty string; the modifiers tell the two apart, so this must too.
+        // See [`Shell::indirect_op_reresolves`], its only reader.
+        let elems = self.array_elements(&name);
+        let value = if elems.is_empty() {
+            None
+        } else {
+            Some(self.join_derived(&elems, star))
+        };
+        Some((array_target_part(target, name, star)?, value))
+    }
+
+    /// Whether `${!ref<op>}` resolves its pointer a **second** time — and so
+    /// evaluates the pointer's subscript, side effects and all, twice.
+    ///
+    /// bash resolves once, in `parameter_brace_expand_indir` (subst.c:9825),
+    /// and hands the resolved text down to the modifier as `value`. A modifier
+    /// that wants the *variable* rather than that text calls `get_var_and_type`
+    /// (subst.c:8261-8265), which re-reads the name it was given — and for an
+    /// indirect that name is still `!ref[…]`, subscript and all. So
+    /// `declare -A s=([k]=sv); ${!s[$(f)]^^}` runs `f` twice where
+    /// `${!s[$(f)]}` runs it once.
+    ///
+    /// Whether a modifier gets that far is decided by a guard that differs per
+    /// operator. `value` below is the text the reference resolved to — `None`
+    /// for an unset target, an absent element or a zero-element array, and
+    /// `Some("")` for an empty scalar or a one-empty-element array:
+    ///
+    /// | operator | resolves again when | bash |
+    /// |---|---|---|
+    /// | `#` `##` `%` `%%` | `value` is set and non-empty **and** the pattern's *source text* is non-empty | dispatch subst.c:10082, then `parameter_brace_remove_pattern` 5874 |
+    /// | `:off[:len]` | `value` is set | `parameter_brace_substring` 8799 |
+    /// | `/pat/rep` | `value` is set | `parameter_brace_patsub` 9119 |
+    /// | `^` `,` `~` | `value` is set | `parameter_brace_casemod` 9366 |
+    /// | `@x` | `value` is set **or** `x` starts with `a`/`A` | `parameter_brace_transform` 8665 |
+    /// | `:-` `:+` `:?` `${#…}` | never | — |
+    ///
+    /// The trim guard reads the pattern's *unexpanded* text, not its expansion:
+    /// bash tests `value` — the raw operand bytes — before either side is
+    /// expanded, so `${!s[$(f)]#}` runs `f` once while `${!s[$(f)]#""}` and
+    /// `${!s[$(f)]#$(g)}` run it twice whatever `g` prints.
+    ///
+    /// The substring guard has an exemption for `$@`/`$*`
+    /// (`varname[0] != '@' && varname[0] != '*'`) that an indirect can never
+    /// take: the name it is asked about starts with the `!`.
+    ///
+    /// `:=` is absent because its second resolution is bash's *other* one —
+    /// `parameter_brace_expand_rhs` (subst.c:7843) re-reads the pointer to name
+    /// the destination, and does it after the right-hand side has expanded
+    /// rather than before.
+    fn indirect_op_reresolves(target: &WordPart, value: Option<&[u8]>) -> bool {
+        match target {
+            WordPart::ParamTrim { pattern, .. } => {
+                value.is_some_and(|v| !v.is_empty()) && !pattern.parts.is_empty()
+            }
+            WordPart::ParamSubstr { .. }
+            | WordPart::ParamReplace { .. }
+            | WordPart::ParamCase { .. } => value.is_some(),
+            WordPart::ParamTransform { op, .. } => value.is_some() || matches!(*op, 'a' | 'A'),
+            // A transform bash will reject is still a transform to this guard:
+            // it reads `xform[0]` before it judges the spelling, so an unset
+            // referent under `${!u[$(f)]@aa}` resolves twice on its way to the
+            // complaint. Only a literal first part can begin with `a`/`A` —
+            // every other spelling starts with its own quote or `$`.
+            WordPart::BadTransform { op, .. } => {
+                value.is_some()
+                    || matches!(op.parts.first(), Some(WordPart::Literal(t))
+                        if matches!(t.as_bytes().first(), Some(b'a' | b'A')))
+            }
+            _ => false,
+        }
+    }
+
+    /// Make the second pointer resolution `${!ref<op>}` owes, if it owes one —
+    /// **once** for this part, however many of osh's expansion paths ask.
+    ///
+    /// The answer is discarded on purpose. bash's second read supplies
+    /// `get_var_and_type` with the `SHELL_VAR` behind the name; the *text* the
+    /// modifier works on stays the first read's, passed down as `value`. So what
+    /// this reproduces is the evaluation — the pointer's subscript running a
+    /// second time — and not a second answer.
+    ///
+    /// `value` is that first read's text: `None` where the reference reached
+    /// nothing. See [`Shell::indirect_op_reresolves`] for which operators get
+    /// here, and [`PointerPart::reresolved`] for the once-per-part scope.
+    fn indirect_reresolve(
+        &mut self,
+        refname: &str,
+        index: &Option<ArrayIndex>,
+        target: &WordPart,
+        value: Option<&[u8]>,
+    ) {
+        if self.pointer_part.reresolved || !Self::indirect_op_reresolves(target, value) {
+            return;
+        }
+        self.pointer_part.reresolved = true;
+        drop(self.pointer_lookup_now(refname, index));
+    }
+
+    /// Arm the second pointer reading a `${!ref[…]:=word}` owes its store, for
+    /// [`Shell::indirect_rebind_store`] to make once the right-hand side has
+    /// expanded. See [`PointerPart::rebind`] for why the two are split.
+    ///
+    /// A no-op for every other operator — and for the two pointers that have no
+    /// store to reach: a nameref (which this family never looks through, so
+    /// `${!gU:=D}` answers with the name and assigns nothing), and one that
+    /// reached nothing at all (`nowhere`), whose refusal is the *indirection's*
+    /// and comes before bash's re-read — `${!nope[$(f)]:=D}` reads once.
+    fn indirect_arm_rebind(
+        &mut self,
+        refname: &str,
+        index: &Option<ArrayIndex>,
+        target: &WordPart,
+        nowhere: bool,
+    ) {
+        if nowhere
+            || !matches!(
+                target,
+                WordPart::ParamOp {
+                    op: ParamOp::AssignDefault,
+                    ..
+                }
+            )
+            || (index.is_none() && self.nameref_attr.contains(refname))
+        {
+            return;
+        }
+        self.pointer_part.rebind = Some(PointerRebind {
+            refname: refname.to_owned(),
+            index: index.clone(),
+            label: bfmt![b"!", Self::indirect_ref_src(refname, index)],
+        });
+    }
+
+    /// Read the pointer a second time and store `v` through what it names —
+    /// bash's `parameter_brace_expand_rhs` (subst.c:7841-7862), reached only
+    /// once the right-hand side has expanded, and only where the operator is
+    /// actually assigning.
+    ///
+    /// The destination is the *second* reading's, not the first's, and that is
+    /// observable: with a subscript that answers `k` then `zz`,
+    /// `declare -A h=([k]=nosuch [zz]=other); ${!h[$(f)]:=D}` leaves `other`
+    /// set and `nosuch` unset. So this re-reads rather than reusing the name
+    /// the modifier was renamed onto.
+    ///
+    /// bash's two refusals, in its order:
+    ///
+    /// ```c
+    /// vname = parameter_brace_find_indir (name + 1, …, 1);
+    /// if (vname == 0 || *vname == 0)
+    ///   report_error (_("%s: invalid indirect expansion"), name);
+    /// if (legal_identifier (vname) == 0)
+    ///   report_error (_("%s: invalid variable name"), vname);
+    /// ```
+    ///
+    /// The first quotes the reference *as written* — `!h[$(f)]`, `!` and all,
+    /// unlike the indirection's own complaint about a pointer that was never
+    /// set. The second quotes the target text, which is how a whole-array
+    /// referent is refused: `legal_identifier("ea[@]")` is false, so
+    /// `declare -a ea=(); declare -A pe=([k]='ea[@]'); ${!pe[k]:=D}` says
+    /// `ea[@]: invalid variable name` rather than storing anything.
+    ///
+    /// Both discard the command with status 1 — they are the expansion failing
+    /// to name a destination. A *store* that then fails (readonly, a chain
+    /// leading nowhere) is rated 2, as everywhere else in this arm.
+    ///
+    /// `false` means it refused; the caller has nothing left to answer with.
+    fn indirect_rebind_store(&mut self, ptr: &PointerRebind, v: Str) -> bool {
+        let dest = match self.pointer_lookup_now(&ptr.refname, &ptr.index) {
+            ElemValue::Value(t) if !t.is_empty() => t,
+            // Reached nothing, or reached an empty name — bash makes no
+            // distinction between the two here.
+            _ => {
+                let msg = bfmt![self.err_prefix(), &ptr.label, b": invalid indirect expansion\n"];
+                self.emit_stderr(&msg);
+                self.arm_discard(1);
+                return false;
+            }
+        };
+        // A variable name is text by construction, so a target that is not text
+        // cannot be one — and the complaint still echoes the bytes the pointer
+        // actually held.
+        let Some(name) = bytes::as_str(&dest)
+            .filter(|d| crate::parser::is_valid_name(d.as_bytes()))
+            .map(str::to_owned)
+        else {
+            let msg = bfmt![self.err_prefix(), &dest, b": invalid variable name\n"];
+            self.emit_stderr(&msg);
+            self.arm_discard(1);
+            return false;
+        };
+        if !self.assign_elem(&name, &None, v) {
+            self.arm_discard(2);
+            return false;
+        }
+        true
     }
 
     /// Attribute-flag letters for a variable, in bash's reporting order — which is
@@ -25024,7 +25362,10 @@ impl Shell {
         // out of, so it is here that the text after an abandoned extent read
         // stops contributing.
         let saved_consumed = std::mem::replace(&mut self.extent_consumed, false);
+        let saved_ptr = self.enter_pointer_walk();
         for (idx, part) in word.parts.iter().enumerate() {
+            // One `${!…}` resolution per part — see [`PointerPart`].
+            self.begin_pointer_part();
             match part {
                 WordPart::Literal(s) => {
                     // A tilde expands to `$HOME`/a home directory — a path, and
@@ -25083,6 +25424,7 @@ impl Shell {
             }
         }
         self.extent_consumed = saved_consumed;
+        self.leave_pointer_walk(saved_ptr);
         let saw_at = std::mem::replace(&mut self.saw_at_list, outer_at);
         let saw_q = std::mem::replace(&mut self.saw_quoted_at_list, outer_q);
         broken.push(cur);
@@ -25180,7 +25522,15 @@ impl Shell {
                 index,
                 target,
             } => {
-                let part = self.indirect_op_part(refname, index, target)?;
+                let (part, value) = self.indirect_op_part(refname, index, target)?;
+                // The array node stands in for the modifier, but the pointer
+                // behind it is still read twice — this reference is spelled
+                // `!ref[…]` like any other. See [`Self::indirect_reresolve`].
+                self.indirect_reresolve(refname, index, target, value.as_deref());
+                // …and an assigning one owes its reading later, to the store.
+                // The pointer named a whole array, so it reached a real
+                // target. See [`Shell::indirect_arm_rebind`].
+                self.indirect_arm_rebind(refname, index, target, false);
                 let label = bfmt![b"!", Self::indirect_ref_src(refname, index)];
                 let saved = self.ref_label.replace(label);
                 let out = self.joined_value(&part);
@@ -25225,7 +25575,16 @@ impl Shell {
                 index,
                 target,
             } => (
-                self.indirect_op_part(refname, index, target)?,
+                {
+                    let (part, value) = self.indirect_op_part(refname, index, target)?;
+                    // See [`Self::indirect_reresolve`].
+                    self.indirect_reresolve(refname, index, target, value.as_deref());
+                    // …and an assigning one owes its reading later, to the
+                    // store. The pointer named a whole array, so it reached a
+                    // real target. See [`Shell::indirect_arm_rebind`].
+                    self.indirect_arm_rebind(refname, index, target, false);
+                    part
+                },
                 bfmt![b"!", Self::indirect_ref_src(refname, index)],
             ),
             _ => return None,
@@ -25455,7 +25814,15 @@ impl Shell {
                 if index.is_none() && self.nameref_attr.contains(refname) {
                     return None;
                 }
-                let part = self.indirect_op_part(refname, index, target)?;
+                let (part, value) = self.indirect_op_part(refname, index, target)?;
+                // The array node stands in for the modifier, but the pointer
+                // behind it is still read twice — this reference is spelled
+                // `!ref[…]` like any other. See [`Self::indirect_reresolve`].
+                self.indirect_reresolve(refname, index, target, value.as_deref());
+                // …and an assigning one owes its reading later, to the store.
+                // The pointer named a whole array, so it reached a real
+                // target. See [`Shell::indirect_arm_rebind`].
+                self.indirect_arm_rebind(refname, index, target, false);
                 let label = bfmt![b"!", Self::indirect_ref_src(refname, index)];
                 let saved = self.ref_label.replace(label);
                 let out = self.quoted_per_element(std::slice::from_ref(&part));
@@ -25523,6 +25890,7 @@ impl Shell {
         // `m: bad array subscript` for the *empty* key the abandoned read left,
         // then `AB`. See [`Shell::extent_consumed`].
         let saved_consumed = std::mem::replace(&mut self.extent_consumed, false);
+        let saved_ptr = self.enter_pointer_walk();
         for (idx, part) in word.parts.iter().enumerate() {
             // Asked at the *top* rather than at the tail, because the arms
             // below reach the next part by `continue` as often as by falling
@@ -25532,6 +25900,9 @@ impl Shell {
             if self.extent_consumed {
                 break;
             }
+            // This part has resolved no `${!…}` pointer yet, whatever the last
+            // one resolved. See [`PointerPart`].
+            self.begin_pointer_part();
             match part {
                 WordPart::Literal(s) => {
                     self.push_literal_annotated(&mut cur, s, idx == 0);
@@ -25609,6 +25980,8 @@ impl Shell {
                         run_wants_field = true;
                     }
                     for part in parts {
+                        // One pointer resolution per part in here too.
+                        self.begin_pointer_part();
                         match part {
                             WordPart::Literal(t) | WordPart::SingleQuoted { text: t, .. } => {
                                 push_chars(&mut cur, t.as_bytes(), true);
@@ -25964,6 +26337,7 @@ impl Shell {
         }
         self.extent_consumed = saved_consumed;
         self.run_at_unjoins = saved_unjoins;
+        self.leave_pointer_walk(saved_ptr);
         fields
     }
 
@@ -26240,7 +26614,10 @@ impl Shell {
         let mut cur = Str::new();
         // The very start of the value is a tilde position.
         let mut at_tilde_pos = true;
+        let saved_ptr = self.enter_pointer_walk();
         for part in &word.parts {
+            // One `${!…}` resolution per part — see [`PointerPart`].
+            self.begin_pointer_part();
             match part {
                 WordPart::Literal(s) => {
                     for (i, seg) in s.split(|&b| b == b':').enumerate() {
@@ -26275,6 +26652,7 @@ impl Shell {
                 }
             }
         }
+        self.leave_pointer_walk(saved_ptr);
         cur
     }
 
@@ -26289,7 +26667,10 @@ impl Shell {
     fn expand_decl_assignment(&mut self, word: &Word) -> Str {
         let mut out = Str::new();
         let mut at_tilde_pos = true;
+        let saved_ptr = self.enter_pointer_walk();
         for (idx, part) in word.parts.iter().enumerate() {
+            // One `${!…}` resolution per part — see [`PointerPart`].
+            self.begin_pointer_part();
             match part {
                 WordPart::Literal(s) => {
                     // On the first part, split off the `NAME=`/`NAME+=` prefix
@@ -26338,6 +26719,7 @@ impl Shell {
                 }
             }
         }
+        self.leave_pointer_walk(saved_ptr);
         out
     }
 
@@ -26576,10 +26958,13 @@ impl Shell {
         // answers `AzzB`, the failed `$(` in the pattern having ended the
         // pattern's walk only.
         let saved_consumed = std::mem::replace(&mut self.extent_consumed, false);
+        let saved_ptr = self.enter_pointer_walk();
         for (idx, part) in word.parts.iter().enumerate() {
             if self.extent_consumed {
                 break;
             }
+            // One `${!…}` resolution per part — see [`PointerPart`].
+            self.begin_pointer_part();
             match part {
                 WordPart::Literal(s) => self.push_literal_annotated(&mut buf, s, idx == 0),
                 WordPart::SingleQuoted { text, .. } => push_chars(&mut buf, text.as_bytes(), true),
@@ -26617,6 +27002,7 @@ impl Shell {
             }
         }
         self.extent_consumed = saved_consumed;
+        self.leave_pointer_walk(saved_ptr);
         let saw_at = std::mem::replace(&mut self.saw_at_list, outer_at);
         let saw_q = std::mem::replace(&mut self.saw_quoted_at_list, outer_q);
         let quoted_path = saw_q && self.cond_quoted_list_on();
@@ -26671,8 +27057,11 @@ impl Shell {
         // abandoned extent read's `sindex` belongs to — see
         // [`Shell::extent_consumed`].
         let saved_consumed = std::mem::replace(&mut self.extent_consumed, false);
+        let saved_ptr = self.enter_pointer_walk();
         let mut s = Str::new();
         for part in parts {
+            // One `${!…}` resolution per part — see [`PointerPart`].
+            self.begin_pointer_part();
             match part {
                 WordPart::Literal(t) | WordPart::SingleQuoted { text: t, .. } => {
                     s.extend_from_slice(t.as_bytes());
@@ -26688,6 +27077,7 @@ impl Shell {
             }
         }
         self.extent_consumed = saved_consumed;
+        self.leave_pointer_walk(saved_ptr);
         self.leave_dquote(saved_dquote);
         self.leave_inner_source(saved);
         s
@@ -26723,7 +27113,10 @@ impl Shell {
         let saved_unjoins =
             std::mem::replace(&mut self.run_at_unjoins, parts_have_quoted_at(parts, true));
         let mut items: Vec<Str> = vec![Str::new()];
+        let saved_ptr = self.enter_pointer_walk();
         for part in parts {
+            // One `${!…}` resolution per part — see [`PointerPart`].
+            self.begin_pointer_part();
             match part {
                 WordPart::Literal(t) | WordPart::SingleQuoted { text: t, .. } => {
                     if let Some(last) = items.last_mut() {
@@ -26774,6 +27167,7 @@ impl Shell {
             }
         }
         self.run_at_unjoins = saved_unjoins;
+        self.leave_pointer_walk(saved_ptr);
         self.leave_dquote(saved_dquote);
         self.leave_inner_source(saved);
         items
@@ -26845,10 +27239,13 @@ impl Shell {
         // read leaves `⏎q)r` and ends the *replacement's* walk, so the `r` after
         // the `$( … )` is not read again and the word's own `B` still is.
         let saved_consumed = std::mem::replace(&mut self.extent_consumed, false);
+        let saved_ptr = self.enter_pointer_walk();
         for part in &word.parts {
             if self.extent_consumed {
                 break;
             }
+            // One `${!…}` resolution per part — see [`PointerPart`].
+            self.begin_pointer_part();
             match part {
                 WordPart::Literal(s) => {
                     // Unquoted literal text. The replacement lexer preserved
@@ -26907,6 +27304,7 @@ impl Shell {
             }
         }
         self.extent_consumed = saved_consumed;
+        self.leave_pointer_walk(saved_ptr);
         out
     }
 
@@ -28198,7 +28596,16 @@ impl Shell {
                 // modifier the *array's* — `${!r#a}` is `${n[@]#a}`, elements
                 // and all. Answer as that part rather than flattening the array
                 // to text first; see [`Shell::indirect_op_part`].
-                if let Some(arr) = self.indirect_op_part(refname, index, target) {
+                if let Some((arr, value)) = self.indirect_op_part(refname, index, target) {
+                    // The array node stands in for the modifier, but the
+                    // pointer behind it is still read twice — the reference
+                    // this path serves is spelled `!ref[…]` like any other.
+                    // See [`Self::indirect_op_reresolves`].
+                    self.indirect_reresolve(refname, index, target, value.as_deref());
+                    // …and an assigning one owes its reading later, to the
+                    // store. The pointer named a whole array, so it reached a
+                    // real target. See [`Shell::indirect_arm_rebind`].
+                    self.indirect_arm_rebind(refname, index, target, false);
                     let saved_label = self.ref_label.replace(label);
                     let out = self.expand_dynamic(&arr);
                     self.ref_label = saved_label;
@@ -28310,6 +28717,21 @@ impl Shell {
                 {
                     return Str::new();
                 }
+                // bash reads the pointer again here, before the modifier's own
+                // operand is expanded — `${!s[$(f)]#$(g)}` reports `f f g`. The
+                // answer is thrown away: the modifier works on `operand`, which
+                // is the *first* resolution's, and bash keeps that too (its
+                // second read supplies `get_var_and_type`'s `SHELL_VAR`, not the
+                // value). What matters is that the subscript runs. See
+                // [`Self::indirect_op_reresolves`]. A nameref pointer is exempt
+                // because it carries no subscript to run.
+                if !nameref {
+                    self.indirect_reresolve(refname, index, target, operand.as_deref());
+                }
+                // An assigning operator's reading is bash's *other* one, made
+                // after its right-hand side rather than before — so it is armed
+                // here and made by the store. See [`PointerPart::rebind`].
+                self.indirect_arm_rebind(refname, index, target, points_nowhere);
                 // For the length of the modifier's expansion, a complaint about
                 // an unset parameter is a complaint about *this* reference.
                 let saved_label = self.ref_label.replace(label);
@@ -28805,6 +29227,11 @@ impl Shell {
             arg,
             label,
         } = node;
+        // Taken before anything expands, so that a `${!q[…]:=…}` written inside
+        // this operator's own right-hand side cannot find it and store through
+        // the wrong pointer. See [`PointerPart::rebind`]; only `:=`/`=` arms it,
+        // and only the branch that assigns spends it.
+        let rebind = self.pointer_part.rebind.take();
         let cur = self.op_operand(operand, name, index);
         // Bash: the colon forms (`:-`, `:=`, `:+`, `:?`) treat an empty value the
         // same as unset ("active" only when set AND non-empty). The colon-less
@@ -28868,15 +29295,28 @@ impl Shell {
                     if self.expansion_failed() {
                         return SplitItems::List(Vec::new());
                     }
-                    // Reached through a reference, the default is stored under
-                    // the name the reference *resolved to*, and bash insists
-                    // that be a plain identifier: `ptr=b[1]` can be read
-                    // through but not assigned through. A reference that
-                    // reached nothing stands in the `!ref` text for a name, and
-                    // no variable can be called that, so it is refused as the
-                    // indirection it is rather than as a bad name. Either way
-                    // the default word is expanded first — bash lets its side
-                    // effects happen before it complains.
+                    // Reached through a reference, the default is not stored
+                    // under this name at all: bash reads the pointer a *second*
+                    // time here and stores through whatever that names — and
+                    // insists it be a plain identifier, so `ptr=b[1]` can be
+                    // read through but not assigned through. The re-read comes
+                    // after the default word, whose side effects bash lets
+                    // happen before it complains. See
+                    // [`Shell::indirect_rebind_store`], which makes the reading
+                    // and both of the refusals it can end in.
+                    if let Some(ptr) = &rebind {
+                        return if self.indirect_rebind_store(ptr, v.clone()) {
+                            SplitItems::List(vec![v])
+                        } else {
+                            SplitItems::List(Vec::new())
+                        };
+                    }
+                    // A reference that reached nothing has no pointer to read
+                    // again — the `!ref` text stands in for a name, and no
+                    // variable can be called that, so it is refused as the
+                    // indirection it is rather than as a bad name. This is the
+                    // refusal `parameter_brace_expand_indir` already made in
+                    // bash, which is why it costs no second reading.
                     if matches!(operand, Operand::Value(_))
                         && !crate::parser::is_valid_name(name.as_bytes())
                     {
@@ -29003,6 +29443,9 @@ impl Shell {
         colon: bool,
         arg: &Word,
     ) -> SplitItems {
+        // Taken before anything expands — see [`Shell::expand_param_op`], which
+        // takes it for the same reason at the same point.
+        let rebind = self.pointer_part.rebind.take();
         let positional = name == "@" || name == "*";
         // A circular nameref names nothing: `array_elements` below reports it,
         // so resolve silently here and let `None` make the name non-existent.
@@ -29110,6 +29553,24 @@ impl Shell {
                     // [`Shell::operand_rhs_read`].
                     let rewritten = self.operand_rhs_read(arg);
                     let arg = rewritten.as_ref().unwrap_or(arg);
+                    // Reached through a reference, none of the endings below
+                    // apply: bash never sees an `a[@]` subscript to write
+                    // through, because it re-reads the pointer for a
+                    // destination and `legal_identifier("ea[@]")` is false. So
+                    // `declare -a ea=(); declare -A pe=([k]='ea[@]');
+                    // ${!pe[k]:=D}` says `ea[@]: invalid variable name` — where
+                    // the written-out `${ea[@]:=D}` says `bad array subscript`,
+                    // and where an associative referent would otherwise have had
+                    // the literal key `@` assigned. See
+                    // [`Shell::indirect_rebind_store`].
+                    if let Some(ptr) = &rebind {
+                        let val = self.expand_to_string(arg);
+                        return if self.indirect_rebind_store(ptr, val.clone()) {
+                            SplitItems::List(vec![val])
+                        } else {
+                            SplitItems::List(Vec::new())
+                        };
+                    }
                     if let Some(resolved) = resolved.filter(|r| self.assoc.contains_key(r)) {
                         let val = self.expand_to_string(arg);
                         self.assoc_set(&resolved, sub.as_bytes().to_vec(), val.clone(), false);
@@ -30813,7 +31274,15 @@ impl Shell {
                 index,
                 target,
             } => {
-                let part = self.indirect_op_part(refname, index, target)?;
+                let (part, value) = self.indirect_op_part(refname, index, target)?;
+                // The array node stands in for the modifier, but the pointer
+                // behind it is still read twice — this reference is spelled
+                // `!ref[…]` like any other. See [`Self::indirect_reresolve`].
+                self.indirect_reresolve(refname, index, target, value.as_deref());
+                // …and an assigning one owes its reading later, to the store.
+                // The pointer named a whole array, so it reached a real
+                // target. See [`Shell::indirect_arm_rebind`].
+                self.indirect_arm_rebind(refname, index, target, false);
                 let label = bfmt![b"!", Self::indirect_ref_src(refname, index)];
                 let saved = self.ref_label.replace(label);
                 let out = self.split_items(&part);
@@ -32017,7 +32486,10 @@ impl Shell {
     /// parts — which is also what it does over the *interior* of a `' … '`,
     /// hence the recursion.
     fn arith_string_parts(&mut self, parts: &[WordPart], out: &mut Str) {
+        let saved_ptr = self.enter_pointer_walk();
         for part in parts {
+            // One `${!…}` resolution per part — see [`PointerPart`].
+            self.begin_pointer_part();
             match part {
                 WordPart::Literal(s) => out.extend_from_slice(s.as_bytes()),
                 WordPart::SingleQuoted {
@@ -32069,6 +32541,7 @@ impl Shell {
                 break;
             }
         }
+        self.leave_pointer_walk(saved_ptr);
     }
 
     fn eval_arith_index(&mut self, w: &Word) -> i64 {
@@ -82011,6 +82484,172 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("x=$( q[1x]=v 2>/dev/null; echo NOT-REACHED )\necho \"rc=$? x=[$x]\"").0,
             "rc=1 x=[]\n"
+        );
+    }
+
+    /// bash resolves a `${!ref[…]}` pointer **once**, in
+    /// `parameter_brace_expand_indir` (subst.c:9825), and a second time only for
+    /// the operators that go on to call `get_var_and_type` (subst.c:8261-8265).
+    /// The pointer's subscript is a word, so the count is observable — each
+    /// resolution runs `f`, which marks stderr.
+    #[test]
+    fn an_indirect_resolves_its_pointer_once_per_operator() {
+        let setup = concat!(
+            "f() { printf . >&2; echo k; }
+",
+            "sv=SVAL
+",
+            "empty=''
+",
+            "n=(ax by cz)
+",
+            "declare -a ea=()
+",
+            "declare -A s=([k]=sv)
+",
+            "declare -A se=([k]=empty)
+",
+            "declare -A u=([k]=nosuch)
+",
+            "declare -A p=([k]='n[@]')
+",
+            "declare -A pe=([k]='ea[@]')
+",
+        );
+        for (expr, want) in [
+            // No operator at all: the one resolution, and no more.
+            ("${!s[$(f)]}", ".[SVAL]"),
+            ("${!s[$(f)]:-D}", ".[SVAL]"),
+            ("${!s[$(f)]:+S}", ".[S]"),
+            ("${#s[$(f)]}", ".[2]"),
+            // Trim: only with a non-empty *source* pattern and a non-empty value.
+            ("${!s[$(f)]#a}", "..[SVAL]"),
+            ("${!s[$(f)]#}", ".[SVAL]"),
+            ("${!se[$(f)]#a}", ".[]"),
+            // Substring, patsub and casemod ask whenever the value is set at all
+            // — an empty scalar included.
+            ("${!s[$(f)]:1}", "..[VAL]"),
+            ("${!se[$(f)]:1}", "..[]"),
+            ("${!s[$(f)]^^}", "..[SVAL]"),
+            // A transform asks for `a`/`A` even where the reference reached
+            // nothing: `parameter_brace_transform` tests `xform[0]` first.
+            ("${!s[$(f)]@Q}", "..['SVAL']"),
+            ("${!u[$(f)]@Q}", ".[]"),
+            ("${!u[$(f)]@a}", "..[]"),
+            // A whole-array referent counts the same, empty or not — a
+            // zero-element array is the unset case.
+            ("${!p[$(f)]}", ".[ax][by][cz]"),
+            ("${!p[$(f)]#a}", "..[x][by][cz]"),
+            ("${!p[$(f)]:-D}", ".[ax][by][cz]"),
+            ("${!pe[$(f)]^^}", ".[]"),
+            ("${!pe[$(f)]@a}", "..[]"),
+        ] {
+            let src = format!("{setup}{{ printf '[%s]' {expr}; }} 2>&1");
+            assert_eq!(run(&src).0, want, "{expr}");
+        }
+        // The second resolution comes *before* the operator's own operand.
+        let src = format!(
+            "{setup}g() {{ printf f >&2; echo k; }}
+             {{ printf '[%s]' ${{!s[$(g)]#$(printf P >&2; echo a)}}; }} 2>&1"
+        );
+        assert_eq!(run(&src).0, "ffP[SVAL]");
+    }
+
+    /// `${!ref[…]:=word}` names its destination by reading the pointer a
+    /// *second* time — `parameter_brace_expand_rhs` (subst.c:7841-7862), after
+    /// the right-hand side has expanded — and refuses anything that read does
+    /// not spell as a plain identifier.
+    #[test]
+    fn an_indirect_assignment_names_its_destination_by_reading_the_pointer_again() {
+        let setup = concat!(
+            "f() { printf . >&2; echo k; }\n",
+            "sv=SVAL\n",
+            "empty=''\n",
+            "n=(ax by cz)\n",
+            "one=('')\n",
+            "declare -a ea=()\n",
+            "declare -A am=()\n",
+            "declare -A s=([k]=sv)\n",
+            "declare -A se=([k]=empty)\n",
+            "declare -A u=([k]=nosuch)\n",
+            "declare -A mt=([k]='')\n",
+            "declare -A bad=([k]='1abc')\n",
+            "declare -A el=([k]='n[9]')\n",
+            "declare -A p=([k]='n[@]')\n",
+            "declare -A pe=([k]='ea[@]')\n",
+            "declare -A p1=([k]='one[@]')\n",
+            "declare -A pm=([k]='am[@]')\n",
+        );
+        for (expr, want) in [
+            // Active: nothing is stored, so there is nothing to name.
+            ("${!s[$(f)]:=D}", ".[SVAL]"),
+            ("${!s[$(f)]=D}", ".[SVAL]"),
+            ("${!se[$(f)]=D}", ".[]"),
+            ("${!p[$(f)]:=D}", ".[ax][by][cz]"),
+            ("${!p1[$(f)]=D}", ".[]"),
+            // Inactive: the store re-reads.
+            ("${!u[$(f)]:=D}", "..[D]"),
+            ("${!u[$(f)]=D}", "..[D]"),
+            ("${!se[$(f)]:=D}", "..[D]"),
+            // …and refuses a target that is no identifier — which is how a
+            // whole-array referent ends, `legal_identifier("ea[@]")` being
+            // false. The written-out `${ea[@]:=D}` says `bad array subscript`
+            // instead, and an associative one would have taken the key `@`.
+            ("${!el[$(f)]:=D}", "..osh: n[9]: invalid variable name\n"),
+            ("${!pe[$(f)]:=D}", "..osh: ea[@]: invalid variable name\n"),
+            ("${!p1[$(f)]:=D}", "..osh: one[@]: invalid variable name\n"),
+            ("${!pm[$(f)]:=D}", "..osh: am[@]: invalid variable name\n"),
+            // A pointer the *indirection* already refused never gets that far,
+            // so it reads once — the complaint is the earlier one.
+            ("${!mt[$(f)]:=D}", ".osh: : invalid variable name\n"),
+            ("${!bad[$(f)]:=D}", ".osh: 1abc: invalid variable name\n"),
+            (
+                "${!nope[$(f)]:=D}",
+                ".osh: nope[$(f)]: invalid indirect expansion\n",
+            ),
+        ] {
+            let src = format!("{setup}{{ printf '[%s]' {expr}; }} 2>&1");
+            assert_eq!(run(&src).0, want, "{expr}");
+        }
+        // The destination is the *second* reading's, not the first's: an
+        // arithmetic subscript with a side effect hands out a different name
+        // each time, and `i` counts the readings in the shell itself.
+        let count = "i=$i other=${other-U} nosuch=${nosuch-U}";
+        assert_eq!(
+            run(&format!("i=0; e=(nosuch other); echo \"[${{!e[i++]:=D}}] {count}\"")).0,
+            "[D] i=2 other=D nosuch=U\n"
+        );
+        // Reaching nothing on the second reading is the one complaint here that
+        // quotes the reference as written — `!` and all, unlike the
+        // indirection's own complaint about a pointer that was never set.
+        assert_eq!(
+            run("i=0; e=(nosuch); { echo \"[${!e[i++]:=D}]\"; } 2>&1").0,
+            "osh: !e[i++]: invalid indirect expansion\n"
+        );
+        // An active operator reads once and stores nothing.
+        assert_eq!(
+            run("i=0; sv=S; e=(sv other); echo \"[${!e[i++]:=D}] i=$i ${other-U}\"").0,
+            "[S] i=1 U\n"
+        );
+        // The reading comes *after* the right-hand side, where the look-through
+        // operators' comes before theirs.
+        assert_eq!(
+            run("g() { printf f >&2; echo k; }
+                 declare -A el=([k]='n[9]')
+                 { echo \"[${!el[$(g)]:=$(printf D >&2; echo dv)}]\"; } 2>&1")
+            .0,
+            "fDfosh: n[9]: invalid variable name\n"
+        );
+        // A nameref is never looked through by this family, so `${!r:=w}` is the
+        // *name* `r` holds — always non-empty, so always active, so never a
+        // store and never a second reading.
+        assert_eq!(
+            run("declare -a ea=(); declare -n r='ea[@]'; echo \"[${!r:=D}]\"").0,
+            "[ea[@]]\n"
+        );
+        assert_eq!(
+            run("declare -n r=nosuch; echo \"[${!r:=D}] ${nosuch-U}\"").0,
+            "[nosuch] U\n"
         );
     }
 

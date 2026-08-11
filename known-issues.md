@@ -145,68 +145,116 @@ TD-OILS-A-COMPOUND-DECLARATION-WITH-NO-KIND-LETTER-DOES-NOT-REACH-FOR-AN-ARRAY
 
 ---
 
-### TD-OILS-A-LOCAL-REDECLARATION-OF-A-CIRCULAR-REFERENCE-ACCEPTS-ANY-VALUE. `local g=5` on a circular local nameref writes `5` into the reference where bash refuses it — 2026-08-11
+### TD-OILS-A-PLUS-N-DECLARATION-STORES-THROUGH-THE-REFERENCE-IT-IS-REMOVING. `local +n g=5` on a circular reference binds `5` where bash refuses the store and keeps the reference — 2026-08-11
 
 **Where:** `userspace/oils/src/interp.rs`, `Shell::builtin_declare_scoped` — the
-follow walk near `let mut target = if follow { … }` and everything downstream of
-it. The chain walk answers `Some(RefTarget { base: "g", scope: GLOBAL })` for a
-cycle that escaped to global scope **whether or not a global `g` exists**, so
-the operand is treated as naming something and the declaration's value is bound
-under the name `g` — which, because the attribute and value tables are keyed by
-name and this path does not swap scopes, lands on the *local* `g` and overwrites
-the reference.
+`unset_nameref` route, which takes the attribute off and then binds the value as
+an ordinary scalar. There is no counterpart to bash's *store* check.
 
-bash's escape is `find_global_variable_noref (v->name)` (variables.c:2104),
-which answers the global variable **or nothing**. With nothing there,
-`declare_transform_name`'s `var = find_variable (name)` is 0, `newname` becomes
-the operand's own name, and `make_local_variable` returns the existing local
-reference unchanged — so `var` is a nameref, and declare.def:817 refuses a value
-that is not a name:
+`+n` is excluded from the declaration-time nameref check by
+`(flags_off & att_nameref) == 0` (declare.def:817), so the refusal comes from
+the assignment instead — declare.def:990, where the attribute is still on the
+variable when the store is attempted:
 
 ```c
-      else if (nameref_p (var) && (flags_on & att_nameref) == 0 && (flags_off & att_nameref) == 0 && offset && valid_nameref_value (value, 1) == 0)
+      if (onref || nameref_p (var))
+	aflags |= ASS_NAMEREF;
+      v = bind_variable_value (var, value, aflags);
+      if (v == 0 && (onref || nameref_p (var)))
 	{
-	  builtin_error (_("`%s': invalid variable name for name reference"), value);
+	  if (valid_nameref_value (value, 1) == 0)
+	    sh_invalidid (value);
+	  assign_error++;
+	  …
+	  flags_on |= onref;		/* undo change from above */
+	  flags_off |= offref;
 ```
+
+`flags_off |= offref` **undoes the removal**, which is why the reference
+survives the refusal intact.
 
 **Reproduce.**
 
 ```sh
-f() { local -n g=z; local -n z=g; local g=5; echo "st=$?"; declare -p g; }
-f
+f() { local -n g=z; local -n z=g; local +n g=5; echo "st=$?"; declare -p g; }; f
 ```
 
-bash: two `circular name reference` warnings, then ``local: `5': invalid
-variable name for name reference``, `st=1`, and `g` still `declare -n g="z"`.
-osh: the two warnings, `st=0`, and `declare -n g="5"`.
+| | bash 5.2.37 | osh |
+|---|---|---|
+| diagnostic | `` local: `5': not a valid identifier `` | none |
+| status | 1 | 0 |
+| `declare -p g` | `declare -n g="z"` | `declare -- g="5"` |
 
-Measured variants (all with the cycle above in force, all in a function):
+The message is the generic `sh_invalidid` wording, **not** the nameref-specific
+one the `-n` and plain spellings give. A value that is a name is stored through
+the reference and the removal then stands (`local +n g=h` leaves `h="…"`), which
+is the case osh already gets right.
 
-| form | bash |
-|---|---|
-| `local g=5` | refused, `g` unchanged |
-| `local -x g=5` | refused |
-| `local g='a b'` | refused, naming `a b` |
-| `local g+=5` | refused, naming `5` — the raw RHS, not the joined value |
-| `local g[1]=5` | refused, and `g` is left `declare -an g=()` |
-| `local g=h` | accepted: `h` is a name |
-| `local -n g=5` / `local +n g=5` | a different refusal, `not a valid identifier`, which osh already matches |
+**Proper fix.** Give the `+n` route the store check: attempt the bind with the
+reference still in force, and on failure report `` `%s': not a valid
+identifier ``, set the status and leave the nameref attribute where it was.
 
-A chain that merely *fails to reach* something is not this: `f() { local -n
-g=nosuch; local g=5; }` binds `nosuch=5` in bash and in osh alike, because
-`find_variable` answered the reference's target rather than nothing.
+**How it was found:** the 31-case sweep that landed
+TD-OILS-A-LOCAL-REDECLARATION-OF-A-CIRCULAR-REFERENCE-ACCEPTS-ANY-VALUE; this
+was the one case in it that the declaration-time refusal does not cover.
 
-**Proper fix.** Give the declare builtin the same scope-aware treatment the
-arithmetic operand paths now have: the walk's `RefScope` has to be honoured
-(one swap around the guard and the store, as `Shell::in_dest_scope` does), and
-an escape that names a global which does not exist has to answer *nothing*, so
-the operand falls back to its own name and meets the `invalid variable name for
-name reference` refusal. This is the "the declare builtin" item on the
-still-unwired `resolve_ref_*` list.
+---
 
-**How it was found:** measuring the walk counts for
-TD-OILS-REDECLARING-A-SELF-NAMING-NAMEREF-WARNS-TOO-FEW-TIMES, whose matrix of
-function-local declaration forms turned this up alongside them.
+### TD-OILS-AN-ARRAY-REFUSAL-MAKES-AN-UNVALUED-ARRAY-VALUED. `declare -a g; declare +a g=5` leaves `declare -a g=()` where bash leaves the bare `declare -a g` — 2026-08-11
+
+**Where:** `userspace/oils/src/interp.rs`, `Shell::builtin_declare_scoped`. Two
+sites, both spelled `if value.is_some() { self.array_valued.insert(…) }`: the
+`cannot destroy array variables in this way` refusal, and the `assoc && indexed`
+self-conflict refusal below it.
+
+**What it is.** Whether `declare -p` prints an array as `=()` or bare is decided
+**once**, when the variable is made — a refusal raised against it afterwards
+never changes the answer. `declare -p` prints the `=()` only for a variable that
+is not `att_invisible`, and the only place a declaration sets that flag is the
+global creation branch, declare.def:802:
+
+```c
+  if (var == 0)
+    { … var = mkglobal ? … : make_new_variable (…);
+      if (offset == 0) VSETATTR (var, att_invisible); … }
+```
+
+— inside `var == 0`, and only when the operand carried **no** value. So a global
+array this command made *with* a value is visible, one made without is not, and
+one the command merely *found* keeps whatever it had. A local is never made
+visible this way: `make_local_variable` returns an existing same-context local
+untouched (`/* local foo; local foo; is a no-op. */`, variables.c:2622) and flags
+a fresh one invisible at the end (:2757), which `make_local_array_variable` does
+not undo. `-g` is off the local branch and answers like the global spellings.
+
+**Reproduce.**
+
+```sh
+declare -a g; declare +a g=5; declare -p g
+#  bash: declare -a g
+#  osh : declare -a g=()
+
+declare -A ex; declare -aA ex=5; declare -p ex     # the second site
+#  bash: declare -A ex
+#  osh : declare -A ex=()
+```
+
+The neighbours pin the rule down and already agree: `declare -a g=(); declare +a
+g=5` keeps `=()` because it was valued to begin with, `declare -a g=(1); declare
++a g=5` keeps `([0]="1")`, `declare +a 'g[1]=5'` gives `declare -a g=()` because
+*this* command created it with a value, `declare -aA fresh` (no value) gives the
+bare `declare -A fresh`, and the conversion refusal beside the two (`declare -a
+g; declare -A g=5`) never inserts in osh either.
+
+**Proper fix.** Narrow both inserts to `value.is_some() && !name_existed &&
+!make_local` — bash's `var == 0 && offset != 0` on the global branch. That is
+already the shape of the third site a few branches down, the subscript-creation
+one, whose comment records the same two limits.
+
+**How it was found:** probing the refusal order for
+TD-OILS-A-LOCAL-REDECLARATION-OF-A-CIRCULAR-REFERENCE-ACCEPTS-ANY-VALUE, whose
+new refusal had to be placed relative to the destroy one; the second site came
+out of the 7-case sweep that followed.
 
 ---
 
@@ -40224,6 +40272,95 @@ deny — are now fixed; see F8 and F9.)_
 ---
 
 ## Fixed Bugs
+
+### TD-OILS-A-LOCAL-REDECLARATION-OF-A-CIRCULAR-REFERENCE-ACCEPTS-ANY-VALUE. `local g=5` on a circular local nameref wrote `5` into the reference where bash refuses it — FIXED 2026-08-11
+
+**Where:** `userspace/oils/src/interp.rs`, `Shell::builtin_declare_scoped` — the
+follow walk, the `follow && target.is_none()` branch, the readonly/un-assignable
+refusals, and a new refusal ahead of the array ones.
+
+**What it was.** `f() { local -n g=z; local -n z=g; local g=5; }` left
+`declare -n g="5"` with status 0; bash refuses the value, keeps
+`declare -n g="z"` and exits 1. Ten of twenty-one measured declaration forms
+differed, all of them function-local declarations *with a value* through a chain
+that did not end on a name.
+
+**The measurement that explains it.** A local declaration never re-scopes onto
+whatever its chain found. The name it declares comes from
+`declare_transform_name` (declare.def:205):
+
+```c
+  v = find_variable_last_nameref (name, 1);
+  newname = (v && v->context != variable_context) ? name : name_cell (var);
+```
+
+— `name_cell (var)`, the found variable's **name**, not its value. A cycle
+escapes through `find_global_variable_noref (v->name)` (variables.c:2104), whose
+`v->name` is the operand's own name again, and a chain past the link cap finds
+nothing at all. Either way `make_local_variable` hands back the frame's own
+reference unchanged, so what follows is a declaration *about a nameref*, and
+declare.def:817 refuses a value that names nothing:
+
+```c
+  else if (nameref_p (var) && (flags_on & att_nameref) == 0 &&
+           (flags_off & att_nameref) == 0 && offset &&
+           valid_nameref_value (value, 1) == 0)
+    { builtin_error (_("`%s': invalid variable name for name reference"), value);
+      any_failed++; NEXT_VARIABLE (); }
+```
+
+The refusal quotes the operand's **raw** right-hand side, so an append says
+`` `5' `` and not the joined `z5`; it judges the value as *written*, so
+`local -u g=ab` passes and is folded to `AB` afterwards while `local -u g='a b'`
+is refused; and an empty value takes this wording rather than the generic "not a
+valid identifier".
+
+Where it sits in the loop was measured too. It is **behind** the array kind,
+which `make_local_array_variable` applied back at declare.def:614 — hence
+`local -a g=5` leaving `declare -an g=()` — and **ahead** of every refusal after
+it:
+
+| through the cycle | bash says |
+|---|---|
+| `local -a g; local +a g=5` | `` `5' ``, not "cannot destroy array variables" |
+| `local -a g; local -A g=5` | `` `5' ``, not "cannot convert indexed to associative" |
+| `local -A g; local -a g=5` | `` `5' ``, leaving `declare -An g=()` |
+| `local -r g; local g=5` | `` `5' ``, not "readonly variable" |
+
+The question is only ever about the variable, never about how the chain failed:
+a reference whose value cell an `ARRAY *` has overwritten follows nothing and
+still refuses. At **global** scope there is no such variable to find — the
+widening is `find_or_make_array_variable`, which takes the reference attribute
+off — so `declare -a g; declare +a g=5` on a global cycle really does say
+"cannot destroy".
+
+**The fix.** The follow walk now calls `walk_ref_name` directly and sets
+`local_ref_fallback` when a `make_local` walk did not end on a name, which drops
+the escape and leaves the operand's own name at live scope (the
+`follow && target.is_none()` branch is skipped for it, so a valueless
+`local -i g` still gives `declare -in g="z"` and `local -a g` still gives
+`declare -an g=()`). `ref_value_refused` is then decided beside `held_here` —
+`make_local_variable`'s own answer, since a name the frame already holds comes
+back as the binding it has where a fresh local is made anew — early enough for
+the readonly and un-assignable refusals to stand aside, and the refusal itself
+is emitted after the array kind and before the array refusals.
+
+**Not this, and unchanged.** A chain that reaches a name (`local w=1;
+local -n g=w; local g=5` binds `w`), one that reaches a name which does not
+exist (`local -n g=nosuch`), a fresh local shadowing a cycle that lives at
+global scope, `-g`/`readonly`/`export` (all off the local branch), and top-level
+declarations.
+
+**Found alongside:**
+TD-OILS-A-PLUS-N-DECLARATION-STORES-THROUGH-THE-REFERENCE-IT-IS-REMOVING and
+TD-OILS-AN-ARRAY-REFUSAL-MAKES-AN-UNVALUED-ARRAY-VALUED.
+
+**Corpus:**
+`a-local-redeclaration-of-a-circular-reference-refuses-a-value-that-is-not-a-name.sh`.
+Unit test:
+`a_local_redeclaration_of_a_circular_reference_refuses_a_value_that_is_not_a_name`.
+
+---
 
 ### TD-OILS-A-SUBSCRIPTED-LOCAL-DECLARATION-REBINDS-THE-NAME-RATHER-THAN-WIDENING-IT. `local g=5; local g[1]=9` kept the scalar as element 0 — FIXED 2026-08-11
 

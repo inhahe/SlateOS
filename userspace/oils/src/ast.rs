@@ -868,7 +868,11 @@ pub enum WordPart {
     /// matters inside double quotes (`*` joins with the first IFS char, `@`
     /// yields one field per name).
     VarNames {
-        prefix: String,
+        /// Raw, exactly as written between the `!` and the `*`/`@`: bash never
+        /// expands it, never removes its quotes, and does not require it to be
+        /// a name — see [`crate::parser::names_prefix`]. So it is bytes, not a
+        /// name, and it is matched against candidate names bytewise.
+        prefix: Str,
         /// `true` for the `*` form, `false` for the `@` form.
         star: bool,
     },

@@ -18678,10 +18678,12 @@ impl Shell {
     /// `${!prefix*}` / `${!prefix@}` — the names of all visible variables
     /// (scalars, indexed arrays, associative arrays) whose name begins with
     /// `prefix`, sorted (bash lists them in lexicographic order).
-    fn var_names_with_prefix(&self, prefix: &str) -> Vec<String> {
+    fn var_names_with_prefix(&self, prefix: BStr<'_>) -> Vec<String> {
         self.visible_var_names()
             .into_iter()
-            .filter(|k| k.starts_with(prefix))
+            // Bytewise: the prefix is raw source text, not a name, and need not
+            // even be valid UTF-8. See [`WordPart::VarNames`].
+            .filter(|k| k.as_bytes().starts_with(prefix))
             .map(str::to_string)
             .collect()
     }
@@ -66734,6 +66736,52 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // A user variable and a dynamic special sharing a prefix are merged and
         // sorted together.
         assert_eq!(run("SECRET=1; echo ${!SEC*}").0, "SECONDS SECRET\n");
+    }
+
+    #[test]
+    fn a_name_listing_asks_for_a_prefix_of_bytes_not_for_a_name() {
+        // bash decides `${!PREFIX@}`/`${!PREFIX*}` syntactically and *first*
+        // (subst.c:9741), ahead of the array keys and of the indirection
+        // proper, and asks only that the prefix start like a name. The rest is
+        // taken raw — `temp1 = savestring (name + 1)` with the last character
+        // cut off — so it is never expanded, never unquoted, and need not be a
+        // name at all.
+        let vars = "sv=SVAL; svx=2; declare -A s=([k]=sv); n=(ax by cz); ";
+        let listing = |body: &str| run(&format!("{vars}printf '<%s>' {body}")).0;
+        // A prefix no variable can be called lists nothing — it does *not*
+        // become an indirection through the element, which is what the very
+        // same body means under any other operator.
+        for body in [
+            "${!s[k]@}",
+            "${!s[k]*}",
+            "${!s[@]@}",
+            "${!n[@]@}",
+            "${!n[@]*}",
+            "${!sv[0]@}",
+            "${!s\"v\"@}",
+            "${!s$x@}",
+            "${!s*b*}",
+            "${!s.@}",
+            // A subscript is stepped over whole, so its own brackets and
+            // operator characters never end the scan.
+            "${!s[a:b]@}",
+            "${!s[a}b]@}",
+            "${!s[@}",
+            // …and so is the character after a backslash.
+            "${!s\\@v@}",
+        ] {
+            assert_eq!(listing(body), "<>", "{body}");
+        }
+        assert_eq!(listing("${!s[k]}"), "<SVAL>");
+        // The ones that really are names still list, prefix and all.
+        assert_eq!(listing("${!s@}"), "<s><sv><svx>");
+        assert_eq!(listing("${!sv*}"), "<sv><svx>");
+        // A trailing `@` the name scan never reaches is not a listing: bash
+        // glues it back on only when the closing brace follows immediately.
+        assert_eq!(
+            run(&format!("{vars}{{ printf '<%s>' ${{!s[k]@ }}; }} 2>&1")).0,
+            "osh: ${!s[k]@ }: bad substitution\n"
+        );
     }
 
     #[test]

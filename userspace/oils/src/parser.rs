@@ -6831,27 +6831,15 @@ fn parse_braced_param_in(
         && is_indirection_starter(syn(first))
     {
         // `${!prefix*}` / `${!prefix@}` — names of set variables beginning with
-        // `prefix`. Distinguished from the array-keys form (`${!a[@]}`) by
-        // ending in a bare `*`/`@` (no closing `]`). A valid name prefix is
-        // required so we don't mistake other expansions.
-        // A *non-empty* prefix is required for the name-listing form: a bare
-        // `${!*}`/`${!@}` is instead indirect expansion through the positional
-        // list (`$*`/`$@`), handled below, not a listing of every variable.
-        if let Some(prefix) = after_bang.strip_suffix(b"*")
-            && !prefix.is_empty()
-            && !prefix.contains(&b'[')
-            && is_valid_name(prefix)
-            && let Some(prefix) = name_text(prefix)
-        {
-            return Ok(WordPart::VarNames { prefix, star: true });
-        }
-        if let Some(prefix) = after_bang.strip_suffix(b"@")
-            && !prefix.is_empty()
-            && !prefix.contains(&b'[')
-            && is_valid_name(prefix)
-            && let Some(prefix) = name_text(prefix)
-        {
-            return Ok(WordPart::VarNames { prefix, star: false });
+        // `prefix`. This reading comes before every other one a `${!…}` could
+        // have (bash tries it at subst.c:9741, ahead of the array keys at 9780
+        // and of the indirection proper), and it is not a *name* it asks for.
+        // See [`names_prefix`].
+        if let Some((prefix, star)) = names_prefix(after_bang) {
+            return Ok(WordPart::VarNames {
+                prefix: prefix.to_vec(),
+                star,
+            });
         }
         // `${!name[@]}` / `${!name[*]}` — the keys/indices of an array.
         let chs: Vec<Ch> = bytes::chars(after_bang).collect();
@@ -7870,6 +7858,76 @@ const PLACEHOLDER_REFERENT: &[u8] = b"x";
 /// are all the operator characters — `${!:0:1}` slices `$!`.
 fn is_indirection_starter(c: char) -> bool {
     is_name_start(c) || c.is_ascii_digit() || matches!(c, '#' | '?' | '@' | '*')
+}
+
+/// The characters that end bash's parameter-name scan
+/// (`string_extract (string, &t_index, "#%^,~:-=?+/@}", SX_VARNAME)`,
+/// subst.c:9567). A `${!…}` body reaches the name-listing form only if the scan
+/// ran the whole way to the trailing `@`/`*`, so any of these standing in the
+/// prefix — outside a subscript, which the scan steps over — takes the body
+/// somewhere else. `*` is deliberately *not* among them, which is why the star
+/// form may carry one inside the prefix as well (`${!a*b*}` lists `a*b`).
+const NAME_SCAN_STOPS: &[u8] = b"#%^,~:-=?+/@}";
+
+/// `${!PREFIX@}` / `${!PREFIX*}` — the names of every set variable beginning
+/// with `PREFIX` — given the brace body with its leading `!` already removed.
+/// Answers the prefix and whether the star spelling was used.
+///
+/// bash decides this **syntactically and first**, before it has looked at what
+/// the body might otherwise mean (subst.c:9741):
+///
+/// ```text
+/// if (want_indir && string[sindex - 1] == RBRACE &&
+///     (string[sindex - 2] == '*' || string[sindex - 2] == '@') &&
+///     legal_variable_starter ((unsigned char) name[1]))
+/// ```
+///
+/// so the prefix is not required to be a *name* — only to start like one. It is
+/// then taken raw: `temp1 = savestring (name + 1)` with its last character cut
+/// off, never expanded and never unquoted. `${!s"v"@}` therefore asks for names
+/// beginning with the five characters `s"v"` (there are none), and `${!s[k]@}`
+/// for names beginning with `s[k]` — *not* the element `s[k]` indirected
+/// through, which is what the same body means with any other operator on it.
+///
+/// The remaining condition is that bash's name scan reached that trailing
+/// character at all, i.e. that nothing in the prefix ends it — see
+/// [`NAME_SCAN_STOPS`]. (For the `@` form there is a second clause, subst.c:9585,
+/// that glues the `@` back onto the name it stopped at; it applies only when the
+/// `@` is immediately followed by the closing brace, which is exactly this
+/// function's `strip_suffix`.)
+fn names_prefix(after_bang: BStr<'_>) -> Option<(BStr<'_>, bool)> {
+    let (&last, prefix) = after_bang.split_last()?;
+    let star = match last {
+        b'*' => true,
+        b'@' => false,
+        _ => return None,
+    };
+    // A bare `${!*}`/`${!@}` is indirection through the positional list, not a
+    // listing of every variable: bash reads `name[1]`, which is the `*`/`@`
+    // itself here, and no name starts with one.
+    if !is_name_start(syn(bytes::chars(prefix).next()?)) {
+        return None;
+    }
+    let mut i = 0usize;
+    while let Some(&c) = prefix.get(i) {
+        match c {
+            // `string_extract` steps over the escaped character without ever
+            // testing it, so a `\@` inside the prefix does not end the scan.
+            b'\\' => i = i.saturating_add(2),
+            // …and over a whole balanced subscript, which is what lets `s[k]`
+            // and even `s[a:b]` stand in a prefix.
+            b'[' => {
+                let mut depth = 1usize;
+                match subscript_close_in_lit(prefix.get(i.saturating_add(1)..)?, &mut depth) {
+                    Some(close) => i = i.saturating_add(close).saturating_add(2),
+                    None => i = i.saturating_add(1),
+                }
+            }
+            c if NAME_SCAN_STOPS.contains(&c) => return None,
+            _ => i = i.saturating_add(1),
+        }
+    }
+    Some((prefix, star))
 }
 
 /// A referent usable in a *bare* indirect expansion `${!name}`: a plain

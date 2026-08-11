@@ -5438,6 +5438,18 @@ pub struct Shell {
     ///
     /// Saved and restored around the inner `apply_assignment` call.
     decl_builtin_ctx: bool,
+    /// Set by [`Shell::assignment_write_refused`] whenever it refuses a write,
+    /// and cleared by the one caller that reads it.
+    ///
+    /// It stands for the *return value* of bash's element store. A readonly
+    /// refusal inside `bind_array_variable` (arrayfunc.c:280) or
+    /// `bind_assoc_variable` (:311) does `err_readonly (name)` and then
+    /// `return (entry)` — non-NULL — so declare.def:962's `if (var == 0)` does
+    /// not fire and the builtin's status is untouched. A *bad subscript*
+    /// returns NULL and does fail it. Both come back to osh as
+    /// `apply_assignment` returning false, so the subscripted branch of
+    /// [`Shell::builtin_declare_scoped`] needs this to tell them apart.
+    readonly_kept_entry: bool,
     /// The bindings [`Shell::enter_global_scope`] displaced for the declaration
     /// builtin currently running under `-g`/`-G` — empty otherwise.
     ///
@@ -6285,6 +6297,7 @@ impl Shell {
             arith_cmd: None,
             expand_cmd: None,
             decl_builtin_ctx: false,
+            readonly_kept_entry: false,
             declare_global_swap: Vec::new(),
             xtrace_compound: None,
             compound_expanded: false,
@@ -12829,6 +12842,7 @@ impl Shell {
             // substitution's body. See [`Shell::expand_cmd`].
             expand_cmd: self.expand_cmd.clone(),
             decl_builtin_ctx: false,
+            readonly_kept_entry: false,
             declare_global_swap: Vec::new(),
             xtrace_compound: None,
             compound_expanded: false,
@@ -14147,7 +14161,42 @@ impl Shell {
             &a.name
         };
         self.perrln(&format!("{blame}: readonly variable"));
-        self.note_shell_error(FatalWhen::ErrexitOrPosix);
+        // A declaration builtin's *subscripted* operand is bash's
+        // `assign_array_element` (declare.def:960), and that one refusal is not
+        // an assignment error: `bind_array_variable` (arrayfunc.c:280) and
+        // `bind_assoc_variable` (:311) both `err_readonly` and then
+        // `return (entry)` — non-NULL, so declare.def:962's `if (var == 0)`
+        // never bumps `assign_error`. So it neither fails the builtin nor ends
+        // a posix shell: `set -o posix; declare -a a=(x y); declare -r a[1]=9`
+        // reports, exits **0**, and carries on. Every other write reaching here
+        // is a real assignment error, posix rule included.
+        //
+        // Errexit reaches it all the same, because that rule is not the
+        // assignment's at all but the *diagnostic's*: `err_readonly` is
+        // `report_error` (error.c:533), and `report_error` ends the shell
+        // itself, at the message —
+        //
+        // ```c
+        // if (exit_immediately_on_error)
+        //   {
+        //     if (last_command_exit_value == 0)
+        //       last_command_exit_value = EXECUTION_FAILURE;
+        //     exit_shell (last_command_exit_value);
+        //   }
+        // ```
+        //
+        // — so no status is consulted and nothing can intercept it. `set -e;
+        // declare -a a=(x y); declare -r 'a[1]=9'` exits 1 even written as
+        // `if declare -r 'a[1]=9'; then …` or `declare -r 'a[1]=9' && …`, where
+        // errexit on a mere status would have been suppressed.
+        self.note_shell_error(if self.decl_builtin_ctx && a.index.is_some() {
+            FatalWhen::ErrexitOnly
+        } else {
+            FatalWhen::ErrexitOrPosix
+        });
+        // …and, for the same reason, the store is reported as having *kept* its
+        // variable: see [`Shell::readonly_kept_entry`].
+        self.readonly_kept_entry = true;
         true
     }
 
@@ -14381,12 +14430,9 @@ impl Shell {
         // bash asks it where the value is bound rather than where the command
         // starts. Two shapes have nothing left to do first and are asked here:
         //
-        // * a **declaration builtin**'s operand, whose value the command's own
-        //   word expansion already ran (so `declare x=$(f)` runs `f` before
-        //   `declare` ever sees it) and whose subscript is plain text by then —
-        //   which is why `declare x[]=9` onto a readonly `x` is
-        //   `x: readonly variable` rather than the bad subscript it would
-        //   otherwise be;
+        // * a **declaration builtin**'s *subscript-less* operand, whose value the
+        //   command's own word expansion already ran (so `declare x=$(f)` runs
+        //   `f` before `declare` ever sees it);
         // * a **compound literal**, which bash refuses without expanding at all:
         //   `readonly x=1; x=($(f))` never runs `f`.
         //
@@ -14394,7 +14440,17 @@ impl Shell {
         // value and then the subscript have been expanded — so its side effects
         // run, its trace is emitted, and a malformed subscript is diagnosed
         // first. See the deferred call sites below.
-        let deferred = !self.decl_builtin_ctx && !matches!(a.value, AssignRhs::Array(_));
+        //
+        // A **subscript defers it whatever the context**, declaration builtin
+        // included, because that store is bash's `assign_array_element`
+        // (declare.def:960) and its readonly check is inside
+        // `assign_array_element_internal`, past `array_expand_index`. Measured
+        // both ways: `declare -a x=(1); declare -r 'x[-9]=9'` is `x[-9]: bad
+        // array subscript` and exits 1, where the same subscript on a name that
+        // was *already* readonly never reaches the store at all — it is refused
+        // by declare.def:849 and says `declare: x: readonly variable`.
+        let deferred =
+            a.index.is_some() || (!self.decl_builtin_ctx && !matches!(a.value, AssignRhs::Array(_)));
         if !deferred && self.assignment_write_refused(a, spelled) {
             return false;
         }
@@ -14623,27 +14679,24 @@ impl Shell {
                             // assign anything.
                             return false;
                         }
-                        // An element assignment onto a name that is not an array
-                        // yet widens it, carrying what it held in as element 0 —
-                        // `w=5; w[1]=9` is `([0]="5" [1]="9")` in bash, and a
-                        // dynamic special carries a last reading of its value
-                        // function the same way (`SECONDS[1]=9` →
-                        // `declare -ai SECONDS=([0]="3" [1]="9")`), attributes
-                        // included. Done *after* the subscript is validated,
-                        // because a malformed one converts nothing, and *before*
-                        // the bound below, because the carried element 0 is what
-                        // `w=5; w[-1]=9` counts back from.
-                        self.array_kind_apply(&a.name, false);
-                        // The conversion can bring the integer attribute with it
-                        // (`SECONDS`, `RANDOM`, `PPID`, …), and bash applies it
-                        // to the very element being assigned: `SECONDS[1]=x`
-                        // stores 0, `SECONDS[1]=3+4` stores 7.
-                        let is_int = is_int || self.integer_attr.contains(&a.name);
-                        let bound = self
-                            .arrays
-                            .get(&a.name)
-                            .and_then(|arr| arr.keys().next_back().copied())
-                            .map_or(0, |k| k.saturating_add(1));
+                        // What a negative subscript counts back from, read
+                        // *without* widening the name — bash reads it off the
+                        // variable it found, before any conversion
+                        // (`arrayfunc.c:398`):
+                        //
+                        // ```c
+                        // if (entry && ind < 0)
+                        //   ind = (array_p (entry) ? array_max_index (array_cell (entry)) : 0) + 1 + ind;
+                        // if (ind < 0) { err_badarraysub (name); return NULL; }
+                        // ```
+                        //
+                        // So an array counts back from its highest index,
+                        // anything else that *exists* from element 0, and a
+                        // name with no entry at all from nothing. The widening
+                        // itself has to wait until below the readonly check, so
+                        // it cannot supply this — see
+                        // [`Shell::negative_index_bound`].
+                        let bound = self.negative_index_bound(&a.name);
                         let Some(idx) = Self::resolve_index(raw, bound) else {
                             // A negative subscript that underflows below 0 is a
                             // "bad array subscript" in bash, naming the full
@@ -14669,15 +14722,41 @@ impl Shell {
                             return false;
                         };
                         // The subscript is settled, so the variable can be
-                        // asked — see the associative branch above. The
-                        // widening just before it can therefore run on a name
-                        // about to be refused, which nothing can see: a refused
-                        // assignment ends the command *and* the shell, and the
-                        // one context where it does not (a declaration
-                        // builtin's operand) asked long before reaching here.
+                        // asked — see the associative branch above.
                         if deferred && self.assignment_write_refused(a, spelled) {
                             return false;
                         }
+                        // An element assignment onto a name that is not an array
+                        // yet widens it, carrying what it held in as element 0 —
+                        // `w=5; w[1]=9` is `([0]="5" [1]="9")` in bash, and a
+                        // dynamic special carries a last reading of its value
+                        // function the same way (`SECONDS[1]=9` →
+                        // `declare -ai SECONDS=([0]="3" [1]="9")`), attributes
+                        // included.
+                        //
+                        // It comes *last*, below both the subscript check and
+                        // the readonly one, because that is where bash's
+                        // `convert_var_to_array` sits — `bind_array_variable`
+                        // (arrayfunc.c:280) refuses a readonly name and returns
+                        // before ever reaching it:
+                        //
+                        // ```c
+                        // else if ((readonly_p (entry) && (flags&ASS_FORCE) == 0) || noassign_p (entry))
+                        //   { if (readonly_p (entry)) err_readonly (name); return (entry); }
+                        // else if (array_p (entry) == 0)
+                        //   entry = convert_var_to_array (entry);
+                        // ```
+                        //
+                        // So a refused element leaves a scalar a scalar:
+                        // `f() { local -r x=5; declare -g 'x[1]=9'; }` reports
+                        // `x: readonly variable` and `declare -p x` still says
+                        // `declare -r x="5"`, not `declare -ar x=([0]="5")`.
+                        self.array_kind_apply(&a.name, false);
+                        // The conversion can bring the integer attribute with it
+                        // (`SECONDS`, `RANDOM`, `PPID`, …), and bash applies it
+                        // to the very element being assigned: `SECONDS[1]=x`
+                        // stores 0, `SECONDS[1]=3+4` stores 7.
+                        let is_int = is_int || self.integer_attr.contains(&a.name);
                         let int_val = if is_int {
                             let base = if a.append {
                                 self.arrays
@@ -45551,6 +45630,37 @@ impl Shell {
             // literal key for an associative array. The array kind was registered
             // above, so `apply_assignment` selects the right one.
             if let Some(sub) = subscript {
+                // `-x`/`-r` on a subscripted target attach to the base array,
+                // and `+x` clears the base array's export the same way.
+                //
+                // They land **before** the element store, which is where bash
+                // puts them: `VSETATTR (var, flags_on)` is declare.def:944 and
+                // `assign_array_element` is :960. The `r` is therefore already
+                // on the variable when the store arrives — and that store, unlike
+                // the whole-array one a few lines above it, carries no
+                // `ASS_FORCE`. So a `-r` declaration **refuses its own element**:
+                // `declare -a a=(x y); declare -r 'a[1]=9'` reports `a: readonly
+                // variable` and leaves `declare -ar a=([0]="x" [1]="y")`.
+                //
+                // The refusal is the store's own, so it is untagged and does not
+                // fail the builtin — see [`Shell::readonly_kept_entry`]. The
+                // second operand of the same command then meets the *tagged*
+                // :849 refusal instead, which is what proves the ordering:
+                // `declare -r 'a[1]=9' 'a[0]=7'` reports both, and exits 1.
+                //
+                // Under `-g` this marks the global the declaration is about while
+                // [`Shell::with_live_binding`] hands the store the local, whose
+                // own attributes come back with it — so `f() { local -a a=(x y);
+                // declare -gr a[1]=9; }` marks the global and lets the local take
+                // the element, with nothing reported.
+                if unset_export {
+                    self.exported.remove(base_name);
+                } else if export {
+                    self.mark_exported(base_name.to_string());
+                }
+                if readonly && !unset_readonly {
+                    self.readonly.insert(base_name.to_string());
+                }
                 if let Some(v) = value {
                     // Build the element assignment directly (not by re-parsing a
                     // `base[sub]=value` string — an unquoted-space value like
@@ -45621,12 +45731,9 @@ impl Shell {
                     // `w`). See [`Shell::with_live_binding`].
                     let saved_decl_ctx = self.decl_builtin_ctx;
                     self.decl_builtin_ctx = true;
-                    // Whether the binding actually written was readonly is read
-                    // *inside* the swap, because under `-g` it need not be the
-                    // one the readonly refusal above tested. bash's store
-                    // reports such a refusal without failing the builtin: both
-                    // `bind_array_variable` (arrayfunc.c:280) and
-                    // `bind_assoc_variable` (:311) `err_readonly` and then
+                    // bash's store reports a readonly refusal without failing
+                    // the builtin: both `bind_array_variable` (arrayfunc.c:280)
+                    // and `bind_assoc_variable` (:311) `err_readonly` and then
                     // `return (entry)` — non-NULL, so declare.def:962's
                     // `if (var == 0)` never bumps `assign_error`. Only a bad
                     // subscript returns NULL. So
@@ -45635,10 +45742,16 @@ impl Shell {
                     // unsplit `f() { local -r g=5; declare g[1]=9; }` exits 1 —
                     // that one is refused by declare.def:849, against the very
                     // variable it is about, and never reaches the store.
-                    let (ok, live_readonly) = self.with_live_binding(base_name, |sh| {
-                        let ro = sh.readonly.contains(base_name);
-                        (sh.apply_assignment(&assignment, false), ro)
-                    });
+                    //
+                    // Which of the two stopped the store is asked of
+                    // [`Shell::readonly_kept_entry`] rather than of the
+                    // readonly set, because by now the `-r` this very command
+                    // carries is already on the name (it is applied above, as
+                    // bash applies it) — and under `-g` the store need not even
+                    // have gone to the binding that flag landed on.
+                    self.readonly_kept_entry = false;
+                    let ok = self
+                        .with_live_binding(base_name, |sh| sh.apply_assignment(&assignment, false));
                     self.decl_builtin_ctx = saved_decl_ctx;
                     if self.discard_error.is_some() {
                         // Malformed subscript/value expression: the command driver
@@ -45680,19 +45793,9 @@ impl Shell {
                     if !name_existed && !make_local {
                         self.array_valued.insert(base_name.to_string());
                     }
-                    if !ok && !live_readonly {
+                    if !ok && !self.readonly_kept_entry {
                         status = 1;
                     }
-                }
-                // `-x`/`-r` on a subscripted target attach to the base array,
-                // and `+x` clears the base array's export the same way.
-                if unset_export {
-                    self.exported.remove(base_name);
-                } else if export {
-                    self.mark_exported(base_name.to_string());
-                }
-                if readonly && !unset_readonly {
-                    self.readonly.insert(base_name.to_string());
                 }
                 continue;
             }
@@ -46183,6 +46286,57 @@ impl Shell {
             Some(v) => Some(v),
             None => self.dyn_array_convert(name),
         }
+    }
+
+    /// Whether `find_variable` would hand back an entry for `name` at all —
+    /// bash's `if (entry && ind < 0)` (arrayfunc.c:398), which is what decides
+    /// whether a negative element subscript has anything to count back from.
+    ///
+    /// "Has an entry" is not "has a value", and the difference is visible: a
+    /// merely-declared name is an entry, so `f() { local x; x[-1]=9; }` and
+    /// `declare -i x; x[-1]=9` both land at element 0 and print
+    /// `([0]="9")` — where the same subscript on a name with no entry at all is
+    /// a bad array subscript. bash reads the bound off the *scalar* the entry
+    /// still is, before `convert_var_to_array` runs, which is why the empty
+    /// array that conversion then builds does not bound it to 0.
+    ///
+    /// (`invisible_p` does not come into it: `find_variable` returns the
+    /// invisible variable a bare declaration leaves, and only the callers that
+    /// ask about *values* filter it out — see [`Shell::var_binding_is_visible`].)
+    fn var_entry_exists(&self, name: &str) -> bool {
+        self.has_stored_binding(name) || self.dynamic_special(name).is_some()
+    }
+
+    /// What a negative element subscript on `name` counts back from, read
+    /// *without* widening the name — which matters, because the widening has to
+    /// wait until below the readonly check and so cannot supply it.
+    ///
+    /// bash reads it off the variable `find_variable` handed back, before any
+    /// conversion (arrayfunc.c:398):
+    ///
+    /// ```c
+    /// if (entry && ind < 0)
+    ///   ind = (array_p (entry) ? array_max_index (array_cell (entry)) : 0) + 1 + ind;
+    /// if (ind < 0) { err_badarraysub (name); return NULL; }
+    /// ```
+    ///
+    /// So an array bounds at its highest index plus one — 0 while it is still
+    /// empty, which is why `declare -a q; q[-1]=9` is a bad subscript and so is
+    /// `FUNCNAME[-1]=9` outside a function. Anything else that *exists* bounds
+    /// at 1, a scalar and a merely-declared name alike (see
+    /// [`Shell::var_entry_exists`]). A name with no entry bounds at 0, since
+    /// bash skips the adjustment for it entirely.
+    fn negative_index_bound(&self, name: &str) -> usize {
+        if let Some(arr) = self.arrays.get(name) {
+            return arr.keys().next_back().copied().map_or(0, |k| k.saturating_add(1));
+        }
+        // The call-stack specials are `array_p` without an entry in
+        // [`Shell::arrays`], and osh lists them empty, so their `array_max_index`
+        // is -1 and they bound at 0 rather than at a scalar's 1.
+        if self.dynamic_special(name).is_some_and(|d| d.listed.is_array()) {
+            return 0;
+        }
+        usize::from(self.var_entry_exists(name))
     }
 
     /// Handle the combined `declare -A m=([k]=v)` / `declare -a a=(x y)` form,
@@ -74526,6 +74680,163 @@ st=1
         let (out, _) =
             run("f() { local g=5; export -a g=9; }; ( f; env | grep '^g=' || echo none )");
         assert_eq!(out, "none\n");
+    }
+
+    /// A declaration builtin applies its attributes **before** it stores a
+    /// subscripted operand's value — `VSETATTR (var, flags_on)` is
+    /// declare.def:944 and `assign_array_element` is :960 — and that store,
+    /// unlike the whole-array one just above it, carries no `ASS_FORCE`. So a
+    /// `-r` declaration **refuses its own element**:
+    /// `declare -a a=(x y); declare -r 'a[1]=9'` reports `a: readonly variable`
+    /// and leaves the array untouched. osh applied the letters after the store
+    /// and so stored 9 in silence.
+    ///
+    /// Three things follow from where `bind_array_variable`'s check sits
+    /// (arrayfunc.c:280). It `return (entry)` — non-NULL — so declare.def:962's
+    /// `if (var == 0)` never fires and the refusal neither fails the builtin
+    /// nor ends a posix shell; errexit still ends it, but through
+    /// `err_readonly` → `report_error` → `exit_shell` (error.c:533), at the
+    /// message rather than on a status. It is *above* `convert_var_to_array`,
+    /// so a refused element leaves a scalar a scalar. And the subscript was
+    /// settled before any of it (arrayfunc.c:398), so a bad one is reported
+    /// instead — and that one does return NULL, so it fails the builtin.
+    ///
+    /// The same lines give the bound a negative subscript counts back from:
+    /// `(array_p (entry) ? array_max_index (…) : 0) + 1`, read off the variable
+    /// that was found and before the conversion, so an existing-but-*unset*
+    /// name bounds at 1 like any other scalar. Corpus:
+    /// `a-readonly-declaration-marks-before-it-stores-so-it-refuses-its-own-element.sh`.
+    #[test]
+    fn a_readonly_declaration_marks_before_it_stores_so_it_refuses_its_own_element() {
+        // The element store is refused, and the value the array already had
+        // stands — under `-i`, under `+=`, and for both kinds of array.
+        for (src, shape) in [
+            ("declare -a a=(x y); declare -r 'a[1]=9'", "declare -ar a=([0]=\"x\" [1]=\"y\")"),
+            ("declare -a a=(x y); declare -ri 'a[1]=4+4'", "declare -air a=([0]=\"x\" [1]=\"y\")"),
+            ("declare -a a=(1 2); declare -r 'a[1]+=9'", "declare -ar a=([0]=\"1\" [1]=\"2\")"),
+            ("declare -a a=(x y); declare -rx 'a[1]=9'", "declare -arx a=([0]=\"x\" [1]=\"y\")"),
+            ("declare -A a=([k]=1); declare -r 'a[k]=9'", "declare -Ar a=([k]=\"1\" )"),
+        ] {
+            let (out, _) = run(&format!("( {src}; echo \"st=$?\"; declare -p a ) 2>&1"));
+            assert_eq!(out, format!("osh: a: readonly variable\nst=0\n{shape}\n"), "{src}");
+        }
+
+        // The *whole-array* store a few lines above it carries `ASS_FORCE`, so
+        // the very same `-r` lets that one through.
+        let (out, _) =
+            run("( declare -a a=(x y); declare -r a=(p q); echo \"st=$?\"; declare -p a ) 2>&1");
+        assert_eq!(out, "st=0\ndeclare -ar a=([0]=\"p\" [1]=\"q\")\n");
+        let (out, _) =
+            run("( declare -A m=([k]=1); declare -r m=([j]=2); echo \"st=$?\"; declare -p m ) 2>&1");
+        assert_eq!(out, "st=0\ndeclare -Ar m=([j]=\"2\" )\n");
+
+        // A second operand of the same command meets the *tagged* :849 refusal
+        // instead, which is what shows the order: the first is untagged and
+        // costs nothing, the second is tagged and fails the builtin.
+        let (out, _) = run(
+            "( declare -a a=(x y); declare -r 'a[1]=9' 'a[0]=7'; echo \"st=$?\"; \
+             declare -p a ) 2>&1",
+        );
+        assert_eq!(
+            out,
+            "osh: a: readonly variable\nosh: declare: a: readonly variable\n\
+             st=1\ndeclare -ar a=([0]=\"x\" [1]=\"y\")\n"
+        );
+
+        // Neither the builtin nor a posix shell fails on the store's own
+        // refusal — but the plain assignment that follows is a real assignment
+        // error, and ends the posix one.
+        let (out, _) = run(
+            "( declare -a a=(x y); declare -r 'a[1]=9'; a[0]=z; echo \"st2=$?\"; \
+             declare -p a; echo REACHED ) 2>&1",
+        );
+        assert_eq!(out, "osh: a: readonly variable\nosh: a: readonly variable\n");
+        let (out, _) = run_script(
+            "( set -o posix; declare -a a=(x y); declare -r 'a[1]=9'; echo \"st=$?\"; \
+             echo REACHED ) 2>&1",
+        );
+        assert_eq!(out, "osh: line 1: a: readonly variable\nst=0\nREACHED\n");
+
+        // Errexit does end it, and does so at the diagnostic — so writing the
+        // command where a status would have been swallowed changes nothing.
+        for src in [
+            "declare -r 'a[1]=9'; echo \"st=$?\"; echo REACHED",
+            "if declare -r 'a[1]=9'; then echo THEN; else echo ELSE; fi; echo REACHED",
+            "declare -r 'a[1]=9' && echo AND || echo OR; echo REACHED",
+        ] {
+            let (out, _) = run(&format!("( set -e; declare -a a=(x y); {src} ) 2>&1"));
+            assert_eq!(out, "osh: a: readonly variable\n", "{src}");
+        }
+
+        // A bad subscript is judged first, and it *does* fail the builtin —
+        // `assign_array_element` returns NULL for that one.
+        let (out, _) =
+            run("( declare -a x=(1); declare -r 'x[-9]=9'; echo \"st=$?\"; declare -p x ) 2>&1");
+        assert_eq!(out, "osh: x[-9]: bad array subscript\nst=1\ndeclare -ar x=([0]=\"1\")\n");
+        let (out, _) = run(
+            "( declare -a x=(1); declare -r 'x[-9]=9' 'x[0]=7'; echo \"st=$?\"; \
+             declare -p x ) 2>&1",
+        );
+        assert_eq!(
+            out,
+            "osh: x[-9]: bad array subscript\nosh: declare: x: readonly variable\n\
+             st=1\ndeclare -ar x=([0]=\"1\")\n"
+        );
+
+        // The refusal is above `convert_var_to_array`, so a refused element
+        // leaves a scalar a scalar. Reaching the store at all needs the `-g`
+        // split — an operand about the readonly binding itself is turned away
+        // by the tagged :849 refusal long before.
+        for (src, shape) in [
+            ("local -r x=5; declare -g 'x[1]=9'", "declare -r x=\"5\""),
+            ("local -r x=5; declare -g 'x[-1]=9'", "declare -r x=\"5\""),
+            ("local -r x=(1 2); declare -g 'x[3]=9'", "declare -ar x=([0]=\"1\" [1]=\"2\")"),
+            ("local -rA x=([k]=1); declare -g 'x[j]=9'", "declare -Ar x=([k]=\"1\" )"),
+        ] {
+            let (out, _) = run(&format!(
+                "f() {{ {src}; echo \"st=$?\"; declare -p x; }}; ( f ) 2>&1"
+            ));
+            assert_eq!(out, format!("main: x: readonly variable\nst=0\n{shape}\n"), "{src}");
+        }
+        let (out, _) =
+            run("( declare -r x=5; declare -g 'x[1]=9'; echo \"st=$?\"; declare -p x ) 2>&1");
+        assert_eq!(out, "osh: declare: x: readonly variable\nst=1\ndeclare -r x=\"5\"\n");
+
+        // Under `-g` the mark and the store part company: the global takes the
+        // `r`, the live local takes the element, and nothing is reported.
+        let (out, _) = run(
+            "f() { local -a a=(x y); declare -gr 'a[1]=9'; echo \"st=$?\"; declare -p a; }; \
+             ( f; echo AFTER; declare -p a ) 2>&1",
+        );
+        assert_eq!(
+            out,
+            "st=0\ndeclare -a a=([0]=\"x\" [1]=\"9\")\nAFTER\ndeclare -ar a=()\n"
+        );
+
+        // What a negative subscript counts back from, read before the widening
+        // that used to supply it: an array's highest index, element 0 for
+        // anything else that exists — a merely-*declared* name included — and
+        // nothing at all for a name with no entry.
+        for (src, tail) in [
+            ("x=5; x[-1]=9", "declare -a x=([0]=\"9\")\n"),
+            ("declare -i x; x[-1]=9", "declare -ai x=([0]=\"9\")\n"),
+            ("declare -a x=([5]=q); x[-1]=9", "declare -a x=([5]=\"9\")\n"),
+            ("declare -a x=(1 2 3); x[-1]=9", "declare -a x=([0]=\"1\" [1]=\"2\" [2]=\"9\")\n"),
+        ] {
+            let (out, _) = run(&format!("( {src}; declare -p x ) 2>&1"));
+            assert_eq!(out, tail, "{src}");
+        }
+        for (src, sub) in [
+            ("x[-1]=9", "-1"),
+            ("x=5; x[-2]=9", "-2"),
+            ("declare -a x; x[-1]=9", "-1"),
+            ("declare -a x=(); x[-1]=9", "-1"),
+        ] {
+            let (out, _) = run(&format!("( {src}; echo \"st=$?\"; echo REACHED ) 2>&1"));
+            assert_eq!(out, format!("osh: x[{sub}]: bad array subscript\n"), "{src}");
+        }
+        let (out, _) = run("f() { local x; x[-1]=9; declare -p x; }; ( f ) 2>&1");
+        assert_eq!(out, "declare -a x=([0]=\"9\")\n");
     }
 
     /// `+n` is excluded from declare.def:817 outright by

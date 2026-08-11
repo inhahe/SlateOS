@@ -15489,8 +15489,13 @@ impl Shell {
         let positional = name == "@" || name == "*";
         // The reference bash tags an offset/length arithmetic error with:
         // `@`/`*` for the positionals, `a[@]`/`a[*]` for an array.
+        // …unless an indirection put one there: a reference is reported as the
+        // writer spelled it, so `pn='n[@]'; ${!pn:b*}` says `!pn`, not `n[@]`.
+        // See [`Shell::ref_label`].
         let all = if star { b'*' } else { b'@' };
-        let param_ref: Str = if positional {
+        let param_ref: Str = if let Some(label) = self.ref_label.clone() {
+            label
+        } else if positional {
             vec![all]
         } else {
             bfmt![name, b"[", all, b"]"]
@@ -28455,7 +28460,17 @@ impl Shell {
                         // will not evaluate stops the other one. All that differs
                         // is how "no field" is spelled: a string context has only
                         // the empty string to say it with.
-                        let param_ref = crate::unparse::name_sub(name, index);
+                        // A bound that will not evaluate is reported against
+                        // the reference the writer typed, not against the name
+                        // an indirection renamed this part to: bash's
+                        // `${!p:b*}` says `!p: b*: syntax error…`, never
+                        // `sv: …`. `ref_label` is installed for exactly the
+                        // length of a modifier's expansion, so its absence is
+                        // what makes the ordinary `${sv:b*}` name `sv`.
+                        let param_ref = self
+                            .ref_label
+                            .clone()
+                            .unwrap_or_else(|| crate::unparse::name_sub(name, index));
                         self.scalar_slice(&value, offset, length, &param_ref)
                             .into_iter()
                             .next()
@@ -66521,6 +66536,60 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
                 "{body}"
             );
         }
+    }
+
+    #[test]
+    fn an_indirect_substrings_bounds_are_reported_against_the_reference() {
+        // A `${x:off:len}` bound that will not evaluate names the parameter in
+        // front of the arithmetic complaint, and through an indirection that
+        // name is the *reference the writer typed* — bash renames the part it
+        // expands but keeps the reference for the diagnostic.
+        let vars = "sv=SVAL; n=(a b c d); declare -A s=([k]=sv) an=([k]='n[@]'); \
+                    p=sv; pn='n[@]'; declare -n nr=sv; ";
+        let e = |body: &str| run(&format!("{vars}{{ printf '<%s>' {body}; }} 2>&1")).0;
+        for (body, shown) in [
+            ("${!p:b*}", "!p"),
+            ("${!p:0:b*}", "!p"),
+            ("${!p:1:b*}", "!p"),
+            ("${!s[k]:b*}", "!s[k]"),
+            ("${!nr:b*}", "!nr"),
+            // …including one whose referent is a whole array, which the
+            // modifier reaches through as a *slice*.
+            ("${!pn:b*}", "!pn"),
+            ("${!an[k]:b*}", "!an[k]"),
+            // With no indirection in front of it the parameter names itself.
+            ("${sv:b*}", "sv"),
+            ("${s[k]:b*}", "s[k]"),
+            ("${n[@]:b*}", "n[@]"),
+        ] {
+            assert_eq!(
+                e(body),
+                format!(
+                    "osh: {shown}: b*: syntax error: operand expected (error token is \"*\")\n"
+                ),
+                "{body}"
+            );
+        }
+        for (body, shown) in [
+            ("${!p:1/0}", "!p"),
+            ("${!p:0:1/0}", "!p"),
+            ("${!pn:1/0}", "!pn"),
+            ("${n[1]:1/0}", "n[1]"),
+        ] {
+            assert_eq!(
+                e(body),
+                format!("osh: {shown}: 1/0: division by 0 (error token is \"0\")\n"),
+                "{body}"
+            );
+        }
+        // A name the bound *reads* still reports on its own behalf.
+        assert_eq!(
+            run(&format!("{vars}set -u; {{ printf '<%s>' ${{!p:zz}}; }} 2>&1")).0,
+            "osh: zz: unbound variable\n"
+        );
+        // …and a bound that evaluates is untouched.
+        assert_eq!(e("${!p:1:2}"), "<VA>");
+        assert_eq!(e("${!pn:1:2}"), "<b><c>");
     }
 
     #[test]

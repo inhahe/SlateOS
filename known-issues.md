@@ -43,6 +43,96 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
+### TD-OILS-A-DEFAULT-ASSIGNMENT-THROUGH-A-CYCLE-STORES-IN-THE-FRAME-IT-RAN-IN. `${a[0]:=w}` through a circular nameref inside a function writes a local, where bash writes the global — 2026-08-11
+
+**Where:** `userspace/oils/src/interp.rs`, [`Shell::assign_elem_owing`]. Unlike
+[`Shell::scalar_write_checked`], which wraps its store in
+`self.in_dest_scope(dest, |sh| …)`, `assign_elem_owing` never enters the
+resolved target's scope. So a `${name[sub]:=value}` whose walk fell back on a
+frame-local binding stores *there* instead of where the chain points — and,
+because the fallback is then seen as a live local array, the bound a negative
+subscript counts back from is the local's rather than none at all.
+
+```sh
+$ f() { declare -n a=b; declare -n b=a; echo "[${a[0]:=w}]"; declare -p a b; }
+$ ( f; echo --; declare -p a )
+bash: [w] / declare -n a="b" / declare -n b="a" / -- / declare -a a=([0]="w")
+osh : [w] / declare -an a=([0]="w") / declare -n b="a" / -- / declare: a: not found
+
+$ g() { declare -n a=b; declare -n b=a; echo "[${a[-1]:=w}]"; }; ( g )
+bash: a: bad array subscript … a[-1]: bad array subscript
+osh : a: bad array subscript … [w]           # stored at index 0
+```
+
+At **top level** both shells already agree (the fallback *is* the global
+there), and the sibling writes agree in a frame too — `read 'a[1]'` and
+`a[1]=9` both reach the global — because those go through
+[`Shell::scalar_write_checked`], which does enter the scope. It is only the
+`:=` path that does not.
+
+bash's rule for the count-back is `if (entry && ind < 0)`
+(`assign_array_element_internal`, arrayfunc.c:398): when `find_variable
+(vname)` returned null there is nothing to count back from, so the negative
+subscript is refused outright. In osh the equivalent is
+`assign_elem_owing`'s
+
+```rust
+let bound = if elem_invalid_name.is_some() || debt.unmade { 0 } else { self.elem_write_bound(name) };
+```
+
+and `debt.unmade` is false here — the `Some(target) if target.scope !=
+RefScope::Live` arm of [`Shell::resolve_ref_elem_write_deferred`] — so the
+frame-local scalar's bound of 1 is used and `a[-1]` lands on index 0.
+
+**Proper fix.** Make [`Shell::assign_elem_owing`] store under the resolved
+target's scope, the way [`Shell::scalar_write_checked`] does, without
+double-entering it from the callers that already wrap it. The count-back
+bound then falls out correctly: a chain that reached no variable has none.
+
+**How it was found:** writing the corpus for
+TD-OILS-A-READ-THROUGH-A-CHAIN-THAT-REACHED-NOTHING-STILL-JUDGES-ITS-SUBSCRIPT,
+whose `:=` rows had to be moved to top-level subshells to keep the file green.
+
+---
+
+### TD-OILS-AN-INDIRECT-THROUGH-A-SUBSCRIPT-SKIPS-THE-SUBSCRIPTS-OWN-REFUSAL. `${!nosuch[-9]}` reports only `invalid indirect expansion` where bash refuses the subscript first — 2026-08-11
+
+**Where:** `userspace/oils/src/interp.rs`, the `${!name[sub]}` path. bash's
+`parameter_brace_expand_indir` reads the pointer by *ordinary* means — the
+same `array_value` every other read goes through — and so pays that read's
+diagnostics before it decides the result is not a usable name. osh reaches
+its `invalid indirect expansion` without ever asking the subscript.
+
+```sh
+$ echo "[${!nosuch[-9]}]"
+bash: nosuch: bad array subscript
+      nosuch[-9]: invalid indirect expansion
+osh : nosuch[-9]: invalid indirect expansion
+
+$ ( declare -n a=b; declare -n b=a; echo "[${!a[-1]}]" )
+bash: warning×2 / a: bad array subscript / warning / a[-1]: invalid indirect expansion
+osh : warning×3 / a[-1]: invalid indirect expansion
+```
+
+The plain-name case is independent of namerefs, so this is not a walk bug:
+`${!q[-9]}` where `q=(1 2)` *does* now report `q: bad array subscript` in both
+(fixed by
+TD-OILS-A-READ-THROUGH-A-CHAIN-THAT-REACHED-NOTHING-STILL-JUDGES-ITS-SUBSCRIPT)
+— it is only the branch taken when the name is *not* found that skips it.
+Note also the warning count: bash pays 2 walks for the pointer read and 1 more
+afterwards, where osh pays 3 up front.
+
+**Proper fix.** Route the `${!name[sub]}` pointer read through the same
+element read every other form uses — [`Shell::param_elem_lookup`] — so its
+`BadSubscript` is reported, and only then judge the resulting string as a
+name.
+
+**How it was found:** probing the read side of a nameref walk that reached
+nothing, for
+TD-OILS-A-READ-THROUGH-A-CHAIN-THAT-REACHED-NOTHING-STILL-JUDGES-ITS-SUBSCRIPT.
+
+---
+
 ### TD-OILS-A-NEGATIVE-SUBSCRIPT-ON-A-CALL-STACK-ARRAY-IS-NOT-JUDGED-AT-ALL. `BASH_SOURCE[-1]=9` is silently discarded where bash calls it a bad subscript — 2026-08-11
 
 **Where:** `userspace/oils/src/interp.rs`. The three call-stack specials
@@ -40156,6 +40246,106 @@ deny — are now fixed; see F8 and F9.)_
 ---
 
 ## Fixed Bugs
+
+### TD-OILS-A-READ-THROUGH-A-CHAIN-THAT-REACHED-NOTHING-STILL-JUDGES-ITS-SUBSCRIPT. `${a[-1]}` through a circular nameref expanded to nothing in silence where bash refuses the subscript — 2026-08-11 — FIXED 2026-08-11
+
+**Where:** `userspace/oils/src/interp.rs`, [`Shell::expand_array_ref`] (plain
+`${a[i]}` / `${#a[i]}`) and [`Shell::param_elem_lookup`] (every operator form).
+Both returned empty the moment the nameref walk came up short, so the
+subscript that was written was never expanded, never evaluated as arithmetic,
+and never refused.
+
+```sh
+$ ( declare -n a=b; declare -n b=a; i=0; echo "[${a[i++]}]"; echo "i=$i" )
+bash: [] / i=1          # the side effect still happens
+osh : [] / i=0
+
+$ ( declare -n a=b; declare -n b=a; echo "[${a[1+]}]" )
+bash: 1+: syntax error: operand expected (error token is "+")
+osh : []
+
+$ ( declare -n a=b; declare -n b=a; echo "[${a[-1]}]" )
+bash: a: bad array subscript / []
+osh : []
+
+$ ( declare -n r='n[1]'; n=(a b c); echo "[${r[-1]}]" )
+bash: r: bad array subscript / []
+osh : []
+```
+
+**Why bash does it.** `array_variable_part` hands `array_value_internal`
+whatever `find_variable` found, and it is allowed to have found *nothing* — a
+circular chain, or a reference that already designates one element and so has
+no array left for a *second* subscript. The read carries on without a
+variable (arrayfunc.c:1487):
+
+```c
+  var = array_variable_part (s, flags, &t, &len);  /* XXX */
+
+  /* Expand the index, even if the variable doesn't exist, in case side
+     effects are needed, like ${w[i++]} where w is unset. */
+#if 0
+  if (var == 0)
+    return (char *)NULL;
+#endif
+```
+
+So the subscript is still expanded, still judged as arithmetic, and a
+negative one still underflows — because only an array counts back from
+anything:
+
+```c
+  ind = array_expand_index (var, t, len, flags);
+  if (ind < 0)
+    {
+      if (var && array_p (var))
+        ind = array_max_index (array_cell (var)) + 1 + ind;
+      if (ind < 0)
+        INDEX_ERROR();
+    }
+```
+
+`INDEX_ERROR()` (arrayfunc.c:1456) picks a different name either side of that
+same question —
+
+```c
+  if (var) err_badarraysub (var->name);
+  else { t[-1] = '\0'; err_badarraysub (s); t[-1] = '['; }
+```
+
+— the variable the walk *found*, or, where it found none, the word as
+**written**, cut off at its `[`. Which is the mirror image of an element
+*write*, where the diagnostic always quotes the word as written and only the
+store follows the chain
+(TD-OILS-A-NAMEREF-TO-AN-ELEMENT-IS-JUDGED-BEFORE-THE-SUBSCRIPT-IT-WAS-WRITTEN-WITH).
+
+The length form takes none of this route: `array_length_reference`
+(subst.c:7213) answers a null `var` with 0 before the subscript is looked at,
+and faults under `set -u` naming the base alone — so `${#a[1+]}` is `0`, not
+a syntax error, and `${#a[0]}` under `set -u` says `a: unbound variable` where
+`${a[0]}` says `a[0]: unbound variable`.
+
+**Fixed** in this commit. [`Shell::expand_array_ref`] no longer returns early
+when [`Shell::resolve_ref_use_walks`] reaches no variable; it calls
+[`Shell::expand_array_ref_resolved`] with `name: None` and the word as
+written, and that function now takes `Option<&str>` throughout — a `None`
+name has no shape, no elements, and (per `var && array_p (var)`) nothing to
+count back from, so every negative subscript underflows. Which name the
+complaint quotes is `INDEX_ERROR()`'s choice, spelled here as
+`name.unwrap_or(written)`. [`Shell::param_elem_lookup`] gained the matching
+[`Shell::param_elem_unfound`], which takes the arithmetic branch
+unconditionally — `assoc_p (var)` is false for a null `var`, so an empty key
+is never judged as one there.
+
+Corpus:
+`a-read-through-a-chain-that-reached-nothing-still-judges-its-subscript.sh`.
+Unit test:
+`a_read_through_a_chain_that_reached_nothing_still_judges_its_subscript`.
+
+**How it was found:** probing the read side of the same walk, while fixing
+TD-OILS-A-NAMEREF-TO-AN-ELEMENT-IS-JUDGED-BEFORE-THE-SUBSCRIPT-IT-WAS-WRITTEN-WITH.
+
+---
 
 ### TD-OILS-A-NAMEREF-TO-AN-ELEMENT-IS-JUDGED-BEFORE-THE-SUBSCRIPT-IT-WAS-WRITTEN-WITH. `declare -n r='n[1]'; r[-1]=9` says `not a valid identifier` where bash says `bad array subscript` — 2026-08-11 — FIXED 2026-08-11
 

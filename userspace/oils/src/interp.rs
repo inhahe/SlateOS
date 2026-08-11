@@ -15756,21 +15756,26 @@ impl Shell {
         // An empty/unknown/multi-char `@` transform over `[@]`/`[*]` (or the
         // positionals): empty when the collection has no elements, but a "bad
         // substitution" when it has ≥1 element (matches bash's set/unset split
-        // for scalars, generalised to "the collection is non-empty").
+        // for scalars, generalised to "the collection is non-empty") — and,
+        // whatever the collection holds, when the operator asks about the
+        // variable. See [`bad_transform_asks_about_the_variable`].
         if let BulkOp::BadTransform { op } = op {
             let count = if name == "@" || name == "*" {
                 self.positional.len()
             } else {
                 self.array_elements_walks(name, 2).len()
             };
-            if count > 0 {
+            if count > 0 || bad_transform_asks_about_the_variable(op) {
                 // The same spelling `part_src` would have printed — the
-                // diagnostic quotes the word back, so the two have to agree.
-                let raw = bfmt![
-                    &crate::unparse::name_bulk(name, star),
-                    b"@",
-                    &crate::unparse::word_src(op)
-                ];
+                // diagnostic quotes the word back, so the two have to agree —
+                // except where an indirection reached here, whose reference the
+                // writer typed stands in for the array it landed on. See
+                // [`Shell::ref_label`].
+                let shown = self
+                    .ref_label
+                    .clone()
+                    .unwrap_or_else(|| crate::unparse::name_bulk(name, star));
+                let raw = bfmt![&shown, b"@", &crate::unparse::word_src(op)];
                 self.bad_transform_substitution(&raw);
             }
             return Vec::new();
@@ -17246,12 +17251,9 @@ impl Shell {
             // A transform bash will reject is still a transform to this guard:
             // it reads `xform[0]` before it judges the spelling, so an unset
             // referent under `${!u[$(f)]@aa}` resolves twice on its way to the
-            // complaint. Only a literal first part can begin with `a`/`A` —
-            // every other spelling starts with its own quote or `$`.
+            // complaint. See [`bad_transform_asks_about_the_variable`].
             WordPart::BadTransform { op, .. } => {
-                value.is_some()
-                    || matches!(op.parts.first(), Some(WordPart::Literal(t))
-                        if matches!(t.as_bytes().first(), Some(b'a' | b'A')))
+                value.is_some() || bad_transform_asks_about_the_variable(op)
             }
             _ => false,
         }
@@ -28489,13 +28491,21 @@ impl Shell {
             }
             WordPart::BadTransform { name, index, op } => {
                 // Empty/unknown/multi-char `@` operator: empty for an unset
-                // parameter (status 0), "bad substitution" for a set one.
-                if self.op_operand(operand, name, index).is_some() {
-                    let raw = bfmt![
-                        &crate::unparse::name_sub(name, index),
-                        b"@",
-                        &crate::unparse::word_src(op)
-                    ];
+                // parameter (status 0), "bad substitution" for a set one —
+                // unless the operator is one that asks about the *variable*,
+                // which an unset name still answers. See
+                // [`bad_transform_asks_about_the_variable`].
+                if self.op_operand(operand, name, index).is_some()
+                    || bad_transform_asks_about_the_variable(op)
+                {
+                    // Reached through an indirection, `name` is the *target* the
+                    // pointer resolved to, and the reference the writer typed is
+                    // what a complaint quotes. See [`Shell::ref_label`].
+                    let shown = self
+                        .ref_label
+                        .clone()
+                        .unwrap_or_else(|| crate::unparse::name_sub(name, index));
+                    let raw = bfmt![&shown, b"@", &crate::unparse::word_src(op)];
                     self.bad_transform_substitution(&raw)
                 } else {
                     Str::new()
@@ -58782,6 +58792,30 @@ fn array_target_part(part: &WordPart, name: String, star: bool) -> Option<WordPa
     })
 }
 
+/// Does this `@` operator ask about the *variable* rather than about its value?
+///
+/// bash reads the operator's first character before it has judged the spelling,
+/// and the short-circuit that spares an unset parameter exempts exactly two
+/// letters (`parameter_brace_transform`, subst.c):
+///
+/// ```text
+/// xc = xform[0];
+/// if (value == 0 && xc != 'A' && xc != 'a')
+///   return ((char *)NULL);
+/// ```
+///
+/// so `${nope@Za}` is quietly empty while `${nope@aQ}` is refused — the second
+/// asks for attributes, which an unset name still has an answer for, and it is
+/// only *after* that gate that the spelling is judged and rejected.
+///
+/// `xform` is the operator's source text and is never expanded (`${x@$(f)}`
+/// does not run `f`), so only a literal first part can begin with one of the two
+/// letters: every other spelling starts with its own quote or `$`.
+fn bad_transform_asks_about_the_variable(op: &Word) -> bool {
+    matches!(op.parts.first(), Some(WordPart::Literal(t))
+        if matches!(t.as_bytes().first(), Some(b'a' | b'A')))
+}
+
 fn rename_param_target(part: &WordPart, new_name: &str, label: BStr<'_>) -> WordPart {
     let mut out = part.clone();
     out.set_param_name(new_name.to_string());
@@ -66785,6 +66819,48 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
     }
 
     #[test]
+    fn a_trailing_at_the_name_scan_reaches_is_glued_back_onto_the_name() {
+        // The scan's stop set does not include `*`, and bash puts a trailing
+        // `@` back on the name it scanned when the closing brace follows
+        // immediately (subst.c:9585):
+        //
+        //     else if (*name == '!' && t_index > sindex &&
+        //              string[t_index] == '@' && string[t_index+1] == RBRACE)
+        //
+        // Only *after* that does it ask whether the name so made starts like a
+        // variable name (subst.c:9741). One that does is the listing form; one
+        // that does not is a name no variable can have, and bash refuses the
+        // word outright — without indirecting through anything, so whether the
+        // pointer is set makes no difference.
+        let e = |body: &str| {
+            run(&format!(
+                "sv=SVAL; set -- sv nope; {{ printf '<%s>' {body}; }} 2>&1"
+            ))
+            .0
+        };
+        for body in [
+            "${!1@}", "${!1*}", "${!2@}", "${!9@}", "${!12@}", "${!1[0]@}", "${!1s@}",
+        ] {
+            assert_eq!(e(body), format!("osh: {body}: bad substitution\n"), "{body}");
+        }
+        // A mark the scan *stopped at* is an operator after all, and reads the
+        // pointer like any other indirection.
+        assert_eq!(e("${!1@Q}"), "<'SVAL'>");
+        assert_eq!(e("${!1@Z}"), "osh: ${!1@Z}: bad substitution\n");
+        assert_eq!(e("${!1:-D}"), "<SVAL>");
+        // An empty prefix is neither form: the character the scan reached is
+        // then the whole of `name + 1`, with nothing in front of it to judge,
+        // so `${!@}` indirects through the positional list — and complains, if
+        // it must, about the *joined value* it was handed rather than the word.
+        assert_eq!(e("${!@}"), "osh: sv nope: invalid variable name\n");
+        assert_eq!(e("${!*}"), "osh: sv nope: invalid variable name\n");
+        assert_eq!(
+            run("sv=SVAL; set -- sv; printf '<%s>' ${!@}${!*}").0,
+            "<SVALSVAL>"
+        );
+    }
+
+    #[test]
     fn a_name_enumeration_passes_over_a_bare_declaration() {
         // A declaration is not an assignment, so the name it creates is
         // *invisible*: `declare -p` reports it, but every listing built from
@@ -71255,6 +71331,49 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run("set -- x y; { echo \"${@@Z}\"; } 2>&1").0,
             "osh: ${@@Z}: bad substitution\n"
         );
+    }
+
+    #[test]
+    fn a_bad_at_transform_is_judged_after_the_indirect_has_read_its_pointer() {
+        // The spelling is judged in `parameter_brace_transform`, which a
+        // `${!ref[…]@…}` reaches only after `parameter_brace_expand_indir` has
+        // resolved the pointer — so what the *referent* is decides whether the
+        // spelling is ever judged at all, and the complaint quotes the
+        // reference the writer typed rather than the target it landed on.
+        let vars = "sv=SVAL; n=(ax by cz); declare -a ea=(); \
+                    declare -A s=([k0]=sv) u=([k0]=nosuch) mt=([k0]='') \
+                    p=([k0]='n[@]') pe=([k0]='ea[@]') el=([k0]='n[9]'); ";
+        let e = |body: &str| run(&format!("{vars}{{ printf '<%s>' {body}; }} 2>&1")).0;
+        // A referent that is set is refused, under the reference's own spelling.
+        assert_eq!(e("${!s[k0]@Z}"), "osh: ${!s[k0]@Z}: bad substitution\n");
+        assert_eq!(e("${!s[k0]@QU}"), "osh: ${!s[k0]@QU}: bad substitution\n");
+        assert_eq!(e("${!p[k0]@Z}"), "osh: ${!p[k0]@Z}: bad substitution\n");
+        // …one that is unset never gets that far: the transform's own operand
+        // never runs either, so this is simply empty at status 0.
+        for body in ["${!u[k0]@Z}", "${!el[k0]@Z}", "${!pe[k0]@QU}"] {
+            assert_eq!(e(body), "<>", "{body}");
+        }
+        // Except for the two letters that ask about the *variable*, which an
+        // unset name still answers — those are judged, and refused.
+        assert_eq!(e("${!u[k0]@aQ}"), "osh: ${!u[k0]@aQ}: bad substitution\n");
+        assert_eq!(e("${!pe[k0]@aQ}"), "osh: ${!pe[k0]@aQ}: bad substitution\n");
+        // The same split with no indirection in front of it.
+        assert_eq!(e("${nope@Za}"), "<>");
+        assert_eq!(e("${nope@aQ}"), "osh: ${nope@aQ}: bad substitution\n");
+        assert_eq!(e("${nope@AQ}"), "osh: ${nope@AQ}: bad substitution\n");
+        assert_eq!(e("${ea[@]@Z}"), "<>");
+        assert_eq!(e("${ea[@]@aQ}"), "osh: ${ea[@]@aQ}: bad substitution\n");
+        assert_eq!(e("${ea[*]@aQ}"), "osh: ${ea[*]@aQ}: bad substitution\n");
+        // The pointer is still resolved first, so its own endings win.
+        assert_eq!(e("${!mt[k0]@Z}"), "osh: : invalid variable name\n");
+        assert_eq!(
+            e("${!nope[k0]@Z}"),
+            "osh: nope[k0]: invalid indirect expansion\n"
+        );
+        // …and the spellings that are *not* refused come back the same way.
+        assert_eq!(e("${!s[k0]@Q}"), "<'SVAL'>");
+        assert_eq!(e("${!p[k0]@Q}"), "<'ax'><'by'><'cz'>");
+        assert_eq!(e("${!el[k0]@a}"), "<a>");
     }
 
     #[test]

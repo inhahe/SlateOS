@@ -6830,16 +6830,33 @@ fn parse_braced_param_in(
         && let Some(first) = bytes::chars(after_bang).next()
         && is_indirection_starter(syn(first))
     {
-        // `${!prefix*}` / `${!prefix@}` — names of set variables beginning with
-        // `prefix`. This reading comes before every other one a `${!…}` could
-        // have (bash tries it at subst.c:9741, ahead of the array keys at 9780
-        // and of the indirection proper), and it is not a *name* it asks for.
-        // See [`names_prefix`].
-        if let Some((prefix, star)) = names_prefix(after_bang) {
-            return Ok(WordPart::VarNames {
-                prefix: prefix.to_vec(),
-                star,
-            });
+        // A trailing `@`/`*` the parameter-name scan ran the whole way up to is
+        // not an operator on the reference — it is part of the *name*, either
+        // because the scan swallowed it (`*` is not one of its stop characters)
+        // or because bash glues it back on (subst.c:9585). What is then done
+        // with that name is decided before any other reading a `${!…}` could
+        // have — ahead of the array keys and of the indirection proper — and
+        // turns only on whether it starts like one. See
+        // [`scan_reaches_trailing_mark`].
+        if let Some((prefix, star)) = scan_reaches_trailing_mark(after_bang) {
+            // `${!prefix*}` / `${!prefix@}` — the names of every set variable
+            // beginning with `prefix` (subst.c:9741). It is not a *name* that is
+            // asked for, only something that begins like one.
+            if let Some(c) = bytes::chars(prefix).next()
+                && is_name_start(syn(c))
+            {
+                return Ok(WordPart::VarNames {
+                    prefix: prefix.to_vec(),
+                    star,
+                });
+            }
+            // Otherwise the name the scan made is one no variable can be called
+            // — `${!1@}` asks after `1@` — and bash refuses the word without
+            // ever indirecting through anything: `${!1@}` and `${!1*}` are a bad
+            // substitution whether or not `$1` is set, where `${!1@Q}` (whose
+            // `@` the scan stopped *at*, so it really is an operator) reads the
+            // pointer like any other indirection.
+            return Ok(WordPart::BadSubst(raw.to_vec()));
         }
         // `${!name[@]}` / `${!name[*]}` — the keys/indices of an array.
         let chs: Vec<Ch> = bytes::chars(after_bang).collect();
@@ -6929,6 +6946,13 @@ fn parse_braced_param_in(
                     | WordPart::ParamReplace { .. }
                     | WordPart::ParamCase { .. }
                     | WordPart::ParamTransform { .. }
+                    // An `@` operator bash will refuse is still an operator
+                    // here: it judges the spelling in `parameter_brace_transform`,
+                    // which the indirection reaches only after it has resolved
+                    // the pointer — so `${!u[k]@Z}` through an unset target is
+                    // simply empty, and `${!nope[k]@Z}` complains about the
+                    // *pointer*. See [`WordPart::BadTransform`].
+                    | WordPart::BadTransform { .. }
             ) {
                 return Ok(WordPart::IndirectOp {
                     refname: name,
@@ -7862,19 +7886,33 @@ fn is_indirection_starter(c: char) -> bool {
 
 /// The characters that end bash's parameter-name scan
 /// (`string_extract (string, &t_index, "#%^,~:-=?+/@}", SX_VARNAME)`,
-/// subst.c:9567). A `${!…}` body reaches the name-listing form only if the scan
-/// ran the whole way to the trailing `@`/`*`, so any of these standing in the
-/// prefix — outside a subscript, which the scan steps over — takes the body
-/// somewhere else. `*` is deliberately *not* among them, which is why the star
-/// form may carry one inside the prefix as well (`${!a*b*}` lists `a*b`).
+/// subst.c:9567). Any of these standing in a `${!…}` body — outside a
+/// subscript, which the scan steps over — ends the name there, so the body's
+/// trailing `@`/`*` is an operator on the reference rather than part of the name
+/// it scanned. `*` is deliberately *not* among them, which is why a star form
+/// may carry one in the middle as well (`${!a*b*}` lists `a*b`).
 const NAME_SCAN_STOPS: &[u8] = b"#%^,~:-=?+/@}";
 
-/// `${!PREFIX@}` / `${!PREFIX*}` — the names of every set variable beginning
-/// with `PREFIX` — given the brace body with its leading `!` already removed.
-/// Answers the prefix and whether the star spelling was used.
+/// Does bash's parameter-name scan run the whole way through this `${!…}` body
+/// (its leading `!` already removed) to a trailing `@`/`*`? Answers the text
+/// before that character and whether the star spelling was used.
 ///
-/// bash decides this **syntactically and first**, before it has looked at what
-/// the body might otherwise mean (subst.c:9741):
+/// This is what decides that the trailing character is part of the **name**
+/// rather than an operator on the reference. For `*` that needs no help — it is
+/// not one of the scan's stop characters, so the scan simply swallows it — while
+/// an `@` bash glues back on afterwards (subst.c:9585):
+///
+/// ```text
+/// else if (*name == '!' && t_index > sindex && string[t_index] == '@' &&
+///          string[t_index+1] == RBRACE)
+/// ```
+///
+/// which is why only an `@` sitting immediately before the closing brace counts,
+/// and `${!1@Q}` — whose `@` the scan stopped *at* — is an ordinary indirection
+/// with a transform on it.
+///
+/// What the name is then used for turns on one further test, made by the caller
+/// (subst.c:9741):
 ///
 /// ```text
 /// if (want_indir && string[sindex - 1] == RBRACE &&
@@ -7882,37 +7920,33 @@ const NAME_SCAN_STOPS: &[u8] = b"#%^,~:-=?+/@}";
 ///     legal_variable_starter ((unsigned char) name[1]))
 /// ```
 ///
-/// so the prefix is not required to be a *name* — only to start like one. It is
-/// then taken raw: `temp1 = savestring (name + 1)` with its last character cut
-/// off, never expanded and never unquoted. `${!s"v"@}` therefore asks for names
-/// beginning with the five characters `s"v"` (there are none), and `${!s[k]@}`
-/// for names beginning with `s[k]` — *not* the element `s[k]` indirected
-/// through, which is what the same body means with any other operator on it.
+/// so a body that merely *starts* like a name is the name-listing form, and the
+/// prefix is taken raw — `temp1 = savestring (name + 1)` with its last character
+/// cut off — never expanded and never unquoted. `${!s"v"@}` therefore asks for
+/// names beginning with the five characters `s"v"` (there are none), and
+/// `${!s[k]@}` for names beginning with `s[k]` — *not* the element `s[k]`
+/// indirected through, which is what the same body means with any other operator
+/// on it. One that does not start like a name is left as a name no variable can
+/// have, and bash refuses the whole word.
 ///
-/// The remaining condition is that bash's name scan reached that trailing
-/// character at all, i.e. that nothing in the prefix ends it — see
-/// [`NAME_SCAN_STOPS`]. (For the `@` form there is a second clause, subst.c:9585,
-/// that glues the `@` back onto the name it stopped at; it applies only when the
-/// `@` is immediately followed by the closing brace, which is exactly this
-/// function's `strip_suffix`.)
-fn names_prefix(after_bang: BStr<'_>) -> Option<(BStr<'_>, bool)> {
+/// An *empty* prefix is neither: `${!@}` and `${!*}` indirect through the
+/// positional list, because the character the scan reached is then the whole of
+/// `name + 1` and there is nothing in front of it to judge.
+fn scan_reaches_trailing_mark(after_bang: BStr<'_>) -> Option<(BStr<'_>, bool)> {
     let (&last, prefix) = after_bang.split_last()?;
     let star = match last {
         b'*' => true,
         b'@' => false,
         _ => return None,
     };
-    // A bare `${!*}`/`${!@}` is indirection through the positional list, not a
-    // listing of every variable: bash reads `name[1]`, which is the `*`/`@`
-    // itself here, and no name starts with one.
-    if !is_name_start(syn(bytes::chars(prefix).next()?)) {
+    if prefix.is_empty() {
         return None;
     }
     let mut i = 0usize;
     while let Some(&c) = prefix.get(i) {
         match c {
             // `string_extract` steps over the escaped character without ever
-            // testing it, so a `\@` inside the prefix does not end the scan.
+            // testing it, so a `\@` inside the body does not end the scan.
             b'\\' => i = i.saturating_add(2),
             // …and over a whole balanced subscript, which is what lets `s[k]`
             // and even `s[a:b]` stand in a prefix.

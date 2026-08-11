@@ -870,8 +870,9 @@ pub enum WordPart {
     VarNames {
         /// Raw, exactly as written between the `!` and the `*`/`@`: bash never
         /// expands it, never removes its quotes, and does not require it to be
-        /// a name — see [`crate::parser::names_prefix`]. So it is bytes, not a
-        /// name, and it is matched against candidate names bytewise.
+        /// a name — see [`crate::parser::scan_reaches_trailing_mark`]. So it is
+        /// bytes, not a name, and it is matched against candidate names
+        /// bytewise.
         prefix: Str,
         /// `true` for the `*` form, `false` for the `@` form.
         star: bool,
@@ -1244,7 +1245,8 @@ impl WordPart {
             | WordPart::ParamSubstr { name, .. }
             | WordPart::ParamReplace { name, .. }
             | WordPart::ParamCase { name, .. }
-            | WordPart::ParamTransform { name, .. } => *name = new_name,
+            | WordPart::ParamTransform { name, .. }
+            | WordPart::BadTransform { name, .. } => *name = new_name,
             _ => {}
         }
     }

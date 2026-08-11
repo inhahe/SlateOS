@@ -53,4 +53,27 @@ b '${!1@}'
 b '${!#@}'
 b '${!@}'
 b '${!*}'
+echo "--- a trailing @ the scan reached is glued back on, name or not"
+# subst.c:9585 puts the `@` back on the scanned name when it sits immediately
+# before the brace, so `${!1@}` asks after a variable called `1@` and is refused
+# outright — no indirection happens, and whether `$1` names something set makes
+# no difference. `b` above evals its own `$1`, so these need a runner that sets
+# the positional parameters itself, with the probe text kept out of them.
+q() { printf '%-20s ' "$1"; c=$2; ( set -- sv nope; eval "printf '<%s>' $c"; printf ' st=%s' "$?" ) 2>&1; echo " alive=$?"; }
+q '${!1@} ($1=sv)' '${!1@}'
+q '${!1*}' '${!1*}'
+q '${!2@} ($2=nope)' '${!2@}'
+q '${!9@} (unset)' '${!9@}'
+q '${!12@}' '${!12@}'
+q '${!1[0]@}' '${!1[0]@}'
+q '${!1s@}' '${!1s@}'
+# …where a mark the scan *stopped at* is an operator after all, and reads the
+# pointer like any other indirection.
+q '${!1@Q}' '${!1@Q}'
+q '${!1@Z}' '${!1@Z}'
+q '${!1:-D}' '${!1:-D}'
+# `#`, `?` and `-` are stop characters, so these never reach the glue at all.
+q '${!#@}' '${!#@}'
+q '${!?@}' '${!?@}'
+q '${!-@}' '${!-@}'
 echo TAIL

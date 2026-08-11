@@ -21021,17 +21021,42 @@ impl Shell {
         else {
             return f(self);
         };
-        let Some(displaced) = self.declare_global_swap.get(pos).map(|(_, _, s)| s.clone()) else {
+        let Some((idx, displaced)) = self
+            .declare_global_swap
+            .get(pos)
+            .map(|(_, i, s)| (*i, s.clone()))
+        else {
             return f(self);
         };
-        let swapped_in = self.snapshot_var(name);
+        // Undoing the swap parks the outer binding back in the frame that
+        // shadows it, exactly as [`Shell::leave_global_scope`] would, rather
+        // than merely holding it aside: osh reaches an outer context *through*
+        // those frames (see [`Shell::enter_scope_at`]), so a nameref chain that
+        // escapes to the very global this declaration is making has to be able
+        // to find it there. `f() { local -n g=g; declare -g -a g=9; }` stores
+        // through the reference into the global and leaves the local reference
+        // standing, where a chain with nowhere to escape to would unmake it.
+        let mut outer = self.snapshot_var(name);
+        if let Some(frame) = self.local_frames.get_mut(idx)
+            && let Some(slot) = frame.iter_mut().find(|(n, _)| *n == name)
+        {
+            std::mem::swap(&mut slot.1, &mut outer);
+        }
         self.restore_var(name, displaced);
         let out = f(self);
         let updated = self.snapshot_var(name);
         if let Some(slot) = self.declare_global_swap.get_mut(pos) {
             slot.2 = updated;
         }
-        self.restore_var(name, swapped_in);
+        // Putting it back takes whatever `f` left in the frame, so a store that
+        // escaped into the outer binding survives the command. What is left
+        // behind is stale, and `leave_global_scope` overwrites it.
+        if let Some(frame) = self.local_frames.get_mut(idx)
+            && let Some(slot) = frame.iter_mut().find(|(n, _)| *n == name)
+        {
+            std::mem::swap(&mut slot.1, &mut outer);
+        }
+        self.restore_var(name, outer);
         out
     }
 
@@ -45652,31 +45677,125 @@ impl Shell {
                         // `declare -al a=QQ` stores `qq`, `declare -ai a=2+3`
                         // stores `5`, and `declare -ai a+=3` onto a `5` stores `8`
                         // rather than `53`.
-                        let cur = if append { self.scalar_store(name) } else { None };
-                        let Some(stored) =
-                            self.appended_attributed_value(name, cur, v, append)
-                        else {
-                            // A bad `-i` value leaves the array *valued but empty*
-                            // (`declare -ai a=2+` reports `declare -ai a=()`) and
-                            // abandons every operand after it: bash's arithmetic
-                            // error jumps straight out of the builtin, so
-                            // `declare -ai bad=2+ ok=1` leaves `ok` unset.
-                            self.array_valued.insert(name.to_string());
-                            break;
-                        };
                         // Which of the two element stores bash makes is decided
                         // by the variable, not by the letters either:
                         // declare.def:972 is `if (assoc_p (var))`. The kind
                         // this command asked for has already been applied to it
                         // above, so the two agree wherever a letter was given.
+                        //
+                        // ```c
+                        //   else if (simple_array_assign)
+                        //     {
+                        //       if (assoc_p (var))
+                        //         bind_assoc_variable (var, name, savestring ("0"), value, aflags|ASS_FORCE);
+                        //       else
+                        //         bind_array_variable (name, 0, value, aflags|ASS_FORCE);
+                        //     }
+                        // ```
+                        //
+                        // The two halves are not handed the same thing. The
+                        // associative one gets `var` — the variable this
+                        // declaration is *about*, which under `-g` is the
+                        // global — while the indexed one is given only the
+                        // **name**, and `bind_array_variable` begins `entry =
+                        // find_shell_variable (name)` (arrayfunc.c:266), an
+                        // ordinary lookup where everything above it held the
+                        // `find_global_variable` one. So `f() { local g=5;
+                        // declare -g -a g=9; }` declares the global an array
+                        // and leaves it empty, and puts the `9` in the local —
+                        // the same split the subscripted spelling makes (see
+                        // [`Shell::with_live_binding`]).
                         if self.assoc.contains_key(name) {
+                            let cur = if append { self.scalar_store(name) } else { None };
+                            let Some(stored) =
+                                self.appended_attributed_value(name, cur, v, append)
+                            else {
+                                // A bad `-i` value leaves the array *valued but
+                                // empty* (`declare -ai a=2+` reports `declare
+                                // -ai a=()`) and abandons every operand after
+                                // it: bash's arithmetic error jumps straight
+                                // out of the builtin, so `declare -ai bad=2+
+                                // ok=1` leaves `ok` unset.
+                                self.array_valued.insert(name.to_string());
+                                break;
+                            };
                             self.assoc_set(name, b"0".to_vec(), stored, false);
                         } else {
+                            // Everything the store does is the *live*
+                            // variable's: the value it appends onto, the
+                            // `-i`/`-u` fold it applies (the declaration's own
+                            // letters went on the global and touch nothing
+                            // here), and the widening of whatever it finds —
+                            // `array_p (entry) == 0` sends a scalar *and* an
+                            // associative binding through
+                            // `convert_var_to_array` (arrayfunc.c:284), which
+                            // carries the old scalar in as element 0 only to
+                            // have it overwritten, and drops an associative
+                            // one's keys with its `VUNSETATTR (var,
+                            // att_assoc)`. `ASS_FORCE` is passed, so a readonly
+                            // live binding takes the element anyway and raises
+                            // nothing.
+                            let ok = self.with_live_binding(name, |sh| {
+                                // The lookup that finds it is
+                                // `find_shell_variable`, which *follows* a
+                                // nameref — `if (var && nameref_p (var)) var =
+                                // find_variable_nameref (var)` (variables.c) —
+                                // so the element lands on whatever the live
+                                // chain names, where the declaration half never
+                                // followed one at all.
+                                let target = if sh.nameref_attr.contains(name) {
+                                    sh.resolve_ref_array_write(name)
+                                } else {
+                                    RefTarget::plain(name.to_string())
+                                };
+                                if target.sub.is_some() {
+                                    // A reference naming an *element* leaves
+                                    // nothing to make the variable out of:
+                                    // `make_new_array_variable (nameref_cell
+                                    // (entry))` is handed `w[1]` and refuses
+                                    // it. Nothing is stored, and nothing fails.
+                                    let spelled = target.spelling();
+                                    sh.berrln(&bfmt![
+                                        sh.err_prefix(),
+                                        tag,
+                                        b": `",
+                                        &spelled,
+                                        b"': not a valid identifier"
+                                    ]);
+                                    return true;
+                                }
+                                // A chain that escaped a cycle names an *outer*
+                                // context, and the element belongs there: with
+                                // no shadow of its own left to fall on, `f() {
+                                // local -n g=g; declare -g -a g=9; }` stores
+                                // into the global the declaration just made
+                                // and leaves the local reference standing.
+                                sh.in_target_scope(&target, |sh| {
+                                    let base = target.base.as_str();
+                                    let cur =
+                                        if append { sh.scalar_store(base) } else { None };
+                                    let Some(stored) =
+                                        sh.appended_attributed_value(base, cur, v, append)
+                                    else {
+                                        return false;
+                                    };
+                                    sh.assoc.remove(base);
+                                    sh.array_kind_apply(base, false);
+                                    sh.array_valued.insert(base.to_string());
+                                    sh.arrays
+                                        .entry(base.to_string())
+                                        .or_default()
+                                        .insert(0, stored);
+                                    true
+                                })
+                            });
+                            // The variable the declaration is about is left an
+                            // array either way — valued, and empty when the
+                            // store landed somewhere else.
                             self.array_valued.insert(name.to_string());
-                            self.arrays
-                                .entry(name.to_string())
-                                .or_default()
-                                .insert(0, stored);
+                            if !ok {
+                                break;
+                            }
                         }
                     }
                 } else if !self.attr_store(name, append, v, false) {
@@ -73745,6 +73864,120 @@ st=1
         // both halves land on it.
         let (out, _) = run("f() { declare -g g[1]=9; declare -p g; }; f; echo AFTER; declare -p g");
         assert_eq!(out, "declare -a g=([1]=\"9\")\nAFTER\ndeclare -a g=([1]=\"9\")\n");
+    }
+
+    /// The **whole-array** spelling splits the same way, and for the same
+    /// reason: declare.def:975 is `bind_array_variable (name, 0, value,
+    /// aflags|ASS_FORCE)`, which begins `entry = find_shell_variable (name)`
+    /// (arrayfunc.c:266) — an ordinary live lookup. Its `assoc_p (var)` twin on
+    /// the line above is handed `var` itself, so `-A` does not split. osh made
+    /// both stores on the declaration's own variable. Corpus:
+    /// `a-global-array-declaration-stores-into-whichever-binding-is-live.sh`.
+    #[test]
+    fn a_global_array_declaration_stores_into_whichever_binding_is_live() {
+        // The local takes the element; the global is declared and left empty.
+        for (src, inside, after) in [
+            ("local g=5; declare -g -a g=9", r#"declare -a g=([0]="9")"#, "declare -a g=()"),
+            ("local g=5; typeset -g -a g=9", r#"declare -a g=([0]="9")"#, "declare -a g=()"),
+            ("local g=5; local -g -a g=9", r#"declare -a g=([0]="9")"#, "declare -a g=()"),
+            // `+=` appends onto the *live* value, which is the local's.
+            ("local g=5; declare -g -a g+=9", r#"declare -a g=([0]="59")"#, "declare -a g=()"),
+            // Only element zero is taken; the rest of a live array stands.
+            ("local -a g=(1 2); declare -g -a g=9", r#"declare -a g=([0]="9" [1]="2")"#, "declare -a g=()"),
+            ("local -a g=(1 2); declare -g -a g+=9", r#"declare -a g=([0]="19" [1]="2")"#, "declare -a g=()"),
+            // Every letter goes on the global and folds nothing on the way
+            // past: the fold is the live variable's own.
+            ("local g=5; declare -g -a -i g=4+4", r#"declare -a g=([0]="4+4")"#, "declare -ai g=()"),
+            ("local -i g=5; declare -g -a g=4+4", r#"declare -ai g=([0]="8")"#, "declare -a g=()"),
+            ("local g=5; declare -g -a -u g=ab", r#"declare -a g=([0]="ab")"#, "declare -au g=()"),
+            ("local -u g=5; declare -g -a g=ab", r#"declare -au g=([0]="AB")"#, "declare -a g=()"),
+            // `ASS_FORCE`: a readonly live binding takes the element anyway.
+            ("local -r g=5; declare -g -a g=9", r#"declare -ar g=([0]="9")"#, "declare -a g=()"),
+            // `array_p (entry) == 0` sends an associative live binding through
+            // `convert_var_to_array` too, which drops its keys.
+            ("local -A g; declare -g -a g=9", r#"declare -a g=([0]="9")"#, "declare -a g=()"),
+            // The associative half is handed `var`, so `-A` does not split…
+            ("local g=5; declare -g -A g=9", r#"declare -- g="5""#, r#"declare -A g=([0]="9" )"#),
+            // …nor does a compound literal, which is assigned to the variable…
+            ("local g=5; declare -g -a g=(1 2)", r#"declare -- g="5""#, r#"declare -a g=([0]="1" [1]="2")"#),
+            // …nor a plain scalar, which never reaches the array branch.
+            ("local g=5; declare -g g=9", r#"declare -- g="5""#, r#"declare -- g="9""#),
+            // A valueless operand makes the global and leaves it unvalued.
+            ("local g=5; declare -g -a g", r#"declare -- g="5""#, "declare -a g"),
+        ] {
+            let (out, _) = run(&format!(
+                "f() {{ {src}; declare -p g; }}; f; echo AFTER; declare -p g"
+            ));
+            assert_eq!(out, format!("{inside}\nAFTER\n{after}\n"), "{src}");
+        }
+
+        // It is the *global* whose kind decides there is an element store at
+        // all — `array_exists` is judged on `var` (declare.def:885) — so a
+        // flagless operand splits too when the global is already an array.
+        for (pre, src, inside, after) in [
+            ("declare -a g=(7 8);", "local g=5; declare -g g=9", r#"declare -a g=([0]="9")"#, r#"declare -a g=([0]="7" [1]="8")"#),
+            ("declare -a g=(7 8);", "local g=5; declare -g g+=9", r#"declare -a g=([0]="59")"#, r#"declare -a g=([0]="7" [1]="8")"#),
+            ("declare -a g=(7 8);", "local -a g=(1 2); declare -g g=9", r#"declare -a g=([0]="9" [1]="2")"#, r#"declare -a g=([0]="7" [1]="8")"#),
+            // An associative global answers yes as well, and keeps the store.
+            ("declare -A g=([k]=1);", "local g=5; declare -g g=9", r#"declare -- g="5""#, r#"declare -A g=([0]="9" [k]="1" )"#),
+            // A global that was already there is converted, and still never
+            // stored into: the widening carries its old scalar to element 0.
+            ("g=7;", "local g=5; declare -g -a g=9", r#"declare -a g=([0]="9")"#, r#"declare -a g=([0]="7")"#),
+        ] {
+            let (out, _) = run(&format!(
+                "{pre} f() {{ {src}; declare -p g; }}; f; echo AFTER; declare -p g"
+            ));
+            assert_eq!(out, format!("{inside}\nAFTER\n{after}\n"), "{src}");
+        }
+
+        // `find_shell_variable` follows a nameref, so the store lands on what
+        // the live chain names while the declaration keeps the global.
+        let (out, _) = run(
+            "f() { local -n g=w; local w=1; declare -g -a g=9; declare -p g w; }; f; \
+             echo AFTER; declare -p g",
+        );
+        assert_eq!(out, "declare -n g=\"w\"\ndeclare -a w=([0]=\"9\")\nAFTER\ndeclare -a g=()\n");
+
+        // A chain that escaped a cycle names an outer context, and the element
+        // belongs there — to the very global the declaration just made.
+        let (out, _) = run(
+            "f() { local -n g=g; declare -g -a g=9; declare -p g; }; f 2>&1; \
+             echo AFTER; declare -p g",
+        );
+        assert_eq!(
+            out,
+            "main: local: warning: g: circular name reference\n\
+             main: warning: g: circular name reference\n\
+             main: warning: g: circular name reference\n\
+             declare -n g=\"g\"\nAFTER\ndeclare -a g=([0]=\"9\")\n"
+        );
+
+        // A readonly global the declaration is about is refused, and does fail.
+        let (out, _) = run(
+            "declare -r g=7; f() { local g=5; declare -g -a g=9; echo \"st=$?\"; }; f 2>&1; \
+             echo AFTER; declare -p g",
+        );
+        assert_eq!(
+            out,
+            "main: local: g: readonly variable\nmain: declare: g: readonly variable\n\
+             st=1\nAFTER\ndeclare -r g=\"7\"\n"
+        );
+
+        // With nothing to shadow it there is only one variable to reach.
+        let (out, _) = run("f() { declare -g -a g=9; declare -p g; }; f; echo AFTER; declare -p g");
+        assert_eq!(out, "declare -a g=([0]=\"9\")\nAFTER\ndeclare -a g=([0]=\"9\")\n");
+
+        // `-G` asks for this frame's own binding first (declare.def:283 gives
+        // `chklocal` only to it), so there is no swap to undo and no split to
+        // make: the frame's own local takes both halves and goes on return.
+        let (out, _) = run(
+            "f() { local g=5; declare -G -a g=9; declare -p g; }; f 2>&1; \
+             echo AFTER; declare -p g 2>&1",
+        );
+        assert_eq!(
+            out,
+            "declare -a g=([0]=\"9\")\nAFTER\nosh: declare: g: not found\n"
+        );
     }
 
     /// `+n` is excluded from declare.def:817 outright by

@@ -43,6 +43,157 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
+### TD-OILS-A-COMPOUND-DECLARATION-WITH-NO-KIND-LETTER-DOES-NOT-REACH-FOR-AN-ARRAY. `declare g=(1 2)` through a circular reference walks once where bash walks three times, and inside a function leaks the value to a global — 2026-08-11
+
+**Where:** `userspace/oils/src/interp.rs`, the compound-operand loop in
+`Shell::builtin_declare_compound` — `let resolved = if follow {
+self.resolve_ref_use(&a.name) } else { None };`. One walk, whatever the
+declaration is.
+
+bash charges a compound operand that names its kind (`-a`/`-A`) **one** walk and
+one that leaves the kind to the `(` **three**: with no kind letter the operand
+goes through `find_or_make_array_variable` (declare.def's
+`making_array_special`/`compound_array_assign` path), which looks the name up
+again on its own account. A function-local declaration adds the local branch's
+own pair on top — see
+TD-OILS-REDECLARING-A-SELF-NAMING-NAMEREF-WARNS-TOO-FEW-TIMES for that half.
+
+**Reproduce.** All against the cycle `declare -n gq=zq; declare -n zq=gq`
+(global) or `local -n g=z; local -n z=g` (in a function):
+
+| form | bash walks | osh walks | state |
+|---|---|---|---|
+| global `declare -a gq=(1 2)` | 1 | 1 | agrees |
+| global `declare -A gq=([k]=v)` | 1 | 1 | agrees |
+| global `declare gq=(1 2)` | 3 | 1 | **differs** |
+| global `declare -i gq=(1 2)` | 3 | 1 | **differs** |
+| global `declare -g gq=(1 2)` | 3 | 1 | **differs** |
+| local `local -a g=(1 2)` | 2 | 2 | agrees — the local pair, fixed |
+| local `local -A g=([k]=v)` | 2 | 2 | agrees — likewise |
+| local `local g=(1 2)` | 4 | 3 | **differs** |
+| local `local -i g=(1 2)` | 4 | 3 | **differs** |
+| local `local -g g=(1 2)` | 0 | 0 | agrees |
+
+The two function-local rows that differ also **put the value in the wrong
+scope**, which is the serious half. bash leaves `declare -an g=([0]="1"
+[1]="2")` in the frame and nothing behind after the function returns; osh leaves
+the reference untouched at `declare -n g="z"` and creates a **global** `g`:
+
+```sh
+f() { local -n g=z; local -n z=g; local g=(1 2); declare -p g; }; f
+declare -p g          # bash: `declare: g: not found`;  osh: declare -a g=([0]="1" [1]="2")
+```
+
+The cause is the cycle's global escape being honoured where bash does not reach
+for it. It is **not** that the escape itself is wrong — measured, an ordinary
+store through a circular chain creates the global in both shells, so
+`walk_ref_name`'s `RefWalk::closed(… RefTarget::global_of(cur))` must stand:
+
+```sh
+f() { local -n g=z; local -n z=g; g=5;     }; f; declare -p g   # both: declare -- g="5"
+f() { local -n g=z; local -n z=g; g=(1 2); }; f; declare -p g   # both: declare -a g=([0]="1" [1]="2")
+f() { local -n g=z; local -n z=g; declare g=(1 2); }; f; declare -p g
+                                                # bash: not found;  osh: declare -a g=(…)
+```
+
+The *declaration* is what differs: it reaches for an array under the operand's
+own name before the reference is ever followed, so the escape never gets a
+chance. (This also rules out a shared root cause with
+TD-OILS-A-LOCAL-REDECLARATION-OF-A-CIRCULAR-REFERENCE-ACCEPTS-ANY-VALUE, which
+needs the scalar `-n` refusal rather than a change to the walk.) `resolve_ref_use_walks` answers `Some(RefTarget { base: "g", scope:
+GLOBAL })` for the circular chain, so the `(None, None) if follow` arm at
+`interp.rs:46251` — which calls `unreference_for_declare` and falls back to the
+operand's own name — is never taken, and `apply_assignment` then follows the
+surviving nameref attribute out to global scope. The kind-letter forms escape
+this by accident: `array_kind_apply` on the target makes the array before the
+store, so `-a`/`-A` are correct in scope *and* count (verified: nothing survives
+the function in either shell). A
+declaration with no kind letter and a compound value *is* an array declaration
+in bash, and reaching for the array is what the extra walks are; osh's compound
+loop resolves the reference, gets nothing back from the cycle, and drops the
+operand instead of falling back to the operand's own name.
+
+**Proper fix.** Give the compound loop the same shape the scalar one has: the
+walk count is 1 for an operand whose kind is named and 3 for one whose kind
+comes from the `(`, plus **one** more when the declaration binds a local (not
+the scalar path's pair — `make_local_array_variable`/`make_local_assoc_variable`
+stand in for `make_local_variable` and do not walk, so only
+`declare_transform_name`'s walk is added: global `-a` 1 → local `-a` 2, global
+no-kind 3 → local no-kind 4); and a chain that answers nothing makes the array
+under the operand's own name, as `unreference_for_declare` already does for the
+scalar path. `local -g g=(1 2)` on a *local* cycle walks nothing in either
+shell and is already right.
+
+**How it was found:** measuring the walk counts for
+TD-OILS-REDECLARING-A-SELF-NAMING-NAMEREF-WARNS-TOO-FEW-TIMES.
+
+---
+
+### TD-OILS-A-LOCAL-REDECLARATION-OF-A-CIRCULAR-REFERENCE-ACCEPTS-ANY-VALUE. `local g=5` on a circular local nameref writes `5` into the reference where bash refuses it — 2026-08-11
+
+**Where:** `userspace/oils/src/interp.rs`, `Shell::builtin_declare_scoped` — the
+follow walk near `let mut target = if follow { … }` and everything downstream of
+it. The chain walk answers `Some(RefTarget { base: "g", scope: GLOBAL })` for a
+cycle that escaped to global scope **whether or not a global `g` exists**, so
+the operand is treated as naming something and the declaration's value is bound
+under the name `g` — which, because the attribute and value tables are keyed by
+name and this path does not swap scopes, lands on the *local* `g` and overwrites
+the reference.
+
+bash's escape is `find_global_variable_noref (v->name)` (variables.c:2104),
+which answers the global variable **or nothing**. With nothing there,
+`declare_transform_name`'s `var = find_variable (name)` is 0, `newname` becomes
+the operand's own name, and `make_local_variable` returns the existing local
+reference unchanged — so `var` is a nameref, and declare.def:817 refuses a value
+that is not a name:
+
+```c
+      else if (nameref_p (var) && (flags_on & att_nameref) == 0 && (flags_off & att_nameref) == 0 && offset && valid_nameref_value (value, 1) == 0)
+	{
+	  builtin_error (_("`%s': invalid variable name for name reference"), value);
+```
+
+**Reproduce.**
+
+```sh
+f() { local -n g=z; local -n z=g; local g=5; echo "st=$?"; declare -p g; }
+f
+```
+
+bash: two `circular name reference` warnings, then ``local: `5': invalid
+variable name for name reference``, `st=1`, and `g` still `declare -n g="z"`.
+osh: the two warnings, `st=0`, and `declare -n g="5"`.
+
+Measured variants (all with the cycle above in force, all in a function):
+
+| form | bash |
+|---|---|
+| `local g=5` | refused, `g` unchanged |
+| `local -x g=5` | refused |
+| `local g='a b'` | refused, naming `a b` |
+| `local g+=5` | refused, naming `5` — the raw RHS, not the joined value |
+| `local g[1]=5` | refused, and `g` is left `declare -an g=()` |
+| `local g=h` | accepted: `h` is a name |
+| `local -n g=5` / `local +n g=5` | a different refusal, `not a valid identifier`, which osh already matches |
+
+A chain that merely *fails to reach* something is not this: `f() { local -n
+g=nosuch; local g=5; }` binds `nosuch=5` in bash and in osh alike, because
+`find_variable` answered the reference's target rather than nothing.
+
+**Proper fix.** Give the declare builtin the same scope-aware treatment the
+arithmetic operand paths now have: the walk's `RefScope` has to be honoured
+(one swap around the guard and the store, as `Shell::in_dest_scope` does), and
+an escape that names a global which does not exist has to answer *nothing*, so
+the operand falls back to its own name and meets the `invalid variable name for
+name reference` refusal. This is the "the declare builtin" item on the
+still-unwired `resolve_ref_*` list.
+
+**How it was found:** measuring the walk counts for
+TD-OILS-REDECLARING-A-SELF-NAMING-NAMEREF-WARNS-TOO-FEW-TIMES, whose matrix of
+function-local declaration forms turned this up alongside them.
+
+---
+
 ### TD-OILS-A-BAD-AT-TRANSFORM-ON-AN-INDIRECT-IS-JUDGED-BEFORE-THE-POINTER-IS-READ. `${!u[k]@Z}` is a bad substitution where bash reads the pointer and answers empty — 2026-08-10 — ✅ FIXED 2026-08-10
 
 **Where:** `userspace/oils/src/parser.rs`, the list of modifier shapes that

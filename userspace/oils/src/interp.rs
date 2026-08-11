@@ -17404,22 +17404,44 @@ impl Shell {
         if index.is_none() && matches!(refname, "@" | "*") && self.positional.is_empty() {
             return Ok(None);
         }
+        // The pointer is read by *ordinary* means, and paid for as such, before
+        // anything asks whether what came back is a usable name.
+        // `parameter_brace_expand_indir` hands the reference to the same
+        // `parameter_brace_expand_word` → `array_value` every other read goes
+        // through, so the read's own side effects happen
+        // (`${!nope[$(echo ran >&2; echo 0)]}` prints `ran`), its own faults are
+        // reported in its place (`${!nope[0+]}` is the arithmetic syntax error,
+        // `set -u; ${!nope[n]}` is `n: unbound variable`), and its own subscript
+        // is judged — with nothing in hand, arithmetically and against nothing,
+        // so every negative subscript underflows. Only then comes
+        // `find_variable_last_nameref`, and only then the complaint:
+        //
+        // ```c
+        // if (var_is_special == 0 && (v = find_variable_last_nameref (name, 0)))
+        //   { … }
+        // if (legal_identifier (name) && v == 0)
+        //   report_error (_("%s: invalid indirect expansion"), name);
+        // ```
+        //
+        // So a pointer that names nowhere reports *twice* — once for the
+        // subscript, quoting the word cut off at its `[`, and once for the
+        // pointer, quoting it whole — and a circular chain pays two walks for
+        // the read and one more for the lookup that follows it, with the
+        // subscript's refusal in between.
+        let read = self.pointer_lookup(refname, index);
+        if index.is_some() && self.expansion_failed() {
+            // The subscript faulted rather than answered: the complaint is made
+            // and the word is abandoned there, with nothing left to point with
+            // and nothing more to say about it.
+            return Err(());
+        }
+        if let ElemValue::BadSubscript(base) = &read {
+            self.perrln(&format!("{base}: bad array subscript"));
+            // Reading through a bad subscript is not a discard on its own, but
+            // `set -e` ends the shell over the diagnostic all the same.
+            self.note_shell_error(FatalWhen::ErrexitOnly);
+        }
         if index.is_some() && !self.ref_name_exists(refname) {
-            // The subscript is evaluated even though there is no variable to
-            // subscript, and *before* the complaint below — bash reads the
-            // reference the ordinary way and only discovers the pointer is
-            // missing afterwards. So its side effects happen
-            // (`${!nope[$(echo ran >&2; echo 0)]}` prints `ran`) and its own
-            // faults are reported in its place: `${!nope[0+]}` is the arithmetic
-            // syntax error, and `set -u; ${!nope[n]}` is `n: unbound variable`.
-            // Arithmetically, because with no variable in hand there is nothing
-            // to say the subscript is an associative key.
-            if let Some(ArrayIndex::Index(w)) = index {
-                let _ = self.eval_arith_index(w);
-                if self.expansion_failed() {
-                    return Err(());
-                }
-            }
             let src = Self::indirect_ref_src(refname, index);
             self.berrln(&bfmt![
                 self.err_prefix(),
@@ -17429,7 +17451,7 @@ impl Shell {
             self.arm_discard(1);
             return Err(());
         }
-        match self.pointer_lookup(refname, index) {
+        match read {
             ElemValue::Value(v) => Ok(Some(v)),
             // Reading the pointer found nothing. That is the fatal case only
             // when there was nothing to read it *out of*: bash asks after the
@@ -17463,13 +17485,11 @@ impl Shell {
                 }
                 Ok(None)
             }
-            ElemValue::BadSubscript(base) => {
-                self.perrln(&format!("{base}: bad array subscript"));
-                // Reading through a bad subscript is not a discard on its own,
-                // but `set -e` ends the shell over the diagnostic all the same.
-                self.note_shell_error(FatalWhen::ErrexitOnly);
-                Ok(None)
-            }
+            // Already reported above, in its place — ahead of the lookup that
+            // decides whether there was a pointer at all. A subscript that was
+            // refused answered with no name, which is the same nothing an absent
+            // element gives, and a name is all this returns.
+            ElemValue::BadSubscript(_) => Ok(None),
         }
     }
 
@@ -17816,9 +17836,16 @@ impl Shell {
             }
             target.spelling()
         } else {
-            if index.is_some() && !self.ref_name_exists(refname) {
-                return None;
-            }
+            // The read is asked for outright, with no "is there a pointer at
+            // all" gate in front of it. That is the order
+            // `parameter_brace_expand_indir` keeps — the reference is read as
+            // any word is, and only the value that comes back decides anything
+            // — and it is what puts a refused subscript's complaint *ahead* of
+            // the "invalid indirect expansion" the missing pointer earns. The
+            // read itself happens once for the whole part however many times
+            // this recogniser is asked, since [`Shell::pointer_lookup`] is
+            // memoised; only the *reporting* is the general path's, which is
+            // what keeps this function silent.
             match self.pointer_lookup(refname, index) {
                 ElemValue::Value(v) => v,
                 _ => return None,
@@ -75738,6 +75765,109 @@ st=1
                 w.repeat(2)
             )
         );
+    }
+
+    /// `parameter_brace_expand_indir` reads its pointer by *ordinary* means —
+    /// the reference goes to the same `parameter_brace_expand_word` →
+    /// `array_value` every other read goes through — and only then asks whether
+    /// what came back names anything:
+    ///
+    /// ```text
+    ///   if (var_is_special == 0 && (v = find_variable_last_nameref (name, 0)))
+    ///     { … }
+    ///   if (legal_identifier (name) && v == 0)
+    ///     report_error (_("%s: invalid indirect expansion"), name);
+    /// ```
+    ///
+    /// So the read is paid for first, in full. Its side effects happen, its
+    /// faults are reported in its place, and its subscript is judged against
+    /// whatever the walk found — which, for a pointer that names nowhere, is
+    /// nothing at all, so every negative subscript underflows (arrayfunc.c:1487;
+    /// see [`Shell::param_elem_resolved`]). A pointer that names nowhere
+    /// therefore reports **twice**: `nosuch: bad array subscript` for the
+    /// subscript, quoting the word cut off at its `[`, and then
+    /// `nosuch[-9]: invalid indirect expansion` for the pointer, quoting it
+    /// whole. A name that *is* there reports only the first, the second being
+    /// the one that depends on the variable existing.
+    ///
+    /// A circular chain spreads the same way: two warnings for the read, the
+    /// subscript's refusal, then one more warning for the
+    /// `find_variable_last_nameref` that follows it.
+    ///
+    /// osh had the order inverted. [`Shell::indirect_whole_array`] gated its
+    /// read behind [`Shell::ref_name_exists`], so the classification passes
+    /// walked the chain without ever reading through it, and
+    /// [`Shell::indirect_pointer_value`] reached its own `ref_name_exists` — and
+    /// so "invalid indirect expansion" — before the read that would have judged
+    /// the subscript. The refusal never happened, and the three walks all landed
+    /// ahead of the subscript instead of straddling it.
+    #[test]
+    fn an_indirect_through_a_subscript_pays_for_its_read_before_it_judges_the_pointer() {
+        // Nowhere to point: the subscript is refused first, then the pointer.
+        let (out, _) = run("( echo \"[${!nosuch[-9]}]\"; echo \"st=$?\" ) 2>&1");
+        assert_eq!(
+            out,
+            "osh: nosuch: bad array subscript\nosh: nosuch[-9]: invalid indirect expansion\n"
+        );
+        // A subscript that is merely unsatisfied has nothing to refuse, so only
+        // the pointer's own complaint is made.
+        let (out, _) = run("( echo \"[${!nosuch[0]}]\" ) 2>&1");
+        assert_eq!(out, "osh: nosuch[0]: invalid indirect expansion\n");
+
+        // The read's own side effects and faults are the read's, and happen
+        // before either complaint.
+        let (out, _) = run("( i=0; echo \"[${!nosuch[i++]}]\"; echo \"i=$i\" ) 2>&1");
+        assert_eq!(out, "osh: nosuch[i++]: invalid indirect expansion\n");
+        let (out, _) = run("( echo \"[${!nosuch[0+]}]\" ) 2>&1");
+        assert_eq!(out, "osh: 0+: syntax error: operand expected (error token is \"+\")\n");
+
+        // A name that is there gets no second complaint: the bad subscript is
+        // the whole of it, and the expansion is an ordinary empty one.
+        let (out, _) = run("( q=(1 2); echo \"[${!q[-9]}]\"; echo \"st=$?\" ) 2>&1");
+        assert_eq!(out, "osh: q: bad array subscript\n[]\nst=0\n");
+        let (out, _) = run("( declare z; echo \"[${!z[-9]}]\"; echo \"st=$?\" ) 2>&1");
+        assert_eq!(out, "osh: z: bad array subscript\n[]\nst=0\n");
+
+        // Every operator layers on that same read and reports the same pair.
+        for form in ["#x", "@Q", ":-D", ":=w"] {
+            let (out, _) = run(&format!("( echo \"[${{!nosuch[-9]{form}}}]\" ) 2>&1"));
+            assert_eq!(
+                out,
+                "osh: nosuch: bad array subscript\n\
+                 osh: nosuch[-9]: invalid indirect expansion\n",
+                "{form}"
+            );
+        }
+        // …and the length form, which never reaches the pointer at all.
+        let (out, _) = run("( echo \"[${#nosuch[-9]}]\"; echo \"st=$?\" ) 2>&1");
+        assert_eq!(out, "[0]\nst=0\n");
+
+        // A circular chain pays two walks for the read and one for the lookup,
+        // with the subscript's refusal in between.
+        let w = "osh: warning: a: circular name reference\n";
+        let cyc = "declare -n a=b; declare -n b=a;";
+        let (out, _) = run(&format!("( {cyc} echo \"[${{!a[-1]}}]\" ) 2>&1"));
+        assert_eq!(
+            out,
+            format!("{w}{w}osh: a: bad array subscript\n{w}osh: a[-1]: invalid indirect expansion\n")
+        );
+        // The side effect belongs to the read, so it lands between the two
+        // walks that pay for it and the third that follows.
+        let (out, _) = run(&format!(
+            "( {cyc} echo \"[${{!a[$(echo ran >&2; echo -1)]}}]\" ) 2>&1"
+        ));
+        assert_eq!(
+            out,
+            format!(
+                "{w}{w}ran\nosh: a: bad array subscript\n{w}\
+                 osh: a[$(echo ran 1>&2; echo -1)]: invalid indirect expansion\n"
+            )
+        );
+        // Unsubscripted, none of this route is taken at all: a bare `${!a}` on a
+        // nameref asks for the *spelling* it holds, and a cycle spells nothing —
+        // one fatal complaint, no read, no warning.
+        let (out, _) = run(&format!("( {cyc} echo \"[${{!a}}]\" ) 2>&1"));
+        assert_eq!(out, "osh: a: invalid indirect expansion\n");
     }
 
     /// A declaration builtin applies its attributes **before** it stores a

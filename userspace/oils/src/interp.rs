@@ -14209,17 +14209,21 @@ impl Shell {
                 sh.apply_assignment_inner(&a, trace, &spelled)
             });
         }
-        // `set -x`: a plain scalar assignment is traced with its *expanded* value
-        // (emitted at the scalar store below); everything else (indexed element,
-        // array literal) is traced now in source form.
+        // `set -x`: a **scalar** value is traced expanded (emitted at the store
+        // below), an array literal in source form. What decides it is the value
+        // alone — a subscript makes no difference, and the two halves of such an
+        // assignment are shown differently: `i=2; a[$i]=$(f)` traces
+        // `+ a[$i]=v`, the target as written and the value as it came out. It is
+        // the same seam everywhere: bash renders the word it *scanned* for the
+        // name and the string it *expanded* for the value, because by the time
+        // `do_assignment_internal` traces, only the value has been through
+        // expansion (the subscript is evaluated later still, inside
+        // `assign_array_element`).
         //
         // Both are the assignment *as written*: a nameref redirection is not
         // something `set -x` shows, so it is `spelled` that is rendered and
         // `spelled` that decides which of the two forms this is.
-        let trace_scalar = trace
-            && self.xtrace
-            && spelled.index.is_none()
-            && matches!(spelled.value, AssignRhs::Scalar(_));
+        let trace_scalar = trace && self.xtrace && matches!(spelled.value, AssignRhs::Scalar(_));
         if trace && self.xtrace && !trace_scalar {
             let prefix = self.xtrace_prefix();
             let line = bfmt![prefix, crate::unparse::assignment_src(spelled), b"\n"];
@@ -14365,7 +14369,8 @@ impl Shell {
                 if trace_scalar {
                     let prefix = self.xtrace_prefix();
                     let op: &[u8] = if spelled.append { b"+=" } else { b"=" };
-                    let line = bfmt![prefix, &spelled.name, op, xtrace_quote_value(&val), b"\n"];
+                    let target = crate::unparse::assignment_target_src(spelled);
+                    let line = bfmt![prefix, target, op, xtrace_quote_value(&val), b"\n"];
                     self.emit_xtrace(&line);
                 }
                 // The deferred readonly guard for a *subscript-less* write: the
@@ -79122,6 +79127,21 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             run(&format!("{cyc} printf '[%s]' \"$c1\"; f() {{ printf '[%s]' \"$c1\"; }}; f")).0,
             "[][]",
         );
+    }
+
+    /// `set -x` shows an assignment's two halves from two different places. The
+    /// target is the word bash **scanned** for a name; the value is the string
+    /// it **expanded** — because by the time `do_assignment_internal` traces,
+    /// only the value has been through expansion. The subscript has not: it is
+    /// evaluated later still, inside `assign_array_element`.
+    #[test]
+    fn an_element_assignment_is_traced_with_its_value_expanded() {
+        let out =
+            run("exec 2>&1\nf() { echo \"v$1\"; }\ni=2\nset -x\na[$i]=$(f e)\na[1+1]=$(f a)\nset +x")
+                .0;
+        // The subscript is traced as written; the value as it came out.
+        assert!(out.contains("+ a[$i]=ve\n"), "{out:?}");
+        assert!(out.contains("+ a[1+1]=va\n"), "{out:?}");
     }
 
     /// An element write walks the chain *twice* — once to find the array and

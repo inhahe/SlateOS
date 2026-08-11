@@ -653,13 +653,24 @@ fn simple_inline(sc: &SimpleCommand) -> Str {
     s
 }
 
-pub(crate) fn assignment_src(a: &Assignment) -> Str {
+/// The **left-hand side** of an assignment as written: the name, and the
+/// subscript still in source form where there is one.
+///
+/// `set -x` renders a scalar assignment as this plus the *expanded* value, so
+/// the two halves are spelled from different places and the target has to be
+/// available on its own. See [`Shell::apply_assignment_inner`].
+pub(crate) fn assignment_target_src(a: &Assignment) -> Str {
     let mut s = a.name.as_bytes().to_vec();
     if let Some(idx) = &a.index {
         s.push(b'[');
         s.push_str(&word_src(idx));
         s.push(b']');
     }
+    s
+}
+
+pub(crate) fn assignment_src(a: &Assignment) -> Str {
+    let mut s = assignment_target_src(a);
     s.push_str(if a.append { "+=" } else { "=" });
     match &a.value {
         AssignRhs::Scalar(w) => s.push_str(&word_src(w)),

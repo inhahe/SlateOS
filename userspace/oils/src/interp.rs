@@ -16837,8 +16837,9 @@ impl Shell {
         // is the same split arithmetic's element read has. See
         // [`Self::resolve_ref_use_walks`].
         let walks = usize::from(index.is_some()) + 1;
+        let written = name;
         let Some(target) = self.resolve_ref_use_walks(name, walks) else {
-            return ElemValue::Absent;
+            return self.param_elem_unfound(written, index);
         };
         // A reference designating an element — or a whole array — names no
         // variable, but it does name a *value*, and every form that reads a
@@ -16854,9 +16855,35 @@ impl Shell {
             return self.ref_target_value(&target.base, sub);
         }
         let Some(name) = target.as_name().map(str::to_owned) else {
-            return ElemValue::Absent;
+            return self.param_elem_unfound(written, index);
         };
         self.in_target_scope(&target, |sh| sh.param_elem_resolved(&name, index))
+    }
+
+    /// [`Self::param_elem_lookup`] where the walk reached no variable at all —
+    /// a circular chain, or a reference that already designates an element and
+    /// so has no array left for a *second* subscript.
+    ///
+    /// bash does not stop there. `array_value_internal` is handed a null `var`
+    /// and carries on regardless, because the subscript must be expanded "in
+    /// case side effects are needed, like ${w[i++]} where w is unset"
+    /// (arrayfunc.c:1490). So the arithmetic still runs, and a negative
+    /// subscript still underflows — with nothing to count back from, since only
+    /// `var && array_p (var)` counts back — reaching `INDEX_ERROR()`, which for
+    /// a null `var` blames the word as written, cut off at its `[`
+    /// (arrayfunc.c:1456). An *unsubscripted* read has none of this to do and
+    /// is simply unset.
+    fn param_elem_unfound(&mut self, written: &str, index: Option<&Word>) -> ElemValue {
+        let Some(w) = index else {
+            return ElemValue::Absent;
+        };
+        // The arithmetic branch, always: `assoc_p (var)` is false for a null
+        // `var`, so an empty key is never judged as one here.
+        let idx = self.eval_arith_index(w);
+        if idx < 0 {
+            return ElemValue::BadSubscript(written.to_string());
+        }
+        ElemValue::Absent
     }
 
     /// [`Self::param_elem_lookup`] once the chain has been walked and the scope
@@ -19506,28 +19533,42 @@ impl Shell {
         // `${#c1}` is the one that walks twice and `${c1}` the one that walks
         // once.
         let walks = usize::from(!length) + 1;
-        let Some(target) = self.resolve_ref_use_walks(name, walks) else {
-            // A circular chain is unset, and so is a reference that already
-            // designates one element (there is no array left to subscript):
-            // `${a[@]}` is empty, `${#a[@]}` is 0.
-            return if length { b"0".to_vec() } else { Str::new() };
-        };
-        let Some(name) = target.as_name().map(str::to_owned) else {
-            return if length { b"0".to_vec() } else { Str::new() };
-        };
+        let target = self.resolve_ref_use_walks(name, walks);
+        // A circular chain names no variable, and neither does a reference that
+        // already designates one element — there is no array left to subscript.
+        // bash reaches both the same way: `array_variable_part` hands
+        // `array_value_internal` a null `var` (arrayfunc.c:1450), and the read
+        // *carries on without one*. The subscript is still expanded — "in case
+        // side effects are needed, like ${w[i++]} where w is unset"
+        // (arrayfunc.c:1490) — so `${a[i++]}` still increments, `${a[1+]}` is
+        // still an arithmetic error, and a negative one still underflows the
+        // nothing it counts back from. Only which name the complaint quotes
+        // changes, and `INDEX_ERROR()` (arrayfunc.c:1456) says how:
+        //
+        //     if (var) err_badarraysub (var->name);
+        //     else { t[-1] = '\0'; err_badarraysub (s); t[-1] = '['; }
+        //
+        // — the word as written, cut off at its `[`. So `declare -n r=q;
+        // ${r[-9]}` blames `q` and `declare -n r='n[1]'; ${r[-1]}` blames `r`.
+        let landed = target.as_ref().and_then(|t| t.as_name().map(str::to_owned));
         let written = written.to_owned();
-        self.in_target_scope(&target, |sh| {
-            sh.expand_array_ref_resolved(&written, &name, index, length)
-        })
+        match (target, landed) {
+            (Some(t), Some(n)) => self.in_target_scope(&t, |sh| {
+                sh.expand_array_ref_resolved(&written, Some(&n), index, length)
+            }),
+            _ => self.expand_array_ref_resolved(&written, None, index, length),
+        }
     }
 
     /// [`Self::expand_array_ref`] once the chain has been walked and the scope
     /// it named is in place — see [`Self::in_target_scope`]. `written` is the
-    /// name as the writer typed it, `name` the array the walk reached.
+    /// name as the writer typed it, `name` the array the walk reached — `None`
+    /// where it reached nothing, which is bash's null `var` and not the same as
+    /// an empty one.
     fn expand_array_ref_resolved(
         &mut self,
         written: &str,
-        name: &String,
+        name: Option<&str>,
         index: &ArrayIndex,
         length: bool,
     ) -> Str {
@@ -19561,18 +19602,18 @@ impl Shell {
         // An array that exists but is empty (`x=()`, or one whose last element
         // was `unset`) has a shape and is visible, so what counts is the table
         // entry rather than the element.
-        if length && !self.array_shape_exists(name) {
+        if length && !name.is_some_and(|n| self.array_shape_exists(n)) {
             if self.unbound_is_error(written) {
                 self.raise_unbound_length(written.as_bytes());
                 return b"0".to_vec();
             }
-            if !self.var_binding_is_visible(name) {
+            if !name.is_some_and(|n| self.var_binding_is_visible(n)) {
                 return b"0".to_vec();
             }
         }
         match index {
             ArrayIndex::All | ArrayIndex::Star => {
-                let elems = self.array_elements(name);
+                let elems = name.map_or_else(Vec::new, |n| self.array_elements(n));
                 if length {
                     elems.len().to_string().into_bytes()
                 } else {
@@ -19583,8 +19624,15 @@ impl Shell {
                 }
             }
             ArrayIndex::Index(w) => {
-                // Associative subscripts are string keys, not arithmetic.
-                let val = if self.assoc.contains_key(name) {
+                // Which name a complaint quotes is `INDEX_ERROR()`'s choice:
+                // the variable the walk found, or — where it found none — the
+                // word as written. See [`Self::expand_array_ref`].
+                let blame = name.unwrap_or(written).to_owned();
+                // Associative subscripts are string keys, not arithmetic. A
+                // name that is not there is not an associative one either, so
+                // this is the arithmetic branch for it, exactly as bash's
+                // `assoc_p (var)` is false for a null `var`.
+                let val = if name.is_some_and(|n| self.assoc.contains_key(n)) {
                     let key = self.expand_subscript_key(w);
                     // Unless the key is empty because expanding it *failed*.
                     // `expand_subscript_string` is a nested
@@ -19616,11 +19664,11 @@ impl Shell {
                             self.note_shell_error(FatalWhen::ErrexitOnly);
                             return b"0".to_vec();
                         }
-                        self.perrln(&format!("{name}: bad array subscript"));
+                        self.perrln(&format!("{blame}: bad array subscript"));
                         self.note_shell_error(FatalWhen::ErrexitOnly);
                         None
                     } else {
-                        self.assoc_element(name, &key)
+                        name.and_then(|n| self.assoc_element(n, &key))
                     }
                 } else {
                     let idx = self.eval_arith_index(w);
@@ -19631,7 +19679,13 @@ impl Shell {
                     //   * length form `${#a[-9]}` — *fatal*, names the raw
                     //     subscript source followed by `]`
                     //     (`-9]: bad array subscript`), aborts the command.
-                    if self.subscript_is_bad(name, idx) {
+                    //
+                    // A name that is not there has nothing to count back from,
+                    // so every negative subscript on one underflows: bash
+                    // leaves `ind` alone when `var == 0` (only
+                    // `var && array_p (var)` counts back) and falls straight
+                    // into `INDEX_ERROR()`.
+                    if name.map_or(idx < 0, |n| self.subscript_is_bad(n, idx)) {
                         if length {
                             // The echoed subscript is the *expansion* of the
                             // subscript word, so it can hold any byte.
@@ -19643,14 +19697,14 @@ impl Shell {
                             self.note_shell_error(FatalWhen::ErrexitOnly);
                             return b"0".to_vec();
                         }
-                        self.perrln(&format!("{name}: bad array subscript"));
+                        self.perrln(&format!("{blame}: bad array subscript"));
                         self.note_shell_error(FatalWhen::ErrexitOnly);
                         // It named nothing, so there is nothing to expand to —
                         // not even the scalar that `a[-1]` would otherwise have
                         // been allowed to reach through index 0.
                         None
                     } else {
-                        self.array_element(name, idx)
+                        name.and_then(|n| self.array_element(n, idx))
                     }
                 };
                 if length {
@@ -75345,6 +75399,108 @@ st=1
         assert_eq!(out, "osh: GROUPS[-9]: bad array subscript\nst=1\n");
         let (out, _) = run("( read 'GROUPS[1]' <<< x; echo \"st=$?\" ) 2>&1");
         assert_eq!(out, "st=1\n");
+    }
+
+    /// `array_variable_part` hands `array_value_internal` whatever
+    /// `find_variable` found, and it is allowed to have found **nothing** — a
+    /// circular chain, or a reference that already designates one element and
+    /// so has no array left for a *second* subscript. The read carries on
+    /// without a variable (arrayfunc.c:1487):
+    ///
+    /// ```text
+    ///   var = array_variable_part (s, flags, &t, &len);  /* XXX */
+    ///
+    ///   /* Expand the index, even if the variable doesn't exist, in case side
+    ///      effects are needed, like ${w[i++]} where w is unset. */
+    /// #if 0
+    ///   if (var == 0)
+    ///     return (char *)NULL;
+    /// #endif
+    /// ```
+    ///
+    /// So the subscript is still expanded (`${a[i++]}` still increments), its
+    /// arithmetic is still judged (`${a[1+]}` is still a syntax error), and a
+    /// negative one still underflows, because only an array counts back from
+    /// anything: `if (var && array_p (var)) ind = array_max_index (…) + 1 + ind;`
+    ///
+    /// `INDEX_ERROR()` (arrayfunc.c:1456) picks a different name either side of
+    /// that same question —
+    ///
+    /// ```text
+    ///   if (var) err_badarraysub (var->name);
+    ///   else { t[-1] = '\0'; err_badarraysub (s); t[-1] = '['; }
+    /// ```
+    ///
+    /// — the variable the walk *found*, or, where it found none, the word as
+    /// **written**, cut off at its `[`. Which is the mirror image of an element
+    /// *write*, where the diagnostic always quotes the word as written and only
+    /// the store follows the chain.
+    ///
+    /// The length form takes none of this route: `array_length_reference`
+    /// (subst.c:7213) answers a null `var` with 0 before the subscript is
+    /// looked at, and faults under `set -u` naming the base alone.
+    ///
+    /// osh returned empty the moment the walk came up short, so none of the
+    /// subscript's own judgements happened at all.
+    #[test]
+    fn a_read_through_a_chain_that_reached_nothing_still_judges_its_subscript() {
+        let w = "osh: warning: a: circular name reference\n";
+        let cyc = "declare -n a=b; declare -n b=a;";
+
+        // The subscript is judged against the nothing the walk found.
+        let (out, _) = run(&format!("( {cyc} i=0; echo \"[${{a[i++]}}]\"; echo \"i=$i\" ) 2>&1"));
+        assert_eq!(out, format!("{}[]\ni=1\n", w.repeat(2)));
+        let (out, _) = run(&format!("( {cyc} echo \"[${{a[1+]}}]\" ) 2>&1"));
+        assert_eq!(
+            out,
+            format!("{}osh: 1+: syntax error: operand expected (error token is \"+\")\n", w.repeat(2))
+        );
+        let (out, _) = run(&format!("( {cyc} echo \"[${{a[-1]}}]\" ) 2>&1"));
+        assert_eq!(out, format!("{}osh: a: bad array subscript\n[]\n", w.repeat(2)));
+        let (out, _) = run(&format!("( {cyc} echo \"[${{a[0]}}]\" ) 2>&1"));
+        assert_eq!(out, format!("{}[]\n", w.repeat(2)));
+        // A reference that already designates one element has no array left for
+        // a second subscript, and reaches the same nothing.
+        let (out, _) = run("( declare -n r='n[1]'; n=(a b c); echo \"[${r[-1]}]\" ) 2>&1");
+        assert_eq!(out, "osh: r: bad array subscript\n[]\n");
+
+        // The name it blames is the one *written*, where none was found — and
+        // the one the walk landed on, where one was.
+        let (out, _) = run("( declare -a q=(1 2); declare -n r=q; echo \"[${r[-9]}]\" ) 2>&1");
+        assert_eq!(out, "osh: q: bad array subscript\n[]\n");
+        let (out, _) = run("( echo \"[${nosuch[-1]}]\" ) 2>&1");
+        assert_eq!(out, "osh: nosuch: bad array subscript\n[]\n");
+
+        // Every form that reads a value asks the same question.
+        for (form, tail) in [("-D", "[D]\n"), (":-D", "[D]\n"), ("+S", "[]\n"), ("/x/y", "[]\n")] {
+            let (out, _) = run(&format!("( {cyc} echo \"[${{a[-1]{form}}}]\" ) 2>&1"));
+            assert_eq!(out, format!("{}osh: a: bad array subscript\n{tail}", w.repeat(2)), "{form}");
+        }
+        // …including the side effect, which happens even where nothing is found.
+        let (out, _) = run(&format!("( {cyc} i=0; echo \"[${{a[i++]-D}}]\"; echo \"i=$i\" ) 2>&1"));
+        assert_eq!(out, format!("{}[D]\ni=1\n", w.repeat(2)));
+
+        // An unsubscripted read of the same chain has nothing to judge — and,
+        // with no subscript to expand, costs one walk rather than two.
+        let (out, _) = run(&format!("( {cyc} echo \"[${{a-D}}]\" ) 2>&1"));
+        assert_eq!(out, format!("{w}[D]\n"));
+
+        // The length form answers before the subscript is looked at.
+        let (out, _) = run(&format!("( {cyc} echo \"[${{#a[-1]}}]\" ) 2>&1"));
+        assert_eq!(out, format!("{w}[0]\n"));
+        let (out, _) = run(&format!("( {cyc} echo \"[${{#a[1+]}}]\" ) 2>&1"));
+        assert_eq!(out, format!("{w}[0]\n"));
+
+        // …and faults under `set -u` naming the base alone, where the value
+        // form reports the subscript first and then the element it could not
+        // find.
+        let (out, _) = run(&format!("( {cyc} set -u; echo \"[${{a[-1]}}]\" ) 2>&1"));
+        assert_eq!(
+            out,
+            format!("{}osh: a: bad array subscript\nosh: a[-1]: unbound variable\n", w.repeat(2))
+        );
+        let (out, _) = run(&format!("( {cyc} set -u; echo \"[${{#a[0]}}]\" ) 2>&1"));
+        assert_eq!(out, format!("{w}osh: a: unbound variable\n"));
     }
 
     /// A declaration builtin applies its attributes **before** it stores a

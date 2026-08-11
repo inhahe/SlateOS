@@ -46085,21 +46085,84 @@ impl Shell {
             // `apply_assignment` already follows when it stores the values.
             let follow =
                 self.nameref_attr.contains(&a.name) && (!make_local || self.local_binds_here(&a.name));
-            // A declaration that binds a local walks the chain **twice**, here
-            // as on the scalar path: `declare_transform_name` and
-            // `make_local_variable` each make a `find_variable` of their own
-            // before anything is bound, and neither cares that the value is a
-            // compound. See [`Shell::builtin_declare_scoped`], where the same
-            // pair is spelled out against declare.def:601. The second walk is
-            // the one this loop was missing, so `f() { local -n g=z; local -n
-            // z=g; local -a g=(1 2); }` warned once where bash warns twice.
+            // A compound operand of a declaration builtin is **three commands**,
+            // not one, and the chain is walked by the first two. bash performs
+            // it in `expand_declaration_argument` (subst.c:12655):
             //
-            // They are made whether or not the reference is the frame's own —
-            // `find_variable` follows whichever binding of the name is live —
+            //   1. `make_internal_declare (word, opts, …)` runs the builtin over
+            //      the *name alone*, with a rebuilt option string carrying only
+            //      the array kind, the scope and the value-transforming letters
+            //      — `--` when there is nothing to carry — so that the binding
+            //      is made in the right scope before the literal lands.
+            //   2. `do_word_assignment` performs the compound assignment proper
+            //      (`do_compound_assignment`, subst.c:3459).
+            //   3. the word is truncated to the name and handed to the real
+            //      builtin, which by then finds an array and follows nothing.
+            //
+            // So the walks are the *first* command's, plus the assignment's:
+            //
+            //   * Step 1 is exactly the valueless scalar declaration of the same
+            //     name — two walks inside a function (declare.def:601, see
+            //     [`Shell::builtin_declare_scoped`]), and at global scope one
+            //     (`declare_find_variable`, declare.def:774) plus a second from
+            //     the `bind_variable` that creates the name, which `-a`/`-A`
+            //     skip by making the array outright.
+            //   * Step 2 walks twice when it has to make the local itself
+            //     (`find_variable` then `make_local_array_variable`, which calls
+            //     `make_local_variable`) and once at global scope
+            //     (`find_or_make_array_variable`, arrayfunc.c:471) — but *not at
+            //     all* once the name is already an array, because a variable
+            //     that is one is no longer followed: bash's conversion
+            //     overwrites the nameref's value cell with the `ARRAY *`, so the
+            //     chain has nothing left to read. That is why a kind letter,
+            //     which makes the array in step 1, costs the assignment nothing:
+            //     `f() { local -n g=z; local -n z=g; local -a g; local g=(1 2);
+            //     }` warns twice for the `local -a g` and not at all for the
+            //     compound beside it.
+            //
+            // Measured against bash 5.2.37, and every one of these was wrong:
+            //
+            // ```text
+            //             -a / -A   no kind letter (incl. -i)
+            //   local        2            4
+            //   top level    1            3
+            // ```
+            //
+            // `readonly`/`export` are the exception. They declare a *global*
+            // even inside a function (`W_ASSNGLOBAL|W_CHKLOCAL`,
+            // execute_cmd.c:4220), so step 1 is `declare -gG NAME` and the
+            // cycle's escape really is where the literal lands — the frame's
+            // reference is left exactly as it was. Only step 1 is charged here;
+            // the store below walks the surviving chain itself, which is step 2.
+            let kind_letter = indexed || assoc;
+            let escapes = !make_local && !self.local_frames.is_empty();
+            // Everywhere else the name is left unfollowable before the store —
+            // unreferenced at global scope, an array in a frame — so this site
+            // is charged for every walk the operand costs.
+            let walks = if escapes {
+                if kind_letter { 1 } else { 2 }
+            } else if make_local {
+                if kind_letter { 2 } else { 4 }
+            } else if kind_letter {
+                1
+            } else {
+                3
+            };
+            // The walks are made whether or not the reference is the frame's own
+            // — `find_variable` follows whichever binding of the name is live —
             // so a fresh local shadowing a global cycle pays them too, which is
-            // the `!follow` arm below.
+            // the `!follow` arm below. It pays only step 1's pair: the fresh
+            // local it makes is not a reference, so nothing downstream walks.
             let resolved = if follow {
-                self.resolve_ref_use_walks(&a.name, if make_local { 2 } else { 1 })
+                let walk = self.walk_ref_name(&a.name);
+                self.warn_circular_walks(&a.name, &walk, walks);
+                // A declaration that binds a **local** does not take the cycle's
+                // escape. bash's step 2 binds `newname` — the operand's own name
+                // — in the frame (`make_local_array_variable`), where a *bare*
+                // `g=(1 2)` through the same cycle goes out to the global. The
+                // two paths genuinely differ, so the escape is dropped here and
+                // the fallback below binds the name as written.
+                if make_local && walk.circular { None } else { walk.target }
             } else {
                 if make_local && self.nameref_attr.contains(&a.name) {
                     let walk = self.walk_ref_name(&a.name);
@@ -46177,6 +46240,10 @@ impl Shell {
                     self.declared.insert(base);
                 }
             }
+            // Set by the fallback arm below: a local declaration whose chain led
+            // nowhere makes the array out of the reference itself, as bash's
+            // `make_local_array_variable` does — see there.
+            let mut local_array_fallback = false;
             let target = match (&spelled, resolved) {
                 (Some(s), _) => s.clone(),
                 (None, Some(RefTarget { base, sub: None, .. })) => base,
@@ -46243,13 +46310,39 @@ impl Shell {
                     self.last_status = 1;
                     return Err(Flow::Discard);
                 }
-                // A followed reference that resolves to no name at all is a cycle
-                // — `resolve_ref_use` has already warned — so the operand falls
-                // back to the name it was written with, and the reference
-                // attribute goes with the fallback: the literal is about to make
-                // that name an array, and no variable is both.
+                // A followed reference that resolves to no name at all — a cycle
+                // the warnings above have already been charged for, or a chain
+                // too long to follow, which says nothing — so the operand falls
+                // back to the name it was written with.
+                //
+                // What becomes of the reference attribute depends on which of
+                // bash's two paths makes the array. At global scope it is
+                // `find_or_make_array_variable`, which builds a *new* array
+                // variable over the name and so leaves no reference behind:
+                // `declare -n gq=zq; declare -n zq=gq; declare gq=(1 2)` ends as
+                // `declare -a gq=([0]="1" [1]="2")`.
+                //
+                // Inside a function it is `make_local_array_variable`, which
+                // converts the reference *in place* — and bash's conversion only
+                // overwrites the value cell (with the `ARRAY *`), never the
+                // attributes, so the impossible `declare -an g=([0]="1"
+                // [1]="2")` is exactly what the frame is left holding. The name
+                // it was pointing at does not survive, though, so it must not
+                // come back as element 0 of the array being made: that is the
+                // `vars` removal at the conversion below, and it is why `local
+                // g+=(1 2)` through the cycle is `[0]="1" [1]="2"` and not
+                // `[0]="z"`.
+                //
+                // Losing the value is also what makes the shell usable again:
+                // osh's walk stops at a name holding nothing, which is bash's
+                // "an array is not followed" without having to read the garbage
+                // bash reads.
                 (None, None) if follow => {
-                    self.unreference_for_declare(&a.name);
+                    if make_local {
+                        local_array_fallback = true;
+                    } else {
+                        self.unreference_for_declare(&a.name);
+                    }
                     a.name.clone()
                 }
                 (None, None) => a.name.clone(),
@@ -46382,9 +46475,15 @@ impl Shell {
                 }
                 continue;
             }
+            // bash's `make_local_array_variable` — see the fallback arm above.
+            // The reference keeps its attribute and loses the name it held, and
+            // the array is indexed unless the command asked for the other kind.
+            if local_array_fallback {
+                self.vars.remove(&target);
+            }
             if assoc {
                 self.array_kind_apply(&target, true);
-            } else if indexed {
+            } else if indexed || local_array_fallback {
                 self.array_kind_apply(&target, false);
             }
             // Apply the value attributes to the array name (mirrors the scalar
@@ -72750,6 +72849,109 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // self, so it is only the two walks.
         let (out, st) = run(&format!("f() {{ {cyc} declare -n g+=x; }}; f 2>&1"));
         assert_eq!(out, w.repeat(2));
+        assert_eq!(st, 0);
+    }
+
+    /// A compound operand of a declaration builtin is **three commands**
+    /// (`expand_declaration_argument`, subst.c:12655): `make_internal_declare`
+    /// over the name alone, `do_word_assignment` for the compound, and then the
+    /// builtin over the truncated word. Inside a function step 1 is a `local`,
+    /// so the array the assignment fills is the *frame's* — a nameref cycle's
+    /// escape to global scope is never taken, though a bare `g=(1 2)` through
+    /// the same cycle does take it.
+    ///
+    /// Each step walks the operand's chain and each walk warns once, so the
+    /// count is what the decomposition is measured by. A kind letter costs
+    /// step 2 nothing: step 1 has already converted the name to an array
+    /// (`make_local_array_variable`, arrayfunc.c:471), overwriting the
+    /// nameref's value cell with the `ARRAY *`, so there is no name left to
+    /// follow. Corpus:
+    /// `a-compound-declaration-binds-the-local-a-nameref-cycle-cannot-reach.sh`.
+    #[test]
+    fn a_compound_declaration_binds_the_local_a_nameref_cycle_cannot_reach() {
+        let w = "main: warning: g: circular name reference\n";
+        let cyc = "local -n g=z; local -n z=g;";
+
+        // The array is the frame's, and no global is created. The frame keeps
+        // the reference attribute beside it — bash's `declare -p` renders the
+        // `ARRAY *` in the value cell as the array it is.
+        let (out, st) = run(&format!(
+            "f() {{ {cyc} local g=(1 2); declare -p g; }}; f 2>&1; \
+             echo AFTER; declare -p g 2>&1"
+        ));
+        assert_eq!(
+            out,
+            format!("{}declare -an g=([0]=\"1\" [1]=\"2\")\nAFTER\nosh: declare: g: not found\n", w.repeat(4))
+        );
+        // The trailing listing of the name that was never created.
+        assert_eq!(st, 1);
+
+        // Four walks with no kind letter, two with one; a value-transforming
+        // letter is not a kind letter, and an append lands in the same place.
+        for (src, want) in [
+            ("local g=(1 2)", 4),
+            ("local -i g=(1 2)", 4),
+            ("local g+=(1 2)", 4),
+            ("local -a g=(1 2)", 2),
+            ("local -A g=([k]=v)", 2),
+            ("local -a g+=(1 2)", 2),
+            ("declare g=(1 2)", 4),
+            ("typeset -a g=(1 2)", 2),
+            // `-g` asks for the global outright: step 1 is `declare -g`, which
+            // enters no local branch, and step 2 assigns to the global.
+            ("declare -g g=(1 2)", 0),
+            ("declare -ga g=(1 2)", 0),
+        ] {
+            let out = run(&format!("f() {{ {cyc} {src}; }}; f 2>&1")).0;
+            assert_eq!(out.matches("circular").count(), want, "{src} -> {out:?}");
+        }
+
+        // At top level there is no step-1 local, so each count is one less.
+        let gcyc = "declare -n g=z; declare -n z=g;";
+        for (src, want) in [
+            ("declare g=(1 2)", 3),
+            ("declare -i g=(1 2)", 3),
+            ("declare -a g=(1 2)", 1),
+            ("declare -A g=([k]=v)", 1),
+        ] {
+            let out = run(&format!("{{ {gcyc} {src}; }} 2>&1")).0;
+            assert_eq!(out.matches("circular").count(), want, "{src} -> {out:?}");
+        }
+
+        // A fresh local shadowing a *global* cycle pays only step 1: the local
+        // it binds is no reference, so the assignment has nothing to walk.
+        for src in ["local g=(1 2)", "local -a g=(1 2)", "local -A g=([k]=v)"] {
+            let out = run(&format!("{gcyc} f() {{ {src}; }}; f 2>&1")).0;
+            assert_eq!(out.matches("circular").count(), 2, "{src} -> {out:?}");
+        }
+
+        // A chain longer than the walk limit keeps the reference attribute:
+        // `find_variable_last_nameref` gives up silently and the fallback makes
+        // the array out of the reference itself.
+        let deep: String = (1..=9)
+            .map(|i| format!("local -n n{i}=n{};", i + 1))
+            .collect::<String>()
+            + "local -n n10=n1;";
+        let (out, st) = run(&format!("f() {{ {deep} local n1=(1 2); declare -p n1; }}; f 2>&1"));
+        assert_eq!(out, "declare -an n1=([0]=\"1\" [1]=\"2\")\n");
+        assert_eq!(st, 0);
+
+        // A chain that reaches something is walked as often and says nothing.
+        let (out, st) =
+            run("f() { local w=1; local -n g=w; local g=(1 2); declare -p g w; }; f 2>&1");
+        assert_eq!(out, "declare -n g=\"w\"\ndeclare -a w=([0]=\"1\" [1]=\"2\")\n");
+        assert_eq!(st, 0);
+
+        // A *bare* compound is no declaration: it follows the escape out to the
+        // global, and the frame's reference is left as it was.
+        let (out, st) = run(&format!(
+            "f() {{ {cyc} g=(1 2); declare -p g; }}; f 2>&1; \
+             echo AFTER; declare -p g 2>&1"
+        ));
+        assert_eq!(
+            out,
+            format!("{w}declare -n g=\"z\"\nAFTER\ndeclare -a g=([0]=\"1\" [1]=\"2\")\n")
+        );
         assert_eq!(st, 0);
     }
 

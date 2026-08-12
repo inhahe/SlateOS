@@ -38,6 +38,7 @@
 //! - Per-I/O RWF_* flags (`aio_rw_flags`) are ignored.
 
 use crate::errno;
+use crate::perprocess::process_global;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 // ---------------------------------------------------------------------------
@@ -176,7 +177,14 @@ const EMPTY_CONTEXT: AioContext = AioContext {
 };
 
 static AIO_LOCK: AtomicBool = AtomicBool::new(false);
-static mut AIO_CONTEXTS: [AioContext; MAX_AIO_CONTEXTS] = [EMPTY_CONTEXT; MAX_AIO_CONTEXTS];
+process_global! {
+    /// This process's `io_setup`/`io_destroy` context table.  A context
+    /// handle is an encoded index into it, so it must not be shared between
+    /// host test threads: `io_setup` in one test would hand back a handle
+    /// another test's `io_destroy` could free.
+    fn aio_contexts_ptr() -> [AioContext; MAX_AIO_CONTEXTS] =
+        [EMPTY_CONTEXT; MAX_AIO_CONTEXTS];
+}
 
 /// RAII guard for the AIO spinlock.
 struct AioLockGuard;
@@ -247,7 +255,7 @@ pub extern "C" fn io_setup(nr_events: u32, ctx_idp: *mut u64) -> i32 {
 
     let _g = lock_aio();
     // SAFETY: serialized by AIO_LOCK.
-    let table = unsafe { &mut *core::ptr::addr_of_mut!(AIO_CONTEXTS) };
+    let table = unsafe { &mut *aio_contexts_ptr() };
     for (i, ctx) in table.iter_mut().enumerate() {
         if !ctx.in_use {
             *ctx = EMPTY_CONTEXT;
@@ -280,7 +288,7 @@ pub extern "C" fn io_destroy(ctx_id: u64) -> i32 {
 
     let _g = lock_aio();
     // SAFETY: serialized by AIO_LOCK.
-    let table = unsafe { &mut *core::ptr::addr_of_mut!(AIO_CONTEXTS) };
+    let table = unsafe { &mut *aio_contexts_ptr() };
     let Some(ctx) = table.get_mut(slot) else {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -399,7 +407,7 @@ pub extern "C" fn io_submit(ctx_id: u64, nr: i64, iocbpp: *mut *mut Iocb) -> i64
 
     let _g = lock_aio();
     // SAFETY: serialized by AIO_LOCK.
-    let table = unsafe { &mut *core::ptr::addr_of_mut!(AIO_CONTEXTS) };
+    let table = unsafe { &mut *aio_contexts_ptr() };
     let Some(ctx) = table.get_mut(slot) else {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -500,7 +508,7 @@ pub extern "C" fn io_getevents(
 
     let _g = lock_aio();
     // SAFETY: serialized by AIO_LOCK.
-    let table = unsafe { &mut *core::ptr::addr_of_mut!(AIO_CONTEXTS) };
+    let table = unsafe { &mut *aio_contexts_ptr() };
     let Some(ctx) = table.get_mut(slot) else {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -545,7 +553,7 @@ mod tests {
     fn reset_aio_state() {
         let _g = lock_aio();
         // SAFETY: serialized by AIO_LOCK + the test mutex.
-        let table = unsafe { &mut *core::ptr::addr_of_mut!(AIO_CONTEXTS) };
+        let table = unsafe { &mut *aio_contexts_ptr() };
         for ctx in table.iter_mut() {
             *ctx = EMPTY_CONTEXT;
         }

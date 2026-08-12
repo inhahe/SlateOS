@@ -40,6 +40,7 @@
 //! tracked in `todo.txt`.
 
 use crate::errno;
+use crate::perprocess::process_global;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -384,18 +385,31 @@ struct NamedSem {
 // once the lock is dropped concurrent `sem_wait`/`sem_post` are safe.
 static SEM_LOCK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
-static mut NAMED_SEMS: [NamedSem; MAX_NAMED_SEMS] = [const {
-    NamedSem {
-        in_use: false,
-        unlinked: false,
-        name: [0u8; MAX_SEM_NAME],
-        name_len: 0,
-        refcount: 0,
-        sem: SemT {
-            value: core::sync::atomic::AtomicI32::new(0),
-        },
-    }
-}; MAX_NAMED_SEMS];
+process_global! {
+    /// This process's named-semaphore pool (`sem_open`/`sem_unlink`).
+    ///
+    /// `SEM_LOCK` already makes concurrent access memory-safe; the per-thread
+    /// host storage is about test isolation -- a test that opens all
+    /// `MAX_NAMED_SEMS` slots and asserts the next `sem_open` fails is broken
+    /// by any concurrent `sem_unlink` in another test, which no lock prevents.
+    ///
+    /// Note `sem_open` returns a pointer *into* this storage.  That pointer is
+    /// valid only for the thread that obtained it, which is exactly the
+    /// lifetime a test has; do not stash one in a `static` or hand it to a
+    /// spawned thread.
+    fn named_sems_ptr() -> [NamedSem; MAX_NAMED_SEMS] = [const {
+        NamedSem {
+            in_use: false,
+            unlinked: false,
+            name: [0u8; MAX_SEM_NAME],
+            name_len: 0,
+            refcount: 0,
+            sem: SemT {
+                value: core::sync::atomic::AtomicI32::new(0),
+            },
+        }
+    }; MAX_NAMED_SEMS];
+}
 
 /// RAII guard that releases `SEM_LOCK` on drop.
 struct SemLockGuard;
@@ -460,14 +474,14 @@ fn validate_sem_name(name: *const u8) -> Result<usize, i32> {
 /// only live (not-yet-fully-reclaimed) entries.  Returns `None` if no
 /// match.  Caller must hold `SEM_LOCK`.
 fn find_named_sem(name: *const u8, len: usize) -> Option<usize> {
-    // Iterating over indices (not iter()) because NAMED_SEMS is
-    // `static mut` and we must take each slot's address via
+    // Iterating over indices (not iter()) because the pool is reached
+    // through a raw pointer and we must take each slot's address via
     // `addr_of!` to avoid creating an aliasing reference to the whole
     // array — that pattern requires an integer index.
     #[allow(clippy::needless_range_loop)]
     for i in 0..MAX_NAMED_SEMS {
         // SAFETY: SEM_LOCK is held.
-        let slot = unsafe { &*core::ptr::addr_of!(NAMED_SEMS[i]) };
+        let slot = unsafe { &*core::ptr::addr_of!((*named_sems_ptr())[i]) };
         if !slot.in_use || slot.unlinked {
             continue;
         }
@@ -490,7 +504,7 @@ fn find_free_sem_slot() -> Option<usize> {
     #[allow(clippy::needless_range_loop)]
     for i in 0..MAX_NAMED_SEMS {
         // SAFETY: SEM_LOCK is held.
-        let slot = unsafe { &*core::ptr::addr_of!(NAMED_SEMS[i]) };
+        let slot = unsafe { &*core::ptr::addr_of!((*named_sems_ptr())[i]) };
         if !slot.in_use {
             return Some(i);
         }
@@ -506,7 +520,7 @@ fn slot_for_ptr(sem: *mut SemT) -> Option<usize> {
     #[allow(clippy::needless_range_loop)]
     for i in 0..MAX_NAMED_SEMS {
         // SAFETY: SEM_LOCK is held; stable addresses in `static mut`.
-        let p = unsafe { core::ptr::addr_of!(NAMED_SEMS[i].sem) }.cast_mut();
+        let p = unsafe { core::ptr::addr_of!((*named_sems_ptr())[i].sem) }.cast_mut();
         if p == sem {
             return Some(i);
         }
@@ -562,10 +576,10 @@ pub extern "C" fn sem_open(name: *const u8, oflag: i32, mode: u32, value: u32) -
         // Bump refcount; return slot's SemT pointer.
         // SAFETY: SEM_LOCK is held.
         unsafe {
-            NAMED_SEMS[idx].refcount = NAMED_SEMS[idx].refcount.wrapping_add(1);
+            (*named_sems_ptr())[idx].refcount = (*named_sems_ptr())[idx].refcount.wrapping_add(1);
         }
         // SAFETY: stable static address.
-        return unsafe { core::ptr::addr_of_mut!(NAMED_SEMS[idx].sem) };
+        return unsafe { core::ptr::addr_of_mut!((*named_sems_ptr())[idx].sem) };
     }
     // Not found.
     if !create {
@@ -582,7 +596,7 @@ pub extern "C" fn sem_open(name: *const u8, oflag: i32, mode: u32, value: u32) -
     };
     // SAFETY: SEM_LOCK is held; idx is in bounds.
     unsafe {
-        let slot = &raw mut NAMED_SEMS[idx];
+        let slot = &raw mut (*named_sems_ptr())[idx];
         (*slot).in_use = true;
         (*slot).unlinked = false;
         (*slot).name_len = name_len;
@@ -626,14 +640,14 @@ pub extern "C" fn sem_close(sem: *mut SemT) -> i32 {
     };
     // SAFETY: SEM_LOCK is held; idx is in bounds.
     unsafe {
-        if NAMED_SEMS[idx].refcount > 0 {
-            NAMED_SEMS[idx].refcount = NAMED_SEMS[idx].refcount.wrapping_sub(1);
+        if (*named_sems_ptr())[idx].refcount > 0 {
+            (*named_sems_ptr())[idx].refcount = (*named_sems_ptr())[idx].refcount.wrapping_sub(1);
         }
-        if NAMED_SEMS[idx].unlinked && NAMED_SEMS[idx].refcount == 0 {
+        if (*named_sems_ptr())[idx].unlinked && (*named_sems_ptr())[idx].refcount == 0 {
             // Reclaim.
-            NAMED_SEMS[idx].in_use = false;
-            NAMED_SEMS[idx].unlinked = false;
-            NAMED_SEMS[idx].name_len = 0;
+            (*named_sems_ptr())[idx].in_use = false;
+            (*named_sems_ptr())[idx].unlinked = false;
+            (*named_sems_ptr())[idx].name_len = 0;
         }
     }
     0
@@ -667,11 +681,11 @@ pub extern "C" fn sem_unlink(name: *const u8) -> i32 {
     };
     // SAFETY: SEM_LOCK is held; idx is in bounds.
     unsafe {
-        NAMED_SEMS[idx].unlinked = true;
-        if NAMED_SEMS[idx].refcount == 0 {
-            NAMED_SEMS[idx].in_use = false;
-            NAMED_SEMS[idx].unlinked = false;
-            NAMED_SEMS[idx].name_len = 0;
+        (*named_sems_ptr())[idx].unlinked = true;
+        if (*named_sems_ptr())[idx].refcount == 0 {
+            (*named_sems_ptr())[idx].in_use = false;
+            (*named_sems_ptr())[idx].unlinked = false;
+            (*named_sems_ptr())[idx].name_len = 0;
         }
     }
     0
@@ -684,11 +698,11 @@ fn reset_named_sems() {
     for i in 0..MAX_NAMED_SEMS {
         // SAFETY: SEM_LOCK is held.
         unsafe {
-            NAMED_SEMS[i].in_use = false;
-            NAMED_SEMS[i].unlinked = false;
-            NAMED_SEMS[i].name_len = 0;
-            NAMED_SEMS[i].refcount = 0;
-            NAMED_SEMS[i]
+            (*named_sems_ptr())[i].in_use = false;
+            (*named_sems_ptr())[i].unlinked = false;
+            (*named_sems_ptr())[i].name_len = 0;
+            (*named_sems_ptr())[i].refcount = 0;
+            (*named_sems_ptr())[i]
                 .sem
                 .value
                 .store(0, core::sync::atomic::Ordering::Relaxed);

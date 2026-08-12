@@ -4,6 +4,7 @@
 //! for kernel clock discipline (NTP, PTP, etc.).
 
 use crate::errno;
+use crate::perprocess::process_global;
 // Only the real OS build (target_os = "none") issues native syscalls; the host
 // test build links no kernel, so the syscall path is compiled out there (see
 // the ADJ_SETOFFSET application in `adjtimex`).
@@ -236,20 +237,28 @@ struct TimexState {
 }
 
 static TIMEX_LOCK: AtomicBool = AtomicBool::new(false);
-static mut TIMEX_STATE: TimexState = TimexState {
-    offset: 0,
-    // Default NTP frequency tolerance: 32_768_000 scaled ppm (Linux's
-    // `MAXFREQ * (1 << 16)`).
-    freq: 0,
-    maxerror: 16_000_000,
-    esterror: 16_000_000,
-    // Clock is unsynchronized until NTP discipline is engaged.
-    status: STA_UNSYNC,
-    constant: 2,
-    // Linux default jiffy tick (USEC_PER_SEC / HZ at HZ=100).
-    tick: 10_000,
-    tai: 0,
-};
+process_global! {
+    /// This process's NTP discipline state, as reported by `adjtimex`.
+    ///
+    /// Mutations are serialised by `TIMEX_LOCK` on both builds; the
+    /// per-thread host storage is about test *isolation*, not safety --
+    /// without it, one test's `ADJ_OFFSET` lands inside another's
+    /// read-modify-write and both see a state neither asked for.
+    fn timex_state_ptr() -> TimexState = TimexState {
+        offset: 0,
+        // Default NTP frequency tolerance: 32_768_000 scaled ppm (Linux's
+        // `MAXFREQ * (1 << 16)`).
+        freq: 0,
+        maxerror: 16_000_000,
+        esterror: 16_000_000,
+        // Clock is unsynchronized until NTP discipline is engaged.
+        status: STA_UNSYNC,
+        constant: 2,
+        // Linux default jiffy tick (USEC_PER_SEC / HZ at HZ=100).
+        tick: 10_000,
+        tai: 0,
+    };
+}
 
 /// RAII guard for the TIMEX spinlock.
 struct TimexLockGuard;
@@ -415,7 +424,7 @@ pub extern "C" fn adjtimex(tx: *mut Timex) -> i32 {
     let _guard = lock_timex();
 
     // SAFETY: serialized by TIMEX_LOCK.
-    let state = unsafe { &mut *core::ptr::addr_of_mut!(TIMEX_STATE) };
+    let state = unsafe { &mut *timex_state_ptr() };
 
     // SAFETY: caller-supplied writable struct.
     unsafe {
@@ -677,7 +686,7 @@ mod tests {
         let _guard = lock_timex();
         // SAFETY: serialized by TIMEX_LOCK.
         unsafe {
-            let s = &mut *core::ptr::addr_of_mut!(TIMEX_STATE);
+            let s = &mut *timex_state_ptr();
             s.offset = 0;
             s.freq = 0;
             s.maxerror = 16_000_000;

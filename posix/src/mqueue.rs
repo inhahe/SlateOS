@@ -28,10 +28,10 @@
 //! Message queues live in two static pools shared by the whole
 //! process:
 //!
-//! * `MQ_QUEUES` — up to `MAX_QUEUES` named queues, each with a fixed
+//! * the queue table — up to `MAX_QUEUES` named queues, each with a fixed
 //!   ring of `MAX_MSGS_PER_QUEUE` messages of up to `MAX_MSG_SIZE`
 //!   bytes.
-//! * `MQ_DESCS` — up to `MAX_DESCRIPTORS` open descriptors; each
+//! * the descriptor table — up to `MAX_DESCRIPTORS` open descriptors; each
 //!   descriptor points to a queue and stores its own `O_NONBLOCK`
 //!   flag.  The descriptor index (`+1`) is returned to userspace as
 //!   the `mqd_t` value; `mqd_t == 0` is reserved as invalid.
@@ -68,6 +68,7 @@
 //!   attributes in `mq_open` get `EINVAL`.
 
 use crate::errno;
+use crate::perprocess::process_global;
 use crate::stat::Timespec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -183,8 +184,20 @@ impl Descriptor {
 // ---------------------------------------------------------------------------
 
 static MQ_LOCK: AtomicBool = AtomicBool::new(false);
-static mut MQ_QUEUES: [Queue; MAX_QUEUES] = [const { Queue::EMPTY }; MAX_QUEUES];
-static mut MQ_DESCS: [Descriptor; MAX_DESCRIPTORS] = [const { Descriptor::EMPTY }; MAX_DESCRIPTORS];
+process_global! {
+    /// This process's POSIX message queues, keyed by name.
+    ///
+    /// `MQ_LOCK` already makes concurrent access memory-safe; the per-thread
+    /// host storage is about test isolation.  A test that fills all
+    /// `MAX_QUEUES` and asserts the next `mq_open` fails is broken by any
+    /// concurrent `mq_unlink`, and no amount of locking fixes that.
+    fn mq_queues_storage() -> [Queue; MAX_QUEUES] = [const { Queue::EMPTY }; MAX_QUEUES];
+
+    /// Open message-queue descriptors.  An `mqd_t` is an index into this
+    /// table, so it shares the queue table's scope.
+    fn mq_descs_storage() -> [Descriptor; MAX_DESCRIPTORS] =
+        [const { Descriptor::EMPTY }; MAX_DESCRIPTORS];
+}
 
 fn lock_acquire() {
     while MQ_LOCK
@@ -218,12 +231,12 @@ fn lock() -> Guard {
 
 /// SAFETY: Caller must hold `MQ_LOCK`.
 unsafe fn queues_ptr() -> *mut Queue {
-    core::ptr::addr_of_mut!(MQ_QUEUES).cast::<Queue>()
+    mq_queues_storage().cast::<Queue>()
 }
 
 /// SAFETY: Caller must hold `MQ_LOCK`.
 unsafe fn descs_ptr() -> *mut Descriptor {
-    core::ptr::addr_of_mut!(MQ_DESCS).cast::<Descriptor>()
+    mq_descs_storage().cast::<Descriptor>()
 }
 
 /// Validate the queue name: must be non-null, start with `/`, contain
@@ -271,7 +284,7 @@ unsafe fn validate_name(name: *const u8) -> Option<([u8; MAX_NAME_LEN], usize)> 
     Some((buf, i))
 }
 
-/// Find a queue by name.  Returns the index in `MQ_QUEUES` or `None`.
+/// Find a queue by name.  Returns the index in the queue table or `None`.
 ///
 /// SAFETY: Caller must hold the lock.
 unsafe fn find_queue_by_name(name: &[u8]) -> Option<usize> {

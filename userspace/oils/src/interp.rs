@@ -5572,6 +5572,14 @@ pub struct Shell {
     /// first `c` entries of `bash_argv` (reversed within the frame). Materialised
     /// into `arrays["BASH_ARGV"]` by `refresh_bash_arg_arrays`.
     bash_argv: Vec<Str>,
+    /// Whether the base argument frame has ever been captured. bash's
+    /// `init_bash_argv` guards `save_bash_argv` with a `bash_argv_initialized`
+    /// flag of exactly this shape, so the base frame is seeded by the *first*
+    /// `shopt -s extdebug` and by no later one — turning extdebug off and on
+    /// again neither clears the stack nor pushes a second base. Without this a
+    /// function that toggles extdebug leaves a frame behind on return, since
+    /// only the frame its own call pushed is popped.
+    bash_argv_initialized: bool,
     /// Parallel to `fn_stack`: whether each active call pushed an arg frame onto
     /// `bash_argc`/`bash_argv` (true iff extdebug was on at call time). A call's
     /// return pops its arg frame only when its recorded flag is true, so toggling
@@ -6315,6 +6323,7 @@ impl Shell {
             fn_source_stack: Vec::new(),
             bash_argc: Vec::new(),
             bash_argv: Vec::new(),
+            bash_argv_initialized: false,
             arg_frame_pushed: Vec::new(),
             source_stack: Vec::new(),
             loop_depth: 0,
@@ -12879,6 +12888,10 @@ impl Shell {
             // same inside `( … )` as outside, matching bash.
             bash_argc: self.bash_argc.clone(),
             bash_argv: self.bash_argv.clone(),
+            // …and it inherits the once-only flag with them, a subshell being a
+            // copy of the shell rather than a new one: `( shopt -s extdebug )`
+            // under an extdebug already on seeds nothing there either.
+            bash_argv_initialized: self.bash_argv_initialized,
             arg_frame_pushed: self.arg_frame_pushed.clone(),
             // A subshell is still *inside* whatever file is being read, so it
             // inherits the source frames: `${BASH_SOURCE[0]}` and diagnostics
@@ -21081,6 +21094,8 @@ impl Shell {
         if self.bash_argc.is_empty() && self.bash_argv.is_empty() {
             self.arrays.remove("BASH_ARGC");
             self.arrays.remove("BASH_ARGV");
+            self.array_valued.remove("BASH_ARGC");
+            self.array_valued.remove("BASH_ARGV");
             return;
         }
         let argc: BTreeMap<usize, Str> = self
@@ -21097,6 +21112,14 @@ impl Shell {
             .collect();
         self.arrays.insert("BASH_ARGC".to_string(), argc);
         self.arrays.insert("BASH_ARGV".to_string(), argv);
+        // Both are *assigned*, not merely declared — bash's visible flag, which
+        // is what makes an empty one print `BASH_ARGV=()` rather than the bare
+        // `BASH_ARGV` a declaration leaves. It matters because the two stacks
+        // empty independently: a frame for a call with no arguments puts a
+        // count on `BASH_ARGC` and nothing at all on `BASH_ARGV`. See
+        // [`Shell::array_is_visible`].
+        self.array_valued.insert("BASH_ARGC".to_string());
+        self.array_valued.insert("BASH_ARGV".to_string());
     }
 
     /// Capture the current `set`-option state for `local -`.
@@ -48707,12 +48730,20 @@ impl Shell {
         if named_extdebug {
             self.sync_extdebug_tracing(flags.set);
         }
-        // On an extdebug OFF→ON transition, seed the BASH_ARGC/BASH_ARGV stack
-        // with a base frame holding the shell's *current* positional parameters.
+        // The *first* time extdebug comes on, seed the BASH_ARGC/BASH_ARGV stack
+        // with a base frame holding the shell's current positional parameters.
         // This base is a static snapshot — a later `set --` does not change it —
-        // and disabling extdebug does not clear it (matching bash). Subsequent
-        // function calls push their own frames on top of this base.
-        if !extdebug_before && self.extdebug_on() {
+        // and disabling extdebug does not clear it. Subsequent function calls
+        // push their own frames on top of this base.
+        //
+        // Once, and only once: bash's turn-on handler calls `init_bash_argv`,
+        // whose whole body is guarded by `bash_argv_initialized`, so a second
+        // OFF→ON transition seeds nothing. That guard is load-bearing rather
+        // than an optimisation — a function that turns extdebug off and on again
+        // pops only the frame its own call pushed, so re-seeding would leave the
+        // extra base behind for good.
+        if !extdebug_before && self.extdebug_on() && !self.bash_argv_initialized {
+            self.bash_argv_initialized = true;
             let base = self.positional.clone();
             self.push_arg_frame(&base);
         }
@@ -73351,6 +73382,69 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("f(){ shopt -s extdebug; g z; }; g(){ echo \"[${BASH_ARGC[@]}][${BASH_ARGV[@]}]\"; }; f a b").0,
             "[1 2][z b a]\n"
+        );
+    }
+
+    #[test]
+    fn an_empty_argument_stack_array_is_assigned_not_merely_declared() {
+        // bash *assigns* BASH_ARGC/BASH_ARGV rather than merely declaring them, so
+        // an empty one prints `=()` and not the bare name a declaration leaves —
+        // `invisible_p`'s distinction, the same one `declare -a q` and `q=()` draw.
+        // It is reachable because the two stacks empty independently: a frame for a
+        // call with no arguments puts a count on BASH_ARGC and nothing on BASH_ARGV.
+        assert_eq!(
+            run("shopt -s extdebug; f(){ g(){ declare -p BASH_ARGV; }; g; }; f").0,
+            "declare -a BASH_ARGV=()\n"
+        );
+        assert_eq!(
+            run("shopt -s extdebug; f(){ declare -p BASH_ARGC; }; f").0,
+            "declare -a BASH_ARGC=([0]=\"0\" [1]=\"0\")\n"
+        );
+        // …and with arguments it fills, the flag being about assignment and not
+        // about emptiness.
+        assert_eq!(
+            run("shopt -s extdebug; f(){ declare -p BASH_ARGV BASH_ARGC; }; f a b").0,
+            "declare -a BASH_ARGV=([0]=\"b\" [1]=\"a\")\ndeclare -a BASH_ARGC=([0]=\"2\" [1]=\"0\")\n"
+        );
+        // Assigned-but-empty is still empty, so `-v` on the name is false.
+        assert_eq!(
+            run("shopt -s extdebug; f(){ [[ -v BASH_ARGV ]]; echo \"v=$?\"; }; f").0,
+            "v=1\n"
+        );
+    }
+
+    #[test]
+    fn the_argument_stack_base_frame_is_captured_once_and_never_again() {
+        // bash's turn-on handler calls `init_bash_argv`, whose body is guarded by
+        // `bash_argv_initialized`, so only the *first* `shopt -s extdebug` seeds a
+        // base frame. The guard is load-bearing: a call pops only the frame its own
+        // call pushed, so a function that toggles extdebug would otherwise return
+        // leaving an extra base behind — and grow the stack once per round.
+        assert_eq!(
+            run("shopt -s extdebug; f(){ shopt -u extdebug; shopt -s extdebug; }; f; f; f; echo \"[${BASH_ARGC[*]}]\"").0,
+            "[0]\n"
+        );
+        // The base is a snapshot of the positionals at that first turn-on; a later
+        // `set --` does not move it and a later turn-on does not recapture it.
+        assert_eq!(
+            run("set -- x y; shopt -s extdebug; set -- a; shopt -u extdebug; shopt -s extdebug; echo \"[${BASH_ARGC[*]}][${BASH_ARGV[*]}]\"").0,
+            "[2][y x]\n"
+        );
+        // Turning extdebug off clears nothing — only a frame's own pop removes it.
+        assert_eq!(
+            run("shopt -s extdebug; shopt -u extdebug; echo \"[${BASH_ARGC[*]}]\"").0,
+            "[0]\n"
+        );
+        // What being off does do is skip the push, so a call made while it is off
+        // contributes no frame to find later.
+        assert_eq!(
+            run("shopt -s extdebug; shopt -u extdebug; f(){ :; }; f a b; shopt -s extdebug; echo \"[${BASH_ARGC[*]}]\"").0,
+            "[0]\n"
+        );
+        // …and the base still sits under every live frame, toggling or not.
+        assert_eq!(
+            run("shopt -s extdebug; f(){ shopt -u extdebug; shopt -s extdebug; g(){ echo \"[${BASH_ARGC[*]}][${BASH_ARGV[*]}]\"; }; g w; }; f a").0,
+            "[1 1 0][w a]\n"
         );
     }
 

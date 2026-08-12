@@ -43,49 +43,6 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
-### TD-OILS-BASH_ARGV-AND-BASH_ARGC-ARE-NOT-LISTABLE-AT-ALL. `declare -p BASH_ARGV` says "not found" where bash prints an empty array — 2026-08-11
-
-**Where:** `userspace/oils/src/interp.rs`, [`Shell::DYNAMIC_SPECIALS`]. The
-extended-debugging argument stack has a row in [`NOASSIGN_VARS`] — so writes
-to it are refused correctly — but no row in the dynamic-specials table, so
-nothing lists it and `declare -p` cannot name it.
-
-```sh
-$ declare -p BASH_ARGV; echo "st=$?"
-bash: declare -a BASH_ARGV=()
-      st=0
-osh : declare: BASH_ARGV: not found
-      st=1
-
-$ declare -p BASH_ARGC
-bash: declare -a BASH_ARGC=([0]="0")
-osh : declare: BASH_ARGC: not found
-
-$ declare -p | grep -c BASH_ARG
-bash: 4       # both names, in the unfiltered listing too
-osh : 2
-```
-
-Reading them already agrees — `${BASH_ARGV[@]}` is empty and
-`${#BASH_ARGV[@]}` is 0 in both — so this is the *listing* alone. Note the two
-list differently: `BASH_ARGV` prints as `=()` where `BASH_ARGC` prints with an
-element, which is the [`DynListing::EmptyArray`] / element-bearing distinction
-the three call-stack views already draw.
-
-**Proper fix.** Give both names a [`DynamicSpecial`] row with `listed_flags:
-"a"`. `BASH_ARGV` is [`DynListing::EmptyArray`]; `BASH_ARGC` needs a live
-listing whose element 0 is the current frame's argument count (0 at a script's
-top level), which is a shape [`DynListing::Live`] already covers. Both keep
-`assign: DynAssign::Discard`, the `noassign` refusal being independent of the
-listing.
-
-**How it was found:** writing the corpus for
-TD-OILS-AN-ELEMENT-WRITE-TO-A-MAINTAINED-NAME-SKIPS-ITS-SUBSCRIPTS-OWN-REFUSALS,
-whose `BASH_ARGV[0]=9` row wanted to show that a refused element widens
-nothing.
-
----
-
 ### TD-OILS-A-COMPOUND-DECLARATION-BY-A-CHKLOCAL-BUILTIN-BINDS-THE-FRAMES-REFERENCE. `readonly g=(1 2)` in a function puts the array and its attributes on the local reference, not on the global the escape names — 2026-08-11
 
 **Where:** `userspace/oils/src/interp.rs`, `Shell::declare_compounds_scoped` —
@@ -40161,6 +40118,86 @@ deny — are now fixed; see F8 and F9.)_
 ---
 
 ## Fixed Bugs
+
+### TD-OILS-THE-ARGUMENT-STACK-BASE-FRAME-WAS-CAPTURED-ON-EVERY-TURN-ON. A function that toggled `extdebug` grew `BASH_ARGC` by one every time — 2026-08-11 — FIXED 2026-08-11
+
+**Where:** `userspace/oils/src/interp.rs`, the `shopt` builtin's OFF→ON
+transition. It seeded a base frame on *every* such transition, where bash seeds
+one on the first and none after.
+
+```sh
+$ shopt -s extdebug; f() { shopt -u extdebug; shopt -s extdebug; }; f; f; f
+$ echo "[${BASH_ARGC[*]}]"
+bash: [0]
+osh : [0 0 0 0]
+```
+
+**Why bash does it.** The turn-on handler calls `init_bash_argv`, whose whole
+body is under a once-only flag:
+
+```c
+  void init_bash_argv (void)
+  { if (bash_argv_initialized == 0) { save_bash_argv (); bash_argv_initialized = 1; } }
+```
+
+The guard is load-bearing rather than thrifty. A call pops only the frame its
+own call pushed — osh records that per frame in [`Shell::arg_frame_pushed`],
+so toggling mid-call cannot desynchronise the two stacks — which means a
+re-seeded base has nothing that will ever remove it. Every off/on round inside
+a function left one more behind, and the stack grew without bound.
+
+The base is a snapshot besides: a later `set --` does not move it, and turning
+extdebug *off* clears nothing. What being off does is skip the push, so a call
+made while it is off contributes no frame to find afterwards.
+
+**Fixed** in this commit. New field [`Shell::bash_argv_initialized`], set at the
+first seeding and inherited by subshells with the stacks themselves.
+
+Corpus: `the-argument-stack-base-frame-is-captured-once-and-never-again.sh`.
+Unit test: `the_argument_stack_base_frame_is_captured_once_and_never_again`.
+
+**How it was found:** a `declare -p | grep BASH_ARGC` row in the corpus for
+TD-OILS-AN-EMPTY-ARGUMENT-STACK-ARRAY-LISTED-AS-MERELY-DECLARED came back with
+one frame too many.
+
+---
+
+### TD-OILS-AN-EMPTY-ARGUMENT-STACK-ARRAY-LISTED-AS-MERELY-DECLARED. `declare -p BASH_ARGV` printed the bare name where bash prints `=()` — 2026-08-11 — FIXED 2026-08-11
+
+**Where:** `userspace/oils/src/interp.rs`, [`Shell::refresh_bash_arg_arrays`].
+It materialised `BASH_ARGC`/`BASH_ARGV` into [`Shell::arrays`] without marking
+them in [`Shell::array_valued`] — bash's `invisible_p`, the flag that separates
+a name that was *assigned* from one that was merely *declared*.
+
+```sh
+$ shopt -s extdebug; f() { g() { declare -p BASH_ARGV; }; g; }; f
+bash: declare -a BASH_ARGV=()
+osh : declare -a BASH_ARGV
+```
+
+bash assigns both names rather than declaring them, so an empty one still
+prints `=()`. It is the same distinction `declare -a q` and `q=()` draw, and it
+is reachable here because the two stacks empty *independently*: a frame for a
+call with no arguments puts a count on `BASH_ARGC` and nothing at all on
+`BASH_ARGV`, so the pair can be a non-empty array beside an empty one.
+
+**Fixed** in this commit: the flag is set with the arrays and cleared with them.
+
+Corpus: `an-empty-argument-stack-array-is-assigned-not-merely-declared.sh`.
+Unit test: `an_empty_argument_stack_array_is_assigned_not_merely_declared`.
+
+Note the corpus turns `extdebug` on throughout. Without it osh populates
+neither array, a separate and deliberate divergence documented under
+TD-OILS-MISSING-SPECIAL-ARRAYS: bash exposes an undocumented base frame whose
+behaviour contradicts its own man page ("The shell sets BASH_ARGC only when in
+extended debugging mode").
+
+**How it was found:** writing the corpus for
+TD-OILS-AN-ELEMENT-WRITE-TO-A-MAINTAINED-NAME-SKIPS-ITS-SUBSCRIPTS-OWN-REFUSALS,
+whose `BASH_ARGV[0]=9` row wanted to show that a refused element widens
+nothing.
+
+---
 
 ### TD-OILS-AN-ELEMENT-WRITE-TO-A-MAINTAINED-NAME-SKIPS-ITS-SUBSCRIPTS-OWN-REFUSALS. `GROUPS[-9]=9` was silently discarded where bash calls it a bad subscript — 2026-08-11 — FIXED 2026-08-11
 

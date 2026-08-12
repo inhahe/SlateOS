@@ -60,6 +60,7 @@
 
 use crate::errno;
 use crate::fdtable::{self, HandleKind};
+use crate::perprocess::process_global;
 #[cfg(target_os = "none")]
 use crate::syscall::{
     SYS_EVENTFD_CLOSE, SYS_EVENTFD_CREATE, SYS_EVENTFD_READ, SYS_EVENTFD_TRY_READ,
@@ -153,11 +154,14 @@ const EPOLL_INSTANCE_INIT: EpollInstance = EpollInstance {
     entries: [None; MAX_EPOLL_ENTRIES],
 };
 
-static mut EPOLL_INSTANCES: [EpollInstance; MAX_EPOLL_INSTANCES] =
-    [EPOLL_INSTANCE_INIT; MAX_EPOLL_INSTANCES];
-
-fn instances_ptr() -> *mut [EpollInstance; MAX_EPOLL_INSTANCES] {
-    core::ptr::addr_of_mut!(EPOLL_INSTANCES)
+process_global! {
+    /// This process's epoll instance table.
+    ///
+    /// An epoll fd's `handle` is an index into this table, so it must live at
+    /// the same scope as the fd table itself (`fdtable.rs`) or an fd from one
+    /// host test thread would name another thread's instance.
+    fn instances_ptr() -> [EpollInstance; MAX_EPOLL_INSTANCES] =
+        [EPOLL_INSTANCE_INIT; MAX_EPOLL_INSTANCES];
 }
 
 /// Allocate a free instance slot and return its index.
@@ -1112,11 +1116,11 @@ const TIMERFD_INSTANCE_INIT: TimerfdInstance = TimerfdInstance {
     nonblock: false,
 };
 
-static mut TIMERFD_INSTANCES: [TimerfdInstance; MAX_TIMERFD_INSTANCES] =
-    [TIMERFD_INSTANCE_INIT; MAX_TIMERFD_INSTANCES];
-
-fn timerfd_table_ptr() -> *mut [TimerfdInstance; MAX_TIMERFD_INSTANCES] {
-    core::ptr::addr_of_mut!(TIMERFD_INSTANCES)
+process_global! {
+    /// This process's timerfd instance table.  Indexed by a timerfd's
+    /// `handle`; see [`instances_ptr`] for why the scope matters.
+    fn timerfd_table_ptr() -> [TimerfdInstance; MAX_TIMERFD_INSTANCES] =
+        [TIMERFD_INSTANCE_INIT; MAX_TIMERFD_INSTANCES];
 }
 
 fn allocate_timerfd_instance() -> Option<usize> {
@@ -1810,11 +1814,11 @@ const INOTIFY_INSTANCE_INIT: InotifyInstance = InotifyInstance {
     count: 0,
 };
 
-static mut INOTIFY_INSTANCES: [InotifyInstance; MAX_INOTIFY_INSTANCES] =
-    [INOTIFY_INSTANCE_INIT; MAX_INOTIFY_INSTANCES];
-
-fn inotify_table_ptr() -> *mut [InotifyInstance; MAX_INOTIFY_INSTANCES] {
-    core::ptr::addr_of_mut!(INOTIFY_INSTANCES)
+process_global! {
+    /// This process's inotify instance table.  Indexed by an inotify fd's
+    /// `handle`; see [`instances_ptr`] for why the scope matters.
+    fn inotify_table_ptr() -> [InotifyInstance; MAX_INOTIFY_INSTANCES] =
+        [INOTIFY_INSTANCE_INIT; MAX_INOTIFY_INSTANCES];
 }
 
 fn allocate_inotify_instance() -> Option<usize> {
@@ -1902,13 +1906,13 @@ const KEV_ISDIR_OFF: usize = 524;
 /// Number of kernel events drained per `SYS_FS_WATCH_READ` call.
 const KWATCH_READ_BATCH: usize = 16;
 
-/// Scratch buffer for draining kernel watch events.  Reused across all
-/// watches — the single-threaded posix layer makes this safe.
-static mut INOTIFY_EVENT_SCRATCH: [u8; KWATCH_READ_BATCH * crate::syscall::FS_WATCH_EVENT_SIZE] =
-    [0u8; KWATCH_READ_BATCH * crate::syscall::FS_WATCH_EVENT_SIZE];
-
-fn event_scratch_ptr() -> *mut [u8; KWATCH_READ_BATCH * crate::syscall::FS_WATCH_EVENT_SIZE] {
-    core::ptr::addr_of_mut!(INOTIFY_EVENT_SCRATCH)
+process_global! {
+    /// Scratch buffer for draining kernel watch events, reused across all
+    /// watches.  Safe to share within a process because the posix layer is
+    /// single-threaded; per-thread on host builds so two concurrently
+    /// draining tests do not overwrite each other's batch.
+    fn event_scratch_ptr() -> [u8; KWATCH_READ_BATCH * crate::syscall::FS_WATCH_EVENT_SIZE] =
+        [0u8; KWATCH_READ_BATCH * crate::syscall::FS_WATCH_EVENT_SIZE];
 }
 
 /// Monotonic cookie source for pairing `IN_MOVED_FROM`/`IN_MOVED_TO`.

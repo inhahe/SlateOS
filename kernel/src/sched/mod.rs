@@ -3720,13 +3720,20 @@ pub fn suspend(task_id: TaskId) -> bool {
         }
     }
 
+    // Log the transition *before* yielding, not after.  For a self-suspend
+    // `schedule_inner` does not return until someone resumes this task, so a
+    // trailing log line would print "Suspended task N" at the moment the task
+    // came *back* — after the matching "[sched] Resumed task N", which reads
+    // as a second, spurious suspend.  The state change is already committed
+    // above, so reporting it here is both accurate and correctly ordered.
+    serial_println!("[sched] Suspended task {}", task_id);
+
     // If we just suspended the current task, yield to another task.
     // Self-suspension is a voluntary context switch.
     if task_id == current {
         schedule_inner(false, SwitchKind::Voluntary);
     }
 
-    serial_println!("[sched] Suspended task {}", task_id);
     true
 }
 

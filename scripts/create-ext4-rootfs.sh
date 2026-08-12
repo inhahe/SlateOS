@@ -857,15 +857,36 @@ fi
 # `zig cc` and linked against the same posix libc.a, and are staged exactly
 # like the fastpy fixtures: /tests/<name>.elf, found by the kernel's
 # `load_test_elf`, which self-skips when the file is absent.
+#
+# Staleness.  Each .elf statically links the sysroot libc.a, so an ELF older
+# than libc.a is testing a *previous* libc.  That is a silent false-green: the
+# fixture keeps passing against the library it was linked with while the real
+# one regresses, and a fixture written for a brand-new libc feature fails in a
+# way that looks like the feature is broken (this cost a full boot cycle on
+# 2026-08-12 — ctest-jobctl reported "raise(SIGTSTP) failed" because its ELF
+# predated SYS_SIGNAL_STOP_SELF existing in libc at all).  Warn per fixture and
+# name the rebuild command; not fatal, because a lean build may legitimately
+# stage prebuilt fixtures with no sysroot present.
+LIBC_A="$ROOT_DIR/toolchain/sysroot/lib/libc.a"
 CTEST_COUNT=0
+CTEST_STALE=0
 for elf in "$ROOT_DIR"/services/ctest-*/*.elf; do
     [ -e "$elf" ] || continue
     name="$(basename "$elf" .elf)"          # e.g. ctest-tls-thread
+    if [ -e "$LIBC_A" ] && [ "$LIBC_A" -nt "$elf" ]; then
+        echo "[rootfs] WARNING: $name.elf is OLDER than the sysroot libc.a — it links a stale"
+        echo "[rootfs]          libc and proves nothing about the current one. Rebuild it:"
+        echo "[rootfs]            PYTHONPATH=<fastpy> python services/$name/build.py"
+        CTEST_STALE=$((CTEST_STALE + 1))
+    fi
     cp -L "$elf" "$STAGE/tests/$name.elf"
     CTEST_COUNT=$((CTEST_COUNT + 1))
 done
 if [ "$CTEST_COUNT" -gt 0 ]; then
     echo "[rootfs] staged $CTEST_COUNT native C self-test ELF(s) into /tests"
+    if [ "$CTEST_STALE" -gt 0 ]; then
+        echo "[rootfs] WARNING: $CTEST_STALE of them are stale (see above)"
+    fi
 else
     echo "[rootfs] WARNING: no services/ctest-*/*.elf found — C self-tests will self-skip"
 fi

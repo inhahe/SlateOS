@@ -1673,6 +1673,19 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: process groups (ring 3) self-test failed: {:?}", e);
     }
 
+    // Job-control stop/continue through our own libc — the other half of what
+    // a shell needs, and the same kind of seam. A child raises SIGTSTP and
+    // suspends itself through SYS_SIGNAL_STOP_SELF; its parent, parked in a
+    // *blocking* waitpid(WUNTRACED), is woken with WIFSTOPPED/WSTOPSIG=SIGTSTP
+    // and resumes it with kill(child, SIGCONT). Neither other layer can see
+    // this: the host suite gets ENOSYS for every stop (the syscall arm is
+    // target-only), and the dispatch self-test can only ever pass WNOHANG,
+    // because a real stop from the boot thread would park the one task left to
+    // resume it. Bounded yield loop; can never hang the boot.
+    if let Err(e) = proc::spawn::self_test_jobctl() {
+        serial_println!("WARNING: job control (ring 3) self-test failed: {:?}", e);
+    }
+
     // Ring-3 end-to-end test of fastpy pure-mode FILE I/O on-target: a native
     // fastpy binary opens/writes/closes then reopens/reads a file on the /tmp
     // memfs and exits with the byte count read back, proving the full path

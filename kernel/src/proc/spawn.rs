@@ -7245,6 +7245,156 @@ pub fn self_test_cpgroup() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of **job-control stop and continue** through our own
+/// libc (`AbiMode::Native`): `services/ctest-jobctl/main.c`.
+///
+/// The kernel has had `TaskState::Suspended`, `JobControlEvent`,
+/// `stop_process_for_signal` and `continue_process` for weeks, but until
+/// 2026-08-12 no userspace program could reach them — our libc answered a
+/// `Stop` default action with "we have no kernel suspend mechanism", and our
+/// `waitpid` accepted `WUNTRACED`/`WCONTINUED` and then discarded them.  Both
+/// halves were fixed together (`SYS_SIGNAL_STOP_SELF` = 1062 and
+/// `SYS_PROCESS_WAIT_STATUS` = 1063); this fixture is the only test that
+/// exercises them *against each other*.
+///
+/// Neither other layer can:
+///
+/// * The **host suite** cannot — `stop_self`'s syscall arm is
+///   `#[cfg(target_os = "none")]`, so on the host triple every stop reports
+///   `ENOSYS`, which is correct there and proves nothing about the wiring.
+/// * The **kernel dispatch self-test** cannot either
+///   (`syscall::dispatch::test_dispatch_wait_status_reports_job_control`): it
+///   feeds the handlers synthetic `record_jc_stopped`/`record_jc_continued`
+///   records, and it can only ever pass `WNOHANG`, because a *real* stop
+///   issued from the boot thread would park the one task left to resume it.
+///
+/// So one layer proves the kernel remembers a stop and the other proves the
+/// wrapper computes the right arguments; only two real ring-3 processes prove
+/// that a child which stops *itself* is seen as stopped by a parent blocked in
+/// `waitpid`, and can then be resumed by that parent.
+///
+/// The load-bearing checks are 53-54 and 62.  53/54 is the parent decoding
+/// `WIFSTOPPED`/`WSTOPSIG` — with *musl's* macros, not our constants — from a
+/// status the kernel encoded for a stop the child initiated; 62 is
+/// `WIFCONTINUED` after the parent's `kill(child, SIGCONT)` genuinely
+/// restarted it.  That `WSTOPSIG` is `SIGTSTP` rather than `SIGSTOP` is the
+/// whole reason `SYS_SIGNAL_STOP_SELF` carries a signal number: a shell
+/// reporting a Ctrl-Z job must name the signal that really stopped it.  It is
+/// also why the child raises the *catchable* SIGTSTP — catchable stop signals
+/// are exactly the case the send path gets wrong if the classifier is allowed
+/// to see the process's registered trampoline first (it would mark the signal
+/// for handler delivery and re-enter the dispatcher that just resolved the
+/// disposition to `SIG_DFL`: an infinite loop instead of a stop).
+///
+/// No capabilities are granted, and none are needed even though the parent
+/// makes a *real* cross-process send: the kernel authorises a signal whose
+/// sender is the target's parent, and our libc's own `CAP_KILL` gate reads the
+/// process capability words, which start out with every capability held.
+///
+/// Exit code 42 means every check passed; any other code names the failing
+/// step (see the FAIL diagnostic below and `services/ctest-jobctl/main.c`).
+pub fn self_test_jobctl() -> KernelResult<()> {
+    let ctest_elf = match load_test_elf("ctest-jobctl") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP ctest-jobctl: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
+
+    serial_println!(
+        "[spawn] Running job control (ring 3, C, native ABI) integration test ({} bytes ELF)...",
+        ctest_elf.len()
+    );
+
+    /// The fixture returns this only after all of its checks pass.
+    const EXPECTED: i32 = 42;
+
+    let argv: &[&[u8]] = &[b"ctest-jobctl"];
+    let envp: &[&[u8]] = &[];
+    // No capabilities: the only cross-process send is the parent's SIGCONT to
+    // its own child, which the kernel authorises on parent-of-target grounds.
+    let options = SpawnOptions {
+        name: "ctest-jobctl",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&ctest_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: ctest-jobctl spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // This fixture parks more often than the other fork-and-reap ones: the
+    // parent blocks twice on a real wait (for the stop and for the continue)
+    // and once more for the exit, and the child is descheduled entirely while
+    // stopped. Headroom is therefore generous — a stop that is never lifted
+    // shows up as the timeout below rather than as a hung boot.
+    let mut became_zombie = false;
+    for _ in 0..12000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-jobctl (ring 3) — expected Zombie, got {:?}. The fixture only \
+             blocks in places this feature owns, so a non-zombie state names one of them: the \
+             parent parked in waitpid() for a stop the child never reported (SYS_SIGNAL_STOP_SELF \
+             did not suspend it, or the stop woke no waiter), the child still suspended because \
+             SIGCONT never resumed it, or the resumed child waiting on a pipe read that never saw \
+             EOF",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECTED) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-jobctl (ring 3) — reached Zombie but exit code was {:?}, \
+             expected {}. Code bands: 10-11 = setup (pipe/fork), 52-57 = a blocking \
+             waitpid(WUNTRACED) saw the child's self-stop, of which 53-54 are load-bearing \
+             (WIFSTOPPED and WSTOPSIG == SIGTSTP, so the kernel named the signal that actually \
+             stopped it) and 55-57 pin the status predicates as mutually exclusive, 58 = the \
+             report was consumed once, 59 = a stop is not a death (the child still exists and was \
+             not reaped), 60-65 = the parent resumed the child and observed it, of which 62 \
+             (WIFCONTINUED) is load-bearing, 70-77 = the resumed child ran to completion and was \
+             reaped exactly once (74 specifically means the child's own raise(SIGTSTP) failed \
+             rather than stopping it). See services/ctest-jobctl/main.c",
+            exit_code, EXPECTED
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   job control (ring 3, native ABI: a child raises SIGTSTP and suspends itself, \
+         its parent's blocking waitpid(WUNTRACED) reports WIFSTOPPED/WSTOPSIG=SIGTSTP, and \
+         kill(child, SIGCONT) resumes it into a WIFCONTINUED report): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the sysroot's **scanf trampolines**.
 ///
 /// `sscanf`, `scanf` and `fscanf` are assembly trampolines — `va_trampoline!`

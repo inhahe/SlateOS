@@ -43,7 +43,7 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::path::Path;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 // ============================================================================
 // Myers diff algorithm
@@ -1163,13 +1163,51 @@ pub enum MergeOutcome {
 /// Both text editors embed one of these per open document. It records an
 /// LF-normalized `base` (the common ancestor for merging) and the file's
 /// `mtime` (a cheap pre-filter that avoids re-reading unchanged files).
+///
+/// The mtime pre-filter is only *sound* when the recorded timestamp was
+/// already settled — see [`FileSync::mtime_racy`] and [`MTIME_SETTLE`].
 #[derive(Clone, Debug, Default)]
 pub struct FileSync {
     /// LF-normalized content as of the last load/save — the merge ancestor.
     pub base: Option<String>,
     /// File mtime as of the last load/save, used as a fast change pre-check.
     pub mtime: Option<SystemTime>,
+    /// `true` when [`mtime`](Self::mtime) was recorded too soon after the write
+    /// that produced it for the filesystem's timestamp granularity to
+    /// distinguish "the bytes we read" from "bytes written immediately
+    /// afterwards". While set, [`changed`](Self::changed) must not trust the
+    /// mtime pre-filter and always compares content.
+    ///
+    /// This is git's "racily clean" rule (`read-cache.c`), which exists for
+    /// exactly this reason: an index entry whose mtime is not strictly older
+    /// than the index's own is re-checked by content, because a same-tick
+    /// rewrite is invisible to `stat`.
+    ///
+    /// **The flag is sticky, deliberately.** It is cleared only by the next
+    /// [`record`](Self::record)/[`touch`](Self::touch), not by the mere passage
+    /// of time — because an aliasing write that *already* happened leaves the
+    /// file's mtime equal to the recorded one forever, so ageing alone never
+    /// makes the timestamp informative again. The cost is that a file recorded
+    /// immediately after a save is content-compared on every check until the
+    /// next save. Git accepts exactly the same cost, and only ever "smudges" a
+    /// racily-clean entry back to trusted when it rewrites the index — the
+    /// equivalent refinement here would be to clear the flag from `changed`
+    /// once a content comparison has come back identical *and* the mtime has
+    /// outlived [`MTIME_SETTLE`], which would make `changed` take `&mut self`.
+    /// Not worth the API cost until a caller is shown to poll hot.
+    pub mtime_racy: bool,
 }
+
+/// How far in the past a recorded mtime must be before it can be trusted as
+/// proof that a file is unchanged.
+///
+/// Sized for the coarsest filesystem timestamp granularity we can plausibly be
+/// asked to watch rather than the finest: FAT stores modification times to 2
+/// seconds, ext3 to 1 second, and NTFS nominally to 100 ns but is stamped from
+/// a system clock that advances in ~15.6 ms steps. A value that is too large
+/// only costs a content read; a value that is too small silently loses an
+/// external edit, which is the failure this constant exists to prevent.
+pub const MTIME_SETTLE: Duration = Duration::from_secs(2);
 
 impl FileSync {
     /// A tracker with no recorded baseline (e.g. an unsaved buffer).
@@ -1178,6 +1216,7 @@ impl FileSync {
         Self {
             base: None,
             mtime: None,
+            mtime_racy: false,
         }
     }
 
@@ -1185,7 +1224,7 @@ impl FileSync {
     /// file's current mtime is captured. Call after reading or writing `path`.
     pub fn record(&mut self, path: &Path, normalized: String) {
         self.base = Some(normalized);
-        self.mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
+        self.stat(path);
     }
 
     /// Refresh only the recorded mtime from `path`, leaving the ancestor intact.
@@ -1193,7 +1232,27 @@ impl FileSync {
     /// Used by "keep current changes": we dismiss the detected external edit
     /// (so it is not re-reported) without adopting it as the new ancestor.
     pub fn touch(&mut self, path: &Path) {
-        self.mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
+        self.stat(path);
+    }
+
+    /// Capture `path`'s mtime and decide whether it is trustworthy.
+    ///
+    /// The raciness verdict is taken **once, here**, and holds until the next
+    /// `record`/`touch`. It cannot be re-evaluated later in
+    /// [`changed`](Self::changed): the aliasing write we are guarding against
+    /// would have happened within the granularity window that has *already*
+    /// closed, so waiting does not make the timestamp any more informative —
+    /// it only makes the miss permanent.
+    fn stat(&mut self, path: &Path) {
+        let mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
+        // A missing mtime is not racy: `changed` already falls through to a
+        // content comparison when there is nothing to compare against.
+        self.mtime_racy = mtime.is_some_and(|m| {
+            SystemTime::now()
+                .duration_since(m)
+                .map_or(true, |age| age < MTIME_SETTLE)
+        });
+        self.mtime = mtime;
     }
 
     /// Check whether `path` changed on disk since the last [`record`](Self::record).
@@ -1208,8 +1267,14 @@ impl FileSync {
         };
         match std::fs::metadata(path) {
             Ok(meta) => {
-                // Fast path: matching mtime means the file is untouched.
-                if let (Ok(mtime), Some(known)) = (meta.modified(), self.mtime)
+                // Fast path: matching mtime means the file is untouched — but
+                // only if that timestamp was already settled when we recorded
+                // it. Within the filesystem's granularity a rewrite carries the
+                // same mtime, so trusting a racy one turns an external edit
+                // into a silent data loss the moment the buffer is saved over
+                // it.
+                if !self.mtime_racy
+                    && let (Ok(mtime), Some(known)) = (meta.modified(), self.mtime)
                     && mtime == known
                 {
                     return DiskChange::Unchanged;
@@ -1576,8 +1641,7 @@ mod tests {
         let mut p = std::env::temp_dir();
         let nanos = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_nanos());
         p.push(format!("diffcore_test_{tag}_{nanos}.txt"));
         p
     }
@@ -1608,10 +1672,80 @@ mod tests {
     }
 
     #[test]
+    fn test_filesync_same_tick_rewrite_is_not_missed() {
+        // The regression this pins: `changed()` used to accept "the mtime
+        // matches what I recorded" as proof the file was untouched. A rewrite
+        // landing inside the filesystem's timestamp granularity carries the
+        // *same* mtime, so the external edit was reported as Unchanged — and
+        // the next save would have overwritten it with no merge and no warning.
+        //
+        // Written without any sleep on purpose: the whole point is that the
+        // record and the rewrite happen close enough together to be
+        // indistinguishable by mtime, which is precisely what a sleep would
+        // hide. On a filesystem with a coarse clock the two timestamps are
+        // equal and the racy flag is what saves us; on one fine enough to tell
+        // them apart the mtime comparison catches it. Either way the answer
+        // must be Modified.
+        let path = temp_path("fs_same_tick");
+        std::fs::write(&path, b"before\n").expect("write");
+        let mut sync = FileSync::new();
+        sync.record(&path, normalize_content("before\n"));
+        assert!(
+            sync.mtime_racy,
+            "an mtime recorded immediately after the write must be treated as racy"
+        );
+
+        std::fs::write(&path, b"after\n").expect("rewrite");
+        match sync.changed(&path) {
+            DiskChange::Modified { disk } => assert_eq!(disk, "after"),
+            other => panic!("a same-tick rewrite must be reported, got {other:?}"),
+        }
+
+        // And the racy path must not manufacture changes either: content equal
+        // to the recorded ancestor is still Unchanged, however fresh the
+        // timestamp. (Restoring the original bytes is the realistic form —
+        // an external tool that edits and then undoes its edit.)
+        std::fs::write(&path, b"before\n").expect("restore original bytes");
+        assert_eq!(sync.changed(&path), DiskChange::Unchanged);
+
+        std::fs::remove_file(&path).expect("remove");
+    }
+
+    #[test]
+    fn test_filesync_settled_mtime_is_trusted() {
+        // The other half of the trade: once a timestamp is older than
+        // MTIME_SETTLE the pre-filter is sound again, so a file nobody has
+        // touched is not re-read on every check. Asserted through the public
+        // flag rather than by timing a read, which would be a flake.
+        let path = temp_path("fs_settled");
+        std::fs::write(&path, b"stable\n").expect("write");
+        let mut sync = FileSync::new();
+        sync.record(&path, normalize_content("stable\n"));
+
+        // Backdate the recorded timestamp past the settle window, exactly as
+        // the passage of time would.
+        sync.mtime = sync.mtime.map(|m| m - MTIME_SETTLE - Duration::from_secs(1));
+        sync.mtime_racy = false;
+        // The on-disk mtime no longer matches the (backdated) recorded one, so
+        // the pre-filter cannot short-circuit — it falls through to content,
+        // which is identical.
+        assert_eq!(sync.changed(&path), DiskChange::Unchanged);
+
+        // Re-record so the two sides agree again, then clear the flag to model
+        // the same recording made after the timestamp had settled: now the fast
+        // path fires and returns Unchanged without reading the file at all.
+        sync.record(&path, normalize_content("stable\n"));
+        sync.mtime_racy = false;
+        assert_eq!(sync.changed(&path), DiskChange::Unchanged);
+
+        std::fs::remove_file(&path).expect("remove");
+    }
+
+    #[test]
     fn test_filesync_merge_uses_base() {
         let sync = FileSync {
             base: Some("alpha\nmiddle\nbeta".to_string()),
-            mtime: None,
+            ..FileSync::new()
         };
         let merge = sync.merge("ALPHA\nmiddle\nbeta", "alpha\nmiddle\nBETA");
         assert_eq!(merge.clean_merge().as_deref(), Some("ALPHA\nmiddle\nBETA"));

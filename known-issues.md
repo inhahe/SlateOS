@@ -43,6 +43,80 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
+### TD-OILS-A-COMPOUND-LITERAL-REFUSES-A-KIND-CHANGE-THE-BUILTIN-BEFORE-IT-HAS-ALREADY-MADE. `readonly -A g=([k]=v)` over a frame-local indexed array refuses where bash converts — 2026-08-12
+
+**Where:** `userspace/oils/src/interp.rs`, [`Shell::array_kind_conflict`] /
+[`Shell::compound_kind_refusal`] and their caller in
+[`Shell::declare_compounds_scoped`]. osh checks the kind conflict against the
+name the **compound literal** binds. bash checks it in a different command:
+
+* Step 1, `make_internal_declare` (`declare -gAG g`), refuses at
+  declare.def:876 — `builtin_error` — and a failed step 1 **discards the whole
+  parse unit** for `readonly`/`export`, so the elements never arrive.
+* Step 2, `do_compound_assignment`, does **not** refuse in either of its
+  scoped branches (subst.c:3484, 3513): `make_local_assoc_variable` and
+  `convert_var_to_assoc` replace or convert without a word. Only the unscoped
+  `else` branch — `assign_array_from_string` → `find_or_make_array_variable`
+  (arrayfunc.c:504) — reports, and that one is a `report_error`, so it carries
+  no builtin tag.
+
+So where step 1's own name resolution takes it *elsewhere*, nothing refuses at
+all and the literal simply converts the frame's array:
+
+```sh
+( declare -n g=z                          # step 1 restarts on `z`
+  f() { local -a g=(9); readonly -A g=([k]=v); declare -p g; }; f )
+# bash: declare -Ar g=([k]="v" )   — the local indexed array converted
+# osh : g: cannot convert indexed to associative array
+```
+
+**Proper fix.** Move the kind refusal onto step 1 — i.e. ask it of
+[`Shell::global_bind_names`]' answer for the *builtin* half, before the literal
+runs — and let the literal's own binding convert rather than refuse. The
+existing refusal then keeps firing for the plain-assignment road (`g=([k]=v)`
+and top-level declarations), which is the `find_or_make_array_variable` one.
+
+**Affected:** 4 shapes of the 240-shape kind matrix (`/tmp/kind_matrix.sh`).
+
+**How it was found:** writing the corpus case
+`the-restart-happens-before-chklocal-so-step-one-outlives-the-frames-own-binding.sh`;
+the `local -a g=(9)` section had to be dropped from it.
+
+---
+
+### TD-OILS-THE-TAG-ON-A-COMPOUND-DECLARATIONS-DIAGNOSTIC-IS-THE-PREVIOUS-COMMANDS-NAME. osh prints the running function's name by rule where bash prints whatever `this_command_name` happens to hold — 2026-08-12
+
+**Where:** `userspace/oils/src/interp.rs`, [`Shell::compound_kind_refusal`],
+which tags the message with `self.fn_stack.last()` whenever the binding it
+would make is a global one. That was inferred from the observable behaviour and
+is not the rule. bash's `builtin_error_prolog` (builtins/common.c:88) prints
+`this_command_name`, and the diagnostics of steps 1 and 2 are emitted during
+**word expansion**, before `this_command_name` has been set to the builtin
+being expanded for. So it holds whatever the *previous* command left there:
+
+```sh
+declare -a g=(1)
+zzz() { readonly -A g=([k]=v); }; zzz
+# bash: zzz: g: cannot convert indexed to associative array   (the call itself)
+zzz() { true; readonly -A g=([k]=v); }; zzz
+# bash: g: cannot convert indexed to associative array        (`true` cleared it)
+```
+
+The "global binding" correlation is an accident: the shapes that reach the
+message with a *local* target happen to have a `local …;` in front of them.
+
+**Proper fix.** Model `this_command_name` — one field on `Shell`, set where
+bash sets it (`execute_simple_command` before dispatch, and left alone by word
+expansion) — and have every `builtin_error`-derived diagnostic read it instead
+of reconstructing a rule. That also fixes the tag on the step-3 messages, which
+today are spelled from the command word directly.
+
+**Affected:** not currently visible in the corpus (the cases that would show it
+are the ones the entry above blocks), but it is why the "names the running
+function" comment on `compound_kind_refusal` is wrong.
+
+---
+
 ### TD-OILS-A-NAMEREF-CHAIN-THAT-OUTRUNS-THE-LINK-LIMIT-IS-TAKEN-FOR-ONE-THAT-CLOSED. A walk that gave up on the eighth link is answered like one that closed on itself — 2026-08-11
 
 **Where:** `userspace/oils/src/interp.rs`, [`Shell::walk_ref_name`] and its
@@ -40115,6 +40189,60 @@ deny — are now fixed; see F8 and F9.)_
 ---
 
 ## Fixed Bugs
+
+### TD-OILS-THE-FRAMES-OWN-BINDING-WAS-ASKED-ABOUT-BEFORE-THE-RESTART-RATHER-THAN-AFTER-IT. `readonly g=(1 2)` over a frame-local `g` left nothing at the global the chain died on — 2026-08-12 — FIXED 2026-08-12
+
+**Where:** `userspace/oils/src/interp.rs`, [`Shell::enter_global_scope`] and the
+new [`Shell::make_empty_global`]. The `chklocal` question — is there a binding
+of this name in *this* frame? — was put once, up front, about the name as
+written, and a `true` answer cancelled the whole swap. bash puts it in two
+different places with two different names.
+
+The builtin half puts it **last** (declare.def:774):
+
+```c
+if (var == 0)
+  var = declare_find_variable (name, mkglobal, chklocal);
+```
+
+By then `name` may not be the name written: three lines above, the global-only
+walk `find_global_variable_last_nameref` has already run, and where it answered
+a reference to a name no global answers to, the command restarts on that name
+(`goto restart_new_var_name`, declare.def:768) — so the frame's binding is asked
+about the name the restart *arrived at*, and the restart itself never saw it.
+The compound literal asks about the name as written
+(`do_compound_assignment`, subst.c:3494).
+
+Where the two answers part, the declaration leaves **two** variables behind.
+
+**Reproduce.**
+
+```sh
+( declare -n g=z                                 # a global chain dying on `z`
+  f() { local g=5; readonly -a g=(1 2); }; f
+  declare -p g z )
+# bash: declare -n g="z"  /  declare -a z        — empty, made by step 1 alone
+# osh (before): z unset
+```
+
+**The fix.** `enter_global_scope` now maps every operand *before* asking
+`chklocal`, and where the frame's binding stops the swap it checks whether the
+map moved the name anyway. If it did — and nothing in the frame answers to the
+name it moved to — step 1's creation is performed on its own:
+`make_empty_global` binds the name globally and unset, in whatever shape the
+kind letter chose. Only the shape, since step 1's option string is spelled out
+of the word flags and those name a scope and a shape and nothing else
+(subst.c:12662-12745) — the `-r` of a `readonly` stays with the builtin proper,
+so the array left behind is writable. `DeclScopeFlags` gained `assoc` to carry
+which of the two letters won (`att_assoc` is tested first, declare.def:786).
+
+**Tests.** Unit test
+`the_restart_happens_before_chklocal_so_step_one_outlives_the_frames_own_binding`
+and the corpus case of the same name (8 sections). The 240-shape probe matrix
+(`/tmp/kind_matrix.sh`) went 214 → 224; the remainder is the two Active entries
+above plus the `declare -Ga` family.
+
+---
 
 ### TD-OILS-A-COMPOUND-LITERAL-WAS-TRANSFORMED-A-SECOND-TIME-WHERE-STEP-ONE-HAD-ALREADY-MADE-THE-VARIABLE. `readonly g=(1 2)` under a merely-dying global chain put the elements on the frame's reference — 2026-08-12 — FIXED 2026-08-12
 

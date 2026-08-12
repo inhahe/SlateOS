@@ -21476,13 +21476,36 @@ impl Shell {
     ) -> Vec<(String, usize, VarSnapshot)> {
         // bash asks every one of its questions of the tables as they stand, so
         // the whole mapping is made before anything is swapped.
-        let binds: Vec<GlobalBind> = names
-            .iter()
-            .map(|n| (n, false))
-            .chain(compound.iter().map(|n| (n, true)))
-            .filter(|(n, _)| !(flags.chklocal && self.chklocal_reaches_this_frame(n)))
-            .map(|(n, compound)| self.global_bind_names(n, compound, flags))
-            .collect();
+        let mut binds: Vec<GlobalBind> = Vec::new();
+        // Where the frame's own binding answers `chklocal`, no swap is made:
+        // the declaration lands on the local, as it stands. But the two
+        // commands do not ask that question about the same name. The builtin
+        // puts it only *after* the restart, and about the name the restart
+        // arrived at (`declare_find_variable (name, mkglobal, chklocal)`,
+        // declare.def:774, with `name` already rewritten); the compound
+        // literal asks it of the name as written (`do_compound_assignment`,
+        // subst.c:3494). So a frame-local binding can keep the literal at home
+        // while the restart carries step 1 past it — and step 1 then *makes*
+        // its variable, at a global the literal never touches.
+        let mut carried: Vec<String> = Vec::new();
+        for (name, compound) in
+            names.iter().map(|n| (n, false)).chain(compound.iter().map(|n| (n, true)))
+        {
+            let bind = self.global_bind_names(name, compound, flags);
+            if flags.chklocal && self.chklocal_reaches_this_frame(name) {
+                if let Some(last) = bind.names.last()
+                    && last != name
+                    && !self.chklocal_reaches_this_frame(last)
+                {
+                    carried.push(last.clone());
+                }
+                continue;
+            }
+            binds.push(bind);
+        }
+        for name in &carried {
+            self.make_empty_global(name, flags);
+        }
         // A kind letter reaches `make_new_array_variable` only after
         // `declare_find_variable` (declare.def:149) has walked the name for
         // itself and come back with nothing — once, or twice where `chklocal`
@@ -21504,6 +21527,40 @@ impl Shell {
             self.restore_var(name, VarSnapshot::default());
         }
         saved
+    }
+
+    /// Make the variable step 1 of a compound declaration makes where it found
+    /// none: `name`, bound globally and unset, in whatever shape the kind
+    /// letter chose.
+    ///
+    /// `declare_internal`'s creation (declare.def:786-792) is one of
+    /// `make_new_assoc_variable`, `make_new_array_variable` and
+    /// `bind_global_variable (name, NULL, ASS_FORCE)`, and all three leave the
+    /// name existing and empty. It is invisible in the ordinary case, where the
+    /// swap puts the compound literal's own binding on top of it a moment
+    /// later; it shows only where the two commands' names have parted, and then
+    /// it is all that is left behind:
+    ///
+    /// ```sh
+    /// declare -n g=z                                   # a global chain that
+    ///                                                  # dies on `z`
+    /// f() { local g=5; readonly -a g=(1 2); }; f       # `declare -a z`, empty
+    /// ```
+    ///
+    /// The attributes the command itself carries are *not* here: step 1's
+    /// option string is spelled out of the word flags, which name a scope and a
+    /// shape and nothing else (subst.c:12662-12745), so the `-r` above stays
+    /// with the builtin proper and the array `z` is writable.
+    fn make_empty_global(&mut self, name: &str, flags: DeclScopeFlags) {
+        if flags.kind {
+            if flags.assoc {
+                self.assoc.entry(name.to_string()).or_default();
+            } else {
+                self.arrays.entry(name.to_string()).or_default();
+            }
+        }
+        self.declared.insert(name.to_string());
+        self.note_var_change(name);
     }
 
     /// The names a global-scope declaration of `name` must un-shadow for the
@@ -21993,6 +22050,9 @@ impl Shell {
             }
             if flags.contains(&b'a') || flags.contains(&b'A') {
                 out.kind = true;
+            }
+            if flags.contains(&b'A') {
+                out.assoc = true;
             }
         }
         out
@@ -55426,6 +55486,9 @@ struct DeclScopeFlags {
     /// `W_ASSIGNARRAY`/`W_ASSIGNASSOC` on the word. See
     /// [`Shell::global_bind_names`].
     kind: bool,
+    /// Which shape that letter named: `-A` beats `-a`, because
+    /// `declare_internal` tests `att_assoc` first (declare.def:786).
+    assoc: bool,
 }
 
 /// What a global-scope declaration of one operand asks the swap for: the names
@@ -75058,6 +75121,95 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         let (out, st) = run("g=old; f() { local -n g=w; declare -ga g=(1 2); }; f; declare -p g");
         assert_eq!(out, "declare -a g=([0]=\"1\" [1]=\"2\")\n");
         assert_eq!(st, 0);
+    }
+
+    /// The two commands a compound declaration decomposes into do not ask
+    /// `chklocal` about the same name. The builtin half asks last
+    /// (`declare_find_variable (name, mkglobal, chklocal)`, declare.def:774),
+    /// by which time the global-only walk three lines above may already have
+    /// restarted the whole command on a different name
+    /// (`goto restart_new_var_name`, declare.def:768) — so the frame's own
+    /// binding is asked about the name the restart *arrived at*, and the
+    /// restart never saw it. The compound literal asks it of the name as
+    /// written (`do_compound_assignment`, subst.c:3494).
+    ///
+    /// Where the answers part, the declaration leaves two variables behind: the
+    /// elements stay on the frame's binding, and step 1 makes an empty global
+    /// out at the name the chain died on — in the *shape* the kind letter chose
+    /// and nothing else, since step 1's options are spelled out of the word
+    /// flags (subst.c:12662-12745) and those name only a scope and a shape.
+    ///
+    /// Corpus:
+    /// `the-restart-happens-before-chklocal-so-step-one-outlives-the-frames-own-binding.sh`.
+    #[test]
+    fn the_restart_happens_before_chklocal_so_step_one_outlives_the_frames_own_binding() {
+        // The frame keeps the elements; `z` — where the global chain died — is
+        // left existing and empty by step 1 alone.
+        let (out, st) = run(
+            "declare -n g=z; \
+             f() { local g=5; readonly g=(1 2); declare -p g; }; f; declare -p g z",
+        );
+        assert_eq!(
+            out,
+            "declare -ar g=([0]=\"1\" [1]=\"2\")\ndeclare -n g=\"z\"\ndeclare -- z\n"
+        );
+        assert_eq!(st, 0);
+
+        // The kind letter chooses the shape of what is left — and only the
+        // shape: the `-r` and the `-x` stay with the builtin proper.
+        for (cmd, shape) in [
+            ("readonly -a g=(1 2)", "declare -a z\n"),
+            ("readonly -A g=([k]=v)", "declare -A z\n"),
+            ("export -a g=(1 2)", "declare -a z\n"),
+        ] {
+            let (out, st) = run(&format!(
+                "declare -n g=z; f() {{ local g=5; {cmd}; }}; f; declare -p z"
+            ));
+            assert_eq!(out, shape, "{cmd}");
+            assert_eq!(st, 0, "{cmd}");
+        }
+
+        // A longer chain restarts on the far end of it.
+        let (out, st) = run(
+            "declare -n g=z; declare -n z=y; \
+             f() { local g=5; readonly -a g=(1 2); }; f; declare -p y",
+        );
+        assert_eq!(out, "declare -a y\n");
+        assert_eq!(st, 0);
+
+        // With nothing to restart on, one name serves both commands and there
+        // is no second variable.
+        let (out, st) =
+            run("g=old; f() { local g=5; readonly -a g=(1 2); }; f; declare -p g; declare -p z");
+        assert_eq!(out, "declare -- g=\"old\"\n");
+        assert_eq!(st, 1);
+
+        // A global cycle answers nothing, so `find_global_variable_last_nameref`
+        // has no reference to restart from either.
+        let (out, st) = run(
+            "declare -n g=z; declare -n z=g; \
+             f() { local g=5; readonly -a g=(1 2); declare -p g; }; f 2>/dev/null; declare -p z",
+        );
+        assert_eq!(
+            out,
+            "declare -ar g=([0]=\"1\" [1]=\"2\")\ndeclare -n z=\"g\"\n"
+        );
+        assert_eq!(st, 0);
+
+        // `declare` reaches the question only by the letter that spells
+        // `chklocal`; a plain `-g` never asks it, so the frame's binding has no
+        // say and one name serves both halves.
+        for cmd in ["declare -gGa g=(1 2)", "declare -ga g=(1 2)"] {
+            let (out, st) = run(&format!(
+                "declare -n g=z; f() {{ local g=5; {cmd}; declare -p g; }}; f; declare -p z"
+            ));
+            assert_eq!(
+                out,
+                "declare -- g=\"5\"\ndeclare -a z=([0]=\"1\" [1]=\"2\")\n",
+                "{cmd}"
+            );
+            assert_eq!(st, 0, "{cmd}");
+        }
     }
 
     /// A compound operand of a declaration builtin is **three commands**

@@ -53,6 +53,13 @@
 //! Single alloc/free: < 1us (Linux buddy: 100-500ns).
 //! See `bench/baselines.toml` for measured targets.
 
+// KASAN debug profile: this module is exempt from compiler instrumentation.
+// The shadow mapper allocates frames, so instrumenting this module would
+// let a shadow-backing allocation recurse into the shadow-backing path.
+// (`sanitize` is nightly-only, so it is gated on the `kasan_instrumented` cfg
+// that `scripts/kasan-build.sh` sets; the ordinary build never sees it.)
+#![cfg_attr(kasan_instrumented, sanitize(address = "off"))]
+
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::error::{KernelError, KernelResult};
 use crate::limine::{MemmapEntry, memmap_type};

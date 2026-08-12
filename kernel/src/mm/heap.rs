@@ -33,6 +33,13 @@
 //! Per-CPU cache hit (uncontended): ~15-30ns (load + pop + store).
 //! See `bench/baselines.toml` for measured targets.
 
+// KASAN debug profile: this module is exempt from compiler instrumentation.
+// The allocator drives shadow poison/unpoison on every alloc and free;
+// instrumenting it would make each of those checks re-enter the allocator.
+// (`sanitize` is nightly-only, so it is gated on the `kasan_instrumented` cfg
+// that `scripts/kasan-build.sh` sets; the ordinary build never sees it.)
+#![cfg_attr(kasan_instrumented, sanitize(address = "off"))]
+
 use crate::error::{KernelError, KernelResult};
 use crate::mm::frame::{self, PhysFrame, FRAME_SIZE};
 use crate::serial_println;

@@ -46,6 +46,15 @@
 
 #![no_std]
 #![no_main]
+// `#[sanitize(address = "off")]` — how the KASAN debug profile exempts the code
+// that must not be instrumented: everything that runs before the zero shadow is
+// installed, the shadow machinery itself (which would recurse), and the raw
+// user-pointer paths (a user address maps to a non-canonical shadow address, so
+// checking one would #GP). The attribute is nightly-only and unstable, and it
+// replaced the removed `no_sanitize` in 1.91, so it is feature-gated on the
+// `kasan_instrumented` cfg that `scripts/kasan-build.sh` passes alongside
+// `-Zsanitizer=kernel-address`; the ordinary build never sees it.
+#![cfg_attr(kasan_instrumented, feature(sanitize))]
 // Lint configuration is in workspace Cargo.toml ([workspace.lints.clippy])
 // and inherited via [lints] workspace = true in kernel/Cargo.toml.
 
@@ -324,6 +333,10 @@ fn check_boot_stack_canary() {
 /// of the dedicated [`KERNEL_BOOT_STACK`] and tail-calls [`kernel_main`], so
 /// that no meaningful work — and in particular none of the deep boot-time
 /// self-tests — ever runs on Limine's small reclaimable-memory stack.
+// KASAN: exempt. Runs before the zero shadow exists, and it switches stacks
+// out from under the compiler, so any inline shadow check here would read an
+// unmapped shadow with no IDT in place — a triple fault, not a report.
+#[cfg_attr(kasan_instrumented, sanitize(address = "off"))]
 #[unsafe(no_mangle)]
 extern "C" fn kmain() -> ! {
     // SAFETY: `KERNEL_BOOT_STACK` is a dedicated 512 KiB static used only as
@@ -351,6 +364,12 @@ extern "C" fn kmain() -> ! {
 }
 
 /// The real kernel entry, running on the dedicated [`KERNEL_BOOT_STACK`].
+// KASAN: exempt, and it has to be the whole function rather than just the
+// prologue. This function's own locals are touched before it can call
+// `kasan::early_init`, and with no shadow installed yet those accesses would
+// fault. Little coverage is lost: `kernel_main` is almost entirely calls into
+// other modules, which stay instrumented.
+#[cfg_attr(kasan_instrumented, sanitize(address = "off"))]
 #[unsafe(no_mangle)]
 extern "C" fn kernel_main() -> ! {
     // Step 1: Initialize serial console for debug output.

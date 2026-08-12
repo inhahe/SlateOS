@@ -46,6 +46,13 @@
 //!   reuse so UAF has a detection window.
 //! - Windows Delayed Free / Application Verifier page-heap deferred frees.
 
+// KASAN debug profile: this module is exempt from compiler instrumentation.
+// Part of the allocator's deferred-free path, which runs inside the
+// allocator lock that the shadow maintenance hooks also run under.
+// (`sanitize` is nightly-only, so it is gated on the `kasan_instrumented` cfg
+// that `scripts/kasan-build.sh` sets; the ordinary build never sees it.)
+#![cfg_attr(kasan_instrumented, sanitize(address = "off"))]
+
 // Diagnostic subsystem: the public API is tooling/hunt surface that may have no
 // production call sites in a normal build. The ring index arithmetic is bounded
 // by QUARANTINE_CAP (all `% QUARANTINE_CAP`), and the self-test intentionally

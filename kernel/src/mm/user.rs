@@ -39,6 +39,14 @@
 //!
 //! [`USER_SPACE_END`]: super::page_table::USER_SPACE_END
 
+// KASAN debug profile: this module is exempt from compiler instrumentation.
+// Dereferences raw user pointers. A user address maps to a shadow address
+// with inconsistent bits 63:47 (`shadow(0x400000) = 0xDFFF_E000_0008_0000`),
+// which is non-canonical — checking one would #GP rather than report.
+// (`sanitize` is nightly-only, so it is gated on the `kasan_instrumented` cfg
+// that `scripts/kasan-build.sh` sets; the ordinary build never sees it.)
+#![cfg_attr(kasan_instrumented, sanitize(address = "off"))]
+
 use super::page_table::{self, PageFlags, VirtAddr, USER_SPACE_END};
 use crate::error::{KernelError, KernelResult};
 use crate::proc::thread;

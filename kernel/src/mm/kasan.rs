@@ -72,6 +72,13 @@
 //! - Linux `mm/kasan/` — generic KASAN shadow memory + `KASAN_SHADOW_SCALE_SHIFT`.
 //! - Documentation/dev-tools/kasan.rst — shadow encoding (`0xFA`/`0xFB`/…).
 
+// KASAN debug profile: this module is exempt from compiler instrumentation.
+// This *is* the shadow machinery: every check LLVM emits calls into it, so
+// instrumenting it would recurse without bound.
+// (`sanitize` is nightly-only, so it is gated on the `kasan_instrumented` cfg
+// that `scripts/kasan-build.sh` sets; the ordinary build never sees it.)
+#![cfg_attr(kasan_instrumented, sanitize(address = "off"))]
+
 // Diagnostic subsystem: much of the public API is tooling/shim surface that
 // may not have production call sites yet (the scheduler-path checked-store shim
 // lands in a follow-up). The shadow-index arithmetic is checked by the

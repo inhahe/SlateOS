@@ -21,6 +21,14 @@
 //!
 //! - Limine protocol spec: <https://github.com/limine-bootloader/limine/blob/trunk/PROTOCOL.md>
 
+// KASAN debug profile: this module is exempt from compiler instrumentation.
+// Runs before `mm::kasan::early_init` installs the zero shadow — an
+// instrumented access here would read an unmapped shadow byte with no IDT in
+// place yet, i.e. a triple fault instead of a diagnosable panic.
+// (`sanitize` is nightly-only, so it is gated on the `kasan_instrumented` cfg
+// that `scripts/kasan-build.sh` sets; the ordinary build never sees it.)
+#![cfg_attr(kasan_instrumented, sanitize(address = "off"))]
+
 use crate::limine::{
     BaseRevision, FramebufferResponse, HhdmResponse, KernelFileResponse, LimineRequest,
     MemmapEntry, MemmapResponse, RequestsEndMarker, RequestsStartMarker, RsdpResponse,

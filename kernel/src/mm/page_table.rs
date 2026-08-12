@@ -44,6 +44,13 @@
 //! and 256–511 (kernel).  Kernel page table entries are shared across
 //! all address spaces to ensure consistent kernel mappings.
 
+// KASAN debug profile: this module is exempt from compiler instrumentation.
+// The shadow mapper allocates and edits page tables through this module,
+// so instrumenting it would let shadow backing recurse into itself.
+// (`sanitize` is nightly-only, so it is gated on the `kasan_instrumented` cfg
+// that `scripts/kasan-build.sh` sets; the ordinary build never sees it.)
+#![cfg_attr(kasan_instrumented, sanitize(address = "off"))]
+
 use crate::error::{KernelError, KernelResult};
 use crate::mm::frame::{self, PhysFrame, FRAME_SIZE};
 use crate::serial_println;

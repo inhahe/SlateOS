@@ -33,6 +33,13 @@
 //! - Windows Debug Heap: 0xFD guard bytes, 0xCD init fill, 0xDD free fill
 //! - Electric Fence / DUMA: guard page-based overflow detection
 
+// KASAN debug profile: this module is exempt from compiler instrumentation.
+// Part of the allocator's debug-metadata path, which runs inside the
+// allocator lock that the shadow maintenance hooks also run under.
+// (`sanitize` is nightly-only, so it is gated on the `kasan_instrumented` cfg
+// that `scripts/kasan-build.sh` sets; the ordinary build never sees it.)
+#![cfg_attr(kasan_instrumented, sanitize(address = "off"))]
+
 // Diagnostic/profiling subsystem — all public API for tooling and kshell
 // commands; many helpers may not have call sites in production paths yet.
 #![allow(dead_code)]

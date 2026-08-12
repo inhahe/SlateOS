@@ -3849,6 +3849,28 @@ enum GetoptsBind {
     NotAName,
 }
 
+/// What one turn of bash's `sh_getopt` (builtins/getopt.c:113) answered.
+///
+/// The scanner speaks in three signals and lets its caller — `dogetopts`
+/// (builtins/getopts.def:159) — decide which of them is which kind of failure,
+/// because `?` on its own is ambiguous: it is the answer both to an option the
+/// optstring does not name and to one whose argument is missing, and what
+/// separates them is whether an argument was *taken*. See
+/// [`Shell::builtin_getopts`].
+struct ShGetopt {
+    /// The character returned, or `None` for `EOF` — no more options.
+    ret: Option<u8>,
+    /// bash's `sh_optarg`. `None` is its NULL: no argument was taken, either
+    /// because the option takes none or because it was not a known option at
+    /// all. `Some(b"")` is the empty string it plants to mark a **missing**
+    /// required argument — which an option-argument that is genuinely empty
+    /// (`-o ''`) also produces, and the two are not told apart.
+    optarg: Option<Str>,
+    /// bash's `sh_optopt`: the character in error, which the caller plants in
+    /// `OPTARG` when the optstring asked for silent reporting.
+    optopt: u8,
+}
+
 impl GetoptsBind {
     /// The status a call that *found* an option reports.
     ///
@@ -4823,13 +4845,30 @@ pub struct Shell {
     /// command records the length on entry and undoes everything above it on
     /// exit, so an inner command's descriptor goes before the outer command's.
     varfd_undo: Vec<VarfdUndo>,
-    /// `getopts` cursor within the current argument (0 = at the start of a new
-    /// argument, i.e. examine the leading `-`). Tracks position inside a bundled
-    /// flag group like `-abc` across successive `getopts` calls.
-    getopts_col: usize,
-    /// The value of `OPTIND` `getopts` last saw, so an external reset
-    /// (`OPTIND=1`) is detected and the intra-argument cursor is cleared.
-    getopts_optind: usize,
+    /// bash's `sh_optind` (builtins/getopt.c:52) — the argument index the next
+    /// scan starts at. It is the shell's own cursor, not a reading of `OPTIND`:
+    /// `getopts` *writes* the variable after every call but never reads it back.
+    /// What moves this from the outside is an **assignment** to `OPTIND`, which
+    /// runs `sv_optind` (variables.c:6279) — see [`Shell::getopts_reset`].
+    getopts_optind: i32,
+    /// Whether a bundled group like `-abc` is part-read: bash's `nextchar`
+    /// being non-NULL (builtins/getopt.c:66).
+    getopts_mid: bool,
+    /// bash's `sh_curopt` — the argument index the part-read group is *in*,
+    /// which is not always `getopts_optind` and is not always in this call's
+    /// argument list at all. See [`Shell::sh_getopt`].
+    getopts_curopt: i32,
+    /// bash's `sh_charindex` — the **byte** offset within that argument. An
+    /// option is a byte to bash (`c = *nextchar++`), not a character.
+    getopts_charindex: usize,
+    /// bash's `sh_opterr` (builtins/getopt.c:57) — whether `getopts` prints its
+    /// own diagnostics. Like the cursor above it is *state*, not a reading of
+    /// the variable: `sv_opterr` (variables.c:6307) sets it when `OPTERR` is
+    /// written and nothing looks at `OPTERR` afterwards. The difference shows
+    /// wherever the value changes without the hook running —
+    /// `declare -n OPTERR=q; q=0` moves what `$OPTERR` expands to and leaves
+    /// the diagnostics on. See [`Shell::getopts_opterr_reset`].
+    getopts_opterr: bool,
     /// Anchor instant for `$SECONDS` (reset when `SECONDS` is assigned).
     seconds_anchor: std::time::Instant,
     /// When this shell started. Unlike `seconds_anchor` this is never
@@ -6246,8 +6285,18 @@ impl Shell {
             procsub_in_temps: Vec::new(),
             procsub_out_jobs: Vec::new(),
             varfd_undo: Vec::new(),
-            getopts_col: 0,
-            getopts_optind: 1,
+            // bash's `initialize_shell_variables` binds `OPTIND=1` and then
+            // calls `getopts_reset (0)` (variables.c:613-615), so the cursor
+            // starts at the "restart from the first argument" zero rather than
+            // at the 1 the variable shows.
+            getopts_optind: 0,
+            getopts_mid: false,
+            getopts_curopt: 0,
+            getopts_charindex: 0,
+            // `int sh_opterr = 1;` (builtins/getopt.c:57) — and the `OPTERR=1`
+            // the startup seeds is the same answer written down, so a value
+            // inherited from the environment never reaches this.
+            getopts_opterr: true,
             seconds_anchor: std::time::Instant::now(),
             birth: std::time::Instant::now(),
             seconds_base: 0,
@@ -12761,8 +12810,11 @@ impl Shell {
             // A varfd's undo is scoped to the command it was written on, and no
             // such command spans the fork.
             varfd_undo: Vec::new(),
-            getopts_col: self.getopts_col,
             getopts_optind: self.getopts_optind,
+            getopts_mid: self.getopts_mid,
+            getopts_curopt: self.getopts_curopt,
+            getopts_charindex: self.getopts_charindex,
+            getopts_opterr: self.getopts_opterr,
             seconds_anchor: self.seconds_anchor,
             birth: self.birth,
             seconds_base: self.seconds_base,
@@ -14234,8 +14286,14 @@ impl Shell {
         // `return (entry)` — non-NULL, so declare.def:962's `if (var == 0)`
         // never bumps `assign_error`. So it neither fails the builtin nor ends
         // a posix shell: `set -o posix; declare -a a=(x y); declare -r a[1]=9`
-        // reports, exits **0**, and carries on. Every other write reaching here
-        // is a real assignment error, posix rule included.
+        // reports, exits **0**, and carries on.
+        //
+        // A *compound* operand takes the same two functions and so the same
+        // answer, which is why the test is the shape of the write rather than
+        // the subscript alone: `set -o posix; readonly r=1; export r=(2)`
+        // reports and carries on, where the scalar `export r=2` beside it ends
+        // the shell. Every other write reaching here is a real assignment
+        // error, posix rule included.
         //
         // Errexit reaches it all the same, because that rule is not the
         // assignment's at all but the *diagnostic's*: `err_readonly` is
@@ -14255,7 +14313,8 @@ impl Shell {
         // declare -a a=(x y); declare -r 'a[1]=9'` exits 1 even written as
         // `if declare -r 'a[1]=9'; then …` or `declare -r 'a[1]=9' && …`, where
         // errexit on a mere status would have been suppressed.
-        self.note_shell_error(if self.decl_builtin_ctx && a.index.is_some() {
+        let array_shaped = a.index.is_some() || matches!(spelled.value, AssignRhs::Array(_));
+        self.note_shell_error(if self.decl_builtin_ctx && array_shaped {
             FatalWhen::ErrexitOnly
         } else {
             FatalWhen::ErrexitOrPosix
@@ -20467,8 +20526,31 @@ impl Shell {
                 flag_limit,
                 xtrace: self.xtrace,
             };
-            return self
+            let flow = self
                 .exec_declare_with_arrays(&argv, &sc.decl_arrays, &words, prepared, out, &redir);
+            // The builtin ran outside [`Shell::run_builtin`], so the failure
+            // class it reported has to be consumed here as well — otherwise
+            // `set -o posix; export -Z x=(1)` (or `export --help x=(1)`) would
+            // be the one usage error a special builtin survives. The route is
+            // `Word` by construction: a compound operand is only recognized as
+            // one when the command word itself named the declaration builtin, so
+            // there is no `command`/`builtin` prefix to take the rule away.
+            // Only the usage class: the other two already unwind from where they
+            // are raised on this path (the readonly refusal of a compound
+            // operand aborts during the word-expansion pass, before the builtin
+            // it belongs to has run), so taking them here would consume the
+            // record twice.
+            if self.builtin_failure == Some(BuiltinFailure::Usage)
+                && let Some(n) = name_str.as_deref()
+                && self.posix_special_builtin_abort(n, BuiltinVia::Word, BuiltinFailure::Usage)
+            {
+                self.builtin_failure = None;
+                // As at the other site: the usage class is decided back at the
+                // node that ran the command, so all that happens here is arming
+                // the flag [`Shell::exec_and_or`] reads.
+                self.special_builtin_failed = true;
+            }
+            return flow;
         }
 
         // Function? A function invocation's own redirects (`myfunc > file`,
@@ -20822,6 +20904,13 @@ impl Shell {
             // Restore shadowed variables in reverse declaration order.
             for (name, snap) in frame.into_iter().rev() {
                 self.restore_var(&name, snap);
+                // A local going out of scope is a write to the name as far as
+                // the shell's second copies are concerned: `pop_var_context`
+                // ends each variable it discards with
+                // `stupidly_hack_special_variables (var->name)`
+                // (variables.c:5370). So `f() { local OPTERR=0; }; f` leaves
+                // `getopts` talking again — see [`Shell::after_var_write`].
+                self.after_var_write(&name);
             }
         }
         // A `local DIRSTACK` suspended the dynamic view for the duration of the
@@ -22285,6 +22374,17 @@ impl Shell {
                 i += 1;
                 break;
             }
+            // `command` is dispatched at exec level, so the shared `--help`
+            // check at the front of [`Shell::run_builtin_body`] never sees it;
+            // the scan it belongs to is this one. bash's `command_builtin` has
+            // the ordinary `CASE_HELPOPT`, so the word counts wherever this loop
+            // is still reading options (`command -v --help`) — see
+            // [`builtin_wants_help`] for the rule.
+            if a.as_slice() == b"--help" {
+                self.write_builtin_help("command", out, redir);
+                self.last_status = 2;
+                return Flow::Next;
+            }
             let Some(flags) = a.strip_prefix(b"-").filter(|f| !f.is_empty()) else {
                 break;
             };
@@ -22392,6 +22492,15 @@ impl Shell {
         if let Some(tok) = argv.get(i) {
             if tok == b"--" {
                 i += 1;
+            } else if tok == b"--help" {
+                // `no_options (list)` is `internal_getopt (list, "")`, so the
+                // request is asked of the first word only — and, like `command`,
+                // `builtin` is dispatched at exec level and so is out of reach
+                // of the shared check. `builtin cd --help` is a different
+                // question: that is `cd`'s own, and it gets `cd`'s answer.
+                self.write_builtin_help("builtin", out, redir);
+                self.last_status = 2;
+                return Flow::Next;
             } else if let Some(c) = tok
                 .strip_prefix(b"-".as_slice())
                 .and_then(|s| bytes::chars(s).next())
@@ -36552,7 +36661,15 @@ impl Shell {
         // dispatch; a nested one (`eval 'export r=x'`) is consumed by its own
         // frame, which knows the right name and [`BuiltinVia`] for it.
         self.builtin_failure = None;
+        // `--help` is answered before the builtin runs, exactly as bash does it:
+        // the test lives in the option scanner every builtin shares
+        // (`internal_getopt`), not in any one builtin, so it is asked once here
+        // rather than sixty times below. Which builtins take the request, and
+        // how far into their own arguments they will still see it, is
+        // [`builtin_wants_help`]'s to decide.
+        let wants_help = builtin_wants_help(name, args, !self.local_frames.is_empty());
         let status = match name {
+            _ if wants_help => self.builtin_answer_help(name, out, redir),
             ":" | "true" => 0,
             "false" => 1,
             "cd" => self.builtin_cd(args, out, redir),
@@ -37849,6 +37966,12 @@ impl Shell {
             self.declared.remove(k);
             self.put_var(k.clone(), v.clone());
             self.exported.insert(k.clone());
+            // A prefix binding is a write like any other as far as the names
+            // the shell keeps a second copy of are concerned: `assign_in_env`
+            // ends with `stupidly_hack_special_variables (newname)`
+            // (variables.c:3698). So `OPTERR=0 getopts ab o` really is quiet
+            // for that one command — see [`Shell::after_var_write`].
+            self.after_var_write(k);
         }
         self.temp_shadow.push(TempScope {
             local_depth: self.local_frames.len(),
@@ -37889,9 +38012,15 @@ impl Shell {
             if let Some(v) = bound
                 && let Some(v) = self.apply_value_attrs(&name, v)
             {
-                self.put_var(name.clone(), v);
-                self.exported.insert(name);
+                self.put_var(name.clone(), v.clone());
+                self.exported.insert(name.clone());
             }
+            // …and taking the binding away is a write as well:
+            // `dispose_temporary_env` collects the special names it dropped and
+            // runs the hook over them once the table is gone
+            // (variables.c:4696-4699), which is what puts `OPTERR` back the way
+            // the surrounding shell had it.
+            self.after_var_write(&name);
         }
     }
 
@@ -37952,12 +38081,29 @@ impl Shell {
     /// The hook every user-facing write to a variable runs afterwards, for the
     /// names whose value the shell keeps somewhere else as well.
     ///
-    /// Only `DIRSTACK` needs it: the other dynamic names bash exposes
-    /// (`FUNCNAME`, `BASH_SOURCE`, `GROUPS`, …) carry `att_noassign`, so a write
-    /// to one is turned away before it can land — see [`Shell::noassign`].
+    /// This is bash's `stupidly_hack_special_variables` (variables.c:6355) —
+    /// and the point of it is *where it is called from*. It hangs off the
+    /// assignment machinery, not off `bind_variable`, so a builtin writing one
+    /// of these names for its own bookkeeping does **not** fire it; only a
+    /// shell-level assignment (or an `unset`) does. `getopts` depends on
+    /// exactly that: it rewrites `OPTIND` after every call, and if its own
+    /// write reset the scanner the shell could never get past the first option.
+    ///
+    /// Three names need it. `DIRSTACK` writes back into the directory stack;
+    /// the other dynamic names bash exposes (`FUNCNAME`, `BASH_SOURCE`,
+    /// `GROUPS`, …) carry `att_noassign`, so a write to one is turned away
+    /// before it can land — see [`Shell::noassign`]. `OPTIND` moves the
+    /// `getopts` scanner, which is the only way anything outside the builtin
+    /// can ([`Shell::getopts_reset`]), and `OPTERR` turns its diagnostics on
+    /// and off ([`Shell::getopts_opterr_reset`]). Neither of the last two is
+    /// ever read back out of its variable: the write is the whole of what the
+    /// shell hears about it.
     fn after_var_write(&mut self, name: &str) {
-        if name == "DIRSTACK" {
-            self.sync_dirstack_writeback();
+        match name {
+            "DIRSTACK" => self.sync_dirstack_writeback(),
+            "OPTIND" => self.getopts_reset(),
+            "OPTERR" => self.getopts_opterr_reset(),
+            _ => {}
         }
     }
 
@@ -40309,6 +40455,18 @@ impl Shell {
                 i += 1;
                 break;
             }
+            // `bind` is the one builtin that runs the shared option scanner
+            // *without* a `CASE_HELPOPT` arm to catch its `--help` pseudo-option
+            // (`builtins/bind.def` has no such case). So the request falls
+            // through to the switch's `default:` and becomes a plain
+            // `builtin_usage ()`: the synopsis on stderr, with no "invalid
+            // option" line in front of it and no long doc — which is why this
+            // sits here and not with the shared answer in
+            // [`Shell::builtin_answer_help`].
+            if args[i].as_slice() == b"--help" {
+                self.errln(USAGE);
+                return 2;
+            }
             // A lone `-`, or a non-option word, ends the options and is an
             // operand (a key sequence) rather than an empty bundle.
             let Some(flags) = args[i].strip_prefix(b"-").filter(|f| !f.is_empty()) else {
@@ -40921,27 +41079,36 @@ impl Shell {
         let mut i = 0;
         while let Some(a) = args.get(i) {
             if a.as_slice() == b"--" {
-                patterns.extend_from_slice(&args[i + 1..]);
+                i += 1;
                 break;
             }
-            if let Some(flags) = a.strip_prefix(b"-")
-                && !flags.is_empty()
-                && flags.iter().all(|c| matches!(c, b's' | b'd' | b'm'))
-            {
-                for c in flags {
-                    match c {
-                        b's' => short = true,
-                        b'd' => desc_only = true,
-                        b'm' => man = true,
-                        _ => {}
+            // An option *group*, scanned letter by letter the way
+            // `internal_getopt` scans one, and stopping where it stops: the
+            // first word that is not one (`NOTOPT`, so a lone `-` counts) ends
+            // the options for good, and everything from there on is a pattern
+            // however it is spelled — `help x -s` looks for a topic called `-s`.
+            // An unknown letter is a usage error naming that letter alone:
+            // `help -Xs` reports `-X` and never reaches the `s`.
+            let Some(flags) = a.strip_prefix(b"-").filter(|f| !f.is_empty()) else {
+                break;
+            };
+            for c in flags {
+                match c {
+                    b's' => short = true,
+                    b'd' => desc_only = true,
+                    b'm' => man = true,
+                    _ => {
+                        return self.builtin_invalid_option(
+                            "help",
+                            &[b'-', *c],
+                            "help [-dms] [pattern ...]",
+                        );
                     }
                 }
-                i += 1;
-                continue;
             }
-            patterns.push(a.clone());
             i += 1;
         }
+        patterns.extend_from_slice(&args[i..]);
 
         // No pattern: print an informative header (bash-shaped, but honest about
         // osh's identity — it deliberately does NOT claim to be GNU bash, just as
@@ -40989,6 +41156,7 @@ impl Shell {
         // `help ech` → echo, `help c` → every topic starting with `c`). Matches
         // are listed alphabetically by topic name, as bash does.
         let mut status = 0;
+        let mut matched = false;
         let mut text = Str::new();
         for pat in &patterns {
             let is_glob = pat.contains(&b'*') || pat.contains(&b'?');
@@ -41015,19 +41183,9 @@ impl Shell {
                     .collect()
             };
             if matches.is_empty() {
-                self.berrln(&bfmt![
-                    self.err_prefix(),
-                    b"help: no help topics match `",
-                    pat,
-                    b"'.  Try `help help' or `man -k ",
-                    pat,
-                    b"' or `info ",
-                    pat,
-                    b"'."
-                ]);
-                status = 1;
                 continue;
             }
+            matched = true;
             matches.sort_unstable_by(|a, b| a.0.cmp(b.0));
             // bash heads a glob match with a keyword banner (a blank line
             // follows); a prefix match lists entries directly.
@@ -41060,10 +41218,65 @@ impl Shell {
                 }
             }
         }
+        // bash counts matches across the *whole* operand list and reports the
+        // failure once, at the end, naming the last pattern it looked at —
+        // `match_found` and `pattern` in `help.def`'s loop. So `help x -s`
+        // blames `-s` alone, and `help -s cd -d` says nothing at all and
+        // succeeds, because `cd` matched: one topic found anywhere is enough.
+        if !matched && !patterns.is_empty() {
+            let pat = patterns.last().unwrap_or(&Vec::new()).clone();
+            self.berrln(&bfmt![
+                self.err_prefix(),
+                b"help: no help topics match `",
+                &pat,
+                b"'.  Try `help help' or `man -k ",
+                &pat,
+                b"' or `info ",
+                &pat,
+                b"'."
+            ]);
+            status = 1;
+        }
         if !text.is_empty() {
             self.write_bytes(out, redir, &text);
         }
         status
+    }
+
+    /// Answer a builtin's own `--help`: the same text `help <name>` prints in
+    /// its long form, on **stdout**, and status 2.
+    ///
+    /// bash's `builtin_help ()` (`builtins/help.def:192`) prints
+    /// `"%s: %s\n"` of `this_command_name` and the builtin's `short_doc` and
+    /// then `show_longdoc`, which is exactly the long form — so `cd --help` and
+    /// `help cd` are byte-for-byte the same output. The name printed is the one
+    /// the command was *called* by, which is why `.` and `source`, and
+    /// `declare` and `typeset`, each answer under their own name.
+    ///
+    /// The status is `EX_USAGE`, 2 — bash treats the request as a usage error
+    /// however successfully it is answered, so in posix mode asking a POSIX
+    /// special builtin for help ends a non-interactive shell just as a bad
+    /// option would (`bash --posix -c 'eval --help; echo after'` prints the
+    /// help and never reaches the `echo`). Reporting it through
+    /// [`Shell::note_builtin_usage_error`] is what carries that.
+    fn builtin_answer_help(&mut self, name: &str, out: &mut Out, redir: &RedirPlan) -> i32 {
+        self.write_builtin_help(name, out, redir);
+        self.note_builtin_usage_error()
+    }
+
+    /// The text of a builtin's `--help`, written to its stdout.
+    ///
+    /// Split from [`Shell::builtin_answer_help`] for `command` and `builtin`,
+    /// which are dispatched at exec level (they re-enter the dispatcher rather
+    /// than running inside it) and so never reach the shared check — and which,
+    /// not being POSIX special builtins, have no use for the usage-error class
+    /// that goes with it.
+    fn write_builtin_help(&mut self, name: &str, out: &mut Out, redir: &RedirPlan) {
+        if let Some((_, usage, description)) = HELP_TABLE.iter().find(|(n, _, _)| *n == name) {
+            let mut text = bfmt![name, b": ", *usage, b"\n"];
+            text.extend_from_slice(&Self::help_description(name, description));
+            self.write_bytes(out, redir, &text);
+        }
     }
 
     /// Indent every line of `text` by four spaces and terminate each with a
@@ -47261,6 +47474,30 @@ impl Shell {
                 self.readonly.insert(name.to_string());
             }
         }
+        // A declaration runs the dynamic-name hook for every name it was given
+        // — `stupidly_hack_special_variables (name)` at the foot of
+        // `declare_internal`'s own operand loop (builtins/declare.def:1048) —
+        // and that is what makes the `local OPTIND` idiom work: the name is
+        // declared afresh with no value, the hook reads nothing there, and
+        // `getopts` starts over for the call. See [`Shell::getopts_reset`].
+        //
+        // bash runs it per operand, at the end of that operand's turn, and the
+        // paths that leave the turn early skip it. Here it is run for the whole
+        // list once the loop is over. The two hooked names cannot tell the
+        // difference: neither the order among operands nor a refused operand
+        // changes what the hook then reads back out of the variable.
+        for op in &ops {
+            let written: BStr<'_> = match op {
+                DeclOperand::Word(w) => w,
+                DeclOperand::Bound(c) => c.name.as_bytes(),
+            };
+            // The hook is on the *name*, so the value and any subscript a
+            // `name=value` operand carries are cut off first.
+            let base = written.split(|&c| c == b'=' || c == b'[').next().unwrap_or_default();
+            if let Some(n) = bytes::as_str(base) {
+                self.after_var_write(n);
+            }
+        }
         status
     }
 
@@ -48870,6 +49107,26 @@ impl Shell {
         // below has to pop it: there are three, this one, the `-p` return, and
         // the end of the function.
         let pushed_stderr = self.push_builtin_stderr(redir, out);
+        // `--help` is the shared option scanner's, so it is asked of this
+        // builtin too — and asked first, ahead of even `local`'s function-context
+        // check, which is where bash puts its own copy of the test
+        // (`declare.def:126`). It has to read the *spliced* words rather than
+        // `argv`: bash scans the operand list as written, and a compound operand
+        // is a `NOTOPT` word that ends the options, so `local x=(1) --help` is
+        // not a request — while to `argv`, which has had the compound taken out,
+        // it would look like one.
+        if builtin_wants_help(
+            cmd,
+            words.spliced.get(1..).unwrap_or_default(),
+            !self.local_frames.is_empty(),
+        ) {
+            self.write_builtin_help(cmd, out, redir);
+            if pushed_stderr {
+                self.stderr_stack.pop();
+            }
+            self.last_status = self.note_builtin_usage_error();
+            return Flow::Next;
+        }
         // The first thing `local`'s builtin does — which is why `local q=(1)` at
         // top level still leaves `declare -a q=([0]="1")` behind, and why the
         // refusal is silenced by the command's own `2>/dev/null`.
@@ -49599,6 +49856,11 @@ impl Shell {
         // b c` still unsets `b` and `c`.
         let mut status = 0;
         for a in &args[i..] {
+            // The operand as *written*, which is what the dynamic-name hook is
+            // run with: bash re-points `name` at `list->word->word` before
+            // reaching it (set.def:1016), undoing the nameref chain's own
+            // re-pointing. See [`Shell::unset_hook`].
+            let operand = bytes::as_str(a);
             // `unset -f` names a *function*, and bash lets a function be
             // defined with any word, so this branch runs on the raw operand —
             // ahead of the identifier gate the variable namespace needs.
@@ -49667,6 +49929,7 @@ impl Shell {
                     self.nameref_attr.remove(a);
                     self.vars.remove(a);
                 }
+                self.unset_hook(operand);
                 continue;
             }
             // `unset name[sub]` removes a single element. The subscript is split
@@ -49757,6 +50020,7 @@ impl Shell {
                             status = 1;
                         }
                     }
+                    self.unset_hook(operand);
                     continue;
                 }
                 // Posix says variables first and functions second, and bash
@@ -49799,6 +50063,7 @@ impl Shell {
                         }
                         status = 1;
                     }
+                    self.unset_hook(operand);
                     continue;
                 }
                 // …and one designating a plain name unbinds it whole — by name,
@@ -49811,6 +50076,7 @@ impl Shell {
                     _ => base.to_string(),
                 };
                 self.unbind_var_through_ref(&whole);
+                self.unset_hook(operand);
                 continue;
             }
             // Every remaining *variable* table `unset` reaches — scalars,
@@ -49849,14 +50115,38 @@ impl Shell {
                 if !self.unset_ref_element(&base, &sub) {
                     status = 1;
                 }
+                self.unset_hook(operand);
                 continue;
             }
             let a = &target.and_then(RefTarget::into_name).unwrap_or_else(|| a.to_string());
-            if !self.unset_resolved_name(a, vars_only) {
+            if self.unset_resolved_name(a, vars_only) {
+                // A refusal leaves by bash's `NEXT_VARIABLE()` before the hook
+                // — see [`Shell::unset_hook`].
+                self.unset_hook(operand);
+            } else {
                 status = 1;
             }
         }
         status
+    }
+
+    /// `unset`'s own run of the dynamic-name hook — `stupidly_hack_special_variables`
+    /// at builtins/set.def:1022, guarded there by `if (unset_function == 0)`.
+    ///
+    /// So it runs once per operand, for the operand *as written*, on every
+    /// path that treated the name as a **variable** — including the ones that
+    /// removed nothing. The paths it does not run on are the ones bash leaves
+    /// by `NEXT_VARIABLE()` before reaching it (an invalid identifier, a
+    /// readonly name, one of the four that cannot be unset at all) and the ones
+    /// that ended up in the *function* namespace.
+    ///
+    /// `unset OPTIND` is why `getopts` can be restarted at all: the hook reads
+    /// the now-absent variable as 0 and that is the value that throws a
+    /// part-read bundle away. See [`Shell::getopts_reset`].
+    fn unset_hook(&mut self, operand: Option<&str>) {
+        if let Some(n) = operand {
+            self.after_var_write(n);
+        }
     }
 
     /// The whole of what `unset` does once an operand has been resolved to a
@@ -50357,7 +50647,16 @@ impl Shell {
         }
         // Handle option flags (`-e`/`-u`/`-x`/… as clusters, `-o name`) and, on
         // the first non-option operand, reset the positional parameters. `--`
-        // ends option processing; a bare `-`/`+` is ignored.
+        // and a lone `-` both end option processing; a lone `+` does not.
+        //
+        // bash reads the list twice (`set.def:689` and `:713`): a validity pass
+        // made with `internal_getopt`, and then the pass that does the work. The
+        // first stops at the first `NOTOPT` word, and a lone `+` is one — so an
+        // invalid option written *after* one is found only by the second pass,
+        // which reports it as a plain failure (`EXECUTION_FAILURE`, set.def:788)
+        // rather than the usage error the first pass would have made of it.
+        // `set -Z` is 2; `set + -Z` is 1, with the same two lines.
+        let mut past_first_pass = false;
         let mut i = 0;
         while i < args.len() {
             let arg = &args[i];
@@ -50366,7 +50665,23 @@ impl Shell {
                     self.positional = args[i + 1..].to_vec();
                     return 0;
                 }
-                b"-" | b"+" => {
+                // "the old shell behaviour of `set - [arg ...]' being equivalent
+                // to `set +xv [arg ...]'" (set.def:727) — and it ends the
+                // options like `--`, but *unlike* `--` it does not clear the
+                // positional parameters when nothing follows it: `--` sets
+                // `force_assignment`, `-` does not, so `set -` leaves `$@`
+                // alone where `set --` empties it.
+                b"-" => {
+                    self.xtrace = false;
+                    self.verbose = false;
+                    self.refresh_shellopts();
+                    if i + 1 < args.len() {
+                        self.positional = args[i + 1..].to_vec();
+                    }
+                    return 0;
+                }
+                b"+" => {
+                    past_first_pass = true;
                     i += 1;
                 }
                 b"-o" | b"+o" => {
@@ -50430,8 +50745,8 @@ impl Shell {
                                 }
                             }
                         } else if !self.set_short_option(c, enable) {
-                            // bash: `set: -X: invalid option` + usage, status 2,
-                            // stopping before later cluster letters are applied.
+                            // bash: `set: -X: invalid option` + usage, stopping
+                            // before later cluster letters are applied.
                             let sign = if enable { b'-' } else { b'+' };
                             self.berrln(&bfmt![
                                 self.err_prefix(),
@@ -50443,7 +50758,21 @@ impl Shell {
                             self.emit_stderr(
                                 b"set: usage: set [-abefhkmnptuvxBCEHPT] [-o option-name] [--] [-] [arg ...]\n",
                             );
-                            return self.note_builtin_usage_error();
+                            // Which of the two passes found it decides the status
+                            // (see the two-pass note above): the validity pass
+                            // makes it the usage error `EX_USAGE`, the working
+                            // pass a plain `EXECUTION_FAILURE` (set.def:788). The
+                            // only way to reach the second without the first
+                            // having seen the word is to hide it behind a lone
+                            // `+`, which is `NOTOPT` and so ends the first pass
+                            // but not the second. An invalid *option name* is
+                            // `EX_USAGE` from either pass (set.def:496), so only
+                            // this site is conditional.
+                            return if past_first_pass {
+                                1
+                            } else {
+                                self.note_builtin_usage_error()
+                            };
                         }
                     }
                     i += 1 + extra_words;
@@ -50889,12 +51218,219 @@ impl Shell {
         }
     }
 
-    /// The `getopts optstring name [args...]` builtin: POSIX-style option
-    /// parser. Reads one option per invocation, tracking position across calls
-    /// via the `OPTIND` shell variable and the internal `getopts_col` cursor
-    /// (for bundled flags like `-abc`). Sets `name` to the option character,
-    /// `OPTARG` to any option-argument. Returns 0 while options remain, 1 at
-    /// the end of the option list.
+    /// The argument at index `k` of the vector `sh_getopt` scans.
+    ///
+    /// bash hands it `argv[0] = $0` followed by the arguments, so an index is
+    /// one more than the position it names; index 0 is never scanned. Out of
+    /// range answers nothing — bash reads past the end of its own vector there
+    /// (`sh_getopt_restore_state` indexes by a *remembered* `sh_curopt`, which
+    /// a later call's shorter argument list need not still hold), and there is
+    /// no reading of uninitialised memory to be faithful to.
+    fn getopts_arg(pos: &[Str], k: i32) -> Option<BStr<'_>> {
+        usize::try_from(k)
+            .ok()?
+            .checked_sub(1)
+            .and_then(|i| pos.get(i))
+            .map(Vec::as_slice)
+    }
+
+    /// One turn of bash's `sh_getopt` (builtins/getopt.c:113) over `pos`.
+    ///
+    /// The cursor is two independent things, and keeping them apart is what
+    /// makes this behave the way bash does:
+    ///
+    ///   * [`Shell::getopts_optind`] — which *argument* the next fresh scan
+    ///     starts at, moved from the outside by assigning `OPTIND`.
+    ///   * [`Shell::getopts_curopt`]/[`Shell::getopts_charindex`] — where in a
+    ///     part-read group like `-abc` the next byte comes from. bash keeps
+    ///     this as a pointer and re-points it at the *current* argument vector
+    ///     on every call (`sh_getopt_restore_state`, builtins/getopt.c:216), so
+    ///     a group half-read out of one list of arguments is finished off
+    ///     against whatever now stands at that index of another:
+    ///
+    ///     ```sh
+    ///     set -- -abc; getopts abc o          # o=a, and 2 bytes into argument 1
+    ///     getopts abcxyz o -xyz -q            # o=y — argument 1 is now `-xyz`
+    ///     ```
+    ///
+    /// The two meet only at the ends: a fresh group is started at
+    /// `getopts_optind`, and finishing one advances it.
+    ///
+    /// `scan` is the optstring past a leading silent-mode colon, and `report`
+    /// says whether the two diagnostics are printed (bash's `sh_opterr`, which
+    /// silent mode turns off for the duration of the call).
+    fn sh_getopt(&mut self, pos: &[Str], scan: BStr<'_>, report: bool) -> ShGetopt {
+        let argc = i32::try_from(pos.len()).unwrap_or(i32::MAX).saturating_add(1);
+        let eof = ShGetopt { ret: None, optarg: None, optopt: b'?' };
+        // Past the end — including an `OPTIND` set past it by hand — reports
+        // where the arguments ran out rather than parroting the value back, and
+        // does so before the part-read group is even looked at.
+        if self.getopts_optind >= argc || self.getopts_optind < 0 {
+            self.getopts_optind = argc;
+            return eof;
+        }
+        // Zero is `sv_optind`'s "start over" — the value it stores for an
+        // `OPTIND` of 1, of a negative number, or of nothing at all — and it is
+        // the one thing that also throws away a part-read group.
+        if self.getopts_optind == 0 {
+            self.getopts_optind = 1;
+            self.getopts_mid = false;
+        }
+        // `nextchar == 0 || *nextchar == '\0'`: no group is part-read, or the
+        // one that is has nothing left of it where it now points.
+        let rest_empty = !self.getopts_mid
+            || Self::getopts_arg(pos, self.getopts_curopt)
+                .is_none_or(|a| self.getopts_charindex >= a.len());
+        if rest_empty {
+            if self.getopts_optind >= argc {
+                return eof;
+            }
+            let temp = Self::getopts_arg(pos, self.getopts_optind).unwrap_or(b"");
+            // `--` is stepped over on the way out; a non-option and the bare
+            // `-` are left where they are, so `OPTIND` points *at* them.
+            if temp == b"--" {
+                self.getopts_optind = self.getopts_optind.saturating_add(1);
+                return eof;
+            }
+            if !temp.starts_with(b"-") || temp.len() == 1 {
+                return eof;
+            }
+            self.getopts_curopt = self.getopts_optind;
+            self.getopts_charindex = 1;
+            self.getopts_mid = true;
+        }
+        let cur = Self::getopts_arg(pos, self.getopts_curopt).unwrap_or(b"").to_vec();
+        let Some(&c) = cur.get(self.getopts_charindex) else {
+            return eof;
+        };
+        self.getopts_charindex = self.getopts_charindex.saturating_add(1);
+        // The index moves on when the *last* byte of a group is taken, not when
+        // the group is next reached — so `-ab` leaves `OPTIND` at 1 after `a`.
+        if self.getopts_charindex >= cur.len() {
+            self.getopts_optind = self.getopts_optind.saturating_add(1);
+            self.getopts_mid = false;
+        }
+        // A colon in the optstring is the marker that the letter before it takes
+        // an argument, so it never names an option itself — it is refused even
+        // where it is spelled there.
+        let at = scan.iter().position(|&x| x == c);
+        let Some(at) = at.filter(|_| c != b':') else {
+            if report {
+                let msg = bfmt![&self.name, b": illegal option -- ", &[c][..]];
+                self.berrln(&msg);
+            }
+            return ShGetopt { ret: Some(b'?'), optarg: None, optopt: c };
+        };
+        if scan.get(at.saturating_add(1)) != Some(&b':') {
+            return ShGetopt { ret: Some(c), optarg: None, optopt: c };
+        }
+        self.getopts_mid = false;
+        if self.getopts_charindex < cur.len() {
+            // The rest of this argument is the option-argument, and the
+            // argument is finished with either way.
+            let optarg = cur.get(self.getopts_charindex..).unwrap_or_default().to_vec();
+            self.getopts_optind = self.getopts_optind.saturating_add(1);
+            return ShGetopt { ret: Some(c), optarg: Some(optarg), optopt: c };
+        }
+        if self.getopts_optind == argc {
+            if report {
+                let msg = bfmt![&self.name, b": option requires an argument -- ", &[c][..]];
+                self.berrln(&msg);
+            }
+            // The reported character is chosen off the **scanned** optstring —
+            // the one a silent-mode colon has already been taken from the front
+            // of. So a second colon there answers `:` from here rather than
+            // from the caller's missing-argument arm, and the caller, seeing no
+            // `?`, plants the empty string in `OPTARG` instead of the letter.
+            let ret = if scan.first() == Some(&b':') { b':' } else { b'?' };
+            return ShGetopt { ret: Some(ret), optarg: Some(Str::new()), optopt: c };
+        }
+        let optarg = Self::getopts_arg(pos, self.getopts_optind).unwrap_or(b"").to_vec();
+        self.getopts_optind = self.getopts_optind.saturating_add(1);
+        ShGetopt { ret: Some(c), optarg: Some(optarg), optopt: c }
+    }
+
+    /// Set the `getopts` cursor from an assignment to `OPTIND` — bash's
+    /// `sv_optind` (variables.c:6279) reaching `getopts_reset`
+    /// (builtins/getopts.def:96).
+    ///
+    /// It is a hook on the **name**, so every shell-level write to `OPTIND`
+    /// runs it and the builtin's own write of the variable does not. What it
+    /// stores is `atoi` of the value, except that POSIX's "setting `OPTIND=1`
+    /// resets the internal state" is spelled by folding 1 — and any negative
+    /// number, and an empty or absent value — down to the 0 that means *start
+    /// over*, which is the only value that also throws away a part-read group.
+    fn getopts_reset(&mut self) {
+        // `find_variable ("OPTIND")` — the ordinary lookup, so the value read is
+        // whatever the name reaches now: a `local OPTIND` while one is in
+        // scope, and a nameref's target through one.
+        let raw = self.param_value("OPTIND").unwrap_or_default();
+        // The cursor bash keeps the answer in is a plain C `int`, and the value
+        // is narrowed to one on the way in — so a number too big for 32 bits is
+        // not "past the end" but whatever its low 32 bits say, which for
+        // `OPTIND=4294967297` is the *first* argument all over again.
+        let s = if raw.is_empty() { 0 } else { atoi_c_int(&raw) };
+        self.getopts_optind = if s < 0 || s == 1 { 0 } else { s };
+    }
+
+    /// Set whether `getopts` prints its own diagnostics from a write to
+    /// `OPTERR` — bash's `sv_opterr` (variables.c:6307):
+    ///
+    /// ```c
+    /// tt = get_string_value ("OPTERR");
+    /// sh_opterr = (tt && *tt) ? atoi (tt) : 1;
+    /// ```
+    ///
+    /// `atoi` is what reads it, so anything that is not a number at all counts
+    /// as the 0 that silences them (`OPTERR=zz` is as quiet as `OPTERR=0`)
+    /// while an *empty* or absent value is the 1 they are on by default —
+    /// which is why `unset OPTERR` turns them back **on**.
+    fn getopts_opterr_reset(&mut self) {
+        let raw = self.param_value("OPTERR").unwrap_or_default();
+        self.getopts_opterr = raw.is_empty() || atoi_c_int(&raw) != 0;
+    }
+
+    /// Bind one of `getopts`' own two variables, as bash's `bind_variable`
+    /// does: through a nameref, obeying the name's value attributes, landing on
+    /// element 0 of an array, and diagnosing — but not otherwise reporting — a
+    /// readonly refusal.
+    ///
+    /// A `None` value is bash's NULL, which leaves the variable *existing with
+    /// no value*: `set -- -a; getopts ab o` reports `declare -- OPTARG` and
+    /// `${OPTARG-U}` still answers `U`. That is what a flag taking no argument
+    /// stores, and it is not the same as the `unset` an unknown option does.
+    fn getopts_bind_own(&mut self, name: &str, value: Option<Str>) {
+        let Some(value) = value else {
+            let Some(dest) = self.scalar_write_dest(name) else {
+                return;
+            };
+            if let ScalarPlace::Var(n) = dest.place {
+                self.vars.remove(&n);
+                self.declared.insert(n);
+            }
+            return;
+        };
+        self.set_scalar_checked(name, value);
+    }
+
+    /// The `getopts optstring name [args...]` builtin — bash's `dogetopts`
+    /// (builtins/getopts.def:159) over [`Shell::sh_getopt`].
+    ///
+    /// The scanner answers in bash's three signals and this sorts them out.
+    /// A `?` means one of two different things, told apart by what the scanner
+    /// did with `sh_optarg`: left alone, the option was not one the optstring
+    /// names; set to the empty string, it was one whose argument was missing.
+    /// The two are reported differently, and differently again depending on
+    /// whether the optstring asked for silent reporting with a leading colon:
+    ///
+    /// | | unknown option | missing argument |
+    /// |---|---|---|
+    /// | plain | name=`?`, `OPTARG` unset, a diagnostic | name=`?`, `OPTARG` unset, a diagnostic |
+    /// | silent | name=`?`, `OPTARG`=the letter | name=`:`, `OPTARG`=the letter |
+    ///
+    /// `OPTIND` is written on the way out of every one of them, before the name
+    /// is, and always with what the scan left — including the end of the
+    /// options, which is how `--` gets stepped over.
     fn builtin_getopts(&mut self, args: &[Str]) -> i32 {
         // getopts has no options of its own, so bash's internal_getopt rejects
         // any leading `-X` (letter) as an invalid option; `--` ends option
@@ -50929,11 +51465,17 @@ impl Shell {
             return 2;
         };
         let silent = optstring.starts_with(b":");
-        // bash suppresses getopts' own diagnostics when `OPTERR` is exactly
-        // "0" (default 1), independently of the leading-colon "silent" mode —
-        // silent mode also changes the *reported* value (`?`→`:`, sets OPTARG),
-        // whereas OPTERR=0 only mutes the message and keeps non-silent values.
-        let report_errors = self.vars.get("OPTERR").is_none_or(|v| v.as_slice() != b"0");
+        // The optstring the *scan* reads is the one past a silent-mode colon,
+        // and a second colon there is an ordinary part of it — which is how
+        // `::a:` comes to answer a missing argument differently. See
+        // [`Shell::sh_getopt`].
+        let scan: Str = if silent { optstring.get(1..).unwrap_or_default().to_vec() } else { optstring.clone() };
+        // Silent mode turns the diagnostics off for the duration of the call
+        // and puts `sh_opterr` back afterwards, so it does not settle the
+        // question `OPTERR` answers — it only overrides it here. The two are
+        // otherwise separate: silent mode also changes the *reported* value
+        // (`?`→`:`, `OPTARG` set), where `OPTERR=0` only mutes the message.
+        let report = !silent && self.getopts_opterr;
         // Arguments to scan: explicit args after `name`, else the positionals.
         // They are *values* — an option-argument is routinely a path — so the
         // scan is over bytes and `OPTARG` is bound to the bytes it found.
@@ -50942,176 +51484,48 @@ impl Shell {
         } else {
             self.positional.clone()
         };
-        // bash reads `OPTIND` with `atoi`: leading whitespace, an optional
-        // sign, a run of digits, and any trailing junk ignored — so a stray
-        // `OPTIND=3junk` really does start the scan at the third argument.
-        // (While the variable keeps its integer attribute it can only hold a
-        // canonical decimal, so the loose reading only shows after an `unset`.)
-        let raw: BStr<'_> = self.vars.get("OPTIND").map_or(b"".as_slice(), Vec::as_slice);
-        let t = bytes::trim_start(raw);
-        let (sign, digits) = match t.strip_prefix(b"-".as_slice()) {
-            Some(rest) => (-1_isize, rest),
-            None => (1, t.strip_prefix(b"+".as_slice()).unwrap_or(t)),
+        let g = self.sh_getopt(&pos, &scan, report);
+        // `OPTIND` is written before anything else the call has to say, and it
+        // is written *from* the shell's own cursor rather than being read back
+        // out of the variable. bash's write here is `bind_variable`, which is
+        // not the assignment machinery and so does not run the reset hook a
+        // shell-level `OPTIND=…` does — osh's shared scalar store is where that
+        // hook lives, so the cursor is put back afterwards. It matters: after
+        // `a` of a bundled `-ab` the cursor still stands at argument 1, and a
+        // reset from the 1 just written would throw the half-read bundle away
+        // and start the same argument over for ever. See
+        // [`Shell::getopts_reset`].
+        let optind = self.getopts_optind;
+        self.getopts_bind_own("OPTIND", Some(optind.to_string().into_bytes()));
+        self.getopts_optind = optind;
+        let Some(mut ret) = g.ret else {
+            self.unbind_var("OPTARG");
+            // The outcome of the write is not consulted on the path that
+            // reports the end of the options: there the 1 is the answer to the
+            // question asked, and neither a readonly variable nor an unnameable
+            // operand has a different answer to give.
+            self.getopts_bind(&name, b"?");
+            return 1;
         };
-        // The cursor bash keeps the answer in is a plain C `int`, and the value
-        // is narrowed to one on the way in — so a number too big for 32 bits is
-        // not "past the end" but whatever its low 32 bits say, which for
-        // `OPTIND=4294967297` is the *first* argument all over again.
-        #[allow(clippy::cast_possible_truncation, reason = "bash narrows to `int`")]
-        let narrowed = sign.saturating_mul(atoi(digits)) as i32;
-        // Anything the narrowing leaves at or below zero is no position at all,
-        // and bash starts over from the first argument.
-        let mut optind = usize::try_from(narrowed).unwrap_or(1).max(1);
-        // An `OPTIND` left past the end is pulled back to one past the last
-        // argument there is to scan, so that the call reports where the options
-        // ran out rather than parroting the value back: `OPTIND=99` over two
-        // arguments answers 3. It is a clamp and not a rescan — the next call
-        // finds the end again in the same place — and it counts the arguments
-        // this call was actually given, so an explicit operand list is measured
-        // instead of the positionals.
-        optind = optind.min(pos.len().saturating_add(1));
-        // If OPTIND was reset externally (e.g. `OPTIND=1`), restart bundling.
-        if optind != self.getopts_optind {
-            self.getopts_col = 0;
+        // `?` is the scanner's answer to both kinds of failure, and `sh_optarg`
+        // is what tells them apart — which means an option *named* `?` whose
+        // argument happens to be empty is read as a missing one.
+        let missing = ret == b'?' && g.optarg.as_ref().is_some_and(Vec::is_empty);
+        let unknown = ret == b'?' && g.optarg.is_none();
+        if unknown || missing {
+            if missing && silent {
+                ret = b':';
+            }
+            let bound = self.getopts_bind(&name, &[ret][..]);
+            if silent {
+                self.getopts_bind_own("OPTARG", Some(vec![g.optopt]));
+            } else {
+                self.unbind_var("OPTARG");
+            }
+            return bound.found_status();
         }
-
-        loop {
-            // No more arguments to scan. (optind >= 1 is guaranteed above.)
-            if optind > pos.len() {
-                self.getopts_col = 0;
-                self.getopts_optind = optind;
-                self.put_var("OPTIND".to_string(), optind.to_string());
-                // The outcome of the write is not consulted on any of the three
-                // paths that report the end of the options: there the 1 is the
-                // answer to the question asked, and neither a readonly variable
-                // nor an unnameable operand has a different answer to give.
-                self.getopts_bind(&name, b"?");
-                return 1;
-            }
-            let arg = &pos[optind - 1].clone();
-            if self.getopts_col == 0 {
-                // Start of a fresh argument.
-                if !arg.starts_with(b"-") || arg.as_slice() == b"-" {
-                    self.getopts_optind = optind;
-                    self.put_var("OPTIND".to_string(), optind.to_string());
-                    self.getopts_bind(&name, b"?");
-                    return 1;
-                }
-                if arg.as_slice() == b"--" {
-                    optind += 1;
-                    self.getopts_col = 0;
-                    self.getopts_optind = optind;
-                    self.put_var("OPTIND".to_string(), optind.to_string());
-                    self.getopts_bind(&name, b"?");
-                    return 1;
-                }
-                self.getopts_col = 1;
-            }
-            // An option is a *character*, so the argument is walked
-            // character-wise; a byte that decodes to none matches no optstring
-            // entry and so takes the "illegal option" path, which is right.
-            let chars: Vec<bytes::Ch> = bytes::chars(arg).collect();
-            if self.getopts_col >= chars.len() {
-                // Exhausted this argument's flags; advance to the next.
-                optind += 1;
-                self.getopts_col = 0;
-                continue;
-            }
-            let opt = chars[self.getopts_col];
-            self.getopts_col += 1;
-
-            // Look the option up in the optstring (skipping ':' modifiers).
-            // The optstring names option *characters* too, so it is walked
-            // the same way the argument is — which lets a byte that decodes to
-            // no character still be named there and matched exactly.
-            let ospec: Vec<bytes::Ch> = bytes::chars(&optstring).collect();
-            const COLON: bytes::Ch = bytes::Ch::U(':');
-            let mut found = false;
-            let mut takes_arg = false;
-            for (i, &c) in ospec.iter().enumerate() {
-                if c == COLON {
-                    continue;
-                }
-                if opt == c {
-                    found = true;
-                    takes_arg = ospec.get(i + 1) == Some(&COLON);
-                    break;
-                }
-            }
-
-            let arg_exhausted = self.getopts_col >= chars.len();
-
-            if !found {
-                if silent {
-                    self.put_var("OPTARG".to_string(), opt.to_str());
-                } else {
-                    if report_errors {
-                        let msg =
-                            bfmt![&self.name, b": illegal option -- ", &opt.to_str()];
-                        self.berrln(&msg);
-                    }
-                    self.vars.remove("OPTARG");
-                }
-                if arg_exhausted {
-                    optind += 1;
-                    self.getopts_col = 0;
-                }
-                self.getopts_optind = optind;
-                self.put_var("OPTIND".to_string(), optind.to_string());
-                return self.getopts_bind(&name, b"?").found_status();
-            }
-
-            if takes_arg {
-                if !arg_exhausted {
-                    // Remainder of the current argument is the option-argument.
-                    let optarg = bytes::from_chars(chars[self.getopts_col..].iter().copied());
-                    self.put_var("OPTARG".to_string(), optarg);
-                    optind += 1;
-                    self.getopts_col = 0;
-                } else if optind < pos.len() {
-                    // The next argument is the option-argument.
-                    let optarg = pos[optind].clone();
-                    self.put_var("OPTARG".to_string(), optarg);
-                    optind += 2;
-                    self.getopts_col = 0;
-                } else {
-                    // Missing required argument.
-                    optind += 1;
-                    self.getopts_col = 0;
-                    let reported: BStr<'_> = if silent {
-                        self.put_var("OPTARG".to_string(), opt.to_str());
-                        b":"
-                    } else {
-                        if report_errors {
-                            let msg = bfmt![
-                                &self.name,
-                                b": option requires an argument -- ",
-                                &opt.to_str()
-                            ];
-                            self.berrln(&msg);
-                        }
-                        self.vars.remove("OPTARG");
-                        b"?"
-                    };
-                    self.getopts_optind = optind;
-                    self.put_var("OPTIND".to_string(), optind.to_string());
-                    return self.getopts_bind(&name, reported).found_status();
-                }
-                self.getopts_optind = optind;
-                self.put_var("OPTIND".to_string(), optind.to_string());
-                return self.getopts_bind(&name, &opt.to_str()).found_status();
-            }
-
-            // Plain flag with no argument.
-            self.vars.remove("OPTARG");
-            if arg_exhausted {
-                optind += 1;
-                self.getopts_col = 0;
-            }
-            self.getopts_optind = optind;
-            self.put_var("OPTIND".to_string(), optind.to_string());
-            return self.getopts_bind(&name, &opt.to_str()).found_status();
-        }
+        self.getopts_bind_own("OPTARG", g.optarg);
+        self.getopts_bind(&name, &[ret][..]).found_status()
     }
 
     /// Whether a `-u` operand names a descriptor this shell actually holds,
@@ -60887,6 +61301,219 @@ fn help_body(name: &str) -> &'static str {
         .map_or("", |(_, body)| *body)
 }
 
+/// Where in its own argument list a builtin will notice `--help`.
+///
+/// bash never writes the test in a builtin: it lives in the *shared* option
+/// scanner, `internal_getopt` (`builtins/bashgetopt.c:83`), which answers
+/// `GETOPT_HELP` for a word that is exactly `--help` (`ISHELP`,
+/// `builtins/common.h:27`) at the head of a fresh option word. Which of the
+/// three consumers a builtin uses is what decides *how far in* the word may
+/// appear — and that is the only thing that varies, so it is all this enum
+/// records.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HelpOpt {
+    /// The builtin has no option scanner in front of it at all, so `--help` is
+    /// an ordinary operand: `echo --help` prints it, `test --help` tests it,
+    /// `: --help` ignores it.
+    None,
+    /// `CHECK_HELPOPT(list)` (`builtins/common.h:29`) — a single test of the
+    /// *first* word, made before the builtin's own hand-written parsing. So
+    /// `kill --help` prints the help but `kill -l --help` reaches `kill` with
+    /// `--help` as a signal name, and `dirs -l --help` calls it a bad operand.
+    First,
+    /// `CASE_HELPOPT` inside the builtin's `internal_getopt` loop, with this
+    /// optstring — so the word is recognized wherever the loop is still
+    /// scanning options: after other flags (`cd -L --help`), but not past a
+    /// `--` (`cd -- --help`), not past the first operand (`cd x --help`), and
+    /// not where a preceding flag has already claimed it as its argument
+    /// (`mapfile -d --help`). `:`/`;` after a letter mean "takes an argument",
+    /// as they do for `internal_getopt`; a leading `+` means plus-signed words
+    /// are options too (`declare +x --help`).
+    Scan(&'static str),
+    /// `local`, the only builtin to use two of the routes at once
+    /// (`declare.def:126`): a hand-written copy of the first-word test, made
+    /// *before* the function-context check so that a straight `local --help`
+    /// answers even at top level, and then — only once inside a function, where
+    /// it goes on to `declare_internal` — the shared scan as well. So
+    /// `local -a --help` is the help in a function and "can only be used in a
+    /// function" outside one.
+    FirstThenScanInFunction(&'static str),
+}
+
+/// How `name` recognizes `--help`, and with which optstring.
+///
+/// The optstrings are bash 5.2's, verbatim from the `internal_getopt` call in
+/// each `builtins/*.def`, so the scan stops exactly where bash's does. Two are
+/// built at runtime there and are spelled out here instead: `set`'s is `'+'`
+/// plus every shell-flag letter plus `o;` (`flags.c:381`), and `ulimit`'s is
+/// `aSH` plus every limit letter each followed by `;` (`ulimit.def:345`).
+/// `pwd`'s is `LP` upstream; osh follows the build we measure against in also
+/// taking `-W`.
+///
+/// `command` and `builtin` are recorded here for completeness but are answered
+/// elsewhere: both are dispatched at exec level ([`Shell::exec_command_builtin`],
+/// [`Shell::exec_builtin_builtin`]) because they re-enter the dispatcher, so
+/// they never pass the shared check and each asks the question in its own scan.
+fn builtin_help_opt(name: &str) -> HelpOpt {
+    match name {
+        // No option scanner in front of these, so no `--help` either.
+        //
+        // `bind` is here for a different reason: it *does* run the scanner, but
+        // its switch has no `CASE_HELPOPT` arm, so the request falls to the
+        // `default:` and is answered as a plain usage error. That answer is its
+        // own — the warning it prints first belongs in front of it — so it lives
+        // in [`Shell::builtin_bind`] rather than here.
+        ":" | "true" | "false" | "echo" | "test" | "[" | "bind" => HelpOpt::None,
+        // `CHECK_HELPOPT`, or `no_options`/`internal_getopt (list, "")`, which
+        // comes to the same thing: only the first word can be the request.
+        "break" | "continue" | "exit" | "logout" | "return" | "shift" | "caller" | "fg" | "bg"
+        | "kill" | "let" | "pushd" | "popd" | "dirs" | "builtin" | "eval" | "source" | "."
+        | "times" | "getopts" => HelpOpt::First,
+        "cd" => HelpOpt::Scan("eLP@"),
+        "pwd" => HelpOpt::Scan("LPW"),
+        "printf" => HelpOpt::Scan("v:"),
+        "export" | "readonly" => HelpOpt::Scan("aAfnp"),
+        "declare" | "typeset" => HelpOpt::Scan("+acfgilnprtuxAFGI"),
+        "local" => HelpOpt::FirstThenScanInFunction("+acfgilnprtuxAFGI"),
+        "shopt" => HelpOpt::Scan("psuoq"),
+        "unset" => HelpOpt::Scan("fnv"),
+        // Every shell-flag letter (`flags.c:165`) except `i`: it *is* in the
+        // optstring bash builds, but `set.def:694` is a `case 'i':` that answers
+        // `sh_invalidopt` + `builtin_usage` outright — "don't allow set -i" —
+        // so for the help question the letter is as good as unknown, in either
+        // sign. Compare `compgen`'s `p`/`r` below.
+        "set" => HelpOpt::Scan("+abefhkmnprtuvxBCEHPTo;"),
+        "mapfile" | "readarray" => HelpOpt::Scan("d:u:n:O:tC:c:s:"),
+        "command" => HelpOpt::Scan("pvV"),
+        "read" => HelpOpt::Scan("ersa:d:i:n:p:t:u:N:"),
+        "type" => HelpOpt::Scan("afptP"),
+        "trap" => HelpOpt::Scan("lp"),
+        "jobs" => HelpOpt::Scan("lpnxrs"),
+        "disown" => HelpOpt::Scan("ahr"),
+        "wait" => HelpOpt::Scan("fnp:"),
+        "suspend" => HelpOpt::Scan("f"),
+        "hash" => HelpOpt::Scan("dlp:rt"),
+        "history" => HelpOpt::Scan("acd:npsrw"),
+        "fc" => HelpOpt::Scan(":e:lnrs"),
+        "umask" => HelpOpt::Scan("Sp"),
+        "ulimit" => HelpOpt::Scan("aSHb;c;d;e;f;i;k;l;m;n;p;q;r;s;t;u;v;x;P;R;T;"),
+        "exec" => HelpOpt::Scan("cla:"),
+        // `adnpsf:` is the optstring, but `d` and `f` are the dynamic-loading
+        // letters and this build has no `dlopen`: without it `enable.def:148`
+        // compiles no `case 'd':` at all (so the letter reaches `default:` and
+        // the usage synopsis) and `case 'f':` is the "dynamic loading not
+        // available" refusal. Either way the scan ends there, so for the help
+        // question the two letters are as good as unknown — and osh, which has
+        // no loadable builtins either, refuses them the same way.
+        "enable" => HelpOpt::Scan("anps"),
+        "alias" => HelpOpt::Scan("p"),
+        "unalias" => HelpOpt::Scan("a"),
+        "help" => HelpOpt::Scan("dms"),
+        "complete" => HelpOpt::Scan("abcdefgjko:prsuvA:G:W:P:S:X:F:C:DEI"),
+        // The same optstring, less `p` and `r`. `build_actions` (complete.def:207)
+        // is shared, but its `p`/`r` arms are `complete`'s alone and answer
+        // `sh_invalidopt` + `builtin_usage` when the caller is `compgen`
+        // (complete.def:212-234) — so for `compgen` those two letters end the
+        // scan just as an unknown one would, and `compgen -p --help` is the
+        // invalid-option refusal rather than the help.
+        "compgen" => HelpOpt::Scan("abcdefgjko:suvA:G:W:P:S:X:F:C:DEI"),
+        "compopt" => HelpOpt::Scan("+o:DEI"),
+        // Not a builtin (or one with no help topic): nothing to answer with.
+        _ => HelpOpt::None,
+    }
+}
+
+/// Whether this call of `name` is a request for the builtin's own help —
+/// `args` being the operands, `argv[0]` already dropped.
+///
+/// The scan is `internal_getopt`'s, kept to its shape so it stops where bash's
+/// stops: `NOTOPT` (`bashgetopt.c:37`) ends the options at the first word that
+/// does not begin with `-` (or `+`, when the optstring allows it) or is a lone
+/// `-`; a bare `--` ends them too; an unknown letter is an error the builtin
+/// reports instead of help; and a letter that takes an argument swallows the
+/// rest of its word, or the whole next word.
+///
+/// `in_function` is only read for `local`, whose scan is reached through the
+/// function-context check — see [`HelpOpt::FirstThenScanInFunction`].
+fn builtin_wants_help(name: &str, args: &[Str], in_function: bool) -> bool {
+    let first_is_help = || args.first().is_some_and(|a| a.as_slice() == b"--help");
+    let opts = match builtin_help_opt(name) {
+        HelpOpt::None => return false,
+        HelpOpt::First => return first_is_help(),
+        HelpOpt::FirstThenScanInFunction(o) => {
+            if first_is_help() {
+                return true;
+            }
+            if !in_function {
+                return false;
+            }
+            o
+        }
+        HelpOpt::Scan(o) => o,
+    };
+    let plus = opts.starts_with('+');
+    let opts = opts.as_bytes().get(usize::from(plus)..).unwrap_or_default();
+    // `NOTOPT`: a word that cannot start an option group, and so ends them.
+    let notopt = |w: &Str| {
+        let first = w.first().copied();
+        (first != Some(b'-') && (!plus || first != Some(b'+'))) || w.len() < 2
+    };
+    let mut i = 0;
+    while let Some(word) = args.get(i) {
+        if notopt(word) || word.as_slice() == b"--" {
+            return false;
+        }
+        if word.as_slice() == b"--help" {
+            return true;
+        }
+        // Walk the letters of this group. `sp` is bash's index into the word.
+        let mut sp = 1;
+        loop {
+            let Some(&c) = word.get(sp) else {
+                i += 1;
+                break;
+            };
+            // A `:` is never a valid option letter, even where the optstring
+            // spells one — it is the mark that the letter before it takes an
+            // argument. Same for `;`.
+            let Some(p) = opts
+                .iter()
+                .position(|&o| o == c)
+                .filter(|_| c != b':' && c != b';')
+            else {
+                // An invalid option: the builtin reports it and stops, so no
+                // `--help` further along the line is ever looked at.
+                return false;
+            };
+            match opts.get(p + 1) {
+                Some(&mark @ (b':' | b';')) => {
+                    if sp + 1 < word.len() {
+                        // `-d,` — the rest of the word is the argument.
+                        i += 1;
+                    } else if args
+                        .get(i + 1)
+                        .is_some_and(|n| mark == b':' || notopt(n))
+                    {
+                        // The next word is the argument — including when that
+                        // word is `--help`, which is why `mapfile -d --help`
+                        // sets the delimiter rather than printing anything.
+                        i += 2;
+                    } else if mark == b';' {
+                        // An optional argument that is not there.
+                        i += 1;
+                    } else {
+                        // A required argument that is not there: an error.
+                        return false;
+                    }
+                    break;
+                }
+                _ => sp += 1,
+            }
+        }
+    }
+    false
+}
+
 const BUILTIN_NAMES: &[&str] = &[
     ":", "true", "false", "cd", "pwd", "pushd", "popd", "dirs", "echo", "printf", "export",
     "declare", "typeset", "local", "readonly", "shopt", "unset", "set", "shift", "getopts",
@@ -61476,6 +62103,22 @@ fn atoi(s: BStr<'_>) -> isize {
             .saturating_add(isize::from(c.saturating_sub(b'0')));
     }
     n
+}
+
+/// The whole of C's `atoi`, narrowed to the `int` it returns: leading blanks, an
+/// optional sign, then a run of ASCII digits, with any trailing junk ignored.
+///
+/// `OPTIND` and `OPTERR` are read this way, so ` -3junk` is -3 and `zz` is 0 —
+/// and, because the result lands in an `int`, a number too big for 32 bits is
+/// not "past the end" but whatever its low 32 bits say.
+#[allow(clippy::cast_possible_truncation, reason = "C's `atoi` returns an `int`")]
+fn atoi_c_int(s: BStr<'_>) -> i32 {
+    let t = bytes::trim_start(s);
+    let (sign, digits) = match t.strip_prefix(b"-".as_slice()) {
+        Some(rest) => (-1_isize, rest),
+        None => (1, t.strip_prefix(b"+".as_slice()).unwrap_or(t)),
+    };
+    sign.saturating_mul(atoi(digits)) as i32
 }
 
 /// Scan `fc`'s options far enough to tell a listing from a run — which decides
@@ -65094,6 +65737,182 @@ mod tests {
             );
         }
         assert_eq!(HELP_TABLE.len(), HELP_BODIES.len());
+    }
+
+    /// Every builtin the shell dispatches has a help topic of its own.
+    ///
+    /// This is the third list that has to agree with the two above, and the one
+    /// with a visible consequence: a builtin with no topic answers neither
+    /// `help <name>` nor its own `--help`, and nothing else would notice.
+    #[test]
+    fn every_builtin_has_a_help_topic() {
+        for name in BUILTIN_NAMES {
+            assert!(
+                HELP_TABLE.iter().any(|(n, _, _)| n == name),
+                "builtin `{name}` has no help topic"
+            );
+        }
+    }
+
+    /// A builtin answers its own `--help` with the text `help` gives it.
+    ///
+    /// bash's `builtin_help ()` prints the short doc and then the long doc —
+    /// which is exactly what the long form of `help NAME` is, so the two are
+    /// the same bytes. It goes to *stdout*, and the status is `EX_USAGE`, 2:
+    /// the request is answered, not refused, but it is still counted a usage
+    /// error.
+    #[test]
+    fn a_builtin_answers_its_own_help_option() {
+        let (long, help_status) = run("help cd");
+        let (opt, opt_status) = run("cd --help");
+        assert_eq!(opt, long);
+        assert_eq!((help_status, opt_status), (0, 2));
+        assert!(
+            opt.starts_with("cd: cd [-L|[-P [-e]] [-@]] [dir]\n    Change the shell working"),
+            "{opt:?}"
+        );
+        // Redirect stdout away and nothing at all is left behind: this is not a
+        // diagnostic.
+        assert_eq!(run("cd --help >/dev/null 2>&1; echo rc=$?").0, "rc=2\n");
+        // The name printed is the one the command was *called* by, so the pairs
+        // that share an implementation still answer under their own names.
+        assert!(run("typeset --help").0.starts_with("typeset: typeset "));
+        assert!(run("declare --help").0.starts_with("declare: declare "));
+        assert!(run(". --help").0.starts_with(".: . filename"));
+        assert!(run("source --help").0.starts_with("source: source filename"));
+    }
+
+    /// `--help` is seen where the option scan is still running, and nowhere
+    /// else.
+    ///
+    /// The test is `internal_getopt`'s, so the word has to be at the head of a
+    /// fresh option word: after other flags it is still one, past `--` or past
+    /// the first operand it is not, and a flag that takes an argument can claim
+    /// it before it is ever looked at.
+    #[test]
+    fn the_help_option_is_only_seen_while_options_are_still_being_scanned() {
+        // After other flags, and with operands of its own following it.
+        assert!(run("cd -L --help").0.starts_with("cd: cd "));
+        assert!(run("cd --help x").0.starts_with("cd: cd "));
+        assert!(run("declare +x --help").0.starts_with("declare: declare "));
+        // Past `--`, or past an operand, it is an ordinary word — so nothing is
+        // printed on stdout at all.
+        assert_eq!(run("cd -- --help >/dev/null 2>&1; echo rc=$?").0, "rc=1\n");
+        assert_eq!(run("cd x --help >/dev/null 2>&1; echo rc=$?").0, "rc=1\n");
+        // Only the exact word counts: `--helpx` and `---help` are option groups
+        // whose first letter is `-`, and `-help` is the letter `h`.
+        assert_eq!(run("cd --helpx >/dev/null 2>&1; echo rc=$?").0, "rc=2\n");
+        assert_eq!(run("cd ---help >/dev/null 2>&1; echo rc=$?").0, "rc=2\n");
+        assert_eq!(run("cd -help >/dev/null 2>&1; echo rc=$?").0, "rc=2\n");
+        // A flag with a required argument takes the next word whatever it is.
+        assert!(run("mapfile -d , --help").0.starts_with("mapfile: mapfile "));
+        assert_eq!(run("mapfile -d --help </dev/null; echo rc=$?").0, "rc=0\n");
+        // One whose argument is optional does not take an option-shaped word,
+        // so the scan reaches the request behind it.
+        assert!(run("ulimit -f --help").0.starts_with("ulimit: ulimit "));
+        assert!(run("ulimit -f 100 --help").0.starts_with("ulimit: ulimit "));
+        assert!(run("set -o --help").0.starts_with("set: set "));
+        // An invalid option ends the scan with a diagnostic of its own; the
+        // request behind it is never reached.
+        assert_eq!(run("type -z --help >/dev/null 2>&1; echo rc=$?").0, "rc=2\n");
+    }
+
+    /// The builtins whose help test is made once, of the first word only.
+    ///
+    /// bash writes those with `CHECK_HELPOPT(list)` (or `no_options`), ahead of
+    /// whatever hand-written parsing follows — so `kill --help` is the help but
+    /// `kill -l --help` is a signal named `--help`.
+    #[test]
+    fn some_builtins_take_the_help_request_only_as_their_first_word() {
+        assert!(run("kill --help").0.starts_with("kill: kill "));
+        assert!(run("shift --help").0.starts_with("shift: shift [n]"));
+        assert!(run("let --help").0.starts_with("let: let arg "));
+        assert!(run("dirs --help").0.starts_with("dirs: dirs "));
+        assert!(run("eval --help").0.starts_with("eval: eval [arg ...]"));
+        assert!(run("times --help").0.starts_with("times: times"));
+        assert!(run("getopts --help").0.starts_with("getopts: getopts "));
+        // One word further in and it is an operand again.
+        assert_eq!(run("kill -l --help >/dev/null 2>&1; echo rc=$?").0, "rc=0\n");
+        assert_eq!(run("let 1 --help >/dev/null 2>&1; echo rc=$?").0, "rc=0\n");
+        assert_eq!(run("dirs -l --help >/dev/null 2>&1").0, "");
+    }
+
+    /// The builtins with no option scanner in front of them have no `--help`
+    /// either — the word simply reaches them as an operand.
+    #[test]
+    fn a_few_builtins_treat_the_help_option_as_an_ordinary_word() {
+        assert_eq!(run("echo --help").0, "--help\n");
+        assert_eq!(run(": --help; echo rc=$?").0, "rc=0\n");
+        assert_eq!(run("true --help; echo rc=$?").0, "rc=0\n");
+        assert_eq!(run("false --help; echo rc=$?").0, "rc=1\n");
+        // `test --help` is the one-argument test: a non-empty string is true.
+        assert_eq!(run("test --help; echo rc=$?").0, "rc=0\n");
+        assert_eq!(run("[ --help ]; echo rc=$?").0, "rc=0\n");
+    }
+
+    /// `command` and `builtin` answer for themselves, being dispatched a level
+    /// up from every other builtin.
+    ///
+    /// Both re-enter the dispatcher rather than running inside it, so the shared
+    /// check never sees them — and each asks the question the way its own `.def`
+    /// does: `command` inside its option loop, `builtin` of its first word only.
+    /// A request one word further in belongs to whatever they are wrapping.
+    #[test]
+    fn the_two_wrapper_builtins_answer_the_help_request_themselves() {
+        assert_eq!(run("command --help").0, run("help command").0);
+        assert_eq!(run("command --help >/dev/null 2>&1; echo rc=$?").0, "rc=2\n");
+        assert_eq!(run("builtin --help").0, run("help builtin").0);
+        assert_eq!(run("builtin --help >/dev/null 2>&1; echo rc=$?").0, "rc=2\n");
+        // `command` still sees it after its own flags; `builtin` does not, and
+        // there it is the wrapped builtin's own request instead.
+        assert_eq!(run("command -v --help").0, run("help command").0);
+        assert_eq!(run("builtin cd --help").0, run("help cd").0);
+        assert_eq!(run("command cd --help").0, run("help cd").0);
+        // Past a `--` it is an operand again — a command name to run.
+        assert_eq!(run("command -- --help >/dev/null 2>&1; echo rc=$?").0, "rc=127\n");
+    }
+
+    /// `bind` runs the scan but has no arm to catch what it finds.
+    ///
+    /// `builtins/bind.def` is the one `.def` with an `internal_getopt` loop and
+    /// no `CASE_HELPOPT` in its switch, so `GETOPT_HELP` reaches the `default:`
+    /// and is answered as any bad option would be — the synopsis on stderr, and
+    /// no long doc at all. The "invalid option" line is *not* printed, because
+    /// the pseudo-option never went through `sh_invalidopt`.
+    #[test]
+    fn bind_answers_the_help_request_with_its_usage_and_nothing_else() {
+        let (out, status) = run("bind --help 2>&1");
+        assert_eq!(
+            out,
+            "osh: bind: warning: line editing not enabled\n\
+             bind: usage: bind [-lpsvPSVX] [-m keymap] [-f filename] [-q name] [-u name] \
+             [-r keyseq] [-x keyseq:shell-command] \
+             [keyseq:readline-function or readline-command]\n"
+        );
+        assert_eq!(status, 2);
+        // Nothing on stdout — it is a usage error, not an answer.
+        assert_eq!(run("bind --help 2>/dev/null").0, "");
+        // The scan still governs where the word counts.
+        assert!(run("bind -l --help 2>&1 >/dev/null").0.contains("usage:"));
+        assert!(!run("bind -- --help 2>&1 >/dev/null").0.contains("usage:"));
+    }
+
+    /// Asking a POSIX special builtin for help ends a non-interactive posix-mode
+    /// shell, because the status it answers with is the usage-error one.
+    #[test]
+    fn a_help_request_is_a_usage_error_for_the_posix_special_builtin_rule() {
+        let (out, status) = run_script("set -o posix\neval --help\necho after\n");
+        assert!(out.starts_with("eval: eval [arg ...]"), "{out:?}");
+        assert!(!out.contains("after"), "{out:?}");
+        assert_eq!(status, 2);
+        // Without posix mode the shell carries on, and `command` strips the
+        // rule off even with it.
+        assert!(run("eval --help; echo after").0.contains("after"));
+        assert!(
+            run_script("set -o posix\ncommand eval --help\necho after\n")
+                .0
+                .contains("after")
+        );
     }
 
     /// A stored value as text, for assertions. Every value these tests store is
@@ -71484,6 +72303,251 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(
             run("set -- -a -b; unset OPTIND; OPTIND=abc; getopts ab o; echo \"o=$o ind=$OPTIND\"").0,
             "o=a ind=2\n"
+        );
+    }
+
+    #[test]
+    fn getopts_keeps_two_cursors_and_only_one_of_them_is_optind() {
+        // A bundle is read letter by letter while `OPTIND` stands still: it
+        // only moves when the *last* letter of the group is taken.
+        assert_eq!(
+            run("set -- -abc x; while getopts abc o; do echo \"$o/$OPTIND\"; done").0,
+            "a/1\nb/1\nc/2\n"
+        );
+        // The letter cursor is pinned to an argument *index*, so handing the
+        // next call a different list resumes at the same offset into it — here
+        // at letter two of `-xyz`, which is `y`.
+        assert_eq!(
+            run("set -- -abc; getopts abc o; getopts abcxyz o -xyz -q; echo \"$o/$OPTIND\"").0,
+            "y/1\n"
+        );
+        // Replacing the positionals does the same.
+        assert_eq!(
+            run("set -- -abcd; getopts abcd o; set -- -wxyz; getopts wxyz o; echo \"$o/$OPTIND\"")
+                .0,
+            "x/1\n"
+        );
+        // Writing `OPTIND` moves the argument cursor, but only a value bash
+        // calls *start over* — 1, 0, or negative — throws the letters away.
+        for w in ["OPTIND=1", "OPTIND=0", "OPTIND=-3", "unset OPTIND", "OPTIND="] {
+            assert_eq!(
+                run(&format!(
+                    "set -- -ab -cd; getopts abcd o; {w}; getopts abcd o; echo \"$o/$OPTIND\""
+                ))
+                .0,
+                "a/1\n",
+                "{w}"
+            );
+        }
+        // Any other number moves the argument cursor and leaves the letters
+        // alone, so the answer can come from an argument that is not the one
+        // `OPTIND` names.
+        assert_eq!(
+            run("set -- -ab -cd; getopts abcd o; OPTIND=3; getopts abcd o; echo \"$o/$OPTIND\"").0,
+            "?/3\n"
+        );
+        // And the builtin's own write-back of `OPTIND` must not run the hook,
+        // or a bundle could never get past its first letter.
+        assert_eq!(
+            run("set -- -ab; getopts ab o; getopts ab o; echo \"$o/$OPTIND\"").0,
+            "b/2\n"
+        );
+    }
+
+    #[test]
+    fn opterr_is_state_a_write_to_the_name_moves() {
+        // `getopts` never reads `OPTERR`; it reads a flag the shell keeps
+        // beside it, which only a *write to that name* moves. The value is
+        // read like `atoi`, so anything unnumeric is zero and mutes it.
+        for v in ["0", "00", "0x", "-0", " 0", "zz", "0.9", "+0"] {
+            assert_eq!(
+                run(&format!("OPTERR='{v}'; set -- -x; getopts ab o 2>&1")).0,
+                "",
+                "{v}"
+            );
+        }
+        // Empty or absent is the 1 that is the default.
+        for w in ["OPTERR=", "unset OPTERR", "OPTERR=1", "OPTERR=2", "OPTERR=-1"] {
+            assert_eq!(
+                run(&format!("OPTERR=0; {w}; set -- -x; getopts ab o 2>&1")).0,
+                "osh: illegal option -- x\n",
+                "{w}"
+            );
+        }
+        // A nameref pointed *at* `OPTERR` writes it, and moves the flag.
+        assert_eq!(
+            run("declare -n r=OPTERR; r=0; set -- -x; getopts ab o 2>&1").0,
+            ""
+        );
+        // A nameref *called* `OPTERR` pointed elsewhere does not: the write is
+        // to the other name, so the complaint stays on even though `$OPTERR`
+        // now expands to `0`.
+        assert_eq!(
+            run("declare -n OPTERR=q; q=0; set -- -x; getopts ab o 2>&1; echo [$OPTERR]").0,
+            "osh: illegal option -- x\n[0]\n"
+        );
+        // An assignment prefix is a write, and so is taking it away again.
+        assert_eq!(
+            run("set -- -x -y; OPTERR=0 getopts ab o 2>&1; echo [$o]; getopts ab o 2>&1").0,
+            "[?]\nosh: illegal option -- y\n"
+        );
+        // So is a `local` going out of scope at the end of a function.
+        assert_eq!(
+            run("f() { local OPTERR=0; set -- -x; getopts ab o; }; f 2>&1\n\
+                 OPTIND=1; set -- -x; getopts ab o 2>&1")
+            .0,
+            "osh: illegal option -- x\n"
+        );
+        // And every shape of declaration.
+        for d in ["declare OPTERR=0", "readonly OPTERR=0", "export OPTERR=0"] {
+            assert_eq!(
+                run(&format!("{d}; set -- -x; getopts ab o 2>&1")).0,
+                "",
+                "{d}"
+            );
+        }
+        assert_eq!(
+            run("f() { declare -g OPTERR=0; }; f; set -- -x; getopts ab o 2>&1").0,
+            ""
+        );
+        // A silent optstring mutes the one call without touching the flag.
+        assert_eq!(
+            run("OPTERR=1; set -- -x; getopts :ab o 2>&1\n\
+                 OPTIND=1; set -- -y; getopts ab o 2>&1")
+            .0,
+            "osh: illegal option -- y\n"
+        );
+    }
+
+    #[test]
+    fn a_getopts_option_is_a_byte_and_a_colon_is_never_one() {
+        // An option letter is one byte, not one character: `-é` is two
+        // options, and an optstring of `é` matches each of them in turn.
+        assert_eq!(
+            run_raw(
+                "set -- -é; while getopts 'é' o; do printf '[%s]' \"$o\"; done; echo \"/$OPTIND\""
+            )
+            .0,
+            b"[\xc3][\xa9]/2\n".to_vec()
+        );
+        assert_eq!(
+            run("set -- -é; getopts ab o; echo $?/$OPTIND; getopts ab o; echo $?/$OPTIND").0,
+            "0/1\n0/2\n"
+        );
+        // A colon in the arguments is never an option, however the optstring
+        // is written.
+        assert_eq!(
+            run("set -- -:; getopts :ab o; echo \"$o/[${OPTARG-unset}]/$OPTIND\"").0,
+            "?/[:]/2\n"
+        );
+        assert_eq!(
+            run("set -- -:; getopts 'a:b' o 2>/dev/null; echo \"$o/[${OPTARG-unset}]/$OPTIND\"").0,
+            "?/[unset]/2\n"
+        );
+        // Exactly one leading colon is stripped, and it is what selects the
+        // silent mode. The missing-argument answer is arrived at twice over —
+        // the scanner picks the character from the first byte of the optstring
+        // it was handed, the builtin then reads the empty `OPTARG` back as the
+        // sign of what went wrong and rewrites it with the offending letter.
+        // With two colons the scanner returns the `:` itself, and the builtin,
+        // which was only ever looking for a `?`, passes it straight through
+        // with the empty `OPTARG` still in place.
+        assert_eq!(
+            run("set -- -a; getopts 'a:' v 2>/dev/null; echo \"$v/[${OPTARG-unset}]\"").0,
+            "?/[unset]\n"
+        );
+        assert_eq!(
+            run("set -- -a; getopts ':a:' v; echo \"$v/[${OPTARG-unset}]\"").0,
+            ":/[a]\n"
+        );
+        assert_eq!(
+            run("set -- -a; getopts '::a:' v; echo \"$v/[${OPTARG-unset}]\"").0,
+            ":/[]\n"
+        );
+        // The second colon is nothing but an unmatchable option letter, so the
+        // rest of the string still reads normally.
+        assert_eq!(
+            run("set -- -a x; getopts '::a:' v; echo \"$v/[${OPTARG-unset}]/$OPTIND\"").0,
+            "a/[x]/3\n"
+        );
+        assert_eq!(
+            run("set -- -z; getopts '::a:' v; echo \"$v/[${OPTARG-unset}]\"").0,
+            "?/[z]\n"
+        );
+    }
+
+    #[test]
+    fn getopts_binds_optind_and_optarg_but_only_unbinds_optarg_by_name() {
+        // `OPTARG` is written with the shell's ordinary binding, so a nameref
+        // sends the value to its target...
+        assert_eq!(
+            run("set -- -a 1; declare -n OPTARG=q; getopts a: o; echo \"[$q]/[$OPTARG]\"").0,
+            "[1]/[1]\n"
+        );
+        // ...and a matched option with nothing to report is still a write, of
+        // nothing, which leaves the nameref and its target standing.
+        assert_eq!(
+            run("set -- -a; declare -n OPTARG=q; getopts a o; declare -p OPTARG q").0,
+            "declare -n OPTARG=\"q\"\ndeclare -- q\n"
+        );
+        // Only the loud mode ever takes `OPTARG` away, and it unbinds the name
+        // itself rather than following the nameref — destroying both.
+        assert_eq!(
+            run("set -- -x; declare -n OPTARG=q; getopts ab o 2>/dev/null; declare -p OPTARG q 2>&1")
+                .0,
+            "osh: declare: OPTARG: not found\nosh: declare: q: not found\n"
+        );
+        assert_eq!(
+            run("set -- -a; declare -n OPTARG=q; getopts a: o 2>/dev/null; declare -p OPTARG q 2>&1")
+                .0,
+            "osh: declare: OPTARG: not found\nosh: declare: q: not found\n"
+        );
+        // The silent mode writes instead, so the nameref survives.
+        assert_eq!(
+            run("set -- -x; declare -n OPTARG=q; getopts :ab o; declare -p OPTARG q").0,
+            "declare -n OPTARG=\"q\"\ndeclare -- q=\"x\"\n"
+        );
+        // The value attributes apply, since it is an ordinary binding.
+        assert_eq!(
+            run("set -- -a abc; declare -u OPTARG; getopts a: o; echo [$OPTARG]").0,
+            "[ABC]\n"
+        );
+        assert_eq!(
+            run("set -- -a 2+2; declare -i OPTARG; getopts a: o; echo [$OPTARG]").0,
+            "[4]\n"
+        );
+        // An array takes it at index zero.
+        assert_eq!(
+            run("set -- -a 1; declare -a OPTARG=(p q); getopts a: o; declare -p OPTARG").0,
+            "declare -a OPTARG=([0]=\"1\" [1]=\"q\")\n"
+        );
+        // `OPTIND` goes through a nameref too.
+        assert_eq!(
+            run("set -- -a -b; declare -n OPTIND=q; getopts ab o; echo \"[$q]/[$OPTIND]\"").0,
+            "[2]/[2]\n"
+        );
+        // A readonly `OPTARG` or `OPTIND` refuses the write and says so, but
+        // that is the *variable's* complaint and not the call's: the scan is
+        // already done and the option still reaches the name it was given.
+        assert_eq!(
+            run("set -- -a 1; readonly OPTARG=z; getopts a: o 2>&1; echo \"[$OPTARG]/[$o]\"").0,
+            "osh: OPTARG: readonly variable\n[z]/[a]\n"
+        );
+        assert_eq!(
+            run("set -- -a -b; readonly OPTIND=1; getopts ab o 2>&1; echo \"[$OPTIND]/[$o]\"").0,
+            "osh: OPTIND: readonly variable\n[1]/[a]\n"
+        );
+        // A refused `OPTIND` does not hold the shell's own cursor back either.
+        assert_eq!(
+            run("set -- -a -b; readonly OPTIND=1\n\
+                 getopts ab o 2>/dev/null; getopts ab o 2>/dev/null; echo \"[$OPTIND]/[$o]\"")
+            .0,
+            "[1]/[b]\n"
+        );
+        // A readonly *name*, though, is the call's own failure — worth 2.
+        assert_eq!(
+            run("set -- -a; readonly o=k; getopts ab o 2>&1; echo \"rc=$? o=[$o]\"").0,
+            "osh: o: readonly variable\nrc=2 o=[k]\n"
         );
     }
 

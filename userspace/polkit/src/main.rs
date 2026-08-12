@@ -1681,14 +1681,20 @@ mod tests {
         assert!(!action_pattern_matches("org.slateos.*", "com.other.foo"));
     }
 
+    // The star here deliberately falls *inside* a component rather than after a
+    // dot, which is what separates this pair from the `.*` tests above: it must
+    // take the plain `starts_with` branch, not the dot-boundary one. (The
+    // literals used to read `org.our*` / `org.ouros.foo`; the OuRoS -> Slate OS
+    // rename rewrote the action but not the pattern, since `our` is not `ouros`,
+    // and left the positive case asserting a match that cannot happen.)
     #[test]
     fn test_pattern_trailing_star() {
-        assert!(action_pattern_matches("org.our*", "org.slateos.foo"));
+        assert!(action_pattern_matches("org.slat*", "org.slateos.foo"));
     }
 
     #[test]
     fn test_pattern_trailing_star_no_match() {
-        assert!(!action_pattern_matches("org.our*", "com.other"));
+        assert!(!action_pattern_matches("org.slat*", "com.other"));
     }
 
     #[test]

@@ -93,6 +93,13 @@ pub mod lflag {
     /// signal. Without this, a signal character discards the in-progress
     /// (canonical) line; with it set, the buffered input is preserved.
     pub const NOFLSH: u32 = 0x0080;
+    /// Send `SIGTTOU` to a **background** process that writes to the terminal.
+    /// Off in the default termios (as on Linux), so background output is
+    /// normally interleaved rather than stopped; a shell that wants the
+    /// classic "background job blocks on output" behaviour sets it. Only the
+    /// *write* gate is conditional like this — the read gate (`SIGTTIN`) and
+    /// the terminal-control gate (`tcsetattr`/`tcsetpgrp`) always apply.
+    pub const TOSTOP: u32 = 0x0100;
     /// Echo control chars as `^X`.
     pub const ECHOCTL: u32 = 0x0200;
     /// Visual erase for the line kill.

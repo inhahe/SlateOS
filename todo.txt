@@ -53877,33 +53877,50 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##
 ## The foreground process group is now real per-session kernel state
 ## (pcb::CTTY_FG_PGRP, native syscalls 537-540, Linux TIOCGPGRP/TIOCSPGRP/
-## TIOCSCTTY/TIOCNOTTY). Three things were deliberately left out:
+## TIOCSCTTY/TIOCNOTTY). Three things were deliberately left out; item 1 is
+## now DONE, items 2 and 3 remain:
 ##
-## 1. SIGTTIN/SIGTTOU enforcement.
-##    A background process that reads from the terminal must get SIGTTIN;
-##    one that writes (with TOSTOP) or calls tcsetpgrp/tcsetattr must get
-##    SIGTTOU. pcb::ctty_is_background() already answers "is this caller in
-##    the background?", so the predicate exists — what is missing is the
-##    enforcement at each entry point that needs it.
-##    NOT deferred, contrary to an earlier version of this note: Ctrl-Z.
-##    tty::feed() already generates SIGTSTP from VSUSP under ISIG exactly
-##    the way it generates SIGINT from VINTR (kernel/src/tty.rs, the
-##    LineStep::Signal(20) arm, honouring NOFLSH), console_read propagates
-##    it as ConsoleRead::Signal, and linux.rs's deliver_console_signal
-##    sends it to every member of pcb::pids_in_group(tty::foreground_pgid())
-##    with SI_KERNEL. SIGTSTP's default action already stops the process
-##    (signal.rs PostDecision::Stop) and waitpid(WUNTRACED) already reports
-##    it — see spawn.rs's job-control ring-3 self-test. So ^Z works today on
-##    the Linux-ABI console read path; only the background-access half is
-##    missing. (The native ABI's console read does not consume
-##    ConsoleRead::Signal at all — that is a separate, real gap.)
-##    Proper fix for what remains: enforce ctty_is_background() at the
-##    console read path, the console write path (gated on TOSTOP), and
-##    tcsetpgrp/tcsetattr.
-##    Note the ordering trap: tcsetpgrp() itself is supposed to raise
-##    SIGTTOU on a background caller, so the enforcement must not be added
-##    to sys_tty_set_pgrp alone or a shell that is *already* background will
-##    stop itself where today it merely fails.
+## 1. SIGTTIN/SIGTTOU enforcement. [DONE 2026-08-12 — see design-decisions
+##    .md §115]
+##    Implemented as handlers::tty_job_control_decide (the pure policy) plus
+##    tty_job_control_check (the effectful wrapper that signals the caller's
+##    group and returns ERESTARTSYS). Wired into sys_tty_read /
+##    sys_console_read_char (SIGTTIN), sys_console_write (SIGTTOU, gated on
+##    the new lflag::TOSTOP), and the shared tty_set_termios_from_user /
+##    tty_set_pgrp_checked helpers that both the native syscalls and the
+##    Linux shim's TCSETS/TIOCSPGRP now go through. Covered by
+##    dispatch.rs::test_dispatch_tty_job_control and by checks 72-86 of the
+##    ring-3 fixture services/ctest-ctty/main.c.
+##    The ordering trap called out here was real and is handled: a shell
+##    that is already background now *stops* in tcsetpgrp rather than merely
+##    failing, and the restart makes the call succeed once it is continued.
+##
+## 1a. REMAINING GAP from item 1: the kernel cannot see a NATIVE-ABI
+##    process's SIG_IGN.
+##    POSIX says a background access whose signal is *ignored* is treated as
+##    if the signal had been sent and discarded — a read fails EIO, a write
+##    proceeds. handlers::signal_ignored_or_blocked can answer that from
+##    three sources, and only two of them are exact:
+##      - the blocked mask (kernel-owned, exact for both ABIs);
+##      - "no trampoline registered", where the kernel's own default-action
+##        table is the disposition (exact);
+##      - an explicit SIG_IGN, which lives in linux.rs's private
+##        linux_sigaction_table and is therefore visible ONLY for
+##        AbiMode::Linux.
+##    So a native-ABI process that registers a trampoline and then sets
+##    SIGTTOU to SIG_IGN in its own userspace table is invisible to the
+##    kernel: it will be signalled where a Linux-ABI process would have been
+##    let through. The practical consequence is that a job-control shell on
+##    our native libc must BLOCK SIGTTOU around tcsetpgrp rather than ignore
+##    it (bash ignores it). The ring-3 fixture documents this by blocking.
+##    Proper fix: give the native ABI a kernel-visible disposition for the
+##    Ignore case — either a native sigaction syscall that records SIG_IGN
+##    in the same per-pid table (promoting it out of linux.rs to a
+##    ABI-neutral module), or a narrow "report this signal as ignored" call
+##    in the shape of the existing SYS_SIGNAL_STOP_SELF, which already
+##    exists precisely because userspace owns native dispositions.
+##    Trigger: when a native-ABI job-control shell is written, or sooner if
+##    any native program needs POSIX-exact ignore semantics.
 ##
 ## 2. Linux TIOCSCTTY's "steal" argument.
 ##    Linux lets root (CAP_SYS_ADMIN) pass arg=1 to steal a terminal from

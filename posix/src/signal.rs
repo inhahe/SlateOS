@@ -1115,10 +1115,16 @@ pub extern "C" fn raise(sig: i32) -> i32 {
 ///
 /// Stores the signal mask in process-local state so that
 /// `sigprocmask(SIG_BLOCK, ..., &old)` followed by
-/// `sigprocmask(SIG_SETMASK, &old, NULL)` round-trips correctly.
+/// `sigprocmask(SIG_SETMASK, &old, NULL)` round-trips correctly, and
+/// mirrors the low 64 bits to the kernel with `SYS_SIGNAL_MASK` so the
+/// mask governs real behaviour and not just what this function reports
+/// back. The kernel consults it on asynchronous delivery *and* in
+/// terminal-access job control, where a blocked `SIGTTIN`/`SIGTTOU` is
+/// the difference between a background access being refused and the
+/// kernel raising a signal that could never be delivered.
 ///
-/// Signal delivery is not implemented (our OS uses IPC), so the
-/// mask only affects what `sigprocmask` returns, not actual behavior.
+/// Only `bits[0]` is synchronised: realtime signals (65+) are not
+/// asynchronously deliverable yet, so the kernel has no use for them.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sigprocmask(how: i32, set: *const SigsetT, oldset: *mut SigsetT) -> i32 {
     // SAFETY: `blocked_mask_ptr()` is owned solely by the caller.

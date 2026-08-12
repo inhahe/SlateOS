@@ -825,6 +825,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_process_group_syscalls()?;
     test_dispatch_ctty_syscalls()?;
     test_dispatch_termios_syscalls()?;
+    test_dispatch_tty_job_control()?;
     test_dispatch_wait_process_group_filter()?;
     test_dispatch_signal_stop_self_rejects_non_stop_signals()?;
     test_dispatch_wait_status_reports_job_control()?;
@@ -1236,6 +1237,129 @@ fn test_dispatch_termios_syscalls() -> KernelResult<()> {
     }
 
     serial_println!("[syscall]   Native termios (541/542) reaches the line discipline: OK");
+    Ok(())
+}
+
+/// Verify POSIX terminal-access job control — `handlers::tty_job_control_decide`,
+/// the policy behind `SIGTTIN`/`SIGTTOU`.
+///
+/// This tests the *decision*, not the delivery, which is the whole reason
+/// `tty_job_control_decide` is a pure function of process state: the effectful
+/// wrapper asks about the *calling* process, and the self-test task is a
+/// kernel task that owns no process, so it could never put itself in the
+/// background of a terminal to be checked.
+///
+/// The cases, and what each one is guarding:
+///
+/// 1. A **foreground** process is allowed. If this ever failed, an ordinary
+///    interactive program could not read its own terminal.
+/// 2. A **background** read raises `SIGTTIN` and a background `tcsetattr`
+///    raises `SIGTTOU` — the signal that stops the intruder.
+/// 3. **Blocked** signal: the read fails `EIO` but the write is *allowed*.
+///    This asymmetry is Linux's and is the easiest part to get backwards.
+///    For the read it is also a liveness property, not a nicety: a blocked
+///    `SIGTTIN` is undeliverable, so raising it and restarting would spin in
+///    the kernel forever.
+/// 4. An **orphaned** background group fails `EIO` for both, because no
+///    session member remains that could ever `SIGCONT` it back.
+///
+/// The console's real controlling-terminal state is claimed and released
+/// around the test, exactly as `pcb::test_controlling_terminal` does.
+fn test_dispatch_tty_job_control() -> KernelResult<()> {
+    use crate::proc::pcb;
+    use crate::proc::signal::{self, SIGTTIN, SIGTTOU};
+    use crate::syscall::handlers::{tty_job_control_decide, TtyAccessDecision};
+
+    fn fail(msg: &str, pids: &[u64]) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: tty job control: {}", msg);
+        for &p in pids {
+            pcb::destroy(p);
+        }
+        Err(KernelError::InternalError)
+    }
+
+    // A shell that leads its own session and owns the console, plus a child
+    // job the shell has placed in its own process group — the standard
+    // job-control shape.
+    let shell = pcb::create("jc-shell", 0);
+    if pcb::set_running(shell).is_err() {
+        return fail("could not start the shell process", &[shell]);
+    }
+    if pcb::ctty_acquire(shell).is_err() {
+        return fail("the shell could not claim the console", &[shell]);
+    }
+    let job = match pcb::fork_create(shell, 0, alloc::vec::Vec::new(), alloc::vec::Vec::new()) {
+        Ok(p) => p,
+        Err(_) => return fail("could not fork the job", &[shell]),
+    };
+    let cleanup = [shell, job];
+    if pcb::set_running(job).is_err() || pcb::set_pgid(shell, job, job).is_err() {
+        return fail("could not put the job in its own group", &cleanup);
+    }
+
+    // (1) The shell is the foreground group: unconditionally allowed.
+    for sig in [SIGTTIN, SIGTTOU] {
+        if tty_job_control_decide(shell, sig) != TtyAccessDecision::Allow {
+            return fail("a foreground process was refused terminal access", &cleanup);
+        }
+    }
+
+    // (2) The job is background: reads raise SIGTTIN, control raises SIGTTOU.
+    //     The shell is a live guardian (different group, same session), so the
+    //     job's group is not orphaned and stopping it is safe.
+    if tty_job_control_decide(job, SIGTTIN) != TtyAccessDecision::Signal(SIGTTIN) {
+        return fail("a background read did not raise SIGTTIN", &cleanup);
+    }
+    if tty_job_control_decide(job, SIGTTOU) != TtyAccessDecision::Signal(SIGTTOU) {
+        return fail("a background tcsetattr did not raise SIGTTOU", &cleanup);
+    }
+
+    // (3) Block both signals in the job. Now neither can be delivered, so the
+    //     read must fail rather than spin and the write must proceed.
+    let (Some(ttin_bit), Some(ttou_bit)) =
+        (signal::signal_bit(SIGTTIN), signal::signal_bit(SIGTTOU))
+    else {
+        return fail("SIGTTIN/SIGTTOU have no mask bit", &cleanup);
+    };
+    let saved_mask = signal::set_blocked(job, ttin_bit | ttou_bit);
+    let blocked_read = tty_job_control_decide(job, SIGTTIN);
+    let blocked_write = tty_job_control_decide(job, SIGTTOU);
+    let _ = signal::set_blocked(job, saved_mask);
+    if blocked_read != TtyAccessDecision::Fail(KernelError::IoError) {
+        return fail("a background read with SIGTTIN blocked should be EIO", &cleanup);
+    }
+    if blocked_write != TtyAccessDecision::Allow {
+        return fail("a background write with SIGTTOU blocked should be allowed", &cleanup);
+    }
+
+    // (4) Orphan the job's group by removing its only guardian. The shell is
+    //     the job's parent, and it is the sole process outside the job's group
+    //     but inside its session — so once the shell is gone, nothing survives
+    //     that could ever `SIGCONT` the job. Stopping it would be permanent, so
+    //     POSIX substitutes `EIO` for both signals.
+    //
+    //     The console deliberately stays claimed across this. `destroy` only
+    //     drops a session's terminal once the session is *empty* (see
+    //     `ctty_release_if_session_empty`), and the job inherited the shell's
+    //     session — so the terminal survives its owner, still with the shell's
+    //     now-defunct group in the foreground. That is precisely the state a
+    //     real orphaned background job is in, and it means the job is still
+    //     background here for the same reason it was in cases (2) and (3):
+    //     nothing about the terminal changed, only the guardian went away.
+    pcb::destroy(shell);
+    if !pcb::pgrp_is_orphaned(job) {
+        return fail("the job's group was not orphaned by its parent's exit", &[job]);
+    }
+    for sig in [SIGTTIN, SIGTTOU] {
+        if tty_job_control_decide(job, sig) != TtyAccessDecision::Fail(KernelError::IoError) {
+            return fail("an orphaned background group was not refused with EIO", &[job]);
+        }
+    }
+
+    // Destroying the last member of the session releases the console with it,
+    // leaving the terminal exactly as the test found it: unowned.
+    pcb::destroy(job);
+    serial_println!("[syscall]   TTY job control (SIGTTIN/SIGTTOU) policy: OK");
     Ok(())
 }
 

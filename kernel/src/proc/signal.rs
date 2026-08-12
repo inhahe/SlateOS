@@ -136,9 +136,16 @@ pub fn is_valid_signal(sig: u32) -> bool {
 /// Convert a 1-based signal number to its bit in a 64-bit set.
 ///
 /// Returns `None` if the signal number is out of range.
+///
+/// Public because the `sig - 1` offset (signals are 1-based, bits are
+/// 0-based) is correct in every open-coded copy right up until one of them is
+/// written next to an *unvalidated* signal number.  Callers outside this
+/// module — terminal-access job control's blocked-signal test, for one —
+/// should ask here rather than reproduce the shift, and the `Option` makes
+/// the out-of-range case impossible to forget.
 #[inline]
 #[must_use]
-fn signal_bit(sig: u32) -> Option<u64> {
+pub fn signal_bit(sig: u32) -> Option<u64> {
     if is_valid_signal(sig) {
         // sig is 1..=64, so the shift amount is 0..=63 — always valid.
         // `checked_sub`/`checked_shl` keep this arithmetic-side-effect
@@ -647,6 +654,15 @@ pub fn set_blocked(pid: ProcessId, mask: u64) -> u64 {
 #[must_use]
 pub fn blocked(pid: ProcessId) -> u64 {
     with_states(|states| states.get(&pid).map(|s| s.blocked).unwrap_or(0))
+}
+
+/// Whether `sig` is currently blocked for `pid`.
+///
+/// An invalid signal number is reported as not blocked — there is no bit for
+/// it to be blocked in.
+#[must_use]
+pub fn is_blocked(pid: ProcessId, sig: u32) -> bool {
+    signal_bit(sig).is_some_and(|bit| blocked(pid) & bit != 0)
 }
 
 /// Get the pending-signal set for a process (without clearing it).

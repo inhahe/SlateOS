@@ -7546,8 +7546,12 @@ pub fn self_test_cctty() -> KernelResult<()> {
              back from a job it just started), 50-62 = the parent/child case, of which 56 and 60 \
              are the load-bearing pair: before the handoff the child reads its *parent's* group \
              (a per-process static would have said its own) and after it reads the group its \
-             parent handed over, 71-80 = the terminal outlives the job and giving it up is real \
-             (72-73 = the reaped child's group can still be read but no longer foregrounded, 74 = \
+             parent handed over, 71-86 = the terminal outlives the job and giving it up is real \
+             (72-73 = terminal-access job control gates the now-background fixture's tcsetpgrp, \
+             with EIO rather than a stop because its group is orphaned; 81-86 = blocking SIGTTOU \
+             — what every job-control shell does to take the terminal back — passes the gate and \
+             reaches the real verdict, that the reaped child's empty group cannot be foregrounded \
+             though it can still be read; 74 = \
              TIOCNOTTY, 75-78 = released means ENOTTY again, 79-80 = the console was genuinely \
              freed and can be re-acquired), 90-116 = the terminal *modes* are the kernel's too \
              (91-99 = control characters and the baud rate the kernel itself wrote, read back at \
@@ -7591,7 +7595,9 @@ pub fn self_test_cctty() -> KernelResult<()> {
         "[spawn]   controlling terminal (ring 3, native ABI: a program on our own libc acquires \
          the console with TIOCSCTTY, hands it to its child's group with tcsetpgrp, and the child \
          reads the handoff back with tcgetpgrp — before it, the parent's group; after it, its \
-         own. The console is held while the session's last process is a zombie and released when \
+         own. Once background, its tcsetpgrp is refused by terminal-access job control — EIO, \
+         because its group is orphaned — until it blocks SIGTTOU the way a job-control shell \
+         must. The console is held while the session's last process is a zombie and released when \
          the session is destroyed. The same program reads back the control characters the kernel \
          itself wrote, switches the console to raw mode for real and restores it): OK"
     );

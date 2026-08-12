@@ -4525,11 +4525,9 @@ pub fn sys_tty_get_pgrp(args: &SyscallArgs) -> SyscallResult {
 /// Returns 0, or `InvalidArgument` / `NotSupported` (ENOTTY) /
 /// `PermissionDenied` per [`pcb::ctty_set_fg_pgrp`].
 ///
-/// Not yet implemented: POSIX says a **background** process calling this is
-/// sent `SIGTTOU` (and the call succeeds only once it resumes in the
-/// foreground).  That rule needs a terminal that can actually deliver
-/// keyboard input, which does not exist yet; deferred with the rest of the
-/// tty work.  See `todo.txt`.
+/// POSIX says a **background** process calling this is sent `SIGTTOU`, and
+/// the call succeeds only once it resumes in the foreground — enforced by
+/// [`tty_set_pgrp_checked`], which both ABIs share.
 ///
 /// [`pcb::ctty_set_fg_pgrp`]: crate::proc::pcb::ctty_set_fg_pgrp
 pub fn sys_tty_set_pgrp(args: &SyscallArgs) -> SyscallResult {
@@ -4545,9 +4543,10 @@ pub fn sys_tty_set_pgrp(args: &SyscallArgs) -> SyscallResult {
         Ok(pid) => pid,
         Err(e) => return SyscallResult::err(e),
     };
-    match crate::proc::pcb::ctty_set_fg_pgrp(pid, args.arg0) {
-        Ok(()) => SyscallResult::ok(0),
-        Err(e) => SyscallResult::err(e),
+    match tty_set_pgrp_checked(pid, args.arg0) {
+        TtyCtlOutcome::Done => SyscallResult::ok(0),
+        TtyCtlOutcome::Restart(r) => r,
+        TtyCtlOutcome::Fail(e) => SyscallResult::err(e),
     }
 }
 
@@ -4670,21 +4669,71 @@ pub fn sys_tty_get_termios(args: &SyscallArgs) -> SyscallResult {
 ///
 /// [`crate::tty::set_termios`] resyncs the keyboard driver's echo to the new
 /// `ECHO` bit, so a password prompt clearing `ECHO` stops echo immediately.
+///
+/// A **background** caller is stopped with `SIGTTOU` first — see
+/// [`tty_set_termios_from_user`], which both ABIs share.
 pub fn sys_tty_set_termios(args: &SyscallArgs) -> SyscallResult {
     if args.arg0 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    match tty_set_termios_from_user(args.arg0) {
+        TtyCtlOutcome::Done => SyscallResult::ok(0),
+        TtyCtlOutcome::Restart(r) => r,
+        TtyCtlOutcome::Fail(e) => SyscallResult::err(e),
+    }
+}
+
+/// Install a new console `struct termios` read from user address `arg`,
+/// applying POSIX job control first.
+///
+/// Shared by the native [`sys_tty_set_termios`] and the Linux shim's
+/// `TCSETS`/`TCSETSW`/`TCSETSF`, because both must apply the *same* policy:
+/// these used to be two copies of the same body, and a `SIGTTOU` rule added
+/// to only one of them would be the fourth-copy mistake all over again.
+///
+/// The `SIGTTOU` gate here is **not** conditional on `TOSTOP` — that flag
+/// governs background *output* only.  Changing the terminal's modes from the
+/// background is always a job-control violation, because the foreground job
+/// would silently inherit settings it never asked for (`termios(3)`,
+/// "Terminal Access Control").
+pub fn tty_set_termios_from_user(arg: u64) -> TtyCtlOutcome {
+    match tty_job_control_check(crate::proc::signal::SIGTTOU) {
+        TtyCtlOutcome::Done => {}
+        other => return other,
     }
     let mut bytes = [0u8; crate::tty::TERMIOS_BYTES];
     // SAFETY: `bytes` is a live kernel array of exactly TERMIOS_BYTES bytes;
     // copy_from_user validates the source is readable user memory and
     // performs the SMAP dance.
-    if let Err(e) =
-        unsafe { crate::mm::user::copy_from_user(args.arg0, bytes.as_mut_ptr(), bytes.len()) }
+    if let Err(e) = unsafe { crate::mm::user::copy_from_user(arg, bytes.as_mut_ptr(), bytes.len()) }
     {
-        return SyscallResult::err(e);
+        return TtyCtlOutcome::Fail(e);
     }
     crate::tty::set_termios(crate::tty::Termios::from_bytes(&bytes));
-    SyscallResult::ok(0)
+    TtyCtlOutcome::Done
+}
+
+/// Hand the console to process group `pgid` on behalf of `pid`
+/// (`tcsetpgrp(3)`), applying POSIX job control first.
+///
+/// Shared by the native [`sys_tty_set_pgrp`] and the Linux shim's
+/// `TIOCSPGRP`.  `pgid` must already be validated positive by the caller
+/// (each ABI has its own idea of how a negative argument arrives).
+///
+/// The ordering trap this resolves: `tcsetpgrp` is itself a `SIGTTOU` site,
+/// so a shell that is *already* in the background stops here rather than
+/// merely failing — and once continued in the foreground, the restart makes
+/// the call succeed.  That is the whole reason the check returns a restart
+/// sentinel instead of an error.
+pub fn tty_set_pgrp_checked(pid: crate::proc::pcb::ProcessId, pgid: u64) -> TtyCtlOutcome {
+    match tty_job_control_check(crate::proc::signal::SIGTTOU) {
+        TtyCtlOutcome::Done => {}
+        other => return other,
+    }
+    match crate::proc::pcb::ctty_set_fg_pgrp(pid, pgid) {
+        Ok(()) => TtyCtlOutcome::Done,
+        Err(e) => TtyCtlOutcome::Fail(e),
+    }
 }
 
 /// Outcome of a line-discipline console read, before ABI-specific encoding.
@@ -4697,11 +4746,194 @@ pub fn sys_tty_set_termios(args: &SyscallArgs) -> SyscallResult {
 pub enum TtyReadOutcome {
     /// `n` bytes were copied into the caller's buffer (`0` ⇒ end of file).
     Bytes(usize),
-    /// A terminal signal was generated and delivered to the foreground
-    /// process group; the caller must return this restart sentinel verbatim.
+    /// A signal was generated — either a terminal signal for the foreground
+    /// process group (`^C`) or `SIGTTIN` for a background caller — and the
+    /// caller must return this restart sentinel verbatim.
     Restart(SyscallResult),
-    /// The user buffer was not usable.
-    Fault(KernelError),
+    /// The read failed: an unusable user buffer, or the `EIO`
+    /// ([`KernelError::IoError`]) POSIX requires when a background read
+    /// cannot be turned into a `SIGTTIN` stop.
+    Fail(KernelError),
+}
+
+/// Outcome of a terminal-*control* operation, before ABI-specific encoding.
+///
+/// The write/`tcsetattr`/`tcsetpgrp` counterpart of [`TtyReadOutcome`], and
+/// it exists for the same reason: the job-control policy below must be one
+/// implementation shared by both ABIs, not a rule written twice that can
+/// drift.  `Done` carries no value because every operation using it returns
+/// 0 on success.
+pub enum TtyCtlOutcome {
+    /// The operation completed; the syscall returns 0.
+    Done,
+    /// `SIGTTIN`/`SIGTTOU` was posted to the caller's process group; the
+    /// caller must return this restart sentinel verbatim.
+    Restart(SyscallResult),
+    /// The operation failed with this error.
+    Fail(KernelError),
+}
+
+/// Whether `sig` is currently *ignored or blocked* for `pid`, in the sense
+/// Linux's `__tty_check_change()` means by `is_ignored()`.
+///
+/// This is the predicate that decides whether a background terminal access
+/// can be turned into a job-control *stop* at all.  If the caller would never
+/// see the signal, stopping it is not an option and POSIX substitutes an
+/// error (for reads) or lets the access through (for writes).
+///
+/// Three sources are consulted, in order of how well the kernel can see them:
+///
+/// 1. **Blocked mask** — always authoritative; the kernel owns it for both
+///    ABIs.  This case is not merely a nicety: a blocked `SIGTTIN` stays
+///    pending and undeliverable, so posting it and returning `ERESTARTSYS`
+///    would restart the read, re-run this check, post again, and spin
+///    forever inside the kernel.
+/// 2. **No signal trampoline** — the process has no userspace dispatcher, so
+///    the kernel's own [`default_action`] table *is* its disposition.  For
+///    `SIGTTIN`/`SIGTTOU` that is `Stop`, so this reports "not ignored"; the
+///    branch exists so the rule is stated rather than assumed.
+/// 3. **Linux `SIG_IGN`** — only visible for a Linux-ABI process, whose
+///    `sigaction` table the kernel stores.
+///
+/// **A native-ABI process that sets `SIGTTIN` to `SIG_IGN` is not detected**,
+/// because a native process's dispositions live in userspace (see
+/// `SYS_SIGNAL_STOP_SELF`'s doc for why that is deliberate).  Such a caller
+/// gets `EINTR` from the interrupted read where POSIX specifies `EIO`: the
+/// kernel posts `SIGTTIN`, the userspace dispatcher resolves it to `SIG_IGN`
+/// and does nothing, and the restart sentinel becomes `EINTR` because a
+/// handler frame was built.  It does not hang, and it does not mis-stop —
+/// the failure is confined to the errno.  Fixing it properly means giving
+/// the kernel a view of native dispositions, which is a larger ABI decision;
+/// tracked in `todo.txt`.
+///
+/// [`default_action`]: crate::proc::signal::default_action
+#[must_use]
+pub fn signal_ignored_or_blocked(pid: crate::proc::pcb::ProcessId, sig: u32) -> bool {
+    use crate::proc::signal;
+
+    // 1. Blocked.
+    if signal::is_blocked(pid, sig) {
+        return true;
+    }
+    // 2. No trampoline: the kernel's default-action table is the disposition.
+    if signal::trampoline(pid).is_none() {
+        return matches!(signal::default_action(sig), signal::DefaultAction::Ignore);
+    }
+    // 3. Explicit SIG_IGN, visible only for the Linux ABI.
+    crate::proc::pcb::get_abi_mode(pid) == Some(crate::proc::pcb::AbiMode::Linux)
+        && crate::syscall::linux::linux_sigaction_is_ignore(pid, sig)
+}
+
+/// What POSIX job control says should happen to a terminal access by `pid`.
+///
+/// Split out of [`tty_job_control_check`] so the *policy* is a pure function
+/// of process state with no side effects: the alternative — a single function
+/// that decides and signals in one step — can only be tested by a caller that
+/// is itself the process under test, which no kernel self-test can be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TtyAccessDecision {
+    /// Let the access proceed.
+    Allow,
+    /// Post this signal to the caller's process group, then restart.
+    Signal(u32),
+    /// Refuse with this error (always `EIO` today).
+    Fail(KernelError),
+}
+
+/// Decide POSIX job control for an access to the *controlling terminal* by
+/// `pid` — the policy behind `SIGTTIN` (reads) and `SIGTTOU` (writes under
+/// `TOSTOP`, and `tcsetattr`/`tcsetpgrp` always).
+///
+/// Mirrors Linux's `__tty_check_change()` (`drivers/tty/tty_io.c`), including
+/// the two asymmetries that are easy to get wrong:
+///
+/// * The signal goes to the **caller's own** process group, not to the
+///   terminal's foreground group.  The point is to stop the intruder, not
+///   the job that legitimately owns the terminal.
+/// * When the signal is ignored or blocked, a **read** fails with `EIO` but
+///   a **write** is *allowed through*.  A process that has deliberately
+///   opted out of `SIGTTOU` is asking to write anyway; one that has opted
+///   out of `SIGTTIN` still cannot be handed input meant for another job.
+///
+/// An **orphaned** caller group also fails with `EIO` rather than stopping,
+/// for both signals: there is no shell left in the session that could ever
+/// send it `SIGCONT`, so the stop would be permanent
+/// ([`pcb::pgrp_is_orphaned`]).
+///
+/// A process that is not in the background of a controlling terminal is
+/// always allowed — which is what keeps every ordinary foreground program on
+/// the fast path.
+///
+/// [`pcb::pgrp_is_orphaned`]: crate::proc::pcb::pgrp_is_orphaned
+#[must_use]
+pub fn tty_job_control_decide(
+    pid: crate::proc::pcb::ProcessId,
+    sig: u32,
+) -> TtyAccessDecision {
+    use crate::proc::pcb;
+    use crate::proc::signal::SIGTTIN;
+
+    if !pcb::ctty_is_background(pid) {
+        return TtyAccessDecision::Allow;
+    }
+    let Some(pgid) = pcb::get_pgid(pid) else {
+        return TtyAccessDecision::Allow;
+    };
+    if signal_ignored_or_blocked(pid, sig) {
+        return if sig == SIGTTIN {
+            TtyAccessDecision::Fail(KernelError::IoError)
+        } else {
+            TtyAccessDecision::Allow
+        };
+    }
+    if pcb::pgrp_is_orphaned(pgid) {
+        return TtyAccessDecision::Fail(KernelError::IoError);
+    }
+    TtyAccessDecision::Signal(sig)
+}
+
+/// Apply [`tty_job_control_decide`] to the *calling* process, posting the
+/// job-control signal when one is due.
+///
+/// A caller with no process-table entry (a kernel task) is always allowed,
+/// which is what keeps early boot and the kernel self-tests on the fast path.
+#[must_use]
+pub fn tty_job_control_check(sig: u32) -> TtyCtlOutcome {
+    use crate::proc::pcb;
+    use crate::proc::signal::si_code::SI_KERNEL;
+
+    let Some(pid) = caller_pid() else {
+        return TtyCtlOutcome::Done;
+    };
+    let due = match tty_job_control_decide(pid, sig) {
+        TtyAccessDecision::Allow => return TtyCtlOutcome::Done,
+        TtyAccessDecision::Fail(e) => return TtyCtlOutcome::Fail(e),
+        TtyAccessDecision::Signal(s) => s,
+    };
+    // `decide` already established the caller is in a real group.
+    let pgid = pcb::get_pgid(pid).unwrap_or(pid);
+    for target in pcb::pids_in_group(pgid) {
+        let send_args = SyscallArgs {
+            arg0: target,
+            arg1: u64::from(due),
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        // Best-effort, as in `deliver_console_signal`: a member that exited
+        // between the membership snapshot and delivery just fails its own
+        // send; the rest still receive it.
+        let _ = sys_signal_send_with_info(&send_args, SI_KERNEL, 0);
+    }
+    // ERESTARTSYS, not a plain error: once a `SIGCONT` brings the caller back
+    // to the foreground the access should simply proceed, which is what a
+    // transparent restart gives.  (A native process that installed a handler
+    // sees `EINTR` instead — native handlers cannot request `SA_RESTART`; see
+    // `deliver_pending_signal`.)
+    TtyCtlOutcome::Restart(super::linux::restart::restart_result(
+        super::linux::restart::ERESTARTSYS,
+    ))
 }
 
 /// Read from the console through the line discipline into a user buffer.
@@ -4712,12 +4944,23 @@ pub enum TtyReadOutcome {
 /// foreground process group via [`deliver_console_signal`] and yields
 /// [`TtyReadOutcome::Restart`].
 ///
+/// A **background** caller does not get to consume input meant for the
+/// foreground job: it is stopped with `SIGTTIN` (or fails with `EIO`) per
+/// [`tty_job_control_check`], before it can block.  That check runs first,
+/// matching Linux's `n_tty_read()`, which calls `job_control()` before
+/// touching the buffer.
+///
 /// One call returns at most a single canonical line, so a
 /// [`crate::tty::MAX_CANON`] staging buffer suffices however large `cap` is.
 /// The destination is validated *before* blocking on input, so a program
 /// passing a bad pointer fails immediately rather than after the user has
 /// typed a line.
 pub fn tty_read_into_user(buf: u64, cap: u64) -> TtyReadOutcome {
+    match tty_job_control_check(crate::proc::signal::SIGTTIN) {
+        TtyCtlOutcome::Done => {}
+        TtyCtlOutcome::Restart(r) => return TtyReadOutcome::Restart(r),
+        TtyCtlOutcome::Fail(e) => return TtyReadOutcome::Fail(e),
+    }
     if cap == 0 {
         return TtyReadOutcome::Bytes(0);
     }
@@ -4725,7 +4968,7 @@ pub fn tty_read_into_user(buf: u64, cap: u64) -> TtyReadOutcome {
         .unwrap_or(usize::MAX)
         .min(crate::tty::MAX_CANON);
     if let Err(e) = crate::mm::user::validate_user_write(buf, want) {
-        return TtyReadOutcome::Fault(e);
+        return TtyReadOutcome::Fail(e);
     }
 
     let mut kbuf = [0u8; crate::tty::MAX_CANON];
@@ -4744,7 +4987,7 @@ pub fn tty_read_into_user(buf: u64, cap: u64) -> TtyReadOutcome {
     // `kbuf` holds `n` live kernel bytes.
     match unsafe { crate::mm::user::copy_to_user(kbuf.as_ptr(), buf, n) } {
         Ok(()) => TtyReadOutcome::Bytes(n),
-        Err(e) => TtyReadOutcome::Fault(e),
+        Err(e) => TtyReadOutcome::Fail(e),
     }
 }
 
@@ -4805,7 +5048,7 @@ pub fn sys_tty_read(args: &SyscallArgs) -> SyscallResult {
         #[allow(clippy::cast_possible_wrap)]
         TtyReadOutcome::Bytes(n) => SyscallResult::ok(n as i64),
         TtyReadOutcome::Restart(r) => r,
-        TtyReadOutcome::Fault(e) => SyscallResult::err(e),
+        TtyReadOutcome::Fail(e) => SyscallResult::err(e),
     }
 }
 
@@ -6601,12 +6844,31 @@ pub fn sys_timer_cancel(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Handles ASCII control characters (`\n`, `\r`, `\t`).
 /// Also mirrors to serial output via `console::write_str`.
+///
+/// When the terminal has `TOSTOP` set, a **background** caller is stopped
+/// with `SIGTTOU` instead of writing (see [`tty_job_control_check`]).  With
+/// `TOSTOP` clear — the default, as on Linux — background output is simply
+/// interleaved, which is why the flag is tested before the check rather than
+/// inside it: the terminal decides whether the policy applies at all.
+///
+/// This is the only console write path; the Linux ABI's `write`/`writev` to a
+/// console fd route here through `dispatch_write`, so the gate is not
+/// duplicated.  A restart sentinel therefore has to survive `linux_from_native`
+/// — which it does, deliberately.
 pub fn sys_console_write(args: &SyscallArgs) -> SyscallResult {
     let ptr = args.arg0 as *const u8;
     let len = args.arg1 as usize;
 
     if ptr.is_null() || len == 0 {
         return SyscallResult::ok(0);
+    }
+
+    if crate::tty::get_termios().c_lflag & crate::tty::lflag::TOSTOP != 0 {
+        match tty_job_control_check(crate::proc::signal::SIGTTOU) {
+            TtyCtlOutcome::Done => {}
+            TtyCtlOutcome::Restart(r) => return r,
+            TtyCtlOutcome::Fail(e) => return SyscallResult::err(e),
+        }
     }
 
     // Cap length to prevent excessive output in a single syscall.
@@ -6642,11 +6904,22 @@ pub fn sys_console_write(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Blocks (via HLT) until a key is pressed.  Returns the ASCII code
 /// in the single-byte buffer pointed to by `arg0`.
+///
+/// Bypasses the line discipline (see this syscall's number doc), but *not*
+/// job control: a background caller is stopped with `SIGTTIN` exactly as in
+/// [`sys_tty_read`].  Which layer decodes the keystrokes is irrelevant to
+/// whose job is entitled to them.
 pub fn sys_console_read_char(args: &SyscallArgs) -> SyscallResult {
     let ptr = args.arg0 as *mut u8;
 
     if ptr.is_null() {
         return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    match tty_job_control_check(crate::proc::signal::SIGTTIN) {
+        TtyCtlOutcome::Done => {}
+        TtyCtlOutcome::Restart(r) => return r,
+        TtyCtlOutcome::Fail(e) => return SyscallResult::err(e),
     }
 
     // Validate the output byte is in user space and writable.

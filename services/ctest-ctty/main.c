@@ -32,13 +32,20 @@
  * session holds the console.  Every expectation below follows from that,
  * which is why they can be exact rather than "some plausible value".
  *
- * What is deliberately NOT here.  Nothing raises `SIGTTIN`/`SIGTTOU` on a
- * background read or write yet — the predicate (`pcb::ctty_is_background`)
- * exists, the enforcement points do not.  See `todo.txt`.  `Ctrl-Z` is *not*
- * in that category and never was: `tty::feed` turns `VSUSP` into `SIGTSTP`
- * exactly as it turns `VINTR` into `SIGINT`, and it reaches the foreground
- * group this fixture establishes.  It is untested here only because the
- * fixture has no way to synthesise a keystroke, not because it is missing.
+ * Terminal-access job control.  A background process that touches the
+ * terminal is now gated (`SIGTTIN` on a read, `SIGTTOU` on `tcsetattr`/
+ * `tcsetpgrp`), so checks 72-84 below run in the one window where this
+ * fixture is genuinely in the background — after it has handed the terminal
+ * to its child's group.  It cannot be *stopped* there: the kernel spawns us
+ * with parent 0, so our process group is orphaned, and POSIX substitutes
+ * `EIO` for a stop that nothing could ever undo.  That is the reason 72-73
+ * assert `EIO` rather than the stop a real shell's job would take.
+ *
+ * What is deliberately NOT here.  `Ctrl-Z` — `tty::feed` turns `VSUSP` into
+ * `SIGTSTP` exactly as it turns `VINTR` into `SIGINT`, and it reaches the
+ * foreground group this fixture establishes.  It is untested here only
+ * because the fixture has no way to synthesise a keystroke, not because it
+ * is missing.
  * The fixture also never lets a hangup reach itself — `TIOCNOTTY` is issued
  * only while the foreground group is the *reaped child's* (an empty group,
  * so no signal is sent at all), which is both the realistic case (a shell
@@ -269,13 +276,44 @@ done:
      * ---------------------------------------------------------------- */
     if (tcgetpgrp(0) != child)          return 71;   /* still points at it */
 
-    /* Foregrounding the now-empty group fails, which is what proves the
-     * foreground group names live membership and not just a number.  Note
-     * that *reading* it still works: a shell whose job just died must be
-     * able to see the stale group in order to take the terminal back. */
+    /* Terminal-access job control fires *before* any of that.  Our group is
+     * not the foreground group (it is still the reaped child's), so this is
+     * a background `tcsetpgrp` and POSIX says the caller is sent `SIGTTOU`.
+     * We cannot be stopped, though: the kernel spawned us with parent 0, so
+     * no process outside our group but inside our session survives to
+     * `SIGCONT` us — the group is orphaned, and an orphan gets `EIO` instead
+     * of a permanent stop.  Reading the foreground group is never gated, as
+     * check 71 just showed: a shell whose job died must be able to see the
+     * stale group in order to take the terminal back. */
     errno = 0;
     if (tcsetpgrp(0, child) != -1)      return 72;
-    if (errno != EPERM)                 return 73;
+    if (errno != EIO)                   return 73;
+
+    /* Block `SIGTTOU` and try again.  This is not a test contrivance: it is
+     * what a job-control shell must do around every `tcsetpgrp` that takes
+     * the terminal back, because at that moment the shell is by definition
+     * in the background.  A Linux-ABI shell would use `SIG_IGN` (bash does);
+     * on our native ABI the kernel cannot see a userspace disposition, only
+     * the blocked mask it owns itself, so blocking is the form that works
+     * for both — see `todo.txt`.  A blocked `SIGTTOU` is undeliverable, so
+     * the gate lets the write through rather than raising a signal that
+     * would never arrive; only a *read* (`SIGTTIN`) is refused in that case,
+     * because letting it through would hand a background job the keystrokes
+     * meant for the foreground one. */
+    sigset_t ttou, saved;
+    if (sigemptyset(&ttou) != 0)        return 81;
+    if (sigaddset(&ttou, SIGTTOU) != 0) return 82;
+    if (sigprocmask(SIG_BLOCK, &ttou, &saved) != 0) return 83;
+    errno = 0;
+    const int retook = tcsetpgrp(0, child);
+    const int retook_errno = errno;
+    if (sigprocmask(SIG_SETMASK, &saved, 0) != 0)   return 84;
+
+    /* And now the check this pair was always about, finally reachable: the
+     * foreground group names live membership, not just a number, so the
+     * reaped child's empty group cannot be foregrounded. */
+    if (retook != -1)                   return 85;
+    if (retook_errno != EPERM)          return 86;
 
     /* Give the terminal up.  The foreground group is still the reaped
      * child's — an empty group — so the SIGHUP/SIGCONT hangup reaches

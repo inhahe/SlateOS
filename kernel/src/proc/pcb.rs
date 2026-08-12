@@ -2955,20 +2955,14 @@ pub fn guarded_child_pgrps(pid: ProcessId) -> Vec<ProcessId> {
     out
 }
 
-/// Whether process group `pgid` is **orphaned** (POSIX) *and* contains at
-/// least one stopped member.
+/// Single-pass scan behind [`pgrp_is_orphaned`] and
+/// [`pgrp_orphaned_with_stopped`], returning `(orphaned, has_stopped_member)`.
 ///
-/// A process group is orphaned when no live member has a parent that is both
-/// in a *different* group and in the *same session* (a "guardian"); zombie
-/// processes count neither as members nor as guardians.  An orphaned group
-/// with stopped jobs must be sent `SIGHUP`+`SIGCONT` so those jobs are not
-/// wedged forever with no shell to continue them (`termios(3)`, `setpgid(2)`,
-/// POSIX "Orphaned Process Group").
-///
-/// Returns `false` for an empty group, a group with a live guardian, or a
-/// group with no stopped member.
-#[must_use]
-pub fn pgrp_orphaned_with_stopped(pgid: ProcessId) -> bool {
+/// One scan under one lock, because the two callers ask about the same group
+/// at the same instant and splitting them into two locked passes would let
+/// the group change in between — a member could exit and turn a
+/// "not orphaned, has stopped" answer into a self-inconsistent pair.
+fn pgrp_orphan_state(pgid: ProcessId) -> (bool, bool) {
     let table = PROCESS_TABLE.lock();
     let mut has_member = false;
     let mut has_stopped = false;
@@ -2988,11 +2982,44 @@ pub fn pgrp_orphaned_with_stopped(pgid: ProcessId) -> bool {
                 && p.sid == m.sid
                 && p.state != ProcessState::Zombie
             {
-                return false;
+                return (false, has_stopped);
             }
         }
     }
-    has_member && has_stopped
+    (has_member, has_stopped)
+}
+
+/// Whether process group `pgid` is **orphaned** in the POSIX sense: it has at
+/// least one live member and no live member has a parent that is both in a
+/// *different* group and in the *same session* (a "guardian").  Zombie
+/// processes count neither as members nor as guardians.
+///
+/// An orphaned group has no shell that could ever continue it, which is why
+/// POSIX forbids stopping it: a background `read` from the controlling
+/// terminal by an orphaned group fails with `EIO` instead of raising
+/// `SIGTTIN`, because the `SIGTTIN` stop would be permanent.  See
+/// `handlers::tty_job_control_check`.
+///
+/// Returns `false` for an empty group (nothing to orphan) and for a group
+/// with a live guardian.
+#[must_use]
+pub fn pgrp_is_orphaned(pgid: ProcessId) -> bool {
+    pgrp_orphan_state(pgid).0
+}
+
+/// Whether process group `pgid` is [orphaned](pgrp_is_orphaned) *and*
+/// contains at least one stopped member.
+///
+/// An orphaned group with stopped jobs must be sent `SIGHUP`+`SIGCONT` so
+/// those jobs are not wedged forever with no shell to continue them
+/// (`termios(3)`, `setpgid(2)`, POSIX "Orphaned Process Group").
+///
+/// Returns `false` for an empty group, a group with a live guardian, or a
+/// group with no stopped member.
+#[must_use]
+pub fn pgrp_orphaned_with_stopped(pgid: ProcessId) -> bool {
+    let (orphaned, has_stopped) = pgrp_orphan_state(pgid);
+    orphaned && has_stopped
 }
 
 /// Read the per-mm `membarrier(2)` registration READY bitmask for `pid`.

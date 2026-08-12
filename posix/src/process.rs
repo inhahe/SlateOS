@@ -915,6 +915,16 @@ pub extern "C" fn setsid() -> PidT {
 /// like a missing kernel feature.  The unknown-failure fallback is `ENOTTY`
 /// for the same reason it is `ESRCH` in `pgid_errno`: it is the conservative
 /// reading, and the one a caller can act on.
+///
+/// `IoError` and `Interrupted` are here because terminal-access job control
+/// made them reachable.  A background `tcsetpgrp` whose process group is
+/// **orphaned** gets `IoError`: POSIX substitutes `EIO` for a `SIGTTOU` stop
+/// that nothing could ever undo.  A background `tcsetpgrp` that *is* signalled
+/// comes back `Interrupted` when the caller installed a signal trampoline,
+/// because our native ABI has no `SA_RESTART` to ask for a transparent
+/// restart.  Both used to land in the `_ => ENOTTY` arm, which tells a shell
+/// "you are not interactive" — the one answer that makes it *skip* job
+/// control, i.e. the exact opposite of what had just happened to it.
 #[cfg_attr(not(target_os = "none"), allow(dead_code))]
 pub(crate) fn ctty_errno(ret: i64) -> i32 {
     #[allow(clippy::match_same_arms)]
@@ -923,6 +933,8 @@ pub(crate) fn ctty_errno(ret: i64) -> i32 {
         errno::native::PERMISSION_DENIED => errno::EPERM,
         errno::native::INVALID_ARGUMENT => errno::EINVAL,
         errno::native::NO_SUCH_PROCESS => errno::ESRCH,
+        errno::native::IO_ERROR => errno::EIO,
+        errno::native::INTERRUPTED => errno::EINTR,
         _ => errno::ENOTTY,
     }
 }
@@ -3765,6 +3777,14 @@ mod tests {
         assert_eq!(ctty_errno(errno::native::PERMISSION_DENIED), errno::EPERM);
         assert_eq!(ctty_errno(errno::native::INVALID_ARGUMENT), errno::EINVAL);
         assert_eq!(ctty_errno(errno::native::NO_SUCH_PROCESS), errno::ESRCH);
+        // Terminal-access job control: EIO for an orphaned background group
+        // (a SIGTTOU stop nothing could undo) and EINTR for one that was
+        // signalled and handled.  Both must NOT collapse into the ENOTTY
+        // fallback, which a shell reads as "not interactive, skip job
+        // control" — precisely the wrong lesson to draw from being stopped
+        // for touching the terminal.
+        assert_eq!(ctty_errno(errno::native::IO_ERROR), errno::EIO);
+        assert_eq!(ctty_errno(errno::native::INTERRUPTED), errno::EINTR);
         // Unknown failures take the conservative reading.
         assert_eq!(ctty_errno(-424_242), errno::ENOTTY);
     }

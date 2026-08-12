@@ -322,6 +322,25 @@ pub use linux_sigaction_table::{
     set as linux_sigaction_set,
 };
 
+/// Whether `pid` has explicitly set `sig` to `SIG_IGN`.
+///
+/// Only meaningful for a **Linux-ABI** process: that is the only kind whose
+/// per-signal dispositions the kernel stores (in the table above).  A native
+/// process keeps its `sigaction` table in userspace — see
+/// `SYS_SIGNAL_STOP_SELF`'s doc for why — so the kernel cannot answer this
+/// question about one, and `handlers::signal_ignored_or_blocked` says so
+/// explicitly rather than guessing.
+///
+/// Returns `false` for `SIG_DFL`: a *default* disposition that happens to
+/// ignore the signal is a different question, answered ABI-neutrally by
+/// [`crate::proc::signal::default_action`].  This function reports only the
+/// explicit userspace choice, which is the half the kernel would otherwise
+/// have no way to see.
+#[must_use]
+pub fn linux_sigaction_is_ignore(pid: crate::proc::pcb::ProcessId, sig: u32) -> bool {
+    linux_sigaction_get(pid, sig).sa_handler == SIG_IGN
+}
+
 // ---------------------------------------------------------------------------
 // Linux x86_64 syscall numbers (subset).
 //
@@ -1378,9 +1397,17 @@ pub const fn linux_errno_for(e: KernelError) -> i32 {
 /// On success (`value >= 0`), the value is passed through unchanged.
 /// On error (`value < 0`), the native error code is interpreted as a
 /// [`KernelError`] and remapped to `-(linux_errno_for(e) as i64)`.
+///
+/// A **restart sentinel** passes through untouched.  It is negative but it is
+/// not a `KernelError`, so the remapping below would decode it as an unknown
+/// code and flatten it to `EINVAL`, destroying the restart before the
+/// delivery checkpoint ever saw it.  Native handlers reached through this
+/// function do emit sentinels — `handlers::sys_console_write`'s `SIGTTOU`
+/// gate is one, routed here by `dispatch_write` — so the guard is load-bearing,
+/// not defensive.
 #[must_use]
 pub fn linux_from_native(res: SyscallResult) -> SyscallResult {
-    if res.value >= 0 {
+    if res.value >= 0 || restart::is_sentinel(res.value) {
         return res;
     }
     // Native error encoding: the value is a signed kernel-error code
@@ -2139,7 +2166,11 @@ pub fn emit_linux_rt_frame(
     let current_blocked = signal::blocked(pid);
     let restore_blocked =
         signal::take_saved_sigmask(pid).unwrap_or(current_blocked);
-    let sig_bit = 1u64 << (u64::from(sig).saturating_sub(1) & 63);
+    // `signal_bit` rather than an open-coded `1 << (sig - 1)`: an
+    // out-of-range signal has no bit at all, which the `& 63` this used to
+    // do would have silently turned into some *other* signal's bit — the
+    // wrong signal blocked for the duration of a handler.
+    let sig_bit = signal::signal_bit(sig).unwrap_or(0);
     let mut new_blocked = current_blocked | act.sa_mask;
     // Unless SA_NODEFER, the delivered signal is blocked during its own
     // handler so it can't recursively re-enter.
@@ -4092,6 +4123,8 @@ fn dispatch_eventfd_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
 /// In canonical mode this blocks until a full line is available and returns up
 /// to `cap` bytes of it; in raw mode it honours `VMIN`.  A `^D` on an empty
 /// canonical line returns `0` (end of file).  See [`crate::tty::console_read`].
+/// A background caller is stopped with `SIGTTIN` (or gets `EIO`) before any
+/// of that — see `handlers::tty_job_control_check`.
 fn dispatch_console_read(buf: u64, cap: u64) -> SyscallResult {
     // Shared with the native ABI's SYS_TTY_READ so the two cannot drift in
     // what they consider a line, an EOF, or a signal character.  The only
@@ -4106,7 +4139,7 @@ fn dispatch_console_read(buf: u64, cap: u64) -> SyscallResult {
         // the signal is handled with SA_RESTART) or a user-visible -EINTR /
         // signal default action.
         handlers::TtyReadOutcome::Restart(r) => r,
-        handlers::TtyReadOutcome::Fault(e) => linux_err(linux_errno_for(e)),
+        handlers::TtyReadOutcome::Fail(e) => linux_err(linux_errno_for(e)),
     }
 }
 
@@ -8563,17 +8596,13 @@ fn console_terminal_ioctl(
             if arg == 0 {
                 return linux_err(errno::EFAULT);
             }
-            let mut bytes = [0u8; tty::TERMIOS_BYTES];
-            // SAFETY: copy_from_user validates the user range is mapped and
-            // readable and does the SMAP dance; `bytes` is a live kernel
-            // buffer of exactly `bytes.len()` bytes.
-            if let Err(e) =
-                unsafe { crate::mm::user::copy_from_user(arg, bytes.as_mut_ptr(), bytes.len()) }
-            {
-                return linux_err(linux_errno_for(e));
+            // Shared with the native `SYS_TTY_SET_TERMIOS`, so the SIGTTOU
+            // job-control rule is written once rather than once per ABI.
+            match super::handlers::tty_set_termios_from_user(arg) {
+                super::handlers::TtyCtlOutcome::Done => SyscallResult::ok(0),
+                super::handlers::TtyCtlOutcome::Restart(r) => r,
+                super::handlers::TtyCtlOutcome::Fail(e) => linux_err(linux_errno_for(e)),
             }
-            tty::set_termios(tty::Termios::from_bytes(&bytes));
-            SyscallResult::ok(0)
         }
         ioctl_cmd::TIOCGWINSZ => {
             if arg == 0 {
@@ -8642,15 +8671,17 @@ fn console_terminal_ioctl(
                 return linux_err(errno::EINVAL);
             }
             // The session/liveness policy — the group must be a live group of
-            // the caller's own session — is the same one the native ABI's
-            // SYS_TTY_SET_PGRP applies, because it is the same state. This
-            // used to write a `tty::FOREGROUND_PGID` atomic that libc's
-            // `tcsetpgrp` never saw, so a glibc program and a slateos-libc
-            // program disagreed about which job owned the terminal.
+            // the caller's own session — and the SIGTTOU job-control rule are
+            // the same ones the native ABI's SYS_TTY_SET_PGRP applies, because
+            // it is the same state. This used to write a
+            // `tty::FOREGROUND_PGID` atomic that libc's `tcsetpgrp` never saw,
+            // so a glibc program and a slateos-libc program disagreed about
+            // which job owned the terminal.
             #[allow(clippy::cast_sign_loss)]
-            match crate::proc::pcb::ctty_set_fg_pgrp(pid, u64::from(pgrp as u32)) {
-                Ok(()) => SyscallResult::ok(0),
-                Err(e) => linux_err(linux_errno_for(e)),
+            match super::handlers::tty_set_pgrp_checked(pid, u64::from(pgrp as u32)) {
+                super::handlers::TtyCtlOutcome::Done => SyscallResult::ok(0),
+                super::handlers::TtyCtlOutcome::Restart(r) => r,
+                super::handlers::TtyCtlOutcome::Fail(e) => linux_err(linux_errno_for(e)),
             }
         }
         ioctl_cmd::TIOCSCTTY => match crate::proc::pcb::ctty_acquire(pid) {

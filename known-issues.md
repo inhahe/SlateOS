@@ -43,42 +43,15 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
-### TD-OILS-THE-TWO-COMMANDS-A-COMPOUND-OPERAND-DECOMPOSES-INTO-ARE-GIVEN-ONE-SWAP. A kind letter, and a chain that outruns the link limit without closing, land the value elsewhere than bash — 2026-08-11
+### TD-OILS-A-NAMEREF-CHAIN-THAT-OUTRUNS-THE-LINK-LIMIT-IS-TAKEN-FOR-ONE-THAT-CLOSED. A walk that gave up on the eighth link is answered like one that closed on itself — 2026-08-11
 
-**Where:** `userspace/oils/src/interp.rs`, [`Shell::global_bind_names`] and
-[`Shell::enter_global_scope`]. A compound operand of a global-scope declaration
-is *three* commands in bash (`expand_declaration_argument`, subst.c:12653), and
-the middle two ask the same question — which name does a global write bind? —
-along two different roads. osh answers it once, in the swap
-[`Shell::enter_global_scope`] performs for the whole word list, so the two roads
-cannot disagree. They do disagree in two families.
-
-**Family 1 — a kind letter takes the name untransformed.** `declare -a`/`-A`
-(and `readonly -a`, `export -A`, …) reach `make_new_array_variable (name)` /
-`make_new_assoc_variable (name)` at declare.def:788-792, which bind the name
-**as written**, unlike the valueless spelling one line below that goes through
-`bind_global_variable` and its `bind_variable_internal` transform
-(variables.c:3020). So the array lands on the global `g` even where the scalar
-spelling would have been redirected.
-
-```sh
-( declare -n g=z; declare -n z=g
-  f() { local -n g=w; declare -ga g=(1 2); }; f; declare -p g z w )
-# bash: declare -ar g=([0]="1" [1]="2") … w unset
-# osh : the array is on w
-```
-
-Affected: `declare -ga g=(1 2)` and `readonly -a g=(1 2)` under a frame-local
-`local -n g=w` over a global `g`↔`z` cycle — 2 shapes of the 27-shape probe
-matrix.
-
-**Family 2 — a chain that outruns `NAMEREF_MAX` without closing on itself.**
-`find_variable_nameref`'s cycle escape (variables.c:2080-2110) fires only on
-`v == orig || v == oldv`. A chain read from a name *in front of* the loop —
-`g` → `z` → `y` → `z` — never returns to `g`, so the test never fires: the walk
-spins to `NAMEREF_MAX` (8, variables.h:172) and gives up **quietly**, a third
-outcome distinct from both "found" and "cycle detected". osh conflates it with
-the detected cycle's NULL.
+**Where:** `userspace/oils/src/interp.rs`, [`Shell::walk_ref_name`] and its
+callers. `find_variable_nameref`'s cycle escape (variables.c:2080-2110) fires
+only on `v == orig || v == oldv`. A chain read from a name *in front of* the
+loop — `g` → `z` → `y` → `z` — never returns to `g`, so the test never fires:
+the walk spins to `NAMEREF_MAX` (8, variables.h:172) and gives up **quietly**, a
+third outcome distinct from both "found" and "cycle detected". osh conflates it
+with the detected cycle's NULL.
 
 ```sh
 ( declare -n g=z; declare -n z=y; declare -n y=z
@@ -87,15 +60,14 @@ the detected cycle's NULL.
 # osh : declare -- g="5"
 ```
 
-Affected: 8 shapes of the 56-shape second probe matrix, three of which also
-empty the frame's binding as above.
+Affected: 8 shapes of the 56-shape second probe matrix (`/tmp/cyc_probe2.sh`,
+48/56), three of which also empty the frame's binding as above.
 
-**Proper fix.** Give the two halves separate answers rather than one swap:
-teach [`Shell::global_bind_names`] a third arm for "kind letter present", which
-binds the untransformed name, and give the walk a tri-state result
-(`Found` / `Cycle` / `Overrun`) so the quiet-overrun case can empty the frame's
-binding the way bash's `bind_variable` does when handed
-`&nameref_maxloop_value` (variables.c:185, 2187, 3305) rather than NULL.
+**Proper fix.** Give the walk a tri-state result (`Found` / `Cycle` / `Overrun`)
+in place of today's `Option` plus a `circular` flag, so the quiet-overrun case
+can empty the frame's binding the way bash's `bind_variable` does when handed
+`&nameref_maxloop_value` (variables.c:185, 2187, 3305) rather than NULL — and so
+it can stay silent where a closed cycle warns.
 
 **Do not imitate:** bash 5.2.37 **segfaults** (rc 139) on
 
@@ -106,9 +78,10 @@ f() { local -a g=(9); declare -g g=1; }; f
 
 reproducibly. osh answers sanely; that row is deliberately not pinned.
 
-**How it was found:** the two nameref-cycle probe matrices (`/tmp/cyc_probe.sh`,
-25/27, and `/tmp/cyc_probe2.sh`, 48/56) written while fixing
+**How it was found:** the two nameref-cycle probe matrices written while fixing
 TD-OILS-A-GLOBAL-SCOPE-DECLARATION-BOUND-THE-NAME-IT-WAS-WRITTEN-WITH-WHEN-ITS-GLOBAL-CHAIN-LED-NOWHERE.
+The first (`/tmp/cyc_probe.sh`) and the 240-shape kind-letter matrix
+(`/tmp/kind_matrix.sh`) no longer see it.
 
 ---
 
@@ -40143,6 +40116,87 @@ deny — are now fixed; see F8 and F9.)_
 
 ## Fixed Bugs
 
+### TD-OILS-A-KIND-LETTER-WAS-GIVEN-THE-NAME-TRANSFORM-IT-IS-THE-ONE-THING-THAT-NEVER-REACHES. `declare -ga g=(1 2)` under a dead global chain landed the array where the scalar spelling puts it — 2026-08-11 — FIXED 2026-08-12
+
+**Where:** `userspace/oils/src/interp.rs`, [`Shell::global_bind_names`],
+[`Shell::enter_global_scope`], [`Shell::in_declare_global_scope`] and the new
+`DeclScopeFlags` / `GlobalBind`. Where the global side of a global-scope
+declaration's lookup comes back empty, the name is transformed to a cell along
+the chain (the Fixed entry
+TD-OILS-A-GLOBAL-SCOPE-DECLARATION-BOUND-THE-NAME-IT-WAS-WRITTEN-WITH-WHEN-ITS-GLOBAL-CHAIN-LED-NOWHERE).
+A **kind letter** is the one thing that stops it, and it stops it by never
+reaching it. Having found nothing, `declare_internal` makes the variable itself
+(declare.def:783-792):
+
+```c
+if (var == 0)
+  {
+    if (creating_array)
+      {
+        if (flags_on & att_assoc) var = make_new_assoc_variable (name);
+        else                      var = make_new_array_variable (name);
+      }
+    else
+      var = bind_global_variable (name, (char *)NULL, ASS_FORCE);
+```
+
+The last line is where the transform lives — its `bind_variable_internal`
+(variables.c:3020) opens by resolving the global table's entry for the name. The
+two above it do not: they bind `name` as written, and they *replace* the global
+table's entry rather than widening it, so the reference cell and its `-n` are
+gone. The elements then arrive on a variable that is no reference, and step 2 of
+the decomposition has nothing left to follow either — one binding of the
+untransformed name serves the whole command.
+
+**Reproduce.** The same shape one letter apart lands in two places:
+
+```sh
+( declare -n g=z; declare -n z=g
+  f() { local -n g=w; declare -ga g=(1 2); }; f; declare -p g z w )
+# bash: declare -a g=([0]="1" [1]="2")  …  w unset
+# osh (before): the array was on w
+```
+
+and a marking builtin splits across both, since only step 1 has the kind:
+
+```sh
+( declare -n g=z; declare -n z=g
+  f() { local -n g=w; readonly -a g=(1 2); }; f; declare -p g z w )
+# bash: the array on g, the `-r` on w
+```
+
+**The fix.** Three parts.
+
+*The letter.* [`Shell::global_bind_names`] gained a kind arm: where the
+global-only road answered a reference the name is still the one its restart
+arrived at (`restart_new_var_name`, declare.def:770), but where it answered
+nothing — among globals, a cycle — the name is bound as written, and
+[`Shell::enter_global_scope`] clears the binding first (`GlobalBind::fresh`) so
+the array is a fresh variable rather than a widening of the reference that stood
+there.
+
+*The walks that came back empty are still paid for.* The destruction has to
+happen after them, so `enter_global_scope` now walks each fresh name against the
+live tables and warns `1 + chklocal` times before clearing it — the walks
+`declare_find_variable` (declare.def:149) made to get there.
+
+*The letters are not the command's.* For a compound operand the half that has
+the kind is step 1, whose options `expand_declaration_argument` spells out of
+the **word flags** (subst.c:12662-12745), not out of what was written: the scan
+in `fix_assignment_words` reads a lowercase `g` only (execute_cmd.c:4246), and
+`W_CHKLOCAL` is `readonly`/`export`'s standing flag (execute_cmd.c:4221) that no
+letter sets. So `declare -Ga g=(1 2)` is a plain local `declare -a` there, and
+`declare -gG` pays one walk, not two. `DeclScopeFlags` now carries the two
+readings apart (`assn_global`, and a `chklocal` the expansion half overrides).
+
+**Tests.** Unit test `a_kind_letter_makes_a_fresh_global_under_the_name_as_written`
+and corpus `a-kind-letter-makes-a-fresh-global-under-the-name-as-written.sh`
+(9 sections). The 240-shape probe matrix (`/tmp/kind_matrix.sh`) went 191 → 210
+and the 27-shape one to 27/27; the remainder is
+TD-OILS-A-NAMEREF-CHAIN-THAT-OUTRUNS-THE-LINK-LIMIT-IS-TAKEN-FOR-ONE-THAT-CLOSED.
+
+---
+
 ### TD-OILS-A-GLOBAL-SCOPE-DECLARATION-BOUND-THE-NAME-IT-WAS-WRITTEN-WITH-WHEN-ITS-GLOBAL-CHAIN-LED-NOWHERE. `declare -g g=1` under a dead global nameref chain wrote the frame's own reference — 2026-08-11 — FIXED 2026-08-11
 
 **Where:** `userspace/oils/src/interp.rs`, [`Shell::global_bind_names`] (was
@@ -40197,7 +40251,7 @@ the global chain and reaches the same cell bash names.
 and corpus
 `a-global-scope-declaration-whose-global-chain-dies-binds-the-live-chains-last-reference.sh`
 (10 sections). Two probe matrices went 25/27 and 48/56 — the remainder is
-TD-OILS-THE-TWO-COMMANDS-A-COMPOUND-OPERAND-DECOMPOSES-INTO-ARE-GIVEN-ONE-SWAP.
+TD-OILS-A-NAMEREF-CHAIN-THAT-OUTRUNS-THE-LINK-LIMIT-IS-TAKEN-FOR-ONE-THAT-CLOSED.
 
 ---
 

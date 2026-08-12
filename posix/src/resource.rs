@@ -114,42 +114,131 @@ pub const RUSAGE_THREAD: i32 = 1;
 // Default limits
 // ---------------------------------------------------------------------------
 
-/// Process-local resource limits.
+/// The process's resource-limit table.
+pub(crate) type RlimitTable = [Rlimit; RLIMIT_NLIMITS];
+
+/// Storage for the process-local resource limits and nice value.
 ///
-/// Initialized to sensible defaults; setrlimit can update them.
-/// Not enforced by the kernel — purely advisory for programs that
-/// query their own limits.
-// Clippy's indexing_slicing lint fires in const context where .get_mut()
-// is unavailable.  These indices are all compile-time constants into a
-// fixed-size array, so the bounds are statically known to be safe.
-#[allow(clippy::indexing_slicing)]
-static mut RLIMITS: [Rlimit; RLIMIT_NLIMITS] = {
-    const INF: Rlimit = Rlimit {
-        rlim_cur: RLIM_INFINITY,
-        rlim_max: RLIM_INFINITY,
-    };
-    let mut limits = [INF; RLIMIT_NLIMITS];
-
-    // Stack: default 8 MiB (matches Linux default).
-    limits[RLIMIT_STACK as usize] = Rlimit {
-        rlim_cur: 8 * 1024 * 1024,
-        rlim_max: RLIM_INFINITY,
-    };
-
-    // Open files: matches fd table size.
-    limits[RLIMIT_NOFILE as usize] = Rlimit {
-        rlim_cur: crate::fdtable::MAX_FDS as u64,
-        rlim_max: crate::fdtable::MAX_FDS as u64,
+/// The limits are initialized to sensible defaults; `setrlimit` can update
+/// them.  Neither is enforced by the kernel — both are advisory, for
+/// programs that query their own limits or priority.
+///
+/// Process-global on the target, where that is what POSIX specifies and
+/// what a SlateOS process is.  Per-*thread* on host builds: `cargo test`
+/// runs every test on its own thread in one process, and this table was a
+/// confirmed source of flakes — `test_setrlimit_phase179_eperm_does_not_
+/// mutate_state`, `test_setpriority_phase169_workflow_raise_drop_cap_raise_
+/// lower`, and `mman`'s `test_mlock2_phase171_rlim_zero_no_cap_eperm`, all
+/// of which assert that a *rejected* call left the stored value alone while
+/// another test was legitimately changing it.  See design-decisions.md §110
+/// for the rule and the alternatives considered.
+mod limit_store {
+    use super::{
+        Rlimit, RlimitTable, RLIMIT_CORE, RLIMIT_NLIMITS, RLIMIT_NOFILE, RLIMIT_STACK,
+        RLIM_INFINITY,
     };
 
-    // Core dumps: 0 (disabled — we don't support them).
-    limits[RLIMIT_CORE as usize] = Rlimit {
-        rlim_cur: 0,
-        rlim_max: 0,
+    /// Cold-start limits, stated once for both builds.
+    // Clippy's indexing_slicing lint fires in const context where .get_mut()
+    // is unavailable.  These indices are all compile-time constants into a
+    // fixed-size array, so the bounds are statically known to be safe.
+    #[allow(clippy::indexing_slicing)]
+    const RLIMITS_INIT: RlimitTable = {
+        const INF: Rlimit = Rlimit {
+            rlim_cur: RLIM_INFINITY,
+            rlim_max: RLIM_INFINITY,
+        };
+        let mut limits = [INF; RLIMIT_NLIMITS];
+
+        // Stack: default 8 MiB (matches Linux default).
+        limits[RLIMIT_STACK as usize] = Rlimit {
+            rlim_cur: 8 * 1024 * 1024,
+            rlim_max: RLIM_INFINITY,
+        };
+
+        // Open files: matches fd table size.
+        limits[RLIMIT_NOFILE as usize] = Rlimit {
+            rlim_cur: crate::fdtable::MAX_FDS as u64,
+            rlim_max: crate::fdtable::MAX_FDS as u64,
+        };
+
+        // Core dumps: 0 (disabled — we don't support them).
+        limits[RLIMIT_CORE as usize] = Rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+
+        limits
     };
 
-    limits
-};
+    // The nice value lives here only on host builds: on the target the
+    // kernel is the authoritative store (see `kernel_get_nice`).
+    #[cfg(target_os = "none")]
+    mod imp {
+        use super::{RlimitTable, RLIMITS_INIT};
+        static mut RLIMITS: RlimitTable = RLIMITS_INIT;
+        pub(super) fn rlimits() -> *mut RlimitTable {
+            &raw mut RLIMITS
+        }
+    }
+
+    #[cfg(not(target_os = "none"))]
+    mod imp {
+        use super::{RlimitTable, RLIMITS_INIT};
+        use core::cell::{Cell, UnsafeCell};
+
+        std::thread_local! {
+            static RLIMITS: UnsafeCell<RlimitTable> =
+                const { UnsafeCell::new(RLIMITS_INIT) };
+            static NICE_VALUE: Cell<i32> = const { Cell::new(0) };
+        }
+
+        /// Shared fallback for the window in which a thread's TLS has
+        /// already been destroyed — see `crate::perthread::current`.
+        static mut RLIMITS_FALLBACK: RlimitTable = RLIMITS_INIT;
+
+        pub(super) fn rlimits() -> *mut RlimitTable {
+            RLIMITS
+                .try_with(UnsafeCell::get)
+                .unwrap_or(&raw mut RLIMITS_FALLBACK)
+        }
+        pub(super) fn nice() -> i32 {
+            NICE_VALUE.try_with(Cell::get).unwrap_or(0)
+        }
+        pub(super) fn set_nice(v: i32) {
+            let _ = NICE_VALUE.try_with(|c| c.set(v));
+        }
+    }
+
+    /// Pointer to the calling context's limit table.  Never null; the call
+    /// sites read and write entries in place.
+    pub(crate) fn rlimits() -> *mut RlimitTable {
+        imp::rlimits()
+    }
+
+    /// The calling context's nice value.  Host-only; see `imp`.
+    #[cfg(not(target_os = "none"))]
+    pub(crate) fn nice() -> i32 {
+        imp::nice()
+    }
+
+    /// Set the calling context's nice value.  Host-only; see `imp`.
+    #[cfg(not(target_os = "none"))]
+    pub(crate) fn set_nice(v: i32) {
+        imp::set_nice(v);
+    }
+
+    /// Restore both to their cold-start values.  Test-only.
+    #[cfg(test)]
+    pub(crate) fn reset() {
+        // SAFETY: the table is per-thread on host builds (the only builds
+        // that compile this), so this touches nothing another test can see.
+        unsafe {
+            *imp::rlimits() = RLIMITS_INIT;
+        }
+        set_nice(0);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // getrlimit / setrlimit
@@ -189,8 +278,10 @@ pub extern "C" fn getrlimit(resource: i32, rlp: *mut Rlimit) -> i32 {
         return -1;
     }
 
-    // SAFETY: Single-threaded access to RLIMITS.
-    let limits = unsafe { core::ptr::addr_of!(RLIMITS).as_ref() };
+    // SAFETY: `limit_store::rlimits` is non-null and aligned, and points
+    // at storage reachable only from this thread on host builds; no other
+    // reference to the table is live across this borrow.
+    let limits = unsafe { limit_store::rlimits().as_ref() };
     let Some(limits) = limits else {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -261,8 +352,8 @@ pub extern "C" fn setrlimit(resource: i32, rlp: *const Rlimit) -> i32 {
         return -1;
     }
 
-    // SAFETY: Single-threaded access to RLIMITS.
-    let limits = unsafe { core::ptr::addr_of_mut!(RLIMITS).as_mut() };
+    // SAFETY: as in `getrlimit` above.
+    let limits = unsafe { limit_store::rlimits().as_mut() };
     let Some(limits) = limits else {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -416,15 +507,6 @@ pub const PRIO_PGRP: i32 = 1;
 /// User priority target.
 pub const PRIO_USER: i32 = 2;
 
-/// Process-local stored nice value — **host builds only**.
-///
-/// On SlateOS the kernel is the authoritative nice store (see
-/// [`kernel_get_nice`]/[`kernel_set_nice`]); this static is compiled only for
-/// host unit tests, where there is no kernel to hold the value.  It preserves
-/// the round-trip semantics those tests assert (seed a value, read it back).
-#[cfg(not(target_os = "none"))]
-static mut NICE_VALUE: i32 = 0;
-
 /// Read the calling process's nice value from the kernel.
 ///
 /// On bare metal this issues `SYS_PROCESS_GET_NICE`, which returns the value
@@ -446,8 +528,10 @@ fn kernel_get_nice() -> i32 {
     }
     #[cfg(not(target_os = "none"))]
     {
-        // SAFETY: Single-threaded host-test access.
-        unsafe { core::ptr::addr_of!(NICE_VALUE).read() }
+        // On SlateOS the kernel is the authoritative nice store; this
+        // per-thread cell stands in for it in host unit tests, preserving
+        // the round-trip semantics they assert (seed a value, read it back).
+        limit_store::nice()
     }
 }
 
@@ -475,11 +559,9 @@ fn kernel_set_nice(nice: i32) -> i32 {
     }
     #[cfg(not(target_os = "none"))]
     {
-        // SAFETY: Single-threaded host-test access.
-        let old = unsafe { core::ptr::addr_of!(NICE_VALUE).read() };
-        unsafe {
-            core::ptr::addr_of_mut!(NICE_VALUE).write(nice);
-        }
+        // Host stand-in for the kernel's store; see `kernel_get_nice`.
+        let old = limit_store::nice();
+        limit_store::set_nice(nice);
         old
     }
 }
@@ -649,43 +731,20 @@ pub extern "C" fn prlimit64(
 mod tests {
     use super::*;
 
-    /// Helper: reset RLIMITS to the compile-time defaults.
+    /// Helper: reset the limits and nice value to their cold-start state.
     ///
-    /// Must be called at the start of any test that reads or writes
-    /// RLIMITS or NICE_VALUE, because tests share the same process
-    /// and the statics are mutable globals.  Run with
-    /// `--test-threads=1` to avoid races between tests.
-    #[allow(clippy::indexing_slicing)]
+    /// Must be called at the start of any test that reads or writes them.
+    /// Safe to call unilaterally: both are per-thread on host builds and
+    /// libtest gives each test its own thread, so this cannot disturb a
+    /// test running concurrently.  (Before that change this helper carried
+    /// a "run with --test-threads=1" warning, and the races it warned about
+    /// were real — see known-issues.md
+    /// TD-POSIX-TEST-SHARED-STATICS-REMAINING-TIER.)
+    ///
+    /// Delegates to `limit_store::reset` rather than restating the default
+    /// table, which previously appeared twice and could drift.
     fn reset_global_state() {
-        unsafe {
-            // Reset NICE_VALUE.
-            core::ptr::addr_of_mut!(NICE_VALUE).write(0);
-
-            // Reset RLIMITS to the compile-time defaults.
-            let limits = core::ptr::addr_of_mut!(RLIMITS).as_mut().unwrap();
-            // First fill everything with RLIM_INFINITY.
-            for slot in limits.iter_mut() {
-                *slot = Rlimit {
-                    rlim_cur: RLIM_INFINITY,
-                    rlim_max: RLIM_INFINITY,
-                };
-            }
-            // Stack: 8 MiB soft, unlimited hard.
-            limits[RLIMIT_STACK as usize] = Rlimit {
-                rlim_cur: 8 * 1024 * 1024,
-                rlim_max: RLIM_INFINITY,
-            };
-            // Open files: matches fd table size.
-            limits[RLIMIT_NOFILE as usize] = Rlimit {
-                rlim_cur: crate::fdtable::MAX_FDS as u64,
-                rlim_max: crate::fdtable::MAX_FDS as u64,
-            };
-            // Core: 0/0.
-            limits[RLIMIT_CORE as usize] = Rlimit {
-                rlim_cur: 0,
-                rlim_max: 0,
-            };
-        }
+        limit_store::reset();
     }
 
     // -----------------------------------------------------------------------

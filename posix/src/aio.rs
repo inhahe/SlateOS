@@ -117,11 +117,108 @@ impl AioRecord {
     };
 }
 
-static mut AIO_TABLE: [AioRecord; MAX_AIO_OPS] = [const { AioRecord::EMPTY }; MAX_AIO_OPS];
+/// Storage for the AIO completion table and its age counter.
+///
+/// Process-global on the target, which is what POSIX AIO models.
+/// Per-*thread* on host builds: `cargo test` runs each test on its own
+/// thread in one process, and this table was a confirmed flake source
+/// (`test_aio_fsync_o_dsync_aio_return_zero`).  The table is keyed by the
+/// *address* of the caller's `Aiocb`, and test `Aiocb`s live on the stack,
+/// so two threads readily produce colliding keys — which is the same
+/// hazard `reset_aio_table` was written for, just across threads instead
+/// of across sequential tests.  See design-decisions.md §110.
+mod aio_store {
+    use super::{AioRecord, MAX_AIO_OPS};
 
-/// Monotonic counter for `age` stamping.  Wraps after 2^64 submissions,
-/// which is impossible in practice; treated as monotonic forever.
-static mut AIO_AGE: u64 = 0;
+    type AioTable = [AioRecord; MAX_AIO_OPS];
+    const AIO_INIT: AioTable = [const { AioRecord::EMPTY }; MAX_AIO_OPS];
+
+    #[cfg(target_os = "none")]
+    mod imp {
+        use super::{AioTable, AIO_INIT};
+        static mut AIO_TABLE: AioTable = AIO_INIT;
+        static mut AIO_AGE: u64 = 0;
+        pub(super) fn table() -> *mut AioTable {
+            &raw mut AIO_TABLE
+        }
+        pub(super) fn bump_age() -> u64 {
+            // SAFETY: single-address-space process, no concurrency.
+            unsafe {
+                let next = core::ptr::addr_of!(AIO_AGE).read().wrapping_add(1);
+                core::ptr::addr_of_mut!(AIO_AGE).write(next);
+                next
+            }
+        }
+        #[cfg(test)]
+        pub(super) fn reset_age() {
+            // SAFETY: as above.
+            unsafe { core::ptr::addr_of_mut!(AIO_AGE).write(0) }
+        }
+    }
+
+    #[cfg(not(target_os = "none"))]
+    mod imp {
+        use super::{AioTable, AIO_INIT};
+        use core::cell::{Cell, UnsafeCell};
+
+        std::thread_local! {
+            static AIO_TABLE: UnsafeCell<AioTable> = const { UnsafeCell::new(AIO_INIT) };
+            static AIO_AGE: Cell<u64> = const { Cell::new(0) };
+        }
+
+        /// Shared fallback for the window in which a thread's TLS has
+        /// already been destroyed — see `crate::perthread::current`.
+        static mut FALLBACK: AioTable = AIO_INIT;
+
+        pub(super) fn table() -> *mut AioTable {
+            AIO_TABLE
+                .try_with(UnsafeCell::get)
+                .unwrap_or(&raw mut FALLBACK)
+        }
+        pub(super) fn bump_age() -> u64 {
+            AIO_AGE
+                .try_with(|c| {
+                    let next = c.get().wrapping_add(1);
+                    c.set(next);
+                    next
+                })
+                .unwrap_or(0)
+        }
+        #[cfg(test)]
+        pub(super) fn reset_age() {
+            let _ = AIO_AGE.try_with(|c| c.set(0));
+        }
+    }
+
+    /// Base pointer to the calling context's record array.  Never null;
+    /// the call sites index it with `add(i)` for `i < MAX_AIO_OPS`.
+    pub(super) fn base() -> *mut AioRecord {
+        imp::table().cast::<AioRecord>()
+    }
+
+    /// Bump and return the next age value.  Wraps after 2^64 submissions,
+    /// which is impossible in practice; treated as monotonic forever.
+    pub(super) fn next_age() -> u64 {
+        imp::bump_age()
+    }
+
+    /// Clear every record and reset the age counter.
+    #[cfg(test)]
+    pub(super) fn reset() {
+        // SAFETY: `base()` is non-null and valid for MAX_AIO_OPS records,
+        // and on host builds — the only ones that compile this — it is
+        // reachable from this thread alone.
+        unsafe {
+            let base = base();
+            let mut i: usize = 0;
+            while i < MAX_AIO_OPS {
+                core::ptr::write(base.add(i), AioRecord::EMPTY);
+                i = i.wrapping_add(1);
+            }
+        }
+        imp::reset_age();
+    }
+}
 
 /// Reset the AIO completion table.
 ///
@@ -129,35 +226,26 @@ static mut AIO_AGE: u64 = 0;
 /// ensure a clean slate — without this, sequential test execution can
 /// reuse stack addresses for `Aiocb`, causing a later test to see a
 /// stale record from an earlier test that happened to allocate its
-/// `Aiocb` at the same address.
+/// `Aiocb` at the same address.  Safe to call unilaterally: the table is
+/// per-thread on host builds, so this cannot clear a record another test
+/// is still waiting on.
 #[cfg(test)]
 fn reset_aio_table() {
-    // SAFETY: single-threaded test context.
-    unsafe {
-        let base = core::ptr::addr_of_mut!(AIO_TABLE).cast::<AioRecord>();
-        let mut i: usize = 0;
-        while i < MAX_AIO_OPS {
-            core::ptr::write(base.add(i), AioRecord::EMPTY);
-            i = i.wrapping_add(1);
-        }
-        AIO_AGE = 0;
-    }
+    aio_store::reset();
 }
 
 /// Bump and return the next age value.
 fn next_age() -> u64 {
-    // SAFETY: single-threaded (consistent with the rest of posix).
-    unsafe {
-        AIO_AGE = AIO_AGE.wrapping_add(1);
-        AIO_AGE
-    }
+    aio_store::next_age()
 }
 
 /// Find the existing record for `cb_ptr`, if any.
 fn find_aio_record(cb_ptr: usize) -> Option<usize> {
-    // SAFETY: single-threaded.
+    // SAFETY: `base()` is non-null and valid for MAX_AIO_OPS records, and
+    // on host builds is reachable from this thread alone; every `add` below
+    // is bounded by MAX_AIO_OPS.
     unsafe {
-        let base = core::ptr::addr_of_mut!(AIO_TABLE).cast::<AioRecord>();
+        let base = aio_store::base();
         let mut i: usize = 0;
         while i < MAX_AIO_OPS {
             let r = base.add(i);
@@ -177,9 +265,9 @@ fn find_aio_record(cb_ptr: usize) -> Option<usize> {
 /// (smallest `age`) is evicted.  The chosen slot is returned populated
 /// with the given status/bytes.
 fn store_aio_record(cb_ptr: usize, status: i32, bytes: isize) {
-    // SAFETY: single-threaded.
+    // SAFETY: as in `find_aio_record`.
     unsafe {
-        let base = core::ptr::addr_of_mut!(AIO_TABLE).cast::<AioRecord>();
+        let base = aio_store::base();
         // 1) Existing record?
         if let Some(idx) = find_aio_record(cb_ptr) {
             let r = base.add(idx);
@@ -225,9 +313,10 @@ fn store_aio_record(cb_ptr: usize, status: i32, bytes: isize) {
 /// Release the record for `cb_ptr` (called by `aio_return`).
 fn free_aio_record(cb_ptr: usize) {
     if let Some(idx) = find_aio_record(cb_ptr) {
-        // SAFETY: single-threaded; idx came from find_aio_record.
+        // SAFETY: idx came from find_aio_record, so it is in bounds; see
+        // `find_aio_record` for the pointer's validity.
         unsafe {
-            let base = core::ptr::addr_of_mut!(AIO_TABLE).cast::<AioRecord>();
+            let base = aio_store::base();
             let r = base.add(idx);
             (*r).in_use = false;
             (*r).cb_ptr = 0;
@@ -333,7 +422,7 @@ pub extern "C" fn aio_error(aiocbp: *const Aiocb) -> i32 {
     if let Some(idx) = find_aio_record(aiocbp as usize) {
         // SAFETY: idx is in-bounds (returned by find_aio_record).
         unsafe {
-            let base = core::ptr::addr_of!(AIO_TABLE).cast::<AioRecord>();
+            let base = aio_store::base();
             (*base.add(idx)).status
         }
     } else {
@@ -358,7 +447,7 @@ pub extern "C" fn aio_return(aiocbp: *mut Aiocb) -> isize {
     };
     // SAFETY: idx came from find_aio_record.
     let (status, bytes) = unsafe {
-        let base = core::ptr::addr_of!(AIO_TABLE).cast::<AioRecord>();
+        let base = aio_store::base();
         let r = base.add(idx);
         ((*r).status, (*r).bytes)
     };
@@ -935,7 +1024,7 @@ mod tests {
         let idx = find_aio_record(key).expect("record should exist");
         // SAFETY: idx is in-bounds.
         let bytes = unsafe {
-            let base = core::ptr::addr_of!(AIO_TABLE).cast::<AioRecord>();
+            let base = aio_store::base();
             (*base.add(idx)).bytes
         };
         assert_eq!(bytes, 42);
@@ -950,7 +1039,7 @@ mod tests {
         store_aio_record(key, 0, 99); // overwrite
         let idx = find_aio_record(key).expect("record should exist");
         let bytes = unsafe {
-            let base = core::ptr::addr_of!(AIO_TABLE).cast::<AioRecord>();
+            let base = aio_store::base();
             (*base.add(idx)).bytes
         };
         assert_eq!(bytes, 99);

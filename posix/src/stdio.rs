@@ -1663,16 +1663,67 @@ struct PopenEntry {
 }
 
 /// Table of active popen streams.
+type PopenTable = [Option<PopenEntry>; MAX_POPEN];
+
+/// Storage for the table of active popen streams.
 ///
-/// When popen succeeds, it records the FILE* and child PID here.
-/// pclose looks up the FILE*, calls waitpid, and removes the entry.
-static mut POPEN_TABLE: [Option<PopenEntry>; MAX_POPEN] = [const { None }; MAX_POPEN];
+/// When popen succeeds, it records the FILE* and child PID here; pclose
+/// looks up the FILE*, calls waitpid, and removes the entry.
+///
+/// Process-global on the target, which is what it models.  Per-*thread* on
+/// host builds: `cargo test` runs each test on its own thread in one
+/// process, and `test_popen_register_full_table` — which fills every slot
+/// and asserts the next registration fails — was a confirmed flake, since
+/// any concurrent popen test could free a slot or consume one.  See
+/// design-decisions.md §110.
+mod popen_store {
+    use super::{PopenTable, MAX_POPEN};
+
+    const POPEN_INIT: PopenTable = [const { None }; MAX_POPEN];
+
+    #[cfg(target_os = "none")]
+    mod imp {
+        use super::{PopenTable, POPEN_INIT};
+        static mut POPEN_TABLE: PopenTable = POPEN_INIT;
+        pub(super) fn table() -> *mut PopenTable {
+            &raw mut POPEN_TABLE
+        }
+    }
+
+    #[cfg(not(target_os = "none"))]
+    mod imp {
+        use super::{PopenTable, POPEN_INIT};
+        use core::cell::UnsafeCell;
+
+        std::thread_local! {
+            static POPEN_TABLE: UnsafeCell<PopenTable> =
+                const { UnsafeCell::new(POPEN_INIT) };
+        }
+
+        /// Shared fallback for the window in which a thread's TLS has
+        /// already been destroyed — see `crate::perthread::current`.
+        static mut FALLBACK: PopenTable = POPEN_INIT;
+
+        pub(super) fn table() -> *mut PopenTable {
+            POPEN_TABLE
+                .try_with(UnsafeCell::get)
+                .unwrap_or(&raw mut FALLBACK)
+        }
+    }
+
+    /// Pointer to the calling context's popen table.  Never null; the call
+    /// sites mutate slots in place.
+    pub(super) fn table() -> *mut PopenTable {
+        imp::table()
+    }
+}
 
 /// Record a popen stream for later pclose.
 fn popen_register(stream: *mut u8, child_pid: i32) -> bool {
-    // SAFETY: Single-threaded access.
+    // SAFETY: non-null and aligned, and reachable only from this thread on
+    // host builds; no other reference to the table is live here.
     unsafe {
-        let table = core::ptr::addr_of_mut!(POPEN_TABLE);
+        let table = popen_store::table();
         for slot in &mut (*table) {
             if slot.is_none() {
                 *slot = Some(PopenEntry { stream, child_pid });
@@ -1685,9 +1736,9 @@ fn popen_register(stream: *mut u8, child_pid: i32) -> bool {
 
 /// Look up and remove a popen stream, returning the child PID.
 fn popen_unregister(stream: *mut u8) -> Option<i32> {
-    // SAFETY: Single-threaded access.
+    // SAFETY: as in `popen_register` above.
     unsafe {
-        let table = core::ptr::addr_of_mut!(POPEN_TABLE);
+        let table = popen_store::table();
         for slot in &mut (*table) {
             if let Some(entry) = slot
                 && core::ptr::eq(entry.stream, stream) {
@@ -2443,9 +2494,14 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// Helper: clear the popen table for test isolation.
+    ///
+    /// Genuinely isolating, because the table is per-thread on host builds
+    /// and libtest gives each test its own thread — before that it was a
+    /// race, and `test_popen_register_full_table` failed accordingly.
     fn reset_popen_table() {
+        // SAFETY: per-thread storage; nothing else can hold a reference.
         unsafe {
-            let table = core::ptr::addr_of_mut!(POPEN_TABLE);
+            let table = popen_store::table();
             for slot in (*table).iter_mut() {
                 *slot = None;
             }

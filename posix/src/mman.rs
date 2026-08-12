@@ -2737,9 +2737,14 @@ mod tests {
             }
         }
 
-        /// RAII rlimit restorer for `RLIMIT_MEMLOCK`.  Snapshots
-        /// the current `(rlim_cur, rlim_max)` and restores it on
-        /// drop so tests don't poison the global RLIMITS table.
+        /// RAII rlimit restorer for `RLIMIT_MEMLOCK`.  Snapshots the
+        /// current `(rlim_cur, rlim_max)` and restores it on drop.
+        ///
+        /// This matters *within* a test (lower the limit, assert the
+        /// rejection, carry on), not across tests: the limit table is
+        /// per-thread on host builds and libtest runs each test on its own
+        /// thread, so a limit this test changes is invisible to every other
+        /// one. See `resource::limit_store`.
         struct MemlockGuard {
             saved: Rlimit,
         }

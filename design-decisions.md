@@ -4854,6 +4854,20 @@ swap is local. Until then the Rust OSH shell is the deliverable.
 `userspace/*` workspace glob). Roadmap: §2.7 "Port Oils (OSH)" (roadmap.md:1494).
 Tracking: open-questions.md Q26.
 
+> **⚠ Audit note — 2026-08-12: the prerequisite fact above is STALE.** The
+> "decisive prerequisite fact" — no C/C++ → `x86_64-slateos` cross-toolchain —
+> was true on 2026-07-18 when this was written, and **stopped being true on
+> 2026-07-21/22**, when the `x86_64-slateos` C cross-target and `zig cc` landed
+> (fastpy initiative F) together with `toolchain/sysroot/lib/libc.a`. The "How to
+> reverse" clause above therefore fired within four days and was never
+> re-examined; ~1,100 of the 1,181 `userspace/oils` commits postdate it. Note
+> that bash is **C**, not the C++ this decision was actually arguing against, so
+> it needs strictly less. This does *not* retroactively invalidate the decision
+> (it was correctly reasoned on the facts of the day), and one real blocker
+> remains — `posix/src/signal.rs:572` has no kernel suspend mechanism, so bash's
+> job control cannot work yet — but the rationale must no longer be read as
+> current. Raised by the operator; now **open-questions.md Q41**.
+
 ## 73. YSH port strategy — **defer YSH; obtain it by cross-compiling genuine Oils once a C++/slateos toolchain exists, NOT by hand-porting or auto-translating**
 
 **Date:** 2026-07-19

@@ -148,6 +148,72 @@ Full write-up:
 `known-issues.md` → `TD-OILS-A-DECLARATION-WITH-NOTHING-TO-DO-BINDS-A-NULL-THROUGH-THE-REFERENCE`.
 
 
+## Q41 — §72's blocker expired on day 4 and was never re-checked: should bash be cross-compiled instead of osh reimplemented? — Status: OPEN
+
+**Raised by the operator** (2026-08-12), who asked whether comparing osh against
+bash and patching every difference means we should have cross-compiled bash from
+the start. Auditing the decision showed the concern is better founded than §72
+reads.
+
+**The finding.** §72 rejected cross-compiling on one decisive fact: *"There is no
+C/C++ → `x86_64-slateos` cross-toolchain in this repo."* That was **true when
+written** (oils' first commit: 2026-07-18). It stopped being true almost
+immediately:
+
+| Date | Event |
+|---|---|
+| 2026-07-18 | oils begins; §72 rejects cross-compile as prerequisite-blocked |
+| 2026-07-21 | `x86_64-slateos` C cross-compilation target added (fastpy, initiative F) |
+| 2026-07-22 | `zig cc` wired in as the C cross-compiler; `toolchain/sysroot/lib/libc.a` |
+
+§72 wrote its own reversal condition ("if a C++/slateos toolchain is later
+built…"). The **C half fired within four days and nobody audited it.** Roughly
+1,100 of the 1,181 `userspace/oils` commits landed *after* the stated blocker
+ceased to exist. The original call was sound; the failure is that a decision with
+a written expiry was never re-examined. bash is C, not C++ — so it needs strictly
+less than the `oils-for-unix` cross-compile §72 was actually arguing against.
+
+**What is genuinely still missing** (so this is not a slam dunk): `posix/src/signal.rs:572`
+— *"We have no kernel suspend mechanism; report ENOSYS."* Bash's job control
+(`SIGTSTP`/`SIGCONT`, Ctrl-Z, `fg`/`bg`) is built directly on it. Also unmeasured:
+autotools cross-configure, readline, and how much of `libstubs.a` bash would hit.
+Note this gap constrains **osh identically** — it is a kernel limitation, not an
+argument for the reimplementation.
+
+**Options.**
+- **A — timeboxed spike, then decide.** Point `zig cc --target=x86_64-slateos` at
+  bash against the existing sysroot; report how far it gets. *Pro:* converts the
+  question from speculation to measurement for ~1–2 h of active work; both
+  outcomes are valuable (bash runs → freeze osh's scope immediately; it walls →
+  we learn exactly which libc/kernel pieces are missing, a far better roadmap item
+  than "keep patching diffs"). *Con:* the spike is wasted if the operator would
+  keep osh regardless.
+- **B — keep osh, close this permanently.** *Pro:* osh is 138k lines, 642/642
+  byte-exact vs bash, and works *today* on an OS with no dynamic linker; a real
+  bash still could not do job control. *Con:* commits to an unbounded fidelity
+  chase — bash has 40 years of edge cases and the corpus can grow forever.
+- **C — switch to cross-compiling bash.** *Pro:* fidelity becomes free and exact.
+  *Con:* discards 1,181 commits; blocked on kernel suspend for job control; osh
+  would still be needed as the fallback shell meanwhile.
+
+**Claude's recommendation.** **A**, then very likely **B** — but the spike first,
+because the honest answer is that nobody has measured it and §72's factual basis
+is now stale. The deeper question the operator is really raising is not
+strategy but **scope**: byte-for-byte bash fidelity has no stopping criterion.
+One case validated today asserts `OPTIND=4294967297` wraps to the first argument
+because bash stores it in a C `int` — true of bash, and nothing on SlateOS will
+ever depend on it. Worth pairing with Q40, which asks the same "does fidelity
+have limits?" question from the other side.
+
+**Meanwhile.** Nothing is blocked; osh work continues and is green (642/642).
+Not started pending the operator's go-ahead, since it is scope, not a bug.
+
+**Where it bites.** `design-decisions.md` §72 (its "How to reverse" clause and
+the now-stale prerequisite claim), `userspace/oils/` (all of it),
+`posix/src/signal.rs:572` (the suspend gap), `toolchain/sysroot/lib/libc.a`,
+and fastpy's `compiler/toolchain.py` (`SLATEOS_TARGET`, `_find_zig_cc`).
+
+
 ---
 
 Recently resolved (see `design-decisions.md` for the full rationale):

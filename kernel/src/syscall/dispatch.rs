@@ -1871,15 +1871,27 @@ fn test_dispatch_clock_monotonic() -> KernelResult<()> {
     Ok(())
 }
 
-/// Test `SYS_GETRANDOM`'s argument handling.
+/// Test `SYS_GETRANDOM`'s argument handling and its success path.
 ///
-/// The success path cannot be exercised from here: `validate_user_write`
-/// rejects a kernel address by design, and this test has no user address
-/// space to borrow.  What *can* be checked from kernel mode is that the
-/// three rejection rules hold and that the length cap is applied rather than
-/// treated as an error — a `SYS_GETRANDOM` that returned a *large* success
-/// count without writing that many bytes would leave the caller reading
-/// uninitialised memory as key material.
+/// **What this test can and cannot see.** `validate_user_write` begins with
+/// `is_kernel_context()`, which is true here — the self-test task owns no
+/// process — so the user-pointer validator is *bypassed* for every call made
+/// from this function.  Two consequences, both deliberate:
+///
+/// * The "a kernel address must be rejected" rule is **not** observable from
+///   here, and asserting it fails (an earlier version of this test did, and
+///   the boot test caught it).  That rule is enforced by `validate_user_range`
+///   for real ring-3 callers and is tested where it lives, in `mm::user`.
+/// * In exchange, the bypass lets us exercise the **success path** with an
+///   ordinary kernel buffer: dispatch → handler → `rng::fill` → returned
+///   count.  That is the more valuable half, because a `SYS_GETRANDOM` that
+///   returns a byte count larger than it actually wrote leaves the caller
+///   reading uninitialised memory as key material — a failure that looks
+///   identical to success at every layer above.
+///
+/// The over-length clamp is deliberately *not* exercised: with validation
+/// bypassed, passing a length above `GETRANDOM_MAX` would really write a
+/// megabyte through a small buffer and corrupt the kernel stack.
 fn test_dispatch_getrandom() -> KernelResult<()> {
     // Zero length is a success returning 0, even for a null pointer: callers
     // that loop until a count is exhausted must not have to special-case the
@@ -1905,34 +1917,47 @@ fn test_dispatch_getrandom() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    // A kernel address must be rejected by the user-pointer validator; if it
-    // were not, any process could ask the kernel to scribble random bytes
-    // over kernel memory.
-    let mut sink = [0u8; 16];
-    let kernel_buf = SyscallArgs {
+    // The success path (see the note above about the kernel-context bypass).
+    // The returned count must equal the requested length, and the buffer must
+    // actually have been written: a handler that returned `len` without
+    // filling anything would hand the caller its own uninitialised memory as
+    // key material.
+    let mut sink = [0u8; 32];
+    let good = SyscallArgs {
         arg0: sink.as_mut_ptr() as u64,
-        arg1: 16,
+        arg1: 32,
         arg2: 0, arg3: 0, arg4: 0, arg5: 0,
     };
-    if dispatch(SYS_GETRANDOM, &kernel_buf).value >= 0 {
-        serial_println!("[syscall]   FAIL: getrandom accepted a kernel address");
+    let result = dispatch(SYS_GETRANDOM, &good);
+    if result.value != 32 {
+        serial_println!(
+            "[syscall]   FAIL: getrandom(buf, 32) returned {}, expected 32",
+            result.value
+        );
         return Err(KernelError::InternalError);
     }
-    // Nothing should have been written.
-    if sink != [0u8; 16] {
-        serial_println!("[syscall]   FAIL: getrandom wrote through a rejected pointer");
+    // The buffer started all-zero, so an all-zero result means nothing was
+    // written.  A genuine 32-byte draw collides with that with probability
+    // 2^-256, so this cannot flake.
+    if sink == [0u8; 32] {
+        serial_println!("[syscall]   FAIL: getrandom reported 32 bytes but wrote none");
         return Err(KernelError::InternalError);
     }
 
-    // The kernel CSPRNG itself is exercised directly, since the syscall
-    // wrapper cannot be: a stuck generator is the one failure that would
-    // otherwise look identical to success at every layer above.
-    let mut a = [0u8; 32];
-    let mut b = [0u8; 32];
-    crate::rng::fill(&mut a);
-    crate::rng::fill(&mut b);
-    if a == b || a == [0u8; 32] {
-        serial_println!("[syscall]   FAIL: rng::fill produced a constant");
+    // A second draw must differ from the first: a stuck generator would pass
+    // every check above while returning the same bytes to every caller.
+    let mut second = [0u8; 32];
+    let good2 = SyscallArgs {
+        arg0: second.as_mut_ptr() as u64,
+        arg1: 32,
+        arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    if dispatch(SYS_GETRANDOM, &good2).value != 32 {
+        serial_println!("[syscall]   FAIL: second getrandom draw did not return 32");
+        return Err(KernelError::InternalError);
+    }
+    if second == sink {
+        serial_println!("[syscall]   FAIL: getrandom returned the same bytes twice");
         return Err(KernelError::InternalError);
     }
 

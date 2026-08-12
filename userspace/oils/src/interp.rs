@@ -21506,6 +21506,20 @@ impl Shell {
         for name in &carried {
             self.make_empty_global(name, flags);
         }
+        // Step 1's own binding, where the literal after it binds a different
+        // name. It has to land before the swap below, so that the snapshot the
+        // swap takes of a frame-local it emptied is the emptied one.
+        for step1 in binds.iter().filter_map(|b| b.step1.clone()).collect::<Vec<_>>() {
+            match step1 {
+                // `bind_global_variable`'s creation has no kind letter behind it
+                // — that road short-circuits before it — so what it leaves is a
+                // plain scalar whatever shape the literal is.
+                Step1Bind::EmptyGlobal(name) => {
+                    self.make_empty_global(&name, DeclScopeFlags { kind: false, ..flags });
+                }
+                Step1Bind::EmptyLive(name) => self.empty_live_binding(&name),
+            }
+        }
         // A kind letter reaches `make_new_array_variable` only after
         // `declare_find_variable` (declare.def:149) has walked the name for
         // itself and come back with nothing — once, or twice where `chklocal`
@@ -21563,13 +21577,36 @@ impl Shell {
         self.note_var_change(name);
     }
 
+    /// Empty the binding step 1 wrote *through* rather than made: the
+    /// `assign_value` `bind_variable_internal` falls into with a NULL value
+    /// (variables.c:3180), which leaves the variable where it stands with its
+    /// name, its scope and its shape, and nothing in it.
+    ///
+    /// It is the frame's own binding that gets this, and it survives the
+    /// declaration: `declare -n g=z; declare -n z=y; declare -n y=z` is a global
+    /// chain nothing can walk, so `f() { local g=5; declare -g g=(1 2); }` binds
+    /// the array to the *global* `g` and leaves the frame's own `g` reported as
+    /// the bare `declare -- g`.
+    fn empty_live_binding(&mut self, name: &str) {
+        self.vars.remove(name);
+        if let Some(elems) = self.arrays.get_mut(name) {
+            elems.clear();
+        }
+        if let Some(pairs) = self.assoc.get_mut(name) {
+            pairs.clear();
+        }
+        self.array_valued.remove(name);
+        self.declared.insert(name.to_string());
+        self.note_var_change(name);
+    }
+
     /// The names a global-scope declaration of `name` must un-shadow for the
     /// ordinary machinery to reach the binding bash's `newname` names — empty
     /// where it reaches it already, and where a swap would take it somewhere
     /// else.
     ///
     /// Three answers, one per outcome of the lookup
-    /// ([`Shell::global_chain_target`]):
+    /// ([`Shell::global_chain_end`]):
     ///
     /// * the chain reaches a **live** binding of `name` itself — it left the
     ///   global table and came back through a local, which is a different
@@ -21654,47 +21691,172 @@ impl Shell {
     /// only where one is in play — the swap is otherwise unchanged.
     fn global_bind_names(&self, name: &str, compound: bool, flags: DeclScopeFlags) -> GlobalBind {
         let kind = flags.kind && (!compound || flags.assn_global);
-        let names = match self.global_chain_target(name) {
-            Some(RefTarget { base, sub: None, scope: RefScope::Live }) if base == name => Vec::new(),
-            Some(_) => vec![name.to_string()],
+        let end = self.global_chain_end(name);
+        let names = match &end {
+            GlobalChainEnd::Reached(RefTarget { base, sub: None, scope: RefScope::Live })
+                if base == name =>
+            {
+                Vec::new()
+            }
+            GlobalChainEnd::Reached(_) => vec![name.to_string()],
             // No global binding at all: neither road above starts, so the name
             // is bound as written.
-            None if self.nameref_cell_in(name, 0).is_none() => vec![name.to_string()],
+            _ if self.nameref_cell_in(name, 0).is_none() => vec![name.to_string()],
             // The global-only road answered: the name is the end of the chain
             // it read, for both commands. The builtin asks for it outright
             // (`find_global_variable_last_nameref`, declare.def:735), and the
             // compound literal is *given* it — step 1 already made a variable
             // there, so step 2's `find_global_variable (name)` finds one and
             // never reaches `nameref_transform_name` at all.
-            None => match self.global_chain_path(name) {
+            _ => match self.global_chain_path(name) {
                 Some(path) => path,
-                // Where that road answered nothing — among globals, a cycle —
-                // step 1 made nothing at the transformed name either, and the
-                // question is live again. A kind letter binds the name as
-                // written, there having been no restart to carry it elsewhere.
+                // Where that road answered nothing — among globals, a cycle or
+                // a chain past the link limit — step 1 made nothing at the
+                // transformed name either, and the question is live again. A
+                // kind letter binds the name as written, there having been no
+                // restart to carry it elsewhere.
                 None if kind => {
-                    return GlobalBind { names: vec![name.to_string()], fresh: true };
+                    return GlobalBind {
+                        names: vec![name.to_string()],
+                        fresh: true,
+                        step1: None,
+                    };
                 }
-                // Otherwise both roads reach the live chain's last cell: the
-                // builtin's `name` falls through unchanged to
-                // `bind_global_variable`, whose `bind_variable_internal` opens
-                // with `find_variable_last_nameref` (variables.c:3020), and the
-                // literal's `nameref_transform_name` (variables.c:2333) asks
-                // either that or `find_global_variable_last_nameref` — which
-                // just answered nothing — depending on `ASS_CHKLOCAL`.
-                //
-                // A chain that dies on the link limit has no last cell to give;
-                // an element reference is no name to bind either, and bash keeps
-                // the name (the `v && nameref_p (v)` guard, variables.c:2336).
-                // Either way the name itself stays shadowed: it is the frame's
-                // own reference that leads there.
-                None => vec![match self.walk_ref_name(name).target {
-                    Some(RefTarget { base, sub: None, .. }) => base,
-                    _ => name.to_string(),
-                }],
+                None => match end {
+                    // The chain **ended** — it left the global table through a
+                    // link a local shadows and ran out on a name nothing
+                    // answers to. Both roads reach that name: the builtin's
+                    // falls through unchanged to `bind_global_variable`, whose
+                    // `bind_variable_internal` opens with the live chain's last
+                    // cell (variables.c:3098), and the literal's
+                    // `find_global_variable` then *finds* what that just made,
+                    // so it binds it in place. The two chains share a tail — the
+                    // global one only reached here by re-entering a shadowed
+                    // name — so the one cell serves both.
+                    GlobalChainEnd::Ended(RefTarget { base, sub: None, .. }) => vec![base],
+                    // A chain that **gave up** — a cycle, or one past the link
+                    // limit — shares no tail, and there the two commands part.
+                    //
+                    // The literal binds the name as written: its
+                    // `find_global_variable` gave up too, whatever step 1 may
+                    // have made elsewhere, and the `nameref_transform_name`
+                    // that follows is the global-only walk, which has just
+                    // answered nothing (subst.c:3506). Step 1, meanwhile, is
+                    // `bind_global_variable` on the **live** chain's end —
+                    // which is a different variable, and left behind.
+                    GlobalChainEnd::GaveUp => {
+                        let live = self.live_last_nameref(name);
+                        if !compound {
+                            // No literal follows: the builtin *is* step 1, and
+                            // binds what `bind_variable_internal` chose.
+                            return GlobalBind {
+                                names: match live {
+                                    // The live binding is no reference at all,
+                                    // so bash assigns to it where it stands —
+                                    // the frame's own, un-swapped.
+                                    LiveLastRef::Here => Vec::new(),
+                                    LiveLastRef::Cell(cell) => vec![cell],
+                                    LiveLastRef::Nothing => vec![name.to_string()],
+                                },
+                                fresh: false,
+                                step1: None,
+                            };
+                        }
+                        // Except that the literal does not always read the
+                        // global-only walk. `nameref_transform_name`
+                        // (variables.c:2333) asks the **live** chain instead
+                        // wherever `ASS_CHKLOCAL` is set — the word flag
+                        // `readonly` and `export` carry standingly
+                        // (execute_cmd.c:4221), which no letter of `declare`
+                        // sets. Where it does, the literal lands on the very
+                        // cell step 1 chose, and one name serves both.
+                        if let (true, LiveLastRef::Cell(cell)) = (flags.chklocal, &live) {
+                            return GlobalBind {
+                                names: vec![cell.clone()],
+                                fresh: false,
+                                step1: None,
+                            };
+                        }
+                        return GlobalBind {
+                            names: vec![name.to_string()],
+                            fresh: false,
+                            step1: match live {
+                                // A live binding that is no reference is
+                                // emptied where it stands, and `chklocal`
+                                // makes no difference: the literal's transform
+                                // answers with a name that is no reference
+                                // either, so both roads keep the name as
+                                // written. (A frame-local of *this* frame
+                                // never reaches here — `chklocal` answers for
+                                // it before the mapping is used.)
+                                LiveLastRef::Here => {
+                                    Some(Step1Bind::EmptyLive(name.to_string()))
+                                }
+                                LiveLastRef::Cell(cell) => Some(Step1Bind::EmptyGlobal(cell)),
+                                LiveLastRef::Nothing => None,
+                            },
+                        };
+                    }
+                    // An element reference is no name to bind, and bash keeps
+                    // the name (the `v && nameref_p (v)` guard,
+                    // variables.c:2336).
+                    _ => vec![name.to_string()],
+                },
             },
         };
-        GlobalBind { names, fresh: false }
+        GlobalBind { names, fresh: false, step1: None }
+    }
+
+    /// bash's `find_variable_last_nameref (name, 0)` (variables.c:2117): the
+    /// reference cell `bind_variable_internal` falls back on when the global
+    /// chain has answered nothing (variables.c:3098).
+    ///
+    /// The walk is the **live** one — `find_variable_noref (name)` and then an
+    /// ordinary innermost-first lookup per link — and what it answers with is
+    /// the last variable it *stood on*, not the one it reached. Three outcomes,
+    /// and `bind_variable_internal` does something different with each:
+    ///
+    /// * the live binding is no reference at all, so the walk never moves and
+    ///   answers with that binding — which bash then assigns to **where it
+    ///   stands**, local or not. `f() { local g=5; declare -g g=1; }` leaves the
+    ///   frame's own `g` holding `1`.
+    /// * it ends on a reference, and bash makes a **fresh global** with the name
+    ///   in that reference's cell (`make_new_variable (newval, table)`, where
+    ///   `table` is the global table).
+    /// * it answers nothing — an empty cell, or a chain past [`NAMEREF_MAX`] —
+    ///   and `bind_variable_internal` returns without binding anything.
+    ///
+    /// There is no cycle test here, only the link limit: a chain that closes on
+    /// itself simply spins to the cap and gives up, silently.
+    ///
+    /// A cell holding an *element* reference is answered as nothing: bash takes
+    /// it to `assign_array_element` (variables.c:3122) rather than binding a
+    /// name, which osh does not model here.
+    fn live_last_nameref(&self, name: &str) -> LiveLastRef {
+        let mut cur = name.to_string();
+        let mut level = 0usize;
+        loop {
+            if !self.nameref_attr.contains(&cur) {
+                return if cur == name { LiveLastRef::Here } else { LiveLastRef::Cell(cur) };
+            }
+            level += 1;
+            if level > NAMEREF_MAX {
+                return LiveLastRef::Nothing;
+            }
+            let Some(cell) = self
+                .vars
+                .get(&cur)
+                .map(Vec::as_slice)
+                .and_then(bytes::as_str)
+                .filter(|n| {
+                    !n.is_empty()
+                        && !matches!(split_assignment_target(n.as_bytes()), Some((_, Some(_))))
+                })
+            else {
+                return LiveLastRef::Nothing;
+            };
+            cur = cell.to_owned();
+        }
     }
 
     /// The names bash's `find_global_variable_last_nameref (name, 0)`
@@ -21737,20 +21899,29 @@ impl Shell {
     ///
     /// Only the *first* link is read from the global table; every link after it
     /// is an ordinary innermost-first lookup, so the chain can re-enter local
-    /// scope. `None` for a name with no global binding, for a chain that ends on
-    /// a name nothing answers to, and for one that closes on itself or outruns
-    /// the link limit — bash's three ways to NULL.
-    fn global_chain_target(&self, name: &str) -> Option<RefTarget> {
+    /// scope. NULL comes back three ways — no global binding of the name, a
+    /// chain ending on a name nothing answers to, and one that closes on itself
+    /// or outruns the link limit — and the last two are not interchangeable to
+    /// a caller that is about to *make* the variable the chain ran out on. See
+    /// [`GlobalChainEnd`].
+    fn global_chain_end(&self, name: &str) -> GlobalChainEnd {
         let Some(cell) = self.nameref_cell_in(name, 0) else {
             // Not a reference: the global binding is the answer, if there is one.
-            return self.bound_in_context(name, 0).then(|| RefTarget {
-                base: name.to_string(),
-                sub: None,
-                scope: RefScope::Context(0),
-            });
+            let here =
+                RefTarget { base: name.to_string(), sub: None, scope: RefScope::Context(0) };
+            return match self.bound_in_context(name, 0) {
+                true => GlobalChainEnd::Reached(here),
+                false => GlobalChainEnd::Ended(here),
+            };
         };
-        let next = bytes::as_str(cell).filter(|n| !n.is_empty())?.to_owned();
-        let target = self.walk_ref_name(&next).target?;
+        let Some(next) = bytes::as_str(cell).filter(|n| !n.is_empty()) else {
+            // An empty cell is `find_variable_nameref`'s second early return
+            // (variables.c:2092): no name to look up, and none to give back.
+            return GlobalChainEnd::GaveUp;
+        };
+        let Some(target) = self.walk_ref_name(next).target else {
+            return GlobalChainEnd::GaveUp;
+        };
         // `find_variable_internal` answering NULL is the chain reaching nothing,
         // and an element reference is not a name it could have looked up.
         let found = match (&target.sub, target.scope) {
@@ -21758,7 +21929,10 @@ impl Shell {
             (None, RefScope::Live) => self.name_is_bound(target.base.as_bytes()),
             (None, RefScope::Context(d)) => self.bound_in_context(&target.base, d),
         };
-        found.then_some(target)
+        match found {
+            true => GlobalChainEnd::Reached(target),
+            false => GlobalChainEnd::Ended(target),
+        }
     }
 
     /// bash's `chklocal` test: does `name` reach a binding **this very frame**
@@ -55508,6 +55682,65 @@ struct GlobalBind {
     /// whatever the name held. Everything the old entry carried — a nameref
     /// cell and its attribute above all — goes with it.
     fresh: bool,
+    /// Where **step 1** of a compound declaration went, when that is not where
+    /// the literal after it goes. `None` where the two agree, which is all but
+    /// the case the chains part in. See [`Step1Bind`].
+    step1: Option<Step1Bind>,
+}
+
+/// The binding step 1 of a compound declaration leaves behind when the literal
+/// that follows it binds a different name.
+///
+/// Step 1 is `make_internal_declare`, and with no kind letter to short-circuit
+/// it (`declare -g g=(1 2)` spells its option string `-g`, since
+/// `W_ASSIGNARRAY` comes from a `-a` on the command and nothing else — see
+/// [`Shell::global_bind_names`]) it creates through `bind_global_variable (name,
+/// NULL, ASS_FORCE)` (declare.def:792). That is `bind_variable_internal`, whose
+/// fallback for a global reference chain that answered nothing is the **live**
+/// chain's last cell (variables.c:3098) — and the live chain can end somewhere
+/// the literal's own lookup never reaches. Both shapes leave the variable
+/// existing and empty; they differ in *which* variable that is.
+#[derive(Debug, Clone)]
+enum Step1Bind {
+    /// The live chain ended on a reference, so bash made a **fresh global** with
+    /// the name in its cell (`make_new_variable (newval, table)`, with `table`
+    /// the global table).
+    EmptyGlobal(String),
+    /// The live binding is no reference, so bash assigned to it **where it
+    /// stands** — the frame's own, which keeps its name, its scope and its
+    /// shape and loses what was in it.
+    EmptyLive(String),
+}
+
+/// What bash's `find_variable_last_nameref (name, 0)` answered. See
+/// [`Shell::live_last_nameref`].
+#[derive(Debug, Clone)]
+enum LiveLastRef {
+    /// The live binding of the name is no reference at all, so the walk never
+    /// moved and answered with it.
+    Here,
+    /// The chain ended on a reference holding this name.
+    Cell(String),
+    /// Nothing: an empty cell, or a chain past [`NAMEREF_MAX`].
+    Nothing,
+}
+
+/// What bash's `find_global_variable (name)` answered, with its two ways of
+/// answering nothing kept apart.
+///
+/// A caller that only wants the variable treats `Ended` and `GaveUp` alike —
+/// both are NULL. One that is about to *create* what the chain ran out on does
+/// not: `Ended` names the variable step 1 has just made, so the lookup a moment
+/// later finds it, while `GaveUp` names nothing at all and leaves the name as
+/// written. See [`Shell::global_chain_end`].
+#[derive(Debug, Clone)]
+enum GlobalChainEnd {
+    /// The chain reached a variable.
+    Reached(RefTarget),
+    /// The chain ran out on this name, which nothing answers to.
+    Ended(RefTarget),
+    /// A cycle, or the link limit: no name to give.
+    GaveUp,
 }
 
 /// What one walk of a nameref chain found: where it led, and whether it closed
@@ -75273,6 +75506,101 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
                 "declare -n g=\"z\"\ndeclare -a z=([0]=\"1\" [1]=\"2\")\n",
                 "{cmd}"
             );
+            assert_eq!(st, 0, "{cmd}");
+        }
+    }
+
+    /// A nameref walk gives up two ways — it closes on a name it has already
+    /// stood on, or it runs past `NAMEREF_MAX` links — and
+    /// `find_variable_nameref` (variables.c:2074) answers NULL for both. Which
+    /// of the two a chain does is not a property of the chain alone: every link
+    /// after the first is an ordinary innermost-first lookup, so a frame-local
+    /// can re-enter the chain and close it. `g→z, z→g` under a local `g` reads
+    /// `g(global)→z→g(local)` and the local answers; `g→z, z→y, y→z` never
+    /// names `g` again and nothing a frame holds can close it.
+    ///
+    /// Where the **global-only** walk gives up, a compound `declare -g` parts
+    /// into two variables. Step 1 is a bare `declare -g g` — `W_ASSIGNARRAY` is
+    /// set from a preceding `-a` option word alone and never from the literal's
+    /// shape (`fix_assignment_words`, execute_cmd.c:4180-4249) — so it is
+    /// `bind_global_variable`, whose `bind_variable_internal` (variables.c:3081)
+    /// falls back on the **live** chain's last reference cell. Step 2's own
+    /// `find_global_variable` repeats the global-only walk, gives up again, and
+    /// binds the name as written. Corpus:
+    /// `a-nameref-chain-that-outruns-the-link-limit-parts-the-two-halves-a-closed-one-does-not.sh`.
+    #[test]
+    fn a_nameref_chain_that_outruns_the_link_limit_parts_the_two_halves() {
+        let w = "main: warning: g: circular name reference\n";
+        let over = "declare -n g=z; declare -n z=y; declare -n y=z;";
+        let cyc = "declare -n g=z; declare -n z=g;";
+
+        // The limit is reached, so step 1 goes out to the live chain's cell and
+        // the literal stays on the name as written.
+        let (out, st) = run(&format!(
+            "{over} f() {{ local -n g=w; declare -g g=(1 2); }}; f; declare -p g w"
+        ));
+        assert_eq!(out, "declare -a g=([0]=\"1\" [1]=\"2\")\ndeclare -- w\n");
+        assert_eq!(st, 0);
+
+        // A chain a local closes answers, so nothing was transformed and one
+        // name serves both halves.
+        let (out, st) = run(&format!(
+            "{cyc} f() {{ local -n g=w; declare -g g=(1 2); }}; f 2>&1; declare -p g w"
+        ));
+        assert_eq!(
+            out,
+            format!("{}declare -n g=\"z\"\ndeclare -a w=([0]=\"1\" [1]=\"2\")\n", w.repeat(2))
+        );
+        assert_eq!(st, 0);
+
+        // A scalar operand has no step 1 to part from, and both chains leave the
+        // one variable the live walk chose.
+        for prefix in [over, cyc] {
+            let (out, st) = run(&format!(
+                "{prefix} f() {{ local -n g=w; declare -g g=1; }}; f 2>/dev/null; declare -p w"
+            ));
+            assert_eq!(out, "declare -- w=\"1\"\n", "{prefix}");
+            assert_eq!(st, 0, "{prefix}");
+        }
+
+        // `find_variable_last_nameref` answers with the last variable it stood
+        // *on*, so a live binding that is no reference is itself the answer, and
+        // step 1's NULL value empties it where it stands. The literal then binds
+        // the global all the same.
+        let (out, st) = run(&format!(
+            "{over} f() {{ local g=5; declare -g g=(1 2); declare -p g; }}; f; declare -p g"
+        ));
+        assert_eq!(out, "declare -- g\ndeclare -a g=([0]=\"1\" [1]=\"2\")\n");
+        assert_eq!(st, 0);
+
+        // With no literal to follow it the value stays on that local, which dies
+        // with the frame.
+        let (out, st) = run(&format!(
+            "{over} f() {{ local g=5; declare -g g=1; declare -p g; }}; f; declare -p g"
+        ));
+        assert_eq!(out, "declare -- g=\"1\"\ndeclare -n g=\"z\"\n");
+        assert_eq!(st, 0);
+
+        // With nothing live to fall back on there is nothing left behind.
+        let (out, st) = run(&format!(
+            "{over} f() {{ declare -g g=(1 2); }}; f; declare -p g"
+        ));
+        assert_eq!(out, "declare -a g=([0]=\"1\" [1]=\"2\")\n");
+        assert_eq!(st, 0);
+
+        // `readonly` and `export` carry `W_CHKLOCAL` standingly
+        // (execute_cmd.c:4221), so their literal walks the live chain too
+        // (`nameref_transform_name`, variables.c:2333) and arrives where step 1
+        // did. `-G` is the builtin's letter alone and never reaches the word
+        // flags, so its literal still parts.
+        for (cmd, want) in [
+            ("readonly g=(1 2)", "declare -n g=\"z\"\ndeclare -ar w=([0]=\"1\" [1]=\"2\")\n"),
+            ("export g=(1 2)", "declare -n g=\"z\"\ndeclare -ax w=([0]=\"1\" [1]=\"2\")\n"),
+            ("declare -gG g=(1 2)", "declare -a g=([0]=\"1\" [1]=\"2\")\ndeclare -- w\n"),
+        ] {
+            let (out, st) =
+                run(&format!("{over} f() {{ local -n g=w; {cmd}; }}; f; declare -p g w"));
+            assert_eq!(out, want, "{cmd}");
             assert_eq!(st, 0, "{cmd}");
         }
     }

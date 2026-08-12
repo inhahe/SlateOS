@@ -993,41 +993,6 @@ fn deadline_from_timespec(p: *const Timespec) -> Result<u64, ()> {
 }
 
 // ---------------------------------------------------------------------------
-// Test-only helpers
-// ---------------------------------------------------------------------------
-
-/// Reset the entire mqueue subsystem to its cold-boot state.  Used by
-/// tests to avoid cross-test contamination of the static tables.
-#[cfg(test)]
-fn reset_all() {
-    let _g = lock();
-    // SAFETY: Lock held.
-    unsafe {
-        let qs = queues_ptr();
-        let mut i: usize = 0;
-        while i < MAX_QUEUES {
-            (*qs.add(i)).in_use = false;
-            (*qs.add(i)).unlinked = false;
-            (*qs.add(i)).refcount = 0;
-            (*qs.add(i)).cur_msgs = 0;
-            (*qs.add(i)).name_len = 0;
-            let mut m: usize = 0;
-            while m < MAX_MSGS_PER_QUEUE {
-                (*qs.add(i)).msgs[m].in_use = false;
-                m = m.wrapping_add(1);
-            }
-            i = i.wrapping_add(1);
-        }
-        let ds = descs_ptr();
-        let mut j: usize = 0;
-        while j < MAX_DESCRIPTORS {
-            (*ds.add(j)).in_use = false;
-            j = j.wrapping_add(1);
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1036,16 +1001,14 @@ mod tests {
     use super::*;
     use crate::fcntl::{O_CREAT, O_EXCL, O_NONBLOCK, O_RDWR};
 
-    /// Tests that mutate the global mqueue tables serialize on this
-    /// lock to avoid cross-test races (the static state is shared
-    /// process-wide).
-    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn lock_tests() -> std::sync::MutexGuard<'static, ()> {
-        let g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        reset_all();
-        g
-    }
+    // These tests used to open with a `lock_tests()` guard that took a
+    // `Mutex` and called `reset_all()`.  Both are unnecessary now that the
+    // queue tables are per-thread on host builds: libtest gives each test
+    // its own thread, so each starts from the cold-boot state and cannot
+    // see another's queues.  The lock never made the tests correct anyway
+    // -- "fill every slot, assert the next open fails" is broken by a
+    // concurrent unlink no matter how well each individual access is
+    // serialised.
 
     fn open_default(name: &[u8], oflag: i32) -> MqdT {
         mq_open(
@@ -1077,7 +1040,6 @@ mod tests {
 
     #[test]
     fn test_open_null_name() {
-        let _g = lock_tests();
         let r = mq_open(core::ptr::null(), O_CREAT | O_RDWR, 0, core::ptr::null());
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::EFAULT);
@@ -1085,7 +1047,6 @@ mod tests {
 
     #[test]
     fn test_open_name_without_leading_slash() {
-        let _g = lock_tests();
         let r = open_default(b"nolead\0", O_NONBLOCK);
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -1093,7 +1054,6 @@ mod tests {
 
     #[test]
     fn test_open_name_with_internal_slash() {
-        let _g = lock_tests();
         let r = open_default(b"/a/b\0", O_NONBLOCK);
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -1101,7 +1061,6 @@ mod tests {
 
     #[test]
     fn test_open_name_just_slash() {
-        let _g = lock_tests();
         let r = open_default(b"/\0", O_NONBLOCK);
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -1109,7 +1068,6 @@ mod tests {
 
     #[test]
     fn test_open_creates_new_queue() {
-        let _g = lock_tests();
         let r = open_default(b"/q1\0", O_NONBLOCK);
         assert!(r > 0, "expected positive mqd, got {r}");
         assert_eq!(mq_close(r), 0);
@@ -1117,7 +1075,6 @@ mod tests {
 
     #[test]
     fn test_open_existing_without_o_creat_succeeds() {
-        let _g = lock_tests();
         let a = open_default(b"/qexist\0", O_NONBLOCK);
         assert!(a > 0);
         // Reopen without O_CREAT.
@@ -1134,7 +1091,6 @@ mod tests {
 
     #[test]
     fn test_open_missing_without_o_creat_enoent() {
-        let _g = lock_tests();
         let r = mq_open(
             b"/no_such\0".as_ptr(),
             O_RDWR | O_NONBLOCK,
@@ -1147,7 +1103,6 @@ mod tests {
 
     #[test]
     fn test_open_o_excl_on_existing_eexist() {
-        let _g = lock_tests();
         let a = open_default(b"/qexcl\0", O_NONBLOCK);
         assert!(a > 0);
         let b = mq_open(
@@ -1163,7 +1118,6 @@ mod tests {
 
     #[test]
     fn test_open_with_attr_too_big() {
-        let _g = lock_tests();
         let attr = MqAttr {
             mq_flags: 0,
             mq_maxmsg: (MAX_MSGS_PER_QUEUE as i64) + 1,
@@ -1183,7 +1137,6 @@ mod tests {
 
     #[test]
     fn test_open_with_attr_negative_eINVAL() {
-        let _g = lock_tests();
         let attr = MqAttr {
             mq_flags: 0,
             mq_maxmsg: -1,
@@ -1203,7 +1156,6 @@ mod tests {
 
     #[test]
     fn test_open_exhaust_queues() {
-        let _g = lock_tests();
         let mut fds = [0i32; MAX_QUEUES];
         let mut names: [[u8; 8]; MAX_QUEUES] = [[0u8; 8]; MAX_QUEUES];
         for i in 0..MAX_QUEUES {
@@ -1226,7 +1178,6 @@ mod tests {
 
     #[test]
     fn test_close_invalid_descriptor() {
-        let _g = lock_tests();
         assert_eq!(mq_close(0), -1);
         assert_eq!(errno::get_errno(), errno::EBADF);
         assert_eq!(mq_close(-1), -1);
@@ -1237,7 +1188,6 @@ mod tests {
 
     #[test]
     fn test_close_twice_second_is_ebadf() {
-        let _g = lock_tests();
         let fd = open_default(b"/qcl\0", O_NONBLOCK);
         assert!(fd > 0);
         assert_eq!(mq_close(fd), 0);
@@ -1249,7 +1199,6 @@ mod tests {
 
     #[test]
     fn test_unlink_missing_enoent() {
-        let _g = lock_tests();
         let r = mq_unlink(b"/no_such\0".as_ptr());
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::ENOENT);
@@ -1257,7 +1206,6 @@ mod tests {
 
     #[test]
     fn test_unlink_existing() {
-        let _g = lock_tests();
         let fd = open_default(b"/qun\0", O_NONBLOCK);
         assert!(fd > 0);
         assert_eq!(mq_unlink(b"/qun\0".as_ptr()), 0);
@@ -1278,7 +1226,6 @@ mod tests {
 
     #[test]
     fn test_send_receive_roundtrip() {
-        let _g = lock_tests();
         let fd = open_default(b"/qsr\0", O_NONBLOCK);
         assert!(fd > 0);
         assert_eq!(mq_send(fd, b"hello".as_ptr(), 5, 7), 0);
@@ -1293,7 +1240,6 @@ mod tests {
 
     #[test]
     fn test_priority_ordering() {
-        let _g = lock_tests();
         let fd = open_default(b"/qpri\0", O_NONBLOCK);
         assert!(fd > 0);
         // Send messages out of priority order.
@@ -1320,7 +1266,6 @@ mod tests {
 
     #[test]
     fn test_fifo_within_same_priority() {
-        let _g = lock_tests();
         let fd = open_default(b"/qfifo\0", O_NONBLOCK);
         assert!(fd > 0);
         assert_eq!(mq_send(fd, b"a".as_ptr(), 1, 5), 0);
@@ -1339,7 +1284,6 @@ mod tests {
 
     #[test]
     fn test_send_oversize_emsgsize() {
-        let _g = lock_tests();
         let fd = open_default(b"/qsz\0", O_NONBLOCK);
         assert!(fd > 0);
         let big = [0u8; DEFAULT_MSGSIZE + 1];
@@ -1351,7 +1295,6 @@ mod tests {
 
     #[test]
     fn test_send_priority_too_high_einval() {
-        let _g = lock_tests();
         let fd = open_default(b"/qprbig\0", O_NONBLOCK);
         assert!(fd > 0);
         let r = mq_send(fd, b"x".as_ptr(), 1, MQ_PRIO_MAX);
@@ -1362,7 +1305,6 @@ mod tests {
 
     #[test]
     fn test_send_when_full_nonblock_eagain() {
-        let _g = lock_tests();
         let attr = MqAttr {
             mq_flags: 0,
             mq_maxmsg: 2,
@@ -1387,7 +1329,6 @@ mod tests {
 
     #[test]
     fn test_receive_when_empty_nonblock_eagain() {
-        let _g = lock_tests();
         let fd = open_default(b"/qempty\0", O_NONBLOCK);
         assert!(fd > 0);
         let mut buf = [0u8; 64];
@@ -1399,7 +1340,6 @@ mod tests {
 
     #[test]
     fn test_receive_small_buffer_emsgsize() {
-        let _g = lock_tests();
         let fd = open_default(b"/qsmall\0", O_NONBLOCK);
         assert!(fd > 0);
         assert_eq!(mq_send(fd, b"x".as_ptr(), 1, 0), 0);
@@ -1413,7 +1353,6 @@ mod tests {
 
     #[test]
     fn test_null_prio_pointer_ok() {
-        let _g = lock_tests();
         let fd = open_default(b"/qnp\0", O_NONBLOCK);
         assert!(fd > 0);
         assert_eq!(mq_send(fd, b"x".as_ptr(), 1, 3), 0);
@@ -1427,7 +1366,6 @@ mod tests {
 
     #[test]
     fn test_getattr_defaults() {
-        let _g = lock_tests();
         let fd = open_default(b"/qa\0", O_NONBLOCK);
         assert!(fd > 0);
         let mut a = MqAttr {
@@ -1447,7 +1385,6 @@ mod tests {
 
     #[test]
     fn test_getattr_curmsgs_updates() {
-        let _g = lock_tests();
         let fd = open_default(b"/qc\0", O_NONBLOCK);
         assert!(fd > 0);
         assert_eq!(mq_send(fd, b"a".as_ptr(), 1, 0), 0);
@@ -1466,7 +1403,6 @@ mod tests {
 
     #[test]
     fn test_setattr_toggles_nonblock() {
-        let _g = lock_tests();
         let fd = open_default(b"/qsa\0", O_NONBLOCK);
         assert!(fd > 0);
         // Clear O_NONBLOCK via setattr.
@@ -1503,7 +1439,6 @@ mod tests {
 
     #[test]
     fn test_setattr_null_old_ok() {
-        let _g = lock_tests();
         let fd = open_default(b"/qsno\0", O_NONBLOCK);
         assert!(fd > 0);
         let new = MqAttr {
@@ -1519,7 +1454,6 @@ mod tests {
 
     #[test]
     fn test_setattr_null_new_efault() {
-        let _g = lock_tests();
         let fd = open_default(b"/qse\0", O_NONBLOCK);
         assert!(fd > 0);
         let r = mq_setattr(fd, core::ptr::null(), core::ptr::null_mut());
@@ -1530,7 +1464,6 @@ mod tests {
 
     #[test]
     fn test_getattr_null_attr_efault() {
-        let _g = lock_tests();
         let fd = open_default(b"/qge\0", O_NONBLOCK);
         assert!(fd > 0);
         let r = mq_getattr(fd, core::ptr::null_mut());
@@ -1543,7 +1476,6 @@ mod tests {
 
     #[test]
     fn test_timedreceive_expired_etimedout() {
-        let _g = lock_tests();
         // Use a blocking descriptor (no O_NONBLOCK), empty queue, and a
         // past-deadline timespec.  Expect ETIMEDOUT.
         let fd = open_default(b"/qto\0", 0);
@@ -1567,7 +1499,6 @@ mod tests {
 
     #[test]
     fn test_timedsend_success_immediate() {
-        let _g = lock_tests();
         let fd = open_default(b"/qts\0", O_NONBLOCK);
         assert!(fd > 0);
         // Future deadline; queue is empty, so the send happens immediately.
@@ -1587,7 +1518,6 @@ mod tests {
 
     #[test]
     fn test_timedsend_invalid_nsec_einval() {
-        let _g = lock_tests();
         let fd = open_default(b"/qtinv\0", O_NONBLOCK);
         assert!(fd > 0);
         let bad = Timespec {
@@ -1602,7 +1532,6 @@ mod tests {
 
     #[test]
     fn test_timedreceive_null_timespec_efault() {
-        let _g = lock_tests();
         let fd = open_default(b"/qtnull\0", O_NONBLOCK);
         assert!(fd > 0);
         let mut buf = [0u8; 64];
@@ -1631,7 +1560,6 @@ mod tests {
 
     #[test]
     fn test_notify_enosys() {
-        let _g = lock_tests();
         let fd = open_default(b"/qenosys\0", O_NONBLOCK);
         assert!(fd > 0);
         // Dummy sevp — content unread by the stub.
@@ -1648,7 +1576,6 @@ mod tests {
 
     #[test]
     fn test_two_opens_one_unlink_close_both() {
-        let _g = lock_tests();
         let a = open_default(b"/qrc\0", O_NONBLOCK);
         let b = mq_open(
             b"/qrc\0".as_ptr(),
@@ -1684,7 +1611,6 @@ mod tests {
 
     #[test]
     fn test_messages_persist_across_descriptor_close() {
-        let _g = lock_tests();
         let a = open_default(b"/qpersist\0", O_NONBLOCK);
         assert!(a > 0);
         assert_eq!(mq_send(a, b"keep".as_ptr(), 4, 0), 0);
@@ -1709,7 +1635,6 @@ mod tests {
 
     #[test]
     fn test_zero_length_message() {
-        let _g = lock_tests();
         let fd = open_default(b"/qzero\0", O_NONBLOCK);
         assert!(fd > 0);
         assert_eq!(mq_send(fd, core::ptr::null(), 0, 0), 0);
@@ -1723,7 +1648,6 @@ mod tests {
 
     #[test]
     fn test_send_null_msg_nonzero_len_efault() {
-        let _g = lock_tests();
         let fd = open_default(b"/qnb\0", O_NONBLOCK);
         assert!(fd > 0);
         let r = mq_send(fd, core::ptr::null(), 4, 0);
@@ -1736,7 +1660,6 @@ mod tests {
 
     #[test]
     fn test_receive_null_buf_nonzero_len_efault() {
-        let _g = lock_tests();
         let fd = open_default(b"/qnrb\0", O_NONBLOCK);
         assert!(fd > 0);
         let r = mq_receive(fd, core::ptr::null_mut(), 100, core::ptr::null_mut());
@@ -1749,7 +1672,6 @@ mod tests {
 
     #[test]
     fn test_descriptor_exhaustion_emfile() {
-        let _g = lock_tests();
         let fd0 = open_default(b"/qex\0", O_NONBLOCK);
         assert!(fd0 > 0);
         // Open the same queue MAX_DESCRIPTORS-1 more times (fd0 already
@@ -1786,7 +1708,6 @@ mod tests {
 
     #[test]
     fn test_mq_notify_negative_mqdes_ebadf() {
-        let _g = lock_tests();
         errno::set_errno(0);
         let ret = mq_notify(-1, core::ptr::null());
         assert_eq!(ret, -1);
@@ -1795,7 +1716,6 @@ mod tests {
 
     #[test]
     fn test_mq_notify_zero_mqdes_ebadf() {
-        let _g = lock_tests();
         // resolve() rejects mqdes <= 0 with EBADF.
         errno::set_errno(0);
         let ret = mq_notify(0, core::ptr::null());
@@ -1805,7 +1725,6 @@ mod tests {
 
     #[test]
     fn test_mq_notify_unopened_mqdes_ebadf() {
-        let _g = lock_tests();
         // A value within range but not associated with an open queue.
         errno::set_errno(0);
         let ret = mq_notify(5, core::ptr::null());
@@ -1815,7 +1734,6 @@ mod tests {
 
     #[test]
     fn test_mq_notify_huge_mqdes_ebadf() {
-        let _g = lock_tests();
         errno::set_errno(0);
         let ret = mq_notify(i32::MAX, core::ptr::null());
         assert_eq!(ret, -1);
@@ -1826,7 +1744,6 @@ mod tests {
     fn test_mq_notify_null_sevp_deregister_success() {
         // NULL sevp is the "deregister notification" form.  Linux
         // returns 0 even when no notification was registered.
-        let _g = lock_tests();
         let fd = open_default(b"/qnotify_dereg\0", O_NONBLOCK);
         assert!(fd > 0);
         errno::set_errno(0);
@@ -1840,7 +1757,6 @@ mod tests {
     fn test_mq_notify_nonnull_sevp_returns_enosys() {
         // Valid mqdes + non-NULL sevp would register a notification,
         // but we have no sigevent dispatcher — return ENOSYS.
-        let _g = lock_tests();
         let fd = open_default(b"/qnotify_reg\0", O_NONBLOCK);
         assert!(fd > 0);
         // Dummy "sigevent" — content unread by our stub.
@@ -1856,7 +1772,6 @@ mod tests {
     #[test]
     fn test_mq_notify_after_close_ebadf() {
         // Closed descriptors must not register notifications.
-        let _g = lock_tests();
         let fd = open_default(b"/qnotify_closed\0", O_NONBLOCK);
         assert!(fd > 0);
         assert_eq!(mq_close(fd), 0);
@@ -1871,7 +1786,6 @@ mod tests {
     fn test_mq_notify_ordering_fd_before_sevp() {
         // Bad mqdes AND non-NULL sevp — EBADF wins because we cannot
         // even reach the sevp-NULL check without a valid descriptor.
-        let _g = lock_tests();
         let dummy: [u8; 64] = [0; 64];
         errno::set_errno(0);
         let ret = mq_notify(-1, dummy.as_ptr());
@@ -1884,7 +1798,6 @@ mod tests {
         // Real workflow: program registers (unsupported → ENOSYS),
         // falls back to polling, and on shutdown deregisters (NULL
         // sevp → 0).  Both must work on the same valid descriptor.
-        let _g = lock_tests();
         let fd = open_default(b"/qnotify_wf\0", O_NONBLOCK);
         assert!(fd > 0);
 
@@ -1905,7 +1818,6 @@ mod tests {
         // Caller stores the result of mq_close() (which is 0 on
         // success) into a variable they later think is a descriptor.
         // mqdes == 0 is EBADF, not silent success.
-        let _g = lock_tests();
         let fd = open_default(b"/qnotify_bug\0", O_NONBLOCK);
         assert!(fd > 0);
         let closed = mq_close(fd);
@@ -1938,7 +1850,6 @@ mod tests {
     #[test]
     fn test_mq_open_phase113_o_wronly_or_rdwr_is_einval() {
         // The single combination Linux rejects: oflag & O_ACCMODE == 3.
-        let _g = lock_tests();
         errno::set_errno(0);
         let r = mq_open(
             b"/q113_a\0".as_ptr(),
@@ -1964,7 +1875,6 @@ mod tests {
         // O_CREAT must not paper over the bad access mode — Linux's
         // do_open check fires inside do_mq_open AFTER the create path
         // decision, but our check fires early. Either way, EINVAL.
-        let _g = lock_tests();
         errno::set_errno(0);
         let r = mq_open(
             b"/q113_b\0".as_ptr(),
@@ -1988,7 +1898,6 @@ mod tests {
     #[test]
     fn test_mq_open_phase113_bad_accmode_with_nonblock_still_einval() {
         // O_NONBLOCK does not whitelist the bad access mode.
-        let _g = lock_tests();
         errno::set_errno(0);
         let r = mq_open(
             b"/q113_c\0".as_ptr(),
@@ -2003,7 +1912,6 @@ mod tests {
     #[test]
     fn test_mq_open_phase113_o_rdonly_accepted() {
         // Boundary: O_RDONLY (0) is a valid access mode.
-        let _g = lock_tests();
         // Create first (open-only-RDONLY would ENOENT a missing queue).
         let creator = mq_open(
             b"/q113_rdonly\0".as_ptr(),
@@ -2032,7 +1940,6 @@ mod tests {
     #[test]
     fn test_mq_open_phase113_o_wronly_accepted() {
         // Boundary: O_WRONLY (1) is a valid access mode.
-        let _g = lock_tests();
         let creator = mq_open(
             b"/q113_wronly\0".as_ptr(),
             crate::fcntl::O_RDWR | O_CREAT,
@@ -2060,7 +1967,6 @@ mod tests {
     #[test]
     fn test_mq_open_phase113_o_rdwr_accepted() {
         // Boundary: O_RDWR (2) is a valid access mode.
-        let _g = lock_tests();
         let r = mq_open(
             b"/q113_rdwr\0".as_ptr(),
             crate::fcntl::O_RDWR | O_CREAT,
@@ -2081,7 +1987,6 @@ mod tests {
         // Order check: NULL name must surface EFAULT BEFORE the bad
         // access mode surfaces EINVAL, matching Linux where getname()
         // runs before do_open().
-        let _g = lock_tests();
         errno::set_errno(0);
         let r = mq_open(
             core::ptr::null(),
@@ -2100,7 +2005,6 @@ mod tests {
         // O_ACCMODE == 3 pattern and does not over-reject. (If we ever
         // tighten this to reject unknown bits we'd break Linux apps
         // that pass O_CLOEXEC, which we already silently accept.)
-        let _g = lock_tests();
         // 0x4000_0000 is well above any defined O_* flag — silently
         // accepted by Linux mq_open. Use a positive sign-safe value.
         let weird_flag: i32 = 0x4000_0000;
@@ -2123,7 +2027,6 @@ mod tests {
     fn test_mq_open_phase113_recovery_after_einval() {
         // After a bad-accmode EINVAL, a subsequent valid call still
         // succeeds — errno is not left in a sticky bad state.
-        let _g = lock_tests();
         errno::set_errno(0);
         let r1 = mq_open(
             b"/q113_rec\0".as_ptr(),
@@ -2154,7 +2057,6 @@ mod tests {
         // State-integrity check: a rejected open must NOT leak a
         // half-created queue. Specifically, the slot allocator must
         // not have been touched.
-        let _g = lock_tests();
         errno::set_errno(0);
         let r = mq_open(
             b"/q113_nocreate\0".as_ptr(),
@@ -2183,7 +2085,6 @@ mod tests {
         // A C caller doing `mq_open(name, -1, ...)` (all bits set,
         // including O_ACCMODE == 3 within the low two bits) hits the
         // access-mode check and gets EINVAL, same as on Linux.
-        let _g = lock_tests();
         errno::set_errno(0);
         let r = mq_open(b"/q113_negone\0".as_ptr(), -1, 0o600, core::ptr::null());
         assert_eq!(r, -1);
@@ -2197,7 +2098,6 @@ mod tests {
         // Phase 113 our shim silently returned a valid descriptor,
         // which would have broken that test if run against our libc.
         // Pin the conformance behaviour.
-        let _g = lock_tests();
         errno::set_errno(0);
         let r = mq_open(
             b"/q113_conform\0".as_ptr(),
@@ -2218,7 +2118,6 @@ mod tests {
         // must happen BEFORE any allocation. Verify by counting: 100
         // rejected mq_opens must still allow a fresh valid mq_open
         // afterward without descriptor-table exhaustion.
-        let _g = lock_tests();
         for _ in 0..100 {
             errno::set_errno(0);
             let r = mq_open(

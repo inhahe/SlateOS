@@ -547,17 +547,11 @@ pub extern "C" fn io_getevents(
 mod tests {
     use super::*;
 
-    /// Serialize tests that mutate the global context table.
-    static AIO_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn reset_aio_state() {
-        let _g = lock_aio();
-        // SAFETY: serialized by AIO_LOCK + the test mutex.
-        let table = unsafe { &mut *aio_contexts_ptr() };
-        for ctx in table.iter_mut() {
-            *ctx = EMPTY_CONTEXT;
-        }
-    }
+    // The `Mutex` and the `reset_aio_state()` helper these tests used to
+    // open with are gone: the context table is per-thread on host builds,
+    // so every test already starts from an empty table that no other test
+    // can reach.  The production `lock_aio()` spinlock is untouched -- it
+    // is what makes the table safe on the target.
 
     #[test]
     fn test_iocb_size() {
@@ -608,8 +602,6 @@ mod tests {
 
     #[test]
     fn test_io_setup_null_ctxidp_efault() {
-        let _g = AIO_TEST_LOCK.lock().unwrap();
-        reset_aio_state();
         errno::set_errno(0);
         let ret = io_setup(8, core::ptr::null_mut());
         assert_eq!(ret, -1);
@@ -618,8 +610,6 @@ mod tests {
 
     #[test]
     fn test_io_setup_zero_nr_einval() {
-        let _g = AIO_TEST_LOCK.lock().unwrap();
-        reset_aio_state();
         let mut ctx: u64 = 0;
         errno::set_errno(0);
         assert_eq!(io_setup(0, &mut ctx as *mut u64), -1);
@@ -629,8 +619,6 @@ mod tests {
 
     #[test]
     fn test_io_setup_too_large_nr_einval() {
-        let _g = AIO_TEST_LOCK.lock().unwrap();
-        reset_aio_state();
         let mut ctx: u64 = 0;
         errno::set_errno(0);
         assert_eq!(
@@ -643,8 +631,6 @@ mod tests {
     #[test]
     fn test_io_setup_nonzero_ctxidp_einval() {
         // Kernel convention: caller must pre-zero *ctx_idp.
-        let _g = AIO_TEST_LOCK.lock().unwrap();
-        reset_aio_state();
         let mut ctx: u64 = 42;
         errno::set_errno(0);
         assert_eq!(io_setup(8, &mut ctx as *mut u64), -1);
@@ -653,8 +639,6 @@ mod tests {
 
     #[test]
     fn test_io_setup_succeeds_returns_nonzero_handle() {
-        let _g = AIO_TEST_LOCK.lock().unwrap();
-        reset_aio_state();
         let mut ctx: u64 = 0;
         assert_eq!(io_setup(8, &mut ctx as *mut u64), 0);
         assert_ne!(ctx, 0);
@@ -663,8 +647,6 @@ mod tests {
 
     #[test]
     fn test_io_setup_distinct_handles() {
-        let _g = AIO_TEST_LOCK.lock().unwrap();
-        reset_aio_state();
         let mut a: u64 = 0;
         let mut b: u64 = 0;
         assert_eq!(io_setup(4, &mut a as *mut u64), 0);
@@ -676,8 +658,6 @@ mod tests {
 
     #[test]
     fn test_io_setup_exhaustion_eagain() {
-        let _g = AIO_TEST_LOCK.lock().unwrap();
-        reset_aio_state();
         let mut handles = [0u64; MAX_AIO_CONTEXTS];
         for h in handles.iter_mut() {
             assert_eq!(io_setup(1, h as *mut u64), 0);
@@ -695,8 +675,6 @@ mod tests {
 
     #[test]
     fn test_io_destroy_zero_handle_einval() {
-        let _g = AIO_TEST_LOCK.lock().unwrap();
-        reset_aio_state();
         errno::set_errno(0);
         assert_eq!(io_destroy(0), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -704,8 +682,6 @@ mod tests {
 
     #[test]
     fn test_io_destroy_oob_handle_einval() {
-        let _g = AIO_TEST_LOCK.lock().unwrap();
-        reset_aio_state();
         errno::set_errno(0);
         assert_eq!(io_destroy(9999), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -713,8 +689,6 @@ mod tests {
 
     #[test]
     fn test_io_destroy_unallocated_einval() {
-        let _g = AIO_TEST_LOCK.lock().unwrap();
-        reset_aio_state();
         errno::set_errno(0);
         // Slot 1 is in range but never allocated.
         assert_eq!(io_destroy(1), -1);
@@ -723,8 +697,6 @@ mod tests {
 
     #[test]
     fn test_io_destroy_after_setup_succeeds() {
-        let _g = AIO_TEST_LOCK.lock().unwrap();
-        reset_aio_state();
         let mut ctx: u64 = 0;
         assert_eq!(io_setup(4, &mut ctx as *mut u64), 0);
         assert_eq!(io_destroy(ctx), 0);
@@ -738,8 +710,6 @@ mod tests {
 
     #[test]
     fn test_io_submit_bad_ctx_einval() {
-        let _g = AIO_TEST_LOCK.lock().unwrap();
-        reset_aio_state();
         errno::set_errno(0);
         assert_eq!(io_submit(0, 1, core::ptr::null_mut()), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -747,8 +717,6 @@ mod tests {
 
     #[test]
     fn test_io_submit_negative_nr_einval() {
-        let _g = AIO_TEST_LOCK.lock().unwrap();
-        reset_aio_state();
         let mut ctx: u64 = 0;
         assert_eq!(io_setup(4, &mut ctx as *mut u64), 0);
         errno::set_errno(0);
@@ -759,8 +727,6 @@ mod tests {
 
     #[test]
     fn test_io_submit_zero_nr_returns_zero() {
-        let _g = AIO_TEST_LOCK.lock().unwrap();
-        reset_aio_state();
         let mut ctx: u64 = 0;
         assert_eq!(io_setup(4, &mut ctx as *mut u64), 0);
         assert_eq!(io_submit(ctx, 0, core::ptr::null_mut()), 0);
@@ -769,8 +735,6 @@ mod tests {
 
     #[test]
     fn test_io_submit_null_iocbpp_efault() {
-        let _g = AIO_TEST_LOCK.lock().unwrap();
-        reset_aio_state();
         let mut ctx: u64 = 0;
         assert_eq!(io_setup(4, &mut ctx as *mut u64), 0);
         errno::set_errno(0);
@@ -781,8 +745,6 @@ mod tests {
 
     #[test]
     fn test_io_submit_unallocated_ctx_einval() {
-        let _g = AIO_TEST_LOCK.lock().unwrap();
-        reset_aio_state();
         errno::set_errno(0);
         // Slot 1 is in range but never allocated.
         assert_eq!(io_submit(1, 1, core::ptr::null_mut()), -1);
@@ -793,8 +755,6 @@ mod tests {
 
     #[test]
     fn test_io_submit_noop_queues_event() {
-        let _g = AIO_TEST_LOCK.lock().unwrap();
-        reset_aio_state();
         let mut ctx: u64 = 0;
         assert_eq!(io_setup(4, &mut ctx as *mut u64), 0);
 
@@ -815,8 +775,6 @@ mod tests {
 
     #[test]
     fn test_io_submit_unknown_opcode_reports_einval_in_event() {
-        let _g = AIO_TEST_LOCK.lock().unwrap();
-        reset_aio_state();
         let mut ctx: u64 = 0;
         assert_eq!(io_setup(4, &mut ctx as *mut u64), 0);
 
@@ -835,8 +793,6 @@ mod tests {
 
     #[test]
     fn test_io_submit_capacity_overflow_partial_then_eagain() {
-        let _g = AIO_TEST_LOCK.lock().unwrap();
-        reset_aio_state();
         let mut ctx: u64 = 0;
         // Capacity of 2.
         assert_eq!(io_setup(2, &mut ctx as *mut u64), 0);
@@ -872,8 +828,6 @@ mod tests {
 
     #[test]
     fn test_io_getevents_bad_ctx_einval() {
-        let _g = AIO_TEST_LOCK.lock().unwrap();
-        reset_aio_state();
         let mut ev = IoEvent::zeroed();
         errno::set_errno(0);
         assert_eq!(
@@ -885,8 +839,6 @@ mod tests {
 
     #[test]
     fn test_io_getevents_negative_args_einval() {
-        let _g = AIO_TEST_LOCK.lock().unwrap();
-        reset_aio_state();
         let mut ctx: u64 = 0;
         assert_eq!(io_setup(4, &mut ctx as *mut u64), 0);
         let mut ev = IoEvent::zeroed();
@@ -913,8 +865,6 @@ mod tests {
 
     #[test]
     fn test_io_getevents_zero_nr_returns_zero() {
-        let _g = AIO_TEST_LOCK.lock().unwrap();
-        reset_aio_state();
         let mut ctx: u64 = 0;
         assert_eq!(io_setup(4, &mut ctx as *mut u64), 0);
         assert_eq!(
@@ -926,8 +876,6 @@ mod tests {
 
     #[test]
     fn test_io_getevents_null_events_efault() {
-        let _g = AIO_TEST_LOCK.lock().unwrap();
-        reset_aio_state();
         let mut ctx: u64 = 0;
         assert_eq!(io_setup(4, &mut ctx as *mut u64), 0);
         errno::set_errno(0);
@@ -941,8 +889,6 @@ mod tests {
 
     #[test]
     fn test_io_getevents_eagain_when_below_min_nr() {
-        let _g = AIO_TEST_LOCK.lock().unwrap();
-        reset_aio_state();
         let mut ctx: u64 = 0;
         assert_eq!(io_setup(4, &mut ctx as *mut u64), 0);
         let mut ev = IoEvent::zeroed();
@@ -958,8 +904,6 @@ mod tests {
 
     #[test]
     fn test_io_getevents_drains_in_fifo_order() {
-        let _g = AIO_TEST_LOCK.lock().unwrap();
-        reset_aio_state();
         let mut ctx: u64 = 0;
         assert_eq!(io_setup(4, &mut ctx as *mut u64), 0);
 
@@ -995,8 +939,6 @@ mod tests {
 
     #[test]
     fn test_io_getevents_partial_drain_then_more() {
-        let _g = AIO_TEST_LOCK.lock().unwrap();
-        reset_aio_state();
         let mut ctx: u64 = 0;
         assert_eq!(io_setup(4, &mut ctx as *mut u64), 0);
 
@@ -1031,8 +973,6 @@ mod tests {
     fn test_io_submit_writes_obj_back_to_event() {
         // The kernel sets event.obj to the address of the originating
         // iocb so callers can correlate completions with submissions.
-        let _g = AIO_TEST_LOCK.lock().unwrap();
-        reset_aio_state();
         let mut ctx: u64 = 0;
         assert_eq!(io_setup(4, &mut ctx as *mut u64), 0);
 

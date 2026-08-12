@@ -400,15 +400,22 @@ tests happen to share" and "state that was never supposed to be process-wide at
 all" look identical in a flake report and have different fixes — the first wants
 `perprocess`, the second `perthread`.
 
-**Residual tech debt.** Four modules still carry test-only `std::sync::Mutex`
-serialisation — `sys_timex` (77 references), `linux_aio_abi` (28),
-`semaphore` (14), `mqueue` (2) — which is now redundant: the state they guard
-is per-thread. They are harmless but they are a second, now-false mechanism for
-a problem that is solved elsewhere, and their comments claim a sharing that no
-longer exists. Removing them is mechanical; it is deferred only because it is
-pure churn in currently-green tests and worth doing as its own change. Note
-removing them is also a *test*: if any of those suites fails without its lock,
-some state in that module is still shared.
+**Residual tech debt — resolved 2026-08-12.** Four modules carried test-only
+`std::sync::Mutex` serialisation — `sys_timex` (77 references), `linux_aio_abi`
+(28), `semaphore` (14), `mqueue` (2) — that was redundant once the state they
+guarded became per-thread. They were harmless, but they were a second, now-false
+mechanism for a problem solved elsewhere, and their comments claimed a sharing
+that no longer existed. All four are now removed, along with the `reset_*()`
+helpers they called (`reset_aio_state`, `reset_timex_state`, `reset_named_sems`,
+`reset_all`), which per-thread storage makes unnecessary: every test thread
+starts from the initialiser. The production spinlocks in those modules
+(`lock_aio()`, `TIMEX_LOCK`, `SEM_LOCK`, mqueue's `lock()`) are untouched — they
+guard real concurrency on the target and are not a test artifact.
+
+Removing them was also a *test*, and it passed: 20,133 tests green with no lock,
+so no state in those four modules was still shared. Had a suite failed without
+its lock, that would have identified another module whose "per-process" state
+was really per-thread.
 
 **Rejected: run the suite single-threaded.** `--test-threads=1` would fix all 18
 at once with no code change and no host/target divergence, and it is not slow —

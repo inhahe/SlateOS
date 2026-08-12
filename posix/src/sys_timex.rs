@@ -677,31 +677,15 @@ mod tests {
         assert_ne!(TIME_INS, TIME_DEL);
     }
 
-    /// Serializes tests that touch the global TIMEX_STATE.
-    static TIMEX_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Restore TIMEX_STATE to its boot defaults so each test starts
-    /// from a known baseline.
-    fn reset_timex_state() {
-        let _guard = lock_timex();
-        // SAFETY: serialized by TIMEX_LOCK.
-        unsafe {
-            let s = &mut *timex_state_ptr();
-            s.offset = 0;
-            s.freq = 0;
-            s.maxerror = 16_000_000;
-            s.esterror = 16_000_000;
-            s.status = STA_UNSYNC;
-            s.constant = 2;
-            s.tick = 10_000;
-            s.tai = 0;
-        }
-    }
+    // These tests used to open with a `Mutex` and a `reset_timex_state()`
+    // that wrote the boot defaults back over the shared state.  Both are
+    // gone: the state is per-thread on host builds, and the initialiser in
+    // the `process_global!` above is the same boot default field for field,
+    // so every test already starts from it.  The production `TIMEX_LOCK` is
+    // untouched -- it is what makes the state safe on the target.
 
     #[test]
     fn test_adjtimex_null_efault() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let ret = adjtimex(core::ptr::null_mut());
         assert_eq!(ret, -1);
@@ -710,8 +694,6 @@ mod tests {
 
     #[test]
     fn test_adjtimex_read_only_returns_time_error_when_unsync() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         let mut tx = Timex::zeroed();
         // modes=0 = read-only query.
         let ret = adjtimex(&mut tx);
@@ -725,8 +707,6 @@ mod tests {
 
     #[test]
     fn test_adjtimex_set_offset_persists() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_OFFSET;
         tx.offset = 12_345;
@@ -739,8 +719,6 @@ mod tests {
 
     #[test]
     fn test_adjtimex_set_status_clears_unsync_returns_time_ok() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_STATUS;
         tx.status = STA_PLL; // No STA_UNSYNC, no leap.
@@ -750,8 +728,6 @@ mod tests {
 
     #[test]
     fn test_adjtimex_set_status_with_leap_ins_returns_time_ins() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_STATUS;
         tx.status = STA_INS; // Synchronized, leap-second insert pending.
@@ -761,8 +737,6 @@ mod tests {
 
     #[test]
     fn test_adjtimex_set_status_with_leap_del_returns_time_del() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_STATUS;
         tx.status = STA_DEL;
@@ -772,8 +746,6 @@ mod tests {
 
     #[test]
     fn test_adjtimex_adj_nano_sets_sta_nano() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_NANO;
         let _ = adjtimex(&mut tx);
@@ -785,8 +757,6 @@ mod tests {
 
     #[test]
     fn test_adjtimex_adj_micro_clears_sta_nano() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         // First set nano.
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_NANO;
@@ -802,8 +772,6 @@ mod tests {
 
     #[test]
     fn test_adjtimex_unknown_modes_einval() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         tx.modes = 0x8000_0000; // Not in KNOWN_MODES.
@@ -814,8 +782,6 @@ mod tests {
 
     #[test]
     fn test_adjtimex_fills_tolerance_and_precision() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         let mut tx = Timex::zeroed();
         let _ = adjtimex(&mut tx);
         // tolerance is the NTP MAXFREQ default.
@@ -826,8 +792,6 @@ mod tests {
 
     #[test]
     fn test_ntp_adjtime_matches_adjtimex() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         let mut tx = Timex::zeroed();
         let ret = ntp_adjtime(&mut tx);
         assert_eq!(ret, TIME_ERROR);
@@ -835,8 +799,6 @@ mod tests {
 
     #[test]
     fn test_clock_adjtime_realtime_works() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         let mut tx = Timex::zeroed();
         let ret = clock_adjtime(0, &mut tx); // CLOCK_REALTIME
         assert_eq!(ret, TIME_ERROR);
@@ -851,8 +813,6 @@ mod tests {
     /// semantics.
     #[test]
     fn test_clock_adjtime_monotonic_returns_eopnotsupp_phase163() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         let ret = clock_adjtime(1, &mut tx); // CLOCK_MONOTONIC
@@ -862,8 +822,6 @@ mod tests {
 
     #[test]
     fn test_clock_adjtime_unknown_clock_einval() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         let ret = clock_adjtime(99, &mut tx);
@@ -873,8 +831,6 @@ mod tests {
 
     #[test]
     fn test_clock_adjtime_null_tx_efault() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let ret = clock_adjtime(0, core::ptr::null_mut());
         assert_eq!(ret, -1);
@@ -904,8 +860,6 @@ mod tests {
 
     #[test]
     fn test_adjtimex_phase161_tick_zero_einval() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_TICK;
@@ -917,8 +871,6 @@ mod tests {
 
     #[test]
     fn test_adjtimex_phase161_tick_negative_einval() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_TICK;
@@ -930,8 +882,6 @@ mod tests {
 
     #[test]
     fn test_adjtimex_phase161_tick_i64_min_einval() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_TICK;
@@ -943,8 +893,6 @@ mod tests {
 
     #[test]
     fn test_adjtimex_phase161_tick_i64_max_einval() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_TICK;
@@ -956,8 +904,6 @@ mod tests {
 
     #[test]
     fn test_adjtimex_phase161_tick_just_below_min_einval() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_TICK;
@@ -969,8 +915,6 @@ mod tests {
 
     #[test]
     fn test_adjtimex_phase161_tick_just_above_max_einval() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_TICK;
@@ -984,8 +928,6 @@ mod tests {
 
     #[test]
     fn test_adjtimex_phase161_tick_at_min_accepted() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_TICK;
         tx.tick = MIN_TICK; // 9000
@@ -1000,8 +942,6 @@ mod tests {
 
     #[test]
     fn test_adjtimex_phase161_tick_at_max_accepted() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_TICK;
         tx.tick = MAX_TICK; // 11000
@@ -1015,8 +955,6 @@ mod tests {
     #[test]
     fn test_adjtimex_phase161_tick_default_accepted() {
         // Default ntp tick = USEC_PER_SEC / USER_HZ = 10_000.
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_TICK;
         tx.tick = 10_000;
@@ -1032,8 +970,6 @@ mod tests {
     fn test_adjtimex_phase161_null_ptr_beats_tick_einval() {
         // EFAULT (null ptr) fires before mode/tick validation —
         // the EFAULT check happens before the deref that reads tick.
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let ret = adjtimex(core::ptr::null_mut());
         assert_eq!(ret, -1);
@@ -1046,8 +982,6 @@ mod tests {
         // Both would yield EINVAL, but the unknown-mode branch returns
         // first; we confirm by setting a clearly-bad mode + bad tick
         // and asserting EINVAL (and that the state is untouched).
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_TICK | 0x8000_0000; // unknown bit + tick
@@ -1069,8 +1003,6 @@ mod tests {
         // (ADJ_OFFSET), a bad tick value must abort the whole call
         // before any state mutation — matching Linux's
         // validate-then-apply ordering.
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_OFFSET | ADJ_TICK;
@@ -1095,8 +1027,6 @@ mod tests {
     fn test_adjtimex_phase161_ntpd_tick_adjustment_workflow() {
         // ntpd periodically adjusts tick to compensate for crystal
         // drift, staying within a few hundred microseconds of 10000.
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         // Drift up by 0.1%.
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_TICK;
@@ -1121,8 +1051,6 @@ mod tests {
         // `tx.tick` is left at its zero-initialised value.  Pre-fix:
         // silently set tick to 0 and broke the NTP state.  Post-fix:
         // EINVAL surfaces the bug.
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_TICK; // tx.tick stays at the zeroed default (0)
@@ -1137,8 +1065,6 @@ mod tests {
     fn test_adjtimex_phase161_recovery_after_bad_tick() {
         // An EINVAL from a bad tick must not poison a follow-up call
         // with a valid tick.
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_TICK;
@@ -1164,8 +1090,6 @@ mod tests {
         // `tick = 0` returned a TIME_* code (success) and silently
         // mutated the discipline state.  Post-fix it must return -1
         // with EINVAL.
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_TICK;
@@ -1185,8 +1109,6 @@ mod tests {
     fn test_clock_adjtime_phase161_bad_tick_forwards_einval() {
         // clock_adjtime is a thin wrapper around adjtimex; the tick
         // validation must apply equally.
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_TICK;
@@ -1199,8 +1121,6 @@ mod tests {
     #[test]
     fn test_ntp_adjtime_phase161_bad_tick_forwards_einval() {
         // ntp_adjtime is an alias for adjtimex — same check applies.
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_TICK;
@@ -1238,8 +1158,6 @@ mod tests {
 
     #[test]
     fn test_adjtimex_phase162_setoffset_usec_negative_einval() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_SETOFFSET;
@@ -1252,8 +1170,6 @@ mod tests {
     #[test]
     fn test_adjtimex_phase162_setoffset_usec_equal_one_second_einval() {
         // The check is `>=`, so exactly USEC_PER_SEC must fail.
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_SETOFFSET;
@@ -1265,8 +1181,6 @@ mod tests {
 
     #[test]
     fn test_adjtimex_phase162_setoffset_usec_way_above_einval() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_SETOFFSET;
@@ -1278,8 +1192,6 @@ mod tests {
 
     #[test]
     fn test_adjtimex_phase162_setoffset_usec_i64_min_einval() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_SETOFFSET;
@@ -1296,8 +1208,6 @@ mod tests {
         // 999_999 is a perfectly valid nsec value (well below 1e9) —
         // confirms the nano variant uses NSEC_PER_SEC, not
         // USEC_PER_SEC.
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_SETOFFSET | ADJ_NANO;
         tx.time_tv_usec = 999_999; // nsec — valid
@@ -1307,8 +1217,6 @@ mod tests {
 
     #[test]
     fn test_adjtimex_phase162_setoffset_nano_equal_one_second_einval() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_SETOFFSET | ADJ_NANO;
@@ -1320,8 +1228,6 @@ mod tests {
 
     #[test]
     fn test_adjtimex_phase162_setoffset_nano_negative_einval() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_SETOFFSET | ADJ_NANO;
@@ -1335,8 +1241,6 @@ mod tests {
 
     #[test]
     fn test_adjtimex_phase162_setoffset_usec_zero_accepted() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_SETOFFSET;
         tx.time_tv_usec = 0;
@@ -1347,8 +1251,6 @@ mod tests {
     #[test]
     fn test_adjtimex_phase162_setoffset_usec_max_accepted() {
         // USEC_PER_SEC - 1 = 999_999 — the largest valid microsecond.
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_SETOFFSET;
         tx.time_tv_usec = USEC_PER_SEC - 1;
@@ -1359,8 +1261,6 @@ mod tests {
     #[test]
     fn test_adjtimex_phase162_setoffset_nano_max_accepted() {
         // NSEC_PER_SEC - 1 = 999_999_999 — the largest valid nanosecond.
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_SETOFFSET | ADJ_NANO;
         tx.time_tv_usec = NSEC_PER_SEC - 1;
@@ -1373,8 +1273,6 @@ mod tests {
     #[test]
     fn test_adjtimex_phase162_null_ptr_beats_setoffset_einval() {
         // EFAULT (null ptr) fires before SETOFFSET validation.
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let ret = adjtimex(core::ptr::null_mut());
         assert_eq!(ret, -1);
@@ -1386,8 +1284,6 @@ mod tests {
         // Unknown mode bit short-circuits before SETOFFSET check.
         // Both yield EINVAL but the precedence matters because the
         // unknown-mode branch doesn't read `time_tv_usec` at all.
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_SETOFFSET | 0x8000_0000;
@@ -1402,8 +1298,6 @@ mod tests {
         // ADJ_TICK check fires before ADJ_SETOFFSET check (our code
         // order matches Linux's: tick first, then setoffset).  Both
         // are EINVAL; this pins the ordering for future readers.
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_TICK | ADJ_SETOFFSET;
@@ -1424,8 +1318,6 @@ mod tests {
     fn test_adjtimex_phase162_bad_setoffset_leaves_state_untouched() {
         // Combined ADJ_OFFSET | ADJ_SETOFFSET with a bad sub-second
         // must abort before the ADJ_OFFSET part is applied.
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_OFFSET | ADJ_SETOFFSET;
@@ -1449,8 +1341,6 @@ mod tests {
         // chrony's clock_step() injects a small offset, typically a
         // few milliseconds.  500_000 usec = 0.5s — well within the
         // valid range.
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_SETOFFSET;
         tx.time_tv_sec = 0;
@@ -1465,8 +1355,6 @@ mod tests {
         // — a caller that "forgot" to normalise 1.5s into 1s + 0.5s.
         // Pre-fix: silently accepted (and we'd have dropped it on
         // the floor).  Post-fix: EINVAL exposes the bug.
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_SETOFFSET;
@@ -1480,8 +1368,6 @@ mod tests {
 
     #[test]
     fn test_adjtimex_phase162_recovery_after_bad_setoffset() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_SETOFFSET;
@@ -1502,8 +1388,6 @@ mod tests {
 
     #[test]
     fn test_adjtimex_setoffset_out_of_range_no_longer_silently_accepted_phase162() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_SETOFFSET;
@@ -1521,8 +1405,6 @@ mod tests {
 
     #[test]
     fn test_clock_adjtime_phase162_bad_setoffset_forwards_einval() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_SETOFFSET;
@@ -1534,8 +1416,6 @@ mod tests {
 
     #[test]
     fn test_ntp_adjtime_phase162_bad_setoffset_nano_forwards_einval() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_SETOFFSET | ADJ_NANO;
@@ -1577,8 +1457,6 @@ mod tests {
 
     #[test]
     fn test_clock_adjtime_phase163_monotonic_eopnotsupp() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         assert_eq!(clock_adjtime(1, &mut tx), -1);
@@ -1587,8 +1465,6 @@ mod tests {
 
     #[test]
     fn test_clock_adjtime_phase163_process_cputime_eopnotsupp() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         assert_eq!(clock_adjtime(2, &mut tx), -1);
@@ -1597,8 +1473,6 @@ mod tests {
 
     #[test]
     fn test_clock_adjtime_phase163_thread_cputime_eopnotsupp() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         assert_eq!(clock_adjtime(3, &mut tx), -1);
@@ -1607,8 +1481,6 @@ mod tests {
 
     #[test]
     fn test_clock_adjtime_phase163_monotonic_raw_eopnotsupp() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         assert_eq!(clock_adjtime(4, &mut tx), -1);
@@ -1617,8 +1489,6 @@ mod tests {
 
     #[test]
     fn test_clock_adjtime_phase163_realtime_coarse_eopnotsupp() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         assert_eq!(clock_adjtime(5, &mut tx), -1);
@@ -1627,8 +1497,6 @@ mod tests {
 
     #[test]
     fn test_clock_adjtime_phase163_monotonic_coarse_eopnotsupp() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         assert_eq!(clock_adjtime(6, &mut tx), -1);
@@ -1637,8 +1505,6 @@ mod tests {
 
     #[test]
     fn test_clock_adjtime_phase163_boottime_eopnotsupp() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         assert_eq!(clock_adjtime(7, &mut tx), -1);
@@ -1647,8 +1513,6 @@ mod tests {
 
     #[test]
     fn test_clock_adjtime_phase163_realtime_alarm_eopnotsupp() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         assert_eq!(clock_adjtime(8, &mut tx), -1);
@@ -1657,8 +1521,6 @@ mod tests {
 
     #[test]
     fn test_clock_adjtime_phase163_boottime_alarm_eopnotsupp() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         assert_eq!(clock_adjtime(9, &mut tx), -1);
@@ -1672,8 +1534,6 @@ mod tests {
         // CLOCK_TAI (id 11) is one of only two clocks whose
         // `clock_adj` callback Linux populates.  Pre-fix we returned
         // EINVAL for id=11; post-fix it must succeed.
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         let ret = clock_adjtime(11, &mut tx);
@@ -1687,8 +1547,6 @@ mod tests {
     fn test_clock_adjtime_phase163_unknown_id_10_einval() {
         // id 10 (was CLOCK_SGI_CYCLE, removed) is no longer
         // recognised — Linux's k_clock table has no entry → EINVAL.
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         assert_eq!(clock_adjtime(10, &mut tx), -1);
@@ -1697,8 +1555,6 @@ mod tests {
 
     #[test]
     fn test_clock_adjtime_phase163_unknown_id_99_einval() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         assert_eq!(clock_adjtime(99, &mut tx), -1);
@@ -1707,8 +1563,6 @@ mod tests {
 
     #[test]
     fn test_clock_adjtime_phase163_negative_id_einval() {
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         assert_eq!(clock_adjtime(-1, &mut tx), -1);
@@ -1722,8 +1576,6 @@ mod tests {
         // Bad clock + null tx → EFAULT (copy_from_user runs first
         // in Linux's SYSCALL_DEFINE2).  Pre-fix this would have been
         // EINVAL because we checked clock id before tx.
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let ret = clock_adjtime(99, core::ptr::null_mut());
         assert_eq!(ret, -1);
@@ -1733,8 +1585,6 @@ mod tests {
     #[test]
     fn test_clock_adjtime_phase163_null_tx_unsupported_id_efault() {
         // Known-but-unsupported clock + null tx → still EFAULT.
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let ret = clock_adjtime(7, core::ptr::null_mut()); // BOOTTIME
         assert_eq!(ret, -1);
@@ -1747,8 +1597,6 @@ mod tests {
         // tx returns EFAULT (this was already passing via adjtimex'
         // own check, but the new structure must not have regressed
         // it).
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let ret = clock_adjtime(0, core::ptr::null_mut());
         assert_eq!(ret, -1);
@@ -1763,8 +1611,6 @@ mod tests {
         // CLOCK_REALTIME, CLOCK_TAI, then falls back if either
         // returns EOPNOTSUPP.  Pre-fix we returned EINVAL on TAI,
         // confusing the probe.  Post-fix both succeed.
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         // REALTIME — supported.
         let mut tx = Timex::zeroed();
         assert_ne!(clock_adjtime(0, &mut tx), -1, "REALTIME must be adjustable");
@@ -1780,8 +1626,6 @@ mod tests {
         // correction step.  Pre-fix: EINVAL (confusing).  Post-fix:
         // EOPNOTSUPP (the documented "this clock isn't adjustable"
         // signal).
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         let ret = clock_adjtime(7, &mut tx);
@@ -1795,8 +1639,6 @@ mod tests {
     fn test_clock_adjtime_phase163_recovery_after_eopnotsupp() {
         // EOPNOTSUPP from one clock doesn't poison a follow-up call
         // on a supported clock.
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         assert_eq!(clock_adjtime(1, &mut tx), -1);
@@ -1816,8 +1658,6 @@ mod tests {
         // Even a rejected MONOTONIC call must not mutate the shared
         // discipline state — important if a caller probes the clock
         // before setting up real ntpd discipline.
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_OFFSET;
         tx.offset = 555_555;
@@ -1840,8 +1680,6 @@ mod tests {
         // code — a divergence from Linux that hid the "this clock
         // isn't adjustable" condition.  Post-fix it must return -1
         // with EOPNOTSUPP.
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         let ret = clock_adjtime(1, &mut tx);
@@ -1857,8 +1695,6 @@ mod tests {
     fn test_clock_adjtime_tai_no_longer_einval_phase163() {
         // Sentinel: pre-Phase-163, CLOCK_TAI was wrongly rejected
         // with EINVAL.  Post-fix it forwards to adjtimex.
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         let ret = clock_adjtime(11, &mut tx);
@@ -1874,8 +1710,6 @@ mod tests {
     fn test_clock_adjtime_phase163_tai_propagates_tick_validation() {
         // The Phase-161 tick validation applies via TAI too — proves
         // TAI really does forward to the same code path.
-        let _g = TIMEX_TEST_LOCK.lock().unwrap();
-        reset_timex_state();
         errno::set_errno(0);
         let mut tx = Timex::zeroed();
         tx.modes = ADJ_TICK;

@@ -691,25 +691,6 @@ pub extern "C" fn sem_unlink(name: *const u8) -> i32 {
     0
 }
 
-/// Reset the named-semaphore table.  Test-only.
-#[cfg(test)]
-fn reset_named_sems() {
-    let _guard = acquire_sem_lock();
-    for i in 0..MAX_NAMED_SEMS {
-        // SAFETY: SEM_LOCK is held.
-        unsafe {
-            (*named_sems_ptr())[i].in_use = false;
-            (*named_sems_ptr())[i].unlinked = false;
-            (*named_sems_ptr())[i].name_len = 0;
-            (*named_sems_ptr())[i].refcount = 0;
-            (*named_sems_ptr())[i]
-                .sem
-                .value
-                .store(0, core::sync::atomic::Ordering::Relaxed);
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -937,193 +918,164 @@ mod tests {
 
     // -- Named semaphores --
 
-    /// Serialise tests that touch the shared NAMED_SEMS pool.
-    static NAMED_SEM_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn with_named_sem_lock<F: FnOnce()>(f: F) {
-        let _guard = NAMED_SEM_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        reset_named_sems();
-        f();
-        reset_named_sems();
-    }
+    // These tests used to run inside a `with_named_sem_lock(|| ...)` wrapper
+    // that took a `Mutex` and reset the pool on the way in and out.  The
+    // named-semaphore pool is per-thread on host builds, so each test gets
+    // its own empty pool and the wrapper bought nothing.
 
     #[test]
     fn test_sem_open_missing_no_create_enoent() {
-        with_named_sem_lock(|| {
-            crate::errno::set_errno(0);
-            let p = sem_open(b"/missing\0".as_ptr(), 0, 0, 0);
-            assert_eq!(p, SEM_FAILED);
-            assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
-        });
+        crate::errno::set_errno(0);
+        let p = sem_open(b"/missing\0".as_ptr(), 0, 0, 0);
+        assert_eq!(p, SEM_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
     }
 
     #[test]
     fn test_sem_open_creates_and_returns_valid() {
-        with_named_sem_lock(|| {
-            let p = sem_open(b"/a\0".as_ptr(), crate::fcntl::O_CREAT, 0o600, 3);
-            assert!(!p.is_null());
-            // Verify the value via sem_getvalue.
-            let mut v: i32 = -1;
-            assert_eq!(sem_getvalue(p, &raw mut v), 0);
-            assert_eq!(v, 3);
-            assert_eq!(sem_close(p), 0);
-        });
+        let p = sem_open(b"/a\0".as_ptr(), crate::fcntl::O_CREAT, 0o600, 3);
+        assert!(!p.is_null());
+        // Verify the value via sem_getvalue.
+        let mut v: i32 = -1;
+        assert_eq!(sem_getvalue(p, &raw mut v), 0);
+        assert_eq!(v, 3);
+        assert_eq!(sem_close(p), 0);
     }
 
     #[test]
     fn test_sem_open_excl_existing_eexist() {
-        with_named_sem_lock(|| {
-            let p1 = sem_open(b"/excl\0".as_ptr(), crate::fcntl::O_CREAT, 0, 1);
-            assert!(!p1.is_null());
-            crate::errno::set_errno(0);
-            let p2 = sem_open(
-                b"/excl\0".as_ptr(),
-                crate::fcntl::O_CREAT | crate::fcntl::O_EXCL,
-                0,
-                1,
-            );
-            assert_eq!(p2, SEM_FAILED);
-            assert_eq!(crate::errno::get_errno(), crate::errno::EEXIST);
-            assert_eq!(sem_close(p1), 0);
-        });
+        let p1 = sem_open(b"/excl\0".as_ptr(), crate::fcntl::O_CREAT, 0, 1);
+        assert!(!p1.is_null());
+        crate::errno::set_errno(0);
+        let p2 = sem_open(
+            b"/excl\0".as_ptr(),
+            crate::fcntl::O_CREAT | crate::fcntl::O_EXCL,
+            0,
+            1,
+        );
+        assert_eq!(p2, SEM_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EEXIST);
+        assert_eq!(sem_close(p1), 0);
     }
 
     #[test]
     fn test_sem_open_same_name_returns_same_pointer() {
-        with_named_sem_lock(|| {
-            let p1 = sem_open(b"/share\0".as_ptr(), crate::fcntl::O_CREAT, 0, 0);
-            let p2 = sem_open(b"/share\0".as_ptr(), 0, 0, 0);
-            assert!(!p1.is_null());
-            assert_eq!(p1, p2);
-            // Cross-handle visibility: post via p1, see via p2.
-            assert_eq!(sem_post(p1), 0);
-            let mut v: i32 = -1;
-            assert_eq!(sem_getvalue(p2, &raw mut v), 0);
-            assert_eq!(v, 1);
-            assert_eq!(sem_close(p1), 0);
-            assert_eq!(sem_close(p2), 0);
-        });
+        let p1 = sem_open(b"/share\0".as_ptr(), crate::fcntl::O_CREAT, 0, 0);
+        let p2 = sem_open(b"/share\0".as_ptr(), 0, 0, 0);
+        assert!(!p1.is_null());
+        assert_eq!(p1, p2);
+        // Cross-handle visibility: post via p1, see via p2.
+        assert_eq!(sem_post(p1), 0);
+        let mut v: i32 = -1;
+        assert_eq!(sem_getvalue(p2, &raw mut v), 0);
+        assert_eq!(v, 1);
+        assert_eq!(sem_close(p1), 0);
+        assert_eq!(sem_close(p2), 0);
     }
 
     #[test]
     fn test_sem_open_invalid_name() {
-        with_named_sem_lock(|| {
-            // No leading '/'.
-            crate::errno::set_errno(0);
-            let p = sem_open(b"bad\0".as_ptr(), crate::fcntl::O_CREAT, 0, 0);
-            assert_eq!(p, SEM_FAILED);
-            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
-            // Embedded '/'.
-            let p = sem_open(b"/a/b\0".as_ptr(), crate::fcntl::O_CREAT, 0, 0);
-            assert_eq!(p, SEM_FAILED);
-            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
-            // Empty.
-            let p = sem_open(b"\0".as_ptr(), crate::fcntl::O_CREAT, 0, 0);
-            assert_eq!(p, SEM_FAILED);
-            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
-        });
+        // No leading '/'.
+        crate::errno::set_errno(0);
+        let p = sem_open(b"bad\0".as_ptr(), crate::fcntl::O_CREAT, 0, 0);
+        assert_eq!(p, SEM_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        // Embedded '/'.
+        let p = sem_open(b"/a/b\0".as_ptr(), crate::fcntl::O_CREAT, 0, 0);
+        assert_eq!(p, SEM_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        // Empty.
+        let p = sem_open(b"\0".as_ptr(), crate::fcntl::O_CREAT, 0, 0);
+        assert_eq!(p, SEM_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]
     fn test_sem_open_null_name_efault() {
-        with_named_sem_lock(|| {
-            crate::errno::set_errno(0);
-            let p = sem_open(core::ptr::null(), crate::fcntl::O_CREAT, 0, 0);
-            assert_eq!(p, SEM_FAILED);
-            assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
-        });
+        crate::errno::set_errno(0);
+        let p = sem_open(core::ptr::null(), crate::fcntl::O_CREAT, 0, 0);
+        assert_eq!(p, SEM_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     #[test]
     fn test_sem_open_value_overflow_einval() {
-        with_named_sem_lock(|| {
-            crate::errno::set_errno(0);
-            let p = sem_open(
-                b"/big\0".as_ptr(),
-                crate::fcntl::O_CREAT,
-                0,
-                (i32::MAX as u32).wrapping_add(1),
-            );
-            assert_eq!(p, SEM_FAILED);
-            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
-        });
+        crate::errno::set_errno(0);
+        let p = sem_open(
+            b"/big\0".as_ptr(),
+            crate::fcntl::O_CREAT,
+            0,
+            (i32::MAX as u32).wrapping_add(1),
+        );
+        assert_eq!(p, SEM_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]
     fn test_sem_open_pool_exhaustion_enospc() {
-        with_named_sem_lock(|| {
-            // Open MAX_NAMED_SEMS distinct semaphores.
-            let names: [&[u8]; 16] = [
-                b"/s00\0", b"/s01\0", b"/s02\0", b"/s03\0", b"/s04\0", b"/s05\0", b"/s06\0",
-                b"/s07\0", b"/s08\0", b"/s09\0", b"/s10\0", b"/s11\0", b"/s12\0", b"/s13\0",
-                b"/s14\0", b"/s15\0",
-            ];
-            let mut ptrs = [SEM_FAILED; 16];
-            for (i, n) in names.iter().enumerate() {
-                ptrs[i] = sem_open(n.as_ptr(), crate::fcntl::O_CREAT, 0, 0);
-                assert!(!ptrs[i].is_null(), "open {i} should succeed");
-            }
-            crate::errno::set_errno(0);
-            let extra = sem_open(b"/overflow\0".as_ptr(), crate::fcntl::O_CREAT, 0, 0);
-            assert_eq!(extra, SEM_FAILED);
-            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSPC);
-            for p in &ptrs {
-                let _ = sem_close(*p);
-            }
-        });
+        // Open MAX_NAMED_SEMS distinct semaphores.
+        let names: [&[u8]; 16] = [
+            b"/s00\0", b"/s01\0", b"/s02\0", b"/s03\0", b"/s04\0", b"/s05\0", b"/s06\0",
+            b"/s07\0", b"/s08\0", b"/s09\0", b"/s10\0", b"/s11\0", b"/s12\0", b"/s13\0",
+            b"/s14\0", b"/s15\0",
+        ];
+        let mut ptrs = [SEM_FAILED; 16];
+        for (i, n) in names.iter().enumerate() {
+            ptrs[i] = sem_open(n.as_ptr(), crate::fcntl::O_CREAT, 0, 0);
+            assert!(!ptrs[i].is_null(), "open {i} should succeed");
+        }
+        crate::errno::set_errno(0);
+        let extra = sem_open(b"/overflow\0".as_ptr(), crate::fcntl::O_CREAT, 0, 0);
+        assert_eq!(extra, SEM_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSPC);
+        for p in &ptrs {
+            let _ = sem_close(*p);
+        }
     }
 
     #[test]
     fn test_sem_unlink_basic_then_open_fresh() {
-        with_named_sem_lock(|| {
-            let p1 = sem_open(b"/u\0".as_ptr(), crate::fcntl::O_CREAT, 0, 5);
-            assert!(!p1.is_null());
-            assert_eq!(sem_close(p1), 0);
-            // No open handles, so unlink should free the slot immediately.
-            assert_eq!(sem_unlink(b"/u\0".as_ptr()), 0);
-            // Opening the same name with O_CREAT now creates a new slot.
-            let p2 = sem_open(b"/u\0".as_ptr(), crate::fcntl::O_CREAT, 0, 7);
-            assert!(!p2.is_null());
-            let mut v: i32 = -1;
-            sem_getvalue(p2, &raw mut v);
-            assert_eq!(v, 7);
-            assert_eq!(sem_close(p2), 0);
-            assert_eq!(sem_unlink(b"/u\0".as_ptr()), 0);
-        });
+        let p1 = sem_open(b"/u\0".as_ptr(), crate::fcntl::O_CREAT, 0, 5);
+        assert!(!p1.is_null());
+        assert_eq!(sem_close(p1), 0);
+        // No open handles, so unlink should free the slot immediately.
+        assert_eq!(sem_unlink(b"/u\0".as_ptr()), 0);
+        // Opening the same name with O_CREAT now creates a new slot.
+        let p2 = sem_open(b"/u\0".as_ptr(), crate::fcntl::O_CREAT, 0, 7);
+        assert!(!p2.is_null());
+        let mut v: i32 = -1;
+        sem_getvalue(p2, &raw mut v);
+        assert_eq!(v, 7);
+        assert_eq!(sem_close(p2), 0);
+        assert_eq!(sem_unlink(b"/u\0".as_ptr()), 0);
     }
 
     #[test]
     fn test_sem_unlink_while_open_delays_reclaim() {
-        with_named_sem_lock(|| {
-            let p1 = sem_open(b"/d\0".as_ptr(), crate::fcntl::O_CREAT, 0, 1);
-            assert!(!p1.is_null());
-            // Unlink while still open — slot stays alive.
-            assert_eq!(sem_unlink(b"/d\0".as_ptr()), 0);
-            // sem_open(no O_CREAT) for the same name now returns ENOENT
-            // because the slot has been marked unlinked.
-            crate::errno::set_errno(0);
-            let p2 = sem_open(b"/d\0".as_ptr(), 0, 0, 0);
-            assert_eq!(p2, SEM_FAILED);
-            assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
-            // p1 is still usable.
-            let mut v: i32 = -1;
-            assert_eq!(sem_getvalue(p1, &raw mut v), 0);
-            assert_eq!(v, 1);
-            // Closing p1 finishes the reclaim.
-            assert_eq!(sem_close(p1), 0);
-        });
+        let p1 = sem_open(b"/d\0".as_ptr(), crate::fcntl::O_CREAT, 0, 1);
+        assert!(!p1.is_null());
+        // Unlink while still open — slot stays alive.
+        assert_eq!(sem_unlink(b"/d\0".as_ptr()), 0);
+        // sem_open(no O_CREAT) for the same name now returns ENOENT
+        // because the slot has been marked unlinked.
+        crate::errno::set_errno(0);
+        let p2 = sem_open(b"/d\0".as_ptr(), 0, 0, 0);
+        assert_eq!(p2, SEM_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
+        // p1 is still usable.
+        let mut v: i32 = -1;
+        assert_eq!(sem_getvalue(p1, &raw mut v), 0);
+        assert_eq!(v, 1);
+        // Closing p1 finishes the reclaim.
+        assert_eq!(sem_close(p1), 0);
     }
 
     #[test]
     fn test_sem_unlink_missing_enoent() {
-        with_named_sem_lock(|| {
-            crate::errno::set_errno(0);
-            let r = sem_unlink(b"/nope\0".as_ptr());
-            assert_eq!(r, -1);
-            assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
-        });
+        crate::errno::set_errno(0);
+        let r = sem_unlink(b"/nope\0".as_ptr());
+        assert_eq!(r, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
     }
 
     #[test]
@@ -1138,33 +1090,29 @@ mod tests {
         // A pointer to an unnamed semaphore on the stack is not a named-
         // semaphore slot; closing it should EINVAL rather than corrupt
         // anything.
-        with_named_sem_lock(|| {
-            let mut sem = SemT {
-                value: core::sync::atomic::AtomicI32::new(0),
-            };
-            crate::errno::set_errno(0);
-            assert_eq!(sem_close(&raw mut sem), -1);
-            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
-        });
+        let mut sem = SemT {
+            value: core::sync::atomic::AtomicI32::new(0),
+        };
+        crate::errno::set_errno(0);
+        assert_eq!(sem_close(&raw mut sem), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]
     fn test_sem_open_refcount_close_balance() {
-        with_named_sem_lock(|| {
-            let p1 = sem_open(b"/rc\0".as_ptr(), crate::fcntl::O_CREAT, 0, 0);
-            let p2 = sem_open(b"/rc\0".as_ptr(), 0, 0, 0);
-            let p3 = sem_open(b"/rc\0".as_ptr(), 0, 0, 0);
-            assert_eq!(p1, p2);
-            assert_eq!(p2, p3);
-            assert_eq!(sem_close(p1), 0);
-            assert_eq!(sem_close(p2), 0);
-            // Slot must still be live for p3 (and unlink).
-            assert_eq!(sem_unlink(b"/rc\0".as_ptr()), 0);
-            // p3 still usable.
-            let mut v: i32 = -1;
-            assert_eq!(sem_getvalue(p3, &raw mut v), 0);
-            assert_eq!(sem_close(p3), 0);
-        });
+        let p1 = sem_open(b"/rc\0".as_ptr(), crate::fcntl::O_CREAT, 0, 0);
+        let p2 = sem_open(b"/rc\0".as_ptr(), 0, 0, 0);
+        let p3 = sem_open(b"/rc\0".as_ptr(), 0, 0, 0);
+        assert_eq!(p1, p2);
+        assert_eq!(p2, p3);
+        assert_eq!(sem_close(p1), 0);
+        assert_eq!(sem_close(p2), 0);
+        // Slot must still be live for p3 (and unlink).
+        assert_eq!(sem_unlink(b"/rc\0".as_ptr()), 0);
+        // p3 still usable.
+        let mut v: i32 = -1;
+        assert_eq!(sem_getvalue(p3, &raw mut v), 0);
+        assert_eq!(sem_close(p3), 0);
     }
 
     // -- SemT layout --

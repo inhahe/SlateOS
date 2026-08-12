@@ -279,6 +279,64 @@ fastpy's `compiler/toolchain.py` (`SLATEOS_TARGET`, `_find_zig_cc`),
 `kernel/src/proc/spawn.rs::self_test_bash_on_slateos_libc`.
 
 
+## Q42 — Two crates are not rustfmt-clean, which makes `cargo fmt` a trap. Do a one-shot repo-wide reformat, or keep formatting only touched files? — Status: OPEN
+
+**Raised by Claude** (2026-08-12) after it cost a revert-and-redo cycle.
+
+**The finding.** CLAUDE.md sets the convention as "`rustfmt` defaults. No manual
+formatting overrides." Two crates comply and two do not (measured with
+`cargo fmt -p <crate> -- --check`):
+
+| Crate | Hunks needing reformat |
+|---|---|
+| `kernel` | 16 911 |
+| `posix` | 389 (244 of 2 299 files, ~11%) |
+| `net` | 0 |
+| `fs` | 0 |
+
+**Why this is more than cosmetic.** `cargo fmt` is package-scoped and has no file
+filter, so in a drifted crate the ordinary act of formatting your own change
+rewrites hundreds of files you never touched. Today, `cargo fmt -p posix` after a
+~150-line edit produced a 1 403-insertion / 1 429-deletion diff across 173 files;
+the two could not be separated afterwards, so the change had to be reverted and
+re-applied by script. It also makes pre-existing oddities look like your own
+damage — I lost time proving a strange `CapGuard` layout predated me. Every fmt
+run in `kernel` or `posix` carries both costs.
+
+**Options.**
+- **A — one-shot repo-wide reformat, then it stays clean.** *Pro:* removes the
+  trap permanently and makes the stated convention true; afterwards `cargo fmt`
+  is safe and any drift is a real diff. Cheap to do (minutes of active work).
+  *Con:* rewrites `git blame` for ~17 000 hunks of kernel code. Blame is the
+  primary tool for "why is this line here?" in a codebase with no human
+  reviewer and a 4 600-commit history — this is the one cost that cannot be
+  undone. (`git blame --ignore-rev` + a `.git-blame-ignore-revs` file mitigates
+  it for anyone who configures it, but not for GitHub's plain view or a casual
+  `git log -S`.)
+- **B — keep the current working rule: format only the files you edited**, via
+  `rustfmt --edition 2024 <file>` rather than `cargo fmt -p`. *Pro:* zero
+  history churn; already adopted and it works. *Con:* the convention stays
+  aspirational; the trap stays armed for anyone who reaches for the obvious
+  command; drift never shrinks except where files happen to be edited.
+- **C — reformat `posix` only, leave `kernel` alone.** *Pro:* clears 11% drift in
+  the crate under active daily work for ~250 files of blame churn, 1.5% of A's
+  cost. *Con:* leaves the worst offender armed, and a half-applied convention is
+  the state that caused this.
+
+**Claude's recommendation.** **A**, with a `.git-blame-ignore-revs` file
+committed alongside — the blame cost is real but one-time and partially
+mitigable, whereas the trap is permanent and recurs on every edit. If the blame
+history is considered untouchable, **C** is a reasonable middle. I have adopted
+**B** in the meantime, so nothing is blocked either way.
+
+**Note:** `cargo fmt --all` does not run in this workspace — it dies with
+`The filename or extension is too long. (os error 206)` (Windows command-line
+limit, hit by the number of workspace members). Any of A/C must iterate crates.
+
+**Where it bites:** everywhere, but the recorded incident is
+`known-issues.md` → `TD-REPO-IS-NOT-RUSTFMT-CLEAN-SO-RUNNING-CARGO-FMT-IS-A-TRAP`.
+
+
 ---
 
 Recently resolved (see `design-decisions.md` for the full rationale):

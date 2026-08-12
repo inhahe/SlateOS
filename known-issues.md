@@ -433,6 +433,52 @@ passing in isolation, is this failure class until proven otherwise — look for
 module-level mutable state the test writes, and check it against the
 carve-out list above before assuming a real regression.
 
+### TD-REPO-IS-NOT-RUSTFMT-CLEAN-SO-RUNNING-CARGO-FMT-IS-A-TRAP. `cargo fmt -p posix` rewrites 244 files you did not touch — 2026-08-12 — OPEN
+
+**Where:** repo-wide, unevenly. Measured 2026-08-12 with `cargo fmt -p <crate> --
+--check`:
+
+| Crate | Hunks needing reformat |
+|---|---|
+| `kernel` | 16 911 |
+| `posix` | 389 (244 of 2 299 files, ~11%) |
+| `net` | 0 |
+| `fs` | 0 |
+
+CLAUDE.md states the convention as "`rustfmt` defaults. No manual formatting
+overrides." Two crates comply; two do not.
+
+**Why it is a trap, not a cosmetic issue.** It cost real work today. After
+editing four `posix` files I ran `cargo fmt -p posix` — the ordinary,
+correct-looking thing to do — and it reformatted **173 files**, producing a
+1 403-insertion / 1 429-deletion diff that buried a ~150-line change. There is no
+way to separate the two afterwards, so the whole edit had to be reverted and
+re-applied by script with `cargo fmt` deliberately *not* run. `cargo fmt` is
+package-scoped with no file filter, so the blast radius is the crate, and in
+`kernel` it would be far worse.
+
+A second, smaller hazard: it makes *pre-existing* oddities look like your own
+damage. `cargo fmt` surfaced strange `CapGuard` formatting in
+`linux_seccomp.rs` right after I had run a regex over that file; I assumed my
+regex had mangled it. `git show <sha>~1:posix/src/linux_seccomp.rs` proved it
+predated me. Every fmt run in a drifted crate costs an investigation like that.
+
+**Working rule adopted now** (`Claude (autonomous)`, cheap and safe): format
+*only the files you edited*, by invoking rustfmt directly —
+`rustfmt --edition 2024 posix/src/semaphore.rs` — never `cargo fmt -p <crate>`
+in `kernel` or `posix`. This removes the hazard without touching history.
+
+**The proper fix is a one-shot repo-wide reformat**, which is *not* obviously
+correct and is therefore the operator's call — it rewrites `git blame` for
+~17 000 hunks of kernel code, and blame is the main tool for answering "why is
+this line here?" in a codebase with no human reviewer. Raised as **Q42** in
+`open-questions.md`. Until it is answered, the working rule above holds.
+
+**Also note:** `cargo fmt --all` does not run in this workspace at all — it dies
+with `The filename or extension is too long. (os error 206)`, a Windows command
+line-length limit hit by the number of workspace members. So a repo-wide reformat
+would have to iterate crates (or files) anyway.
+
 ### TD-OILS-A-BUILTIN-DOES-NOT-ANSWER-ITS-OWN---HELP. `cd --help` says `--: invalid option` where bash prints the long doc — 2026-08-12 — ✅ FIXED 2026-08-12
 
 **Where:** `userspace/oils/src/interp.rs` — every builtin's own option parser.

@@ -1015,9 +1015,8 @@ mod tests {
     fn test_sem_open_pool_exhaustion_enospc() {
         // Open MAX_NAMED_SEMS distinct semaphores.
         let names: [&[u8]; 16] = [
-            b"/s00\0", b"/s01\0", b"/s02\0", b"/s03\0", b"/s04\0", b"/s05\0", b"/s06\0",
-            b"/s07\0", b"/s08\0", b"/s09\0", b"/s10\0", b"/s11\0", b"/s12\0", b"/s13\0",
-            b"/s14\0", b"/s15\0",
+            b"/s00\0", b"/s01\0", b"/s02\0", b"/s03\0", b"/s04\0", b"/s05\0", b"/s06\0", b"/s07\0",
+            b"/s08\0", b"/s09\0", b"/s10\0", b"/s11\0", b"/s12\0", b"/s13\0", b"/s14\0", b"/s15\0",
         ];
         let mut ptrs = [SEM_FAILED; 16];
         for (i, n) in names.iter().enumerate() {

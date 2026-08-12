@@ -196,12 +196,17 @@ argument for the reimplementation.
 > argument for either side, and neither is anything else on the feasibility
 > axis: **Q41 is now purely the scope/ownership call in its closing line.**
 >
-> One *shell-facing* piece is still open, and it constrains osh and bash
-> identically: there is no **controlling terminal** — no `tcsetpgrp`/`tcgetpgrp`,
-> no foreground process group — so nothing enforces SIGTTIN/SIGTTOU and a Ctrl-Z
-> at the keyboard reaches no job on its own. That is a kernel/libc feature
-> rather than a shell choice, so building it does not pre-empt this question in
-> either direction.
+> The **controlling terminal** followed the same day and is now real kernel
+> state: `tcsetpgrp`/`tcgetpgrp` and `ioctl(TIOCSCTTY/TIOCNOTTY)` go through
+> native syscalls 537–540 to a per-session table (`pcb::CTTY_FG_PGRP`), the
+> Linux shim's `TIOCGPGRP`/`TIOCSPGRP` read and write that same state, and the
+> group `^C`/`^\` signal is a derived read of it (see design-decisions §113).
+> What remains is *enforcement*, not state: nothing raises SIGTTIN/SIGTTOU on a
+> background read/write, and a Ctrl-Z at the keyboard still reaches no job on
+> its own, because both need a real tty driver with a line discipline to
+> enforce at (the predicate, `pcb::ctty_is_background`, already exists — see
+> `todo.txt`). That is a kernel feature rather than a shell choice, so it does
+> not pre-empt this question in either direction.
 
 **Options.**
 - **A — timeboxed spike, then decide.** Point `zig cc --target=x86_64-slateos` at

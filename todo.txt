@@ -53872,3 +53872,49 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ##   Note: sys.argv and sys.exit(code) already work in pure mode (runtime.c,
 ##   fpy_argv / fastpy_sys_exit) — validated on-target by
 ##   self_test_fastpy_slateos_tls (exits with argc). print() also works.
+
+## Controlling terminal — deferred pieces (2026-08-12)
+##
+## The foreground process group is now real per-session kernel state
+## (pcb::CTTY_FG_PGRP, native syscalls 537-540, Linux TIOCGPGRP/TIOCSPGRP/
+## TIOCSCTTY/TIOCNOTTY). Three things were deliberately left out:
+##
+## 1. SIGTTIN/SIGTTOU enforcement, and Ctrl-Z.
+##    A background process that reads from the terminal must get SIGTTIN;
+##    one that writes (with TOSTOP) or calls tcsetpgrp/tcsetattr must get
+##    SIGTTOU. pcb::ctty_is_background() already answers "is this caller in
+##    the background?", so the predicate exists — what is missing is a place
+##    to enforce it. Our console is polled from the syscall path, not a tty
+##    driver with a line discipline, so there is no single choke point that
+##    owns "a background process just tried to read" or "the user pressed
+##    ^Z". Proper fix: build the tty driver (line discipline + input queue +
+##    per-terminal state), then enforce in its read/write path and generate
+##    SIGTSTP from the VSUSP character the same way SIGINT is generated from
+##    VINTR today. Trigger: when the tty driver task is started.
+##    Note the ordering trap: tcsetpgrp() itself is supposed to raise
+##    SIGTTOU on a background caller, so the enforcement must not be added
+##    to sys_tty_set_pgrp alone or a shell that is *already* background will
+##    stop itself where today it merely fails.
+##
+## 2. Linux TIOCSCTTY's "steal" argument.
+##    Linux lets root (CAP_SYS_ADMIN) pass arg=1 to steal a terminal from
+##    another session, hanging up the old session. We ignore arg and always
+##    return EPERM when the console is already claimed. Deferred because we
+##    have no credential model to check — there is no uid/capability answer
+##    to "is this caller allowed to steal". Proper fix: once process
+##    credentials exist, gate arg=1 on the equivalent of CAP_SYS_ADMIN and
+##    SIGHUP+SIGCONT the losing session's foreground group. Trigger: when a
+##    credential/uid model lands.
+##
+## 3. Per-process TIOCNOTTY.
+##    Linux's disassociate_ctty drops the *caller's* pointer to its
+##    controlling terminal, and only the session leader's call additionally
+##    hangs up the group and clears it for the whole session. We only model
+##    the session-wide half: a non-leader gets EPERM instead of quietly
+##    losing its own tty. Deferred because we have no per-process ctty
+##    pointer — a process's controlling terminal is currently derived from
+##    its session. Proper fix: add an Option<TerminalId> to the PCB, have
+##    fork inherit it and setsid clear it, and make the non-leader path
+##    clear just that field. Trigger: when a second terminal exists (before
+##    then every process in a session with a terminal has the same one, so
+##    the distinction is unobservable).

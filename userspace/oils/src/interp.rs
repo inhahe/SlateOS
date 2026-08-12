@@ -3990,9 +3990,6 @@ struct DeclCompounds {
     /// `-p`: the builtin is *asked about* its operands rather than told about
     /// them, and applies none of its own attributes.
     print_mode: bool,
-    /// The attributes the builtin half applies to each compound operand, decided
-    /// by the flag prescan the first half already ran.
-    flags: BoundCompoundFlags,
 }
 
 /// A declaration builtin's compound operands, bound one at a time as the
@@ -14178,7 +14175,7 @@ impl Shell {
         if self.assignment_scan_failed(a) {
             return false;
         }
-        let ok = self.apply_assignment_inner(a, trace, spelled.unwrap_or(a), pre, None);
+        let ok = self.apply_assignment_inner(a, trace, spelled.unwrap_or(a), pre, None, false);
         // A name the shell also keeps somewhere else takes the write back out of
         // the variable table again — see [`Shell::after_var_write`]. Run whether
         // or not the assignment succeeded, since a literal that failed part-way
@@ -14278,6 +14275,13 @@ impl Shell {
     /// under takes the reference out of the live tables, so a second resolution
     /// would find no chain and charge for nothing. Every entry from outside
     /// passes `None`. See [`RefWriteDebt`].
+    ///
+    /// `reached` says the same re-entry has *already* chosen the binding, and
+    /// so no chain is to be walked a second time — bash's escape is
+    /// `find_global_variable_noref`, which reads the global binding and stops.
+    /// It is what makes the escape terminate: the swap it runs under puts that
+    /// very binding live, so a chain that closed on the name would close on it
+    /// again and ask to escape to itself for ever.
     fn apply_assignment_inner(
         &mut self,
         a: &Assignment,
@@ -14285,6 +14289,7 @@ impl Shell {
         spelled: &Assignment,
         pre: Option<Str>,
         debt: Option<RefWriteDebt>,
+        reached: bool,
     ) -> bool {
         // One element is no place for a list, and the objection is raised on the
         // word *as written* — before the name is resolved, the subscript
@@ -14364,7 +14369,19 @@ impl Shell {
         // What a *subscripted* store's walk costs is not paid here at all: bash
         // takes its two walks either side of the subscript's own refusals, so
         // the write pays as it goes. See [`RefWriteDebt`].
-        let (target, mut debt) = if a.index.is_some() {
+        let (target, mut debt) = if reached {
+            // The binding is already in hand — this is the second pass of a
+            // cycle's escape to global scope, and bash's escape is
+            // `find_global_variable_noref` (variables.c:2103), which takes the
+            // global binding *without following it*. Walking again is what
+            // would not terminate: the escape swap makes the global binding
+            // live, and a chain that closed on the name would close on it
+            // again, and again ask to escape to itself.
+            (
+                RefTarget::plain(a.name.clone()),
+                debt.unwrap_or_else(RefWriteDebt::none),
+            )
+        } else if a.index.is_some() {
             let (target, owed) = self.resolve_ref_elem_write_deferred(&a.name);
             (target, debt.unwrap_or(owed))
         } else if matches!(a.value, AssignRhs::Array(_)) {
@@ -14504,7 +14521,7 @@ impl Shell {
             let (a, spelled, base) = (a.clone(), spelled.clone(), target.base.clone());
             let scope = target.scope;
             return self.in_scope(scope, &base, |sh| {
-                sh.apply_assignment_inner(&a, trace, &spelled, pre, Some(debt))
+                sh.apply_assignment_inner(&a, trace, &spelled, pre, Some(debt), true)
             });
         }
         // `set -x`: a **scalar** value is traced expanded (emitted at the store
@@ -21407,16 +21424,257 @@ impl Shell {
     /// ```
     ///
     /// which is just "skip the swap where the innermost frame already holds the
-    /// name".
+    /// name" — except that the name it asks about is the one at the *end of the
+    /// reference chain*, not the one written. See
+    /// [`Shell::chklocal_reaches_this_frame`].
+    ///
+    /// And the name swapped is not always the name written. bash decides it in
+    /// two questions, of which `chklocal` is only the first
+    /// (`do_compound_assignment`, subst.c:3494):
+    ///
+    /// ```c
+    ///   v = chklocal ? find_variable (name) : 0;
+    ///   if (v && (local_p (v) == 0 || v->context != variable_context))
+    ///     v = 0;
+    ///   if (v == 0)
+    ///     v = find_global_variable (name);
+    ///   …
+    ///   newname = (v == 0) ? nameref_transform_name (name, flags) : name;
+    /// ```
+    ///
+    /// The second question — [`Shell::global_chain_reaches_var`] — is whether
+    /// the *global* binding of the name reaches a variable at all. Where it does
+    /// not (there is no global of that name, or its reference chain runs into a
+    /// name nothing answers to, or into a cycle) bash does not bind the name: it
+    /// binds `nameref_transform_name`, which is the **live** chain's last
+    /// reference cell (`find_variable_last_nameref`, variables.c:2334) — and
+    /// binds it *globally* all the same. So a frame-local reference out of the
+    /// frame decides which global is written whenever the global side is empty:
+    ///
+    /// ```sh
+    /// declare -n g=z; declare -n z=g               # a global chain that ends
+    ///                                             # nowhere
+    /// f() { local -n g=w; declare -g g=(1 2); }; f # binds the global `w`
+    /// f() { local g=5; declare -g g=(1 2); }; f    # `g` is this frame's own,
+    ///                                             # so the array is the local
+    /// ```
+    ///
+    /// (The two warnings each of those prints belong to the `local` before it,
+    /// which walks the cycle while nothing yet shadows it.)
     ///
     /// Returns the entries to hand back to `leave_global_scope`, in the order
     /// they were swapped.
+    ///
+    /// `compound` names are the operands assigned a **compound literal**, which
+    /// is a different command from the builtin the rest of the word list is —
+    /// and finds the name it binds its own way. See [`Shell::global_bind_name`].
     fn enter_global_scope(
         &mut self,
         names: &[String],
+        compound: &[String],
         chklocal: bool,
     ) -> Vec<(String, usize, VarSnapshot)> {
-        self.enter_scope_at(names, 0, chklocal)
+        // bash asks every one of its questions of the tables as they stand, so
+        // the whole mapping is made before anything is swapped.
+        let targets: Vec<String> = names
+            .iter()
+            .map(|n| (n, false))
+            .chain(compound.iter().map(|n| (n, true)))
+            .filter(|(n, _)| !(chklocal && self.chklocal_reaches_this_frame(n)))
+            .flat_map(|(n, compound)| self.global_bind_names(n, compound))
+            .collect();
+        self.enter_scope_at(&targets, 0, false)
+    }
+
+    /// The names a global-scope declaration of `name` must un-shadow for the
+    /// ordinary machinery to reach the binding bash's `newname` names — empty
+    /// where it reaches it already, and where a swap would take it somewhere
+    /// else.
+    ///
+    /// Three answers, one per outcome of the lookup
+    /// ([`Shell::global_chain_target`]):
+    ///
+    /// * the chain reaches a **live** binding of `name` itself — it left the
+    ///   global table and came back through a local, which is a different
+    ///   variable to bash and is the very binding a swap would displace. bash
+    ///   assigns to it, so the right thing to do is nothing: the ordinary walk
+    ///   goes there by itself.
+    /// * the chain reaches anything else — `name`, swapped, so the walk starts
+    ///   from the global binding as bash's does.
+    /// * the chain reaches nothing — a **reference cell somewhere along the
+    ///   chain**, bound globally all the same, but only where the global binding
+    ///   of the name is itself a reference. *Which* cell is the one place the
+    ///   two commands a declaration is made of part company.
+    ///
+    ///   A **compound literal** is `do_compound_assignment`, which says it
+    ///   outright (subst.c:3506):
+    ///
+    ///   ```c
+    ///     newname = (v == 0) ? nameref_transform_name (name, flags) : name;
+    ///   ```
+    ///
+    ///   With `ASS_MKGLOBAL|ASS_CHKLOCAL` that is `find_variable_last_nameref
+    ///   (name, 1)`'s cell (variables.c:2334) — the **live** chain's, so a
+    ///   frame-local reference out of the frame decides the global written.
+    ///
+    ///   The builtin proper is `declare_internal`, which asks a narrower
+    ///   question first (declare.def:735):
+    ///
+    ///   ```c
+    ///     refvar = mkglobal ? find_global_variable_last_nameref (name, 0) : …;
+    ///     if (refvar) var = declare_find_variable (nameref_cell (refvar), …);
+    ///     if (refvar && var == 0)
+    ///       { name = declare_build_newname (nameref_cell (refvar), …);
+    ///         goto restart_new_var_name; }
+    ///   ```
+    ///
+    ///   [`Shell::global_chain_path`] never leaves the global table, so it does
+    ///   not see the frame's reference at all — un-shadowing every link it reads
+    ///   is what puts the ordinary walk on the chain as written at top level.
+    ///   And it is only when it answers *nothing*, which among globals means a
+    ///   cycle, that the name falls through unchanged to `bind_global_variable`
+    ///   and its `bind_variable_internal` (variables.c:3020) opens with the live
+    ///   cell after all:
+    ///
+    ///   ```c
+    ///     if (entry && nameref_p (entry) && … && table == global_variables->table)
+    ///       {
+    ///         entry = find_global_variable (entry->name);
+    ///         if (entry == 0) entry = find_variable_last_nameref (name, 0);
+    ///   ```
+    ///
+    ///   That opening is reached only through the global table's own entry for
+    ///   the name, which is the one thing both roads agree on: a name with **no
+    ///   global binding** is bound as written. `f() { local -n g=z; readonly
+    ///   g=(1 2); }` makes a global `g` array and marks `z`, two different
+    ///   variables.
+    ///
+    /// A name that is no reference transforms to itself, so the answers differ
+    /// only where one is in play — the swap is otherwise unchanged.
+    fn global_bind_names(&self, name: &str, compound: bool) -> Vec<String> {
+        match self.global_chain_target(name) {
+            Some(RefTarget { base, sub: None, scope: RefScope::Live }) if base == name => Vec::new(),
+            Some(_) => vec![name.to_string()],
+            // No global binding at all: neither road above starts, so the name
+            // is bound as written.
+            None if self.nameref_cell_in(name, 0).is_none() => vec![name.to_string()],
+            None => match (compound, self.global_chain_path(name)) {
+                (false, Some(path)) => path,
+                // A chain that dies on the link limit has no last cell to give
+                // and the live one is asked for instead; an element reference is
+                // no name to bind either, and bash keeps the name (the `v &&
+                // nameref_p (v)` guard, variables.c:2336). Either way the name
+                // itself stays shadowed: it is the frame's own reference that
+                // leads there.
+                _ => vec![match self.walk_ref_name(name).target {
+                    Some(RefTarget { base, sub: None, .. }) => base,
+                    _ => name.to_string(),
+                }],
+            },
+        }
+    }
+
+    /// The names bash's `find_global_variable_last_nameref (name, 0)`
+    /// (variables.c:2147) reads on its way to the reference it answers with —
+    /// `name`, every link after it, and the cell that reference holds.
+    ///
+    /// The twin of `find_variable_last_nameref` that never leaves the global
+    /// table: every link is `find_global_variable_noref`, so a local shadowing a
+    /// name along the way is invisible to it and the walk reads the chain as it
+    /// was written at top level. Un-shadowing the whole path is how the ordinary
+    /// walk is put on that same chain.
+    ///
+    /// `None` where the walk has no reference to answer with — an empty cell
+    /// (`vflags` is 0 at every call site that matters here, so an invisible one
+    /// is not returned either) or a chain longer than [`NAMEREF_MAX`], which
+    /// among globals is what a cycle becomes.
+    fn global_chain_path(&self, name: &str) -> Option<Vec<String>> {
+        let mut path = vec![name.to_string()];
+        let mut level = 0usize;
+        while let Some(cell) = self.nameref_cell_in(path.last()?, 0) {
+            level += 1;
+            if level > NAMEREF_MAX {
+                return None;
+            }
+            let next = bytes::as_str(cell).filter(|n| !n.is_empty())?.to_owned();
+            path.push(next);
+        }
+        Some(path)
+    }
+
+    /// bash's `find_global_variable (name)` (variables.c:2400): what the
+    /// **global** binding of `name` reaches, if it reaches a variable at all.
+    ///
+    /// ```c
+    ///   var = var_lookup (name, global_variables);
+    ///   if (var && nameref_p (var))
+    ///     var = find_variable_nameref (var);
+    ///   if (var == 0) return ((SHELL_VAR *)NULL);
+    /// ```
+    ///
+    /// Only the *first* link is read from the global table; every link after it
+    /// is an ordinary innermost-first lookup, so the chain can re-enter local
+    /// scope. `None` for a name with no global binding, for a chain that ends on
+    /// a name nothing answers to, and for one that closes on itself or outruns
+    /// the link limit — bash's three ways to NULL.
+    fn global_chain_target(&self, name: &str) -> Option<RefTarget> {
+        let Some(cell) = self.nameref_cell_in(name, 0) else {
+            // Not a reference: the global binding is the answer, if there is one.
+            return self.bound_in_context(name, 0).then(|| RefTarget {
+                base: name.to_string(),
+                sub: None,
+                scope: RefScope::Context(0),
+            });
+        };
+        let next = bytes::as_str(cell).filter(|n| !n.is_empty())?.to_owned();
+        let target = self.walk_ref_name(&next).target?;
+        // `find_variable_internal` answering NULL is the chain reaching nothing,
+        // and an element reference is not a name it could have looked up.
+        let found = match (&target.sub, target.scope) {
+            (Some(_), _) => false,
+            (None, RefScope::Live) => self.name_is_bound(target.base.as_bytes()),
+            (None, RefScope::Context(d)) => self.bound_in_context(&target.base, d),
+        };
+        found.then_some(target)
+    }
+
+    /// bash's `chklocal` test: does `name` reach a binding **this very frame**
+    /// holds?
+    ///
+    /// The question is asked of the variable the *reference chain* ends at, not
+    /// of the name as written — `declare_find_variable` (declare.def:149) and
+    /// `do_compound_assignment`'s global branch (subst.c:3497) both spell it the
+    /// same way:
+    ///
+    /// ```c
+    ///   var = find_variable (name);           /* follows namerefs */
+    ///   if (var && local_p (var) && var->context == variable_context)
+    ///     return var;
+    ///   return (find_global_variable (name)); /* only globals, and only their
+    ///                                            namerefs */
+    /// ```
+    ///
+    /// So a frame-local reference *out* of the frame does not keep the
+    /// declaration in it. `f() { local -n g=z; readonly g=(1 2); }` lands the
+    /// array on the **global `g`** — not on `z`, and not on the frame's `g`,
+    /// which stays the reference it was — because the chain reaches `z`, `z` is
+    /// no local of `f`, and the fallback then looks `g` up among the globals
+    /// alone, where the frame's reference is invisible. Point the reference at a
+    /// local of the same frame (`local z; local -n g=z`) and the test passes, so
+    /// the array binds `z`.
+    ///
+    /// A chain that reaches no variable at all — a broken link, an element
+    /// reference (`find_variable` looks the cell up as a whole name and
+    /// `arr[0]` is not one), a cycle — is `find_variable` answering NULL, which
+    /// is not a local either.
+    fn chklocal_reaches_this_frame(&self, name: &str) -> bool {
+        let reached = match self.walk_ref_name(name).target {
+            Some(RefTarget { base, sub: None, scope: RefScope::Live }) => base,
+            _ => return false,
+        };
+        self.local_frames
+            .last()
+            .is_some_and(|f| f.iter().any(|(n, _)| *n == reached))
     }
 
     /// [`Shell::enter_global_scope`] for any variable context, not just the
@@ -21442,12 +21700,7 @@ impl Shell {
     ) -> Vec<(String, usize, VarSnapshot)> {
         let mut saved = Vec::new();
         for name in names {
-            if chklocal
-                && self
-                    .local_frames
-                    .last()
-                    .is_some_and(|f| f.iter().any(|(n, _)| n == name))
-            {
+            if chklocal && self.chklocal_reaches_this_frame(name) {
                 continue;
             }
             // The *outermost* shadowing frame at or inside `depth`, so a name
@@ -44399,7 +44652,7 @@ impl Shell {
         if !global {
             return self.builtin_declare_scoped(args, is_local, tag, flag_limit, &[]);
         }
-        let saved = self.enter_global_scope(&Self::declare_operand_names(args), chklocal);
+        let saved = self.enter_global_scope(&Self::declare_operand_names(args), &[], chklocal);
         let prev = std::mem::replace(&mut self.declare_global_swap, saved);
         let status = self.builtin_declare_scoped(args, is_local, tag, flag_limit, &[]);
         let saved = std::mem::replace(&mut self.declare_global_swap, prev);
@@ -46744,23 +46997,54 @@ impl Shell {
     ///
     /// The line is the compound-assignment machinery's, which is why it carries
     /// no `declare:` tag (unlike the bare-name form in
-    /// [`Shell::builtin_declare`]). What follows it turns on whether there is a
-    /// function frame around the command — bash's `variable_context`:
+    /// [`Shell::builtin_declare`]). What follows it is decided by one flag on
+    /// the word, `W_FORCELOCAL` (subst.c:12762):
     ///
-    /// * At top level the machinery's failure ends the parse unit, so the
+    /// ```c
+    ///   t = make_internal_declare (tlist->word->word, opts, …);
+    ///   if (t != EXECUTION_SUCCESS)
+    ///     {
+    ///       last_command_exit_value = t;
+    ///       if (tlist->word->flags & W_FORCELOCAL)   /* non-fatal error */
+    ///         skip = 1;
+    ///       else
+    ///         exp_jump_to_top_level (DISCARD);
+    ///     }
+    /// ```
+    ///
+    /// * **Without** it the machinery's failure ends the parse unit, so the
     ///   builtin never runs and never speaks its half. `None` says so, and the
     ///   caller returns [`Flow::Discard`].
-    /// * Inside a function it is an ordinary failure: the builtin runs, is
-    ///   handed the same operand, and refuses it again with its own tag. The
-    ///   returned line is that half, to be *held* on the operand rather than
-    ///   spoken now — bash prints every machinery half before any builtin one,
-    ///   for the same reason the `noassign` and readonly refusals hold theirs.
+    /// * **With** it the failure is ordinary: the builtin runs, is handed the
+    ///   same operand, and refuses it again with its own tag. The returned line
+    ///   is that half, to be *held* on the operand rather than spoken now —
+    ///   bash prints every machinery half before any builtin one, for the same
+    ///   reason the `noassign` and readonly refusals hold theirs.
+    ///
+    /// The flag is set for an assignment builtin that is also a
+    /// `LOCALVAR_BUILTIN` — `declare`, `typeset`, `local` — running with a
+    /// non-zero `variable_context` (execute_cmd.c:4223):
+    ///
+    /// ```c
+    ///   else if (b && (b->flags & ASSIGNMENT_BUILTIN) &&
+    ///            (b->flags & LOCALVAR_BUILTIN) && variable_context)
+    ///     w->word->flags |= W_FORCELOCAL;
+    /// ```
+    ///
+    /// So it is the **builtin's identity**, not `-g`, that decides: a
+    /// `declare -ga q=(1)` inside a function is non-fatal like a plain
+    /// `declare -a q=(1)` even though it binds a global, while `readonly -a` and
+    /// `export -a` — assignment builtins that make no locals — discard the parse
+    /// unit wherever they run. Reading `variable_context` alone got the first
+    /// right and the second wrong, silently continuing past a `readonly -a` that
+    /// bash abandons.
     ///
     /// The machinery's half names the running function when the binding it
-    /// would make is a **global** one (`declare -g` from inside a function); a
-    /// declaration binding a local is untagged, as at top level. That is the
-    /// opposite way round from the readonly refusal, which is tagged and only
-    /// ever fires on a local — the two come from different places in bash.
+    /// would make is a **global** one (`declare -g` from inside a function, and
+    /// either global builtin); a declaration binding a local is untagged, as at
+    /// top level. That is the opposite way round from the readonly refusal,
+    /// which is tagged and only ever fires on a local — the two come from
+    /// different places in bash.
     ///
     /// `blame` is the name the refusal is *about*, which is not always the
     /// operand: an operand reached through a reference to an element is refused
@@ -46779,6 +47063,8 @@ impl Shell {
             format!(": cannot convert {from_kind} to {to_kind} array")
         ];
         let top = self.local_frames.is_empty();
+        // `W_FORCELOCAL`: a locals-making assignment builtin, inside a function.
+        let forcelocal = !top && !matches!(cmd, "readonly" | "export");
         let tag: Str = if make_local || top {
             Vec::new()
         } else {
@@ -46786,7 +47072,7 @@ impl Shell {
         };
         self.berrln(&bfmt![self.err_prefix(), &tag, &msg]);
         self.last_status = 1;
-        if top {
+        if !forcelocal {
             return None;
         }
         Some(bfmt![self.err_prefix(), cmd, b": ", &msg])
@@ -46919,7 +47205,7 @@ impl Shell {
         out: &mut Out,
         redir: &RedirPlan,
     ) -> Flow {
-        self.in_declare_global_scope(argv, decl_arrays, |sh| {
+        self.in_declare_global_scope(argv, decl_arrays, false, |sh| {
             sh.exec_declare_with_arrays_scoped(argv, words, &prepared, out, redir)
         })
     }
@@ -47038,7 +47324,7 @@ impl Shell {
         flag_limit: usize,
         positions: &[usize],
     ) -> Result<DeclCompounds, Flow> {
-        self.in_declare_global_scope(argv, decl_arrays, |sh| {
+        self.in_declare_global_scope(argv, decl_arrays, true, |sh| {
             sh.declare_compounds_scoped(argv, decl_arrays, flag_limit, positions)
         })
     }
@@ -47053,25 +47339,100 @@ impl Shell {
     /// what the half made of the global back in the frame that shadows it, which
     /// is exactly where the next enter reads it from. See
     /// [`Shell::enter_global_scope`].
+    ///
+    /// `readonly` and `export` ask for it without spelling it. bash flags every
+    /// assignment word of an assignment builtin that does not make locals with
+    /// `W_ASSNGLOBAL|W_CHKLOCAL` (execute_cmd.c:4221) — "make sure we create
+    /// global variables even if we internally call `declare`" — which is the
+    /// `-gG` this reads out of the words of any other command. Without it a
+    /// compound operand of theirs bound wherever the *live* binding of the name
+    /// was, so an enclosing frame's local was overwritten and the global left
+    /// unset.
+    ///
+    /// Only their **compound** operands take it, though: the flag is read by
+    /// `expand_declaration_argument`, which the word-expansion pass runs for
+    /// `W_COMPASSIGN` words alone (subst.c:12815). A scalar operand is handed to
+    /// the builtin as a `name=value` string and assigned by it through the
+    /// ordinary `bind_variable`, so `f() { readonly g=1; }` under an enclosing
+    /// `local g` really does mark and write that local.
     fn in_declare_global_scope<T>(
         &mut self,
         argv: &[Str],
         decl_arrays: &[DeclArray],
+        expansion_half: bool,
         body: impl FnOnce(&mut Self) -> T,
     ) -> T {
-        let (global, chklocal) = Self::declare_global_flag(argv.get(1..).unwrap_or_default());
-        if !global {
+        let cmd = argv
+            .first()
+            .map(Vec::as_slice)
+            .and_then(bytes::as_str)
+            .unwrap_or_default();
+        let global_builtin = matches!(cmd, "export" | "readonly");
+        let (flagged, chklocal) = Self::declare_global_flag(argv.get(1..).unwrap_or_default());
+        if !flagged && !global_builtin {
             return body(self);
         }
-        let mut names = Self::declare_operand_names(argv.get(1..).unwrap_or_default());
+        let names = if global_builtin {
+            Vec::new()
+        } else {
+            Self::declare_operand_names(argv.get(1..).unwrap_or_default())
+        };
+        let chklocal = chklocal || global_builtin;
         // Compound operands were lifted out of `argv` into `decl_arrays`, so
-        // their names have to be collected separately.
+        // their names have to be collected separately — and kept apart, since
+        // the name a compound literal binds is not found the same way (see
+        // [`Shell::global_bind_name`]).
+        let mut compound: Vec<String> = Vec::new();
         for d in decl_arrays {
-            if !names.contains(&d.assign.name) {
-                names.push(d.assign.name.clone());
+            if !names.contains(&d.assign.name) && !compound.contains(&d.assign.name) {
+                compound.push(d.assign.name.clone());
             }
         }
-        let saved = self.enter_global_scope(&names, chklocal);
+        // A **frame-local** reference the swap is about to hide is still the
+        // live binding of the name for the two commands the swap belongs to.
+        // bash's `declare_find_variable` (declare.def:149) and
+        // `do_compound_assignment`'s chklocal branch (subst.c:3491) each ask
+        // `find_variable` of the tables as they stand — reference and all —
+        // *before* falling back on `find_global_variable`, so a cycle reached
+        // through the frame warns once per command. Only then does the fallback
+        // choose the global, which is what the swap models.
+        //
+        // Walking it here rather than in [`Shell::declare_compounds_scoped`] is
+        // the whole point: by the time that runs the frame's binding has been
+        // swapped out of the live tables and the chain has nothing to say. Only
+        // the **expansion half** owes them, and owes exactly two — steps 1 and
+        // 2, the pair the swap is entered for. The third command, the builtin
+        // proper, runs after [`Shell::leave_global_scope`] and finds the
+        // reference back where it was, so it walks for itself and this owes it
+        // nothing.
+        //
+        // `chklocal` is what decides between the two: a chain that reaches a
+        // binding of *this very frame* is not swapped at all (the declaration
+        // simply lands on it) and takes the ordinary in-swap path, while one
+        // that reaches out of the frame, or reaches nothing — a broken link, an
+        // element reference, a cycle — is. So the test is simply whether the
+        // swap ended up saving the name.
+        let hidden: Vec<(String, RefWalk)> = if global_builtin && expansion_half {
+            names
+                .iter()
+                .chain(compound.iter())
+                .filter(|n| self.nameref_attr.contains(*n))
+                .map(|n| (n.clone(), self.walk_ref_name(n)))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let saved = self.enter_global_scope(&names, &compound, chklocal);
+        // Whatever the swap really did hide, it owes for — and only that: where
+        // the global side of the lookup was empty the swap is made for the
+        // *transformed* name instead (see [`Shell::enter_global_scope`]), the
+        // frame's reference stays live, and the commands that follow walk it for
+        // themselves.
+        for (name, walk) in &hidden {
+            if saved.iter().any(|(n, _, _)| n == name) {
+                self.warn_circular_walks(name, walk, 2);
+            }
+        }
         let prev = std::mem::replace(&mut self.declare_global_swap, saved);
         let outcome = body(self);
         let saved = std::mem::replace(&mut self.declare_global_swap, prev);
@@ -47160,21 +47521,15 @@ impl Shell {
         let mut off_lower = false;
         let mut off_upper = false;
         let mut off_capcase = false;
-        // `readonly`/`export` imply the corresponding attribute on every name.
-        let mut readonly = cmd == "readonly";
-        let mut export = cmd == "export";
-        // `+x`/`+r` cancel the attribute the same command's `-x`/`-r` set — see
-        // `unset_export`/`unset_readonly` in
-        // [`Shell::builtin_declare_scoped`]. `+r` needs no *refusal* here: a
-        // compound operand naming an already-readonly variable is turned away
-        // by the readonly guard in `apply_assignment` during phase 1, before
-        // these attributes are reached.
-        let mut unset_export = false;
-        let mut unset_readonly = false;
+        // The *marking* letters — `r`, `x`, `n`, `t` and their `+` spellings —
+        // are read only for `-n`, and only because a reference and an array are
+        // a combination phase 1 has to refuse before the literal binds. The
+        // rest are applied by the builtin half, which re-scans the same words
+        // ([`Shell::builtin_declare_scoped`] for the `declare` family,
+        // [`Shell::builtin_readonly`]/[`Shell::builtin_export`] for the other
+        // two), so reading them a second time here would only invite the two
+        // scans to disagree.
         let mut nameref = false;
-        let mut unset_nameref = false;
-        let mut trace = false;
-        let mut unset_trace = false;
         // The attributes a *compound literal's* values bind with are not the
         // pair the name is left holding, and which set is used turns on whether
         // the command "claims" the assignment word.
@@ -47285,14 +47640,7 @@ impl Shell {
                             }
                         }
                     }
-                    b'r' if enable => readonly = true,
-                    b'r' => unset_readonly = true,
-                    b'x' if enable => export = true,
-                    b'x' => unset_export = true,
                     b'n' if enable => nameref = true,
-                    b'n' => unset_nameref = true,
-                    b't' if enable => trace = true,
-                    b't' => unset_trace = true,
                     b'p' if enable => print_mode = true,
                     // Both signs ask to inherit — see the same letter in
                     // [`Shell::builtin_declare_scoped`].
@@ -47318,19 +47666,11 @@ impl Shell {
         // `-n` is not the nameref letter for `readonly`/`export`: each reads it
         // as "do not apply my own attribute", so `readonly -n q=(1)` binds a
         // writable array and `export -n q=(1)` an unexported one, and neither
-        // name becomes a reference. `export -n` on a name that already carries
-        // the attribute really does take it off; `readonly -n` cannot, since
-        // nothing un-makes a readonly — which is exactly the asymmetry
-        // `unset_export`/`unset_readonly` already carry below.
-        if global_builtin && nameref {
-            nameref = false;
-            if cmd == "readonly" {
-                readonly = false;
-            } else {
-                export = false;
-                unset_export = true;
-            }
-        }
+        // name becomes a reference. Which of the two the letter means is the
+        // builtin's own business, and each reads it for itself; all this half
+        // has to know is that no reference is being asked for, so the
+        // reference-cannot-be-an-array refusal below must not fire.
+        nameref &= !global_builtin;
         // `local` outside a function makes nothing local: bash's refusal comes
         // from the builtin, after the literals have already bound as globals, so
         // this phase behaves exactly as a bare `q=(1)` would — including taking
@@ -47496,29 +47836,46 @@ impl Shell {
             //     }` warns twice for the `local -a g` and not at all for the
             //     compound beside it.
             //
-            // Measured against bash 5.2.37, and every one of these was wrong:
+            // `readonly`/`export` differ twice over, and both times because they
+            // are the assignment builtins that make no locals, so bash flags
+            // their words `W_ASSNGLOBAL|W_CHKLOCAL` (execute_cmd.c:4221) and
+            // step 1 becomes `declare -gG NAME`:
+            //
+            //   * The `-G` costs **one walk more** than a plain `-g` wherever it
+            //     runs, because `declare_find_variable` (declare.def:149) asks
+            //     `find_variable` first and only falls back on
+            //     `find_global_variable` — two walks where the plain global
+            //     branch makes one.
+            //   * Step 2 costs one more too, but only *inside a function*.
+            //     `do_compound_assignment`'s `chklocal` branch is guarded
+            //     `else if (mkglobal && variable_context)` (subst.c:3491), so at
+            //     top level the ordinary `assign_array_from_string` runs
+            //     instead — one walk, not the branch's `find_variable` plus
+            //     `find_global_variable`.
+            //
+            // Measured against bash 5.2.37 (`declare -n c1=c2; declare -n c2=c1`
+            // then the command, counting `circular name reference` lines):
             //
             // ```text
-            //             -a / -A   no kind letter (incl. -i)
-            //   local        2            4
-            //   top level    1            3
+            //                        -a / -A   no kind letter (incl. -i)
+            //   local                   2            4
+            //   global, declare-family  1            3   (top level and in a function alike)
+            //   global, readonly/export 2            4 at top level, 5 in a function
             // ```
             //
-            // `readonly`/`export` are the exception. They declare a *global*
-            // even inside a function (`W_ASSNGLOBAL|W_CHKLOCAL`,
-            // execute_cmd.c:4220), so step 1 is `declare -gG NAME` and the
-            // cycle's escape really is where the literal lands — the frame's
-            // reference is left exactly as it was. Only step 1 is charged here;
-            // the store below walks the surviving chain itself, which is step 2.
+            // The store below adds nothing to any of these: by the time it runs
+            // the name is unfollowable — an array where a kind letter made one,
+            // and otherwise the target this walk already resolved.
             let kind_letter = indexed || assoc;
-            let escapes = !make_local && !self.local_frames.is_empty();
-            // Everywhere else the name is left unfollowable before the store —
-            // unreferenced at global scope, an array in a frame — so this site
-            // is charged for every walk the operand costs.
-            let walks = if escapes {
-                if kind_letter { 1 } else { 2 }
-            } else if make_local {
+            let in_function = !self.local_frames.is_empty();
+            let walks = if make_local {
                 if kind_letter { 2 } else { 4 }
+            } else if global_builtin {
+                match (kind_letter, in_function) {
+                    (true, _) => 2,
+                    (false, true) => 5,
+                    (false, false) => 4,
+                }
             } else if kind_letter {
                 1
             } else {
@@ -48115,23 +48472,7 @@ impl Shell {
                 return Err(Flow::Discard);
             }
         }
-        Ok(DeclCompounds {
-            bound,
-            print_mode,
-            flags: BoundCompoundFlags {
-                kind_conflict: self_kind_conflict,
-                unset_assoc,
-                unset_indexed,
-                nameref,
-                unset_nameref,
-                export,
-                unset_export,
-                readonly,
-                unset_readonly,
-                trace,
-                unset_trace,
-            },
-        })
+        Ok(DeclCompounds { bound, print_mode })
     }
 
     /// The builtin half of a declaration command with compound operands: its own
@@ -48157,8 +48498,8 @@ impl Shell {
         // Only the `declare` family reads a `+` word as a flag at all, which
         // decides both where phase 2 stops scanning and whether phase 3 runs.
         let global_builtin = cmd == "export" || cmd == "readonly";
-        let DeclCompounds { bound, print_mode, flags } = prepared;
-        let (print_mode, flags) = (*print_mode, *flags);
+        let DeclCompounds { bound, print_mode } = prepared;
+        let print_mode = *print_mode;
         // Every compound operand has bound (and traced), so the builtin's own trace
         // line comes now — after them *and after the command's prefix assignments*,
         // and only if the command got this far: bash does not trace the builtin at
@@ -48233,31 +48574,63 @@ impl Shell {
             }
             return Flow::Next;
         }
-        // Phase 2 — the builtin: the flags, and any *scalar* operands
-        // (e.g. `declare -x FOO=bar`). For `readonly`/`export`, route scalar
-        // operands through their own builtin — but only when a non-flag operand is
-        // present, so an array-literal-only invocation (`readonly arr=(1 2)`) never
-        // slips into listing mode.
+        // Phase 2 — the builtin: the flags, and the operands.
+        //
         // A word past `flag_limit` is an operand however it is spelled, so it
-        // counts here too — `readonly q=(1) -x` really does reach the operand
+        // counts here too — `declare q=(1) -x` really does reach the operand
         // loop, which is what refuses `-x` as a name.
-        // And a `+x` word is an operand to `readonly`/`export`, which have no `+`
-        // options — so `readonly +a q=(1)` reaches the operand loop too, and gets
-        // the same `` `+a': not a valid identifier `` the scalar spelling gives.
         let limit = words.flag_limit.max(1).saturating_sub(1);
-        let has_scalar_operand = argv[1..].iter().enumerate().any(|(i, a)| {
-            if i >= limit {
-                return true;
+        let status = if global_builtin {
+            // `readonly` and `export` are **one** builtin call, not one per kind
+            // of operand. bash's decomposition (`expand_declaration_argument`,
+            // subst.c:12653) hands the third of its three commands the operand
+            // *truncated at the `=`* (subst.c:12493) and runs it as the real
+            // builtin, once the whole word-expansion pass is over — and a scalar
+            // operand never enters that decomposition at all (it is only reached
+            // for `W_COMPASSIGN` words, subst.c:12815) so it arrives at the same
+            // call, whole. `words.spliced` is exactly that argument list: every
+            // operand at the position it was written, the compound ones as bare
+            // names. Handing it over is all this needs.
+            //
+            // Calling the builtin only when a *scalar* operand was present is
+            // what made `readonly -Z q=(1)`, `readonly -f q=(1)` and
+            // `export -f q=(1)` silent successes: with nothing but compound
+            // operands the flags were never scanned, so no invalid option was
+            // refused, `-f` never reached the function namespace, and the
+            // marking was applied by a loop of this file's own instead.
+            //
+            // Every operand is in the list now, so nothing can end option
+            // parsing at a word the builtin cannot see and the natural getopt
+            // stop is the only limit there is — which is also what gives
+            // `readonly +a q=(1)` the same `` `+a': not a valid identifier ``
+            // the scalar spelling gives, these two having no `+` options.
+            //
+            // It runs **outside** the `-gG` swap the compound operands bound
+            // under: the swap belongs to the first two of bash's three commands
+            // (`declare -gG name`, then the compound assignment proper), which
+            // is why the value can land globally while the attribute follows the
+            // live reference somewhere else entirely:
+            //
+            // ```sh
+            // f() { local -n g=z; readonly g=(1 2); }; f
+            // declare -a g=([0]="1" [1]="2")   # the array, on the global `g`
+            // declare -r z                     # the attribute, on what the reference reached
+            // ```
+            //
+            // Undoing the swap here rather than up in
+            // [`Shell::exec_declare_with_arrays`] keeps the call inside the
+            // builtin's own `2>`, which a second `push_builtin_stderr` would
+            // have re-truncated.
+            let swap = std::mem::take(&mut self.declare_global_swap);
+            self.leave_global_scope(swap);
+            let args = words.spliced.get(1..).unwrap_or_default();
+            let n = args.len();
+            if cmd == "readonly" {
+                self.builtin_readonly(args, out, redir, n)
+            } else {
+                self.builtin_export(args, out, redir, n)
             }
-            if a.as_slice() == b"--" || a.starts_with(b"-") {
-                return false;
-            }
-            global_builtin || !a.starts_with(b"+")
-        });
-        let mut status = match cmd {
-            "readonly" if has_scalar_operand => self.builtin_readonly(&argv[1..], out, redir, limit),
-            "export" if has_scalar_operand => self.builtin_export(&argv[1..], out, redir, limit),
-            "readonly" | "export" => 0,
+        } else {
             // `_scoped`: any `-g` swap is already in force for this half of the
             // command (see [`Shell::in_declare_global_scope`]), and re-entering
             // it here would pair the inner restore with the outer's saved
@@ -48265,31 +48638,8 @@ impl Shell {
             // `builtin_declare_scoped` walks them interleaved with its own
             // words, so its diagnostics come out in the order the operands were
             // written, as bash's single loop over all of them does.
-            _ => self.builtin_declare_scoped(&argv[1..], is_local, cmd, limit, bound),
+            self.builtin_declare_scoped(&argv[1..], is_local, cmd, limit, bound)
         };
-        // Phase 3 — the compound operands of `readonly`/`export`, which are the
-        // two builtins whose scalar operands went to an entry point of their own
-        // (`builtin_readonly`/`builtin_export`) that knows nothing of
-        // `decl_arrays`. The `declare` family's compounds took their turn inside
-        // `builtin_declare_scoped`'s operand loop instead, at the position they
-        // were written. `readonly` in particular has to come after the value is
-        // bound, since a readonly guard in `apply_assignment` would otherwise
-        // reject the initializer — and an array-literal-only `readonly arr=(1 2)`
-        // has no builtin call at all to rely on.
-        //
-        // Ordering costs nothing here: neither builtin has a diagnostic left to
-        // interleave. None of `apply_bound_compound`'s three refusals can fire —
-        // neither makes locals (so `refused_local` is unreachable), neither reads
-        // `-n` as the nameref letter (so `refused_nameref` is), neither reads a
-        // `+` word as a flag at all (so `unset_assoc`/`unset_indexed` are), and
-        // the kind conflict is the `declare` family's alone.
-        if global_builtin {
-            for c in bound {
-                if self.apply_bound_compound(c, cmd, flags) {
-                    status = 1;
-                }
-            }
-        }
         if pushed_stderr {
             self.stderr_stack.pop();
         }
@@ -54986,28 +55336,19 @@ struct RefWalk {
 impl RefWalk {
     /// A walk that ended on a name — the ordinary case, cycle or not.
     fn reached(target: RefTarget) -> Self {
-        Self {
-            target: Some(target),
-            circular: false,
-        }
+        Self { target: Some(target), circular: false }
     }
 
     /// A walk abandoned for depth: nothing reached, nothing said.
     fn gave_up() -> Self {
-        Self {
-            target: None,
-            circular: false,
-        }
+        Self { target: None, circular: false }
     }
 
-    /// A walk that closed on itself. `Some` where the cycle shut on a
+    /// A walk that closed on itself. `Some` target where the cycle shut on a
     /// function-local variable and so escaped to global scope, `None` where it
     /// reached nothing at all.
     fn closed(target: Option<RefTarget>) -> Self {
-        Self {
-            target,
-            circular: true,
-        }
+        Self { target, circular: true }
     }
 
     /// Whether the walk ended on a name the chain really designates — bash's
@@ -74413,6 +74754,75 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(st, 0);
     }
 
+    /// A declaration made at global scope from inside a function does not always
+    /// bind the name it was written with. `find_global_variable` (variables.c:
+    /// 2400) reads only the *first* link from the global table, so when it comes
+    /// back NULL — no global binding, a chain ending on an unset name, a cycle —
+    /// bash binds a reference cell from the chain instead, globally all the same.
+    ///
+    /// *Which* cell is where the two commands a declaration is made of part
+    /// company. `do_compound_assignment` takes the **live** chain's
+    /// (`nameref_transform_name`, subst.c:3506), so a frame-local reference out
+    /// of the frame decides the global written. `declare_internal` asks
+    /// `find_global_variable_last_nameref (name, 0)` first (declare.def:735),
+    /// which never leaves the global table and so cannot see that reference at
+    /// all; only when *that* answers nothing — among globals, a cycle — does the
+    /// name fall through to `bind_global_variable`, whose `bind_variable_internal`
+    /// (variables.c:3020) reaches for the live cell after all. Both roads start
+    /// at the global table's own entry for the name, so a name with no global
+    /// binding is bound as written. Corpus:
+    /// `a-global-scope-declaration-whose-global-chain-dies-binds-the-live-chains-last-reference.sh`.
+    #[test]
+    fn a_global_scope_declaration_whose_global_chain_dies_binds_the_live_chains_last_reference() {
+        // A cycle among the globals: the builtin's own walk gives up, and the
+        // frame's reference names the global written.
+        let (out, st) = run(
+            "declare -n g=z; declare -n z=g; \
+             f() { local -n g=w; declare -g g=1; }; f 2>/dev/null; declare -p g z w",
+        );
+        assert_eq!(out, "declare -n g=\"z\"\ndeclare -n z=\"g\"\ndeclare -- w=\"1\"\n");
+        assert_eq!(st, 0);
+
+        // The same chain merely *ending* on an unset name is walkable, so the
+        // global-only walk answers and the frame's reference is never consulted:
+        // the value lands on the end of the chain as written at top level.
+        let (out, st) = run(
+            "declare -n g=z; \
+             f() { local -n g=w; declare -g g=1; }; f; declare -p g z",
+        );
+        assert_eq!(out, "declare -n g=\"z\"\ndeclare -- z=\"1\"\n");
+        assert_eq!(st, 0);
+
+        // A compound literal is the other command and always takes the live
+        // cell, cycle or no cycle.
+        let (out, st) = run(
+            "declare -n g=z; \
+             f() { local -n g=w; readonly g=(1 2); }; f; declare -p g z w",
+        );
+        assert_eq!(
+            out,
+            "declare -n g=\"z\"\ndeclare -ar w=([0]=\"1\" [1]=\"2\")\n"
+        );
+        assert_eq!(st, 1); // the trailing listing of `z`, which was never made
+
+        // No global binding at all: both roads bind the name as written, which
+        // is why the array and the attribute can end up on two variables.
+        let (out, st) = run("f() { local -n g=w; readonly g=(1 2); }; f; declare -p g w");
+        assert_eq!(out, "declare -a g=([0]=\"1\" [1]=\"2\")\ndeclare -r w\n");
+        assert_eq!(st, 0);
+
+        // A global that is no reference is found, so nothing is transformed…
+        let (out, st) = run("g=old; f() { local -n g=w; declare -g g=1; }; f; declare -p g");
+        assert_eq!(out, "declare -- g=\"1\"\n");
+        assert_eq!(st, 0);
+
+        // …and neither is a chain that reaches a variable, wherever it ends.
+        let (out, st) =
+            run("declare -n g=z; z=Z; f() { local -n g=w; declare -g g=1; }; f; declare -p g z");
+        assert_eq!(out, "declare -n g=\"z\"\ndeclare -- z=\"1\"\n");
+        assert_eq!(st, 0);
+    }
+
     /// A compound operand of a declaration builtin is **three commands**
     /// (`expand_declaration_argument`, subst.c:12655): `make_internal_declare`
     /// over the name alone, `do_word_assignment` for the compound, and then the
@@ -74514,6 +74924,251 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             format!("{w}declare -n g=\"z\"\nAFTER\ndeclare -a g=([0]=\"1\" [1]=\"2\")\n")
         );
         assert_eq!(st, 0);
+    }
+
+    /// The three commands a compound operand decomposes into
+    /// (`expand_declaration_argument`, subst.c:12653) name the same variable for
+    /// the declare family and need not for `readonly`/`export`. Those two are
+    /// not LOCALVAR_BUILTINs, so every assignment word of theirs carries
+    /// `W_ASSNGLOBAL|W_CHKLOCAL` (execute_cmd.c:4221) and steps 1–2 run as
+    /// `declare -gG` — but step 3, the *real* builtin over the word truncated at
+    /// the `=`, runs after the whole expansion pass with no such stamp. It marks
+    /// whatever the name is bound to then, followed through its live reference
+    /// chain, which can be somewhere else entirely.
+    ///
+    /// The absent kind letter also matters: `W_FORCELOCAL` (command.h:105) is
+    /// set only for an assignment builtin that is *also* a LOCALVAR_BUILTIN
+    /// inside a function, and at subst.c:12762 it alone separates a non-fatal
+    /// error from `exp_jump_to_top_level (DISCARD)`. Corpus:
+    /// `a-marked-compound-operand-is-two-commands-that-need-not-agree-where-they-land.sh`.
+    #[test]
+    fn a_marked_compound_operand_is_two_commands_that_need_not_agree_where_they_land() {
+        // The canonical parting: the array on the global `g` (the frame's `g`
+        // is a nameref, not a local chklocal would accept), the `-r` on `z`.
+        let (out, st) = run(
+            "f() { local -n g=z; readonly g=(1 2); declare -p g z; }; f 2>&1; \
+             echo AFTER; declare -p g z",
+        );
+        assert_eq!(
+            out,
+            "declare -n g=\"z\"\ndeclare -r z\nAFTER\n\
+             declare -a g=([0]=\"1\" [1]=\"2\")\ndeclare -r z\n"
+        );
+        assert_eq!(st, 0);
+
+        // `export` parts the same way, and a chain is followed to its end.
+        let (out, st) = run(
+            "f() { local -n g=h2; local -n h2=z; export g=(1 2); declare -p g h2 z; }; f 2>&1; \
+             echo AFTER; declare -p g z",
+        );
+        assert_eq!(
+            out,
+            "declare -n g=\"h2\"\ndeclare -n h2=\"z\"\ndeclare -x z\nAFTER\n\
+             declare -a g=([0]=\"1\" [1]=\"2\")\ndeclare -x z\n"
+        );
+        assert_eq!(st, 0);
+
+        // The declare family keeps both halves together: step 1 is a `local`,
+        // so the array *is* what the reference reached.
+        let (out, st) =
+            run("f() { local -n g=z; declare g=(1 2); declare -p g z; }; f 2>&1; \
+                 echo AFTER; declare -p g 2>&1");
+        assert_eq!(
+            out,
+            "declare -n g=\"z\"\ndeclare -a z=([0]=\"1\" [1]=\"2\")\nAFTER\n\
+             osh: declare: g: not found\n"
+        );
+        assert_eq!(st, 1);
+
+        // A *global* nameref parts nothing — chklocal finds no local of this
+        // frame either way, so the global the walk reaches takes both halves.
+        for src in ["f() { readonly g=(1 2); declare -p g z; }; f", "readonly g=(1 2); declare -p g z"] {
+            let (out, st) = run(&format!("declare -n g=z; {src} 2>&1"));
+            assert_eq!(out, "declare -n g=\"z\"\ndeclare -ar z=([0]=\"1\" [1]=\"2\")\n", "{src}");
+            assert_eq!(st, 0, "{src}");
+        }
+
+        // Nor does a local the reference actually reaches: chklocal accepts it,
+        // so the value lands there and the marking finds the same place.
+        let (out, st) = run("f() { local z=Z; local -n g=z; readonly g=(1 2); declare -p g z; }; f 2>&1");
+        assert_eq!(out, "declare -n g=\"z\"\ndeclare -ar z=([0]=\"1\" [1]=\"2\")\n");
+        assert_eq!(st, 0);
+
+        // Every operand is split alike, compound or scalar, and the scalar ones
+        // never took this path at all.
+        let (out, st) =
+            run("f() { local -n g=z; readonly g=(1 2) s=5 w=(3); declare -p g z s w; }; f 2>&1");
+        assert_eq!(
+            out,
+            "declare -n g=\"z\"\ndeclare -r z\ndeclare -r s=\"5\"\n\
+             declare -ar w=([0]=\"3\")\n"
+        );
+        assert_eq!(st, 0);
+
+        // `W_FORCELOCAL`: a kind conflict is non-fatal for the locals-making
+        // builtins inside a function and fatal for `readonly`/`export` there,
+        // exactly as it is fatal for everything at top level.
+        for (src, want) in [
+            ("f() { declare -ga m=(1 2); echo reached; }; f; echo out=$?", true),
+            ("f() { readonly -a m=(1 2); echo reached; }; f; echo out=$?", false),
+            ("f() { export -a m=(1 2); echo reached; }; f; echo out=$?", false),
+            ("readonly -a m=(1 2); echo reached", false),
+        ] {
+            let out = run(&format!("declare -A m=([a]=1); {{ {src}; }} 2>&1")).0;
+            assert_eq!(out.contains("reached"), want, "{src} -> {out:?}");
+            assert!(out.contains("cannot convert associative to indexed array"), "{src}");
+        }
+    }
+
+    /// The circular-warning count measures the decomposition, because every walk
+    /// of a self-closing chain warns exactly once. `readonly`/`export` pay two
+    /// walks the declare family does not: `-G` makes step 1's
+    /// `declare_find_variable` (declare.def:149) try the nameref-following
+    /// `find_variable` before `find_global_variable`, and step 2's chklocal
+    /// branch is guarded `else if (mkglobal && variable_context)`
+    /// (subst.c:3491), so it costs one more *inside a function only*. A kind
+    /// letter collapses both: step 1 has already overwritten the value cell with
+    /// an `ARRAY *`, leaving no name to follow. Corpus:
+    /// `a-marking-builtins-compound-operand-is-walked-once-more-than-a-declarations.sh`.
+    #[test]
+    fn a_marking_builtins_compound_operand_is_walked_once_more_than_a_declarations() {
+        // The redirect has to be on a *group*: bash expands a command's words
+        // before `do_redirections` runs, so a `2>&1` written on the declaration
+        // itself never catches its own expansion's warnings.
+        let cyc = "declare -n g=z; declare -n z=g;";
+        for (src, top, infn) in [
+            // No kind letter: four walks at top level, five in a function —
+            // these two builtins are the only spelling that costs *more* there.
+            ("readonly g=(1 2)", 4, 5),
+            ("export g=(1 2)", 4, 5),
+            // `-i` transforms a value; it does not choose a storage shape.
+            ("readonly -i g=(1 2)", 4, 5),
+            // A kind letter leaves no name for steps 2–3 to follow.
+            ("readonly -a g=(1 2)", 2, 2),
+            ("readonly -A g=([k]=v)", 2, 2),
+            ("export -a g=(1 2)", 2, 2),
+            // The declare family is one cheaper, and flat across the two.
+            ("declare -g g=(1 2)", 3, 3),
+            ("declare -ga g=(1 2)", 1, 1),
+            // …and a plain one inside a function binds a *local*, which is
+            // step 1's whole cost and leaves the global chain to steps 2–3.
+            ("declare g=(1 2)", 3, 2),
+            ("declare -a g=(1 2)", 1, 2),
+            // Scalars never reach `expand_declaration_argument` at all, so the
+            // marking builtins and the declaring ones agree about them.
+            ("readonly g=1", 3, 3),
+            ("export g=1", 3, 3),
+            ("readonly g", 2, 2),
+            ("export -n g", 1, 1),
+        ] {
+            let out = run(&format!("{{ {cyc} {src}; }} 2>&1")).0;
+            assert_eq!(out.matches("circular").count(), top, "top {src} -> {out:?}");
+            let out = run(&format!("{{ {cyc} f() {{ {src}; }}; f; }} 2>&1")).0;
+            assert_eq!(out.matches("circular").count(), infn, "fn {src} -> {out:?}");
+        }
+
+        // A cycle the **frame itself** holds is never overwritten — step 1's
+        // `-g` makes its array global, in front of the frame's reference — so
+        // all three steps walk it and the count is a flat 3, where a kind letter
+        // over a global cycle collapsed it to 2. `-i` measures 2 for a reason of
+        // its own: neither builtin takes it, so step 3 exits on the usage error
+        // before it looks anything up.
+        let loc = "local -n g=z; local -n z=g;";
+        for (src, want) in [
+            ("readonly g=(1 2)", 3),
+            ("readonly -a g=(1 2)", 3),
+            ("readonly -A g=([k]=v)", 3),
+            ("readonly -i g=(1 2)", 2),
+            ("export g=(1 2)", 3),
+            ("export -a g=(1 2)", 3),
+            // More operands do not multiply it: each name's own chain is walked.
+            ("readonly g=(1 2) h=(3)", 3),
+            ("readonly g=(1 2) s=5", 3),
+            // The declare family makes a *local*, so its step 1 is the ordinary
+            // `make_local_variable` that finds the frame's own reference and
+            // walks it — four, and a kind letter still collapses it to two by
+            // overwriting the value cell before step 2 reads it.
+            ("declare g=(1 2)", 4),
+            ("local -a g=(1 2)", 2),
+            // Its `-g` spelling walks nothing at all: every step asks the global
+            // side, where the cycle was never written.
+            ("declare -g g=(1 2)", 0),
+        ] {
+            let out = run(&format!("f() {{ {loc} {src}; }}; f 2>&1")).0;
+            assert_eq!(out.matches("circular").count(), want, "local {src} -> {out:?}");
+        }
+    }
+
+    /// `readonly q=(1 2)` is **one** builtin call whose operand list was
+    /// rewritten, not two commands that each own a kind of operand. bash
+    /// truncates a compound operand at the `=` (subst.c:12493) and hands the
+    /// bare name to the real builtin once the whole word-expansion pass is over
+    /// — alongside the scalar operands, which never entered the decomposition
+    /// at all (it is reached only for `W_COMPASSIGN` words, subst.c:12815). So
+    /// the builtin's own getopt scan runs whether or not any operand survived as
+    /// a `name=value` string, and `-Z`, `-f`, `-p`, `-n` and `+a` all answer for
+    /// a command every one of whose operands is compound. osh called the builtin
+    /// only when a scalar operand was present and marked the rest from a loop of
+    /// its own, so those flags were silently accepted. Corpus:
+    /// `a-marking-builtin-with-only-compound-operands-still-runs-its-own-flag-scan.sh`.
+    #[test]
+    fn a_marking_builtin_with_only_compound_operands_still_runs_its_own_flag_scan() {
+        let arr = "declare -a g=([0]=\"1\" [1]=\"2\")";
+        for (src, rc, printed, msg) in [
+            // An option letter neither takes: refused with status 2, and nothing
+            // marked — though the literal bound two commands ago.
+            ("readonly -Z g=(1 2)", 2, arr, "readonly: -Z: invalid option"),
+            ("readonly -x g=(1 2)", 2, arr, "readonly: -x: invalid option"),
+            ("export -r g=(1 2)", 2, arr, "export: -r: invalid option"),
+            // `-i` is the row that reaches both halves: refused by the builtin,
+            // but copied into the truncated `declare` that types the array.
+            (
+                "readonly -i g=(1 2)",
+                2,
+                "declare -ai g=([0]=\"1\" [1]=\"2\")",
+                "readonly: -i: invalid option",
+            ),
+            // `-f` is the function namespace.
+            ("readonly -f g=(1 2)", 1, arr, "readonly: g: not a function"),
+            ("export -f g=(1 2)", 1, arr, "export: g: not a function"),
+            // `-n` is not the nameref letter for either.
+            ("readonly -n g=(1 2)", 0, arr, ""),
+            ("export -n g=(1 2)", 0, arr, ""),
+            // `-p` given names marks them and prints nothing extra.
+            ("readonly -p g=(1 2)", 0, "declare -ar g=([0]=\"1\" [1]=\"2\")", ""),
+            ("export -p g=(1 2)", 0, "declare -ax g=([0]=\"1\" [1]=\"2\")", ""),
+            ("readonly -- g=(1 2)", 0, "declare -ar g=([0]=\"1\" [1]=\"2\")", ""),
+            ("readonly g=(1 2)", 0, "declare -ar g=([0]=\"1\" [1]=\"2\")", ""),
+            // A word these two do not take as an option is an operand, and only
+            // that operand is lost: `g` is still marked.
+            (
+                "readonly +a g=(1 2)",
+                1,
+                "declare -ar g=([0]=\"1\" [1]=\"2\")",
+                "readonly: `+a': not a valid identifier",
+            ),
+            (
+                "readonly g=(1 2) -x",
+                1,
+                "declare -ar g=([0]=\"1\" [1]=\"2\")",
+                "readonly: `-x': not a valid identifier",
+            ),
+        ] {
+            let (out, st) = run(&format!("{{ {src}; }} 2>&1"));
+            assert_eq!(st, rc, "{src} -> {out:?}");
+            if msg.is_empty() {
+                assert_eq!(out, "", "{src}");
+            } else {
+                assert!(out.contains(msg), "{src} -> {out:?}");
+            }
+            let shown = run(&format!("{{ {src}; }} 2>/dev/null; declare -p g")).0;
+            assert_eq!(shown.trim_end(), printed, "{src}");
+        }
+        // One call, not two: the compound operand arrives truncated and the
+        // scalar one whole, and `-f` turns both away in the same loop.
+        let out = run("{ readonly -f g=(1 2) s=5; } 2>&1").0;
+        assert!(out.contains("readonly: g: not a function"), "{out:?}");
+        assert!(out.contains("readonly: s=5: not a function"), "{out:?}");
     }
 
     /// A subscript asks a declaration for an array as plainly as `-a` does, and

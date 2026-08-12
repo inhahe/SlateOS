@@ -43,48 +43,72 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
-### TD-OILS-A-COMPOUND-DECLARATION-BY-A-CHKLOCAL-BUILTIN-BINDS-THE-FRAMES-REFERENCE. `readonly g=(1 2)` in a function puts the array and its attributes on the local reference, not on the global the escape names — 2026-08-11
+### TD-OILS-THE-TWO-COMMANDS-A-COMPOUND-OPERAND-DECOMPOSES-INTO-ARE-GIVEN-ONE-SWAP. A kind letter, and a chain that outruns the link limit without closing, land the value elsewhere than bash — 2026-08-11
 
-**Where:** `userspace/oils/src/interp.rs`, `Shell::declare_compounds_scoped` —
-the `(None, Some(RefTarget { base, sub: None, .. })) => base` arm of the target
-match drops `RefTarget::scope`, so everything below it (`declare_local`,
-`array_kind_apply`, the `readonly`/`export`/`integer` attribute sites) operates
-on the **live** tables while only `apply_assignment` re-resolves and stores at
-the scope the walk named.
+**Where:** `userspace/oils/src/interp.rs`, [`Shell::global_bind_names`] and
+[`Shell::enter_global_scope`]. A compound operand of a global-scope declaration
+is *three* commands in bash (`expand_declaration_argument`, subst.c:12653), and
+the middle two ask the same question — which name does a global write bind? —
+along two different roads. osh answers it once, in the swap
+[`Shell::enter_global_scope`] performs for the whole word list, so the two roads
+cannot disagree. They do disagree in two families.
 
-`readonly` and `export` are `W_ASSNGLOBAL|W_CHKLOCAL` (execute_cmd.c:4220), so
-even inside a function they declare a *global*: step 1 of
-`expand_declaration_argument` is `declare -gG NAME`, and a nameref cycle's
-escape really is where the literal lands, with the frame's own reference left
-untouched.
-
-**Reproduce.**
+**Family 1 — a kind letter takes the name untransformed.** `declare -a`/`-A`
+(and `readonly -a`, `export -A`, …) reach `make_new_array_variable (name)` /
+`make_new_assoc_variable (name)` at declare.def:788-792, which bind the name
+**as written**, unlike the valueless spelling one line below that goes through
+`bind_global_variable` and its `bind_variable_internal` transform
+(variables.c:3020). So the array lands on the global `g` even where the scalar
+spelling would have been redirected.
 
 ```sh
-f() { local -n g=z; local -n z=g; readonly g=(1 2); declare -p g; }; f
-echo AFTER; declare -p g
+( declare -n g=z; declare -n z=g
+  f() { local -n g=w; declare -ga g=(1 2); }; f; declare -p g z w )
+# bash: declare -ar g=([0]="1" [1]="2") … w unset
+# osh : the array is on w
 ```
 
-| | bash 5.2.37 | osh |
-|---|---|---|
-| inside the frame | `declare -n g="z"` | `declare -nr g="z"` |
-| after the return | `declare -ar g=([0]="1" [1]="2")` | `declare -a g=([0]="1" [1]="2")` |
+Affected: `declare -ga g=(1 2)` and `readonly -a g=(1 2)` under a frame-local
+`local -n g=w` over a global `g`↔`z` cycle — 2 shapes of the 27-shape probe
+matrix.
 
-`export g=(1 2)` differs the same way (`-nx` in the frame, `-ax` lost after).
-With a kind letter it is worse still: `readonly -a g=(1 2)` binds the **array
-itself** locally in osh, and the walk count stays 1 against bash's 3.
+**Family 2 — a chain that outruns `NAMEREF_MAX` without closing on itself.**
+`find_variable_nameref`'s cycle escape (variables.c:2080-2110) fires only on
+`v == orig || v == oldv`. A chain read from a name *in front of* the loop —
+`g` → `z` → `y` → `z` — never returns to `g`, so the test never fires: the walk
+spins to `NAMEREF_MAX` (8, variables.h:172) and gives up **quietly**, a third
+outcome distinct from both "found" and "cycle detected". osh conflates it with
+the detected cycle's NULL.
 
-**Proper fix.** Thread `RefTarget::scope` through the whole second half of the
-compound loop rather than only into `apply_assignment` — or route the chklocal
-builtins through the same scope entry `-g` already uses, so `declare_local`,
-`array_kind_apply` and the attribute sites all run at the scope the walk named.
-The walk accounting for these builtins is already right (step 1 walks once as a
-`declare -gG`, step 2 once, and step 3's truncated builtin once more, for 3);
-only the scope of the binding is wrong.
+```sh
+( declare -n g=z; declare -n z=y; declare -n y=z
+  f() { local g=5; declare -g g=1; declare -p g; }; f )
+# bash: declare -- g     (the frame's own binding is *emptied*)
+# osh : declare -- g="5"
+```
 
-**How it was found:** the 25-case differential sweep that landed
-TD-OILS-A-COMPOUND-DECLARATION-WITH-NO-KIND-LETTER-DOES-NOT-REACH-FOR-AN-ARRAY
-(`ok=23 bad=2`; these were the two).
+Affected: 8 shapes of the 56-shape second probe matrix, three of which also
+empty the frame's binding as above.
+
+**Proper fix.** Give the two halves separate answers rather than one swap:
+teach [`Shell::global_bind_names`] a third arm for "kind letter present", which
+binds the untransformed name, and give the walk a tri-state result
+(`Found` / `Cycle` / `Overrun`) so the quiet-overrun case can empty the frame's
+binding the way bash's `bind_variable` does when handed
+`&nameref_maxloop_value` (variables.c:185, 2187, 3305) rather than NULL.
+
+**Do not imitate:** bash 5.2.37 **segfaults** (rc 139) on
+
+```sh
+declare -n g=z; declare -n z=y; declare -n y=z
+f() { local -a g=(9); declare -g g=1; }; f
+```
+
+reproducibly. osh answers sanely; that row is deliberately not pinned.
+
+**How it was found:** the two nameref-cycle probe matrices (`/tmp/cyc_probe.sh`,
+25/27, and `/tmp/cyc_probe2.sh`, 48/56) written while fixing
+TD-OILS-A-GLOBAL-SCOPE-DECLARATION-BOUND-THE-NAME-IT-WAS-WRITTEN-WITH-WHEN-ITS-GLOBAL-CHAIN-LED-NOWHERE.
 
 ---
 
@@ -40118,6 +40142,343 @@ deny — are now fixed; see F8 and F9.)_
 ---
 
 ## Fixed Bugs
+
+### TD-OILS-A-GLOBAL-SCOPE-DECLARATION-BOUND-THE-NAME-IT-WAS-WRITTEN-WITH-WHEN-ITS-GLOBAL-CHAIN-LED-NOWHERE. `declare -g g=1` under a dead global nameref chain wrote the frame's own reference — 2026-08-11 — FIXED 2026-08-11
+
+**Where:** `userspace/oils/src/interp.rs`, [`Shell::global_bind_names`] (was
+`global_bind_name`) and the new [`Shell::global_chain_path`]. A declaration made
+at global scope from inside a function does not always bind the name it was
+written with. bash decides in two questions (`do_compound_assignment`,
+subst.c:3494):
+
+```c
+v = chklocal ? find_variable (name) : 0;
+if (v && (local_p (v) == 0 || v->context != variable_context)) v = 0;
+if (v == 0) v = find_global_variable (name);
+…
+newname = (v == 0) ? nameref_transform_name (name, flags) : name;
+```
+
+`find_global_variable` (variables.c:2400) answers NULL three ways — no global
+binding, a chain ending on an unset name, and a chain that closes on itself or
+outruns `NAMEREF_MAX`. Where it does, the name bound is the **live** chain's
+last reference cell (`find_variable_last_nameref`), bound globally all the same.
+So a frame-local reference pointing out of the frame decides which global a
+`declare -g` writes, whenever the global side of the lookup is empty. osh took
+the global side's answer only, and so bound the name as written.
+
+The builtin half reaches the same rule two steps later:
+`find_global_variable_last_nameref` (declare.def:735) walks the global table
+*alone*, so a cycle leaves it with nothing and the name falls through unchanged
+to `bind_global_variable`, whose `bind_variable_internal` (variables.c:3020)
+opens with the same live-chain cell. That opening is reached only through the
+global table's own entry for the name — which is the one thing the two roads
+agree on: a name with **no global binding at all** is bound exactly as written.
+
+**Reproduce.**
+
+```sh
+( declare -n g=z; declare -n z=g
+  f() { local -n g=w; declare -g g=1; declare -p g; }; f; declare -p g z w )
+# bash: declare -- w="1"   osh (before): the value on g's own chain
+```
+
+**The fix.** Two changes. `global_bind_names` gained the missing arms — no
+global binding at all binds the name as written; a global chain reaching the
+live binding of the name itself is no swap; a chain leading nowhere takes the
+live chain's last cell for the compound-literal road, and the *global-only path*
+for the builtin road. And because osh's swap can only *un-shadow* a name — it
+cannot redirect a write — the builtin road returns the whole path
+([`Shell::global_chain_path`]), so the ordinary innermost-first walk is put onto
+the global chain and reaches the same cell bash names.
+
+**Tests.** Unit test
+`a_global_scope_declaration_whose_global_chain_dies_binds_the_live_chains_last_reference`
+and corpus
+`a-global-scope-declaration-whose-global-chain-dies-binds-the-live-chains-last-reference.sh`
+(10 sections). Two probe matrices went 25/27 and 48/56 — the remainder is
+TD-OILS-THE-TWO-COMMANDS-A-COMPOUND-OPERAND-DECOMPOSES-INTO-ARE-GIVEN-ONE-SWAP.
+
+---
+
+### TD-OILS-A-FRAME-LOCAL-NAMEREF-CYCLE-WAS-HIDDEN-FROM-A-MARKING-BUILTINS-FIRST-WALK. `readonly g=(1 2)` under a *local* nameref cycle warned once where bash warns three times — 2026-08-11 — FIXED 2026-08-11
+
+**Where:** `userspace/oils/src/interp.rs`, [`Shell::in_declare_global_scope`].
+For a compound operand of `readonly`/`export` osh entered the `-gG` swap
+*before* the operand's chain was walked, so the frame's live nameref had already
+been swapped out of the table and the cycle left no trace. bash's
+`declare_find_variable` (declare.def:149) and `do_compound_assignment`
+(subst.c:3491) do their `find_variable` against the tables as they stand, cycle
+and all, and each walk warns.
+
+**Reproduce.** Only a cycle built out of *frame-local* references was affected;
+a global one has nothing for the swap to hide.
+
+```sh
+f() { local -n g=z; local -n z=g; readonly g=(1 2); }; f
+# bash: three `circular name reference` warnings   osh (before): one
+```
+
+**The fix.** [`Shell::in_declare_global_scope`] now records each operand's walk
+against the live tables *before* [`Shell::enter_global_scope`] hides the frame,
+and warns twice from that recorded walk — the pair the swap is entered for
+(steps 1 and 2 of `expand_declaration_argument`'s decomposition, subst.c:12653).
+The third command, the builtin proper, runs after
+[`Shell::leave_global_scope`] and finds the reference back where it was, so it
+walks for itself and is owed nothing. That split is what the new
+`expansion_half: bool` parameter carries: only the word-expansion half pays.
+
+Where the value and the attribute land was already right — see the Fixed entry
+TD-OILS-A-MARKING-BUILTINS-COMPOUND-OPERAND-MARKED-WHERE-IT-STORED — and so was
+the exit status; only the *count* differed.
+
+**Tests.** The unit test
+`a_marking_builtins_compound_operand_is_walked_once_more_than_a_declarations`
+gained a frame-local-cycle block (11 rows), and the corpus case of the same name
+gained two sections. The 54-row circular-warning matrix (`/tmp/c7.sh`) that
+found it now scores 54/54.
+
+---
+
+### TD-OILS-A-MARKING-BUILTIN-WITH-ONLY-COMPOUND-OPERANDS-NEVER-RAN-ITS-OWN-FRONT-HALF. `readonly -i g=(1 2)` marked and succeeded where bash rejects the option and exits 2 — 2026-08-11 — FIXED 2026-08-11
+
+**Where:** `userspace/oils/src/interp.rs`,
+[`Shell::exec_declare_with_arrays_scoped`]. The builtin dispatch was
+
+```rust
+    "readonly" if has_scalar_operand => self.builtin_readonly(&argv[1..], out, redir, limit),
+    "readonly" | "export" => 0,
+```
+
+so a command whose operands were *all* compound never reached
+[`Shell::builtin_readonly`]/[`Shell::builtin_export`] at all. Its attribute was
+applied instead by a `mark_bound_compounds` of this file's own, which started at
+the operand loop and skipped the option scan the builtin would have run first.
+
+bash's step 3 (`expand_declaration_argument`, subst.c:12653) is the *real*
+builtin over the whole word list with the compound operands truncated to bare
+names, so the front half always runs — and a scalar operand, which never enters
+the decomposition at all (it is reached only for `W_COMPASSIGN` words,
+subst.c:12815), arrives at that same call whole. One call, one getopt scan.
+
+```sh
+$ readonly -i g=(1 2); echo rc=$?; declare -p g
+bash: readonly: -i: invalid option
+      readonly: usage: readonly [-aAf] [name[=value] ...] or readonly -p
+      rc=2
+      declare -ai g=([0]="1" [1]="2")
+osh : rc=0
+      declare -air g=([0]="1" [1]="2")
+```
+
+| command | bash 5.2.37 | osh, before |
+|---|---|---|
+| `readonly -i g=(1 2)` | usage error, rc 2, `declare -ai g` | rc 0, `declare -air g` |
+| `readonly -x g=(1 2)` | usage error, rc 2, `declare -a g` | rc 0, `declare -ar g` |
+| `export -i g=(1 2)` | usage error, rc 2, `declare -ai g` | rc 0, `declare -aix g` |
+| `readonly -f g=(1 2)` | `readonly: g: not a function`, rc 1, `declare -a g` | rc 0, `declare -ar g` |
+| `export -f g=(1 2)` | `export: g: not a function`, rc 1, `declare -a g` | rc 0, `declare -ax g` |
+| `readonly -i g=(1 2) s=5` | usage error, rc 2, `declare -ai g` | usage error, rc 2, but `declare -air g` |
+
+The last row was the tell: a scalar operand beside the compound one *did* reach
+the builtin, so the diagnostic and the status were right — and the `-r` still
+leaked onto the compound, because the private loop ran regardless. Note also
+that step 1's rebuilt option string carries only the array kind, the scope and
+the value-transforming letters, which is why `readonly -x g=(1 2)` leaves
+neither `-x` nor `-r`: the `-x` is not carried and the `-r` never runs. `-i`
+*is* carried, which is why that row's array is `-ai` even though the command
+failed.
+
+**Fixed** in this commit. `mark_bound_compounds` is gone and the two builtins
+are called unconditionally over [`DeclWords::spliced`] — `argv` with every
+compound operand's bare name back at the position it was written, which is
+exactly bash's step-3 argument list. Nothing can now end option parsing at a
+word the builtin cannot see, so the `flag_limit` dance is not needed on this
+path either and the natural getopt stop is the only limit; that is also what
+gives `readonly +a q=(1)` the same `` `+a': not a valid identifier `` the scalar
+spelling gives. The call stays where phase 3 was — after
+`std::mem::take(&mut self.declare_global_swap)` and
+[`Shell::leave_global_scope`], inside the builtin's own `2>` — so the
+value/attribute split the previous fix established is untouched.
+
+The merge deleted a duplicate rather than adding a caller: the private loop was
+[`Shell::attr_operand`] + [`Shell::in_scope`] +
+[`Shell::readonly_operand`]/[`Shell::export_operand`], which is the builtin's
+own operand loop verbatim. With it went `DeclCompounds::flags` and the marking
+letters of [`Shell::declare_compounds_scoped`]'s flag prescan (`r`, `x`, `t`
+and the `+` spellings): the builtin half re-scans the same words, so reading
+them twice only invited the two scans to disagree. `-n` is still read there,
+and still cancelled for `readonly`/`export`, because a reference and an array
+are a combination phase 1 must refuse *before* the literal binds.
+
+Corpus:
+`a-marking-builtin-with-only-compound-operands-still-runs-its-own-flag-scan.sh`.
+Unit test:
+`a_marking_builtin_with_only_compound_operands_still_runs_its_own_flag_scan`.
+
+**How it was found:** checking, after the value/attribute fix, that the shapes
+the fix did *not* touch still agreed — a sweep over `readonly`/`export`
+× every option letter × compound-only and mixed operand lists.
+
+---
+
+### TD-OILS-A-MARKING-BUILTINS-COMPOUND-OPERAND-MARKED-WHERE-IT-STORED. `readonly g=(1 2)` through a local nameref put the array and the `-r` on one variable where bash parts them — 2026-08-11 — FIXED 2026-08-11
+
+**Where:** `userspace/oils/src/interp.rs`,
+[`Shell::exec_declare_with_arrays_scoped`]. Its phase 3 — the loop over
+[`BoundCompound`] that applies `readonly`/`export`'s attribute — ran *inside*
+the `-gG` scope swap the value had bound under, so both halves necessarily
+landed in the same place.
+
+bash's `expand_declaration_argument` (subst.c:12653) is three commands:
+
+1. `make_internal_declare(word, opts, cmd)` — the `declare` builtin over the
+   word **truncated at the `=`** (subst.c:12493),
+2. `do_word_assignment` → `do_compound_assignment` (subst.c:3458) — the
+   compound assignment proper, and
+3. the same truncated word handed to the **real builtin**, after the whole
+   word-expansion pass has finished.
+
+`readonly` and `export` are not LOCALVAR_BUILTINs, so every assignment word of
+theirs is stamped `W_ASSNGLOBAL|W_CHKLOCAL` (execute_cmd.c:4221) and steps 1–2
+run as `declare -gG`. Step 3 carries no such stamp: it runs later, outside that
+arrangement, and marks whatever the name is bound to *then*, followed through
+its live reference chain. The two halves are free to disagree.
+
+```sh
+$ f() { local -n g=z; readonly g=(1 2); declare -p g z; }; f; echo AFTER; declare -p g z
+bash: declare -n g="z" / declare -r z / AFTER / declare -a g=([0]="1" [1]="2") / declare -r z
+osh : declare -nr g="z" / AFTER / declare -a g=([0]="1" [1]="2")
+```
+
+The value goes to the frame's own local if the reference reaches one (bash's
+chklocal rule) and to the **global** otherwise — and a nameref is not a local
+chklocal will accept, so it goes global. The `-r` goes to `z`, which is where
+the live reference points.
+
+**Fixed** in this commit by a new [`Shell::mark_bound_compounds`], called after
+`std::mem::take(&mut self.declare_global_swap)` + [`Shell::leave_global_scope`]
+so it runs outside the swap and resolves the truncated name the ordinary way.
+`-a`/`-A` are deliberately not passed on: they shape an operand that carries a
+value, and the truncated one carries none. The loop stays inside the builtin's
+own `2>` — hoisting it into [`Shell::exec_declare_with_arrays`] would have meant
+a second [`Shell::push_builtin_stderr`], whose `open_std_sink(…, append=false)`
+would have truncated away the phase-1/2 diagnostics already written.
+
+Corpus:
+`a-marked-compound-operand-is-two-commands-that-need-not-agree-where-they-land.sh`.
+Unit test:
+`a_marked_compound_operand_is_two_commands_that_need_not_agree_where_they_land`.
+
+**How it was found:** the 25-case differential sweep that landed
+TD-OILS-A-COMPOUND-DECLARATION-WITH-NO-KIND-LETTER-DOES-NOT-REACH-FOR-AN-ARRAY
+(`ok=23 bad=2`; these were the two), then narrowed by a 15-row and a 10-row
+per-process matrix over compound and scalar operands.
+
+---
+
+### TD-OILS-A-KIND-CONFLICT-WAS-FATAL-BY-SCOPE-WHERE-BASH-DECIDES-BY-BUILTIN. `readonly -a` on an associative array kept running inside a function — 2026-08-11 — FIXED 2026-08-11
+
+**Where:** `userspace/oils/src/interp.rs`, [`Shell::compound_kind_refusal`]. It
+decided whether a kind conflict abandons the parse unit by asking whether there
+is a function frame (`self.local_frames.is_empty()`), which is the wrong
+predicate: it is the *builtin's identity* that decides.
+
+At subst.c:12762 the flag is the sole discriminator:
+
+```c
+  if (t != EXECUTION_SUCCESS) {
+      last_command_exit_value = t;
+      if (tlist->word->flags & W_FORCELOCAL)   /* non-fatal error */
+        skip = 1;
+      else
+        exp_jump_to_top_level (DISCARD);
+  }
+```
+
+and `W_FORCELOCAL` (command.h:105) is set at execute_cmd.c:4223 only when
+`ASSIGNMENT_BUILTIN && LOCALVAR_BUILTIN && variable_context` — a locals-making
+assignment builtin, inside a function. `readonly` and `export` are not
+LOCALVAR_BUILTINs, so they never carry it and always discard; `declare -ga`
+inside a function does carry it and is merely an error.
+
+```sh
+$ declare -A m=([a]=1); f() { readonly -a m=(1 2); echo reached; }; f; echo out=$?
+bash: f: m: cannot convert associative to indexed array          # and nothing more
+osh : f: m: cannot convert associative to indexed array
+      readonly: m: cannot convert associative to indexed array
+      reached
+      out=1
+```
+
+**Fixed** in this commit: the predicate is now
+`!self.local_frames.is_empty() && !matches!(cmd, "readonly" | "export")`, and
+the function-name tag on the machinery's half is unchanged (it is present
+whenever the binding would be a global one, which for these two it always is).
+
+Corpus (the last section of)
+`a-marked-compound-operand-is-two-commands-that-need-not-agree-where-they-land.sh`;
+the declare family's side was already pinned by
+`a-compound-kind-refusal-inside-a-function-is-reported-twice.sh`.
+
+**How it was found:** a 12-row matrix over
+`{declare -a, declare -ga, typeset -a, local -a, readonly -a, export -a}` ×
+`{top level, inside a function}`, written to check that the value/attribute fix
+had not moved the refusal path.
+
+---
+
+### TD-OILS-A-MARKING-BUILTINS-COMPOUND-OPERAND-WAS-WALKED-AS-CHEAPLY-AS-A-DECLARATIONS. The circular-warning count was 3/1 for every non-local compound operand — 2026-08-11 — FIXED 2026-08-11
+
+**Where:** `userspace/oils/src/interp.rs`, [`Shell::declare_compounds_scoped`].
+The count came from an `escapes` model that gave 3/1 at top level and 2/1 inside
+a function, with no separate arm for `readonly`/`export`. Since every walk of a
+self-closing nameref chain warns exactly once, the count is a direct measure of
+the decomposition, and it was wrong in every `!make_local` arm.
+
+The two builtins pay two walks the declare family does not:
+
+* `-G` (from `W_CHKLOCAL`) makes step 1's `declare_find_variable`
+  (declare.def:149) try the nameref-following `find_variable` before falling
+  back to `find_global_variable` — exactly one walk more than a plain `-g`.
+* Step 2's chklocal branch in `do_compound_assignment` is guarded
+  `else if (mkglobal && variable_context)` (subst.c:3491). At top level
+  `variable_context` is 0, so the ordinary `assign_array_from_string` runs and
+  costs one walk; inside a function the branch is taken and costs two. These two
+  builtins are therefore the only spelling that warns *more* inside a function
+  than outside one.
+
+Measured, over `declare -n g=z; declare -n z=g`:
+
+```
+                       -a / -A   no kind letter (incl. -i)
+  local                    2            4
+  global, declare-family   1            3    (top level and in a function alike)
+  global, readonly/export  2            4 at top level, 5 in a function
+```
+
+**Fixed** in this commit; the arm is now a `match (kind_letter, in_function)`
+under `global_builtin`.
+
+Corpus:
+`a-marking-builtins-compound-operand-is-walked-once-more-than-a-declarations.sh`.
+Unit test:
+`a_marking_builtins_compound_operand_is_walked_once_more_than_a_declarations`.
+
+Note the corpus must not run inside a function of its own, and its `2>&1` must
+be on a *group*: bash expands a command's words before `do_redirections` runs,
+so a redirect written on the declaration itself never catches its own
+expansion's warnings.
+
+One shape is still wrong and is filed as Active:
+TD-OILS-A-FRAME-LOCAL-NAMEREF-CYCLE-IS-HIDDEN-FROM-A-MARKING-BUILTINS-FIRST-WALK.
+
+**How it was found:** a 54-row matrix (18 command spellings × 3 contexts)
+written after the value/attribute fix, to check that the relocation of phase 3
+had not changed how often the chain is traversed. 6 rows disagreed; 5 of the 6
+were this formula.
+
+---
 
 ### TD-OILS-THE-ARGUMENT-STACK-BASE-FRAME-WAS-CAPTURED-ON-EVERY-TURN-ON. A function that toggled `extdebug` grew `BASH_ARGC` by one every time — 2026-08-11 — FIXED 2026-08-11
 

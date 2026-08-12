@@ -76,7 +76,7 @@ use super::number::{
     SYS_SCHED_SET_PROFILE, SYS_SCHED_SET_TIMESLICE,
     SYS_SYSCTL_GET, SYS_SYSCTL_SET,
     SYS_MM_SET_PROFILE, SYS_MM_GET_PROFILE,
-    SYS_SYSTEM_SET_PROFILE,
+    SYS_SYSTEM_SET_PROFILE, SYS_GETRANDOM,
     SYS_CAP_QUERY, SYS_CAP_REQUEST, SYS_CAP_REQUEST_STATUS, SYS_CAP_REQUEST_CANCEL,
     SYS_MMAP, SYS_MUNMAP, SYS_MPROTECT, SYS_PROCESS_ID,
     SYS_NOTIFY_READY, SYS_PROCESS_IS_READY,
@@ -327,6 +327,7 @@ const fn build_v1_table() -> SyscallTable {
 
     // System-wide workload profiles (80–89).
     handlers[SYS_SYSTEM_SET_PROFILE as usize] = Some(handlers::sys_system_set_profile);
+    handlers[SYS_GETRANDOM as usize] = Some(handlers::sys_getrandom);
 
     // IPC (200–399)
     handlers[SYS_CHANNEL_CREATE as usize] = Some(handlers::sys_channel_create);
@@ -816,6 +817,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_channel_roundtrip()?;
     test_dispatch_clock_monotonic()?;
     test_dispatch_clock_realtime()?;
+    test_dispatch_getrandom()?;
     test_dispatch_clock_settime()?;
     test_dispatch_clock_adjtime()?;
     test_dispatch_console_write()?;
@@ -1866,6 +1868,75 @@ fn test_dispatch_clock_monotonic() -> KernelResult<()> {
         "[syscall]   Dispatch SYS_CLOCK_MONOTONIC: OK ({}ns)",
         result.value
     );
+    Ok(())
+}
+
+/// Test `SYS_GETRANDOM`'s argument handling.
+///
+/// The success path cannot be exercised from here: `validate_user_write`
+/// rejects a kernel address by design, and this test has no user address
+/// space to borrow.  What *can* be checked from kernel mode is that the
+/// three rejection rules hold and that the length cap is applied rather than
+/// treated as an error — a `SYS_GETRANDOM` that returned a *large* success
+/// count without writing that many bytes would leave the caller reading
+/// uninitialised memory as key material.
+fn test_dispatch_getrandom() -> KernelResult<()> {
+    // Zero length is a success returning 0, even for a null pointer: callers
+    // that loop until a count is exhausted must not have to special-case the
+    // final iteration.
+    let zero_len = SyscallArgs {
+        arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let result = dispatch(SYS_GETRANDOM, &zero_len);
+    if result.value != 0 {
+        serial_println!(
+            "[syscall]   FAIL: getrandom(NULL, 0) returned {}",
+            result.value
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Null pointer with a nonzero length is an error, not a silent no-op.
+    let null_buf = SyscallArgs {
+        arg0: 0, arg1: 16, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    if dispatch(SYS_GETRANDOM, &null_buf).value >= 0 {
+        serial_println!("[syscall]   FAIL: getrandom(NULL, 16) did not fail");
+        return Err(KernelError::InternalError);
+    }
+
+    // A kernel address must be rejected by the user-pointer validator; if it
+    // were not, any process could ask the kernel to scribble random bytes
+    // over kernel memory.
+    let mut sink = [0u8; 16];
+    let kernel_buf = SyscallArgs {
+        arg0: sink.as_mut_ptr() as u64,
+        arg1: 16,
+        arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    if dispatch(SYS_GETRANDOM, &kernel_buf).value >= 0 {
+        serial_println!("[syscall]   FAIL: getrandom accepted a kernel address");
+        return Err(KernelError::InternalError);
+    }
+    // Nothing should have been written.
+    if sink != [0u8; 16] {
+        serial_println!("[syscall]   FAIL: getrandom wrote through a rejected pointer");
+        return Err(KernelError::InternalError);
+    }
+
+    // The kernel CSPRNG itself is exercised directly, since the syscall
+    // wrapper cannot be: a stuck generator is the one failure that would
+    // otherwise look identical to success at every layer above.
+    let mut a = [0u8; 32];
+    let mut b = [0u8; 32];
+    crate::rng::fill(&mut a);
+    crate::rng::fill(&mut b);
+    if a == b || a == [0u8; 32] {
+        serial_println!("[syscall]   FAIL: rng::fill produced a constant");
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[syscall]   Dispatch SYS_GETRANDOM: OK");
     Ok(())
 }
 

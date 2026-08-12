@@ -2029,7 +2029,19 @@ pub extern "C" fn getrandom(buf: *mut u8, buflen: usize, flags: u32) -> isize {
         return -1;
     }
 
-    fill_random(buf, buflen);
+    // 5. No entropy source → fail, rather than return predictable bytes a
+    //    caller would use as key material.  Linux cannot reach this state
+    //    (its pool is always seedable), so there is no ABI precedent to
+    //    match; `EIO` is what `getentropy` is specified to report for the
+    //    same condition, so both calls agree.  `GRND_INSECURE` does not
+    //    override it: that flag means "don't block waiting for the pool to
+    //    initialise", not "make something up".
+    // SAFETY: `buf` is non-null (checked at step 3) and the caller's
+    // contract is that it is writable for `buflen` bytes.
+    if !unsafe { fill_random(buf, buflen) } {
+        errno::set_errno(errno::EIO);
+        return -1;
+    }
     buflen as isize
 }
 
@@ -2048,65 +2060,41 @@ pub extern "C" fn getentropy(buf: *mut u8, buflen: usize) -> i32 {
         return -1;
     }
 
-    fill_random(buf, buflen);
+    // No entropy source → `EIO`, which is exactly what `getentropy` is
+    // specified to report when it "could not fill the buffer".
+    // SAFETY: `buf` is non-null (checked above) and the caller's contract is
+    // that it is writable for `buflen` bytes.
+    if !unsafe { fill_random(buf, buflen) } {
+        errno::set_errno(errno::EIO);
+        return -1;
+    }
     0
 }
 
-/// Fill a buffer with pseudo-random bytes.
+/// Fill a buffer with cryptographically-secure random bytes.
 ///
-/// Tries RDRAND first (hardware RNG), falls back to an LCG seeded from
-/// the monotonic clock.  Not cryptographically strong — suitable for
-/// seeding userspace PRNGs, temp file names, etc.
-pub(crate) fn fill_random(buf: *mut u8, len: usize) {
-    // Try RDRAND first.
-    let mut seed: u64 = 0;
-    let rdrand_ok: bool;
-
-    #[cfg(target_arch = "x86_64")]
-    {
-        let ok: u8;
-        // SAFETY: rdrand is safe to execute; it simply reads hardware RNG.
-        unsafe {
-            core::arch::asm!(
-                "rdrand {val}",
-                "setc {ok}",
-                val = out(reg) seed,
-                ok = out(reg_byte) ok,
-                options(nostack, nomem),
-            );
-        }
-        rdrand_ok = ok != 0;
+/// Returns `false` when no entropy source could be reached, in which case the
+/// buffer's contents are unspecified and must not be used.  See
+/// [`crate::random::secure_bytes`] for where the bytes come from and
+/// why there is no "best effort" fallback: this used to expand a single
+/// 64-bit `RDRAND` draw (or the monotonic clock, if `RDRAND` failed) with an
+/// LCG, giving `getrandom`/`getentropy` callers at most 64 bits of entropy
+/// from a generator whose whole state is recoverable from its output.
+///
+/// # Safety
+///
+/// `buf` must be valid for writes of `len` bytes, or `len` must be 0.
+pub(crate) unsafe fn fill_random(buf: *mut u8, len: usize) -> bool {
+    if len == 0 {
+        return true;
     }
-
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        rdrand_ok = false;
+    if buf.is_null() {
+        return false;
     }
-
-    if !rdrand_ok {
-        // Fallback: seed from monotonic clock.
-        let ns = syscall0(SYS_CLOCK_MONOTONIC) as u64;
-        seed = ns;
-    }
-
-    // Use a simple LCG to fill the buffer.  XOR with RDRAND output
-    // if available for better entropy distribution.
-    let mut state = seed;
-    let mut i: usize = 0;
-    while i < len {
-        // LCG step: state = state * 6364136223846793005 + 1442695040888963407
-        state = state
-            .wrapping_mul(0x5851_F42D_4C95_7F2D)
-            .wrapping_add(0x1405_7B7E_F767_814F);
-
-        // Extract byte from upper bits (better quality).
-        let byte = (state >> 56) as u8;
-        // SAFETY: i < len, buf is valid for len bytes.
-        unsafe {
-            *buf.add(i) = byte;
-        }
-        i = i.wrapping_add(1);
-    }
+    // SAFETY: the caller guarantees `buf` is writable for `len` bytes, and it
+    // is non-null with `len` nonzero by the checks above.
+    let out = unsafe { core::slice::from_raw_parts_mut(buf, len) };
+    crate::random::secure_bytes(out)
 }
 
 // ---------------------------------------------------------------------------

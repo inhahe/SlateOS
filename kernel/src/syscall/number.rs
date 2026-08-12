@@ -495,6 +495,42 @@ pub const SYS_MM_GET_PROFILE: u64 = 71;
 /// Returns: 0 on success, `InvalidArgument` if ID is unknown.
 pub const SYS_SYSTEM_SET_PROFILE: u64 = 80;
 
+/// Fill a userspace buffer with cryptographically-secure random bytes.
+///
+/// `arg0`: pointer to the destination buffer (userspace).
+/// `arg1`: number of bytes to write.
+///
+/// Returns: the number of bytes written (always `arg1` on success).
+///
+/// The bytes come from the kernel's ChaCha20 CSPRNG (`crate::rng`), which
+/// is seeded from RDRAND/RDSEED, TSC jitter, the HPET counter and
+/// interrupt-arrival timing.  This is the *only* way for userspace to
+/// obtain key-grade randomness: userspace cannot see the kernel's entropy
+/// sources, and an unprivileged process cannot assume RDRAND exists.  libc's
+/// `getrandom`/`getentropy`/`arc4random` are all built on this.
+///
+/// Deliberately **not** capability-gated.  Randomness is not a resource
+/// another process can be deprived of and there is nothing to authorise
+/// reading: refusing it would only push callers back onto a homebrew PRNG,
+/// which is strictly worse for security than handing out CSPRNG output.
+/// Linux, the BSDs and Fuchsia all treat `getrandom`/`cprng_draw` the same
+/// way.  The one real cost is CPU time, which the scheduler already bounds.
+///
+/// `arg1` is capped at [`GETRANDOM_MAX`] per call so a single syscall cannot
+/// hold the RNG spinlock for an unbounded stretch; larger requests loop in
+/// libc.  A request larger than the cap is *not* an error — it is a short
+/// read, exactly like Linux's 32 MiB cap.
+pub const SYS_GETRANDOM: u64 = 90;
+
+/// Largest number of bytes a single [`SYS_GETRANDOM`] call will produce.
+///
+/// 1 MiB: large enough that no realistic caller loops more than once (keys
+/// and nonces are tens of bytes), small enough that the RNG spinlock is
+/// never held for long.  A bigger request succeeds and returns this many
+/// bytes; the caller is expected to loop, as it must for a signal-truncated
+/// read anyway.
+pub const GETRANDOM_MAX: usize = 1024 * 1024;
+
 /// Debug print (temporary — write a byte string to serial).
 ///
 /// `arg0`: pointer to bytes.

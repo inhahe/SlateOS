@@ -445,6 +445,11 @@ pub extern "C" fn fork() -> PidT {
     let pid = errno::translate(ret) as PidT;
 
     if pid == 0 {
+        // The inherited `arc4random` pool is a byte-for-byte copy of the
+        // parent's and would replay the parent's stream, so a parent and
+        // child that each generated a "random" key would generate the same
+        // one.  Invalidate it before any user handler can draw from it.
+        crate::random::reseed_after_fork();
         // Child: run `child` handlers (FIFO) to re-init locks/state.
         crate::pthread::atfork_run_child();
     } else {

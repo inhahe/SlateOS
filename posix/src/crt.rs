@@ -1008,9 +1008,10 @@ pub static mut __libc_single_threaded: u8 = 1;
 /// they must be unpredictable per-process — a constant here would let
 /// an attacker bypass stack canary protection.
 ///
-/// We populate this on first read via `fill_random()` (RDRAND with LCG
-/// fallback).  The buffer is then stable for the rest of the process
-/// lifetime, which matches the Linux ABI contract.
+/// We populate this on first read from [`crate::random`] (the kernel CSPRNG,
+/// or RDSEED/RDRAND when the kernel is unreachable).  The buffer is then
+/// stable for the rest of the process lifetime, which matches the Linux ABI
+/// contract.
 static mut AT_RANDOM_BYTES: [u8; 16] = [0; 16];
 /// Whether `AT_RANDOM_BYTES` has been initialized.
 ///
@@ -1042,14 +1043,24 @@ fn ensure_at_random_initialized() {
         return;
     }
 
-    // Take a raw pointer to the static buffer.  fill_random is safe
-    // (it writes through the pointer with the standard write-len ABI);
-    // the buffer itself is owned by this module and only ever written
-    // here.  Race in single-process userspace is harmless: both racers
-    // call fill_random into the same buffer; the second write simply
-    // overwrites the first.
+    // The buffer is owned by this module and only ever written here.  A race
+    // in single-process userspace is harmless: both racers fill the same
+    // buffer, and the second write simply overwrites the first.
+    //
+    // SAFETY: `AT_RANDOM_BYTES` is a live 16-byte static owned by this
+    // module, so the pointer is valid for the 16-byte write below.
     let ptr = core::ptr::addr_of_mut!(AT_RANDOM_BYTES).cast::<u8>();
-    crate::unistd::fill_random(ptr, 16);
+    if !unsafe { crate::unistd::fill_random(ptr, 16) } {
+        // These bytes are the process's stack canary — glibc and musl both
+        // seed `__stack_chk_guard` from AT_RANDOM.  Publishing a buffer we
+        // could not randomise would hand every process the same canary and
+        // silently disable stack-smashing protection, and `getauxval` has no
+        // way to report the failure.  Refusing to run is the only honest
+        // option; it can only happen if neither the kernel CSPRNG nor a
+        // hardware RNG is reachable, which on this target means the kernel
+        // is broken.
+        crate::unistd::abort();
+    }
     AT_RANDOM_INITIALIZED.store(true, Ordering::Release);
 }
 
@@ -1063,8 +1074,8 @@ fn ensure_at_random_initialized() {
 /// - `AT_PAGESZ` (6) → 16384 (our page size).
 /// - `AT_CLKTCK` (17) → 100 (HZ).
 /// - `AT_RANDOM` (25) → pointer to 16 bytes of process-local randomness,
-///   lazily populated on first call from `fill_random()` (RDRAND with
-///   LCG fallback).  Used by glibc/musl for stack canaries.
+///   lazily populated on first call from the kernel CSPRNG (see
+///   [`crate::random`]).  Used by glibc/musl for stack canaries.
 /// - `AT_PLATFORM` (15) → pointer to "x86_64\0".
 /// - `AT_SECURE`/`AT_HWCAP`/`AT_HWCAP2`/`AT_UID`/`AT_EUID`/`AT_GID`/
 ///   `AT_EGID` → 0 (single-user OS, no setuid binaries, no advertised

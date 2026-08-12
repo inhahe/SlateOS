@@ -1373,7 +1373,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] ppoll: poll with timespec timeout (converts to ms, delegates to poll), sigmask ignored
   - [x] if_nametoindex/if_indextoname: network interface stubs (no named interfaces), IF_NAMESIZE constant
   - [x] inttypes: strtoimax/strtoumax (delegate to strtoll/strtoull), imaxabs, imaxdiv, wcstoimax/wcstoumax (full wide-char integer parsing)
-  - [x] getrandom/getentropy: pseudo-random bytes via RDRAND + LCG fallback (not cryptographic)
+  - [x] getrandom/getentropy: cryptographically-secure bytes from the kernel ChaCha20 CSPRNG via `SYS_GETRANDOM`; fail with `EIO` rather than returning predictable bytes if no entropy source answers (was a 64-bit LCG seeded from one RDRAND draw, falling back to the monotonic clock — see `known-issues.md` TD-POSIX-GETRANDOM-WAS-AN-LCG-SEEDED-FROM-ONE-RDRAND-DRAW)
+  - [x] arc4random/arc4random_buf/arc4random_uniform: per-thread userspace ChaCha20 pool with fast key erasure, seeded from `SYS_GETRANDOM` (RDSEED/RDRAND behind a CPUID probe when the kernel is unreachable), reseeded on fork; `arc4random_uniform` uses OpenBSD's bias-free rejection loop
   - [x] dup3: dup2 with flags (O_CLOEXEC accepted but not enforced), EINVAL when oldfd==newfd
   - [x] fdatasync/syncfs: stubs (writes are synchronous), sendfile (userspace read+write loop)
   - [x] clock_settime (stub EPERM), clock_nanosleep (relative + absolute time, TIMER_ABSTIME)

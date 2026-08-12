@@ -29,6 +29,15 @@ pub const SYS_CLOCK_SETTIME: u64 = 15;
 pub const SYS_CLOCK_ADJTIME: u64 = 16;
 pub const SYS_SLEEP: u64 = 11;
 
+/// Fill a userspace buffer with kernel-CSPRNG bytes.
+///   `(buf_ptr, len)` -> bytes written, capped at 1 MiB per call.
+///
+/// The only source of key-grade randomness available to userspace: the
+/// kernel's ChaCha20 pool is seeded from RDRAND/RDSEED, TSC jitter, the HPET
+/// and interrupt timing, none of which an unprivileged process can see.
+/// See [`crate::random`].
+pub const SYS_GETRANDOM: u64 = 90;
+
 // Console I/O
 pub const SYS_CONSOLE_WRITE: u64 = 100;
 pub const SYS_CONSOLE_READ_CHAR: u64 = 101;

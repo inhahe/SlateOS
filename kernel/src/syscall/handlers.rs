@@ -6963,6 +6963,49 @@ pub fn sys_console_try_read_char(args: &SyscallArgs) -> SyscallResult {
 }
 
 // ---------------------------------------------------------------------------
+// Randomness handler (90)
+// ---------------------------------------------------------------------------
+
+/// `SYS_GETRANDOM` — fill a userspace buffer with CSPRNG output.
+///
+/// `arg0`: pointer to the destination buffer.
+/// `arg1`: byte count.
+///
+/// Returns: bytes written, which is `min(arg1, GETRANDOM_MAX)`.
+///
+/// See [`crate::syscall::number::SYS_GETRANDOM`] for why this is not
+/// capability-gated and why the length is capped.
+pub fn sys_getrandom(args: &SyscallArgs) -> SyscallResult {
+    let buf_ptr = args.arg0 as *mut u8;
+    let len = (args.arg1 as usize).min(crate::syscall::number::GETRANDOM_MAX);
+
+    // A zero-length request is a no-op success, not an error: callers that
+    // loop until a count is exhausted would otherwise have to special-case
+    // the final iteration.
+    if len == 0 {
+        return SyscallResult::ok(0);
+    }
+    if buf_ptr.is_null() {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // Validate before writing: this is the one place a bad user pointer would
+    // otherwise be scribbled over with random bytes, which is both a fault and
+    // an information leak into whatever the pointer did happen to reach.
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg0, len) {
+        return SyscallResult::err(e);
+    }
+
+    // SAFETY: validated above — `buf_ptr` is a userspace address, mapped and
+    // writable for `len` bytes, and `len` is nonzero.
+    let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr, len) };
+    crate::rng::fill(buf);
+
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(len as i64)
+}
+
+// ---------------------------------------------------------------------------
 // Logging handlers (102)
 // ---------------------------------------------------------------------------
 

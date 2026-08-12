@@ -137,6 +137,13 @@ pub struct PerThread {
     /// [`Self::cancel_state`], and zero is likewise POSIX's required
     /// initial value.
     pub cancel_type: i32,
+
+    /// The thread's `arc4random` ChaCha20 pool.
+    ///
+    /// Per-thread so `arc4random` needs no lock and two threads can never be
+    /// handed the same bytes.  All-zero means "never seeded", which is what
+    /// this block starts as — see [`crate::random::RandomState`].
+    pub random: crate::random::RandomState,
 }
 
 impl PerThread {
@@ -166,6 +173,7 @@ impl PerThread {
         protoent: crate::socket::ProtoentBuf::ZERO,
         cancel_state: 0,
         cancel_type: 0,
+        random: crate::random::RandomState::ZERO,
     };
 }
 

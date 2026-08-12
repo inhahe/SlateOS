@@ -312,6 +312,7 @@ pub fn syscall_name(nr: u64) -> &'static str {
         70 => "mm_set_prof",
         71 => "mm_get_prof",
         80 => "sys_set_prof",
+        90 => "getrandom",
         99 => "debug_print",
         100 => "con_write",
         101 => "con_read",

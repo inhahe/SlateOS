@@ -206,7 +206,41 @@ ever depend on it. Worth pairing with Q40, which asks the same "does fidelity
 have limits?" question from the other side.
 
 **Meanwhile.** Nothing is blocked; osh work continues and is green (642/642).
-Not started pending the operator's go-ahead, since it is scope, not a bug.
+
+**Spike results (2026-08-12, operator authorised option A).** Scripts live in
+`build/spike/`. Measured, not estimated:
+
+- **bash 5.2 builds.** A native build succeeded first (4,501,576-byte binary),
+  proving the source tree is sound. A cross-configure/cross-compile with
+  `zig cc --target=x86_64-linux-musl` (`--without-bash-malloc --disable-nls
+  --disable-readline --without-curses`) then compiled every translation unit
+  clean. Note the first cross attempt died with `CROSS_CONFIGURE_EXIT=77`
+  ("C compiler cannot create executables") purely because autotools
+  word-splits `$CC` and this repo lives under `visual studio projects` — fixed
+  with a wrapper script on a spaceless path, not a real toolchain problem.
+- **The symbol surface is nearly covered already.** SlateOS `libc.a` defines
+  2,900 symbols; bash references 2,030; **only 23 are unresolved**, and they
+  decompose as: 9 termcap (`tgetent`/`tputs`/`tgoto`/`tgetflag`/`tgetnum`/
+  `tgetstr`/`BC`/`PC`/`UP`, all dropped by `--disable-readline`), 8 glibc-ism
+  artifacts of the native build (`__isoc23_strtol`, `__longjmp_chk`,
+  `__fdelt_chk`, `__fpurge`, `__mbrlen`, `__mbsrtowcs_chk`, `__wcsrtombs_chk`,
+  `__isoc23_strtoumax` — musl doesn't need these), 1 linker symbol
+  (`_GLOBAL_OFFSET_TABLE_`), and **5 genuinely missing, all trivial**:
+  `arc4random`, `eaccess`, `getservent`, `setservent`, `endservent`.
+- **Stub quality is not the problem either.** Exactly **one** bash symbol is
+  served only by `libstubs.a`: `killpg`. There are 1,299 `ENOSYS` sites in
+  `posix/src`, but they cluster in aio/crypt/dirent/epoll — subsystems bash
+  never calls.
+- **The one real blocker is unchanged and is a kernel gap, not a libc gap:**
+  `posix/src/signal.rs:572`, no kernel suspend ⇒ no `SIGTSTP`/`SIGCONT` ⇒ no
+  Ctrl-Z / `fg` / `bg`. This constrains osh identically.
+
+So the honest verdict is that §72's prerequisite objection is not merely stale,
+it is *comprehensively* stale: C bash is ~5 trivial libc functions away from
+linking against SlateOS's own sysroot. That does **not** by itself argue for
+option C — the case for B (osh is done, works today, and is byte-exact) is
+about sunk value and the missing dynamic linker, not about feasibility. But the
+decision should now be made on those grounds, not on "we can't build C".
 
 **Where it bites.** `design-decisions.md` §72 (its "How to reverse" clause and
 the now-stale prerequisite claim), `userspace/oils/` (all of it),

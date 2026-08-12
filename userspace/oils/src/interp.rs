@@ -47507,11 +47507,17 @@ impl Shell {
         let mut flags = Self::declare_global_flag(argv.get(1..).unwrap_or_default());
         // The expansion half is not the command's own letters. Step 1's options
         // are spelled out of the *word flags* `fix_assignment_words` put on the
-        // operand (subst.c:12662-12745), and only `readonly`/`export` are given
-        // `W_CHKLOCAL` there (execute_cmd.c:4221) — no letter sets it. So the
-        // `G` of `declare -gG` reaches the builtin proper and nothing before it.
+        // operand (subst.c:12662-12745), and that scan is the narrower of the
+        // two readings: it takes `W_ASSNGLOBAL` from a **lowercase `g`** alone
+        // (execute_cmd.c:4246), and `W_CHKLOCAL` is `readonly`/`export`'s
+        // standing flag (execute_cmd.c:4221) that no letter sets at all. So
+        // both of `declare -G`'s meanings reach the builtin proper and neither
+        // reaches anything before it: `declare -Ga g=(1 2)` is a plain *local*
+        // `declare -a` where the literal binds, and `declare -gG` pays one walk
+        // rather than two.
         if expansion_half {
             flags.chklocal = global_builtin;
+            flags.global = flags.assn_global || global_builtin;
         }
         if !flags.global && !global_builtin {
             return body(self);
@@ -75206,6 +75212,65 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             assert_eq!(
                 out,
                 "declare -- g=\"5\"\ndeclare -a z=([0]=\"1\" [1]=\"2\")\n",
+                "{cmd}"
+            );
+            assert_eq!(st, 0, "{cmd}");
+        }
+    }
+
+    /// `-G` means two things — bind globally, and unless the frame's own binding
+    /// answers — and a **compound** operand receives neither of them.
+    ///
+    /// The `declare` a compound operand decomposes into first spells its option
+    /// string out of the *word flags* (`expand_declaration_argument`,
+    /// subst.c:12662-12745), and that scan is the narrower reading: it takes
+    /// `W_ASSNGLOBAL` from a **lowercase `g`** alone (execute_cmd.c:4246), and
+    /// `W_CHKLOCAL` only for an assignment builtin that makes no locals —
+    /// `readonly` and `export` (execute_cmd.c:4221) — which no letter reaches.
+    /// So `declare -Ga g=(1 2)` is a plain *local* `declare -a` where the
+    /// literal binds, while the very same command's *scalar* operand, having no
+    /// such first step, takes the `-G` it was written with.
+    ///
+    /// Corpus:
+    /// `a-lone-G-is-the-builtins-alone-and-reaches-neither-the-literal-nor-its-scope.sh`.
+    #[test]
+    fn a_lone_g_letter_reaches_the_builtin_alone_and_leaves_the_literal_local() {
+        // The same letters, a compound operand and a scalar one.
+        let (out, st) = run("g=old; f() { declare -Ga g=(1 2); declare -p g; }; f; declare -p g");
+        assert_eq!(
+            out,
+            "declare -a g=([0]=\"1\" [1]=\"2\")\ndeclare -- g=\"old\"\n"
+        );
+        assert_eq!(st, 0);
+
+        let (out, st) = run("g=old; f() { declare -Ga g=1; declare -p g; }; f; declare -p g");
+        assert_eq!(out, "declare -a g=([0]=\"1\")\ndeclare -a g=([0]=\"1\")\n");
+        assert_eq!(st, 0);
+
+        // The builtin proper still has both letters, so its own restart still
+        // happens — in the shape *its* kind letter named, not the literal's.
+        for (cmd, left) in [
+            ("declare -Ga g=(1 2)", "declare -a z\n"),
+            ("declare -GA g=([k]=v)", "declare -A z\n"),
+            ("declare -G g=(1 2)", "declare -- z\n"),
+        ] {
+            let (out, st) = run(&format!(
+                "declare -n g=z; f() {{ {cmd}; }}; f; declare -p z"
+            ));
+            assert_eq!(out, left, "{cmd}");
+            assert_eq!(st, 0, "{cmd}");
+        }
+
+        // Spelled with the lowercase letter too, both halves go out — and the
+        // literal then leaves what a plain `-ga` leaves, the `G` having reached
+        // nothing before the builtin.
+        for cmd in ["declare -gGa g=(1 2)", "declare -ga g=(1 2)"] {
+            let (out, st) = run(&format!(
+                "declare -n g=z; f() {{ {cmd}; }}; f; declare -p g z"
+            ));
+            assert_eq!(
+                out,
+                "declare -n g=\"z\"\ndeclare -a z=([0]=\"1\" [1]=\"2\")\n",
                 "{cmd}"
             );
             assert_eq!(st, 0, "{cmd}");

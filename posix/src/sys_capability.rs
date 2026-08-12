@@ -209,34 +209,138 @@ pub const CAP_LAST_CAP: u32 = 40;
 // ---------------------------------------------------------------------------
 //
 // Linux capability v3 holds 64 bits per set across two u32 words (the
-// `datap[2]` array passed to capget/capset).  We model that as a pair
-// of AtomicU32 per set.  The default value is "all caps held" — we
-// run as root with no security boundary yet, so dropping a cap means
-// the process voluntarily declines a privilege, but querying always
-// reports whatever the process previously stored.
-
-use core::sync::atomic::{AtomicU32, Ordering};
+// `datap[2]` array passed to capget/capset).  The default value is "all
+// caps held" — we run as root with no security boundary yet, so dropping
+// a cap means the process voluntarily declines a privilege, but querying
+// always reports whatever the process previously stored.
+//
+// ## Where the words live
+//
+// On the real target the sets are process-global, because that is what
+// they model: capabilities are a property of the process, and every
+// thread in it shares them.  On the host, where this crate exists only to
+// be unit-tested, they are `thread_local!` instead — for exactly the
+// reason `perthread` gives (known-issues.md `TD-POSIX-TEST-PARALLEL`):
+// cargo runs the suite on many threads in one process, so process-global
+// cap words make every cap-mutating test a race against every other test
+// that reads or writes them.  Giving each test thread its own set makes
+// that interference structurally impossible rather than something each
+// test has to remember to defend against.
 
 /// Initial value with every defined capability bit set (caps 0..=40
 /// occupy the low 41 bits of the combined 64-bit set).
 const DEFAULT_CAPS_LOW: u32 = u32::MAX;
 const DEFAULT_CAPS_HIGH: u32 = (1u32 << 9).wrapping_sub(1); // caps 32..40 → 9 bits
 
-// effective / permitted / inheritable, each (low, high) word.
-static CAP_EFF_LO: AtomicU32 = AtomicU32::new(DEFAULT_CAPS_LOW);
-static CAP_EFF_HI: AtomicU32 = AtomicU32::new(DEFAULT_CAPS_HIGH);
-static CAP_PRM_LO: AtomicU32 = AtomicU32::new(DEFAULT_CAPS_LOW);
-static CAP_PRM_HI: AtomicU32 = AtomicU32::new(DEFAULT_CAPS_HIGH);
-static CAP_INH_LO: AtomicU32 = AtomicU32::new(0);
-static CAP_INH_HI: AtomicU32 = AtomicU32::new(0);
+/// The three capability sets, each as a (low, high) `u32` pair.
+///
+/// Loaded and stored as one value so the backing store can differ per
+/// build without every caller knowing which it got.
+#[derive(Clone, Copy)]
+pub(crate) struct CapWords {
+    pub(crate) eff_lo: u32,
+    pub(crate) eff_hi: u32,
+    pub(crate) prm_lo: u32,
+    pub(crate) prm_hi: u32,
+    pub(crate) inh_lo: u32,
+    pub(crate) inh_hi: u32,
+}
+
+/// Cold-boot capability state: all defined caps effective and permitted,
+/// nothing inheritable.
+pub(crate) const CAPS_DEFAULT: CapWords = CapWords {
+    eff_lo: DEFAULT_CAPS_LOW,
+    eff_hi: DEFAULT_CAPS_HIGH,
+    prm_lo: DEFAULT_CAPS_LOW,
+    prm_hi: DEFAULT_CAPS_HIGH,
+    inh_lo: 0,
+    inh_hi: 0,
+};
+
+// -- target build: process-global, shared by every thread ------------------
+
+#[cfg(target_os = "none")]
+mod store {
+    use super::{CAPS_DEFAULT, CapWords};
+    use core::sync::atomic::{AtomicU32, Ordering};
+
+    // effective / permitted / inheritable, each (low, high) word. Seeded
+    // from `CAPS_DEFAULT` so both builds share one statement of the
+    // cold-boot set rather than restating it.
+    static CAP_EFF_LO: AtomicU32 = AtomicU32::new(CAPS_DEFAULT.eff_lo);
+    static CAP_EFF_HI: AtomicU32 = AtomicU32::new(CAPS_DEFAULT.eff_hi);
+    static CAP_PRM_LO: AtomicU32 = AtomicU32::new(CAPS_DEFAULT.prm_lo);
+    static CAP_PRM_HI: AtomicU32 = AtomicU32::new(CAPS_DEFAULT.prm_hi);
+    static CAP_INH_LO: AtomicU32 = AtomicU32::new(CAPS_DEFAULT.inh_lo);
+    static CAP_INH_HI: AtomicU32 = AtomicU32::new(CAPS_DEFAULT.inh_hi);
+
+    /// Read all six words.  Relaxed and word-by-word, so a concurrent
+    /// `capset` can in principle be observed half-applied; that matches
+    /// the pre-existing behaviour and the fact that a process changing
+    /// its own privileges from two threads at once is already a race in
+    /// the caller.
+    pub(super) fn load() -> CapWords {
+        CapWords {
+            eff_lo: CAP_EFF_LO.load(Ordering::Relaxed),
+            eff_hi: CAP_EFF_HI.load(Ordering::Relaxed),
+            prm_lo: CAP_PRM_LO.load(Ordering::Relaxed),
+            prm_hi: CAP_PRM_HI.load(Ordering::Relaxed),
+            inh_lo: CAP_INH_LO.load(Ordering::Relaxed),
+            inh_hi: CAP_INH_HI.load(Ordering::Relaxed),
+        }
+    }
+
+    pub(super) fn store(c: CapWords) {
+        CAP_EFF_LO.store(c.eff_lo, Ordering::Relaxed);
+        CAP_EFF_HI.store(c.eff_hi, Ordering::Relaxed);
+        CAP_PRM_LO.store(c.prm_lo, Ordering::Relaxed);
+        CAP_PRM_HI.store(c.prm_hi, Ordering::Relaxed);
+        CAP_INH_LO.store(c.inh_lo, Ordering::Relaxed);
+        CAP_INH_HI.store(c.inh_hi, Ordering::Relaxed);
+    }
+}
+
+// -- host build: per-thread, so parallel tests cannot collide --------------
+
+#[cfg(not(target_os = "none"))]
+mod store {
+    use super::{CAPS_DEFAULT, CapWords};
+
+    std::thread_local! {
+        static CAPS: core::cell::Cell<CapWords> =
+            const { core::cell::Cell::new(CAPS_DEFAULT) };
+    }
+
+    /// Falls back to the cold-boot default if the thread's TLS is already
+    /// destroyed (only reachable from a TLS destructor, which nothing in
+    /// this crate registers).
+    pub(super) fn load() -> CapWords {
+        CAPS.try_with(core::cell::Cell::get).unwrap_or(CAPS_DEFAULT)
+    }
+
+    pub(super) fn store(c: CapWords) {
+        // A failed `try_with` means the thread is shutting down and the
+        // value is about to be discarded anyway, so dropping the write is
+        // the correct response rather than a lost update.
+        let _ = CAPS.try_with(|cell| cell.set(c));
+    }
+}
+
+/// Read all three capability sets.
+pub(crate) fn current_caps() -> CapWords {
+    store::load()
+}
+
+/// Overwrite all three capability sets.
+pub(crate) fn set_current_caps(c: CapWords) {
+    store::store(c);
+}
 
 /// Read the currently-held effective capability set as (low, high).
 #[must_use]
 pub fn current_caps_effective() -> (u32, u32) {
-    (
-        CAP_EFF_LO.load(Ordering::Relaxed),
-        CAP_EFF_HI.load(Ordering::Relaxed),
-    )
+    let c = store::load();
+    (c.eff_lo, c.eff_hi)
 }
 
 /// Test whether the calling process holds capability `cap`.
@@ -254,86 +358,6 @@ pub fn has_capability(cap: u32) -> bool {
         lo & (1u32 << cap) != 0
     } else {
         hi & (1u32 << (cap.wrapping_sub(32))) != 0
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Cross-module cap-state test serialisation
-// ---------------------------------------------------------------------------
-//
-// The effective/permitted/inheritable cap sets above are process-global
-// `AtomicU32`s. Cargo runs `posix`'s test suite multi-threaded, so any
-// test that mutates the cap state (e.g. drops `CAP_SYS_ADMIN` to verify
-// an unprivileged code path) races against every other test in every
-// other module that does the same — or that merely reads/assumes a
-// specific cap layout. The races manifest as ~150 spurious test
-// failures per run, all with errno mismatches (EPERM vs ENOSYS, etc.)
-// where a concurrent test had reset the caps mid-run.
-//
-// The fix: every test-only `CapGuard` in the crate acquires this
-// global mutex before snapshotting/mutating the cap set and holds it
-// until Drop restores. Cap-mutating tests therefore serialise across
-// modules, and tests that only read the cap state but rely on it
-// staying stable get the same protection by also holding the guard.
-//
-// Only compiled on host builds (`std::sync::Mutex` is unavailable in
-// the no_std `target_os = "none"` build). The lock is intentionally
-// `pub` so every module's CapGuard can name it.
-#[cfg(not(target_os = "none"))]
-pub static CAP_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-// `std::sync::Mutex` is not reentrant: a thread that locks it twice
-// deadlocks itself. Some tests nest `CapGuard`s on purpose — typically
-// an outer snapshot for the whole test plus an inner one for a scoped
-// modification (e.g. `test_ioprio_set_phase191_recovery_after_eperm`).
-// To make those work under the global lock, we wrap acquisition in a
-// thread-local depth counter: only the outermost guard actually owns
-// the `MutexGuard`; nested guards are no-ops for the lock but still
-// snapshot/restore caps independently.
-#[cfg(not(target_os = "none"))]
-std::thread_local! {
-    static CAP_TEST_LOCK_DEPTH: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
-}
-
-/// RAII handle returned by [`CapTestLockGuard::acquire`]. Holds the
-/// crate-global cap-state mutex on the outermost call per thread and is
-/// a no-op for nested calls on the same thread. Drop decrements the
-/// depth counter and releases the lock when depth returns to zero.
-#[cfg(not(target_os = "none"))]
-pub struct CapTestLockGuard {
-    // `Some` on the outermost acquire; `None` for re-entrant acquires
-    // that piggy-back on an existing hold.
-    _inner: Option<std::sync::MutexGuard<'static, ()>>,
-}
-
-#[cfg(not(target_os = "none"))]
-impl CapTestLockGuard {
-    /// Acquire the cap-state test lock with re-entrant semantics.
-    /// Poisoned locks are recovered (a prior panicking test holding the
-    /// guard would otherwise wedge every subsequent test in the run).
-    #[must_use]
-    pub fn acquire() -> Self {
-        let depth = CAP_TEST_LOCK_DEPTH.with(core::cell::Cell::get);
-        CAP_TEST_LOCK_DEPTH.with(|d| d.set(depth.saturating_add(1)));
-        let inner = if depth == 0 {
-            Some(
-                CAP_TEST_LOCK
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner),
-            )
-        } else {
-            None
-        };
-        Self { _inner: inner }
-    }
-}
-
-#[cfg(not(target_os = "none"))]
-impl Drop for CapTestLockGuard {
-    fn drop(&mut self) {
-        CAP_TEST_LOCK_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
-        // `_inner` (the real MutexGuard) drops here on the outermost
-        // guard, releasing the mutex.
     }
 }
 
@@ -444,12 +468,14 @@ pub extern "C" fn capget(hdrp: *mut CapUserHeader, datap: *mut CapUserData) -> i
         return -1;
     }
 
-    let eff_lo = CAP_EFF_LO.load(Ordering::Relaxed);
-    let eff_hi = CAP_EFF_HI.load(Ordering::Relaxed);
-    let prm_lo = CAP_PRM_LO.load(Ordering::Relaxed);
-    let prm_hi = CAP_PRM_HI.load(Ordering::Relaxed);
-    let inh_lo = CAP_INH_LO.load(Ordering::Relaxed);
-    let inh_hi = CAP_INH_HI.load(Ordering::Relaxed);
+    let CapWords {
+        eff_lo,
+        eff_hi,
+        prm_lo,
+        prm_hi,
+        inh_lo,
+        inh_hi,
+    } = current_caps();
     // SAFETY: caller guarantees datap points to `tocopy` writable
     // CapUserData entries — 1 for V1 (low word only), 2 for V2/V3.
     unsafe {
@@ -553,12 +579,14 @@ pub extern "C" fn capset(hdrp: *mut CapUserHeader, datap: *const CapUserData) ->
         errno::set_errno(errno::EPERM);
         return -1;
     }
-    CAP_EFF_LO.store(lo.effective, Ordering::Relaxed);
-    CAP_EFF_HI.store(hi.effective, Ordering::Relaxed);
-    CAP_PRM_LO.store(lo.permitted, Ordering::Relaxed);
-    CAP_PRM_HI.store(hi.permitted, Ordering::Relaxed);
-    CAP_INH_LO.store(lo.inheritable, Ordering::Relaxed);
-    CAP_INH_HI.store(hi.inheritable, Ordering::Relaxed);
+    set_current_caps(CapWords {
+        eff_lo: lo.effective,
+        eff_hi: hi.effective,
+        prm_lo: lo.permitted,
+        prm_hi: hi.permitted,
+        inh_lo: lo.inheritable,
+        inh_hi: hi.inheritable,
+    });
     0
 }
 
@@ -689,12 +717,7 @@ mod tests {
     /// Restore the capability sets to their cold-boot defaults so tests
     /// that mutate state don't leak into one another.
     fn reset_caps() {
-        CAP_EFF_LO.store(DEFAULT_CAPS_LOW, Ordering::Relaxed);
-        CAP_EFF_HI.store(DEFAULT_CAPS_HIGH, Ordering::Relaxed);
-        CAP_PRM_LO.store(DEFAULT_CAPS_LOW, Ordering::Relaxed);
-        CAP_PRM_HI.store(DEFAULT_CAPS_HIGH, Ordering::Relaxed);
-        CAP_INH_LO.store(0, Ordering::Relaxed);
-        CAP_INH_HI.store(0, Ordering::Relaxed);
+        set_current_caps(CAPS_DEFAULT);
     }
 
     #[test]

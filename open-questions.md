@@ -210,12 +210,23 @@ argument for the reimplementation.
 > from the kernel. (An earlier version of this note claimed `^Z` "still reaches
 > no job"; that was wrong — the generation and delivery were always there, only
 > the *target group* was broken, which is exactly what this change fixed.)
-> What genuinely remains is *enforcement*, not state: nothing raises
+> ~~What genuinely remains is *enforcement*, not state: nothing raises
 > SIGTTIN/SIGTTOU on a background read/write, though the predicate
-> (`pcb::ctty_is_background`) exists — see `todo.txt`. Bash notices that gap
-> only in the narrow case of a background job reading the terminal, which
-> should hang rather than return data. That is a kernel feature rather than a
-> shell choice, so it does not pre-empt this question in either direction.
+> (`pcb::ctty_is_background`) exists — see `todo.txt`.~~ **Also closed
+> 2026-08-12** (commit `a6e286332`, design-decisions §115): `sys_tty_read`,
+> `sys_console_read_char`, `sys_console_write` (under `TOSTOP`) and the
+> `tcsetattr`/`tcsetpgrp` paths now go through `tty_job_control_decide`, which
+> follows Linux's `__tty_check_change()` including the orphaned-group `EIO`
+> substitution. So the *entire* kernel-side surface bash's job control touches —
+> process groups, self-stop, wait-status reporting, the controlling terminal,
+> and now terminal-access enforcement — exists. Nothing on the feasibility axis
+> is outstanding in either direction; this question is purely the scope call.
+> (One deliberate limitation remains, and it constrains a *native-ABI* shell
+> only, never bash: the kernel cannot see a native process's `SIG_IGN`, so a
+> native job-control shell must **block** `SIGTTOU` around `tcsetpgrp` where
+> bash ignores it. Bash runs under `AbiMode::Linux`, whose dispositions the
+> kernel does own, so it gets exact POSIX behaviour. See `known-issues.md`,
+> `TD-KERNEL-NATIVE-ABI-SIG_IGN-IS-INVISIBLE-TO-THE-KERNEL`.)
 
 **Options.**
 - **A — timeboxed spike, then decide.** Point `zig cc --target=x86_64-slateos` at

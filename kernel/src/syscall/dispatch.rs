@@ -89,6 +89,10 @@ use super::number::{
     SYS_PROCESS_SET_CREDENTIALS,
     SYS_PROCESS_GET_NICE,
     SYS_PROCESS_SET_NICE,
+    SYS_PROCESS_SET_PGID,
+    SYS_PROCESS_GET_PGID,
+    SYS_PROCESS_SET_SID,
+    SYS_PROCESS_GET_SID,
     SYS_SIGNAL_REGISTER,
     SYS_SIGNAL_SEND,
     SYS_SIGNAL_MASK,
@@ -452,6 +456,14 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PROCESS_GET_NICE as usize] = Some(handlers::sys_process_get_nice);
     handlers[SYS_PROCESS_SET_NICE as usize] = Some(handlers::sys_process_set_nice);
 
+    // Process groups / sessions (533–536). Native entry points onto the
+    // same `proc::pcb` state the Linux shim's setpgid/getpgid/setsid/getsid
+    // use, so both ABIs share one source of truth.
+    handlers[SYS_PROCESS_SET_PGID as usize] = Some(handlers::sys_process_set_pgid);
+    handlers[SYS_PROCESS_GET_PGID as usize] = Some(handlers::sys_process_get_pgid);
+    handlers[SYS_PROCESS_SET_SID as usize] = Some(handlers::sys_process_set_sid);
+    handlers[SYS_PROCESS_GET_SID as usize] = Some(handlers::sys_process_get_sid);
+
     // POSIX signal shim (522–526). SYS_SIGNAL_RETURN (524) is a
     // frame-modifying syscall handled specially in syscall_handler_inner,
     // so it has no flat-table entry.
@@ -783,6 +795,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_fs_roundtrip()?;
     test_io_dir_classification()?;
     test_dispatch_mprotect_native()?;
+    test_dispatch_process_group_syscalls()?;
 
     serial_println!("[syscall] Dispatch self-test PASSED");
     Ok(())
@@ -846,6 +859,208 @@ fn test_dispatch_mprotect_native() -> KernelResult<()> {
     }
 
     serial_println!("[syscall]   Native mprotect (SYS_MPROTECT=22) wired + gate order: OK");
+    Ok(())
+}
+
+/// Verify the **native** process-group syscalls (533–536) and the
+/// non-positive (`kill(-pgid)`) forms of `SYS_SIGNAL_SEND` (523).
+///
+/// Motivation: `AbiMode` is per-process, so before these numbers existed a
+/// program linked against our own posix libc could not reach `pcb::set_pgid`
+/// at all — only the Linux shim could — and the libc papered over the gap
+/// with a userspace `static mut PGID` that no other process could observe.
+/// This test pins down three things that fix depends on:
+///
+/// 1. **Registration.** An unknown-PID query must come back as
+///    `NoSuchProcess`, *not* `NotSupported`. `NotSupported` is what an
+///    unregistered dispatch slot returns, so this distinction alone proves
+///    the wiring.
+/// 2. **Delegation, not duplication.** The group/session policy lives in
+///    `proc::pcb`; the handlers only resolve arguments. So the checks below
+///    are of the *resolution* (0 = caller, `pgid == 0` = lead a new group,
+///    negative rejected) and of the error mapping — the policy itself is
+///    covered by `proc::pcb::test_process_groups`.
+/// 3. **Group-signal ordering.** `signal_send_to_group` is the single
+///    implementation shared by both ABIs, and it must resolve the target set
+///    *before* validating the signal number (ESRCH beats EINVAL, as in
+///    Linux's `kill_something_info`). A bad signal aimed at a live group and
+///    the same bad signal aimed at a dead group must therefore give
+///    *different* errors.
+///
+/// Every process this creates is destroyed on every exit path. Only
+/// `sig == 0` existence probes are issued at live groups, so nothing the
+/// test creates is actually signalled.
+fn test_dispatch_process_group_syscalls() -> KernelResult<()> {
+    use crate::proc::pcb;
+
+    let mk = |arg0: u64, arg1: u64| SyscallArgs {
+        arg0, arg1, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    // Sign-extend a negative group target into the `arg0` slot exactly the
+    // way userspace must (`i64::from(pid) as u64`). Zero-extending a 32-bit
+    // pid here would turn `kill(-7)` into a send to PID 4294967289.
+    #[allow(clippy::cast_sign_loss)]
+    let neg = |pid: i64| -> u64 { -pid as u64 };
+
+    fn fail(msg: &str, pids: &[u64]) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: process groups: {}", msg);
+        for &p in pids {
+            crate::proc::pcb::destroy(p);
+        }
+        Err(KernelError::InternalError)
+    }
+
+    // A PID/PGID no process will ever hold, used both as an unknown target
+    // and as an empty destination group.
+    const NO_GROUP_I: i64 = 7_654_321;
+    const NO_GROUP: u64 = 7_654_321;
+
+    // (1) Registration: an unknown PID is ESRCH, not "no such syscall".
+    for (nr, name) in [
+        (SYS_PROCESS_GET_PGID, "getpgid"),
+        (SYS_PROCESS_GET_SID, "getsid"),
+    ] {
+        let r = dispatch(nr, &mk(NO_GROUP, 0));
+        if r.value == i64::from(KernelError::NotSupported.code()) {
+            serial_println!("[syscall]     ({} is unregistered: NotSupported)", name);
+            return fail("process-group syscall not wired into the table", &[]);
+        }
+        if r.value != i64::from(KernelError::NoSuchProcess.code()) {
+            serial_println!("[syscall]     ({} unknown pid gave {})", name, r.value);
+            return fail("unknown pid should be NoSuchProcess", &[]);
+        }
+    }
+
+    // Build a parent and a forked child. `fork_create` (not `create`) is
+    // essential: `create` makes the new process its own session leader,
+    // whose pgid is fixed by rule, so it could never exercise `set_pgid`.
+    let parent = pcb::create("pg-syscall-parent", 0);
+    if pcb::set_running(parent).is_err() {
+        return fail("could not run parent", &[parent]);
+    }
+    let child = match pcb::fork_create(parent, 0, alloc::vec::Vec::new(), alloc::vec::Vec::new()) {
+        Ok(c) => c,
+        Err(_) => return fail("fork_create failed", &[parent]),
+    };
+    if pcb::set_running(child).is_err() {
+        return fail("could not run child", &[parent, child]);
+    }
+    let live = [parent, child];
+
+    // (2) The child inherited the parent's group and session.
+    #[allow(clippy::cast_possible_wrap)]
+    let parent_i = parent as i64;
+    #[allow(clippy::cast_possible_wrap)]
+    let child_i = child as i64;
+    if dispatch(SYS_PROCESS_GET_PGID, &mk(child, 0)).value != parent_i {
+        return fail("getpgid(child) != parent after fork", &live);
+    }
+    if dispatch(SYS_PROCESS_GET_SID, &mk(child, 0)).value != parent_i {
+        return fail("getsid(child) != parent after fork", &live);
+    }
+
+    // (3) `setpgid(child, 0)` — pgid 0 resolves to the target, creating a
+    //     new group led by the child. This is precisely what a shell does
+    //     to put a job in its own group, and precisely what the old
+    //     userspace-only implementation could not make visible.
+    if dispatch(SYS_PROCESS_SET_PGID, &mk(child, 0)).value != 0 {
+        return fail("setpgid(child, 0) failed", &live);
+    }
+    if dispatch(SYS_PROCESS_GET_PGID, &mk(child, 0)).value != child_i {
+        return fail("setpgid(child, 0) did not move the child", &live);
+    }
+
+    // (4) Error mapping is the pcb layer's, surfaced unchanged: joining a
+    //     group no live process holds is EPERM, not ESRCH.
+    if dispatch(SYS_PROCESS_SET_PGID, &mk(child, NO_GROUP)).value
+        != i64::from(KernelError::PermissionDenied.code())
+    {
+        return fail("setpgid into a nonexistent group should be PermissionDenied", &live);
+    }
+
+    // (5) Argument gates. A negative pid is not a PID: `setpgid` reports it
+    //     as EINVAL (it is a malformed argument), while the getters report
+    //     ESRCH (there is simply no such process), matching POSIX.
+    #[allow(clippy::cast_sign_loss)]
+    let minus_one = -1_i64 as u64;
+    if dispatch(SYS_PROCESS_SET_PGID, &mk(minus_one, 0)).value
+        != i64::from(KernelError::InvalidArgument.code())
+    {
+        return fail("setpgid(-1, ..) should be InvalidArgument", &live);
+    }
+    if dispatch(SYS_PROCESS_SET_PGID, &mk(child, minus_one)).value
+        != i64::from(KernelError::InvalidArgument.code())
+    {
+        return fail("setpgid(child, -1) should be InvalidArgument", &live);
+    }
+    if dispatch(SYS_PROCESS_GET_PGID, &mk(minus_one, 0)).value
+        != i64::from(KernelError::NoSuchProcess.code())
+    {
+        return fail("getpgid(-1) should be NoSuchProcess", &live);
+    }
+
+    // (6) The kernel self-test task owns no process, so "the caller" cannot
+    //     be resolved. Every 0-means-caller form must therefore say ESRCH
+    //     rather than silently acting on PID 0 (which never exists — PIDs
+    //     start at 1).
+    if dispatch(SYS_PROCESS_GET_PGID, &mk(0, 0)).value
+        != i64::from(KernelError::NoSuchProcess.code())
+    {
+        return fail("getpgid(0) with no owning process should be NoSuchProcess", &live);
+    }
+    if dispatch(SYS_PROCESS_SET_SID, &mk(0, 0)).value
+        != i64::from(KernelError::NoSuchProcess.code())
+    {
+        return fail("setsid() with no owning process should be NoSuchProcess", &live);
+    }
+
+    // (7) `kill(-pgid, 0)`: a live group is reachable through the *native*
+    //     SYS_SIGNAL_SEND. This is the whole point of the fix — before it,
+    //     the native ABI rejected every non-positive pid outright.
+    if dispatch(SYS_SIGNAL_SEND, &mk(neg(child_i), 0)).value != 0 {
+        return fail("kill(-child, 0) should find the child's live group", &live);
+    }
+    if dispatch(SYS_SIGNAL_SEND, &mk(neg(NO_GROUP_I), 0)).value
+        != i64::from(KernelError::NoSuchProcess.code())
+    {
+        return fail("kill(-<empty group>, 0) should be NoSuchProcess", &live);
+    }
+    // `kill(-1)` is the broadcast form, which we deliberately do not model
+    // (it needs a credential model to define "every process you may
+    // signal"); both ABIs report ESRCH. See known-issues.md,
+    // TD-KILL-MINUS-ONE-BROADCAST-NOT-MODELLED.
+    if dispatch(SYS_SIGNAL_SEND, &mk(minus_one, 0)).value
+        != i64::from(KernelError::NoSuchProcess.code())
+    {
+        return fail("kill(-1, 0) should be NoSuchProcess (broadcast unmodelled)", &live);
+    }
+    // `kill(0, ..)` means "my own group" — unresolvable here, so ESRCH.
+    if dispatch(SYS_SIGNAL_SEND, &mk(0, 0)).value
+        != i64::from(KernelError::NoSuchProcess.code())
+    {
+        return fail("kill(0, 0) with no owning process should be NoSuchProcess", &live);
+    }
+
+    // (8) Ordering: target resolution precedes signal validation. The same
+    //     invalid signal number gives EINVAL at a live group but ESRCH at a
+    //     dead one. If these two ever agree, the ordering has regressed and
+    //     a shell would get the wrong errno for a reaped job.
+    if dispatch(SYS_SIGNAL_SEND, &mk(neg(child_i), 999)).value
+        != i64::from(KernelError::InvalidArgument.code())
+    {
+        return fail("bad signal at a live group should be InvalidArgument", &live);
+    }
+    if dispatch(SYS_SIGNAL_SEND, &mk(neg(NO_GROUP_I), 999)).value
+        != i64::from(KernelError::NoSuchProcess.code())
+    {
+        return fail("bad signal at a dead group should be NoSuchProcess (ESRCH first)", &live);
+    }
+
+    pcb::destroy(child);
+    pcb::destroy(parent);
+    serial_println!(
+        "[syscall]   Native process groups (533-536) + kill(-pgid) ordering: OK"
+    );
     Ok(())
 }
 

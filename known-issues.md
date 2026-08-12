@@ -43,7 +43,7 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
-### TD-POSIX-PROCESS-GROUPS-ARE-FAKE-FOR-NATIVE-ABI-PROGRAMS. Our own libc keeps a userspace-only PGID and reports `ENOSYS` for `kill(-pgid)`, while the kernel has had real process groups since 2026-06-20 — 2026-08-12
+### TD-POSIX-PROCESS-GROUPS-ARE-FAKE-FOR-NATIVE-ABI-PROGRAMS. Our own libc keeps a userspace-only PGID and reports `ENOSYS` for `kill(-pgid)`, while the kernel has had real process groups since 2026-06-20 — 2026-08-12 — ✅ FIXED 2026-08-12
 
 **Where:** `posix/src/process.rs:590` (`setpgid`) and `posix/src/signal.rs:845`
 (`kill`, the `KillTarget::ProcessGroup` arm).
@@ -96,11 +96,91 @@ already has, rather than emulating them in userspace:
    short-circuit in `posix/src/signal.rs::kill`; `killpg` then inherits correct
    behaviour with no change of its own.
 
+**Fixed.** All three steps, as planned.
+
+1. `SYS_PROCESS_SET_PGID` (533), `SYS_PROCESS_GET_PGID` (534),
+   `SYS_PROCESS_SET_SID` (535), `SYS_PROCESS_GET_SID` (536) in
+   `kernel/src/syscall/number.rs`, handlers in `handlers.rs`, registered in
+   `dispatch.rs`. Each handler only *resolves arguments* (`pid == 0` → caller,
+   `pgid == 0` → target, negative → `EINVAL`/`ESRCH`) and then delegates to the
+   same `pcb::set_pgid` / `pcb::get_pgid` / `pcb::setsid` / `pcb::get_sid` the
+   Linux shim calls. No policy is duplicated.
+2. The group-fanout core moved **down** into the native layer as
+   `handlers::signal_send_to_group`, and `sys_signal_send_with_info` routes
+   every `arg0 <= 0` to it. `linux.rs::kill_process_group` lost its ~68-line
+   body and is now a three-line adapter that calls the same core through
+   `linux_from_native`. So the ordering rules (membership resolved first →
+   ESRCH before EINVAL → `sig == 0` probe → best-effort fanout) exist in
+   exactly one place, and a native-ABI shell and a glibc shell provably see
+   identical `kill(-pgid)` semantics.
+3. `OUR_PGID`/`OUR_SID` deleted from `posix/src/process.rs`; all six wrappers
+   now issue the real syscall on the target and use a `host_pg` test double on
+   the host triple (a test double, *not* a fallback — on `target_os = "none"`
+   the syscall arm is unconditional). `posix/src/signal.rs::kill` lost the
+   `ENOSYS` short-circuit; `killpg` was correct already and needed no change.
+
+Two things worth knowing about the result:
+
+* **Sign extension.** A negative `pid_t` must be widened as
+  `i64::from(pid) as u64`, never `pid as u64` — zero-extending would turn
+  `kill(-7)` into a send to PID 4294967289. `posix::signal::sign_extend_pid`
+  exists solely to make that one conversion impossible to get wrong, and is
+  pinned by `test_sign_extend_pid_keeps_negative_targets_negative`.
+* **`CAP_KILL` now applies to group sends.** It previously did not, but only
+  because the group forms could not signal anything at all, so the gate was
+  unreachable dead weight. Now that a group send really reaches other
+  processes, exempting it would make `killpg(g, SIGKILL)` a way to do what
+  `kill(pid, SIGKILL)` is denied. Two posix tests that asserted the old
+  exemption were rewritten to assert `EPERM`.
+
+**Still not modelled: `kill(-1)`** (the broadcast form) — see
+TD-KILL-MINUS-ONE-BROADCAST-NOT-MODELLED below.
+
+**Coverage.** `dispatch.rs::test_dispatch_process_group_syscalls` (boot
+self-test) pins registration, argument resolution, error mapping, and the
+ESRCH-before-EINVAL ordering (the same bad signal must give `EINVAL` at a live
+group and `ESRCH` at a dead one). `posix` host suite: 20,128 passing.
+
 **Note this is only half of bash's job control.** The other half is the kernel
 suspend mechanism that `posix/src/signal.rs:572` reports `ENOSYS` for (no
 `SIGTSTP`/`SIGCONT`, so no Ctrl-Z / `fg` / `bg`). Both gaps constrain `osh`
 identically, so neither is an argument for either side of
 `open-questions.md` Q41.
+
+### TD-KILL-MINUS-ONE-BROADCAST-NOT-MODELLED. `kill(-1, sig)` reports `ESRCH` in both ABIs instead of signalling every process the caller may signal — 2026-08-12
+
+**Where:** `kernel/src/syscall/handlers.rs::signal_send_to_group` — the first
+gate, `if pid_signed == -1 { return NoSuchProcess }`. Reached from the native
+ABI via `SYS_SIGNAL_SEND` and from the Linux ABI via `sys_kill` →
+`kill_process_group`, so both see it identically.
+
+**What.** POSIX gives `kill(-1, sig)` a distinct meaning from `kill(-pgid, sig)`:
+it is not "the group whose id is 1", it is "all processes for which the caller
+has permission to signal" (Linux: `kill_something_info` → `__kill_pgrp_info`
+over every task except `init` and the caller). We return `ESRCH` instead.
+
+**Why it is deferred rather than wrong-by-accident.** The definition is a
+*credential* question, not a plumbing one — "may signal" is
+`same_uid || CAP_KILL || same_session`, and we do not yet have the uid/euid and
+saved-set credential model to evaluate it per target. Implementing it against
+the state we have would mean picking an arbitrary interpretation (e.g. "every
+live process") that is strictly worse than an honest `ESRCH`, because a
+too-broad broadcast is a privilege escalation, not a cosmetic divergence. The
+group forms — which are what shells actually use for job control — are fully
+implemented; `-1` is used mostly by shutdown paths.
+
+**Reproduce.** `kill(-1, SIGTERM)` or `killpg` with a pgrp of 1 from any
+process returns −1/`ESRCH`. Pinned deliberately (so a future change is a
+conscious one) by `dispatch.rs::test_dispatch_process_group_syscalls` step (7)
+and `posix` test `test_kill_sig0_pid_minus_one_is_esrch_broadcast_not_modelled`.
+
+**Proper fix.** Once processes carry real uid/euid/saved-set credentials, add a
+`may_signal(caller, target)` predicate in `proc::pcb` and have
+`signal_send_to_group` treat `-1` as "every live process except pid 1 and the
+caller, filtered by `may_signal`", keeping the same best-effort fanout and
+`ESRCH`-if-none-accepted rule as the group path. **Trigger:** the credential
+model landing — this should be done in the same change, since that is the only
+thing blocking it.
 
 ### TD-OILS-A-BUILTIN-DOES-NOT-ANSWER-ITS-OWN---HELP. `cd --help` says `--: invalid option` where bash prints the long doc — 2026-08-12 — ✅ FIXED 2026-08-12
 

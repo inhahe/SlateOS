@@ -95,6 +95,30 @@ pub const SYS_PROCESS_GET_NICE: u64 = 531;
 /// nice, biased by +20. CAP_SYS_NICE policy is enforced in userspace.
 pub const SYS_PROCESS_SET_NICE: u64 = 532;
 
+// Process groups / sessions (533–536)
+//
+// These reach the same kernel `proc::pcb` state the Linux ABI shim's
+// setpgid/getpgid/setsid/getsid use.  Before they existed the process-group
+// functions in `process.rs` kept a userspace guess (a `static mut PGID`),
+// which meant a parent and its child could disagree about the child's own
+// group — see `known-issues.md`.
+
+/// Move a process into a process group.  arg0 = target PID (0 = caller),
+/// arg1 = destination PGID (0 = the resolved target PID).  Returns 0, or a
+/// negative error code (`NoSuchProcess` for a dead target,
+/// `PermissionDenied` if a POSIX gate rejects the move).
+pub const SYS_PROCESS_SET_PGID: u64 = 533;
+/// Query a process's process-group ID.  arg0 = target PID (0 = caller).
+/// Returns the PGID, or `NoSuchProcess`.
+pub const SYS_PROCESS_GET_PGID: u64 = 534;
+/// Start a new session led by the caller (`sid = pgid = pid`).  No
+/// arguments.  Returns the new SID, or `PermissionDenied` if the caller
+/// already leads a process group.
+pub const SYS_PROCESS_SET_SID: u64 = 535;
+/// Query a process's session ID.  arg0 = target PID (0 = caller).
+/// Returns the SID, or `NoSuchProcess`.
+pub const SYS_PROCESS_GET_SID: u64 = 536;
+
 // POSIX signal shim (522–526)
 pub const SYS_SIGNAL_REGISTER: u64 = 522;
 pub const SYS_SIGNAL_SEND: u64 = 523;

@@ -7962,12 +7962,10 @@ fn kill_common_value(args: &SyscallArgs, si_code: i32, value: u64) -> SyscallRes
     // For the group cases we resolve the membership first (ESRCH if
     // empty), validate sig, then deliver to each member best-effort.
     // Crucially the empty-set ESRCH must come *before* sig validation.
-    if pid_i32 == 0 || pid_i32 < -1 {
-        return kill_process_group(args, si_code, value, pid_i32, sig);
-    }
-    if pid_i32 == -1 {
-        // Broadcast not yet modelled.
-        return linux_err(errno::ESRCH);
+    if pid_i32 <= 0 {
+        // Includes pid == -1 (broadcast), which the shared core reports as
+        // ESRCH because we do not model "every process you may signal".
+        return kill_process_group(si_code, value, pid_i32, sig);
     }
     #[allow(clippy::cast_sign_loss)]
     let target_u: u64 = pid_i32 as u64;
@@ -8054,8 +8052,9 @@ fn kill_common_value(args: &SyscallArgs, si_code: i32, value: u64) -> SyscallRes
 }
 
 /// Deliver a signal to every live process in a process group, for the
-/// `kill(2)` group targets: `pid == 0` (the caller's own group) and
-/// `pid < -1` (the explicit group `-pid`).
+/// non-positive `kill(2)` targets: `pid == 0` (the caller's own group),
+/// `pid < -1` (the explicit group `-pid`), and `pid == -1` (broadcast,
+/// which we do not model — ESRCH).
 ///
 /// Linux semantics (`kill_pgrp_info`):
 /// - Resolve the group's live membership first; an empty group is
@@ -8064,73 +8063,20 @@ fn kill_common_value(args: &SyscallArgs, si_code: i32, value: u64) -> SyscallRes
 /// - `sig == 0` is an existence probe: succeed if the group is non-empty.
 /// - Otherwise deliver to each member; succeed (`0`) if at least one
 ///   delivery succeeded, else surface the last error.
-fn kill_process_group(
-    args: &SyscallArgs,
-    si_code: i32,
-    value: u64,
-    pid_i32: i32,
-    sig: i32,
-) -> SyscallResult {
-    use crate::proc::{pcb, thread};
-
-    // Resolve the target group ID.
-    let task_id = crate::sched::current_task_id();
-    let caller = thread::owner_process(task_id).unwrap_or(0);
-    let pgid: u64 = if pid_i32 == 0 {
-        // The caller's own process group. In kernel self-test context
-        // (no owning process) there is no group → empty set → ESRCH.
-        match pcb::get_pgid(caller) {
-            Some(g) => g,
-            None => return linux_err(errno::ESRCH),
-        }
-    } else {
-        // pid < -1: the group is -pid. Widen to i64 before taking the
-        // magnitude so even i32::MIN is representable, then drop the sign.
-        i64::from(pid_i32).unsigned_abs()
-    };
-
-    // Gate: resolve membership before validating sig.
-    let members = pcb::pids_in_group(pgid);
-    if members.is_empty() {
-        return linux_err(errno::ESRCH);
-    }
-
-    // Gate: validate sig now (post-resolution).
-    if !(0..=64).contains(&sig) {
-        return linux_err(errno::EINVAL);
-    }
-    if sig == 0 {
-        // Existence probe: the group exists and is non-empty.
-        return SyscallResult::ok(0);
-    }
-
-    // Deliver to each member best-effort.
-    #[allow(clippy::cast_sign_loss)]
-    let sig_u = sig as u64;
-    let mut any_ok = false;
-    let mut last_err: i64 = -i64::from(errno::ESRCH);
-    for target in members {
-        let send_args = SyscallArgs {
-            arg0: target,
-            arg1: sig_u,
-            arg2: args.arg2,
-            arg3: args.arg3,
-            arg4: args.arg4,
-            arg5: args.arg5,
-        };
-        let r =
-            linux_from_native(handlers::sys_signal_send_with_info(&send_args, si_code, value));
-        if r.value >= 0 {
-            any_ok = true;
-        } else {
-            last_err = r.value;
-        }
-    }
-    if any_ok {
-        SyscallResult::ok(0)
-    } else {
-        SyscallResult { value: last_err, value2: 0, has_value2: false }
-    }
+///
+/// All of that logic lives in [`handlers::signal_send_to_group`], which the
+/// *native* `SYS_SIGNAL_SEND` also routes to for its `pid <= 0` forms; this
+/// function is only the Linux-ABI adapter (pid_t truncation on the way in,
+/// errno translation on the way out). There is deliberately no second copy
+/// of the ordering rules here — a native-ABI shell and a Linux-ABI shell
+/// must see identical group semantics.
+fn kill_process_group(si_code: i32, value: u64, pid_i32: i32, sig: i32) -> SyscallResult {
+    linux_from_native(handlers::signal_send_to_group(
+        i64::from(pid_i32),
+        i64::from(sig),
+        si_code,
+        value,
+    ))
 }
 
 /// `rt_sigpending(set, sigsetsize)` — report the pending-signal mask
@@ -13779,13 +13725,16 @@ fn sys_times(args: &SyscallArgs) -> SyscallResult {
 
 /// `getpgrp()` — return the calling process's process-group ID.
 ///
-/// We don't have process groups; every process is implicitly the
-/// sole member of its own group.  Return the caller's PID, which is
-/// also what Linux would return if the process had called
-/// `setpgrp()` to detach itself into a fresh group (the common case
-/// for shells and daemons).
+/// Reads the real process-group record ([`crate::proc::pcb::get_pgid`]),
+/// which `fork` inherits and `setpgid`/`setsid` update, so the answer
+/// tracks actual group membership rather than assuming every process
+/// leads its own group.
 ///
-/// Never fails; returns 1 if there's no caller (boot-context probe).
+/// Never fails (POSIX gives `getpgrp` no error return): it falls back to
+/// the caller's own PID when there is no group record, and to 1 when
+/// there is no caller at all (boot-context probe). The fallback is
+/// reachable only from kernel self-test context, where no process owns
+/// the calling task.
 fn sys_getpgrp(_args: &SyscallArgs) -> SyscallResult {
     let pid = caller_pid().unwrap_or(1);
     // getpgrp() == getpgid(0): the caller's own process group. Fall back
@@ -13799,8 +13748,9 @@ fn sys_getpgrp(_args: &SyscallArgs) -> SyscallResult {
 /// `getpgid(pid)` — return the process-group ID of `pid` (or self if
 /// `pid == 0`).
 ///
-/// We don't track group membership.  Without it, the most truthful
-/// answer is "pgid == pid" — every process is in its own group.
+/// Reports the target's real process-group record, which is shared with
+/// the native ABI's `SYS_PROCESS_GET_PGID` — a glibc process and a
+/// process on our own libc must never disagree about a group.
 ///
 /// Errors:
 ///   - `-ESRCH` if `pid` refers to a non-existent process.

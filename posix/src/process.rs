@@ -502,111 +502,266 @@ pub extern "C" fn gettid() -> PidT {
 }
 
 // ---------------------------------------------------------------------------
-// Process groups / sessions (stubs)
+// Process groups / sessions
 // ---------------------------------------------------------------------------
 //
-// Our kernel doesn't have process groups or sessions yet.  These stubs
-// return the process's own PID as its group/session ID, making every
-// process appear to be its own group and session leader.  This is
-// sufficient for programs that query but don't rely on job control.
-
-// ---------------------------------------------------------------------------
-// Process group / session tracking
-// ---------------------------------------------------------------------------
+// Process-group and session membership lives in the *kernel* process
+// table (`proc::pcb`), where `kill(-pgid)`, `wait4(-pgid)` and job control
+// all read it.  These wrappers are thin translations onto the native
+// syscalls that expose it (`SYS_PROCESS_{SET,GET}_PGID` /
+// `SYS_PROCESS_{SET,GET}_SID`).
 //
-// Without kernel support for multi-process job control, we track the
-// calling process's own PGID and SID in static variables.  Queries for
-// other PIDs fall back to returning the PID itself (each process is its
-// own group leader).  This gives consistent behavior for programs that
-// call setpgid/setsid and later query their own group/session.
+// They used to keep a per-process `static mut OUR_PGID`/`OUR_SID` instead,
+// because those syscalls did not exist — group state was reachable only
+// through the Linux ABI shim, and a process is in exactly one `AbiMode`.
+// That guess was actively wrong in the one case it mattered: a shell doing
+// `setpgid(child, child)` after fork changed nothing the kernel could see,
+// so `killpg` could not reach the child and the parent and child disagreed
+// about the child's own group.  The statics are gone; there is now one
+// source of truth shared by both ABIs.
 
-/// Process group ID of the calling process.  Initialized to our PID
-/// on first call (lazy init via 0 sentinel; real PIDs are ≥ 1).
-static mut OUR_PGID: PidT = 0;
-
-/// Session ID of the calling process.  Same lazy-init pattern.
-static mut OUR_SID: PidT = 0;
-
-/// Foreground process group of the terminal (set by tcsetpgrp).
+/// Foreground process group of the controlling terminal (set by
+/// `tcsetpgrp`).
+///
+/// Still userspace-only: the kernel has no notion of a controlling
+/// terminal or its foreground group yet, and without kernel suspend there
+/// is no `SIGTTIN`/`SIGTTOU` stop to enforce against it anyway.  Tracked
+/// in `known-issues.md`; unlike the PGID/SID statics this one is not
+/// *wrong*, merely local — no other process can observe or contradict it.
 static mut FG_PGRP: PidT = 0;
 
-/// Ensure our PGID/SID are initialized (called before any getter).
+/// Ensure `FG_PGRP` is initialized (called before any terminal getter).
 ///
-/// On first call, sets both to our PID (process is its own group/session
-/// leader at startup, matching POSIX semantics for the initial process).
+/// On first call, sets it to our PID: before any `tcsetpgrp`, the process
+/// reading the terminal is by definition the foreground one.
 fn ensure_pg_init() {
     // SAFETY: single-address-space process, no concurrency.
     unsafe {
-        if core::ptr::addr_of!(OUR_PGID).read() == 0 {
-            core::ptr::addr_of_mut!(OUR_PGID).write(getpid());
-        }
-        if core::ptr::addr_of!(OUR_SID).read() == 0 {
-            core::ptr::addr_of_mut!(OUR_SID).write(getpid());
-        }
         if core::ptr::addr_of!(FG_PGRP).read() == 0 {
             core::ptr::addr_of_mut!(FG_PGRP).write(getpid());
         }
     }
 }
 
+/// Map a process-group syscall failure to the errno POSIX specifies for
+/// `setpgid(2)`/`getpgid(2)`/`setsid(2)`.
+///
+/// These calls use `EPERM` — not the `EACCES` that `errno::translate`
+/// produces for a generic `PermissionDenied` — for every policy rejection
+/// (target is a session leader, target is in another session, destination
+/// group is outside the caller's session).  Unknown failures collapse to
+/// `ESRCH`, the conservative reading: we could not name the target.
+// Only the `target_os = "none"` arms of the wrappers below call this (the
+// host build uses the `host_pg` test double, which cannot fail), but it is
+// compiled on host anyway so the mapping itself stays under test.
+#[cfg_attr(not(target_os = "none"), allow(dead_code))]
+fn pgid_errno(ret: i64) -> i32 {
+    // The explicit NO_SUCH_PROCESS arm documents its mapping even though
+    // the conservative fallback also yields ESRCH.
+    #[allow(clippy::match_same_arms)]
+    match ret {
+        errno::native::NO_SUCH_PROCESS => errno::ESRCH,
+        errno::native::PERMISSION_DENIED => errno::EPERM,
+        errno::native::INVALID_ARGUMENT => errno::EINVAL,
+        _ => errno::ESRCH,
+    }
+}
+
+// Host-build test double for process groups.
+//
+// `cargo test` runs this crate against the host triple, where the raw
+// `syscall` instruction is gated off and every `syscallN` returns
+// `-ENOSYS`.  There is no SlateOS kernel to hold the state, so the host
+// build keeps the group/session IDs in statics — the same model the OS
+// build used before the syscalls existed.  This is a test double, not a
+// fallback: on the real target the `cfg(target_os = "none")` arms below
+// always issue the syscall.
+#[cfg(not(target_os = "none"))]
+mod host_pg {
+    use super::PidT;
+
+    /// Process group ID of the calling process (0 = not yet initialized;
+    /// real PIDs are >= 1).
+    pub static mut PGID: PidT = 0;
+    /// Session ID of the calling process.  Same lazy-init sentinel.
+    pub static mut SID: PidT = 0;
+
+    /// Initialize both to our PID on first use: at startup a process leads
+    /// its own group and session.
+    fn ensure_init() {
+        // SAFETY: host test double; single-address-space, no concurrency
+        // beyond the test harness's own threads, which do not share PIDs.
+        unsafe {
+            let us = super::getpid();
+            if core::ptr::addr_of!(PGID).read() == 0 {
+                core::ptr::addr_of_mut!(PGID).write(us);
+            }
+            if core::ptr::addr_of!(SID).read() == 0 {
+                core::ptr::addr_of_mut!(SID).write(us);
+            }
+        }
+    }
+
+    /// `getpgid(pid)`: our own stored PGID for self, else `pid` (each
+    /// other process is assumed to lead its own group).
+    pub fn get_pgid(pid: PidT) -> PidT {
+        ensure_init();
+        let us = super::getpid();
+        if pid == 0 || pid == us {
+            // SAFETY: initialized above.
+            return unsafe { core::ptr::addr_of!(PGID).read() };
+        }
+        pid
+    }
+
+    /// `setpgid(pid, pgid)`: only our own group is stored; a move of
+    /// another process succeeds silently (the host has no such process).
+    pub fn set_pgid(pid: PidT, pgid: PidT) -> i32 {
+        ensure_init();
+        let us = super::getpid();
+        let target = if pid == 0 { us } else { pid };
+        if target != us {
+            return 0;
+        }
+        // SAFETY: host test double, single process.
+        unsafe {
+            core::ptr::addr_of_mut!(PGID).write(if pgid == 0 { us } else { pgid });
+        }
+        0
+    }
+
+    /// `getsid(pid)`: our own stored SID for self, else `pid`.
+    pub fn get_sid(pid: PidT) -> PidT {
+        ensure_init();
+        let us = super::getpid();
+        if pid == 0 || pid == us {
+            // SAFETY: initialized above.
+            return unsafe { core::ptr::addr_of!(SID).read() };
+        }
+        pid
+    }
+
+    /// `setsid()`: become leader of a new session and group.
+    pub fn set_sid() -> PidT {
+        let us = super::getpid();
+        // SAFETY: host test double, single process.
+        unsafe {
+            core::ptr::addr_of_mut!(SID).write(us);
+            core::ptr::addr_of_mut!(PGID).write(us);
+        }
+        us
+    }
+}
+
 /// Get the process group ID of the calling process.
 ///
-/// Returns the PGID set by `setpgid()` or `setpgrp()`, defaulting
-/// to our own PID (we are our own group leader at startup).
+/// POSIX specifies `getpgrp()` as infallible — it has no error return at
+/// all — so a kernel failure (only possible if the calling task has no
+/// process record) degrades to our own PID rather than inventing an error
+/// the caller has no way to read.  errno is deliberately left untouched;
+/// a function that cannot fail must not clobber it.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getpgrp() -> PidT {
-    ensure_pg_init();
-    // SAFETY: initialized above.
-    unsafe { core::ptr::addr_of!(OUR_PGID).read() }
+    #[cfg(target_os = "none")]
+    {
+        let ret = crate::syscall::syscall1(crate::syscall::SYS_PROCESS_GET_PGID, 0);
+        if ret < 0 {
+            return getpid();
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            ret as PidT
+        }
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        host_pg::get_pgid(0)
+    }
 }
 
 /// Get the process group ID of a specific process.
 ///
-/// For `pid` == 0 or our own PID, returns the stored PGID.
-/// For other PIDs, returns the PID itself (no kernel visibility into
-/// other processes' groups).
+/// `pid` == 0 means the calling process.
+///
+/// Errors:
+///   * `ESRCH` — no process with that PID.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getpgid(pid: PidT) -> PidT {
-    ensure_pg_init();
-    let us = getpid();
-    if pid == 0 || pid == us {
-        // SAFETY: initialized.
-        return unsafe { core::ptr::addr_of!(OUR_PGID).read() };
+    if pid < 0 {
+        // No valid PID is negative; POSIX/Linux report ESRCH rather than
+        // EINVAL for an unnameable target.
+        errno::set_errno(errno::ESRCH);
+        return -1;
     }
-    // Without kernel support, each other process is assumed to be its
-    // own group leader.
-    pid
+    #[cfg(target_os = "none")]
+    {
+        #[allow(clippy::cast_sign_loss)]
+        let ret = crate::syscall::syscall1(crate::syscall::SYS_PROCESS_GET_PGID, pid as u64);
+        if ret < 0 {
+            errno::set_errno(pgid_errno(ret));
+            return -1;
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            ret as PidT
+        }
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        host_pg::get_pgid(pid)
+    }
 }
 
 /// Set the process group ID of a process.
 ///
-/// `pid` == 0 means the calling process.  `pgid` == 0 means set the
-/// PGID to the target PID.  Only our own PGID can actually be changed
-/// (no kernel support for modifying other processes).
+/// `pid` == 0 means the calling process.  `pgid` == 0 means "make the
+/// target a group leader" (set its PGID to its own PID).
+///
+/// The kernel enforces the POSIX policy: the target must be the caller or
+/// a child of the caller that has not yet `exec`'d, it must not be a
+/// session leader, and the destination group must be in the caller's
+/// session.  This is the call a shell makes after `fork()` to put a job
+/// into its own group, so it has to reach real kernel state — see the
+/// section comment above.
 ///
 /// Returns 0 on success, -1 on error.
+///
+/// Errors:
+///   * `EINVAL` — `pid` or `pgid` is negative.
+///   * `ESRCH` — no such process (or it is already a zombie).
+///   * `EPERM` — a POSIX policy gate rejected the move.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::similar_names)] // POSIX parameter names: pid and pgid.
 pub extern "C" fn setpgid(pid: PidT, pgid: PidT) -> i32 {
-    ensure_pg_init();
-    let us = getpid();
-    let target = if pid == 0 { us } else { pid };
-    if target != us {
-        // Can't change other processes — succeed silently to avoid
-        // breaking programs that call setpgid(child, ...) after spawn.
-        return 0;
+    if pid < 0 || pgid < 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
     }
-    let new_pgid = if pgid == 0 { us } else { pgid };
-    // SAFETY: single process.
-    unsafe {
-        core::ptr::addr_of_mut!(OUR_PGID).write(new_pgid);
+    #[cfg(target_os = "none")]
+    {
+        #[allow(clippy::cast_sign_loss)]
+        let ret = crate::syscall::syscall2(
+            crate::syscall::SYS_PROCESS_SET_PGID,
+            pid as u64,
+            pgid as u64,
+        );
+        if ret < 0 {
+            errno::set_errno(pgid_errno(ret));
+            return -1;
+        }
+        0
     }
-    0
+    #[cfg(not(target_os = "none"))]
+    {
+        host_pg::set_pgid(pid, pgid)
+    }
 }
 
 /// Set the process group ID of the calling process to its own PID.
 ///
-/// Equivalent to `setpgid(0, 0)`.
+/// Equivalent to `setpgid(0, 0)` (the System V form; POSIX also allows a
+/// no-op `setpgrp()` returning the PGID, but the setpgid form is what
+/// shells and daemons use to detach into their own group).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setpgrp() -> i32 {
     setpgid(0, 0)
@@ -614,37 +769,76 @@ pub extern "C" fn setpgrp() -> i32 {
 
 /// Get the session ID of a process.
 ///
-/// For `pid` == 0 or our own PID, returns the stored SID.
-/// For other PIDs, returns the PID itself.
+/// `pid` == 0 means the calling process.
+///
+/// Errors:
+///   * `ESRCH` — no process with that PID.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getsid(pid: PidT) -> PidT {
-    ensure_pg_init();
-    let us = getpid();
-    if pid == 0 || pid == us {
-        // SAFETY: initialized.
-        return unsafe { core::ptr::addr_of!(OUR_SID).read() };
+    if pid < 0 {
+        errno::set_errno(errno::ESRCH);
+        return -1;
     }
-    pid
+    #[cfg(target_os = "none")]
+    {
+        #[allow(clippy::cast_sign_loss)]
+        let ret = crate::syscall::syscall1(crate::syscall::SYS_PROCESS_GET_SID, pid as u64);
+        if ret < 0 {
+            errno::set_errno(pgid_errno(ret));
+            return -1;
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            ret as PidT
+        }
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        host_pg::get_sid(pid)
+    }
 }
 
 /// Create a new session.
 ///
-/// Sets our SID and PGID to our own PID (new session leader is its
-/// own process group leader).  Returns the new SID.
+/// Sets our SID and PGID to our own PID: a new session leader also leads a
+/// new process group.  Returns the new SID (our PID).
 ///
-/// POSIX requires the caller not be a process group leader already,
-/// but since we track only our own state and have no kernel enforcement,
-/// we always succeed.
+/// POSIX forbids a process that already *leads* a process group from
+/// starting a session — the new session ID would collide with the existing
+/// group ID — and the kernel enforces that, so unlike the old stub this
+/// can genuinely fail.
+///
+/// Errors:
+///   * `EPERM` — the caller is already a process-group leader.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setsid() -> PidT {
-    let us = getpid();
-    // SAFETY: single process.
-    unsafe {
-        core::ptr::addr_of_mut!(OUR_SID).write(us);
-        core::ptr::addr_of_mut!(OUR_PGID).write(us);
-        core::ptr::addr_of_mut!(FG_PGRP).write(us);
+    #[cfg(target_os = "none")]
+    {
+        let ret = crate::syscall::syscall0(crate::syscall::SYS_PROCESS_SET_SID);
+        if ret < 0 {
+            errno::set_errno(pgid_errno(ret));
+            return -1;
+        }
+        // A new session leader is also the terminal's foreground group as
+        // far as this process can tell: it has no controlling terminal
+        // yet, so nothing else can claim the foreground.
+        #[allow(clippy::cast_possible_truncation)]
+        let sid = ret as PidT;
+        // SAFETY: single process.
+        unsafe {
+            core::ptr::addr_of_mut!(FG_PGRP).write(sid);
+        }
+        sid
     }
-    us
+    #[cfg(not(target_os = "none"))]
+    {
+        let sid = host_pg::set_sid();
+        // SAFETY: single process.
+        unsafe {
+            core::ptr::addr_of_mut!(FG_PGRP).write(sid);
+        }
+        sid
+    }
 }
 
 /// Get the foreground process group ID of a terminal.
@@ -3222,20 +3416,21 @@ mod tests {
 
     // -- Process group / session state machine --
     //
-    // These tests pre-set OUR_PGID/OUR_SID/FG_PGRP to non-zero values
-    // to skip the getpid() call in ensure_pg_init().  This lets us test
-    // the pure-logic state machine on the host without triggering actual
-    // kernel syscalls.
+    // On the OS target the group/session wrappers are thin syscall
+    // translations; on host they run against the `host_pg` test double.
+    // These tests pre-set that double (and `FG_PGRP`) to non-zero values
+    // so the lazy `getpid()` initialisation is skipped and the routing
+    // logic is exercised against known state.
 
     /// Reset the process group/session state to known values.
     ///
     /// Must be called before each process group test to avoid
     /// inter-test interference.  Uses `pid=42` as a deterministic
-    /// "fake PID" so ensure_pg_init() skips the getpid() syscall.
+    /// "fake PID" so the lazy initialisers skip their getpid() call.
     fn reset_pg() {
         unsafe {
-            core::ptr::addr_of_mut!(OUR_PGID).write(42);
-            core::ptr::addr_of_mut!(OUR_SID).write(42);
+            core::ptr::addr_of_mut!(host_pg::PGID).write(42);
+            core::ptr::addr_of_mut!(host_pg::SID).write(42);
             core::ptr::addr_of_mut!(FG_PGRP).write(42);
         }
     }

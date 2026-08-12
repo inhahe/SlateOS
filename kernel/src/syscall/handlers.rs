@@ -4059,6 +4059,135 @@ pub fn sys_process_parent_id(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(ppid as i64)
 }
 
+// ---------------------------------------------------------------------------
+// Process groups and sessions
+// ---------------------------------------------------------------------------
+//
+// These four handlers are the *native* ABI's entry points onto the process-
+// group state in `proc::pcb`. They exist because a process runs in exactly
+// one `AbiMode`: before them, a program linked against our own posix libc
+// could not reach `pcb::set_pgid` at all (only the Linux shim could), so the
+// libc kept a per-process userspace guess instead — and two processes could
+// disagree about their own group. Every gate below is delegated to the same
+// `pcb` helper the Linux shim uses; no policy is duplicated here.
+
+/// Resolve a syscall PID argument where 0 means "the calling process".
+///
+/// Returns `None` when the argument is 0 *and* there is no owning process
+/// (kernel self-test context) — callers surface that as `NoSuchProcess`,
+/// since there is genuinely no process whose group could be named.
+fn resolve_pid_arg(arg: u64) -> Option<u64> {
+    if arg == 0 {
+        crate::proc::thread::owner_process(sched::current_task_id())
+    } else {
+        Some(arg)
+    }
+}
+
+/// `SYS_PROCESS_SET_PGID` — move a process into a process group.
+///
+/// `arg0`: target PID (0 = caller). `arg1`: destination PGID (0 = the
+/// resolved target PID, i.e. "lead your own new group").
+///
+/// Argument resolution mirrors POSIX `setpgid(2)`; the actual policy
+/// (child-of-caller, not-a-session-leader, same-session, group-exists-in-
+/// session) is enforced atomically under the process-table lock by
+/// [`crate::proc::pcb::set_pgid`].
+pub fn sys_process_set_pgid(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::{pcb, thread};
+
+    // A negative value in either slot is not a PID. The native ABI is
+    // 64-bit clean (no pid_t truncation), so we reject on the full width
+    // rather than reproducing Linux's `int` wrap.
+    #[allow(clippy::cast_possible_wrap)]
+    let (pid_signed, pgid_signed) = (args.arg0 as i64, args.arg1 as i64);
+    if pid_signed < 0 || pgid_signed < 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let Some(target) = resolve_pid_arg(args.arg0) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    // pgid == 0 means "the target itself becomes a group leader".
+    let pgid = if args.arg1 == 0 { target } else { args.arg1 };
+
+    // Reject up front what `set_pgid` cannot express: a target that is gone
+    // or already reaped. A zombie cannot be moved into a group — there is
+    // nothing left to signal — and reporting NoSuchProcess is what the
+    // caller can act on.
+    match pcb::state(target) {
+        None | Some(pcb::ProcessState::Zombie) => {
+            return SyscallResult::err(KernelError::NoSuchProcess);
+        }
+        _ => {}
+    }
+
+    // With no owning process (kernel self-test context) the caller cannot
+    // be established; fall back to the target so a self-directed move still
+    // passes the "target is the caller or its child" gate.
+    let caller = thread::owner_process(sched::current_task_id()).unwrap_or(target);
+    match pcb::set_pgid(caller, target, pgid) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_PROCESS_GET_PGID` — query a process's process-group ID.
+///
+/// `arg0`: target PID (0 = caller). Returns the PGID, or `NoSuchProcess`
+/// if the target has no process-table entry.
+pub fn sys_process_get_pgid(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_wrap)]
+    let pid_signed = args.arg0 as i64;
+    if pid_signed < 0 {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    }
+    let Some(target) = resolve_pid_arg(args.arg0) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    match crate::proc::pcb::get_pgid(target) {
+        #[allow(clippy::cast_possible_wrap)]
+        Some(pgid) => SyscallResult::ok(pgid as i64),
+        None => SyscallResult::err(KernelError::NoSuchProcess),
+    }
+}
+
+/// `SYS_PROCESS_SET_SID` — start a new session led by the caller.
+///
+/// Takes no arguments. Returns the new session ID (the caller's PID), or
+/// `PermissionDenied` if the caller already leads a process group.
+pub fn sys_process_set_sid(args: &SyscallArgs) -> SyscallResult {
+    let _ = args;
+    let Some(pid) = crate::proc::thread::owner_process(sched::current_task_id()) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    match crate::proc::pcb::setsid(pid) {
+        #[allow(clippy::cast_possible_wrap)]
+        Ok(sid) => SyscallResult::ok(sid as i64),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_PROCESS_GET_SID` — query a process's session ID.
+///
+/// `arg0`: target PID (0 = caller). Returns the SID, or `NoSuchProcess`
+/// if the target has no process-table entry.
+pub fn sys_process_get_sid(args: &SyscallArgs) -> SyscallResult {
+    #[allow(clippy::cast_possible_wrap)]
+    let pid_signed = args.arg0 as i64;
+    if pid_signed < 0 {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    }
+    let Some(target) = resolve_pid_arg(args.arg0) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    match crate::proc::pcb::get_sid(target) {
+        #[allow(clippy::cast_possible_wrap)]
+        Some(sid) => SyscallResult::ok(sid as i64),
+        None => SyscallResult::err(KernelError::NoSuchProcess),
+    }
+}
+
 /// `SYS_PROCESS_COUNT` — return the count of live processes.
 ///
 /// Wraps `pcb::count()`, which returns the size of the process table
@@ -4518,13 +4647,22 @@ pub fn sys_signal_send_with_info(
     use crate::proc::{pcb, signal, thread};
     use super::dispatch::SyscallResult;
 
+    // `arg0` is a signed PID (see SYS_SIGNAL_SEND's docs): the non-positive
+    // forms address a process *group*, not a process. Route them to the
+    // shared group-fanout core before the single-target path below, which
+    // treats `arg0` as an unsigned PID.
+    #[allow(clippy::cast_possible_wrap)]
+    let target_signed = args.arg0 as i64;
+    if target_signed <= 0 {
+        #[allow(clippy::cast_possible_wrap)]
+        let sig_signed = args.arg1 as i64;
+        return signal_send_to_group(target_signed, sig_signed, si_code, value);
+    }
+
     let target = args.arg0;
     #[allow(clippy::cast_possible_truncation)]
     let sig = args.arg1 as u32;
 
-    if target == 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
     if !signal::is_valid_signal(sig) {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
@@ -4606,6 +4744,107 @@ pub fn sys_signal_send_with_info(
             SyscallResult::ok(0)
         }
     }
+}
+
+/// Deliver a signal to every live process in a process group — the
+/// non-positive `kill(2)` targets.
+///
+/// This is the *single* implementation of group signalling for both ABIs:
+/// the native `SYS_SIGNAL_SEND` routes here whenever `arg0 <= 0`, and the
+/// Linux shim's `kill_process_group` calls it and translates the result.
+/// Keeping one copy matters because the ordering below is load-bearing and
+/// easy to get subtly different in a second implementation.
+///
+/// `pid_signed` is the raw signed `kill` target:
+///   * `0`  — the *caller's* own process group;
+///   * `-1` — broadcast to everything signalable. Linux excludes init and
+///     walks the whole task list; we do not model that, so it reports
+///     `NoSuchProcess` (tracked in todo.txt);
+///   * `< -1` — the explicit group `-pid_signed`.
+///
+/// Ordering (matching Linux's `kill_something_info` → `kill_pgrp_info` →
+/// `group_send_sig_info` → `check_kill_permission`):
+///   1. Resolve the group's live membership. An empty group fails with
+///      `NoSuchProcess` *before* the signal number is looked at, so a call
+///      combining a dead group with a bad signal reports the dead group —
+///      the more actionable of the two facts.
+///   2. Validate the signal number (`0..=64`), else `InvalidArgument`.
+///   3. `sig == 0` is a pure existence probe: step 1 already proved the
+///      group is non-empty, so succeed without delivering.
+///   4. Deliver to each member best-effort: succeed if *any* member
+///      accepted, otherwise surface the last member's error. Best-effort is
+///      required because members may exit concurrently with the fanout;
+///      failing the whole call because one member was reaped mid-loop would
+///      make group signalling unusably racy.
+pub fn signal_send_to_group(
+    pid_signed: i64,
+    sig: i64,
+    si_code: i32,
+    value: u64,
+) -> super::dispatch::SyscallResult {
+    use crate::proc::{pcb, thread};
+    use super::dispatch::{SyscallArgs, SyscallResult};
+
+    if pid_signed == -1 {
+        // Broadcast not yet modelled.
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    }
+
+    // Step 1: resolve the target group and its membership.
+    let pgid: u64 = if pid_signed == 0 {
+        let task_id = sched::current_task_id();
+        let caller = thread::owner_process(task_id).unwrap_or(0);
+        // Kernel self-test context (no owning process) has no group, and
+        // neither does a caller whose PCB has already gone away.
+        match pcb::get_pgid(caller) {
+            Some(g) => g,
+            None => return SyscallResult::err(KernelError::NoSuchProcess),
+        }
+    } else {
+        // `unsigned_abs` rather than negation so even i64::MIN — which a
+        // 64-bit-clean native caller can pass — has a representable
+        // magnitude instead of overflowing.
+        pid_signed.unsigned_abs()
+    };
+    let members = pcb::pids_in_group(pgid);
+    if members.is_empty() {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    }
+
+    // Step 2: validate the signal now that the group is known to exist.
+    if !(0..=64).contains(&sig) {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    // Step 3: existence probe.
+    if sig == 0 {
+        return SyscallResult::ok(0);
+    }
+
+    // Step 4: fan out. Each member goes through the ordinary single-target
+    // path, so the per-target authority check (parent / self / Process
+    // capability with DELETE) applies to every member individually — a
+    // group send grants no authority the caller did not already have.
+    #[allow(clippy::cast_sign_loss)]
+    let sig_u = sig as u64;
+    let mut any_ok = false;
+    let mut last_err = SyscallResult::err(KernelError::NoSuchProcess);
+    for target in members {
+        let send_args = SyscallArgs {
+            arg0: target,
+            arg1: sig_u,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let r = sys_signal_send_with_info(&send_args, si_code, value);
+        if r.value >= 0 {
+            any_ok = true;
+        } else {
+            last_err = r;
+        }
+    }
+    if any_ok { SyscallResult::ok(0) } else { last_err }
 }
 
 /// `SYS_SIGNAL_MASK` — set the calling process's blocked-signal mask.

@@ -777,7 +777,10 @@ fn sync_kernel_blocked_mask(_low: u64) {}
 enum KillTarget {
     /// `pid == self_pid` — dispatch the signal locally/synchronously.
     Self_,
-    /// `pid <= 0` — process-group / broadcast form, not supported.
+    /// `pid <= 0` — a process *group*: `0` is the caller's own group,
+    /// `< -1` is the group `-pid`, `-1` is the broadcast form. Delivered
+    /// via `SYS_SIGNAL_SEND` with a sign-extended target, which fans the
+    /// signal out across the group's live members.
     ProcessGroup,
     /// `pid > 0 && pid != self_pid` — deliver via `SYS_SIGNAL_SEND`.
     Other,
@@ -786,6 +789,11 @@ enum KillTarget {
 /// Route a validated `kill()` to the appropriate delivery mechanism.
 ///
 /// Precondition: `sig` is in `[1, NSIG)` and `sig != 0`.
+///
+/// Note the ordering: `pid == self_pid` is checked *first*, so a
+/// self-directed `kill(getpid(), sig)` still takes the synchronous
+/// local-dispatch path. The group forms are all `pid <= 0` and real PIDs
+/// are `>= 1`, so the two cases cannot overlap.
 fn kill_target(pid: i32, self_pid: i32) -> KillTarget {
     if pid == self_pid {
         KillTarget::Self_
@@ -794,6 +802,20 @@ fn kill_target(pid: i32, self_pid: i32) -> KillTarget {
     } else {
         KillTarget::Other
     }
+}
+
+/// Widen a `kill(2)` target PID into the `SYS_SIGNAL_SEND` argument slot.
+///
+/// The kernel reads `arg0` back as a **signed** 64-bit value so it can
+/// tell `kill(pid)` from `kill(-pgid)`, which means a negative target must
+/// be *sign*-extended, not zero-extended: `-5i32 as u64` is
+/// `0xFFFF_FFFF_FFFF_FFFB` only if the widening goes through `i64` first.
+/// Zero-extending would hand the kernel `0x0000_0000_FFFF_FFFB`, a huge
+/// positive PID, and the group send would silently become an ESRCH on a
+/// process that does not exist.
+#[allow(clippy::cast_sign_loss)]
+fn sign_extend_pid(pid: i32) -> u64 {
+    i64::from(pid) as u64
 }
 
 /// Map a `SYS_SIGNAL_SEND` failure to the POSIX errno expected by
@@ -835,22 +857,40 @@ fn signal_send_errno(ret: i64) -> i32 {
 ///   The *sender* no longer classifies by default action — that is the
 ///   kernel's and the target's responsibility, which is the correct
 ///   POSIX semantics.
-/// * `pid <= 0` (process groups): not supported (`ENOSYS`).
+/// * **Process groups** (`pid <= 0`): delivered via `SYS_SIGNAL_SEND` with
+///   the target sign-extended into the syscall argument.  The kernel
+///   resolves the group's live membership from the same process-table
+///   state `setpgid()` writes and fans the signal out, applying the
+///   per-target authority check to each member individually.  `pid == 0`
+///   is the caller's own group, `pid < -1` is the group `-pid`, and
+///   `pid == -1` (broadcast to everything signalable) is not modelled and
+///   reports `ESRCH`.
 ///
 /// ## Capability gate (Phase 203)
 ///
-/// Non-self `kill()` with `pid > 0` requires `CAP_KILL` (matches
-/// Linux's `check_kill_permission()` → `kill_ok_by_cred()`).
+/// Every non-self `kill()` — `pid > 0` and the group forms alike —
+/// requires `CAP_KILL` (matches Linux's `check_kill_permission()` →
+/// `kill_ok_by_cred()`).  A group send is semantically N cross-process
+/// sends, so it cannot be a way around the gate.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn kill(pid: i32, sig: i32) -> i32 {
     // sig == 0 is a pure existence/permission check; honour it.
     if sig == 0 {
         if pid <= 0 {
-            // pid == 0 → "every process in the caller's process group",
-            // pid == -1 → "every process you may signal", pid < -1 →
-            // "process group |pid|".  None of these are supported here.
-            errno::set_errno(errno::ENOSYS);
-            return -1;
+            // Group existence probe: "does this group have any live
+            // member?".  The kernel answers it on the same path a real
+            // group send takes, so the probe cannot report a group the
+            // send would then fail to find.
+            let ret = crate::syscall::syscall2(
+                crate::syscall::SYS_SIGNAL_SEND,
+                sign_extend_pid(pid),
+                0,
+            );
+            if ret < 0 {
+                errno::set_errno(signal_send_errno(ret));
+                return -1;
+            }
+            return 0;
         }
         // SYS_PROCESS_IS_READY: returns 1 if ready, 0 if alive but not
         // yet ready, negative error if the PID is unknown.  For an
@@ -875,9 +915,29 @@ pub extern "C" fn kill(pid: i32, sig: i32) -> i32 {
     match kill_target(pid, self_pid) {
         KillTarget::Self_ => dispatch_self_signal(sig),
         KillTarget::ProcessGroup => {
-            // Process group signaling — not supported.
-            errno::set_errno(errno::ENOSYS);
-            -1
+            // Same CAP_KILL gate as a single cross-process send: a group
+            // send reaches other processes, so it must not be a cheaper
+            // route to the same authority.
+            if !crate::sys_capability::has_capability(crate::sys_capability::CAP_KILL) {
+                errno::set_errno(errno::EPERM);
+                return -1;
+            }
+            // The kernel fans the signal out across the group. Note this
+            // may include *us*, if we are a member of the target group:
+            // that delivery arrives asynchronously through the registered
+            // trampoline rather than through `dispatch_self_signal`, which
+            // is correct — POSIX does not special-case the sender out of
+            // its own group.
+            let ret = crate::syscall::syscall2(
+                crate::syscall::SYS_SIGNAL_SEND,
+                sign_extend_pid(pid),
+                sig as u64,
+            );
+            if ret < 0 {
+                errno::set_errno(signal_send_errno(ret));
+                return -1;
+            }
+            0
         }
         KillTarget::Other => {
             // Phase 203: CAP_KILL gate for cross-process signals.
@@ -907,19 +967,18 @@ pub extern "C" fn kill(pid: i32, sig: i32) -> i32 {
 /// there is one code path to keep correct rather than two.  `pgrp == 0` means
 /// the caller's own process group.
 ///
-/// Because [`kill`] reports `ENOSYS` for every `pid <= 0` (process groups are
-/// not implemented — see its docs), this currently fails with `ENOSYS` for all
-/// inputs except the `EINVAL` case below.  It exists as a real symbol anyway:
-/// GNU bash references `killpg` from its job-control code, so the symbol must
-/// resolve at link time even on a build where job control cannot work.  Once
-/// process groups land in the kernel, `kill` gains the capability and this
-/// function inherits it unchanged.
+/// This delivers for real: [`kill`] routes `pid <= 0` to the kernel's group
+/// fanout over the process-table membership that `setpgid()` writes.  (It was
+/// written while that fanout was still `ENOSYS`-only, purely so GNU bash's
+/// job-control code would link; it needed no change when the kernel side
+/// landed, which is the point of defining it as `kill(-pgrp, sig)`.)
 ///
 /// Errors (Linux-matching):
 /// * `EINVAL` — `sig` is not a valid signal number, or `pgrp` is negative
 ///   (a negative process *group* is nonsense; without this check the negation
 ///   below would silently turn it into a positive per-process `kill`).
-/// * `ENOSYS` — process groups are not yet supported.
+/// * `ESRCH` — no such process group, or it has no live members.
+/// * `EPERM` — the caller does not hold `CAP_KILL`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn killpg(pgrp: i32, sig: i32) -> i32 {
     if pgrp < 0 {
@@ -2640,35 +2699,60 @@ mod tests {
         }
     }
 
+    // -- kill() group forms ------------------------------------------------
+    //
+    // On the OS target `kill(pid <= 0, sig)` issues SYS_SIGNAL_SEND with a
+    // sign-extended target and the kernel fans the signal out across the
+    // group.  Host builds have no kernel: every `syscallN` returns the
+    // -ENOSYS sentinel, which `signal_send_errno` maps to its conservative
+    // ESRCH fallback ("we could not name the target").  So on host these
+    // assert the *routing* — that the call reaches the syscall path and
+    // reports a target-resolution failure — not delivery, which only the
+    // in-kernel self-tests can prove.
+
     #[test]
-    fn test_kill_sig0_pid_zero_enosys() {
-        // pid == 0 means "every process in the caller's process group"
-        // on Linux.  We don't implement process groups, so reject with
-        // ENOSYS before touching any syscall.
+    fn test_kill_sig0_pid_zero_is_a_group_probe_not_enosys() {
+        // pid == 0 means "every process in the caller's process group".
+        // This used to be rejected with ENOSYS before touching a syscall;
+        // it is now a real group existence probe, so the one thing that
+        // must NOT come back is ENOSYS-because-unimplemented.
         crate::errno::set_errno(0);
         let ret = kill(0, 0);
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(ret, -1, "host has no kernel group to probe");
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
     }
 
     #[test]
-    fn test_kill_sig0_pid_negative_enosys() {
+    fn test_kill_sig0_pid_negative_is_a_group_probe_not_enosys() {
         // Negative pids select process groups; same story.
         crate::errno::set_errno(0);
         let ret = kill(-5, 0);
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
+    }
+
+    #[test]
+    fn test_sign_extend_pid_keeps_negative_targets_negative() {
+        // The whole group mechanism hinges on the kernel reading arg0 back
+        // as a signed value.  Zero-extending a negative pid would turn
+        // kill(-7, sig) into a send to PID 4294967289 — a silent ESRCH on a
+        // process that does not exist, rather than a group signal.
+        assert_eq!(sign_extend_pid(-7), 0xFFFF_FFFF_FFFF_FFF9);
+        assert_eq!(sign_extend_pid(-1), u64::MAX);
+        assert_eq!(sign_extend_pid(i32::MIN), 0xFFFF_FFFF_8000_0000);
+        // Positive targets must be untouched — the same slot carries plain
+        // per-process kills.
+        assert_eq!(sign_extend_pid(0), 0);
+        assert_eq!(sign_extend_pid(1), 1);
+        assert_eq!(sign_extend_pid(i32::MAX), 0x7FFF_FFFF);
     }
 
     // -- killpg ------------------------------------------------------------
     //
     // killpg is defined by POSIX as exactly `kill(-pgrp, sig)`, so these
     // assert the delegation and the one check killpg makes on its own
-    // behalf.  The ENOSYS results are inherited from `kill`, which rejects
-    // every pid <= 0 (process groups are a kernel gap — see
-    // TD-POSIX-PROCESS-GROUPS-ARE-FAKE-FOR-NATIVE-ABI-PROGRAMS in
-    // known-issues.md).  When that is fixed these become delivery tests
-    // rather than ENOSYS tests.
+    // behalf.  The ESRCH results are inherited from `kill`'s group path
+    // under the host sentinel described above.
 
     #[test]
     fn test_killpg_negative_group_is_einval() {
@@ -2695,11 +2779,12 @@ mod tests {
     #[test]
     fn test_killpg_zero_means_own_group_and_delegates_to_kill() {
         // pgrp == 0 negates to 0, which `kill` treats as "the caller's own
-        // process group" and currently rejects with ENOSYS.
+        // process group" — the group path, not an unimplemented-feature
+        // rejection.
         crate::errno::set_errno(0);
         let ret = killpg(0, 15);
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(ret, -1, "host has no kernel group to deliver to");
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
     }
 
     #[test]
@@ -2709,18 +2794,18 @@ mod tests {
         crate::errno::set_errno(0);
         let ret = killpg(7, 15);
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
     }
 
     #[test]
-    fn test_killpg_invalid_signal_is_rejected_as_einval_not_enosys() {
+    fn test_killpg_invalid_signal_is_rejected_as_einval_not_esrch() {
         // Signal validation is `kill`'s job and killpg must not bypass it.
         // `kill` checks the signal number BEFORE classifying the target, so a
-        // bad signal reports EINVAL even though the group target would also
-        // have failed with ENOSYS. That ordering is what Linux does and it is
-        // the more useful diagnostic — "your signal is wrong" rather than
-        // "process groups are unimplemented" — so pin it here: if the two
-        // checks were ever reordered this test would catch it.
+        // bad signal reports EINVAL even when the group would also have
+        // failed to resolve. That ordering is what Linux does and it is the
+        // more useful diagnostic — "your signal is wrong" rather than "that
+        // group is gone" — so pin it here: if the two checks were ever
+        // reordered this test would catch it.
         crate::errno::set_errno(0);
         let ret = killpg(7, 9999);
         assert_eq!(ret, -1);
@@ -2728,12 +2813,16 @@ mod tests {
     }
 
     #[test]
-    fn test_kill_sig0_pid_minus_one_enosys() {
-        // pid == -1 means "every process you may signal".  ENOSYS.
+    fn test_kill_sig0_pid_minus_one_is_esrch_broadcast_not_modelled() {
+        // pid == -1 means "every process you may signal".  The kernel does
+        // not model broadcast (it would have to walk the whole process
+        // table and decide what "may signal" means without a full
+        // credential model), so it reports ESRCH — the same answer the
+        // host sentinel produces here.  Documented in todo.txt.
         crate::errno::set_errno(0);
         let ret = kill(-1, 0);
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
     }
 
     #[test]
@@ -2910,11 +2999,10 @@ mod tests {
         let _g = phase203_cap::CapGuard::snapshot();
         phase203_cap::drop_cap_kill();
         crate::errno::set_errno(0);
-        // pid <= 0 is ENOSYS for sig==0 (process group); that's
-        // tested elsewhere.  For pid > 0, sig==0 does a
-        // SYS_PROCESS_IS_READY syscall — the result depends on
-        // whether pid 1 actually exists.  Either ESRCH or 0 is
-        // acceptable; what matters is it's NOT EPERM.
+        // pid <= 0 takes the group-probe path for sig==0; that's tested
+        // elsewhere.  For pid > 0, sig==0 does a SYS_PROCESS_IS_READY
+        // syscall — the result depends on whether pid 1 actually exists.
+        // Either ESRCH or 0 is acceptable; what matters is it's NOT EPERM.
         let ret = kill(1, 0);
         // We don't assert ret because pid 1 may or may not exist.
         // The key invariant is that errno != EPERM.
@@ -2926,12 +3014,17 @@ mod tests {
         let _ = ret; // suppress unused warning
     }
 
-    // -- pid <= 0 bypasses the cap gate (falls to ENOSYS) -----------------
+    // -- pid <= 0 is subject to the cap gate too --------------------------
+    //
+    // These used to assert that the group forms *bypassed* CAP_KILL — but
+    // only because they could not signal anything at all, so the gate was
+    // unreachable dead weight.  Now that a group send really does reach
+    // other processes, exempting it would make `killpg(g, SIGKILL)` a way
+    // to do what `kill(pid, SIGKILL)` is denied.  The gate applies.
 
-    /// pid == 0 (process group) with no cap → ENOSYS, not EPERM.
-    /// The cap gate only fires for pid > 0.
+    /// pid == 0 (the caller's own process group) with no cap → EPERM.
     #[test]
-    fn test_phase203_kill_pid0_no_cap_enosys() {
+    fn test_phase203_kill_pid0_no_cap_is_eperm() {
         let _g = phase203_cap::CapGuard::snapshot();
         phase203_cap::drop_cap_kill();
         crate::errno::set_errno(0);
@@ -2939,14 +3032,18 @@ mod tests {
         assert_eq!(ret, -1);
         assert_eq!(
             crate::errno::get_errno(),
-            crate::errno::ENOSYS,
-            "pid <= 0 must bypass CAP_KILL gate"
+            crate::errno::EPERM,
+            "a group send must not be a way around the CAP_KILL gate"
         );
     }
 
-    /// pid == -1 (all processes) with no cap → ENOSYS.
+    /// pid == -1 (all processes) with no cap → EPERM.
+    ///
+    /// Note the gate fires *before* the kernel would report ESRCH for the
+    /// unmodelled broadcast: a caller without CAP_KILL must not be able to
+    /// probe which targets exist.
     #[test]
-    fn test_phase203_kill_pidneg1_no_cap_enosys() {
+    fn test_phase203_kill_pidneg1_no_cap_is_eperm() {
         let _g = phase203_cap::CapGuard::snapshot();
         phase203_cap::drop_cap_kill();
         crate::errno::set_errno(0);
@@ -2954,8 +3051,8 @@ mod tests {
         assert_eq!(ret, -1);
         assert_eq!(
             crate::errno::get_errno(),
-            crate::errno::ENOSYS,
-            "pid == -1 must bypass CAP_KILL gate"
+            crate::errno::EPERM,
+            "a broadcast send must not be a way around the CAP_KILL gate"
         );
     }
 
@@ -4544,19 +4641,22 @@ mod tests {
         signal(SIGUSR1, SIG_DFL);
     }
 
-    /// kill() with pid <= 0 and valid signal still returns ENOSYS
-    /// (no process group support).
+    /// kill() with pid <= 0 and a valid signal takes the kernel group path.
+    ///
+    /// On host there is no kernel, so the syscall sentinel surfaces as
+    /// ESRCH; the assertion that matters is that it is no longer ENOSYS —
+    /// i.e. the call is routed to a real mechanism rather than refused.
     #[test]
-    fn test_phase211_kill_pgroup_enosys() {
+    fn test_phase211_kill_pgroup_routes_to_kernel() {
         crate::errno::set_errno(0);
         let ret = kill(0, SIGTERM);
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
 
         crate::errno::set_errno(0);
         let ret = kill(-1, SIGINT);
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
     }
 
     /// Cross-process kill() for any signal requires CAP_KILL: the gate

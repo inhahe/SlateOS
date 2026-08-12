@@ -1818,19 +1818,35 @@ pub const SYS_PROCESS_SET_NICE: u64 = 532;
 /// the caller is not associated with a process).
 pub const SYS_SIGNAL_REGISTER: u64 = 522;
 
-/// Post a signal to a target process's pending set.
+/// Post a signal to a target process's pending set, or to every member of
+/// a process group.
 ///
-/// `arg0`: target process ID.
-/// `arg1`: signal number (1..=64).
+/// `arg0`: target, interpreted as a **signed** 64-bit PID exactly as
+///         `kill(2)` does:
+///           * `> 0`  — that specific process;
+///           * `== 0` — every process in the *caller's* process group;
+///           * `< -1` — every process in group `-arg0`;
+///           * `== -1` — broadcast to everything signalable (not modelled;
+///             reports `NoSuchProcess`).
+///         Userspace must sign-extend a negative PID into `arg0`.
+/// `arg1`: signal number (1..=64; 0 is a pure existence probe).
 ///
-/// Sets the corresponding bit in the target's pending set.  Delivery
+/// Sets the corresponding bit in each target's pending set.  Delivery
 /// happens lazily the next time the target returns to userspace.  If the
 /// target has no trampoline registered, the kernel applies the default
 /// action (terminating signals kill the process; others are dropped).
 ///
+/// For the group forms the membership is resolved *before* the signal
+/// number is validated, so signalling a group that does not exist reports
+/// `NoSuchProcess` even when the signal number is also bad — the same
+/// ordering Linux's `kill_something_info` uses, and the more useful
+/// diagnostic (the caller learns the group is gone).  Delivery to the
+/// members is best-effort: the call succeeds if *any* member accepted the
+/// signal, and otherwise reports the last member's error.
+///
 /// Returns: 0 on success, negative `KernelError` code on failure
-/// (`NoSuchProcess` if the PID is unknown, `InvalidArgument` for an
-/// out-of-range signal number).
+/// (`NoSuchProcess` if the PID or group is unknown, `InvalidArgument` for
+/// an out-of-range signal number).
 pub const SYS_SIGNAL_SEND: u64 = 523;
 
 /// Return from a signal handler (sigreturn).
@@ -1899,6 +1915,65 @@ pub const SYS_PROCESS_FORK: u64 = 527;
 /// Returns: 0 on success, or `InvalidArgument` if the address is out of
 /// range.
 pub const SYS_SET_FS_BASE: u64 = 528;
+
+// ---------------------------------------------------------------------------
+// Process groups and sessions (533–536)
+// ---------------------------------------------------------------------------
+//
+// Process groups have existed in the PCB since the job-control work
+// ([`crate::proc::pcb::set_pgid`] / `pids_in_group` / `setsid`), but they
+// were only reachable through the Linux ABI shim.  A process runs in
+// exactly one [`crate::proc::pcb::AbiMode`], so a *native*-ABI program —
+// anything linked against our own `posix` libc — had no way to reach that
+// state and the libc faked it in a userspace static.  Two processes could
+// therefore disagree about their own group.  These four numbers close that
+// gap: they are the native entry points onto the *same* `pcb` helpers the
+// Linux shim calls, so both ABIs observe one shared source of truth.
+
+/// Move a process into a process group (`setpgid(2)`).
+///
+/// `arg0`: target PID; 0 means the calling process.
+/// `arg1`: new process-group ID; 0 means "the resolved target PID"
+///         (i.e. make the target a group leader of its own new group).
+///
+/// The policy — target must be the caller or a child of the caller, must
+/// not be a session leader, must be in the caller's session, and the
+/// destination group must already exist in that session unless the target
+/// is creating it — is enforced atomically under the process-table lock by
+/// [`crate::proc::pcb::set_pgid`], exactly as for the Linux shim.
+///
+/// Returns: 0 on success; `NoSuchProcess` if the target does not exist or
+/// is a zombie; `PermissionDenied` if a policy gate rejects the move;
+/// `InvalidArgument` if either argument is negative when read as a signed
+/// PID.  Chosen number 533 (next free slot after 532).
+pub const SYS_PROCESS_SET_PGID: u64 = 533;
+
+/// Query a process's process-group ID (`getpgid(2)` / `getpgrp(2)`).
+///
+/// `arg0`: target PID; 0 means the calling process.
+///
+/// Returns: the target's PGID (> 0), or `NoSuchProcess` if the PID is
+/// unknown.  Chosen number 534.
+pub const SYS_PROCESS_GET_PGID: u64 = 534;
+
+/// Start a new session with the caller as leader (`setsid(2)`).
+///
+/// Takes no arguments.  Sets `sid = pgid = pid` for the calling process.
+///
+/// Returns: the new session ID (= the caller's PID) on success;
+/// `PermissionDenied` if the caller is already a process-group leader
+/// (POSIX forbids a group leader from starting a session, since the new
+/// session ID would collide with the existing group ID).  Chosen number
+/// 535.
+pub const SYS_PROCESS_SET_SID: u64 = 535;
+
+/// Query a process's session ID (`getsid(2)`).
+///
+/// `arg0`: target PID; 0 means the calling process.
+///
+/// Returns: the target's SID (> 0), or `NoSuchProcess` if the PID is
+/// unknown.  Chosen number 536.
+pub const SYS_PROCESS_GET_SID: u64 = 536;
 
 // ---------------------------------------------------------------------------
 // Filesystem syscalls (600–799)

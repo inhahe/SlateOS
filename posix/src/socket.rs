@@ -5693,6 +5693,21 @@ pub struct ServentBuf {
     proto: [u8; 8],
     /// `s_aliases`: always empty — our table records no alternate names.
     aliases: [*const u8; 1],
+    /// Index into [`SERVICES`] of the entry `getservent` will return next.
+    ///
+    /// Zero is "the start of the database", which is both the correct initial
+    /// state and what [`Self::ZERO`] requires.
+    cursor: u32,
+    /// Nonzero once `setservent(1)` has asked for the database to stay open.
+    ///
+    /// Not decorative even though there is no file to hold open: glibc without
+    /// `stayopen` implements `getservbyname`/`getservbyport` as
+    /// open-scan-close, so a lookup made mid-enumeration rewinds the cursor;
+    /// with `stayopen` set it does not.  We reproduce the observable half of
+    /// that (see [`servent_lookup_done`]) rather than let the argument be a
+    /// silent no-op that diverges from every other libc for programs that
+    /// interleave the two styles.
+    stayopen: i32,
     /// The `struct servent` handed back to the caller.
     result: Servent,
 }
@@ -5704,6 +5719,8 @@ impl ServentBuf {
         name: [0; 32],
         proto: [0; 8],
         aliases: [core::ptr::null()],
+        cursor: 0,
+        stayopen: 0,
         result: Servent {
             s_name: core::ptr::null(),
             s_aliases: core::ptr::null(),
@@ -5779,12 +5796,15 @@ pub unsafe extern "C" fn getservbyname(name: *const u8, proto: *const u8) -> *co
         unsafe { core::slice::from_raw_parts(proto, plen) }
     };
 
-    for entry in SERVICES {
-        if entry.name == name_slice && (proto_slice.is_empty() || entry.proto == proto_slice) {
-            return unsafe { fill_servent(entry) };
-        }
-    }
-    core::ptr::null()
+    let found = SERVICES.iter().find(|entry| {
+        entry.name == name_slice && (proto_slice.is_empty() || entry.proto == proto_slice)
+    });
+    // Fill before the rewind: `fill_servent` and `servent_lookup_done` touch
+    // different fields of the same block, but doing the lookup bookkeeping last
+    // keeps the "a lookup ends the scan" rule in one place.
+    let result = found.map_or(core::ptr::null(), |entry| unsafe { fill_servent(entry) });
+    unsafe { servent_lookup_done() };
+    result
 }
 
 /// Look up a service by port number and protocol.
@@ -5805,12 +5825,101 @@ pub unsafe extern "C" fn getservbyport(port: i32, proto: *const u8) -> *const Se
         unsafe { core::slice::from_raw_parts(proto, plen) }
     };
 
-    for entry in SERVICES {
-        if entry.port == host_port && (proto_slice.is_empty() || entry.proto == proto_slice) {
-            return unsafe { fill_servent(entry) };
+    let found = SERVICES.iter().find(|entry| {
+        entry.port == host_port && (proto_slice.is_empty() || entry.proto == proto_slice)
+    });
+    let result = found.map_or(core::ptr::null(), |entry| unsafe { fill_servent(entry) });
+    unsafe { servent_lookup_done() };
+    result
+}
+
+// ---------------------------------------------------------------------------
+// setservent / getservent / endservent — sequential access to the same table
+// ---------------------------------------------------------------------------
+//
+// bash calls these (they were two of the five symbols the cross-compile spike
+// found genuinely missing, see `open-questions.md` Q41).  They walk exactly the
+// table `getservby*` searches, so there is no second database to keep in sync.
+//
+// The cursor lives in the caller's `ServentBuf`, i.e. it is *per thread*, for
+// the same reason the result buffer is: two threads enumerating at once must
+// not consume each other's entries.  glibc's is per process and shared, which
+// is a documented footgun rather than a property worth reproducing.
+
+/// Called at the end of every `getservby*` lookup to model glibc's
+/// open-scan-close behaviour when the database was not opened with
+/// `setservent(1)`.
+///
+/// # Safety
+///
+/// Same requirement as [`fill_servent`]: the calling thread's `PerThread`
+/// block must not be concurrently in use, which `perthread::current()`
+/// guarantees.
+unsafe fn servent_lookup_done() {
+    // SAFETY: `perthread::current()` is valid for this thread and no other
+    // thread holds a pointer into this block.
+    unsafe {
+        let this = &raw mut (*crate::perthread::current()).servent;
+        if (*this).stayopen == 0 {
+            (*this).cursor = 0;
         }
     }
-    core::ptr::null()
+}
+
+/// Rewind the service database to its first entry.
+///
+/// `stayopen` nonzero asks for the database to remain open across
+/// `getservbyname`/`getservbyport` calls; see [`ServentBuf::stayopen`] for what
+/// that means when the "file" is a static table.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn setservent(stayopen: i32) {
+    // SAFETY: `perthread::current()` is valid for this thread and no other
+    // thread holds a pointer into this block.
+    unsafe {
+        let this = &raw mut (*crate::perthread::current()).servent;
+        (*this).cursor = 0;
+        (*this).stayopen = i32::from(stayopen != 0);
+    }
+}
+
+/// Return the next entry in the service database, or NULL at the end.
+///
+/// The returned pointer is library-owned and is invalidated by the calling
+/// thread's next `getservent`/`getservby*` call, as POSIX specifies.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn getservent() -> *const Servent {
+    // SAFETY: `perthread::current()` is valid for this thread and no other
+    // thread holds a pointer into this block.  The index is bounds-checked
+    // against `SERVICES` by `get` before it is used.
+    unsafe {
+        let this = &raw mut (*crate::perthread::current()).servent;
+        let index = (*this).cursor as usize;
+        let Some(entry) = SERVICES.get(index) else {
+            // Past the end: stay there rather than wrapping, so repeated calls
+            // keep returning NULL until `setservent` rewinds.
+            return core::ptr::null();
+        };
+        // Saturating rather than `+ 1`: the cursor can only reach
+        // `SERVICES.len()`, far below `u32::MAX`, but a saturating step means
+        // even a corrupted cursor cannot wrap around to a valid index.
+        (*this).cursor = (*this).cursor.saturating_add(1);
+        fill_servent(entry)
+    }
+}
+
+/// Close the service database, rewinding the enumeration cursor.
+///
+/// Also clears the `stayopen` request, matching glibc: a subsequent
+/// `getservbyname` is back to open-scan-close until `setservent(1)` asks again.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn endservent() {
+    // SAFETY: `perthread::current()` is valid for this thread and no other
+    // thread holds a pointer into this block.
+    unsafe {
+        let this = &raw mut (*crate::perthread::current()).servent;
+        (*this).cursor = 0;
+        (*this).stayopen = 0;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5910,6 +6019,12 @@ pub struct ProtoentBuf {
     aliases: [*const u8; 2],
     /// Storage for that one alias.
     alias: [u8; 16],
+    /// Index into [`PROTOCOLS`] of the entry `getprotoent` will return next.
+    /// Zero is the start of the database, as [`Self::ZERO`] requires.
+    cursor: u32,
+    /// Nonzero once `setprotoent(1)` has asked the database to stay open; see
+    /// [`ServentBuf::stayopen`], which this mirrors exactly.
+    stayopen: i32,
     /// The `struct protoent` handed back to the caller.
     result: Protoent,
 }
@@ -5921,6 +6036,8 @@ impl ProtoentBuf {
         name: [0; 16],
         aliases: [core::ptr::null(); 2],
         alias: [0; 16],
+        cursor: 0,
+        stayopen: 0,
         result: Protoent {
             p_name: core::ptr::null(),
             p_aliases: core::ptr::null(),
@@ -5990,33 +6107,98 @@ pub unsafe extern "C" fn getprotobyname(name: *const u8) -> *const Protoent {
     let name_len = unsafe { crate::string::strlen(name) };
     let name_slice = unsafe { core::slice::from_raw_parts(name, name_len) };
 
-    for entry in PROTOCOLS {
-        // Match by name (case-insensitive).
-        if entry.name.eq_ignore_ascii_case(name_slice) {
-            return unsafe { fill_protoent(entry) };
-        }
-        // Also match against aliases.
-        for &alias in entry.aliases {
-            if alias.eq_ignore_ascii_case(name_slice) {
-                return unsafe { fill_protoent(entry) };
-            }
-        }
-    }
-    core::ptr::null()
+    let found = PROTOCOLS.iter().find(|entry| {
+        entry.name.eq_ignore_ascii_case(name_slice)
+            || entry
+                .aliases
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(name_slice))
+    });
+    let result = found.map_or(core::ptr::null(), |entry| unsafe { fill_protoent(entry) });
+    unsafe { protoent_lookup_done() };
+    result
 }
 
 /// Look up a protocol by number.
 ///
-/// Returns a pointer to a static `Protoent`, or NULL if not found.
+/// Returns a pointer to library-owned storage (valid until the calling
+/// thread's next `getprotoent`/`getprotoby*` call), or NULL if not found.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getprotobynumber(number: i32) -> *const Protoent {
-    for entry in PROTOCOLS {
-        if entry.number == number {
-            // SAFETY: single-threaded static storage.
-            return unsafe { fill_protoent(entry) };
+    let found = PROTOCOLS.iter().find(|entry| entry.number == number);
+    // SAFETY: per-thread storage; `perthread::current()` is valid for this
+    // thread and no other thread holds a pointer into this block.
+    let result = found.map_or(core::ptr::null(), |entry| unsafe { fill_protoent(entry) });
+    // SAFETY: as above.
+    unsafe { protoent_lookup_done() };
+    result
+}
+
+// ---------------------------------------------------------------------------
+// setprotoent / getprotoent / endprotoent — sequential access to the same table
+// ---------------------------------------------------------------------------
+//
+// The exact analogue of the `servent` trio above, over [`PROTOCOLS`].  Added
+// alongside it because their absence is the same gap: a program that wants to
+// list the protocol database (`/etc/protocols` readers, `netstat`-style tools)
+// has no other way to reach it.
+
+/// Called at the end of every `getprotoby*` lookup; models glibc's
+/// open-scan-close behaviour when `setprotoent(1)` was not used.
+///
+/// # Safety
+///
+/// Same requirement as [`fill_protoent`]: the calling thread's `PerThread`
+/// block must not be concurrently in use.
+unsafe fn protoent_lookup_done() {
+    // SAFETY: `perthread::current()` is valid for this thread and no other
+    // thread holds a pointer into this block.
+    unsafe {
+        let this = &raw mut (*crate::perthread::current()).protoent;
+        if (*this).stayopen == 0 {
+            (*this).cursor = 0;
         }
     }
-    core::ptr::null()
+}
+
+/// Rewind the protocol database to its first entry.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn setprotoent(stayopen: i32) {
+    // SAFETY: `perthread::current()` is valid for this thread and no other
+    // thread holds a pointer into this block.
+    unsafe {
+        let this = &raw mut (*crate::perthread::current()).protoent;
+        (*this).cursor = 0;
+        (*this).stayopen = i32::from(stayopen != 0);
+    }
+}
+
+/// Return the next entry in the protocol database, or NULL at the end.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn getprotoent() -> *const Protoent {
+    // SAFETY: `perthread::current()` is valid for this thread and no other
+    // thread holds a pointer into this block.  `get` bounds-checks the index.
+    unsafe {
+        let this = &raw mut (*crate::perthread::current()).protoent;
+        let index = (*this).cursor as usize;
+        let Some(entry) = PROTOCOLS.get(index) else {
+            return core::ptr::null();
+        };
+        (*this).cursor = (*this).cursor.saturating_add(1);
+        fill_protoent(entry)
+    }
+}
+
+/// Close the protocol database, rewinding the cursor and clearing `stayopen`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn endprotoent() {
+    // SAFETY: `perthread::current()` is valid for this thread and no other
+    // thread holds a pointer into this block.
+    unsafe {
+        let this = &raw mut (*crate::perthread::current()).protoent;
+        (*this).cursor = 0;
+        (*this).stayopen = 0;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -7652,6 +7834,208 @@ mod tests {
         let port_be = 65534_u16.to_be() as i32;
         let p = unsafe { getservbyport(port_be, core::ptr::null()) };
         assert!(p.is_null());
+    }
+
+    // -- setservent / getservent / endservent --
+    //
+    // The cursor lives in the per-thread block and each `#[test]` gets its own
+    // thread, so these do not need to undo each other's state.  They still call
+    // `endservent` where the point is what a *fresh* enumeration sees, so the
+    // intent survives if the harness ever stops giving each test a thread.
+
+    #[test]
+    fn test_getservent_walks_the_table_in_order() {
+        setservent(0);
+        let first = getservent();
+        assert!(!first.is_null());
+        // The table's first entry is `echo/7/tcp`; enumeration order is table
+        // order, not sorted-by-port or sorted-by-name.
+        assert_eq!(unsafe { c_str_to_slice((*first).s_name) }, b"echo");
+        assert_eq!(unsafe { u16::from_be((*first).s_port as u16) }, 7);
+
+        let second = getservent();
+        assert!(!second.is_null());
+        assert_eq!(unsafe { c_str_to_slice((*second).s_proto) }, b"udp");
+        endservent();
+    }
+
+    #[test]
+    fn test_getservent_reaches_the_end_and_stays_there() {
+        setservent(0);
+        let mut seen = 0usize;
+        // Bounded: a cursor bug that failed to advance would otherwise spin
+        // forever rather than fail.
+        for _ in 0..SERVICES.len().saturating_add(4) {
+            if getservent().is_null() {
+                break;
+            }
+            seen = seen.saturating_add(1);
+        }
+        assert_eq!(seen, SERVICES.len());
+        // Past the end the cursor stops rather than wrapping, so every further
+        // call keeps returning NULL until something rewinds it.
+        assert!(getservent().is_null());
+        assert!(getservent().is_null());
+        endservent();
+    }
+
+    #[test]
+    fn test_setservent_rewinds() {
+        setservent(0);
+        let _ = getservent();
+        let _ = getservent();
+        setservent(0);
+        let p = getservent();
+        assert!(!p.is_null());
+        assert_eq!(unsafe { c_str_to_slice((*p).s_name) }, b"echo");
+        endservent();
+    }
+
+    #[test]
+    fn test_endservent_rewinds_and_clears_stayopen() {
+        setservent(1);
+        let _ = getservent();
+        endservent();
+        // Rewound: the next entry is the first one again.
+        let p = getservent();
+        assert!(!p.is_null());
+        assert_eq!(unsafe { c_str_to_slice((*p).s_name) }, b"echo");
+        // And `stayopen` was cleared, so a lookup is back to open-scan-close
+        // and rewinds what we just advanced.
+        let _ = unsafe { getservbyname(b"ssh\0".as_ptr(), core::ptr::null()) };
+        let after = getservent();
+        assert!(!after.is_null());
+        assert_eq!(unsafe { c_str_to_slice((*after).s_name) }, b"echo");
+        endservent();
+    }
+
+    #[test]
+    fn test_getservbyname_rewinds_cursor_without_stayopen() {
+        // glibc without `stayopen` opens, scans and closes the database for
+        // each `getservby*`, which resets an in-progress `getservent` walk.
+        setservent(0);
+        let _ = getservent();
+        let _ = getservent();
+        let _ = unsafe { getservbyname(b"ssh\0".as_ptr(), core::ptr::null()) };
+        let p = getservent();
+        assert!(!p.is_null());
+        assert_eq!(unsafe { c_str_to_slice((*p).s_name) }, b"echo");
+        endservent();
+    }
+
+    #[test]
+    fn test_getservbyname_preserves_cursor_with_stayopen() {
+        setservent(1);
+        let _ = getservent();
+        let second = getservent();
+        let second_name = unsafe { c_str_to_slice((*second).s_name) }.to_vec();
+        let second_proto = unsafe { c_str_to_slice((*second).s_proto) }.to_vec();
+        // The lookup shares `ServentBuf`, so it overwrites the strings `second`
+        // points at — hence the copies above — but with `stayopen` set it must
+        // not move the cursor.
+        let _ = unsafe { getservbyname(b"ssh\0".as_ptr(), core::ptr::null()) };
+        let third = getservent();
+        assert!(!third.is_null());
+        // Third entry of the table, i.e. the walk continued from where it was
+        // rather than restarting at `echo/tcp`.
+        assert_eq!(unsafe { c_str_to_slice((*third).s_name) }, b"ftp-data");
+        assert_eq!(second_name, b"echo");
+        assert_eq!(second_proto, b"udp");
+        endservent();
+    }
+
+    #[test]
+    fn test_getservbyport_rewinds_cursor_without_stayopen() {
+        setservent(0);
+        let _ = getservent();
+        let port_be = 22_u16.to_be() as i32;
+        let _ = unsafe { getservbyport(port_be, core::ptr::null()) };
+        let p = getservent();
+        assert!(!p.is_null());
+        assert_eq!(unsafe { c_str_to_slice((*p).s_name) }, b"echo");
+        endservent();
+    }
+
+    #[test]
+    fn test_setservent_normalises_stayopen_to_zero_or_one() {
+        // Any nonzero value means "stay open"; we store 1, not the argument.
+        setservent(42);
+        let _ = getservent();
+        let _ = unsafe { getservbyname(b"ssh\0".as_ptr(), core::ptr::null()) };
+        let p = getservent();
+        assert!(!p.is_null());
+        assert_eq!(unsafe { c_str_to_slice((*p).s_proto) }, b"udp");
+        endservent();
+    }
+
+    // -- setprotoent / getprotoent / endprotoent --
+
+    #[test]
+    fn test_getprotoent_walks_the_table_in_order() {
+        setprotoent(0);
+        let first = getprotoent();
+        assert!(!first.is_null());
+        assert_eq!(unsafe { c_str_to_slice((*first).p_name) }, b"ip");
+        assert_eq!(unsafe { (*first).p_proto }, 0);
+
+        let second = getprotoent();
+        assert!(!second.is_null());
+        assert_eq!(unsafe { c_str_to_slice((*second).p_name) }, b"icmp");
+        assert_eq!(unsafe { (*second).p_proto }, 1);
+        endprotoent();
+    }
+
+    #[test]
+    fn test_getprotoent_reaches_the_end_and_stays_there() {
+        setprotoent(0);
+        let mut seen = 0usize;
+        for _ in 0..PROTOCOLS.len().saturating_add(4) {
+            if getprotoent().is_null() {
+                break;
+            }
+            seen = seen.saturating_add(1);
+        }
+        assert_eq!(seen, PROTOCOLS.len());
+        assert!(getprotoent().is_null());
+        endprotoent();
+    }
+
+    #[test]
+    fn test_getprotobyname_rewinds_cursor_without_stayopen() {
+        setprotoent(0);
+        let _ = getprotoent();
+        let _ = getprotoent();
+        let _ = unsafe { getprotobyname(b"tcp\0".as_ptr()) };
+        let p = getprotoent();
+        assert!(!p.is_null());
+        assert_eq!(unsafe { c_str_to_slice((*p).p_name) }, b"ip");
+        endprotoent();
+    }
+
+    #[test]
+    fn test_getprotobynumber_preserves_cursor_with_stayopen() {
+        setprotoent(1);
+        let _ = getprotoent();
+        let _ = getprotobynumber(6);
+        let p = getprotoent();
+        assert!(!p.is_null());
+        assert_eq!(unsafe { c_str_to_slice((*p).p_name) }, b"icmp");
+        endprotoent();
+    }
+
+    #[test]
+    fn test_endprotoent_rewinds_and_clears_stayopen() {
+        setprotoent(1);
+        let _ = getprotoent();
+        endprotoent();
+        let p = getprotoent();
+        assert!(!p.is_null());
+        assert_eq!(unsafe { c_str_to_slice((*p).p_name) }, b"ip");
+        let _ = unsafe { getprotobyname(b"udp\0".as_ptr()) };
+        let after = getprotoent();
+        assert!(!after.is_null());
+        assert_eq!(unsafe { c_str_to_slice((*after).p_name) }, b"ip");
+        endprotoent();
     }
 
     // -- shutdown with invalid how --

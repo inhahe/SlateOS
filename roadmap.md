@@ -1432,6 +1432,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] getifaddrs real IP: queries SYS_NET_IF_INFO to populate eth0 address and netmask (was INADDR_ANY)
   - [x] getservbyname/getservbyport: built-in service database (27 entries: http, https, ssh, ftp, smtp, dns, mysql, postgresql, redis, etc.)
   - [x] getprotobyname/getprotobynumber: built-in protocol database (11 entries: ip, icmp, tcp, udp, gre, esp, ah, sctp, etc.)
+  - [x] setservent/getservent/endservent + setprotoent/getprotoent/endprotoent: sequential enumeration of the same two tables, per-thread cursor; without `setservent(1)`/`setprotoent(1)` a `getservby*`/`getprotoby*` lookup rewinds the cursor, reproducing glibc's open-scan-close behaviour instead of making `stayopen` a silent no-op
   - [x] poll/select kernel-queried readiness: check_readiness() queries SYS_TCP_POLL_STATUS/SYS_TCP_LISTENER_READY/SYS_UDP_RX_READY for actual socket state (was always-ready)
   - [x] recv MSG_PEEK/MSG_DONTWAIT: flags passed through to kernel; O_NONBLOCK on fd auto-adds MSG_DONTWAIT
   - [x] shutdown half-close: delegates to SYS_TCP_SHUTDOWN for proper SHUT_RD/SHUT_WR/SHUT_RDWR semantics

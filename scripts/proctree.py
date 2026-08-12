@@ -42,9 +42,12 @@ closes the handles and lets the drain finish.
 
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
 
 IS_WINDOWS = sys.platform.startswith("win")
 
@@ -195,6 +198,148 @@ else:
         return {"start_new_session": True}  # child leads its own process group
 
 
+# Shell-script launching on Windows.
+#
+# Two separate traps, both of which produce a *misleading* run rather than an
+# error, which is why they are handled here at the single launch point rather
+# than left to each caller:
+#
+#  1. `CreateProcess` cannot execute a `.sh` at all — there is no shebang
+#     handling on Windows — so `Tree(["./scripts/boot-test.sh"])` dies with
+#     "%1 is not a valid Win32 application". Harmless on its own, but a caller
+#     that appends `; echo $?` (or otherwise reports the *wrapper's* status)
+#     turns "never ran" into a green result.
+#
+#  2. Naming `bash` explicitly is worse, because it appears to work. From a
+#     native-Windows parent, `CreateProcess` searches System32 *before* PATH,
+#     and `C:\Windows\System32\bash.exe` is the WSL launcher. So the child is a
+#     Linux bash in an entirely different filesystem namespace: our scripts'
+#     `/c/Program Files/qemu`, `cygpath` and `taskkill //F` are all absent, and
+#     the script fails for reasons that have nothing to do with the code under
+#     test. Note that `shutil.which("bash")` does NOT reproduce this — it walks
+#     PATH and answers Git Bash — so the PATH lookup and the actual launch
+#     disagree, and only the launch is authoritative.
+#
+# The fix for both is to resolve an *absolute* path to an MSYS-family bash
+# (Git Bash / MSYS2) and invoke the script through it. Anything else — a real
+# `.exe`, `cargo`, `taskkill` — passes through untouched.
+_MSYS_BASH_CANDIDATES = (
+    r"C:\Program Files\Git\bin\bash.exe",
+    r"C:\Program Files\Git\usr\bin\bash.exe",
+    r"C:\Program Files (x86)\Git\bin\bash.exe",
+    r"C:\msys64\usr\bin\bash.exe",
+    r"C:\cygwin64\bin\bash.exe",
+)
+
+_SHELL_NAMES = {"bash", "sh", "bash.exe", "sh.exe"}
+
+# Shebang interpreters we are willing to run under bash. Deliberately only the
+# POSIX-shell family: a `#!` naming python/perl/node is a script we must NOT
+# interpose a shell on.
+_SHELL_INTERPRETERS = {"sh", "bash", "dash", "ksh", "zsh", "ash"}
+
+
+def _is_wsl_launcher(path: str) -> bool:
+    """Is this the WSL shim in System32 rather than a real Unix shell?
+
+    Matched by location, not by name: System32/SysWOW64/Sysnative hold the
+    `bash.exe` and `wsl.exe` stubs that hand off to a Linux distribution.
+    """
+    try:
+        parent = Path(path).resolve().parent.name.lower()
+    except OSError:
+        return False
+    return parent in {"system32", "syswow64", "sysnative"}
+
+
+def find_unix_shell() -> str | None:
+    """Absolute path to an MSYS-family bash, or None if none is installed.
+
+    `SLATE_BASH` overrides the search, for a host whose shell lives somewhere
+    unusual. The PATH lookup is tried first so a deliberately-installed shell
+    wins over a stock one, but its answer is rejected if it is the WSL shim.
+    """
+    override = os.environ.get("SLATE_BASH")
+    if override and Path(override).is_file():
+        return override
+    found = shutil.which("bash")
+    if found and not _is_wsl_launcher(found):
+        return found
+    for cand in _MSYS_BASH_CANDIDATES:
+        if Path(cand).is_file():
+            return cand
+    return None
+
+
+def _is_shell_script(path: str) -> bool:
+    """Does this name a shell script (by extension, or by `#!` line)?"""
+    if path.lower().endswith((".sh", ".bash")):
+        return True
+    # Extensionless scripts are common too; ask the file itself.
+    try:
+        with open(path, "rb") as fh:
+            first = fh.read(256)
+    except OSError:
+        return False
+    if not first.startswith(b"#!"):
+        return False
+    line = first.split(b"\n", 1)[0][2:].strip()
+    try:
+        tokens = line.decode("utf-8").split()
+    except UnicodeDecodeError:
+        return False
+    if not tokens:
+        return False
+    # `#!/usr/bin/env bash` — the interpreter is the argument, not `env`.
+    # Resolve that one level so the basename we test is the real interpreter.
+    interp = tokens[0]
+    if PurePosixPath(interp).name == "env" and len(tokens) > 1:
+        interp = tokens[1]
+    # Match on the interpreter's *basename*, not a substring of the whole
+    # line: `#!/home/shared/bin/python` contains "sh" but is not a shell
+    # script, and running it under bash would be a confusing failure.
+    return PurePosixPath(interp).name in _SHELL_INTERPRETERS
+
+
+def resolve_command(command):
+    """Rewrite `command` so a shell script actually runs, under a real bash.
+
+    Returns the command unchanged on POSIX, when it is not a list, or when
+    argv[0] is neither a shell script nor a bare `bash`/`sh`. Raises `OSError`
+    when a shell is genuinely required but none can be found — silently falling
+    back to WSL, or to the un-launchable script, is precisely the failure mode
+    this exists to prevent, so it must be loud.
+    """
+    if not IS_WINDOWS or not isinstance(command, (list, tuple)) or not command:
+        return command
+    command = list(command)
+    argv0 = str(command[0])
+
+    # `bash script.sh` / `sh -c ...`: keep the arguments, fix the interpreter.
+    if Path(argv0).name.lower() in _SHELL_NAMES and os.sep not in argv0 and "/" not in argv0:
+        shell = find_unix_shell()
+        if shell is None:
+            raise OSError(
+                f"cannot run {argv0!r}: no MSYS/Git Bash found (only the WSL "
+                f"shim in System32, which cannot run this project's scripts). "
+                f"Install Git for Windows or set SLATE_BASH."
+            )
+        command[0] = shell
+        return command
+
+    # A script path: `CreateProcess` cannot start it, so interpose bash.
+    if _is_shell_script(argv0):
+        shell = find_unix_shell()
+        if shell is None:
+            raise OSError(
+                f"cannot run shell script {argv0!r}: no MSYS/Git Bash found. "
+                f"Install Git for Windows or set SLATE_BASH."
+            )
+        return [shell, argv0, *command[1:]]
+
+    return command
+
+
 class Tree:
     """A child process and every descendant it spawns, killable as a unit.
 
@@ -208,6 +353,10 @@ class Tree:
     """
 
     def __init__(self, command, warn=None, **kwargs):
+        # Before anything else: make the command launchable at all. See
+        # `resolve_command` — on Windows a `.sh` cannot be started directly and
+        # a bare `bash` silently resolves to the WSL shim.
+        command = resolve_command(command)
         self.job = create_kill_on_close_job()
         if IS_WINDOWS and self.job is None and warn:
             warn("could not create Job Object; relying on taskkill fallback")

@@ -67,6 +67,15 @@ pub const SYS_PROCESS_SPAWN: u64 = 500;
 pub const SYS_PROCESS_WAIT: u64 = 501;
 pub const SYS_PROCESS_EXEC: u64 = 503;
 pub const SYS_PROCESS_TRY_WAIT: u64 = 507;
+/// POSIX `waitpid`: `arg0` = pid selector, `arg1` = options
+/// (`WNOHANG`/`WUNTRACED`/`WCONTINUED`), `arg2` = `*mut i32` wstatus.
+/// Returns the pid whose state changed, or 0 for a `WNOHANG` miss.
+///
+/// Backs `process::waitpid`. Distinct from `SYS_PROCESS_WAIT` (501) because
+/// that one returns the exit *code* in rax, which cannot express a
+/// job-control stop — every value is a legitimate exit code — and cannot
+/// grow an options argument its existing callers do not set.
+pub const SYS_PROCESS_WAIT_STATUS: u64 = 1063;
 pub const SYS_PROCESS_IS_READY: u64 = 509;
 pub const SYS_THREAD_CREATE: u64 = 510;
 pub const SYS_THREAD_EXIT: u64 = 511;

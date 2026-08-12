@@ -45369,7 +45369,6 @@ fn sys_prlimit64(args: &SyscallArgs) -> SyscallResult {
 ///   - bad `wstatus` or `rusage` pointer: `-EFAULT`;
 ///   - bad `options` bits: `-EINVAL`.
 fn sys_wait4(args: &SyscallArgs) -> SyscallResult {
-    use crate::proc::pcb;
 
     // Linux WAIT4 option flags.  Per Linux 6.x kernel/exit.c
     // SYSCALL_DEFINE4(wait4) (cited verbatim — batch 442):
@@ -45467,186 +45466,34 @@ fn sys_wait4(args: &SyscallArgs) -> SyscallResult {
     let parent_pid = caller_pid().unwrap_or(0);
     let task_id = crate::sched::current_task_id();
 
-    let want_stopped = (options & WUNTRACED) != 0;
-    let want_continued = (options & WCONTINUED) != 0;
-
-    // Resolve the process-group filter for the wait-any (pid <= 0) path:
-    //   pid == -1 : wait for ANY child (no group restriction).
-    //   pid == 0  : any child in the *caller's* process group.
-    //   pid <  -1 : any child in process group `-pid`.
-    // (pid == INT_MIN already returned ESRCH above.) In kernel-context
-    // self-tests the caller (pid 0) has no group record, so pid==0 falls
-    // back to wait-any — the same answer the old unconditional wait-any
-    // path produced.
-    let pgid_filter: Option<u64> = if pid_arg == -1 {
-        None
-    } else if pid_arg == 0 {
-        pcb::get_pgid(parent_pid)
-    } else if pid_arg < -1 {
-        Some(pid_arg.unsigned_abs())
-    } else {
-        None // pid_arg > 0 handled by the specific-pid branch below
-    };
-
-    // Specific-pid vs any-child path mirrors sys_process_wait.  Each loop
-    // breaks with the child PID and an already-encoded wstatus word, since a
-    // zombie exit and a job-control stop/continue report encode differently.
-    // wait4 has no WNOWAIT, so a reported job-control transition is always
-    // consumed (`consume = true`).
-    let (child_pid, wstatus): (u64, i32) = if pid_arg > 0 {
-        #[allow(clippy::cast_sign_loss)]
-        let target_pid = pid_arg as u64;
-        loop {
-            // Zombie exit? (reaps the child)
-            match pcb::try_reap(parent_pid, target_pid) {
-                Ok(Some(info)) => break (target_pid, encode_linux_wstatus(&info)),
-                Ok(None) => {} // still running
-                Err(KernelError::PermissionDenied) | Err(KernelError::NoSuchProcess) => {
-                    // Not our child / doesn't exist → ECHILD.
-                    return linux_err(errno::ECHILD);
-                }
-                Err(e) => return linux_err(linux_errno_for(e)),
-            }
-            // Stopped / continued for job control? (does not reap)
-            if want_stopped || want_continued {
-                match pcb::jc_report_for_child(
-                    parent_pid, target_pid, want_stopped, want_continued, true,
-                ) {
-                    Ok(Some(ev)) => break (target_pid, encode_jc_wstatus(&ev)),
-                    Ok(None) => {}
-                    Err(KernelError::PermissionDenied)
-                    | Err(KernelError::NoSuchProcess) => {
-                        return linux_err(errno::ECHILD);
-                    }
-                    Err(e) => return linux_err(linux_errno_for(e)),
-                }
-            }
-            if nohang {
-                return SyscallResult::ok(0);
-            }
-            // A deliverable (handler-backed) signal interrupts the wait.  wait4
-            // is restartable, so emit ERESTARTSYS: the signal-delivery
-            // checkpoint runs the handler and then either restarts wait4
-            // (SA_RESTART) or substitutes -EINTR.  Only handler-backed signals
-            // can be pending-and-deliverable at a park point (classify_post
-            // drops no-handler default-ignore signals and terminates on fatal
-            // ones), so the restart can never spuriously livelock here.
-            let deliverable = !crate::proc::signal::blocked(parent_pid);
-            if crate::proc::signal::has_pending_in_mask(parent_pid, deliverable) {
-                return restart::restart_result(restart::ERESTARTSYS);
-            }
-            // Block until a state change (lost-wakeup-safe via set_wait_task +
-            // re-check).  A stop/continue wakes this task through the parent
-            // waiters that stop_process_for_signal/continue_process signal.
-            if let Err(e) = pcb::set_wait_task(target_pid, task_id) {
-                return linux_err(linux_errno_for(e));
-            }
-            match pcb::try_reap(parent_pid, target_pid) {
-                Ok(Some(info)) => break (target_pid, encode_linux_wstatus(&info)),
-                Ok(None) => {}
-                Err(KernelError::PermissionDenied) | Err(KernelError::NoSuchProcess) => {
-                    return linux_err(errno::ECHILD);
-                }
-                Err(e) => return linux_err(linux_errno_for(e)),
-            }
-            if want_stopped || want_continued {
-                match pcb::jc_report_for_child(
-                    parent_pid, target_pid, want_stopped, want_continued, true,
-                ) {
-                    Ok(Some(ev)) => break (target_pid, encode_jc_wstatus(&ev)),
-                    Ok(None) => {}
-                    Err(KernelError::PermissionDenied)
-                    | Err(KernelError::NoSuchProcess) => {
-                        return linux_err(errno::ECHILD);
-                    }
-                    Err(e) => return linux_err(linux_errno_for(e)),
-                }
-            }
-            // Register as a signal-waiter so a signal delivered while we are
-            // parked wakes us (set_pending wakes signal-waiters); recheck after
-            // registering to close the post-before-park race.  The registration
-            // window is bounded to just around the park — every break/return
-            // path above runs before it, so none can leak the registration.
-            crate::proc::signal::register_signalfd_waiter(parent_pid, task_id, deliverable);
-            if crate::proc::signal::has_pending_in_mask(parent_pid, deliverable) {
-                crate::proc::signal::deregister_signalfd_waiter(parent_pid, task_id);
-                continue;
-            }
-            crate::sched::block_current();
-            crate::proc::signal::deregister_signalfd_waiter(parent_pid, task_id);
+    // The selector resolution, the reap/stop/continue scan order, the
+    // lost-wakeup-safe park and the wstatus encoding all live in
+    // `handlers::wait_for_child_event`, shared with the native
+    // `SYS_PROCESS_WAIT_STATUS`.  Both ABIs read the same kernel records, so
+    // they must not drift; see that function's doc comment.  wait4 has no
+    // WNOWAIT, so a reported job-control transition is always consumed.
+    //
+    // __WNOTHREAD/__WALL/__WCLONE are accepted and ignored: we have no
+    // clone-vs-fork child distinction to filter on, so every child is
+    // already "all children".
+    let outcome = crate::syscall::handlers::wait_for_child_event(
+        parent_pid,
+        task_id,
+        pid_arg,
+        nohang,
+        (options & WUNTRACED) != 0,
+        (options & WCONTINUED) != 0,
+    );
+    let (child_pid, wstatus): (u64, i32) = match outcome {
+        Ok(crate::syscall::handlers::WaitOutcome::Changed(pid, ws)) => (pid, ws),
+        Ok(crate::syscall::handlers::WaitOutcome::NoHang) => return SyscallResult::ok(0),
+        Ok(crate::syscall::handlers::WaitOutcome::Restart) => {
+            return restart::restart_result(restart::ERESTARTSYS);
         }
-    } else {
-        // pid <= 0: wait for any child.  Same register-before-check
-        // discipline as sys_process_wait's wait-any path.
-        loop {
-            if let Err(e) = pcb::set_wait_any_task(parent_pid, task_id) {
-                // ECHILD if the parent has no children at all.
-                pcb::clear_wait_any_task(parent_pid, task_id);
-                return linux_err(linux_errno_for(e));
-            }
-            // Zombie exit of any child? (reaps)  When a process-group
-            // filter is active (pid == 0 or pid < -1) only children whose
-            // pgid matches are eligible; otherwise any child qualifies.
-            let reap_result = match pgid_filter {
-                Some(g) => pcb::try_reap_group(parent_pid, g),
-                None => pcb::try_reap_any(parent_pid),
-            };
-            match reap_result {
-                Ok(Some((cpid, info))) => {
-                    pcb::clear_wait_any_task(parent_pid, task_id);
-                    break (cpid, encode_linux_wstatus(&info));
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    pcb::clear_wait_any_task(parent_pid, task_id);
-                    return linux_err(linux_errno_for(e));
-                }
-            }
-            // Stop/continue of any child? (does not reap)
-            if want_stopped || want_continued {
-                let jc_result = match pgid_filter {
-                    Some(g) => pcb::jc_report_group(
-                        parent_pid, g, want_stopped, want_continued, true,
-                    ),
-                    None => pcb::jc_report_any_child(
-                        parent_pid, want_stopped, want_continued, true,
-                    ),
-                };
-                match jc_result {
-                    Ok(Some((cpid, ev))) => {
-                        pcb::clear_wait_any_task(parent_pid, task_id);
-                        break (cpid, encode_jc_wstatus(&ev));
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        pcb::clear_wait_any_task(parent_pid, task_id);
-                        return linux_err(linux_errno_for(e));
-                    }
-                }
-            }
-            if nohang {
-                pcb::clear_wait_any_task(parent_pid, task_id);
-                return SyscallResult::ok(0);
-            }
-            // Interrupted by a deliverable (handler-backed) signal — wait4 is
-            // restartable; clear the any-child registration and emit
-            // ERESTARTSYS (see the specific-pid branch for the no-livelock
-            // argument).
-            let deliverable = !crate::proc::signal::blocked(parent_pid);
-            if crate::proc::signal::has_pending_in_mask(parent_pid, deliverable) {
-                pcb::clear_wait_any_task(parent_pid, task_id);
-                return restart::restart_result(restart::ERESTARTSYS);
-            }
-            // Register as a signal-waiter for the park (register-then-recheck),
-            // bounded around block_current so no exit path leaks it.
-            crate::proc::signal::register_signalfd_waiter(parent_pid, task_id, deliverable);
-            if crate::proc::signal::has_pending_in_mask(parent_pid, deliverable) {
-                crate::proc::signal::deregister_signalfd_waiter(parent_pid, task_id);
-                continue;
-            }
-            crate::sched::block_current();
-            crate::proc::signal::deregister_signalfd_waiter(parent_pid, task_id);
-        }
+        // POSIX reports both "not your child" and "no children" as ECHILD;
+        // the core already folds PermissionDenied/NoSuchProcess into
+        // NoChildProcess, so this maps the one remaining shape.
+        Err(e) => return linux_err(linux_errno_for(e)),
     };
 
     if wstatus_ptr != 0 {
@@ -45673,51 +45520,23 @@ fn sys_wait4(args: &SyscallArgs) -> SyscallResult {
 
 /// Translate our [`pcb::ExitInfo`] into a Linux-shaped `wstatus` word.
 ///
-/// Pure function — split out so the boot self-test can exercise the
-/// three branches (normal / signaled / crashed) without needing a
-/// real reaped child.
+/// A thin adapter over [`crate::proc::pcb::ExitInfo::to_wstatus`], which is
+/// where the encoding lives so the native `SYS_PROCESS_WAIT_STATUS` cannot
+/// drift from `wait4`. Kept as a named function because the boot self-test
+/// below exercises the three branches by this name.
 fn encode_linux_wstatus(info: &crate::proc::pcb::ExitInfo) -> i32 {
-    // Crash: synthesise SIGSEGV.  This is "good enough" for the
-    // common case; a future enhancement could map exception codes
-    // (DivideError → SIGFPE, InvalidOpcode → SIGILL, etc.) by
-    // consulting CrashInfo.exception_code.
-    if info.crash.is_some() {
-        return 11; // SIGSEGV, low 7 bits of wstatus, WIFSIGNALED true
-    }
-    let code = info.exit_code;
-    if (128..=255).contains(&code) {
-        // Killed by signal: kernel convention is exit_code = 128 + sig.
-        
-        (code - 128) & 0x7f
-    } else {
-        // Normal exit: low byte of exit_code lives in bits 8..=15.
-        #[allow(clippy::cast_sign_loss)]
-        let lo = (code as u32) & 0xff;
-        #[allow(clippy::cast_possible_wrap)]
-        let s = (lo << 8) as i32;
-        s
-    }
+    info.to_wstatus()
 }
 
 /// Encode a job-control transition as a Linux `wstatus` word.
 ///
-/// * `Stopped(sig)` → `(sig << 8) | 0x7f` — `WIFSTOPPED` true, `WSTOPSIG`
-///   yields the stop signal.
-/// * `Continued` → `0xffff` — the value `WIFCONTINUED` tests for.
-///
-/// Pure function so the boot self-test can exercise both branches.
+/// A thin adapter over [`crate::proc::pcb::JobControlEvent::to_wstatus`],
+/// which is where the encoding lives so the native `SYS_PROCESS_WAIT_STATUS`
+/// cannot drift from `wait4`/`waitid`: both ABIs report the same kernel
+/// transitions, so both must produce the same bits. Kept as a named function
+/// because the boot self-test below exercises it by this name.
 fn encode_jc_wstatus(ev: &crate::proc::pcb::JobControlEvent) -> i32 {
-    use crate::proc::pcb::JobControlEvent;
-    match ev {
-        JobControlEvent::Stopped(sig) => {
-            #[allow(clippy::cast_possible_wrap)]
-            let s = sig & 0xff;
-            #[allow(clippy::cast_possible_wrap)]
-            let w = ((s << 8) | 0x7f) as i32;
-            w
-        }
-        JobControlEvent::Continued => 0xffff,
-    }
+    ev.to_wstatus()
 }
 
 /// `getppid()` — parent's PID.

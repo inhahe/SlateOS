@@ -1650,6 +1650,44 @@ pub const SYS_PROCESS_GET_INITIAL_FDS: u64 = 518;
 /// Returns: number of entries recorded on success, or negative error.
 pub const SYS_PROCESS_SET_EXEC_FDS: u64 = 1061;
 
+/// POSIX `waitpid`: wait for a child to exit **or** change job-control state,
+/// returning the child's PID and writing a full `wstatus` word.
+///
+/// `arg0`: pid selector, exactly as POSIX `waitpid`:
+///   - `> 0`: that specific child.
+///   - `== -1`: any child.
+///   - `== 0`: any child in the caller's process group.
+///   - `< -1`: any child in process group `-arg0`.
+///
+/// `arg1`: options — `WNOHANG` (1), `WUNTRACED` (2), `WCONTINUED` (8).
+/// Any other bit is `InvalidArgument`.
+///
+/// `arg2`: user `*mut i32` receiving the `wstatus` word (0 = don't write).
+///
+/// Returns the PID whose state changed, `0` when `WNOHANG` was given and
+/// nothing was ready, or a negative error (`NoChildProcess` = ECHILD).
+///
+/// The status encoding is [`crate::proc::pcb::JobControlEvent::to_wstatus`]
+/// for stop/continue and `(exit_code & 0xff) << 8` for a normal exit, i.e.
+/// bit-identical to what the Linux ABI's `wait4` reports for the same event.
+///
+/// ## Why this exists rather than extending `SYS_PROCESS_WAIT`
+///
+/// `SYS_PROCESS_WAIT` (501) returns the *exit code* in `rax`, which has no
+/// room to say "stopped" — every value is a legitimate exit code. It also
+/// cannot grow arguments: its own specific-pid path already refuses to write
+/// `arg1` because callers using a one-argument syscall wrapper leave
+/// unrelated garbage in that register, and an options word or a status
+/// pointer read from `arg1`/`arg2` would have exactly that problem, only
+/// worse — it would be *written through*. A new number is the only way to
+/// add arguments to a syscall whose existing callers do not set them.
+///
+/// `SYS_PROCESS_WAIT`/`SYS_PROCESS_TRY_WAIT` remain for callers that only
+/// need the exit code; all three resolve the pid selector through the same
+/// `wait_pgid_filter`, so they cannot disagree about which children a
+/// non-positive selector names.
+pub const SYS_PROCESS_WAIT_STATUS: u64 = 1063;
+
 /// Retrieve initial argv/envp for the current process.
 ///
 /// Called by the child process's POSIX layer during startup to read

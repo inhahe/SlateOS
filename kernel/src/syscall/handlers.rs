@@ -3835,6 +3835,258 @@ fn reap_any_filtered(
     }
 }
 
+/// What a wait observed. Returned by [`wait_for_child_event`].
+pub enum WaitOutcome {
+    /// A child changed state: its PID and the encoded `wstatus` word.
+    Changed(u64, i32),
+    /// `WNOHANG` was requested and no child was ready.
+    NoHang,
+    /// A deliverable signal arrived before the caller parked. The caller
+    /// must return `restart::restart_result(ERESTARTSYS)`: the
+    /// signal-delivery checkpoint runs the handler and then either restarts
+    /// the wait (`SA_RESTART`) or substitutes `EINTR`.
+    Restart,
+}
+
+/// Poll one specific child for a state change, without blocking.
+///
+/// `Ok(Some(wstatus))` if it exited (reaping it) or has a matching
+/// unconsumed job-control report (consuming the report, not the child).
+/// `Ok(None)` if it is alive with nothing to report. A child that is not
+/// ours, or does not exist, is `NoChildProcess` — POSIX says `waitpid` on a
+/// non-child is ECHILD, not EPERM/ESRCH.
+fn poll_child_event(
+    parent_pid: u64,
+    child_pid: u64,
+    want_stopped: bool,
+    want_continued: bool,
+) -> Result<Option<i32>, KernelError> {
+    use crate::proc::pcb;
+
+    match pcb::try_reap(parent_pid, child_pid) {
+        Ok(Some(info)) => return Ok(Some(info.to_wstatus())),
+        Ok(None) => {}
+        Err(KernelError::PermissionDenied | KernelError::NoSuchProcess) => {
+            return Err(KernelError::NoChildProcess);
+        }
+        Err(e) => return Err(e),
+    }
+    if !(want_stopped || want_continued) {
+        return Ok(None);
+    }
+    match pcb::jc_report_for_child(parent_pid, child_pid, want_stopped, want_continued, true) {
+        Ok(Some(ev)) => Ok(Some(ev.to_wstatus())),
+        Ok(None) => Ok(None),
+        Err(KernelError::PermissionDenied | KernelError::NoSuchProcess) => {
+            Err(KernelError::NoChildProcess)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Poll every eligible child for a state change, without blocking.
+///
+/// The any-child counterpart of [`poll_child_event`]; `pgid_filter`
+/// restricts the scan to one process group (the `waitpid(0)` /
+/// `waitpid(-pgid)` forms). Propagates `NoChildProcess` when the caller has
+/// no eligible children at all.
+fn poll_any_child_event(
+    parent_pid: u64,
+    pgid_filter: Option<u64>,
+    want_stopped: bool,
+    want_continued: bool,
+) -> Result<Option<(u64, i32)>, KernelError> {
+    use crate::proc::pcb;
+
+    if let Some((cpid, info)) = reap_any_filtered(parent_pid, pgid_filter)? {
+        return Ok(Some((cpid, info.to_wstatus())));
+    }
+    if !(want_stopped || want_continued) {
+        return Ok(None);
+    }
+    let jc = match pgid_filter {
+        Some(g) => pcb::jc_report_group(parent_pid, g, want_stopped, want_continued, true),
+        None => pcb::jc_report_any_child(parent_pid, want_stopped, want_continued, true),
+    }?;
+    Ok(jc.map(|(cpid, ev)| (cpid, ev.to_wstatus())))
+}
+
+/// The shared body of every POSIX-shaped wait: `wait4`/`waitpid` on the
+/// Linux ABI and `SYS_PROCESS_WAIT_STATUS` on ours.
+///
+/// This is one implementation rather than two because the two ABIs read the
+/// *same* kernel records — process groups, zombie exit info, job-control
+/// reports — so a program on our own libc and a glibc program waiting on the
+/// same child have to agree about which children the selector names, which
+/// transition is reported first, and what `wstatus` bits describe it. The
+/// two callers differ only in how they map errors and marshal the result.
+///
+/// `pid_arg` uses the POSIX selector encoding (`> 0` a specific child, `-1`
+/// any, `0` the caller's group, `< -1` group `-pid_arg`); `want_stopped` and
+/// `want_continued` are `WUNTRACED` and `WCONTINUED`.
+///
+/// ## Blocking discipline
+///
+/// Both branches register as a waiter *before* the final re-check and park
+/// only after it, so a state change that lands in the gap sets
+/// `pending_wake` and the re-check (or `block_current` itself) sees it —
+/// there is no lost wakeup. A stop or continue wakes the parent through the
+/// waiters `stop_process_for_signal` / `continue_process` collect. The
+/// any-child waiter flag lives on the *parent*, which survives reaping, so
+/// it is cleared on every exit path; the specific-pid flag lives on the
+/// child, which is destroyed when reaped, leaving nothing stale.
+///
+/// The signal-waiter registration around the park is what lets a signal
+/// interrupt the wait; it is bounded to just the park, so no early return
+/// can leak it.
+pub fn wait_for_child_event(
+    parent_pid: u64,
+    task_id: u64,
+    pid_arg: i64,
+    nohang: bool,
+    want_stopped: bool,
+    want_continued: bool,
+) -> Result<WaitOutcome, KernelError> {
+    use crate::proc::{pcb, signal};
+
+    if pid_arg > 0 {
+        #[allow(clippy::cast_sign_loss)]
+        let child_pid = pid_arg as u64;
+        loop {
+            if let Some(ws) = poll_child_event(parent_pid, child_pid, want_stopped, want_continued)?
+            {
+                return Ok(WaitOutcome::Changed(child_pid, ws));
+            }
+            if nohang {
+                return Ok(WaitOutcome::NoHang);
+            }
+            // Only handler-backed signals can be pending-and-deliverable at a
+            // park point (`classify_post` drops no-handler default-ignore
+            // signals and terminates on fatal ones), so a restart can never
+            // spuriously livelock here.
+            let deliverable = !signal::blocked(parent_pid);
+            if signal::has_pending_in_mask(parent_pid, deliverable) {
+                return Ok(WaitOutcome::Restart);
+            }
+            pcb::set_wait_task(child_pid, task_id)?;
+            if let Some(ws) = poll_child_event(parent_pid, child_pid, want_stopped, want_continued)?
+            {
+                return Ok(WaitOutcome::Changed(child_pid, ws));
+            }
+            signal::register_signalfd_waiter(parent_pid, task_id, deliverable);
+            if signal::has_pending_in_mask(parent_pid, deliverable) {
+                signal::deregister_signalfd_waiter(parent_pid, task_id);
+                continue;
+            }
+            sched::block_current();
+            signal::deregister_signalfd_waiter(parent_pid, task_id);
+        }
+    } else {
+        let pgid_filter = wait_pgid_filter(pid_arg, parent_pid);
+        loop {
+            // Registering first means a child that changes state during the
+            // scan below still wakes us. It also reports ECHILD when the
+            // caller has no children at all.
+            if let Err(e) = pcb::set_wait_any_task(parent_pid, task_id) {
+                pcb::clear_wait_any_task(parent_pid, task_id);
+                return Err(e);
+            }
+            let polled =
+                poll_any_child_event(parent_pid, pgid_filter, want_stopped, want_continued);
+            match polled {
+                Ok(Some((cpid, ws))) => {
+                    pcb::clear_wait_any_task(parent_pid, task_id);
+                    return Ok(WaitOutcome::Changed(cpid, ws));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    pcb::clear_wait_any_task(parent_pid, task_id);
+                    return Err(e);
+                }
+            }
+            if nohang {
+                pcb::clear_wait_any_task(parent_pid, task_id);
+                return Ok(WaitOutcome::NoHang);
+            }
+            let deliverable = !signal::blocked(parent_pid);
+            if signal::has_pending_in_mask(parent_pid, deliverable) {
+                pcb::clear_wait_any_task(parent_pid, task_id);
+                return Ok(WaitOutcome::Restart);
+            }
+            signal::register_signalfd_waiter(parent_pid, task_id, deliverable);
+            if signal::has_pending_in_mask(parent_pid, deliverable) {
+                signal::deregister_signalfd_waiter(parent_pid, task_id);
+                continue;
+            }
+            sched::block_current();
+            signal::deregister_signalfd_waiter(parent_pid, task_id);
+        }
+    }
+}
+
+/// `SYS_PROCESS_WAIT_STATUS` — POSIX `waitpid` for the native ABI.
+///
+/// `arg0` is the POSIX pid selector, `arg1` the option bits
+/// (`WNOHANG`/`WUNTRACED`/`WCONTINUED`, Linux values so no ABI remaps them),
+/// and `arg2` an optional user `*mut i32` for the `wstatus` word. Returns
+/// the PID whose state changed, or 0 for a `WNOHANG` miss.
+///
+/// See `number.rs` for why this is a new number rather than more arguments
+/// on `SYS_PROCESS_WAIT`: that syscall returns the exit code in `rax`, which
+/// cannot express "stopped", and its existing callers leave garbage in the
+/// argument registers a new options word would have to read.
+pub fn sys_process_wait_status(args: &SyscallArgs) -> SyscallResult {
+    use crate::syscall::linux::restart;
+
+    // Same option bits as Linux `wait4`, so the value a caller passes means
+    // the same thing whichever ABI it is compiled for.
+    const WNOHANG: u64 = 0x0000_0001;
+    const WUNTRACED: u64 = 0x0000_0002;
+    const WCONTINUED: u64 = 0x0000_0008;
+
+    let options = args.arg1;
+    if options & !(WNOHANG | WUNTRACED | WCONTINUED) != 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let status_ptr = args.arg2;
+    if status_ptr != 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(status_ptr, 4) {
+            return SyscallResult::err(e);
+        }
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
+    let pid_arg = args.arg0 as i64;
+    let parent_pid = caller_pid().unwrap_or(0);
+    let task_id = sched::current_task_id();
+
+    let outcome = wait_for_child_event(
+        parent_pid,
+        task_id,
+        pid_arg,
+        options & WNOHANG != 0,
+        options & WUNTRACED != 0,
+        options & WCONTINUED != 0,
+    );
+    let (child_pid, wstatus) = match outcome {
+        Ok(WaitOutcome::Changed(pid, ws)) => (pid, ws),
+        Ok(WaitOutcome::NoHang) => return SyscallResult::ok(0),
+        Ok(WaitOutcome::Restart) => return restart::restart_result(restart::ERESTARTSYS),
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    if status_ptr != 0 {
+        // SAFETY: validated as a writable user range of i32 size above, and
+        // the address space cannot have changed since — we are still in the
+        // calling process, which was running to make this call.
+        unsafe {
+            core::ptr::write(status_ptr as *mut i32, wstatus);
+        }
+    }
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(child_pid as i64)
+}
+
 /// `SYS_PROCESS_WAIT` — wait for a child process to exit.
 ///
 /// `arg0`: child process ID to wait for, interpreted as a signed value:

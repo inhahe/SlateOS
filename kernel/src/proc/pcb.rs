@@ -158,6 +158,33 @@ pub enum JobControlEvent {
     Continued,
 }
 
+impl JobControlEvent {
+    /// Encode this transition as a POSIX `wstatus` word.
+    ///
+    /// * `Stopped(sig)` → `(sig << 8) | 0x7f` — `WIFSTOPPED` true, and
+    ///   `WSTOPSIG` yields the stop signal.
+    /// * `Continued` → `0xffff` — the value `WIFCONTINUED` tests for.
+    ///
+    /// This lives on the event rather than in a wait syscall because *both*
+    /// ABIs report the same transitions and must encode them identically: a
+    /// program on our own libc and a glibc program observing the same stopped
+    /// child have to see the same `wstatus` bits. `linux.rs`'s `wait4`/`waitid`
+    /// and the native `SYS_PROCESS_WAIT_STATUS` both call it.
+    #[must_use]
+    pub fn to_wstatus(self) -> i32 {
+        match self {
+            Self::Stopped(sig) => {
+                // `sig & 0xff` bounds the shift, so the result always fits in
+                // i32 and the wrap-check lint has nothing left to warn about.
+                #[allow(clippy::cast_possible_wrap)]
+                let w = (((sig & 0xff) << 8) | 0x7f) as i32;
+                w
+            }
+            Self::Continued => 0xffff,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Syscall ABI mode — selects which syscall table interprets the process's
 // `syscall` instructions.
@@ -3869,6 +3896,43 @@ pub struct ExitInfo {
     /// Crash details (exception code, faulting address, etc.).
     /// `None` for normal exits.
     pub crash: Option<CrashInfo>,
+}
+
+impl ExitInfo {
+    /// Encode this termination as a POSIX `wstatus` word.
+    ///
+    /// * Crashed → `11` (SIGSEGV in the low 7 bits, so `WIFSIGNALED`).
+    ///   This is "good enough" for the common case; a future refinement
+    ///   could map exception codes (`DivideError` → SIGFPE, `InvalidOpcode`
+    ///   → SIGILL, …) by consulting [`CrashInfo::exception_code`].
+    /// * Killed by signal → `(exit_code - 128) & 0x7f`, since the kernel
+    ///   convention for a signal death is `exit_code = 128 + sig`.
+    /// * Normal exit → `(exit_code & 0xff) << 8`, so `WIFEXITED` /
+    ///   `WEXITSTATUS`.
+    ///
+    /// Lives here, next to [`JobControlEvent::to_wstatus`], because both
+    /// ABIs must encode the same termination identically — see that
+    /// method's note.
+    #[must_use]
+    pub fn to_wstatus(&self) -> i32 {
+        if self.crash.is_some() {
+            return 11; // SIGSEGV, low 7 bits of wstatus, WIFSIGNALED true.
+        }
+        let code = self.exit_code;
+        if (128..=255).contains(&code) {
+            // The range check above is the proof: `code >= 128`, so the
+            // subtraction cannot underflow.
+            #[allow(clippy::arithmetic_side_effects)]
+            let sig = code - 128;
+            sig & 0x7f
+        } else {
+            #[allow(clippy::cast_sign_loss)]
+            let lo = (code as u32) & 0xff;
+            #[allow(clippy::cast_possible_wrap)]
+            let s = (lo << 8) as i32;
+            s
+        }
+    }
 }
 
 /// Try to reap (wait for) a zombie child process.

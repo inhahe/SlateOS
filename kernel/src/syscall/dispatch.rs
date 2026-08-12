@@ -99,7 +99,7 @@ use super::number::{
     SYS_SIGNAL_PENDING,
     SYS_SIGNAL_STOP_SELF,
     SYS_PROCESS_KILL, SYS_PROCESS_SPAWN, SYS_PROCESS_SPAWN_EX,
-    SYS_PROCESS_TRY_WAIT, SYS_PROCESS_WAIT,
+    SYS_PROCESS_TRY_WAIT, SYS_PROCESS_WAIT, SYS_PROCESS_WAIT_STATUS,
     SYS_SET_EXCEPTION_HANDLER,
     SYS_SHM_CLOSE, SYS_SHM_CREATE, SYS_SHM_MAP, SYS_SHM_SIZE, SYS_SHM_UNMAP,
     SYS_SLEEP, SYS_TASK_ID,
@@ -441,6 +441,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PROCESS_SPAWN as usize] = Some(handlers::sys_process_spawn);
     handlers[SYS_PROCESS_WAIT as usize] = Some(handlers::sys_process_wait);
     handlers[SYS_PROCESS_TRY_WAIT as usize] = Some(handlers::sys_process_try_wait);
+    handlers[SYS_PROCESS_WAIT_STATUS as usize] = Some(handlers::sys_process_wait_status);
     handlers[SYS_PROCESS_ID as usize] = Some(handlers::sys_process_id);
     handlers[SYS_SET_EXCEPTION_HANDLER as usize] = Some(handlers::sys_set_exception_handler);
     handlers[SYS_PROCESS_KILL as usize] = Some(handlers::sys_process_kill);
@@ -800,6 +801,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_process_group_syscalls()?;
     test_dispatch_wait_process_group_filter()?;
     test_dispatch_signal_stop_self_rejects_non_stop_signals()?;
+    test_dispatch_wait_status_reports_job_control()?;
 
     serial_println!("[syscall] Dispatch self-test PASSED");
     Ok(())
@@ -1181,6 +1183,136 @@ fn test_dispatch_wait_process_group_filter() -> KernelResult<()> {
     }
 
     serial_println!("[syscall]   Native wait(-pgid) group filter (matches Linux wait4): OK");
+    Ok(())
+}
+
+/// Verify `SYS_PROCESS_WAIT_STATUS` (1063) reports job-control transitions
+/// to a native-ABI caller, and reports them *only* when asked.
+///
+/// This is the parent half of job control. Without it a program on our own
+/// libc could stop (`SYS_SIGNAL_STOP_SELF`) but nobody could observe the
+/// stop: `SYS_PROCESS_WAIT` returns the exit code in `rax`, so it has no
+/// way to say "stopped", and a parent calling it would simply block until a
+/// child that is parked forever exits.
+///
+/// The `wstatus` *encoding* is not checked here — `arg2` must be a user
+/// address, and the self-test task has none. It is covered by
+/// `linux::test_wstatus_encoding`, which exercises the same
+/// `JobControlEvent::to_wstatus` / `ExitInfo::to_wstatus` this path calls.
+/// What is checked here is everything else: option validation, which
+/// transitions are eligible, that a report is consumed exactly once, and
+/// that a stop does *not* reap.
+///
+/// `record_jc_stopped` / `record_jc_continued` are used directly rather than
+/// `stop_process_for_signal`, because they are pure bookkeeping: the fixture
+/// child has a thread id in its PCB but no scheduler task, so actually
+/// suspending it is neither possible nor what this test is about.
+///
+/// Every process created is destroyed on every exit path.
+fn test_dispatch_wait_status_reports_job_control() -> KernelResult<()> {
+    use crate::proc::pcb;
+
+    // WNOHANG throughout: this runs on the boot thread, and a blocking wait
+    // on a fixture child that has no task to ever exit would never return.
+    const WNOHANG: u64 = 1;
+    const WUNTRACED: u64 = 2;
+    const WCONTINUED: u64 = 8;
+    const SIGTSTP: u32 = 20;
+
+    let mk = |arg0: u64, arg1: u64| SyscallArgs {
+        arg0, arg1, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+
+    fn fail(msg: &str, pids: &[u64]) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: wait_status: {}", msg);
+        for &p in pids {
+            crate::proc::pcb::destroy(p);
+        }
+        Err(KernelError::InternalError)
+    }
+
+    // (a) Option validation runs before anything else, so it needs no
+    //     fixture. WEXITED (4) is a `waitid`-only bit and is not accepted by
+    //     waitpid; a NotSupported here would mean the slot is unregistered.
+    let r = dispatch(SYS_PROCESS_WAIT_STATUS, &mk(1, 4));
+    if r.value == i64::from(KernelError::NotSupported.code()) {
+        return fail("unregistered (NotSupported)", &[]);
+    }
+    if r.value != i64::from(KernelError::InvalidArgument.code()) {
+        return fail("WEXITED should be InvalidArgument for waitpid", &[]);
+    }
+
+    // A child of pid 0 — the process id the bare kernel task running this
+    // self-test reports — so the handler agrees it is ours.
+    let child = pcb::create("waitstatus", 0);
+    let one = [child];
+    if pcb::set_running(child).is_err() || pcb::add_thread(child, 9980).is_err() {
+        return fail("could not start the fixture child", &one);
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
+    let child_i = child as i64;
+    #[allow(clippy::cast_sign_loss)]
+    let child_arg = child_i as u64;
+
+    // (b) Running child, nothing to report → 0, not an error.
+    if dispatch(SYS_PROCESS_WAIT_STATUS, &mk(child_arg, WNOHANG)).value != 0 {
+        return fail("a running child with no transition should be a WNOHANG miss", &one);
+    }
+
+    // (c) A stop the caller did not ask about is invisible. This is the
+    //     check that keeps `WUNTRACED` meaningful: a wait that reported
+    //     stops unconditionally would break every existing caller, which
+    //     expects a return only when the child is *gone*.
+    let _ = pcb::record_jc_stopped(child, SIGTSTP);
+    if dispatch(SYS_PROCESS_WAIT_STATUS, &mk(child_arg, WNOHANG)).value != 0 {
+        return fail("a stop must not be reported without WUNTRACED", &one);
+    }
+
+    // (d) With WUNTRACED it is reported, as the child's pid...
+    if dispatch(SYS_PROCESS_WAIT_STATUS, &mk(child_arg, WNOHANG | WUNTRACED)).value != child_i {
+        return fail("WUNTRACED should report the stopped child", &one);
+    }
+    // ...and reported once: the transition is consumed, not latched.
+    if dispatch(SYS_PROCESS_WAIT_STATUS, &mk(child_arg, WNOHANG | WUNTRACED)).value != 0 {
+        return fail("the same stop must not be reported twice", &one);
+    }
+    // ...and the child is still alive, because a stop is not an exit.
+    if pcb::state(child).is_none() {
+        return fail("reporting a stop must not reap the child", &[]);
+    }
+
+    // (e) The same, for the resume half.
+    let _ = pcb::record_jc_continued(child);
+    if dispatch(SYS_PROCESS_WAIT_STATUS, &mk(child_arg, WNOHANG | WUNTRACED)).value != 0 {
+        return fail("WUNTRACED must not report a continue", &one);
+    }
+    if dispatch(SYS_PROCESS_WAIT_STATUS, &mk(child_arg, WNOHANG | WCONTINUED)).value != child_i {
+        return fail("WCONTINUED should report the resumed child", &one);
+    }
+
+    // (f) Exit still works, and now returns the *pid* rather than the exit
+    //     code — the whole reason this is a separate syscall number.
+    if pcb::set_exit_code(child, 33).is_err() {
+        return fail("could not set the fixture exit code", &one);
+    }
+    match pcb::remove_thread(child, 9980, pcb::ThreadExitAccounting::default()) {
+        Ok((true, _, _)) => {}
+        _ => return fail("the fixture child did not become a zombie", &one),
+    }
+    if dispatch(SYS_PROCESS_WAIT_STATUS, &mk(child_arg, WNOHANG)).value != child_i {
+        return fail("an exited child should be reported by pid", &one);
+    }
+
+    // (g) That reaped it, so the child is gone and the wait is ECHILD —
+    //     the POSIX answer for a pid that is not (or is no longer) ours.
+    if dispatch(SYS_PROCESS_WAIT_STATUS, &mk(child_arg, WNOHANG)).value
+        != i64::from(KernelError::NoChildProcess.code())
+    {
+        return fail("waiting on a reaped child should be NoChildProcess", &[]);
+    }
+
+    serial_println!("[syscall]   wait_status (1063) job-control reporting: OK");
     Ok(())
 }
 

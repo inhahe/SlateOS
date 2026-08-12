@@ -221,6 +221,15 @@ pub extern "C" fn getppid() -> PidT {
 ///
 /// Returns the PID of the child, 0 if WNOHANG and no child changed
 /// state, or -1 on error.
+///
+/// ## Job control
+///
+/// `WUNTRACED` and `WCONTINUED` are honoured, not merely accepted: a child
+/// stopped by `SIGTSTP`/`SIGSTOP` is reported as `WIFSTOPPED` with the
+/// stopping signal in `WSTOPSIG`, and one resumed by `SIGCONT` as
+/// `WIFCONTINUED`, in both cases *without* reaping it. This is what makes a
+/// shell's Ctrl-Z / `fg` / `bg` implementable on our own libc; see
+/// `signal::stop_self` for the other half.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn waitpid(pid: PidT, status: *mut i32, options: i32) -> PidT {
     // Linux semantics (kernel/exit.c::kernel_wait4):
@@ -234,57 +243,49 @@ pub extern "C" fn waitpid(pid: PidT, status: *mut i32, options: i32) -> PidT {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    // Use non-blocking or blocking wait based on options.
-    let sys_nr = if options & WNOHANG != 0 {
-        SYS_PROCESS_TRY_WAIT
-    } else {
-        SYS_PROCESS_WAIT
-    };
 
-    // The kernel writes the reaped child's PID into this slot (arg1).
-    // This is how `waitpid(-1)` learns which child it reaped — the exit
-    // code itself comes back in rax.  Initialised to 0 ("not written").
-    let mut reaped_pid: i32 = 0;
-    let ret = syscall2(
-        sys_nr,
+    // `SYS_PROCESS_WAIT_STATUS` is POSIX-shaped: it returns the pid whose
+    // state changed and writes the whole `wstatus` word, so WNOHANG is an
+    // option bit rather than a second syscall number, and a stop is
+    // expressible at all.  The older `SYS_PROCESS_WAIT`/`SYS_PROCESS_TRY_WAIT`
+    // pair returns the exit *code* in rax, which cannot say "stopped" and
+    // forced this wrapper to synthesise a status — it reported a child killed
+    // by a signal as a normal exit with code 128+sig.
+    //
+    // __WNOTHREAD/__WALL/__WCLONE are accepted here for Linux source
+    // compatibility but not forwarded: the kernel has no clone-vs-fork child
+    // distinction to filter on, and passing an unknown bit would be EINVAL.
+    let kernel_options = options & (WNOHANG | WUNTRACED | WCONTINUED);
+    let mut wstatus: i32 = 0;
+    #[allow(clippy::cast_sign_loss)]
+    let ret = syscall3(
+        SYS_PROCESS_WAIT_STATUS,
         pid as u64,
-        core::ptr::addr_of_mut!(reaped_pid) as u64,
+        kernel_options as u32 as u64,
+        core::ptr::addr_of_mut!(wstatus) as u64,
     );
 
     if ret < 0 {
-        // POSIX: WNOHANG with no child state change returns 0, not -1.
-        // The kernel signals "nothing ready" with WouldBlock (-4).
-        if (options & WNOHANG) != 0 && ret == errno::native::WOULD_BLOCK {
-            return 0;
-        }
         return errno::translate(ret) as PidT;
     }
+    // POSIX: WNOHANG with no child state change returns 0 and writes no
+    // status.  The kernel reports that as a 0 return, so there is nothing to
+    // distinguish here — but the status must be left untouched.
+    if ret == 0 {
+        return 0;
+    }
 
-    // The kernel returns the exit code in rax for blocking wait.
-    // Pack it into a wait status: (exit_code << 8) | 0 (normal exit).
     if !status.is_null() {
-        let exit_code = ret as i32;
-        // SAFETY: Caller guarantees status is valid or null (checked above).
+        // SAFETY: caller guarantees `status` is a valid writable `*mut i32`
+        // or null, and null was just excluded.
         unsafe {
-            #[allow(clippy::arithmetic_side_effects)]
-            let packed = (exit_code & 0xff) << 8;
-            *status = packed;
+            *status = wstatus;
         }
     }
 
-    // Determine which child PID to return.  For a positive pid argument
-    // the caller already knows the child, but for pid <= 0 (wait-for-any)
-    // we rely on the kernel-reported `reaped_pid`.  Fall back to the
-    // last spawned child / 1 only if the kernel did not report one
-    // (e.g. an older kernel that ignores arg1).
-    if pid > 0 {
-        pid
-    } else if reaped_pid > 0 {
-        reaped_pid
-    } else {
-        let child = unsafe { core::ptr::addr_of!(LAST_CHILD_PID).read() };
-        if child > 0 { child } else { 1 }
-    }
+    #[allow(clippy::cast_possible_truncation)]
+    let changed = ret as PidT;
+    changed
 }
 
 /// Wait for any child process (convenience wrapper).

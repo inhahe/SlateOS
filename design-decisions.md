@@ -7302,3 +7302,29 @@ each new conversion: on the target these really are process-wide, and the host
 build diverges. It stays acceptable only for state whose host build exists
 solely to be tested — which is all of `posix`, but would not be true of, say,
 kernel state a host harness is meant to model faithfully.
+
+### The alternative that would have made all of this unnecessary: `--test-threads=1`
+
+Worth writing down because it is the obvious question and the answer is not
+"it's too slow". Running libtest single-threaded fixes every instance of this
+class at once, with no code change and — crucially — **no host/target
+divergence at all**, which is the one real cost of the chosen approach. It was
+measured, not assumed: 20,128 posix tests take **4.14 s** single-threaded
+against 2.2 s parallel. On performance grounds it wins easily.
+
+It was rejected on *enforcement scope*. Cargo has no per-package test-harness
+arguments, so the only way to make it stick is `RUST_TEST_THREADS = "1"` under
+`[env]` in `.cargo/config.toml`, which applies to the entire workspace. CLAUDE.md
+requires concurrency stress tests for every shared data structure in this repo;
+serialising the harness workspace-wide to work around one crate's host-only test
+doubles is the wrong default for a kernel project. And a *convention* — "always
+pass `--test-threads=1` when testing posix" — is not enforcement: the next plain
+`cargo test -p posix` flakes again, which is precisely how this class stayed
+invisible for so long.
+
+If Cargo ever grows per-package harness configuration, this decision should be
+revisited: at that point single-threading is strictly better than 18 cfg'd
+storage modules, and the conversions could be reverted for a net simplification.
+The three already done would still be worth keeping on their own merits (they
+replaced scattered raw `unsafe` with accessors, and deleted a global mutex), but
+the remaining ~15 should not be started if that option becomes available.

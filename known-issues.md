@@ -295,6 +295,63 @@ statics. Do not read this entry as "the posix suite is now deterministic".
 any mutable module-level state in `posix` that tests write must be per-thread on
 host builds — is recorded in design-decisions.md §110.
 
+### TD-POSIX-TEST-SHARED-STATICS-REMAINING-TIER. `cargo test -p posix` is still non-deterministic: ~15 more modules keep test-mutated state in process-globals — 2026-08-12 — 🔴 OPEN
+
+**What.** With the capability, process-group and timer statics converted, 40
+consecutive runs of `cargo test -p posix --target x86_64-pc-windows-gnu` still
+failed **7 times**, each a single test out of 20,128, on six different tests:
+
+| Test | Module |
+|---|---|
+| `resource::tests::setrlimit_cap_phase179::test_setrlimit_phase179_eperm_does_not_mutate_state` | `resource.rs` |
+| `resource::tests::setpriority_cap_phase169::test_setpriority_phase169_workflow_raise_drop_cap_raise_lower` | `resource.rs` |
+| `mman::tests::mlock_cap_phase171::test_mlock2_phase171_rlim_zero_no_cap_eperm` | `mman.rs` (reads `resource.rs`'s rlimits) |
+| `epoll::tests::test_timerfd_settime_bad_fd` | `epoll.rs` / `fdtable.rs` |
+| `stdio::tests::test_popen_register_full_table` | `stdio.rs` |
+| `aio::tests::test_aio_fsync_o_dsync_aio_return_zero` | `aio.rs` |
+
+**Why they are all the same bug.** Every one mutates module-level state that
+libtest's thread-per-test model shares with every concurrent test.
+`test_popen_register_full_table` is the clearest specimen: it calls
+`reset_popen_table()`, fills all `MAX_POPEN` slots, and asserts the next
+registration fails — so any other popen test that registers or resets
+concurrently breaks it, in either direction.
+
+**Scope.** The reliable tell is a per-test reset helper. There are 18, in 17
+modules — every one is a latent instance of this bug:
+
+`aio.rs` `reset_aio_table` · `getopt.rs` `reset_getopt_state` (returns a
+`MutexGuard` — the lock approach §110 rejects) · `linux_aio_abi.rs`
+`reset_aio_state` · `mqueue.rs` `reset_all` · `pthread.rs`
+`reset_cancel_state_and_type` · `pwd.rs` `reset_state` · `resource.rs`
+`reset_global_state` · `semaphore.rs` `reset_named_sems` · `signal.rs`
+`reset_disposition`, `reset_blocked_mask` · `stdio.rs` `reset_popen_table` ·
+`sys_fsuid.rs` `reset_creds` · `sys_personality.rs` `reset_personality` ·
+`sys_timex.rs` `reset_timex_state` · `unistd.rs` `reset_hostid_for_test`
+(plus the three already converted: `process.rs`, `time.rs`, `sys_capability.rs`).
+
+**Fix.** Apply the §110 conversion to each — the work is mechanical and the
+three shapes are already in the tree. `fdtable.rs` needs thought before it is
+touched: nearly every test in the crate opens fds, so converting it is both the
+highest-value change and the one most likely to disturb tests that currently
+lean on fds another test opened.
+
+**Rejected: run the suite single-threaded.** `--test-threads=1` would fix all 18
+at once with no code change and no host/target divergence, and it is not slow —
+measured 4.14 s vs 2.2 s for the 20,128 tests. It was rejected because there is
+no way to make it *stick* per-crate: Cargo has no per-package test-harness args,
+so it would have to be `RUST_TEST_THREADS=1` in `.cargo/config.toml`, which
+applies to the whole workspace. CLAUDE.md requires concurrency stress tests for
+every shared data structure, and serialising the workspace's test harness is the
+wrong default for a kernel repo. A convention ("always pass `--test-threads=1`
+for posix") is not enforcement — the next plain `cargo test -p posix` flakes
+again. See design-decisions.md §110.
+
+**Until then.** A single failing test out of 20,128 in a `posix` run, in one of
+the modules above, is very likely this issue rather than a real regression —
+but *check the test name against this list* before assuming so, and add any new
+name you see.
+
 ### TD-OILS-A-BUILTIN-DOES-NOT-ANSWER-ITS-OWN---HELP. `cd --help` says `--: invalid option` where bash prints the long doc — 2026-08-12 — ✅ FIXED 2026-08-12
 
 **Where:** `userspace/oils/src/interp.rs` — every builtin's own option parser.

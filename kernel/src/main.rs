@@ -2658,6 +2658,18 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // GNU bash 5.2 compiled for this OS and linked against OUR libc.a (not
+    // glibc): a ~5.3 MiB static C program whose every library call lands in
+    // posix/src. The dash tests around it prove our loader/syscalls against
+    // glibc; this one proves our libc itself. No-op without rootfs.ext4 /
+    // /bin/bash (built by scripts/bash-spike/). See open-questions.md Q41.
+    if let Err(e) = proc::spawn::self_test_bash_on_slateos_libc() {
+        serial_println!(
+            "WARNING: GNU bash on SlateOS libc self-test failed: {:?}",
+            e
+        );
+    }
+
     // Path Z: the full shell-orchestration proof — dash forks + exec's an
     // EXTERNAL real-glibc binary (/bin/emit) with output redirection. Proves
     // dash parses `cmd > file`, fork()s, the child redirects fd 1 + execve()s

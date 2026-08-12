@@ -4867,6 +4867,20 @@ Tracking: open-questions.md Q26.
 > remains — `posix/src/signal.rs:572` has no kernel suspend mechanism, so bash's
 > job control cannot work yet — but the rationale must no longer be read as
 > current. Raised by the operator; now **open-questions.md Q41**.
+>
+> **Follow-up, same day — measured, not argued.** The operator authorised a
+> spike (`scripts/bash-spike/`). **GNU bash 5.2 now boots and runs on SlateOS**:
+> cross-compiled with `zig cc`, linked statically against
+> `toolchain/sysroot/lib/libc.a` with **zero undefined symbols and no shims**,
+> and exercised by `self_test_bash_on_slateos_libc` in
+> `kernel/src/proc/spawn.rs` on a script using arrays, `${v,,}`, `$(( ** ))`
+> and brace expansion — constructs dash lacks, so no `/bin/sh` fallback can
+> explain the result. Closing the gap took exactly three small additions to
+> `posix/src`: `killpg`, `eaccess`/`euidaccess`, `__fpurge`. The prerequisite
+> objection is therefore not merely stale but comprehensively so:
+> **feasibility is settled and is no longer an input to Q41**, which is now
+> purely a scope/ownership question — keep osh, switch to bash, or keep both
+> and use bash as a differential oracle running on SlateOS itself.
 
 ## 73. YSH port strategy — **defer YSH; obtain it by cross-compiling genuine Oils once a C++/slateos toolchain exists, NOT by hand-porting or auto-translating**
 

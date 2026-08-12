@@ -1122,6 +1122,36 @@ pub extern "C" fn fflush(stream: *mut u8) -> i32 {
     file_flush(file)
 }
 
+/// Discard a stream's buffered data **without** writing it out (`stdio_ext.h`).
+///
+/// The deliberate opposite of [`fflush`]: where `fflush` commits pending
+/// output, `__fpurge` throws it away.  A Solaris extension that glibc and musl
+/// both provide; GNU bash calls it in its `fork()` child paths so the child
+/// cannot re-emit output the parent has already buffered but not yet written
+/// (without this, that output appears twice — once from each process).
+///
+/// Both directions are reset, matching glibc:
+/// - write direction: buffered bytes are dropped, never `write(2)`n;
+/// - read direction: read-ahead is dropped, so the next read re-fetches from
+///   the fd;
+/// - any `ungetc` pushback is dropped as well.
+///
+/// `NULL` maps to stdin via [`stream_to_file`], the same convention every other
+/// entry point here uses.  Returns nothing and cannot fail — there is no
+/// syscall to fail, which is the whole point of the function.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn __fpurge(stream: *mut u8) {
+    let file = stream_to_file(stream);
+    // SAFETY: stream_to_file returns a pointer to one of the static stream
+    // Files or to a live heap File from fopen; either way it is valid and
+    // uniquely borrowed for the duration of this call, exactly as in fseek.
+    let f = unsafe { &mut *file };
+    f.buf_pos = 0;
+    f.buf_len = 0;
+    f.buf_dir = BUF_DIR_IDLE;
+    f.ungetc_byte = -1;
+}
+
 // ---------------------------------------------------------------------------
 // Seeking
 // ---------------------------------------------------------------------------
@@ -2174,6 +2204,72 @@ mod tests {
         assert_eq!(f.buf_mode, BUF_MODE_FULL);
         assert_eq!(f.flags, 0);
         assert_eq!(f.ungetc_byte, -1, "no pushed-back byte initially");
+    }
+
+    // -----------------------------------------------------------------------
+    // __fpurge
+    // -----------------------------------------------------------------------
+    //
+    // The defining property is what __fpurge does NOT do: unlike fflush it
+    // must never write buffered bytes out.  These drive a File directly
+    // rather than through a real fd, so a stray write(2) would be a test
+    // failure anyway — what is asserted here is that all four pieces of
+    // buffer state are reset in both directions.
+
+    #[test]
+    fn test_fpurge_discards_pending_write_data() {
+        let mut f = File::new(42, BUF_MODE_FULL);
+        f.buf_dir = BUF_DIR_WRITE;
+        f.buf_pos = 128;
+        f.buf[0] = b'X';
+        __fpurge(core::ptr::addr_of_mut!(f).cast::<u8>());
+        assert_eq!(f.buf_pos, 0, "buffered write bytes must be dropped");
+        assert_eq!(f.buf_dir, BUF_DIR_IDLE, "direction must reset to idle");
+    }
+
+    #[test]
+    fn test_fpurge_discards_read_ahead() {
+        let mut f = File::new(42, BUF_MODE_FULL);
+        f.buf_dir = BUF_DIR_READ;
+        f.buf_len = 512;
+        f.buf_pos = 100;
+        __fpurge(core::ptr::addr_of_mut!(f).cast::<u8>());
+        assert_eq!(f.buf_len, 0, "read-ahead must be dropped");
+        assert_eq!(f.buf_pos, 0, "read cursor must reset");
+        assert_eq!(f.buf_dir, BUF_DIR_IDLE);
+    }
+
+    #[test]
+    fn test_fpurge_drops_ungetc_pushback() {
+        // A pushed-back byte is buffered data too, so it goes as well —
+        // otherwise the next read would return a byte from before the purge.
+        let mut f = File::new(42, BUF_MODE_FULL);
+        f.ungetc_byte = i16::from(b'Z');
+        __fpurge(core::ptr::addr_of_mut!(f).cast::<u8>());
+        assert_eq!(f.ungetc_byte, -1, "pushback must be dropped");
+    }
+
+    #[test]
+    fn test_fpurge_leaves_fd_and_mode_alone() {
+        // __fpurge touches buffer state only: it is not a close, and it does
+        // not change how the stream is buffered afterwards.
+        let mut f = File::new(42, BUF_MODE_LINE);
+        f.buf_dir = BUF_DIR_WRITE;
+        f.buf_pos = 64;
+        __fpurge(core::ptr::addr_of_mut!(f).cast::<u8>());
+        assert_eq!(f.fd, 42, "fd must be untouched");
+        assert_eq!(f.buf_mode, BUF_MODE_LINE, "buffering mode must be untouched");
+    }
+
+    #[test]
+    fn test_fpurge_is_idempotent_on_an_idle_stream() {
+        let mut f = File::new(42, BUF_MODE_FULL);
+        __fpurge(core::ptr::addr_of_mut!(f).cast::<u8>());
+        __fpurge(core::ptr::addr_of_mut!(f).cast::<u8>());
+        assert_eq!(f.buf_pos, 0);
+        assert_eq!(f.buf_len, 0);
+        assert_eq!(f.buf_dir, BUF_DIR_IDLE);
+        assert_eq!(f.ungetc_byte, -1);
     }
 
     #[test]

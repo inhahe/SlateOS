@@ -21941,6 +21941,194 @@ pub fn self_test_linux_real_glibc_redirin() -> KernelResult<()> {
     Ok(())
 }
 
+/// GNU **bash 5.2**, compiled from source for this OS and linked against
+/// **our own `libc.a`**, runs a script and writes its result to a file.
+///
+/// This is categorically different from the `dash`/`make`/`tcc` tests below
+/// and above.  Those run *stock Ubuntu glibc binaries*: the code under test is
+/// our ELF loader, our `ld.so` support and our syscall layer, but the libc
+/// they call is glibc's.  This binary is statically linked against
+/// `toolchain/sysroot/lib/libc.a` — the POSIX layer in `posix/src` — so every
+/// library call bash makes lands in *our* code.  At ~5.3 MiB of C exercising
+/// string handling, memory, stdio, `fork`/`exec`/`wait`, signals and file I/O,
+/// it is by a wide margin the largest single consumer our libc has faced.
+///
+/// The script deliberately uses constructs dash does not have — arrays,
+/// `${#a[@]}`, case modification `${v,,}`, the `**` arithmetic operator and
+/// brace expansion — so a passing run cannot be explained by a `/bin/sh`
+/// fallback quietly handling the script instead.
+///
+/// Background: `design-decisions.md` §72 rejected cross-compiling a real shell
+/// because no C → `x86_64-slateos` toolchain existed.  That ceased to be true
+/// on 2026-07-21/22 (see `open-questions.md` Q41 and `scripts/bash-spike/`).
+/// Whether bash *replaces* `userspace/oils` is an open scope question for the
+/// operator; this test exists to keep the answer grounded in a booting
+/// artifact rather than in argument.
+///
+/// No-op (returns `Ok(())`) when the rootfs / `/bin/bash` is absent, so a
+/// checkout that has never run `scripts/bash-spike/` still boots green.
+///
+/// # Errors
+///
+/// Returns [`KernelError::InternalError`] if bash exits non-zero or the file
+/// it wrote does not match; [`KernelError::TimedOut`] if it never reaches
+/// `Zombie`; propagates spawn failure.
+pub fn self_test_bash_on_slateos_libc() -> KernelResult<()> {
+    const EXPECT_EXIT: i32 = 0;
+    // Emitted by the script below, in order: an array length + element, an
+    // uppercased parameter expansion, an arithmetic expansion, and a brace
+    // expansion. None of these exist in dash.
+    const EXPECT_OUT: &[u8] = b"n=3 mid=beta\nSHOUT=slateos\n1024\nx1 x2 x3\nSLATE_BASH_OK\n";
+
+    const SRC_BASH: &str = "/mnt/bin/bash";
+    const DST_BASH: &str = "/bin/bash";
+    const OUT_PATH: &str = "/bash-out.txt";
+    // bash does substantially more startup work than dash (locale tables, a
+    // much larger builtin/variable table, its own memory allocator setup), and
+    // it is doing all of it against our libc, so allow 4x dash's budget.
+    const MAX_YIELDS: usize = 1_048_576;
+
+    if !crate::fs::Vfs::exists(SRC_BASH) {
+        return Ok(());
+    }
+
+    serial_println!(
+        "[spawn] Running GNU bash 5.2 linked against OUR libc.a (ring 3) test..."
+    );
+
+    let _ = crate::fs::Vfs::mkdir_all("/bin");
+    // Statically linked, so unlike the dash test there is no ld.so or libc.so
+    // to stage alongside it — the binary is self-contained.
+    match crate::fs::Vfs::read_file(SRC_BASH) {
+        Ok(bytes) => {
+            serial_println!("[spawn]   bash: staging {} bytes -> {}", bytes.len(), DST_BASH);
+            if let Err(e) = crate::fs::Vfs::write_file(DST_BASH, &bytes) {
+                serial_println!(
+                    "[spawn]   bash: SKIP (staging {} -> {} failed: {:?})",
+                    SRC_BASH, DST_BASH, e
+                );
+                return Ok(());
+            }
+        }
+        Err(e) => {
+            serial_println!("[spawn]   bash: SKIP (reading {} failed: {:?})", SRC_BASH, e);
+            return Ok(());
+        }
+    }
+
+    let exe_elf = match crate::fs::Vfs::read_file(DST_BASH) {
+        Ok(b) => b,
+        Err(e) => {
+            serial_println!("[spawn]   bash: SKIP (re-read {} failed: {:?})", DST_BASH, e);
+            return Ok(());
+        }
+    };
+
+    // Clear any stale output so a read-back can only succeed if THIS run
+    // wrote it.
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    let argv: &[&[u8]] = &[
+        b"/bin/bash",
+        b"-c",
+        // The `{ ...; } > file` group redirection is bash's own work: it
+        // open(2)s the target, dup2s it over fd 1 for the group, and restores
+        // fd 1 afterwards — all through our libc.
+        b"{ a=(alpha beta gamma); echo \"n=${#a[@]} mid=${a[1]}\"; \
+          v=SlateOS; echo \"SHOUT=${v,,}\"; \
+          echo $(( 2 ** 10 )); \
+          echo x{1..3}; \
+          echo SLATE_BASH_OK; } > /bash-out.txt",
+    ];
+    let envp: &[&[u8]] = &[b"PATH=/bin", b"LANG=C"];
+    let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-bash",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: Some(DST_BASH.as_bytes()),
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: bash spawn returned {:?} — our ELF loader could not \
+                 start a static binary linked against our own libc",
+                e
+            );
+            return Err(e);
+        }
+    };
+
+    let mut reaped = false;
+    for _ in 0..MAX_YIELDS {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            reaped = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    let written = crate::fs::Vfs::read_file(OUT_PATH);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+    let _ = crate::fs::Vfs::remove(OUT_PATH);
+
+    if !reaped || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: bash did not exit within {} yields (state={:?}) — it hung \
+             somewhere in our libc during startup or while running the script",
+            MAX_YIELDS, state
+        );
+        return Err(KernelError::TimedOut);
+    }
+
+    if exit_code != Some(EXPECT_EXIT) {
+        serial_println!(
+            "[spawn]   FAIL: bash exit code={:?}, expected {}",
+            exit_code, EXPECT_EXIT
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    match written {
+        Ok(bytes) if bytes.as_slice() == EXPECT_OUT => {
+            serial_println!(
+                "[spawn]   GNU bash 5.2 on our own libc.a (ring 3: static ELF, no glibc \
+                 and no ld.so; arrays, parameter/arithmetic/brace expansion and its own \
+                 `>` redirection all ran against posix/src; read back {} bytes == \
+                 expected, exit {}): OK",
+                bytes.len(), EXPECT_EXIT
+            );
+            Ok(())
+        }
+        Ok(bytes) => {
+            serial_println!(
+                "[spawn]   FAIL: bash wrote {} bytes {:?}, expected {:?}",
+                bytes.len(), bytes.as_slice(), EXPECT_OUT
+            );
+            Err(KernelError::InternalError)
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: reading bash's output file back failed: {:?}",
+                e
+            );
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
 /// Path Z Part 10: run an **unmodified, prebuilt POSIX shell** (`dash`)
 /// that performs an output redirection itself.
 ///

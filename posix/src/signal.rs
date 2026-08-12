@@ -901,6 +901,40 @@ pub extern "C" fn kill(pid: i32, sig: i32) -> i32 {
     }
 }
 
+/// Send a signal to every process in a process group (POSIX `killpg`).
+///
+/// Defined by POSIX as exactly `kill(-pgrp, sig)`, and implemented that way so
+/// there is one code path to keep correct rather than two.  `pgrp == 0` means
+/// the caller's own process group.
+///
+/// Because [`kill`] reports `ENOSYS` for every `pid <= 0` (process groups are
+/// not implemented — see its docs), this currently fails with `ENOSYS` for all
+/// inputs except the `EINVAL` case below.  It exists as a real symbol anyway:
+/// GNU bash references `killpg` from its job-control code, so the symbol must
+/// resolve at link time even on a build where job control cannot work.  Once
+/// process groups land in the kernel, `kill` gains the capability and this
+/// function inherits it unchanged.
+///
+/// Errors (Linux-matching):
+/// * `EINVAL` — `sig` is not a valid signal number, or `pgrp` is negative
+///   (a negative process *group* is nonsense; without this check the negation
+///   below would silently turn it into a positive per-process `kill`).
+/// * `ENOSYS` — process groups are not yet supported.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn killpg(pgrp: i32, sig: i32) -> i32 {
+    if pgrp < 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // `0i32.checked_neg()` is trivially Some, and pgrp > 0 negates safely for
+    // every i32 except i32::MIN, which pgrp < 0 already rejected.
+    let Some(target) = pgrp.checked_neg() else {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    };
+    kill(target, sig)
+}
+
 /// Send a signal to the calling process / calling thread.
 ///
 /// POSIX `raise(sig)`:
@@ -2624,6 +2658,73 @@ mod tests {
         let ret = kill(-5, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // -- killpg ------------------------------------------------------------
+    //
+    // killpg is defined by POSIX as exactly `kill(-pgrp, sig)`, so these
+    // assert the delegation and the one check killpg makes on its own
+    // behalf.  The ENOSYS results are inherited from `kill`, which rejects
+    // every pid <= 0 (process groups are a kernel gap — see
+    // TD-POSIX-PROCESS-GROUPS-ARE-FAKE-FOR-NATIVE-ABI-PROGRAMS in
+    // known-issues.md).  When that is fixed these become delivery tests
+    // rather than ENOSYS tests.
+
+    #[test]
+    fn test_killpg_negative_group_is_einval() {
+        // A negative process *group* is nonsense.  killpg must reject it
+        // itself: without this check the negation would turn -5 into +5 and
+        // silently signal process 5 instead of failing.
+        crate::errno::set_errno(0);
+        let ret = killpg(-5, 15);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_killpg_i32_min_is_einval_not_a_negation_overflow() {
+        // i32::MIN has no positive counterpart; it is caught by the pgrp < 0
+        // gate before checked_neg can be reached, so this can never panic in
+        // debug or wrap in release.
+        crate::errno::set_errno(0);
+        let ret = killpg(i32::MIN, 15);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_killpg_zero_means_own_group_and_delegates_to_kill() {
+        // pgrp == 0 negates to 0, which `kill` treats as "the caller's own
+        // process group" and currently rejects with ENOSYS.
+        crate::errno::set_errno(0);
+        let ret = killpg(0, 15);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_killpg_positive_group_delegates_to_kill() {
+        // The normal case: killpg(7, sig) becomes kill(-7, sig), which lands
+        // in kill's ProcessGroup arm.
+        crate::errno::set_errno(0);
+        let ret = killpg(7, 15);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_killpg_invalid_signal_is_rejected_as_einval_not_enosys() {
+        // Signal validation is `kill`'s job and killpg must not bypass it.
+        // `kill` checks the signal number BEFORE classifying the target, so a
+        // bad signal reports EINVAL even though the group target would also
+        // have failed with ENOSYS. That ordering is what Linux does and it is
+        // the more useful diagnostic — "your signal is wrong" rather than
+        // "process groups are unimplemented" — so pin it here: if the two
+        // checks were ever reordered this test would catch it.
+        crate::errno::set_errno(0);
+        let ret = killpg(7, 9999);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]

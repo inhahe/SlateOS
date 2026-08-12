@@ -32,28 +32,15 @@ pcomplete.o pcomplib.o syntax.o xmalloc.o signames.o"
 # `__rustc::rust_begin_unwind`. That costs us nothing here: the symbol survey
 # found exactly one bash symbol served only by libstubs.a (killpg), and libc.a
 # turns out to cover even that.
-# Measurement shim. SlateOS's libc covers all but three of bash's references;
-# these stand in so the link completes and we can see whether anything ELSE is
-# missing behind them. They are the spike's instrument, not the fix — the fix
-# is to implement all three in posix/src and rebuild libc.a.
-cat > /tmp/slate_shim.c <<'SHIM'
-#include <signal.h>
-#include <unistd.h>
-#include <stdio.h>
-/* POSIX; SlateOS libc has kill() but not the process-group wrapper. */
-int killpg(pid_t pgrp, int sig) { return kill(-pgrp, sig); }
-/* glibc extension: access() using the EFFECTIVE uid. bash uses it to decide
-   whether a file is executable. Approximated with access() here; a real
-   implementation must consult euid/egid. */
-int eaccess(const char *path, int mode) { return access(path, mode); }
-/* Solaris/glibc stdio_ext: discard buffered data without flushing it. bash
-   calls it when abandoning output after a fork. Needs stdio internals to do
-   properly. */
-void __fpurge(FILE *stream) { (void)stream; }
-SHIM
-/tmp/zigcc -c /tmp/slate_shim.c -o /tmp/slate_shim.o || exit 1
-
-/tmp/zigcc -static -nostdlib -o bash-slateos $OBJS /tmp/slate_shim.o \
+#
+# NO SHIM. The first run of this script had to stand in for killpg, eaccess and
+# __fpurge — the only three of bash's 2,030 referenced symbols SlateOS's libc
+# did not provide. All three are now implemented for real in posix/src
+# (signal.rs, file.rs, stdio.rs respectively), so bash links against our libc
+# and nothing else. If this fails to find them, re-run
+# toolchain/build-sysroot.ps1; scripts/bash-spike/checksyms.sh confirms they
+# are present in the archive.
+/tmp/zigcc -static -nostdlib -o bash-slateos $OBJS \
     -L./builtins -L./lib/glob -L./lib/tilde -L./lib/sh -L./lib/readline \
     -lbuiltins -lglob -lsh -ltilde -lhistory \
     /tmp/slate-sysroot/libc.a /tmp/slate-sysroot/libc.a \

@@ -208,7 +208,19 @@ have limits?" question from the other side.
 **Meanwhile.** Nothing is blocked; osh work continues and is green (642/642).
 
 **Spike results (2026-08-12, operator authorised option A).** Scripts live in
-`build/spike/`. Measured, not estimated:
+`scripts/bash-spike/` (see its README); artifacts land in the gitignored
+`build/spike/`. Measured, not estimated — and the headline is that **it works**:
+
+> **GNU bash 5.2 now boots and runs on SlateOS**, as a 5,349,720-byte static
+> ELF linked against `toolchain/sysroot/lib/libc.a` — our own POSIX layer, not
+> glibc, with **zero undefined symbols and no shims**. The kernel self-test
+> `self_test_bash_on_slateos_libc` (`kernel/src/proc/spawn.rs`) runs a script
+> using arrays, `${#a[@]}`, `${v,,}`, `$(( ** ))` and brace expansion — none of
+> which dash has, so the result cannot be a `/bin/sh` fallback — with bash
+> doing its own `{ …; } > file` redirection. Exit 0, 55 bytes byte-exact.
+> Boot is green.
+
+The detail:
 
 - **bash 5.2 builds.** A native build succeeded first (4,501,576-byte binary),
   proving the source tree is sound. A cross-configure/cross-compile with
@@ -227,25 +239,44 @@ have limits?" question from the other side.
   `__isoc23_strtoumax` — musl doesn't need these), 1 linker symbol
   (`_GLOBAL_OFFSET_TABLE_`), and **5 genuinely missing, all trivial**:
   `arc4random`, `eaccess`, `getservent`, `setservent`, `endservent`.
-- **Stub quality is not the problem either.** Exactly **one** bash symbol is
+- **Stub quality is not the problem either.** Exactly **one** bash symbol was
   served only by `libstubs.a`: `killpg`. There are 1,299 `ENOSYS` sites in
   `posix/src`, but they cluster in aio/crypt/dirent/epoll — subsystems bash
   never calls.
+- **Linking against our own `libc.a` left exactly three real gaps**, since
+  closed for real in `posix/src` (not shimmed): `killpg` (`signal.rs`),
+  `eaccess`/`euidaccess` (`file.rs`), `__fpurge` (`stdio.rs`).
 - **The one real blocker is unchanged and is a kernel gap, not a libc gap:**
   `posix/src/signal.rs:572`, no kernel suspend ⇒ no `SIGTSTP`/`SIGCONT` ⇒ no
-  Ctrl-Z / `fg` / `bg`. This constrains osh identically.
+  Ctrl-Z / `fg` / `bg`; and no process groups, so `killpg` can only return
+  `ENOSYS`. **This constrains osh identically** — it is not an argument for
+  either side.
 
-So the honest verdict is that §72's prerequisite objection is not merely stale,
-it is *comprehensively* stale: C bash is ~5 trivial libc functions away from
-linking against SlateOS's own sysroot. That does **not** by itself argue for
-option C — the case for B (osh is done, works today, and is byte-exact) is
-about sunk value and the missing dynamic linker, not about feasibility. But the
-decision should now be made on those grounds, not on "we can't build C".
+So §72's prerequisite objection is not merely stale, it is *comprehensively*
+stale: C bash was three small libc functions from running on this OS, and now
+does. **Feasibility is settled and is no longer an input to this decision.**
+
+That does not make the answer C. What the spike changes is *which* arguments
+are live. Still-valid reasons to keep osh (option B): 138k lines already
+written and byte-exact at 642/642; it is ours to debug and extend, whereas bash
+is 40-year-old C we would be maintaining a fork of; and a real bash still
+cannot do job control here. Still-valid reasons to switch (option C): fidelity
+stops being an unbounded chase with no stopping criterion — which is the actual
+concern the operator raised — and every future corpus case is one we no longer
+have to write. **A hybrid is now also on the table and was not before:** ship
+osh as the shell and keep the cross-compiled bash as a differential oracle that
+runs *on SlateOS itself*, which would remove the Linux-reference-bash
+dependency from `scripts/osh-bash-diff.py` entirely.
+
+**Still open, and now purely a scope/ownership call:** B, C, or the hybrid.
 
 **Where it bites.** `design-decisions.md` §72 (its "How to reverse" clause and
 the now-stale prerequisite claim), `userspace/oils/` (all of it),
 `posix/src/signal.rs:572` (the suspend gap), `toolchain/sysroot/lib/libc.a`,
-and fastpy's `compiler/toolchain.py` (`SLATEOS_TARGET`, `_find_zig_cc`).
+fastpy's `compiler/toolchain.py` (`SLATEOS_TARGET`, `_find_zig_cc`),
+`scripts/bash-spike/` (the spike, kept reproducible),
+`scripts/create-ext4-rootfs.sh` (stages `/bin/bash`, best-effort) and
+`kernel/src/proc/spawn.rs::self_test_bash_on_slateos_libc`.
 
 
 ---

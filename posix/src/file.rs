@@ -2153,6 +2153,38 @@ pub extern "C" fn faccessat(dirfd: i32, path: *const u8, mode: i32, flags: i32) 
     access(full.as_ptr(), mode)
 }
 
+/// Check file accessibility using the **effective** uid/gid rather than the
+/// real ones (`eaccess`, glibc/musl extension; also spelled `euidaccess`).
+///
+/// `access(2)` deliberately asks "could the *real* user do this?", which is the
+/// wrong question for a set-uid program deciding whether it can itself open a
+/// file.  GNU bash uses `eaccess` throughout `findcmd.c` to decide whether a
+/// `$PATH` candidate is executable, and for the `test -r/-w/-x` builtin.
+///
+/// Equivalent to `faccessat(AT_FDCWD, path, mode, AT_EACCESS)`.
+///
+/// Note this currently gives the same answer as [`access`]: that function has
+/// no permission system to consult and reports existence only (see its docs),
+/// so real and effective IDs cannot yet diverge.  Routing through
+/// `faccessat`'s `AT_EACCESS` path rather than hard-coding the equivalence
+/// means this becomes correct for free once permission checking lands, instead
+/// of silently staying wrong.
+///
+/// Returns 0 if accessible, −1 on error (errno set).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn eaccess(path: *const u8, mode: i32) -> i32 {
+    faccessat(AT_FDCWD, path, mode, AT_EACCESS)
+}
+
+/// `euidaccess` — the other name glibc exports the same function under.
+///
+/// Provided because different programs reach for different spellings, and both
+/// must resolve when statically linking.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn euidaccess(path: *const u8, mode: i32) -> i32 {
+    eaccess(path, mode)
+}
+
 // ---------------------------------------------------------------------------
 // *at() functions
 // ---------------------------------------------------------------------------
@@ -8721,6 +8753,80 @@ mod tests {
             crate::fcntl::R_OK | crate::fcntl::W_OK | crate::fcntl::X_OK,
         );
         assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- eaccess / euidaccess ----------------------------------------------
+    //
+    // eaccess asks access()'s question against the EFFECTIVE uid.  It routes
+    // through faccessat(AT_FDCWD, …, AT_EACCESS) rather than hard-coding the
+    // equivalence to access(), so it inherits that path's validation now and
+    // real permission checking later.  These assert the validation is not
+    // bypassed and that both spellings behave identically.
+
+    #[test]
+    fn test_eaccess_rejects_out_of_range_mode_bits() {
+        // Anything outside R_OK|W_OK|X_OK is EINVAL, same as access().
+        crate::errno::set_errno(0);
+        let ret = eaccess(b"/nonexistent_xyz\0".as_ptr(), 0x40);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_eaccess_null_path_is_efault() {
+        crate::errno::set_errno(0);
+        let ret = eaccess(core::ptr::null(), crate::fcntl::F_OK);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_eaccess_accepts_every_valid_mode() {
+        crate::errno::set_errno(0);
+        let _ret = eaccess(
+            b"/nonexistent_xyz\0".as_ptr(),
+            crate::fcntl::R_OK | crate::fcntl::W_OK | crate::fcntl::X_OK,
+        );
+        assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_euidaccess_is_the_same_function_under_the_other_name() {
+        // glibc exports both spellings; programs reach for either, so both
+        // must resolve AND agree.
+        for mode in [
+            crate::fcntl::F_OK,
+            crate::fcntl::R_OK,
+            crate::fcntl::W_OK,
+            crate::fcntl::X_OK,
+            0x40, // invalid, to compare the error path too
+        ] {
+            crate::errno::set_errno(0);
+            let a = eaccess(b"/nonexistent_xyz\0".as_ptr(), mode);
+            let a_errno = crate::errno::get_errno();
+            crate::errno::set_errno(0);
+            let b = euidaccess(b"/nonexistent_xyz\0".as_ptr(), mode);
+            let b_errno = crate::errno::get_errno();
+            assert_eq!(a, b, "return differs for mode {mode:#x}");
+            assert_eq!(a_errno, b_errno, "errno differs for mode {mode:#x}");
+        }
+    }
+
+    #[test]
+    fn test_eaccess_agrees_with_faccessat_at_eaccess() {
+        // eaccess is *defined* as this call; if the two ever diverge the
+        // delegation has been broken.
+        for mode in [crate::fcntl::F_OK, crate::fcntl::R_OK, 0x40] {
+            crate::errno::set_errno(0);
+            let via_eaccess = eaccess(b"/nonexistent_xyz\0".as_ptr(), mode);
+            let e1 = crate::errno::get_errno();
+            crate::errno::set_errno(0);
+            let via_faccessat =
+                faccessat(AT_FDCWD, b"/nonexistent_xyz\0".as_ptr(), mode, AT_EACCESS);
+            let e2 = crate::errno::get_errno();
+            assert_eq!(via_eaccess, via_faccessat, "return differs for mode {mode:#x}");
+            assert_eq!(e1, e2, "errno differs for mode {mode:#x}");
+        }
     }
 
     #[test]

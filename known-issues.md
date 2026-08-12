@@ -43,6 +43,65 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
+### TD-POSIX-PROCESS-GROUPS-ARE-FAKE-FOR-NATIVE-ABI-PROGRAMS. Our own libc keeps a userspace-only PGID and reports `ENOSYS` for `kill(-pgid)`, while the kernel has had real process groups since 2026-06-20 — 2026-08-12
+
+**Where:** `posix/src/process.rs:590` (`setpgid`) and `posix/src/signal.rs:845`
+(`kill`, the `KillTarget::ProcessGroup` arm).
+
+**The divergence.** The kernel implements process groups properly and has since
+2026-06-20 (see `todo.txt:9650`): `pcb` carries real `pgid`/`sid`, groups are
+inherited across `fork`, `kill_process_group` in `kernel/src/syscall/linux.rs`
+mirrors Linux's `kill_pgrp_info` exactly (resolve membership first, empty group
+→ `ESRCH` *before* signal validation, `sig == 0` as an existence probe, succeed
+if any delivery succeeded), and `wait4`/`waitid(P_PGID)` filter by group.
+
+None of that is reachable from a program linked against **our** libc:
+
+- `posix::setpgid` writes a `static mut OUR_PGID` in userspace and returns 0.
+  It never tells the kernel. `setpgid(child, …)` on another process
+  "succeeds silently" without doing anything at all.
+- `posix::kill` short-circuits every `pid <= 0` to `ENOSYS` before issuing any
+  syscall, so `kill(0, sig)`, `kill(-pgid, sig)` and therefore `killpg` cannot
+  work.
+
+**Why it has been invisible.** The kernel's group logic lives behind the
+**Linux** syscall ABI (`nr::SETPGID`, `nr::KILL` → `dispatch_linux`), and
+`AbiMode` is per-process (`kernel/src/proc/pcb.rs:172`) — a process is Native
+*or* Linux, never both. Every binary that has exercised process groups so far
+(dash, make, tcc) is a stock glibc binary running in `AbiMode::Linux`, so it
+gets the real implementation. Programs linked against `posix/src` run
+`AbiMode::Native` and get the fake one. The two have simply never been
+compared.
+
+**How it surfaced.** Cross-compiling GNU bash against our `libc.a`
+(`scripts/bash-spike/`) required `killpg`, which bash's job-control code
+references. It is now implemented in `posix/src/signal.rs` as POSIX defines it
+— `kill(-pgrp, sig)` — and is therefore correct, but can only ever return
+`ENOSYS` until this is fixed.
+
+**Reproduce.** From any Native-ABI program: `setpgid(0, 0)` then `getpgid(0)`
+agree with each other but not with the kernel's view of the process;
+`killpg(0, SIGTERM)` returns −1/`ENOSYS` where Linux delivers to the group.
+
+**Proper fix.** Give the native ABI the process-group syscalls the Linux ABI
+already has, rather than emulating them in userspace:
+
+1. Add native syscall numbers for `setpgid`/`getpgid`/`setsid`/`getsid`,
+   dispatching to the same `pcb` helpers the Linux shim uses
+   (`pcb::set_pgid`, `pcb::get_pgid`, `pcb::pids_in_group`).
+2. Extend native `SYS_SIGNAL_SEND` to accept `pid <= 0` and route to the same
+   group-delivery path as `kill_process_group`, so both ABIs share one
+   implementation rather than growing a second one.
+3. Delete `OUR_PGID` from `posix/src/process.rs` and drop the `ENOSYS`
+   short-circuit in `posix/src/signal.rs::kill`; `killpg` then inherits correct
+   behaviour with no change of its own.
+
+**Note this is only half of bash's job control.** The other half is the kernel
+suspend mechanism that `posix/src/signal.rs:572` reports `ENOSYS` for (no
+`SIGTSTP`/`SIGCONT`, so no Ctrl-Z / `fg` / `bg`). Both gaps constrain `osh`
+identically, so neither is an argument for either side of
+`open-questions.md` Q41.
+
 ### TD-OILS-A-BUILTIN-DOES-NOT-ANSWER-ITS-OWN---HELP. `cd --help` says `--: invalid option` where bash prints the long doc — 2026-08-12 — ✅ FIXED 2026-08-12
 
 **Where:** `userspace/oils/src/interp.rs` — every builtin's own option parser.

@@ -826,6 +826,30 @@ if [ "$PROMOTED_COUNT" -gt 0 ]; then
     echo "[rootfs] installed $PROMOTED_COUNT promoted fastpy command(s) into /bin"
 fi
 
+# --- GNU bash 5.2, cross-compiled and linked against OUR OWN libc -------------
+# Every other real-world binary above (dash, make, tcc) is a stock Ubuntu glibc
+# program that SlateOS runs through the staged glibc + ld-linux.  This one is
+# different in kind: it is GNU bash 5.2 compiled from source for this OS and
+# linked *statically against toolchain/sysroot/lib/libc.a*, i.e. against the
+# POSIX layer in posix/src rather than against glibc.  It therefore exercises
+# our own libc directly, on a program far larger than any ctest fixture.
+#
+# Built by scripts/bash-spike/ (see its README); the artifact lands in the
+# gitignored build/spike/.  Best-effort like dash/make/tcc: absent the artifact
+# the self-test self-skips, so a checkout that has never run the spike still
+# boots green.  Staged as /bin/bash only — NOT as /bin/sh, which stays dash, so
+# that adding bash cannot change the behaviour of any existing self-test.
+BASH_SLATE="$ROOT_DIR/build/spike/bash-slateos.elf"
+if [ -e "$BASH_SLATE" ]; then
+    cp -L "$BASH_SLATE" "$STAGE/bin/bash"
+    echo "[rootfs] staged GNU bash 5.2 (linked against our libc.a): /bin/bash"
+    echo "[rootfs] bash binary type:"
+    file "$STAGE/bin/bash" 2>/dev/null | sed 's/^/  /'
+else
+    echo "[rootfs] WARNING: $BASH_SLATE not found — the bash self-test will no-op"
+    echo "[rootfs]          (build it with scripts/bash-spike/, see its README)"
+fi
+
 # --- native C ring-3 fixtures (services/ctest-*) ------------------------------
 # A few self-tests need constructs only a C compiler emits — e.g. a `__thread`
 # access plus a `%fs:0x28` stack-protector canary load in a *child* thread (see

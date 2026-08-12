@@ -7464,3 +7464,35 @@ that is read on the `open()`/`close()` path. The cutoff is documented in
 anything approaching a megabyte, hand-roll a lazy `thread_local!`") so the next
 person meets the rule at the point of use rather than having to find this file.
 
+
+### The test mutexes were removed, and removing them was the experiment
+
+**Decided by:** Claude (autonomous)
+
+Four modules (`sys_timex`, `linux_aio_abi`, `semaphore`, `mqueue`) wrapped their
+tests in a `std::sync::Mutex` plus a `reset_*()` call. After the conversions
+those were dead — **per-thread storage is the reset**, because libtest gives
+every test its own thread and every thread starts from the initialiser. (This
+holds even at `--test-threads=1`; libtest spawns a thread per test at *any*
+concurrency, which was verified directly rather than assumed.)
+
+*For leaving them:* they were harmless, and deleting them is pure churn in
+green tests. *For removing them, which is what was done:* a second, now-false
+mechanism for a problem solved elsewhere is worse than no mechanism, because
+its comments assert a sharing that no longer exists and the next reader will
+believe them — exactly the failure recorded above, where `nnp_guard()`'s
+carefully-written doc comment is what kept the real bug alive for two weeks.
+They also never made these tests correct: "fill every slot, then assert the
+next open fails" is broken by a concurrent unlink no matter how well each
+individual access is serialised.
+
+The decisive argument is that **removing them is itself the experiment.** With
+the locks gone, a suite that still fails has state that is genuinely still
+shared, and the failure names the module. It passed — 20 133 tests green, and a
+40-run hunt clean — so the conversions are confirmed complete rather than
+merely masked by leftover serialisation. Keeping the locks would have made that
+unfalsifiable.
+
+The production spinlocks in those modules (`lock_aio()`, `TIMEX_LOCK`,
+`SEM_LOCK`, mqueue's `lock()`) are untouched; they guard real concurrency on
+the target and are not a test artifact.

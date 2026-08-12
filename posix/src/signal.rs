@@ -50,6 +50,7 @@
 #![allow(clippy::used_underscore_items)]
 
 use crate::errno;
+use crate::perprocess::process_global;
 
 // ---------------------------------------------------------------------------
 // Signal numbers (Linux x86_64 compatible)
@@ -139,25 +140,27 @@ const DEFAULT_SIGACTION: Sigaction = Sigaction {
     sa_mask: SigsetT::EMPTY,
 };
 
-/// Registered signal actions.
-///
-/// Index 0 unused (signals are 1-based).  Initialized to SIG_DFL.
-/// Stores the full `Sigaction` so that `sigaction(sig, NULL, &old)`
-/// returns the correct `sa_mask`, `sa_flags`, and `sa_restorer`.
-static mut ACTIONS: [Sigaction; NSIG as usize] = [DEFAULT_SIGACTION; NSIG as usize];
+process_global! {
+    /// Registered signal actions.
+    ///
+    /// Index 0 unused (signals are 1-based).  Initialized to SIG_DFL.
+    /// Stores the full `Sigaction` so that `sigaction(sig, NULL, &old)`
+    /// returns the correct `sa_mask`, `sa_flags`, and `sa_restorer`.
+    fn actions_ptr() -> [Sigaction; NSIG as usize] = [DEFAULT_SIGACTION; NSIG as usize];
 
-/// Process-wide blocked signal mask.
-///
-/// Updated by `sigprocmask`.  Read back by `sigprocmask` (old mask)
-/// and `sigpending` (which returns the intersection of blocked and
-/// pending signals — but since we have no signal delivery, pending
-/// is always empty, so `sigpending` still returns empty).
-///
-/// Storing the mask is important for programs that do
-/// `sigprocmask(SIG_BLOCK, ..., &old)` and later restore with
-/// `sigprocmask(SIG_SETMASK, &old, NULL)` — the old mask must
-/// round-trip correctly.
-static mut BLOCKED_MASK: SigsetT = SigsetT::EMPTY;
+    /// Process-wide blocked signal mask.
+    ///
+    /// Updated by `sigprocmask`.  Read back by `sigprocmask` (old mask)
+    /// and `sigpending` (which returns the intersection of blocked and
+    /// pending signals — but since we have no signal delivery, pending
+    /// is always empty, so `sigpending` still returns empty).
+    ///
+    /// Storing the mask is important for programs that do
+    /// `sigprocmask(SIG_BLOCK, ..., &old)` and later restore with
+    /// `sigprocmask(SIG_SETMASK, &old, NULL)` — the old mask must
+    /// round-trip correctly.
+    fn blocked_mask_ptr() -> SigsetT = SigsetT::EMPTY;
+}
 
 /// Install a signal handler.
 ///
@@ -174,9 +177,10 @@ pub extern "C" fn signal(signum: i32, handler: SighandlerT) -> SighandlerT {
         return SIG_ERR;
     }
 
-    // SAFETY: Single-threaded access. signum range checked above.
+    // SAFETY: `actions_ptr()` is owned solely by the caller (the process on
+    // the target, this thread on host builds).  signum range checked above.
     let idx = signum as usize;
-    let actions = unsafe { core::ptr::addr_of_mut!(ACTIONS).as_mut() };
+    let actions = unsafe { actions_ptr().as_mut() };
     let Some(actions) = actions else {
         errno::set_errno(errno::EINVAL);
         return SIG_ERR;
@@ -265,9 +269,9 @@ pub unsafe extern "C" fn sigaction(
 
     // Return old action via oldact.
     if !oldact.is_null() {
-        // SAFETY: ACTIONS is single-threaded; idx in [1, NSIG).
+        // SAFETY: `actions_ptr()` is caller-owned; idx in [1, NSIG).
         let old = unsafe {
-            let actions = core::ptr::addr_of!(ACTIONS);
+            let actions = actions_ptr();
             (*actions).get(idx).copied().unwrap_or(DEFAULT_SIGACTION)
         };
         unsafe {
@@ -281,8 +285,8 @@ pub unsafe extern "C" fn sigaction(
     // Store new action from act.
     if !act.is_null() {
         let new_act = unsafe { *act };
-        // SAFETY: ACTIONS is single-threaded; idx in [1, NSIG).
-        let actions = unsafe { core::ptr::addr_of_mut!(ACTIONS).as_mut() };
+        // SAFETY: `actions_ptr()` is caller-owned; idx in [1, NSIG).
+        let actions = unsafe { actions_ptr().as_mut() };
         if let Some(actions) = actions
             && let Some(slot) = actions.get_mut(idx)
         {
@@ -361,18 +365,18 @@ fn handler_block_mask(saved: u64, sa_mask_low: u64, sa_flags: u64, sig: i32) -> 
 
 /// Read the current process-wide blocked mask (low 64 signals).
 fn current_blocked_low() -> u64 {
-    // SAFETY: single-threaded access to BLOCKED_MASK.
-    unsafe { core::ptr::addr_of!(BLOCKED_MASK).read().bits[0] }
+    // SAFETY: `blocked_mask_ptr()` is owned solely by the caller.
+    unsafe { blocked_mask_ptr().read().bits[0] }
 }
 
 /// Replace the low 64 signals of the process-wide blocked mask and mirror
 /// the change to the kernel so asynchronous delivery honours it.
 fn apply_blocked_low(low: u64) {
-    // SAFETY: single-threaded access to BLOCKED_MASK.
+    // SAFETY: `blocked_mask_ptr()` is owned solely by the caller.
     unsafe {
-        let mut m = core::ptr::addr_of!(BLOCKED_MASK).read();
+        let mut m = blocked_mask_ptr().read();
         m.bits[0] = low;
-        core::ptr::addr_of_mut!(BLOCKED_MASK).write(m);
+        blocked_mask_ptr().write(m);
     }
     sync_kernel_blocked_mask(low);
 }
@@ -425,8 +429,8 @@ fn reset_disposition(sig: i32) {
         return;
     }
     let idx = sig as usize;
-    // SAFETY: single-threaded access; idx in [1, NSIG).
-    let actions = unsafe { core::ptr::addr_of_mut!(ACTIONS).as_mut() };
+    // SAFETY: `actions_ptr()` is caller-owned; idx in [1, NSIG).
+    let actions = unsafe { actions_ptr().as_mut() };
     if let Some(actions) = actions
         && let Some(slot) = actions.get_mut(idx)
     {
@@ -500,9 +504,9 @@ fn lookup_action(sig: i32) -> (usize, u64, u64) {
         return (SIG_DFL, 0, 0);
     }
     let idx = sig as usize;
-    // SAFETY: single-threaded access, idx in [1, NSIG).
+    // SAFETY: `actions_ptr()` is caller-owned; idx in [1, NSIG).
     unsafe {
-        let actions = core::ptr::addr_of!(ACTIONS);
+        let actions = actions_ptr();
         (*actions).get(idx).map_or((SIG_DFL, 0, 0), |a| {
             (a.sa_handler, a.sa_flags, a.sa_mask.bits[0])
         })
@@ -1030,8 +1034,8 @@ pub extern "C" fn raise(sig: i32) -> i32 {
 /// mask only affects what `sigprocmask` returns, not actual behavior.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sigprocmask(how: i32, set: *const SigsetT, oldset: *mut SigsetT) -> i32 {
-    // SAFETY: single-threaded access to BLOCKED_MASK.
-    let current = unsafe { core::ptr::addr_of!(BLOCKED_MASK).read() };
+    // SAFETY: `blocked_mask_ptr()` is owned solely by the caller.
+    let current = unsafe { blocked_mask_ptr().read() };
 
     // Return old mask if requested.
     if !oldset.is_null() {
@@ -1077,7 +1081,7 @@ pub extern "C" fn sigprocmask(how: i32, set: *const SigsetT, oldset: *mut Sigset
         };
         // SAFETY: single-threaded access.
         unsafe {
-            core::ptr::addr_of_mut!(BLOCKED_MASK).write(new_mask);
+            blocked_mask_ptr().write(new_mask);
         }
 
         // Mirror the low 64 signals to the kernel so asynchronous
@@ -2238,12 +2242,15 @@ mod tests {
 
     /// Reset the blocked signal mask to empty.
     ///
-    /// Must be called at the start of sigprocmask tests because the
-    /// global BLOCKED_MASK persists between tests.
+    /// Since the mask became per-thread on host builds (see
+    /// `crate::perprocess`), each test already starts with an empty mask, so
+    /// calling this first is belt-and-braces rather than load-bearing.  It
+    /// still earns its keep within a test that sets a mask and then wants to
+    /// assert against a clean slate.
     fn reset_blocked_mask() {
-        // SAFETY: single-threaded, tests run with --test-threads=1.
+        // SAFETY: `blocked_mask_ptr()` is this thread's own storage.
         unsafe {
-            core::ptr::addr_of_mut!(BLOCKED_MASK).write(SigsetT::EMPTY);
+            blocked_mask_ptr().write(SigsetT::EMPTY);
         }
     }
 

@@ -17,6 +17,7 @@
 //!   yields the single root entry.
 //! - Not thread-safe (uses static storage, matching POSIX spec).
 
+use crate::perprocess::process_global;
 use crate::types::*;
 
 // ---------------------------------------------------------------------------
@@ -98,9 +99,13 @@ static ROOT_GROUP: Group = Group {
     gr_mem: EMPTY_MEM.0.as_ptr(),
 };
 
-/// Enumeration position for getpwent/getgrent.
-static mut PW_POS: i32 = 0;
-static mut GR_POS: i32 = 0;
+process_global! {
+    /// Enumeration cursor for `getpwent`/`setpwent`/`endpwent`.
+    fn pw_pos_ptr() -> i32 = 0;
+
+    /// Enumeration cursor for `getgrent`/`setgrent`/`endgrent`.
+    fn gr_pos_ptr() -> i32 = 0;
+}
 
 // ---------------------------------------------------------------------------
 // Password database lookups
@@ -140,7 +145,7 @@ pub extern "C" fn getpwuid(uid: UidT) -> *const Passwd {
 pub extern "C" fn setpwent() {
     // SAFETY: Single-threaded access.
     unsafe {
-        core::ptr::addr_of_mut!(PW_POS).write(0);
+        pw_pos_ptr().write(0);
     }
 }
 
@@ -149,10 +154,10 @@ pub extern "C" fn setpwent() {
 /// Returns null when all entries have been read.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getpwent() -> *const Passwd {
-    let pos = unsafe { *core::ptr::addr_of!(PW_POS) };
+    let pos = unsafe { *pw_pos_ptr() };
     if pos == 0 {
         unsafe {
-            core::ptr::addr_of_mut!(PW_POS).write(1);
+            pw_pos_ptr().write(1);
         }
         return &raw const ROOT_PASSWD;
     }
@@ -163,7 +168,7 @@ pub extern "C" fn getpwent() -> *const Passwd {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn endpwent() {
     unsafe {
-        core::ptr::addr_of_mut!(PW_POS).write(0);
+        pw_pos_ptr().write(0);
     }
 }
 
@@ -199,17 +204,17 @@ pub extern "C" fn getgrgid(gid: GidT) -> *const Group {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setgrent() {
     unsafe {
-        core::ptr::addr_of_mut!(GR_POS).write(0);
+        gr_pos_ptr().write(0);
     }
 }
 
 /// Read the next entry from the group database.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getgrent() -> *const Group {
-    let pos = unsafe { *core::ptr::addr_of!(GR_POS) };
+    let pos = unsafe { *gr_pos_ptr() };
     if pos == 0 {
         unsafe {
-            core::ptr::addr_of_mut!(GR_POS).write(1);
+            gr_pos_ptr().write(1);
         }
         return &raw const ROOT_GROUP;
     }
@@ -220,7 +225,7 @@ pub extern "C" fn getgrent() -> *const Group {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn endgrent() {
     unsafe {
-        core::ptr::addr_of_mut!(GR_POS).write(0);
+        gr_pos_ptr().write(0);
     }
 }
 
@@ -557,8 +562,8 @@ mod tests {
     // Helper: reset global enumeration state between tests.
     fn reset_state() {
         unsafe {
-            core::ptr::addr_of_mut!(PW_POS).write(0);
-            core::ptr::addr_of_mut!(GR_POS).write(0);
+            pw_pos_ptr().write(0);
+            gr_pos_ptr().write(0);
         }
     }
 

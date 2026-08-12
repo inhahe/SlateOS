@@ -19,6 +19,7 @@
 //! slashes.  `..` at root is a no-op (cannot ascend above `/`).
 
 use crate::errno;
+use crate::perprocess::process_global;
 use crate::syscall::*;
 use crate::types::*;
 
@@ -179,32 +180,22 @@ pub const _SC_THREAD_KEYS_MAX: i32 = 76;
 /// [`resolve_path`].
 pub const PATH_MAX: usize = 4096;
 
-/// Current working directory buffer.
-///
-/// Each userspace process gets its own copy via separate virtual
-/// address spaces.  Initialized to "/" (root filesystem).
-///
-/// Invariant: always contains a normalized absolute path of length
-/// `CWD_LEN` (no null terminator stored).
-static mut CWD_BUF: [u8; PATH_MAX] = {
-    let mut buf = [0u8; PATH_MAX];
-    buf[0] = b'/';
-    buf
-};
+process_global! {
+    /// Current working directory buffer.
+    ///
+    /// Each userspace process gets its own copy via separate virtual
+    /// address spaces.  Initialized to "/" (root filesystem).
+    ///
+    /// Invariant: always contains a normalized absolute path of length
+    /// `*cwd_len_ptr()` (no null terminator stored).
+    fn cwd_buf_ptr() -> [u8; PATH_MAX] = {
+        let mut buf = [0u8; PATH_MAX];
+        buf[0] = b'/';
+        buf
+    };
 
-/// Length of the CWD string (excludes any null terminator).
-static mut CWD_LEN: usize = 1;
-
-/// Raw pointer to the CWD buffer (avoids direct `static mut` reference).
-#[inline]
-fn cwd_buf_ptr() -> *mut [u8; PATH_MAX] {
-    core::ptr::addr_of_mut!(CWD_BUF)
-}
-
-/// Raw pointer to the CWD length.
-#[inline]
-fn cwd_len_ptr() -> *mut usize {
-    core::ptr::addr_of_mut!(CWD_LEN)
+    /// Length of the CWD string (excludes any null terminator).
+    fn cwd_len_ptr() -> usize = 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -995,27 +986,28 @@ pub extern "C" fn issetugid() -> i32 {
 /// Maximum hostname length (references limits::HOST_NAME_MAX).
 const HOST_NAME_MAX: usize = crate::limits::HOST_NAME_MAX as usize;
 
-/// Hostname buffer (including null terminator space).
-///
-/// Initialized to "localhost" — can be changed via `sethostname()`.
-/// SAFETY: single-process, no concurrency — direct access is safe.
-static mut HOSTNAME_BUF: [u8; HOST_NAME_MAX + 1] = {
-    let mut buf = [0u8; HOST_NAME_MAX + 1];
-    // "localhost" = 9 bytes.
-    buf[0] = b'l';
-    buf[1] = b'o';
-    buf[2] = b'c';
-    buf[3] = b'a';
-    buf[4] = b'l';
-    buf[5] = b'h';
-    buf[6] = b'o';
-    buf[7] = b's';
-    buf[8] = b't';
-    buf
-};
+process_global! {
+    /// Hostname buffer (including null terminator space).
+    ///
+    /// Initialized to "localhost" — can be changed via `sethostname()`.
+    fn hostname_buf_ptr() -> [u8; HOST_NAME_MAX + 1] = {
+        let mut buf = [0u8; HOST_NAME_MAX + 1];
+        // "localhost" = 9 bytes.
+        buf[0] = b'l';
+        buf[1] = b'o';
+        buf[2] = b'c';
+        buf[3] = b'a';
+        buf[4] = b'l';
+        buf[5] = b'h';
+        buf[6] = b'o';
+        buf[7] = b's';
+        buf[8] = b't';
+        buf
+    };
 
-/// Length of the current hostname (excluding null terminator).
-static mut HOSTNAME_LEN: usize = 9; // "localhost".len()
+    /// Length of the current hostname (excluding null terminator).
+    fn hostname_len_ptr() -> usize = 9; // "localhost".len()
+}
 
 /// Copy the current hostname into `out`, returning the number of bytes
 /// written (excluding any null terminator).  Truncates if `out` is
@@ -1028,11 +1020,11 @@ static mut HOSTNAME_LEN: usize = 9; // "localhost".len()
 pub(crate) fn copy_hostname(out: &mut [u8]) -> usize {
     // SAFETY: Single-address-space, no concurrent writes during the read.
     // Same access pattern as `gethostname()` above.
-    let (src_ptr, src_len) = unsafe { (&raw const HOSTNAME_BUF, HOSTNAME_LEN) };
+    let (src_ptr, src_len) = unsafe { (hostname_buf_ptr().cast_const(), *hostname_len_ptr()) };
     let n = core::cmp::min(out.len(), src_len);
     let mut i = 0;
     while i < n {
-        // SAFETY: i < HOSTNAME_LEN <= HOST_NAME_MAX, HOSTNAME_BUF is at
+        // SAFETY: i < src_len <= HOST_NAME_MAX, the hostname buffer is at
         // least HOST_NAME_MAX + 1 bytes, and out[i] is in-bounds because
         // i < n <= out.len().
         unsafe {
@@ -1046,24 +1038,25 @@ pub(crate) fn copy_hostname(out: &mut [u8]) -> usize {
     n
 }
 
-/// Domain name buffer (including null terminator space).
-///
-/// Initialized to "(none)" — can be changed via `setdomainname()`.
-/// SAFETY: single-process, no concurrency — direct access is safe.
-static mut DOMAIN_BUF: [u8; HOST_NAME_MAX + 1] = {
-    let mut buf = [0u8; HOST_NAME_MAX + 1];
-    // "(none)" = 6 bytes.
-    buf[0] = b'(';
-    buf[1] = b'n';
-    buf[2] = b'o';
-    buf[3] = b'n';
-    buf[4] = b'e';
-    buf[5] = b')';
-    buf
-};
+process_global! {
+    /// Domain name buffer (including null terminator space).
+    ///
+    /// Initialized to "(none)" — can be changed via `setdomainname()`.
+    fn domain_buf_ptr() -> [u8; HOST_NAME_MAX + 1] = {
+        let mut buf = [0u8; HOST_NAME_MAX + 1];
+        // "(none)" = 6 bytes.
+        buf[0] = b'(';
+        buf[1] = b'n';
+        buf[2] = b'o';
+        buf[3] = b'n';
+        buf[4] = b'e';
+        buf[5] = b')';
+        buf
+    };
 
-/// Length of the current domain name (excluding null terminator).
-static mut DOMAIN_LEN: usize = 6; // "(none)".len()
+    /// Length of the current domain name (excluding null terminator).
+    fn domain_len_ptr() -> usize = 6; // "(none)".len()
+}
 
 /// Get the hostname.
 ///
@@ -1080,7 +1073,7 @@ pub extern "C" fn gethostname(name: *mut u8, len: usize) -> i32 {
 
     // SAFETY: single-address-space, no concurrent writes during read.
     // Use raw pointers to comply with Rust 2024 `static_mut_refs` rules.
-    let (hostname_ptr, hlen) = unsafe { (&raw const HOSTNAME_BUF, HOSTNAME_LEN) };
+    let (hostname_ptr, hlen) = unsafe { (hostname_buf_ptr().cast_const(), *hostname_len_ptr()) };
     let needed = hlen.wrapping_add(1); // +null
     if len < needed {
         errno::set_errno(errno::ENAMETOOLONG);
@@ -1089,8 +1082,8 @@ pub extern "C" fn gethostname(name: *mut u8, len: usize) -> i32 {
 
     let mut idx: usize = 0;
     while idx < hlen {
-        // SAFETY: idx < hlen <= HOST_NAME_MAX, HOSTNAME_BUF is HOST_NAME_MAX+1
-        // bytes, and name buffer has at least `needed` bytes.
+        // SAFETY: idx < hlen <= HOST_NAME_MAX, the hostname buffer is
+        // HOST_NAME_MAX+1 bytes, and `name` has at least `needed` bytes.
         unsafe {
             let byte = *hostname_ptr.cast::<u8>().add(idx);
             *name.add(idx) = byte;
@@ -1119,7 +1112,7 @@ pub extern "C" fn getdomainname(name: *mut u8, len: usize) -> i32 {
     }
 
     // SAFETY: single-address-space, no concurrent writes during read.
-    let (domain_ptr, dlen) = unsafe { (&raw const DOMAIN_BUF, DOMAIN_LEN) };
+    let (domain_ptr, dlen) = unsafe { (domain_buf_ptr().cast_const(), *domain_len_ptr()) };
     let needed = dlen.wrapping_add(1); // +null
     if len < needed {
         errno::set_errno(errno::EINVAL);
@@ -1128,8 +1121,8 @@ pub extern "C" fn getdomainname(name: *mut u8, len: usize) -> i32 {
 
     let mut idx: usize = 0;
     while idx < dlen {
-        // SAFETY: idx < dlen <= HOST_NAME_MAX, DOMAIN_BUF is HOST_NAME_MAX+1
-        // bytes, and name buffer has at least `needed` bytes.
+        // SAFETY: idx < dlen <= HOST_NAME_MAX, the domain buffer is
+        // HOST_NAME_MAX+1 bytes, and `name` has at least `needed` bytes.
         unsafe {
             let byte = *domain_ptr.cast::<u8>().add(idx);
             *name.add(idx) = byte;
@@ -1179,14 +1172,14 @@ pub extern "C" fn setdomainname(name: *const u8, len: usize) -> i32 {
 
     // SAFETY: single-address-space, no concurrent access.
     unsafe {
-        let buf_ptr = (&raw mut DOMAIN_BUF).cast::<u8>();
+        let buf_ptr = domain_buf_ptr().cast::<u8>();
         let mut idx = 0;
         while idx < len {
             *buf_ptr.add(idx) = *name.add(idx);
             idx = idx.wrapping_add(1);
         }
         *buf_ptr.add(len) = 0;
-        DOMAIN_LEN = len;
+        *domain_len_ptr() = len;
     }
     0
 }
@@ -1677,7 +1670,7 @@ pub extern "C" fn sethostname(name: *const u8, len: usize) -> i32 {
     // SAFETY: single-address-space, no concurrent access.
     // Use raw pointers to comply with Rust 2024 `static_mut_refs` rules.
     unsafe {
-        let buf_ptr = (&raw mut HOSTNAME_BUF).cast::<u8>();
+        let buf_ptr = hostname_buf_ptr().cast::<u8>();
         let mut idx = 0;
         while idx < len {
             *buf_ptr.add(idx) = *name.add(idx);
@@ -1685,7 +1678,7 @@ pub extern "C" fn sethostname(name: *const u8, len: usize) -> i32 {
         }
         // Null-terminate the stored hostname.
         *buf_ptr.add(len) = 0;
-        HOSTNAME_LEN = len;
+        *hostname_len_ptr() = len;
     }
     0
 }
@@ -1747,12 +1740,12 @@ pub extern "C" fn gethostid() -> i64 {
 
     // Derive from hostname.  SAFETY: single-address-space, no concurrent
     // writes during read (matches the gethostname / copy_hostname pattern).
-    let (src_ptr, src_len) = unsafe { (&raw const HOSTNAME_BUF, HOSTNAME_LEN) };
+    let (src_ptr, src_len) = unsafe { (hostname_buf_ptr().cast_const(), *hostname_len_ptr()) };
     let mut tmp = [0u8; HOST_NAME_MAX];
     let n = core::cmp::min(src_len, tmp.len());
     let mut i = 0;
     while i < n {
-        // SAFETY: i < n <= HOSTNAME_LEN <= HOST_NAME_MAX, source buffer is
+        // SAFETY: i < n <= src_len <= HOST_NAME_MAX, the source buffer is
         // HOST_NAME_MAX + 1 bytes, and tmp has HOST_NAME_MAX bytes.
         unsafe {
             let b = *src_ptr.cast::<u8>().add(i);

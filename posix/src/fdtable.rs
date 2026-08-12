@@ -53,9 +53,17 @@
 //!
 //! ## Thread Safety
 //!
-//! Uses `static mut` with single-threaded access.  When threading is
-//! added, this must be replaced with proper synchronization (a mutex
-//! or per-thread fd tables).
+//! The fd table and its parallel path tables are per-*process* state, and
+//! on the target they are exactly that: `static mut`, reached only from a
+//! single-threaded posix process.  Adding threads to the target will
+//! require real synchronisation here (the fd table is shared between a
+//! process's threads in POSIX, so per-thread storage would be wrong).
+//!
+//! On **host** builds the same storage is per-*thread*, because libtest
+//! runs every test on its own thread inside one process — a process-global
+//! table lets one test's `open()` hand out an fd another test is asserting
+//! is unused.  This is a test-isolation measure, not a threading model;
+//! see [`fd_store`] and design-decisions.md §110.
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -170,50 +178,108 @@ pub struct FdEntry {
 }
 
 // ---------------------------------------------------------------------------
-// Static fd table
+// The fd table
 // ---------------------------------------------------------------------------
 
-/// The per-process fd table.
+/// The fd table type: one slot per fd, `None` when the fd is closed.
+pub(crate) type FdTable = [Option<FdEntry>; MAX_FDS];
+
+/// Backing storage for the fd table.
 ///
-/// Each slot is either `None` (unused) or `Some(FdEntry)`.
-/// Pre-initialized with console handles for fds 0, 1, 2.
-static mut FD_TABLE: [Option<FdEntry>; MAX_FDS] = {
-    let mut table: [Option<FdEntry>; MAX_FDS] = [None; MAX_FDS];
+/// On the target this is one `static mut` — the fd table is per-*process*
+/// state and a posix process has exactly one.  On host builds it is
+/// per-*thread*, because libtest runs every test on its own thread inside
+/// one process: with a process-global table, one test's `open()` hands out
+/// an fd number that another test is simultaneously asserting is unused.
+/// That is not hypothetical — `epoll::tests::test_timerfd_settime_bad_fd`
+/// asserts fd 3 is *not* a timerfd, and failed whenever a concurrent test
+/// happened to be holding a timerfd at fd 3.  See design-decisions.md §110.
+mod fd_store {
+    use super::{FdEntry, FdTable, HandleKind, MAX_FDS};
 
-    // Pre-initialize stdin/stdout/stderr as console handles.
-    // stdin is read-only, stdout/stderr are write-only.
-    table[0] = Some(FdEntry {
-        kind: HandleKind::Console,
-        handle: 0,
-        flags: 0,
-        status_flags: 0,
-    }); // O_RDONLY
-    table[1] = Some(FdEntry {
-        kind: HandleKind::Console,
-        handle: 1,
-        flags: 0,
-        status_flags: 1,
-    }); // O_WRONLY
-    table[2] = Some(FdEntry {
-        kind: HandleKind::Console,
-        handle: 2,
-        flags: 0,
-        status_flags: 1,
-    }); // O_WRONLY
+    /// The cold-boot fd table: stdin/stdout/stderr pre-bound to the console,
+    /// every other slot free.  This is the single statement of that layout —
+    /// both the target static and the host per-thread cell start from it, and
+    /// the test reset helper restores it.
+    #[allow(clippy::indexing_slicing)] // const context: indices are literals < MAX_FDS
+    const FDS_INIT: FdTable = {
+        let mut table: FdTable = [None; MAX_FDS];
 
-    table
-};
+        // stdin is read-only, stdout/stderr are write-only.
+        table[0] = Some(FdEntry {
+            kind: HandleKind::Console,
+            handle: 0,
+            flags: 0,
+            status_flags: 0,
+        }); // O_RDONLY
+        table[1] = Some(FdEntry {
+            kind: HandleKind::Console,
+            handle: 1,
+            flags: 0,
+            status_flags: 1,
+        }); // O_WRONLY
+        table[2] = Some(FdEntry {
+            kind: HandleKind::Console,
+            handle: 2,
+            flags: 0,
+            status_flags: 1,
+        }); // O_WRONLY
+
+        table
+    };
+
+    #[cfg(target_os = "none")]
+    mod imp {
+        use super::{FdTable, FDS_INIT};
+
+        static mut FD_TABLE: FdTable = FDS_INIT;
+
+        pub(super) fn table() -> *mut FdTable {
+            &raw mut FD_TABLE
+        }
+    }
+
+    #[cfg(not(target_os = "none"))]
+    mod imp {
+        use super::{FdTable, FDS_INIT};
+        use core::cell::UnsafeCell;
+
+        std::thread_local! {
+            static FD_TABLE: UnsafeCell<FdTable> = const { UnsafeCell::new(FDS_INIT) };
+        }
+
+        /// Used only during thread-local teardown, when the real table has
+        /// already been dropped.  A late `close()` from a destructor must
+        /// scribble somewhere harmless rather than panic.
+        static mut FD_FALLBACK: FdTable = FDS_INIT;
+
+        pub(super) fn table() -> *mut FdTable {
+            FD_TABLE
+                .try_with(UnsafeCell::get)
+                .unwrap_or(&raw mut FD_FALLBACK)
+        }
+    }
+
+    /// Raw pointer to this thread's (host) or the process's (target) fd table.
+    ///
+    /// Note there is deliberately no `reset()` here, unlike the other stores
+    /// converted under §110: those kept a process-global that tests had to
+    /// scrub between runs, whereas a fresh test thread gets a fresh
+    /// `FDS_INIT` table for free.  Per-thread storage *is* the reset.
+    #[inline]
+    pub(super) fn table() -> *mut FdTable {
+        imp::table()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Raw table pointer helper
 // ---------------------------------------------------------------------------
 
 /// Get a mutable pointer to the fd table without creating a reference.
-///
-/// Uses `addr_of_mut!` to avoid the Rust 2024 `static_mut_refs` restriction.
 #[inline]
-fn table_ptr() -> *mut [Option<FdEntry>; MAX_FDS] {
-    core::ptr::addr_of_mut!(FD_TABLE)
+fn table_ptr() -> *mut FdTable {
+    fd_store::table()
 }
 
 // ---------------------------------------------------------------------------
@@ -261,7 +327,9 @@ pub fn alloc_fd_from_with_flags(
         return None;
     }
     let start = min_fd as usize;
-    // SAFETY: Single-threaded access.
+    // SAFETY: The table pointer refers to storage owned exclusively by the
+    // caller — the process on the target, this thread on host builds — so
+    // this reference is unique.
     unsafe {
         let table = &mut *table_ptr();
         let mut i = start;
@@ -307,7 +375,9 @@ pub fn install_fd_with_flags(
         return None;
     }
     let idx = fd as usize;
-    // SAFETY: Single-threaded access.
+    // SAFETY: The table pointer refers to storage owned exclusively by the
+    // caller — the process on the target, this thread on host builds — so
+    // this reference is unique.
     unsafe {
         let table = &mut *table_ptr();
         let slot = table.get_mut(idx)?;
@@ -330,7 +400,10 @@ pub fn get_fd(fd: i32) -> Option<FdEntry> {
     if fd < 0 || fd as usize >= MAX_FDS {
         return None;
     }
-    // SAFETY: Single-threaded access.  Read-only after bounds check.
+    // SAFETY: The table pointer refers to storage owned exclusively by the
+    // caller — the process on the target, this thread on host builds — so
+    // this reference is unique.
+    // Read-only after the bounds check.
     unsafe {
         let table = &*table_ptr();
         table.get(fd as usize).copied().flatten()
@@ -346,7 +419,9 @@ pub fn close_fd(fd: i32) -> Option<FdEntry> {
     if fd < 0 || fd as usize >= MAX_FDS {
         return None;
     }
-    // SAFETY: Single-threaded access.
+    // SAFETY: The table pointer refers to storage owned exclusively by the
+    // caller — the process on the target, this thread on host builds — so
+    // this reference is unique.
     unsafe {
         let table = &mut *table_ptr();
         table.get_mut(fd as usize)?.take()
@@ -360,7 +435,9 @@ pub fn close_fd(fd: i32) -> Option<FdEntry> {
 /// fd mappings (the child's handles are different from the parent's
 /// default console handles).
 pub fn clear_all() {
-    // SAFETY: Single-threaded access during early startup.
+    // SAFETY: The table pointer refers to storage owned exclusively by the
+    // caller — the process on the target, this thread on host builds — so
+    // this reference is unique.
     unsafe {
         let table = &mut *table_ptr();
         let mut i = 0usize;
@@ -396,7 +473,9 @@ pub fn set_fd_flags(fd: i32, flags: u32) -> bool {
     if fd < 0 || fd as usize >= MAX_FDS {
         return false;
     }
-    // SAFETY: Single-threaded access.
+    // SAFETY: The table pointer refers to storage owned exclusively by the
+    // caller — the process on the target, this thread on host builds — so
+    // this reference is unique.
     unsafe {
         let table = &mut *table_ptr();
         if let Some(Some(entry)) = table.get_mut(fd as usize) {
@@ -435,7 +514,9 @@ pub fn set_status_flags(fd: i32, new_flags: i32) -> bool {
     if fd < 0 || fd as usize >= MAX_FDS {
         return false;
     }
-    // SAFETY: Single-threaded access.
+    // SAFETY: The table pointer refers to storage owned exclusively by the
+    // caller — the process on the target, this thread on host builds — so
+    // this reference is unique.
     unsafe {
         let table = &mut *table_ptr();
         if let Some(Some(entry)) = table.get_mut(fd as usize) {
@@ -459,7 +540,10 @@ pub fn set_status_flags(fd: i32, new_flags: i32) -> bool {
 /// Returns `true` if at least one open fd matches `(kind, handle)`.
 #[must_use]
 pub fn is_handle_referenced(kind: HandleKind, handle: u64) -> bool {
-    // SAFETY: Single-threaded access.  Read-only scan.
+    // SAFETY: The table pointer refers to storage owned exclusively by the
+    // caller — the process on the target, this thread on host builds — so
+    // this reference is unique.
+    // Read-only scan.
     unsafe {
         let table = &*table_ptr();
         let mut i = 0;
@@ -487,30 +571,117 @@ pub fn is_handle_referenced(kind: HandleKind, handle: u64) -> bool {
 /// desktop OS process.
 const FD_PATH_MAX: usize = 4096;
 
-/// Per-fd path buffer table.
-///
-/// Each slot stores a null-terminated absolute path string when a path
-/// is recorded for that fd.  The path is set by [`store_fd_path()`]
-/// (called from `open()`) and cleared by [`clear_fd_path()`] (called
-/// from `close()`).
-static mut FD_PATH_TABLE: [[u8; FD_PATH_MAX]; MAX_FDS] = [[0u8; FD_PATH_MAX]; MAX_FDS];
+/// One fd's path slot: a null-terminated absolute path.
+pub(crate) type PathSlot = [u8; FD_PATH_MAX];
 
 /// Length of the stored path for each fd (0 = no path stored).
 ///
 /// The length does NOT include the null terminator — it is the number
 /// of path bytes.  Maximum storable length is `FD_PATH_MAX - 1` = 4095.
-static mut FD_PATH_LENS: [u16; MAX_FDS] = [0u16; MAX_FDS];
+pub(crate) type PathLens = [u16; MAX_FDS];
+
+/// Backing storage for the per-fd path tables.
+///
+/// These are keyed by fd, so they must live at exactly the same scope as
+/// the fd table itself: per-process on the target, per-thread on host
+/// builds (see [`fd_store`]).  If they did not follow, one test thread's
+/// fd 3 would report another thread's path.
+///
+/// The path buffer is 1 MiB (`MAX_FDS × FD_PATH_MAX`).  On the target that
+/// is a .bss array; on host builds it is **heap-allocated lazily per
+/// thread** rather than placed in thread-local storage.  libtest spawns a
+/// fresh thread per test — 20k of them for this crate — and a 1 MiB
+/// const-init TLS block would make the OS allocate and zero 1 MiB at every
+/// one of those thread creations, ~20 GiB of pointless memset across a
+/// suite that otherwise runs in ~2 s.  The lazy `Box` is paid only by the
+/// handful of threads that actually run a `*at`/`fchdir` test.
+mod path_store {
+    use super::{PathLens, PathSlot, FD_PATH_MAX, MAX_FDS};
+
+    const LENS_INIT: PathLens = [0u16; MAX_FDS];
+
+    #[cfg(target_os = "none")]
+    mod imp {
+        use super::{PathLens, PathSlot, FD_PATH_MAX, LENS_INIT, MAX_FDS};
+
+        static mut FD_PATH_TABLE: [PathSlot; MAX_FDS] = [[0u8; FD_PATH_MAX]; MAX_FDS];
+        static mut FD_PATH_LENS: PathLens = LENS_INIT;
+
+        pub(super) fn paths() -> *mut [PathSlot] {
+            &raw mut FD_PATH_TABLE
+        }
+
+        pub(super) fn lens() -> *mut PathLens {
+            &raw mut FD_PATH_LENS
+        }
+    }
+
+    #[cfg(not(target_os = "none"))]
+    mod imp {
+        use super::{PathLens, PathSlot, FD_PATH_MAX, LENS_INIT, MAX_FDS};
+        use core::cell::UnsafeCell;
+
+        /// Allocate one thread's zeroed path table on the heap.
+        ///
+        /// `vec![[0u8; N]; M]` hits std's `IsZero` specialisation and becomes
+        /// a single `alloc_zeroed`, so this never materialises a 1 MiB
+        /// temporary on the (finite) test thread's stack.
+        fn alloc_paths() -> std::boxed::Box<[PathSlot]> {
+            std::vec![[0u8; FD_PATH_MAX]; MAX_FDS].into_boxed_slice()
+        }
+
+        std::thread_local! {
+            static FD_PATH_TABLE: UnsafeCell<std::boxed::Box<[PathSlot]>> =
+                UnsafeCell::new(alloc_paths());
+            static FD_PATH_LENS: UnsafeCell<PathLens> = const { UnsafeCell::new(LENS_INIT) };
+        }
+
+        /// Teardown-window fallbacks — see `fd_store`'s `FD_FALLBACK`.
+        static mut PATHS_FALLBACK: [PathSlot; MAX_FDS] = [[0u8; FD_PATH_MAX]; MAX_FDS];
+        static mut LENS_FALLBACK: PathLens = LENS_INIT;
+
+        pub(super) fn paths() -> *mut [PathSlot] {
+            FD_PATH_TABLE
+                .try_with(|c| {
+                    // SAFETY: `c` is this thread's cell; the `Box` it owns
+                    // outlives the pointer's use by every caller below, all of
+                    // which drop it before returning.
+                    let boxed = unsafe { &mut *c.get() };
+                    core::ptr::from_mut::<[PathSlot]>(&mut **boxed)
+                })
+                .unwrap_or(&raw mut PATHS_FALLBACK)
+        }
+
+        pub(super) fn lens() -> *mut PathLens {
+            FD_PATH_LENS
+                .try_with(UnsafeCell::get)
+                .unwrap_or(&raw mut LENS_FALLBACK)
+        }
+    }
+
+    /// Raw pointer to this thread's (host) or the process's (target) path table.
+    #[inline]
+    pub(super) fn paths() -> *mut [PathSlot] {
+        imp::paths()
+    }
+
+    /// Raw pointer to the matching path-length table.
+    #[inline]
+    pub(super) fn lens() -> *mut PathLens {
+        imp::lens()
+    }
+}
 
 /// Get a mutable pointer to the path table.
 #[inline]
-fn path_table_ptr() -> *mut [[u8; FD_PATH_MAX]; MAX_FDS] {
-    core::ptr::addr_of_mut!(FD_PATH_TABLE)
+fn path_table_ptr() -> *mut [PathSlot] {
+    path_store::paths()
 }
 
 /// Get a mutable pointer to the path length table.
 #[inline]
-fn path_lens_ptr() -> *mut [u16; MAX_FDS] {
-    core::ptr::addr_of_mut!(FD_PATH_LENS)
+fn path_lens_ptr() -> *mut PathLens {
+    path_store::lens()
 }
 
 /// Store the resolved absolute path associated with an fd.
@@ -531,7 +702,10 @@ pub fn store_fd_path(fd: i32, path: *const u8, len: usize) {
         return;
     }
     let idx = fd as usize;
-    // SAFETY: Single-threaded access.  `idx < MAX_FDS` checked above.
+    // SAFETY: The table pointer refers to storage owned exclusively by the
+    // caller — the process on the target, this thread on host builds — so
+    // this reference is unique.
+    // `idx < MAX_FDS` is checked above.
     // `path` is valid for `len` bytes (caller contract).
     unsafe {
         let table = &mut *path_table_ptr();
@@ -567,7 +741,10 @@ pub fn get_fd_path(fd: i32, out: &mut [u8]) -> usize {
         return 0;
     }
     let idx = fd as usize;
-    // SAFETY: Single-threaded access.  `idx < MAX_FDS` checked above.
+    // SAFETY: The table pointer refers to storage owned exclusively by the
+    // caller — the process on the target, this thread on host builds — so
+    // this reference is unique.
+    // `idx < MAX_FDS` is checked above.
     unsafe {
         let lens = &*path_lens_ptr();
         let len = match lens.get(idx) {
@@ -603,7 +780,9 @@ pub fn clear_fd_path(fd: i32) {
         return;
     }
     let idx = fd as usize;
-    // SAFETY: Single-threaded access.
+    // SAFETY: The table pointer refers to storage owned exclusively by the
+    // caller — the process on the target, this thread on host builds — so
+    // this reference is unique.
     unsafe {
         let lens = &mut *path_lens_ptr();
         if let Some(len_slot) = lens.get_mut(idx) {
@@ -622,7 +801,10 @@ pub fn copy_fd_path(src_fd: i32, dst_fd: i32) {
     }
     let src_idx = src_fd as usize;
     let dst_idx = dst_fd as usize;
-    // SAFETY: Single-threaded access.  Both indices < MAX_FDS.
+    // SAFETY: The table pointer refers to storage owned exclusively by the
+    // caller — the process on the target, this thread on host builds — so
+    // this reference is unique.
+    // Both indices are < MAX_FDS.
     unsafe {
         let lens = &mut *path_lens_ptr();
         let Some(&src_len) = lens.get(src_idx) else { return };

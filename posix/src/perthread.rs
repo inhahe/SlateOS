@@ -16,6 +16,14 @@
 //! functions are thread-safe in the only sense callers can rely on.  This
 //! module provides that storage.
 //!
+//! It also holds the handful of values POSIX defines as *attributes of a
+//! thread* rather than as return buffers — currently the cancellation
+//! state and type.  The test is the same one that governs everything
+//! here: if the spec says "the calling thread", the value belongs in this
+//! block.  Contrast [`crate::perprocess`], which is for state that really
+//! is per-process and only needs splitting so that host test threads can
+//! stand in for processes.
+//!
 //! ## How it is stored
 //!
 //! Everything lives in one [`PerThread`] struct, and the struct lives at a
@@ -108,6 +116,27 @@ pub struct PerThread {
 
     /// Result web for `getprotobyname`/`getprotobynumber`.
     pub protoent: crate::socket::ProtoentBuf,
+
+    /// The thread's cancellation state — `PTHREAD_CANCEL_ENABLE` (0) or
+    /// `PTHREAD_CANCEL_DISABLE`.
+    ///
+    /// Unlike the buffers above, this is not a "returns a pointer to
+    /// static storage" case: POSIX makes cancellability a property *of
+    /// the thread*, and `pthread_setcancelstate` is defined to change it
+    /// for the calling thread only.  It lived in a process-global atomic
+    /// until it was found sharing state between test threads, which is
+    /// the same bug the target build would have had the moment a program
+    /// called `pthread_create`.
+    ///
+    /// Zero is `PTHREAD_CANCEL_ENABLE`, which is POSIX's required initial
+    /// value for a new thread — so the all-zero invariant holds.
+    pub cancel_state: i32,
+
+    /// The thread's cancellation type — `PTHREAD_CANCEL_DEFERRED` (0) or
+    /// `PTHREAD_CANCEL_ASYNCHRONOUS`.  Per-thread for the same reason as
+    /// [`Self::cancel_state`], and zero is likewise POSIX's required
+    /// initial value.
+    pub cancel_type: i32,
 }
 
 impl PerThread {
@@ -135,6 +164,8 @@ impl PerThread {
         hostent_rev: crate::socket::HostentBuf::ZERO,
         servent: crate::socket::ServentBuf::ZERO,
         protoent: crate::socket::ProtoentBuf::ZERO,
+        cancel_state: 0,
+        cancel_type: 0,
     };
 }
 
@@ -245,6 +276,45 @@ mod tests {
         assert_eq!(zeroed.tm.tm_sec, PerThread::ZERO.tm.tm_sec);
         assert_eq!(zeroed.tm.tm_year, PerThread::ZERO.tm.tm_year);
         assert_eq!(zeroed.tm.tm_isdst, PerThread::ZERO.tm.tm_isdst);
+        assert_eq!(zeroed.cancel_state, PerThread::ZERO.cancel_state);
+        assert_eq!(zeroed.cancel_type, PerThread::ZERO.cancel_type);
+    }
+
+    /// A fresh thread must start cancellable and deferred, which POSIX
+    /// requires and which the all-zero block is relied on to provide.
+    #[test]
+    fn a_fresh_thread_starts_from_the_posix_cancel_defaults() {
+        let (state, ty) = std::thread::spawn(|| {
+            (
+                crate::pthread::current_cancel_state(),
+                crate::pthread::current_cancel_type(),
+            )
+        })
+        .join()
+        .expect("child thread panicked");
+        assert_eq!(state, crate::pthread::PTHREAD_CANCEL_ENABLE);
+        assert_eq!(ty, crate::pthread::PTHREAD_CANCEL_DEFERRED);
+    }
+
+    /// The bug that moved this state here: one thread's
+    /// `pthread_setcanceltype` must be invisible to another.
+    #[test]
+    fn cancel_type_is_not_shared_between_threads() {
+        assert_eq!(
+            crate::pthread::pthread_setcanceltype(
+                crate::pthread::PTHREAD_CANCEL_ASYNCHRONOUS,
+                core::ptr::null_mut(),
+            ),
+            0,
+        );
+        let child_saw = std::thread::spawn(crate::pthread::current_cancel_type)
+            .join()
+            .expect("child thread panicked");
+        assert_eq!(
+            child_saw,
+            crate::pthread::PTHREAD_CANCEL_DEFERRED,
+            "child observed the parent's cancel type",
+        );
     }
 
     #[test]

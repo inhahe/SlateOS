@@ -2111,39 +2111,36 @@ pub const PTHREAD_CANCEL_ENABLE: i32 = 0;
 /// Cancel state: disabled.
 pub const PTHREAD_CANCEL_DISABLE: i32 = 1;
 
-// Cancellation state and type are per-thread under POSIX, but our
-// libc runs in a context where threading is effectively
-// single-tasked (or pthread is a thin wrapper).  We track the values
-// in process-global atomics so that:
+// Cancellation state and type are attributes of a *thread* under POSIX:
+// every one of these functions is specified in terms of "the calling
+// thread", and a new thread starts enabled and deferred.  They live in
+// the per-thread block (`crate::perthread`) accordingly.
 //
-//   * the previous value is correctly reported via the `old*` out
-//     pointer, even across non-default settings;
-//   * a successful set() reliably persists until the next set();
-//   * tests can observe and reset the state deterministically.
+// They were process-global atomics until a flake hunt caught
+// `test_setcanceltype_null_oldtype_succeeds` reading a value another
+// test thread had just set.  The test-only `Mutex` and reset helper that
+// had been added to contain that were treating the symptom: the same
+// sharing would have been a plain conformance bug on the target the
+// moment a program called `pthread_create`, with no test in sight.
 //
-// This is a stub-quality model, but it gives callers the documented
-// pthread contract instead of a pair of constants.
-static CANCEL_STATE: AtomicI32 = AtomicI32::new(PTHREAD_CANCEL_ENABLE);
-static CANCEL_TYPE: AtomicI32 = AtomicI32::new(PTHREAD_CANCEL_DEFERRED);
+// POSIX's initial values are both zero, which is what lets these ride in
+// a block whose whole contract is that all-zero is the valid initial
+// state.  Assert it rather than trusting the constants to stay put.
+const _: () = assert!(PTHREAD_CANCEL_ENABLE == 0 && PTHREAD_CANCEL_DEFERRED == 0);
 
-/// Inspect the current cancellation state (test/debug helper).
+/// Inspect the calling thread's cancellation state (test/debug helper).
 #[must_use]
 pub fn current_cancel_state() -> i32 {
-    CANCEL_STATE.load(Ordering::Relaxed)
+    // SAFETY: `current()` is this thread's block, and the reference is
+    // not held across a call that could hand out another.
+    unsafe { (*crate::perthread::current()).cancel_state }
 }
 
-/// Inspect the current cancellation type (test/debug helper).
+/// Inspect the calling thread's cancellation type (test/debug helper).
 #[must_use]
 pub fn current_cancel_type() -> i32 {
-    CANCEL_TYPE.load(Ordering::Relaxed)
-}
-
-/// Reset the cancellation state/type back to POSIX defaults.  Used by
-/// tests to avoid cross-test contamination of the static atomics.
-#[cfg(test)]
-pub(crate) fn reset_cancel_state_and_type() {
-    CANCEL_STATE.store(PTHREAD_CANCEL_ENABLE, Ordering::Relaxed);
-    CANCEL_TYPE.store(PTHREAD_CANCEL_DEFERRED, Ordering::Relaxed);
+    // SAFETY: as in `current_cancel_state`.
+    unsafe { (*crate::perthread::current()).cancel_type }
 }
 
 /// Set the calling thread's cancellation state.
@@ -2156,7 +2153,7 @@ pub(crate) fn reset_cancel_state_and_type() {
 /// > return [EINVAL] without changing the state of the cancelability
 /// > state.
 ///
-/// On success we atomically swap the new value into `CANCEL_STATE`
+/// On success we swap the new value into the calling thread's block
 /// and write the previous value to `*oldstate` (if non-null), so
 /// that a save-restore idiom like
 ///
@@ -2175,9 +2172,12 @@ pub extern "C" fn pthread_setcancelstate(state: i32, oldstate: *mut i32) -> i32 
     if state != PTHREAD_CANCEL_ENABLE && state != PTHREAD_CANCEL_DISABLE {
         return errno::EINVAL;
     }
-    // Swap atomically so concurrent callers can never observe an
-    // intermediate state.
-    let prev = CANCEL_STATE.swap(state, Ordering::Relaxed);
+    // SAFETY: `current()` is this thread's block; no other thread can
+    // observe the swap, since the value is the calling thread's own.
+    let prev = unsafe {
+        let slot = &raw mut (*crate::perthread::current()).cancel_state;
+        core::mem::replace(&mut *slot, state)
+    };
     if !oldstate.is_null() {
         // SAFETY: caller guarantees oldstate is valid if non-null.
         unsafe {
@@ -2202,7 +2202,11 @@ pub extern "C" fn pthread_setcanceltype(cancel_type: i32, oldtype: *mut i32) -> 
     if cancel_type != PTHREAD_CANCEL_DEFERRED && cancel_type != PTHREAD_CANCEL_ASYNCHRONOUS {
         return errno::EINVAL;
     }
-    let prev = CANCEL_TYPE.swap(cancel_type, Ordering::Relaxed);
+    // SAFETY: as in `pthread_setcancelstate`.
+    let prev = unsafe {
+        let slot = &raw mut (*crate::perthread::current()).cancel_type;
+        core::mem::replace(&mut *slot, cancel_type)
+    };
     if !oldtype.is_null() {
         // SAFETY: caller guarantees oldtype is valid if non-null.
         unsafe {
@@ -5233,29 +5237,13 @@ mod tests {
     // without mutating the current cancellation state/type, and that
     // valid calls report the previous value via the out-pointer.
     //
-    // These tests use an RAII guard that snapshots and restores the
-    // global atomics around each case, so they remain deterministic
-    // under `--test-threads=1` even when tests run in arbitrary order.
+    // These tests need no snapshot/restore guard and no reset helper:
+    // the state is per-thread and libtest gives every test its own
+    // thread, so each one starts from the POSIX defaults by construction.
+    // The guard they used to carry could not have worked anyway — it
+    // restored the values it *observed* on entry, which another test
+    // running concurrently may already have changed.
     // -----------------------------------------------------------------------
-
-    struct CancelGuard {
-        saved_state: i32,
-        saved_type: i32,
-    }
-    impl CancelGuard {
-        fn new() -> Self {
-            Self {
-                saved_state: current_cancel_state(),
-                saved_type: current_cancel_type(),
-            }
-        }
-    }
-    impl Drop for CancelGuard {
-        fn drop(&mut self) {
-            CANCEL_STATE.store(self.saved_state, Ordering::Relaxed);
-            CANCEL_TYPE.store(self.saved_type, Ordering::Relaxed);
-        }
-    }
 
     // ---- (a) Helper / constant invariants -------------------------------
 
@@ -5267,8 +5255,6 @@ mod tests {
 
     #[test]
     fn test_cancel_state_default_after_reset() {
-        let _g = CancelGuard::new();
-        reset_cancel_state_and_type();
         assert_eq!(current_cancel_state(), PTHREAD_CANCEL_ENABLE);
         assert_eq!(current_cancel_type(), PTHREAD_CANCEL_DEFERRED);
     }
@@ -5277,8 +5263,6 @@ mod tests {
 
     #[test]
     fn test_setcancelstate_rejects_negative() {
-        let _g = CancelGuard::new();
-        reset_cancel_state_and_type();
         let ret = pthread_setcancelstate(-1, core::ptr::null_mut());
         assert_eq!(ret, errno::EINVAL);
         // State must be unchanged.
@@ -5287,8 +5271,6 @@ mod tests {
 
     #[test]
     fn test_setcancelstate_rejects_value_two() {
-        let _g = CancelGuard::new();
-        reset_cancel_state_and_type();
         let ret = pthread_setcancelstate(2, core::ptr::null_mut());
         assert_eq!(ret, errno::EINVAL);
         assert_eq!(current_cancel_state(), PTHREAD_CANCEL_ENABLE);
@@ -5296,8 +5278,6 @@ mod tests {
 
     #[test]
     fn test_setcancelstate_rejects_large_value() {
-        let _g = CancelGuard::new();
-        reset_cancel_state_and_type();
         let ret = pthread_setcancelstate(i32::MAX, core::ptr::null_mut());
         assert_eq!(ret, errno::EINVAL);
         assert_eq!(current_cancel_state(), PTHREAD_CANCEL_ENABLE);
@@ -5305,8 +5285,6 @@ mod tests {
 
     #[test]
     fn test_setcancelstate_invalid_does_not_write_oldstate() {
-        let _g = CancelGuard::new();
-        reset_cancel_state_and_type();
         let mut old: i32 = 0x5A5A_5A5A;
         let ret = pthread_setcancelstate(42, &raw mut old);
         assert_eq!(ret, errno::EINVAL);
@@ -5318,8 +5296,6 @@ mod tests {
 
     #[test]
     fn test_setcancelstate_enable_to_disable_reports_previous() {
-        let _g = CancelGuard::new();
-        reset_cancel_state_and_type();
         let mut old: i32 = -123;
         let ret = pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &raw mut old);
         assert_eq!(ret, 0);
@@ -5329,8 +5305,6 @@ mod tests {
 
     #[test]
     fn test_setcancelstate_save_restore_roundtrip() {
-        let _g = CancelGuard::new();
-        reset_cancel_state_and_type();
         let mut saved: i32 = 0;
         assert_eq!(
             pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &raw mut saved),
@@ -5344,8 +5318,6 @@ mod tests {
 
     #[test]
     fn test_setcancelstate_null_oldstate_succeeds() {
-        let _g = CancelGuard::new();
-        reset_cancel_state_and_type();
         let ret = pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, core::ptr::null_mut());
         assert_eq!(ret, 0);
         assert_eq!(current_cancel_state(), PTHREAD_CANCEL_DISABLE);
@@ -5355,8 +5327,6 @@ mod tests {
     fn test_setcancelstate_idempotent() {
         // Setting the same value twice should be a no-op (and report
         // that value back).
-        let _g = CancelGuard::new();
-        reset_cancel_state_and_type();
         let mut old: i32 = 99;
         assert_eq!(
             pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &raw mut old),
@@ -5373,8 +5343,6 @@ mod tests {
 
     #[test]
     fn test_setcanceltype_rejects_negative() {
-        let _g = CancelGuard::new();
-        reset_cancel_state_and_type();
         let ret = pthread_setcanceltype(-1, core::ptr::null_mut());
         assert_eq!(ret, errno::EINVAL);
         assert_eq!(current_cancel_type(), PTHREAD_CANCEL_DEFERRED);
@@ -5382,8 +5350,6 @@ mod tests {
 
     #[test]
     fn test_setcanceltype_rejects_value_two() {
-        let _g = CancelGuard::new();
-        reset_cancel_state_and_type();
         let ret = pthread_setcanceltype(2, core::ptr::null_mut());
         assert_eq!(ret, errno::EINVAL);
         assert_eq!(current_cancel_type(), PTHREAD_CANCEL_DEFERRED);
@@ -5391,8 +5357,6 @@ mod tests {
 
     #[test]
     fn test_setcanceltype_invalid_does_not_write_oldtype() {
-        let _g = CancelGuard::new();
-        reset_cancel_state_and_type();
         let mut old: i32 = 0x1234_5678;
         let ret = pthread_setcanceltype(99, &raw mut old);
         assert_eq!(ret, errno::EINVAL);
@@ -5403,8 +5367,6 @@ mod tests {
 
     #[test]
     fn test_setcanceltype_deferred_to_async_reports_previous() {
-        let _g = CancelGuard::new();
-        reset_cancel_state_and_type();
         let mut old: i32 = 0xABCD;
         let ret = pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, &raw mut old);
         assert_eq!(ret, 0);
@@ -5414,8 +5376,6 @@ mod tests {
 
     #[test]
     fn test_setcanceltype_save_restore_roundtrip() {
-        let _g = CancelGuard::new();
-        reset_cancel_state_and_type();
         let mut saved: i32 = 0;
         assert_eq!(
             pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, &raw mut saved),
@@ -5428,8 +5388,6 @@ mod tests {
 
     #[test]
     fn test_setcanceltype_null_oldtype_succeeds() {
-        let _g = CancelGuard::new();
-        reset_cancel_state_and_type();
         let ret = pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, core::ptr::null_mut());
         assert_eq!(ret, 0);
         assert_eq!(current_cancel_type(), PTHREAD_CANCEL_ASYNCHRONOUS);
@@ -5439,8 +5397,6 @@ mod tests {
 
     #[test]
     fn test_setcancelstate_does_not_affect_type() {
-        let _g = CancelGuard::new();
-        reset_cancel_state_and_type();
         assert_eq!(
             pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, core::ptr::null_mut()),
             0,
@@ -5456,8 +5412,6 @@ mod tests {
 
     #[test]
     fn test_setcanceltype_does_not_affect_state() {
-        let _g = CancelGuard::new();
-        reset_cancel_state_and_type();
         assert_eq!(
             pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, core::ptr::null_mut()),
             0,

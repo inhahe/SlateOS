@@ -1207,22 +1207,6 @@ mod tests {
             }
         }
 
-        /// RAII guard that resets `no_new_privs` to `false` on Drop.
-        /// `PR_SET_NO_NEW_PRIVS` is irreversible by user API but we
-        /// expose `_test_reset_no_new_privs` for cross-module tests.
-        struct NnpGuard;
-        impl NnpGuard {
-            fn snapshot_and_clear() -> Self {
-                crate::unistd::_test_reset_no_new_privs(false);
-                Self
-            }
-        }
-        impl Drop for NnpGuard {
-            fn drop(&mut self) {
-                crate::unistd::_test_reset_no_new_privs(false);
-            }
-        }
-
         fn drop_cap(cap: u32) {
             let (lo, hi) = crate::sys_capability::current_caps_effective();
             let (new_lo, new_hi) = if cap < 32 {
@@ -1262,7 +1246,6 @@ mod tests {
         #[test]
         fn test_landlock_phase185_no_cap_no_nnp_returns_eperm() {
             let _g = CapGuard::snapshot();
-            let _n = NnpGuard::snapshot_and_clear();
             drop_sys_admin();
             errno::set_errno(0);
             let ret = landlock_restrict_self(0, 0);
@@ -1274,7 +1257,6 @@ mod tests {
         /// existing EBADFD path (no real ruleset).
         #[test]
         fn test_landlock_phase185_with_cap_no_nnp_reaches_ebadfd() {
-            let _n = NnpGuard::snapshot_and_clear();
             assert!(crate::sys_capability::has_capability(
                 crate::sys_capability::CAP_SYS_ADMIN
             ));
@@ -1289,7 +1271,6 @@ mod tests {
         #[test]
         fn test_landlock_phase185_with_nnp_no_cap_reaches_ebadfd() {
             let _g = CapGuard::snapshot();
-            let _n = NnpGuard::snapshot_and_clear();
             drop_sys_admin();
             crate::unistd::_test_reset_no_new_privs(true);
             assert!(crate::unistd::no_new_privs_set());
@@ -1304,7 +1285,6 @@ mod tests {
         #[test]
         fn test_landlock_phase185_errno_is_eperm_not_eacces() {
             let _g = CapGuard::snapshot();
-            let _n = NnpGuard::snapshot_and_clear();
             drop_sys_admin();
             errno::set_errno(0);
             let ret = landlock_restrict_self(0, 0);
@@ -1320,7 +1300,6 @@ mod tests {
         #[test]
         fn test_landlock_phase185_eperm_beats_einval_invalid_flag() {
             let _g = CapGuard::snapshot();
-            let _n = NnpGuard::snapshot_and_clear();
             drop_sys_admin();
             errno::set_errno(0);
             let ret = landlock_restrict_self(0, 0x1);
@@ -1333,7 +1312,6 @@ mod tests {
         #[test]
         fn test_landlock_phase185_eperm_beats_ebadf_negative_fd() {
             let _g = CapGuard::snapshot();
-            let _n = NnpGuard::snapshot_and_clear();
             drop_sys_admin();
             errno::set_errno(0);
             let ret = landlock_restrict_self(-1, 0);
@@ -1346,7 +1324,6 @@ mod tests {
         /// retains the EINVAL precedence over EBADF).
         #[test]
         fn test_landlock_phase185_admin_caller_invalid_flag_still_einval() {
-            let _n = NnpGuard::snapshot_and_clear();
             assert!(crate::sys_capability::has_capability(
                 crate::sys_capability::CAP_SYS_ADMIN
             ));
@@ -1364,7 +1341,6 @@ mod tests {
         #[test]
         fn test_landlock_phase185_eperm_preserves_caps_and_nnp() {
             let _g = CapGuard::snapshot();
-            let _n = NnpGuard::snapshot_and_clear();
             drop_sys_admin();
             let (lo_before, hi_before) = crate::sys_capability::current_caps_effective();
             let nnp_before = crate::unistd::no_new_privs_set();
@@ -1384,7 +1360,6 @@ mod tests {
         #[test]
         fn test_landlock_phase185_recovery_set_nnp_reaches_ebadfd() {
             let _g = CapGuard::snapshot();
-            let _n = NnpGuard::snapshot_and_clear();
             drop_sys_admin();
             errno::set_errno(0);
             let denied = landlock_restrict_self(0, 0);
@@ -1407,7 +1382,6 @@ mod tests {
         #[test]
         fn test_landlock_phase185_workflow_unprivileged_sandbox_with_nnp() {
             let _g = CapGuard::snapshot();
-            let _n = NnpGuard::snapshot_and_clear();
             drop_sys_admin();
             crate::unistd::_test_reset_no_new_privs(true);
             // Probe + restrict in one shot.
@@ -1425,7 +1399,6 @@ mod tests {
         #[test]
         fn test_landlock_phase185_buggy_caller_forgets_nnp_returns_eperm() {
             let _g = CapGuard::snapshot();
-            let _n = NnpGuard::snapshot_and_clear();
             drop_sys_admin();
             // (forgot: crate::unistd::_test_reset_no_new_privs(true);)
             errno::set_errno(0);
@@ -1442,7 +1415,6 @@ mod tests {
         #[test]
         fn test_landlock_phase185_sentinel_ptrace_cap_does_not_satisfy() {
             let _g = CapGuard::snapshot();
-            let _n = NnpGuard::snapshot_and_clear();
             drop_sys_admin();
             // CAP_SYS_PTRACE remains held by default (cap 19 in
             // DEFAULT_CAPS_LOW = u32::MAX).
@@ -1467,7 +1439,6 @@ mod tests {
         fn test_landlock_phase185_nnp_path_symmetric_across_caps() {
             // Held cap + NNP set.
             {
-                let _n = NnpGuard::snapshot_and_clear();
                 crate::unistd::_test_reset_no_new_privs(true);
                 errno::set_errno(0);
                 let ret = landlock_restrict_self(0, 0);
@@ -1477,7 +1448,6 @@ mod tests {
             // Dropped cap + NNP set.
             {
                 let _g = CapGuard::snapshot();
-                let _n = NnpGuard::snapshot_and_clear();
                 drop_sys_admin();
                 crate::unistd::_test_reset_no_new_privs(true);
                 errno::set_errno(0);

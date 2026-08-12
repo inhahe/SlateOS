@@ -1050,20 +1050,6 @@ mod tests {
             }
         }
 
-        /// RAII guard that resets `no_new_privs` to false on Drop.
-        struct NnpGuard;
-        impl NnpGuard {
-            fn snapshot_and_clear() -> Self {
-                crate::unistd::_test_reset_no_new_privs(false);
-                Self
-            }
-        }
-        impl Drop for NnpGuard {
-            fn drop(&mut self) {
-                crate::unistd::_test_reset_no_new_privs(false);
-            }
-        }
-
         fn drop_cap(cap: u32) {
             let (lo, hi) = crate::sys_capability::current_caps_effective();
             let (new_lo, new_hi) = if cap < 32 {
@@ -1112,7 +1098,6 @@ mod tests {
         #[test]
         fn test_seccomp_phase186_filter_no_cap_no_nnp_returns_eacces() {
             let _g = CapGuard::snapshot();
-            let _n = NnpGuard::snapshot_and_clear();
             drop_sys_admin();
             errno::set_errno(0);
             let ret = seccomp(SECCOMP_SET_MODE_FILTER, 0, nonnull_args());
@@ -1123,7 +1108,6 @@ mod tests {
         /// CAP_SYS_ADMIN held → bypasses gate → reaches ENOSYS.
         #[test]
         fn test_seccomp_phase186_filter_with_cap_no_nnp_reaches_enosys() {
-            let _n = NnpGuard::snapshot_and_clear();
             assert!(crate::sys_capability::has_capability(
                 crate::sys_capability::CAP_SYS_ADMIN
             ));
@@ -1137,7 +1121,6 @@ mod tests {
         #[test]
         fn test_seccomp_phase186_filter_with_nnp_no_cap_reaches_enosys() {
             let _g = CapGuard::snapshot();
-            let _n = NnpGuard::snapshot_and_clear();
             drop_sys_admin();
             crate::unistd::_test_reset_no_new_privs(true);
             errno::set_errno(0);
@@ -1152,7 +1135,6 @@ mod tests {
         #[test]
         fn test_seccomp_phase186_errno_is_eacces_not_eperm() {
             let _g = CapGuard::snapshot();
-            let _n = NnpGuard::snapshot_and_clear();
             drop_sys_admin();
             errno::set_errno(0);
             let ret = seccomp(SECCOMP_SET_MODE_FILTER, 0, nonnull_args());
@@ -1169,7 +1151,6 @@ mod tests {
         #[test]
         fn test_seccomp_phase186_strict_no_cap_no_nnp_still_reaches_enosys() {
             let _g = CapGuard::snapshot();
-            let _n = NnpGuard::snapshot_and_clear();
             drop_sys_admin();
             errno::set_errno(0);
             let ret = seccomp(SECCOMP_SET_MODE_STRICT, 0, core::ptr::null_mut());
@@ -1182,7 +1163,6 @@ mod tests {
         #[test]
         fn test_seccomp_phase186_get_action_avail_no_cap_works_normally() {
             let _g = CapGuard::snapshot();
-            let _n = NnpGuard::snapshot_and_clear();
             drop_sys_admin();
             errno::set_errno(0);
             let mut action: u32 = SECCOMP_RET_ALLOW;
@@ -1196,7 +1176,6 @@ mod tests {
         #[test]
         fn test_seccomp_phase186_get_notif_sizes_no_cap_returns_enosys_not_eacces() {
             let _g = CapGuard::snapshot();
-            let _n = NnpGuard::snapshot_and_clear();
             drop_sys_admin();
             errno::set_errno(0);
             let mut sizes = [0u8; 32];
@@ -1215,7 +1194,6 @@ mod tests {
         #[test]
         fn test_seccomp_phase186_einval_beats_eacces_unknown_flag() {
             let _g = CapGuard::snapshot();
-            let _n = NnpGuard::snapshot_and_clear();
             drop_sys_admin();
             errno::set_errno(0);
             let ret = seccomp(SECCOMP_SET_MODE_FILTER, 0x8000_0000, nonnull_args());
@@ -1228,7 +1206,6 @@ mod tests {
         #[test]
         fn test_seccomp_phase186_einval_beats_eacces_tsync_new_listener_combo() {
             let _g = CapGuard::snapshot();
-            let _n = NnpGuard::snapshot_and_clear();
             drop_sys_admin();
             errno::set_errno(0);
             let ret = seccomp(
@@ -1245,7 +1222,6 @@ mod tests {
         #[test]
         fn test_seccomp_phase186_efault_beats_eacces_null_args() {
             let _g = CapGuard::snapshot();
-            let _n = NnpGuard::snapshot_and_clear();
             drop_sys_admin();
             errno::set_errno(0);
             let ret = seccomp(SECCOMP_SET_MODE_FILTER, 0, core::ptr::null_mut());
@@ -1259,7 +1235,6 @@ mod tests {
         #[test]
         fn test_seccomp_phase186_eacces_preserves_caps_and_nnp() {
             let _g = CapGuard::snapshot();
-            let _n = NnpGuard::snapshot_and_clear();
             drop_sys_admin();
             let (lo_before, hi_before) = crate::sys_capability::current_caps_effective();
             let nnp_before = crate::unistd::no_new_privs_set();
@@ -1279,7 +1254,6 @@ mod tests {
         #[test]
         fn test_seccomp_phase186_recovery_set_nnp_reaches_enosys() {
             let _g = CapGuard::snapshot();
-            let _n = NnpGuard::snapshot_and_clear();
             drop_sys_admin();
             errno::set_errno(0);
             let denied = seccomp(SECCOMP_SET_MODE_FILTER, 0, nonnull_args());
@@ -1300,7 +1274,6 @@ mod tests {
         #[test]
         fn test_seccomp_phase186_workflow_sandbox_drops_then_filter_denied() {
             let _g = CapGuard::snapshot();
-            let _n = NnpGuard::snapshot_and_clear();
             drop_sys_admin();
             // (forgot NNP)
             errno::set_errno(0);
@@ -1315,7 +1288,6 @@ mod tests {
         #[test]
         fn test_seccomp_phase186_workflow_unprivileged_filter_with_nnp() {
             let _g = CapGuard::snapshot();
-            let _n = NnpGuard::snapshot_and_clear();
             drop_sys_admin();
             crate::unistd::_test_reset_no_new_privs(true);
             errno::set_errno(0);
@@ -1331,7 +1303,6 @@ mod tests {
         #[test]
         fn test_seccomp_phase186_sentinel_ptrace_cap_does_not_satisfy() {
             let _g = CapGuard::snapshot();
-            let _n = NnpGuard::snapshot_and_clear();
             drop_sys_admin();
             assert!(crate::sys_capability::has_capability(
                 crate::sys_capability::CAP_SYS_PTRACE
@@ -1356,7 +1327,6 @@ mod tests {
         #[test]
         fn test_seccomp_phase186_errno_differs_from_landlock_phase185() {
             let _g = CapGuard::snapshot();
-            let _n = NnpGuard::snapshot_and_clear();
             drop_sys_admin();
 
             errno::set_errno(0);

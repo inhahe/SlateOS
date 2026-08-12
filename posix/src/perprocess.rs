@@ -31,6 +31,14 @@
 //! A test thread then stands in for a process, which is what the tests
 //! already assume they are.  Nothing about the target build changes.
 //!
+//! A consequence worth relying on: **per-thread storage is the reset.**
+//! Every test starts from `$init`, so converted modules can drop their
+//! `reset_*()` helpers and their test-only mutexes rather than porting
+//! them.  This holds even under `--test-threads=1` — libtest spawns a
+//! thread per test at *any* concurrency, so tests never share one
+//! thread's copy (verified directly: a write in one test is invisible to
+//! the next when the two are run serially).
+//!
 //! The rejected alternatives — a test-only `Mutex`, and running the suite
 //! with `--test-threads=1` — are recorded in design-decisions.md §110.
 //!

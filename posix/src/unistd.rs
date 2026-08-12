@@ -2195,14 +2195,60 @@ pub const TASK_COMM_LEN: usize = 16;
 /// the flag as **one-way**: once set, it cannot be cleared except by a
 /// fresh `execve` (which doesn't apply to our single-process model).
 ///
-/// Stored as an `AtomicBool` to match the lock-free fast-path that
-/// real seccomp/sandbox code expects — every syscall on Linux that
-/// honours `no_new_privs` reads this bit unguarded.  Pre-Phase-160 the
-/// flag was discarded entirely (SET succeeded but GET always returned
-/// 0), which silently disabled the security semantics that callers
-/// like Chromium's sandbox and Docker's `--security-opt=no-new-privileges`
-/// rely on.
-static NO_NEW_PRIVS: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// Stored as an `AtomicBool` on the target to match the lock-free
+/// fast-path that real seccomp/sandbox code expects — every syscall on
+/// Linux that honours `no_new_privs` reads this bit unguarded.
+/// Pre-Phase-160 the flag was discarded entirely (SET succeeded but GET
+/// always returned 0), which silently disabled the security semantics
+/// that callers like Chromium's sandbox and Docker's
+/// `--security-opt=no-new-privileges` rely on.
+///
+/// # Why the host build stores it per-thread
+///
+/// The bit is per-*process* in Linux, and on the target that is exactly
+/// what the atomic is.  Under `cargo test` it is not: libtest runs each
+/// `#[test]` on its own thread of one process, so a single bit is shared
+/// by every concurrently-running test — and three modules' tests
+/// (`unistd`, `linux_seccomp`, `linux_landlock`) drive it to opposite
+/// values and assert on the result.  A test thread standing in for a
+/// process is the same remedy the rest of this crate's process-global
+/// state uses; see [`crate::perprocess`] and design-decisions.md §110.
+///
+/// This is *not* the module a `process_global!` invocation belongs in:
+/// that macro hands out a raw pointer, which would replace the safe
+/// atomic accessors below with `unsafe` derefs for no gain on a value
+/// this small.
+#[cfg(target_os = "none")]
+mod nnp {
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    static NO_NEW_PRIVS: AtomicBool = AtomicBool::new(false);
+
+    pub(super) fn get() -> bool {
+        NO_NEW_PRIVS.load(Ordering::Relaxed)
+    }
+    pub(super) fn set(v: bool) {
+        NO_NEW_PRIVS.store(v, Ordering::Relaxed);
+    }
+}
+
+#[cfg(not(target_os = "none"))]
+mod nnp {
+    std::thread_local! {
+        static NO_NEW_PRIVS: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    }
+
+    // `try_with` rather than `with`: a read during thread-local teardown
+    // must degrade to the cold-boot value, not panic.
+    pub(super) fn get() -> bool {
+        NO_NEW_PRIVS.try_with(core::cell::Cell::get).unwrap_or(false)
+    }
+    pub(super) fn set(v: bool) {
+        // A failed `try_with` means the thread is shutting down and the
+        // value is about to be discarded anyway.
+        let _ = NO_NEW_PRIVS.try_with(|c| c.set(v));
+    }
+}
 
 /// Read the current `no_new_privs` bit (Phase 160).
 ///
@@ -2212,7 +2258,7 @@ static NO_NEW_PRIVS: core::sync::atomic::AtomicBool = core::sync::atomic::Atomic
 /// kernel-internal `task_no_new_privs()` accessor for the same purpose.
 #[must_use]
 pub fn no_new_privs_set() -> bool {
-    NO_NEW_PRIVS.load(core::sync::atomic::Ordering::Relaxed)
+    nnp::get()
 }
 
 /// Test-only reset of the `no_new_privs` bit.
@@ -2222,13 +2268,17 @@ pub fn no_new_privs_set() -> bool {
 /// of the task.  But tests in other modules (e.g. landlock,
 /// seccomp) need to observe both the cleared and set states of the
 /// bit to exercise the `task_no_new_privs() || CAP_SYS_ADMIN`
-/// branches in their syscall stubs.  Direct atomic access stays
-/// inside this module; cross-module test code goes through this
+/// branches in their syscall stubs.  Direct access to the storage
+/// stays inside this module; cross-module test code goes through this
 /// accessor, which is gated on `cfg(test)` so it cannot leak into
 /// production builds.
+///
+/// Because the host build stores the bit per-thread, a write here is
+/// confined to the calling test — callers need no lock and no restore
+/// on the way out.
 #[cfg(test)]
 pub(crate) fn _test_reset_no_new_privs(value: bool) {
-    NO_NEW_PRIVS.store(value, core::sync::atomic::Ordering::Relaxed);
+    nnp::set(value);
 }
 
 /// Process control operations (Linux).
@@ -2309,7 +2359,7 @@ pub extern "C" fn prctl(option: i32, arg2: u64, arg3: u64, arg4: u64, arg5: u64)
             // Phase 160: persist the one-way bit so a follow-up
             // PR_GET_NO_NEW_PRIVS observes it.  Pre-fix this was a
             // silent no-op which broke sandbox callers.
-            NO_NEW_PRIVS.store(true, core::sync::atomic::Ordering::Relaxed);
+            nnp::set(true);
             0
         }
         PR_GET_NO_NEW_PRIVS => {
@@ -2319,7 +2369,7 @@ pub extern "C" fn prctl(option: i32, arg2: u64, arg3: u64, arg4: u64, arg5: u64)
                 return -1;
             }
             // Phase 160: report the persisted bit (was always 0 pre-fix).
-            i32::from(NO_NEW_PRIVS.load(core::sync::atomic::Ordering::Relaxed))
+            i32::from(nnp::get())
         }
         _ => {
             crate::errno::set_errno(crate::errno::EINVAL);
@@ -3526,26 +3576,12 @@ pub extern "C" fn get_current_dir_name() -> *mut u8 {
 mod tests {
     use super::*;
 
-    /// Serialises the tests that touch the process-wide `NO_NEW_PRIVS` bit.
-    ///
-    /// Unlike `errno` and the libc return buffers (which are per-thread —
-    /// see `crate::perthread`), `no_new_privs` is *correctly* one variable
-    /// per process: that is what Linux's `task->no_new_privs` is, and what
-    /// the prctl contract describes.  So these 29 tests genuinely share one
-    /// piece of state, and the harness running them on many threads at once
-    /// lets one test's `PR_SET_NO_NEW_PRIVS` land in the middle of another's
-    /// `PR_GET_NO_NEW_PRIVS` — observed as an intermittent failure of
-    /// `test_phase160_repeated_get_no_set_returns_zero`.  Serialising them
-    /// is the fix; making the bit per-thread would be wrong.
-    ///
-    /// Poisoning is ignored on purpose: if one of these tests panics, the
-    /// rest should still report their own assertion rather than a lock
-    /// error that hides it.
-    fn nnp_guard() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
+    // The `NO_NEW_PRIVS` tests below need no serialisation: the bit is
+    // per-thread on host builds, so each test gets its own (see the `nnp`
+    // module).  The `Mutex` that used to guard them was removed with that
+    // change — it never actually worked, because it could only serialise
+    // *this* module's tests, while `linux_seccomp` and `linux_landlock`
+    // drove the same bit through `_test_reset_no_new_privs` without it.
 
     // ------------------------------------------------------------------
     // normalize_path — pure function, exhaustively testable
@@ -4154,12 +4190,11 @@ mod tests {
 
     #[test]
     fn test_prctl_set_no_new_privs_succeeds() {
-        let _serialised = nnp_guard();
         // Phase 160: bit is now persisted globally.  Reset around the
         // call so we don't leak state to other tests.
-        NO_NEW_PRIVS.store(false, core::sync::atomic::Ordering::Relaxed);
+        nnp::set(false);
         assert_eq!(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
-        NO_NEW_PRIVS.store(false, core::sync::atomic::Ordering::Relaxed);
+        nnp::set(false);
     }
 
     #[test]
@@ -4215,7 +4250,6 @@ mod tests {
 
     #[test]
     fn test_phase76_prctl_set_no_new_privs_arg2_zero_einval() {
-        let _serialised = nnp_guard();
         // arg2 must be 1 — not 0.
         crate::errno::set_errno(0);
         assert_eq!(prctl(PR_SET_NO_NEW_PRIVS, 0, 0, 0, 0), -1);
@@ -4224,7 +4258,6 @@ mod tests {
 
     #[test]
     fn test_phase76_prctl_set_no_new_privs_arg2_two_einval() {
-        let _serialised = nnp_guard();
         // arg2 == 2 is not a valid boolean.
         crate::errno::set_errno(0);
         assert_eq!(prctl(PR_SET_NO_NEW_PRIVS, 2, 0, 0, 0), -1);
@@ -4233,7 +4266,6 @@ mod tests {
 
     #[test]
     fn test_phase76_prctl_set_no_new_privs_arg2_max_einval() {
-        let _serialised = nnp_guard();
         crate::errno::set_errno(0);
         assert_eq!(prctl(PR_SET_NO_NEW_PRIVS, u64::MAX, 0, 0, 0), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -4241,7 +4273,6 @@ mod tests {
 
     #[test]
     fn test_phase76_prctl_set_no_new_privs_arg3_nonzero_einval() {
-        let _serialised = nnp_guard();
         crate::errno::set_errno(0);
         assert_eq!(prctl(PR_SET_NO_NEW_PRIVS, 1, 1, 0, 0), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -4249,7 +4280,6 @@ mod tests {
 
     #[test]
     fn test_phase76_prctl_set_no_new_privs_arg4_nonzero_einval() {
-        let _serialised = nnp_guard();
         crate::errno::set_errno(0);
         assert_eq!(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 99, 0), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -4257,7 +4287,6 @@ mod tests {
 
     #[test]
     fn test_phase76_prctl_set_no_new_privs_arg5_nonzero_einval() {
-        let _serialised = nnp_guard();
         crate::errno::set_errno(0);
         assert_eq!(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, u64::MAX), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -4265,7 +4294,6 @@ mod tests {
 
     #[test]
     fn test_phase76_prctl_set_no_new_privs_all_extra_args_max_einval() {
-        let _serialised = nnp_guard();
         // Garbage in every extra slot — must still be EINVAL.
         crate::errno::set_errno(0);
         assert_eq!(
@@ -4277,7 +4305,6 @@ mod tests {
 
     #[test]
     fn test_phase76_prctl_get_no_new_privs_arg2_nonzero_einval() {
-        let _serialised = nnp_guard();
         crate::errno::set_errno(0);
         assert_eq!(prctl(PR_GET_NO_NEW_PRIVS, 1, 0, 0, 0), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -4285,7 +4312,6 @@ mod tests {
 
     #[test]
     fn test_phase76_prctl_get_no_new_privs_arg3_nonzero_einval() {
-        let _serialised = nnp_guard();
         crate::errno::set_errno(0);
         assert_eq!(prctl(PR_GET_NO_NEW_PRIVS, 0, 1, 0, 0), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -4293,10 +4319,9 @@ mod tests {
 
     #[test]
     fn test_phase76_prctl_get_no_new_privs_all_zero_ok() {
-        let _serialised = nnp_guard();
         // Phase 160: ensure the bit starts cleared so we assert the
         // "fresh process" value (0).
-        NO_NEW_PRIVS.store(false, core::sync::atomic::Ordering::Relaxed);
+        nnp::set(false);
         crate::errno::set_errno(0);
         assert_eq!(prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0), 0);
         // Success path must not stamp errno.
@@ -4305,12 +4330,11 @@ mod tests {
 
     #[test]
     fn test_phase76_prctl_set_no_new_privs_correct_call_ok() {
-        let _serialised = nnp_guard();
-        NO_NEW_PRIVS.store(false, core::sync::atomic::Ordering::Relaxed);
+        nnp::set(false);
         crate::errno::set_errno(0);
         assert_eq!(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
         assert_eq!(crate::errno::get_errno(), 0);
-        NO_NEW_PRIVS.store(false, core::sync::atomic::Ordering::Relaxed);
+        nnp::set(false);
     }
 
     #[test]
@@ -4370,7 +4394,6 @@ mod tests {
 
     #[test]
     fn test_phase76_prctl_buggy_caller_set_nnp_with_zero() {
-        let _serialised = nnp_guard();
         // Caller mis-remembers PR_SET_NO_NEW_PRIVS and passes 0
         // thinking "0 = enable".  Must reject — only 1 is accepted.
         crate::errno::set_errno(0);
@@ -4381,18 +4404,17 @@ mod tests {
 
     #[test]
     fn test_phase76_prctl_workflow_roundtrip_get_after_set() {
-        let _serialised = nnp_guard();
         // Phase 160 retask: Pre-Phase-160 the stub didn't flip the bit,
         // so GET returned 0 even after a successful SET.  Post-fix the
         // bit is persisted, so GET returns 1.  The sentinel for the old
         // behaviour lives in
         // `test_prctl_get_after_set_no_longer_returns_zero_phase160`.
-        NO_NEW_PRIVS.store(false, core::sync::atomic::Ordering::Relaxed);
+        nnp::set(false);
         crate::errno::set_errno(0);
         assert_eq!(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
         assert_eq!(prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0), 1);
         assert_eq!(crate::errno::get_errno(), 0);
-        NO_NEW_PRIVS.store(false, core::sync::atomic::Ordering::Relaxed);
+        nnp::set(false);
     }
 
     // ------------------------------------------------------------------
@@ -4649,8 +4671,7 @@ mod tests {
     /// state when running the file under cargo's alphabetic test order.
     #[test]
     fn test_phase160_fresh_bit_reads_zero() {
-        let _serialised = nnp_guard();
-        NO_NEW_PRIVS.store(false, core::sync::atomic::Ordering::Relaxed);
+        nnp::set(false);
         assert_eq!(prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0), 0);
     }
 
@@ -4658,8 +4679,7 @@ mod tests {
     /// bad arg2 short-circuits BEFORE storing the bit.
     #[test]
     fn test_phase160_set_bad_arg2_does_not_store_bit() {
-        let _serialised = nnp_guard();
-        NO_NEW_PRIVS.store(false, core::sync::atomic::Ordering::Relaxed);
+        nnp::set(false);
         // arg2 == 2 → EINVAL.
         assert_eq!(prctl(PR_SET_NO_NEW_PRIVS, 2, 0, 0, 0), -1);
         // Bit is still cleared.
@@ -4670,8 +4690,7 @@ mod tests {
     /// SET with bad arg3 likewise must not store the bit.
     #[test]
     fn test_phase160_set_bad_arg3_does_not_store_bit() {
-        let _serialised = nnp_guard();
-        NO_NEW_PRIVS.store(false, core::sync::atomic::Ordering::Relaxed);
+        nnp::set(false);
         assert_eq!(prctl(PR_SET_NO_NEW_PRIVS, 1, 99, 0, 0), -1);
         assert!(!no_new_privs_set());
     }
@@ -4681,11 +4700,10 @@ mod tests {
     /// Core Phase-160 fix: SET then GET returns 1.
     #[test]
     fn test_phase160_set_then_get_returns_one() {
-        let _serialised = nnp_guard();
-        NO_NEW_PRIVS.store(false, core::sync::atomic::Ordering::Relaxed);
+        nnp::set(false);
         assert_eq!(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
         assert_eq!(prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0), 1);
-        NO_NEW_PRIVS.store(false, core::sync::atomic::Ordering::Relaxed);
+        nnp::set(false);
     }
 
     /// One-way invariant: once set, repeated SET still leaves the bit
@@ -4693,8 +4711,7 @@ mod tests {
     /// Linux's contract: only `execve` can clear it.
     #[test]
     fn test_phase160_one_way_invariant() {
-        let _serialised = nnp_guard();
-        NO_NEW_PRIVS.store(false, core::sync::atomic::Ordering::Relaxed);
+        nnp::set(false);
         assert_eq!(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
         assert_eq!(prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0), 1);
         // Second SET: still succeeds, bit still 1.
@@ -4705,7 +4722,7 @@ mod tests {
         assert_eq!(prctl(PR_SET_NO_NEW_PRIVS, 0, 0, 0, 0), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
         assert_eq!(prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0), 1);
-        NO_NEW_PRIVS.store(false, core::sync::atomic::Ordering::Relaxed);
+        nnp::set(false);
     }
 
     // -- no_new_privs_set() accessor --------------------------------------
@@ -4715,12 +4732,11 @@ mod tests {
     /// will gate on this.
     #[test]
     fn test_phase160_accessor_after_set() {
-        let _serialised = nnp_guard();
-        NO_NEW_PRIVS.store(false, core::sync::atomic::Ordering::Relaxed);
+        nnp::set(false);
         assert!(!no_new_privs_set());
         assert_eq!(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
         assert!(no_new_privs_set());
-        NO_NEW_PRIVS.store(false, core::sync::atomic::Ordering::Relaxed);
+        nnp::set(false);
         assert!(!no_new_privs_set());
     }
 
@@ -4734,27 +4750,25 @@ mod tests {
     /// that subsequent exec calls won't gain new privileges.
     #[test]
     fn test_phase160_workflow_chromium_sandbox_verify() {
-        let _serialised = nnp_guard();
-        NO_NEW_PRIVS.store(false, core::sync::atomic::Ordering::Relaxed);
+        nnp::set(false);
         // (steps 1-2 fused — we don't have a cap-drop step here)
         let set_ret = prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
         assert_eq!(set_ret, 0);
         // Step 3: verification readback.
         let get_ret = prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0);
         assert_eq!(get_ret, 1, "sandbox verification readback must see 1");
-        NO_NEW_PRIVS.store(false, core::sync::atomic::Ordering::Relaxed);
+        nnp::set(false);
     }
 
     /// Bubblewrap-style: SET twice (defensive double-set), then GET.
     /// Must still return 1, not 2 or some accumulated counter.
     #[test]
     fn test_phase160_workflow_double_set_then_get_returns_one() {
-        let _serialised = nnp_guard();
-        NO_NEW_PRIVS.store(false, core::sync::atomic::Ordering::Relaxed);
+        nnp::set(false);
         assert_eq!(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
         assert_eq!(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
         assert_eq!(prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0), 1);
-        NO_NEW_PRIVS.store(false, core::sync::atomic::Ordering::Relaxed);
+        nnp::set(false);
     }
 
     // -- Buggy-caller patterns -------------------------------------------
@@ -4763,8 +4777,7 @@ mod tests {
     /// reject and NOT set the bit.  Subsequent GET still reads 0.
     #[test]
     fn test_phase160_buggy_caller_garbage_arg2_no_state_mutation() {
-        let _serialised = nnp_guard();
-        NO_NEW_PRIVS.store(false, core::sync::atomic::Ordering::Relaxed);
+        nnp::set(false);
         let ret = prctl(PR_SET_NO_NEW_PRIVS, 0xDEAD_BEEF, 0, 0, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -4776,8 +4789,7 @@ mod tests {
     /// bit also untouched.
     #[test]
     fn test_phase160_buggy_caller_extra_arg_does_not_set_bit() {
-        let _serialised = nnp_guard();
-        NO_NEW_PRIVS.store(false, core::sync::atomic::Ordering::Relaxed);
+        nnp::set(false);
         let ret = prctl(PR_SET_NO_NEW_PRIVS, 1, 1, 0, 0);
         assert_eq!(ret, -1);
         // Bit untouched even though arg2 was valid.
@@ -4790,8 +4802,7 @@ mod tests {
     /// succeed, no errno desync.
     #[test]
     fn test_phase160_repeated_set_idempotent_loop() {
-        let _serialised = nnp_guard();
-        NO_NEW_PRIVS.store(false, core::sync::atomic::Ordering::Relaxed);
+        nnp::set(false);
         for i in 0..200 {
             crate::errno::set_errno(0);
             let ret = prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
@@ -4799,14 +4810,13 @@ mod tests {
             assert_eq!(crate::errno::get_errno(), 0, "iter {i} errno changed");
             assert_eq!(prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0), 1, "iter {i} GET");
         }
-        NO_NEW_PRIVS.store(false, core::sync::atomic::Ordering::Relaxed);
+        nnp::set(false);
     }
 
     /// 200 GET calls with no SET — bit stays cleared, all GETs return 0.
     #[test]
     fn test_phase160_repeated_get_no_set_returns_zero() {
-        let _serialised = nnp_guard();
-        NO_NEW_PRIVS.store(false, core::sync::atomic::Ordering::Relaxed);
+        nnp::set(false);
         for i in 0..200 {
             assert_eq!(prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0), 0, "iter {i}");
         }
@@ -4819,14 +4829,13 @@ mod tests {
     /// the new contract in place.
     #[test]
     fn test_prctl_get_after_set_no_longer_returns_zero_phase160() {
-        let _serialised = nnp_guard();
-        NO_NEW_PRIVS.store(false, core::sync::atomic::Ordering::Relaxed);
+        nnp::set(false);
         assert_eq!(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
         let got = prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0);
         // Pre-fix: 0.  Post-fix: 1.
         assert_ne!(got, 0);
         assert_eq!(got, 1);
-        NO_NEW_PRIVS.store(false, core::sync::atomic::Ordering::Relaxed);
+        nnp::set(false);
     }
 
     // -- Cross-checks: other prctl options unaffected -------------------
@@ -4834,25 +4843,23 @@ mod tests {
     /// Cross-check: PR_GET_NAME unaffected by Phase 160.
     #[test]
     fn test_phase160_get_name_unaffected() {
-        let _serialised = nnp_guard();
-        NO_NEW_PRIVS.store(true, core::sync::atomic::Ordering::Relaxed);
+        nnp::set(true);
         let mut buf = [b'X'; TASK_COMM_LEN];
         let ret = prctl(PR_GET_NAME, buf.as_mut_ptr() as u64, 0, 0, 0);
         assert_eq!(ret, 0);
         assert_eq!(buf, [0u8; TASK_COMM_LEN]);
-        NO_NEW_PRIVS.store(false, core::sync::atomic::Ordering::Relaxed);
+        nnp::set(false);
     }
 
     /// Cross-check: unknown prctl options still EINVAL regardless of
     /// the no_new_privs bit state.
     #[test]
     fn test_phase160_unknown_prctl_still_einval_when_bit_set() {
-        let _serialised = nnp_guard();
-        NO_NEW_PRIVS.store(true, core::sync::atomic::Ordering::Relaxed);
+        nnp::set(true);
         crate::errno::set_errno(0);
         assert_eq!(prctl(9_999, 0, 0, 0, 0), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
-        NO_NEW_PRIVS.store(false, core::sync::atomic::Ordering::Relaxed);
+        nnp::set(false);
     }
 
     // ------------------------------------------------------------------

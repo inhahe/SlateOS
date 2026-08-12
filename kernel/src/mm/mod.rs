@@ -43,6 +43,7 @@ pub mod heap;
 pub mod heap_profile;
 pub mod hugepage;
 pub mod kasan;
+pub mod kasan_rt;
 pub mod kstack;
 pub mod kvspace;
 pub mod kswapd;

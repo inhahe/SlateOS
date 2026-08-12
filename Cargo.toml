@@ -76,6 +76,17 @@ exclude = [
     "userspace/.cargo",
 ]
 
+[workspace.lints.rust]
+# `kasan_instrumented` is set by `scripts/kasan-build.sh` (design-decisions.md
+# §107), not by a Cargo feature: it has to arrive at the same moment as the
+# `-Zsanitizer=kernel-address` rustflags it belongs with, and a Cargo feature
+# could be switched on independently of them — which would apply
+# `#[sanitize(...)]` attributes in a build whose toolchain does not even have
+# that feature. Declaring the name here keeps ordinary `cargo build` free of
+# `unexpected_cfgs` warnings. It lives at workspace scope because a crate that
+# sets `lints.workspace = true` may not also define its own `[lints.rust]`.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kasan_instrumented)'] }
+
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
 pedantic = { level = "warn", priority = -1 }

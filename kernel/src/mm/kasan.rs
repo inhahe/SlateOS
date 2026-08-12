@@ -422,13 +422,96 @@ impl Violation {
     /// Human-readable name for the shadow state.
     #[must_use]
     pub fn kind(&self) -> &'static str {
-        match self.shadow {
-            KASAN_FREE => "use-after-free (freed heap)",
-            KASAN_REDZONE => "out-of-bounds (heap redzone)",
-            v if v <= 7 => "out-of-bounds (partial granule)",
-            _ => "poisoned heap",
-        }
+        describe_shadow(self.shadow)
     }
+}
+
+/// Human-readable name for a shadow byte value.
+///
+/// Shared with `mm::kasan_rt` so a violation found by the compiler's inline
+/// check and one found by this module's manual `check` are described in the
+/// same words — when both appear in one log, a wording difference reads as a
+/// difference in *kind*, which it is not.
+#[must_use]
+pub fn describe_shadow(shadow: u8) -> &'static str {
+    match shadow {
+        KASAN_FREE => "use-after-free (freed heap)",
+        KASAN_REDZONE => "out-of-bounds (heap redzone)",
+        v if v <= 7 => "out-of-bounds (partial granule)",
+        _ => "poisoned heap",
+    }
+}
+
+/// The shadow byte covering `addr` (`KASAN_ADDRESSABLE` if unshadowed).
+#[must_use]
+pub fn shadow_byte(addr: u64) -> u8 {
+    get_shadow(addr)
+}
+
+/// Whether the shadow permits `[addr, addr+size)`, consulting only the shadow.
+///
+/// Unlike [`check`] this is **not** gated on [`is_enabled`]: it backs the
+/// compiler-emitted checks in `mm::kasan_rt`, which LLVM runs unconditionally.
+/// The gate is unnecessary there anyway — when KASAN is disabled nothing writes
+/// poison, so every shadow byte reads `0x00` and this returns `true`.
+#[must_use]
+pub fn shadow_allows(addr: u64, size: usize) -> bool {
+    if size == 0 {
+        return true;
+    }
+    let last = addr.wrapping_add(size as u64 - 1);
+    let mut a = addr;
+    loop {
+        if byte_bad(a).is_some() {
+            return false;
+        }
+        let next = (a & !KASAN_GRANULE_MASK) + KASAN_GRANULE;
+        if next > last {
+            break;
+        }
+        a = next;
+    }
+    byte_bad(last).is_none()
+}
+
+/// Allocate, free, and return the address of a heap object whose shadow is
+/// therefore poisoned `KASAN_FREE` — a known-bad address for testing a checker.
+///
+/// Returns `None` if the object landed outside the backed shadow window, in
+/// which case there is nothing to test against and the caller must skip rather
+/// than fail.
+///
+/// Leaves [`ENABLED`] as it found it: this is called from a boot self-test, and
+/// silently turning KASAN on for the rest of the boot would change the
+/// performance profile of everything measured afterwards.
+#[must_use]
+pub fn self_test_freed_address() -> Option<u64> {
+    use alloc::alloc::{alloc, dealloc, Layout};
+
+    if !INITED.load(Ordering::Acquire) {
+        return None;
+    }
+    let was_enabled = is_enabled();
+    enable();
+
+    let layout = Layout::from_size_align(64, 8).expect("valid layout");
+    // SAFETY: valid non-zero layout; null-checked immediately.
+    let p = unsafe { alloc(layout) };
+    let result = if p.is_null() {
+        None
+    } else {
+        let a = p as u64;
+        // SAFETY: `p` came from `alloc(layout)` and is not used afterwards
+        // except as an integer address for shadow lookups.
+        unsafe { dealloc(p, layout); }
+        // Only usable if the free actually poisoned a shadow byte we can read.
+        if get_shadow(a) == KASAN_FREE { Some(a) } else { None }
+    };
+
+    if !was_enabled {
+        disable();
+    }
+    result
 }
 
 /// Is a single byte at `a` inaccessible per its shadow?

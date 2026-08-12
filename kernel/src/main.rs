@@ -4581,6 +4581,14 @@ extern "C" fn kernel_main() -> ! {
     // out-of-bounds, and a freed slot is flagged use-after-free.
     mm::kasan::self_test();
 
+    // Step 22e⅞+: KASAN compiler-runtime self-test.
+    // Drives the `__asan_*` entry points that the instrumented build's inline
+    // checks call, using a known-poisoned heap address. Worth running in the
+    // ordinary build too: that path only ever executes when something is
+    // already broken, so a fault or an infinite recursion inside it would
+    // otherwise surface at the worst possible moment.
+    mm::kasan_rt::self_test();
+
     // Step 22e⅞+: Slab free-quarantine self-test.
     // Exercises the FIFO parking ring / poison-verify / eviction logic used to
     // catch stale-pointer/UAF writes (leading B-KNULLJUMP hypothesis).

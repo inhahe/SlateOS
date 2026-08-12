@@ -126,6 +126,18 @@ pub const SYS_SIGNAL_RETURN: u64 = 524;
 pub const SYS_SIGNAL_MASK: u64 = 525;
 pub const SYS_SIGNAL_PENDING: u64 = 526;
 
+/// Stop the calling process for job control, on a disposition this crate
+/// has *already* resolved to the POSIX `Stop` default action.  `arg0` is
+/// the stop signal (SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU), recorded as the
+/// parent's `WSTOPSIG`.  Returns 0 once a `SIGCONT` resumes us.
+///
+/// Not expressible as `SYS_SIGNAL_SEND` to self: the kernel does not hold
+/// our `sigaction` table, only whether a trampoline is registered — and one
+/// always is — so it would mark a catchable stop signal pending for handler
+/// delivery, landing back in the dispatcher that just resolved it to
+/// `SIG_DFL`.  See the kernel's `SYS_SIGNAL_STOP_SELF` docs.
+pub const SYS_SIGNAL_STOP_SELF: u64 = 1062;
+
 /// Fork the calling process (copy-on-write).  Returns the child PID to
 /// the parent and 0 to the child, or a negative error code to the
 /// parent on failure.

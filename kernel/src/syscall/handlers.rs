@@ -4954,6 +4954,51 @@ pub fn sys_signal_pending(
     SyscallResult::ok(0)
 }
 
+/// `SYS_SIGNAL_STOP_SELF` — stop the caller for job control.
+///
+/// `arg0`: the stop signal (`SIGSTOP`/`SIGTSTP`/`SIGTTIN`/`SIGTTOU`) that
+/// resolved to the `Stop` default action in the caller's *userspace*
+/// disposition table.  Recorded as the wait-status stop signal so the
+/// parent's `WSTOPSIG` reports what the user actually sent.
+///
+/// Self-only by construction: there is no target-pid argument, so this
+/// grants no authority over any other process and needs no capability.
+/// See `SYS_SIGNAL_STOP_SELF` in `number.rs` for why `SYS_SIGNAL_SEND`
+/// cannot serve this purpose.
+///
+/// Returns 0 once a later `SIGCONT` resumes the process.
+pub fn sys_signal_stop_self(
+    args: &super::dispatch::SyscallArgs,
+) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+
+    // Only the four POSIX stop signals may be reported here.  Anything
+    // else would record a wait status the parent cannot interpret.
+    use crate::proc::signal::{SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU};
+    let sig = match u32::try_from(args.arg0) {
+        Ok(s) if matches!(s, SIGSTOP | SIGTSTP | SIGTTIN | SIGTTOU) => s,
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    let task_id = sched::current_task_id();
+    let pid = match caller_process_or_err() {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    // A stop cancels any pending SIGCONT, exactly as the send path does.
+    // Otherwise a SIGCONT that raced in just before this call would stay
+    // pending while we park, and nothing would resume us.
+    crate::proc::signal::discard_pending_cont(pid);
+
+    // Always a self-stop, so the current thread is parked last:
+    // `sched::suspend(current)` yields and returns only on SIGCONT, and
+    // suspending it first would strand the siblings un-suspended.
+    stop_process_for_signal(pid, sig, Some(task_id));
+
+    SyscallResult::ok(0)
+}
+
 /// `SYS_SIGNAL_RETURN` — resume from a signal handler (sigreturn).
 ///
 /// `arg0`: pointer to the `SignalContext` on the user stack.

@@ -97,6 +97,7 @@ use super::number::{
     SYS_SIGNAL_SEND,
     SYS_SIGNAL_MASK,
     SYS_SIGNAL_PENDING,
+    SYS_SIGNAL_STOP_SELF,
     SYS_PROCESS_KILL, SYS_PROCESS_SPAWN, SYS_PROCESS_SPAWN_EX,
     SYS_PROCESS_TRY_WAIT, SYS_PROCESS_WAIT,
     SYS_SET_EXCEPTION_HANDLER,
@@ -471,6 +472,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_SIGNAL_SEND as usize] = Some(handlers::sys_signal_send);
     handlers[SYS_SIGNAL_MASK as usize] = Some(handlers::sys_signal_mask);
     handlers[SYS_SIGNAL_PENDING as usize] = Some(handlers::sys_signal_pending);
+    handlers[SYS_SIGNAL_STOP_SELF as usize] = Some(handlers::sys_signal_stop_self);
 
     // Thread management (510–519).
     handlers[SYS_THREAD_CREATE as usize] = Some(handlers::sys_thread_create);
@@ -797,6 +799,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_mprotect_native()?;
     test_dispatch_process_group_syscalls()?;
     test_dispatch_wait_process_group_filter()?;
+    test_dispatch_signal_stop_self_rejects_non_stop_signals()?;
 
     serial_println!("[syscall] Dispatch self-test PASSED");
     Ok(())
@@ -1178,6 +1181,57 @@ fn test_dispatch_wait_process_group_filter() -> KernelResult<()> {
     }
 
     serial_println!("[syscall]   Native wait(-pgid) group filter (matches Linux wait4): OK");
+    Ok(())
+}
+
+/// Verify `SYS_SIGNAL_STOP_SELF` (1062) is registered and rejects every
+/// signal that is not one of the four POSIX stop signals.
+///
+/// The syscall exists because a self-stop is *not* expressible as
+/// `SYS_SIGNAL_SEND(self, SIGTSTP)`: `classify_post_info` tests
+/// `has_trampoline` before it reaches the catchable stop signals, so a
+/// native process — which always has a trampoline registered — would have
+/// the signal marked pending for handler delivery and re-enter the
+/// dispatcher that just resolved it to `SIG_DFL`. That is an infinite
+/// delivery loop, not a stop. The argument gate below is what keeps the
+/// new number from becoming a second, unvalidated way into
+/// `stop_process_for_signal`.
+///
+/// **Only the rejection path may be exercised here.** A *valid* stop signal
+/// suspends every thread of the caller and returns only on `SIGCONT` — from
+/// the kernel self-test task that would park the boot thread forever with
+/// nobody left to resume it. The argument check runs before any process
+/// lookup or scheduler call, so these calls short-circuit and are safe. The
+/// accept path is covered end-to-end from ring 3, where a parent can observe
+/// the stop and send the `SIGCONT`.
+fn test_dispatch_signal_stop_self_rejects_non_stop_signals() -> KernelResult<()> {
+    let mk = |arg0: u64| SyscallArgs {
+        arg0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+
+    // 0 (the existence-probe signal), 9 (SIGKILL — fatal, not a stop),
+    // 18 (SIGCONT — the *opposite* of a stop, and one off SIGSTOP=19),
+    // 23 (one past SIGTTOU=22), 64 (past the end of the signal range) and a
+    // value that does not fit in u32 at all (the `try_from` arm).
+    for sig in [0_u64, 9, 18, 23, 64, u64::from(u32::MAX) + 1] {
+        let r = dispatch(SYS_SIGNAL_STOP_SELF, &mk(sig));
+        // An unregistered dispatch slot answers NotSupported, so this
+        // distinction is what proves the handler is actually wired in
+        // rather than that every call happens to fail.
+        if r.value == i64::from(KernelError::NotSupported.code()) {
+            serial_println!("[syscall]   FAIL: signal_stop_self unregistered (NotSupported)");
+            return Err(KernelError::InternalError);
+        }
+        if r.value != i64::from(KernelError::InvalidArgument.code()) {
+            serial_println!(
+                "[syscall]   FAIL: signal_stop_self({}) returned {}, expected InvalidArgument",
+                sig, r.value
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    serial_println!("[syscall]   signal_stop_self (1062) wired + stop-signal gate: OK");
     Ok(())
 }
 

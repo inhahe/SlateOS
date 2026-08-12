@@ -40,6 +40,24 @@
 //! resume the interrupted code.  This mirrors SEH-style exception
 //! delivery and is *not* a process-control mechanism.
 //!
+//! ## Job-control stops
+//!
+//! The `Stop` default action (SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU) is the one
+//! default the userspace disposition table cannot carry out on its own:
+//! suspending every thread of the process is a scheduler operation.  It
+//! goes through [`SYS_SIGNAL_STOP_SELF`](crate::syscall::SYS_SIGNAL_STOP_SELF),
+//! which parks the caller and returns only once someone sends `SIGCONT`.
+//!
+//! That is a *separate* syscall from `SYS_SIGNAL_SEND` rather than
+//! `kill(getpid(), SIGTSTP)`, because the kernel's send path checks for a
+//! registered trampoline before it reaches the catchable stop signals — and
+//! a native process always has one.  Sending ourselves a SIGTSTP would
+//! therefore mark it pending for handler delivery and re-enter the very
+//! dispatcher that just resolved it to `SIG_DFL`: an infinite delivery
+//! loop, not a stop.  The dedicated number also lets the recorded wait
+//! status name the signal that actually stopped us, so a shell's Ctrl-Z
+//! reports `SIGTSTP` and not `SIGSTOP`.
+//!
 //! `sigprocmask()` stores the blocked mask for get/set round-trips and
 //! mirrors the low 64 signals to the kernel (`SYS_SIGNAL_MASK`) so the
 //! blocked set actually suppresses delivery.  `sigpending()` queries the
@@ -513,11 +531,66 @@ fn lookup_action(sig: i32) -> (usize, u64, u64) {
     }
 }
 
+/// Ask the kernel to stop this process for job control, reporting `sig` as
+/// the wait-status stop signal.
+///
+/// Returns 0 once a `SIGCONT` resumes us, or -1 with `errno` set.
+///
+/// This must not be expressed as `SYS_SIGNAL_SEND` to ourselves.  The
+/// kernel does not hold our `sigaction` table — it only knows whether a
+/// signal trampoline is registered, and for any process using this crate
+/// one always is.  So re-posting a *catchable* stop signal
+/// (SIGTSTP/SIGTTIN/SIGTTOU) is classified as "deliver to the handler",
+/// which re-enters the very dispatcher that just resolved the disposition
+/// to `SIG_DFL`: an infinite delivery loop rather than a stop.
+/// `SYS_SIGNAL_STOP_SELF` reports the already-made decision instead of
+/// asking the kernel to re-derive one from state it cannot see.
+///
+/// On host builds every raw syscall returns the `-ENOSYS` sentinel, so
+/// this reports `ENOSYS` there — which is correct, as a host test process
+/// has no SlateOS kernel to suspend it.
+fn stop_self(sig: i32) -> i32 {
+    // Only ever called for a signal `default_action` classified as `Stop`,
+    // so `sig` is one of 19..=22; the fallible conversion is defensive.
+    let Ok(nr) = u64::try_from(sig) else {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    };
+    let ret = crate::syscall::syscall1(crate::syscall::SYS_SIGNAL_STOP_SELF, nr);
+    if ret < 0 {
+        errno::set_errno(stop_self_errno(ret));
+        return -1;
+    }
+    0
+}
+
+/// Map `SYS_SIGNAL_STOP_SELF`'s failure codes to `errno`.
+///
+/// Deliberately not `errno::translate`: that maps *native `KernelError`*
+/// codes, and its catch-all is `EIO`.  The value this call site most often
+/// sees on a host test build is the raw-syscall sentinel `-38`, which is
+/// `-(ENOSYS)` in **Linux** numbering and means "there is no SlateOS kernel
+/// here" — not an I/O error.  `-38` is not in the native code space
+/// (`-1..=-6`, `-100`s, `-200`s, …), so the two cannot collide and naming
+/// it here is unambiguous.
+fn stop_self_errno(ret: i64) -> i32 {
+    match ret {
+        // The host build's raw-syscall sentinel: no kernel to suspend us.
+        -38 => errno::ENOSYS,
+        errno::native::INVALID_ARGUMENT => errno::EINVAL,
+        errno::native::NO_SUCH_PROCESS => errno::ESRCH,
+        // Any other kernel failure is genuinely unexpected here; report it
+        // as an I/O error rather than inventing a more specific meaning.
+        _ => errno::EIO,
+    }
+}
+
 /// Apply the Linux default action (`SIG_DFL`) for `sig`.
 ///
-/// Returns 0 for actions that complete in-process (Ignore), terminates
-/// the process for Terminate/Core, and reports `ENOSYS`/`EINVAL` for
-/// actions we cannot perform (Stop/Continue) or unknown signals.
+/// Returns 0 for actions that complete in-process (Ignore, and Continue
+/// when we are already running), terminates the process for
+/// Terminate/Core, suspends it via the kernel for Stop, and reports
+/// `EINVAL` for unknown signals.
 fn apply_default_action(sig: i32) -> i32 {
     match default_action(sig) {
         Some(DefaultAction::Terminate | DefaultAction::Core) => {
@@ -528,10 +601,15 @@ fn apply_default_action(sig: i32) -> i32 {
             crate::process::_exit(128i32.wrapping_add(sig));
         }
         Some(DefaultAction::Ignore) => 0,
-        Some(DefaultAction::Stop | DefaultAction::Continue) => {
-            // No kernel suspend/resume mechanism yet.
-            errno::set_errno(errno::ENOSYS);
-            -1
+        Some(DefaultAction::Stop) => stop_self(sig),
+        Some(DefaultAction::Continue) => {
+            // Reaching the SIGCONT default action means we are already
+            // running: either the kernel resumed us and then delivered the
+            // signal, or we were never stopped.  Either way the default
+            // action ("continue the process") is already satisfied, so
+            // there is nothing to ask the kernel for.  POSIX: SIGCONT on a
+            // running process has no effect beyond running a handler.
+            0
         }
         None => {
             errno::set_errno(errno::EINVAL);
@@ -564,7 +642,16 @@ fn apply_default_action(sig: i32) -> i32 {
 /// mask is restored after the handler returns.  `SA_RESETHAND` resets the
 /// disposition to `SIG_DFL` before the handler is invoked.
 ///
-/// **Returns** 0 on success, -1 on unimplemented action (errno = ENOSYS).
+/// ## Stop signals
+///
+/// A disposition that resolves to the `Stop` default action suspends the
+/// process through the kernel (`SYS_SIGNAL_STOP_SELF`) and returns 0 only
+/// once a `SIGCONT` resumes it — so a caller of `raise(SIGSTOP)` blocks
+/// here for as long as the process is stopped.
+///
+/// **Returns** 0 on success, -1 with `errno` set on failure (`EINVAL` for
+/// an unknown signal; on host builds, `ENOSYS` for a stop, since there is
+/// no SlateOS kernel to suspend the test process).
 fn dispatch_self_signal(sig: i32) -> i32 {
     // SIGKILL / SIGSTOP: always apply default, regardless of handler.
     // They cannot be caught, blocked, or ignored.
@@ -573,9 +660,9 @@ fn dispatch_self_signal(sig: i32) -> i32 {
         crate::process::_exit(128i32.wrapping_add(sig));
     }
     if sig == SIGSTOP {
-        // We have no kernel suspend mechanism; report ENOSYS.
-        errno::set_errno(errno::ENOSYS);
-        return -1;
+        // SIGSTOP cannot be caught, blocked or ignored, so its action is
+        // fixed regardless of the disposition table: stop the process.
+        return stop_self(sig);
     }
 
     let (handler, sa_flags, sa_mask_low) = lookup_action(sig);
@@ -3258,13 +3345,62 @@ mod tests {
         signal(SIGINT, old);
     }
 
-    /// raise() with a stop signal returns ENOSYS (no kernel suspend).
+    /// `raise()` with a stop signal asks the kernel to suspend us.
+    ///
+    /// On the target that parks the process until a `SIGCONT`, so it cannot
+    /// be exercised here — a host test process has no SlateOS kernel and
+    /// every raw syscall returns the `-ENOSYS` sentinel, which surfaces as
+    /// `ENOSYS`.  What this pins is that the call now *reaches* the syscall
+    /// rather than being short-circuited: before, `apply_default_action`
+    /// set `ENOSYS` itself without ever asking the kernel, so the same
+    /// observable value meant something entirely different.  The
+    /// distinction is covered by `every_stop_signal_takes_the_kernel_path`
+    /// and `sigcont_default_action_succeeds_without_a_syscall`, which
+    /// together show the `Stop` and `Continue` arms now behave differently
+    /// — they shared one `ENOSYS` branch before.
     #[test]
-    fn test_raise_sigtstp_enosys() {
+    fn test_raise_sigtstp_enosys_on_host() {
         signal(SIGTSTP, SIG_DFL);
         errno::set_errno(0);
         assert_eq!(raise(SIGTSTP), -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    /// The four stop signals all route through `stop_self`, and none of
+    /// them is short-circuited before the syscall.
+    ///
+    /// `errno::translate` maps the host sentinel to `ENOSYS`, so a `-1` /
+    /// `ENOSYS` here is evidence the syscall was issued and its return
+    /// value propagated — the same value the old hard-coded branch
+    /// produced, which is exactly why this asserts the *set* of signals
+    /// that take the path rather than just the value.
+    #[test]
+    fn every_stop_signal_takes_the_kernel_path() {
+        for sig in [SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU] {
+            signal(sig, SIG_DFL);
+            errno::set_errno(0);
+            assert_eq!(raise(sig), -1, "raise({sig}) should fail on host");
+            assert_eq!(
+                errno::get_errno(),
+                errno::ENOSYS,
+                "raise({sig}) should report the host syscall sentinel"
+            );
+        }
+    }
+
+    /// `SIGCONT`'s default action is satisfied without a syscall.
+    ///
+    /// A process that reaches the `Continue` default action is by
+    /// definition already running, so it must report success — not the
+    /// host `ENOSYS` that a syscall would produce.  This is what
+    /// distinguishes the `Continue` arm from the `Stop` arm; they shared a
+    /// single `ENOSYS` branch before.
+    #[test]
+    fn sigcont_default_action_succeeds_without_a_syscall() {
+        signal(SIGCONT, SIG_DFL);
+        errno::set_errno(0);
+        assert_eq!(raise(SIGCONT), 0);
+        assert_eq!(errno::get_errno(), 0, "no syscall should have been made");
     }
 
     #[test]
@@ -4606,13 +4742,16 @@ mod tests {
         }
     }
 
-    /// raise() with SIG_DFL for stop signals returns ENOSYS.
+    /// `raise()` with SIG_DFL for a stop signal issues the stop syscall,
+    /// which on host has no kernel behind it and reports ENOSYS.
+    ///
+    /// On the target this suspends the process until a `SIGCONT`.
     #[test]
-    fn test_phase211_raise_default_stop_enosys() {
+    fn test_phase211_raise_default_stop_enosys_on_host() {
         for sig in [SIGTSTP, SIGTTIN, SIGTTOU] {
             signal(sig, SIG_DFL);
             crate::errno::set_errno(0);
-            assert_eq!(raise(sig), -1, "raise({sig}) stop should fail");
+            assert_eq!(raise(sig), -1, "raise({sig}) stop should fail on host");
             assert_eq!(
                 crate::errno::get_errno(),
                 crate::errno::ENOSYS,
@@ -4621,13 +4760,19 @@ mod tests {
         }
     }
 
-    /// raise() with SIG_DFL for SIGCONT returns ENOSYS.
+    /// `raise()` with SIG_DFL for `SIGCONT` succeeds.
+    ///
+    /// It used to share the stop signals' `ENOSYS` branch, which was wrong
+    /// on both arms: a process that reaches the `Continue` default action
+    /// is already running, so the action is satisfied and there is nothing
+    /// to fail at.  Unlike the stop cases this is *not* host-specific — it
+    /// returns 0 on the target too, because no syscall is involved.
     #[test]
-    fn test_phase211_raise_default_continue_enosys() {
+    fn test_phase211_raise_default_continue_succeeds() {
         signal(SIGCONT, SIG_DFL);
         crate::errno::set_errno(0);
-        assert_eq!(raise(SIGCONT), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(raise(SIGCONT), 0);
+        assert_eq!(crate::errno::get_errno(), 0);
     }
 
     /// Handler set via signal() then ignored via SIG_IGN: verify

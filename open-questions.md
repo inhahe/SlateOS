@@ -180,6 +180,17 @@ autotools cross-configure, readline, and how much of `libstubs.a` bash would hit
 Note this gap constrains **osh identically** — it is a kernel limitation, not an
 argument for the reimplementation.
 
+> **Correction (2026-08-12, later the same day): the job-control gap is closed.**
+> The paragraph above — and the "one real blocker" bullet in the spike results
+> below — was itself stale in exactly the way this question is *about*. The
+> kernel had `TaskState::Suspended`, `JobControlEvent`, `stop_process_for_signal`
+> and `continue_process` all along; what was missing was a way for a process to
+> ask for its *own* stop. That is now `SYS_SIGNAL_STOP_SELF` (1062), and
+> `posix`'s `Stop` default action goes through it. Process groups (533–536) and
+> a real `killpg` also exist. So job control is no longer an argument for either
+> side, and neither is anything else on the feasibility axis: **Q41 is now purely
+> the scope/ownership call in its closing line.**
+
 **Options.**
 - **A — timeboxed spike, then decide.** Point `zig cc --target=x86_64-slateos` at
   bash against the existing sysroot; report how far it gets. *Pro:* converts the
@@ -246,11 +257,14 @@ The detail:
 - **Linking against our own `libc.a` left exactly three real gaps**, since
   closed for real in `posix/src` (not shimmed): `killpg` (`signal.rs`),
   `eaccess`/`euidaccess` (`file.rs`), `__fpurge` (`stdio.rs`).
-- **The one real blocker is unchanged and is a kernel gap, not a libc gap:**
+- ~~**The one real blocker is unchanged and is a kernel gap, not a libc gap:**
   `posix/src/signal.rs:572`, no kernel suspend ⇒ no `SIGTSTP`/`SIGCONT` ⇒ no
   Ctrl-Z / `fg` / `bg`; and no process groups, so `killpg` can only return
   `ENOSYS`. **This constrains osh identically** — it is not an argument for
-  either side.
+  either side.~~ **Closed 2026-08-12** — see the correction note above.
+  Process groups landed as syscalls 533–536 with a real `killpg`, and the
+  self-stop landed as `SYS_SIGNAL_STOP_SELF` (1062). Nothing on the
+  feasibility axis is outstanding.
 
 So §72's prerequisite objection is not merely stale, it is *comprehensively*
 stale: C bash was three small libc functions from running on this OS, and now
@@ -272,7 +286,8 @@ dependency from `scripts/osh-bash-diff.py` entirely.
 
 **Where it bites.** `design-decisions.md` §72 (its "How to reverse" clause and
 the now-stale prerequisite claim), `userspace/oils/` (all of it),
-`posix/src/signal.rs:572` (the suspend gap), `toolchain/sysroot/lib/libc.a`,
+`posix/src/signal.rs` (`stop_self`, the former suspend gap — now the
+`SYS_SIGNAL_STOP_SELF` call site), `toolchain/sysroot/lib/libc.a`,
 fastpy's `compiler/toolchain.py` (`SLATEOS_TARGET`, `_find_zig_cc`),
 `scripts/bash-spike/` (the spike, kept reproducible),
 `scripts/create-ext4-rootfs.sh` (stages `/bin/bash`, best-effort) and

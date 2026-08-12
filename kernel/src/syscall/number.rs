@@ -1884,6 +1884,46 @@ pub const SYS_SIGNAL_MASK: u64 = 525;
 /// Returns: 0 on success, negative `KernelError` code on failure.
 pub const SYS_SIGNAL_PENDING: u64 = 526;
 
+/// Stop the calling process for job control, on a disposition the caller
+/// has *already resolved* to the POSIX `Stop` default action.
+///
+/// `arg0`: the stop signal that caused it — `SIGSTOP` (19), `SIGTSTP` (20),
+///         `SIGTTIN` (21) or `SIGTTOU` (22).  Any other value is
+///         `InvalidArgument`.  It is recorded as the wait-status stop
+///         signal, so the parent's `WSTOPSIG` reports the signal the user
+///         actually sent (`Ctrl-Z` must show `SIGTSTP`, not `SIGSTOP`).
+///
+/// Suspends every thread of the caller and records a `Stopped(sig)`
+/// job-control event for the parent's `wait4`/`waitid`
+/// (`WUNTRACED`/`WSTOPPED`).  The calling thread is parked last and this
+/// syscall returns 0 only once a later `SIGCONT` resumes the process.
+///
+/// ## Why this exists rather than re-using `SYS_SIGNAL_SEND`
+///
+/// A native process keeps its `sigaction` dispositions in **userspace**
+/// (the posix crate's table); the kernel only knows whether a signal
+/// *trampoline* is registered.  So `SYS_SIGNAL_SEND(self, SIGTSTP)` cannot
+/// express "the default action applies": `classify_post_info` sees a
+/// registered trampoline, marks the signal pending for handler delivery,
+/// and control lands back in the very userspace dispatcher that just
+/// resolved the disposition to `SIG_DFL` — an infinite delivery loop
+/// instead of a stop.  (`SIGSTOP` alone escapes this, because it is
+/// checked before the trampoline test and is never catchable.)  This
+/// syscall is the direction userspace needs and `SYS_SIGNAL_SEND` cannot
+/// provide: *report* an already-made decision rather than ask the kernel
+/// to re-derive one from state it cannot see.
+///
+/// ## Authority
+///
+/// Deliberately **self-only** — there is no target-pid argument.  Stopping
+/// yourself needs no authority (you may already `_exit`), so this requires
+/// no capability; stopping *another* process remains `SYS_SIGNAL_SEND`,
+/// which is gated by `CAP_KILL`.  Adding a pid argument here would make
+/// this a cheaper route to the same authority, so it must not gain one.
+///
+/// Returns: 0 once resumed, or negative `KernelError` code on failure.
+pub const SYS_SIGNAL_STOP_SELF: u64 = 1062;
+
 /// Fork the calling process, creating a copy-on-write child.
 ///
 /// Takes no arguments.  The child inherits a copy-on-write clone of the

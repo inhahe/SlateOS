@@ -1686,6 +1686,22 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: job control (ring 3) self-test failed: {:?}", e);
     }
 
+    // The controlling terminal and the foreground process group — the third
+    // piece a job-control shell needs, and the one that used to exist in
+    // three unrelated copies (a posix per-process static, tty.rs's
+    // FOREGROUND_PGID atomic, and nothing at all for the native ABI). The
+    // fixture forks, hands the terminal to the child's group with
+    // tcsetpgrp(), and the *child* reads the handoff back with tcgetpgrp():
+    // two processes agreeing about which group owns the terminal is exactly
+    // what a userspace static can never do. Bounded yield loop; can never
+    // hang the boot.
+    if let Err(e) = proc::spawn::self_test_cctty() {
+        serial_println!(
+            "WARNING: controlling terminal (ring 3) self-test failed: {:?}",
+            e
+        );
+    }
+
     // Ring-3 end-to-end test of fastpy pure-mode FILE I/O on-target: a native
     // fastpy binary opens/writes/closes then reopens/reads a file on the /tmp
     // memfs and exits with the byte count read back, proving the full path

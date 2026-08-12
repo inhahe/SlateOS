@@ -7395,6 +7395,201 @@ pub fn self_test_jobctl() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of the **controlling terminal and the foreground
+/// process group** through our own libc (`AbiMode::Native`):
+/// `services/ctest-ctty/main.c`.
+///
+/// Until 2026-08-12 the foreground process group was not one value but three:
+/// a per-process `FG_PGRP` static in `posix`, a `FOREGROUND_PGID` atomic in
+/// `kernel/src/tty.rs` (the value `^C`/`^\` actually signalled, written only
+/// by the Linux shim's `TIOCSPGRP`), and nothing at all for the native ABI.
+/// They are now one per-session table in `pcb` reached through syscalls
+/// 537-540; see design-decisions.md §113.
+///
+/// Neither other layer can see the bug that fixed:
+///
+/// * The **host suite** cannot — the syscall arm of `tcgetpgrp`/`tcsetpgrp`
+///   and of the `TIOCSCTTY`/`TIOCNOTTY` ioctls is `#[cfg(target_os = "none")]`,
+///   so on the host triple they answer from a per-thread test double and
+///   prove only the argument handling.
+/// * The **kernel self-tests** cannot either
+///   (`pcb::test_controlling_terminal`, `dispatch::test_dispatch_ctty_syscalls`):
+///   they call `pcb` and the handlers directly and never go through libc, so
+///   they prove the kernel side and nothing about whether libc is wired to it.
+///
+/// The load-bearing checks are 56 and 60, and they are a matched pair. 56 is
+/// the child reading the *parent's* group before the handoff — under a
+/// per-process static it would have read its own, because it inherits libc's
+/// copy across `fork`. 60 is the child reading the *child's* group after the
+/// parent's `tcsetpgrp(0, child)` — a different process, a different address
+/// space, a different copy of libc, seeing a handoff it did not perform.
+/// Together they say the foreground group is session state and not a local
+/// guess.
+///
+/// The fixture exits still holding the terminal, on purpose: that lets this
+/// function assert the other half of the lifecycle from the kernel side —
+/// the console is held while the session's last process is a zombie, and
+/// released by `pcb::destroy` when the session empties. A leak there would
+/// wedge every later session out of a terminal with `EPERM`, which is
+/// exactly the kind of failure that would otherwise surface days later as
+/// "the shell can't get the console".
+///
+/// No capabilities are granted and none are needed: the fixture opens no
+/// files (fds 0/1/2 are libc's pre-installed console handles) and sends no
+/// signals — its one `TIOCNOTTY` is issued while the foreground group is the
+/// *reaped* child's, so the hangup reaches an empty group.
+///
+/// Exit code 42 means every check passed; any other code names the failing
+/// step (see the FAIL diagnostic below and `services/ctest-ctty/main.c`).
+pub fn self_test_cctty() -> KernelResult<()> {
+    let ctest_elf = match load_test_elf("ctest-ctty") {
+        Some(v) => v,
+        None => {
+            serial_println!("[spawn] SKIP ctest-ctty: fixture absent on /mnt/tests (lean build)");
+            return Ok(());
+        }
+    };
+
+    serial_println!(
+        "[spawn] Running controlling terminal (ring 3, C, native ABI) integration test ({} bytes \
+         ELF)...",
+        ctest_elf.len()
+    );
+
+    /// The fixture returns this only after all of its checks pass.
+    const EXPECTED: i32 = 42;
+
+    let argv: &[&[u8]] = &[b"ctest-ctty"];
+    let envp: &[&[u8]] = &[];
+    // Spawning with `parent: 0` is what makes the expectations exact: the
+    // fixture is then its own session and group leader, which is the only
+    // position from which a process may acquire a controlling terminal.
+    let options = SpawnOptions {
+        name: "ctest-ctty",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    // The console must be free for the fixture to claim it. Nothing in the
+    // boot sequence acquires one, but say so rather than let a stray holder
+    // turn into an unexplained EPERM at check 21.
+    if let Some(holder) = pcb::ctty_console_fg_pgrp() {
+        serial_println!(
+            "[spawn]   FAIL: ctest-ctty — the console is already claimed (foreground group {}) \
+             before the fixture starts, so its TIOCSCTTY would fail with EPERM. Some earlier \
+             self-test acquired a controlling terminal and did not release it",
+            holder
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    let result = match spawn_process(&ctest_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: ctest-ctty spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // The fixture forks one child and exchanges two pipe round-trips with it
+    // before closing the command pipe and reaping — so the parent's progress
+    // depends on the child being scheduled several times. Headroom matched to
+    // the other fork-and-reap fixtures.
+    let mut became_zombie = false;
+    for _ in 0..8000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    // Sampled *before* destroy: the fixture deliberately exits still holding
+    // the console, so this is what the session-exit release has to clean up.
+    let held_at_exit = pcb::ctty_console_fg_pgrp();
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    // And after: destroying the session's last process must release it.
+    let held_after_destroy = pcb::ctty_console_fg_pgrp();
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-ctty (ring 3) — expected Zombie, got {:?}. The fixture blocks \
+             only on its two pipes, so a non-zombie state is one of them: the child waiting for a \
+             command byte that never arrived, the parent waiting for a sample the child never \
+             wrote, or the parent stuck in waitpid() for a child that never saw EOF",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECTED) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-ctty (ring 3) — reached Zombie but exit code was {:?}, \
+             expected {}. Code bands: 10-20 = starting conditions and the fact that a session \
+             with no terminal says ENOTTY rather than answering from a static (17-18 pin that a \
+             bad fd is diagnosed before the missing terminal, 19-20 that a bad pgrp is), 21-29 = \
+             acquiring the terminal really works (22 = acquiring seeds the foreground group with \
+             the acquirer's own, 25-26 = a dead group cannot be foregrounded, 28-29 = a redundant \
+             TIOCSCTTY must NOT reset the foreground group or a shell would yank the terminal \
+             back from a job it just started), 50-62 = the parent/child case, of which 56 and 60 \
+             are the load-bearing pair: before the handoff the child reads its *parent's* group \
+             (a per-process static would have said its own) and after it reads the group its \
+             parent handed over, 71-80 = the terminal outlives the job and giving it up is real \
+             (72-73 = the reaped child's group can still be read but no longer foregrounded, 74 = \
+             TIOCNOTTY, 75-78 = released means ENOTTY again, 79-80 = the console was genuinely \
+             freed and can be re-acquired). See services/ctest-ctty/main.c",
+            exit_code, EXPECTED
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Only meaningful once the fixture passed: a failing run may have died
+    // before it ever acquired the terminal.
+    if held_at_exit != Some(result.pid) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-ctty (ring 3) — the fixture passed all its checks (so its last \
+             TIOCSCTTY succeeded and its foreground group was itself), but the kernel reports the \
+             console's foreground group as {:?} rather than {} while its session was still alive \
+             as a zombie. Exiting must not release the controlling terminal — the session, not \
+             the process, owns it",
+            held_at_exit, result.pid
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if let Some(holder) = held_after_destroy {
+        serial_println!(
+            "[spawn]   FAIL: ctest-ctty (ring 3) — the console is still claimed (foreground group \
+             {}) after the fixture's session was destroyed. pcb::destroy must release the \
+             controlling terminal when the last member of a session goes, or the console is \
+             wedged for every later session",
+            holder
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   controlling terminal (ring 3, native ABI: a program on our own libc acquires \
+         the console with TIOCSCTTY, hands it to its child's group with tcsetpgrp, and the child \
+         reads the handoff back with tcgetpgrp — before it, the parent's group; after it, its \
+         own. The console is held while the session's last process is a zombie and released when \
+         the session is destroyed): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the sysroot's **scanf trampolines**.
 ///
 /// `sscanf`, `scanf` and `fscanf` are assembly trampolines — `va_trampoline!`

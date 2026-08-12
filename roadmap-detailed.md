@@ -518,6 +518,47 @@ _One graphical session at a time. Fast user switching (suspend one session, star
 - [ ] `proc.priority` — change own priority within allowed range
 - [ ] `proc.signal` — send shutdown/IPC messages to other processes
 
+_Acting on **another** process is separated from acting on your own, and each
+verb is its own grant, because the blast radii differ sharply: reading a
+process's stats is not stopping it, stopping it is not killing it, and none of
+them is reaching into its memory. All of the `_other`-class grants below are
+scoped by default to processes **the same user owns**; touching another user's
+process additionally needs `admin.cross_user` (§ elevated block below), and
+touching a system service additionally needs `admin.service`. Every use is
+audit-logged JSON-lines (who, what target, when, with what reason)._
+
+- [ ] `proc.inspect` — enumerate other processes and read their metadata: pid,
+      name, full path, owning user, state, priority, per-resource usage,
+      capability set, loaded libraries, threads, open handles, what they are
+      blocked on, and the launch provenance (argv, launcher, launch time) of
+      §4.3. Read-only, and the concrete name for the "`system.*` process-query
+      capability" §4.3 refers to. Separate from every verb below because a
+      monitoring tool needs to *see* without being able to *touch* — the same
+      "monitoring something is a separate capability from doing it" principle
+      the hook capabilities follow. **Not** required to see your own process.
+- [ ] `proc.priority_other` — change **another** process's priority (CPU and
+      the I/O priority `resource.io_priority` governs). Raising a target above
+      the grantee's own allowed ceiling, and anything into the realtime band,
+      requires an elevated grant, so a program cannot launder priority it does
+      not have through a process it can reach.
+- [ ] `proc.suspend` — pause and resume another process (freeze/thaw all its
+      threads). Distinct from `proc.terminate` because it is *recoverable* —
+      but it is not harmless: a frozen process still holds its locks, its
+      handles, and its share of committed memory, so a debugger or a resource
+      governor gets this while an installer does not.
+- [ ] `proc.terminate` — forcibly kill another process. The escalation from
+      `proc.signal`, which sends the *orderly* structured-shutdown request the
+      target may handle, delay, or decline (§2.1 — "no Unix signals for process
+      control"); `proc.terminate` is the one the target cannot refuse, so the
+      target loses unflushed state. Killing a process **tree** rather than a
+      single process is a scope on the grant, since a stray tree kill can take
+      down far more than was aimed at.
+- [ ] `proc.debug` — attach to another process as a debugger: read/write its
+      memory and registers, set breakpoints, single-step. The strongest of the
+      set — it is equivalent to *becoming* the target, so it subsumes what the
+      target could do — and therefore never implied by any of the above, and
+      never granted by "allow this app to manage processes" as a bundle.
+
 #### Capability Types — IPC
 - [ ] `ipc.channel` — create/use IPC channels
 - [ ] `ipc.sharedmem` — create/use shared memory regions
@@ -577,6 +618,59 @@ _Scoping mechanics: the grant carries a list of extension strings (or `*` if the
 - [ ] `resource.cpu` — CPU limit (% or time-based)
 - [ ] `resource.disk` — disk space limit
 - [ ] `resource.io_priority` — set I/O priority (realtime requires elevated grant)
+
+#### Capability Types — Startup / Autostart
+
+_Gates changing **what runs at boot or at login** — the startup app list and the
+service-manager units behind it (§2.6: "only two ways to load programs on
+startup: service manager + startup app list", the startup app list being a
+service-manager config section). This is the single most valuable thing for
+malware to reach, because an entry here survives reboots and runs before the
+user is watching; and it is also completely ordinary for an app to want ("start
+Slack when I log in"). So the ordinary case is split off from the dangerous
+one: registering **yourself** is its own small grant, and touching anyone
+else's entry — or writing a shell-command entry, which is arbitrary code — is
+not. The Settings UI's reorderable startup list (§2.6) and a `startup`/`autorun`
+CLI are the user-facing front ends; a human toggling an entry there is a direct
+user gesture and needs none of these, exactly as with the power options._
+
+- [ ] `startup.autostart_self` — add, modify, or remove **the granting
+      program's own** entry in the startup app list. The "run at login"
+      checkbox. Scoped to one entry naming the grantee's own executable, so it
+      cannot smuggle in arguments that turn it into a different program (a
+      script interpreter plus a script path is still a *different program*, and
+      is rejected as such); argument changes re-prompt.
+- [ ] `startup.autostart_other` — add, modify, remove, or **reorder** any entry
+      in the startup app list, including other programs' entries. Reordering is
+      in here rather than in a weaker grant because order is authority: moving
+      yourself ahead of the security agent or the backup service is an attack,
+      not a preference.
+- [ ] `startup.script` — create or modify a startup **script** entry: the
+      shell-command form the startup app list allows for dynamic logic (§2.6).
+      Held separately from `startup.autostart_other` because its contents are
+      arbitrary code rather than a named executable the user can recognise, so
+      the prompt has to say something different ("run commands you can't see at
+      every login") and the entry has to be shown verbatim and diffable in
+      Settings.
+- [ ] `startup.service` — create, modify, enable/disable, or remove a
+      **service-manager unit**: the heavier of the two startup paths, since a
+      service can start before any user logs in, can run as a system identity,
+      can declare dependencies that reorder other services, and can be
+      socket-activated. Elevated; implies none of the above and is implied by
+      none of them.
+- [ ] `startup.read` — enumerate the startup app list and the service units
+      without changing anything: what a startup-manager UI, a "why is my boot
+      slow" tool, or an audit script needs. Read-only, and required to see
+      *other* programs' entries — a program can always see its own.
+
+_All five are audit-logged JSON-lines (who changed which entry, when, from what
+to what), and every change is **revocable by construction**: revoking the
+capability does not by itself remove entries already written, so the audit log
+and the Settings list are the recovery path — Settings surfaces "added by
+&lt;program&gt; on &lt;date&gt;" next to every entry the user did not add
+themselves, with one-click removal. A startup entry is never created silently:
+even with the grant, a newly-added entry is announced once in the notification
+centre._
 
 #### Capability Types — Power / Session Control
 
@@ -1012,6 +1106,14 @@ _Traditional suffix extensions (foo.txt). OS-specific: `.nx` (executable), `.dso
 
 _Startup app list is a service manager config section (not a separate system). Entries: app path, arguments, whether to wait for readiness. Settings UI shows reorderable list with toggles. Entries can be shell commands for dynamic logic._
 
+_A **program** changing any of this is gated by the `startup.*` capabilities
+(§1.5 → Capability Types — Startup / Autostart): `startup.autostart_self` for
+the ordinary "run me at login" checkbox, `startup.autostart_other` for anyone
+else's entry or the ordering, `startup.script` for the shell-command entry form
+above, `startup.service` for the service units themselves, and `startup.read`
+to enumerate without changing. A human toggling an entry in the Settings list is
+a direct user gesture and needs none of them._
+
 ### 2.7 Shell and Basic Userspace Tools
 
 #### Shells
@@ -1032,6 +1134,91 @@ _Nushell as default interactive shell (structured data, Rust-native). Oils for P
 - [ ] Monitor-off utility (like nircmd monitor off)
 
 _nircmd: full feature set (see `nircmd.html`). CLI wrapper over system functions. Telnet: client only (for BBSs), no server._
+
+#### Native Process Tools (alongside `ps`/`kill`/`top`, not instead of them)
+
+_The Linux-compatible `ps`, `kill`, `top`, `pgrep`/`pkill`, `nice`/`renice` and
+`/proc` views ship as part of the coreutils port and the POSIX layer, because
+scripts depend on them byte-for-byte. But their **output formats are the
+bottleneck**: `ps` columns are a fixed vocabulary from a kernel that has no
+capabilities, no service-mediated attribution, no launch provenance, and no
+structured shutdown, so the most interesting things SlateOS knows about a
+process have nowhere to go. These native tools are the ones that can say them.
+They are the CLI counterpart of Process Explorer (§4.3) and read the same
+kernel views through the same `proc.inspect` capability (§1.5), so the two can
+never disagree. Written in Python/fastpy per the language rule; output is
+structured by default so Nushell can pipe it as a table and `--json` feeds
+anything else._
+
+- [ ] `pslist` — list processes with the columns Linux has no concept of:
+  - [ ] **Capability set** — what the process is actually allowed to do, and
+        which grants are *scoped* (which paths, which domains, which
+        extensions). The single most useful column on the system and one `ps`
+        cannot approximate; `--caps <name>` filters to holders of a grant, so
+        "who can reach the network" is one command.
+  - [ ] **Attributed resource use** — the §4.3 service-mediated view: CPU, RAM,
+        disk and network charged back to the *originating* program rather than
+        to the service that performed the syscall, with a `via <service>`
+        breakdown. `--raw` shows the kernel-visible view instead; both reconcile
+        to the same totals.
+  - [ ] **Launch provenance** — full argv, the launching process *and thread*,
+        and the launch timestamp (absolute and elapsed), from the kernel's
+        exec-time capture rather than a self-declared `/proc/pid/cmdline` the
+        process can rewrite.
+  - [ ] **Blocked-on / blocking** — what the process is waiting for (which
+        channel, which futex, which lock, which handle, which peer pid) and, the
+        other way round, who is waiting on locks *it* holds. This is what turns
+        a hung desktop into a one-line answer.
+  - [ ] **Identity and origin** — owning user, whether it is a service (and
+        which unit), whether it was started by the startup app list, its package
+        and **generation** (§5), and its code-signing status ("repo-verified",
+        "signed by X", "unsigned").
+  - [ ] **Handle and namespace view** — open channels, shared-memory regions,
+        pipes, files, and which process namespace it lives in.
+  - [ ] Tree mode (`--tree`), name/user/capability/state filters, sort by any
+        column including the attributed ones, and a `--watch` refresh.
+- [ ] `psinfo <pid|name>` — the full detail pane for one process as text: every
+      column above plus its threads, loaded libraries, resource limits, and the
+      per-resource "via which service" breakdown. What a user pastes into a bug
+      report.
+- [ ] `pstop` — the live counterpart of `pslist` (a `top`/`htop` for the same
+      data): attributed-resource ordering by default, so the row at the top is
+      the program actually responsible rather than the daemon doing its work.
+      Includes the §4.3 "top-3 attributed consumers per resource" summary line.
+- [ ] `psctl` — the acting half, one verb per capability so the tool cannot do
+      more than it was granted:
+  - [ ] `psctl stop <target>` — the **orderly** structured-shutdown IPC request
+        (§2.1), which the target may handle, delay, or decline; reports which
+        of those happened rather than pretending success. Needs `proc.signal`.
+  - [ ] `psctl kill <target>` — the refusal-proof one. Needs `proc.terminate`;
+        `--tree` is a separate scope on that grant. Warns when the target holds
+        locks others are waiting on, naming them.
+  - [ ] `psctl pause` / `psctl resume <target>` — needs `proc.suspend`; warns
+        that a frozen process keeps its locks and its committed memory.
+  - [ ] `psctl priority <target> <level>` — needs `proc.priority_other`;
+        realtime and above-own-ceiling need the elevated grant.
+  - [ ] `psctl restart <target>` — stop-then-relaunch with the *recorded* argv
+        and environment, which is only possible because launch provenance is
+        kept; falls back with a clear error when the process was spawned
+        without a recorded argv.
+  - [ ] Targets may be a pid, an exact name, a glob, a window (`--window`,
+        click-to-identify like §4.3), or a service unit. Every destructive verb
+        refuses to match more than one process unless `--all` is given, and
+        every use is audit-logged with the tool's own identity.
+- [ ] `psblame <resource>` — "what is eating my disk / network / CPU / RAM right
+      now", answered with the attributed view and the service chain spelled out
+      ("Backup.app — 200 MB/s writes via filesystem service"). The CLI form of
+      the discover-the-culprit UX.
+- [ ] `pswhy <pid>` — "why is this stuck": walks the blocked-on chain to its
+      root and prints the cycle or the ultimate blocker, including when the
+      blocker is a lock held through a service. Detects and names deadlock
+      cycles rather than leaving the user to read a wait graph.
+
+_These are additions, never replacements: `ps`, `kill`, `top` and friends keep
+their exact Linux behaviour and formats. Where a native tool and a POSIX tool
+overlap, the POSIX one is the compatibility surface and the native one is the
+honest one — and the native ones deliberately do **not** shadow the POSIX names
+on `$PATH`, so a script that says `ps` gets `ps`._
 
 #### Terminal Emulator
 - [ ] Persistent input history (searchable)
@@ -1661,13 +1848,19 @@ _Custom Python (fastpy) text editor. Editing engine is a toolkit widget (Phase 3
 
 ### 4.3 Process Explorer
 
+_Reads through `proc.inspect` and acts through `proc.priority_other` /
+`proc.suspend` / `proc.terminate` / `proc.signal` (§1.5 → Capability Types —
+Process Management). The `pslist`/`psinfo`/`pstop`/`psctl`/`psblame`/`pswhy`
+CLI tools (§2.7 → Native Process Tools) are the text counterpart of everything
+below and read the same kernel views, so the two can never disagree._
+
 - [ ] Identify process by clicking window, kill it
 - [ ] Find process by name
 - [ ] Pause, resume, kill, change priority, restart
 - [ ] Show all libraries loaded by process
 - [ ] Show all subprocesses and threads
 - [ ] Show: capabilities, running user, priority levels, app name, what launched it, is it a service, what's blocking it, what's waiting on its locks, running/paused status, full path
-- [ ] **Launch provenance (command line + who/when started it).** Each process row must surface the full launch context: (a) the *command line* it was launched with — the executable path plus every argument (argv), and if any, the parameters/flags it was passed — shown verbatim when available, and clearly marked "(no arguments)" or "(command line unavailable)" when the process was spawned without a recorded argv or has since cleared it; (b) the *originating process or thread* that launched it — the parent process (and specific thread, when the kernel records launcher thread id) resolved to a clickable identity so the user can jump straight to the launcher's row, with graceful "(launcher exited)" / "(launched by init)" fallbacks; and (c) the *launch timestamp* (wall-clock time the process was created), shown both absolutely and as an elapsed "started N ago" so the user can correlate a process with something they just did. This is read-only informational metadata; the command line is captured by the kernel at `exec`/spawn time (the same argv/envp the loader already stores) and exposed through a `system.*` process-query capability, never self-declared by the process (so it can't lie about how it was invoked). Long command lines are truncated in the row with full text on hover / in the detail pane, and are copyable.
+- [ ] **Launch provenance (command line + who/when started it).** Each process row must surface the full launch context: (a) the *command line* it was launched with — the executable path plus every argument (argv), and if any, the parameters/flags it was passed — shown verbatim when available, and clearly marked "(no arguments)" or "(command line unavailable)" when the process was spawned without a recorded argv or has since cleared it; (b) the *originating process or thread* that launched it — the parent process (and specific thread, when the kernel records launcher thread id) resolved to a clickable identity so the user can jump straight to the launcher's row, with graceful "(launcher exited)" / "(launched by init)" fallbacks; and (c) the *launch timestamp* (wall-clock time the process was created), shown both absolutely and as an elapsed "started N ago" so the user can correlate a process with something they just did. This is read-only informational metadata; the command line is captured by the kernel at `exec`/spawn time (the same argv/envp the loader already stores) and exposed through the `proc.inspect` process-query capability (§1.5), never self-declared by the process (so it can't lie about how it was invoked). Long command lines are truncated in the row with full text on hover / in the detail pane, and are copyable.
 - [ ] Switch to any window or terminal a process owns
 - [ ] System resource graphs (CPU, RAM, disk, network over time)
 - [ ] **Service-mediated resource attribution.** When a program's resource use flows through an OS service process — e.g., the program writes to a TCP socket and the network stack runs in a separate daemon, or the program opens a file and the disk I/O is performed by a filesystem service, or the program asks the audio service to mix samples — Process Explorer must attribute the resource consumption back to the *originating* program, not to the service. So a user sees "Firefox is using 4 MB/s of network" and "Slack is using 12% disk I/O" even though the kernel-visible network/disk traffic actually flows through the network/storage daemons.

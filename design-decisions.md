@@ -7292,10 +7292,12 @@ fixes, so state it: **any mutable module-level state in `posix` that a test
 writes must be per-thread on host builds.** The tell is a per-test `reset_*()`
 helper — its very existence means tests write shared state, and under libtest's
 thread-per-test model such a helper is a race, not the isolation its doc comment
-usually claims. Three shapes are now available, pick by what call sites need:
-a `Cell` behind `get`/`set` accessors (`fg_pgrp`, `host_pg`), a `Cell` of a
-copyable struct (`sys_capability::CapWords`), or an `UnsafeCell` handing out a
-raw `*mut` when sites mutate in place (`time::timer_store`, `perthread`).
+usually claims. Three shapes were used at first, picked by what call
+sites needed: a `Cell` behind `get`/`set` accessors (`fg_pgrp`, `host_pg`), a
+`Cell` of a copyable struct (`sys_capability::CapWords`), or an `UnsafeCell`
+handing out a raw `*mut` when sites mutate in place (`time::timer_store`,
+`perthread`).  The third shape won and is now a macro — see *Consolidated into
+`perprocess::process_global!`* below.
 
 The *Against* argument above applies unchanged and is worth re-reading before
 each new conversion: on the target these really are process-wide, and the host
@@ -7322,9 +7324,143 @@ pass `--test-threads=1` when testing posix" — is not enforcement: the next pla
 `cargo test -p posix` flakes again, which is precisely how this class stayed
 invisible for so long.
 
-If Cargo ever grows per-package harness configuration, this decision should be
-revisited: at that point single-threading is strictly better than 18 cfg'd
-storage modules, and the conversions could be reverted for a net simplification.
-The three already done would still be worth keeping on their own merits (they
-replaced scattered raw `unsafe` with accessors, and deleted a global mutex), but
-the remaining ~15 should not be started if that option becomes available.
+If Cargo ever grows per-package harness configuration, this decision is worth
+re-examining, but the case for reverting is now much weaker than it looked when
+this was written — at the time the estimate was "18 cfg'd storage modules" of
+bespoke code, and the answer was to not start the remaining ~15. They were all
+done, and the cost came out far lower than that: one macro plus a one-line
+invocation per table (see below). Single-threading would still remove the
+host/target divergence, which is the one genuine cost, so it remains the better
+option *in principle*; it is no longer obviously worth the churn of reverting.
+
+### Consolidated into `perprocess::process_global!` — 2026-08-12
+
+**Decided by:** Claude (autonomous)
+
+By the time the conversion reached its sixth module the cfg'd pair of storage
+arms had been hand-written ten times, in three variants, each with its own
+retelling of the rationale in a doc comment. That is the band-aid accumulation
+CLAUDE.md warns about: the eleventh copy becomes a fourth variant, and ten
+copies of a rationale drift apart.
+
+`posix/src/perprocess.rs` now states it once, as a `process_global!` macro that
+takes an accessor name, a type and a `const` initialiser and expands to a
+`static mut` on the target or a `thread_local!` on the host. Converting a table
+is one invocation and, where the module already had a `*_ptr()` accessor, zero
+call-site changes. The module is named to pair with `perthread.rs`, and its docs
+lead with the distinction between the two, which is the thing most likely to be
+confused:
+
+| | real scope | why the host build differs |
+|---|---|---|
+| `perthread` | per-**thread** | it doesn't — the target is per-thread too |
+| `perprocess` | per-**process** | libtest puts many "processes" in one process |
+
+**Modules converted** (in observed-failure order, which is how the whole effort
+was driven): `sys_capability`, `process`, `time`, `resource`, `mman`, `stdio`,
+`aio`, `fdtable`, `epoll`, `signal`, `pwd`, `unistd`, `sys_timex`,
+`linux_aio_abi`, `mqueue`, `semaphore`.
+
+**Deliberate carve-outs**, recorded in the module docs so nobody "finishes the
+job" by converting them:
+
+* `getopt.rs`'s `optarg`/`optind`/`opterr`/`optopt` are exported C ABI globals
+  whose address a caller may legitimately take. Per-thread storage would change
+  observable semantics, not just isolate tests.
+* `pthread.rs`'s thread-specific-data table is *indexed by* thread. Making its
+  storage per-thread would be a category error. (This covers the TSD table
+  *only* — it was read as covering the whole module, which is how the cancel
+  state discussed below went unexamined.)
+* `sys_fsuid.rs`'s two `AtomicU32`s are already memory-safe, have only 6 call
+  sites, and — unlike every other candidate — are touched by no other module's
+  tests, so the sharing is confined to one small test module. Converting would
+  replace safe atomic accessors with `unsafe` pointer derefs. This one is a
+  judgement call, not a principle; if it ever shows up in a hunt, convert it.
+
+**A carve-out that was wrong, and why.** `unistd.rs`'s `no_new_privs` bit was
+initially left alone with its `nnp_guard()` mutex, on the strength of that
+guard's own comment: *"the bit is in the kernel … making the bit per-thread
+would be wrong."* The very next flake hunt failed on
+`linux_seccomp::tests::…filter_with_nnp_no_cap_reaches_enosys`. The comment was
+false: `NO_NEW_PRIVS` is an `AtomicBool` in `unistd.rs`, a posix static like any
+other. Worse, it is read by *three* modules (`unistd`, `linux_seccomp`,
+`linux_landlock`) while `nnp_guard()` lives in `unistd`'s test module and can
+only serialise `unistd`'s own tests — exactly the shape of the original cap-lock
+failure this section opens with, repeated verbatim.
+
+The lesson is not about `no_new_privs`. It is that a carve-out justified by
+what a comment *claims* about state is worth nothing; check where the storage
+actually lives. Both other carve-outs above were re-verified against the code
+after this.
+
+The conversion keeps the target arm's `AtomicBool` verbatim and changes only the
+host storage, which also disposes of the objection the old comment raised — the
+product semantics on the target are untouched. The `nnp_guard()` mutex and both
+copies of the `NnpGuard` RAII wrapper (in `linux_seccomp` and `linux_landlock`)
+were deleted with it: once the bit is per-thread, they guard nothing.
+
+### `perprocess` or `perthread`? The second wrong carve-out asked a different question
+
+**Decided by:** Claude (autonomous)
+
+The same hunt that caught `no_new_privs` also caught
+`pthread::tests::test_setcanceltype_null_oldtype_succeeds`, reading a
+cancellation type another test thread had just set. It looks like one more
+instance of this section's bug, and it is not.
+
+`pthread_setcancelstate`/`setcanceltype` are specified by POSIX in terms of
+*"the calling thread"*, and a new thread is required to start `ENABLE` +
+`DEFERRED`. So the cancellation state is **genuinely per-thread**, and storing
+it in a process-global pair of atomics was a conformance bug that the *target*
+build would hit the moment a program called `pthread_create` — no test harness
+involved. A `perprocess`-style host-only split would have made the flake go away
+while leaving the real defect in place.
+
+It therefore went into [`crate::perthread`] — the block that is per-thread on
+**both** arms — not into `process_global!`. The decision rule this establishes,
+and which is now written at the top of both modules:
+
+| If the spec says… | Storage | Host build differs? |
+|---|---|---|
+| "the calling thread" | `perthread` | no — the target is per-thread too |
+| "the process" | `perprocess` | yes — a test thread stands in for a process |
+
+Both POSIX defaults are `0`, which is what let the values ride in a block whose
+whole contract is that all-zero is the valid initial state; a `const` assert
+pins the constants so a later renumbering can't silently break that invariant.
+The test-side `CancelGuard` and `reset_cancel_state_and_type()` went with it —
+and the guard could never have worked anyway, since it restored the values it
+*observed* on entry, which a concurrent test may already have changed.
+
+### The size cutoff: TLS for small tables, a lazy `Box` for large ones
+
+**Decided by:** Claude (autonomous)
+
+A wrinkle that only shows up at this scale. libtest spawns a *fresh thread per
+test* — 20k of them for this crate — and the OS allocates and zeroes a thread's
+entire static TLS block at every one of those creations. Per-thread storage is
+therefore not free in the way a single process's `static mut` is: it is paid
+20,000 times.
+
+For the tables here it is unmeasurable — `fdtable`'s 6 KiB table plus `epoll`'s
+~80 KiB across four tables moved the suite from 2.2 s to 1.91–2.02 s, i.e. into
+the noise, and in fact slightly *down*. But `fdtable`'s per-fd path table is
+1 MiB (256 fds × `PATH_MAX`), and 20k × 1 MiB is ~20 GiB of pointless memset on
+a suite that runs in two seconds.
+
+So that one table is a lazily heap-allocated `Box` inside its `thread_local!`
+instead of a const-initialised value: only the handful of threads that actually
+run an `*at`/`fchdir` test pay for it. It is allocated via
+`vec![[0u8; N]; M].into_boxed_slice()` specifically because that hits std's
+`IsZero` specialisation and becomes one `alloc_zeroed`, rather than
+materialising a 1 MiB temporary on a test thread's stack.
+
+*Against splitting the approaches:* two shapes to understand instead of one,
+and the boundary is a judgement call rather than a rule the compiler enforces.
+*For:* the alternative is either a 10x slower suite or pushing every table onto
+the heap, and the latter costs a lazy-init branch on every access to state
+that is read on the `open()`/`close()` path. The cutoff is documented in
+`process_global!`'s own doc comment ("keep values here to a few KiB; for
+anything approaching a megabyte, hand-roll a lazy `thread_local!`") so the next
+person meets the rule at the point of use rather than having to find this file.
+

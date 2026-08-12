@@ -288,14 +288,15 @@ for both the target and host builds.
 **Not verified: the suite as a whole.** Those same 40 runs failed 7 times, on
 six *other* tests, in five modules that were not touched here. See
 TD-POSIX-TEST-SHARED-STATICS-REMAINING-TIER below — same failure class, more
-statics. Do not read this entry as "the posix suite is now deterministic".
+statics. That entry is now fixed too; read the two together for the full
+picture rather than either alone.
 
 **Note for future statics.** Three separate incidents now share one cause: a
 `static`\`static mut` in `posix` that a test mutates. The rule this establishes —
 any mutable module-level state in `posix` that tests write must be per-thread on
 host builds — is recorded in design-decisions.md §110.
 
-### TD-POSIX-TEST-SHARED-STATICS-REMAINING-TIER. `cargo test -p posix` is still non-deterministic: ~15 more modules keep test-mutated state in process-globals — 2026-08-12 — 🔴 OPEN
+### TD-POSIX-TEST-SHARED-STATICS-REMAINING-TIER. `cargo test -p posix` was non-deterministic: ~15 more modules kept test-mutated state in process-globals — 2026-08-12 — ✅ FIXED 2026-08-12
 
 **What.** With the capability, process-group and timer statics converted, 40
 consecutive runs of `cargo test -p posix --target x86_64-pc-windows-gnu` still
@@ -330,11 +331,84 @@ modules — every one is a latent instance of this bug:
 `sys_timex.rs` `reset_timex_state` · `unistd.rs` `reset_hostid_for_test`
 (plus the three already converted: `process.rs`, `time.rs`, `sys_capability.rs`).
 
-**Fix.** Apply the §110 conversion to each — the work is mechanical and the
-three shapes are already in the tree. `fdtable.rs` needs thought before it is
-touched: nearly every test in the crate opens fds, so converting it is both the
-highest-value change and the one most likely to disturb tests that currently
-lean on fds another test opened.
+**Fix (applied).** All of them were converted, in observed-failure order.
+Partway through, the hand-written cfg'd storage module was replaced by a macro,
+`perprocess::process_global!` — by the sixth module the same pattern had been
+written out ten times in three variants, which is the band-aid accumulation
+CLAUDE.md warns about. With the macro, converting a table is one invocation, and
+zero call-site changes where the module already had a `*_ptr()` accessor.
+
+Order and outcome:
+
+| Module | State moved | Note |
+|---|---|---|
+| `resource`, `mman`, `stdio`, `aio` | rlimits + nice, popen table, aio table | the four observed victims from the 7/40 hunt |
+| `fdtable` | fd table, per-fd path table + lengths | the fifth victim, via `epoll::tests::test_timerfd_settime_bad_fd` |
+| `epoll` | epoll / timerfd / inotify instance tables, kernel-watch scratch | an fd's `handle` indexes these, so they had to follow `fdtable`'s scope |
+| `signal`, `pwd`, `unistd` | dispositions + blocked mask; getpwent/getgrent cursors; CWD, hostname, domain | the modules with **no** protection at all |
+| `sys_timex`, `linux_aio_abi`, `mqueue`, `semaphore` | NTP state, aio contexts, queues + descriptors, named-sem pool | already spinlock-protected, so never *unsafe* — but a lock cannot fix "fill all N slots, assert the next fails" |
+
+`fdtable` was flagged here as needing thought before being touched, on the
+theory that tests might lean on fds another test opened. They do not — the
+suite passed first try after the conversion. Its 1 MiB path table did need a
+different shape (a lazily heap-allocated `Box` rather than const-init TLS,
+because libtest creates ~20k threads and would have zeroed 1 MiB at each);
+see design-decisions.md §110, *The size cutoff*.
+
+**Not converted, deliberately.** `getopt.rs` (`optarg`/`optind`/`opterr`/
+`optopt` are exported C ABI globals whose address a caller may take),
+`pthread.rs`'s **thread-specific-data table** (it is *indexed by* thread
+already — note this covers only the TSD table, not the rest of the module; see
+the cancel-state finding below), and `sys_fsuid.rs` (two `AtomicU32`s, already
+memory-safe, 6 call sites, and touched by no other module's tests — converting
+would trade safe accessors for `unsafe` derefs). Each is documented at the site.
+
+**Two carve-outs were wrong, and a second hunt found both.** After the
+16-module conversion a fresh 40-run hunt came back **2 / 40**, one test each:
+
+| Test | Cause |
+|---|---|
+| `linux_seccomp::…::test_seccomp_phase186_filter_with_nnp_no_cap_reaches_enosys` | `unistd.rs`'s `no_new_privs` bit |
+| `pthread::tests::test_setcanceltype_null_oldtype_succeeds` | `pthread.rs`'s cancel state/type |
+
+*`no_new_privs`* was left alone because `nnp_guard()`'s comment said the bit
+lives *in the kernel*. It does not — it is an `AtomicBool` in `unistd.rs` read
+by three modules (`unistd`, `linux_seccomp`, `linux_landlock`), while the guard
+sits in `unistd`'s test module and so can only serialise `unistd`'s own tests.
+One test sets the bit and expects `ENOSYS`; a sibling clears it and expects
+`EACCES`. Converted to per-thread host storage (the target keeps the
+`AtomicBool` exactly); the mutex and *both* copies of the `NnpGuard` RAII
+wrapper in `linux_seccomp` and `linux_landlock` went with it, 30 lines each.
+
+*Cancel state* was never explicitly carved out — it was missed, because
+`pthread.rs` appeared in the do-not-convert list for an unrelated reason (its
+TSD table). It turned out not to be a `perprocess` case at all: **POSIX defines
+cancellability as a property of the calling thread**, so the sharing was a plain
+conformance bug that the target build would hit the moment a program called
+`pthread_create`, entirely independent of tests. Converting it host-only would
+have left that in place. The values moved into `crate::perthread` — the real
+per-thread block on *both* arms — and both POSIX defaults being zero satisfies
+that block's all-zero-is-valid invariant (pinned by a `const` assert). Its
+snapshot/restore `CancelGuard` and reset helper went too (17 call sites each);
+the guard could never have worked, since it restored the values it *observed*
+on entry, which a concurrent test may already have changed.
+
+The lesson generalises past the one already recorded: **a carve-out justified by
+what a comment claims about state is worth nothing — check where the storage
+actually lives**, and then check *why* it is shared. "Per-process state that
+tests happen to share" and "state that was never supposed to be process-wide at
+all" look identical in a flake report and have different fixes — the first wants
+`perprocess`, the second `perthread`.
+
+**Residual tech debt.** Four modules still carry test-only `std::sync::Mutex`
+serialisation — `sys_timex` (77 references), `linux_aio_abi` (28),
+`semaphore` (14), `mqueue` (2) — which is now redundant: the state they guard
+is per-thread. They are harmless but they are a second, now-false mechanism for
+a problem that is solved elsewhere, and their comments claim a sharing that no
+longer exists. Removing them is mechanical; it is deferred only because it is
+pure churn in currently-green tests and worth doing as its own change. Note
+removing them is also a *test*: if any of those suites fails without its lock,
+some state in that module is still shared.
 
 **Rejected: run the suite single-threaded.** `--test-threads=1` would fix all 18
 at once with no code change and no host/target divergence, and it is not slow —
@@ -347,10 +421,10 @@ wrong default for a kernel repo. A convention ("always pass `--test-threads=1`
 for posix") is not enforcement — the next plain `cargo test -p posix` flakes
 again. See design-decisions.md §110.
 
-**Until then.** A single failing test out of 20,128 in a `posix` run, in one of
-the modules above, is very likely this issue rather than a real regression —
-but *check the test name against this list* before assuming so, and add any new
-name you see.
+**If it comes back.** A single failing test out of ~20,133 in a `posix` run,
+passing in isolation, is this failure class until proven otherwise — look for
+module-level mutable state the test writes, and check it against the
+carve-out list above before assuming a real regression.
 
 ### TD-OILS-A-BUILTIN-DOES-NOT-ANSWER-ITS-OWN---HELP. `cd --help` says `--: invalid option` where bash prints the long doc — 2026-08-12 — ✅ FIXED 2026-08-12
 
@@ -19004,6 +19078,21 @@ statement of all 29 affected tests. The guard's doc comment records explicitly
 why serialising is the right fix here and why per-thread storage would be
 wrong, so a future reader doesn't "improve" it into a bug. Verified by 10
 consecutive clean parallel runs of the full posix suite (20013 tests each).
+
+> **⚠️ Superseded 2026-08-12 — the "root cause" above is wrong where it
+> matters, and the fix did not work.** The premise that serialising is
+> sufficient is false: the mutex lives in `unistd`'s *own* test module, so it
+> can only serialise `unistd`'s 29 tests, while `linux_seccomp` and
+> `linux_landlock` drive the same bit through `_test_reset_no_new_privs`
+> without ever taking it. A 40-run hunt duly failed on
+> `test_seccomp_phase186_filter_with_nnp_no_cap_reaches_enosys`. The claim that
+> "making the bit per-thread would have fixed the suite by breaking the
+> product" is also wrong: the *host* build can store it per-thread while the
+> target keeps the `AtomicBool` untouched, so the product semantics are
+> unchanged. The guard's doc comment — written to stop a future reader
+> "improving" it — is what kept the real bug alive for two weeks. Both the
+> guard and the two `NnpGuard` copies are gone; see
+> TD-POSIX-TEST-SHARED-STATICS-REMAINING-TIER.
 
 ### BUG-OILS-NAMEREF-CIRCULAR-CHAIN. A nameref cycle expands to the last name in the chain instead of to nothing, with no warning — 2026-07-28 — ✅ RESOLVED 2026-07-28
 

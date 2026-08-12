@@ -106,6 +106,20 @@ having `apply_bound_compound` set them — would close these two rows, but it
 would be a fifth mark bolted to the reduced path and would leave
 `make_empty_global` standing. Do the structural one.
 
+**Why it is not done yet.** The operand loop is ~1950 lines
+(interp.rs:45133-47081) and every one of its steps was written on the stated
+assumption that a compound operand never enters it — the local shadow above all,
+which phase 1 already made under a *different* `-g` swap than the builtin half
+runs under, so redoing it could leave two shadows of one name. Reconciling that
+is a real piece of work against 635 corpus cases, and the observable payoff is
+two matrix rows. Deferred deliberately, not by oversight: no band-aid has been
+applied in the meantime, and the entry above is the whole of the debt.
+Do it when the next divergence in the same place raises the payoff — most
+likely alongside
+TD-OILS-A-COMPOUND-LITERAL-REFUSES-A-KIND-CHANGE-THE-BUILTIN-BEFORE-IT-HAS-ALREADY-MADE
+below, which is the same asymmetry seen from the refusal side and would be
+fixed by the same change.
+
 **How it was found:** the 240-shape kind-letter matrix, while fixing
 TD-OILS-AN-UPPERCASE-G-WAS-READ-BY-THE-HALF-OF-THE-COMMAND-THAT-ONLY-EVER-READS-THE-LOWERCASE-ONE.
 

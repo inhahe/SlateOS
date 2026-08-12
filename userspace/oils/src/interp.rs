@@ -20636,6 +20636,14 @@ impl Shell {
         // Parallel `local -` save slot for this call (empty until a `local -`
         // runs). Kept in lockstep with `local_frames`.
         self.local_opt_saves.push(None);
+        // A call is a simple command like any other, so it leaves its own name
+        // in `this_command_name` for the body to be expanded under
+        // (`run_builtin:`, execute_cmd.c:4684 — before the dispatch, so a
+        // function gets it as much as a builtin does). The body's *first*
+        // command is therefore expanded with the call's name in force, and the
+        // moment any command in the body returns it is blanked and gone. See
+        // [`Shell::expand_cmd`].
+        self.expand_cmd = Some(name.to_vec());
         // Track the function name for `FUNCNAME` while the body runs, plus the
         // line at the call site (the item currently executing) for `BASH_LINENO`.
         self.fn_stack.push(name.to_vec());
@@ -47349,12 +47357,16 @@ impl Shell {
     /// right and the second wrong, silently continuing past a `readonly -a` that
     /// bash abandons.
     ///
-    /// The machinery's half names the running function when the binding it
-    /// would make is a **global** one (`declare -g` from inside a function, and
-    /// either global builtin); a declaration binding a local is untagged, as at
-    /// top level. That is the opposite way round from the readonly refusal,
-    /// which is tagged and only ever fires on a local — the two come from
-    /// different places in bash.
+    /// The machinery's half is `builtin_error`'s prolog (builtins/common.c:88),
+    /// which prints `this_command_name` — and this half is spoken during **word
+    /// expansion**, before the declaration builtin has become the command that
+    /// is running. So the name it carries belongs to whatever command is still
+    /// running *around* the expansion, and is gone the moment any sibling
+    /// command has run and returned: a function body's first command names the
+    /// call, a second one names nothing. See [`Shell::expand_cmd`], which is
+    /// that name. (That is the opposite way round from the readonly refusal,
+    /// which is the builtin's own and always tagged — the two come from
+    /// different places in bash.)
     ///
     /// `blame` is the name the refusal is *about*, which is not always the
     /// operand: an operand reached through a reference to an element is refused
@@ -47364,7 +47376,6 @@ impl Shell {
         &mut self,
         blame: &str,
         kinds: (&'static str, &'static str),
-        make_local: bool,
         cmd: &str,
     ) -> Option<Str> {
         let (from_kind, to_kind) = kinds;
@@ -47375,10 +47386,9 @@ impl Shell {
         let top = self.local_frames.is_empty();
         // `W_FORCELOCAL`: a locals-making assignment builtin, inside a function.
         let forcelocal = !top && !matches!(cmd, "readonly" | "export");
-        let tag: Str = if make_local || top {
-            Vec::new()
-        } else {
-            bfmt![&self.fn_stack.last().cloned().unwrap_or_default(), b": "]
+        let tag: Str = match &self.expand_cmd {
+            Some(name) => bfmt![name.as_slice(), b": "],
+            None => Str::new(),
         };
         self.berrln(&bfmt![self.err_prefix(), &tag, &msg]);
         self.last_status = 1;
@@ -48281,7 +48291,7 @@ impl Shell {
                 .filter(|_| !make_local)
             {
                 if let Some(kinds) = self.array_kind_conflict(&base, assoc, indexed) {
-                    let Some(held) = self.compound_kind_refusal(&base, kinds, make_local, cmd) else {
+                    let Some(held) = self.compound_kind_refusal(&base, kinds, cmd) else {
                         return Err(Flow::Discard);
                     };
                     bound.push(BoundCompound {
@@ -48528,7 +48538,7 @@ impl Shell {
             // script. Reject with bash's message and status 1, leaving the
             // variable untouched (`unset` first is the way to change kind).
             if let Some(kinds) = self.array_kind_conflict(&target, assoc, indexed) {
-                let Some(held) = self.compound_kind_refusal(&a.name, kinds, make_local, cmd) else {
+                let Some(held) = self.compound_kind_refusal(&a.name, kinds, cmd) else {
                     return Err(Flow::Discard);
                 };
                 if let Some(e) = bound.last_mut() {
@@ -75603,6 +75613,58 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             assert_eq!(out, want, "{cmd}");
             assert_eq!(st, 0, "{cmd}");
         }
+    }
+
+    /// A compound operand's kind refusal is the assignment machinery's, spoken
+    /// while the operand is still being *expanded* — so `builtin_error`'s prolog
+    /// (builtins/common.c:88) prints whatever `this_command_name` holds, which
+    /// is the command still running **around** the expansion.
+    ///
+    /// `execute_simple_command` sets it from the command word at `run_builtin:`
+    /// (execute_cmd.c:4684), before it knows whether it has a builtin or a
+    /// function, and blanks it on the way out rather than putting the old one
+    /// back (execute_cmd.c:4828). So a function body's *first* command names the
+    /// call and a second one names nothing. Corpus:
+    /// `the-tag-on-a-compound-declarations-refusal-is-whatever-command-was-still-running.sh`.
+    #[test]
+    fn the_tag_on_a_compound_refusal_is_whatever_command_was_still_running() {
+        let msg = "g: cannot convert indexed to associative array\n";
+        // (The prefix before the tag is the *frame's* source name, which is
+        // "main" for a function body and the shell's own name at top level; it
+        // is `err_prefix`, not the tag under test.)
+        for (src, want) in [
+            // The first command of a body names the call…
+            ("zzz() { readonly -A g=([k]=v); }; zzz", "main: zzz: "),
+            ("zzz() { export -A g=([k]=v); }; zzz", "main: zzz: "),
+            // …and anything that ran before it took the name away.
+            ("zzz() { true; readonly -A g=([k]=v); }; zzz", "main: "),
+            ("zzz() { local q; readonly -A g=([k]=v); }; zzz", "main: "),
+            ("zzz() { x=$(true); readonly -A g=([k]=v); }; zzz", "main: "),
+            // A pipeline does not, bash forking for every element of one.
+            ("zzz() { true | true; readonly -A g=([k]=v); }; zzz", "main: zzz: "),
+            // The innermost call is the one that named it.
+            ("i() { readonly -A g=([k]=v); }; o() { i; }; o", "main: i: "),
+            ("i() { readonly -A g=([k]=v); }; o() { true; i; }; o", "main: i: "),
+            // A group keeps it; a loop or a conditional does not.
+            ("zzz() { { readonly -A g=([k]=v); }; }; zzz", "main: zzz: "),
+            ("zzz() { for i in 1; do readonly -A g=([k]=v); done; }; zzz", "main: "),
+            ("zzz() { if true; then readonly -A g=([k]=v); fi; }; zzz", "main: "),
+            // `eval` names itself for the first command of its string.
+            ("eval \"readonly -A g=([k]=v)\"", "osh: eval: "),
+            ("eval \"true; readonly -A g=([k]=v)\"", "osh: "),
+            ("eval \"zzz() { readonly -A g=([k]=v); }; zzz\"", "main: zzz: "),
+            // At the top of a script there is no command around it at all.
+            ("readonly -A g=([k]=v)", "osh: "),
+        ] {
+            let (out, _) = run(&format!("declare -a g=(1); {{ {src}; }} 2>&1"));
+            assert_eq!(out, format!("{want}{msg}"), "{src}");
+        }
+
+        // A *local* target reads the same way: the tag is no part of what the
+        // refusal is about, and the builtin's own half after it carries its own
+        // name whatever the machinery's half carried.
+        let (out, _) = run("f() { local -a g=(9); local -A g=([k]=v); }; { f; } 2>&1");
+        assert_eq!(out, format!("main: {msg}main: local: {msg}"));
     }
 
     /// A compound operand of a declaration builtin is **three commands**

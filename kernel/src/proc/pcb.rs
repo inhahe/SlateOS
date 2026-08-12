@@ -2561,6 +2561,233 @@ pub fn get_sid(pid: ProcessId) -> Option<ProcessId> {
     PROCESS_TABLE.lock().get(&pid).map(|p| p.sid)
 }
 
+// ---------------------------------------------------------------------------
+// Controlling terminal (POSIX): the foreground process group
+// ---------------------------------------------------------------------------
+//
+// The foreground process group is a property of a *session*, not of a
+// process, which is exactly why libc could not model it.  `posix` kept it in
+// a per-process `FG_PGRP` static, so a shell handing the terminal to a job
+// and the job itself held two independent copies that could never disagree
+// out loud — the same defect class as the process-group static that
+// TD-POSIX-PROCESS-GROUPS-ARE-FAKE-FOR-NATIVE-ABI-PROGRAMS described, one
+// layer up.  Storing it here makes it observable by every member of the
+// session, which is the whole point of the concept.
+//
+// Sessions are not first-class objects in this kernel (a session is just the
+// set of processes sharing an `sid`), so the state lives in a table keyed by
+// session id rather than on a session struct.  An entry exists exactly when
+// that session has a controlling terminal; absence is POSIX's `ENOTTY`.
+//
+// ## Which terminal
+//
+// There is exactly one terminal (the console), so a session either has it or
+// has none, and no terminal *identity* needs storing.  When a second terminal
+// ever exists — a pty, a second console — this map's value grows a terminal
+// id and the acquisition rule below becomes "the terminal you opened" rather
+// than "the console".  Nothing outside this module depends on the current
+// value being just a pgid.
+
+/// Per-session controlling-terminal state, keyed by session id.
+///
+/// An entry's presence means "this session has a controlling terminal"; the
+/// value is that terminal's foreground process group.
+///
+/// Locking order: this must never be taken while [`PROCESS_TABLE`] is held.
+/// Every function below that needs both reads what it needs from the process
+/// table, drops that lock, and only then touches this one — so the two can
+/// never deadlock against each other regardless of caller.
+static CTTY_FG_PGRP: Mutex<BTreeMap<ProcessId, ProcessId>> =
+    Mutex::new(BTreeMap::new());
+
+/// Drop session `sid`'s controlling terminal, if it had one.
+///
+/// POSIX: `setsid()` creates a session with **no** controlling terminal, and
+/// a session's terminal is released when the session ends.  Returns whether
+/// an association was actually removed.
+pub fn ctty_detach(sid: ProcessId) -> bool {
+    CTTY_FG_PGRP.lock().remove(&sid).is_some()
+}
+
+/// `TIOCSCTTY`: claim the console as `pid`'s session's controlling terminal.
+///
+/// Two rules, both load-bearing:
+///   - **Only a session leader may claim.** A non-leader claiming would give
+///     the terminal to a session whose leader never asked for it.
+///   - **Only if no other session holds the console.** Otherwise any process
+///     could take the terminal away from the session currently using it.
+///
+/// Claiming a terminal the caller's session *already* holds is a no-op that
+/// succeeds, and specifically does **not** reset the foreground group: a
+/// program that calls `ioctl(TIOCSCTTY)` defensively at startup must not
+/// yank the terminal back from a job the shell foregrounded.
+///
+/// On a successful first claim the foreground group is the claimant's own
+/// group — a session leader that has just taken the terminal is by
+/// definition the only thing running on it.
+///
+/// # Errors
+/// - [`KernelError::NoSuchProcess`] if `pid` does not exist.
+/// - [`KernelError::PermissionDenied`] if `pid` is not a session leader, or
+///   another session already holds the console.
+pub fn ctty_acquire(pid: ProcessId) -> KernelResult<()> {
+    // Read what we need and drop the process table before taking the ctty
+    // lock — see the locking-order note on CTTY_FG_PGRP.
+    let (sid, pgid) = {
+        let table = PROCESS_TABLE.lock();
+        let me = table.get(&pid).ok_or(KernelError::NoSuchProcess)?;
+        (me.sid, me.pgid)
+    };
+    if sid != pid {
+        return Err(KernelError::PermissionDenied);
+    }
+
+    let mut map = CTTY_FG_PGRP.lock();
+    if map.contains_key(&sid) {
+        // Already ours — idempotent, and the foreground group is left alone.
+        return Ok(());
+    }
+    // With exactly one console, "some session holds the console" is exactly
+    // "the map is non-empty". When a second terminal exists this becomes a
+    // lookup by terminal id and the rest of this function is unchanged.
+    if !map.is_empty() {
+        return Err(KernelError::PermissionDenied);
+    }
+    map.insert(sid, pgid);
+    Ok(())
+}
+
+/// `TIOCNOTTY`: give up `pid`'s session's controlling terminal.
+///
+/// Returns the foreground process group that was in effect, so the caller
+/// can hang it up (`SIGHUP` + `SIGCONT`) — a stopped foreground job must not
+/// be left with neither a terminal nor a shell able to continue it.  Signal
+/// delivery is the syscall layer's job, not this module's.
+///
+/// Restricted to the session leader: the association is stored per session,
+/// so there is no per-process pointer a non-leader could clear for itself
+/// alone.  See `SYS_TTY_RELEASE_CTTY`'s doc and `todo.txt`.
+///
+/// # Errors
+/// - [`KernelError::NoSuchProcess`] if `pid` does not exist.
+/// - [`KernelError::PermissionDenied`] if `pid` is not the session leader.
+/// - [`KernelError::NotSupported`] (ENOTTY) if the session has no
+///   controlling terminal.
+pub fn ctty_release(pid: ProcessId) -> KernelResult<ProcessId> {
+    let sid = get_sid(pid).ok_or(KernelError::NoSuchProcess)?;
+    if sid != pid {
+        return Err(KernelError::PermissionDenied);
+    }
+    CTTY_FG_PGRP
+        .lock()
+        .remove(&sid)
+        .ok_or(KernelError::NotSupported)
+}
+
+/// Read the foreground process group of `pid`'s controlling terminal
+/// (`tcgetpgrp(3)`).
+///
+/// # Errors
+/// - [`KernelError::NoSuchProcess`] if `pid` does not exist.
+/// - [`KernelError::NotSupported`] (ENOTTY) if `pid`'s session has no
+///   controlling terminal.
+pub fn ctty_get_fg_pgrp(pid: ProcessId) -> KernelResult<ProcessId> {
+    // Read the session id and release the process table *before* taking the
+    // ctty lock — see the locking-order note on CTTY_FG_PGRP.
+    let sid = get_sid(pid).ok_or(KernelError::NoSuchProcess)?;
+    CTTY_FG_PGRP
+        .lock()
+        .get(&sid)
+        .copied()
+        .ok_or(KernelError::NotSupported)
+}
+
+/// Set the foreground process group of `pid`'s controlling terminal
+/// (`tcsetpgrp(3)`).
+///
+/// POSIX requires `pgid` to name a process group **in the caller's own
+/// session**: the terminal may only be handed to a job of the session that
+/// owns it, or any process could steal another session's terminal by naming
+/// one of its groups.  A group with no live member is rejected too — handing
+/// the terminal to a group that no longer exists would wedge it, since
+/// nothing would remain to hand it back.
+///
+/// # Errors
+/// - [`KernelError::NoSuchProcess`] if `pid` does not exist.
+/// - [`KernelError::NotSupported`] (ENOTTY) if `pid`'s session has no
+///   controlling terminal.
+/// - [`KernelError::InvalidArgument`] if `pgid` is 0.
+/// - [`KernelError::PermissionDenied`] if `pgid` names no live process group
+///   in the caller's session.
+pub fn ctty_set_fg_pgrp(pid: ProcessId, pgid: ProcessId) -> KernelResult<()> {
+    if pgid == 0 {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    // Resolve the caller's session and validate the destination group in one
+    // pass over the process table, then drop it before locking the ctty map.
+    let (sid, group_ok) = {
+        let table = PROCESS_TABLE.lock();
+        let me = table.get(&pid).ok_or(KernelError::NoSuchProcess)?;
+        let sid = me.sid;
+        let ok = table
+            .values()
+            .any(|p| p.pgid == pgid && p.sid == sid && p.state != ProcessState::Zombie);
+        (sid, ok)
+    };
+
+    let mut map = CTTY_FG_PGRP.lock();
+    // Check for the terminal before the group, so a process with no terminal
+    // at all gets ENOTTY rather than a permission verdict about a group it
+    // was never entitled to name.
+    let slot = map.get_mut(&sid).ok_or(KernelError::NotSupported)?;
+    if !group_ok {
+        return Err(KernelError::PermissionDenied);
+    }
+    *slot = pgid;
+    Ok(())
+}
+
+/// The console's foreground process group, whoever owns it — or `None` if
+/// no session currently holds the console.
+///
+/// This is the *terminal's* view rather than a process's: the console
+/// driver needs to know which group a typed `^C` belongs to, and it has no
+/// caller process to ask on behalf of.  With exactly one terminal there is
+/// at most one entry in the map, so "the console's foreground group" and
+/// "the only entry's value" are the same thing; when a second terminal
+/// exists this takes a terminal id instead of scanning.
+///
+/// This exists so the console keeps **no separate copy**.  It used to: a
+/// `tty::FOREGROUND_PGID` atomic held the group `^C` was delivered to while
+/// the Linux shim's `TIOCSPGRP` wrote only there and libc's `tcsetpgrp`
+/// wrote only to the userspace static, so the group that received `^C` and
+/// the group userspace believed was foreground were two unrelated values.
+#[must_use]
+pub fn ctty_console_fg_pgrp() -> Option<ProcessId> {
+    CTTY_FG_PGRP.lock().values().next().copied()
+}
+
+/// Whether `pid` is running in the **background** with respect to its
+/// controlling terminal — i.e. it has one and its process group is not the
+/// foreground group.
+///
+/// This is the predicate behind `SIGTTIN`/`SIGTTOU`: a background process
+/// that reads from (or, with `TOSTOP`, writes to) the terminal must be
+/// stopped rather than allowed to race the foreground job for the input.
+/// Returns `false` when the process has no controlling terminal, since a
+/// process with no terminal cannot be in its background.
+#[must_use]
+pub fn ctty_is_background(pid: ProcessId) -> bool {
+    let Some((pgid, sid)) = PROCESS_TABLE.lock().get(&pid).map(|p| (p.pgid, p.sid)) else {
+        return false;
+    };
+    match CTTY_FG_PGRP.lock().get(&sid) {
+        Some(&fg) => fg != pgid,
+        None => false,
+    }
+}
+
 /// `setpgid(target, pgid)` core: move `target` into process group `pgid`,
 /// enforcing the POSIX/Linux permission and session rules.
 ///
@@ -2654,18 +2881,31 @@ pub fn set_pgid(
 /// - [`KernelError::NoSuchProcess`] if `pid` doesn't exist.
 /// - [`KernelError::PermissionDenied`] if `pid` already leads a group.
 pub fn setsid(pid: ProcessId) -> KernelResult<ProcessId> {
-    let mut table = PROCESS_TABLE.lock();
-    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
-    // A process that already leads a process group cannot start a new
-    // session (Linux: `if (group_leader->signal->leader) return -EPERM`
-    // is approximated by the pgid==pid group-leader check, since for a
-    // single-threaded model a group leader is the only one that would
-    // collide).
-    if proc.pgid == pid {
-        return Err(KernelError::PermissionDenied);
+    {
+        let mut table = PROCESS_TABLE.lock();
+        let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+        // A process that already leads a process group cannot start a new
+        // session (Linux: `if (group_leader->signal->leader) return -EPERM`
+        // is approximated by the pgid==pid group-leader check, since for a
+        // single-threaded model a group leader is the only one that would
+        // collide).
+        if proc.pgid == pid {
+            return Err(KernelError::PermissionDenied);
+        }
+        proc.sid = pid;
+        proc.pgid = pid;
     }
-    proc.sid = pid;
-    proc.pgid = pid;
+
+    // POSIX: the new session has **no** controlling terminal — that is the
+    // main reason daemons call setsid(). The new sid is this pid, and a live
+    // process cannot already be a session leader (rejected above), so any
+    // entry under this key belongs to a *dead* session whose leader's pid has
+    // since been recycled. Clearing it unconditionally is therefore both the
+    // POSIX behaviour and the fix for that recycling hazard.
+    //
+    // Deliberately outside the block above: the process-table lock is dropped
+    // first, per the locking order documented on CTTY_FG_PGRP.
+    ctty_detach(pid);
     Ok(pid)
 }
 
@@ -5698,7 +5938,28 @@ pub fn destroy(pid: ProcessId) {
         for vma in &proc.vmas {
             vma_release_backing(vma);
         }
+        // A controlling terminal belongs to a session, so it outlives the
+        // session *leader* but not the session itself. Once this process is
+        // gone, if nobody is left in its session the association would leak —
+        // and worse, a later process whose pid recycled into that sid would
+        // inherit a terminal it never acquired. Checked here rather than in
+        // the zombie transition because a zombie is still a session member.
+        ctty_release_if_session_empty(proc.sid);
         destroy_process_resources(pid, proc.pml4_phys, &proc.ipc_handles, &proc.initial_fds);
+    }
+}
+
+/// Drop session `sid`'s controlling terminal if no process remains in it.
+///
+/// Called when a process leaves the table for good. Safe to call for a
+/// session that never had a terminal, and safe to call when other members
+/// survive — in both cases it does nothing.
+fn ctty_release_if_session_empty(sid: ProcessId) {
+    // Read the survivor count under the process-table lock, then release it
+    // before touching the ctty map (see the CTTY_FG_PGRP locking order).
+    let still_populated = PROCESS_TABLE.lock().values().any(|p| p.sid == sid);
+    if !still_populated {
+        ctty_detach(sid);
     }
 }
 
@@ -6579,6 +6840,7 @@ pub fn self_test() -> KernelResult<()> {
     test_io_accounting()?;
     test_job_control_state()?;
     test_process_groups()?;
+    test_controlling_terminal()?;
     test_orphaned_pgrp()?;
     test_mmap_commit_policy()?;
     test_reserve_unmapped_area()?;
@@ -7146,6 +7408,200 @@ fn test_process_groups() -> KernelResult<()> {
     destroy(parent);
 
     serial_println!("[proc]   process-group/session model: OK");
+    Ok(())
+}
+
+/// Test: the controlling terminal's foreground process group
+/// ([`ctty_acquire`] / [`ctty_get_fg_pgrp`] / [`ctty_set_fg_pgrp`] /
+/// [`ctty_is_background`] / [`ctty_release`]).
+///
+/// The decisive check is (3): a *second* process in the session reads the
+/// same foreground group the session leader set. That is the property the
+/// old userspace `FG_PGRP` static could not have — each process held its own
+/// copy, so a shell handing the terminal to a job and the job itself could
+/// never disagree out loud, and neither could ever be wrong in a way a test
+/// could see. Everything else here guards the rules that make the handoff
+/// safe: only a session leader may claim the console and only if it is free
+/// (2, 5), only a group in your own session may receive the terminal (5), a
+/// group with no live member may not (4, 6), `setsid` leaves you with no
+/// terminal at all (7), and the association is released both by an explicit
+/// `TIOCNOTTY` (9) and when the last member of the session goes away (10).
+fn test_controlling_terminal() -> KernelResult<()> {
+    fn fail(msg: &str, pids: &[ProcessId]) -> KernelResult<()> {
+        serial_println!("[proc]   FAIL: ctty: {}", msg);
+        for &p in pids {
+            destroy(p);
+        }
+        Err(KernelError::InternalError)
+    }
+
+    // (1) A fresh session has no controlling terminal: ENOTTY, not a bogus
+    //     pgid of 0. A daemon must be able to tell "no terminal" from
+    //     "terminal whose foreground group is nobody".
+    let shell = create("ctty-shell", 0);
+    set_running(shell)?;
+    if ctty_get_fg_pgrp(shell) != Err(KernelError::NotSupported) {
+        return fail("fresh session should have no controlling terminal", &[shell]);
+    }
+    if ctty_set_fg_pgrp(shell, shell) != Err(KernelError::NotSupported) {
+        return fail("tcsetpgrp with no terminal should be ENOTTY", &[shell]);
+    }
+    // A process that does not exist is ESRCH, distinct from ENOTTY above.
+    if ctty_get_fg_pgrp(9_999_999) != Err(KernelError::NoSuchProcess) {
+        return fail("tcgetpgrp on an unknown pid should be ESRCH", &[shell]);
+    }
+
+    // (2) Claim the console (`TIOCSCTTY`). The shell is its own session
+    //     leader and the console is free, so this succeeds and makes the
+    //     shell's own group the foreground one.
+    ctty_acquire(shell)?;
+    if ctty_get_fg_pgrp(shell) != Ok(shell) {
+        return fail("tcgetpgrp did not report the claimed foreground group", &[shell]);
+    }
+
+    // (3) THE POINT: a job in the same session sees the *same* value,
+    //     because the state belongs to the session and not to either process.
+    let job = fork_create(shell, 0, Vec::new(), Vec::new())?;
+    set_running(job)?;
+    if ctty_get_fg_pgrp(job) != Ok(shell) {
+        return fail("a second process in the session read a different fg group", &[shell, job]);
+    }
+
+    // Put the job in its own group, as a shell does before running it, and
+    // check the background predicate both ways round.
+    set_pgid(shell, job, job)?;
+    if !ctty_is_background(job) {
+        return fail("a job outside the fg group should be background", &[shell, job]);
+    }
+    if ctty_is_background(shell) {
+        return fail("the fg group's own members should not be background", &[shell, job]);
+    }
+
+    // Hand the terminal to the job — the foreground/background verdict must
+    // flip for *both* processes off one write.
+    ctty_set_fg_pgrp(shell, job)?;
+    if ctty_get_fg_pgrp(job) != Ok(job) || ctty_get_fg_pgrp(shell) != Ok(job) {
+        return fail("tcsetpgrp was not visible to both session members", &[shell, job]);
+    }
+    if ctty_is_background(job) || !ctty_is_background(shell) {
+        return fail("foreground/background did not flip after the handoff", &[shell, job]);
+    }
+
+    // (4) Argument gates: pgid 0 is not a group, and handing the terminal to
+    //     a group with no live member would wedge it — nothing would be left
+    //     to hand it back.
+    if ctty_set_fg_pgrp(shell, 0) != Err(KernelError::InvalidArgument) {
+        return fail("tcsetpgrp(0) should be EINVAL", &[shell, job]);
+    }
+    if ctty_set_fg_pgrp(shell, 7_654_321) != Err(KernelError::PermissionDenied) {
+        return fail("tcsetpgrp to an empty group should be EPERM", &[shell, job]);
+    }
+
+    // (5) Terminal theft: `stranger` leads its own session, so its group is
+    //     live but not ours. Naming it must be refused, or any process could
+    //     take another session's terminal. And the stranger, having no
+    //     terminal of its own, still gets ENOTTY — our attachment is not
+    //     visible outside the session.
+    let stranger = create("ctty-stranger", 0);
+    set_running(stranger)?;
+    if ctty_set_fg_pgrp(shell, stranger) != Err(KernelError::PermissionDenied) {
+        return fail("tcsetpgrp to another session's group should be EPERM", &[shell, job, stranger]);
+    }
+    if ctty_get_fg_pgrp(stranger) != Err(KernelError::NotSupported) {
+        return fail("another session saw our controlling terminal", &[shell, job, stranger]);
+    }
+    if ctty_is_background(stranger) {
+        return fail("a process with no terminal cannot be in its background", &[shell, job, stranger]);
+    }
+    // Nor may the stranger simply claim the console out from under us, even
+    // though it is a session leader in good standing: the console is taken.
+    if ctty_acquire(stranger) != Err(KernelError::PermissionDenied) {
+        return fail("a second session claimed the console", &[shell, job, stranger]);
+    }
+    // And a non-leader may not claim at all. `job` is in the shell's session
+    // (sid == shell), so it fails the leader test rather than the free test.
+    if ctty_acquire(job) != Err(KernelError::PermissionDenied) {
+        return fail("a non-session-leader claimed the console", &[shell, job, stranger]);
+    }
+    // Re-claiming a terminal our session already holds succeeds and must NOT
+    // reset the foreground group — a program calling TIOCSCTTY defensively
+    // at startup must not yank the terminal back from the foreground job.
+    ctty_acquire(shell)?;
+    if ctty_get_fg_pgrp(shell) != Ok(job) {
+        return fail("a redundant TIOCSCTTY reset the foreground group", &[shell, job, stranger]);
+    }
+
+    // (6) A zombie group member does not keep the group eligible. Kill the
+    //     job's group off and confirm the terminal cannot be handed to it.
+    //     (The shell keeps the terminal it already holds — releasing it is
+    //     the shell's job, not the kernel's.)
+    add_thread(job, 91_010)?;
+    let (became_zombie, _wake, _any) =
+        remove_thread(job, 91_010, ThreadExitAccounting::default())?;
+    if !became_zombie || state(job) != Some(ProcessState::Zombie) {
+        return fail("could not park the job as a zombie", &[shell, job, stranger]);
+    }
+    if ctty_set_fg_pgrp(shell, job) != Err(KernelError::PermissionDenied) {
+        return fail("tcsetpgrp to an all-zombie group should be EPERM", &[shell, job, stranger]);
+    }
+
+    // (7) `setsid` leaves the new session with no controlling terminal, and
+    //     leaves the *old* session's terminal alone.
+    ctty_set_fg_pgrp(shell, shell)?;
+    let daemon = fork_create(shell, 0, Vec::new(), Vec::new())?;
+    set_running(daemon)?;
+    setsid(daemon)?;
+    if ctty_get_fg_pgrp(daemon) != Err(KernelError::NotSupported) {
+        return fail("setsid did not drop the controlling terminal", &[shell, job, stranger, daemon]);
+    }
+    if ctty_get_fg_pgrp(shell) != Ok(shell) {
+        return fail("setsid disturbed the old session's terminal", &[shell, job, stranger, daemon]);
+    }
+
+    // (9) `TIOCNOTTY`: only the session leader may release, and the release
+    //     reports the foreground group so the caller can hang it up. The
+    //     `daemon` is in its own session with no terminal, so it gets ENOTTY
+    //     rather than a permission verdict about someone else's terminal.
+    if ctty_release(daemon) != Err(KernelError::NotSupported) {
+        return fail("TIOCNOTTY with no terminal should be ENOTTY", &[shell, job, stranger, daemon]);
+    }
+    let rejoined = fork_create(shell, 0, Vec::new(), Vec::new())?;
+    set_running(rejoined)?;
+    if ctty_release(rejoined) != Err(KernelError::PermissionDenied) {
+        return fail("a non-leader released the session's terminal",
+            &[shell, job, stranger, daemon, rejoined]);
+    }
+    if ctty_release(shell) != Ok(shell) {
+        return fail("TIOCNOTTY did not report the foreground group it dropped",
+            &[shell, job, stranger, daemon, rejoined]);
+    }
+    // Gone for the whole session, not just the leader.
+    if ctty_get_fg_pgrp(rejoined) != Err(KernelError::NotSupported) {
+        return fail("TIOCNOTTY left the terminal attached for other members",
+            &[shell, job, stranger, daemon, rejoined]);
+    }
+    // Released means free: another session may now claim it.
+    ctty_acquire(stranger)?;
+    if ctty_get_fg_pgrp(stranger) != Ok(stranger) {
+        return fail("the console was not reclaimable after TIOCNOTTY",
+            &[shell, job, stranger, daemon, rejoined]);
+    }
+
+    // (10) The association is released when the session's last member goes.
+    //      Observable through `ctty_detach`'s return: after the cleanup in
+    //      `destroy` there is nothing left to remove. Without it the entry
+    //      would leak, and a future process whose pid recycled `stranger`'s
+    //      would inherit a terminal it never opened.
+    destroy(rejoined);
+    destroy(daemon);
+    destroy(stranger);
+    destroy(job);
+    destroy(shell);
+    if ctty_detach(stranger) || ctty_detach(shell) {
+        return fail("controlling terminal leaked after the session emptied", &[]);
+    }
+
+    serial_println!("[proc]   controlling terminal (fg process group): OK");
     Ok(())
 }
 

@@ -35,7 +35,6 @@
 // are wired incrementally; not every accessor has an in-tree caller yet.
 #![allow(dead_code)]
 
-use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
 /// Number of control characters in the Linux *kernel* `struct termios`
@@ -558,27 +557,27 @@ impl PendingLine {
 /// Leftover bytes of a canonical line that overflowed a small reader buffer.
 static PENDING: Mutex<PendingLine> = Mutex::new(PendingLine::new());
 
-/// The process group ID currently in the *foreground* of the console — the
-/// group that owns the terminal for the purpose of job control.  A `^C`/`^\`
-/// under `ISIG` delivers `SIGINT`/`SIGQUIT` to this group (see
-/// [`ConsoleRead::Signal`]); `TIOCGPGRP`/`TIOCSPGRP` read and set it.
+/// Read the console's foreground process-group ID — the group that owns the
+/// terminal for the purpose of job control.  A `^C`/`^\` under `ISIG`
+/// delivers `SIGINT`/`SIGQUIT` to this group (see [`ConsoleRead::Signal`]).
 ///
-/// `0` means "no foreground group set" (the kernel-startup / no-shell state),
-/// in which case a generated terminal signal has no group to target and is
+/// `0` means "no foreground group" — either no session holds the console
+/// (the kernel-startup / no-shell state) or the holder has released it — in
+/// which case a generated terminal signal has no group to target and is
 /// dropped.  This mirrors Linux's `tty->pgrp`, which an interactive shell
 /// installs via `tcsetpgrp(3)` for each job it foregrounds.
-static FOREGROUND_PGID: AtomicU64 = AtomicU64::new(0);
-
-/// Read the console's foreground process-group ID (0 if none is set).
+///
+/// This module deliberately keeps **no storage** of its own for it.  It used
+/// to own a `FOREGROUND_PGID` atomic, which made the foreground group two
+/// unrelated values: the Linux shim's `TIOCSPGRP` wrote here, libc's
+/// `tcsetpgrp` wrote to a userspace static, and neither could see the other
+/// — so the group that received `^C` and the group userspace believed was in
+/// the foreground could disagree indefinitely.  The single copy now lives
+/// with the session that holds the terminal, in `proc::pcb`, and this is a
+/// derived read of it.
 #[must_use]
 pub fn foreground_pgid() -> u64 {
-    FOREGROUND_PGID.load(Ordering::Relaxed)
-}
-
-/// Set the console's foreground process-group ID (`tcsetpgrp(3)` /
-/// `TIOCSPGRP`).  A value of `0` clears the foreground group.
-pub fn set_foreground_pgid(pgid: u64) {
-    FOREGROUND_PGID.store(pgid, Ordering::Relaxed);
+    crate::proc::pcb::ctty_console_fg_pgrp().unwrap_or(0)
 }
 
 /// Outcome of a console [`console_read`].
@@ -966,18 +965,19 @@ pub fn self_test() {
         crate::serial_println!("[tty]   pending-line chunked delivery: OK");
     }
 
-    // Foreground process group (job control): set/get round-trips and 0 clears.
+    // Foreground process group (job control).  There is nothing to set here
+    // any more: the value is owned by whichever session holds the console
+    // (`proc::pcb`'s controlling-terminal table), and this module only reads
+    // it.  What is worth asserting is that the read agrees with that table
+    // rather than caching — if this module ever reacquires storage of its
+    // own, the two would drift and `^C` would go to the wrong job.
     {
-        let saved = foreground_pgid();
-        set_foreground_pgid(0);
-        assert_eq!(foreground_pgid(), 0, "0 clears the foreground group");
-        set_foreground_pgid(4242);
-        assert_eq!(foreground_pgid(), 4242, "foreground pgid round-trips");
-        set_foreground_pgid(0);
-        assert_eq!(foreground_pgid(), 0, "foreground pgid re-cleared");
-        // Restore whatever the running system had installed (none, at boot).
-        set_foreground_pgid(saved);
-        crate::serial_println!("[tty]   foreground pgrp set/get: OK");
+        assert_eq!(
+            foreground_pgid(),
+            crate::proc::pcb::ctty_console_fg_pgrp().unwrap_or(0),
+            "console foreground pgrp must be a derived read of the ctty table"
+        );
+        crate::serial_println!("[tty]   foreground pgrp is session-owned: OK");
     }
 
     crate::serial_println!("[tty] Self-test passed.");

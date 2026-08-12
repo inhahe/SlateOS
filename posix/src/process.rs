@@ -503,7 +503,7 @@ pub extern "C" fn gettid() -> PidT {
 }
 
 // ---------------------------------------------------------------------------
-// Process groups / sessions
+// Process groups / sessions / the controlling terminal
 // ---------------------------------------------------------------------------
 //
 // Process-group and session membership lives in the *kernel* process
@@ -520,64 +520,22 @@ pub extern "C" fn gettid() -> PidT {
 // so `killpg` could not reach the child and the parent and child disagreed
 // about the child's own group.  The statics are gone; there is now one
 // source of truth shared by both ABIs.
-
-/// Storage for the foreground process group of the controlling terminal
-/// (set by `tcsetpgrp`).  `0` is the not-yet-initialized sentinel; real
-/// PIDs are >= 1.
-///
-/// Still userspace-only: the kernel has no notion of a controlling
-/// terminal or its foreground group yet, and without kernel suspend there
-/// is no `SIGTTIN`/`SIGTTOU` stop to enforce against it anyway.  Tracked
-/// in `known-issues.md`; unlike the PGID/SID statics this one is not
-/// *wrong*, merely local — no other process can observe or contradict it.
-///
-/// On the target that "local" scope is the process, so a plain static is
-/// the right model.  On host it is per-*thread*: `cargo test` runs every
-/// test on its own thread inside one process, so a process-global here
-/// makes each test's `reset_pg()` visible to every concurrently-running
-/// test.  Same remedy, and same reasoning, as the capability words in
-/// `sys_capability` (design-decisions.md §110) and the libc scratch
-/// buffers in `perthread`.
-#[cfg(target_os = "none")]
-mod fg_pgrp {
-    use super::PidT;
-    static mut FG_PGRP: PidT = 0;
-    pub(super) fn get() -> PidT {
-        // SAFETY: single-address-space process, no concurrency.
-        unsafe { core::ptr::addr_of!(FG_PGRP).read() }
-    }
-    pub(super) fn set(v: PidT) {
-        // SAFETY: single-address-space process, no concurrency.
-        unsafe { core::ptr::addr_of_mut!(FG_PGRP).write(v) }
-    }
-}
-
-#[cfg(not(target_os = "none"))]
-mod fg_pgrp {
-    use super::PidT;
-    std::thread_local! {
-        static FG_PGRP: core::cell::Cell<PidT> = const { core::cell::Cell::new(0) };
-    }
-    // `try_with` rather than `with`: a value read during thread-local
-    // teardown must degrade to the uninitialized sentinel, not panic.
-    pub(super) fn get() -> PidT {
-        FG_PGRP.try_with(core::cell::Cell::get).unwrap_or(0)
-    }
-    pub(super) fn set(v: PidT) {
-        let _ = FG_PGRP.try_with(|c| c.set(v));
-    }
-}
-
-/// Ensure the foreground process group is initialized (called before any
-/// terminal getter).
-///
-/// On first call, sets it to our PID: before any `tcsetpgrp`, the process
-/// reading the terminal is by definition the foreground one.
-fn ensure_pg_init() {
-    if fg_pgrp::get() == 0 {
-        fg_pgrp::set(getpid());
-    }
-}
+//
+// The **foreground process group** (`tcgetpgrp`/`tcsetpgrp`) was the last
+// holdout: it kept a per-process `FG_PGRP` static after the group/session
+// ones were removed, on the reasoning that it was "local rather than wrong"
+// — nothing else could observe or contradict it.  That was the defect, not
+// the mitigation.  The foreground group is a property of a *session*, so a
+// shell handing the terminal to a job and the job asking whether it is in
+// the foreground held two independent copies and could never disagree out
+// loud; the one question the concept exists to answer was unanswerable.  It
+// now lives in the kernel behind `SYS_TTY_{GET,SET}_PGRP` (537/538), keyed
+// by session id, along with the POSIX rules that make a handoff safe.
+//
+// Still missing, and deliberately: `SIGTTIN`/`SIGTTOU` are not delivered to
+// a background process that touches the terminal, because no terminal can
+// deliver input yet.  The state is now correct and shared; the enforcement
+// arrives with the tty driver.  See `todo.txt`.
 
 /// Map a process-group syscall failure to the errno POSIX specifies for
 /// `setpgid(2)`/`getpgid(2)`/`setsid(2)`.
@@ -692,12 +650,75 @@ mod host_pg {
         pid
     }
 
-    /// `setsid()`: become leader of a new session and group.
+    /// `setsid()`: become leader of a new session and group.  POSIX also
+    /// says the new session has **no** controlling terminal, which the
+    /// kernel does for the target build; mirror it here.
     pub fn set_sid() -> PidT {
         let us = super::getpid();
         set_sid_raw(us);
         set_pgid_raw(us);
+        ctty_detach();
         us
+    }
+
+    std::thread_local! {
+        /// Foreground process group of the host double's controlling
+        /// terminal, or 0 for "no controlling terminal" (ENOTTY).
+        static CTTY_FG: Cell<PidT> = const { Cell::new(0) };
+        /// Whether [`CTTY_FG`] has been seeded.  Without this, the
+        /// "not yet initialized" and "detached by setsid" states would
+        /// share the value 0 and `setsid` would appear to do nothing.
+        static CTTY_SEEDED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// On first use the process has a controlling terminal whose foreground
+    /// group is itself — before any `tcsetpgrp`, the process reading the
+    /// terminal is by definition the foreground one.
+    ///
+    /// A failed `try_with` (thread-local teardown) reports "already seeded"
+    /// so nothing calls `getpid()` on a dying thread.
+    fn ensure_ctty_init() {
+        if CTTY_SEEDED.try_with(Cell::get).unwrap_or(true) {
+            return;
+        }
+        let us = super::getpid();
+        let _ = CTTY_SEEDED.try_with(|c| c.set(true));
+        let _ = CTTY_FG.try_with(|c| c.set(us));
+    }
+
+    /// `tcgetpgrp()`: the foreground group, or 0 for ENOTTY.
+    pub fn ctty_fg() -> PidT {
+        ensure_ctty_init();
+        CTTY_FG.try_with(Cell::get).unwrap_or(0)
+    }
+
+    /// `tcsetpgrp()`: returns whether we had a terminal to hand over.
+    ///
+    /// The kernel additionally requires `pgrp` to name a live group in the
+    /// caller's own session; the host has no other processes, so that gate
+    /// cannot be modelled here and is covered by the kernel's
+    /// `pcb::test_controlling_terminal` instead.
+    pub fn ctty_set_fg(pgrp: PidT) -> bool {
+        ensure_ctty_init();
+        if CTTY_FG.try_with(Cell::get).unwrap_or(0) == 0 {
+            return false;
+        }
+        let _ = CTTY_FG.try_with(|c| c.set(pgrp));
+        true
+    }
+
+    /// Drop the controlling terminal (`setsid`, or a test reset).
+    pub fn ctty_detach() {
+        let _ = CTTY_SEEDED.try_with(|c| c.set(true));
+        let _ = CTTY_FG.try_with(|c| c.set(0));
+    }
+
+    /// Give the caller a controlling terminal whose foreground group is
+    /// `pgrp`.  Test-support only: on the target the kernel attaches the
+    /// console to the initial session at boot.
+    pub fn ctty_attach(pgrp: PidT) {
+        let _ = CTTY_SEEDED.try_with(|c| c.set(true));
+        let _ = CTTY_FG.try_with(|c| c.set(pgrp));
     }
 }
 
@@ -867,32 +888,91 @@ pub extern "C" fn setsid() -> PidT {
             errno::set_errno(pgid_errno(ret));
             return -1;
         }
-        // A new session leader is also the terminal's foreground group as
-        // far as this process can tell: it has no controlling terminal
-        // yet, so nothing else can claim the foreground.
+        // The new session has no controlling terminal — the kernel drops
+        // the association as part of the syscall, so there is nothing to
+        // mirror here.  (This crate used to set a local `FG_PGRP` to the
+        // new SID, which claimed the opposite: that we were the foreground
+        // group of a terminal we had just given up.)
         #[allow(clippy::cast_possible_truncation)]
-        let sid = ret as PidT;
-        fg_pgrp::set(sid);
-        sid
+        {
+            ret as PidT
+        }
     }
     #[cfg(not(target_os = "none"))]
     {
-        let sid = host_pg::set_sid();
-        fg_pgrp::set(sid);
-        sid
+        host_pg::set_sid()
     }
+}
+
+/// Map a controlling-terminal syscall failure to the errno POSIX specifies
+/// for `tcgetpgrp(3)`/`tcsetpgrp(3)`.
+///
+/// Differs from [`pgid_errno`] in one place that matters: the kernel's
+/// `NotSupported` means "your session has no controlling terminal", which
+/// POSIX spells `ENOTTY` — not the generic `ENOTSUP` that
+/// `errno::translate` would produce.  A shell distinguishes the two: ENOTTY
+/// means "I am not interactive, skip job control", while ENOTSUP would look
+/// like a missing kernel feature.  The unknown-failure fallback is `ENOTTY`
+/// for the same reason it is `ESRCH` in `pgid_errno`: it is the conservative
+/// reading, and the one a caller can act on.
+#[cfg_attr(not(target_os = "none"), allow(dead_code))]
+pub(crate) fn ctty_errno(ret: i64) -> i32 {
+    #[allow(clippy::match_same_arms)]
+    match ret {
+        errno::native::NOT_SUPPORTED => errno::ENOTTY,
+        errno::native::PERMISSION_DENIED => errno::EPERM,
+        errno::native::INVALID_ARGUMENT => errno::EINVAL,
+        errno::native::NO_SUCH_PROCESS => errno::ESRCH,
+        _ => errno::ENOTTY,
+    }
+}
+
+/// Host-build backing for `ioctl(fd, TIOCSCTTY)` — see
+/// [`crate::ioctl`]'s `handle_tiocsctty`.
+///
+/// The double always succeeds: it has exactly one "session" per thread, so
+/// neither POSIX gate the kernel enforces (session leader only; the console
+/// must be free) has anything to bite on here.  Those are covered by the
+/// kernel's `pcb::test_controlling_terminal`.  What this *does* model is the
+/// part the host tests need: after a claim, the session has a terminal whose
+/// foreground group is us.
+#[cfg(not(target_os = "none"))]
+pub(crate) fn host_ctty_acquire() -> i32 {
+    host_pg::ctty_attach(host_pg::get_pgid(0));
+    0
+}
+
+/// Host-build backing for `ioctl(fd, TIOCNOTTY)`.
+///
+/// Models the one rule that is observable without other processes: you
+/// cannot give up a terminal you do not have.  The `SIGHUP`/`SIGCONT`
+/// hangup the kernel performs needs a process group to signal, so it has no
+/// host analogue.
+#[cfg(not(target_os = "none"))]
+pub(crate) fn host_ctty_release() -> i32 {
+    if host_pg::ctty_fg() == 0 {
+        errno::set_errno(errno::ENOTTY);
+        return -1;
+    }
+    host_pg::ctty_detach();
+    0
 }
 
 /// Get the foreground process group ID of a terminal.
 ///
-/// Returns the PGID last set by `tcsetpgrp()`, defaulting to our own
-/// PID.  Validates `fd`: Linux's `tcgetpgrp` returns -1/EBADF for a
-/// closed fd before consulting the controlling terminal.  Since we
-/// don't track which fds are terminals, an open non-tty fd accepts the
-/// call (matches Linux ENOTTY-equivalent leniency for our stub).
+/// The value lives in the *kernel*, keyed by our session, so a shell and
+/// the job it foregrounded read the same one — see the section comment
+/// above and `kernel/src/proc/pcb.rs`'s controlling-terminal section.
+///
+/// Validates `fd` first: Linux's `tcgetpgrp` returns -1/EBADF for a closed
+/// fd before consulting the controlling terminal.  We do not track which
+/// fds are terminals, so an open non-tty fd is accepted and the answer
+/// comes from the session; the kernel reports `ENOTTY` if it has no
+/// terminal at all.
 ///
 /// Errors:
 ///   * `EBADF` — `fd` is negative or not open.
+///   * `ENOTTY` — our session has no controlling terminal.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tcgetpgrp(fd: crate::types::Fd) -> PidT {
     if fd < 0 {
@@ -903,19 +983,49 @@ pub extern "C" fn tcgetpgrp(fd: crate::types::Fd) -> PidT {
         errno::set_errno(errno::EBADF);
         return -1;
     }
-    ensure_pg_init();
-    fg_pgrp::get()
+    #[cfg(target_os = "none")]
+    {
+        let ret = crate::syscall::syscall0(crate::syscall::SYS_TTY_GET_PGRP);
+        if ret < 0 {
+            errno::set_errno(ctty_errno(ret));
+            return -1;
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            ret as PidT
+        }
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let fg = host_pg::ctty_fg();
+        if fg == 0 {
+            errno::set_errno(errno::ENOTTY);
+            return -1;
+        }
+        fg
+    }
 }
 
 /// Set the foreground process group ID of a terminal.
 ///
-/// Stores the value for later retrieval by `tcgetpgrp()`.  Validates
-/// `fd` before checking `pgrp` — Linux's prologue order is to check the
-/// fd first.
+/// This is the call a shell makes to hand the terminal to a job, so it has
+/// to reach real kernel state: the job must be able to see that it is now
+/// in the foreground.  The kernel enforces that `pgrp` names a live process
+/// group *in our own session* — otherwise any process could steal another
+/// session's terminal by naming one of its groups.
+///
+/// Validates `fd` before checking `pgrp` — Linux's prologue order is to
+/// check the fd first.
+///
+/// Not yet implemented: POSIX sends `SIGTTOU` to a **background** process
+/// that calls this.  That needs a terminal that can deliver input, which
+/// does not exist yet; see `todo.txt`.
 ///
 /// Errors:
 ///   * `EBADF` — `fd` is negative or not open.
 ///   * `EINVAL` — `pgrp` is zero or negative.
+///   * `ENOTTY` — our session has no controlling terminal.
+///   * `EPERM` — `pgrp` is not a live group in our session.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tcsetpgrp(fd: crate::types::Fd, pgrp: PidT) -> i32 {
     if fd < 0 {
@@ -926,13 +1036,29 @@ pub extern "C" fn tcsetpgrp(fd: crate::types::Fd, pgrp: PidT) -> i32 {
         errno::set_errno(errno::EBADF);
         return -1;
     }
-    ensure_pg_init();
     if pgrp <= 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    fg_pgrp::set(pgrp);
-    0
+    #[cfg(target_os = "none")]
+    {
+        #[allow(clippy::cast_sign_loss)]
+        let ret = crate::syscall::syscall1(crate::syscall::SYS_TTY_SET_PGRP, pgrp as u64);
+        if ret < 0 {
+            errno::set_errno(ctty_errno(ret));
+            return -1;
+        }
+        0
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        if host_pg::ctty_set_fg(pgrp) {
+            0
+        } else {
+            errno::set_errno(errno::ENOTTY);
+            -1
+        }
+    }
 }
 
 // ===========================================================================
@@ -3471,7 +3597,10 @@ mod tests {
     fn reset_pg() {
         host_pg::set_pgid_raw(42);
         host_pg::set_sid_raw(42);
-        fg_pgrp::set(42);
+        // Give the "process" a controlling terminal whose foreground group
+        // is 42, so the terminal tests start from a known attached state
+        // rather than the lazy getpid() seed.
+        host_pg::ctty_attach(42);
     }
 
     /// Ensure fds 0/1/2 are open so `tcgetpgrp`/`tcsetpgrp` tests
@@ -3574,6 +3703,70 @@ mod tests {
         ensure_pg_test_fds();
         assert_eq!(tcsetpgrp(0, 1), 0);
         assert_eq!(tcgetpgrp(0), 1);
+    }
+
+    // -- "no controlling terminal" is a distinct, reportable state --
+    //
+    // These are the checks the old `FG_PGRP` static could not have passed:
+    // it had no way to represent "we have no terminal", so `tcgetpgrp` on a
+    // daemon returned a plausible-looking pgid instead of ENOTTY, and
+    // `setsid()` — whose whole purpose is to give up the terminal — set the
+    // static to the new SID, asserting the opposite of what had happened.
+
+    #[test]
+    fn test_setsid_drops_the_controlling_terminal() {
+        reset_pg();
+        ensure_pg_test_fds();
+        // We start attached, foreground group 42.
+        assert_eq!(tcgetpgrp(0), 42);
+        // A process that does not already lead a group may start a session.
+        host_pg::set_pgid_raw(7);
+        assert!(setsid() > 0);
+        // POSIX: the new session has no controlling terminal.
+        assert_eq!(tcgetpgrp(0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOTTY);
+    }
+
+    #[test]
+    fn test_tcsetpgrp_with_no_terminal_is_enotty() {
+        reset_pg();
+        ensure_pg_test_fds();
+        host_pg::ctty_detach();
+        assert_eq!(tcsetpgrp(0, 99), -1);
+        assert_eq!(errno::get_errno(), errno::ENOTTY);
+    }
+
+    #[test]
+    fn test_bad_argument_beats_missing_terminal() {
+        // A malformed pgid is EINVAL even with no terminal: the argument
+        // gate runs first, so a caller learns what is actually wrong with
+        // its call rather than a fact about its session.
+        reset_pg();
+        ensure_pg_test_fds();
+        host_pg::ctty_detach();
+        assert_eq!(tcsetpgrp(0, 0), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_bad_fd_beats_missing_terminal() {
+        // ...and an unusable fd beats both, matching Linux's prologue order.
+        reset_pg();
+        host_pg::ctty_detach();
+        assert_eq!(tcgetpgrp(-1), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_ctty_errno_maps_not_supported_to_enotty() {
+        // The mapping that keeps a shell from mistaking "I have no terminal,
+        // so skip job control" for "this kernel lacks the feature".
+        assert_eq!(ctty_errno(errno::native::NOT_SUPPORTED), errno::ENOTTY);
+        assert_eq!(ctty_errno(errno::native::PERMISSION_DENIED), errno::EPERM);
+        assert_eq!(ctty_errno(errno::native::INVALID_ARGUMENT), errno::EINVAL);
+        assert_eq!(ctty_errno(errno::native::NO_SUCH_PROCESS), errno::ESRCH);
+        // Unknown failures take the conservative reading.
+        assert_eq!(ctty_errno(-424_242), errno::ENOTTY);
     }
 
     // -- setpgid for other PIDs (silent success, no state change) --

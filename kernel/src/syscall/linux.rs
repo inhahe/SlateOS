@@ -8566,6 +8566,17 @@ pub mod ioctl_cmd {
     /// `*arg` (a `pid_t`).  `tcsetpgrp(3)` issues this each time the shell
     /// foregrounds a job, so that job's group receives `^C`/`^\` signals.
     pub const TIOCSPGRP: u32 = 0x5410;
+    /// `TIOCSCTTY` — make this terminal the caller's session's controlling
+    /// terminal.  A session leader issues this after `setsid()` to acquire a
+    /// terminal; without it no `TIOCGPGRP`/`TIOCSPGRP` can succeed, because
+    /// the foreground group belongs to a session's terminal and not to an
+    /// fd.  `arg` is Linux's "steal it from another session" flag, which we
+    /// do not honour — see todo.txt.
+    pub const TIOCSCTTY: u32 = 0x540E;
+    /// `TIOCNOTTY` — give up the controlling terminal.  Issued by the
+    /// session leader, this hangs up whichever group was foreground
+    /// (`SIGHUP` then `SIGCONT`) and detaches the terminal from the session.
+    pub const TIOCNOTTY: u32 = 0x5422;
 }
 
 /// Handle the terminal-control ioctls on a console (tty) fd.
@@ -8575,7 +8586,17 @@ pub mod ioctl_cmd {
 /// (`TCGETS`/`TCSETS*`) or `struct winsize` (`TIOCGWINSZ`/`TIOCSWINSZ`).
 /// `TCSETSW`/`TCSETSF` behave as `TCSETS` because we have no kernel-side
 /// output/input queue to drain or flush yet.
-fn console_terminal_ioctl(request: u32, arg: u64) -> SyscallResult {
+///
+/// `pid` is the calling process.  The job-control requests
+/// (`TIOCGPGRP`/`TIOCSPGRP`/`TIOCSCTTY`/`TIOCNOTTY`) need it because the
+/// foreground process group and the controlling terminal are per-*session*
+/// state in `pcb`, not properties of the console device: the answer depends
+/// on who is asking.
+fn console_terminal_ioctl(
+    pid: crate::proc::pcb::ProcessId,
+    request: u32,
+    arg: u64,
+) -> SyscallResult {
     use crate::tty;
     match request {
         ioctl_cmd::TCGETS => {
@@ -8636,12 +8657,16 @@ fn console_terminal_ioctl(request: u32, arg: u64) -> SyscallResult {
             if arg == 0 {
                 return linux_err(errno::EFAULT);
             }
-            // Report the foreground process group as a 4-byte pid_t.  A value
-            // of 0 (no foreground group installed) is reported as-is; Linux
-            // returns the real pgrp or, lacking one, a value > 1.
+            // Read *this caller's* controlling terminal, not "the console's
+            // pgrp": the foreground group belongs to a session, so a process
+            // in a session that holds no terminal must get ENOTTY rather
+            // than another session's answer.
+            let pgrp = match crate::proc::pcb::ctty_get_fg_pgrp(pid) {
+                Ok(p) => p,
+                Err(e) => return linux_err(linux_errno_for(e)),
+            };
             #[allow(clippy::cast_possible_truncation)]
-            let pgrp = tty::foreground_pgid() as i32;
-            let bytes = pgrp.to_ne_bytes();
+            let bytes = (pgrp as i32).to_ne_bytes();
             // SAFETY: copy_to_user validates the 4-byte user range is mapped
             // and writable and does the SMAP dance; `bytes` is a live 4-byte
             // kernel buffer.
@@ -8665,16 +8690,27 @@ fn console_terminal_ioctl(request: u32, arg: u64) -> SyscallResult {
             }
             let pgrp = i32::from_ne_bytes(bytes);
             // A foreground pgrp must be a positive process-group ID.  Linux
-            // rejects pgrp <= 0 (and groups in a different session) with
-            // EINVAL/EPERM; we have a single session, so we only validate the
-            // sign here.
+            // rejects pgrp <= 0 with EINVAL before any policy check.
             if pgrp <= 0 {
                 return linux_err(errno::EINVAL);
             }
+            // The session/liveness policy — the group must be a live group of
+            // the caller's own session — is the same one the native ABI's
+            // SYS_TTY_SET_PGRP applies, because it is the same state. This
+            // used to write a `tty::FOREGROUND_PGID` atomic that libc's
+            // `tcsetpgrp` never saw, so a glibc program and a slateos-libc
+            // program disagreed about which job owned the terminal.
             #[allow(clippy::cast_sign_loss)]
-            tty::set_foreground_pgid(u64::from(pgrp as u32));
-            SyscallResult::ok(0)
+            match crate::proc::pcb::ctty_set_fg_pgrp(pid, u64::from(pgrp as u32)) {
+                Ok(()) => SyscallResult::ok(0),
+                Err(e) => linux_err(linux_errno_for(e)),
+            }
         }
+        ioctl_cmd::TIOCSCTTY => match crate::proc::pcb::ctty_acquire(pid) {
+            Ok(()) => SyscallResult::ok(0),
+            Err(e) => linux_err(linux_errno_for(e)),
+        },
+        ioctl_cmd::TIOCNOTTY => super::handlers::hangup_released_ctty(pid),
         // Unreachable: sys_ioctl only routes the terminal requests here.
         _ => linux_err(errno::ENOTTY),
     }
@@ -8764,7 +8800,9 @@ fn sys_ioctl(args: &SyscallArgs) -> SyscallResult {
         | ioctl_cmd::TIOCGWINSZ
         | ioctl_cmd::TIOCSWINSZ
         | ioctl_cmd::TIOCGPGRP
-        | ioctl_cmd::TIOCSPGRP => {
+        | ioctl_cmd::TIOCSPGRP
+        | ioctl_cmd::TIOCSCTTY
+        | ioctl_cmd::TIOCNOTTY => {
             // Terminal-control ioctls only apply to a tty (the console).
             // A non-console fd that exists returns ENOTTY (which is what
             // isatty(3) wants for "not a terminal"); a missing fd is EBADF.
@@ -8775,7 +8813,7 @@ fn sys_ioctl(args: &SyscallArgs) -> SyscallResult {
             if entry.kind != crate::proc::linux_fd::HandleKind::Console {
                 return linux_err(errno::ENOTTY);
             }
-            console_terminal_ioctl(request, args.arg2)
+            console_terminal_ioctl(pid, request, args.arg2)
         }
         ioctl_cmd::FIONBIO => {
             // Toggle O_NONBLOCK on the fd.  arg is a pointer to int

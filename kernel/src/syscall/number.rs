@@ -2054,6 +2054,93 @@ pub const SYS_PROCESS_SET_SID: u64 = 535;
 pub const SYS_PROCESS_GET_SID: u64 = 536;
 
 // ---------------------------------------------------------------------------
+// Controlling terminal: foreground process group (537–538)
+// ---------------------------------------------------------------------------
+//
+// Same story as 533–536, one layer up.  The foreground process group is a
+// property of a *session*, so libc could not model it: `posix` kept it in a
+// per-process `FG_PGRP` static, and a shell handing the terminal to a job and
+// the job itself held two independent copies that could never disagree out
+// loud.  These two numbers move it into the kernel, where every member of the
+// session observes the same value.
+//
+// Both take no terminal argument.  There is exactly one terminal (the
+// console), so "the caller's controlling terminal" identifies it completely;
+// libc validates the `fd` the POSIX signatures carry and the kernel never
+// sees it.  When a second terminal exists these gain a terminal handle rather
+// than changing meaning.
+
+/// Query the foreground process group of the caller's controlling terminal
+/// (`tcgetpgrp(3)`).
+///
+/// Takes no arguments — the subject is always the *caller's* controlling
+/// terminal, which is what makes this safe without a capability: it reveals
+/// only a property of a session the caller is already in.
+///
+/// Returns: the foreground PGID (> 0); `NotSupported` (ENOTTY) if the
+/// caller's session has no controlling terminal; `NoSuchProcess` if the
+/// caller is not in the process table.  Chosen number 537.
+pub const SYS_TTY_GET_PGRP: u64 = 537;
+
+/// Hand the caller's controlling terminal to a process group
+/// (`tcsetpgrp(3)`).
+///
+/// `arg0`: the process group to make foreground.  Must name a live group in
+/// the caller's own session — otherwise any process could steal another
+/// session's terminal by naming one of its groups, and handing the terminal
+/// to a group with no live member would wedge it with nothing left to hand
+/// it back.
+///
+/// Returns: 0 on success; `NotSupported` (ENOTTY) if the caller has no
+/// controlling terminal; `InvalidArgument` if `arg0` is 0 or does not fit a
+/// PID; `PermissionDenied` if the group is not a live group of the caller's
+/// session.  Chosen number 538.
+pub const SYS_TTY_SET_PGRP: u64 = 538;
+
+/// Claim the console as the caller's session's controlling terminal
+/// (`ioctl(fd, TIOCSCTTY)`).
+///
+/// Takes no arguments.  This is the acquisition step POSIX spells "a session
+/// leader that has no controlling terminal opens a terminal that is not
+/// already the controlling terminal of another session".  We have no
+/// terminal-device open path yet, so the claim is explicit rather than a
+/// side effect of `open`; that is also what Linux programs already do
+/// (`setsid(); ioctl(fd, TIOCSCTTY, 0)`), so nothing has to change when one
+/// arrives.
+///
+/// Only a **session leader** may claim, and only if no other session holds
+/// the console: without both rules any process could take the terminal from
+/// the session using it.  Claiming a terminal the caller's session already
+/// holds succeeds without changing the foreground group, so a program that
+/// calls this defensively at startup is not punished for it.
+///
+/// Returns: 0 on success; `PermissionDenied` if the caller is not a session
+/// leader or another session holds the console; `NoSuchProcess` if the
+/// caller is not in the process table.  Chosen number 539.
+pub const SYS_TTY_ACQUIRE_CTTY: u64 = 539;
+
+/// Give up the caller's session's controlling terminal
+/// (`ioctl(fd, TIOCNOTTY)`).
+///
+/// Takes no arguments.  Restricted to the session leader, because the
+/// association is stored per session: there is no per-process controlling-
+/// terminal pointer to clear, so a non-leader "detaching itself" would in
+/// fact detach every member of its session.  POSIX allows the per-process
+/// form; modelling it needs the per-process pointer, and is deferred with
+/// the rest of the tty work (see `todo.txt`).
+///
+/// Per POSIX/Linux, the foreground process group is hung up (`SIGHUP` then
+/// `SIGCONT`) when the session leader detaches — otherwise a stopped
+/// foreground job would be left with no terminal and no shell to continue
+/// it.  The signals are sent by the syscall handler, which owns delivery.
+///
+/// Returns: 0 on success; `NotSupported` (ENOTTY) if the caller's session
+/// has no controlling terminal; `PermissionDenied` if the caller is not the
+/// session leader; `NoSuchProcess` if the caller is not in the process
+/// table.  Chosen number 540.
+pub const SYS_TTY_RELEASE_CTTY: u64 = 540;
+
+// ---------------------------------------------------------------------------
 // Filesystem syscalls (600–799)
 // ---------------------------------------------------------------------------
 

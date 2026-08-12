@@ -298,13 +298,10 @@ pub extern "C" fn ioctl(fd: i32, request: u64, arg: *mut u8) -> i32 {
         FIONREAD => handle_fionread(entry.kind, entry.handle, arg),
         TCGETS => handle_tcgets(entry.kind, arg),
         TCSETS | TCSETSW | TCSETSF => handle_tcsets(entry.kind),
-        TIOCGPGRP => handle_tiocgpgrp(entry.kind, arg),
-        TIOCSPGRP => handle_tiocspgrp(entry.kind, arg),
-        TIOCSCTTY | TIOCNOTTY => {
-            // Accept silently — we don't have real TTY sessions yet.
-            // Many programs call these during startup/shutdown.
-            0
-        }
+        TIOCGPGRP => handle_tiocgpgrp(fd, entry.kind, arg),
+        TIOCSPGRP => handle_tiocspgrp(fd, entry.kind, arg),
+        TIOCSCTTY => handle_tiocsctty(entry.kind),
+        TIOCNOTTY => handle_tiocnotty(entry.kind),
         _ => {
             errno::set_errno(errno::ENOTTY);
             -1
@@ -511,8 +508,14 @@ fn handle_tcsets(kind: HandleKind) -> i32 {
 /// TIOCGPGRP — get the foreground process group of a terminal.
 ///
 /// Returns the PGID via the integer pointer `arg`.  Delegates to
-/// `tcgetpgrp()` which tracks the foreground PGID in process-local state.
-fn handle_tiocgpgrp(kind: HandleKind, arg: *mut u8) -> i32 {
+/// `tcgetpgrp()`, which reads the value from the kernel, keyed by our
+/// session — so this reports the same foreground group every other member
+/// of the session sees.
+///
+/// `tcgetpgrp` can genuinely fail (`ENOTTY` when the session has no
+/// controlling terminal), so its -1 is propagated rather than written into
+/// the caller's buffer as if it were a process group.
+fn handle_tiocgpgrp(fd: i32, kind: HandleKind, arg: *mut u8) -> i32 {
     if kind != HandleKind::Console {
         errno::set_errno(errno::ENOTTY);
         return -1;
@@ -521,7 +524,11 @@ fn handle_tiocgpgrp(kind: HandleKind, arg: *mut u8) -> i32 {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    let pgrp = crate::process::tcgetpgrp(0);
+    let pgrp = crate::process::tcgetpgrp(fd);
+    if pgrp < 0 {
+        // errno is already set by tcgetpgrp.
+        return -1;
+    }
     // SAFETY: arg must be at least sizeof(i32) per ioctl contract.
     unsafe {
         core::ptr::write_unaligned(arg.cast::<i32>(), pgrp);
@@ -533,7 +540,7 @@ fn handle_tiocgpgrp(kind: HandleKind, arg: *mut u8) -> i32 {
 ///
 /// Reads the PGID from the integer pointer `arg` and delegates to
 /// `tcsetpgrp()`.
-fn handle_tiocspgrp(kind: HandleKind, arg: *mut u8) -> i32 {
+fn handle_tiocspgrp(fd: i32, kind: HandleKind, arg: *mut u8) -> i32 {
     if kind != HandleKind::Console {
         errno::set_errno(errno::ENOTTY);
         return -1;
@@ -544,7 +551,77 @@ fn handle_tiocspgrp(kind: HandleKind, arg: *mut u8) -> i32 {
     }
     // SAFETY: arg must be at least sizeof(i32) per ioctl contract.
     let pgrp = unsafe { core::ptr::read_unaligned(arg.cast::<i32>()) };
-    crate::process::tcsetpgrp(0, pgrp)
+    crate::process::tcsetpgrp(fd, pgrp)
+}
+
+/// TIOCSCTTY — claim this terminal as our session's controlling terminal.
+///
+/// This used to be accepted silently on the grounds that "we don't have
+/// real TTY sessions yet".  We do now: the kernel keys the controlling
+/// terminal by session id, and this is the only way for a userspace process
+/// to acquire one — a session leader that never claims gets `ENOTTY` from
+/// `tcgetpgrp`/`tcsetpgrp` forever.  Accepting silently therefore stopped
+/// being harmless and started being a lie.
+///
+/// The kernel enforces POSIX's two rules (session leader only; the console
+/// must not already belong to another session) and reports `EPERM` for
+/// either.  Linux's `arg != 0` "steal the terminal from another session"
+/// force flag is deliberately not implemented — it is a root-only override
+/// and we have no credential model for it yet; see `todo.txt`.
+///
+/// Errors:
+///   * `ENOTTY` — `fd` is not a terminal.
+///   * `EPERM` — not a session leader, or the console is taken.
+fn handle_tiocsctty(kind: HandleKind) -> i32 {
+    if kind != HandleKind::Console {
+        errno::set_errno(errno::ENOTTY);
+        return -1;
+    }
+    #[cfg(target_os = "none")]
+    {
+        let ret = crate::syscall::syscall0(crate::syscall::SYS_TTY_ACQUIRE_CTTY);
+        if ret < 0 {
+            errno::set_errno(crate::process::ctty_errno(ret));
+            return -1;
+        }
+        0
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        crate::process::host_ctty_acquire()
+    }
+}
+
+/// TIOCNOTTY — give up our session's controlling terminal.
+///
+/// Restricted by the kernel to the session leader, and hangs up the
+/// foreground process group (`SIGHUP` then `SIGCONT`) on success, matching
+/// Linux's `disassociate_ctty(0)`.  A caller that is itself in the
+/// foreground group is hung up too — which is why the usual idiom is
+/// `setsid()` (which drops the terminal without the hangup) and why a
+/// daemon should not reach for this one by mistake.
+///
+/// Errors:
+///   * `ENOTTY` — `fd` is not a terminal, or we have no controlling one.
+///   * `EPERM` — the caller is not the session leader.
+fn handle_tiocnotty(kind: HandleKind) -> i32 {
+    if kind != HandleKind::Console {
+        errno::set_errno(errno::ENOTTY);
+        return -1;
+    }
+    #[cfg(target_os = "none")]
+    {
+        let ret = crate::syscall::syscall0(crate::syscall::SYS_TTY_RELEASE_CTTY);
+        if ret < 0 {
+            errno::set_errno(crate::process::ctty_errno(ret));
+            return -1;
+        }
+        0
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        crate::process::host_ctty_release()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1589,6 +1666,50 @@ mod tests {
         let ret = ioctl(0, TIOCGPGRP, (&raw mut pgrp).cast::<u8>());
         assert_eq!(ret, 0);
         assert_eq!(pgrp, 100, "Should read back the pgrp we set");
+    }
+
+    // TIOCSCTTY/TIOCNOTTY used to be accepted silently on any fd. They are
+    // real now, so the terminal-ness of the fd and the presence of a
+    // controlling terminal both have to be reportable.
+
+    #[test]
+    fn test_ioctl_tiocnotty_twice_is_enotty() {
+        ensure_std_fds();
+        // First release succeeds (the lazy seed gives us a terminal)...
+        assert_eq!(ioctl(0, TIOCNOTTY, core::ptr::null_mut()), 0);
+        // ...the second has nothing to release.
+        assert_eq!(ioctl(0, TIOCNOTTY, core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
+    }
+
+    #[test]
+    fn test_ioctl_tiocsctty_reattaches_after_notty() {
+        ensure_std_fds();
+        assert_eq!(ioctl(0, TIOCNOTTY, core::ptr::null_mut()), 0);
+        let mut pgrp: i32 = -999;
+        // With no controlling terminal, reading the foreground group is an
+        // error — not a stale value written into the caller's buffer.
+        assert_eq!(ioctl(0, TIOCGPGRP, (&raw mut pgrp).cast::<u8>()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
+        assert_eq!(pgrp, -999, "a failed TIOCGPGRP must not write the buffer");
+        // Claiming it back restores service.
+        assert_eq!(ioctl(0, TIOCSCTTY, core::ptr::null_mut()), 0);
+        assert_eq!(ioctl(0, TIOCGPGRP, (&raw mut pgrp).cast::<u8>()), 0);
+        assert!(pgrp > 0);
+    }
+
+    #[test]
+    fn test_ioctl_tiocsctty_non_console_is_enotty() {
+        // A pipe is not a terminal; claiming it must not silently succeed.
+        let probe = 61;
+        let _ = fdtable::install_fd(probe, HandleKind::Pipe, 0);
+        assert_eq!(ioctl(probe, TIOCSCTTY, core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
+        assert_eq!(ioctl(probe, TIOCNOTTY, core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
+        // The probe fd's handle is a dummy, so the returned entry has
+        // nothing to release.
+        let _ = crate::fdtable::close_fd(probe);
     }
 
     #[test]

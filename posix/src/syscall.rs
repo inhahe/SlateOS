@@ -128,6 +128,38 @@ pub const SYS_PROCESS_SET_SID: u64 = 535;
 /// Returns the SID, or `NoSuchProcess`.
 pub const SYS_PROCESS_GET_SID: u64 = 536;
 
+// Controlling terminal (537–538)
+//
+// Same story as 533–536, one layer up: the foreground process group belongs
+// to a *session*, so a shell and the job it foregrounds must be able to read
+// one shared value.  This crate used to keep it in a per-process `FG_PGRP`
+// static, which no other process could observe or contradict.
+//
+// Neither call takes a terminal argument: there is exactly one console, so
+// the caller's session names the terminal unambiguously.  `tcgetpgrp`/
+// `tcsetpgrp` still take an `fd` because POSIX says so, and validate it here.
+
+/// Read the foreground process group of the caller's controlling terminal.
+/// No arguments.  Returns the PGID, `NotSupported` (ENOTTY) if the caller's
+/// session has no controlling terminal, or `NoSuchProcess`.
+pub const SYS_TTY_GET_PGRP: u64 = 537;
+/// Hand the caller's controlling terminal to a process group.  arg0 = the
+/// destination PGID, which must name a live group in the caller's own
+/// session.  Returns 0, `InvalidArgument`, `NotSupported` (ENOTTY), or
+/// `PermissionDenied`.
+pub const SYS_TTY_SET_PGRP: u64 = 538;
+/// Claim the console as the caller's session's controlling terminal
+/// (`ioctl(fd, TIOCSCTTY)`).  No arguments.  Returns 0, or
+/// `PermissionDenied` if the caller is not a session leader or another
+/// session already holds the console.
+pub const SYS_TTY_ACQUIRE_CTTY: u64 = 539;
+/// Give up the caller's session's controlling terminal
+/// (`ioctl(fd, TIOCNOTTY)`).  No arguments.  Hangs up the foreground group
+/// (`SIGHUP` + `SIGCONT`) on success, as Linux's `disassociate_ctty` does.
+/// Returns 0, `NotSupported` (ENOTTY), or `PermissionDenied` if the caller
+/// is not the session leader.
+pub const SYS_TTY_RELEASE_CTTY: u64 = 540;
+
 // POSIX signal shim (522–526)
 pub const SYS_SIGNAL_REGISTER: u64 = 522;
 pub const SYS_SIGNAL_SEND: u64 = 523;

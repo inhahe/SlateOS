@@ -93,6 +93,10 @@ use super::number::{
     SYS_PROCESS_GET_PGID,
     SYS_PROCESS_SET_SID,
     SYS_PROCESS_GET_SID,
+    SYS_TTY_GET_PGRP,
+    SYS_TTY_SET_PGRP,
+    SYS_TTY_ACQUIRE_CTTY,
+    SYS_TTY_RELEASE_CTTY,
     SYS_SIGNAL_REGISTER,
     SYS_SIGNAL_SEND,
     SYS_SIGNAL_MASK,
@@ -466,6 +470,15 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PROCESS_SET_SID as usize] = Some(handlers::sys_process_set_sid);
     handlers[SYS_PROCESS_GET_SID as usize] = Some(handlers::sys_process_get_sid);
 
+    // Controlling terminal (537–540). The foreground process group belongs to
+    // a *session*, so like 533–536 it has to live in the kernel: two members
+    // of one session must be able to disagree about it out loud. 539/540 are
+    // the acquire/release pair behind `ioctl(TIOCSCTTY)`/`ioctl(TIOCNOTTY)`.
+    handlers[SYS_TTY_GET_PGRP as usize] = Some(handlers::sys_tty_get_pgrp);
+    handlers[SYS_TTY_SET_PGRP as usize] = Some(handlers::sys_tty_set_pgrp);
+    handlers[SYS_TTY_ACQUIRE_CTTY as usize] = Some(handlers::sys_tty_acquire_ctty);
+    handlers[SYS_TTY_RELEASE_CTTY as usize] = Some(handlers::sys_tty_release_ctty);
+
     // POSIX signal shim (522–526). SYS_SIGNAL_RETURN (524) is a
     // frame-modifying syscall handled specially in syscall_handler_inner,
     // so it has no flat-table entry.
@@ -799,6 +812,7 @@ pub fn self_test() -> KernelResult<()> {
     test_io_dir_classification()?;
     test_dispatch_mprotect_native()?;
     test_dispatch_process_group_syscalls()?;
+    test_dispatch_ctty_syscalls()?;
     test_dispatch_wait_process_group_filter()?;
     test_dispatch_signal_stop_self_rejects_non_stop_signals()?;
     test_dispatch_wait_status_reports_job_control()?;
@@ -1068,6 +1082,65 @@ fn test_dispatch_process_group_syscalls() -> KernelResult<()> {
     serial_println!(
         "[syscall]   Native process groups (533-536) + kill(-pgid) ordering: OK"
     );
+    Ok(())
+}
+
+/// Verify the controlling-terminal syscalls (537–540) are wired into the
+/// dispatch table and apply their argument gate in the right order.
+///
+/// Scope note: the semantics — that two processes in one session read the
+/// same foreground group, that only a group in your own session may receive
+/// the terminal, that `setsid` drops it — are covered by
+/// `pcb::test_controlling_terminal`, which can build real sessions. This
+/// test cannot: the self-test task owns no process, so every "the caller's
+/// terminal" form is unresolvable here by construction. That is exactly what
+/// makes it a good *registration* probe, though — an unresolvable caller must
+/// report `NoSuchProcess`, so a `NotSupported` verdict can only mean the
+/// syscall number was never registered.
+fn test_dispatch_ctty_syscalls() -> KernelResult<()> {
+    let mk = |arg0: u64| SyscallArgs {
+        arg0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    fn fail(msg: &str) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: ctty: {}", msg);
+        Err(KernelError::InternalError)
+    }
+
+    // (1) Registration. `NotSupported` is also ENOTTY, so it would be an
+    //     ambiguous verdict from a caller that *has* a session — but this
+    //     caller has no process at all, which must be ESRCH either way.
+    if dispatch(SYS_TTY_GET_PGRP, &mk(0)).value != i64::from(KernelError::NoSuchProcess.code()) {
+        return fail("tcgetpgrp with no owning process should be NoSuchProcess (unregistered?)");
+    }
+    if dispatch(SYS_TTY_SET_PGRP, &mk(1)).value != i64::from(KernelError::NoSuchProcess.code()) {
+        return fail("tcsetpgrp with no owning process should be NoSuchProcess (unregistered?)");
+    }
+    for (nr, name) in [
+        (SYS_TTY_ACQUIRE_CTTY, "TIOCSCTTY"),
+        (SYS_TTY_RELEASE_CTTY, "TIOCNOTTY"),
+    ] {
+        if dispatch(nr, &mk(0)).value != i64::from(KernelError::NoSuchProcess.code()) {
+            serial_println!("[syscall]     ({} gave an unexpected verdict)", name);
+            return fail("ctty acquire/release with no owning process should be NoSuchProcess");
+        }
+    }
+
+    // (2) The argument gate runs *before* caller resolution, so a malformed
+    //     pgid is EINVAL even when the caller could not be established. If
+    //     these two ever collapse into one verdict, a program would learn
+    //     "no such process" for what is really a bad argument.
+    #[allow(clippy::cast_sign_loss)]
+    let minus_one = -1_i64 as u64;
+    for (arg, what) in [(0_u64, "tcsetpgrp(0)"), (minus_one, "tcsetpgrp(-1)")] {
+        if dispatch(SYS_TTY_SET_PGRP, &mk(arg)).value
+            != i64::from(KernelError::InvalidArgument.code())
+        {
+            serial_println!("[syscall]     ({} did not report InvalidArgument)", what);
+            return fail("a non-positive pgid should be InvalidArgument");
+        }
+    }
+
+    serial_println!("[syscall]   Controlling terminal (537-540) registration: OK");
     Ok(())
 }
 

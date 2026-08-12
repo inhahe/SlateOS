@@ -4491,6 +4491,147 @@ pub fn sys_process_get_sid(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `SYS_TTY_GET_PGRP` — read the foreground process group of the caller's
+/// controlling terminal (`tcgetpgrp(3)`).
+///
+/// Takes no arguments: there is exactly one terminal (the console), so the
+/// caller's session determines which terminal is meant.  `posix` still takes
+/// an `fd` and validates it userspace-side, because the POSIX signature does;
+/// the fd carries no information the kernel needs yet.
+///
+/// Returns the foreground PGID, `NoSuchProcess` if the caller has no
+/// process-table entry, or `NotSupported` (ENOTTY) if the caller's session
+/// has no controlling terminal.
+pub fn sys_tty_get_pgrp(args: &SyscallArgs) -> SyscallResult {
+    let _ = args;
+    let pid = match caller_process_or_err() {
+        Ok(pid) => pid,
+        Err(e) => return SyscallResult::err(e),
+    };
+    match crate::proc::pcb::ctty_get_fg_pgrp(pid) {
+        #[allow(clippy::cast_possible_wrap)]
+        Ok(pgid) => SyscallResult::ok(pgid as i64),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_TTY_SET_PGRP` — hand the caller's controlling terminal to process
+/// group `arg0` (`tcsetpgrp(3)`).
+///
+/// `arg0`: the process group to make foreground.  Must be a live group in the
+/// caller's own session, or the call is refused — otherwise any process could
+/// steal another session's terminal by naming one of its groups.
+///
+/// Returns 0, or `InvalidArgument` / `NotSupported` (ENOTTY) /
+/// `PermissionDenied` per [`pcb::ctty_set_fg_pgrp`].
+///
+/// Not yet implemented: POSIX says a **background** process calling this is
+/// sent `SIGTTOU` (and the call succeeds only once it resumes in the
+/// foreground).  That rule needs a terminal that can actually deliver
+/// keyboard input, which does not exist yet; deferred with the rest of the
+/// tty work.  See `todo.txt`.
+///
+/// [`pcb::ctty_set_fg_pgrp`]: crate::proc::pcb::ctty_set_fg_pgrp
+pub fn sys_tty_set_pgrp(args: &SyscallArgs) -> SyscallResult {
+    // A negative value is not a process group. Reject on the full 64-bit
+    // width rather than reproducing Linux's `int` wrap; 0 is rejected by
+    // `ctty_set_fg_pgrp` itself (there is no group 0 to hand a terminal to).
+    #[allow(clippy::cast_possible_wrap)]
+    let pgid_signed = args.arg0 as i64;
+    if pgid_signed <= 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let pid = match caller_process_or_err() {
+        Ok(pid) => pid,
+        Err(e) => return SyscallResult::err(e),
+    };
+    match crate::proc::pcb::ctty_set_fg_pgrp(pid, args.arg0) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_TTY_ACQUIRE_CTTY` — claim the console as the caller's session's
+/// controlling terminal (`ioctl(fd, TIOCSCTTY)`).
+///
+/// Takes no arguments.  Delegates the POSIX rules — session leader only,
+/// console must be free — to [`pcb::ctty_acquire`].
+///
+/// Returns 0, `PermissionDenied`, or `NoSuchProcess`.
+///
+/// [`pcb::ctty_acquire`]: crate::proc::pcb::ctty_acquire
+pub fn sys_tty_acquire_ctty(args: &SyscallArgs) -> SyscallResult {
+    let _ = args;
+    let pid = match caller_process_or_err() {
+        Ok(pid) => pid,
+        Err(e) => return SyscallResult::err(e),
+    };
+    match crate::proc::pcb::ctty_acquire(pid) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_TTY_RELEASE_CTTY` — give up the caller's session's controlling
+/// terminal (`ioctl(fd, TIOCNOTTY)`).
+///
+/// Takes no arguments.  On success the foreground process group is hung up
+/// (`SIGHUP` then `SIGCONT`), which is why this cannot live entirely in
+/// `pcb`: a stopped foreground job whose session leader has just discarded
+/// the terminal would otherwise be left with neither a terminal nor a shell
+/// able to continue it.  `pcb::ctty_release` reports which group was
+/// foreground and this layer, which owns signal delivery, does the hangup.
+///
+/// SIGHUP before SIGCONT, and both across the whole group, for the same
+/// reason as [`kill_orphaned_pgrp`]: SIGHUP's default action terminates, and
+/// a member that installed a SIGHUP handler survives and must still be
+/// continued.
+///
+/// Returns 0, `NotSupported` (ENOTTY), `PermissionDenied`, or
+/// `NoSuchProcess`.
+pub fn sys_tty_release_ctty(args: &SyscallArgs) -> SyscallResult {
+    let _ = args;
+    let pid = match caller_process_or_err() {
+        Ok(pid) => pid,
+        Err(e) => return SyscallResult::err(e),
+    };
+    hangup_released_ctty(pid)
+}
+
+/// Release `pid`'s session's controlling terminal and hang up the group that
+/// was foreground on it.
+///
+/// Factored out of [`sys_tty_release_ctty`] so the Linux shim's
+/// `ioctl(fd, TIOCNOTTY)` performs the identical hangup rather than a
+/// second, drifting copy of it.  `pid` must already have been resolved to a
+/// real caller by whichever ABI is calling; this function does no
+/// permission checking of its own beyond what `pcb::ctty_release` enforces
+/// (session leader only).
+///
+/// Returns 0, `NotSupported` (ENOTTY), `PermissionDenied`, or
+/// `NoSuchProcess`.
+pub fn hangup_released_ctty(pid: crate::proc::pcb::ProcessId) -> SyscallResult {
+    use crate::proc::{pcb, signal};
+
+    let fg = match pcb::ctty_release(pid) {
+        Ok(fg) => fg,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    serial_println!(
+        "[signal] Session {} released the console: SIGHUP+SIGCONT to group {}",
+        pid,
+        fg
+    );
+    for member in pcb::pids_in_group(fg) {
+        deliver_kernel_signal(member, signal::SIGHUP);
+    }
+    for member in pcb::pids_in_group(fg) {
+        deliver_kernel_signal(member, signal::SIGCONT);
+    }
+    SyscallResult::ok(0)
+}
+
 /// `SYS_PROCESS_COUNT` — return the count of live processes.
 ///
 /// Wraps `pcb::count()`, which returns the size of the process table

@@ -54685,3 +54685,49 @@ bulk operator over an array, the `SX_STRIPDQ` backslash proved both ways (the
 stripped pattern would have matched `axb` and does not), the embedded quote that
 puts the bit back, the replacement side, and the `$*`/list rows that show what
 `Q_PATQUOTE` does keep.
+
+### TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S. libc's Linux capability words start as "all caps held" and are never seeded from the process's real kernel capabilities — 2026-08-12
+
+**What.** `posix/src/sys_capability.rs` keeps the three Linux capability sets
+(effective/permitted/inheritable) in its own store and initialises them from
+`CAPS_DEFAULT` — every defined capability bit set. Nothing ever asks the kernel
+what the process actually holds. So on the target:
+
+- `capget()` reports "all caps" to a process the kernel granted none.
+- Any libc-side capability gate (e.g. the `CAP_KILL` check in
+  `posix/src/signal.rs`) is a userspace-only test that always passes on a
+  freshly-started process, regardless of the capability list its `SpawnOptions`
+  named.
+- `capset()` "drops" a capability the process may never have had, and the
+  kernel is not told, so the drop constrains only libc's own gates.
+
+Today this is *safe by accident*: the kernel re-checks every privileged
+operation itself, so libc's optimistic answer cannot grant anything — it can
+only fail to pre-empt a denial the kernel will issue anyway. It is recorded
+because the failure mode when that stops being true is silent: a caller that
+trusts `capget()` (a port that decides whether to attempt an operation, or
+drops privileges based on what it thinks it has) gets a wrong answer with no
+error anywhere.
+
+**Where.** `posix/src/sys_capability.rs` (`CAPS_DEFAULT`, ~line 251, and the
+two `store` modules below it). Consumers: `capget`/`capset` in the same file,
+and every `has_cap(...)` gate in the crate.
+
+**Reproduce.** Spawn a ring-3 fixture with `capabilities: &[]` (as
+`self_test_cctty` and `self_test_cpgroup` both do) and call `capget()` on
+itself: it reports the full set. `services/ctest-jobctl`'s doc comment already
+records the consequence out loud — "our libc's own `CAP_KILL` gate reads the
+process capability words, which start out with every capability held" — which
+is why that fixture needs no capabilities to make a real cross-process send.
+
+**Proper fix.** Seed the words at libc startup from the kernel via
+`SYS_CAP_QUERY` (400), and push `capset` changes back to the kernel. The work
+is not the plumbing but the *mapping*: the kernel's model is
+`(ResourceType, Rights)` capability handles, not Linux's 41 numbered bits, so
+someone has to define which kernel rights imply which `CAP_*`. That mapping is
+a design decision (it decides what a Linux port is allowed to conclude about
+our capability model), so it belongs in `design-decisions.md` when it is made
+— see `open-questions.md` if it needs the operator. Until then the honest
+alternative would be for `capget` to fail rather than answer confidently, but
+that would break Linux ports that call it informationally, so the optimistic
+answer stays.

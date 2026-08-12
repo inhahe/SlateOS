@@ -386,6 +386,31 @@ extern "C" fn kernel_main() -> ! {
     serial_println!("[boot] Boot info parsed successfully");
     serial_println!("[boot] HHDM offset: {:#x}", boot_info.hhdm_offset);
 
+    // Step 2a: Install the KASAN zero shadow.
+    //
+    // Must happen here — as soon as the HHDM offset is known and before any
+    // instrumented code runs. In the compiler-instrumented build every load and
+    // store first reads a shadow byte, so an unmapped shadow this early (no IDT
+    // yet) is a triple fault and a silent reboot rather than a diagnosable
+    // panic. Pointing all 16 TiB of shadow at one shared read-only zero page
+    // makes every check pass until something poisons a byte for real.
+    //
+    // Done in the ordinary build too, so the path is exercised by every boot
+    // test instead of first running in the build where something is already
+    // going wrong. Costs 20 KiB of .bss and 32 PML4 entries.
+    //
+    // SAFETY: called once, on the BSP, with interrupts off and no other CPU
+    // running; `hhdm_offset` is the offset Limine just reported.
+    if unsafe { mm::kasan::early_init(boot_info.hhdm_offset) } {
+        serial_println!("[boot] KASAN zero shadow installed");
+    } else {
+        // Only reachable if the kernel's own statics cannot be translated,
+        // which means the HHDM offset is wrong — nothing after this point can
+        // be trusted, and an instrumented build would triple-fault shortly.
+        serial_println!("FATAL: KASAN zero shadow install failed (bad HHDM offset?)");
+        cpu::halt_loop();
+    }
+
     // Step 2b: Initialize framebuffer console (if available).
     // The framebuffer is already mapped by Limine, so we can start
     // writing pixels immediately — no page tables or heap needed.

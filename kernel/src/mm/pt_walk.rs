@@ -171,6 +171,12 @@ pub unsafe fn walk_all(
     // read_entry uses the phys_addr from the prior level, which was checked
     // present.  All indices are in [0, 512).
     'pml4: for pml4_idx in 0..ENTRIES_PER_TABLE {
+        // The KASAN shadow aliases a few page tables across 16 TiB, so its
+        // subtree holds ~4×10⁹ entries that all name the same zero page.
+        // Enumerating them would add nothing and would never finish.
+        if crate::mm::kvspace::is_kasan_shadow_pml4_slot(pml4_idx) {
+            continue;
+        }
         let pml4e = unsafe { page_table::read_entry(pml4_phys, pml4_idx, hhdm) };
         if !pml4e.is_present() {
             continue;

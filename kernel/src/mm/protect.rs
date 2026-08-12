@@ -306,6 +306,17 @@ pub fn audit_kernel_wx(pml4_phys: u64) -> WxAuditResult {
         let is_hhdm = pml4_idx >= hhdm_pml4_start && pml4_idx < hhdm_pml4_end;
         let pml4_nx = pml4e.flags().contains(PageFlags::NO_EXECUTE);
 
+        // NX at any level makes the whole subtree non-executable (the hardware
+        // ORs NX across levels), so nothing below can be a W+X violation and
+        // descending would only cost time. Pruning here is not an optimization
+        // detail — it is what keeps this audit finite. The KASAN shadow, for
+        // instance, is 32 NX PML4 entries whose sub-tables are *deliberately
+        // aliased* thousands of times over, so an unpruned walk would visit
+        // ~4 billion entries and never return.
+        if pml4_nx {
+            continue;
+        }
+
         for pdpt_idx in 0..512 {
             let pdpte = unsafe { page_table::read_entry(pml4e.phys_addr(), pdpt_idx, hhdm) };
             if !pdpte.is_present() {
@@ -329,6 +340,11 @@ pub fn audit_kernel_wx(pml4_phys: u64) -> WxAuditResult {
                         kernel_violations += 1;
                     }
                 }
+                continue;
+            }
+
+            // Same pruning rule as at the PML4 level above.
+            if pdpt_nx {
                 continue;
             }
 
@@ -356,6 +372,11 @@ pub fn audit_kernel_wx(pml4_phys: u64) -> WxAuditResult {
                             kernel_violations += 1;
                         }
                     }
+                    continue;
+                }
+
+                // Same pruning rule as at the PML4 level above.
+                if pd_nx {
                     continue;
                 }
 

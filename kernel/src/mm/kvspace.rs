@@ -157,6 +157,30 @@ pub const KASAN_SHADOW: Region = Region {
     size: 0x0000_1000_0000_0000, // 16 TiB
 };
 
+/// First PML4 slot covering [`KASAN_SHADOW`].
+pub const KASAN_SHADOW_PML4_FIRST: usize = ((KASAN_SHADOW.start >> 39) & 0x1FF) as usize;
+/// One past the last PML4 slot covering [`KASAN_SHADOW`].
+pub const KASAN_SHADOW_PML4_END: usize =
+    KASAN_SHADOW_PML4_FIRST + (KASAN_SHADOW.size / (512 * 1024 * 1024 * 1024)) as usize;
+
+/// Whether `pml4_slot` belongs to the KASAN shadow reservation.
+///
+/// **Any walker that enumerates the whole kernel half of an address space must
+/// consult this and skip.** The shadow is the one region that deliberately
+/// *aliases* a handful of page tables across an enormous virtual range: a
+/// single read-only zero page is mapped by one page table, which one page
+/// directory repeats 512 times, which the PDPTs repeat again — so the 32 PML4
+/// slots below expand to roughly 4×10⁹ "mapped" entries that all name the same
+/// physical page. Descending into them yields no information (every entry is
+/// the same zero page) and, at a few hundred nanoseconds per entry, does not
+/// finish in any practical time — it presents as a kernel hang.
+///
+/// See `mm::kasan::early_init` for how the aliasing is built and why.
+#[must_use]
+pub const fn is_kasan_shadow_pml4_slot(pml4_slot: usize) -> bool {
+    pml4_slot >= KASAN_SHADOW_PML4_FIRST && pml4_slot < KASAN_SHADOW_PML4_END
+}
+
 /// User-space range.
 pub const USER_SPACE: Region = Region {
     name: "user",

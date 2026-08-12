@@ -91,7 +91,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::mm::frame::{self, FRAME_SIZE};
 use crate::mm::kvspace;
-use crate::mm::page_table::{self, PageFlags, VirtAddr};
+use crate::mm::page_table::{self, HW_PAGES_PER_FRAME};
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -168,11 +168,457 @@ static SHADOW_MAPPED: [AtomicU64; MAP_BITMAP_WORDS] =
 /// IRQ-context allocation cannot re-enter and self-deadlock on the same CPU.
 static MAP_LOCK: spin::Mutex<()> = spin::Mutex::new(());
 
+/// Run `f` holding [`MAP_LOCK`] with interrupts disabled, without ever *waiting*
+/// for the lock with interrupts disabled. Returns `None` if the lock was busy
+/// and this caller could not safely wait for it.
+///
+/// The distinction matters because the mapping path performs a cross-CPU TLB
+/// shootdown while holding the lock, and the shootdown blocks until every other
+/// CPU acknowledges an IPI. A CPU spinning on `MAP_LOCK.lock()` with interrupts
+/// disabled can never take that IPI, so the holder would wait for an
+/// acknowledgement that can never come — a two-CPU deadlock.
+///
+/// So the lock is only ever acquired with `try_lock`:
+///
+/// * If the caller arrived with interrupts enabled, a failed attempt re-enables
+///   them before retrying, which lets the shootdown IPI through and guarantees
+///   forward progress.
+/// * If the caller arrived with interrupts already disabled (an IRQ-context
+///   allocation), re-enabling them is not ours to do, so a failed attempt gives
+///   up. The caller then simply leaves that shadow byte unwritten, which loses
+///   detection coverage for one allocation but is never a correctness problem —
+///   an unpoisoned shadow byte reads as "addressable" and fails open.
+fn with_map_lock<R>(f: impl FnOnce() -> R) -> Option<R> {
+    let irqs_were_on = crate::cpu::interrupts_enabled();
+    loop {
+        // SAFETY: masking interrupts is always permitted in ring 0; we restore
+        // the caller's flag state on every exit path below.
+        unsafe { crate::cpu::cli() };
+        if let Some(guard) = MAP_LOCK.try_lock() {
+            let out = f();
+            drop(guard);
+            if irqs_were_on {
+                // SAFETY: restoring the interrupt flag the caller arrived with.
+                unsafe { crate::cpu::sti() };
+            }
+            return Some(out);
+        }
+        if !irqs_were_on {
+            return None;
+        }
+        // SAFETY: as above — the caller had interrupts enabled, so re-enabling
+        // them between attempts merely restores their state, and it is what
+        // lets an incoming TLB-shootdown IPI be serviced while we wait.
+        unsafe { crate::cpu::sti() };
+        core::hint::spin_loop();
+    }
+}
+
+/// Physical address of the all-zero shadow page, or 0 before [`early_init`].
+static ZERO_PAGE_PHYS: AtomicU64 = AtomicU64::new(0);
+/// Physical address of the shared, read-only zero-shadow page table.
+static ZERO_PT_PHYS: AtomicU64 = AtomicU64::new(0);
+/// Physical address of the shared page directory (every entry → `ZERO_PT`).
+static ZERO_PD_PHYS: AtomicU64 = AtomicU64::new(0);
+/// Physical address of `SHADOW_PDPT0`, the private PDPT covering the backed
+/// window. Written last by [`early_init`], so a non-zero value here is the
+/// "the zero shadow is installed and usable" flag for the whole module.
+static PDPT0_PHYS: AtomicU64 = AtomicU64::new(0);
+
 // Statistics.
 static VIOLATIONS: AtomicU64 = AtomicU64::new(0);
 static SHADOW_FRAMES_MAPPED: AtomicU64 = AtomicU64::new(0);
 static BYTES_POISONED: AtomicU64 = AtomicU64::new(0);
 static BYTES_UNPOISONED: AtomicU64 = AtomicU64::new(0);
+
+// ---------------------------------------------------------------------------
+// Early zero shadow
+// ---------------------------------------------------------------------------
+//
+// The compiler-instrumented build checks a shadow byte before *every* load and
+// store, from the first instruction of instrumented code onwards. That creates
+// a bootstrap problem with no gentle failure mode: an access whose shadow page
+// is not mapped faults, and a fault before the IDT exists is a triple fault and
+// a silent reboot.
+//
+// The classic answer (Linux's `kasan_early_init`) is to make the *entire*
+// shadow readable from the very start by pointing all of it at one shared,
+// read-only, all-zero page — zero meaning "addressable", so every check passes
+// until something poisons a byte for real. Because every level of the paging
+// hierarchy is shared as well, the whole 16 TiB costs five 4 KiB pages:
+//
+//   PML4[416]        ─→ SHADOW_PDPT0   (512 entries, all →) ZERO_PD ─┐
+//   PML4[417..448]   ─→ ZERO_PDPT      (512 entries, all →) ZERO_PD ─┤
+//                                                                     │
+//                                ZERO_PD (512 entries, all →) ZERO_PT ┘
+//                                ZERO_PT (512 entries, all →) ZERO_SHADOW_PAGE (RO)
+//
+// They are `static`s in `.bss` rather than allocations because this must be
+// able to run before the frame allocator exists — the only inputs are CR3 and
+// the HHDM offset.
+//
+// Installed unconditionally, not just in the instrumented profile. Twenty KiB
+// and 32 PML4 entries is a negligible price for having the path exercised by
+// every boot test, instead of first running in the build where something is
+// already going wrong.
+//
+// ## Why the first PDPT is private
+//
+// Real (writable) shadow pages get spliced into this hierarchy lazily, one
+// 16 KiB frame at a time, by replacing shared tables with private copies on the
+// path down — see [`install_shadow_frame`]. Those edits must be visible in
+// *every* address space, and that constrains which level they may start at:
+// `page_table::alloc_pml4` copies the kernel's PML4 entries **by value** into
+// each new process PML4, so a PML4 entry rewritten after boot would be seen
+// only by whichever address space happened to be active. Everything *below* the
+// PML4 is reached by pointer and therefore shared by construction.
+//
+// So the PML4 entries are written exactly once, in [`early_init`], and never
+// again. To make that possible the slot that covers the backed window gets its
+// own private PDPT (`SHADOW_PDPT0`) instead of the shared one, so that writing
+// a PDPT entry affects only that slot. `SHADOW_PML4_ONLY_SLOT` below asserts
+// that the backed window really does fit in one 512 GiB slot.
+
+/// One 4 KiB hardware page holding 512 page-table entries.
+///
+/// (Note the kernel's `FRAME_SIZE` is 16 KiB, but paging structures are
+/// hardware-defined 4 KiB objects regardless.)
+#[repr(C, align(4096))]
+struct PtPage([u64; 512]);
+
+/// The single all-zero page that every unpoisoned shadow address resolves to.
+/// Mapped read-only 2^31 times over; nothing may ever write through it.
+static mut ZERO_SHADOW_PAGE: PtPage = PtPage([0; 512]);
+/// Shared page table: all 512 entries map [`ZERO_SHADOW_PAGE`] read-only.
+static mut ZERO_SHADOW_PT: PtPage = PtPage([0; 512]);
+/// Shared page directory: all 512 entries point at [`ZERO_SHADOW_PT`].
+static mut ZERO_SHADOW_PD: PtPage = PtPage([0; 512]);
+/// Shared PDPT for the shadow PML4 slots that are never backed by real pages
+/// (everything above the first 512 GiB of shadow). All entries → `ZERO_SHADOW_PD`.
+static mut ZERO_SHADOW_PDPT: PtPage = PtPage([0; 512]);
+/// Private PDPT for the *first* shadow PML4 slot — the 512 GiB that contains
+/// the whole backed window. Entries start out pointing at `ZERO_SHADOW_PD` and
+/// are swapped for private page directories as shadow is really backed.
+static mut SHADOW_PDPT0: PtPage = PtPage([0; 512]);
+
+/// Present bit in a page-table entry.
+const PTE_PRESENT: u64 = 1 << 0;
+/// Writable bit.
+const PTE_WRITABLE: u64 = 1 << 1;
+/// Page-size bit (a huge page at PDPT/PD level).
+const PTE_HUGE: u64 = 1 << 7;
+/// No-execute bit.
+const PTE_NX: u64 = 1 << 63;
+/// Physical-address field of a page-table entry.
+const PTE_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+
+/// Read entry `index` of the 4 KiB paging structure at `table_phys`.
+///
+/// # Safety
+///
+/// `table_phys` must be a live paging structure, `index < 512`, and `hhdm` the
+/// correct direct-map offset.
+#[inline]
+unsafe fn pt_read(table_phys: u64, index: usize, hhdm: u64) -> u64 {
+    // SAFETY: caller guarantees the table is live and mapped through the HHDM;
+    // entries are 8 bytes and the structure is 4 KiB aligned, so the read is
+    // aligned and in bounds for index < 512.
+    unsafe { core::ptr::read_volatile((table_phys.wrapping_add(hhdm) as *const u64).add(index)) }
+}
+
+/// Write entry `index` of the 4 KiB paging structure at `table_phys`.
+///
+/// # Safety
+///
+/// As [`pt_read`], plus the caller must have exclusive access to the entry.
+#[inline]
+unsafe fn pt_write(table_phys: u64, index: usize, value: u64, hhdm: u64) {
+    // SAFETY: as `pt_read`; the caller guarantees exclusivity.
+    unsafe {
+        core::ptr::write_volatile((table_phys.wrapping_add(hhdm) as *mut u64).add(index), value);
+    }
+}
+
+/// Translate a kernel virtual address using the live page tables.
+///
+/// A standalone walk rather than `page_table::translate` because this runs
+/// *before* `page_table::init`, so the module's HHDM cell is not yet set.
+///
+/// # Safety
+///
+/// `pml4_phys` must be the live PML4 and `hhdm` the correct direct-map offset.
+unsafe fn early_translate(pml4_phys: u64, hhdm: u64, va: u64) -> Option<u64> {
+    let index = |shift: u32| ((va >> shift) & 0x1FF) as usize;
+
+    // SAFETY: each level is checked present before being used as the next
+    // table's physical address, which is what makes the following read valid.
+    unsafe {
+        let e = pt_read(pml4_phys, index(39), hhdm);
+        if e & PTE_PRESENT == 0 {
+            return None;
+        }
+        let e = pt_read(e & PTE_ADDR_MASK, index(30), hhdm);
+        if e & PTE_PRESENT == 0 {
+            return None;
+        }
+        if e & PTE_HUGE != 0 {
+            return Some((e & PTE_ADDR_MASK) | (va & 0x3FFF_FFFF));
+        }
+        let e = pt_read(e & PTE_ADDR_MASK, index(21), hhdm);
+        if e & PTE_PRESENT == 0 {
+            return None;
+        }
+        if e & PTE_HUGE != 0 {
+            return Some((e & PTE_ADDR_MASK) | (va & 0x1F_FFFF));
+        }
+        let e = pt_read(e & PTE_ADDR_MASK, index(12), hhdm);
+        if e & PTE_PRESENT == 0 {
+            return None;
+        }
+        Some((e & PTE_ADDR_MASK) | (va & 0xFFF))
+    }
+}
+
+/// Reload CR3 to flush the TLB after editing top-level paging structures.
+///
+/// `invlpg` cannot be used here: the mappings being added cover 16 TiB, and
+/// there is nothing to invalidate per-page anyway — the entries were absent.
+///
+/// # Safety
+///
+/// Writing CR3 with the value just read from it is always safe in ring 0; it
+/// changes no mapping, only flushes non-global TLB entries.
+#[inline]
+unsafe fn flush_tlb_all() {
+    // SAFETY: read-then-write of CR3 with an unchanged value.
+    unsafe {
+        core::arch::asm!(
+            "mov {tmp}, cr3",
+            "mov cr3, {tmp}",
+            tmp = out(reg) _,
+            options(nostack, preserves_flags),
+        );
+    }
+}
+
+/// Map the whole KASAN shadow reservation onto a shared read-only zero page.
+///
+/// Must be called as early in boot as the HHDM offset is known and *before*
+/// any instrumented code runs. Requires no allocator. Idempotent.
+///
+/// Returns `false` if the kernel's own statics could not be translated, which
+/// would mean the HHDM offset is wrong — in the instrumented build that is
+/// fatal and the caller should say so loudly rather than continue into a
+/// triple fault.
+///
+/// # Safety
+///
+/// Must be called exactly once, on the BSP, with interrupts disabled and no
+/// other CPU running, since it edits the live PML4.
+pub unsafe fn early_init(hhdm: u64) -> bool {
+    if PDPT0_PHYS.load(Ordering::Acquire) != 0 {
+        return true; // already installed
+    }
+
+    // CR3's low 12 bits are flags (PCD/PWT/PCID), not part of the address.
+    let cr3: u64;
+    // SAFETY: reading CR3 is a plain register read, always valid in ring 0.
+    unsafe {
+        core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack, preserves_flags));
+    }
+    let pml4_phys = cr3 & PTE_ADDR_MASK;
+
+    // Physical addresses of our four .bss pages. `addr_of_mut!` rather than a
+    // reference: taking `&mut` to a `static mut` that the paging hardware is
+    // about to alias is exactly the kind of aliasing Rust forbids.
+    let zero_page_va = core::ptr::addr_of_mut!(ZERO_SHADOW_PAGE) as u64;
+    let pt_va = core::ptr::addr_of_mut!(ZERO_SHADOW_PT) as u64;
+    let pd_va = core::ptr::addr_of_mut!(ZERO_SHADOW_PD) as u64;
+    let pdpt_va = core::ptr::addr_of_mut!(ZERO_SHADOW_PDPT) as u64;
+    let pdpt0_va = core::ptr::addr_of_mut!(SHADOW_PDPT0) as u64;
+
+    // SAFETY: `pml4_phys` came from CR3 and `hhdm` is the bootloader's offset,
+    // so the walk reads live, mapped paging structures.
+    let (
+        Some(zero_page_phys),
+        Some(pt_phys),
+        Some(pd_phys),
+        Some(pdpt_phys),
+        Some(pdpt0_phys),
+    ) = (unsafe {
+        (
+            early_translate(pml4_phys, hhdm, zero_page_va),
+            early_translate(pml4_phys, hhdm, pt_va),
+            early_translate(pml4_phys, hhdm, pd_va),
+            early_translate(pml4_phys, hhdm, pdpt_va),
+            early_translate(pml4_phys, hhdm, pdpt0_va),
+        )
+    })
+    else {
+        return false;
+    };
+
+    // Leaf entries: read-only and non-executable. Read-only is load-bearing —
+    // one writable alias to this page would let a stray shadow *store* (e.g.
+    // stack-redzone poisoning, were it ever enabled without real backing)
+    // silently mark all of memory poisoned or all of it clean.
+    let leaf = zero_page_phys | PTE_PRESENT | PTE_NX;
+    let pde = pt_phys | PTE_PRESENT | PTE_WRITABLE;
+    let pdpte = pd_phys | PTE_PRESENT | PTE_WRITABLE;
+
+    // SAFETY: the five tables are our own 4 KiB-aligned statics, reached
+    // through their HHDM aliases; nothing else refers to them yet, and no
+    // other CPU is running. Intermediate levels are writable so that
+    // `install_shadow_frame` can later split a branch off for real shadow
+    // pages; the read-only leaf still makes the *pages* read-only, because
+    // x86 ANDs the writable bit across all levels.
+    unsafe {
+        for i in 0..512 {
+            pt_write(pt_phys, i, leaf, hhdm);
+            pt_write(pd_phys, i, pde, hhdm);
+            pt_write(pdpt_phys, i, pdpte, hhdm);
+            pt_write(pdpt0_phys, i, pdpte, hhdm);
+        }
+        pt_write(
+            pml4_phys,
+            SHADOW_PML4_FIRST,
+            pdpt0_phys | PTE_PRESENT | PTE_WRITABLE | PTE_NX,
+            hhdm,
+        );
+        for slot in SHADOW_PML4_FIRST.saturating_add(1)..SHADOW_PML4_END {
+            pt_write(
+                pml4_phys,
+                slot,
+                pdpt_phys | PTE_PRESENT | PTE_WRITABLE | PTE_NX,
+                hhdm,
+            );
+        }
+        flush_tlb_all();
+    }
+
+    ZERO_PAGE_PHYS.store(zero_page_phys, Ordering::Relaxed);
+    ZERO_PT_PHYS.store(pt_phys, Ordering::Relaxed);
+    ZERO_PD_PHYS.store(pd_phys, Ordering::Relaxed);
+    // Written last, with Release: it is the flag the rest of the module tests.
+    PDPT0_PHYS.store(pdpt0_phys, Ordering::Release);
+    true
+}
+
+/// First PML4 slot covering the shadow reservation.
+const SHADOW_PML4_FIRST: usize = kvspace::KASAN_SHADOW_PML4_FIRST;
+/// One past the last PML4 slot covering the shadow reservation.
+const SHADOW_PML4_END: usize = kvspace::KASAN_SHADOW_PML4_END;
+
+// The shadow reservation must start on a PML4 (512 GiB) boundary, or
+// `SHADOW_PML4_FIRST` would not describe it.
+const _: () = assert!(
+    KASAN_SHADOW_BASE & ((1u64 << 39) - 1) == 0,
+    "KASAN shadow base must be 512 GiB aligned"
+);
+// The *backed* window must fit entirely in the first shadow PML4 slot. This is
+// what lets `install_shadow_frame` start its walk at `SHADOW_PDPT0` and never
+// touch a PML4 entry after boot — see the section comment above for why a
+// post-boot PML4 edit would not be visible in every address space.
+const _: () = assert!(
+    KASAN_SHADOW_SIZE <= 1u64 << 39,
+    "backed KASAN shadow window must fit in one PML4 slot"
+);
+
+/// Splice a real, writable 16 KiB shadow frame into the zero-shadow hierarchy.
+///
+/// Cannot go through `page_table::map_frame`: that refuses to overwrite a
+/// present PTE (`AlreadyExists`), and in the shadow region *every* PTE is
+/// already present — pointing at the shared read-only zero page. Unmapping
+/// first is not an option either, since it would leave a window in which an
+/// instrumented access faults instead of reading a benign zero. So the four
+/// hardware PTEs are replaced in place, after copy-on-writing whichever shared
+/// tables lie on the path.
+///
+/// Each shared table found on the way down is copied first, with the copy
+/// pre-filled with the same shared child, so coverage is preserved exactly and
+/// only the branch being written diverges. Because the walk starts at
+/// `SHADOW_PDPT0` — a fixed static that every address space reaches through the
+/// same by-value PML4 entry — every table it edits is shared by pointer, and
+/// the new mapping is therefore visible in all address spaces at once.
+///
+/// TLB coherence: `invlpg` on a linear address invalidates both its TLB entry
+/// and the paging-structure-cache entries used to translate it (Intel SDM Vol.
+/// 3A §4.10.4.1), and those are exactly the PDPTE/PDE entries this function may
+/// have rewritten — so a cross-CPU `invlpg` of the four pages is sufficient; no
+/// full CR3 shootdown is needed.
+///
+/// Returns `false` if a table page could not be allocated (the shadow simply
+/// stays unbacked there, which fails open) or if [`early_init`] never ran.
+///
+/// # Safety
+///
+/// `shadow_va` must be 16 KiB-aligned and inside the backed window, `phys` a
+/// frame owned by the caller, and `hhdm` the live direct-map offset. The caller
+/// must serialize against other mappers (`MAP_LOCK`).
+unsafe fn install_shadow_frame(shadow_va: u64, phys: u64, hhdm: u64) -> bool {
+    let pdpt0 = PDPT0_PHYS.load(Ordering::Acquire);
+    if pdpt0 == 0 {
+        return false; // early_init never ran; nothing to splice into
+    }
+    let shared_pd = ZERO_PD_PHYS.load(Ordering::Relaxed);
+    let shared_pt = ZERO_PT_PHYS.load(Ordering::Relaxed);
+    let zero_page = ZERO_PAGE_PHYS.load(Ordering::Relaxed);
+
+    let idx = |shift: u32| ((shadow_va >> shift) & 0x1FF) as usize;
+
+    // SAFETY: `pdpt0` is our own static, and every table below it was either
+    // installed by `early_init` or freshly allocated here, so each read/write
+    // targets a live 4 KiB paging structure reached through the HHDM.
+    unsafe {
+        // PDPT → PD.
+        let mut pd = pt_read(pdpt0, idx(30), hhdm) & PTE_ADDR_MASK;
+        if pd == shared_pd {
+            let Ok(fresh) = page_table::alloc_pt_page() else {
+                return false;
+            };
+            let fill = shared_pt | PTE_PRESENT | PTE_WRITABLE;
+            for e in 0..512 {
+                pt_write(fresh, e, fill, hhdm);
+            }
+            pt_write(pdpt0, idx(30), fresh | PTE_PRESENT | PTE_WRITABLE, hhdm);
+            pd = fresh;
+        }
+
+        // PD → PT.
+        let mut pt = pt_read(pd, idx(21), hhdm) & PTE_ADDR_MASK;
+        if pt == shared_pt {
+            let Ok(fresh) = page_table::alloc_pt_page() else {
+                // The private PD allocated just above (if any) is retained: it
+                // maps exactly what the shared one did, so leaving it in place
+                // is correct, and the next call will reuse it.
+                return false;
+            };
+            let fill = zero_page | PTE_PRESENT | PTE_NX;
+            for e in 0..512 {
+                pt_write(fresh, e, fill, hhdm);
+            }
+            pt_write(pd, idx(21), fresh | PTE_PRESENT | PTE_WRITABLE, hhdm);
+            pt = fresh;
+        }
+
+        // Leaves: the four 4 KiB hardware pages of one 16 KiB kernel frame.
+        // `shadow_va` is frame-aligned, so `idx(12)` is a multiple of 4 and
+        // all four entries live in this one page table.
+        let base = idx(12);
+        for k in 0..HW_PAGES_PER_FRAME {
+            let entry = phys.wrapping_add((k as u64) << 12)
+                | PTE_PRESENT
+                | PTE_WRITABLE
+                | PTE_NX;
+            pt_write(pt, base.wrapping_add(k), entry, hhdm);
+        }
+    }
+
+    // Cross-CPU invalidation of the four pages, which also drops any stale
+    // paging-structure-cache entries for them (see the doc comment).
+    crate::tlb::flush_range(shadow_va, HW_PAGES_PER_FRAME as u32);
+    true
+}
 
 // ---------------------------------------------------------------------------
 // Init / enable
@@ -260,8 +706,7 @@ fn ensure_shadow_mapped(shadow_va: u64) -> bool {
     }
 
     // Slow path: map under the lock with interrupts disabled (re-entrancy safe).
-    crate::cpu::without_interrupts(|| {
-        let _guard = MAP_LOCK.lock();
+    with_map_lock(|| {
         // Double-check after acquiring the lock.
         if SHADOW_MAPPED[word].load(Ordering::Acquire) & bit != 0 {
             return true;
@@ -280,27 +725,21 @@ fn ensure_shadow_mapped(shadow_va: u64) -> bool {
         unsafe { core::ptr::write_bytes(frame_virt, 0, FRAME_SIZE); }
 
         let frame_base = KASAN_SHADOW_BASE + (frame_idx as u64) * FRAME_SIZE as u64;
-        let pml4 = page_table::active_pml4_phys();
-        let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE;
-        // SAFETY: pml4 is the active table; `phys` is a valid frame we just
-        // allocated; `frame_base` is a reserved-but-unmapped shadow VA. We
-        // flush the new mapping below.
-        match unsafe { page_table::map_frame(pml4, VirtAddr::new(frame_base), phys, flags) } {
-            Ok(()) => {
-                // SAFETY: invlpg on the just-mapped frame is always safe in ring 0.
-                unsafe { page_table::flush_frame(VirtAddr::new(frame_base)); }
-                SHADOW_MAPPED[word].fetch_or(bit, Ordering::Release);
-                SHADOW_FRAMES_MAPPED.fetch_add(1, Ordering::Relaxed);
-                true
-            }
-            Err(_) => {
-                // Roll back the frame we couldn't map.
-                // SAFETY: `phys` was just allocated and never handed out.
-                let _ = unsafe { frame::free_frame(phys) };
-                false
-            }
+        // SAFETY: `frame_base` is frame-aligned and inside the backed window
+        // (checked above), `phys` is a frame we just allocated and still own,
+        // and we hold MAP_LOCK.
+        if unsafe { install_shadow_frame(frame_base, phys.addr(), hhdm) } {
+            SHADOW_MAPPED[word].fetch_or(bit, Ordering::Release);
+            SHADOW_FRAMES_MAPPED.fetch_add(1, Ordering::Relaxed);
+            true
+        } else {
+            // Roll back the frame we couldn't map.
+            // SAFETY: `phys` was just allocated and never handed out.
+            let _ = unsafe { frame::free_frame(phys) };
+            false
         }
     })
+    .unwrap_or(false)
 }
 
 /// Write `val` to the shadow byte for `addr` (mapping the shadow page if

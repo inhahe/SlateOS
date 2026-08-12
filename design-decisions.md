@@ -7212,3 +7212,93 @@ the two ABIs need a shared test asserting they agree, or the divergence
 returns. Decision 2: delete the `has_capability(CAP_KILL)` check from the
 `ProcessGroup` arm and restore the two posix tests, which are named for what
 they assert and so will read as a deliberate exemption rather than an accident.
+
+## §110 — On the host, posix's test-mutated global state is per-thread, and the test lock that stood in for that is gone
+
+**Date:** 2026-08-12
+**Decided by:** Claude (autonomous)
+
+**Decision.** `posix::sys_capability` stores the effective/permitted/inheritable
+capability sets in a `store` module with two cfg'd bodies: process-global
+`AtomicU32`s on `target_os = "none"`, and a `thread_local!` `Cell<CapWords>` on
+host builds. The crate-global `CAP_TEST_LOCK` mutex that previously serialised
+every cap-mutating test — and its `CapTestLockGuard`, plus all 138 use sites
+across 25 files — was deleted in the same change.
+
+**Why this came up.** A cap-gated test failed roughly one run in three, a
+different one each time, passing in isolation. The lock was already there and
+was already documented as preventing "~150 spurious failures per run"; what it
+could not prevent were the tests that *read* cap state without taking it. See
+known-issues.md `TD-POSIX-TEST-CAP-STATE-SHARED-ACROSS-TEST-THREADS`.
+
+**The real fork: per-thread state vs. more disciplined locking.**
+
+*For per-thread state (chosen).* It makes the failure class unrepresentable
+instead of merely defended against — no test can observe or disturb another's
+caps, so no future test author has to know the rule. It fixed the unguarded
+reader tests without editing any of them, which is the strongest evidence the
+diagnosis was right. It removes a global mutex from a 20,128-test suite. And it
+matches an established precedent in this same crate: `perthread.rs` moved 15
+`static mut` libc buffers to per-thread storage for exactly this reason
+(TD-POSIX-TEST-PARALLEL, §92), so this is the house pattern rather than a new
+one.
+
+*Against.* Host and target now genuinely differ in behaviour, not just in
+mechanism — on the target, one thread's `capset` is visible to its siblings,
+and on the host it is not. That is a real divergence a test cannot catch: a
+future test asserting "thread B sees the cap A dropped" would pass on the
+target and fail on host. It is defensible only because it is the *modelled*
+semantics that differ from the *testing* substrate, and posix's host build has
+no purpose other than being tested. The alternative reading — that capability
+sets are per-thread for real (Linux credentials are in fact per-task) — is not
+what our target build implements, so I did not use it as justification.
+
+*The rejected alternative* was to keep the lock and add `CapGuard::snapshot()`
+to the dozen reader tests. It is a smaller diff and preserves host/target
+symmetry. Rejected because it leaves a live hazard behind an unwritten
+convention: the next cap-gated "happy path" test added anywhere in the crate
+reintroduces the flake, and the failure surfaces as an unrelated-looking errno
+mismatch in a different module.
+
+**Why the lock had to go rather than stay as belt-and-braces.** Its doc comment
+stated a rationale that was no longer true, and stale rationale is worse than
+none — it would have taught the next reader that cap state is shared. It also
+serialised a large fraction of the suite for nothing. Deleting it doubled as
+the experiment: with per-thread words removed *and* the lock removed, a still-
+shared store would have reproduced the ~150 failures its own comment described.
+It did not (82 runs).
+
+**Where it lives.** `posix/src/sys_capability.rs` (`CapWords`, `CAPS_DEFAULT`,
+`mod store`, `current_caps`/`set_current_caps`); the deleted `_lock` fields in
+46 test-only `CapGuard`s across `posix/src/`.
+
+**How to reverse.** Point both `store::load`/`store::store` bodies at the
+atomics (delete the `cfg` split) and reinstate `CapTestLockGuard`. The 46
+`CapGuard`s would each need their `_lock` field back — which is the cost signal
+that the lock was the wrong layer for this.
+
+### Generalised the same day: the rule now covers all test-mutated statics in `posix`
+
+The cap fix left one uncaptured failure. Hunting it turned up three more —
+`process::tests::test_tcsetpgrp_bad_pgrp_does_not_change_fg_pgrp` and two
+`time::tests` timer-slot tests — with the identical cause in three *other*
+statics: `process.rs`'s `FG_PGRP` and its `host_pg::PGID`/`SID` test double, and
+`time.rs`'s `TIMER_TABLE`/`ITIMER_STATE`. All were converted to the same cfg'd
+per-thread storage (see known-issues.md
+`TD-POSIX-TEST-PGRP-AND-TIMER-STATE-SHARED-ACROSS-TEST-THREADS`).
+
+Three independent incidents from one cause makes this a rule rather than three
+fixes, so state it: **any mutable module-level state in `posix` that a test
+writes must be per-thread on host builds.** The tell is a per-test `reset_*()`
+helper — its very existence means tests write shared state, and under libtest's
+thread-per-test model such a helper is a race, not the isolation its doc comment
+usually claims. Three shapes are now available, pick by what call sites need:
+a `Cell` behind `get`/`set` accessors (`fg_pgrp`, `host_pg`), a `Cell` of a
+copyable struct (`sys_capability::CapWords`), or an `UnsafeCell` handing out a
+raw `*mut` when sites mutate in place (`time::timer_store`, `perthread`).
+
+The *Against* argument above applies unchanged and is worth re-reading before
+each new conversion: on the target these really are process-wide, and the host
+build diverges. It stays acceptable only for state whose host build exists
+solely to be tested — which is all of `posix`, but would not be true of, say,
+kernel state a host harness is meant to model faithfully.

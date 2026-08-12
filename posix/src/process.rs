@@ -520,26 +520,61 @@ pub extern "C" fn gettid() -> PidT {
 // about the child's own group.  The statics are gone; there is now one
 // source of truth shared by both ABIs.
 
-/// Foreground process group of the controlling terminal (set by
-/// `tcsetpgrp`).
+/// Storage for the foreground process group of the controlling terminal
+/// (set by `tcsetpgrp`).  `0` is the not-yet-initialized sentinel; real
+/// PIDs are >= 1.
 ///
 /// Still userspace-only: the kernel has no notion of a controlling
 /// terminal or its foreground group yet, and without kernel suspend there
 /// is no `SIGTTIN`/`SIGTTOU` stop to enforce against it anyway.  Tracked
 /// in `known-issues.md`; unlike the PGID/SID statics this one is not
 /// *wrong*, merely local — no other process can observe or contradict it.
-static mut FG_PGRP: PidT = 0;
+///
+/// On the target that "local" scope is the process, so a plain static is
+/// the right model.  On host it is per-*thread*: `cargo test` runs every
+/// test on its own thread inside one process, so a process-global here
+/// makes each test's `reset_pg()` visible to every concurrently-running
+/// test.  Same remedy, and same reasoning, as the capability words in
+/// `sys_capability` (design-decisions.md §110) and the libc scratch
+/// buffers in `perthread`.
+#[cfg(target_os = "none")]
+mod fg_pgrp {
+    use super::PidT;
+    static mut FG_PGRP: PidT = 0;
+    pub(super) fn get() -> PidT {
+        // SAFETY: single-address-space process, no concurrency.
+        unsafe { core::ptr::addr_of!(FG_PGRP).read() }
+    }
+    pub(super) fn set(v: PidT) {
+        // SAFETY: single-address-space process, no concurrency.
+        unsafe { core::ptr::addr_of_mut!(FG_PGRP).write(v) }
+    }
+}
 
-/// Ensure `FG_PGRP` is initialized (called before any terminal getter).
+#[cfg(not(target_os = "none"))]
+mod fg_pgrp {
+    use super::PidT;
+    std::thread_local! {
+        static FG_PGRP: core::cell::Cell<PidT> = const { core::cell::Cell::new(0) };
+    }
+    // `try_with` rather than `with`: a value read during thread-local
+    // teardown must degrade to the uninitialized sentinel, not panic.
+    pub(super) fn get() -> PidT {
+        FG_PGRP.try_with(core::cell::Cell::get).unwrap_or(0)
+    }
+    pub(super) fn set(v: PidT) {
+        let _ = FG_PGRP.try_with(|c| c.set(v));
+    }
+}
+
+/// Ensure the foreground process group is initialized (called before any
+/// terminal getter).
 ///
 /// On first call, sets it to our PID: before any `tcsetpgrp`, the process
 /// reading the terminal is by definition the foreground one.
 fn ensure_pg_init() {
-    // SAFETY: single-address-space process, no concurrency.
-    unsafe {
-        if core::ptr::addr_of!(FG_PGRP).read() == 0 {
-            core::ptr::addr_of_mut!(FG_PGRP).write(getpid());
-        }
+    if fg_pgrp::get() == 0 {
+        fg_pgrp::set(getpid());
     }
 }
 
@@ -572,33 +607,53 @@ fn pgid_errno(ret: i64) -> i32 {
 // `cargo test` runs this crate against the host triple, where the raw
 // `syscall` instruction is gated off and every `syscallN` returns
 // `-ENOSYS`.  There is no SlateOS kernel to hold the state, so the host
-// build keeps the group/session IDs in statics — the same model the OS
-// build used before the syscalls existed.  This is a test double, not a
-// fallback: on the real target the `cfg(target_os = "none")` arms below
-// always issue the syscall.
+// build keeps the group/session IDs in per-thread cells — the same model
+// the OS build used before the syscalls existed, except scoped to the
+// thread.  `cargo test` runs every test on its own thread inside one
+// process, so process-global doubles here would let one test's
+// `setpgid`/`setsid` rewrite the state another test is mid-assertion on;
+// per-thread state gives each test the isolated "process" it thinks it
+// has.  Same remedy as `fg_pgrp` above (design-decisions.md §110).  This
+// is a test double, not a fallback: on the real target the
+// `cfg(target_os = "none")` arms below always issue the syscall.
 #[cfg(not(target_os = "none"))]
 mod host_pg {
     use super::PidT;
+    use core::cell::Cell;
 
-    /// Process group ID of the calling process (0 = not yet initialized;
-    /// real PIDs are >= 1).
-    pub static mut PGID: PidT = 0;
-    /// Session ID of the calling process.  Same lazy-init sentinel.
-    pub static mut SID: PidT = 0;
+    std::thread_local! {
+        /// Process group ID of the calling process (0 = not yet
+        /// initialized; real PIDs are >= 1).
+        static PGID: Cell<PidT> = const { Cell::new(0) };
+        /// Session ID of the calling process.  Same lazy-init sentinel.
+        static SID: Cell<PidT> = const { Cell::new(0) };
+    }
+
+    // The four accessors below use `try_with`, so a read during
+    // thread-local teardown degrades to the uninitialized sentinel rather
+    // than panicking.
+    pub(super) fn pgid() -> PidT {
+        PGID.try_with(Cell::get).unwrap_or(0)
+    }
+    pub(super) fn set_pgid_raw(v: PidT) {
+        let _ = PGID.try_with(|c| c.set(v));
+    }
+    pub(super) fn sid() -> PidT {
+        SID.try_with(Cell::get).unwrap_or(0)
+    }
+    pub(super) fn set_sid_raw(v: PidT) {
+        let _ = SID.try_with(|c| c.set(v));
+    }
 
     /// Initialize both to our PID on first use: at startup a process leads
     /// its own group and session.
     fn ensure_init() {
-        // SAFETY: host test double; single-address-space, no concurrency
-        // beyond the test harness's own threads, which do not share PIDs.
-        unsafe {
-            let us = super::getpid();
-            if core::ptr::addr_of!(PGID).read() == 0 {
-                core::ptr::addr_of_mut!(PGID).write(us);
-            }
-            if core::ptr::addr_of!(SID).read() == 0 {
-                core::ptr::addr_of_mut!(SID).write(us);
-            }
+        let us = super::getpid();
+        if pgid() == 0 {
+            set_pgid_raw(us);
+        }
+        if sid() == 0 {
+            set_sid_raw(us);
         }
     }
 
@@ -608,25 +663,21 @@ mod host_pg {
         ensure_init();
         let us = super::getpid();
         if pid == 0 || pid == us {
-            // SAFETY: initialized above.
-            return unsafe { core::ptr::addr_of!(PGID).read() };
+            return pgid();
         }
         pid
     }
 
     /// `setpgid(pid, pgid)`: only our own group is stored; a move of
     /// another process succeeds silently (the host has no such process).
-    pub fn set_pgid(pid: PidT, pgid: PidT) -> i32 {
+    pub fn set_pgid(pid: PidT, new_pgid: PidT) -> i32 {
         ensure_init();
         let us = super::getpid();
         let target = if pid == 0 { us } else { pid };
         if target != us {
             return 0;
         }
-        // SAFETY: host test double, single process.
-        unsafe {
-            core::ptr::addr_of_mut!(PGID).write(if pgid == 0 { us } else { pgid });
-        }
+        set_pgid_raw(if new_pgid == 0 { us } else { new_pgid });
         0
     }
 
@@ -635,8 +686,7 @@ mod host_pg {
         ensure_init();
         let us = super::getpid();
         if pid == 0 || pid == us {
-            // SAFETY: initialized above.
-            return unsafe { core::ptr::addr_of!(SID).read() };
+            return sid();
         }
         pid
     }
@@ -644,11 +694,8 @@ mod host_pg {
     /// `setsid()`: become leader of a new session and group.
     pub fn set_sid() -> PidT {
         let us = super::getpid();
-        // SAFETY: host test double, single process.
-        unsafe {
-            core::ptr::addr_of_mut!(SID).write(us);
-            core::ptr::addr_of_mut!(PGID).write(us);
-        }
+        set_sid_raw(us);
+        set_pgid_raw(us);
         us
     }
 }
@@ -824,19 +871,13 @@ pub extern "C" fn setsid() -> PidT {
         // yet, so nothing else can claim the foreground.
         #[allow(clippy::cast_possible_truncation)]
         let sid = ret as PidT;
-        // SAFETY: single process.
-        unsafe {
-            core::ptr::addr_of_mut!(FG_PGRP).write(sid);
-        }
+        fg_pgrp::set(sid);
         sid
     }
     #[cfg(not(target_os = "none"))]
     {
         let sid = host_pg::set_sid();
-        // SAFETY: single process.
-        unsafe {
-            core::ptr::addr_of_mut!(FG_PGRP).write(sid);
-        }
+        fg_pgrp::set(sid);
         sid
     }
 }
@@ -862,8 +903,7 @@ pub extern "C" fn tcgetpgrp(fd: crate::types::Fd) -> PidT {
         return -1;
     }
     ensure_pg_init();
-    // SAFETY: initialized.
-    unsafe { core::ptr::addr_of!(FG_PGRP).read() }
+    fg_pgrp::get()
 }
 
 /// Set the foreground process group ID of a terminal.
@@ -890,10 +930,7 @@ pub extern "C" fn tcsetpgrp(fd: crate::types::Fd, pgrp: PidT) -> i32 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    // SAFETY: single process.
-    unsafe {
-        core::ptr::addr_of_mut!(FG_PGRP).write(pgrp);
-    }
+    fg_pgrp::set(pgrp);
     0
 }
 
@@ -3418,21 +3455,22 @@ mod tests {
     //
     // On the OS target the group/session wrappers are thin syscall
     // translations; on host they run against the `host_pg` test double.
-    // These tests pre-set that double (and `FG_PGRP`) to non-zero values
-    // so the lazy `getpid()` initialisation is skipped and the routing
-    // logic is exercised against known state.
+    // These tests pre-set that double (and the foreground group) to
+    // non-zero values so the lazy `getpid()` initialisation is skipped and
+    // the routing logic is exercised against known state.
 
     /// Reset the process group/session state to known values.
     ///
-    /// Must be called before each process group test to avoid
-    /// inter-test interference.  Uses `pid=42` as a deterministic
-    /// "fake PID" so the lazy initialisers skip their getpid() call.
+    /// Must be called before each process group test.  This is safe to do
+    /// unilaterally because all three cells are per-thread on host builds
+    /// and libtest gives each test its own thread — a reset here cannot
+    /// disturb a test running concurrently.  Uses `pid=42` as a
+    /// deterministic "fake PID" so the lazy initialisers skip their
+    /// getpid() call.
     fn reset_pg() {
-        unsafe {
-            core::ptr::addr_of_mut!(host_pg::PGID).write(42);
-            core::ptr::addr_of_mut!(host_pg::SID).write(42);
-            core::ptr::addr_of_mut!(FG_PGRP).write(42);
-        }
+        host_pg::set_pgid_raw(42);
+        host_pg::set_sid_raw(42);
+        fg_pgrp::set(42);
     }
 
     /// Ensure fds 0/1/2 are open so `tcgetpgrp`/`tcsetpgrp` tests
@@ -7761,20 +7799,11 @@ mod tests {
         struct CapGuard {
             lo: u32,
             hi: u32,
-            // Held for the lifetime of the guard. See
-            // `sys_capability::CAP_TEST_LOCK` for why.
-            _lock: crate::sys_capability::CapTestLockGuard,
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            // Re-entrant lock guard: outermost acquire on the
-            // thread takes the global mutex; nested acquires
-            // (some tests stack a scoped CapGuard inside an
-            // outer one) are no-ops for the lock but still
-            // snapshot/restore caps independently.
-            let lock = crate::sys_capability::CapTestLockGuard::acquire();
             let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi, _lock: lock }
+            Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
@@ -9534,19 +9563,11 @@ mod tests {
         pub(super) struct CapGuard {
             lo: u32,
             hi: u32,
-            // Held for the lifetime of the guard. See
-            // `sys_capability::CAP_TEST_LOCK` for why.
-            _lock: crate::sys_capability::CapTestLockGuard,
         }
         impl CapGuard {
             pub(super) fn snapshot() -> Self {
-                // Re-entrant lock guard: outermost acquire on the
-                // thread takes the global mutex; nested acquires are
-                // no-ops for the lock but still snapshot/restore caps
-                // independently.
-                let lock = crate::sys_capability::CapTestLockGuard::acquire();
                 let (lo, hi) = crate::sys_capability::current_caps_effective();
-                Self { lo, hi, _lock: lock }
+                Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
@@ -10501,20 +10522,11 @@ mod tests {
         struct CapGuard {
             lo: u32,
             hi: u32,
-            // Held for the lifetime of the guard. See
-            // `sys_capability::CAP_TEST_LOCK` for why.
-            _lock: crate::sys_capability::CapTestLockGuard,
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            // Re-entrant lock guard: outermost acquire on the
-            // thread takes the global mutex; nested acquires
-            // (some tests stack a scoped CapGuard inside an
-            // outer one) are no-ops for the lock but still
-            // snapshot/restore caps independently.
-            let lock = crate::sys_capability::CapTestLockGuard::acquire();
             let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi, _lock: lock }
+            Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
@@ -11165,23 +11177,11 @@ mod tests {
 
             hi: u32,
 
-            // Held for the lifetime of the guard. See
-
-            // `sys_capability::CAP_TEST_LOCK` for why.
-
-            _lock: crate::sys_capability::CapTestLockGuard,
-
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            // Re-entrant lock guard: outermost acquire on the
-            // thread takes the global mutex; nested acquires
-            // (some tests stack a scoped CapGuard inside an
-            // outer one) are no-ops for the lock but still
-            // snapshot/restore caps independently.
-            let lock = crate::sys_capability::CapTestLockGuard::acquire();
             let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi, _lock: lock }
+            Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
@@ -11573,23 +11573,11 @@ mod tests {
 
             hi: u32,
 
-            // Held for the lifetime of the guard. See
-
-            // `sys_capability::CAP_TEST_LOCK` for why.
-
-            _lock: crate::sys_capability::CapTestLockGuard,
-
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            // Re-entrant lock guard: outermost acquire on the
-            // thread takes the global mutex; nested acquires
-            // (some tests stack a scoped CapGuard inside an
-            // outer one) are no-ops for the lock but still
-            // snapshot/restore caps independently.
-            let lock = crate::sys_capability::CapTestLockGuard::acquire();
             let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi, _lock: lock }
+            Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
@@ -12033,23 +12021,11 @@ mod tests {
 
             hi: u32,
 
-            // Held for the lifetime of the guard. See
-
-            // `sys_capability::CAP_TEST_LOCK` for why.
-
-            _lock: crate::sys_capability::CapTestLockGuard,
-
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            // Re-entrant lock guard: outermost acquire on the
-            // thread takes the global mutex; nested acquires
-            // (some tests stack a scoped CapGuard inside an
-            // outer one) are no-ops for the lock but still
-            // snapshot/restore caps independently.
-            let lock = crate::sys_capability::CapTestLockGuard::acquire();
             let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi, _lock: lock }
+            Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
@@ -12436,23 +12412,11 @@ mod tests {
 
             hi: u32,
 
-            // Held for the lifetime of the guard. See
-
-            // `sys_capability::CAP_TEST_LOCK` for why.
-
-            _lock: crate::sys_capability::CapTestLockGuard,
-
         }
         impl CapGuard {
             fn snapshot() -> Self {
-            // Re-entrant lock guard: outermost acquire on the
-            // thread takes the global mutex; nested acquires
-            // (some tests stack a scoped CapGuard inside an
-            // outer one) are no-ops for the lock but still
-            // snapshot/restore caps independently.
-            let lock = crate::sys_capability::CapTestLockGuard::acquire();
             let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi, _lock: lock }
+            Self { lo, hi }
             }
         }
         impl Drop for CapGuard {

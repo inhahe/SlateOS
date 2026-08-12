@@ -2250,11 +2250,107 @@ fn is_valid_sigev_notify(notify: i32) -> bool {
 /// Maximum number of timers per process.
 const MAX_TIMERS: usize = 32;
 
-/// Timer state table.
+/// Timer state table type.
 ///
-/// Each slot holds the timer's itimerspec (or zeros if unused).
-/// Timer IDs are indices into this table.
-static mut TIMER_TABLE: [Option<Itimerspec>; MAX_TIMERS] = [None; MAX_TIMERS];
+/// Each slot holds the timer's itimerspec (`None` if unused).  Timer IDs
+/// are indices into this table.
+type TimerTable = [Option<Itimerspec>; MAX_TIMERS];
+
+/// Interval-timer state type, indexed by the `setitimer` `which`
+/// parameter (0 = REAL, 1 = VIRTUAL, 2 = PROF).
+type ItimerState = [Itimerval; ITIMER_COUNT];
+
+/// Storage for the two POSIX timer tables.
+///
+/// POSIX makes both per-*process*, and on the target a process is one
+/// address space, so plain statics are the right model there.
+///
+/// On host builds they are per-*thread* instead.  `cargo test` runs every
+/// test on its own thread inside a single process, so process-global
+/// tables mean one test's `timer_create` consumes a slot — and one test's
+/// reset wipes a slot — that a concurrently running test is mid-assertion
+/// on.  That produced exactly the flakes recorded in `known-issues.md`
+/// (`test_timer_settime_bad_it_value_tv_nsec_does_not_overwrite_slot_phase146`
+/// and `test_timer_gettime_efault_loop_no_state_change_phase148`).  Same
+/// remedy, and same reasoning, as `crate::perthread` (`TD-POSIX-TEST-PARALLEL`)
+/// and the capability words in `crate::sys_capability` (design-decisions.md
+/// §110): the host build exists to be tested, and per-thread storage gives
+/// each test the isolated "process" it already assumes it has.
+///
+/// Both accessors hand out a raw `*mut` rather than a reference because
+/// the call sites mutate the table in place; the pointer is valid for the
+/// calling thread and must not be shared with another one.
+mod timer_store {
+    use super::{ItimerState, Itimerval, TimerTable, Timeval, ITIMER_COUNT, MAX_TIMERS};
+
+    /// Cold-start state of the timer table, stated once for both builds.
+    const TIMERS_INIT: TimerTable = [None; MAX_TIMERS];
+    /// Cold-start state of the interval timers, stated once for both builds.
+    const ITIMERS_INIT: ItimerState = [Itimerval {
+        it_interval: Timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        },
+        it_value: Timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        },
+    }; ITIMER_COUNT];
+
+    #[cfg(target_os = "none")]
+    mod imp {
+        use super::{ItimerState, TimerTable, ITIMERS_INIT, TIMERS_INIT};
+        static mut TIMER_TABLE: TimerTable = TIMERS_INIT;
+        static mut ITIMER_STATE: ItimerState = ITIMERS_INIT;
+        pub(super) fn timers() -> *mut TimerTable {
+            &raw mut TIMER_TABLE
+        }
+        pub(super) fn itimers() -> *mut ItimerState {
+            &raw mut ITIMER_STATE
+        }
+    }
+
+    #[cfg(not(target_os = "none"))]
+    mod imp {
+        use super::{ItimerState, TimerTable, ITIMERS_INIT, TIMERS_INIT};
+        use core::cell::UnsafeCell;
+
+        std::thread_local! {
+            static TIMER_TABLE: UnsafeCell<TimerTable> =
+                const { UnsafeCell::new(TIMERS_INIT) };
+            static ITIMER_STATE: UnsafeCell<ItimerState> =
+                const { UnsafeCell::new(ITIMERS_INIT) };
+        }
+
+        // Shared fallbacks for the window in which a thread's TLS has
+        // already been destroyed (a `Drop` impl calling back into libc).
+        // Unreachable in practice, and by then the thread is the only one
+        // that could still be using them — see `crate::perthread::current`.
+        static mut TIMER_FALLBACK: TimerTable = TIMERS_INIT;
+        static mut ITIMER_FALLBACK: ItimerState = ITIMERS_INIT;
+
+        pub(super) fn timers() -> *mut TimerTable {
+            TIMER_TABLE
+                .try_with(UnsafeCell::get)
+                .unwrap_or(&raw mut TIMER_FALLBACK)
+        }
+        pub(super) fn itimers() -> *mut ItimerState {
+            ITIMER_STATE
+                .try_with(UnsafeCell::get)
+                .unwrap_or(&raw mut ITIMER_FALLBACK)
+        }
+    }
+
+    /// Pointer to the calling context's timer table.  Never null.
+    pub(super) fn timers() -> *mut TimerTable {
+        imp::timers()
+    }
+
+    /// Pointer to the calling context's interval-timer state.  Never null.
+    pub(super) fn itimers() -> *mut ItimerState {
+        imp::itimers()
+    }
+}
 
 /// Create a per-process timer.
 ///
@@ -2318,8 +2414,10 @@ pub extern "C" fn timer_create(
     }
 
     // Step 4: allocate a slot.  Find a free entry.
-    // SAFETY: single-threaded access by convention.
-    let table = unsafe { core::ptr::addr_of_mut!(TIMER_TABLE).as_mut() };
+    // SAFETY: the pointer is non-null, aligned, and points at storage
+    // reachable only from this thread (see `timer_store`); no other
+    // reference to the table is live across this borrow.
+    let table = unsafe { timer_store::timers().as_mut() };
     let Some(table) = table else {
         errno::set_errno(errno::ENOMEM);
         return -1;
@@ -2423,7 +2521,7 @@ pub extern "C" fn timer_settime(
         return -1;
     }
     // Step 5: lock_timer(timer_id) → EINVAL on miss.
-    let table = unsafe { core::ptr::addr_of_mut!(TIMER_TABLE).as_mut() };
+    let table = unsafe { timer_store::timers().as_mut() };
     let Some(table) = table else {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -2496,7 +2594,7 @@ pub extern "C" fn timer_settime(
 pub extern "C" fn timer_gettime(timerid: TimerT, curr_value: *mut Itimerspec) -> i32 {
     // Step 1: lock_timer(timer_id) → EINVAL on miss.  This must fire
     // before the NULL curr_value check.
-    let table = unsafe { core::ptr::addr_of_mut!(TIMER_TABLE).as_mut() };
+    let table = unsafe { timer_store::timers().as_mut() };
     let Some(table) = table else {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -2530,7 +2628,7 @@ pub extern "C" fn timer_gettime(timerid: TimerT, curr_value: *mut Itimerspec) ->
 /// Delete a per-process timer.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn timer_delete(timerid: TimerT) -> i32 {
-    let table = unsafe { core::ptr::addr_of_mut!(TIMER_TABLE).as_mut() };
+    let table = unsafe { timer_store::timers().as_mut() };
     let Some(table) = table else {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -2581,8 +2679,10 @@ pub extern "C" fn timer_delete(timerid: TimerT) -> i32 {
 /// `-1`/`EINVAL` for misses; on hit, still return 0 (stub).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn timer_getoverrun(timerid: TimerT) -> i32 {
-    // SAFETY: single-threaded access by convention.
-    let table = unsafe { core::ptr::addr_of_mut!(TIMER_TABLE).as_mut() };
+    // SAFETY: the pointer is non-null, aligned, and points at storage
+    // reachable only from this thread (see `timer_store`); no other
+    // reference to the table is live across this borrow.
+    let table = unsafe { timer_store::timers().as_mut() };
     let Some(table) = table else {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -2626,22 +2726,11 @@ pub const ITIMER_PROF: i32 = 2;
 /// Number of interval timer types (ITIMER_REAL, ITIMER_VIRTUAL, ITIMER_PROF).
 const ITIMER_COUNT: usize = 3;
 
-/// Per-timer-type storage for `setitimer`/`getitimer`.
-///
-/// Indexed by the `which` parameter (0 = REAL, 1 = VIRTUAL, 2 = PROF).
-/// The timers never actually fire (no signal delivery), but we store the
-/// values so `getitimer` returns what `setitimer` set.  This makes
-/// programs that read back their own timer settings work correctly.
-static mut ITIMER_STATE: [Itimerval; ITIMER_COUNT] = [Itimerval {
-    it_interval: Timeval {
-        tv_sec: 0,
-        tv_usec: 0,
-    },
-    it_value: Timeval {
-        tv_sec: 0,
-        tv_usec: 0,
-    },
-}; ITIMER_COUNT];
+// Per-timer-type storage for `setitimer`/`getitimer` lives in
+// `timer_store::itimers()`, alongside the `timer_create` table.  The
+// timers never actually fire (no signal delivery), but we store the
+// values so `getitimer` returns what `setitimer` set.  This makes
+// programs that read back their own timer settings work correctly.
 
 /// Check that a `Timeval` is well-formed for itimer use.
 ///
@@ -2702,7 +2791,7 @@ pub extern "C" fn setitimer(
     if !old_value.is_null() {
         // SAFETY: old_value verified non-null; idx < ITIMER_COUNT.
         unsafe {
-            let state = core::ptr::addr_of_mut!(ITIMER_STATE);
+            let state = timer_store::itimers();
             if let Some(entry) = (*state).get(idx) {
                 *old_value = *entry;
             }
@@ -2710,9 +2799,10 @@ pub extern "C" fn setitimer(
     }
 
     // Store the new value.
-    // SAFETY: single-threaded; idx < ITIMER_COUNT.
+    // SAFETY: `timer_store::itimers` is non-null and reachable only from
+    // this thread; `get_mut` bounds-checks `idx` itself.
     unsafe {
-        let state = core::ptr::addr_of_mut!(ITIMER_STATE);
+        let state = timer_store::itimers();
         if let Some(entry) = (*state).get_mut(idx) {
             *entry = val;
         }
@@ -2745,7 +2835,7 @@ pub extern "C" fn getitimer(which: i32, curr_value: *mut Itimerval) -> i32 {
 
     // SAFETY: curr_value verified non-null; idx < ITIMER_COUNT.
     unsafe {
-        let state = core::ptr::addr_of_mut!(ITIMER_STATE);
+        let state = timer_store::itimers();
         if let Some(entry) = (*state).get(idx) {
             *curr_value = *entry;
         }
@@ -4778,15 +4868,20 @@ mod tests {
 
     // -- timer_create / timer_settime / timer_gettime / timer_delete --
 
-    /// Helper: reset TIMER_TABLE and ITIMER_STATE for isolation.
+    /// Helper: reset both timer tables for isolation.
+    ///
+    /// Safe to call unilaterally: the tables are per-thread on host builds
+    /// and libtest gives each test its own thread, so this cannot wipe a
+    /// slot a concurrently running test is using.
     fn reset_timers() {
-        // SAFETY: single-threaded test, no concurrent access.
+        // SAFETY: the tables are per-thread on host builds, so this
+        // reset touches only the state of the test that called it.
         unsafe {
-            let table = core::ptr::addr_of_mut!(TIMER_TABLE).as_mut().unwrap();
+            let table = timer_store::timers().as_mut().unwrap();
             for slot in table.iter_mut() {
                 *slot = None;
             }
-            let state = core::ptr::addr_of_mut!(ITIMER_STATE).as_mut().unwrap();
+            let state = timer_store::itimers().as_mut().unwrap();
             for entry in state.iter_mut() {
                 *entry = Itimerval {
                     it_interval: Timeval {
@@ -8339,29 +8434,19 @@ mod tests {
 
     /// RAII guard that restores the effective capability set on drop.
     ///
-    /// Capability state is process-global. Cargo's test runner is parallel
-    /// by default (one thread per core), so without serialisation two tests
-    /// can race: T1 drops `CAP_SYS_TIME`, T2 reads the dropped state and
-    /// fails its "cap held" assertion, T1's `Drop` restores. To prevent
-    /// that we hold the crate-global `CAP_TEST_LOCK` for the lifetime of
-    /// the guard — only one cap-mutating test (anywhere in the crate)
-    /// runs at a time.
+    /// Restoring matters within a single test (drop `CAP_SYS_TIME`, assert
+    /// the unprivileged path, then carry on privileged), not across tests:
+    /// on host builds the capability words are per-thread and cargo runs
+    /// each test on its own thread, so a cap this test drops is invisible
+    /// to every other test. See `sys_capability`'s storage docs.
     struct CapGuard {
         lo: u32,
         hi: u32,
-        // Held for the lifetime of the guard. Dropped after `Drop` restores
-        // the caps so the next waiter sees a consistent state.
-        _lock: crate::sys_capability::CapTestLockGuard,
     }
     impl CapGuard {
         fn snapshot() -> Self {
-            // Re-entrant lock guard: outermost acquire on the thread takes
-            // the global mutex; nested acquires (some tests stack a scoped
-            // CapGuard inside an outer one) are no-ops for the lock but
-            // still snapshot/restore caps independently.
-            let lock = crate::sys_capability::CapTestLockGuard::acquire();
             let (lo, hi) = crate::sys_capability::current_caps_effective();
-            Self { lo, hi, _lock: lock }
+            Self { lo, hi }
         }
     }
     impl Drop for CapGuard {

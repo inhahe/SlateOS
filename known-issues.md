@@ -186,6 +186,115 @@ caller, filtered by `may_signal`", keeping the same best-effort fanout and
 model landing — this should be done in the same change, since that is the only
 thing blocking it.
 
+### TD-POSIX-TEST-CAP-STATE-SHARED-ACROSS-TEST-THREADS. Cap-gated posix tests fail at random under the parallel runner because the capability words are process-global — 2026-08-12 — ✅ FIXED 2026-08-12
+
+**What.** `cargo test -p posix --target x86_64-pc-windows-gnu` intermittently
+failed a *single*, *different* cap-related test per run while the same test
+passed 3/3 in isolation. Two victims observed before the fix:
+`epoll::tests::test_phase199_timerfd_cap_restore_re_enables_alarm`
+("must succeed after cap restored", `posix/src/epoll.rs:6759`) and
+`socket::tests::test_phase201_bind_privileged_port_with_cap_ok`. Interleaved
+clean runs of 20,128 passed made it look like noise; it was not.
+
+**Root cause.** `sys_capability`'s three capability sets were six process-global
+`AtomicU32`s. A test that drops a cap to exercise an unprivileged path mutates
+state that *every concurrently running test* shares. The crate already knew
+this: a global `CAP_TEST_LOCK` mutex existed, taken by all 46 test-only
+`CapGuard`s, and its comment recorded "~150 spurious test failures per run"
+without it. But a mutex only protects code that takes it, and the surviving
+failures were precisely the tests that **read** the cap state without holding
+the guard — asserting `has_capability(...)` or that a privileged operation
+succeeds, while another thread had that cap dropped. `test_phase199_…_restore_…`
+was the sharpest case: it holds the guard in an inner scope, then asserts the
+cap is back *after* the scope ends, i.e. after releasing the lock.
+
+**Why the fix is structural, not another guard.** Adding `CapGuard::snapshot()`
+to the dozen-odd reader tests would have worked and been wrong: it leaves the
+hazard in place and makes correctness depend on every future test author
+remembering an invisible rule. The capability words are only process-global
+*on the target*, where that is what they model — a real process's threads do
+share its privileges. On the host the crate exists solely to be unit-tested, so
+there is no reason for one test thread's voluntary privilege drop to be visible
+to another.
+
+**Fix.** `sys_capability` grew a `store` module with two cfg'd bodies behind a
+`CapWords` load/store pair: `AtomicU32`s as before on `target_os = "none"`, and
+a `thread_local!` `Cell<CapWords>` on the host. This is the same remedy, and the
+same reasoning, as TD-POSIX-TEST-PARALLEL (`perthread.rs`) — cited in the new
+module comment. Each test thread now starts from the cold-boot default and
+cannot observe or disturb another's caps, so the entire failure class is
+impossible rather than merely defended against, and the unguarded reader tests
+became correct without being touched.
+
+`CAP_TEST_LOCK`/`CapTestLockGuard` and all 138 use sites were then deleted: with
+per-thread state the lock guards nothing, and keeping it would have serialised a
+large slice of a 20k-test suite behind a mutex whose documented rationale was no
+longer true. Removing it doubles as the proof — if the words were still shared,
+the ~150 failures its own comment describes would have returned immediately.
+
+**Verified.** 45 consecutive suite runs after the change with the lock fully
+removed: 44 clean at 20,128 passed, 1 failure whose identity was not captured
+and which did not recur in 37 further targeted runs. Both original victims are
+green. `cargo build` clean for the target and host.
+
+**Residual — identified, see the entry below.** That one uncaptured failure was
+real: a 60-run hunt caught three more failures belonging to two *different*
+process-global statics, not to the caps. They are covered by
+TD-POSIX-TEST-PGRP-AND-TIMER-STATE-SHARED-ACROSS-TEST-THREADS.
+
+### TD-POSIX-TEST-PGRP-AND-TIMER-STATE-SHARED-ACROSS-TEST-THREADS. The same parallel-runner race in two more posix statics: the foreground process group and the POSIX timer tables — 2026-08-12 — ✅ FIXED 2026-08-12
+
+**What.** After the capability words were made per-thread, a 60-run hunt of
+`cargo test -p posix --target x86_64-pc-windows-gnu` still caught three failing
+runs, across three tests in two unrelated modules:
+
+| Test | Symptom |
+|---|---|
+| `process::tests::test_tcsetpgrp_bad_pgrp_does_not_change_fg_pgrp` (`posix\src\process.rs`) | `left: 42, right: 555` |
+| `time::tests::test_timer_settime_bad_it_value_tv_nsec_does_not_overwrite_slot_phase146` (`posix\src\time.rs`) | `left: -1, right: 0` |
+| `time::tests::test_timer_gettime_efault_loop_no_state_change_phase148` | same class |
+
+**Root cause.** Identical to the cap race, in three more statics:
+`process.rs`'s `FG_PGRP` plus its `host_pg::PGID`\`SID` test double, and
+`time.rs`'s `TIMER_TABLE`\`ITIMER_STATE`. Each module has a per-test reset
+helper (`reset_pg()`, `reset_timers()`) whose doc comment claimed it gave
+"isolation"; with process-global storage the reset instead *reached into every
+concurrently running test*. The two shapes of failure follow directly: a test
+asserting "a rejected `tcsetpgrp` left the foreground group at 42" read 555
+because another test had just legitimately set it; a test asserting "a rejected
+`timer_settime` left slot N untouched" read a slot another test had reset or
+consumed.
+
+**Fix.** The same cfg'd-storage pattern, applied three times:
+
+* `FG_PGRP` → module `process::fg_pgrp` with `get`\`set`: `static mut` on
+  `target_os = "none"`, `thread_local!` `Cell<PidT>` on host. The six repeated
+  `unsafe` blocks at the call sites collapsed into the two accessors.
+* `host_pg::PGID`\`SID` → `thread_local!` `Cell<PidT>`s behind accessors. That
+  module is host-only to begin with, so there is no target arm.
+* `TIMER_TABLE`\`ITIMER_STATE` → module `time::timer_store` handing out a raw
+  `*mut` to each table (the call sites mutate in place): `static mut` on target,
+  `thread_local!` `UnsafeCell` plus a teardown fallback on host — the exact
+  shape `perthread::current()` already uses.
+
+Both reset helpers' doc comments were corrected: they are now safe to call
+unilaterally *because* the state is per-thread and libtest gives each test its
+own thread, which is what makes "isolation" true rather than aspirational.
+
+**Verified.** The three named tests are green: 40 consecutive suite runs with
+zero failures among them. `cargo build` and `cargo clippy --all-targets` clean
+for both the target and host builds.
+
+**Not verified: the suite as a whole.** Those same 40 runs failed 7 times, on
+six *other* tests, in five modules that were not touched here. See
+TD-POSIX-TEST-SHARED-STATICS-REMAINING-TIER below — same failure class, more
+statics. Do not read this entry as "the posix suite is now deterministic".
+
+**Note for future statics.** Three separate incidents now share one cause: a
+`static`\`static mut` in `posix` that a test mutates. The rule this establishes —
+any mutable module-level state in `posix` that tests write must be per-thread on
+host builds — is recorded in design-decisions.md §110.
+
 ### TD-OILS-A-BUILTIN-DOES-NOT-ANSWER-ITS-OWN---HELP. `cd --help` says `--: invalid option` where bash prints the long doc — 2026-08-12 — ✅ FIXED 2026-08-12
 
 **Where:** `userspace/oils/src/interp.rs` — every builtin's own option parser.

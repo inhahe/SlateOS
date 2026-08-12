@@ -27,6 +27,7 @@
 //!     0xFFFF_C300_0000_0000    vmalloc (128 MiB, discontiguous allocations)
 //!     0xFFFF_C900_0000_0000    Page table self-test area
 //!     0xFFFF_CA00_0000_0000    Demand paging test area
+//!     0xFFFF_D000_0000_0000    KASAN shadow (16 TiB, 1:8 over all kernel VA)
 //!     0xFFFF_FF00_0000_0000    Kernel text/data (Limine loads here)
 //! ```
 //!
@@ -108,19 +109,52 @@ pub const FAULT_TEST: Region = Region {
     size: 16 * 1024 * 1024, // 16 MiB
 };
 
-/// KASAN shadow region (1:8 scale over the HHDM heap; lazily mapped).
+/// Compile-time constant added to `addr >> 3` to obtain a KASAN shadow address.
 ///
-/// 8 GiB of shadow describes up to 64 GiB of heap — sized to exceed physical
-/// RAM on any realistic dev/QEMU config so no heap object falls outside the
-/// covered window (an uncovered object has no shadow byte and fails open, which
-/// both flaked the KASAN self-test and blinded the corruption hunt above the
-/// old 4 GiB cap). Pages are backed on first touch by `mm::kasan`, so the
-/// reservation is virtual-only until used. The next region (kernel text at
-/// 0xFFFF_FF00_...) is ~30 TiB away, so there is ample room.
+/// This is the *whole* KASAN address mapping:
+///
+/// ```text
+/// shadow(addr) = (addr >> 3) + KASAN_SHADOW_OFFSET      (wrapping, 64-bit)
+/// ```
+///
+/// It is derived so that the lowest kernel address maps to the base of
+/// [`KASAN_SHADOW`]:
+///
+/// ```text
+/// (0xFFFF_8000_0000_0000 >> 3) = 0x1FFF_F000_0000_0000
+/// 0xFFFF_D000_0000_0000 - 0x1FFF_F000_0000_0000 = 0xDFFF_E000_0000_0000
+/// ```
+///
+/// **This value is not ours alone to choose.** It is passed verbatim to LLVM as
+/// `-Cllvm-args=-asan-mapping-offset=0xDFFFE00000000000` in the compiler-KASAN
+/// build profile, and the instrumentation LLVM emits inline at every load/store
+/// is literally `shr $3; add $offset; movzbl (…)`. The manual poison written by
+/// the heap hooks in `mm::kasan` and the checks the compiler emits therefore
+/// address the *same* shadow bytes — that unification is the entire point of
+/// using this mapping rather than an HHDM-relative one.
+///
+/// Note that LLVM's default mapping is `(addr >> 3) | 0x100000000000` — an
+/// **OR**, which is only correct while `addr < 2^47` and so cannot express a
+/// higher-half kernel address at all. Supplying an explicit offset switches the
+/// codegen to an **ADD** (verified by disassembling an instrumented object).
+/// Linux does exactly the same thing with `0xDFFFFC0000000000`.
+pub const KASAN_SHADOW_OFFSET: u64 = 0xDFFF_E000_0000_0000;
+
+/// KASAN shadow region — 1:8 scale over the *entire* 128 TiB kernel half.
+///
+/// 16 TiB of VA is reserved because the mapping above is a pure function of the
+/// address, so every kernel address — HHDM heap, kernel stacks, vmalloc, kernel
+/// text — has a shadow byte at a fixed place. The reservation is virtual-only:
+/// `mm::kasan` backs shadow pages on first touch, and only for the low window it
+/// actually tracks (the HHDM heap), so the cost of the extra VA is zero.
+///
+/// The region deliberately ends exactly where 0xFFFF_E000_0000_0000 begins and
+/// sits above `fault_test`, so it overlaps nothing. Kernel text (0xFFFF_FF00_…)
+/// is ~30 TiB above the end.
 pub const KASAN_SHADOW: Region = Region {
     name: "kasan_shadow",
-    start: 0xFFFF_E000_0000_0000,
-    size: 8 * 1024 * 1024 * 1024, // 8 GiB
+    start: 0xFFFF_D000_0000_0000,
+    size: 0x0000_1000_0000_0000, // 16 TiB
 };
 
 /// User-space range.
@@ -230,8 +264,9 @@ pub fn self_test() {
     assert_eq!(id.unwrap().name, "vmalloc");
     serial_println!("[kvspace]   identify(): OK");
 
-    // Test 3: Unknown address.
-    let id = identify(0xFFFF_D000_0000_0000);
+    // Test 3: Unknown address. (0xFFFF_C000_… sits below `kstack` and above the
+    // HHDM, in a gap no region claims.)
+    let id = identify(0xFFFF_C000_0000_0000);
     assert!(id.is_none());
     serial_println!("[kvspace]   Unknown addr → None: OK");
 
@@ -248,6 +283,18 @@ pub fn self_test() {
     assert!(VMALLOC.contains(VMALLOC.start + VMALLOC.size - 1));
     assert!(!VMALLOC.contains(VMALLOC.start + VMALLOC.size)); // Exclusive end.
     serial_println!("[kvspace]   Region::contains: OK");
+
+    // Test 6: the KASAN shadow mapping must land inside the reserved region for
+    // every kernel address, and must not wrap. This constant is compiled into
+    // LLVM's instrumentation (`-asan-mapping-offset`), so a silent drift between
+    // it and the region would put the compiler's inline checks on unmapped
+    // memory — a triple fault at the first instrumented access, with no clue as
+    // to why. Pin both ends of the kernel half.
+    let shadow_of = |addr: u64| (addr >> 3).wrapping_add(KASAN_SHADOW_OFFSET);
+    assert_eq!(shadow_of(0xFFFF_8000_0000_0000), KASAN_SHADOW.start);
+    assert_eq!(shadow_of(0xFFFF_FFFF_FFFF_FFFF), KASAN_SHADOW.end().wrapping_sub(1));
+    assert!(KASAN_SHADOW.contains(shadow_of(KASAN_SHADOW.start)));
+    serial_println!("[kvspace]   KASAN shadow mapping covers kernel VA: OK");
 
     serial_println!("[kvspace] Self-test PASSED");
 }

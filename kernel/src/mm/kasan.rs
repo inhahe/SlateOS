@@ -31,16 +31,33 @@
 //!
 //! ## Address mapping
 //!
-//! Heap objects live in the HHDM direct-map (`virt = phys + hhdm_offset`), so
-//! the shadow covers `[hhdm, hhdm + KASAN_COVER_BYTES)`:
+//! The shadow address is a pure, HHDM-independent function of the address:
 //!
 //! ```text
-//! shadow(addr) = KASAN_SHADOW_BASE + ((addr - hhdm_offset) >> 3)
+//! shadow(addr) = (addr >> 3) + kvspace::KASAN_SHADOW_OFFSET    (wrapping)
 //! ```
 //!
-//! The shadow VA range is reserved in `kvspace.rs` but its pages are
-//! **lazily mapped** on first touch (the heap only ever uses a fraction of
-//! RAM, so eagerly backing `phys_ram / 8` would waste hundreds of MiB).
+//! which maps the whole 128 TiB kernel half onto the 16 TiB
+//! `kvspace::KASAN_SHADOW` reservation, with the lowest kernel address
+//! (`0xFFFF_8000_0000_0000`) landing exactly on the region base.
+//!
+//! **Why this shape and not an HHDM-relative one.** It is the mapping LLVM's
+//! address sanitizer emits inline when given
+//! `-Cllvm-args=-asan-mapping-offset=0xDFFFE00000000000` (design-decisions.md
+//! §107, the compiler-instrumented KASAN build). Because the compiler cannot be
+//! taught a runtime-discovered HHDM base, the *shadow* must be the thing that is
+//! address-derived — and then the poison this module writes on every heap
+//! alloc/free is read by the compiler's checks on every load and store, with no
+//! translation layer between them. Using two different mappings would give two
+//! disjoint shadows and defeat the purpose.
+//!
+//! Since the heap only ever lives in the HHDM, this module *backs* only the
+//! first [`KASAN_SHADOW_SIZE`] of that reservation — enough shadow for
+//! [`KASAN_COVER_BYTES`] of kernel VA starting at `0xFFFF_8000_0000_0000`.
+//! Addresses beyond it have no shadow byte here and fail open. Pages within the
+//! window are **lazily mapped** on first touch (the heap only ever uses a
+//! fraction of RAM, so eagerly backing `phys_ram / 8` would waste hundreds of
+//! MiB).
 //!
 //! ## Performance / gating
 //!
@@ -73,6 +90,7 @@
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::mm::frame::{self, FRAME_SIZE};
+use crate::mm::kvspace;
 use crate::mm::page_table::{self, PageFlags, VirtAddr};
 use crate::serial_println;
 
@@ -88,8 +106,14 @@ const KASAN_GRANULE: u64 = 1 << KASAN_GRANULE_SHIFT;
 const KASAN_GRANULE_MASK: u64 = KASAN_GRANULE - 1;
 
 /// Base of the shadow region (see `kvspace::KASAN_SHADOW`).
-const KASAN_SHADOW_BASE: u64 = 0xFFFF_E000_0000_0000;
-/// Size of the reserved shadow VA range (8 GiB → covers 64 GiB of heap).
+const KASAN_SHADOW_BASE: u64 = kvspace::KASAN_SHADOW.start;
+/// Constant added to `addr >> 3` to obtain the shadow address.
+///
+/// Shared with the compiler-KASAN build profile, which passes the identical
+/// value to LLVM as `-asan-mapping-offset` — see `kvspace::KASAN_SHADOW_OFFSET`.
+const KASAN_SHADOW_OFFSET: u64 = kvspace::KASAN_SHADOW_OFFSET;
+/// Size of the shadow window this module actually backs (8 GiB → covers the
+/// first 64 GiB of kernel VA, i.e. the whole HHDM on any realistic machine).
 ///
 /// Must comfortably exceed the machine's physical RAM: the HHDM heap can back
 /// a slab slot with any physical frame, and an object whose HHDM offset lands
@@ -101,8 +125,14 @@ const KASAN_SHADOW_BASE: u64 = 0xFFFF_E000_0000_0000;
 /// blind to any stomp in high memory. 64 GiB covers every realistic dev/QEMU
 /// config; the shadow is lazily mapped so the reservation is virtual-only until
 /// heap is actually touched at a given offset.
+///
+/// This is a *backing* limit, not an addressing limit: the mapping itself
+/// (`kvspace::KASAN_SHADOW_OFFSET`) spans the entire kernel half, and the
+/// 16 TiB `kvspace::KASAN_SHADOW` reservation has room for all of it when the
+/// compiler-KASAN profile needs whole-VA coverage.
 const KASAN_SHADOW_SIZE: u64 = 8 * 1024 * 1024 * 1024;
-/// Heap span the shadow can describe (`KASAN_SHADOW_SIZE * KASAN_GRANULE`).
+/// Kernel-VA span the backed shadow can describe
+/// (`KASAN_SHADOW_SIZE * KASAN_GRANULE`), starting at `0xFFFF_8000_0000_0000`.
 const KASAN_COVER_BYTES: u64 = KASAN_SHADOW_SIZE << KASAN_GRANULE_SHIFT;
 
 /// Number of 16 KiB shadow frames in the reserved range.
@@ -148,17 +178,22 @@ static BYTES_UNPOISONED: AtomicU64 = AtomicU64::new(0);
 // Init / enable
 // ---------------------------------------------------------------------------
 
-/// Initialize KASAN. Records the HHDM offset so shadow addresses can be
-/// computed. Does **not** map any shadow pages (they are lazily backed) and
-/// does **not** enable checking (call [`enable`]).
+/// Initialize KASAN. Records the HHDM offset — needed only to reach a freshly
+/// allocated shadow frame through its direct-map alias in order to zero it, not
+/// for shadow addressing, which is HHDM-independent. Does **not** map any shadow
+/// pages (they are lazily backed) and does **not** enable checking (call
+/// [`enable`]).
 pub fn init(hhdm_offset: u64) {
     HHDM_OFFSET.store(hhdm_offset, Ordering::Relaxed);
     INITED.store(true, Ordering::Release);
+    const COVER_LOW: u64 = 0xFFFF_8000_0000_0000;
     serial_println!(
-        "[kasan] shadow ready: base={:#x} covers heap [{:#x}..{:#x}) (1:8 scale, lazily mapped)",
+        "[kasan] shadow ready: base={:#x} backs kernel VA [{:#x}..{:#x}) \
+         (1:8 scale, offset={:#x}, lazily mapped)",
         KASAN_SHADOW_BASE,
-        hhdm_offset,
-        hhdm_offset.wrapping_add(KASAN_COVER_BYTES)
+        COVER_LOW,
+        COVER_LOW.wrapping_add(KASAN_COVER_BYTES),
+        KASAN_SHADOW_OFFSET
     );
 }
 
@@ -185,19 +220,25 @@ pub fn is_enabled() -> bool {
 // Shadow addressing + lazy mapping
 // ---------------------------------------------------------------------------
 
-/// Return the shadow byte address for `addr`, or `None` if `addr` is outside
-/// the covered HHDM heap range.
+/// Return the shadow byte address for `addr`, or `None` if `addr` lies outside
+/// the shadow window this module backs.
+///
+/// The mapping is unconditional (`(addr >> 3) + OFFSET`, matching the compiler
+/// instrumentation exactly); the `None` case is purely about *backing*: only the
+/// first [`KASAN_SHADOW_SIZE`] of the shadow reservation is ever mapped here, so
+/// anything landing above it — or below the base, i.e. a user address — has no
+/// shadow byte and must fail open rather than dereference unmapped memory.
+///
+/// `wrapping_*` throughout: for a user address the add legitimately produces a
+/// value below the shadow base, and the subtraction then wraps to a huge number
+/// that the bound check rejects. That is the intended arithmetic, not overflow.
 #[inline]
 fn shadow_of(addr: u64) -> Option<u64> {
-    let hhdm = HHDM_OFFSET.load(Ordering::Relaxed);
-    if addr < hhdm {
+    let sv = (addr >> KASAN_GRANULE_SHIFT).wrapping_add(KASAN_SHADOW_OFFSET);
+    if sv.wrapping_sub(KASAN_SHADOW_BASE) >= KASAN_SHADOW_SIZE {
         return None;
     }
-    let off = addr - hhdm;
-    if off >= KASAN_COVER_BYTES {
-        return None;
-    }
-    Some(KASAN_SHADOW_BASE + (off >> KASAN_GRANULE_SHIFT))
+    Some(sv)
 }
 
 /// Ensure the 16 KiB shadow frame containing `shadow_va` is mapped and zeroed.
@@ -584,8 +625,31 @@ pub fn self_test() {
     serial_println!("[kasan]   partial granule (12-in-16): OK");
 
     // -- Test 4: an address outside the covered range fails open -------------
+    // A user address maps *below* the shadow base (the add wraps under it), so
+    // this also pins the "negative" side of the window check.
     assert!(check(0x1000, 8, false).is_ok(), "kasan: out-of-range not fail-open");
     serial_println!("[kasan]   out-of-range fail-open: OK");
+
+    // -- Test 5: the shadow mapping is exactly the one LLVM is told to emit ---
+    // The compiler-KASAN profile hands `KASAN_SHADOW_OFFSET` to LLVM, which then
+    // emits `shr $3; add $offset` inline at every load/store. If this module's
+    // `shadow_of` ever drifted from that formula, the poison written below would
+    // land somewhere the compiler's checks never read — KASAN would go silently
+    // blind rather than fail. Assert the two agree, on a real heap address.
+    let layout8 = Layout::from_size_align(8, 8).expect("valid layout");
+    // SAFETY: valid non-zero layout; null-checked below.
+    let p3 = unsafe { alloc(layout8) };
+    assert!(!p3.is_null(), "kasan self-test: alloc(8) failed");
+    let a3 = p3 as u64;
+    let expected = (a3 >> KASAN_GRANULE_SHIFT).wrapping_add(KASAN_SHADOW_OFFSET);
+    assert_eq!(shadow_of(a3), Some(expected), "kasan: shadow_of != LLVM mapping");
+    assert!(
+        expected >= KASAN_SHADOW_BASE && expected < KASAN_SHADOW_BASE + KASAN_SHADOW_SIZE,
+        "kasan: heap shadow outside the backed window"
+    );
+    // SAFETY: `p3` was allocated with `layout8`.
+    unsafe { dealloc(p3, layout8); }
+    serial_println!("[kasan]   mapping matches -asan-mapping-offset: OK");
 
     let st = stats();
     serial_println!(

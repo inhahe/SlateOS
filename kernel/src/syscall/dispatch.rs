@@ -796,6 +796,7 @@ pub fn self_test() -> KernelResult<()> {
     test_io_dir_classification()?;
     test_dispatch_mprotect_native()?;
     test_dispatch_process_group_syscalls()?;
+    test_dispatch_wait_process_group_filter()?;
 
     serial_println!("[syscall] Dispatch self-test PASSED");
     Ok(())
@@ -1062,6 +1063,121 @@ fn test_dispatch_process_group_syscalls() -> KernelResult<()> {
     serial_println!(
         "[syscall]   Native process groups (533-536) + kill(-pgid) ordering: OK"
     );
+    Ok(())
+}
+
+/// Verify that the **native** wait syscalls honour the process-group forms
+/// of a non-positive `pid`, rather than collapsing them to "any child".
+///
+/// Motivation: this is the same ABI asymmetry that
+/// `test_dispatch_process_group_syscalls` covers for `kill`. The Linux
+/// shim's `wait4` has filtered by group for a while (`linux.rs`'s
+/// `pgid_filter`), but `SYS_PROCESS_WAIT`/`SYS_PROCESS_TRY_WAIT` treated
+/// every `pid <= 0` as `-1`. Both ABIs read the *same* `pcb` group
+/// records, so a program on our own libc silently reaped a child from the
+/// wrong group where a glibc program got `ECHILD`.
+///
+/// The decisive check is step (2): both children are zombies and
+/// `child_a < child_b` by PID, while `try_reap_any` deliberately picks the
+/// *lowest* PID. So asking for `child_b`'s group must yield `child_b`. An
+/// unfiltered implementation returns `child_a` and the test fails —
+/// which is exactly what the pre-fix code did.
+///
+/// Every query here is group-filtered, which also makes the test immune to
+/// unrelated children of pid 0 that other boot self-tests may have left
+/// behind: a filter naming a group they are not in cannot see them, and
+/// cannot reap them by accident either.
+///
+/// The `pid == 0` ("caller's own group") form is deliberately *not*
+/// exercised here. `caller_pid()` reports 0 for a bare kernel task, pid 0
+/// has no process record and so no pgid, so `wait_pgid_filter` degrades it
+/// to wait-any by design — calling it would be an unfiltered reap that
+/// could destroy an unrelated child of pid 0 and make a later self-test
+/// fail mysteriously. What this test pins down is the `< -1` form, and
+/// with it the shared `wait_pgid_filter`/`reap_any_filtered` path that the
+/// `== 0` form also goes through.
+fn test_dispatch_wait_process_group_filter() -> KernelResult<()> {
+    use crate::proc::pcb;
+
+    let mk = |arg0: u64| SyscallArgs {
+        arg0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    #[allow(clippy::cast_sign_loss)]
+    let neg = |pid: i64| -> u64 { -pid as u64 };
+
+    fn fail(msg: &str, pids: &[u64]) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: wait group filter: {}", msg);
+        for &p in pids {
+            crate::proc::pcb::destroy(p);
+        }
+        Err(KernelError::InternalError)
+    }
+
+    // A group id no process will ever hold.
+    const NO_GROUP_I: i64 = 8_765_432;
+
+    // Children of pid 0 — the process id `caller_pid()` reports for the
+    // bare kernel task running this self-test, so the handler agrees these
+    // are its children. `create` makes each its own session and group
+    // leader, so `pgid == pid` and the two sit in *different* groups.
+    let child_a = pcb::create("waitpg-a", 0);
+    let child_b = pcb::create("waitpg-b", 0);
+    if child_a >= child_b {
+        return fail("expected ascending PIDs for the ordering check", &[child_a, child_b]);
+    }
+    let both = [child_a, child_b];
+    for (pid, tid, code) in [(child_a, 9970_u64, 11_i32), (child_b, 9971, 22)] {
+        if pcb::set_running(pid).is_err() || pcb::add_thread(pid, tid).is_err() {
+            return fail("could not start child", &both);
+        }
+        // Turn the child into a zombie carrying a distinctive exit code.
+        if pcb::set_exit_code(pid, code).is_err() {
+            return fail("could not set exit code", &both);
+        }
+        match pcb::remove_thread(pid, tid, pcb::ThreadExitAccounting::default()) {
+            Ok((true, _, _)) => {}
+            _ => return fail("child did not become a zombie", &both),
+        }
+    }
+
+    // (1) A group with no members of ours is ECHILD — and must not reap.
+    if dispatch(SYS_PROCESS_TRY_WAIT, &mk(neg(NO_GROUP_I))).value
+        != i64::from(KernelError::NoChildProcess.code())
+    {
+        return fail("wait on an empty group should be NoChildProcess", &both);
+    }
+
+    // (2) Ask for the *higher*-PID child by group. Reaping destroys it, so
+    //     a correct answer both returns code 22 and leaves child_a alone.
+    #[allow(clippy::cast_possible_wrap)]
+    let child_b_i = child_b as i64;
+    if dispatch(SYS_PROCESS_TRY_WAIT, &mk(neg(child_b_i))).value != 22 {
+        return fail("wait(-pgid_b) should reap child_b, not the lowest-PID child", &both);
+    }
+
+    // (3) The filter is still restricting after a successful reap: child_a
+    //     is a waiting zombie, but it is not in this group.
+    if dispatch(SYS_PROCESS_TRY_WAIT, &mk(neg(NO_GROUP_I))).value
+        != i64::from(KernelError::NoChildProcess.code())
+    {
+        return fail("empty group should still be NoChildProcess with a zombie pending", &[child_a]);
+    }
+
+    // (4) child_a's own group reaps child_a, leaving nothing behind.
+    #[allow(clippy::cast_possible_wrap)]
+    let child_a_i = child_a as i64;
+    if dispatch(SYS_PROCESS_TRY_WAIT, &mk(neg(child_a_i))).value != 11 {
+        return fail("wait(-pgid_a) should reap child_a", &[child_a]);
+    }
+
+    // (5) Its group is now empty, so the same call is ECHILD.
+    if dispatch(SYS_PROCESS_TRY_WAIT, &mk(neg(child_a_i))).value
+        != i64::from(KernelError::NoChildProcess.code())
+    {
+        return fail("reaped child's group should be NoChildProcess", &[]);
+    }
+
+    serial_println!("[syscall]   Native wait(-pgid) group filter (matches Linux wait4): OK");
     Ok(())
 }
 

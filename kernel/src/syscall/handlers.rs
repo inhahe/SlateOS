@@ -3797,18 +3797,58 @@ fn write_reaped_pid(out_ptr: u64, child_pid: crate::proc::pcb::ProcessId) {
     let _ = unsafe { crate::mm::user::write_user::<i32>(out_ptr, pid_i32) };
 }
 
+/// Resolve the process-group restriction for a non-positive `waitpid`
+/// argument, shared by [`sys_process_wait`] and [`sys_process_try_wait`]
+/// so the blocking and non-blocking forms cannot drift apart.
+///
+/// * `-1` → `None` (any child, no restriction).
+/// * `0` → the caller's own process group.
+/// * `< -1` → group `-pid`.
+///
+/// A caller with no group record — pid 0, i.e. bare kernel tasks in the
+/// boot self-tests — yields `None` for the `0` case, which is the
+/// wait-any answer this path gave before group filtering existed.
+///
+/// `i64::MIN` has no positive counterpart, so `unsigned_abs` yields
+/// 2^63; that is a well-defined `u64` which simply matches no group, so
+/// the caller sees `ECHILD` rather than a panic or a wrapped-around
+/// group id.
+fn wait_pgid_filter(pid_arg: i64, parent_pid: u64) -> Option<u64> {
+    if pid_arg == 0 {
+        crate::proc::pcb::get_pgid(parent_pid)
+    } else if pid_arg < -1 {
+        Some(pid_arg.unsigned_abs())
+    } else {
+        None // pid_arg == -1: any child.
+    }
+}
+
+/// Reap the lowest-PID eligible zombie child, honouring an optional
+/// process-group restriction.  Companion to [`wait_pgid_filter`].
+fn reap_any_filtered(
+    parent_pid: u64,
+    pgid_filter: Option<u64>,
+) -> Result<Option<(u64, crate::proc::pcb::ExitInfo)>, KernelError> {
+    match pgid_filter {
+        Some(pgid) => crate::proc::pcb::try_reap_group(parent_pid, pgid),
+        None => crate::proc::pcb::try_reap_any(parent_pid),
+    }
+}
+
 /// `SYS_PROCESS_WAIT` — wait for a child process to exit.
 ///
 /// `arg0`: child process ID to wait for, interpreted as a signed value:
 ///   - `> 0`: wait for that specific child.
-///   - `<= 0`: wait for *any* child (POSIX `waitpid(-1)`; process groups
-///     are not yet implemented, so `0` and `< -1` also mean "any child").
-///     `arg1`: optional user `*mut i32` that receives the reaped child PID
-///     (0 = don't report).  The exit code is returned in `rax`.
+///   - `== -1`: wait for *any* child (POSIX `waitpid(-1)`).
+///   - `== 0`: any child in the *caller's* process group.
+///   - `< -1`: any child in process group `-arg0`.
+///
+/// `arg1`: optional user `*mut i32` that receives the reaped child PID
+/// (0 = don't report).  The exit code is returned in `rax`.
 ///
 /// If no child is ready, blocks the calling task until one exits.
 /// Returns the exit code on success, or a negative error
-/// (`NoChildProcess`/ECHILD when there are no children).
+/// (`NoChildProcess`/ECHILD when there are no matching children).
 pub fn sys_process_wait(args: &SyscallArgs) -> SyscallResult {
     use crate::proc::pcb;
 
@@ -3870,17 +3910,27 @@ pub fn sys_process_wait(args: &SyscallArgs) -> SyscallResult {
             }
         }
     } else {
-        // --- Wait for any child (POSIX waitpid(-1)) ---
+        // --- Wait for any child, optionally restricted to a group ---
         //
         // Same register-before-check discipline, but the waiter flag
         // lives on the *parent* (this process), which survives reaping,
         // so we must clear it on every exit path to avoid delivering a
         // stale wake to a later, unrelated `block_current`.
+        //
+        // The group filter is resolved exactly as the Linux ABI's
+        // `wait4` resolves it (linux.rs `pgid_filter`), and deliberately
+        // so: both ABIs read the *same* kernel process-group records, so
+        // a program on our own libc and a glibc program must not
+        // disagree about which children a non-positive `pid` selects.
+        // Registration still happens unfiltered — the waiter is woken by
+        // any child exiting and re-scans under the filter, which costs a
+        // spurious wake at most and never misses one.
+        let pgid_filter = wait_pgid_filter(pid_arg, parent_pid);
         loop {
             if let Err(e) = pcb::set_wait_any_task(parent_pid, task_id) {
                 return SyscallResult::err(e);
             }
-            match pcb::try_reap_any(parent_pid) {
+            match reap_any_filtered(parent_pid, pgid_filter) {
                 Ok(Some((child_pid, info))) => {
                     pcb::clear_wait_any_task(parent_pid, task_id);
                     write_reaped_pid(out_ptr, child_pid);
@@ -3906,7 +3956,8 @@ pub fn sys_process_wait(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Like `SYS_PROCESS_WAIT` but returns `WouldBlock` immediately if no
 /// matching child is ready, instead of blocking the caller.  `arg0` and
-/// `arg1` have the same meaning as in [`sys_process_wait`].
+/// `arg1` have the same meaning as in [`sys_process_wait`], including the
+/// process-group forms of a non-positive `arg0`.
 pub fn sys_process_try_wait(args: &SyscallArgs) -> SyscallResult {
     use crate::proc::pcb;
 
@@ -3928,7 +3979,7 @@ pub fn sys_process_try_wait(args: &SyscallArgs) -> SyscallResult {
             Err(e) => SyscallResult::err(e),
         }
     } else {
-        match pcb::try_reap_any(parent_pid) {
+        match reap_any_filtered(parent_pid, wait_pgid_filter(pid_arg, parent_pid)) {
             Ok(Some((child_pid, info))) => {
                 write_reaped_pid(out_ptr, child_pid);
                 #[allow(clippy::cast_possible_wrap)]

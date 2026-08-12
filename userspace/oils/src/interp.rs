@@ -21526,19 +21526,8 @@ impl Shell {
     ///   of the name is itself a reference. *Which* cell is the one place the
     ///   two commands a declaration is made of part company.
     ///
-    ///   A **compound literal** is `do_compound_assignment`, which says it
-    ///   outright (subst.c:3506):
-    ///
-    ///   ```c
-    ///     newname = (v == 0) ? nameref_transform_name (name, flags) : name;
-    ///   ```
-    ///
-    ///   With `ASS_MKGLOBAL|ASS_CHKLOCAL` that is `find_variable_last_nameref
-    ///   (name, 1)`'s cell (variables.c:2334) — the **live** chain's, so a
-    ///   frame-local reference out of the frame decides the global written.
-    ///
-    ///   The builtin proper is `declare_internal`, which asks a narrower
-    ///   question first (declare.def:735):
+    ///   The builtin proper is `declare_internal`, which reads the global chain
+    ///   on its own (declare.def:735):
     ///
     ///   ```c
     ///     refvar = mkglobal ? find_global_variable_last_nameref (name, 0) : …;
@@ -21548,13 +21537,27 @@ impl Shell {
     ///         goto restart_new_var_name; }
     ///   ```
     ///
-    ///   [`Shell::global_chain_path`] never leaves the global table, so it does
-    ///   not see the frame's reference at all — un-shadowing every link it reads
-    ///   is what puts the ordinary walk on the chain as written at top level.
-    ///   And it is only when it answers *nothing*, which among globals means a
-    ///   cycle, that the name falls through unchanged to `bind_global_variable`
-    ///   and its `bind_variable_internal` (variables.c:3020) opens with the live
-    ///   cell after all:
+    ///   [`Shell::global_chain_path`] is that walk. It never leaves the global
+    ///   table, so it does not see the frame's reference at all — un-shadowing
+    ///   every link it reads is what puts the ordinary walk on the chain as
+    ///   written at top level.
+    ///
+    ///   A **compound literal** is `do_compound_assignment`, which looks like a
+    ///   second, different question (subst.c:3506):
+    ///
+    ///   ```c
+    ///     newname = (v == 0) ? nameref_transform_name (name, flags) : name;
+    ///   ```
+    ///
+    ///   but is only reached where `find_global_variable (name)` came back
+    ///   empty — and where the walk above *answered*, step 1 has already made a
+    ///   variable at the name it answered with (`bind_global_variable (name,
+    ///   NULL, ASS_FORCE)`, declare.def:792, or a kind letter's fresh array),
+    ///   so it no longer is. The two roads part only past that point.
+    ///
+    ///   Past it, they meet again: the builtin's name falls through unchanged
+    ///   to `bind_global_variable`, whose `bind_variable_internal`
+    ///   (variables.c:3020) opens with the **live** chain's last cell,
     ///
     ///   ```c
     ///     if (entry && nameref_p (entry) && … && table == global_variables->table)
@@ -21562,6 +21565,11 @@ impl Shell {
     ///         entry = find_global_variable (entry->name);
     ///         if (entry == 0) entry = find_variable_last_nameref (name, 0);
     ///   ```
+    ///
+    ///   and the literal's `nameref_transform_name` (variables.c:2333) asks for
+    ///   either that or the global-only walk — which just answered nothing —
+    ///   depending on `ASS_CHKLOCAL`. So a frame-local reference out of the
+    ///   frame decides the global written, whichever road was taken.
     ///
     ///   That opening is reached only through the global table's own entry for
     ///   the name, which is the one thing both roads agree on: a name with **no
@@ -21595,28 +21603,35 @@ impl Shell {
             // No global binding at all: neither road above starts, so the name
             // is bound as written.
             None if self.nameref_cell_in(name, 0).is_none() => vec![name.to_string()],
-            None => match (compound, self.global_chain_path(name)) {
-                (false, Some(path)) => path,
-                // A kind letter's `make_new_array_variable` never reaches the
-                // `bind_global_variable` the live chain's last cell comes out
-                // of, so *both* commands take the builtin's road: the global
-                // chain read on its own. It binds the name the restart arrived
-                // at (`restart_new_var_name`, declare.def:770), which is that
-                // road's own end.
-                (true, Some(path)) if kind => path,
-                // And where even that road answered nothing — bash's
-                // `refvar == 0`, which among globals means a cycle — there was
-                // no restart, so the name bound is the one written.
-                (_, None) if kind => {
+            // The global-only road answered: the name is the end of the chain
+            // it read, for both commands. The builtin asks for it outright
+            // (`find_global_variable_last_nameref`, declare.def:735), and the
+            // compound literal is *given* it — step 1 already made a variable
+            // there, so step 2's `find_global_variable (name)` finds one and
+            // never reaches `nameref_transform_name` at all.
+            None => match self.global_chain_path(name) {
+                Some(path) => path,
+                // Where that road answered nothing — among globals, a cycle —
+                // step 1 made nothing at the transformed name either, and the
+                // question is live again. A kind letter binds the name as
+                // written, there having been no restart to carry it elsewhere.
+                None if kind => {
                     return GlobalBind { names: vec![name.to_string()], fresh: true };
                 }
-                // A chain that dies on the link limit has no last cell to give
-                // and the live one is asked for instead; an element reference is
-                // no name to bind either, and bash keeps the name (the `v &&
-                // nameref_p (v)` guard, variables.c:2336). Either way the name
-                // itself stays shadowed: it is the frame's own reference that
-                // leads there.
-                _ => vec![match self.walk_ref_name(name).target {
+                // Otherwise both roads reach the live chain's last cell: the
+                // builtin's `name` falls through unchanged to
+                // `bind_global_variable`, whose `bind_variable_internal` opens
+                // with `find_variable_last_nameref` (variables.c:3020), and the
+                // literal's `nameref_transform_name` (variables.c:2333) asks
+                // either that or `find_global_variable_last_nameref` — which
+                // just answered nothing — depending on `ASS_CHKLOCAL`.
+                //
+                // A chain that dies on the link limit has no last cell to give;
+                // an element reference is no name to bind either, and bash keeps
+                // the name (the `v && nameref_p (v)` guard, variables.c:2336).
+                // Either way the name itself stays shadowed: it is the frame's
+                // own reference that leads there.
+                None => vec![match self.walk_ref_name(name).target {
                     Some(RefTarget { base, sub: None, .. }) => base,
                     _ => name.to_string(),
                 }],
@@ -74910,17 +74925,20 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(out, "declare -n g=\"z\"\ndeclare -- z=\"1\"\n");
         assert_eq!(st, 0);
 
-        // A compound literal is the other command and always takes the live
-        // cell, cycle or no cycle.
+        // The compound literal follows it there rather than taking the live
+        // cell of its own: step 1 made a variable at the end of that walk, so
+        // `find_global_variable (name)` finds one and `nameref_transform_name`
+        // is never reached. Only the builtin proper, running last against the
+        // frame's reference, goes to `w` — so the value and the mark part.
         let (out, st) = run(
             "declare -n g=z; \
              f() { local -n g=w; readonly g=(1 2); }; f; declare -p g z w",
         );
         assert_eq!(
             out,
-            "declare -n g=\"z\"\ndeclare -ar w=([0]=\"1\" [1]=\"2\")\n"
+            "declare -n g=\"z\"\ndeclare -a z=([0]=\"1\" [1]=\"2\")\ndeclare -r w\n"
         );
-        assert_eq!(st, 1); // the trailing listing of `z`, which was never made
+        assert_eq!(st, 0);
 
         // No global binding at all: both roads bind the name as written, which
         // is why the array and the attribute can end up on two variables.

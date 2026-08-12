@@ -49,6 +49,24 @@ echo '=== a chain that merely ends on an unset name reads the same'
 ( declare -n g=z
   f() { local -n g=w; declare -g g=1; declare -p g; }; f; echo AFTER; declare -p g z w )
 
+echo '=== a compound literal follows the builtin there rather than transforming again'
+# `do_compound_assignment` only reaches `nameref_transform_name` where
+# `find_global_variable (name)` came back empty — and where the walk above
+# answered, step 1 has already made a variable at the name it answered with
+# (`bind_global_variable (name, NULL, ASS_FORCE)`, declare.def:792), so it no
+# longer is. Only the builtin proper, running last against the frame's reference,
+# goes elsewhere: the value and the mark end up on two variables.
+( declare -n g=z
+  f() { local -n g=w; readonly g=(1 2); }; f; echo AFTER; declare -p g z w )
+( declare -n g=z
+  f() { local -n g=w; export g=(1 2); }; f; echo AFTER; declare -p g z w )
+( declare -n g=z
+  f() { local -n g=w; declare -g g=(1 2); }; f; echo AFTER; declare -p g z w )
+
+echo '=== a cycle answers nothing, so there was nothing to follow and both transform'
+( declare -n g=z; declare -n z=g
+  f() { local -n g=w; readonly g=(1 2); }; f; echo AFTER; declare -p g z w )
+
 echo '=== no global binding at all: the name is bound as written'
 ( f() { local -n g=w; declare -g g=1; declare -p g; }; f; echo AFTER; declare -p g )
 ( f() { local -n g=w; readonly g=(1 2); declare -p g; }; f; echo AFTER; declare -p g w )

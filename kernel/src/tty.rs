@@ -558,8 +558,9 @@ impl PendingLine {
 static PENDING: Mutex<PendingLine> = Mutex::new(PendingLine::new());
 
 /// Read the console's foreground process-group ID — the group that owns the
-/// terminal for the purpose of job control.  A `^C`/`^\` under `ISIG`
-/// delivers `SIGINT`/`SIGQUIT` to this group (see [`ConsoleRead::Signal`]).
+/// terminal for the purpose of job control.  A `^C`/`^\`/`^Z` under `ISIG`
+/// delivers `SIGINT`/`SIGQUIT`/`SIGTSTP` to this group (see
+/// [`ConsoleRead::Signal`]).
 ///
 /// `0` means "no foreground group" — either no session holds the console
 /// (the kernel-startup / no-shell state) or the holder has released it — in
@@ -584,17 +585,19 @@ pub fn foreground_pgid() -> u64 {
 ///
 /// A normal read yields [`ConsoleRead::Data`] with the number of bytes written
 /// to the caller's buffer (`0` means end-of-file on a `^D` at an empty line, or
-/// nothing immediately available in a polling raw read).  A `^C`/`^\` typed
-/// under `ISIG` interrupts the read and yields [`ConsoleRead::Signal`] carrying
-/// the signal number (`SIGINT`=2 / `SIGQUIT`=3) the foreground process group
-/// must receive; the syscall layer performs the actual group delivery and
-/// returns the restart/`EINTR` sentinel to the blocked reader.
+/// nothing immediately available in a polling raw read).  A `^C`/`^\`/`^Z`
+/// typed under `ISIG` interrupts the read and yields [`ConsoleRead::Signal`]
+/// carrying the signal number (`SIGINT`=2 / `SIGQUIT`=3 / `SIGTSTP`=20) the
+/// foreground process group must receive; the syscall layer performs the actual
+/// group delivery and returns the restart/`EINTR` sentinel to the blocked
+/// reader.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConsoleRead {
     /// `n` bytes were written to the caller's buffer (`0` ⇒ EOF / no data).
     Data(usize),
-    /// A terminal signal (`SIGINT`/`SIGQUIT`) was generated; deliver it to the
-    /// foreground process group.  No bytes were written to the caller's buffer.
+    /// A terminal signal (`SIGINT`/`SIGQUIT`/`SIGTSTP`) was generated; deliver
+    /// it to the foreground process group.  No bytes were written to the
+    /// caller's buffer.
     Signal(u8),
 }
 
@@ -614,7 +617,7 @@ pub enum ConsoleRead {
 /// full-screen editors) suppress echo correctly.
 ///
 /// Returns a [`ConsoleRead`]: either the number of bytes written to `out`, or a
-/// [`ConsoleRead::Signal`] when a `^C`/`^\` interrupted a canonical read.
+/// [`ConsoleRead::Signal`] when a `^C`/`^\`/`^Z` interrupted a canonical read.
 pub fn console_read(out: &mut [u8]) -> ConsoleRead {
     if out.is_empty() {
         return ConsoleRead::Data(0);
@@ -642,10 +645,11 @@ pub fn console_read(out: &mut [u8]) -> ConsoleRead {
 
 /// Canonical-mode read: edit a line until a terminator, then deliver it.
 ///
-/// A `^C`/`^\` typed under `ISIG` interrupts the read immediately and returns
-/// [`ConsoleRead::Signal`]; the line in progress has already been discarded by
-/// [`feed`], so no partial data is delivered (matching Linux: an interrupted
-/// canonical read returns `-EINTR`, not the editing buffer).
+/// A `^C`/`^\`/`^Z` typed under `ISIG` interrupts the read immediately and
+/// returns [`ConsoleRead::Signal`]; the line in progress has already been
+/// discarded by [`feed`] (unless `NOFLSH` is set), and this function delivers
+/// no partial data either way (matching Linux: an interrupted canonical read
+/// returns `-EINTR`, not the editing buffer).
 fn canonical_read(t: &Termios, out: &mut [u8]) -> ConsoleRead {
     let mut line = LineBuf::new();
     loop {

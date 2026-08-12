@@ -4632,6 +4632,183 @@ pub fn hangup_released_ctty(pid: crate::proc::pcb::ProcessId) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
+/// `SYS_TTY_GET_TERMIOS` — read the console's `struct termios`
+/// (`ioctl(fd, TCGETS)` / `tcgetattr(3)`).
+///
+/// `arg0` is a pointer to a [`crate::tty::TERMIOS_BYTES`]-byte user buffer.
+///
+/// Reads the same [`crate::tty::get_termios`] the line discipline itself
+/// consults, so a native-ABI program and a Linux-ABI program describing the
+/// same terminal now get the same answer.  libc previously answered this
+/// from a hardcoded constant of its own — see `SYS_TTY_GET_TERMIOS`'s
+/// number doc for why that is the foreground-process-group bug again.
+pub fn sys_tty_get_termios(args: &SyscallArgs) -> SyscallResult {
+    if args.arg0 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let bytes = crate::tty::get_termios().to_bytes();
+    // SAFETY: `bytes` is a live kernel array of exactly TERMIOS_BYTES bytes;
+    // copy_to_user validates the destination is writable user memory and
+    // performs the SMAP dance.
+    match unsafe { crate::mm::user::copy_to_user(bytes.as_ptr(), args.arg0, bytes.len()) } {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_TTY_SET_TERMIOS` — install a new console `struct termios`
+/// (`ioctl(fd, TCSETS/TCSETSW/TCSETSF)` / `tcsetattr(3)`).
+///
+/// `arg0` is a pointer to a [`crate::tty::TERMIOS_BYTES`]-byte wire-format
+/// `struct termios`.
+///
+/// Any bit pattern is accepted: `termios` has no invalid encodings, unknown
+/// flag bits are simply ones this line discipline does not implement, and
+/// rejecting them would break programs that set a superset of flags (which
+/// is every program that starts from a `tcgetattr` result).  This mirrors
+/// the Linux shim's `TCSETS`, which likewise installs what it is given.
+///
+/// [`crate::tty::set_termios`] resyncs the keyboard driver's echo to the new
+/// `ECHO` bit, so a password prompt clearing `ECHO` stops echo immediately.
+pub fn sys_tty_set_termios(args: &SyscallArgs) -> SyscallResult {
+    if args.arg0 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let mut bytes = [0u8; crate::tty::TERMIOS_BYTES];
+    // SAFETY: `bytes` is a live kernel array of exactly TERMIOS_BYTES bytes;
+    // copy_from_user validates the source is readable user memory and
+    // performs the SMAP dance.
+    if let Err(e) =
+        unsafe { crate::mm::user::copy_from_user(args.arg0, bytes.as_mut_ptr(), bytes.len()) }
+    {
+        return SyscallResult::err(e);
+    }
+    crate::tty::set_termios(crate::tty::Termios::from_bytes(&bytes));
+    SyscallResult::ok(0)
+}
+
+/// Outcome of a line-discipline console read, before ABI-specific encoding.
+///
+/// Exists so the native [`sys_tty_read`] and the Linux shim's
+/// `dispatch_console_read` share one implementation of "read through the
+/// line discipline and deliver any terminal signal".  The two ABIs differ
+/// only in how they encode errors (a `KernelError` versus a negative Linux
+/// errno), which is the one thing this enum leaves to the caller.
+pub enum TtyReadOutcome {
+    /// `n` bytes were copied into the caller's buffer (`0` ⇒ end of file).
+    Bytes(usize),
+    /// A terminal signal was generated and delivered to the foreground
+    /// process group; the caller must return this restart sentinel verbatim.
+    Restart(SyscallResult),
+    /// The user buffer was not usable.
+    Fault(KernelError),
+}
+
+/// Read from the console through the line discipline into a user buffer.
+///
+/// Blocks per the current termios: a full line in canonical mode, or the
+/// `VMIN`/`VTIME` rules in raw mode.  A `^C`/`^\`/`^Z` under `ISIG` does not
+/// return data — it delivers the corresponding signal to the session's
+/// foreground process group via [`deliver_console_signal`] and yields
+/// [`TtyReadOutcome::Restart`].
+///
+/// One call returns at most a single canonical line, so a
+/// [`crate::tty::MAX_CANON`] staging buffer suffices however large `cap` is.
+/// The destination is validated *before* blocking on input, so a program
+/// passing a bad pointer fails immediately rather than after the user has
+/// typed a line.
+pub fn tty_read_into_user(buf: u64, cap: u64) -> TtyReadOutcome {
+    if cap == 0 {
+        return TtyReadOutcome::Bytes(0);
+    }
+    let want = usize::try_from(cap)
+        .unwrap_or(usize::MAX)
+        .min(crate::tty::MAX_CANON);
+    if let Err(e) = crate::mm::user::validate_user_write(buf, want) {
+        return TtyReadOutcome::Fault(e);
+    }
+
+    let mut kbuf = [0u8; crate::tty::MAX_CANON];
+    let dst = kbuf.get_mut(..want).unwrap_or(&mut []);
+    let n = match crate::tty::console_read(dst) {
+        crate::tty::ConsoleRead::Data(n) => n,
+        crate::tty::ConsoleRead::Signal(sig) => {
+            return TtyReadOutcome::Restart(deliver_console_signal(sig));
+        }
+    };
+    if n == 0 {
+        return TtyReadOutcome::Bytes(0);
+    }
+    // SAFETY: `want` bytes at `buf` were validated writable above and
+    // `n <= want`; copy_to_user re-validates and performs the SMAP dance.
+    // `kbuf` holds `n` live kernel bytes.
+    match unsafe { crate::mm::user::copy_to_user(kbuf.as_ptr(), buf, n) } {
+        Ok(()) => TtyReadOutcome::Bytes(n),
+        Err(e) => TtyReadOutcome::Fault(e),
+    }
+}
+
+/// Deliver a terminal-generated signal (`SIGINT`/`SIGQUIT`/`SIGTSTP` from
+/// `^C`/`^\`/`^Z`) to the console's foreground process group, then return
+/// the `ERESTARTSYS` restart sentinel for the interrupted reader.
+///
+/// Mirrors Linux's `n_tty.c` calling `kill_pgrp(tty->pgrp, sig, …)`: the line
+/// discipline only *decides* a signal is due; the kill is performed in the
+/// surrounding layer.  The signal carries an `SI_KERNEL` siginfo (kernel
+/// origin, no sender pid), matching a tty-generated signal.
+///
+/// If no foreground group is installed (`foreground_pgid() == 0` — e.g.
+/// before any interactive shell ran `tcsetpgrp`), there is no group to
+/// signal, so the `^C` simply restarts the read (Linux likewise generates no
+/// signal when the tty has no foreground pgrp).  Either way we return
+/// `ERESTARTSYS`: with a deliverable signal the checkpoint runs the default
+/// action / handler; with none it transparently restarts the blocking read.
+pub fn deliver_console_signal(sig: u8) -> SyscallResult {
+    use crate::proc::pcb;
+    use crate::proc::signal::si_code::SI_KERNEL;
+
+    let pgid = crate::tty::foreground_pgid();
+    if pgid != 0 {
+        for target in pcb::pids_in_group(pgid) {
+            let send_args = SyscallArgs {
+                arg0: target,
+                arg1: u64::from(sig),
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            };
+            // Best-effort: a member that exited between the membership snapshot
+            // and delivery just fails its own send; the rest still receive it.
+            let _ = sys_signal_send_with_info(&send_args, SI_KERNEL, 0);
+        }
+    }
+    // The restart machinery lives in the Linux shim's module but is not
+    // Linux-specific: `entry.rs` runs `resolve_syscall_restart` over *both*
+    // ABIs' results, so a sentinel from a native handler is resolved the same
+    // way.  (Only `leaked_sentinel_to_linux_eintr` inside that module is
+    // Linux-encoded, and the native path deliberately does not use it — see
+    // `deliver_pending_signal`.)
+    super::linux::restart::restart_result(super::linux::restart::ERESTARTSYS)
+}
+
+/// `SYS_TTY_READ` — read from the console through the line discipline.
+///
+/// `arg0`: destination buffer.  `arg1`: capacity in bytes.
+///
+/// The native ABI's console read.  Unlike [`sys_console_read_char`], which
+/// hands back one raw keyboard byte, this honours `ICANON`, `VEOF`,
+/// `VMIN`/`VTIME` and `ISIG` — so `^C` at a native-ABI program generates
+/// `SIGINT` for the foreground group instead of arriving as byte 0x03.
+pub fn sys_tty_read(args: &SyscallArgs) -> SyscallResult {
+    match tty_read_into_user(args.arg0, args.arg1) {
+        #[allow(clippy::cast_possible_wrap)]
+        TtyReadOutcome::Bytes(n) => SyscallResult::ok(n as i64),
+        TtyReadOutcome::Restart(r) => r,
+        TtyReadOutcome::Fault(e) => SyscallResult::err(e),
+    }
+}
+
 /// `SYS_PROCESS_COUNT` — return the count of live processes.
 ///
 /// Wraps `pcb::count()`, which returns the size of the process table
@@ -5777,10 +5954,27 @@ pub fn deliver_pending_signal(
 
     // A restart sentinel must never be saved into the native trampoline
     // context: native processes have no per-signal SA_RESTART disposition, so
-    // convert any sentinel to the user-visible -EINTR. (No native syscall emits
-    // a sentinel today; this keeps the never-leak invariant safe-by-
-    // construction if one ever does.)
-    let ret_val = crate::syscall::linux::restart::leaked_sentinel_to_eintr(ret_val);
+    // convert any sentinel to the user-visible -EINTR.
+    //
+    // `sys_tty_read` (543) is the first native syscall that emits one: a
+    // ^C/^\/^Z during a console read returns ERESTARTSYS so the *same*
+    // machinery the Linux ABI uses decides restart-vs-EINTR. The two cases
+    // split here: if a native handler is about to run, the read reports EINTR
+    // (a native handler cannot ask for SA_RESTART, so restarting would hide
+    // the interruption from a program that explicitly installed a handler);
+    // if no handler runs, `entry.rs`'s `resolve_syscall_restart` rewinds RIP
+    // and the read transparently resumes, which is what makes a ^C aimed at
+    // *another* process invisible to this one.
+    // Deliberately NOT `leaked_sentinel_to_linux_eintr`: that substitutes
+    // Linux's `EINTR` (4), and a native process reads its return value as a
+    // `KernelError` code, where -4 is `WouldBlock`/`EAGAIN`. Using it here
+    // would report "try again" for "interrupted by a signal" — the two
+    // errnos a program most needs to tell apart around a blocking read.
+    let ret_val = if crate::syscall::linux::restart::is_sentinel(ret_val) {
+        i64::from(KernelError::Interrupted.code())
+    } else {
+        ret_val
+    };
 
     let ctx = SignalContext {
         signum: u64::from(sig),

@@ -1076,7 +1076,7 @@ mod msgflags {
 ///
 /// These values MUST NEVER reach userspace: every path that returns a value to
 /// ring 3 ([`crate::syscall::entry`]) runs them through [`restart_action`] and
-/// either restarts or substitutes `-EINTR`.  [`leaked_sentinel_to_eintr`] is
+/// either restarts or substitutes `-EINTR`.  [`leaked_sentinel_to_linux_eintr`] is
 /// the final backstop.
 pub mod restart {
     use super::errno;
@@ -1177,12 +1177,21 @@ pub mod restart {
         }
     }
 
-    /// Final backstop: if `ret` is a restart sentinel that somehow reached a
-    /// return-to-user path without being resolved, substitute `-EINTR` so the
-    /// internal value can never leak to ring 3.  Non-sentinel values pass
-    /// through unchanged.
+    /// Final backstop for the **Linux ABI**: if `ret` is a restart sentinel
+    /// that somehow reached a return-to-user path without being resolved,
+    /// substitute Linux's `-EINTR` so the internal value can never leak to
+    /// ring 3.  Non-sentinel values pass through unchanged.
+    ///
+    /// The `_linux_` in the name is load-bearing.  Everything else in this
+    /// module is ABI-neutral — [`crate::syscall::entry`] runs
+    /// [`super::resolve_syscall_restart`] over native results too, and native
+    /// syscalls emit [`ERESTARTSYS`] — but this function encodes the *Linux*
+    /// errno numbering.  A native process reads its syscall return value as a
+    /// [`KernelError`] code, in which `-4` is `WouldBlock`, not `EINTR`; the
+    /// native delivery path in `handlers::deliver_pending_signal` therefore
+    /// substitutes `KernelError::Interrupted` itself rather than calling this.
     #[must_use]
-    pub fn leaked_sentinel_to_eintr(ret: i64) -> i64 {
+    pub fn leaked_sentinel_to_linux_eintr(ret: i64) -> i64 {
         if is_sentinel(ret) {
             -i64::from(errno::EINTR)
         } else {
@@ -4084,83 +4093,21 @@ fn dispatch_eventfd_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
 /// to `cap` bytes of it; in raw mode it honours `VMIN`.  A `^D` on an empty
 /// canonical line returns `0` (end of file).  See [`crate::tty::console_read`].
 fn dispatch_console_read(buf: u64, cap: u64) -> SyscallResult {
-    if cap == 0 {
-        return SyscallResult::ok(0);
+    // Shared with the native ABI's SYS_TTY_READ so the two cannot drift in
+    // what they consider a line, an EOF, or a signal character.  The only
+    // ABI-specific part is the error encoding.
+    match handlers::tty_read_into_user(buf, cap) {
+        #[allow(clippy::cast_possible_wrap)]
+        handlers::TtyReadOutcome::Bytes(n) => SyscallResult::ok(n as i64),
+        // A ^C/^\/^Z under ISIG interrupted the read: the terminal signal has
+        // been delivered to the foreground process group and this is the
+        // restart sentinel.  The signal-delivery checkpoint resolves it into a
+        // transparent restart (the reader wasn't in the foreground group, or
+        // the signal is handled with SA_RESTART) or a user-visible -EINTR /
+        // signal default action.
+        handlers::TtyReadOutcome::Restart(r) => r,
+        handlers::TtyReadOutcome::Fault(e) => linux_err(linux_errno_for(e)),
     }
-    // Resolve the requested length before blocking on input.  One read returns
-    // at most a single canonical line, so a kernel staging buffer of MAX_CANON
-    // bytes is sufficient; larger caps simply read at most a line per call.
-    let want = usize::try_from(cap).unwrap_or(usize::MAX).min(crate::tty::MAX_CANON);
-    // Validate the user destination up front (before we block reading input).
-    if let Err(e) = crate::mm::user::validate_user_write(buf, want) {
-        return linux_err(linux_errno_for(e));
-    }
-
-    let mut kbuf = [0u8; crate::tty::MAX_CANON];
-    let dst = kbuf.get_mut(..want).unwrap_or(&mut []);
-    let n = match crate::tty::console_read(dst) {
-        crate::tty::ConsoleRead::Data(n) => n,
-        crate::tty::ConsoleRead::Signal(sig) => {
-            // A ^C/^\ under ISIG interrupted the read: deliver the terminal
-            // signal to the foreground process group and return the restart
-            // sentinel.  The signal-delivery checkpoint resolves it into a
-            // transparent restart (the reader wasn't in the foreground group,
-            // or the signal is handled with SA_RESTART) or a user-visible
-            // -EINTR / signal default action.
-            return deliver_console_signal(sig);
-        }
-    };
-    if n == 0 {
-        // EOF (^D on an empty line) or nothing available — read returns 0.
-        return SyscallResult::ok(0);
-    }
-    // SAFETY: `want` bytes at `buf` were validated writable above and `n <=
-    // want`; copy_to_user re-validates and performs the SMAP dance.  `kbuf`
-    // holds `n` live kernel bytes.
-    match unsafe { crate::mm::user::copy_to_user(kbuf.as_ptr(), buf, n) } {
-        Ok(()) => {
-            #[allow(clippy::cast_possible_wrap)]
-            SyscallResult::ok(n as i64)
-        }
-        Err(e) => linux_err(linux_errno_for(e)),
-    }
-}
-
-/// Deliver a terminal-generated signal (`SIGINT`/`SIGQUIT` from `^C`/`^\`) to
-/// the console's foreground process group, then return the `ERESTARTSYS`
-/// restart sentinel for the interrupted reader.
-///
-/// Mirrors Linux's `n_tty.c` calling `kill_pgrp(tty->pgrp, sig, …)`: the line
-/// discipline only *decides* a signal is due; the kill is performed in the
-/// surrounding layer.  The signal carries an `SI_KERNEL` siginfo (kernel
-/// origin, no sender pid), matching a tty-generated signal.
-///
-/// If no foreground group is installed (`foreground_pgid() == 0` — e.g. before
-/// any interactive shell ran `tcsetpgrp`), there is no group to signal, so the
-/// `^C` simply restarts the read (Linux likewise generates no signal when the
-/// tty has no foreground pgrp).  Either way we return `ERESTARTSYS`: with a
-/// deliverable signal the checkpoint runs the default action / handler; with
-/// none it transparently restarts the blocking read.
-fn deliver_console_signal(sig: u8) -> SyscallResult {
-    use crate::proc::signal::si_code::SI_KERNEL;
-
-    let pgid = crate::tty::foreground_pgid();
-    if pgid != 0 {
-        for target in pcb::pids_in_group(pgid) {
-            let send_args = SyscallArgs {
-                arg0: target,
-                arg1: u64::from(sig),
-                arg2: 0,
-                arg3: 0,
-                arg4: 0,
-                arg5: 0,
-            };
-            // Best-effort: a member that exited between the membership snapshot
-            // and delivery just fails its own send; the rest still receive it.
-            let _ = handlers::sys_signal_send_with_info(&send_args, SI_KERNEL, 0);
-        }
-    }
-    restart::restart_result(restart::ERESTARTSYS)
 }
 
 /// Dispatch a `read(buf, cap)` against an fd entry.
@@ -51715,13 +51662,13 @@ fn self_test_restart_action() -> crate::error::KernelResult<()> {
             serial_println!("[syscall/linux]   FAIL: restart false-positive on {n}");
             return Err(KernelError::InternalError);
         }
-        if restart::leaked_sentinel_to_eintr(n) != n {
+        if restart::leaked_sentinel_to_linux_eintr(n) != n {
             serial_println!("[syscall/linux]   FAIL: leaked backstop mutated {n}");
             return Err(KernelError::InternalError);
         }
     }
     // Backstop turns a stray sentinel into -EINTR.
-    if restart::leaked_sentinel_to_eintr(-ERESTARTSYS) != -i64::from(errno::EINTR) {
+    if restart::leaked_sentinel_to_linux_eintr(-ERESTARTSYS) != -i64::from(errno::EINTR) {
         serial_println!("[syscall/linux]   FAIL: leaked backstop didn't convert");
         return Err(KernelError::InternalError);
     }

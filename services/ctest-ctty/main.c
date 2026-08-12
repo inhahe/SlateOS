@@ -1,7 +1,7 @@
 /*
- * ctest-ctty — ring-3 regression test for the **controlling terminal** and
- * the **foreground process group** reached through *our own* libc
- * (`AbiMode::Native`), not through the Linux ABI shim.
+ * ctest-ctty — ring-3 regression test for the **controlling terminal**, the
+ * **foreground process group** and the **terminal modes** reached through
+ * *our own* libc (`AbiMode::Native`), not through the Linux ABI shim.
  *
  * Why this fixture has to exist.  Until 2026-08-12 the foreground process
  * group was not one value but three: `posix` kept a per-process `FG_PGRP`
@@ -33,8 +33,12 @@
  * which is why they can be exact rather than "some plausible value".
  *
  * What is deliberately NOT here.  Nothing raises `SIGTTIN`/`SIGTTOU` on a
- * background read or write yet, and there is no `Ctrl-Z` from the line
- * discipline: both need a real tty driver to enforce at.  See `todo.txt`.
+ * background read or write yet — the predicate (`pcb::ctty_is_background`)
+ * exists, the enforcement points do not.  See `todo.txt`.  `Ctrl-Z` is *not*
+ * in that category and never was: `tty::feed` turns `VSUSP` into `SIGTSTP`
+ * exactly as it turns `VINTR` into `SIGINT`, and it reaches the foreground
+ * group this fixture establishes.  It is untested here only because the
+ * fixture has no way to synthesise a keystroke, not because it is missing.
  * The fixture also never lets a hangup reach itself — `TIOCNOTTY` is issued
  * only while the foreground group is the *reaped child's* (an empty group,
  * so no signal is sent at all), which is both the realistic case (a shell
@@ -53,6 +57,7 @@
 #include <signal.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
+#include <termios.h>
 #include <unistd.h>
 
 /* A pgid no live process will ever hold. */
@@ -294,6 +299,98 @@ done:
      * that from the other side. */
     if (ioctl(0, TIOCSCTTY, 0) != 0)    return 79;
     if (tcgetpgrp(0) != me)             return 80;
+
+    /* ---------------------------------------------------------------- *
+     * 90s — the terminal *modes* are the kernel's too.
+     *
+     * Same disease as the foreground group, found the same day: until
+     * 2026-08-12 `tcgetattr` on the native ABI returned a compiled-in
+     * constant and `tcsetattr` wrote a userspace static the kernel never
+     * read, so asking for raw mode changed nothing and a native program
+     * and a Linux-ABI program on the same console reported different
+     * terminals.  Syscalls 541/542 make both a view of `tty::TERMIOS`.
+     * See design-decisions.md §114.
+     *
+     * These checks cannot be done anywhere else.  `cargo test` runs the
+     * posix crate on the host triple, where the syscall arm is compiled
+     * out and a per-thread double answers — it proves the marshalling and
+     * nothing about the kernel.  `dispatch::test_dispatch_termios_syscalls`
+     * proves the kernel side and never goes through libc.  Only here do
+     * the two layouts have to be the same layout.
+     * ---------------------------------------------------------------- */
+    struct termios orig;
+    if (tcgetattr(0, &orig) != 0)       return 90;
+
+    /* Values the *kernel* wrote (Linux's INIT_C_CC, in `tty.rs`), read at
+     * indices *musl* computed.  This is the layout proof, and a mere
+     * round trip could not substitute for it: the kernel stores and
+     * returns whatever it is handed, so a set/get pair would agree even
+     * if both directions were consistently wrong.  Here libc marshals its
+     * 60-byte user struct (NCCS 32, explicit speeds) into the kernel's
+     * 36-byte wire format (NCCS 19, speed folded into c_cflag's CBAUD
+     * bits) by hand; if it were off by a field or a byte, these would
+     * come back as neighbouring control characters rather than the exact
+     * ones below. */
+    if (orig.c_cc[VINTR]  != 003)       return 91;   /* ^C  */
+    if (orig.c_cc[VQUIT]  != 034)       return 92;   /* ^\  */
+    if (orig.c_cc[VERASE] != 0177)      return 93;   /* DEL */
+    if (orig.c_cc[VKILL]  != 025)       return 94;   /* ^U  */
+    if (orig.c_cc[VEOF]   != 004)       return 95;   /* ^D  */
+    if (orig.c_cc[VSUSP]  != 032)       return 96;   /* ^Z  */
+    if (orig.c_cc[VMIN]   != 1)         return 97;
+    if ((orig.c_lflag & (ICANON | ECHO | ISIG)) != (ICANON | ECHO | ISIG))
+                                        return 98;
+    /* The speed survives the CBAUD folding in both directions. */
+    if (cfgetospeed(&orig) != B38400)   return 99;
+
+    /* Raw mode is real.  A `getch()`-style program clears these three and
+     * expects the *next* read to return one byte without waiting for a
+     * newline and without echoing it; before 541/542 that request was
+     * dropped on the floor. */
+    struct termios raw = orig;
+    raw.c_lflag &= (tcflag_t)~(ICANON | ECHO | ISIG);
+    raw.c_cc[VMIN]  = 1;
+    raw.c_cc[VTIME] = 0;
+    raw.c_cc[VINTR] = 021;              /* ^Q — a slot no default holds */
+    if (tcsetattr(0, TCSANOW, &raw) != 0) return 100;
+
+    struct termios got;
+    if (tcgetattr(0, &got) != 0)          return 101;
+    if (got.c_lflag & ICANON)             return 102;
+    if (got.c_lflag & ECHO)               return 103;
+    if (got.c_lflag & ISIG)               return 104;
+    /* An individual c_cc slot is addressed correctly through the wire, and
+     * the untouched slots came back untouched — a whole-array smear would
+     * pass the flag checks above but fail here. */
+    if (got.c_cc[VINTR] != 021)           return 105;
+    if (got.c_cc[VSUSP] != 032)           return 106;
+    if (got.c_cc[VERASE] != 0177)         return 107;
+    /* c_iflag/c_oflag are three and two words away from c_lflag; a field
+     * shift that survived everything above would show up as a change to
+     * one of them. */
+    if (got.c_iflag != orig.c_iflag)      return 108;
+    if (got.c_oflag != orig.c_oflag)      return 109;
+
+    /* Only the console has modes.  A pipe must say ENOTTY, not answer with
+     * the console's settings — the fd-kind gate is what keeps `isatty()`
+     * and every "am I interactive?" test honest. */
+    int nt[2];
+    if (pipe(nt) != 0)                    return 110;
+    errno = 0;
+    int notty = tcgetattr(nt[0], &got);
+    int notty_errno = errno;
+    close(nt[0]);
+    close(nt[1]);
+    if (notty != -1)                      return 111;
+    if (notty_errno != ENOTTY)            return 112;
+
+    /* Put the console back the way we found it: the kernel's console is
+     * shared with every later boot self-test and with the shell, and a
+     * fixture that left it in raw mode would silently break them. */
+    if (tcsetattr(0, TCSANOW, &orig) != 0) return 113;
+    if (tcgetattr(0, &got) != 0)           return 114;
+    if (got.c_lflag != orig.c_lflag)       return 115;
+    if (got.c_cc[VINTR] != 003)            return 116;
 
     return 42;
 }

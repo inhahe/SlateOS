@@ -544,6 +544,17 @@ pub const SYS_CONSOLE_WRITE: u64 = 100;
 /// Blocks (via HLT) until a key is pressed.  Returns the ASCII code
 /// of the key.  Non-printable keys (function keys, arrows) return 0.
 ///
+/// **Raw: this bypasses the line discipline entirely.**  It reads straight
+/// from the keyboard driver, so there is no line editing, no `VEOF`, no
+/// termios, and — importantly — no `ISIG`: a `^C` arrives here as byte 0x03
+/// rather than generating `SIGINT` for the foreground process group.  That
+/// is the right primitive for a caller that genuinely wants one unbuffered
+/// keystroke, and the wrong one for a `read(2)` on a terminal.
+///
+/// libc's `read()` on a console fd used to be built on this, which is why a
+/// native-ABI program got none of the above while a Linux-ABI program on the
+/// same console got all of it.  It now uses [`SYS_TTY_READ`] (543).
+///
 /// This is a kernel-provided bootstrap console.  It will be replaced
 /// by a userspace console server / terminal emulator.
 ///
@@ -2139,6 +2150,68 @@ pub const SYS_TTY_ACQUIRE_CTTY: u64 = 539;
 /// session leader; `NoSuchProcess` if the caller is not in the process
 /// table.  Chosen number 540.
 pub const SYS_TTY_RELEASE_CTTY: u64 = 540;
+
+/// Read the console's `struct termios` (`ioctl(fd, TCGETS)`).
+///
+/// `arg0`: pointer to a 36-byte user buffer receiving the wire-format
+///         `struct termios` (see [`crate::tty::Termios::to_bytes`]).
+///
+/// Exists because the native ABI previously had *no* way to reach the
+/// terminal's real line-discipline settings: libc's `tcgetattr` answered
+/// from a hardcoded `default_termios()` constant in `posix/src/ioctl.rs`,
+/// so it reported `ICANON|ECHO` no matter what the terminal was actually
+/// doing.  The Linux shim's `TCGETS` has always read the real state, which
+/// made the two ABIs disagree about the same terminal.  This is the same
+/// bug shape as the foreground process group (design-decisions §113): one
+/// piece of terminal state with a second, local, lying copy.
+///
+/// Returns: 0 on success; `InvalidArgument` for a null pointer; a fault
+/// error if the buffer is not writable user memory.  Chosen number 541.
+pub const SYS_TTY_GET_TERMIOS: u64 = 541;
+
+/// Set the console's `struct termios` (`ioctl(fd, TCSETS/TCSETSW/TCSETSF)`).
+///
+/// `arg0`: pointer to a 36-byte wire-format `struct termios` to install.
+///
+/// `TCSETSW`/`TCSETSF` collapse onto this: we have no output queue to drain
+/// and no kernel-side input queue to flush, exactly as the Linux shim's
+/// three commands already collapse.
+///
+/// This is what makes raw mode work for a native-ABI program.  libc's
+/// `tcsetattr` previously accepted the call and threw it away ("our console
+/// has no configurable line discipline" — untrue since `kernel/src/tty.rs`
+/// gained one), so every full-screen editor, password prompt and shell
+/// running under the native ABI silently kept canonical mode and echo.
+///
+/// Returns: 0 on success; `InvalidArgument` for a null pointer; a fault
+/// error if the buffer is not readable user memory.  Chosen number 542.
+pub const SYS_TTY_SET_TERMIOS: u64 = 542;
+
+/// Read from the console **through the line discipline**.
+///
+/// `arg0`: pointer to the destination buffer.
+/// `arg1`: buffer capacity in bytes.
+///
+/// The native counterpart of the Linux shim's console `read(2)`.  Honours
+/// `ICANON` (line editing, `VEOF`), the `VMIN`/`VTIME` pair in raw mode, and
+/// `ISIG` — a `^C`/`^\`/`^Z` generates `SIGINT`/`SIGQUIT`/`SIGTSTP` for the
+/// session's foreground process group rather than being delivered to the
+/// reader as a data byte.  Both ABIs route that generation through the same
+/// `handlers::deliver_console_signal`, so they cannot drift.
+///
+/// This replaces [`SYS_CONSOLE_READ_CHAR`] as libc's console read path.
+/// That syscall reads one raw byte straight from the keyboard driver,
+/// bypassing the line discipline entirely: under it a native-ABI program
+/// got no line editing, no `VEOF`, no termios and — most importantly — no
+/// terminal-generated signals, so `^C` at a native program was just byte
+/// 0x03.  It is kept for the callers that genuinely want an unbuffered
+/// keystroke (see its own doc comment).
+///
+/// Returns: the number of bytes written to the buffer (`0` at end of file);
+/// `InvalidArgument` for a null pointer; a fault error if the buffer is not
+/// writable user memory; or the restart sentinel when a terminal signal
+/// interrupted the read.  Chosen number 543.
+pub const SYS_TTY_READ: u64 = 543;
 
 // ---------------------------------------------------------------------------
 // Filesystem syscalls (600–799)

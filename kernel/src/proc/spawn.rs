@@ -7549,7 +7549,14 @@ pub fn self_test_cctty() -> KernelResult<()> {
              parent handed over, 71-80 = the terminal outlives the job and giving it up is real \
              (72-73 = the reaped child's group can still be read but no longer foregrounded, 74 = \
              TIOCNOTTY, 75-78 = released means ENOTTY again, 79-80 = the console was genuinely \
-             freed and can be re-acquired). See services/ctest-ctty/main.c",
+             freed and can be re-acquired), 90-116 = the terminal *modes* are the kernel's too \
+             (91-99 = control characters and the baud rate the kernel itself wrote, read back at \
+             the indices musl computed — the layout proof a set/get round trip cannot give, since \
+             the kernel returns whatever it is handed; 100-109 = raw mode really takes effect and \
+             an individual c_cc slot is addressed correctly through the 36-byte wire format; \
+             110-112 = a pipe answers ENOTTY rather than the console's modes; 113-116 = the \
+             fixture puts the console back for every later self-test). See \
+             services/ctest-ctty/main.c",
             exit_code, EXPECTED
         );
         return Err(KernelError::InternalError);
@@ -7585,7 +7592,8 @@ pub fn self_test_cctty() -> KernelResult<()> {
          the console with TIOCSCTTY, hands it to its child's group with tcsetpgrp, and the child \
          reads the handoff back with tcgetpgrp — before it, the parent's group; after it, its \
          own. The console is held while the session's last process is a zombie and released when \
-         the session is destroyed): OK"
+         the session is destroyed. The same program reads back the control characters the kernel \
+         itself wrote, switches the console to raw mode for real and restores it): OK"
     );
     Ok(())
 }

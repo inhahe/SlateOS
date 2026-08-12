@@ -53879,18 +53879,27 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ## (pcb::CTTY_FG_PGRP, native syscalls 537-540, Linux TIOCGPGRP/TIOCSPGRP/
 ## TIOCSCTTY/TIOCNOTTY). Three things were deliberately left out:
 ##
-## 1. SIGTTIN/SIGTTOU enforcement, and Ctrl-Z.
+## 1. SIGTTIN/SIGTTOU enforcement.
 ##    A background process that reads from the terminal must get SIGTTIN;
 ##    one that writes (with TOSTOP) or calls tcsetpgrp/tcsetattr must get
 ##    SIGTTOU. pcb::ctty_is_background() already answers "is this caller in
-##    the background?", so the predicate exists — what is missing is a place
-##    to enforce it. Our console is polled from the syscall path, not a tty
-##    driver with a line discipline, so there is no single choke point that
-##    owns "a background process just tried to read" or "the user pressed
-##    ^Z". Proper fix: build the tty driver (line discipline + input queue +
-##    per-terminal state), then enforce in its read/write path and generate
-##    SIGTSTP from the VSUSP character the same way SIGINT is generated from
-##    VINTR today. Trigger: when the tty driver task is started.
+##    the background?", so the predicate exists — what is missing is the
+##    enforcement at each entry point that needs it.
+##    NOT deferred, contrary to an earlier version of this note: Ctrl-Z.
+##    tty::feed() already generates SIGTSTP from VSUSP under ISIG exactly
+##    the way it generates SIGINT from VINTR (kernel/src/tty.rs, the
+##    LineStep::Signal(20) arm, honouring NOFLSH), console_read propagates
+##    it as ConsoleRead::Signal, and linux.rs's deliver_console_signal
+##    sends it to every member of pcb::pids_in_group(tty::foreground_pgid())
+##    with SI_KERNEL. SIGTSTP's default action already stops the process
+##    (signal.rs PostDecision::Stop) and waitpid(WUNTRACED) already reports
+##    it — see spawn.rs's job-control ring-3 self-test. So ^Z works today on
+##    the Linux-ABI console read path; only the background-access half is
+##    missing. (The native ABI's console read does not consume
+##    ConsoleRead::Signal at all — that is a separate, real gap.)
+##    Proper fix for what remains: enforce ctty_is_background() at the
+##    console read path, the console write path (gated on TOSTOP), and
+##    tcsetpgrp/tcsetattr.
 ##    Note the ordering trap: tcsetpgrp() itself is supposed to raise
 ##    SIGTTOU on a background caller, so the enforcement must not be added
 ##    to sys_tty_set_pgrp alone or a shell that is *already* background will

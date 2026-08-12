@@ -200,13 +200,24 @@ pub extern "C" fn __errno_location() -> *mut i32 {
 /// MUST stay in sync with kernel/src/error.rs — any mismatch causes
 /// wrong errno values throughout the entire POSIX layer.
 pub(crate) mod native {
-    // --- General (0-99 range: -1 to -6) ---
+    // --- General (0-99 range: -1 to -8) ---
     pub const INTERNAL_ERROR: i64 = -1;
     pub const NOT_SUPPORTED: i64 = -2;
     pub const INVALID_ARGUMENT: i64 = -3;
     pub const WOULD_BLOCK: i64 = -4;
     pub const CANCELLED: i64 = -5;
     pub const TIMED_OUT: i64 = -6;
+    pub const DEADLOCK: i64 = -7;
+    /// A blocking syscall was interrupted by a signal.
+    ///
+    /// This became reachable on the native ABI when `SYS_TTY_READ` (543)
+    /// started returning it: a `^C` during a console read whose handler the
+    /// program installed itself resolves to `KernelError::Interrupted`.
+    /// Before it was mapped here it fell through to `EIO`, which is not a
+    /// value any `read()` caller retries on.  Note the number: Linux's
+    /// `EINTR` is 4, and `-4` here is `WOULD_BLOCK`, so the two ABIs must
+    /// never share an encoding path.
+    pub const INTERRUPTED: i64 = -8;
 
     // --- Memory (100 range: -100 to -103) ---
     pub const OUT_OF_MEMORY: i64 = -100;
@@ -273,6 +284,8 @@ pub fn translate(ret: i64) -> i64 {
         native::WOULD_BLOCK | native::CHANNEL_FULL => EAGAIN,
         native::CANCELLED => ECANCELED,
         native::TIMED_OUT => ETIMEDOUT,
+        native::DEADLOCK => EDEADLK,
+        native::INTERRUPTED => EINTR,
 
         // Memory errors
         native::OUT_OF_MEMORY | native::RESOURCE_EXHAUSTED => ENOMEM,
@@ -400,6 +413,36 @@ mod tests {
         let result = translate(-9999);
         assert_eq!(result, -1);
         assert_eq!(get_errno(), EIO);
+    }
+
+    #[test]
+    fn test_translate_interrupted() {
+        // A blocking native syscall interrupted by a signal.  Reachable since
+        // SYS_TTY_READ (543): a ^C during a console read, with a handler
+        // installed, resolves to KernelError::Interrupted rather than a
+        // restart.  Until it was mapped this fell through to EIO, which no
+        // read() caller retries on.
+        assert_eq!(translate(native::INTERRUPTED), -1);
+        assert_eq!(get_errno(), EINTR);
+    }
+
+    #[test]
+    fn test_native_interrupted_is_not_would_block() {
+        // The two ABIs number these differently and must never share an
+        // encoding path: Linux's EINTR is 4, while the *native* -4 is
+        // WouldBlock.  A kernel path that substituted a Linux EINTR into a
+        // native return value would silently report EAGAIN for "interrupted".
+        assert_ne!(native::INTERRUPTED, native::WOULD_BLOCK);
+        assert_eq!(native::INTERRUPTED, -8);
+        assert_eq!(-i64::from(EINTR), native::WOULD_BLOCK);
+        assert_eq!(translate(native::WOULD_BLOCK), -1);
+        assert_eq!(get_errno(), EAGAIN);
+    }
+
+    #[test]
+    fn test_translate_deadlock() {
+        assert_eq!(translate(native::DEADLOCK), -1);
+        assert_eq!(get_errno(), EDEADLK);
     }
 
     #[test]

@@ -159,6 +159,21 @@ pub const SYS_TTY_ACQUIRE_CTTY: u64 = 539;
 /// Returns 0, `NotSupported` (ENOTTY), or `PermissionDenied` if the caller
 /// is not the session leader.
 pub const SYS_TTY_RELEASE_CTTY: u64 = 540;
+/// Read the console's `struct termios` (`tcgetattr`/`ioctl(fd, TCGETS)`).
+/// `arg0` is a pointer to a 36-byte buffer.  Returns 0 or a negative error.
+/// This reaches the terminal's *real* line-discipline settings; `tcgetattr`
+/// used to answer from a hardcoded constant in `ioctl.rs`.
+pub const SYS_TTY_GET_TERMIOS: u64 = 541;
+/// Install a new console `struct termios` (`tcsetattr`/`ioctl(fd, TCSETS)`).
+/// `arg0` is a pointer to a 36-byte buffer.  Returns 0 or a negative error.
+/// This is what makes raw mode real; `tcsetattr` used to silently discard it.
+pub const SYS_TTY_SET_TERMIOS: u64 = 542;
+/// Read from the console through the line discipline (`read(2)` on a tty).
+/// `arg0` is the destination buffer, `arg1` its capacity.  Honours `ICANON`,
+/// `VEOF`, `VMIN`/`VTIME` and `ISIG` — unlike [`SYS_CONSOLE_READ_CHAR`],
+/// which returns one raw keyboard byte and so delivered `^C` as byte 0x03.
+/// Returns the byte count (0 at EOF) or a negative error.
+pub const SYS_TTY_READ: u64 = 543;
 
 // POSIX signal shim (522–526)
 pub const SYS_SIGNAL_REGISTER: u64 = 522;

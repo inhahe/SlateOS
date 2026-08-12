@@ -200,13 +200,22 @@ argument for the reimplementation.
 > state: `tcsetpgrp`/`tcgetpgrp` and `ioctl(TIOCSCTTY/TIOCNOTTY)` go through
 > native syscalls 537–540 to a per-session table (`pcb::CTTY_FG_PGRP`), the
 > Linux shim's `TIOCGPGRP`/`TIOCSPGRP` read and write that same state, and the
-> group `^C`/`^\` signal is a derived read of it (see design-decisions §113).
-> What remains is *enforcement*, not state: nothing raises SIGTTIN/SIGTTOU on a
-> background read/write, and a Ctrl-Z at the keyboard still reaches no job on
-> its own, because both need a real tty driver with a line discipline to
-> enforce at (the predicate, `pcb::ctty_is_background`, already exists — see
-> `todo.txt`). That is a kernel feature rather than a shell choice, so it does
-> not pre-empt this question in either direction.
+> group `^C`/`^\`/`^Z` signal is a derived read of it (see design-decisions
+> §113). That last part matters for *this* question specifically: **a `Ctrl-Z`
+> typed at the keyboard now stops the foreground job end to end** on the
+> Linux-ABI console read path — `tty::feed` generates `SIGTSTP` from `VSUSP`,
+> `deliver_console_signal` sends it to the session's real foreground group, and
+> `SIGTSTP`'s default action stops the process. Combined with
+> `SYS_SIGNAL_STOP_SELF`, that is the whole of what bash's `fg`/`bg`/`^Z` needs
+> from the kernel. (An earlier version of this note claimed `^Z` "still reaches
+> no job"; that was wrong — the generation and delivery were always there, only
+> the *target group* was broken, which is exactly what this change fixed.)
+> What genuinely remains is *enforcement*, not state: nothing raises
+> SIGTTIN/SIGTTOU on a background read/write, though the predicate
+> (`pcb::ctty_is_background`) exists — see `todo.txt`. Bash notices that gap
+> only in the narrow case of a background job reading the terminal, which
+> should hang rather than return data. That is a kernel feature rather than a
+> shell choice, so it does not pre-empt this question in either direction.
 
 **Options.**
 - **A — timeboxed spike, then decide.** Point `zig cc --target=x86_64-slateos` at

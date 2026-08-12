@@ -230,7 +230,7 @@ pub extern "C" fn close(fd: Fd) -> i32 {
 /// Dispatches to the correct kernel read syscall based on handle type:
 /// - File → `SYS_FS_READ`
 /// - Pipe → `SYS_PIPE_READ`
-/// - Console → `SYS_CONSOLE_READ_CHAR` (one byte at a time)
+/// - Console → `SYS_TTY_READ` (through the kernel line discipline)
 ///
 /// Returns number of bytes read, 0 at EOF, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
@@ -278,16 +278,20 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
             }
         }
         HandleKind::Console => {
-            // Console read: one character at a time via SYS_CONSOLE_READ_CHAR.
-            let ch = syscall0(SYS_CONSOLE_READ_CHAR);
-            if ch < 0 {
-                return errno::translate(ch) as SsizeT;
-            }
-            // SAFETY: buf is valid for at least `count` bytes (checked above).
-            unsafe {
-                *buf = ch as u8;
-            }
-            1
+            // Console read goes through the kernel's line discipline
+            // (SYS_TTY_READ), not the raw keyboard.  It therefore honours
+            // ICANON (line editing and VEOF), the VMIN/VTIME pair in raw
+            // mode, and ISIG — a ^C/^\/^Z generates SIGINT/SIGQUIT/SIGTSTP
+            // for the session's foreground process group instead of being
+            // handed to us as a data byte.
+            //
+            // This used to be SYS_CONSOLE_READ_CHAR, which reads a single
+            // raw byte straight from the keyboard driver.  Under it a
+            // native-ABI program got no line editing, no EOF on ^D, no
+            // effect from tcsetattr, and — worst — no terminal signals at
+            // all, while a Linux-ABI program on the same console got all
+            // four.  See design-decisions §114.
+            syscall2(SYS_TTY_READ, buf as u64, count as u64)
         }
         HandleKind::TcpStream => {
             if entry.handle == 0 {

@@ -97,6 +97,9 @@ use super::number::{
     SYS_TTY_SET_PGRP,
     SYS_TTY_ACQUIRE_CTTY,
     SYS_TTY_RELEASE_CTTY,
+    SYS_TTY_GET_TERMIOS,
+    SYS_TTY_SET_TERMIOS,
+    SYS_TTY_READ,
     SYS_SIGNAL_REGISTER,
     SYS_SIGNAL_SEND,
     SYS_SIGNAL_MASK,
@@ -470,14 +473,22 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PROCESS_SET_SID as usize] = Some(handlers::sys_process_set_sid);
     handlers[SYS_PROCESS_GET_SID as usize] = Some(handlers::sys_process_get_sid);
 
-    // Controlling terminal (537–540). The foreground process group belongs to
+    // Controlling terminal (537–543). The foreground process group belongs to
     // a *session*, so like 533–536 it has to live in the kernel: two members
-    // of one session must be able to disagree about it out loud. 539/540 are
+    // of one session must never be able to disagree about it. 539/540 are
     // the acquire/release pair behind `ioctl(TIOCSCTTY)`/`ioctl(TIOCNOTTY)`.
+    // 541–543 are the rest of the terminal that the native ABI could not
+    // previously reach at all: the real termios (libc answered `tcgetattr`
+    // from a constant and threw `tcsetattr` away) and a console read that
+    // goes through the line discipline instead of straight to the keyboard
+    // driver, so `^C` becomes a signal rather than byte 0x03.
     handlers[SYS_TTY_GET_PGRP as usize] = Some(handlers::sys_tty_get_pgrp);
     handlers[SYS_TTY_SET_PGRP as usize] = Some(handlers::sys_tty_set_pgrp);
     handlers[SYS_TTY_ACQUIRE_CTTY as usize] = Some(handlers::sys_tty_acquire_ctty);
     handlers[SYS_TTY_RELEASE_CTTY as usize] = Some(handlers::sys_tty_release_ctty);
+    handlers[SYS_TTY_GET_TERMIOS as usize] = Some(handlers::sys_tty_get_termios);
+    handlers[SYS_TTY_SET_TERMIOS as usize] = Some(handlers::sys_tty_set_termios);
+    handlers[SYS_TTY_READ as usize] = Some(handlers::sys_tty_read);
 
     // POSIX signal shim (522–526). SYS_SIGNAL_RETURN (524) is a
     // frame-modifying syscall handled specially in syscall_handler_inner,
@@ -813,6 +824,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_mprotect_native()?;
     test_dispatch_process_group_syscalls()?;
     test_dispatch_ctty_syscalls()?;
+    test_dispatch_termios_syscalls()?;
     test_dispatch_wait_process_group_filter()?;
     test_dispatch_signal_stop_self_rejects_non_stop_signals()?;
     test_dispatch_wait_status_reports_job_control()?;
@@ -1141,6 +1153,89 @@ fn test_dispatch_ctty_syscalls() -> KernelResult<()> {
     }
 
     serial_println!("[syscall]   Controlling terminal (537-540) registration: OK");
+    Ok(())
+}
+
+/// Verify the native termios syscalls (541/542) reach the *same* line
+/// discipline state the Linux shim's `TCGETS`/`TCSETS` do.
+///
+/// Unlike the ctty syscalls above, these need no process — the console's
+/// termios is global — so this test can check real semantics rather than
+/// only registration.
+///
+/// What it is guarding against is the bug that motivated the pair: libc's
+/// `tcsetattr` was a silent no-op and its `tcgetattr` answered from a
+/// hardcoded constant, so a native-ABI program could never observe the
+/// terminal's real mode and never change it.  A test that only checked
+/// "the syscall returns 0" would still have passed against that, which is
+/// why step (2) reads the value back through `tty::get_termios` — the
+/// accessor the line discipline itself uses on every keystroke.
+///
+/// The original termios is saved and restored: this runs during boot on the
+/// real console, and leaving it in raw mode would break every later
+/// interactive read.
+fn test_dispatch_termios_syscalls() -> KernelResult<()> {
+    use crate::tty;
+
+    fn fail(msg: &str) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: termios: {}", msg);
+        Err(KernelError::InternalError)
+    }
+
+    let saved = tty::get_termios();
+
+    // (1) A null pointer is InvalidArgument, not a fault or a silent success.
+    //     This also proves both numbers are registered: an unregistered
+    //     number reports NotSupported.
+    let null_args = SyscallArgs {
+        arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    for (nr, name) in [
+        (SYS_TTY_GET_TERMIOS, "SYS_TTY_GET_TERMIOS"),
+        (SYS_TTY_SET_TERMIOS, "SYS_TTY_SET_TERMIOS"),
+    ] {
+        if dispatch(nr, &null_args).value != i64::from(KernelError::InvalidArgument.code()) {
+            serial_println!("[syscall]     ({} gave an unexpected verdict)", name);
+            return fail("a null termios pointer should be InvalidArgument (unregistered?)");
+        }
+    }
+
+    // (2) A set must be *observable* through the line discipline's own
+    //     accessor. Clearing ICANON is the change that matters: it is what
+    //     "raw mode" means to every full-screen program, and it is exactly
+    //     what libc used to drop on the floor.
+    let mut raw = saved;
+    raw.c_lflag &= !(tty::lflag::ICANON | tty::lflag::ECHO);
+    tty::set_termios(raw);
+    let read_back = tty::get_termios();
+    if read_back.c_lflag & tty::lflag::ICANON != 0 {
+        tty::set_termios(saved);
+        return fail("ICANON survived a raw-mode set");
+    }
+    if read_back.c_lflag & tty::lflag::ECHO != 0 {
+        tty::set_termios(saved);
+        return fail("ECHO survived a raw-mode set");
+    }
+
+    // (3) The wire format both ABIs marshal must round-trip exactly. A
+    //     mismatch here is a silent ABI break with `posix`'s
+    //     `termios_to_wire`/`termios_from_wire`.
+    let wire = raw.to_bytes();
+    if wire.len() != tty::TERMIOS_BYTES {
+        tty::set_termios(saved);
+        return fail("termios wire size is not TERMIOS_BYTES");
+    }
+    if tty::Termios::from_bytes(&wire) != raw {
+        tty::set_termios(saved);
+        return fail("termios did not survive a to_bytes/from_bytes round trip");
+    }
+
+    tty::set_termios(saved);
+    if tty::get_termios() != saved {
+        return fail("failed to restore the original termios");
+    }
+
+    serial_println!("[syscall]   Native termios (541/542) reaches the line discipline: OK");
     Ok(())
 }
 

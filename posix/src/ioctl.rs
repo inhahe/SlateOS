@@ -9,16 +9,29 @@
 //! - **`FIONBIO`**: non-blocking mode flag — sets/clears `O_NONBLOCK` on
 //!   the fd (equivalent to `fcntl(fd, F_SETFL, ... | O_NONBLOCK)`).
 //! - **`FIONREAD`**: bytes available to read without blocking.
-//! - **`TCGETS`/`TCSETS`**: termios get/set — returns/accepts defaults for
-//!   Console fds.
+//! - **`TCGETS`/`TCSETS`**: termios get/set — real, via the kernel's
+//!   `SYS_TTY_GET_TERMIOS`/`SYS_TTY_SET_TERMIOS` (541/542).
 //! - All other requests return `ENOTTY`.
 //!
 //! ## Terminal Model
 //!
-//! Our console is a framebuffer with VT100 escape sequence support.
-//! There is no TTY device layer yet.  We fake enough termios to let
-//! programs like `less`, `vim`, and `readline` function.  The default
-//! termios reflects a cooked-mode terminal with echo enabled.
+//! Our console is a framebuffer with VT100 escape sequence support.  There
+//! is no TTY *device* layer (no `/dev/tty`, no PTYs) — but there is a real
+//! **line discipline**, in `kernel/src/tty.rs`, and this module talks to it.
+//!
+//! `TCGETS`/`TCSETS` used to be faked here: `tcgetattr` answered from the
+//! `default_termios()` constant below and `tcsetattr` accepted the call and
+//! discarded it, on the rationale that "our console has no configurable line
+//! discipline".  That was true when it was written and stopped being true
+//! when the kernel gained one, with the result that a native-ABI program
+//! asking for raw mode silently stayed in cooked mode while a Linux-ABI
+//! program on the same console really got raw mode.  Both now marshal the
+//! same 36-byte kernel `struct termios` to the same state.  See
+//! design-decisions §114.
+//!
+//! `default_termios()` survives as the *initial* state (cooked mode with
+//! echo) and as the host-build test double's starting value — not as the
+//! answer to every query.
 //!
 //! ## Terminal Control Functions
 //!
@@ -272,6 +285,174 @@ fn default_termios() -> Termios {
 }
 
 // ---------------------------------------------------------------------------
+// Kernel termios marshalling
+// ---------------------------------------------------------------------------
+
+/// Number of control characters in the *kernel* `struct termios`.
+///
+/// Deliberately smaller than [`NCCS`] (32): the kernel wire format for
+/// `TCGETS`/`TCSETS` is Linux's 36-byte kernel `struct termios`, which has 19
+/// control characters and no baud-rate fields, while the *user* `struct
+/// termios` that C programs see is musl's larger one.  glibc and musl both
+/// marshal between the two exactly like this, so a program's `struct termios`
+/// never has to match the kernel's.
+const KERNEL_NCCS: usize = 19;
+
+/// Serialised size of the kernel `struct termios`: four `u32` flag words, a
+/// one-byte `c_line`, and [`KERNEL_NCCS`] control bytes (4*4 + 1 + 19 = 36).
+/// Must equal `kernel/src/tty.rs`'s `TERMIOS_BYTES`.
+const KERNEL_TERMIOS_BYTES: usize = 4 * 4 + 1 + KERNEL_NCCS;
+
+/// Baud-rate field inside `c_cflag` (Linux `CBAUD`, including `CBAUDEX`).
+///
+/// The kernel wire format has no `c_ispeed`/`c_ospeed`; Linux encodes the
+/// speed in these bits of `c_cflag`, and that is where we carry it too.  Our
+/// console is a framebuffer with no line rate at all, so the value is purely
+/// something we must not lose across a get/set round trip.
+const CBAUD: u32 = 0o010017;
+
+/// Marshal a user `Termios` into the 36-byte kernel wire format.
+///
+/// The control-character array is truncated to the kernel's 19 entries (the
+/// user array's extra slots are unused padding in musl too), and the baud
+/// rate is folded from `c_ospeed` into `c_cflag`'s `CBAUD` bits, which is
+/// where the kernel struct keeps it.
+fn termios_to_wire(t: &Termios) -> [u8; KERNEL_TERMIOS_BYTES] {
+    let mut buf = [0u8; KERNEL_TERMIOS_BYTES];
+    let cflag = (t.c_cflag & !CBAUD) | (t.c_ospeed & CBAUD);
+    for (i, word) in [t.c_iflag, t.c_oflag, cflag, t.c_lflag].iter().enumerate() {
+        let bytes = word.to_le_bytes();
+        // `i` is 0..4 and each write is 4 bytes inside a 36-byte buffer, so
+        // the slice always exists; `get_mut` keeps this free of indexing
+        // panics regardless.
+        if let Some(slot) = buf.get_mut(i * 4..i * 4 + 4) {
+            slot.copy_from_slice(&bytes);
+        }
+    }
+    if let Some(slot) = buf.get_mut(16) {
+        *slot = t.c_line;
+    }
+    for i in 0..KERNEL_NCCS {
+        if let (Some(dst), Some(src)) = (buf.get_mut(17 + i), t.c_cc.get(i)) {
+            *dst = *src;
+        }
+    }
+    buf
+}
+
+/// Unmarshal the 36-byte kernel wire format into a user `Termios`.
+///
+/// Control characters beyond the kernel's 19 are zeroed, and both speeds are
+/// reported from `c_cflag`'s `CBAUD` bits — the inverse of [`termios_to_wire`],
+/// so `tcgetattr` after `tcsetattr` returns what was set.
+fn termios_from_wire(buf: &[u8; KERNEL_TERMIOS_BYTES]) -> Termios {
+    let word = |i: usize| -> u32 {
+        let mut b = [0u8; 4];
+        if let Some(src) = buf.get(i * 4..i * 4 + 4) {
+            b.copy_from_slice(src);
+        }
+        u32::from_le_bytes(b)
+    };
+    let c_cflag = word(2);
+    let mut c_cc = [0u8; NCCS];
+    for i in 0..KERNEL_NCCS {
+        if let (Some(dst), Some(src)) = (c_cc.get_mut(i), buf.get(17 + i)) {
+            *dst = *src;
+        }
+    }
+    Termios {
+        c_iflag: word(0),
+        c_oflag: word(1),
+        c_cflag,
+        c_lflag: word(3),
+        c_line: buf.get(16).copied().unwrap_or(0),
+        c_cc,
+        c_ispeed: c_cflag & CBAUD,
+        c_ospeed: c_cflag & CBAUD,
+    }
+}
+
+/// Read the console's termios from the kernel (`SYS_TTY_GET_TERMIOS`).
+///
+/// Returns `None` with `errno` already set (by `errno::translate`) on
+/// failure.  On host builds there is no kernel, so this answers from the
+/// per-thread [`host_termios`] double — which is what makes the marshalling
+/// above testable under `cargo test`.
+fn get_kernel_termios() -> Option<Termios> {
+    #[cfg(target_os = "none")]
+    {
+        let mut buf = [0u8; KERNEL_TERMIOS_BYTES];
+        let ret = crate::syscall::syscall1(
+            crate::syscall::SYS_TTY_GET_TERMIOS,
+            buf.as_mut_ptr() as u64,
+        );
+        if errno::translate(ret) < 0 {
+            return None;
+        }
+        Some(termios_from_wire(&buf))
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        Some(termios_from_wire(&host_termios::get()))
+    }
+}
+
+/// Install a console termios in the kernel (`SYS_TTY_SET_TERMIOS`).
+///
+/// Returns `false` with `errno` already set on failure.
+fn set_kernel_termios(t: &Termios) -> bool {
+    let buf = termios_to_wire(t);
+    #[cfg(target_os = "none")]
+    {
+        let ret =
+            crate::syscall::syscall1(crate::syscall::SYS_TTY_SET_TERMIOS, buf.as_ptr() as u64);
+        errno::translate(ret) >= 0
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        host_termios::set(buf);
+        true
+    }
+}
+
+// Host-build test double for the console termios.
+//
+// `cargo test` runs this crate against the host triple, where the raw
+// `syscall` instruction is gated off and every `syscallN` returns `-ENOSYS`.
+// There is no SlateOS kernel to hold the terminal state, so the host build
+// keeps the wire-format bytes in a per-thread cell — the same model as
+// `process.rs`'s `host_pg` double for process groups.
+//
+// This deliberately stores the *wire* form rather than a `Termios`, so a
+// host `tcsetattr`/`tcgetattr` round trip exercises both marshalling
+// directions exactly as the kernel path does.  What it cannot prove is that
+// the kernel agrees about the layout; that is the ring-3 fixture's job.
+#[cfg(not(target_os = "none"))]
+mod host_termios {
+    use super::{default_termios, termios_to_wire, KERNEL_TERMIOS_BYTES};
+    use core::cell::Cell;
+
+    std::thread_local! {
+        /// `None` until first use, then the last wire-format termios set.
+        static TERMIOS: Cell<Option<[u8; KERNEL_TERMIOS_BYTES]>> = const { Cell::new(None) };
+    }
+
+    /// The current termios, defaulting to cooked mode with echo — the state
+    /// the kernel's own console starts in.
+    pub(super) fn get() -> [u8; KERNEL_TERMIOS_BYTES] {
+        TERMIOS
+            .try_with(Cell::get)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| termios_to_wire(&default_termios()))
+    }
+
+    pub(super) fn set(v: [u8; KERNEL_TERMIOS_BYTES]) {
+        let _ = TERMIOS.try_with(|c| c.set(Some(v)));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ioctl()
 // ---------------------------------------------------------------------------
 
@@ -297,7 +478,7 @@ pub extern "C" fn ioctl(fd: i32, request: u64, arg: *mut u8) -> i32 {
         FIONBIO => handle_fionbio(fd, arg),
         FIONREAD => handle_fionread(entry.kind, entry.handle, arg),
         TCGETS => handle_tcgets(entry.kind, arg),
-        TCSETS | TCSETSW | TCSETSF => handle_tcsets(entry.kind),
+        TCSETS | TCSETSW | TCSETSF => handle_tcsets(entry.kind, arg),
         TIOCGPGRP => handle_tiocgpgrp(fd, entry.kind, arg),
         TIOCSPGRP => handle_tiocspgrp(fd, entry.kind, arg),
         TIOCSCTTY => handle_tiocsctty(entry.kind),
@@ -473,6 +654,12 @@ fn handle_fionread(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
 }
 
 /// TCGETS — get termios attributes.
+///
+/// Reads the kernel's real line-discipline state via `SYS_TTY_GET_TERMIOS`
+/// and unmarshals the 36-byte kernel wire format into our (larger) user
+/// `Termios`.  This used to return `default_termios()` unconditionally, so
+/// it reported cooked-mode-with-echo even after a `tcsetattr` to raw mode,
+/// and disagreed with what a Linux-ABI program on the same console saw.
 fn handle_tcgets(kind: HandleKind, arg: *mut u8) -> i32 {
     if kind != HandleKind::Console {
         errno::set_errno(errno::ENOTTY);
@@ -482,7 +669,10 @@ fn handle_tcgets(kind: HandleKind, arg: *mut u8) -> i32 {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    let t = default_termios();
+    let Some(t) = get_kernel_termios() else {
+        // errno already set by the translation of the kernel's error.
+        return -1;
+    };
     // SAFETY: Caller must provide a buffer large enough for Termios.
     unsafe {
         core::ptr::write_unaligned(arg.cast::<Termios>(), t);
@@ -492,17 +682,37 @@ fn handle_tcgets(kind: HandleKind, arg: *mut u8) -> i32 {
 
 /// TCSETS / TCSETSW / TCSETSF — set termios attributes.
 ///
-/// Accepted as a no-op for Console fds.  We don't actually change
-/// terminal behaviour (e.g., switching to raw mode) because our
-/// console has no configurable line discipline.  Programs that set
-/// raw mode will work via VT100 escape sequences instead.
-fn handle_tcsets(kind: HandleKind) -> i32 {
+/// Marshals our user `Termios` into the 36-byte kernel wire format and
+/// installs it via `SYS_TTY_SET_TERMIOS`, so raw mode, `ECHO` and the
+/// control characters take real effect on the next console read.
+///
+/// All three requests behave identically: `TCSETSW` waits for queued output
+/// to drain and `TCSETSF` additionally flushes pending input, and we have
+/// neither an output queue nor a kernel-side input queue to act on.  The
+/// Linux shim collapses the same three for the same reason.
+///
+/// This was previously accepted and thrown away, on the rationale that "our
+/// console has no configurable line discipline".  That stopped being true
+/// when `kernel/src/tty.rs` gained one; the comment outlived the fact, and
+/// every native-ABI program that asked for raw mode silently got cooked
+/// mode instead.
+fn handle_tcsets(kind: HandleKind, arg: *mut u8) -> i32 {
     if kind != HandleKind::Console {
         errno::set_errno(errno::ENOTTY);
         return -1;
     }
-    // Accept silently.
-    0
+    if arg.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: Caller must provide a buffer large enough for Termios.
+    let t = unsafe { core::ptr::read_unaligned(arg.cast::<Termios>()) };
+    if set_kernel_termios(&t) {
+        0
+    } else {
+        // errno already set by the translation of the kernel's error.
+        -1
+    }
 }
 
 /// TIOCGPGRP — get the foreground process group of a terminal.
@@ -1025,6 +1235,101 @@ mod tests {
         // c_line(1) + c_cc(32) + padding(3) + c_ispeed(4) + c_ospeed(4) = 60.
         let size = core::mem::size_of::<Termios>();
         assert_eq!(size, 60, "Termios size mismatch");
+    }
+
+    // -- Kernel termios marshalling --
+    //
+    // These cover the *translation* between musl's 60-byte user `struct
+    // termios` and the kernel's 36-byte wire format.  They cannot prove the
+    // kernel agrees about the layout — the host build has no kernel — which
+    // is why `KERNEL_TERMIOS_BYTES` is also asserted against the kernel's own
+    // constant in the ring-3 fixture.
+
+    #[test]
+    fn test_kernel_termios_wire_size() {
+        // Must equal kernel/src/tty.rs's TERMIOS_BYTES (4*4 + 1 + 19).
+        assert_eq!(KERNEL_TERMIOS_BYTES, 36);
+        assert_eq!(KERNEL_NCCS, 19);
+        // The user struct is deliberately the larger of the two.
+        assert!(NCCS > KERNEL_NCCS);
+    }
+
+    #[test]
+    fn test_termios_wire_roundtrip() {
+        let t = default_termios();
+        let back = termios_from_wire(&termios_to_wire(&t));
+        assert_eq!(back.c_iflag, t.c_iflag);
+        assert_eq!(back.c_oflag, t.c_oflag);
+        assert_eq!(back.c_lflag, t.c_lflag);
+        assert_eq!(back.c_line, t.c_line);
+        // Every control character the kernel carries survives.
+        for i in 0..KERNEL_NCCS {
+            assert_eq!(back.c_cc.get(i), t.c_cc.get(i), "c_cc[{i}] lost");
+        }
+        // The baud rate round-trips through c_cflag's CBAUD bits.
+        assert_eq!(back.c_ospeed, B38400);
+        assert_eq!(back.c_ispeed, B38400);
+        assert_eq!(back.c_cflag & !CBAUD, t.c_cflag & !CBAUD);
+    }
+
+    #[test]
+    fn test_termios_wire_field_offsets() {
+        // Pin the wire layout: four LE u32 flag words, c_line, then c_cc.
+        // A mismatch here is a silent ABI break with the kernel.
+        let mut t = default_termios();
+        t.c_iflag = 0x1111_1111;
+        t.c_oflag = 0x2222_2222;
+        // Deliberately holds no CBAUD bits of its own, so the only change
+        // to c_cflag is the speed folded in below.  That keeps this an
+        // offset test: if the pattern carried CBAUD bits, a failure here
+        // could equally mean "the fields moved" or "the folding is wrong".
+        t.c_cflag = 0x3333_2320;
+        t.c_lflag = 0x4444_4444;
+        t.c_line = 7;
+        t.c_ospeed = B38400;
+        let w = termios_to_wire(&t);
+        assert_eq!(&w[0..4], &0x1111_1111u32.to_le_bytes());
+        assert_eq!(&w[4..8], &0x2222_2222u32.to_le_bytes());
+        // The speed rides in c_cflag's low bits — the kernel wire format has
+        // no c_ospeed field to put it in.
+        assert_eq!(&w[8..12], &(0x3333_2320u32 | B38400).to_le_bytes());
+        assert_eq!(&w[12..16], &0x4444_4444u32.to_le_bytes());
+        assert_eq!(w[16], 7);
+        // c_cc starts at byte 17 — VINTR is index 0 and is Ctrl-C.
+        assert_eq!(w[17 + VINTR], 0x03);
+        assert_eq!(w[17 + VSUSP], 0x1A);
+    }
+
+    #[test]
+    fn test_termios_wire_drops_extra_cc_slots() {
+        // The user array's slots past the kernel's 19 have nowhere to go;
+        // they must be dropped silently rather than corrupting the tail.
+        let mut t = default_termios();
+        if let Some(slot) = t.c_cc.get_mut(KERNEL_NCCS) {
+            *slot = 0xAB;
+        }
+        let w = termios_to_wire(&t);
+        assert_eq!(w.len(), KERNEL_TERMIOS_BYTES);
+        let back = termios_from_wire(&w);
+        assert_eq!(back.c_cc.get(KERNEL_NCCS), Some(&0));
+    }
+
+    #[test]
+    fn test_tcsetattr_tcgetattr_roundtrip_raw_mode() {
+        // The behaviour that was broken: entering raw mode has to be
+        // *observable*.  tcsetattr used to be a silent no-op and tcgetattr
+        // used to answer from a constant, so this pair could never fail.
+        let mut raw = default_termios();
+        raw.c_lflag &= !(ICANON | ECHO);
+        assert!(set_kernel_termios(&raw), "set_kernel_termios failed");
+        let got = get_kernel_termios().expect("get_kernel_termios failed");
+        assert_eq!(got.c_lflag & ICANON, 0, "ICANON survived a raw-mode set");
+        assert_eq!(got.c_lflag & ECHO, 0, "ECHO survived a raw-mode set");
+        // And going back to cooked mode is equally visible.
+        assert!(set_kernel_termios(&default_termios()));
+        let cooked = get_kernel_termios().expect("get_kernel_termios failed");
+        assert_ne!(cooked.c_lflag & ICANON, 0);
+        assert_ne!(cooked.c_lflag & ECHO, 0);
     }
 
     // -- Default terminal dimensions --

@@ -186,10 +186,22 @@ argument for the reimplementation.
 > kernel had `TaskState::Suspended`, `JobControlEvent`, `stop_process_for_signal`
 > and `continue_process` all along; what was missing was a way for a process to
 > ask for its *own* stop. That is now `SYS_SIGNAL_STOP_SELF` (1062), and
-> `posix`'s `Stop` default action goes through it. Process groups (533–536) and
-> a real `killpg` also exist. So job control is no longer an argument for either
-> side, and neither is anything else on the feasibility axis: **Q41 is now purely
-> the scope/ownership call in its closing line.**
+> `posix`'s `Stop` default action goes through it. The parent half followed the
+> same day — `waitpid`'s `WUNTRACED`/`WCONTINUED` are honoured through
+> `SYS_PROCESS_WAIT_STATUS` (1063) — and the loop is now proven end to end in
+> ring 3 by `services/ctest-jobctl`: a child stops itself with SIGTSTP, its
+> parent's *blocking* `waitpid` reports `WIFSTOPPED`/`WSTOPSIG == SIGTSTP`, and
+> `kill(child, SIGCONT)` resumes it into a `WIFCONTINUED` report. Process groups
+> (533–536) and a real `killpg` also exist. So job control is no longer an
+> argument for either side, and neither is anything else on the feasibility
+> axis: **Q41 is now purely the scope/ownership call in its closing line.**
+>
+> One *shell-facing* piece is still open, and it constrains osh and bash
+> identically: there is no **controlling terminal** — no `tcsetpgrp`/`tcgetpgrp`,
+> no foreground process group — so nothing enforces SIGTTIN/SIGTTOU and a Ctrl-Z
+> at the keyboard reaches no job on its own. That is a kernel/libc feature
+> rather than a shell choice, so building it does not pre-empt this question in
+> either direction.
 
 **Options.**
 - **A — timeboxed spike, then decide.** Point `zig cc --target=x86_64-slateos` at

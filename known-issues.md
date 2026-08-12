@@ -121,11 +121,15 @@ already has, rather than emulating them in userspace:
 
 Two things worth knowing about the result:
 
-* **Sign extension.** A negative `pid_t` must be widened as
-  `i64::from(pid) as u64`, never `pid as u64` — zero-extending would turn
-  `kill(-7)` into a send to PID 4294967289. `posix::signal::sign_extend_pid`
-  exists solely to make that one conversion impossible to get wrong, and is
-  pinned by `test_sign_extend_pid_keeps_negative_targets_negative`.
+* **Sign extension.** A negative `pid_t` has to reach the kernel
+  sign-extended: `kill(-7)` must arrive as `0xFFFF_FFFF_FFFF_FFF9`, since
+  `0x0000_0000_FFFF_FFF9` is a huge *positive* PID and the send would quietly
+  become `ESRCH`. Rust's `as` already sign-extends from a signed type to a
+  wider one, so `posix::signal::sign_extend_pid` is not repairing a defect —
+  it names a requirement that is invisible at the call site and one careless
+  edit (an intermediate `as u32`, a `u32` argument slot) away from being lost
+  silently. Pinned by
+  `test_sign_extend_pid_keeps_negative_targets_negative`.
 * **`CAP_KILL` now applies to group sends.** It previously did not, but only
   because the group forms could not signal anything at all, so the gate was
   unreachable dead weight. Now that a group send really reaches other

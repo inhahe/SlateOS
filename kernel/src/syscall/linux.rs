@@ -45324,10 +45324,12 @@ fn sys_prlimit64(args: &SyscallArgs) -> SyscallResult {
 /// Linux semantics:
 ///   - `pid > 0`: wait for that specific child.
 ///   - `pid == -1`: wait for any child.
-///   - `pid == 0`: wait for any child in the caller's process group
-///     (we have no process groups; treated as `-1`).
-///   - `pid < -1`: wait for any child in process group `-pid` (treated
-///     as `-1`).
+///   - `pid == 0`: wait for any child in the caller's process group.
+///   - `pid < -1`: wait for any child in process group `-pid`.
+///
+/// Both group forms are filtered for real against the process table (see
+/// `pgid_filter` below); only in kernel-context self-tests, where the caller
+/// has no group record, does `pid == 0` degrade to wait-any.
 ///
 /// `wstatus`: optional `*mut i32` receiving the encoded status.  Per
 /// glibc's `<sys/wait.h>` macros:

@@ -7098,6 +7098,153 @@ pub fn self_test_cfortify() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 end-to-end test of **process groups and sessions through our own
+/// libc** — `getpgid`/`setpgid`/`getpgrp`/`setpgrp`/`getsid`/`setsid` in
+/// `posix/src/process.rs` and the non-positive `kill`/`killpg` forms in
+/// `posix/src/signal.rs`.
+///
+/// This fixture exists because neither of the other two test layers can see
+/// the bug it guards against.  `AbiMode` is per-process, so a program is
+/// Native *or* Linux, never both: for a long time the kernel's real process
+/// groups were reachable only through the Linux syscall shim, and a program
+/// linked against our libc silently got a userspace `static mut PGID` plus
+/// `ENOSYS` for every `kill(pid <= 0)`.  See known-issues.md,
+/// TD-POSIX-PROCESS-GROUPS-ARE-FAKE-FOR-NATIVE-ABI-PROGRAMS.
+///
+/// * The **host suite** cannot see it: the syscall arm of every one of these
+///   wrappers is `#[cfg(target_os = "none")]`, so on the host triple `cargo
+///   test` exercises a local test double (`host_pg`) and proves only the
+///   argument handling.
+/// * The **kernel dispatch self-test** cannot see it either
+///   (`syscall::dispatch::test_dispatch_process_group_syscalls`): it calls the
+///   handlers directly and never goes through libc, so it proves the kernel
+///   side and nothing about whether libc is wired to it.
+///
+/// Only a native-ABI binary in ring 3 joins the two halves, which is exactly
+/// the seam the bug lived in.
+///
+/// The load-bearing check is 55: the fixture forks, moves the child into a new
+/// group with `setpgid(child, child)`, and then — *as the parent* — asks
+/// `getpgid(child)` and gets the child's new group back.  Two processes
+/// agreeing about a third process's group is precisely what a userspace
+/// `static mut` can never do, so a pass there proves the state is genuinely
+/// shared rather than merely self-consistent.  Checks 71-72 then confirm the
+/// group was backed by real membership: once the child is reaped, probing its
+/// group is `ESRCH`.
+///
+/// Only `sig == 0` existence probes are sent at live groups, so nothing the
+/// fixture creates is actually signalled and it needs no capabilities.  The
+/// child is kept alive by blocking on a pipe the parent closes when done,
+/// rather than by sleeping — a sleep would race in both directions (too short
+/// and the child is a zombie before it can be measured, too long and the yield
+/// budget below expires).
+///
+/// Exit code 42 means every check passed; any other code names the failing
+/// step (see the FAIL diagnostic below and `services/ctest-pgroup/main.c`).
+pub fn self_test_cpgroup() -> KernelResult<()> {
+    let ctest_elf = match load_test_elf("ctest-pgroup") {
+        Some(v) => v,
+        None => {
+            serial_println!(
+                "[spawn] SKIP ctest-pgroup: fixture absent on /mnt/tests (lean build)"
+            );
+            return Ok(());
+        }
+    };
+
+    serial_println!(
+        "[spawn] Running process groups (ring 3, C, native ABI) integration test ({} bytes \
+         ELF)...",
+        ctest_elf.len()
+    );
+
+    /// The fixture returns this only after all of its checks pass.
+    const EXPECTED: i32 = 42;
+
+    let argv: &[&[u8]] = &[b"ctest-pgroup"];
+    let envp: &[&[u8]] = &[];
+    // No capabilities: the fixture touches no files, and every group send it
+    // makes is a `sig == 0` probe, which is not behind the CAP_KILL gate.
+    // Spawning with `parent: 0` is what makes the expectations exact — the
+    // fixture is then its own session and group leader.
+    let options = SpawnOptions {
+        name: "ctest-pgroup",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&ctest_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: ctest-pgroup spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // The fixture forks one child, which blocks on a pipe read until the
+    // parent closes the write end, and then reaps it — so the parent's
+    // progress depends on the child being scheduled twice. Headroom matched to
+    // the other fork-and-reap fixtures.
+    let mut became_zombie = false;
+    for _ in 0..6000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-pgroup (ring 3) — expected Zombie, got {:?}. The fixture only \
+             blocks in two places, so a non-zombie state is one of them: the child waiting on a \
+             pipe read that never saw EOF after the parent closed the write end, or the parent \
+             stuck in waitpid() for a child that therefore never exited",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECTED) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-pgroup (ring 3) — reached Zombie but exit code was {:?}, \
+             expected {}. Code bands: 10-15 = the process's own pgid/sid (all three spellings \
+             must agree with the kernel), 20-30 = errors that are the kernel's policy and not a \
+             userspace guess (a session leader cannot be moved or start a session — the old \
+             userspace stub returned success for both), 31-40 = kill()/killpg() with a \
+             non-positive pid reaching the kernel at all (every one of these was ENOSYS before \
+             the fix; 37-38 pin kill(-1) as deliberately unmodelled, 39-40 pin that the signal \
+             number is validated before the target is classified), 50-63 = the parent/child \
+             case, of which 55 is the load-bearing one: the parent sees the child's new group \
+             after setpgid(child, child), which a userspace static could never report, 70-74 = \
+             the group was backed by real membership, so it is ESRCH once the child is reaped. \
+             See services/ctest-pgroup/main.c",
+            exit_code, EXPECTED
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   process groups (ring 3, native ABI: a program on our own libc reaches the \
+         kernel's real process-group state — a parent moves its child into a new group and both \
+         the parent's getpgid(child) and killpg(child) observe it): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test of the sysroot's **scanf trampolines**.
 ///
 /// `sscanf`, `scanf` and `fscanf` are assembly trampolines — `va_trampoline!`

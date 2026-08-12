@@ -1661,6 +1661,18 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("WARNING: scanf (ring 3) self-test failed: {:?}", e);
     }
 
+    // Process groups through our own libc. AbiMode is per-process, so these
+    // wrappers are the only route a native-ABI program has to the kernel's
+    // process-group state — and their syscall arms exist only on this target,
+    // so `cargo test` proves the argument handling while the dispatch
+    // self-test proves the kernel side, and neither proves the two are
+    // connected. The fixture forks, moves the child into a new group, and
+    // checks that the *parent* can see it: the seam the whole bug lived in.
+    // Bounded yield loop; can never hang the boot.
+    if let Err(e) = proc::spawn::self_test_cpgroup() {
+        serial_println!("WARNING: process groups (ring 3) self-test failed: {:?}", e);
+    }
+
     // Ring-3 end-to-end test of fastpy pure-mode FILE I/O on-target: a native
     // fastpy binary opens/writes/closes then reopens/reads a file on the /tmp
     // memfs and exits with the byte count read back, proving the full path

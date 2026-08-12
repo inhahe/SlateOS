@@ -806,13 +806,21 @@ fn kill_target(pid: i32, self_pid: i32) -> KillTarget {
 
 /// Widen a `kill(2)` target PID into the `SYS_SIGNAL_SEND` argument slot.
 ///
-/// The kernel reads `arg0` back as a **signed** 64-bit value so it can
-/// tell `kill(pid)` from `kill(-pgid)`, which means a negative target must
-/// be *sign*-extended, not zero-extended: `-5i32 as u64` is
-/// `0xFFFF_FFFF_FFFF_FFFB` only if the widening goes through `i64` first.
-/// Zero-extending would hand the kernel `0x0000_0000_FFFF_FFFB`, a huge
-/// positive PID, and the group send would silently become an ESRCH on a
-/// process that does not exist.
+/// The kernel reads `arg0` back as a **signed** 64-bit value so it can tell
+/// `kill(pid)` from `kill(-pgid)`, so a negative target has to arrive
+/// *sign*-extended: `-5` must be `0xFFFF_FFFF_FFFF_FFFB`, not
+/// `0x0000_0000_FFFF_FFFB` — the latter is a huge positive PID, and the send
+/// would silently become an `ESRCH` against a process that does not exist.
+///
+/// Rust's `as` already does this correctly (a cast from a signed type to a
+/// wider one sign-extends), so this is **not** repairing a defect in the
+/// plain `pid as u64` it replaces. It exists because that correctness is
+/// invisible at the call site and is one careless edit away from being lost:
+/// an intermediate `as u32`, or a `u32` argument slot, zero-extends and
+/// produces exactly the failure above with no diagnostic at all. Naming the
+/// requirement and giving it a test
+/// (`test_sign_extend_pid_keeps_negative_targets_negative`) turns a language
+/// rule a reader has to recall into one the suite enforces.
 #[allow(clippy::cast_sign_loss)]
 fn sign_extend_pid(pid: i32) -> u64 {
     i64::from(pid) as u64
@@ -2737,6 +2745,12 @@ mod tests {
         // as a signed value.  Zero-extending a negative pid would turn
         // kill(-7, sig) into a send to PID 4294967289 — a silent ESRCH on a
         // process that does not exist, rather than a group signal.
+        //
+        // Rust's `as` sign-extends from a signed type today, so these
+        // assertions pass for `pid as u64` too.  That is the point: the
+        // property is currently free, invisible, and one careless `as u32`
+        // away from being lost with no other symptom, so it is asserted
+        // here rather than left to a reader's recall of the cast rules.
         assert_eq!(sign_extend_pid(-7), 0xFFFF_FFFF_FFFF_FFF9);
         assert_eq!(sign_extend_pid(-1), u64::MAX);
         assert_eq!(sign_extend_pid(i32::MIN), 0xFFFF_FFFF_8000_0000);

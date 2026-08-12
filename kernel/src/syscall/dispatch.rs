@@ -896,9 +896,10 @@ fn test_dispatch_process_group_syscalls() -> KernelResult<()> {
     let mk = |arg0: u64, arg1: u64| SyscallArgs {
         arg0, arg1, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
     };
-    // Sign-extend a negative group target into the `arg0` slot exactly the
-    // way userspace must (`i64::from(pid) as u64`). Zero-extending a 32-bit
-    // pid here would turn `kill(-7)` into a send to PID 4294967289.
+    // Negative group targets travel in the `arg0` slot as their two's
+    // complement bit pattern, which is what the handler reads back as i64.
+    // A zero-extended 32-bit pid would arrive as a huge *positive* PID
+    // instead, so `kill(-7)` would become an ESRCH against PID 4294967289.
     #[allow(clippy::cast_sign_loss)]
     let neg = |pid: i64| -> u64 { -pid as u64 };
 

@@ -7807,13 +7807,49 @@ This is the same anti-drift move as §113's `hangup_released_ctty`.
   §113 aiming them at the right group, terminal job control now works from
   *either* ABI.
 - **`sys_tty_read` is the first native syscall to emit a restart sentinel.**
-  This turned out to need no new machinery: `entry.rs` applies
+  This needed no new *machinery*: `entry.rs` applies
   `resolve_syscall_restart` to both ABIs' dispatch results, so a `^C` meant
   for another process transparently restarts the read, and a `^C` that runs
   a native handler becomes `EINTR` (native handlers have no `SA_RESTART`, so
   restarting would hide the interruption from a program that asked to see
   it). The stale "no native syscall emits a sentinel today" comment in
-  `deliver_pending_signal` was corrected.
+  `deliver_pending_signal` was corrected. But it did expose two latent
+  *encoding* bugs, both unreachable until a native syscall could be
+  interrupted:
+  - **The native delivery path was folding sentinels into Linux's `EINTR`.**
+    `deliver_pending_signal`'s native branch called what was then
+    `leaked_sentinel_to_eintr`, which substitutes Linux's `EINTR` = 4, i.e.
+    a return value of `-4`. A native process reads its return value as a
+    `KernelError` code, and `-4` there is `WouldBlock`/`EAGAIN`. An
+    interrupted read would have reported "try again" — the one errno a
+    caller most needs to distinguish from "interrupted". Fixed to
+    `KernelError::Interrupted` (`-8`), and the helper renamed
+    `leaked_sentinel_to_linux_eintr` so the ABI assumption is in the name
+    rather than in a comment. The `restart` module stays inside `linux.rs`:
+    everything in it *except* that one function is ABI-neutral, so moving
+    the module wholesale would be as wrong as leaving it unlabelled.
+  - **`posix`'s `errno::native` table was missing `INTERRUPTED` (-8) and
+    `DEADLOCK` (-7).** Both fell through to `_ => EIO`, so even after the
+    kernel returned the right code libc would have told the program the
+    disk had failed. Added, with a test that pins the numeric collision
+    (`-EINTR` is bit-identical to `native::WOULD_BLOCK`) so a future
+    refactor that merges the two encoding paths fails loudly.
+- **Verification had to reach ring 3 to mean anything.** A set/get round
+  trip cannot prove the two structs agree — the kernel stores and returns
+  whatever it is handed, so *mutually wrong* marshalling round-trips
+  perfectly. The proof is `ctest-ctty` checks 90–116, which read
+  kernel-authored values (Linux's `INIT_C_CC`, `B38400`) at *musl-computed*
+  indices, then set raw mode and confirm the untouched fields did not
+  shift. Host `cargo test` sees only the marshalling (the syscall arms are
+  `#[cfg(target_os = "none")]`) and the kernel self-test calls the handlers
+  directly, never through libc; only ring 3 joins the two halves. A first
+  boot run appeared to pass while actually executing the *previous* fixture
+  ELF — the full chain (sysroot → fixture build → rootfs image → boot) has
+  to be re-run or the test silently proves nothing.
+- **`default_termios()` is now `#[cfg(not(target_os = "none"))]`.** It is
+  host-test scaffolding, and compiling it out of the bare-metal build is
+  what guarantees no target-side path can quietly start answering from a
+  constant again — which is the exact failure §114 exists to remove.
 - The two wire formats stay distinct on purpose: musl's user `struct
   termios` is 60 bytes (`NCCS` 32, plus `c_ispeed`/`c_ospeed`) and the
   kernel's is 36 (`NCCS` 19, baud carried in `c_cflag`'s `CBAUD` bits).

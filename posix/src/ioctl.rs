@@ -29,9 +29,13 @@
 //! same 36-byte kernel `struct termios` to the same state.  See
 //! design-decisions §114.
 //!
-//! `default_termios()` survives as the *initial* state (cooked mode with
-//! echo) and as the host-build test double's starting value — not as the
-//! answer to every query.
+//! `default_termios()` is therefore **host-only** now.  On the bare-metal
+//! target the initial state is the kernel's `tty::Termios::sane_default()`
+//! and libc never invents one; what is left here is the host test double's
+//! seed and, more usefully, an independently-written copy of the same
+//! constants that the tests below pin field by field — so a drift between
+//! our idea of a sane terminal and the kernel's shows up as a test failure
+//! rather than as a program that mysteriously starts in the wrong mode.
 //!
 //! ## Terminal Control Functions
 //!
@@ -236,7 +240,19 @@ const DEFAULT_WINSIZE: Winsize = Winsize {
 /// Build a default termios reflecting cooked mode with echo.
 ///
 /// This matches a typical Linux terminal initial state: canonical
-/// mode, echo enabled, CR→NL translation, common control characters.
+/// mode, echo enabled, CR→NL translation, common control characters —
+/// the same values Linux's `INIT_C_CC` / `tty_std_termios` carry, which is
+/// also what `kernel/src/tty.rs`'s `Termios::sane_default()` installs.
+///
+/// **Host-only.**  It used to be the answer `tcgetattr` gave on the real
+/// target, which was the bug §114 fixed: the console's mode is the
+/// kernel's, and libc must ask (`SYS_TTY_GET_TERMIOS`) rather than assume.
+/// What remains is the host test double's seed plus an independently
+/// written copy of those constants that the tests pin field by field, so a
+/// drift from the kernel's table surfaces as a test failure.  Compiling it
+/// out of the bare-metal build is deliberate: it guarantees no target-side
+/// path can quietly start answering from a constant again.
+#[cfg(not(target_os = "none"))]
 fn default_termios() -> Termios {
     let mut cc = [0u8; NCCS];
 

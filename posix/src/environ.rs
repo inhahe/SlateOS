@@ -361,6 +361,49 @@ pub unsafe extern "C" fn secure_getenv(name: *const u8) -> *const u8 {
     unsafe { getenv(name) }
 }
 
+/// Look up an environment variable from Rust, by name bytes.
+///
+/// The safe counterpart to [`getenv`] for callers inside this crate: it takes
+/// the name as a byte slice (no NUL terminator needed, and no temporary
+/// buffer) and hands back the value as a slice rather than a bare pointer, so
+/// the caller never has to reconstruct the length with `strlen`.
+///
+/// The returned slice borrows the environment store directly and carries the
+/// same lifetime contract as C's `getenv`: a later `setenv`/`putenv`/`unsetenv`
+/// touching this variable may overwrite the bytes. Copy the value out if you
+/// need to hold it across such a call.
+///
+/// Returns `None` when the variable is unset; note that a variable set to the
+/// empty string returns `Some(&[])`, which is a different thing — `TZ=""`
+/// means "UTC" while an unset `TZ` means "use the system default".
+#[must_use]
+pub fn getenv_bytes(name: &[u8]) -> Option<&'static [u8]> {
+    if name.is_empty() {
+        return None;
+    }
+    // SAFETY: `ENV_STORE` is a process-global whose address is stable for the
+    // lifetime of the program. POSIX specifies the environment functions as
+    // not thread-safe, so a concurrent `setenv` is already the caller's
+    // problem; this read is no weaker than `getenv`'s own.
+    let store = unsafe { core::ptr::addr_of!(ENV_STORE).as_ref() }?;
+    for entry in store.iter() {
+        // A zero first byte marks an inactive slot.
+        if entry.first().copied().unwrap_or(0) == 0 {
+            continue;
+        }
+        // The entry must read `name=` — matching a prefix without checking the
+        // `=` would let `PATH` be answered by `PATHEXT`.
+        if entry.get(..name.len()) != Some(name) || entry.get(name.len()) != Some(&b'=') {
+            continue;
+        }
+        let value_start = name.len().saturating_add(1);
+        let rest = entry.get(value_start..)?;
+        let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
+        return rest.get(..end);
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------

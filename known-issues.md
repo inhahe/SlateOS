@@ -43,7 +43,16 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
-### B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT. 26 Path-Z self-test rungs (every `tcc` rung, Parts 35–60) have been no-opping on every boot while the boot test reported PASSED — 2026-08-13 — OPEN
+### B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT. 26 Path-Z self-test rungs (every `tcc` rung, Parts 35–60) have been no-opping on every boot while the boot test reported PASSED — 2026-08-13 — ✅ FIXED 2026-08-13 (`kernel/src/proc/spawn.rs`, `kernel/src/main.rs`, `scripts/boot-test.sh`)
+
+**Verified fixed 2026-08-13.** `rootfs.ext4` was rebuilt with tinycc present and a
+full boot test confirms all 26 tcc rungs now run and pass under CR4.SMAP
+(compile → glibc-link → ld.so → ring 3, including signal, setjmp, varargs, SSE,
+struct-by-value, x87 long double, TLS and ctor/dtor), ending in
+`[spawn] Path-Z prerequisites: complete — 0 rungs skipped`. A boot that *does*
+lose coverage now prints one `SKIP:` line per rung naming the missing file, a
+nonzero summary count, and a `=== PATH-Z COVERAGE INCOMPLETE ===` block from
+`boot-test.sh` — so the silence that caused this can no longer recur.
 
 **Symptom.** `rootfs.ext4` contains no TinyCC:
 

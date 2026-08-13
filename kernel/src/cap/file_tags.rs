@@ -33,12 +33,12 @@
 //! Safe to acquire `GROUPS` lock *after* `FILE_TAGS` if needed
 //! (but currently we release `FILE_TAGS` before checking membership).
 
-use alloc::string::String;
 use alloc::vec::Vec;
 use crate::sync::PreemptSpinMutex as Mutex;
 
 use super::groups::{self, CapGroupId};
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -83,9 +83,22 @@ impl FileTag {
         }
     }
 
-    /// Get the path as a string slice.
-    fn path_str(&self) -> &str {
-        core::str::from_utf8(&self.path[..self.path_len]).unwrap_or("")
+    /// The tagged path, as bytes.
+    ///
+    /// This used to be a `fn path_str(&self) -> &str` that did
+    /// `from_utf8(..).unwrap_or("")`. That was a **fail-open** access-control
+    /// bug waiting for the first non-UTF-8 tagged path: the lookup key
+    /// (`normalize_path` of a caller-supplied path) always begins with `/`, so
+    /// it could never equal the `""` that a non-decodable entry degraded to.
+    /// The tag would sit in the registry, `count()` would report it, and
+    /// [`effective_tags`] would never find it — every access to the protected
+    /// path would be permitted. Comparing bytes has no such failure mode.
+    fn path(&self) -> &Path {
+        Path::new(
+            self.path
+                .get(..self.path_len)
+                .unwrap_or(&[]),
+        )
     }
 }
 
@@ -107,8 +120,8 @@ static FILE_TAGS: Mutex<[FileTag; MAX_TAGGED_PATHS]> = Mutex::new({
 ///
 /// Adding the same group to a path that already has it is a no-op (success).
 /// The group must exist in the groups registry.
-pub fn tag_path(path: &str, group_id: CapGroupId) -> KernelResult<()> {
-    let normalized = normalize_path(path);
+pub fn tag_path(path: impl AsRef<Path>, group_id: CapGroupId) -> KernelResult<()> {
+    let normalized = normalize_path(path.as_ref());
     if normalized.is_empty() || normalized.len() > MAX_PATH_LEN {
         return Err(KernelError::InvalidArgument);
     }
@@ -122,7 +135,7 @@ pub fn tag_path(path: &str, group_id: CapGroupId) -> KernelResult<()> {
 
     // Check if path already has an entry.
     for entry in tags.iter_mut() {
-        if entry.active && entry.path_str() == normalized {
+        if entry.active && entry.path() == normalized.as_path() {
             // Check for duplicate tag.
             for i in 0..entry.tag_count {
                 if entry.group_ids[i] == group_id {
@@ -143,10 +156,14 @@ pub fn tag_path(path: &str, group_id: CapGroupId) -> KernelResult<()> {
     let slot = tags.iter().position(|e| !e.active)
         .ok_or(KernelError::OutOfMemory)?;
 
-    let entry = &mut tags[slot];
+    let entry = tags.get_mut(slot).ok_or(KernelError::OutOfMemory)?;
     entry.active = true;
     entry.path_len = normalized.len();
-    entry.path[..normalized.len()].copy_from_slice(normalized.as_bytes());
+    entry
+        .path
+        .get_mut(..normalized.len())
+        .ok_or(KernelError::InvalidArgument)?
+        .copy_from_slice(normalized.as_bytes());
     entry.group_ids[0] = group_id;
     entry.tag_count = 1;
 
@@ -156,12 +173,12 @@ pub fn tag_path(path: &str, group_id: CapGroupId) -> KernelResult<()> {
 /// Remove a capability group tag from a file or directory.
 ///
 /// If this was the last tag, the entry is removed entirely.
-pub fn untag_path(path: &str, group_id: CapGroupId) -> KernelResult<()> {
-    let normalized = normalize_path(path);
+pub fn untag_path(path: impl AsRef<Path>, group_id: CapGroupId) -> KernelResult<()> {
+    let normalized = normalize_path(path.as_ref());
 
     let mut tags = FILE_TAGS.lock();
     for entry in tags.iter_mut() {
-        if entry.active && entry.path_str() == normalized {
+        if entry.active && entry.path() == normalized.as_path() {
             for i in 0..entry.tag_count {
                 if entry.group_ids[i] == group_id {
                     // Swap with last and shrink.
@@ -185,12 +202,12 @@ pub fn untag_path(path: &str, group_id: CapGroupId) -> KernelResult<()> {
 }
 
 /// Remove all tags from a path.
-pub fn clear_tags(path: &str) -> KernelResult<()> {
-    let normalized = normalize_path(path);
+pub fn clear_tags(path: impl AsRef<Path>) -> KernelResult<()> {
+    let normalized = normalize_path(path.as_ref());
 
     let mut tags = FILE_TAGS.lock();
     for entry in tags.iter_mut() {
-        if entry.active && entry.path_str() == normalized {
+        if entry.active && entry.path() == normalized.as_path() {
             entry.active = false;
             return Ok(());
         }
@@ -199,12 +216,12 @@ pub fn clear_tags(path: &str) -> KernelResult<()> {
 }
 
 /// Get the group tags on a specific path (direct, not inherited).
-pub fn get_tags(path: &str) -> Vec<CapGroupId> {
-    let normalized = normalize_path(path);
+pub fn get_tags(path: impl AsRef<Path>) -> Vec<CapGroupId> {
+    let normalized = normalize_path(path.as_ref());
 
     let tags = FILE_TAGS.lock();
     for entry in tags.iter() {
-        if entry.active && entry.path_str() == normalized {
+        if entry.active && entry.path() == normalized.as_path() {
             return entry.group_ids[..entry.tag_count].to_vec();
         }
     }
@@ -216,38 +233,36 @@ pub fn get_tags(path: &str) -> Vec<CapGroupId> {
 /// Walks up the path hierarchy and collects all tags from ancestors.
 /// All collected tags compose via AND — the process must be a member of
 /// every group found on the path or any ancestor.
-pub fn effective_tags(path: &str) -> Vec<CapGroupId> {
-    let normalized = normalize_path(path);
+pub fn effective_tags(path: impl AsRef<Path>) -> Vec<CapGroupId> {
+    let normalized = normalize_path(path.as_ref());
     let mut result: Vec<CapGroupId> = Vec::new();
 
     let tags = FILE_TAGS.lock();
 
-    // Check each ancestor (including the path itself).
-    // For "/a/b/c", check "/", "/a", "/a/b", "/a/b/c".
-    let mut prefix = String::new();
-    let parts: Vec<&str> = normalized.split('/').collect();
-
-    for (i, part) in parts.iter().enumerate() {
-        if i == 0 {
-            // Root.
-            prefix.push('/');
-        } else {
-            if prefix.len() > 1 {
-                prefix.push('/');
-            }
-            prefix.push_str(part);
-        }
-
-        // Find tags for this prefix.
+    // Collect the tags on one exact path into `result`, de-duplicated.
+    let collect = |prefix: &Path, result: &mut Vec<CapGroupId>| {
         for entry in tags.iter() {
-            if entry.active && entry.path_str() == prefix {
-                for &gid in &entry.group_ids[..entry.tag_count] {
+            if entry.active && entry.path() == prefix {
+                for &gid in entry.group_ids.get(..entry.tag_count).unwrap_or(&[]) {
                     if !result.contains(&gid) {
                         result.push(gid);
                     }
                 }
             }
         }
+    };
+
+    // Check each ancestor, root first, then the path itself.
+    // For "/a/b/c": "/", "/a", "/a/b", "/a/b/c".
+    //
+    // Walking *components* rather than splitting on `/` is what makes the
+    // inheritance boundary component-aligned: a tag on `/a` can never be
+    // inherited by `/ab`, no matter how the caller spelled either path.
+    let mut prefix = PathBuf::from("/");
+    collect(&prefix, &mut result);
+    for comp in normalized.components() {
+        prefix.push(comp);
+        collect(&prefix, &mut result);
     }
 
     result
@@ -268,7 +283,7 @@ pub fn check_access(
     uid: u32,
     primary_gid: u32,
     supplementary_gids: &[u32],
-    path: &str,
+    path: impl AsRef<Path>,
 ) -> KernelResult<()> {
     // Root bypasses all tag checks.
     if uid == 0 {
@@ -295,14 +310,14 @@ pub fn check_access(
 /// List all tagged paths (for kshell/procfs).
 ///
 /// Returns (path, group_ids) pairs for active entries.
-pub fn list_all() -> Vec<(String, Vec<CapGroupId>)> {
+pub fn list_all() -> Vec<(PathBuf, Vec<CapGroupId>)> {
     let tags = FILE_TAGS.lock();
     let mut result = Vec::new();
     for entry in tags.iter() {
         if entry.active {
             result.push((
-                String::from(entry.path_str()),
-                entry.group_ids[..entry.tag_count].to_vec(),
+                entry.path().to_path_buf(),
+                entry.group_ids.get(..entry.tag_count).unwrap_or(&[]).to_vec(),
             ));
         }
     }
@@ -347,32 +362,20 @@ pub fn remove_group_references(group_id: CapGroupId) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Normalize a path: ensure leading slash, collapse "//", strip trailing "/".
-fn normalize_path(path: &str) -> String {
-    let mut result = String::with_capacity(path.len());
-
-    if !path.starts_with('/') {
-        result.push('/');
+/// Normalize a path: ensure a leading slash, collapse `//`, strip a trailing
+/// `/`.
+///
+/// Rebuilding from [`Path::components`] does all three at once: the iterator
+/// already drops empty components (which is what a `//` run or a trailing `/`
+/// produces), and seeding the buffer with `/` makes the result absolute.
+/// `.`/`..` are *not* resolved here — they never were, and the VFS resolves
+/// them before a path reaches the tag check.
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut result = PathBuf::with_capacity(path.len().saturating_add(1));
+    result.extend_bytes(b"/");
+    for comp in path.components() {
+        result.push(comp);
     }
-
-    let mut last_was_slash = false;
-    for ch in path.chars() {
-        if ch == '/' {
-            if !last_was_slash {
-                result.push('/');
-            }
-            last_was_slash = true;
-        } else {
-            result.push(ch);
-            last_was_slash = false;
-        }
-    }
-
-    // Strip trailing slash (unless root).
-    if result.len() > 1 && result.ends_with('/') {
-        result.pop();
-    }
-
     result
 }
 
@@ -397,6 +400,7 @@ pub fn self_test() -> KernelResult<()> {
     test_access_check_basic()?;
     test_and_composition()?;
     test_remove_group_refs()?;
+    test_non_utf8_and_boundaries()?;
 
     serial_println!("[cap/file_tags] File capability tags self-test PASSED");
     Ok(())
@@ -620,5 +624,93 @@ fn test_remove_group_refs() -> KernelResult<()> {
 
     groups::remove(gid).ok();
     serial_println!("[cap/file_tags]   Remove group refs: OK");
+    Ok(())
+}
+
+/// Test 6: non-UTF-8 tagged paths, and component-aligned inheritance.
+///
+/// Both halves are regressions against the same root cause — the registry
+/// used to key on a lossily-decoded `&str`:
+///
+/// * A tag on a path containing a non-UTF-8 byte decoded to `""`, which no
+///   lookup key could ever equal, so the tag was **inert** and every access
+///   to the protected path was permitted (fail-open).
+/// * Two *different* non-UTF-8 paths both decoded to `""`, so a tag on one
+///   would have matched the other had a lookup key ever been `""`.
+///
+/// The boundary half pins the other property a byte-prefix scheme gets
+/// wrong: `/secure` must not confer its tags on `/secureX`.
+fn test_non_utf8_and_boundaries() -> KernelResult<()> {
+    let gid = groups::create("ftag_test6")?;
+
+    // A directory whose name is not valid UTF-8.  `\xff` is never a legal
+    // UTF-8 byte anywhere in a sequence, so this path cannot be spelled as
+    // a `&str` at all.
+    let secret = Path::new(b"/vault/\xff");
+    let sibling = Path::new(b"/vault/\xfe");
+
+    let cleanup = |gid| {
+        clear_tags(Path::new(b"/vault/\xff")).ok();
+        clear_tags("/secure").ok();
+        groups::remove(gid).ok();
+    };
+
+    tag_path(secret, gid)?;
+
+    // The tag must be findable by the exact same bytes.
+    if !get_tags(secret).contains(&gid) {
+        serial_println!("[cap/file_tags]   FAIL: non-UTF-8 tag not found after adding");
+        cleanup(gid);
+        return Err(KernelError::InternalError);
+    }
+
+    // A child of it inherits.
+    if !effective_tags(Path::new(b"/vault/\xff/file")).contains(&gid) {
+        serial_println!("[cap/file_tags]   FAIL: non-UTF-8 child did not inherit");
+        cleanup(gid);
+        return Err(KernelError::InternalError);
+    }
+
+    // A sibling differing only in that one byte does NOT.  This is the case
+    // that lossy decoding collapsed together.
+    if effective_tags(sibling).contains(&gid) {
+        serial_println!("[cap/file_tags]   FAIL: distinct non-UTF-8 sibling matched");
+        cleanup(gid);
+        return Err(KernelError::InternalError);
+    }
+
+    // And a non-root, non-member process is actually denied — i.e. the tag
+    // is live, not inert.  gid 4242 is in no group.
+    if check_access(1000, 4242, &[], Path::new(b"/vault/\xff/file")).is_ok() {
+        serial_println!("[cap/file_tags]   FAIL: non-UTF-8 tag failed open");
+        cleanup(gid);
+        return Err(KernelError::InternalError);
+    }
+
+    clear_tags(secret).ok();
+
+    // Component boundary: a tag on "/secure" covers "/secure/x" but never
+    // "/secureX", regardless of trailing-slash spelling.
+    tag_path("/secure/", gid)?;
+    for (probe, want) in [
+        ("/secure", true),
+        ("/secure/x", true),
+        ("/secure//x", true),
+        ("/secureX", false),
+        ("/secureX/y", false),
+    ] {
+        if effective_tags(probe).contains(&gid) != want {
+            serial_println!(
+                "[cap/file_tags]   FAIL: boundary: {} should{} inherit",
+                probe,
+                if want { "" } else { " not" }
+            );
+            cleanup(gid);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    cleanup(gid);
+    serial_println!("[cap/file_tags]   Non-UTF-8 + boundaries: OK");
     Ok(())
 }

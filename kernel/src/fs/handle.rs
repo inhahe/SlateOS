@@ -19,11 +19,11 @@
 //! structures on the hot path.
 
 use alloc::collections::BTreeMap;
-use alloc::string::String;
 use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Open flags
@@ -147,7 +147,13 @@ pub enum SeekFrom {
 /// An open file tracked by the kernel.
 struct OpenFile {
     /// Absolute VFS path to the file.
-    path: String,
+    ///
+    /// Stored as a byte [`PathBuf`], not a `String`: a path component may
+    /// contain any byte except `/` and NUL, so a handle on a file whose
+    /// name is not valid UTF-8 must still round-trip through
+    /// [`handle_path`] and through the close-time `funlock`/`emit_closed`
+    /// calls that re-derive the file from this field.
+    path: PathBuf,
     /// Current read/write cursor position.
     offset: u64,
     /// Cached file size (updated on write/truncate/open).
@@ -207,7 +213,7 @@ const MAX_OPEN_FILES: usize = 1024;
 ///
 /// Same logic as `vfs::check_file_tags` but for the handle module.
 /// Called at open time — the handle is proof of access after that.
-fn check_file_tags_for_handle(path: &str) -> KernelResult<()> {
+fn check_file_tags_for_handle(path: &Path) -> KernelResult<()> {
     if crate::cap::file_tags::count() == 0 {
         return Ok(());
     }
@@ -253,7 +259,7 @@ pub const DEFAULT_CREATE_MODE: u16 = 0o644;
 /// behaviour for every in-kernel caller.  Userspace file creation goes
 /// through [`open_with_mode`] so a caller-supplied, umask-masked mode is
 /// honoured.
-pub fn open(path: &str, flags: OpenFlags) -> KernelResult<u64> {
+pub fn open(path: impl AsRef<Path>, flags: OpenFlags) -> KernelResult<u64> {
     open_with_mode(path, flags, DEFAULT_CREATE_MODE)
 }
 
@@ -266,7 +272,13 @@ pub fn open(path: &str, flags: OpenFlags) -> KernelResult<u64> {
 /// umask lives in the userspace POSIX layer (per design-decision on the
 /// thin-kernel-primitive model), so the kernel treats `create_mode` as the
 /// final on-disk permission bits and does not apply any mask of its own.
-pub fn open_with_mode(path: &str, flags: OpenFlags, create_mode: u16) -> KernelResult<u64> {
+pub fn open_with_mode(
+    path: impl AsRef<Path>,
+    flags: OpenFlags,
+    create_mode: u16,
+) -> KernelResult<u64> {
+    let path = path.as_ref();
+
     // Must have at least READ or WRITE.
     if !flags.is_readable() && !flags.is_writable() {
         return Err(KernelError::InvalidArgument);
@@ -973,7 +985,7 @@ pub fn dup_shared(handle: u64) -> KernelResult<u64> {
 /// Get the VFS path associated with an open handle.
 ///
 /// Useful for diagnostics and `/proc/<pid>/fd` equivalent.
-pub fn handle_path(handle: u64) -> KernelResult<String> {
+pub fn handle_path(handle: u64) -> KernelResult<PathBuf> {
     let table = OPEN_FILES.lock();
     let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
     Ok(file.path.clone())
@@ -1009,7 +1021,7 @@ pub struct HandleInfo {
     /// Handle ID.
     pub id: u64,
     /// VFS path.
-    pub path: String,
+    pub path: PathBuf,
     /// Current offset.
     pub offset: u64,
     /// Cached file size.
@@ -1042,7 +1054,7 @@ pub fn list_handles() -> alloc::vec::Vec<HandleInfo> {
 
 /// Allocate a handle in the global table.
 fn allocate_handle(
-    path: alloc::string::String,
+    path: PathBuf,
     offset: u64,
     size: u64,
     flags: OpenFlags,
@@ -1076,7 +1088,7 @@ fn allocate_handle(
 /// (the underlying VFS doesn't track a stable entry count cheaply, so
 /// we don't cache one — `read_dir_at` queries the VFS each time).
 fn allocate_dir_handle(
-    path: alloc::string::String,
+    path: PathBuf,
     flags: OpenFlags,
 ) -> KernelResult<u64> {
     let mut table = OPEN_FILES.lock();
@@ -1279,13 +1291,19 @@ pub fn self_test() -> KernelResult<()> {
 
     // 13. handle_path.
     let path_check = handle_path(hw)?;
-    if path_check != "/handle_write_test.txt" {
-        crate::serial_println!("[fs::handle]   FAIL: handle_path = '{}'", path_check);
+    if path_check.as_path() != Path::new("/handle_write_test.txt") {
+        crate::serial_println!(
+            "[fs::handle]   FAIL: handle_path = '{}'",
+            path_check.display()
+        );
         close(hdup).ok();
         close(hw).ok();
         return Err(KernelError::InternalError);
     }
-    crate::serial_println!("[fs::handle]   handle_path: '{}' OK", path_check);
+    crate::serial_println!(
+        "[fs::handle]   handle_path: '{}' OK",
+        path_check.display()
+    );
 
     close(hdup)?;
     close(hw)?;
@@ -1453,8 +1471,8 @@ pub fn self_test() -> KernelResult<()> {
         let mut saw_a = false;
         let mut saw_b = false;
         for e in &entries {
-            if e.name == "a.txt" { saw_a = true; }
-            if e.name == "b.txt" { saw_b = true; }
+            if e.name.as_path() == Path::new("a.txt") { saw_a = true; }
+            if e.name.as_path() == Path::new("b.txt") { saw_b = true; }
         }
         if !(saw_a && saw_b) {
             crate::serial_println!(

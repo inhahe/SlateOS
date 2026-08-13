@@ -9537,27 +9537,21 @@ pub fn sys_tcp_send(args: &SyscallArgs) -> SyscallResult {
     }
 
     let handle = args.arg0 as usize;
-    let ptr = args.arg1 as *const u8;
     let len = args.arg2 as usize;
 
-    if ptr.is_null() && len > 0 {
+    if args.arg1 == 0 && len > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    if len > 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, len) {
-            return SyscallResult::err(e);
-        }
-    }
-
-    let data = if len == 0 {
-        &[]
-    } else {
-        // SAFETY: Validated above — ptr is in user space and mapped.
-        unsafe { core::slice::from_raw_parts(ptr, len) }
+    // `tcp::send` queues into the socket's transmit buffer and can block on a
+    // full window, so the payload has to be kernel-owned before it is handed
+    // over.  See `sys_fs_write_file` on why the unbounded copy is safe.
+    let data = match crate::mm::user::read_user_vec(args.arg1, len, usize::MAX) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
     };
 
-    match crate::net::tcp::send(handle, data) {
+    match crate::net::tcp::send(handle, &data) {
         Ok(sent) => {
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(sent as i64)
@@ -9876,27 +9870,21 @@ pub fn sys_udp_send(args: &SyscallArgs) -> SyscallResult {
     let dst_ip = Ipv4Addr::from_u32(args.arg1 as u32);
     #[allow(clippy::cast_possible_truncation)]
     let dst_port = args.arg2 as u16;
-    let data_ptr = args.arg3 as *const u8;
     let data_len = args.arg4 as usize;
 
     if dst_port == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if data_ptr.is_null() && data_len > 0 {
+    if args.arg3 == 0 && data_len > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    if data_len > 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg3, data_len) {
-            return SyscallResult::err(e);
-        }
-    }
-
-    let data = if data_len == 0 {
-        &[]
-    } else {
-        // SAFETY: Validated above — data_ptr is in user space and mapped.
-        unsafe { core::slice::from_raw_parts(data_ptr, data_len) }
+    // Copied before the handle lookup below, so the datagram the driver
+    // eventually DMAs is the one that was validated — a peer thread cannot
+    // rewrite it between here and the NIC.
+    let data = match crate::mm::user::read_user_vec(args.arg3, data_len, usize::MAX) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
     };
 
     // Look up the actual bound port from the socket handle.
@@ -9908,7 +9896,7 @@ pub fn sys_udp_send(args: &SyscallArgs) -> SyscallResult {
         }
     };
 
-    match crate::net::udp::send(src_port, dst_ip, dst_port, data) {
+    match crate::net::udp::send(src_port, dst_ip, dst_port, &data) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -10520,21 +10508,21 @@ pub fn sys_service_register(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let name_ptr = args.arg0 as *const u8;
     let name_len = args.arg1 as usize;
 
-    if name_ptr.is_null() || name_len == 0 {
+    if args.arg0 == 0 || name_len == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, name_len) {
-        return SyscallResult::err(e);
-    }
+    // The name is the key the registry is indexed by, so it must be a kernel
+    // copy: `register` stores it, and a slice into user memory would leave the
+    // registry pointing at a mapping the process can change or unmap.
+    let name = match crate::mm::user::read_user_vec(args.arg0, name_len, NAME_MAX) {
+        Ok(n) => n,
+        Err(e) => return SyscallResult::err(e),
+    };
 
-    // SAFETY: Validated above — ptr is in user space, mapped, readable.
-    let name = unsafe { core::slice::from_raw_parts(name_ptr, name_len) };
-
-    match service::register(name) {
+    match service::register(&name) {
         Ok(listener) => {
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(listener.raw() as i64)
@@ -10550,21 +10538,20 @@ pub fn sys_service_register(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns: client channel handle.
 pub fn sys_service_connect(args: &SyscallArgs) -> SyscallResult {
-    let name_ptr = args.arg0 as *const u8;
     let name_len = args.arg1 as usize;
 
-    if name_ptr.is_null() || name_len == 0 {
+    if args.arg0 == 0 || name_len == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, name_len) {
-        return SyscallResult::err(e);
-    }
+    // `connect` blocks on the listener's accept queue, so the lookup key has
+    // to outlive the caller's mapping.
+    let name = match crate::mm::user::read_user_vec(args.arg0, name_len, NAME_MAX) {
+        Ok(n) => n,
+        Err(e) => return SyscallResult::err(e),
+    };
 
-    // SAFETY: Validated above.
-    let name = unsafe { core::slice::from_raw_parts(name_ptr, name_len) };
-
-    match service::connect(name) {
+    match service::connect(&name) {
         Ok(handle) => {
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(handle.raw() as i64)
@@ -10676,39 +10663,27 @@ pub fn sys_ns_create(args: &SyscallArgs) -> SyscallResult {
 /// `arg4`: target prefix length.
 pub fn sys_ns_bind(args: &SyscallArgs) -> SyscallResult {
     let ns_id = args.arg0;
-    let src_ptr = args.arg1 as *const u8;
     let src_len = args.arg2 as usize;
-    let tgt_ptr = args.arg3 as *const u8;
     let tgt_len = args.arg4 as usize;
 
-    if src_ptr.is_null() || src_len == 0 || tgt_ptr.is_null() || tgt_len == 0 {
+    if args.arg1 == 0 || src_len == 0 || args.arg3 == 0 || tgt_len == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    let safe_src_len = src_len.min(1024);
-    let safe_tgt_len = tgt_len.min(1024);
-
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, safe_src_len) {
-        return SyscallResult::err(e);
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg3, safe_tgt_len) {
-        return SyscallResult::err(e);
-    }
-
-    // SAFETY: Validated user pointers above.
-    let src_bytes = unsafe { core::slice::from_raw_parts(src_ptr, safe_src_len) };
-    let tgt_bytes = unsafe { core::slice::from_raw_parts(tgt_ptr, safe_tgt_len) };
-
-    let src_str = match core::str::from_utf8(src_bytes) {
+    // Rejected, not clipped at 1024 as before.  These prefixes decide what a
+    // whole namespace can reach: truncating the source prefix would install a
+    // rule over a *broader* subtree than the caller named, which is the wrong
+    // direction to fail in for a sandboxing primitive.
+    let src_str = match read_user_path(args.arg1, src_len) {
         Ok(s) => s,
-        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+        Err(e) => return SyscallResult::err(e),
     };
-    let tgt_str = match core::str::from_utf8(tgt_bytes) {
+    let tgt_str = match read_user_path(args.arg3, tgt_len) {
         Ok(s) => s,
-        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+        Err(e) => return SyscallResult::err(e),
     };
 
-    match crate::ipc::namespace::bind(ns_id, src_str, tgt_str) {
+    match crate::ipc::namespace::bind(ns_id, &src_str, &tgt_str) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -10721,26 +10696,20 @@ pub fn sys_ns_bind(args: &SyscallArgs) -> SyscallResult {
 /// `arg2`: source prefix length.
 pub fn sys_ns_unbind(args: &SyscallArgs) -> SyscallResult {
     let ns_id = args.arg0;
-    let src_ptr = args.arg1 as *const u8;
     let src_len = args.arg2 as usize;
 
-    if src_ptr.is_null() || src_len == 0 {
+    if args.arg1 == 0 || src_len == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    let safe_len = src_len.min(1024);
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, safe_len) {
-        return SyscallResult::err(e);
-    }
-
-    // SAFETY: Validated above.
-    let bytes = unsafe { core::slice::from_raw_parts(src_ptr, safe_len) };
-    let prefix = match core::str::from_utf8(bytes) {
+    // Rejected rather than clipped: a truncated prefix would remove a
+    // different rule than the caller named.
+    let prefix = match read_user_path(args.arg1, src_len) {
         Ok(s) => s,
-        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+        Err(e) => return SyscallResult::err(e),
     };
 
-    match crate::ipc::namespace::unbind(ns_id, prefix) {
+    match crate::ipc::namespace::unbind(ns_id, &prefix) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -10753,26 +10722,21 @@ pub fn sys_ns_unbind(args: &SyscallArgs) -> SyscallResult {
 /// `arg2`: prefix length.
 pub fn sys_ns_hide(args: &SyscallArgs) -> SyscallResult {
     let ns_id = args.arg0;
-    let ptr = args.arg1 as *const u8;
     let len = args.arg2 as usize;
 
-    if ptr.is_null() || len == 0 {
+    if args.arg1 == 0 || len == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    let safe_len = len.min(1024);
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg1, safe_len) {
-        return SyscallResult::err(e);
-    }
-
-    // SAFETY: Validated above.
-    let bytes = unsafe { core::slice::from_raw_parts(ptr, safe_len) };
-    let prefix = match core::str::from_utf8(bytes) {
+    // Rejected rather than clipped: a truncated prefix hides a broader subtree
+    // than the caller asked for, silently cutting off paths that should still
+    // have been reachable.
+    let prefix = match read_user_path(args.arg1, len) {
         Ok(s) => s,
-        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+        Err(e) => return SyscallResult::err(e),
     };
 
-    match crate::ipc::namespace::hide(ns_id, prefix) {
+    match crate::ipc::namespace::hide(ns_id, &prefix) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -10939,32 +10903,40 @@ pub fn sys_dns_reverse_resolve(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns 0 on success.
 pub fn sys_net_stat(args: &SyscallArgs) -> SyscallResult {
-    let out_ptr = args.arg0 as *mut u8;
-
-    if out_ptr.is_null() {
+    if args.arg0 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
-    }
-
-    // Output: 6 × u64 = 48 bytes.
-    const STAT_SIZE: usize = 48;
-    if let Err(e) = crate::mm::user::validate_user_write(args.arg0, STAT_SIZE) {
-        return SyscallResult::err(e);
     }
 
     let stats = crate::net::interface::stats();
 
-    // SAFETY: out_ptr validated for STAT_SIZE bytes above.
-    unsafe {
-        let buf = core::slice::from_raw_parts_mut(out_ptr, STAT_SIZE);
-        buf[0..8].copy_from_slice(&stats.tx_bytes.to_le_bytes());
-        buf[8..16].copy_from_slice(&stats.tx_packets.to_le_bytes());
-        buf[16..24].copy_from_slice(&stats.tx_errors.to_le_bytes());
-        buf[24..32].copy_from_slice(&stats.rx_bytes.to_le_bytes());
-        buf[32..40].copy_from_slice(&stats.rx_packets.to_le_bytes());
-        buf[40..48].copy_from_slice(&stats.rx_drops.to_le_bytes());
+    // Output: 6 × u64 = 48 bytes.  Packed on the stack and emitted with one
+    // copy, so the six field stores run against kernel memory and the whole
+    // record either lands or does not — the caller can never observe a
+    // half-updated set of counters.
+    let mut buf = [0u8; 48];
+    for (i, field) in [
+        stats.tx_bytes,
+        stats.tx_packets,
+        stats.tx_errors,
+        stats.rx_bytes,
+        stats.rx_packets,
+        stats.rx_drops,
+    ]
+    .iter()
+    .enumerate()
+    {
+        let base = i.saturating_mul(8);
+        if let Some(dst) = buf.get_mut(base..base.saturating_add(8)) {
+            dst.copy_from_slice(&field.to_le_bytes());
+        }
     }
 
-    SyscallResult::ok(0)
+    // SAFETY: `buf` is a live 48-byte stack array; `copy_to_user` validates
+    // the destination and brackets the store with STAC/CLAC.
+    match unsafe { crate::mm::user::copy_to_user(buf.as_ptr(), args.arg0, buf.len()) } {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
 }
 
 /// `SYS_ICMP_PING` — send an ICMP Echo Request.
@@ -11059,12 +11031,14 @@ pub fn sys_net_raw_tx(args: &SyscallArgs) -> SyscallResult {
     if !(RAW_FRAME_MIN..=RAW_FRAME_MAX).contains(&len) {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, len) {
-        return SyscallResult::err(e);
-    }
-    // SAFETY: validated readable for `len` bytes above.
-    let frame = unsafe { core::slice::from_raw_parts(args.arg0 as *const u8, len) };
-    match crate::net::raw::transmit(frame) {
+    // Copied before it reaches the driver: `transmit` hands the buffer to the
+    // NIC, and a frame the process can still rewrite between validation and
+    // DMA is a frame the kernel never actually checked.
+    let frame = match crate::mm::user::read_user_vec(args.arg0, len, RAW_FRAME_MAX) {
+        Ok(f) => f,
+        Err(e) => return SyscallResult::err(e),
+    };
+    match crate::net::raw::transmit(&frame) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -11099,9 +11073,13 @@ pub fn sys_net_raw_rx(args: &SyscallArgs) -> SyscallResult {
                 // the caller's buffer.  (Should not happen with a 1500 MTU.)
                 return SyscallResult::err(KernelError::InvalidArgument);
             }
-            // SAFETY: `args.arg0` validated writable for `cap` >= `n` bytes.
-            unsafe {
-                core::ptr::copy_nonoverlapping(frame.as_ptr(), args.arg0 as *mut u8, n);
+            // SAFETY: `frame` is a live kernel-owned buffer of `n` bytes.
+            // `copy_to_user` re-validates the destination and brackets the
+            // store with STAC/CLAC.
+            if let Err(e) =
+                unsafe { crate::mm::user::copy_to_user(frame.as_ptr(), args.arg0, n) }
+            {
+                return SyscallResult::err(e);
             }
             SyscallResult::ok(n as i64)
         }

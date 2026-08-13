@@ -422,28 +422,28 @@ impl MemFs {
     /// `follow_last`: if `true`, follow the final component if it
     /// is a symlink.  If `false`, follow only intermediate symlinks.
     ///
-    /// Returns the fully resolved path as an owned `String`.
+    /// Returns the fully resolved path as an owned [`PathBuf`].
     fn resolve_path_str(&self, path: &Path, follow_last: bool) -> KernelResult<PathBuf> {
         let mut resolved = normalize_path(path);
         let mut depth = 0usize;
 
         loop {
-            let components: Vec<&str> = resolved
-                .split('/')
-                .filter(|s| !s.is_empty())
-                .collect();
+            // `resolved` is owned and mutated below, so the components must be
+            // copied out before the loop body can reassign it.
+            let components: Vec<PathBuf> =
+                resolved.components().map(Path::to_path_buf).collect();
 
-            if components.is_empty() {
-                return Ok(String::from("/"));
-            }
+            let Some(last_index) = components.len().checked_sub(1) else {
+                return Ok(PathBuf::from("/"));
+            };
 
             let mut current = &self.root;
             let mut hit_symlink = false;
 
             for (i, component) in components.iter().enumerate() {
-                let is_last = i == components.len() - 1;
+                let is_last = i == last_index;
                 let children = current.children().ok_or(KernelError::NotADirectory)?;
-                let node = children.get(*component).ok_or(KernelError::NotFound)?;
+                let node = children.get(component.as_path()).ok_or(KernelError::NotFound)?;
 
                 if let MemFsNodeKind::Symlink(ref target) = node.kind {
                     if is_last && !follow_last {
@@ -456,46 +456,22 @@ impl MemFs {
                         return Err(KernelError::TooManyLinks);
                     }
 
-                    // Build parent path (components before this symlink).
-                    let parent = if i == 0 {
-                        String::from("/")
-                    } else {
-                        let mut p = String::new();
-                        for c in &components[..i] {
-                            p.push('/');
-                            p.push_str(c);
-                        }
-                        p
-                    };
+                    // Rebuild the path with this symlink replaced by its
+                    // target: [components before it] + target + [components
+                    // after it].  `PathBuf::push` inserts the separator, and
+                    // clears the buffer when the pushed piece is absolute —
+                    // which is exactly the "absolute target discards the
+                    // parent" rule, so it needs no special case here.
+                    let mut rebuilt = PathBuf::from("/");
+                    for c in components.get(..i).unwrap_or(&[]) {
+                        rebuilt.push(c);
+                    }
+                    rebuilt.push(target);
+                    for c in components.get(i.saturating_add(1)..).unwrap_or(&[]) {
+                        rebuilt.push(c);
+                    }
 
-                    // Resolve target: absolute targets are used directly;
-                    // relative targets are resolved from the parent directory.
-                    let new_base = if target.starts_with('/') {
-                        target.clone()
-                    } else if parent == "/" {
-                        let mut s = String::from("/");
-                        s.push_str(target);
-                        s
-                    } else {
-                        let mut s = parent;
-                        s.push('/');
-                        s.push_str(target);
-                        s
-                    };
-
-                    // Append remaining path components after the symlink.
-                    let remaining = &components[i + 1..];
-                    resolved = if remaining.is_empty() {
-                        normalize_path(&new_base)
-                    } else {
-                        let mut full = new_base;
-                        for r in remaining {
-                            full.push('/');
-                            full.push_str(r);
-                        }
-                        normalize_path(&full)
-                    };
-
+                    resolved = normalize_path(&rebuilt);
                     hit_symlink = true;
                     break;
                 }
@@ -582,14 +558,10 @@ impl MemFs {
     /// followed if it's a symlink).  The parent path IS fully resolved.
     fn resolve_parent_mut<'a, 'b>(
         &'a mut self,
-        path: &'b str,
-    ) -> KernelResult<(&'a mut MemFsNode, &'b str)> {
+        path: &'b Path,
+    ) -> KernelResult<(&'a mut MemFsNode, &'b Path)> {
         let components = Self::path_components(path);
-        if components.is_empty() {
-            return Err(KernelError::InvalidArgument);
-        }
-
-        let filename = components[components.len() - 1];
+        let filename = *components.last().ok_or(KernelError::InvalidArgument)?;
         let parent_path = Self::parent_path_of(&components);
 
         // Resolve the parent (following all symlinks in the parent path).
@@ -617,11 +589,7 @@ impl MemFs {
 
         loop {
             let comps = Self::path_components(&current_path);
-            if comps.is_empty() {
-                return Err(KernelError::InvalidArgument);
-            }
-
-            let filename = String::from(comps[comps.len() - 1]);
+            let filename = (*comps.last().ok_or(KernelError::InvalidArgument)?).to_path_buf();
             let parent_path = Self::parent_path_of(&comps);
 
             // Resolve the parent path (following all symlinks).
@@ -631,7 +599,7 @@ impl MemFs {
             let parent_node = self.walk(&resolved_parent)?;
             let children = parent_node.children().ok_or(KernelError::NotADirectory)?;
 
-            match children.get(&*filename) {
+            match children.get(filename.as_path()) {
                 Some(node) => {
                     if let MemFsNodeKind::Symlink(ref target) = node.kind {
                         // Follow the symlink.
@@ -639,18 +607,12 @@ impl MemFs {
                         if depth > MAX_SYMLINK_DEPTH {
                             return Err(KernelError::TooManyLinks);
                         }
-                        current_path = if target.starts_with('/') {
-                            normalize_path(target)
-                        } else if resolved_parent == "/" {
-                            let mut s = String::from("/");
-                            s.push_str(target);
-                            normalize_path(&s)
-                        } else {
-                            let mut s = resolved_parent;
-                            s.push('/');
-                            s.push_str(target);
-                            normalize_path(&s)
-                        };
+                        // `push` clears the buffer for an absolute argument,
+                        // so an absolute target correctly discards the parent
+                        // without a separate branch.
+                        let mut next = resolved_parent;
+                        next.push(target);
+                        current_path = normalize_path(&next);
                         continue;
                     }
                     // Not a symlink — write here.
@@ -780,7 +742,7 @@ impl FileSystem for MemFs {
             return Err(KernelError::AlreadyExists);
         }
 
-        children.insert(String::from(dirname), MemFsNode::new_dir());
+        children.insert(dirname.to_path_buf(), MemFsNode::new_dir());
         parent.touch_modified();
         Ok(())
     }
@@ -898,8 +860,8 @@ impl FileSystem for MemFs {
             return Err(KernelError::InvalidArgument);
         }
 
-        let from_name = String::from(from_comps[from_comps.len() - 1]);
-        let to_name = String::from(to_comps[to_comps.len() - 1]);
+        let from_name = (*from_comps.last().ok_or(KernelError::InvalidArgument)?).to_path_buf();
+        let to_name = (*to_comps.last().ok_or(KernelError::InvalidArgument)?).to_path_buf();
 
         let from_parent_path = Self::parent_path_of(&from_comps);
         let to_parent_path = Self::parent_path_of(&to_comps);
@@ -911,7 +873,7 @@ impl FileSystem for MemFs {
         {
             let to_parent = self.walk(&resolved_to_parent)?;
             let to_children = to_parent.children().ok_or(KernelError::NotADirectory)?;
-            if to_children.contains_key(&*to_name) {
+            if to_children.contains_key(to_name.as_path()) {
                 return Err(KernelError::AlreadyExists);
             }
         }
@@ -922,7 +884,7 @@ impl FileSystem for MemFs {
             let children = from_parent
                 .children_mut()
                 .ok_or(KernelError::NotADirectory)?;
-            children.remove(&*from_name).ok_or(KernelError::NotFound)?
+            children.remove(from_name.as_path()).ok_or(KernelError::NotFound)?
         };
 
         // Insert at destination.
@@ -944,8 +906,8 @@ impl FileSystem for MemFs {
             return Err(KernelError::InvalidArgument);
         }
 
-        let a_name = String::from(a_comps[a_comps.len() - 1]);
-        let b_name = String::from(b_comps[b_comps.len() - 1]);
+        let a_name = (*a_comps.last().ok_or(KernelError::InvalidArgument)?).to_path_buf();
+        let b_name = (*b_comps.last().ok_or(KernelError::InvalidArgument)?).to_path_buf();
 
         let a_parent_path = Self::parent_path_of(&a_comps);
         let b_parent_path = Self::parent_path_of(&b_comps);
@@ -958,7 +920,7 @@ impl FileSystem for MemFs {
         if resolved_a_parent == resolved_b_parent && a_name == b_name {
             let parent = self.walk(&resolved_a_parent)?;
             let children = parent.children().ok_or(KernelError::NotADirectory)?;
-            if !children.contains_key(&*a_name) {
+            if !children.contains_key(a_name.as_path()) {
                 return Err(KernelError::NotFound);
             }
             return Ok(());
@@ -968,14 +930,14 @@ impl FileSystem for MemFs {
         let node_a = {
             let parent = self.walk_mut(&resolved_a_parent)?;
             let children = parent.children_mut().ok_or(KernelError::NotADirectory)?;
-            children.remove(&*a_name).ok_or(KernelError::NotFound)?
+            children.remove(a_name.as_path()).ok_or(KernelError::NotFound)?
         };
 
         // Detach b's node; if it does not exist, restore a and fail so the
         // exchange is all-or-nothing.
         let node_b_result = match self.walk_mut(&resolved_b_parent) {
             Ok(parent) => match parent.children_mut() {
-                Some(children) => children.remove(&*b_name).ok_or(KernelError::NotFound),
+                Some(children) => children.remove(b_name.as_path()).ok_or(KernelError::NotFound),
                 None => Err(KernelError::NotADirectory),
             },
             Err(e) => Err(e),
@@ -1195,18 +1157,18 @@ impl FileSystem for MemFs {
         }
 
         children.insert(
-            String::from(linkname),
-            MemFsNode::new_symlink(String::from(target)),
+            linkname.to_path_buf(),
+            MemFsNode::new_symlink(target.to_path_buf()),
         );
         parent.touch_modified();
         Ok(())
     }
 
-    fn readlink(&mut self, path: &Path) -> KernelResult<String> {
+    fn readlink(&mut self, path: &Path) -> KernelResult<PathBuf> {
         // readlink does NOT follow the final component.
         let node = self.resolve_no_follow(path)?;
         match node.symlink_target() {
-            Some(target) => Ok(String::from(target)),
+            Some(target) => Ok(target.to_path_buf()),
             None => Err(KernelError::InvalidArgument), // Not a symlink.
         }
     }
@@ -1285,11 +1247,11 @@ pub fn self_test() -> KernelResult<()> {
     let mut fs = MemFs::new();
 
     // Test mkdir.
-    fs.mkdir("/testdir")?;
-    let entries = fs.readdir("/")?;
+    fs.mkdir(Path::new("/testdir"))?;
+    let entries = fs.readdir(Path::new("/"))?;
     let has_testdir = entries
         .iter()
-        .any(|e| e.name == "testdir" && e.entry_type == EntryType::Directory);
+        .any(|e| e.name.as_path() == Path::new("testdir") && e.entry_type == EntryType::Directory);
     if !has_testdir {
         crate::serial_println!("[memfs]   FAILED: testdir not in root");
         return Err(KernelError::IoError);
@@ -1298,8 +1260,8 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test write_file + read_file.
     let test_data = b"Hello from MemFs!";
-    fs.write_file("/testdir/hello.txt", test_data)?;
-    let readback = fs.read_file("/testdir/hello.txt")?;
+    fs.write_file(Path::new("/testdir/hello.txt"), test_data)?;
+    let readback = fs.read_file(Path::new("/testdir/hello.txt"))?;
     if readback.as_slice() != test_data.as_slice() {
         crate::serial_println!("[memfs]   FAILED: write/read mismatch");
         return Err(KernelError::IoError);
@@ -1307,14 +1269,14 @@ pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[memfs]   write_file + read_file: OK");
 
     // Test stat.
-    let stat = fs.stat("/testdir/hello.txt")?;
+    let stat = fs.stat(Path::new("/testdir/hello.txt"))?;
     if stat.size != test_data.len() as u64 || stat.entry_type != EntryType::File {
         crate::serial_println!("[memfs]   FAILED: stat mismatch");
         return Err(KernelError::IoError);
     }
 
     // Test case sensitivity: "Hello.txt" should NOT find "hello.txt".
-    match fs.read_file("/testdir/Hello.txt") {
+    match fs.read_file(Path::new("/testdir/Hello.txt")) {
         Err(KernelError::NotFound) => {
             crate::serial_println!("[memfs]   Case sensitivity: OK (Hello.txt != hello.txt)");
         }
@@ -1326,7 +1288,7 @@ pub fn self_test() -> KernelResult<()> {
     }
 
     // Test read_at.
-    let partial = fs.read_at("/testdir/hello.txt", 6, 4)?;
+    let partial = fs.read_at(Path::new("/testdir/hello.txt"), 6, 4)?;
     if partial.as_slice() != b"from" {
         crate::serial_println!(
             "[memfs]   FAILED: read_at expected 'from', got {:?}",
@@ -1337,8 +1299,8 @@ pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[memfs]   read_at: OK");
 
     // Test write_at (extend).
-    fs.write_at("/testdir/hello.txt", 17, b" Extended!")?;
-    let extended = fs.read_file("/testdir/hello.txt")?;
+    fs.write_at(Path::new("/testdir/hello.txt"), 17, b" Extended!")?;
+    let extended = fs.read_file(Path::new("/testdir/hello.txt"))?;
     if extended.as_slice() != b"Hello from MemFs! Extended!" {
         crate::serial_println!("[memfs]   FAILED: write_at extend");
         return Err(KernelError::IoError);
@@ -1346,8 +1308,8 @@ pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[memfs]   write_at: OK");
 
     // Test truncate.
-    fs.truncate("/testdir/hello.txt", 5)?;
-    let truncated = fs.read_file("/testdir/hello.txt")?;
+    fs.truncate(Path::new("/testdir/hello.txt"), 5)?;
+    let truncated = fs.read_file(Path::new("/testdir/hello.txt"))?;
     if truncated.as_slice() != b"Hello" {
         crate::serial_println!("[memfs]   FAILED: truncate");
         return Err(KernelError::IoError);
@@ -1355,15 +1317,15 @@ pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[memfs]   truncate: OK");
 
     // Test rename.
-    fs.rename("/testdir/hello.txt", "/testdir/renamed.txt")?;
-    match fs.read_file("/testdir/hello.txt") {
+    fs.rename(Path::new("/testdir/hello.txt"), Path::new("/testdir/renamed.txt"))?;
+    match fs.read_file(Path::new("/testdir/hello.txt")) {
         Err(KernelError::NotFound) => {}
         _ => {
             crate::serial_println!("[memfs]   FAILED: old name still exists after rename");
             return Err(KernelError::IoError);
         }
     }
-    let renamed_data = fs.read_file("/testdir/renamed.txt")?;
+    let renamed_data = fs.read_file(Path::new("/testdir/renamed.txt"))?;
     if renamed_data.as_slice() != b"Hello" {
         crate::serial_println!("[memfs]   FAILED: renamed file data mismatch");
         return Err(KernelError::IoError);
@@ -1371,8 +1333,8 @@ pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[memfs]   rename: OK");
 
     // Test remove.
-    fs.remove("/testdir/renamed.txt")?;
-    match fs.read_file("/testdir/renamed.txt") {
+    fs.remove(Path::new("/testdir/renamed.txt"))?;
+    match fs.read_file(Path::new("/testdir/renamed.txt")) {
         Err(KernelError::NotFound) => {}
         _ => {
             crate::serial_println!("[memfs]   FAILED: file still exists after remove");
@@ -1381,8 +1343,8 @@ pub fn self_test() -> KernelResult<()> {
     }
 
     // Test rmdir.
-    fs.rmdir("/testdir")?;
-    match fs.readdir("/testdir") {
+    fs.rmdir(Path::new("/testdir"))?;
+    match fs.readdir(Path::new("/testdir")) {
         Err(KernelError::NotFound) => {}
         _ => {
             crate::serial_println!("[memfs]   FAILED: dir still exists after rmdir");
@@ -1392,9 +1354,9 @@ pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[memfs]   remove + rmdir: OK");
 
     // Test rmdir on non-empty directory.
-    fs.mkdir("/notempty")?;
-    fs.write_file("/notempty/file.txt", b"data")?;
-    match fs.rmdir("/notempty") {
+    fs.mkdir(Path::new("/notempty"))?;
+    fs.write_file(Path::new("/notempty/file.txt"), b"data")?;
+    match fs.rmdir(Path::new("/notempty")) {
         Err(KernelError::InvalidArgument) => {
             crate::serial_println!("[memfs]   rmdir non-empty: correctly rejected");
         }
@@ -1404,22 +1366,22 @@ pub fn self_test() -> KernelResult<()> {
         }
     }
     // Clean up.
-    fs.remove("/notempty/file.txt")?;
-    fs.rmdir("/notempty")?;
+    fs.remove(Path::new("/notempty/file.txt"))?;
+    fs.rmdir(Path::new("/notempty"))?;
 
     // Test debug_stats.
-    fs.write_file("/a.txt", b"aaa")?;
-    fs.write_file("/b.txt", b"bbb")?;
+    fs.write_file(Path::new("/a.txt"), b"aaa")?;
+    fs.write_file(Path::new("/b.txt"), b"bbb")?;
     let stats = fs.debug_stats();
     crate::serial_println!("[memfs]   {}", stats);
-    fs.remove("/a.txt")?;
-    fs.remove("/b.txt")?;
+    fs.remove(Path::new("/a.txt"))?;
+    fs.remove(Path::new("/b.txt"))?;
 
     // --- Metadata tests ---
 
     // Test metadata timestamps are set.
-    fs.write_file("/meta.txt", b"metadata test")?;
-    let meta = fs.metadata("/meta.txt")?;
+    fs.write_file(Path::new("/meta.txt"), b"metadata test")?;
+    let meta = fs.metadata(Path::new("/meta.txt"))?;
     if meta.created_ns == 0 || meta.modified_ns == 0 || meta.accessed_ns == 0 {
         crate::serial_println!("[memfs]   FAILED: timestamps not set");
         return Err(KernelError::IoError);
@@ -1435,8 +1397,8 @@ pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[memfs]   metadata (timestamps, permissions): OK");
 
     // Test set_permissions.
-    fs.set_permissions("/meta.txt", 0o755)?;
-    let meta2 = fs.metadata("/meta.txt")?;
+    fs.set_permissions(Path::new("/meta.txt"), 0o755)?;
+    let meta2 = fs.metadata(Path::new("/meta.txt"))?;
     if meta2.permissions != 0o755 {
         crate::serial_println!("[memfs]   FAILED: permissions not updated");
         return Err(KernelError::IoError);
@@ -1444,8 +1406,8 @@ pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[memfs]   set_permissions: OK");
 
     // Test set_owner.
-    fs.set_owner("/meta.txt", 1000, 1000)?;
-    let meta3 = fs.metadata("/meta.txt")?;
+    fs.set_owner(Path::new("/meta.txt"), 1000, 1000)?;
+    let meta3 = fs.metadata(Path::new("/meta.txt"))?;
     if meta3.uid != 1000 || meta3.gid != 1000 {
         crate::serial_println!("[memfs]   FAILED: owner not updated");
         return Err(KernelError::IoError);
@@ -1453,8 +1415,8 @@ pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[memfs]   set_owner: OK");
 
     // Test immutable attribute.
-    fs.set_attributes("/meta.txt", FileAttr::IMMUTABLE)?;
-    match fs.write_file("/meta.txt", b"should fail") {
+    fs.set_attributes(Path::new("/meta.txt"), FileAttr::IMMUTABLE)?;
+    match fs.write_file(Path::new("/meta.txt"), b"should fail") {
         Err(KernelError::PermissionDenied) => {
             crate::serial_println!("[memfs]   immutable write rejected: OK");
         }
@@ -1463,7 +1425,7 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::IoError);
         }
     }
-    match fs.remove("/meta.txt") {
+    match fs.remove(Path::new("/meta.txt")) {
         Err(KernelError::PermissionDenied) => {
             crate::serial_println!("[memfs]   immutable remove rejected: OK");
         }
@@ -1473,11 +1435,11 @@ pub fn self_test() -> KernelResult<()> {
         }
     }
     // Clear immutable to clean up.
-    fs.set_attributes("/meta.txt", FileAttr::NONE)?;
+    fs.set_attributes(Path::new("/meta.txt"), FileAttr::NONE)?;
 
     // Test append-only attribute.
-    fs.set_attributes("/meta.txt", FileAttr::APPEND_ONLY)?;
-    match fs.truncate("/meta.txt", 0) {
+    fs.set_attributes(Path::new("/meta.txt"), FileAttr::APPEND_ONLY)?;
+    match fs.truncate(Path::new("/meta.txt"), 0) {
         Err(KernelError::PermissionDenied) => {
             crate::serial_println!("[memfs]   append-only truncate rejected: OK");
         }
@@ -1486,22 +1448,22 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::IoError);
         }
     }
-    fs.set_attributes("/meta.txt", FileAttr::NONE)?;
+    fs.set_attributes(Path::new("/meta.txt"), FileAttr::NONE)?;
 
     // Test extended attributes.
-    fs.set_xattr("/meta.txt", "user.tag", b"important")?;
-    let xval = fs.get_xattr("/meta.txt", "user.tag")?;
+    fs.set_xattr(Path::new("/meta.txt"), "user.tag", b"important")?;
+    let xval = fs.get_xattr(Path::new("/meta.txt"), "user.tag")?;
     if xval.as_slice() != b"important" {
         crate::serial_println!("[memfs]   FAILED: xattr value mismatch");
         return Err(KernelError::IoError);
     }
-    let xkeys = fs.list_xattrs("/meta.txt")?;
+    let xkeys = fs.list_xattrs(Path::new("/meta.txt"))?;
     if xkeys.len() != 1 || xkeys[0] != "user.tag" {
         crate::serial_println!("[memfs]   FAILED: xattr list mismatch");
         return Err(KernelError::IoError);
     }
-    fs.remove_xattr("/meta.txt", "user.tag")?;
-    let xkeys2 = fs.list_xattrs("/meta.txt")?;
+    fs.remove_xattr(Path::new("/meta.txt"), "user.tag")?;
+    let xkeys2 = fs.list_xattrs(Path::new("/meta.txt"))?;
     if !xkeys2.is_empty() {
         crate::serial_println!("[memfs]   FAILED: xattr not removed");
         return Err(KernelError::IoError);
@@ -1509,12 +1471,116 @@ pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[memfs]   extended attributes: OK");
 
     // Clean up.
-    fs.remove("/meta.txt")?;
+    fs.remove(Path::new("/meta.txt"))?;
 
     // --- Symlink tests ---
     test_symlinks(&mut fs)?;
 
+    // --- Non-UTF-8 name tests ---
+    test_non_utf8_names(&mut fs)?;
+
     crate::serial_println!("[memfs] Self-test PASSED");
+    Ok(())
+}
+
+/// A file whose name is not valid UTF-8 must be fully usable.
+///
+/// This is the end-to-end case the byte-`Path` conversion exists for.  Under
+/// the old `&str` API such a file could not even be *named* from kernel code,
+/// so every operation on it was unreachable; the only way one could come into
+/// existence was through a filesystem driver reading it off disk, and the
+/// drivers responded by *skipping* the entry — making the file invisible to
+/// `readdir` and its parent directory permanently un-`rmdir`-able (the entry
+/// is still on disk, so the directory is never empty, but nothing can name it
+/// to delete it).
+///
+/// The bytes chosen are deliberately hostile: `\xff` is never legal anywhere
+/// in a UTF-8 sequence, and `\xc3` is a legal *lead* byte whose continuation
+/// is missing — the two ways a lossy decoder fails.  Two names differing only
+/// in one such byte must stay distinct, which is what a `from_utf8_lossy`
+/// scheme cannot guarantee (both would become the same replacement char).
+#[allow(clippy::arithmetic_side_effects)]
+fn test_non_utf8_names(fs: &mut MemFs) -> KernelResult<()> {
+    let dir = Path::new(b"/nonutf8");
+    let a = Path::new(b"/nonutf8/na\xffme.txt");
+    let b = Path::new(b"/nonutf8/na\xfeme.txt");
+    let lossy_twin = Path::new(b"/nonutf8/na\xc3me.txt");
+
+    fs.mkdir(dir)?;
+
+    // Create, read back.
+    fs.write_file(a, b"alpha")?;
+    fs.write_file(b, b"beta")?;
+    fs.write_file(lossy_twin, b"gamma")?;
+
+    for (path, want) in [
+        (a, b"alpha".as_slice()),
+        (b, b"beta".as_slice()),
+        (lossy_twin, b"gamma".as_slice()),
+    ] {
+        if fs.read_file(path)? != want {
+            crate::serial_println!("[memfs]   FAILED: non-UTF-8 read-back mismatch");
+            return Err(KernelError::IoError);
+        }
+    }
+
+    // All three are distinct entries — a lossy decoder would have collapsed
+    // them into one.
+    let entries = fs.readdir(dir)?;
+    if entries.len() != 3 {
+        crate::serial_println!(
+            "[memfs]   FAILED: expected 3 non-UTF-8 entries, got {}",
+            entries.len()
+        );
+        return Err(KernelError::IoError);
+    }
+    let listed_a = entries
+        .iter()
+        .any(|e| e.name.as_bytes() == b"na\xffme.txt");
+    if !listed_a {
+        crate::serial_println!("[memfs]   FAILED: non-UTF-8 name missing from readdir");
+        return Err(KernelError::IoError);
+    }
+
+    // stat by the exact bytes.
+    if fs.stat(a)?.size != 5 {
+        crate::serial_println!("[memfs]   FAILED: non-UTF-8 stat size");
+        return Err(KernelError::IoError);
+    }
+
+    // A symlink whose *target* is non-UTF-8 resolves.
+    fs.symlink(Path::new(b"/nonutf8/link"), Path::new(b"na\xffme.txt"))?;
+    if fs.read_file(Path::new(b"/nonutf8/link"))? != b"alpha" {
+        crate::serial_println!("[memfs]   FAILED: symlink to non-UTF-8 target");
+        return Err(KernelError::IoError);
+    }
+    if fs.readlink(Path::new(b"/nonutf8/link"))?.as_bytes() != b"na\xffme.txt" {
+        crate::serial_println!("[memfs]   FAILED: readlink lost non-UTF-8 target bytes");
+        return Err(KernelError::IoError);
+    }
+
+    // Rename between two non-UTF-8 names.
+    let renamed = Path::new(b"/nonutf8/re\xf0named");
+    fs.rename(a, renamed)?;
+    if fs.read_file(renamed)? != b"alpha" {
+        crate::serial_println!("[memfs]   FAILED: non-UTF-8 rename lost data");
+        return Err(KernelError::IoError);
+    }
+    if fs.read_file(a).is_ok() {
+        crate::serial_println!("[memfs]   FAILED: old non-UTF-8 name survived rename");
+        return Err(KernelError::IoError);
+    }
+
+    // Delete everything and rmdir.  If any name were un-nameable the rmdir
+    // below would fail with "not empty" — that is the exact production
+    // symptom this test guards.
+    fs.remove(renamed)?;
+    fs.remove(b)?;
+    fs.remove(lossy_twin)?;
+    fs.remove(Path::new(b"/nonutf8/link"))?;
+    fs.rmdir(dir)?;
+
+    crate::serial_println!("[memfs]   non-UTF-8 names: OK");
     Ok(())
 }
 
@@ -1522,26 +1588,26 @@ pub fn self_test() -> KernelResult<()> {
 #[allow(clippy::arithmetic_side_effects)]
 fn test_symlinks(fs: &mut MemFs) -> KernelResult<()> {
     // Create a file and a symlink to it.
-    fs.write_file("/target.txt", b"symlink target data")?;
-    fs.symlink("/link.txt", "target.txt")?;
+    fs.write_file(Path::new("/target.txt"), b"symlink target data")?;
+    fs.symlink(Path::new("/link.txt"), Path::new("target.txt"))?;
 
     // readlink returns the stored target.
-    let target = fs.readlink("/link.txt")?;
-    if target != "target.txt" {
-        crate::serial_println!("[memfs]   FAILED: readlink got '{}'", target);
+    let target = fs.readlink(Path::new("/link.txt"))?;
+    if target.as_path() != Path::new("target.txt") {
+        crate::serial_println!("[memfs]   FAILED: readlink got '{}'", target.display());
         return Err(KernelError::IoError);
     }
     crate::serial_println!("[memfs]   symlink + readlink: OK");
 
     // stat follows the symlink (returns the target's info).
-    let st = fs.stat("/link.txt")?;
+    let st = fs.stat(Path::new("/link.txt"))?;
     if st.entry_type != EntryType::File || st.size != 19 {
         crate::serial_println!("[memfs]   FAILED: stat through symlink");
         return Err(KernelError::IoError);
     }
 
     // lstat does NOT follow (returns the symlink's own info).
-    let lst = fs.lstat("/link.txt")?;
+    let lst = fs.lstat(Path::new("/link.txt"))?;
     if lst.entry_type != EntryType::Symlink {
         crate::serial_println!("[memfs]   FAILED: lstat type not Symlink");
         return Err(KernelError::IoError);
@@ -1554,15 +1620,15 @@ fn test_symlinks(fs: &mut MemFs) -> KernelResult<()> {
     crate::serial_println!("[memfs]   stat vs lstat: OK");
 
     // read_file through symlink.
-    let data = fs.read_file("/link.txt")?;
+    let data = fs.read_file(Path::new("/link.txt"))?;
     if data.as_slice() != b"symlink target data" {
         crate::serial_println!("[memfs]   FAILED: read through symlink");
         return Err(KernelError::IoError);
     }
 
     // write_file through symlink overwrites the target.
-    fs.write_file("/link.txt", b"overwritten")?;
-    let data2 = fs.read_file("/target.txt")?;
+    fs.write_file(Path::new("/link.txt"), b"overwritten")?;
+    let data2 = fs.read_file(Path::new("/target.txt"))?;
     if data2.as_slice() != b"overwritten" {
         crate::serial_println!("[memfs]   FAILED: write through symlink");
         return Err(KernelError::IoError);
@@ -1570,13 +1636,13 @@ fn test_symlinks(fs: &mut MemFs) -> KernelResult<()> {
     crate::serial_println!("[memfs]   read/write through symlink: OK");
 
     // remove on the symlink removes the link, not the target.
-    fs.remove("/link.txt")?;
-    let target_data = fs.read_file("/target.txt")?;
+    fs.remove(Path::new("/link.txt"))?;
+    let target_data = fs.read_file(Path::new("/target.txt"))?;
     if target_data.as_slice() != b"overwritten" {
         crate::serial_println!("[memfs]   FAILED: remove symlink deleted target");
         return Err(KernelError::IoError);
     }
-    match fs.read_file("/link.txt") {
+    match fs.read_file(Path::new("/link.txt")) {
         Err(KernelError::NotFound) => {}
         _ => {
             crate::serial_println!("[memfs]   FAILED: symlink still exists after remove");
@@ -1586,17 +1652,17 @@ fn test_symlinks(fs: &mut MemFs) -> KernelResult<()> {
     crate::serial_println!("[memfs]   remove symlink (not target): OK");
 
     // Symlink to a directory.
-    fs.mkdir("/realdir")?;
-    fs.write_file("/realdir/file.txt", b"in realdir")?;
-    fs.symlink("/dirlink", "realdir")?;
-    let entries = fs.readdir("/dirlink")?;
-    let has_file = entries.iter().any(|e| e.name == "file.txt");
+    fs.mkdir(Path::new("/realdir"))?;
+    fs.write_file(Path::new("/realdir/file.txt"), b"in realdir")?;
+    fs.symlink(Path::new("/dirlink"), Path::new("realdir"))?;
+    let entries = fs.readdir(Path::new("/dirlink"))?;
+    let has_file = entries.iter().any(|e| e.name.as_path() == Path::new("file.txt"));
     if !has_file {
         crate::serial_println!("[memfs]   FAILED: readdir through dir symlink");
         return Err(KernelError::IoError);
     }
     // Access file through the dir symlink.
-    let nested = fs.read_file("/dirlink/file.txt")?;
+    let nested = fs.read_file(Path::new("/dirlink/file.txt"))?;
     if nested.as_slice() != b"in realdir" {
         crate::serial_println!("[memfs]   FAILED: read file through dir symlink");
         return Err(KernelError::IoError);
@@ -1604,9 +1670,9 @@ fn test_symlinks(fs: &mut MemFs) -> KernelResult<()> {
     crate::serial_println!("[memfs]   directory symlink traversal: OK");
 
     // Symlink chain: a → b → target.txt
-    fs.symlink("/chain_b", "target.txt")?;
-    fs.symlink("/chain_a", "chain_b")?;
-    let chain_data = fs.read_file("/chain_a")?;
+    fs.symlink(Path::new("/chain_b"), Path::new("target.txt"))?;
+    fs.symlink(Path::new("/chain_a"), Path::new("chain_b"))?;
+    let chain_data = fs.read_file(Path::new("/chain_a"))?;
     if chain_data.as_slice() != b"overwritten" {
         crate::serial_println!("[memfs]   FAILED: symlink chain");
         return Err(KernelError::IoError);
@@ -1614,9 +1680,9 @@ fn test_symlinks(fs: &mut MemFs) -> KernelResult<()> {
     crate::serial_println!("[memfs]   symlink chain (a->b->file): OK");
 
     // Circular symlink detection.
-    fs.symlink("/circ_a", "circ_b")?;
-    fs.symlink("/circ_b", "circ_a")?;
-    match fs.read_file("/circ_a") {
+    fs.symlink(Path::new("/circ_a"), Path::new("circ_b"))?;
+    fs.symlink(Path::new("/circ_b"), Path::new("circ_a"))?;
+    match fs.read_file(Path::new("/circ_a")) {
         Err(KernelError::TooManyLinks) => {
             crate::serial_println!("[memfs]   circular symlink detected: OK");
         }
@@ -1631,8 +1697,8 @@ fn test_symlinks(fs: &mut MemFs) -> KernelResult<()> {
     }
 
     // Dangling symlink.
-    fs.symlink("/dangling", "nonexistent.txt")?;
-    match fs.read_file("/dangling") {
+    fs.symlink(Path::new("/dangling"), Path::new("nonexistent.txt"))?;
+    match fs.read_file(Path::new("/dangling")) {
         Err(KernelError::NotFound) => {
             crate::serial_println!("[memfs]   dangling symlink -> NotFound: OK");
         }
@@ -1643,8 +1709,8 @@ fn test_symlinks(fs: &mut MemFs) -> KernelResult<()> {
     }
 
     // Absolute symlink within the filesystem.
-    fs.symlink("/abs_link", "/target.txt")?;
-    let abs_data = fs.read_file("/abs_link")?;
+    fs.symlink(Path::new("/abs_link"), Path::new("/target.txt"))?;
+    let abs_data = fs.read_file(Path::new("/abs_link"))?;
     if abs_data.as_slice() != b"overwritten" {
         crate::serial_println!("[memfs]   FAILED: absolute symlink");
         return Err(KernelError::IoError);
@@ -1652,9 +1718,9 @@ fn test_symlinks(fs: &mut MemFs) -> KernelResult<()> {
     crate::serial_println!("[memfs]   absolute symlink: OK");
 
     // Relative symlink with .. traversal.
-    fs.mkdir("/subdir")?;
-    fs.symlink("/subdir/up_link", "../target.txt")?;
-    let up_data = fs.read_file("/subdir/up_link")?;
+    fs.mkdir(Path::new("/subdir"))?;
+    fs.symlink(Path::new("/subdir/up_link"), Path::new("../target.txt"))?;
+    let up_data = fs.read_file(Path::new("/subdir/up_link"))?;
     if up_data.as_slice() != b"overwritten" {
         crate::serial_println!("[memfs]   FAILED: relative symlink with ..");
         return Err(KernelError::IoError);
@@ -1662,8 +1728,8 @@ fn test_symlinks(fs: &mut MemFs) -> KernelResult<()> {
     crate::serial_println!("[memfs]   relative symlink (..): OK");
 
     // Symlinks appear as Symlink type in readdir.
-    let root_entries = fs.readdir("/")?;
-    let link_entry = root_entries.iter().find(|e| e.name == "abs_link");
+    let root_entries = fs.readdir(Path::new("/"))?;
+    let link_entry = root_entries.iter().find(|e| e.name.as_path() == Path::new("abs_link"));
     match link_entry {
         Some(e) if e.entry_type == EntryType::Symlink => {
             crate::serial_println!("[memfs]   symlink in readdir: OK");
@@ -1680,8 +1746,8 @@ fn test_symlinks(fs: &mut MemFs) -> KernelResult<()> {
     // its name in the parent).  Each immediate subdirectory adds one (its
     // ".." back-reference); files and symlinks inside it do NOT.  Removing a
     // subdirectory decrements the count again.
-    fs.mkdir("/nlinkdir")?;
-    let m_empty = fs.metadata("/nlinkdir")?;
+    fs.mkdir(Path::new("/nlinkdir"))?;
+    let m_empty = fs.metadata(Path::new("/nlinkdir"))?;
     if m_empty.nlinks != 2 {
         crate::serial_println!(
             "[memfs]   FAILED: empty dir nlink expected 2, got {}",
@@ -1690,9 +1756,9 @@ fn test_symlinks(fs: &mut MemFs) -> KernelResult<()> {
         return Err(KernelError::IoError);
     }
     // A regular file and a symlink must NOT bump the parent's link count.
-    fs.write_file("/nlinkdir/file.txt", b"x")?;
-    fs.symlink("/nlinkdir/lnk", "file.txt")?;
-    let m_file = fs.metadata("/nlinkdir")?;
+    fs.write_file(Path::new("/nlinkdir/file.txt"), b"x")?;
+    fs.symlink(Path::new("/nlinkdir/lnk"), Path::new("file.txt"))?;
+    let m_file = fs.metadata(Path::new("/nlinkdir"))?;
     if m_file.nlinks != 2 {
         crate::serial_println!(
             "[memfs]   FAILED: dir nlink with file+symlink expected 2, got {}",
@@ -1701,9 +1767,9 @@ fn test_symlinks(fs: &mut MemFs) -> KernelResult<()> {
         return Err(KernelError::IoError);
     }
     // Two subdirectories bring it to 4.
-    fs.mkdir("/nlinkdir/sub1")?;
-    fs.mkdir("/nlinkdir/sub2")?;
-    let m_subs = fs.metadata("/nlinkdir")?;
+    fs.mkdir(Path::new("/nlinkdir/sub1"))?;
+    fs.mkdir(Path::new("/nlinkdir/sub2"))?;
+    let m_subs = fs.metadata(Path::new("/nlinkdir"))?;
     if m_subs.nlinks != 4 {
         crate::serial_println!(
             "[memfs]   FAILED: dir nlink with 2 subdirs expected 4, got {}",
@@ -1712,8 +1778,8 @@ fn test_symlinks(fs: &mut MemFs) -> KernelResult<()> {
         return Err(KernelError::IoError);
     }
     // Removing one subdirectory drops it back to 3.
-    fs.rmdir("/nlinkdir/sub1")?;
-    let m_after = fs.metadata("/nlinkdir")?;
+    fs.rmdir(Path::new("/nlinkdir/sub1"))?;
+    let m_after = fs.metadata(Path::new("/nlinkdir"))?;
     if m_after.nlinks != 3 {
         crate::serial_println!(
             "[memfs]   FAILED: dir nlink after rmdir expected 3, got {}",
@@ -1722,7 +1788,7 @@ fn test_symlinks(fs: &mut MemFs) -> KernelResult<()> {
         return Err(KernelError::IoError);
     }
     // A regular file still reports a single link.
-    let m_regfile = fs.metadata("/nlinkdir/file.txt")?;
+    let m_regfile = fs.metadata(Path::new("/nlinkdir/file.txt"))?;
     if m_regfile.nlinks != 1 {
         crate::serial_println!(
             "[memfs]   FAILED: file nlink expected 1, got {}",
@@ -1732,24 +1798,24 @@ fn test_symlinks(fs: &mut MemFs) -> KernelResult<()> {
     }
     crate::serial_println!("[memfs]   directory link count (st_nlink): OK");
     // Clean up the nlink fixtures.
-    fs.remove("/nlinkdir/lnk")?;
-    fs.remove("/nlinkdir/file.txt")?;
-    fs.rmdir("/nlinkdir/sub2")?;
-    fs.rmdir("/nlinkdir")?;
+    fs.remove(Path::new("/nlinkdir/lnk"))?;
+    fs.remove(Path::new("/nlinkdir/file.txt"))?;
+    fs.rmdir(Path::new("/nlinkdir/sub2"))?;
+    fs.rmdir(Path::new("/nlinkdir"))?;
 
     // Clean up.
-    fs.remove("/target.txt")?;
-    fs.remove("/realdir/file.txt")?;
-    fs.rmdir("/realdir")?;
-    fs.remove("/dirlink")?;
-    fs.remove("/chain_a")?;
-    fs.remove("/chain_b")?;
-    fs.remove("/circ_a")?;
-    fs.remove("/circ_b")?;
-    fs.remove("/dangling")?;
-    fs.remove("/abs_link")?;
-    fs.remove("/subdir/up_link")?;
-    fs.rmdir("/subdir")?;
+    fs.remove(Path::new("/target.txt"))?;
+    fs.remove(Path::new("/realdir/file.txt"))?;
+    fs.rmdir(Path::new("/realdir"))?;
+    fs.remove(Path::new("/dirlink"))?;
+    fs.remove(Path::new("/chain_a"))?;
+    fs.remove(Path::new("/chain_b"))?;
+    fs.remove(Path::new("/circ_a"))?;
+    fs.remove(Path::new("/circ_b"))?;
+    fs.remove(Path::new("/dangling"))?;
+    fs.remove(Path::new("/abs_link"))?;
+    fs.remove(Path::new("/subdir/up_link"))?;
+    fs.rmdir(Path::new("/subdir"))?;
 
     Ok(())
 }

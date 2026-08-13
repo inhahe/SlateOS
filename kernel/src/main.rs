@@ -4682,6 +4682,12 @@ extern "C" fn kernel_main() -> ! {
     // is set, and an IDT gate — unlike SYSCALL — does not clear DF for us.
     idt::df_on_entry_self_test();
 
+    // Step 22e⅞+: Serial print re-entrancy self-test.
+    // Guards the escape hatch that keeps a fault taken *during* a print from
+    // deadlocking on the console lock — the difference between a diagnosable
+    // crash and an evidence-free wedge.
+    serial::reentrancy_self_test();
+
     // Step 22e⅞+: Memory poison self-test.
     // Verifies poison fill/verify for use-after-free and overflow detection.
     mm::poison::self_test();

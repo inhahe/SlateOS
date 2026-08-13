@@ -78,11 +78,44 @@ string operation reversed. Each one scribbles over the memory immediately
   does not reproduce in early boot), the damage lands at an address depending on
   which instruction the interrupt preempted, the corruption is silent and its
   detection is arbitrarily delayed, and the per-boot probability tracks "did any
-  thread happen to leave DF set at a tick boundary" — which would explain a base
-  rate near 1-in-120 boots. **This is a hypothesis, not a confirmed diagnosis.**
-  It is not yet proven that any userspace code in the Path-Z rootfs actually
-  leaves DF set; the bug above is real and worth fixing on its own terms
-  regardless. If B-KNULLJUMP survives this fix, the hypothesis is disproved.
+  thread happen to be inside a DF = 1 window at a tick boundary" — which is the
+  right shape for a base rate near 1-in-120 boots.
+
+**The precondition is confirmed, not assumed.** Disassembling the *exact*
+`libc.so.6` that `scripts/create-ext4-rootfs.sh` stages into `rootfs.ext4` finds
+one `std` in the whole library, and it is in `__memmove_erms`:
+
+```
+  ba8e0:  endbr64                     <-- __memmove_erms
+  ba8e4:  mov    %rdi,%rax
+  ba8ef:  cmp    %rsi,%rdi
+  ba8f2:  jb     ba8ff                ; dst < src  -> forward
+  ba8f6:  lea    (%rsi,%rcx,1),%rdx
+  ba8fd:  jb     ba902                ; dst < src+n -> overlapping, backward
+  ba8ff:  rep movsb                   ; forward path
+  ba901:  ret
+  ba902:  lea    -0x1(%rdi,%rcx,1),%rdi
+  ba907:  lea    -0x1(%rsi,%rcx,1),%rsi
+  ba90c:  std                         <-- DF = 1 from here …
+  ba90d:  rep movsb
+  ba90f:  cld                         <-- … to here
+  ba910:  ret
+```
+
+So any ring-3 `memmove(dst, src, n)` with `src < dst < src + n` — an ordinary
+forward-shifting overlapped copy, which is what stdio buffer compaction and
+insert-at-front do — runs with **DF = 1 across the whole `rep movsb`**. That
+window is not an instruction or two: `rep movsb` is architecturally interruptible
+between iterations (RIP stays on the prefix so it can resume), so the window is
+*proportional to the copy length*. A large overlapping memmove is a wide open
+door for a timer tick.
+
+**Still unproven: that this is what actually causes B-KNULLJUMP.** What is
+established is that (a) the kernel entered with whatever DF ring 3 had, and (b)
+ring-3 glibc demonstrably sets DF for interruptible, length-proportional
+windows. What is *not* established is that the observed corruption came through
+this path rather than another. The bug above is worth fixing on its own terms
+regardless. If B-KNULLJUMP survives this fix, the hypothesis is disproved.
 
 **Note the asymmetry that hid this.** The SYSCALL path was already correct:
 `kernel/src/syscall/entry.rs` programs `IA32_FMASK` bit 10, so the CPU clears DF

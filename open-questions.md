@@ -462,6 +462,45 @@ operator-decision-worthy rather than mine to take unilaterally.
 catches `[kasan] CRITICAL:` and documents the raised `SOAK_TIMEOUT`),
 `design-decisions.md` §107/§119, and `known-issues.md` → `B-KNULLJUMP-SIGNAL`.
 
+### UPDATE 2026-08-12 — a concrete suspect appeared, which adds a much cheaper option E
+
+Since this question was written, a specific candidate root cause for
+B-KNULLJUMP was found and fixed: `known-issues.md` →
+`B-NO-CLD-ON-INTERRUPT-ENTRY`. No IDT stub cleared the direction flag, so the
+kernel ran with whatever DF ring 3 left set, and every `rep`-string
+operation — including compiler-emitted `memset`/`memcpy` — walked backwards,
+writing *before* each intended destination.
+
+The precondition is confirmed rather than assumed: the exact `libc.so.6` staged
+into `rootfs.ext4` contains `std; rep movsb; cld` in `__memmove_erms`'s
+overlapping-backward path, so ring 3 demonstrably holds DF = 1 across an
+interruptible window whose width is proportional to the copy length.
+
+**This changes the economics of the question.** The original framing was "we
+have no lead, so we must sample blindly, and instrumentation is the only way to
+localize a catch." There is now a *falsifiable hypothesis*, and testing a
+hypothesis is far cheaper than searching without one:
+
+- **E — soak the ordinary (uninstrumented) fixed kernel and see whether
+  B-KNULLJUMP stops.** *Pro:* no instrumentation cost at all, so it runs at the
+  ~283–318 s per-boot rate the existing 100-iteration baseline was measured
+  at — directly comparable, same codegen, same timing, no release-build gamble.
+  ~250 boots (≈2× the 1-in-120 base rate, ~21 h unattended) coming back clean
+  would be strong evidence the fix landed; a single catch immediately falsifies
+  the hypothesis and hands the instrumented profile a much better-motivated job.
+  Either outcome is informative, which is not true of options A–D.
+  *Con:* a clean result is statistical, not proof of causation — it cannot
+  distinguish "fixed" from "got lucky", and the confidence is only as good as
+  the 1-in-120 estimate.
+
+**Claude's revised recommendation: E first, then re-ask this question.** The
+instrumented profile stays exactly where option D leaves it — built, gated and
+ready — but there is no longer a reason to spend a week of machine time on a
+blind search *before* spending a night on a targeted one. If E comes back
+clean, this question may be moot; if it catches, A–D are all still available and
+better aimed. I have started E, since it commits nothing and reverses freely;
+A (booting an optimized kernel for the first time) remains yours to call.
+
 
 ## Q44 — libc reports "all Linux capabilities held" to every process because nothing maps our `(ResourceType, Rights)` handles onto `CAP_*` bits. Which mapping do you want? — Status: OPEN
 

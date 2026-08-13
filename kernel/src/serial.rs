@@ -180,20 +180,81 @@ pub unsafe fn init() {
 /// contention is still fine: the other CPU also runs IRQ-off and releases
 /// promptly, so a waiter only spins briefly.
 ///
+/// EXCEPTION RE-ENTRANCY FIX (2026-08-12): the interrupt-disabling above is
+/// necessary but **not sufficient**, because `cli` does not mask *exceptions*.
+/// A `#PF`, `#GP` or `#DF` taken while this CPU is mid-write re-enters `_print`
+/// from the fault handler and spins on a lock only the interrupted frame can
+/// release. That is not hypothetical: it is the observed shape of
+/// `B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT`, where the
+/// last thing on the wire was a half-formatted `EXCEPTION: Page Fault (#PF) at`
+/// — the fault handler's own print, cut off mid-`{:#x}`. The wedge then
+/// destroys the evidence, because the token the operator most needs (the
+/// faulting RIP) is precisely the one that never made it out.
+///
+/// So `_print` records, per CPU, that it is inside the critical section, and a
+/// nested call from the same CPU writes through the lock-free emergency port
+/// instead of blocking. The nested line interleaves with the outer one, which
+/// is ugly but is unambiguously better than silence: a garbled report can be
+/// read, a deadlock cannot.
+///
 /// This is a function (not inline in the macro) so that `?`/`await`/`return`
 /// used inside a `serial_println!(...)` format argument is evaluated in the
 /// *caller's* context, exactly as with the standard-library `print!` family.
 #[doc(hidden)]
 pub fn _print(args: core::fmt::Arguments<'_>) {
     use core::fmt::Write;
-    OUTPUT_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    use core::sync::atomic::Ordering;
+
+    OUTPUT_COUNT.fetch_add(1, Ordering::Relaxed);
     crate::cpu::without_interrupts(|| {
-        // If the lock is poisoned (shouldn't happen with spinlocks) or the
-        // write fails, silently drop the output rather than panicking inside a
-        // print path.
-        let _ = SERIAL.lock().write_fmt(args);
+        let cpu = crate::smp::current_cpu_index();
+        // `current_cpu_index` returns 0 before SMP init and is bounded by
+        // MAX_CPUS after it, but index defensively: this is the deadlock-escape
+        // path, and it must not become a new panic site.
+        let Some(busy) = IN_PRINT.get(cpu) else {
+            // No slot for this CPU — take the always-safe route rather than
+            // risking the lock.
+            let _ = SerialPort::emergency().write_fmt(args);
+            return;
+        };
+
+        if busy.load(Ordering::Relaxed) {
+            // Re-entered from an exception that interrupted this CPU's own
+            // print. The lock is held by a frame below us and will not be
+            // released until we return, so taking it would wedge forever.
+            let _ = SerialPort::emergency().write_fmt(args);
+            return;
+        }
+
+        // Claim the flag *before* taking the lock, not after. If it were set
+        // afterwards there would be a window — however short — in which this
+        // CPU holds the lock but a nested exception would not recognise it and
+        // would spin. Claiming first is safe in the other direction too: while
+        // this CPU merely *waits* for the lock, a nested print still correctly
+        // takes the emergency path, because "this CPU is somewhere inside
+        // `_print`" is exactly the condition that makes blocking unsafe. The
+        // flag is per-CPU, so another CPU's concurrent print is unaffected.
+        busy.store(true, Ordering::Relaxed);
+        {
+            // If the write fails, silently drop the output rather than
+            // panicking inside a print path.
+            let mut guard = SERIAL.lock();
+            let _ = guard.write_fmt(args);
+            // Clear before the guard drops, so the flag is never observably
+            // stale while another CPU could already hold the lock.
+            busy.store(false, Ordering::Relaxed);
+            drop(guard);
+        }
     });
 }
+
+/// Per-CPU "this CPU is inside [`_print`]" flags.
+///
+/// Only ever read and written by the CPU that owns the slot (under `cli`), so
+/// `Relaxed` ordering suffices — there is no cross-CPU handoff to order against,
+/// and the lock itself provides the memory barriers that matter.
+static IN_PRINT: [core::sync::atomic::AtomicBool; crate::smp::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicBool::new(false) }; crate::smp::MAX_CPUS];
 
 /// Monotonic count of completed [`_print`] calls.
 ///
@@ -215,6 +276,62 @@ static OUTPUT_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU
 /// Read the serial output-progress counter (see [`OUTPUT_COUNT`]).
 pub fn output_count() -> u64 {
     OUTPUT_COUNT.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// A `Display` that raises `#BP` while it is being formatted.
+///
+/// This is the whole point of the self-test below: it reproduces the *exact*
+/// shape of the real deadlock, which is not "an interrupt arrives during a
+/// print" (that one is already excluded by the `cli`) but "the act of
+/// formatting an argument faults". A fault is not maskable, so it re-enters
+/// `_print` from a frame that sits on top of the lock holder.
+struct FaultWhileFormatting;
+
+impl fmt::Display for FaultWhileFormatting {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // SAFETY: `int3` raises #BP, whose handler is installed by `idt::init`,
+        // prints one line and returns normally. It clobbers nothing.
+        unsafe {
+            core::arch::asm!("int3", options(nostack, preserves_flags));
+        }
+        f.write_str("<survived>")
+    }
+}
+
+/// Boot self-test: prove that a fault taken *during* a serial write does not
+/// deadlock the printer.
+///
+/// Must run after `idt::init` (it relies on a working `#BP` handler, which
+/// itself prints — that is what makes the re-entry happen).
+///
+/// **Failure mode is a hang, not an assertion.** That is unavoidable and is
+/// the point: the bug being guarded against *is* a hang, so the only faithful
+/// test is one that would hang. `scripts/boot-test.sh` catches it through its
+/// stall detector, and the last line on the wire names this test, so a
+/// regression is immediately attributable rather than appearing as a mystery
+/// wedge thousands of lines later.
+pub fn reentrancy_self_test() {
+    crate::serial_println!("[serial] Running print re-entrancy self-test...");
+    crate::serial_println!(
+        "[serial]   (the #BP line below is emitted from inside this line's own \
+         formatting, through the lock-free emergency port — the interleaving is \
+         expected)"
+    );
+
+    let before = output_count();
+    crate::serial_println!("[serial]   fault during formatting: {FaultWhileFormatting}");
+
+    // Reaching here at all is the primary result. The counter check adds a
+    // little: it confirms the nested print really happened rather than the
+    // handler having been silently skipped, which would make the test vacuous.
+    let after = output_count();
+    assert!(
+        after >= before.saturating_add(2),
+        "serial: the nested print never ran — re-entrancy self-test is vacuous"
+    );
+
+    crate::serial_println!("[serial]   nested print completed without deadlock: OK");
+    crate::serial_println!("[serial] Print re-entrancy self-test PASSED");
 }
 
 /// Print to the serial console (COM1).

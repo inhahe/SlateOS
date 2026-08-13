@@ -26,6 +26,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::KernelResult;
+use crate::fs::path::{Path, PathBuf};
 use crate::fs::{EntryType, Vfs};
 use crate::serial_println;
 
@@ -37,9 +38,9 @@ use crate::serial_println;
 #[derive(Debug, Clone)]
 pub struct BatchItem {
     /// Source path.
-    pub src: String,
+    pub src: PathBuf,
     /// Destination path (empty for delete operations).
-    pub dst: String,
+    pub dst: PathBuf,
     /// Whether this item succeeded.
     pub ok: bool,
     /// Error message (empty if ok).
@@ -60,10 +61,10 @@ pub struct BatchResult {
 }
 
 impl BatchResult {
-    fn record_ok(&mut self, src: &str, dst: &str, bytes: u64) {
+    fn record_ok(&mut self, src: &Path, dst: &Path, bytes: u64) {
         self.items.push(BatchItem {
-            src: String::from(src),
-            dst: String::from(dst),
+            src: src.to_path_buf(),
+            dst: dst.to_path_buf(),
             ok: true,
             error: String::new(),
         });
@@ -71,10 +72,10 @@ impl BatchResult {
         self.bytes = self.bytes.saturating_add(bytes);
     }
 
-    fn record_err(&mut self, src: &str, dst: &str, err: &str) {
+    fn record_err(&mut self, src: &Path, dst: &Path, err: &str) {
         self.items.push(BatchItem {
-            src: String::from(src),
-            dst: String::from(dst),
+            src: src.to_path_buf(),
+            dst: dst.to_path_buf(),
             ok: false,
             error: String::from(err),
         });
@@ -136,19 +137,32 @@ pub fn stats() -> (u64, u64, u64, u64) {
 
 /// Rename files in a directory matching a glob pattern.
 ///
-/// `pattern` is a simple glob (e.g., "*.txt") matched against filenames
-/// in `dir`.  `replacement` is an extension or pattern to replace with
-/// (e.g., "*.bak" replaces the extension).
+/// `pattern` is a glob (e.g., `*.txt`) matched against filenames in `dir`.
+/// `replacement` is an extension or pattern to replace with (e.g., `*.bak`
+/// replaces the extension).
 ///
 /// Supports:
 /// - Extension replacement: `rename("/dir", "*.txt", "*.bak")`
 /// - Prefix replacement: `rename("/dir", "old_*", "new_*")`
-pub fn rename(dir: &str, pattern: &str, replacement: &str, opts: &BatchOptions) -> KernelResult<BatchResult> {
+///
+/// The pattern and replacement are byte strings, not text: they are matched
+/// against filenames, and a filename is a byte string that need not be valid
+/// UTF-8.  Accepting `impl AsRef<[u8]>` keeps `&str` literals working while
+/// letting a caller pass a pattern that came off the wire or out of a
+/// directory listing.
+pub fn rename<D: AsRef<Path> + ?Sized, G: AsRef<[u8]> + ?Sized, R: AsRef<[u8]> + ?Sized>(
+    dir: &D,
+    pattern: &G,
+    replacement: &R,
+    opts: &BatchOptions,
+) -> KernelResult<BatchResult> {
+    let dir = dir.as_ref();
+    let (pattern, replacement) = (pattern.as_ref(), replacement.as_ref());
     let entries = Vfs::readdir(dir)?;
     let mut result = BatchResult::default();
 
     for entry in &entries {
-        if entry.name == "." || entry.name == ".." {
+        if entry.name.as_path() == Path::new(".") || entry.name.as_path() == Path::new("..") {
             continue;
         }
         if entry.entry_type != EntryType::File {
@@ -156,8 +170,8 @@ pub fn rename(dir: &str, pattern: &str, replacement: &str, opts: &BatchOptions) 
         }
 
         if let Some(new_name) = apply_rename_pattern(&entry.name, pattern, replacement) {
-            let src = alloc::format!("{}/{}", dir, entry.name);
-            let dst = alloc::format!("{}/{}", dir, new_name);
+            let src = dir.join(&entry.name);
+            let dst = dir.join(&new_name);
 
             if !opts.dry_run {
                 // Check for conflicts.
@@ -194,7 +208,9 @@ pub fn rename(dir: &str, pattern: &str, replacement: &str, opts: &BatchOptions) 
 
     serial_println!(
         "[batch] Rename in {}: {} succeeded, {} failed",
-        dir, result.succeeded, result.failed,
+        dir.display(),
+        result.succeeded,
+        result.failed,
     );
 
     Ok(result)
@@ -205,7 +221,12 @@ pub fn rename(dir: &str, pattern: &str, replacement: &str, opts: &BatchOptions) 
 // ---------------------------------------------------------------------------
 
 /// Copy multiple files to a destination directory.
-pub fn copy(paths: &[&str], dest_dir: &str, opts: &BatchOptions) -> KernelResult<BatchResult> {
+pub fn copy<P: AsRef<Path>, D: AsRef<Path> + ?Sized>(
+    paths: &[P],
+    dest_dir: &D,
+    opts: &BatchOptions,
+) -> KernelResult<BatchResult> {
+    let dest_dir = dest_dir.as_ref();
     let mut result = BatchResult::default();
 
     if !opts.dry_run {
@@ -213,8 +234,15 @@ pub fn copy(paths: &[&str], dest_dir: &str, opts: &BatchOptions) -> KernelResult
     }
 
     for src in paths {
-        let filename = src.rsplit('/').next().unwrap_or(src);
-        let dst = alloc::format!("{}/{}", dest_dir, filename);
+        let src = src.as_ref();
+        // A source with no final component (`/`, or the empty path) names no
+        // file to copy; skipping it is the only reading that does not invent
+        // a destination name.
+        let Some(filename) = src.file_name() else {
+            result.record_err(src, Path::new(""), "source has no filename");
+            continue;
+        };
+        let dst = dest_dir.join(filename);
 
         // Handle conflicts.
         let final_dst = if Vfs::metadata(&dst).is_ok() {
@@ -248,7 +276,10 @@ pub fn copy(paths: &[&str], dest_dir: &str, opts: &BatchOptions) -> KernelResult
 
     serial_println!(
         "[batch] Copy {} files to {}: {} ok, {} failed",
-        paths.len(), dest_dir, result.succeeded, result.failed,
+        paths.len(),
+        dest_dir.display(),
+        result.succeeded,
+        result.failed,
     );
 
     Ok(result)
@@ -259,7 +290,12 @@ pub fn copy(paths: &[&str], dest_dir: &str, opts: &BatchOptions) -> KernelResult
 // ---------------------------------------------------------------------------
 
 /// Move multiple files to a destination directory.
-pub fn move_files(paths: &[&str], dest_dir: &str, opts: &BatchOptions) -> KernelResult<BatchResult> {
+pub fn move_files<P: AsRef<Path>, D: AsRef<Path> + ?Sized>(
+    paths: &[P],
+    dest_dir: &D,
+    opts: &BatchOptions,
+) -> KernelResult<BatchResult> {
+    let dest_dir = dest_dir.as_ref();
     let mut result = BatchResult::default();
 
     if !opts.dry_run {
@@ -267,8 +303,12 @@ pub fn move_files(paths: &[&str], dest_dir: &str, opts: &BatchOptions) -> Kernel
     }
 
     for src in paths {
-        let filename = src.rsplit('/').next().unwrap_or(src);
-        let dst = alloc::format!("{}/{}", dest_dir, filename);
+        let src = src.as_ref();
+        let Some(filename) = src.file_name() else {
+            result.record_err(src, Path::new(""), "source has no filename");
+            continue;
+        };
+        let dst = dest_dir.join(filename);
 
         let final_dst = if Vfs::metadata(&dst).is_ok() {
             match opts.on_conflict {
@@ -309,7 +349,10 @@ pub fn move_files(paths: &[&str], dest_dir: &str, opts: &BatchOptions) -> Kernel
 
     serial_println!(
         "[batch] Move {} files to {}: {} ok, {} failed",
-        paths.len(), dest_dir, result.succeeded, result.failed,
+        paths.len(),
+        dest_dir.display(),
+        result.succeeded,
+        result.failed,
     );
 
     Ok(result)
@@ -320,16 +363,20 @@ pub fn move_files(paths: &[&str], dest_dir: &str, opts: &BatchOptions) -> Kernel
 // ---------------------------------------------------------------------------
 
 /// Delete multiple files.
-pub fn delete(paths: &[&str], opts: &BatchOptions) -> KernelResult<BatchResult> {
+pub fn delete<P: AsRef<Path>>(paths: &[P], opts: &BatchOptions) -> KernelResult<BatchResult> {
     let mut result = BatchResult::default();
 
+    // A delete has no destination; the empty path records that absence
+    // without inventing a name.
+    let none = Path::new("");
     for path in paths {
+        let path = path.as_ref();
         if opts.dry_run {
-            result.record_ok(path, "", 0);
+            result.record_ok(path, none, 0);
         } else {
             match Vfs::remove(path) {
-                Ok(()) => result.record_ok(path, "", 0),
-                Err(e) => result.record_err(path, "", &alloc::format!("{:?}", e)),
+                Ok(()) => result.record_ok(path, none, 0),
+                Err(e) => result.record_err(path, none, &alloc::format!("{:?}", e)),
             }
         }
     }
@@ -348,20 +395,26 @@ pub fn delete(paths: &[&str], opts: &BatchOptions) -> KernelResult<BatchResult> 
 // Glob-based file collection
 // ---------------------------------------------------------------------------
 
-/// Collect files in a directory matching a simple glob pattern.
+/// Collect files in a directory matching a glob pattern.
 ///
-/// Supports `*` wildcard matching and `?` single-character matching.
-pub fn glob_files(dir: &str, pattern: &str) -> KernelResult<Vec<String>> {
+/// See [`crate::fs::vfs::glob_match`] for the supported syntax.  Matching is
+/// case-sensitive because the filesystem is: two names differing only in case
+/// are two different files, and a glob must say so.
+pub fn glob_files<D: AsRef<Path> + ?Sized, G: AsRef<[u8]> + ?Sized>(
+    dir: &D,
+    pattern: &G,
+) -> KernelResult<Vec<PathBuf>> {
+    let dir = dir.as_ref();
+    let pattern = pattern.as_ref();
     let entries = Vfs::readdir(dir)?;
     let mut matched = Vec::new();
 
     for entry in &entries {
-        if entry.name == "." || entry.name == ".." {
+        if entry.name.as_path() == Path::new(".") || entry.name.as_path() == Path::new("..") {
             continue;
         }
-        if glob_match(pattern, &entry.name) {
-            let path = alloc::format!("{}/{}", dir, entry.name);
-            matched.push(path);
+        if crate::fs::vfs::glob_match(entry.name.as_bytes(), pattern, false) {
+            matched.push(dir.join(&entry.name));
         }
     }
 
@@ -377,99 +430,82 @@ pub fn glob_files(dir: &str, pattern: &str) -> KernelResult<Vec<String>> {
 /// Patterns use `*` as wildcard:
 /// - `*.txt` → `*.bak`: replaces extension
 /// - `old_*` → `new_*`: replaces prefix
-fn apply_rename_pattern(name: &str, pattern: &str, replacement: &str) -> Option<String> {
+///
+/// Operates on bytes throughout: the name comes from a directory listing and
+/// need not be valid UTF-8, and the byte slicing here is index-free so a
+/// multi-byte sequence cannot be split.
+fn apply_rename_pattern(name: &Path, pattern: &[u8], replacement: &[u8]) -> Option<PathBuf> {
     // First check if the name matches the pattern.
-    if !glob_match(pattern, name) {
+    if !crate::fs::vfs::glob_match(name.as_bytes(), pattern, false) {
         return None;
     }
+    let name = name.as_bytes();
 
-    // Extension replacement: *.ext1 → *.ext2
-    if pattern.starts_with("*.") && replacement.starts_with("*.") {
-        let old_ext = &pattern[1..]; // ".ext1"
-        let new_ext = &replacement[1..]; // ".ext2"
-        if let Some(base) = name.strip_suffix(old_ext) {
-            return Some(alloc::format!("{}{}", base, new_ext));
+    // Extension replacement: *.ext1 → *.ext2.  Both `*.` prefixes are dropped
+    // and the leading `.` kept, so the suffix compared is `.ext1`.
+    if let (Some(old_ext), Some(new_ext)) = (
+        pattern.strip_prefix(b"*"),
+        replacement.strip_prefix(b"*"),
+    ) {
+        if old_ext.starts_with(b".") && new_ext.starts_with(b".") {
+            if let Some(base) = name.strip_suffix(old_ext) {
+                let mut out = PathBuf::from(base);
+                out.extend_bytes(new_ext);
+                return Some(out);
+            }
         }
     }
 
-    // Prefix replacement: old_* → new_*
-    if pattern.ends_with('*') && replacement.ends_with('*') {
-        let old_prefix = &pattern[..pattern.len() - 1];
-        let new_prefix = &replacement[..replacement.len() - 1];
+    // Prefix replacement: old_* → new_*.
+    if let (Some(old_prefix), Some(new_prefix)) = (
+        pattern.strip_suffix(b"*"),
+        replacement.strip_suffix(b"*"),
+    ) {
         if let Some(suffix) = name.strip_prefix(old_prefix) {
-            return Some(alloc::format!("{}{}", new_prefix, suffix));
+            let mut out = PathBuf::from(new_prefix);
+            out.extend_bytes(suffix);
+            return Some(out);
         }
     }
 
     // Exact replacement (no wildcards).
-    if !pattern.contains('*') && !replacement.contains('*') {
-        if name == pattern {
-            return Some(String::from(replacement));
-        }
+    if !pattern.contains(&b'*') && !replacement.contains(&b'*') && name == pattern {
+        return Some(PathBuf::from(replacement));
     }
 
     None
 }
 
-/// Simple glob matching: `*` matches any sequence, `?` matches one char.
-fn glob_match(pattern: &str, text: &str) -> bool {
-    let p = pattern.as_bytes();
-    let t = text.as_bytes();
-    glob_match_inner(p, t, 0, 0)
-}
-
-fn glob_match_inner(p: &[u8], t: &[u8], pi: usize, ti: usize) -> bool {
-    if pi >= p.len() && ti >= t.len() {
-        return true;
-    }
-    if pi >= p.len() {
-        return false;
-    }
-
-    if p[pi] == b'*' {
-        // Try matching zero or more characters.
-        let mut ti2 = ti;
-        while ti2 <= t.len() {
-            if glob_match_inner(p, t, pi + 1, ti2) {
-                return true;
-            }
-            ti2 += 1;
-        }
-        return false;
-    }
-
-    if ti >= t.len() {
-        return false;
-    }
-
-    if p[pi] == b'?' || p[pi] == t[ti] {
-        return glob_match_inner(p, t, pi + 1, ti + 1);
-    }
-
-    false
-}
-
 /// Generate a unique filename by appending " (N)" before the extension.
-fn find_unique_name(path: &str) -> String {
-    // Split into base and extension.
-    let (dir, name) = if let Some(pos) = path.rfind('/') {
-        (&path[..pos], &path[pos + 1..])
-    } else {
-        ("", path)
-    };
+///
+/// The split uses [`Path::file_name`]/[`Path::extension`] rather than a
+/// `rfind('.')`, so a dotfile keeps its name intact: `.bashrc` becomes
+/// `.bashrc (2)`, not ` (2).bashrc`.
+fn find_unique_name(path: &Path) -> PathBuf {
+    let dir = path.parent();
+    // A path with no final component names no file to disambiguate; treating
+    // the whole path as the name is the closest thing to a useful answer and
+    // matches what the caller passed in.
+    let name = path.file_name().unwrap_or(path).as_bytes();
+    // `extension()` measures from the same final component, so this offset is
+    // in range by construction; `len - (ext + 1)` accounts for the dot.
+    let stem_len = path.extension().map_or(name.len(), |e| {
+        name.len().saturating_sub(e.as_bytes().len().saturating_add(1))
+    });
+    let (stem, ext) = name.split_at(stem_len.min(name.len()));
 
-    let (base, ext) = if let Some(dot) = name.rfind('.') {
-        (&name[..dot], &name[dot..])
-    } else {
-        (name, "")
+    let build = |suffix: &str| -> PathBuf {
+        let mut leaf = PathBuf::from(stem);
+        leaf.extend_bytes(suffix.as_bytes());
+        leaf.extend_bytes(ext);
+        match dir {
+            Some(d) => d.join(&leaf),
+            None => leaf,
+        }
     };
 
     for n in 2u32..100 {
-        let candidate = if dir.is_empty() {
-            alloc::format!("{} ({}){}", base, n, ext)
-        } else {
-            alloc::format!("{}/{} ({}){}", dir, base, n, ext)
-        };
+        let candidate = build(&alloc::format!(" ({})", n));
         if Vfs::metadata(&candidate).is_err() {
             return candidate;
         }
@@ -477,11 +513,7 @@ fn find_unique_name(path: &str) -> String {
 
     // Fallback: use timestamp.
     let ts = crate::timekeeping::clock_monotonic();
-    if dir.is_empty() {
-        alloc::format!("{}_{}{}", base, ts, ext)
-    } else {
-        alloc::format!("{}/{}_{}{}", dir, base, ts, ext)
-    }
+    build(&alloc::format!("_{}", ts))
 }
 
 // ---------------------------------------------------------------------------
@@ -505,28 +537,56 @@ pub fn self_test() -> KernelResult<()> {
     Ok(())
 }
 
+/// The glob syntax itself lives in `vfs::glob_match` and is tested there;
+/// what matters here is that batch's own callers reach it with the arguments
+/// in the right order and case-sensitively.
 fn test_glob_match() {
-    assert!(glob_match("*.txt", "hello.txt"));
-    assert!(glob_match("*.txt", ".txt"));
-    assert!(!glob_match("*.txt", "hello.bak"));
-    assert!(glob_match("test*", "test123"));
-    assert!(glob_match("?est", "test"));
-    assert!(!glob_match("?est", "best2"));
-    assert!(glob_match("*", "anything"));
-    assert!(glob_match("a*b", "aXYZb"));
+    let m = |pat: &str, name: &str| crate::fs::vfs::glob_match(name, pat, false);
+    assert!(m("*.txt", "hello.txt"));
+    assert!(m("*.txt", ".txt"));
+    assert!(!m("*.txt", "hello.bak"));
+    assert!(m("test*", "test123"));
+    assert!(m("?est", "test"));
+    assert!(!m("?est", "best2"));
+    assert!(m("*", "anything"));
+    assert!(m("a*b", "aXYZb"));
+    // Case-sensitive filesystem: `A.TXT` and `a.txt` are two different files.
+    assert!(!m("*.txt", "HELLO.TXT"));
+    // A pattern is bytes, so it matches a name that is not text.
+    assert!(crate::fs::vfs::glob_match(b"re\xffport.txt".as_slice(), "*.txt", false));
     serial_println!("[batch]   glob match: ok");
 }
 
 fn test_rename_pattern() {
+    let ap = |name: &[u8], pat: &str, rep: &str| {
+        apply_rename_pattern(Path::new(name), pat.as_bytes(), rep.as_bytes())
+    };
+    assert_eq!(ap(b"doc.txt", "*.txt", "*.bak"), Some(PathBuf::from("doc.bak")));
     assert_eq!(
-        apply_rename_pattern("doc.txt", "*.txt", "*.bak"),
-        Some(String::from("doc.bak"))
+        ap(b"old_data.csv", "old_*", "new_*"),
+        Some(PathBuf::from("new_data.csv"))
     );
+    assert_eq!(ap(b"doc.bak", "*.txt", "*.bak"), None);
+
+    // A name that is not UTF-8 renames like any other: the transform is
+    // byte-wise and never has to decode the part it keeps.
     assert_eq!(
-        apply_rename_pattern("old_data.csv", "old_*", "new_*"),
-        Some(String::from("new_data.csv"))
+        ap(b"re\xffport.txt", "*.txt", "*.bak"),
+        Some(PathBuf::from(b"re\xffport.bak".as_slice()))
     );
-    assert_eq!(apply_rename_pattern("doc.bak", "*.txt", "*.bak"), None);
+    // ...including when the undecodable byte is in the pattern.
+    assert_eq!(
+        apply_rename_pattern(
+            Path::new(b"re\xffport.txt".as_slice()),
+            b"re\xff*",
+            b"ok_*",
+        ),
+        Some(PathBuf::from("ok_port.txt"))
+    );
+
+    // Exact rename with no wildcard on either side.
+    assert_eq!(ap(b"a.txt", "a.txt", "b.txt"), Some(PathBuf::from("b.txt")));
+    assert_eq!(ap(b"c.txt", "a.txt", "b.txt"), None);
     serial_println!("[batch]   rename pattern: ok");
 }
 
@@ -631,9 +691,46 @@ fn test_glob_files() {
 }
 
 fn test_unique_name() {
-    // Without a file existing, find_unique_name should still work.
-    let name = find_unique_name("/tmp/nonexistent.txt");
-    assert!(name.contains("(2)") || name.contains('_'), "should generate unique name");
+    // Nothing exists at the target, so the very first candidate is free.
+    assert_eq!(
+        find_unique_name(Path::new("/tmp/nonexistent.txt")),
+        PathBuf::from("/tmp/nonexistent (2).txt")
+    );
+
+    // A dotfile has no extension, so the suffix goes at the end rather than
+    // splitting the name at its leading dot.  The `rfind('.')` this replaced
+    // produced `/tmp/ (2).bashrc`.
+    assert_eq!(
+        find_unique_name(Path::new("/tmp/.bashrc")),
+        PathBuf::from("/tmp/.bashrc (2)")
+    );
+
+    // A name with no extension at all, and a relative one with no directory.
+    assert_eq!(
+        find_unique_name(Path::new("/tmp/README")),
+        PathBuf::from("/tmp/README (2)")
+    );
+    assert_eq!(
+        find_unique_name(Path::new("plain.txt")),
+        PathBuf::from("plain (2).txt")
+    );
+
+    // A name that is not UTF-8 keeps its bytes, and the split still lands on
+    // the extension boundary rather than inside the undecodable byte.
+    assert_eq!(
+        find_unique_name(Path::new(b"/tmp/re\xffport.txt".as_slice())),
+        PathBuf::from(b"/tmp/re\xffport (2).txt".as_slice())
+    );
+
+    // An occupied candidate is skipped over rather than returned.
+    Vfs::write_file("/tmp/batch_uniq.txt", b"x").expect("write");
+    Vfs::write_file("/tmp/batch_uniq (2).txt", b"x").expect("write");
+    assert_eq!(
+        find_unique_name(Path::new("/tmp/batch_uniq.txt")),
+        PathBuf::from("/tmp/batch_uniq (3).txt")
+    );
+    let _ = Vfs::remove("/tmp/batch_uniq.txt");
+    let _ = Vfs::remove("/tmp/batch_uniq (2).txt");
 
     serial_println!("[batch]   unique name: ok");
 }

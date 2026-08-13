@@ -4675,6 +4675,13 @@ extern "C" fn kernel_main() -> ! {
     // would make every downstream "OK" meaningless.
     mm::rawmem::self_test();
 
+    // Step 22e⅞+: Direction-flag-on-entry self-test.
+    // Runs right after `rawmem` because it validates the same invariant from
+    // the other side: `rawmem::fill_u8` and every compiler-emitted
+    // `memset`/`memcpy` are `rep`-string operations that run *backwards* if DF
+    // is set, and an IDT gate — unlike SYSCALL — does not clear DF for us.
+    idt::df_on_entry_self_test();
+
     // Step 22e⅞+: Memory poison self-test.
     // Verifies poison fill/verify for use-after-free and overflow detection.
     mm::poison::self_test();

@@ -43,6 +43,136 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
+### B-NO-CLD-ON-INTERRUPT-ENTRY. Ring 3 could set the direction flag and make every `rep`-string op in the kernel — `memset`/`memcpy` included — run backwards — 2026-08-12 — ✅ FIXED 2026-08-12 (`kernel/src/idt.rs`)
+
+**What.** None of the three `global_asm!` ISR stub macros in `kernel/src/idt.rs`
+(`isr_stub_no_error`, `isr_stub_with_error`, `irq_stub`) issued `cld`. There was
+no `cld` anywhere in `kernel/src/` at all.
+
+An IDT gate does **not** clear DF. Loading the new RFLAGS clears TF, NT, RF and
+VM; DF is explicitly left alone (Intel SDM Vol. 3A §6.12.1). So DF on entry to
+every exception and every hardware IRQ is whatever the interrupted context left
+in it — and for a ring-3 interrupt, that is whatever userspace chose. `std` is
+an unprivileged instruction, one byte, and ordinary glibc string routines emit
+it.
+
+**Why it matters.** The SysV AMD64 ABI requires DF = 0 at every function
+boundary, and all compiled kernel code silently depends on it. LLVM lowers
+`write_bytes` and `copy_nonoverlapping` — and therefore `[T]::fill`,
+`slice::copy_from_slice`, `Vec::extend_from_slice`, and every large struct
+move — into `memset`/`memcpy` calls whose `rep stosb`/`rep movsb` bodies walk
+**backwards** when DF = 1, writing `[p - len, p)` instead of `[p, p + len)`.
+`mm::rawmem::fill_u8` uses `rep stosb` directly for the same reason.
+
+So a ring-3 thread that executes `std` and then waits for a timer tick gets the
+entire scheduler, the heap allocator and the serial printer to run with every
+string operation reversed. Each one scribbles over the memory immediately
+*before* its intended destination. That is:
+
+- **a security hole** — a controlled, unprivileged, no-syscall-needed way for
+  userspace to corrupt kernel memory adjacent to whatever the preempting code
+  path happens to touch. Linux closes it with a `cld` in its interrupt entry
+  path (`arch/x86/entry/entry_64.S`) for exactly this reason;
+- **a plausible root cause for B-KNULLJUMP**, the rare nondeterministic heap
+  corruption. The shape matches unusually well: it needs userspace running (it
+  does not reproduce in early boot), the damage lands at an address depending on
+  which instruction the interrupt preempted, the corruption is silent and its
+  detection is arbitrarily delayed, and the per-boot probability tracks "did any
+  thread happen to leave DF set at a tick boundary" — which would explain a base
+  rate near 1-in-120 boots. **This is a hypothesis, not a confirmed diagnosis.**
+  It is not yet proven that any userspace code in the Path-Z rootfs actually
+  leaves DF set; the bug above is real and worth fixing on its own terms
+  regardless. If B-KNULLJUMP survives this fix, the hypothesis is disproved.
+
+**Note the asymmetry that hid this.** The SYSCALL path was already correct:
+`kernel/src/syscall/entry.rs` programs `IA32_FMASK` bit 10, so the CPU clears DF
+as part of the transition, and the comment there even says *"Bit 10 = DF
+(direction) — ensure forward string ops in kernel."* Whoever wrote that knew the
+hazard; only the IDT-gated half was left uncovered. A grep for `DF` or
+`direction` finds the handled case and nothing to suggest the unhandled one,
+which is why review kept passing over it.
+
+**The fix.** `"cld"` as the *first* instruction of all three stub macros —
+first, rather than tucked in just before the `call`, so no later edit can
+insert a string operation ahead of it. No `std` is needed on the way out:
+`iretq` restores the whole saved RFLAGS, DF included, so the interrupted context
+gets its own flag back untouched.
+
+`mm::rawmem::fill_u8` also grew its own `cld` inside the `asm!` block (and
+consequently dropped `options(preserves_flags)`), so the helper is correct on
+its own terms rather than by trusting a caller-side invariant. Its SAFETY
+comment previously asserted that "the SysV ABI guarantees DF = 0 at every
+function boundary" — true of compiled code, but not of the machine, and exactly
+the assumption this bug violates. That comment has been corrected.
+
+**Regression test.** `idt::df_on_entry_self_test()`, run at boot right after
+`mm::rawmem::self_test()`. It sets DF and executes `int3` **in a single `asm!`
+block** — they must not be separable, or the compiler could schedule a `memcpy`
+into the window and corrupt memory with the very bug under test — and checks a
+flag recorded at the top of `handle_breakpoint`, which observes DF as the
+handler sees it. A second block confirms `iretq` hands the caller's DF back.
+Without the stub `cld`, the first assertion is the only visible failure; the
+real symptom is silent corruption somewhere else entirely, which is why a direct
+test earns its keep here.
+
+### B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT. The instrumented kernel spins forever with a half-printed `#PF` line, and the report path has no way to say anything more — 2026-08-12 — OPEN
+
+**Reproduce.** `./scripts/kasan-build.sh --boot`. Observed once so far, at the
+same place; not yet known whether it is deterministic.
+
+**Symptom.** Serial output stops permanently in the *middle* of a line:
+
+```
+[spawn]   fastpy-on-SlateOS `ftype` (ring 3: file-type via os.path.isfile/isdir …): OK
+EXCEPTION: Page Fault (#PF) at
+```
+
+— truncated exactly where `{:#x}` would have formatted `frame.rip`. Evidence
+preserved at
+`build/hang-catches/kasan-wedge-20260812-pf-midprint.serial.txt`
+(347929 bytes, 5560 lines).
+
+It is a spin, not slowness: three samples over ~90 s showed the byte count
+frozen at 347929 while QEMU's CPU time climbed 591.9 → 594.9 → 597.7 s. A
+reference *uninstrumented* boot has no exception at this point at all, so the
+fault is either instrumentation-induced or a latent bug that the ~20× slowdown
+reschedules into existence.
+
+**Suspected mechanism.** `mm::kasan_rt::report` and the `#PF` handler both print
+through `serial_println!`, which takes a spin mutex, and **neither has a
+re-entrancy guard**. Any fault or KASAN report raised *while that lock is held*
+deadlocks on the spot, with the partial line already emitted — which is exactly
+the observed shape. The likeliest sequence is: `#PF` handler starts printing →
+formatting `frame.rip` touches something that faults again (or trips an
+instrumented access that calls `report`) → the nested printer spins on the lock
+its own caller holds.
+
+**Why it is bad beyond the hang.** This failure mode destroys its own evidence.
+The one thing the operator needs — the faulting RIP — is the token that never
+got printed, and the wedge then prevents any later mechanism from reporting it.
+
+**Two separable fixes:**
+
+- **(a) Give the serial printer a re-entrancy escape.** If the lock is already
+  held by this CPU, fall back to the unlocked/polled emergency writer
+  (`emergency_println!` already exists for the hard-lockup path) instead of
+  spinning. Turns an evidence-free wedge into an interleaved-but-complete
+  report. This is the one worth doing regardless of the underlying fault, since
+  it is a diagnosis multiplier for every future wedge, not just this one.
+- **(b) Find the actual fault.** Blocked on capture: `scripts/boot-test.sh`
+  attaches the HMP monitor and `capture_guest_state()` **only** when
+  `HARD_LOCKUP_WATCHDOG=1`, and this run was launched without it, so no live RIP
+  could be read from the wedged guest. Re-run with `HARD_LOCKUP_WATCHDOG=1`.
+
+**Not the same bug as B-KASAN-INSTRUMENTED-BUILD-PANICS-ON-ITS-OWN-REDZONE-CHECKS.**
+That one flooded `[kasan] CRITICAL` reports and panicked; this run reached 5560
+lines with **zero** such reports, confirming the `mm::rawmem` fix landed. The
+wedge is a distinct, later failure.
+
+**Not caused by `mm::rawmem`.** An ordinary (uninstrumented) boot of the same
+tree — which compiles and exercises `rawmem` identically — reached `BOOT_OK` in
+273 s.
+
 ### TD-HARNESS-RUN-TIMEOUT-COULD-NOT-LAUNCH-A-SHELL-SCRIPT-AND-BARE-BASH-MEANT-WSL. The documented boot-test invocation never ran the boot test — 2026-08-12 — ✅ FIXED 2026-08-12 (`scripts/proctree.py`)
 
 **What.** `CLAUDE.md` documents the canonical hang-proof invocation as:

@@ -32,7 +32,7 @@ use crate::proc::spawn::{USER_STACK_TOP, USER_STACK_GUARD, MAX_STACK_FRAMES};
 use crate::sched;
 use crate::serial_println;
 use crate::emergency_println;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Exception / interrupt statistics
@@ -617,12 +617,50 @@ extern "C" fn irq_common_dispatch(frame: *mut InterruptStackFrame, vector: u64) 
 // reference them by name.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// `cld` on entry
+//
+// The first instruction of every stub below is `cld`. Why:
+//
+// The SysV AMD64 ABI requires DF = 0 at every function entry and exit, and all
+// compiled kernel code relies on it: LLVM lowers `write_bytes` /
+// `copy_nonoverlapping` (and therefore `[T]::fill`, `slice::copy_from_slice`,
+// `Vec::extend_from_slice`, every large struct move …) to `memset`/`memcpy`,
+// whose `rep stosb`/`rep movsb` implementations walk *backwards* when DF = 1.
+// `mm::rawmem::fill_u8` uses `rep stosb` directly for the same reason.
+//
+// Nothing in the hardware upholds that invariant on the way *in*. An IDT gate
+// clears TF, NT, RF and VM when it loads the new RFLAGS, but it explicitly
+// leaves **DF alone** (Intel SDM Vol. 3A §6.12.1). So any ring-3 thread that
+// executes a bare `std` — entirely legal, and emitted by ordinary glibc string
+// routines — leaves DF set, and the very next timer tick runs the whole
+// scheduler, allocator and serial printer with every string operation
+// reversed. The corruption is silent, arbitrarily delayed, and depends on
+// which instruction the interrupt happened to land on, which is exactly the
+// shape of the nondeterministic heap corruption tracked as B-KNULLJUMP.
+//
+// The SYSCALL path already closes this hole a different way: `syscall::entry`
+// programs `IA32_FMASK` bit 10, so the CPU clears DF as part of the
+// transition. Only IDT-gated entries were left uncovered. Linux does exactly
+// this — a `cld` in its interrupt entry path (`arch/x86/entry/entry_64.S`) for
+// exactly this reason.
+//
+// No matching `std` is needed on the way out: `iretq` reloads the whole saved
+// RFLAGS, DF included, so the interrupted context gets its own flag back
+// untouched.
+//
+// It is the *first* instruction rather than one tucked in just before the
+// `call` so that no future edit can accidentally insert a string operation
+// ahead of it.
+// ---------------------------------------------------------------------------
+
 /// Generate an assembly stub for an exception WITHOUT a CPU error code.
 macro_rules! isr_stub_no_error {
     ($stub:ident, $handler:ident) => {
         global_asm!(
             concat!(".global ", stringify!($stub)),
             concat!(stringify!($stub), ":"),
+            "cld",                 // see "`cld` on entry" above
             "push 0",              // dummy error code
             "push rax",
             "push rcx",
@@ -670,6 +708,7 @@ macro_rules! isr_stub_with_error {
         global_asm!(
             concat!(".global ", stringify!($stub)),
             concat!(stringify!($stub), ":"),
+            "cld",                 // see "`cld` on entry" above
             // CPU already pushed error code.
             "push rax",
             "push rcx",
@@ -753,6 +792,7 @@ macro_rules! irq_stub {
         global_asm!(
             concat!(".global ", stringify!($stub)),
             concat!(stringify!($stub), ":"),
+            "cld",                 // see "`cld` on entry" above
             "push 0",              // dummy error code (IRQs push none)
             "push rax",
             "push rcx",
@@ -1748,7 +1788,85 @@ fn dump_kernel_backtrace(frame: &InterruptStackFrame) {
 #[unsafe(no_mangle)]
 extern "C" fn handle_breakpoint(frame: &InterruptStackFrame, _error: u64) {
     count_vector(3);
+    // Record DF as the handler sees it, so `df_on_entry_self_test` can prove
+    // the stub's `cld` really executed. #BP is a once-in-a-blue-moon vector, so
+    // the extra relaxed store costs nothing that matters.
+    BP_ENTRY_DF.store(cpu::read_rflags() & RFLAGS_DF != 0, Ordering::Relaxed);
     serial_println!("EXCEPTION: Breakpoint (#BP) at {:#x}", frame.rip);
+}
+
+/// RFLAGS.DF — the direction flag, bit 10.
+const RFLAGS_DF: u64 = 1 << 10;
+
+/// DF as observed on entry to the most recent `#BP`.
+///
+/// Written by `handle_breakpoint`, read by [`df_on_entry_self_test`].
+static BP_ENTRY_DF: AtomicBool = AtomicBool::new(false);
+
+/// Boot self-test: prove that an IDT gate entered with DF set still runs the
+/// handler with DF clear, and that the interrupted context gets its own DF
+/// back.
+///
+/// This guards the `cld` at the top of every stub (see the "`cld` on entry"
+/// comment above). Without that `cld` the first check below fails — and *only*
+/// this check fails visibly, because the real symptom is silent memory
+/// corruption in whatever the interrupt happened to preempt. That is precisely
+/// why a direct test is worth having.
+///
+/// It is a boot self-test rather than a `#[cfg(test)]` unit test because the
+/// kernel binary cannot be built for the host harness (duplicate `panic_impl`
+/// lang item), and because the property is about real IDT delivery, which no
+/// host test could exercise anyway.
+pub fn df_on_entry_self_test() {
+    serial_println!("[idt] Running direction-flag self-test...");
+
+    // `std` and `int3` must be in one `asm!` block: if the compiler were free
+    // to schedule code between them it could emit a `memcpy` — which is exactly
+    // the operation that misbehaves with DF set. The trailing `cld` undoes the
+    // `std`, since `iretq` restores the saved RFLAGS (DF included) and hands us
+    // back the flag we set.
+    //
+    // SAFETY: `int3` raises #BP, whose handler is installed by `init()` and
+    // returns normally. `std`/`cld` only toggle DF, and the trailing `cld`
+    // leaves it in the state all compiled code requires. `nostack` holds
+    // because the block pushes nothing itself.
+    unsafe {
+        core::arch::asm!("std", "int3", "cld", options(nostack));
+    }
+
+    assert!(
+        !BP_ENTRY_DF.load(Ordering::Relaxed),
+        "idt: handler entered with DF set — the `cld` in the ISR stubs is \
+         missing or unreachable; every rep-string op in interrupt context \
+         (memset/memcpy included) would run backwards"
+    );
+    serial_println!("[idt]   DF is clear on exception entry: OK");
+
+    // And the interrupted context must get its own DF back: `iretq` restores
+    // RFLAGS wholesale, so a stub that "helpfully" left DF cleared for the
+    // returnee would silently change ring-3 string-op semantics.
+    let flags_after: u64;
+    // SAFETY: as above; this block sets DF, takes the same #BP, then reads the
+    // flags back. `pushfq`/`pop` are balanced, and DF is cleared again before
+    // the block ends, so compiled code resumes with DF = 0. `nostack` is not
+    // claimed here because the block does push.
+    unsafe {
+        core::arch::asm!(
+            "std",
+            "int3",
+            "pushfq",
+            "pop {out}",
+            "cld",
+            out = out(reg) flags_after,
+        );
+    }
+    assert!(
+        flags_after & RFLAGS_DF != 0,
+        "idt: iretq did not restore the interrupted context's DF"
+    );
+    serial_println!("[idt]   iretq restores the caller's DF: OK");
+
+    serial_println!("[idt] Direction-flag self-test PASSED");
 }
 
 /// Handle #OF (Overflow, vector 4).

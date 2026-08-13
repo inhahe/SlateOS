@@ -125,19 +125,32 @@ pub unsafe fn write_u8(p: *mut u8, v: u8) {
 pub unsafe fn fill_u8(p: *mut u8, v: u8, len: usize) {
     // `rep stosb` with RCX = 0 is a no-op, so no length guard is needed.
     //
+    // The leading `cld` is not redundant. `rep stosb` walks *backwards* when
+    // DF = 1, which would make this fill scribble over `[p - len, p)` — the
+    // bytes *before* the buffer — instead of the requested range. The SysV ABI
+    // does require DF = 0 at every function boundary, but the ABI is a property
+    // of compiled code, not of the machine: an IDT gate does not clear DF (see
+    // the `cld` discussion in `idt.rs`), so a fill running in interrupt context
+    // inherits whatever the interrupted ring-3 thread left behind. `idt.rs` now
+    // clears it on every entry, and this `cld` makes the helper correct on its
+    // own terms rather than by trusting that. Since DF = 0 is the state all
+    // kernel code requires anyway, clearing it can only ever repair state, never
+    // damage it — so there is nothing to restore afterwards.
+    //
     // SAFETY: the caller guarantees `p` is valid for `len` bytes of exclusive
     // writing. `rep stosb` writes exactly `[p, p + len)` and clobbers only RDI
-    // and RCX, both declared. It requires DF = 0, which the SysV ABI guarantees
-    // at every function boundary and which nothing here changes. `stos` does
-    // not write flags, so `preserves_flags` holds; `nostack` holds because no
-    // push/pop is emitted. `nomem` is deliberately not set (see module docs).
+    // and RCX, both declared, plus DF as described above — which is why
+    // `preserves_flags` is *not* set here (it is on the other two helpers).
+    // `nostack` holds because no push/pop is emitted. `nomem` is deliberately
+    // not set (see module docs).
     unsafe {
         asm!(
+            "cld",
             "rep stosb",
             inout("rdi") p => _,
             inout("rcx") len => _,
             in("eax") u32::from(v),
-            options(nostack, preserves_flags),
+            options(nostack),
         );
     }
 }

@@ -8317,7 +8317,6 @@ pub fn sys_fs_journal_read(args: &SyscallArgs) -> SyscallResult {
     use crate::syscall::number::FS_JOURNAL_ENTRY_SIZE;
 
     let since_seq = args.arg0;
-    let buf_ptr = args.arg1 as usize;
     let buf_len = args.arg2 as usize;
 
     // Calculate how many entries fit in the buffer.
@@ -8331,53 +8330,53 @@ pub fn sys_fs_journal_read(args: &SyscallArgs) -> SyscallResult {
 
     let count = entries.len().min(max_entries);
 
-    // Marshal entries into the user buffer.
+    // Sized by what will actually be emitted, not by the caller's advertised
+    // capacity, so a huge `buf_len` cannot make the kernel allocate for it.
+    let mut out =
+        match crate::mm::user::alloc_zeroed_vec(count.saturating_mul(FS_JOURNAL_ENTRY_SIZE)) {
+            Ok(v) => v,
+            Err(e) => return SyscallResult::err(e),
+        };
+
+    // Layout: seq(8) + timestamp_ns(8) + event_type(1) + path(256) + old_path(256) = 529
     for (i, entry) in entries.iter().take(count).enumerate() {
-        let offset = i * FS_JOURNAL_ENTRY_SIZE;
-        let entry_ptr = buf_ptr + offset;
+        let base = i.saturating_mul(FS_JOURNAL_ENTRY_SIZE);
+        let Some(rec) = out.get_mut(base..base.saturating_add(FS_JOURNAL_ENTRY_SIZE)) else {
+            // Unreachable: `out` was sized for exactly `count` records.
+            break;
+        };
+        // The trailing bytes of each string field stay zero (the buffer starts
+        // zeroed), which is what makes the fields NUL-terminated.
+        let mut put = |at: usize, bytes: &[u8], cap: usize| {
+            let n = bytes.len().min(cap);
+            if let (Some(dst), Some(src)) =
+                (rec.get_mut(at..at.saturating_add(n)), bytes.get(..n))
+            {
+                dst.copy_from_slice(src);
+            }
+        };
+        put(0, &entry.seq.to_le_bytes(), 8);
+        put(8, &entry.timestamp_ns.to_le_bytes(), 8);
+        put(16, &[entry.event_type as u8], 1);
+        put(17, entry.path.as_bytes(), 255);
+        put(273, entry.old_path.as_bytes(), 255);
+    }
 
-        // Validate user buffer for this entry.
-        if let Err(e) = crate::mm::user::validate_user_write(entry_ptr as u64, FS_JOURNAL_ENTRY_SIZE) {
+    // One copy for the whole batch.  Validating and storing per entry meant a
+    // buffer that went bad partway through returned an error *and* left the
+    // caller holding some valid records with no way to tell how many.
+    if !out.is_empty() {
+        // SAFETY: `out` is a live kernel-owned buffer of exactly `out.len()`
+        // bytes; `copy_to_user` validates the destination and brackets the
+        // store with STAC/CLAC.
+        if let Err(e) =
+            unsafe { crate::mm::user::copy_to_user(out.as_ptr(), args.arg1, out.len()) }
+        {
             return SyscallResult::err(e);
-        }
-
-        // Write the entry to user memory.
-        // Layout: seq(8) + timestamp_ns(8) + event_type(1) + path(256) + old_path(256) = 529
-        // SAFETY: Buffer has been validated for the full entry size.
-        unsafe {
-            let base = entry_ptr as *mut u8;
-
-            // seq (u64 LE, offset 0)
-            core::ptr::copy_nonoverlapping(
-                entry.seq.to_le_bytes().as_ptr(),
-                base,
-                8,
-            );
-
-            // timestamp_ns (u64 LE, offset 8)
-            core::ptr::copy_nonoverlapping(
-                entry.timestamp_ns.to_le_bytes().as_ptr(),
-                base.add(8),
-                8,
-            );
-
-            // event_type (u8, offset 16)
-            *base.add(16) = entry.event_type as u8;
-
-            // path (256 bytes, null-terminated, offset 17)
-            let path_bytes = entry.path.as_bytes();
-            let path_len = path_bytes.len().min(255);
-            core::ptr::copy_nonoverlapping(path_bytes.as_ptr(), base.add(17), path_len);
-            core::ptr::write_bytes(base.add(17 + path_len), 0, 256 - path_len);
-
-            // old_path (256 bytes, null-terminated, offset 273)
-            let old_bytes = entry.old_path.as_bytes();
-            let old_len = old_bytes.len().min(255);
-            core::ptr::copy_nonoverlapping(old_bytes.as_ptr(), base.add(273), old_len);
-            core::ptr::write_bytes(base.add(273 + old_len), 0, 256 - old_len);
         }
     }
 
+    #[allow(clippy::cast_possible_wrap)]
     SyscallResult::ok(count as i64)
 }
 
@@ -9271,13 +9270,17 @@ pub fn sys_fs_dup(args: &SyscallArgs) -> SyscallResult {
 /// `arg1`: pointer to output buffer.
 /// `arg2`: buffer capacity.
 ///
-/// Returns: path length in bytes (excluding null terminator).
+/// Returns: the **full** path length in bytes, excluding the NUL terminator —
+/// the `snprintf` contract.  A return value of `out_cap` or more means the
+/// path did not fit and what landed in the buffer is a *prefix*, not the path;
+/// the caller retries with a buffer of at least `ret + 1` bytes.  Reporting
+/// the truncated length instead (as this used to) made truncation invisible,
+/// and a truncated path is a different path that may well exist.
 pub fn sys_fs_handle_path(args: &SyscallArgs) -> SyscallResult {
     let handle = args.arg0;
-    let out_ptr = args.arg1 as *mut u8;
     let out_cap = args.arg2 as usize;
 
-    if out_ptr.is_null() || out_cap == 0 {
+    if args.arg1 == 0 || out_cap == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
     if let Err(e) = crate::mm::user::validate_user_write(args.arg1, out_cap) {
@@ -9290,19 +9293,34 @@ pub fn sys_fs_handle_path(args: &SyscallArgs) -> SyscallResult {
     };
 
     let path_bytes = path.as_bytes();
-    // Copy as much as fits, plus null terminator.
+    // Reserve the last byte of the buffer for the terminator.
     let copy_len = path_bytes.len().min(out_cap.saturating_sub(1));
 
-    // SAFETY: Validated above — out_ptr is in user space, mapped, writable.
-    unsafe {
-        core::ptr::copy_nonoverlapping(path_bytes.as_ptr(), out_ptr, copy_len);
-        // Null terminator.
-        core::ptr::write(out_ptr.add(copy_len), 0u8);
+    // Assembled kernel-side with its terminator so the whole thing goes out in
+    // one copy; the buffer is `copy_len + 1` bytes and always fits `out_cap`.
+    let mut out = match crate::mm::user::alloc_zeroed_vec(copy_len.saturating_add(1)) {
+        Ok(v) => v,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if let (Some(dst), Some(src)) = (out.get_mut(..copy_len), path_bytes.get(..copy_len)) {
+        dst.copy_from_slice(src);
     }
 
-    #[allow(clippy::cast_possible_wrap)]
-    let len = copy_len as i64;
-    SyscallResult::ok(len)
+    // SAFETY: `out` is a live kernel-owned buffer of exactly `out.len()`
+    // bytes; `copy_to_user` re-validates the destination — `handle_path` can
+    // block, so the check above is not the one that matters — and brackets the
+    // store with STAC/CLAC.
+    if let Err(e) = unsafe { crate::mm::user::copy_to_user(out.as_ptr(), args.arg1, out.len()) }
+    {
+        return SyscallResult::err(e);
+    }
+
+    match i64::try_from(path_bytes.len()) {
+        Ok(len) => SyscallResult::ok(len),
+        // A path longer than `i64::MAX` cannot exist, but reporting a negative
+        // length would read as an error code.
+        Err(_) => SyscallResult::err(KernelError::FileTooLarge),
+    }
 }
 
 /// `SYS_FS_READDIR_AT` — paginated directory listing.
@@ -9625,7 +9643,6 @@ pub fn sys_tcp_recv(args: &SyscallArgs) -> SyscallResult {
     }
 
     let handle = args.arg0 as usize;
-    let buf_ptr = args.arg1 as *mut u8;
     let buf_cap = args.arg2 as usize;
     let flags = args.arg3 as u32;
 
@@ -9633,7 +9650,7 @@ pub fn sys_tcp_recv(args: &SyscallArgs) -> SyscallResult {
     const MSG_PEEK: u32 = 0x02;
     const MSG_DONTWAIT: u32 = 0x40;
 
-    if buf_ptr.is_null() && buf_cap > 0 {
+    if args.arg1 == 0 && buf_cap > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
@@ -9684,13 +9701,14 @@ pub fn sys_tcp_recv(args: &SyscallArgs) -> SyscallResult {
 
     let copy_len = data.len().min(buf_cap);
     if copy_len > 0 {
-        // SAFETY: Validated above — buf_ptr is in user space, mapped, and writable.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                data.as_ptr(),
-                buf_ptr,
-                copy_len,
-            );
+        // SAFETY: `data` is a live kernel-owned `Vec` of at least `copy_len`
+        // bytes.  `copy_to_user` re-validates the destination, which is the
+        // check that matters: the read above blocks for up to five seconds, so
+        // a peer thread has ample opportunity to unmap the buffer meanwhile.
+        if let Err(e) =
+            unsafe { crate::mm::user::copy_to_user(data.as_ptr(), args.arg1, copy_len) }
+        {
+            return SyscallResult::err(e);
         }
     }
     #[allow(clippy::cast_possible_wrap)]
@@ -9751,9 +9769,8 @@ pub fn sys_tcp_peer_addr(args: &SyscallArgs) -> SyscallResult {
     }
 
     let handle = args.arg0 as usize;
-    let out_ptr = args.arg1 as *mut u8;
 
-    if out_ptr.is_null() {
+    if args.arg1 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
@@ -9769,11 +9786,22 @@ pub fn sys_tcp_peer_addr(args: &SyscallArgs) -> SyscallResult {
                 Some(v4) => v4,
                 None => return SyscallResult::err(KernelError::NotSupported),
             };
-            // SAFETY: out_ptr validated for 6 bytes above.
-            unsafe {
-                core::ptr::copy_nonoverlapping(v4.0.as_ptr(), out_ptr, 4);
-                let port_bytes = port.to_be_bytes();
-                core::ptr::copy_nonoverlapping(port_bytes.as_ptr(), out_ptr.add(4), 2);
+            // Assembled kernel-side so the address and port cannot be observed
+            // half-updated, and delivered through the validating bounce.
+            let mut rec = [0u8; 6];
+            if let Some(dst) = rec.get_mut(..4) {
+                dst.copy_from_slice(&v4.0);
+            }
+            if let Some(dst) = rec.get_mut(4..6) {
+                dst.copy_from_slice(&port.to_be_bytes());
+            }
+            // SAFETY: `rec` is a live 6-byte kernel stack array;
+            // `copy_to_user` re-validates the destination and brackets the
+            // store with STAC/CLAC.
+            if let Err(e) =
+                unsafe { crate::mm::user::copy_to_user(rec.as_ptr(), args.arg1, rec.len()) }
+            {
+                return SyscallResult::err(e);
             }
             SyscallResult::ok(0)
         }

@@ -14,3 +14,10 @@ path = "src/lib.rs"
 
 [dependencies]
 bstr = { version = "1.13.0", default-features = false, features = ["std"] }
+
+# The POSIX `TZ`-string engine, shared verbatim with the libc (`posix`). osh
+# renders broken-down time itself — `printf '%(FMT)T'` and the `\D{…}` prompt
+# escapes never call `strftime` — so without a shared engine the shell and every
+# C program on the machine would disagree about what local time is. See
+# tzrules/src/lib.rs's "Why this is a crate and not a module".
+tzrules = { path = "../../tzrules" }

@@ -5704,7 +5704,48 @@ and ~30440. Each wants its own measurement before it moves.
 
 ---
 
-### TD-OILS-BROKEN-DOWN-TIME-IS-ALWAYS-UTC. `printf '%(%T)T' -1` and `PS1='\t'` are hours off — 2026-08-09 — OPEN
+### TD-OILS-BROKEN-DOWN-TIME-IS-ALWAYS-UTC. `printf '%(%T)T' -1` and `PS1='\t'` are hours off — 2026-08-09 — ✅ FIXED 2026-08-13
+
+**Fixed by** extracting the libc's POSIX `TZ` engine into the dependency-free
+`no_std` crate `tzrules/` and linking it into *both* `posix` and
+`userspace/oils`. `format_strftime` now takes a `&tzrules::Tz`, shifts the epoch
+by `tz.lookup(epoch).gmtoff` before breaking it down, and renders `%z`/`%Z` from
+that same `TzInfo` — so a DST-observing zone reports `EDT`/`-0400` in July and
+`EST`/`-0500` in January instead of `UTC`/`+0000` always. `%s` is deliberately
+left unshifted: it names the instant, not a reading of any clock.
+
+Fixing only the libc would have been worse than fixing neither — osh renders
+broken-down time itself and never calls `strftime`, so the shell would have gone
+on disagreeing with every C program on the machine. Hence the shared crate
+rather than a `posix` module; see `tzrules/src/lib.rs`'s "Why this is a crate
+and not a module".
+
+The zone is resolved by `Shell::shell_tz` from the shell's **exported** `TZ`,
+which is bash's rule rather than an approximation of it: `variables.c:sv_tz`
+calls `tzset()` only for an exported (or newly unset) `TZ`, because `strftime`
+reads the *process* environment and only the export attribute puts a shell
+variable there. So `TZ=EST5 printf '%(%Z)T'` with no `export` really is UTC in
+bash and is UTC here, while `export TZ=…`, an inherited `TZ`, and an assignment
+*prefix* all take effect. A test shell has nothing in `exported`, so the suite
+renders in UTC on every host without pinning `TZ` — the determinism falls out of
+bash's rule instead of being carved out of it, which answers the "the corpus
+cannot simply stop pinning" worry below.
+
+Tests (`interp.rs`): `printf_time_renders_in_the_exported_zone`,
+`printf_time_percent_s_is_zone_independent`,
+`printf_time_ignores_an_unexported_tz`,
+`printf_time_falls_back_to_utc_for_a_zone_it_cannot_parse`,
+`prompt_time_escapes_render_in_the_exported_zone` — the last uses the DST-less
+`NPT-5:45` because a prompt renders *now*, so a DST zone's `%Z` would assert one
+thing in July and another in January.
+
+**Residual, tracked separately as `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`:** an
+unset `TZ`, and a zoneinfo name like `America/New_York` (which is not a POSIX
+`TZ` string), still resolve to UTC — in the libc and the shell alike. That is
+now a *consistent* gap rather than a disagreement, and closing it needs tzdata
+on the machine.
+
+The original report follows.
 
 **Where:** `userspace/oils/src/interp.rs`, `format_strftime` (~55980) — it does
 `epoch.div_euclid(86_400)` / `rem_euclid` straight off the epoch seconds, i.e.
@@ -5750,7 +5791,52 @@ case that sets `TZ` explicitly to a fixed offset, which is deterministic
 everywhere.
 
 **Note:** `format_strftime`'s doc comment says "see known-issues TD-OILS" with
-no tag — this entry is the referent; point it here when fixing.
+no tag — this entry is the referent; point it here when fixing. *(Done: the doc
+comment now points at `Shell::shell_tz` and describes the real rule.)*
+
+---
+
+### TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ. With `TZ` unset — or set to a zoneinfo name — local time is UTC — 2026-08-13 — OPEN
+
+**Where:** `posix/src/tz.rs` `read_env_tz` (the `None`/unparseable arms) and
+`userspace/oils/src/interp.rs` `Shell::shell_tz`. Both funnel into
+`tzrules::Tz::parse`, which by construction only understands the **POSIX `TZ`
+grammar** — `std offset[dst[offset][,start[/time],end[/time]]]`.
+
+**What is missing, in two parts:**
+
+1. **No system default zone.** A machine with no `TZ` in its environment is
+   UTC. glibc would read `/etc/localtime`; SlateOS has no such file and no
+   setting behind it. So a freshly installed machine tells the truth about the
+   instant and lies about the wall clock, and there is currently no way for the
+   *system* (as opposed to each user's `TZ`) to say otherwise.
+2. **No tzdata.** `TZ=America/New_York` is not a POSIX `TZ` string, so it fails
+   to parse and falls back to UTC — silently, which is the unpleasant part: the
+   user gets UTC while believing they selected Eastern. Resolving it needs a
+   TZif reader *and* the tzdata files on disk. Covered by the libc test
+   `test_zoneinfo_names_currently_resolve_to_utc` and the oils test
+   `printf_time_falls_back_to_utc_for_a_zone_it_cannot_parse`, both of which
+   assert the *current* behaviour so the day it changes is loud.
+
+**Not a disagreement, which is the point.** Since `tzrules` is the single
+engine behind the libc and osh, both halves are wrong in exactly the same way
+— `date`, a C program's `localtime`, `printf '%(%T)T'` and `PS1='\t'` all agree.
+The gap is one of coverage, not of consistency, and a POSIX `TZ` string
+(`EST5EDT,M3.2.0,M11.1.0`) works fully today, DST rules included.
+
+**Proper fix, in dependency order:**
+
+* A TZif (RFC 8536) reader — a small `no_std` addition to `tzrules`, since both
+  consumers need it and neither may allocate on the parse path. TZif v2+ files
+  carry a POSIX `TZ` string in their footer for times past the last recorded
+  transition, so the existing engine becomes the *tail* of the new one rather
+  than being replaced.
+* Ship tzdata: which files, from where, and how they are updated is a packaging
+  decision (`pkg/`) and belongs in `open-questions.md` before it is coded — a
+  full tzdata is ~450 KiB of the base image, and a stale one is a wrong clock.
+* A system-wide default: `/etc/localtime` (a TZif file or a symlink into the
+  zoneinfo tree) is the portable spelling and is what any ported program will
+  look for, so prefer it over inventing a YAML setting.
 
 ---
 
@@ -29798,7 +29884,18 @@ script enables group lexing only for later commands. Deferred: the current
 behavior is a deliberate, documented superset tradeoff and `!(cmd)`
 no-space negated subshells are vanishingly rare.
 
-### TD-OILS9. `osh` `printf '%(FMT)T'`: time is always formatted in UTC, not local time — OPEN (low priority, gated on timezone infrastructure)
+### TD-OILS9. `osh` `printf '%(FMT)T'`: time is always formatted in UTC, not local time — ✅ FIXED 2026-08-13
+
+**Superseded by `TD-OILS-BROKEN-DOWN-TIME-IS-ALWAYS-UTC`,** which is the entry
+with the fix write-up: `format_strftime` now takes a `&tzrules::Tz` resolved
+from the shell's exported `TZ`, and `%z`/`%Z` come from the zone in effect at
+the rendered instant. The `%Z`-prints-`UTC`-not-`GMT` note below still stands
+(a host-libc naming difference, not an osh bug — the slateos target is
+glibc-like and `tzrules` answers `UTC`). The `-2` approximation below is
+**still open** and unrelated to zones: `format_printf` is a free function with
+no access to the shell's start instant, so `%(…)T -2` renders "now".
+
+The original report follows.
 
 **Where:** `userspace/oils/src/interp.rs` (`format_strftime`, called from
 `format_conversion`'s `%(…)T` branch).

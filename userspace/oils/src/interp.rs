@@ -97,6 +97,9 @@
 //!   background jobs run synchronously.
 
 use bstr::ByteSlice;
+// The same TZ engine the libc's `strftime`/`localtime` use, so `printf '%(%Z)T'`
+// in osh and a C program's `date` can never disagree about local time.
+use tzrules::Tz;
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -1627,21 +1630,27 @@ fn close_std_before_exec(pc: &mut PCommand, closed: ClosedStd) {
         .into_iter()
         .filter_map(|(fd, wanted)| wanted.then_some(fd))
         .collect();
+    // Bound out here rather than written inline below, so that the `unsafe`
+    // `pre_exec` needs is not also draped over the closure's body: an `unsafe`
+    // block covers everything lexically inside it, which would have silently
+    // absorbed the `from_raw_fd` below and left its own SAFETY comment
+    // guarding nothing (rustc's `unused_unsafe` says as much on unix).
+    let close_fds = move || {
+        for &fd in &fds {
+            // SAFETY: taking ownership of a standard descriptor in a child that
+            // is about to `exec` and dropping it immediately: the close is the
+            // whole point, and nothing else in this child ever uses the
+            // descriptor again.
+            drop(unsafe { OwnedFd::from_raw_fd(fd) });
+        }
+        Ok(())
+    };
     // SAFETY: the closure runs in the forked child after the standard
     // descriptors have been set up and before `exec`. It allocates nothing and
     // calls nothing but `close`, so it is async-signal-safe as `pre_exec`
     // requires.
     unsafe {
-        pc.pre_exec(move || {
-            for &fd in &fds {
-                // SAFETY: taking ownership of a standard descriptor in a child
-                // that is about to `exec` and dropping it immediately: the
-                // close is the whole point, and nothing else in this child ever
-                // uses the descriptor again.
-                drop(unsafe { OwnedFd::from_raw_fd(fd) });
-            }
-            Ok(())
-        });
+        pc.pre_exec(close_fds);
     }
 }
 
@@ -18903,12 +18912,15 @@ impl Shell {
 
     /// Decode the bash prompt escape sequences (`\u`, `\h`, `\w`, `\t`, `\d`,
     /// `\D{fmt}`, …) in `s`. Backslash escapes not recognised keep the
-    /// backslash and following character. Time-based escapes render in UTC (no
-    /// local-timezone model yet, consistent with the `%(…)T` printf
-    /// conversion — see TD-OILS9).
+    /// backslash and following character. Time-based escapes render in the
+    /// shell's zone — see [`Self::shell_tz`] — consistently with the `%(…)T`
+    /// printf conversion, which shares the same engine.
     fn prompt_decode(&mut self, s: &str) -> Str {
         let (epoch, _) = unix_time();
         let epoch = epoch as i64;
+        // One reading for the whole prompt: `\t` and `\D{%Z}` in the same `PS1`
+        // must not straddle a `TZ` change, just as they share one `epoch`.
+        let tz = self.shell_tz();
         // The escapes insert *values* — the working directory, `$0`, the host
         // name — so what comes out is bytes even though the prompt source is
         // text: `PS1='\w$ '` in a directory whose name is not UTF-8 must still
@@ -18946,7 +18958,7 @@ impl Shell {
                     chars.next();
                 }
                 'd' => {
-                    push_prompt_strftime(&mut out, b"%a %b %e", epoch);
+                    push_prompt_strftime(&mut out, b"%a %b %e", epoch, &tz);
                     chars.next();
                 }
                 'D' => {
@@ -18963,25 +18975,25 @@ impl Shell {
                             fmt.push(fc);
                         }
                         let fmt = if fmt.is_empty() { "%H:%M:%S" } else { &fmt };
-                        push_prompt_strftime(&mut out, fmt.as_bytes(), epoch);
+                        push_prompt_strftime(&mut out, fmt.as_bytes(), epoch, &tz);
                     } else {
                         out.extend_from_slice(b"\\D");
                     }
                 }
                 't' => {
-                    push_prompt_strftime(&mut out, b"%H:%M:%S", epoch);
+                    push_prompt_strftime(&mut out, b"%H:%M:%S", epoch, &tz);
                     chars.next();
                 }
                 'T' => {
-                    push_prompt_strftime(&mut out, b"%I:%M:%S", epoch);
+                    push_prompt_strftime(&mut out, b"%I:%M:%S", epoch, &tz);
                     chars.next();
                 }
                 '@' => {
-                    push_prompt_strftime(&mut out, b"%I:%M %p", epoch);
+                    push_prompt_strftime(&mut out, b"%I:%M %p", epoch, &tz);
                     chars.next();
                 }
                 'A' => {
-                    push_prompt_strftime(&mut out, b"%H:%M", epoch);
+                    push_prompt_strftime(&mut out, b"%H:%M", epoch, &tz);
                     chars.next();
                 }
                 'h' => {
@@ -37544,6 +37556,44 @@ impl Shell {
         }
     }
 
+    /// The timezone this shell renders broken-down time in — `printf
+    /// '%(FORMAT)T'` and the `\d \D{…} \t \T \@ \A` prompt escapes.
+    ///
+    /// The zone comes from **`TZ`, and only when `TZ` is exported.** That is
+    /// bash's rule, not an approximation of it: bash renders time by calling
+    /// `strftime`, which reads the *process* environment, and the only thing
+    /// that pushes a shell variable into that environment is the export
+    /// attribute. `variables.c:sv_tz` is explicit —
+    ///
+    /// ```c
+    /// v = find_variable (name);
+    /// if (v && exported_p (v)) array_needs_making = 1;
+    /// else if (v == 0)         array_needs_making = 1;
+    /// if (array_needs_making) { maybe_make_export_env (); tzset (); }
+    /// ```
+    ///
+    /// — it rebuilds the export environment and calls `tzset()` only for an
+    /// exported (or newly unset) `TZ`. So a plain `TZ=EST5` with no `export`
+    /// really does leave `printf '%(%Z)T'` unchanged in bash, and it leaves it
+    /// unchanged here. The common case still works because an *inherited* `TZ`
+    /// arrives already exported (see [`Self::import_environment`]), and
+    /// assigning to an exported name keeps the attribute.
+    ///
+    /// An unset, empty or unparseable `TZ` is UTC, matching both POSIX and
+    /// [`tzrules::Tz::parse`]'s contract. A shell that has not imported the
+    /// environment (every unit test) has nothing in `exported`, so tests render
+    /// in UTC no matter what the host's `TZ` says — the determinism is a
+    /// consequence of bash's rule, not a carve-out from it.
+    fn shell_tz(&mut self) -> Tz {
+        if !self.exported.contains("TZ") {
+            return Tz::UTC;
+        }
+        match self.param_value("TZ") {
+            Some(raw) if !raw.is_empty() => Tz::parse(&raw).unwrap_or(Tz::UTC),
+            _ => Tz::UTC,
+        }
+    }
+
     /// The `_` bash puts in an executed command's environment: the program that
     /// command is about to run.
     ///
@@ -43323,7 +43373,11 @@ impl Shell {
         // aborts printf). Each carries the byte offset at which it arose.
         let mut diags = PrintfDiags::default();
         let fargs = args.get(i + 1..).unwrap_or_default();
-        let text = format_printf(fmt, fargs, &mut diags);
+        // Resolved once for the whole format, not per `%(…)T`: bash calls
+        // `tzset()` at assignment time, so every conversion in one `printf`
+        // sees the same zone even if the format somehow changed it.
+        let tz = self.shell_tz();
+        let text = format_printf(fmt, fargs, &mut diags, &tz);
         let PrintfDiags { errors, warnings, notes, fatal, .. } = diags;
         let num_status = i32::from(!errors.is_empty() || fatal.is_some());
         // Merge errors and warnings into one offset-ordered message stream so
@@ -63767,7 +63821,7 @@ struct PrintfDiags {
     base: usize,
 }
 
-fn format_printf(fmt: &[u8], args: &[Str], diags: &mut PrintfDiags) -> Str {
+fn format_printf(fmt: &[u8], args: &[Str], diags: &mut PrintfDiags, tz: &Tz) -> Str {
     // Bash reuses the format string until all arguments are consumed. Repeat the
     // format while arguments remain, stopping if a pass consumes none (the
     // format has no argument-consuming conversions) to avoid an infinite loop.
@@ -63780,7 +63834,7 @@ fn format_printf(fmt: &[u8], args: &[Str], diags: &mut PrintfDiags) -> Str {
         // which it occurred (used to interleave stderr with stdout — see
         // `builtin_printf`).
         diags.base = out.len();
-        let (chunk, stop) = format_printf_once(fmt, args, &mut arg_i, diags);
+        let (chunk, stop) = format_printf_once(fmt, args, &mut arg_i, diags, tz);
         out.extend_from_slice(&chunk);
         // A `%b` argument containing `\c` halts all further output, format
         // recycling included. A malformed conversion (`fatal`) aborts printf
@@ -63837,6 +63891,7 @@ fn format_printf_once(
     args: &[Str],
     arg_i: &mut usize,
     diags: &mut PrintfDiags,
+    tz: &Tz,
 ) -> (Str, bool) {
     let mut out = Str::new();
     // A format string is a shell word: its *syntax* is ASCII, but its literal
@@ -63858,7 +63913,7 @@ fn format_printf_once(
                 }
             }
             b'%' => {
-                if format_conversion(&mut chars, args, arg_i, &mut out, diags) {
+                if format_conversion(&mut chars, args, arg_i, &mut out, diags, tz) {
                     return (out, true);
                 }
                 // A malformed conversion aborts the rest of this pass too.
@@ -63882,6 +63937,7 @@ fn format_conversion(
     arg_i: &mut usize,
     out: &mut Str,
     diags: &mut PrintfDiags,
+    tz: &Tz,
 ) -> bool {
     // Literal `%%` short-circuit (no flags/width may precede it).
     if chars.peek() == Some(&b'%') {
@@ -63995,7 +64051,8 @@ fn format_conversion(
     // sentinels rather than times — `-1` is now and `-2` is the shell's start
     // (approximated as now here) — and so is a missing or empty argument. Every
     // *other* negative is an ordinary time before the epoch: `-86400` is
-    // 1969-12-31, not today. Time is rendered in UTC.
+    // 1969-12-31, not today. Time is rendered in `tz` — the shell's exported
+    // `TZ`, resolved once per `printf` by [`Shell::shell_tz`].
     if chars.peek() == Some(&b'(') {
         chars.next();
         let mut tfmt = Str::new();
@@ -64039,7 +64096,7 @@ fn format_conversion(
         // An empty format is not an empty result: bash passes `%X` to strftime,
         // which in the C locale is the 24-hour clock time.
         let tfmt: &[u8] = if tfmt.is_empty() { b"%X" } else { &tfmt };
-        let mut rendered = format_strftime(tfmt, secs);
+        let mut rendered = format_strftime(tfmt, secs, tz);
         // bash renders the time and then lays it out as a string, so precision
         // truncates it the way it truncates `%s` — by bytes, as C counts them —
         // making `%.2(%Y)T` `19` and `%.0` nothing at all. A precision longer
@@ -64454,12 +64511,13 @@ fn iso_week(year: i64, yday: i64, wday: usize) -> (i64, i64) {
 }
 
 /// Render a `strftime`-style format for `printf '%(FORMAT)T'`. `epoch` is
-/// seconds since the Unix epoch; the broken-down time is computed in **UTC**
-/// (SlateOS has no timezone database — see known-issues TD-OILS). Supports the
-/// common specifiers `%Y %C %y %m %d %e %H %I %k %l %M %S %p %P %A %a %B %b %h
-/// %j %u %w %s %z %Z %V %G %g %n %t %F %T %R %D %r %c %x %X %%`; an unknown
-/// specifier is emitted verbatim. Zone-dependent output (`%z` `%Z`) reflects the
-/// UTC rendering (`+0000` / `UTC`).
+/// seconds since the Unix epoch and `tz` is the zone to render it in — see
+/// [`Shell::shell_tz`], which resolves it from the shell's *exported* `TZ`
+/// exactly as bash's `sv_tz` does. Supports the common specifiers
+/// `%Y %C %y %m %d %e %H %I %k %l %M %S %p %P %A %a %B %b %h %j %u %w %s %z %Z
+/// %V %G %g %n %t %F %T %R %D %r %c %x %X %%`; an unknown specifier is emitted
+/// verbatim. `%z` and `%Z` report the offset and abbreviation `tz` was in at
+/// `epoch`, so they follow a DST rule across its transitions.
 /// Append a strftime rendering to a prompt buffer.
 ///
 /// **TD-OILS-BYTE-STRINGS scaffold.** Prompt expansion is still `String`-based,
@@ -64468,11 +64526,11 @@ fn iso_week(year: i64, yday: i64, wday: usize) -> (i64, i64) {
 /// pure ASCII and so pass through unharmed; this whole helper disappears when
 /// prompt expansion becomes byte-native.
 #[allow(deprecated)]
-fn push_prompt_strftime(out: &mut Str, fmt: &[u8], epoch: i64) {
-    out.extend_from_slice(&format_strftime(fmt, epoch));
+fn push_prompt_strftime(out: &mut Str, fmt: &[u8], epoch: i64, tz: &Tz) {
+    out.extend_from_slice(&format_strftime(fmt, epoch, tz));
 }
 
-fn format_strftime(fmt: &[u8], epoch: i64) -> Str {
+fn format_strftime(fmt: &[u8], epoch: i64, tz: &Tz) -> Str {
     const WDAY_FULL: [&[u8]; 7] = [
         b"Sunday", b"Monday", b"Tuesday", b"Wednesday", b"Thursday", b"Friday", b"Saturday",
     ];
@@ -64486,8 +64544,14 @@ fn format_strftime(fmt: &[u8], epoch: i64) -> Str {
         b"Dec",
     ];
 
-    let days = epoch.div_euclid(86_400);
-    let rem = epoch.rem_euclid(86_400);
+    // The zone state at this instant, and the local seconds it names. Every
+    // broken-down field below reads the *local* clock; only `%s` keeps the
+    // unshifted `epoch`, because that specifier names the instant itself
+    // rather than a reading of any clock.
+    let info = tz.lookup(epoch);
+    let local = epoch.saturating_add(i64::from(info.gmtoff));
+    let days = local.div_euclid(86_400);
+    let rem = local.rem_euclid(86_400);
     let hour = (rem / 3600) as u32;
     let minute = ((rem % 3600) / 60) as u32;
     let second = (rem % 60) as u32;
@@ -64504,7 +64568,7 @@ fn format_strftime(fmt: &[u8], epoch: i64) -> Str {
     }
 
     // Render one specifier letter to `out`. `%F`/`%T`/`%R`/`%D` recurse.
-    fn emit(out: &mut Str, c: u8, ctx: &StrftimeCtx) {
+    fn emit(out: &mut Str, c: u8, ctx: &StrftimeCtx<'_>) {
         match c {
             b'Y' => num(out, &ctx.year.to_string()),
             b'C' => num(out, &format!("{:02}", ctx.year.div_euclid(100))),
@@ -64540,11 +64604,23 @@ fn format_strftime(fmt: &[u8], epoch: i64) -> Str {
             b'u' => num(out, &(if ctx.wday == 0 { 7 } else { ctx.wday }).to_string()),
             b'w' => num(out, &ctx.wday.to_string()),
             b's' => num(out, &ctx.epoch.to_string()),
-            // osh renders all times in UTC (see TD-OILS9), so the zone offset is
-            // always +0000 and the zone name is UTC. bash would use the shell's
-            // local zone; matching that is gated on a timezone database.
-            b'z' => out.extend_from_slice(b"+0000"),
-            b'Z' => out.extend_from_slice(b"UTC"),
+            // `%z` — the offset as `±hhmm`. Sub-minute seconds are dropped
+            // rather than rendered as `±hhmmss`, matching glibc's plain `%z`
+            // (which divides the offset by 60 before formatting); no real zone
+            // has had a non-whole-minute offset since 1972 anyway.
+            b'z' => {
+                let (sign, mag) = if ctx.gmtoff < 0 {
+                    (b'-', ctx.gmtoff.unsigned_abs())
+                } else {
+                    (b'+', ctx.gmtoff.unsigned_abs())
+                };
+                out.push(sign);
+                let mins = mag / 60;
+                num(out, &format!("{:02}{:02}", mins / 60, mins % 60));
+            }
+            // `%Z` — the abbreviation in effect at this instant, so a zone with
+            // a DST rule reports `EST` or `EDT` depending on `epoch`.
+            b'Z' => out.extend_from_slice(ctx.zone_name),
             // `%U`/`%W` — the plain week counts, which are not the ISO one and
             // do not share its year: week 1 starts at the year's first Sunday
             // (`%U`) or first Monday (`%W`), and every day before that is week
@@ -64646,6 +64722,8 @@ fn format_strftime(fmt: &[u8], epoch: i64) -> Str {
         wday_abbr: WDAY_ABBR[wday],
         mon_full: MON_FULL[mon_i],
         mon_abbr: MON_ABBR[mon_i],
+        gmtoff: info.gmtoff,
+        zone_name: info.name.as_bytes(),
     };
     let mut out = Str::new();
     // Bytes, not chars: the format's *syntax* is ASCII, but its literal text
@@ -64665,9 +64743,13 @@ fn format_strftime(fmt: &[u8], epoch: i64) -> Str {
     out
 }
 
-/// Broken-down UTC time plus preformatted name strings, passed to the
+/// Broken-down **local** time plus preformatted name strings, passed to the
 /// `strftime` specifier renderer.
-struct StrftimeCtx {
+///
+/// The lifetime is the zone's: `zone_name` borrows the abbreviation out of the
+/// [`tzrules::TzInfo`] the caller looked up, while the weekday/month names are
+/// `&'static` and coerce into it.
+struct StrftimeCtx<'a> {
     year: i64,
     month: u32,
     day: u32,
@@ -64676,11 +64758,16 @@ struct StrftimeCtx {
     second: u32,
     wday: usize,
     yday: i64,
+    /// The unshifted instant, for `%s` — *not* `zone_name`'s local clock.
     epoch: i64,
-    wday_full: &'static [u8],
-    wday_abbr: &'static [u8],
-    mon_full: &'static [u8],
-    mon_abbr: &'static [u8],
+    wday_full: &'a [u8],
+    wday_abbr: &'a [u8],
+    mon_full: &'a [u8],
+    mon_abbr: &'a [u8],
+    /// Seconds east of Greenwich at `epoch` (`%z`).
+    gmtoff: i32,
+    /// The zone abbreviation at `epoch` (`%Z`).
+    zone_name: &'a [u8],
 }
 
 /// Parse an integer `printf` argument with C/bash `strtoimax` semantics and
@@ -73581,8 +73668,8 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("printf '%(%R)T\\n' 1000000000").0, "01:46\n");
         // A negative argument means "now"; just check it produces 4-digit year.
         assert_eq!(run("printf '%(%Y)T\\n' -1").0.trim().len(), 4);
-        // Zone specifiers reflect osh's UTC rendering (bash would use the local
-        // zone; see TD-OILS9).
+        // With no `TZ` in the environment the zone is UTC (POSIX), so the zone
+        // specifiers report the offsetless rendering the fields above assume.
         assert_eq!(run("printf '%(%z %Z)T\\n' 0").0, "+0000 UTC\n");
         // Space-padded hours (%k 24h, %l 12h) and the %r 12-hour clock.
         assert_eq!(run("printf '%(%k|%l|%r)T\\n' 1000000000").0, " 1| 1|01:46:40 AM\n");
@@ -73599,6 +73686,103 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         assert_eq!(run("printf '%(%G-W%V)T\\n' 1609459200").0, "2020-W53\n");
         // Boundary: 2018-12-31 (Mon) belongs to ISO week 01 of 2019.
         assert_eq!(run("printf '%(%G-W%V)T\\n' 1546214400").0, "2019-W01\n");
+    }
+
+    /// `printf '%(FMT)T'` renders in the shell's zone, not always in UTC.
+    ///
+    /// 1000000000 is 2001-09-09 01:46:40 UTC, which in US Eastern is
+    /// 2001-09-08 21:46:40 EDT — a different *day*, so a broken zone shift
+    /// cannot pass this by rounding.
+    #[test]
+    fn printf_time_renders_in_the_exported_zone() {
+        const EASTERN: &str = "EST5EDT,M3.2.0,M11.1.0";
+        assert_eq!(
+            run(&format!(
+                "export TZ={EASTERN}; printf '%(%Y-%m-%d %H:%M:%S %z %Z)T\\n' 1000000000"
+            ))
+            .0,
+            "2001-09-08 21:46:40 -0400 EDT\n"
+        );
+        // The same instant, six months earlier in the year, falls outside DST:
+        // 2001-01-01 00:00:00 UTC is 2000-12-31 19:00:00 EST.
+        assert_eq!(
+            run(&format!(
+                "export TZ={EASTERN}; printf '%(%Y-%m-%d %H:%M:%S %z %Z)T\\n' 978307200"
+            ))
+            .0,
+            "2000-12-31 19:00:00 -0500 EST\n"
+        );
+        // A zone *east* of Greenwich, and a whole-hour offset with minutes:
+        // Kathmandu is +05:45, which `%z` must render as `+0545` rather than
+        // rounding to a whole hour.
+        assert_eq!(
+            run("export TZ='NPT-5:45'; printf '%(%Y-%m-%d %H:%M %z %Z)T\\n' 0").0,
+            "1970-01-01 05:45 +0545 NPT\n"
+        );
+    }
+
+    /// `%s` names the instant, not a clock reading, so it is the argument
+    /// unchanged however far the zone shifts the other fields.
+    #[test]
+    fn printf_time_percent_s_is_zone_independent() {
+        assert_eq!(
+            run("export TZ='EST5EDT,M3.2.0,M11.1.0'; printf '%(%s %H)T\\n' 1000000000").0,
+            "1000000000 21\n"
+        );
+        assert_eq!(run("printf '%(%s %H)T\\n' 1000000000").0, "1000000000 01\n");
+    }
+
+    /// bash's `sv_tz` calls `tzset()` only for an *exported* `TZ`, so a plain
+    /// assignment leaves the rendered time alone. See [`Shell::shell_tz`].
+    #[test]
+    fn printf_time_ignores_an_unexported_tz() {
+        // Assigned but never exported: still UTC.
+        assert_eq!(
+            run("TZ='EST5EDT,M3.2.0,M11.1.0'; printf '%(%H %Z)T\\n' 1000000000").0,
+            "01 UTC\n"
+        );
+        // Exporting the name afterwards is enough — the value was already there.
+        assert_eq!(
+            run("TZ='EST5EDT,M3.2.0,M11.1.0'; export TZ; printf '%(%H %Z)T\\n' 1000000000").0,
+            "21 EDT\n"
+        );
+        // An assignment *prefix* is exported into the command's environment, so
+        // it does take effect — as it does for an external `date`.
+        assert_eq!(
+            run("TZ='EST5EDT,M3.2.0,M11.1.0' printf '%(%H %Z)T\\n' 1000000000").0,
+            "21 EDT\n"
+        );
+    }
+
+    /// An unset, empty or unparseable `TZ` is UTC — POSIX's rule and
+    /// [`tzrules::Tz::parse`]'s contract. Notably a bare zoneinfo name such as
+    /// `America/New_York` is *not* a POSIX TZ string and lands here, because
+    /// SlateOS has no tzdata to resolve it against yet.
+    #[test]
+    fn printf_time_falls_back_to_utc_for_a_zone_it_cannot_parse() {
+        for tz in ["", "America/New_York", "EST5EDT,garbage", "%%%"] {
+            assert_eq!(
+                run(&format!("export TZ='{tz}'; printf '%(%H %Z)T\\n' 1000000000")).0,
+                "01 UTC\n",
+                "TZ={tz:?} should render as UTC"
+            );
+        }
+    }
+
+    /// The `\t`-family prompt escapes share the printf engine, so a prompt and
+    /// a `printf '%(…)T'` in the same shell cannot disagree about the zone.
+    #[test]
+    fn prompt_time_escapes_render_in_the_exported_zone() {
+        // A prompt renders *now*, so the assertion has to hold at every
+        // instant: a DST-observing zone would flip `%Z` between EST and EDT
+        // with the calendar. `NPT-5:45` has no DST rule, so its name and
+        // offset are the same in July as in January.
+        let mut sh = new_shell();
+        sh.run_source(b"export TZ='NPT-5:45'");
+        assert_eq!(sh.prompt_decode("\\D{%Z %z}"), b"NPT +0545".to_vec());
+        // …and a shell with no exported TZ still renders UTC.
+        let mut utc = new_shell();
+        assert_eq!(utc.prompt_decode("\\D{%Z %z}"), b"UTC +0000".to_vec());
     }
 
     #[test]

@@ -62,6 +62,35 @@ check_selftest_failures() {
     return 0
 }
 
+# Surface Path-Z rungs that DID NOT RUN because rootfs.ext4 lacked a binary
+# they drive.
+#
+# This is NOT a failure — the image is git-ignored and a diskless boot must
+# still pass — so it does not change the exit code.  It is printed loudly
+# because the alternative was worse than a failure: a skipped rung used to be
+# byte-identical to a passing one in the serial log, and all 26 tcc rungs
+# no-op'd unnoticed for weeks once /bin/tcc fell out of the image
+# (known-issues.md -> B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT).  A skip that is
+# reported gets acted on; a silent one gets believed.
+report_pathz_skips() {
+    local file="$1"
+    [ -f "$file" ] || return 0
+    local line
+    line="$(grep -a 'Path-Z prerequisites:' "$file" | tail -1)"
+    case "$line" in
+        *"rung(s) SKIPPED"*)
+            echo "=== PATH-Z COVERAGE INCOMPLETE ==="
+            echo "  ${line#*\[spawn\] }"
+            grep -a '\[spawn\]   SKIP:' "$file" | head -8 | sed 's/^/  /'
+            local n
+            n="$(grep -ac '\[spawn\]   SKIP:' "$file")"
+            [ "$n" -gt 8 ] && echo "  ... and $((n - 8)) more"
+            echo "  (rebuild the image: wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh)"
+            ;;
+    esac
+    return 0
+}
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
@@ -603,6 +632,7 @@ while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
             exit 1
         fi
         [ "$BENCH" -eq 1 ] && print_bench_results "$SERIAL_FILE"
+        report_pathz_skips "$SERIAL_FILE"
         echo "=== Boot test PASSED ==="
         exit 0
     fi
@@ -654,6 +684,7 @@ if [ -f "$SERIAL_FILE" ]; then
             exit 1
         fi
         [ "$BENCH" -eq 1 ] && print_bench_results "$SERIAL_FILE"
+        report_pathz_skips "$SERIAL_FILE"
         echo "=== Boot test PASSED ==="
         exit 0
     elif grep -q "PANIC\|FATAL" "$SERIAL_FILE"; then

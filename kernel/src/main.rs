@@ -3293,6 +3293,15 @@ extern "C" fn kernel_main() -> ! {
         );
     }
 
+    // Path-Z coverage verdict.  Every rung above self-skips when `rootfs.ext4`
+    // lacks a binary it drives, which is correct (the image is optional) but
+    // used to be *invisible*: a rung that never ran looked exactly like a rung
+    // that passed.  All 26 tcc rungs no-op'd unnoticed that way once /bin/tcc
+    // fell out of the image (known-issues.md →
+    // B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT).  This prints the count so a boot
+    // that lost coverage cannot be read as a clean one.
+    proc::spawn::pathz_report_skips();
+
     // B-KNULLJUMP corruption hunt: end-of-block checkpoint. Sweep every
     // still-parked slot for a stomped poison pattern (a stale-pointer/UAF write
     // that landed while the slot was quarantined), report the verdict + stats,

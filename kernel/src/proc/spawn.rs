@@ -50,6 +50,70 @@ use crate::sched::task::{TaskId, DEFAULT_PRIORITY};
 use crate::serial_println;
 use crate::serial_print;
 
+/// How many Path-Z rungs declined to run this boot because `rootfs.ext4` did
+/// not carry a file they need.  Reported by [`pathz_report_skips`].
+static PATHZ_SKIPPED: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+/// Record — *loudly* — that a Path-Z rung did not run for want of a staged
+/// prerequisite.
+///
+/// Every Path-Z rung is best-effort by design: `rootfs.ext4` is git-ignored, a
+/// fresh checkout legitimately lacks it, and a diskless boot must still pass.
+/// That is why the prerequisite guards return `Ok(())` instead of an error, and
+/// that part is right.
+///
+/// What was *wrong* was doing it silently.  A rung that never ran then looks
+/// byte-for-byte like a rung that passed — same (empty) contribution to the
+/// serial log — and `boot-test.sh` exits 0 either way.  That is exactly how all
+/// 26 on-target-compiler rungs (Path-Z Parts 35–60) no-op'd unnoticed once
+/// `/bin/tcc` fell out of the image: see known-issues.md →
+/// `B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT`.  It nearly cost more than the lost
+/// coverage, because B-KNULLJUMP only ever fires inside one of those rungs, so
+/// the planned 250-boot soak would have sampled a population that cannot
+/// reproduce it and returned a clean, meaningless result.
+///
+/// The rule this encodes: **a skip must be at least as loud as a failure.** A
+/// failure gets investigated; a silent skip is believed.
+fn pathz_skip(rung: core::fmt::Arguments<'_>, missing: &str) {
+    PATHZ_SKIPPED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    serial_println!("[spawn]   SKIP: {} — prerequisite missing: {}", rung, missing);
+}
+
+/// Prerequisite gate for a Path-Z rung.
+///
+/// Returns `true` — having logged one `SKIP` line naming the rung and the first
+/// absent path — when any `required` artifact is missing, so the caller can
+/// `return Ok(())`.  Returns `false` when the whole set is present.
+fn pathz_missing(rung: &str, required: &[&str]) -> bool {
+    for path in required {
+        if !crate::fs::Vfs::exists(path) {
+            pathz_skip(format_args!("{rung}"), path);
+            return true;
+        }
+    }
+    false
+}
+
+/// Print the end-of-boot Path-Z coverage verdict.
+///
+/// Called once after the Path-Z sequence.  The wording is deliberately blunt on
+/// the nonzero path: `boot-test.sh` greps for `rung(s) SKIPPED` and surfaces it,
+/// so a boot that quietly lost a chunk of its coverage can no longer be read as
+/// a clean run.
+pub fn pathz_report_skips() {
+    let n = PATHZ_SKIPPED.load(core::sync::atomic::Ordering::Relaxed);
+    if n == 0 {
+        serial_println!("[spawn] Path-Z prerequisites: complete — 0 rungs skipped");
+    } else {
+        serial_println!(
+            "[spawn] Path-Z prerequisites: {} rung(s) SKIPPED — coverage is INCOMPLETE \
+             (rebuild rootfs.ext4 via scripts/create-ext4-rootfs.sh; see the SKIP lines above)",
+            n
+        );
+    }
+}
+
 /// Load a ring-3 self-test fixture ELF from the rootfs-staged test directory
 /// (`/mnt/tests/<name>.elf`, where `/mnt` is the ext4 rootfs mounted at boot,
 /// long before the Path-Z self-tests run).
@@ -18865,8 +18929,7 @@ pub fn self_test_linux_link() -> KernelResult<()> {
     serial_println!("[spawn] Running Linux link()/linkat() hard-link test (ring 3, ext4 /mnt)...");
 
     // Skip cleanly when /mnt isn't an ext4 mount (diskless boot).
-    if !crate::fs::Vfs::exists("/mnt") {
-        serial_println!("[spawn]   Linux link() (ring 3): SKIP (no /mnt ext4 mount)");
+    if pathz_missing("Linux link()/linkat() hard-link (ring 3, ext4 /mnt)", &["/mnt"]) {
         return Ok(());
     }
 
@@ -19006,8 +19069,7 @@ pub fn self_test_ext4_link_no_follow() -> KernelResult<()> {
 
     serial_println!("[spawn] Running link()/linkat no-follow symlink test (kernel, ext4 /mnt)...");
 
-    if !Vfs::exists("/mnt") {
-        serial_println!("[spawn]   link no-follow (ext4): SKIP (no /mnt ext4 mount)");
+    if pathz_missing("link()/linkat no-follow symlink (kernel, ext4 /mnt)", &["/mnt"]) {
         return Ok(());
     }
 
@@ -20396,7 +20458,7 @@ pub fn self_test_linux_real_glibc() -> KernelResult<()> {
 
     // No rootfs.ext4 attached → nothing staged at /mnt.  No-op (not a failure):
     // the image is git-ignored, so most environments legitimately lack it.
-    if !crate::fs::Vfs::exists(SRC_HELLO) {
+    if pathz_missing("REAL glibc dynamic-execution (ring 3, Path Z)", &[SRC_HELLO]) {
         return Ok(());
     }
 
@@ -20564,7 +20626,7 @@ pub fn self_test_linux_real_glibc_stdio() -> KernelResult<()> {
     const CAPTURE: &str = "/glibc-stdio-capture.tmp";
     const MAX_YIELDS: usize = 4096;
 
-    if !crate::fs::Vfs::exists(SRC_STDIO) {
+    if pathz_missing("REAL glibc stdio (output) (ring 3, Path Z)", &[SRC_STDIO]) {
         return Ok(());
     }
 
@@ -20758,7 +20820,7 @@ pub fn self_test_linux_real_glibc_full() -> KernelResult<()> {
     const CAPTURE: &str = "/glibc-full-capture.tmp";
     const MAX_YIELDS: usize = 4096;
 
-    if !crate::fs::Vfs::exists(SRC_FULL) {
+    if pathz_missing("REAL glibc argv/env/stdin/heap (ring 3, Path Z)", &[SRC_FULL]) {
         return Ok(());
     }
 
@@ -20972,7 +21034,7 @@ pub fn self_test_linux_real_glibc_pthread() -> KernelResult<()> {
     // the bound quickly (no ready task → each yield returns immediately).
     const MAX_YIELDS: usize = 262_144;
 
-    if !crate::fs::Vfs::exists(SRC_PT) {
+    if pathz_missing("REAL glibc pthread (clone+futex+TLS) (ring 3, Path Z)", &[SRC_PT]) {
         return Ok(());
     }
 
@@ -21169,7 +21231,7 @@ pub fn self_test_linux_real_glibc_signal() -> KernelResult<()> {
     // Generous bound still tolerates scheduler jitter.
     const MAX_YIELDS: usize = 65_536;
 
-    if !crate::fs::Vfs::exists(SRC_SIG) {
+    if pathz_missing("REAL glibc signal (SA_SIGINFO handler, ring 3, Path Z)", &[SRC_SIG]) {
         return Ok(());
     }
 
@@ -21358,7 +21420,7 @@ pub fn self_test_linux_real_glibc_fault() -> KernelResult<()> {
     // Single-threaded, synchronous fault + siglongjmp — completes promptly.
     const MAX_YIELDS: usize = 65_536;
 
-    if !crate::fs::Vfs::exists(SRC_FAULT) {
+    if pathz_missing("REAL glibc fault-signal (SIGSEGV handler, ring 3, Path Z)", &[SRC_FAULT]) {
         return Ok(());
     }
 
@@ -21549,7 +21611,7 @@ pub fn self_test_linux_real_glibc_sigqueue() -> KernelResult<()> {
     // Single-threaded, synchronous self-sigqueue — completes promptly.
     const MAX_YIELDS: usize = 65_536;
 
-    if !crate::fs::Vfs::exists(SRC_SIGQUEUE) {
+    if pathz_missing("REAL glibc SI_QUEUE-payload (SIGUSR1 handler, ring 3, Path Z)", &[SRC_SIGQUEUE]) {
         return Ok(());
     }
 
@@ -21739,7 +21801,7 @@ pub fn self_test_linux_real_glibc_forkexec() -> KernelResult<()> {
     // single-process tests (the child re-runs ld.so), so allow extra yields.
     const MAX_YIELDS: usize = 262_144;
 
-    if !crate::fs::Vfs::exists(SRC_FORKEXEC) {
+    if pathz_missing("REAL glibc fork()+execl()+waitpid() (ring 3, Path Z)", &[SRC_FORKEXEC]) {
         return Ok(());
     }
 
@@ -21930,7 +21992,7 @@ pub fn self_test_linux_real_glibc_pipe() -> KernelResult<()> {
     // once the child finishes its (in-budget) startup.
     const MAX_YIELDS: usize = 262_144;
 
-    if !crate::fs::Vfs::exists(SRC_PIPE) {
+    if pathz_missing("REAL glibc pipe()+fork()+dup2()+execl()+read()+wait (ring 3, Path Z)", &[SRC_PIPE]) {
         return Ok(());
     }
 
@@ -22151,7 +22213,7 @@ pub fn self_test_linux_real_glibc_redir() -> KernelResult<()> {
     // budget as the other real-glibc tests.
     const MAX_YIELDS: usize = 262_144;
 
-    if !crate::fs::Vfs::exists(SRC_REDIR) {
+    if pathz_missing("REAL glibc `cmd > file` output-redirection (ring 3, Path Z)", &[SRC_REDIR]) {
         return Ok(());
     }
 
@@ -22324,7 +22386,7 @@ pub fn self_test_linux_real_glibc_redirin() -> KernelResult<()> {
     // budget as the other real-glibc tests.
     const MAX_YIELDS: usize = 262_144;
 
-    if !crate::fs::Vfs::exists(SRC_REDIRIN) {
+    if pathz_missing("REAL glibc `cmd < file` input-redirection (ring 3, Path Z)", &[SRC_REDIRIN]) {
         return Ok(());
     }
 
@@ -22494,7 +22556,7 @@ pub fn self_test_bash_on_slateos_libc() -> KernelResult<()> {
     // it is doing all of it against our libc, so allow 4x dash's budget.
     const MAX_YIELDS: usize = 1_048_576;
 
-    if !crate::fs::Vfs::exists(SRC_BASH) {
+    if pathz_missing("GNU bash 5.2 linked against OUR libc.a (ring 3)", &[SRC_BASH]) {
         return Ok(());
     }
 
@@ -22674,7 +22736,7 @@ pub fn self_test_linux_real_glibc_shell_redir() -> KernelResult<()> {
     // streams, command parsing); keep the same generous budget.
     const MAX_YIELDS: usize = 262_144;
 
-    if !crate::fs::Vfs::exists(SRC_DASH) {
+    if pathz_missing("REAL dash shell `echo > file` redirection (ring 3, Path Z)", &[SRC_DASH]) {
         return Ok(());
     }
 
@@ -22856,7 +22918,7 @@ pub fn self_test_linux_real_glibc_shell_exec() -> KernelResult<()> {
     // keep the generous budget.
     const MAX_YIELDS: usize = 262_144;
 
-    if !crate::fs::Vfs::exists(SRC_DASH) || !crate::fs::Vfs::exists(SRC_EMIT) {
+    if pathz_missing("REAL dash shell fork+exec of external `/bin/emit > file` (ring 3, Path Z)", &[SRC_DASH, SRC_EMIT]) {
         return Ok(());
     }
 
@@ -23044,10 +23106,7 @@ pub fn self_test_linux_real_glibc_shell_pipe() -> KernelResult<()> {
     // generous budget.
     const MAX_YIELDS: usize = 262_144;
 
-    if !crate::fs::Vfs::exists(SRC_DASH)
-        || !crate::fs::Vfs::exists(SRC_EMIT)
-        || !crate::fs::Vfs::exists(SRC_COUNT)
-    {
+    if pathz_missing("REAL dash shell pipeline `/bin/emit | /bin/countbytes > file` (ring 3, Path Z)", &[SRC_DASH, SRC_EMIT, SRC_COUNT]) {
         return Ok(());
     }
 
@@ -23224,7 +23283,7 @@ pub fn self_test_linux_real_glibc_shell_loop() -> KernelResult<()> {
     // Three fork+exec+wait cycles under a shell; keep the generous budget.
     const MAX_YIELDS: usize = 262_144;
 
-    if !crate::fs::Vfs::exists(SRC_DASH) || !crate::fs::Vfs::exists(SRC_EMIT) {
+    if pathz_missing("REAL dash shell loop `for i in a b c; do /bin/emit; done > file` (ring 3, Path Z)", &[SRC_DASH, SRC_EMIT]) {
         return Ok(());
     }
 
@@ -23406,7 +23465,7 @@ pub fn self_test_linux_real_glibc_shell_script_stdin() -> KernelResult<()> {
     // budget used by the other dash tests.
     const MAX_YIELDS: usize = 262_144;
 
-    if !crate::fs::Vfs::exists(SRC_DASH) || !crate::fs::Vfs::exists(SRC_EMIT) {
+    if pathz_missing("REAL dash shell script-from-stdin (no -c; ring 3, Path Z)", &[SRC_DASH, SRC_EMIT]) {
         return Ok(());
     }
 
@@ -23622,7 +23681,7 @@ pub fn self_test_linux_real_glibc_shell_glob() -> KernelResult<()> {
     const OUT_PATH: &str = "/glob-out.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if !crate::fs::Vfs::exists(SRC_DASH) {
+    if pathz_missing("REAL dash shell glob `echo /globdir/* > file` (ring 3, Path Z)", &[SRC_DASH]) {
         return Ok(());
     }
 
@@ -23808,7 +23867,7 @@ pub fn self_test_linux_real_glibc_shell_cmdsub() -> KernelResult<()> {
     const OUT_PATH: &str = "/cmdsub-out.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if !crate::fs::Vfs::exists(SRC_DASH) || !crate::fs::Vfs::exists(SRC_EMIT) {
+    if pathz_missing("REAL dash shell command substitution `echo [$(/bin/emit)] > file` (ring 3, Path Z)", &[SRC_DASH, SRC_EMIT]) {
         return Ok(());
     }
 
@@ -23971,7 +24030,7 @@ pub fn self_test_linux_real_glibc_shell_cond() -> KernelResult<()> {
     const OUT_PATH: &str = "/cond-out.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if !crate::fs::Vfs::exists(SRC_DASH) {
+    if pathz_missing("REAL dash shell conditional `if [ \"$x\" = hello ]; then ...` (ring 3, Path Z)", &[SRC_DASH]) {
         return Ok(());
     }
 
@@ -24126,7 +24185,7 @@ pub fn self_test_linux_real_glibc_shell_arith() -> KernelResult<()> {
     const OUT_PATH: &str = "/arith-out.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if !crate::fs::Vfs::exists(SRC_DASH) {
+    if pathz_missing("REAL dash shell arithmetic `echo $((x * y + 2))` (ring 3, Path Z)", &[SRC_DASH]) {
         return Ok(());
     }
 
@@ -24282,7 +24341,7 @@ pub fn self_test_linux_real_glibc_shell_heredoc() -> KernelResult<()> {
     const OUT_PATH: &str = "/hd-out.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if !crate::fs::Vfs::exists(SRC_DASH) {
+    if pathz_missing("REAL dash shell here-document `read a <<EOF` (ring 3, Path Z)", &[SRC_DASH]) {
         return Ok(());
     }
 
@@ -24441,7 +24500,7 @@ pub fn self_test_linux_real_glibc_shell_bgjob() -> KernelResult<()> {
     const OUT_PATH: &str = "/bg-out.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if !crate::fs::Vfs::exists(SRC_DASH) || !crate::fs::Vfs::exists(SRC_EMIT) {
+    if pathz_missing("REAL dash shell background job `/bin/emit > file & wait` (ring 3, Path Z)", &[SRC_DASH, SRC_EMIT]) {
         return Ok(());
     }
 
@@ -24607,7 +24666,7 @@ pub fn self_test_linux_real_glibc_shell_pipeline() -> KernelResult<()> {
     const OUT_PATH: &str = "/pipe2-out.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if !crate::fs::Vfs::exists(SRC_DASH) || !crate::fs::Vfs::exists(SRC_EMIT) {
+    if pathz_missing("REAL dash shell pipeline `/bin/emit | while read ...` (ring 3, Path Z)", &[SRC_DASH, SRC_EMIT]) {
         return Ok(());
     }
 
@@ -24775,7 +24834,7 @@ pub fn self_test_linux_real_glibc_shell_cwd() -> KernelResult<()> {
     const OUT_PATH: &str = "/cwd-out.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if !crate::fs::Vfs::exists(SRC_DASH) {
+    if pathz_missing("REAL dash shell cwd `cd /cwdtest && pwd -P` (ring 3, Path Z)", &[SRC_DASH]) {
         return Ok(());
     }
 
@@ -24931,7 +24990,7 @@ pub fn self_test_linux_real_glibc_shell_relpath() -> KernelResult<()> {
     const WRONG_PATH: &str = "/relfile.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if !crate::fs::Vfs::exists(SRC_DASH) {
+    if pathz_missing("REAL dash shell relpath `cd /reltest && echo > relfile.txt` (ring 3, Path Z)", &[SRC_DASH]) {
         return Ok(());
     }
 
@@ -25091,7 +25150,7 @@ pub fn self_test_linux_real_glibc_shell_statpath() -> KernelResult<()> {
     const OUT_PATH: &str = "/stat-out.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if !crate::fs::Vfs::exists(SRC_DASH) {
+    if pathz_missing("REAL dash shell statpath `[ -f /bin/dash ] && echo` (ring 3, Path Z)", &[SRC_DASH]) {
         return Ok(());
     }
 
@@ -25235,7 +25294,7 @@ pub fn self_test_linux_real_glibc_shell_dirstat() -> KernelResult<()> {
     const OUT_PATH: &str = "/dirstat-out.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if !crate::fs::Vfs::exists(SRC_DASH) {
+    if pathz_missing("REAL dash shell dirstat `[ -d /bin ] && [ ! -f /bin ]` (ring 3, Path Z)", &[SRC_DASH]) {
         return Ok(());
     }
 
@@ -25383,7 +25442,7 @@ pub fn self_test_linux_real_glibc_shell_append() -> KernelResult<()> {
     const OUT_PATH: &str = "/append-out.txt";
     const MAX_YIELDS: usize = 262_144;
 
-    if !crate::fs::Vfs::exists(SRC_DASH) {
+    if pathz_missing("REAL dash shell append `echo > f; echo >> f` (ring 3, Path Z)", &[SRC_DASH]) {
         return Ok(());
     }
 
@@ -25560,9 +25619,7 @@ pub fn self_test_linux_real_glibc_make() -> KernelResult<()> {
     // bounded poll loop extra headroom over the two-process shell tests.
     const MAX_YIELDS: usize = 524_288;
 
-    if !crate::fs::Vfs::exists(SRC_MAKE) || !crate::fs::Vfs::exists(SRC_SH)
-        || !crate::fs::Vfs::exists(SRC_EMIT)
-    {
+    if pathz_missing("REAL GNU make (ring 3, Path Z)", &[SRC_MAKE, SRC_SH, SRC_EMIT]) {
         return Ok(());
     }
 
@@ -25778,7 +25835,7 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
     // The compiled program is tiny; a smaller budget suffices to run it.
     const RUN_MAX_YIELDS: usize = 524_288;
 
-    if !crate::fs::Vfs::exists(SRC_TCC) {
+    if pathz_missing("REAL C compiler (tcc, ring 3, Path Z)", &[SRC_TCC]) {
         return Ok(());
     }
 
@@ -26093,18 +26150,20 @@ sc3(1,1,(long)m,16);sc3(60,0,0,0);}\n";
 /// captured bytes equal `expect_out`.  `label` names the libc surface the
 /// program exercises (e.g. "puts", "printf/malloc") for the serial log.
 ///
-/// No-ops cleanly (returns `Ok`) if the glibc support set is absent so the
-/// test is a silent skip on a rootfs that wasn't built with hosted-compile
-/// support.
+/// No-ops cleanly (returns `Ok`) if the glibc support set is absent, logging a
+/// `SKIP` line naming the rung and the missing file so the gap is visible in the
+/// boot log rather than silently indistinguishable from a pass.
 /// Stage the shared tcc + glibc support set from the `/mnt` rootfs into the VFS
 /// root at the exact absolute paths tcc opens (verified via `tcc -vv`).  Shared
 /// by every Path-Z hosted-compile self-test.
 ///
-/// Returns `Ok(true)` when the whole set is staged, `Ok(false)` when a
-/// prerequisite is missing or a copy fails — in which case the caller no-ops,
-/// matching the best-effort rootfs pattern (the image may be built without the
-/// toolchain).
-fn stage_hosted_cc_support() -> KernelResult<bool> {
+/// Returns `Ok(None)` when the whole set is staged, and `Ok(Some(what))` when a
+/// prerequisite is missing or a copy failed — `what` names the offending path so
+/// the *caller* (which knows its own rung name) can emit a precise `SKIP` line
+/// via [`pathz_skip`].  This function deliberately does not log it itself: it is
+/// shared by ~26 rungs, and one line per rung is the information you actually
+/// want (see known-issues.md → `B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT`).
+fn stage_hosted_cc_support() -> KernelResult<Option<&'static str>> {
     // (src in /mnt rootfs, dst in VFS) staging pairs.  ld + libc + libm + tcc
     // are shared with the other Path-Z tests; the crt objects, libc.so script,
     // libc_nonshared.a and libtcc1.a are the hosted-compile additions.
@@ -26150,11 +26209,14 @@ fn stage_hosted_cc_support() -> KernelResult<bool> {
 
     // The hosted compile needs the whole support set; if tcc itself or any
     // support file is missing, no-op (matches the rootfs best-effort pattern).
-    if !crate::fs::Vfs::exists("/mnt/bin/tcc")
-        || !crate::fs::Vfs::exists("/mnt/usr/lib/x86_64-linux-gnu/crt1.o")
-        || !crate::fs::Vfs::exists("/mnt/tmp/tccinstall/lib/tcc/libtcc1.a")
-    {
-        return Ok(false);
+    for probe in [
+        "/mnt/bin/tcc",
+        "/mnt/usr/lib/x86_64-linux-gnu/crt1.o",
+        "/mnt/tmp/tccinstall/lib/tcc/libtcc1.a",
+    ] {
+        if !crate::fs::Vfs::exists(probe) {
+            return Ok(Some(probe));
+        }
     }
 
     let _ = crate::fs::Vfs::mkdir_all("/lib64");
@@ -26167,19 +26229,19 @@ fn stage_hosted_cc_support() -> KernelResult<bool> {
             Ok(bytes) => {
                 if let Err(e) = crate::fs::Vfs::write_file(dst, &bytes) {
                     serial_println!(
-                        "[spawn]   hosted cc: SKIP (staging {} -> {} failed: {:?})",
+                        "[spawn]   hosted cc: staging {} -> {} failed: {:?}",
                         src, dst, e
                     );
-                    return Ok(false);
+                    return Ok(Some(dst));
                 }
             }
             Err(e) => {
-                serial_println!("[spawn]   hosted cc: SKIP (reading {} failed: {:?})", src, e);
-                return Ok(false);
+                serial_println!("[spawn]   hosted cc: reading {} failed: {:?}", src, e);
+                return Ok(Some(src));
             }
         }
     }
-    Ok(true)
+    Ok(None)
 }
 
 /// Spawn the staged image `tcc` with `argv`, wait for it to exit, and return its
@@ -26466,8 +26528,16 @@ fn run_hosted_cc_case(label: &str, hosted_src: &[u8], expect_out: &[u8]) -> Kern
     const OUT_PATH: &str = "/hosted-out.txt";
 
     match stage_hosted_cc_support() {
-        Ok(true) => {}
-        Ok(false) => return Ok(()),
+        Ok(None) => {}
+        Ok(Some(missing)) => {
+            pathz_skip(
+                format_args!(
+                    "REAL C compiler (tcc, HOSTED glibc link, {label}, ring 3, Path Z)"
+                ),
+                missing,
+            );
+            return Ok(());
+        }
         Err(e) => return Err(e),
     }
 
@@ -26673,8 +26743,14 @@ int main(void){\n\
     const LABEL: &str = "separate-compilation";
 
     match stage_hosted_cc_support() {
-        Ok(true) => {}
-        Ok(false) => return Ok(()),
+        Ok(None) => {}
+        Ok(Some(missing)) => {
+            pathz_skip(
+                format_args!("REAL C compiler (tcc, SEPARATE compilation, ring 3, Path Z)"),
+                missing,
+            );
+            return Ok(());
+        }
         Err(e) => return Err(e),
     }
 
@@ -26943,12 +27019,18 @@ int main(void){\n\
 
     // Stage the hosted-cc support set (ld/libc/libm/tcc/crt/libtcc1.a, ...).
     match stage_hosted_cc_support() {
-        Ok(true) => {}
-        Ok(false) => return Ok(()),
+        Ok(None) => {}
+        Ok(Some(missing)) => {
+            pathz_skip(
+                format_args!("REAL make-drives-tcc build (ring 3, Path Z)"),
+                missing,
+            );
+            return Ok(());
+        }
         Err(e) => return Err(e),
     }
     // make + its recipe shell are the additional binaries this rung needs.
-    if !crate::fs::Vfs::exists(SRC_MAKE) || !crate::fs::Vfs::exists(SRC_SH) {
+    if pathz_missing("REAL make-drives-tcc build (ring 3, Path Z)", &[SRC_MAKE, SRC_SH]) {
         return Ok(());
     }
 
@@ -27176,8 +27258,16 @@ int main(void){\n\
 }\n";
 
     match stage_hosted_cc_support() {
-        Ok(true) => {}
-        Ok(false) => return Ok(()),
+        Ok(None) => {}
+        Ok(Some(missing)) => {
+            pathz_skip(
+                format_args!(
+                    "REAL project-header C build (tcc, #include \"...\", ring 3, Path Z)"
+                ),
+                missing,
+            );
+            return Ok(());
+        }
         Err(e) => return Err(e),
     }
 

@@ -133,6 +133,7 @@ pub mod encrypt;
 pub mod entropy;
 pub mod envvars;
 pub mod epollstat;
+pub mod escape;
 pub mod energysaver;
 pub mod eventlog;
 pub mod eyeprotect;

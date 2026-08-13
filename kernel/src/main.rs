@@ -4537,6 +4537,10 @@ extern "C" fn kernel_main() -> ! {
     if let Err(e) = fs::path::self_test() {
         serial_println!("WARNING: Path self-test failed: {:?}", e);
     }
+    // The octal escaper that lets those byte paths be written into the
+    // line-oriented text formats (/proc/mounts, the trash index). A bug here
+    // corrupts a file rather than failing loudly, so it is checked on boot.
+    fs::escape::self_test();
     // Locale and timezone. Both self-tests existed but were never called from
     // anywhere — a test that never runs is not a test, and these two are the
     // only coverage the kernel's POSIX `TZ` rule evaluation has.

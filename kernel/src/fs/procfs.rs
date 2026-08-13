@@ -2640,34 +2640,15 @@ fn gen_pid_maps(task_id: u64) -> KernelResult<Vec<u8>> {
 /// except `/` and NUL in path components, so a mount point genuinely can
 /// contain a space — without this, such a mount would be misparsed.
 ///
-/// The escape is byte-oriented, exactly like Linux's: `mangle()` calls
-/// `seq_escape(m, s, " \t\n\\")`, which is `string_escape_mem` with
-/// `ESCAPE_OCTAL`, so a byte is emitted raw only if it is printable ASCII
-/// (`0x21..=0x7E`) and not a backslash; every other byte — control
-/// characters, DEL, and *all* bytes `>= 0x80` — becomes a 3-digit octal
-/// escape.  That is what makes this function total over arbitrary path
-/// bytes: a mount point that is not valid UTF-8 is still rendered
-/// losslessly and unambiguously (a literal backslash is itself escaped,
-/// so unmangling is a straight inverse).  It also means a UTF-8 mount
-/// point appears as its octal byte sequence, which is exactly what
-/// `findmnt`/`getmntent` already unmangle out of a real Linux
-/// `/proc/mounts`.
+/// The escape is byte-oriented, exactly like Linux's, so it is total over
+/// arbitrary path bytes: a mount point that is not valid UTF-8 is still
+/// rendered losslessly and unambiguously.  It also means a UTF-8 mount point
+/// appears as its octal byte sequence, which is exactly what
+/// `findmnt`/`getmntent` already unmangle out of a real Linux `/proc/mounts`.
+/// See [`crate::fs::escape`] for the encoding itself; the empty `extra` set
+/// is `mangle()` semantics precisely.
 fn mangle_mount_field(s: impl AsRef<[u8]>) -> String {
-    let bytes = s.as_ref();
-    let mut out = String::with_capacity(bytes.len());
-    for &b in bytes {
-        if b.is_ascii_graphic() && b != b'\\' {
-            out.push(char::from(b));
-        } else {
-            out.push('\\');
-            // Three octal digits, most significant first. `b` is a `u8` and
-            // every operand below is masked to 0..=7, so the adds are in range.
-            out.push(char::from(b'0'.wrapping_add((b >> 6) & 0o7)));
-            out.push(char::from(b'0'.wrapping_add((b >> 3) & 0o7)));
-            out.push(char::from(b'0'.wrapping_add(b & 0o7)));
-        }
-    }
-    out
+    crate::fs::escape::escape_octal(s.as_ref(), &[])
 }
 
 /// Render the mount table as Linux `/proc/<pid>/mountinfo` lines.
@@ -3550,8 +3531,8 @@ fn gen_overlays() -> Vec<u8> {
     s.push_str(&format!("Active overlays: {}\n\n", overlays.len()));
     for (id, ov) in &overlays {
         s.push_str(&format!("overlay {} ({}):\n", id, ov.name));
-        s.push_str(&format!("  lower:      {}\n", ov.lower_path));
-        s.push_str(&format!("  upper:      {}\n", ov.upper_path));
+        s.push_str(&format!("  lower:      {}\n", ov.lower_path.display()));
+        s.push_str(&format!("  upper:      {}\n", ov.upper_path.display()));
         s.push_str(&format!("  whiteouts:  {}\n", ov.whiteout_count));
         s.push_str(&format!("  opaque:     {}\n", ov.opaque_dir_count));
         s.push_str(&format!("  reads:      {}\n", ov.reads));

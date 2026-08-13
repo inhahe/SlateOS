@@ -113,19 +113,20 @@ const LOG_READ_MAX: usize = 1024 * 1024;
 /// paginated listing.
 const READDIR_BUF_MAX: usize = 1024 * 1024;
 
-/// Copy a path argument out of user space into a kernel `String`.
+/// Copy a path argument out of user space into a kernel [`crate::fs::path::PathBuf`].
 ///
-/// `String::from_utf8` consumes the `Vec` in place, so this is one allocation,
-/// not two.
+/// `PathBuf::from` takes the `Vec` by value, so this is one allocation, not
+/// two, and there is no decode step at all: a path is an uninterpreted byte
+/// string in which every byte except `/` and NUL is legal.
 ///
-/// The UTF-8 requirement comes from the VFS, whose API is `&str`; our path
-/// rules actually permit any byte except `/` and NUL, so a non-UTF-8 path is
-/// currently rejected rather than resolved.  That is pre-existing — this
-/// function only moves the check, it does not introduce it — and is tracked as
+/// This used to `String::from_utf8` and reject anything that failed, because
+/// the VFS API was `&str`.  That made a file whose name contains a non-UTF-8
+/// byte impossible to open, stat, rename or delete from userspace — the file
+/// could exist on disk yet be entirely unaddressable.  Fixed with the rest of
 /// `D-VFS-PATHS-ARE-STR-NOT-BYTES`.
-fn read_user_path(ptr: u64, len: usize) -> Result<alloc::string::String, KernelError> {
+fn read_user_path(ptr: u64, len: usize) -> Result<crate::fs::path::PathBuf, KernelError> {
     let bytes = crate::mm::user::read_user_vec(ptr, len, PATH_MAX)?;
-    alloc::string::String::from_utf8(bytes).map_err(|_| KernelError::InvalidArgument)
+    Ok(crate::fs::path::PathBuf::from(bytes))
 }
 
 /// Copy a NUL-terminated user string into a kernel `String`.
@@ -8099,7 +8100,18 @@ pub fn sys_fs_trash_list(args: &SyscallArgs) -> SyscallResult {
             }
         };
         put(0, item.trash_name.as_bytes(), 255);
-        put(256, item.original_path.as_bytes(), 255);
+        // An absent original path is reported as an empty field, not as a
+        // placeholder like `<unknown>`: every byte except `/` and NUL is legal
+        // in a filename, so any placeholder string is itself a path a real file
+        // could have had, and userspace could not tell the two apart.  The
+        // empty string is not a legal path, so it is unambiguous.
+        put(
+            256,
+            item.original_path
+                .as_deref()
+                .map_or(&[][..], crate::fs::path::Path::as_bytes),
+            255,
+        );
         put(512, &item.size.to_le_bytes(), 8);
         let flags: u32 = u32::from(item.is_directory);
         put(520, &flags.to_le_bytes(), 4);
@@ -8948,9 +8960,10 @@ pub fn sys_fs_readlink(args: &SyscallArgs) -> SyscallResult {
     // Truncation here is the documented POSIX `readlink` contract, not a
     // validation shortcut: the caller is told how many bytes it got and grows
     // its buffer if that equals the capacity.
+    let target = target.as_bytes();
     let copy_len = target.len().min(capacity);
     if copy_len > 0 {
-        // SAFETY: `target` is a live kernel-owned string of at least
+        // SAFETY: `target` is a live kernel-owned byte slice of at least
         // `copy_len` bytes.  `copy_to_user` re-validates the destination —
         // `readlink` can block on the filesystem, so the check above is not
         // the one that matters — and brackets the store with STAC/CLAC.
@@ -9493,7 +9506,9 @@ pub fn sys_fs_tmpfile(args: &SyscallArgs) -> SyscallResult {
     // Generate a unique temporary filename using the TSC for entropy.
     // SAFETY: _rdtsc is always available on x86_64; no side-effects.
     let tsc = unsafe { core::arch::x86_64::_rdtsc() };
-    let tmp_name = alloc::format!("{dir_path}/.tmp_{tsc:016x}");
+    // Joined as a path component rather than formatted into a string, so a
+    // non-UTF-8 directory name survives verbatim.
+    let tmp_name = dir_path.join(alloc::format!(".tmp_{tsc:016x}"));
 
     // Create the file.
     if let Err(e) = crate::fs::Vfs::write_file(&tmp_name, &[]) {

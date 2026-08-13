@@ -51,6 +51,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::escape::{escape_octal, unescape_octal};
+use crate::fs::path::{Path, PathBuf};
 use crate::fs::vfs::{EntryType, Vfs};
 
 /// Disk usage percentage (0–100) above which auto-prune activates.
@@ -75,8 +77,19 @@ const TRASH_DIR: &str = "/_TRASH";
 /// Name of the index file inside the trash directory.
 ///
 /// Maps trashed filenames to their original paths.
-/// Format: one entry per line, `trash_name=original_path`.
+/// Format: one entry per line, `trash_name=original_path`, with both fields
+/// octal-escaped (see [`INDEX_ESCAPE`] and [`crate::fs::escape`]).
 const INDEX_FILE: &str = "/_TRASH/_INDEX";
+
+/// Bytes that must not appear raw inside an index field.
+///
+/// `=` is the field separator; the record separator `\n` and every other
+/// non-printable byte are already escaped by default.  Both are perfectly
+/// legal in a filename here — our paths allow every byte but `/` and NUL — so
+/// without escaping, trashing a file whose name contains a newline would
+/// inject a second, bogus record into the index and make an unrelated file
+/// restorable to an attacker-chosen path.
+const INDEX_ESCAPE: &[u8] = b"=";
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -86,9 +99,11 @@ const INDEX_FILE: &str = "/_TRASH/_INDEX";
 #[derive(Debug, Clone)]
 pub struct TrashItem {
     /// Filename as it appears in the trash directory.
-    pub trash_name: String,
-    /// Original path where the file was before deletion.
-    pub original_path: String,
+    pub trash_name: PathBuf,
+    /// Original path where the file was before deletion, or `None` if the
+    /// index has no record of it (the file was put there out of band, or the
+    /// index was truncated).
+    pub original_path: Option<PathBuf>,
     /// File size in bytes.
     pub size: u64,
     /// Whether this is a directory (currently only files are supported).
@@ -103,7 +118,8 @@ pub struct TrashItem {
 ///
 /// Returns `Ok(())` on success, or an error if the file doesn't exist
 /// or the trash directory can't be created.
-pub fn trash(path: &str) -> KernelResult<()> {
+pub fn trash(path: impl AsRef<Path>) -> KernelResult<()> {
+    let path = path.as_ref();
     // Verify the source exists.
     let stat = Vfs::stat(path)?;
     let _ = stat; // Used for existence check only.
@@ -111,11 +127,9 @@ pub fn trash(path: &str) -> KernelResult<()> {
     // Ensure the trash directory exists.
     ensure_trash_dir()?;
 
-    // Extract the filename from the path.
-    let filename = path.rsplit('/').next().unwrap_or(path);
-    if filename.is_empty() {
-        return Err(KernelError::InvalidArgument);
-    }
+    // Extract the filename from the path.  `file_name` yields `None` only for
+    // the root and for all-separator paths, neither of which can be trashed.
+    let filename = path.file_name().ok_or(KernelError::InvalidArgument)?;
 
     // Find a unique name in the trash directory.
     let trash_name = unique_trash_name(filename)?;
@@ -128,7 +142,11 @@ pub fn trash(path: &str) -> KernelResult<()> {
     // Update the index file with the mapping.
     index_add(&trash_name, path)?;
 
-    crate::serial_println!("[trash] Moved '{}' to trash as '{}'", path, trash_name);
+    crate::serial_println!(
+        "[trash] Moved '{}' to trash as '{}'",
+        path.display(),
+        trash_name.display()
+    );
 
     // Check disk space and prune oldest trash items if needed.
     let _ = auto_prune();
@@ -160,8 +178,7 @@ pub fn list() -> KernelResult<Vec<TrashItem>> {
         }
 
         // Look up the original path from the index.
-        let original = index_lookup(&index, &entry.name)
-            .unwrap_or_else(|| String::from("<unknown>"));
+        let original = index_lookup(&index, &entry.name);
 
         items.push(TrashItem {
             trash_name: entry.name.clone(),
@@ -180,7 +197,8 @@ pub fn list() -> KernelResult<Vec<TrashItem>> {
 /// The file is moved back to the path stored in the index file.
 ///
 /// Returns the original path on success.
-pub fn restore(trash_name: &str) -> KernelResult<String> {
+pub fn restore(trash_name: impl AsRef<Path>) -> KernelResult<PathBuf> {
+    let trash_name = trash_name.as_ref();
     let trash_path = format_trash_path(trash_name);
 
     // Look up the original path from the index.
@@ -196,8 +214,8 @@ pub fn restore(trash_name: &str) -> KernelResult<String> {
 
     crate::serial_println!(
         "[trash] Restored '{}' to '{}'",
-        trash_name,
-        original
+        trash_name.display(),
+        original.display()
     );
 
     Ok(original)
@@ -251,7 +269,8 @@ pub fn empty() -> KernelResult<()> {
 /// Permanently delete a single item from the recycle bin.
 ///
 /// `trash_name` is the filename as it appears in `/_TRASH/`.
-pub fn purge_one(trash_name: &str) -> KernelResult<()> {
+pub fn purge_one(trash_name: impl AsRef<Path>) -> KernelResult<()> {
+    let trash_name = trash_name.as_ref();
     let trash_path = format_trash_path(trash_name);
 
     // Determine if this is a file or directory.
@@ -265,7 +284,7 @@ pub fn purge_one(trash_name: &str) -> KernelResult<()> {
     // Best-effort: remove the entry from the index.
     let _ = index_remove(trash_name);
 
-    crate::serial_println!("[trash] Permanently deleted '{}'", trash_name);
+    crate::serial_println!("[trash] Permanently deleted '{}'", trash_name.display());
     Ok(())
 }
 
@@ -328,7 +347,9 @@ pub fn auto_prune() -> KernelResult<usize> {
             pruned = pruned.wrapping_add(1);
             crate::serial_println!(
                 "[trash] Auto-pruned '{}' ({} bytes, was: {})",
-                item.trash_name, item.size, item.original_path
+                item.trash_name.display(),
+                item.size,
+                item.original_path.as_deref().unwrap_or(Path::new("<unknown>")).display()
             );
         }
     }
@@ -373,48 +394,41 @@ fn ensure_trash_dir() -> KernelResult<()> {
 ///
 /// Returns the unique name (without path prefix).
 #[allow(clippy::arithmetic_side_effects)]
-fn unique_trash_name(name: &str) -> KernelResult<String> {
+fn unique_trash_name(name: &Path) -> KernelResult<PathBuf> {
     // Check if the name is available.
     let check_path = format_trash_path(name);
     if Vfs::stat(&check_path).is_err() {
-        return Ok(String::from(name));
+        return Ok(name.to_path_buf());
     }
 
     // Name is taken — try suffixed variants.
-    // Split into base and extension for proper suffixing.
-    let (base, ext) = if let Some(dot) = name.rfind('.') {
-        (&name[..dot], Some(&name[dot..]))
-    } else {
-        (name, None)
+    // Split into base and extension for proper suffixing.  This works on raw
+    // bytes: a filename has no encoding, so there is no character boundary to
+    // respect, and the 8.3 budget below is a byte budget on a FAT volume.
+    let bytes = name.as_bytes();
+    let (base, ext) = match bytes.iter().rposition(|&b| b == b'.') {
+        Some(dot) => (
+            bytes.get(..dot).unwrap_or(bytes),
+            bytes.get(dot..).unwrap_or(&[]),
+        ),
+        None => (bytes, &[][..]),
     };
 
     for i in 2u32..1000 {
         let suffix = format_u32(i);
         let suffix_len = suffix.len().wrapping_add(1); // "_N"
 
-        // Truncate the base to fit within 8 chars: base + "_" + N.
+        // Truncate the base to fit within 8 bytes: base + "_" + N.
         let max_base = 8usize.saturating_sub(suffix_len);
-        let truncated_base = if base.len() > max_base {
-            &base[..max_base]
-        } else {
-            base
-        };
+        let truncated_base = base.get(..max_base.min(base.len())).unwrap_or(base);
 
-        let candidate = match ext {
-            Some(e) => {
-                let mut s = String::from(truncated_base);
-                s.push('_');
-                s.push_str(&suffix);
-                s.push_str(e);
-                s
-            }
-            None => {
-                let mut s = String::from(truncated_base);
-                s.push('_');
-                s.push_str(&suffix);
-                s
-            }
-        };
+        let mut candidate = PathBuf::with_capacity(
+            truncated_base.len().saturating_add(suffix_len).saturating_add(ext.len()),
+        );
+        candidate.extend_bytes(truncated_base);
+        candidate.extend_bytes(b"_");
+        candidate.extend_bytes(suffix.as_bytes());
+        candidate.extend_bytes(ext);
 
         let check = format_trash_path(&candidate);
         if Vfs::stat(&check).is_err() {
@@ -426,11 +440,8 @@ fn unique_trash_name(name: &str) -> KernelResult<String> {
 }
 
 /// Format the full path to a file in the trash directory.
-fn format_trash_path(name: &str) -> String {
-    let mut path = String::from(TRASH_DIR);
-    path.push('/');
-    path.push_str(name);
-    path
+fn format_trash_path(name: &Path) -> PathBuf {
+    Path::new(TRASH_DIR).join(name)
 }
 
 /// Recursively delete a directory and all its contents.
@@ -438,14 +449,12 @@ fn format_trash_path(name: &str) -> String {
 /// Walks the directory tree depth-first, removing files first, then
 /// empty directories.  Returns the first error encountered, but
 /// continues trying to delete remaining items.
-fn recursive_delete(path: &str) -> KernelResult<()> {
+fn recursive_delete(path: &Path) -> KernelResult<()> {
     let entries = Vfs::readdir(path)?;
     let mut worst_error: Option<KernelError> = None;
 
     for entry in &entries {
-        let mut child_path = String::from(path);
-        child_path.push('/');
-        child_path.push_str(&entry.name);
+        let child_path = path.join(&entry.name);
 
         let result = if entry.entry_type == EntryType::Directory {
             recursive_delete(&child_path)
@@ -482,63 +491,85 @@ fn recursive_delete(path: &str) -> KernelResult<()> {
 // This design keeps all metadata in a single file, avoiding the FAT
 // 8.3 naming issue of per-file companion files.
 
-/// Load the full index file contents as a string.
-fn index_load() -> String {
-    match Vfs::read_file(INDEX_FILE) {
-        Ok(data) => {
-            core::str::from_utf8(&data)
-                .unwrap_or("")
-                .into()
-        }
-        Err(_) => String::new(),
-    }
+/// Load the full index file contents.
+///
+/// Returned as raw bytes rather than a `String`: escaping guarantees the file
+/// is ASCII, but a truncated or externally-mangled index must degrade to
+/// "some records unreadable" rather than to "whole index discarded", which is
+/// what the old `from_utf8(..).unwrap_or("")` did.
+fn index_load() -> Vec<u8> {
+    Vfs::read_file(INDEX_FILE).unwrap_or_default()
+}
+
+/// Split one index record into its escaped name and escaped original path.
+fn index_split(line: &[u8]) -> Option<(&[u8], &[u8])> {
+    let eq = line.iter().position(|&b| b == b'=')?;
+    Some((line.get(..eq)?, line.get(eq.wrapping_add(1)..)?))
+}
+
+/// Whether an index record names `trash_name`.
+///
+/// The comparison is case-insensitive because the trash lives on whatever
+/// filesystem the deleted file did, and FAT — the case-insensitive one — will
+/// happily return `TRTEST.TXT` for a file created as `trtest.txt`.  It runs on
+/// the *decoded* name so that escaping cannot make two equal names compare
+/// unequal.
+fn index_name_matches(escaped_name: &[u8], trash_name: &Path) -> bool {
+    unescape_octal(escaped_name)
+        .is_some_and(|name| Path::new(name.as_slice()).eq_ignore_ascii_case(trash_name))
 }
 
 /// Look up the original path for a trashed filename.
-fn index_lookup(index_content: &str, trash_name: &str) -> Option<String> {
-    for line in index_content.lines() {
-        // Each line: "TRASH_NAME=ORIGINAL_PATH"
-        if let Some(eq_pos) = line.find('=') {
-            let name = &line[..eq_pos];
-            if name.eq_ignore_ascii_case(trash_name) {
-                return Some(String::from(&line[eq_pos + 1..]));
-            }
+fn index_lookup(index_content: &[u8], trash_name: &Path) -> Option<PathBuf> {
+    for line in index_content.split(|&b| b == b'\n') {
+        // Each record: "ESCAPED_TRASH_NAME=ESCAPED_ORIGINAL_PATH"
+        let Some((name, original)) = index_split(line) else { continue };
+        if index_name_matches(name, trash_name) {
+            // A record whose value will not decode is corrupt; reporting
+            // `None` is better than handing back a path that names a
+            // different file.
+            return unescape_octal(original).map(PathBuf::from);
         }
     }
     None
 }
 
 /// Add an entry to the index file.
-fn index_add(trash_name: &str, original_path: &str) -> KernelResult<()> {
+fn index_add(trash_name: &Path, original_path: &Path) -> KernelResult<()> {
     let mut content = index_load();
 
-    // Append the new entry.
-    content.push_str(trash_name);
-    content.push('=');
-    content.push_str(original_path);
-    content.push('\n');
+    // Append the new entry.  Both fields are escaped, so neither can contain
+    // the `=` field separator or the `\n` record separator.
+    content.extend_from_slice(escape_octal(trash_name.as_bytes(), INDEX_ESCAPE).as_bytes());
+    content.push(b'=');
+    content.extend_from_slice(escape_octal(original_path.as_bytes(), INDEX_ESCAPE).as_bytes());
+    content.push(b'\n');
 
-    Vfs::write_file(INDEX_FILE, content.as_bytes())
+    Vfs::write_file(INDEX_FILE, &content)
 }
 
 /// Remove an entry from the index file.
-fn index_remove(trash_name: &str) -> KernelResult<()> {
+fn index_remove(trash_name: &Path) -> KernelResult<()> {
     let content = index_load();
     if content.is_empty() {
         return Ok(());
     }
 
-    // Rebuild without the matching line.
-    let mut new_content = String::new();
-    for line in content.lines() {
-        if let Some(eq_pos) = line.find('=') {
-            let name = &line[..eq_pos];
-            if name.eq_ignore_ascii_case(trash_name) {
+    // Rebuild without the matching record.
+    let mut new_content: Vec<u8> = Vec::with_capacity(content.len());
+    for line in content.split(|&b| b == b'\n') {
+        // A trailing newline yields a final empty slice; dropping it here is
+        // what keeps the file from growing a blank line on every rewrite.
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((name, _)) = index_split(line) {
+            if index_name_matches(name, trash_name) {
                 continue; // Skip this entry.
             }
         }
-        new_content.push_str(line);
-        new_content.push('\n');
+        new_content.extend_from_slice(line);
+        new_content.push(b'\n');
     }
 
     if new_content.is_empty() {
@@ -546,7 +577,7 @@ fn index_remove(trash_name: &str) -> KernelResult<()> {
         let _ = Vfs::remove(INDEX_FILE);
         Ok(())
     } else {
-        Vfs::write_file(INDEX_FILE, new_content.as_bytes())
+        Vfs::write_file(INDEX_FILE, &new_content)
     }
 }
 
@@ -623,14 +654,14 @@ pub fn self_test() -> KernelResult<()> {
     }
     let item = found.expect("checked above");
     crate::serial_println!(
-        "[trash]   Found: '{}' from '{}' ({} bytes) ✓",
-        item.trash_name, item.original_path, item.size
+        "[trash]   Found: '{}' from '{:?}' ({} bytes) ✓",
+        item.trash_name.display(), item.original_path, item.size
     );
 
     // Verify the index records the original path.
-    if item.original_path != "/TRTEST.TXT" {
+    if item.original_path.as_deref() != Some(Path::new("/TRTEST.TXT")) {
         crate::serial_println!(
-            "[trash]   FAIL: original path is '{}', expected '/TRTEST.TXT'",
+            "[trash]   FAIL: original path is '{:?}', expected '/TRTEST.TXT'",
             item.original_path
         );
         return Err(KernelError::InternalError);
@@ -639,10 +670,10 @@ pub fn self_test() -> KernelResult<()> {
 
     // Restore the file.
     let restored_path = restore("TRTEST.TXT")?;
-    if restored_path != "/TRTEST.TXT" {
+    if restored_path.as_path() != Path::new("/TRTEST.TXT") {
         crate::serial_println!(
             "[trash]   FAIL: restored to '{}', not '/TRTEST.TXT'",
-            restored_path
+            restored_path.display()
         );
         return Err(KernelError::InternalError);
     }
@@ -681,6 +712,73 @@ pub fn self_test() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     crate::serial_println!("[trash]   Trash empty after empty() ✓");
+
+    // --- The index is total over legal filenames ---
+    //
+    // A path is an uninterpreted byte string, so a filename may legally
+    // contain the index's own delimiters (`=`, `\n`) and bytes that are not
+    // UTF-8 at all.  Before escaping, such a name either round-tripped as a
+    // *different* name or split its record in two — which silently rewrote an
+    // unrelated entry's original path and so made a file restorable to an
+    // attacker-chosen location.
+    //
+    // This exercises the index directly rather than by trashing a real file:
+    // this self-test only runs on the FAT root, and FAT physically cannot
+    // store such a name (its long names are UCS-2), so the filesystem would
+    // reject it long before the index saw it.  The index must nevertheless be
+    // correct, because the trash also serves the in-memory and ext4 mounts,
+    // which can store these names.
+    {
+        ensure_trash_dir()?;
+        let hostile_name = Path::new(b"tr\xffk=y\nname.txt".as_slice());
+        let hostile_orig = Path::new(b"/a b/\xfe=q\nr/tr\xffk=y\nname.txt".as_slice());
+        // A second, ordinary record that a split of the hostile one would
+        // corrupt — the bug is only visible when there is a neighbour to hurt.
+        let plain_name = Path::new("PLAIN.TXT");
+        let plain_orig = Path::new("/PLAIN.TXT");
+
+        index_add(hostile_name, hostile_orig)?;
+        index_add(plain_name, plain_orig)?;
+
+        let index = index_load();
+        // Escaping is what lets the index be parsed at all: every record must
+        // be one line with exactly one `=`.
+        if !index.is_ascii() {
+            crate::serial_println!("[trash]   FAIL: index is not pure ASCII after escaping");
+            return Err(KernelError::InternalError);
+        }
+        let records = index.split(|&b| b == b'\n').filter(|l| !l.is_empty()).count();
+        if records != 2 {
+            crate::serial_println!(
+                "[trash]   FAIL: index has {} records, expected 2 (record split?)",
+                records
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        if index_lookup(&index, hostile_name).as_deref() != Some(hostile_orig) {
+            crate::serial_println!("[trash]   FAIL: hostile name did not round-trip the index");
+            return Err(KernelError::InternalError);
+        }
+        if index_lookup(&index, plain_name).as_deref() != Some(plain_orig) {
+            crate::serial_println!("[trash]   FAIL: hostile record corrupted its neighbour");
+            return Err(KernelError::InternalError);
+        }
+
+        // Removal must match the same name it stored, and leave the neighbour.
+        index_remove(hostile_name)?;
+        let index = index_load();
+        if index_lookup(&index, hostile_name).is_some() {
+            crate::serial_println!("[trash]   FAIL: hostile record survived removal");
+            return Err(KernelError::InternalError);
+        }
+        if index_lookup(&index, plain_name).as_deref() != Some(plain_orig) {
+            crate::serial_println!("[trash]   FAIL: removal took the neighbour with it");
+            return Err(KernelError::InternalError);
+        }
+        index_remove(plain_name)?;
+        crate::serial_println!("[trash]   Index total over non-UTF-8 / delimiter names ✓");
+    }
 
     // Clean up the trash directory itself.
     let _ = Vfs::rmdir(TRASH_DIR);

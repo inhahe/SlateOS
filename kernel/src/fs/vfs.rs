@@ -746,7 +746,7 @@ pub trait FileSystem: Send {
 
     /// Read the target of a symbolic link.
     ///
-    /// Does NOT follow the symlink — returns the stored target string.
+    /// Does NOT follow the symlink — returns the stored target path.
     ///
     /// Default: not supported.
     fn readlink(&mut self, path: &Path) -> KernelResult<PathBuf> {
@@ -1041,7 +1041,7 @@ struct FileLock {
 #[derive(Debug, Clone)]
 struct PathLockEntry {
     /// Canonical path (after symlink resolution).
-    path: String,
+    path: PathBuf,
     /// Active locks on this path.
     locks: Vec<FileLock>,
 }
@@ -1379,7 +1379,7 @@ impl Vfs {
         options: MountOptions,
     ) -> KernelResult<()> {
         let mount_path = mount_path.as_ref();
-        if !mount_path.starts_with('/') {
+        if !mount_path.is_absolute() {
             return Err(KernelError::InvalidArgument);
         }
 
@@ -1387,7 +1387,7 @@ impl Vfs {
 
         // Check for duplicate mount point.
         for mp in &vfs.mounts {
-            if mp.path == mount_path {
+            if mp.path.as_path() == mount_path {
                 return Err(KernelError::AlreadyExists);
             }
         }
@@ -1396,12 +1396,12 @@ impl Vfs {
         crate::serial_println!(
             "[vfs] Mounted {} filesystem at '{}' ({})",
             fs.fs_type(),
-            mount_path,
+            mount_path.display(),
             opts_str,
         );
 
         vfs.mounts.push(MountPoint {
-            path: String::from(mount_path),
+            path: mount_path.to_path_buf(),
             fs: Arc::new(Mutex::new(fs)),
             options,
             // Stable, never-reused id for this mount instance (see FileId).
@@ -1430,25 +1430,25 @@ impl Vfs {
         let mount_path = mount_path.as_ref();
         let mut vfs = VFS.lock();
 
-        let idx = vfs.mounts.iter().position(|mp| mp.path == mount_path)
+        let idx = vfs.mounts.iter().position(|mp| mp.path.as_path() == mount_path)
             .ok_or(KernelError::NotFound)?;
 
         // Refuse to unmount root.
-        if mount_path == "/" {
+        if mount_path == Path::new("/") {
             return Err(KernelError::PermissionDenied);
         }
 
-        // Check for sub-mounts that would be orphaned.
+        // Check for sub-mounts that would be orphaned.  `path_strictly_under`
+        // matches on component boundaries, so unmounting `/mnt` is not blocked
+        // by an unrelated `/mnt_data` mount, and a `/mnt/` spelling of the
+        // argument still finds the real children.
         let has_children = vfs.mounts.iter().enumerate().any(|(i, mp)| {
-            i != idx
-                && mp.path.starts_with(mount_path)
-                && mp.path.len() > mount_path.len()
-                && mp.path.as_bytes().get(mount_path.len()) == Some(&b'/')
+            i != idx && crate::fs::pathutil::path_strictly_under(&mp.path, mount_path)
         });
         if has_children {
             crate::serial_println!(
                 "[vfs] Cannot unmount '{}': has sub-mounts",
-                mount_path
+                mount_path.display()
             );
             return Err(KernelError::DeviceBusy);
         }
@@ -1457,7 +1457,7 @@ impl Vfs {
         if let Err(e) = vfs.mounts[idx].fs.lock().sync() {
             crate::serial_println!(
                 "[vfs] WARNING: sync failed during unmount of '{}': {:?}",
-                mount_path, e
+                mount_path.display(), e
             );
             // Continue with unmount anyway — data loss is better than a
             // permanently stuck mount.
@@ -1467,28 +1467,20 @@ impl Vfs {
         crate::serial_println!(
             "[vfs] Unmounted {} from '{}'",
             removed.fs.lock().fs_type(),
-            mount_path
+            mount_path.display()
         );
 
         // Unmount changes affect path resolution — invalidate entire dcache.
         drop(vfs);
         VFS_DCACHE.lock().invalidate_all();
 
-        // Release any advisory locks on paths under this mount.
-        // Use path-boundary check to avoid accidentally clearing locks
-        // on paths like "/mnt_data" when unmounting "/mnt".
+        // Release any advisory locks on paths under this mount.  The subtree
+        // test matches on component boundaries, so locks on `/mnt_data` are
+        // not cleared when unmounting `/mnt` (and, unlike the byte-prefix
+        // idiom this replaces, a `/mnt/` spelling does not silently keep every
+        // child's lock alive).
         let mut table = LOCK_TABLE.lock();
-        table.retain(|entry| {
-            if entry.path == mount_path {
-                return false; // Exact match — remove.
-            }
-            if entry.path.starts_with(mount_path) {
-                // Only remove if mount_path is a path boundary prefix.
-                entry.path.as_bytes().get(mount_path.len()) != Some(&b'/')
-            } else {
-                true // Different prefix — keep.
-            }
-        });
+        table.retain(|entry| !crate::fs::pathutil::path_in_subtree(&entry.path, mount_path));
 
         Ok(())
     }
@@ -1748,7 +1740,7 @@ impl Vfs {
         // Collect mount-point names that are direct children of `path`.
         // E.g., if path="/", mounts at "/tmp" and "/mnt" produce ["tmp", "mnt"].
         // Nested mounts like "/mnt/usb" are NOT direct children of "/".
-        let submount_names: Vec<String> = {
+        let submount_names: Vec<PathBuf> = {
             let vfs = VFS.lock();
             Self::submount_children(&vfs, &path)
         };
@@ -1797,7 +1789,7 @@ impl Vfs {
         count: usize,
     ) -> KernelResult<(Vec<DirEntry>, usize)> {
         let path = path.as_ref();
-        let submount_names: Vec<String> = {
+        let submount_names: Vec<PathBuf> = {
             let vfs = VFS.lock();
             Self::submount_children(&vfs, path)
         };
@@ -2037,8 +2029,8 @@ impl Vfs {
         let mut total_bytes = 0u64;
 
         for child in &entries {
-            let src_child = format!("{}/{}", src, child.name);
-            let dst_child = format!("{}/{}", dst, child.name);
+            let src_child = src.join(&child.name);
+            let dst_child = dst.join(&child.name);
             let bytes = Self::copy_recursive_inner(&src_child, &dst_child, depth.saturating_add(1))?;
             total_bytes = total_bytes.saturating_add(bytes);
         }
@@ -2090,7 +2082,7 @@ impl Vfs {
         let mut count = 0u64;
 
         for child in &entries {
-            let child_path = format!("{}/{}", path, child.name);
+            let child_path = path.join(&child.name);
             let removed = Self::remove_recursive_inner(&child_path, depth.saturating_add(1))?;
             count = count.saturating_add(removed);
         }
@@ -2216,19 +2208,16 @@ impl Vfs {
         validate_path(path)?;
         let norm = normalize_path(path);
 
-        let components: Vec<&str> = norm.split('/')
-            .filter(|c| !c.is_empty())
-            .collect();
+        let components: Vec<&Path> = norm.components().collect();
 
         if components.len() > 64 {
             return Err(KernelError::InvalidArgument);
         }
 
-        let mut built = String::with_capacity(norm.len());
+        let mut built = PathBuf::with_capacity(norm.len());
 
         for comp in &components {
-            built.push('/');
-            built.push_str(comp);
+            built.push(comp);
 
             // Check if this component exists.
             match Self::stat(&built) {
@@ -2700,7 +2689,7 @@ impl Vfs {
     /// List mount points that appear in the VFS.
     ///
     /// Returns a list of `(mount_path, fs_type)` pairs.
-    pub fn mounts() -> Vec<(String, String)> {
+    pub fn mounts() -> Vec<(PathBuf, String)> {
         let vfs = VFS.lock();
         vfs.mounts
             .iter()
@@ -2709,7 +2698,7 @@ impl Vfs {
     }
 
     /// List all mount points with full information (path, fs type, options).
-    pub fn mounts_full() -> Vec<(String, String, MountOptions)> {
+    pub fn mounts_full() -> Vec<(PathBuf, String, MountOptions)> {
         let vfs = VFS.lock();
         vfs.mounts
             .iter()
@@ -2730,10 +2719,10 @@ impl Vfs {
         let mount_path = mount_path.as_ref();
         let mut vfs = VFS.lock();
         for mp in &mut vfs.mounts {
-            if mp.path == mount_path {
+            if mp.path.as_path() == mount_path {
                 crate::serial_println!(
                     "[vfs] Remounted '{}' with options: {}",
-                    mount_path,
+                    mount_path.display(),
                     options.to_string(),
                 );
                 mp.options = options;
@@ -2759,7 +2748,7 @@ impl Vfs {
             // mount that some intermediate directory owns, not this one.
             if let Some(tail) = mp.path.strip_prefix(dir_path) {
                 if tail.components().count() == 1 {
-                    names.push(tail);
+                    names.push(tail.to_path_buf());
                 }
             }
         }
@@ -3104,10 +3093,9 @@ impl Vfs {
         super::quota::charge_inode(0, 0);
         // A new symlink can change how any path through it resolves.
         // Invalidate the parent directory prefix to be safe.
-        if let Some(last_slash) = path.rfind('/') {
-            let parent = if last_slash == 0 { "/" } else { &path[..last_slash] };
-            VFS_DCACHE.lock().invalidate_prefix(parent);
-        }
+        VFS_DCACHE
+            .lock()
+            .invalidate_prefix(path.parent().unwrap_or(Path::new("/")));
         super::notify::emit_created(&path);
         super::index::on_file_changed(&path);
         super::journal::record(super::journal::JournalEventType::Created, &path);
@@ -3202,7 +3190,7 @@ impl Vfs {
     /// Read a symbolic link's target.
     ///
     /// Does NOT follow the symlink — returns the stored target string.
-    pub fn readlink(path: impl AsRef<Path>) -> KernelResult<String> {
+    pub fn readlink(path: impl AsRef<Path>) -> KernelResult<PathBuf> {
         let path = path.as_ref();
         let path = Self::resolve_no_follow(path)?;
         let (fs, _id, _opts, relative) = resolve_mount(&path)?;
@@ -3312,11 +3300,11 @@ impl Vfs {
     /// List all mount points with their filesystem info.
     ///
     /// Returns `(mount_path, FsInfo)` for each mounted filesystem.
-    pub fn mount_info() -> KernelResult<Vec<(String, FsInfo)>> {
+    pub fn mount_info() -> KernelResult<Vec<(PathBuf, FsInfo)>> {
         // Snapshot (path, handle) pairs under a brief global lock, then query
         // each filesystem lock-free — `statvfs` on a stacked mount may itself
         // re-enter the VFS, so it must not run under the global lock.
-        let mounts: Vec<(String, MountedFs)> = {
+        let mounts: Vec<(PathBuf, MountedFs)> = {
             let vfs = VFS.lock();
             vfs.mounts
                 .iter()
@@ -3334,7 +3322,7 @@ impl Vfs {
                 Err(e) => {
                     crate::serial_println!(
                         "[vfs] mount_info: statvfs failed for '{}' ({}): {:?}",
-                        path, guard.fs_type(), e
+                        path.display(), guard.fs_type(), e
                     );
                     FsInfo {
                         fs_type: String::from(guard.fs_type()),
@@ -3446,7 +3434,7 @@ impl Vfs {
         // File capability tag check — regardless of mode, a process
         // must pass group membership requirements on tagged paths.
         {
-            let resolved = Self::resolve_follow(path).unwrap_or_else(|_| String::from(path));
+            let resolved = Self::resolve_follow(path).unwrap_or_else(|_| path.to_path_buf());
             check_file_tags(&resolved)?;
         }
 
@@ -3517,14 +3505,12 @@ impl Vfs {
     /// - Maximum 1000 results to prevent runaway expansion.
     /// - Maximum pattern depth of 32 components.
     /// - Maximum recursion depth of 16 for `**` patterns.
-    pub fn glob(pattern: &str) -> KernelResult<Vec<String>> {
-        let components: Vec<&str> = pattern
-            .split('/')
-            .filter(|c| !c.is_empty())
-            .collect();
+    pub fn glob(pattern: impl AsRef<Path>) -> KernelResult<Vec<PathBuf>> {
+        let pattern = pattern.as_ref();
+        let components: Vec<&Path> = pattern.components().collect();
 
         if components.is_empty() {
-            return Ok(alloc::vec![String::from("/")]);
+            return Ok(alloc::vec![PathBuf::from("/")]);
         }
 
         if components.len() > 32 {
@@ -3533,7 +3519,7 @@ impl Vfs {
 
         let mut results = Vec::new();
         glob_recurse(
-            &String::from("/"),
+            Path::new("/"),
             &components,
             0,
             &mut results,
@@ -3614,17 +3600,13 @@ impl Vfs {
 
         // Generate a unique temp filename in the same directory.
         // Same directory ensures rename is on the same filesystem (atomic).
-        let dir = if let Some(pos) = resolved.rfind('/') {
-            if pos == 0 { "/" } else { &resolved[..pos] }
-        } else {
-            "/"
-        };
+        let dir = resolved.parent().unwrap_or(Path::new("/"));
 
         let ns = crate::hpet::elapsed_ns();
         // SAFETY: rdtsc is always available on x86_64 and has no side effects.
         let tsc = unsafe { core::arch::x86_64::_rdtsc() };
         let unique = ns ^ tsc;
-        let tmp_path = alloc::format!("{}/.tmp_atomic_{:016x}", dir, unique);
+        let tmp_path = dir.join(alloc::format!(".tmp_atomic_{unique:016x}"));
 
         // Step 1: Write data to the temp file.
         if let Err(e) = Self::write_file(&tmp_path, data) {
@@ -3706,11 +3688,10 @@ impl Vfs {
     /// lock on the wrong path. This worker operates directly on `path`.
     pub fn flock_resolved(path: impl AsRef<Path>, owner: u64, lock_type: LockType) -> KernelResult<()> {
         let path = path.as_ref();
-        let path = path.to_string();
         let mut table = LOCK_TABLE.lock();
 
         // Find or create the entry for this path.
-        let entry_idx = table.iter().position(|e| e.path == path);
+        let entry_idx = table.iter().position(|e| e.path.as_path() == path);
 
         if let Some(idx) = entry_idx {
             let entry = &mut table[idx];
@@ -3757,7 +3738,7 @@ impl Vfs {
                 return Err(KernelError::OutOfMemory);
             }
             table.push(PathLockEntry {
-                path,
+                path: path.to_path_buf(),
                 locks: alloc::vec![FileLock { owner, lock_type }],
             });
         }
@@ -3781,10 +3762,9 @@ impl Vfs {
     /// [`flock_resolved`](Self::flock_resolved)).
     pub fn funlock_resolved(path: impl AsRef<Path>, owner: u64) -> KernelResult<()> {
         let path = path.as_ref();
-        let path = path.to_string();
         let mut table = LOCK_TABLE.lock();
 
-        if let Some(idx) = table.iter().position(|e| e.path == path) {
+        if let Some(idx) = table.iter().position(|e| e.path.as_path() == path) {
             let entry = &mut table[idx];
             entry.locks.retain(|l| l.owner != owner);
 
@@ -3826,10 +3806,9 @@ impl Vfs {
     /// [`flock_resolved`](Self::flock_resolved)).
     pub fn lock_query_resolved(path: impl AsRef<Path>) -> KernelResult<Option<(LockType, usize)>> {
         let path = path.as_ref();
-        let path = path.to_string();
         let table = LOCK_TABLE.lock();
 
-        if let Some(entry) = table.iter().find(|e| e.path == path) {
+        if let Some(entry) = table.iter().find(|e| e.path.as_path() == path) {
             if entry.locks.is_empty() {
                 return Ok(None);
             }
@@ -3852,7 +3831,7 @@ impl Vfs {
 /// Dump all active advisory locks for display in `/proc/locks`.
 ///
 /// Returns `(path, lock_type, owner)` for each active lock.
-pub fn lock_table_dump() -> Vec<(String, LockType, u64)> {
+pub fn lock_table_dump() -> Vec<(PathBuf, LockType, u64)> {
     let table = LOCK_TABLE.lock();
     let mut result = Vec::new();
     for entry in table.iter() {
@@ -3975,10 +3954,10 @@ pub fn normalize_path<P: AsRef<Path>>(path: P) -> PathBuf {
 const GLOBSTAR_MAX_DEPTH: usize = 16;
 
 fn glob_recurse(
-    base: &str,
-    components: &[&str],
+    base: &Path,
+    components: &[&Path],
     depth: usize,
-    results: &mut Vec<String>,
+    results: &mut Vec<PathBuf>,
     max_results: usize,
 ) {
     if results.len() >= max_results {
@@ -3994,7 +3973,7 @@ fn glob_recurse(
     let is_last = depth + 1 == components.len();
 
     // Handle `**` (globstar): matches zero or more directory levels.
-    if component == "**" {
+    if component == Path::new("**") {
         // `**` as the last component: match everything under base recursively.
         if is_last {
             glob_collect_recursive(base, results, max_results, 0);
@@ -4014,7 +3993,10 @@ fn glob_recurse(
     }
 
     // Check if this component contains glob metacharacters.
-    let is_glob = component.contains('*') || component.contains('?') || component.contains('[');
+    let is_glob = component
+        .as_bytes()
+        .iter()
+        .any(|&b| b == b'*' || b == b'?' || b == b'[');
 
     if is_glob {
         // Read the current directory and match each entry against the pattern.
@@ -4025,11 +4007,7 @@ fn glob_recurse(
 
         for entry in &entries {
             if glob_match(&entry.name, component, true) {
-                let child_path = if base == "/" {
-                    alloc::format!("/{}", entry.name)
-                } else {
-                    alloc::format!("{}/{}", base, entry.name)
-                };
+                let child_path = base.join(&entry.name);
 
                 if is_last {
                     // This was the last component — add to results.
@@ -4044,11 +4022,7 @@ fn glob_recurse(
         }
     } else {
         // No glob chars — this is a literal path component.
-        let child_path = if base == "/" {
-            alloc::format!("/{}", component)
-        } else {
-            alloc::format!("{}/{}", base, component)
-        };
+        let child_path = base.join(component);
 
         if is_last {
             // Check if this path exists.
@@ -4074,10 +4048,10 @@ fn glob_recurse(
 /// At each level, tries matching the remaining pattern components (after `**`)
 /// from each subdirectory, then recurses deeper into their subdirectories.
 fn globstar_recurse(
-    base: &str,
-    components: &[&str],
+    base: &Path,
+    components: &[&Path],
     star_depth: usize,  // Index of `**` in components.
-    results: &mut Vec<String>,
+    results: &mut Vec<PathBuf>,
     max_results: usize,
     recurse_depth: usize,
 ) {
@@ -4095,11 +4069,7 @@ fn globstar_recurse(
             continue;
         }
 
-        let child_path = if base == "/" {
-            alloc::format!("/{}", entry.name)
-        } else {
-            alloc::format!("{}/{}", base, entry.name)
-        };
+        let child_path = base.join(&entry.name);
 
         // Try matching remaining components (after **) from this subdir.
         glob_recurse(
@@ -4124,8 +4094,8 @@ fn globstar_recurse(
 
 /// Collect all entries under a directory recursively (for `**` as last component).
 fn glob_collect_recursive(
-    base: &str,
-    results: &mut Vec<String>,
+    base: &Path,
+    results: &mut Vec<PathBuf>,
     max_results: usize,
     depth: usize,
 ) {
@@ -4139,11 +4109,7 @@ fn glob_collect_recursive(
     };
 
     for entry in &entries {
-        let child_path = if base == "/" {
-            alloc::format!("/{}", entry.name)
-        } else {
-            alloc::format!("{}/{}", base, entry.name)
-        };
+        let child_path = base.join(&entry.name);
 
         if results.len() < max_results {
             results.push(child_path.clone());
@@ -4408,10 +4374,10 @@ pub fn self_test() -> KernelResult<()> {
     }
     serial_println!("[vfs]   {} mount(s) active", mounts.len());
     for (path, fs_type) in &mounts {
-        serial_println!("[vfs]     {} -> {}", path, fs_type);
+        serial_println!("[vfs]     {} -> {}", path.display(), fs_type);
     }
 
-    let has_tmp = mounts.iter().any(|(p, _)| p == "/tmp");
+    let has_tmp = mounts.iter().any(|(p, _)| p.as_path() == Path::new("/tmp"));
 
     // --- Basic path validation ---
     match Vfs::stat("relative/path") {
@@ -4426,11 +4392,14 @@ pub fn self_test() -> KernelResult<()> {
 
     // --- normalize_path ---
     let norm = normalize_path("/a/b/../c/./d");
-    if norm != "/a/c/d" {
-        serial_println!("[vfs]   FAIL: normalize '/a/b/../c/./d' = '{}', expected '/a/c/d'", norm);
+    if norm.as_path() != Path::new("/a/c/d") {
+        serial_println!(
+            "[vfs]   FAIL: normalize '/a/b/../c/./d' = '{}', expected '/a/c/d'",
+            norm.display()
+        );
         return Err(KernelError::InternalError);
     }
-    serial_println!("[vfs]   normalize_path: /a/b/../c/./d → {} OK", norm);
+    serial_println!("[vfs]   normalize_path: /a/b/../c/./d → {} OK", norm.display());
 
     // --- Intra-mount symlink resolution (on /tmp memfs) ---
     if has_tmp {
@@ -4472,13 +4441,16 @@ pub fn self_test() -> KernelResult<()> {
 
         // readlink should return the raw target.
         let target = Vfs::readlink("/tmp/_vfs_test_link")?;
-        if target != "/tmp/_vfs_test_target" {
-            serial_println!("[vfs]   FAIL: readlink = '{}', expected '/tmp/_vfs_test_target'", target);
+        if target.as_path() != Path::new("/tmp/_vfs_test_target") {
+            serial_println!(
+                "[vfs]   FAIL: readlink = '{}', expected '/tmp/_vfs_test_target'",
+                target.display()
+            );
             let _ = Vfs::remove("/tmp/_vfs_test_link");
             let _ = Vfs::remove("/tmp/_vfs_test_target");
             return Err(KernelError::InternalError);
         }
-        serial_println!("[vfs]     readlink: '{}' OK", target);
+        serial_println!("[vfs]     readlink: '{}' OK", target.display());
 
         // --- Cross-mount symlink resolution ---
         // Create a symlink on root (/) that points to /tmp/file.
@@ -4575,7 +4547,7 @@ pub fn self_test() -> KernelResult<()> {
             for (path, info) in &mounts {
                 serial_println!(
                     "[vfs]     {} → {} ({})",
-                    path,
+                    path.display(),
                     info.fs_type,
                     if info.total_bytes() > 0 {
                         let mb = info.total_bytes() / (1024 * 1024);
@@ -4921,8 +4893,12 @@ pub fn self_test() -> KernelResult<()> {
 
         // Verify the copy has the expected structure.
         let copy_entries = Vfs::readdir("/tmp/_vfs_rc_copy")?;
-        let has_a = copy_entries.iter().any(|e| e.name == "a" && e.entry_type == EntryType::Directory);
-        let has_top = copy_entries.iter().any(|e| e.name == "top.txt" && e.entry_type == EntryType::File);
+        let has_a = copy_entries
+            .iter()
+            .any(|e| e.name.as_path() == Path::new("a") && e.entry_type == EntryType::Directory);
+        let has_top = copy_entries
+            .iter()
+            .any(|e| e.name.as_path() == Path::new("top.txt") && e.entry_type == EntryType::File);
         if !has_a || !has_top {
             serial_println!("[vfs]   FAIL: copy directory structure wrong (a={}, top.txt={})", has_a, has_top);
             let _ = Vfs::remove_recursive("/tmp/_vfs_rc");
@@ -5094,8 +5070,8 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[vfs]     readdir_at(3, 3): {} entries OK", page2.len());
 
         // Verify no overlap between pages.
-        let names1: Vec<&str> = page1.iter().map(|e| e.name.as_str()).collect();
-        let names2: Vec<&str> = page2.iter().map(|e| e.name.as_str()).collect();
+        let names1: Vec<&Path> = page1.iter().map(|e| e.name.as_path()).collect();
+        let names2: Vec<&Path> = page2.iter().map(|e| e.name.as_path()).collect();
         let has_overlap = names1.iter().any(|n| names2.contains(n));
         if has_overlap {
             serial_println!("[vfs]   FAIL: page1 and page2 overlap!");
@@ -5265,7 +5241,7 @@ pub fn self_test() -> KernelResult<()> {
         // Test 1: /**/*.txt should find all .txt files recursively.
         let txt_results = Vfs::glob("/tmp/_glob_test/**/*.txt")?;
         let txt_count = txt_results.iter()
-            .filter(|p| p.ends_with(".txt"))
+            .filter(|p| p.as_bytes().ends_with(b".txt"))
             .count();
         if txt_count < 3 {
             serial_println!(
@@ -5295,7 +5271,7 @@ pub fn self_test() -> KernelResult<()> {
         // Test 3: /**/*.rs should find .rs files at any depth.
         let rs_results = Vfs::glob("/tmp/_glob_test/**/*.rs")?;
         let rs_count = rs_results.iter()
-            .filter(|p| p.ends_with(".rs"))
+            .filter(|p| p.as_bytes().ends_with(b".rs"))
             .count();
         if rs_count < 2 {
             serial_println!(
@@ -5398,14 +5374,14 @@ pub fn mount_self_test() -> KernelResult<()> {
     let mp = "/_mount_selftest";
 
     // Refuse to clobber a stale mount from a previous run.
-    if Vfs::mounts().iter().any(|(p, _)| p == mp) {
+    if Vfs::mounts().iter().any(|(p, _)| p.as_path() == Path::new(mp)) {
         serial_println!("[vfs]   {} already mounted — unmounting stale entry", mp);
         let _ = Vfs::unmount(mp);
     }
 
     // Mount a fresh in-memory filesystem (same call as fstype "tmpfs").
     crate::fs::memfs::mount(mp)?;
-    if !Vfs::mounts().iter().any(|(p, _)| p == mp) {
+    if !Vfs::mounts().iter().any(|(p, _)| p.as_path() == Path::new(mp)) {
         serial_println!("[vfs]   FAIL: {} not present after mount", mp);
         let _ = Vfs::unmount(mp);
         return Err(KernelError::InternalError);
@@ -5437,7 +5413,7 @@ pub fn mount_self_test() -> KernelResult<()> {
 
     // Unmount the scratch mount and verify it is gone.
     Vfs::unmount(mp)?;
-    if Vfs::mounts().iter().any(|(p, _)| p == mp) {
+    if Vfs::mounts().iter().any(|(p, _)| p.as_path() == Path::new(mp)) {
         serial_println!("[vfs]   FAIL: {} still present after unmount", mp);
         return Err(KernelError::InternalError);
     }
@@ -5468,7 +5444,7 @@ pub fn file_identity_self_test() -> KernelResult<()> {
 
     // Refuse to clobber stale mounts from a previous run.
     for mp in [mp_a, mp_b] {
-        if Vfs::mounts().iter().any(|(p, _)| p == mp) {
+        if Vfs::mounts().iter().any(|(p, _)| p.as_path() == Path::new(mp)) {
             let _ = Vfs::unmount(mp);
         }
     }
@@ -5590,8 +5566,12 @@ fn cleanup_glob_test() -> KernelResult<()> {
 /// - `glob_match("test.txt", "test.[tx][tx][tx]", false)` → true
 /// - `glob_match("abc", "a*c", false)` → true
 /// - `glob_match("abc", "a?c", false)` → true
-pub fn glob_match(name: &str, pattern: &str, case_insensitive: bool) -> bool {
-    glob_match_inner(name.as_bytes(), pattern.as_bytes(), case_insensitive)
+pub fn glob_match<N: AsRef<[u8]>, P: AsRef<[u8]>>(
+    name: N,
+    pattern: P,
+    case_insensitive: bool,
+) -> bool {
+    glob_match_inner(name.as_ref(), pattern.as_ref(), case_insensitive)
 }
 
 /// Inner recursive glob matcher operating on byte slices.

@@ -9992,9 +9992,7 @@ pub fn sys_udp_recv(args: &SyscallArgs) -> SyscallResult {
     }
 
     let handle = args.arg0 as usize;
-    let buf_ptr = args.arg1 as *mut u8;
     let buf_cap = args.arg2 as usize;
-    let src_ptr = args.arg3 as *mut u8;
     // arg4: flags —
     //   bit 1 (0x02) = MSG_PEEK (peek without consuming)
     //   bit 5 (0x20) = MSG_TRUNC (return real datagram size, not truncated)
@@ -10002,17 +10000,20 @@ pub fn sys_udp_recv(args: &SyscallArgs) -> SyscallResult {
     let peek = (flags & 0x02) != 0;
     let trunc = (flags & 0x20) != 0;
 
-    if buf_ptr.is_null() && buf_cap > 0 {
+    if args.arg1 == 0 && buf_cap > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
+    // Both destinations are checked before the dequeue below, so a bad pointer
+    // costs the caller an error rather than a datagram consumed with nowhere
+    // to put it.  The copies themselves re-validate.
     if buf_cap > 0 {
         if let Err(e) = crate::mm::user::validate_user_write(args.arg1, buf_cap) {
             return SyscallResult::err(e);
         }
     }
     // Source address output: 4 bytes IPv4 + 2 bytes port = 6 bytes.
-    if !src_ptr.is_null() {
+    if args.arg3 != 0 {
         if let Err(e) = crate::mm::user::validate_user_write(args.arg3, 6) {
             return SyscallResult::err(e);
         }
@@ -10029,34 +10030,35 @@ pub fn sys_udp_recv(args: &SyscallArgs) -> SyscallResult {
         Some(datagram) => {
             let real_len = datagram.data.len();
             let copy_len = real_len.min(buf_cap);
-            if copy_len > 0 && !buf_ptr.is_null() {
-                // SAFETY: Validated above — buf_ptr is in user space, mapped, and writable.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        datagram.data.as_ptr(),
-                        buf_ptr,
-                        copy_len,
-                    );
+            if copy_len > 0 && args.arg1 != 0 {
+                // SAFETY: `datagram.data` is a live kernel-owned `Vec` of at
+                // least `copy_len` bytes; `copy_to_user` re-validates the
+                // destination and brackets the store with STAC/CLAC.
+                if let Err(e) = unsafe {
+                    crate::mm::user::copy_to_user(datagram.data.as_ptr(), args.arg1, copy_len)
+                } {
+                    return SyscallResult::err(e);
                 }
             }
 
             // Write source address info if pointer provided.
-            if !src_ptr.is_null() {
-                // SAFETY: Validated above — src_ptr is in user space, mapped, and writable.
-                unsafe {
-                    // IPv4 address (4 bytes).
-                    core::ptr::copy_nonoverlapping(
-                        datagram.src_ip.0.as_ptr(),
-                        src_ptr,
-                        4,
-                    );
-                    // Source port (u16 LE, 2 bytes).
-                    let port_bytes = datagram.src_port.to_le_bytes();
-                    core::ptr::copy_nonoverlapping(
-                        port_bytes.as_ptr(),
-                        src_ptr.add(4),
-                        2,
-                    );
+            if args.arg3 != 0 {
+                // Assembled kernel-side so the address and port cannot be seen
+                // half-updated.
+                let mut src = [0u8; 6];
+                if let Some(dst) = src.get_mut(..4) {
+                    dst.copy_from_slice(&datagram.src_ip.0);
+                }
+                if let Some(dst) = src.get_mut(4..6) {
+                    dst.copy_from_slice(&datagram.src_port.to_le_bytes());
+                }
+                // SAFETY: `src` is a live 6-byte kernel stack array;
+                // `copy_to_user` validates the destination and brackets the
+                // store with STAC/CLAC.
+                if let Err(e) =
+                    unsafe { crate::mm::user::copy_to_user(src.as_ptr(), args.arg3, src.len()) }
+                {
+                    return SyscallResult::err(e);
                 }
             }
 
@@ -10935,14 +10937,14 @@ pub fn sys_dns_reverse_resolve(args: &SyscallArgs) -> SyscallResult {
     }
 
     let ip_u32 = args.arg0 as u32;
-    let out_ptr = args.arg1 as *mut u8;
     let out_len = args.arg2 as usize;
 
-    if out_ptr.is_null() || out_len == 0 {
+    if args.arg1 == 0 || out_len == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    // Cap output to a reasonable hostname length.
+    // 253 is the RFC 1035 maximum name length, so this bounds the range the
+    // kernel has to validate without ever clipping a real hostname.
     let safe_out_len = out_len.min(253);
     if let Err(e) = crate::mm::user::validate_user_write(args.arg1, safe_out_len) {
         return SyscallResult::err(e);
@@ -10957,14 +10959,16 @@ pub fn sys_dns_reverse_resolve(args: &SyscallArgs) -> SyscallResult {
             if copy_len == 0 {
                 return SyscallResult::err(KernelError::InvalidArgument);
             }
-            // SAFETY: out_ptr validated for safe_out_len bytes above.
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    hostname.as_bytes().as_ptr(),
-                    out_ptr,
-                    copy_len,
-                );
+            // SAFETY: `hostname` is a live kernel-owned string of at least
+            // `copy_len` bytes.  `copy_to_user` re-validates the destination,
+            // which is the check that matters here: `reverse_resolve` waits on
+            // a network round-trip, so the validation above is stale by now.
+            if let Err(e) = unsafe {
+                crate::mm::user::copy_to_user(hostname.as_ptr(), args.arg1, copy_len)
+            } {
+                return SyscallResult::err(e);
             }
+            #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(copy_len as i64)
         }
         Err(e) => SyscallResult::err(e),
@@ -11465,11 +11469,11 @@ pub fn sys_system_set_profile(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Writes 20-byte records per connection.  Returns the number of
 /// connections written.
+#[allow(clippy::cast_possible_truncation)]
 pub fn sys_tcp_list(args: &SyscallArgs) -> SyscallResult {
-    let buf_ptr = args.arg0 as usize;
     let buf_len = args.arg1 as usize;
 
-    if buf_ptr == 0 {
+    if args.arg0 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
@@ -11483,82 +11487,82 @@ pub fn sys_tcp_list(args: &SyscallArgs) -> SyscallResult {
     let local_ip = crate::net::interface::info().ip;
 
     let conns = crate::net::tcp::all_connections();
-    let mut written: usize = 0;
+    let count = conns.len().min(max_records);
 
-    for conn in &conns {
-        if written >= max_records {
+    // Sized by the connections that exist, not by the caller's `buf_len`, so a
+    // caller cannot make the kernel reserve an arbitrary amount.
+    let mut out = match crate::mm::user::alloc_zeroed_vec(count.saturating_mul(RECORD_SIZE)) {
+        Ok(v) => v,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    for (i, conn) in conns.iter().take(count).enumerate() {
+        let base = i.saturating_mul(RECORD_SIZE);
+        let Some(rec) = out.get_mut(base..base.saturating_add(RECORD_SIZE)) else {
+            // Unreachable: `out` was sized for exactly `count` records.
             break;
-        }
-
-        let mut record = [0u8; RECORD_SIZE];
+        };
+        let mut put = |at: usize, bytes: &[u8]| {
+            if let Some(dst) = rec.get_mut(at..at.saturating_add(bytes.len())) {
+                dst.copy_from_slice(bytes);
+            }
+        };
 
         // [0..4] local IP (network order — already stored as octets).
-        record[0] = local_ip.0[0];
-        record[1] = local_ip.0[1];
-        record[2] = local_ip.0[2];
-        record[3] = local_ip.0[3];
-
+        put(0, &local_ip.0);
         // [4..6] local port (network order = big-endian).
-        let lport_be = conn.local_port.to_be_bytes();
-        record[4] = lport_be[0];
-        record[5] = lport_be[1];
-
-        // [6..10] remote IP (IPv4 only — write zeroes for IPv6 connections).
-        match conn.remote_ip.as_v4() {
-            Some(v4) => {
-                record[6] = v4.0[0];
-                record[7] = v4.0[1];
-                record[8] = v4.0[2];
-                record[9] = v4.0[3];
-            }
-            None => {
-                // IPv6 not representable in this 4-byte field; use 0.0.0.0.
-                record[6] = 0;
-                record[7] = 0;
-                record[8] = 0;
-                record[9] = 0;
-            }
+        put(4, &conn.local_port.to_be_bytes());
+        // [6..10] remote IP.  An IPv6 peer is not representable in this
+        // 4-byte field, so it reads as 0.0.0.0 — the buffer starts zeroed.
+        if let Some(v4) = conn.remote_ip.as_v4() {
+            put(6, &v4.0);
         }
-
         // [10..12] remote port (network order).
-        let rport_be = conn.remote_port.to_be_bytes();
-        record[10] = rport_be[0];
-        record[11] = rport_be[1];
-
+        put(10, &conn.remote_port.to_be_bytes());
         // [12] state.
-        record[12] = conn.state as u8;
-
+        put(12, &[conn.state as u8]);
         // [13..16] rx_buffered (u24 LE, capped).
         let rx = conn.rx_buffered.min(0xFF_FFFF) as u32;
-        record[13] = rx as u8;
-        record[14] = (rx >> 8) as u8;
-        record[15] = (rx >> 16) as u8;
-
+        put(13, &rx.to_le_bytes()[..3]);
         // [16..19] tx_buffered (u24 LE, capped).
         let tx = conn.tx_buffered.min(0xFF_FFFF) as u32;
-        record[16] = tx as u8;
-        record[17] = (tx >> 8) as u8;
-        record[18] = (tx >> 16) as u8;
-
+        put(16, &tx.to_le_bytes()[..3]);
         // [19] flags.
         let mut flags: u8 = 0;
-        if conn.keepalive { flags |= 1; }
-        if conn.nagle { flags |= 2; }
-        if conn.ecn_ok { flags |= 4; }
-        if conn.sack_ok { flags |= 8; }
-        record[19] = flags;
-
-        // SAFETY: buf_ptr is a userspace pointer validated by the caller;
-        // written < max_records ensures dst stays within the buffer.
-        let dst = (buf_ptr + written * RECORD_SIZE) as *mut u8;
-        unsafe {
-            core::ptr::copy_nonoverlapping(record.as_ptr(), dst, RECORD_SIZE);
+        if conn.keepalive {
+            flags |= 1;
         }
-        written = written.wrapping_add(1);
+        if conn.nagle {
+            flags |= 2;
+        }
+        if conn.ecn_ok {
+            flags |= 4;
+        }
+        if conn.sack_ok {
+            flags |= 8;
+        }
+        put(19, &[flags]);
+    }
+
+    // The destination was previously written record-by-record through
+    // `args.arg0 as *mut u8` under a SAFETY comment claiming the pointer was
+    // "validated by the caller".  Nothing validated it — the handler only
+    // checked it was non-null — so any process holding no capability at all
+    // could name an arbitrary kernel address and have the connection table
+    // written over it.  `copy_to_user` performs the check that comment
+    // assumed, and brackets the store for SMAP.
+    if !out.is_empty() {
+        // SAFETY: `out` is a live kernel-owned buffer of exactly `out.len()`
+        // bytes.
+        if let Err(e) =
+            unsafe { crate::mm::user::copy_to_user(out.as_ptr(), args.arg0, out.len()) }
+        {
+            return SyscallResult::err(e);
+        }
     }
 
     #[allow(clippy::cast_possible_wrap)]
-    SyscallResult::ok(written as i64)
+    SyscallResult::ok(count as i64)
 }
 
 /// `SYS_TCP_LISTENER_LIST` — list active TCP listeners.
@@ -11568,11 +11572,11 @@ pub fn sys_tcp_list(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Writes 4-byte records per listener.  Returns the number of
 /// listeners written.
+#[allow(clippy::cast_possible_truncation)]
 pub fn sys_tcp_listener_list(args: &SyscallArgs) -> SyscallResult {
-    let buf_ptr = args.arg0 as usize;
     let buf_len = args.arg1 as usize;
 
-    if buf_ptr == 0 {
+    if args.arg0 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
@@ -11583,34 +11587,47 @@ pub fn sys_tcp_listener_list(args: &SyscallArgs) -> SyscallResult {
     }
 
     let (listeners, count) = crate::net::tcp::all_listeners();
-    let mut written: usize = 0;
+    let count = count.min(listeners.len()).min(max_records);
 
-    for i in 0..count {
-        if written >= max_records {
+    let mut out = match crate::mm::user::alloc_zeroed_vec(count.saturating_mul(RECORD_SIZE)) {
+        Ok(v) => v,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    for (i, listener) in listeners.iter().take(count).enumerate() {
+        let base = i.saturating_mul(RECORD_SIZE);
+        let Some(rec) = out.get_mut(base..base.saturating_add(RECORD_SIZE)) else {
+            // Unreachable: `out` was sized for exactly `count` records.
             break;
+        };
+        // [0..2] local port (network order).
+        if let Some(dst) = rec.get_mut(..2) {
+            dst.copy_from_slice(&listener.port.to_be_bytes());
         }
-        if let Some(listener) = listeners.get(i) {
-            let mut record = [0u8; RECORD_SIZE];
-            // [0..2] local port (network order).
-            let port_be = listener.port.to_be_bytes();
-            record[0] = port_be[0];
-            record[1] = port_be[1];
-            // [2] backlog used.
-            record[2] = listener.backlog_used as u8;
-            // [3] backlog max.
-            record[3] = listener.backlog_max as u8;
+        // [2] backlog used, [3] backlog max.
+        if let Some(dst) = rec.get_mut(2..4) {
+            dst.copy_from_slice(&[
+                listener.backlog_used as u8,
+                listener.backlog_max as u8,
+            ]);
+        }
+    }
 
-            // SAFETY: buf_ptr is validated; written < max_records.
-            let dst = (buf_ptr + written * RECORD_SIZE) as *mut u8;
-            unsafe {
-                core::ptr::copy_nonoverlapping(record.as_ptr(), dst, RECORD_SIZE);
-            }
-            written = written.wrapping_add(1);
+    // Same unvalidated-destination bug as `sys_tcp_list`: the records went out
+    // through a bare `args.arg0 as *mut u8` that had only been null-checked.
+    if !out.is_empty() {
+        // SAFETY: `out` is a live kernel-owned buffer of exactly `out.len()`
+        // bytes; `copy_to_user` validates the destination and brackets the
+        // store with STAC/CLAC.
+        if let Err(e) =
+            unsafe { crate::mm::user::copy_to_user(out.as_ptr(), args.arg0, out.len()) }
+        {
+            return SyscallResult::err(e);
         }
     }
 
     #[allow(clippy::cast_possible_wrap)]
-    SyscallResult::ok(written as i64)
+    SyscallResult::ok(count as i64)
 }
 
 /// `SYS_NET_IF_INFO` — query network interface configuration.
@@ -11620,10 +11637,9 @@ pub fn sys_tcp_listener_list(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns 0 on success with interface info written.
 pub fn sys_net_if_info(args: &SyscallArgs) -> SyscallResult {
-    let out_ptr = args.arg0 as usize;
     let buf_len = args.arg1 as usize;
 
-    if out_ptr == 0 {
+    if args.arg0 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
@@ -11634,49 +11650,33 @@ pub fn sys_net_if_info(args: &SyscallArgs) -> SyscallResult {
 
     let info = crate::net::interface::info();
     let mut record = [0u8; INFO_SIZE];
+    {
+        // Constant offsets inside a fixed-size array; a `get_mut` here can
+        // only fail if the offsets and `INFO_SIZE` disagree.
+        let mut put = |at: usize, bytes: &[u8]| {
+            if let Some(dst) = record.get_mut(at..at.saturating_add(bytes.len())) {
+                dst.copy_from_slice(bytes);
+            }
+        };
+        put(0, &info.ip.0); // [0..4]   IPv4 address
+        put(4, &info.subnet_mask.0); // [4..8]   subnet mask
+        put(8, &info.gateway.0); // [8..12]  gateway
+        put(12, &info.dns.0); // [12..16] DNS server
+        put(16, &info.mac.0); // [16..22] MAC address
+        put(22, &[u8::from(info.up)]); // [22]     flags
+        // [23] reserved: stays zero.
+    }
 
-    // [0..4] IPv4 address.
-    record[0] = info.ip.0[0];
-    record[1] = info.ip.0[1];
-    record[2] = info.ip.0[2];
-    record[3] = info.ip.0[3];
-
-    // [4..8] subnet mask.
-    record[4] = info.subnet_mask.0[0];
-    record[5] = info.subnet_mask.0[1];
-    record[6] = info.subnet_mask.0[2];
-    record[7] = info.subnet_mask.0[3];
-
-    // [8..12] gateway.
-    record[8] = info.gateway.0[0];
-    record[9] = info.gateway.0[1];
-    record[10] = info.gateway.0[2];
-    record[11] = info.gateway.0[3];
-
-    // [12..16] DNS server.
-    record[12] = info.dns.0[0];
-    record[13] = info.dns.0[1];
-    record[14] = info.dns.0[2];
-    record[15] = info.dns.0[3];
-
-    // [16..22] MAC address.
-    record[16] = info.mac.0[0];
-    record[17] = info.mac.0[1];
-    record[18] = info.mac.0[2];
-    record[19] = info.mac.0[3];
-    record[20] = info.mac.0[4];
-    record[21] = info.mac.0[5];
-
-    // [22] flags.
-    record[22] = u8::from(info.up);
-
-    // [23] reserved.
-    record[23] = 0;
-
-    let dst = out_ptr as *mut u8;
-    // SAFETY: out_ptr is a userspace pointer, buf_len >= INFO_SIZE.
-    unsafe {
-        core::ptr::copy_nonoverlapping(record.as_ptr(), dst, INFO_SIZE);
+    // Was stored through a bare `args.arg0 as *mut u8` that had only been
+    // null-checked — the same missing-validation bug as `sys_tcp_list`.
+    //
+    // SAFETY: `record` is a live kernel stack array of exactly `INFO_SIZE`
+    // bytes; `copy_to_user` validates the destination and brackets the store
+    // with STAC/CLAC.
+    if let Err(e) =
+        unsafe { crate::mm::user::copy_to_user(record.as_ptr(), args.arg0, INFO_SIZE) }
+    {
+        return SyscallResult::err(e);
     }
 
     SyscallResult::ok(0)
@@ -12087,11 +12087,11 @@ pub fn sys_net_fw_flush(_args: &SyscallArgs) -> SyscallResult {
 /// `arg1`: buffer length in bytes.
 ///
 /// Writes 12-byte records per entry.  Returns the number written.
+#[allow(clippy::cast_possible_truncation)]
 pub fn sys_arp_table(args: &SyscallArgs) -> SyscallResult {
-    let buf_ptr = args.arg0 as usize;
     let buf_len = args.arg1 as usize;
 
-    if buf_ptr == 0 {
+    if args.arg0 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
@@ -12102,45 +12102,45 @@ pub fn sys_arp_table(args: &SyscallArgs) -> SyscallResult {
     }
 
     let (entries, count) = crate::net::arp::cache_entries();
-    let mut written: usize = 0;
+    let count = count.min(entries.len()).min(max_records);
 
-    for i in 0..count {
-        if written >= max_records {
+    let mut out = match crate::mm::user::alloc_zeroed_vec(count.saturating_mul(RECORD_SIZE)) {
+        Ok(v) => v,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    for (i, entry) in entries.iter().take(count).enumerate() {
+        let base = i.saturating_mul(RECORD_SIZE);
+        let Some(rec) = out.get_mut(base..base.saturating_add(RECORD_SIZE)) else {
+            // Unreachable: `out` was sized for exactly `count` records.
             break;
-        }
-        if let Some(entry) = entries.get(i) {
-            let mut record = [0u8; RECORD_SIZE];
-
-            // [0..4] IP address.
-            record[0] = entry.ip.0[0];
-            record[1] = entry.ip.0[1];
-            record[2] = entry.ip.0[2];
-            record[3] = entry.ip.0[3];
-
-            // [4..10] MAC address.
-            record[4] = entry.mac.0[0];
-            record[5] = entry.mac.0[1];
-            record[6] = entry.mac.0[2];
-            record[7] = entry.mac.0[3];
-            record[8] = entry.mac.0[4];
-            record[9] = entry.mac.0[5];
-
-            // [10..12] TTL in seconds (u16 LE).
-            let ttl = entry.ttl_secs.min(u64::from(u16::MAX)) as u16;
-            record[10] = ttl as u8;
-            record[11] = (ttl >> 8) as u8;
-
-            // SAFETY: buf_ptr is validated; written < max_records.
-            let dst = (buf_ptr + written * RECORD_SIZE) as *mut u8;
-            unsafe {
-                core::ptr::copy_nonoverlapping(record.as_ptr(), dst, RECORD_SIZE);
+        };
+        let mut put = |at: usize, bytes: &[u8]| {
+            if let Some(dst) = rec.get_mut(at..at.saturating_add(bytes.len())) {
+                dst.copy_from_slice(bytes);
             }
-            written = written.wrapping_add(1);
+        };
+        put(0, &entry.ip.0); // [0..4]   IP address
+        put(4, &entry.mac.0); // [4..10]  MAC address
+        // [10..12] TTL in seconds (u16 LE).
+        let ttl = entry.ttl_secs.min(u64::from(u16::MAX)) as u16;
+        put(10, &ttl.to_le_bytes());
+    }
+
+    // Same unvalidated-destination bug as `sys_tcp_list`.
+    if !out.is_empty() {
+        // SAFETY: `out` is a live kernel-owned buffer of exactly `out.len()`
+        // bytes; `copy_to_user` validates the destination and brackets the
+        // store with STAC/CLAC.
+        if let Err(e) =
+            unsafe { crate::mm::user::copy_to_user(out.as_ptr(), args.arg0, out.len()) }
+        {
+            return SyscallResult::err(e);
         }
     }
 
     #[allow(clippy::cast_possible_wrap)]
-    SyscallResult::ok(written as i64)
+    SyscallResult::ok(count as i64)
 }
 
 /// `SYS_DNS_CACHE_STATS` — query DNS cache statistics.
@@ -12150,10 +12150,9 @@ pub fn sys_arp_table(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns 0 on success.
 pub fn sys_dns_cache_stats(args: &SyscallArgs) -> SyscallResult {
-    let out_ptr = args.arg0 as usize;
     let buf_len = args.arg1 as usize;
 
-    if out_ptr == 0 {
+    if args.arg0 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
@@ -12164,18 +12163,34 @@ pub fn sys_dns_cache_stats(args: &SyscallArgs) -> SyscallResult {
 
     let stats = crate::net::dns::cache_stats();
     let mut buf = [0u8; STATS_SIZE];
+    {
+        // Constant offsets inside a fixed-size array; a `get_mut` here can
+        // only fail if the offsets and `STATS_SIZE` disagree.
+        let mut put = |at: usize, bytes: &[u8]| {
+            if let Some(dst) = buf.get_mut(at..at.saturating_add(bytes.len())) {
+                dst.copy_from_slice(bytes);
+            }
+        };
+        put(0, &stats.hits.to_le_bytes());
+        put(8, &stats.misses.to_le_bytes());
+        put(16, &stats.evictions.to_le_bytes());
+        put(24, &(stats.entries as u32).to_le_bytes());
+        put(28, &(stats.capacity as u32).to_le_bytes());
+        // [32..40] reserved: stays zero.
+    }
 
-    buf[0..8].copy_from_slice(&stats.hits.to_le_bytes());
-    buf[8..16].copy_from_slice(&stats.misses.to_le_bytes());
-    buf[16..24].copy_from_slice(&stats.evictions.to_le_bytes());
-    buf[24..28].copy_from_slice(&(stats.entries as u32).to_le_bytes());
-    buf[28..32].copy_from_slice(&(stats.capacity as u32).to_le_bytes());
-    // [32..40] reserved.
-
-    // SAFETY: out_ptr is validated non-null and buf_len ≥ STATS_SIZE above.
-    let dst = out_ptr as *mut u8;
-    unsafe {
-        core::ptr::copy_nonoverlapping(buf.as_ptr(), dst, STATS_SIZE);
+    // The old SAFETY comment offered "validated non-null and buf_len >=
+    // STATS_SIZE" as justification for the store.  Neither says anything about
+    // whether the address belongs to the caller — same missing-validation bug
+    // as `sys_tcp_list`.
+    //
+    // SAFETY: `buf` is a live kernel stack array of exactly `STATS_SIZE`
+    // bytes; `copy_to_user` validates the destination and brackets the store
+    // with STAC/CLAC.
+    if let Err(e) =
+        unsafe { crate::mm::user::copy_to_user(buf.as_ptr(), args.arg0, STATS_SIZE) }
+    {
+        return SyscallResult::err(e);
     }
 
     SyscallResult::ok(0)

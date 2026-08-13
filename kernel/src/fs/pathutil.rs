@@ -27,7 +27,9 @@
 //! for this "no filter configured" sentinel — so that case is spelled out
 //! rather than delegated.
 
-use super::path::Path;
+use crate::error::{KernelError, KernelResult};
+
+use super::path::{Path, PathBuf};
 
 /// Returns `true` if `path` lies within the directory subtree denoted by
 /// `dir` — that is, `path` equals `dir` or is strictly underneath it.
@@ -70,6 +72,68 @@ pub fn path_strictly_under<P: AsRef<Path>, D: AsRef<Path>>(path: P, dir: D) -> b
         return path.components().next().is_some();
     }
     path.starts_with(dir) && path.components().count() > dir.components().count()
+}
+
+/// Join `rel` underneath the directory `base`, refusing anything that could
+/// escape it.
+///
+/// This is the guard every archive extractor and every "copy into a jail"
+/// operation needs.  An archive member (or container `cp` argument) named
+/// `../../etc/passwd` must not be able to write outside `base` — the "Zip
+/// Slip" bug class.
+///
+/// A leading `/` on `rel` is **stripped**, not honoured: a tar member named
+/// `/etc/passwd` denotes `etc/passwd` *inside the archive*, and treating it as
+/// absolute is the same escape by another spelling.  `.` components are
+/// dropped, and a trailing separator on either argument is ignored.
+///
+/// # Errors
+/// - [`KernelError::InvalidArgument`] if `base` is empty, if `rel` contains a
+///   NUL byte or any `..` component, or if `rel` has no real component (which
+///   would name `base` itself rather than something inside it).
+pub fn confine_under<B: AsRef<Path> + ?Sized, R: AsRef<Path> + ?Sized>(
+    base: &B,
+    rel: &R,
+) -> KernelResult<PathBuf> {
+    let (base, rel) = (base.as_ref(), rel.as_ref());
+    if base.is_empty() {
+        return Err(KernelError::InvalidArgument);
+    }
+    if rel.as_bytes().contains(&0) {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    // Trim trailing separators off `base` so the join inserts exactly one.
+    let base_bytes = base.as_bytes();
+    let mut end = base_bytes.len();
+    while end > 0 && base_bytes.get(end.wrapping_sub(1)) == Some(&b'/') {
+        end = end.wrapping_sub(1);
+    }
+    let base_trimmed = base_bytes.get(..end).unwrap_or(base_bytes);
+
+    let mut out =
+        PathBuf::with_capacity(base.len().saturating_add(rel.len()).saturating_add(1));
+    out.extend_bytes(base_trimmed);
+
+    // `components()` already drops empty components, so a leading `/`, a
+    // trailing `/` and any `//` run need no separate handling.
+    let mut any_real = false;
+    for comp in rel.components() {
+        let bytes = comp.as_bytes();
+        if bytes == b".." {
+            return Err(KernelError::InvalidArgument);
+        }
+        if bytes == b"." {
+            continue;
+        }
+        out.extend_bytes(b"/");
+        out.extend_bytes(bytes);
+        any_real = true;
+    }
+    if !any_real {
+        return Err(KernelError::InvalidArgument);
+    }
+    Ok(out)
 }
 
 /// Returns `true` if `haystack` contains `needle` as a contiguous byte
@@ -154,6 +218,39 @@ mod tests {
         assert!(path_strictly_under(Path::new(b"/data/\xff/file"), dir));
         // A different trailing byte is a different directory.
         assert!(!path_in_subtree(Path::new(b"/data/\xfe/file"), dir));
+    }
+
+    #[test]
+    fn confine_under_normal_joins() {
+        assert_eq!(confine_under("/dest", "a/b.txt").unwrap(), PathBuf::from("/dest/a/b.txt"));
+        // Trailing separators on either side collapse to exactly one.
+        assert_eq!(confine_under("/dest/", "a/").unwrap(), PathBuf::from("/dest/a"));
+        // A leading slash on the member is stripped, not honoured.
+        assert_eq!(confine_under("/dest", "/etc/passwd").unwrap(), PathBuf::from("/dest/etc/passwd"));
+        // `.` components are dropped.
+        assert_eq!(confine_under("/dest", "./a/./b").unwrap(), PathBuf::from("/dest/a/b"));
+        // Bytes that are not UTF-8 survive intact.
+        assert_eq!(
+            confine_under("/dest", Path::new(b"re\xffport")).unwrap(),
+            PathBuf::from(b"/dest/re\xffport".as_slice())
+        );
+    }
+
+    #[test]
+    fn confine_under_rejects_escapes() {
+        // The Zip Slip case, in each of its spellings.
+        assert!(confine_under("/dest", "../etc/passwd").is_err());
+        assert!(confine_under("/dest", "a/../../etc/passwd").is_err());
+        assert!(confine_under("/dest", "/../etc/passwd").is_err());
+        assert!(confine_under("/dest", "a/..").is_err());
+        // Naming the base itself is not "something inside it".
+        assert!(confine_under("/dest", "").is_err());
+        assert!(confine_under("/dest", "/").is_err());
+        assert!(confine_under("/dest", ".").is_err());
+        // A NUL byte cannot appear in a path.
+        assert!(confine_under("/dest", Path::new(b"a\0b")).is_err());
+        // An empty base names nothing.
+        assert!(confine_under("", "a").is_err());
     }
 
     #[test]

@@ -62,11 +62,11 @@
 
 #![allow(dead_code)]
 
-use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -124,7 +124,13 @@ impl EntryKind {
 #[derive(Debug, Clone)]
 pub struct TarEntry {
     /// Full path (prefix + "/" + name if prefix is present).
-    pub name: String,
+    ///
+    /// The ustar `name`/`prefix` fields are raw bytes, and the paths they
+    /// name are byte strings.  Decoding them as UTF-8 made every member whose
+    /// name contains a non-UTF-8 byte unpackable — it parsed to the empty
+    /// name and then either collided with another entry or extracted to the
+    /// archive root.
+    pub name: PathBuf,
     /// File size in bytes (0 for directories and symlinks).
     pub size: u64,
     /// Modification time in seconds since Unix epoch.
@@ -138,7 +144,7 @@ pub struct TarEntry {
     /// Entry type.
     pub kind: EntryKind,
     /// Symlink target (empty for non-symlinks).
-    pub link_target: String,
+    pub link_target: PathBuf,
     /// Byte offset of the file data within the archive.
     /// Points to the first byte after the header block.
     pub data_offset: usize,
@@ -147,13 +153,13 @@ pub struct TarEntry {
 /// An entry to be written into a new tar archive.
 pub struct TarWriteEntry {
     /// Path inside the archive (directories should end with `/`).
-    pub name: String,
+    pub name: PathBuf,
     /// File data.  Empty for directories and symlinks.
     pub data: Vec<u8>,
     /// Entry type.
     pub kind: EntryKind,
     /// Symlink target (only used when kind == Symlink).
-    pub link_target: String,
+    pub link_target: PathBuf,
     /// File mode (permissions).
     pub mode: u32,
     /// Owner UID.
@@ -256,19 +262,29 @@ pub fn parse(data: &[u8]) -> KernelResult<Vec<TarEntry>> {
             return Err(KernelError::CorruptedData);
         }
 
-        // Parse name (prefix + name).
+        // Parse name (prefix + name).  Both fields are raw NUL-padded bytes;
+        // never decode them as UTF-8.
         let name_raw = &header[..100];
         let name_end = name_raw.iter().position(|&b| b == 0).unwrap_or(100);
-        let name_part = core::str::from_utf8(&name_raw[..name_end]).unwrap_or("");
+        let name_part = &name_raw[..name_end];
 
         let prefix_raw = &header[345..500];
         let prefix_end = prefix_raw.iter().position(|&b| b == 0).unwrap_or(155);
-        let prefix_part = core::str::from_utf8(&prefix_raw[..prefix_end]).unwrap_or("");
+        let prefix_part = &prefix_raw[..prefix_end];
 
+        // Concatenated explicitly rather than via `Path::join`: ustar defines
+        // the full name as `prefix + "/" + name`, and `join` would discard the
+        // prefix for a member name that begins with `/`.  Path *safety* (`..`,
+        // absolute names) is the extractor's job, not the parser's.
         let name = if prefix_part.is_empty() {
-            String::from(name_part)
+            PathBuf::from(name_part)
         } else {
-            alloc::format!("{}/{}", prefix_part, name_part)
+            let mut n =
+                PathBuf::with_capacity(prefix_part.len().saturating_add(name_part.len()).saturating_add(1));
+            n.extend_bytes(prefix_part);
+            n.extend_bytes(b"/");
+            n.extend_bytes(name_part);
+            n
         };
 
         let size = parse_octal(&header[124..136]);
@@ -280,9 +296,7 @@ pub fn parse(data: &[u8]) -> KernelResult<Vec<TarEntry>> {
 
         let link_raw = &header[157..257];
         let link_end = link_raw.iter().position(|&b| b == 0).unwrap_or(100);
-        let link_target = String::from(
-            core::str::from_utf8(&link_raw[..link_end]).unwrap_or(""),
-        );
+        let link_target = PathBuf::from(&link_raw[..link_end]);
 
         let data_offset = offset.wrapping_add(BLOCK_SIZE);
 
@@ -436,10 +450,10 @@ pub fn self_test() -> KernelResult<()> {
     // --- Test 1: round-trip with a regular file ---
     {
         let entries = vec![TarWriteEntry {
-            name: String::from("hello.txt"),
+            name: PathBuf::from("hello.txt"),
             data: b"Hello, world!".to_vec(),
             kind: EntryKind::File,
-            link_target: String::new(),
+            link_target: PathBuf::new(),
             mode: 0o644,
             uid: 1000,
             gid: 1000,
@@ -450,7 +464,7 @@ pub fn self_test() -> KernelResult<()> {
         if parsed.len() != 1 {
             return Err(KernelError::CorruptedData);
         }
-        if parsed[0].name != "hello.txt" {
+        if parsed[0].name.as_path() != Path::new("hello.txt") {
             return Err(KernelError::CorruptedData);
         }
         if parsed[0].kind != EntryKind::File {
@@ -473,30 +487,30 @@ pub fn self_test() -> KernelResult<()> {
     {
         let entries = vec![
             TarWriteEntry {
-                name: String::from("mydir/"),
+                name: PathBuf::from("mydir/"),
                 data: Vec::new(),
                 kind: EntryKind::Directory,
-                link_target: String::new(),
+                link_target: PathBuf::new(),
                 mode: 0o755,
                 uid: 0,
                 gid: 0,
                 mtime: 1700000000,
             },
             TarWriteEntry {
-                name: String::from("mydir/data.bin"),
+                name: PathBuf::from("mydir/data.bin"),
                 data: vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x11, 0x22, 0x33],
                 kind: EntryKind::File,
-                link_target: String::new(),
+                link_target: PathBuf::new(),
                 mode: 0o600,
                 uid: 0,
                 gid: 0,
                 mtime: 1700000000,
             },
             TarWriteEntry {
-                name: String::from("link"),
+                name: PathBuf::from("link"),
                 data: Vec::new(),
                 kind: EntryKind::Symlink,
-                link_target: String::from("mydir/data.bin"),
+                link_target: PathBuf::from("mydir/data.bin"),
                 mode: 0o777,
                 uid: 0,
                 gid: 0,
@@ -508,13 +522,16 @@ pub fn self_test() -> KernelResult<()> {
         if parsed.len() != 3 {
             return Err(KernelError::CorruptedData);
         }
-        if parsed[0].kind != EntryKind::Directory || parsed[0].name != "mydir/" {
+        if parsed[0].kind != EntryKind::Directory || parsed[0].name.as_path() != Path::new("mydir/")
+        {
             return Err(KernelError::CorruptedData);
         }
         if parsed[1].kind != EntryKind::File || parsed[1].size != 8 {
             return Err(KernelError::CorruptedData);
         }
-        if parsed[2].kind != EntryKind::Symlink || parsed[2].link_target != "mydir/data.bin" {
+        if parsed[2].kind != EntryKind::Symlink
+            || parsed[2].link_target.as_path() != Path::new("mydir/data.bin")
+        {
             return Err(KernelError::CorruptedData);
         }
         let data = entry_data(&archive, &parsed[1])?;
@@ -538,10 +555,10 @@ pub fn self_test() -> KernelResult<()> {
     // --- Test 4: checksum validation ---
     {
         let entries = vec![TarWriteEntry {
-            name: String::from("test.dat"),
+            name: PathBuf::from("test.dat"),
             data: b"checksum test".to_vec(),
             kind: EntryKind::File,
-            link_target: String::new(),
+            link_target: PathBuf::new(),
             mode: 0o644,
             uid: 0,
             gid: 0,
@@ -579,10 +596,10 @@ pub fn self_test() -> KernelResult<()> {
     // --- Test 6: uid/gid/mtime preservation ---
     {
         let entries = vec![TarWriteEntry {
-            name: String::from("owned.txt"),
+            name: PathBuf::from("owned.txt"),
             data: b"data".to_vec(),
             kind: EntryKind::File,
-            link_target: String::new(),
+            link_target: PathBuf::new(),
             mode: 0o755,
             uid: 1234,
             gid: 5678,
@@ -602,6 +619,85 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::CorruptedData);
         }
         serial_println!("[tar]   metadata preservation OK");
+    }
+
+    // --- Test 7: non-UTF-8 member name and link target round-trip ---
+    //
+    // The ustar name/linkname fields are raw bytes.  Decoding them as UTF-8
+    // turned a member like `re\xffport.txt` into the empty name, so it
+    // extracted over the archive root instead of as a file.
+    {
+        let odd = Path::new(b"dir/re\xffport.txt".as_slice());
+        let entries = vec![
+            TarWriteEntry {
+                name: odd.to_path_buf(),
+                data: b"raw".to_vec(),
+                kind: EntryKind::File,
+                link_target: PathBuf::new(),
+                mode: 0o644,
+                uid: 0,
+                gid: 0,
+                mtime: 0,
+            },
+            TarWriteEntry {
+                name: PathBuf::from("alias"),
+                data: Vec::new(),
+                kind: EntryKind::Symlink,
+                link_target: odd.to_path_buf(),
+                mode: 0o777,
+                uid: 0,
+                gid: 0,
+                mtime: 0,
+            },
+        ];
+        let archive = create(&entries);
+        let parsed = parse(&archive)?;
+        if parsed.len() != 2 {
+            return Err(KernelError::CorruptedData);
+        }
+        if parsed[0].name.as_path() != odd {
+            return Err(KernelError::CorruptedData);
+        }
+        if entry_data(&archive, &parsed[0])? != b"raw" {
+            return Err(KernelError::CorruptedData);
+        }
+        if parsed[1].link_target.as_path() != odd {
+            return Err(KernelError::CorruptedData);
+        }
+        serial_println!("[tar]   non-UTF-8 name round-trip OK");
+    }
+
+    // --- Test 8: >100-byte name uses the ustar prefix field ---
+    //
+    // The prefix/name split and the `prefix + "/" + name` rejoin are separate
+    // code paths from the short-name case, and the rejoin must not be done
+    // with `Path::join` (which would drop the prefix for a rooted name).
+    {
+        let mut long = PathBuf::new();
+        for _ in 0..12 {
+            long.extend_bytes(b"abcdefghij/");
+        }
+        long.extend_bytes(b"leaf.txt");
+        if long.len() <= 100 {
+            return Err(KernelError::InternalError);
+        }
+        let entries = vec![TarWriteEntry {
+            name: long.clone(),
+            data: b"deep".to_vec(),
+            kind: EntryKind::File,
+            link_target: PathBuf::new(),
+            mode: 0o644,
+            uid: 0,
+            gid: 0,
+            mtime: 0,
+        }];
+        let archive = create(&entries);
+        let parsed = parse(&archive)?;
+        if parsed.len() != 1 || parsed[0].name != long {
+            serial_println!("[tar]   long-name mismatch: {}", parsed[0].name.display());
+            return Err(KernelError::CorruptedData);
+        }
+        serial_println!("[tar]   long-name prefix split OK");
     }
 
     serial_println!("[tar] Self-test passed.");

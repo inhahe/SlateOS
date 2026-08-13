@@ -47037,6 +47037,44 @@ of the frag_history hang AND zero recurrence of Active Bugs #1
 
 ## Technical Debt
 
+### TD-ARCHIVE-WRITER-NAMES-ARE-STRING-NOT-BYTES. zip/cpio/ar/rar/7z member names are still `String` — LOGGED 2026-08-13
+
+**Where:** `kernel/src/fs/zip.rs` (`ZipEntry::name`, `ZipWriteEntry::name`),
+`kernel/src/fs/cpio.rs` (`CpioEntry::name`, `::link_target`),
+`kernel/src/fs/ar.rs` (`ArEntry::name`), `kernel/src/fs/rar.rs`,
+`kernel/src/fs/sevenz.rs`.  The narrowing point is
+`kernel/src/fs/archive.rs::name_for_string_writer`.
+
+**What it is:** as part of `D-VFS-PATHS-ARE-STR-NOT-BYTES`, `fs::tar` and the
+unified `fs::archive` layer now carry member names as `fs::path::PathBuf`
+(raw bytes).  The other five format modules still model their names as
+`String`.  On the *read* path this is harmless — `archive::list_*` widens
+`String → PathBuf` losslessly.  On the *write* path it is not: a member name
+that is not valid UTF-8 cannot be handed to those writers at all, so
+`archive::create` now **rejects** it with `KernelError::InvalidArgument`
+(`name_for_string_writer`).  That is the honest failure — the alternative,
+`from_utf8_lossy`, would write an archive whose member cannot be extracted
+back to the file it came from — but it is still a capability gap: you cannot
+zip up a directory containing a file whose name has a stray byte in it, even
+though every one of those formats stores names as raw bytes on disk (zip has
+a UTF-8 *flag*, not a UTF-8 *requirement*; cpio and ar are NUL/space
+terminated byte fields).
+
+**Reproduce:** `archive::create(ArchiveFormat::Zip, &[CreateEntry { name:
+PathBuf::from(b"re\xffport.txt".as_slice()), .. }])` → `InvalidArgument`.
+The same content in a tar round-trips byte-for-byte (see
+`archive::test_tar_byte_name_roundtrip`).
+
+**Proper fix:** convert `ZipEntry`/`ZipWriteEntry`/`CpioEntry`/`ArEntry` and
+the rar/7z entry types' `name` and `link_target` fields to `PathBuf`, exactly
+as was done for `TarEntry`/`TarWriteEntry`, then delete
+`name_for_string_writer` and make `create_zip`/`create_cpio`/`create_ar`
+infallible again.  The fallout is confined to those five modules plus
+`kshell.rs` (the `cpio`, `dpkg`/`ar` and `unzip` builtins, around lines
+80343–80900) — and `kshell.rs` has to be swept for this conversion anyway.
+Deferred only to keep the tar/archive commit reviewable; it is not blocked on
+anything.
+
 ### TD-POSIX-LONG-DOUBLE-PRECISION. `long double` has the right *ABI* but only `double` (53-bit) *precision* — ACCEPTED LIMITATION 2026-07-30
 
 **Where:** `posix/src/x87.rs` (`to_f64`/`from_f64`), `posix/src/printf.rs`

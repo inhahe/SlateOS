@@ -24,6 +24,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::Vfs;
+use crate::fs::path::{Path, PathBuf};
+use crate::fs::pathutil::confine_under;
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -85,7 +87,11 @@ pub enum EntryKind {
 #[derive(Debug, Clone)]
 pub struct ArchiveEntry {
     /// Name/path within the archive.
-    pub name: String,
+    ///
+    /// Archive member names are byte strings, like every other path.  Formats
+    /// that still model their own names as `String` (zip, ar, rar, 7z) widen
+    /// into this losslessly; tar and cpio carry raw bytes end to end.
+    pub name: PathBuf,
     /// Uncompressed file size.
     pub size: u64,
     /// Entry kind.
@@ -99,14 +105,14 @@ pub struct ArchiveEntry {
     /// GID (0 if not available).
     pub gid: u32,
     /// Symlink target (empty if not a symlink).
-    pub link_target: String,
+    pub link_target: PathBuf,
 }
 
 /// Entry for creating an archive.
 #[derive(Debug, Clone)]
 pub struct CreateEntry {
     /// Name/path within the archive.
-    pub name: String,
+    pub name: PathBuf,
     /// File content (empty for directories).
     pub data: Vec<u8>,
     /// Entry kind.
@@ -260,14 +266,14 @@ pub fn list_format(data: &[u8], fmt: ArchiveFormat) -> KernelResult<Vec<ArchiveE
 fn list_zip(data: &[u8]) -> KernelResult<Vec<ArchiveEntry>> {
     let zip_entries = crate::fs::zip::parse(data)?;
     Ok(zip_entries.iter().map(|e| ArchiveEntry {
-        name: e.name.clone(),
+        name: PathBuf::from(e.name.as_str()),
         size: e.uncompressed_size,
         kind: if e.is_dir { EntryKind::Directory } else { EntryKind::File },
         mtime: 0,
         mode: 0,
         uid: 0,
         gid: 0,
-        link_target: String::new(),
+        link_target: PathBuf::new(),
     }).collect())
 }
 
@@ -303,14 +309,14 @@ fn list_cpio(data: &[u8]) -> KernelResult<Vec<ArchiveEntry>> {
             _ => EntryKind::Other,
         };
         ArchiveEntry {
-            name: e.name.clone(),
+            name: PathBuf::from(e.name.as_str()),
             size: e.data.len() as u64,
             kind,
             mtime: e.mtime as u64,
             mode: e.mode,
             uid: e.uid,
             gid: e.gid,
-            link_target: e.link_target.clone(),
+            link_target: PathBuf::from(e.link_target.as_str()),
         }
     }).collect())
 }
@@ -318,42 +324,42 @@ fn list_cpio(data: &[u8]) -> KernelResult<Vec<ArchiveEntry>> {
 fn list_ar(data: &[u8]) -> KernelResult<Vec<ArchiveEntry>> {
     let ar_entries = crate::fs::ar::unar(data)?;
     Ok(ar_entries.iter().map(|e| ArchiveEntry {
-        name: e.name.clone(),
+        name: PathBuf::from(e.name.as_str()),
         size: e.data.len() as u64,
         kind: EntryKind::File, // AR only has files.
         mtime: e.mtime,
         mode: e.mode,
         uid: e.uid,
         gid: e.gid,
-        link_target: String::new(),
+        link_target: PathBuf::new(),
     }).collect())
 }
 
 fn list_rar(data: &[u8]) -> KernelResult<Vec<ArchiveEntry>> {
     let rar_entries = crate::fs::rar::parse(data)?;
     Ok(rar_entries.iter().map(|e| ArchiveEntry {
-        name: e.name.clone(),
+        name: PathBuf::from(e.name.as_str()),
         size: e.unpacked_size,
         kind: if e.is_dir { EntryKind::Directory } else { EntryKind::File },
         mtime: e.mtime as u64,
         mode: 0,
         uid: 0,
         gid: 0,
-        link_target: String::new(),
+        link_target: PathBuf::new(),
     }).collect())
 }
 
 fn list_7z(data: &[u8]) -> KernelResult<Vec<ArchiveEntry>> {
     let entries = crate::fs::sevenz::un7z(data)?;
     Ok(entries.iter().map(|e| ArchiveEntry {
-        name: e.name.clone(),
+        name: PathBuf::from(e.name.as_str()),
         size: e.data.len() as u64,
         kind: if e.is_dir { EntryKind::Directory } else { EntryKind::File },
         mtime: 0,
         mode: 0,
         uid: 0,
         gid: 0,
-        link_target: String::new(),
+        link_target: PathBuf::new(),
     }).collect())
 }
 
@@ -362,80 +368,118 @@ fn list_7z(data: &[u8]) -> KernelResult<Vec<ArchiveEntry>> {
 // ---------------------------------------------------------------------------
 
 /// Extract a single entry from an archive by name.
-pub fn extract_one(data: &[u8], name: &str) -> KernelResult<Vec<u8>> {
+///
+/// # Errors
+/// [`KernelError::NotSupported`] if the format cannot be detected, plus
+/// whatever [`extract_one_format`] reports.
+pub fn extract_one<N: AsRef<Path> + ?Sized>(data: &[u8], name: &N) -> KernelResult<Vec<u8>> {
     let fmt = detect(data).ok_or(KernelError::NotSupported)?;
-    extract_one_format(data, name, fmt)
+    extract_one_format(data, name.as_ref(), fmt)
 }
 
 /// Extract a single entry with specified format.
-pub fn extract_one_format(data: &[u8], name: &str, fmt: ArchiveFormat) -> KernelResult<Vec<u8>> {
+///
+/// # Errors
+/// [`KernelError::NotFound`] if no member carries that exact name, plus
+/// whatever the format's own parser reports.
+pub fn extract_one_format<N: AsRef<Path> + ?Sized>(
+    data: &[u8],
+    name: &N,
+    fmt: ArchiveFormat,
+) -> KernelResult<Vec<u8>> {
+    let name = name.as_ref();
     match fmt {
         ArchiveFormat::Zip => {
             let entries = crate::fs::zip::parse(data)?;
-            let entry = entries.iter().find(|e| e.name == name)
+            let entry = entries.iter().find(|e| Path::new(e.name.as_str()) == name)
                 .ok_or(KernelError::NotFound)?;
             crate::fs::zip::extract_entry(data, entry)
         }
         ArchiveFormat::Tar => {
             let entries = crate::fs::tar::parse(data)?;
-            let entry = entries.iter().find(|e| e.name == name)
+            let entry = entries.iter().find(|e| e.name.as_path() == name)
                 .ok_or(KernelError::NotFound)?;
-            crate::fs::tar::entry_data(data, entry).map(|s| s.to_vec())
+            crate::fs::tar::entry_data(data, entry).map(<[u8]>::to_vec)
         }
         ArchiveFormat::Cpio => {
             let entries = crate::fs::cpio::uncpio(data)?;
-            let entry = entries.iter().find(|e| e.name == name)
+            let entry = entries.iter().find(|e| Path::new(e.name.as_str()) == name)
                 .ok_or(KernelError::NotFound)?;
             Ok(entry.data.clone())
         }
         ArchiveFormat::Ar => {
             let entries = crate::fs::ar::unar(data)?;
-            let entry = entries.iter().find(|e| e.name == name)
+            let entry = entries.iter().find(|e| Path::new(e.name.as_str()) == name)
                 .ok_or(KernelError::NotFound)?;
             Ok(entry.data.clone())
         }
         ArchiveFormat::Rar => {
             let entries = crate::fs::rar::parse(data)?;
-            let entry = entries.iter().find(|e| e.name == name)
+            let entry = entries.iter().find(|e| Path::new(e.name.as_str()) == name)
                 .ok_or(KernelError::NotFound)?;
-            crate::fs::rar::entry_data(data, entry).map(|s| s.to_vec())
+            crate::fs::rar::entry_data(data, entry).map(<[u8]>::to_vec)
         }
         ArchiveFormat::SevenZ => {
             let entries = crate::fs::sevenz::un7z(data)?;
-            let entry = entries.iter().find(|e| e.name == name)
+            let entry = entries.iter().find(|e| Path::new(e.name.as_str()) == name)
                 .ok_or(KernelError::NotFound)?;
             Ok(entry.data.clone())
         }
     }
 }
 
-/// Extract all entries from an archive to a directory.
-pub fn extract_all(data: &[u8], dest: &str) -> KernelResult<ExtractResult> {
+/// Extract all entries from an archive into the directory `dest`.
+///
+/// # Errors
+/// [`KernelError::NotSupported`] if the format cannot be detected, plus
+/// whatever [`extract_all_format`] reports.
+pub fn extract_all<D: AsRef<Path> + ?Sized>(data: &[u8], dest: &D) -> KernelResult<ExtractResult> {
     let fmt = detect(data).ok_or(KernelError::NotSupported)?;
-    extract_all_format(data, dest, fmt)
+    extract_all_format(data, dest.as_ref(), fmt)
 }
 
 /// Extract all entries with specified format.
-pub fn extract_all_format(data: &[u8], dest: &str, fmt: ArchiveFormat) -> KernelResult<ExtractResult> {
+///
+/// Every member name is joined onto `dest` with [`confine_under`], so a
+/// member named `../../etc/passwd` (the "Zip Slip" bug class) is refused
+/// rather than escaping the destination directory.  A refused member is
+/// recorded in [`ExtractResult::errors`] and extraction continues.
+///
+/// # Errors
+/// Propagates listing failures.  Per-member failures are collected in
+/// [`ExtractResult::errors`] instead of aborting the extraction.
+pub fn extract_all_format<D: AsRef<Path> + ?Sized>(
+    data: &[u8],
+    dest: &D,
+    fmt: ArchiveFormat,
+) -> KernelResult<ExtractResult> {
+    let dest = dest.as_ref();
     let entries = list_format(data, fmt)?;
     let mut result = ExtractResult::default();
 
-    // Ensure destination exists.
+    // Ensure destination exists.  Already-existing is the normal case, and
+    // a genuine failure surfaces below as a per-member write error.
     let _ = Vfs::mkdir(dest);
 
-    // Create directories first (sorted for proper ordering).
-    let mut dirs: Vec<&str> = entries.iter()
+    // Create directories first (sorted so parents precede children).
+    let mut dirs: Vec<&Path> = entries.iter()
         .filter(|e| e.kind == EntryKind::Directory)
-        .map(|e| e.name.as_str())
+        .map(|e| e.name.as_path())
         .collect();
-    dirs.sort();
+    dirs.sort_unstable();
 
     for dir in &dirs {
-        let path = alloc::format!("{}/{}", dest, dir.trim_end_matches('/'));
+        let path = match confine_under(dest, dir) {
+            Ok(p) => p,
+            Err(e) => {
+                result.errors.push(alloc::format!("unsafe dir {}: {:?}", dir.display(), e));
+                continue;
+            }
+        };
         match Vfs::mkdir(&path) {
             Ok(()) => result.dirs_created = result.dirs_created.saturating_add(1),
             Err(KernelError::AlreadyExists) => {}
-            Err(e) => result.errors.push(alloc::format!("mkdir {}: {:?}", path, e)),
+            Err(e) => result.errors.push(alloc::format!("mkdir {}: {:?}", path.display(), e)),
         }
     }
 
@@ -445,13 +489,20 @@ pub fn extract_all_format(data: &[u8], dest: &str, fmt: ArchiveFormat) -> Kernel
             continue;
         }
 
-        // Ensure parent directory exists.
-        let path = alloc::format!("{}/{}", dest, entry.name);
-        if let Some(last_slash) = path.rfind('/') {
-            let parent = &path[..last_slash];
-            if !parent.is_empty() {
-                let _ = Vfs::mkdir(parent);
+        let path = match confine_under(dest, &entry.name) {
+            Ok(p) => p,
+            Err(e) => {
+                result.errors.push(
+                    alloc::format!("unsafe member {}: {:?}", entry.name.display(), e),
+                );
+                continue;
             }
+        };
+
+        // Ensure the parent directory exists.  An archive need not carry
+        // directory members for the directories its files live in.
+        if let Some(parent) = path.parent() {
+            let _ = Vfs::mkdir(parent);
         }
 
         match extract_one_format(data, &entry.name, fmt) {
@@ -462,10 +513,16 @@ pub fn extract_all_format(data: &[u8], dest: &str, fmt: ArchiveFormat) -> Kernel
                         result.files_extracted = result.files_extracted.saturating_add(1);
                         result.bytes_written = result.bytes_written.saturating_add(bytes);
                     }
-                    Err(e) => result.errors.push(alloc::format!("write {}: {:?}", path, e)),
+                    Err(e) => {
+                        result.errors.push(alloc::format!("write {}: {:?}", path.display(), e));
+                    }
                 }
             }
-            Err(e) => result.errors.push(alloc::format!("extract {}: {:?}", entry.name, e)),
+            Err(e) => {
+                result.errors.push(
+                    alloc::format!("extract {}: {:?}", entry.name.display(), e),
+                );
+            }
         }
     }
 
@@ -485,13 +542,19 @@ pub fn extract_all_format(data: &[u8], dest: &str, fmt: ArchiveFormat) -> Kernel
 // ---------------------------------------------------------------------------
 
 /// Create an archive from entries.
+///
+/// # Errors
+/// - [`KernelError::NotSupported`] if `fmt` has no writer.
+/// - [`KernelError::InvalidArgument`] if a member name is not valid UTF-8 and
+///   the target format's writer still models names as `String` (zip, cpio,
+///   ar).  See [`name_for_string_writer`].
 pub fn create(fmt: ArchiveFormat, entries: &[CreateEntry]) -> KernelResult<Vec<u8>> {
     if !fmt.supports_create() {
         return Err(KernelError::NotSupported);
     }
 
     let data = match fmt {
-        ArchiveFormat::Zip => create_zip(entries),
+        ArchiveFormat::Zip => create_zip(entries)?,
         ArchiveFormat::Tar => create_tar(entries),
         ArchiveFormat::Cpio => create_cpio(entries)?,
         ArchiveFormat::Ar => create_ar(entries)?,
@@ -508,28 +571,48 @@ pub fn create(fmt: ArchiveFormat, entries: &[CreateEntry]) -> KernelResult<Vec<u
     Ok(data)
 }
 
-fn create_zip(entries: &[CreateEntry]) -> Vec<u8> {
+/// Narrow a byte member name to the `String` that the zip, cpio and ar
+/// writers still take.
+///
+/// Those three formats store names as raw bytes on disk, so this narrowing is
+/// an artefact of their in-kernel writer types, not of the file formats — see
+/// `known-issues.md`.  Until they carry [`PathBuf`] end to end, a name that is
+/// not valid UTF-8 is **rejected** rather than lossily transcoded: silently
+/// replacing bytes would write an archive whose member cannot be extracted
+/// back to the file it came from.
+///
+/// `trailing_slash` appends the `/` that directory members conventionally
+/// carry, when the caller has not already supplied one.
+fn name_for_string_writer(name: &Path, trailing_slash: bool) -> KernelResult<String> {
+    let s = name.to_str().ok_or(KernelError::InvalidArgument)?;
+    let mut out = String::from(s);
+    if trailing_slash && !out.ends_with('/') {
+        out.push('/');
+    }
+    Ok(out)
+}
+
+fn create_zip(entries: &[CreateEntry]) -> KernelResult<Vec<u8>> {
     use crate::fs::zip::ZipWriteEntry;
-    let zip_entries: Vec<ZipWriteEntry> = entries.iter().map(|e| {
-        ZipWriteEntry {
-            name: if e.kind == EntryKind::Directory && !e.name.ends_with('/') {
-                alloc::format!("{}/", e.name)
-            } else {
-                e.name.clone()
-            },
+    let mut zip_entries: Vec<ZipWriteEntry> = Vec::with_capacity(entries.len());
+    for e in entries {
+        zip_entries.push(ZipWriteEntry {
+            name: name_for_string_writer(&e.name, e.kind == EntryKind::Directory)?,
             data: e.data.clone(),
             store_only: false,
-        }
-    }).collect();
-    crate::fs::zip::create(&zip_entries)
+        });
+    }
+    Ok(crate::fs::zip::create(&zip_entries))
 }
 
 fn create_tar(entries: &[CreateEntry]) -> Vec<u8> {
     use crate::fs::tar::{TarWriteEntry, EntryKind as TarKind};
     let tar_entries: Vec<TarWriteEntry> = entries.iter().map(|e| {
         TarWriteEntry {
-            name: if e.kind == EntryKind::Directory && !e.name.ends_with('/') {
-                alloc::format!("{}/", e.name)
+            name: if e.kind == EntryKind::Directory && !e.name.as_bytes().ends_with(b"/") {
+                let mut n = e.name.clone();
+                n.extend_bytes(b"/");
+                n
             } else {
                 e.name.clone()
             },
@@ -544,7 +627,7 @@ fn create_tar(entries: &[CreateEntry]) -> Vec<u8> {
             uid: 0,
             gid: 0,
             mtime: 0,
-            link_target: String::new(),
+            link_target: PathBuf::new(),
         }
     }).collect();
     crate::fs::tar::create(&tar_entries)
@@ -552,9 +635,10 @@ fn create_tar(entries: &[CreateEntry]) -> Vec<u8> {
 
 fn create_cpio(entries: &[CreateEntry]) -> KernelResult<Vec<u8>> {
     use crate::fs::cpio::{CpioEntry, CpioEntryType};
-    let cpio_entries: Vec<CpioEntry> = entries.iter().map(|e| {
-        CpioEntry {
-            name: e.name.clone(),
+    let mut cpio_entries: Vec<CpioEntry> = Vec::with_capacity(entries.len());
+    for e in entries {
+        cpio_entries.push(CpioEntry {
+            name: name_for_string_writer(&e.name, false)?,
             data: e.data.clone(),
             entry_type: match e.kind {
                 EntryKind::File => CpioEntryType::File,
@@ -567,25 +651,25 @@ fn create_cpio(entries: &[CreateEntry]) -> KernelResult<Vec<u8>> {
             gid: 0,
             mtime: 0,
             link_target: String::new(),
-        }
-    }).collect();
+        });
+    }
     crate::fs::cpio::mkcpio(&cpio_entries)
 }
 
 fn create_ar(entries: &[CreateEntry]) -> KernelResult<Vec<u8>> {
     use crate::fs::ar::ArEntry;
-    let ar_entries: Vec<ArEntry> = entries.iter()
-        .filter(|e| e.kind == EntryKind::File) // AR only supports files.
-        .map(|e| {
-            ArEntry {
-                name: e.name.clone(),
-                data: e.data.clone(),
-                mtime: 0,
-                uid: 0,
-                gid: 0,
-                mode: 0o100644,
-            }
-        }).collect();
+    let mut ar_entries: Vec<ArEntry> = Vec::new();
+    for e in entries.iter().filter(|e| e.kind == EntryKind::File) {
+        // AR only supports files.
+        ar_entries.push(ArEntry {
+            name: name_for_string_writer(&e.name, false)?,
+            data: e.data.clone(),
+            mtime: 0,
+            uid: 0,
+            gid: 0,
+            mode: 0o100644,
+        });
+    }
     crate::fs::ar::mkar(&ar_entries)
 }
 
@@ -603,9 +687,11 @@ pub fn self_test() -> KernelResult<()> {
     test_detect_extension();
     test_zip_roundtrip();
     test_tar_roundtrip();
+    test_tar_byte_name_roundtrip();
+    test_extract_rejects_traversal();
     test_stats();
 
-    serial_println!("[archive] Self-test passed (8 tests).");
+    serial_println!("[archive] Self-test passed (10 tests).");
     Ok(())
 }
 
@@ -649,12 +735,12 @@ fn test_detect_extension() {
 fn test_zip_roundtrip() {
     let entries = alloc::vec![
         CreateEntry {
-            name: String::from("hello.txt"),
+            name: PathBuf::from("hello.txt"),
             data: b"Hello from archive!".to_vec(),
             kind: EntryKind::File,
         },
         CreateEntry {
-            name: String::from("sub/"),
+            name: PathBuf::from("sub/"),
             data: Vec::new(),
             kind: EntryKind::Directory,
         },
@@ -665,10 +751,25 @@ fn test_zip_roundtrip() {
 
     let listed = list(&archive).expect("list zip");
     assert!(!listed.is_empty(), "should list entries");
-    assert!(listed.iter().any(|e| e.name == "hello.txt"), "should find hello.txt");
+    assert!(
+        listed.iter().any(|e| e.name.as_path() == Path::new("hello.txt")),
+        "should find hello.txt",
+    );
 
     let content = extract_one(&archive, "hello.txt").expect("extract");
     assert_eq!(&content, b"Hello from archive!");
+
+    // The zip writer still models names as `String`, so a non-UTF-8 name must
+    // be refused outright rather than silently mangled.
+    let odd = alloc::vec![CreateEntry {
+        name: PathBuf::from(b"re\xffport.txt".as_slice()),
+        data: Vec::new(),
+        kind: EntryKind::File,
+    }];
+    assert!(
+        create(ArchiveFormat::Zip, &odd).is_err(),
+        "zip must reject a name it cannot represent, not corrupt it",
+    );
 
     serial_println!("[archive]   zip roundtrip: ok");
 }
@@ -676,7 +777,7 @@ fn test_zip_roundtrip() {
 fn test_tar_roundtrip() {
     let entries = alloc::vec![
         CreateEntry {
-            name: String::from("data.txt"),
+            name: PathBuf::from("data.txt"),
             data: b"TAR content".to_vec(),
             kind: EntryKind::File,
         },
@@ -684,12 +785,79 @@ fn test_tar_roundtrip() {
 
     let archive = create(ArchiveFormat::Tar, &entries).expect("create tar");
     let listed = list(&archive).expect("list tar");
-    assert!(listed.iter().any(|e| e.name.contains("data.txt")), "should find data.txt");
+    assert!(
+        listed.iter().any(|e| e.name.as_path() == Path::new("data.txt")),
+        "should find data.txt",
+    );
 
     let content = extract_one(&archive, "data.txt").expect("extract");
     assert_eq!(&content, b"TAR content");
 
     serial_println!("[archive]   tar roundtrip: ok");
+}
+
+/// A tar member whose name is not valid UTF-8 must survive create → list →
+/// extract byte-for-byte.  Before the byte-path conversion the name could not
+/// even be spelled, so such a member was unreachable.
+fn test_tar_byte_name_roundtrip() {
+    let odd = PathBuf::from(b"re\xffport.txt".as_slice());
+    let entries = alloc::vec![CreateEntry {
+        name: odd.clone(),
+        data: b"raw bytes".to_vec(),
+        kind: EntryKind::File,
+    }];
+
+    let archive = create(ArchiveFormat::Tar, &entries).expect("create tar");
+    let listed = list(&archive).expect("list tar");
+    assert!(
+        listed.iter().any(|e| e.name == odd),
+        "non-UTF-8 member name must round-trip intact",
+    );
+
+    let content = extract_one(&archive, &odd).expect("extract by byte name");
+    assert_eq!(&content, b"raw bytes");
+
+    serial_println!("[archive]   tar byte name roundtrip: ok");
+}
+
+/// "Zip Slip": a member named `../../escaped.txt` must not be able to write
+/// outside the destination directory.  The member is skipped and recorded as
+/// an error; the well-behaved member alongside it still extracts.
+fn test_extract_rejects_traversal() {
+    let entries = alloc::vec![
+        CreateEntry {
+            name: PathBuf::from("../../slipped.txt"),
+            data: b"pwned".to_vec(),
+            kind: EntryKind::File,
+        },
+        CreateEntry {
+            name: PathBuf::from("good.txt"),
+            data: b"fine".to_vec(),
+            kind: EntryKind::File,
+        },
+    ];
+
+    let archive = create(ArchiveFormat::Tar, &entries).expect("create tar");
+    let dest = Path::new("/tmp/archive_slip/dest");
+    let _ = Vfs::mkdir("/tmp/archive_slip");
+    let result = extract_all(&archive, dest).expect("extract");
+
+    assert_eq!(result.files_extracted, 1, "only the safe member may be written");
+    assert!(!result.errors.is_empty(), "the escaping member must be reported");
+    assert!(
+        Vfs::read_file("/tmp/archive_slip/dest/good.txt").is_ok(),
+        "the safe member should still extract",
+    );
+    assert!(
+        Vfs::read_file("/tmp/slipped.txt").is_err(),
+        "traversal must not write outside the destination",
+    );
+
+    let _ = Vfs::remove("/tmp/archive_slip/dest/good.txt");
+    let _ = Vfs::rmdir("/tmp/archive_slip/dest");
+    let _ = Vfs::rmdir("/tmp/archive_slip");
+
+    serial_println!("[archive]   traversal rejected: ok");
 }
 
 fn test_stats() {

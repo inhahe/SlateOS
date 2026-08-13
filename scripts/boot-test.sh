@@ -517,8 +517,18 @@ if [ -f "$ROOTFS_IMG" ]; then
     echo "=== Attaching Path-Z glibc rootfs: $ROOTFS_IMG (vdb) ==="
 fi
 
+# CPU model.  QEMU's default (`qemu64`) advertises no SMEP, SMAP or UMIP, so
+# without this the kernel's supervisor-mode protections are silently inert under
+# test: `smep_smap::init()` logs "not supported by CPU", never touches CR4, and
+# the STAC/CLAC paths are skipped.  We were shipping a SMEP we believed was
+# active and was not (see B-QEMU-DEFAULT-CPU-HAS-NO-SMEP-SMAP-UMIP in
+# known-issues.md).  Requesting them explicitly makes the boot test actually
+# exercise those paths — and makes a future `clac` in the ISR stubs testable
+# rather than dead code.  Override with QEMU_CPU=... to test other models.
+QEMU_CPU="${QEMU_CPU:-qemu64,+smep,+smap,+umip}"
+
 # Step 4: Boot QEMU
-echo "=== Booting QEMU (timeout: ${TIMEOUT}s) ==="
+echo "=== Booting QEMU (timeout: ${TIMEOUT}s, cpu: $QEMU_CPU) ==="
 rm -f "$SERIAL_FILE"
 
 OVMF_WIN="$(to_win_path "$OVMF")"
@@ -537,6 +547,7 @@ rm -f "$PIDFILE"
     -display none \
     -no-reboot \
     -m 3072M \
+    -cpu "$QEMU_CPU" \
     -machine q35 &
 QEMU_PID=$!
 # Ensure QEMU is reaped even if the harness is interrupted (Ctrl-C, SIGTERM)

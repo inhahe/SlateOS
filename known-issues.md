@@ -110,13 +110,14 @@ path that disables it.
 macros that need the `clac`); `kernel/src/syscall/entry.rs` (FMASK — done).
 
 **Related.** Second instance of the "ring-3 RFLAGS inherited at an IDT gate" bug
-class, after `B-NO-CLD-ON-INTERRUPT-ENTRY`. Blocked in practice by
-`B-QEMU-DEFAULT-CPU-HAS-NO-SMEP-SMAP-UMIP` — the fix cannot be tested until the
-test CPU advertises SMAP.
+class, after `B-NO-CLD-ON-INTERRUPT-ENTRY`. No longer blocked on test coverage:
+`B-QEMU-DEFAULT-CPU-HAS-NO-SMEP-SMAP-UMIP` is fixed, so the boot CPU now
+advertises SMAP and a `clac` in the stubs would be live code. The remaining
+blocker is the alternatives-patching framework (option 1 above).
 
 ---
 
-### B-QEMU-DEFAULT-CPU-HAS-NO-SMEP-SMAP-UMIP. The boot test never exercises the supervisor-mode protections — 2026-08-12 — OPEN (testing gap)
+### B-QEMU-DEFAULT-CPU-HAS-NO-SMEP-SMAP-UMIP. The boot test never exercises the supervisor-mode protections — 2026-08-12 — ✅ FIXED 2026-08-13 (`scripts/boot-test.sh`)
 
 **What.** The boot log shows all three protections unavailable, so the code paths
 that set CR4.SMEP/SMAP/UMIP never execute under test:
@@ -135,15 +136,31 @@ including on the one machine that runs our whole test suite. **SMEP in particula
 is assumed to be protecting us and is in fact inactive**, on hardware and in CI
 alike, whenever CPUID does not advertise it.
 
-**Fix.** Add the features to the QEMU CPU model in `scripts/boot-test.sh`, e.g.
-`-cpu qemu64,+smep,+smap,+umip` (or `-cpu Haswell`). Then the enable path, the
-CR4 readback, and STAC/CLAC all execute for real. Do this *before* attempting
-`B-AC-INHERITED-AT-KERNEL-ENTRY`, since otherwise the fix for that bug cannot be
-tested either — a `clac` in the ISR stubs would be dead code under the current
-CPU model.
+**Fixed by** adding `-cpu "$QEMU_CPU"` to the QEMU invocation in
+`scripts/boot-test.sh`, defaulting to `qemu64,+smep,+smap,+umip` and overridable
+via the `QEMU_CPU` environment variable. The kernel boots to `BOOT_OK` (262 s)
+with SMEP and UMIP genuinely enforced for the first time:
 
-**Where.** `scripts/boot-test.sh` (QEMU invocation); `kernel/src/smep_smap.rs`
-(the untested paths).
+```
+[smep_smap] Enabling SMEP (kernel exec of user pages blocked)
+[smep_smap] SMAP supported (enablement deferred — IDT entry stubs do not clear
+            EFLAGS.AC (B-AC-INHERITED-AT-KERNEL-ENTRY))
+[smep_smap] Enabling UMIP (user SGDT/SIDT/SLDT/SMSW/STR blocked)
+[smep_smap] CR4 updated: 0x20 → 0x100820
+...
+[smep_smap]   Active: SMEP=true, SMAP=false, UMIP=true    CR4=0x100e20
+[smep_smap]   SMEP enforcement: VERIFIED (CR4 bit set)
+[smep_smap]   UMIP enforcement: VERIFIED (CR4 bit set)
+[smep_smap]   STAC/CLAC pair: OK (no fault)
+```
+
+Two results worth noting: the kernel boots cleanly with SMEP active, i.e. no
+kernel code path executes from a user page; and `stac()`/`clac()` executed for
+the first time ever (previously skipped as they would #UD), so that
+infrastructure is now covered rather than merely written.
+
+**Where.** `scripts/boot-test.sh` (`QEMU_CPU`); `kernel/src/smep_smap.rs`
+(the formerly-untested paths).
 
 ---
 

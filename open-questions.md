@@ -463,6 +463,107 @@ catches `[kasan] CRITICAL:` and documents the raised `SOAK_TIMEOUT`),
 `design-decisions.md` §107/§119, and `known-issues.md` → `B-KNULLJUMP-SIGNAL`.
 
 
+## Q44 — libc reports "all Linux capabilities held" to every process because nothing maps our `(ResourceType, Rights)` handles onto `CAP_*` bits. Which mapping do you want? — Status: OPEN
+
+**Raised by Claude** (2026-08-12), from the survey behind
+`known-issues.md` → `TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S`.
+
+**The situation.** `posix/src/sys_capability.rs` keeps Linux's three capability
+words in libc's own memory and initialises them from `CAPS_DEFAULT` — *every*
+bit set. Nothing ever asks the kernel what the process actually holds, so
+`capget()` reports the full set to a process that was spawned with
+`capabilities: &[]`, and every libc-side gate passes. It is safe today only by
+accident: the kernel re-checks every privileged operation itself, so libc's
+optimistic answer can never *grant* anything. The failure is silent, not loud —
+a port that trusts `capget()` to decide what to attempt, or to drop privileges,
+gets a confidently wrong answer with no error anywhere.
+
+**Why this needs you rather than me.** The plumbing is easy; the *mapping* is a
+policy decision. The two models are not the same shape and do not have an
+obviously-correct correspondence:
+
+- **Kernel:** 25 `ResourceType` variants (`Channel`, `Pipe`, `SharedMemory`,
+  `EventFd`, `CompletionPort`, `Process`, `Thread`, `PortIo`, `DeviceIrq`,
+  `File`, `Socket`, `Timer`, `IoScheduler`, `Service`, `Namespace`,
+  `StreamSocket`, `MemFd`, `Epoll`, `SignalFd`, `Timerfd`, `Inotify`,
+  `AlsaPcm`, `Drm`, `NetRaw`, `NetSocket`) × 12 `Rights` bits (`READ`, `WRITE`,
+  `EXECUTE`, `CREATE`, `DELETE`, `METADATA`, `TRANSFER`, `DUPLICATE`, `WAIT`,
+  `SIGNAL`, `IO_REALTIME`, `DEBUG`) — a *per-object* model with no ambient
+  authority, which is the whole point of the design.
+- **Linux:** 41 numbered, *ambient*, process-wide bits. Our libc currently
+  gates on 22 distinct ones across **63 production sites**, all inside
+  `posix/` (0 in `userspace/`, `services/`, `apps/`): `CAP_SYS_ADMIN` (20),
+  `CAP_SYS_NICE` (6), `CAP_SYS_PTRACE` (5), `CAP_SYS_TIME`/`CAP_SYS_MODULE`/
+  `CAP_SETGID`/`CAP_KILL`/`CAP_CHOWN` (3 each), then a long tail of 1–2.
+
+Deciding which kernel rights *imply* `CAP_SYS_ADMIN` is deciding what a Linux
+port is permitted to conclude about our capability model — that is a design
+statement about the POSIX layer's honesty, not an implementation detail.
+
+**A blocker the note did not know about.** The existing "proper fix" pointed at
+`SYS_CAP_QUERY` (400) as the source of truth. It cannot serve: the handler
+(`kernel/src/syscall/handlers.rs`, `sys_cap_query`) returns only a *count* of
+the caller's capabilities, and its own doc comment says "a future extension
+will support filling a user-space buffer with detailed capability entries."
+Its sole consumer today is `userspace/strace`'s syscall name table. So **every**
+option below needs an enumerating query syscall built first; that part is not
+in dispute and I can do it under any answer.
+
+**Options.**
+- **A — conservative projection.** Derive each `CAP_*` from a specific
+  `(ResourceType, Rights)` predicate, and report *not held* whenever no rule
+  matches. E.g. `CAP_SYS_RAWIO` ⇐ any `PortIo` handle with `READ|WRITE`;
+  `CAP_KILL` ⇐ a `Process` handle with `SIGNAL`; `CAP_SYS_PTRACE` ⇐ `Process`
+  with `DEBUG`; `CAP_SYS_NICE` ⇐ `Thread` with `IO_REALTIME`.
+  *Pro:* `capget()` becomes truthful, the gates start meaning something, and
+  the mapping is auditable rule by rule. *Con:* `CAP_SYS_ADMIN` — 20 of the 63
+  sites — has no natural preimage; it is Linux's junk drawer and would have to
+  be either a hand-maintained union or permanently false. And every fixture
+  spawned with `capabilities: &[]` starts failing gates that pass today (see
+  blast radius).
+- **B — capability-per-CAP.** Add `ResourceType::PosixCapability` and grant
+  Linux bits explicitly at spawn, leaving the native model untouched.
+  *Pro:* exact, no lossy projection, and the two models stay cleanly separated.
+  *Con:* imports Linux's ambient-authority model into a design whose stated
+  first principle is that there is none — the thing `design.txt` deliberately
+  rejected.
+- **C — keep libc optimistic, but stop pretending.** Leave the words as they
+  are and make the dishonesty explicit: document `capget()` as "reports the
+  ceiling, not the grant", and treat libc-side gates as advisory only, with the
+  kernel as the sole authority. *Pro:* zero risk, matches how it already
+  behaves, and no fixture breaks. *Con:* the silent-wrong-answer trap for
+  future ports stays open, which is exactly why the entry was logged.
+- **D — make `capget()` fail** (`ENOSYS`/`EOPNOTSUPP`) rather than answer
+  wrongly. *Pro:* the most honest option; no caller can be silently misled.
+  *Con:* Linux software calls `capget()` informationally and often does not
+  expect failure, so this trades a silent wrong answer for loud breakage in
+  ports — probably the worst outcome for a compatibility layer.
+
+**Claude's recommendation.** **A**, with `CAP_SYS_ADMIN` as an explicit
+hand-maintained union rather than a derived rule, and staged: build the
+enumerating query syscall, seed the words from it, but keep the libc gates
+advisory until the fixtures are given real capabilities. I lean against **B**
+because it contradicts the no-ambient-authority principle for the benefit of
+compatibility shims only, and against **D** because loud breakage in ports is
+worse than the current documented-safe optimism. **C** is the honest do-nothing
+and is a perfectly reasonable answer if you would rather this wait.
+
+**Blast radius you should know about before answering A or B.** Making any gate
+truthful breaks fixtures that currently rely on the permissive behaviour.
+`services/ctest-jobctl`'s doc comment already says so out loud — "our libc's own
+`CAP_KILL` gate reads the process capability words, which start out with every
+capability held" — which is why it needs no capabilities to make a real
+cross-process signal send. `self_test_cctty` and `self_test_cpgroup` spawn with
+`capabilities: &[]` and would need real grants too. That is a boot-test-visible
+change, so it should land with QEMU free.
+
+**Where it bites:** `posix/src/sys_capability.rs` (`CAPS_DEFAULT` ~line 251),
+the 63 gate sites led by `posix/src/process.rs` (13) and `posix/src/unistd.rs`
+(10), `kernel/src/cap/mod.rs` + `kernel/src/cap/rights.rs` (the model being
+projected), `kernel/src/syscall/handlers.rs` (`sys_cap_query`), and
+`known-issues.md` → `TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S`.
+
+
 ---
 
 Recently resolved (see `design-decisions.md` for the full rationale):

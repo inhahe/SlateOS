@@ -55046,7 +55046,17 @@ error anywhere.
 
 **Where.** `posix/src/sys_capability.rs` (`CAPS_DEFAULT`, ~line 251, and the
 two `store` modules below it). Consumers: `capget`/`capset` in the same file,
-and every `has_cap(...)` gate in the crate.
+and every `has_capability(...)` gate in the crate. **Surveyed 2026-08-12:**
+**63 production gate sites** spanning **22 distinct `CAP_*` bits**, all of them
+inside `posix/` (0 in `userspace/`, `services/`, `apps/`). Led by
+`posix/src/process.rs` (13) and `posix/src/unistd.rs` (10); by bit, by
+`CAP_SYS_ADMIN` (20), `CAP_SYS_NICE` (6) and `CAP_SYS_PTRACE` (5). The
+`CAP_KILL` gate in `posix/src/signal.rs` named below is one example of 63, not
+the extent of it. (Note when re-counting: a bare `grep -c has_capability(`
+returns ~251, but the great majority are `assert!`s in `#[cfg(test)]` modules —
+filter those out or the surface looks 4× larger than it is. The symbol is
+`has_capability`, not `has_cap`; grepping the latter returns zero and makes the
+gap look like it is confined to `CAP_KILL`.)
 
 **Reproduce.** Spawn a ring-3 fixture with `capabilities: &[]` (as
 `self_test_cctty` and `self_test_cpgroup` both do) and call `capget()` on
@@ -55055,17 +55065,37 @@ records the consequence out loud — "our libc's own `CAP_KILL` gate reads the
 process capability words, which start out with every capability held" — which
 is why that fixture needs no capabilities to make a real cross-process send.
 
-**Proper fix.** Seed the words at libc startup from the kernel via
-`SYS_CAP_QUERY` (400), and push `capset` changes back to the kernel. The work
-is not the plumbing but the *mapping*: the kernel's model is
-`(ResourceType, Rights)` capability handles, not Linux's 41 numbered bits, so
-someone has to define which kernel rights imply which `CAP_*`. That mapping is
-a design decision (it decides what a Linux port is allowed to conclude about
-our capability model), so it belongs in `design-decisions.md` when it is made
-— see `open-questions.md` if it needs the operator. Until then the honest
-alternative would be for `capget` to fail rather than answer confidently, but
-that would break Linux ports that call it informationally, so the optimistic
-answer stays.
+**Proper fix.** Seed the words at libc startup from the kernel, and push
+`capset` changes back to the kernel. The work is not the plumbing but the
+*mapping*: the kernel's model is 25 `ResourceType` variants × 12 `Rights` bits
+of **per-object** authority, not Linux's 41 **ambient** numbered bits, so
+someone has to define which kernel rights imply which `CAP_*` — and
+`CAP_SYS_ADMIN`, which is 20 of the 63 gate sites, has no natural preimage at
+all. That mapping decides what a Linux port is allowed to conclude about our
+capability model, so it is an operator decision: **asked as `open-questions.md`
+Q44** (2026-08-12), with four options and a recommendation. It moves to
+`design-decisions.md` once answered.
+
+**CORRECTED 2026-08-12.** An earlier version of this section named
+`SYS_CAP_QUERY` (400) as the syscall to seed the words from. **It cannot serve
+that role.** Its handler (`kernel/src/syscall/handlers.rs`, `sys_cap_query`)
+returns only a *count* of the caller's capabilities — it takes no buffer and
+enumerates nothing; the doc comment on it says so explicitly ("A future
+extension will support filling a user-space buffer with detailed capability
+entries"), and its only consumer today is `userspace/strace`'s syscall-name
+table. So an **enumerating** query syscall has to be built first, under any
+answer to Q44. Do not start the libc side expecting 400 to hand you the set.
+
+Until Q44 is answered the optimistic answer stays. The honest alternative —
+`capget` failing rather than answering confidently — would break Linux ports
+that call it informationally, which is worse for a compatibility layer than a
+documented-safe wrong answer.
+
+**Do not make a gate truthful without freeing QEMU first.** Fixtures depend on
+the permissive behaviour: `services/ctest-jobctl` (documented in its own doc
+comment), and `self_test_cctty` / `self_test_cpgroup`, which spawn with
+`capabilities: &[]`. All three need real capability grants in the same change,
+and that is boot-test-visible.
 
 ---
 

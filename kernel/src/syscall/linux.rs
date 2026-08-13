@@ -1940,25 +1940,13 @@ fn validate_clone3_args(cl_args_ptr: u64, size: u64) -> Result<ClonedArgs, i32> 
     })
 }
 
-/// Set of RFLAGS bits a user `rt_sigreturn` is permitted to restore.
-///
-/// A signal handler can scribble arbitrary bytes into `uc.uc_mcontext`
-/// before calling `rt_sigreturn`, so we must treat the restored RFLAGS
-/// as fully attacker-controlled.  We keep only the arithmetic/status
-/// flags plus the benign user-settable bits, then force IF=1 and the
-/// reserved bit-1, and drop everything dangerous: IF-clear (would
-/// disable interrupts in ring 3 — impossible anyway, but defensive),
-/// IOPL (would grant I/O-port access), NT (nested-task), VM, VIF/VIP,
-/// and the always-zero reserved bits.
-///
-/// Bits kept: CF(0) PF(2) AF(4) ZF(6) SF(7) TF(8) DF(10) OF(11) AC(18)
-/// ID(21).  TF is permitted so a debugger-driven single-step survives a
-/// signal round-trip, matching Linux.
-const SIGRETURN_RFLAGS_USER_MASK: u64 = 0x0024_0DD5;
-
 /// RFLAGS bits the kernel always forces on after a `rt_sigreturn`:
 /// IF (interrupts enabled) + the mandatory reserved bit 1.
-const SIGRETURN_RFLAGS_FORCED: u64 = 0x0000_0202;
+///
+/// Re-exported from [`crate::syscall::entry`], which owns the shared
+/// sanitisation policy for *every* frame-rewriting return path (the native
+/// `SYS_SIGNAL_RETURN` and `SYS_EXCEPTION_RETURN` have the same problem).
+const SIGRETURN_RFLAGS_FORCED: u64 = crate::syscall::entry::USER_RFLAGS_FORCED;
 
 /// Linux `rt_sigreturn(2)` translation — restores from a **Linux-shape**
 /// `ucontext` built by [`build_linux_rt_frame`].
@@ -1979,7 +1967,9 @@ const SIGRETURN_RFLAGS_FORCED: u64 = 0x0000_0202;
 /// ```
 ///
 /// We read the `ucontext`, restore every GPR from `uc_mcontext`, restore
-/// `RIP`/`RSP`, sanitise `RFLAGS` (see [`SIGRETURN_RFLAGS_USER_MASK`]),
+/// `RIP`/`RSP` (rejecting anything outside the user half — see
+/// [`crate::syscall::entry::user_return_state_ok`]), sanitise `RFLAGS` (see
+/// [`crate::syscall::entry::sanitize_user_rflags`]),
 /// restore the blocked signal mask from `uc_sigmask`, and return
 /// `uc_mcontext.rax` as the syscall result (which the SYSRET path loads
 /// into the resumed `RAX`).
@@ -2017,6 +2007,13 @@ fn linux_rt_sigreturn(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
     };
     let mc = &uc.uc_mcontext;
 
+    // A handler can put anything in the saved RIP/RSP.  A non-canonical RIP
+    // reaching `sysretq` faults in ring 0 on the user stack (CVE-2012-0217),
+    // so reject a non-user pair outright rather than installing it.
+    if !crate::syscall::entry::user_return_state_ok(mc.rip, mc.rsp) {
+        return -i64::from(errno::EFAULT);
+    }
+
     // Restore the interrupted GPRs from uc_mcontext.
     frame.arg0 = mc.rdi;
     frame.arg1 = mc.rsi;
@@ -2032,8 +2029,7 @@ fn linux_rt_sigreturn(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
     frame.r15 = mc.r15;
     frame.user_rip = mc.rip;
     frame.user_rsp = mc.rsp;
-    frame.user_rflags =
-        (mc.eflags & SIGRETURN_RFLAGS_USER_MASK) | SIGRETURN_RFLAGS_FORCED;
+    frame.user_rflags = crate::syscall::entry::sanitize_user_rflags(mc.eflags);
 
     // Restore the pre-handler blocked mask.  set_blocked strips
     // SIGKILL/SIGSTOP, so a crafted uc_sigmask cannot wedge those.
@@ -7594,6 +7590,21 @@ fn sys_rt_sigaction(args: &SyscallArgs) -> SyscallResult {
     // catch userspace bugs early.
     if (new_act.sa_flags & !sa_flags::MASK) != 0 {
         return linux_err(errno::EINVAL);
+    }
+
+    // A catchable handler is installed directly as the SYSRET RIP at delivery
+    // (`emit_linux_rt_frame` → `frame.user_rip = entry.rip`), and `sysretq`
+    // loads RIP while still at CPL 0 — a non-canonical value faults in ring 0
+    // *after* the stub has switched to the user stack and run `swapgs`
+    // (CVE-2012-0217).  SIG_DFL / SIG_IGN are sentinels that are never
+    // executed.  Linux only notices a bad handler lazily (`force_sigsegv` when
+    // the frame setup fails); rejecting the address *shape* here is stricter
+    // and closes the hazard before it can ever reach the return path.
+    if new_act.sa_handler != SIG_IGN
+        && new_act.sa_handler != SIG_DFL
+        && new_act.sa_handler >= crate::mm::page_table::USER_SPACE_END
+    {
+        return linux_err(errno::EFAULT);
     }
 
     // Persist.

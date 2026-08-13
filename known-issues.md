@@ -43,6 +43,93 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
+### B-FRAME-REWRITING-RETURNS-INSTALLED-UNSANITISED-USER-STATE. Every syscall that rewrites the return frame took RIP/RSP/RFLAGS from userspace unchecked — 2026-08-13 — ✅ FIXED 2026-08-13 (`kernel/src/syscall/entry.rs`, `kernel/src/syscall/handlers.rs`, `kernel/src/syscall/linux.rs`)
+
+**Context.** Three syscalls do not return to their caller — they overwrite the
+saved return frame so the SYSRET path resumes somewhere else entirely:
+
+| Syscall | File | Source of the new state |
+|---|---|---|
+| `sys_exception_return_with_frame` | `handlers.rs` | user `ExceptionContext` |
+| `sys_signal_return_with_frame` | `handlers.rs` | user `SignalContext` |
+| `linux_rt_sigreturn` (Linux ABI) | `linux.rs` | user `ucontext.uc_mcontext` |
+
+All three read RIP, RSP and RFLAGS out of a userspace structure and stored them
+straight into `frame.user_rip` / `frame.user_rsp` / `frame.user_rflags`. Nothing
+between the copy-in and `sysretq` looked at the values. This was found while
+converting the two `handlers.rs` entries away from raw user pointers for
+`D-SYSCALL-HANDLERS-HAND-RAW-USER-SLICES-TO-KERNEL-CODE` (below) — the pointer
+conversion is unrelated, but writing an honest justification comment for it
+required checking what *did* sanitise the frame, and the answer was "nothing".
+
+**Bug 1 — non-canonical RIP faults at CPL 0 (CVE-2012-0217 shape).** `sysretq`
+loads RIP from RCX *while still at ring 0* and only then drops privilege. If
+RCX is non-canonical, the #GP is raised in ring 0, not ring 3. This kernel makes
+that strictly worse than the classic bug: `syscall_entry_stub` in `entry.rs`
+does `mov rsp, gs:[8]` and `swapgs` **before** `sysretq`, so at the moment of
+the fault RSP is attacker-influenced and the GS base is the user's. The #GP
+handler then runs at kernel privilege on a stack and per-CPU base the attacker
+chose. A userspace thread could trigger this with a one-line `ExceptionContext`
+whose `rip` was `0xFFFF_8000_0000_0000`.
+
+**Bug 2 — unsanitised RFLAGS.** The restored RFLAGS went to ring 3 verbatim, so
+a caller could set:
+
+- **IOPL = 3** — direct `in`/`out` to every I/O port from an unprivileged
+  process. That is a full privilege escalation on its own: PCI config space,
+  the PS/2 controller, the PIT, the CMOS/RTC, ATA PIO.
+- **NT** (nested task) — corrupts a subsequent `iret` into a task switch.
+- **VM** (virtual-8086) — puts the CPU in a mode the rest of the kernel has no
+  handling for.
+- **VIF/VIP** — meaningless without VME but sets up confusing state.
+- **IF cleared** — returns to ring 3 with interrupts disabled, which wedges that
+  CPU until something re-enables them (nothing does).
+
+`linux.rs` was the one path that *had* a mask (`SIGRETURN_RFLAGS_USER_MASK`),
+but it was a local constant covering only that function, and it did not check
+RIP/RSP at all.
+
+**Bug 3 — the registration side accepted kernel addresses.** Even with the
+return paths fixed, `sys_signal_register`, `sys_set_exception_handler` and
+Linux `sys_rt_sigaction` would accept a *kernel* address as the handler /
+trampoline. Delivery builds a frame targeting that address, so the check has to
+exist at registration too or the same kernel RIP arrives by a different route.
+
+**Fix.** One shared policy in `kernel/src/syscall/entry.rs`, applied at every
+path rather than reimplemented per-caller:
+
+```rust
+pub const USER_RFLAGS_MASK: u64   = 0x0024_0DD5; // CF PF AF ZF SF TF DF OF AC ID
+pub const USER_RFLAGS_FORCED: u64 = 0x0000_0202; // IF + reserved bit 1
+
+pub const fn sanitize_user_rflags(raw: u64) -> u64 {
+    (raw & USER_RFLAGS_MASK) | USER_RFLAGS_FORCED
+}
+
+pub fn user_return_state_ok(rip: u64, rsp: u64) -> bool {
+    rip < crate::mm::page_table::USER_SPACE_END && rsp < crate::mm::page_table::USER_SPACE_END
+}
+```
+
+`user_return_state_ok` is deliberately stronger than a canonicality test:
+`rip < 0x0000_8000_0000_0000` rejects the whole upper half, so a canonical
+*kernel* address is refused as well as a non-canonical one. All three return
+paths now reject a failing pair with `EFAULT`/`InvalidAddress` **before**
+touching the frame, and pass RFLAGS through `sanitize_user_rflags`.
+`linux.rs`'s `SIGRETURN_RFLAGS_USER_MASK` was deleted and its
+`SIGRETURN_RFLAGS_FORCED` re-pointed at `entry::USER_RFLAGS_FORCED` so the
+kernel-built signal frame and the user-supplied one cannot drift apart. The
+three registration syscalls now reject a handler `>= USER_SPACE_END` up front
+(0 still means unregister / `SIG_DFL` / `SIG_IGN`).
+
+**Why reject rather than Linux's lazy approach.** Linux lets a bad
+`rt_sigaction` handler through and only kills the process when delivery
+faults (`force_sigsegv`). Rejecting at registration gives the caller a
+diagnosable `EFAULT` at the point of the mistake instead of an unexplained
+death later, and it means the delivery path has one fewer failure mode to
+unwind. Nothing in-tree registers a kernel address, so there is no
+compatibility cost.
+
 ### B-IO-RING-SUBMISSION-PATH-WAS-UNGATED-AND-UNVALIDATED. Four separate ring-3-reachable holes in `io_ring` — 2026-08-13 — ✅ FIXED 2026-08-13 (`kernel/src/ipc/io_ring.rs`)
 
 **Context.** `SYS_IO_RING_SETUP` (260) and `SYS_IO_RING_ENTER` (261) are
@@ -404,11 +491,27 @@ validation that is a double-fetch: the counts and the records were read from a
 live user mapping the submitting process can rewrite between reads. Now
 `read_user_vec` with a 64 KiB cap.
 
-**Remaining: `kernel/src/ipc/futex.rs` — see
-`D-FUTEX-ATOMICS-OPERATE-DIRECTLY-ON-USER-WORDS` below.** It was not on the
-original file list because it uses none of the grep's patterns: it casts the
-user address to `*const AtomicU32` instead. Fourteen sites. It is the one place
-where the bounce is *not* the right answer, so it needs its own primitive.
+`kernel/src/ipc/futex.rs` was **not** on the original file list because it uses
+none of the grep's patterns: it casts the user address to `*const AtomicU32`
+instead. Fourteen sites, and the one place where the bounce is *not* the right
+answer, so it needed its own primitive — see
+`D-FUTEX-ATOMICS-OPERATE-DIRECTLY-ON-USER-WORDS` below (now fixed).
+
+A final sweep after that — grepping the *whole* kernel for
+`from_raw_parts`/`as *const`/`as *mut`/`unsafe { &*(` and triaging each hit as
+HHDM, kernel-local or user address — turned up three more genuinely-unconverted
+user accesses, all in `handlers.rs`:
+
+- **`sys_cp_wait` / `sys_cp_try_wait`** delivered completion events by storing
+  them one 24-byte record at a time through `args.arg1 as *mut CpEventRaw`,
+  after a `validate_user_write` that ran *before* `completion::wait` blocked.
+  Now packed into a kernel `Vec` and delivered with a single
+  `write_user_items`, which makes delivery all-or-nothing as well.
+- **`sys_exception_return_with_frame` / `sys_signal_return_with_frame`** read
+  the saved register context field-by-field through `&*(frame.arg0 as *const
+  ExceptionContext)` — a double-fetch as well as an unbracketed access. Now
+  `read_user_value`. Reading these two closely is also what surfaced
+  `B-FRAME-REWRITING-RETURNS-INSTALLED-UNSANITISED-USER-STATE` (above).
 
 Then flip `USER_ACCESSES_ANNOTATED` and boot-test under `+smep,+smap,+umip`.
 
@@ -475,7 +578,7 @@ gate rather than being enabled optimistically.
 
 ---
 
-### D-FUTEX-ATOMICS-OPERATE-DIRECTLY-ON-USER-WORDS — 2026-08-13 — TECH DEBT (blocks enabling SMAP) — IN PROGRESS (`kernel/src/ipc/futex.rs`)
+### D-FUTEX-ATOMICS-OPERATE-DIRECTLY-ON-USER-WORDS — 2026-08-13 — TECH DEBT (blocked enabling SMAP) — ✅ FIXED 2026-08-13 (`kernel/src/ipc/futex.rs`, `kernel/src/mm/user.rs`)
 
 **What.** Fourteen sites in `futex.rs` do
 
@@ -524,6 +627,38 @@ per iteration. That is a correctness improvement independent of SMAP for the
 same reason as the rest of the entry above: the reference is a raw user pointer
 held across a sleep, so a peer thread's `munmap` turns it into a
 use-after-free.
+
+**Fixed as designed.** `mm::user` gained `user_atomic_load_u32`,
+`user_atomic_store_u32`, `user_atomic_cas_u32` and
+`user_atomic_rmw_u32(op, operand)` (`UserAtomicOp::{Set,Add,Or,AndN,Xor}`), each
+validating the address and bracketing exactly one atomic instruction. All
+fourteen sites converted; `futex.rs` now contains no raw-pointer cast at all
+(`grep 'as \*const\|as \*mut\|from_raw_parts'` → no matches).
+
+Three sites needed more than a mechanical swap, because making a previously
+infallible store fallible introduces error paths that must not corrupt the
+kernel-side bookkeeping:
+
+- **`futex_unlock_pi`** — the ownership-transfer store now returns a
+  `KernelResult`, but the handoff (`register_pi_owner` + `sched::wake`)
+  completes *regardless*. The selected waiter has already been removed from the
+  wait queue under the table lock, so bailing out on the store would park it
+  forever on a lock nobody owns. `lock_pi_inner` consults the kernel ownership
+  record, not the user word, so the handoff stays coherent; the error is
+  reported to the unlocker, whose mapping is the one that vanished.
+- **`futex_cmp_requeue_pi`** — the PI word is now read *before* each waiter is
+  dequeued, so a faulting read cannot strand a waiter that has already left the
+  condvar queue, and the first fault is reported only after every waiter has
+  landed somewhere.
+- **`try_acquire_ownerless`** — split into `ownerless_claim_value` (pure
+  decision), `acquire_ownerless_with` (the generic CAS retry loop) and the
+  user-address wrapper. Necessary because `test_owner_died_relock` drives it
+  with a *kernel* `AtomicU32`, which the new accessors correctly reject; the
+  self-test now drives the real retry loop through closures instead of testing
+  a parallel reimplementation.
+
+Boot test green, all futex self-tests pass (including requeue-PI, PI
+owner-death handoff and OWNER_DIED relock).
 
 ---
 

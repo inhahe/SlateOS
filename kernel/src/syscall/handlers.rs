@@ -3060,6 +3060,7 @@ pub fn sys_cp_unregister(args: &SyscallArgs) -> SyscallResult {
 /// Matches the layout expected by userspace.  Each event is 24 bytes:
 /// `source_type` (u64) + `source_handle` (u64) + `user_data` (u64).
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct CpEventRaw {
     source_type: u64,
     source_handle: u64,
@@ -3085,25 +3086,40 @@ fn encode_event(event: &completion::CompletionEvent) -> CpEventRaw {
     }
 }
 
-/// Write events to the userspace buffer and return the count.
+/// Deliver events to the userspace buffer and return the count written.
 ///
-/// # Safety
+/// The records are packed into kernel memory and copied out in a single
+/// `write_user_items`.  Delivering them one store at a time through the user
+/// address would be wrong twice over: `completion::wait` *blocks*, so the
+/// `validate_user_write` its caller ran beforehand proves nothing by the time
+/// we get here (a peer thread can `munmap` the range while we sleep), and each
+/// store would be a supervisor access to a user page outside any STAC window
+/// once SMAP is on.  The single copy also makes delivery all-or-nothing rather
+/// than leaving a half-written array behind on a fault.
 ///
-/// `buf_ptr` must be valid for `buf_cap` `CpEventRaw` entries.
-unsafe fn write_events_to_buffer(
+/// # Errors
+///
+/// - [`KernelError::OutOfMemory`] if the scratch buffer cannot be allocated.
+/// - Whatever `write_user_items` returns if the destination is no longer
+///   writable.
+fn deliver_events(
     events: &[completion::CompletionEvent],
-    buf_ptr: *mut CpEventRaw,
+    user_dst: u64,
     buf_cap: usize,
-) -> usize {
+) -> crate::error::KernelResult<usize> {
     let count = events.len().min(buf_cap);
-    for (i, event) in events.iter().take(count).enumerate() {
-        let raw = encode_event(event);
-        // SAFETY: buf_ptr is valid for buf_cap entries, i < count <= buf_cap.
-        unsafe {
-            buf_ptr.add(i).write(raw);
-        }
+    if count == 0 {
+        return Ok(0);
     }
-    count
+    // Bounded by `events.len()`, not by the caller-supplied `buf_cap`, so a
+    // huge capacity cannot be turned into a huge kernel allocation.
+    let mut packed = alloc::vec::Vec::<CpEventRaw>::new();
+    packed
+        .try_reserve_exact(count)
+        .map_err(|_| KernelError::OutOfMemory)?;
+    packed.extend(events.iter().take(count).map(encode_event));
+    crate::mm::user::write_user_items(user_dst, &packed)?;
+    Ok(count)
 }
 
 /// `SYS_CP_WAIT` — blocking wait for events.
@@ -3113,10 +3129,9 @@ unsafe fn write_events_to_buffer(
 /// `arg2`: buffer capacity (max events).
 pub fn sys_cp_wait(args: &SyscallArgs) -> SyscallResult {
     let cp = CpHandle::from_raw(args.arg0);
-    let buf_ptr = args.arg1 as *mut CpEventRaw;
     let buf_cap = args.arg2 as usize;
 
-    if buf_ptr.is_null() && buf_cap > 0 {
+    if args.arg1 == 0 && buf_cap > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
@@ -3136,11 +3151,15 @@ pub fn sys_cp_wait(args: &SyscallArgs) -> SyscallResult {
 
     match completion::wait(cp) {
         Ok(events) => {
-            // SAFETY: Validated above — buf_ptr is in user space, mapped, and writable.
-            let count = unsafe { write_events_to_buffer(&events, buf_ptr, buf_cap) };
-            #[allow(clippy::cast_possible_wrap)]
-            let n = count as i64;
-            SyscallResult::ok(n)
+            // The events have already been dequeued, so a faulting copy costs
+            // them — same as Linux returning EFAULT from a completed read.
+            // Nothing better is available: the destination the caller named is
+            // gone, and there is nowhere to put them back.
+            match deliver_events(&events, args.arg1, buf_cap) {
+                #[allow(clippy::cast_possible_wrap)]
+                Ok(count) => SyscallResult::ok(count as i64),
+                Err(e) => SyscallResult::err(e),
+            }
         }
         Err(e) => SyscallResult::err(e),
     }
@@ -3151,10 +3170,9 @@ pub fn sys_cp_wait(args: &SyscallArgs) -> SyscallResult {
 /// Same arguments as `SYS_CP_WAIT`.
 pub fn sys_cp_try_wait(args: &SyscallArgs) -> SyscallResult {
     let cp = CpHandle::from_raw(args.arg0);
-    let buf_ptr = args.arg1 as *mut CpEventRaw;
     let buf_cap = args.arg2 as usize;
 
-    if buf_ptr.is_null() && buf_cap > 0 {
+    if args.arg1 == 0 && buf_cap > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
@@ -3172,13 +3190,11 @@ pub fn sys_cp_try_wait(args: &SyscallArgs) -> SyscallResult {
     }
 
     match completion::try_wait(cp) {
-        Ok(events) => {
-            // SAFETY: Validated above — buf_ptr is in user space, mapped, and writable.
-            let count = unsafe { write_events_to_buffer(&events, buf_ptr, buf_cap) };
+        Ok(events) => match deliver_events(&events, args.arg1, buf_cap) {
             #[allow(clippy::cast_possible_wrap)]
-            let n = count as i64;
-            SyscallResult::ok(n)
-        }
+            Ok(count) => SyscallResult::ok(count as i64),
+            Err(e) => SyscallResult::err(e),
+        },
         Err(e) => SyscallResult::err(e),
     }
 }
@@ -5285,6 +5301,13 @@ pub fn sys_set_exception_handler(args: &SyscallArgs) -> SyscallResult {
         }
     };
 
+    // 0 unregisters; anything else is installed as the SYSRET RIP when an
+    // exception is dispatched, so it must be a user-half address — see
+    // `sys_signal_register` for why a non-canonical RIP is a ring-0 hazard.
+    if handler_addr != 0 && handler_addr >= crate::mm::page_table::USER_SPACE_END {
+        return SyscallResult::err(KernelError::InvalidAddress);
+    }
+
     exception::set_handler(pid, handler_addr);
     SyscallResult::ok(0)
 }
@@ -5304,26 +5327,31 @@ pub fn sys_exception_return_with_frame(
 ) -> i64 {
     use crate::proc::exception::ExceptionContext;
 
-    let ctx_ptr = frame.arg0 as *const ExceptionContext;
+    // Copied in rather than read through the user pointer: every field below
+    // is consumed after the fact, and reading them one at a time out of a live
+    // user mapping is a double-fetch (a peer thread can rewrite the context
+    // between reads) as well as an unbracketed supervisor access under SMAP.
+    // `read_user_value` validates the range and performs the copy in one go.
+    // Any bit pattern is a valid `ExceptionContext` — it is all `u64` register
+    // values — but the values themselves are attacker-controlled, hence the
+    // RIP/RSP/RFLAGS sanitisation below.
+    let ctx = match crate::mm::user::read_user_value::<ExceptionContext>(frame.arg0) {
+        Ok(v) => v,
+        Err(e) => return e.code() as i64,
+    };
 
-    // Validate that the exception context is in user space and mapped.
-    // The context is sizeof(ExceptionContext) = 160 bytes on the user stack.
-    if let Err(e) = crate::mm::user::validate_user_read(
-        frame.arg0,
-        core::mem::size_of::<ExceptionContext>(),
-    ) {
-        return e.code() as i64;
+    // The handler may have scribbled anything into the saved RIP/RSP/RFLAGS.
+    // Reject a non-user RIP/RSP before it reaches SYSRETQ and mask RFLAGS down
+    // to the bits ring 3 may set — see `super::entry::user_return_state_ok`
+    // and `super::entry::sanitize_user_rflags`.
+    if !super::entry::user_return_state_ok(ctx.rip, ctx.rsp) {
+        return KernelError::InvalidAddress.code() as i64;
     }
-
-    // SAFETY: Validated above — ctx_ptr is in user space and mapped.
-    // Originally written by the kernel's exception dispatch onto the
-    // user stack; the handler may have modified fields.
-    let ctx = unsafe { &*ctx_ptr };
 
     // Restore the SYSRET frame from the exception context.
     frame.user_rip = ctx.rip;
     frame.user_rsp = ctx.rsp;
-    frame.user_rflags = ctx.rflags;
+    frame.user_rflags = super::entry::sanitize_user_rflags(ctx.rflags);
     frame.arg0 = ctx.rdi;  // rdi
     frame.arg1 = ctx.rsi;  // rsi
     frame.arg2 = ctx.rdx;  // rdx
@@ -5365,6 +5393,13 @@ fn caller_process_or_err() -> Result<crate::proc::pcb::ProcessId, KernelError> {
 /// `SYS_SIGNAL_REGISTER` — register the process-wide signal trampoline.
 ///
 /// `arg0`: trampoline address (0 to unregister).
+///
+/// The address is rejected here if it is not in the user half.  Delivery
+/// installs it directly as the SYSRET RIP, and `sysretq` loads RIP while still
+/// at CPL 0 — a non-canonical value would fault in ring 0 on the user stack
+/// (CVE-2012-0217).  Catching it at registration turns a would-be kernel
+/// escalation into an ordinary `EINVAL`-shaped error at the point the caller
+/// can actually diagnose it.
 pub fn sys_signal_register(
     args: &super::dispatch::SyscallArgs,
 ) -> super::dispatch::SyscallResult {
@@ -5373,6 +5408,10 @@ pub fn sys_signal_register(
         Ok(p) => p,
         Err(e) => return SyscallResult::err(e),
     };
+    // 0 means "unregister"; anything else must be a user-half address.
+    if args.arg0 != 0 && args.arg0 >= crate::mm::page_table::USER_SPACE_END {
+        return SyscallResult::err(KernelError::InvalidAddress);
+    }
     crate::proc::signal::register_trampoline(pid, args.arg0);
     SyscallResult::ok(0)
 }
@@ -5735,23 +5774,26 @@ pub fn sys_signal_return_with_frame(
 ) -> i64 {
     use crate::proc::signal::SignalContext;
 
-    if let Err(e) = crate::mm::user::validate_user_read(
-        frame.arg0,
-        core::mem::size_of::<SignalContext>(),
-    ) {
-        return e.code() as i64;
-    }
+    // Copied in rather than read field-by-field through the user pointer: the
+    // context sits on the *user* stack, so each read would be an unbracketed
+    // supervisor access under SMAP and a double-fetch (a peer thread, or the
+    // handler on another thread, can rewrite it between reads).
+    let ctx = match crate::mm::user::read_user_value::<SignalContext>(frame.arg0) {
+        Ok(v) => v,
+        Err(e) => return e.code() as i64,
+    };
 
-    let ctx_ptr = frame.arg0 as *const SignalContext;
-    // SAFETY: validated above — ctx_ptr is a mapped, readable user pointer
-    // sized for SignalContext. The kernel wrote it during delivery; the
-    // handler may have adjusted fields.
-    let ctx = unsafe { &*ctx_ptr };
+    // The handler may have scribbled anything into the saved state; sanitise
+    // it before it reaches SYSRETQ.  Same reasoning as the Linux-ABI
+    // `rt_sigreturn` path in `linux.rs`.
+    if !super::entry::user_return_state_ok(ctx.rip, ctx.rsp) {
+        return KernelError::InvalidAddress.code() as i64;
+    }
 
     // Restore the interrupted SYSRET frame.
     frame.user_rip = ctx.rip;
     frame.user_rsp = ctx.rsp;
-    frame.user_rflags = ctx.rflags;
+    frame.user_rflags = super::entry::sanitize_user_rflags(ctx.rflags);
     frame.arg0 = ctx.rdi;
     frame.arg1 = ctx.rsi;
     frame.arg2 = ctx.rdx;

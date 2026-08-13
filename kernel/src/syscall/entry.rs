@@ -257,6 +257,56 @@ pub struct SyscallFrame {
 }
 
 // ---------------------------------------------------------------------------
+// Sanitising an attacker-supplied return state
+// ---------------------------------------------------------------------------
+//
+// Several syscalls rewrite the SYSRET frame from a register snapshot that
+// lives on the *user* stack: `SYS_EXCEPTION_RETURN`, `SYS_SIGNAL_RETURN` and
+// the Linux-ABI `rt_sigreturn`/`sigreturn`.  Userspace can put anything in
+// those snapshots, so the RIP, RSP and RFLAGS they carry are attacker-
+// controlled and must be filtered here rather than trusted.
+
+/// RFLAGS bits userspace is permitted to restore through a frame-rewriting
+/// return.
+///
+/// Kept: CF(0) PF(2) AF(4) ZF(6) SF(7) TF(8) DF(10) OF(11) AC(18) ID(21).
+/// TF is permitted so a debugger-driven single-step survives a signal
+/// round-trip, matching Linux.
+///
+/// Dropped: IOPL(12,13) — would grant ring 3 direct I/O-port access; IF(9) —
+/// forced on below, since resuming ring 3 with interrupts disabled wedges the
+/// CPU; NT(14), RF(16), VM(17), VIF(19), VIP(20); and every reserved bit.
+pub const USER_RFLAGS_MASK: u64 = 0x0024_0DD5;
+
+/// RFLAGS bits always forced on: IF (interrupts enabled) plus the mandatory
+/// reserved bit 1.
+pub const USER_RFLAGS_FORCED: u64 = 0x0000_0202;
+
+/// Reduce an attacker-supplied RFLAGS value to one that is safe to load on
+/// return to ring 3.
+#[must_use]
+pub const fn sanitize_user_rflags(raw: u64) -> u64 {
+    (raw & USER_RFLAGS_MASK) | USER_RFLAGS_FORCED
+}
+
+/// Check that an attacker-supplied `(rip, rsp)` pair is safe to install in the
+/// SYSRET frame.
+///
+/// Both must lie in the user half.  The RIP check is not merely hygiene: on
+/// `sysretq` the CPU loads RIP from RCX *while still at CPL 0*, and a
+/// non-canonical value raises `#GP` in ring 0 — after this stub has already
+/// switched RSP to the user stack and run `swapgs`, so the fault handler would
+/// run with kernel privilege on an attacker-controlled stack and an
+/// attacker-controlled GS base.  That is the CVE-2012-0217 shape.  Requiring
+/// `rip < USER_SPACE_END` is strictly stronger than "canonical" and is what a
+/// legitimate user context always satisfies.
+#[must_use]
+pub fn user_return_state_ok(rip: u64, rsp: u64) -> bool {
+    use crate::mm::page_table::USER_SPACE_END;
+    rip < USER_SPACE_END && rsp < USER_SPACE_END
+}
+
+// ---------------------------------------------------------------------------
 // Rust-level syscall handler
 // ---------------------------------------------------------------------------
 

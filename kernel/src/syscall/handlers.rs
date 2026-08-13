@@ -10412,23 +10412,124 @@ pub fn sys_set_fs_base(args: &SyscallArgs) -> SyscallResult {
 /// `arg0`: number of submission queue entries.
 /// `arg1`: number of completion queue entries.
 ///
-/// Returns: ring handle in `value`, header virtual address in `value2`.
+/// Returns: ring handle in `value`, and in `value2` the **user** virtual
+/// address of the [`IoRingHeader`], with the SQ and CQ arrays following it.
+///
+/// The ring frames are mapped read/write into the caller's address space here.
+/// This used to return the address [`io_ring::setup`] hands back, which is an
+/// HHDM (kernel direct-map) pointer — userspace could not have dereferenced it
+/// from ring 3 anyway, but publishing it disclosed the direct-map base to any
+/// process that asked, defeating kernel address-space randomisation.
+///
+/// [`IoRingHeader`]: crate::ipc::io_ring::IoRingHeader
 pub fn sys_io_ring_setup(args: &SyscallArgs) -> SyscallResult {
     use crate::ipc::io_ring;
+    use crate::mm::frame::{self, PhysFrame, FRAME_SIZE};
+    use crate::mm::page_table::{self, PageFlags, VirtAddr};
+    use crate::mm::vma::VmaKind;
+    use crate::proc::pcb;
 
     #[allow(clippy::cast_possible_truncation)]
     let sq_entries = args.arg0 as u32;
     #[allow(clippy::cast_possible_truncation)]
     let cq_entries = args.arg1 as u32;
 
-    match io_ring::setup(sq_entries, cq_entries) {
-        Ok((handle, header_virt, _phys_frames)) => {
-            // Return handle in rax, header vaddr in rdx.
-            #[allow(clippy::cast_possible_wrap)]
-            SyscallResult::ok2(handle as i64, header_virt as i64)
-        }
-        Err(e) => SyscallResult::err(e),
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return SyscallResult::err(KernelError::NoSuchProcess),
+    };
+    let pml4_phys = match pcb::get_pml4(pid) {
+        Some(p) if p != 0 => p,
+        _ => return SyscallResult::err(KernelError::NoSuchProcess),
+    };
+
+    let (handle, _hhdm_base, phys_frames) = match io_ring::setup(sq_entries, cq_entries) {
+        Ok(r) => r,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    // The ring is shared data, never code: no execute, and no reason for the
+    // kernel to reach it through this mapping (it uses the HHDM view).
+    let page_flags = PageFlags::PRESENT
+        | PageFlags::USER_ACCESSIBLE
+        | PageFlags::WRITABLE
+        | PageFlags::NO_EXECUTE;
+
+    #[allow(clippy::arithmetic_side_effects)]
+    let frame_size = FRAME_SIZE as u64;
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+    let size_aligned = (phys_frames.len() as u64) * frame_size;
+
+    // Frames are pre-backed, so a fault in this range is a kernel bug rather
+    // than demand paging — reserve it as `Fixed`.
+    let base = alloc_user_mmap_reserve(pid, size_aligned, VmaKind::Fixed, page_flags);
+    if base == 0 {
+        let _ = io_ring::destroy(handle);
+        return SyscallResult::err(KernelError::OutOfMemory);
     }
+
+    // Undo the mapping for frames [0, up_to), then release the reservation and
+    // the ring itself, so a partial failure leaves nothing behind.
+    let unwind = |up_to: usize, handle: u64| {
+        for j in 0..up_to {
+            #[allow(clippy::arithmetic_side_effects)]
+            let va = base + (j as u64) * frame_size;
+            // SAFETY: these frames were mapped by this function a moment ago.
+            if let Ok(phys) = unsafe { page_table::unmap_frame(pml4_phys, VirtAddr::new(va)) } {
+                // SAFETY: refcount-aware; drops the reference added below.
+                unsafe {
+                    let _ = frame::free_frame(phys);
+                }
+            }
+        }
+        pcb::remove_vma(pid, base);
+        let _ = io_ring::destroy(handle);
+    };
+
+    for (i, &pa) in phys_frames.iter().enumerate() {
+        #[allow(clippy::arithmetic_side_effects)]
+        let va = base + (i as u64) * frame_size;
+        let Some(phys) = PhysFrame::from_addr(pa) else {
+            unwind(i, handle);
+            return SyscallResult::err(KernelError::InternalError);
+        };
+
+        // Bump the refcount before mapping, so the mapping holds a reference of
+        // its own: `io_ring::destroy` drops the ring's reference, and the frame
+        // survives until this mapping is torn down too.
+        // SAFETY: `pa` is a frame allocated by `io_ring::setup` moments ago and
+        // still owned by the ring, so its refcount is non-zero.
+        if let Err(e) = unsafe { frame::ref_inc(phys) } {
+            unwind(i, handle);
+            return SyscallResult::err(e);
+        }
+
+        // SAFETY: `pml4_phys` is the caller's page table, `phys` is a live
+        // refcounted frame, and `va` lies in the gap just reserved.
+        if let Err(e) =
+            unsafe { page_table::map_frame(pml4_phys, VirtAddr::new(va), phys, page_flags) }
+        {
+            // Undo this frame's ref_inc (the mapping never took), then the rest.
+            // SAFETY: refcount-aware; drops the reference added just above.
+            unsafe {
+                let _ = frame::free_frame(phys);
+            }
+            unwind(i, handle);
+            return SyscallResult::err(e);
+        }
+    }
+
+    // Record the mapping so `destroy` tears it down with the ring.
+    if let Err(e) = io_ring::attach_user_mapping(handle, base, size_aligned) {
+        unwind(phys_frames.len(), handle);
+        return SyscallResult::err(e);
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    crate::mm::accounting::charge(pml4_phys, phys_frames.len() as u64);
+
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok2(handle as i64, base as i64)
 }
 
 /// `SYS_IO_RING_ENTER` — process io_ring submissions.

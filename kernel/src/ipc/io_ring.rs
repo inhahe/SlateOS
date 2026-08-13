@@ -293,10 +293,43 @@ struct IoRing {
     cq_entries: u32,
     /// Owning task ID (for cleanup).
     owner_task: u64,
+    /// Owning **process**, or `None` for a ring created by a kernel thread.
+    ///
+    /// The unit of ownership is the process, not the task: the SQ/CQ are a
+    /// shared mapping in one address space, so every thread of that process is
+    /// a legitimate driver of the ring, and no thread outside it is.  Handles
+    /// come from a small global counter and are therefore trivially guessable,
+    /// so without this check any process could name another's ring.
+    owner_process: Option<u64>,
+    /// Set while [`enter`] is processing this ring's SQ with the table lock
+    /// released.
+    ///
+    /// Serves two purposes: it makes `enter` non-reentrant per ring (two
+    /// threads of the owning process would otherwise both consume from the same
+    /// SQ head), and it blocks [`destroy`], which would otherwise free the
+    /// frames the processing loop is still reading SQEs out of.
+    busy: bool,
     /// Physical frame addresses backing this ring (for cleanup).
     phys_frames: alloc::vec::Vec<u64>,
     /// Completion port to notify when CQEs are posted (0 = none).
     cp_handle: u64,
+    /// Base of the owning process's mapping of these frames, or 0 if the ring
+    /// has no user mapping (a kernel-thread ring).
+    ///
+    /// Recorded so [`destroy`] can tear the mapping down; see
+    /// [`attach_user_mapping`].
+    user_base: u64,
+    /// Byte length of the user mapping at `user_base`.
+    user_bytes: u64,
+}
+
+/// The process that owns rings created by, and usable from, the current task.
+///
+/// `None` means "a kernel thread with no owning process" — a legitimate owner
+/// value that only matches other kernel threads, which is what the in-kernel
+/// self-tests and benchmarks need.
+fn current_owner_process() -> Option<u64> {
+    crate::proc::thread::owner_process(crate::sched::current_task_id())
 }
 
 // SAFETY: IoRing's raw pointers point to HHDM-mapped memory that is
@@ -332,7 +365,15 @@ static NEXT_RING_ID: core::sync::atomic::AtomicU64 =
 ///
 /// # Returns
 ///
-/// `(ring_handle, header_virt_addr, phys_frames)` on success.
+/// `(ring_handle, header_hhdm_addr, phys_frames)` on success.
+///
+/// **The returned address is an HHDM (kernel direct-map) address and must not
+/// be handed to userspace.**  It is here for in-kernel callers (the self-tests
+/// and benchmarks) that drive a ring without an address space of their own.
+/// A syscall must instead map `phys_frames` into the calling process and
+/// register the result with [`attach_user_mapping`], returning *that* address:
+/// leaking an HHDM pointer to ring 3 discloses the direct-map base and thus
+/// defeats kernel address-space randomisation for every subsequent attack.
 pub fn setup(
     sq_entries: u32,
     cq_entries: u32,
@@ -409,8 +450,12 @@ pub fn setup(
         sq_entries: sq,
         cq_entries: cq,
         owner_task: owner,
+        owner_process: current_owner_process(),
+        busy: false,
         phys_frames: phys_frames.clone(),
         cp_handle: 0,
+        user_base: 0,
+        user_bytes: 0,
     };
 
     {
@@ -438,13 +483,73 @@ pub fn setup(
 /// - `ring_handle` — the ring to process.
 /// - `to_submit` — maximum number of SQEs to process (0 = drain all available).
 pub fn enter(ring_handle: u64, to_submit: u32) -> KernelResult<u32> {
-    let table = RING_TABLE.lock();
-    let ring = table.get(&ring_handle)
-        .ok_or(KernelError::InvalidArgument)?;
+    // Claim the ring under the table lock, then release it for the duration of
+    // processing.  Executing SQEs with `RING_TABLE` held was a system-wide
+    // hazard: `IO_OP_SLEEP` parks for up to 60 seconds, `IO_OP_TIMEOUT` for up
+    // to 10, and every buffer-moving opcode can block on a demand-paging fault
+    // or on filesystem I/O — all with a global spinlock held, which also
+    // deadlocks any other thread touching *any* ring.  The `busy` flag keeps
+    // the exclusion the lock used to provide (one entrant per ring, and no
+    // `destroy` freeing the frames underneath us) without holding it.
+    let (header_ptr, sq_ptr, cq_ptr) = {
+        let mut table = RING_TABLE.lock();
+        let ring = table
+            .get_mut(&ring_handle)
+            .ok_or(KernelError::InvalidArgument)?;
+        if ring.owner_process != current_owner_process() {
+            return Err(KernelError::PermissionDenied);
+        }
+        if ring.busy {
+            return Err(KernelError::WouldBlock);
+        }
+        ring.busy = true;
+        (ring.header_ptr, ring.sq_ptr, ring.cq_ptr)
+    };
 
-    // SAFETY: ring pointers are valid HHDM addresses set up in setup().
-    // We hold the RING_TABLE lock, preventing concurrent access.
-    let header = unsafe { &*ring.header_ptr };
+    let processed = enter_locked(header_ptr, sq_ptr, cq_ptr, to_submit);
+
+    // Release the claim and pick up the completion port in one pass.
+    let cp = {
+        let mut table = RING_TABLE.lock();
+        match table.get_mut(&ring_handle) {
+            Some(ring) => {
+                ring.busy = false;
+                ring.cp_handle
+            }
+            // Unreachable: `destroy` refuses a busy ring.  Nothing to notify.
+            None => 0,
+        }
+    };
+
+    // Lock ordering: CP_TABLE → RING_TABLE, so `notify` must run with the ring
+    // table released.
+    if processed > 0 && cp != 0 {
+        use super::completion::{self, CpHandle, WaitSource};
+        completion::notify(
+            CpHandle::from_raw(cp),
+            WaitSource::IoCompletion(ring_handle),
+        );
+    }
+
+    Ok(processed)
+}
+
+/// Drain the SQ and post CQEs, with the ring already claimed.
+///
+/// Split out of [`enter`] so the claim/release bookkeeping is impossible to
+/// skip: this function does no locking and must only be called between setting
+/// and clearing a ring's `busy` flag.
+fn enter_locked(
+    header_ptr: *mut IoRingHeader,
+    sq_ptr: *mut SqEntry,
+    cq_ptr: *mut CqEntry,
+    to_submit: u32,
+) -> u32 {
+    // SAFETY: the ring's pointers are HHDM addresses of frames allocated in
+    // `setup` and freed only by `destroy`, which refuses a busy ring — so they
+    // stay valid for this whole call.  The `busy` claim also makes this the
+    // only thread advancing this ring's SQ head / CQ tail.
+    let header = unsafe { &*header_ptr };
 
     let sq_head = header.sq_head.load(Ordering::Acquire);
     let sq_tail = header.sq_tail.load(Ordering::Acquire);
@@ -475,19 +580,25 @@ pub fn enter(ring_handle: u64, to_submit: u32) -> KernelResult<u32> {
             break;
         }
 
-        // Read the SQE.
+        // Read the SQE.  Copied out by value before dispatch: the SQ is a
+        // shared mapping the owning process can keep writing to, so reading a
+        // field twice could see two different values (a classic double-fetch —
+        // validate one pointer, act on another).
         let sq_idx = (new_sq_head & sq_mask) as usize;
-        // SAFETY: sq_idx is bounded by sq_mask (< sq_entries).
-        let sqe = unsafe { *ring.sq_ptr.add(sq_idx) };
+        // SAFETY: `sq_idx` is masked by `sq_mask == sq_entries - 1`, so it
+        // indexes within the SQ array allocated in `setup`.
+        let sqe = unsafe { *sq_ptr.add(sq_idx) };
 
         // Execute the operation.
         let result = execute_sqe(&sqe);
 
         // Write the CQE.
         let cq_idx = (new_cq_tail & cq_mask) as usize;
-        // SAFETY: cq_idx is bounded by cq_mask (< cq_entries).
+        // SAFETY: `cq_idx` is masked by `cq_mask == cq_entries - 1`, so it
+        // indexes within the CQ array allocated in `setup`.  The `busy` claim
+        // makes this thread the only writer.
         unsafe {
-            let cqe = &mut *ring.cq_ptr.add(cq_idx);
+            let cqe = &mut *cq_ptr.add(cq_idx);
             cqe.user_data = sqe.user_data;
             cqe.result = result;
         }
@@ -501,38 +612,81 @@ pub fn enter(ring_handle: u64, to_submit: u32) -> KernelResult<u32> {
     header.sq_head.store(new_sq_head, Ordering::Release);
     header.cq_tail.store(new_cq_tail, Ordering::Release);
 
-    // Notify the associated completion port if CQEs were posted.
-    let cp = ring.cp_handle;
-    // Must drop the table lock before calling completion::notify
-    // (lock ordering: CP_TABLE → RING_TABLE would deadlock).
-    drop(table);
-
-    if processed > 0 && cp != 0 {
-        use super::completion::{self, CpHandle, WaitSource};
-        completion::notify(
-            CpHandle::from_raw(cp),
-            WaitSource::IoCompletion(ring_handle),
-        );
-    }
-
-    Ok(processed)
+    processed
 }
 
 /// Destroy an io_ring and free its resources.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] — no such ring.
+/// - [`KernelError::PermissionDenied`] — the ring belongs to another process.
+/// - [`KernelError::WouldBlock`] — the ring is mid-[`enter`]; retry after it
+///   completes.
 pub fn destroy(ring_handle: u64) -> KernelResult<()> {
     use crate::mm::frame::{self, PhysFrame};
 
     let ring = {
         let mut table = RING_TABLE.lock();
-        table.remove(&ring_handle)
+        // Checked before the removal: handles come from a global counter, so
+        // without this any process could free another's ring — and the frames
+        // stay mapped in the victim's address space, which turns this into a
+        // use-after-free of physical memory across a security boundary.
+        let ring = table
+            .get(&ring_handle)
+            .ok_or(KernelError::InvalidArgument)?;
+        if ring.owner_process != current_owner_process() {
+            return Err(KernelError::PermissionDenied);
+        }
+        if ring.busy {
+            // `enter` is walking the SQ in these frames right now.
+            return Err(KernelError::WouldBlock);
+        }
+        table
+            .remove(&ring_handle)
             .ok_or(KernelError::InvalidArgument)?
     };
+
+    // Tear down the owner's window onto these frames first.  Freeing them with
+    // the mapping still live would hand the process a dangling view of memory
+    // the allocator is free to hand to somebody else.  Each unmap drops the
+    // reference taken when the mapping was made; the loop below drops the
+    // ring's own reference, and the frame is released when both are gone.
+    if ring.user_base != 0 {
+        use crate::mm::page_table::{self, VirtAddr};
+        let frame_size = crate::mm::frame::FRAME_SIZE as u64;
+        if let Some(pml4) = current_owner_process().and_then(crate::proc::pcb::get_pml4) {
+            let mut va = ring.user_base;
+            let end = ring.user_base.saturating_add(ring.user_bytes);
+            while va < end {
+                // SAFETY: `pml4` is the owning process's page table (the owner
+                // check above ran on this same process) and `va` walks the
+                // range recorded by `attach_user_mapping`.  A range that is
+                // already gone — the process munmap'd it — simply reports an
+                // error, which is why the result is only used to release the
+                // reference on success.
+                if let Ok(phys) = unsafe { page_table::unmap_frame(pml4, VirtAddr::new(va)) } {
+                    // SAFETY: refcount-aware; drops the mapping's reference.
+                    unsafe {
+                        let _ = frame::free_frame(phys);
+                    }
+                }
+                va = va.saturating_add(frame_size);
+            }
+            crate::proc::pcb::remove_vma(
+                current_owner_process().unwrap_or(0),
+                ring.user_base,
+            );
+        }
+    }
 
     // Free the physical frames.
     for &phys_addr in &ring.phys_frames {
         if let Some(frame) = PhysFrame::from_addr(phys_addr) {
-            // SAFETY: We just removed the ring from the table, so no
-            // one else references these frames.
+            // SAFETY: the ring was removed from the table under the lock and
+            // `busy` was clear, so no `enter` is walking these frames.  This
+            // drops the ring's own reference; a still-live user mapping holds
+            // its own, so the frame is released only when both are gone.
             unsafe {
                 let _ = frame::free_frame(frame);
             }
@@ -547,21 +701,67 @@ pub fn destroy(ring_handle: u64) -> KernelResult<()> {
     Ok(())
 }
 
+/// Record the owning process's mapping of a ring's frames.
+///
+/// Called by `SYS_IO_RING_SETUP` once it has mapped the frames returned by
+/// [`setup`] into the caller's address space, so [`destroy`] can tear that
+/// mapping down instead of leaving the process with a live window onto frames
+/// the ring no longer owns.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] — no such ring, or a mapping is already
+///   recorded (a ring is mapped exactly once, at creation).
+/// - [`KernelError::PermissionDenied`] — the ring belongs to another process.
+pub fn attach_user_mapping(ring_handle: u64, base: u64, bytes: u64) -> KernelResult<()> {
+    let mut table = RING_TABLE.lock();
+    let ring = table
+        .get_mut(&ring_handle)
+        .ok_or(KernelError::InvalidArgument)?;
+    if ring.owner_process != current_owner_process() {
+        return Err(KernelError::PermissionDenied);
+    }
+    if ring.user_base != 0 {
+        return Err(KernelError::InvalidArgument);
+    }
+    ring.user_base = base;
+    ring.user_bytes = bytes;
+    Ok(())
+}
+
 /// Associate an io_ring with a completion port.
 ///
 /// When CQEs are posted via `enter()`, the completion port is notified.
 /// Pass 0 to clear the association.
-pub fn set_cp(ring_handle: u64, cp_raw: u64) {
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] — no such ring.
+/// - [`KernelError::PermissionDenied`] — the ring belongs to another process.
+///   Without this check, pointing a foreign ring at handle 0 would silently
+///   detach it from its owner's completion port, so the owner's event loop
+///   would never wake again — a quiet denial of service.
+pub fn set_cp(ring_handle: u64, cp_raw: u64) -> KernelResult<()> {
     let mut table = RING_TABLE.lock();
-    if let Some(ring) = table.get_mut(&ring_handle) {
-        ring.cp_handle = cp_raw;
+    let ring = table
+        .get_mut(&ring_handle)
+        .ok_or(KernelError::InvalidArgument)?;
+    if ring.owner_process != current_owner_process() {
+        return Err(KernelError::PermissionDenied);
     }
+    ring.cp_handle = cp_raw;
+    Ok(())
 }
 
 /// Check whether an io_ring has pending completion entries.
 ///
 /// Returns `true` if CQ tail > CQ head (user hasn't consumed all CQEs).
 /// Used by completion port polling.
+///
+/// Deliberately *not* owner-checked, unlike the mutating entry points: this
+/// runs on whichever task is polling a completion port, which need not be the
+/// task that created the ring, and it discloses nothing but "this ring has
+/// completions" for a handle the caller already had to name.
 pub fn has_completions_ready(ring_handle: u64) -> bool {
     let table = RING_TABLE.lock();
     let Some(ring) = table.get(&ring_handle) else {
@@ -596,6 +796,30 @@ pub fn pending_completions(ring_handle: u64) -> KernelResult<u32> {
 // SQE execution
 // ---------------------------------------------------------------------------
 
+/// Largest payload an SQE may move in one operation.
+///
+/// This is a *rejection* threshold for the all-or-nothing opcodes and a
+/// short-transfer cap for the ones that report a byte count; see the note on
+/// each `exec_*` below.  It also bounds the kernel bounce allocation, so a
+/// hostile `len` costs an `InvalidArgument`, not 4 GiB of kernel heap.
+const MAX_SQE_PAYLOAD: usize = 64 * 1024;
+
+/// Largest path an SQE may name.
+const SQE_PATH_MAX: usize = 4096;
+
+/// Copy an SQE-named path out of user memory.
+///
+/// `addr`/`len` in an SQE are *userspace* values — the SQ is a shared mapping
+/// that the submitting process fills in — so they get the same treatment as a
+/// syscall argument: bounce through kernel memory, reject rather than truncate.
+fn sqe_path(addr: u64, len: usize) -> Result<alloc::string::String, KernelError> {
+    let bytes = crate::mm::user::read_user_vec(addr, len, SQE_PATH_MAX)?;
+    // NOTE: forced UTF-8 here mirrors `fs::Vfs`'s `&str` path API; both are
+    // tracked as D-VFS-PATHS-ARE-STR-NOT-BYTES in known-issues.md.  Our paths
+    // permit every byte except `/` and NUL, so this rejects legal names.
+    alloc::string::String::from_utf8(bytes).map_err(|_| KernelError::InvalidArgument)
+}
+
 /// Execute a single submission queue entry and return the result.
 ///
 /// Dispatches to the appropriate kernel subsystem based on the opcode.
@@ -625,20 +849,25 @@ fn execute_sqe(sqe: &SqEntry) -> i64 {
 }
 
 fn exec_console_write(sqe: &SqEntry) -> i64 {
-    let ptr = sqe.addr as *const u8;
     let len = sqe.len as usize;
 
-    if ptr.is_null() || len == 0 {
+    if sqe.addr == 0 || len == 0 {
         return 0;
     }
 
-    // SAFETY: Caller guarantees ptr is valid for len bytes.
-    let bytes = unsafe { core::slice::from_raw_parts(ptr, len.min(4096)) };
+    // Short write: the CQE result is the number of bytes consumed, so a caller
+    // handing over more than the cap loops on the remainder — the same contract
+    // as `write(2)`, and the only shape in which a length cap is honest.
+    let n = len.min(MAX_SQE_PAYLOAD);
+    let bytes = match crate::mm::user::read_user_vec(sqe.addr, n, MAX_SQE_PAYLOAD) {
+        Ok(b) => b,
+        Err(e) => return e.code() as i64,
+    };
 
-    if let Ok(s) = core::str::from_utf8(bytes) {
+    if let Ok(s) = core::str::from_utf8(&bytes) {
         crate::console::write_str(s);
     } else {
-        for &b in bytes {
+        for &b in &bytes {
             crate::console::putchar(b);
         }
     }
@@ -650,16 +879,20 @@ fn exec_channel_send(sqe: &SqEntry) -> i64 {
     use crate::ipc::channel::{self, ChannelHandle, Message};
 
     let handle = ChannelHandle::from_raw(sqe.handle);
-    let ptr = sqe.addr as *const u8;
     let len = sqe.len as usize;
 
-    if ptr.is_null() || len == 0 {
+    if sqe.addr == 0 || len == 0 {
         return KernelError::InvalidArgument.code() as i64;
     }
 
-    // SAFETY: Caller guarantees ptr is valid for len bytes.
-    let data = unsafe { core::slice::from_raw_parts(ptr, len) };
-    let msg = match Message::from_bytes(data) {
+    // All-or-nothing: the CQE result is 0/error, not a byte count, so an
+    // over-long message must be *rejected*.  Clamping would send a truncated
+    // message and report success.
+    let data = match crate::mm::user::read_user_vec(sqe.addr, len, MAX_SQE_PAYLOAD) {
+        Ok(d) => d,
+        Err(e) => return e.code() as i64,
+    };
+    let msg = match Message::from_bytes(&data) {
         Ok(m) => m,
         Err(e) => return e.code() as i64,
     };
@@ -674,30 +907,36 @@ fn exec_channel_recv(sqe: &SqEntry) -> i64 {
     use crate::ipc::channel::{self, ChannelHandle};
 
     let handle = ChannelHandle::from_raw(sqe.handle);
-    let buf_ptr = sqe.addr as *mut u8;
     let buf_cap = sqe.len as usize;
 
-    if buf_ptr.is_null() {
+    if sqe.addr == 0 {
         return KernelError::InvalidArgument.code() as i64;
     }
 
-    match channel::try_recv(handle) {
-        Ok(Some(msg)) => {
-            let copy_len = msg.data().len().min(buf_cap);
-            if copy_len > 0 {
-                // SAFETY: buf_ptr is non-null (checked above) and we copy
-                // at most buf_cap bytes, which the caller guarantees is valid.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        msg.data().as_ptr(),
-                        buf_ptr,
-                        copy_len,
-                    );
+    // The destination is validated *before* the dequeue, so a bad buffer costs
+    // an error rather than a message that has already left the channel with
+    // nowhere to put it.  `with_user_out_buf` then re-validates at the copy.
+    let r = crate::mm::user::with_user_out_buf(
+        sqe.addr,
+        buf_cap.min(MAX_SQE_PAYLOAD),
+        MAX_SQE_PAYLOAD,
+        |buf| match channel::try_recv(handle) {
+            Ok(Some(msg)) => {
+                let n = msg.data().len().min(buf.len());
+                match (buf.get_mut(..n), msg.data().get(..n)) {
+                    (Some(dst), Some(src)) => {
+                        dst.copy_from_slice(src);
+                        Ok(n)
+                    }
+                    _ => Err(KernelError::InternalError),
                 }
             }
-            copy_len as i64
-        }
-        Ok(None) => KernelError::WouldBlock.code() as i64,
+            Ok(None) => Err(KernelError::WouldBlock),
+            Err(e) => Err(e),
+        },
+    );
+    match r {
+        Ok(n) => n as i64,
         Err(e) => e.code() as i64,
     }
 }
@@ -706,18 +945,22 @@ fn exec_pipe_write(sqe: &SqEntry) -> i64 {
     use crate::ipc::pipe::{self, PipeHandle};
 
     let handle = PipeHandle::from_raw(sqe.handle);
-    let ptr = sqe.addr as *const u8;
     let len = sqe.len as usize;
 
-    if ptr.is_null() || len == 0 {
+    if sqe.addr == 0 || len == 0 {
         return KernelError::InvalidArgument.code() as i64;
     }
 
-    // SAFETY: ptr is non-null (checked above) and the SQE contract requires
-    // addr/len to describe a valid buffer.
-    let data = unsafe { core::slice::from_raw_parts(ptr, len) };
+    // Short write: the result is the byte count `pipe::try_write` accepted, so
+    // capping what we hand it is a partial write the caller already has to
+    // handle (a pipe can accept less than offered regardless).
+    let n = len.min(MAX_SQE_PAYLOAD);
+    let data = match crate::mm::user::read_user_vec(sqe.addr, n, MAX_SQE_PAYLOAD) {
+        Ok(d) => d,
+        Err(e) => return e.code() as i64,
+    };
 
-    match pipe::try_write(handle, data) {
+    match pipe::try_write(handle, &data) {
         Ok(written) => written as i64,
         Err(e) => e.code() as i64,
     }
@@ -727,82 +970,87 @@ fn exec_pipe_read(sqe: &SqEntry) -> i64 {
     use crate::ipc::pipe::{self, PipeHandle};
 
     let handle = PipeHandle::from_raw(sqe.handle);
-    let ptr = sqe.addr as *mut u8;
     let cap = sqe.len as usize;
 
-    if ptr.is_null() {
+    if sqe.addr == 0 {
         return KernelError::InvalidArgument.code() as i64;
     }
 
-    // SAFETY: ptr is non-null (checked above); SQE contract guarantees
-    // addr/len describe a valid writable buffer.
-    let buf = unsafe { core::slice::from_raw_parts_mut(ptr, cap) };
-
-    match pipe::try_read(handle, buf) {
+    // `pipe::try_read` only ever sees kernel scratch: the pipe lock is taken
+    // inside it, and a user mapping handed straight in could fault (or go stale
+    // under a peer's `munmap`) with that lock held.
+    let r = crate::mm::user::with_user_out_buf(
+        sqe.addr,
+        cap.min(MAX_SQE_PAYLOAD),
+        MAX_SQE_PAYLOAD,
+        |buf| pipe::try_read(handle, buf),
+    );
+    match r {
         Ok(n) => n as i64,
         Err(e) => e.code() as i64,
     }
 }
 
 fn exec_fs_read(sqe: &SqEntry) -> i64 {
-    let path_ptr = sqe.addr as *const u8;
     let path_len = sqe.len as usize;
-    let buf_ptr = sqe.arg1 as *mut u8;
     let buf_cap = sqe.arg2 as usize;
 
-    if path_ptr.is_null() || path_len == 0 || buf_ptr.is_null() {
+    if sqe.addr == 0 || path_len == 0 || sqe.arg1 == 0 {
         return KernelError::InvalidArgument.code() as i64;
     }
 
-    // SAFETY: path_ptr is non-null and path_len > 0 (checked above);
-    // SQE contract guarantees addr/len describe valid readable memory.
-    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_len) };
-    let path = match core::str::from_utf8(path_bytes) {
-        Ok(s) => s,
-        Err(_) => return KernelError::InvalidArgument.code() as i64,
+    let path = match sqe_path(sqe.addr, path_len) {
+        Ok(p) => p,
+        Err(e) => return e.code() as i64,
     };
 
-    match crate::fs::Vfs::read_file(path) {
-        Ok(data) => {
-            let copy_len = data.len().min(buf_cap);
-            if copy_len > 0 {
-                // SAFETY: buf_ptr is non-null (checked above); copy_len ≤ buf_cap.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        data.as_ptr(),
-                        buf_ptr,
-                        copy_len,
-                    );
+    // Short read: the result is the byte count delivered.  The whole file is
+    // read into kernel memory first (that is what `Vfs::read_file` returns),
+    // then as much of it as fits is copied out in one go.
+    let r = crate::mm::user::with_user_out_buf(
+        sqe.arg1,
+        buf_cap.min(MAX_SQE_PAYLOAD),
+        MAX_SQE_PAYLOAD,
+        |buf| {
+            let data = crate::fs::Vfs::read_file(&path)?;
+            let n = data.len().min(buf.len());
+            match (buf.get_mut(..n), data.get(..n)) {
+                (Some(dst), Some(src)) => {
+                    dst.copy_from_slice(src);
+                    Ok(n)
                 }
+                _ => Err(KernelError::InternalError),
             }
-            copy_len as i64
-        }
+        },
+    );
+    match r {
+        Ok(n) => n as i64,
         Err(e) => e.code() as i64,
     }
 }
 
 fn exec_fs_write(sqe: &SqEntry) -> i64 {
-    let path_ptr = sqe.addr as *const u8;
     let path_len = sqe.len as usize;
-    let data_ptr = sqe.arg1 as *const u8;
     let data_len = sqe.arg2 as usize;
 
-    if path_ptr.is_null() || path_len == 0 || data_ptr.is_null() {
+    if sqe.addr == 0 || path_len == 0 || sqe.arg1 == 0 {
         return KernelError::InvalidArgument.code() as i64;
     }
 
-    // SAFETY: path_ptr is non-null and path_len > 0 (checked above);
-    // SQE contract guarantees addr/len describe valid readable memory.
-    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_len) };
-    let path = match core::str::from_utf8(path_bytes) {
-        Ok(s) => s,
-        Err(_) => return KernelError::InvalidArgument.code() as i64,
+    let path = match sqe_path(sqe.addr, path_len) {
+        Ok(p) => p,
+        Err(e) => return e.code() as i64,
     };
 
-    // SAFETY: data_ptr is non-null (checked above); data_len from the SQE.
-    let data = unsafe { core::slice::from_raw_parts(data_ptr, data_len) };
+    // All-or-nothing: `write_file` replaces the file's contents and the result
+    // is 0/error, so an over-long payload is rejected rather than clamped —
+    // clamping would silently truncate the file and report success.
+    let data = match crate::mm::user::read_user_vec(sqe.arg1, data_len, MAX_SQE_PAYLOAD) {
+        Ok(d) => d,
+        Err(e) => return e.code() as i64,
+    };
 
-    match crate::fs::Vfs::write_file(path, data) {
+    match crate::fs::Vfs::write_file(&path, &data) {
         Ok(()) => 0,
         Err(e) => e.code() as i64,
     }
@@ -814,43 +1062,43 @@ fn exec_fs_write(sqe: &SqEntry) -> i64 {
 
 fn exec_fh_read(sqe: &SqEntry) -> i64 {
     let fh = sqe.handle;
-    let ptr = sqe.addr as *mut u8;
     let cap = sqe.len as usize;
 
-    if ptr.is_null() || cap == 0 {
+    if sqe.addr == 0 || cap == 0 {
         return KernelError::InvalidArgument.code() as i64;
     }
 
-    // Allocate a kernel buffer, read into it, then copy to user pointer.
-    let mut kbuf = alloc::vec![0u8; cap.min(65536)];
-
-    match crate::fs::handle::read(fh, &mut kbuf) {
-        Ok(n) => {
-            if n > 0 {
-                // SAFETY: Caller guarantees ptr is valid for cap bytes.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(kbuf.as_ptr(), ptr, n);
-                }
-            }
-            n as i64
-        }
+    // Short read; the result is the byte count.  The scratch buffer also keeps
+    // the filesystem from ever seeing a user address — it can block on I/O, at
+    // which point a user mapping would be both SMAP-illegal and revocable.
+    let r = crate::mm::user::with_user_out_buf(
+        sqe.addr,
+        cap.min(MAX_SQE_PAYLOAD),
+        MAX_SQE_PAYLOAD,
+        |buf| crate::fs::handle::read(fh, buf),
+    );
+    match r {
+        Ok(n) => n as i64,
         Err(e) => e.code() as i64,
     }
 }
 
 fn exec_fh_write(sqe: &SqEntry) -> i64 {
     let fh = sqe.handle;
-    let ptr = sqe.addr as *const u8;
     let len = sqe.len as usize;
 
-    if ptr.is_null() || len == 0 {
+    if sqe.addr == 0 || len == 0 {
         return KernelError::InvalidArgument.code() as i64;
     }
 
-    // SAFETY: Caller guarantees ptr is valid for len bytes.
-    let data = unsafe { core::slice::from_raw_parts(ptr, len.min(65536)) };
+    // Short write: the result is the count `handle::write` accepted.
+    let n = len.min(MAX_SQE_PAYLOAD);
+    let data = match crate::mm::user::read_user_vec(sqe.addr, n, MAX_SQE_PAYLOAD) {
+        Ok(d) => d,
+        Err(e) => return e.code() as i64,
+    };
 
-    match crate::fs::handle::write(fh, data) {
+    match crate::fs::handle::write(fh, &data) {
         Ok(n) => n as i64,
         Err(e) => e.code() as i64,
     }
@@ -860,15 +1108,22 @@ fn exec_fh_pread(sqe: &SqEntry) -> i64 {
     use crate::fs::handle::SeekFrom;
 
     let fh = sqe.handle;
-    let ptr = sqe.addr as *mut u8;
     let cap = sqe.len as usize;
     let offset = sqe.arg1;
 
-    if ptr.is_null() || cap == 0 {
+    if sqe.addr == 0 || cap == 0 {
         return KernelError::InvalidArgument.code() as i64;
     }
 
+    // The destination is validated before the seek, so a bad buffer cannot
+    // leave the handle parked at `offset` with nothing read.
+    if let Err(e) = crate::mm::user::validate_user_write(sqe.addr, cap.min(MAX_SQE_PAYLOAD)) {
+        return e.code() as i64;
+    }
+
     // Save current position, seek to offset, read, restore position.
+    // NOTE: seek/read/seek is not atomic against another thread sharing this
+    // handle — see B-FS-HANDLE-PREAD-PWRITE-ARE-NOT-ATOMIC in known-issues.md.
     let saved = match crate::fs::handle::seek(fh, SeekFrom::Current(0)) {
         Ok(pos) => pos,
         Err(e) => return e.code() as i64,
@@ -878,22 +1133,23 @@ fn exec_fh_pread(sqe: &SqEntry) -> i64 {
         return e.code() as i64;
     }
 
-    let mut kbuf = alloc::vec![0u8; cap.min(65536)];
-    let result = match crate::fs::handle::read(fh, &mut kbuf) {
-        Ok(n) => {
-            if n > 0 {
-                // SAFETY: Caller guarantees ptr is valid for cap bytes.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(kbuf.as_ptr(), ptr, n);
-                }
-            }
-            n as i64
-        }
+    let result = match crate::mm::user::with_user_out_buf(
+        sqe.addr,
+        cap.min(MAX_SQE_PAYLOAD),
+        MAX_SQE_PAYLOAD,
+        |buf| crate::fs::handle::read(fh, buf),
+    ) {
+        Ok(n) => n as i64,
         Err(e) => e.code() as i64,
     };
 
-    // Restore original position.
-    let _ = crate::fs::handle::seek(fh, SeekFrom::Start(saved));
+    // Restore original position.  The failure is reported rather than dropped:
+    // leaving the cursor at `offset + n` would silently corrupt every
+    // subsequent sequential read on this handle, which is far worse than the
+    // pread itself failing.
+    if let Err(e) = crate::fs::handle::seek(fh, SeekFrom::Start(saved)) {
+        return e.code() as i64;
+    }
 
     result
 }
@@ -902,15 +1158,25 @@ fn exec_fh_pwrite(sqe: &SqEntry) -> i64 {
     use crate::fs::handle::SeekFrom;
 
     let fh = sqe.handle;
-    let ptr = sqe.addr as *const u8;
     let len = sqe.len as usize;
     let offset = sqe.arg1;
 
-    if ptr.is_null() || len == 0 {
+    if sqe.addr == 0 || len == 0 {
         return KernelError::InvalidArgument.code() as i64;
     }
 
+    // Copied out of user memory *before* the seek: the copy can fail, and
+    // failing after the seek would leave the handle's cursor moved with nothing
+    // written.  Short write — the result is the count accepted.
+    let n = len.min(MAX_SQE_PAYLOAD);
+    let data = match crate::mm::user::read_user_vec(sqe.addr, n, MAX_SQE_PAYLOAD) {
+        Ok(d) => d,
+        Err(e) => return e.code() as i64,
+    };
+
     // Save current position, seek to offset, write, restore position.
+    // NOTE: not atomic against a peer sharing the handle — see
+    // B-FS-HANDLE-PREAD-PWRITE-ARE-NOT-ATOMIC in known-issues.md.
     let saved = match crate::fs::handle::seek(fh, SeekFrom::Current(0)) {
         Ok(pos) => pos,
         Err(e) => return e.code() as i64,
@@ -920,16 +1186,16 @@ fn exec_fh_pwrite(sqe: &SqEntry) -> i64 {
         return e.code() as i64;
     }
 
-    // SAFETY: Caller guarantees ptr is valid for len bytes.
-    let data = unsafe { core::slice::from_raw_parts(ptr, len.min(65536)) };
-
-    let result = match crate::fs::handle::write(fh, data) {
+    let result = match crate::fs::handle::write(fh, &data) {
         Ok(n) => n as i64,
         Err(e) => e.code() as i64,
     };
 
-    // Restore original position.
-    let _ = crate::fs::handle::seek(fh, SeekFrom::Start(saved));
+    // Restore original position; see `exec_fh_pread` for why the failure is
+    // reported rather than discarded.
+    if let Err(e) = crate::fs::handle::seek(fh, SeekFrom::Start(saved)) {
+        return e.code() as i64;
+    }
 
     result
 }
@@ -1006,17 +1272,23 @@ fn exec_timeout_cancel(_sqe: &SqEntry) -> i64 {
 /// `addr` points to the service name bytes, `len` is the name length.
 /// Returns the raw channel handle on success (>= 0).
 fn exec_service_connect(sqe: &SqEntry) -> i64 {
-    let ptr = sqe.addr as *const u8;
+    /// A service name longer than this is rejected, never clipped: a clipped
+    /// name is a *different* service, and connecting to the wrong one is a
+    /// failure in exactly the wrong direction.
+    const NAME_MAX: usize = 256;
+
     let len = sqe.len as usize;
 
-    if ptr.is_null() || len == 0 || len > 256 {
+    if sqe.addr == 0 || len == 0 {
         return KernelError::InvalidArgument.code() as i64;
     }
 
-    // SAFETY: Caller guarantees ptr is valid for len bytes.
-    let name = unsafe { core::slice::from_raw_parts(ptr, len) };
+    let name = match crate::mm::user::read_user_vec(sqe.addr, len, NAME_MAX) {
+        Ok(n) => n,
+        Err(e) => return e.code() as i64,
+    };
 
-    match crate::ipc::service::connect(name) {
+    match crate::ipc::service::connect(&name) {
         Ok(handle) => handle.raw() as i64,
         Err(e) => e.code() as i64,
     }

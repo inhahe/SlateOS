@@ -347,7 +347,14 @@ pub fn register(
             super::timer::set_cp(timer_handle, cp.raw());
         }
         WaitSource::IoCompletion(ring_handle) => {
-            super::io_ring::set_cp(ring_handle, cp.raw());
+            // A ring the caller does not own must not be wired to its port:
+            // that would let it observe, and later detach, another process's
+            // completion stream.  Roll the registration back so the port is
+            // left exactly as it was.
+            if let Err(e) = super::io_ring::set_cp(ring_handle, cp.raw()) {
+                port.registrations.pop();
+                return Err(e);
+            }
         }
         _ => {}
     }
@@ -387,7 +394,10 @@ pub fn unregister(cp: CpHandle, source: WaitSource) -> KernelResult<()> {
             super::timer::set_cp(timer_handle, 0);
         }
         WaitSource::IoCompletion(ring_handle) => {
-            super::io_ring::set_cp(ring_handle, 0);
+            // A failure here means the ring is gone or belongs to someone else
+            // — in which case *not* clearing its association is the correct
+            // outcome, and the local registration has already been dropped.
+            let _ = super::io_ring::set_cp(ring_handle, 0);
         }
         _ => {}
     }

@@ -43,7 +43,58 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
-### D-SYSCALL-HANDLERS-HAND-RAW-USER-SLICES-TO-KERNEL-CODE — 2026-08-13 — TECH DEBT (blocks enabling SMAP)
+### B-NET-DIAGNOSTIC-HANDLERS-WROTE-TO-AN-UNVALIDATED-USER-POINTER. Five uncapability-gated syscalls were a write-what-where primitive — 2026-08-13 — ✅ FIXED 2026-08-13 (`kernel/src/syscall/handlers.rs`)
+
+**What.** `sys_tcp_list`, `sys_tcp_listener_list`, `sys_net_if_info`,
+`sys_arp_table` and `sys_dns_cache_stats` each wrote their output records
+straight through `args.arg0 as *mut u8`, having checked only that the argument
+was non-zero:
+
+```rust
+if buf_ptr == 0 { return SyscallResult::err(KernelError::InvalidArgument); }
+...
+// SAFETY: buf_ptr is a userspace pointer validated by the caller;
+// written < max_records ensures dst stays within the buffer.
+let dst = (buf_ptr + written * RECORD_SIZE) as *mut u8;
+unsafe { core::ptr::copy_nonoverlapping(record.as_ptr(), dst, RECORD_SIZE); }
+```
+
+Nothing validated it. `validate_user_write` was never called, and the SAFETY
+comments asserted a precondition that no code established — "validated by the
+caller" (there is no such caller; this is the syscall boundary), or in
+`sys_dns_cache_stats`' case `buf_len >= STATS_SIZE`, which bounds the *length*
+and says nothing about the *address*.
+
+**Why it mattered.** None of the five requires a capability. So any process at
+all could pass an arbitrary kernel virtual address and have the kernel write
+attacker-influenced bytes over it: the TCP connection table (remote IPs and
+ports the attacker chooses by opening connections), the interface config, the
+ARP cache, or the DNS counters. That is a write-what-where primitive with
+partial content control — enough to corrupt page tables, a task struct, or a
+capability table. It was reachable from an unprivileged process with no
+capability held.
+
+`sys_net_route_list` and `sys_tcp_info`, in the same file and the same style,
+*did* call `validate_user_write`, which is what made the omission easy to miss
+on a read-through.
+
+**Fix.** All five now pack their records into a kernel-owned buffer and deliver
+it with a single `copy_to_user`, which performs the validation the comments
+assumed (and brackets the store with STAC/CLAC for SMAP). Sizing the scratch
+buffer by the number of records that actually exist, rather than by the
+caller's advertised `buf_len`, additionally stops a caller demanding an
+arbitrary kernel allocation.
+
+**How it was found.** Not by looking for it — by working through
+`D-SYSCALL-HANDLERS-HAND-RAW-USER-SLICES-TO-KERNEL-CODE` below and reading
+every SAFETY comment on a user-pointer access to check whether the invariant it
+claimed actually held. Five did not. **The lesson worth keeping: a SAFETY
+comment that names a precondition without pointing at the code that establishes
+it is not evidence, and in this file it was wrong five times out of five.**
+
+---
+
+### D-SYSCALL-HANDLERS-HAND-RAW-USER-SLICES-TO-KERNEL-CODE — 2026-08-13 — TECH DEBT (blocks enabling SMAP) — IN PROGRESS
 
 **What.** Roughly 100 syscall handlers in `kernel/src/syscall/handlers.rs`,
 `kernel/src/syscall/linux.rs` and `kernel/src/ipc/io_ring.rs` follow this shape:
@@ -100,6 +151,111 @@ sites, and it wants a pinning primitive before (2) is available.
 **Where.** `kernel/src/syscall/handlers.rs` (~60 sites — grep
 `from_raw_parts`), `kernel/src/syscall/linux.rs`, `kernel/src/ipc/io_ring.rs`;
 gate at `kernel/src/smep_smap.rs::USER_ACCESSES_ANNOTATED`.
+
+**Approach taken.** Option (1), the bounce, everywhere. Option (2) still wants
+a frame-pinning primitive that does not exist; revisit it for the large
+transfers once one does. Four shapes recur:
+
+- **write** — `read_user_vec(ptr, len, MAX)` into a kernel `Vec`, then call the
+  subsystem with `&data`.
+- **read** — `with_user_out_buf(ptr, cap, MAX, |buf| subsystem_read(buf))`.
+- **recv-then-copy** — keep the up-front `validate_user_write` so a bad
+  destination costs the caller an error rather than a *dequeued* message with
+  nowhere to go, then `copy_to_user`, which re-validates at the moment of the
+  store. The second check is the one that matters: the dequeue blocks.
+- **record packing** — fill a kernel buffer sized by what the kernel will
+  actually emit (never by the caller's advertised capacity), then one
+  `copy_to_user` for the batch. Storing records one at a time meant a fault
+  partway through left the caller with a partial answer it could not detect.
+
+**Progress (2026-08-13).** `handlers.rs` is done. Verified by grep, not by
+recollection — the first time this entry claimed "done" the grep immediately
+disproved it, which is why the check is recorded here:
+
+```
+grep -nE 'as \*const u8|as \*mut u8|as \*mut u64|as \*mut u32|as \*mut i32|copy_nonoverlapping|ptr::write|write_bytes|read_volatile|write_volatile|from_raw_parts' kernel/src/syscall/handlers.rs
+```
+
+now yields six hits, all benign: five are prose inside comments describing the
+code that *used* to be there, and `handlers.rs:3655` takes a slice over a
+`SpawnArgsHeader` living on the **kernel** stack, which is not a user access at
+all. So: no `from_raw_parts` over a user address, no
+`core::ptr::write`/`copy_nonoverlapping` through a user pointer, and no
+raw-pointer locals derived from a syscall argument.
+
+The last batch was the six net handlers, which all *did* validate first and so
+were easy to skim past — validation is necessary but it is not the property
+being restored here. Four inbound record readers (`sys_net_if_config`,
+`sys_net_route_add`, `sys_net_route_del`, `sys_net_fw_add_rule`) became
+`read_user_value::<[u8; REC_SIZE]>` — a `[u8; N]` has alignment 1, so the
+fixed-size ABI record decodes through the bounce with no cast and no indexing.
+`sys_tcp_info` became a single `copy_to_user`. `sys_net_route_list` was the only
+one needing real restructuring: it stored records one at a time through
+`buf_ptr as *mut u8`, so a fault on record 5 of 9 left the caller holding a
+partial table *and* a return value claiming all nine — now packed in the kernel
+and delivered as one copy, with the count reported from what was actually
+packed.
+
+Remaining: `kernel/src/ipc/io_ring.rs` (~10 sites), `kernel/src/syscall/linux.rs`,
+`kernel/src/drm/syscall.rs`. Then flip `USER_ACCESSES_ANNOTATED` and boot-test
+under `+smep,+smap,+umip`.
+
+**Bugs found while doing it.** The refactor was worth far more than the SMAP
+unblock — reading each site closely turned up a long list of live defects,
+every one of which predates this work:
+
+- **`B-NET-DIAGNOSTIC-HANDLERS-WROTE-TO-AN-UNVALIDATED-USER-POINTER`** (above)
+  — five handlers, arbitrary kernel write, no capability required. The most
+  serious find.
+- **A kernel-panic vector in the xattr handlers.** They validated *one* byte
+  and then scanned up to 256 looking for a NUL. An unterminated string at the
+  end of a mapping walks the scan into an unmapped page, and the fault is taken
+  in supervisor mode with no exception-table entry to recover from — so any
+  process could panic the kernel with one unterminated buffer. Fixed by
+  `mm::user::read_user_cstr`, which copies forward in page-bounded chunks.
+- **Alignment UB in `mm::user::read_user`/`write_user`.** Typed
+  `core::ptr::read`/`write` through a user-supplied pointer, behind a safety
+  contract requiring the caller to "ensure it is properly aligned" — which a
+  syscall ABI cannot enforce. Both deleted in favour of the byte-wise
+  `read_user_value`/`write_user_value`.
+- **Alignment UB in `sys_fs_metadata` for *every* caller.** `attributes` sits
+  at ABI offset 58, two bytes past a `u16`, so `out_ptr.add(58) as *mut u32`
+  was a misaligned typed store by construction — not merely reachable by a
+  hostile caller.
+- **A self-deadlock in `sys_log_read`.** `klog::read_logs` formats JSON-lines
+  *while holding the log-ring spinlock*, straight into the caller's buffer, so
+  a demand-paging fault on an untouched user page is taken with that lock held
+  — and the fault path itself logs.
+- **Six silent truncations**, each of which changed *which object* the syscall
+  operated on rather than merely shortening a result: `sys_dns_resolve` (a
+  clipped name resolves a different host), `sys_fs_symlink` (the link points
+  elsewhere), `sys_fs_set_xattr` and `sys_fs_append` (clipped the data and
+  returned *success* — silent corruption), `sys_cap_request` (clipped the
+  human-facing reason string, so a request could be made to read as more
+  innocuous than it is), and `ns_bind`/`ns_unbind`/`ns_hide` (a truncated
+  prefix installs a sandbox rule over a *broader* subtree — failure in exactly
+  the wrong direction). All now reject with `InvalidArgument`. The rule
+  adopted: a length cap is legitimate **only** where the handler returns the
+  number of bytes it consumed, making it a `write(2)`-style short write the
+  caller loops on (`sys_debug_print`, console write, `readlink`).
+- **`sys_fs_handle_path` reported the truncated length**, so a caller that
+  filled its buffer exactly could not distinguish a fit from a clipped path.
+  Now returns the full length — the `snprintf` contract.
+- **Infallible allocations sized by a syscall argument** (`vec![0u8; buf_cap]`
+  in `sys_fs_read` and elsewhere): on exhaustion these call the allocation
+  error handler, i.e. a userspace-triggerable kernel abort. Now
+  `mm::user::alloc_zeroed_vec`, which returns `OutOfMemory`.
+- **`sys_getrandom` validated its destination *after* running the CSPRNG**, so
+  a bad pointer consumed entropy for nothing.
+- **Two false SAFETY comments on blocking paths** — the `waitpid` status write
+  claimed "the address space cannot have changed since" on a path that sleeps,
+  and `sys_process_crash_info` called a userspace buffer "always valid kernel
+  memory".
+- **Several handlers wrote multi-field records one field at a time**
+  (`sys_net_stat`'s six counters, `sys_fs_watch_read`, `sys_process_get_args`,
+  `sys_fs_journal_read`), so a fault partway through left the caller with a
+  half-updated record — and in the `watch_read` and `get_args` cases the data
+  had *already* been dequeued/consumed, so it was unrecoverably lost.
 
 **Related.** `B-AC-INHERITED-AT-KERNEL-ENTRY` (fixed) was the *other*
 prerequisite for SMAP; this is now the only one left. design-decisions §122

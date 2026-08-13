@@ -11724,15 +11724,15 @@ pub fn sys_net_if_config(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    // Copy the fixed-size record out of user memory (validated first).
-    if let Err(e) = crate::mm::user::validate_user_read(in_ptr, REC_SIZE) {
-        return SyscallResult::err(e);
-    }
-    let mut record = [0u8; REC_SIZE];
-    // SAFETY: validated above for exactly REC_SIZE bytes of readable user memory.
-    unsafe {
-        core::ptr::copy_nonoverlapping(in_ptr as *const u8, record.as_mut_ptr(), REC_SIZE);
-    }
+    // Copied through the bounce rather than by dereferencing `in_ptr`: the
+    // address is userspace, so the read has to be bracketed by STAC/CLAC once
+    // SMAP is on, and a bare `validate_user_read` is not on its own a licence to
+    // dereference — `read_user_value` re-validates at the moment of the copy,
+    // which is the check that survives a concurrent `munmap` from a peer thread.
+    let record = match crate::mm::user::read_user_value::<[u8; REC_SIZE]>(in_ptr) {
+        Ok(r) => r,
+        Err(e) => return SyscallResult::err(e),
+    };
 
     // Destructure the fixed-size record by value: no indexing/arithmetic on the
     // hot path, and every field is named per the ABI layout.
@@ -11813,14 +11813,12 @@ pub fn sys_net_route_add(args: &SyscallArgs) -> SyscallResult {
     if in_ptr == 0 || buf_len < REC_SIZE {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if let Err(e) = crate::mm::user::validate_user_read(in_ptr, REC_SIZE) {
-        return SyscallResult::err(e);
-    }
-    let mut record = [0u8; REC_SIZE];
-    // SAFETY: validated above for exactly REC_SIZE bytes of readable user memory.
-    unsafe {
-        core::ptr::copy_nonoverlapping(in_ptr as *const u8, record.as_mut_ptr(), REC_SIZE);
-    }
+    // Through the bounce: see `sys_net_if_config` for why the raw dereference
+    // was wrong even with the validation immediately above it.
+    let record = match crate::mm::user::read_user_value::<[u8; REC_SIZE]>(in_ptr) {
+        Ok(r) => r,
+        Err(e) => return SyscallResult::err(e),
+    };
 
     // Destructure by value: named fields, no indexing/arithmetic on the path.
     let [d0, d1, d2, d3, m0, m1, m2, m3, g0, g1, g2, g3, mt0, mt1, mt2, mt3] = record;
@@ -11860,14 +11858,11 @@ pub fn sys_net_route_del(args: &SyscallArgs) -> SyscallResult {
     if in_ptr == 0 || buf_len < REC_SIZE {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if let Err(e) = crate::mm::user::validate_user_read(in_ptr, REC_SIZE) {
-        return SyscallResult::err(e);
-    }
-    let mut record = [0u8; REC_SIZE];
-    // SAFETY: validated above for exactly REC_SIZE bytes of readable user memory.
-    unsafe {
-        core::ptr::copy_nonoverlapping(in_ptr as *const u8, record.as_mut_ptr(), REC_SIZE);
-    }
+    // Through the bounce: see `sys_net_if_config`.
+    let record = match crate::mm::user::read_user_value::<[u8; REC_SIZE]>(in_ptr) {
+        Ok(r) => r,
+        Err(e) => return SyscallResult::err(e),
+    };
 
     let [d0, d1, d2, d3, m0, m1, m2, m3] = record;
     let destination = crate::netns::Ipv4Addr([d0, d1, d2, d3]);
@@ -11907,25 +11902,44 @@ pub fn sys_net_route_list(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::ok(0);
     }
     let span = to_write.saturating_mul(RECORD_SIZE);
+    // Fail fast on a hopeless destination so the caller gets an error rather
+    // than a table half-written; `copy_to_user` below re-validates at the
+    // moment of the store, which is the check that actually guards it.
     if let Err(e) = crate::mm::user::validate_user_write(buf_ptr, span) {
         return SyscallResult::err(e);
     }
 
+    // Packed in the kernel and delivered as one copy.  The records used to be
+    // stored one at a time through `buf_ptr as *mut u8`; besides needing SMAP
+    // bracketing, that meant a fault on record 5 of 9 left the caller with a
+    // partial table and a return value claiming all nine.
+    let mut out = match crate::mm::user::alloc_zeroed_vec(span) {
+        Ok(v) => v,
+        Err(e) => return SyscallResult::err(e),
+    };
     let mut written: usize = 0;
     for route in entries.iter().take(to_write) {
-        let mut record = [0u8; RECORD_SIZE];
-        record[0..4].copy_from_slice(&route.destination.0);
-        record[4..8].copy_from_slice(&route.mask.0);
-        record[8..12].copy_from_slice(&route.gateway.0);
-        record[12..16].copy_from_slice(&route.metric.to_le_bytes());
+        let base = written.saturating_mul(RECORD_SIZE);
+        let Some(rec) = out.get_mut(base..base.saturating_add(RECORD_SIZE)) else {
+            break;
+        };
+        let mut put = |at: usize, bytes: &[u8]| {
+            if let Some(dst) = rec.get_mut(at..at.saturating_add(bytes.len())) {
+                dst.copy_from_slice(bytes);
+            }
+        };
+        put(0, &route.destination.0);
+        put(4, &route.mask.0);
+        put(8, &route.gateway.0);
+        put(12, &route.metric.to_le_bytes());
+        written = written.saturating_add(1);
+    }
 
-        // SAFETY: `buf_ptr..buf_ptr+span` validated writable above; each record
-        // lands within that span (written < to_write, offset < span).
-        let dst = (buf_ptr as usize).wrapping_add(written.wrapping_mul(RECORD_SIZE)) as *mut u8;
-        unsafe {
-            core::ptr::copy_nonoverlapping(record.as_ptr(), dst, RECORD_SIZE);
-        }
-        written = written.wrapping_add(1);
+    // SAFETY: `out` is a live kernel allocation of exactly `span` bytes, so the
+    // source range is readable for the length passed.  `copy_to_user` validates
+    // the destination itself and brackets the store for SMAP.
+    if let Err(e) = unsafe { crate::mm::user::copy_to_user(out.as_ptr(), buf_ptr, span) } {
+        return SyscallResult::err(e);
     }
 
     #[allow(clippy::cast_possible_wrap)]
@@ -11990,14 +12004,11 @@ pub fn sys_net_fw_add_rule(args: &SyscallArgs) -> SyscallResult {
     if in_ptr == 0 || buf_len < REC_SIZE {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if let Err(e) = crate::mm::user::validate_user_read(in_ptr, REC_SIZE) {
-        return SyscallResult::err(e);
-    }
-    let mut record = [0u8; REC_SIZE];
-    // SAFETY: validated above for exactly REC_SIZE bytes of readable user memory.
-    unsafe {
-        core::ptr::copy_nonoverlapping(in_ptr as *const u8, record.as_mut_ptr(), REC_SIZE);
-    }
+    // Through the bounce: see `sys_net_if_config`.
+    let record = match crate::mm::user::read_user_value::<[u8; REC_SIZE]>(in_ptr) {
+        Ok(r) => r,
+        Err(e) => return SyscallResult::err(e),
+    };
 
     // Destructure by value: named fields, no indexing on the decode path.
     let [dir_b, act_b, proto_b, prefix_b, dp0, dp1, pr0, pr1, s0, s1, s2, s3] = record;
@@ -12356,10 +12367,13 @@ pub fn sys_tcp_info(args: &SyscallArgs) -> SyscallResult {
     buf[32..36].copy_from_slice(&(info.peer_mss as u32).to_le_bytes());
     // [36..48] reserved (zeros).
 
-    let dst = out_ptr as *mut u8;
-    // SAFETY: validated above — dst is in user space and writable.
-    unsafe {
-        core::ptr::copy_nonoverlapping(buf.as_ptr(), dst, INFO_SIZE);
+    // SAFETY: `buf` is a live 48-byte kernel array, so the source range is
+    // readable for `INFO_SIZE`.  `copy_to_user` re-validates the destination at
+    // the moment of the store — the check above only fails the call early, and
+    // is not on its own a licence to dereference a user address — and brackets
+    // the store for SMAP.
+    if let Err(e) = unsafe { crate::mm::user::copy_to_user(buf.as_ptr(), args.arg1, INFO_SIZE) } {
+        return SyscallResult::err(e);
     }
 
     SyscallResult::ok(0)

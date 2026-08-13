@@ -54,6 +54,12 @@ exclude = [
     # rationale as netproto: linked into both the bare-metal daemon and the
     # kernel; excluded so the workspace-root target doesn't build it as std.
     "netipc",
+    # Shared no_std POSIX TZ-string engine. Linked into the libc (posix,
+    # x86_64-unknown-none) *and* into std userspace (userspace/oils,
+    # x86_64-slateos), so the shell and every C program on the machine agree
+    # on what local time is. Excluded for netproto's reason; host-testable
+    # with an explicit --target.
+    "tzrules",
     # Shared no_std atomic SPSC ring driver over the netipc::ring ABI. Adds
     # the *unsafe* Acquire/Release atomic index accesses that netipc
     # (#![forbid(unsafe_code)]) can't host. Linked into both the bare-metal

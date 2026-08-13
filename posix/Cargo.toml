@@ -9,5 +9,11 @@ description = "POSIX compatibility library — C-compatible function signatures 
 # `cargo test` only uses the rlib.
 crate-type = ["staticlib", "rlib"]
 
+# The POSIX `TZ`-string engine. Shared with `userspace/oils` so the shell's
+# `printf '%(FMT)T'` and the libc's `strftime` can never disagree about local
+# time; see tzrules/src/lib.rs's "Why this is a crate and not a module".
+[dependencies]
+tzrules = { path = "../tzrules" }
+
 [lints]
 workspace = true

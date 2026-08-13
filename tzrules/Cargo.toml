@@ -1,0 +1,14 @@
+[package]
+name = "tzrules"
+version = "0.1.0"
+edition = "2024"
+description = "Shared no_std POSIX TZ-string timezone rules engine for SlateOS (libc + shell must agree on local time)."
+
+[lib]
+path = "src/lib.rs"
+
+# Intentionally dependency-free and `no_std`, mirroring `netproto`/`netipc`:
+# this crate is linked into the libc (`posix`, built for x86_64-unknown-none)
+# *and* into std userspace programs (`userspace/oils`, x86_64-slateos). It must
+# never pull in `std` or an allocator, or one of those two arms breaks.
+[dependencies]

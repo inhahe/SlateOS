@@ -8036,6 +8036,9 @@ version = "0.1.0"
 [[package]]
 name = "posix"
 version = "0.1.0"
+dependencies = [
+ "tzrules",
+]
 
 [[package]]
 name = "postcard-cli"
@@ -10874,6 +10877,10 @@ dependencies = [
 
 [[package]]
 name = "typst-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tzrules"
 version = "0.1.0"
 
 [[package]]

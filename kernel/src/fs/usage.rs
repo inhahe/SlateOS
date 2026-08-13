@@ -36,6 +36,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::KernelResult;
+use crate::fs::path::{Path, PathBuf};
 use crate::fs::{EntryType, Vfs};
 use crate::serial_println;
 
@@ -60,7 +61,7 @@ const TOP_N: usize = 20;
 #[derive(Debug, Clone)]
 pub struct UsageReport {
     /// Root path that was analyzed.
-    pub root: String,
+    pub root: PathBuf,
     /// Total size of all files under root (bytes).
     pub total_size: u64,
     /// Total number of files.
@@ -89,7 +90,7 @@ pub struct UsageReport {
 #[derive(Debug, Clone)]
 pub struct SizeEntry {
     /// Path.
-    pub path: String,
+    pub path: PathBuf,
     /// Size in bytes.
     pub size: u64,
 }
@@ -97,8 +98,12 @@ pub struct SizeEntry {
 /// Aggregate size for a file extension group.
 #[derive(Debug, Clone)]
 pub struct ExtensionGroup {
-    /// File extension (lowercase, without dot).
-    pub extension: String,
+    /// File extension (ASCII-lowercased, without dot).
+    ///
+    /// Bytes, not text: an extension is a slice of a filename, which has no
+    /// declared encoding. Folding is ASCII-only for the same reason - see
+    /// [`Path::eq_ignore_ascii_case`].
+    pub extension: Vec<u8>,
     /// Total size of all files with this extension.
     pub total_size: u64,
     /// Number of files with this extension.
@@ -146,26 +151,31 @@ pub struct WastedSpace {
 #[derive(Debug, Clone)]
 pub struct UsageConfig {
     /// Root path to analyze.
-    pub root: String,
+    pub root: PathBuf,
     /// Maximum depth to recurse.
     pub max_depth: usize,
     /// Maximum files to track.
     pub max_files: usize,
-    /// Paths to exclude.
-    pub exclude_prefixes: Vec<String>,
+    /// Exclude these paths and everything under them.
+    ///
+    /// Matching is by *component*, via [`crate::fs::pathutil::path_in_subtree`]:
+    /// excluding `/dev` excludes `/dev/null` but not `/devices`. This used to be
+    /// a byte-prefix test, which also swallowed every sibling whose name merely
+    /// started the same way.
+    pub exclude_paths: Vec<PathBuf>,
 }
 
 impl Default for UsageConfig {
     fn default() -> Self {
         Self {
-            root: String::from("/"),
+            root: PathBuf::from("/"),
             max_depth: MAX_DEPTH,
             max_files: MAX_TRACKED_FILES,
-            exclude_prefixes: alloc::vec![
-                String::from("/proc"),
-                String::from("/dev"),
-                String::from("/sys"),
-                String::from("/_"),
+            exclude_paths: alloc::vec![
+                PathBuf::from("/proc"),
+                PathBuf::from("/dev"),
+                PathBuf::from("/sys"),
+                PathBuf::from("/_"),
             ],
         }
     }
@@ -206,7 +216,7 @@ pub fn analyze(config: &UsageConfig) -> KernelResult<UsageReport> {
 
     serial_println!(
         "[usage] Analysis of '{}': {} files, {} dirs, {} bytes",
-        config.root,
+        config.root.display(),
         report.file_count,
         report.dir_count,
         report.total_size,
@@ -216,9 +226,9 @@ pub fn analyze(config: &UsageConfig) -> KernelResult<UsageReport> {
 }
 
 /// Analyze a path with default config.
-pub fn analyze_path(root: &str) -> KernelResult<UsageReport> {
+pub fn analyze_path<P: AsRef<Path> + ?Sized>(root: &P) -> KernelResult<UsageReport> {
     let config = UsageConfig {
-        root: String::from(root),
+        root: root.as_ref().to_path_buf(),
         ..UsageConfig::default()
     };
     analyze(&config)
@@ -233,11 +243,11 @@ struct Collector {
     /// Current epoch nanoseconds.
     now_ns: u64,
     /// All file entries (path, size).
-    files: Vec<(String, u64)>,
+    files: Vec<(PathBuf, u64)>,
     /// Directory sizes (path → total size of contents).
-    dir_sizes: BTreeMap<String, u64>,
+    dir_sizes: BTreeMap<PathBuf, u64>,
     /// Extension → (total_size, count).
-    ext_stats: BTreeMap<String, (u64, u64)>,
+    ext_stats: BTreeMap<Vec<u8>, (u64, u64)>,
     /// Age buckets.
     age: AgeBuckets,
     /// Wasted space counters.
@@ -250,7 +260,7 @@ struct Collector {
     /// Size histogram for median approximation.
     size_buckets: [u64; 16],
     /// Filename occurrences for duplicate name detection.
-    name_counts: BTreeMap<String, u64>,
+    name_counts: BTreeMap<PathBuf, u64>,
 }
 
 impl Collector {
@@ -272,20 +282,20 @@ impl Collector {
     }
 
     /// Record a file.
-    fn record_file(&mut self, path: &str, name: &str, size: u64, modified_ns: u64) {
+    fn record_file(&mut self, path: &Path, name: &Path, size: u64, modified_ns: u64) {
         self.file_count = self.file_count.saturating_add(1);
         self.total_size = self.total_size.saturating_add(size);
 
         // Track individual files for top-N (bounded).
         if self.files.len() < MAX_TRACKED_FILES {
-            self.files.push((String::from(path), size));
+            self.files.push((path.to_path_buf(), size));
         }
 
         // Extension stats.
-        let ext = file_extension(name);
+        let ext = name.extension().map_or(&[][..], Path::as_bytes);
         if !ext.is_empty() {
             let entry = self.ext_stats
-                .entry(String::from(ext))
+                .entry(ext.to_ascii_lowercase())
                 .or_insert((0, 0));
             entry.0 = entry.0.saturating_add(size);
             entry.1 = entry.1.saturating_add(1);
@@ -313,7 +323,7 @@ impl Collector {
 
         // Duplicate name tracking.
         let count = self.name_counts
-            .entry(String::from(name))
+            .entry(name.to_path_buf())
             .or_insert(0);
         *count = count.saturating_add(1);
     }
@@ -339,34 +349,32 @@ impl Collector {
     }
 
     /// Record a directory.
-    fn record_dir(&mut self, path: &str) {
+    fn record_dir(&mut self, path: &Path) {
         self.dir_count = self.dir_count.saturating_add(1);
-        self.dir_sizes.entry(String::from(path)).or_insert(0);
+        self.dir_sizes.entry(path.to_path_buf()).or_insert(0);
     }
 
     /// Add size to a directory and all its parent directories.
-    fn add_to_dir(&mut self, dir: &str, size: u64) {
+    fn add_to_dir(&mut self, dir: &Path, size: u64) {
         // Add to this directory.
-        let entry = self.dir_sizes.entry(String::from(dir)).or_insert(0);
+        let entry = self.dir_sizes.entry(dir.to_path_buf()).or_insert(0);
         *entry = entry.saturating_add(size);
 
-        // Walk up the path and add to parents.
-        let mut current = String::from(dir);
-        while let Some(pos) = current.rfind('/') {
-            if pos == 0 {
-                // Root directory.
-                let root_entry = self.dir_sizes.entry(String::from("/")).or_insert(0);
-                *root_entry = root_entry.saturating_add(size);
-                break;
-            }
-            current = String::from(&current[..pos]);
-            let parent_entry = self.dir_sizes.entry(current.clone()).or_insert(0);
+        // Walk up the path and add to parents.  `Path::parent` yields `/` for a
+        // top-level directory and then `None`, so the hand-rolled `rfind('/')`
+        // loop - which needed a special case to notice it had reached the root -
+        // collapses into the iteration itself.
+        let mut current = dir.to_path_buf();
+        while let Some(parent) = current.parent() {
+            let parent = parent.to_path_buf();
+            let parent_entry = self.dir_sizes.entry(parent.clone()).or_insert(0);
             *parent_entry = parent_entry.saturating_add(size);
+            current = parent;
         }
     }
 
     /// Build the final report.
-    fn build_report(self, root: &str) -> UsageReport {
+    fn build_report(self, root: &Path) -> UsageReport {
         // Top directories by size.
         let mut dir_entries: Vec<SizeEntry> = self.dir_sizes
             .iter()
@@ -411,7 +419,7 @@ impl Collector {
         wasted.duplicate_names = dup_names;
 
         UsageReport {
-            root: String::from(root),
+            root: root.to_path_buf(),
             total_size: self.total_size,
             file_count: self.file_count,
             dir_count: self.dir_count,
@@ -456,7 +464,7 @@ impl Collector {
 
 /// Recursively walk a directory tree collecting usage data.
 fn walk(
-    path: &str,
+    path: &Path,
     config: &UsageConfig,
     collector: &mut Collector,
     depth: usize,
@@ -468,9 +476,10 @@ fn walk(
         return;
     }
 
-    // Check exclusions.
-    for excl in &config.exclude_prefixes {
-        if path.starts_with(excl.as_str()) {
+    // Check the exclude list (canonical subtree predicate tolerates a
+    // trailing slash on the exclude entry). See fs::pathutil.
+    for excl in &config.exclude_paths {
+        if crate::fs::pathutil::path_in_subtree(path, excl) {
             return;
         }
     }
@@ -483,15 +492,13 @@ fn walk(
     };
 
     for entry in &entries {
-        if entry.name == "." || entry.name == ".." {
+        if entry.name.as_path() == Path::new(".") || entry.name.as_path() == Path::new("..") {
             continue;
         }
 
-        let full = if path == "/" {
-            alloc::format!("/{}", entry.name)
-        } else {
-            alloc::format!("{}/{}", path, entry.name)
-        };
+        // `Path::join` collapses the root case itself, so the `path == "/"` arm
+        // that existed only to avoid a doubled separator is gone.
+        let full = path.join(&entry.name);
 
         match entry.entry_type {
             EntryType::File => {
@@ -513,15 +520,6 @@ fn walk(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// Extract file extension (lowercase, without dot).
-fn file_extension(name: &str) -> &str {
-    if let Some(pos) = name.rfind('.') {
-        &name[pos + 1..]
-    } else {
-        ""
-    }
-}
 
 /// Format a byte count as a human-readable string.
 pub fn format_size(bytes: u64) -> String {
@@ -604,7 +602,7 @@ fn test_extension_stats() {
     assert!(!report.by_extension.is_empty(), "should have extension stats");
 
     // Find the .txt group.
-    let txt = report.by_extension.iter().find(|g| g.extension == "txt");
+    let txt = report.by_extension.iter().find(|g| g.extension == b"txt");
     assert!(txt.is_some(), "should find .txt group");
     if let Some(g) = txt {
         assert_eq!(g.count, 2, "should have 2 .txt files");

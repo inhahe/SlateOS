@@ -3936,7 +3936,10 @@ fn gen_usage() -> Vec<u8> {
     out.push_str(&format!("Disk Usage Analyzer ({} analyses run)\n\n", usage::analyses_run()));
 
     if let Some(report) = usage::last_report() {
-        out.push_str(&format!("Last analysis: {}\n", report.root));
+        // Paths and extensions are raw bytes; octal-escape them like the mount
+        // fields, so an embedded newline cannot forge a record in this
+        // line-oriented file.
+        out.push_str(&format!("Last analysis: {}\n", mangle_mount_field(report.root.as_bytes())));
         out.push_str(&format!("  total size:   {}\n", usage::format_size(report.total_size)));
         out.push_str(&format!("  files:        {}\n", report.file_count));
         out.push_str(&format!("  directories:  {}\n", report.dir_count));
@@ -3946,7 +3949,11 @@ fn gen_usage() -> Vec<u8> {
         if !report.top_dirs.is_empty() {
             out.push_str("\nTop Directories:\n");
             for d in report.top_dirs.iter().take(10) {
-                out.push_str(&format!("  {:>10} {}\n", usage::format_size(d.size), d.path));
+                out.push_str(&format!(
+                    "  {:>10} {}\n",
+                    usage::format_size(d.size),
+                    mangle_mount_field(d.path.as_bytes())
+                ));
             }
         }
 
@@ -3955,7 +3962,7 @@ fn gen_usage() -> Vec<u8> {
             for e in report.by_extension.iter().take(10) {
                 out.push_str(&format!(
                     "  .{:8} {:>10} ({} files)\n",
-                    e.extension,
+                    mangle_mount_field(&e.extension),
                     usage::format_size(e.total_size),
                     e.count
                 ));

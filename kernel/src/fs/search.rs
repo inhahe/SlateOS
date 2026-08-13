@@ -42,6 +42,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::KernelResult;
+use crate::fs::path::{Path, PathBuf};
 use crate::fs::{EntryType, Vfs};
 use crate::serial_println;
 
@@ -53,7 +54,7 @@ use crate::serial_println;
 #[derive(Debug, Clone)]
 pub struct SearchResult {
     /// Full path to the matched file/directory.
-    pub path: String,
+    pub path: PathBuf,
     /// Entry type (file, directory, symlink).
     pub entry_type: EntryType,
     /// File size in bytes.
@@ -69,18 +70,26 @@ pub struct SearchResult {
 }
 
 /// Query builder for constructing compound search queries.
+///
+/// Every *name* pattern is a byte string, not text. The pattern itself is
+/// typically typed by a person and so is usually valid UTF-8, but the names it
+/// is matched against come from `readdir` and have no declared encoding. Held
+/// as `String`, a pattern could only ever be compared against names that happen
+/// to decode — which would make exactly the files that are hardest to name by
+/// hand the ones this search engine cannot find. The builders take
+/// `impl AsRef<[u8]>`, so a `&str` literal still works at the call site.
 #[derive(Debug, Clone)]
 pub struct Query {
-    /// Name must contain this substring (case-insensitive).
-    name_contains: Option<String>,
+    /// Name must contain this substring (ASCII-case-insensitive).
+    name_contains: Option<Vec<u8>>,
     /// Name must match this glob pattern.
-    name_glob: Option<String>,
+    name_glob: Option<Vec<u8>>,
     /// Name must start with this prefix.
-    name_prefix: Option<String>,
+    name_prefix: Option<Vec<u8>>,
     /// Name must end with this suffix.
-    name_suffix: Option<String>,
+    name_suffix: Option<Vec<u8>>,
     /// File extension (without dot).
-    extension: Option<String>,
+    extension: Option<Vec<u8>>,
     /// Minimum file size.
     size_min: Option<u64>,
     /// Maximum file size.
@@ -105,8 +114,11 @@ pub struct Query {
     max_depth: usize,
     /// Maximum results to return.
     max_results: usize,
-    /// Paths to exclude.
-    exclude_prefixes: Vec<String>,
+    /// Exclude these paths and everything under them.
+    ///
+    /// Matching is by *component*, via [`crate::fs::pathutil::path_in_subtree`]:
+    /// excluding `/dev` excludes `/dev/null` but not `/devices`.
+    exclude_paths: Vec<PathBuf>,
     /// Content hash must match (SHA-256 hex string).
     content_hash: Option<String>,
     /// Minimum permissions bits that must be set (AND check).
@@ -134,43 +146,43 @@ impl Query {
             permissions: None,
             max_depth: 32,
             max_results: 10_000,
-            exclude_prefixes: alloc::vec![
-                String::from("/proc"),
-                String::from("/dev"),
-                String::from("/sys"),
+            exclude_paths: alloc::vec![
+                PathBuf::from("/proc"),
+                PathBuf::from("/dev"),
+                PathBuf::from("/sys"),
             ],
             content_hash: None,
             permissions_mask: None,
         }
     }
 
-    /// Name must contain this substring (case-insensitive).
-    pub fn name_contains(mut self, s: &str) -> Self {
-        self.name_contains = Some(String::from(s));
+    /// Name must contain this substring (ASCII-case-insensitive).
+    pub fn name_contains<S: AsRef<[u8]> + ?Sized>(mut self, s: &S) -> Self {
+        self.name_contains = Some(s.as_ref().to_vec());
         self
     }
 
     /// Name must match this glob pattern.
-    pub fn name_glob(mut self, pattern: &str) -> Self {
-        self.name_glob = Some(String::from(pattern));
+    pub fn name_glob<S: AsRef<[u8]> + ?Sized>(mut self, pattern: &S) -> Self {
+        self.name_glob = Some(pattern.as_ref().to_vec());
         self
     }
 
     /// Name must start with this prefix.
-    pub fn name_prefix(mut self, pfx: &str) -> Self {
-        self.name_prefix = Some(String::from(pfx));
+    pub fn name_prefix<S: AsRef<[u8]> + ?Sized>(mut self, pfx: &S) -> Self {
+        self.name_prefix = Some(pfx.as_ref().to_vec());
         self
     }
 
     /// Name must end with this suffix.
-    pub fn name_suffix(mut self, sfx: &str) -> Self {
-        self.name_suffix = Some(String::from(sfx));
+    pub fn name_suffix<S: AsRef<[u8]> + ?Sized>(mut self, sfx: &S) -> Self {
+        self.name_suffix = Some(sfx.as_ref().to_vec());
         self
     }
 
-    /// File extension (without dot, case-insensitive).
-    pub fn extension(mut self, ext: &str) -> Self {
-        self.extension = Some(String::from(ext));
+    /// File extension (without dot, ASCII-case-insensitive).
+    pub fn extension<S: AsRef<[u8]> + ?Sized>(mut self, ext: &S) -> Self {
+        self.extension = Some(ext.as_ref().to_vec());
         self
     }
 
@@ -264,9 +276,9 @@ impl Query {
         self
     }
 
-    /// Add a path prefix to exclude.
-    pub fn exclude(mut self, prefix: &str) -> Self {
-        self.exclude_prefixes.push(String::from(prefix));
+    /// Exclude a path and everything under it.
+    pub fn exclude<P: AsRef<Path> + ?Sized>(mut self, path: &P) -> Self {
+        self.exclude_paths.push(path.as_ref().to_path_buf());
         self
     }
 
@@ -277,9 +289,9 @@ impl Query {
     }
 
     /// Execute the query starting from the given root path.
-    pub fn execute(&self, root: &str) -> KernelResult<Vec<SearchResult>> {
+    pub fn execute<P: AsRef<Path> + ?Sized>(&self, root: &P) -> KernelResult<Vec<SearchResult>> {
         let mut results = Vec::new();
-        search_recursive(root, self, &mut results, 0);
+        search_recursive(root.as_ref(), self, &mut results, 0);
 
         // Update stats.
         TOTAL_SEARCHES.fetch_add(1, Ordering::Relaxed);
@@ -316,7 +328,7 @@ pub fn stats() -> (u64, u64) {
 
 /// Recursively search a directory tree.
 fn search_recursive(
-    path: &str,
+    path: &Path,
     query: &Query,
     results: &mut Vec<SearchResult>,
     depth: usize,
@@ -328,10 +340,10 @@ fn search_recursive(
         return;
     }
 
-    // Check exclude prefixes (canonical subtree predicate tolerates a
+    // Check the exclude list (canonical subtree predicate tolerates a
     // trailing slash on the exclude entry). See fs::pathutil.
-    for excl in &query.exclude_prefixes {
-        if crate::fs::pathutil::path_in_subtree(path, excl.as_str()) {
+    for excl in &query.exclude_paths {
+        if crate::fs::pathutil::path_in_subtree(path, excl) {
             return;
         }
     }
@@ -346,15 +358,13 @@ fn search_recursive(
             return;
         }
 
-        if entry.name == "." || entry.name == ".." {
+        if entry.name.as_path() == Path::new(".") || entry.name.as_path() == Path::new("..") {
             continue;
         }
 
-        let full_path = if path == "/" {
-            alloc::format!("/{}", entry.name)
-        } else {
-            alloc::format!("{}/{}", path, entry.name)
-        };
+        // `Path::join` collapses the root case itself, so the `path == "/"` arm
+        // that existed only to avoid a doubled separator is gone.
+        let full_path = path.join(&entry.name);
 
         // Quick name/type filters before stat.
         if !matches_name_filters(&entry.name, query) {
@@ -410,36 +420,41 @@ fn search_recursive(
 }
 
 /// Check name-based filters (fast, no I/O needed).
-fn matches_name_filters(name: &str, query: &Query) -> bool {
-    // Name contains (case-insensitive).
+///
+/// Every comparison here is over raw bytes. Case folding is restricted to
+/// ASCII because a filename carries no declared encoding, so there is nothing
+/// to consult that would say how to fold a byte >= 0x80 — and folding one by
+/// guessing an encoding makes two distinct names collide.
+fn matches_name_filters(name: &Path, query: &Query) -> bool {
+    let name = name.as_bytes();
+
+    // Name contains (ASCII-case-insensitive).
     if let Some(ref substr) = query.name_contains {
-        let name_lower = to_lower(name);
-        let substr_lower = to_lower(substr);
-        if !name_lower.contains(&substr_lower) {
+        let name_lower = name.to_ascii_lowercase();
+        let substr_lower = substr.to_ascii_lowercase();
+        if !contains_subslice(&name_lower, &substr_lower) {
             return false;
         }
     }
 
     // Name prefix.
     if let Some(ref pfx) = query.name_prefix {
-        if !name.starts_with(pfx.as_str()) {
+        if !name.starts_with(pfx) {
             return false;
         }
     }
 
     // Name suffix.
     if let Some(ref sfx) = query.name_suffix {
-        if !name.ends_with(sfx.as_str()) {
+        if !name.ends_with(sfx) {
             return false;
         }
     }
 
     // Extension.
     if let Some(ref ext) = query.extension {
-        let file_ext = file_extension(name);
-        let ext_lower = to_lower(ext);
-        let file_ext_lower = to_lower(file_ext);
-        if file_ext_lower != ext_lower {
+        let file_ext = Path::new(name).extension().map_or(&[][..], Path::as_bytes);
+        if !file_ext.eq_ignore_ascii_case(ext) {
             return false;
         }
     }
@@ -454,11 +469,25 @@ fn matches_name_filters(name: &str, query: &Query) -> bool {
     true
 }
 
+/// Whether `haystack` contains `needle` as a contiguous subslice.
+///
+/// `[u8]` has `starts_with`/`ends_with` but no substring search, and the
+/// `str::contains` this replaces cannot be applied to a name that does not
+/// decode.
+fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    haystack
+        .windows(needle.len())
+        .any(|w| w == needle)
+}
+
 /// Check metadata-based filters (requires stat data).
 fn matches_metadata_filters(
     meta: &crate::fs::FileMeta,
     query: &Query,
-    path: &str,
+    path: &Path,
 ) -> bool {
     // Size filters.
     if let Some(min) = query.size_min {
@@ -549,58 +578,41 @@ fn matches_metadata_filters(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Extract file extension (without dot).
-fn file_extension(name: &str) -> &str {
-    if let Some(pos) = name.rfind('.') {
-        &name[pos + 1..]
-    } else {
-        ""
-    }
+/// Simple glob matching (`*`, `?`) over raw bytes.
+///
+/// `?` matches exactly one *byte*, not one character. That is the only
+/// definable semantics here: a filename has no declared encoding, so there is
+/// no character boundary to find. It also matches POSIX `fnmatch` in the C
+/// locale, which is what a shell glob does on a Linux filesystem.
+fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
+    glob_match_impl(pattern, text, 0, 0)
 }
 
-/// Simple lowercase conversion (ASCII only).
-fn to_lower(s: &str) -> String {
-    s.chars().map(|c| {
-        if c.is_ascii_uppercase() {
-            (c as u8 + 32) as char
-        } else {
-            c
-        }
-    }).collect()
-}
-
-/// Simple glob matching (*, ?).
-fn glob_match(pattern: &str, text: &str) -> bool {
-    let pat: Vec<char> = pattern.chars().collect();
-    let txt: Vec<char> = text.chars().collect();
-    glob_match_impl(&pat, &txt, 0, 0)
-}
-
-fn glob_match_impl(pat: &[char], txt: &[char], pi: usize, ti: usize) -> bool {
-    if pi == pat.len() {
+fn glob_match_impl(pat: &[u8], txt: &[u8], pi: usize, ti: usize) -> bool {
+    let Some(&p) = pat.get(pi) else {
         return ti == txt.len();
-    }
+    };
 
-    match pat[pi] {
-        '*' => {
-            // Try matching 0 or more characters.
+    match p {
+        b'*' => {
+            // Try matching 0 or more bytes.
             for skip in 0..=txt.len().saturating_sub(ti) {
-                if glob_match_impl(pat, txt, pi + 1, ti + skip) {
+                if glob_match_impl(pat, txt, pi.saturating_add(1), ti.saturating_add(skip)) {
                     return true;
                 }
             }
             false
         }
-        '?' => {
+        b'?' => {
             if ti < txt.len() {
-                glob_match_impl(pat, txt, pi + 1, ti + 1)
+                glob_match_impl(pat, txt, pi.saturating_add(1), ti.saturating_add(1))
             } else {
                 false
             }
         }
         c => {
-            if ti < txt.len() && (txt[ti] == c || txt[ti].eq_ignore_ascii_case(&c)) {
-                glob_match_impl(pat, txt, pi + 1, ti + 1)
+            if txt.get(ti).is_some_and(|t| t.eq_ignore_ascii_case(&c)) {
+                glob_match_impl(pat, txt, pi.saturating_add(1), ti.saturating_add(1))
             } else {
                 false
             }
@@ -632,9 +644,10 @@ pub fn self_test() -> KernelResult<()> {
     test_type_filter();
     test_glob_match();
     test_compound_query();
+    test_non_utf8_name();
     test_stats();
 
-    serial_println!("[search] Self-test passed (8 tests).");
+    serial_println!("[search] Self-test passed (9 tests).");
     Ok(())
 }
 
@@ -670,11 +683,11 @@ fn test_name_contains() {
 
     assert!(results.len() >= 2, "should find 2 files containing 'report'");
     for r in &results {
-        let name = r.path.rsplit('/').next().unwrap_or("");
+        let name = r.path.file_name().map_or(&[][..], Path::as_bytes);
         assert!(
-            to_lower(name).contains("report"),
+            contains_subslice(&name.to_ascii_lowercase(), b"report"),
             "name should contain 'report': {}",
-            name
+            Path::new(name).display()
         );
     }
 
@@ -699,7 +712,11 @@ fn test_extension_filter() {
 
     assert!(results.len() >= 2, "should find 2 .txt files");
     for r in &results {
-        assert!(r.path.ends_with(".txt"), "should be .txt: {}", r.path);
+        assert!(
+            r.path.as_bytes().ends_with(b".txt"),
+            "should be .txt: {}",
+            r.path.display()
+        );
     }
 
     let _ = Vfs::remove("/tmp/search_ext/a.txt");
@@ -723,7 +740,7 @@ fn test_size_filter() {
 
     // Only the big file should match.
     for r in &results {
-        assert!(r.size >= 10, "size should be >= 10: {} has {}", r.path, r.size);
+        assert!(r.size >= 10, "size should be >= 10: {} has {}", r.path.display(), r.size);
     }
 
     let _ = Vfs::remove("/tmp/search_sz/small.txt");
@@ -746,7 +763,7 @@ fn test_type_filter() {
         .expect("execute");
 
     for r in &files {
-        assert_eq!(r.entry_type, EntryType::File, "should be file: {}", r.path);
+        assert_eq!(r.entry_type, EntryType::File, "should be file: {}", r.path.display());
     }
 
     // Dirs only.
@@ -757,7 +774,7 @@ fn test_type_filter() {
         .expect("execute");
 
     for r in &dirs {
-        assert_eq!(r.entry_type, EntryType::Directory, "should be dir: {}", r.path);
+        assert_eq!(r.entry_type, EntryType::Directory, "should be dir: {}", r.path.display());
     }
 
     let _ = Vfs::remove("/tmp/search_type/file.txt");
@@ -768,14 +785,14 @@ fn test_type_filter() {
 }
 
 fn test_glob_match() {
-    assert!(glob_match("*.txt", "hello.txt"));
-    assert!(!glob_match("*.txt", "hello.log"));
-    assert!(glob_match("report*", "report_2024.pdf"));
-    assert!(glob_match("?at", "cat"));
-    assert!(!glob_match("?at", "chat"));
-    assert!(glob_match("*", "anything"));
-    assert!(glob_match("a*b", "aXb"));
-    assert!(glob_match("a*b", "ab"));
+    assert!(glob_match(b"*.txt", b"hello.txt"));
+    assert!(!glob_match(b"*.txt", b"hello.log"));
+    assert!(glob_match(b"report*", b"report_2024.pdf"));
+    assert!(glob_match(b"?at", b"cat"));
+    assert!(!glob_match(b"?at", b"chat"));
+    assert!(glob_match(b"*", b"anything"));
+    assert!(glob_match(b"a*b", b"aXb"));
+    assert!(glob_match(b"a*b", b"ab"));
 
     serial_println!("[search]   glob match: ok");
 }
@@ -796,8 +813,8 @@ fn test_compound_query() {
 
     assert!(!results.is_empty(), "should find at least 1 matching file");
     for r in &results {
-        assert!(r.path.contains("report"), "should contain 'report'");
-        assert!(r.path.ends_with(".txt"), "should be .txt");
+        assert!(contains_subslice(r.path.as_bytes(), b"report"), "should contain 'report'");
+        assert!(r.path.as_bytes().ends_with(b".txt"), "should be .txt");
         assert!(r.size >= 10, "size should be >= 10");
     }
 
@@ -807,6 +824,50 @@ fn test_compound_query() {
     let _ = Vfs::rmdir("/tmp/search_cq");
 
     serial_println!("[search]   compound query: ok");
+}
+
+/// A name that is not valid UTF-8 must still be findable.
+///
+/// Before the byte-path conversion every name filter was a `&str` compare, so
+/// a file like this one could be created but never matched by name, glob or
+/// extension — the search engine was blind to exactly the files that are
+/// hardest to name by hand.
+fn test_non_utf8_name() {
+    let dir = Path::new("/tmp/search_bytes");
+    let _ = Vfs::mkdir(dir);
+    // 0xFF is not a legal UTF-8 byte anywhere in a sequence.
+    let name = Path::new(b"re\xffport.txt".as_slice());
+    let full = dir.join(name);
+    Vfs::write_file(&full, b"a report with a byte no decoder accepts").expect("write");
+
+    let by_substring = Query::new()
+        .name_contains(b"re\xffpo".as_slice())
+        .execute(dir)
+        .expect("execute");
+    assert!(
+        by_substring.iter().any(|r| r.path == full),
+        "substring filter should match a non-UTF-8 name"
+    );
+
+    let by_glob = Query::new()
+        .name_glob(b"re?port.*".as_slice())
+        .execute(dir)
+        .expect("execute");
+    assert!(
+        by_glob.iter().any(|r| r.path == full),
+        "glob `?` should match the single undecodable byte"
+    );
+
+    let by_ext = Query::new().extension("txt").execute(dir).expect("execute");
+    assert!(
+        by_ext.iter().any(|r| r.path == full),
+        "extension filter should match a non-UTF-8 name"
+    );
+
+    let _ = Vfs::remove(&full);
+    let _ = Vfs::rmdir(dir);
+
+    serial_println!("[search]   non-UTF-8 name: ok");
 }
 
 fn test_stats() {

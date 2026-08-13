@@ -39,6 +39,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 use crate::fs::Vfs;
 use crate::serial_println;
 
@@ -71,14 +72,14 @@ pub struct DedupGroup {
     /// Size of each file in bytes.
     pub size: u64,
     /// Paths of all files in this group.
-    pub paths: Vec<String>,
+    pub paths: Vec<PathBuf>,
 }
 
 /// Configuration for a dedup scan.
 #[derive(Debug, Clone)]
 pub struct DedupConfig {
     /// Root paths to scan.
-    pub scan_paths: Vec<String>,
+    pub scan_paths: Vec<PathBuf>,
     /// Minimum file size to consider (skip small files).
     pub min_size: u64,
     /// Maximum file size to consider (skip huge files).
@@ -88,25 +89,33 @@ pub struct DedupConfig {
     /// Maximum depth for recursive directory traversal.
     pub max_depth: usize,
     /// File extensions to include (empty = all).
+    ///
+    /// An extension is *text* the operator types, but the name it is matched
+    /// against is raw bytes, so the comparison is byte-exact: an extension that
+    /// is not valid UTF-8 simply never matches, rather than the name being
+    /// lossily decoded to make it match.
     pub include_extensions: Vec<String>,
-    /// Path prefixes to exclude.
-    pub exclude_prefixes: Vec<String>,
+    /// Exclude these paths and everything under them.
+    ///
+    /// Matching is by *component*, via [`crate::fs::pathutil::path_in_subtree`]:
+    /// excluding `/dev` excludes `/dev/null` but not `/devices`.
+    pub exclude_paths: Vec<PathBuf>,
 }
 
 impl Default for DedupConfig {
     fn default() -> Self {
         Self {
-            scan_paths: alloc::vec![String::from("/")],
+            scan_paths: alloc::vec![PathBuf::from("/")],
             min_size: 1,
             max_size: 64 * 1024 * 1024, // 64 MiB
             max_files: 50_000,
             max_depth: 32,
             include_extensions: Vec::new(),
-            exclude_prefixes: alloc::vec![
-                String::from("/proc"),
-                String::from("/dev"),
-                String::from("/sys"),
-                String::from("/_"),
+            exclude_paths: alloc::vec![
+                PathBuf::from("/proc"),
+                PathBuf::from("/dev"),
+                PathBuf::from("/sys"),
+                PathBuf::from("/_"),
             ],
         }
     }
@@ -233,7 +242,7 @@ fn run_scan(config: &DedupConfig) -> KernelResult<DedupResult> {
     let mut result = DedupResult::default();
 
     // Phase 1: Collect all files with their sizes.
-    let mut files: Vec<(String, u64)> = Vec::new();
+    let mut files: Vec<(PathBuf, u64)> = Vec::new();
     for root in &config.scan_paths {
         collect_files(
             root,
@@ -247,7 +256,7 @@ fn run_scan(config: &DedupConfig) -> KernelResult<DedupResult> {
     result.bytes_scanned = files.iter().map(|(_, sz)| *sz).sum();
 
     // Phase 2: Group by size (files of different sizes can't be duplicates).
-    let mut size_groups: BTreeMap<u64, Vec<String>> = BTreeMap::new();
+    let mut size_groups: BTreeMap<u64, Vec<PathBuf>> = BTreeMap::new();
     for (path, size) in &files {
         size_groups
             .entry(*size)
@@ -256,14 +265,14 @@ fn run_scan(config: &DedupConfig) -> KernelResult<DedupResult> {
     }
 
     // Only keep groups with 2+ files (potential duplicates).
-    let candidate_groups: Vec<(u64, Vec<String>)> = size_groups
+    let candidate_groups: Vec<(u64, Vec<PathBuf>)> = size_groups
         .into_iter()
         .filter(|(_, paths)| paths.len() >= 2)
         .collect();
 
     // Phase 3: Full hash comparison for candidate groups.
     for (size, paths) in &candidate_groups {
-        let mut hash_groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut hash_groups: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
 
         for path in paths {
             match Vfs::read_file(path) {
@@ -311,9 +320,9 @@ fn run_scan(config: &DedupConfig) -> KernelResult<DedupResult> {
 
 /// Recursively collect files from a directory.
 fn collect_files(
-    path: &str,
+    path: &Path,
     config: &DedupConfig,
-    out: &mut Vec<(String, u64)>,
+    out: &mut Vec<(PathBuf, u64)>,
     depth: usize,
 ) {
     if depth > config.max_depth {
@@ -323,10 +332,10 @@ fn collect_files(
         return;
     }
 
-    // Check exclude prefixes (canonical subtree predicate tolerates a
+    // Check the exclude list (canonical subtree predicate tolerates a
     // trailing slash on the exclude entry). See fs::pathutil.
-    for excl in &config.exclude_prefixes {
-        if crate::fs::pathutil::path_in_subtree(path, excl.as_str()) {
+    for excl in &config.exclude_paths {
+        if crate::fs::pathutil::path_in_subtree(path, excl) {
             return;
         }
     }
@@ -342,24 +351,28 @@ fn collect_files(
             return;
         }
 
-        let full_path = if path == "/" {
-            alloc::format!("/{}", entry.name)
-        } else {
-            alloc::format!("{}/{}", path, entry.name)
-        };
+        // `Path::join` collapses the root case itself, so the `path == "/"` arm
+        // that existed only to avoid a doubled separator is gone.
+        let full_path = path.join(&entry.name);
 
         match entry.entry_type {
             crate::fs::EntryType::Directory => {
                 // Skip . and ..
-                if entry.name != "." && entry.name != ".." {
+                if entry.name.as_path() != Path::new(".")
+                    && entry.name.as_path() != Path::new("..")
+                {
                     collect_files(&full_path, config, out, depth + 1);
                 }
             }
             crate::fs::EntryType::File => {
                 // Check extension filter.
                 if !config.include_extensions.is_empty() {
-                    let ext = file_extension(&entry.name);
-                    if !config.include_extensions.iter().any(|e| e.as_str() == ext) {
+                    let ext = entry.name.extension().map_or(&[][..], Path::as_bytes);
+                    if !config
+                        .include_extensions
+                        .iter()
+                        .any(|e| e.as_bytes() == ext)
+                    {
                         continue;
                     }
                 }
@@ -374,15 +387,6 @@ fn collect_files(
             }
             _ => {} // Skip symlinks, etc.
         }
-    }
-}
-
-/// Extract file extension (lowercase, without dot).
-fn file_extension(name: &str) -> &str {
-    if let Some(pos) = name.rfind('.') {
-        &name[pos + 1..]
-    } else {
-        ""
     }
 }
 
@@ -417,7 +421,7 @@ pub fn self_test() -> KernelResult<()> {
 fn test_empty_scan() {
     // Scan a non-existent path — should succeed with 0 results.
     let config = DedupConfig {
-        scan_paths: alloc::vec![String::from("/tmp/__dedup_test_empty_nonexistent")],
+        scan_paths: alloc::vec![PathBuf::from("/tmp/__dedup_test_empty_nonexistent")],
         ..DedupConfig::default()
     };
     let result = scan(&config).expect("scan should succeed");
@@ -437,7 +441,7 @@ fn test_basic_duplicates() {
     Vfs::write_file("/tmp/dedup_test/unique.txt", b"this is different content").expect("write unique");
 
     let config = DedupConfig {
-        scan_paths: alloc::vec![String::from("/tmp/dedup_test")],
+        scan_paths: alloc::vec![PathBuf::from("/tmp/dedup_test")],
         min_size: 1,
         ..DedupConfig::default()
     };
@@ -474,7 +478,7 @@ fn test_no_duplicates() {
     Vfs::write_file("/tmp/dedup_nd/z.txt", b"completely different Z content here").expect("write");
 
     let config = DedupConfig {
-        scan_paths: alloc::vec![String::from("/tmp/dedup_nd")],
+        scan_paths: alloc::vec![PathBuf::from("/tmp/dedup_nd")],
         min_size: 1,
         ..DedupConfig::default()
     };
@@ -497,7 +501,7 @@ fn test_config_filters() {
 
     // Min size filter should skip the small file.
     let config = DedupConfig {
-        scan_paths: alloc::vec![String::from("/tmp/dedup_filt")],
+        scan_paths: alloc::vec![PathBuf::from("/tmp/dedup_filt")],
         min_size: 10,
         ..DedupConfig::default()
     };

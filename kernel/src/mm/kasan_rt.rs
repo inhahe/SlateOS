@@ -1,23 +1,50 @@
 //! KASAN runtime — the `__asan_*` callbacks LLVM's instrumentation calls.
 //!
 //! When the kernel is built with the compiler-KASAN profile
-//! (`scripts/kasan-build.sh`, design-decisions.md §107), rustc/LLVM rewrites
-//! every load and store into:
+//! (`scripts/kasan-build.sh`, design-decisions.md §107 and §118), rustc/LLVM
+//! rewrites every load and store into a call to one of the check entry points
+//! below:
 //!
 //! ```text
-//!     mov  %rdi, %rax
-//!     shr  $3, %rax
-//!     movabs $0xDFFFE00000000000, %rcx     ; kvspace::KASAN_SHADOW_OFFSET
-//!     movzbl (%rax,%rcx), %eax             ; the shadow byte
-//!     test %al, %al
-//!     jne  slow_path                       ; -> __asan_report_*_noabort
+//!     mov  %rdi, <the address about to be accessed>
+//!     call __asan_load8_noabort            ; shadow_allows(), report if bad
 //!     <the original access>
 //! ```
 //!
-//! The check itself is emitted *inline*; this module supplies only the cold
-//! slow path — the reporting functions LLVM calls once a shadow byte says the
-//! access is not cleanly addressable. That is why there is no `check` function
-//! here: by the time we are called, the verdict is already in.
+//! ## Why outlined and not inline
+//!
+//! LLVM's default is to emit the shadow compare *inline*
+//! (`movzbl (shadow), %eax; test %al, %al; jne slow_path`), and the profile
+//! turns that off with `-asan-instrumentation-with-call-threshold=0`. The
+//! inline sequence dereferences `(addr >> 3) + KASAN_SHADOW_OFFSET`
+//! unconditionally, which is a canonical address only when `addr` is a *kernel*
+//! address — the shadow of a user pointer has non-sign-extended high bits, so
+//! probing it is a #GP rather than a report. Kernel code dereferences user
+//! pointers by design (the SEH context written onto the faulting thread's user
+//! stack in `idt.rs`, the uaccess helpers in `mm::user`), so inline checks turn
+//! every one of those sites into a panic that has nothing to do with the bug
+//! being hunted. Outlined, the address is filtered by `mm::kasan::shadow_of`
+//! before anything is dereferenced, and a user address simply passes.
+//!
+//! So this module supplies both halves: the check entry points, which do the
+//! shadow lookup, and the report entry points, which are the cold slow path.
+//!
+//! ## Termination
+//!
+//! Because every checked access now lands here, nothing on the path from a
+//! check entry point down through `kasan::shadow_allows` may itself perform an
+//! instrumented access — it would call back in, without bound. Marking this
+//! module `sanitize(address = "off")` does not establish that: generic `core`
+//! functions monomorphise into this crate carrying the default (instrumented)
+//! attribute, so a single `AtomicU64::load` inside the shadow lookup would be
+//! enough. `mm::kasan::get_shadow` is written against raw `asm!` loads for
+//! exactly this reason, and `scripts/kasan-check-preshadow.py --runtime` proves
+//! it against the built binary rather than trusting review.
+//!
+//! The *report* path is deliberately not held to that rule — it formats and
+//! backtraces, far too much code to keep raw. It does not need to be: a report
+//! calls instrumented code, whose checks call `shadow_allows`, which is clean
+//! and returns. That is one level of nesting, not a regress.
 //!
 //! ## Why `_noabort`
 //!
@@ -212,12 +239,12 @@ asan_report_n! {
 // Outlined check entry points
 // ---------------------------------------------------------------------------
 //
-// LLVM stops emitting the check inline and calls these instead once a single
-// function exceeds `-asan-instrumentation-with-call-threshold` accesses
-// (7000 by default). Nothing in this kernel is anywhere near that today, but a
-// missing symbol here is a *link* failure in a build that is only ever run
-// when something is already going wrong — so define them rather than gamble.
-// Unlike the report entry points these must do the check themselves.
+// These are the primary entry points: the profile sets
+// `-asan-instrumentation-with-call-threshold=0`, so LLVM calls one of them for
+// *every* checked access rather than emitting the compare inline. See the
+// module docs for why. Unlike the report entry points, these must do the check
+// themselves — and everything they call must be free of instrumented accesses,
+// or the check recurses into itself.
 
 macro_rules! asan_check {
     ($($name:ident => ($size:expr, $write:expr)),* $(,)?) => {

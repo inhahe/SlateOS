@@ -251,6 +251,57 @@ pub struct HhdmResponse {
 
 impl LimineRequest<HhdmResponse> {
     pub const HHDM: Self = Self::new([0x48dc_f1cb_8ad2_b852, 0x6398_4e95_9a98_244b]);
+
+    /// Read the HHDM offset using raw, un-instrumented loads.
+    ///
+    /// `mm::kasan::early_init` needs the direct-map offset before *anything*
+    /// else in the kernel runs, because from that point on every load and store
+    /// in an instrumented build first probes a shadow byte that does not exist
+    /// yet. Neither ordinary path can be used that early: [`LimineRequest::
+    /// response`] is generic, so it monomorphises into this crate *with*
+    /// instrumentation and would fault dereferencing the response pointer, and
+    /// `boot::parse_boot_info` logs through the serial spinlock, whose atomics
+    /// are instrumented for the same reason.
+    ///
+    /// This method is concrete (the impl block names one `R`), so the
+    /// `sanitize` exemption does apply to it, and the two loads it needs are
+    /// emitted as raw `mov`s that stay inside it.
+    ///
+    /// Returns `None` if the bootloader did not answer the request.
+    ///
+    /// # Safety
+    ///
+    /// Must be called on the live Limine request static, at or after kernel
+    /// entry (i.e. once the bootloader has populated it).
+    #[cfg_attr(kasan_instrumented, sanitize(address = "off"))]
+    pub unsafe fn offset_raw(&self) -> Option<u64> {
+        // `#[repr(C)]` on both structs is what makes these offsets meaningful;
+        // `offset_of!` keeps them honest if a field is ever added or reordered.
+        //
+        // `wrapping_add` throughout, not because wrapping is wanted — neither
+        // sum can overflow — but because a checked `+` emits a branch to
+        // `core::panicking::panic_const_add_overflow` in debug builds, and that
+        // is instrumented panic machinery reachable from the pre-shadow window.
+        let response_field = (ptr::addr_of!(*self) as u64)
+            .wrapping_add(core::mem::offset_of!(LimineRequest<HhdmResponse>, response) as u64);
+
+        // SAFETY: `response_field` addresses the 8-byte, naturally aligned
+        // `response` pointer inside the request static, which is mapped for the
+        // whole kernel lifetime.
+        let response = unsafe { crate::mm::kasan::raw_load_u64(response_field) };
+        if response == 0 {
+            return None;
+        }
+
+        // SAFETY: a non-null response pointer from Limine points at a live,
+        // aligned `HhdmResponse` in bootloader-reclaimable memory we have not
+        // freed; `offset` is an 8-byte field within it.
+        Some(unsafe {
+            crate::mm::kasan::raw_load_u64(
+                response.wrapping_add(core::mem::offset_of!(HhdmResponse, offset) as u64),
+            )
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------

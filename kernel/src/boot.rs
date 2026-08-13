@@ -103,6 +103,28 @@ static KERNEL_FILE_REQUEST: LimineRequest<KernelFileResponse> = LimineRequest::K
 // Public accessors
 // ---------------------------------------------------------------------------
 
+/// The HHDM offset, read before any other kernel code has run.
+///
+/// [`parse_boot_info`] reports the same value, but it cannot be used to
+/// bootstrap KASAN: it logs, and logging takes the serial spinlock, whose
+/// atomics are instrumented and would probe a shadow that does not exist yet.
+/// This accessor performs two raw loads and nothing else — see
+/// [`LimineRequest::<HhdmResponse>::offset_raw`] for the full reasoning.
+///
+/// Returns `None` if Limine did not answer the HHDM request, which means the
+/// kernel cannot reach physical memory at all and boot cannot continue.
+///
+/// # Safety
+///
+/// Must be called at or after kernel entry, once Limine has filled in the
+/// request statics.
+#[must_use]
+pub unsafe fn hhdm_offset_early() -> Option<u64> {
+    // SAFETY: `HHDM_REQUEST` is our own `static` in `.requests`, populated by
+    // the bootloader before it transferred control to us.
+    unsafe { HHDM_REQUEST.offset_raw() }
+}
+
 /// Framebuffer information from the bootloader (if available).
 ///
 /// Contains the virtual address and geometry needed to initialize

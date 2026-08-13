@@ -232,6 +232,17 @@ static ZERO_PD_PHYS: AtomicU64 = AtomicU64::new(0);
 /// "the zero shadow is installed and usable" flag for the whole module.
 static PDPT0_PHYS: AtomicU64 = AtomicU64::new(0);
 
+/// Set to 1 by [`early_init`] once the zero shadow is live.
+///
+/// Duplicates what a non-zero `PDPT0_PHYS` already means, and exists only
+/// because `early_init`'s own idempotency check runs *before* any shadow is
+/// mapped: `AtomicU64::load` is a generic `core` function, so it is compiled
+/// into this crate *with* instrumentation and would probe unmapped shadow.
+/// A plain `static mut` can be read with a raw `mov` that stays inside this
+/// exempt module. Only ever touched on the BSP with no other CPU running, so
+/// the absence of atomicity is not a race.
+static mut EARLY_SHADOW_DONE: u64 = 0;
+
 // Statistics.
 static VIOLATIONS: AtomicU64 = AtomicU64::new(0);
 static SHADOW_FRAMES_MAPPED: AtomicU64 = AtomicU64::new(0);
@@ -319,6 +330,163 @@ const PTE_NX: u64 = 1 << 63;
 /// Physical-address field of a page-table entry.
 const PTE_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
+// ---------------------------------------------------------------------------
+// Raw memory access for the pre-shadow window
+// ---------------------------------------------------------------------------
+//
+// Everything `early_init` executes runs *before* any shadow exists, so it must
+// not perform a single instrumented memory access: with no shadow mapped and no
+// IDT installed yet, one would be a triple fault and a silent reboot rather
+// than a diagnosable report.
+//
+// Marking this module `sanitize(address = "off")` is not sufficient by itself.
+// The exemption is a per-function LLVM attribute, and it only covers functions
+// that are *ours*. Generic `core` functions — `ptr::read_volatile`,
+// `AtomicU64::load`, and friends — monomorphise into **this** crate's codegen
+// units, are emitted as real out-of-line calls at `-O0`, and carry the default
+// (instrumented) attribute. They dereference the pointer we hand them, so the
+// check happens in `core`'s frame where our exemption has no reach. That is
+// exactly how the first instrumented boot died: `serial::init` took a spinlock,
+// which called `core::sync::atomic::atomic_compare_exchange_weak::<u8>`, which
+// probed the not-yet-mapped shadow of `serial::SERIAL`.
+//
+// So the pre-shadow window issues its loads and stores itself, via `asm!`.
+// Being inline assembly it is also opaque to LLVM and cannot be elided or
+// reordered, which is the property `read_volatile` was being used for.
+//
+// The same primitives serve a second caller with the same requirement for a
+// different reason: the *shadow lookup itself* (`get_shadow` and everything
+// under `shadow_allows`). The build uses outlined instrumentation, so every
+// checked access is a call to `mm::kasan_rt::__asan_load*`, which calls
+// `shadow_allows`. If the lookup performed an instrumented access of its own it
+// would call `__asan_load*` again, and so on without bound — a stack overflow
+// with no explanation, in the one build where you are already debugging
+// something else. `scripts/kasan-check-preshadow.py --runtime` enforces this.
+
+/// Load a `u64` from `addr` without letting the compiler instrument the access.
+///
+/// Exposed crate-wide so the handful of other call sites that also run in the
+/// pre-shadow window (see `limine::LimineRequest::<HhdmResponse>::offset_raw`)
+/// can share one audited implementation instead of open-coding `asm!`.
+///
+/// # Safety
+///
+/// `addr` must be mapped, readable and 8-byte aligned.
+#[inline]
+pub(crate) unsafe fn raw_load_u64(addr: u64) -> u64 {
+    let value: u64;
+    // SAFETY: the caller guarantees `addr` is a mapped, aligned, readable u64.
+    unsafe {
+        core::arch::asm!(
+            "mov {value}, qword ptr [{addr}]",
+            addr = in(reg) addr,
+            value = out(reg) value,
+            options(nostack, preserves_flags, readonly),
+        );
+    }
+    value
+}
+
+/// Load a `u8` from `addr` without letting the compiler instrument the access.
+///
+/// The shadow-byte read in [`get_shadow`] uses this: that read is on the path
+/// LLVM's outlined check calls into, so instrumenting it would make every
+/// checked access recurse.
+///
+/// # Safety
+///
+/// `addr` must be mapped and readable.
+#[inline]
+unsafe fn raw_load_u8(addr: u64) -> u8 {
+    let value: u8;
+    // SAFETY: the caller guarantees `addr` is a mapped, readable byte.
+    unsafe {
+        core::arch::asm!(
+            "mov {value}, byte ptr [{addr}]",
+            addr = in(reg) addr,
+            value = out(reg_byte) value,
+            options(nostack, preserves_flags, readonly),
+        );
+    }
+    value
+}
+
+/// Store a `u64` to `addr` without letting the compiler instrument the access.
+///
+/// # Safety
+///
+/// `addr` must be mapped, writable, 8-byte aligned, and exclusively owned by
+/// the caller.
+#[inline]
+unsafe fn raw_store_u64(addr: u64, value: u64) {
+    // SAFETY: the caller guarantees `addr` is a mapped, aligned, writable u64
+    // that nothing else is concurrently touching.
+    unsafe {
+        core::arch::asm!(
+            "mov qword ptr [{addr}], {value}",
+            addr = in(reg) addr,
+            value = in(reg) value,
+            options(nostack, preserves_flags),
+        );
+    }
+}
+
+/// `value >> shift`, emitted directly, with no `core` helper in between.
+///
+/// A plain `>>` by a non-constant amount is not usable in the pre-shadow
+/// window. In a debug build the checked shift branches to
+/// `core::panicking::panic_const_shr_overflow`, and `wrapping_shr` is no better
+/// — it forwards to `core::num::<u64>::unchecked_shr`, whose `ub_checks`
+/// precondition check is itself a `core` generic that monomorphises into this
+/// crate *with* instrumentation. Either one puts a shadow probe in a frame our
+/// `sanitize(address = "off")` cannot reach, which before the shadow exists is
+/// a triple fault with no serial output.
+///
+/// Doing the shift in `asm!` keeps it inside this exempt module. x86 masks the
+/// count in `cl` to 6 bits, so this has `wrapping_shr` semantics; every caller
+/// here passes a fixed page-table level shift (39/30/21/12), well under 64.
+#[inline]
+fn raw_shr_u64(value: u64, shift: u32) -> u64 {
+    let out: u64;
+    // SAFETY: `shr r64, cl` touches no memory and is defined for any count.
+    // `preserves_flags` is deliberately not claimed: `shr` writes the flags.
+    unsafe {
+        core::arch::asm!(
+            "shr {out}, cl",
+            out = inout(reg) value => out,
+            in("cl") shift as u8,
+            options(nomem, nostack),
+        );
+    }
+    out
+}
+
+/// `value << shift`, emitted directly. The left-shift counterpart of
+/// [`raw_shr_u64`], with the same rationale and the same masking semantics.
+#[inline]
+fn raw_shl_u64(value: u64, shift: u32) -> u64 {
+    let out: u64;
+    // SAFETY: `shl r64, cl` touches no memory and is defined for any count.
+    // `preserves_flags` is deliberately not claimed: `shl` writes the flags.
+    unsafe {
+        core::arch::asm!(
+            "shl {out}, cl",
+            out = inout(reg) value => out,
+            in("cl") shift as u8,
+            options(nomem, nostack),
+        );
+    }
+    out
+}
+
+/// Byte address of entry `index` in the 4 KiB paging structure at `table_phys`.
+#[inline]
+fn pt_entry_addr(table_phys: u64, index: usize, hhdm: u64) -> u64 {
+    table_phys
+        .wrapping_add(hhdm)
+        .wrapping_add((index as u64).wrapping_mul(8))
+}
+
 /// Read entry `index` of the 4 KiB paging structure at `table_phys`.
 ///
 /// # Safety
@@ -330,7 +498,7 @@ unsafe fn pt_read(table_phys: u64, index: usize, hhdm: u64) -> u64 {
     // SAFETY: caller guarantees the table is live and mapped through the HHDM;
     // entries are 8 bytes and the structure is 4 KiB aligned, so the read is
     // aligned and in bounds for index < 512.
-    unsafe { core::ptr::read_volatile((table_phys.wrapping_add(hhdm) as *const u64).add(index)) }
+    unsafe { raw_load_u64(pt_entry_addr(table_phys, index, hhdm)) }
 }
 
 /// Write entry `index` of the 4 KiB paging structure at `table_phys`.
@@ -341,9 +509,7 @@ unsafe fn pt_read(table_phys: u64, index: usize, hhdm: u64) -> u64 {
 #[inline]
 unsafe fn pt_write(table_phys: u64, index: usize, value: u64, hhdm: u64) {
     // SAFETY: as `pt_read`; the caller guarantees exclusivity.
-    unsafe {
-        core::ptr::write_volatile((table_phys.wrapping_add(hhdm) as *mut u64).add(index), value);
-    }
+    unsafe { raw_store_u64(pt_entry_addr(table_phys, index, hhdm), value) }
 }
 
 /// Translate a kernel virtual address using the live page tables.
@@ -355,7 +521,10 @@ unsafe fn pt_write(table_phys: u64, index: usize, value: u64, hhdm: u64) {
 ///
 /// `pml4_phys` must be the live PML4 and `hhdm` the correct direct-map offset.
 unsafe fn early_translate(pml4_phys: u64, hhdm: u64, va: u64) -> Option<u64> {
-    let index = |shift: u32| ((va >> shift) & 0x1FF) as usize;
+    // `raw_shr_u64` rather than `>>` — see its doc comment: both the checked
+    // shift and `wrapping_shr` route through instrumented `core` generics that
+    // would triple-fault here.
+    let index = |shift: u32| (raw_shr_u64(va, shift) & 0x1FF) as usize;
 
     // SAFETY: each level is checked present before being used as the next
     // table's physical address, which is what makes the following read valid.
@@ -408,24 +577,40 @@ unsafe fn flush_tlb_all() {
     }
 }
 
+/// Physical addresses of the paging structures backing the zero shadow.
+///
+/// Produced by [`install_zero_shadow`] and handed to [`publish_shadow_roots`],
+/// which is what keeps the two boot phases separable — see [`early_init`].
+#[derive(Clone, Copy)]
+struct ShadowRoots {
+    /// The single all-zero page every shadow PTE initially points at.
+    zero_page: u64,
+    /// The shared, read-only zero-shadow page table.
+    pt: u64,
+    /// The shared page directory (every entry → `pt`).
+    pd: u64,
+    /// The private PDPT covering the lazily-backed window.
+    pdpt0: u64,
+}
+
 /// Map the whole KASAN shadow reservation onto a shared read-only zero page.
 ///
-/// Must be called as early in boot as the HHDM offset is known and *before*
-/// any instrumented code runs. Requires no allocator. Idempotent.
+/// This is **phase one**: the half of [`early_init`] that runs before the
+/// shadow exists. Everything it calls, transitively, must be exempt from
+/// instrumentation — `scripts/kasan-check-preshadow.py` walks the call graph
+/// from here and fails the build otherwise. It is a separate function precisely
+/// so that boundary is a thing the tooling can name, rather than a comment in
+/// the middle of a function whose first half is pre-shadow and second half is
+/// not.
 ///
-/// Returns `false` if the kernel's own statics could not be translated, which
-/// would mean the HHDM offset is wrong — in the instrumented build that is
-/// fatal and the caller should say so loudly rather than continue into a
-/// triple fault.
+/// Returns `None` if the kernel's own statics could not be translated.
 ///
 /// # Safety
 ///
-/// Must be called exactly once, on the BSP, with interrupts disabled and no
-/// other CPU running, since it edits the live PML4.
-pub unsafe fn early_init(hhdm: u64) -> bool {
-    if PDPT0_PHYS.load(Ordering::Acquire) != 0 {
-        return true; // already installed
-    }
+/// Must be called on the BSP, with interrupts disabled and no other CPU
+/// running, since it edits the live PML4. `hhdm` must be the bootloader's
+/// direct-map offset.
+unsafe fn install_zero_shadow(hhdm: u64) -> Option<ShadowRoots> {
 
     // CR3's low 12 bits are flags (PCD/PWT/PCID), not part of the address.
     let cr3: u64;
@@ -462,7 +647,7 @@ pub unsafe fn early_init(hhdm: u64) -> bool {
         )
     })
     else {
-        return false;
+        return None;
     };
 
     // Leaf entries: read-only and non-executable. Read-only is load-bearing —
@@ -479,12 +664,22 @@ pub unsafe fn early_init(hhdm: u64) -> bool {
     // `install_shadow_frame` can later split a branch off for real shadow
     // pages; the read-only leaf still makes the *pages* read-only, because
     // x86 ANDs the writable bit across all levels.
+    //
+    // `while` rather than `for`: a `for` over a `Range` hands `&mut Range` to
+    // `core::iter::range::RangeIteratorImpl::spec_next`, and *there* the
+    // counter is reached through a pointer parameter rather than the callee's
+    // own `alloca`, so `-asan-stack=0` does not suppress the check and the
+    // instrumented probe hits this frame's not-yet-mapped stack shadow. (That
+    // was the second triple fault this bootstrap produced.) A plain counter
+    // never lets its address escape this exempt function.
     unsafe {
-        for i in 0..512 {
+        let mut i = 0usize;
+        while i < 512 {
             pt_write(pt_phys, i, leaf, hhdm);
             pt_write(pd_phys, i, pde, hhdm);
             pt_write(pdpt_phys, i, pdpte, hhdm);
             pt_write(pdpt0_phys, i, pdpte, hhdm);
+            i = i.saturating_add(1);
         }
         pt_write(
             pml4_phys,
@@ -492,22 +687,78 @@ pub unsafe fn early_init(hhdm: u64) -> bool {
             pdpt0_phys | PTE_PRESENT | PTE_WRITABLE | PTE_NX,
             hhdm,
         );
-        for slot in SHADOW_PML4_FIRST.saturating_add(1)..SHADOW_PML4_END {
+        let mut slot = SHADOW_PML4_FIRST.saturating_add(1);
+        while slot < SHADOW_PML4_END {
             pt_write(
                 pml4_phys,
                 slot,
                 pdpt_phys | PTE_PRESENT | PTE_WRITABLE | PTE_NX,
                 hhdm,
             );
+            slot = slot.saturating_add(1);
         }
         flush_tlb_all();
+        // The shadow is live from here on: every kernel address now has a
+        // readable shadow byte, so ordinary instrumented code is safe again.
+        raw_store_u64(core::ptr::addr_of!(EARLY_SHADOW_DONE) as u64, 1);
     }
 
-    ZERO_PAGE_PHYS.store(zero_page_phys, Ordering::Relaxed);
-    ZERO_PT_PHYS.store(pt_phys, Ordering::Relaxed);
-    ZERO_PD_PHYS.store(pd_phys, Ordering::Relaxed);
+    Some(ShadowRoots {
+        zero_page: zero_page_phys,
+        pt: pt_phys,
+        pd: pd_phys,
+        pdpt0: pdpt0_phys,
+    })
+}
+
+/// Record the zero-shadow roots for the rest of the module to use.
+///
+/// **Phase two**: runs only after [`install_zero_shadow`] has succeeded, so
+/// ordinary instrumented code — including `AtomicU64::store`, whose generic
+/// `core` implementation *is* instrumented — is safe here. Kept separate from
+/// phase one so `scripts/kasan-check-preshadow.py` can exclude it by name
+/// instead of reporting these stores as pre-shadow violations.
+fn publish_shadow_roots(roots: ShadowRoots) {
+    ZERO_PAGE_PHYS.store(roots.zero_page, Ordering::Relaxed);
+    ZERO_PT_PHYS.store(roots.pt, Ordering::Relaxed);
+    ZERO_PD_PHYS.store(roots.pd, Ordering::Relaxed);
     // Written last, with Release: it is the flag the rest of the module tests.
-    PDPT0_PHYS.store(pdpt0_phys, Ordering::Release);
+    PDPT0_PHYS.store(roots.pdpt0, Ordering::Release);
+}
+
+/// Install the KASAN zero shadow over the whole kernel half.
+///
+/// Must be called as early in boot as the HHDM offset is known and *before*
+/// any instrumented code runs. Requires no allocator. Idempotent.
+///
+/// Returns `false` if the kernel's own statics could not be translated, which
+/// would mean the HHDM offset is wrong — in the instrumented build that is
+/// fatal and the caller should say so loudly rather than continue into a
+/// triple fault.
+///
+/// The body is deliberately just the two phases in order: everything reachable
+/// from [`install_zero_shadow`] must be uninstrumented, and nothing reachable
+/// from [`publish_shadow_roots`] needs to be.
+///
+/// # Safety
+///
+/// Must be called exactly once, on the BSP, with interrupts disabled and no
+/// other CPU running, since it edits the live PML4.
+pub unsafe fn early_init(hhdm: u64) -> bool {
+    // Idempotency guard. A raw load rather than `PDPT0_PHYS.load()` because
+    // `AtomicU64::load` is a generic `core` function and therefore instrumented
+    // — see the "Raw memory access for the pre-shadow window" section above.
+    // SAFETY: `EARLY_SHADOW_DONE` is our own aligned `static mut` in `.bss`, and
+    // this runs on the BSP with no other CPU up.
+    if unsafe { raw_load_u64(core::ptr::addr_of!(EARLY_SHADOW_DONE) as u64) } != 0 {
+        return true; // already installed
+    }
+
+    // SAFETY: forwarding this function's own contract.
+    let Some(roots) = (unsafe { install_zero_shadow(hhdm) }) else {
+        return false;
+    };
+    publish_shadow_roots(roots);
     true
 }
 
@@ -762,22 +1013,48 @@ fn set_shadow(addr: u64, val: u8) {
     unsafe { core::ptr::write_volatile(sv as *mut u8, val); }
 }
 
+/// `log2(FRAME_SIZE)`. The shadow lookup divides by the frame size on the
+/// hottest path in the instrumented build, and must do it with a shift rather
+/// than `/`: a debug-profile division emits a divide-by-zero check whose panic
+/// path is `core` code monomorphised into this crate *with* instrumentation.
+/// A compile-time assertion keeps the two in step.
+const FRAME_SIZE_SHIFT: u32 = 14;
+const _: () = assert!(1usize << FRAME_SIZE_SHIFT == FRAME_SIZE);
+
 /// Read the shadow byte for `addr`. Returns `KASAN_ADDRESSABLE` for
 /// out-of-range or unmapped shadow (fail-open: never a false positive).
+///
+/// **Every memory access here is raw** — see the "Raw memory access" section
+/// above. With outlined instrumentation this function sits underneath
+/// `mm::kasan_rt::__asan_load*`, so an instrumented access of its own would
+/// call back into `__asan_load*` and recurse without bound. The bitmap word and
+/// the shadow byte are therefore loaded with `asm!`, the index arithmetic uses
+/// shifts and masks instead of `/` and `%`, and the shift amounts go through
+/// [`raw_shl_u64`]. None of this is an optimization; all of it is the
+/// termination argument.
+///
+/// Dropping the `Acquire` on the bitmap load costs nothing: x86 gives every
+/// `mov` acquire semantics, and the `asm!` block is an optimization barrier, so
+/// the load cannot be hoisted above the range checks that guard it.
 #[inline]
 fn get_shadow(addr: u64) -> u8 {
     let Some(sv) = shadow_of(addr) else { return KASAN_ADDRESSABLE };
-    let frame_idx = ((sv - KASAN_SHADOW_BASE) / FRAME_SIZE as u64) as usize;
+    let frame_idx = raw_shr_u64(sv.wrapping_sub(KASAN_SHADOW_BASE), FRAME_SIZE_SHIFT) as usize;
     if frame_idx >= SHADOW_FRAMES {
         return KASAN_ADDRESSABLE;
     }
-    let word = frame_idx / 64;
-    let bit = 1u64 << (frame_idx % 64);
-    if SHADOW_MAPPED[word].load(Ordering::Acquire) & bit == 0 {
+    let word = frame_idx >> 6;
+    let bit = raw_shl_u64(1, (frame_idx & 63) as u32);
+    // The bitmap is a `static`, so its base address is a link-time constant and
+    // `word` was just bounds-checked against `SHADOW_FRAMES`.
+    let word_addr = (SHADOW_MAPPED.as_ptr() as u64).wrapping_add((word as u64) << 3);
+    // SAFETY: `word_addr` is `&SHADOW_MAPPED[word]` computed without indexing,
+    // with `word < MAP_BITMAP_WORDS` established by the check above.
+    if unsafe { raw_load_u64(word_addr) } & bit == 0 {
         return KASAN_ADDRESSABLE;
     }
     // SAFETY: the shadow frame is mapped (bitmap bit set); `sv` is in range.
-    unsafe { core::ptr::read_volatile(sv as *const u8) }
+    unsafe { raw_load_u8(sv) }
 }
 
 // ---------------------------------------------------------------------------
@@ -905,19 +1182,23 @@ pub fn shadow_allows(addr: u64, size: usize) -> bool {
     if size == 0 {
         return true;
     }
-    let last = addr.wrapping_add(size as u64 - 1);
+    // `wrapping_*` throughout: `size` is non-zero, so none of these can actually
+    // overflow, but a *checked* operator emits a branch into `core`'s panic
+    // machinery — which is monomorphised into this crate with instrumentation,
+    // and this function runs underneath the instrumentation. See `get_shadow`.
+    let last = addr.wrapping_add((size as u64).wrapping_sub(1));
     let mut a = addr;
     loop {
-        if byte_bad(a).is_some() {
+        if byte_bad(a) != KASAN_ADDRESSABLE {
             return false;
         }
-        let next = (a & !KASAN_GRANULE_MASK) + KASAN_GRANULE;
+        let next = (a & !KASAN_GRANULE_MASK).wrapping_add(KASAN_GRANULE);
         if next > last {
             break;
         }
         a = next;
     }
-    byte_bad(last).is_none()
+    byte_bad(last) == KASAN_ADDRESSABLE
 }
 
 /// Allocate, free, and return the address of a heap object whose shadow is
@@ -960,22 +1241,31 @@ pub fn self_test_freed_address() -> Option<u64> {
     result
 }
 
-/// Is a single byte at `a` inaccessible per its shadow?
+/// The shadow byte that makes the single byte at `a` inaccessible, or
+/// [`KASAN_ADDRESSABLE`] (0) if it is accessible.
+///
+/// Returning a sentinel rather than `Option<u8>` is not a style choice. This
+/// function is on the path `mm::kasan_rt`'s outlined checks call into, and
+/// `Option::<u8>::is_some` is a generic `core` function that monomorphises into
+/// this crate *with* instrumentation — so testing the result would call the
+/// check again, without bound. A zero shadow byte already means "addressable"
+/// and is never a violation code (`byte_bad` never returned `Some(0)`), so the
+/// sentinel loses no information.
 #[inline]
-fn byte_bad(a: u64) -> Option<u8> {
+fn byte_bad(a: u64) -> u8 {
     let sb = get_shadow(a);
     if sb == KASAN_ADDRESSABLE {
-        None
+        KASAN_ADDRESSABLE
     } else if sb <= 7 {
         // Partial granule: bytes [0, sb) accessible.
         if (a & KASAN_GRANULE_MASK) as u8 >= sb {
-            Some(sb)
+            sb
         } else {
-            None
+            KASAN_ADDRESSABLE
         }
     } else {
         // 0xFA / 0xFB / any other poison.
-        Some(sb)
+        sb
     }
 }
 
@@ -989,7 +1279,8 @@ pub fn check(addr: u64, size: usize, is_write: bool) -> Result<(), Violation> {
     // Check the first byte, every intermediate granule boundary, and the last.
     let mut a = addr;
     loop {
-        if let Some(sb) = byte_bad(a) {
+        let sb = byte_bad(a);
+        if sb != KASAN_ADDRESSABLE {
             VIOLATIONS.fetch_add(1, Ordering::Relaxed);
             return Err(Violation { addr: a, size, is_write, shadow: sb });
         }
@@ -1001,7 +1292,8 @@ pub fn check(addr: u64, size: usize, is_write: bool) -> Result<(), Violation> {
         a = next;
     }
     // Ensure the final byte is checked (it may share the first byte's granule).
-    if let Some(sb) = byte_bad(last) {
+    let sb = byte_bad(last);
+    if sb != KASAN_ADDRESSABLE {
         VIOLATIONS.fetch_add(1, Ordering::Relaxed);
         return Err(Violation { addr: last, size, is_write, shadow: sb });
     }

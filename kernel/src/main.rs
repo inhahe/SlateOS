@@ -363,6 +363,20 @@ extern "C" fn kmain() -> ! {
     }
 }
 
+/// Outcome of the pre-serial KASAN shadow install, reported once logging works.
+///
+/// A plain enum carried in a local: the install happens before the serial port
+/// exists, so the result cannot be printed where it is produced.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KasanEarlyStatus {
+    /// The zero shadow is live over the whole kernel half.
+    Installed,
+    /// Limine did not answer the HHDM request at all.
+    NoHhdmResponse,
+    /// The HHDM offset did not translate the kernel's own statics.
+    TranslationFailed,
+}
+
 /// The real kernel entry, running on the dedicated [`KERNEL_BOOT_STACK`].
 // KASAN: exempt, and it has to be the whole function rather than just the
 // prologue. This function's own locals are touched before it can call
@@ -372,13 +386,69 @@ extern "C" fn kmain() -> ! {
 #[cfg_attr(kasan_instrumented, sanitize(address = "off"))]
 #[unsafe(no_mangle)]
 extern "C" fn kernel_main() -> ! {
+    // Step 0: Install the KASAN zero shadow, before literally anything else.
+    //
+    // In the compiler-instrumented build every load and store first reads a
+    // shadow byte, so until the shadow exists *no* instrumented memory access
+    // may happen — and with no IDT installed yet the failure mode is a triple
+    // fault and a silent reboot, not a diagnosable panic. That rules out doing
+    // even serial init first: `serial::init` takes a spinlock, and a spinlock
+    // acquisition calls `core::sync::atomic::atomic_compare_exchange_weak`,
+    // which — being generic — is monomorphised into *this* crate and therefore
+    // instrumented no matter which module called it. (This is precisely how the
+    // first instrumented boot died.) So `hhdm_offset_early` reads the Limine
+    // response with raw loads and this runs as statement zero.
+    //
+    // Pointing all 16 TiB of shadow at one shared read-only zero page makes
+    // every check pass until something poisons a byte for real. It is done in
+    // the ordinary build too, so the path is exercised by every boot test
+    // instead of first running in the build where something is already going
+    // wrong. Costs 20 KiB of .bss and 32 PML4 entries.
+    //
+    // Nothing can be reported yet, so the outcome is stashed and logged as soon
+    // as the serial port is up.
+    //
+    // SAFETY: we are at kernel entry, so Limine has populated its request
+    // statics; `early_init` is called once, on the BSP, with interrupts off and
+    // no other CPU running.
+    let kasan_early = unsafe {
+        match boot::hhdm_offset_early() {
+            Some(hhdm) => {
+                if mm::kasan::early_init(hhdm) {
+                    KasanEarlyStatus::Installed
+                } else {
+                    KasanEarlyStatus::TranslationFailed
+                }
+            }
+            None => KasanEarlyStatus::NoHhdmResponse,
+        }
+    };
+
     // Step 1: Initialize serial console for debug output.
-    // This must be first so we can log everything that follows.
+    // This must be first *after* the shadow so we can log everything that
+    // follows.
     //
     // SAFETY: COM1 is standard PC hardware, always present in QEMU.
     // Called exactly once.
     unsafe {
         serial::init();
+    }
+
+    match kasan_early {
+        KasanEarlyStatus::Installed => {
+            serial_println!("[boot] KASAN zero shadow installed");
+        }
+        // Both failures mean the kernel cannot reach physical memory through
+        // the direct map, so nothing after this point can be trusted — and an
+        // instrumented build would triple-fault within a few instructions.
+        KasanEarlyStatus::NoHhdmResponse => {
+            serial_println!("FATAL: Limine did not answer the HHDM request");
+            cpu::halt_loop();
+        }
+        KasanEarlyStatus::TranslationFailed => {
+            serial_println!("FATAL: KASAN zero shadow install failed (bad HHDM offset?)");
+            cpu::halt_loop();
+        }
     }
 
     serial_println!("=== Kernel booting ===");
@@ -404,31 +474,6 @@ extern "C" fn kernel_main() -> ! {
 
     serial_println!("[boot] Boot info parsed successfully");
     serial_println!("[boot] HHDM offset: {:#x}", boot_info.hhdm_offset);
-
-    // Step 2a: Install the KASAN zero shadow.
-    //
-    // Must happen here — as soon as the HHDM offset is known and before any
-    // instrumented code runs. In the compiler-instrumented build every load and
-    // store first reads a shadow byte, so an unmapped shadow this early (no IDT
-    // yet) is a triple fault and a silent reboot rather than a diagnosable
-    // panic. Pointing all 16 TiB of shadow at one shared read-only zero page
-    // makes every check pass until something poisons a byte for real.
-    //
-    // Done in the ordinary build too, so the path is exercised by every boot
-    // test instead of first running in the build where something is already
-    // going wrong. Costs 20 KiB of .bss and 32 PML4 entries.
-    //
-    // SAFETY: called once, on the BSP, with interrupts off and no other CPU
-    // running; `hhdm_offset` is the offset Limine just reported.
-    if unsafe { mm::kasan::early_init(boot_info.hhdm_offset) } {
-        serial_println!("[boot] KASAN zero shadow installed");
-    } else {
-        // Only reachable if the kernel's own statics cannot be translated,
-        // which means the HHDM offset is wrong — nothing after this point can
-        // be trusted, and an instrumented build would triple-fault shortly.
-        serial_println!("FATAL: KASAN zero shadow install failed (bad HHDM offset?)");
-        cpu::halt_loop();
-    }
 
     // Step 2b: Initialize framebuffer console (if available).
     // The framebuffer is already mapped by Limine, so we can start

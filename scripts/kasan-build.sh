@@ -69,6 +69,31 @@ done
 #     Aborting on the first hit would tell us about one corruption; recovering
 #     lets a single boot enumerate all of them.  Linux uses the same mode.
 #
+# -asan-instrumentation-with-call-threshold=0
+#     Emit a *call* to `__asan_load8_noabort` & co. for every checked access
+#     instead of the inline shadow-compare sequence ("outline" mode; Linux
+#     offers the same choice as CONFIG_KASAN_OUTLINE).  This is not a size or
+#     taste preference — it is a correctness requirement for this kernel.
+#
+#     The inline sequence computes `(addr >> 3) + offset` and dereferences it
+#     unconditionally.  That is only a valid address for a *kernel* address: the
+#     shadow of a user address is `shadow(0x4000000000) = 0xDFFFE00800000000`,
+#     whose bits 63:47 are not sign-extended, so it is non-canonical and the
+#     probe is a #GP rather than a report.  Kernel code legitimately dereferences
+#     user pointers (the SEH context written onto the faulting thread's user
+#     stack in `idt.rs`, every uaccess helper in `mm/user.rs`, …), so with inline
+#     checks every such site is a kernel panic that has nothing to do with the
+#     bug being hunted — and each one costs a full boot cycle to find.
+#
+#     Outlined, the address never reaches a shadow dereference unless
+#     `mm::kasan::shadow_of` maps it into the *backed* window; a user address
+#     returns `None` and the check passes.  One rule, applied by construction,
+#     instead of an open-ended hunt for raw user derefs.
+#
+#     The cost is a call per access.  This profile is already `-O0` with a check
+#     on every load and store; a debug build whose purpose is one bug hunt can
+#     pay it.
+#
 # -asan-stack=0 -asan-globals=0
 #     No redzones around stack slots or statics.  Accesses to them are still
 #     checked — this only turns off the *poisoning*.  Poisoning stack redzones
@@ -99,6 +124,7 @@ KASAN_ARGS=(
     -Cllvm-args=-asan-mapping-offset=0xDFFFE00000000000
     -Cllvm-args=-asan-mapping-scale=3
     -Cllvm-args=-asan-recover=1
+    -Cllvm-args=-asan-instrumentation-with-call-threshold=0
     -Cllvm-args=-asan-stack=0
     -Cllvm-args=-asan-globals=0
     --cfg kasan_instrumented
@@ -108,6 +134,24 @@ echo "=== Building kernel with KASAN instrumentation (+$TOOLCHAIN) ==="
 cd "$PROJECT_ROOT"
 cargo "+$TOOLCHAIN" rustc -p kernel ${PROFILE_ARGS[@]+"${PROFILE_ARGS[@]}"} -- "${KASAN_ARGS[@]}"
 echo "Build OK (instrumented)."
+
+# ---------------------------------------------------------------------------
+# Verify the pre-shadow window
+# ---------------------------------------------------------------------------
+#
+# Between the entry point and the end of `mm::kasan::install_zero_shadow` there
+# is no shadow to read and no IDT to catch the resulting fault, so one
+# instrumented access is a triple fault: QEMU resets, the kernel prints nothing
+# at all, and the boot test can only report "no BOOT_OK".  Source review does
+# not establish this — `sanitize(address = "off")` is per-function and does not
+# reach the generic `core` code that monomorphises into this crate — so it is
+# checked mechanically against the binary instead.  Failing here costs a
+# message; failing at boot costs a `-d int,cpu_reset` session.
+KERNEL_BIN="$PROJECT_ROOT/target/x86_64-unknown-none/debug/kernel"
+if [ ${#PROFILE_ARGS[@]} -gt 0 ]; then
+    KERNEL_BIN="$PROJECT_ROOT/target/x86_64-unknown-none/release/kernel"
+fi
+python "$SCRIPT_DIR/kasan-check-preshadow.py" "$KERNEL_BIN"
 
 if [ "$BOOT" -eq 1 ]; then
     echo "=== Booting the instrumented kernel ==="

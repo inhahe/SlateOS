@@ -35,6 +35,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 use crate::fs::{EntryType, Vfs};
 use crate::serial_println;
 
@@ -55,8 +56,6 @@ const MAX_FILES: usize = 100_000;
 /// A file entry with metadata for comparison.
 #[derive(Debug, Clone)]
 struct FileEntry {
-    /// Relative path from the tree root.
-    rel_path: String,
     /// File size.
     size: u64,
     /// Last modified timestamp (nanoseconds).
@@ -69,17 +68,24 @@ struct FileEntry {
 #[derive(Debug, Clone, Default)]
 pub struct DirDiff {
     /// Files that exist only in the source.
-    pub new_files: Vec<String>,
+    ///
+    /// Every path in a [`DirDiff`] is *relative* to the tree root and carries
+    /// no leading separator, so it can be joined onto either root with
+    /// [`Path::join`].  These used to keep the leading `/` left over from a
+    /// byte-prefix strip, which the caller then had to concatenate without a
+    /// separator - a scheme that also mis-stripped `/ab` against a root of
+    /// `/a`.
+    pub new_files: Vec<PathBuf>,
     /// Files that exist in both but differ (size or mtime).
-    pub modified_files: Vec<String>,
+    pub modified_files: Vec<PathBuf>,
     /// Files that exist only in the destination.
-    pub deleted_files: Vec<String>,
+    pub deleted_files: Vec<PathBuf>,
     /// Files that are identical in both.
-    pub unchanged_files: Vec<String>,
+    pub unchanged_files: Vec<PathBuf>,
     /// Directories that exist only in the source.
-    pub new_dirs: Vec<String>,
+    pub new_dirs: Vec<PathBuf>,
     /// Directories that exist only in the destination.
-    pub deleted_dirs: Vec<String>,
+    pub deleted_dirs: Vec<PathBuf>,
     /// Total source files.
     pub src_file_count: u64,
     /// Total destination files.
@@ -151,7 +157,8 @@ pub fn stats() -> (u64, u64) {
 // ---------------------------------------------------------------------------
 
 /// Compare two directory trees and report differences.
-pub fn compare(src: &str, dst: &str) -> KernelResult<DirDiff> {
+pub fn compare(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> KernelResult<DirDiff> {
+    let (src, dst) = (src.as_ref(), dst.as_ref());
     let mut src_entries = BTreeMap::new();
     let mut dst_entries = BTreeMap::new();
 
@@ -220,7 +227,8 @@ pub fn compare(src: &str, dst: &str) -> KernelResult<DirDiff> {
 }
 
 /// Synchronize source to destination (one-way).
-pub fn sync(src: &str, dst: &str, opts: &SyncOptions) -> KernelResult<SyncResult> {
+pub fn sync(src: impl AsRef<Path>, dst: impl AsRef<Path>, opts: &SyncOptions) -> KernelResult<SyncResult> {
+    let (src, dst) = (src.as_ref(), dst.as_ref());
     let diff = compare(src, dst)?;
     let mut result = SyncResult::default();
 
@@ -229,22 +237,23 @@ pub fn sync(src: &str, dst: &str, opts: &SyncOptions) -> KernelResult<SyncResult
     sorted_dirs.sort(); // Sort to create parents before children.
 
     for rel in &sorted_dirs {
-        let dst_path = alloc::format!("{}{}", dst, rel);
+        let dst_path = dst.join(rel);
         if opts.dry_run {
             result.dirs_created = result.dirs_created.saturating_add(1);
         } else {
             match Vfs::mkdir(&dst_path) {
                 Ok(()) => result.dirs_created = result.dirs_created.saturating_add(1),
                 Err(KernelError::AlreadyExists) => {}
-                Err(e) => result.errors.push(alloc::format!("mkdir {}: {:?}", dst_path, e)),
+                Err(e) => result.errors.push(
+                    alloc::format!("mkdir {}: {:?}", dst_path.display(), e)),
             }
         }
     }
 
     // Copy new files.
     for rel in &diff.new_files {
-        let src_path = alloc::format!("{}{}", src, rel);
-        let dst_path = alloc::format!("{}{}", dst, rel);
+        let src_path = src.join(rel);
+        let dst_path = dst.join(rel);
 
         if opts.dry_run {
             result.copied = result.copied.saturating_add(1);
@@ -254,15 +263,16 @@ pub fn sync(src: &str, dst: &str, opts: &SyncOptions) -> KernelResult<SyncResult
                     result.copied = result.copied.saturating_add(1);
                     result.bytes_copied = result.bytes_copied.saturating_add(bytes);
                 }
-                Err(e) => result.errors.push(alloc::format!("copy {}: {:?}", rel, e)),
+                Err(e) => result.errors.push(
+                    alloc::format!("copy {}: {:?}", rel.display(), e)),
             }
         }
     }
 
     // Copy modified files.
     for rel in &diff.modified_files {
-        let src_path = alloc::format!("{}{}", src, rel);
-        let dst_path = alloc::format!("{}{}", dst, rel);
+        let src_path = src.join(rel);
+        let dst_path = dst.join(rel);
 
         // If verify_content, check hash before copying.
         if opts.verify_content {
@@ -283,7 +293,8 @@ pub fn sync(src: &str, dst: &str, opts: &SyncOptions) -> KernelResult<SyncResult
                     result.copied = result.copied.saturating_add(1);
                     result.bytes_copied = result.bytes_copied.saturating_add(bytes);
                 }
-                Err(e) => result.errors.push(alloc::format!("update {}: {:?}", rel, e)),
+                Err(e) => result.errors.push(
+                    alloc::format!("update {}: {:?}", rel.display(), e)),
             }
         }
     }
@@ -291,13 +302,14 @@ pub fn sync(src: &str, dst: &str, opts: &SyncOptions) -> KernelResult<SyncResult
     // Delete extra files in destination.
     if opts.delete_extra {
         for rel in &diff.deleted_files {
-            let dst_path = alloc::format!("{}{}", dst, rel);
+            let dst_path = dst.join(rel);
             if opts.dry_run {
                 result.deleted = result.deleted.saturating_add(1);
             } else {
                 match Vfs::remove(&dst_path) {
                     Ok(()) => result.deleted = result.deleted.saturating_add(1),
-                    Err(e) => result.errors.push(alloc::format!("delete {}: {:?}", rel, e)),
+                    Err(e) => result.errors.push(
+                        alloc::format!("delete {}: {:?}", rel.display(), e)),
                 }
             }
         }
@@ -308,13 +320,14 @@ pub fn sync(src: &str, dst: &str, opts: &SyncOptions) -> KernelResult<SyncResult
         sorted_del_dirs.reverse();
 
         for rel in &sorted_del_dirs {
-            let dst_path = alloc::format!("{}{}", dst, rel);
+            let dst_path = dst.join(rel);
             if opts.dry_run {
                 result.dirs_deleted = result.dirs_deleted.saturating_add(1);
             } else {
                 match Vfs::rmdir(&dst_path) {
                     Ok(()) => result.dirs_deleted = result.dirs_deleted.saturating_add(1),
-                    Err(e) => result.errors.push(alloc::format!("rmdir {}: {:?}", rel, e)),
+                    Err(e) => result.errors.push(
+                        alloc::format!("rmdir {}: {:?}", rel.display(), e)),
                 }
             }
         }
@@ -336,9 +349,9 @@ pub fn sync(src: &str, dst: &str, opts: &SyncOptions) -> KernelResult<SyncResult
 
 /// Recursively collect file entries from a directory tree.
 fn collect_tree(
-    root: &str,
-    path: &str,
-    out: &mut BTreeMap<String, FileEntry>,
+    root: &Path,
+    path: &Path,
+    out: &mut BTreeMap<PathBuf, FileEntry>,
     depth: usize,
 ) -> KernelResult<()> {
     if depth > MAX_DEPTH || out.len() >= MAX_FILES {
@@ -351,33 +364,28 @@ fn collect_tree(
     };
 
     for entry in &entries {
-        if entry.name == "." || entry.name == ".." {
+        if entry.name.as_path() == Path::new(".") || entry.name.as_path() == Path::new("..") {
             continue;
         }
         if out.len() >= MAX_FILES {
             return Ok(());
         }
 
-        let full = if path == "/" {
-            alloc::format!("/{}", entry.name)
-        } else {
-            alloc::format!("{}/{}", path, entry.name)
-        };
+        // `Path::join` collapses the root case, so `path == "/"` needs no arm.
+        let full = path.join(&entry.name);
 
-        // Compute relative path.
-        let rel = if root == "/" {
-            full.clone()
-        } else if let Some(stripped) = full.strip_prefix(root) {
-            String::from(stripped)
-        } else {
-            full.clone()
-        };
+        // Relative path.  `Path::strip_prefix` matches whole components and
+        // returns a path with no leading separator, so it handles a root of
+        // `/` uniformly and cannot mis-strip `/a` off `/ab` the way the old
+        // byte-prefix strip could.  A non-match can only mean `readdir`
+        // returned something outside the tree it was asked about; keeping the
+        // absolute path is the same fallback as before.
+        let rel = full.as_path().strip_prefix(root).unwrap_or_else(|| full.clone());
 
         match entry.entry_type {
             EntryType::File => {
                 if let Ok(meta) = Vfs::metadata(&full) {
                     out.insert(rel, FileEntry {
-                        rel_path: String::new(), // Not needed in the map.
                         size: meta.size,
                         modified_ns: meta.modified_ns,
                         entry_type: EntryType::File,
@@ -386,7 +394,6 @@ fn collect_tree(
             }
             EntryType::Directory => {
                 out.insert(rel.clone(), FileEntry {
-                    rel_path: String::new(),
                     size: 0,
                     modified_ns: 0,
                     entry_type: EntryType::Directory,
@@ -401,7 +408,7 @@ fn collect_tree(
 }
 
 /// Copy a single file from src to dst.
-fn copy_file(src: &str, dst: &str) -> KernelResult<u64> {
+fn copy_file(src: &Path, dst: &Path) -> KernelResult<u64> {
     let data = Vfs::read_file(src)?;
     let len = data.len() as u64;
     Vfs::write_file(dst, &data)?;
@@ -457,11 +464,11 @@ fn test_compare_different() {
 
     let diff = compare("/tmp/ds_c", "/tmp/ds_d").expect("compare");
     // b.txt is only in source → new
-    assert!(diff.new_files.iter().any(|f| f.contains("b.txt")), "b.txt should be new");
+    assert!(diff.new_files.iter().any(|f| f.as_path() == Path::new("b.txt")), "b.txt should be new");
     // c.txt is only in destination → deleted
-    assert!(diff.deleted_files.iter().any(|f| f.contains("c.txt")), "c.txt should be deleted");
+    assert!(diff.deleted_files.iter().any(|f| f.as_path() == Path::new("c.txt")), "c.txt should be deleted");
     // a.txt differs (different content/size) → modified
-    assert!(diff.modified_files.iter().any(|f| f.contains("a.txt")), "a.txt should be modified");
+    assert!(diff.modified_files.iter().any(|f| f.as_path() == Path::new("a.txt")), "a.txt should be modified");
 
     let _ = Vfs::remove("/tmp/ds_c/a.txt");
     let _ = Vfs::remove("/tmp/ds_c/b.txt");

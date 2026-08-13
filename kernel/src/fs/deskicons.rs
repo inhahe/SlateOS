@@ -26,11 +26,11 @@
 
 #![allow(dead_code)]
 
-use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -122,9 +122,9 @@ impl SpecialIcon {
 #[derive(Debug, Clone)]
 pub struct DesktopIcon {
     /// File or folder name.
-    pub name: String,
+    pub name: PathBuf,
     /// Full path.
-    pub path: String,
+    pub path: PathBuf,
     /// Whether this is a directory.
     pub is_dir: bool,
     /// Whether this is a special system icon.
@@ -176,7 +176,7 @@ impl Default for GridConfig {
 #[derive(Debug, Clone)]
 pub struct DesktopLayout {
     /// Desktop directory path.
-    pub desktop_path: String,
+    pub desktop_path: PathBuf,
     /// All icons.
     pub icons: Vec<DesktopIcon>,
     /// Layout mode.
@@ -215,7 +215,8 @@ static LAYOUT: Mutex<Option<DesktopLayout>> = Mutex::new(None);
 ///
 /// Scans the directory, applies saved positions if available,
 /// and arranges new icons that don't have saved positions.
-pub fn load(desktop_path: &str, screen_w: u32, screen_h: u32) -> KernelResult<()> {
+pub fn load(desktop_path: impl AsRef<Path>, screen_w: u32, screen_h: u32) -> KernelResult<()> {
+    let desktop_path = desktop_path.as_ref();
     LOAD_COUNT.fetch_add(1, Ordering::Relaxed);
 
     let entries = crate::fs::vfs::Vfs::readdir(desktop_path)?;
@@ -233,8 +234,8 @@ pub fn load(desktop_path: &str, screen_w: u32, screen_h: u32) -> KernelResult<()
     for (idx, special) in specials.iter().enumerate() {
         let (x, y) = grid_position(&grid, idx, screen_w);
         icons.push(DesktopIcon {
-            name: String::from(special.label()),
-            path: String::from(special.path()),
+            name: PathBuf::from(special.label()),
+            path: PathBuf::from(special.path()),
             is_dir: true,
             special: Some(*special),
             x,
@@ -247,18 +248,19 @@ pub fn load(desktop_path: &str, screen_w: u32, screen_h: u32) -> KernelResult<()
     // Add regular icons from directory.
     let offset = specials.len();
     for (idx, entry) in entries.iter().enumerate() {
-        if entry.name.starts_with('.') {
+        // Byte compare, not `Path::starts_with`: the latter matches whole
+        // components, so it would ask whether the name *is* `.`.
+        if entry.name.as_bytes().starts_with(b".") {
             continue; // Skip hidden by default.
         }
         if icons.len() >= MAX_ICONS {
             break;
         }
         let (x, y) = grid_position(&grid, offset + idx, screen_w);
-        let full_path = if desktop_path == "/" {
-            alloc::format!("/{}", entry.name)
-        } else {
-            alloc::format!("{}/{}", desktop_path, entry.name)
-        };
+        // `Path::join` collapses the root case itself, so the old
+        // `desktop_path == "/"` arm (which existed only to avoid a doubled
+        // separator) is gone.
+        let full_path = desktop_path.join(&entry.name);
         icons.push(DesktopIcon {
             name: entry.name.clone(),
             path: full_path,
@@ -272,7 +274,7 @@ pub fn load(desktop_path: &str, screen_w: u32, screen_h: u32) -> KernelResult<()
     }
 
     let layout = DesktopLayout {
-        desktop_path: String::from(desktop_path),
+        desktop_path: desktop_path.to_path_buf(),
         icons,
         mode: LayoutMode::SnapToGrid,
         sort_by: SortBy::Name,
@@ -293,12 +295,13 @@ pub fn get_layout() -> Option<DesktopLayout> {
 }
 
 /// Update an icon's position (after drag).
-pub fn update_position(name: &str, x: u32, y: u32) -> KernelResult<()> {
+pub fn update_position(name: impl AsRef<Path>, x: u32, y: u32) -> KernelResult<()> {
+    let name = name.as_ref();
     let mut layout_opt = LAYOUT.lock();
     let layout = layout_opt.as_mut().ok_or(KernelError::NotFound)?;
 
     let icon = layout.icons.iter_mut()
-        .find(|i| i.name == name)
+        .find(|i| i.name.as_path() == name)
         .ok_or(KernelError::NotFound)?;
 
     match layout.mode {
@@ -352,10 +355,16 @@ pub fn auto_arrange(sort: SortBy) -> KernelResult<()> {
             (None, Some(_)) => core::cmp::Ordering::Greater,
             _ => {
                 match sort {
-                    SortBy::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+                    // ASCII-only case folding over the raw bytes: a filename
+                    // has no declared encoding, so there is nothing to consult
+                    // that would say how to fold a byte >= 0x80 - and the old
+                    // `str::to_lowercase` could not be applied to such a name
+                    // at all.
+                    SortBy::Name => a.name.as_bytes().to_ascii_lowercase()
+                        .cmp(&b.name.as_bytes().to_ascii_lowercase()),
                     SortBy::Type => {
-                        let ext_a = a.name.rsplit('.').next().unwrap_or("");
-                        let ext_b = b.name.rsplit('.').next().unwrap_or("");
+                        let ext_a = a.name.extension().map(Path::as_bytes).unwrap_or(b"");
+                        let ext_b = b.name.extension().map(Path::as_bytes).unwrap_or(b"");
                         ext_a.cmp(ext_b).then(a.name.cmp(&b.name))
                     }
                     SortBy::Size | SortBy::DateModified => {
@@ -380,7 +389,8 @@ pub fn auto_arrange(sort: SortBy) -> KernelResult<()> {
 }
 
 /// Select an icon by name.
-pub fn select(name: &str, exclusive: bool) -> KernelResult<()> {
+pub fn select(name: impl AsRef<Path>, exclusive: bool) -> KernelResult<()> {
+    let name = name.as_ref();
     let mut layout_opt = LAYOUT.lock();
     let layout = layout_opt.as_mut().ok_or(KernelError::NotFound)?;
 
@@ -392,7 +402,7 @@ pub fn select(name: &str, exclusive: bool) -> KernelResult<()> {
     }
 
     let icon = layout.icons.iter_mut()
-        .find(|i| i.name == name)
+        .find(|i| i.name.as_path() == name)
         .ok_or(KernelError::NotFound)?;
     icon.selected = true;
     Ok(())
@@ -409,7 +419,7 @@ pub fn deselect_all() -> KernelResult<()> {
 }
 
 /// Get selected icon paths.
-pub fn selected_paths() -> Vec<String> {
+pub fn selected_paths() -> Vec<PathBuf> {
     let layout_opt = LAYOUT.lock();
     match layout_opt.as_ref() {
         Some(layout) => layout.icons.iter()
@@ -439,7 +449,7 @@ pub fn refresh() -> KernelResult<()> {
 }
 
 /// Hit test: find icon at pixel coordinates.
-pub fn icon_at(px: u32, py: u32) -> Option<String> {
+pub fn icon_at(px: u32, py: u32) -> Option<PathBuf> {
     let layout_opt = LAYOUT.lock();
     let layout = layout_opt.as_ref()?;
 
@@ -573,7 +583,7 @@ pub fn self_test() -> KernelResult<()> {
         select("Computer", true)?;
         let sel = selected_paths();
         assert_eq!(sel.len(), 1);
-        assert_eq!(sel.first().map(|s| s.as_str()), Some("/"));
+        assert_eq!(sel.first().map(PathBuf::as_path), Some(Path::new("/")));
 
         deselect_all()?;
         let sel2 = selected_paths();

@@ -117,8 +117,13 @@ pub struct JournalEntry {
     pub event_type: JournalEventType,
     /// Affected path (destination for renames).
     pub path: PathBuf,
-    /// Original path for rename events; empty for other event types.
-    pub old_path: PathBuf,
+    /// Original path for rename events; `None` for other event types.
+    ///
+    /// This was a `PathBuf` that was empty for a non-rename.  The empty path
+    /// is not a legal path, so it could never name a real source — but the
+    /// only way to say so was a value check at every use site, which is what
+    /// `Option` says in the type.
+    pub old_path: Option<PathBuf>,
 }
 
 impl JournalEntry {
@@ -137,8 +142,8 @@ impl JournalEntry {
         s.push_str(self.event_type.as_str());
         s.push('"');
         json_push_path(&mut s, "path", &self.path);
-        if !self.old_path.is_empty() {
-            json_push_path(&mut s, "from", &self.old_path);
+        if let Some(old_path) = &self.old_path {
+            json_push_path(&mut s, "from", old_path);
         }
         s.push('}');
         s
@@ -153,7 +158,9 @@ impl JournalEntry {
         let etype_str = json_extract_str(line, "\"type\":\"")?;
         let event_type = JournalEventType::from_str(&etype_str)?;
         let path = json_extract_path(line, "path")?;
-        let old_path = json_extract_path(line, "from").unwrap_or_default();
+        // A missing "from" is a non-rename, not a rename from the empty
+        // path — so the absent case stays absent rather than defaulting.
+        let old_path = json_extract_path(line, "from");
         Some(Self {
             seq,
             timestamp_ns: ts,
@@ -257,16 +264,16 @@ pub fn init() {
 ///
 /// Called by the VFS after each mutating operation.
 pub fn record(event_type: JournalEventType, path: impl AsRef<Path>) {
-    record_with_old_path(event_type, path.as_ref(), Path::new(""));
+    record_with_old_path(event_type, path.as_ref(), None);
 }
 
 /// Record a rename event with the old path.
 pub fn record_rename(old_path: impl AsRef<Path>, new_path: impl AsRef<Path>) {
-    record_with_old_path(JournalEventType::Renamed, new_path.as_ref(), old_path.as_ref());
+    record_with_old_path(JournalEventType::Renamed, new_path.as_ref(), Some(old_path.as_ref()));
 }
 
 /// Internal: record an event with an optional old path.
-fn record_with_old_path(event_type: JournalEventType, path: &Path, old_path: &Path) {
+fn record_with_old_path(event_type: JournalEventType, path: &Path, old_path: Option<&Path>) {
     let mut journal = JOURNAL.lock();
     if !journal.initialized {
         return; // Not yet initialized — drop silently.
@@ -282,7 +289,7 @@ fn record_with_old_path(event_type: JournalEventType, path: &Path, old_path: &Pa
         timestamp_ns,
         event_type,
         path: path.to_path_buf(),
-        old_path: old_path.to_path_buf(),
+        old_path: old_path.map(Path::to_path_buf),
     };
 
     journal.entries.push_back(entry);
@@ -641,11 +648,16 @@ pub fn self_test() -> KernelResult<()> {
     }
 
     // Verify rename has old_path.
-    if last_four[2].old_path.as_path() != Path::new("/TEST_JOURNAL.TXT") {
+    if last_four[2].old_path.as_deref() != Some(Path::new("/TEST_JOURNAL.TXT")) {
         crate::serial_println!(
-            "[journal]   FAILED: rename old_path wrong: '{}'",
-            last_four[2].old_path.display()
+            "[journal]   FAILED: rename old_path wrong: {:?}",
+            last_four[2].old_path
         );
+        return Err(KernelError::IoError);
+    }
+    // A non-rename carries no source path at all, rather than an empty one.
+    if last_four[0].old_path.is_some() {
+        crate::serial_println!("[journal]   FAILED: non-rename carries an old_path");
         return Err(KernelError::IoError);
     }
 
@@ -679,7 +691,7 @@ pub fn self_test() -> KernelResult<()> {
             timestamp_ns: 7,
             event_type: JournalEventType::Renamed,
             path: raw.to_path_buf(),
-            old_path: PathBuf::from(b"/o\xffld".as_slice().to_vec()),
+            old_path: Some(PathBuf::from(b"/o\xffld".as_slice().to_vec())),
         };
         let json = entry.to_json_line();
         // The readable field is lossy; the hex field is not.  Both must be
@@ -708,7 +720,7 @@ pub fn self_test() -> KernelResult<()> {
             timestamp_ns: 2,
             event_type: JournalEventType::Created,
             path: PathBuf::from("/plain.txt"),
-            old_path: PathBuf::new(),
+            old_path: None,
         };
         let plain_json = plain.to_json_line();
         if plain_json.contains("_hex") {

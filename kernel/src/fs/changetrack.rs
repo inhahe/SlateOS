@@ -59,6 +59,7 @@ use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::journal::{self, JournalEntry, JournalEventType};
+use crate::fs::path::PathBuf;
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -84,9 +85,9 @@ struct Cursor {
 /// A filter for querying changes.
 #[derive(Debug, Clone, Default)]
 pub struct ChangeFilter {
-    /// Only include changes under these path prefixes.
-    /// Empty means "all paths".
-    pub path_prefixes: Vec<String>,
+    /// Only include changes under these paths (the path itself and its
+    /// subtree).  Empty means "all paths".
+    pub path_prefixes: Vec<PathBuf>,
     /// Only include these event types.
     /// Empty means "all types".
     pub event_types: Vec<JournalEventType>,
@@ -104,9 +105,9 @@ pub struct Change {
     /// Type of change.
     pub event_type: JournalEventType,
     /// Affected path.
-    pub path: String,
-    /// Original path for renames.
-    pub old_path: String,
+    pub path: PathBuf,
+    /// Original path for renames; `None` for every other event type.
+    pub old_path: Option<PathBuf>,
 }
 
 impl From<&JournalEntry> for Change {
@@ -440,17 +441,15 @@ fn matches_filter(entry: &JournalEntry, filter: &ChangeFilter) -> bool {
         let path_matches = filter
             .path_prefixes
             .iter()
-            .any(|pfx| crate::fs::pathutil::path_in_subtree(entry.path.as_str(), pfx.as_str()));
+            .any(|pfx| crate::fs::pathutil::path_in_subtree(&entry.path, pfx));
         if !path_matches {
-            // For renames, also check old_path.
-            if !entry.old_path.is_empty() {
-                let old_matches = filter.path_prefixes.iter().any(|pfx| {
-                    crate::fs::pathutil::path_in_subtree(entry.old_path.as_str(), pfx.as_str())
-                });
-                if !old_matches {
-                    return false;
-                }
-            } else {
+            // For renames, also check old_path.  A non-rename has none, so it
+            // is simply unmatched.
+            let old_matches = entry.old_path.as_ref().is_some_and(|old| {
+                filter.path_prefixes.iter()
+                    .any(|pfx| crate::fs::pathutil::path_in_subtree(old, pfx))
+            });
+            if !old_matches {
                 return false;
             }
         }
@@ -655,7 +654,7 @@ fn test_filter_path() {
 
     // Filter to only /etc.
     let filter = ChangeFilter {
-        path_prefixes: alloc::vec![String::from("/etc")],
+        path_prefixes: alloc::vec![PathBuf::from("/etc")],
         ..ChangeFilter::default()
     };
 
@@ -666,7 +665,7 @@ fn test_filter_path() {
         assert!(
             c.path.starts_with("/etc"),
             "unexpected path: {}",
-            c.path
+            c.path.display()
         );
     }
     assert!(result.changes.len() >= 2, "expected at least 2 /etc changes");

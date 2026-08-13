@@ -8416,7 +8416,9 @@ pub fn sys_fs_journal_read(args: &SyscallArgs) -> SyscallResult {
         put(8, &entry.timestamp_ns.to_le_bytes(), 8);
         put(16, &[entry.event_type as u8], 1);
         put(17, entry.path.as_bytes(), 255);
-        put(273, entry.old_path.as_bytes(), 255);
+        // A non-rename has no source path; the field stays all-zero, which is
+        // the empty NUL-terminated string userspace already reads it as.
+        put(273, entry.old_path.as_ref().map_or(b"".as_slice(), |p| p.as_bytes()), 255);
     }
 
     // One copy for the whole batch.  Validating and storing per entry meant a

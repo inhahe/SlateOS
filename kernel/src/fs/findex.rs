@@ -43,6 +43,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::fileinfo::{self, FieldValue, FileInfo};
+use crate::fs::path::{Path, PathBuf};
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -100,7 +101,7 @@ pub struct QueryPredicate {
 #[derive(Debug, Clone)]
 struct IndexedFile {
     /// Full file path.
-    path: String,
+    path: PathBuf,
     /// MIME type.
     mime: String,
     /// Indexed fields (name → value).
@@ -141,7 +142,8 @@ static QUERY_COUNT: AtomicU64 = AtomicU64::new(0);
 ///
 /// Extracts metadata via `fileinfo::extract()` and adds to the index.
 /// If the file is already indexed, updates its entry.
-pub fn index_file(path: &str) -> KernelResult<usize> {
+pub fn index_file<P: AsRef<Path> + ?Sized>(path: &P) -> KernelResult<usize> {
+    let path = path.as_ref();
     INDEX_OPS.fetch_add(1, Ordering::Relaxed);
 
     let info = fileinfo::extract(path)?;
@@ -151,7 +153,7 @@ pub fn index_file(path: &str) -> KernelResult<usize> {
 
     // Update existing entry.
     for entry in index.iter_mut() {
-        if entry.path == path {
+        if entry.path.as_path() == path {
             entry.mime = info.mime.clone();
             entry.fields = info.fields.iter()
                 .map(|f| (f.name.clone(), f.value.clone()))
@@ -169,7 +171,7 @@ pub fn index_file(path: &str) -> KernelResult<usize> {
     register_fields(&info);
 
     index.push(IndexedFile {
-        path: String::from(path),
+        path: path.to_path_buf(),
         mime: info.mime.clone(),
         fields: info.fields.iter()
             .map(|f| (f.name.clone(), f.value.clone()))
@@ -180,10 +182,11 @@ pub fn index_file(path: &str) -> KernelResult<usize> {
 }
 
 /// Remove a file from the index.
-pub fn remove_file(path: &str) -> bool {
+pub fn remove_file<P: AsRef<Path> + ?Sized>(path: &P) -> bool {
+    let path = path.as_ref();
     let mut index = INDEX.lock();
     let len_before = index.len();
-    index.retain(|e| e.path != path);
+    index.retain(|e| e.path.as_path() != path);
     index.len() < len_before
 }
 
@@ -191,7 +194,7 @@ pub fn remove_file(path: &str) -> bool {
 ///
 /// Uses `fswalk` to enumerate files and `fileinfo` to extract metadata.
 /// Returns the number of files indexed.
-pub fn build(root: &str, max_depth: usize) -> KernelResult<usize> {
+pub fn build<P: AsRef<Path> + ?Sized>(root: &P, max_depth: usize) -> KernelResult<usize> {
     BUILD_COUNT.fetch_add(1, Ordering::Relaxed);
 
     let walk_opts = crate::fs::fswalk::WalkOptions {
@@ -232,7 +235,7 @@ pub fn count() -> usize {
 /// Query the index with predicates.
 ///
 /// Returns paths of files matching ALL predicates (AND logic).
-pub fn query(predicates: &[QueryPredicate]) -> Vec<String> {
+pub fn query(predicates: &[QueryPredicate]) -> Vec<PathBuf> {
     QUERY_COUNT.fetch_add(1, Ordering::Relaxed);
 
     let index = INDEX.lock();
@@ -258,7 +261,7 @@ pub fn query(predicates: &[QueryPredicate]) -> Vec<String> {
 }
 
 /// Query for files that have a specific field, regardless of value.
-pub fn query_has_field(field: &str) -> Vec<String> {
+pub fn query_has_field(field: &str) -> Vec<PathBuf> {
     QUERY_COUNT.fetch_add(1, Ordering::Relaxed);
 
     let index = INDEX.lock();
@@ -270,10 +273,11 @@ pub fn query_has_field(field: &str) -> Vec<String> {
 }
 
 /// Get all field values for a specific file.
-pub fn get_fields(path: &str) -> Vec<(String, String)> {
+pub fn get_fields<P: AsRef<Path> + ?Sized>(path: &P) -> Vec<(String, String)> {
+    let path = path.as_ref();
     let index = INDEX.lock();
     index.iter()
-        .find(|e| e.path == path)
+        .find(|e| e.path.as_path() == path)
         .map(|e| {
             e.fields.iter()
                 .map(|(name, value)| (name.clone(), value.display()))
@@ -287,30 +291,29 @@ pub fn get_fields(path: &str) -> Vec<(String, String)> {
 /// Looks at all indexed files under the given path and returns
 /// the union of their field names — exactly what the design spec
 /// requires for the file explorer detail column selection.
-pub fn columns_for_dir(dir_path: &str) -> Vec<FieldStat> {
+pub fn columns_for_dir<P: AsRef<Path> + ?Sized>(dir_path: &P) -> Vec<FieldStat> {
+    let dir_path = dir_path.as_ref();
     let index = INDEX.lock();
-    let prefix = if dir_path.ends_with('/') {
-        String::from(dir_path)
-    } else {
-        format!("{}/", dir_path)
-    };
+    // Component count of the directory itself; a direct child has exactly one
+    // more.  Counting components rather than slicing a byte prefix means a
+    // trailing separator on `dir_path` costs nothing (`Path::components`
+    // drops empty components) and no arithmetic on byte offsets can go wrong.
+    let dir_depth = dir_path.components().count();
 
     // Count field occurrences among files in this directory.
     let mut field_counts: Vec<(String, String, usize)> = Vec::new();
 
     for entry in index.iter() {
-        // `prefix` always ends in '/' (built above), so a child is any
-        // indexed path strictly under it.  The previous inline boundary
-        // check `get(prefix.len()) == Some('/')` was wrong for a
-        // trailing-slash prefix — it looked one byte past the slash and so
-        // matched nothing, making this function always return empty.  See
-        // fs::pathutil for the canonical predicate.
-        if !crate::fs::pathutil::path_strictly_under(entry.path.as_str(), prefix.as_str()) {
+        // A child is any indexed path strictly under the directory.  The
+        // original inline boundary check `get(prefix.len()) == Some('/')` was
+        // wrong for a trailing-slash prefix — it looked one byte past the
+        // slash and so matched nothing, making this function always return
+        // empty.  See fs::pathutil for the canonical predicate.
+        if !crate::fs::pathutil::path_strictly_under(&entry.path, dir_path) {
             continue;
         }
         // Only direct children (no subdirectories).
-        let rest = &entry.path[prefix.len()..];
-        if rest.is_empty() || rest.contains('/') {
+        if entry.path.components().count() != dir_depth.saturating_add(1) {
             continue;
         }
 
@@ -609,8 +612,9 @@ pub fn self_test() -> KernelResult<()> {
     test_parse_f64();
     test_query_predicate();
     test_field_label();
+    test_columns_for_dir();
 
-    serial_println!("[findex] Self-test passed (6 tests).");
+    serial_println!("[findex] Self-test passed (7 tests).");
     Ok(())
 }
 
@@ -698,6 +702,53 @@ fn test_query_predicate() {
     assert_eq!(preds[0].op, QueryOp::EndsWith);
 
     serial_println!("[findex]   query_predicate: ok");
+}
+
+/// `columns_for_dir` must see direct children only, tolerate a trailing
+/// separator on the directory, and work on a path that is not valid UTF-8.
+///
+/// It is the file explorer's column picker, and it has already been wrong once
+/// (the byte-offset boundary check described in the function), so it gets a
+/// test of its own rather than relying on the shared subtree predicate.
+fn test_columns_for_dir() {
+    let saved = core::mem::take(&mut *INDEX.lock());
+
+    // 0xFF is not a legal UTF-8 byte anywhere in a sequence.  Before the
+    // byte-path conversion this entry could not be indexed at all.
+    let entries = [
+        PathBuf::from("/music/song.flac"),
+        PathBuf::from(b"/music/tra\xffck.flac".as_slice()),
+        PathBuf::from("/music/live/encore.flac"), // grandchild: excluded
+        PathBuf::from("/musicvideos/clip.mp4"),   // sibling dir: excluded
+    ];
+    {
+        let mut index = INDEX.lock();
+        for path in &entries {
+            index.push(IndexedFile {
+                path: path.clone(),
+                mime: String::from("audio/flac"),
+                fields: alloc::vec![(
+                    String::from("audio.artist"),
+                    FieldValue::Text(String::from("Someone")),
+                )],
+            });
+        }
+    }
+
+    let cols = columns_for_dir("/music");
+    assert_eq!(cols.len(), 1);
+    assert_eq!(cols[0].name, "audio.artist");
+    assert_eq!(cols[0].count, 2, "direct children only, including the non-UTF-8 one");
+
+    // A trailing separator names the same directory.
+    let cols = columns_for_dir("/music/");
+    assert_eq!(cols.first().map(|c| c.count), Some(2));
+
+    // And the prefix must be component-aligned: `/mus` is not a directory here.
+    assert!(columns_for_dir("/mus").is_empty());
+
+    *INDEX.lock() = saved;
+    serial_println!("[findex]   columns_for_dir: ok");
 }
 
 fn test_field_label() {

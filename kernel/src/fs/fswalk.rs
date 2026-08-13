@@ -41,6 +41,7 @@ use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 use crate::fs::{EntryType, Vfs};
 use crate::serial_println;
 
@@ -101,7 +102,7 @@ pub enum WalkAction {
 #[derive(Debug, Clone)]
 pub struct WalkEntry {
     /// Full path of the entry.
-    pub path: String,
+    pub path: PathBuf,
     /// Entry type (file, directory, symlink).
     pub entry_type: EntryType,
     /// File size (0 for directories).
@@ -120,11 +121,18 @@ pub struct WalkOptions {
     /// Type filter.
     pub filter: WalkFilter,
     /// Glob pattern for name matching (empty = all).
-    pub pattern: String,
+    ///
+    /// Bytes, not text: the names it is matched against come from `readdir`
+    /// and have no declared encoding, so a `String` pattern could only ever
+    /// match the subset of names that happen to decode.
+    pub pattern: Vec<u8>,
     /// Whether to include hidden files (names starting with '.').
     pub show_hidden: bool,
-    /// Additional path prefixes to exclude.
-    pub excludes: Vec<String>,
+    /// Additional subtrees to exclude.
+    ///
+    /// Matching is by *component*, via [`crate::fs::pathutil::path_in_subtree`]:
+    /// excluding `/tmp` excludes `/tmp/scratch` but not `/tmpfiles`.
+    pub excludes: Vec<PathBuf>,
     /// Maximum number of results to collect (0 = unlimited up to MAX_RESULTS).
     pub limit: usize,
     /// Whether to follow symbolic links.
@@ -139,7 +147,7 @@ impl Default for WalkOptions {
             order: WalkOrder::DepthFirst,
             max_depth: DEFAULT_MAX_DEPTH,
             filter: WalkFilter::All,
-            pattern: String::new(),
+            pattern: Vec::new(),
             show_hidden: false,
             excludes: Vec::new(),
             limit: 0,
@@ -214,7 +222,9 @@ static TOTAL_ERRORS: AtomicU64 = AtomicU64::new(0);
 /// Walk a directory tree, collecting matching entries.
 ///
 /// Returns a `WalkResult` with entries and statistics.
-pub fn walk(root: &str, opts: &WalkOptions) -> KernelResult<WalkResult> {
+pub fn walk<P: AsRef<Path> + ?Sized>(root: &P, opts: &WalkOptions)
+    -> KernelResult<WalkResult> {
+    let root = root.as_ref();
     WALK_COUNT.fetch_add(1, Ordering::Relaxed);
 
     let mut result = WalkResult {
@@ -234,7 +244,7 @@ pub fn walk(root: &str, opts: &WalkOptions) -> KernelResult<WalkResult> {
     // Include root directory itself if requested.
     if opts.include_root {
         let entry = WalkEntry {
-            path: String::from(root),
+            path: root.to_path_buf(),
             entry_type: EntryType::Directory,
             size: 0,
             depth: 0,
@@ -246,8 +256,8 @@ pub fn walk(root: &str, opts: &WalkOptions) -> KernelResult<WalkResult> {
     }
 
     // Stack/queue of (path, depth) for pending directories.
-    let mut pending: Vec<(String, usize)> = Vec::new();
-    pending.push((String::from(root), 0));
+    let mut pending: Vec<(PathBuf, usize)> = Vec::new();
+    pending.push((root.to_path_buf(), 0));
 
     while let Some((dir_path, depth)) = pop_next(&mut pending, opts.order) {
         // Check depth limit.
@@ -266,20 +276,20 @@ pub fn walk(root: &str, opts: &WalkOptions) -> KernelResult<WalkResult> {
 
         for de in &entries {
             // Skip . and ..
-            if de.name == "." || de.name == ".." {
+            if de.name.as_path() == Path::new(".") || de.name.as_path() == Path::new("..") {
                 continue;
             }
 
-            // Skip hidden files unless requested.
-            if !opts.show_hidden && de.name.starts_with('.') {
+            // Skip hidden files unless requested.  Byte compare, not
+            // `Path::starts_with`: the latter matches whole components, so it
+            // would ask whether the name *is* `.`.
+            if !opts.show_hidden && de.name.as_bytes().starts_with(b".") {
                 continue;
             }
 
-            let full_path = if dir_path.ends_with('/') {
-                format!("{}{}", dir_path, de.name)
-            } else {
-                format!("{}/{}", dir_path, de.name)
-            };
+            // `Path::join` inserts exactly one separator, so the
+            // trailing-slash special case this used to need is gone.
+            let full_path = dir_path.join(&de.name);
 
             // Check exclusions.
             if is_excluded(&full_path, opts) {
@@ -338,10 +348,12 @@ pub fn walk(root: &str, opts: &WalkOptions) -> KernelResult<WalkResult> {
 ///
 /// The visitor can control traversal by returning `WalkAction`.
 /// This avoids collecting all entries in memory.
-pub fn walk_visit<F>(root: &str, opts: &WalkOptions, mut visitor: F) -> KernelResult<WalkStats>
+pub fn walk_visit<P: AsRef<Path> + ?Sized, F>(root: &P, opts: &WalkOptions, mut visitor: F)
+    -> KernelResult<WalkStats>
 where
     F: FnMut(&WalkEntry) -> WalkAction,
 {
+    let root = root.as_ref();
     WALK_COUNT.fetch_add(1, Ordering::Relaxed);
 
     let mut stats = WalkStats::new();
@@ -354,7 +366,7 @@ where
 
     if opts.include_root {
         let entry = WalkEntry {
-            path: String::from(root),
+            path: root.to_path_buf(),
             entry_type: EntryType::Directory,
             size: 0,
             depth: 0,
@@ -368,8 +380,8 @@ where
         }
     }
 
-    let mut pending: Vec<(String, usize)> = Vec::new();
-    pending.push((String::from(root), 0));
+    let mut pending: Vec<(PathBuf, usize)> = Vec::new();
+    pending.push((root.to_path_buf(), 0));
     let mut stopped = false;
 
     while let Some((dir_path, depth)) = pop_next(&mut pending, opts.order) {
@@ -386,18 +398,14 @@ where
         };
 
         for de in &entries {
-            if de.name == "." || de.name == ".." {
+            if de.name.as_path() == Path::new(".") || de.name.as_path() == Path::new("..") {
                 continue;
             }
-            if !opts.show_hidden && de.name.starts_with('.') {
+            if !opts.show_hidden && de.name.as_bytes().starts_with(b".") {
                 continue;
             }
 
-            let full_path = if dir_path.ends_with('/') {
-                format!("{}{}", dir_path, de.name)
-            } else {
-                format!("{}/{}", dir_path, de.name)
-            };
+            let full_path = dir_path.join(&de.name);
 
             if is_excluded(&full_path, opts) {
                 stats.excluded += 1;
@@ -454,7 +462,7 @@ where
 }
 
 /// Quick count of files and directories under a path (no collecting).
-pub fn count(root: &str, max_depth: usize) -> KernelResult<(u64, u64)> {
+pub fn count<P: AsRef<Path> + ?Sized>(root: &P, max_depth: usize) -> KernelResult<(u64, u64)> {
     let opts = WalkOptions {
         max_depth,
         show_hidden: true,
@@ -465,7 +473,7 @@ pub fn count(root: &str, max_depth: usize) -> KernelResult<(u64, u64)> {
 }
 
 /// Calculate total size of all files under a path.
-pub fn total_size(root: &str, max_depth: usize) -> KernelResult<u64> {
+pub fn total_size<P: AsRef<Path> + ?Sized>(root: &P, max_depth: usize) -> KernelResult<u64> {
     let opts = WalkOptions {
         max_depth,
         show_hidden: true,
@@ -476,11 +484,18 @@ pub fn total_size(root: &str, max_depth: usize) -> KernelResult<u64> {
 }
 
 /// Find all files matching a glob pattern under a path.
-pub fn find(root: &str, pattern: &str, max_depth: usize) -> KernelResult<Vec<String>> {
+///
+/// The pattern is taken as bytes (`impl AsRef<[u8]>` accepts a `&str`
+/// literal), so a name that does not decode as UTF-8 is still findable.
+pub fn find<P: AsRef<Path> + ?Sized, G: AsRef<[u8]> + ?Sized>(
+    root: &P,
+    pattern: &G,
+    max_depth: usize,
+) -> KernelResult<Vec<PathBuf>> {
     let opts = WalkOptions {
         max_depth,
         filter: WalkFilter::FilesOnly,
-        pattern: String::from(pattern),
+        pattern: pattern.as_ref().to_vec(),
         show_hidden: true,
         ..Default::default()
     };
@@ -509,7 +524,7 @@ pub fn reset_stats() {
 // ---------------------------------------------------------------------------
 
 /// Pop the next directory to process based on traversal order.
-fn pop_next(pending: &mut Vec<(String, usize)>, order: WalkOrder) -> Option<(String, usize)> {
+fn pop_next(pending: &mut Vec<(PathBuf, usize)>, order: WalkOrder) -> Option<(PathBuf, usize)> {
     match order {
         WalkOrder::DepthFirst => pending.pop(), // LIFO = DFS.
         WalkOrder::BreadthFirst => {
@@ -538,10 +553,15 @@ fn matches_filter(entry: &WalkEntry, opts: &WalkOptions) -> bool {
         }
     }
 
-    // Pattern filter.
+    // Pattern filter.  Matched against the final component only, and
+    // case-sensitively: this is a case-sensitive filesystem, so two names that
+    // differ only in case are two different files and a glob must say so.
     if !opts.pattern.is_empty() {
-        let name = entry.path.rsplit('/').next().unwrap_or(&entry.path);
-        if !simple_glob(&opts.pattern, name) {
+        let name = entry.path.file_name().map_or_else(
+            || entry.path.as_bytes(),
+            Path::as_bytes,
+        );
+        if !crate::fs::vfs::glob_match(name, &opts.pattern, false) {
             return false;
         }
     }
@@ -550,7 +570,7 @@ fn matches_filter(entry: &WalkEntry, opts: &WalkOptions) -> bool {
 }
 
 /// Check if a path should be excluded.
-fn is_excluded(path: &str, opts: &WalkOptions) -> bool {
+fn is_excluded(path: &Path, opts: &WalkOptions) -> bool {
     // Canonical subtree predicate tolerates a trailing slash on the exclude
     // entries. See fs::pathutil.
     for prefix in DEFAULT_EXCLUDES {
@@ -559,45 +579,11 @@ fn is_excluded(path: &str, opts: &WalkOptions) -> bool {
         }
     }
     for prefix in &opts.excludes {
-        if crate::fs::pathutil::path_in_subtree(path, prefix.as_str()) {
+        if crate::fs::pathutil::path_in_subtree(path, prefix) {
             return true;
         }
     }
     false
-}
-
-/// Simple glob matching (supports * and ?).
-fn simple_glob(pattern: &str, text: &str) -> bool {
-    let pat = pattern.as_bytes();
-    let txt = text.as_bytes();
-
-    let mut pi = 0;
-    let mut ti = 0;
-    let mut star_pi = usize::MAX;
-    let mut star_ti = 0;
-
-    while ti < txt.len() {
-        if pi < pat.len() && (pat[pi] == b'?' || pat[pi] == txt[ti]) {
-            pi += 1;
-            ti += 1;
-        } else if pi < pat.len() && pat[pi] == b'*' {
-            star_pi = pi;
-            star_ti = ti;
-            pi += 1;
-        } else if star_pi != usize::MAX {
-            pi = star_pi + 1;
-            star_ti += 1;
-            ti = star_ti;
-        } else {
-            return false;
-        }
-    }
-
-    while pi < pat.len() && pat[pi] == b'*' {
-        pi += 1;
-    }
-
-    pi == pat.len()
 }
 
 /// Format a byte size for human-readable display.
@@ -620,7 +606,7 @@ fn format_size(bytes: u64) -> String {
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[fswalk] Running self-test...");
 
-    test_simple_glob();
+    test_non_utf8_names();
     test_matches_filter();
     test_walk_options_default();
     test_pop_next();
@@ -631,28 +617,60 @@ pub fn self_test() -> KernelResult<()> {
     Ok(())
 }
 
-fn test_simple_glob() {
-    assert!(simple_glob("*.txt", "hello.txt"));
-    assert!(simple_glob("*.txt", "a.txt"));
-    assert!(!simple_glob("*.txt", "hello.rs"));
-    assert!(simple_glob("hello.*", "hello.txt"));
-    assert!(simple_glob("*", "anything"));
-    assert!(simple_glob("h?llo", "hello"));
-    assert!(!simple_glob("h?llo", "heello"));
-    assert!(simple_glob("*.tar.gz", "archive.tar.gz"));
-    assert!(!simple_glob("*.tar.gz", "archive.tar.bz2"));
-    serial_println!("[fswalk]   simple_glob: ok");
+/// A name that is not valid UTF-8 must survive the pattern and exclude
+/// filters.
+///
+/// Before the byte-path conversion `WalkEntry.path` was a `String` and the
+/// pattern was matched with `str` slicing, so the traversal engine every other
+/// subsystem builds on - indexer, search, backup, dedup, health-check - was
+/// structurally unable to report such a file.
+fn test_non_utf8_names() {
+    // 0xFF is not a legal UTF-8 byte anywhere in a sequence.
+    let entry = WalkEntry {
+        path: PathBuf::from(b"/data/re\xffport.txt".as_slice()),
+        entry_type: EntryType::File,
+        size: 7,
+        depth: 1,
+    };
+
+    let by_ext = WalkOptions { pattern: b"*.txt".to_vec(), ..Default::default() };
+    assert!(matches_filter(&entry, &by_ext));
+
+    // `?` matches the single undecodable byte.
+    let by_wildcard = WalkOptions { pattern: b"re?port.*".to_vec(), ..Default::default() };
+    assert!(matches_filter(&entry, &by_wildcard));
+
+    // The pattern itself may be undecodable too.
+    let by_literal = WalkOptions {
+        pattern: b"re\xffport.txt".to_vec(),
+        ..Default::default()
+    };
+    assert!(matches_filter(&entry, &by_literal));
+
+    // The pattern applies to the final component, not the whole path.
+    let by_dir = WalkOptions { pattern: b"data*".to_vec(), ..Default::default() };
+    assert!(!matches_filter(&entry, &by_dir));
+
+    // And an exclude with an undecodable component still prunes.
+    let excluded = WalkOptions {
+        excludes: vec![PathBuf::from(b"/da\xffta".as_slice())],
+        ..Default::default()
+    };
+    assert!(is_excluded(Path::new(b"/da\xffta/file".as_slice()), &excluded));
+    assert!(!is_excluded(Path::new("/data/file"), &excluded));
+
+    serial_println!("[fswalk]   non-UTF-8 names: ok");
 }
 
 fn test_matches_filter() {
     let file_entry = WalkEntry {
-        path: String::from("/test/file.txt"),
+        path: PathBuf::from("/test/file.txt"),
         entry_type: EntryType::File,
         size: 100,
         depth: 1,
     };
     let dir_entry = WalkEntry {
-        path: String::from("/test/subdir"),
+        path: PathBuf::from("/test/subdir"),
         entry_type: EntryType::Directory,
         size: 0,
         depth: 1,
@@ -667,11 +685,15 @@ fn test_matches_filter() {
     assert!(!matches_filter(&dir_entry, &files_only));
 
     let with_pattern = WalkOptions {
-        pattern: String::from("*.txt"),
+        pattern: b"*.txt".to_vec(),
         ..Default::default()
     };
     assert!(matches_filter(&file_entry, &with_pattern));
     assert!(!matches_filter(&dir_entry, &with_pattern));
+
+    // Case-sensitive: `FILE.TXT` and `file.txt` are two different files here.
+    let upper = WalkOptions { pattern: b"*.TXT".to_vec(), ..Default::default() };
+    assert!(!matches_filter(&file_entry, &upper));
 
     serial_println!("[fswalk]   matches_filter: ok");
 }
@@ -690,37 +712,41 @@ fn test_walk_options_default() {
 fn test_pop_next() {
     // DFS: LIFO.
     let mut stack = vec![
-        (String::from("first"), 0),
-        (String::from("second"), 1),
-        (String::from("third"), 2),
+        (PathBuf::from("first"), 0),
+        (PathBuf::from("second"), 1),
+        (PathBuf::from("third"), 2),
     ];
     let (path, _) = pop_next(&mut stack, WalkOrder::DepthFirst).unwrap();
-    assert_eq!(path, "third");
+    assert_eq!(path, PathBuf::from("third"));
 
     // BFS: FIFO.
     let mut queue = vec![
-        (String::from("first"), 0),
-        (String::from("second"), 1),
-        (String::from("third"), 2),
+        (PathBuf::from("first"), 0),
+        (PathBuf::from("second"), 1),
+        (PathBuf::from("third"), 2),
     ];
     let (path, _) = pop_next(&mut queue, WalkOrder::BreadthFirst).unwrap();
-    assert_eq!(path, "first");
+    assert_eq!(path, PathBuf::from("first"));
 
     serial_println!("[fswalk]   pop_next: ok");
 }
 
 fn test_is_excluded() {
     let opts = WalkOptions::default();
-    assert!(is_excluded("/proc/cpuinfo", &opts));
-    assert!(is_excluded("/sys/class", &opts));
-    assert!(is_excluded("/dev/null", &opts));
-    assert!(!is_excluded("/home/user/file.txt", &opts));
+    assert!(is_excluded(Path::new("/proc/cpuinfo"), &opts));
+    assert!(is_excluded(Path::new("/sys/class"), &opts));
+    assert!(is_excluded(Path::new("/dev/null"), &opts));
+    assert!(!is_excluded(Path::new("/home/user/file.txt"), &opts));
+
+    // Component-aligned, not a byte prefix: `/devices` is not under `/dev`.
+    assert!(!is_excluded(Path::new("/devices/pci0"), &opts));
 
     let custom = WalkOptions {
-        excludes: vec![String::from("/tmp"), String::from(".git")],
+        excludes: vec![PathBuf::from("/tmp"), PathBuf::from(".git")],
         ..Default::default()
     };
-    assert!(is_excluded("/tmp/scratch", &custom));
+    assert!(is_excluded(Path::new("/tmp/scratch"), &custom));
+    assert!(!is_excluded(Path::new("/tmpfiles/scratch"), &custom));
 
     serial_println!("[fswalk]   is_excluded: ok");
 }

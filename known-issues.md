@@ -5838,6 +5838,19 @@ The gap is one of coverage, not of consistency, and a POSIX `TZ` string
   zoneinfo tree) is the portable spelling and is what any ported program will
   look for, so prefer it over inventing a YAML setting.
 
+**Do not wire `kernel/src/fs/locale.rs`'s `Timezone` to the clock.** It already
+exists (`LocaleConfig.timezone`, 12 registered zones, surfaced by the
+`locale`/`lcl` command and `/proc/locale`) and looks like the answer, but it is
+a *settings-UI registry*, not a time engine: it carries an IANA `id`, a single
+fixed `utc_offset_min`, and an `observes_dst: bool` — a flag saying DST happens
+somewhere in the year, with no rule for *when*. Computing local time from it
+would be wrong on one side of every transition, and wrong by a whole hour for
+half the year on whichever side you picked. The two are different notions of
+"timezone" that happen to share a name. When the system default zone is
+implemented, `LocaleConfig.timezone` should become a *label* that selects a
+TZif/POSIX rule for `tzrules` to evaluate — never an offset that anything adds
+to a timestamp itself.
+
 ---
 
 ### TD-OILS-A-SUBSTITUTION-IN-TEXT-NO-PARSER-READ-WAS-PARSED-AT-PARSE-TIME. A `$( … )` in a here-document body was re-printed, and its errors were the script's — 2026-08-09 — ✅ FIXED 2026-08-09

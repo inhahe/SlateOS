@@ -55103,13 +55103,59 @@ silent about it and the hunt sees nothing. The window is narrow — it needs
 an unmapped shadow frame — but it is not zero, and it is invisible when it
 happens.
 
-**Proper fix.** Decouple the frame mapping from the shootdown so the lock is
-never held across an IPI wait: map and zero the shadow frame under the lock,
-then queue the shootdown to run after the lock is dropped (the shadow frame is
-freshly mapped, so a stale *absent* TLB entry on another CPU is the only
-hazard, and it resolves into a fault that re-checks the bitmap). With no IPI
-wait inside the critical section, a plain `lock()` with interrupts disabled is
-safe and the IRQ-context give-up arm can be deleted. Secondary option: record
-the give-up in a counter so the coverage gap is at least *observable* rather
-than silent — worth doing even alongside the real fix, since it is how you find
-out the fix worked.
+**Proper fix — CORRECTED 2026-08-12. Do not implement the version first written
+here; its premise was wrong and it would have been a regression.**
+
+The original note proposed: map and zero the frame under the lock, then queue
+the TLB shootdown to run *after* the lock is dropped, on the grounds that "the
+shadow frame is freshly mapped, so a stale *absent* TLB entry on another CPU is
+the only hazard, and it resolves into a fault that re-checks the bitmap." That
+is not what the code does. The unbacked state is **not absent** — it is a
+*present, read-only* mapping of the shared zero page: `install_shadow_frame`
+pre-fills a fresh leaf PT with `zero_page | PTE_PRESENT | PTE_NX` (no
+`PTE_WRITABLE`), which is precisely what makes §118's "every check passes until
+something is poisoned" work. So during a deferred-shootdown window another CPU
+holds a stale **read-only present** entry, and the two cases differ sharply:
+
+- A stale *read* is harmless. It reads `0x00` out of the zero page, which means
+  "addressable", so it fails open — the same class of transient detection gap
+  this entry is already about.
+- A stale *write* — i.e. any poison store — hits a read-only kernel page and
+  takes a `#PF` with the write bit set. `idt.rs::handle_page_fault` has **no
+  spurious-fault fast path** (grepped: the only "spurious" handling in the file
+  is APIC vector 255), and the shadow window is not a demand-paged VMA, so the
+  fault lands on the fatal kernel-`#PF` path. That turns a silent, fail-open
+  detection gap into a kernel panic — strictly worse than the bug.
+
+Two ways to make deferring the shootdown actually sound:
+
+- **(a) Add a spurious-kernel-fault fast path.** On a kernel `#PF` whose address
+  is inside the shadow window, re-walk the page tables; if the PTE now permits
+  the access, `invlpg` and return. This is exactly Linux's
+  `spurious_kernel_fault`, it makes the deferred shootdown safe by construction,
+  and it is self-contained. Cost: one more special case early in the fatal-fault
+  path, which is the worst place in the kernel to get something subtly wrong.
+- **(b) Make the unbacked state not-present rather than present-read-only.** x86
+  does not create a TLB entry for a translation that faults, so a
+  not-present → present transition needs no shootdown at all (the ordinary
+  demand-paging result), and `MAP_LOCK` would never hold an IPI wait.
+  **But this is not sufficient on its own**, and that is the subtlety that makes
+  it more than a flag flip: `install_shadow_frame` also splices *private* PD/PT
+  pages in place of the shared ones, and those upper-level entries are present
+  both before and after. The paging-structure caches may still hold the old
+  shared-table pointers, so another CPU can walk to the shared zero PT and land
+  on the read-only zero page anyway. Any not-present design has to handle the
+  upper-level splice separately (e.g. allocate the private tables eagerly at
+  `early_init`, so only leaf entries ever change). It also inverts §118's design
+  premise, though possibly harmlessly now: with outlined checks `get_shadow`
+  consults the `SHADOW_MAPPED` bitmap *first* and never dereferences an unmapped
+  shadow, so the zero page may now be load-bearing only for the pre-shadow
+  window. That needs verifying rather than assuming — it is the same "a generic
+  `core` fn is instrumented after all" class of assumption that cost two boots
+  in §118.
+
+**Do first, regardless of which:** count the give-ups. A counter next to
+`SHADOW_FRAMES_MAPPED`, surfaced wherever the other KASAN stats are, turns an
+invisible gap into a measured one — it says whether this is a once-a-boot event
+or a never event, which decides whether (a)/(b) is worth its risk at all, and it
+is the only way to tell afterwards that the fix worked.

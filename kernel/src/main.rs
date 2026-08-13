@@ -3288,12 +3288,19 @@ extern "C" fn kernel_main() -> ! {
         let corrupted = mm::quarantine::scan_all();
         let qs = mm::quarantine::stats();
         let ks = mm::kasan::stats();
+        // `giveups` is reported here specifically because this line is the one a
+        // soak reads to decide whether a boot was clean. `corruptions=0` means
+        // "no corruption was found", not "no corruption happened", and every
+        // give-up is an allocation whose shadow was never written — so a nonzero
+        // value here is the difference between evidence of absence and absence
+        // of evidence. See known-issues.md →
+        // TD-KASAN-IRQ-CONTEXT-ALLOCATIONS-LOSE-SHADOW-COVERAGE.
         serial_println!(
             "[hunt] Path-Z checkpoint: quarantine parked={} total_parked={} \
              evicted={} corruptions={} (scan found {}); kasan violations={} \
-             shadow_frames={}",
+             shadow_frames={} giveups={}",
             qs.parked_now, qs.total_parked, qs.total_evicted, qs.corruptions,
-            corrupted, ks.violations, ks.shadow_frames_mapped
+            corrupted, ks.violations, ks.shadow_frames_mapped, ks.map_lock_giveups
         );
         mm::quarantine::disable();
         mm::kasan::disable();

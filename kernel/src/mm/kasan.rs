@@ -211,6 +211,7 @@ fn with_map_lock<R>(f: impl FnOnce() -> R) -> Option<R> {
             return Some(out);
         }
         if !irqs_were_on {
+            MAP_LOCK_GIVEUPS.fetch_add(1, Ordering::Relaxed);
             return None;
         }
         // SAFETY: as above — the caller had interrupts enabled, so re-enabling
@@ -246,6 +247,17 @@ static mut EARLY_SHADOW_DONE: u64 = 0;
 // Statistics.
 static VIOLATIONS: AtomicU64 = AtomicU64::new(0);
 static SHADOW_FRAMES_MAPPED: AtomicU64 = AtomicU64::new(0);
+/// Times [`with_map_lock`] gave up because an IRQ-context caller found the lock
+/// busy, each one an allocation whose shadow was never written.
+///
+/// This gap is otherwise completely invisible: it fails open, so nothing
+/// downstream can tell "not poisoned" from "poison never recorded". Counting it
+/// is what makes the trade in
+/// `known-issues.md` → `TD-KASAN-IRQ-CONTEXT-ALLOCATIONS-LOSE-SHADOW-COVERAGE`
+/// decidable — whether it happens once a boot or never decides whether the
+/// (risky) real fix is worth attempting at all — and it is the only way to tell
+/// afterwards that a fix worked.
+static MAP_LOCK_GIVEUPS: AtomicU64 = AtomicU64::new(0);
 static BYTES_POISONED: AtomicU64 = AtomicU64::new(0);
 static BYTES_UNPOISONED: AtomicU64 = AtomicU64::new(0);
 
@@ -1343,6 +1355,15 @@ pub struct KasanStats {
     pub bytes_poisoned: u64,
     /// Total bytes unpoisoned (allocated).
     pub bytes_unpoisoned: u64,
+    /// Allocations whose shadow was never written because an IRQ-context caller
+    /// found `MAP_LOCK` busy and could not safely wait for it.
+    ///
+    /// Nonzero means KASAN has blind spots this boot: each one is an allocation
+    /// whose redzones and freed-state poison were silently dropped, so an
+    /// overflow or use-after-free on it cannot be detected. Never a false
+    /// positive — the shadow fails open. See
+    /// `known-issues.md` → `TD-KASAN-IRQ-CONTEXT-ALLOCATIONS-LOSE-SHADOW-COVERAGE`.
+    pub map_lock_giveups: u64,
 }
 
 /// Read KASAN statistics.
@@ -1354,6 +1375,7 @@ pub fn stats() -> KasanStats {
         shadow_frames_mapped: SHADOW_FRAMES_MAPPED.load(Ordering::Relaxed),
         bytes_poisoned: BYTES_POISONED.load(Ordering::Relaxed),
         bytes_unpoisoned: BYTES_UNPOISONED.load(Ordering::Relaxed),
+        map_lock_giveups: MAP_LOCK_GIVEUPS.load(Ordering::Relaxed),
     }
 }
 
@@ -1474,9 +1496,25 @@ pub fn self_test() {
 
     let st = stats();
     serial_println!(
-        "[kasan]   stats: violations={}, shadow_frames={}, poisoned={}B, unpoisoned={}B",
-        st.violations, st.shadow_frames_mapped, st.bytes_poisoned, st.bytes_unpoisoned
+        "[kasan]   stats: violations={}, shadow_frames={}, poisoned={}B, unpoisoned={}B, \
+         map_lock_giveups={}",
+        st.violations,
+        st.shadow_frames_mapped,
+        st.bytes_poisoned,
+        st.bytes_unpoisoned,
+        st.map_lock_giveups
     );
+    // Printed as its own line rather than left in the stats tuple: a nonzero
+    // value means the shadow has holes this boot, which changes how any KASAN
+    // result from this boot should be read, and it must not be something you
+    // only notice by comparing two numbers in a long line.
+    if st.map_lock_giveups != 0 {
+        serial_println!(
+            "[kasan]   WARNING: {} IRQ-context allocation(s) went unpoisoned \
+             (MAP_LOCK busy) — shadow coverage has holes this boot",
+            st.map_lock_giveups
+        );
+    }
 
     if !was_enabled {
         disable();

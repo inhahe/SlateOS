@@ -38,7 +38,7 @@ use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::vfs::{DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo};
-use crate::fs::path::Path;
+use crate::fs::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Random bytes — delegates to kernel CSPRNG (rng module)

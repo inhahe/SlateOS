@@ -64,7 +64,7 @@ use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::vfs::{DirEntry, EntryType, FileMeta, FileSystem, FsInfo};
-use crate::fs::path::Path;
+use crate::fs::path::{Path, PathBuf};
 
 use crate::sync::PreemptSpinMutex as Mutex;
 

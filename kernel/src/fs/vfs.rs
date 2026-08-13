@@ -948,7 +948,7 @@ type MountedFs = Arc<Mutex<Box<dyn FileSystem>>>;
 
 struct MountPoint {
     /// Path where this filesystem is mounted (e.g., `"/"`).
-    path: String,
+    path: PathBuf,
     /// The filesystem implementation.
     ///
     /// Held behind a *per-mount* lock (not the global VFS lock) so that
@@ -1086,13 +1086,13 @@ pub(super) const VFS_DCACHE_SIZE: usize = 1024;
 /// A single entry in the VFS path resolution cache.
 struct VfsDcacheEntry {
     /// The normalized input path (key).
-    key: String,
+    key: PathBuf,
     /// Whether the final component was followed (true = resolve_follow,
     /// false = resolve_no_follow).
     follow_last: bool,
     /// The resolved output path (after symlink expansion).
     /// Empty for negative entries (path does not exist).
-    resolved: String,
+    resolved: PathBuf,
     /// Monotonic access counter for LRU eviction.
     last_access: u64,
     /// Whether this entry contains valid data.
@@ -1107,9 +1107,9 @@ struct VfsDcacheEntry {
 impl VfsDcacheEntry {
     const fn empty() -> Self {
         Self {
-            key: String::new(),
+            key: PathBuf::new(),
             follow_last: false,
-            resolved: String::new(),
+            resolved: PathBuf::new(),
             last_access: 0,
             valid: false,
             negative: false,
@@ -1119,12 +1119,12 @@ impl VfsDcacheEntry {
 
 /// Result of a VFS dcache lookup.
 ///
-/// Distinguished from `Option<String>` so callers can tell the difference
+/// Distinguished from `Option<PathBuf>` so callers can tell the difference
 /// between "not in cache" (walk needed) and "known not to exist" (short-
 /// circuit with `NotFound`).
 enum DcacheLookup {
     /// Path resolves to this value (positive cache hit).
-    Hit(String),
+    Hit(PathBuf),
     /// Path is known NOT to exist — a parent directory was missing when
     /// the path was last resolved.  Caller can return `NotFound`
     /// immediately without walking the filesystem.
@@ -1173,7 +1173,7 @@ impl VfsDcache {
     const fn new() -> Self {
         // SAFETY: VfsDcacheEntry::empty() is const and produces a valid
         // zero-like state.  We can't use [VfsDcacheEntry::empty(); N]
-        // because String isn't Copy, so we initialize in init().
+        // because PathBuf isn't Copy, so we initialize in init().
         Self {
             entries: [const { VfsDcacheEntry::empty() }; VFS_DCACHE_SIZE],
             counter: 0,
@@ -1186,9 +1186,9 @@ impl VfsDcache {
     ///
     /// Returns `Hit(resolved)` for a positive cache entry, `NegativeHit`
     /// for a path known not to exist, or `Miss` if the path is not cached.
-    fn lookup(&mut self, key: &str, follow_last: bool) -> DcacheLookup {
+    fn lookup(&mut self, key: &Path, follow_last: bool) -> DcacheLookup {
         for entry in self.entries.iter_mut() {
-            if entry.valid && entry.follow_last == follow_last && entry.key == key {
+            if entry.valid && entry.follow_last == follow_last && entry.key.as_path() == key {
                 self.counter = self.counter.wrapping_add(1);
                 entry.last_access = self.counter;
                 self.hits = self.hits.wrapping_add(1);
@@ -1207,14 +1207,14 @@ impl VfsDcache {
     /// Overwrites the least-recently-used entry if the cache is full.
     /// If the key previously held a negative entry, it is promoted to
     /// positive (the path now exists).
-    fn insert(&mut self, key: &str, follow_last: bool, resolved: &str) {
+    fn insert(&mut self, key: &Path, follow_last: bool, resolved: &Path) {
         self.counter = self.counter.wrapping_add(1);
 
         // Check if already cached (update in place).
         for entry in self.entries.iter_mut() {
-            if entry.valid && entry.follow_last == follow_last && entry.key == key {
+            if entry.valid && entry.follow_last == follow_last && entry.key.as_path() == key {
                 entry.resolved.clear();
-                entry.resolved.push_str(resolved);
+                entry.resolved.extend_bytes(resolved.as_bytes());
                 entry.last_access = self.counter;
                 entry.negative = false;
                 return;
@@ -1224,9 +1224,9 @@ impl VfsDcache {
         // Find an empty slot.
         for entry in self.entries.iter_mut() {
             if !entry.valid {
-                entry.key = String::from(key);
+                entry.key = key.to_path_buf();
                 entry.follow_last = follow_last;
-                entry.resolved = String::from(resolved);
+                entry.resolved = resolved.to_path_buf();
                 entry.last_access = self.counter;
                 entry.valid = true;
                 entry.negative = false;
@@ -1245,10 +1245,10 @@ impl VfsDcache {
         }
 
         self.entries[lru_idx].key.clear();
-        self.entries[lru_idx].key.push_str(key);
+        self.entries[lru_idx].key.extend_bytes(key.as_bytes());
         self.entries[lru_idx].follow_last = follow_last;
         self.entries[lru_idx].resolved.clear();
-        self.entries[lru_idx].resolved.push_str(resolved);
+        self.entries[lru_idx].resolved.extend_bytes(resolved.as_bytes());
         self.entries[lru_idx].last_access = self.counter;
         self.entries[lru_idx].valid = true;
         self.entries[lru_idx].negative = false;
@@ -1260,12 +1260,12 @@ impl VfsDcache {
     /// parent chain is broken, and subsequent lookups can short-circuit.
     /// Negative entries are invalidated by `invalidate_negative_prefix()`
     /// when creation operations succeed at matching paths.
-    fn insert_negative(&mut self, key: &str, follow_last: bool) {
+    fn insert_negative(&mut self, key: &Path, follow_last: bool) {
         self.counter = self.counter.wrapping_add(1);
 
         // Check if already cached (update to negative in place).
         for entry in self.entries.iter_mut() {
-            if entry.valid && entry.follow_last == follow_last && entry.key == key {
+            if entry.valid && entry.follow_last == follow_last && entry.key.as_path() == key {
                 entry.resolved.clear();
                 entry.negative = true;
                 entry.last_access = self.counter;
@@ -1276,9 +1276,9 @@ impl VfsDcache {
         // Find an empty slot.
         for entry in self.entries.iter_mut() {
             if !entry.valid {
-                entry.key = String::from(key);
+                entry.key = key.to_path_buf();
                 entry.follow_last = follow_last;
-                entry.resolved = String::new();
+                entry.resolved = PathBuf::new();
                 entry.last_access = self.counter;
                 entry.valid = true;
                 entry.negative = true;
@@ -1297,7 +1297,7 @@ impl VfsDcache {
         }
 
         self.entries[lru_idx].key.clear();
-        self.entries[lru_idx].key.push_str(key);
+        self.entries[lru_idx].key.extend_bytes(key.as_bytes());
         self.entries[lru_idx].follow_last = follow_last;
         self.entries[lru_idx].resolved.clear();
         self.entries[lru_idx].last_access = self.counter;
@@ -1310,14 +1310,12 @@ impl VfsDcache {
     ///
     /// Uses path-boundary checking: `/tmp` invalidates `/tmp/foo` but
     /// not `/tmpfile`.
-    fn invalidate_prefix(&mut self, prefix: &str) {
+    fn invalidate_prefix(&mut self, prefix: &Path) {
         for entry in self.entries.iter_mut() {
             if !entry.valid {
                 continue;
             }
-            if path_prefix_matches(&entry.key, prefix)
-                || path_prefix_matches(&entry.resolved, prefix)
-            {
+            if entry.key.starts_with(prefix) || entry.resolved.starts_with(prefix) {
                 entry.valid = false;
             }
         }
@@ -1329,12 +1327,12 @@ impl VfsDcache {
     /// cache entries remain valid because creating a new entry doesn't
     /// change how existing paths resolve, but a previously-negative path
     /// now exists.
-    fn invalidate_negative_prefix(&mut self, prefix: &str) {
+    fn invalidate_negative_prefix(&mut self, prefix: &Path) {
         for entry in self.entries.iter_mut() {
             if !entry.valid || !entry.negative {
                 continue;
             }
-            if path_prefix_matches(&entry.key, prefix) {
+            if entry.key.starts_with(prefix) {
                 entry.valid = false;
             }
         }
@@ -1356,27 +1354,6 @@ impl VfsDcache {
     }
 }
 
-/// Check if `path` starts with `prefix` at a path boundary.
-///
-/// Returns true if:
-/// - `path == prefix`, or
-/// - `path` starts with `prefix` followed by '/', or
-/// - `prefix == "/"` (root matches everything)
-fn path_prefix_matches(path: &str, prefix: &str) -> bool {
-    if prefix == "/" {
-        return true;
-    }
-    if path == prefix {
-        return true;
-    }
-    if path.starts_with(prefix) {
-        // Must be followed by '/' to be a path boundary.
-        path.as_bytes().get(prefix.len()) == Some(&b'/')
-    } else {
-        false
-    }
-}
-
 /// Global VFS path resolution cache.
 static VFS_DCACHE: Mutex<VfsDcache> = Mutex::new(VfsDcache::new());
 
@@ -1390,16 +1367,18 @@ impl Vfs {
     ///
     /// `mount_path` must start with `/`.  Multiple mounts are supported;
     /// the VFS uses longest-prefix matching to route operations.
-    pub fn mount(mount_path: &str, fs: Box<dyn FileSystem>) -> KernelResult<()> {
+    pub fn mount(mount_path: impl AsRef<Path>, fs: Box<dyn FileSystem>) -> KernelResult<()> {
+        let mount_path = mount_path.as_ref();
         Self::mount_with_options(mount_path, fs, MountOptions::defaults())
     }
 
     /// Mount a filesystem at the given path with specific mount options.
     pub fn mount_with_options(
-        mount_path: &str,
+        mount_path: impl AsRef<Path>,
         fs: Box<dyn FileSystem>,
         options: MountOptions,
     ) -> KernelResult<()> {
+        let mount_path = mount_path.as_ref();
         if !mount_path.starts_with('/') {
             return Err(KernelError::InvalidArgument);
         }
@@ -1447,7 +1426,8 @@ impl Vfs {
     /// The caller must ensure no file handles are open on this
     /// filesystem.  Currently we don't track per-mount handle counts,
     /// so this is the caller's responsibility.
-    pub fn unmount(mount_path: &str) -> KernelResult<()> {
+    pub fn unmount(mount_path: impl AsRef<Path>) -> KernelResult<()> {
+        let mount_path = mount_path.as_ref();
         let mut vfs = VFS.lock();
 
         let idx = vfs.mounts.iter().position(|mp| mp.path == mount_path)
@@ -1525,8 +1505,8 @@ impl Vfs {
     /// Returns the canonical absolute path with all symlinks resolved.
     /// This is the public API for callers (like file handles) that need
     /// to resolve a path once and reuse the result.
-    pub fn resolve_path(path: &str) -> KernelResult<String> {
-        Self::resolve_follow(path)
+    pub fn resolve_path<P: AsRef<Path>>(path: P) -> KernelResult<PathBuf> {
+        Self::resolve_follow(path.as_ref())
     }
 
     /// Internal: resolve following all symlinks.
@@ -1542,11 +1522,11 @@ impl Vfs {
     /// A future optimization: add a single-component `lookup()` to the
     /// `FileSystem` trait (like Linux's namei) to avoid re-resolving
     /// parent components.
-    fn resolve_follow(path: &str) -> KernelResult<String> {
+    fn resolve_follow(path: &Path) -> KernelResult<PathBuf> {
         // Apply per-process namespace translation before anything else.
         // This may remap or block the path entirely.
         let ns_path = crate::ipc::namespace::resolve_path(path)?;
-        let path = ns_path.as_str();
+        let path = ns_path.as_path();
 
         validate_path(path)?;
         let norm = normalize_path(path);
@@ -1588,10 +1568,10 @@ impl Vfs {
     ///
     /// Used for operations that act on the entry itself: `remove`,
     /// `rmdir`, `lstat`, `readlink`, `symlink`, `rename`.
-    fn resolve_no_follow(path: &str) -> KernelResult<String> {
+    fn resolve_no_follow(path: &Path) -> KernelResult<PathBuf> {
         // Apply per-process namespace translation before anything else.
         let ns_path = crate::ipc::namespace::resolve_path(path)?;
-        let path = ns_path.as_str();
+        let path = ns_path.as_path();
 
         validate_path(path)?;
         let norm = normalize_path(path);
@@ -1640,10 +1620,10 @@ impl Vfs {
     /// symlink-*followed* resolutions, which would mask the very symlinks
     /// this mode must reject.  These calls are rare (security-sensitive
     /// `openat2` opens), so the extra component walk is acceptable.
-    pub fn resolve_no_symlinks(path: &str) -> KernelResult<String> {
+    pub fn resolve_no_symlinks<P: AsRef<Path>>(path: P) -> KernelResult<PathBuf> {
         // Apply per-process namespace translation before anything else.
-        let ns_path = crate::ipc::namespace::resolve_path(path)?;
-        let path = ns_path.as_str();
+        let ns_path = crate::ipc::namespace::resolve_path(path.as_ref())?;
+        let path = ns_path.as_path();
 
         validate_path(path)?;
         let norm = normalize_path(path);
@@ -1660,32 +1640,29 @@ impl Vfs {
     /// implements `openat2`'s `RESOLVE_NO_SYMLINKS` semantics — strictly
     /// stronger than `O_NOFOLLOW`, which only guards the final component.
     fn resolve_inner(
-        path: &str,
+        path: &Path,
         follow_last: bool,
         depth: usize,
         no_symlinks: bool,
-    ) -> KernelResult<String> {
+    ) -> KernelResult<PathBuf> {
         if depth > Self::MAX_SYMLINK_DEPTH {
             return Err(KernelError::TooManyLinks);
         }
 
-        let components: Vec<&str> = path
-            .split('/')
-            .filter(|c| !c.is_empty())
-            .collect();
+        let components: Vec<&Path> = path.components().collect();
 
         if components.is_empty() {
-            return Ok(String::from("/"));
+            return Ok(PathBuf::from("/"));
         }
 
-        let mut resolved = String::with_capacity(path.len());
+        let mut resolved = PathBuf::with_capacity(path.len());
 
         for (i, comp) in components.iter().enumerate() {
             let is_last = i == components.len().saturating_sub(1);
 
             // Build current absolute path.
-            resolved.push('/');
-            resolved.push_str(comp);
+            resolved.extend_bytes(b"/");
+            resolved.extend_bytes(comp.as_bytes());
 
             // Check for symlinks if we should follow at this position, or
             // whenever `no_symlinks` is requested (which must reject a
@@ -1718,22 +1695,25 @@ impl Vfs {
                     }; // lock released
 
                     // Build new path: symlink target + remaining components.
-                    let base = if target.starts_with('/') {
+                    let mut full = if target.is_absolute() {
                         // Absolute target — restart from VFS root.
                         target
                     } else {
                         // Relative target — resolve from symlink's parent.
-                        let parent_end = resolved.rfind('/').unwrap_or(0);
-                        let parent = if parent_end == 0 { "/" } else { &resolved[..parent_end] };
-                        format!("{}/{}", parent, target)
+                        // `parent()` returns `None` only for a path with no
+                        // component to drop, which cannot happen here: this
+                        // loop has pushed at least one component onto
+                        // `resolved` before it can observe a symlink.
+                        let mut base = resolved
+                            .parent()
+                            .map_or_else(|| PathBuf::from("/"), Path::to_path_buf);
+                        base.push(&target);
+                        base
                     };
 
-                    let remaining = &components[i.saturating_add(1)..];
-                    let full = if remaining.is_empty() {
-                        base
-                    } else {
-                        format!("{}/{}", base, remaining.join("/"))
-                    };
+                    for r in components.get(i.saturating_add(1)..).unwrap_or(&[]) {
+                        full.push(*r);
+                    }
 
                     // Normalize (resolve `.` and `..` introduced by target)
                     // and recurse with incremented depth.
@@ -1760,7 +1740,8 @@ impl Vfs {
     /// If other filesystems are mounted at sub-paths of `path`, their
     /// mount points appear as directory entries in the listing (even if
     /// the underlying filesystem doesn't have a physical directory there).
-    pub fn readdir(path: &str) -> KernelResult<Vec<DirEntry>> {
+    pub fn readdir(path: impl AsRef<Path>) -> KernelResult<Vec<DirEntry>> {
+        let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
         check_file_tags(&path)?;
 
@@ -1798,10 +1779,11 @@ impl Vfs {
     /// This is the efficient API for large directories — callers can
     /// read entries in batches instead of loading everything at once.
     pub fn readdir_at(
-        path: &str,
+        path: impl AsRef<Path>,
         offset: usize,
         count: usize,
     ) -> KernelResult<(Vec<DirEntry>, usize)> {
+        let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
         Self::readdir_at_resolved(&path, offset, count)
     }
@@ -1810,10 +1792,11 @@ impl Vfs {
     /// host path (see [`read_at_resolved`](Self::read_at_resolved)) — used by
     /// directory file handles, which store the resolved path.
     pub fn readdir_at_resolved(
-        path: &str,
+        path: impl AsRef<Path>,
         offset: usize,
         count: usize,
     ) -> KernelResult<(Vec<DirEntry>, usize)> {
+        let path = path.as_ref();
         let submount_names: Vec<String> = {
             let vfs = VFS.lock();
             Self::submount_children(&vfs, path)
@@ -1841,7 +1824,8 @@ impl Vfs {
     }
 
     /// Read a file's contents.
-    pub fn read_file(path: &str) -> KernelResult<Vec<u8>> {
+    pub fn read_file(path: impl AsRef<Path>) -> KernelResult<Vec<u8>> {
+        let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
         Self::read_file_resolved(&path)
     }
@@ -1849,7 +1833,8 @@ impl Vfs {
     /// Like [`read_file`](Self::read_file) but on an **already-resolved** host
     /// path (see [`read_at_resolved`](Self::read_at_resolved) for why handle-
     /// backed I/O must skip re-translation).
-    pub fn read_file_resolved(path: &str) -> KernelResult<Vec<u8>> {
+    pub fn read_file_resolved(path: impl AsRef<Path>) -> KernelResult<Vec<u8>> {
+        let path = path.as_ref();
         check_file_tags(path)?;
         let result = Self::read_file_routed(path);
         // inotify IN_ACCESS: emit an Accessed event after a successful read,
@@ -1873,7 +1858,8 @@ impl Vfs {
     /// else — symlinks (whose `read_file` returns the link target), and objects
     /// without a stable identity (FAT/ISO/pseudo-filesystems) — falls back to
     /// the per-filesystem `read_file` unchanged.
-    fn read_file_routed(path: &str) -> KernelResult<Vec<u8>> {
+    fn read_file_routed(path: impl AsRef<Path>) -> KernelResult<Vec<u8>> {
+        let path = path.as_ref();
         let (file_id, size) = {
             let (fs, fs_id, _opts, relative) = resolve_mount(path)?;
             let mut guard = fs.lock();
@@ -1895,21 +1881,24 @@ impl Vfs {
     }
 
     /// Get metadata for a path.
-    pub fn stat(path: &str) -> KernelResult<DirEntry> {
+    pub fn stat(path: impl AsRef<Path>) -> KernelResult<DirEntry> {
+        let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
         Self::stat_resolved(&path)
     }
 
     /// Like [`stat`](Self::stat) but on an **already-resolved** host path (see
     /// [`read_at_resolved`](Self::read_at_resolved)).
-    pub fn stat_resolved(path: &str) -> KernelResult<DirEntry> {
+    pub fn stat_resolved(path: impl AsRef<Path>) -> KernelResult<DirEntry> {
+        let path = path.as_ref();
         check_file_tags(path)?;
         let (fs, _id, _opts, relative) = resolve_mount(path)?;
         fs.lock().stat(&relative)
     }
 
     /// Write data to a file (create or overwrite).
-    pub fn write_file(path: &str, data: &[u8]) -> KernelResult<()> {
+    pub fn write_file(path: impl AsRef<Path>, data: &[u8]) -> KernelResult<()> {
+        let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_follow(path)?;
         Self::write_file_resolved(&path, data)
@@ -1917,7 +1906,8 @@ impl Vfs {
 
     /// Like [`write_file`](Self::write_file) but on an **already-resolved**
     /// host path (see [`read_at_resolved`](Self::read_at_resolved)).
-    pub fn write_file_resolved(path: &str, data: &[u8]) -> KernelResult<()> {
+    pub fn write_file_resolved(path: impl AsRef<Path>, data: &[u8]) -> KernelResult<()> {
+        let path = path.as_ref();
         check_file_tags(path)?;
         check_writable(path)?;
         // Intercept: let pre-operation handlers approve/deny before proceeding.
@@ -1962,7 +1952,9 @@ impl Vfs {
     ///
     /// Future optimization: if both paths are on the same filesystem,
     /// delegate to a filesystem-level copy (reflink, server-side copy).
-    pub fn copy(src: &str, dst: &str) -> KernelResult<u64> {
+    pub fn copy(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> KernelResult<u64> {
+        let src = src.as_ref();
+        let dst = dst.as_ref();
         // For files that fit in a reasonable buffer (≤64 KiB), do a
         // simple read-all + write-all.  For larger files, use chunked
         // read_at / write_at to avoid loading the entire file into
@@ -2006,11 +1998,15 @@ impl Vfs {
     /// ## Depth limit
     ///
     /// Recursion depth is limited to 64 levels to prevent stack overflow.
-    pub fn copy_recursive(src: &str, dst: &str) -> KernelResult<u64> {
+    pub fn copy_recursive(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> KernelResult<u64> {
+        let src = src.as_ref();
+        let dst = dst.as_ref();
         Self::copy_recursive_inner(src, dst, 0)
     }
 
-    fn copy_recursive_inner(src: &str, dst: &str, depth: usize) -> KernelResult<u64> {
+    fn copy_recursive_inner(src: impl AsRef<Path>, dst: impl AsRef<Path>, depth: usize) -> KernelResult<u64> {
+        let src = src.as_ref();
+        let dst = dst.as_ref();
         const MAX_DEPTH: usize = 64;
         if depth > MAX_DEPTH {
             return Err(KernelError::TooManyLinks);
@@ -2065,12 +2061,14 @@ impl Vfs {
     /// ## Depth limit
     ///
     /// Recursion depth is limited to 64 levels to prevent stack overflow.
-    pub fn remove_recursive(path: &str) -> KernelResult<u64> {
+    pub fn remove_recursive(path: impl AsRef<Path>) -> KernelResult<u64> {
+        let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
         Self::remove_recursive_inner(path, 0)
     }
 
-    fn remove_recursive_inner(path: &str, depth: usize) -> KernelResult<u64> {
+    fn remove_recursive_inner(path: impl AsRef<Path>, depth: usize) -> KernelResult<u64> {
+        let path = path.as_ref();
         const MAX_DEPTH: usize = 64;
         if depth > MAX_DEPTH {
             return Err(KernelError::TooManyLinks);
@@ -2107,7 +2105,8 @@ impl Vfs {
     /// Delete a file.
     ///
     /// Does NOT follow the final symlink — removes the link itself.
-    pub fn remove(path: &str) -> KernelResult<()> {
+    pub fn remove(path: impl AsRef<Path>) -> KernelResult<()> {
+        let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_no_follow(path)?;
         check_file_tags(&path)?;
@@ -2156,7 +2155,8 @@ impl Vfs {
     /// caller does not specify a mode (the historical 0o755).
     pub const DEFAULT_DIR_MODE: u16 = 0o755;
 
-    pub fn mkdir(path: &str) -> KernelResult<()> {
+    pub fn mkdir(path: impl AsRef<Path>) -> KernelResult<()> {
+        let path = path.as_ref();
         Self::mkdir_mode(path, Self::DEFAULT_DIR_MODE)
     }
 
@@ -2167,7 +2167,8 @@ impl Vfs {
     /// umask lives in the userspace POSIX layer, so the kernel treats `mode`
     /// as the final on-disk permission bits (same thin-primitive model as the
     /// file-create path in [`crate::fs::handle::open_with_mode`]).
-    pub fn mkdir_mode(path: &str, mode: u16) -> KernelResult<()> {
+    pub fn mkdir_mode(path: impl AsRef<Path>, mode: u16) -> KernelResult<()> {
+        let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_no_follow(path)?;
         check_file_tags(&path)?;
@@ -2209,7 +2210,8 @@ impl Vfs {
     /// ## Depth limit
     ///
     /// Limited to 64 path components to prevent abuse.
-    pub fn mkdir_all(path: &str) -> KernelResult<()> {
+    pub fn mkdir_all(path: impl AsRef<Path>) -> KernelResult<()> {
+        let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
         validate_path(path)?;
         let norm = normalize_path(path);
@@ -2249,7 +2251,8 @@ impl Vfs {
     }
 
     /// Remove an empty directory.
-    pub fn rmdir(path: &str) -> KernelResult<()> {
+    pub fn rmdir(path: impl AsRef<Path>) -> KernelResult<()> {
+        let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_no_follow(path)?;
         check_file_tags(&path)?;
@@ -2272,7 +2275,8 @@ impl Vfs {
     }
 
     /// Read a range of bytes from a file.
-    pub fn read_at(path: &str, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+    pub fn read_at(path: impl AsRef<Path>, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+        let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
         Self::read_at_resolved(&path, offset, len)
     }
@@ -2288,7 +2292,8 @@ impl Vfs {
     /// Open file descriptors hold a resolved reference (Unix semantics — an fd
     /// is immune to later chroot/rename/symlink changes), so handle-backed I/O
     /// must use this entry point, never the path-based [`read_at`](Self::read_at).
-    pub fn read_at_resolved(path: &str, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+    pub fn read_at_resolved(path: impl AsRef<Path>, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+        let path = path.as_ref();
         check_file_tags(path)?;
         let result = Self::read_at_routed(path, offset, len);
         // inotify IN_ACCESS, gated on a live ACCESS watch (see `read_file`).
@@ -2322,7 +2327,8 @@ impl Vfs {
     /// [`crate::mm::page_cache::read_through`], so the cache→VFS fill path does
     /// not nest the two locks (the cache lock is already dropped before the fill
     /// closure runs).
-    fn read_at_routed(path: &str, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+    fn read_at_routed(path: impl AsRef<Path>, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+        let path = path.as_ref();
         if len == 0 {
             return Ok(Vec::new());
         }
@@ -2367,7 +2373,8 @@ impl Vfs {
     /// the caller's pre-zeroed page (demand-paging zero-fill semantics).  The
     /// mount is re-resolved under the VFS lock here; the page-cache lock is
     /// already dropped before this runs, so the cache and VFS locks never nest.
-    fn fill_file_page(path: &str, page_off: u64, page_buf: &mut [u8]) -> KernelResult<()> {
+    fn fill_file_page(path: impl AsRef<Path>, page_off: u64, page_buf: &mut [u8]) -> KernelResult<()> {
+        let path = path.as_ref();
         let data = {
             let (fs, _id, _opts, relative) = resolve_mount(path)?;
             fs.lock().read_at(&relative, page_off, page_buf.len())?
@@ -2395,7 +2402,8 @@ impl Vfs {
     /// are internal cache fills, not user-visible reads (the user-visible read
     /// that triggered the fill emits `ACCESS` at the [`read_at`](Self::read_at)
     /// layer).
-    pub fn read_at_uncached(path: &str, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+    pub fn read_at_uncached(path: impl AsRef<Path>, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+        let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
         Self::read_at_uncached_resolved(&path, offset, len)
     }
@@ -2403,14 +2411,16 @@ impl Vfs {
     /// Like [`read_at_uncached`](Self::read_at_uncached) but on an
     /// **already-resolved** host path (see
     /// [`read_at_resolved`](Self::read_at_resolved)).
-    pub fn read_at_uncached_resolved(path: &str, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+    pub fn read_at_uncached_resolved(path: impl AsRef<Path>, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+        let path = path.as_ref();
         check_file_tags(path)?;
         let (fs, _id, _opts, relative) = resolve_mount(path)?;
         fs.lock().read_at(&relative, offset, len)
     }
 
     /// Write bytes at a specific offset within a file.
-    pub fn write_at(path: &str, offset: u64, data: &[u8]) -> KernelResult<()> {
+    pub fn write_at(path: impl AsRef<Path>, offset: u64, data: &[u8]) -> KernelResult<()> {
+        let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_follow(path)?;
         Self::write_at_resolved(&path, offset, data)
@@ -2418,7 +2428,8 @@ impl Vfs {
 
     /// Like [`write_at`](Self::write_at) but on an **already-resolved** host
     /// path (see [`read_at_resolved`](Self::read_at_resolved)).
-    pub fn write_at_resolved(path: &str, offset: u64, data: &[u8]) -> KernelResult<()> {
+    pub fn write_at_resolved(path: impl AsRef<Path>, offset: u64, data: &[u8]) -> KernelResult<()> {
+        let path = path.as_ref();
         check_file_tags(path)?;
         check_writable(path)?;
         // Intercept and quota checks on partial writes.
@@ -2445,7 +2456,8 @@ impl Vfs {
     ///
     /// Creates the file if it doesn't exist.  Uses write_at at the
     /// current file size for efficient append without rewriting.
-    pub fn append(path: &str, data: &[u8]) -> KernelResult<()> {
+    pub fn append(path: impl AsRef<Path>, data: &[u8]) -> KernelResult<()> {
+        let path = path.as_ref();
         let offset = match Self::stat(path) {
             Ok(entry) => entry.size,
             Err(KernelError::NotFound) => {
@@ -2458,7 +2470,8 @@ impl Vfs {
     }
 
     /// Truncate a file to the given size.
-    pub fn truncate(path: &str, size: u64) -> KernelResult<()> {
+    pub fn truncate(path: impl AsRef<Path>, size: u64) -> KernelResult<()> {
+        let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_follow(path)?;
         Self::truncate_resolved(&path, size)
@@ -2466,7 +2479,8 @@ impl Vfs {
 
     /// Like [`truncate`](Self::truncate) but on an **already-resolved** host
     /// path (see [`read_at_resolved`](Self::read_at_resolved)).
-    pub fn truncate_resolved(path: &str, size: u64) -> KernelResult<()> {
+    pub fn truncate_resolved(path: impl AsRef<Path>, size: u64) -> KernelResult<()> {
+        let path = path.as_ref();
         check_writable(path)?;
         let cache_inval = {
             let (fs, fs_id, _opts, relative) = resolve_mount(path)?;
@@ -2490,7 +2504,8 @@ impl Vfs {
     /// logical size is not changed — this just ensures the blocks are
     /// allocated so future writes don't fail due to ENOSPC and don't
     /// cause fragmentation.
-    pub fn fallocate(path: &str, size: u64) -> KernelResult<()> {
+    pub fn fallocate(path: impl AsRef<Path>, size: u64) -> KernelResult<()> {
+        let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
         check_writable(&path)?;
         let (fs, _id, _opts, relative) = resolve_mount(&path)?;
@@ -2500,7 +2515,9 @@ impl Vfs {
     /// Rename or move a file or directory.
     ///
     /// Both paths must be on the same mount point.
-    pub fn rename(from: &str, to: &str) -> KernelResult<()> {
+    pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> KernelResult<()> {
+        let from = from.as_ref();
+        let to = to.as_ref();
         Self::rename_inner(from, to, false)
     }
 
@@ -2515,11 +2532,15 @@ impl Vfs {
     /// copy+delete path — itself a SlateOS convenience that Linux rejects with
     /// EXDEV — cannot be made atomic and keeps a documented best-effort
     /// pre-check; see the comment in the cross-mount branch.)
-    pub fn rename_noreplace(from: &str, to: &str) -> KernelResult<()> {
+    pub fn rename_noreplace(from: impl AsRef<Path>, to: impl AsRef<Path>) -> KernelResult<()> {
+        let from = from.as_ref();
+        let to = to.as_ref();
         Self::rename_inner(from, to, true)
     }
 
-    fn rename_inner(from: &str, to: &str, noreplace: bool) -> KernelResult<()> {
+    fn rename_inner(from: impl AsRef<Path>, to: impl AsRef<Path>, noreplace: bool) -> KernelResult<()> {
+        let from = from.as_ref();
+        let to = to.as_ref();
         crate::ipc::namespace::check_writable(from)?;
         crate::ipc::namespace::check_writable(to)?;
         let from = Self::resolve_no_follow(from)?;
@@ -2630,7 +2651,9 @@ impl Vfs {
     /// returns [`KernelError::NotSupported`], which the syscall layer maps to
     /// `EINVAL` (mirroring Linux's `->rename` returning `EINVAL` when it
     /// cannot honour the flag).
-    pub fn rename_exchange(a: &str, b: &str) -> KernelResult<()> {
+    pub fn rename_exchange(a: impl AsRef<Path>, b: impl AsRef<Path>) -> KernelResult<()> {
+        let a = a.as_ref();
+        let b = b.as_ref();
         crate::ipc::namespace::check_writable(a)?;
         crate::ipc::namespace::check_writable(b)?;
         let a = Self::resolve_no_follow(a)?;
@@ -2695,14 +2718,16 @@ impl Vfs {
     }
 
     /// Get mount options for the filesystem containing `path`.
-    pub fn mount_options(path: &str) -> KernelResult<MountOptions> {
+    pub fn mount_options(path: impl AsRef<Path>) -> KernelResult<MountOptions> {
+        let path = path.as_ref();
         let mut vfs = VFS.lock();
         let (mp, _) = find_mount(&mut vfs, path)?;
         Ok(mp.options)
     }
 
     /// Re-mount a filesystem with new options (e.g., `remount,ro`).
-    pub fn remount(mount_path: &str, options: MountOptions) -> KernelResult<()> {
+    pub fn remount(mount_path: impl AsRef<Path>, options: MountOptions) -> KernelResult<()> {
+        let mount_path = mount_path.as_ref();
         let mut vfs = VFS.lock();
         for mp in &mut vfs.mounts {
             if mp.path == mount_path {
@@ -2723,38 +2748,18 @@ impl Vfs {
     /// For example, if `dir_path` is `"/"` and there are mounts at
     /// `"/tmp"` and `"/mnt/usb"`, this returns `["tmp"]` — only the
     /// immediate child, not nested mounts.
-    fn submount_children(vfs: &VfsInner, dir_path: &str) -> Vec<String> {
+    fn submount_children(vfs: &VfsInner, dir_path: &Path) -> Vec<PathBuf> {
         let mut names = Vec::new();
-        let prefix = if dir_path == "/" {
-            "/"
-        } else {
-            dir_path
-        };
 
         for mp in &vfs.mounts {
-            // Skip the mount that *is* this directory (root mount for "/").
-            if mp.path == prefix && prefix == "/" {
-                continue;
-            }
-            if mp.path == dir_path {
-                continue;
-            }
-
-            // Check if this mount is directly under dir_path.
-            if prefix == "/" {
-                // Mount "/tmp" → child name "tmp" (strip leading /).
-                // Mount "/mnt/usb" → not a direct child of "/".
-                let tail = &mp.path[1..]; // strip leading /
-                if !tail.is_empty() && !tail.contains('/') {
-                    names.push(String::from(tail));
-                }
-            } else if mp.path.starts_with(prefix)
-                && mp.path.as_bytes().get(prefix.len()) == Some(&b'/')
-            {
-                // Mount "/mnt/usb" under dir_path "/mnt" → child "usb".
-                let tail = &mp.path[prefix.len() + 1..];
-                if !tail.is_empty() && !tail.contains('/') {
-                    names.push(String::from(tail));
+            // `strip_prefix` is component-aligned, so a mount at `/tmpfile`
+            // is not treated as living under `/tmp`.  A tail of exactly one
+            // component is a direct child; an empty tail is the mount that
+            // *is* this directory (skipped), and a longer tail is a nested
+            // mount that some intermediate directory owns, not this one.
+            if let Some(tail) = mp.path.strip_prefix(dir_path) {
+                if tail.components().count() == 1 {
+                    names.push(tail);
                 }
             }
         }
@@ -2765,14 +2770,16 @@ impl Vfs {
     // --- Extended metadata VFS methods ---
 
     /// Get rich metadata for a path.
-    pub fn metadata(path: &str) -> KernelResult<FileMeta> {
+    pub fn metadata(path: impl AsRef<Path>) -> KernelResult<FileMeta> {
+        let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
         Self::metadata_resolved(&path)
     }
 
     /// Like [`metadata`](Self::metadata) but on an **already-resolved** host
     /// path (see [`read_at_resolved`](Self::read_at_resolved)).
-    pub fn metadata_resolved(path: &str) -> KernelResult<FileMeta> {
+    pub fn metadata_resolved(path: impl AsRef<Path>) -> KernelResult<FileMeta> {
+        let path = path.as_ref();
         let (fs, _id, _opts, relative) = resolve_mount(path)?;
         fs.lock().metadata(&relative)
     }
@@ -2798,14 +2805,16 @@ impl Vfs {
     /// Propagates path-resolution / metadata errors (`NotFound`, etc.).  A
     /// missing or unreadable path is a real error; only a *successfully
     /// resolved* object that lacks a stable inode yields `Ok(None)`.
-    pub fn file_identity(path: &str) -> KernelResult<Option<FileId>> {
+    pub fn file_identity(path: impl AsRef<Path>) -> KernelResult<Option<FileId>> {
+        let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
         Self::file_identity_resolved(&path)
     }
 
     /// Like [`file_identity`](Self::file_identity) but on an **already-resolved**
     /// host path (see [`read_at_resolved`](Self::read_at_resolved)).
-    pub fn file_identity_resolved(path: &str) -> KernelResult<Option<FileId>> {
+    pub fn file_identity_resolved(path: impl AsRef<Path>) -> KernelResult<Option<FileId>> {
+        let path = path.as_ref();
         let (fs, fs_id, _opts, relative) = resolve_mount(path)?;
         let ino = fs.lock().metadata(&relative)?.ino;
         // ino == 0 ⇒ filesystem has no stable per-object identity ⇒ not
@@ -2821,13 +2830,15 @@ impl Vfs {
     ///
     /// Reads the file and returns the 32-byte SHA-256 digest.
     /// Returns `IsADirectory` if the path is a directory.
-    pub fn content_hash(path: &str) -> KernelResult<Vec<u8>> {
+    pub fn content_hash(path: impl AsRef<Path>) -> KernelResult<Vec<u8>> {
+        let path = path.as_ref();
         let data = Self::read_file(path)?;
         Ok(crate::crypto::sha256_vec(&data))
     }
 
     /// Set file attributes (immutable, append-only, hidden, system).
-    pub fn set_attributes(path: &str, attrs: FileAttr) -> KernelResult<()> {
+    pub fn set_attributes(path: impl AsRef<Path>, attrs: FileAttr) -> KernelResult<()> {
+        let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
         check_writable(&path)?;
         {
@@ -2846,7 +2857,8 @@ impl Vfs {
     /// sentinels here against the file's current owner so every backing
     /// filesystem `set_owner` impl receives concrete values and need not
     /// know about the sentinel convention.
-    pub fn set_owner(path: &str, uid: u32, gid: u32) -> KernelResult<()> {
+    pub fn set_owner(path: impl AsRef<Path>, uid: u32, gid: u32) -> KernelResult<()> {
+        let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
         check_writable(&path)?;
         // Resolve "leave unchanged" sentinels before taking the VFS lock
@@ -2877,7 +2889,8 @@ impl Vfs {
     /// its target.  Intermediate symlinks are still resolved.  The
     /// `u32::MAX` "leave unchanged" sentinels are read from the link's own
     /// metadata via [`lmetadata`](Self::lmetadata) (not the target's).
-    pub fn set_owner_no_follow(path: &str, uid: u32, gid: u32) -> KernelResult<()> {
+    pub fn set_owner_no_follow(path: impl AsRef<Path>, uid: u32, gid: u32) -> KernelResult<()> {
+        let path = path.as_ref();
         let path = Self::resolve_no_follow(path)?;
         check_writable(&path)?;
         let (uid, gid) = if uid == u32::MAX || gid == u32::MAX {
@@ -2899,7 +2912,8 @@ impl Vfs {
     }
 
     /// Set Unix-style permission bits.
-    pub fn set_permissions(path: &str, permissions: u16) -> KernelResult<()> {
+    pub fn set_permissions(path: impl AsRef<Path>, permissions: u16) -> KernelResult<()> {
+        let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_follow(path)?;
         check_writable(&path)?;
@@ -2918,7 +2932,8 @@ impl Vfs {
     /// No-follow analogue of [`set_permissions`](Self::set_permissions): if the
     /// final component is a symlink, the link inode's own mode bits are changed
     /// rather than its target's.  Intermediate symlinks are still resolved.
-    pub fn set_permissions_no_follow(path: &str, permissions: u16) -> KernelResult<()> {
+    pub fn set_permissions_no_follow(path: impl AsRef<Path>, permissions: u16) -> KernelResult<()> {
+        let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_no_follow(path)?;
         check_writable(&path)?;
@@ -2933,10 +2948,11 @@ impl Vfs {
 
     /// Update timestamps (pass 0 to leave unchanged).
     pub fn set_times(
-        path: &str,
+        path: impl AsRef<Path>,
         accessed_ns: Timestamp,
         modified_ns: Timestamp,
     ) -> KernelResult<()> {
+        let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_follow(path)?;
         check_writable(&path)?;
@@ -2951,10 +2967,11 @@ impl Vfs {
     /// No-follow analogue of [`set_times`](Self::set_times): stamps the
     /// link inode itself when the final component is a symlink.
     pub fn set_times_no_follow(
-        path: &str,
+        path: impl AsRef<Path>,
         accessed_ns: Timestamp,
         modified_ns: Timestamp,
     ) -> KernelResult<()> {
+        let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_no_follow(path)?;
         check_writable(&path)?;
@@ -2964,14 +2981,16 @@ impl Vfs {
     }
 
     /// Get an extended attribute value.
-    pub fn get_xattr(path: &str, key: &str) -> KernelResult<Vec<u8>> {
+    pub fn get_xattr(path: impl AsRef<Path>, key: &str) -> KernelResult<Vec<u8>> {
+        let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
         let (fs, _id, _opts, relative) = resolve_mount(&path)?;
         fs.lock().get_xattr(&relative, key)
     }
 
     /// Set an extended attribute.
-    pub fn set_xattr(path: &str, key: &str, value: &[u8]) -> KernelResult<()> {
+    pub fn set_xattr(path: impl AsRef<Path>, key: &str, value: &[u8]) -> KernelResult<()> {
+        let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_follow(path)?;
         check_writable(&path)?;
@@ -2985,7 +3004,8 @@ impl Vfs {
     }
 
     /// Remove an extended attribute.
-    pub fn remove_xattr(path: &str, key: &str) -> KernelResult<()> {
+    pub fn remove_xattr(path: impl AsRef<Path>, key: &str) -> KernelResult<()> {
+        let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_follow(path)?;
         check_writable(&path)?;
@@ -2999,7 +3019,8 @@ impl Vfs {
     }
 
     /// List all extended attribute keys.
-    pub fn list_xattrs(path: &str) -> KernelResult<Vec<String>> {
+    pub fn list_xattrs(path: impl AsRef<Path>) -> KernelResult<Vec<String>> {
+        let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
         let (fs, _id, _opts, relative) = resolve_mount(&path)?;
         fs.lock().list_xattrs(&relative)
@@ -3010,14 +3031,16 @@ impl Vfs {
     // is a link.  Intermediate symlinks are still resolved. ---
 
     /// Get an xattr WITHOUT following a trailing symlink (`lgetxattr`).
-    pub fn get_xattr_no_follow(path: &str, key: &str) -> KernelResult<Vec<u8>> {
+    pub fn get_xattr_no_follow(path: impl AsRef<Path>, key: &str) -> KernelResult<Vec<u8>> {
+        let path = path.as_ref();
         let path = Self::resolve_no_follow(path)?;
         let (fs, _id, _opts, relative) = resolve_mount(&path)?;
         fs.lock().get_xattr_no_follow(&relative, key)
     }
 
     /// Set an xattr WITHOUT following a trailing symlink (`lsetxattr`).
-    pub fn set_xattr_no_follow(path: &str, key: &str, value: &[u8]) -> KernelResult<()> {
+    pub fn set_xattr_no_follow(path: impl AsRef<Path>, key: &str, value: &[u8]) -> KernelResult<()> {
+        let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_no_follow(path)?;
         check_writable(&path)?;
@@ -3031,7 +3054,8 @@ impl Vfs {
     }
 
     /// Remove an xattr WITHOUT following a trailing symlink (`lremovexattr`).
-    pub fn remove_xattr_no_follow(path: &str, key: &str) -> KernelResult<()> {
+    pub fn remove_xattr_no_follow(path: impl AsRef<Path>, key: &str) -> KernelResult<()> {
+        let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_no_follow(path)?;
         check_writable(&path)?;
@@ -3045,7 +3069,8 @@ impl Vfs {
     }
 
     /// List xattr keys WITHOUT following a trailing symlink (`llistxattr`).
-    pub fn list_xattrs_no_follow(path: &str) -> KernelResult<Vec<String>> {
+    pub fn list_xattrs_no_follow(path: impl AsRef<Path>) -> KernelResult<Vec<String>> {
+        let path = path.as_ref();
         let path = Self::resolve_no_follow(path)?;
         let (fs, _id, _opts, relative) = resolve_mount(&path)?;
         fs.lock().list_xattrs_no_follow(&relative)
@@ -3057,7 +3082,9 @@ impl Vfs {
     ///
     /// `path` is the location of the new symlink.  `target` is the
     /// string it points to (stored as-is, resolved on traversal).
-    pub fn symlink(path: &str, target: &str) -> KernelResult<()> {
+    pub fn symlink(path: impl AsRef<Path>, target: impl AsRef<Path>) -> KernelResult<()> {
+        let path = path.as_ref();
+        let target = target.as_ref();
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_no_follow(path)?;
         check_writable(&path)?;
@@ -3098,7 +3125,9 @@ impl Vfs {
     /// underlying file, not the symlink) — this is the `linkat` +
     /// `AT_SYMLINK_FOLLOW` semantics.  Plain `link(2)` must NOT follow;
     /// use [`link_no_follow`] for that.
-    pub fn link(existing: &str, new_path: &str) -> KernelResult<()> {
+    pub fn link(existing: impl AsRef<Path>, new_path: impl AsRef<Path>) -> KernelResult<()> {
+        let existing = existing.as_ref();
+        let new_path = new_path.as_ref();
         Self::link_inner(existing, new_path, true)
     }
 
@@ -3108,7 +3137,9 @@ impl Vfs {
     /// If `existing` names a symlink, the new directory entry hard-links the
     /// symlink inode itself rather than its target.  Intermediate symlinks in
     /// `existing` are still resolved; only the final component is not.
-    pub fn link_no_follow(existing: &str, new_path: &str) -> KernelResult<()> {
+    pub fn link_no_follow(existing: impl AsRef<Path>, new_path: impl AsRef<Path>) -> KernelResult<()> {
+        let existing = existing.as_ref();
+        let new_path = new_path.as_ref();
         Self::link_inner(existing, new_path, false)
     }
 
@@ -3116,7 +3147,9 @@ impl Vfs {
     /// trailing symlink in `existing` is dereferenced before the hard link is
     /// created; everything else (namespace/write checks, same-mount rule,
     /// quota, notify/journal/audit) is identical.
-    fn link_inner(existing: &str, new_path: &str, follow: bool) -> KernelResult<()> {
+    fn link_inner(existing: impl AsRef<Path>, new_path: impl AsRef<Path>, follow: bool) -> KernelResult<()> {
+        let existing = existing.as_ref();
+        let new_path = new_path.as_ref();
         crate::ipc::namespace::check_writable(new_path)?;
         let existing = if follow {
             Self::resolve_follow(existing)?
@@ -3169,14 +3202,16 @@ impl Vfs {
     /// Read a symbolic link's target.
     ///
     /// Does NOT follow the symlink — returns the stored target string.
-    pub fn readlink(path: &str) -> KernelResult<String> {
+    pub fn readlink(path: impl AsRef<Path>) -> KernelResult<String> {
+        let path = path.as_ref();
         let path = Self::resolve_no_follow(path)?;
         let (fs, _id, _opts, relative) = resolve_mount(&path)?;
         fs.lock().readlink(&relative)
     }
 
     /// Stat a path without following the final symbolic link.
-    pub fn lstat(path: &str) -> KernelResult<DirEntry> {
+    pub fn lstat(path: impl AsRef<Path>) -> KernelResult<DirEntry> {
+        let path = path.as_ref();
         let path = Self::resolve_no_follow(path)?;
         let (fs, _id, _opts, relative) = resolve_mount(&path)?;
         fs.lock().lstat(&relative)
@@ -3187,14 +3222,16 @@ impl Vfs {
     /// No-follow analogue of [`metadata`](Self::metadata), backing the
     /// `lstat`/`lfstatat` syscalls.  Intermediate symlinks are still
     /// resolved; only the final component is left unfollowed.
-    pub fn lmetadata(path: &str) -> KernelResult<FileMeta> {
+    pub fn lmetadata(path: impl AsRef<Path>) -> KernelResult<FileMeta> {
+        let path = path.as_ref();
         let path = Self::resolve_no_follow(path)?;
         let (fs, _id, _opts, relative) = resolve_mount(&path)?;
         fs.lock().lmetadata(&relative)
     }
 
     /// Return debug statistics for the filesystem mounted at `path`.
-    pub fn debug_stats(path: &str) -> KernelResult<String> {
+    pub fn debug_stats(path: impl AsRef<Path>) -> KernelResult<String> {
+        let path = path.as_ref();
         // Clone the per-mount handle under a brief global lock, then query it
         // lock-free (debug_stats may itself touch the VFS on stacked mounts).
         let fs = {
@@ -3214,7 +3251,8 @@ impl Vfs {
     ///
     /// Returns capacity, free space, block size, and other filesystem
     /// metadata.  Analogous to POSIX `statvfs()`.
-    pub fn statvfs(path: &str) -> KernelResult<FsInfo> {
+    pub fn statvfs(path: impl AsRef<Path>) -> KernelResult<FsInfo> {
+        let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
         let (fs, _id, _opts, _relative) = resolve_mount(&path)?;
         fs.lock().statvfs()
@@ -3228,7 +3266,8 @@ impl Vfs {
     /// non-destructive: only free blocks are trimmed.  Read-only mounts and
     /// filesystems whose backing device does not support discard return
     /// `Ok(0)` (nothing to do).
-    pub fn trim(path: &str) -> KernelResult<u64> {
+    pub fn trim(path: impl AsRef<Path>) -> KernelResult<u64> {
+        let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
         let (fs, _id, opts, _relative) = resolve_mount(&path)?;
         // A read-only mount has no business mutating the device; treat it as a
@@ -3322,7 +3361,8 @@ impl Vfs {
     /// Check if a path exists (file, directory, or symlink).
     ///
     /// Follows symlinks.  Returns `false` for broken symlinks.
-    pub fn exists(path: &str) -> bool {
+    pub fn exists(path: impl AsRef<Path>) -> bool {
+        let path = path.as_ref();
         Self::stat(path).is_ok()
     }
 
@@ -3330,14 +3370,16 @@ impl Vfs {
     ///
     /// Follows symlinks.  Returns `false` if the path doesn't exist
     /// or is not a directory.
-    pub fn is_directory(path: &str) -> bool {
+    pub fn is_directory(path: impl AsRef<Path>) -> bool {
+        let path = path.as_ref();
         Self::stat(path)
             .map(|e| e.entry_type == EntryType::Directory)
             .unwrap_or(false)
     }
 
     /// Check if a path exists and is a regular file.
-    pub fn is_file(path: &str) -> bool {
+    pub fn is_file(path: impl AsRef<Path>) -> bool {
+        let path = path.as_ref();
         Self::stat(path)
             .map(|e| e.entry_type == EntryType::File)
             .unwrap_or(false)
@@ -3347,7 +3389,8 @@ impl Vfs {
     ///
     /// Returns `NotFound` if the path doesn't exist, `NotSupported` if
     /// it's a directory (use `readdir` to count entries).
-    pub fn file_size(path: &str) -> KernelResult<u64> {
+    pub fn file_size(path: impl AsRef<Path>) -> KernelResult<u64> {
+        let path = path.as_ref();
         let entry = Self::stat(path)?;
         if entry.entry_type == EntryType::Directory {
             return Err(KernelError::NotSupported);
@@ -3359,7 +3402,8 @@ impl Vfs {
     ///
     /// Returns `Ok(())` if the file exists and has read permission,
     /// or an appropriate error (`NotFound`, `PermissionDenied`).
-    pub fn is_readable(path: &str) -> KernelResult<()> {
+    pub fn is_readable(path: impl AsRef<Path>) -> KernelResult<()> {
+        let path = path.as_ref();
         let meta = Self::metadata(path)?;
         // Check any read permission bit (owner/group/other).
         if meta.permissions & 0o444 != 0 {
@@ -3374,7 +3418,8 @@ impl Vfs {
     /// Returns `Ok(())` if the file exists and has write permission,
     /// or an appropriate error (`NotFound`, `PermissionDenied`).
     /// Also checks the immutable attribute.
-    pub fn is_writable(path: &str) -> KernelResult<()> {
+    pub fn is_writable(path: impl AsRef<Path>) -> KernelResult<()> {
+        let path = path.as_ref();
         let meta = Self::metadata(path)?;
         if meta.attributes.contains(FileAttr::IMMUTABLE) {
             return Err(KernelError::PermissionDenied);
@@ -3394,7 +3439,8 @@ impl Vfs {
     ///
     /// Returns `Ok(())` when every requested access is permitted, or
     /// `NotFound` / `PermissionDenied` on failure.
-    pub fn access(path: &str, mode: u32) -> KernelResult<()> {
+    pub fn access(path: impl AsRef<Path>, mode: u32) -> KernelResult<()> {
+        let path = path.as_ref();
         let meta = Self::metadata(path)?; // NotFound propagated here
 
         // File capability tag check — regardless of mode, a process
@@ -3522,7 +3568,8 @@ impl Vfs {
     }
 
     /// Flush a specific filesystem (the one that `path` resolves to).
-    pub fn sync_path(path: &str) -> KernelResult<()> {
+    pub fn sync_path(path: impl AsRef<Path>) -> KernelResult<()> {
+        let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
         let (fs, _id, _opts, _relative) = resolve_mount(&path)?;
         fs.lock().sync()
@@ -3532,7 +3579,8 @@ impl Vfs {
     ///
     /// Dispatches to the underlying filesystem's `set_volume_label()`
     /// method.  Returns `NotSupported` for filesystems without labels.
-    pub fn set_volume_label(path: &str, label: &str) -> KernelResult<()> {
+    pub fn set_volume_label(path: impl AsRef<Path>, label: &str) -> KernelResult<()> {
+        let path = path.as_ref();
         check_writable(path)?;
         let path = Self::resolve_follow(path)?;
         let (fs, _id, _opts, _relative) = resolve_mount(&path)?;
@@ -3553,7 +3601,8 @@ impl Vfs {
     ///
     /// This is the standard safe-write pattern (used by editors, databases,
     /// config writers, etc.) exposed as a single VFS operation.
-    pub fn atomic_write(path: &str, data: &[u8]) -> KernelResult<()> {
+    pub fn atomic_write(path: impl AsRef<Path>, data: &[u8]) -> KernelResult<()> {
+        let path = path.as_ref();
         // Authoritative read-only volume check on the caller's (guest) path,
         // before resolution.  Internal write_file/rename calls below operate
         // on already-resolved host temp paths, so this top-level check is the
@@ -3605,7 +3654,8 @@ impl Vfs {
     /// (permissions, ownership, timestamps) to the new file after the
     /// rename.  Use this when replacing config files or documents where
     /// metadata preservation matters.
-    pub fn atomic_write_preserve(path: &str, data: &[u8]) -> KernelResult<()> {
+    pub fn atomic_write_preserve(path: impl AsRef<Path>, data: &[u8]) -> KernelResult<()> {
+        let path = path.as_ref();
         let resolved = Self::resolve_follow(path)?;
 
         // Capture existing metadata before the atomic write replaces it.
@@ -3641,7 +3691,8 @@ impl Vfs {
     ///   upgraded or downgraded atomically.
     ///
     /// Returns `WouldBlock` if the lock cannot be acquired (non-blocking).
-    pub fn flock(path: &str, owner: u64, lock_type: LockType) -> KernelResult<()> {
+    pub fn flock(path: impl AsRef<Path>, owner: u64, lock_type: LockType) -> KernelResult<()> {
+        let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
         Self::flock_resolved(&path, owner, lock_type)
     }
@@ -3653,7 +3704,8 @@ impl Vfs {
     /// `open`), so they must NOT re-run namespace translation — doing so would
     /// re-apply the chroot jail prefix a second time (double-jail) and key the
     /// lock on the wrong path. This worker operates directly on `path`.
-    pub fn flock_resolved(path: &str, owner: u64, lock_type: LockType) -> KernelResult<()> {
+    pub fn flock_resolved(path: impl AsRef<Path>, owner: u64, lock_type: LockType) -> KernelResult<()> {
+        let path = path.as_ref();
         let path = path.to_string();
         let mut table = LOCK_TABLE.lock();
 
@@ -3716,7 +3768,8 @@ impl Vfs {
     /// Release an advisory lock on a file.
     ///
     /// If the owner doesn't hold a lock on the path, this is a no-op.
-    pub fn funlock(path: &str, owner: u64) -> KernelResult<()> {
+    pub fn funlock(path: impl AsRef<Path>, owner: u64) -> KernelResult<()> {
+        let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
         Self::funlock_resolved(&path, owner)
     }
@@ -3726,7 +3779,8 @@ impl Vfs {
     /// Worker for [`funlock`](Self::funlock); handle-backed callers pass the
     /// resolved host path directly to avoid double-jailing (see
     /// [`flock_resolved`](Self::flock_resolved)).
-    pub fn funlock_resolved(path: &str, owner: u64) -> KernelResult<()> {
+    pub fn funlock_resolved(path: impl AsRef<Path>, owner: u64) -> KernelResult<()> {
+        let path = path.as_ref();
         let path = path.to_string();
         let mut table = LOCK_TABLE.lock();
 
@@ -3759,7 +3813,8 @@ impl Vfs {
     ///
     /// Returns `None` if no locks are held, or `Some((lock_type, count))`
     /// describing the current lock state.
-    pub fn lock_query(path: &str) -> KernelResult<Option<(LockType, usize)>> {
+    pub fn lock_query(path: impl AsRef<Path>) -> KernelResult<Option<(LockType, usize)>> {
+        let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
         Self::lock_query_resolved(&path)
     }
@@ -3769,7 +3824,8 @@ impl Vfs {
     /// Worker for [`lock_query`](Self::lock_query); handle-backed callers pass
     /// the resolved host path directly to avoid double-jailing (see
     /// [`flock_resolved`](Self::flock_resolved)).
-    pub fn lock_query_resolved(path: &str) -> KernelResult<Option<(LockType, usize)>> {
+    pub fn lock_query_resolved(path: impl AsRef<Path>) -> KernelResult<Option<(LockType, usize)>> {
+        let path = path.as_ref();
         let path = path.to_string();
         let table = LOCK_TABLE.lock();
 
@@ -3828,19 +3884,24 @@ const MAX_COMPONENT_LEN: usize = 255;
 /// - The path must start with `/` (absolute paths only in the VFS).
 ///
 /// Returns `Ok(())` if valid, `Err(InvalidArgument)` if not.
-pub fn validate_path(path: &str) -> KernelResult<()> {
-    // No null bytes.
-    if path.bytes().any(|b| b == 0) {
+pub fn validate_path<P: AsRef<Path>>(path: P) -> KernelResult<()> {
+    let path = path.as_ref();
+
+    // No null bytes.  Every *other* byte is legal in a name — that is the
+    // design rule (`design.txt`), and the reason this takes a `Path` rather
+    // than a `&str`: rejecting a name for not being UTF-8 would not be
+    // validation, it would be an unreachable file.
+    if !path.is_valid() {
         return Err(KernelError::InvalidArgument);
     }
 
     // Must be absolute.
-    if !path.starts_with('/') {
+    if !path.is_absolute() {
         return Err(KernelError::InvalidArgument);
     }
 
     // Check each component length.
-    for component in path.split('/') {
+    for component in path.components() {
         if component.len() > MAX_COMPONENT_LEN {
             return Err(KernelError::InvalidArgument);
         }
@@ -3865,13 +3926,18 @@ pub fn validate_path(path: &str) -> KernelResult<()> {
 /// - `"/foo//bar"` → `"/foo/bar"`
 /// - `"/"` → `"/"`
 /// - `"/foo/bar/.."` → `"/foo"`
-pub fn normalize_path(path: &str) -> String {
-    let mut components: Vec<&str> = Vec::new();
+pub fn normalize_path<P: AsRef<Path>>(path: P) -> PathBuf {
+    let path = path.as_ref();
+    let mut components: Vec<&Path> = Vec::new();
 
-    for part in path.split('/') {
-        match part {
-            "" | "." => {}
-            ".." => {
+    // `Path::components` already drops empty parts (leading, repeated and
+    // trailing separators); `.` and `..` are yielded verbatim because whether
+    // they may be resolved lexically is the caller's decision, and here it is
+    // yes — this is the purely textual normalizer.
+    for part in path.components() {
+        match part.as_bytes() {
+            b"." => {}
+            b".." => {
                 components.pop();
             }
             _ => components.push(part),
@@ -3879,13 +3945,13 @@ pub fn normalize_path(path: &str) -> String {
     }
 
     if components.is_empty() {
-        return String::from("/");
+        return PathBuf::from("/");
     }
 
-    let mut result = String::new();
+    let mut result = PathBuf::with_capacity(path.len());
     for c in &components {
-        result.push('/');
-        result.push_str(c);
+        result.extend_bytes(b"/");
+        result.extend_bytes(c.as_bytes());
     }
     result
 }
@@ -4098,21 +4164,10 @@ fn glob_collect_recursive(
 ///
 /// A mount at `"/tmp"` must match `"/tmp"` and `"/tmp/foo"` but
 /// NOT `"/tmpfile"`.  The root mount `"/"` matches everything.
-fn mount_matches(mount_path: &str, path: &str) -> bool {
-    if !path.starts_with(mount_path) {
-        return false;
-    }
-    // Root mount matches everything.
-    if mount_path == "/" {
-        return true;
-    }
-    // Exact match (e.g., path == "/tmp" and mount == "/tmp").
-    if path.len() == mount_path.len() {
-        return true;
-    }
-    // The character after the mount prefix must be '/' to ensure
-    // we're on a path boundary.  "/tmp/foo" → ok, "/tmpfile" → no.
-    path.as_bytes().get(mount_path.len()) == Some(&b'/')
+fn mount_matches(mount_path: &Path, path: &Path) -> bool {
+    // Component-aligned by construction: a mount at `/tmp` must capture
+    // `/tmp/foo` but not `/tmpfile`.  See [`Path::starts_with`].
+    path.starts_with(mount_path)
 }
 
 /// Find the mount point that best matches `path`.
@@ -4145,7 +4200,10 @@ fn cache_identity(
     Some((fs_id, ino))
 }
 
-fn find_mount<'a, 'p>(vfs: &'a mut VfsInner, path: &'p str) -> KernelResult<(&'a mut MountPoint, &'p str)> {
+fn find_mount<'a, 'p>(
+    vfs: &'a mut VfsInner,
+    path: &'p Path,
+) -> KernelResult<(&'a mut MountPoint, &'p Path)> {
     if vfs.mounts.is_empty() {
         return Err(KernelError::NotFound);
     }
@@ -4169,16 +4227,13 @@ fn find_mount<'a, 'p>(vfs: &'a mut VfsInner, path: &'p str) -> KernelResult<(&'a
     let relative = if best_len <= 1 {
         path // Mount is "/", keep the full path.
     } else {
-        let stripped = &path[best_len..];
-        if stripped.is_empty() {
-            "/"
-        } else {
-            stripped
+        match path.as_bytes().get(best_len..) {
+            None | Some([]) => Path::new("/"),
+            Some(rest) => Path::new(rest),
         }
     };
 
-    // SAFETY: We checked `best_idx` is Some and within bounds.
-    let mp = &mut vfs.mounts[idx];
+    let mp = vfs.mounts.get_mut(idx).ok_or(KernelError::NotFound)?;
     Ok((mp, relative))
 }
 
@@ -4194,16 +4249,14 @@ fn find_mount<'a, 'p>(vfs: &'a mut VfsInner, path: &'p str) -> KernelResult<(&'a
 /// the `Arc`, then released.  The caller locks the returned per-mount handle
 /// to perform the actual operation — a *different* lock from the global one
 /// and from any lower-layer mount's lock, so reentrancy is safe.
-fn resolve_mount(
-    path: &str,
-) -> KernelResult<(MountedFs, u64, MountOptions, String)> {
+fn resolve_mount(path: &Path) -> KernelResult<(MountedFs, u64, MountOptions, PathBuf)> {
     let mut vfs = VFS.lock();
     let (mp, relative) = find_mount(&mut vfs, path)?;
     Ok((
         Arc::clone(&mp.fs),
         mp.fs_id,
         mp.options,
-        String::from(relative),
+        relative.to_path_buf(),
     ))
 }
 
@@ -4211,7 +4264,7 @@ fn resolve_mount(
 ///
 /// Returns `ReadOnlyFilesystem` if the mount is read-only.
 /// Does not hold the VFS lock after returning.
-fn check_writable(path: &str) -> KernelResult<()> {
+fn check_writable(path: &Path) -> KernelResult<()> {
     let vfs = VFS.lock();
     // Find mount without &mut (we only need to read options).
     let mut best_len = 0;
@@ -4698,24 +4751,32 @@ pub fn self_test() -> KernelResult<()> {
             );
         }
 
-        // Test path_prefix_matches helper.
-        if !path_prefix_matches("/tmp/foo", "/tmp") {
-            serial_println!("[vfs]   FAIL: path_prefix_matches('/tmp/foo', '/tmp') should be true");
-            return Err(KernelError::InternalError);
+        // Dcache invalidation is component-aligned: it now uses
+        // `Path::starts_with` rather than the open-coded
+        // `starts_with(prefix) && bytes[prefix.len()] == b'/'` idiom this
+        // module used to carry.  The last two cases are the ones the old
+        // idiom got wrong — a prefix with a trailing slash made the boundary
+        // byte land inside the *next* component, so `/tmp/` matched nothing
+        // at all, and invalidation silently skipped every affected entry.
+        for (path, prefix, want) in [
+            ("/tmp/foo", "/tmp", true),
+            ("/tmpfile", "/tmp", false),
+            ("/tmp", "/tmp", true),
+            ("/anything", "/", true),
+            ("/tmp/foo", "/tmp/", true),
+            ("/tmp", "/tmp/", true),
+        ] {
+            if Path::new(path).starts_with(Path::new(prefix)) != want {
+                serial_println!(
+                    "[vfs]   FAIL: Path::starts_with('{}', '{}') should be {}",
+                    path,
+                    prefix,
+                    want,
+                );
+                return Err(KernelError::InternalError);
+            }
         }
-        if path_prefix_matches("/tmpfile", "/tmp") {
-            serial_println!("[vfs]   FAIL: path_prefix_matches('/tmpfile', '/tmp') should be false");
-            return Err(KernelError::InternalError);
-        }
-        if !path_prefix_matches("/tmp", "/tmp") {
-            serial_println!("[vfs]   FAIL: path_prefix_matches('/tmp', '/tmp') should be true");
-            return Err(KernelError::InternalError);
-        }
-        if !path_prefix_matches("/anything", "/") {
-            serial_println!("[vfs]   FAIL: path_prefix_matches('/anything', '/') should be true");
-            return Err(KernelError::InternalError);
-        }
-        serial_println!("[vfs]     path_prefix_matches: all cases OK");
+        serial_println!("[vfs]     dcache prefix matching: all cases OK");
 
         // --- Negative cache test ---
         // Access a path with a non-existent parent.  This should produce a

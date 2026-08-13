@@ -16,20 +16,26 @@
 //! "missing file" / column-discovery logic silently no-op (see
 //! `fs::integrity`, `fs::findex`).
 //!
-//! [`path_in_subtree`] is the single canonical predicate: it normalises
-//! away an optional trailing slash and applies a path-component boundary
-//! check, so it is correct whether or not the prefix carries a trailing
-//! slash.  All subtree checks should route through it rather than
-//! re-deriving the boundary logic.
+//! The boundary rule itself now lives in [`Path::starts_with`], which
+//! compares *components* rather than bytes and so cannot be fooled by a
+//! trailing slash or by a shared byte prefix (`/ab` vs `/a`).  The two
+//! predicates here remain as the canonical spelling of the two subtree
+//! questions, and they add the one thing `Path::starts_with` deliberately
+//! does not provide: the caller convenience that an **empty** directory
+//! argument means "the whole tree".  `Path::starts_with` refuses to call a
+//! relative prefix a prefix of an absolute path — correct for paths, wrong
+//! for this "no filter configured" sentinel — so that case is spelled out
+//! rather than delegated.
+
+use super::path::Path;
 
 /// Returns `true` if `path` lies within the directory subtree denoted by
 /// `dir` — that is, `path` equals `dir` or is strictly underneath it.
 ///
-/// `dir` may optionally carry a single trailing `/`; it is normalised
-/// away before the boundary check, so `"/a"` and `"/a/"` behave
-/// identically.  An empty `dir` (or `"/"`, which normalises to empty)
-/// matches every path.  The match must end on a path-component boundary,
-/// so `dir = "/a"` matches `"/a"` and `"/a/b"` but never `"/ab"`.
+/// `dir` may optionally carry a single trailing `/`; component matching
+/// ignores it, so `"/a"` and `"/a/"` behave identically.  An empty `dir`
+/// (or `"/"`) matches every path.  The match ends on a path-component
+/// boundary, so `dir = "/a"` matches `"/a"` and `"/a/b"` but never `"/ab"`.
 ///
 /// # Examples
 /// ```ignore
@@ -40,34 +46,30 @@
 /// assert!(path_in_subtree("/anything", "")); // empty matches all
 /// ```
 #[must_use]
-pub fn path_in_subtree(path: &str, dir: &str) -> bool {
-    // Normalise away a single trailing slash so the boundary check is
-    // uniform whether or not the caller supplied one.
-    let d = dir.strip_suffix('/').unwrap_or(dir);
-    if d.is_empty() {
+pub fn path_in_subtree<P: AsRef<Path>, D: AsRef<Path>>(path: P, dir: D) -> bool {
+    let dir = dir.as_ref();
+    if dir.components().next().is_none() {
         // Empty prefix, or `dir` was exactly "/": the whole tree.
         return true;
     }
-    path == d || (path.starts_with(d) && path.as_bytes().get(d.len()) == Some(&b'/'))
+    path.as_ref().starts_with(dir)
 }
 
 /// Returns `true` if `path` is *strictly* underneath `dir` (i.e. a
 /// descendant), excluding `dir` itself.
 ///
-/// Same trailing-slash normalisation and component-boundary semantics as
+/// Same trailing-slash tolerance and component-boundary semantics as
 /// [`path_in_subtree`], but `path == dir` returns `false`.  Useful for
 /// "list children" / "has descendants" checks where the directory node
 /// itself must not be counted.
 #[must_use]
-pub fn path_strictly_under(path: &str, dir: &str) -> bool {
-    let d = dir.strip_suffix('/').unwrap_or(dir);
-    if d.is_empty() {
-        // Everything except the root itself is strictly under the root.
-        return !path.is_empty() && path != "/";
+pub fn path_strictly_under<P: AsRef<Path>, D: AsRef<Path>>(path: P, dir: D) -> bool {
+    let (path, dir) = (path.as_ref(), dir.as_ref());
+    if dir.components().next().is_none() {
+        // Everything with at least one component is strictly under the root.
+        return path.components().next().is_some();
     }
-    path.len() > d.len()
-        && path.starts_with(d)
-        && path.as_bytes().get(d.len()) == Some(&b'/')
+    path.starts_with(dir) && path.components().count() > dir.components().count()
 }
 
 #[cfg(test)]
@@ -120,5 +122,18 @@ mod tests {
         assert!(path_strictly_under("/a", "/"));
         assert!(path_strictly_under("/a/b", "/"));
         assert!(!path_strictly_under("/", "/"));
+    }
+
+    /// A name that is not UTF-8 must still match by bytes.  This is the
+    /// property the whole byte-`Path` conversion exists for: before it, such
+    /// a path could not even be *spelled*, so a subtree check involving one
+    /// was unreachable code.
+    #[test]
+    fn subtree_matches_non_utf8_components() {
+        let dir = Path::new(b"/data/\xff");
+        assert!(path_in_subtree(Path::new(b"/data/\xff/file"), dir));
+        assert!(path_strictly_under(Path::new(b"/data/\xff/file"), dir));
+        // A different trailing byte is a different directory.
+        assert!(!path_in_subtree(Path::new(b"/data/\xfe/file"), dir));
     }
 }

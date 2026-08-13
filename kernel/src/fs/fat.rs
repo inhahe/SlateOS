@@ -28,7 +28,7 @@ use alloc::vec::Vec;
 use crate::blkdev::SECTOR_SIZE;
 use crate::error::{KernelError, KernelResult};
 use crate::fs::vfs::{DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo};
-use crate::fs::path::Path;
+use crate::fs::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // FAT type detection

@@ -55231,8 +55231,40 @@ and that is boot-test-visible.
 
 ## B-KASAN-INSTRUMENTED-BUILD-PANICS-ON-ITS-OWN-REDZONE-CHECKS
 
-**Status:** OPEN, blocks the §107 escalation. Found 2026-08-12 by the first
-instrumented boot that got far enough to reach the self-tests.
+**Status:** ✅ **FIXED 2026-08-12** — the flood and the panic are both gone.
+Found 2026-08-12 by the first instrumented boot that got far enough to reach the
+self-tests.
+
+**Verification.** The instrumented boot of 2026-08-12 ran 5560 lines — well past
+the self-tests that previously flooded and panicked — with **zero `[kasan]
+CRITICAL` reports**. The 64-report cap is untouched at the point the hunt
+window opens, which was consequence (1) below and the reason this blocked the
+§107 escalation.
+
+**That boot did not reach `BOOT_OK`**, but for an unrelated reason: it later
+wedged mid-print on a page fault. That is tracked separately as
+`B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT`; it is a different
+failure (a deadlock, not a report flood) at a different place, and it is still
+open. So the §107 escalation is unblocked *by this entry* but still gated on
+that wedge.
+
+**What the fix was.** Exactly the "proper fix" described below, implemented as
+`kernel/src/mm/rawmem.rs` (`read_u8`/`write_u8`/`fill_u8` in inline `asm!`) with
+every deliberate poisoned-memory touch in `heap.rs`/`poison.rs`/`quarantine.rs`
+routed through it, plus walk 3 of `scripts/kasan-check-preshadow.py` as the
+build gate, plus `rawmem::self_test()` at boot ahead of the poison/kasan/
+quarantine self-tests it underpins. The design and the reasoning behind walk 3's
+accessor-based violation rule are recorded in `design-decisions.md` §120.
+
+`kasan_rt::self_test`'s `before` snapshot also moved to *after*
+`self_test_freed_address()` returns, as described below. That was independently
+worth doing: it is what made the assertion count setup traffic as the thing
+under test, and it would have kept the measurement window fragile even with the
+flood gone.
+
+---
+
+*Original report follows.*
 
 **What happens.** The compiler-instrumented kernel (`scripts/kasan-build.sh`)
 does **not** reach `BOOT_OK`. It runs almost the whole boot, then dies in the

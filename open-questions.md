@@ -501,6 +501,30 @@ clean, this question may be moot; if it catches, A–D are all still available a
 better aimed. I have started E, since it commits nothing and reverses freely;
 A (booting an optimized kernel for the first time) remains yours to call.
 
+#### UPDATE 2026-08-13 — the first attempt at E would have been worthless; E is now genuinely running
+
+The E soak described above was launched once and **aborted before it could
+produce a misleading answer.** B-KNULLJUMP has only ever been observed inside
+the tcc-driven Path-Z rungs, and `/bin/tcc` had silently fallen out of
+`rootfs.ext4`, so all 26 of those rungs (Parts 35–60) were no-opping on every
+boot while `boot-test.sh` still reported PASSED. The sampled population did not
+contain the trigger: 250 clean boots would have looked like strong evidence and
+meant nothing. See `known-issues.md` → `B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT`,
+now fixed so a rung that skips says so and the harness reprints it.
+
+The image was rebuilt with tinycc present and a full boot verified that all 26
+tcc rungs run and pass, ending in `Path-Z prerequisites: complete — 0 rungs
+skipped`. **The real E soak is now running** against that frozen, verified image
+(`MAX_ITERS=250 HUNT=0 SOAK_TIMEOUT=600 STALL_SECS=150`, `--no-stage`), watching
+for the `RIP=0x0` / `error=0x10` signature.
+
+Two caveats for whoever reads the result:
+
+- It samples a **SMAP-enabled** kernel (`qemu64,+smep,+smap,+umip`), which the
+  1-in-120 base rate was not measured on. Treat that rate as order-of-magnitude.
+- Per-boot wall time is now ~355 s, not the ~283–318 s the ~21 h figure above
+  was built on, so budget ~24 h for the full 250.
+
 
 ## Q44 — libc reports "all Linux capabilities held" to every process because nothing maps our `(ResourceType, Rights)` handles onto `CAP_*` bits. Which mapping do you want? — Status: OPEN
 

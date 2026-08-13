@@ -1255,7 +1255,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] string additions: stpcpy, stpncpy, strsep, strverscmp
   - [x] regex: regcomp/regexec/regfree/regerror — compiled regex with BRE and ERE (REG_EXTENDED), case-insensitive (REG_ICASE), anchors, character classes, groups, alternation, quantifiers (*+?), REG_NEWLINE support
   - [x] stdio additions: fdopen, freopen, ungetc (per-fd pushback buffer), getc/putc, setvbuf/setbuf (stubs), popen/pclose (stubs), BUFSIZ/_IONBF/_IOLBF/_IOFBF constants
-  - [x] time: gmtime/localtime/mktime (epoch↔broken-down conversion), asctime/ctime (formatted string), strftime (%Y%m%d%H%M%S%A%a%B%b%c%p%j%n%t%%), difftime; all UTC (no timezone)
+  - [x] time: gmtime/localtime/mktime (epoch↔broken-down conversion), asctime/ctime (formatted string), strftime (%Y%m%d%H%M%S%A%a%B%b%c%p%j%n%t%%), difftime; **no longer UTC-only — see the `tzset`/TZ entry below**
   - [x] dlfcn: dlopen/dlsym/dlclose/dlerror stubs (dynamic linking not supported, returns descriptive errors)
   - [x] semaphore: unnamed sem_init/sem_wait/sem_trywait/sem_post/sem_getvalue/sem_destroy (atomic CAS + spin-yield); named sem_open/sem_close/sem_unlink stubs (ENOSYS)
   - [x] uid/gid: setuid/seteuid/setgid/setegid/setreuid/setregid (stubs — single-user OS), getgroups
@@ -1380,7 +1380,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] clock_settime (stub EPERM), clock_nanosleep (relative + absolute time, TIMER_ABSTIME)
   - [x] posix_madvise: POSIX_MADV_* constants + stub (returns 0); memfd_create stub (ENOSYS)
   - [x] ffs/ffsl/ffsll: find first set bit (trailing_zeros + 1)
-  - [x] timegm: inverse of gmtime (identical to mktime — we're always UTC)
+  - [x] timegm: inverse of gmtime (**no longer** identical to mktime — `mktime` reads local time, `timegm` UTC; they differ by the zone offset)
   - [x] INET_ADDRSTRLEN/INET6_ADDRSTRLEN/INADDR_BROADCAST/INADDR_NONE constants
   - [x] sched_getaffinity/sched_setaffinity: CPU affinity stubs (single-CPU mask), CpuSetT struct
   - [x] mkostemp: mkstemp with additional open flags (flags accepted, not enforced)
@@ -1400,6 +1400,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] copy_file_range: cross-file copy (userspace read+write loop), offset tracking
   - [x] epoll stubs: epoll_create/create1/ctl/wait/pwait (all ENOSYS), EpollEvent struct, EPOLLIN/OUT/ERR/HUP/ET constants
   - [x] strftime/strptime expansion: 22 additional format specifiers (%C/%y/%e/%w/%u/%U/%W/%I/%k/%l/%P/%D/%F/%T/%R/%r/%x/%X/%z/%Z/%s + ISO 8601 %V/%G/%g), strptime month/weekday name parsing (%b/%B/%a/%A case-insensitive)
+  - [x] timezones: real POSIX `TZ`-string support — 2026-08-13. `tzset` parses `std offset[dst[offset][,start[/time],end[/time]]]` (all three `TZ` date forms `Jn`/`n`/`Mm.w.d`, offsets `[+-]hh[:mm[:ss]]`, the glibc/musl default US rules when a DST name carries no `,start,end`) and publishes the four POSIX globals `timezone`/`daylight`/`tzname[0]`/`tzname[1]`. `localtime`/`localtime_r`/`ctime`/`ctime_r` shift by the offset in effect at the instant; `mktime`/`timelocal` invert it, resolving the nonexistent hour at a spring-forward and honouring `tm_isdst` in the repeated hour at a fall-back; `strftime`'s `%z`/`%Z` read the `Tm`'s own `tm_gmtoff`/`tm_zone`. `gmtime`/`timegm` are unaffected by design. **`struct tm` grew to the real glibc/musl x86-64 ABI** (56 bytes: 9 ints, 4 bytes padding, `long tm_gmtoff` at 40, `const char *tm_zone` at 48) — it was 36 bytes before, so every C caller of `localtime_r` had been reading stack garbage for `tm_gmtoff`; `linux_clock_user_types.rs`'s offset constants are now cross-checked against `offset_of!` by a test so the two cannot drift.
+    - [x] The engine lives in the shared `no_std`, dependency-free crate **`tzrules/`**, linked into *both* `posix` (x86_64-unknown-none) and `userspace/oils` (x86_64-slateos) — osh renders broken-down time itself and never calls `strftime`, so a `posix`-private module would have left the shell disagreeing with every C program on the machine about what time it is. Same rationale as `netproto`/`netipc`. See design-decisions.md §125.
+    - [x] osh side: `printf '%(FMT)T'` and the `\d \D{…} \t \T \@ \A` prompt escapes take their zone from the shell's *exported* `TZ`, which is bash's `sv_tz` rule verbatim. Closes known-issues `TD-OILS-BROKEN-DOWN-TIME-IS-ALWAYS-UTC`, `TD-OILS9` and `TD-OILS-PRINTF-TZ` (three entries for one bug).
+    - [~] **Still UTC:** an unset `TZ` (no `/etc/localtime`, no system default zone) and any zoneinfo name (`America/New_York` is not a POSIX `TZ` string — needs a TZif reader plus shipped tzdata, a packaging decision). Consistent across libc and shell, so nothing disagrees; tracked as `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`.
   - [x] system(): posix_spawnp("sh", "-c", command) + waitpid (was ENOSYS stub), NULL→stat /bin/sh check
   - [x] tmpnam: /tmp/tmp_NNNNNN name generation with monotonic counter, L_TMPNAM=20 (was null stub)
   - [x] fcntl advisory locking: F_GETLK/F_SETLK/F_SETLKW commands, struct Flock (l_type/l_whence/l_start/l_len/l_pid), F_RDLCK/F_WRLCK/F_UNLCK constants; stubs (no kernel lock enforcement — F_GETLK returns F_UNLCK, F_SETLK/F_SETLKW always succeed)

@@ -5255,11 +5255,17 @@ fn gen_filepicker() -> Vec<u8> {
     out.push_str(&format!("Open ops:       {}\n", open_ops));
     out.push_str(&format!("Navigate ops:   {}\n\n", nav_ops));
 
+    // Paths are raw bytes; octal-escape them like the mount fields, so an
+    // embedded newline cannot forge a record in this line-oriented file.
     let bookmarks = super::filepicker::bookmarks();
     if !bookmarks.is_empty() {
         out.push_str("Bookmarks:\n");
         for bm in &bookmarks {
-            out.push_str(&format!("  {} → {}\n", bm.label, bm.path));
+            out.push_str(&format!(
+                "  {} → {}\n",
+                bm.label,
+                mangle_mount_field(bm.path.as_bytes())
+            ));
         }
         out.push('\n');
     }
@@ -5268,7 +5274,7 @@ fn gen_filepicker() -> Vec<u8> {
     if !recent.is_empty() {
         out.push_str("Recent directories:\n");
         for d in recent.iter().take(10) {
-            out.push_str(&format!("  {}\n", d));
+            out.push_str(&format!("  {}\n", mangle_mount_field(d.as_bytes())));
         }
     }
 
@@ -11363,7 +11369,12 @@ fn gen_pathbar() -> Vec<u8> {
     out.push_str(&format!("Completions:   {}\n", complete_count));
     out.push_str(&format!("History:       {}/{}\n", hist_len, 256));
     out.push_str(&format!("Recent dirs:   {}/{}\n", recent_len, 32));
-    out.push_str(&format!("Current:       {}\n", super::pathbar::current()));
+    // Octal-escape: the current directory is raw bytes, and an embedded
+    // newline would otherwise forge a record in this line-oriented file.
+    out.push_str(&format!(
+        "Current:       {}\n",
+        mangle_mount_field(super::pathbar::current().as_bytes())
+    ));
     out.push_str(&format!("Can go back:   {}\n", super::pathbar::can_go_back()));
     out.push_str(&format!("Can go forward:{}\n", super::pathbar::can_go_forward()));
 

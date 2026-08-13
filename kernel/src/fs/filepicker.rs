@@ -34,6 +34,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
+use crate::fs::path::{Path, PathBuf};
 use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
@@ -126,6 +127,13 @@ pub struct FileFilter {
     /// Display label (e.g., "Image Files").
     pub label: String,
     /// Extension patterns (e.g., ["png", "jpg", "gif"]).
+    ///
+    /// These stay text because they are declared by the *application* that
+    /// opens the dialog, not read off the disk.  The names they are matched
+    /// against are raw bytes, so the comparison is byte-exact (ASCII-folded):
+    /// a file whose extension is not valid UTF-8 simply matches no filter,
+    /// which is the truthful answer, rather than its name being lossily
+    /// decoded to make it match.
     pub extensions: Vec<String>,
 }
 
@@ -133,9 +141,9 @@ pub struct FileFilter {
 #[derive(Debug, Clone)]
 pub struct ListingItem {
     /// File/directory name.
-    pub name: String,
+    pub name: PathBuf,
     /// Full path.
-    pub path: String,
+    pub path: PathBuf,
     /// Whether this is a directory.
     pub is_dir: bool,
     /// File size in bytes (0 for directories).
@@ -150,7 +158,7 @@ pub struct ListingItem {
 #[derive(Debug, Clone)]
 pub enum DialogResult {
     /// User confirmed selection.
-    Confirmed(Vec<String>),
+    Confirmed(Vec<PathBuf>),
     /// User cancelled.
     Cancelled,
 }
@@ -163,11 +171,11 @@ pub struct DialogState {
     /// Dialog mode.
     pub mode: DialogMode,
     /// Current directory path.
-    pub current_dir: String,
+    pub current_dir: PathBuf,
     /// Current file name (for SaveFile mode).
-    pub filename: String,
+    pub filename: PathBuf,
     /// Currently selected paths.
-    pub selection: Vec<String>,
+    pub selection: Vec<PathBuf>,
     /// Available file type filters.
     pub filters: Vec<FileFilter>,
     /// Active filter index.
@@ -183,7 +191,7 @@ pub struct DialogState {
     /// Items in current directory.
     pub listing: Vec<ListingItem>,
     /// Navigation history (back stack).
-    pub history: Vec<String>,
+    pub history: Vec<PathBuf>,
     /// Whether dialog is still open.
     pub open: bool,
     /// Result once closed.
@@ -196,7 +204,7 @@ pub struct PickerBookmark {
     /// Display label.
     pub label: String,
     /// Directory path.
-    pub path: String,
+    pub path: PathBuf,
     /// Icon name.
     pub icon: String,
 }
@@ -209,7 +217,7 @@ struct PickerState {
     /// Dialog ID → state.
     dialogs: Vec<DialogState>,
     /// Recent directories.
-    recent_dirs: Vec<String>,
+    recent_dirs: Vec<PathBuf>,
     /// Quick-access bookmarks.
     bookmarks: Vec<PickerBookmark>,
     /// Next dialog ID.
@@ -235,35 +243,21 @@ static NAV_OPS: AtomicU64 = AtomicU64::new(0);
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn to_lower(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        if c.is_ascii_uppercase() {
-            out.push((c as u8 + 32) as char);
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-/// Extract extension from a filename.
-fn extension(name: &str) -> &str {
-    if let Some(dot) = name.rfind('.') {
-        if dot > 0 && dot + 1 < name.len() {
-            return &name[dot + 1..];
-        }
-    }
-    ""
-}
-
 /// Check if a file matches the active filter.
-fn matches_filter(name: &str, filter: &FileFilter) -> bool {
+///
+/// The extension comes from [`Path::extension`], which - unlike the
+/// hand-rolled `rfind('.')` this replaces - declines to call a leading dot an
+/// extension, so `.bashrc` is a dotfile rather than a file of type `bashrc`.
+///
+/// Folding is ASCII-only: a filename carries no declared encoding, so there is
+/// nothing to consult that would say how to fold a byte >= 0x80, and folding
+/// one by guessing an encoding makes two distinct names collide.
+fn matches_filter(name: &Path, filter: &FileFilter) -> bool {
     if filter.extensions.is_empty() {
         return true; // "All Files"
     }
-    let ext = to_lower(extension(name));
-    filter.extensions.iter().any(|f| to_lower(f) == ext)
+    let ext = name.extension().map_or(&[][..], Path::as_bytes);
+    filter.extensions.iter().any(|f| ext.eq_ignore_ascii_case(f.as_bytes()))
 }
 
 // ---------------------------------------------------------------------------
@@ -271,8 +265,9 @@ fn matches_filter(name: &str, filter: &FileFilter) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Create and open a new file dialog.
-pub fn create_dialog(mode: DialogMode, start_dir: &str,
+pub fn create_dialog<P: AsRef<Path> + ?Sized>(mode: DialogMode, start_dir: &P,
                      filters: Vec<FileFilter>) -> KernelResult<u64> {
+    let start_dir = start_dir.as_ref();
     if filters.len() > MAX_FILTERS {
         return Err(KernelError::InvalidArgument);
     }
@@ -286,13 +281,13 @@ pub fn create_dialog(mode: DialogMode, start_dir: &str,
     let id = picker.next_id;
     picker.next_id = picker.next_id.saturating_add(1);
 
-    let dir = if start_dir.is_empty() { "/" } else { start_dir };
+    let dir = if start_dir.is_empty() { Path::new("/") } else { start_dir };
 
     let state = DialogState {
         id,
         mode,
-        current_dir: String::from(dir),
-        filename: String::new(),
+        current_dir: dir.to_path_buf(),
+        filename: PathBuf::new(),
         selection: Vec::new(),
         filters,
         active_filter: 0,
@@ -317,7 +312,8 @@ pub fn get_dialog(id: u64) -> Option<DialogState> {
 }
 
 /// Navigate to a directory in the dialog.
-pub fn navigate(id: u64, path: &str) -> KernelResult<()> {
+pub fn navigate<P: AsRef<Path> + ?Sized>(id: u64, path: &P) -> KernelResult<()> {
+    let path = path.as_ref();
     NAV_OPS.fetch_add(1, Ordering::Relaxed);
     let mut picker = PICKER.lock();
     let dialog = picker.dialogs.iter_mut().find(|d| d.id == id)
@@ -329,7 +325,7 @@ pub fn navigate(id: u64, path: &str) -> KernelResult<()> {
 
     // Push current to history.
     dialog.history.push(dialog.current_dir.clone());
-    dialog.current_dir = String::from(path);
+    dialog.current_dir = path.to_path_buf();
     dialog.selection.clear();
 
     // Refresh listing from VFS.
@@ -369,20 +365,20 @@ pub fn go_up(id: u64) -> KernelResult<()> {
     let current = dialog.current_dir.clone();
     drop(picker);
 
-    // Find parent directory.
-    let parent = if current == "/" {
-        return Ok(()); // Already at root.
-    } else if let Some(slash) = current.rfind('/') {
-        if slash == 0 { "/" } else { &current[..slash] }
-    } else {
-        "/"
+    // `Path::parent` yields `/` for a top-level directory and `None` at the
+    // root, which is exactly the three-armed `rfind('/')` match this replaces -
+    // including the "already at root, do nothing" case.
+    let Some(parent) = current.parent() else {
+        return Ok(());
     };
+    let parent = parent.to_path_buf();
 
-    navigate(id, parent)
+    navigate(id, &parent)
 }
 
 /// Select a file or directory in the dialog.
-pub fn select(id: u64, path: &str) -> KernelResult<()> {
+pub fn select<P: AsRef<Path> + ?Sized>(id: u64, path: &P) -> KernelResult<()> {
+    let path = path.as_ref();
     let mut picker = PICKER.lock();
     let dialog = picker.dialogs.iter_mut().find(|d| d.id == id)
         .ok_or(KernelError::NotFound)?;
@@ -390,11 +386,11 @@ pub fn select(id: u64, path: &str) -> KernelResult<()> {
     match dialog.mode {
         DialogMode::OpenFile | DialogMode::SaveFile | DialogMode::SelectFolder => {
             dialog.selection.clear();
-            dialog.selection.push(String::from(path));
+            dialog.selection.push(path.to_path_buf());
         }
         DialogMode::OpenFiles => {
-            if !dialog.selection.iter().any(|s| s == path) {
-                dialog.selection.push(String::from(path));
+            if !dialog.selection.iter().any(|s| s.as_path() == path) {
+                dialog.selection.push(path.to_path_buf());
             }
         }
     }
@@ -402,20 +398,21 @@ pub fn select(id: u64, path: &str) -> KernelResult<()> {
 }
 
 /// Deselect a file.
-pub fn deselect(id: u64, path: &str) -> KernelResult<()> {
+pub fn deselect<P: AsRef<Path> + ?Sized>(id: u64, path: &P) -> KernelResult<()> {
+    let path = path.as_ref();
     let mut picker = PICKER.lock();
     let dialog = picker.dialogs.iter_mut().find(|d| d.id == id)
         .ok_or(KernelError::NotFound)?;
-    dialog.selection.retain(|s| s != path);
+    dialog.selection.retain(|s| s.as_path() != path);
     Ok(())
 }
 
 /// Set the filename in the input field (SaveFile mode).
-pub fn set_filename(id: u64, name: &str) -> KernelResult<()> {
+pub fn set_filename<P: AsRef<Path> + ?Sized>(id: u64, name: &P) -> KernelResult<()> {
     let mut picker = PICKER.lock();
     let dialog = picker.dialogs.iter_mut().find(|d| d.id == id)
         .ok_or(KernelError::NotFound)?;
-    dialog.filename = String::from(name);
+    dialog.filename = name.as_ref().to_path_buf();
     Ok(())
 }
 
@@ -488,13 +485,16 @@ pub fn confirm(id: u64) -> KernelResult<DialogResult> {
     let result = match dialog.mode {
         DialogMode::SaveFile => {
             // Build full path from current_dir + filename.
-            let path = if dialog.filename.is_empty() {
+            if dialog.filename.is_empty() {
                 return Err(KernelError::InvalidArgument);
-            } else if dialog.current_dir == "/" {
-                alloc::format!("/{}", dialog.filename)
-            } else {
-                alloc::format!("{}/{}", dialog.current_dir, dialog.filename)
-            };
+            }
+            // `PathBuf::push` inserts exactly one separator, so the
+            // `current_dir == "/"` arm that existed only to avoid doubling it
+            // is gone.  It also lets an absolute filename replace the
+            // directory outright, which is what a user typing a full path into
+            // the name box means.
+            let mut path = dialog.current_dir.clone();
+            path.push(&dialog.filename);
             DialogResult::Confirmed(alloc::vec![path])
         }
         _ => {
@@ -544,7 +544,7 @@ pub fn close(id: u64) -> KernelResult<()> {
 // ---------------------------------------------------------------------------
 
 /// Build a directory listing from VFS.
-fn build_listing(dir: &str, show_hidden: bool,
+fn build_listing(dir: &Path, show_hidden: bool,
                  filter: Option<&FileFilter>) -> Vec<ListingItem> {
     use crate::fs::vfs::Vfs;
 
@@ -555,8 +555,10 @@ fn build_listing(dir: &str, show_hidden: bool,
 
     let mut items = Vec::new();
     for entry in entries.iter().take(MAX_LISTING) {
-        // Skip hidden files if not showing them.
-        if !show_hidden && entry.name.starts_with('.') {
+        // Skip hidden files if not showing them.  Byte compare, not
+        // `Path::starts_with`: the latter matches whole components, so it
+        // would ask whether the name *is* `.`.
+        if !show_hidden && entry.name.as_bytes().starts_with(b".") {
             continue;
         }
 
@@ -571,11 +573,9 @@ fn build_listing(dir: &str, show_hidden: bool,
             }
         }
 
-        let path = if dir == "/" {
-            alloc::format!("/{}", entry.name)
-        } else {
-            alloc::format!("{}/{}", dir, entry.name)
-        };
+        // `Path::join` collapses the root case itself, so the `dir == "/"`
+        // arm that existed only to avoid a doubled separator is gone.
+        let path = dir.join(&entry.name);
 
         items.push(ListingItem {
             name: entry.name.clone(),
@@ -600,7 +600,7 @@ fn sort_listing(items: &mut [ListingItem], column: SortColumn, dir: SortDirectio
         let cmp = match column {
             SortColumn::Name => a.name.cmp(&b.name),
             SortColumn::Size => a.size.cmp(&b.size),
-            SortColumn::Type => extension(&a.name).cmp(extension(&b.name)),
+            SortColumn::Type => a.name.extension().cmp(&b.name.extension()),
             SortColumn::DateModified => a.modified_ns.cmp(&b.modified_ns),
         };
         match dir {
@@ -615,26 +615,29 @@ fn sort_listing(items: &mut [ListingItem], column: SortColumn, dir: SortDirectio
 // ---------------------------------------------------------------------------
 
 /// Add a quick-access bookmark.
-pub fn add_bookmark(label: &str, path: &str, icon: &str) -> KernelResult<()> {
+pub fn add_bookmark<P: AsRef<Path> + ?Sized>(label: &str, path: &P, icon: &str)
+    -> KernelResult<()> {
+    let path = path.as_ref();
     if label.is_empty() || path.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
     let mut picker = PICKER.lock();
-    if picker.bookmarks.iter().any(|b| b.path == path) {
+    if picker.bookmarks.iter().any(|b| b.path.as_path() == path) {
         return Err(KernelError::AlreadyExists);
     }
     picker.bookmarks.push(PickerBookmark {
         label: String::from(label),
-        path: String::from(path),
+        path: path.to_path_buf(),
         icon: String::from(icon),
     });
     Ok(())
 }
 
 /// Remove a bookmark.
-pub fn remove_bookmark(path: &str) -> KernelResult<()> {
+pub fn remove_bookmark<P: AsRef<Path> + ?Sized>(path: &P) -> KernelResult<()> {
+    let path = path.as_ref();
     let mut picker = PICKER.lock();
-    let idx = picker.bookmarks.iter().position(|b| b.path == path)
+    let idx = picker.bookmarks.iter().position(|b| b.path.as_path() == path)
         .ok_or(KernelError::NotFound)?;
     picker.bookmarks.remove(idx);
     Ok(())
@@ -647,7 +650,7 @@ pub fn bookmarks() -> Vec<PickerBookmark> {
 }
 
 /// Get recent directories.
-pub fn recent_dirs() -> Vec<String> {
+pub fn recent_dirs() -> Vec<PathBuf> {
     let picker = PICKER.lock();
     picker.recent_dirs.clone()
 }
@@ -718,7 +721,7 @@ pub fn self_test() -> KernelResult<()> {
         assert!(id > 0);
         let d = get_dialog(id).unwrap();
         assert_eq!(d.mode, DialogMode::OpenFile);
-        assert_eq!(d.current_dir, "/");
+        assert_eq!(d.current_dir, PathBuf::from("/"));
         assert!(d.open);
         serial_println!("[filepicker] test 1 passed: create dialog");
     }
@@ -729,7 +732,7 @@ pub fn self_test() -> KernelResult<()> {
         // Navigate somewhere (may fail if directory doesn't exist in VFS, that's OK).
         let _ = navigate(id, "/tmp");
         let d = get_dialog(id).unwrap();
-        assert_eq!(d.current_dir, "/tmp");
+        assert_eq!(d.current_dir, PathBuf::from("/tmp"));
         assert!(!d.history.is_empty());
         serial_println!("[filepicker] test 2 passed: navigate");
     }
@@ -753,9 +756,16 @@ pub fn self_test() -> KernelResult<()> {
 
         // Test filter matching.
         let f = &d.filters[0];
-        assert!(matches_filter("readme.txt", f));
-        assert!(matches_filter("README.TXT", f));
-        assert!(!matches_filter("photo.png", f));
+        assert!(matches_filter(Path::new("readme.txt"), f));
+        assert!(matches_filter(Path::new("README.TXT"), f));
+        assert!(!matches_filter(Path::new("photo.png"), f));
+        // A dotfile has no extension, so it is not a file of type `bashrc`.
+        assert!(!matches_filter(Path::new(".txt"), f));
+        // A name that does not decode as UTF-8 still has an extension, and it
+        // matches on the bytes.  Before the byte-path conversion this file
+        // could not even be represented here, let alone filtered.
+        assert!(matches_filter(Path::new(b"re\xffport.txt".as_slice()), f));
+        assert!(!matches_filter(Path::new(b"re\xffport.png".as_slice()), f));
         serial_println!("[filepicker] test 3 passed: filters");
     }
 
@@ -781,11 +791,29 @@ pub fn self_test() -> KernelResult<()> {
         match result {
             DialogResult::Confirmed(paths) => {
                 assert_eq!(paths.len(), 1);
-                assert_eq!(paths[0], "/home/output.txt");
+                assert_eq!(paths[0], PathBuf::from("/home/output.txt"));
             }
             _ => panic!("Expected Confirmed"),
         }
         serial_println!("[filepicker] test 5 passed: save dialog");
+    }
+
+    // Test 5b: a save name that is not valid UTF-8 round-trips.  The whole
+    // dialog used to be `String`-typed, so such a name could not be entered,
+    // joined onto the directory, or returned to the calling application.
+    {
+        let id = create_dialog(DialogMode::SaveFile, "/home", Vec::new())?;
+        set_filename(id, b"dr\xffaft.txt".as_slice())?;
+        match confirm(id)? {
+            DialogResult::Confirmed(paths) => {
+                assert_eq!(paths.len(), 1);
+                assert_eq!(paths[0], PathBuf::from(b"/home/dr\xffaft.txt".as_slice()));
+            }
+            DialogResult::Cancelled => panic!("Expected Confirmed"),
+        }
+        // The directory just used must now head the recent list.
+        assert_eq!(recent_dirs().first(), Some(&PathBuf::from("/home")));
+        serial_println!("[filepicker] test 5b passed: non-UTF-8 save name");
     }
 
     // Test 6: cancel dialog.
@@ -821,6 +849,6 @@ pub fn self_test() -> KernelResult<()> {
     clear_all();
     reset_stats();
 
-    serial_println!("[filepicker] all 7 self-tests passed");
+    serial_println!("[filepicker] all 8 self-tests passed");
     Ok(())
 }

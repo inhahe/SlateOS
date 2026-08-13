@@ -453,6 +453,11 @@ impl From<Vec<u8>> for PathBuf {
         Self(v)
     }
 }
+impl From<&[u8]> for PathBuf {
+    fn from(b: &[u8]) -> Self {
+        Self(b.to_owned())
+    }
+}
 
 impl fmt::Debug for PathBuf {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

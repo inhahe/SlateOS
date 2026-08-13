@@ -38,11 +38,11 @@
 
 #![allow(dead_code)]
 
-use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 use crate::fs::{EntryType, FileMeta, Vfs};
 use crate::serial_println;
 
@@ -61,13 +61,13 @@ const MAX_ENTRIES_PER_CALL: usize = 4096;
 #[derive(Debug, Clone)]
 pub struct DirEntryPlus {
     /// Entry name (filename only, not full path).
-    pub name: String,
+    pub name: PathBuf,
     /// Entry type (file, directory, symlink, etc.).
     pub entry_type: EntryType,
     /// Full file metadata (size, timestamps, permissions).
     pub meta: Option<FileMeta>,
     /// Full path for reference.
-    pub full_path: String,
+    pub full_path: PathBuf,
 }
 
 /// Sort order for directory listing.
@@ -143,7 +143,11 @@ pub struct ListOptions {
     /// Type filter.
     pub type_filter: TypeFilter,
     /// Glob pattern filter (empty = no filter).
-    pub pattern: String,
+    ///
+    /// Bytes, not text: the names it is matched against come from `readdir`
+    /// and have no declared encoding, so a `String` pattern could only ever
+    /// match the subset of names that happen to decode.
+    pub pattern: Vec<u8>,
     /// Whether to include hidden files (starting with '.').
     pub show_hidden: bool,
     /// Maximum entries (0 = default limit).
@@ -157,7 +161,7 @@ impl Default for ListOptions {
         Self {
             sort: SortOrder::Name,
             type_filter: TypeFilter::All,
-            pattern: String::new(),
+            pattern: Vec::new(),
             show_hidden: true,
             limit: 0,
             offset: 0,
@@ -195,7 +199,11 @@ static METADATA_ERRORS: AtomicU64 = AtomicU64::new(0);
 ///
 /// Returns directory entries with full attributes in a single call,
 /// sorted and filtered according to options.
-pub fn readdir_plus(dir_path: &str, options: &ListOptions) -> KernelResult<ListResult> {
+pub fn readdir_plus<P: AsRef<Path> + ?Sized>(
+    dir_path: &P,
+    options: &ListOptions,
+) -> KernelResult<ListResult> {
+    let dir_path = dir_path.as_ref();
     if dir_path.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
@@ -215,21 +223,22 @@ pub fn readdir_plus(dir_path: &str, options: &ListOptions) -> KernelResult<ListR
         }
 
         // Apply hidden filter.
-        if !options.show_hidden && entry.name.starts_with('.') {
+        // Byte compare, not `Path::starts_with`: the latter matches whole
+        // components, so it would ask whether the name *is* `.`.
+        if !options.show_hidden && entry.name.as_bytes().starts_with(b".") {
             continue;
         }
 
         // Apply glob pattern.
-        if !options.pattern.is_empty() && !glob_match(&options.pattern, &entry.name) {
+        if !options.pattern.is_empty()
+            && !glob_match_bytes(&options.pattern, entry.name.as_bytes())
+        {
             continue;
         }
 
-        // Build full path.
-        let full_path = if dir_path.ends_with('/') {
-            alloc::format!("{}{}", dir_path, entry.name)
-        } else {
-            alloc::format!("{}/{}", dir_path, entry.name)
-        };
+        // Build full path.  `Path::join` inserts exactly one separator, so
+        // the trailing-slash special case this used to need is gone.
+        let full_path = dir_path.join(&entry.name);
 
         // Fetch metadata.
         METADATA_FETCHED.fetch_add(1, Ordering::Relaxed);
@@ -278,7 +287,7 @@ pub fn readdir_plus(dir_path: &str, options: &ListOptions) -> KernelResult<ListR
 }
 
 /// Simple readdir_plus with default options (all files, sorted by name).
-pub fn readdir_plus_simple(dir_path: &str) -> KernelResult<ListResult> {
+pub fn readdir_plus_simple<P: AsRef<Path> + ?Sized>(dir_path: &P) -> KernelResult<ListResult> {
     readdir_plus(dir_path, &ListOptions::default())
 }
 
@@ -367,13 +376,6 @@ fn type_sort_key(et: EntryType) -> u8 {
     }
 }
 
-/// Simple glob matching (supports * and ?).
-fn glob_match(pattern: &str, name: &str) -> bool {
-    let pat = pattern.as_bytes();
-    let txt = name.as_bytes();
-    glob_match_bytes(pat, txt)
-}
-
 /// Byte-level glob matching with * (any sequence) and ? (any char).
 fn glob_match_bytes(pat: &[u8], txt: &[u8]) -> bool {
     let mut pi = 0;
@@ -455,7 +457,7 @@ fn test_sort_orders() {
     // Sort by name.
     let opts = ListOptions { sort: SortOrder::Name, ..Default::default() };
     let result = readdir_plus(dir, &opts).unwrap();
-    let names: Vec<&str> = result.entries.iter().map(|e| e.name.as_str()).collect();
+    let names: Vec<&Path> = result.entries.iter().map(|e| e.name.as_path()).collect();
     // First should be 'a.txt' (alphabetically first among our test files).
     assert!(names.windows(2).all(|w| w[0] <= w[1]));
 
@@ -513,23 +515,23 @@ fn test_glob_filter() {
 
     // Filter: *.txt
     let opts = ListOptions {
-        pattern: String::from("*.txt"),
+        pattern: b"*.txt".to_vec(),
         ..Default::default()
     };
     let result = readdir_plus(dir, &opts).unwrap();
     for entry in &result.entries {
-        assert!(entry.name.ends_with(".txt"));
+        assert!(entry.name.as_bytes().ends_with(b".txt"));
     }
     assert!(result.total_count >= 2); // test.txt + other.txt
 
     // Filter: test.*
     let opts2 = ListOptions {
-        pattern: String::from("test.*"),
+        pattern: b"test.*".to_vec(),
         ..Default::default()
     };
     let result2 = readdir_plus(dir, &opts2).unwrap();
     for entry in &result2.entries {
-        assert!(entry.name.starts_with("test."));
+        assert!(entry.name.as_bytes().starts_with(b"test."));
     }
 
     let _ = Vfs::remove(&alloc::format!("{}/test.txt", dir));
@@ -565,9 +567,9 @@ fn test_pagination() {
     assert_eq!(result2.entries.len(), 3);
 
     // Verify no overlap between pages.
-    let page1_names: Vec<&str> = result.entries.iter().map(|e| e.name.as_str()).collect();
+    let page1_names: Vec<&Path> = result.entries.iter().map(|e| e.name.as_path()).collect();
     for entry in &result2.entries {
-        assert!(!page1_names.contains(&entry.name.as_str()));
+        assert!(!page1_names.contains(&entry.name.as_path()));
     }
 
     for i in 0..10 {
@@ -578,16 +580,16 @@ fn test_pagination() {
 
 fn test_glob_match() {
     // Basic tests for the glob matcher.
-    assert!(glob_match("*", "anything"));
-    assert!(glob_match("*.txt", "file.txt"));
-    assert!(!glob_match("*.txt", "file.dat"));
-    assert!(glob_match("file?", "file1"));
-    assert!(!glob_match("file?", "file12"));
-    assert!(glob_match("*.rs", "main.rs"));
-    assert!(glob_match("test*", "testing123"));
-    assert!(glob_match("*test*", "my_test_file"));
-    assert!(glob_match("a*b*c", "aXbYc"));
-    assert!(!glob_match("a*b*c", "aXbY"));
+    assert!(glob_match_bytes(b"*", b"anything"));
+    assert!(glob_match_bytes(b"*.txt", b"file.txt"));
+    assert!(!glob_match_bytes(b"*.txt", b"file.dat"));
+    assert!(glob_match_bytes(b"file?", b"file1"));
+    assert!(!glob_match_bytes(b"file?", b"file12"));
+    assert!(glob_match_bytes(b"*.rs", b"main.rs"));
+    assert!(glob_match_bytes(b"test*", b"testing123"));
+    assert!(glob_match_bytes(b"*test*", b"my_test_file"));
+    assert!(glob_match_bytes(b"a*b*c", b"aXbYc"));
+    assert!(!glob_match_bytes(b"a*b*c", b"aXbY"));
 
     serial_println!("[readdir_plus]   glob_match: ok");
 }

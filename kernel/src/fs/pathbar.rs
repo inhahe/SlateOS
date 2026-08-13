@@ -23,11 +23,11 @@
 
 #![allow(dead_code)]
 
-use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -53,9 +53,9 @@ const MAX_SEGMENTS: usize = 32;
 #[derive(Debug, Clone)]
 pub struct Breadcrumb {
     /// Display name (directory name, or "/" for root).
-    pub name: String,
+    pub name: PathBuf,
     /// Full path up to and including this segment.
-    pub path: String,
+    pub path: PathBuf,
     /// Whether this is the last (current) segment.
     pub current: bool,
 }
@@ -64,9 +64,9 @@ pub struct Breadcrumb {
 #[derive(Debug, Clone)]
 pub struct Completion {
     /// The completed text.
-    pub text: String,
+    pub text: PathBuf,
     /// Display name (just the filename).
-    pub display: String,
+    pub display: PathBuf,
     /// Whether this is a directory.
     pub is_dir: bool,
     /// File size (0 for directories).
@@ -77,7 +77,7 @@ pub struct Completion {
 #[derive(Debug, Clone)]
 pub struct HistoryEntry {
     /// The directory path.
-    pub path: String,
+    pub path: PathBuf,
     /// Timestamp when visited (ns).
     pub visited_ns: u64,
 }
@@ -86,7 +86,7 @@ pub struct HistoryEntry {
 #[derive(Debug, Clone)]
 pub struct NavState {
     /// Current path.
-    pub current: String,
+    pub current: PathBuf,
     /// History (past paths, in order).
     pub history: Vec<HistoryEntry>,
     /// Current position in history (index into history).
@@ -103,7 +103,7 @@ static NAV_COUNT: AtomicU64 = AtomicU64::new(0);
 static COMPLETE_COUNT: AtomicU64 = AtomicU64::new(0);
 
 static NAV_STATE: spin::Mutex<NavState> = spin::Mutex::new(NavState {
-    current: String::new(),
+    current: PathBuf::new(),
     history: Vec::new(),
     position: 0,
     recent: Vec::new(),
@@ -117,15 +117,15 @@ static NAV_STATE: spin::Mutex<NavState> = spin::Mutex::new(NavState {
 ///
 /// "/home/user/Documents" → [("/", "/"), ("home", "/home"),
 ///   ("user", "/home/user"), ("Documents", "/home/user/Documents")]
-pub fn parse_breadcrumbs(path: &str) -> Vec<Breadcrumb> {
+pub fn parse_breadcrumbs<P: AsRef<Path> + ?Sized>(path: &P) -> Vec<Breadcrumb> {
     let normalized = normalize(path);
     let mut segments = Vec::new();
-    let mut accumulated = String::new();
+    let mut accumulated = PathBuf::new();
 
-    if normalized == "/" || normalized.is_empty() {
+    if normalized.as_path() == Path::new("/") || normalized.is_empty() {
         segments.push(Breadcrumb {
-            name: String::from("/"),
-            path: String::from("/"),
+            name: PathBuf::from("/"),
+            path: PathBuf::from("/"),
             current: true,
         });
         return segments;
@@ -133,26 +133,24 @@ pub fn parse_breadcrumbs(path: &str) -> Vec<Breadcrumb> {
 
     // Root segment.
     segments.push(Breadcrumb {
-        name: String::from("/"),
-        path: String::from("/"),
+        name: PathBuf::from("/"),
+        path: PathBuf::from("/"),
         current: false,
     });
 
-    let parts: Vec<&str> = normalized.trim_start_matches('/')
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .collect();
+    // `Path::components` already drops empty components, so the
+    // `trim_start_matches('/')` + `filter(!is_empty)` dance is redundant.
+    let parts: Vec<&Path> = normalized.components().collect();
 
     for (i, part) in parts.iter().enumerate() {
-        accumulated.push('/');
-        accumulated.push_str(part);
+        accumulated.push(part);
 
         if segments.len() >= MAX_SEGMENTS {
             break;
         }
 
         segments.push(Breadcrumb {
-            name: String::from(*part),
+            name: part.to_path_buf(),
             path: accumulated.clone(),
             current: i == parts.len().saturating_sub(1),
         });
@@ -163,80 +161,62 @@ pub fn parse_breadcrumbs(path: &str) -> Vec<Breadcrumb> {
 
 /// Normalize a path: resolve "." and "..", remove trailing slash,
 /// collapse consecutive slashes.
-pub fn normalize(path: &str) -> String {
+pub fn normalize<P: AsRef<Path> + ?Sized>(path: &P) -> PathBuf {
+    let path = path.as_ref();
     if path.is_empty() {
-        return String::from("/");
+        return PathBuf::from("/");
     }
 
-    let absolute = path.starts_with('/');
-    let mut components: Vec<&str> = Vec::new();
+    let absolute = path.is_absolute();
+    let mut components: Vec<&Path> = Vec::new();
 
-    for part in path.split('/') {
-        match part {
-            "" | "." => {} // Skip empty and current-dir.
-            ".." => {
-                if !components.is_empty() {
-                    components.pop();
-                }
-            }
-            _ => components.push(part),
+    for part in path.components() {
+        if part == Path::new(".") {
+            // Current-dir: no effect.  (Empty components are already dropped
+            // by `Path::components`, so `//` collapses for free.)
+        } else if part == Path::new("..") {
+            components.pop();
+        } else {
+            components.push(part);
         }
     }
 
     if components.is_empty() {
-        return String::from("/");
+        return PathBuf::from("/");
     }
 
-    let mut result = String::new();
-    if absolute {
-        result.push('/');
-    }
-    for (i, c) in components.iter().enumerate() {
-        if i > 0 {
-            result.push('/');
-        }
-        result.push_str(c);
+    let mut result = PathBuf::from(if absolute { "/" } else { "" });
+    for c in components {
+        result.push(c);
     }
 
     result
 }
 
 /// Join a base directory and a relative path.
-pub fn join(base: &str, relative: &str) -> String {
-    if relative.starts_with('/') {
-        return normalize(relative);
-    }
-    let combined = if base == "/" {
-        alloc::format!("/{}", relative)
-    } else {
-        alloc::format!("{}/{}", base, relative)
-    };
-    normalize(&combined)
+pub fn join<B: AsRef<Path> + ?Sized, R: AsRef<Path> + ?Sized>(
+    base: &B,
+    relative: &R,
+) -> PathBuf {
+    // `PathBuf::push` already lets an absolute `relative` replace the base and
+    // collapses the root case, so both hand-written branches are gone.
+    normalize(&base.as_ref().join(relative))
 }
 
 /// Get the parent directory of a path.
-pub fn parent(path: &str) -> String {
-    let normalized = normalize(path);
-    if normalized == "/" {
-        return String::from("/");
-    }
-    match normalized.rfind('/') {
-        Some(0) => String::from("/"),
-        Some(pos) => normalized.get(..pos).unwrap_or("/").into(),
-        None => String::from("/"),
-    }
+pub fn parent<P: AsRef<Path> + ?Sized>(path: &P) -> PathBuf {
+    // `Path::parent` already yields `/` for a top-level entry and `None` at the
+    // root, which is exactly the three-armed `rfind('/')` match this replaces.
+    normalize(path)
+        .parent()
+        .map_or_else(|| PathBuf::from("/"), Path::to_path_buf)
 }
 
 /// Get the filename (last segment) of a path.
-pub fn basename(path: &str) -> String {
-    let normalized = normalize(path);
-    if normalized == "/" {
-        return String::from("/");
-    }
-    match normalized.rfind('/') {
-        Some(pos) => normalized.get(pos.saturating_add(1)..).unwrap_or("").into(),
-        None => normalized,
-    }
+pub fn basename<P: AsRef<Path> + ?Sized>(path: &P) -> PathBuf {
+    normalize(path)
+        .file_name()
+        .map_or_else(|| PathBuf::from("/"), Path::to_path_buf)
 }
 
 // ---------------------------------------------------------------------------
@@ -247,24 +227,28 @@ pub fn basename(path: &str) -> String {
 ///
 /// Given "/home/us", returns completions like "/home/user", "/home/usr".
 /// Works for both absolute and relative (to current) paths.
-pub fn autocomplete(partial: &str, cwd: &str) -> Vec<Completion> {
+pub fn autocomplete<P: AsRef<Path> + ?Sized, C: AsRef<Path> + ?Sized>(
+    partial: &P,
+    cwd: &C,
+) -> Vec<Completion> {
     COMPLETE_COUNT.fetch_add(1, Ordering::Relaxed);
 
+    let partial = partial.as_ref();
+
     // Determine the directory to search and the prefix to match.
-    let full_partial = if partial.starts_with('/') {
-        String::from(partial)
+    let full_partial = if partial.is_absolute() {
+        partial.to_path_buf()
     } else {
         join(cwd, partial)
     };
 
-    let (search_dir, prefix) = if full_partial.ends_with('/') {
-        // Looking for entries in this directory.
-        (full_partial.clone(), String::new())
+    // A trailing separator means "list this directory", so it must be tested on
+    // the raw bytes: `normalize` (inside `join`) strips it, and `Path` has no
+    // notion of a trailing separator at all.
+    let (search_dir, prefix) = if full_partial.as_bytes().ends_with(b"/") {
+        (full_partial.clone(), PathBuf::new())
     } else {
-        // Looking for entries matching a partial name.
-        let dir = parent(&full_partial);
-        let name = basename(&full_partial);
-        (dir, name)
+        (parent(&full_partial), basename(&full_partial))
     };
 
     // List directory contents.
@@ -273,7 +257,10 @@ pub fn autocomplete(partial: &str, cwd: &str) -> Vec<Completion> {
         Err(_) => return Vec::new(),
     };
 
-    let prefix_lower = prefix.to_ascii_lowercase();
+    // ASCII-only case folding over raw bytes: a filename has no declared
+    // encoding, so there is nothing to consult that would say how to fold a
+    // byte >= 0x80, and guessing makes two distinct names collide.
+    let prefix_lower = prefix.as_bytes().to_ascii_lowercase();
     let mut completions: Vec<Completion> = Vec::new();
 
     for entry in &entries {
@@ -281,29 +268,26 @@ pub fn autocomplete(partial: &str, cwd: &str) -> Vec<Completion> {
             break;
         }
 
-        let name_lower = entry.name.to_ascii_lowercase();
+        let name_lower = entry.name.as_bytes().to_ascii_lowercase();
         if !prefix.is_empty() && !name_lower.starts_with(&prefix_lower) {
             continue;
         }
 
-        // Skip hidden files unless prefix starts with "."
-        if entry.name.starts_with('.') && !prefix.starts_with('.') {
+        // Skip hidden files unless the prefix starts with ".".  Byte compares,
+        // not `Path::starts_with`, which matches whole components and so would
+        // ask whether the name *is* `.`.
+        if entry.name.as_bytes().starts_with(b".") && !prefix.as_bytes().starts_with(b".") {
             continue;
         }
 
         let is_dir = entry.entry_type == crate::fs::EntryType::Directory;
-        let full_path = if search_dir == "/" {
-            alloc::format!("/{}", entry.name)
-        } else {
-            alloc::format!("{}/{}", search_dir, entry.name)
-        };
+        // `Path::join` collapses the root case itself.
+        let mut text = search_dir.join(&entry.name);
 
         // Add trailing slash for directories.
-        let text = if is_dir {
-            alloc::format!("{}/", full_path)
-        } else {
-            full_path
-        };
+        if is_dir {
+            text.extend_bytes(b"/");
+        }
 
         completions.push(Completion {
             text,
@@ -315,8 +299,12 @@ pub fn autocomplete(partial: &str, cwd: &str) -> Vec<Completion> {
 
     // Sort: directories first, then alphabetical.
     completions.sort_by(|a, b| {
-        b.is_dir.cmp(&a.is_dir)
-            .then(a.display.to_ascii_lowercase().cmp(&b.display.to_ascii_lowercase()))
+        b.is_dir.cmp(&a.is_dir).then_with(|| {
+            a.display
+                .as_bytes()
+                .to_ascii_lowercase()
+                .cmp(&b.display.as_bytes().to_ascii_lowercase())
+        })
     });
 
     completions
@@ -327,7 +315,7 @@ pub fn autocomplete(partial: &str, cwd: &str) -> Vec<Completion> {
 // ---------------------------------------------------------------------------
 
 /// Navigate to a path (adds to history).
-pub fn go(path: &str) -> KernelResult<()> {
+pub fn go<P: AsRef<Path> + ?Sized>(path: &P) -> KernelResult<()> {
     let normalized = normalize(path);
 
     // Validate the path exists and is a directory.
@@ -372,7 +360,7 @@ pub fn go(path: &str) -> KernelResult<()> {
 }
 
 /// Navigate back in history.
-pub fn back() -> Option<String> {
+pub fn back() -> Option<PathBuf> {
     let mut nav = NAV_STATE.lock();
     if nav.position == 0 {
         return None;
@@ -384,7 +372,7 @@ pub fn back() -> Option<String> {
 }
 
 /// Navigate forward in history.
-pub fn forward() -> Option<String> {
+pub fn forward() -> Option<PathBuf> {
     let mut nav = NAV_STATE.lock();
     if nav.position >= nav.history.len().saturating_sub(1) {
         return None;
@@ -396,7 +384,7 @@ pub fn forward() -> Option<String> {
 }
 
 /// Navigate to parent directory.
-pub fn up() -> KernelResult<String> {
+pub fn up() -> KernelResult<PathBuf> {
     let current = {
         let nav = NAV_STATE.lock();
         nav.current.clone()
@@ -407,7 +395,7 @@ pub fn up() -> KernelResult<String> {
 }
 
 /// Get current navigation path.
-pub fn current() -> String {
+pub fn current() -> PathBuf {
     NAV_STATE.lock().current.clone()
 }
 
@@ -475,11 +463,11 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 1: path normalization.
     {
-        assert_eq!(normalize("/home/user/../user/./docs"), "/home/user/docs");
-        assert_eq!(normalize("/"), "/");
-        assert_eq!(normalize("//foo///bar//"), "/foo/bar");
-        assert_eq!(normalize("/a/b/c/../../d"), "/a/d");
-        assert_eq!(normalize(""), "/");
+        assert_eq!(normalize("/home/user/../user/./docs"), PathBuf::from("/home/user/docs"));
+        assert_eq!(normalize("/"), PathBuf::from("/"));
+        assert_eq!(normalize("//foo///bar//"), PathBuf::from("/foo/bar"));
+        assert_eq!(normalize("/a/b/c/../../d"), PathBuf::from("/a/d"));
+        assert_eq!(normalize(""), PathBuf::from("/"));
         serial_println!("[pathbar] test 1 passed: normalization");
     }
 
@@ -487,34 +475,51 @@ pub fn self_test() -> KernelResult<()> {
     {
         let crumbs = parse_breadcrumbs("/home/user/Documents");
         assert_eq!(crumbs.len(), 4);
-        assert_eq!(crumbs[0].name, "/");
-        assert_eq!(crumbs[0].path, "/");
+        assert_eq!(crumbs[0].name, PathBuf::from("/"));
+        assert_eq!(crumbs[0].path, PathBuf::from("/"));
         assert!(!crumbs[0].current);
-        assert_eq!(crumbs[1].name, "home");
-        assert_eq!(crumbs[1].path, "/home");
-        assert_eq!(crumbs[3].name, "Documents");
-        assert_eq!(crumbs[3].path, "/home/user/Documents");
+        assert_eq!(crumbs[1].name, PathBuf::from("home"));
+        assert_eq!(crumbs[1].path, PathBuf::from("/home"));
+        assert_eq!(crumbs[3].name, PathBuf::from("Documents"));
+        assert_eq!(crumbs[3].path, PathBuf::from("/home/user/Documents"));
         assert!(crumbs[3].current);
         serial_println!("[pathbar] test 2 passed: breadcrumbs");
     }
 
     // Test 3: parent and basename.
     {
-        assert_eq!(parent("/home/user/file.txt"), "/home/user");
-        assert_eq!(parent("/"), "/");
-        assert_eq!(parent("/home"), "/");
-        assert_eq!(basename("/home/user/file.txt"), "file.txt");
-        assert_eq!(basename("/"), "/");
+        assert_eq!(parent("/home/user/file.txt"), PathBuf::from("/home/user"));
+        assert_eq!(parent("/"), PathBuf::from("/"));
+        assert_eq!(parent("/home"), PathBuf::from("/"));
+        assert_eq!(basename("/home/user/file.txt"), PathBuf::from("file.txt"));
+        assert_eq!(basename("/"), PathBuf::from("/"));
         serial_println!("[pathbar] test 3 passed: parent + basename");
     }
 
     // Test 4: path join.
     {
-        assert_eq!(join("/home/user", "docs"), "/home/user/docs");
-        assert_eq!(join("/home/user", "../other"), "/home/other");
-        assert_eq!(join("/home", "/etc/config"), "/etc/config");
-        assert_eq!(join("/", "tmp"), "/tmp");
+        assert_eq!(join("/home/user", "docs"), PathBuf::from("/home/user/docs"));
+        assert_eq!(join("/home/user", "../other"), PathBuf::from("/home/other"));
+        assert_eq!(join("/home", "/etc/config"), PathBuf::from("/etc/config"));
+        assert_eq!(join("/", "tmp"), PathBuf::from("/tmp"));
         serial_println!("[pathbar] test 4 passed: join");
+    }
+
+    // Test 4b: a path component that is not valid UTF-8 survives every
+    // operation.  Before the byte-path conversion the whole address bar was
+    // `&str`, so such a directory could not be normalized, split into
+    // breadcrumbs, or completed - it was simply unreachable from the UI.
+    {
+        let weird = Path::new(b"/home/we\xffird/docs".as_slice());
+        assert_eq!(normalize(weird), weird.to_path_buf());
+        assert_eq!(parent(weird), PathBuf::from(b"/home/we\xffird".as_slice()));
+        assert_eq!(basename(weird), PathBuf::from("docs"));
+
+        let crumbs = parse_breadcrumbs(weird);
+        assert_eq!(crumbs.len(), 4);
+        assert_eq!(crumbs[2].name, PathBuf::from(b"we\xffird".as_slice()));
+        assert_eq!(crumbs[2].path, PathBuf::from(b"/home/we\xffird".as_slice()));
+        serial_println!("[pathbar] test 4b passed: non-UTF-8 component");
     }
 
     // Test 5: navigation history.
@@ -535,6 +540,6 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[pathbar] test 6 passed: stats");
     }
 
-    serial_println!("[pathbar] all 6 self-tests passed");
+    serial_println!("[pathbar] all 7 self-tests passed");
     Ok(())
 }

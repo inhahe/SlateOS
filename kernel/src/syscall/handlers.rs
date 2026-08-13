@@ -72,6 +72,15 @@ const ARGV_MAX: usize = 256 * 1024;
 /// Most file-descriptor map entries accepted by spawn.
 const FD_MAP_MAX: usize = 256;
 
+/// Longest extended-attribute name accepted, matching Linux's `XATTR_NAME_MAX`.
+///
+/// Same rejection-not-truncation rule as [`PATH_MAX`]: a clipped xattr name is
+/// a *different* attribute, so truncating would read or overwrite the wrong one.
+const XATTR_NAME_MAX: usize = 255;
+
+/// Largest extended-attribute value accepted, matching Linux's `XATTR_SIZE_MAX`.
+const XATTR_SIZE_MAX: usize = 65536;
+
 /// Copy a path argument out of user space into a kernel `String`.
 ///
 /// `String::from_utf8` consumes the `Vec` in place, so this is one allocation,
@@ -84,6 +93,18 @@ const FD_MAP_MAX: usize = 256;
 /// `D-VFS-PATHS-ARE-STR-NOT-BYTES`.
 fn read_user_path(ptr: u64, len: usize) -> Result<alloc::string::String, KernelError> {
     let bytes = crate::mm::user::read_user_vec(ptr, len, PATH_MAX)?;
+    alloc::string::String::from_utf8(bytes).map_err(|_| KernelError::InvalidArgument)
+}
+
+/// Copy a NUL-terminated user string into a kernel `String`.
+///
+/// The terminator-delimited counterpart to [`read_user_path`], for arguments
+/// that arrive as a bare C string with no length beside them — xattr keys,
+/// mount options, and similar.  See
+/// [`crate::mm::user::read_user_cstr`] for why the scan cannot be done in
+/// place over the user mapping.
+fn read_user_cstring(ptr: u64, max: usize) -> Result<alloc::string::String, KernelError> {
+    let bytes = crate::mm::user::read_user_cstr(ptr, max)?;
     alloc::string::String::from_utf8(bytes).map_err(|_| KernelError::InvalidArgument)
 }
 
@@ -8522,37 +8543,17 @@ pub fn sys_fs_get_xattr(args: &SyscallArgs) -> SyscallResult {
         Ok(p) => p,
         Err(e) => return SyscallResult::err(e),
     };
-    // Read key from arg2 (null-terminated string, max 255 bytes).
-    let key_ptr = args.arg2 as *const u8;
-    if key_ptr.is_null() {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 1) {
-        return SyscallResult::err(e);
-    }
-    // SAFETY: Validated above, scan for null within 256 bytes.
-    let key = unsafe {
-        let mut len = 0usize;
-        while len < 256 {
-            if *key_ptr.add(len) == 0 {
-                break;
-            }
-            len = len.wrapping_add(1);
-        }
-        let bytes = core::slice::from_raw_parts(key_ptr, len);
-        match core::str::from_utf8(bytes) {
-            Ok(s) => s,
-            Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
-        }
+    let key = match read_user_cstring(args.arg2, XATTR_NAME_MAX) {
+        Ok(k) => k,
+        Err(e) => return SyscallResult::err(e),
     };
 
-    let out_ptr = args.arg3 as *mut u8;
     let capacity = args.arg4 as usize;
     // capacity == 0 is a valid "size query" (POSIX getxattr): the caller
     // wants the attribute length without copying, so don't require a buffer.
     // Only validate the output buffer when one is actually provided.
     if capacity > 0 {
-        if out_ptr.is_null() {
+        if args.arg3 == 0 {
             return SyscallResult::err(KernelError::InvalidArgument);
         }
         if let Err(e) = crate::mm::user::validate_user_write(args.arg3, capacity) {
@@ -8562,20 +8563,25 @@ pub fn sys_fs_get_xattr(args: &SyscallArgs) -> SyscallResult {
 
     // arg5 bit 0 = NO_FOLLOW (lgetxattr: read the link inode's own xattrs).
     let xattr_res = if args.arg5 & 1 != 0 {
-        crate::fs::Vfs::get_xattr_no_follow(&path, key)
+        crate::fs::Vfs::get_xattr_no_follow(&path, &key)
     } else {
-        crate::fs::Vfs::get_xattr(&path, key)
+        crate::fs::Vfs::get_xattr(&path, &key)
     };
     match xattr_res {
         Ok(val) => {
             // Copy as much as fits, but always report the TRUE length so the
             // caller can perform a size query or detect truncation (ERANGE).
-            if capacity > 0 {
-                let copy_len = val.len().min(capacity);
-                // SAFETY: out_ptr validated for capacity bytes above, and
-                // copy_len <= capacity.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(val.as_ptr(), out_ptr, copy_len);
+            let copy_len = val.len().min(capacity);
+            if copy_len > 0 {
+                // SAFETY: `val` is a live kernel-owned buffer of at least
+                // `copy_len` bytes.  `copy_to_user` re-validates the
+                // destination — the lookup above can block on the underlying
+                // filesystem, so the check made before it is not the one that
+                // matters — and brackets the store with STAC/CLAC.
+                if let Err(e) =
+                    unsafe { crate::mm::user::copy_to_user(val.as_ptr(), args.arg3, copy_len) }
+                {
+                    return SyscallResult::err(e);
                 }
             }
             SyscallResult::ok(val.len() as i64)
@@ -8601,52 +8607,29 @@ pub fn sys_fs_set_xattr(args: &SyscallArgs) -> SyscallResult {
         Ok(p) => p,
         Err(e) => return SyscallResult::err(e),
     };
-    // Read key.
-    let key_ptr = args.arg2 as *const u8;
-    if key_ptr.is_null() {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 1) {
-        return SyscallResult::err(e);
-    }
-    // SAFETY: Validated.
-    let key = unsafe {
-        let mut len = 0usize;
-        while len < 256 {
-            if *key_ptr.add(len) == 0 {
-                break;
-            }
-            len = len.wrapping_add(1);
-        }
-        let bytes = core::slice::from_raw_parts(key_ptr, len);
-        match core::str::from_utf8(bytes) {
-            Ok(s) => s,
-            Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
-        }
+    let key = match read_user_cstring(args.arg2, XATTR_NAME_MAX) {
+        Ok(k) => k,
+        Err(e) => return SyscallResult::err(e),
     };
-    // Read value.
-    let val_ptr = args.arg3 as *const u8;
-    let val_len = (args.arg4 as usize).min(65536);
-    if val_ptr.is_null() && val_len > 0 {
+
+    let val_len = args.arg4 as usize;
+    if args.arg3 == 0 && val_len > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if val_len > 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg3, val_len) {
-            return SyscallResult::err(e);
-        }
-    }
-    // SAFETY: Validated.
-    let value = if val_len > 0 {
-        unsafe { core::slice::from_raw_parts(val_ptr, val_len) }
-    } else {
-        &[]
+    // An over-long value is rejected, not clipped.  This used to be
+    // `.min(65536)`, which stored a *truncated* attribute and still reported
+    // success — the caller had no way to tell that what it read back later
+    // would not be what it wrote.
+    let value = match crate::mm::user::read_user_vec(args.arg3, val_len, XATTR_SIZE_MAX) {
+        Ok(v) => v,
+        Err(e) => return SyscallResult::err(e),
     };
 
     // arg5 bit 0 = NO_FOLLOW (lsetxattr: write the link inode's own xattrs).
     let res = if args.arg5 & 1 != 0 {
-        crate::fs::Vfs::set_xattr_no_follow(&path, key, value)
+        crate::fs::Vfs::set_xattr_no_follow(&path, &key, &value)
     } else {
-        crate::fs::Vfs::set_xattr(&path, key, value)
+        crate::fs::Vfs::set_xattr(&path, &key, &value)
     };
     match res {
         Ok(()) => SyscallResult::ok(0),
@@ -8670,34 +8653,16 @@ pub fn sys_fs_remove_xattr(args: &SyscallArgs) -> SyscallResult {
         Ok(p) => p,
         Err(e) => return SyscallResult::err(e),
     };
-    let key_ptr = args.arg2 as *const u8;
-    if key_ptr.is_null() {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg2, 1) {
-        return SyscallResult::err(e);
-    }
-    // SAFETY: Validated.
-    let key = unsafe {
-        let mut len = 0usize;
-        while len < 256 {
-            if *key_ptr.add(len) == 0 {
-                break;
-            }
-            len = len.wrapping_add(1);
-        }
-        let bytes = core::slice::from_raw_parts(key_ptr, len);
-        match core::str::from_utf8(bytes) {
-            Ok(s) => s,
-            Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
-        }
+    let key = match read_user_cstring(args.arg2, XATTR_NAME_MAX) {
+        Ok(k) => k,
+        Err(e) => return SyscallResult::err(e),
     };
 
     // arg3 bit 0 = NO_FOLLOW (lremovexattr: remove from the link inode).
     let res = if args.arg3 & 1 != 0 {
-        crate::fs::Vfs::remove_xattr_no_follow(&path, key)
+        crate::fs::Vfs::remove_xattr_no_follow(&path, &key)
     } else {
-        crate::fs::Vfs::remove_xattr(&path, key)
+        crate::fs::Vfs::remove_xattr(&path, &key)
     };
     match res {
         Ok(()) => SyscallResult::ok(0),
@@ -8722,13 +8687,12 @@ pub fn sys_fs_list_xattrs(args: &SyscallArgs) -> SyscallResult {
         Ok(p) => p,
         Err(e) => return SyscallResult::err(e),
     };
-    let out_ptr = args.arg2 as *mut u8;
     let capacity = args.arg3 as usize;
     // capacity == 0 is a valid "size query" (POSIX listxattr): return the
     // total bytes needed without writing.  Validate the buffer only when one
     // is provided.
     if capacity > 0 {
-        if out_ptr.is_null() {
+        if args.arg2 == 0 {
             return SyscallResult::err(KernelError::InvalidArgument);
         }
         if let Err(e) = crate::mm::user::validate_user_write(args.arg2, capacity) {
@@ -8749,7 +8713,7 @@ pub fn sys_fs_list_xattrs(args: &SyscallArgs) -> SyscallResult {
     // Total size of the packed null-terminated key list.
     let mut total = 0usize;
     for key in &keys {
-        total = total.wrapping_add(key.len().wrapping_add(1));
+        total = total.saturating_add(key.len().saturating_add(1));
     }
 
     // Only fill the buffer when the whole list fits; otherwise report the
@@ -8758,19 +8722,33 @@ pub fn sys_fs_list_xattrs(args: &SyscallArgs) -> SyscallResult {
     // partially-packed list that the caller cannot distinguish from a
     // complete one.
     if capacity > 0 && total <= capacity {
+        // Packed kernel-side and sized by `total`, not by the caller's
+        // `capacity`: the list is built while the VFS lock has already been
+        // dropped, so writing it out key-by-key through a user pointer would
+        // both need a STAC window per key and race a peer thread remapping
+        // the buffer partway through.
+        let mut packed = match crate::mm::user::alloc_zeroed_vec(total) {
+            Ok(v) => v,
+            Err(e) => return SyscallResult::err(e),
+        };
         let mut offset = 0usize;
         for key in &keys {
-            // SAFETY: total <= capacity and out_ptr is validated for
-            // capacity bytes, so every write stays in bounds.
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    key.as_ptr(),
-                    out_ptr.add(offset),
-                    key.len(),
-                );
-                *out_ptr.add(offset.wrapping_add(key.len())) = 0;
+            // The trailing NUL is already there from the zero fill.
+            if let Some(dst) = packed.get_mut(offset..offset.saturating_add(key.len())) {
+                dst.copy_from_slice(key.as_bytes());
             }
-            offset = offset.wrapping_add(key.len().wrapping_add(1));
+            offset = offset.saturating_add(key.len().saturating_add(1));
+        }
+
+        if !packed.is_empty() {
+            // SAFETY: `packed` is a live kernel-owned buffer of exactly
+            // `packed.len()` bytes; `copy_to_user` re-validates the
+            // destination and brackets the store with STAC/CLAC.
+            if let Err(e) = unsafe {
+                crate::mm::user::copy_to_user(packed.as_ptr(), args.arg2, packed.len())
+            } {
+                return SyscallResult::err(e);
+            }
         }
     }
 
@@ -8800,23 +8778,19 @@ pub fn sys_fs_symlink(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return SyscallResult::err(e),
     };
 
-    // Read the target string (arg2=ptr, arg3=len).
-    let target_ptr = args.arg2 as *const u8;
-    let target_len = (args.arg3 as usize).min(256);
-    if target_ptr.is_null() || target_len == 0 {
+    // The target is a path, so an over-long one is rejected rather than
+    // clipped at 256 as it used to be: a truncated symlink target points
+    // somewhere else entirely, and the link would be created pointing there.
+    let target_len = args.arg3 as usize;
+    if args.arg2 == 0 || target_len == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg2, target_len) {
-        return SyscallResult::err(e);
-    }
-    // SAFETY: Validated above — target_ptr is in user space and mapped.
-    let target_bytes = unsafe { core::slice::from_raw_parts(target_ptr, target_len) };
-    let target = match core::str::from_utf8(target_bytes) {
-        Ok(s) => s,
-        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    let target = match read_user_path(args.arg2, target_len) {
+        Ok(t) => t,
+        Err(e) => return SyscallResult::err(e),
     };
 
-    match crate::fs::Vfs::symlink(&path, target) {
+    match crate::fs::Vfs::symlink(&path, &target) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -8846,9 +8820,8 @@ pub fn sys_fs_readlink(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return SyscallResult::err(e),
     };
 
-    let out_ptr = args.arg2 as *mut u8;
     let capacity = args.arg3 as usize;
-    if out_ptr.is_null() || capacity == 0 {
+    if args.arg2 == 0 || capacity == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
     if let Err(e) = crate::mm::user::validate_user_write(args.arg2, capacity) {
@@ -8860,11 +8833,20 @@ pub fn sys_fs_readlink(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return SyscallResult::err(e),
     };
 
-    // Copy target to user buffer, truncating if necessary.
+    // Truncation here is the documented POSIX `readlink` contract, not a
+    // validation shortcut: the caller is told how many bytes it got and grows
+    // its buffer if that equals the capacity.
     let copy_len = target.len().min(capacity);
-    // SAFETY: out_ptr validated for capacity bytes.
-    unsafe {
-        core::ptr::copy_nonoverlapping(target.as_ptr(), out_ptr, copy_len);
+    if copy_len > 0 {
+        // SAFETY: `target` is a live kernel-owned string of at least
+        // `copy_len` bytes.  `copy_to_user` re-validates the destination —
+        // `readlink` can block on the filesystem, so the check above is not
+        // the one that matters — and brackets the store with STAC/CLAC.
+        if let Err(e) =
+            unsafe { crate::mm::user::copy_to_user(target.as_ptr(), args.arg2, copy_len) }
+        {
+            return SyscallResult::err(e);
+        }
     }
 
     SyscallResult::ok(copy_len as i64)

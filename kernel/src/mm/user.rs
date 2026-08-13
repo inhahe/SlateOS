@@ -678,6 +678,84 @@ pub fn read_user_vec(user_src: u64, len: usize, max: usize) -> KernelResult<allo
     Ok(buf)
 }
 
+/// Copy a NUL-terminated user string into a kernel buffer, without the NUL.
+///
+/// The counterpart to [`read_user_vec`] for arguments whose length is implied
+/// by a terminator rather than passed alongside the pointer.
+///
+/// The naive version of this — validate one byte, then scan forward through
+/// user memory for the NUL — is doubly wrong.  Validating the first byte says
+/// nothing about the rest: an unterminated string at the end of a mapping
+/// walks the scan straight into an unmapped page, and the resulting fault is
+/// taken in *kernel* mode with no exception-table entry to recover from, so a
+/// user process can panic the kernel with a single unterminated buffer.  And
+/// the bytes are read from a live user mapping, which SMAP forbids and which a
+/// peer thread can change between the scan and the use.
+///
+/// This copies forward in page-bounded chunks, so the scan can never touch a
+/// page that was not validated, and stops at the first NUL.  The returned
+/// `Vec` is kernel memory.
+///
+/// `max` is a hard limit on the string length excluding the terminator; a
+/// string with no NUL in `[ptr, ptr + max]` is rejected rather than truncated,
+/// for the reason given on [`read_user_vec`].
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] if no NUL appears within `max` bytes.
+/// - [`KernelError::OutOfMemory`] if the kernel buffer cannot be allocated.
+/// - [`KernelError::InvalidAddress`] if the user range is not readable up to
+///   and including the terminator.
+pub fn read_user_cstr(user_src: u64, max: usize) -> KernelResult<alloc::vec::Vec<u8>> {
+    // Small enough to sit on a kernel stack, and chunks are additionally
+    // clipped to the end of the current page so one copy never spans two.
+    const CHUNK: usize = 64;
+
+    let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    let mut addr = user_src;
+    // The terminator itself may sit one past `max` bytes of content.
+    let mut remaining = max.saturating_add(1);
+
+    while remaining > 0 {
+        let page_off = addr & (PAGE_SIZE - 1);
+        // `PAGE_SIZE - page_off` is in `1..=PAGE_SIZE`, so this cast is exact.
+        #[allow(clippy::cast_possible_truncation)]
+        let to_page_end = (PAGE_SIZE - page_off) as usize;
+        let n = remaining.min(CHUNK).min(to_page_end);
+
+        let mut scratch = [0u8; CHUNK];
+        // SAFETY: `scratch` is a live stack array of `CHUNK` bytes and
+        // `n <= CHUNK`, so it is a valid destination for `n` bytes.
+        // `copy_from_user` validates the source range before reading it, and
+        // `n` never carries the read past the end of the current page.
+        unsafe { copy_from_user(addr, scratch.as_mut_ptr(), n)? };
+
+        let Some(piece) = scratch.get(..n) else {
+            // Unreachable: `n <= CHUNK` by construction.
+            return Err(KernelError::InvalidArgument);
+        };
+
+        let (content, done) = match piece.iter().position(|&b| b == 0) {
+            Some(i) => (piece.get(..i).unwrap_or(&[]), true),
+            None => (piece, false),
+        };
+        out.try_reserve(content.len())
+            .map_err(|_| KernelError::OutOfMemory)?;
+        out.extend_from_slice(content);
+        if done {
+            // At most `max + 1` bytes were scanned and the last of them was
+            // the terminator, so `out.len() <= max` holds by construction.
+            return Ok(out);
+        }
+
+        addr = addr.saturating_add(n as u64);
+        remaining = remaining.saturating_sub(n);
+    }
+
+    // Ran out of budget without seeing a terminator.
+    Err(KernelError::InvalidArgument)
+}
+
 /// Serve a user output buffer through kernel scratch memory.
 ///
 /// Allocates a zeroed kernel buffer of `cap` bytes, hands it to `fill`, and

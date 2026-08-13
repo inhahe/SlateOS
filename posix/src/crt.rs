@@ -1663,10 +1663,38 @@ mod tests {
     // We can't test exit() itself because it calls _exit which terminates.
     // But we CAN test that atexit returns 0 for valid registrations.
 
+    /// Serialises every test that touches `ATEXIT_COUNT` / `QUICKEXIT_COUNT`.
+    ///
+    /// Those are process-global, and each of these tests works by *writing* a
+    /// starting count, calling the registration function, and asserting the
+    /// resulting count — so two of them running concurrently (cargo's default is
+    /// a thread per test) trample each other's setup. That is exactly what
+    /// happened: five of these failed intermittently with counts from a
+    /// neighbouring test (`test_at_quick_exit_multiple_registrations` expecting
+    /// 2 and seeing 5, `test_atexit_table_full` expecting the table full and
+    /// seeing an empty one). Same reasoning and same shape as
+    /// `INIT_ARRAY_TEST_LOCK` above.
+    ///
+    /// The guard must cover the reset *and* the cleanup, not just the
+    /// assertion — the reset is half the shared state being mutated.
+    static ATEXIT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Take [`ATEXIT_TEST_LOCK`], ignoring poisoning.
+    ///
+    /// A failing assertion panics while holding the guard, which poisons the
+    /// mutex. Propagating that would turn one genuine failure into six
+    /// confusing "test lock poisoned" ones and hide the real cause, so recover
+    /// the guard instead: these tests reset the counters they depend on at
+    /// entry, so a predecessor's abandoned state cannot affect them.
+    fn atexit_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        ATEXIT_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     extern "C" fn dummy_atexit_handler() {}
 
     #[test]
     fn test_atexit_returns_zero() {
+        let _guard = atexit_test_guard();
         // Reset state for this test.
         unsafe {
             addr_of_mut!(ATEXIT_COUNT).write(0);
@@ -1681,6 +1709,7 @@ mod tests {
 
     #[test]
     fn test_atexit_table_full() {
+        let _guard = atexit_test_guard();
         // Fill the table, then try one more.
         unsafe {
             addr_of_mut!(ATEXIT_COUNT).write(MAX_ATEXIT);
@@ -1695,6 +1724,7 @@ mod tests {
 
     #[test]
     fn test_at_quick_exit_returns_zero() {
+        let _guard = atexit_test_guard();
         unsafe {
             addr_of_mut!(QUICKEXIT_COUNT).write(0);
         }
@@ -1707,6 +1737,7 @@ mod tests {
 
     #[test]
     fn test_at_quick_exit_table_full() {
+        let _guard = atexit_test_guard();
         unsafe {
             addr_of_mut!(QUICKEXIT_COUNT).write(MAX_ATEXIT);
         }
@@ -1850,6 +1881,7 @@ mod tests {
 
     #[test]
     fn test_atexit_multiple_registrations() {
+        let _guard = atexit_test_guard();
         unsafe {
             addr_of_mut!(ATEXIT_COUNT).write(0);
         }
@@ -1865,6 +1897,7 @@ mod tests {
 
     #[test]
     fn test_at_quick_exit_multiple_registrations() {
+        let _guard = atexit_test_guard();
         unsafe {
             addr_of_mut!(QUICKEXIT_COUNT).write(0);
         }
@@ -1881,6 +1914,7 @@ mod tests {
 
     #[test]
     fn test_atexit_and_quick_exit_separate() {
+        let _guard = atexit_test_guard();
         unsafe {
             addr_of_mut!(ATEXIT_COUNT).write(0);
             addr_of_mut!(QUICKEXIT_COUNT).write(0);

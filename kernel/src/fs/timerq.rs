@@ -299,13 +299,22 @@ pub fn self_test() {
     crate::serial_println!("  [3/8] cancel: OK");
 
     // 4: Periodic fire — stays Pending and the deadline advances by interval.
-    //    Use a far-future deadline so fire_expired (test 6) never fires it.
-    let pid = add("periodic", TimerType::Periodic, 1_000_000_000_000, 1_000, 0).expect("add3");
+    //    The deadline must outlive the whole boot, because `fire_expired`
+    //    (test 6) fires every pending timer whose deadline is in the past and
+    //    test 6 asserts an exact count. The original value here was
+    //    1_000_000_000_000 ns — 1000 seconds of uptime — which an ordinary boot
+    //    reaches this test well inside, but the KASAN-instrumented build
+    //    (design-decisions.md §119: a call per memory access) does not: it got
+    //    here at ~1090 s, the periodic timer counted as expired, and test 6
+    //    failed with `left: 2, right: 1`. A deadline of 2^62 ns is ~146 years,
+    //    so no build can outrun it, and it still leaves room for `+ interval`.
+    const FAR_FUTURE_NS: u64 = 1 << 62;
+    let pid = add("periodic", TimerType::Periodic, FAR_FUTURE_NS, 1_000, 0).expect("add3");
     fire(pid).expect("fire_p");
     let t = list_all().into_iter().find(|t| t.id == pid).expect("f3");
     assert_eq!(t.state, TimerState::Pending);
     assert_eq!(t.fire_count, 1);
-    assert_eq!(t.deadline_ns, 1_000_000_000_000 + 1_000);
+    assert_eq!(t.deadline_ns, FAR_FUTURE_NS + 1_000);
     crate::serial_println!("  [4/8] periodic: OK");
 
     // 5: Firing a non-pending timer errors; unknown ids are NotFound.

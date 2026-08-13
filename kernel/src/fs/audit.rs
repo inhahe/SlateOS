@@ -50,6 +50,8 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
+use crate::fs::pathutil::path_in_subtree;
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -172,9 +174,9 @@ pub struct AuditEntry {
     /// UID that performed the operation (0 = root/kernel).
     pub uid: u32,
     /// Primary path (subject of the operation).
-    pub path: String,
+    pub path: PathBuf,
     /// Secondary path (destination for rename/link, target for symlink).
-    pub path2: Option<String>,
+    pub path2: Option<PathBuf>,
     /// Whether the operation succeeded.
     pub success: bool,
     /// Error code if the operation failed.
@@ -189,7 +191,7 @@ pub struct AuditRule {
     /// Unique rule ID.
     pub id: u64,
     /// Path prefix to match (empty = match all).
-    pub path_prefix: String,
+    pub path_prefix: PathBuf,
     /// Operation mask.
     pub mask: AuditMask,
     /// UID filter (None = all users).
@@ -354,7 +356,7 @@ pub fn is_enabled() -> bool {
 
 /// Add an audit rule.  Returns the rule ID.
 pub fn add_rule(
-    path_prefix: &str,
+    path_prefix: impl AsRef<Path>,
     mask: AuditMask,
     uid: Option<u32>,
     failures_only: bool,
@@ -365,7 +367,7 @@ pub fn add_rule(
 
     inner.rules.insert(id, AuditRule {
         id,
-        path_prefix: path_prefix.into(),
+        path_prefix: path_prefix.as_ref().to_path_buf(),
         mask,
         uid,
         failures_only,
@@ -424,8 +426,8 @@ pub fn stats() -> AuditStats {
 pub fn log_event(
     op: AuditOp,
     uid: u32,
-    path: &str,
-    path2: Option<&str>,
+    path: &Path,
+    path2: Option<&Path>,
     success: bool,
     error_code: Option<i32>,
     detail: Option<&str>,
@@ -448,7 +450,10 @@ pub fn log_event(
         if !rule.mask.contains(op) {
             continue;
         }
-        if !rule.path_prefix.is_empty() && !path.starts_with(&rule.path_prefix) {
+        // Component-aligned: a rule on `/tmp` must not audit `/tmpfile`.
+        // The empty prefix means "every path", which `path_in_subtree`
+        // handles directly.
+        if !path_in_subtree(path, &rule.path_prefix) {
             continue;
         }
         if let Some(rule_uid) = rule.uid {
@@ -479,8 +484,8 @@ pub fn log_event(
         timestamp,
         op,
         uid,
-        path: path.into(),
-        path2: path2.map(Into::into),
+        path: path.to_path_buf(),
+        path2: path2.map(Path::to_path_buf),
         success,
         error_code,
         detail: detail.map(Into::into),
@@ -488,17 +493,17 @@ pub fn log_event(
 }
 
 /// Convenience: log a successful operation.
-pub fn log_ok(op: AuditOp, uid: u32, path: &str) {
+pub fn log_ok(op: AuditOp, uid: u32, path: &Path) {
     log_event(op, uid, path, None, true, None, None);
 }
 
 /// Convenience: log a failed operation.
-pub fn log_err(op: AuditOp, uid: u32, path: &str, err: KernelError) {
+pub fn log_err(op: AuditOp, uid: u32, path: &Path, err: KernelError) {
     log_event(op, uid, path, None, false, Some(err.code()), None);
 }
 
 /// Convenience: log a two-path operation (rename, link).
-pub fn log_two_path(op: AuditOp, uid: u32, from: &str, to: &str, success: bool) {
+pub fn log_two_path(op: AuditOp, uid: u32, from: &Path, to: &Path, success: bool) {
     log_event(op, uid, from, Some(to), success, None, None);
 }
 
@@ -515,7 +520,7 @@ pub fn recent(n: usize) -> Vec<AuditEntry> {
 pub fn search(
     max: usize,
     op_filter: Option<AuditOp>,
-    path_prefix: Option<&str>,
+    path_prefix: Option<&Path>,
     uid_filter: Option<u32>,
     failures_only: bool,
 ) -> Vec<AuditEntry> {
@@ -527,7 +532,7 @@ pub fn search(
             }
         }
         if let Some(prefix) = path_prefix {
-            if !entry.path.starts_with(prefix) {
+            if !path_in_subtree(&entry.path, prefix) {
                 return false;
             }
         }

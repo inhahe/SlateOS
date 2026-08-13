@@ -52,6 +52,8 @@
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
+
+use crate::fs::path::{Path, PathBuf};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::Mutex;
@@ -145,9 +147,9 @@ pub struct InterceptContext {
     /// The operation being performed.
     pub op: FsOp,
     /// The primary path affected.
-    pub path: String,
+    pub path: PathBuf,
     /// For rename: the destination path.  For link/symlink: the target.
-    pub secondary_path: Option<String>,
+    pub secondary_path: Option<PathBuf>,
 }
 
 /// Decision returned by an interceptor.
@@ -171,7 +173,7 @@ struct Interceptor {
     /// Human-readable name for this interceptor.
     name: String,
     /// Path prefix this interceptor monitors (empty = all paths).
-    path_prefix: String,
+    path_prefix: PathBuf,
     /// Operations this interceptor cares about.
     mask: FsOpMask,
     /// The callback function.
@@ -208,7 +210,7 @@ pub struct InterceptorInfo {
     /// Name.
     pub name: String,
     /// Monitored path prefix.
-    pub path_prefix: String,
+    pub path_prefix: PathBuf,
     /// Operation mask.
     pub mask: FsOpMask,
     /// Whether active.
@@ -255,10 +257,11 @@ const MAX_INTERCEPTORS: usize = 64;
 /// Returns the interceptor ID.
 pub fn register(
     name: &str,
-    path_prefix: &str,
+    path_prefix: impl AsRef<Path>,
     mask: FsOpMask,
     handler: InterceptFn,
 ) -> KernelResult<u64> {
+    let path_prefix = path_prefix.as_ref();
     let mut inner = INTERCEPTS.lock();
 
     if inner.interceptors.len() >= MAX_INTERCEPTORS {
@@ -270,7 +273,7 @@ pub fn register(
     inner.interceptors.insert(id, Interceptor {
         id,
         name: String::from(name),
-        path_prefix: String::from(path_prefix),
+        path_prefix: path_prefix.to_path_buf(),
         mask,
         handler,
         active: true,
@@ -280,7 +283,7 @@ pub fn register(
 
     serial_println!(
         "[intercept] Registered interceptor {} '{}' (path='{}', mask={:#x})",
-        id, name, path_prefix, mask.0
+        id, name, path_prefix.display(), mask.0
     );
 
     Ok(id)
@@ -366,7 +369,7 @@ pub fn clear() {
 /// single canonical subtree predicate; the wrapper is retained for the
 /// descriptive name at the deny-check call sites and the bug-history note.
 #[inline]
-fn path_matches_prefix(path: &str, prefix: &str) -> bool {
+fn path_matches_prefix(path: &Path, prefix: &Path) -> bool {
     crate::fs::pathutil::path_in_subtree(path, prefix)
 }
 
@@ -377,7 +380,12 @@ fn path_matches_prefix(path: &str, prefix: &str) -> bool {
 /// `Err(PermissionDenied)` with the denial reason logged.
 ///
 /// When no interceptors are registered, returns immediately.
-pub fn pre_check(op: FsOp, path: &str, secondary_path: Option<&str>) -> KernelResult<()> {
+pub fn pre_check(
+    op: FsOp,
+    path: impl AsRef<Path>,
+    secondary_path: Option<&Path>,
+) -> KernelResult<()> {
+    let path = path.as_ref();
     let mut inner = INTERCEPTS.lock();
 
     // Fast path: no interceptors.
@@ -408,8 +416,8 @@ pub fn pre_check(op: FsOp, path: &str, secondary_path: Option<&str>) -> KernelRe
     // Build context.
     let ctx = InterceptContext {
         op,
-        path: String::from(path),
-        secondary_path: secondary_path.map(String::from),
+        path: path.to_path_buf(),
+        secondary_path: secondary_path.map(Path::to_path_buf),
     };
 
     for (id, handler) in &candidates {
@@ -433,7 +441,7 @@ pub fn pre_check(op: FsOp, path: &str, secondary_path: Option<&str>) -> KernelRe
                 inner.total_denials = inner.total_denials.saturating_add(1);
                 serial_println!(
                     "[intercept] DENIED: {} on '{}' by interceptor {}: {}",
-                    op.name(), path, id, reason
+                    op.name(), path.display(), id, reason
                 );
                 return Err(KernelError::PermissionDenied);
             }
@@ -445,25 +453,25 @@ pub fn pre_check(op: FsOp, path: &str, secondary_path: Option<&str>) -> KernelRe
 
 /// Convenience: pre-check for write operations.
 #[inline]
-pub fn pre_write(path: &str) -> KernelResult<()> {
+pub fn pre_write(path: impl AsRef<Path>) -> KernelResult<()> {
     pre_check(FsOp::Write, path, None)
 }
 
 /// Convenience: pre-check for delete operations.
 #[inline]
-pub fn pre_delete(path: &str) -> KernelResult<()> {
+pub fn pre_delete(path: impl AsRef<Path>) -> KernelResult<()> {
     pre_check(FsOp::Delete, path, None)
 }
 
 /// Convenience: pre-check for rename operations.
 #[inline]
-pub fn pre_rename(from: &str, to: &str) -> KernelResult<()> {
-    pre_check(FsOp::Rename, from, Some(to))
+pub fn pre_rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> KernelResult<()> {
+    pre_check(FsOp::Rename, from, Some(to.as_ref()))
 }
 
 /// Convenience: pre-check for mkdir operations.
 #[inline]
-pub fn pre_mkdir(path: &str) -> KernelResult<()> {
+pub fn pre_mkdir(path: impl AsRef<Path>) -> KernelResult<()> {
     pre_check(FsOp::Mkdir, path, None)
 }
 
@@ -496,7 +504,7 @@ pub fn audit_handler(ctx: &InterceptContext) -> InterceptDecision {
     serial_println!(
         "[audit] {} {} (secondary: {:?})",
         ctx.op.name(),
-        ctx.path,
+        ctx.path.display(),
         ctx.secondary_path
     );
     InterceptDecision::Allow

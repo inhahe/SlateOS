@@ -5945,13 +5945,38 @@ after the US sprang forward but before the EU did),
 fixed by construction: São Paulo (`<-03>3`, no DST since 2019) and Cairo
 (`EET-2EEST,M4.5.4/24,M10.5.4/24`, DST reinstated in 2023).
 
+**And so did the tool that sets the clock.** `userspace/hwclock` had the worst
+version of the shape: `named_tz_offset_hours` returned an offset in whole
+**hours**, so half-hour and quarter-hour zones were not merely stale but
+*inexpressible*. Two entries said so out loud —
+`"IST" => Some(5),  // India — note: actually +5:30, rounded to +5` and
+`"ACST" => Some(9),  // actually +9:30, rounded`. A comment admitting the clock
+is half an hour wrong is not a fix; it is a wrong clock with a footnote, in the
+one utility whose job is to set the machine's time. The table is now
+`named_tz_posix`, mapping each abbreviation to the POSIX `TZ` string that
+*defines* it (`IST-5:30`, `ACST-9:30`, `<CST>-8` for China so it cannot collide
+with US Central), and `parse_tz_offset_secs(tz, at)` resolves through
+`tzrules` **in seconds, at an instant**. It accepts three forms in order: a
+numeric offset with optional minutes (`+5:30`, `-03:30`), a known abbreviation,
+or any full POSIX rule — so `hwclock --timezone 'EST5EDT,M3.2.0,M11.1.0'` now
+reads EDT in July and EST in January off the same string, and the displayed
+label is the abbreviation the *rule* reports rather than whatever the user
+typed. `resolve_tz` takes the instant, which meant moving the RTC read above
+the zone resolution in `cmd_show` — you cannot resolve a zone before you know
+what time it is. Covered by
+`test_a_half_hour_zone_is_not_rounded_to_the_hour`,
+`test_a_numeric_offset_may_carry_minutes`,
+`test_a_bad_minute_field_is_not_silently_carried` (`+5:70` is a typo, not
+6:10 — rejected rather than invented),
+`test_a_full_posix_rule_is_evaluated_at_the_instant`,
+`test_a_quarter_hour_zone_survives` (Nepal, `<+0545>-5:45`) and
+`test_every_named_abbreviation_parses`; 32 tests pass (2026-08-13).
+
 **Still carrying the fixed-offset shape** and not yet converted:
 `kernel/src/fs/locale.rs` (see the note below), `kernel/src/fs/timezone.rs`,
-`kernel/src/fs/procfs.rs`, `kernel/src/kshell.rs`, and
-`userspace/hwclock/src/main.rs` (`named_tz_offset_hours` /
-`parse_tz_offset_hours` — an offset in whole *hours*, so it cannot even express
-Mumbai). These are lower-visibility than the clock and the picker, but they are
-the same bug and should get the same treatment.
+`kernel/src/fs/procfs.rs` and `kernel/src/kshell.rs`. These are lower-visibility
+than the clock, the picker and `hwclock`, but they are the same bug and should
+get the same treatment.
 
 **Do not wire `kernel/src/fs/locale.rs`'s `Timezone` to the clock.** It already
 exists (`LocaleConfig.timezone`, 12 registered zones, surfaced by the
@@ -37606,6 +37631,90 @@ stack-overflow storm. That is unrelated to this deadlock (different signature: a
 control-flow hijack, not a spinloop) and is tracked separately as
 **B-KNULLJUMP-SIGNAL** below. Downgrading this entry's confidence: the fix is
 validated; leaving as ROOT-CAUSED & FIXED.
+
+### B-SYSCTL-SPIN-MUTEX-PREEMPTED-HOLDER. kswapd spun forever on `sysctl::REGISTRY`, a bare `spin::Mutex` whose holder had been descheduled — 2026-08-13 — MECHANISM FIXED, TRIGGER STILL OPEN
+
+**Caught by:** the 250-boot B-KNULLJUMP soak, iteration 20 of 20
+(`build/knulljump-soak.log`; artifacts
+`build/hang-catches/soak-20260813-061906-iter20.{serial,regs,stdout}.txt`).
+19 of 20 boots were clean. **This is not B-KNULLJUMP** — that signature is
+`RIP=0x0` with `error=0x10` (a control-flow hijack). Here `RIP` is a perfectly
+real kernel address and the CPU is *executing normally*, just never finishing.
+
+**What the evidence says.** `resolve-rip.sh` on the wedged RIP and the
+rbp-chain the liveness dump walked:
+
+```
+0xffffffff80f32d56 -> core::sync::atomic::spin_loop_hint   (a bare `pause`)
+  # 0: 0xffffffff80f1ab87 -> kernel::sysctl::get
+  # 1: 0xffffffff80777ffe -> kernel::mm::kswapd::watermark_low
+  # 2: 0xffffffff80777a63 -> kernel::mm::kswapd::kswapd_entry
+  # 3: 0xffffffff807e2e79 -> task_entry_trampoline
+```
+
+All 16 RIP samples are the same instruction. The last boot-sequence line on
+serial is `[kswapd] Background page reclaimer started` — the *very next*
+statement in `kswapd_entry` is the `low_wm=…` `serial_println!`, whose first
+argument is `watermark_low()`, i.e. `sysctl::get(PARAM_MM_MIN_FREE_PAGES)`.
+kswapd wedged on its first ever sysctl read and never printed a second line.
+
+Disassembling `sysctl::get` shows the spin is an *inlined* `spin::Mutex::lock`:
+a `compare_exchange_weak` on the flag byte at `0x822cff28` (= `sysctl::REGISTRY`)
+falling into a `load` + `pause` loop. The task table confirms the other half:
+tid=0 (`prctl-batch269`, prio 31 — *higher* than kswapd's 20) sat **Ready** for
+5562 ticks and was never picked, while `ctx_switches` stayed frozen at 1573 with
+the heartbeat still climbing. So the timer was firing and the scheduler was
+refusing to switch.
+
+**Mechanism.** `kernel/src/sysctl.rs` had `use spin::Mutex;` — the *bare*
+`spin::Mutex`, not `crate::sync::Mutex`. Three consequences, all of them bad:
+
+1. **No `preempt_disable()` on acquire.** `crate::sync::Mutex::lock` disables
+   preemption for the whole hold precisely because "a spinlock must never be
+   held across a context switch". The bare lock has no such guard, so a holder
+   can be descheduled mid-update and every later caller spins on a lock whose
+   owner is Ready-but-not-running.
+2. **No stall detector.** `crate::sync::Mutex::lock_contended` prints a one-shot
+   diagnostic after `STALL_SECONDS` and keeps spinning. The bare lock spun for
+   **five minutes** and printed nothing, which is why the hang looked like a
+   silent freeze instead of naming itself.
+3. **No owner tracking.** `crate::sync::Mutex` records the holding tid so
+   `report_stall` can say *who*. The bare lock cannot, so the task table left
+   "which task holds REGISTRY?" unanswerable.
+
+**Fixed.** `sysctl::REGISTRY` is now
+`crate::sync::Mutex::named(Registry::new(), b"sysctl-reg")`. That closes the
+preempted-holder window outright and makes any future contention self-report
+with a name and an owner. `list_all()` was also allocating its `Vec` *inside*
+the critical section; with preemption now disabled for the hold that nests the
+heap allocator (and, under pressure, reclaim) under a spinlock, so the
+reservation moved above the `lock()` and the guard is explicitly dropped before
+the return. The ISR contract is unchanged: interrupt-context readers still must
+use `try_get` (see B-SYSCTL-IRQ-DEADLOCK).
+
+**Still open — what froze `ctx_switches`.** The fix removes the *mechanism* by
+which a sysctl holder could be preempted, but it does not fully explain why
+CPU 0 stopped switching at all. Two candidates remain, and the evidence to date
+cannot separate them:
+
+* a leaked `preempt_disable()` somewhere on CPU 0 (`PREEMPT_DISABLE_COUNT` is
+  **per-CPU**, so a task that voluntarily blocks while holding a tracked
+  `crate::sync::Mutex` would leave the count elevated with nobody on-CPU to
+  decrement it — preemption is then off for that CPU forever); or
+* the run queue genuinely not holding tid=0, consistent with
+  `local_has_real_work=false` printed beside a Ready prio-31 task.
+
+To tell them apart on the next catch, the liveness dump now prints
+`preempt_disable_depth=` per CPU (`kernel/src/sched/mod.rs`, from the existing
+`preempt_count(cpu)`). A non-zero depth means "the scheduler was not *allowed*
+to switch"; zero means "the scheduler *chose* not to", which is a completely
+different bug. Re-run the soak and read that field first.
+
+**Context worth keeping.** The wedged boot was also in an IRQ 11 storm
+(~600 000 IRQs/sec, four mask/cooldown cycles) and had just come through the
+OOM self-test driving memory pressure to `critical`. Whether the storm is a
+cause, a consequence, or a coincidence is unknown; it is recorded here so a
+repeat catch can be compared.
 
 ### B-KNULLJUMP-SIGNAL. Rare kernel jump to `RIP=0x0` during the tcc-signal Path-Z self-test, cascading into a kernel-stack-overflow #DF/#UD storm — DIAGNOSTICS HARDENED, ROOT-CAUSE OPEN, WATCH 2026-07-16
 

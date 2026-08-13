@@ -4,3 +4,11 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS hardware clock and time management"
 [dependencies]
+
+# The POSIX `TZ`-rule engine, shared with the libc (`posix`), the shell
+# (`userspace/oils`), the desktop shell and the world clock. `hwclock` is the
+# tool that *sets* the machine's idea of what time it is, so a zone table of
+# its own — especially one rounded to whole hours, as this used to carry — is
+# the last thing it should have. See tzrules/src/lib.rs's "Why this is a crate
+# and not a module".
+tzrules = { path = "../../tzrules" }

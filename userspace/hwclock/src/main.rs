@@ -191,51 +191,117 @@ fn unix_to_datetime_offset(secs: u64, offset_secs: i64) -> DateTime {
 // Named timezone offsets (hours from UTC)
 // ---------------------------------------------------------------------------
 
-/// Map a common timezone abbreviation to its UTC offset in hours.
-/// Returns `None` for unknown abbreviations.
-fn named_tz_offset_hours(name: &str) -> Option<i32> {
-    // This is intentionally a small, fixed list. Full Olson database support
-    // would live in a shared library; this utility only needs rough offsets.
-    match name.to_ascii_uppercase().as_str() {
-        "UTC" | "GMT" | "Z" => Some(0),
-        "EST" => Some(-5),
-        "EDT" => Some(-4),
-        "CST" => Some(-6),
-        "CDT" => Some(-5),
-        "MST" => Some(-7),
-        "MDT" => Some(-6),
-        "PST" => Some(-8),
-        "PDT" => Some(-7),
-        "AKST" => Some(-9),
-        "AKDT" => Some(-8),
-        "HST" => Some(-10),
-        "CET" => Some(1),
-        "CEST" => Some(2),
-        "EET" => Some(2),
-        "EEST" => Some(3),
-        "WET" => Some(0),
-        "WEST" => Some(1),
-        "IST" => Some(5),  // India — note: actually +5:30, rounded to +5
-        "JST" => Some(9),
-        "KST" => Some(9),
-        "CST_CN" => Some(8), // China Standard Time
-        "AEST" => Some(10),
-        "AEDT" => Some(11),
-        "ACST" => Some(9),  // actually +9:30, rounded
-        "AWST" => Some(8),
-        "NZST" => Some(12),
-        "NZDT" => Some(13),
-        _ => None,
-    }
+/// Map a common timezone abbreviation to the POSIX `TZ` string that *defines*
+/// it, so the offset is derived by `tzrules` rather than stored here.
+///
+/// Every abbreviation below names one fixed offset (`EST` is always UTC-5;
+/// `EDT` is the separate name for UTC-4), so these strings carry no DST rule —
+/// a user who wants a zone that *switches* passes the full POSIX rule instead
+/// (e.g. `EST5EDT,M3.2.0,M11.1.0`), which `parse_tz_offset_secs` accepts
+/// directly.
+///
+/// Note the inverted POSIX sign convention: `EST5` means UTC**-**5.
+fn named_tz_posix(name: &str) -> Option<&'static str> {
+    // Deliberately small. The full tzdata set belongs in a system zone
+    // database, not in a utility's source; what matters is that the entries
+    // that *are* here are exact.
+    Some(match name.to_ascii_uppercase().as_str() {
+        "UTC" | "GMT" | "Z" => "UTC0",
+        "EST" => "EST5",
+        "EDT" => "EDT4",
+        "CST" => "CST6",
+        "CDT" => "CDT5",
+        "MST" => "MST7",
+        "MDT" => "MDT6",
+        "PST" => "PST8",
+        "PDT" => "PDT7",
+        "AKST" => "AKST9",
+        "AKDT" => "AKDT8",
+        "HST" => "HST10",
+        "CET" => "CET-1",
+        "CEST" => "CEST-2",
+        "EET" => "EET-2",
+        "EEST" => "EEST-3",
+        "WET" => "WET0",
+        "WEST" => "WEST-1",
+        // India is +5:30. The old table rounded this to +5 and said so in a
+        // comment, which made every Indian `hwclock` reading half an hour
+        // early — a comment is not a fix.
+        "IST" => "IST-5:30",
+        "JST" => "JST-9",
+        "KST" => "KST-9",
+        "CST_CN" => "<CST>-8", // China Standard Time, distinct from US Central
+        "AEST" => "AEST-10",
+        "AEDT" => "AEDT-11",
+        "ACST" => "ACST-9:30", // also previously rounded, to +9
+        "ACDT" => "ACDT-10:30",
+        "AWST" => "AWST-8",
+        "NZST" => "NZST-12",
+        "NZDT" => "NZDT-13",
+        _ => return None,
+    })
 }
 
-/// Parse a timezone string: either a named abbreviation (e.g. "EST") or a
-/// signed integer offset in hours (e.g. "+5", "-8").
-fn parse_tz_offset_hours(tz: &str) -> Result<i32, String> {
-    if let Some(h) = named_tz_offset_hours(tz) {
-        return Ok(h);
+/// Parse a user-supplied `--timezone` value into an offset **in seconds** at
+/// the given instant.
+///
+/// Accepts, in order:
+///
+/// 1. A signed numeric offset in the *user-facing* sign convention, in hours
+///    or hours:minutes — `+5`, `-8`, `+5:30`, `-03:30`. `+5` means UTC+5.
+/// 2. A known abbreviation from [`named_tz_posix`] — `EST`, `IST`, `NZDT`.
+/// 3. Any full POSIX `TZ` string, including one with a DST rule —
+///    `EST5EDT,M3.2.0,M11.1.0`, `<+0545>-5:45`.
+///
+/// Seconds, not hours: half-hour (India, +5:30) and quarter-hour (Nepal,
+/// +5:45) zones exist and a whole-hour offset simply cannot express them.
+///
+/// `at` is the UTC epoch instant the offset is wanted for. It matters for
+/// case 3, where the rule may put the zone on either side of a transition.
+fn parse_tz_offset_secs(tz: &str, at: i64) -> Result<i32, String> {
+    if let Some(secs) = parse_numeric_offset(tz) {
+        return Ok(secs);
     }
-    tz.parse::<i32>().map_err(|_| format!("unknown timezone: {tz}"))
+    let posix = named_tz_posix(tz).unwrap_or(tz);
+    tzrules::Tz::parse(posix.as_bytes())
+        .map(|rule| rule.lookup(at).gmtoff)
+        .ok_or_else(|| format!("unknown timezone: {tz}"))
+}
+
+/// Parse `+5`, `-8`, `+5:30`, `-03:30`, `0` into seconds east of UTC.
+///
+/// Returns `None` if the string is not a bare numeric offset, so the caller
+/// can fall through to the named/POSIX paths. A bare `5` (no sign) is accepted
+/// as `+5`, matching the old behaviour.
+fn parse_numeric_offset(tz: &str) -> Option<i32> {
+    let (negative, rest) = match tz.as_bytes().first() {
+        Some(b'-') => (true, tz.get(1..)?),
+        Some(b'+') => (false, tz.get(1..)?),
+        _ => (false, tz),
+    };
+    let (h_str, m_str) = match rest.split_once(':') {
+        Some((h, m)) => (h, m),
+        None => (rest, "0"),
+    };
+    let hours: i32 = h_str.parse().ok()?;
+    let minutes: i32 = m_str.parse().ok()?;
+    // A minute field is a minute field; `+5:70` is a typo, not 6:10.
+    if hours < 0 || !(0..60).contains(&minutes) {
+        return None;
+    }
+    let magnitude = hours.checked_mul(3600)?.checked_add(minutes.checked_mul(60)?)?;
+    Some(if negative { -magnitude } else { magnitude })
+}
+
+/// Render an offset in seconds as `UTC+05:30` / `UTC-08:00` / `UTC`.
+fn format_offset_label(secs: i32) -> String {
+    if secs == 0 {
+        return "UTC".to_string();
+    }
+    let sign = if secs < 0 { '-' } else { '+' };
+    let total_minutes = secs.unsigned_abs() / 60;
+    let (hours, minutes) = (total_minutes / 60, total_minutes % 60);
+    format!("UTC{sign}{hours:02}:{minutes:02}")
 }
 
 // ---------------------------------------------------------------------------
@@ -726,24 +792,24 @@ fn parse_args() -> Result<Options, String> {
 fn cmd_show(opts: &Options) -> Result<(), String> {
     let rtc = read_rtc()?;
 
-    let (tz_label, offset_hours) = resolve_tz(opts);
-    let offset_secs = i64::from(offset_hours) * 3600;
+    // The RTC reads UTC, so it is the instant the zone rule must be evaluated
+    // at — resolve the zone *after* we know what time it is, not before.
+    let unix = datetime_to_unix(&rtc)?;
+    let (tz_label, offset_secs) = resolve_tz(opts, i64::try_from(unix).unwrap_or(i64::MAX));
 
     // The RTC value is in UTC (unless --localtime, which we treat as
     // already adjusted). Convert to the display timezone.
     let display = if opts.utc {
-        let unix = datetime_to_unix(&rtc)?;
-        unix_to_datetime_offset(unix, offset_secs)
+        unix_to_datetime_offset(unix, i64::from(offset_secs))
     } else {
         // localtime mode: the RTC already represents wall-clock time in the
         // local timezone. For --timezone display, convert from local to UTC
         // first, then to the target timezone.
-        if offset_hours == 0 {
+        if offset_secs == 0 {
             rtc.clone()
         } else {
-            let unix = datetime_to_unix(&rtc)?;
             // Assume local = system default (offset 0 if unknown).
-            unix_to_datetime_offset(unix, offset_secs)
+            unix_to_datetime_offset(unix, i64::from(offset_secs))
         }
     };
 
@@ -779,43 +845,55 @@ fn cmd_ntp(server: &str, opts: &Options) -> Result<(), String> {
     let unix = ntp_query(server)?;
     let utc_dt = unix_to_datetime(unix);
 
-    let (tz_label, offset_hours) = resolve_tz(opts);
-    let offset_secs = i64::from(offset_hours) * 3600;
-    let display = unix_to_datetime_offset(unix, offset_secs);
+    let (tz_label, offset_secs) = resolve_tz(opts, i64::try_from(unix).unwrap_or(i64::MAX));
+    let display = unix_to_datetime_offset(unix, i64::from(offset_secs));
 
     println!("NTP time: {}", format_display(&display, &tz_label));
 
     // Also show UTC if a non-UTC timezone was requested.
-    if offset_hours != 0 {
+    if offset_secs != 0 {
         println!("     UTC: {}", format_display(&utc_dt, "UTC"));
     }
 
     Ok(())
 }
 
-/// Determine the timezone label and offset-hours for display.
-fn resolve_tz(opts: &Options) -> (String, i32) {
-    if let Some(ref tz) = opts.timezone {
-        match parse_tz_offset_hours(tz) {
-            Ok(h) => {
-                let label = if named_tz_offset_hours(tz).is_some() {
-                    tz.to_ascii_uppercase()
-                } else if h >= 0 {
-                    format!("UTC+{h}")
-                } else {
-                    format!("UTC{h}")
-                };
-                (label, h)
-            }
-            Err(_) => {
-                eprintln!("warning: unknown timezone '{tz}', using UTC");
-                ("UTC".to_string(), 0)
-            }
+/// Determine the timezone label and offset **in seconds** for display.
+///
+/// `at` is the UTC epoch instant being displayed: a zone given as a full POSIX
+/// rule is on one side or the other of a transition depending on it, so the
+/// offset cannot be resolved without knowing *when*.
+fn resolve_tz(opts: &Options, at: i64) -> (String, i32) {
+    let Some(ref tz) = opts.timezone else {
+        return if opts.utc {
+            ("UTC".to_string(), 0)
+        } else {
+            ("localtime".to_string(), 0)
+        };
+    };
+    match parse_tz_offset_secs(tz, at) {
+        Ok(secs) => {
+            // Prefer the abbreviation the *rule* reports at this instant over
+            // whatever the user typed: passing `EST5EDT,M3.2.0,M11.1.0` in
+            // July should print EDT, not the whole rule string.
+            let label = if parse_numeric_offset(tz).is_some() {
+                format_offset_label(secs)
+            } else {
+                let posix = named_tz_posix(tz).unwrap_or(tz);
+                tzrules::Tz::parse(posix.as_bytes()).map_or_else(
+                    || format_offset_label(secs),
+                    |rule| {
+                        String::from_utf8_lossy(rule.lookup(at).name.as_bytes())
+                            .into_owned()
+                    },
+                )
+            };
+            (label, secs)
         }
-    } else if opts.utc {
-        ("UTC".to_string(), 0)
-    } else {
-        ("localtime".to_string(), 0)
+        Err(_) => {
+            eprintln!("warning: unknown timezone '{tz}', using UTC");
+            ("UTC".to_string(), 0)
+        }
     }
 }
 
@@ -999,29 +1077,114 @@ mod tests {
 
     // -- Named timezones ----------------------------------------------------
 
+    /// 2024-07-15 12:00 UTC — northern summer, southern winter.
+    const NOON_JUL: i64 = 1_721_044_800;
+    /// 2024-01-15 12:00 UTC — the other side of every transition.
+    const NOON_JAN: i64 = 1_705_320_000;
+
     #[test]
     fn test_known_tz() {
-        assert_eq!(named_tz_offset_hours("UTC"), Some(0));
-        assert_eq!(named_tz_offset_hours("EST"), Some(-5));
-        assert_eq!(named_tz_offset_hours("JST"), Some(9));
+        assert_eq!(parse_tz_offset_secs("UTC", NOON_JUL).unwrap(), 0);
+        assert_eq!(parse_tz_offset_secs("EST", NOON_JUL).unwrap(), -5 * 3600);
+        assert_eq!(parse_tz_offset_secs("JST", NOON_JUL).unwrap(), 9 * 3600);
     }
 
     #[test]
     fn test_unknown_tz() {
-        assert_eq!(named_tz_offset_hours("XYZZY"), None);
+        assert!(named_tz_posix("XYZZY").is_none());
+        assert!(parse_tz_offset_secs("XYZZY", NOON_JUL).is_err());
     }
 
     #[test]
     fn test_parse_tz_numeric() {
-        assert_eq!(parse_tz_offset_hours("+5").unwrap(), 5);
-        assert_eq!(parse_tz_offset_hours("-8").unwrap(), -8);
-        assert_eq!(parse_tz_offset_hours("0").unwrap(), 0);
+        assert_eq!(parse_tz_offset_secs("+5", NOON_JUL).unwrap(), 5 * 3600);
+        assert_eq!(parse_tz_offset_secs("-8", NOON_JUL).unwrap(), -8 * 3600);
+        assert_eq!(parse_tz_offset_secs("0", NOON_JUL).unwrap(), 0);
     }
 
     #[test]
     fn test_parse_tz_named() {
-        assert_eq!(parse_tz_offset_hours("PST").unwrap(), -8);
-        assert_eq!(parse_tz_offset_hours("cet").unwrap(), 1);
+        assert_eq!(parse_tz_offset_secs("PST", NOON_JUL).unwrap(), -8 * 3600);
+        assert_eq!(parse_tz_offset_secs("cet", NOON_JUL).unwrap(), 3600);
+    }
+
+    #[test]
+    fn test_a_half_hour_zone_is_not_rounded_to_the_hour() {
+        // The whole point of moving off `offset_hours`. India is +5:30, and the
+        // old table stored +5 with a comment admitting it — half an hour wrong
+        // for every reading.
+        assert_eq!(
+            parse_tz_offset_secs("IST", NOON_JUL).unwrap(),
+            5 * 3600 + 1800
+        );
+        assert_eq!(
+            parse_tz_offset_secs("ACST", NOON_JUL).unwrap(),
+            9 * 3600 + 1800
+        );
+    }
+
+    #[test]
+    fn test_a_numeric_offset_may_carry_minutes() {
+        assert_eq!(parse_numeric_offset("+5:30"), Some(5 * 3600 + 1800));
+        assert_eq!(parse_numeric_offset("-03:30"), Some(-(3 * 3600 + 1800)));
+        assert_eq!(parse_numeric_offset("+5:45"), Some(5 * 3600 + 2700));
+    }
+
+    #[test]
+    fn test_a_bad_minute_field_is_not_silently_carried() {
+        // `+5:70` is a typo. Accepting it as 6:10 would invent a zone.
+        assert_eq!(parse_numeric_offset("+5:70"), None);
+        assert_eq!(parse_numeric_offset("+5:xx"), None);
+        assert_eq!(parse_numeric_offset("EST"), None);
+    }
+
+    #[test]
+    fn test_a_full_posix_rule_is_evaluated_at_the_instant() {
+        // US Eastern with its real DST rule reads EDT in July and EST in
+        // January — the same string, two different offsets.
+        let eastern = "EST5EDT,M3.2.0,M11.1.0";
+        assert_eq!(parse_tz_offset_secs(eastern, NOON_JUL).unwrap(), -4 * 3600);
+        assert_eq!(parse_tz_offset_secs(eastern, NOON_JAN).unwrap(), -5 * 3600);
+    }
+
+    #[test]
+    fn test_a_quarter_hour_zone_survives() {
+        // Nepal, +5:45, expressible only as a POSIX angle-bracket name.
+        assert_eq!(
+            parse_tz_offset_secs("<+0545>-5:45", NOON_JUL).unwrap(),
+            5 * 3600 + 2700
+        );
+    }
+
+    #[test]
+    fn test_every_named_abbreviation_parses() {
+        // A typo in the table above is a typo, and the right place to catch a
+        // typo is a failing test rather than a wrong clock on a running system.
+        for name in [
+            "UTC", "GMT", "Z", "EST", "EDT", "CST", "CDT", "MST", "MDT", "PST",
+            "PDT", "AKST", "AKDT", "HST", "CET", "CEST", "EET", "EEST", "WET",
+            "WEST", "IST", "JST", "KST", "CST_CN", "AEST", "AEDT", "ACST",
+            "ACDT", "AWST", "NZST", "NZDT",
+        ] {
+            let posix = named_tz_posix(name)
+                .unwrap_or_else(|| panic!("{name} missing from the table"));
+            let rule = tzrules::Tz::parse(posix.as_bytes())
+                .unwrap_or_else(|| panic!("{name} → {posix:?} does not parse"));
+            // These are fixed-offset names by construction; none may shift.
+            assert_eq!(
+                rule.lookup(NOON_JUL).gmtoff,
+                rule.lookup(NOON_JAN).gmtoff,
+                "{name} should be a fixed offset"
+            );
+        }
+    }
+
+    #[test]
+    fn test_offset_label_formatting() {
+        assert_eq!(format_offset_label(0), "UTC");
+        assert_eq!(format_offset_label(5 * 3600 + 1800), "UTC+05:30");
+        assert_eq!(format_offset_label(-8 * 3600), "UTC-08:00");
+        assert_eq!(format_offset_label(-(3 * 3600 + 1800)), "UTC-03:30");
     }
 
     // -- DateTime parsing ---------------------------------------------------

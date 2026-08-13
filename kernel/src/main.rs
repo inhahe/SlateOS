@@ -4529,6 +4529,21 @@ extern "C" fn kernel_main() -> ! {
     if let Err(e) = fs::mount_ns::self_test() {
         serial_println!("WARNING: Mount namespace self-test failed: {:?}", e);
     }
+    // Locale and timezone. Both self-tests existed but were never called from
+    // anywhere — a test that never runs is not a test, and these two are the
+    // only coverage the kernel's POSIX `TZ` rule evaluation has.
+    if let Err(e) = fs::locale::self_test() {
+        serial_println!("WARNING: Locale self-test failed: {:?}", e);
+    }
+    if let Err(e) = fs::timezone::self_test() {
+        serial_println!("WARNING: Timezone self-test failed: {:?}", e);
+    }
+    // Both self-tests end by clearing their tables, so populate them after.
+    // Without this the zone database stays empty until someone types
+    // `locale init` at the kernel shell, and every offset query answers 0 —
+    // i.e. the kernel silently believes it is in UTC.
+    fs::locale::init_defaults();
+    fs::timezone::init_defaults();
 
     // Run cryptographic self-tests.
     if let Err(e) = crypto::self_test() {

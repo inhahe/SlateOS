@@ -5972,24 +5972,61 @@ what time it is. Covered by
 `test_a_quarter_hour_zone_survives` (Nepal, `<+0545>-5:45`) and
 `test_every_named_abbreviation_parses`; 32 tests pass (2026-08-13).
 
-**Still carrying the fixed-offset shape** and not yet converted:
-`kernel/src/fs/locale.rs` (see the note below), `kernel/src/fs/timezone.rs`,
-`kernel/src/fs/procfs.rs` and `kernel/src/kshell.rs`. These are lower-visibility
-than the clock, the picker and `hwclock`, but they are the same bug and should
-get the same treatment.
+**And so did the kernel's own two zone tables.** `kernel/src/fs/locale.rs` and
+`kernel/src/fs/timezone.rs` were the last instances of the shape, and they are
+the ones the note below said to leave alone until they carried rules. They do
+now: `Timezone` and `TzEntry` each hold a `posix_tz: String` and derive
+everything else (`offset_minutes_at`, `is_dst_at`, `abbrev_at`,
+`observes_dst`, and — for the richer `TzEntry` — `std_offset_min`,
+`dst_offset_min`, `std_abbrev`, `dst_abbrev`) by evaluating it. `tzrules` is a
+kernel dependency now; it is `no_std`, allocation-free and dependency-free, so
+linking it costs the kernel nothing but means the kernel and userspace cannot
+disagree about what time it is (2026-08-13).
 
-**Do not wire `kernel/src/fs/locale.rs`'s `Timezone` to the clock.** It already
-exists (`LocaleConfig.timezone`, 12 registered zones, surfaced by the
-`locale`/`lcl` command and `/proc/locale`) and looks like the answer, but it is
-a *settings-UI registry*, not a time engine: it carries an IANA `id`, a single
-fixed `utc_offset_min`, and an `observes_dst: bool` — a flag saying DST happens
-somewhere in the year, with no rule for *when*. Computing local time from it
-would be wrong on one side of every transition, and wrong by a whole hour for
-half the year on whichever side you picked. The two are different notions of
-"timezone" that happen to share a name. When the system default zone is
-implemented, `LocaleConfig.timezone` should become a *label* that selects a
-TZif/POSIX rule for `tzrules` to evaluate — never an offset that anything adds
-to a timestamp itself.
+Three things fell out of that conversion that were bugs in their own right:
+
+- **`timezone_info()` hardcoded `dst_active: false`**, with the comment
+  "Simplified: DST detection would need actual date logic". `TzEntry` already
+  stored `dst_offset_min` and `dst_abbrev`, so the table *knew* a zone had two
+  states and had nothing that could choose between them — every DST zone read
+  as standard time all year round. It is computed from the rule now, and the
+  self-test asserts EST/EDT (and Auckland's opposite-season NZDT/NZST) at a
+  January and a July instant.
+- **Three print paths used kernel floating point.** `procfs.rs`'s
+  `/proc/locale` and both `kshell` timezone commands formatted the offset as
+  `offset_minutes as f32 / 60.0`, which rendered India as `UTC+5.5` and pulled
+  SSE register state into a kernel print path. All now go through
+  `locale::format_utc_offset`, which is integer-only and prints `+05:30`.
+  `kshell`'s `tzlist` also had a hand-rolled sign/hour/minute split that
+  printed `-5:00` unpadded (the minus ate the `{:02}` field width) and would
+  have mangled a negative half-hour zone outright.
+- **`locale::self_test()` and `timezone::self_test()` were never called from
+  anywhere.** Both were complete, both were dead code — a test that never runs
+  is not a test. They are wired into the boot self-test battery in `main.rs`
+  now, immediately after `fs::mount_ns::self_test()`. Related: because both end
+  by calling `clear_all()` and nothing outside `kshell` called
+  `init_defaults()`, the kernel's zone database was *empty* at boot until
+  someone typed `locale init` at the kernel shell — so every offset query
+  silently answered 0, i.e. the kernel believed it was in UTC. `main.rs` now
+  calls both `init_defaults()` after the self-tests.
+
+Two rows were also factually stale in the same way the world clock's were: São
+Paulo (Brazil abolished DST in 2019; the entry still said `BRT` with equal
+std/DST offsets, which recorded the fact without being able to act on it) and
+Dubai (tzdata prints `+04`, not `GST`).
+
+**Historical note — why this table was previously off-limits.** The advice used
+to be: *do not wire `kernel/src/fs/locale.rs`'s `Timezone` to the clock.* It
+already existed (`LocaleConfig.timezone`, 12 registered zones, surfaced by the
+`locale`/`lcl` command and `/proc/locale`) and looked like the answer, but it
+was a *settings-UI registry*, not a time engine — an IANA `id`, a single fixed
+`utc_offset_min`, and an `observes_dst: bool` recording that DST happens
+somewhere in the year with no rule for *when*. Computing local time from it
+would have been wrong on one side of every transition, and wrong by a whole
+hour for half the year on whichever side you picked. The prescribed fix was
+that `LocaleConfig.timezone` should become a *label* that selects a POSIX rule
+for `tzrules` to evaluate, never an offset anything adds to a timestamp itself.
+That is exactly what it is now, so the warning is retired.
 
 ---
 

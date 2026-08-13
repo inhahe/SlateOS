@@ -5899,7 +5899,12 @@ fn gen_locale() -> Vec<u8> {
     out.push_str(&format!("Time:          {}\n", cfg.time_format.label()));
     out.push_str(&format!("First day:     {}\n", cfg.first_day.label()));
     out.push_str(&format!("Measurement:   {}\n", cfg.measurement.label()));
-    out.push_str(&format!("Timezone:      {} (UTC{:+})\n", cfg.timezone, super::locale::timezone_offset_minutes() as f32 / 60.0));
+    // Integer formatting, and the offset evaluated *now*. This used to be
+    // `offset_minutes as f32 / 60.0`, which printed `UTC+5.5` for India and
+    // dragged floating point — and therefore SSE register state — into a
+    // kernel print path.
+    out.push_str(&format!("Timezone:      {} (UTC{})\n", cfg.timezone,
+        super::locale::format_utc_offset(super::locale::timezone_offset_minutes())));
     out.push_str(&format!("Paper:         {}\n", if cfg.paper_a4 { "A4" } else { "Letter" }));
     out.push_str(&format!("Languages:     {}\n", lang_count));
     out.push_str(&format!("Timezones:     {}\n", tz_count));

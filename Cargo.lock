@@ -4960,6 +4960,7 @@ dependencies = [
  "netipc",
  "netring",
  "spin",
+ "tzrules",
 ]
 
 [[package]]

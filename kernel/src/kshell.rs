@@ -20778,10 +20778,18 @@ fn cmd_locale(args: &str) {
         "time" => { if let Some(fmt) = parts.get(1).and_then(|s| locale::TimeFormat::from_str(s)) { locale::set_time_format(fmt); shell_println!("Time: {}", fmt.label()); } else { shell_println!("Time: {} (12/24)", locale::config().time_format.label()); } }
         "firstday" => { if let Some(d) = parts.get(1).and_then(|s| locale::FirstDay::from_str(s)) { locale::set_first_day(d); shell_println!("First day: {}", d.label()); } else { shell_println!("First day: {} (sun/mon/sat)", locale::config().first_day.label()); } }
         "measure" => { if let Some(m) = parts.get(1).and_then(|s| locale::MeasurementSystem::from_str(s)) { locale::set_measurement(m); shell_println!("Measurement: {}", m.label()); } else { shell_println!("Measurement: {} (metric/imperial)", locale::config().measurement.label()); } }
-        "tz" | "timezone" => { let id = parts.get(1).copied().unwrap_or(""); if id.is_empty() { let cfg = locale::config(); shell_println!("Timezone: {} (UTC{:+})", cfg.timezone, locale::timezone_offset_minutes() as f32 / 60.0); } else { match locale::set_timezone(id) { Ok(()) => shell_println!("Timezone: {} (UTC{:+})", id, locale::timezone_offset_minutes() as f32 / 60.0), Err(e) => shell_println!("Error: {:?}", e), } } }
+        // The offset is resolved at the current instant and printed with
+        // integer arithmetic. It used to be `offset_minutes as f32 / 60.0`,
+        // which rendered India as `UTC+5.5` and pulled floating point into a
+        // kernel print path.
+        "tz" | "timezone" => { let id = parts.get(1).copied().unwrap_or(""); if id.is_empty() { let cfg = locale::config(); shell_println!("Timezone: {} (UTC{})", cfg.timezone, locale::format_utc_offset(locale::timezone_offset_minutes())); } else { match locale::set_timezone(id) { Ok(()) => shell_println!("Timezone: {} (UTC{})", id, locale::format_utc_offset(locale::timezone_offset_minutes())), Err(e) => shell_println!("Error: {:?}", e), } } }
         "paper" => { match parts.get(1).copied().unwrap_or("") { "a4" | "A4" => { locale::set_paper_a4(true); shell_println!("Paper: A4"); } "letter" | "Letter" => { locale::set_paper_a4(false); shell_println!("Paper: Letter"); } _ => { shell_println!("Paper: {} (a4/letter)", if locale::config().paper_a4 {"A4"} else {"Letter"}); } } }
         "langs" | "languages" => { let langs = locale::list_languages(); if langs.is_empty() { shell_println!("No languages"); } else { for l in &langs { shell_println!("  {} — {} ({})", l.tag, l.native_name, l.english_name); } } }
-        "tzlist" | "timezones" => { let tzs = locale::list_timezones(); if tzs.is_empty() { shell_println!("No timezones"); } else { for t in &tzs { shell_println!("  {} — {} UTC{:+}{}", t.id, t.display_name, t.utc_offset_min as f32 / 60.0, if t.observes_dst {" (DST)"} else {""}); } } }
+        // One instant for the whole listing, so the table cannot straddle a
+        // transition mid-print. `(DST)` now means "shifted right now", and the
+        // trailing `*` marks a zone that observes DST at all — two different
+        // facts the old single `observes_dst` column conflated.
+        "tzlist" | "timezones" => { let tzs = locale::list_timezones(); if tzs.is_empty() { shell_println!("No timezones"); } else { let now = locale::now_utc_secs(); for t in &tzs { shell_println!("  {} — {} {} UTC{}{}{}", t.id, t.display_name, t.abbrev_at(now), locale::format_utc_offset(t.offset_minutes_at(now)), if t.is_dst_at(now) {" (DST)"} else {""}, if t.observes_dst() {" *"} else {""}); } } }
         "show" | "config" => { let cfg = locale::config(); shell_println!("Lang:{} Region:{} Num:{} Date:{}{} Time:{} Day1:{} Measure:{} TZ:{} Paper:{} Currency:{}", cfg.language, cfg.region_format, cfg.number_format.label(), cfg.date_order.label(), cfg.date_separator.label(), cfg.time_format.label(), cfg.first_day.label(), cfg.measurement.label(), cfg.timezone, if cfg.paper_a4 {"A4"} else {"Letter"}, cfg.currency_symbol); }
         "init" => { locale::init_defaults(); shell_println!("Default locale settings initialized"); }
         "test" => { match locale::self_test() { Ok(()) => shell_println!("All locale tests passed"), Err(e) => shell_println!("Test failed: {:?}", e), } }
@@ -21493,6 +21501,9 @@ fn cmd_installer(args: &str) {
 /// `timezone` / `tz` — timezone and system clock settings.
 fn cmd_timezone(args: &str) {
     use crate::fs::timezone;
+    // The one integer offset formatter, shared with the locale table so the
+    // two never drift into printing offsets differently.
+    use crate::fs::locale;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -21516,12 +21527,22 @@ fn cmd_timezone(args: &str) {
             let region = parts.get(1).copied().unwrap_or("");
             let tzs = timezone::list_timezones(region);
             if tzs.is_empty() { shell_println!("No timezones{}", if region.is_empty() { "" } else { " in region" }); return; }
-            shell_println!("{:<28} {:<8} {:<6} {}", "NAME", "OFFSET", "ABBR", "DISPLAY");
+            // STD is the zone's standard offset, NOW the one actually in
+            // effect — they differ for exactly the zones the old fixed-offset
+            // table could never describe. The hand-rolled sign/hour/minute
+            // split this replaces printed `-5:00` (unpadded, because the minus
+            // ate the field width) and would have mangled a negative
+            // half-hour zone outright.
+            let now = locale::now_utc_secs();
+            shell_println!("{:<28} {:<8} {:<8} {:<6} {}", "NAME", "STD", "NOW", "ABBR", "DISPLAY");
             for t in &tzs {
-                let sign = if t.std_offset_min >= 0 { "+" } else { "" };
-                let h = t.std_offset_min / 60;
-                let m = (t.std_offset_min % 60).unsigned_abs();
-                shell_println!("{:<28} {}{:02}:{:02}  {:<6} {}", t.name, sign, h, m, t.std_abbrev, t.display_name);
+                shell_println!("{:<28} {:<8} {:<8} {:<6} {}{}",
+                    t.name,
+                    locale::format_utc_offset(t.std_offset_min()),
+                    locale::format_utc_offset(t.offset_minutes_at(now)),
+                    t.abbrev_at(now),
+                    t.display_name,
+                    if t.is_dst_at(now) { " (DST)" } else { "" });
             }
         }
         "regions" => {

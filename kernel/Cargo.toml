@@ -17,6 +17,13 @@ netipc = { path = "../netipc" }
 # Acquire/Release SQ/CQ index accesses the forbid-unsafe netipc can't host; the
 # daemon links the same crate, so the ring memory-ordering logic lives once.
 netring = { path = "../netring" }
+# The POSIX `TZ`-rule engine, shared with the libc (`posix`), the shell
+# (`oils`), the desktop shell, the world clock and `hwclock`. The kernel's
+# locale/timezone tables used to store a fixed `utc_offset_min`, which cannot
+# express a DST zone at all; linking the one shared engine is what stops the
+# kernel from disagreeing with userspace about what time it is. no_std,
+# allocation-free and dependency-free, so it builds for the bare-metal target.
+tzrules = { path = "../tzrules" }
 
 [lints]
 workspace = true

@@ -110,12 +110,37 @@ between iterations (RIP stays on the prefix so it can resume), so the window is
 *proportional to the copy length*. A large overlapping memmove is a wide open
 door for a timer tick.
 
-**Still unproven: that this is what actually causes B-KNULLJUMP.** What is
-established is that (a) the kernel entered with whatever DF ring 3 had, and (b)
-ring-3 glibc demonstrably sets DF for interruptible, length-proportional
-windows. What is *not* established is that the observed corruption came through
-this path rather than another. The bug above is worth fixing on its own terms
-regardless. If B-KNULLJUMP survives this fix, the hypothesis is disproved.
+**And the corruption *class* matches, not just the timing.** B-KNULLJUMP is
+specifically a jump through a **null** code pointer (`RIP=0x0`, `error=0x10` —
+kernel instruction fetch of a not-present page). That is exactly what a
+backwards `memset` manufactures. Most `memset`s in Rust code are *zero* fills —
+`vec![0; n]`, `MaybeUninit::zeroed`, `Default`-style struct initialisation, a
+cleared buffer — and a zero fill running backwards writes zeros over
+`[dst - n, dst)`, i.e. it zeroes whatever object happens to sit immediately
+*before* the buffer being cleared. Any function pointer in that region becomes
+null, and the next call through it lands at `0x0`.
+
+So the hypothesised chain is fully concrete:
+
+1. ring 3 calls `memmove` with an overlapping forward shift → `std`,
+2. a timer tick lands inside the length-proportional `rep movsb` window,
+3. the kernel is entered with DF = 1 (no `cld` at the gate),
+4. any zeroing `memset` on that path clears the memory *before* its buffer,
+5. a callback/vtable/return-address slot in that memory becomes null,
+6. the kernel later calls through it → `RIP=0x0`.
+
+Step 6 is B-KNULLJUMP's exact observed signature, and steps 1–3 are now
+established fact rather than conjecture.
+
+**Still unproven: that this is what actually happened.** What is established is
+that (a) the kernel entered with whatever DF ring 3 had, (b) ring-3 glibc
+demonstrably sets DF for interruptible, length-proportional windows, and (c) the
+resulting corruption primitive produces precisely the observed failure class.
+What is *not* established is that the one caught instance came through this path
+rather than another — a use-after-free on a callback pointer, the original
+suspicion recorded in `B-KNULLJUMP-SIGNAL`, produces the same signature and
+remains possible. The bug above is worth fixing on its own terms regardless. If
+B-KNULLJUMP survives this fix, the hypothesis is disproved.
 
 **Note the asymmetry that hid this.** The SYSCALL path was already correct:
 `kernel/src/syscall/entry.rs` programs `IA32_FMASK` bit 10, so the CPU clears DF

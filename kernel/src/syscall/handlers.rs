@@ -81,6 +81,38 @@ const XATTR_NAME_MAX: usize = 255;
 /// Largest extended-attribute value accepted, matching Linux's `XATTR_SIZE_MAX`.
 const XATTR_SIZE_MAX: usize = 65536;
 
+/// Longest human-readable reason accepted by `SYS_CAP_REQUEST`.
+///
+/// A rejection limit: the string is shown to the human deciding whether to
+/// grant the capability, so clipping it would let a request read as more
+/// innocuous than it is.
+const CAP_REASON_MAX: usize = 256;
+
+/// Bytes consumed per `SYS_DEBUG_PRINT` call.
+///
+/// Unlike [`PATH_MAX`] this *is* a clamp, and legitimately so: the handler
+/// returns the number of bytes it consumed, so a longer message is a short
+/// write the caller loops on — the `write(2)` contract — not a lost one.
+const DEBUG_PRINT_MAX: usize = 1024;
+
+/// Bytes consumed per console-write call.  Same short-write contract as
+/// [`DEBUG_PRINT_MAX`].
+const CONSOLE_WRITE_MAX: usize = 4096;
+
+/// Largest `SYS_LOG_READ` buffer accepted.
+///
+/// The whole capacity becomes a kernel scratch allocation, so this bounds what
+/// one caller can make the kernel reserve; 1 MiB is far more than the log ring
+/// itself holds.
+const LOG_READ_MAX: usize = 1024 * 1024;
+
+/// Largest `SYS_FS_READDIR_AT` output buffer accepted.
+///
+/// The capacity becomes a kernel scratch allocation, so it is bounded; 1 MiB
+/// holds several thousand directory entries, well past any single page of a
+/// paginated listing.
+const READDIR_BUF_MAX: usize = 1024 * 1024;
+
 /// Copy a path argument out of user space into a kernel `String`.
 ///
 /// `String::from_utf8` consumes the `Vec` in place, so this is one allocation,
@@ -401,33 +433,29 @@ pub fn sys_task_id(args: &SyscallArgs) -> SyscallResult {
 
 /// `SYS_DEBUG_PRINT` — print a byte string to serial (debug only).
 ///
-/// # Safety contract
+/// `arg0`: pointer to the bytes.  `arg1`: length.
 ///
-/// `arg0` must be a valid pointer to `arg1` bytes of readable memory.
-/// For now (kernel-mode testing), we trust the pointer.  When
-/// userspace is implemented, this must validate the pointer against
-/// the caller's address space.
+/// Returns the number of bytes consumed, which may be less than `arg1`: the
+/// per-call cap is [`DEBUG_PRINT_MAX`].
 pub fn sys_debug_print(args: &SyscallArgs) -> SyscallResult {
-    let ptr = args.arg0 as *const u8;
     let len = args.arg1 as usize;
 
-    if ptr.is_null() || len == 0 {
+    if args.arg0 == 0 || len == 0 {
         return SyscallResult::ok(0);
     }
 
-    // Cap length to prevent excessive output.
-    let safe_len = len.min(1024);
+    // A *short write*, not a silent truncation: the return value tells the
+    // caller how much was consumed, exactly as `write(2)` does, so a longer
+    // message is printed by looping rather than quietly lost.
+    let safe_len = len.min(DEBUG_PRINT_MAX);
 
-    // Validate the user buffer is in user space and mapped.
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, safe_len) {
-        return SyscallResult::err(e);
-    }
+    let bytes = match crate::mm::user::read_user_vec(args.arg0, safe_len, DEBUG_PRINT_MAX) {
+        Ok(b) => b,
+        Err(e) => return SyscallResult::err(e),
+    };
 
-    // SAFETY: Buffer validated above — in user space and mapped.
-    let bytes = unsafe { core::slice::from_raw_parts(ptr, safe_len) };
-
-    // Print as UTF-8 if valid, otherwise as hex.
-    if let Ok(s) = core::str::from_utf8(bytes) {
+    // Print as UTF-8 if valid, otherwise report the size.
+    if let Ok(s) = core::str::from_utf8(&bytes) {
         serial_println!("[debug] {}", s);
     } else {
         serial_println!("[debug] <{} non-UTF8 bytes>", safe_len);
@@ -5106,7 +5134,6 @@ pub fn sys_cap_request(args: &SyscallArgs) -> SyscallResult {
 
     let resource_type_raw = args.arg0 as u16;
     let rights_raw = args.arg1 as u32;
-    let reason_ptr = args.arg2 as *const u8;
     let reason_len = args.arg3 as usize;
 
     // Validate resource type.
@@ -5135,19 +5162,18 @@ pub fn sys_cap_request(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    // Validate reason string.
-    if reason_ptr.is_null() || reason_len == 0 {
+    // Validate reason string.  An over-long reason is rejected, not clipped
+    // at 256 as it used to be: this string is shown to the human deciding
+    // whether to grant the capability, and cutting it mid-sentence is a way
+    // to make a request read as more innocuous than it is.
+    if args.arg2 == 0 || reason_len == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    let safe_len = reason_len.min(256);
-
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg2, safe_len) {
-        return SyscallResult::err(e);
-    }
-
-    // SAFETY: Buffer validated above — in user space and mapped.
-    let reason_bytes = unsafe { core::slice::from_raw_parts(reason_ptr, safe_len) };
-    let reason_str = match core::str::from_utf8(reason_bytes) {
+    let reason_bytes = match crate::mm::user::read_user_vec(args.arg2, reason_len, CAP_REASON_MAX) {
+        Ok(b) => b,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let reason_str = match core::str::from_utf8(&reason_bytes) {
         Ok(s) => s,
         Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
     };
@@ -6679,10 +6705,9 @@ pub fn sys_timer_cancel(args: &SyscallArgs) -> SyscallResult {
 /// duplicated.  A restart sentinel therefore has to survive `linux_from_native`
 /// — which it does, deliberately.
 pub fn sys_console_write(args: &SyscallArgs) -> SyscallResult {
-    let ptr = args.arg0 as *const u8;
     let len = args.arg1 as usize;
 
-    if ptr.is_null() || len == 0 {
+    if args.arg0 == 0 || len == 0 {
         return SyscallResult::ok(0);
     }
 
@@ -6694,25 +6719,27 @@ pub fn sys_console_write(args: &SyscallArgs) -> SyscallResult {
         }
     }
 
-    // Cap length to prevent excessive output in a single syscall.
-    let safe_len = len.min(4096);
+    // A *short write*, not a silent truncation: the return value tells the
+    // caller how much was consumed, so a longer buffer is written by looping.
+    let safe_len = len.min(CONSOLE_WRITE_MAX);
 
-    // Validate the user buffer is in user space and mapped.
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, safe_len) {
-        return SyscallResult::err(e);
-    }
-
-    // SAFETY: Buffer validated above — in user space and mapped.
-    let bytes = unsafe { core::slice::from_raw_parts(ptr, safe_len) };
+    // Bounced into the kernel before any of it reaches the console: the
+    // console lock is held across the write, and `putchar` can scroll the
+    // framebuffer, so this is exactly the kind of long operation during which
+    // a peer thread could remap the source buffer.
+    let bytes = match crate::mm::user::read_user_vec(args.arg0, safe_len, CONSOLE_WRITE_MAX) {
+        Ok(b) => b,
+        Err(e) => return SyscallResult::err(e),
+    };
 
     // Use write_str when possible — it writes to both framebuffer
     // and serial.  For non-UTF8 data, write bytes individually.
-    if let Ok(s) = core::str::from_utf8(bytes) {
+    if let Ok(s) = core::str::from_utf8(&bytes) {
         crate::console::write_str(s);
     } else {
         // Non-UTF8: write each byte to framebuffer (putchar) and
         // serial (via serial_print).
-        for &b in bytes {
+        for &b in &bytes {
             crate::console::putchar(b);
         }
         // Mirror to serial.
@@ -6799,7 +6826,6 @@ pub fn sys_console_try_read_char(args: &SyscallArgs) -> SyscallResult {
 /// See [`crate::syscall::number::SYS_GETRANDOM`] for why this is not
 /// capability-gated and why the length is capped.
 pub fn sys_getrandom(args: &SyscallArgs) -> SyscallResult {
-    let buf_ptr = args.arg0 as *mut u8;
     let len = (args.arg1 as usize).min(crate::syscall::number::GETRANDOM_MAX);
 
     // A zero-length request is a no-op success, not an error: callers that
@@ -6808,24 +6834,29 @@ pub fn sys_getrandom(args: &SyscallArgs) -> SyscallResult {
     if len == 0 {
         return SyscallResult::ok(0);
     }
-    if buf_ptr.is_null() {
+    if args.arg0 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    // Validate before writing: this is the one place a bad user pointer would
-    // otherwise be scribbled over with random bytes, which is both a fault and
-    // an information leak into whatever the pointer did happen to reach.
-    if let Err(e) = crate::mm::user::validate_user_write(args.arg0, len) {
-        return SyscallResult::err(e);
+    // `with_user_out_buf` validates before generating anything, which matters
+    // here more than elsewhere: a bad pointer discovered *after* the CSPRNG
+    // had run would have consumed entropy and scribbled random bytes over
+    // whatever the pointer did happen to reach.
+    match crate::mm::user::with_user_out_buf(
+        args.arg0,
+        len,
+        crate::syscall::number::GETRANDOM_MAX,
+        |buf| {
+            crate::rng::fill(buf);
+            Ok(buf.len())
+        },
+    ) {
+        Ok(n) => {
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(n as i64)
+        }
+        Err(e) => SyscallResult::err(e),
     }
-
-    // SAFETY: validated above — `buf_ptr` is a userspace address, mapped and
-    // writable for `len` bytes, and `len` is nonzero.
-    let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr, len) };
-    crate::rng::fill(buf);
-
-    #[allow(clippy::cast_possible_wrap)]
-    SyscallResult::ok(len as i64)
 }
 
 // ---------------------------------------------------------------------------
@@ -6845,25 +6876,32 @@ pub fn sys_getrandom(args: &SyscallArgs) -> SyscallResult {
 /// Returns: entry count in `value`, newest sequence in `value2`.
 pub fn sys_log_read(args: &SyscallArgs) -> SyscallResult {
     let after_seq = args.arg0;
-    let buf_ptr = args.arg1 as *mut u8;
     let buf_cap = args.arg2 as usize;
 
-    if buf_ptr.is_null() || buf_cap == 0 {
+    if args.arg1 == 0 || buf_cap == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    // Validate the output buffer.
-    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, buf_cap) {
-        return SyscallResult::err(e);
+    // `read_logs` formats its output *while holding the log-ring spinlock*.
+    // Formatting straight into user memory therefore risked taking a demand
+    // -paging fault with that lock held — and the fault path itself logs, so
+    // that is a self-deadlock, not merely a latency problem.  Serialising into
+    // kernel scratch keeps the locked region entirely in kernel memory.
+    let mut totals = (0usize, 0u64);
+    match crate::mm::user::with_user_out_buf(args.arg1, buf_cap, LOG_READ_MAX, |buf| {
+        totals = crate::klog::read_logs(after_seq, buf);
+        // The whole buffer is copied back: `read_logs` reports an entry count,
+        // not a byte count, and the scratch is zero-filled, so the caller sees
+        // its JSON lines followed by NULs rather than uninitialised bytes.
+        Ok(buf.len())
+    }) {
+        Ok(_) => {
+            let (count, newest_seq) = totals;
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok2(count as i64, newest_seq as i64)
+        }
+        Err(e) => SyscallResult::err(e),
     }
-
-    // SAFETY: Validated above — buf_ptr is in user space, mapped, writable.
-    let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr, buf_cap) };
-
-    let (count, newest_seq) = crate::klog::read_logs(after_seq, buf);
-
-    #[allow(clippy::cast_possible_wrap)]
-    SyscallResult::ok2(count as i64, newest_seq as i64)
 }
 
 // ---------------------------------------------------------------------------
@@ -8980,28 +9018,22 @@ pub fn sys_fs_link(args: &SyscallArgs) -> SyscallResult {
     };
 
     // Read the new link path (arg2=ptr, arg3=len).
-    let new_ptr = args.arg2 as *const u8;
-    let new_len = (args.arg3 as usize).min(4096);
-    if new_ptr.is_null() || new_len == 0 {
+    let new_len = args.arg3 as usize;
+    if args.arg2 == 0 || new_len == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg2, new_len) {
-        return SyscallResult::err(e);
-    }
-    // SAFETY: Validated above — new_ptr is in user space and mapped.
-    let new_bytes = unsafe { core::slice::from_raw_parts(new_ptr, new_len) };
-    let new_path = match core::str::from_utf8(new_bytes) {
-        Ok(s) => s,
-        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    let new_path = match read_user_path(args.arg2, new_len) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
     };
 
     // bit 0 of arg4 selects follow (linkat AT_SYMLINK_FOLLOW) vs the default
     // no-follow (plain link(2)).
     let follow = args.arg4 & 1 != 0;
     let result = if follow {
-        crate::fs::Vfs::link(&existing, new_path)
+        crate::fs::Vfs::link(&existing, &new_path)
     } else {
-        crate::fs::Vfs::link_no_follow(&existing, new_path)
+        crate::fs::Vfs::link_no_follow(&existing, &new_path)
     };
     match result {
         Ok(()) => SyscallResult::ok(0),
@@ -9094,22 +9126,16 @@ pub fn sys_fs_copy(args: &SyscallArgs) -> SyscallResult {
     };
 
     // Read destination path (arg2=ptr, arg3=len).
-    let dst_ptr = args.arg2 as *const u8;
-    let dst_len = (args.arg3 as usize).min(4096);
-    if dst_ptr.is_null() || dst_len == 0 {
+    let dst_len = args.arg3 as usize;
+    if args.arg2 == 0 || dst_len == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg2, dst_len) {
-        return SyscallResult::err(e);
-    }
-    // SAFETY: Validated above — dst_ptr is in user space and mapped.
-    let dst_bytes = unsafe { core::slice::from_raw_parts(dst_ptr, dst_len) };
-    let dst = match core::str::from_utf8(dst_bytes) {
-        Ok(s) => s,
-        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    let dst = match read_user_path(args.arg2, dst_len) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
     };
 
-    match crate::fs::Vfs::copy(&src, dst) {
+    match crate::fs::Vfs::copy(&src, &dst) {
         Ok(bytes) => {
             #[allow(clippy::cast_possible_wrap)]
             let n = bytes as i64;
@@ -9138,25 +9164,24 @@ pub fn sys_fs_append(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return SyscallResult::err(e),
     };
 
-    let data_ptr = args.arg2 as *const u8;
-    let data_len = (args.arg3 as usize).min(64 * 1024);
-    if data_ptr.is_null() && data_len > 0 {
+    let data_len = args.arg3 as usize;
+    if args.arg2 == 0 && data_len > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if data_len > 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, data_len) {
-            return SyscallResult::err(e);
-        }
-    }
 
-    let data = if data_len == 0 {
-        &[]
-    } else {
-        // SAFETY: Validated above — data_ptr is in user space and mapped.
-        unsafe { core::slice::from_raw_parts(data_ptr, data_len) }
+    // The length used to be clamped with `.min(64 * 1024)` while the handler
+    // still returned success — so appending a larger buffer silently wrote a
+    // prefix of it and told the caller everything was fine.  This syscall
+    // reports no byte count, so it cannot express a short write; the only
+    // correct options are to append all of it or fail, and it appends all of
+    // it.  See `sys_fs_write_file` for why the unbounded copy is not an
+    // amplification vector.
+    let data = match crate::mm::user::read_user_vec(args.arg2, data_len, usize::MAX) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
     };
 
-    match crate::fs::Vfs::append(&path, data) {
+    match crate::fs::Vfs::append(&path, &data) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -9250,18 +9275,12 @@ pub fn sys_fs_handle_path(args: &SyscallArgs) -> SyscallResult {
 pub fn sys_fs_readdir_at(args: &SyscallArgs) -> SyscallResult {
     // Validate path pointer.
     let path_len = args.arg1 as usize;
-    if path_len == 0 || path_len > 4096 {
+    if path_len == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, path_len) {
-        return SyscallResult::err(e);
-    }
-
-    // SAFETY: path_bytes validated by validate_user_read above.
-    let path_bytes = unsafe { core::slice::from_raw_parts(args.arg0 as *const u8, path_len) };
-    let path = match core::str::from_utf8(path_bytes) {
-        Ok(s) => s,
-        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    let path = match read_user_path(args.arg0, path_len) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
     };
 
     // Unpack offset and count from arg2.
@@ -9272,68 +9291,79 @@ pub fn sys_fs_readdir_at(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    // Validate output buffer.
-    let out_ptr = args.arg3 as *mut u8;
     let out_cap = args.arg4 as usize;
-    if out_ptr.is_null() || out_cap == 0 {
+    if args.arg3 == 0 || out_cap == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if let Err(e) = crate::mm::user::validate_user_write(args.arg3, out_cap) {
-        return SyscallResult::err(e);
-    }
 
-    // Perform paginated readdir.
-    let (entries, total) = match crate::fs::Vfs::readdir_at(path, offset, count) {
+    // Perform paginated readdir.  `readdir_at` reaches the block layer and
+    // blocks, so the serialisation below has to run against kernel memory:
+    // the caller's buffer could have been remapped while this thread slept.
+    let (entries, total) = match crate::fs::Vfs::readdir_at(&path, offset, count) {
         Ok(r) => r,
         Err(e) => return SyscallResult::err(e),
     };
 
-    // Serialize entries into the output buffer.
-    // Format: [u8 type][u32 name_len][name bytes][u64 size] per entry.
-    // SAFETY: out_ptr/out_cap validated by validate_user_write above.
-    let out_slice = unsafe { core::slice::from_raw_parts_mut(out_ptr, out_cap) };
-    let mut pos = 0usize;
     let mut written = 0u32;
 
-    for entry in &entries {
-        let name_bytes = entry.name.as_bytes();
-        // Each entry needs: 1 + 4 + name_len + 8 bytes.
-        let entry_size = 1usize
-            .saturating_add(4)
-            .saturating_add(name_bytes.len())
-            .saturating_add(8);
+    // Format: [u8 type][u32 name_len][name bytes][u64 size] per entry.
+    let copied = match crate::mm::user::with_user_out_buf(
+        args.arg3,
+        out_cap,
+        READDIR_BUF_MAX,
+        |out_slice| {
+            let mut pos = 0usize;
+            for entry in &entries {
+                let name_bytes = entry.name.as_bytes();
+                // Each entry needs: 1 + 4 + name_len + 8 bytes.
+                let entry_size = 1usize
+                    .saturating_add(4)
+                    .saturating_add(name_bytes.len())
+                    .saturating_add(8);
 
-        if pos.saturating_add(entry_size) > out_cap {
-            break; // Buffer full — stop writing (not an error).
-        }
+                if pos.saturating_add(entry_size) > out_cap {
+                    break; // Buffer full — stop writing (not an error).
+                }
 
-        // Entry type: 0=file, 1=dir, 2=symlink, 3=volume_label.
-        out_slice[pos] = match entry.entry_type {
-            crate::fs::vfs::EntryType::File => 0,
-            crate::fs::vfs::EntryType::Directory => 1,
-            crate::fs::vfs::EntryType::Symlink => 2,
-            crate::fs::vfs::EntryType::VolumeLabel => 3,
-        };
-        pos = pos.saturating_add(1);
+                // Entry type: 0=file, 1=dir, 2=symlink, 3=volume_label.
+                if let Some(b) = out_slice.get_mut(pos) {
+                    *b = match entry.entry_type {
+                        crate::fs::vfs::EntryType::File => 0,
+                        crate::fs::vfs::EntryType::Directory => 1,
+                        crate::fs::vfs::EntryType::Symlink => 2,
+                        crate::fs::vfs::EntryType::VolumeLabel => 3,
+                    };
+                }
+                pos = pos.saturating_add(1);
 
-        // Name length (u32 LE).
-        let name_len = name_bytes.len() as u32;
-        out_slice[pos..pos.saturating_add(4)]
-            .copy_from_slice(&name_len.to_le_bytes());
-        pos = pos.saturating_add(4);
+                // Name length (u32 LE).
+                let name_len = name_bytes.len() as u32;
+                if let Some(dst) = out_slice.get_mut(pos..pos.saturating_add(4)) {
+                    dst.copy_from_slice(&name_len.to_le_bytes());
+                }
+                pos = pos.saturating_add(4);
 
-        // Name bytes.
-        out_slice[pos..pos.saturating_add(name_bytes.len())]
-            .copy_from_slice(name_bytes);
-        pos = pos.saturating_add(name_bytes.len());
+                // Name bytes.
+                if let Some(dst) = out_slice.get_mut(pos..pos.saturating_add(name_bytes.len())) {
+                    dst.copy_from_slice(name_bytes);
+                }
+                pos = pos.saturating_add(name_bytes.len());
 
-        // Size (u64 LE).
-        out_slice[pos..pos.saturating_add(8)]
-            .copy_from_slice(&entry.size.to_le_bytes());
-        pos = pos.saturating_add(8);
+                // Size (u64 LE).
+                if let Some(dst) = out_slice.get_mut(pos..pos.saturating_add(8)) {
+                    dst.copy_from_slice(&entry.size.to_le_bytes());
+                }
+                pos = pos.saturating_add(8);
 
-        written = written.saturating_add(1);
-    }
+                written = written.saturating_add(1);
+            }
+            Ok(pos)
+        },
+    ) {
+        Ok(n) => n,
+        Err(e) => return SyscallResult::err(e),
+    };
+    debug_assert!(copied <= out_cap);
 
     // Pack result: (total << 32) | entries_written.
     let result = ((total as u64) << 32) | (written as u64);
@@ -9353,21 +9383,15 @@ pub fn sys_fs_tmpfile(args: &SyscallArgs) -> SyscallResult {
     if path_len == 0 || path_len > 4096 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, path_len) {
-        return SyscallResult::err(e);
-    }
-
-    // SAFETY: path_bytes validated by validate_user_read above.
-    let path_bytes = unsafe { core::slice::from_raw_parts(args.arg0 as *const u8, path_len) };
-    let dir_path = match core::str::from_utf8(path_bytes) {
-        Ok(s) => s,
-        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    let dir_path = match read_user_path(args.arg0, path_len) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
     };
 
     // Generate a unique temporary filename using the TSC for entropy.
     // SAFETY: _rdtsc is always available on x86_64; no side-effects.
     let tsc = unsafe { core::arch::x86_64::_rdtsc() };
-    let tmp_name = alloc::format!("{}/.tmp_{:016x}", dir_path, tsc);
+    let tmp_name = alloc::format!("{dir_path}/.tmp_{tsc:016x}");
 
     // Create the file.
     if let Err(e) = crate::fs::Vfs::write_file(&tmp_name, &[]) {
@@ -9399,19 +9423,13 @@ pub fn sys_fs_fallocate(args: &SyscallArgs) -> SyscallResult {
     if path_len == 0 || path_len > 4096 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, path_len) {
-        return SyscallResult::err(e);
-    }
-
-    // SAFETY: path_bytes validated by validate_user_read above.
-    let path_bytes = unsafe { core::slice::from_raw_parts(args.arg0 as *const u8, path_len) };
-    let path = match core::str::from_utf8(path_bytes) {
-        Ok(s) => s,
-        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    let path = match read_user_path(args.arg0, path_len) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
     };
 
     let size = args.arg2;
-    match crate::fs::Vfs::fallocate(path, size) {
+    match crate::fs::Vfs::fallocate(&path, size) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }

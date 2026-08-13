@@ -45,12 +45,12 @@
 
 use alloc::collections::BTreeMap;
 use alloc::collections::VecDeque;
-use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 use crate::sched::{self, task::TaskId};
 
 // ---------------------------------------------------------------------------
@@ -145,9 +145,9 @@ pub struct FsEvent {
     /// Type of change.
     pub event_type: FsEventType,
     /// Affected path (relative to the watched directory, or absolute).
-    pub path: String,
+    pub path: PathBuf,
     /// For rename events: the new path.
-    pub new_path: Option<String>,
+    pub new_path: Option<PathBuf>,
     /// Whether the subject of this event is a directory (as opposed to a
     /// regular file).  The Linux-ABI inotify adapter ORs `IN_ISDIR` into the
     /// reported event mask when this is set.  Defaults to `false` for the
@@ -164,8 +164,14 @@ pub struct FsEvent {
 struct FsWatch {
     /// Unique watch identifier.
     id: u64,
-    /// Watched directory path (normalized, with trailing `/`).
-    path: String,
+    /// Watched directory path, exactly as registered.
+    ///
+    /// It is deliberately *not* slash-normalized: matching is
+    /// component-aligned ([`Path::starts_with`]), which is immune to a
+    /// trailing separator either way.  The old code appended a `/` here to
+    /// force a boundary on a byte-prefix test, which is the very thing that
+    /// broke child matching (see [`path_matches`]).
+    path: PathBuf,
     /// Which events to report.
     mask: FsEventMask,
     /// Watch subdirectories recursively?
@@ -354,11 +360,11 @@ pub fn wake_notify_waiters(owner_tokens: &[u64]) {
 /// [`close_watch`].  The watch has no blocking-read owner (poll/`read_events`
 /// consumers only); use [`create_watch_owned`] to attach a wake owner token.
 pub fn create_watch(
-    path: &str,
+    path: impl AsRef<Path>,
     mask: FsEventMask,
     recursive: bool,
 ) -> KernelResult<u64> {
-    create_watch_owned(path, mask, recursive, 0)
+    create_watch_owned(path.as_ref(), mask, recursive, 0)
 }
 
 /// Create a watch with an opaque `owner_token` for blocking-read wakeups.
@@ -369,11 +375,12 @@ pub fn create_watch(
 /// Linux-ABI inotify adapter, which passes its instance id so a blocked
 /// `read()` is woken when any of the instance's watches fire.
 pub fn create_watch_owned(
-    path: &str,
+    path: impl AsRef<Path>,
     mask: FsEventMask,
     recursive: bool,
     owner_token: u64,
 ) -> KernelResult<u64> {
+    let path = path.as_ref();
     if path.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
@@ -389,15 +396,9 @@ pub fn create_watch_owned(
 
     let id = NEXT_WATCH_ID.fetch_add(1, Ordering::Relaxed);
 
-    // Normalize the path: ensure it ends with '/' for directory matching.
-    let mut normalized = String::from(path);
-    if !normalized.ends_with('/') {
-        normalized.push('/');
-    }
-
     watches.insert(id, FsWatch {
         id,
-        path: normalized,
+        path: path.to_path_buf(),
         mask,
         recursive,
         events: VecDeque::with_capacity(16),
@@ -412,7 +413,7 @@ pub fn create_watch_owned(
 
     crate::serial_println!(
         "[notify] Watch {} created for '{}' (mask={:#x}, recursive={}, owner={:#x})",
-        id, path, mask.0, recursive, owner_token
+        id, path.display(), mask.0, recursive, owner_token
     );
 
     Ok(id)
@@ -437,7 +438,7 @@ pub fn read_events(watch_id: u64, max: usize) -> KernelResult<Vec<FsEvent>> {
         result.push(FsEvent {
             watch_id,
             event_type: FsEventType::Overflow,
-            path: String::new(),
+            path: PathBuf::new(),
             new_path: None,
             is_dir: false,
         });
@@ -491,55 +492,46 @@ pub fn close_watch(watch_id: u64) -> KernelResult<()> {
 // Path matching
 // ---------------------------------------------------------------------------
 
-/// Determine whether `candidate` (an absolute path from a VFS
-/// operation) falls under a watch whose normalized directory path is
-/// `watch_path` (always stored with a trailing `/`, see
-/// [`create_watch`]).
+/// Determine whether `candidate` (an absolute path from a VFS operation)
+/// falls under the watch registered on `watch_path`.
 ///
 /// Two cases match:
 ///
-/// 1. **The watched path itself** — `candidate` equals `watch_path`
-///    with its trailing slash stripped.  This surfaces "self" events
-///    such as the watched directory (or a watched file) being deleted
-///    or renamed.
-/// 2. **A path inside the watched directory** — for a non-recursive
-///    watch only direct children match; for a recursive watch any
-///    descendant matches.
+/// 1. **The watched path itself** — `candidate` equals `watch_path`.  This
+///    surfaces "self" events such as the watched directory (or a watched
+///    file) being deleted or renamed.
+/// 2. **A path inside the watched directory** — for a non-recursive watch
+///    only direct children match; for a recursive watch any descendant
+///    matches.
 ///
 /// # Why a dedicated helper
 ///
-/// The previous inline matcher tested
-/// `candidate.as_bytes().get(watch_path.len()) == Some(&b'/')` to
-/// confirm a separator boundary.  That was a bug: because `watch_path`
-/// already ends in `/`, the byte at `watch_path.len()` is the first
-/// character of the *child name*, never a separator — so no child
-/// event ever matched and the notification system delivered only
-/// self-events.  A `strip_prefix` against the slash-terminated
-/// `watch_path` inherently guarantees the boundary, so no extra check
-/// is needed.
-fn path_matches(watch_path: &str, recursive: bool, candidate: &str) -> bool {
-    // Case 1: the watched path itself (watch_path minus trailing '/').
-    if let Some(bare) = watch_path.strip_suffix('/') {
-        if candidate == bare {
-            return true;
-        }
+/// This matcher has been wrong twice, in opposite directions, for the same
+/// underlying reason: it was testing a *byte* prefix and bolting a boundary
+/// check onto it.  First it tested
+/// `candidate.as_bytes().get(watch_path.len()) == Some(&b'/')`, which never
+/// fires because `watch_path` was stored slash-terminated, so no child event
+/// ever matched and only self-events were delivered.  The fix at the time was
+/// to lean on that stored trailing slash instead — correct, but it made the
+/// watch path's *storage format* load-bearing for correctness, so a caller
+/// that stored one without the slash would silently match `/ab` against a
+/// watch on `/a`.
+///
+/// [`Path::starts_with`] compares whole components, so the boundary is
+/// intrinsic and no storage convention is required: a trailing slash on
+/// either side is irrelevant, and a shared byte prefix that is not a
+/// component prefix cannot match.
+fn path_matches(watch_path: &Path, recursive: bool, candidate: &Path) -> bool {
+    if !candidate.starts_with(watch_path) {
+        return false;
     }
-    // Case 2: inside the watched directory.  The trailing '/' on
-    // `watch_path` makes a successful prefix match a guaranteed
-    // separator boundary.
-    if let Some(remainder) = candidate.strip_prefix(watch_path) {
-        if remainder.is_empty() {
-            // candidate == watch_path including its trailing slash;
-            // treat as the directory itself.
-            return true;
-        }
-        if recursive {
-            return true;
-        }
-        // Non-recursive: only direct children (no further separator).
-        return !remainder.contains('/');
+    if recursive {
+        return true;
     }
-    false
+    // Non-recursive: the watched path itself, or one of its direct children —
+    // i.e. at most one component deeper.
+    candidate.components().count()
+        <= watch_path.components().count().saturating_add(1)
 }
 
 // ---------------------------------------------------------------------------
@@ -557,8 +549,12 @@ fn path_matches(watch_path: &str, recursive: bool, candidate: &str) -> bool {
 /// operating on directories use [`emit_dir`] (or the `*_dir` convenience
 /// wrappers) so the inotify adapter can OR in `IN_ISDIR`.
 #[inline]
-pub fn emit(event_type: FsEventType, path: &str, new_path: Option<&str>) {
-    emit_inner(event_type, path, new_path, false);
+pub fn emit(
+    event_type: FsEventType,
+    path: impl AsRef<Path>,
+    new_path: Option<&Path>,
+) {
+    emit_inner(event_type, path.as_ref(), new_path, false);
 }
 
 /// Emit a filesystem change event whose subject is a **directory**.
@@ -566,15 +562,24 @@ pub fn emit(event_type: FsEventType, path: &str, new_path: Option<&str>) {
 /// Identical to [`emit`] but tags the queued [`FsEvent`] with `is_dir = true`
 /// so the Linux-ABI inotify adapter ORs `IN_ISDIR` into the reported mask.
 #[inline]
-pub fn emit_dir(event_type: FsEventType, path: &str, new_path: Option<&str>) {
-    emit_inner(event_type, path, new_path, true);
+pub fn emit_dir(
+    event_type: FsEventType,
+    path: impl AsRef<Path>,
+    new_path: Option<&Path>,
+) {
+    emit_inner(event_type, path.as_ref(), new_path, true);
 }
 
 /// Core event-emission path shared by [`emit`] and [`emit_dir`].
 ///
 /// This is on the hot path — must be fast when no watches exist.
 #[allow(clippy::arithmetic_side_effects)]
-fn emit_inner(event_type: FsEventType, path: &str, new_path: Option<&str>, is_dir: bool) {
+fn emit_inner(
+    event_type: FsEventType,
+    path: &Path,
+    new_path: Option<&Path>,
+    is_dir: bool,
+) {
     // Lock-free fast path: if no live watch is interested in this event type,
     // there is nothing to queue — skip without ever taking the `WATCHES` lock.
     // (Internal `Overflow` events have an empty mask and are never emitted this
@@ -618,7 +623,7 @@ fn emit_inner(event_type: FsEventType, path: &str, new_path: Option<&str>, is_di
         // with repeated writes to the same file.
         let already_queued = watch.events.iter().any(|e| {
             e.event_type == event_type
-                && e.path == path
+                && e.path.as_path() == path
                 && e.new_path.as_deref() == new_path
         });
         if already_queued {
@@ -635,8 +640,8 @@ fn emit_inner(event_type: FsEventType, path: &str, new_path: Option<&str>, is_di
         watch.events.push_back(FsEvent {
             watch_id: watch.id,
             event_type,
-            path: String::from(path),
-            new_path: new_path.map(String::from),
+            path: path.to_path_buf(),
+            new_path: new_path.map(Path::to_path_buf),
             is_dir,
         });
         if watch.owner_token != 0 {
@@ -654,40 +659,40 @@ fn emit_inner(event_type: FsEventType, path: &str, new_path: Option<&str>, is_di
 
 /// Convenience: emit a "created" event.
 #[inline]
-pub fn emit_created(path: &str) {
+pub fn emit_created(path: impl AsRef<Path>) {
     emit(FsEventType::Created, path, None);
 }
 
 /// Convenience: emit a "created" event whose subject is a directory
 /// (e.g. `mkdir`).  Surfaces as inotify `IN_CREATE | IN_ISDIR`.
 #[inline]
-pub fn emit_created_dir(path: &str) {
+pub fn emit_created_dir(path: impl AsRef<Path>) {
     emit_dir(FsEventType::Created, path, None);
 }
 
 /// Convenience: emit a "deleted" event.
 #[inline]
-pub fn emit_deleted(path: &str) {
+pub fn emit_deleted(path: impl AsRef<Path>) {
     emit(FsEventType::Deleted, path, None);
 }
 
 /// Convenience: emit a "deleted" event whose subject is a directory
 /// (e.g. `rmdir`).  Surfaces as inotify `IN_DELETE | IN_ISDIR`.
 #[inline]
-pub fn emit_deleted_dir(path: &str) {
+pub fn emit_deleted_dir(path: impl AsRef<Path>) {
     emit_dir(FsEventType::Deleted, path, None);
 }
 
 /// Convenience: emit a "modified" event.
 #[inline]
-pub fn emit_modified(path: &str) {
+pub fn emit_modified(path: impl AsRef<Path>) {
     emit(FsEventType::Modified, path, None);
 }
 
 /// Convenience: emit a "renamed" event.
 #[inline]
-pub fn emit_renamed(old_path: &str, new_path: &str) {
-    emit(FsEventType::Renamed, old_path, Some(new_path));
+pub fn emit_renamed(old_path: impl AsRef<Path>, new_path: impl AsRef<Path>) {
+    emit(FsEventType::Renamed, old_path, Some(new_path.as_ref()));
 }
 
 /// Convenience: emit a "metadata changed" event.
@@ -696,7 +701,7 @@ pub fn emit_renamed(old_path: &str, new_path: &str) {
 /// and xattr modifications — operations that affect file metadata but
 /// not file content.
 #[inline]
-pub fn emit_metadata(path: &str) {
+pub fn emit_metadata(path: impl AsRef<Path>) {
     emit(FsEventType::MetadataChanged, path, None);
 }
 
@@ -706,7 +711,7 @@ pub fn emit_metadata(path: &str) {
 /// watch requests `ACCESS` (see the `INTEREST_COUNTS` gate). Surfaces as
 /// inotify `IN_ACCESS`.
 #[inline]
-pub fn emit_accessed(path: &str) {
+pub fn emit_accessed(path: impl AsRef<Path>) {
     emit(FsEventType::Accessed, path, None);
 }
 
@@ -715,7 +720,7 @@ pub fn emit_accessed(path: &str) {
 /// Emitted from the file-handle open path. High-frequency and opt-in (gated by
 /// the `OPEN` interest count). Surfaces as inotify `IN_OPEN`.
 #[inline]
-pub fn emit_opened(path: &str) {
+pub fn emit_opened(path: impl AsRef<Path>) {
     emit(FsEventType::Opened, path, None);
 }
 
@@ -727,13 +732,13 @@ pub fn emit_opened(path: &str) {
 /// `IN_ISDIR` for directory-handle closes. Emitted from the file-handle
 /// final-close path; opt-in, gated by the matching interest count.
 #[inline]
-pub fn emit_closed(path: &str, was_writable: bool, is_dir: bool) {
+pub fn emit_closed(path: impl AsRef<Path>, was_writable: bool, is_dir: bool) {
     let ty = if was_writable {
         FsEventType::ClosedWrite
     } else {
         FsEventType::ClosedNoWrite
     };
-    emit_inner(ty, path, None, is_dir);
+    emit_inner(ty, path.as_ref(), None, is_dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -748,17 +753,35 @@ pub fn emit_closed(path: &str, was_writable: bool, is_dir: bool) {
 pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[notify] Running self-test...");
 
-    // Regression guard for the slash-boundary matching bug: a watch on
-    // a directory must match its direct children and itself, but not
-    // grandchildren (unless recursive) or unrelated siblings.
-    if !path_matches("/docs/", false, "/docs/file.txt")
-        || !path_matches("/docs/", false, "/docs")
-        || path_matches("/docs/", false, "/docs/sub/file.txt")
-        || !path_matches("/docs/", true, "/docs/sub/file.txt")
-        || path_matches("/docs/", false, "/docsx")
-        || path_matches("/docs/", false, "/other")
-        || !path_matches("/", false, "/file.txt")
-        || path_matches("/", false, "/sub/file.txt")
+    // Regression guard for the boundary-matching bug: a watch on a directory
+    // must match its direct children and itself, but not grandchildren
+    // (unless recursive) or unrelated siblings.  Both spellings of the watch
+    // path — with and without a trailing slash — must behave identically;
+    // the old byte-prefix matcher was correct for exactly one of them.
+    let boundary_ok = ["/docs", "/docs/"].iter().all(|w| {
+        let w = Path::new(*w);
+        path_matches(w, false, Path::new("/docs/file.txt"))
+            && path_matches(w, false, Path::new("/docs"))
+            && !path_matches(w, false, Path::new("/docs/sub/file.txt"))
+            && path_matches(w, true, Path::new("/docs/sub/file.txt"))
+            && !path_matches(w, false, Path::new("/docsx"))
+            && !path_matches(w, false, Path::new("/other"))
+    });
+    if !boundary_ok
+        || !path_matches(Path::new("/"), false, Path::new("/file.txt"))
+        || path_matches(Path::new("/"), false, Path::new("/sub/file.txt"))
+        // A name that is not UTF-8 is still watchable and still matches by
+        // bytes — the property this whole conversion exists for.
+        || !path_matches(
+            Path::new(b"/d/\xff"),
+            false,
+            Path::new(b"/d/\xff/file"),
+        )
+        || path_matches(
+            Path::new(b"/d/\xff"),
+            false,
+            Path::new(b"/d/\xfe/file"),
+        )
     {
         crate::serial_println!("[notify]   FAIL: path_matches boundary logic wrong");
         return Err(KernelError::InternalError);
@@ -805,8 +828,11 @@ pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[notify]   3 events received in correct order ✓");
 
     // Verify paths.
-    if events[0].path != "/TEST.TXT" {
-        crate::serial_println!("[notify]   FAIL: event path is '{}'", events[0].path);
+    if events[0].path.as_path() != Path::new("/TEST.TXT") {
+        crate::serial_println!(
+            "[notify]   FAIL: event path is '{}'",
+            events[0].path.display()
+        );
         close_watch(watch_id)?;
         return Err(KernelError::InternalError);
     }
@@ -849,7 +875,7 @@ pub fn self_test() -> KernelResult<()> {
         close_watch(rec_id)?;
         return Err(KernelError::InternalError);
     }
-    if events[0].new_path.as_deref() != Some("/NEW.TXT") {
+    if events[0].new_path.as_deref() != Some(Path::new("/NEW.TXT")) {
         crate::serial_println!(
             "[notify]   FAIL: rename new_path is {:?}",
             events[0].new_path
@@ -972,17 +998,17 @@ pub fn self_test() -> KernelResult<()> {
     // ACCESS: a real `Vfs::read_file` must surface an Accessed event when an
     // ACCESS watch is live. Write a probe, read it, assert the event surfaces.
     let access_id = create_watch("/", FsEventMask::ACCESS, false)?;
-    let probe_path = "/ACCESS_PROBE.TXT";
+    let probe_path = Path::new("/ACCESS_PROBE.TXT");
     super::vfs::Vfs::write_file(probe_path, b"hi")?;
     let _ = super::vfs::Vfs::read_file(probe_path)?;
     let e2e = read_events(access_id, 10)?;
     let saw_probe = e2e
         .iter()
-        .any(|e| e.event_type == FsEventType::Accessed && e.path == probe_path);
+        .any(|e| e.event_type == FsEventType::Accessed && e.path.as_path() == probe_path);
     if !saw_probe {
         crate::serial_println!(
             "[notify]   FAIL: Vfs::read_file did not surface Accessed for {} ({} events)",
-            probe_path,
+            probe_path.display(),
             e2e.len()
         );
         close_watch(access_id)?;
@@ -1005,7 +1031,7 @@ pub fn self_test() -> KernelResult<()> {
         FsEventMask::OPEN.0 | FsEventMask::CLOSE_WRITE.0 | FsEventMask::CLOSE_NOWRITE.0,
     );
     let oc_id = create_watch("/", oc_mask, false)?;
-    let oc_probe = "/OPENCLOSE_PROBE.TXT";
+    let oc_probe = Path::new("/OPENCLOSE_PROBE.TXT");
     super::vfs::Vfs::write_file(oc_probe, b"x")?;
 
     // Read-only open then close → Opened + ClosedNoWrite (never ClosedWrite).
@@ -1014,10 +1040,10 @@ pub fn self_test() -> KernelResult<()> {
     let ro_events = read_events(oc_id, 10)?;
     let saw_open = ro_events
         .iter()
-        .any(|e| e.event_type == FsEventType::Opened && e.path == oc_probe);
+        .any(|e| e.event_type == FsEventType::Opened && e.path.as_path() == oc_probe);
     let saw_close_nw = ro_events
         .iter()
-        .any(|e| e.event_type == FsEventType::ClosedNoWrite && e.path == oc_probe);
+        .any(|e| e.event_type == FsEventType::ClosedNoWrite && e.path.as_path() == oc_probe);
     let bad_close_w = ro_events
         .iter()
         .any(|e| e.event_type == FsEventType::ClosedWrite);
@@ -1043,10 +1069,10 @@ pub fn self_test() -> KernelResult<()> {
     let rw_events = read_events(oc_id, 10)?;
     let saw_open_rw = rw_events
         .iter()
-        .any(|e| e.event_type == FsEventType::Opened && e.path == oc_probe);
+        .any(|e| e.event_type == FsEventType::Opened && e.path.as_path() == oc_probe);
     let saw_close_w = rw_events
         .iter()
-        .any(|e| e.event_type == FsEventType::ClosedWrite && e.path == oc_probe);
+        .any(|e| e.event_type == FsEventType::ClosedWrite && e.path.as_path() == oc_probe);
     if !saw_open_rw || !saw_close_w {
         crate::serial_println!(
             "[notify]   FAIL: writable open/close (open={}, close_w={})",

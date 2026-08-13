@@ -38362,6 +38362,55 @@ compiler-instrumented KASAN (Q34→B in open-questions.md), which is
 operator-decision-worthy and NOT started unilaterally. B-KNULLJUMP does not
 block other roadmap work.
 
+**UPDATE 2026-08-12 (g) — Path B (compiler-instrumented KASAN) is BUILT and
+survives boot, but is ~20× too slow to soak; hunt NOT yet run.** The operator
+approved the Q34→B escalation (design-decisions.md §107) and the instrumented
+profile now exists and works. Getting there took two structural fixes, both of
+which are the same invariant with different roots — "no `__asan_*` call may be
+reachable from here" — and both are now *build gates* rather than review items,
+because source review demonstrably cannot see them (generic `core` functions
+monomorphise into the kernel crate carrying the default, instrumented,
+attribute, so a module-level `sanitize(address = "off")` does not cover them):
+
+- **§118 — the pre-shadow window.** Kernel entry through
+  `mm::kasan::install_zero_shadow` has no shadow to read and no IDT to catch the
+  fault, so one instrumented access is a triple fault: QEMU resets and prints
+  *nothing*, indistinguishable from any other boot failure. Two real ones were
+  hit this way (`serial::init`'s spinlock CAS; a `for i in 0..512` lowering to
+  `spec_next`). The window is now raw `asm!` loads/stores, and
+  `scripts/kasan-check-preshadow.py` walks the disassembled call graph from the
+  entry point to prove it.
+- **§119 — the runtime check path.** Checks are now *outlined*
+  (`-asan-instrumentation-with-call-threshold=0`) because the inline sequence
+  dereferences `(addr >> 3) + offset` unconditionally, and for a *user* address
+  that shadow is non-canonical — a `#GP`, not a report. Our kernel legitimately
+  derefs user pointers (SEH context onto the user stack in `idt.rs`, every
+  `mm/user.rs` helper), so inline checks made each such site a panic unrelated to
+  the bug; one killed the boot at line 1298. Outlining creates the obligation
+  that nothing under `shadow_allows` may perform an instrumented access, which a
+  second walk from the `__asan_load*`/`__asan_store*` roots enforces — it caught
+  `Option::<u8>::is_some` on its first run.
+
+Current gate output: `14 function(s) reachable before the shadow is installed
+and 21 on the check path, none instrumented`. A boot to `BOOT_OK` is in flight.
+One genuine pre-existing test fragility surfaced en route and was fixed
+(`fs/timerq.rs` self-test used a "far future" periodic deadline of 1000 s of
+uptime, which only a *fast* boot outruns; now 2^62 ns).
+
+**The blocker is cost, not correctness.** Measured: a plain debug boot is
+~283–318 s; the instrumented one needs **5500–8500 s (~20×)**. At B-KNULLJUMP's
+~1-in-120 rate an even-odds soak is ~80 boots = **over a week of wall-clock**,
+versus ~7 h for the plain-build soak. So Path B is a validated tool that cannot
+yet be *used* for the thing it was built for. How to make it affordable —
+optimized instrumented build, trimmed workload, soak anyway, or shelve — is
+**open-questions.md Q43**, deliberately left to the operator because the leading
+option (`--release`) would be the first optimized kernel ever booted here and
+perturbs the very timing the race depends on. `scripts/wedge-soak.sh` is already
+armed for it: catch (0) greps `[kasan] CRITICAL:` on every boot regardless of
+exit code (the profile uses `-asan-recover=1`, so a reported access still
+completes and the boot can pass), and its header documents the raised
+`SOAK_TIMEOUT`/`STALL_SECS` an instrumented soak requires.
+
 **SEPARATE STILL-OPEN WEDGE — `gen_dmastat` / `restart-init.elf` spawn-dispatch
 (first isolated 2026-07-15, `build/hang-catches/soak-20260715-020155-iter05.*`).**
 On the very soak that validated the serial fix, iter05 caught a *different* wedge
@@ -55017,3 +55066,50 @@ our capability model), so it belongs in `design-decisions.md` when it is made
 alternative would be for `capget` to fail rather than answer confidently, but
 that would break Linux ports that call it informationally, so the optimistic
 answer stays.
+
+---
+
+## TD-KASAN-IRQ-CONTEXT-ALLOCATIONS-LOSE-SHADOW-COVERAGE
+
+**Status:** open, deliberate. Logged 2026-08-12.
+
+**What it is.** `mm::kasan::with_map_lock` acquires `MAP_LOCK` only with
+`try_lock`, and when the caller arrived with interrupts *already disabled* — an
+IRQ-context allocation — a failed attempt **gives up and returns `None`**
+rather than waiting. The caller then leaves that allocation's shadow bytes
+unwritten, so the allocation's redzones and freed-state poison are never
+recorded and KASAN cannot detect an overflow or use-after-free on it. The
+shadow fails open: an unpoisoned byte reads as "addressable", so this is a
+*detection* gap, never a false positive and never a correctness problem.
+
+**Why it is written that way.** The mapping path performs a cross-CPU TLB
+shootdown while holding `MAP_LOCK`, and the shootdown blocks until every other
+CPU acknowledges an IPI. A CPU spinning on `MAP_LOCK.lock()` with interrupts
+disabled can never take that IPI, so the holder would wait forever for an
+acknowledgement — a two-CPU deadlock. A caller that arrived with interrupts
+enabled can re-enable them between attempts (and does), which lets the IPI
+through and guarantees forward progress. A caller that arrived with them
+disabled cannot re-enable them; that is not ours to do.
+
+**Where it lives.** `kernel/src/mm/kasan.rs` — `with_map_lock` (the
+`if !irqs_were_on { return None; }` arm) and its one caller at the lazy
+shadow-map site.
+
+**Why it matters now.** With compiler-instrumented KASAN (§107, §118) the
+shadow is the primary evidence for B-KNULLJUMP. If the wild store lands in an
+allocation that was made from IRQ context on a contended lock, the shadow is
+silent about it and the hunt sees nothing. The window is narrow — it needs
+`MAP_LOCK` to be *held* at the moment of an IRQ-context allocation that touches
+an unmapped shadow frame — but it is not zero, and it is invisible when it
+happens.
+
+**Proper fix.** Decouple the frame mapping from the shootdown so the lock is
+never held across an IPI wait: map and zero the shadow frame under the lock,
+then queue the shootdown to run after the lock is dropped (the shadow frame is
+freshly mapped, so a stale *absent* TLB entry on another CPU is the only
+hazard, and it resolves into a fault that re-checks the bitmap). With no IPI
+wait inside the critical section, a plain `lock()` with interrupts disabled is
+safe and the IRQ-context give-up arm can be deleted. Secondary option: record
+the give-up in a counter so the coverage gap is at least *observable* rather
+than silent — worth doing even alongside the real fix, since it is how you find
+out the fix worked.

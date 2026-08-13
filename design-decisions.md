@@ -8173,3 +8173,210 @@ single caller is a worse trade than a relaxed atomic load.
   the path all the unit tests exercise.
 - `CPUID` is now probed before `RDRAND`/`RDSEED` is issued. The old code issued
   `rdrand` unconditionally, which is `#UD` on a pre-2012 CPU.
+
+## §118 — The KASAN pre-shadow window is raw assembly, and the invariant is checked by a build gate rather than by review
+
+**Date:** 2026-08-12
+
+**Decided by:** Claude (operator-approved scope). §107 was the operator's call
+to build the instrumented kernel; every decision below is a specific call made
+while making it actually boot, and is mine to revisit.
+
+**Context — the failure that forced this.** Between the kernel entry point and
+the moment `mm::kasan::early_init` finishes installing the zero shadow there is
+no shadow to read *and* no IDT to catch the resulting page fault. One
+instrumented memory access in that window is a triple fault: QEMU resets, the
+kernel prints **nothing at all**, and `boot-test.sh` reports the same "no
+BOOT_OK" it would report for any other boot failure. Two of these were hit for
+real before the gate below existed, each costing a `-d int,cpu_reset` run and a
+symbol lookup to localize.
+
+**The discovery that makes this non-obvious.** A module-level
+`#![cfg_attr(kasan_instrumented, sanitize(address = "off"))]` does **not**
+establish that the module's code is uninstrumented. `sanitize` is a per-function
+LLVM attribute, so it covers functions that are *ours*. Generic `core`
+functions monomorphise into the kernel crate's codegen units, are emitted
+out-of-line at `-O0`, and carry the default (instrumented) attribute — and they
+dereference the pointers we hand them, so the shadow probe lands in `core`'s
+frame where our exemption has no reach. The two real faults:
+
+- `serial::init` takes a spinlock → `core::sync::atomic::atomic_compare_exchange_weak::<u8>`
+  probes the shadow of `serial::SERIAL`.
+- `for i in 0..512` hands `&mut Range<usize>` to
+  `core::iter::range::RangeIteratorImpl::spec_next`, which probes the shadow of
+  *this* frame's stack slot. (`-asan-stack=0` suppresses instrumentation of a
+  function's own allocas — not of a pointer parameter that happens to point at
+  a caller's alloca.)
+
+Neither is visible by reading the source of the exempt module.
+
+**Decision 1 — the window issues its own loads and stores via `asm!`.**
+`mm::kasan::raw_load_u64` / `raw_store_u64` / `raw_shr_u64` are the audited
+primitives; `limine::LimineRequest::<HhdmResponse>::offset_raw` and
+`boot::hhdm_offset_early` are built on them, and the idempotency flag is a plain
+`static mut EARLY_SHADOW_DONE: u64` read with `raw_load_u64` rather than an
+`AtomicU64` (whose `load` is a `core` generic, hence instrumented).
+
+*For:* inline assembly is opaque to LLVM, so it cannot be instrumented,
+elided or reordered — the last property is what the previous `read_volatile`
+was there for anyway. *Against:* it is more code than `*ptr`, and the safety
+argument moves from the type system into `// SAFETY:` comments. Accepted
+because there is no attribute that reaches into a monomorphised `core` generic;
+keeping the access in our own frame is the only mechanism available.
+
+**Decision 2 — debug arithmetic checks count as instrumented code.** In a debug
+build `+` branches to `core::panicking::panic_const_add_overflow` and `>>` to
+`panic_const_shr_overflow`, both instrumented panic machinery reachable from
+the window. `wrapping_shr` is *not* a fix: it forwards to
+`core::num::<u64>::unchecked_shr`, whose `ub_checks` precondition check is
+itself a `core` generic that monomorphises in with instrumentation. So the
+window uses `wrapping_add`/`saturating_add` for arithmetic and `raw_shr_u64`
+(an `asm!` `shr`) for shifts, and `while` loops with plain counters instead of
+`for`-over-`Range`.
+
+**Decision 3 — `early_init` splits into two named phases.** `install_zero_shadow`
+runs with no shadow and returns a `ShadowRoots`; `publish_shadow_roots` runs
+after the TLB flush and does the ordinary atomic stores. `early_init` is a
+two-statement wrapper.
+
+*For:* the phase boundary was previously a comment in the middle of one
+function, which no tool can reference. A call-graph walk cannot express "the
+first half of this function", so the *code* draws the line instead, and the
+gate below can name `install_zero_shadow` as a root. *Against:* it is a split
+made for the benefit of tooling rather than for the code's own structure.
+Accepted: the boundary is real regardless, and naming it also stopped the
+gate's false positive on the post-shadow atomic stores.
+
+**Decision 4 — the invariant is a build gate, not a review item.**
+`scripts/kasan-check-preshadow.py` disassembles the built kernel, walks the
+call graph breadth-first from the pre-shadow roots, and fails on any reachable
+`__asan*` call or any indirect call it cannot prove exempt. `kasan-build.sh`
+runs it immediately after the build. A `check_entry_order` pass separately
+verifies that `kernel_main` still calls nothing but the allowed set before
+`serial::init`, so inserting a new call ahead of the window's end is *reported*
+rather than silently escaping the walk.
+
+*For:* the whole point of the section above is that source review cannot
+establish this property, and the failure mode gives you no evidence to work
+from. Failing here costs a message; failing at boot costs a debugging session.
+*Against:* it is a disassembly-based check, so it is coupled to symbol mangling
+(`ROOT_SUBSTRINGS` carries v0 length prefixes such as `19install_zero_shadow`)
+and needs updating when those functions are renamed. Mitigated by the root-not-
+found and entry-order checks, which turn a stale list into a hard failure
+instead of a silent pass.
+
+**Where it lives.** `kernel/src/mm/kasan.rs` (the raw primitives, the phase
+split, `early_translate`), `kernel/src/limine.rs` (`offset_raw`),
+`kernel/src/boot.rs` (`hhdm_offset_early`), `kernel/src/main.rs` (the shadow
+install is now statement zero of `kernel_main`, before `serial::init`),
+`scripts/kasan-check-preshadow.py`, `scripts/kasan-build.sh`.
+
+**How to reverse.** All of it is inert in the ordinary build: the raw
+primitives compile to the same loads and stores, the phase split is a
+refactor, and the checker exits 2 ("not an instrumented build") when handed a
+kernel with no `__asan` symbols.
+
+## §119 — KASAN checks are outlined, because inline checks cannot survive a kernel that dereferences user pointers
+
+**Date:** 2026-08-12
+
+**Decided by:** Claude (operator-approved scope). A follow-on to §118, made
+while getting the instrumented kernel past its first user-mode fault; mine to
+revisit.
+
+**Context.** With the pre-shadow window fixed (§118) the instrumented kernel
+booted 1298 serial lines — and then died on an unrecoverable kernel #GP inside
+`core::ptr::write::<u64>`, reached from `idt::try_dispatch_user_exception`
+writing the SEH `ExceptionContext` onto the faulting thread's **user** stack.
+The faulting instruction was `cmpb $0x0, (%rax)`: LLVM's inline shadow compare.
+
+**The mechanism.** Inline instrumentation computes
+`shadow = (addr >> 3) + 0xDFFFE00000000000` and dereferences it
+*unconditionally*, before anything has had a chance to decide whether the
+address is one we shadow. For a kernel address that is fine. For a user address
+it is not: `shadow(0x40_0000_0000) = 0xDFFF_E008_0000_0000`, whose bits 63:48
+are `0xDFFF` while bit 47 is 1 — not sign-extended, therefore **non-canonical**,
+therefore #GP. There is no offset that fixes this; a single-add mapping cannot
+cover both halves of a 48-bit split address space, which is why Linux's KASAN
+covers only kernel addresses too.
+
+Linux gets away with inline checks because kernel code there *never*
+dereferences a user pointer directly — every access goes through hand-written
+`uaccess` asm that the compiler does not instrument. Our kernel does dereference
+user pointers directly in several places by design (the SEH context above,
+`mm::user`'s copy helpers, …), so the same guarantee does not hold, and each
+such site is a kernel panic with a backtrace that points at the sanitizer rather
+than at the bug being hunted.
+
+**Decision.** Build with `-asan-instrumentation-with-call-threshold=0`, which
+makes LLVM emit a **call** to `mm::kasan_rt::__asan_load8_noabort` & co. for
+every checked access instead of the inline compare. The entry points already
+existed (they were defined defensively for LLVM's 7000-access threshold); they
+call `kasan::shadow_allows`, which runs `shadow_of` *first* and returns "no
+shadow, therefore allowed" for any address outside the backed window — user
+addresses included. The bad dereference is now unreachable by construction.
+
+**For.** It is one rule that covers every site, present and future, instead of
+an open-ended hunt for raw user derefs where each miss costs a full boot cycle
+(~10 minutes) to find. It also makes the shadow lookup a single place where
+policy can be added — the pre-shadow "is the shadow even installed yet"
+question, address-space filtering, future quarantine integration — rather than
+something baked into thousands of inline sequences. Linux offers exactly this
+mode (`CONFIG_KASAN_OUTLINE`) for essentially the same reasons.
+
+**Against.** A call per memory access is substantially slower than a
+compare-and-branch, and the instrumented kernel was already `-O0` with a check
+on every load and store. Accepted for the *correctness* goal: this is a debug
+profile whose entire purpose is localizing one bug, and a boot that finishes
+slowly beats a boot that panics in the sanitizer.
+
+**Measured cost, and the consequence nobody costed up front.** The slowdown was
+guessed at "roughly doubled" when this was written; measuring it gave something
+far worse. A plain debug boot reaches `BOOT_OK` in **~283–318 s**
+(`soak-20260723-190300`, 100/100 iterations). The instrumented debug boot ran
+975 s to reach the point a plain boot reaches at line 4016 of 23532 — 17 % of
+the log — with 48 of the 66 ring-3 spawn tests and 178 MB of the 217 MB of test
+ELF still ahead of it. Both extrapolations (line rate, and remaining-ELF ratio)
+land between **5500 s and 8500 s**, i.e. a **~20× slowdown**, not 2×. The first
+attempt was launched with a 5400 s timeout on the strength of the 2× guess and
+had to be abandoned at 17 % rather than yield a truncated answer.
+
+For proving the instrumented kernel *boots*, ~2 h per boot is merely tedious.
+For the thing this profile was built for it is disqualifying: B-KNULLJUMP fires
+at roughly 1 boot in 120, so a soak that has an even chance of catching it needs
+~80 boots — **over a week of wall-clock** at this rate, against ~7 h for the
+plain-build soak that has been run repeatedly. So the cost is only "accepted"
+for the single validating boot. Making the *hunt* viable needs a separate
+decision (an optimized instrumented build being the obvious candidate, since
+most of the 20× is `-O0` codegen rather than the sanitizer, but a release kernel
+has never been booted here and optimization perturbs exactly the timing a rare
+race depends on) — see `open-questions.md` Q43.
+
+**The obligation it creates.** Every checked access now *calls* the runtime, so
+nothing on the path from a check entry point down through `shadow_allows` may
+perform an instrumented access of its own — it would call the check again,
+unbounded, and appear as a stack overflow with no explanation. This is the same
+invariant as §118's pre-shadow window with different roots, and it is enforced
+the same way: `scripts/kasan-check-preshadow.py` now runs a second walk from the
+`__asan_load*`/`__asan_store*` entry points. It caught a real violation on the
+first run — `shadow_allows` calling `Option::<u8>::is_some`, a `core` generic
+monomorphised into the kernel *with* instrumentation — which is why `byte_bad`
+now returns a `u8` sentinel (`0` = addressable) rather than an `Option<u8>`, and
+why `get_shadow` loads the mapped-frame bitmap and the shadow byte with `asm!`
+and indexes with shifts and masks instead of `/` and `%`.
+
+The *report* path is deliberately exempt from that rule and the walk stops
+there: it formats and backtraces, far too much code to keep raw, and it does not
+need to be. A report calls instrumented code, whose checks call `shadow_allows`,
+which is clean and returns — one level of nesting, not a regress.
+
+**Where it lives.** `scripts/kasan-build.sh` (the flag and its rationale),
+`kernel/src/mm/kasan_rt.rs` (the check entry points are now the primary ones),
+`kernel/src/mm/kasan.rs` (`get_shadow`, `byte_bad`, `shadow_allows`,
+`raw_load_u8`, `raw_shl_u64`), `scripts/kasan-check-preshadow.py` (the
+`RUNTIME_ROOT_PREFIXES` walk).
+
+**How to reverse.** Drop the one flag. The check entry points stay defined and
+unused, exactly as they were before, and the raw-`asm!` shadow lookup is
+semantically identical either way — so reversing costs only the reappearance of
+the #GP class this fixed.

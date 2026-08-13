@@ -12,6 +12,25 @@
 # clobbered by the next run.
 #
 # Kernel is assumed already built and current (soak uses --no-build).
+#
+# Soaking the compiler-instrumented (KASAN) kernel
+# ------------------------------------------------
+# The strongest configuration for the B-KNULLJUMP hunt is this soak run against
+# a kernel built by scripts/kasan-build.sh: the allocator-boundary checks that
+# `mm.corruption_hunt=1` arms only see a stomp when the *checkpoint* runs, and
+# only on a parked slab slot, whereas compiler instrumentation checks every load
+# and store as it happens and so names the faulting instruction directly.  That
+# combination is the whole point of design-decisions.md §107.
+#
+#   ./scripts/kasan-build.sh
+#   MAX_ITERS=30 SOAK_TIMEOUT=5400 STALL_SECS=300 ./scripts/wedge-soak.sh
+#
+# The two overrides are not optional.  Outlined instrumentation costs a call per
+# memory access (§119), so a full self-test boot runs several times longer than
+# the ~460-470s the defaults are sized for; leaving TIMEOUT at 720 would cut
+# every single boot short and the soak would measure nothing.  STALL_SECS must
+# grow for the same reason — a quiet self-test window stretches with everything
+# else — but not proportionally, since a true wedge is silent forever.
 set -u
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
@@ -79,6 +98,25 @@ for i in $(seq 1 "$MAX_ITERS"); do
     # corruption checkpoint counts.  (A genuinely fatal fault always prevents
     # BOOT_OK, so it surfaces as rc != 0 — nothing real is lost by this gate.)
 
+    # (0) Compiler-KASAN report: an instrumented build (scripts/kasan-build.sh)
+    #     caught a bad access at the instruction that made it.  This is the
+    #     highest-value catch available — unlike the checkpoint below it names
+    #     the faulting access rather than the damage found later — so it is
+    #     tested first.  Checked on EVERY boot regardless of rc: the profile
+    #     builds with `-asan-recover=1`, so a reported access is still performed
+    #     and the boot can go on to reach BOOT_OK and exit 0 (design-decisions
+    #     .md §119).  A plain build never prints this line, so the check is
+    #     inert for an ordinary soak.
+    if [ -f "$SERIAL" ] && grep -aq '\[kasan\] CRITICAL:' "$SERIAL"; then
+        echo ""
+        echo "=== KASAN REPORT CAUGHT on iter $n (compiler-instrumented build) ==="
+        # The backtrace that follows each report is the payload; keep enough
+        # lines to carry the first few frames of the first couple of reports.
+        grep -aA 12 '\[kasan\] CRITICAL:' "$SERIAL" | head -40 || true
+        echo "  serial: $OUTDIR/soak-$RUNSTAMP-iter$n.serial.txt"
+        caught=1
+        break
+    fi
     # (1) B-KNULLJUMP corruption checkpoint: the Path-Z hunt reported a nonzero
     #     corruption count (a stale-pointer/UAF write into a parked slot) — the
     #     precise, primary signal.  Checked on EVERY boot (the checkpoint runs

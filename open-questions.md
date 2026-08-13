@@ -389,6 +389,80 @@ limit, hit by the number of workspace members). Any of A/C must iterate crates.
 `known-issues.md` → `TD-REPO-IS-NOT-RUSTFMT-CLEAN-SO-RUNNING-CARGO-FMT-IS-A-TRAP`.
 
 
+## Q43 — The compiler-KASAN kernel is ~20× slower to boot, so the B-KNULLJUMP soak it was built for would take over a week. How should the hunt be made viable? — Status: OPEN
+
+**Raised by Claude** (2026-08-12), on measuring the profile the operator
+approved in §107.
+
+**The finding.** The instrumented kernel from `scripts/kasan-build.sh` now
+survives everything that used to kill it (§118's pre-shadow triple fault,
+§119's user-pointer `#GP`) and boots normally — but it is far slower than the
+"roughly doubled" figure §119 was written with. A plain debug boot reaches
+`BOOT_OK` in **~283–318 s** (`soak-20260723-190300`, 100/100 iterations). The
+instrumented one spent **975 s to reach 17 %** of that log, with 48 of the 66
+ring-3 spawn tests and 178 MB of the 217 MB of test ELF still ahead; line-rate
+and remaining-ELF extrapolations agree on **5500–8500 s per boot**, i.e. ~20×.
+
+**Why it matters.** For the one validating boot this is only tedious. For the
+hunt it is disqualifying. B-KNULLJUMP fires at ~1 boot in 120, so an
+even-odds soak needs ~80 boots: **over a week of wall-clock** here, versus ~7 h
+for the plain-build soak that has already been run several times. The
+escalation to compiler instrumentation was justified precisely because the
+passive tooling could not localize the bug (§107, and the Path-A exhaustion note
+in `known-issues.md`) — so the profile working but being unaffordable to soak
+leaves the bug exactly where it was.
+
+**Options.**
+- **A — build the instrumented kernel optimized (`kasan-build.sh --release`).**
+  *Pro:* most of the 20× is almost certainly `-O0` codegen and the outlined call
+  per access, not the shadow check itself; `-O2` would fold most redundant
+  checks and could plausibly land within 2–3× of a plain debug boot, which makes
+  the soak affordable at close to its usual cadence. The flag already exists and
+  the build gate (`kasan-check-preshadow.py`) validates the release binary the
+  same way, so the invariants stay mechanically proven.
+  *Con:* two real risks. (1) **No release kernel has ever been booted in this
+  project** — every boot test to date is the debug profile, so `--release` may
+  surface latent UB that debug codegen hides, and debugging *that* in the middle
+  of a corruption hunt is the worst possible time. (2) Optimization perturbs
+  instruction timing and layout, which is exactly what a rare race depends on;
+  the 1-in-120 rate is a *debug-build* measurement and may not carry over. A
+  release soak that comes back clean would be much weaker evidence than a debug
+  one.
+- **B — soak the debug instrumented build anyway, accepting >1 week.** *Pro:*
+  changes nothing about the population being sampled, so a catch is
+  unambiguous and a clean run is comparable to the existing 100-iter baseline.
+  *Con:* a week of the machine doing one thing, and it is only even odds at the
+  end of it.
+- **C — cut the instrumented boot's workload rather than its cost per
+  instruction** (e.g. a cmdline that runs only the Path-Z spawn tests
+  B-KNULLJUMP has been seen near, skipping the rest). *Pro:* potentially a large
+  constant-factor win with debug codegen retained, so timing is perturbed much
+  less than by (A). *Con:* the bug has never been localized to a specific test —
+  that is the whole problem — so trimming the workload may trim away the
+  trigger, and a clean soak would then prove nothing. Also needs new
+  test-selection plumbing that does not exist.
+- **D — leave the instrumented profile as a validated tool, do not soak it now,
+  and spend the time on roadmap work instead.** *Pro:* the profile is finished
+  and committed either way, ready for the moment a *reproducible* trigger is
+  found; B-KNULLJUMP does not block other work and never has. *Con:* the bug
+  stays open with the escalation built but unused.
+
+**Claude's recommendation.** **A, gated on a cheap experiment**: build
+`--release`, run the checker, and attempt one boot. That costs ~30 min and
+answers both unknowns at once (does a release kernel boot at all; what is the
+real per-boot cost). If it boots green and fast, soak with it and treat a clean
+result as suggestive rather than exonerating — the §119 update already records
+that timing caveat. If it does not boot, fall back to **D** rather than **B**:
+a week of machine time for even odds is a bad trade while roadmap work is
+unblocked. I have not started (A) because "boot an optimized kernel for the
+first time" is a change of profile for the whole project, which reads as
+operator-decision-worthy rather than mine to take unilaterally.
+
+**Where it bites:** `scripts/kasan-build.sh`, `scripts/wedge-soak.sh` (which now
+catches `[kasan] CRITICAL:` and documents the raised `SOAK_TIMEOUT`),
+`design-decisions.md` §107/§119, and `known-issues.md` → `B-KNULLJUMP-SIGNAL`.
+
+
 ---
 
 Recently resolved (see `design-decisions.md` for the full rationale):

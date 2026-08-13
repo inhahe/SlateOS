@@ -1354,28 +1354,21 @@ pub fn sys_channel_create(args: &SyscallArgs) -> SyscallResult {
 /// `arg2`: length of message data.
 pub fn sys_channel_send(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
-    let ptr = args.arg1 as *const u8;
     let len = args.arg2 as usize;
 
-    if ptr.is_null() && len > 0 {
+    if args.arg1 == 0 && len > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    // Validate user buffer.
-    if len > 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, len) {
-            return SyscallResult::err(e);
-        }
-    }
-
-    // SAFETY: Buffer validated above — in user space and mapped.
-    let data = if len == 0 {
-        &[]
-    } else {
-        unsafe { core::slice::from_raw_parts(ptr, len) }
+    // Copy the message body into the kernel before parsing it: `Message` owns
+    // its bytes and the send path can block, so a slice over user memory would
+    // be both a SMAP violation and a TOCTOU hazard (see `sys_pipe_write`).
+    let data = match crate::mm::user::read_user_vec(args.arg1, len, usize::MAX) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
     };
 
-    let msg = match Message::from_bytes(data) {
+    let msg = match Message::from_bytes(&data) {
         Ok(m) => m,
         Err(e) => return SyscallResult::err(e),
     };
@@ -1395,14 +1388,16 @@ pub fn sys_channel_send(args: &SyscallArgs) -> SyscallResult {
 /// Returns: message length on success.
 pub fn sys_channel_recv(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
-    let buf_ptr = args.arg1 as *mut u8;
     let buf_cap = args.arg2 as usize;
 
-    if buf_ptr.is_null() && buf_cap > 0 {
+    if args.arg1 == 0 && buf_cap > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    // Validate user buffer is writable.
+    // Fail fast on an unusable destination *before* dequeuing, so a bad pointer
+    // costs the caller an error rather than a lost message.  `copy_to_user`
+    // below re-validates, because `recv` blocks and the mapping can change
+    // underneath us while this thread sleeps.
     if buf_cap > 0 {
         if let Err(e) = crate::mm::user::validate_user_write(args.arg1, buf_cap) {
             return SyscallResult::err(e);
@@ -1415,13 +1410,13 @@ pub fn sys_channel_recv(args: &SyscallArgs) -> SyscallResult {
             let copy_len = data.len().min(buf_cap);
 
             if copy_len > 0 {
-                // SAFETY: Buffer validated above — in user space, mapped, writable.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        data.as_ptr(),
-                        buf_ptr,
-                        copy_len,
-                    );
+                // SAFETY: `data` is a live kernel-owned buffer of at least
+                // `copy_len` bytes; `copy_to_user` validates the destination
+                // and brackets the store with STAC/CLAC.
+                if let Err(e) =
+                    unsafe { crate::mm::user::copy_to_user(data.as_ptr(), args.arg1, copy_len) }
+                {
+                    return SyscallResult::err(e);
                 }
             }
 
@@ -1442,14 +1437,14 @@ pub fn sys_channel_recv(args: &SyscallArgs) -> SyscallResult {
 /// Returns: message length, 0 if empty, negative error code on failure.
 pub fn sys_channel_try_recv(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
-    let buf_ptr = args.arg1 as *mut u8;
     let buf_cap = args.arg2 as usize;
 
-    if buf_ptr.is_null() && buf_cap > 0 {
+    if args.arg1 == 0 && buf_cap > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    // Validate user buffer is writable.
+    // Fail fast before dequeuing, so a bad destination doesn't consume a
+    // message that then has nowhere to go.
     if buf_cap > 0 {
         if let Err(e) = crate::mm::user::validate_user_write(args.arg1, buf_cap) {
             return SyscallResult::err(e);
@@ -1462,13 +1457,12 @@ pub fn sys_channel_try_recv(args: &SyscallArgs) -> SyscallResult {
             let copy_len = data.len().min(buf_cap);
 
             if copy_len > 0 {
-                // SAFETY: Validated above — buf_ptr is in user space, mapped, and writable.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        data.as_ptr(),
-                        buf_ptr,
-                        copy_len,
-                    );
+                // SAFETY: `data` is a live kernel-owned buffer of at least
+                // `copy_len` bytes; `copy_to_user` validates the destination.
+                if let Err(e) =
+                    unsafe { crate::mm::user::copy_to_user(data.as_ptr(), args.arg1, copy_len) }
+                {
+                    return SyscallResult::err(e);
                 }
             }
 
@@ -1506,14 +1500,14 @@ pub fn sys_channel_close(args: &SyscallArgs) -> SyscallResult {
 /// Returns: message length on success, `TimedOut` if deadline expires.
 pub fn sys_channel_recv_timeout(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
-    let buf_ptr = args.arg1 as *mut u8;
     let buf_cap = args.arg2 as usize;
     let timeout_ns = args.arg3;
 
-    if buf_ptr.is_null() && buf_cap > 0 {
+    if args.arg1 == 0 && buf_cap > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
+    // Fail fast before dequeuing; `copy_to_user` re-validates after the wait.
     if buf_cap > 0 {
         if let Err(e) = crate::mm::user::validate_user_write(args.arg1, buf_cap) {
             return SyscallResult::err(e);
@@ -1526,13 +1520,12 @@ pub fn sys_channel_recv_timeout(args: &SyscallArgs) -> SyscallResult {
             let copy_len = data.len().min(buf_cap);
 
             if copy_len > 0 {
-                // SAFETY: Buffer validated above — in user space, mapped, writable.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        data.as_ptr(),
-                        buf_ptr,
-                        copy_len,
-                    );
+                // SAFETY: `data` is a live kernel-owned buffer of at least
+                // `copy_len` bytes; `copy_to_user` validates the destination.
+                if let Err(e) =
+                    unsafe { crate::mm::user::copy_to_user(data.as_ptr(), args.arg1, copy_len) }
+                {
+                    return SyscallResult::err(e);
                 }
             }
 
@@ -1554,28 +1547,19 @@ pub fn sys_channel_recv_timeout(args: &SyscallArgs) -> SyscallResult {
 /// Returns: 0 on success, `TimedOut` if deadline expires.
 pub fn sys_channel_send_timeout(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
-    let data_ptr = args.arg1 as *const u8;
     let data_len = args.arg2 as usize;
     let timeout_ns = args.arg3;
 
-    if data_ptr.is_null() && data_len > 0 {
+    if args.arg1 == 0 && data_len > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    if data_len > 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, data_len) {
-            return SyscallResult::err(e);
-        }
-    }
-
-    let data = if data_len == 0 {
-        &[]
-    } else {
-        // SAFETY: Validated above — data_ptr is in user space, mapped, readable.
-        unsafe { core::slice::from_raw_parts(data_ptr, data_len) }
+    let data = match crate::mm::user::read_user_vec(args.arg1, data_len, usize::MAX) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
     };
 
-    let msg = match Message::from_bytes(data) {
+    let msg = match Message::from_bytes(&data) {
         Ok(m) => m,
         Err(e) => return SyscallResult::err(e),
     };
@@ -1595,27 +1579,18 @@ pub fn sys_channel_send_timeout(args: &SyscallArgs) -> SyscallResult {
 /// Returns: 0 on success.
 pub fn sys_channel_send_blocking(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
-    let data_ptr = args.arg1 as *const u8;
     let data_len = args.arg2 as usize;
 
-    if data_ptr.is_null() && data_len > 0 {
+    if args.arg1 == 0 && data_len > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    if data_len > 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, data_len) {
-            return SyscallResult::err(e);
-        }
-    }
-
-    let data = if data_len == 0 {
-        &[]
-    } else {
-        // SAFETY: Validated above — data_ptr is in user space, mapped, readable.
-        unsafe { core::slice::from_raw_parts(data_ptr, data_len) }
+    let data = match crate::mm::user::read_user_vec(args.arg1, data_len, usize::MAX) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
     };
 
-    let msg = match Message::from_bytes(data) {
+    let msg = match Message::from_bytes(&data) {
         Ok(m) => m,
         Err(e) => return SyscallResult::err(e),
     };
@@ -1637,51 +1612,36 @@ pub fn sys_channel_send_blocking(args: &SyscallArgs) -> SyscallResult {
 /// Returns: 0 on success.
 pub fn sys_channel_send_caps(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
-    let data_ptr = args.arg1 as *const u8;
     let data_len = args.arg2 as usize;
-    let caps_ptr = args.arg3 as *const u64;
     let caps_count = args.arg4 as usize;
 
-    // Validate data buffer.
-    if data_ptr.is_null() && data_len > 0 {
+    if args.arg1 == 0 && data_len > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if data_len > 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, data_len) {
-            return SyscallResult::err(e);
-        }
-    }
-
-    // Validate caps array.
-    if caps_ptr.is_null() && caps_count > 0 {
+    if args.arg3 == 0 && caps_count > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if caps_count > 0 {
-        let caps_bytes = caps_count.saturating_mul(8); // Each handle is u64 = 8 bytes.
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg3, caps_bytes) {
-            return SyscallResult::err(e);
-        }
-    }
 
-    let data = if data_len == 0 {
-        &[]
-    } else {
-        // SAFETY: Validated above.
-        unsafe { core::slice::from_raw_parts(data_ptr, data_len) }
+    // Both the body and the handle array are copied in before the send, which
+    // can block on a full queue.  Transferring capabilities out of a slice that
+    // a peer thread could remap mid-send would be especially bad: the handles
+    // the kernel installs in the receiver would not be the ones it validated.
+    let data = match crate::mm::user::read_user_vec(args.arg1, data_len, usize::MAX) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
     };
 
-    let cap_handles = if caps_count == 0 {
-        &[]
-    } else {
-        // SAFETY: Validated above.
-        unsafe { core::slice::from_raw_parts(caps_ptr, caps_count) }
-    };
+    let cap_handles =
+        match crate::mm::user::read_user_items::<u64>(args.arg3, caps_count, usize::MAX) {
+            Ok(c) => c,
+            Err(e) => return SyscallResult::err(e),
+        };
 
     // Get sender PID.  A kernel task (no caller) maps to PID 0, which is
     // the default and needs no cap-table management.
     let sender_pid = caller_pid().unwrap_or_default();
 
-    match channel::send_with_caps(handle, data, cap_handles, sender_pid) {
+    match channel::send_with_caps(handle, &data, &cap_handles, sender_pid) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -1699,15 +1659,16 @@ pub fn sys_channel_send_caps(args: &SyscallArgs) -> SyscallResult {
 /// Returns (rdx): number of capability handles received.
 pub fn sys_channel_recv_caps(args: &SyscallArgs) -> SyscallResult {
     let handle = ChannelHandle::from_raw(args.arg0);
-    let buf_ptr = args.arg1 as *mut u8;
     let buf_cap = args.arg2 as usize;
-    let caps_out_ptr = args.arg3 as *mut u64;
     let caps_out_cap = args.arg4 as usize;
 
     // Validate message buffer.
-    if buf_ptr.is_null() && buf_cap > 0 {
+    if args.arg1 == 0 && buf_cap > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
+    // Fail fast before dequeuing: a message carrying capabilities that cannot
+    // be delivered would leak the installed handles.  The copies below
+    // re-validate, since `recv_with_caps` blocks.
     if buf_cap > 0 {
         if let Err(e) = crate::mm::user::validate_user_write(args.arg1, buf_cap) {
             return SyscallResult::err(e);
@@ -1715,7 +1676,7 @@ pub fn sys_channel_recv_caps(args: &SyscallArgs) -> SyscallResult {
     }
 
     // Validate caps output array.
-    if caps_out_ptr.is_null() && caps_out_cap > 0 {
+    if args.arg3 == 0 && caps_out_cap > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
     if caps_out_cap > 0 {
@@ -1733,26 +1694,20 @@ pub fn sys_channel_recv_caps(args: &SyscallArgs) -> SyscallResult {
             // Copy message data to user buffer.
             let copy_len = data.len().min(buf_cap);
             if copy_len > 0 {
-                // SAFETY: Buffer validated above.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        data.as_ptr(),
-                        buf_ptr,
-                        copy_len,
-                    );
+                // SAFETY: `data` is a live kernel-owned buffer of at least
+                // `copy_len` bytes; `copy_to_user` validates the destination.
+                if let Err(e) =
+                    unsafe { crate::mm::user::copy_to_user(data.as_ptr(), args.arg1, copy_len) }
+                {
+                    return SyscallResult::err(e);
                 }
             }
 
             // Copy cap handles to user output array.
             let caps_copy = new_handles.len().min(caps_out_cap);
-            if caps_copy > 0 {
-                // SAFETY: Buffer validated above.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        new_handles.as_ptr(),
-                        caps_out_ptr,
-                        caps_copy,
-                    );
+            if let Some(out) = new_handles.get(..caps_copy) {
+                if let Err(e) = crate::mm::user::write_user_items(args.arg3, out) {
+                    return SyscallResult::err(e);
                 }
             }
 
@@ -2137,27 +2092,24 @@ pub fn sys_pipe_create(args: &SyscallArgs) -> SyscallResult {
 /// Returns: number of bytes written.
 pub fn sys_pipe_write(args: &SyscallArgs) -> SyscallResult {
     let handle = PipeHandle::from_raw(args.arg0);
-    let ptr = args.arg1 as *const u8;
     let len = args.arg2 as usize;
 
-    if ptr.is_null() && len > 0 {
+    if args.arg1 == 0 && len > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    if len > 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, len) {
-            return SyscallResult::err(e);
-        }
-    }
-
-    let data = if len == 0 {
-        &[]
-    } else {
-        // SAFETY: Buffer validated above — in user space and mapped.
-        unsafe { core::slice::from_raw_parts(ptr, len) }
+    // Bounce the payload into the kernel before calling `pipe::write`, which
+    // blocks.  Handing the callee a slice over user memory would be wrong
+    // twice over: the supervisor access happens outside any STAC window once
+    // SMAP is on, and — SMAP or not — another thread in the same process can
+    // unmap or remap the range while this one sleeps on the pipe, turning the
+    // slice into a dangling pointer.  Copying first makes both impossible.
+    let data = match crate::mm::user::read_user_vec(args.arg1, len, usize::MAX) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
     };
 
-    match pipe::write(handle, data) {
+    match pipe::write(handle, &data) {
         Ok(n) => {
             #[allow(clippy::cast_possible_wrap)]
             let written = n as i64;
@@ -2176,27 +2128,18 @@ pub fn sys_pipe_write(args: &SyscallArgs) -> SyscallResult {
 /// Returns: number of bytes read (0 = EOF).
 pub fn sys_pipe_read(args: &SyscallArgs) -> SyscallResult {
     let handle = PipeHandle::from_raw(args.arg0);
-    let buf_ptr = args.arg1 as *mut u8;
     let buf_cap = args.arg2 as usize;
 
-    if buf_ptr.is_null() && buf_cap > 0 {
+    if args.arg1 == 0 && buf_cap > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    if buf_cap > 0 {
-        if let Err(e) = crate::mm::user::validate_user_write(args.arg1, buf_cap) {
-            return SyscallResult::err(e);
-        }
-    }
-
-    let buf = if buf_cap == 0 {
-        &mut []
-    } else {
-        // SAFETY: Buffer validated above — in user space, mapped, writable.
-        unsafe { core::slice::from_raw_parts_mut(buf_ptr, buf_cap) }
-    };
-
-    match pipe::read(handle, buf) {
+    // `pipe::read` blocks, so it fills a kernel-side buffer that is copied out
+    // only after it returns.  See `sys_pipe_write` for why a user slice must
+    // never cross a blocking call.
+    match crate::mm::user::with_user_out_buf(args.arg1, buf_cap, usize::MAX, |buf| {
+        pipe::read(handle, buf)
+    }) {
         Ok(n) => {
             #[allow(clippy::cast_possible_wrap)]
             let read_bytes = n as i64;
@@ -2211,27 +2154,20 @@ pub fn sys_pipe_read(args: &SyscallArgs) -> SyscallResult {
 /// Same as `SYS_PIPE_WRITE` but returns `WouldBlock` if buffer is full.
 pub fn sys_pipe_try_write(args: &SyscallArgs) -> SyscallResult {
     let handle = PipeHandle::from_raw(args.arg0);
-    let ptr = args.arg1 as *const u8;
     let len = args.arg2 as usize;
 
-    if ptr.is_null() && len > 0 {
+    if args.arg1 == 0 && len > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    if len > 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, len) {
-            return SyscallResult::err(e);
-        }
-    }
-
-    let data = if len == 0 {
-        &[]
-    } else {
-        // SAFETY: Validated above — ptr is in user space and mapped.
-        unsafe { core::slice::from_raw_parts(ptr, len) }
+    // Non-blocking, but bounced anyway: `try_write` still touches the buffer
+    // from supervisor mode, which SMAP forbids outside a STAC window.
+    let data = match crate::mm::user::read_user_vec(args.arg1, len, usize::MAX) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
     };
 
-    match pipe::try_write(handle, data) {
+    match pipe::try_write(handle, &data) {
         Ok(n) => {
             #[allow(clippy::cast_possible_wrap)]
             let written = n as i64;
@@ -2246,27 +2182,15 @@ pub fn sys_pipe_try_write(args: &SyscallArgs) -> SyscallResult {
 /// Same as `SYS_PIPE_READ` but returns `WouldBlock` if empty.
 pub fn sys_pipe_try_read(args: &SyscallArgs) -> SyscallResult {
     let handle = PipeHandle::from_raw(args.arg0);
-    let buf_ptr = args.arg1 as *mut u8;
     let buf_cap = args.arg2 as usize;
 
-    if buf_ptr.is_null() && buf_cap > 0 {
+    if args.arg1 == 0 && buf_cap > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    if buf_cap > 0 {
-        if let Err(e) = crate::mm::user::validate_user_write(args.arg1, buf_cap) {
-            return SyscallResult::err(e);
-        }
-    }
-
-    let buf = if buf_cap == 0 {
-        &mut []
-    } else {
-        // SAFETY: Validated above — buf_ptr is in user space, mapped, and writable.
-        unsafe { core::slice::from_raw_parts_mut(buf_ptr, buf_cap) }
-    };
-
-    match pipe::try_read(handle, buf) {
+    match crate::mm::user::with_user_out_buf(args.arg1, buf_cap, usize::MAX, |buf| {
+        pipe::try_read(handle, buf)
+    }) {
         Ok(n) => {
             #[allow(clippy::cast_possible_wrap)]
             let read_bytes = n as i64;
@@ -2319,28 +2243,16 @@ pub fn sys_pipe_readable_bytes(args: &SyscallArgs) -> SyscallResult {
 /// Returns: bytes read, 0 if EOF, `TimedOut` if deadline expires.
 pub fn sys_pipe_read_timeout(args: &SyscallArgs) -> SyscallResult {
     let handle = PipeHandle::from_raw(args.arg0);
-    let buf_ptr = args.arg1 as *mut u8;
     let buf_cap = args.arg2 as usize;
     let timeout_ns = args.arg3;
 
-    if buf_ptr.is_null() && buf_cap > 0 {
+    if args.arg1 == 0 && buf_cap > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    if buf_cap > 0 {
-        if let Err(e) = crate::mm::user::validate_user_write(args.arg1, buf_cap) {
-            return SyscallResult::err(e);
-        }
-    }
-
-    let buf = if buf_cap == 0 {
-        &mut []
-    } else {
-        // SAFETY: Validated above — buf_ptr is in user space, mapped, and writable.
-        unsafe { core::slice::from_raw_parts_mut(buf_ptr, buf_cap) }
-    };
-
-    match pipe::read_timeout(handle, buf, timeout_ns) {
+    match crate::mm::user::with_user_out_buf(args.arg1, buf_cap, usize::MAX, |buf| {
+        pipe::read_timeout(handle, buf, timeout_ns)
+    }) {
         Ok(n) => {
             #[allow(clippy::cast_possible_wrap)]
             let read_bytes = n as i64;
@@ -2360,28 +2272,19 @@ pub fn sys_pipe_read_timeout(args: &SyscallArgs) -> SyscallResult {
 /// Returns: bytes written, `TimedOut` if deadline expires.
 pub fn sys_pipe_write_timeout(args: &SyscallArgs) -> SyscallResult {
     let handle = PipeHandle::from_raw(args.arg0);
-    let data_ptr = args.arg1 as *const u8;
     let data_len = args.arg2 as usize;
     let timeout_ns = args.arg3;
 
-    if data_ptr.is_null() && data_len > 0 {
+    if args.arg1 == 0 && data_len > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    if data_len > 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, data_len) {
-            return SyscallResult::err(e);
-        }
-    }
-
-    let data = if data_len == 0 {
-        &[]
-    } else {
-        // SAFETY: Validated above — data_ptr is in user space, mapped, and readable.
-        unsafe { core::slice::from_raw_parts(data_ptr, data_len) }
+    let data = match crate::mm::user::read_user_vec(args.arg1, data_len, usize::MAX) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
     };
 
-    match pipe::write_timeout(handle, data, timeout_ns) {
+    match pipe::write_timeout(handle, &data, timeout_ns) {
         Ok(n) => {
             #[allow(clippy::cast_possible_wrap)]
             let written = n as i64;
@@ -2403,27 +2306,15 @@ pub fn sys_pipe_write_timeout(args: &SyscallArgs) -> SyscallResult {
 pub fn sys_pipe_peek(args: &SyscallArgs) -> SyscallResult {
     let handle = PipeHandle::from_raw(args.arg0);
     let offset = args.arg1;
-    let buf_ptr = args.arg2 as *mut u8;
     let buf_cap = args.arg3 as usize;
 
-    if buf_ptr.is_null() && buf_cap > 0 {
+    if args.arg2 == 0 && buf_cap > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    if buf_cap > 0 {
-        if let Err(e) = crate::mm::user::validate_user_write(args.arg2, buf_cap) {
-            return SyscallResult::err(e);
-        }
-    }
-
-    let buf = if buf_cap == 0 {
-        &mut []
-    } else {
-        // SAFETY: Validated above — buf_ptr is in user space, mapped, and writable.
-        unsafe { core::slice::from_raw_parts_mut(buf_ptr, buf_cap) }
-    };
-
-    match pipe::peek_at(handle, offset, buf) {
+    match crate::mm::user::with_user_out_buf(args.arg2, buf_cap, usize::MAX, |buf| {
+        pipe::peek_at(handle, offset, buf)
+    }) {
         Ok(n) => {
             #[allow(clippy::cast_possible_wrap)]
             let copied = n as i64;
@@ -2474,26 +2365,20 @@ pub fn sys_socketpair_create(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_SOCKETPAIR_SEND` — send bytes on an endpoint (blocking).
 pub fn sys_socketpair_send(args: &SyscallArgs) -> SyscallResult {
     let handle = StreamSocketHandle::from_raw(args.arg0);
-    let ptr = args.arg1 as *const u8;
     let len = args.arg2 as usize;
 
-    if ptr.is_null() && len > 0 {
+    if args.arg1 == 0 && len > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if len > 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, len) {
-            return SyscallResult::err(e);
-        }
-    }
 
-    let data = if len == 0 {
-        &[]
-    } else {
-        // SAFETY: Buffer validated above — in user space and mapped.
-        unsafe { core::slice::from_raw_parts(ptr, len) }
+    // `stream_socket::send` blocks when the peer's buffer is full; see
+    // `sys_pipe_write` for why the payload is copied in first.
+    let data = match crate::mm::user::read_user_vec(args.arg1, len, usize::MAX) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
     };
 
-    match stream_socket::send(handle, data) {
+    match stream_socket::send(handle, &data) {
         Ok(n) => {
             #[allow(clippy::cast_possible_wrap)]
             let sent = n as i64;
@@ -2506,26 +2391,15 @@ pub fn sys_socketpair_send(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_SOCKETPAIR_RECV` — receive bytes from an endpoint (blocking).
 pub fn sys_socketpair_recv(args: &SyscallArgs) -> SyscallResult {
     let handle = StreamSocketHandle::from_raw(args.arg0);
-    let buf_ptr = args.arg1 as *mut u8;
     let buf_cap = args.arg2 as usize;
 
-    if buf_ptr.is_null() && buf_cap > 0 {
+    if args.arg1 == 0 && buf_cap > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if buf_cap > 0 {
-        if let Err(e) = crate::mm::user::validate_user_write(args.arg1, buf_cap) {
-            return SyscallResult::err(e);
-        }
-    }
 
-    let buf = if buf_cap == 0 {
-        &mut []
-    } else {
-        // SAFETY: Buffer validated above — in user space, mapped, writable.
-        unsafe { core::slice::from_raw_parts_mut(buf_ptr, buf_cap) }
-    };
-
-    match stream_socket::recv(handle, buf) {
+    match crate::mm::user::with_user_out_buf(args.arg1, buf_cap, usize::MAX, |buf| {
+        stream_socket::recv(handle, buf)
+    }) {
         Ok(n) => {
             #[allow(clippy::cast_possible_wrap)]
             let recvd = n as i64;
@@ -2538,26 +2412,18 @@ pub fn sys_socketpair_recv(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_SOCKETPAIR_TRY_SEND` — non-blocking send.
 pub fn sys_socketpair_try_send(args: &SyscallArgs) -> SyscallResult {
     let handle = StreamSocketHandle::from_raw(args.arg0);
-    let ptr = args.arg1 as *const u8;
     let len = args.arg2 as usize;
 
-    if ptr.is_null() && len > 0 {
+    if args.arg1 == 0 && len > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if len > 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, len) {
-            return SyscallResult::err(e);
-        }
-    }
 
-    let data = if len == 0 {
-        &[]
-    } else {
-        // SAFETY: Validated above — ptr is in user space and mapped.
-        unsafe { core::slice::from_raw_parts(ptr, len) }
+    let data = match crate::mm::user::read_user_vec(args.arg1, len, usize::MAX) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
     };
 
-    match stream_socket::try_send(handle, data) {
+    match stream_socket::try_send(handle, &data) {
         Ok(n) => {
             #[allow(clippy::cast_possible_wrap)]
             let sent = n as i64;
@@ -2570,26 +2436,15 @@ pub fn sys_socketpair_try_send(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_SOCKETPAIR_TRY_RECV` — non-blocking receive.
 pub fn sys_socketpair_try_recv(args: &SyscallArgs) -> SyscallResult {
     let handle = StreamSocketHandle::from_raw(args.arg0);
-    let buf_ptr = args.arg1 as *mut u8;
     let buf_cap = args.arg2 as usize;
 
-    if buf_ptr.is_null() && buf_cap > 0 {
+    if args.arg1 == 0 && buf_cap > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if buf_cap > 0 {
-        if let Err(e) = crate::mm::user::validate_user_write(args.arg1, buf_cap) {
-            return SyscallResult::err(e);
-        }
-    }
 
-    let buf = if buf_cap == 0 {
-        &mut []
-    } else {
-        // SAFETY: Validated above — buf_ptr is in user space, mapped, writable.
-        unsafe { core::slice::from_raw_parts_mut(buf_ptr, buf_cap) }
-    };
-
-    match stream_socket::try_recv(handle, buf) {
+    match crate::mm::user::with_user_out_buf(args.arg1, buf_cap, usize::MAX, |buf| {
+        stream_socket::try_recv(handle, buf)
+    }) {
         Ok(n) => {
             #[allow(clippy::cast_possible_wrap)]
             let recvd = n as i64;
@@ -2612,27 +2467,19 @@ pub fn sys_socketpair_close(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_SOCKETPAIR_SEND_TIMEOUT` — send with a deadline.
 pub fn sys_socketpair_send_timeout(args: &SyscallArgs) -> SyscallResult {
     let handle = StreamSocketHandle::from_raw(args.arg0);
-    let ptr = args.arg1 as *const u8;
     let len = args.arg2 as usize;
     let timeout_ns = args.arg3;
 
-    if ptr.is_null() && len > 0 {
+    if args.arg1 == 0 && len > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if len > 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, len) {
-            return SyscallResult::err(e);
-        }
-    }
 
-    let data = if len == 0 {
-        &[]
-    } else {
-        // SAFETY: Validated above — ptr is in user space and mapped.
-        unsafe { core::slice::from_raw_parts(ptr, len) }
+    let data = match crate::mm::user::read_user_vec(args.arg1, len, usize::MAX) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
     };
 
-    match stream_socket::send_timeout(handle, data, timeout_ns) {
+    match stream_socket::send_timeout(handle, &data, timeout_ns) {
         Ok(n) => {
             #[allow(clippy::cast_possible_wrap)]
             let sent = n as i64;
@@ -2645,27 +2492,16 @@ pub fn sys_socketpair_send_timeout(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_SOCKETPAIR_RECV_TIMEOUT` — receive with a deadline.
 pub fn sys_socketpair_recv_timeout(args: &SyscallArgs) -> SyscallResult {
     let handle = StreamSocketHandle::from_raw(args.arg0);
-    let buf_ptr = args.arg1 as *mut u8;
     let buf_cap = args.arg2 as usize;
     let timeout_ns = args.arg3;
 
-    if buf_ptr.is_null() && buf_cap > 0 {
+    if args.arg1 == 0 && buf_cap > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if buf_cap > 0 {
-        if let Err(e) = crate::mm::user::validate_user_write(args.arg1, buf_cap) {
-            return SyscallResult::err(e);
-        }
-    }
 
-    let buf = if buf_cap == 0 {
-        &mut []
-    } else {
-        // SAFETY: Validated above — buf_ptr is in user space, mapped, writable.
-        unsafe { core::slice::from_raw_parts_mut(buf_ptr, buf_cap) }
-    };
-
-    match stream_socket::recv_timeout(handle, buf, timeout_ns) {
+    match crate::mm::user::with_user_out_buf(args.arg1, buf_cap, usize::MAX, |buf| {
+        stream_socket::recv_timeout(handle, buf, timeout_ns)
+    }) {
         Ok(n) => {
             #[allow(clippy::cast_possible_wrap)]
             let recvd = n as i64;

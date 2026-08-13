@@ -1992,6 +1992,48 @@ tests happen to share" and "state that was never supposed to be process-wide at
 all" look identical in a flake report and have different fixes — the first wants
 `perprocess`, the second `perthread`.
 
+**A third carve-out was wrong too — 2026-08-13.** `sys_fsuid::tests::
+test_phase79_setfsgid_invalid_from_default_zero` failed once during an unrelated
+TZ change, then passed on re-run. `sys_fsuid.rs` was the remaining deliberate
+carve-out above, justified as *"two `AtomicU32`s, already memory-safe, 6 call
+sites, and touched by no other module's tests"*.
+
+That reasoning had a hole: **"no other module's tests" is not the test — libtest
+runs a module's own tests concurrently with each other.** `sys_fsuid.rs` had ~30
+tests, every one of which called a `reset()`/`reset_creds()` helper and then
+mutated the same two atomics, so they raced *each other*. "Already memory-safe"
+was true and irrelevant: atomics stop data races, not logical ones, and the
+whole failure class here is "test A observes test B's value", which an atomic
+faithfully delivers.
+
+The module even documented its own race and called it acceptable:
+
+```rust
+let saw = current_fsuid();
+// saw could be non-zero if a prior test left state; tolerate
+// both, but always restore to 0.
+let _ = saw;
+```
+
+A test that tolerates two answers because it cannot tell which it will get is
+not a weaker test, it is a *disabled* one — and the tolerance is what stopped
+anyone noticing the module was racy.
+
+**Fix.** Converted to `perprocess::process_global!`, keeping the values as
+`AtomicU32` (the macro changes only *where* storage lives, so the target build
+is byte-identical in behaviour). Both reset helpers and all ~30 of their call
+sites are gone — per-thread storage is the reset — and the cold-value test now
+asserts `0` exactly instead of tolerating anything. 30 consecutive suite runs
+clean afterwards.
+
+**Amended rule for carve-outs.** The question is not "do other modules touch
+this state?" but **"can two tests that touch it run at the same time?"** — and
+with libtest's thread-per-test model the answer is yes whenever a module has
+more than one test that writes it. By that rule the only defensible carve-outs
+left are the two where converting would change *observable semantics*:
+`getopt.rs`'s exported C ABI globals, and `pthread.rs`'s thread-indexed TSD
+table. No remaining module qualifies on "nobody else touches it".
+
 **Residual tech debt — resolved 2026-08-12.** Four modules carried test-only
 `std::sync::Mutex` serialisation — `sys_timex` (77 references), `linux_aio_abi`
 (28), `semaphore` (14), `mqueue` (2) — that was redundant once the state they

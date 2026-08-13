@@ -12,6 +12,7 @@
 //! 0 (matching `getuid()`/`getgid()`).  POSIX semantics: each call
 //! returns the *previous* fsuid/fsgid value.
 
+use crate::perprocess::process_global;
 use crate::types::GidT;
 use crate::types::UidT;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -26,9 +27,22 @@ use core::sync::atomic::{AtomicU32, Ordering};
 // `getuid()` (which currently always returns 0) and is a safe
 // approximation.  When per-thread credentials land, switch to
 // `current_thread_creds()` lookups here.
+//
+// The values stay `AtomicU32` — `process_global!` only changes *where*
+// they live, so the target build keeps exactly the atomics it had.
 
-static FSUID: AtomicU32 = AtomicU32::new(0);
-static FSGID: AtomicU32 = AtomicU32::new(0);
+process_global! {
+    /// This process's filesystem UID.
+    fn fsuid_cell() -> AtomicU32 = AtomicU32::new(0);
+
+    /// This process's filesystem GID.
+    fn fsgid_cell() -> AtomicU32 = AtomicU32::new(0);
+}
+
+// Each access dereferences the accessor inside a single expression
+// rather than binding a `&'static AtomicU32`: on host builds the storage
+// is thread-local, so a `'static` borrow of it would be a lie that
+// outlives the thread.  The atomic itself makes concurrent access sound.
 
 /// Get the current process-wide filesystem UID.
 ///
@@ -36,7 +50,8 @@ static FSGID: AtomicU32 = AtomicU32::new(0);
 /// permissions.  Not a POSIX/Linux API — internal to posix.
 #[must_use]
 pub fn current_fsuid() -> UidT {
-    FSUID.load(Ordering::Relaxed)
+    // SAFETY: this process's own storage, borrowed only for this call.
+    unsafe { (*fsuid_cell()).load(Ordering::Relaxed) }
 }
 
 /// Get the current process-wide filesystem GID.
@@ -44,7 +59,8 @@ pub fn current_fsuid() -> UidT {
 /// See [`current_fsuid`].
 #[must_use]
 pub fn current_fsgid() -> GidT {
-    FSGID.load(Ordering::Relaxed)
+    // SAFETY: as above.
+    unsafe { (*fsgid_cell()).load(Ordering::Relaxed) }
 }
 
 // ---------------------------------------------------------------------------
@@ -111,7 +127,8 @@ pub const INVALID_GID: GidT = GidT::MAX;
 /// permission checks will use the new value.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setfsuid(fsuid: UidT) -> i32 {
-    let prev = FSUID.load(Ordering::Relaxed);
+    // SAFETY: this process's own storage, borrowed only for this call.
+    let prev = unsafe { (*fsuid_cell()).load(Ordering::Relaxed) };
     if fsuid != INVALID_UID {
         // Phase 198: Linux requires the requested uid to match one
         // of {ruid, euid, suid, fsuid} OR the caller to hold
@@ -122,7 +139,8 @@ pub extern "C" fn setfsuid(fsuid: UidT) -> i32 {
         let matches_cred = fsuid == ruid || fsuid == euid || fsuid == prev;
         if matches_cred || crate::sys_capability::has_capability(crate::sys_capability::CAP_SETUID)
         {
-            FSUID.store(fsuid, Ordering::Relaxed);
+            // SAFETY: as above.
+            unsafe { (*fsuid_cell()).store(fsuid, Ordering::Relaxed) };
         }
     }
     // Linux returns the previous fsuid as an int.  Personality / UID
@@ -139,14 +157,16 @@ pub extern "C" fn setfsuid(fsuid: UidT) -> i32 {
 /// cred-set or capability.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setfsgid(fsgid: GidT) -> i32 {
-    let prev = FSGID.load(Ordering::Relaxed);
+    // SAFETY: this process's own storage, borrowed only for this call.
+    let prev = unsafe { (*fsgid_cell()).load(Ordering::Relaxed) };
     if fsgid != INVALID_GID {
         let rgid = crate::unistd::getgid();
         let egid = crate::unistd::getegid();
         let matches_cred = fsgid == rgid || fsgid == egid || fsgid == prev;
         if matches_cred || crate::sys_capability::has_capability(crate::sys_capability::CAP_SETGID)
         {
-            FSGID.store(fsgid, Ordering::Relaxed);
+            // SAFETY: as above.
+            unsafe { (*fsgid_cell()).store(fsgid, Ordering::Relaxed) };
         }
     }
     prev as i32
@@ -160,76 +180,55 @@ pub extern "C" fn setfsgid(fsgid: GidT) -> i32 {
 mod tests {
     use super::*;
 
-    /// Reset the credentials to the default value.  Each test that
-    /// mutates the atomics restores 0 at the end so other tests see
-    /// the documented baseline.
-    fn reset() {
-        FSUID.store(0, Ordering::Relaxed);
-        FSGID.store(0, Ordering::Relaxed);
-    }
-
     #[test]
     fn test_setfsuid_returns_previous_value() {
-        reset();
         let prev = setfsuid(1000);
         assert_eq!(prev, 0);
         let prev2 = setfsuid(0);
         assert_eq!(prev2, 1000);
-        reset();
     }
 
     #[test]
     fn test_setfsgid_returns_previous_value() {
-        reset();
         let prev = setfsgid(2000);
         assert_eq!(prev, 0);
         let prev2 = setfsgid(0);
         assert_eq!(prev2, 2000);
-        reset();
     }
 
     #[test]
     fn test_setfsuid_root_default() {
-        reset();
         let prev = setfsuid(0);
         assert_eq!(prev, 0);
-        reset();
     }
 
     #[test]
     fn test_current_fsuid_follows_setter() {
-        reset();
         assert_eq!(current_fsuid(), 0);
         setfsuid(42);
         assert_eq!(current_fsuid(), 42);
-        reset();
     }
 
     #[test]
     fn test_current_fsgid_follows_setter() {
-        reset();
         assert_eq!(current_fsgid(), 0);
         setfsgid(99);
         assert_eq!(current_fsgid(), 99);
-        reset();
     }
 
     #[test]
     fn test_setfsuid_default_is_zero() {
-        // The atomics start at 0 by static initializer.  We don't
-        // reset first because we want to observe the cold value.
-        // After this test we ensure the value is back to 0.
-        let saw = current_fsuid();
-        // saw could be non-zero if a prior test left state; tolerate
-        // both, but always restore to 0.
-        let _ = saw;
-        FSUID.store(0, Ordering::Relaxed);
+        // Observing the *cold* value is the point, so nothing is set
+        // first.  This used to tolerate a non-zero reading "if a prior
+        // test left state" — which was the shared-statics race, not a
+        // real ambiguity.  With per-process storage the assertion can be
+        // exact, and a regression here means the isolation broke.
         assert_eq!(current_fsuid(), 0);
+        assert_eq!(current_fsgid(), 0);
     }
 
     #[test]
     fn test_setfsuid_setfsgid_independent() {
-        reset();
         setfsuid(7);
         setfsgid(11);
         assert_eq!(current_fsuid(), 7);
@@ -237,7 +236,6 @@ mod tests {
         // Changing one must not disturb the other.
         setfsuid(0);
         assert_eq!(current_fsgid(), 11);
-        reset();
     }
 
     // -----------------------------------------------------------------------
@@ -259,7 +257,6 @@ mod tests {
 
     #[test]
     fn test_phase79_setfsuid_invalid_uid_does_not_change_state() {
-        reset();
         // Establish a known non-default state.
         let _ = setfsuid(1234);
         assert_eq!(current_fsuid(), 1234);
@@ -269,93 +266,76 @@ mod tests {
         assert_eq!(prev, 1234);
         // And the stored value is still 1234, not u32::MAX.
         assert_eq!(current_fsuid(), 1234);
-        reset();
     }
 
     #[test]
     fn test_phase79_setfsgid_invalid_gid_does_not_change_state() {
-        reset();
         let _ = setfsgid(5678);
         assert_eq!(current_fsgid(), 5678);
         let prev = setfsgid(INVALID_GID);
         assert_eq!(prev, 5678);
         assert_eq!(current_fsgid(), 5678);
-        reset();
     }
 
     #[test]
     fn test_phase79_setfsuid_invalid_from_default_zero() {
-        reset();
         // From default state, an INVALID_UID call returns 0 and leaves
         // state at 0 (not u32::MAX).
         let prev = setfsuid(INVALID_UID);
         assert_eq!(prev, 0);
         assert_eq!(current_fsuid(), 0);
-        reset();
     }
 
     #[test]
     fn test_phase79_setfsgid_invalid_from_default_zero() {
-        reset();
         let prev = setfsgid(INVALID_GID);
         assert_eq!(prev, 0);
         assert_eq!(current_fsgid(), 0);
-        reset();
     }
 
     #[test]
     fn test_phase79_setfsuid_invalid_then_real_works() {
-        reset();
         // INVALID_UID is a no-op, so a subsequent real call still
         // observes 0 as the "previous" value.
         let _ = setfsuid(INVALID_UID);
         let prev = setfsuid(42);
         assert_eq!(prev, 0);
         assert_eq!(current_fsuid(), 42);
-        reset();
     }
 
     #[test]
     fn test_phase79_max_minus_one_is_set_not_sentinel() {
         // u32::MAX is the sentinel; u32::MAX - 1 (0xFFFFFFFE) is a
         // perfectly valid UID and must be stored.
-        reset();
         let _ = setfsuid(u32::MAX - 1);
         assert_eq!(current_fsuid(), u32::MAX - 1);
-        reset();
     }
 
     #[test]
     fn test_phase79_invalid_uid_does_not_clobber_errno() {
         // setfsuid never sets errno — even on the "would have been
         // denied" path it returns the previous value cleanly.
-        reset();
         crate::errno::set_errno(crate::errno::EBADF);
         let _ = setfsuid(INVALID_UID);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
         crate::errno::set_errno(0);
-        reset();
     }
 
     #[test]
     fn test_phase79_invalid_gid_does_not_clobber_errno() {
-        reset();
         crate::errno::set_errno(crate::errno::EBADF);
         let _ = setfsgid(INVALID_GID);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
         crate::errno::set_errno(0);
-        reset();
     }
 
     #[test]
     fn test_phase79_setfsuid_does_not_clobber_errno_on_normal_set() {
         // A normal setfsuid also leaves errno untouched.
-        reset();
         crate::errno::set_errno(crate::errno::EAGAIN);
         let _ = setfsuid(100);
         assert_eq!(crate::errno::get_errno(), crate::errno::EAGAIN);
         crate::errno::set_errno(0);
-        reset();
     }
 
     #[test]
@@ -363,14 +343,12 @@ mod tests {
         // C code that does `setfsuid((uid_t)(-1))` on a u32 typedef:
         // the cast value is u32::MAX, which is our sentinel.  Must be
         // treated as the "no change" probe, not a corrupt set.
-        reset();
         let _ = setfsuid(50);
         let cast: u32 = -1i32 as u32;
         assert_eq!(cast, u32::MAX);
         let prev = setfsuid(cast);
         assert_eq!(prev, 50);
         assert_eq!(current_fsuid(), 50);
-        reset();
     }
 
     #[test]
@@ -378,7 +356,6 @@ mod tests {
         // Real-world idiom: probe current fsuid, do work as a different
         // UID, restore.  The probe is `setfsuid(INVALID_UID)` per Linux
         // convention — it returns the current value without changing it.
-        reset();
         let _ = setfsuid(1000);
 
         // Probe: returns current (1000), state unchanged.
@@ -396,12 +373,10 @@ mod tests {
         assert_eq!(after, 65534);
         assert_eq!(current_fsuid(), 1000);
 
-        reset();
     }
 
     #[test]
     fn test_phase79_workflow_probe_then_set_then_restore_gid() {
-        reset();
         let _ = setfsgid(2000);
         let original = setfsgid(INVALID_GID);
         assert_eq!(original, 2000);
@@ -410,20 +385,17 @@ mod tests {
         let after = setfsgid(original as u32);
         assert_eq!(after, 65534);
         assert_eq!(current_fsgid(), 2000);
-        reset();
     }
 
     #[test]
     fn test_phase79_invalid_uid_does_not_affect_gid() {
         // Cross-cred non-interference: a setfsuid sentinel must not
         // touch the fsgid at all.
-        reset();
         let _ = setfsuid(7);
         let _ = setfsgid(11);
         let _ = setfsuid(INVALID_UID);
         assert_eq!(current_fsuid(), 7);
         assert_eq!(current_fsgid(), 11);
-        reset();
     }
 
     // -----------------------------------------------------------------------
@@ -445,7 +417,6 @@ mod tests {
     // -----------------------------------------------------------------------
     mod fsuid_cap_phase198 {
         use super::*;
-        use core::sync::atomic::Ordering;
 
         /// RAII guard: snapshot effective caps on construction,
         /// restore them on Drop.  Mirrors the pattern used by the
@@ -510,11 +481,6 @@ mod tests {
             assert!(!crate::sys_capability::has_capability(cap));
         }
 
-        fn reset_creds() {
-            FSUID.store(0, Ordering::Relaxed);
-            FSGID.store(0, Ordering::Relaxed);
-        }
-
         // -- Per-error-class: denial path leaves state unchanged ---------
 
         /// Without CAP_SETUID and from fsuid=0, requesting an
@@ -523,7 +489,6 @@ mod tests {
         /// state remains 0.
         #[test]
         fn test_phase198_setfsuid_no_cap_arbitrary_denied_silently() {
-            reset_creds();
             let _g = CapGuard::snapshot();
             drop_cap(crate::sys_capability::CAP_SETUID);
             crate::errno::set_errno(0);
@@ -531,13 +496,11 @@ mod tests {
             assert_eq!(prev, 0, "always returns previous fsuid");
             assert_eq!(current_fsuid(), 0, "denied: state unchanged");
             assert_eq!(crate::errno::get_errno(), 0, "setfsuid never touches errno");
-            reset_creds();
         }
 
         /// Same for setfsgid + CAP_SETGID.
         #[test]
         fn test_phase198_setfsgid_no_cap_arbitrary_denied_silently() {
-            reset_creds();
             let _g = CapGuard::snapshot();
             drop_cap(crate::sys_capability::CAP_SETGID);
             crate::errno::set_errno(0);
@@ -545,7 +508,6 @@ mod tests {
             assert_eq!(prev, 0);
             assert_eq!(current_fsgid(), 0);
             assert_eq!(crate::errno::get_errno(), 0);
-            reset_creds();
         }
 
         // -- Cred-match path: allowed even without cap --------------------
@@ -555,13 +517,11 @@ mod tests {
         /// the "no-cap, matches cred" branch is exercised.
         #[test]
         fn test_phase198_setfsuid_no_cap_matches_ruid_allowed() {
-            reset_creds();
             let _g = CapGuard::snapshot();
             drop_cap(crate::sys_capability::CAP_SETUID);
             let prev = setfsuid(0); // ruid = 0
             assert_eq!(prev, 0);
             assert_eq!(current_fsuid(), 0);
-            reset_creds();
         }
 
         /// Without CAP_SETUID, setting fsuid to the *current* fsuid
@@ -569,7 +529,6 @@ mod tests {
         /// "matches fsuid" arm of the cred set.
         #[test]
         fn test_phase198_setfsuid_no_cap_matches_current_fsuid_allowed() {
-            reset_creds();
             // With cap held, push fsuid to 7777.
             let _ = setfsuid(7777);
             assert_eq!(current_fsuid(), 7777);
@@ -580,7 +539,6 @@ mod tests {
             let prev = setfsuid(7777);
             assert_eq!(prev, 7777);
             assert_eq!(current_fsuid(), 7777);
-            reset_creds();
         }
 
         // -- With cap: arbitrary set succeeds ----------------------------
@@ -588,27 +546,23 @@ mod tests {
         /// With CAP_SETUID held, an arbitrary new fsuid is stored.
         #[test]
         fn test_phase198_setfsuid_with_cap_arbitrary_succeeds() {
-            reset_creds();
             assert!(crate::sys_capability::has_capability(
                 crate::sys_capability::CAP_SETUID,
             ));
             let prev = setfsuid(9999);
             assert_eq!(prev, 0);
             assert_eq!(current_fsuid(), 9999);
-            reset_creds();
         }
 
         /// With CAP_SETGID held, arbitrary new fsgid stored.
         #[test]
         fn test_phase198_setfsgid_with_cap_arbitrary_succeeds() {
-            reset_creds();
             assert!(crate::sys_capability::has_capability(
                 crate::sys_capability::CAP_SETGID,
             ));
             let prev = setfsgid(8888);
             assert_eq!(prev, 0);
             assert_eq!(current_fsgid(), 8888);
-            reset_creds();
         }
 
         // -- Sentinel preserved -------------------------------------------
@@ -618,24 +572,20 @@ mod tests {
         /// no-op probe (state unchanged, returns prev).
         #[test]
         fn test_phase198_invalid_uid_still_noop_with_cap() {
-            reset_creds();
             let _ = setfsuid(50);
             let prev = setfsuid(INVALID_UID);
             assert_eq!(prev, 50);
             assert_eq!(current_fsuid(), 50);
-            reset_creds();
         }
 
         /// And without cap: sentinel still skips silently.
         #[test]
         fn test_phase198_invalid_uid_still_noop_without_cap() {
-            reset_creds();
             let _g = CapGuard::snapshot();
             drop_cap(crate::sys_capability::CAP_SETUID);
             let prev = setfsuid(INVALID_UID);
             assert_eq!(prev, 0);
             assert_eq!(current_fsuid(), 0);
-            reset_creds();
         }
 
         // -- Errno discipline on the denied path --------------------------
@@ -645,7 +595,6 @@ mod tests {
         /// returns the previous value, period.
         #[test]
         fn test_phase198_denied_setfsuid_preserves_stale_errno() {
-            reset_creds();
             let _g = CapGuard::snapshot();
             drop_cap(crate::sys_capability::CAP_SETUID);
             crate::errno::set_errno(crate::errno::EBADF);
@@ -656,19 +605,16 @@ mod tests {
                 "setfsuid must not write errno even on denial"
             );
             crate::errno::set_errno(0);
-            reset_creds();
         }
 
         #[test]
         fn test_phase198_denied_setfsgid_preserves_stale_errno() {
-            reset_creds();
             let _g = CapGuard::snapshot();
             drop_cap(crate::sys_capability::CAP_SETGID);
             crate::errno::set_errno(crate::errno::EBADF);
             let _ = setfsgid(4242);
             assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
             crate::errno::set_errno(0);
-            reset_creds();
         }
 
         // -- Recovery: cap restoration re-enables arbitrary set -----------
@@ -677,7 +623,6 @@ mod tests {
         /// of scope), now arbitrary set succeeds.
         #[test]
         fn test_phase198_capguard_restore_re_enables_set() {
-            reset_creds();
             {
                 let _g = CapGuard::snapshot();
                 drop_cap(crate::sys_capability::CAP_SETUID);
@@ -689,7 +634,6 @@ mod tests {
             ));
             let _ = setfsuid(1234);
             assert_eq!(current_fsuid(), 1234, "succeeds after restore");
-            reset_creds();
         }
 
         // -- Independence: uid path uses CAP_SETUID, gid uses CAP_SETGID --
@@ -698,7 +642,6 @@ mod tests {
         /// working (different cap gates).
         #[test]
         fn test_phase198_drop_setuid_does_not_affect_setfsgid() {
-            reset_creds();
             let _g = CapGuard::snapshot();
             drop_cap(crate::sys_capability::CAP_SETUID);
             assert!(crate::sys_capability::has_capability(
@@ -707,13 +650,11 @@ mod tests {
             let prev = setfsgid(3333);
             assert_eq!(prev, 0);
             assert_eq!(current_fsgid(), 3333);
-            reset_creds();
         }
 
         /// And vice-versa.
         #[test]
         fn test_phase198_drop_setgid_does_not_affect_setfsuid() {
-            reset_creds();
             let _g = CapGuard::snapshot();
             drop_cap(crate::sys_capability::CAP_SETGID);
             assert!(crate::sys_capability::has_capability(
@@ -722,7 +663,6 @@ mod tests {
             let prev = setfsuid(4444);
             assert_eq!(prev, 0);
             assert_eq!(current_fsuid(), 4444);
-            reset_creds();
         }
 
         // -- Workflow: NFS-style probe / set / restore under cap drop -----
@@ -733,7 +673,6 @@ mod tests {
         /// 1000 via the matches-fsuid arm.
         #[test]
         fn test_phase198_workflow_probe_and_restore_under_no_cap() {
-            reset_creds();
             // Cap'd setup: become fsuid 1000.
             let _ = setfsuid(1000);
             let _g = CapGuard::snapshot();
@@ -756,7 +695,6 @@ mod tests {
             assert_eq!(restored, 1000);
             assert_eq!(current_fsuid(), 1000);
 
-            reset_creds();
         }
 
         // -- Buggy-caller --------------------------------------------------
@@ -764,7 +702,6 @@ mod tests {
         /// Repeated denied calls keep state stable.
         #[test]
         fn test_phase198_repeated_denied_calls_stable() {
-            reset_creds();
             let _g = CapGuard::snapshot();
             drop_cap(crate::sys_capability::CAP_SETUID);
             for _ in 0..8 {
@@ -772,7 +709,6 @@ mod tests {
                 assert_eq!(prev, 0);
                 assert_eq!(current_fsuid(), 0);
             }
-            reset_creds();
         }
 
         // -- Cross-checks --------------------------------------------------
@@ -781,23 +717,19 @@ mod tests {
         /// return is the previous fsuid (which is a valid uid).
         #[test]
         fn test_phase198_setfsuid_never_returns_minus_one() {
-            reset_creds();
             let _g = CapGuard::snapshot();
             drop_cap(crate::sys_capability::CAP_SETUID);
             let prev = setfsuid(9999);
             assert_ne!(prev, -1, "setfsuid never returns -1 on any path");
-            reset_creds();
         }
 
         /// Symmetry: setfsgid never returns -1.
         #[test]
         fn test_phase198_setfsgid_never_returns_minus_one() {
-            reset_creds();
             let _g = CapGuard::snapshot();
             drop_cap(crate::sys_capability::CAP_SETGID);
             let prev = setfsgid(9999);
             assert_ne!(prev, -1);
-            reset_creds();
         }
 
         /// Parity: setfsuid/setfsgid use distinct caps that mirror

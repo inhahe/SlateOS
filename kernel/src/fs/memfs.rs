@@ -27,6 +27,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 use crate::fs::vfs::{
     metadata_now_ns, normalize_path, DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo,
     Timestamp,
@@ -64,13 +65,13 @@ enum MemFsNodeKind {
     /// A regular file with byte contents.
     File(Vec<u8>),
     /// A directory containing named children.
-    Dir(BTreeMap<String, MemFsNode>),
+    Dir(BTreeMap<PathBuf, MemFsNode>),
     /// A symbolic link storing a target path string.
     ///
     /// The target is stored as-is (not resolved).  It can be absolute
     /// (starts with `/`) or relative (resolved from the symlink's
     /// parent directory).  Resolution happens during path traversal.
-    Symlink(String),
+    Symlink(PathBuf),
 }
 
 /// A single node in the memory filesystem tree.
@@ -190,7 +191,7 @@ impl MemFsNode {
         }
     }
 
-    fn new_symlink(target: String) -> Self {
+    fn new_symlink(target: PathBuf) -> Self {
         let now = metadata_now_ns();
         Self {
             kind: MemFsNodeKind::Symlink(target),
@@ -235,14 +236,14 @@ impl MemFsNode {
         }
     }
 
-    fn children(&self) -> Option<&BTreeMap<String, MemFsNode>> {
+    fn children(&self) -> Option<&BTreeMap<PathBuf, MemFsNode>> {
         match &self.kind {
             MemFsNodeKind::Dir(children) => Some(children),
             _ => None,
         }
     }
 
-    fn children_mut(&mut self) -> Option<&mut BTreeMap<String, MemFsNode>> {
+    fn children_mut(&mut self) -> Option<&mut BTreeMap<PathBuf, MemFsNode>> {
         match &mut self.kind {
             MemFsNodeKind::Dir(children) => Some(children),
             _ => None,
@@ -250,7 +251,7 @@ impl MemFsNode {
     }
 
     /// Symlink target string, if this is a symlink.
-    fn symlink_target(&self) -> Option<&str> {
+    fn symlink_target(&self) -> Option<&Path> {
         match &self.kind {
             MemFsNodeKind::Symlink(target) => Some(target),
             _ => None,
@@ -307,7 +308,7 @@ impl MemFsNode {
     }
 
     /// Convert to a VFS DirEntry.
-    fn to_dir_entry(&self, name: &str) -> DirEntry {
+    fn to_dir_entry(&self, name: &Path) -> DirEntry {
         DirEntry {
             name: PathBuf::from(name),
             entry_type: self.entry_type(),
@@ -384,23 +385,26 @@ impl MemFs {
     // -----------------------------------------------------------------------
 
     /// Split a path into components, filtering out empty parts and ".".
-    fn path_components(path: &str) -> Vec<&str> {
-        path.split('/')
-            .filter(|s| !s.is_empty() && *s != ".")
-            .collect()
+    ///
+    /// [`Path::components`] already drops the empty parts (leading, repeated
+    /// and trailing separators); the extra filter here drops `.`, which the
+    /// lexer deliberately yields verbatim because whether it is meaningful is
+    /// the filesystem's decision, not the lexer's.
+    fn path_components(path: &Path) -> Vec<&Path> {
+        path.components().filter(|c| c.as_bytes() != b".").collect()
     }
 
     /// Build the parent path from a set of components.
     ///
     /// `["a", "b", "c"]` → `"/a/b"`.  `["a"]` → `"/"`.
-    fn parent_path_of(comps: &[&str]) -> String {
+    fn parent_path_of(comps: &[&Path]) -> PathBuf {
         if comps.len() <= 1 {
-            return String::from("/");
+            return PathBuf::from("/");
         }
-        let mut p = String::new();
-        for c in &comps[..comps.len() - 1] {
-            p.push('/');
-            p.push_str(c);
+        let mut p = PathBuf::new();
+        for c in comps.get(..comps.len().saturating_sub(1)).unwrap_or(&[]) {
+            p.extend_bytes(b"/");
+            p.extend_bytes(c.as_bytes());
         }
         p
     }
@@ -419,7 +423,7 @@ impl MemFs {
     /// is a symlink.  If `false`, follow only intermediate symlinks.
     ///
     /// Returns the fully resolved path as an owned `String`.
-    fn resolve_path_str(&self, path: &str, follow_last: bool) -> KernelResult<String> {
+    fn resolve_path_str(&self, path: &Path, follow_last: bool) -> KernelResult<PathBuf> {
         let mut resolved = normalize_path(path);
         let mut depth = 0usize;
 
@@ -508,7 +512,7 @@ impl MemFs {
     /// Walk a path WITHOUT following symlinks.
     ///
     /// Used after [`resolve_path_str`] has already resolved all symlinks.
-    fn walk(&self, path: &str) -> KernelResult<&MemFsNode> {
+    fn walk(&self, path: &Path) -> KernelResult<&MemFsNode> {
         let components = Self::path_components(path);
         if components.is_empty() {
             return Ok(&self.root);
@@ -522,7 +526,7 @@ impl MemFs {
     }
 
     /// Walk a path without following symlinks (mutable).
-    fn walk_mut(&mut self, path: &str) -> KernelResult<&mut MemFsNode> {
+    fn walk_mut(&mut self, path: &Path) -> KernelResult<&mut MemFsNode> {
         let components = Self::path_components(path);
         if components.is_empty() {
             return Ok(&mut self.root);
@@ -540,13 +544,13 @@ impl MemFs {
     // -----------------------------------------------------------------------
 
     /// Resolve a path, following ALL symlinks (including the final one).
-    fn resolve(&self, path: &str) -> KernelResult<&MemFsNode> {
+    fn resolve(&self, path: &Path) -> KernelResult<&MemFsNode> {
         let resolved = self.resolve_path_str(path, true)?;
         self.walk(&resolved)
     }
 
     /// Resolve a path mutably, following ALL symlinks.
-    fn resolve_mut(&mut self, path: &str) -> KernelResult<&mut MemFsNode> {
+    fn resolve_mut(&mut self, path: &Path) -> KernelResult<&mut MemFsNode> {
         // Phase 1: resolve symlinks immutably → owned String.
         let resolved = self.resolve_path_str(path, true)?;
         // Phase 2: walk the resolved path (no symlinks left).
@@ -555,7 +559,7 @@ impl MemFs {
 
     /// Resolve a path, following intermediate symlinks but NOT the
     /// final component.  Used by `lstat` and `readlink`.
-    fn resolve_no_follow(&self, path: &str) -> KernelResult<&MemFsNode> {
+    fn resolve_no_follow(&self, path: &Path) -> KernelResult<&MemFsNode> {
         let resolved = self.resolve_path_str(path, false)?;
         self.walk(&resolved)
     }
@@ -563,7 +567,7 @@ impl MemFs {
     /// Resolve a path mutably, following intermediate symlinks but NOT the
     /// final component.  Used by `lchown`/`lutimes`-style operations that
     /// must mutate the symlink inode itself, not its target.
-    fn resolve_no_follow_mut(&mut self, path: &str) -> KernelResult<&mut MemFsNode> {
+    fn resolve_no_follow_mut(&mut self, path: &Path) -> KernelResult<&mut MemFsNode> {
         // Phase 1: resolve intermediate symlinks immutably → owned String
         // whose final component is left unfollowed.
         let resolved = self.resolve_path_str(path, false)?;
@@ -607,7 +611,7 @@ impl MemFs {
     /// the caller can create a new entry.
     ///
     /// Returns `(resolved_parent_path, filename)`.
-    fn resolve_write_path(&self, path: &str) -> KernelResult<(String, String)> {
+    fn resolve_write_path(&self, path: &Path) -> KernelResult<(PathBuf, PathBuf)> {
         let mut current_path = normalize_path(path);
         let mut depth = 0usize;
 
@@ -666,7 +670,7 @@ impl FileSystem for MemFs {
         "memfs"
     }
 
-    fn readdir(&mut self, path: &str) -> KernelResult<Vec<DirEntry>> {
+    fn readdir(&mut self, path: &Path) -> KernelResult<Vec<DirEntry>> {
         let node = self.resolve(path)?;
         let children = node.children().ok_or(KernelError::NotADirectory)?;
 
@@ -678,7 +682,7 @@ impl FileSystem for MemFs {
         Ok(entries)
     }
 
-    fn read_file(&mut self, path: &str) -> KernelResult<Vec<u8>> {
+    fn read_file(&mut self, path: &Path) -> KernelResult<Vec<u8>> {
         // Two-phase: resolve immutably to get data, then update atime.
         let data = {
             let node = self.resolve(path)?;
@@ -692,7 +696,7 @@ impl FileSystem for MemFs {
         Ok(data)
     }
 
-    fn stat(&mut self, path: &str) -> KernelResult<DirEntry> {
+    fn stat(&mut self, path: &Path) -> KernelResult<DirEntry> {
         let components = Self::path_components(path);
         if components.is_empty() {
             // Root directory.
@@ -708,7 +712,7 @@ impl FileSystem for MemFs {
         Ok(node.to_dir_entry(name))
     }
 
-    fn write_file(&mut self, path: &str, data: &[u8]) -> KernelResult<()> {
+    fn write_file(&mut self, path: &Path, data: &[u8]) -> KernelResult<()> {
         // Follow symlinks to find the actual write target.
         let (parent_path, filename) = self.resolve_write_path(path)?;
 
@@ -745,7 +749,7 @@ impl FileSystem for MemFs {
         Ok(())
     }
 
-    fn remove(&mut self, path: &str) -> KernelResult<()> {
+    fn remove(&mut self, path: &Path) -> KernelResult<()> {
         // remove() does NOT follow the final component — it removes the
         // entry itself (file or symlink).  Intermediate symlinks ARE followed.
         let (parent, filename) = self.resolve_parent_mut(path)?;
@@ -763,7 +767,7 @@ impl FileSystem for MemFs {
         Ok(())
     }
 
-    fn mkdir(&mut self, path: &str) -> KernelResult<()> {
+    fn mkdir(&mut self, path: &Path) -> KernelResult<()> {
         // mkdir does NOT follow the final component — if the name
         // already exists (even as a symlink), it returns AlreadyExists.
         let (parent, dirname) = self.resolve_parent_mut(path)?;
@@ -781,7 +785,7 @@ impl FileSystem for MemFs {
         Ok(())
     }
 
-    fn rmdir(&mut self, path: &str) -> KernelResult<()> {
+    fn rmdir(&mut self, path: &Path) -> KernelResult<()> {
         // rmdir does NOT follow the final component — a symlink at the
         // end returns NotADirectory (like Linux).
         let (parent, dirname) = self.resolve_parent_mut(path)?;
@@ -807,7 +811,7 @@ impl FileSystem for MemFs {
         Ok(())
     }
 
-    fn read_at(&mut self, path: &str, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+    fn read_at(&mut self, path: &Path, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
         let result = {
             let node = self.resolve(path)?;
             let data = node.file_data().ok_or(KernelError::IsADirectory)?;
@@ -822,7 +826,7 @@ impl FileSystem for MemFs {
         Ok(result)
     }
 
-    fn write_at(&mut self, path: &str, offset: u64, data: &[u8]) -> KernelResult<()> {
+    fn write_at(&mut self, path: &Path, offset: u64, data: &[u8]) -> KernelResult<()> {
         let node = match self.resolve_mut(path) {
             Ok(n) => n,
             Err(KernelError::NotFound) => {
@@ -867,7 +871,7 @@ impl FileSystem for MemFs {
         Ok(())
     }
 
-    fn truncate(&mut self, path: &str, size: u64) -> KernelResult<()> {
+    fn truncate(&mut self, path: &Path, size: u64) -> KernelResult<()> {
         let node = self.resolve_mut(path)?;
         // Check attributes before getting mutable data reference.
         if node.attributes.contains(FileAttr::IMMUTABLE)
@@ -882,7 +886,7 @@ impl FileSystem for MemFs {
         Ok(())
     }
 
-    fn rename(&mut self, from: &str, to: &str) -> KernelResult<()> {
+    fn rename(&mut self, from: &Path, to: &Path) -> KernelResult<()> {
         // rename() does NOT follow the final component for either source
         // or destination — it moves the entry itself (including symlinks).
         // Intermediate components ARE resolved through symlinks.
@@ -930,7 +934,7 @@ impl FileSystem for MemFs {
         Ok(())
     }
 
-    fn rename_exchange(&mut self, a: &str, b: &str) -> KernelResult<()> {
+    fn rename_exchange(&mut self, a: &Path, b: &Path) -> KernelResult<()> {
         // Atomically swap two existing entries. Like rename(), the final
         // component is NOT followed for either path; intermediate components
         // ARE resolved through symlinks. Both entries must exist.
@@ -1038,12 +1042,12 @@ impl FileSystem for MemFs {
 
     // --- Extended metadata operations ---
 
-    fn metadata(&mut self, path: &str) -> KernelResult<FileMeta> {
+    fn metadata(&mut self, path: &Path) -> KernelResult<FileMeta> {
         let node = self.resolve(path)?;
         Ok(node.to_file_meta())
     }
 
-    fn lmetadata(&mut self, path: &str) -> KernelResult<FileMeta> {
+    fn lmetadata(&mut self, path: &Path) -> KernelResult<FileMeta> {
         // No-follow: return the trailing symlink's own metadata rather
         // than its target's.  Mirrors `metadata` but uses the
         // non-following resolver.
@@ -1051,14 +1055,14 @@ impl FileSystem for MemFs {
         Ok(node.to_file_meta())
     }
 
-    fn set_attributes(&mut self, path: &str, attrs: FileAttr) -> KernelResult<()> {
+    fn set_attributes(&mut self, path: &Path, attrs: FileAttr) -> KernelResult<()> {
         let node = self.resolve_mut(path)?;
         node.attributes = attrs;
         node.changed_ns = metadata_now_ns();
         Ok(())
     }
 
-    fn set_owner(&mut self, path: &str, uid: u32, gid: u32) -> KernelResult<()> {
+    fn set_owner(&mut self, path: &Path, uid: u32, gid: u32) -> KernelResult<()> {
         let node = self.resolve_mut(path)?;
         node.uid = uid;
         node.gid = gid;
@@ -1066,7 +1070,7 @@ impl FileSystem for MemFs {
         Ok(())
     }
 
-    fn set_permissions(&mut self, path: &str, permissions: u16) -> KernelResult<()> {
+    fn set_permissions(&mut self, path: &Path, permissions: u16) -> KernelResult<()> {
         let node = self.resolve_mut(path)?;
         node.permissions = permissions;
         node.changed_ns = metadata_now_ns();
@@ -1075,7 +1079,7 @@ impl FileSystem for MemFs {
 
     fn set_times(
         &mut self,
-        path: &str,
+        path: &Path,
         accessed_ns: Timestamp,
         modified_ns: Timestamp,
     ) -> KernelResult<()> {
@@ -1092,7 +1096,7 @@ impl FileSystem for MemFs {
     /// `lchown`/`fchownat(AT_SYMLINK_NOFOLLOW)`: chown the link inode itself,
     /// not its target.  Identical to [`set_owner`](Self::set_owner) but the
     /// final path component is resolved WITHOUT following a symlink.
-    fn set_owner_no_follow(&mut self, path: &str, uid: u32, gid: u32) -> KernelResult<()> {
+    fn set_owner_no_follow(&mut self, path: &Path, uid: u32, gid: u32) -> KernelResult<()> {
         let node = self.resolve_no_follow_mut(path)?;
         node.uid = uid;
         node.gid = gid;
@@ -1103,7 +1107,7 @@ impl FileSystem for MemFs {
     /// `fchmodat2(AT_SYMLINK_NOFOLLOW)`: set mode bits on the link inode
     /// itself.  Same as [`set_permissions`](Self::set_permissions) but the
     /// final path component is resolved WITHOUT following a symlink.
-    fn set_permissions_no_follow(&mut self, path: &str, permissions: u16) -> KernelResult<()> {
+    fn set_permissions_no_follow(&mut self, path: &Path, permissions: u16) -> KernelResult<()> {
         let node = self.resolve_no_follow_mut(path)?;
         node.permissions = permissions;
         node.changed_ns = metadata_now_ns();
@@ -1114,7 +1118,7 @@ impl FileSystem for MemFs {
     /// itself.  Same as [`set_times`](Self::set_times) but no-follow.
     fn set_times_no_follow(
         &mut self,
-        path: &str,
+        path: &Path,
         accessed_ns: Timestamp,
         modified_ns: Timestamp,
     ) -> KernelResult<()> {
@@ -1128,22 +1132,22 @@ impl FileSystem for MemFs {
         Ok(())
     }
 
-    fn get_xattr(&mut self, path: &str, key: &str) -> KernelResult<Vec<u8>> {
+    fn get_xattr(&mut self, path: &Path, key: &str) -> KernelResult<Vec<u8>> {
         node_get_xattr(self.resolve(path)?, key)
     }
 
-    fn set_xattr(&mut self, path: &str, key: &str, value: &[u8]) -> KernelResult<()> {
+    fn set_xattr(&mut self, path: &Path, key: &str, value: &[u8]) -> KernelResult<()> {
         // Validation happens before path resolution so a bad key/value shape
         // is rejected identically regardless of follow mode.
         node_validate_xattr(key, value)?;
         node_set_xattr(self.resolve_mut(path)?, key, value)
     }
 
-    fn remove_xattr(&mut self, path: &str, key: &str) -> KernelResult<()> {
+    fn remove_xattr(&mut self, path: &Path, key: &str) -> KernelResult<()> {
         node_remove_xattr(self.resolve_mut(path)?, key)
     }
 
-    fn list_xattrs(&mut self, path: &str) -> KernelResult<Vec<String>> {
+    fn list_xattrs(&mut self, path: &Path) -> KernelResult<Vec<String>> {
         Ok(node_list_xattrs(self.resolve(path)?))
     }
 
@@ -1151,26 +1155,26 @@ impl FileSystem for MemFs {
     // Operate on the symlink inode itself rather than its target.  Identical
     // to the following versions but the final component is not followed.
 
-    fn get_xattr_no_follow(&mut self, path: &str, key: &str) -> KernelResult<Vec<u8>> {
+    fn get_xattr_no_follow(&mut self, path: &Path, key: &str) -> KernelResult<Vec<u8>> {
         node_get_xattr(self.resolve_no_follow(path)?, key)
     }
 
-    fn set_xattr_no_follow(&mut self, path: &str, key: &str, value: &[u8]) -> KernelResult<()> {
+    fn set_xattr_no_follow(&mut self, path: &Path, key: &str, value: &[u8]) -> KernelResult<()> {
         node_validate_xattr(key, value)?;
         node_set_xattr(self.resolve_no_follow_mut(path)?, key, value)
     }
 
-    fn remove_xattr_no_follow(&mut self, path: &str, key: &str) -> KernelResult<()> {
+    fn remove_xattr_no_follow(&mut self, path: &Path, key: &str) -> KernelResult<()> {
         node_remove_xattr(self.resolve_no_follow_mut(path)?, key)
     }
 
-    fn list_xattrs_no_follow(&mut self, path: &str) -> KernelResult<Vec<String>> {
+    fn list_xattrs_no_follow(&mut self, path: &Path) -> KernelResult<Vec<String>> {
         Ok(node_list_xattrs(self.resolve_no_follow(path)?))
     }
 
     // --- Symlink operations ---
 
-    fn symlink(&mut self, path: &str, target: &str) -> KernelResult<()> {
+    fn symlink(&mut self, path: &Path, target: &Path) -> KernelResult<()> {
         if target.is_empty() {
             return Err(KernelError::InvalidArgument);
         }
@@ -1198,7 +1202,7 @@ impl FileSystem for MemFs {
         Ok(())
     }
 
-    fn readlink(&mut self, path: &str) -> KernelResult<String> {
+    fn readlink(&mut self, path: &Path) -> KernelResult<String> {
         // readlink does NOT follow the final component.
         let node = self.resolve_no_follow(path)?;
         match node.symlink_target() {
@@ -1207,7 +1211,7 @@ impl FileSystem for MemFs {
         }
     }
 
-    fn lstat(&mut self, path: &str) -> KernelResult<DirEntry> {
+    fn lstat(&mut self, path: &Path) -> KernelResult<DirEntry> {
         let components = Self::path_components(path);
         if components.is_empty() {
             return Ok(DirEntry {

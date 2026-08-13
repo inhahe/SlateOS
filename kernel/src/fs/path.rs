@@ -397,6 +397,17 @@ impl core::ops::Deref for PathBuf {
     }
 }
 
+/// Lets a `BTreeMap<PathBuf, _>` or `BTreeSet<PathBuf>` be looked up by
+/// `&Path` without allocating an owned key for every probe — the same reason
+/// `String: Borrow<str>` exists. `Ord`/`Eq`/`Hash` must agree between the two
+/// types for this to be sound, and they do: both derive from the same byte
+/// slice, since `PathBuf`'s impls delegate to `Vec<u8>` and `Path`'s to `[u8]`.
+impl core::borrow::Borrow<Path> for PathBuf {
+    fn borrow(&self) -> &Path {
+        self.as_path()
+    }
+}
+
 impl AsRef<Path> for PathBuf {
     fn as_ref(&self) -> &Path {
         self.as_path()

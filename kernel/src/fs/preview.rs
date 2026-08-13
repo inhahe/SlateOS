@@ -44,6 +44,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -128,7 +129,7 @@ pub struct Preview {
     /// Kind of preview that was generated.
     pub kind: PreviewKind,
     /// Source file path.
-    pub source: String,
+    pub source: PathBuf,
     /// MIME type of source.
     pub mime: String,
 }
@@ -176,7 +177,8 @@ static CUSTOM_GENERATORS: spin::Mutex<Vec<CustomGenerator>> = spin::Mutex::new(V
 ///
 /// Returns RGBA pixel data at the requested size.  Checks thumbcache
 /// first; on cache miss, generates and stores the result.
-pub fn generate(path: &str, size: PreviewSize) -> KernelResult<Preview> {
+pub fn generate(path: impl AsRef<Path>, size: PreviewSize) -> KernelResult<Preview> {
+    let path = path.as_ref();
     GENERATE_COUNT.fetch_add(1, Ordering::Relaxed);
 
     // Check file exists and get metadata.
@@ -202,7 +204,7 @@ pub fn generate(path: &str, size: PreviewSize) -> KernelResult<Preview> {
             width: cached.width,
             height: cached.height,
             kind: PreviewKind::Image,
-            source: String::from(path),
+            source: path.to_path_buf(),
             mime: String::from(crate::fs::mime::detect(path).unwrap_or("application/octet-stream")),
         });
     }
@@ -230,7 +232,7 @@ pub fn generate(path: &str, size: PreviewSize) -> KernelResult<Preview> {
 }
 
 /// Check if a file type supports preview generation.
-pub fn supports_preview(path: &str) -> bool {
+pub fn supports_preview(path: impl AsRef<Path>) -> bool {
     let mime = crate::fs::mime::detect(path).unwrap_or("application/octet-stream");
     mime_supports_preview(mime)
 }
@@ -284,7 +286,7 @@ pub fn list_generators() -> Vec<CustomGenerator> {
 
 /// Dispatch to the appropriate generator based on MIME type.
 fn generate_for_mime(
-    path: &str,
+    path: &Path,
     mime: &str,
     width: u32,
     height: u32,
@@ -314,7 +316,7 @@ fn generate_for_mime(
 /// For now, creates a solid color block representing the image with its
 /// dimensions info — actual image scaling requires a decoder.
 fn generate_image_preview(
-    path: &str,
+    path: &Path,
     mime: &str,
     width: u32,
     height: u32,
@@ -359,7 +361,7 @@ fn generate_image_preview(
         width,
         height,
         kind: PreviewKind::Image,
-        source: String::from(path),
+        source: path.to_path_buf(),
         mime: String::from(mime),
     })
 }
@@ -424,7 +426,7 @@ fn extract_image_dimensions(header: &[u8], mime: &str) -> (u32, u32) {
 ///
 /// Renders the first few lines of text as a miniature text view.
 fn generate_text_preview(
-    path: &str,
+    path: &Path,
     mime: &str,
     width: u32,
     height: u32,
@@ -501,14 +503,14 @@ fn generate_text_preview(
         width,
         height,
         kind: PreviewKind::Text,
-        source: String::from(path),
+        source: path.to_path_buf(),
         mime: String::from(mime),
     })
 }
 
 /// Generate preview for audio files (album art extraction).
 fn generate_audio_preview(
-    path: &str,
+    path: &Path,
     mime: &str,
     width: u32,
     height: u32,
@@ -533,7 +535,7 @@ fn generate_audio_preview(
 
 /// Generate a music note icon as placeholder for audio.
 fn generate_music_icon(
-    path: &str,
+    path: &Path,
     mime: &str,
     width: u32,
     height: u32,
@@ -583,14 +585,14 @@ fn generate_music_icon(
         width,
         height,
         kind: PreviewKind::AlbumArt,
-        source: String::from(path),
+        source: path.to_path_buf(),
         mime: String::from(mime),
     })
 }
 
 /// Generate preview for PDF files (first page rendering).
 fn generate_pdf_preview(
-    path: &str,
+    path: &Path,
     width: u32,
     height: u32,
 ) -> KernelResult<Preview> {
@@ -642,14 +644,14 @@ fn generate_pdf_preview(
         width,
         height,
         kind: PreviewKind::Icon,
-        source: String::from(path),
+        source: path.to_path_buf(),
         mime: String::from("application/pdf"),
     })
 }
 
 /// Generate preview for archive files (show file listing).
 fn generate_archive_preview(
-    path: &str,
+    path: &Path,
     mime: &str,
     width: u32,
     height: u32,
@@ -695,14 +697,14 @@ fn generate_archive_preview(
         width,
         height,
         kind: PreviewKind::Listing,
-        source: String::from(path),
+        source: path.to_path_buf(),
         mime: String::from(mime),
     })
 }
 
 /// Generate a generic placeholder icon.
 fn generate_placeholder(
-    path: &str,
+    path: &Path,
     mime: &str,
     width: u32,
     height: u32,
@@ -729,7 +731,7 @@ fn generate_placeholder(
         width,
         height,
         kind: PreviewKind::Icon,
-        source: String::from(path),
+        source: path.to_path_buf(),
         mime: String::from(mime),
     })
 }
@@ -747,17 +749,17 @@ fn is_custom_handled(mime: &str) -> bool {
 /// Generate previews for all files in a directory.
 ///
 /// Returns the number of previews generated (skips unsupported types).
-pub fn generate_for_directory(dir: &str, size: PreviewSize) -> KernelResult<usize> {
+pub fn generate_for_directory(dir: impl AsRef<Path>, size: PreviewSize) -> KernelResult<usize> {
+    let dir = dir.as_ref();
     let entries = crate::fs::vfs::Vfs::readdir(dir)?;
     let mut generated = 0usize;
 
     for entry in &entries {
         if entry.entry_type == crate::fs::EntryType::File {
-            let path = if dir == "/" {
-                alloc::format!("/{}", entry.name)
-            } else {
-                alloc::format!("{}/{}", dir, entry.name)
-            };
+            // `Path::join` already collapses the root case, so the old
+            // `dir == "/"` special case (which existed only to avoid a
+            // doubled separator) is gone.
+            let path = dir.join(&entry.name);
             if supports_preview(&path) {
                 if generate(&path, size).is_ok() {
                     generated = generated.saturating_add(1);
@@ -869,7 +871,7 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 6: placeholder generation.
     {
-        let preview = generate_placeholder("/test.bin", "application/octet-stream", 48, 48)?;
+        let preview = generate_placeholder(Path::new("/test.bin"), "application/octet-stream", 48, 48)?;
         assert_eq!(preview.width, 48);
         assert_eq!(preview.height, 48);
         assert_eq!(preview.pixels.len(), 48 * 48 * 4);

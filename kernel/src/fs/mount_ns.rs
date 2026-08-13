@@ -50,6 +50,7 @@ use alloc::vec::Vec;
 use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -69,7 +70,7 @@ const MAX_NAMESPACES: usize = 256;
 #[derive(Debug, Clone)]
 pub struct NsMount {
     /// Mount point path (e.g., "/", "/tmp").
-    pub mount_path: String,
+    pub mount_path: PathBuf,
     /// Filesystem type name (e.g., "ext4", "memfs", "procfs").
     pub fs_type: String,
     /// Whether this mount is read-only in this namespace.
@@ -293,17 +294,23 @@ pub fn get_ns(pid: u64) -> NamespaceId {
 // ---------------------------------------------------------------------------
 
 /// Add a mount point to a namespace.
-pub fn ns_mount(ns_id: NamespaceId, mount_path: &str, fs_type: &str, readonly: bool) -> KernelResult<()> {
+pub fn ns_mount(
+    ns_id: NamespaceId,
+    mount_path: impl AsRef<Path>,
+    fs_type: &str,
+    readonly: bool,
+) -> KernelResult<()> {
+    let mount_path = mount_path.as_ref();
     let mut inner = NAMESPACES.lock();
     let ns = inner.namespaces.get_mut(&ns_id).ok_or(KernelError::NotFound)?;
 
     // Check for duplicate.
-    if ns.mounts.iter().any(|m| m.mount_path == mount_path) {
+    if ns.mounts.iter().any(|m| m.mount_path.as_path() == mount_path) {
         return Err(KernelError::AlreadyExists);
     }
 
     ns.mounts.push(NsMount {
-        mount_path: mount_path.into(),
+        mount_path: mount_path.to_path_buf(),
         fs_type: fs_type.into(),
         readonly,
     });
@@ -312,12 +319,13 @@ pub fn ns_mount(ns_id: NamespaceId, mount_path: &str, fs_type: &str, readonly: b
 }
 
 /// Remove a mount point from a namespace.
-pub fn ns_unmount(ns_id: NamespaceId, mount_path: &str) -> KernelResult<()> {
+pub fn ns_unmount(ns_id: NamespaceId, mount_path: impl AsRef<Path>) -> KernelResult<()> {
+    let mount_path = mount_path.as_ref();
     let mut inner = NAMESPACES.lock();
     let ns = inner.namespaces.get_mut(&ns_id).ok_or(KernelError::NotFound)?;
 
     let before = ns.mounts.len();
-    ns.mounts.retain(|m| m.mount_path != mount_path);
+    ns.mounts.retain(|m| m.mount_path.as_path() != mount_path);
 
     if ns.mounts.len() == before {
         return Err(KernelError::NotFound);
@@ -336,41 +344,48 @@ pub fn ns_mounts(ns_id: NamespaceId) -> KernelResult<Vec<NsMount>> {
 /// Check if a path is visible in a namespace.
 ///
 /// A path is visible if it is under any mount point in the namespace.
-pub fn is_visible(ns_id: NamespaceId, path: &str) -> KernelResult<bool> {
+///
+/// Subtree containment is decided by [`crate::fs::pathutil::path_in_subtree`],
+/// which matches on component boundaries over raw bytes.  This used to
+/// build `format!("{}/", mp.trim_end_matches('/'))` and `starts_with` it,
+/// which required both sides to be UTF-8 and — because it tested a byte
+/// prefix rather than a component prefix — is the same shape of bug that
+/// made `/ab` look like it lived under `/a`.
+pub fn is_visible(ns_id: NamespaceId, path: impl AsRef<Path>) -> KernelResult<bool> {
+    let path = path.as_ref();
     let inner = NAMESPACES.lock();
     let ns = inner.namespaces.get(&ns_id).ok_or(KernelError::NotFound)?;
 
-    for mount in &ns.mounts {
-        if path == mount.mount_path || path.starts_with(&alloc::format!("{}/", mount.mount_path.trim_end_matches('/'))) {
-            return Ok(true);
-        }
-        // Root mount covers everything.
-        if mount.mount_path == "/" {
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
+    // A root mount covers everything; `path_in_subtree` already returns
+    // `true` for a `/` prefix, so it needs no special case here.
+    Ok(ns
+        .mounts
+        .iter()
+        .any(|mount| crate::fs::pathutil::path_in_subtree(path, &mount.mount_path)))
 }
 
 /// Check if a path is writable in a namespace.
 ///
-/// A path is writable if it's under a non-readonly mount.
-pub fn is_writable(ns_id: NamespaceId, path: &str) -> KernelResult<bool> {
+/// A path is writable if it's under a non-readonly mount.  When several
+/// mounts cover the path the most specific one wins, measured in matched
+/// *components* rather than bytes: `/` has depth 0, `/a/b` has depth 2, and
+/// a deeper mount always shadows a shallower one regardless of how long the
+/// names in it happen to be.
+pub fn is_writable(ns_id: NamespaceId, path: impl AsRef<Path>) -> KernelResult<bool> {
+    let path = path.as_ref();
     let inner = NAMESPACES.lock();
     let ns = inner.namespaces.get(&ns_id).ok_or(KernelError::NotFound)?;
 
     // Find the longest matching mount point.
     let mut best_match: Option<&NsMount> = None;
-    let mut best_len = 0;
+    let mut best_depth = 0;
 
     for mount in &ns.mounts {
-        let mp = mount.mount_path.trim_end_matches('/');
-        if path == mp || path.starts_with(&alloc::format!("{}/", mp)) || mp == "/" {
-            let len = if mp == "/" { 0 } else { mp.len() };
-            if len >= best_len {
+        if crate::fs::pathutil::path_in_subtree(path, &mount.mount_path) {
+            let depth = mount.mount_path.components().count();
+            if depth >= best_depth {
                 best_match = Some(mount);
-                best_len = len;
+                best_depth = depth;
             }
         }
     }
@@ -382,12 +397,17 @@ pub fn is_writable(ns_id: NamespaceId, path: &str) -> KernelResult<bool> {
 }
 
 /// Set a mount as read-only or read-write in a namespace.
-pub fn set_readonly(ns_id: NamespaceId, mount_path: &str, readonly: bool) -> KernelResult<()> {
+pub fn set_readonly(
+    ns_id: NamespaceId,
+    mount_path: impl AsRef<Path>,
+    readonly: bool,
+) -> KernelResult<()> {
+    let mount_path = mount_path.as_ref();
     let mut inner = NAMESPACES.lock();
     let ns = inner.namespaces.get_mut(&ns_id).ok_or(KernelError::NotFound)?;
 
     for mount in &mut ns.mounts {
-        if mount.mount_path == mount_path {
+        if mount.mount_path.as_path() == mount_path {
             mount.readonly = readonly;
             return Ok(());
         }
@@ -466,8 +486,8 @@ pub fn self_test() -> KernelResult<()> {
         let child_mounts = ns_mounts(child_id)?;
         let root_mounts = ns_mounts(ROOT_NAMESPACE)?;
 
-        let child_has_sandbox = child_mounts.iter().any(|m| m.mount_path == "/sandbox");
-        let root_has_sandbox = root_mounts.iter().any(|m| m.mount_path == "/sandbox");
+        let child_has_sandbox = child_mounts.iter().any(|m| m.mount_path.as_path() == Path::new("/sandbox"));
+        let root_has_sandbox = root_mounts.iter().any(|m| m.mount_path.as_path() == Path::new("/sandbox"));
 
         if !child_has_sandbox {
             serial_println!("[mount_ns]   ERROR: /sandbox not in child");
@@ -564,7 +584,7 @@ pub fn self_test() -> KernelResult<()> {
     {
         ns_unmount(child_id, "/sandbox")?;
         let child_mounts = ns_mounts(child_id)?;
-        let has_sandbox = child_mounts.iter().any(|m| m.mount_path == "/sandbox");
+        let has_sandbox = child_mounts.iter().any(|m| m.mount_path.as_path() == Path::new("/sandbox"));
         if has_sandbox {
             serial_println!("[mount_ns]   ERROR: /sandbox still mounted after unmount");
             let _ = destroy(child_id);

@@ -40,6 +40,7 @@ use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::KernelResult;
+use crate::fs::path::{Path, PathBuf};
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -105,7 +106,7 @@ pub struct Field {
 #[derive(Debug, Clone)]
 pub struct FileInfo {
     /// Path of the file.
-    pub path: String,
+    pub path: PathBuf,
     /// Detected MIME type.
     pub mime: String,
     /// Format-specific human-readable description.
@@ -115,9 +116,9 @@ pub struct FileInfo {
 }
 
 impl FileInfo {
-    fn new(path: &str, mime: &str) -> Self {
+    fn new(path: &Path, mime: &str) -> Self {
         Self {
-            path: String::from(path),
+            path: path.to_path_buf(),
             mime: String::from(mime),
             format_desc: String::new(),
             fields: Vec::new(),
@@ -205,7 +206,8 @@ static ERROR_COUNT: AtomicU64 = AtomicU64::new(0);
 ///
 /// Detects the MIME type, then runs the appropriate format-specific parser.
 /// Returns fields for display in file explorer columns.
-pub fn extract(path: &str) -> KernelResult<FileInfo> {
+pub fn extract(path: impl AsRef<Path>) -> KernelResult<FileInfo> {
+    let path = path.as_ref();
     EXTRACT_COUNT.fetch_add(1, Ordering::Relaxed);
 
     let mime = crate::fs::mime::detect(path)?;
@@ -387,7 +389,7 @@ pub fn fields_for_mime(mime: &str) -> Vec<(&'static str, &'static str)> {
 // ---------------------------------------------------------------------------
 
 /// Parse MP3 file: ID3v1 (tail), ID3v2 (header), MPEG frame header.
-fn parse_mp3(header: &[u8], path: &str, info: &mut FileInfo) {
+fn parse_mp3(header: &[u8], path: &Path, info: &mut FileInfo) {
     // Try ID3v2 from header.
     parse_id3v2(header, info);
 
@@ -1215,7 +1217,7 @@ pub fn self_test() -> KernelResult<()> {
 }
 
 fn test_id3v1_parse() {
-    let mut info = FileInfo::new("/test.mp3", "audio/mpeg");
+    let mut info = FileInfo::new(Path::new("/test.mp3"), "audio/mpeg");
 
     // Construct a minimal ID3v1 tag.
     let mut tag = [0u8; 128];
@@ -1250,7 +1252,7 @@ fn test_id3v1_parse() {
 }
 
 fn test_id3v2_parse() {
-    let mut info = FileInfo::new("/test.mp3", "audio/mpeg");
+    let mut info = FileInfo::new(Path::new("/test.mp3"), "audio/mpeg");
 
     // Construct minimal ID3v2.3 tag: header + one TIT2 frame.
     let mut data = Vec::new();
@@ -1279,7 +1281,7 @@ fn test_id3v2_parse() {
 }
 
 fn test_png_parse() {
-    let mut info = FileInfo::new("/test.png", "image/png");
+    let mut info = FileInfo::new(Path::new("/test.png"), "image/png");
 
     // Construct minimal PNG: signature + IHDR chunk.
     let mut data = Vec::new();
@@ -1311,7 +1313,7 @@ fn test_png_parse() {
 }
 
 fn test_gif_parse() {
-    let mut info = FileInfo::new("/test.gif", "image/gif");
+    let mut info = FileInfo::new(Path::new("/test.gif"), "image/gif");
 
     let mut data = Vec::new();
     data.extend_from_slice(b"GIF89a");
@@ -1331,7 +1333,7 @@ fn test_gif_parse() {
 }
 
 fn test_bmp_parse() {
-    let mut info = FileInfo::new("/test.bmp", "image/bmp");
+    let mut info = FileInfo::new(Path::new("/test.bmp"), "image/bmp");
 
     let mut data = vec![0u8; 40];
     data[0] = b'B'; data[1] = b'M';
@@ -1359,7 +1361,7 @@ fn test_bmp_parse() {
 }
 
 fn test_wav_parse() {
-    let mut info = FileInfo::new("/test.wav", "audio/wav");
+    let mut info = FileInfo::new(Path::new("/test.wav"), "audio/wav");
 
     let mut data = vec![0u8; 48];
     data[0..4].copy_from_slice(b"RIFF");
@@ -1395,7 +1397,7 @@ fn test_wav_parse() {
 }
 
 fn test_elf_parse() {
-    let mut info = FileInfo::new("/test.elf", "application/x-elf");
+    let mut info = FileInfo::new(Path::new("/test.elf"), "application/x-elf");
 
     let mut data = vec![0u8; 24];
     data[0..4].copy_from_slice(b"\x7FELF");

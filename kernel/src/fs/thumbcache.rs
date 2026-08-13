@@ -34,13 +34,12 @@
 
 #![allow(dead_code)]
 
-use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::KernelResult;
+use crate::fs::path::{Path, PathBuf};
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -122,7 +121,7 @@ impl ThumbSize {
 #[derive(Debug, Clone)]
 pub struct CachedThumb {
     /// Source file path.
-    pub path: String,
+    pub path: PathBuf,
     /// Thumbnail pixel width.
     pub width: u32,
     /// Thumbnail pixel height.
@@ -142,7 +141,7 @@ pub struct CachedThumb {
 /// Cache entry (internal).
 struct CacheEntry {
     /// Cache key: path + size category.
-    path: String,
+    path: PathBuf,
     size: ThumbSize,
     /// Thumbnail data.
     thumb: CachedThumb,
@@ -172,12 +171,13 @@ static EVICT_COUNT: AtomicU64 = AtomicU64::new(0);
 ///
 /// Returns `Some` if the thumbnail is cached AND the source file hasn't
 /// changed (validated by mtime + size). Returns `None` on cache miss.
-pub fn get(path: &str, size: ThumbSize) -> Option<CachedThumb> {
+pub fn get(path: impl AsRef<Path>, size: ThumbSize) -> Option<CachedThumb> {
+    let path = path.as_ref();
     let now = crate::timekeeping::clock_monotonic();
     let mut cache = CACHE.lock();
 
     // Find matching entry.
-    let entry = cache.iter_mut().find(|e| e.path == path && e.size == size)?;
+    let entry = cache.iter_mut().find(|e| e.path.as_path() == path && e.size == size)?;
 
     // Validate: check if source file changed.
     if let Ok(meta) = crate::fs::Vfs::metadata(path) {
@@ -199,7 +199,7 @@ pub fn get(path: &str, size: ThumbSize) -> Option<CachedThumb> {
 /// The caller provides the pre-generated RGBA pixel data.
 /// Evicts least-recently-used entries if at capacity or memory limit.
 pub fn store(
-    path: &str,
+    path: impl AsRef<Path>,
     size: ThumbSize,
     width: u32,
     height: u32,
@@ -207,12 +207,13 @@ pub fn store(
     source_mtime_ns: u64,
     source_size: u64,
 ) -> KernelResult<()> {
+    let path = path.as_ref();
     let now = crate::timekeeping::clock_monotonic();
     let data_len = data.len();
     STORE_COUNT.fetch_add(1, Ordering::Relaxed);
 
     let thumb = CachedThumb {
-        path: String::from(path),
+        path: path.to_path_buf(),
         width,
         height,
         data,
@@ -225,7 +226,7 @@ pub fn store(
     let mut cache = CACHE.lock();
 
     // Remove existing entry for same path+size.
-    if let Some(pos) = cache.iter().position(|e| e.path == path && e.size == size) {
+    if let Some(pos) = cache.iter().position(|e| e.path.as_path() == path && e.size == size) {
         let old_len = cache[pos].thumb.data.len() as u64;
         cache.swap_remove(pos);
         MEMORY_USED.fetch_sub(old_len, Ordering::Relaxed);
@@ -246,7 +247,7 @@ pub fn store(
     MEMORY_USED.fetch_add(data_len as u64, Ordering::Relaxed);
 
     cache.push(CacheEntry {
-        path: String::from(path),
+        path: path.to_path_buf(),
         size,
         thumb,
     });
@@ -257,12 +258,13 @@ pub fn store(
 /// Invalidate all cached thumbnails for a path.
 ///
 /// Called when a file is modified, deleted, or renamed.
-pub fn invalidate(path: &str) -> usize {
+pub fn invalidate(path: impl AsRef<Path>) -> usize {
+    let path = path.as_ref();
     let mut cache = CACHE.lock();
     let len_before = cache.len();
 
     cache.retain(|e| {
-        if e.path == path {
+        if e.path.as_path() == path {
             MEMORY_USED.fetch_sub(e.thumb.data.len() as u64, Ordering::Relaxed);
             false
         } else {
@@ -274,18 +276,17 @@ pub fn invalidate(path: &str) -> usize {
 }
 
 /// Invalidate thumbnails for all files under a directory prefix.
-pub fn invalidate_dir(dir_path: &str) -> usize {
-    let prefix = if dir_path.ends_with('/') {
-        String::from(dir_path)
-    } else {
-        format!("{}/", dir_path)
-    };
-
+pub fn invalidate_dir(dir_path: impl AsRef<Path>) -> usize {
+    let dir_path = dir_path.as_ref();
     let mut cache = CACHE.lock();
     let len_before = cache.len();
 
+    // `path_in_subtree` matches on component boundaries and already covers
+    // the directory itself, replacing the hand-built `format!("{}/", dir)`
+    // byte prefix — which needed UTF-8 and, being a byte test, would also
+    // have invalidated `/ab` when asked to invalidate `/a`.
     cache.retain(|e| {
-        if e.path.starts_with(prefix.as_str()) || e.path == dir_path {
+        if crate::fs::pathutil::path_in_subtree(&e.path, dir_path) {
             MEMORY_USED.fetch_sub(e.thumb.data.len() as u64, Ordering::Relaxed);
             false
         } else {
@@ -305,7 +306,7 @@ pub fn is_thumbnailable(mime: &str) -> bool {
 }
 
 /// Get a list of cached paths.
-pub fn list() -> Vec<(String, ThumbSize, u32, u32, usize)> {
+pub fn list() -> Vec<(PathBuf, ThumbSize, u32, u32, usize)> {
     let cache = CACHE.lock();
     cache.iter()
         .map(|e| (

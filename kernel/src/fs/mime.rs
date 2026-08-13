@@ -33,6 +33,7 @@
 //! This makes it safe to call from any context (interrupt, kshell, VFS).
 
 use crate::error::KernelResult;
+use crate::fs::path::Path;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -43,7 +44,8 @@ use crate::error::KernelResult;
 /// Reads the first 512 bytes for magic detection, then falls back to
 /// extension-based detection.  Returns `"application/octet-stream"` for
 /// unknown binary files and `"text/plain"` for unknown text files.
-pub fn detect(path: &str) -> KernelResult<&'static str> {
+pub fn detect(path: impl AsRef<Path>) -> KernelResult<&'static str> {
+    let path = path.as_ref();
     // Try magic detection first (reads file header).
     if let Ok(header) = crate::fs::Vfs::read_at(path, 0, 512) {
         if let Some(mime) = from_bytes(&header) {
@@ -51,8 +53,10 @@ pub fn detect(path: &str) -> KernelResult<&'static str> {
         }
     }
 
-    // Fall back to extension.
-    if let Some(ext) = path_extension(path) {
+    // Fall back to extension.  A non-UTF-8 extension simply matches no table
+    // entry — every extension we know is ASCII — which is the same answer as
+    // an unrecognised one, so `to_str` failing needs no special case.
+    if let Some(ext) = path.extension().and_then(Path::to_str) {
         if let Some(mime) = from_extension(ext) {
             return Ok(mime);
         }
@@ -455,17 +459,6 @@ pub fn category(mime: &str) -> &'static str {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Extract the file extension from a path (lowercase, without dot).
-fn path_extension(path: &str) -> Option<&str> {
-    let filename = path.rsplit('/').next().unwrap_or(path);
-    let dot_pos = filename.rfind('.')?;
-    if dot_pos == 0 {
-        // Dotfile like ".bashrc" — not a meaningful extension.
-        return None;
-    }
-    Some(&filename[dot_pos.saturating_add(1)..])
-}
-
 // ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
@@ -537,11 +530,16 @@ pub fn self_test() -> KernelResult<()> {
 
     // --- Test 4: Path extension extraction ---
     {
-        assert_eq!(path_extension("/home/user/file.txt"), Some("txt"));
-        assert_eq!(path_extension("/path/to/image.PNG"), Some("PNG"));
-        assert_eq!(path_extension("/path/.bashrc"), None);
-        assert_eq!(path_extension("/path/noext"), None);
-        assert_eq!(path_extension("file.tar.gz"), Some("gz"));
+        // Extension extraction now lives in `Path::extension`; these keep
+        // watch over the cases `detect`'s fallback depends on.
+        assert_eq!(Path::new("/home/user/file.txt").extension(), Some(Path::new("txt")));
+        assert_eq!(Path::new("/path/to/image.PNG").extension(), Some(Path::new("PNG")));
+        assert_eq!(Path::new("/path/.bashrc").extension(), None);
+        assert_eq!(Path::new("/path/noext").extension(), None);
+        assert_eq!(Path::new("file.tar.gz").extension(), Some(Path::new("gz")));
+        // A trailing dot names no extension; the helper this replaced
+        // returned `Some("")` here, which matched no table entry by luck.
+        assert_eq!(Path::new("/path/trailing.").extension(), None);
 
         serial_println!("[mime]   path extension OK");
     }

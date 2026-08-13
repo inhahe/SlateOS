@@ -11426,6 +11426,11 @@ fn gen_fileselect() -> Vec<u8> {
     if !sets.is_empty() {
         out.push_str("\nSets:\n");
         for (id, dir, count) in &sets {
+            // Octal-escaped, not `display()`ed: this file is line-oriented, so
+            // a directory whose name contains a newline would otherwise forge
+            // an extra `Sets:` record, and a lossy U+FFFD rendering would name
+            // a different directory than the one actually selected.
+            let dir = mangle_mount_field(dir.as_bytes());
             out.push_str(&format!("  #{}: {} ({} items)\n", id, dir, count));
         }
     }

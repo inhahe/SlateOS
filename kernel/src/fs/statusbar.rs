@@ -150,7 +150,10 @@ pub fn generate_for_dir(path: &str, selected_count: u64, selected_size: u64) -> 
 
     if let Ok(entries) = crate::fs::vfs::Vfs::readdir(path) {
         for entry in &entries {
-            if entry.name.starts_with('.') {
+            // Byte compare, not `Path::starts_with`: the latter matches whole
+            // components, so it would ask whether the name *is* `.` rather
+            // than whether it begins with a dot.
+            if entry.name.as_bytes().starts_with(b".") {
                 hidden_count = hidden_count.saturating_add(1);
             }
             match entry.entry_type {

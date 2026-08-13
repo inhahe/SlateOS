@@ -28,6 +28,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::KernelResult;
+use crate::fs::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -37,7 +38,7 @@ use crate::error::KernelResult;
 #[derive(Debug, Clone)]
 pub struct FileProperties {
     /// File path.
-    pub path: String,
+    pub path: PathBuf,
     /// General tab.
     pub general: GeneralProperties,
     /// Security tab.
@@ -54,7 +55,7 @@ pub struct FileProperties {
 #[derive(Debug, Clone)]
 pub struct GeneralProperties {
     /// Display name (filename).
-    pub name: String,
+    pub name: PathBuf,
     /// File type description (e.g., "JPEG Image", "Python Script").
     pub type_description: String,
     /// MIME type.
@@ -62,7 +63,7 @@ pub struct GeneralProperties {
     /// Opens with (default application).
     pub opens_with: String,
     /// Location (parent directory).
-    pub location: String,
+    pub location: PathBuf,
     /// Size in bytes.
     pub size: u64,
     /// Size on disk (including slack space).
@@ -81,8 +82,13 @@ pub struct GeneralProperties {
     pub is_directory: bool,
     /// Whether it's a symlink.
     pub is_symlink: bool,
-    /// Symlink target (if applicable).
-    pub link_target: String,
+    /// Symlink target, or `None` when this is not a symlink or the link
+    /// could not be read.
+    ///
+    /// This was a `String` that was empty in both of those cases.  A symlink
+    /// target is a path, and the empty path is not a legal one, so `Option`
+    /// says the same thing without needing a value to stand in for "absent".
+    pub link_target: Option<PathBuf>,
     /// Number of hard links.
     pub nlinks: u32,
     /// Inode number (or equivalent).
@@ -161,7 +167,8 @@ static CHECKSUM_COUNT: AtomicU64 = AtomicU64::new(0);
 /// Gather all properties for a file or directory.
 ///
 /// This is the main entry point for the Properties dialog.
-pub fn gather(path: &str) -> KernelResult<FileProperties> {
+pub fn gather(path: impl AsRef<Path>) -> KernelResult<FileProperties> {
+    let path = path.as_ref();
     GATHER_COUNT.fetch_add(1, Ordering::Relaxed);
 
     let meta = crate::fs::vfs::Vfs::metadata(path)?;
@@ -187,7 +194,7 @@ pub fn gather(path: &str) -> KernelResult<FileProperties> {
     };
 
     Ok(FileProperties {
-        path: String::from(path),
+        path: path.to_path_buf(),
         general,
         security,
         details,
@@ -197,13 +204,11 @@ pub fn gather(path: &str) -> KernelResult<FileProperties> {
 }
 
 /// Gather general properties.
-fn gather_general(path: &str, meta: &crate::fs::FileMeta) -> KernelResult<GeneralProperties> {
-    let name = path.rsplit('/').next().unwrap_or(path);
-    let location = match path.rfind('/') {
-        Some(0) => String::from("/"),
-        Some(pos) => path.get(..pos).unwrap_or("/").into(),
-        None => String::from("/"),
-    };
+fn gather_general(path: &Path, meta: &crate::fs::FileMeta) -> KernelResult<GeneralProperties> {
+    // `/` has no final component and no parent; both fall back to `/` itself,
+    // which is what the dialog shows for the root.
+    let name = path.file_name().unwrap_or(Path::new("/"));
+    let location = path.parent().unwrap_or(Path::new("/"));
 
     let mime_type = crate::fs::mime::detect(path).unwrap_or("application/octet-stream");
     let type_desc = mime_to_description(mime_type);
@@ -214,22 +219,25 @@ fn gather_general(path: &str, meta: &crate::fs::FileMeta) -> KernelResult<Genera
 
     let is_symlink = meta.entry_type == crate::fs::EntryType::Symlink;
     let link_target = if is_symlink {
-        crate::fs::vfs::Vfs::readlink(path).unwrap_or_default()
+        crate::fs::vfs::Vfs::readlink(path).ok()
     } else {
-        String::new()
+        None
     };
 
-    let hidden = name.starts_with('.');
+    // Byte compare, not `Path::starts_with`: the latter matches whole
+    // components, so it would ask whether the name *is* the directory `.`
+    // rather than whether it begins with a dot.
+    let hidden = name.as_bytes().starts_with(b".");
 
     // Size on disk (blocks × block size, estimate 4096).
     let size_on_disk = meta.blocks.saturating_mul(4096);
 
     Ok(GeneralProperties {
-        name: String::from(name),
+        name: name.to_path_buf(),
         type_description: String::from(type_desc),
         mime_type: String::from(mime_type),
         opens_with,
-        location,
+        location: location.to_path_buf(),
         size: meta.size,
         size_on_disk,
         created_ns: meta.created_ns,
@@ -246,7 +254,7 @@ fn gather_general(path: &str, meta: &crate::fs::FileMeta) -> KernelResult<Genera
 }
 
 /// Gather security properties.
-fn gather_security(_path: &str, meta: &crate::fs::FileMeta) -> SecurityProperties {
+fn gather_security(_path: &Path, meta: &crate::fs::FileMeta) -> SecurityProperties {
     let perms = format_permissions(meta.permissions);
     let xattrs: Vec<(String, String)> = meta.xattrs.iter()
         .map(|(k, v)| {
@@ -270,7 +278,7 @@ fn gather_security(_path: &str, meta: &crate::fs::FileMeta) -> SecurityPropertie
 }
 
 /// Gather content-specific details using fileinfo.
-fn gather_details(path: &str) -> Vec<DetailField> {
+fn gather_details(path: &Path) -> Vec<DetailField> {
     let info = match crate::fs::fileinfo::extract(path) {
         Ok(i) => i,
         Err(_) => return Vec::new(),
@@ -286,7 +294,7 @@ fn gather_details(path: &str) -> Vec<DetailField> {
 }
 
 /// Gather disk usage for a directory.
-fn gather_disk_usage(path: &str) -> DiskUsage {
+fn gather_disk_usage(path: &Path) -> DiskUsage {
     let mut total_size = 0u64;
     let mut file_count = 0u64;
     let mut dir_count = 0u64;
@@ -323,7 +331,7 @@ fn gather_disk_usage(path: &str) -> DiskUsage {
 ///
 /// This is separated from `gather()` because it's expensive and may
 /// not be needed (only computed when the user opens the Checksums tab).
-pub fn compute_checksums(path: &str) -> KernelResult<ChecksumProperties> {
+pub fn compute_checksums(path: impl AsRef<Path>) -> KernelResult<ChecksumProperties> {
     CHECKSUM_COUNT.fetch_add(1, Ordering::Relaxed);
 
     let data = crate::fs::vfs::Vfs::read_file(path)?;
@@ -469,14 +477,14 @@ pub fn self_test() -> KernelResult<()> {
     // Test 4: gather properties (uses root directory which should exist).
     {
         let props = gather("/")?;
-        assert_eq!(props.general.name, "/");
+        assert_eq!(props.general.name.as_path(), Path::new("/"));
         assert!(props.general.is_directory);
         serial_println!("[properties] test 4 passed: gather");
     }
 
     // Test 5: disk usage.
     {
-        let usage = gather_disk_usage("/");
+        let usage = gather_disk_usage(Path::new("/"));
         // Root may legitimately be empty during early boot self-tests;
         // we only verify the call returns without panicking.
         let _ = (usage.file_count, usage.dir_count);

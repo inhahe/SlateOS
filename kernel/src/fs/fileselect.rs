@@ -41,6 +41,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -85,9 +86,9 @@ pub enum CheckState {
 #[derive(Debug, Clone)]
 pub struct SelectedItem {
     /// Full path of the selected item.
-    pub path: String,
+    pub path: PathBuf,
     /// Item name (filename).
-    pub name: String,
+    pub name: PathBuf,
     /// Whether this is a directory.
     pub is_dir: bool,
     /// Size in bytes (0 for directories).
@@ -100,7 +101,7 @@ pub struct SelectionSet {
     /// Unique set ID.
     pub id: u64,
     /// Directory being viewed.
-    pub directory: String,
+    pub directory: PathBuf,
     /// Selected items (ordered by selection time).
     pub items: Vec<SelectedItem>,
     /// Anchor index for range selection (index into the visible listing).
@@ -134,9 +135,9 @@ pub struct SelectionSummary {
 #[derive(Debug, Clone)]
 pub struct CheckTreeNode {
     /// Node path.
-    pub path: String,
+    pub path: PathBuf,
     /// Node name.
-    pub name: String,
+    pub name: PathBuf,
     /// Whether this is a directory.
     pub is_dir: bool,
     /// Check state.
@@ -165,10 +166,10 @@ static SETS: Mutex<Vec<SelectionSet>> = Mutex::new(Vec::new());
 
 impl SelectionSet {
     /// Create a new empty selection set for a directory.
-    fn new(directory: &str) -> Self {
+    fn new(directory: &Path) -> Self {
         Self {
             id: NEXT_SET_ID.fetch_add(1, Ordering::Relaxed),
-            directory: String::from(directory),
+            directory: directory.to_path_buf(),
             items: Vec::new(),
             anchor: None,
             cursor: None,
@@ -189,8 +190,8 @@ impl SelectionSet {
     }
 
     /// Check if a path is selected.
-    fn contains(&self, path: &str) -> bool {
-        self.items.iter().any(|i| i.path == path)
+    fn contains(&self, path: &Path) -> bool {
+        self.items.iter().any(|i| i.path.as_path() == path)
     }
 
     /// Add an item to the selection.
@@ -213,8 +214,8 @@ impl SelectionSet {
     }
 
     /// Remove an item by path.
-    fn remove(&mut self, path: &str) {
-        if let Some(pos) = self.items.iter().position(|i| i.path == path) {
+    fn remove(&mut self, path: &Path) {
+        if let Some(pos) = self.items.iter().position(|i| i.path.as_path() == path) {
             let item = self.items.remove(pos);
             if item.is_dir {
                 self.dir_count = self.dir_count.saturating_sub(1);
@@ -250,7 +251,7 @@ impl SelectionSet {
     }
 
     /// Get all selected paths.
-    fn paths(&self) -> Vec<String> {
+    fn paths(&self) -> Vec<PathBuf> {
         self.items.iter().map(|i| i.path.clone()).collect()
     }
 }
@@ -260,7 +261,8 @@ impl SelectionSet {
 // ---------------------------------------------------------------------------
 
 /// Create a new selection set for a directory.
-pub fn create(directory: &str) -> KernelResult<u64> {
+pub fn create(directory: impl AsRef<Path>) -> KernelResult<u64> {
+    let directory = directory.as_ref();
     let mut sets = SETS.lock();
     if sets.len() >= MAX_SETS {
         return Err(KernelError::ResourceExhausted);
@@ -285,7 +287,8 @@ pub fn destroy(set_id: u64) -> KernelResult<()> {
 /// Perform a single-item selection (click).
 ///
 /// Replaces the current selection with just this item.
-pub fn select_single(set_id: u64, path: &str, index: usize) -> KernelResult<()> {
+pub fn select_single(set_id: u64, path: impl AsRef<Path>, index: usize) -> KernelResult<()> {
+    let path = path.as_ref();
     let mut sets = SETS.lock();
     let set = find_set_mut(&mut sets, set_id)?;
     set.clear();
@@ -300,7 +303,8 @@ pub fn select_single(set_id: u64, path: &str, index: usize) -> KernelResult<()> 
 /// Toggle selection of an item (ctrl+click).
 ///
 /// If selected, deselects it. If not selected, adds it to selection.
-pub fn select_toggle(set_id: u64, path: &str, index: usize) -> KernelResult<()> {
+pub fn select_toggle(set_id: u64, path: impl AsRef<Path>, index: usize) -> KernelResult<()> {
+    let path = path.as_ref();
     let mut sets = SETS.lock();
     let set = find_set_mut(&mut sets, set_id)?;
 
@@ -324,7 +328,7 @@ pub fn select_toggle(set_id: u64, path: &str, index: usize) -> KernelResult<()> 
 /// `listing` provides the full ordered listing of the directory.
 pub fn select_range(
     set_id: u64,
-    listing: &[&str],
+    listing: &[&Path],
     target_index: usize,
 ) -> KernelResult<()> {
     let mut sets = SETS.lock();
@@ -355,7 +359,7 @@ pub fn select_range(
 }
 
 /// Select all items in the listing.
-pub fn select_all(set_id: u64, listing: &[&str]) -> KernelResult<()> {
+pub fn select_all(set_id: u64, listing: &[&Path]) -> KernelResult<()> {
     let mut sets = SETS.lock();
     let set = find_set_mut(&mut sets, set_id)?;
 
@@ -373,17 +377,17 @@ pub fn select_all(set_id: u64, listing: &[&str]) -> KernelResult<()> {
 }
 
 /// Invert selection — toggle every item in the listing.
-pub fn select_invert(set_id: u64, listing: &[&str]) -> KernelResult<()> {
+pub fn select_invert(set_id: u64, listing: &[&Path]) -> KernelResult<()> {
     let mut sets = SETS.lock();
     let set = find_set_mut(&mut sets, set_id)?;
 
     // Collect currently selected paths.
-    let was_selected: Vec<String> = set.paths();
+    let was_selected: Vec<PathBuf> = set.paths();
     set.clear();
 
     // Add items that were NOT selected before.
     for path in listing {
-        if !was_selected.iter().any(|s| s.as_str() == *path) {
+        if !was_selected.iter().any(|s| s.as_path() == *path) {
             if let Ok(item) = make_item(path) {
                 set.add(item);
             }
@@ -393,7 +397,7 @@ pub fn select_invert(set_id: u64, listing: &[&str]) -> KernelResult<()> {
 }
 
 /// Select items matching a glob pattern.
-pub fn select_pattern(set_id: u64, listing: &[&str], pattern: &str) -> KernelResult<()> {
+pub fn select_pattern(set_id: u64, listing: &[&Path], pattern: &str) -> KernelResult<()> {
     if pattern.len() > MAX_PATTERN_LEN {
         return Err(KernelError::InvalidArgument);
     }
@@ -401,7 +405,9 @@ pub fn select_pattern(set_id: u64, listing: &[&str], pattern: &str) -> KernelRes
     let set = find_set_mut(&mut sets, set_id)?;
 
     for path in listing {
-        let name = path.rsplit('/').next().unwrap_or(path);
+        // A path with no final component (the root, or all separators) has no
+        // name to match, so no pattern can select it.
+        let Some(name) = path.file_name() else { continue };
         if simple_glob(pattern, name) && !set.contains(path) {
             if let Ok(item) = make_item(path) {
                 set.add(item);
@@ -419,7 +425,7 @@ pub fn deselect_pattern(set_id: u64, pattern: &str) -> KernelResult<()> {
     let mut sets = SETS.lock();
     let set = find_set_mut(&mut sets, set_id)?;
 
-    let to_remove: Vec<String> = set.items.iter()
+    let to_remove: Vec<PathBuf> = set.items.iter()
         .filter(|i| simple_glob(pattern, &i.name))
         .map(|i| i.path.clone())
         .collect();
@@ -446,17 +452,17 @@ pub fn summary(set_id: u64) -> KernelResult<SelectionSummary> {
 }
 
 /// Get all selected paths.
-pub fn selected_paths(set_id: u64) -> KernelResult<Vec<String>> {
+pub fn selected_paths(set_id: u64) -> KernelResult<Vec<PathBuf>> {
     let sets = SETS.lock();
     let set = find_set(&sets, set_id)?;
     Ok(set.paths())
 }
 
 /// Check if a path is selected.
-pub fn is_selected(set_id: u64, path: &str) -> KernelResult<bool> {
+pub fn is_selected(set_id: u64, path: impl AsRef<Path>) -> KernelResult<bool> {
     let sets = SETS.lock();
     let set = find_set(&sets, set_id)?;
-    Ok(set.contains(path))
+    Ok(set.contains(path.as_ref()))
 }
 
 /// Get the number of items selected.
@@ -467,7 +473,7 @@ pub fn count(set_id: u64) -> KernelResult<usize> {
 }
 
 /// List all active selection sets.
-pub fn list_sets() -> Vec<(u64, String, usize)> {
+pub fn list_sets() -> Vec<(u64, PathBuf, usize)> {
     let sets = SETS.lock();
     sets.iter().map(|s| (s.id, s.directory.clone(), s.count())).collect()
 }
@@ -480,8 +486,10 @@ pub fn list_sets() -> Vec<(u64, String, usize)> {
 ///
 /// Populates a tree structure with files and subdirectories.
 /// All nodes start unchecked.
-pub fn build_check_tree(path: &str) -> KernelResult<CheckTreeNode> {
-    let name = path.rsplit('/').next().unwrap_or(path);
+pub fn build_check_tree(path: impl AsRef<Path>) -> KernelResult<CheckTreeNode> {
+    let path = path.as_ref();
+    // The root has no final component; it names itself.
+    let name = path.file_name().unwrap_or(path);
     let meta = crate::fs::vfs::Vfs::metadata(path)?;
     let is_dir = meta.entry_type == crate::fs::EntryType::Directory;
 
@@ -490,11 +498,9 @@ pub fn build_check_tree(path: &str) -> KernelResult<CheckTreeNode> {
             Ok(entries) => {
                 let mut kids = Vec::new();
                 for entry in &entries {
-                    let child_path = if path == "/" {
-                        alloc::format!("/{}", entry.name)
-                    } else {
-                        alloc::format!("{}/{}", path, entry.name)
-                    };
+                    // `join` collapses the root case and keeps the
+                    // entry name's bytes verbatim.
+                    let child_path = path.join(&entry.name);
                     // Build shallow children (one level only for performance).
                     kids.push(CheckTreeNode {
                         path: child_path,
@@ -513,8 +519,8 @@ pub fn build_check_tree(path: &str) -> KernelResult<CheckTreeNode> {
     };
 
     Ok(CheckTreeNode {
-        path: String::from(path),
-        name: String::from(name),
+        path: path.to_path_buf(),
+        name: name.to_path_buf(),
         is_dir,
         state: CheckState::Unchecked,
         children,
@@ -553,7 +559,7 @@ pub fn recompute_parent_state(node: &mut CheckTreeNode) {
 }
 
 /// Collect all checked paths from a check tree.
-pub fn collect_checked(node: &CheckTreeNode) -> Vec<String> {
+pub fn collect_checked(node: &CheckTreeNode) -> Vec<PathBuf> {
     let mut result = Vec::new();
     collect_checked_recursive(node, &mut result);
     result
@@ -578,12 +584,13 @@ fn find_set_mut(sets: &mut [SelectionSet], id: u64) -> KernelResult<&mut Selecti
 }
 
 /// Create a SelectedItem from a path by querying VFS.
-fn make_item(path: &str) -> KernelResult<SelectedItem> {
+fn make_item(path: &Path) -> KernelResult<SelectedItem> {
     let meta = crate::fs::vfs::Vfs::metadata(path)?;
-    let name = path.rsplit('/').next().unwrap_or(path);
+    // The root has no final component; it names itself.
+    let name = path.file_name().unwrap_or(path);
     Ok(SelectedItem {
-        path: String::from(path),
-        name: String::from(name),
+        path: path.to_path_buf(),
+        name: name.to_path_buf(),
         is_dir: meta.entry_type == crate::fs::EntryType::Directory,
         size: meta.size,
     })
@@ -598,7 +605,7 @@ fn set_state_recursive(node: &mut CheckTreeNode, state: CheckState) {
 }
 
 /// Recursively collect checked leaf paths.
-fn collect_checked_recursive(node: &CheckTreeNode, result: &mut Vec<String>) {
+fn collect_checked_recursive(node: &CheckTreeNode, result: &mut Vec<PathBuf>) {
     if node.state == CheckState::Checked {
         // If fully checked, add this path (not children individually).
         result.push(node.path.clone());
@@ -614,18 +621,23 @@ fn collect_checked_recursive(node: &CheckTreeNode, result: &mut Vec<String>) {
 }
 
 /// Simple glob pattern matching (supports `*` and `?`).
-fn simple_glob(pattern: &str, text: &str) -> bool {
-    let pat: Vec<char> = pattern.chars().collect();
-    let txt: Vec<char> = text.chars().collect();
-    glob_match(&pat, 0, &txt, 0)
+///
+/// Matching is over **bytes**, not `char`s.  `text` is a filename, which is an
+/// uninterpreted byte string that need not be valid UTF-8, so `chars()` could
+/// not be formed for it at all.  The visible consequence is that `?` matches
+/// one byte rather than one code point — the same rule a POSIX shell applies
+/// in a non-multibyte locale, and the only rule that is total over the names
+/// the filesystem accepts.
+fn simple_glob(pattern: &str, text: impl AsRef<Path>) -> bool {
+    glob_match(pattern.as_bytes(), 0, text.as_ref().as_bytes(), 0)
 }
 
-fn glob_match(pat: &[char], pi: usize, txt: &[char], ti: usize) -> bool {
+fn glob_match(pat: &[u8], pi: usize, txt: &[u8], ti: usize) -> bool {
     if pi == pat.len() {
         return ti == txt.len();
     }
     match pat.get(pi).copied() {
-        Some('*') => {
+        Some(b'*') => {
             // Try matching zero or more characters.
             let mut t = ti;
             loop {
@@ -639,7 +651,7 @@ fn glob_match(pat: &[char], pi: usize, txt: &[char], ti: usize) -> bool {
             }
             false
         }
-        Some('?') => {
+        Some(b'?') => {
             if ti < txt.len() {
                 glob_match(pat, pi + 1, txt, ti + 1)
             } else {
@@ -748,6 +760,10 @@ pub fn self_test() -> KernelResult<()> {
         assert!(simple_glob("*", "anything"));
         assert!(simple_glob("a*b", "ab"));
         assert!(simple_glob("a*b", "aXXXb"));
+        // A name that is not valid UTF-8 still matches: the whole point of
+        // globbing over bytes.
+        assert!(simple_glob("*.rs", Path::new(b"ma\xffn.rs".as_slice())));
+        assert!(!simple_glob("*.rs", Path::new(b"ma\xffn.py".as_slice())));
         serial_println!("[fileselect] test 4 passed: glob matching");
     }
 
@@ -783,21 +799,21 @@ pub fn self_test() -> KernelResult<()> {
     // Test 7: collect_checked.
     {
         let mut tree = CheckTreeNode {
-            path: String::from("/test"),
-            name: String::from("test"),
+            path: PathBuf::from("/test"),
+            name: PathBuf::from("test"),
             is_dir: true,
             state: CheckState::Partial,
             children: vec![
                 CheckTreeNode {
-                    path: String::from("/test/a"),
-                    name: String::from("a"),
+                    path: PathBuf::from("/test/a"),
+                    name: PathBuf::from("a"),
                     is_dir: false,
                     state: CheckState::Checked,
                     children: Vec::new(),
                 },
                 CheckTreeNode {
-                    path: String::from("/test/b"),
-                    name: String::from("b"),
+                    path: PathBuf::from("/test/b"),
+                    name: PathBuf::from("b"),
                     is_dir: false,
                     state: CheckState::Unchecked,
                     children: Vec::new(),
@@ -806,14 +822,14 @@ pub fn self_test() -> KernelResult<()> {
         };
         let checked = collect_checked(&tree);
         assert_eq!(checked.len(), 1);
-        assert_eq!(checked.first().map(|s| s.as_str()), Some("/test/a"));
+        assert_eq!(checked.first().map(PathBuf::as_path), Some(Path::new("/test/a")));
 
         // After toggling parent, all should be checked.
         toggle_check_node(&mut tree);
         let checked = collect_checked(&tree);
         // Parent is checked → just the parent path.
         assert_eq!(checked.len(), 1);
-        assert_eq!(checked.first().map(|s| s.as_str()), Some("/test"));
+        assert_eq!(checked.first().map(PathBuf::as_path), Some(Path::new("/test")));
         serial_println!("[fileselect] test 7 passed: collect_checked");
     }
 

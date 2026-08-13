@@ -62,6 +62,23 @@ fn json_escape(s: &str) -> String {
     out
 }
 
+/// Escape a filesystem path for JSON output.
+///
+/// A JSON string is a sequence of Unicode code points, but a path is an
+/// uninterpreted byte string that need not be valid UTF-8 — so a path cannot
+/// be placed in JSON directly at all.  The bytes are first rendered with the
+/// same octal escaping `/proc/self/mounts` uses
+/// ([`crate::fs::escape::escape_octal`]), which is total, lossless and pure
+/// ASCII, and the resulting text is then JSON-escaped as usual.  A client
+/// that wants the original bytes back un-escapes twice.
+///
+/// The alternative — lossy UTF-8 decoding — would emit a path that names a
+/// *different* file, which is worse than an escaped one for an API whose
+/// consumers may act on the value.
+fn json_escape_path(path: &crate::fs::path::Path) -> String {
+    json_escape(&crate::fs::escape::escape_octal(path.as_bytes(), &[]))
+}
+
 /// Convert TcpState to a display string, matching netstat.rs conventions.
 fn tcp_state_str(state: super::tcp::TcpState) -> &'static str {
     use super::tcp::TcpState;
@@ -785,7 +802,7 @@ fn api_fs() -> Vec<u8> {
                 r#"{{"path":"{}","fs_type":"{}","read_only":{},"#,
                 r#""noatime":{},"noexec":{},"nosuid":{}}}"#,
             ),
-            json_escape(path),
+            json_escape_path(path),
             json_escape(fs_type),
             opts.read_only,
             opts.noatime,

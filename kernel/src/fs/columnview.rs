@@ -40,6 +40,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -127,8 +128,14 @@ pub struct ColumnDef {
 /// User preference for a specific column in a specific directory.
 #[derive(Debug, Clone)]
 pub struct ColumnPref {
-    /// Directory path this preference applies to ("*" = global default).
-    pub directory: String,
+    /// Directory this preference applies to, or `None` for the global
+    /// default.
+    ///
+    /// This was a `String` in which `"*"` meant "global".  A path is an
+    /// uninterpreted byte string, so `*` is a name a directory can actually
+    /// have — an in-band sentinel here is a directory whose own preferences
+    /// silently become everyone's.  `Option` cannot collide.
+    pub directory: Option<PathBuf>,
     /// Column ID.
     pub column_id: String,
     /// Whether the column is visible.
@@ -265,7 +272,8 @@ pub fn init() {
 /// This is the main entry point implementing the design spec:
 /// "use the subset of possible columns which is the union of the
 /// columns relevant to each file in the given folder."
-pub fn compute_columns(directory: &str) -> KernelResult<Vec<DisplayColumn>> {
+pub fn compute_columns(directory: impl AsRef<Path>) -> KernelResult<Vec<DisplayColumn>> {
+    let directory = directory.as_ref();
     init();
     COMPUTE_COUNT.fetch_add(1, Ordering::Relaxed);
 
@@ -275,11 +283,9 @@ pub fn compute_columns(directory: &str) -> KernelResult<Vec<DisplayColumn>> {
 
     for entry in &entries {
         if entry.entry_type == crate::fs::EntryType::File {
-            let path = if directory == "/" {
-                alloc::format!("/{}", entry.name)
-            } else {
-                alloc::format!("{}/{}", directory, entry.name)
-            };
+            // `join` handles the root case (no doubled separator) and
+            // keeps the name's bytes verbatim, which `format!` could not.
+            let path = directory.join(&entry.name);
             if let Ok(mime) = crate::fs::mime::detect(&path) {
                 let mime_str = String::from(mime);
                 if !mime_types.contains(&mime_str) {
@@ -315,7 +321,10 @@ pub fn compute_columns(directory: &str) -> KernelResult<Vec<DisplayColumn>> {
     for def in &applicable {
         // Check for directory-specific or global preference.
         let pref = prefs.iter()
-            .find(|p| p.column_id == def.id && (p.directory == directory || p.directory == "*"));
+            .find(|p| {
+                p.column_id == def.id
+                    && p.directory.as_deref().is_none_or(|d| d == directory)
+            });
 
         let visible = pref.map(|p| p.visible).unwrap_or(true);
         if !visible {
@@ -416,8 +425,9 @@ pub fn unregister_source_columns(source: &str) -> usize {
 // ---------------------------------------------------------------------------
 
 /// Set a user column preference.
+/// `directory` is `None` for the global default.
 pub fn set_preference(
-    directory: &str,
+    directory: Option<&Path>,
     column_id: &str,
     visible: bool,
     width: u32,
@@ -426,7 +436,10 @@ pub fn set_preference(
     let mut prefs = USER_PREFS.lock();
 
     // Update existing or add new.
-    if let Some(pref) = prefs.iter_mut().find(|p| p.directory == directory && p.column_id == column_id) {
+    if let Some(pref) = prefs
+        .iter_mut()
+        .find(|p| p.directory.as_deref() == directory && p.column_id == column_id)
+    {
         pref.visible = visible;
         pref.width = width;
         pref.position = position;
@@ -438,7 +451,7 @@ pub fn set_preference(
     }
 
     prefs.push(ColumnPref {
-        directory: String::from(directory),
+        directory: directory.map(Path::to_path_buf),
         column_id: String::from(column_id),
         visible,
         width,
@@ -448,11 +461,11 @@ pub fn set_preference(
     Ok(())
 }
 
-/// Remove user preferences for a directory.
-pub fn clear_preferences(directory: &str) -> usize {
+/// Remove user preferences for a directory, or `None` for the global default.
+pub fn clear_preferences(directory: Option<&Path>) -> usize {
     let mut prefs = USER_PREFS.lock();
     let before = prefs.len();
-    prefs.retain(|p| p.directory != directory);
+    prefs.retain(|p| p.directory.as_deref() != directory);
     before.saturating_sub(prefs.len())
 }
 
@@ -527,10 +540,10 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 5: user preferences.
     {
-        set_preference("*", "size", true, 120, 1)?;
+        set_preference(None, "size", true, 120, 1)?;
         let prefs = list_preferences();
         assert!(!prefs.is_empty());
-        clear_preferences("*");
+        clear_preferences(None);
         serial_println!("[columnview] test 5 passed: user preferences");
     }
 

@@ -44,11 +44,11 @@
 
 use alloc::collections::BTreeSet;
 use alloc::format;
-use alloc::string::String;
 use alloc::vec::Vec;
 use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 use crate::fs::vfs::Vfs;
 use crate::fs::EntryType;
 use crate::serial_println;
@@ -78,7 +78,7 @@ pub struct CleanupResult {
     /// Number of errors encountered during removal.
     pub errors: u64,
     /// Paths of files that were removed (for reporting).
-    pub removed_paths: Vec<String>,
+    pub removed_paths: Vec<PathBuf>,
 }
 
 /// Persistent statistics across runs.
@@ -100,9 +100,13 @@ pub struct TmpwatchStats {
 
 struct TmpwatchInner {
     /// Directories to scan.
-    watch_dirs: Vec<String>,
+    watch_dirs: Vec<PathBuf>,
     /// Path prefixes to exclude from cleanup.
-    excludes: BTreeSet<String>,
+    ///
+    /// These are *byte* prefixes, deliberately not component-aligned: the
+    /// built-in `/tmp/.` exists precisely to exclude every dotfile in `/tmp`,
+    /// which a component-wise match could not express.
+    excludes: BTreeSet<PathBuf>,
     /// Maximum file age in seconds.
     max_age_secs: u64,
     /// Minimum file size to consider (0 = all).
@@ -141,12 +145,12 @@ pub fn init() {
     let mut inner = TMPWATCH.lock();
 
     if inner.watch_dirs.is_empty() {
-        inner.watch_dirs.push(String::from("/tmp"));
+        inner.watch_dirs.push(PathBuf::from("/tmp"));
     }
 
     // Default excludes: overlay work dirs, pipe paths, etc.
-    inner.excludes.insert(String::from("/tmp/overlay_"));
-    inner.excludes.insert(String::from("/tmp/."));
+    inner.excludes.insert(PathBuf::from("/tmp/overlay_"));
+    inner.excludes.insert(PathBuf::from("/tmp/."));
 }
 
 // ---------------------------------------------------------------------------
@@ -154,12 +158,13 @@ pub fn init() {
 // ---------------------------------------------------------------------------
 
 /// Add a directory to the watch list.
-pub fn add_watch_dir(path: &str) -> KernelResult<()> {
+pub fn add_watch_dir(path: impl AsRef<Path>) -> KernelResult<()> {
+    let path = path.as_ref();
     if path.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
     let mut inner = TMPWATCH.lock();
-    let s = String::from(path);
+    let s = path.to_path_buf();
     if !inner.watch_dirs.contains(&s) {
         inner.watch_dirs.push(s);
     }
@@ -167,30 +172,31 @@ pub fn add_watch_dir(path: &str) -> KernelResult<()> {
 }
 
 /// Remove a directory from the watch list.
-pub fn remove_watch_dir(path: &str) -> bool {
+pub fn remove_watch_dir(path: impl AsRef<Path>) -> bool {
+    let path = path.as_ref();
     let mut inner = TMPWATCH.lock();
     let before = inner.watch_dirs.len();
-    inner.watch_dirs.retain(|d| d != path);
+    inner.watch_dirs.retain(|d| d.as_path() != path);
     inner.watch_dirs.len() < before
 }
 
 /// List watched directories.
-pub fn watch_dirs() -> Vec<String> {
+pub fn watch_dirs() -> Vec<PathBuf> {
     TMPWATCH.lock().watch_dirs.clone()
 }
 
 /// Add a path prefix to exclude from cleanup.
-pub fn add_exclude(prefix: &str) {
-    TMPWATCH.lock().excludes.insert(String::from(prefix));
+pub fn add_exclude(prefix: impl AsRef<Path>) {
+    TMPWATCH.lock().excludes.insert(prefix.as_ref().to_path_buf());
 }
 
 /// Remove an exclusion.
-pub fn remove_exclude(prefix: &str) -> bool {
-    TMPWATCH.lock().excludes.remove(prefix)
+pub fn remove_exclude(prefix: impl AsRef<Path>) -> bool {
+    TMPWATCH.lock().excludes.remove(prefix.as_ref())
 }
 
 /// List exclusions.
-pub fn excludes() -> Vec<String> {
+pub fn excludes() -> Vec<PathBuf> {
     TMPWATCH.lock().excludes.iter().cloned().collect()
 }
 
@@ -294,7 +300,7 @@ pub fn run(now: u64) -> KernelResult<CleanupResult> {
 }
 
 /// Perform a dry-run (report what would be removed without deleting).
-pub fn dry_run(now: u64) -> KernelResult<Vec<(String, u64)>> {
+pub fn dry_run(now: u64) -> KernelResult<Vec<(PathBuf, u64)>> {
     let (dirs, excludes, max_age, min_size) = {
         let inner = TMPWATCH.lock();
         (
@@ -320,11 +326,11 @@ pub fn dry_run(now: u64) -> KernelResult<Vec<(String, u64)>> {
 
 /// Recursively scan a directory and remove old files.
 fn scan_directory(
-    dir: &str,
+    dir: &Path,
     now: u64,
     max_age: u64,
     min_size: u64,
-    excludes: &BTreeSet<String>,
+    excludes: &BTreeSet<PathBuf>,
     remove_empty: bool,
     depth: u32,
     result: &mut CleanupResult,
@@ -339,7 +345,7 @@ fn scan_directory(
     };
 
     for entry in &entries {
-        let full_path = format!("{}/{}", dir.trim_end_matches('/'), entry.name);
+        let full_path = dir.join(&entry.name);
 
         // Check excludes.
         if is_excluded(&full_path, excludes) {
@@ -388,13 +394,13 @@ fn scan_directory(
 
 /// Collect candidates for dry-run without removing.
 fn collect_candidates(
-    dir: &str,
+    dir: &Path,
     now: u64,
     max_age: u64,
     min_size: u64,
-    excludes: &BTreeSet<String>,
+    excludes: &BTreeSet<PathBuf>,
     depth: u32,
-    candidates: &mut Vec<(String, u64)>,
+    candidates: &mut Vec<(PathBuf, u64)>,
 ) {
     if depth > MAX_SCAN_DEPTH {
         return;
@@ -406,7 +412,7 @@ fn collect_candidates(
     };
 
     for entry in &entries {
-        let full_path = format!("{}/{}", dir.trim_end_matches('/'), entry.name);
+        let full_path = dir.join(&entry.name);
 
         if is_excluded(&full_path, excludes) {
             continue;
@@ -428,17 +434,17 @@ fn collect_candidates(
 }
 
 /// Check if a path matches any exclude prefix.
-fn is_excluded(path: &str, excludes: &BTreeSet<String>) -> bool {
-    for exc in excludes {
-        if path.starts_with(exc.as_str()) {
-            return true;
-        }
-    }
-    false
+///
+/// A *byte* prefix test, not [`Path::starts_with`]: see the `excludes` field
+/// for why the exclusions are deliberately not component-aligned.
+fn is_excluded(path: &Path, excludes: &BTreeSet<PathBuf>) -> bool {
+    excludes
+        .iter()
+        .any(|exc| path.as_bytes().starts_with(exc.as_bytes()))
 }
 
 /// Determine if a file should be removed based on age and size.
-fn should_remove(path: &str, size: u64, now: u64, max_age: u64, min_size: u64) -> bool {
+fn should_remove(path: &Path, size: u64, now: u64, max_age: u64, min_size: u64) -> bool {
     // Size check.
     if size < min_size {
         return false;
@@ -481,7 +487,7 @@ pub fn self_test() -> KernelResult<()> {
     {
         init();
         let dirs = watch_dirs();
-        if !dirs.contains(&String::from("/tmp")) {
+        if !dirs.contains(&PathBuf::from("/tmp")) {
             serial_println!("[tmpwatch]   ERROR: /tmp not in watch dirs");
             let _ = Vfs::remove_recursive(test_dir);
             return Err(KernelError::InternalError);
@@ -493,14 +499,14 @@ pub fn self_test() -> KernelResult<()> {
     {
         add_watch_dir(test_dir)?;
         let dirs = watch_dirs();
-        if !dirs.contains(&String::from(test_dir)) {
+        if !dirs.contains(&PathBuf::from(test_dir)) {
             serial_println!("[tmpwatch]   ERROR: test dir not added");
             let _ = Vfs::remove_recursive(test_dir);
             return Err(KernelError::InternalError);
         }
         remove_watch_dir(test_dir);
         let dirs = watch_dirs();
-        if dirs.contains(&String::from(test_dir)) {
+        if dirs.contains(&PathBuf::from(test_dir)) {
             serial_println!("[tmpwatch]   ERROR: test dir not removed");
             let _ = Vfs::remove_recursive(test_dir);
             return Err(KernelError::InternalError);
@@ -512,7 +518,7 @@ pub fn self_test() -> KernelResult<()> {
     {
         add_exclude("/tmp/important_");
         let exc = excludes();
-        if !exc.contains(&String::from("/tmp/important_")) {
+        if !exc.contains(&PathBuf::from("/tmp/important_")) {
             serial_println!("[tmpwatch]   ERROR: exclude not added");
             let _ = Vfs::remove_recursive(test_dir);
             return Err(KernelError::InternalError);
@@ -524,13 +530,13 @@ pub fn self_test() -> KernelResult<()> {
     // --- Test 4: Exclude check ---
     {
         let mut exc = BTreeSet::new();
-        exc.insert(String::from("/tmp/keep_"));
-        if !is_excluded("/tmp/keep_this.txt", &exc) {
+        exc.insert(PathBuf::from("/tmp/keep_"));
+        if !is_excluded(Path::new("/tmp/keep_this.txt"), &exc) {
             serial_println!("[tmpwatch]   ERROR: excluded path not detected");
             let _ = Vfs::remove_recursive(test_dir);
             return Err(KernelError::InternalError);
         }
-        if is_excluded("/tmp/other.txt", &exc) {
+        if is_excluded(Path::new("/tmp/other.txt"), &exc) {
             serial_println!("[tmpwatch]   ERROR: non-excluded path flagged");
             let _ = Vfs::remove_recursive(test_dir);
             return Err(KernelError::InternalError);
@@ -595,8 +601,8 @@ pub fn self_test() -> KernelResult<()> {
         Vfs::write_file(&format!("{}/keep_me.tmp", test_dir), b"keep")?;
 
         // Remove all other excludes to prevent interference.
-        let saved_excludes: Vec<String> = excludes().into_iter()
-            .filter(|e| !e.starts_with(test_dir))
+        let saved_excludes: Vec<PathBuf> = excludes().into_iter()
+            .filter(|e| !e.as_bytes().starts_with(test_dir.as_bytes()))
             .collect();
         for e in &saved_excludes {
             remove_exclude(e);
@@ -640,8 +646,8 @@ pub fn self_test() -> KernelResult<()> {
 
         Vfs::write_file(&format!("{}/dryrun.tmp", test_dir), b"dry run data")?;
 
-        let saved_excludes: Vec<String> = excludes().into_iter()
-            .filter(|e| !e.starts_with(test_dir))
+        let saved_excludes: Vec<PathBuf> = excludes().into_iter()
+            .filter(|e| !e.as_bytes().starts_with(test_dir.as_bytes()))
             .collect();
         for e in &saved_excludes { remove_exclude(e); }
 
@@ -720,8 +726,8 @@ pub fn self_test() -> KernelResult<()> {
 
         add_watch_dir(test_dir)?;
 
-        let saved_excludes: Vec<String> = excludes().into_iter()
-            .filter(|e| !e.starts_with(test_dir))
+        let saved_excludes: Vec<PathBuf> = excludes().into_iter()
+            .filter(|e| !e.as_bytes().starts_with(test_dir.as_bytes()))
             .collect();
         for e in &saved_excludes { remove_exclude(e); }
 

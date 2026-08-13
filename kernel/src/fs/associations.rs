@@ -29,6 +29,7 @@ use alloc::vec::Vec;
 use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::Path;
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -153,9 +154,12 @@ pub fn apps_for(mime: &str) -> Vec<Association> {
 ///
 /// Detects the MIME type first (via magic bytes / extension), then
 /// looks up the association.
-pub fn default_app_for_file(path: &str) -> Option<Association> {
-    // Check extension override first.
-    if let Some(ext) = path_extension(path) {
+pub fn default_app_for_file(path: impl AsRef<Path>) -> Option<Association> {
+    let path = path.as_ref();
+    // Check extension override first.  A non-UTF-8 extension can match no
+    // override — every key in the table is text the user typed — so `to_str`
+    // failing is the same answer as an unregistered extension.
+    if let Some(ext) = path.extension().and_then(Path::to_str) {
         let inner = ASSOC.lock();
         if let Some(mime) = inner.ext_override.get(ext) {
             let result = inner.by_mime.get(mime.as_str()).and_then(|l| l.first().cloned());
@@ -339,16 +343,6 @@ pub fn register_defaults() {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// Extract the file extension from a path (lowercase, without dot).
-fn path_extension(path: &str) -> Option<&str> {
-    let filename = path.rsplit('/').next().unwrap_or(path);
-    let dot_pos = filename.rfind('.')?;
-    if dot_pos == 0 {
-        return None;
-    }
-    Some(&filename[dot_pos.saturating_add(1)..])
-}
 
 // ---------------------------------------------------------------------------
 // Self-test

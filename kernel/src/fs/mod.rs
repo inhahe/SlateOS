@@ -282,6 +282,7 @@ pub mod parentaltime;
 pub mod partmgr;
 pub mod pagecache;
 pub mod pagestat;
+pub mod path;
 pub mod pathbar;
 pub mod pathutil;
 pub mod peninput;

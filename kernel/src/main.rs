@@ -4529,6 +4529,14 @@ extern "C" fn kernel_main() -> ! {
     if let Err(e) = fs::mount_ns::self_test() {
         serial_println!("WARNING: Mount namespace self-test failed: {:?}", e);
     }
+    // The byte-oriented path lexer, which the VFS is being converted onto.
+    // If `Path::components` or `Path::starts_with` is wrong then every
+    // containment check built on them is wrong the same way, and that would
+    // surface as a sandbox-escape rather than as a test failure — so it is
+    // worth checking on every boot rather than trusting it.
+    if let Err(e) = fs::path::self_test() {
+        serial_println!("WARNING: Path self-test failed: {:?}", e);
+    }
     // Locale and timezone. Both self-tests existed but were never called from
     // anywhere — a test that never runs is not a test, and these two are the
     // only coverage the kernel's POSIX `TZ` rule evaluation has.

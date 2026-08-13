@@ -65,6 +65,7 @@ use alloc::format;
 use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -177,13 +178,13 @@ fn mime_for_extension(ext: &str) -> &'static str {
 }
 
 /// Get MIME type for a file path.
-fn mime_for_path(path: &str) -> &'static str {
-    if let Some(dot_pos) = path.rfind('.') {
-        let ext = &path[dot_pos.saturating_add(1)..];
-        mime_for_extension(ext)
-    } else {
-        "application/octet-stream"
-    }
+///
+/// An extension that is not valid UTF-8 cannot match any entry in the
+/// extension table, so it falls through to the generic binary type.
+fn mime_for_path(path: &Path) -> &'static str {
+    path.extension()
+        .and_then(|ext| core::str::from_utf8(ext.as_bytes()).ok())
+        .map_or("application/octet-stream", mime_for_extension)
 }
 
 // ---------------------------------------------------------------------------
@@ -197,8 +198,8 @@ const MAX_HEADERS: usize = 32;
 struct HttpRequest {
     /// HTTP method (GET, HEAD, etc.).
     method: String,
-    /// Request URI path (decoded, no query string).
-    path: String,
+    /// Request URI path (percent-decoded and normalized, no query string).
+    path: PathBuf,
     /// HTTP version string.
     #[allow(dead_code)]
     version: String,
@@ -231,11 +232,8 @@ fn parse_request(data: &[u8]) -> Option<HttpRequest> {
         raw_uri
     };
 
-    // Percent-decode the path.
-    let decoded = percent_decode(path_str);
-
-    // Normalize the path to prevent traversal.
-    let normalized = normalize_path(&decoded);
+    // Percent-decode the path, then normalize it to prevent traversal.
+    let normalized = normalize_path(&percent_decode(path_str));
 
     // Parse headers we care about.
     let mut if_none_match = None;
@@ -276,8 +274,15 @@ fn parse_request(data: &[u8]) -> Option<HttpRequest> {
 }
 
 /// Percent-decode a URI path component.
+///
+/// Returns bytes, not a `String`. `%FF` is a perfectly legal escape naming a
+/// byte that is not valid UTF-8, and a filename may contain any byte but `/`
+/// and NUL. The previous version ran the result through
+/// `String::from_utf8().unwrap_or_default()`, so such a request silently
+/// decoded to the *empty* path and was then normalized to `/` — the server
+/// answered with the document-root listing instead of the requested file.
 #[allow(clippy::arithmetic_side_effects)]
-fn percent_decode(s: &str) -> String {
+fn percent_decode(s: &str) -> Vec<u8> {
     let bytes = s.as_bytes();
     let mut result = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -295,7 +300,64 @@ fn percent_decode(s: &str) -> String {
         result.push(bytes[i]);
         i += 1;
     }
-    String::from_utf8(result).unwrap_or_default()
+    result
+}
+
+/// Percent-encode a path component for use in an `href`.
+///
+/// Everything outside the RFC 3986 unreserved set plus a small set of
+/// path-safe characters is escaped, so a name containing `?`, `#`, `%`, a
+/// space, or a byte that is not valid UTF-8 still produces a link that
+/// resolves back to exactly that name.
+fn percent_encode(bytes: &[u8]) -> String {
+    fn hex_char(nibble: u8) -> char {
+        char::from(match nibble {
+            0..=9 => b'0'.saturating_add(nibble),
+            _ => b'A'.saturating_add(nibble.saturating_sub(10)),
+        })
+    }
+    let mut out = String::with_capacity(bytes.len());
+    for &b in bytes {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b'/' | b',') {
+            out.push(char::from(b));
+        } else {
+            out.push('%');
+            out.push(hex_char(b >> 4));
+            out.push(hex_char(b & 0x0f));
+        }
+    }
+    out
+}
+
+/// Escape text for inclusion in HTML element content or a quoted attribute.
+///
+/// The names in a directory listing come from the filesystem, so they are
+/// attacker-controlled whenever an attacker can create a file. Interpolating
+/// them raw let a name like `<script>…</script>` execute in the browser of
+/// anyone who listed the directory.
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Render a path as HTML-safe display text.
+///
+/// The listing declares `charset=utf-8`, so bytes that are not valid UTF-8
+/// cannot be sent literally; `Path::display` renders them as U+FFFD. The
+/// `href` is built from the raw bytes by [`percent_encode`], so the link still
+/// works even when the label is lossy.
+fn html_path(path: &Path) -> String {
+    html_escape(&alloc::format!("{}", path.display()))
 }
 
 fn hex_digit(b: u8) -> Option<u8> {
@@ -309,26 +371,30 @@ fn hex_digit(b: u8) -> Option<u8> {
 
 /// Normalize a path: resolve `.` and `..`, collapse slashes, ensure leading `/`.
 ///
-/// Prevents path traversal by never allowing the path to escape the root.
-fn normalize_path(path: &str) -> String {
-    let mut segments: Vec<&str> = Vec::new();
+/// Prevents path traversal by never allowing the path to escape the root: a
+/// `..` with nothing to pop is discarded rather than climbing above `/`.
+///
+/// Operates on bytes because the input is a percent-decoded URI, which may
+/// name any byte a filename may contain.
+fn normalize_path(path: &[u8]) -> PathBuf {
+    let mut segments: Vec<&[u8]> = Vec::new();
 
-    for part in path.split('/') {
+    for part in path.split(|&b| b == b'/') {
         match part {
-            "" | "." => { /* skip */ }
-            ".." => { segments.pop(); }
+            b"" | b"." => { /* skip */ }
+            b".." => { segments.pop(); }
             _ => segments.push(part),
         }
     }
 
+    let mut result = PathBuf::with_capacity(path.len().saturating_add(1));
     if segments.is_empty() {
-        return String::from("/");
+        result.extend_bytes(b"/");
+        return result;
     }
-
-    let mut result = String::new();
     for seg in &segments {
-        result.push('/');
-        result.push_str(seg);
+        result.extend_bytes(b"/");
+        result.extend_bytes(seg);
     }
     result
 }
@@ -397,7 +463,10 @@ const ACCESS_LOG_SIZE: usize = 64;
 pub struct AccessLogEntry {
     /// HTTP method (GET, HEAD, etc.).
     pub method: String,
-    /// Request path.
+    /// Request path, octal-escaped so the log line stays pure ASCII and
+    /// unambiguous. A URI may decode to any byte, and a log a reader cannot
+    /// parse — or that a crafted path can inject a fake line into — is worse
+    /// than no log. The escaping is lossless: see [`crate::fs::escape`].
     pub path: String,
     /// HTTP status code returned.
     pub status: u16,
@@ -458,10 +527,10 @@ impl AccessLog {
 }
 
 /// Log an HTTP request to the access log ring buffer.
-fn log_access(method: &str, path: &str, status: u16, body_size: usize, duration_us: u64) {
+fn log_access(method: &str, path: &Path, status: u16, body_size: usize, duration_us: u64) {
     ACCESS_LOG.lock().push(AccessLogEntry {
         method: String::from(method),
-        path: String::from(path),
+        path: crate::fs::escape::escape_octal(path.as_bytes(), b""),
         status,
         body_size,
         duration_us,
@@ -923,11 +992,17 @@ fn extract_status(response: &[u8]) -> u16 {
 // ---------------------------------------------------------------------------
 
 /// Generate an HTML directory listing for the given VFS path.
+///
+/// Every filesystem-derived string in the output is HTML-escaped, and every
+/// `href` is percent-encoded from the raw name bytes. Both are required: a
+/// name is attacker-controlled whenever an attacker can create a file, and it
+/// may contain `<`, `"`, `?`, `#` or bytes that are not valid UTF-8.
 #[allow(clippy::arithmetic_side_effects)]
-fn directory_listing(vfs_path: &str, uri_path: &str) -> KernelResult<Vec<u8>> {
+fn directory_listing(vfs_path: &Path, uri_path: &Path) -> KernelResult<Vec<u8>> {
     use crate::fs::vfs::{Vfs, EntryType};
 
     let entries = Vfs::readdir(vfs_path)?;
+    let uri_text = html_path(uri_path);
 
     let mut html = format!(
         "<!DOCTYPE html>\n<html><head>\
@@ -944,35 +1019,25 @@ fn directory_listing(vfs_path: &str, uri_path: &str) -> KernelResult<Vec<u8>> {
          </head><body>\
          <h1>Index of {}</h1>\
          <table><tr><th>Name</th><th>Size</th><th>Type</th></tr>\n",
-        uri_path, uri_path,
+        uri_text, uri_text,
     );
 
     // Parent directory link (if not root).
-    if uri_path != "/" {
-        let parent = if let Some(pos) = uri_path[..uri_path.len().saturating_sub(1)].rfind('/') {
-            &uri_path[..pos.saturating_add(1)]
-        } else {
-            "/"
-        };
+    if uri_path != Path::new("/") {
+        // `Path::parent` already ignores a trailing separator and yields `/`
+        // for a top-level entry, which is exactly what the link needs.
+        let parent = uri_path.parent().unwrap_or(Path::new("/"));
         html.push_str(&format!(
             "<tr><td><a href=\"{}\">..</a></td><td>-</td><td>Directory</td></tr>\n",
-            parent,
+            percent_encode(parent.as_bytes()),
         ));
     }
 
     for entry in &entries {
-        let name = &entry.name;
-        let _entry_vfs_path = if vfs_path.ends_with('/') {
-            format!("{}{}", vfs_path, name)
-        } else {
-            format!("{}/{}", vfs_path, name)
-        };
-
-        let entry_uri = if uri_path.ends_with('/') {
-            format!("{}{}", uri_path, name)
-        } else {
-            format!("{}/{}", uri_path, name)
-        };
+        let name = entry.name.as_path();
+        // `Path::join` inserts exactly one separator, so a root `uri_path`
+        // needs no special case: `/` joined with `x` is `/x`, not `//x`.
+        let entry_uri = uri_path.join(name);
 
         let is_dir = entry.entry_type == EntryType::Directory;
 
@@ -987,16 +1052,15 @@ fn directory_listing(vfs_path: &str, uri_path: &str) -> KernelResult<Vec<u8>> {
         };
 
         let display_name = if is_dir {
-            format!("{}/", name)
+            format!("{}/", html_path(name))
         } else {
-            name.clone()
+            html_path(name)
         };
 
-        let href = if is_dir {
-            format!("{}/", entry_uri)
-        } else {
-            entry_uri.clone()
-        };
+        let mut href = percent_encode(entry_uri.as_bytes());
+        if is_dir {
+            href.push('/');
+        }
 
         let class = if is_dir { " class=\"dir\"" } else { "" };
 
@@ -1048,7 +1112,7 @@ fn handle_connection(conn_handle: usize) {
         if !check_rate_limit(ip_bytes) {
             RATE_LIMITED_COUNT.fetch_add(1, Ordering::Relaxed);
             REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-            log_access("*", "(rate-limited)", 429, 0, 0);
+            log_access("*", Path::new("(rate-limited)"), 429, 0, 0);
             let resp = too_many_requests_response();
             let _ = tcp::send(conn_handle, &resp);
             let _ = tcp::close(conn_handle);
@@ -1096,7 +1160,7 @@ fn handle_connection(conn_handle: usize) {
 /// - Range requests (Range: bytes=N-M → 206 Partial Content)
 /// - HEAD method (headers only)
 /// - gzip compression for compressible MIME types
-fn serve_file(vfs_path: &str, method: &str, if_none_match: &Option<String>, range: &Option<String>, use_gzip: bool) -> Vec<u8> {
+fn serve_file(vfs_path: &Path, method: &str, if_none_match: &Option<String>, range: &Option<String>, use_gzip: bool) -> Vec<u8> {
     use crate::fs::vfs::Vfs;
 
     match Vfs::read_file(vfs_path) {
@@ -1269,7 +1333,7 @@ fn handle_tls_connection(tcp_handle: usize) {
         if !check_rate_limit(ip_bytes) {
             RATE_LIMITED_COUNT.fetch_add(1, Ordering::Relaxed);
             REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-            log_access("*", "(rate-limited/tls)", 429, 0, 0);
+            log_access("*", Path::new("(rate-limited/tls)"), 429, 0, 0);
             // Can't send HTTP response before TLS handshake, just close.
             let _ = super::tcp::close(tcp_handle);
             return;
@@ -1411,9 +1475,14 @@ fn process_http_request(request_data: &[u8]) -> Vec<u8> {
         return error_response(405, "Method Not Allowed");
     }
 
-    // Dashboard API and HTML — intercept before VFS serving.
-    if req.path.starts_with("/api/") || req.path == "/dashboard" || req.path == "/dashboard/" {
-        if let Some((content_type, body)) = super::dashboard::handle_api_request(&req.path) {
+    // Dashboard API and HTML — intercept before VFS serving. These routes are
+    // fixed ASCII strings, so a path that is not valid UTF-8 can never name
+    // one and goes straight to the VFS.
+    let api_route = req.path.to_str().filter(|p| {
+        p.starts_with("/api/") || *p == "/dashboard" || *p == "/dashboard/"
+    });
+    if let Some(route) = api_route {
+        if let Some((content_type, body)) = super::dashboard::handle_api_request(route) {
             // ETag check for dashboard API (especially useful for the
             // auto-refresh dashboard that polls every 3 seconds).
             if etag_matches(&req.if_none_match, &body) {
@@ -1442,15 +1511,12 @@ fn process_http_request(request_data: &[u8]) -> Vec<u8> {
     // Check if client accepts gzip compression.
     let use_gzip = accepts_gzip(&req.accept_encoding);
 
-    // Map URI path to VFS path.
+    // Map URI path to VFS path. `req.path` is always absolute, so
+    // `Path::join` would discard the document root entirely — concatenate the
+    // byte strings instead.
     let doc_root = *DOC_ROOT.lock();
-    let vfs_path = if req.path == "/" {
-        String::from(doc_root)
-    } else if doc_root == "/" {
-        req.path.clone()
-    } else {
-        format!("{}{}", doc_root.trim_end_matches('/'), req.path)
-    };
+    let mut vfs_path = PathBuf::from(doc_root.trim_end_matches('/'));
+    vfs_path.extend_bytes(req.path.as_bytes());
 
     // Check if path exists and is a directory or file.
     let meta = Vfs::stat(&vfs_path);
@@ -1458,11 +1524,7 @@ fn process_http_request(request_data: &[u8]) -> Vec<u8> {
     let (response, status, body_len) = match meta {
         Ok(m) if m.entry_type == EntryType::Directory => {
             // Try index.html first.
-            let index_path = if vfs_path.ends_with('/') {
-                format!("{}index.html", vfs_path)
-            } else {
-                format!("{}/index.html", vfs_path)
-            };
+            let index_path = vfs_path.join("index.html");
 
             if Vfs::stat(&index_path).is_ok() {
                 let r = serve_file(&index_path, &req.method, &req.if_none_match, &req.range, use_gzip);
@@ -1608,12 +1670,12 @@ pub fn bench_parse_request(data: &[u8]) -> Option<bool> {
 /// Determine MIME type for a file path.  Exposed for benchmarking.
 #[inline(never)]
 pub fn bench_mime_type(path: &str) -> &'static str {
-    mime_for_path(path)
+    mime_for_path(Path::new(path))
 }
 
 /// Percent-decode a URI string.  Exposed for benchmarking.
 #[inline(never)]
-pub fn bench_percent_decode(s: &str) -> String {
+pub fn bench_percent_decode(s: &str) -> Vec<u8> {
     percent_decode(s)
 }
 
@@ -1652,29 +1714,48 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("[httpd] Running self-test...");
 
     // Test 1: Path normalization.
-    assert_eq!(normalize_path("/"), "/");
-    assert_eq!(normalize_path("/foo/bar"), "/foo/bar");
-    assert_eq!(normalize_path("/foo/../bar"), "/bar");
-    assert_eq!(normalize_path("/foo/./bar"), "/foo/bar");
-    assert_eq!(normalize_path("/../../../etc/passwd"), "/etc/passwd");
-    assert_eq!(normalize_path("/a//b///c"), "/a/b/c");
-    assert_eq!(normalize_path(""), "/");
+    let norm = |s: &str| normalize_path(s.as_bytes());
+    assert_eq!(norm("/"), PathBuf::from("/"));
+    assert_eq!(norm("/foo/bar"), PathBuf::from("/foo/bar"));
+    assert_eq!(norm("/foo/../bar"), PathBuf::from("/bar"));
+    assert_eq!(norm("/foo/./bar"), PathBuf::from("/foo/bar"));
+    assert_eq!(norm("/../../../etc/passwd"), PathBuf::from("/etc/passwd"));
+    assert_eq!(norm("/a//b///c"), PathBuf::from("/a/b/c"));
+    assert_eq!(norm(""), PathBuf::from("/"));
+    // A byte that is not valid UTF-8 must survive normalization intact.
+    assert_eq!(
+        normalize_path(b"/a/re\xffport.txt"),
+        PathBuf::from(b"/a/re\xffport.txt".as_slice())
+    );
     serial_println!("[httpd]   Path normalization: OK");
 
     // Test 2: Percent decoding.
-    assert_eq!(percent_decode("/foo%20bar"), "/foo bar");
-    assert_eq!(percent_decode("/hello%2Fworld"), "/hello/world");
-    assert_eq!(percent_decode("/plain"), "/plain");
-    assert_eq!(percent_decode("%41%42%43"), "ABC");
+    assert_eq!(percent_decode("/foo%20bar"), b"/foo bar");
+    assert_eq!(percent_decode("/hello%2Fworld"), b"/hello/world");
+    assert_eq!(percent_decode("/plain"), b"/plain");
+    assert_eq!(percent_decode("%41%42%43"), b"ABC");
+    // `%FF` is a legal escape naming a legal filename byte. Decoding it used
+    // to yield the empty string, which normalized to `/` — so the server
+    // answered a request for this file with the document-root listing.
+    assert_eq!(percent_decode("/re%FFport.txt"), b"/re\xffport.txt");
     serial_println!("[httpd]   Percent decode: OK");
 
     // Test 3: MIME type detection.
-    assert_eq!(mime_for_path("/index.html"), "text/html; charset=utf-8");
-    assert_eq!(mime_for_path("/style.css"), "text/css; charset=utf-8");
-    assert_eq!(mime_for_path("/app.js"), "application/javascript; charset=utf-8");
-    assert_eq!(mime_for_path("/data.json"), "application/json; charset=utf-8");
-    assert_eq!(mime_for_path("/image.png"), "image/png");
-    assert_eq!(mime_for_path("/unknown"), "application/octet-stream");
+    let mime = |s: &str| mime_for_path(Path::new(s));
+    assert_eq!(mime("/index.html"), "text/html; charset=utf-8");
+    assert_eq!(mime("/style.css"), "text/css; charset=utf-8");
+    assert_eq!(mime("/app.js"), "application/javascript; charset=utf-8");
+    assert_eq!(mime("/data.json"), "application/json; charset=utf-8");
+    assert_eq!(mime("/image.png"), "image/png");
+    assert_eq!(mime("/unknown"), "application/octet-stream");
+    // A dotfile has no extension, and a directory component's dot must not be
+    // mistaken for one.
+    assert_eq!(mime("/.htaccess"), "application/octet-stream");
+    assert_eq!(mime("/a.b/plain"), "application/octet-stream");
+    assert_eq!(
+        mime_for_path(Path::new(b"/x.h\xfftml".as_slice())),
+        "application/octet-stream"
+    );
     serial_println!("[httpd]   MIME type detection: OK");
 
     // Test 4: Request parsing.
@@ -1682,13 +1763,20 @@ pub fn self_test() -> KernelResult<()> {
     assert!(req.is_some());
     let r = req.unwrap();
     assert_eq!(r.method, "GET");
-    assert_eq!(r.path, "/index.html");
+    assert_eq!(r.path, PathBuf::from("/index.html"));
     serial_println!("[httpd]   Request parsing: OK");
 
     // Test 5: Request with query string.
     let req2 = parse_request(b"GET /search?q=hello&lang=en HTTP/1.1\r\n\r\n");
     assert!(req2.is_some());
-    assert_eq!(req2.unwrap().path, "/search");
+    assert_eq!(req2.unwrap().path, PathBuf::from("/search"));
+    // The undecodable path must reach the VFS as its exact bytes, not be
+    // silently rerouted to the document root.
+    let req3 = parse_request(b"GET /re%FFport.txt HTTP/1.1\r\n\r\n");
+    assert_eq!(
+        req3.map(|r| r.path),
+        Some(PathBuf::from(b"/re\xffport.txt".as_slice()))
+    );
     serial_println!("[httpd]   Query string stripping: OK");
 
     // Test 6: Response building.
@@ -1708,10 +1796,15 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("[httpd]   Error response: OK");
 
     // Test 8: Path traversal prevention.
-    assert_eq!(normalize_path("/../../etc/shadow"), "/etc/shadow");
-    assert_eq!(normalize_path("/foo/../../bar"), "/bar");
+    assert_eq!(norm("/../../etc/shadow"), PathBuf::from("/etc/shadow"));
+    assert_eq!(norm("/foo/../../bar"), PathBuf::from("/bar"));
     // Path can never escape root.
-    assert_eq!(normalize_path("/../../../../"), "/");
+    assert_eq!(norm("/../../../../"), PathBuf::from("/"));
+    // ...including when the `..` arrives percent-encoded.
+    assert_eq!(
+        normalize_path(&percent_decode("/%2e%2e/%2e%2e/etc/shadow")),
+        PathBuf::from("/etc/shadow")
+    );
     serial_println!("[httpd]   Path traversal prevention: OK");
 
     // Test 9: contains_header_end detection.

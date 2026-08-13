@@ -661,6 +661,10 @@ macro_rules! isr_stub_no_error {
             concat!(".global ", stringify!($stub)),
             concat!(stringify!($stub), ":"),
             "cld",                 // see "`cld` on entry" above
+            // AC is the SMAP override and an IDT gate does not clear it, so a
+            // ring-3 `popfq` would otherwise disable SMAP for this handler.
+            // Patched from a 3-byte NOP to `clac` at boot iff CPUID.SMAP.
+            crate::alternative_site!(".byte 0x0f,0x1f,0x00", "clac", 1),
             "push 0",              // dummy error code
             "push rax",
             "push rcx",
@@ -709,6 +713,10 @@ macro_rules! isr_stub_with_error {
             concat!(".global ", stringify!($stub)),
             concat!(stringify!($stub), ":"),
             "cld",                 // see "`cld` on entry" above
+            // AC is the SMAP override and an IDT gate does not clear it, so a
+            // ring-3 `popfq` would otherwise disable SMAP for this handler.
+            // Patched from a 3-byte NOP to `clac` at boot iff CPUID.SMAP.
+            crate::alternative_site!(".byte 0x0f,0x1f,0x00", "clac", 1),
             // CPU already pushed error code.
             "push rax",
             "push rcx",
@@ -793,6 +801,10 @@ macro_rules! irq_stub {
             concat!(".global ", stringify!($stub)),
             concat!(stringify!($stub), ":"),
             "cld",                 // see "`cld` on entry" above
+            // AC is the SMAP override and an IDT gate does not clear it, so a
+            // ring-3 `popfq` would otherwise disable SMAP for this handler.
+            // Patched from a 3-byte NOP to `clac` at boot iff CPUID.SMAP.
+            crate::alternative_site!(".byte 0x0f,0x1f,0x00", "clac", 1),
             "push 0",              // dummy error code (IRQs push none)
             "push rax",
             "push rcx",

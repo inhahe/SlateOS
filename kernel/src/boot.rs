@@ -30,9 +30,9 @@
 #![cfg_attr(kasan_instrumented, sanitize(address = "off"))]
 
 use crate::limine::{
-    BaseRevision, FramebufferResponse, HhdmResponse, KernelFileResponse, LimineRequest,
-    MemmapEntry, MemmapResponse, RequestsEndMarker, RequestsStartMarker, RsdpResponse,
-    memmap_type,
+    BaseRevision, ExecutableAddressResponse, FramebufferResponse, HhdmResponse,
+    KernelFileResponse, LimineRequest, MemmapEntry, MemmapResponse, RequestsEndMarker,
+    RequestsStartMarker, RsdpResponse, memmap_type,
 };
 use crate::serial_println;
 
@@ -91,6 +91,18 @@ static FRAMEBUFFER_REQUEST: LimineRequest<FramebufferResponse> = LimineRequest::
 #[unsafe(link_section = ".requests")]
 static RSDP_REQUEST: LimineRequest<RsdpResponse> = LimineRequest::RSDP;
 
+/// Request: where the kernel image was loaded (physical and virtual base).
+///
+/// The virtual base is fixed by `linker.ld`; the physical base is chosen by
+/// the bootloader.  Their difference converts any kernel virtual address to a
+/// physical one by subtraction, with no page-table walk — which is what
+/// [`crate::alternatives`] needs to write `.text` through its writable HHDM
+/// alias, at a point in boot long before `mm::page_table` is initialized.
+#[used]
+#[unsafe(link_section = ".requests")]
+static EXECUTABLE_ADDRESS_REQUEST: LimineRequest<ExecutableAddressResponse> =
+    LimineRequest::EXECUTABLE_ADDRESS;
+
 /// Request the raw kernel ELF binary for symbol table access.
 ///
 /// Limine keeps the original kernel file mapped in memory.  We use
@@ -123,6 +135,21 @@ pub unsafe fn hhdm_offset_early() -> Option<u64> {
     // SAFETY: `HHDM_REQUEST` is our own `static` in `.requests`, populated by
     // the bootloader before it transferred control to us.
     unsafe { HHDM_REQUEST.offset_raw() }
+}
+
+/// Where the bootloader loaded the kernel image: `(physical_base, virtual_base)`.
+///
+/// Callers convert a kernel virtual address `v` to physical with
+/// `v - virtual_base + physical_base`.  This is only valid for addresses
+/// inside the kernel image (the HHDM and any later mappings are unrelated).
+///
+/// Available immediately at kernel entry — it reads a Limine response
+/// directly and depends on no other subsystem.  Returns `None` if the
+/// bootloader did not answer the request.
+#[must_use]
+pub fn executable_address() -> Option<(u64, u64)> {
+    let r = EXECUTABLE_ADDRESS_REQUEST.response()?;
+    Some((r.physical_base, r.virtual_base))
 }
 
 /// Framebuffer information from the bootloader (if available).

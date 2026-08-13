@@ -52,6 +52,24 @@ SECTIONS
     .rodata : ALIGN(4K) {
         __rodata_start = .;
         *(.rodata .rodata.*)
+
+        /* CPUID-gated code patching (see kernel/src/alternatives.rs).
+         *
+         * `.altinstructions` is the table of patch records; each names a site
+         * in .text and a replacement byte string in `.altinstr_replacement`.
+         * Both live in .rodata because they are only ever *read* by the
+         * patcher — the bytes are copied into .text, never executed here, so
+         * this segment stays non-executable.
+         *
+         * KEEP() is required: nothing references these sections symbolically,
+         * so --gc-sections would otherwise discard the entire table and every
+         * alternative would silently keep its default instruction. */
+        . = ALIGN(8);
+        __altinstructions_start = .;
+        KEEP(*(.altinstructions))
+        __altinstructions_end = .;
+        KEEP(*(.altinstr_replacement))
+
         __rodata_end = .;
     } :rodata
 

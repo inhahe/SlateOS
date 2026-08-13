@@ -77,7 +77,7 @@ static HW_SMAP: AtomicBool = AtomicBool::new(false);
 /// Count of intentional user-access windows opened (STAC/CLAC pairs).
 static USER_ACCESS_COUNT: AtomicU64 = AtomicU64::new(0);
 
-/// Whether every kernel entry path is known to clear `EFLAGS.AC`.
+/// Whether every kernel entry path clears `EFLAGS.AC`.
 ///
 /// **CR4.SMAP must not be set while this is `false`** — `smap_enable_blocker()`
 /// enforces that.
@@ -89,24 +89,35 @@ static USER_ACCESS_COUNT: AtomicU64 = AtomicU64::new(0);
 ///
 /// - **SYSCALL** — covered.  `syscall::entry::init()` masks AC (bit 18) in
 ///   `IA32_FMASK`, so the CPU clears it as part of the instruction.
-/// - **IDT gates (every interrupt, every exception)** — NOT covered.  An
-///   interrupt gate loads the new RFLAGS clearing only TF, NT, RF and VM
-///   (Intel SDM Vol. 3A §6.12.1); AC is inherited verbatim, exactly as DF is.
-///   So a process that sets AC and then simply waits for a timer tick enters
-///   every kernel interrupt handler with SMAP disabled.
+/// - **IDT gates (every interrupt, every exception)** — covered as of the
+///   alternatives framework.  An interrupt gate loads the new RFLAGS clearing
+///   only TF, NT, RF and VM (Intel SDM Vol. 3A §6.12.1); AC is inherited
+///   verbatim, exactly as DF is.  So a process that set AC and then waited for a
+///   timer tick used to enter every kernel handler with SMAP disabled.  Each ISR
+///   stub now begins with a patch site that [`crate::alternatives`] rewrites
+///   from a 3-byte NOP to `clac` at boot.
 ///
 /// This is the same bug class as the missing `cld` fixed in `idt.rs` — inherited
 /// ring-3 flag state — but it fails *open* and *silently*: nothing crashes, no
-/// test goes red, SMAP is simply not enforced.  Hence the hard gate rather than
-/// a comment.
+/// test goes red, SMAP is simply not enforced.  Hence the gate, and hence
+/// `idt::ac_on_entry_self_test()` checking this answer against what a real IDT
+/// gate does rather than trusting it.
 ///
-/// Linux solves this by emitting `ASM_CLAC` at every entry point, alternatives-
-/// patched to a 3-byte NOP on CPUs without SMAP (`arch/x86/include/asm/smap.h`).
-/// We cannot emit an unconditional `clac` in the IDT stubs because `clac` #UDs
-/// when CPUID.SMAP is absent, and we have no alternatives-patching framework
-/// yet.  The options are written up in `known-issues.md` under
-/// `B-AC-INHERITED-AT-KERNEL-ENTRY`.
-const ENTRY_PATHS_CLEAR_AC: bool = false;
+/// Note the conjunction: the `clac` is patched in **only when CPUID reports
+/// SMAP**, since `clac` #UDs otherwise.  On a CPU without SMAP the stubs keep
+/// their NOP and AC is still inherited — harmless, because SMAP cannot be
+/// enabled there either, but it means this must not report `true` merely because
+/// the patcher ran.
+///
+/// It asks [`crate::alternatives::all_supported_sites_patched`] rather than
+/// `has_run()` for the same reason: the patcher can run to completion and still
+/// have installed nothing (a malformed table, no HHDM alias to write through),
+/// and that outcome must read as "AC is not cleared", not as "the patcher ran,
+/// so we're fine".
+fn entry_paths_clear_ac_impl() -> bool {
+    crate::alternatives::all_supported_sites_patched()
+        && crate::cpu::features().is_some_and(|f| f.smap)
+}
 
 /// Whether every kernel path that touches user memory is wrapped in STAC/CLAC.
 ///
@@ -115,8 +126,19 @@ const ENTRY_PATHS_CLEAR_AC: bool = false;
 /// loudly (a #PF on the first unannotated user access), but gating it keeps
 /// both preconditions in one place.
 ///
-/// `mm::user` already uses `stac()`/`clac()` around its accessors; what remains
-/// is an audit of every *other* site that dereferences a user pointer.
+/// `mm::user` already uses `stac()`/`clac()` around its accessors.  What blocks
+/// this is not an audit but a refactor: ~100 syscall handlers validate a user
+/// pointer and then build a slice *over the user virtual address* and hand it
+/// to kernel code (`core::slice::from_raw_parts(ptr, len)` straight into
+/// `pipe::read`, and so on).  Those accesses would all fault under SMAP.
+///
+/// Wrapping them in `stac()`/`clac()` is *not* the fix — several of the
+/// callees block, and an open STAC window across a reschedule leaves AC = 1 in
+/// the task's saved RFLAGS, disabling SMAP for that task and for the scheduler
+/// itself.  The window has to stay inside a single non-blocking copy.  See
+/// `D-SYSCALL-HANDLERS-HAND-RAW-USER-SLICES-TO-KERNEL-CODE` in
+/// `known-issues.md`; note it is a use-after-free risk in its own right, quite
+/// apart from SMAP.
 const USER_ACCESSES_ANNOTATED: bool = false;
 
 /// Whether the kernel believes every entry path clears `EFLAGS.AC`.
@@ -125,8 +147,8 @@ const USER_ACCESSES_ANNOTATED: bool = false;
 /// actual IDT gate does — see [`ENTRY_PATHS_CLEAR_AC`] for why a wrong answer
 /// here would otherwise fail silently.
 #[must_use]
-pub const fn entry_paths_clear_ac() -> bool {
-    ENTRY_PATHS_CLEAR_AC
+pub fn entry_paths_clear_ac() -> bool {
+    entry_paths_clear_ac_impl()
 }
 
 /// Return the reason CR4.SMAP cannot be enabled yet, or `None` if it can.
@@ -135,11 +157,11 @@ pub const fn entry_paths_clear_ac() -> bool {
 /// an unmet [`ENTRY_PATHS_CLEAR_AC`] yields a protection that silently does
 /// nothing while reporting itself as ACTIVE, which is precisely the "a defence
 /// that looks sufficient is not" failure mode recorded in design-decisions §118.
-const fn smap_enable_blocker() -> Option<&'static str> {
-    if !ENTRY_PATHS_CLEAR_AC {
+fn smap_enable_blocker() -> Option<&'static str> {
+    if !entry_paths_clear_ac_impl() {
         // Keep this string specific: it is what a future reader sees on the
         // serial log when they wonder why SMAP is off.
-        return Some("IDT entry stubs do not clear EFLAGS.AC (B-AC-INHERITED-AT-KERNEL-ENTRY)");
+        return Some("IDT entry stubs do not clear EFLAGS.AC — alternatives::apply() has not patched in `clac`");
     }
     if !USER_ACCESSES_ANNOTATED {
         return Some("user-access paths not fully STAC/CLAC-annotated");
@@ -496,7 +518,7 @@ pub fn self_test() {
         let count_before = USER_ACCESS_COUNT.load(Ordering::Relaxed);
         unsafe { stac(); clac(); }
         let count_after = USER_ACCESS_COUNT.load(Ordering::Relaxed);
-        assert_eq!(count_after, count_before + 1);
+        assert_eq!(count_after, count_before.wrapping_add(1));
         serial_println!("[smep_smap]   Access counter: OK");
     } else {
         serial_println!("[smep_smap]   STAC/CLAC: skipped (SMAP not available — instructions would #UD)");

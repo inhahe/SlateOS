@@ -378,8 +378,53 @@ pub struct RsdpResponse {
 impl LimineRequest<RsdpResponse> {
     /// Limine RSDP feature request ID.
     ///
-    /// Reference: Limine Protocol v8.x, RSDP Feature.
-    pub const RSDP: Self = Self::new([0x71ba_7686_3cc5_5f63, 0xb264_4a48_c516_a487]);
+    /// Reference: Limine Protocol v8.x, RSDP Feature (`LIMINE_RSDP_REQUEST`
+    /// in `limine/limine.h`).
+    ///
+    /// This ID was previously `0x71ba…, 0xb264…`, which is in fact
+    /// `LIMINE_EXECUTABLE_ADDRESS_REQUEST` (see [`ExecutableAddressResponse`]
+    /// below).  Limine answered it happily — with a *kernel address* response
+    /// — so `RsdpResponse::address`, which overlays that struct's
+    /// `physical_base`, returned the kernel's load address instead of the
+    /// RSDP.  `acpi::init` then rejected it (no `"RSD PTR "` signature) and
+    /// silently fell back to brute-force scanning the ACPI-reclaimable and
+    /// legacy BIOS regions.  That fallback happens to work under QEMU/SeaBIOS
+    /// but is exactly what the RSDP request exists to avoid: on UEFI the RSDP
+    /// need not live in either scanned region, and a legacy machine can hold a
+    /// stale ACPI 1.0 RSDP in the BIOS area shadowing the real one.
+    pub const RSDP: Self = Self::new([0xc5e7_7b6b_397e_7b43, 0x2763_7845_accd_cf3c]);
+}
+
+// ---------------------------------------------------------------------------
+// Executable (kernel) address
+// ---------------------------------------------------------------------------
+
+/// Where the bootloader actually loaded the kernel image.
+///
+/// The kernel's link-time virtual base is fixed by `linker.ld`
+/// (0xFFFF_FFFF_8000_0000), but its *physical* base is chosen by the
+/// bootloader at load time.  The difference between the two is the only
+/// thing needed to convert a kernel virtual address to a physical one
+/// without walking the page tables — which is what
+/// [`crate::alternatives`] needs in order to reach `.text` through its
+/// writable HHDM alias, long before `mm::page_table` is initialized.
+#[repr(C)]
+pub struct ExecutableAddressResponse {
+    pub revision: u64,
+    /// Physical address the kernel image was loaded at.
+    pub physical_base: u64,
+    /// Virtual address the kernel image is mapped at (its link address).
+    pub virtual_base: u64,
+}
+
+impl LimineRequest<ExecutableAddressResponse> {
+    /// Limine executable-address feature request ID.
+    ///
+    /// Reference: Limine Protocol v8.x, Executable Address Feature
+    /// (`LIMINE_EXECUTABLE_ADDRESS_REQUEST`, formerly
+    /// `LIMINE_KERNEL_ADDRESS_REQUEST` — same ID, renamed at API revision 2).
+    pub const EXECUTABLE_ADDRESS: Self =
+        Self::new([0x71ba_7686_3cc5_5f63, 0xb264_4a48_c516_a487]);
 }
 
 // ---------------------------------------------------------------------------

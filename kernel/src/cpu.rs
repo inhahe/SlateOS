@@ -111,6 +111,35 @@ pub fn read_cr2() -> u64 {
     cr2
 }
 
+/// Execute a serializing instruction, flushing the prefetch queue.
+///
+/// Required after modifying instruction bytes that this CPU may already have
+/// prefetched or decoded — without it the CPU is permitted to execute the
+/// *stale* bytes (Intel SDM Vol. 3A §8.1.3, "Handling Self- and Cross-Modifying
+/// Code").  `cpuid` is the canonical choice: serializing by definition and
+/// available on every CPU we can boot on, unlike the alternatives (`mfence` does
+/// not serialize instruction fetch; a far jump is awkward to emit from Rust).
+///
+/// Used by [`crate::alternatives::apply`] after patching `.text`.
+#[inline]
+pub fn serialize() {
+    // SAFETY: `cpuid` has no memory effects and cannot fault; leaf 0 is
+    // implemented on every x86_64 CPU.  We discard all results and want only the
+    // serializing side effect.  RBX is saved and restored around the instruction
+    // because LLVM reserves it and will not allow it as an operand.
+    unsafe {
+        core::arch::asm!(
+            "push rbx",
+            "cpuid",
+            "pop rbx",
+            inout("eax") 0u32 => _,
+            out("ecx") _,
+            out("edx") _,
+            options(preserves_flags),
+        );
+    }
+}
+
 /// Read the current value of the RFLAGS register.
 #[inline]
 #[allow(dead_code)] // Used by without_interrupts and future CPU state inspection.

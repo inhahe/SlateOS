@@ -63,6 +63,7 @@ extern crate alloc;
 // Module declarations.
 mod ac97;
 mod acpi;
+mod alternatives;
 mod apic;
 mod audio_alsa;
 mod audio_alsa_ctl;
@@ -526,6 +527,20 @@ extern "C" fn kernel_main() -> ! {
     // Detect Intel CET (Control-flow Enforcement Technology) support.
     // On hardware with CET, this enables shadow stacks and IBT for kernel protection.
     cet::detect();
+    // Apply CPUID-gated code patches before anything depends on them.
+    //
+    // Ordering is load-bearing in two directions: *after* cpu::detect_features()
+    // (the patcher reads CPUID), and *before* smp::init() (patching .text while
+    // another CPU might execute it is cross-modifying code).  apply() asserts
+    // the CPU-count precondition rather than trusting this call site.
+    //
+    // It does NOT need to precede mm::protect::harden_kernel_sections(): .text
+    // is read-only from the moment Limine maps it, so the patcher writes
+    // through the image's read-write HHDM alias regardless.
+    //
+    // Concretely this turns the 3-byte NOP at the top of every ISR stub into
+    // `clac`, so smep_smap can enable SMAP without ring-3's AC flag disabling it.
+    alternatives::apply();
     // Enable SMEP/SMAP — hardware protection against kernel accidentally
     // accessing or executing user-space memory.  Critical for security.
     smep_smap::init();
@@ -4681,6 +4696,12 @@ extern "C" fn kernel_main() -> ! {
     // `memset`/`memcpy` are `rep`-string operations that run *backwards* if DF
     // is set, and an IDT gate — unlike SYSCALL — does not clear DF for us.
     idt::df_on_entry_self_test();
+
+    // Step 22e⅞+: Alternatives (CPUID-gated code patching) self-test.
+    // Must precede the AC test below, which depends on the `clac` this patches
+    // into the ISR stubs — if patching silently did nothing, we want to hear it
+    // from here, where the message says so, rather than as a confusing AC result.
+    alternatives::self_test();
 
     // Step 22e⅞+: Alignment-check-flag-on-entry self-test.
     // The same class of bug as the DF test above — RFLAGS the kernel inherits

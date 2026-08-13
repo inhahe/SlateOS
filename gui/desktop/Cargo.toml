@@ -5,3 +5,10 @@ edition = "2024"
 description = "SlateOS desktop shell — window manager, taskbar, system tray"
 [dependencies]
 guitk = { path = "../toolkit" }
+
+# The POSIX `TZ`-rule engine, shared with the libc (`posix`) and the shell
+# (`userspace/oils`). The taskbar clock is the most-looked-at rendering of local
+# time on the machine, so if it carried its own notion of a zone it would be the
+# most visible thing on the desktop to disagree with `date`. See
+# tzrules/src/lib.rs's "Why this is a crate and not a module".
+tzrules = { path = "../../tzrules" }

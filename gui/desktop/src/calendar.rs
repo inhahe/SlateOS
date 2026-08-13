@@ -34,6 +34,8 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+// The same zone engine the libc's `localtime` and osh's `printf '%(…)T'` use.
+use tzrules::Tz;
 
 // ============================================================================
 // Theme — Catppuccin Mocha palette
@@ -849,8 +851,16 @@ impl Default for ReminderManager {
 pub struct TimezoneEntry {
     /// Display label (e.g., "New York", "London").
     pub label: String,
-    /// Offset from UTC in seconds (e.g., -18000 for UTC-5).
-    pub utc_offset_secs: i64,
+    /// The zone's **rules**, not a fixed offset.
+    ///
+    /// This used to be a single `utc_offset_secs: i64`, which cannot be right:
+    /// a zone that observes daylight saving has two offsets and a rule saying
+    /// which is in force *at a given instant*.  Storing one number meant "New
+    /// York" was `-5h` all year, so the clock read an hour early for the ~8
+    /// months of EDT — and, worse, was silently wrong rather than visibly
+    /// missing.  A [`Tz`] carries the transition rule, so
+    /// [`ClockDisplay::format_time`] can ask what the offset is *now*.
+    pub tz: Tz,
 }
 
 /// Digital clock for the taskbar.
@@ -863,6 +873,18 @@ pub struct ClockDisplay {
     pub extra_timezones: Vec<TimezoneEntry>,
 }
 
+/// The local seconds a UTC instant names in `tz`.
+///
+/// Split out so the time and date renderings can never disagree about which
+/// day they are on — they must apply the *same* offset to the *same* instant,
+/// and a clock that reads `00:30` under one rule and yesterday's date under
+/// another is exactly the bug this shape prevents.
+fn local_secs(utc_timestamp: u64, tz: &Tz) -> u64 {
+    let utc = i64::try_from(utc_timestamp).unwrap_or(i64::MAX);
+    let shifted = utc.saturating_add(i64::from(tz.lookup(utc).gmtoff));
+    u64::try_from(shifted).unwrap_or(0)
+}
+
 impl ClockDisplay {
     pub fn new() -> Self {
         Self {
@@ -872,20 +894,32 @@ impl ClockDisplay {
         }
     }
 
-    /// Add an additional timezone display (up to 3).
-    pub fn add_timezone(&mut self, label: &str, utc_offset_secs: i64) {
-        if self.extra_timezones.len() < 3 {
-            self.extra_timezones.push(TimezoneEntry {
-                label: label.to_string(),
-                utc_offset_secs,
-            });
+    /// Add an additional timezone display (up to 3), named by a POSIX `TZ`
+    /// string (`"EST5EDT,M3.2.0,M11.1.0"`, `"NPT-5:45"`, `"GMT0BST,M3.5.0/1,M10.5.0"`).
+    ///
+    /// Returns `false` — and adds nothing — if the list is already full or the
+    /// string is not a POSIX `TZ` string.  A zoneinfo *name* (`America/New_York`)
+    /// is deliberately **not** accepted: it needs a TZif database we do not ship
+    /// (known-issues `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`), and quietly
+    /// falling back to UTC for it would put a wrong time on the taskbar under a
+    /// label claiming otherwise.
+    pub fn add_timezone(&mut self, label: &str, posix_tz: &str) -> bool {
+        if self.extra_timezones.len() >= 3 {
+            return false;
         }
+        let Some(tz) = Tz::parse(posix_tz.as_bytes()) else {
+            return false;
+        };
+        self.extra_timezones.push(TimezoneEntry {
+            label: label.to_string(),
+            tz,
+        });
+        true
     }
 
-    /// Format a UTC timestamp for the local clock display.
-    pub fn format_time(&self, utc_timestamp: u64, utc_offset_secs: i64) -> String {
-        let adjusted = (utc_timestamp as i64 + utc_offset_secs).max(0) as u64;
-        let (_, _, _, hour, min, sec) = timestamp_to_date(adjusted);
+    /// Format a UTC timestamp as a wall clock reading in `tz`.
+    pub fn format_time(&self, utc_timestamp: u64, tz: &Tz) -> String {
+        let (_, _, _, hour, min, sec) = timestamp_to_date(local_secs(utc_timestamp, tz));
 
         if self.use_24h {
             if self.show_seconds {
@@ -912,9 +946,8 @@ impl ClockDisplay {
     }
 
     /// Format a date string: "DayOfWeek, Month DD, YYYY".
-    pub fn format_date(&self, utc_timestamp: u64, utc_offset_secs: i64) -> String {
-        let adjusted = (utc_timestamp as i64 + utc_offset_secs).max(0) as u64;
-        let (year, month, day, _, _, _) = timestamp_to_date(adjusted);
+    pub fn format_date(&self, utc_timestamp: u64, tz: &Tz) -> String {
+        let (year, month, day, _, _, _) = timestamp_to_date(local_secs(utc_timestamp, tz));
         let dow = day_of_week(year, month, day);
         let dow_name = day_of_week_name(dow);
         let month_str = month_name(month);
@@ -924,13 +957,14 @@ impl ClockDisplay {
     /// Render the clock display for the taskbar.
     ///
     /// Returns render commands positioned at `(x, y)`.
-    /// `utc_now` is the current UTC timestamp, `local_offset` is the local
-    /// timezone offset in seconds from UTC.
-    pub fn render(&self, x: f32, y: f32, utc_now: u64, local_offset: i64) -> Vec<RenderCommand> {
+    /// `utc_now` is the current UTC timestamp and `local` is the machine's
+    /// zone — the same [`Tz`] the libc's `localtime` and the shell's
+    /// `printf '%(…)T'` use, so the taskbar cannot disagree with `date`.
+    pub fn render(&self, x: f32, y: f32, utc_now: u64, local: &Tz) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Main time.
-        let time_str = self.format_time(utc_now, local_offset);
+        let time_str = self.format_time(utc_now, local);
         cmds.push(RenderCommand::Text {
             x,
             y,
@@ -942,7 +976,7 @@ impl ClockDisplay {
         });
 
         // Date below the time.
-        let date_str = self.format_date(utc_now, local_offset);
+        let date_str = self.format_date(utc_now, local);
         cmds.push(RenderCommand::Text {
             x,
             y: y + 16.0,
@@ -956,7 +990,7 @@ impl ClockDisplay {
         // Extra timezones.
         let mut tz_y = y + 34.0;
         for tz in &self.extra_timezones {
-            let tz_time = self.format_time(utc_now, tz.utc_offset_secs);
+            let tz_time = self.format_time(utc_now, &tz.tz);
             let label = format!("{}: {}", tz.label, tz_time);
             cmds.push(RenderCommand::Text {
                 x,
@@ -1712,9 +1746,9 @@ impl CalendarView {
         x: f32,
         y: f32,
         utc_now: u64,
-        local_offset: i64,
+        local: &Tz,
     ) -> Vec<RenderCommand> {
-        clock.render(x, y, utc_now, local_offset)
+        clock.render(x, y, utc_now, local)
     }
 }
 
@@ -2394,6 +2428,14 @@ mod tests {
     // ClockDisplay tests
     // ========================================================================
 
+    /// A zone from a POSIX `TZ` string, for the tests below.  Panicking on a
+    /// literal the test itself wrote is the right failure mode here: a typo in
+    /// the string would otherwise silently become UTC and make the assertion
+    /// test nothing.
+    fn tz(s: &str) -> Tz {
+        Tz::parse(s.as_bytes()).expect("test TZ string should parse")
+    }
+
     #[test]
     fn clock_24h_format() {
         let clock = ClockDisplay {
@@ -2402,10 +2444,10 @@ mod tests {
             extra_timezones: Vec::new(),
         };
         // Epoch = midnight UTC.
-        assert_eq!(clock.format_time(0, 0), "00:00");
+        assert_eq!(clock.format_time(0, &Tz::UTC), "00:00");
         // 13:45 UTC.
         let ts = 13 * 3600 + 45 * 60;
-        assert_eq!(clock.format_time(ts, 0), "13:45");
+        assert_eq!(clock.format_time(ts, &Tz::UTC), "13:45");
     }
 
     #[test]
@@ -2416,7 +2458,7 @@ mod tests {
             extra_timezones: Vec::new(),
         };
         let ts = 13 * 3600 + 45 * 60 + 30;
-        assert_eq!(clock.format_time(ts, 0), "13:45:30");
+        assert_eq!(clock.format_time(ts, &Tz::UTC), "13:45:30");
     }
 
     #[test]
@@ -2427,13 +2469,13 @@ mod tests {
             extra_timezones: Vec::new(),
         };
         // Midnight.
-        assert_eq!(clock.format_time(0, 0), "12:00 AM");
+        assert_eq!(clock.format_time(0, &Tz::UTC), "12:00 AM");
         // Noon.
-        assert_eq!(clock.format_time(12 * 3600, 0), "12:00 PM");
+        assert_eq!(clock.format_time(12 * 3600, &Tz::UTC), "12:00 PM");
         // 1 PM.
-        assert_eq!(clock.format_time(13 * 3600, 0), "1:00 PM");
+        assert_eq!(clock.format_time(13 * 3600, &Tz::UTC), "1:00 PM");
         // 11 AM.
-        assert_eq!(clock.format_time(11 * 3600, 0), "11:00 AM");
+        assert_eq!(clock.format_time(11 * 3600, &Tz::UTC), "11:00 AM");
     }
 
     #[test]
@@ -2443,10 +2485,43 @@ mod tests {
             show_seconds: false,
             extra_timezones: Vec::new(),
         };
-        // UTC+5:30 (India).
-        let offset = 5 * 3600 + 30 * 60;
-        // At UTC midnight, local time is 05:30.
-        assert_eq!(clock.format_time(0, offset), "05:30");
+        // India: UTC+5:30, and no DST rule — POSIX writes an *east* offset
+        // with a minus sign.  At UTC midnight, local time is 05:30.
+        assert_eq!(clock.format_time(0, &tz("IST-5:30")), "05:30");
+    }
+
+    /// The bug this API shape exists to prevent: a zone with daylight saving
+    /// has two offsets, and which one applies depends on the instant.  A
+    /// `utc_offset_secs: i64` field could only ever hold one of them, so the
+    /// taskbar read an hour wrong for the ~8 months of EDT.
+    #[test]
+    fn clock_follows_a_daylight_saving_transition() {
+        let clock = ClockDisplay::new();
+        let eastern = tz("EST5EDT,M3.2.0,M11.1.0");
+        // 2001-09-09 01:46:40 UTC — inside EDT (UTC-4).
+        assert_eq!(clock.format_time(1_000_000_000, &eastern), "21:46");
+        // 2001-01-01 00:00:00 UTC — inside EST (UTC-5).
+        assert_eq!(clock.format_time(978_307_200, &eastern), "19:00");
+        // A zone that observes no DST is the same all year, which is the
+        // control that keeps the two readings above meaningful.
+        let kolkata = tz("IST-5:30");
+        assert_eq!(clock.format_time(1_000_000_000, &kolkata), "07:16");
+        assert_eq!(clock.format_time(978_307_200, &kolkata), "05:30");
+    }
+
+    /// The date must be taken from the same shifted instant as the time, or a
+    /// clock reading just after local midnight would show yesterday.
+    #[test]
+    fn clock_date_moves_with_the_zone() {
+        let clock = ClockDisplay::new();
+        let ts = 1_704_067_200; // 2024-01-01 00:00:00 UTC — a Monday.
+        assert_eq!(clock.format_date(ts, &Tz::UTC), "Monday, January 1, 2024");
+        // Five hours behind: still New Year's Eve, and a Sunday.
+        assert_eq!(
+            clock.format_date(ts, &tz("EST5EDT,M3.2.0,M11.1.0")),
+            "Sunday, December 31, 2023"
+        );
+        assert_eq!(clock.format_time(ts, &tz("EST5EDT,M3.2.0,M11.1.0")), "19:00");
     }
 
     #[test]
@@ -2454,18 +2529,34 @@ mod tests {
         let clock = ClockDisplay::new();
         // 2024-01-01 00:00 UTC.
         let ts = 1704067200;
-        let date_str = clock.format_date(ts, 0);
+        let date_str = clock.format_date(ts, &Tz::UTC);
         assert_eq!(date_str, "Monday, January 1, 2024");
     }
 
     #[test]
     fn clock_max_timezones() {
         let mut clock = ClockDisplay::new();
-        clock.add_timezone("New York", -5 * 3600);
-        clock.add_timezone("London", 0);
-        clock.add_timezone("Tokyo", 9 * 3600);
-        clock.add_timezone("Sydney", 11 * 3600); // Should be ignored.
+        assert!(clock.add_timezone("New York", "EST5EDT,M3.2.0,M11.1.0"));
+        assert!(clock.add_timezone("London", "GMT0BST,M3.5.0/1,M10.5.0"));
+        assert!(clock.add_timezone("Tokyo", "JST-9"));
+        // Full — refused, and says so rather than silently dropping it.
+        assert!(!clock.add_timezone("Sydney", "AEST-10AEDT,M10.1.0,M4.1.0/3"));
         assert_eq!(clock.extra_timezones.len(), 3);
+    }
+
+    /// A zoneinfo *name* is not a POSIX `TZ` string.  Accepting it and falling
+    /// back to UTC would put a wrong time on the taskbar under a label
+    /// claiming otherwise, so it is refused outright.
+    #[test]
+    fn clock_refuses_a_zone_it_cannot_actually_render() {
+        let mut clock = ClockDisplay::new();
+        for bad in ["America/New_York", "", "Mars", "EST5EDT,garbage"] {
+            assert!(
+                !clock.add_timezone("somewhere", bad),
+                "{bad:?} should not be accepted as a POSIX TZ string"
+            );
+        }
+        assert!(clock.extra_timezones.is_empty());
     }
 
     // ========================================================================
@@ -2671,7 +2762,7 @@ description: Just a test";
     #[test]
     fn clock_render_produces_commands() {
         let clock = ClockDisplay::new();
-        let cmds = clock.render(0.0, 0.0, 1_700_000_000, 0);
+        let cmds = clock.render(0.0, 0.0, 1_700_000_000, &Tz::UTC);
         // At minimum: time text + date text.
         assert!(cmds.len() >= 2);
     }
@@ -2679,10 +2770,10 @@ description: Just a test";
     #[test]
     fn clock_render_with_extra_timezones() {
         let mut clock = ClockDisplay::new();
-        clock.add_timezone("Tokyo", 9 * 3600);
-        clock.add_timezone("London", 0);
+        assert!(clock.add_timezone("Tokyo", "JST-9"));
+        assert!(clock.add_timezone("London", "GMT0BST,M3.5.0/1,M10.5.0"));
 
-        let cmds = clock.render(0.0, 0.0, 1_700_000_000, 0);
+        let cmds = clock.render(0.0, 0.0, 1_700_000_000, &Tz::UTC);
         // time + date + 2 timezone lines.
         assert!(cmds.len() >= 4);
     }

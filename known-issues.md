@@ -5874,6 +5874,23 @@ The gap is one of coverage, not of consistency, and a POSIX `TZ` string
   zoneinfo tree) is the portable spelling and is what any ported program will
   look for, so prefer it over inventing a YAML setting.
 
+**Found and fixed while writing this warning: the taskbar clock had exactly the
+shape being warned against.** `gui/desktop/src/calendar.rs`'s
+`ClockDisplay`/`TimezoneEntry` stored a `utc_offset_secs: i64` and rendered with
+`timestamp + offset`, so its own test declared `clock.add_timezone("New York",
+-5 * 3600)` — an hour early for the ~8 months of EDT, and silently so. The clock
+was still library-only (nothing in the taskbar called it yet), so nothing had
+shipped wrong; it is now `TimezoneEntry { label, tz: tzrules::Tz }`, with
+`format_time`/`format_date`/`render` taking a `&Tz` and a shared `local_secs`
+helper so the time and date can never be shifted differently (a clock reading
+`00:30` beside yesterday's date is the failure that split shape invites).
+`add_timezone` now takes a POSIX `TZ` string and **returns `false`** for one it
+cannot parse rather than falling back to UTC — a wrong time under a label
+saying "New York" is worse than no entry. Covered by
+`clock_follows_a_daylight_saving_transition`,
+`clock_date_moves_with_the_zone` and
+`clock_refuses_a_zone_it_cannot_actually_render` (2026-08-13).
+
 **Do not wire `kernel/src/fs/locale.rs`'s `Timezone` to the clock.** It already
 exists (`LocaleConfig.timezone`, 12 registered zones, surfaced by the
 `locale`/`lcl` command and `/proc/locale`) and looks like the answer, but it is

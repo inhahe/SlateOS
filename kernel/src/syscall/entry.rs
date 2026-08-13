@@ -4,8 +4,9 @@
 //!
 //! 1. The CPU loads CS from `IA32_STAR[47:32]` (kernel CS = 0x08).
 //! 2. RIP is loaded from `IA32_LSTAR` (our `syscall_entry` stub).
-//! 3. RFLAGS is masked with `IA32_FMASK` (we clear IF to disable
-//!    interrupts).
+//! 3. RFLAGS is masked with `IA32_FMASK`.  Everything not masked there is
+//!    inherited verbatim from ring 3, so we mask the full Linux set — IF, DF,
+//!    TF, AC, NT, IOPL, RF, ID and the arithmetic flags.  See `init()`.
 //! 4. The old RIP is saved in RCX, old RFLAGS in R11.
 //! 5. RSP is NOT changed — we must switch to the kernel stack manually.
 //!
@@ -91,7 +92,7 @@ global_asm!(
     //   R11 = user RFLAGS
     //   RSP = user RSP (unchanged by SYSCALL!)
     //   CS  = kernel CS (from IA32_STAR[47:32])
-    //   IF  = 0 (cleared by IA32_FMASK)
+    //   IF  = 0, and DF = AC = NT = 0 (all cleared by IA32_FMASK)
     //
     // Syscall arguments in registers:
     //   RAX = syscall number
@@ -393,7 +394,8 @@ extern "C" fn syscall_handler_inner(frame: *mut SyscallFrame) -> i64 {
 ///
 /// Configures:
 /// - `IA32_LSTAR` — syscall entry point
-/// - `IA32_FMASK` — RFLAGS mask (clears IF, DF, TF on entry)
+/// - `IA32_FMASK` — RFLAGS mask (clears IF, DF, TF, AC, NT, IOPL, RF, ID and
+///   the arithmetic flags on entry)
 /// - `IA32_KERNEL_GS_BASE` — per-CPU data for SWAPGS
 ///
 /// `IA32_STAR` (segment selectors) is configured in `gdt::init()`.
@@ -421,11 +423,50 @@ pub unsafe fn init() {
     }
 
     // Set FMASK — bits to clear in RFLAGS on SYSCALL entry.
-    // Bit 8 = TF (single-step) — prevent tracing into kernel.
-    // Bit 9 = IF (interrupts) — disable until we're on kernel stack.
-    // Bit 10 = DF (direction) — ensure forward string ops in kernel.
-    let fmask: u64 = (1 << 8) | (1 << 9) | (1 << 10);
-    // SAFETY: IA32_FMASK is a valid MSR; the value masks TF/IF/DF as documented above.
+    //
+    // SYSCALL copies RFLAGS from ring 3 verbatim except for the bits set here,
+    // so every bit we leave unmasked is ring-3-controlled kernel entry state.
+    // We therefore mask the same set Linux does in `syscall_init()`
+    // (arch/x86/kernel/cpu/common.c, MSR_SYSCALL_MASK) rather than the
+    // minimum that happens to work today:
+    //
+    //   TF   (8)      single-step — prevent tracing into the kernel.
+    //   IF   (9)      interrupts — off until we are on the kernel stack.
+    //   DF   (10)     direction — `rep movsb`/`rep stosb` must run forwards.
+    //                 See the "`cld` on entry" comment in idt.rs: with DF = 1 a
+    //                 compiler-emitted memset writes [dst-n, dst) instead.
+    //   AC   (18)     alignment check — doubles as the SMAP override. A user
+    //                 process can set AC with `popfq`; if it survived into the
+    //                 kernel, every SMAP check would be suppressed for the whole
+    //                 syscall. Masking it now means SMAP cannot be silently
+    //                 defeated on this path when it is eventually enabled
+    //                 (see B-AC-INHERITED-AT-KERNEL-ENTRY in known-issues.md).
+    //   NT   (14)     nested task — a stray NT makes a later `iret` attempt a
+    //                 task-switch return through the TSS link field.
+    //   IOPL (12,13)  I/O privilege level — never meaningful for kernel code.
+    //   RF   (16)     resume flag — would suppress the next instruction breakpoint.
+    //   ID   (21)     CPUID-available flag — no reason to inherit.
+    //   CF PF AF ZF SF OF (0,2,4,6,7,11)
+    //                 arithmetic flags — masked so the kernel never begins a
+    //                 syscall with attacker-chosen condition codes, and so the
+    //                 entry state is deterministic for debugging.
+    let fmask: u64 = (1 << 0)   // CF
+        | (1 << 2)              // PF
+        | (1 << 4)              // AF
+        | (1 << 6)              // ZF
+        | (1 << 7)              // SF
+        | (1 << 8)              // TF
+        | (1 << 9)              // IF
+        | (1 << 10)             // DF
+        | (1 << 11)             // OF
+        | (0b11 << 12)          // IOPL
+        | (1 << 14)             // NT
+        | (1 << 16)             // RF
+        | (1 << 18)             // AC
+        | (1 << 21); // ID
+    // SAFETY: IA32_FMASK is a valid MSR on all x86_64 CPUs with SCE, and every
+    // bit set above is a defined, maskable RFLAGS bit (reserved bits are left
+    // clear).  Masking a flag can only clear it on entry, never set it.
     unsafe {
         cpu::wrmsr(IA32_FMASK, fmask);
     }

@@ -77,6 +77,76 @@ static HW_SMAP: AtomicBool = AtomicBool::new(false);
 /// Count of intentional user-access windows opened (STAC/CLAC pairs).
 static USER_ACCESS_COUNT: AtomicU64 = AtomicU64::new(0);
 
+/// Whether every kernel entry path is known to clear `EFLAGS.AC`.
+///
+/// **CR4.SMAP must not be set while this is `false`** — `smap_enable_blocker()`
+/// enforces that.
+///
+/// AC is the SMAP override: when AC = 1, supervisor accesses to user pages are
+/// permitted and SMAP checks nothing.  A ring-3 process can set AC freely with
+/// `popfq` (unlike IF or IOPL, AC is not privileged), so AC is *attacker-
+/// controlled* on entry unless the entry path clears it:
+///
+/// - **SYSCALL** — covered.  `syscall::entry::init()` masks AC (bit 18) in
+///   `IA32_FMASK`, so the CPU clears it as part of the instruction.
+/// - **IDT gates (every interrupt, every exception)** — NOT covered.  An
+///   interrupt gate loads the new RFLAGS clearing only TF, NT, RF and VM
+///   (Intel SDM Vol. 3A §6.12.1); AC is inherited verbatim, exactly as DF is.
+///   So a process that sets AC and then simply waits for a timer tick enters
+///   every kernel interrupt handler with SMAP disabled.
+///
+/// This is the same bug class as the missing `cld` fixed in `idt.rs` — inherited
+/// ring-3 flag state — but it fails *open* and *silently*: nothing crashes, no
+/// test goes red, SMAP is simply not enforced.  Hence the hard gate rather than
+/// a comment.
+///
+/// Linux solves this by emitting `ASM_CLAC` at every entry point, alternatives-
+/// patched to a 3-byte NOP on CPUs without SMAP (`arch/x86/include/asm/smap.h`).
+/// We cannot emit an unconditional `clac` in the IDT stubs because `clac` #UDs
+/// when CPUID.SMAP is absent, and we have no alternatives-patching framework
+/// yet.  The options are written up in `known-issues.md` under
+/// `B-AC-INHERITED-AT-KERNEL-ENTRY`.
+const ENTRY_PATHS_CLEAR_AC: bool = false;
+
+/// Whether every kernel path that touches user memory is wrapped in STAC/CLAC.
+///
+/// **CR4.SMAP must not be set while this is `false`** — `smap_enable_blocker()`
+/// enforces that.  Unlike [`ENTRY_PATHS_CLEAR_AC`], this prerequisite fails
+/// loudly (a #PF on the first unannotated user access), but gating it keeps
+/// both preconditions in one place.
+///
+/// `mm::user` already uses `stac()`/`clac()` around its accessors; what remains
+/// is an audit of every *other* site that dereferences a user pointer.
+const USER_ACCESSES_ANNOTATED: bool = false;
+
+/// Whether the kernel believes every entry path clears `EFLAGS.AC`.
+///
+/// Exposed so `idt::ac_on_entry_self_test()` can hold this claim against what an
+/// actual IDT gate does — see [`ENTRY_PATHS_CLEAR_AC`] for why a wrong answer
+/// here would otherwise fail silently.
+#[must_use]
+pub const fn entry_paths_clear_ac() -> bool {
+    ENTRY_PATHS_CLEAR_AC
+}
+
+/// Return the reason CR4.SMAP cannot be enabled yet, or `None` if it can.
+///
+/// Enabling SMAP with either prerequisite unmet is worse than leaving it off:
+/// an unmet [`ENTRY_PATHS_CLEAR_AC`] yields a protection that silently does
+/// nothing while reporting itself as ACTIVE, which is precisely the "a defence
+/// that looks sufficient is not" failure mode recorded in design-decisions §118.
+const fn smap_enable_blocker() -> Option<&'static str> {
+    if !ENTRY_PATHS_CLEAR_AC {
+        // Keep this string specific: it is what a future reader sees on the
+        // serial log when they wonder why SMAP is off.
+        return Some("IDT entry stubs do not clear EFLAGS.AC (B-AC-INHERITED-AT-KERNEL-ENTRY)");
+    }
+    if !USER_ACCESSES_ANNOTATED {
+        return Some("user-access paths not fully STAC/CLAC-annotated");
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Initialization
 // ---------------------------------------------------------------------------
@@ -107,19 +177,32 @@ pub fn init() {
         serial_println!("[smep_smap] SMEP not supported by CPU");
     }
 
-    // SMAP: detected but NOT enabled yet.
-    // SMAP requires all kernel→user memory access paths to use STAC/CLAC.
-    // Until copy_from_user / copy_to_user are instrumented, enabling SMAP
-    // would fault on legitimate kernel reads of user buffers during syscalls.
-    // The infrastructure (stac/clac/with_user_access) is ready — enablement
-    // is deferred until user access paths are properly annotated.
+    // SMAP: detected but NOT enabled yet.  There are TWO independent
+    // prerequisites, and both must be met before setting CR4.SMAP:
+    //
+    // 1. Every kernel→user memory access path must use STAC/CLAC.  Until
+    //    copy_from_user / copy_to_user are instrumented, enabling SMAP would
+    //    fault on legitimate kernel reads of user buffers during syscalls.
+    //    The infrastructure (stac/clac/with_user_access) is ready.
+    //    *This one fails loudly* — you get a #PF the first time a syscall
+    //    touches a user buffer.
+    //
+    // 2. Every kernel entry path must clear EFLAGS.AC — see
+    //    `ENTRY_PATHS_CLEAR_AC` below.  *This one fails silently*, which is
+    //    why it is asserted rather than left to a comment.
     if features.smap {
         // Record that the hardware supports STAC/CLAC instructions (they
         // #UD without CPUID SMAP support).  This gates their execution in
         // stac()/clac()/with_user_access().
         HW_SMAP.store(true, Ordering::Release);
-        serial_println!("[smep_smap] SMAP supported (enablement deferred — needs STAC/CLAC instrumentation)");
-        // Do NOT enable — leave SMAP_ENABLED = false.
+        if let Some(blocker) = smap_enable_blocker() {
+            serial_println!("[smep_smap] SMAP supported (enablement deferred — {blocker})");
+            // Do NOT enable — leave SMAP_ENABLED = false.
+        } else {
+            new_cr4 |= CR4_SMAP;
+            SMAP_ENABLED.store(true, Ordering::Release);
+            serial_println!("[smep_smap] Enabling SMAP (kernel read/write of user pages blocked)");
+        }
     } else {
         serial_println!("[smep_smap] SMAP not supported by CPU");
     }
@@ -162,7 +245,12 @@ pub fn init_ap() {
     if features.smep && (cr4 & CR4_SMEP == 0) {
         new_cr4 |= CR4_SMEP;
     }
-    // SMAP intentionally skipped (deferred until access paths instrumented).
+    // Use the same gate as `init()` rather than an independent decision here:
+    // an AP running with a different CR4.SMAP than the BSP would make user
+    // access succeed or fault depending on which CPU the syscall landed on.
+    if features.smap && smap_enable_blocker().is_none() && (cr4 & CR4_SMAP == 0) {
+        new_cr4 |= CR4_SMAP;
+    }
     if features.umip && (cr4 & CR4_UMIP == 0) {
         new_cr4 |= CR4_UMIP;
     }

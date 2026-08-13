@@ -4682,6 +4682,12 @@ extern "C" fn kernel_main() -> ! {
     // is set, and an IDT gate — unlike SYSCALL — does not clear DF for us.
     idt::df_on_entry_self_test();
 
+    // Step 22e⅞+: Alignment-check-flag-on-entry self-test.
+    // The same class of bug as the DF test above — RFLAGS the kernel inherits
+    // from ring 3 at an IDT gate — but for AC, which is the SMAP override.
+    // Keeps `smep_smap`'s SMAP-enable gate honest about what the stubs do.
+    idt::ac_on_entry_self_test();
+
     // Step 22e⅞+: Serial print re-entrancy self-test.
     // Guards the escape hatch that keeps a fault taken *during* a print from
     // deadlocking on the console lock — the difference between a diagnosable

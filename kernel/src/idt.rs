@@ -1791,17 +1791,27 @@ extern "C" fn handle_breakpoint(frame: &InterruptStackFrame, _error: u64) {
     // Record DF as the handler sees it, so `df_on_entry_self_test` can prove
     // the stub's `cld` really executed. #BP is a once-in-a-blue-moon vector, so
     // the extra relaxed store costs nothing that matters.
-    BP_ENTRY_DF.store(cpu::read_rflags() & RFLAGS_DF != 0, Ordering::Relaxed);
+    let rflags = cpu::read_rflags();
+    BP_ENTRY_DF.store(rflags & RFLAGS_DF != 0, Ordering::Relaxed);
+    BP_ENTRY_AC.store(rflags & RFLAGS_AC != 0, Ordering::Relaxed);
     serial_println!("EXCEPTION: Breakpoint (#BP) at {:#x}", frame.rip);
 }
 
 /// RFLAGS.DF — the direction flag, bit 10.
 const RFLAGS_DF: u64 = 1 << 10;
 
+/// RFLAGS.AC — the alignment-check flag, bit 18.  Doubles as the SMAP override.
+const RFLAGS_AC: u64 = 1 << 18;
+
 /// DF as observed on entry to the most recent `#BP`.
 ///
 /// Written by `handle_breakpoint`, read by [`df_on_entry_self_test`].
 static BP_ENTRY_DF: AtomicBool = AtomicBool::new(false);
+
+/// AC as observed on entry to the most recent `#BP`.
+///
+/// Written by `handle_breakpoint`, read by [`ac_on_entry_self_test`].
+static BP_ENTRY_AC: AtomicBool = AtomicBool::new(false);
 
 /// Boot self-test: prove that an IDT gate entered with DF set still runs the
 /// handler with DF clear, and that the interrupted context gets its own DF
@@ -1867,6 +1877,74 @@ pub fn df_on_entry_self_test() {
     serial_println!("[idt]   iretq restores the caller's DF: OK");
 
     serial_println!("[idt] Direction-flag self-test PASSED");
+}
+
+/// Boot self-test: check whether an IDT gate clears `EFLAGS.AC`, and hold that
+/// observation to `smep_smap::entry_paths_clear_ac()`.
+///
+/// AC is the SMAP override — with AC set, supervisor accesses to user pages are
+/// permitted and SMAP checks nothing — and an interrupt gate does *not* clear
+/// it (Intel SDM Vol. 3A §6.12.1 clears only TF, NT, RF and VM).  Since ring 3
+/// can set AC with an unprivileged `popfq`, an uncovered IDT entry means a user
+/// process disables SMAP for every interrupt handler just by setting a flag.
+///
+/// This is deliberately *not* an assertion that AC is clear: today it is not,
+/// and that is a known, documented gap (`B-AC-INHERITED-AT-KERNEL-ENTRY`).  What
+/// it asserts is that the constant the SMAP-enable gate consults agrees with what
+/// the hardware actually does.  So:
+///
+/// - flipping `ENTRY_PATHS_CLEAR_AC` to `true` without adding `clac` to the
+///   stubs fails here, loudly, instead of silently shipping a SMAP that
+///   enforces nothing;
+/// - adding `clac` to the stubs without flipping the constant also fails here,
+///   so the mitigation cannot sit unused.
+pub fn ac_on_entry_self_test() {
+    serial_println!("[idt] Running alignment-check-flag (SMAP override) self-test...");
+
+    let expected_clear = crate::smep_smap::entry_paths_clear_ac();
+
+    // Set AC, take a #BP, then restore AC to 0.
+    //
+    // SAFETY: `int3` raises #BP, whose handler is installed by `init()` and
+    // returns normally.  The block only toggles AC, and clears it again before
+    // returning, so compiled code resumes with the flag it expects.  Setting AC
+    // in ring 0 is inert: alignment checking is performed only at CPL 3, so no
+    // #AC can result here regardless of CR0.AM — the flag's only effect in
+    // kernel mode is the SMAP override, which is what we are measuring.
+    // `pushfq`/`popfq` are balanced; `nostack` is not claimed because we push.
+    unsafe {
+        core::arch::asm!(
+            "pushfq",
+            "or qword ptr [rsp], {ac}",
+            "popfq",
+            "int3",
+            "pushfq",
+            "and qword ptr [rsp], {not_ac}",
+            "popfq",
+            ac = const RFLAGS_AC,
+            not_ac = const !RFLAGS_AC,
+        );
+    }
+
+    let observed_clear = !BP_ENTRY_AC.load(Ordering::Relaxed);
+    assert_eq!(
+        observed_clear, expected_clear,
+        "idt: smep_smap::entry_paths_clear_ac() says {expected_clear}, but an IDT \
+         gate entered with AC {} — the constant and the ISR stubs disagree, so \
+         CR4.SMAP would be enabled against an entry path that silently disables it",
+        if observed_clear { "clear" } else { "SET" }
+    );
+
+    if observed_clear {
+        serial_println!("[idt]   AC is clear on exception entry: OK (SMAP override closed)");
+    } else {
+        serial_println!(
+            "[idt]   AC is inherited on exception entry, as expected while \
+             B-AC-INHERITED-AT-KERNEL-ENTRY is open (SMAP stays disabled): OK"
+        );
+    }
+
+    serial_println!("[idt] Alignment-check-flag self-test PASSED");
 }
 
 /// Handle #OF (Overflow, vector 4).

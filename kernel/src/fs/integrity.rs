@@ -29,12 +29,12 @@
 //! hashing can be added later on top of the CAS.
 
 use alloc::collections::BTreeMap;
-use alloc::string::String;
 use alloc::vec::Vec;
 use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::cas::Hash256;
+use crate::fs::path::{Path, PathBuf};
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -46,7 +46,7 @@ use crate::serial_println;
 #[allow(dead_code)]
 pub struct BaselineEntry {
     /// Absolute path to the file.
-    pub path: String,
+    pub path: PathBuf,
     /// SHA-256 hash of the file contents at baseline time.
     pub hash: Hash256,
     /// File size in bytes at baseline time.
@@ -60,7 +60,7 @@ pub struct BaselineEntry {
 #[allow(dead_code)]
 pub struct VerifyResult {
     /// The file path.
-    pub path: String,
+    pub path: PathBuf,
     /// Verification status.
     pub status: VerifyStatus,
     /// Baseline hash (if the file was in the baseline).
@@ -122,7 +122,7 @@ pub struct IntegrityConfig {
     /// Maximum file size to hash (skip very large files).
     pub max_file_size: u64,
     /// Directories to exclude from baseline/verify walks.
-    pub exclude_dirs: Vec<String>,
+    pub exclude_dirs: Vec<PathBuf>,
 }
 
 impl Default for IntegrityConfig {
@@ -141,7 +141,7 @@ impl Default for IntegrityConfig {
 
 struct IntegrityInner {
     /// The baseline: path → entry.
-    baseline: BTreeMap<String, BaselineEntry>,
+    baseline: BTreeMap<PathBuf, BaselineEntry>,
     /// Configuration.
     config: IntegrityConfig,
     /// When the baseline was last updated (HPET nanoseconds).
@@ -191,9 +191,10 @@ pub fn get_config() -> IntegrityConfig {
 ///
 /// Returns `NotFound` if the file doesn't exist, or `DiskFull` if the
 /// baseline is at capacity.
-pub fn baseline_file(path: &str) -> KernelResult<Hash256> {
+pub fn baseline_file<P: AsRef<Path> + ?Sized>(path: &P) -> KernelResult<Hash256> {
     use crate::fs::Vfs;
 
+    let path = path.as_ref();
     let meta = Vfs::stat(path)?;
 
     // Only baseline regular files.
@@ -231,8 +232,8 @@ pub fn baseline_file(path: &str) -> KernelResult<Hash256> {
 
     // Store in the baseline.
     let mut inner = INTEGRITY.lock();
-    inner.baseline.insert(path.into(), BaselineEntry {
-        path: path.into(),
+    inner.baseline.insert(path.to_path_buf(), BaselineEntry {
+        path: path.to_path_buf(),
         hash,
         size: data.len() as u64,
         mtime_ns,
@@ -248,15 +249,15 @@ pub fn baseline_file(path: &str) -> KernelResult<Hash256> {
 ///
 /// Skips files that are too large or in excluded directories.
 /// Stops early if the baseline reaches max capacity.
-pub fn baseline_dir(dir: &str) -> KernelResult<u64> {
+pub fn baseline_dir<D: AsRef<Path> + ?Sized>(dir: &D) -> KernelResult<u64> {
     use crate::fs::{Vfs, EntryType};
 
     // Snapshot config (drop lock before I/O).
     let config = INTEGRITY.lock().config.clone();
 
     let mut count: u64 = 0;
-    let mut dirs_to_visit: Vec<String> = Vec::new();
-    dirs_to_visit.push(dir.into());
+    let mut dirs_to_visit: Vec<PathBuf> = Vec::new();
+    dirs_to_visit.push(dir.as_ref().to_path_buf());
 
     while let Some(current_dir) = dirs_to_visit.pop() {
         // Check excluded directories.
@@ -265,7 +266,7 @@ pub fn baseline_dir(dir: &str) -> KernelResult<u64> {
         let skip = config
             .exclude_dirs
             .iter()
-            .any(|excl| crate::fs::pathutil::path_in_subtree(current_dir.as_str(), excl.as_str()));
+            .any(|excl| crate::fs::pathutil::path_in_subtree(&current_dir, excl));
         if skip {
             continue;
         }
@@ -276,15 +277,15 @@ pub fn baseline_dir(dir: &str) -> KernelResult<u64> {
         };
 
         for entry in &entries {
-            let path = if current_dir == "/" {
-                alloc::format!("/{}", entry.name)
-            } else {
-                alloc::format!("{}/{}", current_dir, entry.name)
-            };
+            // `Path::join` inserts exactly one separator, so the root needs no
+            // special case: `/` joined with `etc` is `/etc`, not `//etc`.
+            let path = current_dir.join(&entry.name);
 
             match entry.entry_type {
                 EntryType::Directory => {
-                    if entry.name != "." && entry.name != ".." {
+                    if entry.name.as_path() != Path::new(".")
+                        && entry.name.as_path() != Path::new("..")
+                    {
                         dirs_to_visit.push(path);
                     }
                 }
@@ -356,7 +357,10 @@ pub fn baseline_timestamp() -> u64 {
 ///
 /// Returns up to `max` entries starting with `prefix` (or all if None).
 /// Each entry is (path, hash, size).
-pub fn list_entries(prefix: Option<&str>, max: usize) -> (Vec<(String, Hash256, u64)>, usize) {
+pub fn list_entries(
+    prefix: Option<&Path>,
+    max: usize,
+) -> (Vec<(PathBuf, Hash256, u64)>, usize) {
     let inner = INTEGRITY.lock();
     let total = inner.baseline.len();
     let mut results = Vec::new();
@@ -364,7 +368,7 @@ pub fn list_entries(prefix: Option<&str>, max: usize) -> (Vec<(String, Hash256, 
     for (path, entry) in inner.baseline.iter() {
         if let Some(pfx) = prefix {
             // Canonical subtree predicate; see fs::pathutil.
-            if !crate::fs::pathutil::path_in_subtree(path.as_str(), pfx) {
+            if !crate::fs::pathutil::path_in_subtree(path, pfx) {
                 continue;
             }
         }
@@ -384,9 +388,10 @@ pub fn list_entries(prefix: Option<&str>, max: usize) -> (Vec<(String, Hash256, 
 /// Verify a single file against its baseline entry.
 ///
 /// Returns `NotFound` if the file is not in the baseline.
-pub fn verify_file(path: &str) -> KernelResult<VerifyResult> {
+pub fn verify_file<P: AsRef<Path> + ?Sized>(path: &P) -> KernelResult<VerifyResult> {
     use crate::fs::Vfs;
 
+    let path = path.as_ref();
     let inner = INTEGRITY.lock();
     let entry = inner.baseline.get(path).ok_or(KernelError::NotFound)?;
     let baseline_hash = entry.hash;
@@ -406,7 +411,7 @@ pub fn verify_file(path: &str) -> KernelResult<VerifyResult> {
             };
 
             Ok(VerifyResult {
-                path: path.into(),
+                path: path.to_path_buf(),
                 status,
                 baseline_hash: Some(baseline_hash),
                 current_hash: Some(current_hash),
@@ -416,7 +421,7 @@ pub fn verify_file(path: &str) -> KernelResult<VerifyResult> {
         }
         Err(KernelError::NotFound) => {
             Ok(VerifyResult {
-                path: path.into(),
+                path: path.to_path_buf(),
                 status: VerifyStatus::Missing,
                 baseline_hash: Some(baseline_hash),
                 current_hash: None,
@@ -426,7 +431,7 @@ pub fn verify_file(path: &str) -> KernelResult<VerifyResult> {
         }
         Err(_) => {
             Ok(VerifyResult {
-                path: path.into(),
+                path: path.to_path_buf(),
                 status: VerifyStatus::Error,
                 baseline_hash: Some(baseline_hash),
                 current_hash: None,
@@ -441,9 +446,10 @@ pub fn verify_file(path: &str) -> KernelResult<VerifyResult> {
 ///
 /// Also walks the directory tree to detect new files not in the baseline.
 /// Returns a list of results and a summary.
-pub fn verify_dir(dir: &str) -> (Vec<VerifyResult>, VerifySummary) {
+pub fn verify_dir<D: AsRef<Path> + ?Sized>(dir: &D) -> (Vec<VerifyResult>, VerifySummary) {
     use crate::fs::{Vfs, EntryType};
 
+    let dir = dir.as_ref();
     let mut results = Vec::new();
     let mut summary = VerifySummary::new();
 
@@ -455,20 +461,21 @@ pub fn verify_dir(dir: &str) -> (Vec<VerifyResult>, VerifySummary) {
     // double-slash paths, so no real file was ever included and "missing"
     // detection in verify_dir silently never fired.  See fs::pathutil.
     let inner = INTEGRITY.lock();
-    let baseline_paths: Vec<(String, Hash256, u64)> = inner.baseline
+    let baseline_paths: Vec<(PathBuf, Hash256, u64)> = inner.baseline
         .iter()
-        .filter(|(p, _)| crate::fs::pathutil::path_in_subtree(p.as_str(), dir))
+        .filter(|(p, _)| crate::fs::pathutil::path_in_subtree(p, dir))
         .map(|(p, e)| (p.clone(), e.hash, e.size))
         .collect();
     let config = inner.config.clone();
     drop(inner);
 
     // Track which baseline paths we've verified (to detect missing files).
-    let mut verified_paths: alloc::collections::BTreeSet<String> = alloc::collections::BTreeSet::new();
+    let mut verified_paths: alloc::collections::BTreeSet<PathBuf> =
+        alloc::collections::BTreeSet::new();
 
     // Walk the current filesystem to find current files.
-    let mut dirs_to_visit: Vec<String> = Vec::new();
-    dirs_to_visit.push(dir.into());
+    let mut dirs_to_visit: Vec<PathBuf> = Vec::new();
+    dirs_to_visit.push(dir.to_path_buf());
 
     while let Some(current_dir) = dirs_to_visit.pop() {
         // Check excluded directories.
@@ -477,7 +484,7 @@ pub fn verify_dir(dir: &str) -> (Vec<VerifyResult>, VerifySummary) {
         let skip = config
             .exclude_dirs
             .iter()
-            .any(|excl| crate::fs::pathutil::path_in_subtree(current_dir.as_str(), excl.as_str()));
+            .any(|excl| crate::fs::pathutil::path_in_subtree(&current_dir, excl));
         if skip {
             continue;
         }
@@ -488,15 +495,14 @@ pub fn verify_dir(dir: &str) -> (Vec<VerifyResult>, VerifySummary) {
         };
 
         for entry in &entries {
-            let path = if current_dir == "/" {
-                alloc::format!("/{}", entry.name)
-            } else {
-                alloc::format!("{}/{}", current_dir, entry.name)
-            };
+            // See `baseline_dir`: `Path::join` needs no root special case.
+            let path = current_dir.join(&entry.name);
 
             match entry.entry_type {
                 EntryType::Directory => {
-                    if entry.name != "." && entry.name != ".." {
+                    if entry.name.as_path() != Path::new(".")
+                        && entry.name.as_path() != Path::new("..")
+                    {
                         dirs_to_visit.push(path);
                     }
                 }
@@ -821,6 +827,51 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[integrity]   non-baselined verify OK");
     }
 
-    serial_println!("[integrity] Self-test passed (6 tests).");
+    // --- Test 7: a filename that is not valid UTF-8 ---
+    //
+    // The whole point of the byte-path conversion: tamper detection is a
+    // security control, and a control that cannot see a file is a control an
+    // attacker picks their filename to evade.
+    {
+        use crate::fs::Vfs;
+
+        clear_baseline();
+        Vfs::mkdir("/tmp/_integrity_wild").ok();
+        let wild = Path::new(b"/tmp/_integrity_wild/re\xffport.bin".as_slice());
+        Vfs::write_file(wild, b"original")?;
+
+        // It must be baselined by the directory walk, not skipped.
+        let count = baseline_dir("/tmp/_integrity_wild")?;
+        if count < 1 {
+            serial_println!("[integrity]   ERROR: undecodable name was not baselined");
+            return Err(KernelError::InternalError);
+        }
+
+        // ...found under its exact bytes...
+        let (entries, _) = list_entries(Some(Path::new("/tmp/_integrity_wild")), 16);
+        if !entries.iter().any(|(p, _, _)| p.as_path() == wild) {
+            serial_println!("[integrity]   ERROR: undecodable name missing from listing");
+            return Err(KernelError::InternalError);
+        }
+
+        // ...and tampering with it must be detected.
+        Vfs::write_file(wild, b"TAMPERED")?;
+        if verify_file(wild)?.status != VerifyStatus::Modified {
+            serial_println!("[integrity]   ERROR: tampering with undecodable name not detected");
+            return Err(KernelError::InternalError);
+        }
+        let (_, summary) = verify_dir("/tmp/_integrity_wild");
+        if summary.modified < 1 {
+            serial_println!("[integrity]   ERROR: verify_dir missed the undecodable name");
+            return Err(KernelError::InternalError);
+        }
+
+        Vfs::remove(wild).ok();
+        Vfs::rmdir("/tmp/_integrity_wild").ok();
+        clear_baseline();
+        serial_println!("[integrity]   undecodable filename OK");
+    }
+
+    serial_println!("[integrity] Self-test passed (7 tests).");
     Ok(())
 }

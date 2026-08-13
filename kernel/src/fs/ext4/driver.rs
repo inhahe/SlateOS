@@ -11,6 +11,7 @@ use alloc::vec::Vec;
 use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 use crate::serial_println;
 
 use super::io::BlockReader;
@@ -37,7 +38,7 @@ struct Ext4DcacheEntry {
     /// Directory inode number (key part 1).
     dir_ino: u32,
     /// Child name within the directory (key part 2).
-    name: String,
+    name: PathBuf,
     /// Resolved child inode number (cached result).
     child_ino: u32,
     /// File type byte from the directory entry.
@@ -52,7 +53,7 @@ impl Ext4DcacheEntry {
     const fn empty() -> Self {
         Self {
             dir_ino: 0,
-            name: String::new(),
+            name: PathBuf::new(),
             child_ino: 0,
             file_type: 0,
             last_access: 0,
@@ -87,9 +88,9 @@ impl Ext4Dcache {
     }
 
     /// Look up a child inode by directory inode + name.
-    fn lookup(&mut self, dir_ino: u32, name: &str) -> Option<(u32, u8)> {
+    fn lookup(&mut self, dir_ino: u32, name: &Path) -> Option<(u32, u8)> {
         for entry in self.entries.iter_mut() {
-            if entry.valid && entry.dir_ino == dir_ino && entry.name == name {
+            if entry.valid && entry.dir_ino == dir_ino && entry.name.as_path() == name {
                 self.counter = self.counter.wrapping_add(1);
                 entry.last_access = self.counter;
                 self.hits = self.hits.wrapping_add(1);
@@ -101,12 +102,12 @@ impl Ext4Dcache {
     }
 
     /// Insert a name→inode mapping.
-    fn insert(&mut self, dir_ino: u32, name: &str, child_ino: u32, file_type: u8) {
+    fn insert(&mut self, dir_ino: u32, name: &Path, child_ino: u32, file_type: u8) {
         self.counter = self.counter.wrapping_add(1);
 
         // Check for existing entry (update in place).
         for entry in self.entries.iter_mut() {
-            if entry.valid && entry.dir_ino == dir_ino && entry.name == name {
+            if entry.valid && entry.dir_ino == dir_ino && entry.name.as_path() == name {
                 entry.child_ino = child_ino;
                 entry.file_type = file_type;
                 entry.last_access = self.counter;
@@ -118,7 +119,7 @@ impl Ext4Dcache {
         for entry in self.entries.iter_mut() {
             if !entry.valid {
                 entry.dir_ino = dir_ino;
-                entry.name = String::from(name);
+                entry.name = name.to_path_buf();
                 entry.child_ino = child_ino;
                 entry.file_type = file_type;
                 entry.last_access = self.counter;
@@ -140,7 +141,7 @@ impl Ext4Dcache {
         let e = &mut self.entries[lru_idx];
         e.dir_ino = dir_ino;
         e.name.clear();
-        e.name.push_str(name);
+        e.name.extend_bytes(name.as_bytes());
         e.child_ino = child_ino;
         e.file_type = file_type;
         e.last_access = self.counter;
@@ -161,9 +162,9 @@ impl Ext4Dcache {
     }
 
     /// Invalidate a specific entry.
-    pub(super) fn invalidate_entry(&mut self, dir_ino: u32, name: &str) {
+    pub(super) fn invalidate_entry(&mut self, dir_ino: u32, name: &Path) {
         for entry in self.entries.iter_mut() {
-            if entry.valid && entry.dir_ino == dir_ino && entry.name == name {
+            if entry.valid && entry.dir_ino == dir_ino && entry.name.as_path() == name {
                 entry.valid = false;
                 return;
             }
@@ -1313,7 +1314,7 @@ impl Ext4Driver {
         &self,
         dir_ino: u32,
         dir_inode: &Ext4Inode,
-    ) -> KernelResult<Vec<(u32, u8, String)>> {
+    ) -> KernelResult<Vec<(u32, u8, PathBuf)>> {
         // Read directory data.
         let data = self.read_file_data(dir_ino, dir_inode)?;
 
@@ -1347,7 +1348,7 @@ impl Ext4Driver {
         &mut self,
         dir_inode: &Ext4Inode,
         dir_ino: u32,
-        name: &str,
+        name: &Path,
     ) -> KernelResult<u32> {
         // Check dcache first (fastest path — O(1) with no I/O).
         if let Some((child_ino, _ftype)) = self.dcache.lookup(dir_ino, name) {
@@ -1372,7 +1373,7 @@ impl Ext4Driver {
         // Fallback: linear scan of all directory entries.
         let entries = self.read_dir_entries(dir_ino, dir_inode)?;
         for (ino, ftype, entry_name) in &entries {
-            if entry_name == name {
+            if entry_name.as_path() == name {
                 // Cache this lookup for next time.
                 self.dcache.insert(dir_ino, name, *ino, *ftype);
                 return Ok(*ino);
@@ -1390,7 +1391,7 @@ impl Ext4Driver {
     /// Resolve a path to an inode number, following all symlinks.
     ///
     /// `path` must be absolute (starting with `/`).
-    pub fn resolve_path(&mut self, path: &str) -> KernelResult<u32> {
+    pub fn resolve_path(&mut self, path: &Path) -> KernelResult<u32> {
         self.resolve_path_from(EXT4_ROOT_INO, path, true, 0)
     }
 
@@ -1398,7 +1399,7 @@ impl Ext4Driver {
     ///
     /// Intermediate symlinks ARE followed; only the last component is
     /// left unresolved if it happens to be a symlink.  Used for `lstat`.
-    pub fn resolve_path_no_follow(&mut self, path: &str) -> KernelResult<u32> {
+    pub fn resolve_path_no_follow(&mut self, path: &Path) -> KernelResult<u32> {
         self.resolve_path_from(EXT4_ROOT_INO, path, false, 0)
     }
 
@@ -1415,7 +1416,7 @@ impl Ext4Driver {
     fn resolve_path_from(
         &mut self,
         start_ino: u32,
-        path: &str,
+        path: &Path,
         follow_last: bool,
         depth: usize,
     ) -> KernelResult<u32> {
@@ -1423,22 +1424,16 @@ impl Ext4Driver {
             return Err(KernelError::TooManyLinks);
         }
 
-        // Handle absolute vs relative paths.
-        let (mut current_ino, path) = if path.starts_with('/') {
-            (EXT4_ROOT_INO, path.strip_prefix('/').unwrap_or(path))
-        } else {
-            (start_ino, path)
-        };
-
-        if path.is_empty() {
-            return Ok(current_ino);
-        }
+        // Handle absolute vs relative paths.  `Path::components` already
+        // drops empty components, so a leading `/` needs no stripping —
+        // it only selects the starting inode.
+        let mut current_ino = if path.is_absolute() { EXT4_ROOT_INO } else { start_ino };
 
         // Collect components so we can index into them for building
         // remaining paths when we encounter a symlink.
-        let components: Vec<&str> = path
-            .split('/')
-            .filter(|c| !c.is_empty() && *c != ".")
+        let components: Vec<&Path> = path
+            .components()
+            .filter(|c| c.as_bytes() != b".")
             .collect();
 
         if components.is_empty() {
@@ -1466,16 +1461,21 @@ impl Ext4Driver {
                     return Ok(child_ino);
                 }
 
-                // Read the symlink target.
+                // Read the symlink target.  It is a raw byte string: ext4
+                // stores whatever bytes were passed to `symlink(2)`, and a
+                // target that is not valid UTF-8 is a perfectly legal
+                // symlink.  The old `from_utf8` here turned such a link
+                // into a hard `IoError`, making the target unreachable.
                 let target = self.read_symlink_target(child_ino, &child_inode)?;
-                let target_str = core::str::from_utf8(&target)
-                    .map_err(|_| KernelError::IoError)?;
 
                 // Build the new path: target + remaining components.
-                let mut new_path = String::from(target_str);
-                for rem in &components[i + 1..] {
-                    new_path.push('/');
-                    new_path.push_str(rem);
+                // `PathBuf::push` inserts the separator and, for an
+                // absolute target, would clear the buffer — which cannot
+                // happen here because a remaining component never starts
+                // with `/`.
+                let mut new_path = PathBuf::from(target);
+                for rem in components.get(i.saturating_add(1)..).unwrap_or(&[]) {
+                    new_path.push(rem);
                 }
 
                 // Recurse.  For absolute targets, start_ino is ignored
@@ -1484,9 +1484,9 @@ impl Ext4Driver {
                 // (the symlink's parent).
                 return self.resolve_path_from(
                     current_ino,
-                    &new_path,
+                    new_path.as_path(),
                     follow_last,
-                    depth + 1,
+                    depth.saturating_add(1),
                 );
             }
 
@@ -2632,7 +2632,7 @@ impl Ext4Driver {
         dir_inode: &mut Ext4Inode,
         dir_inode_nr: u32,
         child_ino: u32,
-        name: &str,
+        name: &Path,
         file_type_byte: u8,
     ) -> KernelResult<()> {
         let name_bytes = name.as_bytes();
@@ -4988,7 +4988,7 @@ fn compute_xattr_block_checksum(
 // ---------------------------------------------------------------------------
 
 /// Parse linear directory entries from raw directory block data.
-fn parse_dir_entries(data: &[u8], block_size: usize) -> KernelResult<Vec<(u32, u8, String)>> {
+fn parse_dir_entries(data: &[u8], block_size: usize) -> KernelResult<Vec<(u32, u8, PathBuf)>> {
     let mut entries = Vec::new();
     let dir_entry_header_size = core::mem::size_of::<Ext4DirEntry2>();
 
@@ -5024,20 +5024,20 @@ fn parse_dir_entries(data: &[u8], block_size: usize) -> KernelResult<Vec<(u32, u
                 let name_end = name_start.saturating_add(hdr.name_len as usize);
                 if name_end <= block_end {
                     if let Some(name_bytes) = data.get(name_start..name_end) {
-                        // Reject non-UTF-8 filenames rather than silently
-                        // corrupting them with lossy replacement characters.
-                        // The proper fix is byte-string DirEntry names (see todo.txt).
-                        match core::str::from_utf8(name_bytes) {
-                            Ok(s) => entries.push((hdr.inode, hdr.file_type, String::from(s))),
-                            Err(_) => {
-                                // Skip this entry — non-UTF-8 filename.
-                                // Log once per directory to avoid spam.
-                                crate::serial_println!(
-                                    "[ext4] WARNING: skipping non-UTF-8 directory entry (inode {})",
-                                    hdr.inode
-                                );
-                            }
-                        }
+                        // An ext4 filename is an opaque byte string: every
+                        // byte except `/` and NUL is legal on disk, and the
+                        // kernel never imposed an encoding.  This used to
+                        // `from_utf8` and *skip* names that failed, which
+                        // made such files invisible to readdir — so they
+                        // could not be listed, opened by listing, or
+                        // deleted, and their parent directory could never
+                        // be rmdir'd because it looked non-empty to the
+                        // kernel but empty to every caller.
+                        entries.push((
+                            hdr.inode,
+                            hdr.file_type,
+                            Path::new(name_bytes).to_path_buf(),
+                        ));
                     }
                 }
             }
@@ -5607,14 +5607,14 @@ fn test_dcache_basic() -> KernelResult<()> {
     let mut dcache = Ext4Dcache::new();
 
     // Initially empty — lookup should miss.
-    if dcache.lookup(2, "hello.txt").is_some() {
+    if dcache.lookup(2, Path::new("hello.txt")).is_some() {
         crate::serial_println!("[ext4-driver]   FAIL: dcache should be empty");
         return Err(KernelError::InternalError);
     }
 
     // Insert and lookup.
-    dcache.insert(2, "hello.txt", 100, 1);
-    match dcache.lookup(2, "hello.txt") {
+    dcache.insert(2, Path::new("hello.txt"), 100, 1);
+    match dcache.lookup(2, Path::new("hello.txt")) {
         Some((100, 1)) => {}
         other => {
             crate::serial_println!(
@@ -5625,14 +5625,14 @@ fn test_dcache_basic() -> KernelResult<()> {
     }
 
     // Different dir inode → miss.
-    if dcache.lookup(3, "hello.txt").is_some() {
+    if dcache.lookup(3, Path::new("hello.txt")).is_some() {
         crate::serial_println!("[ext4-driver]   FAIL: dcache matched wrong dir");
         return Err(KernelError::InternalError);
     }
 
     // Invalidate entry.
-    dcache.invalidate_entry(2, "hello.txt");
-    if dcache.lookup(2, "hello.txt").is_some() {
+    dcache.invalidate_entry(2, Path::new("hello.txt"));
+    if dcache.lookup(2, Path::new("hello.txt")).is_some() {
         crate::serial_println!("[ext4-driver]   FAIL: dcache not invalidated");
         return Err(KernelError::InternalError);
     }
@@ -5662,29 +5662,29 @@ fn test_dcache_lru_eviction() -> KernelResult<()> {
 
     // Fill all 512 slots.
     for i in 0..EXT4_DCACHE_SIZE {
-        dcache.insert(2, &format!("file{}", i), i as u32, 1);
+        dcache.insert(2, Path::new(&format!("file{}", i)), i as u32, 1);
     }
 
     // Access file1 to make it recently used.
-    let _ = dcache.lookup(2, "file1");
+    let _ = dcache.lookup(2, Path::new("file1"));
 
     // Insert one more — should evict file0 (LRU, inserted first, never re-accessed).
-    dcache.insert(2, "newfile", 999, 1);
+    dcache.insert(2, Path::new("newfile"), 999, 1);
 
     // file0 should be evicted.
-    if dcache.lookup(2, "file0").is_some() {
+    if dcache.lookup(2, Path::new("file0")).is_some() {
         crate::serial_println!("[ext4-driver]   FAIL: file0 should be evicted");
         return Err(KernelError::InternalError);
     }
 
     // file1 should still be there (was re-accessed).
-    if dcache.lookup(2, "file1").is_none() {
+    if dcache.lookup(2, Path::new("file1")).is_none() {
         crate::serial_println!("[ext4-driver]   FAIL: file1 should survive eviction");
         return Err(KernelError::InternalError);
     }
 
     // newfile should be there.
-    match dcache.lookup(2, "newfile") {
+    match dcache.lookup(2, Path::new("newfile")) {
         Some((999, 1)) => {}
         other => {
             crate::serial_println!(
@@ -5954,27 +5954,27 @@ fn test_parse_dir_entries() -> KernelResult<()> {
 
     // Check "."
     let (ino, ft, ref name) = entries[0];
-    if ino != 2 || ft != 2 || name != "." {
+    if ino != 2 || ft != 2 || name.as_path() != Path::new(".") {
         crate::serial_println!(
-            "[ext4-driver]   FAIL: entry 0 = ({}, {}, '{}')", ino, ft, name
+            "[ext4-driver]   FAIL: entry 0 = ({}, {}, '{}')", ino, ft, name.display()
         );
         return Err(KernelError::InternalError);
     }
 
     // Check ".."
     let (ino, ft, ref name) = entries[1];
-    if ino != 2 || ft != 2 || name != ".." {
+    if ino != 2 || ft != 2 || name.as_path() != Path::new("..") {
         crate::serial_println!(
-            "[ext4-driver]   FAIL: entry 1 = ({}, {}, '{}')", ino, ft, name
+            "[ext4-driver]   FAIL: entry 1 = ({}, {}, '{}')", ino, ft, name.display()
         );
         return Err(KernelError::InternalError);
     }
 
     // Check "hello.txt"
     let (ino, ft, ref name) = entries[2];
-    if ino != 100 || ft != 1 || name != "hello.txt" {
+    if ino != 100 || ft != 1 || name.as_path() != Path::new("hello.txt") {
         crate::serial_println!(
-            "[ext4-driver]   FAIL: entry 2 = ({}, {}, '{}')", ino, ft, name
+            "[ext4-driver]   FAIL: entry 2 = ({}, {}, '{}')", ino, ft, name.display()
         );
         return Err(KernelError::InternalError);
     }

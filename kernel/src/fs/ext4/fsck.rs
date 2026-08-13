@@ -31,6 +31,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::error::KernelResult;
+use crate::fs::path::{Path, PathBuf};
 
 use super::balloc;
 use super::driver::Ext4Driver;
@@ -418,8 +419,8 @@ pub fn fsck_ext4(device: &str) -> KernelResult<Ext4FsckReport> {
 
     // Start from root inode (2).
     let root_inode_nr: u32 = 2;
-    let mut dir_stack: Vec<(u32, String)> = Vec::new();
-    dir_stack.push((root_inode_nr, String::from("/")));
+    let mut dir_stack: Vec<(u32, PathBuf)> = Vec::new();
+    dir_stack.push((root_inode_nr, PathBuf::from("/")));
 
     // Count root's self-reference (. entry).
     *ref_count.entry(root_inode_nr).or_insert(0) =
@@ -443,7 +444,7 @@ pub fn fsck_ext4(device: &str) -> KernelResult<Ext4FsckReport> {
         };
 
         for (child_ino, file_type, name) in &entries {
-            if name == "." || name == ".." {
+            if name.as_path() == Path::new(".") || name.as_path() == Path::new("..") {
                 // "." and ".." contribute to link counts.
                 *ref_count.entry(*child_ino).or_insert(0) =
                     ref_count.get(child_ino).copied().unwrap_or(0).saturating_add(1);
@@ -457,12 +458,10 @@ pub fn fsck_ext4(device: &str) -> KernelResult<Ext4FsckReport> {
             // If child is a directory, add to stack for traversal.
             // File type byte: 2 = EXT4_FT_DIR.
             if *file_type == 2 {
-                let child_path = if dir_path == "/" {
-                    format!("/{}", name)
-                } else {
-                    format!("{}/{}", dir_path, name)
-                };
-                dir_stack.push((*child_ino, child_path));
+                // `Path::join` inserts exactly one separator and never
+                // needs the name to be UTF-8, unlike the `format!` this
+                // replaced.
+                dir_stack.push((*child_ino, dir_path.join(name)));
             }
         }
 

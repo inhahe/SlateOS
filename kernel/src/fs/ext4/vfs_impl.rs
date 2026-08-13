@@ -150,7 +150,7 @@ impl FileSystem for Ext4Fs {
         "ext4"
     }
 
-    fn readdir(&mut self, path: &str) -> KernelResult<Vec<DirEntry>> {
+    fn readdir(&mut self, path: &Path) -> KernelResult<Vec<DirEntry>> {
         let ino = self.driver.resolve_path(path)?;
         let inode = self.driver.read_inode(ino)?;
 
@@ -163,7 +163,7 @@ impl FileSystem for Ext4Fs {
 
         let entries = raw_entries
             .into_iter()
-            .filter(|(_, _, name)| name != "." && name != "..")
+            .filter(|(_, _, name)| name.as_path() != Path::new(".") && name.as_path() != Path::new(".."))
             .map(|(child_ino, ftype, name)| {
                 let entry_type = dir_type_to_entry_type(ftype);
                 // Try to get the file size from the child inode.
@@ -183,7 +183,7 @@ impl FileSystem for Ext4Fs {
 
     fn readdir_at(
         &mut self,
-        path: &str,
+        path: &Path,
         offset: usize,
         count: usize,
     ) -> KernelResult<(Vec<DirEntry>, usize)> {
@@ -200,7 +200,7 @@ impl FileSystem for Ext4Fs {
         // Filter . and .. and count total.
         let filtered: Vec<_> = raw_entries
             .into_iter()
-            .filter(|(_, _, name)| name != "." && name != "..")
+            .filter(|(_, _, name)| name.as_path() != Path::new(".") && name.as_path() != Path::new(".."))
             .collect();
         let total = filtered.len();
 
@@ -226,7 +226,7 @@ impl FileSystem for Ext4Fs {
         Ok((page, total))
     }
 
-    fn read_file(&mut self, path: &str) -> KernelResult<Vec<u8>> {
+    fn read_file(&mut self, path: &Path) -> KernelResult<Vec<u8>> {
         let ino = self.driver.resolve_path(path)?;
         let inode = self.driver.read_inode(ino)?;
 
@@ -246,7 +246,7 @@ impl FileSystem for Ext4Fs {
         }
     }
 
-    fn stat(&mut self, path: &str) -> KernelResult<DirEntry> {
+    fn stat(&mut self, path: &Path) -> KernelResult<DirEntry> {
         let ino = self.driver.resolve_path(path)?;
         let inode = self.driver.read_inode(ino)?;
 
@@ -254,18 +254,18 @@ impl FileSystem for Ext4Fs {
         let entry_type = mode_to_entry_type(mode);
         let size = inode_file_size(&inode);
 
-        // Extract the name from the path.
-        let name = path.rsplit('/').next().unwrap_or(path);
-        let name = if name.is_empty() { "/" } else { name };
+        // Extract the name from the path.  `file_name` yields `None` only
+        // for a path with no components (i.e. the root), which is named `/`.
+        let name = path.file_name().unwrap_or(Path::new("/"));
 
         Ok(DirEntry {
-            name: PathBuf::from(name),
+            name: name.to_path_buf(),
             entry_type,
             size,
         })
     }
 
-    fn write_file(&mut self, path: &str, data: &[u8]) -> KernelResult<()> {
+    fn write_file(&mut self, path: &Path, data: &[u8]) -> KernelResult<()> {
         // Check if the file already exists.
         match self.driver.resolve_path(path) {
             Ok(ino) => {
@@ -315,7 +315,7 @@ impl FileSystem for Ext4Fs {
         }
     }
 
-    fn remove(&mut self, path: &str) -> KernelResult<()> {
+    fn remove(&mut self, path: &Path) -> KernelResult<()> {
         // `unlink(2)` never dereferences a trailing symlink: it removes the
         // symlink inode itself, not its target.  Resolving with follow here
         // both corrupts the wrong inode (decrementing the *target's* link
@@ -368,7 +368,7 @@ impl FileSystem for Ext4Fs {
         Ok(())
     }
 
-    fn mkdir(&mut self, path: &str) -> KernelResult<()> {
+    fn mkdir(&mut self, path: &Path) -> KernelResult<()> {
         // Verify parent exists and is a directory.
         let (parent_path, name) = split_parent_name(path)?;
         let parent_ino = self.driver.resolve_path(parent_path)?;
@@ -421,7 +421,7 @@ impl FileSystem for Ext4Fs {
         Ok(())
     }
 
-    fn rmdir(&mut self, path: &str) -> KernelResult<()> {
+    fn rmdir(&mut self, path: &Path) -> KernelResult<()> {
         // Like `unlink`, `rmdir(2)` never dereferences a trailing symlink:
         // resolving with follow would let `rmdir("symlink-to-dir")` destroy the
         // *target* directory while unlinking the symlink's name.  Resolve
@@ -438,7 +438,7 @@ impl FileSystem for Ext4Fs {
         // Check that the directory is empty (only . and ..).
         let entries = self.driver.read_dir_entries(ino, &inode)?;
         let real_entries = entries.iter()
-            .filter(|(_, _, name)| name != "." && name != "..")
+            .filter(|(_, _, name)| name.as_path() != Path::new(".") && name.as_path() != Path::new(".."))
             .count();
         if real_entries > 0 {
             return Err(KernelError::NotEmpty);
@@ -480,7 +480,7 @@ impl FileSystem for Ext4Fs {
         Ok(())
     }
 
-    fn rename(&mut self, from: &str, to: &str) -> KernelResult<()> {
+    fn rename(&mut self, from: &Path, to: &Path) -> KernelResult<()> {
         // `rename(2)` never dereferences a trailing symlink on either operand:
         // it renames the *symlink itself* (and replaces an existing symlink
         // destination, not its target).  Resolve the final components no-follow
@@ -610,7 +610,7 @@ impl FileSystem for Ext4Fs {
         Ok(())
     }
 
-    fn read_at(&mut self, path: &str, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+    fn read_at(&mut self, path: &Path, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
         let ino = self.driver.resolve_path(path)?;
         let inode = self.driver.read_inode(ino)?;
 
@@ -624,7 +624,7 @@ impl FileSystem for Ext4Fs {
         self.driver.read_file_range(ino, &inode, offset, len)
     }
 
-    fn write_at(&mut self, path: &str, offset: u64, data: &[u8]) -> KernelResult<()> {
+    fn write_at(&mut self, path: &Path, offset: u64, data: &[u8]) -> KernelResult<()> {
         let ino = self.driver.resolve_path(path)?;
         let inode = self.driver.read_inode(ino)?;
 
@@ -739,7 +739,7 @@ impl FileSystem for Ext4Fs {
         }
     }
 
-    fn fallocate(&mut self, path: &str, size: u64) -> KernelResult<()> {
+    fn fallocate(&mut self, path: &Path, size: u64) -> KernelResult<()> {
         if size == 0 {
             return Ok(());
         }
@@ -862,7 +862,7 @@ impl FileSystem for Ext4Fs {
         Ok(())
     }
 
-    fn truncate(&mut self, path: &str, size: u64) -> KernelResult<()> {
+    fn truncate(&mut self, path: &Path, size: u64) -> KernelResult<()> {
         let ino = self.driver.resolve_path(path)?;
         let inode = self.driver.read_inode(ino)?;
 
@@ -954,13 +954,13 @@ impl FileSystem for Ext4Fs {
         }
     }
 
-    fn metadata(&mut self, path: &str) -> KernelResult<FileMeta> {
+    fn metadata(&mut self, path: &Path) -> KernelResult<FileMeta> {
         // Follows the trailing symlink (resolve_path).
         let ino = self.driver.resolve_path(path)?;
         self.meta_from_ino(ino)
     }
 
-    fn lmetadata(&mut self, path: &str) -> KernelResult<FileMeta> {
+    fn lmetadata(&mut self, path: &Path) -> KernelResult<FileMeta> {
         // No-follow: resolve_path_no_follow follows intermediate
         // symlinks but stops at the final component, so a trailing
         // symlink reports its own inode rather than the target's.
@@ -968,33 +968,33 @@ impl FileSystem for Ext4Fs {
         self.meta_from_ino(ino)
     }
 
-    fn set_permissions(&mut self, path: &str, permissions: u16) -> KernelResult<()> {
+    fn set_permissions(&mut self, path: &Path, permissions: u16) -> KernelResult<()> {
         let ino = self.driver.resolve_path(path)?;
         self.set_permissions_ino(ino, permissions)
     }
 
     /// `fchmodat2(AT_SYMLINK_NOFOLLOW)`: set the link inode's own mode bits.
     /// Resolves the final component WITHOUT following a trailing symlink.
-    fn set_permissions_no_follow(&mut self, path: &str, permissions: u16) -> KernelResult<()> {
+    fn set_permissions_no_follow(&mut self, path: &Path, permissions: u16) -> KernelResult<()> {
         let ino = self.driver.resolve_path_no_follow(path)?;
         self.set_permissions_ino(ino, permissions)
     }
 
-    fn set_owner(&mut self, path: &str, uid: u32, gid: u32) -> KernelResult<()> {
+    fn set_owner(&mut self, path: &Path, uid: u32, gid: u32) -> KernelResult<()> {
         let ino = self.driver.resolve_path(path)?;
         self.set_owner_ino(ino, uid, gid)
     }
 
     /// `lchown`/`fchownat(AT_SYMLINK_NOFOLLOW)`: chown the link inode itself.
     /// Resolves the final component WITHOUT following a trailing symlink.
-    fn set_owner_no_follow(&mut self, path: &str, uid: u32, gid: u32) -> KernelResult<()> {
+    fn set_owner_no_follow(&mut self, path: &Path, uid: u32, gid: u32) -> KernelResult<()> {
         let ino = self.driver.resolve_path_no_follow(path)?;
         self.set_owner_ino(ino, uid, gid)
     }
 
     fn set_times(
         &mut self,
-        path: &str,
+        path: &Path,
         accessed_ns: crate::fs::vfs::Timestamp,
         modified_ns: crate::fs::vfs::Timestamp,
     ) -> KernelResult<()> {
@@ -1005,7 +1005,7 @@ impl FileSystem for Ext4Fs {
     /// `lutimes`/`utimensat(AT_SYMLINK_NOFOLLOW)`: stamp the link inode itself.
     fn set_times_no_follow(
         &mut self,
-        path: &str,
+        path: &Path,
         accessed_ns: crate::fs::vfs::Timestamp,
         modified_ns: crate::fs::vfs::Timestamp,
     ) -> KernelResult<()> {
@@ -1013,7 +1013,7 @@ impl FileSystem for Ext4Fs {
         self.set_times_ino(ino, accessed_ns, modified_ns)
     }
 
-    fn set_attributes(&mut self, path: &str, attrs: FileAttr) -> KernelResult<()> {
+    fn set_attributes(&mut self, path: &Path, attrs: FileAttr) -> KernelResult<()> {
         let ino = self.driver.resolve_path(path)?;
         let mut inode = self.driver.read_inode(ino)?;
 
@@ -1038,22 +1038,22 @@ impl FileSystem for Ext4Fs {
         Ok(())
     }
 
-    fn get_xattr(&mut self, path: &str, key: &str) -> KernelResult<Vec<u8>> {
+    fn get_xattr(&mut self, path: &Path, key: &str) -> KernelResult<Vec<u8>> {
         let ino = self.driver.resolve_path(path)?;
         self.get_xattr_ino(ino, key)
     }
 
-    fn set_xattr(&mut self, path: &str, key: &str, value: &[u8]) -> KernelResult<()> {
+    fn set_xattr(&mut self, path: &Path, key: &str, value: &[u8]) -> KernelResult<()> {
         let ino = self.driver.resolve_path(path)?;
         self.set_xattr_ino(ino, key, value)
     }
 
-    fn remove_xattr(&mut self, path: &str, key: &str) -> KernelResult<()> {
+    fn remove_xattr(&mut self, path: &Path, key: &str) -> KernelResult<()> {
         let ino = self.driver.resolve_path(path)?;
         self.remove_xattr_ino(ino, key)
     }
 
-    fn list_xattrs(&mut self, path: &str) -> KernelResult<Vec<String>> {
+    fn list_xattrs(&mut self, path: &Path) -> KernelResult<Vec<String>> {
         let ino = self.driver.resolve_path(path)?;
         self.list_xattrs_ino(ino)
     }
@@ -1062,27 +1062,27 @@ impl FileSystem for Ext4Fs {
     // llistxattr): resolve the final component WITHOUT following a symlink,
     // so the link inode's own xattrs are targeted. ---
 
-    fn get_xattr_no_follow(&mut self, path: &str, key: &str) -> KernelResult<Vec<u8>> {
+    fn get_xattr_no_follow(&mut self, path: &Path, key: &str) -> KernelResult<Vec<u8>> {
         let ino = self.driver.resolve_path_no_follow(path)?;
         self.get_xattr_ino(ino, key)
     }
 
-    fn set_xattr_no_follow(&mut self, path: &str, key: &str, value: &[u8]) -> KernelResult<()> {
+    fn set_xattr_no_follow(&mut self, path: &Path, key: &str, value: &[u8]) -> KernelResult<()> {
         let ino = self.driver.resolve_path_no_follow(path)?;
         self.set_xattr_ino(ino, key, value)
     }
 
-    fn remove_xattr_no_follow(&mut self, path: &str, key: &str) -> KernelResult<()> {
+    fn remove_xattr_no_follow(&mut self, path: &Path, key: &str) -> KernelResult<()> {
         let ino = self.driver.resolve_path_no_follow(path)?;
         self.remove_xattr_ino(ino, key)
     }
 
-    fn list_xattrs_no_follow(&mut self, path: &str) -> KernelResult<Vec<String>> {
+    fn list_xattrs_no_follow(&mut self, path: &Path) -> KernelResult<Vec<String>> {
         let ino = self.driver.resolve_path_no_follow(path)?;
         self.list_xattrs_ino(ino)
     }
 
-    fn symlink(&mut self, path: &str, target: &str) -> KernelResult<()> {
+    fn symlink(&mut self, path: &Path, target: &Path) -> KernelResult<()> {
         let (parent_path, name) = split_parent_name(path)?;
         let parent_ino = self.driver.resolve_path(parent_path)?;
         let mut parent_inode = self.driver.read_inode(parent_ino)?;
@@ -1139,7 +1139,7 @@ impl FileSystem for Ext4Fs {
         Ok(())
     }
 
-    fn readlink(&mut self, path: &str) -> KernelResult<String> {
+    fn readlink(&mut self, path: &Path) -> KernelResult<PathBuf> {
         // Use resolve_path_no_follow so we get the symlink inode itself,
         // not whatever it points to.
         let ino = self.driver.resolve_path_no_follow(path)?;
@@ -1149,12 +1149,14 @@ impl FileSystem for Ext4Fs {
             return Err(KernelError::InvalidArgument);
         }
 
-        let target_bytes = self.driver.read_symlink_target(ino, &inode)?;
-        String::from_utf8(target_bytes)
-            .map_err(|_| KernelError::IoError)
+        // A symlink target is whatever bytes were handed to `symlink(2)`;
+        // ext4 imposes no encoding on it.  Returning it as a `PathBuf`
+        // (rather than `String::from_utf8`, which turned a non-UTF-8
+        // target into a hard `IoError`) keeps such links readable.
+        Ok(PathBuf::from(self.driver.read_symlink_target(ino, &inode)?))
     }
 
-    fn lstat(&mut self, path: &str) -> KernelResult<DirEntry> {
+    fn lstat(&mut self, path: &Path) -> KernelResult<DirEntry> {
         // lstat doesn't follow the final symlink.  resolve_path_no_follow
         // follows all intermediate symlinks but stops at the last component.
         let ino = self.driver.resolve_path_no_follow(path)?;
@@ -1164,11 +1166,10 @@ impl FileSystem for Ext4Fs {
         let entry_type = mode_to_entry_type(mode);
         let size = inode_file_size(&inode);
 
-        let name = path.rsplit('/').next().unwrap_or(path);
-        let name = if name.is_empty() { "/" } else { name };
+        let name = path.file_name().unwrap_or(Path::new("/"));
 
         Ok(DirEntry {
-            name: PathBuf::from(name),
+            name: name.to_path_buf(),
             entry_type,
             size,
         })
@@ -1230,14 +1231,14 @@ impl FileSystem for Ext4Fs {
     /// - The target must exist.
     /// - The new name must not already exist.
     #[allow(clippy::arithmetic_side_effects)]
-    fn link(&mut self, existing: &str, new_path: &str) -> KernelResult<()> {
+    fn link(&mut self, existing: &Path, new_path: &Path) -> KernelResult<()> {
         // `link`/`linkat(AT_SYMLINK_FOLLOW)`: follow a trailing symlink in
         // `existing` so the hard link points at the underlying file.
         let existing_ino = self.driver.resolve_path(existing)?;
         self.link_ino_checked(existing_ino, new_path)
     }
 
-    fn link_no_follow(&mut self, existing: &str, new_path: &str) -> KernelResult<()> {
+    fn link_no_follow(&mut self, existing: &Path, new_path: &Path) -> KernelResult<()> {
         // Plain `link(2)` / `linkat` without AT_SYMLINK_FOLLOW: do NOT follow
         // a trailing symlink — hard-link the symlink inode itself.
         let existing_ino = self.driver.resolve_path_no_follow(existing)?;
@@ -1279,7 +1280,7 @@ impl Ext4Fs {
     /// Regular files and symlinks may be hard-linked (a symlink inode is the
     /// no-follow `link(2)` target); directories are rejected (EISDIR), as is
     /// any other inode type (EINVAL).
-    fn link_ino_checked(&mut self, existing_ino: u32, new_path: &str) -> KernelResult<()> {
+    fn link_ino_checked(&mut self, existing_ino: u32, new_path: &Path) -> KernelResult<()> {
         let mut inode = self.driver.read_inode(existing_ino)?;
 
         let mode_type = inode.i_mode & file_type::S_IFMT;
@@ -1480,7 +1481,7 @@ impl Ext4Fs {
     }
 
     /// Create a new file at `path` with the given data.
-    fn create_file(&mut self, path: &str, data: &[u8]) -> KernelResult<()> {
+    fn create_file(&mut self, path: &Path, data: &[u8]) -> KernelResult<()> {
         let (parent_path, name) = split_parent_name(path)?;
         let parent_ino = self.driver.resolve_path(parent_path)?;
         let mut parent_inode = self.driver.read_inode(parent_ino)?;
@@ -1525,7 +1526,7 @@ impl Ext4Fs {
         &mut self,
         dir_inode: &mut super::ondisk::Ext4Inode,
         dir_ino: u32,
-        name: &str,
+        name: &Path,
     ) -> KernelResult<()> {
         // Invalidate the dcache entry for this name.
         self.driver.dcache.invalidate_entry(dir_ino, name);
@@ -1770,20 +1771,16 @@ fn stamp_inode_ctime(inode: &mut super::ondisk::Ext4Inode) {
 /// Split a path into parent directory and final name component.
 ///
 /// e.g., `"/foo/bar/baz"` → `("/foo/bar", "baz")`
-fn split_parent_name(path: &str) -> KernelResult<(&str, &str)> {
-    let path = path.strip_suffix('/').unwrap_or(path);
-    match path.rfind('/') {
-        Some(pos) => {
-            let parent = if pos == 0 { "/" } else { &path[..pos] };
-            let name = &path[pos + 1..];
-            if name.is_empty() {
-                Err(KernelError::InvalidArgument)
-            } else {
-                Ok((parent, name))
-            }
-        }
-        None => Err(KernelError::InvalidArgument),
-    }
+///
+/// Built from `Path::parent`/`Path::file_name` so it is byte-exact and needs
+/// no UTF-8 boundary reasoning.  Both halves must exist, which preserves the
+/// previous `rfind`-based rejections exactly: the root (and any all-separator
+/// path) has no final component, and a relative path such as `file.txt` has
+/// no parent — every path reaching the ext4 driver is already absolute.
+fn split_parent_name(path: &Path) -> KernelResult<(&Path, &Path)> {
+    let name = path.file_name().ok_or(KernelError::InvalidArgument)?;
+    let parent = path.parent().ok_or(KernelError::InvalidArgument)?;
+    Ok((parent, name))
 }
 
 /// Write a "." directory entry at the given offset.
@@ -1854,45 +1851,56 @@ pub fn self_test() -> KernelResult<()> {
 /// Test split_parent_name for various path patterns.
 fn test_split_parent_name() -> KernelResult<()> {
     // Simple path.
-    let (parent, name) = split_parent_name("/foo/bar")?;
-    if parent != "/foo" || name != "bar" {
+    let (parent, name) = split_parent_name(Path::new("/foo/bar"))?;
+    if parent != Path::new("/foo") || name != Path::new("bar") {
         crate::serial_println!(
-            "[ext4-vfs]   FAIL: split('/foo/bar') = ('{}', '{}')", parent, name
+            "[ext4-vfs]   FAIL: split('/foo/bar') = ('{}', '{}')",
+            parent.display(), name.display()
         );
         return Err(KernelError::InternalError);
     }
 
     // Root-level file.
-    let (parent, name) = split_parent_name("/file.txt")?;
-    if parent != "/" || name != "file.txt" {
+    let (parent, name) = split_parent_name(Path::new("/file.txt"))?;
+    if parent != Path::new("/") || name != Path::new("file.txt") {
         crate::serial_println!(
-            "[ext4-vfs]   FAIL: split('/file.txt') = ('{}', '{}')", parent, name
+            "[ext4-vfs]   FAIL: split('/file.txt') = ('{}', '{}')",
+            parent.display(), name.display()
         );
         return Err(KernelError::InternalError);
     }
 
     // Deep path.
-    let (parent, name) = split_parent_name("/a/b/c/d")?;
-    if parent != "/a/b/c" || name != "d" {
+    let (parent, name) = split_parent_name(Path::new("/a/b/c/d"))?;
+    if parent != Path::new("/a/b/c") || name != Path::new("d") {
         crate::serial_println!("[ext4-vfs]   FAIL: split deep path");
         return Err(KernelError::InternalError);
     }
 
     // Trailing slash should be stripped.
-    let (parent, name) = split_parent_name("/foo/bar/")?;
-    if parent != "/foo" || name != "bar" {
+    let (parent, name) = split_parent_name(Path::new("/foo/bar/"))?;
+    if parent != Path::new("/foo") || name != Path::new("bar") {
         crate::serial_println!("[ext4-vfs]   FAIL: split trailing slash");
         return Err(KernelError::InternalError);
     }
 
-    // No slash → error.
-    if split_parent_name("file.txt").is_ok() {
+    // A name that is not valid UTF-8 splits byte-exactly.  ext4 filenames are
+    // opaque byte strings, so this is the case the old `&str` signature could
+    // not even represent — the name had to be lost or the call rejected.
+    let (parent, name) = split_parent_name(Path::new(b"/logs/re\xffport.l\xfeg".as_slice()))?;
+    if parent != Path::new("/logs") || name != Path::new(b"re\xffport.l\xfeg".as_slice()) {
+        crate::serial_println!("[ext4-vfs]   FAIL: split non-UTF-8 name");
+        return Err(KernelError::InternalError);
+    }
+
+    // No slash -> error (a relative path has no parent).
+    if split_parent_name(Path::new("file.txt")).is_ok() {
         crate::serial_println!("[ext4-vfs]   FAIL: no-slash should fail");
         return Err(KernelError::InternalError);
     }
 
-    // Root only → error.
-    if split_parent_name("/").is_ok() {
+    // Root only -> error.
+    if split_parent_name(Path::new("/")).is_ok() {
         crate::serial_println!("[ext4-vfs]   FAIL: root-only should fail");
         return Err(KernelError::InternalError);
     }

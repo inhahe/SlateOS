@@ -37,6 +37,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::Path;
 
 use super::driver::{read_struct_pub, Ext4Driver};
 use super::ondisk::{
@@ -309,7 +310,7 @@ const DX_NODE_HEADER_SIZE: usize = 8;
 pub fn htree_lookup(
     driver: &Ext4Driver,
     dir_ino: u32,
-    name: &str,
+    name: &Path,
 ) -> KernelResult<Option<(u32, u8)>> {
     let dir_inode = driver.read_inode(dir_ino)?;
 
@@ -497,7 +498,7 @@ fn descend_dx_nodes(
 /// Returns `Ok(Some((inode, file_type)))` if found, `Ok(None)` if not.
 fn scan_leaf_block(
     data: &[u8],
-    name: &str,
+    name: &Path,
 ) -> KernelResult<Option<(u32, u8)>> {
     let name_bytes = name.as_bytes();
     let hdr_size = core::mem::size_of::<Ext4DirEntry2>();
@@ -1374,7 +1375,7 @@ pub fn self_test() -> KernelResult<()> {
         block[7] = 1; // file_type = REG_FILE
         block[8..16].copy_from_slice(name_bytes);
 
-        let result = scan_leaf_block(&block, "testfile")?;
+        let result = scan_leaf_block(&block, Path::new("testfile"))?;
         if result != Some((42, 1)) {
             serial_println!(
                 "[ext4-htree]   FAIL: scan_leaf_block returned {:?}, expected Some((42, 1))",
@@ -1385,7 +1386,7 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[ext4-htree]   scan_leaf_block found entry OK");
 
         // Should not find a different name.
-        let result = scan_leaf_block(&block, "other")?;
+        let result = scan_leaf_block(&block, Path::new("other"))?;
         if result.is_some() {
             serial_println!("[ext4-htree]   FAIL: scan_leaf_block should not find 'other'");
             return Err(KernelError::InternalError);

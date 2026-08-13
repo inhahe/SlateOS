@@ -39,7 +39,6 @@ pub mod superblock;
 pub mod vfs_impl;
 
 use alloc::boxed::Box;
-use alloc::format;
 use crate::error::KernelResult;
 use crate::serial_println;
 
@@ -107,10 +106,10 @@ pub fn self_test() -> KernelResult<()> {
         }
     };
 
-    serial_println!("[ext4]   ext4 mounted at '{}' — testing...", mount_path);
+    serial_println!("[ext4]   ext4 mounted at '{}' — testing...", mount_path.display());
 
     // List the root directory of the ext4 mount.
-    let root = if mount_path == "/" { "/".into() } else { mount_path.clone() };
+    let root = mount_path.clone();
     let entries = crate::fs::Vfs::readdir(&root)?;
     serial_println!("[ext4]   Root directory ({} entries):", entries.len());
     for entry in &entries {
@@ -122,7 +121,7 @@ pub fn self_test() -> KernelResult<()> {
         };
         serial_println!(
             "[ext4]     {} {:20} {} bytes",
-            type_str, entry.name, entry.size
+            type_str, entry.name.display(), entry.size
         );
     }
 
@@ -135,16 +134,12 @@ pub fn self_test() -> KernelResult<()> {
 
     // Try to read the first regular file we find (if any).
     if let Some(first_file) = entries.iter().find(|e| e.entry_type == crate::fs::EntryType::File) {
-        let file_path = if root == "/" {
-            format!("/{}", first_file.name)
-        } else {
-            format!("{}/{}", root, first_file.name)
-        };
+        let file_path = root.join(&first_file.name);
         match crate::fs::Vfs::read_file(&file_path) {
             Ok(data) => {
                 serial_println!(
                     "[ext4]   Read '{}': {} bytes",
-                    first_file.name, data.len()
+                    first_file.name.display(), data.len()
                 );
                 // Show first 64 bytes as text if valid UTF-8.
                 let preview_len = data.len().min(64);
@@ -155,7 +150,7 @@ pub fn self_test() -> KernelResult<()> {
             Err(e) => {
                 serial_println!(
                     "[ext4]   WARNING: Could not read '{}': {:?}",
-                    first_file.name, e
+                    first_file.name.display(), e
                 );
             }
         }
@@ -165,11 +160,7 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("[ext4]   Testing extended attributes...");
     {
         // Create a temporary test file for xattr tests.
-        let xattr_path = if root == "/" {
-            alloc::string::String::from("/_ext4_xattr_test")
-        } else {
-            format!("{}/_ext4_xattr_test", root)
-        };
+        let xattr_path = root.join("_ext4_xattr_test");
         crate::fs::Vfs::write_file(&xattr_path, b"xattr test data")?;
 
         // Initially, no xattrs should be set.
@@ -244,16 +235,8 @@ pub fn self_test() -> KernelResult<()> {
     // --- Symlink tests ---
     serial_println!("[ext4]   Testing symlinks...");
     {
-        let target_path = if root == "/" {
-            alloc::string::String::from("/_ext4_symlink_target")
-        } else {
-            format!("{}/_ext4_symlink_target", root)
-        };
-        let link_path = if root == "/" {
-            alloc::string::String::from("/_ext4_symlink_link")
-        } else {
-            format!("{}/_ext4_symlink_link", root)
-        };
+        let target_path = root.join("_ext4_symlink_target");
+        let link_path = root.join("_ext4_symlink_link");
 
         // Create a target file and a symlink to it.
         crate::fs::Vfs::write_file(&target_path, b"symlink target content")?;
@@ -262,12 +245,15 @@ pub fn self_test() -> KernelResult<()> {
         // readlink should return the target path.
         let target_read = crate::fs::Vfs::readlink(&link_path)?;
         if target_read != target_path {
-            serial_println!("[ext4]   FAIL: readlink = '{}', expected '{}'", target_read, target_path);
+            serial_println!(
+                "[ext4]   FAIL: readlink = '{}', expected '{}'",
+                target_read.display(), target_path.display()
+            );
             let _ = crate::fs::Vfs::remove(&link_path);
             let _ = crate::fs::Vfs::remove(&target_path);
             return Err(crate::error::KernelError::InternalError);
         }
-        serial_println!("[ext4]     readlink OK: {}", target_read);
+        serial_println!("[ext4]     readlink OK: {}", target_read.display());
 
         // lstat on the symlink should return Symlink type.
         let link_stat = crate::fs::Vfs::lstat(&link_path)?;
@@ -310,11 +296,7 @@ pub fn self_test() -> KernelResult<()> {
     // rather than boot-relative ones, and that overwriting bumps mtime.
     serial_println!("[ext4]   Testing create/modify timestamps...");
     {
-        let ct_path = if root == "/" {
-            alloc::string::String::from("/_ext4_ctime_test")
-        } else {
-            format!("{}/_ext4_ctime_test", root)
-        };
+        let ct_path = root.join("_ext4_ctime_test");
 
         // Only run the assertion if the wall clock is actually initialized.
         // Before RTC init, clock_realtime() returns 0 and every timestamp is
@@ -388,11 +370,7 @@ pub fn self_test() -> KernelResult<()> {
     // --- Timestamp (set_times) test ---
     serial_println!("[ext4]   Testing set_times...");
     {
-        let ts_path = if root == "/" {
-            alloc::string::String::from("/_ext4_timestamp_test")
-        } else {
-            format!("{}/_ext4_timestamp_test", root)
-        };
+        let ts_path = root.join("_ext4_timestamp_test");
         crate::fs::Vfs::write_file(&ts_path, b"timestamp test")?;
 
         // Set specific timestamps (1_700_000_000 seconds = 2023-11-14).
@@ -422,16 +400,8 @@ pub fn self_test() -> KernelResult<()> {
     // --- Hard link tests ---
     serial_println!("[ext4]   Testing hard links...");
     {
-        let file_path = if root == "/" {
-            alloc::string::String::from("/_ext4_hardlink_src")
-        } else {
-            format!("{}/_ext4_hardlink_src", root)
-        };
-        let link_path = if root == "/" {
-            alloc::string::String::from("/_ext4_hardlink_dst")
-        } else {
-            format!("{}/_ext4_hardlink_dst", root)
-        };
+        let file_path = root.join("_ext4_hardlink_src");
+        let link_path = root.join("_ext4_hardlink_dst");
 
         // Create a source file.
         crate::fs::Vfs::write_file(&file_path, b"hard link test data")?;
@@ -486,13 +456,18 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[ext4]     sizes match ({} bytes) OK", meta_src.size);
 
         // Linking to a directory should fail.
-        let dir_path = if root == "/" {
-            alloc::string::String::from("/_ext4_hardlink_dir_test")
-        } else {
-            format!("{}/_ext4_hardlink_dir_test", root)
-        };
+        let dir_path = root.join("_ext4_hardlink_dir_test");
         crate::fs::Vfs::mkdir(&dir_path)?;
-        let link_dir_result = crate::fs::Vfs::link(&dir_path, &format!("{}_link", dir_path));
+        let link_dir_result = crate::fs::Vfs::link(
+            &dir_path,
+            // A sibling name derived by appending to the directory's own path:
+            // built from the raw bytes so it works for a non-UTF-8 mount point.
+            crate::fs::path::PathBuf::from({
+                let mut v = dir_path.as_bytes().to_vec();
+                v.extend_from_slice(b"_link");
+                v
+            }),
+        );
         if !matches!(link_dir_result, Err(crate::error::KernelError::IsADirectory)) {
             serial_println!("[ext4]   FAIL: linking directory should return IsADirectory, got {:?}", link_dir_result);
             let _ = crate::fs::Vfs::rmdir(&dir_path);
@@ -540,11 +515,7 @@ pub fn self_test() -> KernelResult<()> {
     // --- Fallocate tests ---
     serial_println!("[ext4]   Testing fallocate...");
     {
-        let fa_path = if root == "/" {
-            alloc::string::String::from("/_ext4_fallocate_test")
-        } else {
-            format!("{}/_ext4_fallocate_test", root)
-        };
+        let fa_path = root.join("_ext4_fallocate_test");
 
         // 1. Fallocate on a new empty file.
         crate::fs::Vfs::write_file(&fa_path, b"")?;
@@ -586,11 +557,7 @@ pub fn self_test() -> KernelResult<()> {
     // --- Write-at tests ---
     serial_println!("[ext4]   Testing write_at paths...");
     {
-        let wa_path = if root == "/" {
-            alloc::string::String::from("/_ext4_write_at_test")
-        } else {
-            format!("{}/_ext4_write_at_test", root)
-        };
+        let wa_path = root.join("_ext4_write_at_test");
 
         // Create a file with known content.
         let initial = b"ABCDEFGHIJKLMNOP";
@@ -666,11 +633,7 @@ pub fn self_test() -> KernelResult<()> {
     // --- Truncate tests ---
     serial_println!("[ext4]   Testing truncate...");
     {
-        let tr_path = if root == "/" {
-            alloc::string::String::from("/_ext4_truncate_test")
-        } else {
-            format!("{}/_ext4_truncate_test", root)
-        };
+        let tr_path = root.join("_ext4_truncate_test");
 
         crate::fs::Vfs::write_file(&tr_path, b"0123456789ABCDEF")?;
 

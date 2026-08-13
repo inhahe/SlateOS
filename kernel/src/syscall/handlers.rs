@@ -6943,12 +6943,10 @@ pub fn sys_fs_read_file(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let path_ptr = args.arg0 as *const u8;
     let path_len = args.arg1 as usize;
-    let buf_ptr = args.arg2 as *mut u8;
     let buf_cap = args.arg3 as usize;
 
-    if path_ptr.is_null() || path_len == 0 || buf_ptr.is_null() || buf_cap == 0 {
+    if args.arg0 == 0 || path_len == 0 || args.arg2 == 0 || buf_cap == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
@@ -6991,12 +6989,10 @@ pub fn sys_fs_write_file(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let path_ptr = args.arg0 as *const u8;
     let path_len = args.arg1 as usize;
-    let data_ptr = args.arg2 as *const u8;
     let data_len = args.arg3 as usize;
 
-    if path_ptr.is_null() || path_len == 0 || data_ptr.is_null() {
+    if args.arg0 == 0 || path_len == 0 || args.arg2 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
@@ -7033,10 +7029,9 @@ pub fn sys_fs_delete(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let path_ptr = args.arg0 as *const u8;
     let path_len = args.arg1 as usize;
 
-    if path_ptr.is_null() || path_len == 0 {
+    if args.arg0 == 0 || path_len == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
@@ -7065,12 +7060,10 @@ pub fn sys_fs_list_dir(args: &SyscallArgs) -> SyscallResult {
 
     use super::number::FS_DIR_ENTRY_SIZE;
 
-    let path_ptr = args.arg0 as *const u8;
     let path_len = args.arg1 as usize;
-    let buf_ptr = args.arg2 as *mut u8;
     let buf_cap = args.arg3 as usize;
 
-    if path_ptr.is_null() || path_len == 0 || buf_ptr.is_null() {
+    if args.arg0 == 0 || path_len == 0 || args.arg2 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
@@ -7169,10 +7162,9 @@ pub fn sys_fs_mkdir(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let path_ptr = args.arg0 as *const u8;
     let path_len = args.arg1 as usize;
 
-    if path_ptr.is_null() || path_len == 0 {
+    if args.arg0 == 0 || path_len == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
@@ -7203,10 +7195,9 @@ pub fn sys_fs_mkdir_mode(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let path_ptr = args.arg0 as *const u8;
     let path_len = args.arg1 as usize;
 
-    if path_ptr.is_null() || path_len == 0 {
+    if args.arg0 == 0 || path_len == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
@@ -7241,10 +7232,9 @@ pub fn sys_fs_rmdir(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let path_ptr = args.arg0 as *const u8;
     let path_len = args.arg1 as usize;
 
-    if path_ptr.is_null() || path_len == 0 {
+    if args.arg0 == 0 || path_len == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
@@ -7352,11 +7342,9 @@ pub fn sys_fs_stat(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let path_ptr = args.arg0 as *const u8;
     let path_len = args.arg1 as usize;
-    let out_ptr = args.arg2 as *mut u8;
 
-    if path_ptr.is_null() || path_len == 0 || out_ptr.is_null() {
+    if args.arg0 == 0 || path_len == 0 || args.arg2 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
@@ -7952,9 +7940,8 @@ pub fn sys_fs_trim(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_FS_FSTAT` — stat a file by handle.
 pub fn sys_fs_fstat(args: &SyscallArgs) -> SyscallResult {
     let handle = args.arg0;
-    let out_ptr = args.arg1 as *mut u8;
 
-    if out_ptr.is_null() {
+    if args.arg1 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
     if let Err(e) =
@@ -8426,8 +8413,7 @@ pub fn sys_fs_metadata(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let out_ptr = args.arg2 as *mut u8;
-    if out_ptr.is_null() {
+    if args.arg2 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
     if let Err(e) = crate::mm::user::validate_user_write(
@@ -8447,27 +8433,53 @@ pub fn sys_fs_metadata(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return SyscallResult::err(e),
     };
 
-    // Marshal to output buffer.
-    // SAFETY: out_ptr validated for FS_META_SIZE bytes.
-    unsafe {
-        core::ptr::write(out_ptr as *mut u64, meta.size);
-        *out_ptr.add(8) = match meta.entry_type {
-            crate::fs::EntryType::File => 0,
-            crate::fs::EntryType::Directory => 1,
-            crate::fs::EntryType::VolumeLabel => 2,
-            crate::fs::EntryType::Symlink => 3,
+    // Packed in the kernel, then delivered as one copy.  The fields used to be
+    // stored one at a time through `args.arg2 as *mut u8`, which was wrong on
+    // three counts: the address is userspace, so the stores need SMAP
+    // bracketing and a re-validating copy; it carries no alignment guarantee;
+    // and `attributes` lives at offset 58, two bytes past a `u16`, so a typed
+    // `*mut u32` store there is misaligned *by construction* — undefined
+    // behaviour even for a perfectly well-behaved caller.  Byte-wise packing
+    // is alignment-agnostic, so the odd offsets in the ABI cost nothing.
+    let mut rec = [0u8; crate::syscall::number::FS_META_SIZE];
+    {
+        // Every offset below is a compile-time constant inside a 64-byte
+        // array, so the `get_mut` can only fail if the layout constants and
+        // `FS_META_SIZE` disagree; then the field is dropped rather than
+        // corrupting a neighbour.
+        let mut put = |at: usize, bytes: &[u8]| {
+            if let Some(dst) = rec.get_mut(at..at.saturating_add(bytes.len())) {
+                dst.copy_from_slice(bytes);
+            }
         };
-        // [9..16] padding (zero)
-        core::ptr::write_bytes(out_ptr.add(9), 0, 7);
-        core::ptr::write(out_ptr.add(16) as *mut u64, meta.created_ns);
-        core::ptr::write(out_ptr.add(24) as *mut u64, meta.modified_ns);
-        core::ptr::write(out_ptr.add(32) as *mut u64, meta.accessed_ns);
-        core::ptr::write(out_ptr.add(40) as *mut u64, meta.changed_ns);
-        core::ptr::write(out_ptr.add(48) as *mut u32, meta.uid);
-        core::ptr::write(out_ptr.add(52) as *mut u32, meta.gid);
-        core::ptr::write(out_ptr.add(56) as *mut u16, meta.permissions);
-        core::ptr::write(out_ptr.add(58) as *mut u32, meta.attributes.bits());
-        core::ptr::write_bytes(out_ptr.add(62), 0, 2);
+        put(0, &meta.size.to_le_bytes());
+        put(
+            8,
+            &[match meta.entry_type {
+                crate::fs::EntryType::File => 0u8,
+                crate::fs::EntryType::Directory => 1,
+                crate::fs::EntryType::VolumeLabel => 2,
+                crate::fs::EntryType::Symlink => 3,
+            }],
+        );
+        // [9..16] and [62..64] stay zero: the array starts zeroed.
+        put(16, &meta.created_ns.to_le_bytes());
+        put(24, &meta.modified_ns.to_le_bytes());
+        put(32, &meta.accessed_ns.to_le_bytes());
+        put(40, &meta.changed_ns.to_le_bytes());
+        put(48, &meta.uid.to_le_bytes());
+        put(52, &meta.gid.to_le_bytes());
+        put(56, &meta.permissions.to_le_bytes());
+        put(58, &meta.attributes.bits().to_le_bytes());
+    }
+
+    // SAFETY: `rec` is a live kernel stack array of exactly `FS_META_SIZE`
+    // bytes; `copy_to_user` re-validates the destination and brackets the
+    // store with STAC/CLAC.
+    if let Err(e) =
+        unsafe { crate::mm::user::copy_to_user(rec.as_ptr(), args.arg2, rec.len()) }
+    {
+        return SyscallResult::err(e);
     }
 
     SyscallResult::ok(0)
@@ -8937,8 +8949,7 @@ pub fn sys_fs_lstat(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return SyscallResult::err(e),
     };
 
-    let out_ptr = args.arg2 as *mut u8;
-    if out_ptr.is_null() {
+    if args.arg2 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
     if let Err(e) =
@@ -9085,8 +9096,7 @@ pub fn sys_fs_statvfs(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return SyscallResult::err(e),
     };
 
-    let out_ptr = args.arg2 as *mut u8;
-    if out_ptr.is_null() {
+    if args.arg2 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
     if let Err(e) = crate::mm::user::validate_user_write(
@@ -9101,24 +9111,35 @@ pub fn sys_fs_statvfs(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return SyscallResult::err(e),
     };
 
-    // Write the 64-byte output buffer.
-    // SAFETY: Validated above — out_ptr is in user space, mapped, and writable.
-    unsafe {
-        core::ptr::write_bytes(out_ptr, 0, 64);
-        // block_size: u64 at offset 0
-        core::ptr::write(out_ptr as *mut u64, info.block_size);
-        // total_blocks: u64 at offset 8
-        core::ptr::write(out_ptr.add(8) as *mut u64, info.total_blocks);
-        // free_blocks: u64 at offset 16
-        core::ptr::write(out_ptr.add(16) as *mut u64, info.free_blocks);
-        // total_inodes: u64 at offset 24
-        core::ptr::write(out_ptr.add(24) as *mut u64, info.total_inodes);
-        // free_inodes: u64 at offset 32
-        core::ptr::write(out_ptr.add(32) as *mut u64, info.free_inodes);
-        // max_name_len: u64 at offset 40
-        core::ptr::write(out_ptr.add(40) as *mut u64, info.max_name_len);
-        // read_only: u8 at offset 48
-        core::ptr::write(out_ptr.add(48), u8::from(info.read_only));
+    // Packed in the kernel and delivered as one copy, so a caller can never
+    // observe a half-updated set of figures: free_blocks without the matching
+    // total_blocks is worse than no answer at all.  The bytes go out through
+    // the validating bounce rather than by typed stores to a user address.
+    let mut rec = [0u8; crate::syscall::number::FS_STATVFS_SIZE];
+    {
+        // Constant offsets inside a fixed-size array; see `sys_fs_metadata`.
+        let mut put = |at: usize, bytes: &[u8]| {
+            if let Some(dst) = rec.get_mut(at..at.saturating_add(bytes.len())) {
+                dst.copy_from_slice(bytes);
+            }
+        };
+        put(0, &info.block_size.to_le_bytes());
+        put(8, &info.total_blocks.to_le_bytes());
+        put(16, &info.free_blocks.to_le_bytes());
+        put(24, &info.total_inodes.to_le_bytes());
+        put(32, &info.free_inodes.to_le_bytes());
+        put(40, &info.max_name_len.to_le_bytes());
+        put(48, &[u8::from(info.read_only)]);
+        // [49..64] stays zero: the array starts zeroed.
+    }
+
+    // SAFETY: `rec` is a live kernel stack array of exactly
+    // `FS_STATVFS_SIZE` bytes; `copy_to_user` re-validates the destination
+    // and brackets the store with STAC/CLAC.
+    if let Err(e) =
+        unsafe { crate::mm::user::copy_to_user(rec.as_ptr(), args.arg2, rec.len()) }
+    {
+        return SyscallResult::err(e);
     }
 
     SyscallResult::ok(0)

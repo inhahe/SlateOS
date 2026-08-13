@@ -749,6 +749,36 @@ pub fn read_user_items<T: Copy>(
     Ok(out)
 }
 
+/// Copy one `T` out of user space.
+///
+/// The common case of [`read_user_items`] with `count == 1`: a handler that
+/// takes a pointer to a single packed argument struct.  Reading it through a
+/// `*const T` instead would dereference user memory directly, which is exactly
+/// what the bounce primitives exist to prevent.
+///
+/// `T` carries the same requirements as in [`read_user_items`]: every bit
+/// pattern must be a valid `T`, because the bytes are attacker-controlled.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidAddress`] if the user range is not readable.
+pub fn read_user_value<T: Copy>(user_src: u64) -> KernelResult<T> {
+    let mut value = core::mem::MaybeUninit::<T>::uninit();
+
+    // SAFETY: `value` is a live, properly aligned allocation of exactly
+    // `size_of::<T>()` bytes.  `copy_from_user` validates the source and, on
+    // success, fills all of them, so the value is fully initialised before
+    // `assume_init` observes it.  On failure we return without reading it.
+    unsafe {
+        copy_from_user(
+            user_src,
+            value.as_mut_ptr().cast::<u8>(),
+            core::mem::size_of::<T>(),
+        )?;
+        Ok(value.assume_init())
+    }
+}
+
 /// Copy a slice of `T`s into user space.
 ///
 /// # Errors

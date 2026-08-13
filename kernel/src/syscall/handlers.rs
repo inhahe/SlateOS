@@ -62,6 +62,16 @@ const PATH_MAX: usize = 4096;
 /// Same rejection-not-truncation rule as [`PATH_MAX`].
 const NAME_MAX: usize = 1024;
 
+/// Largest packed argv or envp blob accepted by spawn/exec.
+///
+/// Linux's equivalent (`MAX_ARG_STRLEN` × count, capped at a quarter of the
+/// stack rlimit) is far larger, but nothing here needs it yet and the blob is
+/// copied into the kernel, so the limit bounds a real allocation.
+const ARGV_MAX: usize = 256 * 1024;
+
+/// Most file-descriptor map entries accepted by spawn.
+const FD_MAP_MAX: usize = 256;
+
 /// Copy a path argument out of user space into a kernel `String`.
 ///
 /// `String::from_utf8` consumes the `Vec` in place, so this is one allocation,
@@ -3173,46 +3183,36 @@ pub fn sys_cp_notify(args: &SyscallArgs) -> SyscallResult {
 pub fn sys_process_spawn(args: &SyscallArgs) -> SyscallResult {
     use crate::proc::spawn::{SpawnOptions, spawn_process};
 
-    let elf_ptr = args.arg0 as usize;
     let elf_len = args.arg1 as usize;
-    let name_ptr = args.arg2 as usize;
-    let name_len = args.arg3 as usize;
+    let name_len = if args.arg2 == 0 { 0 } else { args.arg3 as usize };
 
     if elf_len == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    // Validate ELF data pointer.
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, elf_len) {
-        return SyscallResult::err(e);
-    }
-
-    // Validate name pointer (if provided).
-    if name_len > 0 && name_ptr != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, name_len) {
-            return SyscallResult::err(e);
-        }
-    }
-
-    // SAFETY: Validated above — elf_ptr is in user space and mapped.
-    let elf_data = unsafe {
-        core::slice::from_raw_parts(elf_ptr as *const u8, elf_len)
+    // Copy the image in before loading it.  `spawn_process` builds a whole
+    // address space — it allocates, takes locks and can reschedule — so it must
+    // not be handed a slice over the caller's memory (see `sys_pipe_write`).
+    let elf_data = match crate::mm::user::read_user_vec(args.arg0, elf_len, usize::MAX) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
     };
 
-    // Read the name.
-    let name = if name_len > 0 && name_ptr != 0 {
-        // SAFETY: Validated above — name_ptr is in user space and mapped.
-        let name_bytes = unsafe {
-            core::slice::from_raw_parts(name_ptr as *const u8, name_len)
-        };
-        core::str::from_utf8(name_bytes).unwrap_or("unnamed")
-    } else {
+    // An over-long name is rejected, not truncated: a silently shortened name
+    // is a different name, and the caller has no way to know it happened.
+    let name_bytes = match crate::mm::user::read_user_vec(args.arg2, name_len, NAME_MAX) {
+        Ok(b) => b,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let name = if name_bytes.is_empty() {
         "unnamed"
+    } else {
+        core::str::from_utf8(&name_bytes).unwrap_or("unnamed")
     };
 
     let options = SpawnOptions::new(name);
 
-    match spawn_process(elf_data, &options) {
+    match spawn_process(&elf_data, &options) {
         Ok(result) => {
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(result.pid as i64)
@@ -3234,123 +3234,96 @@ pub fn sys_process_spawn_ex(args: &SyscallArgs) -> SyscallResult {
 
     let args_ptr = args.arg0 as usize;
 
-    // Validate the args struct pointer.
-    let struct_size = core::mem::size_of::<SpawnExArgs>();
     if args_ptr == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, struct_size) {
-        return SyscallResult::err(e);
-    }
 
-    // SAFETY: Validated above — args_ptr points to mapped user memory.
-    let spawn_args: SpawnExArgs = unsafe { *(args_ptr as *const SpawnExArgs) };
+    // The whole argument struct is copied in first: every pointer it carries is
+    // re-read below, and re-reading them from user memory would let a peer
+    // thread change a length between the check and the use.
+    let spawn_args: SpawnExArgs = match crate::mm::user::read_user_value(args.arg0) {
+        Ok(v) => v,
+        Err(e) => return SyscallResult::err(e),
+    };
 
-    let elf_ptr = spawn_args.elf_ptr as usize;
     let elf_len = spawn_args.elf_len as usize;
-    let name_ptr = spawn_args.name_ptr as usize;
-    let name_len = spawn_args.name_len as usize;
-    let fd_map_ptr = spawn_args.fd_map_ptr as usize;
-    let fd_map_count = spawn_args.fd_map_count as usize;
-    let argv_ptr = spawn_args.argv_ptr as usize;
-    let argv_len = spawn_args.argv_len as usize;
+    let name_len = if spawn_args.name_ptr == 0 {
+        0
+    } else {
+        spawn_args.name_len as usize
+    };
+    let fd_map_count = if spawn_args.fd_map_ptr == 0 {
+        0
+    } else {
+        spawn_args.fd_map_count as usize
+    };
+    let argv_len = if spawn_args.argv_ptr == 0 {
+        0
+    } else {
+        spawn_args.argv_len as usize
+    };
     let argc = spawn_args.argc as usize;
-    let envp_ptr = spawn_args.envp_ptr as usize;
-    let envp_len = spawn_args.envp_len as usize;
+    let envp_len = if spawn_args.envp_ptr == 0 {
+        0
+    } else {
+        spawn_args.envp_len as usize
+    };
     let envc = spawn_args.envc as usize;
 
     if elf_len == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    // Validate ELF data pointer.
-    if let Err(e) = crate::mm::user::validate_user_read(spawn_args.elf_ptr, elf_len) {
-        return SyscallResult::err(e);
-    }
-
-    // Validate name pointer (if provided).
-    if name_len > 0 && name_ptr != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(spawn_args.name_ptr, name_len) {
-            return SyscallResult::err(e);
-        }
-    }
-
-    // Validate fd map pointer (if provided).
-    if fd_map_count > 256 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-    let fd_map_byte_len = fd_map_count.saturating_mul(core::mem::size_of::<FdMapEntry>());
-    if fd_map_count > 0 && fd_map_ptr != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(spawn_args.fd_map_ptr, fd_map_byte_len) {
-            return SyscallResult::err(e);
-        }
-    }
-
-    // Validate argv pointer (if provided).
-    if argv_len > 256 * 1024 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-    if argv_len > 0 && argv_ptr != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(spawn_args.argv_ptr, argv_len) {
-            return SyscallResult::err(e);
-        }
-    }
-
-    // Validate envp pointer (if provided).
-    if envp_len > 256 * 1024 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-    if envp_len > 0 && envp_ptr != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(spawn_args.envp_ptr, envp_len) {
-            return SyscallResult::err(e);
-        }
-    }
-
-    // SAFETY: Validated above — elf_ptr is in user space and mapped.
-    let elf_data = unsafe {
-        core::slice::from_raw_parts(elf_ptr as *const u8, elf_len)
+    // Everything `spawn_process` reads is bounced into the kernel first: it
+    // builds a fresh address space, so it allocates, takes locks and can
+    // reschedule with these buffers still in use.
+    let elf_data = match crate::mm::user::read_user_vec(spawn_args.elf_ptr, elf_len, usize::MAX) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
     };
 
-    // Read the name.
-    let name = if name_len > 0 && name_ptr != 0 {
-        // SAFETY: name_ptr/name_len validated by validate_user_read above.
-        let name_bytes = unsafe {
-            core::slice::from_raw_parts(name_ptr as *const u8, name_len)
-        };
-        core::str::from_utf8(name_bytes).unwrap_or("unnamed")
-    } else {
+    let name_bytes = match crate::mm::user::read_user_vec(spawn_args.name_ptr, name_len, NAME_MAX) {
+        Ok(b) => b,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let name = if name_bytes.is_empty() {
         "unnamed"
+    } else {
+        core::str::from_utf8(&name_bytes).unwrap_or("unnamed")
     };
 
-    // Read the fd map entries.
-    let fd_pairs: alloc::vec::Vec<(i32, u8, u64)> = if fd_map_count > 0 && fd_map_ptr != 0 {
-        // SAFETY: fd_map_ptr/fd_map_count validated by validate_user_read above.
-        let entries = unsafe {
-            core::slice::from_raw_parts(fd_map_ptr as *const FdMapEntry, fd_map_count)
+    let fd_entries =
+        match crate::mm::user::read_user_items::<FdMapEntry>(
+            spawn_args.fd_map_ptr,
+            fd_map_count,
+            FD_MAP_MAX,
+        ) {
+            Ok(e) => e,
+            Err(e) => return SyscallResult::err(e),
         };
-        entries.iter().map(|e| (e.fd, e.handle_type, e.handle)).collect()
+    let fd_pairs: alloc::vec::Vec<(i32, u8, u64)> = fd_entries
+        .iter()
+        .map(|e| (e.fd, e.handle_type, e.handle))
+        .collect();
+
+    let argv_data = match crate::mm::user::read_user_vec(spawn_args.argv_ptr, argv_len, ARGV_MAX) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let envp_data = match crate::mm::user::read_user_vec(spawn_args.envp_ptr, envp_len, ARGV_MAX) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    // Parse packed argv/envp strings (null-terminated, concatenated) out of the
+    // kernel copies, so the resulting slices borrow kernel memory.
+    let argv_slices: alloc::vec::Vec<&[u8]> = if argc > 0 {
+        parse_packed_strings(&argv_data, argc)
     } else {
         alloc::vec::Vec::new()
     };
-
-    // Parse packed argv strings (null-terminated, concatenated).
-    let argv_slices: alloc::vec::Vec<&[u8]> = if argc > 0 && argv_len > 0 && argv_ptr != 0 {
-        // SAFETY: argv_ptr/argv_len validated by validate_user_read above.
-        let data = unsafe {
-            core::slice::from_raw_parts(argv_ptr as *const u8, argv_len)
-        };
-        parse_packed_strings(data, argc)
-    } else {
-        alloc::vec::Vec::new()
-    };
-
-    // Parse packed envp strings.
-    let envp_slices: alloc::vec::Vec<&[u8]> = if envc > 0 && envp_len > 0 && envp_ptr != 0 {
-        // SAFETY: envp_ptr/envp_len validated by validate_user_read above.
-        let data = unsafe {
-            core::slice::from_raw_parts(envp_ptr as *const u8, envp_len)
-        };
-        parse_packed_strings(data, envc)
+    let envp_slices: alloc::vec::Vec<&[u8]> = if envc > 0 {
+        parse_packed_strings(&envp_data, envc)
     } else {
         alloc::vec::Vec::new()
     };
@@ -3360,7 +3333,7 @@ pub fn sys_process_spawn_ex(args: &SyscallArgs) -> SyscallResult {
         .argv(&argv_slices)
         .envp(&envp_slices);
 
-    match spawn_process(elf_data, &options) {
+    match spawn_process(&elf_data, &options) {
         Ok(result) => {
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(result.pid as i64)
@@ -3463,35 +3436,32 @@ pub fn sys_process_get_initial_fds(args: &SyscallArgs) -> SyscallResult {
     let count = fds.len().min(out_cap);
 
     if count > 0 && out_ptr != 0 {
-        let byte_len = count.saturating_mul(core::mem::size_of::<FdMapEntry>());
+        // Build the records in the kernel and copy them out in one go: the
+        // entries have already been taken from the PCB, so a partial write
+        // through a raw user pointer that then faults would lose them.
+        let records: alloc::vec::Vec<FdMapEntry> = fds
+            .iter()
+            .take(count)
+            .map(|&(fd, handle_type, handle)| FdMapEntry {
+                fd,
+                handle_type,
+                _pad: [0; 3],
+                handle,
+            })
+            .collect();
 
-        if let Err(e) = crate::mm::user::validate_user_write(args.arg0, byte_len) {
+        if let Err(e) = crate::mm::user::write_user_items(args.arg0, &records) {
             // Put the fds back — caller can retry with a valid buffer.
             put_back(pid, fds);
             return SyscallResult::err(e);
         }
 
-        // SAFETY: Validated above — out_ptr is writable user memory.
-        let out_slice = unsafe {
-            core::slice::from_raw_parts_mut(out_ptr as *mut FdMapEntry, count)
-        };
-
-        for (i, &(fd, handle_type, handle)) in fds.iter().take(count).enumerate() {
-            if let Some(entry) = out_slice.get_mut(i) {
-                *entry = FdMapEntry {
-                    fd,
-                    handle_type,
-                    _pad: [0; 3],
-                    handle,
-                };
-            }
-        }
-
         // If we couldn't deliver all entries (output buffer too small),
         // put the remaining ones back.
-        if count < fds.len() {
-            let remaining: alloc::vec::Vec<(i32, u8, u64)> = fds[count..].to_vec();
-            put_back(pid, remaining);
+        if let Some(rest) = fds.get(count..) {
+            if !rest.is_empty() {
+                put_back(pid, rest.to_vec());
+            }
         }
     }
 
@@ -3531,21 +3501,18 @@ pub fn sys_process_set_exec_fds(args: &SyscallArgs) -> SyscallResult {
     }
 
     // Bound the count so a bogus argument can't request an unbounded read.
-    // 256 mirrors the userspace fd-table capacity (posix `fdtable::MAX_FDS`).
-    let count = count.min(256);
-    let byte_len = count.saturating_mul(core::mem::size_of::<FdMapEntry>());
+    // `FD_MAP_MAX` mirrors the userspace fd-table capacity (posix
+    // `fdtable::MAX_FDS`).  An over-long table is rejected rather than
+    // truncated: silently recording only the first 256 entries would drop the
+    // caller's redirections without telling it.
+    let in_slice =
+        match crate::mm::user::read_user_items::<FdMapEntry>(args.arg0, count, FD_MAP_MAX) {
+            Ok(s) => s,
+            Err(e) => return SyscallResult::err(e),
+        };
 
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, byte_len) {
-        return SyscallResult::err(e);
-    }
-
-    // SAFETY: Validated above — in_ptr covers `count` readable FdMapEntry.
-    let in_slice = unsafe {
-        core::slice::from_raw_parts(in_ptr as *const FdMapEntry, count)
-    };
-
-    let mut fds = alloc::vec::Vec::with_capacity(count);
-    for entry in in_slice {
+    let mut fds = alloc::vec::Vec::with_capacity(in_slice.len());
+    for entry in &in_slice {
         // Skip nonsensical fd numbers; keep every valid, in-range entry.
         if entry.fd < 0 {
             continue;
@@ -6328,12 +6295,9 @@ pub fn sys_process_exec_with_frame(
     use crate::proc::spawn::exec_process;
     use crate::proc::thread;
 
-    let elf_ptr = frame.arg0 as usize;
     let elf_len = frame.arg1 as usize;
-    let argv_ptr = frame.arg2 as usize;
-    let argv_len = frame.arg3 as usize;
-    let envp_ptr = frame.arg4 as usize;
-    let envp_len = frame.arg5 as usize;
+    let argv_len = if frame.arg2 == 0 { 0 } else { frame.arg3 as usize };
+    let envp_len = if frame.arg4 == 0 { 0 } else { frame.arg5 as usize };
 
     // Validate arguments.
     if elf_len == 0 {
@@ -6350,63 +6314,22 @@ pub fn sys_process_exec_with_frame(
         }
     };
 
-    // Validate the ELF data pointer before reading.
-    if let Err(e) = crate::mm::user::validate_user_read(frame.arg0, elf_len) {
-        return e.code() as i64;
-    }
-
-    // Validate argv pointer (if provided).
-    const MAX_PACKED_BYTES: usize = 256 * 1024;
-    if argv_len > MAX_PACKED_BYTES {
-        return KernelError::InvalidArgument.code() as i64;
-    }
-    if argv_len > 0 && argv_ptr != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(frame.arg2, argv_len) {
-            return e.code() as i64;
-        }
-    }
-
-    // Validate envp pointer (if provided).
-    if envp_len > MAX_PACKED_BYTES {
-        return KernelError::InvalidArgument.code() as i64;
-    }
-    if envp_len > 0 && envp_ptr != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(frame.arg4, envp_len) {
-            return e.code() as i64;
-        }
-    }
-
-    // Read the ELF data from userspace.
-    //
-    // SAFETY: Validated above — elf_ptr is in user space and mapped.
-    // We copy into a kernel buffer before tearing down the address space.
-    let elf_data = unsafe {
-        core::slice::from_raw_parts(elf_ptr as *const u8, elf_len)
+    // Everything the new image needs must be in kernel memory BEFORE the old
+    // address space is torn down, which unmaps the sources.  `read_user_vec`
+    // also makes the allocation fallible: `Vec::from(slice)` would abort the
+    // kernel on OOM, and an ELF image is exactly the kind of large allocation
+    // that can fail.
+    let elf_copy = match crate::mm::user::read_user_vec(frame.arg0, elf_len, usize::MAX) {
+        Ok(d) => d,
+        Err(e) => return e.code() as i64,
     };
-
-    // We need to copy the ELF data into a kernel buffer BEFORE we
-    // tear down the user address space (which would unmap the source).
-    let elf_copy = alloc::vec::Vec::from(elf_data);
-
-    // Copy argv/envp into kernel buffers before address space teardown.
-    let argv_copy = if argv_len > 0 && argv_ptr != 0 {
-        // SAFETY: Validated above — argv_ptr is mapped user memory.
-        let data = unsafe {
-            core::slice::from_raw_parts(argv_ptr as *const u8, argv_len)
-        };
-        alloc::vec::Vec::from(data)
-    } else {
-        alloc::vec::Vec::new()
+    let argv_copy = match crate::mm::user::read_user_vec(frame.arg2, argv_len, ARGV_MAX) {
+        Ok(d) => d,
+        Err(e) => return e.code() as i64,
     };
-
-    let envp_copy = if envp_len > 0 && envp_ptr != 0 {
-        // SAFETY: Validated above — envp_ptr is mapped user memory.
-        let data = unsafe {
-            core::slice::from_raw_parts(envp_ptr as *const u8, envp_len)
-        };
-        alloc::vec::Vec::from(data)
-    } else {
-        alloc::vec::Vec::new()
+    let envp_copy = match crate::mm::user::read_user_vec(frame.arg4, envp_len, ARGV_MAX) {
+        Ok(d) => d,
+        Err(e) => return e.code() as i64,
     };
 
     // Parse the copied packed strings into slices.

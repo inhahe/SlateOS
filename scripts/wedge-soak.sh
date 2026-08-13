@@ -11,7 +11,12 @@
 # build/hang-catches/soak-<runstamp>-iterNN.{serial,regs}.txt so nothing is
 # clobbered by the next run.
 #
-# Kernel is assumed already built and current (soak uses --no-build).
+# Kernel is assumed already built AND already staged into build/esp: the soak
+# passes --no-stage, so it boots that one image for every iteration and a
+# `cargo build` in another terminal cannot swap the kernel mid-experiment.
+# (--no-build alone did not prevent that — staging ran unconditionally — which
+# silently contaminated a 250-boot run from iteration 3 onwards.)  Stage the
+# image you intend to soak by running boot-test.sh once without --no-stage.
 #
 # Soaking the compiler-instrumented (KASAN) kernel
 # ------------------------------------------------
@@ -73,7 +78,7 @@ for i in $(seq 1 "$MAX_ITERS"); do
     echo "########## soak iter $n/$MAX_ITERS ($(date +%H:%M:%S)) ##########"
     rm -f "$REGS"
     stdout_log="$OUTDIR/soak-$RUNSTAMP-iter$n.stdout.txt"
-    bash scripts/boot-test.sh --hard-lockup-watchdog --no-build \
+    bash scripts/boot-test.sh --hard-lockup-watchdog --no-stage \
         --timeout="$TIMEOUT" --stall-secs="$STALL_SECS" \
         > "$stdout_log" 2>&1
     rc=$?

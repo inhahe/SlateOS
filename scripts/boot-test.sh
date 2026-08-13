@@ -7,7 +7,11 @@
 #
 # Usage:
 #   ./scripts/boot-test.sh              # full build + test (waits for BOOT_OK)
-#   ./scripts/boot-test.sh --no-build   # skip build
+#   ./scripts/boot-test.sh --no-build   # skip build (still re-stages target/!)
+#   ./scripts/boot-test.sh --no-stage   # boot the existing ESP image verbatim;
+#                                       # use this for soaks so a concurrent
+#                                       # `cargo build` cannot swap the kernel
+#                                       # mid-run
 #   ./scripts/boot-test.sh --bench      # wait for BENCH_OK and print benchmark
 #                                       # numbers (the micro-benchmarks run in a
 #                                       # deferred background task AFTER BOOT_OK,
@@ -118,6 +122,7 @@ kill_qemu() {
 # override with --timeout= for slower hosts or the --bench wait marker.
 TIMEOUT=480
 NO_BUILD=0
+NO_STAGE=0
 BENCH=0
 # Serial-stall wedge detector (opt-in; 0 = disabled).  A genuinely wedged kernel
 # stops emitting serial output, whereas a merely-slow boot keeps printing as it
@@ -143,6 +148,13 @@ WAIT_MARKER="BOOT_OK"
 for arg in "$@"; do
     case "$arg" in
         --no-build) NO_BUILD=1 ;;
+        # --no-stage implies --no-build: boot exactly the image already in the
+        # ESP, touching neither the compiler nor build/esp.  This is what makes a
+        # long soak reproducible.  `--no-build` alone is NOT enough: staging runs
+        # unconditionally, so a `cargo build` in another terminal silently swaps
+        # the kernel under a running soak mid-experiment (this happened — see the
+        # note on B-KNULLJUMP-SIGNAL).
+        --no-stage) NO_BUILD=1; NO_STAGE=1 ;;
         --bench) BENCH=1; WAIT_MARKER="BENCH_OK" ;;
         --timeout=*) TIMEOUT="${arg#*=}" ;;
         --stall-secs=*) STALL_SECS="${arg#*=}" ;;
@@ -395,7 +407,7 @@ if [ "$NO_BUILD" -eq 0 ]; then
     echo "Build OK."
 fi
 
-if [ ! -f "$KERNEL_BIN" ]; then
+if [ "$NO_STAGE" -eq 0 ] && [ ! -f "$KERNEL_BIN" ]; then
     echo "ERROR: Kernel binary not found at $KERNEL_BIN" >&2
     exit 1
 fi
@@ -439,7 +451,18 @@ done
 # the image.
 STAGED_KERNEL="$ESP_DIR/boot/kernel"
 stage_ok=0
-if [ -n "$LLVM_STRIP" ]; then
+if [ "$NO_STAGE" -eq 1 ]; then
+    # Deliberately reuse the existing image (see --no-stage).  The freshness
+    # guard below is inverted here: staleness relative to target/ is the *point*,
+    # so we only check the image exists at all.
+    if [ ! -f "$STAGED_KERNEL" ]; then
+        echo "ERROR: --no-stage given but no staged kernel at $STAGED_KERNEL." >&2
+        echo "       Run once without --no-stage first to populate the ESP." >&2
+        exit 1
+    fi
+    echo "Reusing staged kernel (--no-stage): $(stat -c %y "$STAGED_KERNEL" 2>/dev/null || echo "$STAGED_KERNEL")"
+    stage_ok=1
+elif [ -n "$LLVM_STRIP" ]; then
     echo "Stripping kernel binary with $LLVM_STRIP..."
     if "$LLVM_STRIP" "$KERNEL_BIN" -o "$STAGED_KERNEL"; then
         stage_ok=1
@@ -447,7 +470,7 @@ if [ -n "$LLVM_STRIP" ]; then
         echo "WARNING: strip failed; falling back to an unstripped copy." >&2
     fi
 fi
-if [ "$stage_ok" -eq 0 ]; then
+if [ "$stage_ok" -eq 0 ] && [ "$NO_STAGE" -eq 0 ]; then
     if cp "$KERNEL_BIN" "$STAGED_KERNEL"; then
         stage_ok=1
     fi
@@ -459,8 +482,9 @@ if [ "$stage_ok" -eq 0 ]; then
     exit 1
 fi
 # Guard against a staged image that predates this build: it must be newer
-# than the freshly-built kernel binary we just compiled.
-if [ "$STAGED_KERNEL" -ot "$KERNEL_BIN" ]; then
+# than the freshly-built kernel binary we just compiled.  Skipped under
+# --no-stage, where an older image is exactly what was asked for.
+if [ "$NO_STAGE" -eq 0 ] && [ "$STAGED_KERNEL" -ot "$KERNEL_BIN" ]; then
     echo "ERROR: staged kernel is older than the build output — staging did" >&2
     echo "       not take effect (stale image).  Aborting to avoid a" >&2
     echo "       misleading boot test." >&2

@@ -570,6 +570,168 @@ pub fn write_user_value<T: Copy>(user_dst: u64, value: T) -> KernelResult<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Atomic access to a user word (futexes)
+// ---------------------------------------------------------------------------
+//
+// Everything else in this module copies user memory into or out of kernel
+// memory.  A futex word is the one thing that cannot be handled that way: the
+// primitive *is* the atomicity of the read-modify-write against a concurrent
+// userspace CAS, and copy-in / modify / copy-out is not atomic — it
+// reintroduces exactly the lost update the futex exists to prevent.
+//
+// So these operate in place, bracketed by STAC/CLAC.  That is legitimate here
+// and nowhere else in the kernel, for one reason: the window spans a *single
+// non-blocking atomic instruction*.  None of the objections that rule STAC out
+// for the handler paths apply — nothing inside can block, so AC cannot leak
+// into a task's saved RFLAGS across a reschedule, and the window is a couple
+// of cycles rather than unbounded.  Linux draws the same line
+// (`arch/x86/include/asm/futex.h`, each op wrapped in
+// `__uaccess_begin()`/`__uaccess_end()`).
+//
+// Callers must keep any retry loop *outside* these functions, one instruction
+// per call — see `user_atomic_cas_u32`.
+
+/// Validate `addr` as a 4-byte-aligned, writable user word and hand back a
+/// reference to it as an `AtomicU32`.
+///
+/// # Safety
+///
+/// The returned reference aliases *user* memory. It may only be used inside a
+/// STAC window, and it must not be held across anything that can block: a peer
+/// thread may `munmap` the page, and an open window across a reschedule leaves
+/// SMAP disabled for the task. Every caller in this module uses it for exactly
+/// one atomic operation and drops it.
+unsafe fn user_atomic_u32(addr: u64) -> KernelResult<&'static core::sync::atomic::AtomicU32> {
+    // Alignment is a hard requirement, not a courtesy: a `lock`-prefixed RMW
+    // that straddles a cache line is not guaranteed atomic on all
+    // microarchitectures, and on some it is a split-lock that stalls every
+    // core.  Rejecting here is also what makes the `AtomicU32` reference
+    // below well-formed.
+    if addr == 0 || addr & 3 != 0 {
+        return Err(KernelError::BadAlignment);
+    }
+    // Writable, not merely readable: even the load-only callers want to be
+    // sure the word is a real futex location the owning process could have
+    // written, and requiring write permission keeps one rule for all ops.
+    validate_user_write(addr, 4)?;
+    // SAFETY: `addr` is 4-byte aligned (checked above) and validated as a
+    // mapped, writable user address, so it is a valid place for a `u32`.
+    // `AtomicU32` has the same size and alignment as `u32` and no validity
+    // requirement beyond that, so every bit pattern at `addr` is a legal
+    // value.  The `'static` lifetime is a lie the caller is responsible for
+    // — hence this function's own safety contract.
+    Ok(unsafe { &*(addr as *const core::sync::atomic::AtomicU32) })
+}
+
+/// Atomically load a user futex word.
+///
+/// # Errors
+///
+/// - [`KernelError::BadAlignment`] if `addr` is null or not 4-byte aligned.
+/// - [`KernelError::InvalidAddress`] if the word is not a writable user
+///   address.
+pub fn user_atomic_load_u32(addr: u64) -> KernelResult<u32> {
+    // SAFETY: the reference is used for one non-blocking atomic load inside
+    // the STAC window and dropped, per `user_atomic_u32`'s contract.
+    unsafe {
+        let atomic = user_atomic_u32(addr)?;
+        crate::smep_smap::stac();
+        let v = atomic.load(core::sync::atomic::Ordering::Acquire);
+        crate::smep_smap::clac();
+        Ok(v)
+    }
+}
+
+/// Atomically store to a user futex word.
+///
+/// # Errors
+///
+/// As [`user_atomic_load_u32`].
+pub fn user_atomic_store_u32(addr: u64, value: u32) -> KernelResult<()> {
+    // SAFETY: one non-blocking atomic store inside the window; see above.
+    unsafe {
+        let atomic = user_atomic_u32(addr)?;
+        crate::smep_smap::stac();
+        atomic.store(value, core::sync::atomic::Ordering::Release);
+        crate::smep_smap::clac();
+    }
+    Ok(())
+}
+
+/// Atomically compare-and-exchange a user futex word.
+///
+/// Returns `Ok(Ok(current))` when the swap happened and `Ok(Err(actual))` when
+/// it did not — the inner `Result` is `AtomicU32::compare_exchange`'s, so a
+/// caller retries by looping on the *outside* of this call. Deliberately not a
+/// `compare_exchange_weak` loop internally: keeping one instruction per call
+/// is what bounds the STAC window.
+///
+/// # Errors
+///
+/// As [`user_atomic_load_u32`].
+pub fn user_atomic_cas_u32(
+    addr: u64,
+    current: u32,
+    new: u32,
+) -> KernelResult<Result<u32, u32>> {
+    // SAFETY: one non-blocking atomic RMW inside the window; see above.
+    unsafe {
+        let atomic = user_atomic_u32(addr)?;
+        crate::smep_smap::stac();
+        let r = atomic.compare_exchange(
+            current,
+            new,
+            core::sync::atomic::Ordering::AcqRel,
+            core::sync::atomic::Ordering::Acquire,
+        );
+        crate::smep_smap::clac();
+        Ok(r)
+    }
+}
+
+/// Which read-modify-write [`user_atomic_rmw_u32`] should perform.
+///
+/// Mirrors the `FUTEX_OP_*` selectors so the `FUTEX_WAKE_OP` dispatch can hand
+/// one of these straight through instead of open-coding five near-identical
+/// STAC windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserAtomicOp {
+    /// Unconditional store, returning the previous value (`FUTEX_OP_SET`).
+    Set,
+    /// Wrapping add (`FUTEX_OP_ADD`).
+    Add,
+    /// Bitwise OR (`FUTEX_OP_OR`).
+    Or,
+    /// Bitwise AND with the complement of the operand (`FUTEX_OP_ANDN`).
+    AndN,
+    /// Bitwise XOR (`FUTEX_OP_XOR`).
+    Xor,
+}
+
+/// Atomically read-modify-write a user futex word, returning the *old* value.
+///
+/// # Errors
+///
+/// As [`user_atomic_load_u32`].
+pub fn user_atomic_rmw_u32(addr: u64, op: UserAtomicOp, operand: u32) -> KernelResult<u32> {
+    use core::sync::atomic::Ordering;
+    // SAFETY: one non-blocking atomic RMW inside the window; see above.
+    unsafe {
+        let atomic = user_atomic_u32(addr)?;
+        crate::smep_smap::stac();
+        let old = match op {
+            UserAtomicOp::Set => atomic.swap(operand, Ordering::AcqRel),
+            UserAtomicOp::Add => atomic.fetch_add(operand, Ordering::AcqRel),
+            UserAtomicOp::Or => atomic.fetch_or(operand, Ordering::AcqRel),
+            UserAtomicOp::AndN => atomic.fetch_and(!operand, Ordering::AcqRel),
+            UserAtomicOp::Xor => atomic.fetch_xor(operand, Ordering::AcqRel),
+        };
+        crate::smep_smap::clac();
+        Ok(old)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Bounce buffers for syscall handlers
 // ---------------------------------------------------------------------------
 //

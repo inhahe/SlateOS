@@ -46,7 +46,7 @@
 
 use alloc::collections::{BTreeMap, VecDeque};
 use crate::error::{KernelError, KernelResult};
-use crate::mm::user::{read_user_value, validate_user_write};
+use crate::mm::user::read_user_value;
 use crate::sched::{self, task::TaskId};
 use crate::serial_println;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -339,13 +339,16 @@ pub fn futex_wait_bitset(addr: u64, expected: u32, bitset: u32) -> KernelResult<
     {
         let mut table = FUTEX_TABLE.lock();
 
-        // Atomically read the value at the address.
-        //
-        // SAFETY: Caller guarantees addr is valid and aligned.
-        // We read atomically (Acquire) to see any concurrent writes.
-        let actual = unsafe {
-            let ptr = addr as *const AtomicU32;
-            (*ptr).load(Ordering::Acquire)
+        // Atomically read the value at the address.  Through
+        // `mm::user::user_atomic_load_u32` rather than a cast: the word is a
+        // *user* address, so the load has to be bracketed by STAC/CLAC once
+        // SMAP is on, and the helper re-validates at the moment of the access
+        // instead of trusting a check the caller may have made before it
+        // blocked.  A single non-blocking instruction is the one thing a STAC
+        // window may legitimately span.
+        let actual = match crate::mm::user::user_atomic_load_u32(addr) {
+            Ok(v) => v,
+            Err(e) => return Err(e),
         };
 
         // If the value changed, don't block — the condition the caller
@@ -460,10 +463,10 @@ pub fn futex_wait_bitset_timeout(
     {
         let mut table = FUTEX_TABLE.lock();
 
-        // SAFETY: Caller guarantees addr is valid and aligned.
-        let actual = unsafe {
-            let ptr = addr as *const AtomicU32;
-            (*ptr).load(Ordering::Acquire)
+        // Through the bounce-equivalent for atomics: see `futex_wait_bitset`.
+        let actual = match crate::mm::user::user_atomic_load_u32(addr) {
+            Ok(v) => v,
+            Err(e) => return Err(e),
         };
 
         if actual != expected {
@@ -625,13 +628,15 @@ pub fn futex_wait_multiple(keys: &[WaitvKey], timeout_ns: Option<u64>) -> WaitvO
         {
             let mut table = FUTEX_TABLE.lock();
             for key in keys {
-                // SAFETY: the syscall layer validated each `uaddr` as a
-                // readable, 4-byte-aligned user pointer; we read atomically
-                // (Acquire) to observe concurrent writers, exactly as the
-                // single-key path does.
-                let actual = unsafe {
-                    let ptr = key.uaddr as *const AtomicU32;
-                    (*ptr).load(Ordering::Acquire)
+                // Through the bounce-equivalent for atomics: see
+                // `futex_wait_bitset`.  A key that has become unmapped since
+                // the syscall layer checked it reads as a mismatch rather
+                // than a fault — the caller cannot be parked on a word that
+                // no longer exists, and `Mismatch` is exactly the "re-check
+                // your condition" answer it already knows how to handle.
+                let Ok(actual) = crate::mm::user::user_atomic_load_u32(key.uaddr) else {
+                    super::stats::futex_spurious();
+                    return WaitvOutcome::Mismatch;
                 };
                 if actual != key.expected {
                     super::stats::futex_spurious();
@@ -909,12 +914,12 @@ fn requeue_inner(
         // dequeue.  Done before touching any queue so a mismatch leaves
         // the table untouched.
         if let Some(expected) = compare {
-            // SAFETY: the caller validated addr1 is a readable, aligned
-            // user pointer (4-byte futex word), mirroring the load in
-            // futex_wait_timeout which also reads under this lock.
-            let actual = unsafe {
-                let ptr = addr1 as *const AtomicU32;
-                (*ptr).load(Ordering::Acquire)
+            // Through the bounce-equivalent for atomics: see
+            // `futex_wait_bitset`.  Mirrors the load in
+            // `futex_wait_timeout`, which also reads under this lock.
+            let actual = match crate::mm::user::user_atomic_load_u32(addr1) {
+                Ok(v) => v,
+                Err(e) => return Err(e),
             };
             if actual != expected {
                 super::stats::futex_spurious();
@@ -1120,22 +1125,22 @@ pub fn futex_wake_op(
         return Err(KernelError::InvalidArgument);
     }
 
-    // Phase 1: atomic RMW on *addr2, capturing the old value.
+    // Phase 1: atomic RMW on *addr2, capturing the old value.  Through
+    // `mm::user::user_atomic_rmw_u32` rather than a cast — see
+    // `futex_wait_bitset` for why the word may not be dereferenced directly.
+    // The selector is translated here rather than passed through as a raw
+    // number so an out-of-range `op` cannot reach the RMW at all.
+    let user_op = match op {
+        0 => crate::mm::user::UserAtomicOp::Set,
+        1 => crate::mm::user::UserAtomicOp::Add,
+        2 => crate::mm::user::UserAtomicOp::Or,
+        3 => crate::mm::user::UserAtomicOp::AndN,
+        // op is bounded to <=4 above; 4 is XOR and the only remaining arm.
+        _ => crate::mm::user::UserAtomicOp::Xor,
+    };
     let oldval = {
         let _table = FUTEX_TABLE.lock();
-        // SAFETY: the caller validated addr2 as a writable, 4-byte-aligned
-        // user word (validate_user_write).  AtomicU32 has the same layout as
-        // a u32, and the RMW methods are the only access to this location
-        // here, so there is no torn read/write.
-        let atomic = unsafe { &*(addr2 as *const AtomicU32) };
-        match op {
-            0 => atomic.swap(oparg, Ordering::AcqRel),       // SET
-            1 => atomic.fetch_add(oparg, Ordering::AcqRel),  // ADD (wrapping)
-            2 => atomic.fetch_or(oparg, Ordering::AcqRel),   // OR
-            3 => atomic.fetch_and(!oparg, Ordering::AcqRel), // ANDN
-            // op is bounded to <=4 above; 4 is XOR and the only remaining arm.
-            _ => atomic.fetch_xor(oparg, Ordering::AcqRel),  // XOR
-        }
+        crate::mm::user::user_atomic_rmw_u32(addr2, user_op, oparg)?
     };
 
     // Compare the *old* value (interpreted as signed) against cmparg.
@@ -1424,40 +1429,82 @@ pub fn futex_lock_pi_timeout(addr: u64, timeout_ns: u64) -> KernelResult<()> {
     lock_pi_inner(addr, Some(timeout_ns))
 }
 
-/// Try to claim an *ownerless* PI futex word for `current_tid`.
+/// Decide what a claim attempt on an *ownerless* PI futex word should write,
+/// given the word we just read.
 ///
 /// A word is ownerless when its owner-TID bits are clear — either a fully
 /// zero word (normal uncontended lock) or a dead-owner word where
 /// `FUTEX_OWNER_DIED` is set but no successor TID was written (left by
-/// robust / PI exit cleanup with no waiter to inherit).  The CAS preserves
-/// the `FUTEX_OWNER_DIED` and `FUTEX_WAITERS` bits so userspace robust
+/// robust / PI exit cleanup with no waiter to inherit).
+///
+/// `None` means a live owner holds the lock and the word must not be touched.
+/// `Some(new)` is the value to CAS in: our TID, with the `FUTEX_OWNER_DIED`
+/// and `FUTEX_WAITERS` recovery bits carried over so userspace robust
 /// recovery (the `EOWNERDEAD` path) still sees the death.
 ///
-/// Returns `true` if the word was claimed; `false` if a live owner holds it.
+/// Pure, so the boot self-test can check the state machine without needing a
+/// user address space.
+fn ownerless_claim_value(word: u32, current_tid: u32) -> Option<u32> {
+    if word & FUTEX_TID_MASK != 0 {
+        return None; // a live owner holds it
+    }
+    Some(current_tid | (word & (FUTEX_OWNER_DIED_BIT | FUTEX_WAITERS_BIT)))
+}
+
+/// The CAS retry loop behind [`try_acquire_ownerless`], parameterised over how
+/// the word is reached.
 ///
-/// # Safety contract
+/// Generic rather than taking a `&AtomicU32` because the production path may
+/// not hold a reference to a user word at all — each access has to go through
+/// `mm::user`, which validates and brackets it for SMAP (see
+/// `D-FUTEX-ATOMICS-OPERATE-DIRECTLY-ON-USER-WORDS` in `known-issues.md`).
+/// Keeping the loop here rather than duplicating it means the self-test
+/// exercises the real retry logic, including the raced-CAS path, against a
+/// kernel word.
 ///
-/// `atomic` must reference a valid, aligned user/kernel `AtomicU32`.
-fn try_acquire_ownerless(atomic: &AtomicU32, current_tid: u32) -> bool {
+/// Note the retry is unbounded, as it is in Linux: a failed CAS means some
+/// other thread's CAS *succeeded*, so the system as a whole is making
+/// progress. A peer that hammers the word can starve this caller, but only by
+/// burning its own quantum.
+fn acquire_ownerless_with<L, C>(
+    current_tid: u32,
+    mut load: L,
+    mut cas: C,
+) -> KernelResult<bool>
+where
+    L: FnMut() -> KernelResult<u32>,
+    C: FnMut(u32, u32) -> KernelResult<Result<u32, u32>>,
+{
     loop {
-        let w = atomic.load(Ordering::Acquire);
-        if w & FUTEX_TID_MASK != 0 {
-            return false; // a live owner holds it
-        }
-        let preserved = w & (FUTEX_OWNER_DIED_BIT | FUTEX_WAITERS_BIT);
-        if atomic
-            .compare_exchange(
-                w,
-                current_tid | preserved,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
-        {
-            return true;
+        let w = load()?;
+        let Some(new) = ownerless_claim_value(w, current_tid) else {
+            return Ok(false);
+        };
+        if cas(w, new)?.is_ok() {
+            return Ok(true);
         }
         // Raced with another CAS on the word; loop re-reads and retries.
+        // Each iteration opens and closes its own STAC window, so the retry
+        // never runs with SMAP suppressed.
     }
+}
+
+/// Try to claim the ownerless PI futex word at user address `addr` for
+/// `current_tid`.
+///
+/// Returns `Ok(true)` if the word was claimed; `Ok(false)` if a live owner
+/// holds it.
+///
+/// # Errors
+///
+/// Propagates `mm::user`'s validation errors if `addr` stops being a writable,
+/// aligned user word.
+fn try_acquire_ownerless(addr: u64, current_tid: u32) -> KernelResult<bool> {
+    acquire_ownerless_with(
+        current_tid,
+        || crate::mm::user::user_atomic_load_u32(addr),
+        |old, new| crate::mm::user::user_atomic_cas_u32(addr, old, new),
+    )
 }
 
 /// Shared implementation of PI lock acquisition.
@@ -1488,14 +1535,17 @@ fn lock_pi_inner(addr: u64, timeout_ns: Option<u64>) -> KernelResult<()> {
     #[allow(clippy::cast_possible_truncation)]
     let current_tid = (current_id as u32) & FUTEX_TID_MASK;
 
-    // SAFETY: Caller guarantees addr is valid and aligned.
-    let atomic = unsafe { &*(addr as *const AtomicU32) };
+    // Every access to the futex word below goes through `mm::user`: it is a
+    // *user* address, so it may not be dereferenced directly (STAC/CLAC under
+    // SMAP), and — more importantly here — this function blocks, so a
+    // reference to it must not be held across the park. See
+    // `D-FUTEX-ATOMICS-OPERATE-DIRECTLY-ON-USER-WORDS` in `known-issues.md`.
 
     // Fast path: claim an ownerless word.  This covers the uncontended
     // case (word == 0) and the dead-owner case (FUTEX_OWNER_DIED set with
     // no TID) that robust/PI exit cleanup leaves behind, preserving the
     // OWNER_DIED bit so userspace robust recovery (EOWNERDEAD) still works.
-    if try_acquire_ownerless(atomic, current_tid) {
+    if try_acquire_ownerless(addr, current_tid)? {
         register_pi_owner(addr, addr_space, current_id);
         return Ok(());
     }
@@ -1506,7 +1556,7 @@ fn lock_pi_inner(addr: u64, timeout_ns: Option<u64>) -> KernelResult<()> {
     // appears to have become ownerless between our first attempt and this
     // read (race window on SMP; harmless retry on single-CPU).
     let owner_id = {
-        let word = atomic.load(Ordering::Acquire);
+        let word = crate::mm::user::user_atomic_load_u32(addr)?;
         let oid = u64::from(word & FUTEX_TID_MASK);
 
         if oid == current_id {
@@ -1514,11 +1564,11 @@ fn lock_pi_inner(addr: u64, timeout_ns: Option<u64>) -> KernelResult<()> {
         }
         if oid == 0 {
             // Lock became ownerless between attempts — retry the claim.
-            if try_acquire_ownerless(atomic, current_tid) {
+            if try_acquire_ownerless(addr, current_tid)? {
                 register_pi_owner(addr, addr_space, current_id);
                 return Ok(());
             }
-            let w2 = atomic.load(Ordering::Acquire);
+            let w2 = crate::mm::user::user_atomic_load_u32(addr)?;
             let o2 = u64::from(w2 & FUTEX_TID_MASK);
             if o2 == current_id {
                 return Err(KernelError::Deadlock);
@@ -1553,7 +1603,27 @@ fn lock_pi_inner(addr: u64, timeout_ns: Option<u64>) -> KernelResult<()> {
     }
 
     // Set the WAITERS bit so the unlocker knows to enter the kernel.
-    atomic.fetch_or(FUTEX_WAITERS_BIT, Ordering::Release);
+    //
+    // If the word has become inaccessible since the claim attempts above (a
+    // peer thread unmapped it), back the registration out rather than parking:
+    // without the WAITERS bit no unlocker will ever enter the kernel for this
+    // address, so the wait could never be satisfied.
+    if let Err(e) = crate::mm::user::user_atomic_rmw_u32(
+        addr,
+        crate::mm::user::UserAtomicOp::Or,
+        FUTEX_WAITERS_BIT,
+    ) {
+        let mut table = PI_FUTEX_TABLE.lock();
+        let idx = FutexTable::bucket_index(addr, addr_space);
+        // SAFETY: idx is masked to NUM_BUCKETS - 1.
+        #[allow(clippy::indexing_slicing)]
+        if let Some(pos) = table.waiters[idx].iter().position(|w| {
+            w.task_id == current_id && w.addr == addr && w.addr_space == addr_space
+        }) {
+            table.waiters[idx].remove(pos);
+        }
+        return Err(e);
+    }
 
     // Boost the lock holder's priority if ours is higher (lower number),
     // then propagate transitively through the PI chain.
@@ -1630,7 +1700,14 @@ fn lock_pi_inner(addr: u64, timeout_ns: Option<u64>) -> KernelResult<()> {
             .iter()
             .any(|w| w.addr == addr && w.addr_space == addr_space);
         if !more {
-            atomic.fetch_and(!FUTEX_WAITERS_BIT, Ordering::Release);
+            // Best-effort: this is cleanup on the timeout path, and the only
+            // way it can fail is the word having become unmapped — in which
+            // case there is no bit left to clear and nobody to mislead.
+            let _ = crate::mm::user::user_atomic_rmw_u32(
+                addr,
+                crate::mm::user::UserAtomicOp::AndN,
+                FUTEX_WAITERS_BIT,
+            );
         }
 
         // Deboost the real current owner: with us gone, its inherited
@@ -1694,20 +1771,15 @@ pub fn futex_trylock_pi(addr: u64) -> KernelResult<()> {
     #[allow(clippy::cast_possible_truncation)]
     let current_tid = (current_id as u32) & FUTEX_TID_MASK;
 
-    // SAFETY: Caller guarantees addr is valid and aligned.
-    let atomic = unsafe { &*(addr as *const AtomicU32) };
-
+    // Through `mm::user`: see the note in `lock_pi_inner`.
     // Fast path: CAS 0 → our tid (uncontended acquisition).
-    if atomic
-        .compare_exchange(0, current_tid, Ordering::AcqRel, Ordering::Acquire)
-        .is_ok()
-    {
+    if crate::mm::user::user_atomic_cas_u32(addr, 0, current_tid)?.is_ok() {
         register_pi_owner(addr, addr_space, current_id);
         return Ok(());
     }
 
     // Contended — distinguish self-deadlock from "held by another".
-    let word = atomic.load(Ordering::Acquire);
+    let word = crate::mm::user::user_atomic_load_u32(addr)?;
     let oid = u64::from(word & FUTEX_TID_MASK);
     if oid == current_id {
         return Err(KernelError::Deadlock);
@@ -1739,11 +1811,9 @@ pub fn futex_unlock_pi(addr: u64) -> KernelResult<()> {
     let current_id = sched::current_task_id();
     let addr_space = current_addr_space();
 
-    // SAFETY: Caller guarantees addr is valid and aligned.
-    let atomic = unsafe { &*(addr as *const AtomicU32) };
-
+    // Through `mm::user`: see the note in `lock_pi_inner`.
     // Verify we're the owner.
-    let word = atomic.load(Ordering::Acquire);
+    let word = crate::mm::user::user_atomic_load_u32(addr)?;
     let word_owner = u64::from(word & FUTEX_TID_MASK);
     if word_owner != current_id {
         return Err(KernelError::InvalidArgument);
@@ -1796,12 +1866,22 @@ pub fn futex_unlock_pi(addr: u64) -> KernelResult<()> {
     }
 
     // Transfer ownership or clear the futex word.
-    if let Some(new_owner_id) = waiter_to_wake {
+    //
+    // The store goes through `mm::user` (see the note in `lock_pi_inner`), so
+    // it can now fail — the range may have been unmapped while we held the
+    // table lock.  When it does, we still finish the kernel-side handoff:
+    // `waiter_to_wake` has *already* been removed from the wait queue under
+    // the lock, so abandoning it here would leave that thread parked forever
+    // on a lock nobody owns.  `lock_pi_inner` consults the kernel ownership
+    // record rather than the user word, so the handoff is coherent even if
+    // the user-visible word could not be updated; the error is reported to
+    // the unlocker, whose mapping is the one that went away.
+    let store_result = if let Some(new_owner_id) = waiter_to_wake {
         #[allow(clippy::cast_possible_truncation)]
         let new_tid = (new_owner_id as u32) & FUTEX_TID_MASK;
         let new_word = new_tid
             | if has_more_waiters { FUTEX_WAITERS_BIT } else { 0 };
-        atomic.store(new_word, Ordering::Release);
+        let r = crate::mm::user::user_atomic_store_u32(addr, new_word);
 
         // Register the new owner (same addr_space — they're in the same
         // address space since they were waiting on the same futex).
@@ -1809,15 +1889,16 @@ pub fn futex_unlock_pi(addr: u64) -> KernelResult<()> {
 
         // Wake the new owner.
         sched::wake(new_owner_id);
+        r
     } else {
         // No waiters — clear the word entirely.
-        atomic.store(0, Ordering::Release);
-    }
+        crate::mm::user::user_atomic_store_u32(addr, 0)
+    };
 
     // Restore our priority (clear or recalculate inherited).
     sched::set_inherited_priority(current_id, recalc_priority);
 
-    Ok(())
+    store_result
 }
 
 // ---------------------------------------------------------------------------
@@ -1925,19 +2006,16 @@ fn handle_futex_death(futex_addr: u64, dying_tid: u32, pi: bool, pending_op: boo
     if futex_addr == 0 || futex_addr & 3 != 0 {
         return;
     }
-    // The word must be a writable user address.  If it is not (page torn
-    // down already, or a hostile offset pointing outside the mapping),
-    // skip it — we cannot touch it, but the walk continues.
-    if validate_user_write(futex_addr, 4).is_err() {
-        return;
-    }
-
-    // SAFETY: validated as a writable, mapped, 4-byte-aligned user address
-    // just above; the dying thread's address space is still active.
-    let atomic = unsafe { &*(futex_addr as *const AtomicU32) };
-
+    // Each access goes through `mm::user`, which re-validates and opens a
+    // one-instruction STAC window per operation (see the note in
+    // `lock_pi_inner`).  The retry loop therefore runs entirely *outside*
+    // any user-access window.  A failure means the page went away (torn
+    // down already, or a hostile offset pointing outside the mapping); we
+    // cannot touch that word, but the walk continues.
     loop {
-        let uval = atomic.load(Ordering::Acquire);
+        let Ok(uval) = crate::mm::user::user_atomic_load_u32(futex_addr) else {
+            return;
+        };
         match robust_death_transition(uval, dying_tid, pi, pending_op) {
             RobustDeath::Leave => return,
             RobustDeath::WakeOnly => {
@@ -1945,10 +2023,10 @@ fn handle_futex_death(futex_addr: u64, dying_tid: u32, pi: bool, pending_op: boo
                 return;
             }
             RobustDeath::SetDied { new, wake } => {
-                if atomic
-                    .compare_exchange(uval, new, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-                {
+                let Ok(cas) = crate::mm::user::user_atomic_cas_u32(futex_addr, uval, new) else {
+                    return;
+                };
+                if cas.is_ok() {
                     if wake {
                         let _ = futex_wake(futex_addr, 1);
                     }
@@ -2131,25 +2209,23 @@ pub fn exit_pi_owned_futexes(dying_task: TaskId) {
 
         // Apply the userspace word + wake outside the table lock.
         // The word lives in the dying thread's (still-active) address space.
-        if validate_user_write(handoff.addr, 4).is_ok() {
-            // SAFETY: validated writable user address; AS still active.
-            let atomic = unsafe { &*(handoff.addr as *const AtomicU32) };
-            match handoff.new_owner {
-                Some(new_id) => {
-                    #[allow(clippy::cast_possible_truncation)]
-                    let new_tid = (new_id as u32) & FUTEX_TID_MASK;
-                    let word = new_tid
-                        | FUTEX_OWNER_DIED_BIT
-                        | if handoff.has_more { FUTEX_WAITERS_BIT } else { 0 };
-                    atomic.store(word, Ordering::Release);
-                }
-                None => {
-                    // No waiter: leave OWNER_DIED so the next userspace
-                    // acquirer of a robust mutex still detects the death.
-                    atomic.store(FUTEX_OWNER_DIED_BIT, Ordering::Release);
-                }
+        // The store goes through `mm::user`, which validates and opens a
+        // one-instruction window per access (see `lock_pi_inner`); a failure
+        // just means the mapping is already gone, which is unremarkable on a
+        // thread-exit path and is handled by the wake below.
+        let word = match handoff.new_owner {
+            Some(new_id) => {
+                #[allow(clippy::cast_possible_truncation)]
+                let new_tid = (new_id as u32) & FUTEX_TID_MASK;
+                new_tid
+                    | FUTEX_OWNER_DIED_BIT
+                    | if handoff.has_more { FUTEX_WAITERS_BIT } else { 0 }
             }
-        }
+            // No waiter: leave OWNER_DIED so the next userspace acquirer of
+            // a robust mutex still detects the death.
+            None => FUTEX_OWNER_DIED_BIT,
+        };
+        let _ = crate::mm::user::user_atomic_store_u32(handoff.addr, word);
 
         // Wake the new owner — even if the word store above failed, the
         // ownership record is registered, so the waiter returns Ok once it
@@ -2268,18 +2344,21 @@ pub fn futex_wait_requeue_pi(
     let our_priority =
         sched::get_effective_priority(current_id).unwrap_or(sched::task::IDLE_PRIORITY);
 
-    // SAFETY: caller validated cond_addr as a readable, aligned user word.
-    let cond = unsafe { &*(cond_addr as *const AtomicU32) };
-    // SAFETY: caller validated pi_addr as a writable, aligned user word.
-    let pi = unsafe { &*(pi_addr as *const AtomicU32) };
-
+    // Both user words are touched one operation at a time through
+    // `mm::user` (see the note in `lock_pi_inner`): this function *blocks*,
+    // so an `&AtomicU32` borrowed from user memory here would be held across
+    // a reschedule — both a stale-mapping use-after-free (a peer thread can
+    // `munmap` the range while we sleep) and, under SMAP, an access outside
+    // any STAC window.
+    //
     // Park on the condvar queue iff *cond_addr == val.  The value check and
     // the enqueue happen under the same PI table lock that
     // futex_cmp_requeue_pi takes, so a concurrent signaller cannot slip
-    // between the two.
+    // between the two.  (Validation only walks the page tables, so it is
+    // safe to call with the table lock held.)
     {
         let mut table = PI_FUTEX_TABLE.lock();
-        let actual = cond.load(Ordering::Acquire);
+        let actual = crate::mm::user::user_atomic_load_u32(cond_addr)?;
         if actual != val {
             super::stats::futex_spurious();
             return Err(KernelError::WouldBlock);
@@ -2377,7 +2456,16 @@ pub fn futex_wait_requeue_pi(
                 .iter()
                 .any(|w| w.addr == pi_addr && w.addr_space == addr_space);
             if !more {
-                pi.fetch_and(!FUTEX_WAITERS_BIT, Ordering::Release);
+                // Best-effort: we are unwinding a timed-out wait and have
+                // already dequeued ourselves, so a vanished mapping (the
+                // only way this fails) must not change the outcome — the
+                // stale WAITERS bit at worst causes one extra
+                // `FUTEX_UNLOCK_PI` syscall in a mapping nobody can reach.
+                let _ = crate::mm::user::user_atomic_rmw_u32(
+                    pi_addr,
+                    crate::mm::user::UserAtomicOp::AndN,
+                    FUTEX_WAITERS_BIT,
+                );
             }
             // Deboost the real owner now that our donation is gone.
             // SAFETY: pidx is masked to NUM_BUCKETS - 1.
@@ -2449,22 +2537,32 @@ pub fn futex_cmp_requeue_pi(
 
     let addr_space = current_addr_space();
 
-    // SAFETY: caller validated cond_addr as a readable, aligned user word.
-    let cond = unsafe { &*(cond_addr as *const AtomicU32) };
-    // SAFETY: caller validated pi_addr as a writable, aligned user word.
-    let pi = unsafe { &*(pi_addr as *const AtomicU32) };
-
+    // Both user words are touched one operation at a time through
+    // `mm::user` (see the note in `lock_pi_inner`), which validates the
+    // address and opens a one-instruction STAC window per access.  Nothing
+    // here blocks, so no user reference would outlive a reschedule — but a
+    // borrowed `&AtomicU32` would still be a supervisor access to a user
+    // page outside any window once SMAP is on.
+    //
     // Results collected under the table lock, applied after release.
     let mut owner_to_wake: Option<TaskId> = None;
     let mut woken: u32 = 0;
     let mut requeued: u32 = 0;
     let mut boost: Option<(TaskId, u8)> = None;
+    // First fault seen while updating the user word.  Reported to the
+    // caller *after* the kernel-side bookkeeping is applied: once a waiter
+    // has left the condvar queue it must land somewhere, or it would never
+    // be woken again.
+    let mut fault: Option<KernelError> = None;
 
     {
         let mut table = PI_FUTEX_TABLE.lock();
 
         // Compare *cond_addr == val under the lock (mismatch → EAGAIN).
-        let actual = cond.load(Ordering::Acquire);
+        // Nothing has been mutated yet, so a faulting read can propagate
+        // directly.  (Validation only walks the page tables, so it is safe
+        // to call with the table lock held.)
+        let actual = crate::mm::user::user_atomic_load_u32(cond_addr)?;
         if actual != val {
             super::stats::futex_spurious();
             return Err(KernelError::WouldBlock);
@@ -2480,6 +2578,17 @@ pub fn futex_cmp_requeue_pi(
         let mut best_requeue_prio: u8 = u8::MAX;
 
         while processed < budget {
+            // Re-read the owner each iteration (it changes after a grant).
+            // Read *before* dequeuing the next waiter so a faulting read
+            // cannot strand a waiter that has already left the queue.
+            let word = match crate::mm::user::user_atomic_load_u32(pi_addr) {
+                Ok(v) => v,
+                Err(e) => {
+                    fault = Some(e);
+                    break;
+                }
+            };
+
             let Some(w) =
                 take_best_requeue_waiter(&mut table, cidx, cond_addr, addr_space, pi_addr)
             else {
@@ -2487,15 +2596,19 @@ pub fn futex_cmp_requeue_pi(
             };
             processed = processed.saturating_add(1);
 
-            // Re-read the owner each iteration (it changes after a grant).
-            let word = pi.load(Ordering::Acquire);
             let owner_tid = word & FUTEX_TID_MASK;
 
             if owner_tid == 0 && owner_to_wake.is_none() {
                 // Mutex free: grant ownership to this (highest-prio) waiter.
                 #[allow(clippy::cast_possible_truncation)]
                 let new_tid = (w.task_id as u32) & FUTEX_TID_MASK;
-                pi.store(new_tid, Ordering::Release);
+                // The authoritative ownership record is the kernel table
+                // pushed just below — that is what `futex_wait_requeue_pi`
+                // consults — so a failed store costs only the userspace
+                // fast path, and the grant proceeds regardless.
+                if let Err(e) = crate::mm::user::user_atomic_store_u32(pi_addr, new_tid) {
+                    fault.get_or_insert(e);
+                }
                 // SAFETY: pidx is masked to NUM_BUCKETS - 1.
                 #[allow(clippy::indexing_slicing)]
                 table.owners[pidx].push_back(PiOwner {
@@ -2526,9 +2639,17 @@ pub fn futex_cmp_requeue_pi(
         // If we parked any PI waiters, set the WAITERS bit and arrange to
         // boost the current owner up to the best requeued priority.
         if requeued > 0 {
-            pi.fetch_or(FUTEX_WAITERS_BIT, Ordering::Release);
+            if let Err(e) = crate::mm::user::user_atomic_rmw_u32(
+                pi_addr,
+                crate::mm::user::UserAtomicOp::Or,
+                FUTEX_WAITERS_BIT,
+            ) {
+                fault.get_or_insert(e);
+            }
             let owner_id = owner_to_wake.or_else(|| {
-                let word = pi.load(Ordering::Acquire);
+                // A faulting re-read only means we cannot identify the
+                // owner to boost; the fault is already recorded above.
+                let word = crate::mm::user::user_atomic_load_u32(pi_addr).ok()?;
                 let t = word & FUTEX_TID_MASK;
                 if t == 0 { None } else { Some(u64::from(t)) }
             });
@@ -2550,6 +2671,12 @@ pub fn futex_cmp_requeue_pi(
     }
 
     super::stats::futex_wake(woken);
+    // Report the fault only now: every waiter that left the condvar queue
+    // has been accounted for above, so the kernel-side state is coherent
+    // whether we return Ok or Err.
+    if let Some(e) = fault {
+        return Err(e);
+    }
     Ok(woken.saturating_add(requeued))
 }
 
@@ -2889,42 +3016,55 @@ fn test_robust_transition() -> KernelResult<()> {
     Ok(())
 }
 
-/// Test: [`try_acquire_ownerless`] recovers dead-owner words while
+/// Test: the ownerless-claim retry loop recovers dead-owner words while
 /// preserving the recovery bits.
 ///
 /// Deterministic (no scheduling): drives a local `AtomicU32` through the
 /// states the robust/PI exit cleanup can leave behind, verifying that a
 /// live owner blocks the claim and that `FUTEX_OWNER_DIED` / `FUTEX_WAITERS`
 /// survive the CAS so userspace `EOWNERDEAD` recovery still works.
+///
+/// Drives [`acquire_ownerless_with`] — the same loop [`try_acquire_ownerless`]
+/// runs — but over a *kernel* word, because the production accessors reject
+/// anything that is not a valid user address.
 fn test_owner_died_relock() -> KernelResult<()> {
     let me: u32 = 0x0042;
 
+    /// Run the real retry loop against a kernel-local word.
+    fn claim(w: &AtomicU32, tid: u32) -> bool {
+        acquire_ownerless_with(
+            tid,
+            || Ok(w.load(Ordering::SeqCst)),
+            |old, new| Ok(w.compare_exchange(old, new, Ordering::SeqCst, Ordering::SeqCst)),
+        )
+        // The closures are infallible, so the loop cannot return Err.
+        .unwrap_or(false)
+    }
+
     // Free word → claimed, owner stamped.
     let w = AtomicU32::new(0);
-    if !try_acquire_ownerless(&w, me) || w.load(Ordering::SeqCst) != me {
+    if !claim(&w, me) || w.load(Ordering::SeqCst) != me {
         serial_println!("[futex]   FAIL: relock free word");
         return Err(KernelError::InternalError);
     }
 
     // Live owner → not claimed, word untouched.
     let w = AtomicU32::new(0x99);
-    if try_acquire_ownerless(&w, me) || w.load(Ordering::SeqCst) != 0x99 {
+    if claim(&w, me) || w.load(Ordering::SeqCst) != 0x99 {
         serial_println!("[futex]   FAIL: relock live owner");
         return Err(KernelError::InternalError);
     }
 
     // Dead owner (OWNER_DIED, no TID) → claimed, OWNER_DIED preserved.
     let w = AtomicU32::new(FUTEX_OWNER_DIED_BIT);
-    if !try_acquire_ownerless(&w, me)
-        || w.load(Ordering::SeqCst) != (me | FUTEX_OWNER_DIED_BIT)
-    {
+    if !claim(&w, me) || w.load(Ordering::SeqCst) != (me | FUTEX_OWNER_DIED_BIT) {
         serial_println!("[futex]   FAIL: relock OWNER_DIED");
         return Err(KernelError::InternalError);
     }
 
     // Dead owner with waiters → claimed, both recovery bits preserved.
     let w = AtomicU32::new(FUTEX_OWNER_DIED_BIT | FUTEX_WAITERS_BIT);
-    if !try_acquire_ownerless(&w, me)
+    if !claim(&w, me)
         || w.load(Ordering::SeqCst) != (me | FUTEX_OWNER_DIED_BIT | FUTEX_WAITERS_BIT)
     {
         serial_println!("[futex]   FAIL: relock OWNER_DIED|WAITERS");

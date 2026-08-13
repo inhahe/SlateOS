@@ -32,12 +32,12 @@
 //! branching like a VM does? options for what to include in the snapshot?"
 
 use alloc::collections::BTreeMap;
-use alloc::string::String;
 use alloc::vec::Vec;
 use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::cas::Hash256;
+use crate::fs::path::{Path, PathBuf};
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -122,7 +122,7 @@ struct FileHistory {
 
 struct HistoryInner {
     /// Map from file path to its version history.
-    files: BTreeMap<String, FileHistory>,
+    files: BTreeMap<PathBuf, FileHistory>,
     /// Total number of version entries.
     total_entries: usize,
     /// Configuration.
@@ -202,20 +202,25 @@ pub fn set_auto_version(enabled: bool) {
 ///
 /// Returns `false` for paths on virtual filesystems (procfs, devfs, sysfs),
 /// temporary files (/tmp), and internal metadata files.
-pub fn should_auto_version(path: &str) -> bool {
-    // Skip virtual filesystems — no real data to version.
-    if path.starts_with("/proc/")
-        || path.starts_with("/dev/")
-        || path.starts_with("/sys/")
-    {
-        return false;
+pub fn should_auto_version(path: impl AsRef<Path>) -> bool {
+    let path = path.as_ref();
+
+    // Skip virtual filesystems (no real data to version) and /tmp
+    // (ephemeral by nature).  `path_in_subtree` matches on component
+    // boundaries, so `/proctor` is not mistaken for something under
+    // `/proc` -- which the old byte-level `starts_with("/proc/")` also got
+    // right, but only because of the trailing slash it was careful to
+    // include.  Spelling it as a subtree test removes the need for that
+    // care and additionally covers the directory itself.
+    for virt in ["/proc", "/dev", "/sys", "/tmp"] {
+        if crate::fs::pathutil::path_in_subtree(path, virt) {
+            return false;
+        }
     }
-    // Skip temporary files — ephemeral by nature.
-    if path.starts_with("/tmp/") {
-        return false;
-    }
+
     // Skip internal metadata files.
-    if path.ends_with("/_TRASH/_INDEX") || path.ends_with("/_JOURNAL") {
+    let bytes = path.as_bytes();
+    if bytes.ends_with(b"/_TRASH/_INDEX") || bytes.ends_with(b"/_JOURNAL") {
         return false;
     }
     true
@@ -225,7 +230,8 @@ pub fn should_auto_version(path: &str) -> bool {
 ///
 /// Called by VFS write/remove paths.  Failures are silently ignored —
 /// version history is best-effort and must never prevent a write operation.
-pub fn try_auto_record(path: &str) {
+pub fn try_auto_record(path: impl AsRef<Path>) {
+    let path = path.as_ref();
     if !is_auto_version_enabled() {
         return;
     }
@@ -251,8 +257,10 @@ pub fn try_auto_record(path: &str) {
 /// Returns the CAS hash of the saved version.
 ///
 /// If history is disabled or the file doesn't exist, returns Ok(None).
-pub fn record_version(path: &str) -> KernelResult<Option<Hash256>> {
+pub fn record_version(path: impl AsRef<Path>) -> KernelResult<Option<Hash256>> {
     use crate::fs::Vfs;
+
+    let path = path.as_ref();
 
     // Check if enabled.
     let inner = HISTORY.lock();
@@ -282,7 +290,7 @@ pub fn record_version(path: &str) -> KernelResult<Option<Hash256>> {
     // Insert the version entry.
     // Scope the mutable borrow of inner.files so we can update counters after.
     {
-        let fh = inner.files.entry(path.into()).or_insert(FileHistory {
+        let fh = inner.files.entry(path.to_path_buf()).or_insert(FileHistory {
             versions: Vec::new(),
             next_version: 0,
         });
@@ -323,8 +331,8 @@ pub fn record_version(path: &str) -> KernelResult<Option<Hash256>> {
     // Global eviction if over total limit.
     while inner.total_entries > max_total {
         // Find the file with the oldest entry.
-        let oldest_path: Option<String> = {
-            let mut best_path: Option<String> = None;
+        let oldest_path: Option<PathBuf> = {
+            let mut best_path: Option<PathBuf> = None;
             let mut best_ts = u64::MAX;
             for (p, fh) in inner.files.iter() {
                 if let Some(first) = fh.versions.first() {
@@ -341,7 +349,7 @@ pub fn record_version(path: &str) -> KernelResult<Option<Hash256>> {
             let (evicted_one, should_remove) = {
                 let mut evicted = false;
                 let mut empty = false;
-                if let Some(fh) = inner.files.get_mut(op.as_str()) {
+                if let Some(fh) = inner.files.get_mut(op.as_path()) {
                     if !fh.versions.is_empty() {
                         if let Some(old) = fh.versions.first() {
                             evicted_hashes.push(old.hash);
@@ -359,7 +367,7 @@ pub fn record_version(path: &str) -> KernelResult<Option<Hash256>> {
                 inner.evicted_versions = inner.evicted_versions.saturating_add(1);
             }
             if should_remove {
-                inner.files.remove(op.as_str());
+                inner.files.remove(op.as_path());
             }
         } else {
             break;
@@ -380,10 +388,10 @@ pub fn record_version(path: &str) -> KernelResult<Option<Hash256>> {
 ///
 /// Returns the list of versions, newest last.
 /// Returns an empty list if the file has no history.
-pub fn get_history(path: &str) -> Vec<VersionEntry> {
+pub fn get_history(path: impl AsRef<Path>) -> Vec<VersionEntry> {
     let inner = HISTORY.lock();
     inner.files
-        .get(path)
+        .get(path.as_ref())
         .map(|fh| fh.versions.clone())
         .unwrap_or_default()
 }
@@ -392,10 +400,10 @@ pub fn get_history(path: &str) -> Vec<VersionEntry> {
 ///
 /// Returns the CAS hash and metadata, or None if no history exists.
 #[allow(dead_code)]
-pub fn latest_version(path: &str) -> Option<VersionEntry> {
+pub fn latest_version(path: impl AsRef<Path>) -> Option<VersionEntry> {
     let inner = HISTORY.lock();
     inner.files
-        .get(path)
+        .get(path.as_ref())
         .and_then(|fh| fh.versions.last().cloned())
 }
 
@@ -411,8 +419,10 @@ pub fn get_version_data(hash: &Hash256) -> KernelResult<Vec<u8>> {
 /// Writes the version's content back to the file.  Before restoring,
 /// records the current content as a new version (so the restore itself
 /// is undoable).
-pub fn restore_version(path: &str, version_hash: &Hash256) -> KernelResult<()> {
+pub fn restore_version(path: impl AsRef<Path>, version_hash: &Hash256) -> KernelResult<()> {
     use crate::fs::Vfs;
+
+    let path = path.as_ref();
 
     // First, record the current version (if it exists) so restore is undoable.
     record_version(path)?;
@@ -433,9 +443,9 @@ pub fn restore_version(path: &str, version_hash: &Hash256) -> KernelResult<()> {
 /// Clear all history for a specific file.
 ///
 /// Releases all CAS references for that file's versions.
-pub fn clear_file(path: &str) {
+pub fn clear_file(path: impl AsRef<Path>) {
     let mut inner = HISTORY.lock();
-    if let Some(fh) = inner.files.remove(path) {
+    if let Some(fh) = inner.files.remove(path.as_ref()) {
         for v in &fh.versions {
             crate::fs::cas::release(&v.hash).ok();
         }
@@ -483,13 +493,15 @@ pub fn stats() -> HistoryStats {
 /// List all tracked file paths.
 ///
 /// Returns up to `max` paths, optionally filtered by prefix.
-pub fn list_tracked(prefix: Option<&str>, max: usize) -> Vec<(String, usize)> {
+pub fn list_tracked(prefix: Option<&Path>, max: usize) -> Vec<(PathBuf, usize)> {
     let inner = HISTORY.lock();
     let mut results = Vec::new();
 
     for (path, fh) in inner.files.iter() {
         if let Some(pfx) = prefix {
-            if !path.starts_with(pfx) {
+            // Subtree filter, not a byte prefix: listing history under
+            // `/home` must not also list `/homework`.
+            if !crate::fs::pathutil::path_in_subtree(path, pfx) {
                 continue;
             }
         }

@@ -38,11 +38,11 @@
 #![allow(dead_code)]
 
 use alloc::collections::BTreeMap;
-use alloc::string::String;
 use alloc::vec::Vec;
 use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -53,13 +53,18 @@ use crate::serial_println;
 #[derive(Debug, Clone)]
 pub struct IndexEntry {
     /// Full absolute path (e.g. "/docs/readme.txt").
-    pub path: String,
+    pub path: PathBuf,
     /// Filename only (e.g. "readme.txt").
-    pub name: String,
-    /// Lowercased filename for case-insensitive search.
-    pub name_lower: String,
-    /// File extension (lowercased, without dot), empty if none.
-    pub extension: String,
+    pub name: PathBuf,
+    /// ASCII-lowercased filename for case-insensitive search.
+    ///
+    /// Bytes, not a `String`: a filename is whatever bytes the filesystem
+    /// stored, and only the ASCII range can be case-folded without knowing
+    /// an encoding.  Non-ASCII bytes pass through untouched, so two names
+    /// differing outside ASCII stay distinct.
+    pub name_lower: Vec<u8>,
+    /// File extension (ASCII-lowercased, without dot), empty if none.
+    pub extension: Vec<u8>,
     /// File, Directory, or Symlink.
     pub entry_type: super::vfs::EntryType,
     /// File size in bytes.
@@ -72,12 +77,12 @@ pub struct IndexEntry {
 #[derive(Debug, Clone)]
 pub struct IndexConfig {
     /// Directories to index (e.g. `["/"]`).
-    pub watch_dirs: Vec<String>,
-    /// Allowed file extensions (lowercased, without dot).
+    pub watch_dirs: Vec<PathBuf>,
+    /// Allowed file extensions (ASCII-lowercased, without dot).
     /// Empty means "index all files".
-    pub extensions: Vec<String>,
+    pub extensions: Vec<Vec<u8>>,
     /// Directories to skip during walk (e.g. `["/_JOURNAL"]`).
-    pub exclude_dirs: Vec<String>,
+    pub exclude_dirs: Vec<PathBuf>,
     /// Maximum number of entries before stopping the walk.
     pub max_entries: usize,
     /// Whether to index directories (not just files).
@@ -111,7 +116,7 @@ pub struct IndexStats {
 struct IndexInner {
     entries: Vec<IndexEntry>,
     /// Secondary index: lowercase extension -> indices into `entries`.
-    by_extension: BTreeMap<String, Vec<usize>>,
+    by_extension: BTreeMap<Vec<u8>, Vec<usize>>,
     config: IndexConfig,
     stats: IndexStats,
 }
@@ -148,13 +153,13 @@ static INDEX: Mutex<IndexInner> = Mutex::new(IndexInner {
 /// don't represent real files on disk).
 pub fn default_config() -> IndexConfig {
     IndexConfig {
-        watch_dirs: alloc::vec![String::from("/")],
+        watch_dirs: alloc::vec![PathBuf::from("/")],
         extensions: Vec::new(), // all extensions
         exclude_dirs: alloc::vec![
-            String::from("/_JOURNAL"),
-            String::from("/proc"),
-            String::from("/sys"),
-            String::from("/dev"),
+            PathBuf::from("/_JOURNAL"),
+            PathBuf::from("/proc"),
+            PathBuf::from("/sys"),
+            PathBuf::from("/dev"),
         ],
         max_entries: 16384,
         include_dirs: false,
@@ -208,7 +213,7 @@ pub fn rebuild() -> KernelResult<()> {
     }
 
     // Build the extension index.
-    let mut by_ext: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    let mut by_ext: BTreeMap<Vec<u8>, Vec<usize>> = BTreeMap::new();
     for (i, entry) in collected.iter().enumerate() {
         if !entry.extension.is_empty() {
             by_ext
@@ -243,7 +248,7 @@ const MAX_DEPTH: u32 = 64;
 
 /// Recursively walk a directory, collecting entries.
 fn walk_directory(
-    path: &str,
+    path: &Path,
     config: &IndexConfig,
     collected: &mut Vec<IndexEntry>,
     truncated: &mut bool,
@@ -257,7 +262,7 @@ fn walk_directory(
     // predicate tolerates a trailing slash on the exclude entry). See
     // fs::pathutil.
     for excl in &config.exclude_dirs {
-        if crate::fs::pathutil::path_in_subtree(path, excl.as_str()) {
+        if crate::fs::pathutil::path_in_subtree(path, excl) {
             return;
         }
     }
@@ -273,11 +278,10 @@ fn walk_directory(
             return;
         }
 
-        let full_path = if path == "/" {
-            alloc::format!("/{}", entry.name)
-        } else {
-            alloc::format!("{}/{}", path, entry.name)
-        };
+        // `PathBuf::push` inserts the separator only when one is needed, so
+        // the root case needs no special handling.
+        let mut full_path = path.to_path_buf();
+        full_path.push(&entry.name);
 
         match entry.entry_type {
             super::vfs::EntryType::Directory => {
@@ -298,7 +302,7 @@ fn walk_directory(
 
                 // Apply extension filter.
                 if !config.extensions.is_empty()
-                    && !config.extensions.iter().any(|e| e == &ext)
+                    && !config.extensions.iter().any(|e| e.as_slice() == ext.as_slice())
                 {
                     continue;
                 }
@@ -321,8 +325,8 @@ fn walk_directory(
 /// Tries to read file metadata for the modification timestamp; if
 /// the metadata call fails, falls back to 0.
 fn make_index_entry(
-    full_path: &str,
-    name: &str,
+    full_path: &Path,
+    name: &Path,
     entry_type: super::vfs::EntryType,
     size: u64,
 ) -> IndexEntry {
@@ -330,12 +334,12 @@ fn make_index_entry(
         .map(|m| m.modified_ns)
         .unwrap_or(0);
 
-    let name_lower = to_ascii_lower(name);
+    let name_lower = to_ascii_lower(name.as_bytes());
     let extension = extract_extension(name);
 
     IndexEntry {
-        path: String::from(full_path),
-        name: String::from(name),
+        path: full_path.to_path_buf(),
+        name: name.to_path_buf(),
         name_lower,
         extension,
         entry_type,
@@ -351,7 +355,9 @@ fn make_index_entry(
 /// Add a single file to the index.
 ///
 /// If the file is already indexed (same path), it is updated in place.
-pub fn add_entry(path: &str) -> KernelResult<()> {
+pub fn add_entry(path: impl AsRef<Path>) -> KernelResult<()> {
+    let path = path.as_ref();
+
     // Stat the file without holding the lock.
     let dir_entry = super::Vfs::stat(path)?;
     let meta_modified = super::Vfs::metadata(path)
@@ -359,11 +365,11 @@ pub fn add_entry(path: &str) -> KernelResult<()> {
         .unwrap_or(0);
 
     let name = path_filename(path);
-    let name_lower = to_ascii_lower(&name);
+    let name_lower = to_ascii_lower(name.as_bytes());
     let extension = extract_extension(&name);
 
     let entry = IndexEntry {
-        path: String::from(path),
+        path: path.to_path_buf(),
         name,
         name_lower,
         extension: extension.clone(),
@@ -375,7 +381,7 @@ pub fn add_entry(path: &str) -> KernelResult<()> {
     let mut idx = INDEX.lock();
 
     // Check for existing entry with same path → update.
-    if let Some(pos) = idx.entries.iter().position(|e| e.path == path) {
+    if let Some(pos) = idx.entries.iter().position(|e| e.path.as_path() == path) {
         let old_ext = idx.entries.get(pos).map(|e| e.extension.clone()).unwrap_or_default();
         // Remove from old extension index.
         if !old_ext.is_empty() {
@@ -416,7 +422,8 @@ pub fn add_entry(path: &str) -> KernelResult<()> {
 /// Remove all entries whose path starts with `prefix`.
 ///
 /// Returns the number of entries removed.
-pub fn remove_entry(prefix: &str) -> usize {
+pub fn remove_entry(prefix: impl AsRef<Path>) -> usize {
+    let prefix = prefix.as_ref();
     let mut idx = INDEX.lock();
     let before = idx.entries.len();
 
@@ -425,7 +432,7 @@ pub fn remove_entry(prefix: &str) -> usize {
         .entries
         .iter()
         .enumerate()
-        .filter(|(_, e)| crate::fs::pathutil::path_in_subtree(e.path.as_str(), prefix))
+        .filter(|(_, e)| crate::fs::pathutil::path_in_subtree(&e.path, prefix))
         .map(|(i, _)| i)
         .collect();
 
@@ -473,30 +480,30 @@ fn rebuild_ext_index(idx: &mut IndexInner) {
 /// Search by case-insensitive substring in the filename (`locate`-style).
 ///
 /// Returns cloned results (the lock is released before returning).
-pub fn search_name(query: &str) -> Vec<IndexEntry> {
-    let query_lower = to_ascii_lower(query);
+pub fn search_name(query: impl AsRef<[u8]>) -> Vec<IndexEntry> {
+    let query_lower = to_ascii_lower(query.as_ref());
     let idx = INDEX.lock();
     idx.entries
         .iter()
-        .filter(|e| e.name_lower.contains(query_lower.as_str()))
+        .filter(|e| contains_bytes(&e.name_lower, &query_lower))
         .cloned()
         .collect()
 }
 
 /// Search by case-insensitive substring in the full path.
-pub fn search_path(query: &str) -> Vec<IndexEntry> {
-    let query_lower = to_ascii_lower(query);
+pub fn search_path(query: impl AsRef<[u8]>) -> Vec<IndexEntry> {
+    let query_lower = to_ascii_lower(query.as_ref());
     let idx = INDEX.lock();
     idx.entries
         .iter()
-        .filter(|e| to_ascii_lower(&e.path).contains(query_lower.as_str()))
+        .filter(|e| contains_bytes(&to_ascii_lower(e.path.as_bytes()), &query_lower))
         .cloned()
         .collect()
 }
 
 /// Search by file extension (case-insensitive, without dot).
-pub fn search_ext(ext: &str) -> Vec<IndexEntry> {
-    let ext_lower = to_ascii_lower(ext);
+pub fn search_ext(ext: impl AsRef<[u8]>) -> Vec<IndexEntry> {
+    let ext_lower = to_ascii_lower(ext.as_ref());
     let idx = INDEX.lock();
     if let Some(indices) = idx.by_extension.get(&ext_lower) {
         indices
@@ -530,8 +537,8 @@ pub fn search_type(entry_type: super::vfs::EntryType) -> Vec<IndexEntry> {
 
 /// Combined search: name substring AND optional extension AND optional size range.
 pub fn search(
-    name_query: Option<&str>,
-    ext_filter: Option<&str>,
+    name_query: Option<&[u8]>,
+    ext_filter: Option<&[u8]>,
     min_size: Option<u64>,
     max_size: Option<u64>,
 ) -> Vec<IndexEntry> {
@@ -543,7 +550,7 @@ pub fn search(
         .iter()
         .filter(|e| {
             if let Some(ref q) = name_lower {
-                if !e.name_lower.contains(q.as_str()) {
+                if !contains_bytes(&e.name_lower, q) {
                     return false;
                 }
             }
@@ -597,51 +604,52 @@ pub fn clear() {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Extract the file extension (lowercased, without dot) from a filename.
+/// Extract the file extension (ASCII-lowercased, without the dot) from a
+/// filename, as bytes.
 ///
-/// Returns empty string if there's no extension or the name starts with
+/// Returns an empty vector if there's no extension or the name starts with
 /// a dot and has no other dots (e.g. `.bashrc` → "bashrc" is the full
 /// name, not an extension).
-fn extract_extension(name: &str) -> String {
-    if let Some(dot_pos) = name.rfind('.') {
-        if dot_pos == 0 {
-            // Dotfile like ".bashrc" — the part after the dot is the name,
-            // not a meaningful extension.  However, ".tar.gz" should return "gz".
-            // Simple heuristic: if there's only one dot at position 0, no ext.
-            return String::new();
-        }
-        let ext = &name[dot_pos.saturating_add(1)..];
-        if ext.is_empty() {
-            return String::new();
-        }
-        to_ascii_lower(ext)
-    } else {
-        String::new()
-    }
+fn extract_extension(name: &Path) -> Vec<u8> {
+    // `Path::extension` already encodes the dotfile rule (a leading `.` that
+    // is the only dot is part of the name, not an extension) and the
+    // trailing-dot rule (nothing after the dot is not an extension), so the
+    // hand-rolled rfind logic that used to live here is gone.
+    name.extension()
+        .map_or_else(Vec::new, |e| to_ascii_lower(e.as_bytes()))
 }
 
 /// Extract the filename component from an absolute path.
-fn path_filename(path: &str) -> String {
-    if let Some(slash_pos) = path.rfind('/') {
-        String::from(&path[slash_pos.saturating_add(1)..])
-    } else {
-        String::from(path)
-    }
+///
+/// Returns the whole path when it has no components (`/` or empty), which
+/// preserves the previous behaviour for those degenerate inputs.
+fn path_filename(path: &Path) -> PathBuf {
+    path.file_name().unwrap_or(path).to_path_buf()
 }
 
-/// ASCII-only lowercase conversion (no_std friendly).
-fn to_ascii_lower(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        if c.is_ascii_uppercase() {
-            // SAFETY: ASCII uppercase letters are single-byte and
-            // their lowercase equivalents are also valid UTF-8.
-            out.push((c as u8 | 0x20) as char);
-        } else {
-            out.push(c);
-        }
+/// ASCII-only lowercase conversion over bytes.
+///
+/// Only the ASCII range is folded.  Case folding any other byte would
+/// require knowing an encoding, and a filename has none — it is bytes.
+/// Leaving them untouched keeps two names that differ only outside ASCII
+/// distinct, which is the property a `from_utf8_lossy`-based fold destroys.
+fn to_ascii_lower(s: &[u8]) -> Vec<u8> {
+    s.iter().map(u8::to_ascii_lowercase).collect()
+}
+
+/// Whether `haystack` contains `needle` as a contiguous byte subsequence.
+///
+/// `[u8]` has no `contains` for subslices (only for single elements), so
+/// this is the byte analogue of `str::contains`.  An empty needle matches
+/// everything, matching `str::contains("")`.
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
     }
-    out
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 // ---------------------------------------------------------------------------
@@ -662,7 +670,7 @@ fn is_live() -> bool {
 /// Check if a path is within a configured watch directory.
 ///
 /// Returns false if the path is in an excluded directory.
-fn is_watched(path: &str) -> bool {
+fn is_watched(path: &Path) -> bool {
     let idx = INDEX.lock();
     if idx.config.watch_dirs.is_empty() {
         return false;
@@ -671,14 +679,14 @@ fn is_watched(path: &str) -> bool {
     // Check exclusions first.  The canonical subtree predicate avoids
     // /sys matching /system and tolerates a trailing slash. See fs::pathutil.
     for excl in &idx.config.exclude_dirs {
-        if crate::fs::pathutil::path_in_subtree(path, excl.as_str()) {
+        if crate::fs::pathutil::path_in_subtree(path, excl) {
             return false;
         }
     }
 
     // Check if within any watch dir.
     for dir in &idx.config.watch_dirs {
-        if crate::fs::pathutil::path_in_subtree(path, dir.as_str()) {
+        if crate::fs::pathutil::path_in_subtree(path, dir) {
             return true;
         }
     }
@@ -689,7 +697,8 @@ fn is_watched(path: &str) -> bool {
 ///
 /// Adds or updates the file in the index.  No-op if the indexer hasn't
 /// been initialized or rebuilt, or if the path is outside watch dirs.
-pub fn on_file_changed(path: &str) {
+pub fn on_file_changed(path: impl AsRef<Path>) {
+    let path = path.as_ref();
     if !is_live() || !is_watched(path) {
         return;
     }
@@ -701,7 +710,8 @@ pub fn on_file_changed(path: &str) {
 /// Called by VFS when a file or directory is deleted.
 ///
 /// Removes the entry (and children for directories) from the index.
-pub fn on_file_deleted(path: &str) {
+pub fn on_file_deleted(path: impl AsRef<Path>) {
+    let path = path.as_ref();
     if !is_live() || !is_watched(path) {
         return;
     }
@@ -711,7 +721,8 @@ pub fn on_file_deleted(path: &str) {
 /// Called by VFS when a file or directory is renamed.
 ///
 /// Removes the old path and adds the new path.
-pub fn on_file_renamed(old_path: &str, new_path: &str) {
+pub fn on_file_renamed(old_path: impl AsRef<Path>, new_path: impl AsRef<Path>) {
+    let (old_path, new_path) = (old_path.as_ref(), new_path.as_ref());
     if !is_live() {
         return;
     }
@@ -739,31 +750,37 @@ pub fn self_test() -> KernelResult<()> {
 
     // --- Test 1: extension extraction (pure logic, no FS needed) ---
     {
-        if extract_extension("file.txt") != "txt" {
+        if extract_extension(Path::new("file.txt")).as_slice() != b"txt" {
             serial_println!("[index]   ERROR: ext('file.txt') != 'txt'");
             return Err(KernelError::InternalError);
         }
-        if extract_extension("archive.tar.gz") != "gz" {
+        if extract_extension(Path::new("archive.tar.gz")).as_slice() != b"gz" {
             serial_println!("[index]   ERROR: ext('archive.tar.gz') != 'gz'");
             return Err(KernelError::InternalError);
         }
-        if !extract_extension("Makefile").is_empty() {
+        if !extract_extension(Path::new("Makefile")).is_empty() {
             serial_println!("[index]   ERROR: ext('Makefile') should be empty");
             return Err(KernelError::InternalError);
         }
-        if !extract_extension(".bashrc").is_empty() {
+        if !extract_extension(Path::new(".bashrc")).is_empty() {
             serial_println!("[index]   ERROR: ext('.bashrc') should be empty");
             return Err(KernelError::InternalError);
         }
-        if extract_extension("PHOTO.JPG") != "jpg" {
+        if extract_extension(Path::new("PHOTO.JPG")).as_slice() != b"jpg" {
             serial_println!("[index]   ERROR: ext('PHOTO.JPG') != 'jpg'");
             return Err(KernelError::InternalError);
         }
-        if !extract_extension("file.").is_empty() {
+        if !extract_extension(Path::new("file.")).is_empty() {
             serial_println!("[index]   ERROR: ext('file.') should be empty");
             return Err(KernelError::InternalError);
         }
-        if path_filename("/docs/readme.txt") != "readme.txt" {
+        // A non-UTF-8 extension must survive intact: the indexer stores
+        // extensions as bytes precisely so `\xff` is not replaced or dropped.
+        if extract_extension(Path::new(b"photo.j\xffg".as_slice())).as_slice() != b"j\xffg" {
+            serial_println!("[index]   ERROR: non-UTF-8 extension mangled");
+            return Err(KernelError::InternalError);
+        }
+        if path_filename(Path::new("/docs/readme.txt")).as_path() != Path::new("readme.txt") {
             serial_println!("[index]   ERROR: filename('/docs/readme.txt') wrong");
             return Err(KernelError::InternalError);
         }
@@ -796,18 +813,22 @@ pub fn self_test() -> KernelResult<()> {
         clear();
         {
             let mut idx = INDEX.lock();
-            let entries = [
-                ("hello.txt", "/docs/hello.txt", 100u64),
-                ("README.md", "/README.md", 2048),
-                ("photo.JPG", "/pics/photo.JPG", 500_000),
-                ("_CaseTest.RS", "/src/_CaseTest.RS", 42),
-                ("data.bin", "/tmp/data.bin", 1024),
+            let entries: [(&[u8], &[u8], u64); 6] = [
+                (b"hello.txt", b"/docs/hello.txt", 100u64),
+                (b"README.md", b"/README.md", 2048),
+                (b"photo.JPG", b"/pics/photo.JPG", 500_000),
+                (b"_CaseTest.RS", b"/src/_CaseTest.RS", 42),
+                (b"data.bin", b"/tmp/data.bin", 1024),
+                // Non-UTF-8 name and extension: must be storable, searchable
+                // and removable by its exact bytes.
+                (b"re\xffport.l\xfeg", b"/logs/re\xffport.l\xfeg", 77),
             ];
             for (name, path, size) in &entries {
+                let name = Path::new(*name);
                 let e = IndexEntry {
-                    path: String::from(*path),
-                    name: String::from(*name),
-                    name_lower: to_ascii_lower(name),
+                    path: Path::new(*path).to_path_buf(),
+                    name: name.to_path_buf(),
+                    name_lower: to_ascii_lower(name.as_bytes()),
                     extension: extract_extension(name),
                     entry_type: super::vfs::EntryType::File,
                     size: *size,
@@ -829,7 +850,8 @@ pub fn self_test() -> KernelResult<()> {
 
         // search_name (case-insensitive)
         let r1 = search_name("hello");
-        if r1.len() != 1 || r1.first().map(|e| e.path.as_str()) != Some("/docs/hello.txt") {
+        if r1.len() != 1 || r1.first().map(|e| e.path.as_path()) != Some(Path::new("/docs/hello.txt"))
+        {
             serial_println!("[index]   ERROR: search_name('hello') failed");
             return Err(KernelError::InternalError);
         }
@@ -864,8 +886,9 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         // combined search
-        let r7 = search(Some("data"), None, Some(512), Some(2048));
-        if r7.len() != 1 || r7.first().map(|e| e.path.as_str()) != Some("/tmp/data.bin") {
+        let r7 = search(Some(b"data"), None, Some(512), Some(2048));
+        if r7.len() != 1 || r7.first().map(|e| e.path.as_path()) != Some(Path::new("/tmp/data.bin"))
+        {
             serial_println!("[index]   ERROR: combined search failed");
             return Err(KernelError::InternalError);
         }
@@ -877,10 +900,37 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
 
+        // Non-UTF-8 entry: searchable by name bytes and by extension bytes.
+        // A lossy decode would fold `\xff`/`\xfe` to U+FFFD and both of these
+        // would then match the wrong thing (or nothing).
+        let r9 = search_name(b"re\xffport".as_slice());
+        if r9.len() != 1
+            || r9.first().map(|e| e.path.as_path()) != Some(Path::new(b"/logs/re\xffport.l\xfeg".as_slice()))
+        {
+            serial_println!("[index]   ERROR: non-UTF-8 name search failed");
+            return Err(KernelError::InternalError);
+        }
+        if search_ext(b"l\xfeg".as_slice()).len() != 1 {
+            serial_println!("[index]   ERROR: non-UTF-8 extension search failed");
+            return Err(KernelError::InternalError);
+        }
+        // A name differing only in that one byte must NOT match.
+        if !search_name(b"re\xfeport".as_slice()).is_empty() {
+            serial_println!("[index]   ERROR: non-UTF-8 name search matched wrong byte");
+            return Err(KernelError::InternalError);
+        }
+
         // remove_entry
         let removed = remove_entry("/docs/hello.txt");
         if removed != 1 {
             serial_println!("[index]   ERROR: remove_entry expected 1, got {}", removed);
+            return Err(KernelError::InternalError);
+        }
+        // Removing by exact bytes must find the non-UTF-8 entry — this is the
+        // "you can delete a file you can name" property the whole byte-path
+        // conversion exists for.
+        if remove_entry(Path::new(b"/logs/re\xffport.l\xfeg".as_slice())) != 1 {
+            serial_println!("[index]   ERROR: remove_entry on non-UTF-8 path failed");
             return Err(KernelError::InternalError);
         }
         if count() != 4 {
@@ -940,7 +990,7 @@ pub fn self_test() -> KernelResult<()> {
         if super::Vfs::write_file(test_path, test_data).is_ok() {
             add_entry(test_path)?;
             let results = search_name("_idx_test");
-            let found = results.iter().any(|e| e.path == test_path);
+            let found = results.iter().any(|e| e.path.as_path() == Path::new(test_path));
             if !found {
                 serial_println!("[index]   ERROR: VFS add_entry + search failed");
                 let _ = super::Vfs::remove(test_path);

@@ -4188,7 +4188,7 @@ fn mount_matches(mount_path: &Path, path: &Path) -> bool {
 fn cache_identity(
     fs: &mut Box<dyn FileSystem>,
     fs_id: u64,
-    relative: &str,
+    relative: &Path,
 ) -> Option<(u64, u64)> {
     if !crate::mm::page_cache::is_populated() {
         return None;
@@ -4294,7 +4294,7 @@ fn check_writable(path: &Path) -> KernelResult<()> {
 /// This is called *before* the VFS lock is taken.  When no quotas are
 /// configured the function returns immediately (fast path in the quota
 /// module).
-fn enforce_quota_write(path: &str, bytes: u64) -> KernelResult<()> {
+fn enforce_quota_write(path: &Path, bytes: u64) -> KernelResult<()> {
     // uid/gid 0 until per-process identity tracking is available.
     match super::quota::check_write(0, 0, bytes) {
         super::quota::QuotaCheckResult::Allowed => Ok(()),
@@ -4324,7 +4324,7 @@ fn enforce_quota_write(path: &str, bytes: u64) -> KernelResult<()> {
 ///
 /// Checks whether creating a new file or directory would exceed the
 /// configured inode limit for the current user.
-fn enforce_quota_create(path: &str) -> KernelResult<()> {
+fn enforce_quota_create(path: &Path) -> KernelResult<()> {
     match super::quota::check_create(0, 0) {
         super::quota::QuotaCheckResult::Allowed => Ok(()),
         super::quota::QuotaCheckResult::SoftWarning => {
@@ -4360,7 +4360,7 @@ fn enforce_quota_create(path: &str) -> KernelResult<()> {
 ///
 /// This function is called from VFS operations (read, write, stat, open,
 /// etc.) to enforce file-level capability requirements.
-fn check_file_tags(path: &str) -> KernelResult<()> {
+fn check_file_tags(path: &Path) -> KernelResult<()> {
     // Skip check if there are no tagged paths at all (fast path for
     // the common case of no file tags configured).
     if crate::cap::file_tags::count() == 0 {

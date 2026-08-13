@@ -4774,6 +4774,7 @@ mod tests {
             tm_wday: 6,
             tm_yday: 0,
             tm_isdst: 0,
+            ..crate::time::Tm::ZERO
         };
         let fmt: [WcharT; 3] = [b'%' as WcharT, b'Y' as WcharT, 0];
         let ret = unsafe { wcsftime(core::ptr::null_mut(), 64, fmt.as_ptr(), &tm) };
@@ -4792,6 +4793,7 @@ mod tests {
             tm_wday: 6,
             tm_yday: 0,
             tm_isdst: 0,
+            ..crate::time::Tm::ZERO
         };
         let mut buf: [WcharT; 64] = [0; 64];
         let ret = unsafe { wcsftime(buf.as_mut_ptr(), 64, core::ptr::null(), &tm) };
@@ -4818,6 +4820,7 @@ mod tests {
             tm_wday: 6,
             tm_yday: 0,
             tm_isdst: 0,
+            ..crate::time::Tm::ZERO
         };
         let fmt: [WcharT; 3] = [b'%' as WcharT, b'Y' as WcharT, 0];
         let mut buf: [WcharT; 64] = [0; 64];
@@ -4838,6 +4841,7 @@ mod tests {
             tm_wday: 6,
             tm_yday: 0,
             tm_isdst: 0,
+            ..crate::time::Tm::ZERO
         };
         let fmt: [WcharT; 3] = [b'%' as WcharT, b'Y' as WcharT, 0];
         let mut buf: [WcharT; 64] = [0; 64];
@@ -4863,6 +4867,7 @@ mod tests {
             tm_wday: 6,
             tm_yday: 0,
             tm_isdst: 0,
+            ..crate::time::Tm::ZERO
         };
         let fmt: [WcharT; 3] = [b'h' as WcharT, b'i' as WcharT, 0];
         let mut buf: [WcharT; 64] = [0; 64];

@@ -154,17 +154,7 @@ impl PerThread {
     pub const ZERO: Self = Self {
         errno: 0,
         h_errno: 0,
-        tm: crate::time::Tm {
-            tm_sec: 0,
-            tm_min: 0,
-            tm_hour: 0,
-            tm_mday: 0,
-            tm_mon: 0,
-            tm_year: 0,
-            tm_wday: 0,
-            tm_yday: 0,
-            tm_isdst: 0,
-        },
+        tm: crate::time::Tm::ZERO,
         asctime: [0; 32],
         inet_ntoa: [0; 16],
         hostent: crate::socket::HostentBuf::ZERO,

@@ -8,8 +8,16 @@
 //!
 //! ## Timezone
 //!
-//! Our OS doesn't have timezone support.  All conversions assume UTC.
-//! `localtime` and `gmtime` produce identical results.
+//! `localtime`, `localtime_r`, `mktime`, `ctime` and `strftime`'s `%z`/`%Z`
+//! honour the `TZ` environment variable through [`crate::tz`], which
+//! implements the full POSIX `TZ`-string grammar including DST rules.  A
+//! zoneinfo *name* (`America/New_York`) needs the tzdata database, which
+//! SlateOS does not ship yet, so it falls back to UTC — the same thing glibc
+//! does when it cannot find the file.  `TZ` unset also means UTC until the OS
+//! grows a system zone setting.
+//!
+//! `gmtime`/`gmtime_r`/`timegm` are the zone-independent forms and always
+//! render UTC.
 //!
 //! ## POSIX Timers
 //!
@@ -699,43 +707,72 @@ pub extern "C" fn difftime(time1: TimeT, time0: TimeT) -> f64 {
 
 /// Sync wrapper for `*const u8` in static arrays.
 ///
-/// Our pointers are to static string literals — safe to share.
+/// The pointers are into [`crate::tz`]'s process-lifetime name storage — safe
+/// to share, and stable until the next `tzset` rewrites the bytes in place.
 #[repr(transparent)]
 pub struct TzPtr(*const u8);
 
-// SAFETY: Points to static c-string literals with program lifetime.
+// SAFETY: Points into `tz`'s static name buffers, which have program lifetime
+// and are never reallocated.
 unsafe impl Sync for TzPtr {}
 
-/// Timezone name strings: [standard, daylight].
+/// Timezone name strings: `[standard, daylight]`.
 ///
-/// POSIX requires `tzname` to be a `char *[2]`.  Since we have no
-/// timezone support, both are "UTC".  `repr(transparent)` on `TzPtr`
-/// ensures the layout matches `[*const u8; 2]` for C interop.
+/// POSIX requires `tzname` to be a `char *[2]`, refreshed by `tzset`.
+/// `repr(transparent)` on `TzPtr` ensures the layout matches
+/// `[*const u8; 2]` for C interop.
+///
+/// This is `static mut` because `tzset` must be able to repoint it when `TZ`
+/// changes — a zone that never updates its own name is exactly the bug this
+/// module used to have.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub static tzname: [TzPtr; 2] = [
-    TzPtr(c"UTC".as_ptr().cast::<u8>()),
-    TzPtr(c"UTC".as_ptr().cast::<u8>()),
-];
+pub static mut tzname: [TzPtr; 2] =
+    [TzPtr(core::ptr::null()), TzPtr(core::ptr::null())];
 
-/// Seconds west of UTC.
+/// Seconds **west** of UTC for standard time.
 ///
-/// POSIX/BSD variable.  Always 0 since we are always UTC.
+/// POSIX/BSD variable, and note the sign: it is the negation of `tm_gmtoff`,
+/// so New York's `timezone` is `18000` while its `tm_gmtoff` is `-18000`.
+/// POSIX defines it in terms of *standard* time, so it does not move when DST
+/// is in effect.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub static timezone: i64 = 0;
+pub static mut timezone: i64 = 0;
 
-/// Whether daylight saving is ever in effect.
+/// Whether daylight saving is ever in effect in the current zone.
 ///
-/// Always 0 — our OS has no DST support.
+/// Note "ever", not "now": POSIX defines this as a property of the zone, so it
+/// is 1 all year round for a zone with DST rules.  Use `tm_isdst` to ask about
+/// a particular instant.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub static daylight: i32 = 0;
+pub static mut daylight: i32 = 0;
 
-/// Initialize timezone information from the TZ environment variable.
+/// Initialize timezone information from the `TZ` environment variable.
 ///
-/// Since our OS doesn't support timezones, this is a no-op.  Programs
-/// call this early in main() per POSIX convention.
+/// Re-reads `TZ`, installs the resulting zone as the process's current one,
+/// and refreshes `tzname`, `timezone` and `daylight` from it.  POSIX specifies
+/// this as not thread-safe, and it is not: it writes those three globals.
+///
+/// The conversion functions call this implicitly on first use, so a program
+/// that never calls `tzset` still gets its zone — matching every real libc.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tzset() {
-    // No-op: we are always UTC.
+    crate::tz::set_from_env();
+    publish_tz_globals();
+}
+
+/// Refresh the three POSIX zone globals from [`crate::tz`]'s current zone.
+fn publish_tz_globals() {
+    let tz = crate::tz::current();
+    // SAFETY: these are the C-visible zone globals, which POSIX specifies as
+    // unsynchronised and modifiable by `tzset`.  Each write is a single
+    // pointer- or word-sized store to a process-lifetime static.
+    unsafe {
+        (*core::ptr::addr_of_mut!(tzname)) =
+            [TzPtr(crate::tz::name_ptr(0)), TzPtr(crate::tz::name_ptr(1))];
+        // POSIX's sign is west-positive; ours is east-positive.
+        (*core::ptr::addr_of_mut!(timezone)) = i64::from(tz.std_gmtoff).saturating_neg();
+        (*core::ptr::addr_of_mut!(daylight)) = i32::from(tz.has_dst());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -762,8 +799,43 @@ pub struct Tm {
     pub tm_wday: i32,
     /// Day of year [0, 365].
     pub tm_yday: i32,
-    /// Daylight saving flag (0 = not in effect).
+    /// Daylight saving flag (0 = not in effect, negative = unknown).
     pub tm_isdst: i32,
+    /// Seconds **east** of Greenwich for this time (`tm_gmtoff`).
+    ///
+    /// A BSD/GNU extension that musl and glibc both carry, so C code compiled
+    /// against their headers allocates a `struct tm` with this field present.
+    /// Before it existed here our `Tm` was two fields short of the layout
+    /// every caller was passing us, which left `tm.tm_gmtoff` reading whatever
+    /// happened to be on the caller's stack.
+    pub tm_gmtoff: i64,
+    /// Zone abbreviation for this time (`tm_zone`), NUL-terminated, or null.
+    ///
+    /// Points into the process's current-zone storage, so it stays valid until
+    /// the next `tzset`. `strftime`'s `%Z` reads it.
+    pub tm_zone: *const u8,
+}
+
+impl Tm {
+    /// An all-zero `Tm`, for callers that fill it in immediately.
+    ///
+    /// Must stay bit-identical to all-zero: [`crate::perthread`] carves its
+    /// block out of fresh anonymous memory and never explicitly initialises
+    /// it, so any non-zero default here would be a lie about what a new
+    /// thread actually sees.
+    pub const ZERO: Self = Self {
+        tm_sec: 0,
+        tm_min: 0,
+        tm_hour: 0,
+        tm_mday: 0,
+        tm_mon: 0,
+        tm_year: 0,
+        tm_wday: 0,
+        tm_yday: 0,
+        tm_isdst: 0,
+        tm_gmtoff: 0,
+        tm_zone: core::ptr::null(),
+    };
 }
 
 /// Convert time_t to broken-down UTC time.
@@ -787,40 +859,88 @@ pub extern "C" fn gmtime(timep: *const TimeT) -> *mut Tm {
     tm
 }
 
-/// Convert time_t to broken-down local time.
+/// Convert time_t to broken-down **local** time, honouring `TZ`.
 ///
-/// We don't have timezone support, so this returns UTC.
+/// Behaves as if `tzset` had been called, per POSIX.  Returns a pointer to
+/// per-thread storage that this thread's next `gmtime`/`localtime`/`ctime`
+/// overwrites; `localtime_r` is the reentrant form.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn localtime(timep: *const TimeT) -> *mut Tm {
-    // No timezone — UTC is local time.
-    gmtime(timep)
+    if timep.is_null() {
+        return core::ptr::null_mut();
+    }
+    let secs = unsafe { *timep };
+    // SAFETY: `perthread::current()` is non-null and valid for this thread,
+    // and no other thread holds a pointer into this block.
+    let tm = unsafe { &raw mut (*crate::perthread::current()).tm };
+    // SAFETY: as above — `tm` points at this thread's own `Tm`.
+    secs_to_local_tm(secs, unsafe { &mut *tm });
+    tm
 }
 
-/// Convert broken-down time to time_t.
+/// Fill `tm` with the broken-down local time for UTC instant `secs`.
 ///
-/// Normalizes the Tm fields and returns seconds since epoch.
+/// Shared by `localtime` and `localtime_r` so the two cannot drift apart.
+fn secs_to_local_tm(secs: TimeT, tm: &mut Tm) {
+    publish_tz_globals();
+    let info = crate::tz::current().lookup(secs);
+    // Rendering local time is just rendering a shifted instant; the offset is
+    // then recorded so `%z`/`%Z` and `mktime` can recover the zone.
+    secs_to_tm(secs.saturating_add(i64::from(info.gmtoff)), tm);
+    tm.tm_isdst = i32::from(info.is_dst);
+    tm.tm_gmtoff = i64::from(info.gmtoff);
+    tm.tm_zone = crate::tz::name_ptr(usize::from(info.is_dst));
+}
+
+/// Convert broken-down **local** time to time_t, honouring `TZ`.
+///
+/// Normalizes the `Tm` fields in place, resolves the zone offset for the
+/// resulting wall-clock time (respecting `tm_isdst`: negative means "work it
+/// out", zero forces standard time, positive forces daylight time), and
+/// writes back `tm_isdst`, `tm_gmtoff` and `tm_zone` to describe the answer.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mktime(tm: *mut Tm) -> TimeT {
     if tm.is_null() {
         return -1;
     }
     let t = unsafe { &mut *tm };
-    tm_to_secs(t)
+    publish_tz_globals();
+    // Normalise first, reading the fields *as if* UTC; the result is the local
+    // wall clock expressed as an instant, which is what `local_to_utc` wants.
+    let isdst_hint = t.tm_isdst;
+    let local = tm_to_secs(t);
+    let (utc, _) = crate::tz::current().local_to_utc(local, isdst_hint);
+    // Re-render from the resolved instant so the normalised fields describe
+    // the same wall clock the caller asked for even when the offset moved
+    // (the DST-transition cases), and so `tm_wday`/`tm_yday` stay consistent.
+    secs_to_local_tm(utc, t);
+    utc
 }
 
-/// Convert broken-down UTC time to seconds since epoch.
+/// Convert broken-down **UTC** time to seconds since epoch.
 ///
-/// Like `mktime` but always interprets the Tm as UTC (no timezone
-/// adjustment).  Since our OS is always UTC, this is identical to
-/// `mktime`.
+/// The zone-independent counterpart to `mktime`: the `Tm` is read as UTC
+/// whatever `TZ` says.  (It used to be an alias for `mktime`, which was
+/// harmless only while `mktime` itself was UTC-only.)
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn timegm(tm: *mut Tm) -> TimeT {
-    mktime(tm)
+    if tm.is_null() {
+        return -1;
+    }
+    let t = unsafe { &mut *tm };
+    let secs = tm_to_secs(t);
+    t.tm_isdst = 0;
+    t.tm_gmtoff = 0;
+    t.tm_zone = UTC_NAME.as_ptr().cast::<u8>();
+    secs
 }
+
+/// The zone name UTC renderings report, independent of `TZ`.
+static UTC_NAME: &core::ffi::CStr = c"UTC";
 
 /// Convert broken-down local time to seconds since epoch.
 ///
-/// BSD/GNU extension.  Equivalent to `mktime` — our OS is always UTC.
+/// BSD/GNU extension; a synonym for `mktime`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn timelocal(tm: *mut Tm) -> TimeT {
     mktime(tm)
@@ -882,16 +1002,20 @@ pub unsafe extern "C" fn gmtime_r(timep: *const TimeT, result: *mut Tm) -> *mut 
     result
 }
 
-/// Convert time_t to broken-down local time (reentrant).
-///
-/// Since we have no timezone support, this is identical to `gmtime_r`.
+/// Convert time_t to broken-down local time (reentrant), honouring `TZ`.
 ///
 /// # Safety
 ///
 /// Both pointers must be valid and non-null.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn localtime_r(timep: *const TimeT, result: *mut Tm) -> *mut Tm {
-    unsafe { gmtime_r(timep, result) }
+    if timep.is_null() || result.is_null() {
+        return core::ptr::null_mut();
+    }
+    let secs = unsafe { *timep };
+    let tm = unsafe { &mut *result };
+    secs_to_local_tm(secs, tm);
+    result
 }
 
 /// Convert broken-down time to string (reentrant).
@@ -944,18 +1068,11 @@ pub unsafe extern "C" fn ctime_r(timep: *const TimeT, buf: *mut u8) -> *mut u8 {
     if timep.is_null() || buf.is_null() {
         return core::ptr::null_mut();
     }
-    let mut result = Tm {
-        tm_sec: 0,
-        tm_min: 0,
-        tm_hour: 0,
-        tm_mday: 0,
-        tm_mon: 0,
-        tm_year: 0,
-        tm_wday: 0,
-        tm_yday: 0,
-        tm_isdst: 0,
-    };
-    if unsafe { gmtime_r(timep, &raw mut result) }.is_null() {
+    let mut result = Tm::ZERO;
+    // `ctime` is defined as `asctime(localtime(t))`, so the reentrant form
+    // must use `localtime_r` too — it used `gmtime_r`, which was invisible
+    // only while the two were the same function.
+    if unsafe { localtime_r(timep, &raw mut result) }.is_null() {
         return core::ptr::null_mut();
     }
     unsafe { asctime_r(&raw const result, buf) }
@@ -1187,12 +1304,31 @@ pub unsafe extern "C" fn strftime(
 
             // --- Timezone ---
             b'z' => {
-                // UTC offset: always +0000 (we have no timezone support).
-                pos = write_str(buf, limit, pos, b"+0000");
+                // `±hhmm` from the `tm`'s own offset, so a `tm` produced by
+                // `gmtime` still renders `+0000` while one from `localtime`
+                // renders its zone. Reading the current zone here instead
+                // would misreport any `tm` the caller built by hand.
+                let off = t.tm_gmtoff;
+                let (sign, mag) = if off < 0 { (b'-', off.unsigned_abs()) } else { (b'+', off.unsigned_abs()) };
+                pos = write_char(buf, limit, pos, sign);
+                // `tm_gmtoff` is bounded by the ±24 h a TZ offset can express,
+                // so these casts cannot truncate.
+                pos = write_dec2(buf, limit, pos, (mag / 3600) as i32);
+                pos = write_dec2(buf, limit, pos, ((mag % 3600) / 60) as i32);
             }
             b'Z' => {
-                // Timezone name: always UTC.
-                pos = write_str(buf, limit, pos, b"UTC");
+                // The abbreviation the `tm` carries; a hand-built `tm` with a
+                // null `tm_zone` renders nothing, as glibc does.
+                if !t.tm_zone.is_null() {
+                    // SAFETY: `tm_zone` is either null (checked) or a pointer
+                    // into `tz`'s NUL-terminated process-lifetime name
+                    // storage, so `strlen` terminates within it.
+                    let len = unsafe { crate::string::strlen(t.tm_zone) };
+                    for i in 0..len {
+                        // SAFETY: `i < len`, the string's own length.
+                        pos = write_char(buf, limit, pos, unsafe { *t.tm_zone.add(i) });
+                    }
+                }
             }
 
             // --- ISO 8601 week date (%G, %g, %V) ---
@@ -1398,7 +1534,13 @@ fn secs_to_tm(secs: TimeT, tm: &mut Tm) {
 
     tm.tm_mon = mon;
     tm.tm_mday = remaining_days + 1;
+    // This renders a UTC instant, so the zone fields describe UTC. A local
+    // caller (`secs_to_local_tm`) overwrites all three afterwards; leaving
+    // them stale here would make `%z`/`%Z` report the previous conversion's
+    // zone, which is worse than reporting UTC.
     tm.tm_isdst = 0;
+    tm.tm_gmtoff = 0;
+    tm.tm_zone = UTC_NAME.as_ptr().cast::<u8>();
 }
 
 /// Convert broken-down time to seconds since epoch.
@@ -2036,16 +2178,27 @@ pub unsafe extern "C" fn strptime(buf: *const u8, format: *const u8, tm: *mut Tm
                     bi = bi.wrapping_add(consumed);
                 }
                 b'z' => {
-                    // Timezone offset (+HHMM or -HHMM).  Parse but ignore
-                    // (we always use UTC).
+                    // Timezone offset (`+HHMM` or `-HHMM`), recorded in
+                    // `tm_gmtoff` the way glibc's strptime does — discarding
+                    // it would silently drop the one piece of zone
+                    // information the input actually carried.
                     let sign = unsafe { *buf.add(bi) };
                     if sign != b'+' && sign != b'-' {
                         return core::ptr::null();
                     }
                     bi = bi.wrapping_add(1);
-                    let (_, consumed) = parse_int(buf, bi, 4);
+                    let (val, consumed) = parse_int(buf, bi, 4);
                     if consumed < 2 {
                         return core::ptr::null();
+                    }
+                    // Two digits mean whole hours; four mean `hhmm`.
+                    let secs = if consumed >= 4 {
+                        i64::from(val / 100) * 3600 + i64::from(val % 100) * 60
+                    } else {
+                        i64::from(val) * 3600
+                    };
+                    unsafe {
+                        (*tm).tm_gmtoff = if sign == b'-' { -secs } else { secs };
                     }
                     bi = bi.wrapping_add(consumed);
                 }
@@ -2863,6 +3016,71 @@ mod tests {
             tm_wday: 0,
             tm_yday: 0,
             tm_isdst: 0,
+            ..crate::time::Tm::ZERO
+        }
+    }
+
+    /// Serialises every test whose result depends on the process-global
+    /// timezone.
+    ///
+    /// The zone is derived from `TZ` in the process environment, so a
+    /// test that installs a zone races any concurrent test that converts
+    /// between UTC and local time (`mktime`, `timelocal`, `localtime`,
+    /// `ctime`).  Both kinds of test must hold this guard: the ones that
+    /// install a zone via [`TzGuard::set`], the zone-agnostic ones via
+    /// [`TzGuard::utc`] so they get the UTC they assume regardless of
+    /// what ran before them.  The lock is the same one the `environ`
+    /// tests use, because those mutate `TZ`'s backing store.
+    ///
+    /// On drop the previous `TZ` value and the installed zone are
+    /// restored, so a failing test cannot leak a zone into its
+    /// successors.
+    struct TzGuard {
+        _env: std::sync::MutexGuard<'static, ()>,
+        saved: Option<std::vec::Vec<u8>>,
+    }
+
+    impl TzGuard {
+        /// Install `tz` (a POSIX TZ string, no trailing NUL) for the
+        /// duration of the test.
+        fn set(tz: &[u8]) -> Self {
+            let guard = crate::environ::lock_env_for_test();
+            let saved = crate::environ::getenv_bytes(b"TZ").map(<[u8]>::to_vec);
+            Self::put(tz);
+            Self {
+                _env: guard,
+                saved,
+            }
+        }
+
+        /// Install UTC — the zone the timezone-agnostic tests assume.
+        fn utc() -> Self {
+            Self::set(b"UTC0")
+        }
+
+        /// Write `TZ=<tz>` into the environment and re-read it.
+        fn put(tz: &[u8]) {
+            let mut value = std::vec::Vec::with_capacity(tz.len() + 1);
+            value.extend_from_slice(tz);
+            value.push(0);
+            // SAFETY: both strings are NUL-terminated and outlive the call.
+            let rc = unsafe { crate::environ::setenv(c"TZ".as_ptr().cast(), value.as_ptr(), 1) };
+            assert_eq!(rc, 0, "setenv(TZ) failed");
+            tzset();
+        }
+    }
+
+    impl Drop for TzGuard {
+        fn drop(&mut self) {
+            match self.saved.as_deref() {
+                Some(previous) => Self::put(previous),
+                None => {
+                    // SAFETY: the name is a NUL-terminated literal.
+                    let rc = unsafe { crate::environ::unsetenv(c"TZ".as_ptr().cast()) };
+                    assert_eq!(rc, 0, "unsetenv(TZ) failed");
+                    tzset();
+                }
+            }
         }
     }
 
@@ -2948,6 +3166,7 @@ mod tests {
 
     #[test]
     fn test_mktime_epoch() {
+        let _tz = TzGuard::utc();
         let mut tm = zero_tm();
         tm.tm_year = 70;
         tm.tm_mon = 0;
@@ -2958,6 +3177,7 @@ mod tests {
 
     #[test]
     fn test_mktime_known_date() {
+        let _tz = TzGuard::utc();
         let mut tm = zero_tm();
         tm.tm_year = 100; // 2000
         tm.tm_mon = 0; // January
@@ -2968,6 +3188,7 @@ mod tests {
 
     #[test]
     fn test_mktime_normalizes() {
+        let _tz = TzGuard::utc();
         // 2000-01-01 00:00:90 should normalize to 00:01:30
         let mut tm = zero_tm();
         tm.tm_year = 100;
@@ -2981,6 +3202,7 @@ mod tests {
 
     #[test]
     fn test_mktime_month_overflow() {
+        let _tz = TzGuard::utc();
         // Month 12 (January of next year) should normalize.
         let mut tm = zero_tm();
         tm.tm_year = 100; // 2000
@@ -2993,6 +3215,7 @@ mod tests {
 
     #[test]
     fn test_mktime_sets_wday() {
+        let _tz = TzGuard::utc();
         // 2024-03-15 should be a Friday (wday=5).
         let mut tm = zero_tm();
         tm.tm_year = 124; // 2024
@@ -3006,6 +3229,7 @@ mod tests {
 
     #[test]
     fn test_gmtime_mktime_roundtrip() {
+        let _tz = TzGuard::utc();
         let timestamps: &[TimeT] = &[0, 1, 86400, 946_684_800, 1_704_067_199, -1, -86400];
         for &t in timestamps {
             let tm = gmtime(&t);
@@ -3152,6 +3376,7 @@ mod tests {
 
     #[test]
     fn test_mktime_null() {
+        let _tz = TzGuard::utc();
         assert_eq!(mktime(core::ptr::null_mut()), -1);
     }
 
@@ -3159,6 +3384,7 @@ mod tests {
 
     #[test]
     fn test_timegm_equals_mktime() {
+        let _tz = TzGuard::utc();
         let mut tm = zero_tm();
         tm.tm_year = 100;
         tm.tm_mon = 5;
@@ -3170,6 +3396,7 @@ mod tests {
 
     #[test]
     fn test_timelocal_equals_mktime() {
+        let _tz = TzGuard::utc();
         let mut tm = zero_tm();
         tm.tm_year = 124;
         tm.tm_mon = 0;
@@ -3316,8 +3543,15 @@ mod tests {
 
     #[test]
     fn test_strftime_timezone() {
-        let tm = zero_tm();
+        // `%z`/`%Z` render the zone recorded in the `Tm`, not the
+        // process's current zone, so a hand-built `Tm` with no zone
+        // renders a zero offset and — like glibc — an empty `%Z`.
+        let mut tm = zero_tm();
         assert_eq!(run_strftime(b"%z\0", &tm), b"+0000");
+        assert_eq!(run_strftime(b"%Z\0", &tm), b"");
+
+        // A `Tm` that went through a conversion carries a name.
+        tm.tm_zone = c"UTC".as_ptr().cast();
         assert_eq!(run_strftime(b"%Z\0", &tm), b"UTC");
     }
 
@@ -3532,6 +3766,7 @@ mod tests {
 
     #[test]
     fn test_mktime_negative_month() {
+        let _tz = TzGuard::utc();
         // tm_mon = -1 should borrow from year (December of previous year)
         let mut tm = zero_tm();
         tm.tm_year = 124; // 2024
@@ -3545,6 +3780,7 @@ mod tests {
 
     #[test]
     fn test_mktime_overflow_day() {
+        let _tz = TzGuard::utc();
         // Jan 32 should become Feb 1
         let mut tm = zero_tm();
         tm.tm_year = 124; // 2024
@@ -3557,6 +3793,7 @@ mod tests {
 
     #[test]
     fn test_mktime_overflow_seconds() {
+        let _tz = TzGuard::utc();
         // 70 seconds should overflow to 1 min 10 sec
         let mut tm = zero_tm();
         tm.tm_year = 124;
@@ -3623,9 +3860,20 @@ mod tests {
 
     #[test]
     fn test_tm_struct_layout() {
-        // Tm has 9 i32 fields, repr(C) → 36 bytes, align 4.
-        assert_eq!(core::mem::size_of::<Tm>(), 36);
-        assert_eq!(core::mem::align_of::<Tm>(), 4);
+        // Must match the glibc/musl x86-64 `struct tm` byte for byte:
+        // callers allocate it, so a short struct means `localtime_r`
+        // writes past the end of theirs.  9 `int`s = 36 bytes, padded to
+        // 40 for the 8-byte `tm_gmtoff`, then the `tm_zone` pointer.
+        assert_eq!(core::mem::size_of::<Tm>(), 56);
+        assert_eq!(core::mem::align_of::<Tm>(), 8);
+        let tm = Tm::ZERO;
+        let base = (&raw const tm).cast::<u8>();
+        // SAFETY: both projections are within the same allocated `Tm`.
+        unsafe {
+            assert_eq!((&raw const tm.tm_isdst).cast::<u8>().offset_from(base), 32);
+            assert_eq!((&raw const tm.tm_gmtoff).cast::<u8>().offset_from(base), 40);
+            assert_eq!((&raw const tm.tm_zone).cast::<u8>().offset_from(base), 48);
+        }
     }
 
     #[test]
@@ -3657,6 +3905,7 @@ mod tests {
 
     #[test]
     fn test_mktime_feb29_nonleap_normalizes() {
+        let _tz = TzGuard::utc();
         // Feb 29 in a non-leap year should normalize to March 1.
         let mut tm = zero_tm();
         tm.tm_year = 123; // 2023 (not a leap year)
@@ -3669,6 +3918,7 @@ mod tests {
 
     #[test]
     fn test_mktime_mday_zero_borrows() {
+        let _tz = TzGuard::utc();
         // mday=0 should be last day of previous month.
         let mut tm = zero_tm();
         tm.tm_year = 124; // 2024 (leap year)
@@ -3681,6 +3931,7 @@ mod tests {
 
     #[test]
     fn test_mktime_negative_seconds() {
+        let _tz = TzGuard::utc();
         // -1 seconds should borrow: sec=59, min decremented.
         let mut tm = zero_tm();
         tm.tm_year = 124;
@@ -3725,6 +3976,7 @@ mod tests {
 
     #[test]
     fn test_gmtime_mktime_roundtrip_leap_years() {
+        let _tz = TzGuard::utc();
         // Test roundtrip for several leap-year Feb 29 timestamps.
         let leap_feb29_timestamps: &[TimeT] = &[
             68169600,   // 1972-02-29 00:00:00 UTC
@@ -3902,6 +4154,7 @@ mod tests {
 
     #[test]
     fn test_mktime_negative_hour_borrows() {
+        let _tz = TzGuard::utc();
         // -1 hour from midnight Jan 1 → 23:00 Dec 31 previous year.
         let mut tm = zero_tm();
         tm.tm_year = 124; // 2024
@@ -3917,6 +4170,7 @@ mod tests {
 
     #[test]
     fn test_mktime_large_seconds_cascade() {
+        let _tz = TzGuard::utc();
         // 3661 seconds = 1 hour, 1 minute, 1 second.
         let mut tm = zero_tm();
         tm.tm_year = 70;
@@ -3932,6 +4186,7 @@ mod tests {
 
     #[test]
     fn test_mktime_month_negative_deep() {
+        let _tz = TzGuard::utc();
         // Month -13 should go back a full year + 1 month.
         let mut tm = zero_tm();
         tm.tm_year = 124; // 2024
@@ -3944,6 +4199,7 @@ mod tests {
 
     #[test]
     fn test_mktime_month_large_positive() {
+        let _tz = TzGuard::utc();
         // Month 24 = 2 years forward.
         let mut tm = zero_tm();
         tm.tm_year = 70; // 1970
@@ -4026,6 +4282,7 @@ mod tests {
 
     #[test]
     fn test_roundtrip_post_2038_timestamps() {
+        let _tz = TzGuard::utc();
         let timestamps: &[TimeT] = &[
             2_147_483_648, // 2038-01-19 03:14:08
             4_107_542_400, // 2100-03-01
@@ -4486,6 +4743,7 @@ mod tests {
 
     #[test]
     fn test_ctime_r_basic() {
+        let _tz = TzGuard::utc();
         let secs: TimeT = 0;
         let mut buf = [0u8; 32];
         let ret = unsafe { ctime_r(&raw const secs, buf.as_mut_ptr()) };
@@ -4497,6 +4755,7 @@ mod tests {
 
     #[test]
     fn test_ctime_r_null_params() {
+        let _tz = TzGuard::utc();
         let mut buf = [0u8; 32];
         let ret = unsafe { ctime_r(core::ptr::null(), buf.as_mut_ptr()) };
         assert!(ret.is_null());
@@ -4570,15 +4829,286 @@ mod tests {
     }
 
     #[test]
-    fn test_tzset_is_noop() {
-        // Just verify it doesn't crash.
-        tzset();
+    fn test_tzset_installs_the_zone_named_by_tz() {
+        let _tz = TzGuard::set(b"EST5EDT,M3.2.0,M11.1.0");
+        let zone = crate::tz::current();
+        assert_eq!(zone.std_name.as_bytes(), b"EST");
+        assert_eq!(zone.std_gmtoff, -5 * 3600);
+        let dst = zone.dst.as_ref().expect("EST5EDT has a daylight zone");
+        assert_eq!(dst.name.as_bytes(), b"EDT");
+        assert_eq!(dst.gmtoff, -4 * 3600);
     }
 
     #[test]
-    fn test_timezone_globals() {
-        assert_eq!(timezone, 0);
-        assert_eq!(daylight, 0);
+    fn test_timezone_globals_track_the_installed_zone() {
+        // `timezone` is WEST-positive (the sign opposite `tm_gmtoff`),
+        // reports *standard* time only, and `daylight` means "this zone
+        // ever observes DST", not "DST is in force now".
+        let _tz = TzGuard::set(b"EST5EDT,M3.2.0,M11.1.0");
+        let (offset_west, ever_dst, std_name, dst_name) = zone_globals();
+        assert_eq!(offset_west, 5 * 3600);
+        assert_eq!(ever_dst, 1);
+        assert_eq!(std_name, b"EST");
+        assert_eq!(dst_name, b"EDT");
+    }
+
+    #[test]
+    fn test_timezone_globals_for_a_zone_without_dst() {
+        let _tz = TzGuard::set(b"MST7");
+        let (offset_west, ever_dst, std_name, dst_name) = zone_globals();
+        assert_eq!(offset_west, 7 * 3600);
+        assert_eq!(ever_dst, 0);
+        assert_eq!(std_name, b"MST");
+        // With no daylight zone `tzname[1]` repeats the standard name
+        // rather than going null, because C code prints it
+        // unconditionally.  glibc does the same.
+        assert_eq!(dst_name, b"MST");
+    }
+
+    /// Snapshot the four C-visible zone globals as owned values:
+    /// `(timezone, daylight, tzname[0], tzname[1])`.
+    ///
+    /// Read through raw pointers because taking a reference to a
+    /// `static mut` is unsound; the caller must hold a [`TzGuard`], which
+    /// is what makes the read race-free.
+    fn zone_globals() -> (i64, i32, std::vec::Vec<u8>, std::vec::Vec<u8>) {
+        // SAFETY: plain word-sized reads of process-lifetime statics,
+        // serialised against every writer by the caller's `TzGuard`.
+        unsafe {
+            let names = core::ptr::addr_of!(tzname).read();
+            (
+                core::ptr::addr_of!(timezone).read(),
+                core::ptr::addr_of!(daylight).read(),
+                cstr(names[0].0),
+                cstr(names[1].0),
+            )
+        }
+    }
+
+    /// Copy a NUL-terminated libc string into an owned `Vec`.
+    ///
+    /// # Safety
+    /// `ptr` must be non-null and NUL-terminated.
+    unsafe fn cstr(ptr: *const u8) -> std::vec::Vec<u8> {
+        assert!(!ptr.is_null(), "unexpected null tzname entry");
+        // SAFETY: guaranteed by the caller.
+        let len = unsafe { crate::string::strlen(ptr) } as usize;
+        // SAFETY: `strlen` bytes are readable from `ptr` by construction.
+        unsafe { core::slice::from_raw_parts(ptr, len) }.to_vec()
+    }
+
+    // -------------------------------------------------------------------
+    // TZ wiring — the libc conversion functions honouring the zone
+    // -------------------------------------------------------------------
+
+    /// US Eastern, with the post-2007 rules written out explicitly.
+    const US_EASTERN: &[u8] = b"EST5EDT,M3.2.0,M11.1.0";
+
+    /// `localtime_r` into a fresh stack `Tm`, asserting success.
+    fn local_tm(t: TimeT) -> Tm {
+        let mut tm = zero_tm();
+        // SAFETY: both pointers are valid, aligned and non-null, and the
+        // `Tm` outlives the call.
+        let ret = unsafe { localtime_r(&raw const t, &raw mut tm) };
+        assert!(!ret.is_null(), "localtime_r failed for {t}");
+        tm
+    }
+
+    /// `localtime_r` must shift the wall clock *and* fill in the three
+    /// zone fields.  Before TZ support it aliased `gmtime_r`, so this is
+    /// the test that would have caught the whole class of bug.
+    #[test]
+    fn test_localtime_r_applies_the_zone_in_winter() {
+        let _tz = TzGuard::set(US_EASTERN);
+        // 2021-01-15 12:00:00 UTC == 07:00:00 EST.
+        let tm = local_tm(1_610_712_000);
+        assert_eq!(tm.tm_hour, 7);
+        assert_eq!(tm.tm_mday, 15);
+        assert_eq!(tm.tm_isdst, 0);
+        assert_eq!(tm.tm_gmtoff, -5 * 3600);
+        // SAFETY: `tm_zone` points into `tz`'s static name storage.
+        assert_eq!(unsafe { cstr(tm.tm_zone) }, b"EST");
+    }
+
+    #[test]
+    fn test_localtime_r_applies_the_zone_in_summer() {
+        let _tz = TzGuard::set(US_EASTERN);
+        // 2021-07-15 12:00:00 UTC == 08:00:00 EDT.
+        let tm = local_tm(1_626_350_400);
+        assert_eq!(tm.tm_hour, 8);
+        assert_eq!(tm.tm_isdst, 1);
+        assert_eq!(tm.tm_gmtoff, -4 * 3600);
+        // SAFETY: as above.
+        assert_eq!(unsafe { cstr(tm.tm_zone) }, b"EDT");
+    }
+
+    /// `gmtime_r` must stay UTC no matter what `TZ` says, and must reset
+    /// the zone fields rather than leaving a previous conversion's.
+    #[test]
+    fn test_gmtime_r_ignores_the_zone() {
+        let _tz = TzGuard::set(US_EASTERN);
+        let t: TimeT = 1_626_350_400;
+        // Start from a local reading so a failure to reset the zone
+        // fields shows up.
+        let mut tm = local_tm(t);
+        // SAFETY: both pointers are valid, aligned and non-null.
+        assert!(!unsafe { gmtime_r(&raw const t, &raw mut tm) }.is_null());
+        assert_eq!(tm.tm_hour, 12);
+        assert_eq!(tm.tm_isdst, 0);
+        assert_eq!(tm.tm_gmtoff, 0);
+        // SAFETY: `tm_zone` points at the static "UTC" literal.
+        assert_eq!(unsafe { cstr(tm.tm_zone) }, b"UTC");
+    }
+
+    /// `mktime` reads its `Tm` as local time; `timegm` reads the same
+    /// fields as UTC.  Under a non-UTC zone they must disagree by exactly
+    /// the offset — the property that made their old aliasing invisible.
+    #[test]
+    fn test_mktime_and_timegm_differ_by_the_offset() {
+        let _tz = TzGuard::set(US_EASTERN);
+        let mut local = zero_tm();
+        local.tm_year = 121; // 2021
+        local.tm_mon = 0; // January
+        local.tm_mday = 15;
+        local.tm_hour = 7;
+        local.tm_isdst = -1;
+        let mut utc = local;
+
+        let from_local = mktime(&raw mut local);
+        let from_utc = timegm(&raw mut utc);
+        assert_eq!(from_local, 1_610_712_000);
+        assert_eq!(from_utc, 1_610_694_000);
+        assert_eq!(from_local - from_utc, 5 * 3600);
+        // `mktime` writes back what it resolved.
+        assert_eq!(local.tm_isdst, 0);
+        assert_eq!(local.tm_gmtoff, -5 * 3600);
+        // `timegm` is zone-free.
+        assert_eq!(utc.tm_gmtoff, 0);
+    }
+
+    #[test]
+    fn test_mktime_localtime_roundtrip_across_the_dst_start() {
+        let _tz = TzGuard::set(US_EASTERN);
+        // One second either side of 2021-03-14 07:00:00 UTC, the instant
+        // EST becomes EDT.
+        for (t, hour, isdst) in [
+            (1_615_705_199 as TimeT, 1, 0),
+            (1_615_705_200 as TimeT, 3, 1),
+        ] {
+            let mut tm = local_tm(t);
+            assert_eq!(tm.tm_hour, hour, "wall clock at {t}");
+            assert_eq!(tm.tm_isdst, isdst, "isdst at {t}");
+            assert_eq!(mktime(&raw mut tm), t, "round-trip at {t}");
+        }
+    }
+
+    /// The hour 02:00–02:59 local does not exist on the spring-forward
+    /// day.  POSIX leaves the result unspecified; we resolve it the way
+    /// glibc does, landing just past the jump rather than failing.
+    #[test]
+    fn test_mktime_resolves_a_nonexistent_local_hour() {
+        let _tz = TzGuard::set(US_EASTERN);
+        let mut tm = zero_tm();
+        tm.tm_year = 121;
+        tm.tm_mon = 2; // March
+        tm.tm_mday = 14;
+        tm.tm_hour = 2;
+        tm.tm_min = 30;
+        tm.tm_isdst = -1;
+        let t = mktime(&raw mut tm);
+        assert!(t > 0, "a vanished hour must still produce an instant");
+        // Whatever instant we picked, re-reading it must be consistent.
+        let mut back = local_tm(t);
+        assert_eq!(mktime(&raw mut back), t);
+    }
+
+    /// The hour 01:00–01:59 local happens twice on the fall-back day.
+    /// `tm_isdst` selects which one, so the two readings must be exactly
+    /// an hour apart.
+    #[test]
+    fn test_mktime_honours_isdst_in_the_repeated_hour() {
+        let _tz = TzGuard::set(US_EASTERN);
+        let mut base = zero_tm();
+        base.tm_year = 121;
+        base.tm_mon = 10; // November
+        base.tm_mday = 7;
+        base.tm_hour = 1;
+        base.tm_min = 30;
+
+        let mut daylight_reading = base;
+        daylight_reading.tm_isdst = 1;
+        let mut standard_reading = base;
+        standard_reading.tm_isdst = 0;
+
+        let earlier = mktime(&raw mut daylight_reading);
+        let later = mktime(&raw mut standard_reading);
+        assert_eq!(later - earlier, 3600);
+        assert_eq!(daylight_reading.tm_gmtoff, -4 * 3600);
+        assert_eq!(standard_reading.tm_gmtoff, -5 * 3600);
+    }
+
+    /// `%z` and `%Z` render the zone recorded in the `Tm`, so they must
+    /// follow DST rather than printing a constant.
+    #[test]
+    fn test_strftime_renders_the_zone_from_the_tm() {
+        let _tz = TzGuard::set(US_EASTERN);
+        for (t, expected) in [
+            (1_610_712_000 as TimeT, &b"-0500 EST"[..]),
+            (1_626_350_400 as TimeT, &b"-0400 EDT"[..]),
+        ] {
+            let tm = local_tm(t);
+            let mut buf = [0u8; 32];
+            // SAFETY: the buffer is writable for `buf.len()` bytes, the
+            // format is a NUL-terminated literal and `tm` is valid.
+            let n = unsafe {
+                strftime(
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    c"%z %Z".as_ptr().cast(),
+                    &raw const tm,
+                )
+            };
+            assert_eq!(&buf[..n], expected, "at {t}");
+        }
+    }
+
+    /// `ctime` is defined as `asctime(localtime(t))`.  It used to call
+    /// `gmtime_r`, which was invisible only while the two agreed.
+    #[test]
+    fn test_ctime_r_uses_local_time() {
+        let _tz = TzGuard::set(US_EASTERN);
+        let t: TimeT = 1_610_712_000; // 2021-01-15 07:00:00 EST
+        let mut buf = [0u8; 32];
+        // SAFETY: `buf` is at least the 26 bytes `ctime_r` requires.
+        let ret = unsafe { ctime_r(&raw const t, buf.as_mut_ptr()) };
+        assert!(!ret.is_null());
+        // SAFETY: `ctime_r` wrote a NUL-terminated string into `buf`.
+        let text = unsafe { cstr(buf.as_ptr()) };
+        assert_eq!(text, b"Fri Jan 15 07:00:00 2021\n");
+    }
+
+    /// An unparsable `TZ` must fall back to UTC, not to garbage — the
+    /// same thing glibc does with a zone file it cannot read.
+    #[test]
+    fn test_unparsable_tz_falls_back_to_utc() {
+        let _tz = TzGuard::set(b"!!!not-a-zone!!!");
+        let tm = local_tm(1_626_350_400);
+        assert_eq!(tm.tm_hour, 12);
+        assert_eq!(tm.tm_gmtoff, 0);
+    }
+
+    /// A zoneinfo name (`America/New_York`) needs tzdata we do not ship,
+    /// so it resolves to UTC.  Documented here so the day we do ship
+    /// tzdata this test fails loudly instead of the behaviour changing
+    /// silently.
+    #[test]
+    fn test_zoneinfo_names_currently_resolve_to_utc() {
+        let _tz = TzGuard::set(b"America/New_York");
+        let tm = local_tm(1_626_350_400);
+        assert_eq!(
+            tm.tm_gmtoff, 0,
+            "no tzdata is installed, so named zones must degrade to UTC"
+        );
     }
 
     // -------------------------------------------------------------------
@@ -8327,12 +8857,14 @@ mod tests {
 
     #[test]
     fn test_localtime_null() {
+        let _tz = TzGuard::utc();
         let ptr = localtime(core::ptr::null());
         assert!(ptr.is_null());
     }
 
     #[test]
     fn test_localtime_epoch() {
+        let _tz = TzGuard::utc();
         // localtime delegates to gmtime (no timezone).
         let t: TimeT = 0;
         let ptr = localtime(&t);
@@ -8348,6 +8880,7 @@ mod tests {
 
     #[test]
     fn test_ctime_null() {
+        let _tz = TzGuard::utc();
         // ctime(NULL) → localtime(NULL) → NULL → asctime(NULL) → fallback "???" string
         let ptr = ctime(core::ptr::null());
         // asctime(NULL) returns a valid fallback string, not NULL.
@@ -8358,6 +8891,7 @@ mod tests {
 
     #[test]
     fn test_ctime_epoch() {
+        let _tz = TzGuard::utc();
         let t: TimeT = 0;
         let ptr = ctime(&t);
         // Should return a non-null formatted time string.
@@ -9226,6 +9760,7 @@ mod tests {
 
     #[test]
     fn test_timelocal_epoch() {
+        let _tz = TzGuard::utc();
         // timelocal is an alias for mktime.
         let mut tm = zero_tm();
         tm.tm_year = 70;

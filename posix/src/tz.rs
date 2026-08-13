@@ -260,7 +260,9 @@ impl Tz {
         let std_name = p.name()?;
         // POSIX requires an offset after the standard name.  (glibc treats a
         // bare name as an error too, falling back to UTC.)
-        let std_gmtoff = -p.offset()?;
+        // POSIX's sign is west-positive; ours is east-positive, so invert
+        // once here and never again.
+        let std_gmtoff = p.offset()?.checked_neg()?;
 
         let dst = if p.at_end() {
             None
@@ -268,7 +270,7 @@ impl Tz {
             let name = p.name()?;
             // An omitted DST offset means one hour ahead of standard time.
             let gmtoff = if p.peek().is_some_and(|c| c == b'+' || c == b'-' || c.is_ascii_digit()) {
-                -p.offset()?
+                p.offset()?.checked_neg()?
             } else {
                 std_gmtoff.checked_add(3600)?
             };
@@ -683,6 +685,50 @@ pub fn year_of_day(days: i64) -> i64 {
 static mut CURRENT: Tz = Tz { std_name: TzName::empty(), std_gmtoff: 0, dst: None };
 static INITIALISED: AtomicBool = AtomicBool::new(false);
 
+/// NUL-terminated copies of the current zone's two abbreviations.
+///
+/// C callers reach these through `tzname[0]`/`tzname[1]` and through
+/// `struct tm`'s `tm_zone`, both of which are `char *` and so must point at
+/// storage that outlives the call. Keeping them here — rather than handing out
+/// a pointer into the `Tz` value, which is `Copy` and lives on the stack —
+/// gives them the process lifetime that C expects.
+static mut NAME_C: [[u8; TZ_NAME_CAP + 1]; 2] = [[0; TZ_NAME_CAP + 1]; 2];
+
+/// Refresh [`NAME_C`] from `tz`.
+fn store_names(tz: &Tz) {
+    // SAFETY: same contract as `CURRENT` — the zone globals are specified as
+    // unsynchronised, and this writes fixed-size arrays that are never
+    // reallocated, so a concurrent reader sees either the old or new bytes of
+    // a NUL-terminated name, never a dangling pointer.
+    let slots = unsafe { &mut *core::ptr::addr_of_mut!(NAME_C) };
+    let dst_name = tz.dst.map_or(tz.std_name, |d| d.name);
+    for (slot, name) in slots.iter_mut().zip([tz.std_name, dst_name]) {
+        *slot = [0; TZ_NAME_CAP + 1];
+        let bytes = name.as_bytes();
+        if let Some(dest) = slot.get_mut(..bytes.len()) {
+            dest.copy_from_slice(bytes);
+        }
+    }
+}
+
+/// The NUL-terminated abbreviation for standard (`index` 0) or daylight
+/// (`index` 1) time, for `tzname` and `tm_zone`.
+///
+/// Never null: an unresolved zone yields an empty string rather than a null
+/// pointer, because C code does `printf("%s", tzname[0])` without a check.
+#[must_use]
+pub fn name_ptr(index: usize) -> *const u8 {
+    if !INITIALISED.load(Ordering::Acquire) {
+        set_from_env();
+    }
+    // SAFETY: see `NAME_C`. The index is clamped, so this is always in bounds,
+    // and the storage is a process-lifetime static.
+    unsafe {
+        let slots = &*core::ptr::addr_of!(NAME_C);
+        slots.get(index.min(1)).map_or(core::ptr::null(), |s| s.as_ptr())
+    }
+}
+
 /// Re-read `TZ` and install the resulting zone as the process's current one.
 ///
 /// This is the engine behind [`crate::time::tzset`].
@@ -693,6 +739,7 @@ pub fn set_from_env() {
     unsafe {
         CURRENT = tz;
     }
+    store_names(&tz);
     INITIALISED.store(true, Ordering::Release);
 }
 
@@ -721,6 +768,7 @@ pub fn set(tz: Tz) {
     unsafe {
         CURRENT = tz;
     }
+    store_names(&tz);
     INITIALISED.store(true, Ordering::Release);
 }
 
@@ -733,7 +781,7 @@ fn read_env_tz() -> Tz {
         // head, and the one case a future settings service should change.
         None => Tz::utc(),
         // `TZ=""` explicitly requests UTC.
-        Some(s) if s.is_empty() => Tz::utc(),
+        Some(b"") => Tz::utc(),
         // A zoneinfo name, or junk: glibc without a tzdata file also lands on
         // UTC, so this is the familiar behaviour rather than a new failure.
         Some(s) => Tz::parse(s).unwrap_or_else(Tz::utc),

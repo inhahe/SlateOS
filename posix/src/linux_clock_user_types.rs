@@ -37,6 +37,19 @@ pub const TM_OFF_WDAY: usize = 24;
 pub const TM_OFF_YDAY: usize = 28;
 /// `int tm_isdst` — DST flag (negative = unknown).
 pub const TM_OFF_ISDST: usize = 32;
+/// `long tm_gmtoff` — seconds **east** of UTC for this instant.
+///
+/// Note the gap: `tm_isdst` ends at 36 but the 8-byte `tm_gmtoff` is
+/// 8-aligned, so four bytes of padding sit between them.
+pub const TM_OFF_GMTOFF: usize = 40;
+/// `const char *tm_zone` — the abbreviation for this instant's zone.
+pub const TM_OFF_ZONE: usize = 48;
+/// `sizeof(struct tm)`.
+///
+/// The last two fields are BSD extensions that glibc and musl both
+/// carry, so C callers allocate 56 bytes.  Writing only the first 36
+/// would be a silent short struct; writing more would smash their stack.
+pub const TM_SIZE: usize = 56;
 
 // ---------------------------------------------------------------------------
 // Broken-down time field ranges
@@ -100,6 +113,27 @@ mod tests {
         for (i, &v) in o.iter().enumerate() {
             assert_eq!(v, i * 4);
         }
+    }
+
+    /// The offsets above describe the ABI; [`crate::time::Tm`] implements
+    /// it.  Cross-check them so the two cannot drift apart silently —
+    /// a mismatch means every C caller of `localtime_r` reads the wrong
+    /// bytes, which no unit test of either file alone would catch.
+    #[test]
+    fn test_tm_offsets_match_the_rust_struct() {
+        use crate::time::Tm;
+        assert_eq!(core::mem::offset_of!(Tm, tm_sec), TM_OFF_SEC);
+        assert_eq!(core::mem::offset_of!(Tm, tm_min), TM_OFF_MIN);
+        assert_eq!(core::mem::offset_of!(Tm, tm_hour), TM_OFF_HOUR);
+        assert_eq!(core::mem::offset_of!(Tm, tm_mday), TM_OFF_MDAY);
+        assert_eq!(core::mem::offset_of!(Tm, tm_mon), TM_OFF_MON);
+        assert_eq!(core::mem::offset_of!(Tm, tm_year), TM_OFF_YEAR);
+        assert_eq!(core::mem::offset_of!(Tm, tm_wday), TM_OFF_WDAY);
+        assert_eq!(core::mem::offset_of!(Tm, tm_yday), TM_OFF_YDAY);
+        assert_eq!(core::mem::offset_of!(Tm, tm_isdst), TM_OFF_ISDST);
+        assert_eq!(core::mem::offset_of!(Tm, tm_gmtoff), TM_OFF_GMTOFF);
+        assert_eq!(core::mem::offset_of!(Tm, tm_zone), TM_OFF_ZONE);
+        assert_eq!(core::mem::size_of::<Tm>(), TM_SIZE);
     }
 
     #[test]

@@ -574,20 +574,30 @@ pub fn sys_drm_atomic_commit(args: &SyscallArgs) -> SyscallResult {
     let flags = args.arg3;
     let test_only = (flags & 1) != 0;
 
+    // Largest atomic-commit blob we will accept.  The wire format is a
+    // 12-byte header plus 12/32/8 bytes per CRTC/plane/connector change, so
+    // 64 KiB covers roughly two thousand plane updates in one commit —
+    // orders of magnitude beyond any real modeset — while bounding the
+    // kernel allocation a caller can force with a bogus length.
+    const MAX_COMMIT_BYTES: usize = 64 * 1024;
+
     // Read the buffer from userspace.
     if buf_ptr == 0 || buf_len < 12 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    // For now, read the buffer directly from the kernel address space.
-    // When userspace is fully isolated, this will need to copy from
-    // the user's address space via safe accessor functions.
-    //
-    // SAFETY: The caller is responsible for passing a valid buffer.
-    // In the current kernel-mode testing setup, all addresses are valid.
-    let buf = unsafe {
-        core::slice::from_raw_parts(buf_ptr as *const u8, buf_len)
+    // Copied into the kernel rather than parsed in place through `buf_ptr`.
+    // That address is userspace, so every read of it would need STAC/CLAC
+    // bracketing once SMAP is on — and, independent of SMAP, parsing
+    // straight out of a live user mapping is a double-fetch: a peer thread
+    // can rewrite the header between the count read and the record reads,
+    // or `munmap` the range mid-parse.  `read_user_vec` validates and
+    // copies in one step and caps the length.
+    let buf = match crate::mm::user::read_user_vec(buf_ptr, buf_len, MAX_COMMIT_BYTES) {
+        Ok(v) => v,
+        Err(e) => return SyscallResult::err(e),
     };
+    let buf = buf.as_slice();
 
     // Parse the header.
     let n_crtc = read_u32(buf, 0) as usize;

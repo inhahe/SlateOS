@@ -370,8 +370,47 @@ global spinlock held, no ownership checks, an HHDM address published to ring 3).
 The lesson generalises: the files still to convert should be read as *audits*,
 not as find-and-replace.
 
-Remaining: `kernel/src/syscall/linux.rs`, `kernel/src/drm/syscall.rs`. Then flip
-`USER_ACCESSES_ANNOTATED` and boot-test under `+smep,+smap,+umip`.
+`kernel/src/syscall/linux.rs` and `kernel/src/drm/syscall.rs` are done as of
+2026-08-13. `linux.rs` was much smaller than the raw grep suggested — of 23
+hits, most were HHDM addresses in self-test code or prose inside comments, and
+only eight were genuine user accesses. They fell into three groups:
+
+- **wait/rusage** (`sys_waitid`, `sys_wait4`). Every one of these carried a
+  SAFETY comment of the form *"validated as a writable user range before the
+  wait began and the address space has not changed"* — wrong twice over, since
+  the wait is exactly what blocks and a peer thread can `munmap` the range
+  while the caller sleeps. Now `write_user_value` / a shared
+  `clear_user_rusage`. The encoder was split out of `write_waitid_siginfo` as a
+  pure `waitid_siginfo` so the byte-layout self-test — which fed it a *kernel*
+  stack buffer — no longer drives the user-delivery path at all.
+- **`rt_sigreturn`** read the whole `LinuxUcontext` off the user stack with
+  `read_unaligned`; now `read_user_value::<LinuxUcontext>`, which also lands it
+  in an aligned kernel local so the user-side alignment stops mattering.
+- **`emit_linux_rt_frame`** wrote `pretcode`, `ucontext` and `siginfo` as three
+  separate stores straight onto the user stack. Now packed into one
+  `RT_SIGFRAME_SIZE` kernel array (the layout is contiguous by construction)
+  and delivered with a single `copy_to_user`. This one needed care: the write
+  can now *fail*, where before it could only fault, and by that point
+  `take_saved_sigmask` has already consumed the pending `sigsuspend` mask — so
+  the failure path puts it back, keeping the documented contract that a `None`
+  return means nothing happened and the caller may retry.
+
+`drm/syscall.rs` had a single site, and it was the worst-annotated one in the
+tree: `sys_drm_atomic_commit` built a slice over the user buffer with *no
+validation whatsoever* — `"SAFETY: The caller is responsible for passing a
+valid buffer. In the current kernel-mode testing setup, all addresses are
+valid."` — and then parsed record counts out of it. Besides the missing
+validation that is a double-fetch: the counts and the records were read from a
+live user mapping the submitting process can rewrite between reads. Now
+`read_user_vec` with a 64 KiB cap.
+
+**Remaining: `kernel/src/ipc/futex.rs` — see
+`D-FUTEX-ATOMICS-OPERATE-DIRECTLY-ON-USER-WORDS` below.** It was not on the
+original file list because it uses none of the grep's patterns: it casts the
+user address to `*const AtomicU32` instead. Fourteen sites. It is the one place
+where the bounce is *not* the right answer, so it needs its own primitive.
+
+Then flip `USER_ACCESSES_ANNOTATED` and boot-test under `+smep,+smap,+umip`.
 
 **Bugs found while doing it.** The refactor was worth far more than the SMAP
 unblock — reading each site closely turned up a long list of live defects,
@@ -431,8 +470,60 @@ every one of which predates this work:
   had *already* been dequeued/consumed, so it was unrecoverably lost.
 
 **Related.** `B-AC-INHERITED-AT-KERNEL-ENTRY` (fixed) was the *other*
-prerequisite for SMAP; this is now the only one left. design-decisions §122
-records why SMAP stays behind a gate rather than being enabled optimistically.
+prerequisite for SMAP. design-decisions §122 records why SMAP stays behind a
+gate rather than being enabled optimistically.
+
+---
+
+### D-FUTEX-ATOMICS-OPERATE-DIRECTLY-ON-USER-WORDS — 2026-08-13 — TECH DEBT (blocks enabling SMAP) — IN PROGRESS (`kernel/src/ipc/futex.rs`)
+
+**What.** Fourteen sites in `futex.rs` do
+
+```rust
+let atomic = unsafe { &*(addr as *const AtomicU32) };
+```
+
+over a *user* virtual address and then load / CAS / `fetch_or` / `swap` through
+it. Under CR4.SMAP every one of those is a supervisor access to a user page
+outside a STAC window, so they all fault.
+
+**Why this was missed.** It is not in
+`D-SYSCALL-HANDLERS-HAND-RAW-USER-SLICES-TO-KERNEL-CODE`'s file list, and the
+grep that drove that entry —
+`from_raw_parts|write_unaligned|core::ptr::write|copy_nonoverlapping|…` — does
+not match any of them. `futex.rs` reaches user memory through a *reference
+cast*, a shape none of the other files use. It surfaced only from a second
+sweep looking for callers of `validate_user_write` outside the syscall files.
+**The lesson: an "is it all converted?" grep proves nothing about code that
+reaches user memory by a shape the grep does not know about. Enumerate the
+files that *take user addresses* and read them, rather than enumerating the
+syntax you expect to find.**
+
+**Why the bounce is the wrong fix here — uniquely.** Everywhere else in that
+entry the answer is copy-in / operate / copy-out. A futex word cannot be
+handled that way: the whole primitive *is* the atomicity of the RMW against
+concurrent userspace CAS. Copy-in, modify, copy-out is not atomic and would
+reintroduce exactly the lost-update race the futex exists to prevent.
+
+This is therefore the one legitimate use of `stac()`/`clac()` in the kernel:
+the window brackets a **single non-blocking atomic instruction**, so none of
+the objections that rule it out for the handler sites apply — nothing blocks
+inside it, so AC cannot leak into a saved RFLAGS across a reschedule, and the
+window is a couple of cycles rather than unbounded. It is what Linux does
+(`futex_atomic_cmpxchg_inatomic` and friends, `arch/x86/include/asm/futex.h`,
+each wrapped in `__uaccess_begin()`/`__uaccess_end()`).
+
+**Proper fix.** Add per-operation accessors to `mm::user` — `user_atomic_load_u32`,
+`user_atomic_cas_u32`, `user_atomic_rmw_u32` — each of which validates the
+address, opens the window, performs *one* atomic operation, and closes it.
+Convert all fourteen sites to those. Critically, several sites currently hold
+the `&AtomicU32` reference across code that blocks (`futex_lock_pi` at ~1492,
+the requeue-PI paths at ~2272/~2453); those must become repeated per-operation
+calls, with any CAS retry loop running *outside* the window, one instruction
+per iteration. That is a correctness improvement independent of SMAP for the
+same reason as the rest of the entry above: the reference is a raw user pointer
+held across a sleep, so a peer thread's `munmap` turns it into a
+use-after-free.
 
 ---
 

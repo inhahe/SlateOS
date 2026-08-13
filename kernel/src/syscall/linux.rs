@@ -1998,16 +1998,23 @@ fn linux_rt_sigreturn(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
     if uc_addr == 0 || (uc_addr & 0x7) != 0 {
         return -i64::from(errno::EFAULT);
     }
+    // Fail fast on a hopeless pointer so a malformed `rt_sigreturn` is
+    // rejected before we touch anything; the copy below re-validates, which
+    // is the check that actually guards the read.
     if crate::mm::user::validate_user_read(uc_addr, uc_size).is_err() {
         return -i64::from(errno::EFAULT);
     }
 
-    // SAFETY: validated above as a readable user mapping spanning the
-    // whole ucontext, and 8-byte aligned (LinuxUcontext's alignment).
-    // CR3 still points at this process's address space (we are returning
-    // to it).  read_unaligned is used defensively even though alignment
-    // is guaranteed.
-    let uc = unsafe { core::ptr::read_unaligned(uc_addr as *const LinuxUcontext) };
+    // Copied through the bounce rather than by dereferencing `uc_addr`:
+    // that address is the *user* stack, so the read has to be bracketed by
+    // STAC/CLAC once SMAP is on, and `read_user_value` re-validates at the
+    // moment of the copy.  It also lands the ucontext in a properly aligned
+    // kernel local, so the user-side alignment is irrelevant to the copy
+    // (the 8-byte gate above stays as an ABI sanity check).
+    let uc = match crate::mm::user::read_user_value::<LinuxUcontext>(uc_addr) {
+        Ok(v) => v,
+        Err(_) => return -i64::from(errno::EFAULT),
+    };
     let mc = &uc.uc_mcontext;
 
     // Restore the interrupted GPRs from uc_mcontext.
@@ -2164,8 +2171,12 @@ pub fn emit_linux_rt_frame(
     // the one to restore — and consuming it here clears the restore flag,
     // matching Linux clearing the flag in `signal_delivered`.
     let current_blocked = signal::blocked(pid);
-    let restore_blocked =
-        signal::take_saved_sigmask(pid).unwrap_or(current_blocked);
+    // Kept rather than folded straight into `restore_blocked`: taking the
+    // saved mask is a side effect, and the frame write below can now fail,
+    // in which case we have to put it back so a `None` return really is
+    // "nothing happened" (the caller re-arms and retries).
+    let saved_taken = signal::take_saved_sigmask(pid);
+    let restore_blocked = saved_taken.unwrap_or(current_blocked);
     // `signal_bit` rather than an open-coded `1 << (sig - 1)`: an
     // out-of-range signal has no bit at all, which the `& 63` this used to
     // do would have silently turned into some *other* signal's bit — the
@@ -2225,17 +2236,65 @@ pub fn emit_linux_rt_frame(
     };
 
     // ---- write the frame to user memory ----
-    // SAFETY: the region [frame_addr, frame_addr + RT_SIGFRAME_SIZE) was
-    // validated as writable user memory above; uc_addr/info_addr lie
-    // within it (see compute_layout), and CR3 points at this process's
-    // address space.  write_unaligned avoids any alignment assumption.
+    // Packed in the kernel and delivered as one copy.  The three parts used
+    // to be stored one at a time straight through `layout.{frame,uc,info}_addr`;
+    // besides needing STAC/CLAC bracketing once SMAP is on, that left a
+    // half-built frame on the user stack if the second or third store
+    // faulted — and the caller was still told delivery succeeded.  The
+    // layout is contiguous by construction (see `compute_layout`):
+    // pretcode, then ucontext, then siginfo, all inside
+    // [frame_addr, frame_addr + RT_SIGFRAME_SIZE).
+    const UC_OFF: usize = 8;
+    const INFO_OFF: usize = UC_OFF + core::mem::size_of::<LinuxUcontext>();
+    const _: () = assert!(
+        INFO_OFF + core::mem::size_of::<linux_sigframe::LinuxSiginfo>()
+            == RT_SIGFRAME_SIZE
+    );
+    let mut frame_buf = [0u8; RT_SIGFRAME_SIZE];
+    // SAFETY: every source is a live, fully initialised kernel local of the
+    // size copied, and each destination range lies wholly inside `frame_buf`
+    // by the const assertion above, so all three copies are in bounds.
+    // `frame_buf` is a distinct local, so it cannot overlap any source.  All
+    // three types are `#[repr(C)]` and `Copy`, so their byte images are the
+    // on-wire frame and viewing them as bytes duplicates no owning handle.
     unsafe {
-        core::ptr::write_unaligned(layout.frame_addr as *mut u64, act.sa_restorer);
-        core::ptr::write_unaligned(layout.uc_addr as *mut LinuxUcontext, uc);
-        core::ptr::write_unaligned(
-            layout.info_addr as *mut linux_sigframe::LinuxSiginfo,
-            siginfo,
+        core::ptr::copy_nonoverlapping(
+            (&raw const act.sa_restorer).cast::<u8>(),
+            frame_buf.as_mut_ptr(),
+            8,
         );
+        core::ptr::copy_nonoverlapping(
+            (&raw const uc).cast::<u8>(),
+            frame_buf.as_mut_ptr().add(UC_OFF),
+            core::mem::size_of::<LinuxUcontext>(),
+        );
+        core::ptr::copy_nonoverlapping(
+            (&raw const siginfo).cast::<u8>(),
+            frame_buf.as_mut_ptr().add(INFO_OFF),
+            core::mem::size_of::<linux_sigframe::LinuxSiginfo>(),
+        );
+    }
+    // Delivered through the bounce: the `validate_user_write` above is only
+    // a fail-fast, while `copy_to_user` re-validates at the moment of the
+    // store — the check that survives a peer thread remapping the stack —
+    // and brackets it for SMAP.
+    // SAFETY: `frame_buf` is a live kernel array of exactly
+    // `RT_SIGFRAME_SIZE` bytes, so the source range is readable for the
+    // length passed.  `copy_to_user` validates the destination itself.
+    let stored = unsafe {
+        crate::mm::user::copy_to_user(
+            frame_buf.as_ptr(),
+            layout.frame_addr,
+            RT_SIGFRAME_SIZE,
+        )
+    };
+    if stored.is_err() {
+        // Undo the one side effect taken above so `None` means "nothing
+        // happened" and the caller's retry sees the original state.
+        if let Some(mask) = saved_taken {
+            signal::set_saved_sigmask(pid, mask);
+        }
+        return None;
     }
 
     // ---- apply the new blocked mask ----
@@ -42229,17 +42288,14 @@ fn waitid_scan(
     }
 }
 
-/// Write a filled `SIGCHLD` `siginfo_t` to the user `infop` buffer.
+/// Encode a [`WaitidFound`] as the on-wire x86_64 `SIGCHLD` `siginfo_t`.
 ///
-/// `infop` must already be validated as a writable 128-byte user range.
-/// A zero `infop` is a no-op (Linux permits a NULL `infop`).
-fn write_waitid_siginfo(infop: u64, found: &WaitidFound) {
-    if infop == 0 {
-        return;
-    }
+/// Pure: no user memory is touched, so the boot self-test can check the
+/// byte layout without needing a user address space.
+fn waitid_siginfo(found: &WaitidFound) -> WaitidSiginfo {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let si_pid = found.si_pid as i32;
-    let info = WaitidSiginfo {
+    WaitidSiginfo {
         si_signo: 17, // SIGCHLD
         si_errno: 0,
         si_code: found.si_code,
@@ -42248,28 +42304,51 @@ fn write_waitid_siginfo(infop: u64, found: &WaitidFound) {
         si_uid: found.si_uid,
         si_status: found.si_status,
         _rest: [0u8; 100],
-    };
-    // SAFETY: `infop` was validated as a writable 128-byte user range
-    // before the wait began and the address space has not changed (we are
-    // still in the calling process).  `WaitidSiginfo` is exactly 128 bytes
-    // (`#[repr(C)]`), and `write_unaligned` tolerates any user alignment.
-    unsafe {
-        core::ptr::write_unaligned(infop as *mut WaitidSiginfo, info);
     }
+}
+
+/// Write a filled `SIGCHLD` `siginfo_t` to the user `infop` buffer.
+///
+/// A zero `infop` is a no-op (Linux permits a NULL `infop`).
+fn write_waitid_siginfo(infop: u64, found: &WaitidFound) -> crate::error::KernelResult<()> {
+    if infop == 0 {
+        return Ok(());
+    }
+    // Delivered through the bounce rather than by writing straight through
+    // `infop`.  The earlier `validate_user_write` in `sys_waitid` runs
+    // *before* the wait blocks, so by the time we get here a peer thread may
+    // have `munmap`ped the range out from under us — and a supervisor store
+    // to a user page needs STAC/CLAC bracketing once SMAP is on.
+    // `write_user_value` re-validates at the moment of the copy, which is
+    // the check that actually guards the store, and it copies bytewise so
+    // an unaligned `infop` is fine.
+    crate::mm::user::write_user_value::<WaitidSiginfo>(infop, waitid_siginfo(found))
 }
 
 /// Zero the user `siginfo_t` (used on the `WNOHANG`-with-no-event path so
 /// userspace can detect "nothing happened" via `si_pid == 0`/`si_signo
 /// == 0`, matching Linux).  No-op for a NULL `infop`.
-fn clear_waitid_siginfo(infop: u64) {
+fn clear_waitid_siginfo(infop: u64) -> crate::error::KernelResult<()> {
     if infop == 0 {
-        return;
+        return Ok(());
     }
-    // SAFETY: `infop` validated as a writable 128-byte user range above;
-    // same-process, so the mapping is unchanged.
-    unsafe {
-        core::ptr::write_bytes(infop as *mut u8, 0, 128);
+    // Through the bounce: see `write_waitid_siginfo`.
+    crate::mm::user::write_user_value::<[u8; 128]>(infop, [0u8; 128])
+}
+
+/// Zero a user `struct rusage` (144 bytes on x86_64).
+///
+/// We do not track per-process resource usage yet, so every wait-family
+/// syscall reports an all-zero struct rather than leaving the caller's
+/// buffer untouched (which would let it read stale stack contents as if
+/// they were accounting data).  A zero `rusage` is a no-op.
+fn clear_user_rusage(rusage: u64) -> crate::error::KernelResult<()> {
+    const RUSAGE_SIZE: usize = 144;
+    if rusage == 0 {
+        return Ok(());
     }
+    // Through the bounce: see `write_waitid_siginfo`.
+    crate::mm::user::write_user_value::<[u8; RUSAGE_SIZE]>(rusage, [0u8; RUSAGE_SIZE])
 }
 
 /// Boot self-test for the real `waitid` child-selection and `siginfo`
@@ -42450,13 +42529,13 @@ fn test_waitid_scan() -> crate::error::KernelResult<()> {
     }
 
     // --- siginfo_t on-wire byte layout (ABI contract) ---
-    // write_waitid_siginfo's field offsets (si_signo@0, si_code@8,
-    // si_pid@16, si_uid@20, si_status@24) are what ported Linux binaries
-    // read; a wrong offset would silently corrupt si_status for every
-    // caller.  The scan tests above only check the WaitidFound struct, so
-    // verify the actual bytes here.  write_waitid_siginfo does not itself
-    // validate the pointer (the syscall does), so a kernel stack buffer is
-    // a legal target in this context.
+    // The field offsets (si_signo@0, si_code@8, si_pid@16, si_uid@20,
+    // si_status@24) are what ported Linux binaries read; a wrong offset
+    // would silently corrupt si_status for every caller.  The scan tests
+    // above only check the WaitidFound struct, so verify the actual bytes
+    // here.  We drive `waitid_siginfo` (the pure encoder) rather than
+    // `write_waitid_siginfo`, which now delivers through the user bounce
+    // and would reject a kernel stack address.
     const _: () = assert!(core::mem::size_of::<WaitidSiginfo>() == 128);
     let mut buf = [0u8; 128];
     let probe = WaitidFound {
@@ -42465,7 +42544,18 @@ fn test_waitid_scan() -> crate::error::KernelResult<()> {
         si_uid: 7,
         si_status: 99,
     };
-    write_waitid_siginfo(buf.as_mut_ptr() as u64, &probe);
+    let encoded = waitid_siginfo(&probe);
+    // SAFETY: `WaitidSiginfo` is `#[repr(C)]` and exactly 128 bytes (asserted
+    // above), so reading it as 128 bytes is in bounds and yields precisely the
+    // image userspace observes.  `encoded` and `buf` are distinct kernel
+    // locals of that size, so the ranges cannot overlap.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            (&raw const encoded).cast::<u8>(),
+            buf.as_mut_ptr(),
+            128,
+        );
+    }
     let rd = |s: Option<&[u8]>| -> Option<i32> {
         s.and_then(|b| <[u8; 4]>::try_from(b).ok())
             .map(i32::from_ne_bytes)
@@ -42671,15 +42761,15 @@ fn sys_waitid(args: &SyscallArgs) -> SyscallResult {
             nowait,
         ) {
             Ok(Some(found)) => {
-                write_waitid_siginfo(infop, &found);
-                if rusage != 0 {
-                    // We don't track per-process resource usage; zero the
-                    // whole struct.  Validated as writable above.
-                    // SAFETY: validated 144-byte writable user range; same
-                    // process, mapping unchanged.
-                    unsafe {
-                        core::ptr::write_bytes(rusage as *mut u8, 0, 144);
-                    }
+                // The child is already reaped at this point, so a faulting
+                // `infop`/`rusage` costs the caller the notification.  Linux
+                // has the same ordering (kernel/exit.c fills siginfo after
+                // the release_task) and likewise returns EFAULT.
+                if let Err(e) = write_waitid_siginfo(infop, &found) {
+                    return linux_err(linux_errno_for(e));
+                }
+                if let Err(e) = clear_user_rusage(rusage) {
+                    return linux_err(linux_errno_for(e));
                 }
                 return SyscallResult::ok(0);
             }
@@ -42689,7 +42779,9 @@ fn sys_waitid(args: &SyscallArgs) -> SyscallResult {
         if nohang {
             // No state change: zero the siginfo so userspace sees
             // si_pid == 0 (Linux convention for "nothing to report").
-            clear_waitid_siginfo(infop);
+            if let Err(e) = clear_waitid_siginfo(infop) {
+                return linux_err(linux_errno_for(e));
+            }
             return SyscallResult::ok(0);
         }
         // Block until a child changes state (lost-wakeup-safe: register
@@ -42716,13 +42808,11 @@ fn sys_waitid(args: &SyscallArgs) -> SyscallResult {
                 if target.is_none() {
                     pcb::clear_wait_any_task(parent_pid, task_id);
                 }
-                write_waitid_siginfo(infop, &found);
-                if rusage != 0 {
-                    // SAFETY: validated 144-byte writable user range; same
-                    // process, mapping unchanged.
-                    unsafe {
-                        core::ptr::write_bytes(rusage as *mut u8, 0, 144);
-                    }
+                if let Err(e) = write_waitid_siginfo(infop, &found) {
+                    return linux_err(linux_errno_for(e));
+                }
+                if let Err(e) = clear_user_rusage(rusage) {
+                    return linux_err(linux_errno_for(e));
                 }
                 return SyscallResult::ok(0);
             }
@@ -45512,22 +45602,22 @@ fn sys_wait4(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return linux_err(linux_errno_for(e)),
     };
 
+    // Delivered through the bounce.  The `validate_user_write` at the top of
+    // the function ran *before* `wait_for_child_event` blocked, so it says
+    // nothing about the mapping now: a peer thread can `munmap` the range
+    // while we sleep.  `write_user_value` re-validates at the moment of the
+    // copy — the check that actually guards the store — and brackets it for
+    // SMAP.  The child is already reaped here, so a fault costs the caller
+    // its status word; Linux's wait4 has the same ordering and also returns
+    // EFAULT (the early validate is what makes that rare, not impossible).
+    // A NULL `wstatus` is legal (the caller just doesn't want the status).
     if wstatus_ptr != 0 {
-        // SAFETY: validated as a writable user range of i32 size at the
-        // top of the function; the address space hasn't changed because
-        // we're still in the calling process.
-        unsafe {
-            core::ptr::write(wstatus_ptr as *mut i32, wstatus);
+        if let Err(e) = crate::mm::user::write_user_value::<i32>(wstatus_ptr, wstatus) {
+            return linux_err(linux_errno_for(e));
         }
     }
-    if rusage_ptr != 0 {
-        // We don't track per-process resource usage; zero the whole
-        // struct.  Validated as writable above.
-        // SAFETY: same as wstatus write — validated user range, no ASID
-        // change since.
-        unsafe {
-            core::ptr::write_bytes(rusage_ptr as *mut u8, 0, RUSAGE_SIZE);
-        }
+    if let Err(e) = clear_user_rusage(rusage_ptr) {
+        return linux_err(linux_errno_for(e));
     }
 
     #[allow(clippy::cast_possible_wrap)]

@@ -43,6 +43,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -71,9 +72,18 @@ const MAX_BOOKMARKS: usize = 64;
 #[derive(Debug, Clone)]
 pub struct RecentCommand {
     /// The command string as typed.
-    pub command: String,
-    /// The resolved executable path (if found).
-    pub resolved_path: String,
+    ///
+    /// Bytes, not `String`: the first word of a command line is a filename,
+    /// and a filename may contain any byte but `/` and NUL.  Requiring UTF-8
+    /// here would make an executable with such a name un-runnable and
+    /// un-recordable even though the filesystem holding it accepts the name.
+    pub command: Vec<u8>,
+    /// The resolved executable path, or `None` if resolution failed.
+    ///
+    /// This was a `String` that was empty when resolution failed; the empty
+    /// path is not a path a file can have, but `Option` says so in the type
+    /// instead of relying on the reader to know the convention.
+    pub resolved_path: Option<PathBuf>,
     /// Timestamp (nanoseconds, monotonic).
     pub timestamp_ns: u64,
     /// Number of times this command was run.
@@ -83,12 +93,13 @@ pub struct RecentCommand {
 /// A completion suggestion.
 #[derive(Debug, Clone)]
 pub struct Completion {
-    /// The suggested text.
-    pub text: String,
+    /// The suggested text (bytes - see [`RecentCommand::command`]).
+    pub text: Vec<u8>,
     /// Source of this completion.
     pub source: CompletionSource,
-    /// Resolved path (if available).
-    pub path: String,
+    /// Resolved path, or `None` when the suggestion has no path (a bookmark
+    /// or an unresolved recent command).
+    pub path: Option<PathBuf>,
     /// Description/tooltip.
     pub description: String,
 }
@@ -110,9 +121,10 @@ pub enum CompletionSource {
 #[derive(Debug, Clone)]
 pub struct ResolveResult {
     /// The resolved executable path.
-    pub path: String,
-    /// Arguments (if command included arguments).
-    pub args: Vec<String>,
+    pub path: PathBuf,
+    /// Arguments (if command included arguments), as raw bytes: argv is not
+    /// required to be text any more than a path is.
+    pub args: Vec<Vec<u8>>,
     /// How it was resolved.
     pub source: CompletionSource,
 }
@@ -125,13 +137,17 @@ struct RunDialogState {
     /// Recent commands (newest first).
     recent: Vec<RecentCommand>,
     /// Aliases: short name → executable path.
-    aliases: BTreeMap<String, String>,
+    aliases: BTreeMap<Vec<u8>, PathBuf>,
     /// PATH directories to search.
-    path_dirs: Vec<String>,
+    path_dirs: Vec<PathBuf>,
     /// Known executables found via PATH (name → full path).
-    path_cache: BTreeMap<String, String>,
+    ///
+    /// Keyed by the filename exactly as `readdir` reported it, so an
+    /// executable whose name is not UTF-8 is still cached and still
+    /// completable.
+    path_cache: BTreeMap<PathBuf, PathBuf>,
     /// Bookmarked favorite commands.
-    bookmarks: Vec<String>,
+    bookmarks: Vec<Vec<u8>>,
 }
 
 impl RunDialogState {
@@ -154,17 +170,14 @@ static COMPLETION_COUNT: AtomicU64 = AtomicU64::new(0);
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// ASCII-lowercase.
-fn to_lower(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        if c.is_ascii_uppercase() {
-            out.push((c as u8 + 32) as char);
-        } else {
-            out.push(c);
-        }
-    }
-    out
+/// ASCII-lowercase, over bytes.
+///
+/// Only ASCII is folded.  Command matching must be total over the byte
+/// strings a filename can be, and there is no encoding to consult that would
+/// tell us how to case-fold a byte >= 0x80 - so those bytes are left alone,
+/// which is exactly what the old `char`-based version did for non-ASCII too.
+fn to_lower(s: &[u8]) -> Vec<u8> {
+    s.to_ascii_lowercase()
 }
 
 // ---------------------------------------------------------------------------
@@ -172,7 +185,8 @@ fn to_lower(s: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Record a command execution in history.
-pub fn record(command: &str, resolved_path: &str) {
+pub fn record(command: impl AsRef<[u8]>, resolved_path: Option<&Path>) {
+    let command = command.as_ref();
     RUN_COUNT.fetch_add(1, Ordering::Relaxed);
 
     if command.is_empty() {
@@ -188,8 +202,8 @@ pub fn record(command: &str, resolved_path: &str) {
         if to_lower(&entry.command) == cmd_lower {
             entry.timestamp_ns = now;
             entry.run_count = entry.run_count.saturating_add(1);
-            if !resolved_path.is_empty() {
-                entry.resolved_path = String::from(resolved_path);
+            if let Some(p) = resolved_path {
+                entry.resolved_path = Some(p.to_path_buf());
             }
             // Move to front by sorting (newest first).
             state.recent.sort_by_key(|e| core::cmp::Reverse(e.timestamp_ns));
@@ -202,8 +216,8 @@ pub fn record(command: &str, resolved_path: &str) {
         state.recent.pop(); // Remove oldest.
     }
     state.recent.insert(0, RecentCommand {
-        command: String::from(command),
-        resolved_path: String::from(resolved_path),
+        command: command.to_vec(),
+        resolved_path: resolved_path.map(Path::to_path_buf),
         timestamp_ns: now,
         run_count: 1,
     });
@@ -225,8 +239,8 @@ pub fn clear_recent() {
 }
 
 /// Remove a specific command from recent history.
-pub fn remove_recent(command: &str) -> KernelResult<()> {
-    let cmd_lower = to_lower(command);
+pub fn remove_recent(command: impl AsRef<[u8]>) -> KernelResult<()> {
+    let cmd_lower = to_lower(command.as_ref());
     let mut state = STATE.lock();
     let len_before = state.recent.len();
     state.recent.retain(|e| to_lower(&e.command) != cmd_lower);
@@ -242,7 +256,8 @@ pub fn remove_recent(command: &str) -> KernelResult<()> {
 // ---------------------------------------------------------------------------
 
 /// Register an alias (short name → executable path).
-pub fn register_alias(name: &str, path: &str) -> KernelResult<()> {
+pub fn register_alias(name: impl AsRef<[u8]>, path: impl AsRef<Path>) -> KernelResult<()> {
+    let (name, path) = (name.as_ref(), path.as_ref());
     if name.is_empty() || path.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
@@ -250,19 +265,19 @@ pub fn register_alias(name: &str, path: &str) -> KernelResult<()> {
     if !state.aliases.contains_key(name) && state.aliases.len() >= MAX_ALIASES {
         return Err(KernelError::ResourceExhausted);
     }
-    state.aliases.insert(String::from(name), String::from(path));
+    state.aliases.insert(name.to_vec(), path.to_path_buf());
     Ok(())
 }
 
 /// Remove an alias.
-pub fn remove_alias(name: &str) -> KernelResult<()> {
+pub fn remove_alias(name: impl AsRef<[u8]>) -> KernelResult<()> {
     let mut state = STATE.lock();
-    state.aliases.remove(name).ok_or(KernelError::NotFound)?;
+    state.aliases.remove(name.as_ref()).ok_or(KernelError::NotFound)?;
     Ok(())
 }
 
 /// List all aliases.
-pub fn list_aliases() -> Vec<(String, String)> {
+pub fn list_aliases() -> Vec<(Vec<u8>, PathBuf)> {
     let state = STATE.lock();
     state.aliases.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
 }
@@ -272,28 +287,32 @@ pub fn list_aliases() -> Vec<(String, String)> {
 // ---------------------------------------------------------------------------
 
 /// Set the PATH directories to search for executables.
-pub fn set_path(dirs: &[&str]) -> KernelResult<()> {
+pub fn set_path<P: AsRef<Path>>(dirs: &[P]) -> KernelResult<()> {
     if dirs.len() > MAX_PATH_ENTRIES {
         return Err(KernelError::InvalidArgument);
     }
     let mut state = STATE.lock();
-    state.path_dirs = dirs.iter().map(|d| String::from(*d)).collect();
+    state.path_dirs = dirs.iter().map(|d| d.as_ref().to_path_buf()).collect();
     Ok(())
 }
 
 /// Get current PATH directories.
-pub fn get_path() -> Vec<String> {
+pub fn get_path() -> Vec<PathBuf> {
     let state = STATE.lock();
     state.path_dirs.clone()
 }
 
 /// Register an executable found in PATH (pre-cache for fast completion).
-pub fn register_executable(name: &str, full_path: &str) -> KernelResult<()> {
+pub fn register_executable(
+    name: impl AsRef<Path>,
+    full_path: impl AsRef<Path>,
+) -> KernelResult<()> {
+    let (name, full_path) = (name.as_ref(), full_path.as_ref());
     if name.is_empty() || full_path.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
     let mut state = STATE.lock();
-    state.path_cache.insert(String::from(name), String::from(full_path));
+    state.path_cache.insert(name.to_path_buf(), full_path.to_path_buf());
     Ok(())
 }
 
@@ -312,11 +331,9 @@ pub fn refresh_path_cache() -> KernelResult<usize> {
         if let Ok(entries) = Vfs::readdir(dir) {
             for entry in &entries {
                 if entry.entry_type == crate::fs::EntryType::File {
-                    let full_path = if dir.ends_with('/') {
-                        alloc::format!("{}{}", dir, entry.name)
-                    } else {
-                        alloc::format!("{}/{}", dir, entry.name)
-                    };
+                    // `Path::join` collapses a trailing separator on `dir`
+                    // itself, so the old `dir.ends_with('/')` branch is gone.
+                    let full_path = dir.join(&entry.name);
                     let mut state = STATE.lock();
                     state.path_cache.insert(entry.name.clone(), full_path);
                     found += 1;
@@ -339,12 +356,13 @@ pub fn clear_path_cache() {
 // ---------------------------------------------------------------------------
 
 /// Add a command to bookmarks (favorites).
-pub fn add_bookmark(command: &str) -> KernelResult<()> {
+pub fn add_bookmark(command: impl AsRef<[u8]>) -> KernelResult<()> {
+    let command = command.as_ref();
     if command.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
     let mut state = STATE.lock();
-    let cmd = String::from(command);
+    let cmd = command.to_vec();
     if state.bookmarks.contains(&cmd) {
         return Ok(()); // Already bookmarked.
     }
@@ -356,10 +374,11 @@ pub fn add_bookmark(command: &str) -> KernelResult<()> {
 }
 
 /// Remove a bookmark.
-pub fn remove_bookmark(command: &str) -> KernelResult<()> {
+pub fn remove_bookmark(command: impl AsRef<[u8]>) -> KernelResult<()> {
+    let command = command.as_ref();
     let mut state = STATE.lock();
     let len_before = state.bookmarks.len();
-    state.bookmarks.retain(|c| c != command);
+    state.bookmarks.retain(|c| c.as_slice() != command);
     if state.bookmarks.len() == len_before {
         Err(KernelError::NotFound)
     } else {
@@ -368,7 +387,7 @@ pub fn remove_bookmark(command: &str) -> KernelResult<()> {
 }
 
 /// List bookmarked commands.
-pub fn list_bookmarks() -> Vec<String> {
+pub fn list_bookmarks() -> Vec<Vec<u8>> {
     let state = STATE.lock();
     state.bookmarks.clone()
 }
@@ -384,7 +403,8 @@ pub fn list_bookmarks() -> Vec<String> {
 /// 2. Recent commands matching prefix (most recent first)
 /// 3. PATH executables matching prefix
 /// 4. Aliases matching prefix
-pub fn completions(prefix: &str) -> Vec<Completion> {
+pub fn completions(prefix: impl AsRef<[u8]>) -> Vec<Completion> {
+    let prefix = prefix.as_ref();
     COMPLETION_COUNT.fetch_add(1, Ordering::Relaxed);
 
     if prefix.is_empty() {
@@ -412,7 +432,9 @@ pub fn completions(prefix: &str) -> Vec<Completion> {
             results.push(Completion {
                 text: cmd.clone(),
                 source: CompletionSource::Bookmark,
-                path: String::new(),
+                // A bookmark is a command line, not a resolved location: it
+                // has no path until `resolve` is run on it.
+                path: None,
                 description: String::from("bookmarked"),
             });
         }
@@ -433,12 +455,15 @@ pub fn completions(prefix: &str) -> Vec<Completion> {
 
     // 3. PATH executables.
     for (name, full_path) in &state.path_cache {
-        if to_lower(name).starts_with(&prefix_lower) && seen.insert(to_lower(name)) {
+        let name_lower = to_lower(name.as_bytes());
+        if name_lower.starts_with(&prefix_lower) && seen.insert(name_lower) {
             results.push(Completion {
-                text: name.clone(),
+                text: name.as_bytes().to_vec(),
                 source: CompletionSource::Path,
-                path: full_path.clone(),
-                description: full_path.clone(),
+                path: Some(full_path.clone()),
+                // The description is human-facing only, so a lossy render is
+                // acceptable here where it would not be in `path`.
+                description: alloc::format!("{}", full_path.display()),
             });
         }
     }
@@ -449,8 +474,8 @@ pub fn completions(prefix: &str) -> Vec<Completion> {
             results.push(Completion {
                 text: name.clone(),
                 source: CompletionSource::Alias,
-                path: target.clone(),
-                description: alloc::format!("alias → {}", target),
+                path: Some(target.clone()),
+                description: alloc::format!("alias → {}", target.display()),
             });
         }
     }
@@ -470,25 +495,30 @@ pub fn completions(prefix: &str) -> Vec<Completion> {
 /// 2. Check aliases
 /// 3. Check PATH cache
 /// 4. Search PATH directories directly
-pub fn resolve(command: &str) -> KernelResult<ResolveResult> {
+pub fn resolve(command: impl AsRef<[u8]>) -> KernelResult<ResolveResult> {
+    let command = command.as_ref();
     if command.is_empty() {
         return Err(KernelError::InvalidArgument);
     }
 
-    // Split command and arguments.
-    let mut parts = command.splitn(2, ' ');
-    let cmd = parts.next().unwrap_or("");
-    let args_str = parts.next().unwrap_or("");
-    let args: Vec<String> = if args_str.is_empty() {
-        Vec::new()
-    } else {
-        args_str.split_whitespace().map(String::from).collect()
-    };
+    // Split command and arguments.  Splitting on ASCII space and the usual
+    // whitespace bytes is safe over raw bytes because none of them can be a
+    // continuation byte of anything: this is a byte-oriented word split, the
+    // same one a POSIX shell performs.
+    let mut parts = command.splitn(2, |&b| b == b' ');
+    let cmd = parts.next().unwrap_or(&[]);
+    let args_str = parts.next().unwrap_or(&[]);
+    let args: Vec<Vec<u8>> = args_str
+        .split(|b| b.is_ascii_whitespace())
+        .filter(|w| !w.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect();
+    let cmd = Path::new(cmd);
 
     // 1. Absolute path.
-    if cmd.starts_with('/') {
+    if cmd.is_absolute() {
         return Ok(ResolveResult {
-            path: String::from(cmd),
+            path: cmd.to_path_buf(),
             args,
             source: CompletionSource::Path,
         });
@@ -497,7 +527,7 @@ pub fn resolve(command: &str) -> KernelResult<ResolveResult> {
     let state = STATE.lock();
 
     // 2. Alias.
-    if let Some(alias_path) = state.aliases.get(cmd) {
+    if let Some(alias_path) = state.aliases.get(cmd.as_bytes()) {
         return Ok(ResolveResult {
             path: alias_path.clone(),
             args,
@@ -516,11 +546,7 @@ pub fn resolve(command: &str) -> KernelResult<ResolveResult> {
 
     // 4. Search PATH directories.
     for dir in &state.path_dirs {
-        let full = if dir.ends_with('/') {
-            alloc::format!("{}{}", dir, cmd)
-        } else {
-            alloc::format!("{}/{}", dir, cmd)
-        };
+        let full = dir.join(cmd);
         // Check if file exists via VFS.
         if crate::fs::Vfs::metadata(&full).is_ok() {
             return Ok(ResolveResult {
@@ -599,23 +625,23 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 1: record and retrieve recent commands.
     {
-        record("file-manager", "/usr/bin/file-manager");
-        record("terminal", "/usr/bin/terminal");
-        record("calculator", "/usr/bin/calculator");
+        record("file-manager", Some(Path::new("/usr/bin/file-manager")));
+        record("terminal", Some(Path::new("/usr/bin/terminal")));
+        record("calculator", Some(Path::new("/usr/bin/calculator")));
         let r = recent(10);
         assert_eq!(r.len(), 3);
         // Most recent first.
-        assert_eq!(r[0].command, "calculator");
+        assert_eq!(r[0].command, b"calculator");
         serial_println!("[rundialog] test 1 passed: record/recent");
     }
 
     // Test 2: duplicate command updates count.
     {
-        record("terminal", "/usr/bin/terminal");
+        record("terminal", Some(Path::new("/usr/bin/terminal")));
         let r = recent(10);
         assert_eq!(r.len(), 3); // Still 3, not 4.
         // Terminal should be first (most recent) with count 2.
-        assert_eq!(r[0].command, "terminal");
+        assert_eq!(r[0].command, b"terminal");
         assert_eq!(r[0].run_count, 2);
         serial_println!("[rundialog] test 2 passed: duplicate handling");
     }
@@ -628,7 +654,7 @@ pub fn self_test() -> KernelResult<()> {
         assert_eq!(aliases.len(), 2);
 
         let resolved = resolve("calc")?;
-        assert_eq!(resolved.path, "/usr/bin/calculator");
+        assert_eq!(resolved.path.as_path(), Path::new("/usr/bin/calculator"));
         assert_eq!(resolved.source, CompletionSource::Alias);
         serial_println!("[rundialog] test 3 passed: aliases");
     }
@@ -638,7 +664,7 @@ pub fn self_test() -> KernelResult<()> {
         register_executable("ls", "/bin/ls")?;
         register_executable("cat", "/bin/cat")?;
         let resolved = resolve("ls")?;
-        assert_eq!(resolved.path, "/bin/ls");
+        assert_eq!(resolved.path.as_path(), Path::new("/bin/ls"));
         assert_eq!(resolved.source, CompletionSource::Path);
         serial_println!("[rundialog] test 4 passed: PATH resolution");
     }
@@ -673,10 +699,28 @@ pub fn self_test() -> KernelResult<()> {
         assert_eq!(r.len(), 2); // Down from 3.
 
         let resolved = resolve("/usr/bin/custom-app --flag")?;
-        assert_eq!(resolved.path, "/usr/bin/custom-app");
+        assert_eq!(resolved.path.as_path(), Path::new("/usr/bin/custom-app"));
         assert_eq!(resolved.args.len(), 1);
-        assert_eq!(resolved.args[0], "--flag");
+        assert_eq!(resolved.args[0], b"--flag");
         serial_println!("[rundialog] test 7 passed: remove/absolute path");
+    }
+
+    // Test 8: a command whose name is not UTF-8 still resolves and completes.
+    //
+    // This is the whole point of the byte typing: `readdir` can hand us a
+    // name like this from any filesystem that stores names as bytes, and the
+    // run dialog must be able to cache, complete and resolve it.
+    {
+        let odd = Path::new(b"we\xffird-app".as_slice());
+        register_executable(odd, Path::new(b"/bin/we\xffird-app".as_slice()))?;
+
+        let resolved = resolve(b"we\xffird-app --go".as_slice())?;
+        assert_eq!(resolved.path.as_path(), Path::new(b"/bin/we\xffird-app".as_slice()));
+        assert_eq!(resolved.args, alloc::vec![b"--go".to_vec()]);
+
+        let comps = completions(b"we\xff".as_slice());
+        assert!(comps.iter().any(|c| c.text == b"we\xffird-app"));
+        serial_println!("[rundialog] test 8 passed: non-UTF-8 executable name");
     }
 
     clear_all();

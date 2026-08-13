@@ -3644,8 +3644,11 @@ fn gen_snapshots() -> Vec<u8> {
             let parent_str = snap.parent
                 .map(|p| format!("{}", p.0))
                 .unwrap_or_else(|| String::from("-"));
+            // Octal-escaped: this is a fixed-column, line-oriented table, and a
+            // root path containing a newline would otherwise forge a row.
+            let root = mangle_mount_field(snap.root_path.as_bytes());
             s.push_str(&format!("{:>4}  {:20}  {:30}  {:>8}  {:>12}  {}\n",
-                snap.id.0, snap.name, snap.root_path,
+                snap.id.0, snap.name, root,
                 snap.file_count, snap.total_bytes, parent_str));
         }
     }
@@ -5012,8 +5015,17 @@ fn gen_rundialog() -> Vec<u8> {
     if !recent.is_empty() {
         out.push_str("Recent commands:\n");
         for cmd in &recent {
+            // Both fields are raw bytes (a command line's first word is a
+            // filename), so they are octal-escaped like the mount fields: this
+            // file is line-oriented, and an un-escaped newline or U+FFFD would
+            // respectively forge a record and name a different executable.
+            // An unresolved command prints `-`, which cannot be mistaken for a
+            // path because a resolved path is always absolute.
+            let command = mangle_mount_field(&cmd.command);
+            let resolved = cmd.resolved_path.as_ref()
+                .map_or_else(|| String::from("-"), |p| mangle_mount_field(p.as_bytes()));
             out.push_str(&format!("  {} (x{}) → {}\n",
-                cmd.command, cmd.run_count, cmd.resolved_path));
+                command, cmd.run_count, resolved));
         }
         out.push('\n');
     }
@@ -5022,7 +5034,9 @@ fn gen_rundialog() -> Vec<u8> {
     if !aliases.is_empty() {
         out.push_str("Aliases:\n");
         for (name, target) in &aliases {
-            out.push_str(&format!("  {} → {}\n", name, target));
+            // Octal-escaped for the same reason as the recent-command list.
+            out.push_str(&format!("  {} → {}\n",
+                mangle_mount_field(name), mangle_mount_field(target.as_bytes())));
         }
     }
 

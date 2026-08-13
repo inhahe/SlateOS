@@ -56,13 +56,13 @@
 
 use alloc::collections::BTreeMap;
 use alloc::collections::VecDeque;
-use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::notify::{self, FsEventMask, FsEventType};
+use crate::fs::path::{Path, PathBuf};
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -301,7 +301,7 @@ struct Watch {
     in_mask: u32,
     /// Normalized watched path (always ends in `/`, matching the native
     /// layer's stored form), used to compute event basenames.
-    path_norm: String,
+    path_norm: PathBuf,
 }
 
 /// A kernel inotify instance: a watch table, a pending-event buffer, and a
@@ -337,33 +337,25 @@ impl Inotify {
     /// Returns an empty vec for "self" events (the watched path itself),
     /// matching inotify's convention of `len == 0` for events on the watch
     /// target rather than a child.
-    fn basename_for(path_norm: &str, abs_path: &str) -> Vec<u8> {
-        // Self event: abs_path equals the watch path with the slash stripped.
-        if let Some(bare) = path_norm.strip_suffix('/') {
-            if abs_path == bare {
-                return Vec::new();
-            }
-        }
+    fn basename_for(path_norm: &Path, abs_path: &Path) -> Vec<u8> {
+        // `Path::strip_prefix` matches on component boundaries and ignores the
+        // trailing separator `path_norm` carries, so the two hand-written
+        // cases this used to need — stripping the slash to recognise a self
+        // event, and re-splitting the remainder on `/` — both collapse into it.
+        // A self event yields an empty remainder, which is exactly inotify's
+        // `len == 0` convention for an event on the watch target itself.
         if let Some(rem) = abs_path.strip_prefix(path_norm) {
-            if rem.is_empty() {
-                return Vec::new();
-            }
             // inotify names are always a single path component (the immediate
             // child of the watched directory), never a multi-level path.  Our
             // native watches are non-recursive, so `rem` is normally already a
-            // single component; guard against a deeper path slipping through by
-            // taking only the first component so the emitted name can never
-            // contain an embedded '/' (which would corrupt the record stream).
-            let first = rem.split('/').next().unwrap_or(rem);
-            if first.is_empty() {
-                return Vec::new();
-            }
-            return first.as_bytes().to_vec();
+            // single component; taking only the first guards against a deeper
+            // path slipping through, so the emitted name can never contain an
+            // embedded '/' (which would corrupt the record stream).
+            return rem.components().next().map_or_else(Vec::new, |c| c.as_bytes().to_vec());
         }
         // Path did not fall under the watch (shouldn't happen — native
         // already filtered) — fall back to the whole path's final component.
-        let tail = abs_path.rsplit('/').next().unwrap_or(abs_path);
-        tail.as_bytes().to_vec()
+        abs_path.file_name().map_or_else(Vec::new, |n| n.as_bytes().to_vec())
     }
 
     /// Drain all native watches into `self.pending`, translating each native
@@ -532,11 +524,11 @@ pub fn exists(handle: InotifyHandle) -> bool {
 /// - [`KernelError::AlreadyExists`] if `IN_MASK_CREATE` is set and the path is
 ///   already watched.
 /// - [`KernelError::OutOfMemory`] if the native watch table is full.
-pub fn add_watch(handle: InotifyHandle, path: &str, in_mask: u32) -> KernelResult<i32> {
+pub fn add_watch(handle: InotifyHandle, path: impl AsRef<Path>, in_mask: u32) -> KernelResult<i32> {
     // Normalize to trailing-slash form for identity + basename math.
-    let mut norm = String::from(path);
-    if !norm.ends_with('/') {
-        norm.push('/');
+    let mut norm = path.as_ref().to_path_buf();
+    if norm.as_bytes().last() != Some(&b'/') {
+        norm.extend_bytes(b"/");
     }
 
     let mut table = INOTIFY_TABLE.lock();
@@ -586,7 +578,7 @@ pub fn add_watch(handle: InotifyHandle, path: &str, in_mask: u32) -> KernelResul
 ///
 /// `owner_token` is the owning inotify instance id, registered on the native
 /// watch so a blocked `read()` on this instance is woken when the watch fires.
-fn create_native(norm: &str, effective: u32, owner_token: u64) -> KernelResult<u64> {
+fn create_native(norm: &Path, effective: u32, owner_token: u64) -> KernelResult<u64> {
     let native_mask = to_native_mask(effective);
     if native_mask.0 == 0 {
         return Ok(0);
@@ -606,7 +598,7 @@ fn rebind_native(
     ino: &mut Inotify,
     owner_token: u64,
     wd: i32,
-    norm: &str,
+    norm: &Path,
     new_mask: u32,
 ) -> KernelResult<()> {
     // Create the replacement first so a failure leaves the old watch intact.

@@ -27,6 +27,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 use crate::sync::PreemptSpinMutex as Mutex;
 
 /// Root directory under which named-volume backing directories are created.
@@ -65,9 +66,15 @@ static TABLE: Mutex<VolumeTable> = Mutex::new(VolumeTable::new());
 /// A name must be non-empty, at most [`MAX_VOLUME_NAME_LEN`] bytes, contain no
 /// path separator (`/`) or NUL (so it maps to exactly one directory under
 /// [`VOLUMES_ROOT`]), and must not be `.` or `..` (which would alias the
-/// volumes root or its parent). All other bytes are permitted, consistent with
-/// the OS-wide path rule (any byte except `/` and NUL). Names are treated as
-/// opaque byte strings — no UTF-8 requirement is imposed.
+/// volumes root or its parent).
+///
+/// A volume name is *text*, not an arbitrary byte string: unlike a filename
+/// read back from a filesystem, it is an identifier the operator types at the
+/// shell and that is echoed back by `docker volume ls`. It never originates
+/// from `readdir`, so there is nothing to lose by requiring it to be decodable.
+/// The byte-generality lives one layer down — [`backing_path`] produces a
+/// [`PathBuf`], so the *path* built from the name is byte-typed like every
+/// other path in the kernel.
 ///
 /// # Errors
 /// [`KernelError::InvalidArgument`] if the name violates any rule above.
@@ -88,12 +95,9 @@ pub fn validate_name(name: &str) -> KernelResult<()> {
 ///
 /// # Errors
 /// [`KernelError::InvalidArgument`] if `name` is invalid (see [`validate_name`]).
-pub fn backing_path(name: &str) -> KernelResult<String> {
+pub fn backing_path(name: &str) -> KernelResult<PathBuf> {
     validate_name(name)?;
-    let mut p = String::from(VOLUMES_ROOT);
-    p.push('/');
-    p.push_str(name);
-    Ok(p)
+    Ok(Path::new(VOLUMES_ROOT).join(name))
 }
 
 /// Create a named volume, materializing its backing directory.
@@ -109,7 +113,7 @@ pub fn backing_path(name: &str) -> KernelResult<String> {
 /// - [`KernelError::InvalidArgument`] if `name` is invalid.
 /// - [`KernelError::ResourceExhausted`] if the registry is full ([`MAX_VOLUMES`]).
 /// - Any VFS error from creating the backing directory.
-pub fn create(name: &str) -> KernelResult<String> {
+pub fn create(name: &str) -> KernelResult<PathBuf> {
     let path = backing_path(name)?;
     {
         let mut table = TABLE.lock();
@@ -134,7 +138,7 @@ pub fn create(name: &str) -> KernelResult<String> {
 ///
 /// # Errors
 /// Same as [`create`].
-pub fn ensure(name: &str) -> KernelResult<String> {
+pub fn ensure(name: &str) -> KernelResult<PathBuf> {
     create(name)
 }
 
@@ -146,7 +150,7 @@ pub fn exists(name: &str) -> bool {
 
 /// The backing path of a registered volume, or `None` if it is not registered.
 #[must_use]
-pub fn path_of(name: &str) -> Option<String> {
+pub fn path_of(name: &str) -> Option<PathBuf> {
     let table = TABLE.lock();
     if table.position(name).is_some() {
         // `backing_path` only fails on an invalid name, which a *registered*
@@ -244,25 +248,28 @@ pub fn backing_size(name: &str) -> u64 {
 ///
 /// Iterative (stack-based) VFS walk shared by [`backing_size`].  A `MAX_ENTRIES`
 /// cap bounds a pathological tree; symlinks carry no data payload to sum.
-fn dir_tree_bytes(root: &str) -> u64 {
+fn dir_tree_bytes(root: &Path) -> u64 {
     use crate::fs::vfs::{EntryType, Vfs};
     const MAX_ENTRIES: usize = 1_000_000;
     let mut total: u64 = 0;
     let mut visited: usize = 0;
-    let mut stack: Vec<String> = alloc::vec![String::from(root.trim_end_matches('/'))];
+    // No `trim_end_matches('/')` on the root any more: `Path::join` collapses a
+    // trailing separator (and the root case) itself, so there is nothing left
+    // for the caller to normalize away.
+    let mut stack: Vec<PathBuf> = alloc::vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = Vfs::readdir(&dir) else {
             continue;
         };
         for de in entries {
-            if de.name == "." || de.name == ".." {
+            if de.name.as_path() == Path::new(".") || de.name.as_path() == Path::new("..") {
                 continue;
             }
             visited = visited.saturating_add(1);
             if visited >= MAX_ENTRIES {
                 return total;
             }
-            let child = alloc::format!("{dir}/{}", de.name);
+            let child = dir.join(&de.name);
             match de.entry_type {
                 EntryType::Directory => stack.push(child),
                 EntryType::File => total = total.saturating_add(de.size),
@@ -297,8 +304,8 @@ pub fn self_test() {
 
     // Backing path derivation.
     assert_eq!(
-        backing_path("data").expect("backing_path data"),
-        "/var/lib/slate/volumes/data",
+        backing_path("data").expect("backing_path data").as_path(),
+        Path::new("/var/lib/slate/volumes/data"),
         "backing path must be VOLUMES_ROOT/name",
     );
     serial_println!("[volume]   backing path derivation: OK");
@@ -314,7 +321,7 @@ pub fn self_test() {
     assert_eq!(count(), base + 1, "re-create must not duplicate the entry");
     assert_eq!(
         path_of("st-vol-a").as_deref(),
-        Some(p1.as_str()),
+        Some(p1.as_path()),
         "path_of must return the backing path of a registered volume",
     );
     assert!(path_of("st-vol-missing").is_none(), "path_of unknown volume is None");
@@ -340,9 +347,9 @@ pub fn self_test() {
         assert_eq!(backing_size("st-vol-missing"), 0, "unknown volume sizes to 0");
         assert_eq!(backing_size("st-vol-b"), 0, "empty volume sizes to 0");
         // Write 3 + 5 bytes at two depths and confirm the total is 8.
-        Vfs::write_file(&alloc::format!("{p2}/a.txt"), b"AAA").expect("write a");
-        Vfs::mkdir(&alloc::format!("{p2}/sub")).expect("mkdir sub");
-        Vfs::write_file(&alloc::format!("{p2}/sub/b.txt"), b"BBBBB").expect("write b");
+        Vfs::write_file(p2.join("a.txt"), b"AAA").expect("write a");
+        Vfs::mkdir(p2.join("sub")).expect("mkdir sub");
+        Vfs::write_file(p2.join("sub/b.txt"), b"BBBBB").expect("write b");
         assert_eq!(
             backing_size("st-vol-b"), 8,
             "backing_size must sum nested regular-file bytes",

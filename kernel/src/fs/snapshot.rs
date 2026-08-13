@@ -50,6 +50,7 @@ use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::cas::{self, Hash256};
+use crate::fs::path::{Path, PathBuf};
 use crate::fs::vfs::{EntryType, FileMeta, Vfs};
 use crate::serial_println;
 
@@ -65,13 +66,13 @@ pub struct SnapshotId(pub u64);
 #[derive(Debug, Clone)]
 pub struct SnapshotEntry {
     /// Full path relative to the snapshot root.
-    pub path: String,
+    pub path: PathBuf,
     /// Entry type (File, Directory, Symlink).
     pub entry_type: EntryType,
     /// CAS hash of file content (None for directories).
     pub content_hash: Option<Hash256>,
     /// Symlink target (for symlinks only).
-    pub symlink_target: Option<String>,
+    pub symlink_target: Option<PathBuf>,
     /// File size in bytes.
     pub size: u64,
     /// POSIX permissions.
@@ -92,7 +93,7 @@ pub struct Snapshot {
     /// Human-readable name.
     pub name: String,
     /// Path that was snapshotted.
-    pub root_path: String,
+    pub root_path: PathBuf,
     /// Timestamp of snapshot creation (nanoseconds since epoch).
     pub created_ns: u64,
     /// Parent snapshot ID (for branching).
@@ -112,7 +113,7 @@ pub struct Snapshot {
 pub struct SnapshotInfo {
     pub id: SnapshotId,
     pub name: String,
-    pub root_path: String,
+    pub root_path: PathBuf,
     pub created_ns: u64,
     pub parent: Option<SnapshotId>,
     pub file_count: u64,
@@ -139,10 +140,18 @@ pub struct SnapshotOptions {
     pub max_depth: usize,
     /// Maximum file size to include (larger files are skipped). Default 64 MiB.
     pub max_file_size: u64,
-    /// Exclude paths matching these prefixes (relative to snapshot root).
-    pub exclude_prefixes: Vec<String>,
-    /// Only include paths matching these prefixes (empty = include all).
-    pub include_prefixes: Vec<String>,
+    /// Exclude these paths and everything under them (relative to the root).
+    ///
+    /// Matching is by *component*, via [`crate::fs::pathutil::path_in_subtree`]:
+    /// excluding `.git` excludes `.git/config` but not `.gitignore`. These were
+    /// byte prefixes, which meant a filter had to be written `src/` with a
+    /// trailing separator to avoid matching a sibling whose name merely started
+    /// the same way — evidence that subtree containment was what was meant.
+    pub exclude_paths: Vec<PathBuf>,
+    /// Only include these paths and their subtrees (empty = include all).
+    ///
+    /// Matched the same way as [`Self::exclude_paths`].
+    pub include_paths: Vec<PathBuf>,
 }
 
 impl Default for SnapshotOptions {
@@ -150,8 +159,8 @@ impl Default for SnapshotOptions {
         Self {
             max_depth: 64,
             max_file_size: 64 * 1024 * 1024, // 64 MiB
-            exclude_prefixes: Vec::new(),
-            include_prefixes: Vec::new(),
+            exclude_paths: Vec::new(),
+            include_paths: Vec::new(),
         }
     }
 }
@@ -179,11 +188,12 @@ static SNAPSHOTS: Mutex<SnapshotInner> = Mutex::new(SnapshotInner {
 /// Walks the tree at `path`, stores file contents in the CAS, and
 /// records the full directory structure.  Returns the new snapshot ID.
 pub fn create(
-    path: &str,
+    path: impl AsRef<Path>,
     name: &str,
     parent: Option<SnapshotId>,
     options: &SnapshotOptions,
 ) -> KernelResult<SnapshotId> {
+    let path = path.as_ref();
     // Validate path exists and is a directory.
     let stat = Vfs::stat(path)?;
     if stat.entry_type != EntryType::Directory {
@@ -199,7 +209,7 @@ pub fn create(
     // Walk the directory tree.
     walk_directory(
         path,
-        "",
+        Path::new(""),
         options,
         0,
         &mut entries,
@@ -216,7 +226,7 @@ pub fn create(
         let snapshot = Snapshot {
             id,
             name: String::from(name),
-            root_path: String::from(path),
+            root_path: path.to_path_buf(),
             created_ns,
             parent,
             entries,
@@ -233,7 +243,7 @@ pub fn create(
         "[snapshot] Created '{}' (id={}) at {}: {} files, {} bytes",
         name,
         id.0,
-        path,
+        path.display(),
         file_count,
         total_bytes,
     );
@@ -246,7 +256,8 @@ pub fn create(
 /// Recreates the directory structure and writes all files from the CAS.
 /// The target path must exist as a directory.  Existing files at the
 /// target are overwritten.
-pub fn restore(id: SnapshotId, target_path: &str) -> KernelResult<RestoreResult> {
+pub fn restore(id: SnapshotId, target_path: impl AsRef<Path>) -> KernelResult<RestoreResult> {
+    let target_path = target_path.as_ref();
     // Clone entries out of the lock to avoid holding it during I/O.
     let entries = {
         let inner = SNAPSHOTS.lock();
@@ -276,7 +287,7 @@ pub fn restore(id: SnapshotId, target_path: &str) -> KernelResult<RestoreResult>
     dirs.sort_by_key(|e| e.path.len());
 
     for entry in &dirs {
-        let full_path = join_path(target_path, &entry.path);
+        let full_path = target_path.join(&entry.path);
         match Vfs::mkdir(&full_path) {
             Ok(()) => result.dirs_created = result.dirs_created.saturating_add(1),
             Err(KernelError::AlreadyExists) => {} // OK, already exists.
@@ -286,7 +297,7 @@ pub fn restore(id: SnapshotId, target_path: &str) -> KernelResult<RestoreResult>
 
     // Second pass: restore files.
     for entry in entries.iter().filter(|e| e.entry_type == EntryType::File) {
-        let full_path = join_path(target_path, &entry.path);
+        let full_path = target_path.join(&entry.path);
 
         if let Some(ref hash) = entry.content_hash {
             match cas::get(hash) {
@@ -309,7 +320,7 @@ pub fn restore(id: SnapshotId, target_path: &str) -> KernelResult<RestoreResult>
 
     // Third pass: restore symlinks.
     for entry in entries.iter().filter(|e| e.entry_type == EntryType::Symlink) {
-        let full_path = join_path(target_path, &entry.path);
+        let full_path = target_path.join(&entry.path);
         if let Some(ref target) = entry.symlink_target {
             match Vfs::symlink(&full_path, target) {
                 Ok(()) => result.symlinks_created = result.symlinks_created.saturating_add(1),
@@ -321,7 +332,7 @@ pub fn restore(id: SnapshotId, target_path: &str) -> KernelResult<RestoreResult>
     serial_println!(
         "[snapshot] Restored id={} to {}: {} files, {} dirs, {} symlinks, {} errors",
         id.0,
-        target_path,
+        target_path.display(),
         result.files_restored,
         result.dirs_created,
         result.symlinks_created,
@@ -400,21 +411,24 @@ pub fn entries(id: SnapshotId) -> KernelResult<Vec<SnapshotEntry>> {
 pub fn diff(
     id_a: SnapshotId,
     id_b: SnapshotId,
-) -> KernelResult<(Vec<String>, Vec<String>, Vec<String>)> {
+) -> KernelResult<(Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>)> {
     let inner = SNAPSHOTS.lock();
     let snap_a = inner.snapshots.get(&id_a).ok_or(KernelError::NotFound)?;
     let snap_b = inner.snapshots.get(&id_b).ok_or(KernelError::NotFound)?;
 
-    // Build path→hash maps for files.
-    let map_a: BTreeMap<&str, Option<&Hash256>> = snap_a
+    // Build path→hash maps for files.  `Path` orders by bytes, so it is a
+    // total order over every name a filesystem can hand back — a map keyed on
+    // it needs no decoding step that could collapse two distinct entries onto
+    // one key.
+    let map_a: BTreeMap<&Path, Option<&Hash256>> = snap_a
         .entries
         .iter()
-        .map(|e| (e.path.as_str(), e.content_hash.as_ref()))
+        .map(|e| (e.path.as_path(), e.content_hash.as_ref()))
         .collect();
-    let map_b: BTreeMap<&str, Option<&Hash256>> = snap_b
+    let map_b: BTreeMap<&Path, Option<&Hash256>> = snap_b
         .entries
         .iter()
-        .map(|e| (e.path.as_str(), e.content_hash.as_ref()))
+        .map(|e| (e.path.as_path(), e.content_hash.as_ref()))
         .collect();
 
     let mut added = Vec::new();
@@ -424,10 +438,10 @@ pub fn diff(
     // In B but not in A → added.
     for (path, hash_b) in &map_b {
         match map_a.get(path) {
-            None => added.push(String::from(*path)),
+            None => added.push(path.to_path_buf()),
             Some(hash_a) => {
                 if hash_a != hash_b {
-                    modified.push(String::from(*path));
+                    modified.push(path.to_path_buf());
                 }
             }
         }
@@ -436,7 +450,7 @@ pub fn diff(
     // In A but not in B → removed.
     for path in map_a.keys() {
         if !map_b.contains_key(path) {
-            removed.push(String::from(*path));
+            removed.push(path.to_path_buf());
         }
     }
 
@@ -475,8 +489,8 @@ pub fn children(id: SnapshotId) -> Vec<SnapshotId> {
 
 /// Recursively walk a directory tree, storing entries and CAS blobs.
 fn walk_directory(
-    root: &str,
-    relative: &str,
+    root: &Path,
+    relative: &Path,
     options: &SnapshotOptions,
     depth: usize,
     entries: &mut Vec<SnapshotEntry>,
@@ -488,27 +502,22 @@ fn walk_directory(
         return Ok(());
     }
 
-    let full_path = if relative.is_empty() {
-        String::from(root)
-    } else {
-        join_path(root, relative)
-    };
+    // `Path::join` returns the base unchanged for an empty relative path and
+    // inserts exactly one separator otherwise, so both of the hand-written
+    // empty/non-empty special cases this used to carry are gone.
+    let full_path = root.join(relative);
 
     let dir_entries = Vfs::readdir(&full_path)?;
 
     for entry in &dir_entries {
-        let entry_relative = if relative.is_empty() {
-            entry.name.clone()
-        } else {
-            alloc::format!("{}/{}", relative, entry.name)
-        };
+        let entry_relative = relative.join(&entry.name);
 
         // Check exclusion filters.
         if should_exclude(&entry_relative, options) {
             continue;
         }
 
-        let entry_full = join_path(root, &entry_relative);
+        let entry_full = root.join(&entry_relative);
 
         match entry.entry_type {
             EntryType::Directory => {
@@ -601,35 +610,26 @@ fn walk_directory(
 }
 
 /// Check if a relative path should be excluded by options.
-fn should_exclude(relative: &str, options: &SnapshotOptions) -> bool {
-    // Check exclusion prefixes.
-    for prefix in &options.exclude_prefixes {
-        if relative.starts_with(prefix.as_str()) {
+///
+/// Both filters test subtree containment on component boundaries rather than
+/// on raw bytes; see [`SnapshotOptions::exclude_paths`].
+fn should_exclude(relative: &Path, options: &SnapshotOptions) -> bool {
+    use crate::fs::pathutil::path_in_subtree;
+
+    for excluded in &options.exclude_paths {
+        if path_in_subtree(relative, excluded) {
             return true;
         }
     }
 
-    // Check inclusion prefixes (if specified, path must match at least one).
-    if !options.include_prefixes.is_empty() {
-        let matches_any = options
-            .include_prefixes
-            .iter()
-            .any(|p| relative.starts_with(p.as_str()));
-        if !matches_any {
-            return true;
-        }
+    // Inclusion filter: if any is specified, the path must match at least one.
+    if !options.include_paths.is_empty()
+        && !options.include_paths.iter().any(|p| path_in_subtree(relative, p))
+    {
+        return true;
     }
 
     false
-}
-
-/// Join a base path and relative path with '/'.
-fn join_path(base: &str, relative: &str) -> String {
-    if relative.is_empty() {
-        return String::from(base);
-    }
-    let base = base.strip_suffix('/').unwrap_or(base);
-    alloc::format!("{}/{}", base, relative)
 }
 
 /// Format a Hash256 as a hex string.
@@ -649,7 +649,6 @@ pub fn hash_to_hex(hash: &Hash256) -> String {
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[snapshot] Running self-test...");
 
-    test_join_path();
     test_should_exclude();
     test_create_and_list();
     test_restore();
@@ -658,32 +657,39 @@ pub fn self_test() -> KernelResult<()> {
     test_branching();
     test_find_by_name();
 
-    serial_println!("[snapshot] Self-test passed (8 tests).");
+    // `join_path` and its test are gone: `Path::join` reproduces it byte for
+    // byte (including the empty-relative and trailing-separator cases) and is
+    // tested in `fs::path`.
+    serial_println!("[snapshot] Self-test passed (7 tests).");
     Ok(())
-}
-
-fn test_join_path() {
-    assert_eq!(join_path("/tmp", "a/b"), "/tmp/a/b");
-    assert_eq!(join_path("/tmp/", "a"), "/tmp/a");
-    assert_eq!(join_path("/", "x"), "/x");
-    assert_eq!(join_path("/tmp", ""), "/tmp");
-    serial_println!("[snapshot]   join_path: ok");
 }
 
 fn test_should_exclude() {
     let mut opts = SnapshotOptions::default();
-    opts.exclude_prefixes.push(String::from(".git"));
-    opts.exclude_prefixes.push(String::from("node_modules"));
+    opts.exclude_paths.push(PathBuf::from(".git"));
+    opts.exclude_paths.push(PathBuf::from("node_modules"));
 
-    assert!(should_exclude(".git/config", &opts));
-    assert!(should_exclude("node_modules/foo", &opts));
-    assert!(!should_exclude("src/main.rs", &opts));
+    assert!(should_exclude(Path::new(".git/config"), &opts));
+    assert!(should_exclude(Path::new("node_modules/foo"), &opts));
+    assert!(!should_exclude(Path::new("src/main.rs"), &opts));
+    // The excluded directory itself is excluded, but a *sibling* whose name
+    // merely starts with it is not - this is the byte-prefix bug the
+    // component-wise match fixes.
+    assert!(should_exclude(Path::new(".git"), &opts));
+    assert!(!should_exclude(Path::new(".gitignore"), &opts));
 
-    // Include filter.
+    // Include filter.  A trailing separator on the filter is tolerated, so
+    // both spellings behave the same.
     let mut opts2 = SnapshotOptions::default();
-    opts2.include_prefixes.push(String::from("src/"));
-    assert!(!should_exclude("src/main.rs", &opts2));
-    assert!(should_exclude("docs/readme.md", &opts2));
+    opts2.include_paths.push(PathBuf::from("src/"));
+    assert!(!should_exclude(Path::new("src/main.rs"), &opts2));
+    assert!(should_exclude(Path::new("docs/readme.md"), &opts2));
+
+    // A non-UTF-8 component is filterable like any other.
+    let mut opts3 = SnapshotOptions::default();
+    opts3.exclude_paths.push(Path::new(b"ca\xffche".as_slice()).to_path_buf());
+    assert!(should_exclude(Path::new(b"ca\xffche/blob".as_slice()), &opts3));
+    assert!(!should_exclude(Path::new("cache/blob"), &opts3));
 
     serial_println!("[snapshot]   should_exclude: ok");
 }
@@ -704,7 +710,7 @@ fn test_create_and_list() {
 
     let info = info(id).expect("snapshot info failed");
     assert_eq!(info.name, "test-snap");
-    assert_eq!(info.root_path, "/tmp/snap_test");
+    assert_eq!(info.root_path.as_path(), Path::new("/tmp/snap_test"));
     assert!(info.file_count >= 2, "should have at least 2 files");
     assert!(info.total_bytes >= 18, "should have at least 18 bytes");
 
@@ -751,7 +757,7 @@ fn test_diff() {
     assert!(!added.is_empty() || !modified.is_empty(), "should detect changes");
     // hello.txt was modified.
     assert!(
-        modified.iter().any(|p| p.contains("hello.txt")),
+        modified.iter().any(|p| p.as_path() == Path::new("hello.txt")),
         "hello.txt should be in modified"
     );
 

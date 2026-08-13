@@ -38277,6 +38277,99 @@ not clear IF).
 
 ---
 
+### B-PTHREAD-CHILD-JUMPS-TO-GARBAGE. One `pthread_create`d thread intermittently starts at a bogus RIP and is killed; the process keeps running and reports a wrong answer — OPEN (1 in 10 boots, measured) 2026-08-13
+
+**Symptom.** A deliberate 40-boot soak (`scripts/wedge-soak.sh`, run
+`soak-20260813-093459`) was launched to hunt an unrelated wedge. It did not
+find the wedge; it found this instead, on iteration 10 of 10 completed
+(iterations 1–9 clean, so the measured rate is **1 failure in 10 boots**).
+The Path-Z real-glibc pthread self-test produced:
+
+```
+captured: SLATE_GLIBC_PTHREAD_OK counter=30000 joinsum=9
+expected: SLATE_GLIBC_PTHREAD_OK counter=40000 joinsum=10
+```
+
+**What those numbers mean.** The test binary (built by
+`scripts/create-ext4-rootfs.sh`, the `pthread.c` heredoc) creates 4 threads;
+worker `i` does 10 000 mutex-guarded `counter += 1` and returns `i + 1`, so a
+correct run is always `counter=40000 joinsum=10`. `40000 - 30000 = 10000` and
+`10 - 9 = 1` identify the casualty exactly: **the thread with `id == 0`** —
+the first one created — contributed neither its increments nor its return
+value. Nothing else diverged.
+
+**The kill.** From the serial log
+(`build/hang-catches/soak-20260813-093459-iter10.serial.txt`, lines ~19256–19280;
+`build/` is gitignored, so the excerpt is reproduced here):
+
+```
+[sched] Spawned task 266 (priority 16, cpu 0)      <- worker id 0
+[mmap] Lazy mapped 0x6000a1a000..0x600121e000 (513 frames, demand-paged)
+[sched] Spawned task 267 (priority 16, cpu 0)
+...
+[sched] Task 267 exiting
+[sched] Task 268 exiting
+[sched] Task 269 exiting
+[exception] User page fault (task 266) at 0x600005eff0, addr=0x600005eff0 (not-present, read) — trying SEH
+[exception] Killing task 266 — Page Fault (#PF) at 0x600005eff0 (ring 3)
+  CS=0x23 RFLAGS=0x10216 RSP=0x6000a15788 SS=0x1b
+[exception] Recording crash: pid=296 exception=8 rip=0x600005eff0 aux=0x600005eff0
+```
+
+**`rip == aux == CR2`** — the faulting address *is* the instruction pointer.
+Task 266 did not deref a bad pointer; it **jumped to** one. And 0x600005eff0
+is not in either loaded image (the binary is at bias 0x57ffc1e4c000, the
+loader/libc at 0x72c7a9914000) — it is an address in the low mmap arena,
+*below* every region this process lazily mapped (the lowest logged is
+0x6000212000). Its `RSP=0x6000a15788` is correctly inside its own thread
+stack (0x6000216000..0x6000a1a000), so the stack pointer survived; only the
+control transfer went wrong.
+
+**Reading of the mechanism (unconfirmed).** glibc's `start_thread` reads
+`pd->start_routine` out of the thread descriptor via `%fs`. A garbage value
+there — because `CLONE_SETTLS` installed the wrong `%fs` base for this child,
+or because the child was made runnable before the parent's descriptor stores
+were visible to it — produces exactly this: a jump to an arena-looking
+address with an otherwise intact stack. That the victim is always(?) the
+*first* child, while children 2–4 ran and exited normally, points at a
+first-time-through / setup-ordering window rather than steady-state
+contention. Confirming this needs the child's `%fs` base and the descriptor
+contents logged at `clone` time — see below.
+
+**Two separate defects are visible here, and the second one is arguably worse:**
+
+1. The thread jumped to garbage (above).
+2. **The process did not die, and reported a plausible-looking wrong answer.**
+   `pthread_join` on the killed thread returned success with `ret == NULL`,
+   which is how `joinsum` became 9 instead of 10. On Linux a `SIGSEGV` in any
+   thread terminates the whole process; here only the thread was killed, the
+   remaining threads finished, and `main` printed a result that looks like a
+   normal run. A test that asserted only "the binary exited 13" would have
+   passed. Whatever the fix for (1), the kill path must not let a
+   fault-killed thread be joined as if it had returned normally — a
+   `pthread_join` on a thread the kernel killed should be distinguishable, and
+   a ring-3 fault with no SEH handler should take down the process, not one
+   thread of it.
+
+**Distinct from the neighbouring pthread entries.** B-PTHREAD-TEARDOWN-PF
+(below) is a *kernel*-mode `#PF` at a near-null address during *teardown*;
+this is a *ring-3* fault at *startup*, and the kernel itself stays healthy.
+B-PTHREAD-YIELDBUDGET (resolved) was a silent hang, not a fault.
+
+**Reproduce.** `bash scripts/wedge-soak.sh` (or plain repeated
+`scripts/boot-test.sh`) — expect roughly one failure per ten boots. The
+soak script already treats a self-test regression as a catch and preserves
+the serial log, which is how this was captured.
+
+**Next step when picked up.** Add a `clone`-time trace to
+`kernel/src/proc/thread_clone.rs` printing, for each child: the requested TLS
+base, the `%fs` base actually installed, and the first 8 bytes at
+`tls_base + offsetof(struct pthread, start_routine)`; then soak until it trips.
+The failure is frequent enough (1/10) that a single 20-boot soak should catch
+it with the trace attached.
+
+---
+
 ### B-PTHREAD-TEARDOWN-PF. Intermittent kernel `#PF` (read @ 0x97) in a `cloned-thread` task during glibc-pthread thread teardown — WATCH (non-fatal, rare) 2026-07-15
 
 **Symptom (1 occurrence in ~5 boots, 2026-07-15):** During the

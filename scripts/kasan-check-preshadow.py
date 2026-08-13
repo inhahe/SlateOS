@@ -258,6 +258,49 @@ POISON_NO_EXPAND_SUBSTRINGS = [
 # own redzone check.
 POISON_ACCESSOR_SUBSTRINGS = ["4core3ptr", "4core10intrinsics"]
 
+# The bulk accessors, which are *not* reachable under either name above.
+#
+# `core::intrinsics` turns out to emit only `rotate_left`/`rotate_right` in this
+# binary — pure register operations that touch no memory — because
+# `write_bytes` and `copy_nonoverlapping` are lowered by LLVM straight to
+# `memset`/`memcpy` calls rather than being emitted as callable monomorphisations.
+# So a `write_bytes` aimed at poisoned memory appears in the call graph as a
+# plain `call memset`, and the substring list above would sail straight past it —
+# the single most likely way to write this bug, missed.
+#
+# Matched exactly rather than as substrings: these are short, unmangled names
+# (`memset`, not `_RNv...6memset`), and a substring test would sweep in every
+# unrelated symbol that merely contains them.
+POISON_ACCESSOR_EXACT = {"memset", "memcpy", "memmove"}
+
+# What this branch is actually doing today: nothing, and that is the point.
+#
+# After the `rawmem` conversion, *zero* accessors of any kind are reachable from
+# the poison roots — the byte touching is all inline `asm!`, which emits no call
+# at all. So the accessor branch currently judges an empty set, and passes
+# because there is nothing to judge rather than because what it judged was
+# clean. That is the correct end state, but it is worth stating plainly, because
+# a check that is vacuous by accident and one that is vacuous by success look
+# identical from the exit code. The OK line reports the accessor count for
+# exactly this reason.
+#
+# The branch earns its keep prospectively: it fires the moment someone
+# reintroduces a `core::ptr` call or a `memset` onto a poison path, which is the
+# specific regression that cost a 2.7-hour boot. It has been positive-controlled
+# — before the `6__print` cut was fixed, it is what caught the instrumented
+# `core::ptr::read_volatile` reached through the printer.
+#
+# The root-body branch, by contrast, is doing real work on every run: it
+# verifies that all thirteen roots are genuinely uninstrumented, i.e. that the
+# module-level opt-out is in force.
+
+
+def is_poison_accessor(name: str) -> bool:
+    """Whether `name` is a raw byte accessor that walk 3 judges."""
+    return name in POISON_ACCESSOR_EXACT or any(
+        frag in name for frag in POISON_ACCESSOR_SUBSTRINGS
+    )
+
 FUNC_HEADER_RE = re.compile(r"^([0-9a-fA-F]+)\s+<(.+)>:$")
 DIRECT_CALL_RE = re.compile(r"\bcallq?\s+0x[0-9a-fA-F]+\s+<([^>]+)>")
 INDIRECT_CALL_RE = re.compile(r"\bcallq?\s+\*")
@@ -433,7 +476,7 @@ def walk_poison(
     while queue:
         name = queue.popleft()
         is_root = name in root_set
-        is_accessor = any(frag in name for frag in POISON_ACCESSOR_SUBSTRINGS)
+        is_accessor = is_poison_accessor(name)
 
         lines = functions.get(name)
         if lines is None:
@@ -590,6 +633,29 @@ def main() -> int:
                 "stop the walk, so this must be fixed rather than dropped."
             )
 
+    # The accessor list is the *only* thing that turns a reached function into a
+    # violation, so an entry that matches nothing does not narrow the walk — it
+    # switches that part of the check off, silently and permanently. Validated
+    # against the whole binary rather than against the reachable set: an
+    # accessor that exists but is not reachable from a poison root is the
+    # expected, passing state, whereas one that exists nowhere at all is a typo
+    # or a rename. Both lists are known to match today (7937 symbols for
+    # `4core3ptr`, 4 for `4core10intrinsics`, and the three `mem*` builtins).
+    for frag in POISON_ACCESSOR_SUBSTRINGS:
+        if not any(frag in name for name in functions):
+            problems.append(
+                f"poisoned-memory accessor pattern {frag!r} matches no symbol "
+                "in the binary. It is not narrowing the walk, it is disabling "
+                "part of it — fix the pattern rather than dropping it."
+            )
+    for exact in sorted(POISON_ACCESSOR_EXACT):
+        if exact not in functions:
+            problems.append(
+                f"poisoned-memory accessor {exact!r} is not defined in the "
+                "binary. `write_bytes`/`copy_nonoverlapping` lower to these, so "
+                "losing the name means losing the check on bulk poison fills."
+            )
+
     poison_violations, poison_visited, poison_parent = walk_poison(
         functions, poison_roots, poison_no_expand
     )
@@ -648,11 +714,20 @@ def main() -> int:
         )
         return 1
 
+    # The accessor count is reported separately from the reachable count
+    # because the two answer different questions, and only the first one is
+    # about the §118/§119 hazard. A reachable count of 46 with 0 accessors means
+    # the poison paths reach no raw byte accessor at all — the intended state
+    # after the `rawmem` conversion — whereas a non-zero accessor count means
+    # the walk found accessors and cleared them. Both exit 0; conflating them in
+    # the output would hide a check that had quietly stopped judging anything.
+    poison_accessors = sum(1 for name in poison_visited if is_poison_accessor(name))
     print(
         f"kasan-check-preshadow: OK — {len(pre_visited)} function(s) reachable "
         f"before the shadow is installed, {len(rt_visited)} on the check path, "
         f"and {len(poison_visited)} reachable from the deliberate "
-        "poisoned-memory accessors, none instrumented."
+        f"poisoned-memory roots ({poison_accessors} of them raw byte "
+        f"accessors), none instrumented."
     )
     return 0
 

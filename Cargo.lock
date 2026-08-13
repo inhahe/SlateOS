@@ -11690,6 +11690,7 @@ name = "worldclock"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "tzrules",
 ]
 
 [[package]]

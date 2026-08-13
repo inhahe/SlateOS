@@ -5916,6 +5916,43 @@ longer sits on Sydney all through the northern summer. Covered by
 the shape the note below asks for: the IANA name is a *label selecting a rule*,
 never something local time is computed from.
 
+**And so did the app whose entire job is other people's clocks.**
+`apps/worldclock` shipped a 30-entry table of `offset_minutes: i32` plus a
+hard-coded `abbreviation: &str` — a pair that is a *snapshot*, correct for
+whichever half of the year it was written in and an hour wrong for the other,
+with the abbreviation ("EST" over New York in July) advertising the error to
+the user. That table is now `posix_tz: &'static str` and a `rule()` accessor
+returning `Option<Tz>`; the offset and the abbreviation are both derived at the
+displayed instant, and `filtered_timezones` matches the abbreviation *currently*
+in force so searching "aedt" finds Sydney in January.
+
+The rewrite exposed a second, deeper bug in the same app: time was held as
+`utc_seconds: u32`, **seconds since midnight with no date**, wrapping at 86400.
+That model cannot evaluate a DST rule at all (a rule needs an instant, not a
+time of day) and cannot answer "is it already tomorrow in Tokyo?" — which is the
+one question a world clock exists to answer. It is now `utc_epoch: i64`, a real
+epoch instant, and the grid card and list row carry a "Tomorrow"/"Yesterday"
+label computed by `day_delta_from_home` comparing local *day numbers* rather
+than offsets. Covered by
+`test_a_dst_zone_reads_differently_in_january_and_july`,
+`test_the_southern_hemisphere_shifts_in_the_other_half_of_the_year`,
+`test_the_gap_between_two_cities_narrows_when_only_one_has_changed` (2024-03-12,
+after the US sprang forward but before the EU did),
+`test_advance_time_rolls_the_date_rather_than_wrapping`,
+`test_home_reads_as_home_whichever_zone_it_is`,
+`test_a_fixed_offset_zone_never_shifts` and `test_every_shipped_zone_parses`;
+59 tests pass (2026-08-13). Two table rows were factually wrong as well and are
+fixed by construction: São Paulo (`<-03>3`, no DST since 2019) and Cairo
+(`EET-2EEST,M4.5.4/24,M10.5.4/24`, DST reinstated in 2023).
+
+**Still carrying the fixed-offset shape** and not yet converted:
+`kernel/src/fs/locale.rs` (see the note below), `kernel/src/fs/timezone.rs`,
+`kernel/src/fs/procfs.rs`, `kernel/src/kshell.rs`, and
+`userspace/hwclock/src/main.rs` (`named_tz_offset_hours` /
+`parse_tz_offset_hours` — an offset in whole *hours*, so it cannot even express
+Mumbai). These are lower-visibility than the clock and the picker, but they are
+the same bug and should get the same treatment.
+
 **Do not wire `kernel/src/fs/locale.rs`'s `Timezone` to the clock.** It already
 exists (`LocaleConfig.timezone`, 12 registered zones, surfaced by the
 `locale`/`lcl` command and `/proc/locale`) and looks like the answer, but it is

@@ -11,10 +11,23 @@
 //! Shows clocks for cities around the world with timezone offset, day/night
 //! indicators, time difference from local, and both analog and digital display
 //! modes.
+//!
+//! Time is held as a real epoch instant rather than a time of day, because
+//! everything interesting a world clock says needs the date: which offset a
+//! zone is on, whether it is already tomorrow there, and how far apart two
+//! cities are during the fortnight when one has changed its clocks and the
+//! other has not.
 
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+
+// The same zone engine the libc's `localtime`, osh's `printf '%(…)T'`, the
+// taskbar clock and the date/time settings panel use.
+use tzrules::Tz;
+
+/// Seconds in a day.
+const DAY: i64 = 86_400;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 const BASE: Color = Color::from_hex(0x1E1E2E);
@@ -37,197 +50,196 @@ const MAUVE: Color = Color::from_hex(0xCBA6F7);
 const SKY: Color = Color::from_hex(0x89DCEB);
 const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
-// ── Timezone data ───────────────────────────────────────────────────
+// ── Timezone data ──────────────────────────────────────────────────
+/// A city and the POSIX `TZ` rule its clock follows.
+///
+/// The rule, not an offset. This table used to store `offset_minutes: i32` and
+/// a hard-coded `abbreviation`, which is a shape that cannot be right: half of
+/// these cities observe daylight saving, so their offset *and* their
+/// abbreviation both change twice a year. The stored pair was a snapshot of
+/// whichever half of the year the table was written in — Sydney was pinned to
+/// `AEST` and Sydney is on `AEDT` for a third of the year — and the app whose
+/// single purpose is being right about other people's clocks was silently
+/// wrong about roughly half of them at any moment.
+///
+/// Both are now derived from the rule at the instant being displayed.
 #[derive(Clone)]
 struct TimezoneInfo {
     city: &'static str,
     country: &'static str,
-    /// UTC offset in minutes (e.g., +330 for India, -300 for US Eastern)
-    offset_minutes: i32,
-    /// Abbreviation (e.g., "EST", "IST", "JST")
-    abbreviation: &'static str,
+    /// The POSIX `TZ` string tzdata publishes for this zone.
+    posix_tz: &'static str,
 }
 
+impl TimezoneInfo {
+    /// The parsed rule.
+    ///
+    /// `None` only for a malformed literal in [`TIMEZONES`], which
+    /// `test_every_shipped_zone_parses` catches. Callers skip the city rather
+    /// than drawing it at UTC under its own name: a world clock showing the
+    /// wrong time for Tokyo is worse than one that does not show Tokyo.
+    fn rule(&self) -> Option<Tz> {
+        Tz::parse(self.posix_tz.as_bytes())
+    }
+}
+
+/// The cities offered in the picker.
+///
+/// Each rule is the POSIX `TZ` string tzdata publishes for that zone, so the
+/// transition dates are the real ones and differ between regions as they
+/// actually do — the US changes on the second Sunday in March, the EU on the
+/// last Sunday, Australia and New Zealand in the opposite half of the year, and
+/// Egypt on a Thursday at midnight.
 const TIMEZONES: &[TimezoneInfo] = &[
     TimezoneInfo {
         city: "London",
         country: "United Kingdom",
-        offset_minutes: 0,
-        abbreviation: "GMT",
+        posix_tz: "GMT0BST,M3.5.0/1,M10.5.0",
     },
     TimezoneInfo {
         city: "Paris",
         country: "France",
-        offset_minutes: 60,
-        abbreviation: "CET",
+        posix_tz: "CET-1CEST,M3.5.0,M10.5.0/3",
     },
     TimezoneInfo {
         city: "Berlin",
         country: "Germany",
-        offset_minutes: 60,
-        abbreviation: "CET",
+        posix_tz: "CET-1CEST,M3.5.0,M10.5.0/3",
     },
     TimezoneInfo {
         city: "Moscow",
         country: "Russia",
-        offset_minutes: 180,
-        abbreviation: "MSK",
+        posix_tz: "MSK-3",
     },
     TimezoneInfo {
         city: "Dubai",
         country: "UAE",
-        offset_minutes: 240,
-        abbreviation: "GST",
+        posix_tz: "<+04>-4",
     },
     TimezoneInfo {
         city: "Mumbai",
         country: "India",
-        offset_minutes: 330,
-        abbreviation: "IST",
+        posix_tz: "IST-5:30",
     },
     TimezoneInfo {
         city: "Dhaka",
         country: "Bangladesh",
-        offset_minutes: 360,
-        abbreviation: "BST",
+        posix_tz: "<+06>-6",
     },
     TimezoneInfo {
         city: "Bangkok",
         country: "Thailand",
-        offset_minutes: 420,
-        abbreviation: "ICT",
+        posix_tz: "<+07>-7",
     },
     TimezoneInfo {
         city: "Singapore",
         country: "Singapore",
-        offset_minutes: 480,
-        abbreviation: "SGT",
+        posix_tz: "<+08>-8",
     },
     TimezoneInfo {
         city: "Beijing",
         country: "China",
-        offset_minutes: 480,
-        abbreviation: "CST",
+        posix_tz: "CST-8",
     },
     TimezoneInfo {
         city: "Tokyo",
         country: "Japan",
-        offset_minutes: 540,
-        abbreviation: "JST",
+        posix_tz: "JST-9",
     },
     TimezoneInfo {
         city: "Seoul",
         country: "South Korea",
-        offset_minutes: 540,
-        abbreviation: "KST",
+        posix_tz: "KST-9",
     },
     TimezoneInfo {
         city: "Sydney",
         country: "Australia",
-        offset_minutes: 600,
-        abbreviation: "AEST",
+        posix_tz: "AEST-10AEDT,M10.1.0,M4.1.0/3",
     },
     TimezoneInfo {
         city: "Auckland",
         country: "New Zealand",
-        offset_minutes: 720,
-        abbreviation: "NZST",
+        posix_tz: "NZST-12NZDT,M9.5.0,M4.1.0/3",
     },
     TimezoneInfo {
         city: "Honolulu",
         country: "USA",
-        offset_minutes: -600,
-        abbreviation: "HST",
+        posix_tz: "HST10",
     },
     TimezoneInfo {
         city: "Anchorage",
         country: "USA",
-        offset_minutes: -540,
-        abbreviation: "AKST",
+        posix_tz: "AKST9AKDT,M3.2.0,M11.1.0",
     },
     TimezoneInfo {
         city: "Los Angeles",
         country: "USA",
-        offset_minutes: -480,
-        abbreviation: "PST",
+        posix_tz: "PST8PDT,M3.2.0,M11.1.0",
     },
     TimezoneInfo {
         city: "Denver",
         country: "USA",
-        offset_minutes: -420,
-        abbreviation: "MST",
+        posix_tz: "MST7MDT,M3.2.0,M11.1.0",
     },
     TimezoneInfo {
         city: "Chicago",
         country: "USA",
-        offset_minutes: -360,
-        abbreviation: "CST",
+        posix_tz: "CST6CDT,M3.2.0,M11.1.0",
     },
     TimezoneInfo {
         city: "New York",
         country: "USA",
-        offset_minutes: -300,
-        abbreviation: "EST",
+        posix_tz: "EST5EDT,M3.2.0,M11.1.0",
     },
     TimezoneInfo {
         city: "São Paulo",
         country: "Brazil",
-        offset_minutes: -180,
-        abbreviation: "BRT",
+        posix_tz: "<-03>3",
     },
     TimezoneInfo {
         city: "Cairo",
         country: "Egypt",
-        offset_minutes: 120,
-        abbreviation: "EET",
+        posix_tz: "EET-2EEST,M4.5.4/24,M10.5.4/24",
     },
     TimezoneInfo {
         city: "Istanbul",
         country: "Turkey",
-        offset_minutes: 180,
-        abbreviation: "TRT",
+        posix_tz: "<+03>-3",
     },
     TimezoneInfo {
         city: "Nairobi",
         country: "Kenya",
-        offset_minutes: 180,
-        abbreviation: "EAT",
+        posix_tz: "EAT-3",
     },
     TimezoneInfo {
         city: "Lagos",
         country: "Nigeria",
-        offset_minutes: 60,
-        abbreviation: "WAT",
+        posix_tz: "WAT-1",
     },
     TimezoneInfo {
         city: "Kathmandu",
         country: "Nepal",
-        offset_minutes: 345,
-        abbreviation: "NPT",
+        posix_tz: "<+0545>-5:45",
     },
     TimezoneInfo {
         city: "Kolkata",
         country: "India",
-        offset_minutes: 330,
-        abbreviation: "IST",
+        posix_tz: "IST-5:30",
     },
     TimezoneInfo {
         city: "Jakarta",
         country: "Indonesia",
-        offset_minutes: 420,
-        abbreviation: "WIB",
+        posix_tz: "WIB-7",
     },
     TimezoneInfo {
         city: "Manila",
         country: "Philippines",
-        offset_minutes: 480,
-        abbreviation: "PHT",
+        posix_tz: "PST-8",
     },
     TimezoneInfo {
         city: "Taipei",
         country: "Taiwan",
-        offset_minutes: 480,
-        abbreviation: "CST",
+        posix_tz: "CST-8",
     },
 ];
 
@@ -251,8 +263,12 @@ struct ClockEntry {
 struct WorldClockApp {
     width: f32,
     height: f32,
-    /// Simulation time: seconds since midnight UTC
-    utc_seconds: u32,
+    /// Simulation time: seconds since the Unix epoch, UTC.
+    ///
+    /// A full instant, not a time of day. A zone rule cannot be evaluated
+    /// without the date, and neither can the question a world clock is for —
+    /// "is it already tomorrow in Tokyo?".
+    utc_epoch: i64,
     /// Active clocks (indices into TIMEZONES)
     clocks: Vec<ClockEntry>,
     /// Local timezone index (home)
@@ -304,7 +320,10 @@ impl WorldClockApp {
         Self {
             width: 1100.0,
             height: 750.0,
-            utc_seconds: 43200, // Start at noon UTC
+            // 2024-07-15 12:00:00 UTC. Northern summer, so the default view
+            // exercises the daylight-saving path in both hemispheres at once:
+            // New York and London are shifted, Sydney and Auckland are not.
+            utc_epoch: 1_721_044_800,
             clocks: default_clocks,
             home_tz_idx: 19, // New York as home
             view_mode: ViewMode::Grid,
@@ -320,18 +339,67 @@ impl WorldClockApp {
         }
     }
 
+    /// Advance the simulated clock.
+    ///
+    /// No longer wraps at midnight: the clock now runs on a calendar, so
+    /// stepping past midnight has to roll the date over — that is precisely
+    /// what makes "tomorrow in Tokyo" and the DST transitions observable.
     fn advance_time(&mut self, seconds: u32) {
-        self.utc_seconds = (self.utc_seconds + seconds) % 86400;
+        self.utc_epoch = self.utc_epoch.saturating_add(i64::from(seconds));
     }
 
-    /// Get time components for a timezone offset.
-    fn time_for_offset(&self, offset_minutes: i32) -> (u32, u32, u32) {
-        let total_secs = self.utc_seconds as i64 + (offset_minutes as i64) * 60;
-        let total_secs = ((total_secs % 86400) + 86400) % 86400;
-        let h = (total_secs / 3600) as u32;
-        let m = ((total_secs % 3600) / 60) as u32;
-        let s = (total_secs % 60) as u32;
+    /// The local instant in `rule`, as seconds since the epoch shifted by the
+    /// offset actually in force then.
+    fn local_epoch(&self, rule: &Tz) -> i64 {
+        self.utc_epoch
+            .saturating_add(i64::from(rule.lookup(self.utc_epoch).gmtoff))
+    }
+
+    /// Local wall-clock time in `rule`, as (hour, minute, second).
+    fn local_hms(&self, rule: &Tz) -> (u32, u32, u32) {
+        let day_secs = self.local_epoch(rule).rem_euclid(DAY);
+        // `rem_euclid` gives 0..DAY, so all three casts are exact.
+        let h = u32::try_from(day_secs / 3600).unwrap_or(0);
+        let m = u32::try_from((day_secs % 3600) / 60).unwrap_or(0);
+        let s = u32::try_from(day_secs % 60).unwrap_or(0);
         (h, m, s)
+    }
+
+    /// The zone abbreviation in force now (`EST` in winter, `EDT` in summer).
+    ///
+    /// Lossy only for a name that is not UTF-8, which `Tz::parse` cannot
+    /// produce — its grammar admits alphanumerics and `+`/`-` only.
+    fn abbrev(&self, rule: &Tz) -> String {
+        String::from_utf8_lossy(rule.lookup(self.utc_epoch).name.as_bytes()).into_owned()
+    }
+
+    /// The rule the home city follows, or UTC if the home index is somehow
+    /// stale — the differences below are then all measured from UTC, which is
+    /// visibly odd rather than quietly plausible.
+    fn home_rule(&self) -> Tz {
+        TIMEZONES
+            .get(self.home_tz_idx)
+            .and_then(TimezoneInfo::rule)
+            .unwrap_or(Tz::UTC)
+    }
+
+    /// Calendar days this zone is ahead of (or behind) the home city: `-1`,
+    /// `0` or `+1`.
+    ///
+    /// This is the answer the app could not give at all before, because it
+    /// held a time of day with no date behind it.
+    fn day_delta_from_home(&self, rule: &Tz) -> i64 {
+        let home = self.home_rule();
+        self.local_epoch(rule).div_euclid(DAY) - self.local_epoch(&home).div_euclid(DAY)
+    }
+
+    /// "Tomorrow" / "Yesterday" / "" relative to the home city.
+    fn day_label(&self, rule: &Tz) -> &'static str {
+        match self.day_delta_from_home(rule) {
+            d if d > 0 => "Tomorrow",
+            d if d < 0 => "Yesterday",
+            _ => "",
+        }
     }
 
     fn format_time(&self, h: u32, m: u32, s: u32) -> String {
@@ -358,9 +426,11 @@ impl WorldClockApp {
         }
     }
 
-    fn format_offset(offset_minutes: i32) -> String {
-        let sign = if offset_minutes >= 0 { '+' } else { '-' };
-        let abs = offset_minutes.unsigned_abs();
+    /// Format the offset in force in `rule` right now.
+    fn format_offset(&self, rule: &Tz) -> String {
+        let mins = rule.lookup(self.utc_epoch).gmtoff.div_euclid(60);
+        let sign = if mins >= 0 { '+' } else { '-' };
+        let abs = mins.unsigned_abs();
         let h = abs / 60;
         let m = abs % 60;
         if m == 0 {
@@ -386,11 +456,18 @@ impl WorldClockApp {
         }
     }
 
-    fn diff_from_home(&self, offset_minutes: i32) -> String {
-        let home_offset = TIMEZONES
-            .get(self.home_tz_idx)
-            .map_or(0, |tz| tz.offset_minutes);
-        let diff = offset_minutes - home_offset;
+    /// How far ahead of the home city this zone is, right now.
+    ///
+    /// Both sides are looked up at the current instant, which is the whole
+    /// point: New York is five hours behind London for most of the year but
+    /// *four* for the fortnight in March after the US has sprung forward and
+    /// the EU has not, and again for the week in autumn when the EU falls back
+    /// first. A difference of two stored offsets can never show that.
+    fn diff_from_home(&self, rule: &Tz) -> String {
+        let home = self.home_rule();
+        let here = rule.lookup(self.utc_epoch).gmtoff.div_euclid(60);
+        let there = home.lookup(self.utc_epoch).gmtoff.div_euclid(60);
+        let diff = here.saturating_sub(there);
         let diff_h = diff / 60;
         let diff_m = (diff % 60).abs();
         if diff == 0 {
@@ -458,9 +535,16 @@ impl WorldClockApp {
                 if query.is_empty() {
                     return true;
                 }
+                // Match the abbreviation *currently* in force, which is the one
+                // shown on screen: if a card reads AEDT, searching "aedt" must
+                // find Sydney.
+                let abbrev = tz
+                    .rule()
+                    .map(|r| self.abbrev(&r).to_ascii_lowercase())
+                    .unwrap_or_default();
                 tz.city.to_ascii_lowercase().contains(&query)
                     || tz.country.to_ascii_lowercase().contains(&query)
-                    || tz.abbreviation.to_ascii_lowercase().contains(&query)
+                    || abbrev.contains(&query)
             })
             .map(|(i, _)| i)
             .collect()
@@ -693,7 +777,7 @@ impl WorldClockApp {
         });
 
         // UTC time
-        let (uh, um, us) = self.time_for_offset(0);
+        let (uh, um, us) = self.local_hms(&Tz::UTC);
         cmds.push(RenderCommand::Text {
             x: self.width - 180.0,
             y: 16.0,
@@ -736,7 +820,13 @@ impl WorldClockApp {
         entry: &ClockEntry,
         selected: bool,
     ) {
-        let (h, m, s) = self.time_for_offset(tz.offset_minutes);
+        // Skip a city whose rule does not parse rather than drawing it at UTC
+        // under its own name. `test_every_shipped_zone_parses` means this
+        // cannot happen for a shipped entry.
+        let Some(rule) = tz.rule() else {
+            return;
+        };
+        let (h, m, s) = self.local_hms(&rule);
         let is_day = Self::is_daytime(h);
         let border_color = if selected {
             BLUE
@@ -862,11 +952,7 @@ impl WorldClockApp {
         cmds.push(RenderCommand::Text {
             x: x + 12.0,
             y: y + Self::CARD_H - 30.0,
-            text: format!(
-                "{} ({})",
-                Self::format_offset(tz.offset_minutes),
-                tz.abbreviation
-            ),
+            text: format!("{} ({})", self.format_offset(&rule), self.abbrev(&rule)),
             font_size: 11.0,
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
@@ -875,7 +961,7 @@ impl WorldClockApp {
         cmds.push(RenderCommand::Text {
             x: x + Self::CARD_W / 2.0 + 8.0,
             y: y + Self::CARD_H - 30.0,
-            text: self.diff_from_home(tz.offset_minutes),
+            text: self.diff_from_home(&rule),
             font_size: 11.0,
             color: TEAL,
             font_weight: FontWeightHint::Regular,
@@ -891,6 +977,21 @@ impl WorldClockApp {
             font_weight: FontWeightHint::Regular,
             max_width: Some(80.0),
         });
+        // The date rollover, which the old time-of-day-only model could not
+        // express: the single most useful thing a world clock tells you is
+        // that it is already tomorrow somewhere.
+        let day_label = self.day_label(&rule);
+        if !day_label.is_empty() {
+            cmds.push(RenderCommand::Text {
+                x: x + Self::CARD_W - 76.0,
+                y: y + Self::CARD_H - 14.0,
+                text: day_label.to_string(),
+                font_size: 10.0,
+                color: PEACH,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(64.0),
+            });
+        }
     }
 
     fn render_analog_clock(
@@ -1023,8 +1124,11 @@ impl WorldClockApp {
             if ry + Self::LIST_ROW_H < Self::HEADER_H || ry > self.height - Self::STATUS_H {
                 continue;
             }
-            if let Some(tz) = TIMEZONES.get(entry.tz_idx) {
-                let (h, m, s) = self.time_for_offset(tz.offset_minutes);
+            if let Some((tz, rule)) = TIMEZONES
+                .get(entry.tz_idx)
+                .and_then(|tz| Some((tz, tz.rule()?)))
+            {
+                let (h, m, s) = self.local_hms(&rule);
                 let is_selected = i == self.selected_clock;
                 let bg = if is_selected {
                     SURFACE1
@@ -1081,11 +1185,7 @@ impl WorldClockApp {
                 cmds.push(RenderCommand::Text {
                     x: 380.0,
                     y: ry + 16.0,
-                    text: format!(
-                        "{} ({})",
-                        Self::format_offset(tz.offset_minutes),
-                        tz.abbreviation
-                    ),
+                    text: format!("{} ({})", self.format_offset(&rule), self.abbrev(&rule)),
                     font_size: 13.0,
                     color: OVERLAY0,
                     font_weight: FontWeightHint::Regular,
@@ -1094,7 +1194,7 @@ impl WorldClockApp {
                 cmds.push(RenderCommand::Text {
                     x: 520.0,
                     y: ry + 16.0,
-                    text: self.diff_from_home(tz.offset_minutes),
+                    text: self.diff_from_home(&rule),
                     font_size: 13.0,
                     color: TEAL,
                     font_weight: FontWeightHint::Regular,
@@ -1111,6 +1211,18 @@ impl WorldClockApp {
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(100.0),
                 });
+                let day_label = self.day_label(&rule);
+                if !day_label.is_empty() {
+                    cmds.push(RenderCommand::Text {
+                        x: 740.0,
+                        y: ry + 16.0,
+                        text: day_label.to_string(),
+                        font_size: 13.0,
+                        color: PEACH,
+                        font_weight: FontWeightHint::Bold,
+                        max_width: Some(90.0),
+                    });
+                }
             }
         }
     }
@@ -1216,10 +1328,9 @@ impl WorldClockApp {
                 cmds.push(RenderCommand::Text {
                     x: px + 16.0,
                     y: iy + 24.0,
-                    text: format!(
-                        "{} ({})",
-                        Self::format_offset(tz.offset_minutes),
-                        tz.abbreviation
+                    text: tz.rule().map_or_else(
+                        || String::from("(unavailable)"),
+                        |r| format!("{} ({})", self.format_offset(&r), self.abbrev(&r)),
                     ),
                     font_size: 11.0,
                     color: SUBTEXT0,
@@ -1288,50 +1399,174 @@ mod tests {
         assert_eq!(app.home_tz_idx, 19);
     }
 
+    /// The default instant: 2024-07-15 12:00:00 UTC.
+    const NOON_JUL: i64 = 1_721_044_800;
+    /// The same time of day in January, when the northern zones are on
+    /// standard time and the southern ones are not: 2024-01-15 12:00:00 UTC.
+    const NOON_JAN: i64 = 1_705_320_000;
+
+    /// The rule for a shipped city. Every assertion below is therefore about a
+    /// zone a user can actually pick.
+    fn zone(city: &str) -> Tz {
+        TIMEZONES
+            .iter()
+            .find(|t| t.city == city)
+            .and_then(TimezoneInfo::rule)
+            .unwrap_or_else(|| panic!("{city} should be a shipped zone with a valid rule"))
+    }
+
     #[test]
     fn test_time_for_utc() {
         let app = WorldClockApp::new();
-        let (h, m, _) = app.time_for_offset(0);
-        assert_eq!(h, 12);
-        assert_eq!(m, 0);
+        let (h, m, _) = app.local_hms(&Tz::UTC);
+        assert_eq!((h, m), (12, 0));
     }
 
     #[test]
     fn test_time_for_positive_offset() {
         let app = WorldClockApp::new();
-        let (h, _, _) = app.time_for_offset(540);
+        let (h, _, _) = app.local_hms(&zone("Tokyo"));
         assert_eq!(h, 21);
     }
 
     #[test]
     fn test_time_for_negative_offset() {
+        // 08:00, not 07:00: at the default instant New York is on EDT. The old
+        // fixed `-300` table asserted 07:00 here, which is the bug.
         let app = WorldClockApp::new();
-        let (h, _, _) = app.time_for_offset(-300);
-        assert_eq!(h, 7);
+        let (h, _, _) = app.local_hms(&zone("New York"));
+        assert_eq!(h, 8);
     }
 
     #[test]
     fn test_time_for_half_hour_offset() {
         let app = WorldClockApp::new();
-        let (h, m, _) = app.time_for_offset(330);
-        assert_eq!(h, 17);
-        assert_eq!(m, 30);
+        let (h, m, _) = app.local_hms(&zone("Kolkata"));
+        assert_eq!((h, m), (17, 30));
     }
 
     #[test]
-    fn test_time_wraps_past_midnight() {
+    fn test_time_rolls_past_midnight() {
+        // 23:00 UTC: Moscow is already 02:00 the next morning, and says so.
         let mut app = WorldClockApp::new();
-        app.utc_seconds = 82800;
-        let (h, _, _) = app.time_for_offset(180);
+        app.utc_epoch = NOON_JUL + 11 * 3600;
+        let (h, _, _) = app.local_hms(&zone("Moscow"));
         assert_eq!(h, 2);
+        assert_eq!(app.day_label(&zone("Moscow")), "Tomorrow");
     }
 
     #[test]
-    fn test_time_wraps_before_midnight() {
+    fn test_time_rolls_before_midnight() {
+        // 22:00 UTC with Tokyo as home: Tokyo is 07:00 on the next day, so
+        // Honolulu — still on the previous afternoon — reads as yesterday.
         let mut app = WorldClockApp::new();
-        app.utc_seconds = 3600;
-        let (h, _, _) = app.time_for_offset(-300);
-        assert_eq!(h, 20);
+        app.utc_epoch = NOON_JUL + 10 * 3600;
+        app.home_tz_idx = 10; // Tokyo
+        let (h, _, _) = app.local_hms(&zone("Honolulu"));
+        assert_eq!(h, 12);
+        assert_eq!(app.day_label(&zone("Honolulu")), "Yesterday");
+        assert_eq!(app.day_label(&zone("Tokyo")), "");
+    }
+
+    #[test]
+    fn test_advance_time_rolls_the_date_rather_than_wrapping() {
+        // The old model wrapped at 86400, which is why it could never say what
+        // day it was anywhere.
+        let mut app = WorldClockApp::new();
+        app.utc_epoch = NOON_JUL + 4 * 3600; // 16:00 UTC
+        app.home_tz_idx = 0; // London, on BST at UTC+1
+        // 17:00 in London but already 01:00 the next day in Tokyo.
+        assert_eq!(app.day_delta_from_home(&zone("Tokyo")), 1);
+        app.advance_time(8 * 3600); // → 00:00 UTC, i.e. 01:00 in London
+        assert_eq!(app.utc_epoch, NOON_JUL + 12 * 3600);
+        // London has crossed midnight too, so Tokyo's *relative* day is back
+        // to level — the delta is a comparison, not a running count.
+        assert_eq!(app.day_delta_from_home(&zone("Tokyo")), 0);
+    }
+
+    // ---- Daylight saving ----
+
+    #[test]
+    fn test_a_dst_zone_reads_differently_in_january_and_july() {
+        let mut app = WorldClockApp::new();
+        let ny = zone("New York");
+        app.utc_epoch = NOON_JUL;
+        assert_eq!(app.local_hms(&ny).0, 8);
+        assert_eq!(app.abbrev(&ny), "EDT");
+        assert_eq!(app.format_offset(&ny), "UTC-4");
+        app.utc_epoch = NOON_JAN;
+        assert_eq!(app.local_hms(&ny).0, 7);
+        assert_eq!(app.abbrev(&ny), "EST");
+        assert_eq!(app.format_offset(&ny), "UTC-5");
+    }
+
+    #[test]
+    fn test_the_southern_hemisphere_shifts_in_the_other_half_of_the_year() {
+        let mut app = WorldClockApp::new();
+        let sydney = zone("Sydney");
+        app.utc_epoch = NOON_JAN;
+        assert_eq!(app.abbrev(&sydney), "AEDT");
+        assert_eq!(app.format_offset(&sydney), "UTC+11");
+        app.utc_epoch = NOON_JUL;
+        assert_eq!(app.abbrev(&sydney), "AEST");
+        assert_eq!(app.format_offset(&sydney), "UTC+10");
+        // The old table pinned Sydney to AEST/+10 year-round, so it was an
+        // hour wrong for a third of the year and never said "AEDT".
+    }
+
+    #[test]
+    fn test_the_gap_between_two_cities_narrows_when_only_one_has_changed() {
+        // 2024-03-12 12:00 UTC. The US sprang forward on March 10, the UK does
+        // not until March 31, so for that fortnight New York is four hours
+        // behind London instead of the usual five. Two stored offsets can
+        // never produce this.
+        let mut app = WorldClockApp::new();
+        app.home_tz_idx = 0; // London
+        let ny = zone("New York");
+        app.utc_epoch = 1_710_244_800;
+        assert_eq!(app.diff_from_home(&ny), "-4h");
+        app.utc_epoch = NOON_JUL;
+        assert_eq!(app.diff_from_home(&ny), "-5h");
+        app.utc_epoch = NOON_JAN;
+        assert_eq!(app.diff_from_home(&ny), "-5h");
+    }
+
+    #[test]
+    fn test_home_reads_as_home_whichever_zone_it_is() {
+        let mut app = WorldClockApp::new();
+        for (idx, city) in [(19, "New York"), (10, "Tokyo"), (13, "Auckland")] {
+            app.home_tz_idx = idx;
+            assert_eq!(app.diff_from_home(&zone(city)), "(home)");
+            assert_eq!(app.day_label(&zone(city)), "");
+        }
+    }
+
+    #[test]
+    fn test_every_shipped_zone_parses() {
+        // The guard on the rule literals: a typo shows up here rather than as
+        // a city that silently vanishes from the grid.
+        for tz in TIMEZONES {
+            assert!(
+                tz.rule().is_some(),
+                "{}: {:?} is not a POSIX TZ string",
+                tz.city,
+                tz.posix_tz
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_fixed_offset_zone_never_shifts() {
+        // `Tz::parse` substitutes the US transition rules only when a DST
+        // *name* is present, so these must stay put across the year.
+        let mut app = WorldClockApp::new();
+        for city in ["Tokyo", "Beijing", "Mumbai", "Nairobi", "S\u{e3}o Paulo"] {
+            let z = zone(city);
+            app.utc_epoch = NOON_JAN;
+            let winter = app.format_offset(&z);
+            app.utc_epoch = NOON_JUL;
+            assert_eq!(app.format_offset(&z), winter, "{city} should not shift");
+        }
     }
 
     #[test]
@@ -1360,11 +1595,16 @@ mod tests {
 
     #[test]
     fn test_format_offset() {
-        assert_eq!(WorldClockApp::format_offset(0), "UTC+0");
-        assert_eq!(WorldClockApp::format_offset(60), "UTC+1");
-        assert_eq!(WorldClockApp::format_offset(-300), "UTC-5");
-        assert_eq!(WorldClockApp::format_offset(330), "UTC+5:30");
-        assert_eq!(WorldClockApp::format_offset(345), "UTC+5:45");
+        let mut app = WorldClockApp::new();
+        // January, so every northern zone is on standard time and the two
+        // southern ones are the odd pair out.
+        app.utc_epoch = NOON_JAN;
+        assert_eq!(app.format_offset(&Tz::UTC), "UTC+0");
+        assert_eq!(app.format_offset(&zone("London")), "UTC+0");
+        assert_eq!(app.format_offset(&zone("Paris")), "UTC+1");
+        assert_eq!(app.format_offset(&zone("New York")), "UTC-5");
+        assert_eq!(app.format_offset(&zone("Mumbai")), "UTC+5:30");
+        assert_eq!(app.format_offset(&zone("Kathmandu")), "UTC+5:45");
     }
 
     #[test]
@@ -1378,12 +1618,15 @@ mod tests {
 
     #[test]
     fn test_diff_from_home() {
-        let app = WorldClockApp::new();
-        assert_eq!(app.diff_from_home(-300), "(home)");
-        assert_eq!(app.diff_from_home(0), "+5h");
-        assert_eq!(app.diff_from_home(540), "+14h");
-        assert_eq!(app.diff_from_home(-480), "-3h");
-        assert_eq!(app.diff_from_home(330), "+10h30m");
+        let mut app = WorldClockApp::new();
+        // July, so home (New York) is on EDT at UTC-4 and the gaps are measured
+        // from there rather than from the winter offset baked into the table.
+        app.utc_epoch = NOON_JUL;
+        assert_eq!(app.diff_from_home(&zone("New York")), "(home)");
+        assert_eq!(app.diff_from_home(&zone("London")), "+5h");
+        assert_eq!(app.diff_from_home(&zone("Tokyo")), "+13h");
+        assert_eq!(app.diff_from_home(&zone("Los Angeles")), "-3h");
+        assert_eq!(app.diff_from_home(&zone("Mumbai")), "+9h30m");
     }
 
     #[test]
@@ -1437,17 +1680,9 @@ mod tests {
     #[test]
     fn test_advance_time() {
         let mut app = WorldClockApp::new();
-        let t = app.utc_seconds;
+        let t = app.utc_epoch;
         app.advance_time(60);
-        assert_eq!(app.utc_seconds, t + 60);
-    }
-
-    #[test]
-    fn test_advance_time_wraps() {
-        let mut app = WorldClockApp::new();
-        app.utc_seconds = 86399;
-        app.advance_time(2);
-        assert_eq!(app.utc_seconds, 1);
+        assert_eq!(app.utc_epoch, t + 60);
     }
 
     #[test]
@@ -1492,9 +1727,9 @@ mod tests {
     #[test]
     fn test_handle_key_advance_time() {
         let mut app = WorldClockApp::new();
-        let t = app.utc_seconds;
+        let t = app.utc_epoch;
         app.handle_key("Space", false, false);
-        assert_eq!(app.utc_seconds, t + 60);
+        assert_eq!(app.utc_epoch, t + 60);
     }
 
     #[test]
@@ -1628,7 +1863,19 @@ mod tests {
         for tz in TIMEZONES {
             assert!(!tz.city.is_empty());
             assert!(!tz.country.is_empty());
-            assert!(tz.offset_minutes >= -720 && tz.offset_minutes <= 840);
+            assert!(!tz.posix_tz.is_empty());
+            // The offset is derived from the rule, so the range check has to be
+            // made at an instant — and at both halves of the year, because a
+            // zone that is in range in January can be an hour out of it in July.
+            let rule = tz.rule().expect("shipped zone must parse");
+            for at in [NOON_JAN, NOON_JUL] {
+                let mins = rule.lookup(at).gmtoff / 60;
+                assert!(
+                    (-720..=840).contains(&mins),
+                    "{} is {mins} minutes from UTC at {at}",
+                    tz.city
+                );
+            }
         }
     }
 
@@ -1640,8 +1887,11 @@ mod tests {
 
     #[test]
     fn test_kathmandu_offset() {
-        let app = WorldClockApp::new();
-        let (h, m, _) = app.time_for_offset(345); // +5:45
+        // The 45-minute zone is the one most likely to be quietly rounded away
+        // by an offset-in-hours shortcut, so it gets its own test.
+        let mut app = WorldClockApp::new();
+        app.utc_epoch = NOON_JUL; // 12:00 UTC
+        let (h, m, _) = app.local_hms(&zone("Kathmandu"));
         assert_eq!(h, 17);
         assert_eq!(m, 45);
     }

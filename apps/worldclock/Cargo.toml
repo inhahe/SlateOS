@@ -5,3 +5,10 @@ edition = "2024"
 
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+
+# The POSIX `TZ`-rule engine, shared with the libc (`posix`), the shell
+# (`userspace/oils`) and the desktop shell. A world clock is the one app whose
+# entire purpose is being right about other people's clocks, so it is the last
+# place that may carry its own table of offsets. See tzrules/src/lib.rs's "Why
+# this is a crate and not a module".
+tzrules = { path = "../../tzrules" }

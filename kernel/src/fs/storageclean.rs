@@ -44,6 +44,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::PreemptSpinMutex as Mutex;
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -86,6 +87,20 @@ impl CleanCategory {
         }
     }
 
+    /// Is this category advisory (a recommendation the user must act on
+    /// file-by-file) rather than something [`clean`] may delete wholesale?
+    ///
+    /// [`clean`] works at category granularity, so obeying it for these would
+    /// mean deleting every large file under `/home` because the user asked to
+    /// "clean all" — destroying data they never named. Reclaiming space in an
+    /// advisory category is [`clean_paths`]' job.
+    pub fn is_advisory(self) -> bool {
+        matches!(
+            self,
+            Self::DuplicateFiles | Self::LargeFiles | Self::OldDownloads
+        )
+    }
+
     pub fn all() -> &'static [CleanCategory] {
         &[
             Self::Trash,
@@ -103,7 +118,12 @@ impl CleanCategory {
 /// A single item that could be cleaned up.
 #[derive(Debug, Clone)]
 pub struct CleanItem {
-    pub path: String,
+    /// The file this item names, or `None` for a synthetic item that does not
+    /// correspond to a filesystem path (the in-memory thumbnail cache is the
+    /// only such item today). Keeping this an `Option` rather than stuffing a
+    /// human-readable label like `"[thumbnail cache]"` into a path field means
+    /// [`clean`] can never hand a label to the VFS as if it were a real path.
+    pub path: Option<PathBuf>,
     pub size_bytes: u64,
     pub category: CleanCategory,
     /// Human-readable reason for recommendation.
@@ -145,8 +165,9 @@ pub struct CleanConfig {
     pub log_retention_days: u32,
     /// Categories enabled for automatic cleanup.
     pub auto_categories: Vec<CleanCategory>,
-    /// Paths excluded from scanning.
-    pub exclusions: Vec<String>,
+    /// Paths excluded from scanning. A scan skips any file at or below one of
+    /// these paths; see [`is_excluded`].
+    pub exclusions: Vec<PathBuf>,
 }
 
 /// Result of a cleanup operation.
@@ -243,27 +264,34 @@ pub fn scan() -> KernelResult<ScanReport> {
     with_state(|state| {
         state.items.clear();
 
+        // Snapshot the exclusion list up front: the scanners need to read it
+        // while `state.items` is mutably borrowed, which a borrow of
+        // `state.config` would forbid.
+        let excl = state.config.exclusions.clone();
+        let retention_days = state.config.log_retention_days;
+        let large_threshold = state.config.large_file_threshold;
+        let download_days = state.config.old_download_days;
+
         // Category: Trash — query trash module
-        let trash_bytes = scan_trash(&mut state.items);
+        let trash_bytes = scan_trash(&mut state.items, &excl);
 
         // Category: TempFiles — query /tmp
-        let temp_bytes = scan_temp_files(&mut state.items);
+        let temp_bytes = scan_temp_files(&mut state.items, &excl);
 
         // Category: Thumbnails — query thumbcache
         let thumb_bytes = scan_thumbnails(&mut state.items);
 
         // Category: LogFiles
-        let log_bytes = scan_log_files(&mut state.items, state.config.log_retention_days);
+        let log_bytes = scan_log_files(&mut state.items, &excl, retention_days);
 
         // Category: PackageCache
-        let pkg_bytes = scan_package_cache(&mut state.items);
+        let pkg_bytes = scan_package_cache(&mut state.items, &excl);
 
         // Category: LargeFiles
-        let large_bytes = scan_large_files(&mut state.items, state.config.large_file_threshold);
+        let large_bytes = scan_large_files(&mut state.items, &excl, large_threshold);
 
         // Category: OldDownloads
-        let download_bytes = scan_old_downloads(
-            &mut state.items, state.config.old_download_days);
+        let download_bytes = scan_old_downloads(&mut state.items, &excl, download_days);
 
         // Build category summaries
         let mut categories = Vec::new();
@@ -300,170 +328,192 @@ pub fn scan() -> KernelResult<ScanReport> {
     })
 }
 
-fn scan_trash(items: &mut Vec<CleanItem>) -> u64 {
+/// Is `path` covered by one of the configured exclusions?
+///
+/// An exclusion names a subtree, not a byte prefix: excluding `/home/keep`
+/// must not also exclude `/home/keepsakes`. [`path_in_subtree`] compares
+/// component-wise, so it gets that right.
+///
+/// [`path_in_subtree`]: crate::fs::pathutil::path_in_subtree
+fn is_excluded(path: &Path, exclusions: &[PathBuf]) -> bool {
+    exclusions.iter().any(|e| crate::fs::pathutil::path_in_subtree(path, e))
+}
+
+/// Shared body of the directory-walking scanners.
+///
+/// Reads `dir`, and for every entry that `accept` approves and that is not
+/// excluded, records a [`CleanItem`] built by `describe` from the entry's path
+/// and size. Returns the total size of the accepted entries — including any
+/// that did not fit within [`MAX_SCAN_ENTRIES`], so the reported reclaimable
+/// total stays honest even when the item list is truncated.
+fn scan_dir<A, D>(
+    items: &mut Vec<CleanItem>,
+    exclusions: &[PathBuf],
+    dir: &Path,
+    accept: A,
+    describe: D,
+) -> u64
+where
+    A: Fn(&Path, u64) -> bool,
+    D: Fn(&Path, u64) -> CleanItem,
+{
     use crate::fs::Vfs;
+    let Ok(entries) = Vfs::readdir(dir) else {
+        return 0;
+    };
     let mut total = 0u64;
-    if let Ok(entries) = Vfs::readdir("/_TRASH") {
-        for entry in entries {
-            if entry.name.starts_with("_INDEX") {
-                continue;
-            }
-            let path = format!("/_TRASH/{}", entry.name);
-            let size = Vfs::read_file(&path).map(|d| d.len() as u64).unwrap_or(0);
-            if items.len() < MAX_SCAN_ENTRIES {
-                items.push(CleanItem {
-                    path,
-                    size_bytes: size,
-                    category: CleanCategory::Trash,
-                    reason: String::from("In recycle bin"),
-                    age_days: 0,
-                });
-            }
-            total = total.saturating_add(size);
+    for entry in entries {
+        // `Path::join` inserts exactly one separator, so a root `dir` needs no
+        // special case: `/` joined with `tmp` is `/tmp`, not `//tmp`.
+        let path = dir.join(&entry.name);
+        if is_excluded(&path, exclusions) {
+            continue;
         }
+        let size = Vfs::read_file(&path).map_or(0, |d| d.len() as u64);
+        if !accept(&path, size) {
+            continue;
+        }
+        if items.len() < MAX_SCAN_ENTRIES {
+            items.push(describe(&path, size));
+        }
+        total = total.saturating_add(size);
     }
     total
 }
 
-fn scan_temp_files(items: &mut Vec<CleanItem>) -> u64 {
-    use crate::fs::Vfs;
-    let mut total = 0u64;
-    if let Ok(entries) = Vfs::readdir("/tmp") {
-        for entry in entries {
-            let path = format!("/tmp/{}", entry.name);
-            let size = Vfs::read_file(&path).map(|d| d.len() as u64).unwrap_or(0);
-            if items.len() < MAX_SCAN_ENTRIES {
-                items.push(CleanItem {
-                    path,
-                    size_bytes: size,
-                    category: CleanCategory::TempFiles,
-                    reason: String::from("Temporary file"),
-                    age_days: 0,
-                });
-            }
-            total = total.saturating_add(size);
-        }
-    }
-    total
+fn scan_trash(items: &mut Vec<CleanItem>, exclusions: &[PathBuf]) -> u64 {
+    scan_dir(
+        items,
+        exclusions,
+        Path::new("/_TRASH"),
+        // The trash index is bookkeeping, not a reclaimable item.
+        |path, _| {
+            path.file_name()
+                .is_none_or(|n| !n.as_bytes().starts_with(b"_INDEX"))
+        },
+        |path, size| CleanItem {
+            path: Some(path.to_path_buf()),
+            size_bytes: size,
+            category: CleanCategory::Trash,
+            reason: String::from("In recycle bin"),
+            age_days: 0,
+        },
+    )
+}
+
+fn scan_temp_files(items: &mut Vec<CleanItem>, exclusions: &[PathBuf]) -> u64 {
+    scan_dir(
+        items,
+        exclusions,
+        Path::new("/tmp"),
+        |_, _| true,
+        |path, size| CleanItem {
+            path: Some(path.to_path_buf()),
+            size_bytes: size,
+            category: CleanCategory::TempFiles,
+            reason: String::from("Temporary file"),
+            age_days: 0,
+        },
+    )
 }
 
 fn scan_thumbnails(items: &mut Vec<CleanItem>) -> u64 {
     // Query thumbcache stats for memory usage
     let (count, _, mem_bytes, _, _, _) = crate::fs::thumbcache::stats();
-    if count > 0 && mem_bytes > 0 {
-        if items.len() < MAX_SCAN_ENTRIES {
-            items.push(CleanItem {
-                path: String::from("[thumbnail cache]"),
-                size_bytes: mem_bytes,
-                category: CleanCategory::Thumbnails,
-                reason: format!("{} cached thumbnails", count),
-                age_days: 0,
-            });
-        }
+    if count > 0 && mem_bytes > 0 && items.len() < MAX_SCAN_ENTRIES {
+        items.push(CleanItem {
+            // The thumbnail cache lives in memory, so this item names no file.
+            path: None,
+            size_bytes: mem_bytes,
+            category: CleanCategory::Thumbnails,
+            reason: format!("{} cached thumbnails", count),
+            age_days: 0,
+        });
     }
     mem_bytes
 }
 
-fn scan_log_files(items: &mut Vec<CleanItem>, _retention_days: u32) -> u64 {
-    use crate::fs::Vfs;
+fn scan_log_files(items: &mut Vec<CleanItem>, exclusions: &[PathBuf], _retention_days: u32) -> u64 {
     let mut total = 0u64;
-    let log_dirs = ["/var/log", "/log"];
-    for dir in &log_dirs {
-        if let Ok(entries) = Vfs::readdir(dir) {
-            for entry in entries {
-                if entry.name.ends_with(".log") || entry.name.ends_with(".log.old") {
-                    let path = format!("{}/{}", dir, entry.name);
-                    let size = Vfs::read_file(&path).map(|d| d.len() as u64).unwrap_or(0);
-                    if items.len() < MAX_SCAN_ENTRIES {
-                        items.push(CleanItem {
-                            path,
-                            size_bytes: size,
-                            category: CleanCategory::LogFiles,
-                            reason: String::from("Log file"),
-                            age_days: 0,
-                        });
-                    }
-                    total = total.saturating_add(size);
-                }
-            }
-        }
+    for dir in ["/var/log", "/log"] {
+        total = total.saturating_add(scan_dir(
+            items,
+            exclusions,
+            Path::new(dir),
+            |path, _| {
+                path.file_name().is_some_and(|n| {
+                    let n = n.as_bytes();
+                    n.ends_with(b".log") || n.ends_with(b".log.old")
+                })
+            },
+            |path, size| CleanItem {
+                path: Some(path.to_path_buf()),
+                size_bytes: size,
+                category: CleanCategory::LogFiles,
+                reason: String::from("Log file"),
+                age_days: 0,
+            },
+        ));
     }
     total
 }
 
-fn scan_package_cache(items: &mut Vec<CleanItem>) -> u64 {
-    use crate::fs::Vfs;
+fn scan_package_cache(items: &mut Vec<CleanItem>, exclusions: &[PathBuf]) -> u64 {
     let mut total = 0u64;
-    let cache_dirs = ["/var/cache/pkg", "/var/cache/packages"];
-    for dir in &cache_dirs {
-        if let Ok(entries) = Vfs::readdir(dir) {
-            for entry in entries {
-                let path = format!("{}/{}", dir, entry.name);
-                let size = Vfs::read_file(&path).map(|d| d.len() as u64).unwrap_or(0);
-                if items.len() < MAX_SCAN_ENTRIES {
-                    items.push(CleanItem {
-                        path,
-                        size_bytes: size,
-                        category: CleanCategory::PackageCache,
-                        reason: String::from("Cached package"),
-                        age_days: 0,
-                    });
-                }
-                total = total.saturating_add(size);
-            }
-        }
+    for dir in ["/var/cache/pkg", "/var/cache/packages"] {
+        total = total.saturating_add(scan_dir(
+            items,
+            exclusions,
+            Path::new(dir),
+            |_, _| true,
+            |path, size| CleanItem {
+                path: Some(path.to_path_buf()),
+                size_bytes: size,
+                category: CleanCategory::PackageCache,
+                reason: String::from("Cached package"),
+                age_days: 0,
+            },
+        ));
     }
     total
 }
 
-fn scan_large_files(items: &mut Vec<CleanItem>, threshold: u64) -> u64 {
-    use crate::fs::Vfs;
+fn scan_large_files(items: &mut Vec<CleanItem>, exclusions: &[PathBuf], threshold: u64) -> u64 {
     let mut total = 0u64;
-    let dirs = ["/home", "/root", "/data"];
-    for dir in &dirs {
-        if let Ok(entries) = Vfs::readdir(dir) {
-            for entry in entries {
-                let path = format!("{}/{}", dir, entry.name);
-                let size = Vfs::read_file(&path).map(|d| d.len() as u64).unwrap_or(0);
-                if size >= threshold {
-                    if items.len() < MAX_SCAN_ENTRIES {
-                        items.push(CleanItem {
-                            path,
-                            size_bytes: size,
-                            category: CleanCategory::LargeFiles,
-                            reason: format!("Large file ({})", format_size(size)),
-                            age_days: 0,
-                        });
-                    }
-                    total = total.saturating_add(size);
-                }
-            }
-        }
+    for dir in ["/home", "/root", "/data"] {
+        total = total.saturating_add(scan_dir(
+            items,
+            exclusions,
+            Path::new(dir),
+            |_, size| size >= threshold,
+            |path, size| CleanItem {
+                path: Some(path.to_path_buf()),
+                size_bytes: size,
+                category: CleanCategory::LargeFiles,
+                reason: format!("Large file ({})", format_size(size)),
+                age_days: 0,
+            },
+        ));
     }
     total
 }
 
-fn scan_old_downloads(items: &mut Vec<CleanItem>, _age_days: u32) -> u64 {
-    use crate::fs::Vfs;
+fn scan_old_downloads(items: &mut Vec<CleanItem>, exclusions: &[PathBuf], _age_days: u32) -> u64 {
     let mut total = 0u64;
-    let download_dirs = ["/home/Downloads", "/root/Downloads"];
-    for dir in &download_dirs {
-        if let Ok(entries) = Vfs::readdir(dir) {
-            for entry in entries {
-                let path = format!("{}/{}", dir, entry.name);
-                let size = Vfs::read_file(&path).map(|d| d.len() as u64).unwrap_or(0);
-                if items.len() < MAX_SCAN_ENTRIES {
-                    items.push(CleanItem {
-                        path,
-                        size_bytes: size,
-                        category: CleanCategory::OldDownloads,
-                        reason: String::from("Old download"),
-                        age_days: 0,
-                    });
-                }
-                total = total.saturating_add(size);
-            }
-        }
+    for dir in ["/home/Downloads", "/root/Downloads"] {
+        total = total.saturating_add(scan_dir(
+            items,
+            exclusions,
+            Path::new(dir),
+            |_, _| true,
+            |path, size| CleanItem {
+                path: Some(path.to_path_buf()),
+                size_bytes: size,
+                category: CleanCategory::OldDownloads,
+                reason: String::from("Old download"),
+                age_days: 0,
+            },
+        ));
     }
     total
 }
@@ -493,6 +543,10 @@ pub fn items_for_category(cat: CleanCategory) -> Vec<CleanItem> {
 // ---------------------------------------------------------------------------
 
 /// Clean up items in the specified categories.
+///
+/// Advisory categories ([`CleanCategory::is_advisory`]) are skipped: their
+/// items stay in the cache and contribute nothing to `freed_bytes`. Use
+/// [`clean_paths`] to delete the specific files the user picked out of them.
 pub fn clean(categories: &[CleanCategory]) -> KernelResult<CleanResult> {
     with_state(|state| {
         let mut freed = 0u64;
@@ -501,6 +555,9 @@ pub fn clean(categories: &[CleanCategory]) -> KernelResult<CleanResult> {
         let mut category_freed: Vec<(CleanCategory, u64)> = Vec::new();
 
         for cat in categories {
+            if cat.is_advisory() {
+                continue;
+            }
             let mut cat_freed = 0u64;
             let items_to_clean: Vec<CleanItem> = state.items.iter()
                 .filter(|i| i.category == *cat)
@@ -513,29 +570,25 @@ pub fn clean(categories: &[CleanCategory]) -> KernelResult<CleanResult> {
                     | CleanCategory::TempFiles
                     | CleanCategory::LogFiles
                     | CleanCategory::PackageCache => {
-                        if crate::fs::Vfs::remove(&item.path).is_ok() {
-                            cat_freed = cat_freed.saturating_add(item.size_bytes);
-                            cleaned += 1;
-                        } else {
-                            errors += 1;
+                        // Every scanned item in these categories names a real
+                        // file, so a `None` path here is a scanner bug; count
+                        // it as an error rather than swallowing it.
+                        match item.path.as_ref() {
+                            Some(p) if crate::fs::Vfs::remove(p).is_ok() => {
+                                cat_freed = cat_freed.saturating_add(item.size_bytes);
+                                cleaned = cleaned.saturating_add(1);
+                            }
+                            _ => errors = errors.saturating_add(1),
                         }
                     }
                     CleanCategory::Thumbnails => {
                         crate::fs::thumbcache::clear();
                         cat_freed = cat_freed.saturating_add(item.size_bytes);
-                        cleaned += 1;
+                        cleaned = cleaned.saturating_add(1);
                     }
-                    // Large files and old downloads are recommendations only;
-                    // user must explicitly confirm deletion.
-                    CleanCategory::LargeFiles | CleanCategory::OldDownloads => {
-                        // Skip unless explicitly cleaning
-                        cat_freed = cat_freed.saturating_add(item.size_bytes);
-                        cleaned += 1;
-                    }
-                    CleanCategory::DuplicateFiles => {
-                        // Skip — requires user selection of which duplicate to keep
-                        continue;
-                    }
+                    CleanCategory::DuplicateFiles
+                    | CleanCategory::LargeFiles
+                    | CleanCategory::OldDownloads => unreachable!("advisory categories skipped above"),
                 }
             }
 
@@ -545,10 +598,68 @@ pub fn clean(categories: &[CleanCategory]) -> KernelResult<CleanResult> {
             freed = freed.saturating_add(cat_freed);
         }
 
-        // Remove cleaned items from cache
-        state.items.retain(|i| !categories.contains(&i.category));
+        // Drop the cleaned items from the cache. Advisory categories were left
+        // untouched on disk, so their items must survive here too — otherwise
+        // the UI would show the recommendations vanishing as if acted upon.
+        state.items
+            .retain(|i| i.category.is_advisory() || !categories.contains(&i.category));
         state.total_freed = state.total_freed.saturating_add(freed);
-        state.total_cleans += 1;
+        state.total_cleans = state.total_cleans.saturating_add(1);
+
+        Ok(CleanResult {
+            freed_bytes: freed,
+            items_cleaned: cleaned,
+            errors,
+            category_freed,
+        })
+    })
+}
+
+/// Delete specific scanned files, whatever category they came from.
+///
+/// This is how space is reclaimed in an advisory category: the user picks the
+/// individual files, so there is no risk of a category-wide `clean` sweeping
+/// away data nobody named.
+///
+/// A path that is not in the cached scan results is reported as an error
+/// rather than deleted — the cache is the record of what the user was shown,
+/// and this call is not a general-purpose `rm`.
+pub fn clean_paths<P: AsRef<Path>>(paths: &[P]) -> KernelResult<CleanResult> {
+    with_state(|state| {
+        let mut freed = 0u64;
+        let mut cleaned = 0usize;
+        let mut errors = 0usize;
+        let mut category_freed: Vec<(CleanCategory, u64)> = Vec::new();
+        let mut removed: Vec<PathBuf> = Vec::new();
+
+        for want in paths {
+            let want = want.as_ref();
+            let Some(item) = state.items.iter()
+                .find(|i| i.path.as_deref() == Some(want))
+                .cloned()
+            else {
+                errors = errors.saturating_add(1);
+                continue;
+            };
+            if crate::fs::Vfs::remove(want).is_err() {
+                errors = errors.saturating_add(1);
+                continue;
+            }
+            freed = freed.saturating_add(item.size_bytes);
+            cleaned = cleaned.saturating_add(1);
+            removed.push(want.to_path_buf());
+            match category_freed.iter_mut().find(|(c, _)| *c == item.category) {
+                Some((_, f)) => *f = f.saturating_add(item.size_bytes),
+                None => category_freed.push((item.category, item.size_bytes)),
+            }
+        }
+
+        state.items.retain(|i| match i.path.as_ref() {
+            Some(p) => !removed.contains(p),
+            None => true,
+        });
+        state.total_freed = state.total_freed.saturating_add(freed);
+        state.total_cleans = state.total_cleans.saturating_add(1);
 
         Ok(CleanResult {
             freed_bytes: freed,
@@ -643,23 +754,32 @@ pub fn remove_auto_category(cat: CleanCategory) -> KernelResult<()> {
     })
 }
 
-/// Add an exclusion path (skip during scans).
-pub fn add_exclusion(path: &str) -> KernelResult<()> {
+/// Add an exclusion path: a scan skips this file and everything under it.
+///
+/// The path must be absolute. A relative path could never match the absolute
+/// paths the scanners build, so accepting one would silently do nothing, and
+/// an empty path would exclude the entire filesystem.
+pub fn add_exclusion<P: AsRef<Path> + ?Sized>(path: &P) -> KernelResult<()> {
+    let path = path.as_ref();
+    if !path.is_absolute() {
+        return Err(KernelError::InvalidArgument);
+    }
     with_state(|state| {
         if state.config.exclusions.len() >= MAX_EXCLUSIONS {
             return Err(KernelError::ResourceExhausted);
         }
-        if !state.config.exclusions.iter().any(|e| e == path) {
-            state.config.exclusions.push(String::from(path));
+        if !state.config.exclusions.iter().any(|e| e.as_path() == path) {
+            state.config.exclusions.push(path.to_path_buf());
         }
         Ok(())
     })
 }
 
 /// Remove an exclusion path.
-pub fn remove_exclusion(path: &str) -> KernelResult<()> {
+pub fn remove_exclusion<P: AsRef<Path> + ?Sized>(path: &P) -> KernelResult<()> {
+    let path = path.as_ref();
     with_state(|state| {
-        let idx = state.config.exclusions.iter().position(|e| e == path)
+        let idx = state.config.exclusions.iter().position(|e| e.as_path() == path)
             .ok_or(KernelError::NotFound)?;
         state.config.exclusions.remove(idx);
         Ok(())
@@ -667,7 +787,7 @@ pub fn remove_exclusion(path: &str) -> KernelResult<()> {
 }
 
 /// List exclusion paths.
-pub fn exclusions() -> Vec<String> {
+pub fn exclusions() -> Vec<PathBuf> {
     let guard = STATE.lock();
     guard.as_ref().map_or_else(Vec::new, |s| s.config.exclusions.clone())
 }
@@ -788,6 +908,13 @@ pub fn self_test() {
         assert_eq!(exclusions().len(), 1);
         let result = remove_exclusion("/nonexistent");
         assert!(result.is_err());
+        // A relative or empty exclusion could never match the absolute paths
+        // the scanners build, so it must be rejected rather than silently
+        // ignored — and an empty one would exclude the whole filesystem.
+        assert!(add_exclusion("home/important").is_err());
+        assert!(add_exclusion("").is_err());
+        remove_exclusion("/data/keep").expect("remove exclusion");
+        assert!(exclusions().is_empty());
         serial_println!("[storageclean]   5. Exclusion management — OK");
     }
 
@@ -851,5 +978,88 @@ pub fn self_test() {
         serial_println!("[storageclean]  11. Last report cached — OK");
     }
 
-    serial_println!("[storageclean] All 11 self-tests passed.");
+    // Test 12: a file whose name is not valid UTF-8 is scanned, listed under
+    // its exact bytes, and can be excluded. A cleanup tool that cannot see a
+    // file is one that silently leaves the user's disk full.
+    {
+        use crate::fs::Vfs;
+        let wild = Path::new(b"/tmp/_sc\xffwild.bin".as_slice());
+        Vfs::write_file(wild, b"junk").expect("write undecodable temp file");
+
+        let _ = scan().expect("scan");
+        assert!(
+            items_for_category(CleanCategory::TempFiles)
+                .iter()
+                .any(|i| i.path.as_deref() == Some(wild)),
+            "undecodable temp file missing from scan"
+        );
+
+        // Excluding it must actually take effect on the next scan — before
+        // this, the exclusion list was consulted by nothing at all.
+        add_exclusion(wild).expect("exclude undecodable path");
+        let _ = scan().expect("rescan");
+        assert!(
+            !items_for_category(CleanCategory::TempFiles)
+                .iter()
+                .any(|i| i.path.as_deref() == Some(wild)),
+            "exclusion did not take effect"
+        );
+        remove_exclusion(wild).expect("unexclude");
+
+        // Excluding a sibling whose name merely shares a byte prefix must not
+        // hide it: exclusions name subtrees, not byte prefixes.
+        add_exclusion("/tmp/_sc").expect("exclude prefix");
+        let _ = scan().expect("rescan");
+        assert!(
+            items_for_category(CleanCategory::TempFiles)
+                .iter()
+                .any(|i| i.path.as_deref() == Some(wild)),
+            "byte-prefix exclusion wrongly hid a sibling"
+        );
+        remove_exclusion("/tmp/_sc").expect("unexclude prefix");
+
+        Vfs::remove(wild).ok();
+        serial_println!("[storageclean]  12. Undecodable name scanned & excludable — OK");
+    }
+
+    // Test 13: advisory categories are recommendations, not deletions.
+    {
+        {
+            let mut guard = STATE.lock();
+            let s = guard.as_mut().expect("state");
+            s.items.push(CleanItem {
+                path: Some(PathBuf::from("/home/_sc_absent_huge.bin")),
+                size_bytes: 999,
+                category: CleanCategory::LargeFiles,
+                reason: String::from("synthetic"),
+                age_days: 0,
+            });
+        }
+        let freed_before = stats().1;
+        let result = clean(&[CleanCategory::LargeFiles]).expect("clean advisory");
+        // Nothing was deleted, so nothing may be reported as freed.
+        assert_eq!(result.freed_bytes, 0);
+        assert_eq!(result.items_cleaned, 0);
+        assert_eq!(stats().1, freed_before);
+        // ...and the recommendation must survive, since it was not acted on.
+        assert!(
+            items_for_category(CleanCategory::LargeFiles)
+                .iter()
+                .any(|i| i.path.as_deref() == Some(Path::new("/home/_sc_absent_huge.bin"))),
+            "advisory item wrongly dropped from the cache"
+        );
+
+        // clean_paths reports a failed delete as an error, never as freed space.
+        let result = clean_paths(&["/home/_sc_absent_huge.bin"]).expect("clean_paths");
+        assert_eq!(result.freed_bytes, 0);
+        assert_eq!(result.items_cleaned, 0);
+        assert_eq!(result.errors, 1);
+        // A path that was never scanned is refused rather than deleted.
+        let result = clean_paths(&["/etc/passwd"]).expect("clean_paths unknown");
+        assert_eq!(result.items_cleaned, 0);
+        assert_eq!(result.errors, 1);
+        serial_println!("[storageclean]  13. Advisory categories are not deleted — OK");
+    }
+
+    serial_println!("[storageclean] All 13 self-tests passed.");
 }

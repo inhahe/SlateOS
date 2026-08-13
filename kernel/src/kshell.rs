@@ -25695,6 +25695,30 @@ fn cmd_storageclean(args: &str) {
                     for (cat, freed) in &result.category_freed {
                         shell_println!("  {}: {}", cat.label(), storageclean::format_size(*freed));
                     }
+                    for cat in cats.iter().filter(|c| c.is_advisory()) {
+                        shell_println!("  {} skipped (advisory — use 'sclean rm <path>...')",
+                            cat.label());
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "rm" => {
+            let paths: alloc::vec::Vec<&str> = parts.iter().skip(1).copied().collect();
+            if paths.is_empty() {
+                shell_println!("Usage: sclean rm <path>...");
+                shell_println!("Deletes specific files from the last scan (the only way to");
+                shell_println!("reclaim space in an advisory category).");
+                return;
+            }
+            match storageclean::clean_paths(&paths) {
+                Ok(result) => {
+                    shell_println!("Deleted {} items, freed {}",
+                        result.items_cleaned, storageclean::format_size(result.freed_bytes));
+                    if result.errors > 0 {
+                        shell_println!("  {} failed (not in the last scan, or delete failed)",
+                            result.errors);
+                    }
                 }
                 Err(e) => shell_println!("Error: {:?}", e),
             }
@@ -25710,9 +25734,16 @@ fn cmd_storageclean(args: &str) {
                 shell_println!("No items. Run 'sclean scan' first.");
             } else {
                 for item in items.iter().take(50) {
-                    shell_println!("  [{:?}] {} ({})",
-                        item.category, item.path,
-                        storageclean::format_size(item.size_bytes));
+                    // An item with no path names no file (the in-memory
+                    // thumbnail cache); show its reason instead.
+                    match &item.path {
+                        Some(p) => shell_println!("  [{:?}] {} ({})",
+                            item.category, p.display(),
+                            storageclean::format_size(item.size_bytes)),
+                        None => shell_println!("  [{:?}] <{}> ({})",
+                            item.category, item.reason,
+                            storageclean::format_size(item.size_bytes)),
+                    }
                 }
                 if items.len() > 50 {
                     shell_println!("  ... and {} more", items.len() - 50);
@@ -25780,12 +25811,14 @@ fn cmd_storageclean(args: &str) {
                     shell_println!("No exclusions.");
                 } else {
                     for e in &excl {
-                        shell_println!("  {}", e);
+                        shell_println!("  {}", e.display());
                     }
                 }
             } else {
-                let _ = storageclean::add_exclusion(path);
-                shell_println!("Added exclusion: {}", path);
+                match storageclean::add_exclusion(path) {
+                    Ok(()) => shell_println!("Added exclusion: {}", path),
+                    Err(e) => shell_println!("Error: {:?} (exclusions must be absolute paths)", e),
+                }
             }
         }
         "unexclude" => {
@@ -25813,7 +25846,8 @@ fn cmd_storageclean(args: &str) {
             shell_println!("Subcommands:");
             shell_println!("  show           Show cleanup status and config");
             shell_println!("  scan           Scan for reclaimable space");
-            shell_println!("  clean [cat]    Clean up (trash/temp/thumbs/logs/pkg/large/dl/all)");
+            shell_println!("  clean [cat]    Clean up (trash/temp/thumbs/logs/pkg/all)");
+            shell_println!("  rm <path>...   Delete specific scanned files (large/dl/dupes)");
             shell_println!("  items [cat]    Show scanned items");
             shell_println!("  auto <on|off>  Enable/disable automatic cleanup");
             shell_println!("  threshold <%%>  Set auto-clean disk usage threshold");

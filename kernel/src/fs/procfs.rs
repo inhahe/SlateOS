@@ -914,7 +914,7 @@ fn gen_mounts() -> Vec<u8> {
 /// Render the global VFS mount table in the `/proc/mounts` line format
 /// (`source mount_point fstype options 0 0`).
 fn render_global_mounts(
-    mounts: &[(String, String, crate::fs::vfs::MountOptions)],
+    mounts: &[(PathBuf, String, crate::fs::vfs::MountOptions)],
 ) -> Vec<u8> {
     let mut s = String::with_capacity(256);
     for (path, fs_type, options) in mounts {
@@ -933,7 +933,7 @@ fn render_global_mounts(
 /// `rw`/`ro` option taken from the container's own read-only view.
 fn render_container_mounts(
     view: &[crate::ipc::namespace::MountViewEntry],
-    global: &[(String, String, crate::fs::vfs::MountOptions)],
+    global: &[(PathBuf, String, crate::fs::vfs::MountOptions)],
 ) -> Vec<u8> {
     let mut s = String::with_capacity(view.len().saturating_mul(64).max(16));
     for entry in view {
@@ -1191,7 +1191,7 @@ fn gen_locks() -> Vec<u8> {
                 super::vfs::LockType::Shared => "SHARED   ",
                 super::vfs::LockType::Exclusive => "EXCLUSIVE",
             };
-            text.push_str(&format!("FLOCK {} {:>8}  {}\n", type_str, owner, path));
+            text.push_str(&format!("FLOCK {} {:>8}  {}\n", type_str, owner, path.display()));
         }
     }
     text.into_bytes()
@@ -1305,7 +1305,7 @@ fn gen_fdinfo() -> Vec<u8> {
 
             text.push_str(&format!(
                 "{:<7} {:<5} {:<12} {:<12} {}\n",
-                h.id, flags_str, h.offset, h.size, h.path,
+                h.id, flags_str, h.offset, h.size, h.path.display(),
             ));
         }
     }
@@ -1504,7 +1504,7 @@ fn gen_fsstats() -> Vec<u8> {
     let mut s = String::with_capacity(512);
 
     for (mount_path, fs_type) in &mounts {
-        s.push_str(&format!("--- {} ({}) ---\n", mount_path, fs_type));
+        s.push_str(&format!("--- {} ({}) ---\n", mount_path.display(), fs_type));
         match crate::fs::Vfs::debug_stats(mount_path) {
             Ok(stats) if !stats.is_empty() => {
                 s.push_str(&stats);
@@ -2640,18 +2640,31 @@ fn gen_pid_maps(task_id: u64) -> KernelResult<Vec<u8>> {
 /// except `/` and NUL in path components, so a mount point genuinely can
 /// contain a space — without this, such a mount would be misparsed.
 ///
-/// Iterating over `char`s (not bytes) keeps multi-byte UTF-8 sequences
-/// intact; the four escaped characters are all ASCII (`< 0x80`) and so
-/// never appear as UTF-8 continuation bytes.
-fn mangle_mount_field(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            ' ' => out.push_str("\\040"),
-            '\t' => out.push_str("\\011"),
-            '\n' => out.push_str("\\012"),
-            '\\' => out.push_str("\\134"),
-            other => out.push(other),
+/// The escape is byte-oriented, exactly like Linux's: `mangle()` calls
+/// `seq_escape(m, s, " \t\n\\")`, which is `string_escape_mem` with
+/// `ESCAPE_OCTAL`, so a byte is emitted raw only if it is printable ASCII
+/// (`0x21..=0x7E`) and not a backslash; every other byte — control
+/// characters, DEL, and *all* bytes `>= 0x80` — becomes a 3-digit octal
+/// escape.  That is what makes this function total over arbitrary path
+/// bytes: a mount point that is not valid UTF-8 is still rendered
+/// losslessly and unambiguously (a literal backslash is itself escaped,
+/// so unmangling is a straight inverse).  It also means a UTF-8 mount
+/// point appears as its octal byte sequence, which is exactly what
+/// `findmnt`/`getmntent` already unmangle out of a real Linux
+/// `/proc/mounts`.
+fn mangle_mount_field(s: impl AsRef<[u8]>) -> String {
+    let bytes = s.as_ref();
+    let mut out = String::with_capacity(bytes.len());
+    for &b in bytes {
+        if b.is_ascii_graphic() && b != b'\\' {
+            out.push(char::from(b));
+        } else {
+            out.push('\\');
+            // Three octal digits, most significant first. `b` is a `u8` and
+            // every operand below is masked to 0..=7, so the adds are in range.
+            out.push(char::from(b'0'.wrapping_add((b >> 6) & 0o7)));
+            out.push(char::from(b'0'.wrapping_add((b >> 3) & 0o7)));
+            out.push(char::from(b'0'.wrapping_add(b & 0o7)));
         }
     }
     out
@@ -2687,7 +2700,7 @@ fn mangle_mount_field(s: &str) -> String {
 /// - `source`: `none` (we do not track backing devices), matching what we
 ///   already emit in `/proc/mounts`.
 /// - per-mount and super options are the same `MountOptions` string.
-fn render_mountinfo(mounts: &[(String, String, crate::fs::vfs::MountOptions)]) -> Vec<u8> {
+fn render_mountinfo(mounts: &[(PathBuf, String, crate::fs::vfs::MountOptions)]) -> Vec<u8> {
     use core::fmt::Write as _;
 
     /// Base for synthetic mount ids.  Linux ids are arbitrary positive
@@ -2720,23 +2733,22 @@ fn render_mountinfo(mounts: &[(String, String, crate::fs::vfs::MountOptions)]) -
 /// True iff mount point `mount_path` covers host path `host` — either an
 /// exact match or a proper parent directory (boundary-aware so `/data` does
 /// not spuriously cover `/database`).  The root mount `/` covers everything.
-fn mount_path_covers(mount_path: &str, host: &str) -> bool {
-    if mount_path == "/" {
-        return true;
-    }
-    if host == mount_path {
-        return true;
-    }
-    host.strip_prefix(mount_path)
-        .is_some_and(|rest| rest.starts_with('/'))
+///
+/// Delegates to [`crate::fs::pathutil::path_in_subtree`], which does the
+/// component-aligned comparison.  The open-coded `strip_prefix` version this
+/// replaced failed open when `mount_path` itself ended in `/`: the remainder
+/// then began with the *next* component rather than a separator, so a real
+/// child was reported as uncovered and got the wrong fstype.
+fn mount_path_covers(mount_path: &Path, host: &Path) -> bool {
+    crate::fs::pathutil::path_in_subtree(host, mount_path)
 }
 
 /// Resolve the filesystem type serving host path `host` from the global mount
 /// table: the longest mount-point prefix that covers it wins.  Returns `none`
 /// if nothing covers it (unreachable in practice — `/` always covers).
 fn fstype_for_host_path<'a>(
-    host: &str,
-    global: &'a [(String, String, crate::fs::vfs::MountOptions)],
+    host: &Path,
+    global: &'a [(PathBuf, String, crate::fs::vfs::MountOptions)],
 ) -> &'a str {
     let mut best: Option<(&str, usize)> = None;
     for (path, fs_type, _) in global {
@@ -2763,7 +2775,7 @@ fn fstype_for_host_path<'a>(
 /// what a write would actually do inside the container.
 fn render_container_mountinfo(
     view: &[crate::ipc::namespace::MountViewEntry],
-    global: &[(String, String, crate::fs::vfs::MountOptions)],
+    global: &[(PathBuf, String, crate::fs::vfs::MountOptions)],
 ) -> Vec<u8> {
     use core::fmt::Write as _;
 
@@ -3099,20 +3111,20 @@ fn gen_pid_io(task_id: u64) -> KernelResult<Vec<u8>> {
 /// labels.  The console maps to `/dev/console`.  Nothing here is
 /// fabricated: if a File handle can no longer be resolved (it raced a
 /// close), we report `anon_inode:[file]` rather than inventing a path.
-fn fd_link_target(entry: &crate::proc::linux_fd::FdEntry) -> String {
+fn fd_link_target(entry: &crate::proc::linux_fd::FdEntry) -> PathBuf {
     use crate::proc::linux_fd::HandleKind;
     match entry.kind {
-        HandleKind::Console => String::from("/dev/console"),
+        HandleKind::Console => PathBuf::from("/dev/console"),
         HandleKind::File => crate::fs::handle::handle_path(entry.raw_handle)
-            .unwrap_or_else(|_| String::from("anon_inode:[file]")),
-        HandleKind::Pipe => format!("pipe:[{}]", entry.raw_handle),
-        HandleKind::EventFd => String::from("anon_inode:[eventfd]"),
-        HandleKind::PidFd => String::from("anon_inode:[pidfd]"),
-        HandleKind::MemFd => String::from("anon_inode:[memfd]"),
-        HandleKind::Epoll => String::from("anon_inode:[eventpoll]"),
-        HandleKind::SignalFd => String::from("anon_inode:[signalfd]"),
-        HandleKind::Timerfd => String::from("anon_inode:[timerfd]"),
-        HandleKind::Inotify => String::from("anon_inode:inotify"),
+            .unwrap_or_else(|_| PathBuf::from("anon_inode:[file]")),
+        HandleKind::Pipe => PathBuf::from(format!("pipe:[{}]", entry.raw_handle)),
+        HandleKind::EventFd => PathBuf::from("anon_inode:[eventfd]"),
+        HandleKind::PidFd => PathBuf::from("anon_inode:[pidfd]"),
+        HandleKind::MemFd => PathBuf::from("anon_inode:[memfd]"),
+        HandleKind::Epoll => PathBuf::from("anon_inode:[eventpoll]"),
+        HandleKind::SignalFd => PathBuf::from("anon_inode:[signalfd]"),
+        HandleKind::Timerfd => PathBuf::from("anon_inode:[timerfd]"),
+        HandleKind::Inotify => PathBuf::from("anon_inode:inotify"),
         // ALSA PCM is a real device node, so /proc/self/fd/N resolves to its
         // /dev/snd path.  The direction (playback `p` vs capture `c`) is
         // recorded on the instance object; a stale handle falls back to the
@@ -3123,13 +3135,13 @@ fn fd_link_target(entry: &crate::proc::linux_fd::FdEntry) -> String {
             )
             .unwrap_or(false);
             if capture {
-                String::from("/dev/snd/pcmC0D0c")
+                PathBuf::from("/dev/snd/pcmC0D0c")
             } else {
-                String::from("/dev/snd/pcmC0D0p")
+                PathBuf::from("/dev/snd/pcmC0D0p")
             }
         }
         // ALSA control device is a real device node at a fixed path.
-        HandleKind::AlsaControl => String::from("/dev/snd/controlC0"),
+        HandleKind::AlsaControl => PathBuf::from("/dev/snd/controlC0"),
         // DRM card / render node is a real device node under /dev/dri; the
         // render-node flag is recorded on the instance object, and a stale
         // handle falls back to the card node name.
@@ -3139,14 +3151,14 @@ fn fd_link_target(entry: &crate::proc::linux_fd::FdEntry) -> String {
             )
             .unwrap_or(false);
             if render {
-                String::from("/dev/dri/renderD128")
+                PathBuf::from("/dev/dri/renderD128")
             } else {
-                String::from("/dev/dri/card0")
+                PathBuf::from("/dev/dri/card0")
             }
         }
         // A daemon-backed AF_INET stream socket resolves to Linux's
         // `socket:[inode]` label; we use the raw handle as the inode.
-        HandleKind::Socket => format!("socket:[{}]", entry.raw_handle),
+        HandleKind::Socket => PathBuf::from(format!("socket:[{}]", entry.raw_handle)),
     }
 }
 
@@ -3622,7 +3634,14 @@ fn gen_audit() -> Vec<u8> {
         s.push_str("Rules:\n");
         for r in &rules {
             let uid_str = r.uid.map(|u| format!("{}", u)).unwrap_or_else(|| String::from("*"));
-            let prefix = if r.path_prefix.is_empty() { "(all)" } else { &r.path_prefix };
+            // The audit rule prefix is a raw byte path, so it is rendered
+            // through `Path::display()` — `Path` deliberately has no `Display`
+            // impl, precisely so lossy rendering is never implicit.
+            let prefix = if r.path_prefix.is_empty() {
+                String::from("(all)")
+            } else {
+                format!("{}", r.path_prefix.display())
+            };
             s.push_str(&format!("  rule {}: path={} mask=0x{:X} uid={} failures={} enabled={}\n",
                 r.id, prefix, r.mask.0, uid_str, r.failures_only, r.enabled));
         }
@@ -12796,7 +12815,7 @@ impl FileSystem for ProcFs {
             ProcPath::PidFdLink(pid, fd) => {
                 let entry = crate::proc::pcb::linux_fd_lookup(pid, fd)
                     .ok_or(KernelError::NotFound)?;
-                Ok(PathBuf::from(fd_link_target(&entry)))
+                Ok(fd_link_target(&entry))
             }
             // `/proc/self` → the caller's pid, as a relative target (Linux
             // returns the bare pid number, e.g. "7", resolved against /proc).
@@ -13100,7 +13119,7 @@ pub fn self_test() -> KernelResult<()> {
         let probe = crate::sched::current_task_id();
         let dir_entries = fs.readdir(Path::new(&format!("/{probe}")))?;
         if !dir_entries.iter().any(|e| {
-            e.name == "task" && e.entry_type == EntryType::Directory
+            e.name.as_path() == Path::new("task") && e.entry_type == EntryType::Directory
         }) {
             serial_println!(
                 "[procfs]   FAIL: /{}/ missing `task` subdirectory", probe
@@ -13174,7 +13193,7 @@ pub fn self_test() -> KernelResult<()> {
         ];
         for (entry, want) in renders {
             let got = fd_link_target(entry);
-            if got != *want {
+            if got.as_path() != Path::new(*want) {
                 serial_println!(
                     "[procfs]   FAIL: fd_link_target = {:?}, want {:?}", got, want
                 );
@@ -13202,7 +13221,7 @@ pub fn self_test() -> KernelResult<()> {
         let probe = crate::sched::current_task_id();
         let dir_entries = fs.readdir(Path::new(&format!("/{probe}")))?;
         if !dir_entries.iter().any(|e| {
-            e.name == "fd" && e.entry_type == EntryType::Directory
+            e.name.as_path() == Path::new("fd") && e.entry_type == EntryType::Directory
         }) {
             serial_println!("[procfs]   FAIL: /{}/ missing `fd` subdirectory", probe);
             return Err(KernelError::InternalError);
@@ -13297,7 +13316,7 @@ pub fn self_test() -> KernelResult<()> {
         let probe = crate::sched::current_task_id();
         let dir_entries = fs.readdir(Path::new(&format!("/{probe}")))?;
         if !dir_entries.iter().any(|e| {
-            e.name == "fdinfo" && e.entry_type == EntryType::Directory
+            e.name.as_path() == Path::new("fdinfo") && e.entry_type == EntryType::Directory
         }) {
             serial_println!("[procfs]   FAIL: /{}/ missing `fdinfo` subdirectory", probe);
             return Err(KernelError::InternalError);
@@ -13749,7 +13768,7 @@ pub fn self_test() -> KernelResult<()> {
     // The extra entries must be the `task`, `fd` and `fdinfo` directories.
     for subdir in ["task", "fd", "fdinfo"] {
         if !pid_entries.iter().any(|e| {
-            e.name == subdir && e.entry_type == EntryType::Directory
+            e.name.as_path() == Path::new(subdir) && e.entry_type == EntryType::Directory
         }) {
             serial_println!(
                 "[procfs]   FAIL: readdir {} missing `{}` subdirectory",
@@ -13939,9 +13958,9 @@ pub fn self_test() -> KernelResult<()> {
     {
         use crate::fs::vfs::MountOptions;
         let mounts = [
-            (String::from("/"), String::from("ext4"), MountOptions::defaults()),
+            (PathBuf::from("/"), String::from("ext4"), MountOptions::defaults()),
             (
-                String::from("/tmp"),
+                PathBuf::from("/tmp"),
                 String::from("tmpfs"),
                 MountOptions::parse("ro,noatime"),
             ),
@@ -13949,7 +13968,7 @@ pub fn self_test() -> KernelResult<()> {
             // `mangle()`-equivalent escaping: the space must become `\040`
             // so the space-separated layout stays parseable.
             (
-                String::from("/mnt/my disk"),
+                PathBuf::from("/mnt/my disk"),
                 String::from("ext4"),
                 MountOptions::defaults(),
             ),
@@ -13981,6 +14000,50 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[procfs]   mountinfo render: {} mount lines OK", lines.len());
     }
 
+    // --- mangle_mount_field over arbitrary path bytes ---
+    // A mount point is a byte string: every byte except `/` and NUL is legal,
+    // so the escaper must be total and lossless over raw bytes, not just over
+    // UTF-8.  This pins Linux `mangle()` semantics exactly (`seq_escape` with
+    // ESCAPE_OCTAL): printable ASCII passes through, everything else — the
+    // four classic offenders, control bytes, DEL and *all* bytes >= 0x80 —
+    // becomes a 3-digit octal escape.  Without this, a mount point holding a
+    // 0xFF byte would emit a raw non-UTF-8 byte into `/proc/mounts`, which is
+    // declared UTF-8 text and is read with `core::str::from_utf8` below.
+    {
+        // ASCII graphic bytes are untouched.
+        if mangle_mount_field("/usr/local-bin_1.2") != "/usr/local-bin_1.2" {
+            serial_println!("[procfs]   FAIL: mangle mangled plain ASCII");
+            return Err(KernelError::InternalError);
+        }
+        // The four Linux-escaped bytes keep their classic renderings.
+        if mangle_mount_field(" \t\n\\") != "\\040\\011\\012\\134" {
+            serial_println!("[procfs]   FAIL: mangle classic escapes wrong");
+            return Err(KernelError::InternalError);
+        }
+        // A path that is not valid UTF-8 at all still renders, losslessly:
+        // 0xFF -> \377, 0xFE -> \376.  This is the case the old `&str`-based
+        // escaper could not even be handed.
+        let wild = Path::new(b"/mnt/re\xffport\xfe".as_slice());
+        let got = mangle_mount_field(wild);
+        if got != "/mnt/re\\377port\\376" {
+            serial_println!("[procfs]   FAIL: mangle non-UTF-8 = {:?}", got);
+            return Err(KernelError::InternalError);
+        }
+        // The whole rendered field must be valid UTF-8 (in fact pure ASCII),
+        // which is what makes `/proc/mounts` safe to expose as text.
+        if !got.is_ascii() {
+            serial_println!("[procfs]   FAIL: mangle output not ASCII");
+            return Err(KernelError::InternalError);
+        }
+        // NUL and DEL are escaped too, so no C-string or terminal control byte
+        // can reach a reader of /proc/mounts.
+        if mangle_mount_field(b"\x00\x7f".as_slice()) != "\\000\\177" {
+            serial_println!("[procfs]   FAIL: mangle NUL/DEL escapes wrong");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[procfs]   mangle_mount_field: byte-exact escaping OK");
+    }
+
     // --- /proc/<pid>/mountinfo for a container (jailed) process ---
     // render_container_mountinfo maps a container's own mount view onto the
     // mountinfo layout: the rootfs at guest `/`, then each volume/tmpfs at its
@@ -13994,14 +14057,14 @@ pub fn self_test() -> KernelResult<()> {
         // Host mount table the container's targets resolve their fstype against:
         // the rootfs overlay, the ext4 host root, and a tmpfs-backing memfs.
         let global = [
-            (String::from("/"), String::from("ext4"), MountOptions::defaults()),
+            (PathBuf::from("/"), String::from("ext4"), MountOptions::defaults()),
             (
-                String::from("/containers/c1/rootfs"),
+                PathBuf::from("/containers/c1/rootfs"),
                 String::from("overlay"),
                 MountOptions::defaults(),
             ),
             (
-                String::from("/var/lib/slate/tmpfs/1-0"),
+                PathBuf::from("/var/lib/slate/tmpfs/1-0"),
                 String::from("tmpfs"),
                 MountOptions::defaults(),
             ),
@@ -14010,18 +14073,18 @@ pub fn self_test() -> KernelResult<()> {
         // the ext4 host root, and a writable tmpfs.
         let view = [
             MountViewEntry {
-                guest_path: String::from("/"),
-                host_target: String::from("/containers/c1/rootfs"),
+                guest_path: PathBuf::from("/"),
+                host_target: PathBuf::from("/containers/c1/rootfs"),
                 read_only: true,
             },
             MountViewEntry {
-                guest_path: String::from("/logs"),
-                host_target: String::from("/var/log/app"),
+                guest_path: PathBuf::from("/logs"),
+                host_target: PathBuf::from("/var/log/app"),
                 read_only: true,
             },
             MountViewEntry {
-                guest_path: String::from("/tmp"),
-                host_target: String::from("/var/lib/slate/tmpfs/1-0"),
+                guest_path: PathBuf::from("/tmp"),
+                host_target: PathBuf::from("/var/lib/slate/tmpfs/1-0"),
                 read_only: false,
             },
         ];
@@ -14054,11 +14117,11 @@ pub fn self_test() -> KernelResult<()> {
         }
         // Boundary safety: a `/data` mount must not be reported as covering
         // `/database` (prefix without a path separator).
-        if mount_path_covers("/data", "/database") {
+        if mount_path_covers(Path::new("/data"), Path::new("/database")) {
             serial_println!("[procfs]   FAIL: /data must not cover /database");
             return Err(KernelError::InternalError);
         }
-        if !mount_path_covers("/data", "/data/x") || !mount_path_covers("/", "/anything") {
+        if !mount_path_covers(Path::new("/data"), Path::new("/data/x")) || !mount_path_covers(Path::new("/"), Path::new("/anything")) {
             serial_println!("[procfs]   FAIL: mount_path_covers parent/root check");
             return Err(KernelError::InternalError);
         }
@@ -15001,7 +15064,7 @@ pub fn self_test() -> KernelResult<()> {
         //    sit directly at the root) — order: dirs before files.
         let root = fs.readdir(Path::new("/sys"))?;
         for d in ["kernel", "vm", "fs"] {
-            if !root.iter().any(|e| e.name == d && e.entry_type == EntryType::Directory) {
+            if !root.iter().any(|e| e.name.as_path() == Path::new(d) && e.entry_type == EntryType::Directory) {
                 serial_println!("[procfs]   FAIL: /sys missing dir {}", d);
                 return Err(KernelError::InternalError);
             }
@@ -15013,12 +15076,12 @@ pub fn self_test() -> KernelResult<()> {
 
         // 4. readdir /proc/sys/kernel: the `random` subdir + the six files.
         let kern = fs.readdir(Path::new("/sys/kernel"))?;
-        if !kern.iter().any(|e| e.name == "random" && e.entry_type == EntryType::Directory) {
+        if !kern.iter().any(|e| e.name.as_path() == Path::new("random") && e.entry_type == EntryType::Directory) {
             serial_println!("[procfs]   FAIL: /sys/kernel missing `random` subdir");
             return Err(KernelError::InternalError);
         }
         for f in ["ostype", "osrelease", "version", "hostname", "domainname", "pid_max"] {
-            if !kern.iter().any(|e| e.name == f && e.entry_type == EntryType::File) {
+            if !kern.iter().any(|e| e.name.as_path() == Path::new(f) && e.entry_type == EntryType::File) {
                 serial_println!("[procfs]   FAIL: /sys/kernel missing file {}", f);
                 return Err(KernelError::InternalError);
             }
@@ -15057,7 +15120,7 @@ pub fn self_test() -> KernelResult<()> {
         //     lazy/overcommit allocation idiom they expect. overcommit_ratio /
         //     overcommit_kbytes are deliberately absent (no commit accounting).
         let vm = fs.readdir(Path::new("/sys/vm"))?;
-        if !vm.iter().any(|e| e.name == "overcommit_memory"
+        if !vm.iter().any(|e| e.name.as_path() == Path::new("overcommit_memory")
             && e.entry_type == EntryType::File)
         {
             serial_println!("[procfs]   FAIL: /sys/vm missing overcommit_memory");
@@ -15085,7 +15148,7 @@ pub fn self_test() -> KernelResult<()> {
         //     /sys/kernel/random lists all four files.
         let rnd = fs.readdir(Path::new("/sys/kernel/random"))?;
         for f in ["uuid", "boot_id", "poolsize", "entropy_avail"] {
-            if !rnd.iter().any(|e| e.name == f && e.entry_type == EntryType::File) {
+            if !rnd.iter().any(|e| e.name.as_path() == Path::new(f) && e.entry_type == EntryType::File) {
                 serial_println!("[procfs]   FAIL: /sys/kernel/random missing file {}", f);
                 return Err(KernelError::InternalError);
             }

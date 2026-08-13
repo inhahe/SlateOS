@@ -346,10 +346,7 @@ pub fn futex_wait_bitset(addr: u64, expected: u32, bitset: u32) -> KernelResult<
         // instead of trusting a check the caller may have made before it
         // blocked.  A single non-blocking instruction is the one thing a STAC
         // window may legitimately span.
-        let actual = match crate::mm::user::user_atomic_load_u32(addr) {
-            Ok(v) => v,
-            Err(e) => return Err(e),
-        };
+        let actual = crate::mm::user::user_atomic_load_u32(addr)?;
 
         // If the value changed, don't block — the condition the caller
         // was waiting for may already be satisfied.
@@ -464,10 +461,7 @@ pub fn futex_wait_bitset_timeout(
         let mut table = FUTEX_TABLE.lock();
 
         // Through the bounce-equivalent for atomics: see `futex_wait_bitset`.
-        let actual = match crate::mm::user::user_atomic_load_u32(addr) {
-            Ok(v) => v,
-            Err(e) => return Err(e),
-        };
+        let actual = crate::mm::user::user_atomic_load_u32(addr)?;
 
         if actual != expected {
             super::stats::futex_spurious();
@@ -917,10 +911,7 @@ fn requeue_inner(
             // Through the bounce-equivalent for atomics: see
             // `futex_wait_bitset`.  Mirrors the load in
             // `futex_wait_timeout`, which also reads under this lock.
-            let actual = match crate::mm::user::user_atomic_load_u32(addr1) {
-                Ok(v) => v,
-                Err(e) => return Err(e),
-            };
+            let actual = crate::mm::user::user_atomic_load_u32(addr1)?;
             if actual != expected {
                 super::stats::futex_spurious();
                 return Err(KernelError::WouldBlock);

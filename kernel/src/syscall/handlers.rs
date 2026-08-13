@@ -8436,10 +8436,6 @@ pub fn sys_fs_journal_flush(_args: &SyscallArgs) -> SyscallResult {
 // Metadata handlers (628–636)
 // ---------------------------------------------------------------------------
 
-/// Helper: read a path string from user pointers (arg0=ptr, arg1=len).
-///
-/// Returns the path as a `&str`.  Validates memory and UTF-8.
-
 /// `SYS_FS_METADATA` — get rich file metadata.
 ///
 /// `arg0`: pointer to path string.

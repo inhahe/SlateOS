@@ -134,6 +134,7 @@
 #![allow(clippy::cast_possible_truncation)]
 
 use crate::error::KernelError;
+use crate::fs::path::{Path, PathBuf};
 use crate::proc::pcb;
 
 use super::dispatch::{SyscallArgs, SyscallResult};
@@ -2856,11 +2857,11 @@ fn linux_execve(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
     let argv_user = frame.arg1;
     let envp_user = frame.arg2;
 
-    // Read filename.
-    // PATH_MAX on Linux is 4096; our VFS uses str so we additionally
-    // require valid UTF-8 (Linux accepts arbitrary bytes — the path
-    // is "all bytes except / and NUL").  Treat invalid UTF-8 as
-    // ENOENT (the file by that name doesn't exist on a UTF-8 VFS).
+    // Read filename.  PATH_MAX on Linux is 4096.  The bytes are taken
+    // verbatim: a path is "all bytes except / and NUL", and this used to
+    // additionally demand valid UTF-8 and report ENOENT when that failed —
+    // so a perfectly present executable whose path contained one such byte
+    // was unexecutable, and reported as missing rather than as rejected.
     const PATH_MAX: usize = 4096;
     let filename_bytes = match read_user_cstr(filename_ptr, PATH_MAX) {
         Ok(b) => b,
@@ -2869,25 +2870,24 @@ fn linux_execve(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
     if filename_bytes.is_empty() {
         return -i64::from(errno::ENOENT);
     }
-    let filename = match core::str::from_utf8(&filename_bytes) {
-        Ok(s) => s,
-        Err(_) => return -i64::from(errno::ENOENT),
-    };
-    linux_exec_common(frame, filename, &filename_bytes, argv_user, envp_user)
+    linux_exec_common(frame, Path::new(filename_bytes.as_slice()), argv_user, envp_user)
 }
 
 /// Shared core of `execve` / `execveat`.
 ///
 /// With the executable already resolved to `filename` (a VFS-openable
-/// path) and `filename_bytes` (the original path bytes, used for the
-/// `/proc/<pid>/exe` link), read argv / envp from the userspace pointer
-/// arrays, load the image, and rewrite `frame` to land at the new entry
-/// point on success.  On any error the old address space is left intact
-/// and the negative errno is returned.
+/// path, also used for the `/proc/<pid>/exe` link), read argv / envp from
+/// the userspace pointer arrays, load the image, and rewrite `frame` to land
+/// at the new entry point on success.  On any error the old address space is
+/// left intact and the negative errno is returned.
+///
+/// This took a `&str` *and* a `&[u8]` of the same path, because the VFS
+/// wanted the former and `/proc/<pid>/exe` the latter.  Now that a path is a
+/// byte string end to end they are the same value, so there is one parameter
+/// and no way for the two to disagree.
 fn linux_exec_common(
     frame: &mut crate::syscall::entry::SyscallFrame,
-    filename: &str,
-    filename_bytes: &[u8],
+    filename: &Path,
     argv_user: u64,
     envp_user: u64,
 ) -> i64 {
@@ -2957,7 +2957,7 @@ fn linux_exec_common(
     // on failure we pass None and the link reports NotFound.
     let exe_path: Option<alloc::vec::Vec<u8>> = {
         let cwd = crate::proc::pcb::get_cwd(pid).unwrap_or_else(|| alloc::vec![b'/']);
-        canonicalize_path(&cwd, filename_bytes).ok()
+        canonicalize_path(&cwd, filename.as_bytes()).ok()
     };
 
     // ---- 7. Exec.  After this point the old AS is gone on success. ----
@@ -3043,7 +3043,7 @@ fn linux_execveat(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
     };
 
     // Resolve to a VFS-openable path string.
-    let filename_string: alloc::string::String = if path_is_empty {
+    let filename_path: PathBuf = if path_is_empty {
         if flags & AT_EMPTY_PATH == 0 {
             // Empty path without AT_EMPTY_PATH → ENOENT (Linux getname()).
             return -i64::from(errno::ENOENT);
@@ -3075,7 +3075,7 @@ fn linux_execveat(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
     // read_file would transparently follow it, so lstat the resolved path
     // and return ELOOP when it is a symlink, matching Linux.
     if flags & AT_SYMLINK_NOFOLLOW != 0 {
-        match crate::fs::Vfs::lstat(&filename_string) {
+        match crate::fs::Vfs::lstat(&filename_path) {
             Ok(entry) if entry.entry_type == crate::fs::EntryType::Symlink => {
                 return -i64::from(errno::ELOOP);
             }
@@ -3085,8 +3085,7 @@ fn linux_execveat(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
         }
     }
 
-    let filename_bytes = filename_string.as_bytes();
-    linux_exec_common(frame, &filename_string, filename_bytes, argv_user, envp_user)
+    linux_exec_common(frame, &filename_path, argv_user, envp_user)
 }
 
 // ---------------------------------------------------------------------------
@@ -5670,17 +5669,19 @@ fn open_common(
         Ok(p) => p,
         Err(e) => return linux_err(e),
     };
-    let canon_str = match core::str::from_utf8(&canon) {
-        Ok(s) => s,
-        Err(_) => return linux_err(errno::EINVAL),
-    };
+    // No UTF-8 check: a path is an uninterpreted byte string in which every
+    // byte but `/` and NUL is legal.  This used to reject non-UTF-8 with
+    // EINVAL, which made a file whose name contains such a byte unnameable
+    // through this syscall even though the filesystem holding it accepts the
+    // name.  Linux's `getname()` copies bytes and validates nothing either.
+    let canon_path = Path::new(canon.as_slice());
 
     let mut kernel_flags = translate_open_flags(flags);
     // openat2 RESOLVE_NO_SYMLINKS: enforce no-symlink resolution in the VFS.
     if no_symlinks {
         kernel_flags |= crate::fs::handle::OpenFlags::NO_SYMLINKS.bits();
     }
-    let r = handlers::fs_open_kernel_path(canon_str, kernel_flags);
+    let r = handlers::fs_open_kernel_path(canon_path, kernel_flags);
     if r.value < 0 {
         return linux_from_native(r);
     }
@@ -5747,7 +5748,7 @@ fn sys_open(args: &SyscallArgs) -> SyscallResult {
 /// For an unjailed process the guest path equals the host path, so this is
 /// transparent.  Returns a ready-to-return error `SyscallResult` on failure
 /// (EBADF / ENOTDIR / ENOENT), matching the `*at` family contract.
-fn dirfd_to_guest_dir(dirfd: i32) -> Result<alloc::string::String, SyscallResult> {
+fn dirfd_to_guest_dir(dirfd: i32) -> Result<crate::fs::path::PathBuf, SyscallResult> {
     let entry = lookup_caller_fd(dirfd)?;
     if entry.kind != HandleKind::File {
         return Err(linux_err(errno::ENOTDIR));
@@ -18736,14 +18737,16 @@ fn access_path_common(path_ptr: u64, mode: u32, follow: bool) -> SyscallResult {
         Ok(p) => p,
         Err(e) => return linux_err(e),
     };
-    let canon_str = match core::str::from_utf8(&canon) {
-        Ok(s) => s,
-        Err(_) => return linux_err(errno::EINVAL),
-    };
+    // No UTF-8 check: a path is an uninterpreted byte string in which every
+    // byte but `/` and NUL is legal.  This used to reject non-UTF-8 with
+    // EINVAL, which made a file whose name contains such a byte unnameable
+    // through this syscall even though the filesystem holding it accepts the
+    // name.  Linux's `getname()` copies bytes and validates nothing either.
+    let canon_path = Path::new(canon.as_slice());
 
     // The lookup answers existence (F_OK) and, by extension, R_OK/X_OK under
     // our no-DAC model.  A NotFound maps to ENOENT.
-    let _meta = match stat_meta_for_path(canon_str, follow) {
+    let _meta = match stat_meta_for_path(canon_path, follow) {
         Ok(m) => m,
         Err(r) => return r,
     };
@@ -18995,7 +18998,7 @@ fn fill_statx_from_meta(buf: &mut [u8; STATX_SIZE], meta: &crate::fs::FileMeta) 
 /// path-based stat, mapping VFS errors to the Linux errno a stat caller
 /// expects.  `follow` selects `metadata` (follow trailing symlink) vs
 /// `lmetadata` (no-follow, for `lstat`/`AT_SYMLINK_NOFOLLOW`).
-fn stat_meta_for_path(path: &str, follow: bool) -> Result<crate::fs::FileMeta, SyscallResult> {
+fn stat_meta_for_path(path: &Path, follow: bool) -> Result<crate::fs::FileMeta, SyscallResult> {
     let r = if follow {
         crate::fs::Vfs::metadata(path)
     } else {
@@ -19156,11 +19159,13 @@ fn stat_path_common(path_ptr: u64, statbuf_ptr: u64, follow: bool) -> SyscallRes
         Ok(p) => p,
         Err(e) => return linux_err(e),
     };
-    let canon_str = match core::str::from_utf8(&canon) {
-        Ok(s) => s,
-        Err(_) => return linux_err(errno::EINVAL),
-    };
-    let meta = match stat_meta_for_path(canon_str, follow) {
+    // No UTF-8 check: a path is an uninterpreted byte string in which every
+    // byte but `/` and NUL is legal.  This used to reject non-UTF-8 with
+    // EINVAL, which made a file whose name contains such a byte unnameable
+    // through this syscall even though the filesystem holding it accepts the
+    // name.  Linux's `getname()` copies bytes and validates nothing either.
+    let canon_path = Path::new(canon.as_slice());
+    let meta = match stat_meta_for_path(canon_path, follow) {
         Ok(m) => m,
         Err(r) => return r,
     };
@@ -19659,7 +19664,7 @@ fn validate_user_str(ptr: u64) -> crate::error::KernelResult<()> {
     crate::mm::user::validate_user_read(ptr, 1)
 }
 
-/// Resolve a `(dirfd, user path pointer)` pair to an owned path string for the
+/// Resolve a `(dirfd, user path pointer)` pair to an owned path for the
 /// native VFS, mirroring `openat(2)` path semantics:
 ///
 /// - `AT_FDCWD`, or any absolute path, is taken verbatim (the native VFS
@@ -19671,7 +19676,15 @@ fn validate_user_str(ptr: u64) -> crate::error::KernelResult<()> {
 ///
 /// On any failure this returns a fully-formed `SyscallResult` (errno already
 /// translated) ready for the caller to return directly.
-fn resolve_at_path(dirfd: i32, path_ptr: u64) -> Result<alloc::string::String, SyscallResult> {
+///
+/// The result is a [`crate::fs::path::PathBuf`], not a `String`.  Both the
+/// relative and the absolute branch used to end in `String::from_utf8(..)` and
+/// return `EINVAL` on failure, which made every `*at` syscall — `openat`,
+/// `unlinkat`, `renameat`, `statx`, … — refuse to name a file whose path
+/// contains a byte that is not valid UTF-8, even though the filesystem holding
+/// it accepts every byte but `/` and NUL.  Linux has no such check (`getname()`
+/// copies bytes), and neither do we now.
+fn resolve_at_path(dirfd: i32, path_ptr: u64) -> Result<crate::fs::path::PathBuf, SyscallResult> {
     if path_ptr == 0 {
         return Err(linux_err(errno::EFAULT));
     }
@@ -19710,10 +19723,7 @@ fn resolve_at_path(dirfd: i32, path_ptr: u64) -> Result<alloc::string::String, S
             if combined.len() > MAX_PATH.saturating_sub(1) {
                 return Err(linux_err(errno::ENAMETOOLONG));
             }
-            return match alloc::string::String::from_utf8(combined) {
-                Ok(s) => Ok(s),
-                Err(_) => Err(linux_err(errno::EINVAL)),
-            };
+            return Ok(crate::fs::path::PathBuf::from(combined));
         }
         // first == b'/': absolute path, dirfd ignored — fall through.
     }
@@ -19740,10 +19750,7 @@ fn resolve_at_path(dirfd: i32, path_ptr: u64) -> Result<alloc::string::String, S
         Ok(p) => p,
         Err(e) => return Err(linux_err(e)),
     };
-    match alloc::string::String::from_utf8(canon) {
-        Ok(s) => Ok(s),
-        Err(_) => Err(linux_err(errno::EINVAL)),
-    }
+    Ok(crate::fs::path::PathBuf::from(canon))
 }
 
 /// Require the caller to hold a File-WRITE capability before a VFS mutation.
@@ -20246,12 +20253,14 @@ fn sys_readlink(args: &SyscallArgs) -> SyscallResult {
         Ok(p) => p,
         Err(e) => return linux_err(e),
     };
-    let canon_str = match core::str::from_utf8(&canon) {
-        Ok(s) => s,
-        Err(_) => return linux_err(errno::EINVAL),
-    };
+    // No UTF-8 check: a path is an uninterpreted byte string in which every
+    // byte but `/` and NUL is legal.  This used to reject non-UTF-8 with
+    // EINVAL, which made a file whose name contains such a byte unnameable
+    // through this syscall even though the filesystem holding it accepts the
+    // name.  Linux's `getname()` copies bytes and validates nothing either.
+    let canon_path = Path::new(canon.as_slice());
     #[allow(clippy::cast_sign_loss)]
-    do_readlink_copy(canon_str, args.arg1, bufsiz_i32 as usize)
+    do_readlink_copy(canon_path, args.arg1, bufsiz_i32 as usize)
 }
 
 /// Read a symlink's target into a user buffer, mapping VFS errors to the Linux
@@ -20263,7 +20272,7 @@ fn sys_readlink(args: &SyscallArgs) -> SyscallResult {
 /// be a symlink — so the buffer pointer is validated here, after a successful
 /// `Vfs::readlink`, never before.  `NotFound`→ENOENT (path gone),
 /// `InvalidArgument`→EINVAL ("not a symlink").
-fn do_readlink_copy(path: &str, buf_ptr: u64, bufsiz: usize) -> SyscallResult {
+fn do_readlink_copy(path: &Path, buf_ptr: u64, bufsiz: usize) -> SyscallResult {
     let target = match crate::fs::Vfs::readlink(path) {
         Ok(t) => t,
         Err(KernelError::NotFound) => return linux_err(errno::ENOENT),
@@ -20409,7 +20418,7 @@ fn sys_chmod(args: &SyscallArgs) -> SyscallResult {
 /// Apply a `chmod`-style mode change to an already-resolved path for a ring-3
 /// caller.  Masks the Linux `umode_t` to the 12 permission/special bits and
 /// routes to `Vfs::set_permissions` after a File-WRITE capability check.
-fn chmod_apply(path: &str, mode: u64) -> SyscallResult {
+fn chmod_apply(path: &Path, mode: u64) -> SyscallResult {
     if let Err(r) = require_fs_write() {
         return r;
     }
@@ -20423,7 +20432,7 @@ fn chmod_apply(path: &str, mode: u64) -> SyscallResult {
 
 /// No-follow variant of [`chmod_apply`] for `fchmodat2(AT_SYMLINK_NOFOLLOW)`:
 /// changes the mode of the final component itself even when it is a symlink.
-fn chmod_apply_no_follow(path: &str, mode: u64) -> SyscallResult {
+fn chmod_apply_no_follow(path: &Path, mode: u64) -> SyscallResult {
     if let Err(r) = require_fs_write() {
         return r;
     }
@@ -20537,14 +20546,14 @@ fn sys_chown(args: &SyscallArgs) -> SyscallResult {
 /// ring-3 caller.  The Linux `uid_t`/`gid_t` are narrowed to 32 bits; the
 /// `(uid_t)-1` / `(gid_t)-1` "leave unchanged" sentinels are honoured by
 /// `Vfs::set_owner` itself.  Requires a File-WRITE capability.
-fn chown_apply(path: &str, uid_arg: u64, gid_arg: u64) -> SyscallResult {
+fn chown_apply(path: &Path, uid_arg: u64, gid_arg: u64) -> SyscallResult {
     chown_apply_ex(path, uid_arg, gid_arg, false)
 }
 
 /// Like [`chown_apply`] but with explicit symlink-follow control.  When
 /// `no_follow` is set (`lchown` / `fchownat(AT_SYMLINK_NOFOLLOW)`), the link
 /// inode itself is chowned rather than its target.
-fn chown_apply_ex(path: &str, uid_arg: u64, gid_arg: u64, no_follow: bool) -> SyscallResult {
+fn chown_apply_ex(path: &Path, uid_arg: u64, gid_arg: u64, no_follow: bool) -> SyscallResult {
     if let Err(r) = require_fs_write() {
         return r;
     }
@@ -20647,8 +20656,11 @@ fn sys_fchownat(args: &SyscallArgs) -> SyscallResult {
         };
         // AT_FDCWD with an empty path targets the cwd.
         let path = if dirfd == AT_FDCWD {
-            match pcb::get_cwd(pid).and_then(|c| alloc::string::String::from_utf8(c).ok()) {
-                Some(p) => p,
+            // The cwd is stored as bytes and is used as bytes; the old
+            // `String::from_utf8(..).ok()` here turned a non-UTF-8 cwd into
+            // ENOENT, i.e. "your current directory does not exist".
+            match pcb::get_cwd(pid) {
+                Some(c) => PathBuf::from(c),
                 None => return linux_err(errno::ENOENT),
             }
         } else {
@@ -40384,7 +40396,7 @@ fn sys_mremap(args: &SyscallArgs) -> SyscallResult {
 /// extending `write_at`.
 #[allow(clippy::cast_possible_truncation)]
 fn fallocate_zero_vfs(
-    path: &str,
+    path: &Path,
     offset: u64,
     end: u64,
     keep_size: bool,
@@ -40460,7 +40472,7 @@ fn fallocate_zero_memfd(
 /// the result a reader observes is identical.
 #[allow(clippy::cast_possible_truncation)]
 fn fallocate_collapse_vfs(
-    path: &str,
+    path: &Path,
     offset: u64,
     len: u64,
 ) -> crate::error::KernelResult<()> {
@@ -40507,7 +40519,7 @@ fn fallocate_collapse_vfs(
 /// the *old* EOF, not the interior hole the shift exposes).
 #[allow(clippy::cast_possible_truncation)]
 fn fallocate_insert_vfs(
-    path: &str,
+    path: &Path,
     offset: u64,
     len: u64,
 ) -> crate::error::KernelResult<()> {
@@ -41686,7 +41698,7 @@ fn sys_fchdir(args: &SyscallArgs) -> SyscallResult {
     // host cwd would double-jail it.  Reverse the chroot layer to recover the
     // guest view (a no-op for unjailed processes).  See TD32 part (b).
     let guest_path = crate::ipc::namespace::unjail_path_for(pid, &path);
-    let new_cwd: alloc::vec::Vec<u8> = guest_path.into_bytes();
+    let new_cwd: alloc::vec::Vec<u8> = guest_path.into_vec();
     match pcb::set_cwd(pid, new_cwd) {
         Ok(()) => SyscallResult::ok(0),
         Err(_) => linux_err(errno::EINVAL),
@@ -42077,7 +42089,7 @@ fn sys_getdents64(args: &SyscallArgs) -> SyscallResult {
 /// Returns an empty string on failure — the hash will still be
 /// well-defined (just keyed off the name alone), keeping the syscall
 /// from failing on a transient race.
-fn entry_path_for_handle(handle: u64) -> alloc::string::String {
+fn entry_path_for_handle(handle: u64) -> PathBuf {
     crate::fs::handle::handle_path(handle).unwrap_or_default()
 }
 
@@ -42086,7 +42098,7 @@ fn entry_path_for_handle(handle: u64) -> alloc::string::String {
 /// Uses FNV-1a over the concatenation `dir_path + "/" + name`.  The
 /// result is non-zero (we OR in 1 if it lands on zero) so userspace
 /// loops that treat 0 as "deleted" don't drop entries.
-fn synth_inode(dir_path: &str, name: &str) -> u64 {
+fn synth_inode(dir_path: &Path, name: &Path) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in dir_path.as_bytes() {
         h ^= u64::from(*b);
@@ -43871,8 +43883,11 @@ fn sys_fchmodat2(args: &SyscallArgs) -> SyscallResult {
             None => return linux_err(errno::EROFS),
         };
         let resolved = if dirfd == AT_FDCWD {
-            match pcb::get_cwd(pid).and_then(|c| alloc::string::String::from_utf8(c).ok()) {
-                Some(p) => p,
+            // The cwd is stored as bytes and is used as bytes; the old
+            // `String::from_utf8(..).ok()` here turned a non-UTF-8 cwd into
+            // ENOENT, i.e. "your current directory does not exist".
+            match pcb::get_cwd(pid) {
+                Some(c) => PathBuf::from(c),
                 None => return linux_err(errno::ENOENT),
             }
         } else {
@@ -47172,12 +47187,12 @@ pub fn self_test_fallocate_range() -> crate::error::KernelResult<()> {
     use crate::error::KernelError;
     use crate::serial_println;
 
-    const PATH: &str = "/tmp/__falloc_range__";
+    let path = Path::new("/tmp/__falloc_range__");
     // 100 bytes of 0xAA.
     const N: usize = 100;
-    let stage = || -> bool { crate::fs::Vfs::write_file(PATH, &[0xAAu8; N]).is_ok() };
+    let stage = || -> bool { crate::fs::Vfs::write_file(path, &[0xAAu8; N]).is_ok() };
 
-    let _ = crate::fs::Vfs::remove(PATH);
+    let _ = crate::fs::Vfs::remove(path);
     if !stage() {
         serial_println!("[syscall/linux]   fallocate range self-test skipped (/tmp not writable)");
         return Ok(());
@@ -47185,7 +47200,7 @@ pub fn self_test_fallocate_range() -> crate::error::KernelResult<()> {
 
     // Helper: read the whole file and check size + a predicate over bytes.
     let check = |want_len: usize, label: &str, pred: &dyn Fn(&[u8]) -> bool| -> bool {
-        match crate::fs::Vfs::read_file(PATH) {
+        match crate::fs::Vfs::read_file(path) {
             Ok(c) if c.len() == want_len && pred(&c) => true,
             Ok(c) => {
                 serial_println!(
@@ -47202,49 +47217,49 @@ pub fn self_test_fallocate_range() -> crate::error::KernelResult<()> {
     };
 
     // (1) ZERO_RANGE + KEEP_SIZE: zero [20,40), size stays 100.
-    fallocate_zero_vfs(PATH, 20, 40, true)?;
+    fallocate_zero_vfs(path, 20, 40, true)?;
     if !check(N, "ZERO_RANGE+KEEP", &|c| {
         c.get(..20).is_some_and(|h| h.iter().all(|&b| b == 0xAA))
             && c.get(20..40).is_some_and(|h| h.iter().all(|&b| b == 0))
             && c.get(40..).is_some_and(|h| h.iter().all(|&b| b == 0xAA))
     }) {
-        let _ = crate::fs::Vfs::remove(PATH);
+        let _ = crate::fs::Vfs::remove(path);
         return Err(KernelError::InternalError);
     }
 
     // (2) PUNCH_HOLE: zero [50,60), size stays 100, range (1) still zero.
-    fallocate_zero_vfs(PATH, 50, 60, true)?;
+    fallocate_zero_vfs(path, 50, 60, true)?;
     if !check(N, "PUNCH_HOLE", &|c| {
         c.get(20..40).is_some_and(|h| h.iter().all(|&b| b == 0))
             && c.get(50..60).is_some_and(|h| h.iter().all(|&b| b == 0))
             && c.get(60..).is_some_and(|h| h.iter().all(|&b| b == 0xAA))
     }) {
-        let _ = crate::fs::Vfs::remove(PATH);
+        let _ = crate::fs::Vfs::remove(path);
         return Err(KernelError::InternalError);
     }
 
     // (3) KEEP_SIZE range entirely past EOF → no-op, size unchanged.
-    fallocate_zero_vfs(PATH, 200, 250, true)?;
+    fallocate_zero_vfs(path, 200, 250, true)?;
     if !check(N, "past-EOF-keep-size", &|_| true) {
-        let _ = crate::fs::Vfs::remove(PATH);
+        let _ = crate::fs::Vfs::remove(path);
         return Err(KernelError::InternalError);
     }
 
     // (4) ZERO_RANGE without KEEP_SIZE crossing EOF: re-stage, zero [90,150)
     // → size grows to 150, [0,90) intact, [90,150) zeroed.
-    let _ = crate::fs::Vfs::remove(PATH);
+    let _ = crate::fs::Vfs::remove(path);
     if !stage() {
         return Ok(());
     }
-    fallocate_zero_vfs(PATH, 90, 150, false)?;
+    fallocate_zero_vfs(path, 90, 150, false)?;
     if !check(150, "ZERO_RANGE-grow", &|c| {
         c.get(..90).is_some_and(|h| h.iter().all(|&b| b == 0xAA))
             && c.get(90..150).is_some_and(|h| h.iter().all(|&b| b == 0))
     }) {
-        let _ = crate::fs::Vfs::remove(PATH);
+        let _ = crate::fs::Vfs::remove(path);
         return Err(KernelError::InternalError);
     }
-    let _ = crate::fs::Vfs::remove(PATH);
+    let _ = crate::fs::Vfs::remove(path);
 
     // (5) MemFd ZERO_RANGE + KEEP_SIZE.
     {
@@ -47277,9 +47292,9 @@ pub fn self_test_fallocate_range() -> crate::error::KernelResult<()> {
     // and compare the result against an explicitly-built expected image.
     let seq: alloc::vec::Vec<u8> =
         (0..N).map(|i| u8::try_from(i & 0xFF).unwrap_or(0)).collect();
-    let stage_seq = || -> bool { crate::fs::Vfs::write_file(PATH, &seq).is_ok() };
+    let stage_seq = || -> bool { crate::fs::Vfs::write_file(path, &seq).is_ok() };
     let expect = |want: &[u8], label: &str| -> bool {
-        match crate::fs::Vfs::read_file(PATH) {
+        match crate::fs::Vfs::read_file(path) {
             Ok(c) if c.as_slice() == want => true,
             Ok(c) => {
                 serial_println!(
@@ -47297,48 +47312,48 @@ pub fn self_test_fallocate_range() -> crate::error::KernelResult<()> {
 
     // (6) COLLAPSE_RANGE: collapse [20,40) (len 20). Result: size 80, the
     // original [40,100) shifted down to sit right after [0,20).
-    let _ = crate::fs::Vfs::remove(PATH);
+    let _ = crate::fs::Vfs::remove(path);
     if !stage_seq() {
         return Ok(());
     }
-    fallocate_collapse_vfs(PATH, 20, 20)?;
+    fallocate_collapse_vfs(path, 20, 20)?;
     let mut want_collapse = alloc::vec::Vec::new();
     want_collapse.extend_from_slice(seq.get(..20).unwrap_or(&[]));
     want_collapse.extend_from_slice(seq.get(40..).unwrap_or(&[]));
     if !expect(&want_collapse, "COLLAPSE_RANGE") {
-        let _ = crate::fs::Vfs::remove(PATH);
+        let _ = crate::fs::Vfs::remove(path);
         return Err(KernelError::InternalError);
     }
 
     // (7) INSERT_RANGE: insert a 20-byte zero hole at offset 30. Result: size
     // 120, [0,30) unchanged, [30,50) zeroed, the original [30,100) shifted up.
-    let _ = crate::fs::Vfs::remove(PATH);
+    let _ = crate::fs::Vfs::remove(path);
     if !stage_seq() {
         return Ok(());
     }
-    fallocate_insert_vfs(PATH, 30, 20)?;
+    fallocate_insert_vfs(path, 30, 20)?;
     let mut want_insert = alloc::vec::Vec::new();
     want_insert.extend_from_slice(seq.get(..30).unwrap_or(&[]));
     want_insert.extend_from_slice(&[0u8; 20]);
     want_insert.extend_from_slice(seq.get(30..).unwrap_or(&[]));
     if !expect(&want_insert, "INSERT_RANGE") {
-        let _ = crate::fs::Vfs::remove(PATH);
+        let _ = crate::fs::Vfs::remove(path);
         return Err(KernelError::InternalError);
     }
 
     // (8) Round-trip identity: INSERT_RANGE then COLLAPSE_RANGE of the same
     // [k,k+len) restores the original file exactly.
-    let _ = crate::fs::Vfs::remove(PATH);
+    let _ = crate::fs::Vfs::remove(path);
     if !stage_seq() {
         return Ok(());
     }
-    fallocate_insert_vfs(PATH, 40, 16)?;
-    fallocate_collapse_vfs(PATH, 40, 16)?;
+    fallocate_insert_vfs(path, 40, 16)?;
+    fallocate_collapse_vfs(path, 40, 16)?;
     if !expect(&seq, "INSERT+COLLAPSE-identity") {
-        let _ = crate::fs::Vfs::remove(PATH);
+        let _ = crate::fs::Vfs::remove(path);
         return Err(KernelError::InternalError);
     }
-    let _ = crate::fs::Vfs::remove(PATH);
+    let _ = crate::fs::Vfs::remove(path);
 
     serial_println!(
         "[syscall/linux]   fallocate PUNCH_HOLE/ZERO_RANGE/COLLAPSE_RANGE/INSERT_RANGE: OK"
@@ -86084,14 +86099,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
 
         // Encoder shape sanity: synth_inode is deterministic and non-zero.
-        let ino_a = synth_inode("/tmp", "foo");
-        let ino_b = synth_inode("/tmp", "foo");
+        let ino_a = synth_inode(Path::new("/tmp"), Path::new("foo"));
+        let ino_b = synth_inode(Path::new("/tmp"), Path::new("foo"));
         if ino_a != ino_b || ino_a == 0 {
             serial_println!("[syscall/linux]   FAIL: synth_inode not stable/non-zero");
             return Err(KernelError::InternalError);
         }
         // Different name -> different ino (with overwhelming probability).
-        if synth_inode("/tmp", "foo") == synth_inode("/tmp", "bar") {
+        if synth_inode(Path::new("/tmp"), Path::new("foo")) == synth_inode(Path::new("/tmp"), Path::new("bar")) {
             serial_println!("[syscall/linux]   FAIL: synth_inode collision foo/bar");
             return Err(KernelError::InternalError);
         }

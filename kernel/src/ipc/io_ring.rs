@@ -812,12 +812,16 @@ const SQE_PATH_MAX: usize = 4096;
 /// `addr`/`len` in an SQE are *userspace* values — the SQ is a shared mapping
 /// that the submitting process fills in — so they get the same treatment as a
 /// syscall argument: bounce through kernel memory, reject rather than truncate.
-fn sqe_path(addr: u64, len: usize) -> Result<alloc::string::String, KernelError> {
+fn sqe_path(addr: u64, len: usize) -> Result<crate::fs::path::PathBuf, KernelError> {
     let bytes = crate::mm::user::read_user_vec(addr, len, SQE_PATH_MAX)?;
-    // NOTE: forced UTF-8 here mirrors `fs::Vfs`'s `&str` path API; both are
-    // tracked as D-VFS-PATHS-ARE-STR-NOT-BYTES in known-issues.md.  Our paths
-    // permit every byte except `/` and NUL, so this rejects legal names.
-    alloc::string::String::from_utf8(bytes).map_err(|_| KernelError::InvalidArgument)
+    // No decode step: a path is an uninterpreted byte string, and
+    // `PathBuf::from` takes the `Vec` by value, so this is one allocation.
+    // This used to `String::from_utf8(..)` and return `InvalidArgument` on
+    // failure, mirroring the VFS's old `&str` API — which rejected legal
+    // names and so made a file with a non-UTF-8 byte in its path
+    // unopenable through io_uring specifically, while other paths to the
+    // same file worked.  Fixed with D-VFS-PATHS-ARE-STR-NOT-BYTES.
+    Ok(crate::fs::path::PathBuf::from(bytes))
 }
 
 /// Execute a single submission queue entry and return the result.

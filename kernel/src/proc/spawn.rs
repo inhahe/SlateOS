@@ -42,6 +42,7 @@
 use alloc::boxed::Box;
 use crate::cap::{Rights, ResourceType};
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::Path;
 use crate::mm::frame::{self, FRAME_SIZE};
 use crate::mm::page_table::{self, PageFlags, VirtAddr};
 use crate::proc::{elf, pcb, thread};
@@ -11963,7 +11964,7 @@ pub fn self_test_fastpy_slateos_symlink() -> KernelResult<()> {
     // Independent kernel-side verification: re-read the link via the VFS and
     // confirm it stores the exact target the tool was asked to create.
     match crate::fs::Vfs::readlink(LINK) {
-        Ok(stored) if stored == TARGET => {}
+        Ok(stored) if stored.as_path() == Path::new(TARGET) => {}
         Ok(stored) => {
             serial_println!(
                 "[spawn]   FAIL: fastpy-symlink (ring 3) — VFS readlink returned {:?}, \
@@ -19128,7 +19129,7 @@ pub fn self_test_ext4_link_no_follow() -> KernelResult<()> {
     // readlink must succeed and return the symlink's target: the hard link
     // shares the symlink inode, not the underlying file.
     match Vfs::readlink(HL_NOFOLLOW) {
-        Ok(ref t) if t == TARGET => {}
+        Ok(ref t) if t.as_path() == Path::new(TARGET) => {}
         other => {
             serial_println!(
                 "[spawn]   FAIL: no-follow hard link is not a symlink (readlink={:?})",
@@ -19177,7 +19178,7 @@ pub fn self_test_ext4_link_no_follow() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
     }
-    if Vfs::readlink(LINK).as_deref() != Ok(TARGET) {
+    if Vfs::readlink(LINK).as_deref() != Ok(Path::new(TARGET)) {
         serial_println!("[spawn]   FAIL: rmdir(symlink) destroyed the link");
         cleanup();
         return Err(KernelError::InternalError);
@@ -19190,7 +19191,7 @@ pub fn self_test_ext4_link_no_follow() -> KernelResult<()> {
         cleanup();
         return Err(KernelError::InternalError);
     }
-    if Vfs::readlink(RENAMED).as_deref() != Ok(TARGET) {
+    if Vfs::readlink(RENAMED).as_deref() != Ok(Path::new(TARGET)) {
         serial_println!("[spawn]   FAIL: rename(symlink) did not preserve the link");
         cleanup();
         return Err(KernelError::InternalError);
@@ -28784,7 +28785,8 @@ fn test_spawn_with_fd_map() -> KernelResult<()> {
     if parent_path != child_path {
         serial_println!(
             "[spawn]   FAIL: paths should match: parent='{}', child='{}'",
-            parent_path, child_path
+            parent_path.display(),
+            child_path.display()
         );
     }
 

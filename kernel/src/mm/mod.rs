@@ -60,6 +60,7 @@ pub mod poison;
 pub mod pressure;
 pub mod protect;
 pub mod quarantine;
+pub mod rawmem;
 pub mod rlimits;
 pub mod rmap;
 pub mod scrub;

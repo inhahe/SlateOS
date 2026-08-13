@@ -4667,6 +4667,14 @@ extern "C" fn kernel_main() -> ! {
     // Ensures no VA regions overlap (catches configuration bugs at boot).
     mm::kvspace::self_test();
 
+    // Step 22e⅞+: Uninstrumented raw byte-accessor self-test.
+    // Must run before poison/kasan/quarantine: those three all do their actual
+    // memory touching through `mm::rawmem`'s hand-written `asm!` load/store/fill
+    // (so the compiler-instrumented build does not report their deliberate
+    // accesses to poisoned memory), and a wrong operand size or direction there
+    // would make every downstream "OK" meaningless.
+    mm::rawmem::self_test();
+
     // Step 22e⅞+: Memory poison self-test.
     // Verifies poison fill/verify for use-after-free and overflow detection.
     mm::poison::self_test();

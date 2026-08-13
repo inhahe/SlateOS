@@ -40,6 +40,18 @@ same walk from different roots, and it is checked here rather than reviewed for
 the same reason: the offending access is usually inside a `core` generic that
 does not appear in our source at all.
 
+A third walk covers the same invariant from a third root. `mm::heap`'s
+free-magic and redzone checks, `mm::poison`'s fills, and `mm::quarantine`'s
+parked slots exist to read and write memory KASAN has deliberately poisoned —
+the access *is* the detector. Instrumented, they report on every free, spend
+the report cap before the window being hunted in, and (through the allocator
+traffic in `kasan::self_test_freed_address`) panicked a boot outright. All
+three modules already had the module-level `sanitize` opt-out and it protected
+none of them, because they touched memory through
+`core::ptr::{read_volatile, write_volatile, write_bytes}` — the same generics
+this script exists to catch. Cost of learning that the other way: one 2.7-hour
+boot.
+
 Usage:
     python scripts/kasan-check-preshadow.py [path/to/kernel]
 
@@ -127,6 +139,59 @@ RUNTIME_ROOT_PREFIXES = ("__asan_load", "__asan_store")
 # is clean, so it returns. That is one level of nesting, not a regress. The
 # walk therefore checks `report`'s own body and stops.
 RUNTIME_NO_EXPAND_SUBSTRINGS = ["2mm8kasan_rt6report"]
+
+# ---------------------------------------------------------------------------
+# The third walk: code that deliberately touches poisoned memory
+# ---------------------------------------------------------------------------
+
+# `mm::heap`'s free-magic and redzone checks, `mm::poison`'s fills and verifies,
+# and `mm::quarantine`'s parked-slot bookkeeping all exist to read and write
+# bytes that `mm::kasan` has marked inaccessible. For them the access *is* the
+# detector, so a report on it is noise — and not harmless noise: it fires on
+# every free, exhausts the 64-report cap long before the window anyone is
+# hunting in, and (through the allocator traffic inside
+# `kasan::self_test_freed_address`) once panicked the boot outright. See
+# `known-issues.md` → `B-KASAN-INSTRUMENTED-BUILD-PANICS-ON-ITS-OWN-REDZONE-
+# CHECKS`.
+#
+# Every one of those modules already carried the module-level `sanitize`
+# opt-out, and it protected none of them, because they did their actual byte
+# touching through `core::ptr::{read_volatile, write_volatile, write_bytes}` —
+# generic `core` functions, which monomorphise into this crate carrying the
+# default (instrumented) attribute. Same hazard as the two walks above, equally
+# invisible in the source of the "exempt" module, so it is checked here rather
+# than reviewed. The repair funnels all of it through `mm::rawmem`, whose
+# accesses are inline `asm!` and therefore cannot be instrumented at all.
+POISON_ROOT_SUBSTRINGS = [
+    "2mm6rawmem7read_u8",
+    "2mm6rawmem8write_u8",
+    "2mm6rawmem7fill_u8",
+    "2mm4heap11poison_free",
+    "2mm4heap12poison_alloc",
+    "2mm4heap12check_poison",
+    "2mm4heap13check_redzone",
+    "2mm6poison11poison_free",
+    "2mm6poison12poison_alloc",
+    "2mm6poison14poison_redzone",
+    "2mm6poison14verify_redzone",
+    "2mm6poison12verify_freed",
+    "2mm10quarantine11fill_poison",
+    "2mm10quarantine15find_corruption",
+]
+
+# Cuts for the third walk.
+#
+# These run only once a violation has *already* been found — the serial
+# formatter, the panic path, the KASAN reporter. They are far too much code to
+# keep free of instrumented accesses and they do not need to be: by then the
+# detector has done its job, and one report is the intended outcome rather than
+# a flood. The walk covers the hot path and stops at the cold one.
+POISON_NO_EXPAND_SUBSTRINGS = [
+    "6serial6_print",
+    "2mm8kasan_rt6report",
+    "4core3fmt",
+    "9panicking",
+]
 
 FUNC_HEADER_RE = re.compile(r"^([0-9a-fA-F]+)\s+<(.+)>:$")
 DIRECT_CALL_RE = re.compile(r"\bcallq?\s+0x[0-9a-fA-F]+\s+<([^>]+)>")
@@ -360,7 +425,31 @@ def main() -> int:
         functions, rt_roots, rt_no_expand, check_indirect=False
     )
 
-    if pre_violations or rt_violations or problems:
+    # -----------------------------------------------------------------------
+    # Walk 3: code that deliberately touches poisoned memory.
+    # -----------------------------------------------------------------------
+    poison_roots: list[str] = []
+    for root in POISON_ROOT_SUBSTRINGS:
+        matched = [name for name in functions if root in name]
+        if not matched:
+            problems.append(
+                f"poisoned-memory root {root!r} not found in the binary "
+                "(renamed, or inlined away — if it was inlined, root the walk "
+                "at its caller instead of deleting the entry)"
+            )
+        poison_roots.extend(matched)
+
+    poison_no_expand = {
+        name
+        for name in functions
+        if any(frag in name for frag in POISON_NO_EXPAND_SUBSTRINGS)
+    }
+
+    poison_violations, poison_visited, poison_parent = walk(
+        functions, poison_roots, poison_no_expand, check_indirect=False
+    )
+
+    if pre_violations or rt_violations or poison_violations or problems:
         print("=== KASAN uninstrumented-path invariants are NOT satisfied ===\n")
         for problem in problems:
             print(f"  STRUCTURE: {problem}\n")
@@ -387,6 +476,18 @@ def main() -> int:
                 "check again — unbounded recursion, i.e. a stack overflow with\n"
                 "no explanation.\n"
             )
+        if poison_violations:
+            print(
+                "POISONED MEMORY: every function above reads or writes bytes\n"
+                "KASAN has deliberately marked inaccessible — that access is\n"
+                "the detector, not a bug. Instrumented, it reports on every\n"
+                "free, spends the report cap before the window you are hunting\n"
+                "in, and can panic the boot. Route the access through\n"
+                "`mm::rawmem` (asm!-based, uninstrumentable); note that a\n"
+                "module-level `sanitize` opt-out will NOT save a\n"
+                "`core::ptr::{read_volatile,write_volatile,write_bytes}` call,\n"
+                "which is exactly how this was introduced the first time.\n"
+            )
         print(
             "Fix either by keeping the offending operation inside an exempt\n"
             "function: emit the load/store with `asm!` (see\n"
@@ -399,8 +500,9 @@ def main() -> int:
 
     print(
         f"kasan-check-preshadow: OK — {len(pre_visited)} function(s) reachable "
-        f"before the shadow is installed and {len(rt_visited)} on the check "
-        "path, none instrumented."
+        f"before the shadow is installed, {len(rt_visited)} on the check path, "
+        f"and {len(poison_visited)} reachable from the deliberate "
+        "poisoned-memory accessors, none instrumented."
     )
     return 0
 

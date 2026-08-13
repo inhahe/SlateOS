@@ -42,6 +42,7 @@
 
 use crate::error::{KernelError, KernelResult};
 use crate::mm::frame::{self, PhysFrame, FRAME_SIZE};
+use crate::mm::rawmem;
 use crate::serial_println;
 use core::alloc::{GlobalAlloc, Layout};
 use core::ops::{Deref, DerefMut};
@@ -133,12 +134,16 @@ unsafe fn poison_free(ptr: *mut u8, class_size: usize) -> bool {
     }
     // Double-free detection: if the magic signature is already present,
     // this slot was freed before without being re-allocated in between.
-    // Check using volatile reads (same reason as check_poison).
+    // Reads go through `mm::rawmem`, not `core::ptr::read_volatile`: this slot
+    // is exactly the memory KASAN poisons, and the `core` generic monomorphises
+    // into this crate *instrumented* despite the module-level opt-out, so a
+    // plain volatile read reports a use-after-free on every single free. Same
+    // volatility guarantee, no instrumentation — see `mm::rawmem`.
     // SAFETY: ptr is valid for class_size bytes (>= 16).
-    let m0 = unsafe { core::ptr::read_volatile(ptr.add(8)) };
-    let m1 = unsafe { core::ptr::read_volatile(ptr.add(9)) };
-    let m2 = unsafe { core::ptr::read_volatile(ptr.add(10)) };
-    let m3 = unsafe { core::ptr::read_volatile(ptr.add(11)) };
+    let m0 = unsafe { rawmem::read_u8(ptr.add(8)) };
+    let m1 = unsafe { rawmem::read_u8(ptr.add(9)) };
+    let m2 = unsafe { rawmem::read_u8(ptr.add(10)) };
+    let m3 = unsafe { rawmem::read_u8(ptr.add(11)) };
     if m0 == POISON_MAGIC[0] && m1 == POISON_MAGIC[1]
         && m2 == POISON_MAGIC[2] && m3 == POISON_MAGIC[3]
     {
@@ -150,25 +155,28 @@ unsafe fn poison_free(ptr: *mut u8, class_size: usize) -> bool {
         return true;
     }
 
-    // Write the magic signature at bytes 8..12 using volatile stores.
-    // Volatile prevents the optimizer from dead-store-eliminating these
-    // writes even with full LTO visibility.
+    // Write the magic signature at bytes 8..12.  `rawmem` keeps the volatile
+    // guarantee — the optimizer must not dead-store-eliminate these writes even
+    // with full LTO visibility — without the instrumentation a `core` generic
+    // would carry (see the read above).
     // SAFETY: ptr is valid for class_size bytes (>= 16), so offsets
     // 8..12 are in-bounds.  We have exclusive access to this slot
     // (it's being freed — the caller no longer uses it).
     unsafe {
-        core::ptr::write_volatile(ptr.add(8), POISON_MAGIC[0]);
-        core::ptr::write_volatile(ptr.add(9), POISON_MAGIC[1]);
-        core::ptr::write_volatile(ptr.add(10), POISON_MAGIC[2]);
-        core::ptr::write_volatile(ptr.add(11), POISON_MAGIC[3]);
+        rawmem::write_u8(ptr.add(8), POISON_MAGIC[0]);
+        rawmem::write_u8(ptr.add(9), POISON_MAGIC[1]);
+        rawmem::write_u8(ptr.add(10), POISON_MAGIC[2]);
+        rawmem::write_u8(ptr.add(11), POISON_MAGIC[3]);
     }
-    // Fill bytes 12..class_size with FREE_POISON.
-    for i in 12..class_size {
-        // SAFETY: ptr is valid for class_size bytes and i < class_size,
-        // so ptr.add(i) is in-bounds.  Volatile prevents DSE.
-        unsafe {
-            core::ptr::write_volatile(ptr.add(i), FREE_POISON);
-        }
+    // Fill bytes 12..class_size with FREE_POISON.  One bulk `rep stosb` rather
+    // than a per-byte loop: the byte helper would emit an `asm!` block per
+    // iteration in a debug build, and this runs on every free.
+    // SAFETY: ptr is valid for class_size bytes and class_size >= 16 > 12 (the
+    // early return above guarantees it), so the range 12..class_size is
+    // in-bounds.  `saturating_sub` rather than `-` for the lint; it cannot
+    // actually saturate here.
+    unsafe {
+        rawmem::fill_u8(ptr.add(12), FREE_POISON, class_size.saturating_sub(12));
     }
     false
 }
@@ -180,9 +188,13 @@ unsafe fn poison_free(ptr: *mut u8, class_size: usize) -> bool {
 /// `ptr` must point to a valid slab slot of `class_size` bytes.
 #[inline]
 unsafe fn poison_alloc(ptr: *mut u8, class_size: usize) {
+    // `rawmem::fill_u8`, not `ptr.write_bytes`: the latter is a generic `core`
+    // function, so it monomorphises into this crate carrying instrumentation
+    // regardless of the module-level opt-out, and this slot may still be marked
+    // freed in the KASAN shadow at this point.  See `mm::rawmem`.
     // SAFETY: ptr is valid for class_size bytes.
     unsafe {
-        ptr.write_bytes(ALLOC_POISON, class_size);
+        rawmem::fill_u8(ptr, ALLOC_POISON, class_size);
     }
 }
 
@@ -211,11 +223,14 @@ unsafe fn check_redzone(ptr: *mut u8, alloc_size: usize, class_size: usize) {
     }
 
     // Scan bytes from alloc_size to class_size for corruption.
-    // Use volatile reads to prevent optimizer from constant-propagating.
+    // `rawmem::read_u8` keeps the volatile guarantee (the optimizer must not
+    // constant-propagate these) while staying uninstrumented — the redzone is
+    // marked 0xFB in the KASAN shadow, so reading it through the `core` generic
+    // reported an out-of-bounds access on every dealloc.  See `mm::rawmem`.
     for i in alloc_size..class_size {
         // SAFETY: ptr is valid for class_size bytes (precondition) and
         // i < class_size, so ptr.add(i) is in-bounds.
-        let byte = unsafe { core::ptr::read_volatile(ptr.add(i)) };
+        let byte = unsafe { rawmem::read_u8(ptr.add(i)) };
         if byte != ALLOC_POISON {
             REDZONE_VIOLATIONS.fetch_add(1, Ordering::Relaxed);
             serial_println!(
@@ -296,16 +311,17 @@ unsafe fn check_poison(ptr: *mut u8, class_size: usize) {
     if class_size < 16 {
         return;
     }
-    // Check the magic signature using volatile reads.  This prevents
-    // the optimizer from constant-propagating through dealloc→alloc
-    // boundaries (it can't assume it knows what's at ptr+8 even with
-    // full LTO visibility into poison_free).
+    // Check the magic signature.  `rawmem::read_u8` keeps the volatility that
+    // stops the optimizer constant-propagating through dealloc→alloc boundaries
+    // (it can't assume it knows what's at ptr+8 even with full LTO visibility
+    // into poison_free), and unlike `core::ptr::read_volatile` it is not
+    // instrumented — this slot is marked freed in the KASAN shadow.
     // SAFETY: ptr is valid for class_size bytes (>= 16, checked above),
     // so offsets 8..12 are in-bounds.  Read-only access, no aliasing.
-    let m0 = unsafe { core::ptr::read_volatile(ptr.add(8)) };
-    let m1 = unsafe { core::ptr::read_volatile(ptr.add(9)) };
-    let m2 = unsafe { core::ptr::read_volatile(ptr.add(10)) };
-    let m3 = unsafe { core::ptr::read_volatile(ptr.add(11)) };
+    let m0 = unsafe { rawmem::read_u8(ptr.add(8)) };
+    let m1 = unsafe { rawmem::read_u8(ptr.add(9)) };
+    let m2 = unsafe { rawmem::read_u8(ptr.add(10)) };
+    let m3 = unsafe { rawmem::read_u8(ptr.add(11)) };
     if m0 != POISON_MAGIC[0] || m1 != POISON_MAGIC[1]
         || m2 != POISON_MAGIC[2] || m3 != POISON_MAGIC[3]
     {
@@ -319,7 +335,7 @@ unsafe fn check_poison(ptr: *mut u8, class_size: usize) {
     for i in 12..class_size {
         // SAFETY: ptr is valid for class_size bytes (precondition) and
         // i < class_size, so ptr.add(i) is in-bounds.
-        let byte = unsafe { core::ptr::read_volatile(ptr.add(i)) };
+        let byte = unsafe { rawmem::read_u8(ptr.add(i)) };
         if byte != FREE_POISON {
             POISON_VIOLATIONS.fetch_add(1, Ordering::Relaxed);
             serial_println!(
@@ -1732,12 +1748,15 @@ pub fn audit_free_lists() -> HeapAuditResult {
             // Check poison integrity on this free slot.
             if poison_on && class_size >= 16 {
                 let ptr = slow.cast::<u8>();
+                // `rawmem` rather than `core::ptr::read_volatile`: every slot on
+                // the free list is poisoned in the KASAN shadow, so this scan
+                // would otherwise report a use-after-free per slot walked.
                 // SAFETY: slot is in the free list, still owned by allocator,
                 // and HHDM-mapped.  Reading bytes 8..12 is safe.
-                let m0 = unsafe { core::ptr::read_volatile(ptr.add(8)) };
-                let m1 = unsafe { core::ptr::read_volatile(ptr.add(9)) };
-                let m2 = unsafe { core::ptr::read_volatile(ptr.add(10)) };
-                let m3 = unsafe { core::ptr::read_volatile(ptr.add(11)) };
+                let m0 = unsafe { rawmem::read_u8(ptr.add(8)) };
+                let m1 = unsafe { rawmem::read_u8(ptr.add(9)) };
+                let m2 = unsafe { rawmem::read_u8(ptr.add(10)) };
+                let m3 = unsafe { rawmem::read_u8(ptr.add(11)) };
                 if m0 != POISON_MAGIC[0] || m1 != POISON_MAGIC[1]
                     || m2 != POISON_MAGIC[2] || m3 != POISON_MAGIC[3]
                 {

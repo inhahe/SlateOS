@@ -45,6 +45,7 @@
 #![allow(dead_code)]
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use crate::mm::rawmem;
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -135,7 +136,7 @@ pub unsafe fn poison_free(ptr: *mut u8, len: usize) {
     }
     // SAFETY: Caller guarantees ptr is valid for len bytes.
     unsafe {
-        core::ptr::write_bytes(ptr, POISON_FREE, len);
+        rawmem::fill_u8(ptr, POISON_FREE, len);
     }
     FREE_POISON_BYTES.fetch_add(len as u64, Ordering::Relaxed);
 }
@@ -154,7 +155,7 @@ pub unsafe fn poison_alloc(ptr: *mut u8, len: usize) {
     }
     // SAFETY: Caller guarantees ptr is valid for len bytes.
     unsafe {
-        core::ptr::write_bytes(ptr, POISON_ALLOC, len);
+        rawmem::fill_u8(ptr, POISON_ALLOC, len);
     }
     ALLOC_POISON_BYTES.fetch_add(len as u64, Ordering::Relaxed);
 }
@@ -171,7 +172,7 @@ pub unsafe fn poison_redzone(ptr: *mut u8, len: usize) {
     }
     // SAFETY: Caller guarantees validity.
     unsafe {
-        core::ptr::write_bytes(ptr, POISON_REDZONE, len);
+        rawmem::fill_u8(ptr, POISON_REDZONE, len);
     }
 }
 
@@ -189,7 +190,7 @@ pub unsafe fn verify_redzone(ptr: *const u8, len: usize) -> bool {
     }
     for i in 0..len {
         // SAFETY: Caller guarantees ptr+i is valid.
-        let byte = unsafe { *ptr.add(i) };
+        let byte = unsafe { rawmem::read_u8(ptr.add(i)) };
         if byte != POISON_REDZONE {
             VIOLATIONS_DETECTED.fetch_add(1, Ordering::Relaxed);
             return false;
@@ -213,7 +214,7 @@ pub unsafe fn verify_freed(ptr: *const u8, len: usize) -> bool {
     }
     for i in 0..len {
         // SAFETY: Caller guarantees ptr+i is valid.
-        let byte = unsafe { *ptr.add(i) };
+        let byte = unsafe { rawmem::read_u8(ptr.add(i)) };
         if byte != POISON_FREE {
             VIOLATIONS_DETECTED.fetch_add(1, Ordering::Relaxed);
             return false;

@@ -107,12 +107,31 @@ for i in $(seq 1 "$MAX_ITERS"); do
     #     and the boot can go on to reach BOOT_OK and exit 0 (design-decisions
     #     .md §119).  A plain build never prints this line, so the check is
     #     inert for an ordinary soak.
-    if [ -f "$SERIAL" ] && grep -aq '\[kasan\] CRITICAL:' "$SERIAL"; then
+    #
+    #     Reports emitted *inside* the kasan / kasan-rt self-tests are excluded.
+    #     `mm::kasan_rt::self_test` drives `__asan_store8_noabort` at a
+    #     known-freed address on purpose — proving the report path works is the
+    #     entire point of it — so those reports fire on every healthy boot.
+    #     Matching them would make this catch trip on iteration 1 of every run
+    #     and hide the signal it exists to find. The awk below tracks the
+    #     self-test windows by their banner lines and reports only what happens
+    #     outside them.
+    kasan_hits=""
+    if [ -f "$SERIAL" ]; then
+        kasan_hits=$(awk '
+            /^\[kasan(-rt)?\] Running self-test\.\.\./  { intest = 1 }
+            /^\[kasan(-rt)?\] Self-test (PASSED|FAILED)/ { intest = 0; next }
+            intest { next }
+            /\[kasan\] CRITICAL:/ { keep = 12; print; next }
+            keep > 0 { print; keep-- }
+        ' "$SERIAL" | head -40)
+    fi
+    if [ -n "$kasan_hits" ]; then
         echo ""
         echo "=== KASAN REPORT CAUGHT on iter $n (compiler-instrumented build) ==="
-        # The backtrace that follows each report is the payload; keep enough
-        # lines to carry the first few frames of the first couple of reports.
-        grep -aA 12 '\[kasan\] CRITICAL:' "$SERIAL" | head -40 || true
+        # The backtrace that follows each report is the payload; the awk above
+        # keeps enough lines to carry the first few frames of each report.
+        printf '%s\n' "$kasan_hits"
         echo "  serial: $OUTDIR/soak-$RUNSTAMP-iter$n.serial.txt"
         caught=1
         break

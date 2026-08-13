@@ -69,6 +69,7 @@
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::mm::poison::POISON_FREE;
+use crate::mm::rawmem;
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -141,8 +142,12 @@ static RING: spin::Mutex<Quarantine> = spin::Mutex::new(Quarantine {
 /// # Safety
 /// `addr` must point to `len` bytes of writable memory (the slot being parked).
 unsafe fn fill_poison(addr: usize, len: usize) {
+    // `rawmem`, not `core::ptr::write_bytes`: the generic monomorphises into
+    // this crate carrying instrumentation despite the module-level opt-out, and
+    // a parked slot is poisoned in the KASAN shadow by construction — so the
+    // fill would report a use-after-free on every park.  See `mm::rawmem`.
     // SAFETY: caller guarantees `[addr, addr+len)` is a valid writable slot.
-    unsafe { core::ptr::write_bytes(addr as *mut u8, POISON_FREE, len) };
+    unsafe { rawmem::fill_u8(addr as *mut u8, POISON_FREE, len) };
 }
 
 /// Verify a parked slot is still fully poisoned. Returns the offset of the
@@ -153,7 +158,7 @@ unsafe fn fill_poison(addr: usize, len: usize) {
 unsafe fn find_corruption(addr: usize, len: usize) -> Option<usize> {
     for i in 0..len {
         // SAFETY: `i < len` and caller guarantees the slot is readable.
-        let b = unsafe { *((addr + i) as *const u8) };
+        let b = unsafe { rawmem::read_u8((addr.wrapping_add(i)) as *const u8) };
         if b != POISON_FREE {
             return Some(i);
         }
@@ -165,7 +170,7 @@ unsafe fn find_corruption(addr: usize, len: usize) -> Option<usize> {
 fn report(addr: usize, class_idx: usize, slot_size: usize, off: usize) {
     CORRUPTIONS.fetch_add(1, Ordering::Relaxed);
     // SAFETY: `off < slot_size` and the slot is readable here.
-    let bad = unsafe { *((addr + off) as *const u8) };
+    let bad = unsafe { rawmem::read_u8((addr.wrapping_add(off)) as *const u8) };
     serial_println!(
         "[quarantine] *** CORRUPTION *** parked slot {:#x} (class {}, {} B) \
          byte +{} = {:#04x} (expected {:#04x}) — stale-pointer/UAF write \

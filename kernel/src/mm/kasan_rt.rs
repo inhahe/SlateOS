@@ -369,12 +369,21 @@ pub unsafe extern "C" fn __asan_unregister_globals(_globals: *mut u8, _n: usize)
 pub fn self_test() {
     serial_println!("[kasan-rt] Running self-test...");
 
-    let before = report_count();
-
     // A freed heap object: `mm::kasan` marks the whole slot 0xFA, so the
     // outlined check must reject it and the report path must run.
     match kasan::self_test_freed_address() {
         Some(freed) => {
+            // The snapshot is taken *here*, after the setup call, not before
+            // it.  `self_test_freed_address` performs a real `alloc`/`dealloc`,
+            // and the allocator's own free-magic and redzone machinery then
+            // touches the slot it has just poisoned.  Snapshotting before the
+            // call counted that setup traffic as if it were the thing under
+            // test — in the instrumented build the assertion below failed by
+            // exactly the size of that flood (217 vs 101).  The flood itself is
+            // fixed separately (`mm::rawmem`), but the measurement window
+            // should not have included setup in the first place.
+            let before = report_count();
+
             // SAFETY: these are the compiler's own entry points; they only read
             // shadow for `freed` and never dereference it. `freed` is a real
             // (now freed) heap address, so its shadow byte exists.

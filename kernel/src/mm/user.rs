@@ -589,6 +589,187 @@ pub unsafe fn write_user<T: Copy>(user_ptr: u64, value: T) -> KernelResult<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Bounce buffers for syscall handlers
+// ---------------------------------------------------------------------------
+//
+// The primitives above copy between a user address and a *caller-supplied*
+// kernel buffer.  The ones below own the kernel buffer, which is what a syscall
+// handler actually wants: a handler must never hand a user virtual address to a
+// kernel subsystem.
+//
+// Two reasons, either sufficient on its own:
+//
+//   * **SMAP.**  A supervisor access to a user page outside a STAC window
+//     faults.  Wrapping the subsystem call in `stac()`/`clac()` is not a fix,
+//     because many of them block: AC lives in RFLAGS, which is saved and
+//     restored across a context switch, so an open window would leave SMAP
+//     disabled for that task *and* for the scheduler for as long as it sleeps.
+//     The window has to stay inside a single non-blocking copy — which is
+//     exactly what these do.
+//
+//   * **TOCTOU, independent of SMAP.**  A user slice held across a blocking
+//     call is a use-after-free: another thread in the same process can `munmap`
+//     or `mremap` the range while the caller sleeps, and the kernel then writes
+//     through a stale mapping into whatever now owns that physical page.
+//
+// Both are structural, so the fix is structural: copy in, work on kernel
+// memory, copy out.
+
+/// Copy a bounded user byte range into a freshly allocated kernel buffer.
+///
+/// This is the replacement for `validate_user_read` followed by
+/// `core::slice::from_raw_parts` over the user address.  The returned `Vec`
+/// is kernel memory and may be held across a blocking call.
+///
+/// `max` is a hard limit, not a truncation: a `len` above it is an error.
+/// Silently clamping (`len.min(256)`) is worse than useless for a path — it
+/// turns "/very/long/path/to/a.txt" into a *different, shorter path* that may
+/// well exist, so an over-long argument would operate on the wrong file
+/// instead of being rejected.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] if `len > max`.
+/// - [`KernelError::OutOfMemory`] if the kernel buffer cannot be allocated.
+/// - [`KernelError::InvalidAddress`] if the user range is not readable.
+pub fn read_user_vec(user_src: u64, len: usize, max: usize) -> KernelResult<alloc::vec::Vec<u8>> {
+    if len > max {
+        return Err(KernelError::InvalidArgument);
+    }
+    let mut buf: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    if len == 0 {
+        return Ok(buf);
+    }
+    buf.try_reserve_exact(len)
+        .map_err(|_| KernelError::OutOfMemory)?;
+    buf.resize(len, 0);
+
+    // SAFETY: `buf` was just allocated with exactly `len` bytes, so it is a
+    // valid writable kernel destination of that size.  `copy_from_user`
+    // validates the user source range itself.
+    unsafe { copy_from_user(user_src, buf.as_mut_ptr(), len)? };
+    Ok(buf)
+}
+
+/// Serve a user output buffer through kernel scratch memory.
+///
+/// Allocates a zeroed kernel buffer of `cap` bytes, hands it to `fill`, and
+/// copies back however many bytes `fill` reports having written.  Returns that
+/// count.
+///
+/// This is the replacement for `validate_user_write` followed by
+/// `core::slice::from_raw_parts_mut` over the user address.  It is the shape to
+/// use whenever the producer might block (`pipe::read`, `channel::recv`,
+/// socket receive): `fill` only ever sees kernel memory, so there is no user
+/// mapping to go stale and no STAC window to hold open.
+///
+/// The user range is validated as writable *before* `fill` runs, so a handler
+/// still rejects a bad output pointer without having done the work — and
+/// `fill`'s side effects (consuming from a pipe, dequeuing a message) are not
+/// wasted on a copy that was going to fail anyway.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] if `cap > max`, or if `fill` reports
+///   having written more than `cap` bytes.
+/// - [`KernelError::OutOfMemory`] if the scratch buffer cannot be allocated.
+/// - [`KernelError::InvalidAddress`] if the user range is not writable.
+/// - Whatever `fill` returns.
+pub fn with_user_out_buf<F>(user_dst: u64, cap: usize, max: usize, fill: F) -> KernelResult<usize>
+where
+    F: FnOnce(&mut [u8]) -> KernelResult<usize>,
+{
+    if cap > max {
+        return Err(KernelError::InvalidArgument);
+    }
+    validate_user_write(user_dst, cap)?;
+
+    let mut buf: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    if cap > 0 {
+        buf.try_reserve_exact(cap)
+            .map_err(|_| KernelError::OutOfMemory)?;
+        buf.resize(cap, 0);
+    }
+
+    let written = fill(&mut buf)?;
+    if written > cap {
+        // A subsystem reporting more than it was given is a kernel bug, and
+        // copying on that count would read past the scratch buffer.
+        return Err(KernelError::InvalidArgument);
+    }
+    if written > 0 {
+        // SAFETY: `buf` is a live kernel allocation of `cap >= written` bytes,
+        // so the source range is valid.  `copy_to_user` re-validates the user
+        // destination.
+        unsafe { copy_to_user(buf.as_ptr(), user_dst, written)? };
+    }
+    Ok(written)
+}
+
+/// Copy a bounded array of `count` `T`s out of user space.
+///
+/// The `u8` case is [`read_user_vec`]; this is for the handful of handlers
+/// that take a plain-old-data array (file-descriptor maps, iovecs).
+///
+/// `T` must be `Copy` and must have no padding whose value the kernel would
+/// then act on — the bytes come from user space and are trusted only to the
+/// extent that any bit pattern is a valid `T`.
+///
+/// # Errors
+///
+/// As [`read_user_vec`], plus [`KernelError::InvalidArgument`] if the total
+/// byte size overflows `usize`.
+pub fn read_user_items<T: Copy>(
+    user_src: u64,
+    count: usize,
+    max_count: usize,
+) -> KernelResult<alloc::vec::Vec<T>> {
+    if count > max_count {
+        return Err(KernelError::InvalidArgument);
+    }
+    let mut out: alloc::vec::Vec<T> = alloc::vec::Vec::new();
+    if count == 0 {
+        return Ok(out);
+    }
+    let bytes = count
+        .checked_mul(core::mem::size_of::<T>())
+        .ok_or(KernelError::InvalidArgument)?;
+
+    out.try_reserve_exact(count)
+        .map_err(|_| KernelError::OutOfMemory)?;
+
+    // SAFETY: `out` has capacity for `count` elements, so its buffer is
+    // `bytes` valid writable bytes.  `copy_from_user` validates the source and
+    // fills every one of them, after which `count` elements are initialised —
+    // `T: Copy` has no drop glue, so no destructor can observe the gap.
+    unsafe {
+        copy_from_user(user_src, out.as_mut_ptr().cast::<u8>(), bytes)?;
+        out.set_len(count);
+    }
+    Ok(out)
+}
+
+/// Copy a slice of `T`s into user space.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] if the total byte size overflows.
+/// - [`KernelError::InvalidAddress`] if the user range is not writable.
+pub fn write_user_items<T: Copy>(user_dst: u64, items: &[T]) -> KernelResult<()> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    let bytes = items
+        .len()
+        .checked_mul(core::mem::size_of::<T>())
+        .ok_or(KernelError::InvalidArgument)?;
+
+    // SAFETY: `items` is a live slice, so `items.as_ptr()` is `bytes` valid
+    // readable bytes.  `copy_to_user` validates the user destination.
+    unsafe { copy_to_user(items.as_ptr().cast::<u8>(), user_dst, bytes) }
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 

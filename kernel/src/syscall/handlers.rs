@@ -13,6 +13,15 @@
 //! - Pointer arguments from userspace are validated via
 //!   [`crate::mm::user`] before dereferencing.  Every buffer pointer
 //!   is checked for user-space range and page table mapping.
+//! - **Handlers never hand a user virtual address to a kernel subsystem.**
+//!   User data is copied into kernel memory first ([`crate::mm::user::read_user_vec`],
+//!   [`crate::mm::user::read_user_items`]) and results are copied back out
+//!   ([`crate::mm::user::with_user_out_buf`], [`crate::mm::user::write_user_items`]).
+//!   Building a `&[u8]` over a user pointer and passing it to, say, `pipe::read`
+//!   is wrong twice over: it faults under SMAP, and — because that callee
+//!   blocks — the mapping can be torn down by another thread in the same
+//!   process while the slice is still live.  See the module comment on
+//!   `mm::user`'s bounce buffers.
 
 // Syscall args are u64 (register-width).  On our x86_64 target,
 // usize is 64 bits, so u64→usize casts cannot truncate.
@@ -33,6 +42,40 @@ use crate::sched;
 use crate::serial_println;
 
 use super::dispatch::{SyscallArgs, SyscallResult};
+
+// ---------------------------------------------------------------------------
+// Shared limits
+// ---------------------------------------------------------------------------
+
+/// Longest path a handler will accept, matching Linux's `PATH_MAX`.
+///
+/// This is a rejection limit, not a truncation limit.  These handlers used to
+/// clamp with `path_len.min(256)`, which silently turned an over-long path into
+/// a *different, shorter* path — `/opt/app/<250 bytes>/secrets.txt` became
+/// whatever directory the first 256 bytes named, and the syscall then operated
+/// on that instead of failing.  A path above this length is now
+/// `InvalidArgument`.
+const PATH_MAX: usize = 4096;
+
+/// Longest name (service name, key, symbol) a handler will accept.
+///
+/// Same rejection-not-truncation rule as [`PATH_MAX`].
+const NAME_MAX: usize = 1024;
+
+/// Copy a path argument out of user space into a kernel `String`.
+///
+/// `String::from_utf8` consumes the `Vec` in place, so this is one allocation,
+/// not two.
+///
+/// The UTF-8 requirement comes from the VFS, whose API is `&str`; our path
+/// rules actually permit any byte except `/` and NUL, so a non-UTF-8 path is
+/// currently rejected rather than resolved.  That is pre-existing — this
+/// function only moves the check, it does not introduce it — and is tracked as
+/// `D-VFS-PATHS-ARE-STR-NOT-BYTES`.
+fn read_user_path(ptr: u64, len: usize) -> Result<alloc::string::String, KernelError> {
+    let bytes = crate::mm::user::read_user_vec(ptr, len, PATH_MAX)?;
+    alloc::string::String::from_utf8(bytes).map_err(|_| KernelError::InvalidArgument)
+}
 
 // ---------------------------------------------------------------------------
 // Channel creation flags
@@ -7066,32 +7109,29 @@ pub fn sys_fs_read_file(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    let safe_path_len = path_len.min(256);
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, safe_path_len) {
-        return SyscallResult::err(e);
-    }
+    // Reject an unusable output buffer before doing the read, so a bad pointer
+    // costs nothing.  `copy_to_user` re-validates the part it actually writes.
     if let Err(e) = crate::mm::user::validate_user_write(args.arg2, buf_cap) {
         return SyscallResult::err(e);
     }
 
-    // SAFETY: Validated above — path_ptr is in user space and mapped.
-    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, safe_path_len) };
-    let path = match core::str::from_utf8(path_bytes) {
-        Ok(s) => s,
-        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    let path = match read_user_path(args.arg0, path_len) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
     };
 
-    // Read the file via the VFS.
-    let data = match crate::fs::Vfs::read_file(path) {
+    // Read the file via the VFS.  `read_file` returns kernel memory, so the
+    // copy-out below is a plain kernel→user transfer.
+    let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
         Err(e) => return SyscallResult::err(e),
     };
 
-    // Copy to the user buffer (up to capacity).
     let copy_len = data.len().min(buf_cap);
-    // SAFETY: Validated above — buf_ptr is in user space, mapped, and writable.
-    unsafe {
-        core::ptr::copy_nonoverlapping(data.as_ptr(), buf_ptr, copy_len);
+    // SAFETY: `data` is a live kernel `Vec` of at least `copy_len` bytes;
+    // `copy_to_user` validates the user destination and opens the SMAP window.
+    if let Err(e) = unsafe { crate::mm::user::copy_to_user(data.as_ptr(), args.arg2, copy_len) } {
+        return SyscallResult::err(e);
     }
 
     #[allow(clippy::cast_possible_wrap)]
@@ -7117,26 +7157,24 @@ pub fn sys_fs_write_file(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    let safe_path_len = path_len.min(256);
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, safe_path_len) {
-        return SyscallResult::err(e);
-    }
-    if data_len > 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, data_len) {
-            return SyscallResult::err(e);
-        }
-    }
-
-    // SAFETY: Validated above — pointers are in user space and mapped.
-    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, safe_path_len) };
-    let path = match core::str::from_utf8(path_bytes) {
-        Ok(s) => s,
-        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    let path = match read_user_path(args.arg0, path_len) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
     };
 
-    let data = unsafe { core::slice::from_raw_parts(data_ptr, data_len) };
+    // A whole-file write is unbounded by design, so there is no length cap —
+    // but the bounce is not an amplification vector either: `read_user_vec`
+    // validates the source range, which requires the process to have already
+    // committed `data_len` bytes of its own memory.  The kernel copy is
+    // proportional to that, and fails as `OutOfMemory` rather than panicking.
+    // It has to be a copy: `Vfs::write_file` reaches the block layer and
+    // blocks, and a user slice must not be live across that.
+    let data = match crate::mm::user::read_user_vec(args.arg2, data_len, usize::MAX) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
+    };
 
-    match crate::fs::Vfs::write_file(path, data) {
+    match crate::fs::Vfs::write_file(&path, &data) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -7159,19 +7197,12 @@ pub fn sys_fs_delete(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    let safe_path_len = path_len.min(256);
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, safe_path_len) {
-        return SyscallResult::err(e);
-    }
-
-    // SAFETY: Validated above — path_ptr is in user space and mapped.
-    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, safe_path_len) };
-    let path = match core::str::from_utf8(path_bytes) {
-        Ok(s) => s,
-        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    let path = match read_user_path(args.arg0, path_len) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
     };
 
-    match crate::fs::Vfs::remove(path) {
+    match crate::fs::Vfs::remove(&path) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -7200,30 +7231,28 @@ pub fn sys_fs_list_dir(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    let safe_path_len = path_len.min(256);
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, safe_path_len) {
-        return SyscallResult::err(e);
-    }
     if buf_cap > 0 {
         if let Err(e) = crate::mm::user::validate_user_write(args.arg2, buf_cap) {
             return SyscallResult::err(e);
         }
     }
 
-    // SAFETY: Validated above — path_ptr is in user space and mapped.
-    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, safe_path_len) };
-    let path = match core::str::from_utf8(path_bytes) {
-        Ok(s) => s,
-        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    let path = match read_user_path(args.arg0, path_len) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
     };
 
-    let entries = match crate::fs::Vfs::readdir(path) {
+    let entries = match crate::fs::Vfs::readdir(&path) {
         Ok(e) => e,
         Err(e) => return SyscallResult::err(e),
     };
 
-    // Pack entries into the buffer.
+    // Pack into kernel memory, then copy out in a single transfer.  The packed
+    // buffer is sized by what we will actually emit rather than by `buf_cap`,
+    // so a caller advertising a huge capacity does not make the kernel
+    // allocate it.
     let max_entries = buf_cap / FS_DIR_ENTRY_SIZE;
+    let mut packed: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
     let mut count = 0usize;
 
     for entry in &entries {
@@ -7231,36 +7260,56 @@ pub fn sys_fs_list_dir(args: &SyscallArgs) -> SyscallResult {
             break;
         }
 
-        let offset = count.wrapping_mul(FS_DIR_ENTRY_SIZE);
-        // SAFETY: buf_ptr + offset is within buf_cap (checked above).
-        unsafe {
-            let dest = buf_ptr.add(offset);
-            // Zero the entry first.
-            core::ptr::write_bytes(dest, 0, FS_DIR_ENTRY_SIZE);
+        // Decided before reserving the slot: a volume label is metadata, not a
+        // directory entry, and must not consume a record.
+        let type_byte = match entry.entry_type {
+            crate::fs::EntryType::File => 0u8,
+            crate::fs::EntryType::Directory => 1u8,
+            crate::fs::EntryType::Symlink => 3u8,
+            crate::fs::EntryType::VolumeLabel => continue,
+        };
 
-            // Copy filename (up to 255 bytes + null terminator).
-            let name_bytes = entry.name.as_bytes();
-            let name_len = name_bytes.len().min(255);
-            core::ptr::copy_nonoverlapping(name_bytes.as_ptr(), dest, name_len);
+        let base = packed.len();
+        if packed.try_reserve(FS_DIR_ENTRY_SIZE).is_err() {
+            return SyscallResult::err(KernelError::OutOfMemory);
+        }
+        // Zero-fill first: the record is NUL-padded, and every field not
+        // written below must read as zero.
+        packed.resize(base.wrapping_add(FS_DIR_ENTRY_SIZE), 0);
+        let Some(rec) = packed.get_mut(base..) else {
+            return SyscallResult::err(KernelError::InternalError);
+        };
 
-            // File size (u32 at offset 256).
-            let size_ptr = dest.add(256) as *mut u32;
-            #[allow(clippy::cast_possible_truncation)]
-            core::ptr::write(size_ptr, entry.size as u32);
+        // Filename at offset 0, at most 255 bytes so the record always ends in
+        // at least one NUL.
+        let name_bytes = entry.name.as_bytes();
+        let name_len = name_bytes.len().min(255);
+        if let (Some(dst), Some(src)) = (rec.get_mut(..name_len), name_bytes.get(..name_len)) {
+            dst.copy_from_slice(src);
+        }
 
-            // Entry type (offset 260): 0=file, 1=directory.
-            let type_ptr = dest.add(260);
-            let type_byte = match entry.entry_type {
-                crate::fs::EntryType::File => 0u8,
-                crate::fs::EntryType::Directory => 1u8,
-                crate::fs::EntryType::Symlink => 3u8,
-                // Skip volume labels — they're metadata, not real entries.
-                crate::fs::EntryType::VolumeLabel => continue,
-            };
-            core::ptr::write(type_ptr, type_byte);
+        // Size (u32 LE) at offset 256.  Written byte-wise rather than through a
+        // `*mut u32` so the record needs no alignment guarantee.
+        #[allow(clippy::cast_possible_truncation)]
+        let size = entry.size as u32;
+        if let Some(dst) = rec.get_mut(256..260) {
+            dst.copy_from_slice(&size.to_le_bytes());
+        }
+
+        // Entry type at offset 260.
+        if let Some(b) = rec.get_mut(260) {
+            *b = type_byte;
         }
 
         count = count.wrapping_add(1);
+    }
+
+    // SAFETY: `packed` is a live kernel allocation of exactly `packed.len()`
+    // bytes; `copy_to_user` validates the user destination.
+    if let Err(e) =
+        unsafe { crate::mm::user::copy_to_user(packed.as_ptr(), args.arg2, packed.len()) }
+    {
+        return SyscallResult::err(e);
     }
 
     #[allow(clippy::cast_possible_wrap)]
@@ -7284,19 +7333,12 @@ pub fn sys_fs_mkdir(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    let safe_path_len = path_len.min(256);
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, safe_path_len) {
-        return SyscallResult::err(e);
-    }
-
-    // SAFETY: Validated above — path_ptr is in user space and mapped.
-    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, safe_path_len) };
-    let path = match core::str::from_utf8(path_bytes) {
-        Ok(s) => s,
-        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    let path = match read_user_path(args.arg0, path_len) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
     };
 
-    match crate::fs::Vfs::mkdir(path) {
+    match crate::fs::Vfs::mkdir(&path) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -7325,16 +7367,9 @@ pub fn sys_fs_mkdir_mode(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    let safe_path_len = path_len.min(256);
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, safe_path_len) {
-        return SyscallResult::err(e);
-    }
-
-    // SAFETY: Validated above — path_ptr is in user space and mapped.
-    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, safe_path_len) };
-    let path = match core::str::from_utf8(path_bytes) {
-        Ok(s) => s,
-        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    let path = match read_user_path(args.arg0, path_len) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
     };
 
     // arg2 = directory create mode (already umask-masked).  Zero → historical
@@ -7347,7 +7382,7 @@ pub fn sys_fs_mkdir_mode(args: &SyscallArgs) -> SyscallResult {
         mode_raw & 0o777
     };
 
-    match crate::fs::Vfs::mkdir_mode(path, mode) {
+    match crate::fs::Vfs::mkdir_mode(&path, mode) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -7370,19 +7405,12 @@ pub fn sys_fs_rmdir(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    let safe_path_len = path_len.min(256);
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, safe_path_len) {
-        return SyscallResult::err(e);
-    }
-
-    // SAFETY: Validated above — path_ptr is in user space and mapped.
-    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, safe_path_len) };
-    let path = match core::str::from_utf8(path_bytes) {
-        Ok(s) => s,
-        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    let path = match read_user_path(args.arg0, path_len) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
     };
 
-    match crate::fs::Vfs::rmdir(path) {
+    match crate::fs::Vfs::rmdir(&path) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -7411,49 +7439,61 @@ pub fn sys_fs_rmdir(args: &SyscallArgs) -> SyscallResult {
 /// ```
 pub const FS_STAT_RESULT_LEN: usize = 80;
 
-/// Serialize file metadata into a user `FsStatResult` buffer.
+/// Serialize file metadata into the [`FS_STAT_RESULT_LEN`]-byte wire layout
+/// documented on that constant.
 ///
-/// Writes exactly [`FS_STAT_RESULT_LEN`] bytes in the layout documented on
-/// that constant.  Uses unaligned stores because the user buffer is not
-/// guaranteed to be aligned (e.g. a `[u8; N]` on a userspace stack).
-///
-/// # Safety
-///
-/// `out_ptr` must point to at least [`FS_STAT_RESULT_LEN`] writable, mapped
-/// user bytes — the caller must have validated this via
-/// [`crate::mm::user::validate_user_write`].
-unsafe fn write_fs_stat_result(out_ptr: *mut u8, meta: &crate::fs::FileMeta) {
+/// Returns kernel memory; the caller copies it out.  Building the record
+/// field-by-field in a fixed array rather than storing through a user pointer
+/// means no alignment precondition on the user buffer (the old code needed
+/// `write_unaligned` for exactly that reason) and no supervisor writes to user
+/// pages outside a copy primitive.
+fn encode_fs_stat_result(meta: &crate::fs::FileMeta) -> [u8; FS_STAT_RESULT_LEN] {
+    let mut out = [0u8; FS_STAT_RESULT_LEN];
     let type_byte = match meta.entry_type {
         crate::fs::EntryType::File => 0u8,
         crate::fs::EntryType::Directory => 1u8,
         crate::fs::EntryType::VolumeLabel => 2u8,
         crate::fs::EntryType::Symlink => 3u8,
     };
-    // SAFETY: out_ptr is valid for FS_STAT_RESULT_LEN bytes (caller
-    // contract).  Every store is unaligned, so no alignment precondition is
-    // imposed on the user buffer; offsets stay within the validated length.
-    unsafe {
-        core::ptr::write_bytes(out_ptr, 0, FS_STAT_RESULT_LEN);
-        core::ptr::write_unaligned(out_ptr.cast::<u64>(), meta.size);
-        out_ptr.add(8).write(type_byte);
-        core::ptr::write_unaligned(out_ptr.add(12).cast::<u32>(), meta.nlinks);
-        core::ptr::write_unaligned(
-            out_ptr.add(16).cast::<u32>(),
-            u32::from(meta.permissions),
-        );
-        core::ptr::write_unaligned(out_ptr.add(20).cast::<u32>(), meta.uid);
-        core::ptr::write_unaligned(out_ptr.add(24).cast::<u32>(), meta.gid);
-        core::ptr::write_unaligned(
-            out_ptr.add(28).cast::<u32>(),
-            meta.attributes.bits(),
-        );
-        core::ptr::write_unaligned(out_ptr.add(32).cast::<u64>(), meta.blocks);
-        core::ptr::write_unaligned(out_ptr.add(40).cast::<u64>(), meta.modified_ns);
-        core::ptr::write_unaligned(out_ptr.add(48).cast::<u64>(), meta.accessed_ns);
-        core::ptr::write_unaligned(out_ptr.add(56).cast::<u64>(), meta.changed_ns);
-        core::ptr::write_unaligned(out_ptr.add(64).cast::<u64>(), meta.created_ns);
-        core::ptr::write_unaligned(out_ptr.add(72).cast::<u64>(), meta.ino);
-    }
+
+    // Each field is written through `get_mut`, so a future change to
+    // FS_STAT_RESULT_LEN that no longer covers the layout drops fields rather
+    // than panicking or corrupting the record.
+    let mut put = |at: usize, bytes: &[u8]| {
+        if let Some(dst) = out.get_mut(at..at.wrapping_add(bytes.len())) {
+            dst.copy_from_slice(bytes);
+        }
+    };
+    put(0, &meta.size.to_le_bytes());
+    put(8, &[type_byte]);
+    put(12, &meta.nlinks.to_le_bytes());
+    put(16, &u32::from(meta.permissions).to_le_bytes());
+    put(20, &meta.uid.to_le_bytes());
+    put(24, &meta.gid.to_le_bytes());
+    put(28, &meta.attributes.bits().to_le_bytes());
+    put(32, &meta.blocks.to_le_bytes());
+    put(40, &meta.modified_ns.to_le_bytes());
+    put(48, &meta.accessed_ns.to_le_bytes());
+    put(56, &meta.changed_ns.to_le_bytes());
+    put(64, &meta.created_ns.to_le_bytes());
+    put(72, &meta.ino.to_le_bytes());
+    out
+}
+
+/// Serialize file metadata into a user `FsStatResult` buffer.
+///
+/// # Errors
+///
+/// [`KernelError::InvalidAddress`] if `user_dst` is not writable for
+/// [`FS_STAT_RESULT_LEN`] bytes.
+fn write_fs_stat_result(
+    user_dst: u64,
+    meta: &crate::fs::FileMeta,
+) -> Result<(), KernelError> {
+    let record = encode_fs_stat_result(meta);
+    // SAFETY: `record` is a live stack array of exactly FS_STAT_RESULT_LEN
+    // bytes; `copy_to_user` validates the user destination.
+    unsafe { crate::mm::user::copy_to_user(record.as_ptr(), user_dst, FS_STAT_RESULT_LEN) }
 }
 
 /// `SYS_FS_STAT` — stat a file or directory.
@@ -7477,34 +7517,28 @@ pub fn sys_fs_stat(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    let safe_path_len = path_len.min(256);
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, safe_path_len) {
-        return SyscallResult::err(e);
-    }
     if let Err(e) =
         crate::mm::user::validate_user_write(args.arg2, FS_STAT_RESULT_LEN)
     {
         return SyscallResult::err(e);
     }
 
-    // SAFETY: Validated above — path_ptr is in user space and mapped.
-    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, safe_path_len) };
-    let path = match core::str::from_utf8(path_bytes) {
-        Ok(s) => s,
-        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+    let path = match read_user_path(args.arg0, path_len) {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
     };
 
     // Use metadata() (follows symlinks) so the caller gets the rich fields
     // — timestamps, ownership, mode, blocks — not just size and type.
-    let meta = match crate::fs::Vfs::metadata(path) {
+    let meta = match crate::fs::Vfs::metadata(&path) {
         Ok(m) => m,
         Err(e) => return SyscallResult::err(e),
     };
 
-    // SAFETY: out_ptr was validated for FS_STAT_RESULT_LEN bytes above.
-    unsafe { write_fs_stat_result(out_ptr, &meta) };
-
-    SyscallResult::ok(0)
+    match write_fs_stat_result(args.arg2, &meta) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -7870,16 +7904,22 @@ pub fn sys_fs_rename(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
-/// Read and validate a user-space string argument (ptr + len pair).
+/// Read and validate a user-space string argument (ptr + len pair) into a
+/// caller-supplied scratch buffer.
 ///
-/// Clamps the length to `max_len` bytes, validates the user read, and
-/// decodes as UTF-8.  Returns an empty string when `len == 0` (used for
-/// the optional source/device argument of pseudo-filesystems).
+/// Returns an empty string when `len == 0` (used for the optional
+/// source/device argument of pseudo-filesystems).
+///
+/// `max_len` is a rejection limit.  It used to be a clamp (`len.min(max_len)`),
+/// which silently turned an over-long argument into a *different, shorter*
+/// one — a 300-byte device name became whatever the first 64 bytes named, and
+/// the mount then proceeded against that.
 ///
 /// # Errors
 ///
-/// - `InvalidArgument` — null pointer with non-zero length, or invalid UTF-8.
-/// - Any error from [`crate::mm::user::validate_user_read`].
+/// - `InvalidArgument` — null pointer with non-zero length, `len` above
+///   `max_len` or above the scratch buffer, or invalid UTF-8.
+/// - Any error from [`crate::mm::user::copy_from_user`].
 fn read_user_str(
     ptr_arg: u64,
     len: usize,
@@ -7889,19 +7929,14 @@ fn read_user_str(
     if len == 0 {
         return Ok("");
     }
-    let ptr = ptr_arg as *const u8;
-    if ptr.is_null() {
+    if ptr_arg == 0 || len > max_len {
         return Err(KernelError::InvalidArgument);
     }
-    let safe_len = len.min(max_len);
-    crate::mm::user::validate_user_read(ptr_arg, safe_len)?;
-    // SAFETY: validated above for `safe_len` bytes in user space.
-    let src = unsafe { core::slice::from_raw_parts(ptr, safe_len) };
-    let dst = match buf.get_mut(..safe_len) {
-        Some(d) => d,
-        None => return Err(KernelError::InvalidArgument),
-    };
-    dst.copy_from_slice(src);
+    let dst = buf.get_mut(..len).ok_or(KernelError::InvalidArgument)?;
+    // SAFETY: `dst` is a live kernel slice of exactly `len` bytes, so it is a
+    // valid destination of that size.  `copy_from_user` validates the user
+    // source range and performs the copy inside a single SMAP window.
+    unsafe { crate::mm::user::copy_from_user(ptr_arg, dst.as_mut_ptr(), len)? };
     core::str::from_utf8(dst).map_err(|_| KernelError::InvalidArgument)
 }
 
@@ -8138,11 +8173,10 @@ pub fn sys_fs_fstat(args: &SyscallArgs) -> SyscallResult {
     }
 
     match crate::fs::handle::fstat(handle) {
-        Ok(meta) => {
-            // SAFETY: out_ptr was validated for FS_STAT_RESULT_LEN bytes above.
-            unsafe { write_fs_stat_result(out_ptr, &meta) };
-            SyscallResult::ok(0)
-        }
+        Ok(meta) => match write_fs_stat_result(args.arg1, &meta) {
+            Ok(()) => SyscallResult::ok(0),
+            Err(e) => SyscallResult::err(e),
+        },
         Err(e) => SyscallResult::err(e),
     }
 }
@@ -8578,19 +8612,6 @@ pub fn sys_fs_journal_flush(_args: &SyscallArgs) -> SyscallResult {
 /// Helper: read a path string from user pointers (arg0=ptr, arg1=len).
 ///
 /// Returns the path as a `&str`.  Validates memory and UTF-8.
-unsafe fn read_user_path<'a>(ptr: u64, len: u64) -> Result<&'a str, SyscallResult> {
-    let path_ptr = ptr as *const u8;
-    let path_len = (len as usize).min(256);
-    if path_ptr.is_null() || path_len == 0 {
-        return Err(SyscallResult::err(KernelError::InvalidArgument));
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(ptr, path_len) {
-        return Err(SyscallResult::err(e));
-    }
-    // SAFETY: Validated above — path_ptr is in user space and mapped.
-    let bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_len) };
-    core::str::from_utf8(bytes).map_err(|_| SyscallResult::err(KernelError::InvalidArgument))
-}
 
 /// `SYS_FS_METADATA` — get rich file metadata.
 ///
@@ -8617,13 +8638,12 @@ pub fn sys_fs_metadata(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    // SAFETY: Validated above.
-    let path = match unsafe { read_user_path(args.arg0, args.arg1) } {
+    let path = match read_user_path(args.arg0, args.arg1 as usize) {
         Ok(p) => p,
-        Err(r) => return r,
+        Err(e) => return SyscallResult::err(e),
     };
 
-    let meta = match crate::fs::Vfs::metadata(path) {
+    let meta = match crate::fs::Vfs::metadata(&path) {
         Ok(m) => m,
         Err(e) => return SyscallResult::err(e),
     };
@@ -8664,13 +8684,12 @@ pub fn sys_fs_set_attr(args: &SyscallArgs) -> SyscallResult {
     ) {
         return SyscallResult::err(e);
     }
-    // SAFETY: Validated in read_user_path.
-    let path = match unsafe { read_user_path(args.arg0, args.arg1) } {
+    let path = match read_user_path(args.arg0, args.arg1 as usize) {
         Ok(p) => p,
-        Err(r) => return r,
+        Err(e) => return SyscallResult::err(e),
     };
     let attrs = crate::fs::FileAttr::from_bits(args.arg2 as u32);
-    match crate::fs::Vfs::set_attributes(path, attrs) {
+    match crate::fs::Vfs::set_attributes(&path, attrs) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -8693,17 +8712,16 @@ pub fn sys_fs_set_owner(args: &SyscallArgs) -> SyscallResult {
     ) {
         return SyscallResult::err(e);
     }
-    // SAFETY: Validated in read_user_path.
-    let path = match unsafe { read_user_path(args.arg0, args.arg1) } {
+    let path = match read_user_path(args.arg0, args.arg1 as usize) {
         Ok(p) => p,
-        Err(r) => return r,
+        Err(e) => return SyscallResult::err(e),
     };
     // arg4 bit 0 = NO_FOLLOW (operate on the link inode itself).
     let no_follow = args.arg4 & 1 != 0;
     let res = if no_follow {
-        crate::fs::Vfs::set_owner_no_follow(path, args.arg2 as u32, args.arg3 as u32)
+        crate::fs::Vfs::set_owner_no_follow(&path, args.arg2 as u32, args.arg3 as u32)
     } else {
-        crate::fs::Vfs::set_owner(path, args.arg2 as u32, args.arg3 as u32)
+        crate::fs::Vfs::set_owner(&path, args.arg2 as u32, args.arg3 as u32)
     };
     match res {
         Ok(()) => SyscallResult::ok(0),
@@ -8725,16 +8743,15 @@ pub fn sys_fs_set_perms(args: &SyscallArgs) -> SyscallResult {
     ) {
         return SyscallResult::err(e);
     }
-    // SAFETY: Validated in read_user_path.
-    let path = match unsafe { read_user_path(args.arg0, args.arg1) } {
+    let path = match read_user_path(args.arg0, args.arg1 as usize) {
         Ok(p) => p,
-        Err(r) => return r,
+        Err(e) => return SyscallResult::err(e),
     };
     let no_follow = args.arg3 & 1 != 0;
     let res = if no_follow {
-        crate::fs::Vfs::set_permissions_no_follow(path, args.arg2 as u16)
+        crate::fs::Vfs::set_permissions_no_follow(&path, args.arg2 as u16)
     } else {
-        crate::fs::Vfs::set_permissions(path, args.arg2 as u16)
+        crate::fs::Vfs::set_permissions(&path, args.arg2 as u16)
     };
     match res {
         Ok(()) => SyscallResult::ok(0),
@@ -8755,17 +8772,16 @@ pub fn sys_fs_set_times(args: &SyscallArgs) -> SyscallResult {
     ) {
         return SyscallResult::err(e);
     }
-    // SAFETY: Validated in read_user_path.
-    let path = match unsafe { read_user_path(args.arg0, args.arg1) } {
+    let path = match read_user_path(args.arg0, args.arg1 as usize) {
         Ok(p) => p,
-        Err(r) => return r,
+        Err(e) => return SyscallResult::err(e),
     };
     // arg4 bit 0 = NO_FOLLOW (stamp the link inode itself).
     let no_follow = args.arg4 & 1 != 0;
     let res = if no_follow {
-        crate::fs::Vfs::set_times_no_follow(path, args.arg2, args.arg3)
+        crate::fs::Vfs::set_times_no_follow(&path, args.arg2, args.arg3)
     } else {
-        crate::fs::Vfs::set_times(path, args.arg2, args.arg3)
+        crate::fs::Vfs::set_times(&path, args.arg2, args.arg3)
     };
     match res {
         Ok(()) => SyscallResult::ok(0),
@@ -8787,10 +8803,9 @@ pub fn sys_fs_get_xattr(args: &SyscallArgs) -> SyscallResult {
     ) {
         return SyscallResult::err(e);
     }
-    // SAFETY: Validated in read_user_path.
-    let path = match unsafe { read_user_path(args.arg0, args.arg1) } {
+    let path = match read_user_path(args.arg0, args.arg1 as usize) {
         Ok(p) => p,
-        Err(r) => return r,
+        Err(e) => return SyscallResult::err(e),
     };
     // Read key from arg2 (null-terminated string, max 255 bytes).
     let key_ptr = args.arg2 as *const u8;
@@ -8832,9 +8847,9 @@ pub fn sys_fs_get_xattr(args: &SyscallArgs) -> SyscallResult {
 
     // arg5 bit 0 = NO_FOLLOW (lgetxattr: read the link inode's own xattrs).
     let xattr_res = if args.arg5 & 1 != 0 {
-        crate::fs::Vfs::get_xattr_no_follow(path, key)
+        crate::fs::Vfs::get_xattr_no_follow(&path, key)
     } else {
-        crate::fs::Vfs::get_xattr(path, key)
+        crate::fs::Vfs::get_xattr(&path, key)
     };
     match xattr_res {
         Ok(val) => {
@@ -8867,10 +8882,9 @@ pub fn sys_fs_set_xattr(args: &SyscallArgs) -> SyscallResult {
     ) {
         return SyscallResult::err(e);
     }
-    // SAFETY: Validated in read_user_path.
-    let path = match unsafe { read_user_path(args.arg0, args.arg1) } {
+    let path = match read_user_path(args.arg0, args.arg1 as usize) {
         Ok(p) => p,
-        Err(r) => return r,
+        Err(e) => return SyscallResult::err(e),
     };
     // Read key.
     let key_ptr = args.arg2 as *const u8;
@@ -8915,9 +8929,9 @@ pub fn sys_fs_set_xattr(args: &SyscallArgs) -> SyscallResult {
 
     // arg5 bit 0 = NO_FOLLOW (lsetxattr: write the link inode's own xattrs).
     let res = if args.arg5 & 1 != 0 {
-        crate::fs::Vfs::set_xattr_no_follow(path, key, value)
+        crate::fs::Vfs::set_xattr_no_follow(&path, key, value)
     } else {
-        crate::fs::Vfs::set_xattr(path, key, value)
+        crate::fs::Vfs::set_xattr(&path, key, value)
     };
     match res {
         Ok(()) => SyscallResult::ok(0),
@@ -8937,10 +8951,9 @@ pub fn sys_fs_remove_xattr(args: &SyscallArgs) -> SyscallResult {
     ) {
         return SyscallResult::err(e);
     }
-    // SAFETY: Validated in read_user_path.
-    let path = match unsafe { read_user_path(args.arg0, args.arg1) } {
+    let path = match read_user_path(args.arg0, args.arg1 as usize) {
         Ok(p) => p,
-        Err(r) => return r,
+        Err(e) => return SyscallResult::err(e),
     };
     let key_ptr = args.arg2 as *const u8;
     if key_ptr.is_null() {
@@ -8967,9 +8980,9 @@ pub fn sys_fs_remove_xattr(args: &SyscallArgs) -> SyscallResult {
 
     // arg3 bit 0 = NO_FOLLOW (lremovexattr: remove from the link inode).
     let res = if args.arg3 & 1 != 0 {
-        crate::fs::Vfs::remove_xattr_no_follow(path, key)
+        crate::fs::Vfs::remove_xattr_no_follow(&path, key)
     } else {
-        crate::fs::Vfs::remove_xattr(path, key)
+        crate::fs::Vfs::remove_xattr(&path, key)
     };
     match res {
         Ok(()) => SyscallResult::ok(0),
@@ -8990,10 +9003,9 @@ pub fn sys_fs_list_xattrs(args: &SyscallArgs) -> SyscallResult {
     ) {
         return SyscallResult::err(e);
     }
-    // SAFETY: Validated in read_user_path.
-    let path = match unsafe { read_user_path(args.arg0, args.arg1) } {
+    let path = match read_user_path(args.arg0, args.arg1 as usize) {
         Ok(p) => p,
-        Err(r) => return r,
+        Err(e) => return SyscallResult::err(e),
     };
     let out_ptr = args.arg2 as *mut u8;
     let capacity = args.arg3 as usize;
@@ -9011,9 +9023,9 @@ pub fn sys_fs_list_xattrs(args: &SyscallArgs) -> SyscallResult {
 
     // arg4 bit 0 = NO_FOLLOW (llistxattr: list the link inode's own xattrs).
     let keys = match if args.arg4 & 1 != 0 {
-        crate::fs::Vfs::list_xattrs_no_follow(path)
+        crate::fs::Vfs::list_xattrs_no_follow(&path)
     } else {
-        crate::fs::Vfs::list_xattrs(path)
+        crate::fs::Vfs::list_xattrs(&path)
     } {
         Ok(k) => k,
         Err(e) => return SyscallResult::err(e),
@@ -9068,10 +9080,9 @@ pub fn sys_fs_symlink(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    // SAFETY: Validated in read_user_path.
-    let path = match unsafe { read_user_path(args.arg0, args.arg1) } {
+    let path = match read_user_path(args.arg0, args.arg1 as usize) {
         Ok(p) => p,
-        Err(r) => return r,
+        Err(e) => return SyscallResult::err(e),
     };
 
     // Read the target string (arg2=ptr, arg3=len).
@@ -9090,7 +9101,7 @@ pub fn sys_fs_symlink(args: &SyscallArgs) -> SyscallResult {
         Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
     };
 
-    match crate::fs::Vfs::symlink(path, target) {
+    match crate::fs::Vfs::symlink(&path, target) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -9115,10 +9126,9 @@ pub fn sys_fs_readlink(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    // SAFETY: Validated in read_user_path.
-    let path = match unsafe { read_user_path(args.arg0, args.arg1) } {
+    let path = match read_user_path(args.arg0, args.arg1 as usize) {
         Ok(p) => p,
-        Err(r) => return r,
+        Err(e) => return SyscallResult::err(e),
     };
 
     let out_ptr = args.arg2 as *mut u8;
@@ -9130,7 +9140,7 @@ pub fn sys_fs_readlink(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let target = match crate::fs::Vfs::readlink(path) {
+    let target = match crate::fs::Vfs::readlink(&path) {
         Ok(t) => t,
         Err(e) => return SyscallResult::err(e),
     };
@@ -9162,10 +9172,9 @@ pub fn sys_fs_lstat(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    // SAFETY: Validated in read_user_path.
-    let path = match unsafe { read_user_path(args.arg0, args.arg1) } {
+    let path = match read_user_path(args.arg0, args.arg1 as usize) {
         Ok(p) => p,
-        Err(r) => return r,
+        Err(e) => return SyscallResult::err(e),
     };
 
     let out_ptr = args.arg2 as *mut u8;
@@ -9179,15 +9188,15 @@ pub fn sys_fs_lstat(args: &SyscallArgs) -> SyscallResult {
     }
 
     // lmetadata() does not follow the final symlink (rich no-follow stat).
-    let meta = match crate::fs::Vfs::lmetadata(path) {
+    let meta = match crate::fs::Vfs::lmetadata(&path) {
         Ok(m) => m,
         Err(e) => return SyscallResult::err(e),
     };
 
-    // SAFETY: out_ptr was validated for FS_STAT_RESULT_LEN bytes above.
-    unsafe { write_fs_stat_result(out_ptr, &meta) };
-
-    SyscallResult::ok(0)
+    match write_fs_stat_result(args.arg2, &meta) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
 }
 
 /// `SYS_FS_FLOCK` — acquire an advisory file lock.
@@ -9204,10 +9213,9 @@ pub fn sys_fs_flock(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    // SAFETY: Validated in read_user_path.
-    let path = match unsafe { read_user_path(args.arg0, args.arg1) } {
+    let path = match read_user_path(args.arg0, args.arg1 as usize) {
         Ok(p) => p,
-        Err(r) => return r,
+        Err(e) => return SyscallResult::err(e),
     };
 
     let lock_type = match args.arg2 {
@@ -9218,7 +9226,7 @@ pub fn sys_fs_flock(args: &SyscallArgs) -> SyscallResult {
 
     let owner = args.arg3;
 
-    match crate::fs::Vfs::flock(path, owner, lock_type) {
+    match crate::fs::Vfs::flock(&path, owner, lock_type) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -9230,15 +9238,14 @@ pub fn sys_fs_flock(args: &SyscallArgs) -> SyscallResult {
 /// `arg1`: path length.
 /// `arg2`: owner ID.
 pub fn sys_fs_funlock(args: &SyscallArgs) -> SyscallResult {
-    // SAFETY: Validated in read_user_path.
-    let path = match unsafe { read_user_path(args.arg0, args.arg1) } {
+    let path = match read_user_path(args.arg0, args.arg1 as usize) {
         Ok(p) => p,
-        Err(r) => return r,
+        Err(e) => return SyscallResult::err(e),
     };
 
     let owner = args.arg2;
 
-    match crate::fs::Vfs::funlock(path, owner) {
+    match crate::fs::Vfs::funlock(&path, owner) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -9270,10 +9277,9 @@ pub fn sys_fs_link(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    // SAFETY: Validated in read_user_path.
-    let existing = match unsafe { read_user_path(args.arg0, args.arg1) } {
+    let existing = match read_user_path(args.arg0, args.arg1 as usize) {
         Ok(p) => p,
-        Err(r) => return r,
+        Err(e) => return SyscallResult::err(e),
     };
 
     // Read the new link path (arg2=ptr, arg3=len).
@@ -9296,9 +9302,9 @@ pub fn sys_fs_link(args: &SyscallArgs) -> SyscallResult {
     // no-follow (plain link(2)).
     let follow = args.arg4 & 1 != 0;
     let result = if follow {
-        crate::fs::Vfs::link(existing, new_path)
+        crate::fs::Vfs::link(&existing, new_path)
     } else {
-        crate::fs::Vfs::link_no_follow(existing, new_path)
+        crate::fs::Vfs::link_no_follow(&existing, new_path)
     };
     match result {
         Ok(()) => SyscallResult::ok(0),
@@ -9320,10 +9326,9 @@ pub fn sys_fs_statvfs(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    // SAFETY: Validated in read_user_path.
-    let path = match unsafe { read_user_path(args.arg0, args.arg1) } {
+    let path = match read_user_path(args.arg0, args.arg1 as usize) {
         Ok(p) => p,
-        Err(r) => return r,
+        Err(e) => return SyscallResult::err(e),
     };
 
     let out_ptr = args.arg2 as *mut u8;
@@ -9337,7 +9342,7 @@ pub fn sys_fs_statvfs(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let info = match crate::fs::Vfs::statvfs(path) {
+    let info = match crate::fs::Vfs::statvfs(&path) {
         Ok(i) => i,
         Err(e) => return SyscallResult::err(e),
     };
@@ -9386,10 +9391,9 @@ pub fn sys_fs_copy(args: &SyscallArgs) -> SyscallResult {
     }
 
     // Read source path.
-    // SAFETY: Validated in read_user_path.
-    let src = match unsafe { read_user_path(args.arg0, args.arg1) } {
+    let src = match read_user_path(args.arg0, args.arg1 as usize) {
         Ok(p) => p,
-        Err(r) => return r,
+        Err(e) => return SyscallResult::err(e),
     };
 
     // Read destination path (arg2=ptr, arg3=len).
@@ -9408,7 +9412,7 @@ pub fn sys_fs_copy(args: &SyscallArgs) -> SyscallResult {
         Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
     };
 
-    match crate::fs::Vfs::copy(src, dst) {
+    match crate::fs::Vfs::copy(&src, dst) {
         Ok(bytes) => {
             #[allow(clippy::cast_possible_wrap)]
             let n = bytes as i64;
@@ -9432,10 +9436,9 @@ pub fn sys_fs_append(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    // SAFETY: Validated in read_user_path.
-    let path = match unsafe { read_user_path(args.arg0, args.arg1) } {
+    let path = match read_user_path(args.arg0, args.arg1 as usize) {
         Ok(p) => p,
-        Err(r) => return r,
+        Err(e) => return SyscallResult::err(e),
     };
 
     let data_ptr = args.arg2 as *const u8;
@@ -9456,7 +9459,7 @@ pub fn sys_fs_append(args: &SyscallArgs) -> SyscallResult {
         unsafe { core::slice::from_raw_parts(data_ptr, data_len) }
     };
 
-    match crate::fs::Vfs::append(path, data) {
+    match crate::fs::Vfs::append(&path, data) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }

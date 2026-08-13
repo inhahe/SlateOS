@@ -46,6 +46,8 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
+use crate::fs::pathutil::path_in_subtree;
 use crate::fs::{EntryType, Vfs};
 use crate::serial_println;
 
@@ -75,8 +77,10 @@ const MAX_SCAN_DEPTH: usize = 32;
 /// A tagged file entry.
 #[derive(Debug, Clone)]
 pub struct TaggedFile {
-    /// Full path to the file.
-    pub path: String,
+    /// Full path to the file.  A path is a byte string, not text: a file whose
+    /// name contains a byte that is not valid UTF-8 must still be findable by
+    /// tag and openable from the result.
+    pub path: PathBuf,
     /// Tags attached to this file.
     pub tags: Vec<String>,
 }
@@ -115,9 +119,9 @@ static SEARCHES: AtomicU64 = AtomicU64::new(0);
 /// Reverse index: tag → set of file paths.
 struct TagIndex {
     /// Tag → set of paths.
-    by_tag: BTreeMap<String, BTreeSet<String>>,
+    by_tag: BTreeMap<String, BTreeSet<PathBuf>>,
     /// Path → set of tags (for fast removal).
-    by_path: BTreeMap<String, BTreeSet<String>>,
+    by_path: BTreeMap<PathBuf, BTreeSet<String>>,
     /// Whether the index has been built.
     built: bool,
 }
@@ -197,7 +201,7 @@ fn normalize_tag(tag: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Read tags from a file's xattr.
-fn read_tags(path: &str) -> KernelResult<Vec<String>> {
+fn read_tags(path: &Path) -> KernelResult<Vec<String>> {
     match Vfs::get_xattr(path, TAG_XATTR_KEY) {
         Ok(data) => {
             let s = core::str::from_utf8(&data).map_err(|_| KernelError::CorruptedData)?;
@@ -213,7 +217,7 @@ fn read_tags(path: &str) -> KernelResult<Vec<String>> {
 }
 
 /// Write tags to a file's xattr.
-fn write_tags(path: &str, tags: &[String]) -> KernelResult<()> {
+fn write_tags(path: &Path, tags: &[String]) -> KernelResult<()> {
     if tags.is_empty() {
         // Remove the xattr entirely when no tags remain.
         match Vfs::remove_xattr(path, TAG_XATTR_KEY) {
@@ -235,7 +239,8 @@ fn write_tags(path: &str, tags: &[String]) -> KernelResult<()> {
 ///
 /// If the file already has this tag (case-insensitive), this is a no-op.
 /// Tags are stored in the file's extended attributes.
-pub fn add(path: &str, tag: &str) -> KernelResult<()> {
+pub fn add<P: AsRef<Path> + ?Sized>(path: &P, tag: &str) -> KernelResult<()> {
+    let path = path.as_ref();
     if !ENABLED.load(Ordering::Relaxed) {
         return Err(KernelError::NotSupported);
     }
@@ -263,9 +268,9 @@ pub fn add(path: &str, tag: &str) -> KernelResult<()> {
         idx.by_tag
             .entry(norm.clone())
             .or_default()
-            .insert(String::from(path));
+            .insert(path.to_path_buf());
         idx.by_path
-            .entry(String::from(path))
+            .entry(path.to_path_buf())
             .or_default()
             .insert(norm);
     }
@@ -277,7 +282,8 @@ pub fn add(path: &str, tag: &str) -> KernelResult<()> {
 /// Remove a tag from a file.
 ///
 /// Case-insensitive removal.  Returns `NotFound` if the tag wasn't present.
-pub fn remove(path: &str, tag: &str) -> KernelResult<()> {
+pub fn remove<P: AsRef<Path> + ?Sized>(path: &P, tag: &str) -> KernelResult<()> {
+    let path = path.as_ref();
     if !ENABLED.load(Ordering::Relaxed) {
         return Err(KernelError::NotSupported);
     }
@@ -316,12 +322,13 @@ pub fn remove(path: &str, tag: &str) -> KernelResult<()> {
 }
 
 /// Get all tags on a file.
-pub fn get(path: &str) -> KernelResult<Vec<String>> {
-    read_tags(path)
+pub fn get<P: AsRef<Path> + ?Sized>(path: &P) -> KernelResult<Vec<String>> {
+    read_tags(path.as_ref())
 }
 
 /// Set all tags on a file (replacing any existing tags).
-pub fn set(path: &str, tags: &[&str]) -> KernelResult<()> {
+pub fn set<P: AsRef<Path> + ?Sized>(path: &P, tags: &[&str]) -> KernelResult<()> {
+    let path = path.as_ref();
     if !ENABLED.load(Ordering::Relaxed) {
         return Err(KernelError::NotSupported);
     }
@@ -361,11 +368,11 @@ pub fn set(path: &str, tags: &[&str]) -> KernelResult<()> {
             idx.by_tag
                 .entry(norm.clone())
                 .or_default()
-                .insert(String::from(path));
+                .insert(path.to_path_buf());
             path_tags.insert(norm);
         }
         if !path_tags.is_empty() {
-            idx.by_path.insert(String::from(path), path_tags);
+            idx.by_path.insert(path.to_path_buf(), path_tags);
         }
     }
 
@@ -374,7 +381,8 @@ pub fn set(path: &str, tags: &[&str]) -> KernelResult<()> {
 }
 
 /// Remove all tags from a file.
-pub fn clear(path: &str) -> KernelResult<()> {
+pub fn clear<P: AsRef<Path> + ?Sized>(path: &P) -> KernelResult<()> {
+    let path = path.as_ref();
     if !ENABLED.load(Ordering::Relaxed) {
         return Err(KernelError::NotSupported);
     }
@@ -408,7 +416,8 @@ pub fn clear(path: &str) -> KernelResult<()> {
 ///
 /// If the index is built, uses the in-memory index for O(1) lookup.
 /// Otherwise falls back to a filesystem walk scanning xattrs.
-pub fn search(tag: &str, root: &str) -> KernelResult<Vec<TaggedFile>> {
+pub fn search<R: AsRef<Path> + ?Sized>(tag: &str, root: &R) -> KernelResult<Vec<TaggedFile>> {
+    let root = root.as_ref();
     if !ENABLED.load(Ordering::Relaxed) {
         return Err(KernelError::NotSupported);
     }
@@ -424,8 +433,10 @@ pub fn search(tag: &str, root: &str) -> KernelResult<Vec<TaggedFile>> {
             Some(set) => {
                 let mut results = Vec::new();
                 for path in set {
-                    // Filter by root prefix.
-                    if path.starts_with(root) || root == "/" {
+                    // Component-boundary subtree test, not a byte prefix: a
+                    // byte prefix would let a search rooted at `/dev` also
+                    // return everything under `/devices`.
+                    if path_in_subtree(path, root) {
                         // Re-read tags from xattr for accuracy.
                         let tags = read_tags(path).unwrap_or_default();
                         results.push(TaggedFile {
@@ -448,7 +459,11 @@ pub fn search(tag: &str, root: &str) -> KernelResult<Vec<TaggedFile>> {
 }
 
 /// Find all files that have ALL of the specified tags (intersection).
-pub fn search_multi(tags: &[&str], root: &str) -> KernelResult<Vec<TaggedFile>> {
+pub fn search_multi<R: AsRef<Path> + ?Sized>(
+    tags: &[&str],
+    root: &R,
+) -> KernelResult<Vec<TaggedFile>> {
+    let root = root.as_ref();
     if !ENABLED.load(Ordering::Relaxed) {
         return Err(KernelError::NotSupported);
     }
@@ -463,7 +478,7 @@ pub fn search_multi(tags: &[&str], root: &str) -> KernelResult<Vec<TaggedFile>> 
     let idx = INDEX.lock();
     if idx.built {
         // Start with the smallest tag set for efficiency.
-        let mut sets: Vec<&BTreeSet<String>> = Vec::new();
+        let mut sets: Vec<&BTreeSet<PathBuf>> = Vec::new();
         for norm in &norms {
             match idx.by_tag.get(norm) {
                 Some(set) => sets.push(set),
@@ -474,9 +489,14 @@ pub fn search_multi(tags: &[&str], root: &str) -> KernelResult<Vec<TaggedFile>> 
         // Sort by size (smallest first).
         sets.sort_by_key(|s| s.len());
 
-        // Intersect iteratively.
-        let mut candidates: BTreeSet<String> = sets[0].clone();
-        for set in &sets[1..] {
+        // Intersect iteratively.  `split_first` rather than `sets[0]`/`sets[1..]`:
+        // `tags` is non-empty so `sets` is too, but indexing to prove that would
+        // be a panic path the compiler cannot check.
+        let Some((first, rest)) = sets.split_first() else {
+            return Ok(Vec::new());
+        };
+        let mut candidates: BTreeSet<PathBuf> = (*first).clone();
+        for set in rest {
             candidates = candidates.intersection(set).cloned().collect();
             if candidates.is_empty() {
                 return Ok(Vec::new());
@@ -485,7 +505,7 @@ pub fn search_multi(tags: &[&str], root: &str) -> KernelResult<Vec<TaggedFile>> 
 
         let mut results = Vec::new();
         for path in &candidates {
-            if path.starts_with(root) || root == "/" {
+            if path_in_subtree(path, root) {
                 let file_tags = read_tags(path).unwrap_or_default();
                 results.push(TaggedFile {
                     path: path.clone(),
@@ -503,40 +523,44 @@ pub fn search_multi(tags: &[&str], root: &str) -> KernelResult<Vec<TaggedFile>> 
     }
 }
 
+/// Is this the `.` or `..` self/parent link, which a walk must never follow?
+fn is_dot_entry(name: &Path) -> bool {
+    name == Path::new(".") || name == Path::new("..")
+}
+
+/// Virtual filesystems carry no persistent xattrs, so walking them can only
+/// waste time.  This is a subtree test rather than a byte-prefix test: the old
+/// `path.starts_with("/dev")` also silently skipped a real `/devices` tree.
+fn is_virtual_fs(path: &Path) -> bool {
+    const VIRTUAL: [&str; 3] = ["/proc", "/dev", "/sys"];
+    VIRTUAL.iter().any(|d| path_in_subtree(path, d))
+}
+
 /// Walk the filesystem looking for files with a specific tag.
-fn search_walk(
-    path: &str,
-    norm_tag: &str,
-    results: &mut Vec<TaggedFile>,
-    depth: usize,
-) {
+fn search_walk(path: &Path, norm_tag: &str, results: &mut Vec<TaggedFile>, depth: usize) {
     if depth > MAX_SCAN_DEPTH || results.len() >= 1000 {
         return;
     }
 
-    // Skip virtual filesystems.
-    if path.starts_with("/proc") || path.starts_with("/dev") || path.starts_with("/sys") {
+    if is_virtual_fs(path) {
         return;
     }
 
-    let entries = match Vfs::readdir(path) {
-        Ok(e) => e,
-        Err(_) => return,
+    let Ok(entries) = Vfs::readdir(path) else {
+        return;
     };
 
     for entry in &entries {
-        if entry.name == "." || entry.name == ".." {
+        if is_dot_entry(&entry.name) {
             continue;
         }
         if results.len() >= 1000 {
             return;
         }
 
-        let full = if path == "/" {
-            alloc::format!("/{}", entry.name)
-        } else {
-            alloc::format!("{}/{}", path, entry.name)
-        };
+        // `Path::join` inserts exactly one separator, so a root `path` needs no
+        // special case: `/` joined with `etc` is `/etc`, not `//etc`.
+        let full = path.join(&entry.name);
 
         // Check tags on this entry.
         if let Ok(tags) = read_tags(&full) {
@@ -550,14 +574,14 @@ fn search_walk(
 
         // Recurse into directories.
         if entry.entry_type == EntryType::Directory {
-            search_walk(&full, norm_tag, results, depth + 1);
+            search_walk(&full, norm_tag, results, depth.saturating_add(1));
         }
     }
 }
 
 /// Walk the filesystem looking for files with ALL specified tags.
 fn search_walk_multi(
-    path: &str,
+    path: &Path,
     norm_tags: &[String],
     results: &mut Vec<TaggedFile>,
     depth: usize,
@@ -566,28 +590,23 @@ fn search_walk_multi(
         return;
     }
 
-    if path.starts_with("/proc") || path.starts_with("/dev") || path.starts_with("/sys") {
+    if is_virtual_fs(path) {
         return;
     }
 
-    let entries = match Vfs::readdir(path) {
-        Ok(e) => e,
-        Err(_) => return,
+    let Ok(entries) = Vfs::readdir(path) else {
+        return;
     };
 
     for entry in &entries {
-        if entry.name == "." || entry.name == ".." {
+        if is_dot_entry(&entry.name) {
             continue;
         }
         if results.len() >= 1000 {
             return;
         }
 
-        let full = if path == "/" {
-            alloc::format!("/{}", entry.name)
-        } else {
-            alloc::format!("{}/{}", path, entry.name)
-        };
+        let full = path.join(&entry.name);
 
         // Check tags on this entry.
         if let Ok(tags) = read_tags(&full) {
@@ -601,7 +620,7 @@ fn search_walk_multi(
         }
 
         if entry.entry_type == EntryType::Directory {
-            search_walk_multi(&full, norm_tags, results, depth + 1);
+            search_walk_multi(&full, norm_tags, results, depth.saturating_add(1));
         }
     }
 }
@@ -614,13 +633,14 @@ fn search_walk_multi(
 ///
 /// Walks the specified root path and indexes all files that have
 /// the `user.tags` xattr.
-pub fn build_index(root: &str) -> KernelResult<u64> {
+pub fn build_index<R: AsRef<Path> + ?Sized>(root: &R) -> KernelResult<u64> {
+    let root = root.as_ref();
     if !ENABLED.load(Ordering::Relaxed) {
         return Err(KernelError::NotSupported);
     }
 
-    let mut new_by_tag: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let mut new_by_path: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut new_by_tag: BTreeMap<String, BTreeSet<PathBuf>> = BTreeMap::new();
+    let mut new_by_path: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
     let mut count: u64 = 0;
 
     index_walk(root, &mut new_by_tag, &mut new_by_path, &mut count, 0);
@@ -636,9 +656,9 @@ pub fn build_index(root: &str) -> KernelResult<u64> {
 
 /// Walk the filesystem to build the tag index.
 fn index_walk(
-    path: &str,
-    by_tag: &mut BTreeMap<String, BTreeSet<String>>,
-    by_path: &mut BTreeMap<String, BTreeSet<String>>,
+    path: &Path,
+    by_tag: &mut BTreeMap<String, BTreeSet<PathBuf>>,
+    by_path: &mut BTreeMap<PathBuf, BTreeSet<String>>,
     count: &mut u64,
     depth: usize,
 ) {
@@ -652,31 +672,29 @@ fn index_walk(
         return;
     }
 
-    // Skip virtual filesystems.
-    if path.starts_with("/proc") || path.starts_with("/dev") || path.starts_with("/sys")
-        || path.starts_with("/_")
+    // Skip virtual filesystems, plus the kernel's own `/_*` scratch mounts.
+    if is_virtual_fs(path)
+        || path
+            .components()
+            .next()
+            .is_some_and(|c| c.as_bytes().starts_with(b"_"))
     {
         return;
     }
 
-    let entries = match Vfs::readdir(path) {
-        Ok(e) => e,
-        Err(_) => return,
+    let Ok(entries) = Vfs::readdir(path) else {
+        return;
     };
 
     for entry in &entries {
-        if entry.name == "." || entry.name == ".." {
+        if is_dot_entry(&entry.name) {
             continue;
         }
         if by_path.len() >= MAX_INDEX_ENTRIES {
             return;
         }
 
-        let full = if path == "/" {
-            alloc::format!("/{}", entry.name)
-        } else {
-            alloc::format!("{}/{}", path, entry.name)
-        };
+        let full = path.join(&entry.name);
 
         // Check for tags.
         if let Ok(tags) = read_tags(&full) {
@@ -697,7 +715,7 @@ fn index_walk(
 
         // Recurse into directories.
         if entry.entry_type == EntryType::Directory {
-            index_walk(&full, by_tag, by_path, count, depth + 1);
+            index_walk(&full, by_tag, by_path, count, depth.saturating_add(1));
         }
     }
 }
@@ -745,9 +763,11 @@ pub fn self_test() -> KernelResult<()> {
     test_search();
     test_multi_search();
     test_index();
+    test_byte_paths();
+    test_subtree_filter();
     test_stats();
 
-    serial_println!("[tags] Self-test passed (8 tests).");
+    serial_println!("[tags] Self-test passed (10 tests).");
     Ok(())
 }
 
@@ -886,7 +906,10 @@ fn test_multi_search() {
     // Search for files with BOTH "hot" AND "urgent".
     let results = search_multi(&["hot", "urgent"], "/tmp/tag_multi").expect("multi");
     assert_eq!(results.len(), 1, "only x.txt has both tags");
-    assert!(results[0].path.contains("x.txt"));
+    assert_eq!(
+        results.first().map(|r| r.path.as_path()),
+        Some(Path::new("/tmp/tag_multi/x.txt"))
+    );
 
     // Single-tag multi-search.
     let results = search_multi(&["hot"], "/tmp/tag_multi").expect("multi");
@@ -932,6 +955,78 @@ fn test_index() {
     let _ = Vfs::rmdir("/tmp/tag_idx");
 
     serial_println!("[tags]   index: ok");
+}
+
+/// A file whose name is not valid UTF-8 must still be taggable, findable by
+/// tag on both the walk and the index path, and its result path must round-trip
+/// back to the exact bytes — not to a U+FFFD-mangled name that names no file.
+fn test_byte_paths() {
+    let dir = Path::new("/tmp/tag_bytes");
+    let _ = Vfs::mkdir(dir);
+    let odd = Path::new(b"/tmp/tag_bytes/re\xffport.txt".as_slice());
+    Vfs::write_file(odd, b"raw").expect("write odd name");
+
+    add(odd, "byteish").expect("add");
+    assert_eq!(get(odd).expect("get").len(), 1);
+
+    // Slow path: no index, so `search` walks the filesystem.
+    clear_index();
+    let results = search("byteish", dir).expect("search");
+    assert_eq!(results.len(), 1, "walk must find the non-UTF-8 name");
+    assert_eq!(results.first().map(|r| r.path.as_path()), Some(odd));
+
+    // Fast path: served from the in-memory index.
+    build_index(dir).expect("build_index");
+    let results = search("byteish", dir).expect("indexed search");
+    assert_eq!(results.len(), 1, "index must hold the non-UTF-8 name");
+    assert_eq!(results.first().map(|r| r.path.as_path()), Some(odd));
+
+    // The returned path must be usable as a path.
+    assert_eq!(Vfs::read_file(odd).expect("read back"), b"raw");
+
+    clear(odd).expect("clear");
+    clear_index();
+    let _ = Vfs::remove(odd);
+    let _ = Vfs::rmdir(dir);
+
+    serial_println!("[tags]   byte paths: ok");
+}
+
+/// A search rooted at `/tmp/tag_sub` must not also return files under the
+/// sibling `/tmp/tag_subtree`.  The old byte-prefix filter matched both.
+fn test_subtree_filter() {
+    let _ = Vfs::mkdir("/tmp/tag_sub");
+    let _ = Vfs::mkdir("/tmp/tag_subtree");
+    Vfs::write_file("/tmp/tag_sub/in.txt", b"i").expect("write");
+    Vfs::write_file("/tmp/tag_subtree/out.txt", b"o").expect("write");
+
+    add("/tmp/tag_sub/in.txt", "subtest").expect("add");
+    add("/tmp/tag_subtree/out.txt", "subtest").expect("add");
+
+    build_index("/tmp").expect("build_index");
+
+    let results = search("subtest", "/tmp/tag_sub").expect("search");
+    assert_eq!(results.len(), 1, "sibling dir must not match as a prefix");
+    assert_eq!(
+        results.first().map(|r| r.path.as_path()),
+        Some(Path::new("/tmp/tag_sub/in.txt"))
+    );
+
+    // `search_multi` has its own copy of the filter; check it too.
+    let results = search_multi(&["subtest"], "/tmp/tag_sub").expect("multi");
+    assert_eq!(results.len(), 1, "sibling dir must not match as a prefix");
+
+    // A root of "/" still matches everything.
+    let results = search("subtest", "/").expect("root search");
+    assert_eq!(results.len(), 2, "root must match both");
+
+    clear_index();
+    let _ = Vfs::remove("/tmp/tag_sub/in.txt");
+    let _ = Vfs::remove("/tmp/tag_subtree/out.txt");
+    let _ = Vfs::rmdir("/tmp/tag_sub");
+    let _ = Vfs::rmdir("/tmp/tag_subtree");
+
+    serial_println!("[tags]   subtree filter: ok");
 }
 
 fn test_stats() {

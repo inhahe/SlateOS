@@ -1105,8 +1105,6 @@ fn exec_fh_write(sqe: &SqEntry) -> i64 {
 }
 
 fn exec_fh_pread(sqe: &SqEntry) -> i64 {
-    use crate::fs::handle::SeekFrom;
-
     let fh = sqe.handle;
     let cap = sqe.len as usize;
     let offset = sqe.arg1;
@@ -1115,48 +1113,30 @@ fn exec_fh_pread(sqe: &SqEntry) -> i64 {
         return KernelError::InvalidArgument.code() as i64;
     }
 
-    // The destination is validated before the seek, so a bad buffer cannot
-    // leave the handle parked at `offset` with nothing read.
+    // Validated before the read so a bad destination fails without having
+    // touched the file at all.
     if let Err(e) = crate::mm::user::validate_user_write(sqe.addr, cap.min(MAX_SQE_PAYLOAD)) {
         return e.code() as i64;
     }
 
-    // Save current position, seek to offset, read, restore position.
-    // NOTE: seek/read/seek is not atomic against another thread sharing this
-    // handle — see B-FS-HANDLE-PREAD-PWRITE-ARE-NOT-ATOMIC in known-issues.md.
-    let saved = match crate::fs::handle::seek(fh, SeekFrom::Current(0)) {
-        Ok(pos) => pos,
-        Err(e) => return e.code() as i64,
-    };
-
-    if let Err(e) = crate::fs::handle::seek(fh, SeekFrom::Start(offset)) {
-        return e.code() as i64;
-    }
-
-    let result = match crate::mm::user::with_user_out_buf(
+    // `read_at` is the whole point of `pread`: it takes the handle table's lock
+    // once and reads at `offset` without ever consulting or moving the stored
+    // cursor.  This opcode used to emulate that with seek/read/seek, which was
+    // neither cursor-preserving nor safe against a peer sharing the handle —
+    // the restore could clobber a position the peer had legitimately advanced.
+    // See B-FS-HANDLE-PREAD-PWRITE-ARE-NOT-ATOMIC in known-issues.md.
+    match crate::mm::user::with_user_out_buf(
         sqe.addr,
         cap.min(MAX_SQE_PAYLOAD),
         MAX_SQE_PAYLOAD,
-        |buf| crate::fs::handle::read(fh, buf),
+        |buf| crate::fs::handle::read_at(fh, offset, buf),
     ) {
         Ok(n) => n as i64,
         Err(e) => e.code() as i64,
-    };
-
-    // Restore original position.  The failure is reported rather than dropped:
-    // leaving the cursor at `offset + n` would silently corrupt every
-    // subsequent sequential read on this handle, which is far worse than the
-    // pread itself failing.
-    if let Err(e) = crate::fs::handle::seek(fh, SeekFrom::Start(saved)) {
-        return e.code() as i64;
     }
-
-    result
 }
 
 fn exec_fh_pwrite(sqe: &SqEntry) -> i64 {
-    use crate::fs::handle::SeekFrom;
-
     let fh = sqe.handle;
     let len = sqe.len as usize;
     let offset = sqe.arg1;
@@ -1165,39 +1145,25 @@ fn exec_fh_pwrite(sqe: &SqEntry) -> i64 {
         return KernelError::InvalidArgument.code() as i64;
     }
 
-    // Copied out of user memory *before* the seek: the copy can fail, and
-    // failing after the seek would leave the handle's cursor moved with nothing
-    // written.  Short write — the result is the count accepted.
+    // Copied out of user memory *before* the write: the copy can fail, and a
+    // failure that reached the filesystem first would have to be undone.  Short
+    // write — the result is the count accepted.
     let n = len.min(MAX_SQE_PAYLOAD);
     let data = match crate::mm::user::read_user_vec(sqe.addr, n, MAX_SQE_PAYLOAD) {
         Ok(d) => d,
         Err(e) => return e.code() as i64,
     };
 
-    // Save current position, seek to offset, write, restore position.
-    // NOTE: not atomic against a peer sharing the handle — see
+    // `write_at` writes at `offset` under a single acquisition of the handle
+    // table's lock and leaves the stored cursor alone — the POSIX `pwrite`
+    // contract, and (unlike the seek/write/seek this replaced) safe to issue
+    // concurrently with a peer's sequential I/O on the same handle.  It also
+    // ignores `O_APPEND`, as Linux's `pwrite` does.  See
     // B-FS-HANDLE-PREAD-PWRITE-ARE-NOT-ATOMIC in known-issues.md.
-    let saved = match crate::fs::handle::seek(fh, SeekFrom::Current(0)) {
-        Ok(pos) => pos,
-        Err(e) => return e.code() as i64,
-    };
-
-    if let Err(e) = crate::fs::handle::seek(fh, SeekFrom::Start(offset)) {
-        return e.code() as i64;
-    }
-
-    let result = match crate::fs::handle::write(fh, &data) {
+    match crate::fs::handle::write_at(fh, offset, &data) {
         Ok(n) => n as i64,
         Err(e) => e.code() as i64,
-    };
-
-    // Restore original position; see `exec_fh_pread` for why the failure is
-    // reported rather than discarded.
-    if let Err(e) = crate::fs::handle::seek(fh, SeekFrom::Start(saved)) {
-        return e.code() as i64;
     }
-
-    result
 }
 
 // ---------------------------------------------------------------------------
@@ -1321,17 +1287,19 @@ pub fn self_test() -> KernelResult<()> {
     test_nop_submission()?;
     test_console_write_batch()?;
     test_fh_read_write()?;
+    test_fh_positioned_io_leaves_the_cursor_alone()?;
     test_timeout_and_service()?;
 
     Ok(())
 }
 
-/// Run io_ring file handle self-test (after filesystem is mounted).
+/// Run io_ring file handle self-tests (after filesystem is mounted).
 ///
 /// This is called separately from main self_test() because it requires
 /// /tmp to be mounted, which happens later in the boot sequence.
 pub fn self_test_fh() -> KernelResult<()> {
-    test_fh_read_write()
+    test_fh_read_write()?;
+    test_fh_positioned_io_leaves_the_cursor_alone()
 }
 
 /// Test 1: Create and destroy a ring.
@@ -1642,6 +1610,143 @@ fn test_fh_read_write() -> KernelResult<()> {
     destroy(ring_handle)?;
     let _ = crate::fs::Vfs::remove(test_path);
     serial_println!("[io_ring]   File handle read/write (1 entry): OK");
+    Ok(())
+}
+
+/// Test 4b: `IO_OP_FH_PREAD` / `IO_OP_FH_PWRITE` are positioned I/O.
+///
+/// The contract these opcodes have to keep is the POSIX one: read or write at
+/// an explicit offset **without disturbing the handle's cursor**.  They used to
+/// be emulated as seek/read/seek, which moved the cursor three times and only
+/// happened to put it back — so a peer sharing the handle saw it wander, and a
+/// failure mid-sandwich left it parked at the wrong place
+/// (B-KNOWN-ISSUES: B-FS-HANDLE-PREAD-PWRITE-ARE-NOT-ATOMIC).
+///
+/// Regression: this test interleaves a sequential read with a pread and a
+/// pwrite and asserts the sequential stream is completely unaffected — which is
+/// exactly what the seek sandwich could not guarantee.
+///
+/// Skipped if no filesystem is mounted yet.
+fn test_fh_positioned_io_leaves_the_cursor_alone() -> KernelResult<()> {
+    use crate::fs::handle::{OpenFlags, SeekFrom};
+
+    let test_path = "/tmp/io_ring_pio_test";
+    // 26 bytes: byte i is b'A' + i, so any offset is self-identifying.
+    let mut test_data = [0u8; 26];
+    for (i, b) in test_data.iter_mut().enumerate() {
+        // 26 elements, so the index always fits; `unwrap_or(0)` rather than an
+        // `expect` only because this is the kernel and a panic here would be a
+        // far worse outcome than a test that then fails its own assertion.
+        *b = b'A'.wrapping_add(u8::try_from(i).unwrap_or(0));
+    }
+    if crate::fs::Vfs::write_file(test_path, &test_data).is_err() {
+        serial_println!("[io_ring]   Positioned I/O (pread/pwrite): SKIPPED (no FS)");
+        return Ok(());
+    }
+
+    let fh = crate::fs::handle::open(test_path, OpenFlags::READ.union(OpenFlags::WRITE))?;
+    let (ring_handle, base_virt, _frames) = setup(8, 16)?;
+    // SAFETY: base_virt from setup() points to a valid io_ring buffer.
+    let header = unsafe { &mut *(base_virt as *mut IoRingHeader) };
+    #[allow(clippy::arithmetic_side_effects)]
+    let sq_base = (base_virt + core::mem::size_of::<IoRingHeader>() as u64) as *mut SqEntry;
+    #[allow(clippy::arithmetic_side_effects)]
+    let cq_base = (base_virt
+        + core::mem::size_of::<IoRingHeader>() as u64
+        + 8u64 * core::mem::size_of::<SqEntry>() as u64) as *const CqEntry;
+
+    // A tiny helper so each step is one submission on a freshly-rewound ring.
+    // Returns the CQE result, or the failing `KernelError` code as a negative.
+    let submit = |sqe: SqEntry| -> KernelResult<i64> {
+        header.sq_head.store(0, Ordering::Release);
+        header.sq_tail.store(0, Ordering::Release);
+        header.cq_head.store(0, Ordering::Release);
+        header.cq_tail.store(0, Ordering::Release);
+        // SAFETY: sq_base points to the SQ array; index 0 < sq_entries (8).
+        unsafe { *sq_base.add(0) = sqe; }
+        header.sq_tail.store(1, Ordering::Release);
+        if enter(ring_handle, 0)? != 1 {
+            return Err(KernelError::InternalError);
+        }
+        // SAFETY: cq_base points to the CQ array; index 0 is valid and the
+        // completion for the single SQE above was just posted there.
+        Ok(unsafe { (*cq_base.add(0)).result })
+    };
+
+    // Bail-out that always closes both objects, so no early `?` leaks a ring.
+    macro_rules! fail {
+        ($($arg:tt)*) => {{
+            serial_println!($($arg)*);
+            let _ = crate::fs::handle::close(fh);
+            destroy(ring_handle)?;
+            let _ = crate::fs::Vfs::remove(test_path);
+            return Err(KernelError::InternalError);
+        }};
+    }
+
+    let mut buf = [0u8; 8];
+    let sqe = |opcode: u8, addr: u64, len: u32, offset: u64| SqEntry {
+        opcode,
+        flags: 0,
+        _pad0: [0; 2],
+        _pad1: 0,
+        user_data: 600,
+        handle: fh,
+        addr,
+        len,
+        _pad2: 0,
+        arg1: offset,
+        arg2: 0,
+    };
+
+    // 1. Sequential read of 4 bytes leaves the cursor at 4.
+    let r = submit(sqe(IO_OP_FH_READ, buf.as_mut_ptr() as u64, 4, 0))?;
+    if r != 4 || buf.get(..4) != Some(b"ABCD".as_slice()) {
+        fail!("[io_ring]   FAIL: pio setup read result={} buf={:?}", r, &buf[..4]);
+    }
+
+    // 2. A pread at a far offset returns that offset's bytes...
+    buf = [0; 8];
+    let r = submit(sqe(IO_OP_FH_PREAD, buf.as_mut_ptr() as u64, 4, 20))?;
+    if r != 4 || buf.get(..4) != Some(b"UVWX".as_slice()) {
+        fail!("[io_ring]   FAIL: pread result={} buf={:?}, expected 4/UVWX", r, &buf[..4]);
+    }
+    // ...and does not move the cursor.
+    let pos = crate::fs::handle::seek(fh, SeekFrom::Current(0))?;
+    if pos != 4 {
+        fail!("[io_ring]   FAIL: pread moved the cursor to {}, expected 4", pos);
+    }
+
+    // 3. A pwrite at another offset lands there and also leaves the cursor.
+    let payload = *b"zzzz";
+    let r = submit(sqe(IO_OP_FH_PWRITE, payload.as_ptr() as u64, 4, 10))?;
+    if r != 4 {
+        fail!("[io_ring]   FAIL: pwrite result={}, expected 4", r);
+    }
+    let pos = crate::fs::handle::seek(fh, SeekFrom::Current(0))?;
+    if pos != 4 {
+        fail!("[io_ring]   FAIL: pwrite moved the cursor to {}, expected 4", pos);
+    }
+
+    // 4. The sequential stream picks up exactly where step 1 left it — the
+    //    property the seek sandwich could not offer a concurrent peer.
+    buf = [0; 8];
+    let r = submit(sqe(IO_OP_FH_READ, buf.as_mut_ptr() as u64, 4, 0))?;
+    if r != 4 || buf.get(..4) != Some(b"EFGH".as_slice()) {
+        fail!("[io_ring]   FAIL: post-pio sequential read={} buf={:?}, expected 4/EFGH", r, &buf[..4]);
+    }
+
+    // 5. The pwrite really reached the file, at the offset asked for.
+    match crate::fs::Vfs::read_file(test_path) {
+        Ok(data) if data.get(10..14) == Some(b"zzzz".as_slice()) => {}
+        Ok(data) => fail!("[io_ring]   FAIL: pwrite landed wrong: {:?}", data.get(8..16)),
+        Err(e) => fail!("[io_ring]   FAIL: re-reading the pwrite target: {:?}", e),
+    }
+
+    let _ = crate::fs::handle::close(fh);
+    destroy(ring_handle)?;
+    let _ = crate::fs::Vfs::remove(test_path);
+    serial_println!("[io_ring]   Positioned I/O (pread/pwrite preserve the cursor): OK");
     Ok(())
 }
 

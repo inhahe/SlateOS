@@ -5106,31 +5106,31 @@ pub fn self_test() -> KernelResult<()> {
 
         let entries = alloc::vec![
             TarWriteEntry {
-                name: alloc::string::String::from("TARTEST/"),
+                name: crate::fs::path::PathBuf::from("TARTEST/"),
                 data: alloc::vec::Vec::new(),
                 kind: EntryKind::Directory,
-                link_target: alloc::string::String::new(),
+                link_target: crate::fs::path::PathBuf::new(),
                 mode: 0o755, uid: 0, gid: 0, mtime: 0,
             },
             TarWriteEntry {
-                name: alloc::string::String::from("TARTEST/hello.txt"),
+                name: crate::fs::path::PathBuf::from("TARTEST/hello.txt"),
                 data: hello_data.to_vec(),
                 kind: EntryKind::File,
-                link_target: alloc::string::String::new(),
+                link_target: crate::fs::path::PathBuf::new(),
                 mode: 0o644, uid: 0, gid: 0, mtime: 0,
             },
             TarWriteEntry {
-                name: alloc::string::String::from("TARTEST/sub/"),
+                name: crate::fs::path::PathBuf::from("TARTEST/sub/"),
                 data: alloc::vec::Vec::new(),
                 kind: EntryKind::Directory,
-                link_target: alloc::string::String::new(),
+                link_target: crate::fs::path::PathBuf::new(),
                 mode: 0o755, uid: 0, gid: 0, mtime: 0,
             },
             TarWriteEntry {
-                name: alloc::string::String::from("TARTEST/sub/deep.txt"),
+                name: crate::fs::path::PathBuf::from("TARTEST/sub/deep.txt"),
                 data: deep_data.to_vec(),
                 kind: EntryKind::File,
-                link_target: alloc::string::String::new(),
+                link_target: crate::fs::path::PathBuf::new(),
                 mode: 0o644, uid: 0, gid: 0, mtime: 0,
             },
         ];
@@ -5170,7 +5170,7 @@ pub fn self_test() -> KernelResult<()> {
             };
             crate::serial_println!(
                 "[fat]     tar entry: '{}' type={} size={}",
-                pe.name, type_ch, pe.size
+                pe.name.display(), type_ch, pe.size
             );
         }
 

@@ -43,6 +43,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
+use crate::fs::pathutil::{confine_under, is_dot_entry};
 use crate::serial_println;
 // The preempt-aware `crate::sync::Mutex` (NOT raw `spin::Mutex`): the container
 // TABLE is contended across many tasks and its critical sections walk/mutate the
@@ -1975,7 +1977,7 @@ fn open_capture_log(id: ContainerId) -> Option<(String, u64)> {
     use crate::fs::handle;
 
     // Create the log directory tree (idempotent) and derive the log path.
-    ensure_dir_path("", LOG_DIR.trim_start_matches('/'));
+    ensure_dir_path(Path::new("/"), Path::new(LOG_DIR));
     let path = log_path_for(id);
 
     // Open (create + truncate) the capture file.  On failure, skip capture.
@@ -2591,7 +2593,7 @@ const MAX_EXPORT_ENTRIES: usize = 65_536;
 /// - [`KernelError::ResourceExhausted`] if the subtree exceeds
 ///   [`MAX_EXPORT_ENTRIES`] objects.
 /// - Any VFS error encountered while reading the tree.
-pub fn tar_tree(base: &str) -> KernelResult<Vec<u8>> {
+pub fn tar_tree<B: AsRef<Path> + ?Sized>(base: &B) -> KernelResult<Vec<u8>> {
     use crate::fs::tar::{EntryKind, TarWriteEntry};
     use crate::fs::vfs::{EntryType, Vfs};
 
@@ -2599,22 +2601,24 @@ pub fn tar_tree(base: &str) -> KernelResult<Vec<u8>> {
     // Explicit work stack of (host_path, archive_rel) directories still to
     // visit; an iterative walk avoids unbounded kernel-stack recursion on a
     // deeply-nested tree.
-    let mut dirs: Vec<(String, String)> =
-        alloc::vec![(String::from(base.trim_end_matches('/')), String::new())];
+    let mut dirs: Vec<(PathBuf, PathBuf)> =
+        alloc::vec![(base.as_ref().to_path_buf(), PathBuf::new())];
     while let Some((host_dir, rel_dir)) = dirs.pop() {
         let listing = Vfs::readdir(&host_dir)?;
         for de in listing {
-            if de.name == "." || de.name == ".." {
+            if is_dot_entry(&de.name) {
                 continue;
             }
             if entries.len() >= MAX_EXPORT_ENTRIES {
                 return Err(KernelError::ResourceExhausted);
             }
-            let host_child = alloc::format!("{host_dir}/{}", de.name);
+            let host_child = host_dir.join(&de.name);
+            // `join` on an empty base would yield a leading `/`, which is not
+            // a legal *relative* member name, so the top level is spelled out.
             let rel_child = if rel_dir.is_empty() {
                 de.name.clone()
             } else {
-                alloc::format!("{rel_dir}/{}", de.name)
+                rel_dir.join(&de.name)
             };
             // Best-effort metadata for permissions/owner/mtime; fall back to
             // conventional defaults when the FS doesn't track them or the
@@ -2633,11 +2637,14 @@ pub fn tar_tree(base: &str) -> KernelResult<Vec<u8>> {
                 .unwrap_or((0, 0, 0, 0));
             match de.entry_type {
                 EntryType::Directory => {
+                    // ustar marks a directory member with a trailing slash.
+                    let mut dir_name = rel_child.clone();
+                    dir_name.extend_bytes(b"/");
                     entries.push(TarWriteEntry {
-                        name: alloc::format!("{rel_child}/"),
+                        name: dir_name,
                         data: Vec::new(),
                         kind: EntryKind::Directory,
-                        link_target: String::new(),
+                        link_target: PathBuf::new(),
                         mode: if mode == 0 { 0o755 } else { mode },
                         uid,
                         gid,
@@ -2651,7 +2658,7 @@ pub fn tar_tree(base: &str) -> KernelResult<Vec<u8>> {
                         name: rel_child,
                         data,
                         kind: EntryKind::File,
-                        link_target: String::new(),
+                        link_target: PathBuf::new(),
                         mode: if mode == 0 { 0o644 } else { mode },
                         uid,
                         gid,
@@ -2713,14 +2720,13 @@ pub fn export_rootfs(id: ContainerId) -> KernelResult<Vec<u8>> {
 /// fails for a missing parent regardless of the source tar's entry ordering.
 /// Empty and `.` components are skipped; callers must have already rejected
 /// `..` components.
-fn ensure_dir_path(base: &str, rel: &str) {
-    let mut acc = String::from(base);
-    for comp in rel.split('/') {
-        if comp.is_empty() || comp == "." {
+fn ensure_dir_path(base: &Path, rel: &Path) {
+    let mut acc = base.to_path_buf();
+    for comp in rel.components() {
+        if comp.as_bytes() == b"." {
             continue;
         }
-        acc.push('/');
-        acc.push_str(comp);
+        acc.push(comp);
         // Already-exists is the expected steady state; any real error here
         // (e.g. a parent that is a file) surfaces later as a write failure.
         let _ = crate::fs::vfs::Vfs::mkdir(&acc);
@@ -2740,24 +2746,33 @@ fn ensure_dir_path(base: &str, rel: &str) {
 /// - [`KernelError::InvalidArgument`] if `base` is empty/contains NUL or an
 ///   archive member name contains a `..` component (jail escape).
 /// - Any tar-parse or VFS error encountered while extracting.
-pub fn untar_tree(base: &str, archive: &[u8]) -> KernelResult<()> {
-    if base.is_empty() || base.contains('\0') {
-        return Err(KernelError::InvalidArgument);
-    }
-    let base = base.trim_end_matches('/');
-    if base.is_empty() {
+pub fn untar_tree<B: AsRef<Path> + ?Sized>(base: &B, archive: &[u8]) -> KernelResult<()> {
+    let base = base.as_ref();
+    if base.is_empty() || base.as_bytes().contains(&0) {
         return Err(KernelError::InvalidArgument);
     }
 
     // Parse (and thereby validate) the archive before mutating any state.
     let entries = crate::fs::tar::parse(archive)?;
 
-    // Validate every member name up front (reject `..` escapes) before writing
-    // anything to disk.
+    // Resolve every member name against `base` up front, so a `..` escape
+    // ("Zip Slip") fails the whole import before anything is written to disk.
+    // `confine_under` also rejects a member that names `base` itself (`.`,
+    // `/`, empty) — those carry no content and are skipped rather than
+    // treated as an error, matching what a tar's own `./` entry means.
+    let mut dests: Vec<Option<PathBuf>> = Vec::with_capacity(entries.len());
     for entry in &entries {
-        let rel = entry.name.trim_start_matches('/');
-        if rel.split('/').any(|c| c == "..") {
-            return Err(KernelError::InvalidArgument);
+        match confine_under(base, &entry.name) {
+            Ok(p) => dests.push(Some(p)),
+            // Distinguish "names the base itself" (benign, skip) from a real
+            // escape (fatal) by re-checking for the `..` that only an escape
+            // can carry.
+            Err(e) => {
+                if entry.name.components().any(|c| c.as_bytes() == b"..") {
+                    return Err(e);
+                }
+                dests.push(None);
+            }
         }
     }
 
@@ -2767,31 +2782,29 @@ pub fn untar_tree(base: &str, archive: &[u8]) -> KernelResult<()> {
     // Create the destination root (idempotent).
     let _ = Vfs::mkdir(base);
 
-    for entry in &entries {
-        let rel = entry.name.trim_start_matches('/');
-        if rel.is_empty() || rel == "." {
-            continue;
-        }
-        let dest = alloc::format!("{base}/{rel}");
+    for (entry, dest) in entries.iter().zip(dests.iter()) {
+        let Some(dest) = dest.as_deref() else { continue };
+        // The path relative to `base`, recovered from the confined join so it
+        // is already normalised (no leading `/`, no `.`, no trailing `/`).
+        let Some(rel) = dest.strip_prefix(base) else { continue };
         match entry.kind {
             EntryKind::Directory => {
-                let rel_dir = rel.trim_end_matches('/');
-                ensure_dir_path(base, rel_dir);
+                ensure_dir_path(base, &rel);
             }
             EntryKind::File => {
-                if let Some((parent, _)) = rel.rsplit_once('/') {
+                if let Some(parent) = rel.parent() {
                     ensure_dir_path(base, parent);
                 }
                 let data = crate::fs::tar::entry_data(archive, entry)?;
-                Vfs::write_file(&dest, data)?;
+                Vfs::write_file(dest, data)?;
             }
             EntryKind::Symlink => {
-                if let Some((parent, _)) = rel.rsplit_once('/') {
+                if let Some(parent) = rel.parent() {
                     ensure_dir_path(base, parent);
                 }
                 // A pre-existing symlink/file at this path is tolerated; the
                 // archive's view wins where it can be applied.
-                let _ = Vfs::symlink(&dest, &entry.link_target);
+                let _ = Vfs::symlink(dest, &entry.link_target);
             }
             EntryKind::Other(_) => {
                 // Devices, FIFOs, hardlinks, etc. have no rootfs analogue here.
@@ -3031,7 +3044,11 @@ pub struct DiffEntry {
     /// The kind of change (added / changed / deleted).
     pub kind: DiffKind,
     /// Absolute guest path (leading `/`) of the changed entry.
-    pub path: String,
+    ///
+    /// A [`PathBuf`], not a `String`: a container's writable layer may hold a
+    /// file whose name is not valid UTF-8, and such a file must still appear
+    /// in `docker diff` rather than being dropped or mangled.
+    pub path: PathBuf,
 }
 
 /// The three change classes Docker `diff` reports, matching its `A`/`C`/`D`
@@ -3094,18 +3111,19 @@ pub fn diff(id: ContainerId) -> KernelResult<Vec<DiffEntry>> {
         return Err(KernelError::InvalidArgument);
     };
 
-    let upper = crate::fs::overlay::upper_path(ov_id)?;
-    let upper_base = upper.trim_end_matches('/');
+    let upper_base = crate::fs::overlay::upper_path(ov_id)?;
     let mut out: Vec<DiffEntry> = Vec::new();
 
     // Iterative walk of the upper layer. Each work item is a normalized rel
-    // directory ("" == the upper root).
-    let mut stack: Vec<String> = alloc::vec![String::new()];
+    // directory (empty == the upper root).
+    let mut stack: Vec<PathBuf> = alloc::vec![PathBuf::new()];
     while let Some(rel_dir) = stack.pop() {
+        // `join` would treat the empty rel as absolute-replacing; spell the
+        // root case out.
         let dir_abs = if rel_dir.is_empty() {
-            String::from(upper_base)
+            upper_base.clone()
         } else {
-            alloc::format!("{}/{}", upper_base, rel_dir)
+            upper_base.join(&rel_dir)
         };
         // A directory that vanished mid-walk (concurrent teardown) is skipped
         // rather than failing the whole diff.
@@ -3113,13 +3131,13 @@ pub fn diff(id: ContainerId) -> KernelResult<Vec<DiffEntry>> {
             continue;
         };
         for e in entries {
-            if e.name == "." || e.name == ".." {
+            if is_dot_entry(&e.name) {
                 continue;
             }
             let child_rel = if rel_dir.is_empty() {
                 e.name.clone()
             } else {
-                alloc::format!("{}/{}", rel_dir, e.name)
+                rel_dir.join(&e.name)
             };
             let kind = match crate::fs::overlay::which_layer(ov_id, &child_rel)? {
                 crate::fs::overlay::Layer::Both => DiffKind::Changed,
@@ -3131,7 +3149,7 @@ pub fn diff(id: ContainerId) -> KernelResult<Vec<DiffEntry>> {
             };
             out.push(DiffEntry {
                 kind,
-                path: alloc::format!("/{child_rel}"),
+                path: Path::new("/").join(&child_rel),
             });
             if e.entry_type == crate::fs::vfs::EntryType::Directory {
                 stack.push(child_rel);
@@ -3143,7 +3161,7 @@ pub fn diff(id: ContainerId) -> KernelResult<Vec<DiffEntry>> {
     for w in crate::fs::overlay::whiteouts(ov_id)? {
         out.push(DiffEntry {
             kind: DiffKind::Deleted,
-            path: alloc::format!("/{w}"),
+            path: Path::new("/").join(&w),
         });
     }
 
@@ -5193,13 +5211,13 @@ pub fn self_test() {
         assert_eq!(
             crate::ipc::namespace::resolve_path_for(JAIL_PID, "/bin/sh")
                 .expect("resolve jailed path"),
-            "/containers/test-jail/rootfs/bin/sh",
+            PathBuf::from("/containers/test-jail/rootfs/bin/sh"),
         );
         // `..` cannot escape the jail.
         assert_eq!(
             crate::ipc::namespace::resolve_path_for(JAIL_PID, "/../../etc/passwd")
                 .expect("resolve escape attempt"),
-            "/containers/test-jail/rootfs/etc/passwd",
+            PathBuf::from("/containers/test-jail/rootfs/etc/passwd"),
         );
 
         // Tear down: remove_process_task must also drop the jail.
@@ -5257,24 +5275,24 @@ pub fn self_test() {
         assert_eq!(
             crate::ipc::namespace::resolve_path_for(VOL_PID, "/data/file.txt")
                 .expect("resolve volume path"),
-            "/srv/data2/file.txt",
+            PathBuf::from("/srv/data2/file.txt"),
         );
         assert_eq!(
             crate::ipc::namespace::resolve_path_for(VOL_PID, "/logs/app.log")
                 .expect("resolve logs volume"),
-            "/var/log/test-vol/app.log",
+            PathBuf::from("/var/log/test-vol/app.log"),
         );
         // Non-volume path stays jailed under the rootfs.
         assert_eq!(
             crate::ipc::namespace::resolve_path_for(VOL_PID, "/bin/sh")
                 .expect("resolve non-volume path"),
-            "/containers/test-vol/rootfs/bin/sh",
+            PathBuf::from("/containers/test-vol/rootfs/bin/sh"),
         );
         // `..` cannot climb out of a volume into the host.
         assert_eq!(
             crate::ipc::namespace::resolve_path_for(VOL_PID, "/data/../escape")
                 .expect("resolve escape attempt"),
-            "/containers/test-vol/rootfs/escape",
+            PathBuf::from("/containers/test-vol/rootfs/escape"),
         );
 
         // Read-only volume enforcement: a write under the read-only `/logs`
@@ -5361,7 +5379,7 @@ pub fn self_test() {
         assert_eq!(
             crate::ipc::namespace::resolve_path_for(RO_PID, "/bin/sh")
                 .expect("resolve under ro root"),
-            "/containers/test-ro/rootfs/bin/sh",
+            PathBuf::from("/containers/test-ro/rootfs/bin/sh"),
         );
 
         // Teardown clears the per-process read-only-root flag (PID-reuse).
@@ -6029,15 +6047,15 @@ pub fn self_test() {
         set_overlay_id(ct_d, Some(ov)).expect("set overlay id");
         let changes = diff(ct_d).expect("diff");
         assert!(
-            changes.iter().any(|c| c.kind == DiffKind::Added && c.path == "/added.txt"),
+            changes.iter().any(|c| c.kind == DiffKind::Added && c.path == PathBuf::from("/added.txt")),
             "added.txt must be reported as Added",
         );
         assert!(
-            changes.iter().any(|c| c.kind == DiffKind::Changed && c.path == "/keep"),
+            changes.iter().any(|c| c.kind == DiffKind::Changed && c.path == PathBuf::from("/keep")),
             "keep must be reported as Changed",
         );
         assert!(
-            changes.iter().any(|c| c.kind == DiffKind::Deleted && c.path == "/gone"),
+            changes.iter().any(|c| c.kind == DiffKind::Deleted && c.path == PathBuf::from("/gone")),
             "gone must be reported as Deleted",
         );
         // Output is sorted by path.
@@ -6273,14 +6291,14 @@ pub fn self_test() {
 
         // The subdir directory entry is present (name ends with '/').
         assert!(
-            parsed.iter().any(|e| e.name == "sub/"
+            parsed.iter().any(|e| e.name == PathBuf::from("sub/")
                 && e.kind == crate::fs::tar::EntryKind::Directory),
             "exported archive must contain the 'sub/' directory entry",
         );
         // Both files are present with their original bytes, at relative paths.
         let top = parsed
             .iter()
-            .find(|e| e.name == "top.txt")
+            .find(|e| e.name == PathBuf::from("top.txt"))
             .expect("top.txt in archive");
         assert_eq!(
             crate::fs::tar::entry_data(&archive, top).expect("top data"),
@@ -6289,7 +6307,7 @@ pub fn self_test() {
         );
         let nested = parsed
             .iter()
-            .find(|e| e.name == "sub/hello.txt")
+            .find(|e| e.name == PathBuf::from("sub/hello.txt"))
             .expect("sub/hello.txt in archive");
         assert_eq!(
             crate::fs::tar::entry_data(&archive, nested).expect("nested data"),
@@ -6318,30 +6336,30 @@ pub fn self_test() {
         // the file, to prove import creates parents independent of ordering.
         let archive = crate::fs::tar::create(&[
             TarWriteEntry {
-                name: String::from("d/a.txt"),
+                name: PathBuf::from("d/a.txt"),
                 data: alloc::vec![b'A'; 3],
                 kind: EntryKind::File,
-                link_target: String::new(),
+                link_target: PathBuf::new(),
                 mode: 0o644,
                 uid: 0,
                 gid: 0,
                 mtime: 0,
             },
             TarWriteEntry {
-                name: String::from("d/"),
+                name: PathBuf::from("d/"),
                 data: Vec::new(),
                 kind: EntryKind::Directory,
-                link_target: String::new(),
+                link_target: PathBuf::new(),
                 mode: 0o755,
                 uid: 0,
                 gid: 0,
                 mtime: 0,
             },
             TarWriteEntry {
-                name: String::from("b.txt"),
+                name: PathBuf::from("b.txt"),
                 data: alloc::vec![b'B'; 3],
                 kind: EntryKind::File,
-                link_target: String::new(),
+                link_target: PathBuf::new(),
                 mode: 0o644,
                 uid: 0,
                 gid: 0,
@@ -6368,10 +6386,10 @@ pub fn self_test() {
         // container behind.
         let n_before = active_count();
         let evil = crate::fs::tar::create(&[TarWriteEntry {
-            name: String::from("../evil.txt"),
+            name: PathBuf::from("../evil.txt"),
             data: alloc::vec![b'x'; 1],
             kind: EntryKind::File,
-            link_target: String::new(),
+            link_target: PathBuf::new(),
             mode: 0o644,
             uid: 0,
             gid: 0,

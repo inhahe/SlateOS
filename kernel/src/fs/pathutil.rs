@@ -136,6 +136,19 @@ pub fn confine_under<B: AsRef<Path> + ?Sized, R: AsRef<Path> + ?Sized>(
     Ok(out)
 }
 
+/// Returns `true` if `name` is one of the two self/parent directory entries
+/// that `readdir` yields, `.` or `..`.
+///
+/// Every directory walk has to skip these — recursing into `.` never
+/// terminates and recursing into `..` escapes upward — so the check is
+/// spelled once here rather than open-coded per walk.  It takes a *name*
+/// (a single component), not a path: `"a/.."` is not a dot entry.
+#[must_use]
+pub fn is_dot_entry<N: AsRef<Path>>(name: N) -> bool {
+    let bytes = name.as_ref().as_bytes();
+    bytes == b"." || bytes == b".."
+}
+
 /// Returns `true` if `haystack` contains `needle` as a contiguous byte
 /// subsequence.
 ///
@@ -251,6 +264,18 @@ mod tests {
         assert!(confine_under("/dest", Path::new(b"a\0b")).is_err());
         // An empty base names nothing.
         assert!(confine_under("", "a").is_err());
+    }
+
+    #[test]
+    fn dot_entries() {
+        assert!(is_dot_entry(Path::new(".")));
+        assert!(is_dot_entry(Path::new("..")));
+        assert!(!is_dot_entry(Path::new("...")));
+        assert!(!is_dot_entry(Path::new(".a")));
+        assert!(!is_dot_entry(Path::new("")));
+        // A *path* ending in `..` is not a dot *entry*; the check is on a
+        // single component.
+        assert!(!is_dot_entry(Path::new("a/..")));
     }
 
     #[test]

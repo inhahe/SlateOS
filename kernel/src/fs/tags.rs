@@ -47,7 +47,7 @@ use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::path::{Path, PathBuf};
-use crate::fs::pathutil::path_in_subtree;
+use crate::fs::pathutil::{is_dot_entry, path_in_subtree};
 use crate::fs::{EntryType, Vfs};
 use crate::serial_println;
 
@@ -521,11 +521,6 @@ pub fn search_multi<R: AsRef<Path> + ?Sized>(
         search_walk_multi(root, &norms, &mut results, 0);
         Ok(results)
     }
-}
-
-/// Is this the `.` or `..` self/parent link, which a walk must never follow?
-fn is_dot_entry(name: &Path) -> bool {
-    name == Path::new(".") || name == Path::new("..")
 }
 
 /// Virtual filesystems carry no persistent xattrs, so walking them can only

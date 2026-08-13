@@ -58,6 +58,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
+use crate::fs::pathutil::{confine_under, is_dot_entry};
 use crate::json::{self, JsonValue};
 use crate::serial_println;
 
@@ -879,7 +881,24 @@ pub fn extract_layer(
     let mut extracted: u64 = 0;
 
     for entry in &entries {
-        let dest = format!("{target_dir}/{}", entry.name.trim_start_matches('/'));
+        // `confine_under` strips a leading `/`, drops `.`, and refuses any
+        // `..` component, so a hostile layer member named `../../etc/passwd`
+        // cannot write outside `target_dir` ("Zip Slip").  A member that
+        // resolves to nothing (`.`, `/`) names the target itself and carries
+        // no content, so it is skipped rather than failing the pull.
+        let dest = match confine_under(target_dir, &entry.name) {
+            Ok(d) => d,
+            Err(e) => {
+                if entry.name.components().any(|c| c.as_bytes() == b"..") {
+                    serial_println!(
+                        "[oci]   Layer member escapes target: {}",
+                        entry.name.display()
+                    );
+                    return Err(e);
+                }
+                continue;
+            }
+        };
 
         match entry.kind {
             crate::fs::tar::EntryKind::Directory => {
@@ -923,7 +942,11 @@ pub fn extract_layer(
 /// synthesised automatically.  `mode` is the POSIX permission bits.
 pub struct LayerFile {
     /// Archive-relative path, e.g. `"bin/hello"`.
-    pub path: String,
+    ///
+    /// A [`PathBuf`], not a `String`: an image layer may legitimately carry a
+    /// file whose name is not valid UTF-8, and the tar member name it becomes
+    /// is a raw byte field.
+    pub path: PathBuf,
     /// File contents.
     pub data: Vec<u8>,
     /// POSIX permission bits (e.g. `0o755`).
@@ -939,7 +962,7 @@ pub struct LayerFile {
 /// [`build_layer_tar`], so only the leaf need be listed.
 pub struct LayerDir {
     /// Archive-relative path, e.g. `"srv/app"` (no leading `/`).
-    pub path: String,
+    pub path: PathBuf,
     /// POSIX permission bits (Docker's `WORKDIR` uses `0o755`).
     pub mode: u32,
 }
@@ -1098,17 +1121,14 @@ fn json_string_array(items: &[String]) -> String {
 
 /// All unique parent-directory prefixes of `path` (archive-relative), shallow to
 /// deep — e.g. `"a/b/c"` → `["a", "a/b"]`.
-fn parent_prefixes(path: &str) -> Vec<String> {
+fn parent_prefixes(path: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    let mut acc = String::new();
-    let comps: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
+    let mut acc = PathBuf::new();
+    let comps: Vec<&Path> = path.components().collect();
     // Every component except the last is a directory prefix.
     let dir_count = comps.len().saturating_sub(1);
     for comp in comps.into_iter().take(dir_count) {
-        if !acc.is_empty() {
-            acc.push('/');
-        }
-        acc.push_str(comp);
+        acc.push(comp);
         out.push(acc.clone());
     }
     out
@@ -1125,23 +1145,30 @@ fn build_layer_tar(layer: &BuildLayer) -> Vec<u8> {
     // order; a parent always sorts before its children because it is a prefix
     // ending at a `/` boundary).  Explicit dirs (e.g. `WORKDIR`) carry their
     // own mode; synthesised parents default to `0o755`.
-    let mut explicit: alloc::collections::BTreeMap<String, u32> =
+    let mut explicit: alloc::collections::BTreeMap<PathBuf, u32> =
         alloc::collections::BTreeMap::new();
     for d in &layer.dirs {
-        let name = d.path.trim_matches('/');
+        // Normalise away leading/trailing separators so `"/srv/app/"` and
+        // `"srv/app"` are the same directory rather than two members.
+        let mut name = PathBuf::new();
+        for c in d.path.components() {
+            name.push(c);
+        }
         if name.is_empty() {
             continue;
         }
-        explicit.insert(String::from(name), d.mode);
+        explicit.insert(name, d.mode);
     }
-    let mut dirs: BTreeSet<String> = BTreeSet::new();
+    let mut dirs: BTreeSet<PathBuf> = BTreeSet::new();
     for f in &layer.files {
         for d in parent_prefixes(&f.path) {
             dirs.insert(d);
         }
     }
     for name in explicit.keys() {
-        for d in parent_prefixes(&format!("{name}/x")) {
+        // `parent_prefixes` returns the prefixes *above* the final component,
+        // so append a dummy leaf to make `name` itself one of them.
+        for d in parent_prefixes(&name.join("x")) {
             dirs.insert(d);
         }
         dirs.insert(name.clone());
@@ -1150,11 +1177,14 @@ fn build_layer_tar(layer: &BuildLayer) -> Vec<u8> {
     let mut entries: Vec<TarWriteEntry> = Vec::new();
     for d in dirs {
         let mode = explicit.get(&d).copied().unwrap_or(0o755);
+        // ustar marks a directory member with a trailing slash.
+        let mut dir_name = d.clone();
+        dir_name.extend_bytes(b"/");
         entries.push(TarWriteEntry {
-            name: format!("{d}/"),
+            name: dir_name,
             data: Vec::new(),
             kind: EntryKind::Directory,
-            link_target: String::new(),
+            link_target: PathBuf::new(),
             mode,
             uid: 0,
             gid: 0,
@@ -1166,7 +1196,7 @@ fn build_layer_tar(layer: &BuildLayer) -> Vec<u8> {
             name: f.path.clone(),
             data: f.data.clone(),
             kind: EntryKind::File,
-            link_target: String::new(),
+            link_target: PathBuf::new(),
             mode: f.mode,
             uid: f.uid,
             gid: f.gid,
@@ -1572,11 +1602,11 @@ fn copy_all_blobs(src: &str, dst: &str) -> KernelResult<()> {
     let src_blobs = format!("{}/blobs/sha256", src.trim_end_matches('/'));
     let dst_blobs = format!("{}/blobs/sha256", dst.trim_end_matches('/'));
     for de in Vfs::readdir(&src_blobs)? {
-        if de.name == "." || de.name == ".." || de.entry_type != EntryType::File {
+        if is_dot_entry(&de.name) || de.entry_type != EntryType::File {
             continue;
         }
-        let data = Vfs::read_file(&format!("{src_blobs}/{}", de.name))?;
-        Vfs::write_file(&format!("{dst_blobs}/{}", de.name), &data)?;
+        let data = Vfs::read_file(Path::new(src_blobs.as_str()).join(&de.name))?;
+        Vfs::write_file(Path::new(dst_blobs.as_str()).join(&de.name), &data)?;
     }
     Ok(())
 }
@@ -1706,11 +1736,15 @@ pub fn store_remove(reference: &str) -> KernelResult<()> {
     let blobs = format!("{STORE_DIR}/blobs/sha256");
     if let Ok(list) = Vfs::readdir(&blobs) {
         for de in list {
-            if de.name == "." || de.name == ".." || de.entry_type != EntryType::File {
+            if is_dot_entry(&de.name) || de.entry_type != EntryType::File {
                 continue;
             }
-            if !keep.contains(&de.name) {
-                let _ = Vfs::remove(&format!("{blobs}/{}", de.name));
+            // Blob file names are hex digests, so a name that is not UTF-8
+            // cannot be a blob this store wrote; leave it alone rather than
+            // deleting a file we do not understand.
+            let Some(name) = de.name.to_str() else { continue };
+            if !keep.contains(name) {
+                let _ = Vfs::remove(Path::new(blobs.as_str()).join(&de.name));
             }
         }
     }
@@ -1860,30 +1894,31 @@ pub fn resolve_image_source(arg: &str) -> KernelResult<(String, OciImage)> {
 /// `.wh.`-prefixed whiteout markers for each deleted `whiteouts` path.  This is
 /// the new layer captured by `commit` — the container's filesystem changes
 /// relative to its read-only base image.
-fn overlay_to_build_layer(upper_dir: &str, whiteouts: &[String]) -> KernelResult<BuildLayer> {
+fn overlay_to_build_layer(upper_dir: &Path, whiteouts: &[PathBuf]) -> KernelResult<BuildLayer> {
     use crate::fs::vfs::{EntryType, Vfs};
-    let root = upper_dir.trim_end_matches('/');
     let mut dirs: Vec<LayerDir> = Vec::new();
     let mut files: Vec<LayerFile> = Vec::new();
 
     // Iterative DFS over the upper tree; `rel` is archive-relative (no slash).
-    let mut stack: Vec<String> = alloc::vec![String::new()];
+    let mut stack: Vec<PathBuf> = alloc::vec![PathBuf::new()];
     while let Some(rel) = stack.pop() {
+        // `join` on an empty `rel` would be a no-op but `join` *from* an empty
+        // base would drop the root, so the two cases are spelled out.
         let abs = if rel.is_empty() {
-            String::from(root)
+            upper_dir.to_path_buf()
         } else {
-            format!("{root}/{rel}")
+            upper_dir.join(&rel)
         };
         for de in Vfs::readdir(&abs)? {
-            if de.name == "." || de.name == ".." {
+            if is_dot_entry(&de.name) {
                 continue;
             }
             let child_rel = if rel.is_empty() {
                 de.name.clone()
             } else {
-                format!("{rel}/{}", de.name)
+                rel.join(&de.name)
             };
-            let child_abs = format!("{abs}/{}", de.name);
+            let child_abs = abs.join(&de.name);
             match de.entry_type {
                 EntryType::Directory => {
                     let mode = Vfs::metadata(&child_abs)
@@ -1913,19 +1948,17 @@ fn overlay_to_build_layer(upper_dir: &str, whiteouts: &[String]) -> KernelResult
     // OCI whiteouts: a deleted path `a/b/c` is recorded as an empty file
     // `a/b/.wh.c` so a consumer hides the corresponding lower-layer entry.
     for w in whiteouts {
-        let norm = w.trim_start_matches('/');
-        if norm.is_empty() {
-            continue;
+        // Normalise away any leading `/` and re-split on components so the
+        // `.wh.` prefix lands on the final name, whatever bytes it holds.
+        let mut comps: Vec<&Path> = w.components().collect();
+        let Some(base) = comps.pop() else { continue };
+        let mut wh_path = PathBuf::new();
+        for c in comps {
+            wh_path.push(c);
         }
-        let (parent, base) = match norm.rsplit_once('/') {
-            Some((p, b)) => (p, b),
-            None => ("", norm),
-        };
-        let wh_path = if parent.is_empty() {
-            format!(".wh.{base}")
-        } else {
-            format!("{parent}/.wh.{base}")
-        };
+        let mut marker = PathBuf::from(".wh.");
+        marker.extend_bytes(base.as_bytes());
+        wh_path.push(&marker);
         files.push(LayerFile {
             path: wh_path,
             data: Vec::new(),
@@ -1954,8 +1987,8 @@ fn overlay_to_build_layer(upper_dir: &str, whiteouts: &[String]) -> KernelResult
 /// base layer/diff_id mismatch or if the layer count exceeds the OCI cap.
 pub fn commit_image(
     base_source: &str,
-    upper_dir: &str,
-    whiteouts: &[String],
+    upper_dir: &Path,
+    whiteouts: &[PathBuf],
     dest_dir: &str,
 ) -> KernelResult<Descriptor> {
     let (base_blob_dir, base) = resolve_image_source(base_source)?;
@@ -2417,18 +2450,24 @@ fn parse_healthcheck(rest: &str) -> Result<HealthcheckConfig, String> {
 
 /// Normalise a Dockerfile destination/path into an archive-relative path
 /// (no leading `/`, no trailing `/`, no empty/`.`/`..` components).
-fn archive_norm(path: &str) -> String {
-    let mut comps: Vec<&str> = Vec::new();
-    for c in path.split('/') {
-        match c {
-            "" | "." => {}
-            ".." => {
+fn archive_norm<P: AsRef<Path> + ?Sized>(path: &P) -> PathBuf {
+    let mut comps: Vec<&Path> = Vec::new();
+    // `components()` already drops empty parts, so only `.` and `..` need
+    // handling here.
+    for c in path.as_ref().components() {
+        match c.as_bytes() {
+            b"." => {}
+            b".." => {
                 comps.pop();
             }
-            other => comps.push(other),
+            _ => comps.push(c),
         }
     }
-    comps.join("/")
+    let mut out = PathBuf::new();
+    for c in comps {
+        out.push(c);
+    }
+    out
 }
 
 /// Effective permission bits for a COPY'd file (fall back to 0o644).
@@ -2451,9 +2490,13 @@ fn parse_dockerignore(bytes: &[u8]) -> Vec<(bool, String)> {
             Some(rest) => (true, rest.trim()),
             None => (false, line),
         };
+        // Patterns come from a text file, so they stay `String`; only the
+        // *paths* they are matched against are byte paths.
         let norm = archive_norm(pat);
-        if !norm.is_empty() {
-            out.push((neg, norm));
+        if let Some(norm) = norm.to_str() {
+            if !norm.is_empty() {
+                out.push((neg, String::from(norm)));
+            }
         }
     }
     out
@@ -2462,19 +2505,19 @@ fn parse_dockerignore(bytes: &[u8]) -> Vec<(bool, String)> {
 /// Glob match with Docker/`filepath.Match` semantics extended with `**`:
 /// `*` matches any run of non-`/`, `**` matches any run including `/`, `?`
 /// matches a single non-`/` char, everything else is literal.
-fn glob_match(pattern: &str, path: &str) -> bool {
-    let p: Vec<char> = pattern.chars().collect();
-    let t: Vec<char> = path.chars().collect();
-    glob_rec(&p, &t)
+fn glob_match<P: AsRef<[u8]> + ?Sized, T: AsRef<[u8]> + ?Sized>(pattern: &P, path: &T) -> bool {
+    // Byte-wise, not char-wise: the metacharacters and `/` are all ASCII, and
+    // a path component may hold bytes that are not valid UTF-8 at all.
+    glob_rec(pattern.as_ref(), path.as_ref())
 }
 
-fn glob_rec(p: &[char], t: &[char]) -> bool {
+fn glob_rec(p: &[u8], t: &[u8]) -> bool {
     let Some((&c, prest)) = p.split_first() else {
         return t.is_empty();
     };
     match c {
-        '*' => {
-            if prest.first() == Some(&'*') {
+        b'*' => {
+            if prest.first() == Some(&b'*') {
                 // `**` — match any run, including `/`.
                 let prest2 = prest.get(1..).unwrap_or(&[]);
                 let mut i = 0usize;
@@ -2495,15 +2538,15 @@ fn glob_rec(p: &[char], t: &[char]) -> bool {
                         return true;
                     }
                     match t.get(i) {
-                        None | Some('/') => return false,
+                        None | Some(&b'/') => return false,
                         Some(_) => {}
                     }
                     i = i.saturating_add(1);
                 }
             }
         }
-        '?' => match t.split_first() {
-            Some((&tc, trest)) if tc != '/' => glob_rec(prest, trest),
+        b'?' => match t.split_first() {
+            Some((&tc, trest)) if tc != b'/' => glob_rec(prest, trest),
             _ => false,
         },
         lit => match t.split_first() {
@@ -2516,15 +2559,15 @@ fn glob_rec(p: &[char], t: &[char]) -> bool {
 /// Whether `path` (context-relative) is excluded by `.dockerignore` `patterns`.
 /// A pattern matching any ancestor of `path` excludes it; rules apply in file
 /// order (last match wins), so a later `!rule` can re-include.
-fn path_ignored(patterns: &[(bool, String)], path: &str) -> bool {
+fn path_ignored(patterns: &[(bool, String)], path: &Path) -> bool {
     if patterns.is_empty() {
         return false;
     }
     let mut candidates = parent_prefixes(path);
-    candidates.push(String::from(path));
+    candidates.push(path.to_path_buf());
     let mut ignored = false;
     for (neg, pat) in patterns {
-        if candidates.iter().any(|c| glob_match(pat, c)) {
+        if candidates.iter().any(|c| glob_match(pat.as_bytes(), c.as_bytes())) {
             ignored = !neg;
         }
     }
@@ -2532,15 +2575,22 @@ fn path_ignored(patterns: &[(bool, String)], path: &str) -> bool {
 }
 
 /// The path of `full` relative to `context_dir` (archive-normalised).
-fn ctx_rel(context_dir: &str, full: &str) -> String {
-    let prefix = format!("{}/", context_dir.trim_end_matches('/'));
-    archive_norm(full.strip_prefix(&prefix).unwrap_or(full))
+///
+/// `Path::strip_prefix` matches on component boundaries, so a `context_dir`
+/// with or without a trailing `/` behaves identically and `/ctxfoo/x` is not
+/// mistaken for a child of `/ctx`.
+fn ctx_rel(context_dir: &Path, full: &Path) -> PathBuf {
+    full.strip_prefix(context_dir)
+        .map_or_else(|| archive_norm(full), |rel| archive_norm(&rel))
 }
 
 /// Whether a COPY/ADD source token contains a glob metacharacter (`*`, `?`,
 /// or `[`) and therefore needs wildcard expansion against the source tree.
-fn has_glob_meta(s: &str) -> bool {
-    s.bytes().any(|b| matches!(b, b'*' | b'?' | b'['))
+fn has_glob_meta<S: AsRef<Path> + ?Sized>(s: &S) -> bool {
+    s.as_ref()
+        .as_bytes()
+        .iter()
+        .any(|b| matches!(*b, b'*' | b'?' | b'['))
 }
 
 /// Expand a wildcard COPY/ADD source pattern against `src_dir`, returning the
@@ -2548,43 +2598,33 @@ fn has_glob_meta(s: &str) -> bool {
 /// layer output.  Matching is component-by-component per Docker's
 /// `filepath.Match` semantics (`*`/`?` never cross `/`); a literal component
 /// must exist.  Returns an empty vec when nothing matches.
-fn expand_glob(src_dir: &str, pattern: &str) -> Vec<String> {
+fn expand_glob(src_dir: &Path, pattern: &Path) -> Vec<PathBuf> {
     use crate::fs::vfs::Vfs;
-    let base_dir = src_dir.trim_end_matches('/');
-    // Each candidate is a path relative to `src_dir`; "" denotes `src_dir`.
-    let mut current: Vec<String> = alloc::vec![String::new()];
-    for comp in pattern.split('/').filter(|c| !c.is_empty()) {
-        let mut next: Vec<String> = Vec::new();
+    // Each candidate is a path relative to `src_dir`; the empty path denotes
+    // `src_dir` itself.  `join` on an empty base yields a *relative* path, and
+    // on a base with a trailing `/` inserts no second separator, so both the
+    // seed and the descent need no special-casing.
+    let mut current: Vec<PathBuf> = alloc::vec![PathBuf::new()];
+    for comp in pattern.components() {
+        let mut next: Vec<PathBuf> = Vec::new();
         for rel in &current {
-            let dir_abs = if rel.is_empty() {
-                String::from(base_dir)
-            } else {
-                format!("{base_dir}/{rel}")
-            };
+            let dir_abs = src_dir.join(rel);
             if has_glob_meta(comp) {
                 let Ok(entries) = Vfs::readdir(&dir_abs) else {
                     continue;
                 };
                 for de in entries {
-                    if de.name == "." || de.name == ".." {
+                    if is_dot_entry(&de.name) {
                         continue;
                     }
-                    if glob_match(comp, &de.name) {
-                        next.push(if rel.is_empty() {
-                            de.name.clone()
-                        } else {
-                            format!("{rel}/{}", de.name)
-                        });
+                    if glob_match(comp.as_bytes(), de.name.as_bytes()) {
+                        next.push(rel.join(&de.name));
                     }
                 }
             } else {
                 // Literal component — accept only if the path exists.
-                let child = if rel.is_empty() {
-                    String::from(comp)
-                } else {
-                    format!("{rel}/{comp}")
-                };
-                if Vfs::metadata(&format!("{base_dir}/{child}")).is_ok() {
+                let child = rel.join(comp);
+                if Vfs::metadata(src_dir.join(&child)).is_ok() {
                     next.push(child);
                 }
             }
@@ -2601,9 +2641,9 @@ fn expand_glob(src_dir: &str, pattern: &str) -> Vec<String> {
 /// skipping context files excluded by `.dockerignore` (`ignore`).
 #[allow(clippy::too_many_arguments)]
 fn collect_copy_src(
-    context_dir: &str,
-    src: &str,
-    dest: &str,
+    context_dir: &Path,
+    src: &Path,
+    dest: &Path,
     single_source: bool,
     ignore: &[(bool, String)],
     chmod: Option<u32>,
@@ -2611,20 +2651,21 @@ fn collect_copy_src(
     files: &mut Vec<LayerFile>,
     line: usize,
 ) -> Result<(), BuildError> {
-    use crate::fs::vfs::{normalize_path, EntryType, Vfs};
+    use crate::fs::vfs::{EntryType, Vfs};
     let (cuid, cgid) = chown.unwrap_or((0, 0));
     // Normalise the joined path so `.`/`..`/double-slash in a COPY source
     // (notably `COPY . /dest`) resolve to a real context path.
-    let ctx = normalize_path(&format!(
-        "{}/{}",
-        context_dir.trim_end_matches('/'),
-        src.trim_start_matches('/')
-    ));
+    let ctx = normalize_path_join(context_dir, src);
     let meta = match Vfs::metadata(&ctx) {
         Ok(m) => m,
-        Err(_) => return Err(BuildError::CopySourceMissing { src: String::from(src) }),
+        Err(_) => {
+            return Err(BuildError::CopySourceMissing {
+                src: alloc::format!("{}", src.display()),
+            })
+        }
     };
-    let dest_is_dir = dest.ends_with('/') || dest.is_empty() || dest == "/";
+    let dest_bytes = dest.as_bytes();
+    let dest_is_dir = dest_bytes.last() == Some(&b'/') || dest_bytes.is_empty();
     let dest_norm = archive_norm(dest);
 
     match meta.entry_type {
@@ -2634,13 +2675,9 @@ fn collect_copy_src(
             if path_ignored(ignore, &ctx_rel(context_dir, &ctx)) {
                 return Ok(());
             }
-            let basename = src.rsplit('/').next().unwrap_or(src);
+            let basename = src.file_name().unwrap_or(src);
             let target = if dest_is_dir || !single_source {
-                if dest_norm.is_empty() {
-                    String::from(basename)
-                } else {
-                    format!("{dest_norm}/{basename}")
-                }
+                dest_norm.join(basename)
             } else {
                 dest_norm.clone()
             };
@@ -2648,7 +2685,10 @@ fn collect_copy_src(
             if target.is_empty() {
                 return Err(BuildError::Parse {
                     line,
-                    msg: format!("COPY/ADD destination resolves to empty path for {src}"),
+                    msg: format!(
+                        "COPY/ADD destination resolves to empty path for {}",
+                        src.display()
+                    ),
                 });
             }
             let data = Vfs::read_file(&ctx)?;
@@ -2662,20 +2702,18 @@ fn collect_copy_src(
         }
         EntryType::Directory => {
             // Docker copies the *contents* of a directory source into dest.
-            let mut stack: Vec<(String, String)> =
+            let mut stack: Vec<(PathBuf, PathBuf)> =
                 alloc::vec![(ctx.clone(), dest_norm.clone())];
             while let Some((cur, cur_dest)) = stack.pop() {
                 let entries = Vfs::readdir(&cur)?;
                 for de in entries {
-                    if de.name == "." || de.name == ".." {
+                    if is_dot_entry(&de.name) {
                         continue;
                     }
-                    let child = format!("{cur}/{}", de.name);
-                    let child_dest = if cur_dest.is_empty() {
-                        de.name.clone()
-                    } else {
-                        format!("{cur_dest}/{}", de.name)
-                    };
+                    let child = cur.join(&de.name);
+                    // `join` on an empty destination yields a bare relative
+                    // name, which is exactly the archive-relative form wanted.
+                    let child_dest = cur_dest.join(&de.name);
                     match de.entry_type {
                         // Always descend (a `!rule` can re-include a file under
                         // an otherwise-ignored directory), filtering per file.
@@ -2709,7 +2747,10 @@ fn collect_copy_src(
         _ => {
             return Err(BuildError::Parse {
                 line,
-                msg: format!("COPY/ADD source is not a regular file or directory: {src}"),
+                msg: format!(
+                    "COPY/ADD source is not a regular file or directory: {}",
+                    src.display()
+                ),
             });
         }
     }
@@ -2718,12 +2759,14 @@ fn collect_copy_src(
 
 /// Join a directory and a (possibly `.`/`..`-laden) relative path, normalising
 /// the result — the same rule [`collect_copy_src`] applies to a COPY source.
-fn normalize_path_join(dir: &str, rel: &str) -> String {
-    crate::fs::vfs::normalize_path(&format!(
-        "{}/{}",
-        dir.trim_end_matches('/'),
-        rel.trim_start_matches('/')
-    ))
+fn normalize_path_join(dir: &Path, rel: &Path) -> PathBuf {
+    // A leading `/` on `rel` must not make it replace `dir` (`PathBuf::push`
+    // semantics): a COPY source is always context-relative, so strip it.
+    let mut joined = dir.to_path_buf();
+    for comp in rel.components() {
+        joined.push(comp);
+    }
+    crate::fs::vfs::normalize_path(&joined)
 }
 
 /// If `data` is a tar archive (plain, or gzip-compressed), return the
@@ -2750,7 +2793,7 @@ fn as_tar_bytes(data: &[u8]) -> Option<Vec<u8>> {
 /// metadata is preserved.
 fn add_tar_into(
     tar: &[u8],
-    dest: &str,
+    dest: &Path,
     chmod: Option<u32>,
     chown: Option<(u32, u32)>,
     files: &mut Vec<LayerFile>,
@@ -2764,15 +2807,14 @@ fn add_tar_into(
         if !matches!(e.kind, crate::fs::tar::EntryKind::File) {
             continue;
         }
-        let name = e.name.trim_start_matches('/');
+        // `archive_norm` drops the leading `/` and any `.`/`..`, so a member
+        // named `/etc/passwd` or `../x` lands inside `dest` rather than
+        // escaping it.
+        let name = archive_norm(&e.name);
         if name.is_empty() {
             continue;
         }
-        let target = if dest_norm.is_empty() {
-            archive_norm(name)
-        } else {
-            archive_norm(&format!("{dest_norm}/{name}"))
-        };
+        let target = archive_norm(&dest_norm.join(&name));
         if target.is_empty() {
             continue;
         }
@@ -3120,21 +3162,19 @@ fn resolve_from_rootfs(
 
 /// If `path` is an OCI whiteout marker (`<dir>/.wh.<name>` or `.wh.<name>`),
 /// return the archive-relative path it deletes (`<dir>/<name>` or `<name>`).
-fn whiteout_target_path(path: &str) -> Option<String> {
-    let (parent, base) = match path.rsplit_once('/') {
-        Some((p, b)) => (p, b),
-        None => ("", path),
-    };
+fn whiteout_target_path(path: &Path) -> Option<PathBuf> {
+    let base = path.file_name()?;
+    // A marker prefix is a *byte* prefix of the final component, not a path
+    // prefix, so it is matched on the raw bytes.
+    let name = base.as_bytes().strip_prefix(b".wh.".as_slice())?;
     // An opaque-directory marker (`.wh..wh..opq`) has no single target; skip it
     // (our overlay never emits one, but be defensive).
-    let name = base.strip_prefix(".wh.")?;
-    if name.starts_with(".wh.") {
+    if name.starts_with(b".wh.") {
         return None;
     }
-    if parent.is_empty() {
-        Some(String::from(name))
-    } else {
-        Some(format!("{parent}/{name}"))
+    match path.parent() {
+        Some(parent) if !parent.is_empty() => Some(parent.join(Path::new(name))),
+        _ => Some(PathBuf::from(name)),
     }
 }
 
@@ -3144,23 +3184,26 @@ fn whiteout_target_path(path: &str) -> Option<String> {
 /// delete the corresponding lower path so a later `RUN` sees the deletion.
 fn apply_build_layer_to_dir(layer: &BuildLayer, dir: &str) -> Result<(), BuildError> {
     use crate::fs::Vfs;
-    let root = dir.trim_end_matches('/');
+    // `join` collapses a trailing separator on `dir`, and every layer path is
+    // archive-*relative*, so no manual trimming is needed (trimming would in
+    // fact turn `dir == "/"` into an empty, relative root).
+    let root = Path::new(dir);
     for d in &layer.dirs {
-        let p = format!("{root}/{}", d.path);
+        let p = root.join(&d.path);
         Vfs::mkdir_all(&p).map_err(BuildError::Kernel)?;
         // Best-effort mode (POSIX perm bits are the low 12 of the mode word).
         let _ = Vfs::set_permissions(&p, (d.mode & 0o7777) as u16);
     }
     for f in &layer.files {
         if let Some(target) = whiteout_target_path(&f.path) {
-            let _ = Vfs::remove_recursive(&format!("{root}/{target}"));
+            let _ = Vfs::remove_recursive(root.join(&target));
             continue;
         }
         // COPY/RUN layers list only leaf files; synthesise parent dirs.
         for pre in parent_prefixes(&f.path) {
-            let _ = Vfs::mkdir_all(&format!("{root}/{pre}"));
+            let _ = Vfs::mkdir_all(root.join(&pre));
         }
-        let p = format!("{root}/{}", f.path);
+        let p = root.join(&f.path);
         Vfs::write_file(&p, &f.data).map_err(BuildError::Kernel)?;
         let _ = Vfs::set_permissions(&p, (f.mode & 0o7777) as u16);
     }
@@ -3652,16 +3695,17 @@ fn build_one_stage_inner(
                 // Expand any wildcard sources against the source tree (Docker
                 // `filepath.Match`); a literal source passes through unchanged.
                 // A wildcard that matches nothing is an error (missing source).
-                let mut effective_srcs: Vec<String> = Vec::new();
+                let mut effective_srcs: Vec<PathBuf> = Vec::new();
+                let src_root = Path::new(src_dir.as_str());
                 for src in toks.iter().take(src_count) {
                     if has_glob_meta(src) {
-                        let matches = expand_glob(&src_dir, src.trim_start_matches('/'));
+                        let matches = expand_glob(src_root, Path::new(src.as_str()));
                         if matches.is_empty() {
                             return Err(BuildError::CopySourceMissing { src: src.clone() });
                         }
                         effective_srcs.extend(matches);
                     } else {
-                        effective_srcs.push(src.clone());
+                        effective_srcs.push(PathBuf::from(src.as_str()));
                     }
                 }
                 // `single` (rename-to-dest semantics) is keyed off the *expanded*
@@ -3672,17 +3716,18 @@ fn build_one_stage_inner(
                 // gzip) into the destination directory — a `--from` reference
                 // disables this (Docker treats it as a plain copy).
                 let add_extract = instr_up == "ADD" && from_ref.is_none();
+                let dest_target = Path::new(dest_path.as_str());
                 for src in &effective_srcs {
                     if add_extract {
-                        let full = normalize_path_join(&src_dir, src);
+                        let full = normalize_path_join(src_root, src);
                         if let Ok(bytes) = Vfs::read_file(&full) {
                             if let Some(tar) = as_tar_bytes(&bytes) {
-                                add_tar_into(&tar, &dest_path, chmod, chown, &mut files, line)?;
+                                add_tar_into(&tar, dest_target, chmod, chown, &mut files, line)?;
                                 continue;
                             }
                         }
                     }
-                    collect_copy_src(&src_dir, src, &dest_path, single, eff_ignore, chmod, chown, &mut files, line)?;
+                    collect_copy_src(src_root, src, dest_target, single, eff_ignore, chmod, chown, &mut files, line)?;
                 }
                 spec.layers.push(BuildLayer { dirs: Vec::new(), files });
             }
@@ -4178,7 +4223,7 @@ pub fn self_test() -> KernelResult<()> {
         spec.layers.push(BuildLayer {
             dirs: Vec::new(),
             files: alloc::vec![LayerFile {
-                path: String::from("entry.sh"),
+                path: PathBuf::from("entry.sh"),
                 data: b"#!/bin/sh\necho base\n".to_vec(),
                 mode: 0o755,
                 uid: 0,
@@ -4188,7 +4233,7 @@ pub fn self_test() -> KernelResult<()> {
         spec.layers.push(BuildLayer {
             dirs: Vec::new(),
             files: alloc::vec![LayerFile {
-                path: String::from("bin/hello"),
+                path: PathBuf::from("bin/hello"),
                 data: b"hello-binary-contents".to_vec(),
                 mode: 0o755,
                 uid: 0,
@@ -4553,7 +4598,7 @@ ONBUILD RUN echo triggered
         //   /extra.txt.
         // Stage 2 (final): scratch; pulls app.txt from stage 0 by index and
         //   extra.txt from `mid` by name via COPY --from.
-        let df = br#"FROM scratch AS builder
+        let df = br"FROM scratch AS builder
 COPY app.txt /out/app.txt
 
 FROM builder AS mid
@@ -4562,7 +4607,7 @@ COPY extra.txt /extra.txt
 FROM scratch
 COPY --from=0 /out/app.txt /app.txt
 COPY --from=mid /extra.txt /extra.txt
-"#;
+";
         build_image(df, ctx, img).map_err(|e| {
             serial_println!("[oci] multi-stage build failed: {}", e.describe());
             KernelError::InternalError
@@ -4656,7 +4701,7 @@ COPY --from=mid /extra.txt /extra.txt
         let entries = crate::fs::tar::parse(&tar)?;
         let run = entries
             .iter()
-            .find(|e| e.name.trim_start_matches('/') == "run.sh")
+            .find(|e| archive_norm(&e.name) == PathBuf::from("run.sh"))
             .ok_or(KernelError::InternalError)?;
         assert_eq!(run.mode & 0o777, 0o600, "--chmod=0600 applied to run.sh");
         assert_eq!(run.uid, 1000, "--chown uid applied to run.sh");
@@ -4682,20 +4727,20 @@ COPY --from=mid /extra.txt /extra.txt
         // Author a small tar with a file and a nested file.
         let bundle = crate::fs::tar::create(&[
             TarWriteEntry {
-                name: String::from("a.txt"),
+                name: PathBuf::from("a.txt"),
                 data: b"alpha".to_vec(),
                 kind: EntryKind::File,
-                link_target: String::new(),
+                link_target: PathBuf::new(),
                 mode: 0o644,
                 uid: 0,
                 gid: 0,
                 mtime: 0,
             },
             TarWriteEntry {
-                name: String::from("sub/b.txt"),
+                name: PathBuf::from("sub/b.txt"),
                 data: b"bravo".to_vec(),
                 kind: EntryKind::File,
-                link_target: String::new(),
+                link_target: PathBuf::new(),
                 mode: 0o644,
                 uid: 0,
                 gid: 0,
@@ -4899,7 +4944,7 @@ COPY --from=mid /extra.txt /extra.txt
         let blobs_dir = format!("{STORE_DIR}/blobs/sha256");
         let blob_count = |dir: &str| -> usize {
             Vfs::readdir(dir)
-                .map(|l| l.iter().filter(|d| d.name != "." && d.name != "..").count())
+                .map(|l| l.iter().filter(|d| !is_dot_entry(&d.name)).count())
                 .unwrap_or(0)
         };
         let before_blobs = blob_count(&blobs_dir);
@@ -5083,9 +5128,9 @@ COPY --from=mid /extra.txt /extra.txt
         let _ = Vfs::mkdir(&format!("{upper}/sub"));
         Vfs::write_file(&format!("{upper}/sub/nested.txt"), b"nested")?;
         // The container deleted base.txt → an OCI whiteout.
-        let whiteouts = alloc::vec![String::from("base.txt")];
+        let whiteouts = alloc::vec![PathBuf::from("base.txt")];
 
-        let desc = commit_image(base, upper, &whiteouts, dest)?;
+        let desc = commit_image(base, Path::new(upper), &whiteouts, dest)?;
         assert!(desc.digest.starts_with("sha256:"), "commit returns a digest");
 
         // The committed image: base layers carried forward + one commit layer.
@@ -5120,7 +5165,7 @@ COPY --from=mid /extra.txt /extra.txt
         ))?;
         let tar = crate::fs::compress::gunzip(&blob)?;
         let entries = crate::fs::tar::parse(&tar)?;
-        let has = |n: &str| entries.iter().any(|e| e.name.trim_start_matches('/') == n);
+        let has = |n: &str| entries.iter().any(|e| archive_norm(&e.name) == PathBuf::from(n));
         assert!(has("newfile.txt"), "commit layer holds the added file");
         assert!(has("sub/nested.txt"), "commit layer holds the nested added file");
         assert!(has(".wh.base.txt"), "commit layer holds the whiteout marker");
@@ -5152,10 +5197,10 @@ fn cleanup_image_dir(dir: &str) {
     let sha_dir = format!("{dir}/blobs/sha256");
     if let Ok(entries) = Vfs::readdir(&sha_dir) {
         for de in entries {
-            if de.name == "." || de.name == ".." {
+            if is_dot_entry(&de.name) {
                 continue;
             }
-            let _ = Vfs::remove(&format!("{sha_dir}/{}", de.name));
+            let _ = Vfs::remove(Path::new(sha_dir.as_str()).join(&de.name));
         }
     }
     let _ = Vfs::rmdir(&sha_dir);

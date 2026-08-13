@@ -865,8 +865,17 @@ fi
 # way that looks like the feature is broken (this cost a full boot cycle on
 # 2026-08-12 — ctest-jobctl reported "raise(SIGTSTP) failed" because its ELF
 # predated SYS_SIGNAL_STOP_SELF existing in libc at all).  Warn per fixture and
-# name the rebuild command; not fatal, because a lean build may legitimately
-# stage prebuilt fixtures with no sysroot present.
+# name the rebuild command.
+#
+# This used to warn and carry on.  It is now FATAL by default, because a
+# warning printed once at image-build time does not get read: on 2026-08-13
+# eight of the nine fixtures were found stale, having quietly linked a
+# two-hours-old libc.a into every boot since, and the ~90 KiB each grew when
+# rebuilt shows the library really had moved underneath them.  Same failure
+# mode as known-issues.md -> B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT: a green
+# result that carries no information.  Set ALLOW_STALE_FIXTURES=1 to downgrade
+# it back to a warning (for a host that has the sysroot but not the fixture
+# toolchain, i.e. no zig, and so cannot rebuild them).
 LIBC_A="$ROOT_DIR/toolchain/sysroot/lib/libc.a"
 CTEST_COUNT=0
 CTEST_STALE=0
@@ -885,7 +894,17 @@ done
 if [ "$CTEST_COUNT" -gt 0 ]; then
     echo "[rootfs] staged $CTEST_COUNT native C self-test ELF(s) into /tests"
     if [ "$CTEST_STALE" -gt 0 ]; then
-        echo "[rootfs] WARNING: $CTEST_STALE of them are stale (see above)"
+        if [ "${ALLOW_STALE_FIXTURES:-0}" = "1" ]; then
+            echo "[rootfs] WARNING: $CTEST_STALE of them are stale (see above);" \
+                 "continuing because ALLOW_STALE_FIXTURES=1"
+        else
+            echo "[rootfs] ERROR: $CTEST_STALE of $CTEST_COUNT native C fixtures are STALE."
+            echo "[rootfs]        They link an older libc.a than the one in the sysroot, so"
+            echo "[rootfs]        they would report a green result about code that is no"
+            echo "[rootfs]        longer in the build. Rebuild them (commands above), or set"
+            echo "[rootfs]        ALLOW_STALE_FIXTURES=1 to build the image anyway."
+            exit 1
+        fi
     fi
 else
     echo "[rootfs] WARNING: no services/ctest-*/*.elf found — C self-tests will self-skip"

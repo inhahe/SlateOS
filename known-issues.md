@@ -43,7 +43,199 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
-### B-AC-INHERITED-AT-KERNEL-ENTRY. An IDT gate does not clear `EFLAGS.AC`, so ring 3 can pre-disable SMAP for every interrupt handler — 2026-08-12 — OPEN (latent: blocks enabling SMAP)
+### D-SYSCALL-HANDLERS-HAND-RAW-USER-SLICES-TO-KERNEL-CODE — 2026-08-13 — TECH DEBT (blocks enabling SMAP)
+
+**What.** Roughly 100 syscall handlers in `kernel/src/syscall/handlers.rs`,
+`kernel/src/syscall/linux.rs` and `kernel/src/ipc/io_ring.rs` follow this shape:
+
+```rust
+if let Err(e) = crate::mm::user::validate_user_write(args.arg1, buf_cap) { ... }
+// SAFETY: Buffer validated above — in user space, mapped, writable.
+let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr, buf_cap) };
+match pipe::read(handle, buf) { ... }
+```
+
+That is, they validate a user pointer and then construct a Rust slice *over the
+user virtual address itself* and pass it into arbitrary kernel code. `mm::user`
+is not involved beyond validation.
+
+**Why this blocks SMAP.** With CR4.SMAP set, every one of those accesses faults:
+they are supervisor-mode reads/writes of user pages performed outside any
+STAC/CLAC window. This is what `smep_smap::USER_ACCESSES_ANNOTATED = false`
+stands for, and it is why `smap_enable_blocker()` still refuses to set the bit
+even now that `B-AC-INHERITED-AT-KERNEL-ENTRY` is fixed.
+
+**Why the obvious fix is wrong.** Wrapping each site in `stac()`/`clac()` would
+make it *compile and boot*, and would be a serious bug. `pipe::read` blocks: it
+registers a waiter and reschedules with the slice still live. So a `stac()` held
+across it would (a) leave AC = 1 in the task's saved RFLAGS, so SMAP stays
+disabled for that task across the context switch and the scheduler itself runs
+with the override on, and (b) hold the window open for an unbounded time. The
+STAC window must stay inside a single non-blocking copy, which is exactly what
+`mm::user::copy_{from,to}_user` already does.
+
+**The independent bug underneath.** Even with SMAP off, holding a raw user slice
+across a blocking call is a TOCTOU use-after-free: another thread in the same
+process can `munmap`/`mremap` the range while the caller sleeps, and the kernel
+then writes through a stale user mapping — into whatever now owns that physical
+page. SMAP would merely convert this from silent corruption into a fault. So
+this is worth fixing on its own merits, independent of SMAP.
+
+**Proper fix.** Handlers must not hand user virtual addresses to kernel
+subsystems. Either:
+
+1. **Bounce through a kernel buffer** — `copy_from_user` into kernel memory,
+   call the subsystem, `copy_to_user` the result back. Correct everywhere,
+   costs a copy on paths that currently have none.
+2. **Use the `_as` accessors** (`mm::user::copy_{from,to}_user_as`) which
+   resolve the user VA to a physical frame and access it through the HHDM.
+   Those are supervisor mappings, so SMAP does not apply and no STAC window is
+   needed at all — but the frame must be pinned for the duration, which is the
+   part that does not exist yet.
+
+(2) is the better end state for large transfers; (1) is right for the many
+small ones. Either way this is a mechanical but wide refactor across ~100 call
+sites, and it wants a pinning primitive before (2) is available.
+
+**Where.** `kernel/src/syscall/handlers.rs` (~60 sites — grep
+`from_raw_parts`), `kernel/src/syscall/linux.rs`, `kernel/src/ipc/io_ring.rs`;
+gate at `kernel/src/smep_smap.rs::USER_ACCESSES_ANNOTATED`.
+
+**Related.** `B-AC-INHERITED-AT-KERNEL-ENTRY` (fixed) was the *other*
+prerequisite for SMAP; this is now the only one left. design-decisions §122
+records why SMAP stays behind a gate rather than being enabled optimistically.
+
+---
+
+### B-LIMINE-RSDP-REQUEST-CARRIED-THE-WRONG-FEATURE-ID — 2026-08-13 — ✅ FIXED
+
+**What.** `kernel/src/limine.rs` declared the ACPI RSDP request with feature ID
+`[0x71ba_7686_3cc5_5f63, 0xb264_4a48_c516_a487]`. That is
+`LIMINE_EXECUTABLE_ADDRESS_REQUEST` (`limine/limine.h:648`), not
+`LIMINE_RSDP_REQUEST` (`limine.h:555`, `[0xc5e7_7b6b_397e_7b43,
+0x2763_7845_accd_cf3c]`).
+
+**Why it hid for so long.** It did not fail — it *succeeded at the wrong
+thing*. Limine happily answered the request it was actually asked, so
+`RSDP_REQUEST.response()` returned non-null and `RsdpResponse { revision,
+address }` overlaid `limine_executable_address_response { revision,
+physical_base, virtual_base }`. `address` therefore read back as the kernel's
+physical load address. `acpi::init` checked the `"RSD PTR "` signature, found
+none, printed one line, and fell back to brute-force scanning ACPI-reclaimable
+memory — which finds the real RSDP under QEMU/SeaBIOS. Every boot log carried
+the evidence:
+
+```
+[boot] RSDP address from Limine: 0x74c43000
+[acpi] RSDP not found at provided address 0x74c43000 (tried virt=0xffff800074c43000)
+[acpi] Limine RSDP address invalid — scanning memory...
+[acpi] RSDP found at phys=0x7f77e000
+```
+
+…and a comment in `acpi::init` had even rationalised it as a bootloader quirk
+("observed on QEMU+edk2 where Limine returns the kernel load address instead").
+It was our bug, not Limine's.
+
+**Impact — not hypothetical; measured.** The scan is a heuristic the RSDP
+request exists to avoid, and it was picking the *wrong table*. QEMU publishes
+two RSDPs 20 bytes apart; scanning on 16-byte boundaries hits the ACPI 1.0 one
+first and stops. So every boot took the legacy path:
+
+| | RSDP | revision | root table |
+|---|---|---|---|
+| before (scan) | `0x7f77e000` | 0 — ACPI 1.0 | **RSDT** `0x7f77d000` (32-bit pointers) |
+| after (bootloader) | `0x7f77e014` | 2 — ACPI 2.0+ | **XSDT** `0x7f77d0e8` (64-bit pointers) |
+
+Both enumerate the same 6 tables on this machine, so nothing was visibly
+broken — but the RSDT physically cannot address a table above 4 GiB, and
+`init()`'s "prefer XSDT" branch had never once been taken. On UEFI the RSDP
+also need not be in either scanned region at all.
+
+**Fix.** Corrected the RSDP ID and added a properly-typed
+`ExecutableAddressResponse` request under the ID that was being misused —
+which `alternatives::apply()` now needs anyway, to find `.text`'s physical
+pages.
+
+**Lesson.** A magic constant that names the *wrong* feature is invisible to
+every test that only asks "did we get an answer?". The two-line diff that
+would have caught it is checking the ID against `limine/limine.h`, which is
+vendored in this repo.
+
+---
+
+### B-ACPI-PROBED-THE-BOOTLOADER-RSDP-WITHOUT-MAPPING-IT — 2026-08-13 — ✅ FIXED
+
+**What.** `acpi::try_rsdp_address()` dereferenced the bootloader-supplied RSDP
+address through `check_rsdp_signature()` without first ensuring the page was
+present in the HHDM. `check_rsdp_signature`'s own SAFETY comment stated the
+obligation — "caller must ensure the virtual address is mapped" — and this
+caller did not meet it. Its sibling `scan_for_rsdp()` had always called
+`ensure_hhdm_mapped()` first.
+
+**Why it hid for so long.** It was masked by
+`B-LIMINE-RSDP-REQUEST-CARRIED-THE-WRONG-FEATURE-ID` above. While the
+"RSDP address" was really the kernel's load address, the probe read from
+inside the kernel image, which is always mapped — so it returned `false`
+harmlessly. Fixing the request ID made the address point at ACPI-reclaimable
+memory, which Limine's HHDM does not necessarily cover, and the very next boot
+died:
+
+```
+EXCEPTION: Page Fault (#PF) at 0xffffffff81ecd8ba, address=0xffff80007f77e014, error=0x0
+  Cause: not-present, read, kernel
+FATAL: Unrecoverable kernel page fault. Halting.
+```
+
+**Fix.** `try_rsdp_address` now maps the candidate (`ensure_hhdm_mapped`, full
+36-byte ACPI 2.0 extent) before probing it, and only after checking the range
+lies inside a memory-map entry — so a bad address cannot cause a mapping over
+MMIO or past the end of RAM, where the probe could hang real hardware rather
+than merely failing the signature test. `check_rsdp_signature` and
+`scan_for_rsdp` were made `unsafe fn`, so the mapping obligation is now
+enforced by the compiler instead of by a comment. The low-memory scan branch,
+which also relied on "usable memory is normally mapped", now maps explicitly
+too.
+
+**Lesson.** Two bugs cancelling out is worse than either alone: the wrong
+request ID was *protecting* the unmapped read, so fixing one exposed the
+other. When a SAFETY comment states an obligation that the function's own
+signature does not enforce, expect at least one caller to be violating it.
+
+---
+
+### B-AC-INHERITED-AT-KERNEL-ENTRY. An IDT gate does not clear `EFLAGS.AC`, so ring 3 can pre-disable SMAP for every interrupt handler — 2026-08-12 — ✅ FIXED 2026-08-13
+
+**Fix (2026-08-13).** Option 1 below — a real alternatives-patching framework
+(`kernel/src/alternatives.rs`, design-decisions §123) — was built and used. Each
+of the three ISR stub macros now opens with a 3-byte NOP patch site that
+`alternatives::apply()` rewrites to `clac` at boot iff CPUID reports SMAP; the
+SYSCALL path was already covered by the widened `IA32_FMASK` (§122). Boot log:
+
+```
+[alt] 47 site(s): 47 patched, 0 left at default, 0 error(s)
+[alt] Running alternatives self-test...
+[alt]   47 patch site(s) in .altinstructions
+[alt] Alternatives self-test PASSED
+[idt] Running alignment-check-flag (SMAP override) self-test...
+EXCEPTION: Breakpoint (#BP) at 0xffffffff8111e73a
+[idt]   AC is clear on exception entry: OK (SMAP override closed)
+[idt] Alignment-check-flag self-test PASSED
+```
+
+That last block is the empirical proof, not an inference from the SDM: the test
+sets AC in ring 0, executes `int3`, and the #BP handler observes AC already
+clear on entry.
+
+**Still not enabling SMAP.** `smap_enable_blocker()` now reports the *other*
+prerequisite — `USER_ACCESSES_ANNOTATED` — and that one turns out to need a
+refactor rather than an audit; see
+`D-SYSCALL-HANDLERS-HAND-RAW-USER-SLICES-TO-KERNEL-CODE` in the tech-debt
+section. The historical analysis below is kept because the reasoning about
+*why* an unconditional `clac` was not an option still explains the design.
+
+---
+
+**Original entry (2026-08-12):**
 
 **What.** `EFLAGS.AC` is the SMAP override: while AC = 1, supervisor-mode
 accesses to user pages are permitted and SMAP checks nothing. An interrupt gate

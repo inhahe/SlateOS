@@ -96,36 +96,102 @@ impl TableRegistry {
 /// The RSDP signature: "RSD PTR " (8 bytes, note trailing space).
 const RSDP_SIGNATURE: [u8; 8] = *b"RSD PTR ";
 
+/// Bytes that must be readable at a candidate RSDP before it can be validated:
+/// the full ACPI 2.0+ structure, which [`init`] reads if `revision >= 2`.
+const RSDP_MAX_LEN: u64 = core::mem::size_of::<tables::Rsdp2>() as u64;
+
+/// Whether the memory map describes `phys..phys+len` as real memory.
+///
+/// The RSDP address comes from the bootloader, and [`try_rsdp_address`] maps
+/// whatever it is pointed at.  Requiring the range to lie inside a single
+/// memory-map entry keeps a wrong answer from creating a mapping over MMIO or
+/// over a hole beyond the end of RAM — where the probe read could hang the
+/// machine on real hardware rather than merely failing the signature check.
+///
+/// Any entry type is accepted (the RSDP legitimately lives in ACPI-reclaimable
+/// memory on UEFI and in conventional memory on legacy BIOS); what matters is
+/// that the firmware described the range at all.
+fn phys_is_described(phys: u64, len: u64, memory_map: &[&crate::limine::MemmapEntry]) -> bool {
+    let Some(end) = phys.checked_add(len) else {
+        return false;
+    };
+    memory_map
+        .iter()
+        .any(|e| phys >= e.base && end <= e.base.saturating_add(e.length))
+}
+
 /// Try a specific address as a potential RSDP location.
 ///
 /// Tests both the raw address (if it looks like an HHDM virtual address)
 /// and the HHDM-translated address (if it looks physical).
 /// Returns the valid virtual address if the RSDP signature matches.
-fn try_rsdp_address(addr: u64, hhdm_offset: u64) -> Option<u64> {
+///
+/// # Safety
+///
+/// `hhdm_offset` must be correct, and `mm::page_table` must be initialized:
+/// this maps the candidate into the HHDM before reading it.
+unsafe fn try_rsdp_address(
+    addr: u64,
+    hhdm_offset: u64,
+    memory_map: &[&crate::limine::MemmapEntry],
+) -> Option<u64> {
+    // Probe a candidate *physical* address, mapping it first.
+    //
+    // Mapping is not optional.  Limine's HHDM need not cover ACPI-reclaimable
+    // or reserved memory, and the RSDP normally lives in exactly those — so
+    // reading the candidate unmapped takes an unrecoverable kernel #PF
+    // ("not-present, read, kernel") before any of the validation below gets a
+    // chance to reject it.  `scan_for_rsdp` has always mapped its regions for
+    // this reason; this path did not, and only got away with it while the
+    // bootloader-supplied address was wrong in a way that happened to point
+    // inside the always-mapped kernel image (see `limine::RSDP`).
+    let probe = |phys: u64| -> Option<u64> {
+        if !phys_is_described(phys, RSDP_MAX_LEN, memory_map) {
+            return None;
+        }
+        // SAFETY: the range is inside a bootloader-described memory region,
+        // and `hhdm_offset` is valid per this function's safety contract.
+        unsafe { ensure_hhdm_mapped(phys, RSDP_MAX_LEN, hhdm_offset) };
+        let virt = phys.wrapping_add(hhdm_offset);
+        // SAFETY: just mapped, so the 8 signature bytes are readable.
+        if unsafe { check_rsdp_signature(virt) } {
+            Some(virt)
+        } else {
+            None
+        }
+    };
+
     // Candidate 1: addr is already HHDM-virtual.
     if addr >= hhdm_offset {
-        if check_rsdp_signature(addr) {
-            return Some(addr);
+        if let Some(virt) = probe(addr.wrapping_sub(hhdm_offset)) {
+            return Some(virt);
         }
     }
 
     // Candidate 2: addr is physical, translate via HHDM.
-    let virt = addr.wrapping_add(hhdm_offset);
-    if check_rsdp_signature(virt) {
+    if let Some(virt) = probe(addr) {
         return Some(virt);
     }
 
     serial_println!(
         "[acpi] RSDP not found at provided address {:#x} (tried virt={:#x})",
-        addr, virt
+        addr,
+        addr.wrapping_add(hhdm_offset)
     );
     None
 }
 
 /// Check if 8 bytes at the given virtual address match "RSD PTR ".
-fn check_rsdp_signature(virt: u64) -> bool {
+///
+/// # Safety
+///
+/// `virt` must be mapped for at least 8 bytes.  This is `unsafe` rather than
+/// documented-and-safe because the obligation is real and was once missed: an
+/// unmapped candidate here is an unrecoverable kernel page fault, not a
+/// `false` return.
+unsafe fn check_rsdp_signature(virt: u64) -> bool {
     let ptr = virt as *const [u8; 8];
-    // SAFETY: caller must ensure the virtual address is mapped.
+    // SAFETY: the caller guarantees `virt` is mapped for 8 bytes.
     let sig = unsafe { core::ptr::read_unaligned(ptr) };
     sig == RSDP_SIGNATURE
 }
@@ -231,7 +297,12 @@ unsafe fn ensure_sdt_mapped(phys: u64, hhdm_offset: u64) -> Option<u64> {
 /// ACPI reclaimable on 16-byte boundaries.
 ///
 /// `memory_map` is the boot memory map from Limine.
-fn scan_for_rsdp(
+///
+/// # Safety
+///
+/// `hhdm_offset` must be correct, and `mm::page_table` must be initialized:
+/// this maps the scanned regions into the HHDM before reading them.
+unsafe fn scan_for_rsdp(
     hhdm_offset: u64,
     memory_map: &[&crate::limine::MemmapEntry],
 ) -> Option<u64> {
@@ -262,7 +333,8 @@ fn scan_for_rsdp(
 
         while addr.wrapping_add(8) <= end {
             let virt = addr.wrapping_add(hhdm_offset);
-            if check_rsdp_signature(virt) {
+            // SAFETY: `ensure_hhdm_mapped` above covered this whole region.
+            if unsafe { check_rsdp_signature(virt) } {
                 serial_println!("[acpi] RSDP found at phys={:#x}", addr);
                 return Some(virt);
             }
@@ -285,9 +357,16 @@ fn scan_for_rsdp(
         let end = entry.base.saturating_add(entry.length).min(0x100000);
         let mut addr = (entry.base.wrapping_add(15)) & !15;
 
+        // Usable memory is normally in the HHDM already, but map it explicitly
+        // anyway: `check_rsdp_signature` faults rather than returning `false`
+        // if it isn't, and "normally" is not a safety argument.
+        // SAFETY: entry.base/length are from the Limine memory map.
+        unsafe { ensure_hhdm_mapped(entry.base, end.saturating_sub(entry.base), hhdm_offset) };
+
         while addr.wrapping_add(8) <= end {
             let virt = addr.wrapping_add(hhdm_offset);
-            if check_rsdp_signature(virt) {
+            // SAFETY: `ensure_hhdm_mapped` above covered this region.
+            if unsafe { check_rsdp_signature(virt) } {
                 serial_println!("[acpi] RSDP found at phys={:#x} (low memory)", addr);
                 return Some(virt);
             }
@@ -322,16 +401,23 @@ pub unsafe fn init(
     hhdm_offset: u64,
     memory_map: &[&crate::limine::MemmapEntry],
 ) {
-    // The RSDP address from Limine may be physical, HHDM-virtual, or
-    // even incorrect (observed on QEMU+edk2 where Limine returns the
-    // kernel load address instead).  Try the provided address first;
-    // if validation fails, fall back to scanning ACPI reclaimable
-    // memory regions for the "RSD PTR " signature.
-    let rsdp_virt = try_rsdp_address(rsdp_addr, hhdm_offset)
-        .or_else(|| {
-            serial_println!("[acpi] Limine RSDP address invalid — scanning memory...");
-            scan_for_rsdp(hhdm_offset, memory_map)
-        });
+    // The RSDP address from Limine may be physical or HHDM-virtual, so both
+    // are tried.  If neither validates, fall back to scanning ACPI-reclaimable
+    // memory (and then low memory) for the "RSD PTR " signature.
+    //
+    // The fallback used to fire on *every* boot: the RSDP request carried the
+    // executable-address feature ID (see `limine::RSDP`), so `rsdp_addr` was
+    // the kernel's load address.  The scan happens to find the right table
+    // under QEMU/SeaBIOS, which is why this went unnoticed — but it is a
+    // heuristic, and the request exists precisely so it isn't needed.
+    //
+    // SAFETY: `hhdm_offset` is valid per this function's contract, and
+    // `mm::page_table` is initialized long before ACPI init runs.
+    let rsdp_virt = unsafe { try_rsdp_address(rsdp_addr, hhdm_offset, memory_map) }.or_else(|| {
+        serial_println!("[acpi] Limine RSDP address invalid — scanning memory...");
+        // SAFETY: as above.
+        unsafe { scan_for_rsdp(hhdm_offset, memory_map) }
+    });
 
     let rsdp_virt = match rsdp_virt {
         Some(v) => v,

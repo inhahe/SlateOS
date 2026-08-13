@@ -179,6 +179,20 @@ impl Path {
         name.get(dot.wrapping_add(1)..).map(Path::new)
     }
 
+    /// Byte-for-byte equality with ASCII case folded away.
+    ///
+    /// For case-*sensitive* filesystems — which is the rule here, per
+    /// `design.txt` — plain `==` is the right comparison and this must not be
+    /// used. It exists for the case-insensitive foreign filesystems we mount:
+    /// FAT, and ISO 9660's plain (non-Rock-Ridge) 8.3 names. Folding is
+    /// restricted to ASCII on purpose: a path is an uninterpreted byte string
+    /// with no declared encoding, so folding a byte ≥ 0x80 would require
+    /// guessing one, and guessing wrong makes two distinct names collide.
+    #[must_use]
+    pub fn eq_ignore_ascii_case<P: AsRef<Self>>(&self, other: P) -> bool {
+        self.0.eq_ignore_ascii_case(&other.as_ref().0)
+    }
+
     /// Whether `prefix` is a leading *component-aligned* prefix of `self`.
     ///
     /// Component-aligned is the whole point: `/ab` does not start with `/a`,
@@ -460,6 +474,18 @@ impl fmt::Display for Display<'_> {
     /// `no_std` and this avoids materialising an intermediate allocation on a
     /// path that is frequently a log line in a fault handler.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // A `Display` impl that writes straight to the sink silently ignores
+        // width/alignment/precision, so `{:20}` or `{:>8}` on a path would
+        // quietly produce ragged output. When the caller asked for any of
+        // those, materialise the lossy string and hand it to `Formatter::pad`,
+        // which implements the padding rules correctly (including counting in
+        // `char`s, not bytes). The allocation is confined to that case, so the
+        // plain `{}` path used by fault handlers stays allocation-free.
+        if f.width().is_some() || f.precision().is_some() {
+            let mut s = alloc::string::String::with_capacity(self.0.len());
+            fmt::write(&mut s, format_args!("{self}"))?;
+            return f.pad(&s);
+        }
         let mut rest = self.0;
         loop {
             match core::str::from_utf8(rest) {
@@ -578,6 +604,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // Non-UTF-8 components compare by bytes like any other.
     assert!(Path::new(b"/\x80/b").starts_with(Path::new(b"/\x80")));
     assert!(!Path::new(b"/\x80/b").starts_with(Path::new(b"/\x81")));
+    // ASCII case folding, for the case-insensitive foreign filesystems only.
+    assert!(Path::new("TESTDIR").eq_ignore_ascii_case("testdir"));
+    assert!(Path::new("/A/b.TXT").eq_ignore_ascii_case("/a/B.txt"));
+    assert!(!Path::new("TESTDIR").eq_ignore_ascii_case("TESTDIR2"));
+    // Bytes >= 0x80 are never folded: there is no encoding to fold them in.
+    assert!(!Path::new(b"\xc3\x89").eq_ignore_ascii_case(Path::new(b"\xc3\xa9")));
+    assert!(Path::new(b"\xffA").eq_ignore_ascii_case(Path::new(b"\xffa")));
 
     serial_println!("  path::self_test 6: join and push");
     assert_eq!(Path::new("/a").join("b").into_vec(), b"/a/b".to_vec());
@@ -610,6 +643,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         format!("{}", Path::new(b"/\xff").display())
     );
     assert_ne!(Path::new(b"/\x80"), Path::new(b"/\xff"));
+    // Width and alignment must be honoured, not silently dropped: `{:8}` on a
+    // path used to emit an unpadded string and misalign every column that
+    // relied on it.
+    assert_eq!(format!("[{:>6}]", Path::new("abc").display()), "[   abc]");
+    assert_eq!(format!("[{:<6}]", Path::new("abc").display()), "[abc   ]");
+    // Padding counts `char`s after the lossy decode, so a 2-byte invalid
+    // sequence is one replacement char wide, not two.
+    assert_eq!(format!("[{:>4}]", Path::new(b"\xff\xff").display()), "[  \u{FFFD}\u{FFFD}]");
 
     serial_println!("  path::self_test 8: dot components");
     assert!(Path::new("/a/b").has_no_dot_components());

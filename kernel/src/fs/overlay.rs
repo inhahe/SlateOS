@@ -57,6 +57,8 @@ use alloc::vec::Vec;
 use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
+use crate::fs::pathutil::path_in_subtree;
 use crate::fs::vfs::Vfs;
 use crate::fs::{DirEntry, EntryType, FileMeta};
 use crate::serial_println;
@@ -74,15 +76,15 @@ struct OverlayMount {
     /// Human-readable name for this overlay.
     name: String,
     /// Absolute path to the read-only lower layer.
-    lower_path: String,
+    lower_path: PathBuf,
     /// Absolute path to the read-write upper layer.
-    upper_path: String,
+    upper_path: PathBuf,
     /// Paths (relative to the overlay root) that have been whited out.
     /// A whiteout hides the corresponding lower-layer entry.
-    whiteouts: BTreeSet<String>,
+    whiteouts: BTreeSet<PathBuf>,
     /// Directories (relative to the overlay root) marked as opaque.
     /// An opaque directory hides all lower-layer content beneath it.
-    opaque_dirs: BTreeSet<String>,
+    opaque_dirs: BTreeSet<PathBuf>,
     /// Number of read operations through this overlay.
     reads: u64,
     /// Number of write operations (including copy-ups).
@@ -97,8 +99,8 @@ struct OverlayMount {
 #[derive(Debug, Clone)]
 pub struct OverlayStats {
     pub name: String,
-    pub lower_path: String,
-    pub upper_path: String,
+    pub lower_path: PathBuf,
+    pub upper_path: PathBuf,
     pub whiteout_count: usize,
     pub opaque_dir_count: usize,
     pub reads: u64,
@@ -139,35 +141,32 @@ static OVERLAYS: Mutex<OverlayInner> = Mutex::new(OverlayInner {
 // Path helpers
 // ---------------------------------------------------------------------------
 
-/// Join an overlay layer path with a relative sub-path.
-fn layer_join(layer_path: &str, rel: &str) -> String {
-    if rel.is_empty() || rel == "/" {
-        layer_path.into()
-    } else {
-        let base = layer_path.trim_end_matches('/');
-        let sub = rel.trim_start_matches('/');
-        alloc::format!("{}/{}", base, sub)
+/// Join an overlay layer path with an overlay-relative sub-path.
+///
+/// `rel` must already have been through [`normalize_rel`], so it carries no
+/// leading separator.  That matters: `PathBuf::push` lets an absolute argument
+/// replace the whole buffer, which for an unnormalized `rel` would silently
+/// escape the layer root and address the real filesystem instead.
+fn layer_join(layer_path: &Path, rel: &Path) -> PathBuf {
+    let mut out = layer_path.to_path_buf();
+    for component in rel.components() {
+        out.push(component);
     }
+    out
 }
 
-/// Normalize a relative path for whiteout/opaque lookups.
-/// Strips leading/trailing slashes, collapses double slashes.
-fn normalize_rel(rel: &str) -> String {
-    let trimmed = rel.trim_matches('/');
-    if trimmed.is_empty() {
-        String::new()
-    } else {
-        trimmed.into()
+/// Normalize an overlay-relative path for whiteout/opaque lookups.
+///
+/// Rebuilding from `components()` drops leading, trailing and repeated
+/// separators in one pass, so every key stored in the whiteout/opaque sets
+/// and every path handed to [`layer_join`] has a single canonical spelling.
+/// The result is always relative.
+fn normalize_rel(rel: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in rel.components() {
+        out.push(component);
     }
-}
-
-/// Check if `path` is under `dir` (both relative, normalized).
-fn is_under(path: &str, dir: &str) -> bool {
-    if dir.is_empty() {
-        true
-    } else {
-        path.starts_with(dir) && path.as_bytes().get(dir.len()) == Some(&b'/')
-    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -181,7 +180,12 @@ fn is_under(path: &str, dir: &str) -> bool {
 /// - `upper_path`: absolute path to the read-write upper directory
 ///
 /// Both paths must exist and be directories.  Returns the overlay ID.
-pub fn create(name: &str, lower_path: &str, upper_path: &str) -> KernelResult<OverlayId> {
+pub fn create(
+    name: &str,
+    lower_path: impl AsRef<Path>,
+    upper_path: impl AsRef<Path>,
+) -> KernelResult<OverlayId> {
+    let (lower_path, upper_path) = (lower_path.as_ref(), upper_path.as_ref());
     // Validate paths exist and are directories.
     if !Vfs::is_directory(lower_path) {
         return Err(KernelError::NotADirectory);
@@ -190,8 +194,12 @@ pub fn create(name: &str, lower_path: &str, upper_path: &str) -> KernelResult<Ov
         return Err(KernelError::NotADirectory);
     }
 
-    // Prevent nesting (lower inside upper or vice versa).
-    if lower_path.starts_with(upper_path) || upper_path.starts_with(lower_path) {
+    // Prevent nesting (lower inside upper or vice versa).  The check is
+    // component-aligned: a raw byte-prefix test would reject the perfectly
+    // legal pairing of `/tmp/upper` with `/tmp/upper2`, and — worse, once
+    // either path picks up a trailing slash — would fail to reject a genuine
+    // nesting.
+    if path_in_subtree(lower_path, upper_path) || path_in_subtree(upper_path, lower_path) {
         return Err(KernelError::InvalidArgument);
     }
 
@@ -209,8 +217,8 @@ pub fn create(name: &str, lower_path: &str, upper_path: &str) -> KernelResult<Ov
 
     inner.mounts.insert(id, OverlayMount {
         name: name.into(),
-        lower_path: lower_path.into(),
-        upper_path: upper_path.into(),
+        lower_path: lower_path.to_path_buf(),
+        upper_path: upper_path.to_path_buf(),
         whiteouts: BTreeSet::new(),
         opaque_dirs: BTreeSet::new(),
         reads: 0,
@@ -281,7 +289,7 @@ pub fn stats(id: OverlayId) -> KernelResult<OverlayStats> {
 /// Used by callers that need to enumerate the container's scratch layer
 /// directly — e.g. `container diff`, which walks the upper layer to report
 /// added/changed files relative to the read-only image.
-pub fn upper_path(id: OverlayId) -> KernelResult<String> {
+pub fn upper_path(id: OverlayId) -> KernelResult<PathBuf> {
     let inner = OVERLAYS.lock();
     let m = inner.mounts.get(&id).ok_or(KernelError::NotFound)?;
     Ok(m.upper_path.clone())
@@ -293,7 +301,7 @@ pub fn upper_path(id: OverlayId) -> KernelResult<String> {
 ///
 /// The result is sorted (the backing set is a `BTreeSet`). Used by
 /// `container diff` to report `D` (deleted) entries.
-pub fn whiteouts(id: OverlayId) -> KernelResult<Vec<String>> {
+pub fn whiteouts(id: OverlayId) -> KernelResult<Vec<PathBuf>> {
     let inner = OVERLAYS.lock();
     let m = inner.mounts.get(&id).ok_or(KernelError::NotFound)?;
     Ok(m.whiteouts.iter().cloned().collect())
@@ -306,7 +314,8 @@ pub fn whiteouts(id: OverlayId) -> KernelResult<Vec<String>> {
 /// Determine which layer a path exists in.
 ///
 /// `rel_path` is relative to the overlay root (no leading slash needed).
-pub fn which_layer(id: OverlayId, rel_path: &str) -> KernelResult<Layer> {
+pub fn which_layer(id: OverlayId, rel_path: impl AsRef<Path>) -> KernelResult<Layer> {
+    let rel_path = rel_path.as_ref();
     let inner = OVERLAYS.lock();
     let m = inner.mounts.get(&id).ok_or(KernelError::NotFound)?;
     let rel = normalize_rel(rel_path);
@@ -337,15 +346,12 @@ pub fn which_layer(id: OverlayId, rel_path: &str) -> KernelResult<Layer> {
     })
 }
 
-/// Check whether any ancestor of `rel` is marked opaque.
-fn is_opaque_ancestor(opaque_dirs: &BTreeSet<String>, rel: &str) -> bool {
-    // Walk parent components.
-    let mut prefix = String::new();
-    for component in rel.split('/') {
-        if !prefix.is_empty() {
-            prefix.push('/');
-        }
-        prefix.push_str(component);
+/// Check whether `rel` itself or any ancestor of it is marked opaque.
+fn is_opaque_ancestor(opaque_dirs: &BTreeSet<PathBuf>, rel: &Path) -> bool {
+    // Walk the components, testing each successive ancestor prefix.
+    let mut prefix = PathBuf::new();
+    for component in rel.components() {
+        prefix.push(component);
         if opaque_dirs.contains(&prefix) {
             return true;
         }
@@ -361,7 +367,8 @@ fn is_opaque_ancestor(opaque_dirs: &BTreeSet<String>, rel: &str) -> bool {
 ///
 /// Returns data from the upper layer if the file exists there,
 /// otherwise from the lower layer.
-pub fn read_file(id: OverlayId, rel_path: &str) -> KernelResult<Vec<u8>> {
+pub fn read_file(id: OverlayId, rel_path: impl AsRef<Path>) -> KernelResult<Vec<u8>> {
+    let rel_path = rel_path.as_ref();
     let (upper_full, lower_full, lower_hidden) = {
         let mut inner = OVERLAYS.lock();
         let m = inner.mounts.get_mut(&id).ok_or(KernelError::NotFound)?;
@@ -398,7 +405,8 @@ pub fn read_file(id: OverlayId, rel_path: &str) -> KernelResult<Vec<u8>> {
 /// If the file exists only in the lower layer, a copy-up is performed
 /// first (parent directories are created in upper as needed).  The
 /// write always goes to the upper layer.
-pub fn write_file(id: OverlayId, rel_path: &str, data: &[u8]) -> KernelResult<()> {
+pub fn write_file(id: OverlayId, rel_path: impl AsRef<Path>, data: &[u8]) -> KernelResult<()> {
+    let rel_path = rel_path.as_ref();
     let (upper_full, needs_copyup) = {
         let mut inner = OVERLAYS.lock();
         let m = inner.mounts.get_mut(&id).ok_or(KernelError::NotFound)?;
@@ -424,7 +432,8 @@ pub fn write_file(id: OverlayId, rel_path: &str, data: &[u8]) -> KernelResult<()
 /// Stat a path through the overlay.
 ///
 /// Returns metadata from the upper layer if present, otherwise lower.
-pub fn stat(id: OverlayId, rel_path: &str) -> KernelResult<DirEntry> {
+pub fn stat(id: OverlayId, rel_path: impl AsRef<Path>) -> KernelResult<DirEntry> {
+    let rel_path = rel_path.as_ref();
     let (upper_full, lower_full, lower_hidden) = {
         let inner = OVERLAYS.lock();
         let m = inner.mounts.get(&id).ok_or(KernelError::NotFound)?;
@@ -455,7 +464,8 @@ pub fn stat(id: OverlayId, rel_path: &str) -> KernelResult<DirEntry> {
 }
 
 /// Get full metadata through the overlay.
-pub fn metadata(id: OverlayId, rel_path: &str) -> KernelResult<FileMeta> {
+pub fn metadata(id: OverlayId, rel_path: impl AsRef<Path>) -> KernelResult<FileMeta> {
+    let rel_path = rel_path.as_ref();
     let (upper_full, lower_full, lower_hidden) = {
         let inner = OVERLAYS.lock();
         let m = inner.mounts.get(&id).ok_or(KernelError::NotFound)?;
@@ -488,7 +498,8 @@ pub fn metadata(id: OverlayId, rel_path: &str) -> KernelResult<FileMeta> {
 ///
 /// If the entry exists in the lower layer, a whiteout is added.
 /// If it exists only in the upper layer, it is removed directly.
-pub fn remove(id: OverlayId, rel_path: &str) -> KernelResult<()> {
+pub fn remove(id: OverlayId, rel_path: impl AsRef<Path>) -> KernelResult<()> {
+    let rel_path = rel_path.as_ref();
     let (upper_full, lower_full, lower_hidden) = {
         let inner = OVERLAYS.lock();
         let m = inner.mounts.get(&id).ok_or(KernelError::NotFound)?;
@@ -537,7 +548,8 @@ pub fn remove(id: OverlayId, rel_path: &str) -> KernelResult<()> {
 }
 
 /// Create a directory through the overlay.
-pub fn mkdir(id: OverlayId, rel_path: &str) -> KernelResult<()> {
+pub fn mkdir(id: OverlayId, rel_path: impl AsRef<Path>) -> KernelResult<()> {
+    let rel_path = rel_path.as_ref();
     let upper_full = {
         let mut inner = OVERLAYS.lock();
         let m = inner.mounts.get_mut(&id).ok_or(KernelError::NotFound)?;
@@ -559,7 +571,8 @@ pub fn mkdir(id: OverlayId, rel_path: &str) -> KernelResult<()> {
 /// Remove a directory through the overlay.
 ///
 /// If the directory has lower-layer content, it becomes opaque.
-pub fn rmdir(id: OverlayId, rel_path: &str) -> KernelResult<()> {
+pub fn rmdir(id: OverlayId, rel_path: impl AsRef<Path>) -> KernelResult<()> {
+    let rel_path = rel_path.as_ref();
     let (upper_full, lower_full, lower_hidden) = {
         let inner = OVERLAYS.lock();
         let m = inner.mounts.get(&id).ok_or(KernelError::NotFound)?;
@@ -614,34 +627,20 @@ pub fn rmdir(id: OverlayId, rel_path: &str) -> KernelResult<()> {
 /// Merges entries from upper and lower layers, excluding whiteouts.
 /// Upper-layer entries take precedence over lower-layer entries with
 /// the same name.
-pub fn readdir(id: OverlayId, rel_path: &str) -> KernelResult<Vec<DirEntry>> {
+pub fn readdir(id: OverlayId, rel_path: impl AsRef<Path>) -> KernelResult<Vec<DirEntry>> {
+    let rel_path = rel_path.as_ref();
     let (upper_full, lower_full, lower_hidden, whiteouts_snapshot) = {
         let mut inner = OVERLAYS.lock();
         let m = inner.mounts.get_mut(&id).ok_or(KernelError::NotFound)?;
         let rel = normalize_rel(rel_path);
 
-        // Collect whiteouts under this directory.
-        let prefix = if rel.is_empty() {
-            String::new()
-        } else {
-            alloc::format!("{}/", rel)
-        };
-
-        let wo: BTreeSet<String> = m.whiteouts.iter()
-            .filter(|w| {
-                if rel.is_empty() {
-                    !w.contains('/')
-                } else {
-                    w.starts_with(&prefix) && !w[prefix.len()..].contains('/')
-                }
-            })
-            .map(|w| {
-                if rel.is_empty() {
-                    w.clone()
-                } else {
-                    w[prefix.len()..].into()
-                }
-            })
+        // Collect the whiteouts that name a *direct child* of this directory,
+        // reduced to the bare child name so they can be matched against the
+        // names `Vfs::readdir` returns for the lower layer.  Component-aligned
+        // stripping is what keeps `d2/x` out of the listing of `d`.
+        let wo: BTreeSet<PathBuf> = m.whiteouts.iter()
+            .filter_map(|w| w.strip_prefix(&rel))
+            .filter(|child| child.components().count() == 1)
             .collect();
 
         m.reads = m.reads.saturating_add(1);
@@ -658,7 +657,7 @@ pub fn readdir(id: OverlayId, rel_path: &str) -> KernelResult<Vec<DirEntry>> {
     };
 
     // Collect upper entries.
-    let mut merged: BTreeMap<String, DirEntry> = BTreeMap::new();
+    let mut merged: BTreeMap<PathBuf, DirEntry> = BTreeMap::new();
 
     if let Ok(entries) = Vfs::readdir(&upper_full) {
         for e in entries {
@@ -686,7 +685,12 @@ pub fn readdir(id: OverlayId, rel_path: &str) -> KernelResult<Vec<DirEntry>> {
 /// Rename a file or directory through the overlay.
 ///
 /// Copy-up from lower if needed, then rename within upper.
-pub fn rename(id: OverlayId, from_rel: &str, to_rel: &str) -> KernelResult<()> {
+pub fn rename(
+    id: OverlayId,
+    from_rel: impl AsRef<Path>,
+    to_rel: impl AsRef<Path>,
+) -> KernelResult<()> {
+    let (from_rel, to_rel) = (from_rel.as_ref(), to_rel.as_ref());
     let layer = which_layer(id, from_rel)?;
 
     match layer {
@@ -730,7 +734,7 @@ pub fn rename(id: OverlayId, from_rel: &str, to_rel: &str) -> KernelResult<()> {
 }
 
 /// Check if a path exists in the merged view.
-pub fn exists(id: OverlayId, rel_path: &str) -> KernelResult<bool> {
+pub fn exists(id: OverlayId, rel_path: impl AsRef<Path>) -> KernelResult<bool> {
     let layer = which_layer(id, rel_path)?;
     Ok(layer != Layer::None)
 }
@@ -739,7 +743,8 @@ pub fn exists(id: OverlayId, rel_path: &str) -> KernelResult<bool> {
 ///
 /// This is the "copy-up" operation.  If the file is already in the
 /// upper layer, this is a no-op.
-pub fn copy_up(id: OverlayId, rel_path: &str) -> KernelResult<()> {
+pub fn copy_up(id: OverlayId, rel_path: impl AsRef<Path>) -> KernelResult<()> {
+    let rel_path = rel_path.as_ref();
     let (upper_full, lower_full) = {
         let mut inner = OVERLAYS.lock();
         let m = inner.mounts.get_mut(&id).ok_or(KernelError::NotFound)?;
@@ -799,7 +804,7 @@ pub fn reset(id: OverlayId) -> KernelResult<u64> {
     let entries = Vfs::readdir(&upper_path).unwrap_or_default();
     let mut removed = 0u64;
     for entry in &entries {
-        let full = alloc::format!("{}/{}", upper_path, entry.name);
+        let full = upper_path.join(&entry.name);
         if entry.entry_type == EntryType::Directory {
             if let Ok(count) = Vfs::remove_recursive(&full) {
                 removed = removed.saturating_add(count);
@@ -847,7 +852,7 @@ pub fn commit(id: OverlayId) -> KernelResult<u64> {
 
     // Copy upper-layer files to lower.
     applied = applied.saturating_add(
-        merge_dir_to_lower(&upper_path, &lower_path, "")?
+        merge_dir_to_lower(&upper_path, &lower_path, Path::new(""))?
     );
 
     // Reset the overlay.
@@ -857,17 +862,15 @@ pub fn commit(id: OverlayId) -> KernelResult<u64> {
 }
 
 /// Recursively merge upper directory contents into lower.
-fn merge_dir_to_lower(upper_base: &str, lower_base: &str, rel: &str) -> KernelResult<u64> {
+fn merge_dir_to_lower(upper_base: &Path, lower_base: &Path, rel: &Path) -> KernelResult<u64> {
     let upper_dir = layer_join(upper_base, rel);
     let entries = Vfs::readdir(&upper_dir)?;
     let mut count = 0u64;
 
     for entry in &entries {
-        let child_rel = if rel.is_empty() {
-            entry.name.clone()
-        } else {
-            alloc::format!("{}/{}", rel, entry.name)
-        };
+        // `Path::join` on an empty `rel` yields the bare name, so the two
+        // cases the old `format!` distinguished collapse into one.
+        let child_rel = rel.join(&entry.name);
 
         let lower_full = layer_join(lower_base, &child_rel);
         let upper_full = layer_join(upper_base, &child_rel);
@@ -895,7 +898,7 @@ fn merge_dir_to_lower(upper_base: &str, lower_base: &str, rel: &str) -> KernelRe
 // ---------------------------------------------------------------------------
 
 /// Ensure all parent directories for `rel_path` exist in the upper layer.
-fn ensure_upper_parents(id: OverlayId, rel_path: &str) -> KernelResult<()> {
+fn ensure_upper_parents(id: OverlayId, rel_path: &Path) -> KernelResult<()> {
     let upper_path = {
         let inner = OVERLAYS.lock();
         let m = inner.mounts.get(&id).ok_or(KernelError::NotFound)?;
@@ -903,15 +906,12 @@ fn ensure_upper_parents(id: OverlayId, rel_path: &str) -> KernelResult<()> {
     };
 
     let rel = normalize_rel(rel_path);
-    let parts: Vec<&str> = rel.split('/').collect();
+    let parts: Vec<&Path> = rel.components().collect();
 
     // Create each parent component (skip the last one which is the file/dir itself).
-    let mut prefix = String::new();
-    for &part in parts.iter().take(parts.len().saturating_sub(1)) {
-        if !prefix.is_empty() {
-            prefix.push('/');
-        }
-        prefix.push_str(part);
+    let mut prefix = PathBuf::new();
+    for part in parts.iter().take(parts.len().saturating_sub(1)) {
+        prefix.push(part);
 
         let full = layer_join(&upper_path, &prefix);
         if !Vfs::is_directory(&full) {
@@ -923,14 +923,14 @@ fn ensure_upper_parents(id: OverlayId, rel_path: &str) -> KernelResult<()> {
 }
 
 /// List all whiteout entries for an overlay.
-pub fn list_whiteouts(id: OverlayId) -> KernelResult<Vec<String>> {
+pub fn list_whiteouts(id: OverlayId) -> KernelResult<Vec<PathBuf>> {
     let inner = OVERLAYS.lock();
     let m = inner.mounts.get(&id).ok_or(KernelError::NotFound)?;
     Ok(m.whiteouts.iter().cloned().collect())
 }
 
 /// List all opaque directories for an overlay.
-pub fn list_opaque_dirs(id: OverlayId) -> KernelResult<Vec<String>> {
+pub fn list_opaque_dirs(id: OverlayId) -> KernelResult<Vec<PathBuf>> {
     let inner = OVERLAYS.lock();
     let m = inner.mounts.get(&id).ok_or(KernelError::NotFound)?;
     Ok(m.opaque_dirs.iter().cloned().collect())
@@ -991,39 +991,39 @@ impl crate::fs::vfs::FileSystem for OverlayFs {
         "overlay"
     }
 
-    fn readdir(&mut self, path: &str) -> KernelResult<Vec<DirEntry>> {
+    fn readdir(&mut self, path: &Path) -> KernelResult<Vec<DirEntry>> {
         readdir(self.id, path)
     }
 
-    fn read_file(&mut self, path: &str) -> KernelResult<Vec<u8>> {
+    fn read_file(&mut self, path: &Path) -> KernelResult<Vec<u8>> {
         read_file(self.id, path)
     }
 
-    fn stat(&mut self, path: &str) -> KernelResult<DirEntry> {
+    fn stat(&mut self, path: &Path) -> KernelResult<DirEntry> {
         stat(self.id, path)
     }
 
-    fn metadata(&mut self, path: &str) -> KernelResult<FileMeta> {
+    fn metadata(&mut self, path: &Path) -> KernelResult<FileMeta> {
         metadata(self.id, path)
     }
 
-    fn write_file(&mut self, path: &str, data: &[u8]) -> KernelResult<()> {
+    fn write_file(&mut self, path: &Path, data: &[u8]) -> KernelResult<()> {
         write_file(self.id, path, data)
     }
 
-    fn remove(&mut self, path: &str) -> KernelResult<()> {
+    fn remove(&mut self, path: &Path) -> KernelResult<()> {
         remove(self.id, path)
     }
 
-    fn mkdir(&mut self, path: &str) -> KernelResult<()> {
+    fn mkdir(&mut self, path: &Path) -> KernelResult<()> {
         mkdir(self.id, path)
     }
 
-    fn rmdir(&mut self, path: &str) -> KernelResult<()> {
+    fn rmdir(&mut self, path: &Path) -> KernelResult<()> {
         rmdir(self.id, path)
     }
 
-    fn rename(&mut self, from: &str, to: &str) -> KernelResult<()> {
+    fn rename(&mut self, from: &Path, to: &Path) -> KernelResult<()> {
         rename(self.id, from, to)
     }
 }
@@ -1138,7 +1138,7 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         let whiteouts = list_whiteouts(id)?;
-        if !whiteouts.contains(&String::from("file_b.txt")) {
+        if !whiteouts.contains(&PathBuf::from("file_b.txt")) {
             serial_println!("[overlay]   ERROR: whiteout not recorded");
             let _ = Vfs::remove_recursive(test_base);
             destroy(id).ok();
@@ -1150,17 +1150,20 @@ pub fn self_test() -> KernelResult<()> {
     // --- Test 7: Readdir merges layers ---
     {
         let entries = readdir(id, "")?;
-        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        let names: Vec<&Path> = entries.iter().map(|e| e.name.as_path()).collect();
 
         // Should have: file_a.txt, shared.txt (upper), new_file.txt, subdir
         // Should NOT have: file_b.txt (whited out)
-        if names.contains(&"file_b.txt") {
+        if names.contains(&Path::new("file_b.txt")) {
             serial_println!("[overlay]   ERROR: whited-out file in readdir");
             let _ = Vfs::remove_recursive(test_base);
             destroy(id).ok();
             return Err(KernelError::InternalError);
         }
-        if !names.contains(&"file_a.txt") || !names.contains(&"shared.txt") || !names.contains(&"subdir") {
+        if !names.contains(&Path::new("file_a.txt"))
+            || !names.contains(&Path::new("shared.txt"))
+            || !names.contains(&Path::new("subdir"))
+        {
             serial_println!("[overlay]   ERROR: missing expected entries: {:?}", names);
             let _ = Vfs::remove_recursive(test_base);
             destroy(id).ok();

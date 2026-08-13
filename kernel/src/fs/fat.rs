@@ -263,7 +263,7 @@ const ATTR_LONG_NAME: u8 = ATTR_READ_ONLY | ATTR_HIDDEN | ATTR_SYSTEM | ATTR_VOL
 #[derive(Debug, Clone)]
 struct FatDirEntry {
     /// 8.3 filename (without dot, padded with spaces).
-    name: PathBuf::from([u8; 11]),
+    name: [u8; 11],
     /// Attribute byte.
     attr: u8,
     /// First cluster of the file (32-bit; FAT16 uses only low 16 bits).
@@ -935,7 +935,7 @@ impl DcacheEntry {
             path: String::new(),
             parent_cluster: 0,
             entry: FatDirEntry {
-                name: PathBuf::from([0; 11]),
+                name: [0; 11],
                 attr: 0,
                 first_cluster: 0,
                 file_size: 0,
@@ -3080,14 +3080,12 @@ impl FileSystem for FatFs {
             None => {
                 // Path points to a directory itself.
                 let name = if parent_cluster == 0 {
-                    String::from("/")
+                    PathBuf::from("/")
                 } else {
-                    // Use the last path component as the name.
-                    let last = path.trim_end_matches('/')
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or("/");
-                    String::from(last)
+                    // Use the last path component as the name.  `file_name`
+                    // already ignores trailing separators and yields `None`
+                    // only for the root, which the branch above handles.
+                    Path::new(path).file_name().unwrap_or(Path::new("/")).to_path_buf()
                 };
                 Ok(DirEntry {
                     name,
@@ -4326,7 +4324,7 @@ pub fn self_test() -> KernelResult<()> {
         };
         crate::serial_println!(
             "[fat]     {} {:12} {} bytes",
-            type_str, entry.name, entry.size
+            type_str, entry.name.display(), entry.size
         );
     }
 
@@ -4834,13 +4832,13 @@ pub fn self_test() -> KernelResult<()> {
     // Verify the long name appears in directory listing.
     let root_entries = crate::fs::Vfs::readdir("/")?;
     let has_lfn = root_entries.iter().any(|e| {
-        e.name == "Hello World.txt"
+        e.name.as_path() == Path::new("Hello World.txt")
     });
     if !has_lfn {
         crate::serial_println!("[fat]   LFN listing FAILED: 'Hello World.txt' not in root");
         // Check if it appears under the short name instead.
         for e in &root_entries {
-            crate::serial_println!("[fat]     found: '{}'", e.name);
+            crate::serial_println!("[fat]     found: '{}'", e.name.display());
         }
         let _ = crate::fs::Vfs::remove(lfn_path);
         return Err(KernelError::IoError);
@@ -4880,12 +4878,12 @@ pub fn self_test() -> KernelResult<()> {
     // Verify the long-named directory appears in root listing.
     let root_entries = crate::fs::Vfs::readdir("/")?;
     let has_lfn_dir = root_entries.iter().any(|e| {
-        e.name == "My Documents" && e.entry_type == EntryType::Directory
+        e.name.as_path() == Path::new("My Documents") && e.entry_type == EntryType::Directory
     });
     if !has_lfn_dir {
         crate::serial_println!("[fat]   LFN mkdir FAILED: 'My Documents' not in root");
         for e in &root_entries {
-            crate::serial_println!("[fat]     found: '{}' {:?}", e.name, e.entry_type);
+            crate::serial_println!("[fat]     found: '{}' {:?}", e.name.display(), e.entry_type);
         }
         return Err(KernelError::IoError);
     }
@@ -4910,7 +4908,7 @@ pub fn self_test() -> KernelResult<()> {
 
     // Verify the directory is gone.
     let root_after = crate::fs::Vfs::readdir("/")?;
-    let still_has = root_after.iter().any(|e| e.name == "My Documents");
+    let still_has = root_after.iter().any(|e| e.name.as_path() == Path::new("My Documents"));
     if still_has {
         crate::serial_println!("[fat]   LFN rmdir FAILED: 'My Documents' still in root");
         return Err(KernelError::IoError);
@@ -4950,7 +4948,7 @@ pub fn self_test() -> KernelResult<()> {
 
     // Verify the long destination name appears in directory listing.
     let root_entries = crate::fs::Vfs::readdir("/")?;
-    let has_renamed = root_entries.iter().any(|e| e.name == "renamed file.txt");
+    let has_renamed = root_entries.iter().any(|e| e.name.as_path() == Path::new("renamed file.txt"));
     if !has_renamed {
         crate::serial_println!("[fat]   LFN rename FAILED: 'renamed file.txt' not in root");
         let _ = crate::fs::Vfs::remove(lfn_dst);
@@ -5073,7 +5071,7 @@ pub fn self_test() -> KernelResult<()> {
 
     // Verify long name in listing.
     let root_entries = crate::fs::Vfs::readdir("/")?;
-    let has_falloc = root_entries.iter().any(|e| e.name == "preallocated file.bin");
+    let has_falloc = root_entries.iter().any(|e| e.name.as_path() == Path::new("preallocated file.bin"));
     if !has_falloc {
         crate::serial_println!("[fat]   LFN fallocate FAILED: file not in root listing");
         let _ = crate::fs::Vfs::remove(lfn_falloc_path);

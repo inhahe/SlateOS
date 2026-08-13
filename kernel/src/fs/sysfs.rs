@@ -899,7 +899,7 @@ impl FileSystem for SysFs {
                             dev.address.bus, dev.address.device, dev.address.function
                         );
                         DirEntry {
-                            name,
+                            name: PathBuf::from(name),
                             entry_type: EntryType::File,
                             size: 0,
                         }
@@ -1196,7 +1196,7 @@ pub fn self_test() -> KernelResult<()> {
     );
     for dir_name in TOP_DIRS {
         assert!(
-            root_entries.iter().any(|e| e.name == *dir_name),
+            root_entries.iter().any(|e| e.name.as_path() == Path::new(*dir_name)),
             "sysfs root missing '{}'",
             dir_name
         );
@@ -1266,11 +1266,11 @@ pub fn self_test() -> KernelResult<()> {
     // 7. Devices directory.
     let dev_dir = fs.readdir(Path::new("/devices"))?;
     assert!(
-        dev_dir.iter().any(|e| e.name == "pci"),
+        dev_dir.iter().any(|e| e.name.as_path() == Path::new("pci")),
         "devices dir should contain 'pci'"
     );
     assert!(
-        dev_dir.iter().any(|e| e.name == "system"),
+        dev_dir.iter().any(|e| e.name.as_path() == Path::new("system")),
         "devices dir should contain 'system'"
     );
     serial_println!("[sysfs]   devices directory: OK");
@@ -1304,7 +1304,7 @@ pub fn self_test() -> KernelResult<()> {
         // system/ lists cpu/.
         let sys_dir = fs.readdir(Path::new("/devices/system"))?;
         assert!(
-            sys_dir.iter().any(|e| e.name == "cpu" && e.entry_type == EntryType::Directory),
+            sys_dir.iter().any(|e| e.name.as_path() == Path::new("cpu") && e.entry_type == EntryType::Directory),
             "devices/system should contain 'cpu' directory"
         );
 
@@ -1312,7 +1312,7 @@ pub fn self_test() -> KernelResult<()> {
         let cpu_dir = fs.readdir(Path::new("/devices/system/cpu"))?;
         for name in CPU_FILES {
             assert!(
-                cpu_dir.iter().any(|e| e.name == *name && e.entry_type == EntryType::File),
+                cpu_dir.iter().any(|e| e.name.as_path() == Path::new(*name) && e.entry_type == EntryType::File),
                 "devices/system/cpu missing '{}'",
                 name
             );
@@ -1379,7 +1379,7 @@ pub fn self_test() -> KernelResult<()> {
         for i in 0..ncpu {
             let want = format!("cpu{i}");
             assert!(
-                cpu_dir.iter().any(|e| e.name == want
+                cpu_dir.iter().any(|e| e.name.as_path() == Path::new(&want)
                     && e.entry_type == EntryType::Directory),
                 "devices/system/cpu missing '{}'",
                 want
@@ -1389,7 +1389,7 @@ pub fn self_test() -> KernelResult<()> {
         // cpu0 always exists; it exposes a topology/ subdir.
         let cpu0 = fs.readdir(Path::new("/devices/system/cpu/cpu0"))?;
         assert!(
-            cpu0.iter().any(|e| e.name == "topology"
+            cpu0.iter().any(|e| e.name.as_path() == Path::new("topology")
                 && e.entry_type == EntryType::Directory),
             "cpu0 should contain 'topology'"
         );
@@ -1398,7 +1398,7 @@ pub fn self_test() -> KernelResult<()> {
         let topo = fs.readdir(Path::new("/devices/system/cpu/cpu0/topology"))?;
         for name in CPU_TOPOLOGY_FILES {
             assert!(
-                topo.iter().any(|e| e.name == *name && e.entry_type == EntryType::File),
+                topo.iter().any(|e| e.name.as_path() == Path::new(*name) && e.entry_type == EntryType::File),
                 "cpu0/topology missing '{}'",
                 name
             );
@@ -1452,7 +1452,7 @@ pub fn self_test() -> KernelResult<()> {
             "cpu0 must not expose an online file"
         );
         assert!(
-            !cpu0.iter().any(|e| e.name == "online"),
+            !cpu0.iter().any(|e| e.name.as_path() == Path::new("online")),
             "cpu0 dir must not list 'online'"
         );
         if ncpu >= 2 {
@@ -1485,14 +1485,14 @@ pub fn self_test() -> KernelResult<()> {
             // No detected geometry: the cache/ dir must be absent (we never
             // expose an empty/fabricated tree).
             assert!(
-                !cpu0.iter().any(|e| e.name == "cache"),
+                !cpu0.iter().any(|e| e.name.as_path() == Path::new("cache")),
                 "cpu0 must not list 'cache' when no geometry detected"
             );
             assert!(fs.stat(Path::new("/devices/system/cpu/cpu0/cache")).is_err());
             serial_println!("[sysfs]   devices/system/cpu/cpuN/cache: absent (no geometry)");
         } else {
             assert!(
-                cpu0.iter().any(|e| e.name == "cache"
+                cpu0.iter().any(|e| e.name.as_path() == Path::new("cache")
                     && e.entry_type == EntryType::Directory),
                 "cpu0 should contain 'cache'"
             );
@@ -1506,7 +1506,7 @@ pub fn self_test() -> KernelResult<()> {
             for i in 0..ncache {
                 let want = format!("index{i}");
                 assert!(
-                    cache_dir.iter().any(|e| e.name == want
+                    cache_dir.iter().any(|e| e.name.as_path() == Path::new(&want)
                         && e.entry_type == EntryType::Directory),
                     "cache/ missing '{}'",
                     want

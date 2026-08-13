@@ -386,7 +386,7 @@ impl FileSystem for Iso9660Fs {
 
             let name = rec.display_name(joliet);
             entries.push(DirEntry {
-                name,
+                name: PathBuf::from(name),
                 entry_type: rec.entry_type(),
                 size: u64::from(rec.size),
             });
@@ -435,7 +435,7 @@ impl FileSystem for Iso9660Fs {
         };
 
         Ok(DirEntry {
-            name,
+            name: PathBuf::from(name),
             entry_type: resolved.entry_type(),
             size: total_size,
         })
@@ -1075,7 +1075,7 @@ fn records_to_dir_entries(
         }
         let name = rec.display_name(joliet);
         entries.push(DirEntry {
-            name,
+            name: PathBuf::from(name),
             entry_type: rec.entry_type(),
             size: u64::from(rec.size),
         });
@@ -1399,7 +1399,7 @@ pub fn self_test() -> KernelResult<()> {
 
     match iso_mount {
         Some((path, _)) => {
-            serial_println!("[iso9660]   Mounted at '{}' — testing...", path);
+            serial_println!("[iso9660]   Mounted at '{}' — testing...", path.display());
 
             let entries = crate::fs::Vfs::readdir(path)?;
             serial_println!("[iso9660]   Root directory ({} entries):", entries.len());
@@ -1413,7 +1413,7 @@ pub fn self_test() -> KernelResult<()> {
                 serial_println!(
                     "[iso9660]     {} {:20} {} bytes",
                     type_str,
-                    entry.name,
+                    entry.name.display(),
                     entry.size
                 );
             }

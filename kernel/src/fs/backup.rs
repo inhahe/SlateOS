@@ -44,6 +44,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 use crate::fs::{EntryType, Vfs};
 use crate::serial_println;
 
@@ -59,6 +60,17 @@ const MAX_FILES: usize = 100_000;
 
 /// Manifest file extension.
 const MANIFEST_EXT: &str = ".manifest";
+
+/// Manifest format version.
+///
+/// Version 2 escapes every path field (see [`esc`]) and stores entry paths
+/// genuinely relative to the backup root, with no leading separator.  A
+/// version-1 manifest is rejected rather than parsed: its entry paths look
+/// absolute (`/sub/file.txt`), so joining one onto the restore destination
+/// replaces that destination and writes back over the *original* location.
+/// A loud failure is the only safe reading of a record we know we would
+/// misinterpret.
+const MANIFEST_VERSION: u64 = 2;
 
 /// Maximum manifest size to load (4 MiB).
 const MAX_MANIFEST_SIZE: usize = 4 * 1024 * 1024;
@@ -79,8 +91,8 @@ pub enum BackupMode {
 /// A single file entry in a manifest.
 #[derive(Debug, Clone)]
 pub struct ManifestEntry {
-    /// Relative path from backup root.
-    pub path: String,
+    /// Path relative to the backup root, with no leading separator.
+    pub path: PathBuf,
     /// File size in bytes.
     pub size: u64,
     /// Last modified timestamp (nanoseconds).
@@ -97,7 +109,7 @@ pub struct Manifest {
     /// Unique backup identifier (timestamp-based).
     pub id: String,
     /// Source path that was backed up.
-    pub source: String,
+    pub source: PathBuf,
     /// Backup mode.
     pub mode: BackupMode,
     /// Creation timestamp (nanoseconds).
@@ -121,8 +133,13 @@ pub struct BackupOptions {
     pub dry_run: bool,
     /// Maximum depth to recurse.
     pub max_depth: usize,
-    /// Exclude paths matching these prefixes.
-    pub exclude: Vec<String>,
+    /// Subtrees to exclude, named by their *absolute* source path.
+    ///
+    /// Matching is by component, via [`crate::fs::pathutil::path_in_subtree`],
+    /// against the real path being visited - which is what the operator sees
+    /// and types.  The previous byte-prefix test against the relative path
+    /// meant excluding `/a` also excluded `/ab`.
+    pub exclude: Vec<PathBuf>,
 }
 
 impl Default for BackupOptions {
@@ -144,8 +161,11 @@ pub struct RestoreOptions {
     pub verify: bool,
     /// Dry run — report what would be done.
     pub dry_run: bool,
-    /// Only restore specific paths (empty = all).
-    pub filter_paths: Vec<String>,
+    /// Only restore these subtrees (empty = all).
+    ///
+    /// Named *relative to the backup root*, since that is the only form the
+    /// manifest records; matched by component, not by byte prefix.
+    pub filter_paths: Vec<PathBuf>,
 }
 
 impl Default for RestoreOptions {
@@ -196,7 +216,7 @@ pub struct BackupInfo {
     /// Manifest ID.
     pub id: String,
     /// Source path.
-    pub source: String,
+    pub source: PathBuf,
     /// Backup mode.
     pub mode: BackupMode,
     /// Timestamp (ns).
@@ -233,7 +253,12 @@ pub fn stats() -> (u64, u64, u64) {
 /// For full backups, copies all files.  For incremental backups,
 /// loads the most recent manifest from `dst` and only copies files
 /// that have changed (different size, mtime, or hash).
-pub fn create(src: &str, dst: &str, opts: &BackupOptions) -> KernelResult<BackupResult> {
+pub fn create<S: AsRef<Path> + ?Sized, D: AsRef<Path> + ?Sized>(
+    src: &S,
+    dst: &D,
+    opts: &BackupOptions,
+) -> KernelResult<BackupResult> {
+    let (src, dst) = (src.as_ref(), dst.as_ref());
     // Generate a unique manifest ID from current timestamp.
     let now_ns = crate::timekeeping::clock_monotonic();
     let manifest_id = generate_id(now_ns);
@@ -259,17 +284,17 @@ pub fn create(src: &str, dst: &str, opts: &BackupOptions) -> KernelResult<Backup
     };
 
     // Build lookup of previous entries by path for quick comparison.
-    let prev_index: BTreeMap<&str, &ManifestEntry> = if let Some(ref m) = prev_manifest {
+    let prev_index: BTreeMap<&Path, &ManifestEntry> = if let Some(ref m) = prev_manifest {
         m.entries.iter()
             .filter(|e| e.entry_type == "file")
-            .map(|e| (e.path.as_str(), e))
+            .map(|e| (e.path.as_path(), e))
             .collect()
     } else {
         BTreeMap::new()
     };
 
     // Create backup subdirectory for this run.
-    let backup_dir = alloc::format!("{}/{}", dst, manifest_id);
+    let backup_dir = dst.join(&manifest_id);
     if !opts.dry_run {
         Vfs::mkdir(&backup_dir).inspect_err(|&e| {
             if matches!(e, KernelError::AlreadyExists) {
@@ -284,14 +309,17 @@ pub fn create(src: &str, dst: &str, opts: &BackupOptions) -> KernelResult<Backup
 
     for entry in &source_entries {
         if entry.entry_type == "dir" {
-            // Create directory in backup.
-            let dst_path = alloc::format!("{}{}", backup_dir, entry.path);
+            // Create directory in backup.  `entry.path` is relative, so
+            // `Path::join` appends it rather than replacing the backup root.
+            let dst_path = backup_dir.join(&entry.path);
             if !opts.dry_run {
                 match Vfs::mkdir(&dst_path) {
                     Ok(()) => result.dirs_created = result.dirs_created.saturating_add(1),
                     Err(KernelError::AlreadyExists) => {}
                     Err(e) => {
-                        result.errors.push(alloc::format!("mkdir {}: {:?}", dst_path, e));
+                        result.errors.push(
+                            alloc::format!("mkdir {}: {:?}", dst_path.display(), e),
+                        );
                         continue;
                     }
                 }
@@ -304,7 +332,7 @@ pub fn create(src: &str, dst: &str, opts: &BackupOptions) -> KernelResult<Backup
 
         // File: check if it changed (incremental mode).
         let should_copy = if opts.mode == BackupMode::Incremental {
-            if let Some(prev) = prev_index.get(entry.path.as_str()) {
+            if let Some(prev) = prev_index.get(entry.path.as_path()) {
                 // Changed if size, mtime, or hash differ.
                 prev.size != entry.size
                     || prev.modified_ns != entry.modified_ns
@@ -324,8 +352,8 @@ pub fn create(src: &str, dst: &str, opts: &BackupOptions) -> KernelResult<Backup
         }
 
         // Copy file.
-        let src_path = alloc::format!("{}{}", src, entry.path);
-        let dst_path = alloc::format!("{}{}", backup_dir, entry.path);
+        let src_path = src.join(&entry.path);
+        let dst_path = backup_dir.join(&entry.path);
 
         if opts.dry_run {
             result.files_copied = result.files_copied.saturating_add(1);
@@ -337,7 +365,9 @@ pub fn create(src: &str, dst: &str, opts: &BackupOptions) -> KernelResult<Backup
                     result.bytes_copied = result.bytes_copied.saturating_add(bytes);
                 }
                 Err(e) => {
-                    result.errors.push(alloc::format!("copy {}: {:?}", entry.path, e));
+                    result.errors.push(
+                        alloc::format!("copy {}: {:?}", entry.path.display(), e),
+                    );
                     continue;
                 }
             }
@@ -348,7 +378,7 @@ pub fn create(src: &str, dst: &str, opts: &BackupOptions) -> KernelResult<Backup
 
     // Write manifest.
     if !opts.dry_run {
-        let manifest_path = alloc::format!("{}/{}{}", dst, manifest_id, MANIFEST_EXT);
+        let manifest_path = dst.join(alloc::format!("{}{}", manifest_id, MANIFEST_EXT));
         let manifest_data = serialize_manifest(
             &manifest_id,
             src,
@@ -382,16 +412,16 @@ pub fn create(src: &str, dst: &str, opts: &BackupOptions) -> KernelResult<Backup
 /// Restore a backup from `backup_root` to `dst`.
 ///
 /// If `manifest_id` is `None`, restores the latest backup.
-pub fn restore(
-    backup_root: &str,
-    dst: &str,
+pub fn restore<R: AsRef<Path> + ?Sized, D: AsRef<Path> + ?Sized>(
+    backup_root: &R,
+    dst: &D,
     manifest_id: Option<&str>,
     opts: &RestoreOptions,
 ) -> KernelResult<RestoreResult> {
+    let (backup_root, dst) = (backup_root.as_ref(), dst.as_ref());
     // Load manifest.
     let manifest = if let Some(id) = manifest_id {
-        let path = alloc::format!("{}/{}{}", backup_root, id, MANIFEST_EXT);
-        load_manifest(&path)?
+        load_manifest(&manifest_path_for(backup_root, id)?)?
     } else {
         load_latest_manifest(backup_root)?
     };
@@ -403,17 +433,21 @@ pub fn restore(
         let _ = Vfs::mkdir(dst);
     }
 
-    let backup_dir = alloc::format!("{}/{}", backup_root, manifest.id);
+    let backup_dir = backup_root.join(&manifest.id);
 
     for entry in &manifest.entries {
-        // Apply path filter if set.
+        // Apply path filter if set.  Component-aligned, so restoring only
+        // `docs` does not also restore `docsets`.
         if !opts.filter_paths.is_empty()
-            && !opts.filter_paths.iter().any(|p| entry.path.starts_with(p.as_str()))
+            && !opts.filter_paths.iter()
+                .any(|p| crate::fs::pathutil::path_in_subtree(&entry.path, p))
         {
             continue;
         }
 
-        let dst_path = alloc::format!("{}{}", dst, entry.path);
+        // `entry.path` was checked at parse time to be relative and free of
+        // `..`, so this join cannot escape `dst`.
+        let dst_path = dst.join(&entry.path);
 
         if entry.entry_type == "dir" {
             if !opts.dry_run {
@@ -421,7 +455,9 @@ pub fn restore(
                     Ok(()) => result.dirs_created = result.dirs_created.saturating_add(1),
                     Err(KernelError::AlreadyExists) => {}
                     Err(e) => {
-                        result.errors.push(alloc::format!("mkdir {}: {:?}", dst_path, e));
+                        result.errors.push(
+                            alloc::format!("mkdir {}: {:?}", dst_path.display(), e),
+                        );
                     }
                 }
             } else {
@@ -431,7 +467,7 @@ pub fn restore(
         }
 
         // Copy file from backup.
-        let backup_file = alloc::format!("{}{}", backup_dir, entry.path);
+        let backup_file = backup_dir.join(&entry.path);
 
         if opts.dry_run {
             result.files_restored = result.files_restored.saturating_add(1);
@@ -453,14 +489,16 @@ pub fn restore(
                             result.verify_failures = result.verify_failures.saturating_add(1);
                             result.errors.push(alloc::format!(
                                 "verify {}: expected {}, got {}",
-                                entry.path, entry.hash, hex,
+                                entry.path.display(), entry.hash, hex,
                             ));
                         }
                     }
                 }
             }
             Err(e) => {
-                result.errors.push(alloc::format!("restore {}: {:?}", entry.path, e));
+                result.errors.push(
+                    alloc::format!("restore {}: {:?}", entry.path.display(), e),
+                );
             }
         }
     }
@@ -484,13 +522,14 @@ pub fn restore(
 // ---------------------------------------------------------------------------
 
 /// List all backups in a backup root directory.
-pub fn list(backup_root: &str) -> KernelResult<Vec<BackupInfo>> {
+pub fn list<R: AsRef<Path> + ?Sized>(backup_root: &R) -> KernelResult<Vec<BackupInfo>> {
+    let backup_root = backup_root.as_ref();
     let entries = Vfs::readdir(backup_root)?;
     let mut backups = Vec::new();
 
     for entry in &entries {
-        if entry.name.ends_with(MANIFEST_EXT) {
-            let path = alloc::format!("{}/{}", backup_root, entry.name);
+        if is_manifest_name(&entry.name) {
+            let path = backup_root.join(&entry.name);
             if let Ok(manifest) = load_manifest(&path) {
                 backups.push(BackupInfo {
                     id: manifest.id,
@@ -511,15 +550,18 @@ pub fn list(backup_root: &str) -> KernelResult<Vec<BackupInfo>> {
 }
 
 /// Verify a backup's integrity by checking file hashes.
-pub fn verify(backup_root: &str, manifest_id: Option<&str>) -> KernelResult<(u64, u64, Vec<String>)> {
+pub fn verify<R: AsRef<Path> + ?Sized>(
+    backup_root: &R,
+    manifest_id: Option<&str>,
+) -> KernelResult<(u64, u64, Vec<String>)> {
+    let backup_root = backup_root.as_ref();
     let manifest = if let Some(id) = manifest_id {
-        let path = alloc::format!("{}/{}{}", backup_root, id, MANIFEST_EXT);
-        load_manifest(&path)?
+        load_manifest(&manifest_path_for(backup_root, id)?)?
     } else {
         load_latest_manifest(backup_root)?
     };
 
-    let backup_dir = alloc::format!("{}/{}", backup_root, manifest.id);
+    let backup_dir = backup_root.join(&manifest.id);
     let mut ok_count: u64 = 0;
     let mut fail_count: u64 = 0;
     let mut failures = Vec::new();
@@ -529,7 +571,7 @@ pub fn verify(backup_root: &str, manifest_id: Option<&str>) -> KernelResult<(u64
             continue;
         }
 
-        let file_path = alloc::format!("{}{}", backup_dir, entry.path);
+        let file_path = backup_dir.join(&entry.path);
         match Vfs::read_file(&file_path) {
             Ok(data) => {
                 let hash = crate::crypto::sha256(&data);
@@ -540,7 +582,7 @@ pub fn verify(backup_root: &str, manifest_id: Option<&str>) -> KernelResult<(u64
                     fail_count = fail_count.saturating_add(1);
                     failures.push(alloc::format!(
                         "{}: expected {}, got {}",
-                        entry.path,
+                        entry.path.display(),
                         entry.hash,
                         hex,
                     ));
@@ -548,7 +590,11 @@ pub fn verify(backup_root: &str, manifest_id: Option<&str>) -> KernelResult<(u64
             }
             Err(e) => {
                 fail_count = fail_count.saturating_add(1);
-                failures.push(alloc::format!("{}: read error: {:?}", entry.path, e));
+                failures.push(alloc::format!(
+                    "{}: read error: {:?}",
+                    entry.path.display(),
+                    e
+                ));
             }
         }
     }
@@ -574,12 +620,27 @@ fn generate_id(ns: u64) -> String {
     alloc::format!("bkp_{}_{:03}", secs, sub)
 }
 
-/// Serialize a manifest to string (simple key=value line format).
+/// Escape a path for a `|`-delimited, line-oriented record.
+///
+/// `|` and newline are both perfectly legal bytes in a filename here (only `/`
+/// and NUL are not), so a path written verbatim can split a record in two or
+/// synthesise an entire new one.  That is not merely a display problem: on
+/// restore a forged `F|` record names the destination to write to, so an
+/// attacker who can choose a filename in the source tree could choose where
+/// the restore writes.  The escaped form is pure ASCII and round-trips
+/// exactly - see [`crate::fs::escape`].
+fn esc(bytes: &[u8]) -> String {
+    crate::fs::escape::escape_octal(bytes, b"|")
+}
+
+/// Serialize a manifest to string (simple delimited line format).
 ///
 /// Uses a simple text format instead of JSON to avoid needing a JSON
-/// library in no_std. Format is one entry per line:
+/// library in no_std. Format is one entry per line, with every path field
+/// octal-escaped:
 ///
 /// ```text
+/// V|<version>
 /// H|<id>|<src>|<mode>|<timestamp_ns>
 /// D|<rel_path>
 /// F|<rel_path>|<size>|<modified_ns>|<hash_hex>
@@ -587,7 +648,7 @@ fn generate_id(ns: u64) -> String {
 /// ```
 fn serialize_manifest(
     id: &str,
-    src: &str,
+    src: &Path,
     mode: BackupMode,
     timestamp_ns: u64,
     entries: &[ManifestEntry],
@@ -595,21 +656,35 @@ fn serialize_manifest(
 ) -> String {
     let mut out = String::new();
 
+    // Version first: everything after it is read according to it, so a
+    // manifest that announced its version late would be one we had already
+    // misread.
+    out.push_str(&alloc::format!("V|{}\n", MANIFEST_VERSION));
+
     // Header line.
     let mode_str = match mode {
         BackupMode::Full => "full",
         BackupMode::Incremental => "incr",
     };
-    out.push_str(&alloc::format!("H|{}|{}|{}|{}\n", id, src, mode_str, timestamp_ns));
+    out.push_str(&alloc::format!(
+        "H|{}|{}|{}|{}\n",
+        esc(id.as_bytes()),
+        esc(src.as_bytes()),
+        mode_str,
+        timestamp_ns,
+    ));
 
     let mut file_count: u64 = 0;
     for entry in entries {
         if entry.entry_type == "dir" {
-            out.push_str(&alloc::format!("D|{}\n", entry.path));
+            out.push_str(&alloc::format!("D|{}\n", esc(entry.path.as_bytes())));
         } else {
             out.push_str(&alloc::format!(
                 "F|{}|{}|{}|{}\n",
-                entry.path, entry.size, entry.modified_ns, entry.hash,
+                esc(entry.path.as_bytes()),
+                entry.size,
+                entry.modified_ns,
+                esc(entry.hash.as_bytes()),
             ));
             file_count = file_count.saturating_add(1);
         }
@@ -621,11 +696,78 @@ fn serialize_manifest(
     out
 }
 
+/// Parse a decimal integer field.
+///
+/// Number fields are written by us and are always ASCII digits, so decoding
+/// through `str` is correct here in a way it never is for a path.
+fn parse_u64(bytes: &[u8]) -> Option<u64> {
+    core::str::from_utf8(bytes).ok()?.parse().ok()
+}
+
+/// Decode an escaped path field.
+///
+/// Returns `None` for a field no call to [`esc`] could have produced; a
+/// malformed record is a corrupt record, and salvaging part of it would hand
+/// the restorer a path naming the wrong file.
+fn unesc_path(bytes: &[u8]) -> Option<PathBuf> {
+    crate::fs::escape::unescape_octal(bytes).map(PathBuf::from)
+}
+
+/// Decode an escaped field that must be ASCII text (an ID or a hex hash).
+fn unesc_text(bytes: &[u8]) -> Option<String> {
+    String::from_utf8(crate::fs::escape::unescape_octal(bytes)?).ok()
+}
+
+/// Whether a manifest ID is safe to use as a single path component.
+///
+/// Both `restore` and `verify` build `<backup_root>/<id>` and
+/// `<backup_root>/<id>.manifest`, and the ID reaching them comes either from
+/// a caller or from inside a manifest file.  An ID of `..` or containing a
+/// `/` would walk out of the backup root, so it is checked against the shape
+/// [`generate_id`] actually produces rather than trusted.
+fn is_valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// Build the path of a named manifest, rejecting an ID that could escape the
+/// backup root.
+fn manifest_path_for(backup_root: &Path, id: &str) -> KernelResult<PathBuf> {
+    if !is_valid_id(id) {
+        return Err(KernelError::InvalidArgument);
+    }
+    Ok(backup_root.join(alloc::format!("{}{}", id, MANIFEST_EXT)))
+}
+
+/// Whether a directory entry names a manifest file.
+///
+/// Uses the extension rather than a byte suffix so that a file *called*
+/// `.manifest` - a legal dotfile with no extension - is not mistaken for one.
+fn is_manifest_name(name: &Path) -> bool {
+    name.extension().is_some_and(|e| e.as_bytes() == b"manifest")
+}
+
+/// Whether a manifest entry path is safe to join onto a destination.
+///
+/// This is the tar/zip path-traversal check: a relative path free of `..`
+/// cannot leave the directory it is joined to, while an absolute one would
+/// *replace* it (`Path::join` semantics) and a `..` would climb out of it.
+/// The check lives at parse time so no later consumer has to remember it.
+fn is_safe_entry_path(path: &Path) -> bool {
+    !path.is_empty() && !path.is_absolute() && path.has_no_dot_components()
+}
+
 /// Parse a manifest from its serialized form.
-fn parse_manifest(data: &str) -> KernelResult<Manifest> {
+///
+/// Operates on bytes rather than `&str`: the escaped form is pure ASCII by
+/// construction, but decoding the file as UTF-8 first would mean a manifest
+/// truncated mid-escape is rejected with the wrong error, and it would tempt
+/// the path fields back into `String`.
+fn parse_manifest(data: &[u8]) -> KernelResult<Manifest> {
     let mut manifest = Manifest {
         id: String::new(),
-        source: String::new(),
+        source: PathBuf::new(),
         mode: BackupMode::Full,
         timestamp_ns: 0,
         entries: Vec::new(),
@@ -633,61 +775,86 @@ fn parse_manifest(data: &str) -> KernelResult<Manifest> {
         total_bytes: 0,
     };
 
-    for line in data.lines() {
-        if line.is_empty() {
-            continue;
-        }
+    let mut lines = data
+        .split(|&b| b == b'\n')
+        .map(|l| l.strip_suffix(b"\r").unwrap_or(l))
+        .filter(|l| !l.is_empty());
 
-        let parts: Vec<&str> = line.splitn(6, '|').collect();
-        if parts.is_empty() {
-            continue;
-        }
+    // The version line must come first; see MANIFEST_VERSION for why an older
+    // manifest is refused rather than read.
+    let version = lines
+        .next()
+        .and_then(|l| l.strip_prefix(b"V|"))
+        .and_then(parse_u64)
+        .ok_or(KernelError::CorruptedData)?;
+    if version != MANIFEST_VERSION {
+        return Err(KernelError::NotSupported);
+    }
 
-        match parts[0] {
-            "H" => {
+    for line in lines {
+        let parts: Vec<&[u8]> = line.splitn(6, |&b| b == b'|').collect();
+
+        match parts.first().copied() {
+            Some(b"H") => {
                 // Header: H|id|src|mode|timestamp_ns
-                if parts.len() < 5 {
+                let (Some(&id), Some(&src), Some(&mode), Some(&ts)) =
+                    (parts.get(1), parts.get(2), parts.get(3), parts.get(4))
+                else {
+                    return Err(KernelError::CorruptedData);
+                };
+                let id = unesc_text(id).ok_or(KernelError::CorruptedData)?;
+                if !is_valid_id(&id) {
+                    // The ID becomes a path component under the backup root.
                     return Err(KernelError::CorruptedData);
                 }
-                manifest.id = String::from(parts[1]);
-                manifest.source = String::from(parts[2]);
-                manifest.mode = match parts[3] {
-                    "incr" => BackupMode::Incremental,
-                    _ => BackupMode::Full,
+                manifest.id = id;
+                manifest.source = unesc_path(src).ok_or(KernelError::CorruptedData)?;
+                manifest.mode = if mode == b"incr" {
+                    BackupMode::Incremental
+                } else {
+                    BackupMode::Full
                 };
-                manifest.timestamp_ns = parts[4].parse().unwrap_or(0);
+                manifest.timestamp_ns = parse_u64(ts).unwrap_or(0);
             }
-            "D" => {
+            Some(b"D") => {
                 // Directory: D|path
-                if parts.len() < 2 {
-                    continue;
+                let Some(&path) = parts.get(1) else { continue };
+                let path = unesc_path(path).ok_or(KernelError::CorruptedData)?;
+                if !is_safe_entry_path(&path) {
+                    return Err(KernelError::CorruptedData);
                 }
                 manifest.entries.push(ManifestEntry {
-                    path: String::from(parts[1]),
+                    path,
                     size: 0,
                     modified_ns: 0,
                     hash: String::new(),
                     entry_type: String::from("dir"),
                 });
             }
-            "F" => {
+            Some(b"F") => {
                 // File: F|path|size|modified_ns|hash
-                if parts.len() < 5 {
+                let (Some(&path), Some(&size), Some(&mtime), Some(&hash)) =
+                    (parts.get(1), parts.get(2), parts.get(3), parts.get(4))
+                else {
                     continue;
+                };
+                let path = unesc_path(path).ok_or(KernelError::CorruptedData)?;
+                if !is_safe_entry_path(&path) {
+                    return Err(KernelError::CorruptedData);
                 }
                 manifest.entries.push(ManifestEntry {
-                    path: String::from(parts[1]),
-                    size: parts[2].parse().unwrap_or(0),
-                    modified_ns: parts[3].parse().unwrap_or(0),
-                    hash: String::from(parts[4]),
+                    path,
+                    size: parse_u64(size).unwrap_or(0),
+                    modified_ns: parse_u64(mtime).unwrap_or(0),
+                    hash: unesc_text(hash).ok_or(KernelError::CorruptedData)?,
                     entry_type: String::from("file"),
                 });
             }
-            "T" => {
+            Some(b"T") => {
                 // Footer: T|file_count|total_bytes
-                if parts.len() >= 3 {
-                    manifest.file_count = parts[1].parse().unwrap_or(0);
-                    manifest.total_bytes = parts[2].parse().unwrap_or(0);
+                if let (Some(&count), Some(&bytes)) = (parts.get(1), parts.get(2)) {
+                    manifest.file_count = parse_u64(count).unwrap_or(0);
+                    manifest.total_bytes = parse_u64(bytes).unwrap_or(0);
                 }
             }
             _ => {} // Skip unknown lines for forward compatibility.
@@ -702,23 +869,22 @@ fn parse_manifest(data: &str) -> KernelResult<Manifest> {
 }
 
 /// Load a manifest file.
-fn load_manifest(path: &str) -> KernelResult<Manifest> {
+fn load_manifest(path: &Path) -> KernelResult<Manifest> {
     let data = Vfs::read_file(path)?;
     if data.len() > MAX_MANIFEST_SIZE {
         return Err(KernelError::InvalidArgument);
     }
-    let text = core::str::from_utf8(&data).map_err(|_| KernelError::CorruptedData)?;
-    parse_manifest(text)
+    parse_manifest(&data)
 }
 
 /// Find and load the most recent manifest in a backup root.
-fn load_latest_manifest(backup_root: &str) -> KernelResult<Manifest> {
+fn load_latest_manifest(backup_root: &Path) -> KernelResult<Manifest> {
     let entries = Vfs::readdir(backup_root)?;
-    let mut best: Option<(u64, String)> = None;
+    let mut best: Option<(u64, PathBuf)> = None;
 
     for entry in &entries {
-        if entry.name.ends_with(MANIFEST_EXT) {
-            let path = alloc::format!("{}/{}", backup_root, entry.name);
+        if is_manifest_name(&entry.name) {
+            let path = backup_root.join(&entry.name);
             if let Ok(m) = load_manifest(&path) {
                 let ts = m.timestamp_ns;
                 if best.as_ref().is_none_or(|(prev_ts, _)| ts > *prev_ts) {
@@ -740,12 +906,12 @@ fn load_latest_manifest(backup_root: &str) -> KernelResult<Manifest> {
 
 /// Recursively collect file/directory entries from a source tree.
 fn collect_entries(
-    root: &str,
-    path: &str,
+    root: &Path,
+    path: &Path,
     out: &mut Vec<ManifestEntry>,
     depth: usize,
     max_depth: usize,
-    exclude: &[String],
+    exclude: &[PathBuf],
 ) -> KernelResult<()> {
     if depth > max_depth || out.len() >= MAX_FILES {
         return Ok(());
@@ -757,30 +923,32 @@ fn collect_entries(
     };
 
     for entry in &entries {
-        if entry.name == "." || entry.name == ".." {
+        if entry.name.as_path() == Path::new(".") || entry.name.as_path() == Path::new("..") {
             continue;
         }
         if out.len() >= MAX_FILES {
             return Ok(());
         }
 
-        let full = if path == "/" {
-            alloc::format!("/{}", entry.name)
-        } else {
-            alloc::format!("{}/{}", path, entry.name)
+        // `Path::join` collapses the root case itself, so the `path == "/"`
+        // arm that existed only to avoid a doubled separator is gone.
+        let full = path.join(&entry.name);
+
+        // Relative path, recorded in the manifest.  `Path::strip_prefix` is
+        // component-aligned and returns a *genuinely* relative remainder; the
+        // byte-wise `str::strip_prefix` it replaces both left a leading
+        // separator (so joining the result onto a restore destination would
+        // have replaced it) and mis-stripped, turning `/ab/c` under root `/a`
+        // into `b/c`.
+        let Some(rel) = full.strip_prefix(root) else {
+            // Not under the root at all: a symlinked or racing readdir.
+            // Skipping is safer than recording a path we cannot place.
+            continue;
         };
 
-        // Compute relative path.
-        let rel = if root == "/" {
-            full.clone()
-        } else if let Some(stripped) = full.strip_prefix(root) {
-            String::from(stripped)
-        } else {
-            full.clone()
-        };
-
-        // Check exclusions.
-        if exclude.iter().any(|ex| rel.starts_with(ex.as_str())) {
+        // Check exclusions against the real path being visited, which is what
+        // the operator sees and types.
+        if exclude.iter().any(|ex| crate::fs::pathutil::path_in_subtree(&full, ex)) {
             continue;
         }
 
@@ -812,7 +980,7 @@ fn collect_entries(
                     hash: String::new(),
                     entry_type: String::from("dir"),
                 });
-                collect_entries(root, &full, out, depth + 1, max_depth, exclude)?;
+                collect_entries(root, &full, out, depth.saturating_add(1), max_depth, exclude)?;
             }
             _ => {} // Skip symlinks etc.
         }
@@ -838,6 +1006,7 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("[backup] Running self-test...");
 
     test_manifest_roundtrip();
+    test_manifest_hostile_names();
     test_full_backup();
     test_incremental_backup();
     test_restore();
@@ -846,21 +1015,21 @@ pub fn self_test() -> KernelResult<()> {
     test_dry_run();
     test_stats();
 
-    serial_println!("[backup] Self-test passed (8 tests).");
+    serial_println!("[backup] Self-test passed (9 tests).");
     Ok(())
 }
 
 fn test_manifest_roundtrip() {
     let entries = alloc::vec![
         ManifestEntry {
-            path: String::from("/sub"),
+            path: PathBuf::from("sub"),
             size: 0,
             modified_ns: 0,
             hash: String::new(),
             entry_type: String::from("dir"),
         },
         ManifestEntry {
-            path: String::from("/sub/file.txt"),
+            path: PathBuf::from("sub/file.txt"),
             size: 42,
             modified_ns: 1000,
             hash: String::from("abcd1234"),
@@ -870,16 +1039,16 @@ fn test_manifest_roundtrip() {
 
     let serialized = serialize_manifest(
         "bkp_100_000",
-        "/src",
+        Path::new("/src"),
         BackupMode::Full,
         999_000_000,
         &entries,
         42,
     );
 
-    let parsed = parse_manifest(&serialized).expect("parse");
+    let parsed = parse_manifest(serialized.as_bytes()).expect("parse");
     assert_eq!(parsed.id, "bkp_100_000");
-    assert_eq!(parsed.source, "/src");
+    assert_eq!(parsed.source, PathBuf::from("/src"));
     assert_eq!(parsed.mode, BackupMode::Full);
     assert_eq!(parsed.entries.len(), 2);
     assert_eq!(parsed.entries[1].hash, "abcd1234");
@@ -887,6 +1056,98 @@ fn test_manifest_roundtrip() {
     assert_eq!(parsed.total_bytes, 42);
 
     serial_println!("[backup]   manifest roundtrip: ok");
+}
+
+/// A manifest must survive names that are not text and must refuse records
+/// that would write outside the destination.
+///
+/// Every case here was a live defect before the format gained escaping and a
+/// version line: a `|` or a newline in a filename forged a record, and an
+/// absolute or `..`-bearing entry path escaped the restore destination
+/// entirely (the classic tar traversal).
+fn test_manifest_hostile_names() {
+    // A name that is not UTF-8, one carrying the field delimiter, and one
+    // carrying the record delimiter.
+    let entries = alloc::vec![
+        ManifestEntry {
+            path: PathBuf::from(b"re\xffport.txt".as_slice()),
+            size: 1,
+            modified_ns: 0,
+            hash: String::from("aa"),
+            entry_type: String::from("file"),
+        },
+        ManifestEntry {
+            path: PathBuf::from("we|ird\nname"),
+            size: 2,
+            modified_ns: 0,
+            hash: String::from("bb"),
+            entry_type: String::from("file"),
+        },
+    ];
+    let serialized = serialize_manifest(
+        "bkp_1",
+        Path::new(b"/sr\xfec".as_slice()),
+        BackupMode::Incremental,
+        7,
+        &entries,
+        3,
+    );
+    // The whole point of escaping: the file stays line-oriented ASCII, so the
+    // two entries are still exactly two records.
+    assert!(serialized.is_ascii());
+    // V, H, F, F, T - the newline inside the second name did not split it.
+    assert_eq!(serialized.lines().count(), 5);
+
+    let parsed = parse_manifest(serialized.as_bytes()).expect("parse");
+    assert_eq!(parsed.source, PathBuf::from(b"/sr\xfec".as_slice()));
+    assert_eq!(parsed.mode, BackupMode::Incremental);
+    assert_eq!(parsed.entries.len(), 2);
+    assert_eq!(parsed.entries[0].path, PathBuf::from(b"re\xffport.txt".as_slice()));
+    assert_eq!(parsed.entries[1].path, PathBuf::from("we|ird\nname"));
+
+    // Path traversal: an absolute entry path would *replace* the restore
+    // destination, and a `..` would climb out of it.  Both are corrupt.
+    for bad in [
+        // Absolute entry path.
+        "V|2\nH|bkp_1|/src|full|0\nF|\\057etc\\057passwd|1|0|aa\nT|1|1\n",
+        // `../../etc` - `\057` is an escaped separator.
+        "V|2\nH|bkp_1|/src|full|0\nF|..\\057..\\057etc|1|0|aa\nT|1|1\n",
+        // A `..` in the middle still climbs out once joined.
+        "V|2\nH|bkp_1|/src|full|0\nD|sub\\057..\\057..\nT|0|0\n",
+        // An ID is joined onto the backup root to name the data directory.
+        "V|2\nH|..|/src|full|0\nT|0|0\n",
+        // A field no `esc` call could have produced.
+        "V|2\nH|bkp_1|/sr\\09c|full|0\nT|0|0\n",
+    ] {
+        assert!(
+            matches!(
+                parse_manifest(bad.as_bytes()),
+                Err(KernelError::CorruptedData)
+            ),
+            "corrupt manifest accepted: {bad}"
+        );
+    }
+
+    // A version-1 manifest recorded absolute entry paths; reading one with
+    // version-2 rules would restore over the original files.
+    assert!(matches!(
+        parse_manifest(b"V|1\nH|bkp_1|/src|full|0\nT|0|0\n"),
+        Err(KernelError::NotSupported)
+    ));
+    // No version line at all is corrupt, not "version 0".
+    assert!(matches!(
+        parse_manifest(b"H|bkp_1|/src|full|0\nT|0|0\n"),
+        Err(KernelError::CorruptedData)
+    ));
+
+    // An ID must be a single safe component wherever it comes from.
+    assert!(manifest_path_for(Path::new("/bkp"), "../evil").is_err());
+    assert_eq!(
+        manifest_path_for(Path::new("/bkp"), "bkp_1").ok(),
+        Some(PathBuf::from("/bkp/bkp_1.manifest"))
+    );
+
+    serial_println!("[backup]   hostile manifest names: ok");
 }
 
 fn test_full_backup() {

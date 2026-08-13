@@ -4218,16 +4218,21 @@ pub fn sys_process_crash_info(args: &SyscallArgs) -> SyscallResult {
 
     match pcb::get_crash_info(child_pid) {
         Some(info) => {
-            // Write crash info to userspace buffer.
-            // SAFETY: validated non-null, and the caller is responsible
-            // for providing a writable 32-byte buffer.  In kernel mode
-            // (current state), this is always valid kernel memory.
-            let buf = buf_ptr as *mut u64;
-            unsafe {
-                buf.write(info.exception_code);
-                buf.add(1).write(info.faulting_rip);
-                buf.add(2).write(info.aux);
-                buf.add(3).write(info.thread_id);
+            // Assembled in the kernel and delivered as one copy.  The four
+            // fields used to be stored one at a time through `buf_ptr as
+            // *mut u64` under a SAFETY comment asserting the buffer was
+            // "always valid kernel memory" — it is a userspace address, so
+            // that was wrong twice over: the store needs SMAP bracketing, and
+            // a fault on the third word would have left the caller with two
+            // words of a crash report and no way to know it was partial.
+            let record = [
+                info.exception_code,
+                info.faulting_rip,
+                info.aux,
+                info.thread_id,
+            ];
+            if let Err(e) = crate::mm::user::write_user_items(buf_ptr, &record) {
+                return SyscallResult::err(e);
             }
             SyscallResult::ok(1)
         }
@@ -5628,17 +5633,22 @@ pub fn sys_signal_mask(
         Ok(p) => p,
         Err(e) => return SyscallResult::err(e),
     };
-    let old = crate::proc::signal::set_blocked(pid, args.arg0);
+    // Checked before the mask is touched, not after: a caller that passes a
+    // bad out-pointer should get an error and an unchanged mask, rather than
+    // a silently swapped mask it cannot learn the previous value of.
+    // `write_user_value` re-validates at the moment of the store, which is
+    // what actually guards it; this is only about failing early.
     if args.arg1 != 0 {
-        if let Err(e) = crate::mm::user::validate_user_write(
-            args.arg1,
-            core::mem::size_of::<u64>(),
-        ) {
+        if let Err(e) =
+            crate::mm::user::validate_user_write(args.arg1, core::mem::size_of::<u64>())
+        {
             return SyscallResult::err(e);
         }
-        // SAFETY: validated as a writable user pointer of u64 size above.
-        unsafe {
-            core::ptr::write(args.arg1 as *mut u64, old);
+    }
+    let old = crate::proc::signal::set_blocked(pid, args.arg0);
+    if args.arg1 != 0 {
+        if let Err(e) = crate::mm::user::write_user_value::<u64>(args.arg1, old) {
+            return SyscallResult::err(e);
         }
     }
     SyscallResult::ok(0)
@@ -5658,16 +5668,12 @@ pub fn sys_signal_pending(
     if args.arg0 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if let Err(e) = crate::mm::user::validate_user_write(
-        args.arg0,
-        core::mem::size_of::<u64>(),
-    ) {
-        return SyscallResult::err(e);
-    }
     let pending = crate::proc::signal::pending(pid);
-    // SAFETY: validated as a writable user pointer of u64 size above.
-    unsafe {
-        core::ptr::write(args.arg0 as *mut u64, pending);
+    // Nothing is consumed by reading the pending set, so there is no need to
+    // validate ahead of the query; `write_user_value` does the check that
+    // matters, at the point of the store.
+    if let Err(e) = crate::mm::user::write_user_value::<u64>(args.arg0, pending) {
+        return SyscallResult::err(e);
     }
     SyscallResult::ok(0)
 }
@@ -6144,12 +6150,17 @@ pub fn deliver_pending_signal(
         rflags: frame.user_rflags,
     };
 
-    // SAFETY: the region was validated as writable user memory above, and
-    // CR3 still points at this process's address space (we are returning
-    // to it). ctx_addr is 16-byte aligned and within the region.
-    unsafe {
-        core::ptr::write(ctx_addr as *mut SignalContext, ctx);
-        core::ptr::write(new_rsp as *mut u64, 0u64); // null return address
+    // Stored through the bounce rather than by a typed write to the user
+    // stack: the store has to be bracketed by STAC/CLAC once SMAP is on, and
+    // the up-front `validate_user_write` is not on its own a licence to
+    // dereference the address.  A failure here re-arms the signal for the same
+    // reason the validation failure above does — better to retry delivery than
+    // to enter the trampoline with a half-written context.
+    if crate::mm::user::write_user_value::<SignalContext>(ctx_addr, ctx).is_err()
+        || crate::mm::user::write_user_value::<u64>(new_rsp, 0u64).is_err()
+    {
+        signal::set_pending(pid, sig);
+        return false;
     }
 
     // Rewrite the frame so SYSRET jumps to the trampoline.
@@ -6772,9 +6783,7 @@ pub fn sys_console_write(args: &SyscallArgs) -> SyscallResult {
 /// [`sys_tty_read`].  Which layer decodes the keystrokes is irrelevant to
 /// whose job is entitled to them.
 pub fn sys_console_read_char(args: &SyscallArgs) -> SyscallResult {
-    let ptr = args.arg0 as *mut u8;
-
-    if ptr.is_null() {
+    if args.arg0 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
@@ -6784,7 +6793,11 @@ pub fn sys_console_read_char(args: &SyscallArgs) -> SyscallResult {
         TtyCtlOutcome::Fail(e) => return SyscallResult::err(e),
     }
 
-    // Validate the output byte is in user space and writable.
+    // Checked before blocking so a bad pointer costs the caller an error
+    // rather than a keystroke consumed with nowhere to put it.  The read below
+    // sleeps, so this check cannot be the one the store relies on — a peer
+    // thread may unmap the byte meanwhile — which is why the delivery goes
+    // through `write_user_value`, which re-validates.
     if let Err(e) = crate::mm::user::validate_user_write(args.arg0, 1) {
         return SyscallResult::err(e);
     }
@@ -6792,8 +6805,9 @@ pub fn sys_console_read_char(args: &SyscallArgs) -> SyscallResult {
     // Block until a key is available.
     let ch = crate::keyboard::read_char();
 
-    // SAFETY: Pointer validated above — in user space, mapped, writable.
-    unsafe { core::ptr::write(ptr, ch); }
+    if let Err(e) = crate::mm::user::write_user_value::<u8>(args.arg0, ch) {
+        return SyscallResult::err(e);
+    }
 
     SyscallResult::ok(1)
 }
@@ -6803,21 +6817,20 @@ pub fn sys_console_read_char(args: &SyscallArgs) -> SyscallResult {
 /// If a keypress is buffered, writes the ASCII code to the output byte
 /// and returns 1.  Otherwise returns `WouldBlock` immediately.
 pub fn sys_console_try_read_char(args: &SyscallArgs) -> SyscallResult {
-    let ptr = args.arg0 as *mut u8;
-
-    if ptr.is_null() {
+    if args.arg0 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    // Validate the output byte is in user space and writable.
+    // Checked before the dequeue so a bad pointer does not swallow a keystroke.
     if let Err(e) = crate::mm::user::validate_user_write(args.arg0, 1) {
         return SyscallResult::err(e);
     }
 
     match crate::keyboard::try_read_char() {
         Some(ch) => {
-            // SAFETY: Pointer validated above — in user space, mapped, writable.
-            unsafe { core::ptr::write(ptr, ch); }
+            if let Err(e) = crate::mm::user::write_user_value::<u8>(args.arg0, ch) {
+                return SyscallResult::err(e);
+            }
             SyscallResult::ok(1)
         }
         None => SyscallResult::err(KernelError::WouldBlock),

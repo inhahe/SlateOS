@@ -11,6 +11,27 @@
 //!   sequence number, timestamp, event type, and path.
 //! - **On-disk persistence** via a `/_JOURNAL` file (JSON-lines format,
 //!   per the design spec's "no binary logs" rule).
+//!
+//! ## Paths in a JSON-only container
+//!
+//! A path is a byte string (every byte but `/` and NUL is legal), but a JSON
+//! string must be valid Unicode.  The two cannot be reconciled in one field
+//! without either losing bytes or emitting ill-formed Unicode, so each path is
+//! written as **up to two** fields:
+//!
+//! - `"path"` — always present, always valid UTF-8: the lossy rendering
+//!   (undecodable bytes as U+FFFD), for human readers and for the
+//!   overwhelmingly common case where the path *is* UTF-8 and the rendering is
+//!   exact.
+//! - `"path_hex"` — present **only** when the path is not valid UTF-8:
+//!   lowercase hex of the exact bytes.  Its presence is the signal that
+//!   `"path"` is a rendering and must not be used to reopen anything.
+//!
+//! Renames use `"from"` / `"from_hex"` the same way.  A reader that cares
+//! about exactness checks for the `_hex` field first and falls back to `path`.
+//! See design-decisions.md §"Journal path encoding" for why this beats
+//! surrogate escapes (`\udcXX`) — those are ill-formed Unicode that strict
+//! parsers, notably Go's `encoding/json`, silently replace with U+FFFD.
 //! - **On boot**: load the journal file to restore the sequence counter
 //!   and recent entries.  Missing file means seq starts at 1.
 //! - **On mutation**: append to the ring buffer.  Periodically flush to disk
@@ -38,6 +59,7 @@ use alloc::vec::Vec;
 use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Event types (reuses FsEventType concept from notify, but journal-specific)
@@ -94,15 +116,17 @@ pub struct JournalEntry {
     /// Type of change.
     pub event_type: JournalEventType,
     /// Affected path (destination for renames).
-    pub path: String,
+    pub path: PathBuf,
     /// Original path for rename events; empty for other event types.
-    pub old_path: String,
+    pub old_path: PathBuf,
 }
 
 impl JournalEntry {
     /// Serialize to a JSON-lines compatible string (no newlines in output).
     ///
-    /// Format: `{"seq":N,"ts":N,"type":"...","path":"..."}` or with `"from":"..."` for renames.
+    /// Format: `{"seq":N,"ts":N,"type":"...","path":"..."}`, plus
+    /// `"path_hex":"..."` when the path is not valid UTF-8, plus
+    /// `"from"`/`"from_hex"` for renames.  See the module docs.
     fn to_json_line(&self) -> String {
         let mut s = String::with_capacity(128);
         s.push_str("{\"seq\":");
@@ -111,13 +135,10 @@ impl JournalEntry {
         push_u64(&mut s, self.timestamp_ns);
         s.push_str(",\"type\":\"");
         s.push_str(self.event_type.as_str());
-        s.push_str("\",\"path\":\"");
-        json_escape_into(&mut s, &self.path);
         s.push('"');
+        json_push_path(&mut s, "path", &self.path);
         if !self.old_path.is_empty() {
-            s.push_str(",\"from\":\"");
-            json_escape_into(&mut s, &self.old_path);
-            s.push('"');
+            json_push_path(&mut s, "from", &self.old_path);
         }
         s.push('}');
         s
@@ -131,8 +152,8 @@ impl JournalEntry {
         let ts = json_extract_u64(line, "\"ts\":")?;
         let etype_str = json_extract_str(line, "\"type\":\"")?;
         let event_type = JournalEventType::from_str(&etype_str)?;
-        let path = json_extract_str(line, "\"path\":\"")?;
-        let old_path = json_extract_str(line, "\"from\":\"").unwrap_or_default();
+        let path = json_extract_path(line, "path")?;
+        let old_path = json_extract_path(line, "from").unwrap_or_default();
         Some(Self {
             seq,
             timestamp_ns: ts,
@@ -235,17 +256,17 @@ pub fn init() {
 /// Record a filesystem change event.
 ///
 /// Called by the VFS after each mutating operation.
-pub fn record(event_type: JournalEventType, path: &str) {
-    record_with_old_path(event_type, path, "");
+pub fn record(event_type: JournalEventType, path: impl AsRef<Path>) {
+    record_with_old_path(event_type, path.as_ref(), Path::new(""));
 }
 
 /// Record a rename event with the old path.
-pub fn record_rename(old_path: &str, new_path: &str) {
-    record_with_old_path(JournalEventType::Renamed, new_path, old_path);
+pub fn record_rename(old_path: impl AsRef<Path>, new_path: impl AsRef<Path>) {
+    record_with_old_path(JournalEventType::Renamed, new_path.as_ref(), old_path.as_ref());
 }
 
 /// Internal: record an event with an optional old path.
-fn record_with_old_path(event_type: JournalEventType, path: &str, old_path: &str) {
+fn record_with_old_path(event_type: JournalEventType, path: &Path, old_path: &Path) {
     let mut journal = JOURNAL.lock();
     if !journal.initialized {
         return; // Not yet initialized — drop silently.
@@ -260,8 +281,8 @@ fn record_with_old_path(event_type: JournalEventType, path: &str, old_path: &str
         seq,
         timestamp_ns,
         event_type,
-        path: String::from(path),
-        old_path: String::from(old_path),
+        path: path.to_path_buf(),
+        old_path: old_path.to_path_buf(),
     };
 
     journal.entries.push_back(entry);
@@ -388,6 +409,22 @@ fn push_u64(s: &mut String, mut val: u64) {
     }
 }
 
+/// Escape a *byte* string for JSON.
+///
+/// JSON strings are Unicode, so undecodable bytes are rendered as U+FFFD —
+/// lossy, and deliberately so: [`json_push_path`] carries the exact bytes in a
+/// companion `_hex` field, and this field exists to be read by a human.
+fn json_escape_bytes_into(s: &mut String, input: &[u8]) {
+    let mut rendered = String::with_capacity(input.len());
+    // Formatting into a `String` cannot fail (its `fmt::Write` impl is
+    // infallible), so there is no error path to propagate.
+    let _ = core::fmt::Write::write_fmt(
+        &mut rendered,
+        format_args!("{}", Path::new(input).display()),
+    );
+    json_escape_into(s, &rendered);
+}
+
 /// Escape a string for JSON (handles quotes, backslashes, control chars).
 fn json_escape_into(s: &mut String, input: &str) {
     for c in input.chars() {
@@ -413,9 +450,87 @@ fn json_escape_into(s: &mut String, input: &str) {
 
 fn hex_digit(n: u32) -> char {
     if n < 10 {
-        (b'0' + n as u8) as char
+        char::from(b'0'.wrapping_add(n as u8))
     } else {
-        (b'a' + (n as u8 - 10)) as char
+        char::from(b'a'.wrapping_add((n as u8).wrapping_sub(10)))
+    }
+}
+
+/// Append `,"<key>":"<lossy>"` and, when `p` is not valid UTF-8, also
+/// `,"<key>_hex":"<lowercase hex of the exact bytes>"`.
+///
+/// A JSON string must be valid Unicode; a path need not be.  Rather than
+/// corrupt the path (lossy-only) or emit ill-formed Unicode (surrogate
+/// escapes), the exact bytes get their own field and the readable field stays
+/// a legal JSON string.  The `_hex` field is omitted entirely for UTF-8 paths,
+/// so ordinary journals are byte-identical to what this module produced before
+/// paths became bytes.
+fn json_push_path(s: &mut String, key: &str, p: &Path) {
+    s.push_str(",\"");
+    s.push_str(key);
+    s.push_str("\":\"");
+    json_escape_bytes_into(s, p.as_bytes());
+    s.push('"');
+    if core::str::from_utf8(p.as_bytes()).is_err() {
+        s.push_str(",\"");
+        s.push_str(key);
+        s.push_str("_hex\":\"");
+        for &b in p.as_bytes() {
+            s.push(hex_digit(u32::from(b >> 4)));
+            s.push(hex_digit(u32::from(b & 0x0F)));
+        }
+        s.push('"');
+    }
+}
+
+/// Read a path field written by [`json_push_path`].
+///
+/// Prefers `<key>_hex` (exact bytes) and falls back to `<key>` (the lossy
+/// rendering) when it is absent — which, by construction, only happens when
+/// the rendering *is* the exact path.
+fn json_extract_path(json: &str, key: &str) -> Option<PathBuf> {
+    let mut hex_prefix = String::with_capacity(key.len().saturating_add(8));
+    hex_prefix.push('"');
+    hex_prefix.push_str(key);
+    hex_prefix.push_str("_hex\":\"");
+    if let Some(hex) = json_extract_str(json, &hex_prefix) {
+        if let Some(bytes) = hex_decode(&hex) {
+            return Some(PathBuf::from(bytes));
+        }
+        // A malformed `_hex` field means the exact bytes are unrecoverable.
+        // Falling back to the lossy `path` would hand the caller a path that
+        // names a *different* file (or none), so refuse the entry instead.
+        return None;
+    }
+    let mut prefix = String::with_capacity(key.len().saturating_add(4));
+    prefix.push('"');
+    prefix.push_str(key);
+    prefix.push_str("\":\"");
+    json_extract_str(json, &prefix).map(PathBuf::from)
+}
+
+/// Decode a lowercase-or-uppercase hex string to bytes; `None` if it has an
+/// odd length or a non-hex digit.
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    let bytes = s.as_bytes();
+    if bytes.len() % 2 != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for pair in bytes.chunks_exact(2) {
+        let hi = hex_val(*pair.first()?)?;
+        let lo = hex_val(*pair.get(1)?)?;
+        out.push(hi.wrapping_shl(4) | lo);
+    }
+    Some(out)
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b.wrapping_sub(b'0')),
+        b'a'..=b'f' => Some(b.wrapping_sub(b'a').wrapping_add(10)),
+        b'A'..=b'F' => Some(b.wrapping_sub(b'A').wrapping_add(10)),
+        _ => None,
     }
 }
 
@@ -526,10 +641,10 @@ pub fn self_test() -> KernelResult<()> {
     }
 
     // Verify rename has old_path.
-    if last_four[2].old_path != "/TEST_JOURNAL.TXT" {
+    if last_four[2].old_path.as_path() != Path::new("/TEST_JOURNAL.TXT") {
         crate::serial_println!(
             "[journal]   FAILED: rename old_path wrong: '{}'",
-            last_four[2].old_path
+            last_four[2].old_path.display()
         );
         return Err(KernelError::IoError);
     }
@@ -550,6 +665,60 @@ pub fn self_test() -> KernelResult<()> {
                 "[journal]   FAILED: JSON round-trip. JSON: {}",
                 json
             );
+            return Err(KernelError::IoError);
+        }
+    }
+
+    // A non-UTF-8 path must survive the JSON round-trip byte-for-byte.  This
+    // is the case the `_hex` companion field exists for: the `"path"` field
+    // alone renders `\xff` as U+FFFD and could never name the file again.
+    {
+        let raw = Path::new(b"/TEST_JOURNAL_\xff\xfe.TXT".as_slice());
+        let entry = JournalEntry {
+            seq: 424_242,
+            timestamp_ns: 7,
+            event_type: JournalEventType::Renamed,
+            path: raw.to_path_buf(),
+            old_path: PathBuf::from(b"/o\xffld".as_slice().to_vec()),
+        };
+        let json = entry.to_json_line();
+        // The readable field is lossy; the hex field is not.  Both must be
+        // present, and the line must still be valid UTF-8 (it is a `String`).
+        if !json.contains("\"path_hex\":\"") || !json.contains("\"from_hex\":\"") {
+            crate::serial_println!("[journal]   FAILED: no _hex field for non-UTF-8 path: {}", json);
+            return Err(KernelError::IoError);
+        }
+        match JournalEntry::from_json_line(&json) {
+            Some(p) if p.path == entry.path && p.old_path == entry.old_path => {
+                crate::serial_println!("[journal]   non-UTF-8 path round-trip: OK");
+            }
+            other => {
+                crate::serial_println!(
+                    "[journal]   FAILED: non-UTF-8 round-trip gave {:?}, json {}",
+                    other.map(|p| p.path),
+                    json
+                );
+                return Err(KernelError::IoError);
+            }
+        }
+        // A pure-UTF-8 path must NOT grow a `_hex` field — ordinary journals
+        // stay byte-identical to the pre-byte-path format.
+        let plain = JournalEntry {
+            seq: 1,
+            timestamp_ns: 2,
+            event_type: JournalEventType::Created,
+            path: PathBuf::from("/plain.txt"),
+            old_path: PathBuf::new(),
+        };
+        let plain_json = plain.to_json_line();
+        if plain_json.contains("_hex") {
+            crate::serial_println!("[journal]   FAILED: UTF-8 path grew a _hex field: {}", plain_json);
+            return Err(KernelError::IoError);
+        }
+        if plain_json.as_str()
+            != "{\"seq\":1,\"ts\":2,\"type\":\"create\",\"path\":\"/plain.txt\"}"
+        {
+            crate::serial_println!("[journal]   FAILED: unexpected JSON layout: {}", plain_json);
             return Err(KernelError::IoError);
         }
     }

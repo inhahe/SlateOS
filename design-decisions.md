@@ -8455,9 +8455,29 @@ is how a bug in the memory debugger itself would surface.
 
 So `walk_poison` judges exactly two things: a root's own body (an `__asan_*`
 call there means the module's opt-out is not in force) and the raw-pointer
-accessors — `core::ptr`, `core::intrinsics` — it reaches, which is the §118/§119
-hazard itself. 500 hits became 2, and both of those turned out to be real
-information about the walk rather than about the kernel (see below).
+accessors it reaches, which is the §118/§119 hazard itself. 500 hits became 2,
+and both of those turned out to be real information about the walk rather than
+about the kernel (see below).
+
+Getting the accessor list right needed one non-obvious addition. `core::ptr` and
+`core::intrinsics` look like they cover the ground, but `core::intrinsics` emits
+only `rotate_left`/`rotate_right` in this binary — pure register operations —
+because `write_bytes` and `copy_nonoverlapping` are lowered by LLVM straight to
+`memset`/`memcpy` calls rather than to callable monomorphisations. A bulk fill
+aimed at poisoned memory therefore appears in the call graph as a plain
+`call memset`, which is the single most likely way to write this bug and which
+both patterns would have missed. The three `mem*` builtins are matched by exact
+name.
+
+One consequence is worth stating rather than leaving to be rediscovered: after
+the `rawmem` conversion, *zero* accessors of any kind are reachable from the
+poison roots, because the byte touching is all inline `asm!`, which emits no
+call. The accessor branch therefore judges an empty set today and passes because
+there is nothing to judge — the intended state, but indistinguishable by exit
+code from a check that has quietly stopped working. The gate's OK line reports
+the accessor count next to the reachable count so the two cannot be confused.
+The real work every run is done by the root-body branch (all thirteen roots
+verified uninstrumented); the accessor branch is a tripwire for reintroduction.
 
 *For:* a gate that reports 500 non-problems does not get 500 exemptions, it gets
 rubber-stamped as noise, and the one real signal goes with it. Precision here is

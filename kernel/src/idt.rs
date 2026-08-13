@@ -1072,25 +1072,39 @@ fn try_dispatch_user_exception(
         r15,
     };
 
-    // Write the context to the user stack.
+    // Write the context to the user stack — through `mm::user`, not through a
+    // raw `*mut ExceptionContext`.
     //
-    // Since CR3 is still the process's PML4, the user stack is
-    // accessible.  But we need to ensure the stack page is mapped
-    // (it should be — we only need the page that was already in use
-    // by the faulting code, unless the stack is very small).
+    // Two things were wrong with writing it directly, and only one of them was
+    // about SMAP:
     //
-    // SAFETY: ctx_addr is within the user stack region, which the
-    // process had mapped (it was just executing with this RSP).
-    // The context struct is safely sized.
-    let ctx_ptr = ctx_addr as *mut ExceptionContext;
-    // Write a null return address above the context so the handler
-    // sees a proper call frame.
-    let ret_addr_ptr = (ctx_addr.wrapping_add(ctx_size)) as *mut u64;
-
-    // SAFETY: These addresses are in the user's mapped stack region.
-    unsafe {
-        core::ptr::write(ctx_ptr, ctx);
-        core::ptr::write(ret_addr_ptr, 0u64); // Null return address.
+    // 1. `rsp` came out of the *ring-3* interrupt frame, so it is entirely
+    //    attacker-chosen. A process that registered an exception handler could
+    //    set RSP to a kernel address, fault deliberately, and have the kernel
+    //    write a 168-byte structure — most of whose fields are its own
+    //    registers — wherever it liked. That is an arbitrary kernel write
+    //    available to any unprivileged process. `write_user_value` validates
+    //    the destination is in the user half and writable before storing.
+    // 2. It is a supervisor write to a user page, so it #PFs under CR4.SMAP.
+    //    `mm::user` brackets each copy in STAC/CLAC; opening a window here by
+    //    hand would be wrong anyway, since `validate_user_write` can fault a
+    //    page in and break CoW (a freshly-forked process's stack is CoW), and
+    //    those can block.
+    //
+    // Failing the write is not fatal to the kernel: we return `false`, and the
+    // caller kills the process exactly as if no handler had been registered.
+    // That is the right answer for an unwritable stack too — there is nowhere
+    // to put the frame, so the process cannot be told about its own fault.
+    // (Linux reaches the same outcome via `force_sigsegv`.)
+    //
+    // A null return address goes above the context so the handler sees a proper
+    // call frame; returning through it faults, which is intentional — handlers
+    // must leave via SYS_EXIT or SYS_EXCEPTION_RETURN.
+    if crate::mm::user::write_user_value::<ExceptionContext>(ctx_addr, ctx).is_err() {
+        return false;
+    }
+    if crate::mm::user::write_user_value::<u64>(ctx_addr.wrapping_add(ctx_size), 0u64).is_err() {
+        return false;
     }
 
     // Redirect execution to the handler via volatile writes.

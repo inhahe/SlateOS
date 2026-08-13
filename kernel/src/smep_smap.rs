@@ -24,15 +24,28 @@
 //!
 //! ## Usage Pattern
 //!
+//! Syscall handlers do **not** call `stac`/`clac`/[`with_user_access`]
+//! themselves.  Every kernel→user access goes through `mm::user`, which already
+//! brackets each copy:
+//!
 //! ```ignore
-//! // In syscall handler that needs to read user memory:
-//! let data = unsafe {
-//!     smep_smap::with_user_access(|| {
-//!         // SMAP temporarily disabled — user pages accessible
-//!         core::ptr::read(user_ptr)
-//!     })
-//! };
+//! let mut buf = alloc::vec![0u8; len];
+//! crate::mm::user::copy_from_user(user_ptr, &mut buf)?;   // STAC … CLAC inside
+//! pipe::write(&buf)?;                                      // kernel memory only
 //! ```
+//!
+//! The rule that makes this work is that the AC window must contain exactly one
+//! non-blocking copy.  A handler that opened a window around a *blocking* callee
+//! would leave AC = 1 in the task's saved RFLAGS across the reschedule, silently
+//! disabling SMAP for that task and for the scheduler itself — which is why
+//! there is no "wrap the existing raw-pointer code" shortcut and why
+//! [`with_user_access`] has no callers outside this module's own self-test.
+//!
+//! The single exception is a futex word, where the atomicity of the RMW against
+//! a concurrent userspace CAS *is* the primitive and a copy-in/copy-out bounce
+//! would reintroduce the lost update.  `mm::user::user_atomic_*` brackets one
+//! atomic instruction per call, with retry loops outside the window — the same
+//! shape as Linux's `arch/x86/include/asm/futex.h`.
 //!
 //! ## Performance
 //!
@@ -126,20 +139,35 @@ fn entry_paths_clear_ac_impl() -> bool {
 /// loudly (a #PF on the first unannotated user access), but gating it keeps
 /// both preconditions in one place.
 ///
-/// `mm::user` already uses `stac()`/`clac()` around its accessors.  What blocks
-/// this is not an audit but a refactor: ~100 syscall handlers validate a user
-/// pointer and then build a slice *over the user virtual address* and hand it
-/// to kernel code (`core::slice::from_raw_parts(ptr, len)` straight into
-/// `pipe::read`, and so on).  Those accesses would all fault under SMAP.
+/// Every kernel→user access now goes through `mm::user`, which brackets each
+/// copy in `stac()`/`clac()`.  Getting here was a refactor, not an audit: ~100
+/// syscall handlers used to validate a user pointer and then build a slice
+/// *over the user virtual address* and hand it to kernel code
+/// (`core::slice::from_raw_parts(ptr, len)` straight into `pipe::read`, and so
+/// on).  Each of those is now a bounce through a kernel buffer —
+/// `copy_from_user` / `copy_to_user` / `read_user_value` / `write_user_value` /
+/// `read_user_items` / `write_user_items`.
 ///
-/// Wrapping them in `stac()`/`clac()` is *not* the fix — several of the
-/// callees block, and an open STAC window across a reschedule leaves AC = 1 in
-/// the task's saved RFLAGS, disabling SMAP for that task and for the scheduler
-/// itself.  The window has to stay inside a single non-blocking copy.  See
-/// `D-SYSCALL-HANDLERS-HAND-RAW-USER-SLICES-TO-KERNEL-CODE` in
-/// `known-issues.md`; note it is a use-after-free risk in its own right, quite
-/// apart from SMAP.
-const USER_ACCESSES_ANNOTATED: bool = false;
+/// Wrapping the old shape in `stac()`/`clac()` would *not* have been the fix:
+/// several of the callees block, and an open STAC window across a reschedule
+/// leaves AC = 1 in the task's saved RFLAGS, disabling SMAP for that task and
+/// for the scheduler itself.  The window has to stay inside a single
+/// non-blocking copy.  (The raw-slice shape was also a use-after-free in its own
+/// right, quite apart from SMAP: a peer thread can `munmap` the range while the
+/// caller sleeps.)  See `D-SYSCALL-HANDLERS-HAND-RAW-USER-SLICES-TO-KERNEL-CODE`
+/// in `known-issues.md`.
+///
+/// The one place a bounce is *wrong* is a futex word, where the primitive is the
+/// atomicity of the RMW against a concurrent userspace CAS — copy-in / modify /
+/// copy-out reintroduces the lost update.  Those go through
+/// `mm::user::user_atomic_*`, which brackets exactly one atomic instruction, and
+/// run their retry loops outside the window (as Linux does in
+/// `arch/x86/include/asm/futex.h`).
+///
+/// Keeping this a `const` rather than deleting it: it is the single documented
+/// place to flip SMAP back off if a missed access path turns up, and
+/// `smap_enable_blocker()` still reads it so the reason lands on the serial log.
+const USER_ACCESSES_ANNOTATED: bool = true;
 
 /// Whether the kernel believes every entry path clears `EFLAGS.AC`.
 ///
@@ -199,15 +227,14 @@ pub fn init() {
         serial_println!("[smep_smap] SMEP not supported by CPU");
     }
 
-    // SMAP: detected but NOT enabled yet.  There are TWO independent
-    // prerequisites, and both must be met before setting CR4.SMAP:
+    // SMAP has TWO independent prerequisites, and both must be met before
+    // setting CR4.SMAP.  Both are satisfied now, but the gate stays so that
+    // regressing either one turns SMAP off with a reason rather than turning
+    // the boot into a #PF storm:
     //
-    // 1. Every kernel→user memory access path must use STAC/CLAC.  Until
-    //    copy_from_user / copy_to_user are instrumented, enabling SMAP would
-    //    fault on legitimate kernel reads of user buffers during syscalls.
-    //    The infrastructure (stac/clac/with_user_access) is ready.
-    //    *This one fails loudly* — you get a #PF the first time a syscall
-    //    touches a user buffer.
+    // 1. Every kernel→user memory access path must use STAC/CLAC — see
+    //    `USER_ACCESSES_ANNOTATED` below.  *This one fails loudly*: a #PF the
+    //    first time a syscall touches a user buffer through a raw pointer.
     //
     // 2. Every kernel entry path must clear EFLAGS.AC — see
     //    `ENTRY_PATHS_CLEAR_AC` below.  *This one fails silently*, which is
@@ -481,13 +508,29 @@ pub fn self_test() {
         serial_println!("[smep_smap]   SMEP: not available on this CPU");
     }
 
-    // Test 3: SMAP detection (enablement is deferred until user access paths
-    // are instrumented with STAC/CLAC).
+    // Test 3: SMAP.  Assert against `smap_enable_blocker()` rather than against
+    // a flat "should be on" expectation, because the blocker is a real runtime
+    // condition (`alternatives::apply()` may have patched nothing).  What must
+    // hold either way is that CR4 and `SMAP_ENABLED` agree with the gate — a
+    // CR4 bit set without the prerequisites, or the status flag claiming an
+    // enforcement CR4 does not have, is the silent-failure mode this whole
+    // module exists to prevent.
     if s.hw_smap {
-        // SMAP is supported but intentionally NOT enabled yet.
-        serial_println!("[smep_smap]   SMAP: supported (deferred — needs user access instrumentation)");
+        match smap_enable_blocker() {
+            None => {
+                assert!(s.cr4 & CR4_SMAP != 0, "CR4.SMAP should be set once both prerequisites are met");
+                assert!(s.smap_active, "SMAP should be marked active");
+                serial_println!("[smep_smap]   SMAP enforcement: VERIFIED (CR4 bit set)");
+            }
+            Some(blocker) => {
+                assert_eq!(s.cr4 & CR4_SMAP, 0, "CR4.SMAP should be clear while a prerequisite is unmet");
+                assert!(!s.smap_active, "SMAP should not be marked active while a prerequisite is unmet");
+                serial_println!("[smep_smap]   SMAP: supported but deferred — {blocker}");
+            }
+        }
     } else {
         assert_eq!(s.cr4 & CR4_SMAP, 0, "CR4.SMAP should be clear without support");
+        assert!(!s.smap_active, "SMAP should not be marked active without support");
         serial_println!("[smep_smap]   SMAP: not available on this CPU");
     }
 

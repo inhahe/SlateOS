@@ -544,48 +544,29 @@ pub fn copy_to_user_as(pml4: u64, user_dst: u64, src: &[u8]) -> KernelResult<()>
     Ok(())
 }
 
-/// Read a single value from user-space (SMAP-safe).
+/// Write a single value to user space.
 ///
-/// Validates the pointer, then reads a `T`-sized value.  This is the
-/// preferred way to read individual syscall arguments from user buffers.
+/// The counterpart to [`read_user_value`], for handlers that report a scalar
+/// through an out-pointer (`waitpid`'s status, a futex's previous value).
 ///
-/// # Safety
+/// Like [`read_user_value`] this goes through the byte-wise copy path rather
+/// than a typed `core::ptr::write`.  That is deliberate: `user_dst` comes from
+/// userspace and carries no alignment guarantee, so a typed store through it
+/// would be undefined behaviour for any `T` with an alignment above 1 — and
+/// nothing about a syscall ABI stops a caller from passing an odd address.
 ///
-/// The user pointer must be properly aligned for type `T`.
-#[allow(dead_code)]
-pub unsafe fn read_user<T: Copy>(user_ptr: u64) -> KernelResult<T> {
-    let len = core::mem::size_of::<T>();
-    validate_user_read(user_ptr, len)?;
-
-    // SAFETY: Validated above.  STAC/CLAC for SMAP.
-    let val = unsafe {
-        crate::smep_smap::stac();
-        let v = core::ptr::read(user_ptr as *const T);
-        crate::smep_smap::clac();
-        v
-    };
-    Ok(val)
-}
-
-/// Write a single value to user-space (SMAP-safe).
+/// # Errors
 ///
-/// Validates the pointer is writable, then writes a `T`-sized value.
-///
-/// # Safety
-///
-/// The user pointer must be properly aligned for type `T`.
-#[allow(dead_code)]
-pub unsafe fn write_user<T: Copy>(user_ptr: u64, value: T) -> KernelResult<()> {
-    let len = core::mem::size_of::<T>();
-    validate_user_write(user_ptr, len)?;
-
-    // SAFETY: Validated above.  STAC/CLAC for SMAP.
+/// - [`KernelError::InvalidAddress`] if the user range is not writable.
+pub fn write_user_value<T: Copy>(user_dst: u64, value: T) -> KernelResult<()> {
+    // SAFETY: `value` is a live, fully initialised `T` in kernel memory, so
+    // `size_of::<T>()` bytes starting at its address are readable.  `T: Copy`
+    // rules out a `Drop` impl, so viewing it as bytes cannot duplicate an
+    // owning handle.  `copy_to_user` validates the destination itself.
     unsafe {
-        crate::smep_smap::stac();
-        core::ptr::write(user_ptr as *mut T, value);
-        crate::smep_smap::clac();
+        let src = core::ptr::addr_of!(value).cast::<u8>();
+        copy_to_user(src, user_dst, core::mem::size_of::<T>())
     }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------

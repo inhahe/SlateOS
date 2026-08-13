@@ -3592,7 +3592,6 @@ pub fn sys_process_get_args(args: &SyscallArgs) -> SyscallResult {
     use crate::proc::spawn::SpawnArgsHeader;
     use crate::proc::pcb;
 
-    let out_ptr = args.arg0 as usize;
     let out_cap = args.arg1 as usize;
 
     let pid = match caller_pid() {
@@ -3600,6 +3599,9 @@ pub fn sys_process_get_args(args: &SyscallArgs) -> SyscallResult {
         None => return SyscallResult::ok(0),
     };
 
+    // This *takes* the args out of the PCB, so every failure path below has to
+    // put them back — otherwise a caller that passed a bad pointer loses its
+    // argv permanently and has no way to ask again.
     let (argv, envp) = pcb::take_initial_args(pid);
 
     if argv.is_empty() && envp.is_empty() {
@@ -3607,8 +3609,8 @@ pub fn sys_process_get_args(args: &SyscallArgs) -> SyscallResult {
     }
 
     // Calculate total sizes.
-    let argv_data_len: usize = argv.iter().map(|a| a.len().wrapping_add(1)).sum();
-    let envp_data_len: usize = envp.iter().map(|e| e.len().wrapping_add(1)).sum();
+    let argv_data_len: usize = argv.iter().map(|a| a.len().saturating_add(1)).sum();
+    let envp_data_len: usize = envp.iter().map(|e| e.len().saturating_add(1)).sum();
     let header_size = core::mem::size_of::<SpawnArgsHeader>();
     let total_needed = header_size
         .saturating_add(argv_data_len)
@@ -3616,7 +3618,7 @@ pub fn sys_process_get_args(args: &SyscallArgs) -> SyscallResult {
 
     // If the caller's buffer is too small, put the data back and
     // return the required size so they can retry.
-    if out_cap < total_needed || out_ptr == 0 {
+    if out_cap < total_needed || args.arg0 == 0 {
         if let Err(_e) = pcb::set_initial_args(pid, argv, envp) {
             // Shouldn't happen — we just took these from the same PID.
         }
@@ -3624,49 +3626,57 @@ pub fn sys_process_get_args(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::ok(total_needed as i64);
     }
 
-    // Validate output buffer.
-    if let Err(e) = crate::mm::user::validate_user_write(args.arg0, total_needed) {
+    // Packed in the kernel and delivered with a single copy.  Writing the
+    // header and then each string straight into user memory meant a fault
+    // partway through left the caller with a half-written buffer *and* the
+    // args already gone from the PCB, unrecoverably.
+    let mut packed = match crate::mm::user::alloc_zeroed_vec(total_needed) {
+        Ok(v) => v,
+        Err(e) => {
+            if let Err(_e) = pcb::set_initial_args(pid, argv, envp) {}
+            return SyscallResult::err(e);
+        }
+    };
+
+    let header = SpawnArgsHeader {
+        #[allow(clippy::cast_possible_truncation)]
+        argc: argv.len() as u32,
+        #[allow(clippy::cast_possible_truncation)]
+        envc: envp.len() as u32,
+        #[allow(clippy::cast_possible_truncation)]
+        argv_data_len: argv_data_len as u32,
+        #[allow(clippy::cast_possible_truncation)]
+        envp_data_len: envp_data_len as u32,
+    };
+    // SAFETY: `SpawnArgsHeader` is a `repr(C)` plain-data struct of `u32`s, so
+    // every byte of it is initialised and it has no padding or pointers; this
+    // just views those `header_size` bytes as bytes.
+    let header_bytes = unsafe {
+        core::slice::from_raw_parts(core::ptr::addr_of!(header).cast::<u8>(), header_size)
+    };
+    if let Some(dst) = packed.get_mut(..header_size) {
+        dst.copy_from_slice(header_bytes);
+    }
+
+    // Packed argv then envp, each string NUL-terminated by the zero fill.
+    let mut offset = header_size;
+    for s in argv.iter().chain(envp.iter()) {
+        if let Some(dst) = packed.get_mut(offset..offset.saturating_add(s.len())) {
+            dst.copy_from_slice(s);
+        }
+        offset = offset.saturating_add(s.len().saturating_add(1));
+    }
+
+    // SAFETY: `packed` is a live kernel-owned buffer of exactly `total_needed`
+    // bytes; `copy_to_user` validates the destination and brackets the store
+    // with STAC/CLAC.
+    if let Err(e) =
+        unsafe { crate::mm::user::copy_to_user(packed.as_ptr(), args.arg0, total_needed) }
+    {
+        // Nothing was consumed from the caller's point of view, so give the
+        // args back rather than stranding the process without an argv.
         if let Err(_e) = pcb::set_initial_args(pid, argv, envp) {}
         return SyscallResult::err(e);
-    }
-
-    // Write the header.
-    // SAFETY: Validated above — out_ptr is writable user memory.
-    let header_ptr = out_ptr as *mut SpawnArgsHeader;
-    unsafe {
-        (*header_ptr) = SpawnArgsHeader {
-            #[allow(clippy::cast_possible_truncation)]
-            argc: argv.len() as u32,
-            #[allow(clippy::cast_possible_truncation)]
-            envc: envp.len() as u32,
-            #[allow(clippy::cast_possible_truncation)]
-            argv_data_len: argv_data_len as u32,
-            #[allow(clippy::cast_possible_truncation)]
-            envp_data_len: envp_data_len as u32,
-        };
-    }
-
-    // Write packed argv strings.
-    let mut offset = out_ptr.wrapping_add(header_size);
-    for arg in &argv {
-        let dst = offset as *mut u8;
-        // SAFETY: Within validated buffer.
-        unsafe {
-            core::ptr::copy_nonoverlapping(arg.as_ptr(), dst, arg.len());
-            *dst.add(arg.len()) = 0; // Null terminator.
-        }
-        offset = offset.wrapping_add(arg.len().wrapping_add(1));
-    }
-
-    // Write packed envp strings.
-    for env in &envp {
-        let dst = offset as *mut u8;
-        // SAFETY: Within validated buffer.
-        unsafe {
-            core::ptr::copy_nonoverlapping(env.as_ptr(), dst, env.len());
-            *dst.add(env.len()) = 0; // Null terminator.
-        }
-        offset = offset.wrapping_add(env.len().wrapping_add(1));
     }
 
     #[allow(clippy::cast_possible_wrap)]
@@ -3687,9 +3697,10 @@ fn write_reaped_pid(out_ptr: u64, child_pid: crate::proc::pcb::ProcessId) {
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let pid_i32 = child_pid as i32;
-    // SAFETY: write_user validates the pointer is a writable user range
-    // before writing.  We ignore failure (best-effort status report).
-    let _ = unsafe { crate::mm::user::write_user::<i32>(out_ptr, pid_i32) };
+    // The failure is deliberately ignored: POSIX does not fail a wait because
+    // the status pointer was bad, and the exit code still reaches the caller
+    // in `rax`.
+    let _ = crate::mm::user::write_user_value::<i32>(out_ptr, pid_i32);
 }
 
 /// Resolve the process-group restriction for a non-positive `waitpid`
@@ -3971,11 +3982,12 @@ pub fn sys_process_wait_status(args: &SyscallArgs) -> SyscallResult {
     };
 
     if status_ptr != 0 {
-        // SAFETY: validated as a writable user range of i32 size above, and
-        // the address space cannot have changed since — we are still in the
-        // calling process, which was running to make this call.
-        unsafe {
-            core::ptr::write(status_ptr as *mut i32, wstatus);
+        // Re-validated by `write_user_value`, which matters: the wait above
+        // blocks, and the old code's claim that "the address space cannot have
+        // changed since" was wrong — a peer thread is free to unmap the status
+        // pointer while this one sleeps.
+        if let Err(e) = crate::mm::user::write_user_value::<i32>(status_ptr, wstatus) {
+            return SyscallResult::err(e);
         }
     }
     #[allow(clippy::cast_possible_wrap)]

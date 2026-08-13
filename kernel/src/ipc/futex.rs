@@ -46,7 +46,7 @@
 
 use alloc::collections::{BTreeMap, VecDeque};
 use crate::error::{KernelError, KernelResult};
-use crate::mm::user::{read_user, validate_user_write};
+use crate::mm::user::{read_user_value, validate_user_write};
 use crate::sched::{self, task::TaskId};
 use crate::serial_println;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -1869,9 +1869,10 @@ fn split_robust_ptr(raw: u64) -> (u64, bool) {
 /// Returns `(masked_pointer, is_pi)`, or `None` if the user read faults
 /// (which aborts the walk, exactly as Linux's `fetch_robust_entry` does).
 fn fetch_robust_entry(ptr: u64) -> Option<(u64, bool)> {
-    // SAFETY: `read_user` validates the range is user-space and mapped
-    // before dereferencing; a fault returns `Err`, never UB.
-    let raw = unsafe { read_user::<u64>(ptr) }.ok()?;
+    // Goes through the bounce rather than dereferencing the user pointer: the
+    // link is attacker-controlled, so it carries no alignment guarantee, and
+    // the read must be bracketed by STAC/CLAC once SMAP is on.
+    let raw = read_user_value::<u64>(ptr).ok()?;
     Some(split_robust_ptr(raw))
 }
 
@@ -1992,8 +1993,7 @@ pub fn exit_robust_list(head_ptr: u64, dying_task: TaskId) {
         Some(v) => v,
         None => return,
     };
-    // SAFETY: read_user validates the address.
-    let futex_offset = match unsafe { read_user::<i64>(head_ptr.wrapping_add(8)) } {
+    let futex_offset = match read_user_value::<i64>(head_ptr.wrapping_add(8)) {
         Ok(v) => v,
         Err(_) => return,
     };

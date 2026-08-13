@@ -32,7 +32,15 @@
 
 use crate::sched::WorkloadProfile;
 use crate::serial_println;
-use spin::Mutex;
+// NOT `spin::Mutex`. A bare spin lock leaves preemption enabled while it is
+// held, so the timer can deschedule a holder mid-update and leave every later
+// caller spinning on a lock whose owner is Ready-but-not-running. That is
+// exactly the livelock a 250-boot soak caught on iteration 20 (kswapd's first
+// `watermark_low()` spun forever on a registry the boot task had been
+// preempted out of). `crate::sync::Mutex` disables preemption for the whole
+// hold, records the owning tid, and reports a stall after a few seconds
+// instead of hanging silently. See B-SYSCTL-SPIN-MUTEX-PREEMPTED-HOLDER.
+use crate::sync::Mutex;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -284,7 +292,9 @@ impl Param {
 ///
 /// Lock ordering: this lock should be acquired BEFORE subsystem locks
 /// when a parameter change triggers a subsystem reconfiguration.
-static REGISTRY: Mutex<Registry> = Mutex::new(Registry::new());
+///
+/// Named so a stall report says which lock wedged rather than `?`.
+static REGISTRY: Mutex<Registry> = Mutex::named(Registry::new(), b"sysctl-reg");
 
 struct Registry {
     params: [Param; MAX_PARAMS],
@@ -697,8 +707,14 @@ pub fn count() -> usize {
 /// Returns a snapshot of every active parameter.  Used by sysfs to
 /// expose kernel tunables via the virtual filesystem.
 pub fn list_all() -> alloc::vec::Vec<ParamInfo> {
+    // Reserve *before* taking the lock. `REGISTRY` disables preemption for the
+    // whole hold, and the heap allocator takes locks of its own (and under
+    // pressure can wake reclaim), so allocating inside the critical section
+    // would nest an unbounded subsystem under a spinlock. `MAX_PARAMS` is the
+    // hard ceiling on `reg.count`, so one up-front reservation makes the fill
+    // loop allocation-free — `push` into spare capacity never reallocates.
+    let mut result = alloc::vec::Vec::with_capacity(MAX_PARAMS);
     let reg = REGISTRY.lock();
-    let mut result = alloc::vec::Vec::with_capacity(reg.count);
     for p in reg.params.iter().take(reg.count) {
         if p.active {
             result.push(ParamInfo {
@@ -711,6 +727,7 @@ pub fn list_all() -> alloc::vec::Vec<ParamInfo> {
             });
         }
     }
+    drop(reg);
     result
 }
 

@@ -2695,10 +2695,18 @@ fn dump_all_tasks_serial() {
         } else {
             crate::rip_sample::AddrClass::classify(rip).name()
         };
+        // Preemption depth is the difference between "the scheduler chose not
+        // to switch" and "the scheduler was not allowed to". A frozen
+        // `ctx_switches` with a Ready higher-priority task in the table is
+        // ambiguous without it; a non-zero count here says a tracked spinlock
+        // is held (or a `preempt_disable` was leaked) and no involuntary
+        // switch can happen at all, which is a completely different bug from
+        // the run queue mis-picking. Cost is one relaxed atomic load.
+        let preempt = preempt_count(cpu);
         serial_println!(
             "[liveness]   cpu{}: heartbeat={} ctx_switches={} local_has_real_work={} \
-             last_rip={:#x} ({})",
-            cpu, hb, cs, has_work, rip, class,
+             preempt_disable_depth={} last_rip={:#x} ({})",
+            cpu, hb, cs, has_work, preempt, rip, class,
         );
 
         // Full call stack for the wedged CPU, not just its lone RIP. Walk the

@@ -5891,6 +5891,31 @@ saying "New York" is worse than no entry. Covered by
 `clock_date_moves_with_the_zone` and
 `clock_refuses_a_zone_it_cannot_actually_render` (2026-08-13).
 
+**And so did the panel that chooses the zone.**
+`gui/desktop/src/datetime_settings.rs`'s `TimezoneInfo` was the same shape one
+level up — `utc_offset_min: i32` beside an `observes_dst: bool`, which is a
+field recording that the entry *knows* it is incomplete without doing anything
+about it. Two of its twenty rows were also simply out of date: São Paulo still
+carried `observes_dst: true` though Brazil abolished daylight saving in 2019,
+and Sydney/Auckland carried their standard offsets with no hint that their DST
+window straddles New Year rather than the northern summer. Each entry now holds
+a `rule: tzrules::Tz` parsed from the POSIX `TZ` string tzdata publishes for
+that zone, `TimezoneInfo::new` returns `Option` (a bad literal is dropped and
+`test_default_timezones_count` fails, rather than a running desktop panicking),
+and `offset_string`/`local_time`/`is_dst_at`/`abbrev_at` all take the instant —
+because the answer depends on it. The list's "DST" badge now marks the zones
+*currently* shifted rather than the ones that shift at some point, so it no
+longer sits on Sydney all through the northern summer. Covered by
+`test_a_dst_zone_reads_differently_in_january_and_july`,
+`test_a_southern_hemisphere_zone_is_shifted_in_january_not_july`,
+`test_fixed_offset_zones_never_shift`,
+`test_europe_and_the_us_do_not_change_on_the_same_day` and
+`test_a_malformed_rule_is_refused_rather_than_defaulted_to_utc` (2026-08-13).
+
+`tz_id` survives as the stable key `set_timezone` matches on, which is exactly
+the shape the note below asks for: the IANA name is a *label selecting a rule*,
+never something local time is computed from.
+
 **Do not wire `kernel/src/fs/locale.rs`'s `Timezone` to the clock.** It already
 exists (`LocaleConfig.timezone`, 12 registered zones, surfaced by the
 `locale`/`lcl` command and `/proc/locale`) and looks like the answer, but it is

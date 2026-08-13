@@ -7,6 +7,12 @@ use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
 
+// The same zone engine the libc's `localtime`, osh's `printf '%(…)T'` and the
+// taskbar clock use.  This panel is where the machine's zone is *chosen*, so of
+// everything on the desktop it is the last place that may hold its own opinion
+// about what a zone means.
+use tzrules::Tz;
+
 // ============================================================================
 // Catppuccin Mocha palette
 // ============================================================================
@@ -30,84 +36,152 @@ const OVERLAY0: Color = Color::from_hex(0x6C7086);
 // Timezone
 // ============================================================================
 
-/// A timezone entry with identifier and UTC offset.
+/// A selectable timezone: an IANA identifier, display strings, and the POSIX
+/// `TZ` rule that says what the clock actually reads.
+///
+/// The rule is the whole point. A zone that observes daylight saving has *two*
+/// offsets and a rule choosing between them; an entry that stored one number
+/// (this struct used to store `utc_offset_min: i32`) is wrong for whichever
+/// half of the year it is not describing — for Eastern Time, wrong for the
+/// roughly eight months of EDT, and wrong *silently*. The `observes_dst: bool`
+/// that sat beside it recorded that the entry knew it was incomplete without
+/// doing anything about it, which is worse than not knowing.
+///
+/// `tz_id` stays the stable key — it is what `set_timezone` matches on and what
+/// an eventual system configuration file would name — but nothing reads local
+/// time from it, because reading a zoneinfo name needs a tzdata database we do
+/// not ship (see `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ` in `known-issues.md`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TimezoneInfo {
     /// IANA timezone identifier (e.g. "America/New_York").
     pub tz_id: String,
     /// Display name (e.g. "Eastern Time (US & Canada)").
     pub display_name: String,
-    /// UTC offset in minutes (e.g. -300 for UTC-5).
-    pub utc_offset_min: i32,
-    /// Whether this timezone currently observes DST.
-    pub observes_dst: bool,
     /// City/region for the world clock label.
     pub city: String,
+    /// The POSIX `TZ` rule this entry renders with.
+    pub rule: Tz,
 }
 
 impl TimezoneInfo {
+    /// Build an entry from a POSIX `TZ` string.
+    ///
+    /// Returns `None` if the string is not a POSIX `TZ` rule. A caller cannot
+    /// usefully recover from that, but it must not be a panic either: this is
+    /// a table of literals, so a malformed rule is a typo, and the right place
+    /// to catch a typo is `test_default_timezones_count` noticing the table
+    /// came up short — not a fault in a running desktop.
     pub fn new(
         tz_id: impl Into<String>,
         display_name: impl Into<String>,
-        utc_offset_min: i32,
-        observes_dst: bool,
+        posix_tz: &str,
         city: impl Into<String>,
-    ) -> Self {
-        Self {
+    ) -> Option<Self> {
+        Some(Self {
             tz_id: tz_id.into(),
             display_name: display_name.into(),
-            utc_offset_min,
-            observes_dst,
             city: city.into(),
+            rule: Tz::parse(posix_tz.as_bytes())?,
+        })
+    }
+
+    /// The offset from UTC, in seconds, in force at `utc_secs`.
+    pub fn offset_secs_at(&self, utc_secs: u64) -> i32 {
+        self.rule.lookup(clamp_to_i64(utc_secs)).gmtoff
+    }
+
+    /// Format the offset in force at `utc_secs` (e.g. "UTC-05:00" in January
+    /// and "UTC-04:00" in July, for the same New York entry).
+    pub fn offset_string(&self, utc_secs: u64) -> String {
+        let secs = self.offset_secs_at(utc_secs);
+        let mins = secs.div_euclid(60);
+        let hours = mins / 60;
+        let rem = (mins % 60).unsigned_abs();
+        if mins >= 0 {
+            format!("UTC+{hours:02}:{rem:02}")
+        } else {
+            format!("UTC-{:02}:{rem:02}", hours.unsigned_abs())
         }
     }
 
-    /// Format the UTC offset as a string (e.g. "UTC-05:00").
-    pub fn offset_string(&self) -> String {
-        let hours = self.utc_offset_min / 60;
-        let mins = (self.utc_offset_min % 60).unsigned_abs();
-        if self.utc_offset_min >= 0 {
-            format!("UTC+{:02}:{:02}", hours, mins)
-        } else {
-            format!("UTC-{:02}:{:02}", hours.unsigned_abs(), mins)
-        }
+    /// The zone abbreviation in force at `utc_secs` (e.g. "EST" or "EDT").
+    ///
+    /// Lossy only for a name that is not UTF-8, which `Tz::parse` cannot
+    /// produce — the grammar admits alphanumerics and `+`/`-` only.
+    pub fn abbrev_at(&self, utc_secs: u64) -> String {
+        let info = self.rule.lookup(clamp_to_i64(utc_secs));
+        String::from_utf8_lossy(info.name.as_bytes()).into_owned()
+    }
+
+    /// Whether this zone observes daylight saving *at all*.
+    pub fn observes_dst(&self) -> bool {
+        self.rule.has_dst()
+    }
+
+    /// Whether daylight saving is actually in force at `utc_secs`. This is the
+    /// live fact a timezone picker should show; `observes_dst` is only the
+    /// standing property.
+    pub fn is_dst_at(&self, utc_secs: u64) -> bool {
+        self.rule.lookup(clamp_to_i64(utc_secs)).is_dst
     }
 
     /// Convert a UTC timestamp to local time in this timezone.
     /// Returns (hour, minute) in 24-hour format.
     pub fn local_time(&self, utc_secs: u64) -> (u32, u32) {
-        let total_secs = utc_secs as i64 + (self.utc_offset_min as i64 * 60);
-        let day_secs = total_secs.rem_euclid(86400);
-        let hour = (day_secs / 3600) as u32;
-        let minute = ((day_secs % 3600) / 60) as u32;
+        let t = clamp_to_i64(utc_secs);
+        let local = t.saturating_add(i64::from(self.rule.lookup(t).gmtoff));
+        let day_secs = local.rem_euclid(86_400);
+        // 0..86_400 by construction, so both casts are exact.
+        let hour = u32::try_from(day_secs / 3600).unwrap_or(0);
+        let minute = u32::try_from((day_secs % 3600) / 60).unwrap_or(0);
         (hour, minute)
     }
 }
 
+/// Timestamps reach this module as `u64`; `tzrules` speaks `i64`. Saturating
+/// rather than wrapping, so an absurd clock reading stays absurd in the same
+/// direction instead of becoming a plausible date in 1901.
+fn clamp_to_i64(utc_secs: u64) -> i64 {
+    i64::try_from(utc_secs).unwrap_or(i64::MAX)
+}
+
 /// Default timezones.
+///
+/// Each rule is the POSIX `TZ` string tzdata publishes for that zone, so the
+/// offsets and transition dates below are the real ones rather than a snapshot
+/// of whatever was in force the day the table was written. Note two entries
+/// that a fixed-offset table got wrong: São Paulo abolished DST in 2019 and is
+/// now a plain `-03`, and Sydney and Auckland are southern-hemisphere, so their
+/// DST window straddles New Year.
 pub fn default_timezones() -> Vec<TimezoneInfo> {
-    vec![
-        TimezoneInfo::new("Pacific/Honolulu", "Hawaii", -600, false, "Honolulu"),
-        TimezoneInfo::new("America/Anchorage", "Alaska", -540, true, "Anchorage"),
-        TimezoneInfo::new("America/Los_Angeles", "Pacific Time", -480, true, "Los Angeles"),
-        TimezoneInfo::new("America/Denver", "Mountain Time", -420, true, "Denver"),
-        TimezoneInfo::new("America/Chicago", "Central Time", -360, true, "Chicago"),
-        TimezoneInfo::new("America/New_York", "Eastern Time", -300, true, "New York"),
-        TimezoneInfo::new("America/Sao_Paulo", "Brasilia Time", -180, true, "S\u{00e3}o Paulo"),
-        TimezoneInfo::new("Atlantic/Reykjavik", "Iceland", 0, false, "Reykjavik"),
-        TimezoneInfo::new("Europe/London", "GMT/BST", 0, true, "London"),
-        TimezoneInfo::new("Europe/Paris", "Central European", 60, true, "Paris"),
-        TimezoneInfo::new("Europe/Berlin", "Central European", 60, true, "Berlin"),
-        TimezoneInfo::new("Europe/Helsinki", "Eastern European", 120, true, "Helsinki"),
-        TimezoneInfo::new("Europe/Moscow", "Moscow Time", 180, false, "Moscow"),
-        TimezoneInfo::new("Asia/Dubai", "Gulf Standard", 240, false, "Dubai"),
-        TimezoneInfo::new("Asia/Kolkata", "India Standard", 330, false, "Mumbai"),
-        TimezoneInfo::new("Asia/Shanghai", "China Standard", 480, false, "Shanghai"),
-        TimezoneInfo::new("Asia/Tokyo", "Japan Standard", 540, false, "Tokyo"),
-        TimezoneInfo::new("Asia/Seoul", "Korea Standard", 540, false, "Seoul"),
-        TimezoneInfo::new("Australia/Sydney", "Australian Eastern", 600, true, "Sydney"),
-        TimezoneInfo::new("Pacific/Auckland", "New Zealand", 720, true, "Auckland"),
+    // `flatten` drops any entry whose rule fails to parse. That can only be a
+    // typo in the literals above, and `test_default_timezones_count` fails when
+    // it happens.
+    [
+        TimezoneInfo::new("Pacific/Honolulu", "Hawaii", "HST10", "Honolulu"),
+        TimezoneInfo::new("America/Anchorage", "Alaska", "AKST9AKDT,M3.2.0,M11.1.0", "Anchorage"),
+        TimezoneInfo::new("America/Los_Angeles", "Pacific Time", "PST8PDT,M3.2.0,M11.1.0", "Los Angeles"),
+        TimezoneInfo::new("America/Denver", "Mountain Time", "MST7MDT,M3.2.0,M11.1.0", "Denver"),
+        TimezoneInfo::new("America/Chicago", "Central Time", "CST6CDT,M3.2.0,M11.1.0", "Chicago"),
+        TimezoneInfo::new("America/New_York", "Eastern Time", "EST5EDT,M3.2.0,M11.1.0", "New York"),
+        TimezoneInfo::new("America/Sao_Paulo", "Brasilia Time", "<-03>3", "S\u{00e3}o Paulo"),
+        TimezoneInfo::new("Atlantic/Reykjavik", "Iceland", "GMT0", "Reykjavik"),
+        TimezoneInfo::new("Europe/London", "GMT/BST", "GMT0BST,M3.5.0/1,M10.5.0", "London"),
+        TimezoneInfo::new("Europe/Paris", "Central European", "CET-1CEST,M3.5.0,M10.5.0/3", "Paris"),
+        TimezoneInfo::new("Europe/Berlin", "Central European", "CET-1CEST,M3.5.0,M10.5.0/3", "Berlin"),
+        TimezoneInfo::new("Europe/Helsinki", "Eastern European", "EET-2EEST,M3.5.0/3,M10.5.0/4", "Helsinki"),
+        TimezoneInfo::new("Europe/Moscow", "Moscow Time", "MSK-3", "Moscow"),
+        TimezoneInfo::new("Asia/Dubai", "Gulf Standard", "<+04>-4", "Dubai"),
+        TimezoneInfo::new("Asia/Kolkata", "India Standard", "IST-5:30", "Mumbai"),
+        TimezoneInfo::new("Asia/Shanghai", "China Standard", "CST-8", "Shanghai"),
+        TimezoneInfo::new("Asia/Tokyo", "Japan Standard", "JST-9", "Tokyo"),
+        TimezoneInfo::new("Asia/Seoul", "Korea Standard", "KST-9", "Seoul"),
+        TimezoneInfo::new("Australia/Sydney", "Australian Eastern", "AEST-10AEDT,M10.1.0,M4.1.0/3", "Sydney"),
+        TimezoneInfo::new("Pacific/Auckland", "New Zealand", "NZST-12NZDT,M9.5.0,M4.1.0/3", "Auckland"),
     ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 // ============================================================================
@@ -447,7 +521,12 @@ impl DateTimeSettingsUI {
             if let Some(tz) = self.settings.current_timezone() {
                 cmds.push(RenderCommand::Text {
                     x: x + width * 0.5 - 60.0, y: cy + 56.0,
-                    text: format!("{} ({})", tz.display_name, tz.offset_string()),
+                    text: format!(
+                        "{} — {} ({})",
+                        tz.display_name,
+                        tz.abbrev_at(self.current_utc),
+                        tz.offset_string(self.current_utc)
+                    ),
                     font_size: 13.0,
                     color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
@@ -488,7 +567,11 @@ impl DateTimeSettingsUI {
             });
             cmds.push(RenderCommand::Text {
                 x: x + 12.0, y: cy + 6.0,
-                text: format!("Current: {} ({})", tz.display_name, tz.offset_string()),
+                text: format!(
+                    "Current: {} ({})",
+                    tz.display_name,
+                    tz.offset_string(self.current_utc)
+                ),
                 font_size: 14.0,
                 color: TEXT,
                 font_weight: FontWeightHint::Bold,
@@ -496,7 +579,11 @@ impl DateTimeSettingsUI {
             });
             cmds.push(RenderCommand::Text {
                 x: x + 12.0, y: cy + 26.0,
-                text: format!("{}{}", tz.tz_id, if tz.observes_dst { " (DST)" } else { "" }),
+                // The abbreviation is the live half of this line: a zone that
+                // observes DST reads `EST` in January and `EDT` in July, and
+                // saying so is what tells the user the offset above is not a
+                // constant.
+                text: format!("{} — {}", tz.tz_id, tz.abbrev_at(self.current_utc)),
                 font_size: 11.0,
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
@@ -566,14 +653,19 @@ impl DateTimeSettingsUI {
 
             cmds.push(RenderCommand::Text {
                 x: x + width - 100.0, y: cy + 4.0,
-                text: tz.offset_string(),
+                text: tz.offset_string(self.current_utc),
                 font_size: 13.0,
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
             });
 
-            if tz.observes_dst {
+            // Badge the zones whose clock is *currently* shifted, not the ones
+            // that observe DST at some point in the year.  The offset printed
+            // just above already moved; without this the badge would sit on
+            // Sydney all through the northern summer, when Sydney is on
+            // standard time and it is New York that has jumped.
+            if tz.is_dst_at(self.current_utc) {
                 cmds.push(RenderCommand::Text {
                     x: x + width - 100.0, y: cy + 20.0,
                     text: "DST".into(),
@@ -744,7 +836,12 @@ impl DateTimeSettingsUI {
 
                 cmds.push(RenderCommand::Text {
                     x: x + 12.0, y: cy + 28.0,
-                    text: format!("{} ({})", tz_info.display_name, tz_info.offset_string()),
+                    text: format!(
+                        "{} — {} ({})",
+                        tz_info.display_name,
+                        tz_info.abbrev_at(self.current_utc),
+                        tz_info.offset_string(self.current_utc)
+                    ),
                     font_size: 11.0,
                     color: SUBTEXT0,
                     font_weight: FontWeightHint::Regular,
@@ -821,60 +918,157 @@ mod tests {
 
     // ---- TimezoneInfo ----
 
+    /// 2024-01-15 12:00:00 UTC — northern winter, southern summer.
+    const JAN: u64 = 1_705_320_000;
+    /// 2024-07-15 12:00:00 UTC — northern summer, southern winter.
+    const JUL: u64 = 1_721_044_800;
+
+    /// Look an entry up in the shipped table rather than constructing one, so
+    /// every assertion below is about a rule a user can actually select.
+    fn shipped(tz_id: &str) -> TimezoneInfo {
+        default_timezones()
+            .into_iter()
+            .find(|t| t.tz_id == tz_id)
+            .unwrap_or_else(|| panic!("{tz_id} should be in the default table"))
+    }
+
     #[test]
     fn test_offset_string_positive() {
-        let tz = TimezoneInfo::new("Asia/Tokyo", "JST", 540, false, "Tokyo");
-        assert_eq!(tz.offset_string(), "UTC+09:00");
+        assert_eq!(shipped("Asia/Tokyo").offset_string(JAN), "UTC+09:00");
     }
 
     #[test]
     fn test_offset_string_negative() {
-        let tz = TimezoneInfo::new("America/New_York", "ET", -300, true, "New York");
-        assert_eq!(tz.offset_string(), "UTC-05:00");
+        assert_eq!(shipped("America/New_York").offset_string(JAN), "UTC-05:00");
     }
 
     #[test]
     fn test_offset_string_half_hour() {
-        let tz = TimezoneInfo::new("Asia/Kolkata", "IST", 330, false, "Mumbai");
-        assert_eq!(tz.offset_string(), "UTC+05:30");
+        assert_eq!(shipped("Asia/Kolkata").offset_string(JAN), "UTC+05:30");
+        assert_eq!(shipped("Asia/Kolkata").offset_string(JUL), "UTC+05:30");
     }
 
     #[test]
     fn test_offset_string_zero() {
-        let tz = TimezoneInfo::new("UTC", "UTC", 0, false, "UTC");
-        assert_eq!(tz.offset_string(), "UTC+00:00");
+        assert_eq!(shipped("Atlantic/Reykjavik").offset_string(JUL), "UTC+00:00");
     }
 
     #[test]
     fn test_local_time_basic() {
-        let tz = TimezoneInfo::new("UTC", "UTC", 0, false, "UTC");
-        // 12:00:00 UTC
-        let (h, m) = tz.local_time(43200);
-        assert_eq!(h, 12);
-        assert_eq!(m, 0);
+        // Reykjavik is UTC all year, so its local time is the UTC reading.
+        let (h, m) = shipped("Atlantic/Reykjavik").local_time(43200);
+        assert_eq!((h, m), (12, 0));
     }
 
     #[test]
     fn test_local_time_offset() {
-        let tz = TimezoneInfo::new("test", "test", 540, false, "test"); // UTC+9
-        // 00:00:00 UTC -> 09:00 JST
-        let (h, m) = tz.local_time(0);
-        assert_eq!(h, 9);
-        assert_eq!(m, 0);
+        // 00:00:00 UTC -> 09:00 JST.
+        assert_eq!(shipped("Asia/Tokyo").local_time(0), (9, 0));
     }
 
     #[test]
     fn test_local_time_negative_offset() {
-        let tz = TimezoneInfo::new("test", "test", -300, false, "test"); // UTC-5
-        // 03:00:00 UTC -> 22:00 previous day
-        let (h, m) = tz.local_time(10800);
-        assert_eq!(h, 22);
-        assert_eq!(m, 0);
+        // 03:00 UTC on a January day is 22:00 the previous day in New York,
+        // which is on standard time then.
+        assert_eq!(shipped("America/New_York").local_time(JAN - 32_400), (22, 0));
     }
 
     #[test]
     fn test_default_timezones_count() {
+        // Also the guard on the rule strings: an entry whose POSIX `TZ` fails
+        // to parse is dropped by `flatten`, so a typo shows up here.
         assert_eq!(default_timezones().len(), 20);
+    }
+
+    /// The bug this struct used to have: one stored offset is right for at most
+    /// half the year in a zone that observes daylight saving.
+    #[test]
+    fn test_a_dst_zone_reads_differently_in_january_and_july() {
+        let ny = shipped("America/New_York");
+        assert_eq!(ny.offset_string(JAN), "UTC-05:00");
+        assert_eq!(ny.offset_string(JUL), "UTC-04:00");
+        assert_eq!(ny.abbrev_at(JAN), "EST");
+        assert_eq!(ny.abbrev_at(JUL), "EDT");
+        assert_eq!(ny.local_time(JAN), (7, 0));
+        assert_eq!(ny.local_time(JUL), (8, 0));
+        assert!(!ny.is_dst_at(JAN));
+        assert!(ny.is_dst_at(JUL));
+        // The standing property does not change with the instant.
+        assert!(ny.observes_dst());
+    }
+
+    /// Sydney's daylight-saving window straddles New Year, so it is shifted in
+    /// exactly the months New York is not. A table of fixed offsets cannot
+    /// express this at all, and a "DST" badge keyed off a static flag would sit
+    /// on both cities at once.
+    #[test]
+    fn test_a_southern_hemisphere_zone_is_shifted_in_january_not_july() {
+        let sydney = shipped("Australia/Sydney");
+        assert_eq!(sydney.offset_string(JAN), "UTC+11:00");
+        assert_eq!(sydney.offset_string(JUL), "UTC+10:00");
+        assert_eq!(sydney.abbrev_at(JAN), "AEDT");
+        assert_eq!(sydney.abbrev_at(JUL), "AEST");
+        assert!(sydney.is_dst_at(JAN));
+        assert!(!sydney.is_dst_at(JUL));
+        // The point of the pair: on one instant the two hemispheres disagree.
+        assert_ne!(
+            sydney.is_dst_at(JAN),
+            shipped("America/New_York").is_dst_at(JAN)
+        );
+    }
+
+    /// A zone that does not observe DST must not acquire one from the default
+    /// US rules — `Tz::parse` only substitutes those when a DST *name* is
+    /// present, and none of these entries has one.
+    #[test]
+    fn test_fixed_offset_zones_never_shift() {
+        for (tz_id, offset) in [
+            ("Pacific/Honolulu", "UTC-10:00"),
+            ("Europe/Moscow", "UTC+03:00"),
+            ("Asia/Dubai", "UTC+04:00"),
+            ("Asia/Shanghai", "UTC+08:00"),
+            ("Asia/Seoul", "UTC+09:00"),
+            // Brazil abolished daylight saving in 2019; the old table still
+            // carried `observes_dst: true` for São Paulo.
+            ("America/Sao_Paulo", "UTC-03:00"),
+        ] {
+            let tz = shipped(tz_id);
+            assert!(!tz.observes_dst(), "{tz_id} should have no DST rule");
+            assert_eq!(tz.offset_string(JAN), offset, "{tz_id} in January");
+            assert_eq!(tz.offset_string(JUL), offset, "{tz_id} in July");
+        }
+    }
+
+    /// Europe changes on the last Sunday of March/October, a fortnight earlier
+    /// and a week later than the US — so there are days when the Atlantic gap
+    /// is four hours, not five. Getting this right is the whole reason for
+    /// carrying transition rules rather than offsets.
+    #[test]
+    fn test_europe_and_the_us_do_not_change_on_the_same_day() {
+        let london = shipped("Europe/London");
+        let ny = shipped("America/New_York");
+        // 2024-03-12 12:00 UTC: the US has sprung forward (March 10), the UK
+        // has not (March 31).
+        let between = 1_710_244_800;
+        assert!(ny.is_dst_at(between));
+        assert!(!london.is_dst_at(between));
+        assert_eq!(london.offset_string(between), "UTC+00:00");
+        assert_eq!(ny.offset_string(between), "UTC-04:00");
+        // By July both have, and the usual five-hour gap is restored.
+        assert_eq!(london.offset_string(JUL), "UTC+01:00");
+        assert_eq!(ny.offset_string(JUL), "UTC-04:00");
+    }
+
+    #[test]
+    fn test_a_malformed_rule_is_refused_rather_than_defaulted_to_utc() {
+        // Above all a zoneinfo name: silently reading it as UTC would put a
+        // wrong time under a label saying "New York".
+        for bad in ["America/New_York", "", "Mars", "EST5EDT,garbage", ":::"] {
+            assert!(
+                TimezoneInfo::new("x", "x", bad, "x").is_none(),
+                "{bad:?} should not parse as a POSIX TZ string"
+            );
+        }
     }
 
     // ---- NtpStatus ----
@@ -1004,9 +1198,23 @@ mod tests {
 
     #[test]
     fn test_local_time() {
+        // The default zone is America/New_York, so the aggregate's reading has
+        // to move with the season too — this used to be an `is_some()` check,
+        // which the fixed-offset version also passed.
         let s = DateTimeSettings::default();
-        let result = s.local_time(43200);
-        assert!(result.is_some());
+        assert_eq!(s.local_time(JAN), Some((7, 0)));
+        assert_eq!(s.local_time(JUL), Some((8, 0)));
+    }
+
+    #[test]
+    fn test_local_time_is_none_for_a_zone_not_in_the_table() {
+        let mut s = DateTimeSettings::default();
+        // `set_timezone` refuses it, so the reading stays on the real zone …
+        assert!(!s.set_timezone("Mars/Olympus_Mons"));
+        assert_eq!(s.local_time(JAN), Some((7, 0)));
+        // … and only a field written past the setter can desynchronise it.
+        s.timezone = "Mars/Olympus_Mons".to_string();
+        assert_eq!(s.local_time(JAN), None);
     }
 
     // ---- DateTimeSettingsUI ----

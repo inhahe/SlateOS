@@ -14382,6 +14382,18 @@ fn cmd_batch(args: &str) {
 }
 
 /// `linkcheck` — find broken symlinks and hardlink analysis.
+/// Render a broken link's target for the terminal.
+///
+/// The target is a path and the error is text, so they are separate fields on
+/// `BrokenLink`; only the display layer merges them, and only here, where the
+/// result is never fed back to the filesystem.
+fn describe_link_target(link: &crate::fs::linkcheck::BrokenLink) -> String {
+    match &link.target {
+        Some(t) => alloc::format!("{}", t.display()),
+        None => alloc::format!("(unreadable: {})", link.error),
+    }
+}
+
 fn cmd_linkcheck(args: &str) {
     use crate::fs::linkcheck;
     let parts: Vec<&str> = args.split_whitespace().collect();
@@ -14402,7 +14414,7 @@ fn cmd_linkcheck(args: &str) {
                         shell_println!();
                         shell_println!("  Broken symlinks:");
                         for b in &report.broken_symlinks {
-                            shell_println!("    {} -> {}", b.link_path, b.target);
+                            shell_println!("    {} -> {}", b.link_path.display(), describe_link_target(b));
                         }
                     }
                     if !report.hardlink_groups.is_empty() {
@@ -14411,7 +14423,7 @@ fn cmd_linkcheck(args: &str) {
                         for g in &report.hardlink_groups {
                             shell_println!("    [{} bytes, {} links]:", g.size, g.nlinks);
                             for p in &g.paths {
-                                shell_println!("      {}", p);
+                                shell_println!("      {}", p.display());
                             }
                         }
                     }
@@ -14428,7 +14440,7 @@ fn cmd_linkcheck(args: &str) {
                     } else {
                         shell_println!("{} broken symlinks:", broken.len());
                         for b in &broken {
-                            shell_println!("  {} -> {}", b.link_path, b.target);
+                            shell_println!("  {} -> {}", b.link_path.display(), describe_link_target(b));
                         }
                     }
                 }

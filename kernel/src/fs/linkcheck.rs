@@ -21,6 +21,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::KernelResult;
+use crate::fs::path::{Path, PathBuf};
 use crate::fs::{EntryType, Vfs};
 use crate::serial_println;
 
@@ -39,9 +40,17 @@ const MAX_FILES: usize = 50_000;
 #[derive(Debug, Clone)]
 pub struct BrokenLink {
     /// Path of the symlink itself.
-    pub link_path: String,
-    /// Target the symlink points to (which doesn't exist).
-    pub target: String,
+    pub link_path: PathBuf,
+    /// Target the symlink points to (which doesn't exist), or `None` when the
+    /// link itself could not be read — in which case [`Self::error`] says why.
+    ///
+    /// A target is a path, and a path is a byte string; a failure to read the
+    /// link is diagnostic text.  Keeping them in separate fields means the
+    /// error message can never be mistaken for a filename.
+    pub target: Option<PathBuf>,
+    /// Why the link is broken, or empty when the link read fine and its
+    /// target simply does not exist.
+    pub error: String,
 }
 
 /// A group of hardlinked files (sharing the same inode/content).
@@ -50,7 +59,7 @@ pub struct HardlinkGroup {
     /// Identifying key (size + mtime hash).
     pub key: String,
     /// Paths that appear to share the same content.
-    pub paths: Vec<String>,
+    pub paths: Vec<PathBuf>,
     /// File size.
     pub size: u64,
     /// Link count reported by metadata.
@@ -120,12 +129,13 @@ pub fn stats() -> (u64, u64) {
 // ---------------------------------------------------------------------------
 
 /// Analyze links in a directory tree.
-pub fn check(root: &str, opts: &CheckOptions) -> KernelResult<LinkReport> {
+pub fn check<R: AsRef<Path> + ?Sized>(root: &R, opts: &CheckOptions) -> KernelResult<LinkReport> {
+    let root = root.as_ref();
     let mut report = LinkReport::default();
 
     // Track files with nlinks > 1 for hardlink grouping.
     // Key: (size, modified_ns) → Vec<path>
-    let mut hardlink_candidates: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut hardlink_candidates: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
 
     walk_tree(root, opts, &mut report, &mut hardlink_candidates, 0)?;
 
@@ -155,7 +165,7 @@ pub fn check(root: &str, opts: &CheckOptions) -> KernelResult<LinkReport> {
 
     serial_println!(
         "[linkcheck] {}: {} broken symlinks, {} valid, {} hardlink groups, {} files",
-        root,
+        root.display(),
         report.broken_symlinks.len(),
         report.valid_symlinks,
         report.hardlink_groups.len(),
@@ -166,7 +176,7 @@ pub fn check(root: &str, opts: &CheckOptions) -> KernelResult<LinkReport> {
 }
 
 /// Find all broken symlinks in a directory tree.
-pub fn find_broken(root: &str) -> KernelResult<Vec<BrokenLink>> {
+pub fn find_broken<R: AsRef<Path> + ?Sized>(root: &R) -> KernelResult<Vec<BrokenLink>> {
     let opts = CheckOptions {
         check_symlinks: true,
         check_hardlinks: false,
@@ -178,7 +188,10 @@ pub fn find_broken(root: &str) -> KernelResult<Vec<BrokenLink>> {
 }
 
 /// Fix broken symlinks by removing them.
-pub fn fix_broken(root: &str, dry_run: bool) -> KernelResult<(u64, Vec<String>)> {
+pub fn fix_broken<R: AsRef<Path> + ?Sized>(
+    root: &R,
+    dry_run: bool,
+) -> KernelResult<(u64, Vec<String>)> {
     let broken = find_broken(root)?;
     let mut removed: u64 = 0;
     let mut errors = Vec::new();
@@ -189,7 +202,9 @@ pub fn fix_broken(root: &str, dry_run: bool) -> KernelResult<(u64, Vec<String>)>
         } else {
             match Vfs::remove(&link.link_path) {
                 Ok(()) => removed = removed.saturating_add(1),
-                Err(e) => errors.push(alloc::format!("rm {}: {:?}", link.link_path, e)),
+                Err(e) => {
+                    errors.push(alloc::format!("rm {}: {:?}", link.link_path.display(), e));
+                }
             }
         }
     }
@@ -208,10 +223,10 @@ pub fn fix_broken(root: &str, dry_run: bool) -> KernelResult<(u64, Vec<String>)>
 // ---------------------------------------------------------------------------
 
 fn walk_tree(
-    path: &str,
+    path: &Path,
     opts: &CheckOptions,
     report: &mut LinkReport,
-    hardlink_map: &mut BTreeMap<String, Vec<String>>,
+    hardlink_map: &mut BTreeMap<String, Vec<PathBuf>>,
     depth: usize,
 ) -> KernelResult<()> {
     if depth > opts.max_depth || report.files_scanned as usize >= MAX_FILES {
@@ -221,7 +236,9 @@ fn walk_tree(
     let entries = match Vfs::readdir(path) {
         Ok(e) => e,
         Err(e) => {
-            report.errors.push(alloc::format!("readdir {}: {:?}", path, e));
+            report
+                .errors
+                .push(alloc::format!("readdir {}: {:?}", path.display(), e));
             return Ok(());
         }
     };
@@ -229,18 +246,16 @@ fn walk_tree(
     report.dirs_scanned = report.dirs_scanned.saturating_add(1);
 
     for entry in &entries {
-        if entry.name == "." || entry.name == ".." {
+        if entry.name.as_path() == Path::new(".") || entry.name.as_path() == Path::new("..") {
             continue;
         }
         if report.files_scanned as usize >= MAX_FILES {
             return Ok(());
         }
 
-        let full = if path == "/" {
-            alloc::format!("/{}", entry.name)
-        } else {
-            alloc::format!("{}/{}", path, entry.name)
-        };
+        // `Path::join` inserts exactly one separator, so the root needs no
+        // special case: `/` joined with `etc` is `/etc`, not `//etc`.
+        let full = path.join(&entry.name);
 
         match entry.entry_type {
             EntryType::File => {
@@ -257,7 +272,7 @@ fn walk_tree(
                 }
             }
             EntryType::Directory => {
-                walk_tree(&full, opts, report, hardlink_map, depth + 1)?;
+                walk_tree(&full, opts, report, hardlink_map, depth.saturating_add(1))?;
             }
             EntryType::Symlink => {
                 report.symlinks_scanned = report.symlinks_scanned.saturating_add(1);
@@ -265,24 +280,21 @@ fn walk_tree(
                 if opts.check_symlinks {
                     match Vfs::readlink(&full) {
                         Ok(target) => {
-                            // Resolve target path.
-                            let resolved = if target.starts_with('/') {
-                                target.clone()
-                            } else {
-                                // Relative symlink — resolve against parent.
-                                let parent = if let Some(pos) = full.rfind('/') {
-                                    &full[..pos]
-                                } else {
-                                    "/"
-                                };
-                                alloc::format!("{}/{}", parent, target)
-                            };
+                            // Resolve the target.  `Path::join` already gives
+                            // an absolute target back unchanged (an absolute
+                            // `other` replaces the whole path), so the two
+                            // cases collapse into one.  The parent of a
+                            // top-level link is `/`, and a link that has no
+                            // parent at all can only be relative to the root.
+                            let base = full.parent().unwrap_or(Path::new("/"));
+                            let resolved = base.join(&target);
 
                             // Check if target exists.
                             if Vfs::metadata(&resolved).is_err() {
                                 report.broken_symlinks.push(BrokenLink {
                                     link_path: full.clone(),
-                                    target,
+                                    target: Some(target),
+                                    error: String::new(),
                                 });
                             } else {
                                 report.valid_symlinks = report.valid_symlinks.saturating_add(1);
@@ -292,7 +304,8 @@ fn walk_tree(
                             // Can't read link target — treat as broken.
                             report.broken_symlinks.push(BrokenLink {
                                 link_path: full.clone(),
-                                target: alloc::format!("(error: {:?})", e),
+                                target: None,
+                                error: alloc::format!("{:?}", e),
                             });
                         }
                     }
@@ -314,12 +327,13 @@ pub fn self_test() -> KernelResult<()> {
 
     test_check_empty();
     test_broken_symlink();
+    test_non_utf8_symlink();
     test_valid_symlink();
     test_fix_broken();
     test_hardlink_detection();
     test_stats();
 
-    serial_println!("[linkcheck] Self-test passed (6 tests).");
+    serial_println!("[linkcheck] Self-test passed (7 tests).");
     Ok(())
 }
 
@@ -339,12 +353,54 @@ fn test_broken_symlink() {
 
     let report = check("/tmp/lc_broken", &CheckOptions::default()).expect("check");
     assert!(!report.broken_symlinks.is_empty(), "should find broken symlink");
-    assert!(report.broken_symlinks[0].link_path.contains("bad"));
+    assert_eq!(
+        report.broken_symlinks.first().map(|b| b.link_path.as_path()),
+        Some(Path::new("/tmp/lc_broken/bad"))
+    );
 
     let _ = Vfs::remove("/tmp/lc_broken/bad");
     let _ = Vfs::rmdir("/tmp/lc_broken");
 
     serial_println!("[linkcheck]   broken symlink: ok");
+}
+
+/// A symlink whose name and target are both undecodable must still be
+/// followed, judged and reported under its exact bytes.
+fn test_non_utf8_symlink() {
+    let dir = Path::new("/tmp/lc_wild");
+    let _ = Vfs::mkdir(dir);
+    let target = Path::new(b"/tmp/lc_wild/tar\xfeget.txt".as_slice());
+    let good = Path::new(b"/tmp/lc_wild/li\xffnk".as_slice());
+    let bad = Path::new(b"/tmp/lc_wild/dang\xffling".as_slice());
+    Vfs::write_file(target, b"hello").expect("write");
+    let _ = Vfs::symlink(good, target);
+    let _ = Vfs::symlink(bad, b"/no/such/tar\xfeget".as_slice());
+
+    let report = check(dir, &CheckOptions::default()).expect("check");
+    assert_eq!(report.valid_symlinks, 1, "undecodable target must resolve");
+    assert_eq!(report.broken_symlinks.len(), 1);
+    let broken = report.broken_symlinks.first().expect("one broken link");
+    assert_eq!(broken.link_path.as_path(), bad);
+    assert_eq!(
+        broken.target.as_deref(),
+        Some(Path::new(b"/no/such/tar\xfeget".as_slice()))
+    );
+    assert!(broken.error.is_empty(), "readlink succeeded, so no error text");
+
+    // A relative target resolves against the link's own directory, not the
+    // process cwd.
+    let rel = Path::new(b"/tmp/lc_wild/re\xfflative".as_slice());
+    let _ = Vfs::symlink(rel, b"tar\xfeget.txt".as_slice());
+    let report = check(dir, &CheckOptions::default()).expect("check");
+    assert_eq!(report.valid_symlinks, 2, "relative target must resolve");
+
+    let _ = Vfs::remove(rel);
+    let _ = Vfs::remove(good);
+    let _ = Vfs::remove(bad);
+    let _ = Vfs::remove(target);
+    let _ = Vfs::rmdir(dir);
+
+    serial_println!("[linkcheck]   non-UTF-8 symlink: ok");
 }
 
 fn test_valid_symlink() {

@@ -72,6 +72,25 @@ pub fn path_strictly_under<P: AsRef<Path>, D: AsRef<Path>>(path: P, dir: D) -> b
     path.starts_with(dir) && path.components().count() > dir.components().count()
 }
 
+/// Returns `true` if `haystack` contains `needle` as a contiguous byte
+/// subsequence.
+///
+/// `[u8]` has no `contains` for subslices (only for single elements), so this
+/// is the byte analogue of `str::contains` — needed wherever a *substring*
+/// filter is applied to a path or file name, which are byte strings and may
+/// not be valid UTF-8.  An empty needle matches everything, matching
+/// `str::contains("")`.
+#[must_use]
+pub fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,5 +154,16 @@ mod tests {
         assert!(path_strictly_under(Path::new(b"/data/\xff/file"), dir));
         // A different trailing byte is a different directory.
         assert!(!path_in_subtree(Path::new(b"/data/\xfe/file"), dir));
+    }
+
+    #[test]
+    fn contains_bytes_basics() {
+        assert!(contains_bytes(b"report.txt", b"port"));
+        assert!(contains_bytes(b"report.txt", b"report.txt"));
+        assert!(contains_bytes(b"report.txt", b""));
+        assert!(!contains_bytes(b"report.txt", b"Port"));
+        assert!(!contains_bytes(b"ab", b"abc"));
+        // A needle that straddles a non-UTF-8 byte still matches by bytes.
+        assert!(contains_bytes(b"re\xffport", b"\xffpo"));
     }
 }

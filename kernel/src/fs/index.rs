@@ -43,6 +43,7 @@ use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::path::{Path, PathBuf};
+use crate::fs::pathutil::contains_bytes;
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -635,21 +636,6 @@ fn path_filename(path: &Path) -> PathBuf {
 /// distinct, which is the property a `from_utf8_lossy`-based fold destroys.
 fn to_ascii_lower(s: &[u8]) -> Vec<u8> {
     s.iter().map(u8::to_ascii_lowercase).collect()
-}
-
-/// Whether `haystack` contains `needle` as a contiguous byte subsequence.
-///
-/// `[u8]` has no `contains` for subslices (only for single elements), so
-/// this is the byte analogue of `str::contains`.  An empty needle matches
-/// everything, matching `str::contains("")`.
-fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() {
-        return true;
-    }
-    if needle.len() > haystack.len() {
-        return false;
-    }
-    haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 // ---------------------------------------------------------------------------

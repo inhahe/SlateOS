@@ -46,6 +46,8 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
+use crate::fs::pathutil::{contains_bytes, path_in_subtree};
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -86,7 +88,7 @@ impl RecoverySource {
 #[derive(Debug, Clone)]
 pub struct RecoverableFile {
     /// Original path of the file.
-    pub path: String,
+    pub path: PathBuf,
     /// Source(s) that have information about this file.
     pub sources: Vec<RecoverySource>,
     /// Best source for recovery (highest priority).
@@ -98,7 +100,7 @@ pub struct RecoverableFile {
     /// SHA-256 hash hex (if known from integrity or CAS).
     pub hash: Option<String>,
     /// Trash name (if in trash).
-    pub trash_name: Option<String>,
+    pub trash_name: Option<PathBuf>,
     /// CAS hash (if in history).
     pub cas_hash: Option<[u8; 32]>,
 }
@@ -106,10 +108,12 @@ pub struct RecoverableFile {
 /// Filter for scanning recoverable files.
 #[derive(Debug, Clone, Default)]
 pub struct ScanFilter {
-    /// Only files matching this path prefix.
-    pub path_prefix: Option<String>,
-    /// Only files with name containing this substring.
-    pub name_contains: Option<String>,
+    /// Only files inside this directory subtree.
+    pub path_prefix: Option<PathBuf>,
+    /// Only files whose name contains this byte substring.  A file name is a
+    /// byte string, so the needle is bytes too — an ASCII needle still matches
+    /// inside a name that is not valid UTF-8.
+    pub name_contains: Option<Vec<u8>>,
     /// Only files deleted after this timestamp (ns).
     pub deleted_after_ns: Option<u64>,
     /// Maximum results.
@@ -126,14 +130,16 @@ impl ScanFilter {
     }
 
     /// Filter by path prefix.
-    pub fn with_prefix(mut self, prefix: &str) -> Self {
-        self.path_prefix = Some(String::from(prefix));
+    #[must_use]
+    pub fn with_prefix<P: AsRef<Path> + ?Sized>(mut self, prefix: &P) -> Self {
+        self.path_prefix = Some(prefix.as_ref().to_path_buf());
         self
     }
 
     /// Filter by name substring.
-    pub fn with_name(mut self, name: &str) -> Self {
-        self.name_contains = Some(String::from(name));
+    #[must_use]
+    pub fn with_name<N: AsRef<[u8]> + ?Sized>(mut self, name: &N) -> Self {
+        self.name_contains = Some(name.as_ref().to_vec());
         self
     }
 
@@ -154,7 +160,7 @@ impl ScanFilter {
 #[derive(Debug, Clone)]
 pub struct RecoveryResult {
     /// Path where the file was recovered to.
-    pub recovered_path: String,
+    pub recovered_path: PathBuf,
     /// Source used for recovery.
     pub source: RecoverySource,
     /// Bytes recovered.
@@ -190,7 +196,7 @@ pub fn stats() -> (u64, u64, u64) {
 /// (most recoverable first).
 pub fn scan(filter: &ScanFilter) -> KernelResult<Vec<RecoverableFile>> {
     // Map: original_path → RecoverableFile (deduplicated across sources).
-    let mut found: BTreeMap<String, RecoverableFile> = BTreeMap::new();
+    let mut found: BTreeMap<PathBuf, RecoverableFile> = BTreeMap::new();
 
     // Source 1: Trash.
     scan_trash(filter, &mut found);
@@ -227,12 +233,21 @@ pub fn scan(filter: &ScanFilter) -> KernelResult<Vec<RecoverableFile>> {
 ///
 /// Tries sources in priority order: Trash → History → fail.
 /// If `dest` is `None`, restores to the original path.
-pub fn recover(original_path: &str, dest: Option<&str>) -> KernelResult<RecoveryResult> {
+pub fn recover<P: AsRef<Path> + ?Sized>(
+    original_path: &P,
+    dest: Option<&Path>,
+) -> KernelResult<RecoveryResult> {
+    let original_path = original_path.as_ref();
+
     // Try trash first.
     if let Ok(result) = recover_from_trash(original_path, dest) {
         RECOVERIES.fetch_add(1, Ordering::Relaxed);
         BYTES_RECOVERED.fetch_add(result.bytes, Ordering::Relaxed);
-        serial_println!("[undelete] Recovered {} from trash ({} bytes)", original_path, result.bytes);
+        serial_println!(
+            "[undelete] Recovered {} from trash ({} bytes)",
+            original_path.display(),
+            result.bytes
+        );
         return Ok(result);
     }
 
@@ -240,7 +255,11 @@ pub fn recover(original_path: &str, dest: Option<&str>) -> KernelResult<Recovery
     if let Ok(result) = recover_from_history(original_path, dest) {
         RECOVERIES.fetch_add(1, Ordering::Relaxed);
         BYTES_RECOVERED.fetch_add(result.bytes, Ordering::Relaxed);
-        serial_println!("[undelete] Recovered {} from history ({} bytes)", original_path, result.bytes);
+        serial_println!(
+            "[undelete] Recovered {} from history ({} bytes)",
+            original_path.display(),
+            result.bytes
+        );
         return Ok(result);
     }
 
@@ -252,33 +271,43 @@ pub fn recover(original_path: &str, dest: Option<&str>) -> KernelResult<Recovery
 // Source scanners
 // ---------------------------------------------------------------------------
 
-fn matches_filter(path: &str, filter: &ScanFilter) -> bool {
+fn matches_filter(path: &Path, filter: &ScanFilter) -> bool {
     if let Some(ref prefix) = filter.path_prefix {
         // Route through the canonical subtree predicate so a prefix with or
         // without a trailing slash behaves identically. See fs::pathutil.
-        if !crate::fs::pathutil::path_in_subtree(path, prefix.as_str()) {
+        if !path_in_subtree(path, prefix) {
             return false;
         }
     }
     if let Some(ref name) = filter.name_contains {
-        // Extract filename portion.
-        let filename = path.rsplit('/').next().unwrap_or(path);
-        if !filename.contains(name.as_str()) {
+        // The name filter applies to the final component only.  A path with no
+        // components (only "/" or empty) has no name and so cannot match a
+        // non-empty needle.
+        let filename = path.file_name().map_or(&[][..], Path::as_bytes);
+        if !contains_bytes(filename, name) {
             return false;
         }
     }
     true
 }
 
-fn scan_trash(filter: &ScanFilter, found: &mut BTreeMap<String, RecoverableFile>) {
+fn scan_trash(filter: &ScanFilter, found: &mut BTreeMap<PathBuf, RecoverableFile>) {
     if let Ok(items) = crate::fs::trash::list() {
         for item in &items {
-            if !matches_filter(&item.original_path, filter) {
+            // This whole module is keyed on the *original* path: it answers
+            // "what can I get back for /home/x?".  A trash item whose original
+            // path was lost (a corrupt or truncated index line) cannot be
+            // keyed, so it is not listed here.  It is still recoverable by
+            // trash name through `fs::trash` directly.
+            let Some(original_path) = item.original_path.as_deref() else {
+                continue;
+            };
+            if !matches_filter(original_path, filter) {
                 continue;
             }
-            let entry = found.entry(item.original_path.clone()).or_insert_with(|| {
+            let entry = found.entry(original_path.to_path_buf()).or_insert_with(|| {
                 RecoverableFile {
-                    path: item.original_path.clone(),
+                    path: original_path.to_path_buf(),
                     sources: Vec::new(),
                     best_source: RecoverySource::Trash,
                     size: Some(item.size),
@@ -299,7 +328,7 @@ fn scan_trash(filter: &ScanFilter, found: &mut BTreeMap<String, RecoverableFile>
     }
 }
 
-fn scan_journal(filter: &ScanFilter, found: &mut BTreeMap<String, RecoverableFile>) {
+fn scan_journal(filter: &ScanFilter, found: &mut BTreeMap<PathBuf, RecoverableFile>) {
     use crate::fs::journal::{JournalEventType, read_since};
 
     let (entries, _) = read_since(0);
@@ -338,7 +367,7 @@ fn scan_journal(filter: &ScanFilter, found: &mut BTreeMap<String, RecoverableFil
     }
 }
 
-fn scan_history(filter: &ScanFilter, found: &mut BTreeMap<String, RecoverableFile>) {
+fn scan_history(filter: &ScanFilter, found: &mut BTreeMap<PathBuf, RecoverableFile>) {
     use crate::fs::history;
 
     // Get all tracked files from history.
@@ -353,12 +382,10 @@ fn scan_history(filter: &ScanFilter, found: &mut BTreeMap<String, RecoverableFil
         }
 
         let versions = history::get_history(path);
-        if versions.is_empty() {
+        // Versions are newest-first, so the head is the most recent.
+        let Some(latest) = versions.first() else {
             continue;
-        }
-
-        // Use the most recent version.
-        let latest = &versions[0]; // Versions are newest-first.
+        };
         let rec = found.entry(path.clone()).or_insert_with(|| {
             RecoverableFile {
                 path: path.clone(),
@@ -385,7 +412,7 @@ fn scan_history(filter: &ScanFilter, found: &mut BTreeMap<String, RecoverableFil
     }
 }
 
-fn scan_integrity(filter: &ScanFilter, found: &mut BTreeMap<String, RecoverableFile>) {
+fn scan_integrity(filter: &ScanFilter, found: &mut BTreeMap<PathBuf, RecoverableFile>) {
     use crate::fs::integrity;
 
     // List all baselined entries.
@@ -432,12 +459,14 @@ fn scan_integrity(filter: &ScanFilter, found: &mut BTreeMap<String, RecoverableF
 // Recovery implementations
 // ---------------------------------------------------------------------------
 
-fn recover_from_trash(original_path: &str, dest: Option<&str>) -> KernelResult<RecoveryResult> {
+fn recover_from_trash(original_path: &Path, dest: Option<&Path>) -> KernelResult<RecoveryResult> {
     use crate::fs::trash;
 
     // Find the item in trash matching this original path.
     let items = trash::list()?;
-    let item = items.iter().find(|i| i.original_path == original_path)
+    let item = items
+        .iter()
+        .find(|i| i.original_path.as_deref() == Some(original_path))
         .ok_or(KernelError::NotFound)?;
 
     let trash_name = item.trash_name.clone();
@@ -445,12 +474,15 @@ fn recover_from_trash(original_path: &str, dest: Option<&str>) -> KernelResult<R
 
     if let Some(target) = dest {
         // Copy from trash to target, then purge from trash.
-        let trash_path = alloc::format!("/_TRASH/{}", trash_name);
+        let trash_path = Path::new(trash::TRASH_DIR).join(&trash_name);
         let data = crate::fs::Vfs::read_file(&trash_path)?;
         crate::fs::Vfs::write_file(target, &data)?;
+        // The copy succeeded, so the trash copy is now redundant; failing to
+        // purge it wastes space but must not fail the recovery the caller
+        // already got.
         let _ = trash::purge_one(&trash_name);
         Ok(RecoveryResult {
-            recovered_path: String::from(target),
+            recovered_path: target.to_path_buf(),
             source: RecoverySource::Trash,
             bytes: size,
             verified: None,
@@ -467,20 +499,16 @@ fn recover_from_trash(original_path: &str, dest: Option<&str>) -> KernelResult<R
     }
 }
 
-fn recover_from_history(original_path: &str, dest: Option<&str>) -> KernelResult<RecoveryResult> {
+fn recover_from_history(original_path: &Path, dest: Option<&Path>) -> KernelResult<RecoveryResult> {
     use crate::fs::history;
 
     let versions = history::get_history(original_path);
-    if versions.is_empty() {
-        return Err(KernelError::NotFound);
-    }
-
-    // Get the most recent version's content from CAS.
-    let latest = &versions[0];
+    // Versions are newest-first, so the head is the most recent.
+    let latest = versions.first().ok_or(KernelError::NotFound)?;
     let data = crate::fs::cas::get(&latest.hash)?;
     let size = data.len() as u64;
 
-    let target = dest.map_or_else(|| String::from(original_path), String::from);
+    let target = dest.unwrap_or(original_path).to_path_buf();
     crate::fs::Vfs::write_file(&target, &data)?;
 
     // Verify hash.
@@ -545,8 +573,9 @@ fn test_trash_recovery() {
     // Should now be recoverable.
     let filter = ScanFilter::new().with_name("und_trash.txt");
     let results = scan(&filter).expect("scan");
-    assert!(!results.is_empty(), "should find trashed file");
-    assert_eq!(results[0].best_source, RecoverySource::Trash);
+    let first = results.first().expect("should find trashed file");
+    assert_eq!(first.best_source, RecoverySource::Trash);
+    assert_eq!(first.path.as_path(), Path::new("/tmp/und_trash.txt"));
 
     // Recover it.
     let result = recover("/tmp/und_trash.txt", None).expect("recover");
@@ -573,7 +602,10 @@ fn test_history_recovery() {
     let _ = Vfs::remove("/tmp/und_hist.txt");
 
     // Should be recoverable from history.
-    let result = recover("/tmp/und_hist.txt", Some("/tmp/und_hist_recovered.txt"));
+    let result = recover(
+        "/tmp/und_hist.txt",
+        Some(Path::new("/tmp/und_hist_recovered.txt")),
+    );
     match result {
         Ok(r) => {
             assert_eq!(r.source, RecoverySource::History);
@@ -598,10 +630,26 @@ fn test_filter() {
         .deleted_after(100)
         .with_limit(50);
 
-    assert_eq!(filter.path_prefix.as_deref(), Some("/tmp"));
-    assert_eq!(filter.name_contains.as_deref(), Some("test"));
+    assert_eq!(filter.path_prefix.as_deref(), Some(Path::new("/tmp")));
+    assert_eq!(filter.name_contains.as_deref(), Some(b"test".as_slice()));
     assert_eq!(filter.deleted_after_ns, Some(100));
     assert_eq!(filter.limit, 50);
+
+    // The prefix is a subtree test, not a byte prefix: a file under a sibling
+    // directory that merely shares a byte prefix must not match.
+    let f = ScanFilter::new().with_prefix("/tmp/und");
+    assert!(matches_filter(Path::new("/tmp/und/a.txt"), &f));
+    assert!(!matches_filter(Path::new("/tmp/undelete/a.txt"), &f));
+
+    // The name filter matches bytes, so an ASCII needle finds a name that is
+    // not valid UTF-8, and a needle spanning the raw byte matches too.
+    let f = ScanFilter::new().with_name("port");
+    assert!(matches_filter(Path::new(b"/tmp/re\xffport.txt".as_slice()), &f));
+    let f = ScanFilter::new().with_name(b"\xffpo".as_slice());
+    assert!(matches_filter(Path::new(b"/tmp/re\xffport.txt".as_slice()), &f));
+    // The name filter applies to the final component only.
+    let f = ScanFilter::new().with_name("tmp");
+    assert!(!matches_filter(Path::new("/tmp/a.txt"), &f));
 
     serial_println!("[undelete]   filter: ok");
 }

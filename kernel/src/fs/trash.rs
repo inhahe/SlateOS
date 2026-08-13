@@ -72,7 +72,7 @@ const AUTO_PRUNE_TARGET: u64 = 85;
 /// Uses `_TRASH` (not `.trash`) because FAT 8.3 naming doesn't support
 /// dot-prefixed filenames (the dot is the base/extension separator,
 /// so `.trash` would have an empty base → invalid).
-const TRASH_DIR: &str = "/_TRASH";
+pub(crate) const TRASH_DIR: &str = "/_TRASH";
 
 /// Name of the index file inside the trash directory.
 ///

@@ -179,6 +179,22 @@ POISON_ROOT_SUBSTRINGS = [
     "2mm10quarantine15find_corruption",
 ]
 
+# Roots that are allowed to be missing from the binary.
+#
+# A root with no call sites is not emitted at all, and a function that never
+# runs cannot report — so absence is safe, and if a caller is added later the
+# symbol reappears and is checked automatically with no edit here. This is
+# listed explicitly rather than by relaxing the check for every root, because
+# for the rest a missing symbol means a rename and the walk silently losing
+# coverage, which is precisely the failure this script exists to prevent.
+#
+# `mm::poison::poison_alloc` is public tooling API in a module carrying
+# `#![allow(dead_code)]`; the slab allocator uses its own `mm::heap::
+# poison_alloc` instead, so nothing calls this one today.
+POISON_ROOTS_MAY_BE_ABSENT = {
+    "2mm6poison12poison_alloc",
+}
+
 # Cuts for the third walk.
 #
 # These run only once a violation has *already* been found — the serial
@@ -187,11 +203,60 @@ POISON_ROOT_SUBSTRINGS = [
 # detector has done its job, and one report is the intended outcome rather than
 # a flood. The walk covers the hot path and stops at the cold one.
 POISON_NO_EXPAND_SUBSTRINGS = [
-    "6serial6_print",
+    # `serial::_print`. The doubled underscore is not a typo: v0 escapes an
+    # identifier that begins with `_`, so `_print` encodes as `6__print`.
+    "6serial6__print",
     "2mm8kasan_rt6report",
     "4core3fmt",
     "9panicking",
 ]
+
+# The third walk's violation rule is deliberately NOT the first two's.
+#
+# Walks 1 and 2 flag *every* instrumented function they can reach, and that is
+# exactly right for them: before the shadow exists, or underneath the check
+# itself, an instrumented access is fatal no matter what memory it touches.
+#
+# Here it would be wrong, and the first run of this walk proved it — 500-odd
+# "violations" that were all `AtomicUsize::fetch_add` on a stats counter,
+# `Range::next` on a loop variable, and a `SpinMutexGuard` deref on the serial
+# port. None of those touch poisoned memory; they touch ordinary live kernel
+# objects, where instrumentation is correct and even desirable (it is how a bug
+# in the memory debugger itself would get caught). Flagging them would have
+# meant either 500 pointless exemptions or, far more likely, someone
+# rubber-stamping the whole walk as noise and losing the one real signal in it.
+#
+# What actually has to be uninstrumented is much narrower: the accesses to the
+# poisoned bytes themselves. Those are reached in exactly two ways, and the walk
+# checks both:
+#
+#   1. The root's own body. Every poison root lives in a module carrying the
+#      `#![cfg_attr(kasan_instrumented, sanitize(address = "off"))]` opt-out, so
+#      a plain `*ptr` in its body compiles to an uninstrumented access. If a
+#      root calls `__asan_*` directly, the opt-out is not in force — the
+#      attribute was dropped, or a new module was added without it.
+#
+#   2. A raw-pointer accessor reached from a root. This is the §118/§119 hazard
+#      and the one the attribute provably cannot cover: `core::ptr::
+#      read_volatile` and friends are generic, so they monomorphise into *this*
+#      crate carrying the default (instrumented) attribute, and the exempt
+#      module's attribute never applies. Invisible in the source of the
+#      "exempt" module, which is why it is checked mechanically.
+#
+# The accessor list is `core::ptr` (which covers the `<*const T>::read` /
+# `<*mut T>::write` inherent methods too, as they live in `core::ptr::const_ptr`
+# / `mut_ptr`) plus `core::intrinsics` (`write_bytes`, `copy_nonoverlapping`).
+# `core::slice` is deliberately excluded: slice helpers are used on ordinary
+# memory throughout these modules, so including them would reintroduce exactly
+# the false positives described above. Poisoned memory is reached through raw
+# pointers here, never through a slice.
+#
+# This can still over-report — a `read_volatile` on an MMIO register reached
+# from a root would be flagged though it touches nothing poisoned. That
+# direction is the cheap one: clearing it costs a `rawmem` call or a documented
+# exception, while a miss costs a ~2.7-hour instrumented boot that dies on its
+# own redzone check.
+POISON_ACCESSOR_SUBSTRINGS = ["4core3ptr", "4core10intrinsics"]
 
 FUNC_HEADER_RE = re.compile(r"^([0-9a-fA-F]+)\s+<(.+)>:$")
 DIRECT_CALL_RE = re.compile(r"\bcallq?\s+0x[0-9a-fA-F]+\s+<([^>]+)>")
@@ -346,6 +411,70 @@ def walk(
     return violations, visited, parent
 
 
+def walk_poison(
+    functions: dict[str, list[str]],
+    roots: list[str],
+    no_expand: set[str],
+) -> tuple[list[tuple[str, str]], set[str], dict[str, str | None]]:
+    """Walk the call graph from the deliberate-poisoned-memory roots.
+
+    Same traversal as `walk`, different — much narrower — violation rule: only
+    the root bodies themselves and the raw-pointer accessors they reach are
+    checked, not every function on the path. See the commentary on
+    `POISON_ACCESSOR_SUBSTRINGS` for why the transitive rule the other two walks
+    use would be actively harmful here.
+    """
+    parent: dict[str, str | None] = {r: None for r in roots}
+    queue: deque[str] = deque(roots)
+    visited = set(roots)
+    root_set = set(roots)
+    violations: list[tuple[str, str]] = []
+
+    while queue:
+        name = queue.popleft()
+        is_root = name in root_set
+        is_accessor = any(frag in name for frag in POISON_ACCESSOR_SUBSTRINGS)
+
+        lines = functions.get(name)
+        if lines is None:
+            # Only worth reporting for the functions this walk actually judges;
+            # a missing body anywhere else on the path is irrelevant here.
+            if is_root or is_accessor:
+                violations.append((name, "no disassembly available for callee"))
+            continue
+
+        callees = calls_in(lines)
+
+        if is_root or is_accessor:
+            for callee in callees:
+                if not callee.startswith("__asan"):
+                    continue
+                if is_root:
+                    why = (
+                        f"calls {callee} in its own body — this function is in a "
+                        "module carrying the `sanitize(address = \"off\")` "
+                        "opt-out, so the opt-out is no longer in force"
+                    )
+                else:
+                    why = (
+                        f"calls {callee} — a generic `core` accessor reachable "
+                        "from a poisoned-memory root, which no module-level "
+                        "`sanitize` attribute can exempt (§118/§119)"
+                    )
+                violations.append((name, why))
+
+        if name in no_expand:
+            continue
+
+        for callee in callees:
+            if callee not in visited:
+                visited.add(callee)
+                parent[callee] = name
+                queue.append(callee)
+
+    return violations, visited, parent
+
+
 def format_path(name: str, parent: dict[str, str | None]) -> str:
     chain = []
     node: str | None = name
@@ -431,11 +560,13 @@ def main() -> int:
     poison_roots: list[str] = []
     for root in POISON_ROOT_SUBSTRINGS:
         matched = [name for name in functions if root in name]
-        if not matched:
+        if not matched and root not in POISON_ROOTS_MAY_BE_ABSENT:
             problems.append(
-                f"poisoned-memory root {root!r} not found in the binary "
-                "(renamed, or inlined away — if it was inlined, root the walk "
-                "at its caller instead of deleting the entry)"
+                f"poisoned-memory root {root!r} not found in the binary. "
+                "Either it was renamed (fix the entry), or it lost its last "
+                "call site and was not emitted — if that is intended, add it "
+                "to POISON_ROOTS_MAY_BE_ABSENT with the reason rather than "
+                "deleting it, so it is re-checked the moment a caller returns."
             )
         poison_roots.extend(matched)
 
@@ -444,9 +575,23 @@ def main() -> int:
         for name in functions
         if any(frag in name for frag in POISON_NO_EXPAND_SUBSTRINGS)
     }
+    # A cut that matches nothing fails silently and in the *unsafe* direction:
+    # the walk runs on past where it was meant to stop and buries the real
+    # signal in noise from code this check never intended to cover. That is not
+    # hypothetical — `'6serial6_print'` was one underscore short of the actual
+    # symbol (v0 escapes the leading `_` of `_print`, giving `6__print`), so the
+    # walk expanded through the printer into the APIC MMIO accessors and
+    # reported those. Same validation as the roots get.
+    for frag in POISON_NO_EXPAND_SUBSTRINGS:
+        if not any(frag in name for name in functions):
+            problems.append(
+                f"poisoned-memory cut {frag!r} not found in the binary "
+                "(renamed, or mistyped?). A cut that matches nothing does not "
+                "stop the walk, so this must be fixed rather than dropped."
+            )
 
-    poison_violations, poison_visited, poison_parent = walk(
-        functions, poison_roots, poison_no_expand, check_indirect=False
+    poison_violations, poison_visited, poison_parent = walk_poison(
+        functions, poison_roots, poison_no_expand
     )
 
     if pre_violations or rt_violations or poison_violations or problems:
@@ -462,6 +607,11 @@ def main() -> int:
             print(
                 f"  CHECK PATH: {name}\n    {why}\n    reached via:\n"
                 f"      {format_path(name, rt_parent)}\n"
+            )
+        for name, why in poison_violations:
+            print(
+                f"  POISONED MEMORY: {name}\n    {why}\n    reached via:\n"
+                f"      {format_path(name, poison_parent)}\n"
             )
         if pre_violations:
             print(

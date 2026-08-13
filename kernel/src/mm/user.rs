@@ -615,6 +615,33 @@ pub unsafe fn write_user<T: Copy>(user_ptr: u64, value: T) -> KernelResult<()> {
 // Both are structural, so the fix is structural: copy in, work on kernel
 // memory, copy out.
 
+/// Allocate a zeroed kernel byte buffer, reporting OOM instead of aborting.
+///
+/// `vec![0u8; n]` and `Vec::from(slice)` are *infallible* allocations: on
+/// exhaustion they call the allocation-error handler, which in a kernel means
+/// the whole system goes down.  Since `n` here is usually derived from a
+/// syscall argument, that turns an OOM into a userspace-triggerable panic.
+/// This returns [`KernelError::OutOfMemory`] instead.
+///
+/// This is the buffer to pack fixed-width output records into before handing
+/// them to [`write_user_items`] or [`copy_to_user`]: size it by what the
+/// kernel will actually emit rather than by the caller's advertised capacity,
+/// so a huge `max_entries` cannot make the kernel allocate for it.
+///
+/// # Errors
+///
+/// - [`KernelError::OutOfMemory`] if the buffer cannot be allocated.
+pub fn alloc_zeroed_vec(len: usize) -> KernelResult<alloc::vec::Vec<u8>> {
+    let mut buf: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    if len == 0 {
+        return Ok(buf);
+    }
+    buf.try_reserve_exact(len)
+        .map_err(|_| KernelError::OutOfMemory)?;
+    buf.resize(len, 0);
+    Ok(buf)
+}
+
 /// Copy a bounded user byte range into a freshly allocated kernel buffer.
 ///
 /// This is the replacement for `validate_user_read` followed by

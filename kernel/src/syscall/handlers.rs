@@ -7351,30 +7351,22 @@ pub fn sys_fs_open(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let path_ptr = args.arg0 as *const u8;
     let path_len = args.arg1 as usize;
     #[allow(clippy::cast_possible_truncation)]
     let flags_raw = args.arg2 as u32;
 
-    if path_ptr.is_null() || path_len == 0 {
+    if args.arg0 == 0 || path_len == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    let safe_path_len = path_len.min(256);
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, safe_path_len) {
-        return SyscallResult::err(e);
-    }
-
-    // SAFETY: Validated above.
-    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, safe_path_len) };
-    let path = match core::str::from_utf8(path_bytes) {
+    let path = match read_user_path(args.arg0, path_len) {
         Ok(s) => s,
-        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+        Err(e) => return SyscallResult::err(e),
     };
 
     let flags = crate::fs::handle::OpenFlags::from_bits(flags_raw);
 
-    match crate::fs::handle::open(path, flags) {
+    match crate::fs::handle::open(&path, flags) {
         Ok(handle) => {
             // Track the open file handle as a per-process resource so it
             // is closed when the process exits (cleanup_handles), and so
@@ -7414,25 +7406,17 @@ pub fn sys_fs_open_mode(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let path_ptr = args.arg0 as *const u8;
     let path_len = args.arg1 as usize;
     #[allow(clippy::cast_possible_truncation)]
     let flags_raw = args.arg2 as u32;
 
-    if path_ptr.is_null() || path_len == 0 {
+    if args.arg0 == 0 || path_len == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    let safe_path_len = path_len.min(256);
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, safe_path_len) {
-        return SyscallResult::err(e);
-    }
-
-    // SAFETY: Validated above.
-    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, safe_path_len) };
-    let path = match core::str::from_utf8(path_bytes) {
+    let path = match read_user_path(args.arg0, path_len) {
         Ok(s) => s,
-        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+        Err(e) => return SyscallResult::err(e),
     };
 
     let flags = crate::fs::handle::OpenFlags::from_bits(flags_raw);
@@ -7448,7 +7432,7 @@ pub fn sys_fs_open_mode(args: &SyscallArgs) -> SyscallResult {
         mode_raw & 0o777
     };
 
-    match crate::fs::handle::open_with_mode(path, flags, create_mode) {
+    match crate::fs::handle::open_with_mode(&path, flags, create_mode) {
         Ok(handle) => {
             if let Some(pid) = caller_pid() {
                 pcb::register_ipc_handle(pid, ResourceType::File, handle);
@@ -7481,7 +7465,6 @@ pub fn sys_fs_close(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_FS_READ` — read from a file handle at the current offset.
 pub fn sys_fs_read(args: &SyscallArgs) -> SyscallResult {
     let handle = args.arg0;
-    let buf_ptr = args.arg1 as *mut u8;
     let buf_cap = args.arg2 as usize;
 
     // POSIX/Linux: a zero-length read returns 0 with no other effect.  It does
@@ -7495,23 +7478,17 @@ pub fn sys_fs_read(args: &SyscallArgs) -> SyscallResult {
     if buf_cap == 0 {
         return SyscallResult::ok(0);
     }
-    if buf_ptr.is_null() {
+    if args.arg1 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, buf_cap) {
-        return SyscallResult::err(e);
-    }
 
-    // Allocate a kernel-side buffer, read into it, then copy to user.
-    // This avoids passing raw user pointers into the VFS.
-    let mut kbuf = alloc::vec![0u8; buf_cap];
-
-    match crate::fs::handle::read(handle, &mut kbuf) {
+    // Read into a kernel buffer, then copy out.  Besides keeping raw user
+    // pointers out of the VFS, this makes the staging allocation fallible —
+    // `vec![0u8; buf_cap]` would abort the kernel on a large failed read.
+    match crate::mm::user::with_user_out_buf(args.arg1, buf_cap, usize::MAX, |buf| {
+        crate::fs::handle::read(handle, buf)
+    }) {
         Ok(n) => {
-            // SAFETY: Validated above — buf_ptr is in user space, mapped, writable.
-            unsafe {
-                core::ptr::copy_nonoverlapping(kbuf.as_ptr(), buf_ptr, n);
-            }
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(n as i64)
         }
@@ -7522,26 +7499,20 @@ pub fn sys_fs_read(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_FS_WRITE` — write to a file handle at the current offset.
 pub fn sys_fs_write(args: &SyscallArgs) -> SyscallResult {
     let handle = args.arg0;
-    let data_ptr = args.arg1 as *const u8;
     let data_len = args.arg2 as usize;
 
-    if data_ptr.is_null() && data_len > 0 {
+    if args.arg1 == 0 && data_len > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if data_len > 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, data_len) {
-            return SyscallResult::err(e);
-        }
-    }
 
-    // SAFETY: Validated above.
-    let data = if data_len > 0 {
-        unsafe { core::slice::from_raw_parts(data_ptr, data_len) }
-    } else {
-        &[]
+    // The VFS write path takes locks and can sleep on the block layer, so the
+    // payload is copied in first (see `sys_pipe_write`).
+    let data = match crate::mm::user::read_user_vec(args.arg1, data_len, usize::MAX) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
     };
 
-    match crate::fs::handle::write(handle, data) {
+    match crate::fs::handle::write(handle, &data) {
         Ok(n) => {
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(n as i64)
@@ -7590,27 +7561,19 @@ pub fn sys_fs_truncate(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let path_ptr = args.arg0 as *const u8;
     let path_len = args.arg1 as usize;
     let new_size = args.arg2;
 
-    if path_ptr.is_null() || path_len == 0 {
+    if args.arg0 == 0 || path_len == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    let safe_path_len = path_len.min(256);
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, safe_path_len) {
-        return SyscallResult::err(e);
-    }
-
-    // SAFETY: Validated above.
-    let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, safe_path_len) };
-    let path = match core::str::from_utf8(path_bytes) {
+    let path = match read_user_path(args.arg0, path_len) {
         Ok(s) => s,
-        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+        Err(e) => return SyscallResult::err(e),
     };
 
-    match crate::fs::Vfs::truncate(path, new_size) {
+    match crate::fs::Vfs::truncate(&path, new_size) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -7625,39 +7588,24 @@ pub fn sys_fs_rename(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let from_ptr = args.arg0 as *const u8;
     let from_len = args.arg1 as usize;
-    let to_ptr = args.arg2 as *const u8;
     let to_len = args.arg3 as usize;
 
-    if from_ptr.is_null() || from_len == 0 || to_ptr.is_null() || to_len == 0 {
+    if args.arg0 == 0 || from_len == 0 || args.arg2 == 0 || to_len == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    let safe_from_len = from_len.min(256);
-    let safe_to_len = to_len.min(256);
-
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, safe_from_len) {
-        return SyscallResult::err(e);
-    }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg2, safe_to_len) {
-        return SyscallResult::err(e);
-    }
-
-    // SAFETY: Validated above.
-    let from_bytes = unsafe { core::slice::from_raw_parts(from_ptr, safe_from_len) };
-    let from_path = match core::str::from_utf8(from_bytes) {
+    let from_path = match read_user_path(args.arg0, from_len) {
         Ok(s) => s,
-        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+        Err(e) => return SyscallResult::err(e),
     };
 
-    let to_bytes = unsafe { core::slice::from_raw_parts(to_ptr, safe_to_len) };
-    let to_path = match core::str::from_utf8(to_bytes) {
+    let to_path = match read_user_path(args.arg2, to_len) {
         Ok(s) => s,
-        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+        Err(e) => return SyscallResult::err(e),
     };
 
-    match crate::fs::Vfs::rename(from_path, to_path) {
+    match crate::fs::Vfs::rename(&from_path, &to_path) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -7958,24 +7906,18 @@ pub fn sys_fs_trash(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let ptr = args.arg0 as *const u8;
     let len = args.arg1 as usize;
 
-    if ptr.is_null() || len == 0 || len > 4096 {
+    if args.arg0 == 0 || len == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, len) {
-        return SyscallResult::err(e);
-    }
 
-    // SAFETY: Validated above — pointer is in user-space and mapped.
-    let path_bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
-    let path = match core::str::from_utf8(path_bytes) {
+    let path = match read_user_path(args.arg0, len) {
         Ok(s) => s,
-        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+        Err(e) => return SyscallResult::err(e),
     };
 
-    match crate::fs::trash::trash(path) {
+    match crate::fs::trash::trash(&path) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -7994,65 +7936,68 @@ pub fn sys_fs_trash_list(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let out_ptr = args.arg0 as *mut u8;
     let max_entries = args.arg1 as usize;
 
-    if out_ptr.is_null() || max_entries == 0 {
+    if args.arg0 == 0 || max_entries == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
     let buf_size = max_entries.saturating_mul(crate::syscall::number::FS_TRASH_ENTRY_SIZE);
+    // Fail fast on an unusable buffer before scanning the recycle bin.
     if let Err(e) = crate::mm::user::validate_user_write(args.arg0, buf_size) {
         return SyscallResult::err(e);
     }
 
-    match crate::fs::trash::list() {
-        Ok(items) => {
-            let count = items.len().min(max_entries);
+    let items = match crate::fs::trash::list() {
+        Ok(i) => i,
+        Err(e) => return SyscallResult::err(e),
+    };
 
-            // SAFETY: Validated above.
-            unsafe {
-                core::ptr::write_bytes(out_ptr, 0, buf_size);
+    let count = items.len().min(max_entries);
+    let entry_size = crate::syscall::number::FS_TRASH_ENTRY_SIZE;
 
-                for (i, item) in items.iter().take(count).enumerate() {
-                    let entry_base = out_ptr.add(
-                        i.wrapping_mul(crate::syscall::number::FS_TRASH_ENTRY_SIZE),
-                    );
+    // Pack the records in the kernel and emit them with a single copy.  The
+    // buffer is sized by what we will actually write, not by what the caller
+    // advertised, so a huge `max_entries` cannot make the kernel allocate it.
+    let packed_len = count.saturating_mul(entry_size);
+    let mut packed = match crate::mm::user::alloc_zeroed_vec(packed_len) {
+        Ok(v) => v,
+        Err(e) => return SyscallResult::err(e),
+    };
 
-                    // Write trash name (bytes 0..256).
-                    let name_bytes = item.trash_name.as_bytes();
-                    let name_len = name_bytes.len().min(255);
-                    core::ptr::copy_nonoverlapping(
-                        name_bytes.as_ptr(),
-                        entry_base,
-                        name_len,
-                    );
+    for (i, item) in items.iter().take(count).enumerate() {
+        let base = i.wrapping_mul(entry_size);
+        let Some(entry) = packed.get_mut(base..base.wrapping_add(entry_size)) else {
+            break;
+        };
 
-                    // Write original path (bytes 256..512).
-                    let path_bytes = item.original_path.as_bytes();
-                    let path_len = path_bytes.len().min(255);
-                    core::ptr::copy_nonoverlapping(
-                        path_bytes.as_ptr(),
-                        entry_base.add(256),
-                        path_len,
-                    );
-
-                    // Write file size (bytes 512..520).
-                    let size_ptr = entry_base.add(512) as *mut u64;
-                    core::ptr::write(size_ptr, item.size);
-
-                    // Write flags (bytes 520..524).
-                    let flags: u32 = if item.is_directory { 1 } else { 0 };
-                    let flags_ptr = entry_base.add(520) as *mut u32;
-                    core::ptr::write(flags_ptr, flags);
-                }
+        // The record layout is fixed-width — name and path fields are 256
+        // bytes each with a NUL terminator — so an over-long name is
+        // necessarily cut here.  That is the ABI, not a validation shortcut:
+        // the trash namer bounds what it generates, and the fields are
+        // display-only.  `sys_fs_trash_restore` matches on the stored name,
+        // not on this copy.
+        let mut put = |at: usize, bytes: &[u8], cap: usize| {
+            let n = bytes.len().min(cap);
+            if let (Some(dst), Some(src)) =
+                (entry.get_mut(at..at.wrapping_add(n)), bytes.get(..n))
+            {
+                dst.copy_from_slice(src);
             }
-
-            #[allow(clippy::cast_possible_wrap)]
-            SyscallResult::ok(count as i64)
-        }
-        Err(e) => SyscallResult::err(e),
+        };
+        put(0, item.trash_name.as_bytes(), 255);
+        put(256, item.original_path.as_bytes(), 255);
+        put(512, &item.size.to_le_bytes(), 8);
+        let flags: u32 = u32::from(item.is_directory);
+        put(520, &flags.to_le_bytes(), 4);
     }
+
+    if let Err(e) = crate::mm::user::write_user_items(args.arg0, &packed) {
+        return SyscallResult::err(e);
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(count as i64)
 }
 
 /// `SYS_FS_TRASH_RESTORE` — restore a file from the recycle bin.
@@ -8069,44 +8014,49 @@ pub fn sys_fs_trash_restore(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let name_ptr = args.arg0 as *const u8;
     let name_len = args.arg1 as usize;
-    let out_ptr = args.arg2 as *mut u8;
 
-    if name_ptr.is_null() || name_len == 0 || name_len > 256 {
+    if args.arg0 == 0 || name_len == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, name_len) {
-        return SyscallResult::err(e);
-    }
 
-    if !out_ptr.is_null() {
+    // Fail fast on an unusable output buffer: the restore is not undoable, so
+    // it must not run for a caller that cannot be told where the file went.
+    if args.arg2 != 0 {
         if let Err(e) = crate::mm::user::validate_user_write(args.arg2, 256) {
             return SyscallResult::err(e);
         }
     }
 
-    // SAFETY: Validated above.
-    let name_bytes = unsafe { core::slice::from_raw_parts(name_ptr, name_len) };
-    let trash_name = match core::str::from_utf8(name_bytes) {
+    let name_bytes = match crate::mm::user::read_user_vec(args.arg0, name_len, NAME_MAX) {
+        Ok(b) => b,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let trash_name = match core::str::from_utf8(&name_bytes) {
         Ok(s) => s,
         Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
     };
 
     match crate::fs::trash::restore(trash_name) {
         Ok(restored_path) => {
-            // Write the restored path to the output buffer.
-            if !out_ptr.is_null() {
+            // Write the restored path to the output buffer.  The field is a
+            // fixed 256-byte NUL-terminated slot, so a longer path is cut —
+            // the caller detects this from the returned full length.
+            if args.arg2 != 0 {
+                let mut record = [0u8; 256];
                 let path_bytes = restored_path.as_bytes();
                 let copy_len = path_bytes.len().min(255);
-                // SAFETY: Validated above.
-                unsafe {
-                    core::ptr::write_bytes(out_ptr, 0, 256);
-                    core::ptr::copy_nonoverlapping(
-                        path_bytes.as_ptr(),
-                        out_ptr,
-                        copy_len,
-                    );
+                if let (Some(dst), Some(src)) =
+                    (record.get_mut(..copy_len), path_bytes.get(..copy_len))
+                {
+                    dst.copy_from_slice(src);
+                }
+                // SAFETY: `record` is a live 256-byte stack array; the
+                // destination is validated inside `copy_to_user`.
+                if let Err(e) =
+                    unsafe { crate::mm::user::copy_to_user(record.as_ptr(), args.arg2, 256) }
+                {
+                    return SyscallResult::err(e);
                 }
             }
 
@@ -8151,29 +8101,23 @@ pub fn sys_fs_watch_create(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let ptr = args.arg0 as *const u8;
     let len = args.arg1 as usize;
     let mask = args.arg2 as u32;
     let flags = args.arg3;
 
-    if ptr.is_null() || len == 0 || len > 4096 {
+    if args.arg0 == 0 || len == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, len) {
-        return SyscallResult::err(e);
-    }
 
-    // SAFETY: Validated above.
-    let path_bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
-    let path = match core::str::from_utf8(path_bytes) {
+    let path = match read_user_path(args.arg0, len) {
         Ok(s) => s,
-        Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
+        Err(e) => return SyscallResult::err(e),
     };
 
     let recursive = (flags & 1) != 0;
     let event_mask = crate::fs::notify::FsEventMask(mask);
 
-    match crate::fs::notify::create_watch(path, event_mask, recursive) {
+    match crate::fs::notify::create_watch(&path, event_mask, recursive) {
         Ok(id) => {
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(id as i64)
@@ -8189,13 +8133,15 @@ pub fn sys_fs_watch_create(args: &SyscallArgs) -> SyscallResult {
 /// `arg2`: max number of events.
 pub fn sys_fs_watch_read(args: &SyscallArgs) -> SyscallResult {
     let watch_id = args.arg0;
-    let out_ptr = args.arg1 as *mut u8;
     let max_events = args.arg2 as usize;
 
-    if out_ptr.is_null() || max_events == 0 {
+    if args.arg0 == 0 || args.arg1 == 0 || max_events == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
+    // Fail fast on an unusable destination *before* dequeuing: `read_events`
+    // removes the events from the watch, so a bad pointer discovered afterwards
+    // would cost the caller the events themselves rather than just an error.
     let buf_size = max_events.saturating_mul(crate::syscall::number::FS_WATCH_EVENT_SIZE);
     if let Err(e) = crate::mm::user::validate_user_write(args.arg1, buf_size) {
         return SyscallResult::err(e);
@@ -8205,49 +8151,59 @@ pub fn sys_fs_watch_read(args: &SyscallArgs) -> SyscallResult {
         Ok(events) => {
             let count = events.len();
 
-            // SAFETY: Validated above.
-            unsafe {
-                core::ptr::write_bytes(out_ptr, 0, buf_size);
+            let entry_size = crate::syscall::number::FS_WATCH_EVENT_SIZE;
 
-                for (i, event) in events.iter().enumerate() {
-                    let base = out_ptr.add(
-                        i.wrapping_mul(crate::syscall::number::FS_WATCH_EVENT_SIZE),
-                    );
+            // Packed kernel-side and sized by what is actually emitted, so a
+            // caller advertising a huge `max_events` cannot make the kernel
+            // allocate a buffer for events that do not exist.
+            let mut out = match crate::mm::user::alloc_zeroed_vec(count.saturating_mul(entry_size))
+            {
+                Ok(v) => v,
+                Err(e) => return SyscallResult::err(e),
+            };
 
-                    // Write path (bytes 0..256).
-                    let path_bytes = event.path.as_bytes();
-                    let path_len = path_bytes.len().min(255);
-                    core::ptr::copy_nonoverlapping(
-                        path_bytes.as_ptr(),
-                        base,
-                        path_len,
-                    );
+            for (i, event) in events.iter().enumerate() {
+                let base = i.saturating_mul(entry_size);
+                let Some(rec) = out.get_mut(base..base.saturating_add(entry_size)) else {
+                    break;
+                };
 
-                    // Write new_path for rename events (bytes 256..512).
-                    if let Some(ref np) = event.new_path {
-                        let np_bytes = np.as_bytes();
-                        let np_len = np_bytes.len().min(255);
-                        core::ptr::copy_nonoverlapping(
-                            np_bytes.as_ptr(),
-                            base.add(256),
-                            np_len,
-                        );
+                // The record layout is fixed-width — path and new_path are 256
+                // bytes each with a NUL terminator — so an over-long path is
+                // necessarily cut here.  That is the ABI, not a validation
+                // shortcut: these fields are advisory notification text, and a
+                // watcher acting on the event re-resolves the path itself.
+                let mut put = |at: usize, bytes: &[u8], cap: usize| {
+                    let n = bytes.len().min(cap);
+                    if let (Some(dst), Some(src)) =
+                        (rec.get_mut(at..at.saturating_add(n)), bytes.get(..n))
+                    {
+                        dst.copy_from_slice(src);
                     }
+                };
 
-                    // Write watch ID (bytes 512..520).
-                    let id_ptr = base.add(512) as *mut u64;
-                    core::ptr::write(id_ptr, event.watch_id);
+                put(0, event.path.as_bytes(), 255);
+                if let Some(ref np) = event.new_path {
+                    put(256, np.as_bytes(), 255);
+                }
+                put(512, &event.watch_id.to_le_bytes(), 8);
+                put(520, &(event.event_type as u32).to_le_bytes(), 4);
 
-                    // Write event type (bytes 520..524).
-                    let type_ptr = base.add(520) as *mut u32;
-                    core::ptr::write(type_ptr, event.event_type as u32);
+                // `is_dir` flag (byte 524).  The buffer is zero-filled, so a
+                // non-directory event needs no write at all.
+                if event.is_dir {
+                    put(524, &[1u8], 1);
+                }
+            }
 
-                    // Write is_dir flag (byte 524): 1 if the subject is a
-                    // directory.  The buffer was zero-filled above, so a
-                    // non-directory event leaves this 0 without an extra write.
-                    if event.is_dir {
-                        core::ptr::write(base.add(524), 1u8);
-                    }
+            if !out.is_empty() {
+                // SAFETY: `out` is a live kernel-owned buffer of exactly
+                // `out.len()` bytes; `copy_to_user` re-validates the
+                // destination and brackets the store with STAC/CLAC.
+                if let Err(e) =
+                    unsafe { crate::mm::user::copy_to_user(out.as_ptr(), args.arg1, out.len()) }
+                {
+                    return SyscallResult::err(e);
                 }
             }
 
@@ -10883,37 +10839,41 @@ pub fn sys_dns_resolve(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    let name_ptr = args.arg0 as *const u8;
     let name_len = args.arg1 as usize;
-    let out_ptr = args.arg2 as *mut u8;
 
-    if name_ptr.is_null() || name_len == 0 || out_ptr.is_null() {
+    if args.arg0 == 0 || name_len == 0 || args.arg2 == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    let safe_name_len = name_len.min(253);
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, safe_name_len) {
-        return SyscallResult::err(e);
-    }
-    // IPv4 address output = 4 bytes.
+    // IPv4 address output = 4 bytes.  Checked up front so a query is not sent
+    // on the wire for a caller that cannot receive the answer.
     if let Err(e) = crate::mm::user::validate_user_write(args.arg2, 4) {
         return SyscallResult::err(e);
     }
 
-    // SAFETY: Validated above — name_ptr is in user space and mapped.
-    let name_bytes = unsafe { core::slice::from_raw_parts(name_ptr, safe_name_len) };
-    let name = match core::str::from_utf8(name_bytes) {
+    // 253 is the maximum length of a DNS name in presentation form (RFC 1035
+    // §2.3.4).  A longer name is rejected rather than truncated: a shortened
+    // name resolves a *different* host, which is the worst possible failure
+    // mode for a name-to-address lookup.
+    let name_bytes = match crate::mm::user::read_user_vec(args.arg0, name_len, 253) {
+        Ok(b) => b,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let name = match core::str::from_utf8(&name_bytes) {
         Ok(s) => s,
         Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
     };
 
     match crate::net::dns::resolve(name) {
         Ok(ip) => {
-            // SAFETY: out_ptr is valid for 4 bytes.
-            unsafe {
-                core::ptr::copy_nonoverlapping(ip.0.as_ptr(), out_ptr, 4);
+            // `resolve` waits for a network round-trip, so the destination is
+            // re-validated here rather than trusting the check above.
+            //
+            // SAFETY: `ip.0` is a live 4-byte array in kernel memory.
+            match unsafe { crate::mm::user::copy_to_user(ip.0.as_ptr(), args.arg2, 4) } {
+                Ok(()) => SyscallResult::ok(0),
+                Err(e) => SyscallResult::err(e),
             }
-            SyscallResult::ok(0)
         }
         Err(e) => SyscallResult::err(e),
     }

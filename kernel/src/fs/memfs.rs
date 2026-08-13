@@ -309,7 +309,7 @@ impl MemFsNode {
     /// Convert to a VFS DirEntry.
     fn to_dir_entry(&self, name: &str) -> DirEntry {
         DirEntry {
-            name: String::from(name),
+            name: PathBuf::from(name),
             entry_type: self.entry_type(),
             size: self.size(),
         }
@@ -697,7 +697,7 @@ impl FileSystem for MemFs {
         if components.is_empty() {
             // Root directory.
             return Ok(DirEntry {
-                name: String::from("/"),
+                name: PathBuf::from("/"),
                 entry_type: EntryType::Directory,
                 size: 0,
             });
@@ -1211,7 +1211,7 @@ impl FileSystem for MemFs {
         let components = Self::path_components(path);
         if components.is_empty() {
             return Ok(DirEntry {
-                name: String::from("/"),
+                name: PathBuf::from("/"),
                 entry_type: EntryType::Directory,
                 size: 0,
             });

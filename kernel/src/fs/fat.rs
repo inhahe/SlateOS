@@ -28,6 +28,7 @@ use alloc::vec::Vec;
 use crate::blkdev::SECTOR_SIZE;
 use crate::error::{KernelError, KernelResult};
 use crate::fs::vfs::{DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo};
+use crate::fs::path::Path;
 
 // ---------------------------------------------------------------------------
 // FAT type detection
@@ -262,7 +263,7 @@ const ATTR_LONG_NAME: u8 = ATTR_READ_ONLY | ATTR_HIDDEN | ATTR_SYSTEM | ATTR_VOL
 #[derive(Debug, Clone)]
 struct FatDirEntry {
     /// 8.3 filename (without dot, padded with spaces).
-    name: [u8; 11],
+    name: PathBuf::from([u8; 11]),
     /// Attribute byte.
     attr: u8,
     /// First cluster of the file (32-bit; FAT16 uses only low 16 bits).
@@ -734,7 +735,7 @@ impl FatDirEntry {
     /// Convert to a VFS [`DirEntry`].
     fn to_vfs_entry(&self) -> DirEntry {
         DirEntry {
-            name: self.display_name(),
+            name: PathBuf::from(self.display_name()),
             entry_type: if self.is_volume_label() {
                 EntryType::VolumeLabel
             } else if self.is_directory() {
@@ -934,7 +935,7 @@ impl DcacheEntry {
             path: String::new(),
             parent_cluster: 0,
             entry: FatDirEntry {
-                name: [0; 11],
+                name: PathBuf::from([0; 11]),
                 attr: 0,
                 first_cluster: 0,
                 file_size: 0,
@@ -2807,6 +2808,18 @@ impl FatFs {
     }
 }
 
+/// Decode a path for the FAT driver.
+///
+/// Paths are byte strings in general (see [`super::path`]), but FAT physically
+/// cannot store one that is not UTF-8-representable: long names are UCS-2 and
+/// short names are an OEM code page, and this driver has already transcoded
+/// both to `String` on the way in. So an undecodable path cannot name a file
+/// that exists on a FAT volume, and `NotFound` is the honest answer rather
+/// than a lossy conversion that would let it alias a real entry.
+fn as_str(path: &Path) -> KernelResult<&str> {
+    path.to_str().ok_or(KernelError::NotFound)
+}
+
 impl FileSystem for FatFs {
     fn fs_type(&self) -> &str {
         match self.bpb.fat_type {
@@ -2973,7 +2986,8 @@ impl FileSystem for FatFs {
         self.trim_free_clusters()
     }
 
-    fn readdir(&mut self, path: &str) -> KernelResult<Vec<DirEntry>> {
+    fn readdir(&mut self, path: &Path) -> KernelResult<Vec<DirEntry>> {
+        let path = as_str(path)?;
         let (parent_cluster, entry) = self.resolve_path(path)?;
 
         // Determine which directory to list.
@@ -3005,10 +3019,11 @@ impl FileSystem for FatFs {
 
     fn readdir_at(
         &mut self,
-        path: &str,
+        path: &Path,
         offset: usize,
         count: usize,
     ) -> KernelResult<(Vec<DirEntry>, usize)> {
+        let path = as_str(path)?;
         // For FAT, we still have to read all raw entries (they're stored as
         // contiguous on-disk structures).  But we avoid calling to_vfs_entry
         // (which formats names/dates) for entries outside the window.
@@ -3048,7 +3063,8 @@ impl FileSystem for FatFs {
         Ok((page, total))
     }
 
-    fn read_file(&mut self, path: &str) -> KernelResult<Vec<u8>> {
+    fn read_file(&mut self, path: &Path) -> KernelResult<Vec<u8>> {
+        let path = as_str(path)?;
         let (_parent, entry) = self.resolve_path(path)?;
         let entry = entry.ok_or(KernelError::NotFound)?;
         if entry.is_directory() {
@@ -3057,7 +3073,8 @@ impl FileSystem for FatFs {
         self.read_file_data(&entry)
     }
 
-    fn stat(&mut self, path: &str) -> KernelResult<DirEntry> {
+    fn stat(&mut self, path: &Path) -> KernelResult<DirEntry> {
+        let path = as_str(path)?;
         let (parent_cluster, entry) = self.resolve_path(path)?;
         match entry {
             None => {
@@ -3092,7 +3109,8 @@ impl FileSystem for FatFs {
     /// - `ATTR_READ_ONLY` → `FileAttr::IMMUTABLE`
     /// - `ATTR_HIDDEN` → `FileAttr::HIDDEN`
     /// - `ATTR_SYSTEM` → `FileAttr::SYSTEM`
-    fn metadata(&mut self, path: &str) -> KernelResult<FileMeta> {
+    fn metadata(&mut self, path: &Path) -> KernelResult<FileMeta> {
+        let path = as_str(path)?;
         let (parent_cluster, entry) = self.resolve_path(path)?;
 
         match entry {
@@ -3181,10 +3199,11 @@ impl FileSystem for FatFs {
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
     fn set_times(
         &mut self,
-        path: &str,
+        path: &Path,
         accessed_ns: crate::fs::vfs::Timestamp,
         modified_ns: crate::fs::vfs::Timestamp,
     ) -> KernelResult<()> {
+        let path = as_str(path)?;
         // Resolve path to get the entry and parent.
         let (parent_path, _filename) = split_path(path);
         let parent_cluster = self.resolve_dir_cluster(parent_path)?;
@@ -3246,7 +3265,8 @@ impl FileSystem for FatFs {
     /// If the file doesn't exist yet, it is created as a zero-length
     /// file with the requested cluster pre-allocation.
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
-    fn fallocate(&mut self, path: &str, size: u64) -> KernelResult<()> {
+    fn fallocate(&mut self, path: &Path, size: u64) -> KernelResult<()> {
+        let path = as_str(path)?;
         self.modified = true;
         if size == 0 {
             return Ok(());
@@ -3376,7 +3396,8 @@ impl FileSystem for FatFs {
     }
 
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
-    fn write_file(&mut self, path: &str, data: &[u8]) -> KernelResult<()> {
+    fn write_file(&mut self, path: &Path, data: &[u8]) -> KernelResult<()> {
+        let path = as_str(path)?;
         self.modified = true;
         let (parent_path, filename) = split_path(path);
 
@@ -3451,7 +3472,8 @@ impl FileSystem for FatFs {
         Ok(())
     }
 
-    fn remove(&mut self, path: &str) -> KernelResult<()> {
+    fn remove(&mut self, path: &Path) -> KernelResult<()> {
+        let path = as_str(path)?;
         self.modified = true;
         let (parent_path, _filename) = split_path(path);
 
@@ -3496,7 +3518,8 @@ impl FileSystem for FatFs {
         Ok(())
     }
 
-    fn rmdir(&mut self, path: &str) -> KernelResult<()> {
+    fn rmdir(&mut self, path: &Path) -> KernelResult<()> {
+        let path = as_str(path)?;
         self.modified = true;
         let (parent_path, _dirname) = split_path(path);
 
@@ -3544,7 +3567,8 @@ impl FileSystem for FatFs {
     }
 
     #[allow(clippy::arithmetic_side_effects)]
-    fn mkdir(&mut self, path: &str) -> KernelResult<()> {
+    fn mkdir(&mut self, path: &Path) -> KernelResult<()> {
+        let path = as_str(path)?;
         self.modified = true;
         let (parent_path, dirname) = split_path(path);
 
@@ -3634,7 +3658,9 @@ impl FileSystem for FatFs {
     /// delete the old entry.  The file data (cluster chain) is not moved
     /// — only the directory entries change.
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
-    fn rename(&mut self, from: &str, to: &str) -> KernelResult<()> {
+    fn rename(&mut self, from: &Path, to: &Path) -> KernelResult<()> {
+        let from = as_str(from)?;
+        let to = as_str(to)?;
         self.modified = true;
 
         // 1. Resolve the source entry via the path resolver, which handles
@@ -3728,7 +3754,8 @@ impl FileSystem for FatFs {
     /// whole file into memory and slices — O(file_size) even for
     /// small reads.
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
-    fn read_at(&mut self, path: &str, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+    fn read_at(&mut self, path: &Path, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+        let path = as_str(path)?;
         let (_parent, entry) = self.resolve_path(path)?;
         let entry = entry.ok_or(KernelError::NotFound)?;
         if entry.is_directory() {
@@ -3831,7 +3858,8 @@ impl FileSystem for FatFs {
     /// Overrides the default which reads the entire file, patches in
     /// memory, and rewrites everything.
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
-    fn write_at(&mut self, path: &str, offset: u64, data: &[u8]) -> KernelResult<()> {
+    fn write_at(&mut self, path: &Path, offset: u64, data: &[u8]) -> KernelResult<()> {
+        let path = as_str(path)?;
         self.modified = true;
         if data.is_empty() {
             return Ok(());
@@ -4018,7 +4046,8 @@ impl FileSystem for FatFs {
     /// Shrinks by freeing excess clusters; grows by allocating and
     /// zero-filling new clusters.
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
-    fn truncate(&mut self, path: &str, size: u64) -> KernelResult<()> {
+    fn truncate(&mut self, path: &Path, size: u64) -> KernelResult<()> {
+        let path = as_str(path)?;
         self.modified = true;
         if size > u64::from(u32::MAX) {
             return Err(KernelError::InvalidArgument);
@@ -4186,7 +4215,8 @@ impl FileSystem for FatFs {
     ///
     /// Returns `NotSupported` for the root directory (no on-disk entry).
     #[allow(clippy::arithmetic_side_effects)]
-    fn set_attributes(&mut self, path: &str, attrs: FileAttr) -> KernelResult<()> {
+    fn set_attributes(&mut self, path: &Path, attrs: FileAttr) -> KernelResult<()> {
+        let path = as_str(path)?;
         self.modified = true;
         // Resolve path — root directory has no entry to modify.
         let (parent_path, _filename) = split_path(path);
@@ -4249,7 +4279,8 @@ impl FileSystem for FatFs {
     /// FAT uses attribute flags (read-only, hidden, system) instead of
     /// rwxrwxrwx permission bits.  Use [`set_attributes`] to control
     /// the read-only flag.
-    fn set_permissions(&mut self, path: &str, permissions: u16) -> KernelResult<()> {
+    fn set_permissions(&mut self, path: &Path, permissions: u16) -> KernelResult<()> {
+        let path = as_str(path)?;
         let _ = (path, permissions);
         Err(KernelError::NotSupported)
     }
@@ -4258,7 +4289,8 @@ impl FileSystem for FatFs {
     ///
     /// FAT directory entries do not store UID/GID.  All files
     /// effectively belong to the same (anonymous) owner.
-    fn set_owner(&mut self, path: &str, uid: u32, gid: u32) -> KernelResult<()> {
+    fn set_owner(&mut self, path: &Path, uid: u32, gid: u32) -> KernelResult<()> {
+        let path = as_str(path)?;
         let _ = (path, uid, gid);
         Err(KernelError::NotSupported)
     }

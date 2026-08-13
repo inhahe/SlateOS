@@ -64,6 +64,7 @@ use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::vfs::{DirEntry, EntryType, FileMeta, FileSystem, FsInfo};
+use crate::fs::path::Path;
 
 use crate::sync::PreemptSpinMutex as Mutex;
 
@@ -693,8 +694,18 @@ impl SysFs {
 }
 
 /// Strip leading "/" from a path to get relative path.
-fn strip_root(path: &str) -> &str {
-    path.strip_prefix('/').unwrap_or(path)
+/// Strip the leading "/" to get the path relative to the sysfs root, and
+/// decode.
+///
+/// This is where sysfs stops caring about bytes. Paths are byte strings in
+/// general (see [`super::path`]), but sysfs's namespace is built entirely by
+/// the kernel out of fixed ASCII names, so a path that is not UTF-8 cannot
+/// name anything that exists and `NotFound` is the honest answer. A lossy
+/// conversion would be strictly worse: it would let a garbage byte alias a
+/// real entry. This is the only decode in the module.
+fn strip_root(path: &Path) -> KernelResult<&str> {
+    let s = path.to_str().ok_or(KernelError::NotFound)?;
+    Ok(s.strip_prefix('/').unwrap_or(s))
 }
 
 // ---------------------------------------------------------------------------
@@ -706,8 +717,8 @@ impl FileSystem for SysFs {
         "sysfs"
     }
 
-    fn readdir(&mut self, path: &str) -> KernelResult<Vec<DirEntry>> {
-        let rel = strip_root(path);
+    fn readdir(&mut self, path: &Path) -> KernelResult<Vec<DirEntry>> {
+        let rel = strip_root(path)?;
 
         match classify_path(rel) {
             SysPath::Root => {
@@ -715,7 +726,7 @@ impl FileSystem for SysFs {
                 let entries = TOP_DIRS
                     .iter()
                     .map(|name| DirEntry {
-                        name: String::from(*name),
+                        name: PathBuf::from(*name),
                         entry_type: EntryType::Directory,
                         size: 0,
                     })
@@ -728,7 +739,7 @@ impl FileSystem for SysFs {
                     .map(|name| {
                         let size = gen_kernel_file(name).map_or(0, |d| d.len() as u64);
                         DirEntry {
-                            name: String::from(*name),
+                            name: PathBuf::from(*name),
                             entry_type: EntryType::File,
                             size,
                         }
@@ -744,7 +755,7 @@ impl FileSystem for SysFs {
                     .map(|p| {
                         let val_str = format!("{}\n", p.value);
                         DirEntry {
-                            name: String::from(p.name),
+                            name: PathBuf::from(p.name),
                             entry_type: EntryType::File,
                             size: val_str.len() as u64,
                         }
@@ -758,7 +769,7 @@ impl FileSystem for SysFs {
                     .map(|name| {
                         let size = gen_fs_file(name).map_or(0, |d| d.len() as u64);
                         DirEntry {
-                            name: String::from(*name),
+                            name: PathBuf::from(*name),
                             entry_type: EntryType::File,
                             size,
                         }
@@ -770,12 +781,12 @@ impl FileSystem for SysFs {
                 // "pci/" (PCI devices) and "system/" (CPU/topology tree).
                 Ok(vec![
                     DirEntry {
-                        name: String::from("pci"),
+                        name: PathBuf::from("pci"),
                         entry_type: EntryType::Directory,
                         size: 0,
                     },
                     DirEntry {
-                        name: String::from("system"),
+                        name: PathBuf::from("system"),
                         entry_type: EntryType::Directory,
                         size: 0,
                     },
@@ -784,7 +795,7 @@ impl FileSystem for SysFs {
             SysPath::SystemDir => {
                 // Just "cpu/" for now (memory/node trees can follow).
                 Ok(vec![DirEntry {
-                    name: String::from("cpu"),
+                    name: PathBuf::from("cpu"),
                     entry_type: EntryType::Directory,
                     size: 0,
                 }])
@@ -795,7 +806,7 @@ impl FileSystem for SysFs {
                     .map(|name| {
                         let size = gen_cpu_file(name).map_or(0, |d| d.len() as u64);
                         DirEntry {
-                            name: String::from(*name),
+                            name: PathBuf::from(*name),
                             entry_type: EntryType::File,
                             size,
                         }
@@ -804,7 +815,7 @@ impl FileSystem for SysFs {
                 // One cpuN directory per present CPU.
                 for i in 0..crate::acpi::processor_count() {
                     entries.push(DirEntry {
-                        name: format!("cpu{i}"),
+                        name: PathBuf::from(format!("cpu{i}")),
                         entry_type: EntryType::Directory,
                         size: 0,
                     });
@@ -816,20 +827,20 @@ impl FileSystem for SysFs {
                 // the kernel detected cache geometry), and — for cpu1+ — an
                 // online toggle (cpu0 cannot be offlined).
                 let mut entries = vec![DirEntry {
-                    name: String::from("topology"),
+                    name: PathBuf::from("topology"),
                     entry_type: EntryType::Directory,
                     size: 0,
                 }];
                 if cache_index_count() > 0 {
                     entries.push(DirEntry {
-                        name: String::from("cache"),
+                        name: PathBuf::from("cache"),
                         entry_type: EntryType::Directory,
                         size: 0,
                     });
                 }
                 if idx >= 1 {
                     entries.push(DirEntry {
-                        name: String::from("online"),
+                        name: PathBuf::from("online"),
                         entry_type: EntryType::File,
                         size: gen_cpu_online_file(idx).len() as u64,
                     });
@@ -840,7 +851,7 @@ impl FileSystem for SysFs {
                 // One indexI directory per detected cache level/type.
                 let entries = (0..cache_index_count())
                     .map(|ci| DirEntry {
-                        name: format!("index{ci}"),
+                        name: PathBuf::from(format!("index{ci}")),
                         entry_type: EntryType::Directory,
                         size: 0,
                     })
@@ -854,7 +865,7 @@ impl FileSystem for SysFs {
                         let size =
                             gen_cpu_cache_file(idx, ci, name).map_or(0, |d| d.len() as u64);
                         DirEntry {
-                            name: String::from(*name),
+                            name: PathBuf::from(*name),
                             entry_type: EntryType::File,
                             size,
                         }
@@ -869,7 +880,7 @@ impl FileSystem for SysFs {
                         let size =
                             gen_cpu_topo_file(idx, name).map_or(0, |d| d.len() as u64);
                         DirEntry {
-                            name: String::from(*name),
+                            name: PathBuf::from(*name),
                             entry_type: EntryType::File,
                             size,
                         }
@@ -900,8 +911,8 @@ impl FileSystem for SysFs {
         }
     }
 
-    fn read_file(&mut self, path: &str) -> KernelResult<Vec<u8>> {
-        let rel = strip_root(path);
+    fn read_file(&mut self, path: &Path) -> KernelResult<Vec<u8>> {
+        let rel = strip_root(path)?;
 
         match classify_path(rel) {
             SysPath::Root
@@ -927,24 +938,24 @@ impl FileSystem for SysFs {
         }
     }
 
-    fn stat(&mut self, path: &str) -> KernelResult<DirEntry> {
-        let rel = strip_root(path);
+    fn stat(&mut self, path: &Path) -> KernelResult<DirEntry> {
+        let rel = strip_root(path)?;
 
         match classify_path(rel) {
             SysPath::Root => Ok(DirEntry {
-                name: String::from("/"),
+                name: PathBuf::from("/"),
                 entry_type: EntryType::Directory,
                 size: 0,
             }),
             SysPath::SubDir(name) => Ok(DirEntry {
-                name: String::from(name),
+                name: PathBuf::from(name),
                 entry_type: EntryType::Directory,
                 size: 0,
             }),
             SysPath::KernelFile(name) => {
                 let size = gen_kernel_file(name).map_or(0, |d| d.len() as u64);
                 Ok(DirEntry {
-                    name: String::from(name),
+                    name: PathBuf::from(name),
                     entry_type: EntryType::File,
                     size,
                 })
@@ -952,25 +963,25 @@ impl FileSystem for SysFs {
             SysPath::FsFile(name) => {
                 let size = gen_fs_file(name).map_or(0, |d| d.len() as u64);
                 Ok(DirEntry {
-                    name: String::from(name),
+                    name: PathBuf::from(name),
                     entry_type: EntryType::File,
                     size,
                 })
             }
             SysPath::DevicesDir => Ok(DirEntry {
-                name: String::from("devices"),
+                name: PathBuf::from("devices"),
                 entry_type: EntryType::Directory,
                 size: 0,
             }),
             SysPath::PciDir => Ok(DirEntry {
-                name: String::from("pci"),
+                name: PathBuf::from("pci"),
                 entry_type: EntryType::Directory,
                 size: 0,
             }),
             SysPath::ParamFile(name) => {
                 let size = gen_param_file(name).map_or(0, |d| d.len() as u64);
                 Ok(DirEntry {
-                    name: String::from(name),
+                    name: PathBuf::from(name),
                     entry_type: EntryType::File,
                     size,
                 })
@@ -978,66 +989,66 @@ impl FileSystem for SysFs {
             SysPath::PciDevice(bdf) => {
                 let size = gen_pci_device(bdf).map_or(0, |d| d.len() as u64);
                 Ok(DirEntry {
-                    name: String::from(bdf),
+                    name: PathBuf::from(bdf),
                     entry_type: EntryType::File,
                     size,
                 })
             }
             SysPath::SystemDir => Ok(DirEntry {
-                name: String::from("system"),
+                name: PathBuf::from("system"),
                 entry_type: EntryType::Directory,
                 size: 0,
             }),
             SysPath::SystemCpuDir => Ok(DirEntry {
-                name: String::from("cpu"),
+                name: PathBuf::from("cpu"),
                 entry_type: EntryType::Directory,
                 size: 0,
             }),
             SysPath::CpuFile(name) => {
                 let size = gen_cpu_file(name).map_or(0, |d| d.len() as u64);
                 Ok(DirEntry {
-                    name: String::from(name),
+                    name: PathBuf::from(name),
                     entry_type: EntryType::File,
                     size,
                 })
             }
             SysPath::CpuN(idx) => Ok(DirEntry {
-                name: format!("cpu{idx}"),
+                name: PathBuf::from(format!("cpu{idx}")),
                 entry_type: EntryType::Directory,
                 size: 0,
             }),
             SysPath::CpuNOnline(idx) => Ok(DirEntry {
-                name: String::from("online"),
+                name: PathBuf::from("online"),
                 entry_type: EntryType::File,
                 size: gen_cpu_online_file(idx).len() as u64,
             }),
             SysPath::CpuNTopologyDir(_) => Ok(DirEntry {
-                name: String::from("topology"),
+                name: PathBuf::from("topology"),
                 entry_type: EntryType::Directory,
                 size: 0,
             }),
             SysPath::CpuTopoFile(idx, name) => {
                 let size = gen_cpu_topo_file(idx, name).map_or(0, |d| d.len() as u64);
                 Ok(DirEntry {
-                    name: String::from(name),
+                    name: PathBuf::from(name),
                     entry_type: EntryType::File,
                     size,
                 })
             }
             SysPath::CpuCacheDir(_) => Ok(DirEntry {
-                name: String::from("cache"),
+                name: PathBuf::from("cache"),
                 entry_type: EntryType::Directory,
                 size: 0,
             }),
             SysPath::CpuCacheIndexDir(_, ci) => Ok(DirEntry {
-                name: format!("index{ci}"),
+                name: PathBuf::from(format!("index{ci}")),
                 entry_type: EntryType::Directory,
                 size: 0,
             }),
             SysPath::CpuCacheFile(idx, ci, name) => {
                 let size = gen_cpu_cache_file(idx, ci, name).map_or(0, |d| d.len() as u64);
                 Ok(DirEntry {
-                    name: String::from(name),
+                    name: PathBuf::from(name),
                     entry_type: EntryType::File,
                     size,
                 })
@@ -1046,8 +1057,8 @@ impl FileSystem for SysFs {
         }
     }
 
-    fn write_file(&mut self, path: &str, data: &[u8]) -> KernelResult<()> {
-        let rel = strip_root(path);
+    fn write_file(&mut self, path: &Path, data: &[u8]) -> KernelResult<()> {
+        let rel = strip_root(path)?;
 
         match classify_path(rel) {
             SysPath::KernelFile("hostname") => {
@@ -1092,13 +1103,13 @@ impl FileSystem for SysFs {
         }
     }
 
-    fn metadata(&mut self, path: &str) -> KernelResult<FileMeta> {
+    fn metadata(&mut self, path: &Path) -> KernelResult<FileMeta> {
         let entry = self.stat(path)?;
         let perms = if entry.entry_type == EntryType::Directory {
             0o555
         } else {
             // Writable for param files and hostname, read-only for others.
-            let rel = strip_root(path);
+            let rel = strip_root(path)?;
             match classify_path(rel) {
                 SysPath::ParamFile(_) | SysPath::KernelFile("hostname") => 0o644,
                 _ => 0o444,
@@ -1176,7 +1187,7 @@ pub fn self_test() -> KernelResult<()> {
     let mut fs = SysFs::new();
 
     // 1. Read root directory — should contain our 4 subdirs.
-    let root_entries = fs.readdir("/")?;
+    let root_entries = fs.readdir(Path::new("/"))?;
     assert!(
         root_entries.len() == TOP_DIRS.len(),
         "sysfs root should have {} entries, got {}",
@@ -1193,11 +1204,11 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("[sysfs]   root directory: OK ({} entries)", root_entries.len());
 
     // 2. Read kernel files.
-    let version = fs.read_file("/kernel/version")?;
+    let version = fs.read_file(Path::new("/kernel/version"))?;
     assert!(!version.is_empty(), "kernel/version should not be empty");
     serial_println!("[sysfs]   kernel/version: OK");
 
-    let ostype = fs.read_file("/kernel/ostype")?;
+    let ostype = fs.read_file(Path::new("/kernel/ostype"))?;
     assert!(
         ostype.starts_with(b"MintOS"),
         "ostype should start with 'MintOS'"
@@ -1205,12 +1216,12 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("[sysfs]   kernel/ostype: OK");
 
     // 3. Hostname read/write.
-    let h1 = fs.read_file("/kernel/hostname")?;
+    let h1 = fs.read_file(Path::new("/kernel/hostname"))?;
     assert!(!h1.is_empty(), "hostname should not be empty");
     serial_println!("[sysfs]   hostname read: OK");
 
-    fs.write_file("/kernel/hostname", b"test-host")?;
-    let h2 = fs.read_file("/kernel/hostname")?;
+    fs.write_file(Path::new("/kernel/hostname"), b"test-host")?;
+    let h2 = fs.read_file(Path::new("/kernel/hostname"))?;
     assert!(
         h2.starts_with(b"test-host"),
         "hostname should be 'test-host' after write"
@@ -1218,10 +1229,10 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("[sysfs]   hostname write: OK");
 
     // Restore default.
-    fs.write_file("/kernel/hostname", b"mintos")?;
+    fs.write_file(Path::new("/kernel/hostname"), b"mintos")?;
 
     // 4. Parameter files.
-    let params_dir = fs.readdir("/params")?;
+    let params_dir = fs.readdir(Path::new("/params"))?;
     assert!(
         !params_dir.is_empty(),
         "params dir should have sysctl entries"
@@ -1229,14 +1240,14 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("[sysfs]   params directory: OK ({} params)", params_dir.len());
 
     // Read one known parameter.
-    let swappiness = fs.read_file("/params/mm.swappiness");
+    let swappiness = fs.read_file(Path::new("/params/mm.swappiness"));
     if let Ok(data) = swappiness {
         let text = core::str::from_utf8(&data).unwrap_or("?");
         serial_println!("[sysfs]   mm.swappiness: {}", text.trim());
     }
 
     // 5. Read-only files should reject writes.
-    let write_result = fs.write_file("/kernel/version", b"hacked");
+    let write_result = fs.write_file(Path::new("/kernel/version"), b"hacked");
     assert!(
         write_result.is_err(),
         "writing to kernel/version should fail"
@@ -1244,7 +1255,7 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("[sysfs]   read-only enforcement: OK");
 
     // 6. Filesystem info files.
-    let fs_dir = fs.readdir("/fs")?;
+    let fs_dir = fs.readdir(Path::new("/fs"))?;
     assert!(
         fs_dir.len() == FS_FILES.len(),
         "fs dir should have {} entries",
@@ -1253,7 +1264,7 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("[sysfs]   fs directory: OK ({} entries)", fs_dir.len());
 
     // 7. Devices directory.
-    let dev_dir = fs.readdir("/devices")?;
+    let dev_dir = fs.readdir(Path::new("/devices"))?;
     assert!(
         dev_dir.iter().any(|e| e.name == "pci"),
         "devices dir should contain 'pci'"
@@ -1265,23 +1276,23 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("[sysfs]   devices directory: OK");
 
     // 8. PCI device listing (may be empty if no PCI bus).
-    let pci_entries = fs.readdir("/devices/pci");
+    let pci_entries = fs.readdir(Path::new("/devices/pci"));
     if let Ok(entries) = pci_entries {
         serial_println!("[sysfs]   devices/pci: {} devices", entries.len());
     }
 
     // 9. Stat on various paths.
-    let root_stat = fs.stat("/")?;
+    let root_stat = fs.stat(Path::new("/"))?;
     assert!(root_stat.entry_type == EntryType::Directory);
 
-    let version_stat = fs.stat("/kernel/version")?;
+    let version_stat = fs.stat(Path::new("/kernel/version"))?;
     assert!(version_stat.entry_type == EntryType::File);
     serial_println!("[sysfs]   stat: OK");
 
     // 10. Metadata with permissions.
-    let hostname_meta = fs.metadata("/kernel/hostname")?;
+    let hostname_meta = fs.metadata(Path::new("/kernel/hostname"))?;
     assert!(hostname_meta.permissions == 0o644, "hostname should be rw-r--r--");
-    let version_meta = fs.metadata("/kernel/version")?;
+    let version_meta = fs.metadata(Path::new("/kernel/version"))?;
     assert!(version_meta.permissions == 0o444, "version should be r--r--r--");
     serial_println!("[sysfs]   metadata/permissions: OK");
 
@@ -1291,14 +1302,14 @@ pub fn self_test() -> KernelResult<()> {
     // formatted ("0" or "0-N"), and consistent with the kernel CPU counts.
     {
         // system/ lists cpu/.
-        let sys_dir = fs.readdir("/devices/system")?;
+        let sys_dir = fs.readdir(Path::new("/devices/system"))?;
         assert!(
             sys_dir.iter().any(|e| e.name == "cpu" && e.entry_type == EntryType::Directory),
             "devices/system should contain 'cpu' directory"
         );
 
         // cpu/ lists exactly the range files.
-        let cpu_dir = fs.readdir("/devices/system/cpu")?;
+        let cpu_dir = fs.readdir(Path::new("/devices/system/cpu"))?;
         for name in CPU_FILES {
             assert!(
                 cpu_dir.iter().any(|e| e.name == *name && e.entry_type == EntryType::File),
@@ -1308,7 +1319,7 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         // online must equal the SMP online count, formatted Linux-style.
-        let online = fs.read_file("/devices/system/cpu/online")?;
+        let online = fs.read_file(Path::new("/devices/system/cpu/online"))?;
         let online_txt = core::str::from_utf8(&online)
             .map_err(|_| KernelError::InternalError)?;
         let want_online = cpu_range(crate::smp::cpu_count());
@@ -1319,7 +1330,7 @@ pub fn self_test() -> KernelResult<()> {
         );
 
         // present/possible must equal the ACPI present count.
-        let present = fs.read_file("/devices/system/cpu/present")?;
+        let present = fs.read_file(Path::new("/devices/system/cpu/present"))?;
         let present_txt = core::str::from_utf8(&present)
             .map_err(|_| KernelError::InternalError)?;
         let want_present = cpu_range(crate::acpi::processor_count());
@@ -1330,7 +1341,7 @@ pub fn self_test() -> KernelResult<()> {
         );
 
         // kernel_max parses as a number and is >= any online index.
-        let kmax = fs.read_file("/devices/system/cpu/kernel_max")?;
+        let kmax = fs.read_file(Path::new("/devices/system/cpu/kernel_max"))?;
         let kmax_txt = core::str::from_utf8(&kmax)
             .map_err(|_| KernelError::InternalError)?;
         let kmax_val: usize = kmax_txt.trim().parse()
@@ -1343,15 +1354,15 @@ pub fn self_test() -> KernelResult<()> {
 
         // The range files are read-only.
         assert!(
-            fs.write_file("/devices/system/cpu/online", b"0-1").is_err(),
+            fs.write_file(Path::new("/devices/system/cpu/online"), b"0-1").is_err(),
             "cpu/online should reject writes"
         );
 
         // Stat reports a directory for cpu/ and a file for online.
-        assert!(fs.stat("/devices/system/cpu")?.entry_type == EntryType::Directory);
-        assert!(fs.stat("/devices/system/cpu/online")?.entry_type == EntryType::File);
+        assert!(fs.stat(Path::new("/devices/system/cpu"))?.entry_type == EntryType::Directory);
+        assert!(fs.stat(Path::new("/devices/system/cpu/online"))?.entry_type == EntryType::File);
         // An unknown cpu file is NotFound, not a phantom.
-        assert!(fs.stat("/devices/system/cpu/bogus").is_err());
+        assert!(fs.stat(Path::new("/devices/system/cpu/bogus")).is_err());
 
         serial_println!(
             "[sysfs]   devices/system/cpu: OK (online={}, present={})",
@@ -1364,7 +1375,7 @@ pub fn self_test() -> KernelResult<()> {
     {
         let ncpu = crate::acpi::processor_count();
         // cpu/ lists one cpuN directory per present CPU.
-        let cpu_dir = fs.readdir("/devices/system/cpu")?;
+        let cpu_dir = fs.readdir(Path::new("/devices/system/cpu"))?;
         for i in 0..ncpu {
             let want = format!("cpu{i}");
             assert!(
@@ -1376,7 +1387,7 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         // cpu0 always exists; it exposes a topology/ subdir.
-        let cpu0 = fs.readdir("/devices/system/cpu/cpu0")?;
+        let cpu0 = fs.readdir(Path::new("/devices/system/cpu/cpu0"))?;
         assert!(
             cpu0.iter().any(|e| e.name == "topology"
                 && e.entry_type == EntryType::Directory),
@@ -1384,7 +1395,7 @@ pub fn self_test() -> KernelResult<()> {
         );
 
         // topology/ lists exactly the topology files.
-        let topo = fs.readdir("/devices/system/cpu/cpu0/topology")?;
+        let topo = fs.readdir(Path::new("/devices/system/cpu/cpu0/topology"))?;
         for name in CPU_TOPOLOGY_FILES {
             assert!(
                 topo.iter().any(|e| e.name == *name && e.entry_type == EntryType::File),
@@ -1394,15 +1405,15 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         // physical_package_id and core_id parse as numbers.
-        let pkg = fs.read_file("/devices/system/cpu/cpu0/topology/physical_package_id")?;
+        let pkg = fs.read_file(Path::new("/devices/system/cpu/cpu0/topology/physical_package_id"))?;
         let pkg_txt = core::str::from_utf8(&pkg).map_err(|_| KernelError::InternalError)?;
         let _pkg_val: u32 = pkg_txt.trim().parse().map_err(|_| KernelError::InternalError)?;
-        let core = fs.read_file("/devices/system/cpu/cpu0/topology/core_id")?;
+        let core = fs.read_file(Path::new("/devices/system/cpu/cpu0/topology/core_id"))?;
         let core_txt = core::str::from_utf8(&core).map_err(|_| KernelError::InternalError)?;
         let _core_val: u32 = core_txt.trim().parse().map_err(|_| KernelError::InternalError)?;
 
         // thread_siblings_list always includes self (cpu0).
-        let tsl = fs.read_file("/devices/system/cpu/cpu0/topology/thread_siblings_list")?;
+        let tsl = fs.read_file(Path::new("/devices/system/cpu/cpu0/topology/thread_siblings_list"))?;
         let tsl_txt = core::str::from_utf8(&tsl).map_err(|_| KernelError::InternalError)?;
         assert!(
             tsl_txt.split([',', '-'])
@@ -1412,7 +1423,7 @@ pub fn self_test() -> KernelResult<()> {
         );
 
         // core_siblings (hex mask) has bit 0 set (self is in its own socket).
-        let csm = fs.read_file("/devices/system/cpu/cpu0/topology/core_siblings")?;
+        let csm = fs.read_file(Path::new("/devices/system/cpu/cpu0/topology/core_siblings"))?;
         let csm_txt = core::str::from_utf8(&csm).map_err(|_| KernelError::InternalError)?;
         let csm_val = u32::from_str_radix(csm_txt.trim(), 16)
             .map_err(|_| KernelError::InternalError)?;
@@ -1420,24 +1431,24 @@ pub fn self_test() -> KernelResult<()> {
 
         // Topology files are read-only.
         assert!(
-            fs.write_file("/devices/system/cpu/cpu0/topology/core_id", b"7").is_err(),
+            fs.write_file(Path::new("/devices/system/cpu/cpu0/topology/core_id"), b"7").is_err(),
             "topology/core_id should reject writes"
         );
 
         // Out-of-range CPU and unknown topology file are NotFound.
         let bogus_cpu = format!("/devices/system/cpu/cpu{ncpu}");
-        assert!(fs.stat(&bogus_cpu).is_err(), "cpu{} should not exist", ncpu);
+        assert!(fs.stat(Path::new(&bogus_cpu)).is_err(), "cpu{} should not exist", ncpu);
         assert!(
-            fs.stat("/devices/system/cpu/cpu0/topology/bogus").is_err(),
+            fs.stat(Path::new("/devices/system/cpu/cpu0/topology/bogus")).is_err(),
             "unknown topology file should be NotFound"
         );
         // cpuN with a leading zero is not a valid Linux name.
-        assert!(fs.stat("/devices/system/cpu/cpu00").is_err());
+        assert!(fs.stat(Path::new("/devices/system/cpu/cpu00")).is_err());
 
         // Per-CPU online toggle: cpu0 never has one (boot CPU can't be
         // offlined); cpu1.. expose a read-only "1"/"0".
         assert!(
-            fs.stat("/devices/system/cpu/cpu0/online").is_err(),
+            fs.stat(Path::new("/devices/system/cpu/cpu0/online")).is_err(),
             "cpu0 must not expose an online file"
         );
         assert!(
@@ -1445,7 +1456,7 @@ pub fn self_test() -> KernelResult<()> {
             "cpu0 dir must not list 'online'"
         );
         if ncpu >= 2 {
-            let on = fs.read_file("/devices/system/cpu/cpu1/online")?;
+            let on = fs.read_file(Path::new("/devices/system/cpu/cpu1/online"))?;
             let on_txt = core::str::from_utf8(&on).map_err(|_| KernelError::InternalError)?;
             assert!(
                 on_txt == "1\n" || on_txt == "0\n",
@@ -1453,7 +1464,7 @@ pub fn self_test() -> KernelResult<()> {
                 on_txt
             );
             assert!(
-                fs.write_file("/devices/system/cpu/cpu1/online", b"0").is_err(),
+                fs.write_file(Path::new("/devices/system/cpu/cpu1/online"), b"0").is_err(),
                 "cpu1/online should reject writes (no hot-plug model)"
             );
         }
@@ -1469,7 +1480,7 @@ pub fn self_test() -> KernelResult<()> {
     // detected, so the whole block is conditional on that.
     {
         let ncache = crate::cpu::cache_topology().len();
-        let cpu0 = fs.readdir("/devices/system/cpu/cpu0")?;
+        let cpu0 = fs.readdir(Path::new("/devices/system/cpu/cpu0"))?;
         if ncache == 0 {
             // No detected geometry: the cache/ dir must be absent (we never
             // expose an empty/fabricated tree).
@@ -1477,7 +1488,7 @@ pub fn self_test() -> KernelResult<()> {
                 !cpu0.iter().any(|e| e.name == "cache"),
                 "cpu0 must not list 'cache' when no geometry detected"
             );
-            assert!(fs.stat("/devices/system/cpu/cpu0/cache").is_err());
+            assert!(fs.stat(Path::new("/devices/system/cpu/cpu0/cache")).is_err());
             serial_println!("[sysfs]   devices/system/cpu/cpuN/cache: absent (no geometry)");
         } else {
             assert!(
@@ -1486,7 +1497,7 @@ pub fn self_test() -> KernelResult<()> {
                 "cpu0 should contain 'cache'"
             );
             // cache/ lists exactly ncache indexI dirs.
-            let cache_dir = fs.readdir("/devices/system/cpu/cpu0/cache")?;
+            let cache_dir = fs.readdir(Path::new("/devices/system/cpu/cpu0/cache"))?;
             assert!(
                 cache_dir.len() == ncache,
                 "cache/ has {} entries, want {}",
@@ -1506,22 +1517,22 @@ pub fn self_test() -> KernelResult<()> {
             // kernel's own cache_topology() values (no fabrication, no drift).
             let topo0 = crate::cpu::cache_topology().first().copied()
                 .ok_or(KernelError::InternalError)?;
-            let lvl = fs.read_file("/devices/system/cpu/cpu0/cache/index0/level")?;
+            let lvl = fs.read_file(Path::new("/devices/system/cpu/cpu0/cache/index0/level"))?;
             let lvl_txt = core::str::from_utf8(&lvl).map_err(|_| KernelError::InternalError)?;
             let lvl_val: u8 = lvl_txt.trim().parse().map_err(|_| KernelError::InternalError)?;
             assert!(lvl_val == topo0.level, "index0 level {} != {}", lvl_val, topo0.level);
 
-            let ty = fs.read_file("/devices/system/cpu/cpu0/cache/index0/type")?;
+            let ty = fs.read_file(Path::new("/devices/system/cpu/cpu0/cache/index0/type"))?;
             let ty_txt = core::str::from_utf8(&ty).map_err(|_| KernelError::InternalError)?;
             assert!(ty_txt.trim() == topo0.type_name(), "index0 type mismatch");
 
-            let ways = fs.read_file("/devices/system/cpu/cpu0/cache/index0/ways_of_associativity")?;
+            let ways = fs.read_file(Path::new("/devices/system/cpu/cpu0/cache/index0/ways_of_associativity"))?;
             let ways_txt = core::str::from_utf8(&ways).map_err(|_| KernelError::InternalError)?;
             let ways_val: u16 = ways_txt.trim().parse().map_err(|_| KernelError::InternalError)?;
             assert!(ways_val == topo0.ways, "index0 ways {} != {}", ways_val, topo0.ways);
 
             // shared_cpu_list always contains cpu0 itself.
-            let scl = fs.read_file("/devices/system/cpu/cpu0/cache/index0/shared_cpu_list")?;
+            let scl = fs.read_file(Path::new("/devices/system/cpu/cpu0/cache/index0/shared_cpu_list"))?;
             let scl_txt = core::str::from_utf8(&scl).map_err(|_| KernelError::InternalError)?;
             assert!(
                 scl_txt.split([',', '-']).any(|t| t.trim() == "0"),
@@ -1531,13 +1542,13 @@ pub fn self_test() -> KernelResult<()> {
 
             // Cache files are read-only; out-of-range index is NotFound.
             assert!(
-                fs.write_file("/devices/system/cpu/cpu0/cache/index0/size", b"0").is_err(),
+                fs.write_file(Path::new("/devices/system/cpu/cpu0/cache/index0/size"), b"0").is_err(),
                 "cache size should reject writes"
             );
             let bogus = format!("/devices/system/cpu/cpu0/cache/index{ncache}");
-            assert!(fs.stat(&bogus).is_err(), "index{} should not exist", ncache);
+            assert!(fs.stat(Path::new(&bogus)).is_err(), "index{} should not exist", ncache);
             assert!(
-                fs.stat("/devices/system/cpu/cpu0/cache/index0/bogus").is_err(),
+                fs.stat(Path::new("/devices/system/cpu/cpu0/cache/index0/bogus")).is_err(),
                 "unknown cache file should be NotFound"
             );
 

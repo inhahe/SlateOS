@@ -258,7 +258,7 @@ impl FileSystem for Ext4Fs {
         let name = if name.is_empty() { "/" } else { name };
 
         Ok(DirEntry {
-            name: String::from(name),
+            name: PathBuf::from(name),
             entry_type,
             size,
         })
@@ -1167,7 +1167,7 @@ impl FileSystem for Ext4Fs {
         let name = if name.is_empty() { "/" } else { name };
 
         Ok(DirEntry {
-            name: String::from(name),
+            name: PathBuf::from(name),
             entry_type,
             size,
         })

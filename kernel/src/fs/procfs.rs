@@ -58,6 +58,7 @@ use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::vfs::{DirEntry, EntryType, FileMeta, FileSystem, FsInfo};
+use crate::fs::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // ProcFs implementation
@@ -11527,9 +11528,19 @@ fn task_exists(task_id: u64) -> bool {
 // Path resolution helpers
 // ---------------------------------------------------------------------------
 
-/// Strip leading "/" to get the relative path within procfs.
-fn strip_root(path: &str) -> &str {
-    path.strip_prefix('/').unwrap_or(path)
+/// Strip leading "/" to get the relative path within procfs, and decode.
+///
+/// This is where procfs stops caring about bytes. Paths are byte strings in
+/// general (see [`super::path`]), but procfs's namespace is generated entirely
+/// by the kernel out of ASCII names — `version`, `uptime`, a decimal PID.
+/// There is no such thing as a procfs path that is not UTF-8, so one that
+/// isn't cannot name anything that exists; `NotFound` is the honest answer,
+/// and a lossy conversion would be strictly worse because it would let
+/// `/proc/\xff` alias `/proc/\u{fffd}`. This is the only decode in the module —
+/// everything below it stays `&str`.
+fn strip_root(path: &Path) -> KernelResult<&str> {
+    let s = path.to_str().ok_or(KernelError::NotFound)?;
+    Ok(s.strip_prefix('/').unwrap_or(s))
 }
 
 /// Generate content for a root-level virtual file by name.
@@ -12086,7 +12097,7 @@ fn sys_children(dir: &str) -> Vec<DirEntry> {
     for &d in SYS_DIRS {
         if let Some(name) = sys_immediate_child(dir, d) {
             entries.push(DirEntry {
-                name: String::from(name),
+                name: PathBuf::from(name),
                 entry_type: EntryType::Directory,
                 size: 0,
             });
@@ -12096,7 +12107,7 @@ fn sys_children(dir: &str) -> Vec<DirEntry> {
         if let Some(name) = sys_immediate_child(dir, f) {
             let size = gen_sys(f).map_or(0, |data| data.len() as u64);
             entries.push(DirEntry {
-                name: String::from(name),
+                name: PathBuf::from(name),
                 entry_type: EntryType::File,
                 size,
             });
@@ -12360,8 +12371,8 @@ impl FileSystem for ProcFs {
         "procfs"
     }
 
-    fn readdir(&mut self, path: &str) -> KernelResult<Vec<DirEntry>> {
-        let rel = strip_root(path);
+    fn readdir(&mut self, path: &Path) -> KernelResult<Vec<DirEntry>> {
+        let rel = strip_root(path)?;
 
         match classify_path(rel) {
             ProcPath::Root => {
@@ -12371,7 +12382,7 @@ impl FileSystem for ProcFs {
                     .map(|name| {
                         let size = generate(name).map_or(0, |d| d.len() as u64);
                         DirEntry {
-                            name: String::from(*name),
+                            name: PathBuf::from(*name),
                             entry_type: EntryType::File,
                             size,
                         }
@@ -12380,14 +12391,14 @@ impl FileSystem for ProcFs {
 
                 // "self" — magic symlink to the current task's PID directory.
                 entries.push(DirEntry {
-                    name: String::from("self"),
+                    name: PathBuf::from("self"),
                     entry_type: EntryType::Symlink,
                     size: 0,
                 });
 
                 // "sys" — the sysctl tree (a directory, not in ROOT_FILES).
                 entries.push(DirEntry {
-                    name: String::from("sys"),
+                    name: PathBuf::from("sys"),
                     entry_type: EntryType::Directory,
                     size: 0,
                 });
@@ -12395,7 +12406,7 @@ impl FileSystem for ProcFs {
                 // Add per-PID directories for all live tasks.
                 for task in &crate::sched::task_list() {
                     entries.push(DirEntry {
-                        name: format!("{}", task.id),
+                        name: PathBuf::from(format!("{}", task.id)),
                         entry_type: EntryType::Directory,
                         size: 0,
                     });
@@ -12413,7 +12424,7 @@ impl FileSystem for ProcFs {
                     .map(|name| {
                         let size = generate_pid(pid, name).map_or(0, |d| d.len() as u64);
                         DirEntry {
-                            name: String::from(*name),
+                            name: PathBuf::from(*name),
                             entry_type: EntryType::File,
                             size,
                         }
@@ -12422,26 +12433,26 @@ impl FileSystem for ProcFs {
                 // Per-PID symbolic links (cwd, root).
                 for name in PID_LINKS {
                     entries.push(DirEntry {
-                        name: String::from(*name),
+                        name: PathBuf::from(*name),
                         entry_type: EntryType::Symlink,
                         size: 0,
                     });
                 }
                 // The `task/` subdirectory (per-thread view).
                 entries.push(DirEntry {
-                    name: String::from("task"),
+                    name: PathBuf::from("task"),
                     entry_type: EntryType::Directory,
                     size: 0,
                 });
                 // The `fd/` subdirectory (open file descriptors).
                 entries.push(DirEntry {
-                    name: String::from("fd"),
+                    name: PathBuf::from("fd"),
                     entry_type: EntryType::Directory,
                     size: 0,
                 });
                 // The `fdinfo/` subdirectory (per-fd pos/flags).
                 entries.push(DirEntry {
-                    name: String::from("fdinfo"),
+                    name: PathBuf::from("fdinfo"),
                     entry_type: EntryType::Directory,
                     size: 0,
                 });
@@ -12462,7 +12473,7 @@ impl FileSystem for ProcFs {
                         // re-lock PROCESS_TABLE per fd via gen_pid_fdinfo.
                         let size = fdinfo_from_entry(&entry).len() as u64;
                         DirEntry {
-                            name: format!("{fd}"),
+                            name: PathBuf::from(format!("{fd}")),
                             entry_type: EntryType::File,
                             size,
                         }
@@ -12482,7 +12493,7 @@ impl FileSystem for ProcFs {
                     .unwrap_or_default()
                     .into_iter()
                     .map(|(fd, _entry)| DirEntry {
-                        name: format!("{fd}"),
+                        name: PathBuf::from(format!("{fd}")),
                         entry_type: EntryType::Symlink,
                         size: 0,
                     })
@@ -12496,7 +12507,7 @@ impl FileSystem for ProcFs {
                 let entries = threads
                     .iter()
                     .map(|tid| DirEntry {
-                        name: format!("{tid}"),
+                        name: PathBuf::from(format!("{tid}")),
                         entry_type: EntryType::Directory,
                         size: 0,
                     })
@@ -12514,7 +12525,7 @@ impl FileSystem for ProcFs {
                         let size = generate_task(pid, tid, name)
                             .map_or(0, |d| d.len() as u64);
                         DirEntry {
-                            name: String::from(*name),
+                            name: PathBuf::from(*name),
                             entry_type: EntryType::File,
                             size,
                         }
@@ -12533,8 +12544,8 @@ impl FileSystem for ProcFs {
         }
     }
 
-    fn read_file(&mut self, path: &str) -> KernelResult<Vec<u8>> {
-        let rel = strip_root(path);
+    fn read_file(&mut self, path: &Path) -> KernelResult<Vec<u8>> {
+        let rel = strip_root(path)?;
 
         match classify_path(rel) {
             ProcPath::Root | ProcPath::PidDir(_)
@@ -12579,8 +12590,8 @@ impl FileSystem for ProcFs {
     /// writes (mirroring Linux's `echo N > .../oom_score_adj`); every other
     /// path stays `NotSupported`, preserving the read-only contract the
     /// rest of procfs relies on.
-    fn write_file(&mut self, path: &str, data: &[u8]) -> KernelResult<()> {
-        let rel = strip_root(path);
+    fn write_file(&mut self, path: &Path, data: &[u8]) -> KernelResult<()> {
+        let rel = strip_root(path)?;
 
         match classify_path(rel) {
             ProcPath::PidFile(pid, "oom_score_adj") => {
@@ -12594,19 +12605,19 @@ impl FileSystem for ProcFs {
         }
     }
 
-    fn stat(&mut self, path: &str) -> KernelResult<DirEntry> {
-        let rel = strip_root(path);
+    fn stat(&mut self, path: &Path) -> KernelResult<DirEntry> {
+        let rel = strip_root(path)?;
 
         match classify_path(rel) {
             ProcPath::Root => Ok(DirEntry {
-                name: String::from("/"),
+                name: PathBuf::from("/"),
                 entry_type: EntryType::Directory,
                 size: 0,
             }),
             ProcPath::RootFile(name) => {
                 let size = generate(name).map_or(0, |d| d.len() as u64);
                 Ok(DirEntry {
-                    name: String::from(name),
+                    name: PathBuf::from(name),
                     entry_type: EntryType::File,
                     size,
                 })
@@ -12616,7 +12627,7 @@ impl FileSystem for ProcFs {
                     return Err(KernelError::NotFound);
                 }
                 Ok(DirEntry {
-                    name: format!("{pid}"),
+                    name: PathBuf::from(format!("{pid}")),
                     entry_type: EntryType::Directory,
                     size: 0,
                 })
@@ -12627,7 +12638,7 @@ impl FileSystem for ProcFs {
                 }
                 let size = generate_pid(pid, file_name).map_or(0, |d| d.len() as u64);
                 Ok(DirEntry {
-                    name: String::from(file_name),
+                    name: PathBuf::from(file_name),
                     entry_type: EntryType::File,
                     size,
                 })
@@ -12637,13 +12648,13 @@ impl FileSystem for ProcFs {
                     return Err(KernelError::NotFound);
                 }
                 Ok(DirEntry {
-                    name: String::from(link_name),
+                    name: PathBuf::from(link_name),
                     entry_type: EntryType::Symlink,
                     size: 0,
                 })
             }
             ProcPath::SelfLink => Ok(DirEntry {
-                name: String::from("self"),
+                name: PathBuf::from("self"),
                 entry_type: EntryType::Symlink,
                 size: 0,
             }),
@@ -12652,7 +12663,7 @@ impl FileSystem for ProcFs {
                     return Err(KernelError::NotFound);
                 }
                 Ok(DirEntry {
-                    name: String::from("task"),
+                    name: PathBuf::from("task"),
                     entry_type: EntryType::Directory,
                     size: 0,
                 })
@@ -12662,7 +12673,7 @@ impl FileSystem for ProcFs {
                     return Err(KernelError::NotFound);
                 }
                 Ok(DirEntry {
-                    name: format!("{tid}"),
+                    name: PathBuf::from(format!("{tid}")),
                     entry_type: EntryType::Directory,
                     size: 0,
                 })
@@ -12673,7 +12684,7 @@ impl FileSystem for ProcFs {
                 }
                 let size = generate_task(pid, tid, file_name).map_or(0, |d| d.len() as u64);
                 Ok(DirEntry {
-                    name: String::from(file_name),
+                    name: PathBuf::from(file_name),
                     entry_type: EntryType::File,
                     size,
                 })
@@ -12683,7 +12694,7 @@ impl FileSystem for ProcFs {
                     return Err(KernelError::NotFound);
                 }
                 Ok(DirEntry {
-                    name: String::from("fd"),
+                    name: PathBuf::from("fd"),
                     entry_type: EntryType::Directory,
                     size: 0,
                 })
@@ -12694,7 +12705,7 @@ impl FileSystem for ProcFs {
                 crate::proc::pcb::linux_fd_lookup(pid, fd)
                     .ok_or(KernelError::NotFound)?;
                 Ok(DirEntry {
-                    name: format!("{fd}"),
+                    name: PathBuf::from(format!("{fd}")),
                     entry_type: EntryType::Symlink,
                     size: 0,
                 })
@@ -12704,7 +12715,7 @@ impl FileSystem for ProcFs {
                     return Err(KernelError::NotFound);
                 }
                 Ok(DirEntry {
-                    name: String::from("fdinfo"),
+                    name: PathBuf::from("fdinfo"),
                     entry_type: EntryType::Directory,
                     size: 0,
                 })
@@ -12713,20 +12724,20 @@ impl FileSystem for ProcFs {
                 // A regular file, present only for a currently-open fd.
                 let size = gen_pid_fdinfo(pid, fd)?.len() as u64;
                 Ok(DirEntry {
-                    name: format!("{fd}"),
+                    name: PathBuf::from(format!("{fd}")),
                     entry_type: EntryType::File,
                     size,
                 })
             }
             ProcPath::SysDir(rel) => Ok(DirEntry {
-                name: String::from(sys_basename(rel)),
+                name: PathBuf::from(sys_basename(rel)),
                 entry_type: EntryType::Directory,
                 size: 0,
             }),
             ProcPath::SysFile(rel) => {
                 let size = gen_sys(rel).map_or(0, |d| d.len() as u64);
                 Ok(DirEntry {
-                    name: String::from(sys_basename(rel)),
+                    name: PathBuf::from(sys_basename(rel)),
                     entry_type: EntryType::File,
                     size,
                 })
@@ -12748,19 +12759,23 @@ impl FileSystem for ProcFs {
     /// surface a non-UTF-8 cwd as an error rather than lossily mangling
     /// it — silent corruption of a path is never acceptable.  In practice
     /// canonical cwds are ASCII/UTF-8, so this is a theoretical edge.
-    fn readlink(&mut self, path: &str) -> KernelResult<String> {
-        let rel = strip_root(path);
+    fn readlink(&mut self, path: &Path) -> KernelResult<PathBuf> {
+        let rel = strip_root(path)?;
         match classify_path(rel) {
             ProcPath::PidLink(pid, "root") => {
                 if !task_exists(pid) {
                     return Err(KernelError::NotFound);
                 }
-                Ok(String::from("/"))
+                Ok(PathBuf::from("/"))
             }
             ProcPath::PidLink(pid, "cwd") => {
+                // `get_cwd` already hands back bytes. This used to run them
+                // through `String::from_utf8` and fail with InvalidArgument,
+                // so a process whose cwd contained one non-UTF-8 byte had a
+                // `/proc/<pid>/cwd` that could not be read at all.
                 let cwd = crate::proc::pcb::get_cwd(pid)
                     .ok_or(KernelError::NotFound)?;
-                String::from_utf8(cwd).map_err(|_| KernelError::InvalidArgument)
+                Ok(PathBuf::from(cwd))
             }
             ProcPath::PidLink(pid, "exe") => {
                 // Empty path means the process has not exec'd a binary
@@ -12771,23 +12786,28 @@ impl FileSystem for ProcFs {
                 if exe.is_empty() {
                     return Err(KernelError::NotFound);
                 }
-                String::from_utf8(exe).map_err(|_| KernelError::InvalidArgument)
+                // Same as `cwd`: the exec path is bytes, and forcing UTF-8 on
+                // it made `/proc/<pid>/exe` unreadable for a binary whose path
+                // happened not to decode.
+                Ok(PathBuf::from(exe))
             }
             ProcPath::PidLink(_, _) => Err(KernelError::NotFound),
             // `/proc/<pid>/fd/<n>` → the backing object of fd n.
             ProcPath::PidFdLink(pid, fd) => {
                 let entry = crate::proc::pcb::linux_fd_lookup(pid, fd)
                     .ok_or(KernelError::NotFound)?;
-                Ok(fd_link_target(&entry))
+                Ok(PathBuf::from(fd_link_target(&entry)))
             }
             // `/proc/self` → the caller's pid, as a relative target (Linux
             // returns the bare pid number, e.g. "7", resolved against /proc).
-            ProcPath::SelfLink => Ok(format!("{}", crate::sched::current_task_id())),
+            ProcPath::SelfLink => {
+                Ok(PathBuf::from(format!("{}", crate::sched::current_task_id())))
+            }
             _ => Err(KernelError::InvalidArgument),
         }
     }
 
-    fn metadata(&mut self, path: &str) -> KernelResult<FileMeta> {
+    fn metadata(&mut self, path: &Path) -> KernelResult<FileMeta> {
         // Verify the path exists by calling stat.
         let entry = self.stat(path)?;
 
@@ -12856,7 +12876,7 @@ pub fn self_test() -> KernelResult<()> {
     let mut fs = ProcFs::new();
 
     // Test root readdir — should have root files + at least 1 PID directory.
-    let entries = fs.readdir("/")?;
+    let entries = fs.readdir(Path::new("/"))?;
     let min_expected = ROOT_FILES.len();
     if entries.len() < min_expected {
         serial_println!(
@@ -12878,7 +12898,7 @@ pub fn self_test() -> KernelResult<()> {
     );
 
     // Test stat on root.
-    let root_stat = fs.stat("/")?;
+    let root_stat = fs.stat(Path::new("/"))?;
     if root_stat.entry_type != EntryType::Directory {
         serial_println!("[procfs]   FAIL: stat / not a directory");
         return Err(KernelError::InternalError);
@@ -12890,14 +12910,14 @@ pub fn self_test() -> KernelResult<()> {
         let path = format!("/{name}");
 
         // stat should succeed.
-        let entry = fs.stat(&path)?;
+        let entry = fs.stat(Path::new(&path))?;
         if entry.entry_type != EntryType::File {
             serial_println!("[procfs]   FAIL: stat {path} not a file");
             return Err(KernelError::InternalError);
         }
 
         // read_file should return non-empty data.
-        let data = fs.read_file(&path)?;
+        let data = fs.read_file(Path::new(&path))?;
         if data.is_empty() {
             serial_println!("[procfs]   FAIL: read_file {path} returned empty");
             return Err(KernelError::InternalError);
@@ -12919,7 +12939,7 @@ pub fn self_test() -> KernelResult<()> {
     // `acpi_id`/`apic_id` keys) was miscounted as an extra CPU by
     // block-counting parsers; pin the new shape so it can't regress.
     {
-        let cpu_data = fs.read_file("/cpuinfo")?;
+        let cpu_data = fs.read_file(Path::new("/cpuinfo"))?;
         let cpu_text = core::str::from_utf8(&cpu_data)
             .map_err(|_| KernelError::InternalError)?;
         // `grep -c ^processor` — count lines that start a processor block.
@@ -12967,21 +12987,21 @@ pub fn self_test() -> KernelResult<()> {
     }
 
     // Test stat on nonexistent file.
-    if fs.stat("/nonexistent").is_ok() {
+    if fs.stat(Path::new("/nonexistent")).is_ok() {
         serial_println!("[procfs]   FAIL: stat /nonexistent should fail");
         return Err(KernelError::InternalError);
     }
     serial_println!("[procfs]   stat /nonexistent: NotFound OK");
 
     // Test read on directory.
-    if fs.read_file("/").is_ok() {
+    if fs.read_file(Path::new("/")).is_ok() {
         serial_println!("[procfs]   FAIL: read_file / should fail (IsADirectory)");
         return Err(KernelError::InternalError);
     }
     serial_println!("[procfs]   read_file /: IsADirectory OK");
 
     // Test write to a read-only root file (should fail — NotSupported).
-    if fs.write_file("/version", b"hacked").is_ok() {
+    if fs.write_file(Path::new("/version"), b"hacked").is_ok() {
         serial_println!("[procfs]   FAIL: write_file should fail (NotSupported)");
         return Err(KernelError::InternalError);
     }
@@ -12994,7 +13014,7 @@ pub fn self_test() -> KernelResult<()> {
     {
         let probe_tid = crate::sched::current_task_id();
         let bad_path = format!("/{probe_tid}/oom_score_adj");
-        if fs.write_file(&bad_path, b"not-a-number").is_ok() {
+        if fs.write_file(Path::new(&bad_path), b"not-a-number").is_ok() {
             serial_println!(
                 "[procfs]   FAIL: oom_score_adj accepted malformed write"
             );
@@ -13078,7 +13098,7 @@ pub fn self_test() -> KernelResult<()> {
     // live multi-threaded process existing at self-test time.
     {
         let probe = crate::sched::current_task_id();
-        let dir_entries = fs.readdir(&format!("/{probe}"))?;
+        let dir_entries = fs.readdir(Path::new(&format!("/{probe}")))?;
         if !dir_entries.iter().any(|e| {
             e.name == "task" && e.entry_type == EntryType::Directory
         }) {
@@ -13088,7 +13108,7 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         // A non-existent thread under any pid must be NotFound.
-        match fs.read_file(&format!("/{probe}/task/999999/comm")) {
+        match fs.read_file(Path::new(&format!("/{probe}/task/999999/comm"))) {
             Err(KernelError::NotFound) => {}
             other => {
                 serial_println!(
@@ -13099,7 +13119,7 @@ pub fn self_test() -> KernelResult<()> {
         }
         // Listing task/ for the bare task (no thread list) is NotFound;
         // for a real process it would enumerate tids.  Tolerate both.
-        match fs.readdir(&format!("/{probe}/task")) {
+        match fs.readdir(Path::new(&format!("/{probe}/task"))) {
             Ok(tids) => serial_println!(
                 "[procfs]   /{}/task: {} thread(s) OK", probe, tids.len()
             ),
@@ -13180,7 +13200,7 @@ pub fn self_test() -> KernelResult<()> {
     // exercising the native-process path without a live Linux-ABI process.
     {
         let probe = crate::sched::current_task_id();
-        let dir_entries = fs.readdir(&format!("/{probe}"))?;
+        let dir_entries = fs.readdir(Path::new(&format!("/{probe}")))?;
         if !dir_entries.iter().any(|e| {
             e.name == "fd" && e.entry_type == EntryType::Directory
         }) {
@@ -13189,10 +13209,10 @@ pub fn self_test() -> KernelResult<()> {
         }
         // fd/ readdir must succeed (empty for a process with no kernel fd
         // table) rather than erroring.
-        let fds = fs.readdir(&format!("/{probe}/fd"))?;
+        let fds = fs.readdir(Path::new(&format!("/{probe}/fd")))?;
         serial_println!("[procfs]   /{}/fd: {} open fd(s) OK", probe, fds.len());
         // A link for an fd that isn't open must be NotFound.
-        match fs.readlink(&format!("/{probe}/fd/0")) {
+        match fs.readlink(Path::new(&format!("/{probe}/fd/0"))) {
             Err(KernelError::NotFound) => {}
             other => {
                 serial_println!(
@@ -13275,17 +13295,17 @@ pub fn self_test() -> KernelResult<()> {
     // listing is empty and any `fdinfo/<n>` file is NotFound.
     {
         let probe = crate::sched::current_task_id();
-        let dir_entries = fs.readdir(&format!("/{probe}"))?;
+        let dir_entries = fs.readdir(Path::new(&format!("/{probe}")))?;
         if !dir_entries.iter().any(|e| {
             e.name == "fdinfo" && e.entry_type == EntryType::Directory
         }) {
             serial_println!("[procfs]   FAIL: /{}/ missing `fdinfo` subdirectory", probe);
             return Err(KernelError::InternalError);
         }
-        let fds = fs.readdir(&format!("/{probe}/fdinfo"))?;
+        let fds = fs.readdir(Path::new(&format!("/{probe}/fdinfo")))?;
         serial_println!("[procfs]   /{}/fdinfo: {} fd(s) OK", probe, fds.len());
         // Reading fdinfo for an fd that isn't open must be NotFound.
-        match fs.read_file(&format!("/{probe}/fdinfo/0")) {
+        match fs.read_file(Path::new(&format!("/{probe}/fdinfo/0"))) {
             Err(KernelError::NotFound) => {}
             other => {
                 serial_println!(
@@ -13707,7 +13727,7 @@ pub fn self_test() -> KernelResult<()> {
     let status_path = format!("/{current_tid}/status");
 
     // stat on PID directory.
-    let pid_stat = fs.stat(&pid_path)?;
+    let pid_stat = fs.stat(Path::new(&pid_path))?;
     if pid_stat.entry_type != EntryType::Directory {
         serial_println!("[procfs]   FAIL: stat {pid_path} not a directory");
         return Err(KernelError::InternalError);
@@ -13717,7 +13737,7 @@ pub fn self_test() -> KernelResult<()> {
     // readdir on PID directory — PID_FILES + PID_LINKS, plus the three
     // subdirectories every PID directory exposes: `task` (per-thread tree),
     // `fd` (open file descriptors) and `fdinfo` (per-fd pos/flags).
-    let pid_entries = fs.readdir(&pid_path)?;
+    let pid_entries = fs.readdir(Path::new(&pid_path))?;
     let expected_pid_entries = PID_FILES.len() + PID_LINKS.len() + 3;
     if pid_entries.len() != expected_pid_entries {
         serial_println!(
@@ -13741,7 +13761,7 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("[procfs]   readdir {}: {} entries OK", pid_path, pid_entries.len());
 
     // read_file on status.
-    let status_data = fs.read_file(&status_path)?;
+    let status_data = fs.read_file(Path::new(&status_path))?;
     if status_data.is_empty() {
         serial_println!("[procfs]   FAIL: read_file {} returned empty", status_path);
         return Err(KernelError::InternalError);
@@ -13781,14 +13801,14 @@ pub fn self_test() -> KernelResult<()> {
         current_tid, status_data.len());
 
     // read_file on PID directory should fail (IsADirectory).
-    if fs.read_file(&pid_path).is_ok() {
+    if fs.read_file(Path::new(&pid_path)).is_ok() {
         serial_println!("[procfs]   FAIL: read_file on PID dir should fail");
         return Err(KernelError::InternalError);
     }
     serial_println!("[procfs]   read_file on PID dir: IsADirectory OK");
 
     // stat on nonexistent PID should fail.
-    if fs.stat("/999999").is_ok() {
+    if fs.stat(Path::new("/999999")).is_ok() {
         serial_println!("[procfs]   FAIL: stat on bogus PID should fail");
         return Err(KernelError::InternalError);
     }
@@ -13799,26 +13819,26 @@ pub fn self_test() -> KernelResult<()> {
     // resolve to the caller's pid, reading its bytes directly must be
     // rejected, and a path *under* it (self/status) must resolve to the
     // current task's file — matching Linux's /proc/self semantics.
-    let self_stat = fs.stat("/self")?;
+    let self_stat = fs.stat(Path::new("/self"))?;
     if self_stat.entry_type != EntryType::Symlink {
         serial_println!(
             "[procfs]   FAIL: /self is {:?}, expected Symlink", self_stat.entry_type
         );
         return Err(KernelError::InternalError);
     }
-    let self_target = fs.readlink("/self")?;
-    if self_target.parse::<u64>() != Ok(current_tid) {
+    let self_target = fs.readlink(Path::new("/self"))?;
+    if self_target.to_str().and_then(|s| s.parse::<u64>().ok()) != Some(current_tid) {
         serial_println!(
             "[procfs]   FAIL: /self -> {:?}, expected pid {}", self_target, current_tid
         );
         return Err(KernelError::InternalError);
     }
-    if fs.read_file("/self") != Err(KernelError::InvalidArgument) {
+    if fs.read_file(Path::new("/self")) != Err(KernelError::InvalidArgument) {
         serial_println!("[procfs]   FAIL: read_file(/self) should be InvalidArgument");
         return Err(KernelError::InternalError);
     }
     // self/status must resolve to the live current task's status file.
-    let self_status = fs.read_file("/self/status")?;
+    let self_status = fs.read_file(Path::new("/self/status"))?;
     if self_status.is_empty() {
         serial_println!("[procfs]   FAIL: /self/status returned empty");
         return Err(KernelError::InternalError);
@@ -14250,7 +14270,7 @@ pub fn self_test() -> KernelResult<()> {
         // The live file is process-only (gated on PCB existence, like
         // oom_score): when it resolves it must expose all seven Linux keys;
         // a bare scheduler task with no PCB legitimately returns NotFound.
-        match fs.read_file(&format!("/{current_tid}/io")) {
+        match fs.read_file(Path::new(&format!("/{current_tid}/io"))) {
             Ok(io_data) => {
                 let live = core::str::from_utf8(&io_data)
                     .map_err(|_| KernelError::InternalError)?;
@@ -14306,7 +14326,7 @@ pub fn self_test() -> KernelResult<()> {
 
     // /proc/<pid>/comm — non-empty, newline-terminated, <= 16 bytes
     // (TASK_COMM_LEN), matching Linux's `comm` shape.
-    let comm_data = fs.read_file(&format!("/{current_tid}/comm"))?;
+    let comm_data = fs.read_file(Path::new(&format!("/{current_tid}/comm")))?;
     if comm_data.is_empty()
         || comm_data.last() != Some(&b'\n')
         || comm_data.len() > 16
@@ -14322,7 +14342,7 @@ pub fn self_test() -> KernelResult<()> {
     // /proc/<pid>/limits — works for any live task (falls back to
     // DEFAULT_RLIMITS without a PCB).  Must carry the Linux header and
     // the well-known rows tools scrape.
-    let limits_data = fs.read_file(&format!("/{current_tid}/limits"))?;
+    let limits_data = fs.read_file(Path::new(&format!("/{current_tid}/limits")))?;
     let limits_text = core::str::from_utf8(&limits_data)
         .map_err(|_| KernelError::InternalError)?;
     if !limits_text.contains("Soft Limit")
@@ -14337,7 +14357,7 @@ pub fn self_test() -> KernelResult<()> {
     // /proc/<pid>/statm — only processes carry the address-space charge,
     // so a bare scheduler task legitimately returns NotFound.  When it
     // does succeed, it must be seven space-separated integers + newline.
-    match fs.read_file(&format!("/{current_tid}/statm")) {
+    match fs.read_file(Path::new(&format!("/{current_tid}/statm"))) {
         Ok(statm_data) => {
             let statm_text = core::str::from_utf8(&statm_data)
                 .map_err(|_| KernelError::InternalError)?;
@@ -14369,7 +14389,7 @@ pub fn self_test() -> KernelResult<()> {
     // scheduler task legitimately returns NotFound.  When it succeeds,
     // every line must carry the `-` separator field and at least the 10
     // mandatory positional fields that precede the super-options.
-    match fs.read_file(&format!("/{current_tid}/mountinfo")) {
+    match fs.read_file(Path::new(&format!("/{current_tid}/mountinfo"))) {
         Ok(mi_data) => {
             let mi_text = core::str::from_utf8(&mi_data)
                 .map_err(|_| KernelError::InternalError)?;
@@ -14402,7 +14422,7 @@ pub fn self_test() -> KernelResult<()> {
     // /proc/<pid>/cgroup — process-only (like statm/mountinfo), so a bare
     // scheduler task returns NotFound.  When it succeeds, it must be the
     // single cgroup v2 line "0::<path>\n".
-    match fs.read_file(&format!("/{current_tid}/cgroup")) {
+    match fs.read_file(Path::new(&format!("/{current_tid}/cgroup"))) {
         Ok(cg_data) => {
             let cg_text = core::str::from_utf8(&cg_data)
                 .map_err(|_| KernelError::InternalError)?;
@@ -14431,7 +14451,7 @@ pub fn self_test() -> KernelResult<()> {
     // /proc/<pid>/cpuset — process-only; when it succeeds it must be a
     // single absolute-path line (starts with "/", no "0::" prefix), the
     // bare cgroup path shared with the cgroup file.
-    match fs.read_file(&format!("/{current_tid}/cpuset")) {
+    match fs.read_file(Path::new(&format!("/{current_tid}/cpuset"))) {
         Ok(cs_data) => {
             let cs_text = core::str::from_utf8(&cs_data)
                 .map_err(|_| KernelError::InternalError)?;
@@ -14461,7 +14481,7 @@ pub fn self_test() -> KernelResult<()> {
     // succeed, each must be a single integer line within Linux's ranges
     // (oom_score 0..=1000, oom_score_adj -1000..=1000).
     for (name, lo, hi) in [("oom_score", 0i32, 1000i32), ("oom_score_adj", -1000, 1000)] {
-        match fs.read_file(&format!("/{current_tid}/{name}")) {
+        match fs.read_file(Path::new(&format!("/{current_tid}/{name}"))) {
             Ok(data) => {
                 let text = core::str::from_utf8(&data)
                     .map_err(|_| KernelError::InternalError)?;
@@ -14492,7 +14512,7 @@ pub fn self_test() -> KernelResult<()> {
 
     // /proc/<pid>/schedstat — served for any live scheduler task.  Must be
     // exactly three space-separated integers, newline-terminated.
-    match fs.read_file(&format!("/{current_tid}/schedstat")) {
+    match fs.read_file(Path::new(&format!("/{current_tid}/schedstat"))) {
         Ok(sched_data) => {
             let sched_text = core::str::from_utf8(&sched_data)
                 .map_err(|_| KernelError::InternalError)?;
@@ -14521,7 +14541,7 @@ pub fn self_test() -> KernelResult<()> {
     // they succeed, each must be a bare decimal integer with no trailing
     // newline (Linux audit-file convention).
     for name in ["loginuid", "sessionid"] {
-        match fs.read_file(&format!("/{current_tid}/{name}")) {
+        match fs.read_file(Path::new(&format!("/{current_tid}/{name}"))) {
             Ok(data) => {
                 let text = core::str::from_utf8(&data)
                     .map_err(|_| KernelError::InternalError)?;
@@ -14548,7 +14568,7 @@ pub fn self_test() -> KernelResult<()> {
     // /proc/<pid>/cmdline — always succeeds for a live task: full argv from
     // the persistent snapshot, or the process/task name as a single
     // NUL-terminated argument.  Must be non-empty and NUL-terminated.
-    let cmdline_data = fs.read_file(&format!("/{current_tid}/cmdline"))?;
+    let cmdline_data = fs.read_file(Path::new(&format!("/{current_tid}/cmdline")))?;
     if cmdline_data.is_empty() || cmdline_data.last() != Some(&0) {
         serial_println!(
             "[procfs]   FAIL: cmdline malformed (len={}, last={:?})",
@@ -14562,7 +14582,7 @@ pub fn self_test() -> KernelResult<()> {
     // statm, only real processes carry an environment, so a bare scheduler
     // task legitimately returns NotFound.  When it succeeds it is either
     // empty (spawned without env) or a run of NUL-terminated entries.
-    match fs.read_file(&format!("/{current_tid}/environ")) {
+    match fs.read_file(Path::new(&format!("/{current_tid}/environ"))) {
         Ok(environ_data) => {
             if !environ_data.is_empty() && environ_data.last() != Some(&0) {
                 serial_println!(
@@ -14588,8 +14608,8 @@ pub fn self_test() -> KernelResult<()> {
     }
 
     // /proc/<pid>/root — always resolves to "/" for a live task.
-    let root_link = fs.readlink(&format!("/{current_tid}/root"))?;
-    if root_link != "/" {
+    let root_link = fs.readlink(Path::new(&format!("/{current_tid}/root")))?;
+    if root_link.as_bytes() != b"/" {
         serial_println!("[procfs]   FAIL: root link = {:?}, expected \"/\"", root_link);
         return Err(KernelError::InternalError);
     }
@@ -14599,19 +14619,19 @@ pub fn self_test() -> KernelResult<()> {
     // scheduler task has no PCB and thus no cwd (NotFound); a real process
     // resolves to an absolute path.  Also confirm reading the link's bytes
     // directly is rejected (EINVAL-style) and that lstat reports a symlink.
-    let cwd_lstat = fs.stat(&format!("/{current_tid}/cwd"))?;
+    let cwd_lstat = fs.stat(Path::new(&format!("/{current_tid}/cwd")))?;
     if cwd_lstat.entry_type != EntryType::Symlink {
         serial_println!("[procfs]   FAIL: cwd not a symlink ({:?})", cwd_lstat.entry_type);
         return Err(KernelError::InternalError);
     }
-    if fs.read_file(&format!("/{current_tid}/cwd")) != Err(KernelError::InvalidArgument) {
+    if fs.read_file(Path::new(&format!("/{current_tid}/cwd"))) != Err(KernelError::InvalidArgument) {
         serial_println!("[procfs]   FAIL: read_file on cwd symlink should be InvalidArgument");
         return Err(KernelError::InternalError);
     }
-    match fs.readlink(&format!("/{current_tid}/cwd")) {
+    match fs.readlink(Path::new(&format!("/{current_tid}/cwd"))) {
         Ok(target) => {
-            if !target.starts_with('/') {
-                serial_println!("[procfs]   FAIL: cwd target {:?} not absolute", target);
+            if !target.is_absolute() {
+                serial_println!("[procfs]   FAIL: cwd target {} not absolute", target.display());
                 return Err(KernelError::InternalError);
             }
             serial_println!("[procfs]   {}/cwd -> {:?} OK", current_tid, target);
@@ -14633,19 +14653,19 @@ pub fn self_test() -> KernelResult<()> {
     // exec'd process), the target must be an absolute path.  Reading the
     // link's bytes directly must be rejected, and lstat must report a
     // symlink regardless.
-    let exe_lstat = fs.stat(&format!("/{current_tid}/exe"))?;
+    let exe_lstat = fs.stat(Path::new(&format!("/{current_tid}/exe")))?;
     if exe_lstat.entry_type != EntryType::Symlink {
         serial_println!("[procfs]   FAIL: exe not a symlink ({:?})", exe_lstat.entry_type);
         return Err(KernelError::InternalError);
     }
-    if fs.read_file(&format!("/{current_tid}/exe")) != Err(KernelError::InvalidArgument) {
+    if fs.read_file(Path::new(&format!("/{current_tid}/exe"))) != Err(KernelError::InvalidArgument) {
         serial_println!("[procfs]   FAIL: read_file on exe symlink should be InvalidArgument");
         return Err(KernelError::InternalError);
     }
-    match fs.readlink(&format!("/{current_tid}/exe")) {
+    match fs.readlink(Path::new(&format!("/{current_tid}/exe"))) {
         Ok(target) => {
-            if !target.starts_with('/') {
-                serial_println!("[procfs]   FAIL: exe target {:?} not absolute", target);
+            if !target.is_absolute() {
+                serial_println!("[procfs]   FAIL: exe target {} not absolute", target.display());
                 return Err(KernelError::InternalError);
             }
             serial_println!("[procfs]   {}/exe -> {:?} OK", current_tid, target);
@@ -14669,7 +14689,7 @@ pub fn self_test() -> KernelResult<()> {
     // arbitrary bytes so it is exempt).  Note: the comm itself can contain
     // spaces, so split on the *last* ')' to isolate the post-comm fields the
     // way real /proc parsers do.
-    let stat_data = fs.read_file(&format!("/{current_tid}/stat"))?;
+    let stat_data = fs.read_file(Path::new(&format!("/{current_tid}/stat")))?;
     let stat_text = core::str::from_utf8(&stat_data)
         .map_err(|_| KernelError::InternalError)?;
     let stat_line = stat_text.strip_suffix('\n').unwrap_or(stat_text);
@@ -14766,7 +14786,7 @@ pub fn self_test() -> KernelResult<()> {
     // the old custom "tasks:/running:" format.  Lock down the line structure so
     // a future edit can't silently regress what top/htop/vmstat/glibc parse.
     {
-        let data = fs.read_file("/stat")?;
+        let data = fs.read_file(Path::new("/stat"))?;
         let text = core::str::from_utf8(&data).map_err(|_| KernelError::InternalError)?;
 
         // The aggregate CPU line is first and uses the "cpu" label followed by
@@ -14814,7 +14834,7 @@ pub fn self_test() -> KernelResult<()> {
     // "<uptime> <idle>" centisecond format.  A strict two-field parser
     // (sscanf "%lf %lf") must find exactly two decimal fields.
     {
-        let data = fs.read_file("/uptime")?;
+        let data = fs.read_file(Path::new("/uptime"))?;
         let text = core::str::from_utf8(&data).map_err(|_| KernelError::InternalError)?;
         let line = text.strip_suffix('\n').unwrap_or(text);
         let fields: Vec<&str> = line.split(' ').filter(|s| !s.is_empty()).collect();
@@ -14847,7 +14867,7 @@ pub fn self_test() -> KernelResult<()> {
     // "<load1> <load5> <load15> <runnable>/<total> <last_pid>" format,
     // with the three loads as <int>.<2-digit-frac> fixed-point figures.
     {
-        let data = fs.read_file("/loadavg")?;
+        let data = fs.read_file(Path::new("/loadavg"))?;
         let text = core::str::from_utf8(&data).map_err(|_| KernelError::InternalError)?;
         let line = text.strip_suffix('\n').unwrap_or(text);
         let fields: Vec<&str> = line.split(' ').filter(|s| !s.is_empty()).collect();
@@ -14899,7 +14919,7 @@ pub fn self_test() -> KernelResult<()> {
     // "Node 0, zone Normal <c0> <c1> ... <c10>" with no trailing comment block.
     // Verify the prefix and that every per-order column parses as an integer.
     {
-        let data = fs.read_file("/buddyinfo")?;
+        let data = fs.read_file(Path::new("/buddyinfo"))?;
         let text = core::str::from_utf8(&data).map_err(|_| KernelError::InternalError)?;
         let line = text.lines().next().unwrap_or("");
         if !line.starts_with("Node 0, zone") {
@@ -14971,7 +14991,7 @@ pub fn self_test() -> KernelResult<()> {
 
         // 2. stat: /proc/sys and an interior dir are directories.
         for d in ["/sys", "/sys/kernel", "/sys/kernel/random", "/sys/vm", "/sys/fs"] {
-            if fs.stat(d)?.entry_type != EntryType::Directory {
+            if fs.stat(Path::new(d))?.entry_type != EntryType::Directory {
                 serial_println!("[procfs]   FAIL: stat {} not a directory", d);
                 return Err(KernelError::InternalError);
             }
@@ -14979,7 +14999,7 @@ pub fn self_test() -> KernelResult<()> {
 
         // 3. readdir /proc/sys lists exactly the two interior dirs (no files
         //    sit directly at the root) — order: dirs before files.
-        let root = fs.readdir("/sys")?;
+        let root = fs.readdir(Path::new("/sys"))?;
         for d in ["kernel", "vm", "fs"] {
             if !root.iter().any(|e| e.name == d && e.entry_type == EntryType::Directory) {
                 serial_println!("[procfs]   FAIL: /sys missing dir {}", d);
@@ -14992,7 +15012,7 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         // 4. readdir /proc/sys/kernel: the `random` subdir + the six files.
-        let kern = fs.readdir("/sys/kernel")?;
+        let kern = fs.readdir(Path::new("/sys/kernel"))?;
         if !kern.iter().any(|e| e.name == "random" && e.entry_type == EntryType::Directory) {
             serial_println!("[procfs]   FAIL: /sys/kernel missing `random` subdir");
             return Err(KernelError::InternalError);
@@ -15005,24 +15025,24 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         // 5. Values: uname-surface consistency + parseable ceilings.
-        let osrelease = fs.read_file("/sys/kernel/osrelease")?;
+        let osrelease = fs.read_file(Path::new("/sys/kernel/osrelease"))?;
         if core::str::from_utf8(&osrelease).ok() != Some("6.6.0-slateos\n") {
             serial_println!("[procfs]   FAIL: osrelease = {:?}", osrelease);
             return Err(KernelError::InternalError);
         }
-        let ostype = fs.read_file("/sys/kernel/ostype")?;
+        let ostype = fs.read_file(Path::new("/sys/kernel/ostype"))?;
         if core::str::from_utf8(&ostype).ok() != Some("Linux\n") {
             serial_println!("[procfs]   FAIL: ostype != \"Linux\"");
             return Err(KernelError::InternalError);
         }
-        let nr_open = core::str::from_utf8(&fs.read_file("/sys/fs/nr_open")?)
+        let nr_open = core::str::from_utf8(&fs.read_file(Path::new("/sys/fs/nr_open"))?)
             .unwrap_or("").trim().parse::<usize>().ok();
         if nr_open != Some(crate::proc::linux_fd::MAX_FDS) {
             serial_println!("[procfs]   FAIL: fs/nr_open = {:?}, want {}",
                 nr_open, crate::proc::linux_fd::MAX_FDS);
             return Err(KernelError::InternalError);
         }
-        let pid_max = core::str::from_utf8(&fs.read_file("/sys/kernel/pid_max")?)
+        let pid_max = core::str::from_utf8(&fs.read_file(Path::new("/sys/kernel/pid_max"))?)
             .unwrap_or("").trim().parse::<usize>().ok();
         if pid_max != Some(crate::pidns::MAX_PIDS_PER_NS) {
             serial_println!("[procfs]   FAIL: kernel/pid_max = {:?}, want {}",
@@ -15036,7 +15056,7 @@ pub fn self_test() -> KernelResult<()> {
         //     reporting overcommit_memory=0 is honest — Linux programs see the
         //     lazy/overcommit allocation idiom they expect. overcommit_ratio /
         //     overcommit_kbytes are deliberately absent (no commit accounting).
-        let vm = fs.readdir("/sys/vm")?;
+        let vm = fs.readdir(Path::new("/sys/vm"))?;
         if !vm.iter().any(|e| e.name == "overcommit_memory"
             && e.entry_type == EntryType::File)
         {
@@ -15044,7 +15064,7 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         let overcommit = core::str::from_utf8(
-            &fs.read_file("/sys/vm/overcommit_memory")?)
+            &fs.read_file(Path::new("/sys/vm/overcommit_memory"))?)
             .unwrap_or("").trim().parse::<u32>().ok();
         if overcommit != Some(0) {
             serial_println!("[procfs]   FAIL: vm/overcommit_memory = {:?}, want 0",
@@ -15053,8 +15073,8 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         // 6. boot_id is stable across reads; uuid is well-formed v4.
-        let b1 = fs.read_file("/sys/kernel/random/boot_id")?;
-        let b2 = fs.read_file("/sys/kernel/random/boot_id")?;
+        let b1 = fs.read_file(Path::new("/sys/kernel/random/boot_id"))?;
+        let b2 = fs.read_file(Path::new("/sys/kernel/random/boot_id"))?;
         if b1 != b2 || b1.len() != 37 {
             serial_println!("[procfs]   FAIL: boot_id unstable or wrong length");
             return Err(KernelError::InternalError);
@@ -15063,20 +15083,20 @@ pub fn self_test() -> KernelResult<()> {
         // 6b. CSPRNG entropy surface: poolsize is the fixed 256-bit ceiling;
         //     entropy_avail is 0 or 256 and never exceeds poolsize.  Also check
         //     /sys/kernel/random lists all four files.
-        let rnd = fs.readdir("/sys/kernel/random")?;
+        let rnd = fs.readdir(Path::new("/sys/kernel/random"))?;
         for f in ["uuid", "boot_id", "poolsize", "entropy_avail"] {
             if !rnd.iter().any(|e| e.name == f && e.entry_type == EntryType::File) {
                 serial_println!("[procfs]   FAIL: /sys/kernel/random missing file {}", f);
                 return Err(KernelError::InternalError);
             }
         }
-        let poolsize = core::str::from_utf8(&fs.read_file("/sys/kernel/random/poolsize")?)
+        let poolsize = core::str::from_utf8(&fs.read_file(Path::new("/sys/kernel/random/poolsize"))?)
             .unwrap_or("").trim().parse::<u32>().ok();
         if poolsize != Some(256) {
             serial_println!("[procfs]   FAIL: random/poolsize = {:?}, want 256", poolsize);
             return Err(KernelError::InternalError);
         }
-        let entropy = core::str::from_utf8(&fs.read_file("/sys/kernel/random/entropy_avail")?)
+        let entropy = core::str::from_utf8(&fs.read_file(Path::new("/sys/kernel/random/entropy_avail"))?)
             .unwrap_or("").trim().parse::<u32>().ok();
         match entropy {
             Some(e) if e == 0 || e == 256 => {}
@@ -15087,11 +15107,11 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         // 7. Directory/file kind enforcement.
-        if fs.read_file("/sys/kernel") != Err(KernelError::IsADirectory) {
+        if fs.read_file(Path::new("/sys/kernel")) != Err(KernelError::IsADirectory) {
             serial_println!("[procfs]   FAIL: read_file(/sys/kernel) not IsADirectory");
             return Err(KernelError::InternalError);
         }
-        if !matches!(fs.readdir("/sys/kernel/osrelease"), Err(KernelError::NotADirectory)) {
+        if !matches!(fs.readdir(Path::new("/sys/kernel/osrelease")), Err(KernelError::NotADirectory)) {
             serial_println!("[procfs]   FAIL: readdir(/sys/kernel/osrelease) not NotADirectory");
             return Err(KernelError::InternalError);
         }

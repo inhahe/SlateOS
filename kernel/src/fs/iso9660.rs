@@ -37,6 +37,7 @@ use alloc::vec::Vec;
 use crate::blkdev::SECTOR_SIZE;
 use crate::error::{KernelError, KernelResult};
 use crate::fs::vfs::{DirEntry, EntryType, FileMeta, FileSystem, FsInfo};
+use crate::fs::path::{Path, PathBuf};
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -345,12 +346,27 @@ impl Iso9660Fs {
     }
 }
 
+/// Decode a path for the ISO 9660 driver.
+///
+/// Paths are byte strings in general (see [`super::path`]), but this driver's
+/// whole internal namespace is already `String`: ISO 9660 level-1/2 names are
+/// a strict ASCII subset, and Joliet names are UCS-2 that the parser has
+/// already transcoded to UTF-8. So a path that does not decode cannot match
+/// anything on the disc, and `NotFound` is the honest answer. (Rock Ridge `NM`
+/// entries can in principle carry arbitrary bytes; that the parser turns them
+/// into `String` is a pre-existing limitation tracked in `known-issues.md`,
+/// not something this decode introduces.)
+fn as_str(path: &Path) -> KernelResult<&str> {
+    path.to_str().ok_or(KernelError::NotFound)
+}
+
 impl FileSystem for Iso9660Fs {
     fn fs_type(&self) -> &'static str {
         "iso9660"
     }
 
-    fn readdir(&mut self, path: &str) -> KernelResult<Vec<DirEntry>> {
+    fn readdir(&mut self, path: &Path) -> KernelResult<Vec<DirEntry>> {
+        let path = as_str(path)?;
         let (dir_lba, dir_size) = self.resolve_dir(path)?;
         let dir_data = self.read_extent(dir_lba, dir_size)?;
         let records = parse_directory_records(
@@ -379,7 +395,8 @@ impl FileSystem for Iso9660Fs {
         Ok(entries)
     }
 
-    fn read_file(&mut self, path: &str) -> KernelResult<Vec<u8>> {
+    fn read_file(&mut self, path: &Path) -> KernelResult<Vec<u8>> {
+        let path = as_str(path)?;
         let resolved = self.resolve_path_full(path)?;
         if resolved.entry_type() == EntryType::Directory {
             return Err(KernelError::IsADirectory);
@@ -398,7 +415,8 @@ impl FileSystem for Iso9660Fs {
         Ok(data)
     }
 
-    fn stat(&mut self, path: &str) -> KernelResult<DirEntry> {
+    fn stat(&mut self, path: &Path) -> KernelResult<DirEntry> {
+        let path = as_str(path)?;
         let resolved = self.resolve_path_full(path)?;
 
         let name = path.rsplit('/').next().unwrap_or(path);
@@ -423,7 +441,8 @@ impl FileSystem for Iso9660Fs {
         })
     }
 
-    fn metadata(&mut self, path: &str) -> KernelResult<FileMeta> {
+    fn metadata(&mut self, path: &Path) -> KernelResult<FileMeta> {
+        let path = as_str(path)?;
         let resolved = self.resolve_path_full(path)?;
 
         let entry_type = resolved.entry_type();
@@ -483,15 +502,16 @@ impl FileSystem for Iso9660Fs {
         })
     }
 
-    fn readlink(&mut self, path: &str) -> KernelResult<String> {
-        let resolved = self.resolve_path_full(path)?;
+    fn readlink(&mut self, path: &Path) -> KernelResult<PathBuf> {
+        let resolved = self.resolve_path_full(as_str(path)?)?;
         resolved
             .rr
             .symlink_target
+            .map(PathBuf::from)
             .ok_or(KernelError::InvalidArgument)
     }
 
-    fn lstat(&mut self, path: &str) -> KernelResult<DirEntry> {
+    fn lstat(&mut self, path: &Path) -> KernelResult<DirEntry> {
         // For ISO 9660, lstat == stat (we don't follow symlinks).
         self.stat(path)
     }

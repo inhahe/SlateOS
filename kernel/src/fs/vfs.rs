@@ -32,6 +32,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::Mutex;
 
 use crate::error::{KernelError, KernelResult};
+// Paths are byte strings, not UTF-8. See `super::path` for why.
+pub use super::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Directory entry
@@ -53,8 +55,18 @@ pub enum EntryType {
 /// A single directory entry returned by readdir.
 #[derive(Debug, Clone)]
 pub struct DirEntry {
-    /// Entry name (UTF-8, no path separators).
-    pub name: String,
+    /// Entry name: a single path component, so it contains neither a
+    /// separator nor a NUL.
+    ///
+    /// A [`PathBuf`] and not a `String` because a directory entry name is
+    /// whatever bytes the filesystem stored, and forcing UTF-8 on it is not a
+    /// validation — it is data loss. ext4 used to *skip* entries whose names
+    /// did not decode, which made such a file invisible to `readdir` and left
+    /// its parent directory permanently un-`rmdir`-able (the entry is still
+    /// there on disk, so the directory is never empty, but nothing can name it
+    /// to delete it). Use [`Path::display`] to log one and
+    /// [`Path::as_bytes`] for anything else.
+    pub name: PathBuf,
     /// Entry type.
     pub entry_type: EntryType,
     /// File size in bytes (0 for directories).
@@ -383,7 +395,7 @@ pub trait FileSystem: Send {
     ///
     /// `path` is `"/"` for the root directory, `"/subdir"` for a
     /// subdirectory, etc.
-    fn readdir(&mut self, path: &str) -> KernelResult<Vec<DirEntry>>;
+    fn readdir(&mut self, path: &Path) -> KernelResult<Vec<DirEntry>>;
 
     /// List entries in a directory with pagination.
     ///
@@ -396,7 +408,7 @@ pub trait FileSystem: Send {
     /// override for efficiency.
     fn readdir_at(
         &mut self,
-        path: &str,
+        path: &Path,
         offset: usize,
         count: usize,
     ) -> KernelResult<(Vec<DirEntry>, usize)> {
@@ -413,18 +425,18 @@ pub trait FileSystem: Send {
     /// (e.g., `"/HELLO.TXT"`).
     ///
     /// Returns the file contents as a byte vector.
-    fn read_file(&mut self, path: &str) -> KernelResult<Vec<u8>>;
+    fn read_file(&mut self, path: &Path) -> KernelResult<Vec<u8>>;
 
     /// Get metadata for a path (file or directory).
     ///
     /// Returns a [`DirEntry`] with name, type, and size.
-    fn stat(&mut self, path: &str) -> KernelResult<DirEntry>;
+    fn stat(&mut self, path: &Path) -> KernelResult<DirEntry>;
 
     /// Write data to a file, creating it if it doesn't exist.
     ///
     /// If the file exists, its contents are replaced entirely.
     /// Returns `NotSupported` if the filesystem is read-only.
-    fn write_file(&mut self, path: &str, data: &[u8]) -> KernelResult<()> {
+    fn write_file(&mut self, path: &Path, data: &[u8]) -> KernelResult<()> {
         let _ = (path, data);
         Err(KernelError::NotSupported)
     }
@@ -432,7 +444,7 @@ pub trait FileSystem: Send {
     /// Delete a file.
     ///
     /// Returns `NotSupported` if the filesystem is read-only.
-    fn remove(&mut self, path: &str) -> KernelResult<()> {
+    fn remove(&mut self, path: &Path) -> KernelResult<()> {
         let _ = path;
         Err(KernelError::NotSupported)
     }
@@ -440,7 +452,7 @@ pub trait FileSystem: Send {
     /// Create a directory.
     ///
     /// Returns `NotSupported` if the filesystem is read-only.
-    fn mkdir(&mut self, path: &str) -> KernelResult<()> {
+    fn mkdir(&mut self, path: &Path) -> KernelResult<()> {
         let _ = path;
         Err(KernelError::NotSupported)
     }
@@ -448,7 +460,7 @@ pub trait FileSystem: Send {
     /// Remove an empty directory.
     ///
     /// Returns `NotSupported` if the filesystem is read-only.
-    fn rmdir(&mut self, path: &str) -> KernelResult<()> {
+    fn rmdir(&mut self, path: &Path) -> KernelResult<()> {
         let _ = path;
         Err(KernelError::NotSupported)
     }
@@ -458,7 +470,7 @@ pub trait FileSystem: Send {
     /// Default implementation reads the whole file and slices.
     /// Filesystem implementations should override this for efficiency
     /// (e.g., walking the FAT cluster chain to the right offset).
-    fn read_at(&mut self, path: &str, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+    fn read_at(&mut self, path: &Path, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
         let data = self.read_file(path)?;
         let start = (offset as usize).min(data.len());
         let end = (start.saturating_add(len)).min(data.len());
@@ -470,7 +482,7 @@ pub trait FileSystem: Send {
     /// Default implementation reads the whole file, patches the range,
     /// and rewrites.  Filesystem implementations should override for
     /// efficiency.
-    fn write_at(&mut self, path: &str, offset: u64, data: &[u8]) -> KernelResult<()> {
+    fn write_at(&mut self, path: &Path, offset: u64, data: &[u8]) -> KernelResult<()> {
         let mut contents = match self.read_file(path) {
             Ok(c) => c,
             Err(KernelError::NotFound) => Vec::new(),
@@ -503,7 +515,7 @@ pub trait FileSystem: Send {
     /// Default implementation: no-op (reports success without actually
     /// reserving space).  Filesystems with block allocation (ext4, FAT)
     /// should override to actually reserve blocks.
-    fn fallocate(&mut self, path: &str, size: u64) -> KernelResult<()> {
+    fn fallocate(&mut self, path: &Path, size: u64) -> KernelResult<()> {
         let _ = (path, size);
         // Default: pretend we allocated.  The actual write will extend
         // the file when data arrives.
@@ -517,7 +529,7 @@ pub trait FileSystem: Send {
     /// extended with zero bytes.
     ///
     /// Default implementation reads, resizes, and rewrites.
-    fn truncate(&mut self, path: &str, size: u64) -> KernelResult<()> {
+    fn truncate(&mut self, path: &Path, size: u64) -> KernelResult<()> {
         let mut contents = match self.read_file(path) {
             Ok(c) => c,
             Err(KernelError::NotFound) => Vec::new(),
@@ -531,7 +543,7 @@ pub trait FileSystem: Send {
     ///
     /// Both `from` and `to` are paths relative to the filesystem root.
     /// Returns `NotSupported` if the filesystem is read-only.
-    fn rename(&mut self, from: &str, to: &str) -> KernelResult<()> {
+    fn rename(&mut self, from: &Path, to: &Path) -> KernelResult<()> {
         let _ = (from, to);
         Err(KernelError::NotSupported)
     }
@@ -545,7 +557,7 @@ pub trait FileSystem: Send {
     /// locking. Default implementation returns `NotSupported` — the VFS maps
     /// that to `EINVAL` at the syscall boundary, matching how a Linux
     /// filesystem whose `->rename` lacks `RENAME_EXCHANGE` support responds.
-    fn rename_exchange(&mut self, a: &str, b: &str) -> KernelResult<()> {
+    fn rename_exchange(&mut self, a: &Path, b: &Path) -> KernelResult<()> {
         let _ = (a, b);
         Err(KernelError::NotSupported)
     }
@@ -565,7 +577,7 @@ pub trait FileSystem: Send {
     /// Default implementation builds a minimal [`FileMeta`] from `stat()`.
     /// Filesystems that track timestamps, ownership, or xattrs should
     /// override this.
-    fn metadata(&mut self, path: &str) -> KernelResult<FileMeta> {
+    fn metadata(&mut self, path: &Path) -> KernelResult<FileMeta> {
         let entry = self.stat(path)?;
         Ok(FileMeta::minimal(entry.entry_type, entry.size))
     }
@@ -580,7 +592,7 @@ pub trait FileSystem: Send {
     /// `lstat()`.  Filesystems that track timestamps, ownership, or
     /// xattrs should override this (typically mirroring their
     /// `metadata()` override but without symlink resolution).
-    fn lmetadata(&mut self, path: &str) -> KernelResult<FileMeta> {
+    fn lmetadata(&mut self, path: &Path) -> KernelResult<FileMeta> {
         let entry = self.lstat(path)?;
         Ok(FileMeta::minimal(entry.entry_type, entry.size))
     }
@@ -588,7 +600,7 @@ pub trait FileSystem: Send {
     /// Set file attributes (immutable, append-only, etc.).
     ///
     /// Default: not supported.
-    fn set_attributes(&mut self, path: &str, attrs: FileAttr) -> KernelResult<()> {
+    fn set_attributes(&mut self, path: &Path, attrs: FileAttr) -> KernelResult<()> {
         let _ = (path, attrs);
         Err(KernelError::NotSupported)
     }
@@ -596,7 +608,7 @@ pub trait FileSystem: Send {
     /// Set ownership (uid/gid).
     ///
     /// Default: not supported.
-    fn set_owner(&mut self, path: &str, uid: u32, gid: u32) -> KernelResult<()> {
+    fn set_owner(&mut self, path: &Path, uid: u32, gid: u32) -> KernelResult<()> {
         let _ = (path, uid, gid);
         Err(KernelError::NotSupported)
     }
@@ -608,14 +620,14 @@ pub trait FileSystem: Send {
     /// filesystems that have no symlinks (e.g. FAT).  Symlink-capable
     /// filesystems (memfs, ext4) override this to resolve the final
     /// component without following, so the link inode itself is chowned.
-    fn set_owner_no_follow(&mut self, path: &str, uid: u32, gid: u32) -> KernelResult<()> {
+    fn set_owner_no_follow(&mut self, path: &Path, uid: u32, gid: u32) -> KernelResult<()> {
         self.set_owner(path, uid, gid)
     }
 
     /// Set Unix-style permission bits (rwxrwxrwx).
     ///
     /// Default: not supported.
-    fn set_permissions(&mut self, path: &str, permissions: u16) -> KernelResult<()> {
+    fn set_permissions(&mut self, path: &Path, permissions: u16) -> KernelResult<()> {
         let _ = (path, permissions);
         Err(KernelError::NotSupported)
     }
@@ -627,7 +639,7 @@ pub trait FileSystem: Send {
     /// correct for filesystems that have no symlinks (e.g. FAT).  Symlink-
     /// capable filesystems (memfs, ext4) override this to resolve the final
     /// component without following, so the link inode itself is chmod-ed.
-    fn set_permissions_no_follow(&mut self, path: &str, permissions: u16) -> KernelResult<()> {
+    fn set_permissions_no_follow(&mut self, path: &Path, permissions: u16) -> KernelResult<()> {
         self.set_permissions(path, permissions)
     }
 
@@ -637,7 +649,7 @@ pub trait FileSystem: Send {
     /// Default: not supported.
     fn set_times(
         &mut self,
-        path: &str,
+        path: &Path,
         accessed_ns: Timestamp,
         modified_ns: Timestamp,
     ) -> KernelResult<()> {
@@ -653,7 +665,7 @@ pub trait FileSystem: Send {
     /// inode itself.
     fn set_times_no_follow(
         &mut self,
-        path: &str,
+        path: &Path,
         accessed_ns: Timestamp,
         modified_ns: Timestamp,
     ) -> KernelResult<()> {
@@ -663,7 +675,7 @@ pub trait FileSystem: Send {
     /// Get an extended attribute value by key.
     ///
     /// Default: not supported.
-    fn get_xattr(&mut self, path: &str, key: &str) -> KernelResult<Vec<u8>> {
+    fn get_xattr(&mut self, path: &Path, key: &str) -> KernelResult<Vec<u8>> {
         let _ = (path, key);
         Err(KernelError::NotSupported)
     }
@@ -671,7 +683,7 @@ pub trait FileSystem: Send {
     /// Set an extended attribute.
     ///
     /// Default: not supported.
-    fn set_xattr(&mut self, path: &str, key: &str, value: &[u8]) -> KernelResult<()> {
+    fn set_xattr(&mut self, path: &Path, key: &str, value: &[u8]) -> KernelResult<()> {
         let _ = (path, key, value);
         Err(KernelError::NotSupported)
     }
@@ -679,7 +691,7 @@ pub trait FileSystem: Send {
     /// Remove an extended attribute.
     ///
     /// Default: not supported.
-    fn remove_xattr(&mut self, path: &str, key: &str) -> KernelResult<()> {
+    fn remove_xattr(&mut self, path: &Path, key: &str) -> KernelResult<()> {
         let _ = (path, key);
         Err(KernelError::NotSupported)
     }
@@ -687,7 +699,7 @@ pub trait FileSystem: Send {
     /// List all extended attribute keys for a path.
     ///
     /// Default: empty list.
-    fn list_xattrs(&mut self, path: &str) -> KernelResult<Vec<String>> {
+    fn list_xattrs(&mut self, path: &Path) -> KernelResult<Vec<String>> {
         let _ = path;
         Ok(Vec::new())
     }
@@ -699,22 +711,22 @@ pub trait FileSystem: Send {
     // without following. ---
 
     /// No-follow analogue of [`get_xattr`](Self::get_xattr) (`lgetxattr`).
-    fn get_xattr_no_follow(&mut self, path: &str, key: &str) -> KernelResult<Vec<u8>> {
+    fn get_xattr_no_follow(&mut self, path: &Path, key: &str) -> KernelResult<Vec<u8>> {
         self.get_xattr(path, key)
     }
 
     /// No-follow analogue of [`set_xattr`](Self::set_xattr) (`lsetxattr`).
-    fn set_xattr_no_follow(&mut self, path: &str, key: &str, value: &[u8]) -> KernelResult<()> {
+    fn set_xattr_no_follow(&mut self, path: &Path, key: &str, value: &[u8]) -> KernelResult<()> {
         self.set_xattr(path, key, value)
     }
 
     /// No-follow analogue of [`remove_xattr`](Self::remove_xattr) (`lremovexattr`).
-    fn remove_xattr_no_follow(&mut self, path: &str, key: &str) -> KernelResult<()> {
+    fn remove_xattr_no_follow(&mut self, path: &Path, key: &str) -> KernelResult<()> {
         self.remove_xattr(path, key)
     }
 
     /// No-follow analogue of [`list_xattrs`](Self::list_xattrs) (`llistxattr`).
-    fn list_xattrs_no_follow(&mut self, path: &str) -> KernelResult<Vec<String>> {
+    fn list_xattrs_no_follow(&mut self, path: &Path) -> KernelResult<Vec<String>> {
         self.list_xattrs(path)
     }
 
@@ -727,7 +739,7 @@ pub trait FileSystem: Send {
     /// path resolution.
     ///
     /// Default: not supported.
-    fn symlink(&mut self, path: &str, target: &str) -> KernelResult<()> {
+    fn symlink(&mut self, path: &Path, target: &Path) -> KernelResult<()> {
         let _ = (path, target);
         Err(KernelError::NotSupported)
     }
@@ -737,7 +749,7 @@ pub trait FileSystem: Send {
     /// Does NOT follow the symlink — returns the stored target string.
     ///
     /// Default: not supported.
-    fn readlink(&mut self, path: &str) -> KernelResult<String> {
+    fn readlink(&mut self, path: &Path) -> KernelResult<PathBuf> {
         let _ = path;
         Err(KernelError::NotSupported)
     }
@@ -749,7 +761,7 @@ pub trait FileSystem: Send {
     /// path are still followed.
     ///
     /// Default implementation falls back to `stat()`.
-    fn lstat(&mut self, path: &str) -> KernelResult<DirEntry> {
+    fn lstat(&mut self, path: &Path) -> KernelResult<DirEntry> {
         self.stat(path)
     }
 
@@ -808,7 +820,7 @@ pub trait FileSystem: Send {
     /// be on the same filesystem.
     ///
     /// Default: not supported (FAT, memfs, procfs, devfs, ISO9660).
-    fn link(&mut self, existing: &str, new_path: &str) -> KernelResult<()> {
+    fn link(&mut self, existing: &Path, new_path: &Path) -> KernelResult<()> {
         let _ = (existing, new_path);
         Err(KernelError::NotSupported)
     }
@@ -824,7 +836,7 @@ pub trait FileSystem: Send {
     /// they return `NotSupported` regardless) or lack symlinks (FAT), where
     /// the follow/no-follow distinction cannot arise.  ext4 overrides this to
     /// resolve `existing` without following the final component.
-    fn link_no_follow(&mut self, existing: &str, new_path: &str) -> KernelResult<()> {
+    fn link_no_follow(&mut self, existing: &Path, new_path: &Path) -> KernelResult<()> {
         self.link(existing, new_path)
     }
 

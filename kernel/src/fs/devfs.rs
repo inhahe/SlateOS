@@ -38,6 +38,7 @@ use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::vfs::{DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo};
+use crate::fs::path::Path;
 
 // ---------------------------------------------------------------------------
 // Random bytes — delegates to kernel CSPRNG (rng module)
@@ -86,19 +87,33 @@ const DEV_FILES: &[&str] = &[
 // FileSystem trait implementation
 // ---------------------------------------------------------------------------
 
+/// Strip the leading "/" to get the path relative to the devfs root, and
+/// decode.
+///
+/// This is where devfs stops caring about bytes. Paths are byte strings in
+/// general (see [`super::path`]), but devfs's namespace is built entirely by
+/// the kernel out of fixed ASCII names, so a path that is not UTF-8 cannot
+/// name anything that exists and `NotFound` is the honest answer. A lossy
+/// conversion would be strictly worse: it would let a garbage byte alias a
+/// real entry. This is the only decode in the module.
+fn strip_root(path: &Path) -> KernelResult<&str> {
+    let s = path.to_str().ok_or(KernelError::NotFound)?;
+    Ok(s.strip_prefix('/').unwrap_or(s))
+}
+
 impl FileSystem for DevFs {
     fn fs_type(&self) -> &'static str {
         "devfs"
     }
 
-    fn readdir(&mut self, path: &str) -> KernelResult<Vec<DirEntry>> {
-        let rel = path.strip_prefix('/').unwrap_or(path);
+    fn readdir(&mut self, path: &Path) -> KernelResult<Vec<DirEntry>> {
+        let rel = strip_root(path)?;
 
         if rel.is_empty() {
             let entries = DEV_FILES
                 .iter()
                 .map(|name| DirEntry {
-                    name: String::from(*name),
+                    name: PathBuf::from(*name),
                     entry_type: EntryType::File,
                     size: 0, // Special files have no meaningful static size.
                 })
@@ -109,8 +124,8 @@ impl FileSystem for DevFs {
         }
     }
 
-    fn read_file(&mut self, path: &str) -> KernelResult<Vec<u8>> {
-        let rel = path.strip_prefix('/').unwrap_or(path);
+    fn read_file(&mut self, path: &Path) -> KernelResult<Vec<u8>> {
+        let rel = strip_root(path)?;
 
         match rel {
             "" => Err(KernelError::IsADirectory),
@@ -141,8 +156,8 @@ impl FileSystem for DevFs {
         }
     }
 
-    fn read_at(&mut self, path: &str, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
-        let rel = path.strip_prefix('/').unwrap_or(path);
+    fn read_at(&mut self, path: &Path, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+        let rel = strip_root(path)?;
 
         // For streaming devices, offset is ignored — they always produce
         // fresh data.  This is important for file-handle reads that advance
@@ -191,8 +206,8 @@ impl FileSystem for DevFs {
         }
     }
 
-    fn write_file(&mut self, path: &str, data: &[u8]) -> KernelResult<()> {
-        let rel = path.strip_prefix('/').unwrap_or(path);
+    fn write_file(&mut self, path: &Path, data: &[u8]) -> KernelResult<()> {
+        let rel = strip_root(path)?;
 
         match rel {
             "" => Err(KernelError::IsADirectory),
@@ -261,18 +276,18 @@ impl FileSystem for DevFs {
         }
     }
 
-    fn write_at(&mut self, path: &str, _offset: u64, data: &[u8]) -> KernelResult<()> {
+    fn write_at(&mut self, path: &Path, _offset: u64, data: &[u8]) -> KernelResult<()> {
         // For device files, write_at behaves the same as write_file —
         // offset is meaningless for streaming devices.
         self.write_file(path, data)
     }
 
-    fn stat(&mut self, path: &str) -> KernelResult<DirEntry> {
-        let rel = path.strip_prefix('/').unwrap_or(path);
+    fn stat(&mut self, path: &Path) -> KernelResult<DirEntry> {
+        let rel = strip_root(path)?;
 
         if rel.is_empty() {
             return Ok(DirEntry {
-                name: String::from("/"),
+                name: PathBuf::from("/"),
                 entry_type: EntryType::Directory,
                 size: 0,
             });
@@ -280,7 +295,7 @@ impl FileSystem for DevFs {
 
         if DEV_FILES.contains(&rel) {
             Ok(DirEntry {
-                name: String::from(rel),
+                name: PathBuf::from(rel),
                 entry_type: EntryType::File,
                 size: 0,
             })
@@ -289,8 +304,8 @@ impl FileSystem for DevFs {
         }
     }
 
-    fn metadata(&mut self, path: &str) -> KernelResult<FileMeta> {
-        let rel = path.strip_prefix('/').unwrap_or(path);
+    fn metadata(&mut self, path: &Path) -> KernelResult<FileMeta> {
+        let rel = strip_root(path)?;
 
         if rel.is_empty() {
             return Ok(FileMeta {
@@ -369,7 +384,7 @@ pub fn self_test() -> KernelResult<()> {
     let mut fs = DevFs::new();
 
     // Test root readdir.
-    let entries = fs.readdir("/")?;
+    let entries = fs.readdir(Path::new("/"))?;
     if entries.len() != DEV_FILES.len() {
         serial_println!(
             "[devfs]   FAIL: readdir returned {} entries, expected {}",
@@ -381,24 +396,24 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("[devfs]   readdir /: {} entries OK", entries.len());
 
     // Test stat on root.
-    let root_stat = fs.stat("/")?;
+    let root_stat = fs.stat(Path::new("/"))?;
     if root_stat.entry_type != EntryType::Directory {
         serial_println!("[devfs]   FAIL: stat / not a directory");
         return Err(KernelError::InternalError);
     }
 
     // Test /dev/null: read returns empty.
-    let null_data = fs.read_file("/null")?;
+    let null_data = fs.read_file(Path::new("/null"))?;
     if !null_data.is_empty() {
         serial_println!("[devfs]   FAIL: /dev/null read should be empty");
         return Err(KernelError::InternalError);
     }
     // Write to null should succeed.
-    fs.write_file("/null", b"discarded")?;
+    fs.write_file(Path::new("/null"), b"discarded")?;
     serial_println!("[devfs]   null: read=empty, write=discard OK");
 
     // Test /dev/zero: read returns zeros.
-    let zero_data = fs.read_file("/zero")?;
+    let zero_data = fs.read_file(Path::new("/zero"))?;
     if zero_data.is_empty() {
         serial_println!("[devfs]   FAIL: /dev/zero read should not be empty");
         return Err(KernelError::InternalError);
@@ -410,7 +425,7 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("[devfs]   zero: {} zero bytes OK", zero_data.len());
 
     // Test /dev/full: read returns zeros, write fails with DiskFull.
-    let full_data = fs.read_file("/full")?;
+    let full_data = fs.read_file(Path::new("/full"))?;
     if full_data.is_empty() {
         serial_println!("[devfs]   FAIL: /dev/full read should not be empty");
         return Err(KernelError::InternalError);
@@ -419,7 +434,7 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[devfs]   FAIL: /dev/full data contains non-zero bytes");
         return Err(KernelError::InternalError);
     }
-    match fs.write_file("/full", b"should fail") {
+    match fs.write_file(Path::new("/full"), b"should fail") {
         Err(KernelError::DiskFull) => {}
         other => {
             serial_println!("[devfs]   FAIL: /dev/full write should return DiskFull, got {:?}", other);
@@ -429,8 +444,8 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("[devfs]   full: read=zeros, write=DiskFull OK");
 
     // Test /dev/random: read returns data, two reads differ.
-    let rand1 = fs.read_file("/random")?;
-    let rand2 = fs.read_file("/random")?;
+    let rand1 = fs.read_file(Path::new("/random"))?;
+    let rand2 = fs.read_file(Path::new("/random"))?;
     if rand1.is_empty() || rand2.is_empty() {
         serial_println!("[devfs]   FAIL: /dev/random read should not be empty");
         return Err(KernelError::InternalError);
@@ -440,20 +455,20 @@ pub fn self_test() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     // Write to random (entropy contribution) should succeed.
-    fs.write_file("/random", b"entropy seed")?;
+    fs.write_file(Path::new("/random"), b"entropy seed")?;
     serial_println!("[devfs]   random: {} random bytes, entropy write OK", rand1.len());
 
     // Test /dev/urandom: same behavior as /dev/random.
-    let urand = fs.read_file("/urandom")?;
+    let urand = fs.read_file(Path::new("/urandom"))?;
     if urand.is_empty() {
         serial_println!("[devfs]   FAIL: /dev/urandom read should not be empty");
         return Err(KernelError::InternalError);
     }
-    fs.write_file("/urandom", b"more entropy")?;
+    fs.write_file(Path::new("/urandom"), b"more entropy")?;
     serial_println!("[devfs]   urandom: {} random bytes OK", urand.len());
 
     // Test read_at on /dev/zero — should always return zeros regardless of offset.
-    let zero_at = fs.read_at("/zero", 99999, 64)?;
+    let zero_at = fs.read_at(Path::new("/zero"), 99999, 64)?;
     if zero_at.len() != 64 || zero_at.iter().any(|&b| b != 0) {
         serial_println!("[devfs]   FAIL: /dev/zero read_at should return 64 zero bytes");
         return Err(KernelError::InternalError);
@@ -461,11 +476,11 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("[devfs]   read_at /dev/zero: offset-independent OK");
 
     // Test /dev/console: write should succeed (outputs to console).
-    fs.write_file("/console", b"[devfs]   console write test\n")?;
+    fs.write_file(Path::new("/console"), b"[devfs]   console write test\n")?;
     serial_println!("[devfs]   console: write OK");
 
     // Test nonexistent device.
-    if fs.stat("/nonexistent").is_ok() {
+    if fs.stat(Path::new("/nonexistent")).is_ok() {
         serial_println!("[devfs]   FAIL: stat /nonexistent should fail");
         return Err(KernelError::InternalError);
     }

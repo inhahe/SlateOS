@@ -426,12 +426,13 @@ pub fn stats() -> AuditStats {
 pub fn log_event(
     op: AuditOp,
     uid: u32,
-    path: &Path,
+    path: impl AsRef<Path>,
     path2: Option<&Path>,
     success: bool,
     error_code: Option<i32>,
     detail: Option<&str>,
 ) {
+    let path = path.as_ref();
     // Fast path: check atomic flag without locking.
     if !ENABLED.load(Ordering::Relaxed) {
         return;
@@ -493,18 +494,24 @@ pub fn log_event(
 }
 
 /// Convenience: log a successful operation.
-pub fn log_ok(op: AuditOp, uid: u32, path: &Path) {
+pub fn log_ok(op: AuditOp, uid: u32, path: impl AsRef<Path>) {
     log_event(op, uid, path, None, true, None, None);
 }
 
 /// Convenience: log a failed operation.
-pub fn log_err(op: AuditOp, uid: u32, path: &Path, err: KernelError) {
+pub fn log_err(op: AuditOp, uid: u32, path: impl AsRef<Path>, err: KernelError) {
     log_event(op, uid, path, None, false, Some(err.code()), None);
 }
 
 /// Convenience: log a two-path operation (rename, link).
-pub fn log_two_path(op: AuditOp, uid: u32, from: &Path, to: &Path, success: bool) {
-    log_event(op, uid, from, Some(to), success, None, None);
+pub fn log_two_path(
+    op: AuditOp,
+    uid: u32,
+    from: impl AsRef<Path>,
+    to: impl AsRef<Path>,
+    success: bool,
+) {
+    log_event(op, uid, from, Some(to.as_ref()), success, None, None);
 }
 
 // ---------------------------------------------------------------------------
@@ -615,7 +622,7 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         let e = &entries[0];
-        if e.op != AuditOp::Write || e.uid != 1000 || e.path != "/test/file.txt" || !e.success {
+        if e.op != AuditOp::Write || e.uid != 1000 || e.path.as_path() != Path::new("/test/file.txt") || !e.success {
             serial_println!("[audit]   ERROR: event data mismatch");
             remove_rule(rule_id);
             return Err(KernelError::InternalError);
@@ -641,7 +648,7 @@ pub fn self_test() -> KernelResult<()> {
             remove_rule(rule_id);
             return Err(KernelError::InternalError);
         }
-        if entries[0].path != "/important/secret.txt" {
+        if entries[0].path.as_path() != Path::new("/important/secret.txt") {
             serial_println!("[audit]   ERROR: wrong path logged");
             remove_rule(rule_id);
             return Err(KernelError::InternalError);
@@ -736,7 +743,7 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         let e = &entries[0];
-        if e.path2.as_deref() != Some("/new/path") {
+        if e.path2.as_deref() != Some(Path::new("/new/path")) {
             serial_println!("[audit]   ERROR: path2 not recorded");
             remove_rule(rule_id);
             return Err(KernelError::InternalError);

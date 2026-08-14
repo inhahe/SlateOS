@@ -31,6 +31,7 @@
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 use diffcore::{
     ConflictChoice, DiskChange, FileSync, MergeOutcome, MergeReview, ThreeWayMerge,
@@ -92,14 +93,43 @@ const TOOLBAR_HEIGHT: f32 = 36.0;
 const TAB_BAR_HEIGHT: f32 = 32.0;
 /// Height of the status bar in pixels.
 const STATUS_BAR_HEIGHT: f32 = 24.0;
+/// Font size of the status bar at the bottom of the window.
+const STATUS_FONT_SIZE: f32 = 11.0;
+/// Font size of toolbar buttons and document tabs.
+const TOOLBAR_FONT_SIZE: f32 = 12.0;
+/// Font size of the compact buttons in the find/replace panel.
+const SMALL_BUTTON_FONT_SIZE: f32 = 11.0;
 /// Width of the table of contents sidebar.
 const TOC_SIDEBAR_WIDTH: f32 = 200.0;
 /// Padding inside the editor area.
 const EDITOR_PADDING: f32 = 8.0;
 /// Padding inside the preview area.
 const PREVIEW_PADDING: f32 = 16.0;
-/// Approximate characters per pixel for the editor font.
-const CHAR_WIDTH: f32 = 8.4;
+/// Width of one cell of the source pane's character grid.
+///
+/// The source pane is a code view: it is laid out on columns, so it keeps the
+/// grid. But the cell has to come from the face — this was a hardcoded 8.4,
+/// which matched the built-in face at 14 px and nothing else, so with any
+/// other face the cursor, the selection band and the find highlights all
+/// drifted away from the text they mark.
+///
+/// The *preview* pane is prose, not a grid, and measures each run instead.
+fn char_width() -> f32 {
+    text::digit_advance(EDITOR_FONT_SIZE, FontWeightHint::Regular)
+}
+
+/// x of byte offset `col` within `line`, given the pane's left edge `text_x`.
+///
+/// The document stores cursor and selection positions as byte offsets on
+/// character boundaries, which is the right model for a text buffer — but the
+/// grid counts *cells*, and a multi-byte character occupies one cell, not two
+/// or three. Multiplying the byte offset by the cell width put the caret
+/// several columns right of the character it precedes on any line holding
+/// non-ASCII text, and stretched the selection band with it.
+fn col_x(line: &str, col: usize, text_x: f32) -> f32 {
+    let prefix = line.get(..col.min(line.len())).unwrap_or(line);
+    text_x + prefix.chars().count() as f32 * char_width()
+}
 /// Minimum width for the find/replace panel.
 const FIND_PANEL_HEIGHT: f32 = 64.0;
 /// Maximum number of undo steps.
@@ -2706,6 +2736,7 @@ pub fn render_editor(
         }
 
         let line_y = y + (i as f32) * LINE_HEIGHT;
+        let line = &doc.lines[line_num];
 
         // Current line highlight.
         if line_num == doc.cursor_line {
@@ -2734,8 +2765,8 @@ pub fn render_editor(
         // Highlight find matches on this line.
         for (match_line, match_start, match_end) in &find_state.matches {
             if *match_line == line_num {
-                let match_x = text_x + (*match_start as f32) * CHAR_WIDTH;
-                let match_w = ((*match_end - *match_start) as f32) * CHAR_WIDTH;
+                let match_x = col_x(line, *match_start, text_x);
+                let match_w = col_x(line, *match_end, text_x) - match_x;
                 let is_current = find_state
                     .current_match_info()
                     .map(|(l, s, _)| l == line_num && s == *match_start)
@@ -2764,7 +2795,12 @@ pub fn render_editor(
             OVERLAY0
         };
         cmds.push(RenderCommand::Text {
-            x: x + GUTTER_WIDTH - EDITOR_PADDING - (line_num_text.len() as f32) * 7.0,
+            x: text::right_x(
+                &line_num_text,
+                x + GUTTER_WIDTH - EDITOR_PADDING,
+                LINE_NUMBER_FONT_SIZE,
+                FontWeightHint::Regular,
+            ),
             y: line_y + 3.0,
             text: line_num_text,
             font_size: LINE_NUMBER_FONT_SIZE,
@@ -2774,7 +2810,6 @@ pub fn render_editor(
         });
 
         // Syntax-highlighted line content.
-        let line = &doc.lines[line_num];
         if !line.is_empty() {
             let spans = if is_in_code_block(line_num) {
                 // Inside code block: use code color for everything.
@@ -2794,7 +2829,7 @@ pub fn render_editor(
                 }
                 let end = span.end.min(line.len());
                 let span_text = &line[span.start..end];
-                let span_x = text_x + (span.start as f32) * CHAR_WIDTH;
+                let span_x = col_x(line, span.start, text_x);
                 cmds.push(RenderCommand::Text {
                     x: span_x,
                     y: line_y + 3.0,
@@ -2809,8 +2844,7 @@ pub fn render_editor(
 
         // Cursor.
         if line_num == doc.cursor_line {
-            let cursor_x =
-                text_x + (doc.cursor_col.min(line.len()) as f32) * CHAR_WIDTH;
+            let cursor_x = col_x(line, doc.cursor_col, text_x);
             cmds.push(RenderCommand::FillRect {
                 x: cursor_x,
                 y: line_y,
@@ -2840,8 +2874,8 @@ pub fn render_editor(
                 } else {
                     line.len()
                 };
-                let sel_x = text_x + (start_col as f32) * CHAR_WIDTH;
-                let sel_w = ((end_col - start_col) as f32) * CHAR_WIDTH;
+                let sel_x = col_x(line, start_col, text_x);
+                let sel_w = col_x(line, end_col, text_x) - sel_x;
                 cmds.push(RenderCommand::FillRect {
                     x: sel_x,
                     y: line_y,
@@ -3274,25 +3308,35 @@ fn render_inlines_preview(
         return;
     }
 
-    // For simplicity, render the full inline content as segments.
+    // Runs of a paragraph sit side by side, so each one has to advance the pen
+    // by its own width — measured in the size and weight it is actually drawn
+    // in. Bold `code` at 13 px is not the same width as the regular 14 px text
+    // beside it, and neither is a byte count.
     let mut offset_x = 0.0;
     for segment in &text {
-        if ctx.is_visible(font_size + 4.0) {
+        let seg_size = segment.font_size.unwrap_or(font_size);
+        let seg_weight = segment.weight.unwrap_or(weight);
+        let seg_width = text::measure(&segment.text, seg_size, seg_weight);
+
+        // Wrap *before* drawing. Deciding on the previous run's overflow left
+        // this one already painted past the right edge of the pane.
+        if offset_x > 0.0 && offset_x + seg_width > ctx.width {
+            offset_x = 0.0;
+            ctx.y += LINE_HEIGHT;
+        }
+
+        if ctx.is_visible(seg_size + 4.0) {
             ctx.cmds.push(RenderCommand::Text {
                 x: ctx.x + offset_x,
                 y: ctx.render_y(),
                 text: segment.text.clone(),
-                font_size: segment.font_size.unwrap_or(font_size),
+                font_size: seg_size,
                 color: segment.color.unwrap_or(color),
-                font_weight: segment.weight.unwrap_or(weight),
+                font_weight: seg_weight,
                 max_width: Some(ctx.width - offset_x),
             });
         }
-        offset_x += segment.text.len() as f32 * CHAR_WIDTH;
-        if offset_x > ctx.width {
-            offset_x = 0.0;
-            ctx.y += LINE_HEIGHT;
-        }
+        offset_x += seg_width;
     }
     ctx.y += LINE_HEIGHT;
 }
@@ -3633,7 +3677,7 @@ pub fn render_toolbar(
             continue;
         }
 
-        let btn_width = (button.label.len() as f32) * 8.0 + 16.0;
+        let btn_width = text::width(&button.label, TOOLBAR_FONT_SIZE) + 16.0;
 
         // Button background.
         cmds.push(RenderCommand::FillRect {
@@ -3650,7 +3694,7 @@ pub fn render_toolbar(
             x: btn_x + 8.0,
             y: btn_y + 5.0,
             text: button.label.clone(),
-            font_size: 12.0,
+            font_size: TOOLBAR_FONT_SIZE,
             color: TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(btn_width - 16.0),
@@ -3697,8 +3741,16 @@ pub fn render_tab_bar(
         } else {
             doc.name.clone()
         };
-        let tab_width = (label.len() as f32) * 7.5 + 24.0;
-        let tab_width = tab_width.clamp(80.0, 200.0);
+        // The active tab is drawn bold, so it has to be *measured* bold —
+        // sizing every tab as if it were regular made the active one the one
+        // that overflowed.
+        let label_weight = if is_active {
+            FontWeightHint::Bold
+        } else {
+            FontWeightHint::Regular
+        };
+        let tab_width = (text::measure(&label, TOOLBAR_FONT_SIZE, label_weight) + 24.0)
+            .clamp(80.0, 200.0);
 
         let bg_color = if is_active { BASE } else { MANTLE };
         let text_color = if is_active { TEXT } else { SUBTEXT0 };
@@ -3735,13 +3787,9 @@ pub fn render_tab_bar(
             x: tab_x + 8.0,
             y: tab_y + 6.0,
             text: label,
-            font_size: 12.0,
+            font_size: TOOLBAR_FONT_SIZE,
             color: text_color,
-            font_weight: if is_active {
-                FontWeightHint::Bold
-            } else {
-                FontWeightHint::Regular
-            },
+            font_weight: label_weight,
             max_width: Some(tab_width - 16.0),
         });
 
@@ -3798,16 +3846,19 @@ pub fn render_status_bar(
     });
 
     // Left side: cursor position.
-    let pos_text = format!(
-        "Ln {}, Col {}",
-        doc.cursor_line + 1,
-        doc.cursor_col + 1
-    );
+    // `cursor_col` is a byte offset; the column the user counts is a
+    // character, so a line with an accent must not jump the reading by one.
+    let cursor_column = doc
+        .lines
+        .get(doc.cursor_line)
+        .and_then(|line| line.get(..doc.cursor_col.min(line.len())))
+        .map_or(doc.cursor_col, |prefix| prefix.chars().count());
+    let pos_text = format!("Ln {}, Col {}", doc.cursor_line + 1, cursor_column + 1);
     cmds.push(RenderCommand::Text {
         x: x + 12.0,
         y: y + 5.0,
         text: pos_text,
-        font_size: 11.0,
+        font_size: STATUS_FONT_SIZE,
         color: SUBTEXT0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -3822,12 +3873,16 @@ pub fn render_status_bar(
         "{} words | {} chars | {} lines | ~{:.0} min read",
         words, chars, lines, reading_mins
     );
-    let stats_width = stats_text.len() as f32 * 6.5;
     cmds.push(RenderCommand::Text {
-        x: x + (width - stats_width) / 2.0,
+        x: text::center_x(
+            &stats_text,
+            x + width / 2.0,
+            STATUS_FONT_SIZE,
+            FontWeightHint::Regular,
+        ),
         y: y + 5.0,
         text: stats_text,
-        font_size: 11.0,
+        font_size: STATUS_FONT_SIZE,
         color: SUBTEXT0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(width * 0.6),
@@ -3844,12 +3899,16 @@ pub fn render_status_bar(
         },
         if doc.modified { "Modified" } else { "Saved" }
     );
-    let right_width = right_items.len() as f32 * 6.5;
     cmds.push(RenderCommand::Text {
-        x: x + width - right_width - 12.0,
+        x: text::right_x(
+            &right_items,
+            x + width - 12.0,
+            STATUS_FONT_SIZE,
+            FontWeightHint::Regular,
+        ),
         y: y + 5.0,
         text: right_items,
-        font_size: 11.0,
+        font_size: STATUS_FONT_SIZE,
         color: SUBTEXT0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -4067,7 +4126,7 @@ pub fn render_find_replace(
     let btn_labels = ["Replace", "Replace All", "Close"];
     let mut bx = btn_x;
     for label in &btn_labels {
-        let bw = (label.len() as f32) * 7.0 + 16.0;
+        let bw = text::width(label, SMALL_BUTTON_FONT_SIZE) + 16.0;
         cmds.push(RenderCommand::FillRect {
             x: bx,
             y: y + 32.0,
@@ -4080,7 +4139,7 @@ pub fn render_find_replace(
             x: bx + 8.0,
             y: y + 36.0,
             text: label.to_string(),
-            font_size: 11.0,
+            font_size: SMALL_BUTTON_FONT_SIZE,
             color: TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(bw - 16.0),
@@ -6897,5 +6956,56 @@ mod tests {
         assert!(!app.check_external_change());
         assert_eq!(app.active_document().full_text(), "second");
         let _ = std::fs::remove_file(&path);
+    }
+    // --- Text measurement ---
+
+    /// The document counts columns in bytes; the grid counts them in cells.
+    /// A multi-byte character is one cell, not two or three — get this wrong
+    /// and the caret sits several columns right of the character it precedes
+    /// on any line holding an accent, and the selection band stretches with it.
+    #[test]
+    fn column_x_counts_cells_not_bytes() {
+        let cell = char_width();
+        // "é" is two bytes, so the byte offset after it is 2 — but it is one
+        // cell, so the caret belongs one cell in.
+        assert!((col_x("éx", 2, 0.0) - cell).abs() < 0.01);
+        assert!((col_x("ax", 1, 0.0) - cell).abs() < 0.01);
+        // Same text, same cell count, whatever the encoding costs.
+        assert!((col_x("ééé", 6, 0.0) - col_x("aaa", 3, 0.0)).abs() < 0.01);
+    }
+
+    /// A byte offset past the end (or off a character boundary, which the
+    /// document should never produce but rendering must survive) must not
+    /// panic — slicing a `str` at a non-boundary is an outright abort.
+    #[test]
+    fn column_x_survives_a_bad_offset() {
+        assert!(col_x("é", 1, 0.0) >= 0.0, "mid-character offset");
+        assert!(col_x("abc", 99, 0.0) >= 0.0, "past the end");
+        assert!((col_x("", 0, 5.0) - 5.0).abs() < f32::EPSILON);
+    }
+
+    /// The active document tab is drawn bold, so it has to be measured bold.
+    /// Sizing every tab as if it were regular made the active one — the only
+    /// tab the user is looking at — the one whose name overflowed.
+    #[test]
+    fn active_tab_is_measured_in_the_weight_it_is_drawn_in() {
+        let name = "a-fairly-long-document-name.md";
+        let bold = text::measure(name, TOOLBAR_FONT_SIZE, FontWeightHint::Bold);
+        let regular = text::measure(name, TOOLBAR_FONT_SIZE, FontWeightHint::Regular);
+        assert!(bold >= regular, "bold is never narrower than regular");
+    }
+
+    /// Toolbar labels have to fit the buttons drawn around them; the button
+    /// reserves 8 px of padding on each side.
+    #[test]
+    fn toolbar_labels_fit_their_buttons() {
+        for label in ["B", "Italic", "Heading 1", "Numbered List"] {
+            let w = text::width(label, TOOLBAR_FONT_SIZE) + 16.0;
+            assert!(
+                text::width(label, TOOLBAR_FONT_SIZE) <= w - 16.0 + 0.01,
+                "{label:?} does not fit its button"
+            );
+            assert!(w > 16.0, "{label:?} produced a zero-width button");
+        }
     }
 }

@@ -44018,6 +44018,51 @@ budgets as multiples of it:
 * `page_alloc_free_owner_ab`: 40 accesses (was 500 cycles). The path performs
   ~16, so 2.5x headroom absorbs variation in how many the optimiser folds.
 
+**The fix failed its own verification boot, in two ways, and both are worth
+recording because both are mistakes the *unit change* made easy to miss.**
+
+```
+memory_access_floor: 100 cycles/guest byte-store (measured=74 nop=1278 store=1352)
+fast_cpu_index: PASS (288 cycles over an empty closure, limit 400 = 4 accesses)
+page_alloc_free_owner_ab: SLOW (17176 cycles/alloc+free = 171 accesses, limit 40)
+```
+
+1. **The calibration was itself vulnerable to the noise it existed to
+   correct for.** It timed *one* store against one empty closure, and the
+   subtraction is only meaningful if the two arms' baselines agree. They did
+   not: `nop=1278` here, while the very next block in the same run measured
+   `nop=448`. A ~200-cycle access simply has no signal above a
+   several-hundred-cycle wander, so `measured=74` was noise and **the clamp
+   became the answer** — which then under-scaled every budget derived from it
+   and manufactured the SLOW below. Fixed by *amplifying*: 64 stores per timed
+   window, divided by 64. The signal scales with N, the wander does not, so it
+   divides away. The loop's own overhead is left inside the measurement
+   deliberately — it can only enlarge the floor and loosen the budgets, and for
+   a check whose whole purpose is to stop crying wolf, false negatives are the
+   safe direction. The clamp stays as a backstop, but if a run ever prints
+   `measured` at or below it, that run's budget verdicts are unreliable rather
+   than findings.
+2. **40 accesses was too tight even against a correct floor.** Honest recount:
+   ~20 architectural accesses per alloc+free (`tag_alloc_owner` = 1 is_enabled
+   + 2 current_owner + 8 set; `untag_free_owner` = 1 + 8). Observed healthy is
+   ~50-57 (11288/218 = 51.7 on one boot, ~57 on the next) — a consistent
+   2.5-3x multiplier, which has a cause rather than being slop:
+   `scripts/boot-test.sh` runs a plain `cargo build`, and the workspace's
+   `[profile.dev]` sets only `panic = "abort"`, so **opt-level is 0 and the
+   benchmarked kernel is unoptimised** (`cargo` prints `Finished dev profile
+   [unoptimized + debuginfo]`). Nothing is inlined, so each of the ~6 calls on
+   this path runs a real prologue/epilogue whose spills and saved registers are
+   memory accesses the source-level count omits. ~3x over the architectural
+   count is what an unoptimised build predicts and what two independent boots
+   measured. Budget raised to **150** ≈ 3x the observed ~50.
+
+   The temptation here was to loosen until it passes, which is the anti-pattern
+   this whole entry is about. What makes 150 legitimate is that the number is
+   derived from a *mechanism* (opt-level 0, non-inlined calls) that predicts the
+   observed multiplier independently, and that the looseness costs no detection
+   power: this is a structural tripwire, not a stopwatch, and every failure it
+   guards against is an order-of-magnitude event, not a percentage.
+
 This keeps the checks doing what they exist for. The failures worth catching —
 an uncached MMIO round-trip, a contended lock, a per-frame loop where a
 `write_bytes` belongs (which scales with `count`) — cost 10-100x a plain

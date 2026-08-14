@@ -149,6 +149,35 @@ pub fn fit(text: &str, max_width: f32, size: f32, weight: FontWeightHint) -> usi
     })
 }
 
+/// The longest *suffix* of `text` that fits in `max_width`, as the byte index
+/// the suffix starts at.
+///
+/// The mirror of [`fit`], for the cases where the end of the string is the part
+/// worth keeping — a filesystem path, where the filename matters and the
+/// leading directories do not, is the usual one. Like [`fit`] it breaks between
+/// characters: an index into the middle of a UTF-8 sequence is not a string
+/// boundary, and slicing there is an abort rather than a cosmetic fault.
+pub fn fit_end(text: &str, max_width: f32, size: f32, weight: FontWeightHint) -> usize {
+    if max_width <= 0.0 {
+        return text.len();
+    }
+    with_font(size, weight, |font| {
+        let mut used = 0.0;
+        for (idx, ch) in text.char_indices().rev() {
+            let Some((_, advance)) = font.glyph(ch) else {
+                continue;
+            };
+            if used + advance > max_width {
+                // `idx` is the character that did not fit, so the suffix that
+                // does starts after it.
+                return idx.saturating_add(ch.len_utf8());
+            }
+            used += advance;
+        }
+        0
+    })
+}
+
 /// `text` truncated to `max_width`, with `ellipsis` appended if it did not fit.
 ///
 /// The ellipsis is measured too, so the result genuinely fits rather than
@@ -172,6 +201,34 @@ pub fn elide(
     let cut = fit(text, room, size, weight);
     let mut out = text[..cut].to_string();
     out.push_str(ellipsis);
+    out
+}
+
+/// `text` truncated from its *start* to `max_width`, with `ellipsis` prepended
+/// if it did not fit.
+///
+/// The mirror of [`elide`], for strings whose tail carries the information. A
+/// path elided the usual way reads `/home/user/projects/very/deep...`, which
+/// tells the reader nothing they wanted; elided from the start it reads
+/// `...deep/notes.txt`, which names the file.
+pub fn elide_start(
+    text: &str,
+    max_width: f32,
+    ellipsis: &str,
+    size: f32,
+    weight: FontWeightHint,
+) -> String {
+    if measure(text, size, weight) <= max_width {
+        return text.to_string();
+    }
+    let room = max_width - measure(ellipsis, size, weight);
+    if room <= 0.0 {
+        // Not even the ellipsis fits, so anything drawn would overflow.
+        return String::new();
+    }
+    let start = fit_end(text, room, size, weight);
+    let mut out = ellipsis.to_string();
+    out.push_str(&text[start..]);
     out
 }
 
@@ -268,6 +325,54 @@ mod tests {
     fn text_that_fits_is_not_elided() {
         let out = elide("short", 1000.0, "...", 16.0, FontWeightHint::Regular);
         assert_eq!(out, "short");
+    }
+
+    #[test]
+    fn start_elided_text_actually_fits() {
+        let path = "/home/user/projects/some/rather/deep/tree/notes.txt";
+        for max in [10.0, 40.0, 80.0, 160.0] {
+            let out = elide_start(path, max, "...", 16.0, FontWeightHint::Regular);
+            assert!(
+                measure(&out, 16.0, FontWeightHint::Regular) <= max,
+                "{out:?} is wider than {max}"
+            );
+        }
+    }
+
+    #[test]
+    fn start_eliding_keeps_the_end() {
+        // The whole point for a path: the filename survives, the leading
+        // directories are what get dropped.
+        let path = "/home/user/projects/some/rather/deep/tree/notes.txt";
+        let out = elide_start(path, 160.0, "...", 16.0, FontWeightHint::Regular);
+        assert!(out.starts_with("..."), "{out:?} should be marked as cut");
+        assert!(out.ends_with("notes.txt"), "{out:?} lost the filename");
+    }
+
+    #[test]
+    fn start_eliding_breaks_between_characters() {
+        // A byte index into the middle of a UTF-8 sequence is not a string
+        // boundary; slicing there aborts rather than looking wrong, so this is
+        // a crash test, not a layout one.
+        let path = "/home/user/projets/déjà-vu/résumé-final.txt";
+        for max in [4.0, 9.0, 17.0, 33.0, 65.0, 129.0] {
+            let out = elide_start(path, max, "…", 16.0, FontWeightHint::Regular);
+            assert!(measure(&out, 16.0, FontWeightHint::Regular) <= max, "{out:?} > {max}");
+        }
+    }
+
+    #[test]
+    fn fit_end_is_the_mirror_of_fit() {
+        let s = "abcdef";
+        let w = measure("abc", 16.0, FontWeightHint::Regular);
+        // Room for exactly three characters, taken from the right.
+        assert_eq!(&s[fit_end(s, w, 16.0, FontWeightHint::Regular)..], "def");
+        assert_eq!(fit_end(s, 1e9, 16.0, FontWeightHint::Regular), 0, "all of it fits");
+        assert_eq!(
+            fit_end(s, -5.0, 16.0, FontWeightHint::Regular),
+            s.len(),
+            "no room means an empty suffix"
+        );
     }
 
     #[test]

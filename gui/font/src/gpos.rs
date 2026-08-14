@@ -40,7 +40,7 @@
 use alloc::vec::Vec;
 
 use crate::gsub::SubGlyph;
-use crate::mark::attachment;
+use crate::mark::{attachment, lig_attachment};
 use crate::otl::{
     ByScript, Lookup, binary_search, coverage_index, glyph_class, value_size,
 };
@@ -56,6 +56,9 @@ const PAIR_POS: u16 = 2;
 const CURSIVE_POS: u16 = 3;
 /// Mark-to-base attachment.
 const MARK_BASE_POS: u16 = 4;
+/// Mark-to-ligature attachment: like mark-to-base, but the glyph below offers
+/// one set of attachment points per component it swallowed.
+const MARK_LIG_POS: u16 = 5;
 /// Mark-to-mark attachment.
 const MARK_MARK_POS: u16 = 6;
 /// Extension: a subtable of another type behind a 32-bit offset, so that a
@@ -67,11 +70,12 @@ const EXTENSION_POS: u16 = 9;
 /// The lookup types this module can apply, in the order [`ByScript`] wants
 /// them: as a set, not a sequence — application order comes from the
 /// LookupList, not from here.
-const KINDS: [u16; 5] = [
+const KINDS: [u16; 6] = [
     SINGLE_POS,
     PAIR_POS,
     CURSIVE_POS,
     MARK_BASE_POS,
+    MARK_LIG_POS,
     MARK_MARK_POS,
 ];
 
@@ -319,6 +323,12 @@ impl Positioning {
                 let skip = Skipper::new(data, self.defs, IGNORE_MARKS, 0, u32::MAX);
                 let j = skip.prev(run.glyphs, i)?;
                 attach(data, sub, run.glyphs, i, j, out)
+            }
+            MARK_LIG_POS => {
+                // Same search as mark-to-base, for the same reason.
+                let skip = Skipper::new(data, self.defs, IGNORE_MARKS, 0, u32::MAX);
+                let j = skip.prev(run.glyphs, i)?;
+                attach_to_lig(data, sub, run.glyphs, i, j, out)
             }
             MARK_MARK_POS => {
                 // Here the lookup's flag is kept except for the three "ignore"
@@ -608,6 +618,39 @@ fn attach(
     i.checked_add(1)
 }
 
+/// Type 5: hang the mark at `i` off the *component* of the ligature at `j`
+/// that it belongs to.
+///
+/// Which component that is was decided during substitution, not here: the
+/// ligature and the mark each carry a [`Lig`](crate::gsub::Lig), and the mark
+/// belongs to a component of *this* ligature only when the two ids agree. When
+/// they do not — the mark came from somewhere else, or nothing ligated and the
+/// font is simply using type 5 where type 4 would have done — the component is
+/// left unknown and [`lig_attachment`] falls back to the last one.
+fn attach_to_lig(
+    data: &[u8],
+    sub: usize,
+    glyphs: &[SubGlyph],
+    i: usize,
+    j: usize,
+    out: &mut [Adjust],
+) -> Option<usize> {
+    let mark = *glyphs.get(i)?;
+    let lig = *glyphs.get(j)?;
+    let component = if lig.lig.id != 0 && lig.lig.id == mark.lig.id {
+        mark.lig.comp()
+    } else {
+        0
+    };
+    let (dx, dy) = lig_attachment(data, sub, lig.gid, mark.gid, component)?;
+    let adjust = out.get_mut(i)?;
+    adjust.x_offset = i32::from(dx);
+    adjust.y_offset = i32::from(dy);
+    adjust.kind = Attach::Mark;
+    adjust.chain = delta(j, i);
+    i.checked_add(1)
+}
+
 /// `to - from` as the relative index an attachment chain stores.
 fn delta(to: usize, from: usize) -> i32 {
     let to = i32::try_from(to).unwrap_or(i32::MAX);
@@ -885,6 +928,107 @@ mod tests {
         // Only the first half is a gap between the pair; the second is the
         // second glyph's own width and must not be moved by reordering.
         assert_eq!(out[1].kern, 0);
+    }
+
+    use crate::gsub::Lig;
+
+    /// A MarkLigPos subtable over one mark class: `mark`'s own anchor sits at
+    /// the origin, and the ligature `lig` offers `(xs[n], 0)` over component
+    /// `n + 1`.
+    fn mark_lig_pos(lig: u16, mark: u16, xs: &[i16]) -> Vec<u8> {
+        fn anchor1(x: i16) -> Vec<u8> {
+            let mut out = Vec::new();
+            out.extend_from_slice(&be16(1));
+            out.extend_from_slice(&x.to_be_bytes());
+            out.extend_from_slice(&be16(0));
+            out
+        }
+
+        let mark_cov = coverage1(&[mark]);
+        let lig_cov = coverage1(&[lig]);
+
+        // count, then one (class, anchor offset) record, then the anchor.
+        let mut mark_array = Vec::new();
+        mark_array.extend_from_slice(&be16(1));
+        mark_array.extend_from_slice(&be16(0)); // class 0
+        mark_array.extend_from_slice(&be16(6)); // anchor, past count + record
+        mark_array.extend_from_slice(&anchor1(0));
+
+        // LigatureAttach: componentCount, one anchor offset per component,
+        // then the anchors — all offsets taken from the LigatureAttach.
+        let mut attach = Vec::new();
+        attach.extend_from_slice(&be16(u16::try_from(xs.len()).unwrap()));
+        let mut anchors = Vec::new();
+        let anchor_base = 2 + xs.len() * 2;
+        for x in xs {
+            attach.extend_from_slice(&be16(u16::try_from(anchor_base + anchors.len()).unwrap()));
+            anchors.extend_from_slice(&anchor1(*x));
+        }
+        attach.extend_from_slice(&anchors);
+
+        // LigatureArray: a count and one offset to that table.
+        let mut lig_array = Vec::new();
+        lig_array.extend_from_slice(&be16(1));
+        lig_array.extend_from_slice(&be16(4));
+        lig_array.extend_from_slice(&attach);
+
+        let mark_cov_at = 12;
+        let lig_cov_at = mark_cov_at + mark_cov.len();
+        let mark_array_at = lig_cov_at + lig_cov.len();
+        let lig_array_at = mark_array_at + mark_array.len();
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&be16(1));
+        out.extend_from_slice(&be16(u16::try_from(mark_cov_at).unwrap()));
+        out.extend_from_slice(&be16(u16::try_from(lig_cov_at).unwrap()));
+        out.extend_from_slice(&be16(1)); // one mark class
+        out.extend_from_slice(&be16(u16::try_from(mark_array_at).unwrap()));
+        out.extend_from_slice(&be16(u16::try_from(lig_array_at).unwrap()));
+        out.extend_from_slice(&mark_cov);
+        out.extend_from_slice(&lig_cov);
+        out.extend_from_slice(&mark_array);
+        out.extend_from_slice(&lig_array);
+        out
+    }
+
+    /// Where `attach_to_lig` puts the mark at 1 on the ligature at 0.
+    fn on_component(data: &[u8], run: &[SubGlyph]) -> Option<i32> {
+        let mut out = alloc::vec![Adjust::plain(0); run.len()];
+        attach_to_lig(data, 0, run, 1, 0, &mut out)?;
+        Some(out.get(1)?.x_offset)
+    }
+
+    #[test]
+    fn a_mark_lands_on_the_component_substitution_gave_it() {
+        let data = mark_lig_pos(100, 200, &[200, 800]);
+        let mut run = glyphs(&[100, 200]);
+        run[0].lig = Lig::at(1, 2, 0);
+        run[1].lig = Lig::at(1, 0, 1);
+        assert_eq!(on_component(&data, &run), Some(200));
+        run[1].lig = Lig::at(1, 0, 2);
+        assert_eq!(on_component(&data, &run), Some(800));
+    }
+
+    #[test]
+    fn a_mark_from_another_ligature_falls_back_to_the_last_component() {
+        // The ids disagree, so the mark was never inside *this* ligature and
+        // its component number means nothing here. Using it anyway would place
+        // the mark by a number that belongs to a different glyph.
+        let data = mark_lig_pos(100, 200, &[200, 800]);
+        let mut run = glyphs(&[100, 200]);
+        run[0].lig = Lig::at(1, 2, 0);
+        run[1].lig = Lig::at(2, 0, 1);
+        assert_eq!(on_component(&data, &run), Some(800));
+    }
+
+    #[test]
+    fn a_type_five_lookup_on_a_run_that_never_ligated_still_attaches() {
+        // Some faces write mark-to-base as type 5 with a single-component
+        // ligature array. Nothing here has an id, so the fallback is the only
+        // path — and it has to work, or those faces lose every mark.
+        let data = mark_lig_pos(100, 200, &[350]);
+        let run = glyphs(&[100, 200]);
+        assert_eq!(on_component(&data, &run), Some(350));
     }
 
     #[test]

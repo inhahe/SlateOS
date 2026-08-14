@@ -393,10 +393,16 @@ Roadmap:
   own lookups out of the table. `shape` cuts the string into segments once
   and feeds both passes, and `recharge_kerns` is now gated to the legacy
   `kern` table, since a GPOS pair already carries its own RTL correction.
-  The sweep's `misplaced` bucket went 98 → 85. Next unblocked step is the
-  rest of shaping: no Indic reordering
-  (`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`), no contextual or
-  mark-to-ligature positioning, GPOS 5/7/8
+  The sweep's `misplaced` bucket went 98 → 85. Mark-to-ligature
+  positioning (GPOS 5) done: a mark typed against one half of a ligature
+  must attach to that *component*, and nothing in the run recorded which —
+  so `gsub.rs` now carries HarfBuzz's `lig_props` bookkeeping on every
+  glyph (`Lig`, `stamp_components`, `ligation_allowed`) and `mark.rs`
+  reads the `LigatureArray` off it. With a lam-fatha-alef string added to
+  the sweep, `agree` went 10055 → 10081 over the 56 host faces that ship
+  the lookup type. Next unblocked step is the rest of shaping: no Indic
+  reordering (`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`), no
+  contextual positioning, GPOS 7/8
   (`TD-GPOS-HAS-NO-CONTEXTUAL-OR-MARK-TO-LIGATURE-POSITIONING`), no
   language selection (`TD-FONT-IGNORES-LANGSYS-OVERRIDES`). Vello itself
   waits on `[A]`'s GPU driver.

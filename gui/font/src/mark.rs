@@ -142,32 +142,63 @@ impl MarkPositioning {
 
 }
 
-/// Read one MarkBasePos or MarkMarkPos subtable.
+/// What the mark side of a mark-attachment subtable says, once read.
 ///
-/// The two are the same shape: `posFormat`, the coverage of what is attached
-/// *to*, the coverage of the mark, the mark-class count, then the mark array
-/// and the array of attachment points. Only the names differ (`base` vs
-/// `mark2`), so only one reader is needed.
+/// Types 4, 5 and 6 have the same first twelve bytes — `posFormat`, the
+/// coverage of the mark, the coverage of what it attaches *to*, the mark-class
+/// count, the mark array, the array of attachment points — and differ only in
+/// the shape of that last array. So the mark side is read once, here, and each
+/// type supplies its own way of finding the anchor to attach to.
+struct Marked {
+    /// Coverage of the glyphs a mark may attach to: bases, ligatures, or the
+    /// marks below in a stack.
+    to_coverage: usize,
+    /// How many mark classes the subtable defines, which is also the width of
+    /// a row of the attachment-point array.
+    classes: usize,
+    /// The array of attachment points — `BaseArray`, `LigatureArray` or
+    /// `Mark2Array`. Offsets inside it are relative to it.
+    to_array: usize,
+    /// Which mark class this mark belongs to: the column of the row to read.
+    class: usize,
+    /// Where on the mark the attachment point is meant to land.
+    at: (i16, i16),
+}
+
+impl Marked {
+    /// The mark's displacement, given where the glyph below offers its
+    /// attachment point.
+    fn displacement(&self, to: (i16, i16)) -> Option<(i16, i16)> {
+        Some((to.0.checked_sub(self.at.0)?, to.1.checked_sub(self.at.1)?))
+    }
+
+    /// The offset of the `class` column of row `row` of a dense
+    /// `classes`-wide array of anchor offsets that begins at `from`.
+    fn cell(&self, from: usize, row: usize) -> Option<usize> {
+        from.checked_add(row.checked_mul(self.classes)?.checked_mul(2)?)?
+            .checked_add(self.class.checked_mul(2)?)
+    }
+}
+
+/// Read the mark side of a MarkBasePos, MarkLigPos or MarkMarkPos subtable.
 ///
-/// The result is the mark's displacement from the base glyph's origin: where
-/// the base offers the attachment point, less where on the mark that point is
-/// meant to land.
-pub(crate) fn attachment(data: &[u8], sub: usize, base: u16, mark: u16) -> Option<(i16, i16)> {
+/// `None` when the subtable is a format this cannot read, when the mark is not
+/// covered, or when the mark's class is out of range — all of which mean the
+/// same thing to a caller: this subtable has nothing to say about this mark.
+fn marked(data: &[u8], sub: usize, mark: u16) -> Option<Marked> {
     if u16_at(data, sub)? != 1 {
         return None;
     }
     let mark_coverage = sub.checked_add(usize::from(u16_at(data, sub.checked_add(2)?)?))?;
-    let base_coverage = sub.checked_add(usize::from(u16_at(data, sub.checked_add(4)?)?))?;
+    let to_coverage = sub.checked_add(usize::from(u16_at(data, sub.checked_add(4)?)?))?;
     let classes = usize::from(u16_at(data, sub.checked_add(6)?)?);
     if classes == 0 {
         return None;
     }
     let mark_array = sub.checked_add(usize::from(u16_at(data, sub.checked_add(8)?)?))?;
-    let base_array = sub.checked_add(usize::from(u16_at(data, sub.checked_add(10)?)?))?;
+    let to_array = sub.checked_add(usize::from(u16_at(data, sub.checked_add(10)?)?))?;
 
     let mark_index = usize::from(coverage_index(data, mark_coverage, mark)?);
-    let base_index = usize::from(coverage_index(data, base_coverage, base)?);
-
     // MarkArray: a count, then one (class, anchor) pair per covered mark. The
     // anchor offsets inside it are relative to the array, not the subtable.
     if mark_index >= usize::from(u16_at(data, mark_array)?) {
@@ -180,24 +211,91 @@ pub(crate) fn attachment(data: &[u8], sub: usize, base: u16, mark: u16) -> Optio
     if class >= classes {
         return None;
     }
-    let mark_anchor = anchor(data, mark_array, u16_at(data, record.checked_add(2)?)?)?;
+    Some(Marked {
+        to_coverage,
+        classes,
+        to_array,
+        class,
+        at: anchor(data, mark_array, u16_at(data, record.checked_add(2)?)?)?,
+    })
+}
+
+/// Read one MarkBasePos or MarkMarkPos subtable.
+///
+/// The two are the same shape, differing only in the names (`base` vs
+/// `mark2`), so only one reader is needed. Which one is being read decides
+/// nothing here — it decides only which glyph the caller passes as `base`.
+///
+/// The result is the mark's displacement from the base glyph's origin: where
+/// the base offers the attachment point, less where on the mark that point is
+/// meant to land.
+pub(crate) fn attachment(data: &[u8], sub: usize, base: u16, mark: u16) -> Option<(i16, i16)> {
+    let m = marked(data, sub, mark)?;
+    let base_index = usize::from(coverage_index(data, m.to_coverage, base)?);
 
     // BaseArray / Mark2Array: a count, then a dense row of `classes` anchor
     // offsets per covered glyph. A row entry may be NULL, meaning this glyph
     // offers no attachment point for that class.
-    if base_index >= usize::from(u16_at(data, base_array)?) {
+    if base_index >= usize::from(u16_at(data, m.to_array)?) {
         return None;
     }
-    let record = base_array
-        .checked_add(2)?
-        .checked_add(base_index.checked_mul(classes)?.checked_mul(2)?)?
-        .checked_add(class.checked_mul(2)?)?;
-    let base_anchor = anchor(data, base_array, u16_at(data, record)?)?;
+    let record = m.cell(m.to_array.checked_add(2)?, base_index)?;
+    m.displacement(anchor(data, m.to_array, u16_at(data, record)?)?)
+}
 
-    Some((
-        base_anchor.0.checked_sub(mark_anchor.0)?,
-        base_anchor.1.checked_sub(mark_anchor.1)?,
-    ))
+/// Read one MarkLigPos subtable: where a mark goes on one *component* of a
+/// ligature.
+///
+/// A ligature is one glyph standing for several characters, so it offers not
+/// one row of attachment points but one per component — a mark typed against
+/// the second half of an `ﻻ` has to land over the alef, not over the joined
+/// glyph's single origin.
+///
+/// `component` is which component the mark belongs to, counted from one, as
+/// [`Lig`](crate::gsub::Lig) recorded during substitution; `0` means the
+/// caller could not tell, and the mark goes on the *last* component. That
+/// fallback is HarfBuzz's, and it is the right way round: a mark whose
+/// provenance is unknown is far more often the tail of the word than its head,
+/// and the last component's anchors are the ones a font is most likely to have
+/// filled in for the isolated case.
+pub(crate) fn lig_attachment(
+    data: &[u8],
+    sub: usize,
+    lig: u16,
+    mark: u16,
+    component: u8,
+) -> Option<(i16, i16)> {
+    let m = marked(data, sub, mark)?;
+    let lig_index = usize::from(coverage_index(data, m.to_coverage, lig)?);
+
+    // LigatureArray: a count, then one offset per covered ligature, each to a
+    // LigatureAttach table of its own — unlike a BaseArray, whose rows are all
+    // the same width and so can be stored inline.
+    if lig_index >= usize::from(u16_at(data, m.to_array)?) {
+        return None;
+    }
+    let offset = u16_at(
+        data,
+        m.to_array
+            .checked_add(2)?
+            .checked_add(lig_index.checked_mul(2)?)?,
+    )?;
+    if offset == 0 {
+        return None;
+    }
+    let attach = m.to_array.checked_add(usize::from(offset))?;
+
+    // LigatureAttach: a component count, then that many dense rows of
+    // `classes` anchor offsets. The offsets are relative to the LigatureAttach
+    // table, not to the LigatureArray — which is the one place this format
+    // differs from type 4 in more than naming.
+    let components = usize::from(u16_at(data, attach)?);
+    let row = match usize::from(component) {
+        0 => components.checked_sub(1)?,
+        n => n.min(components).checked_sub(1)?,
+    };
+    let record = m.cell(attach.checked_add(2)?, row)?;
+    m.displacement(anchor(data, attach, u16_at(data, record)?)?)
 }
 
 /// One `Anchor` table at `from + offset`, or `None` for the NULL offset.
@@ -295,6 +393,46 @@ mod tests {
     /// `None` where the font writes a NULL offset.
     type BaseRow = (u16, Vec<Option<Anchor>>);
 
+    /// A MarkArray: a count, then a (class, anchor offset) pair per mark, with
+    /// the anchors laid out after the records and offsets taken from the array.
+    fn mark_array_bytes(marks: &[(u16, u16, Anchor)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&be16(u16::try_from(marks.len()).unwrap()));
+        let mut anchors = Vec::new();
+        let anchor_base = 2 + marks.len() * 4;
+        for (_, class, (x, y)) in marks {
+            out.extend_from_slice(&be16(*class));
+            out.extend_from_slice(&be16(u16::try_from(anchor_base + anchors.len()).unwrap()));
+            anchors.extend_from_slice(&anchor1(*x, *y));
+        }
+        out.extend_from_slice(&anchors);
+        out
+    }
+
+    /// A dense `classes`-wide grid of anchor offsets, taken from `from` bytes
+    /// before the grid — 2 for a BaseArray (past its count), 2 for a
+    /// LigatureAttach (past its component count).
+    fn anchor_grid(classes: u16, rows: &[Vec<Option<Anchor>>], from: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut anchors = Vec::new();
+        let anchor_base = from + rows.len() * usize::from(classes) * 2;
+        for row in rows {
+            for slot in row {
+                match slot {
+                    Some((x, y)) => {
+                        out.extend_from_slice(&be16(
+                            u16::try_from(anchor_base + anchors.len()).unwrap(),
+                        ));
+                        anchors.extend_from_slice(&anchor1(*x, *y));
+                    }
+                    None => out.extend_from_slice(&be16(0)),
+                }
+            }
+        }
+        out.extend_from_slice(&anchors);
+        out
+    }
+
     /// A MarkBasePos/MarkMarkPos subtable over one mark class.
     ///
     /// `marks` is (glyph, class, anchor); `bases` is a row per covered glyph.
@@ -302,39 +440,13 @@ mod tests {
         let mark_glyphs: Vec<u16> = marks.iter().map(|m| m.0).collect();
         let base_glyphs: Vec<u16> = bases.iter().map(|b| b.0).collect();
 
-        // MarkArray, self-relative anchors after the records.
-        let mut mark_array = Vec::new();
-        mark_array.extend_from_slice(&be16(u16::try_from(marks.len()).unwrap()));
-        let mut mark_anchors = Vec::new();
-        let mark_anchor_base = 2 + marks.len() * 4;
-        for (_, class, (x, y)) in marks {
-            mark_array.extend_from_slice(&be16(*class));
-            mark_array
-                .extend_from_slice(&be16(u16::try_from(mark_anchor_base + mark_anchors.len())
-                    .unwrap()));
-            mark_anchors.extend_from_slice(&anchor1(*x, *y));
-        }
-        mark_array.extend_from_slice(&mark_anchors);
+        let mark_array = mark_array_bytes(marks);
 
-        // BaseArray, same idea with a dense row per glyph.
+        // BaseArray: a count, then one dense row per covered glyph.
+        let rows: Vec<Vec<Option<Anchor>>> = bases.iter().map(|b| b.1.clone()).collect();
         let mut base_array = Vec::new();
         base_array.extend_from_slice(&be16(u16::try_from(bases.len()).unwrap()));
-        let mut base_anchors = Vec::new();
-        let base_anchor_base = 2 + bases.len() * usize::from(classes) * 2;
-        for (_, row) in bases {
-            for slot in row {
-                match slot {
-                    Some((x, y)) => {
-                        base_array.extend_from_slice(&be16(
-                            u16::try_from(base_anchor_base + base_anchors.len()).unwrap(),
-                        ));
-                        base_anchors.extend_from_slice(&anchor1(*x, *y));
-                    }
-                    None => base_array.extend_from_slice(&be16(0)),
-                }
-            }
-        }
-        base_array.extend_from_slice(&base_anchors);
+        base_array.extend_from_slice(&anchor_grid(classes, &rows, 2));
 
         let mark_cov = coverage1(&mark_glyphs);
         let base_cov = coverage1(&base_glyphs);
@@ -357,6 +469,138 @@ mod tests {
         out.extend_from_slice(&mark_array);
         out.extend_from_slice(&base_array);
         out
+    }
+
+    /// One covered ligature: the glyph, and a row of anchors per component.
+    type LigRows = (u16, Vec<Vec<Option<Anchor>>>);
+
+    /// A MarkLigPos subtable.
+    ///
+    /// Identical to [`mark_subtable`] down to the last offset, except that the
+    /// LigatureArray holds *offsets* to per-ligature tables rather than one
+    /// grid — because ligatures differ in how many components they have — and
+    /// the anchor offsets inside those are taken from the LigatureAttach.
+    fn lig_subtable(classes: u16, marks: &[(u16, u16, Anchor)], ligs: &[LigRows]) -> Vec<u8> {
+        let mark_glyphs: Vec<u16> = marks.iter().map(|m| m.0).collect();
+        let lig_glyphs: Vec<u16> = ligs.iter().map(|l| l.0).collect();
+
+        let mark_array = mark_array_bytes(marks);
+
+        let mut lig_array = Vec::new();
+        lig_array.extend_from_slice(&be16(u16::try_from(ligs.len()).unwrap()));
+        let mut attachments = Vec::new();
+        let attach_base = 2 + ligs.len() * 2;
+        for (_, rows) in ligs {
+            lig_array
+                .extend_from_slice(&be16(u16::try_from(attach_base + attachments.len()).unwrap()));
+            attachments.extend_from_slice(&be16(u16::try_from(rows.len()).unwrap()));
+            attachments.extend_from_slice(&anchor_grid(classes, rows, 2));
+        }
+        lig_array.extend_from_slice(&attachments);
+
+        let mark_cov = coverage1(&mark_glyphs);
+        let lig_cov = coverage1(&lig_glyphs);
+
+        let header = 12;
+        let mark_cov_at = header;
+        let lig_cov_at = mark_cov_at + mark_cov.len();
+        let mark_array_at = lig_cov_at + lig_cov.len();
+        let lig_array_at = mark_array_at + mark_array.len();
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&be16(1));
+        out.extend_from_slice(&be16(u16::try_from(mark_cov_at).unwrap()));
+        out.extend_from_slice(&be16(u16::try_from(lig_cov_at).unwrap()));
+        out.extend_from_slice(&be16(classes));
+        out.extend_from_slice(&be16(u16::try_from(mark_array_at).unwrap()));
+        out.extend_from_slice(&be16(u16::try_from(lig_array_at).unwrap()));
+        out.extend_from_slice(&mark_cov);
+        out.extend_from_slice(&lig_cov);
+        out.extend_from_slice(&mark_array);
+        out.extend_from_slice(&lig_array);
+        out
+    }
+
+    /// Ligature glyph 1 of two components, offering (200, 700) over the first
+    /// and (800, 700) over the second; mark glyph 2 whose own anchor is at
+    /// (100, 0).
+    fn lam_alef() -> Vec<u8> {
+        lig_subtable(
+            1,
+            &[(2, 0, (100, 0))],
+            &[(1, vec![vec![Some((200, 700))], vec![Some((800, 700))]])],
+        )
+    }
+
+    #[test]
+    fn a_mark_lands_on_the_component_it_belongs_to() {
+        let data = lam_alef();
+        assert_eq!(lig_attachment(&data, 0, 1, 2, 1), Some((100, 700)));
+        assert_eq!(lig_attachment(&data, 0, 1, 2, 2), Some((700, 700)));
+    }
+
+    #[test]
+    fn an_unknown_component_falls_back_to_the_last() {
+        let data = lam_alef();
+        assert_eq!(lig_attachment(&data, 0, 1, 2, 0), Some((700, 700)));
+    }
+
+    #[test]
+    fn a_component_past_the_end_is_clamped_to_the_last() {
+        // A mark numbered into a component the ligature does not have — the
+        // font's `componentCount` and the substitution disagreeing — must not
+        // read a neighbouring table.
+        let data = lam_alef();
+        assert_eq!(lig_attachment(&data, 0, 1, 2, 9), Some((700, 700)));
+    }
+
+    #[test]
+    fn a_ligature_component_may_decline_the_attachment() {
+        let data = lig_subtable(
+            1,
+            &[(2, 0, (100, 0))],
+            &[(1, vec![vec![None], vec![Some((800, 700))]])],
+        );
+        assert_eq!(lig_attachment(&data, 0, 1, 2, 1), None);
+        assert_eq!(lig_attachment(&data, 0, 1, 2, 2), Some((700, 700)));
+    }
+
+    #[test]
+    fn an_uncovered_ligature_or_mark_attaches_to_nothing() {
+        let data = lam_alef();
+        assert_eq!(lig_attachment(&data, 0, 3, 2, 1), None);
+        assert_eq!(lig_attachment(&data, 0, 1, 3, 1), None);
+    }
+
+    #[test]
+    fn each_mark_class_reads_its_own_column_of_the_component() {
+        // Two classes over a two-component ligature: an above-mark and a
+        // below-mark, each with its own anchor on each component.
+        let data = lig_subtable(
+            2,
+            &[(2, 0, (0, 0)), (3, 1, (0, 0))],
+            &[(
+                1,
+                vec![
+                    vec![Some((200, 700)), Some((200, -100))],
+                    vec![Some((800, 700)), Some((800, -100))],
+                ],
+            )],
+        );
+        assert_eq!(lig_attachment(&data, 0, 1, 2, 1), Some((200, 700)));
+        assert_eq!(lig_attachment(&data, 0, 1, 3, 1), Some((200, -100)));
+        assert_eq!(lig_attachment(&data, 0, 1, 2, 2), Some((800, 700)));
+        assert_eq!(lig_attachment(&data, 0, 1, 3, 2), Some((800, -100)));
+    }
+
+    #[test]
+    fn a_ligature_with_no_components_attaches_nothing() {
+        // `componentCount` of zero: legal to encode, meaningless to read, and
+        // the one input that would make the fallback's "last component"
+        // underflow.
+        let data = lig_subtable(1, &[(2, 0, (100, 0))], &[(1, vec![])]);
+        assert_eq!(lig_attachment(&data, 0, 1, 2, 0), None);
+        assert_eq!(lig_attachment(&data, 0, 1, 2, 1), None);
     }
 
     /// Where `gpos_table` puts its subtable. Fixed, so that a test that has to

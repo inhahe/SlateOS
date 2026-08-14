@@ -54,15 +54,18 @@
 //! chaining `fina` rule fail whenever its lookahead is a medial letter, which
 //! is most of the time.
 //!
-//! # What is deliberately not honoured
+//! # Where the flag comes from on the positioning side
 //!
-//! * **`RightToLeft`** (bit 0). It changes how cursive attachment (GPOS 3)
-//!   chooses which of the two joined glyphs moves, and GPOS 3 is not
-//!   implemented, so there is nothing for the bit to change.
-//! * **The flag on GPOS lookups.** `kern` and `mark` reach their subtables
-//!   through `otl::feature_subtables`, which returns a flat list and has
-//!   discarded the flag by then. Filed as part of
-//!   `TD-FONT-IGNORES-GSUB-LOOKUP-FLAGS`.
+//! `GPOS` goes through this module too, but not always with the lookup's own
+//! flag. Types 1, 2 and 3 use it as written; the two mark types deliberately
+//! substitute one of their own, because "which glyph does this mark hang off"
+//! is not a question the font gets to answer with a flag. See
+//! [`Positioning::one`](crate::gpos::Positioning) for which and why.
+//!
+//! `RightToLeft` (bit 0) is read by cursive attachment alone, which is the
+//! only thing it means anything to: it selects which of the two joined glyphs
+//! moves. It is not a general statement about the run's direction and must not
+//! be treated as one.
 
 use crate::gsub::SubGlyph;
 use crate::otl::{coverage_index, glyph_class};
@@ -91,7 +94,7 @@ const USE_MARK_FILTERING_SET: u16 = 0x0010;
 const MARK_ATTACHMENT_TYPE: u16 = 0xFF00;
 
 /// `GDEF` `GlyphClassDef` class 1: a base glyph, standing on its own.
-const CLASS_BASE: u16 = 1;
+pub(crate) const CLASS_BASE: u16 = 1;
 /// `GDEF` `GlyphClassDef` class 2: a glyph that is itself a ligature.
 const CLASS_LIGATURE: u16 = 2;
 /// `GDEF` `GlyphClassDef` class 3: a combining mark.

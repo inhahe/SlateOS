@@ -126,7 +126,7 @@ use crate::otl::{
 };
 use crate::script::ScriptTags;
 use crate::sfnt::{Span, u16_at};
-use crate::skip::{Definitions, Skipper};
+use crate::skip::{CLASS_BASE, CLASS_MARK, Definitions, Skipper};
 
 /// The features read, in the order whose positions become the mask bits.
 ///
@@ -286,6 +286,128 @@ pub struct SubGlyph {
     /// Left at `0` unless the face needs the fallback at all, since deriving
     /// it costs a table lookup per character.
     pub(crate) klass: u8,
+    /// Where this glyph sits inside a ligature, once one has swallowed it or
+    /// the glyphs around it. Written by ligature substitution and read by
+    /// `GPOS`'s mark-to-ligature attachment, which is the only thing that
+    /// needs to know *which* half of an `ﻻ` a vowel sign belongs over.
+    pub(crate) lig: Lig,
+}
+
+/// Where a glyph sits inside a ligature: HarfBuzz's `lig_props`, unpacked.
+///
+/// A ligature is one glyph standing for several characters, and a mark that
+/// was typed against one of those characters has to be placed against the
+/// *component* it belonged to rather than against the joined glyph's single
+/// origin. Nothing in the glyph run records that by itself — after `ﻟ`+`ﺎ`
+/// ligate, the run is one glyph and a mark, and the mark's cluster is shared
+/// with the base. So substitution writes it down as it goes: the ligature
+/// records how many components it swallowed, and every glyph that stood
+/// between two of them records which component it follows.
+///
+/// The fields are HarfBuzz's byte with the bit-packing undone. Keeping the
+/// packing would buy nothing here — this rides in a `SubGlyph`, not in a
+/// buffer the caller allocates per character — and would hide the one
+/// genuinely subtle part, which is that `comps` and `comp` are mutually
+/// exclusive (HarfBuzz's `IS_LIG_BASE` bit selects between them).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Lig {
+    /// Which ligature this glyph belongs to, or `0` for none.
+    ///
+    /// Handed out per run and wrapping after seven, which is HarfBuzz's three
+    /// bits. Two live ligatures eight apart in one run cannot both still have
+    /// marks pending against them, so the reuse is not observable.
+    pub(crate) id: u8,
+    /// On the ligature glyph itself: how many components it swallowed. `0` on
+    /// everything else, which is what tells the two cases apart.
+    comps: u8,
+    /// On a glyph that stood *between* the components: which one it follows,
+    /// counted from one. Meaningless, and read as `0`, when `comps` is set.
+    comp: u8,
+    /// Whether this glyph is one piece of a multiple substitution's output.
+    ///
+    /// It changes what the glyph is worth to a later ligature: the pieces of
+    /// a decomposition all belong to the component the *first* piece does, so
+    /// the pieces after the first contribute none of their own. Mark-to-base
+    /// attaches a mark only to the first piece for the same reason, and the
+    /// two have to agree or a mark lands a component out.
+    multiplied: bool,
+}
+
+/// The widest component count and index HarfBuzz's four bits can hold. Kept
+/// because the wrap is observable: a ligature of more than fifteen components
+/// puts its marks on a component the arithmetic wrapped to, and matching that
+/// is the point of transcribing the algorithm rather than inventing one.
+const LIG_FIELD_MAX: u8 = 0x0F;
+
+impl Lig {
+    /// The glyph a ligature substitution produced.
+    fn ligature(id: u8, components: u8) -> Self {
+        Self {
+            id,
+            comps: (components & LIG_FIELD_MAX).max(1),
+            comp: 0,
+            multiplied: false,
+        }
+    }
+
+    /// A glyph that stood between the components of ligature `id`, following
+    /// component `comp`.
+    fn mark(id: u8, comp: u8) -> Self {
+        Self {
+            id,
+            comps: 0,
+            comp: comp & LIG_FIELD_MAX,
+            multiplied: false,
+        }
+    }
+
+    /// One piece of a multiple substitution's output, the `n`-th counted from
+    /// zero — so the first piece is `0`, meaning "part of no component", which
+    /// is what keeps a decomposition that nothing later ligates looking
+    /// exactly like the glyph it replaced.
+    fn piece(n: u8) -> Self {
+        Self {
+            multiplied: true,
+            ..Self::mark(0, n)
+        }
+    }
+
+    /// Build one directly, for tests in other modules that need a run already
+    /// inside a ligature without running substitution to put it there.
+    #[cfg(test)]
+    pub(crate) fn at(id: u8, components: u8, comp: u8) -> Self {
+        Self {
+            id,
+            comps: components,
+            comp,
+            multiplied: false,
+        }
+    }
+
+    /// Which component of its ligature this glyph follows, or `0` for "none" —
+    /// which is also the answer for the ligature glyph itself, since a
+    /// ligature does not sit inside itself.
+    pub(crate) fn comp(self) -> u8 {
+        if self.comps > 0 { 0 } else { self.comp }
+    }
+
+    /// How many components this glyph is worth when a further ligature
+    /// swallows it. One for anything that is not already a ligature.
+    fn components(self) -> u8 {
+        if self.comps > 0 { self.comps } else { 1 }
+    }
+
+    /// The same, as a ligature about to swallow this glyph should count it.
+    ///
+    /// Zero for every piece of a decomposition after the first, which is what
+    /// makes them all land in one component of the new ligature.
+    fn components_in_ligation(self) -> u8 {
+        if self.multiplied && self.comp() > 0 {
+            0
+        } else {
+            self.components()
+        }
+    }
 }
 
 impl SubGlyph {
@@ -298,6 +420,7 @@ impl SubGlyph {
             cluster,
             mask: ALWAYS,
             klass: 0,
+            lig: Lig::default(),
         }
     }
 
@@ -312,6 +435,7 @@ impl SubGlyph {
             cluster,
             mask: form_mask(form),
             klass: 0,
+            lig: Lig::default(),
         }
     }
 
@@ -329,6 +453,7 @@ impl SubGlyph {
             cluster,
             mask,
             klass: 0,
+            lig: Lig::default(),
         }
     }
 }
@@ -393,6 +518,7 @@ impl Substitutions {
             scratch: Vec::new(),
             defs: self.defs,
             mask: ALWAYS,
+            serial: 0,
         };
         for (lookup, mask) in self.lookups.for_script(script) {
             ctx.mask = mask;
@@ -429,6 +555,26 @@ struct Ctx {
     /// by contrast, is the nested lookup's own — which is why a skipper is
     /// built per invocation rather than passed down.
     mask: u32,
+    /// How many ligature ids have been handed out so far in this run, for
+    /// [`next_lig_id`](Ctx::next_lig_id).
+    serial: u8,
+}
+
+impl Ctx {
+    /// The next ligature id: cycles through 1..=7 and never returns `0`,
+    /// because `0` is what [`Lig::id`] uses for "belongs to no ligature".
+    ///
+    /// HarfBuzz's `_hb_allocate_lig_id`, which is three bits of a per-buffer
+    /// serial. The range is small on purpose: an id only has to tell apart
+    /// the ligatures whose marks are still waiting to be placed, and a run
+    /// with eight of those live at once does not occur.
+    fn next_lig_id(&mut self) -> u8 {
+        self.serial = self.serial.wrapping_add(1);
+        if self.serial & 0x07 == 0 {
+            self.serial = self.serial.wrapping_add(1);
+        }
+        self.serial & 0x07
+    }
 }
 
 /// Run one lookup across the whole run, left to right.
@@ -491,7 +637,7 @@ fn apply_at(
         LOOKUP_SINGLE => apply_single(data, subs, glyphs, i),
         LOOKUP_MULTIPLE => apply_multiple(data, subs, glyphs, i, ctx),
         LOOKUP_ALTERNATE => apply_alternate(data, subs, glyphs, i),
-        LOOKUP_LIGATURE => apply_ligature(data, subs, glyphs, i, skip),
+        LOOKUP_LIGATURE => apply_ligature(data, subs, glyphs, i, skip, ctx),
         LOOKUP_CONTEXT => apply_context(data, subs, glyphs, i, skip, ctx),
         LOOKUP_CHAIN_CONTEXT => apply_chain_context(data, subs, glyphs, i, skip, ctx),
         // `feature_lookups` and `lookup_at` are both asked for these types
@@ -568,11 +714,33 @@ fn apply_multiple(
     // and never carries a failed subtable's partial read. Checking emptiness
     // again would be dead code that hides the guard inside.
     let grown = ctx.scratch.len();
+    // A one-glyph sequence is a replacement, not a decomposition: the run does
+    // not grow, nothing was split, and HarfBuzz special-cases it so the glyph
+    // is not marked as multiplied. Stamping it would tell a later ligature
+    // that this glyph is worth no components of its own.
+    let pieces = grown > 1;
     // Every glyph of the sequence inherits the source's cluster *and* its
     // feature mask: they all came from the one character, so they are all
     // eligible for exactly what it was. A `ccmp` that splits a letter into a
     // base and a mark must not leave the base ineligible for `fina`.
-    glyphs.splice(i..=i, ctx.scratch.iter().map(|&gid| SubGlyph { gid, ..glyph }));
+    //
+    // The ligature bookkeeping is the exception. A glyph that already belongs
+    // to a ligature keeps that — its pieces are still inside the component it
+    // was inside, and overwriting it would strand them. A glyph that does not
+    // gets one piece number each, so a ligature swallowing the pieces later
+    // can tell they were one thing.
+    glyphs.splice(
+        i..=i,
+        ctx.scratch.iter().enumerate().map(|(n, &gid)| SubGlyph {
+            gid,
+            lig: if pieces && glyph.lig.id == 0 {
+                Lig::piece(u8::try_from(n).unwrap_or(u8::MAX))
+            } else {
+                glyph.lig
+            },
+            ..glyph
+        }),
+    );
     Some(grown)
 }
 
@@ -691,22 +859,25 @@ fn sequence_at(data: &[u8], sub: usize, glyph: u16, out: &mut Vec<u16>) -> Optio
 /// Glyphs the lookup's flag hid — marks, typically — stand *between* the
 /// components and are not part of the match. They are left where they are and
 /// simply close up behind the removed components, so a vowelled Arabic word
-/// keeps its vowels after its letters ligate. That is a simplification of what
-/// HarfBuzz does, which is to reposition each skipped mark against the
-/// component it belonged to; ours leaves them in run order, which is right
-/// whenever the marks sit at the end of the ligature's own span and is what
-/// almost every face produces.
+/// keeps its vowels after its letters ligate. Each of them is stamped with the
+/// [`Lig`] of the component it followed, which is the only record that will
+/// exist of where in the joined glyph it belongs: `GPOS`'s mark-to-ligature
+/// attachment reads it back to choose an anchor.
 fn apply_ligature(
     data: &[u8],
     subtables: &[usize],
     glyphs: &mut Vec<SubGlyph>,
     i: usize,
     skip: Skipper<'_>,
+    ctx: &mut Ctx,
 ) -> Option<usize> {
     let mut at = [0usize; MAX_COMPONENTS];
-    let (gid, count) = subtables
+    let (gid, count, total) = subtables
         .iter()
         .find_map(|&sub| ligature_at(data, sub, glyphs, i, skip, &mut at))?;
+    let end = at.get(count.checked_sub(1)?).copied()?;
+    // Before the removal, while the recorded positions still mean something.
+    stamp_components(data, glyphs, &at, count, total, ctx);
     if let Some(first) = glyphs.get_mut(i) {
         // The cluster stays as it was: it is the first component's, and the
         // components that follow are being swallowed, not moved.
@@ -714,7 +885,6 @@ fn apply_ligature(
     }
     // Removed from the back so that the earlier indices stay valid. Component
     // zero is the glyph just rewritten and stays.
-    let end = at.get(count.checked_sub(1)?).copied()?;
     for k in (1..count).rev() {
         let Some(&pos) = at.get(k) else { continue };
         if pos < glyphs.len() {
@@ -728,6 +898,110 @@ fn apply_ligature(
     Some(span.saturating_sub(count.saturating_sub(1)).max(1))
 }
 
+/// Record, on every glyph the match touched, where it sits in the ligature
+/// about to be formed.
+///
+/// HarfBuzz's `ligate_input` without the buffer mechanics. Three cases, and
+/// the distinctions between them are all HarfBuzz's, each with a font behind
+/// it:
+///
+/// * **A base and some marks joining.** Treated as a base, not a ligature, so
+///   that further marks can still attach to it. It is given no id.
+/// * **Only marks joining.** A *mark ligature*: two vowel signs becoming one
+///   glyph. It keeps whatever id it already had, so that it can still attach
+///   to the base ligature its components were attached to — otherwise
+///   `LAM,LAM,SHADDA,FATHA,HEH` loses the shadda-fatha's place on the
+///   lam-lam-heh the moment the two marks join.
+/// * **Anything else** is a real ligature: a fresh id, and every glyph
+///   standing between two of its components is stamped with the component it
+///   follows.
+///
+/// The last case has a tail. A component may itself be a ligature with marks
+/// already assigned to *its* components, and those marks may stand after the
+/// whole match — so the walk continues past the last component for as long as
+/// the glyphs still belong to it, renumbering them into the new ligature.
+fn stamp_components(
+    data: &[u8],
+    glyphs: &mut [SubGlyph],
+    at: &[usize; MAX_COMPONENTS],
+    count: usize,
+    total: u8,
+    ctx: &mut Ctx,
+) {
+    let defs = ctx.defs;
+    let class_of = |glyphs: &[SubGlyph], pos: usize| {
+        glyphs.get(pos).map_or(0, |g| defs.class(data, g.gid))
+    };
+    let Some(&first) = at.first() else { return };
+    let rest_all_marks =
+        (1..count).all(|k| at.get(k).is_some_and(|&p| class_of(glyphs, p) == CLASS_MARK));
+    let first_class = class_of(glyphs, first);
+    let mark_ligature = rest_all_marks && first_class == CLASS_MARK;
+    let ligature = !(rest_all_marks && matches!(first_class, CLASS_BASE | CLASS_MARK));
+
+    let id = if ligature { ctx.next_lig_id() } else { 0 };
+    let Some(head) = glyphs.get_mut(first) else {
+        return;
+    };
+    let mut last_id = head.lig.id;
+    let mut last_components = head.lig.components();
+    let mut so_far = last_components;
+    if ligature {
+        head.lig = Lig::ligature(id, total);
+    }
+
+    let mut from = first.saturating_add(1);
+    for k in 1..count {
+        let Some(&pos) = at.get(k) else { break };
+        if ligature {
+            for p in from..pos {
+                renumber(glyphs, p, id, so_far, last_components);
+            }
+        }
+        let Some(component) = glyphs.get(pos) else {
+            break;
+        };
+        last_id = component.lig.id;
+        last_components = component.lig.components_in_ligation();
+        so_far = so_far.saturating_add(last_components);
+        from = pos.saturating_add(1);
+    }
+
+    if mark_ligature || last_id == 0 {
+        return;
+    }
+    for p in from..glyphs.len() {
+        let Some(glyph) = glyphs.get(p) else { break };
+        if glyph.lig.id != last_id || glyph.lig.comp() == 0 {
+            break;
+        }
+        renumber(glyphs, p, id, so_far, last_components);
+    }
+}
+
+/// Move one mark from the component it followed in its old ligature to the
+/// component that same position has become in the new one.
+///
+/// The arithmetic is HarfBuzz's. `so_far - last` is how many components of the
+/// new ligature were complete before the one this mark belongs to began; the
+/// `min` is what keeps a mark that pointed past the end of its old ligature —
+/// which a malformed font can arrange — inside the component it names.
+fn renumber(glyphs: &mut [SubGlyph], at: usize, id: u8, so_far: u8, last: u8) {
+    let Some(glyph) = glyphs.get_mut(at) else {
+        return;
+    };
+    let this = match glyph.lig.comp() {
+        // A glyph that belonged to no component of anything counts as a whole
+        // one, so that it lands after everything the last component covered.
+        0 => last,
+        n => n,
+    };
+    let comp = so_far
+        .saturating_sub(last)
+        .saturating_add(this.min(last));
+    glyph.lig = Lig::mark(id, comp);
+}
+
 /// Look for a ligature starting at `glyphs[i]` in one `LigatureSubst`
 /// subtable, recording each matched component's position in `at`.
 fn ligature_at(
@@ -737,7 +1011,7 @@ fn ligature_at(
     i: usize,
     skip: Skipper<'_>,
     at: &mut [usize; MAX_COMPONENTS],
-) -> Option<(u16, usize)> {
+) -> Option<(u16, usize, u8)> {
     if u16_at(data, sub)? != 1 {
         return None;
     }
@@ -775,6 +1049,16 @@ fn ligature_at(
 /// The record lists its components from the *second* onwards: the first is
 /// the one the coverage table already matched, so storing it again would be
 /// storing it twice.
+///
+/// Reports the ligature glyph, how many components matched, and how many
+/// components the result is worth — which is not the same number, because a
+/// component may itself be a ligature that already swallowed several.
+///
+/// Matching a glyph id is not on its own enough. A component that already
+/// belongs to some *other* ligature must not be swallowed by this one: if
+/// `LAM,LAM,HEH` has already joined, the `SHADDA,FATHA` it left adjacent
+/// belong to different components of that ligature and joining them would
+/// silently move one of them. See [`ligation_allowed`].
 fn ligature_matches(
     data: &[u8],
     lig: usize,
@@ -782,13 +1066,16 @@ fn ligature_matches(
     i: usize,
     skip: Skipper<'_>,
     at: &mut [usize; MAX_COMPONENTS],
-) -> Option<(u16, usize)> {
+) -> Option<(u16, usize, u8)> {
     let glyph = u16_at(data, lig)?;
     let components = usize::from(u16_at(data, lig.checked_add(2)?)?);
     if components < 2 || components > MAX_COMPONENTS {
         return None;
     }
     *at.get_mut(0)? = i;
+    let head = glyphs.get(i)?.lig;
+    let mut total = head.components();
+    let mut ligbase: Option<bool> = None;
     let mut pos = i;
     for k in 1..components {
         let want = u16_at(
@@ -797,12 +1084,70 @@ fn ligature_matches(
                 .checked_add(k.checked_sub(1)?.checked_mul(2)?)?,
         )?;
         pos = skip.next(glyphs, pos)?;
-        if glyphs.get(pos)?.gid != want {
+        let component = glyphs.get(pos)?;
+        if component.gid != want {
             return None;
         }
+        if !ligation_allowed(glyphs, i, head, component.lig, skip, &mut ligbase) {
+            return None;
+        }
+        total = total.saturating_add(component.lig.components_in_ligation());
         *at.get_mut(k)? = pos;
     }
-    Some((glyph, components))
+    Some((glyph, components, total))
+}
+
+/// May this component join the ligature the one at `first` is starting?
+///
+/// Two rules, both HarfBuzz's `match_input`:
+///
+/// * If the first component was itself part of an earlier ligature, every
+///   later component must be part of the *same* component of it — otherwise
+///   the marks of two different components are being joined, which moves one
+///   of them. The exception, and the reason `ligbase` exists, is that the
+///   earlier ligature's base glyph may be one this lookup's flag hides: a
+///   lookup that cannot see the base cannot be said to be crossing it, so the
+///   join is allowed.
+/// * If the first component was *not* part of an earlier ligature, no later
+///   component may be part of one either — unless it is part of the first
+///   component itself.
+///
+/// `ligbase` caches the first rule's expensive half across the components of
+/// one match: it is a backward scan, and the answer cannot change within a
+/// match because nothing before `first` moves.
+fn ligation_allowed(
+    glyphs: &[SubGlyph],
+    first: usize,
+    head: Lig,
+    component: Lig,
+    skip: Skipper<'_>,
+    ligbase: &mut Option<bool>,
+) -> bool {
+    if head.id != 0 && head.comp() != 0 {
+        if head.id == component.id && head.comp() == component.comp() {
+            return true;
+        }
+        return *ligbase.get_or_insert_with(|| base_is_hidden(glyphs, first, head.id, skip));
+    }
+    component.id == 0 || component.comp() == 0 || component.id == head.id
+}
+
+/// Is the base glyph of ligature `id` — the glyph its marks hang off, found by
+/// walking back through the glyphs that belong to it — one this lookup's flag
+/// hides?
+fn base_is_hidden(glyphs: &[SubGlyph], from: usize, id: u8, skip: Skipper<'_>) -> bool {
+    let mut j = from;
+    while let Some(k) = j.checked_sub(1) {
+        let Some(glyph) = glyphs.get(k) else { return false };
+        if glyph.lig.id != id {
+            return false;
+        }
+        if glyph.lig.comp() == 0 {
+            return skip.skips(glyph.gid);
+        }
+        j = k;
+    }
+    false
 }
 
 /// A `SequenceLookupRecord`: run lookup `lookup` at input position `at`.
@@ -2187,6 +2532,151 @@ mod tests {
     /// lookup that can tell a skipped glyph from a matched one.
     fn fi_subtable() -> Vec<u8> {
         ligature_subst(&[10], &[ligature_set(&[ligature(20, &[11])])])
+    }
+
+    /// Run every lookup over `gids` and report where each glyph ended up
+    /// inside a ligature: `(glyph, ligature id, component)`.
+    fn ligature_props(data: &[u8], subs: &Substitutions, gids: &[u16]) -> Vec<(u16, u8, u8)> {
+        let mut glyphs: Vec<SubGlyph> = gids
+            .iter()
+            .enumerate()
+            .map(|(i, &gid)| SubGlyph::new(gid, i))
+            .collect();
+        subs.apply(data, None, &mut glyphs);
+        glyphs
+            .iter()
+            .map(|g| (g.gid, g.lig.id, g.lig.comp()))
+            .collect()
+    }
+
+    /// The same, reporting instead how many components each glyph is worth —
+    /// which is what a further ligature counts it as.
+    fn lig_components(data: &[u8], subs: &Substitutions, gids: &[u16]) -> Vec<u8> {
+        let mut glyphs: Vec<SubGlyph> = gids
+            .iter()
+            .enumerate()
+            .map(|(i, &gid)| SubGlyph::new(gid, i))
+            .collect();
+        subs.apply(data, None, &mut glyphs);
+        glyphs.iter().map(|g| g.lig.components()).collect()
+    }
+
+    #[test]
+    fn a_skipped_mark_records_the_component_it_followed() {
+        // The bookkeeping `GPOS`'s mark-to-ligature attachment reads back. The
+        // mark stood between the two components, so it belongs after the
+        // first — and once the ligature has formed there is nothing else left
+        // in the run that could say so.
+        let gsub = gsub_flagged(b"liga", LOOKUP_LIGATURE, IGNORE_MARKS, 0, &fi_subtable());
+        let (data, subs) = with_gdef(&gsub, &gdef(&class_def(90, &[3]), &[]));
+        assert_eq!(
+            ligature_props(&data, &subs, &[10, 90, 11]),
+            [(20, 1, 0), (90, 1, 1)]
+        );
+    }
+
+    #[test]
+    fn each_mark_is_numbered_for_the_component_it_stood_after() {
+        // Three components with a mark between each pair: the numbering has to
+        // count components, not glyphs, or the second mark lands on the first
+        // half of the ligature.
+        let sub = ligature_subst(&[10], &[ligature_set(&[ligature(21, &[11, 12])])]);
+        let gsub = gsub_flagged(b"liga", LOOKUP_LIGATURE, IGNORE_MARKS, 0, &sub);
+        let (data, subs) = with_gdef(&gsub, &gdef(&class_def(90, &[3]), &[]));
+        assert_eq!(
+            ligature_props(&data, &subs, &[10, 90, 11, 90, 12]),
+            [(21, 1, 0), (90, 1, 1), (90, 1, 2)]
+        );
+    }
+
+    #[test]
+    fn a_base_and_its_marks_joining_is_still_a_base() {
+        // A ligature whose components are a base and nothing but marks is not
+        // given an id, because it is not really a ligature: it is the base
+        // with its marks drawn in, and further marks must still be able to
+        // attach to it as a base. Giving it an id would send them looking for
+        // a component instead.
+        let sub = ligature_subst(&[90], &[ligature_set(&[ligature(92, &[91])])]);
+        let gsub = gsub_flagged(b"liga", LOOKUP_LIGATURE, 0, 0, &sub);
+        let (data, subs) = with_gdef(&gsub, &gdef(&class_def(90, &[1, 3]), &[]));
+        assert_eq!(ligature_props(&data, &subs, &[90, 91]), [(92, 0, 0)]);
+    }
+
+    #[test]
+    fn two_marks_joining_keep_the_ligature_they_were_attached_to() {
+        // HarfBuzz's mark-ligature case. A shadda and a fatha over a lam-lam
+        // ligature join into one glyph; if that join allocated a fresh id, the
+        // joined mark would no longer belong to any component of the ligature
+        // beneath it and would fall back to the last one. So a ligature of
+        // nothing but marks keeps its first component's id.
+        let joined = ligature_subst(&[90], &[ligature_set(&[ligature(94, &[93])])]);
+        let marks = ligature_subst(&[91], &[ligature_set(&[ligature(95, &[92])])]);
+        let gsub = gsub_lookups_flagged(
+            &[
+                (b"liga", LOOKUP_LIGATURE, joined),
+                (b"rlig", LOOKUP_LIGATURE, marks),
+            ],
+            &[IGNORE_MARKS, 0],
+        );
+        let (data, subs) = with_gdef(&gsub, &gdef(&class_def(90, &[1, 3, 3, 1, 2, 3]), &[]));
+        assert_eq!(
+            ligature_props(&data, &subs, &[90, 91, 92, 93]),
+            [(94, 1, 0), (95, 1, 1)]
+        );
+    }
+
+    #[test]
+    fn the_pieces_of_a_decomposition_count_as_one_component() {
+        // `ccmp` splits 10 into 30 and 31, and a ligature then swallows both
+        // along with an 11. The result stands for two characters, not three:
+        // the pieces after the first are worth no component of their own,
+        // because a mark that attaches to the decomposed character attaches to
+        // its first piece. Counting them separately would number every later
+        // mark one component too high.
+        let sub = ligature_subst(&[30], &[ligature_set(&[ligature(40, &[31, 11])])]);
+        let data = gsub_lookups(&[
+            (b"ccmp", LOOKUP_MULTIPLE, multiple(&[10], &[&[30, 31]])),
+            (b"liga", LOOKUP_LIGATURE, sub),
+        ]);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+        assert_eq!(subst(&data, &subs, &[10, 11]), [40]);
+        assert_eq!(lig_components(&data, &subs, &[10, 11]), [2]);
+    }
+
+    #[test]
+    fn a_one_glyph_sequence_is_a_replacement_not_a_decomposition() {
+        // The pieces of a decomposition are numbered so a later ligature can
+        // tell they were one thing. A sequence of length one split nothing, so
+        // numbering it would tell that ligature the glyph is worth no
+        // component — and a two-component ligature would come out claiming
+        // one.
+        let sub = ligature_subst(&[30], &[ligature_set(&[ligature(40, &[11])])]);
+        let data = gsub_lookups(&[
+            (b"ccmp", LOOKUP_MULTIPLE, multiple(&[10], &[&[30]])),
+            (b"liga", LOOKUP_LIGATURE, sub),
+        ]);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+        assert_eq!(lig_components(&data, &subs, &[10, 11]), [2]);
+    }
+
+    #[test]
+    fn a_mark_already_inside_a_ligature_does_not_ligate_with_a_stranger() {
+        // Once a mark belongs to component 1 of a ligature, a lookup may only
+        // join it to glyphs that belong to the same component. Otherwise a
+        // `rlig` could pull one mark out of the ligature it was placed on and
+        // join it to a mark that was never there, stranding both.
+        let joined = ligature_subst(&[90], &[ligature_set(&[ligature(94, &[93])])]);
+        // 91 is inside the ligature; 96 stands after the whole thing.
+        let marks = ligature_subst(&[91], &[ligature_set(&[ligature(95, &[96])])]);
+        let gsub = gsub_lookups_flagged(
+            &[
+                (b"liga", LOOKUP_LIGATURE, joined),
+                (b"rlig", LOOKUP_LIGATURE, marks),
+            ],
+            &[IGNORE_MARKS, 0],
+        );
+        let (data, subs) = with_gdef(&gsub, &gdef(&class_def(90, &[1, 3, 3, 1, 2, 3, 3]), &[]));
+        assert_eq!(subst(&data, &subs, &[90, 91, 93, 96]), [94, 91, 96]);
     }
 
     #[test]

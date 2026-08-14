@@ -82,6 +82,11 @@ CORPUS = [
     # the string that exercises `IgnoreMarks`; the unvowelled entry above
     # cannot, because it has no marks to ignore.
     "\\u0628\\u0650\\u0633\\u0652\\u0645\\u0650",
+    # LAM, FATHA, ALEF: the lam and the alef ligate across the fatha, which
+    # then has to be placed over the *first* component of the joined glyph.
+    # This is the string mark-to-ligature positioning exists for, and the only
+    # one in the corpus where getting the component wrong is visible.
+    "\\u0644\\u064e\\u0627",
     # Devanagari, the reason script tags have two spellings.
     "\\u0939\\u093f\\u0928\\u094d\\u0926\\u0940",
     # Scriptless text, which selects the font's default features.

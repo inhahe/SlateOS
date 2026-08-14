@@ -59501,6 +59501,52 @@ are a `ValueRecord` reader change plus a ppem the pass is not currently told.
 matchers to be shared; `gui/font/src/mark.rs` — the anchor reader type 5
 would reuse.
 
+**Type 5 fixed** (2026-08-14). Mark-to-ligature attachment now works; types 7
+and 8 and device tables remain open, so this entry stays.
+
+The estimate above — "type 4's reader with a component index" — was wrong, and
+wrong in the way that mattered: *nothing in our glyph run recorded which
+component a mark belonged to*, so there was no index to pass. HarfBuzz carries
+it in a per-glyph `lig_props` byte written during ligature substitution, and
+the honest fix was to port that bookkeeping rather than to fall back on
+HarfBuzz's degenerate "use the last component" path for every mark.
+
+So `gui/font/src/gsub.rs` gained a `Lig` on every `SubGlyph` — HarfBuzz's
+`lig_props` with the bit-packing undone — and three pieces of `ligate_input`
+transcribed onto it:
+
+* `stamp_components` writes it. It keeps HarfBuzz's three cases: a base joining
+  with nothing but marks stays a *base* (no id) so further marks can still
+  attach to it; a ligature of nothing but marks keeps its existing id so it
+  still belongs to the ligature its components were on; anything else gets a
+  fresh id and every glyph the flag skipped over is numbered with the component
+  it followed. The walk continues past the last component for as long as the
+  glyphs still belong to it, because a component may itself be a ligature whose
+  marks stand after the whole match.
+* `ligation_allowed` enforces HarfBuzz's `match_input` legality rules, so a
+  mark already inside one ligature cannot be pulled out and joined to a
+  stranger — with the `LIGBASE_MAY_SKIP` exception for when the earlier
+  ligature's base is a glyph this lookup's flag hides.
+* `apply_multiple` numbers the pieces of a decomposition, and
+  `Lig::components_in_ligation` makes every piece after the first worth *zero*
+  components to a later ligature — matching how mark-to-base attaches a mark
+  only to the first piece.
+
+`gui/font/src/mark.rs` was split so the mark side of types 4, 5 and 6 is read
+once (`marked`), with `attachment` and the new `lig_attachment` each supplying
+their own way of finding the anchor to attach to. The one place type 5 differs
+from type 4 in more than naming: a `LigatureArray` holds *offsets* to
+per-ligature tables rather than one grid (ligatures differ in component count),
+and the anchor offsets inside those are taken from the `LigatureAttach`, not
+from the array.
+
+**Measured.** The sweep corpus had no string that could show the bug, so one
+was added: `\u0644\u064e\u0627` (LAM, FATHA, ALEF — the lam and alef ligate
+across the fatha, which must then land over the *first* component). Over 556
+faces, 56 of which ship a type-5 lookup: with the dispatch entry removed,
+agree 10055 / misplaced 125; with it, **agree 10081 / misplaced 99** — 26
+face×string cases fixed and none broken.
+
 ## TD-FONT-DOES-NOT-RE-SORT-HEBREW-AND-ARABIC-MARKS
 
 **What.** Unicode gives Hebrew points the canonical combining classes 10–26

@@ -62278,3 +62278,47 @@ N=64 and N=1024 (i.e. the unrolling stops), and the per-access delta agrees
 within 25% across the two scales, landing near 5. MISS if the delta still moves
 more than 25% between N and 2N — which would mean the asymmetry is not
 unrolling and the A/B subtraction is unsound for a reason not yet identified.
+
+#### CORRECTION — the clamp's blast radius is 2 verdicts, not "~60 budgets"
+
+Commit `535652cbd` and the earlier `access_floor` write-ups say a rejected
+calibration would otherwise "silently calibrate ~60 budgets". **That number is
+wrong.** Counting the actual consumers of `access_floor` in `bench.rs`:
+
+| site | use | is it a verdict? |
+|---|---|---|
+| `mmio_suspicion = access_floor * 4` (`fast_cpu_index`) | PASS/FAIL limit | **yes** |
+| `budget = access_floor * 150` (`page_alloc_free_owner_ab`) | PASS/FAIL limit | **yes** |
+| `accesses(delta, access_floor)` in `page_alloc_free_owner_ab` | prints "N.n accesses" | no |
+| `accesses(call_floor/real_work, ...)` in `frame_owner_set_split` | prints "N.n accesses" | no |
+
+So **two** verdicts depend on the calibration; the rest are display units. The
+"~60" figure came from conflating `access_floor`'s consumers with the ~60
+benchmarks that carry a `// Target from baselines.toml` literal — those are
+independent hard-coded targets and the clamp never touched them.
+
+This matters in both directions, and the second is the uncomfortable one:
+
+- **The urgency was overstated.** Removing the clamp is a 2-verdict change, not
+  a suite-wide one.
+- **The reassurance in the earlier entry was also overstated**, the same way.
+  It said the clamp binding meant "no release-run budget verdict has been
+  calibrated to this machine" — true, but that was only ever 2 verdicts, so it
+  was never the sweeping invalidation it was written up as.
+
+The lesson is the one this file keeps recording about *measuring before
+asserting*: I described a blast radius from memory instead of counting the call
+sites, in an entry whose entire subject is a number that was believed rather
+than measured. Counting took one grep.
+
+**The clamp change itself still stands and is still correct.** With
+`access_floor = max(measured, 100)` and a measured 5, both budgets are **20x
+looser than the cost they claim to be multiples of** — `mmio_suspicion` is 400
+cycles where it means 20, and the owner-tag budget is 15000 where it means 750.
+A budget expressed as "150 accesses" that is really 150 x an arbitrary constant
+is not a budget in accesses. Now that failure is expressible as `None` and
+scale-dependence is rejected outright, the clamp's original job ("do not let
+the budgets collapse to 0") is fully done by those two paths, and a *valid*
+measurement should be used as measured. Deferred only until P17 grades: if the
+measurement is still not scale-invariant, tightening budgets onto it would be
+building on the same sand.

@@ -60122,12 +60122,11 @@ disagree on the **text they then print back**:
 So osh drops the run's opening `'` and stops its tail two bytes early. The
 extent is right and the value is unaffected; only the echoed text is wrong.
 
-**Not** the defect fixed the same day by
-`TD-OILS-AN-UNMATED-DOUBLE-QUOTE-GROWS-A-MATE-WHEN-THE-WORD-IS-PRINTED-BACK`:
-that one *added* a byte at print time and this one *drops* two, and the two
-binaries were compared directly (`target-baseline` built from the commit before
-that fix) — byte-identical on this repro, so the defect is older and
-independent.
+**Not** either defect fixed the same day. That day's reprint fix *added* a byte
+at print time where this one *drops* two, and its brace-scan fix touched which
+openers a scan counts. Binaries built from the commit before each were diffed
+against this repro directly and are byte-identical to today's, so the defect is
+older than both and independent of them.
 
 **What the proper fix looks like.** The text is `crate::unparse::word_src(w)`
 and nothing else: `Shell::begin_word` computes it once, hands it to
@@ -60149,40 +60148,6 @@ substring bound holds a `'` with no mate.
 
 ---
 
-### TD-OILS-AN-UNTERMINATED-DQUOTE-IN-A-SUBSCRIPT-IS-BLAMED-ON-THE-WRONG-LINE — 2026-08-14
-
-**Where:** the `` unexpected EOF while looking for matching `"' `` diagnostic;
-the line it carries comes from the lexer's `open` capture in
-`Lexer::read_double_quote_until` (`userspace/oils/src/lexer.rs`).
-
-**Repro** (bash 5.2.37, `build/pr15.sh` x5) — the script's line 11 opens a `"`
-that never closes:
-
-```sh
-echo A${arr["1]}B
-```
-
-| | bash 5.2.37 | osh |
-|---|---|---|
-| reports | ``line 11: unexpected EOF while looking for matching `"' `` | same text, **line 15** |
-
-bash blames the line the `"` opened on; osh blames the line the input ran out
-on. Same message, same exit, wrong number.
-
-Pre-existing and independent of the two reprint defects above — same
-`target-baseline` comparison, byte-identical.
-
-**What the proper fix looks like.** `read_double_quote_until` already captures
-`let open = self.cur_line();` and hands it to `eof_matching('"').at(open)`, so
-the number is right where that error is *raised*. Follow where it is re-raised:
-a `.at(self.eof_line())` on the way out will overwrite it. The brace-scan work
-of the same day added one such site deliberately, for a different error, which
-is a good place to start looking.
-
-**Impact.** Diagnostics only — one wrong line number in a message whose text
-and status already match.
-
----
 
 ### TD-OILS-A-SQUOTE-RUN-DOES-NOT-CUT-A-SUBSTITUTION-SHORT-FOR-THE-BRACE-SCAN. A `$( … )` opened inside one swallows the read that should have followed it — 2026-08-14
 

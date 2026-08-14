@@ -5254,8 +5254,19 @@ impl Lexer {
                 // [`SubBody::Unread`], and it carries its spelling because
                 // nothing downstream performs it: see
                 // [`crate::ast::SubDelim`].
+                //
+                // A `' … '` run is the one stretch of unread text this row does
+                // *not* reach: the scan meets the `'` first and steps over the
+                // run whole (`skip_single_quoted`), so what it covers was never
+                // offered to the `<(` row at all. Measured against bash 5.2.37,
+                // `echo "${z:-'<(fi)'}"` prints `'<(fi)'` and reports nothing —
+                // where without this guard the body would be read, and its
+                // syntax error raised. `in_run` is the run's own bookkeeping
+                // from the second `'` arm above; `self.here_text` is true inside
+                // one, so it cannot stand in for this.
                 '<' | '>'
                     if mode == Verbatim::Dquote
+                        && !in_run
                         && self.here_text
                         && self.at(self.pos + 1) == Some('(') =>
                 {

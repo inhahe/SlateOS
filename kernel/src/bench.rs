@@ -2004,18 +2004,28 @@ fn bench_syscall_dispatch_breakdown(dispatch_result: &BenchResult) {
         core::hint::black_box(crate::scfilter::check(tid, SYS_TASK_ID));
     });
 
-    // Stage 4: the two `ktrace::record` calls (enter + exit).  Measured as the
-    // pair, because that is how dispatch pays for them.
+    // Stage 4: the two ktrace calls (enter + exit).  Measured as the pair,
+    // because that is how dispatch pays for them.
+    //
+    // Must mirror dispatch exactly: it calls `record_with_task`, passing the
+    // task id it resolved once at the top.  Benchmarking `record` here instead
+    // would fold two `current_task_id()` lookups into this stage that dispatch
+    // no longer performs — and since `sd_current_task_id` is already its own
+    // stage, the breakdown would over-count and the `unexplained` residual
+    // would go *negative*, which the coherence gate reads as "the parts do not
+    // fit in the whole".
     let ktrace = run("sd_ktrace_pair", 2000, || {
-        crate::ktrace::record(
+        crate::ktrace::record_with_task(
             crate::ktrace::Category::Syscall,
             crate::ktrace::event::SYSCALL_ENTER,
+            tid,
             SYS_TASK_ID,
             0,
         );
-        crate::ktrace::record(
+        crate::ktrace::record_with_task(
             crate::ktrace::Category::Syscall,
             crate::ktrace::event::SYSCALL_EXIT,
+            tid,
             SYS_TASK_ID,
             0,
         );

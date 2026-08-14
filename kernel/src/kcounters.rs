@@ -238,6 +238,10 @@ pub fn builtin_snapshot() -> alloc::vec::Vec<CounterSnapshot> {
     let slat = crate::sclatency::stats();
     result.push(CounterSnapshot { group: "syscall", name: "total_calls", value: slat.total_calls });
     result.push(CounterSnapshot { group: "syscall", name: "mean_ns", value: slat.mean_ns });
+    // Exported so a monitoring consumer can tell "the histogram is empty" from
+    // "the histogram could not measure": non-zero means that many calls have
+    // no known duration and are absent from every bucket.
+    result.push(CounterSnapshot { group: "syscall", name: "latency_unbucketed", value: slat.uncalibrated });
 
     // --- Process accounting ---
     result.push(CounterSnapshot { group: "pacct", name: "exits_recorded", value: crate::pacct::total_recorded() });

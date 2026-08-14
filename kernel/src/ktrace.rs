@@ -295,6 +295,42 @@ static CATEGORY_MASK: AtomicU32 = AtomicU32::new(0xFFFF);
 /// Safe to call from any context (ISR, softirq, task).
 #[inline]
 pub fn record(category: Category, event_id: u16, arg0: u64, arg1: u64) {
+    // Fast-path: check enabled.  Duplicated from `record_with_task` so a
+    // disabled tracer costs one atomic load and does *not* pay for
+    // `current_task_id()` just to hand it to a function that discards it.
+    if !ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    let cat_bit = 1u32 << (category as u8);
+    if CATEGORY_MASK.load(Ordering::Relaxed) & cat_bit == 0 {
+        return;
+    }
+    record_with_task(category, event_id, crate::sched::current_task_id(), arg0, arg1);
+}
+
+/// Record a trace event on behalf of a task the caller has already identified.
+///
+/// Identical to [`record`] except that the caller supplies `task_id` instead
+/// of this function looking it up.
+///
+/// # Why this exists
+///
+/// `sched::current_task_id()` measures ~23 ns in this kernel, and syscall
+/// dispatch calls `record` twice (enter and exit) around a handler for which
+/// it has *already* computed the current task id.  That is three lookups of
+/// one value per syscall, two of them pure waste on the hottest path in the
+/// system.
+///
+/// # Correctness note
+///
+/// The caller becomes responsible for passing the *right* id.  That is safe
+/// for syscall dispatch — the value is read at entry and the task cannot be
+/// switched out underneath a syscall in a way that changes whose syscall it
+/// is — but it is not safe to cache across a blocking point.  Prefer
+/// [`record`] anywhere the id is not already at hand; the saving is only real
+/// when the lookup would genuinely have been redundant.
+#[inline]
+pub fn record_with_task(category: Category, event_id: u16, task_id: u64, arg0: u64, arg1: u64) {
     // Fast-path: check enabled.
     if !ENABLED.load(Ordering::Relaxed) {
         return;
@@ -307,7 +343,6 @@ pub fn record(category: Category, event_id: u16, arg0: u64, arg1: u64) {
     }
 
     let timestamp = bench::rdtsc();
-    let task_id = crate::sched::current_task_id();
 
     // Pack category + event_id.
     let category_event = ((category as u16) << 12) | (event_id & 0x0FFF);

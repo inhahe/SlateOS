@@ -635,6 +635,13 @@ extern "C" fn kernel_main() -> ! {
     // Must be after serial (for output) and before subsystem benchmarks.
     // PIT channel 2 is always available on x86_64 hardware.
     bench::calibrate_tsc();
+    // Rescale the syscall-latency histogram thresholds into TSC cycles now
+    // that the frequency is known.  Must follow `calibrate_tsc` and should be
+    // as early as possible: syscalls dispatched before this point cannot be
+    // bucketed and are counted separately as unmeasurable rather than being
+    // silently reported as "<1us".
+    sclatency::calibrate();
+    sclatency::self_test();
     cputime::init();
     timekeeping::init();
 

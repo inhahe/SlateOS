@@ -87,6 +87,7 @@
 
 use crate::errno;
 use crate::fcntl::{S_IFDIR, S_IFLNK, S_IFMT, S_IFREG};
+use crate::perprocess::process_global;
 use crate::stat::Stat;
 use crate::unistd::PATH_MAX;
 
@@ -308,6 +309,8 @@ const DIR_FRAME_INIT: DirFrame = DirFrame {
 
 /// One FTS stream's state.
 struct Instance {
+    /// Slot is occupied iff true.  Only ever read/written through the
+    /// helpers below, which operate on this process's own table.
     in_use: bool,
     options: i32,
     /// Root path provided at `fts_open`, NUL-terminated.
@@ -369,20 +372,26 @@ const INSTANCE_INIT: Instance = Instance {
     pending_again: false,
 };
 
-static mut FTS_INSTANCES: [Instance; MAX_FTS_INSTANCES] = [INSTANCE_INIT, INSTANCE_INIT];
+process_global! {
+    /// This process's FTS stream table.
+    ///
+    /// `process_global!` rather than a bare `static mut`: an `FTS *` handed to
+    /// the caller is an index into this table, so the table must have exactly
+    /// the same scope as the fd table it parallels.  As a bare `static mut`
+    /// this was the one slot pool in the crate that host test threads *shared*,
+    /// which is how two `fts_open` calls on different test threads came to
+    /// claim the same slot — see
+    /// `B-FTS-INSTANCE-POOL-CLAIM-IS-A-DATA-RACE` in `known-issues.md`.
+    fn instances_ptr() -> [Instance; MAX_FTS_INSTANCES] = [INSTANCE_INIT, INSTANCE_INIT];
 
-/// Static `Fts` handle bodies — one per instance — that we hand out
-/// to the caller.  Lives forever.
-static mut FTS_HANDLES: [Fts; MAX_FTS_INSTANCES] = [
-    Fts {
-        handle: 1,
-        fts_options: 0,
-    },
-    Fts {
-        handle: 2,
-        fts_options: 0,
-    },
-];
+    /// The `Fts` handle bodies — one per instance — that we hand out to the
+    /// caller.  Must be per-process for the same reason as the table above:
+    /// the handle is only meaningful against its own process's slots.
+    fn handles_ptr() -> [Fts; MAX_FTS_INSTANCES] = [
+        Fts { handle: 1, fts_options: 0 },
+        Fts { handle: 2, fts_options: 0 },
+    ];
+}
 
 // ---------------------------------------------------------------------------
 // Const helper — we need an all-zero `Stat` in `const` initializers,
@@ -405,8 +414,9 @@ const fn zeroed_stat() -> Stat {
 // ---------------------------------------------------------------------------
 
 fn allocate_instance() -> Option<usize> {
-    // SAFETY: `FTS_INSTANCES` is single-process userspace state.
-    let table = unsafe { &mut *core::ptr::addr_of_mut!(FTS_INSTANCES) };
+    // SAFETY: `instances_ptr()` yields this process's own table (see
+    // `perprocess.rs`), so nothing else holds a reference to it here.
+    let table = unsafe { &mut *instances_ptr() };
     for (i, inst) in table.iter_mut().enumerate() {
         if !inst.in_use {
             *inst = INSTANCE_INIT;
@@ -419,7 +429,7 @@ fn allocate_instance() -> Option<usize> {
 
 fn release_instance(idx: usize) {
     // SAFETY: see `allocate_instance`.
-    let table = unsafe { &mut *core::ptr::addr_of_mut!(FTS_INSTANCES) };
+    let table = unsafe { &mut *instances_ptr() };
     if let Some(inst) = table.get_mut(idx) {
         *inst = INSTANCE_INIT;
     }
@@ -427,7 +437,7 @@ fn release_instance(idx: usize) {
 
 fn with_instance<R>(idx: usize, f: impl FnOnce(&mut Instance) -> R) -> Option<R> {
     // SAFETY: see `allocate_instance`.
-    let table = unsafe { &mut *core::ptr::addr_of_mut!(FTS_INSTANCES) };
+    let table = unsafe { &mut *instances_ptr() };
     table.get_mut(idx).filter(|i| i.in_use).map(f)
 }
 
@@ -672,11 +682,10 @@ pub extern "C" fn fts_open(
         return core::ptr::null_mut();
     }
 
-    // SAFETY: indexing into the static handle pool with a bounded
+    // SAFETY: indexing into this process's handle pool with a bounded
     // index from `allocate_instance`.
-    
     unsafe {
-        let table = core::ptr::addr_of_mut!(FTS_HANDLES);
+        let table = handles_ptr();
         (*table)[idx].fts_options = options;
         core::ptr::addr_of_mut!((*table)[idx])
     }
@@ -1224,16 +1233,27 @@ mod tests {
 
     // -- Open + close round-trip -- -----------------------------------------
 
+    // The instance table is a `process_global!`, so it is this thread's alone:
+    // a concurrently-running test cannot consume a slot out from under us and
+    // the open must therefore succeed outright.  This used to tolerate a null
+    // return "because parallel tests may have taken the slots", which masked
+    // the shared-table bug it should have caught
+    // (`B-FTS-INSTANCE-POOL-CLAIM-IS-A-DATA-RACE`).
     #[test]
     fn test_fts_open_close_roundtrip() {
         let path = b"/\0".as_ptr();
         let argv: [*const u8; 2] = [path, core::ptr::null()];
         let r = fts_open(argv.as_ptr(), FTS_PHYSICAL, None);
-        if r.is_null() {
-            // Instance pool exhausted by parallel tests — acceptable.
-            return;
-        }
+        assert!(!r.is_null(), "this thread's instance pool must be free");
         assert_eq!(fts_close(r), 0);
+        // The slot must go back to the pool, so the same open can be repeated
+        // indefinitely — a release that failed to clear `in_use` would wedge
+        // the pool after `MAX_FTS_INSTANCES` opens.
+        for _ in 0..MAX_FTS_INSTANCES * 3 {
+            let again = fts_open(argv.as_ptr(), FTS_PHYSICAL, None);
+            assert!(!again.is_null(), "closed slot was not returned to the pool");
+            assert_eq!(fts_close(again), 0);
+        }
     }
 
     #[test]
@@ -1323,25 +1343,29 @@ mod tests {
 
     // -- Instance pool exhaustion -- ----------------------------------------
 
+    // Exactly `MAX_FTS_INSTANCES` opens must succeed and the next must fail
+    // with ENOMEM.  The pool is per-thread (`process_global!`), so this is
+    // deterministic rather than "either outcome is fine".
     #[test]
-    fn test_fts_open_exhausts_pool_returns_enomem_or_succeeds() {
-        // Open as many as we can in this thread, then close them all.
+    fn test_fts_open_exhausts_pool_returns_enomem() {
         let path = b"/\0".as_ptr();
         let argv: [*const u8; 2] = [path, core::ptr::null()];
         let mut handles: [*mut Fts; MAX_FTS_INSTANCES] = [core::ptr::null_mut(); MAX_FTS_INSTANCES];
-        for i in 0..MAX_FTS_INSTANCES {
-            handles[i] = fts_open(argv.as_ptr(), FTS_PHYSICAL, None);
-            // Each could fail if parallel tests are using slots; just
-            // verify the pattern (either success or ENOMEM, never a
-            // mid-state).
-            if handles[i].is_null() {
-                assert_eq!(errno::get_errno(), errno::ENOMEM);
-            }
+        for (i, slot) in handles.iter_mut().enumerate() {
+            *slot = fts_open(argv.as_ptr(), FTS_PHYSICAL, None);
+            assert!(!slot.is_null(), "open {i} of a free pool must succeed");
         }
+        // Distinct streams must get distinct handles — the whole point of the
+        // claim being exclusive.
+        assert_ne!(handles.first(), handles.last());
+
+        errno::set_errno(0);
+        let over = fts_open(argv.as_ptr(), FTS_PHYSICAL, None);
+        assert!(over.is_null(), "pool is full; open must fail");
+        assert_eq!(errno::get_errno(), errno::ENOMEM);
+
         for h in handles.iter() {
-            if !h.is_null() {
-                fts_close(*h);
-            }
+            assert_eq!(fts_close(*h), 0);
         }
     }
 

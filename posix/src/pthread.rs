@@ -4169,15 +4169,26 @@ mod tests {
     // pthread_atfork stub
     // =======================================================================
 
+    // These two register into the *process-global* atfork table, so they must
+    // hold `ATFORK_TEST_LOCK` and reset afterwards, like the tests further down.
+    // Without that they leaked handlers into a table that
+    // `atfork_table_full_returns_enomem` fills exactly, so with more than one
+    // test thread that test intermittently saw ENOMEM on a registration it
+    // expected to succeed.
     #[test]
     fn atfork_returns_zero() {
+        let _g = ATFORK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        atfork_reset();
         assert_eq!(pthread_atfork(None, None, None), 0);
+        atfork_reset();
     }
 
     extern "C" fn dummy_fork_handler() {}
 
     #[test]
     fn atfork_with_handlers_returns_zero() {
+        let _g = ATFORK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        atfork_reset();
         assert_eq!(
             pthread_atfork(
                 Some(dummy_fork_handler),
@@ -4186,6 +4197,7 @@ mod tests {
             ),
             0
         );
+        atfork_reset();
     }
 
     // =======================================================================

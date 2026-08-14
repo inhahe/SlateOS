@@ -8849,13 +8849,23 @@ mod tests {
 
     // -- cap dropped: non-privileged ports bypass the gate ----------------
 
-    /// Without cap, port 1024 (first non-privileged) succeeds.
-    #[test]
-    fn test_phase201_bind_port1024_no_cap_ok() {
+    /// Bind `port` with `CAP_NET_BIND_SERVICE` dropped and assert the
+    /// privileged-port gate did *not* reject it.
+    ///
+    /// The assertion is deliberately "not `EACCES`" rather than "returned 0".
+    /// These tests bind a *fixed real host port* on 127.0.0.1, so a bind can
+    /// legitimately fail with `EADDRINUSE` — either because some unrelated
+    /// program on the dev machine holds the port, or because a socket from an
+    /// earlier run of this very suite is still in `TIME_WAIT`.  Asserting
+    /// success therefore made these tests fail intermittently for a reason
+    /// that has nothing to do with the code under test.  `EACCES` is the only
+    /// error the gate itself can produce, so excluding it tests exactly the
+    /// property these cases exist to pin down and nothing else.
+    fn assert_bind_not_gated(port: u16) {
         let _g = phase201_cap::CapGuard::snapshot();
         phase201_cap::drop_cap_net_bind_service();
         let fd = make_tcp_socket();
-        let addr = make_sockaddr_in(1024);
+        let addr = make_sockaddr_in(port);
         crate::errno::set_errno(0);
         let ret = unsafe {
             bind(
@@ -8864,27 +8874,26 @@ mod tests {
                 core::mem::size_of::<SockaddrIn>() as SocklenT,
             )
         };
-        assert_eq!(ret, 0, "port 1024 must bypass privileged port gate");
+        if ret != 0 {
+            assert_ne!(
+                crate::errno::get_errno(),
+                crate::errno::EACCES,
+                "port {port} is unprivileged and must bypass the privileged-port gate",
+            );
+        }
         crate::file::close(fd);
     }
 
-    /// Without cap, port 8080 (common unprivileged) succeeds.
+    /// Without cap, port 1024 (first non-privileged) is not gated.
+    #[test]
+    fn test_phase201_bind_port1024_no_cap_ok() {
+        assert_bind_not_gated(1024);
+    }
+
+    /// Without cap, port 8080 (common unprivileged) is not gated.
     #[test]
     fn test_phase201_bind_port8080_no_cap_ok() {
-        let _g = phase201_cap::CapGuard::snapshot();
-        phase201_cap::drop_cap_net_bind_service();
-        let fd = make_tcp_socket();
-        let addr = make_sockaddr_in(8080);
-        crate::errno::set_errno(0);
-        let ret = unsafe {
-            bind(
-                fd,
-                &raw const addr as *const Sockaddr,
-                core::mem::size_of::<SockaddrIn>() as SocklenT,
-            )
-        };
-        assert_eq!(ret, 0, "port 8080 must bypass privileged port gate");
-        crate::file::close(fd);
+        assert_bind_not_gated(8080);
     }
 
     /// Without cap, port 0 (ephemeral) succeeds.

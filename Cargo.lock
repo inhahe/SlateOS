@@ -11989,6 +11989,10 @@ name = "yambar-cli"
 version = "0.1.0"
 
 [[package]]
+name = "yamldoc"
+version = "0.1.0"
+
+[[package]]
 name = "yard-cli"
 version = "0.1.0"
 

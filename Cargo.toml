@@ -13,6 +13,15 @@ members = [
     # control linker flags.
     "posix",
     "toolchain/stubs",
+    # Shared no_std format-preserving YAML editor. `design.txt` mandates YAML
+    # for configuration "processed with a library that preserves comments and
+    # formatting", and every settings consumer (desktop appearance, the
+    # settings app, the package manager, the installer) needs the same one.
+    # A workspace *member* rather than an `exclude` entry so it inherits
+    # `[lints] workspace = true`; kept out of `default-members` because the
+    # workspace-root target is x86_64-unknown-none and there is no reason to
+    # rebuild it on every kernel build.
+    "yamldoc",
 ]
 # Default members: only the crates that build under the workspace-root
 # target (x86_64-unknown-none). A plain `cargo build` from the project

@@ -167,6 +167,14 @@ const MEDI: u64 = 0b1_0000_0000_0000_0000;
 /// The bit for `fina`, the eighteenth.
 const FINA: u64 = 0b10_0000_0000_0000_0000;
 
+/// Every feature at once: the one stage a caller with no staging plan runs.
+///
+/// It is all sixty-four bits rather than the bits of [`FEATURES`] because a
+/// stage is intersected with each lookup's own mask, and a bit no feature
+/// occupies is a bit no lookup carries — so the extra ones select nothing and
+/// the constant needs no maintenance when the list grows.
+const ALL_FEATURES: u64 = u64::MAX;
+
 /// The mask for a glyph whose cursive form is `form`.
 ///
 /// `None` — a space, a mark, a Latin letter, anything in a face with no
@@ -296,6 +304,22 @@ pub struct SubGlyph {
     /// `GPOS`'s mark-to-ligature attachment, which is the only thing that
     /// needs to know *which* half of an `ﻻ` a vowel sign belongs over.
     pub(crate) lig: Lig,
+    /// Which syllable this glyph belongs to, for the features that may not
+    /// match across a syllable boundary.
+    ///
+    /// Only the Indic shaper writes it; everything else leaves it at `0`,
+    /// where it means "one syllable, the whole run" and constrains nothing.
+    /// The value is a small serial rather than an index, because all that is
+    /// ever asked of it is whether two glyphs share one — so it need only
+    /// differ between *neighbours*, and a byte is enough for that however long
+    /// the run is.
+    ///
+    /// Carried through substitution untouched, exactly as
+    /// [`klass`](Self::klass) is: a ligature keeps its first component's, and
+    /// the pieces of a decomposition all keep the whole's. Both are right,
+    /// because a lookup cannot join glyphs from two syllables in the first
+    /// place.
+    pub(crate) syllable: u8,
 }
 
 /// Where a glyph sits inside a ligature: HarfBuzz's `lig_props`, unpacked.
@@ -427,6 +451,7 @@ impl SubGlyph {
             klass: 0,
             mark: false,
             lig: Lig::default(),
+            syllable: 0,
         }
     }
 
@@ -443,6 +468,7 @@ impl SubGlyph {
             klass: 0,
             mark: false,
             lig: Lig::default(),
+            syllable: 0,
         }
     }
 
@@ -462,6 +488,7 @@ impl SubGlyph {
             klass: 0,
             mark: false,
             lig: Lig::default(),
+            syllable: 0,
         }
     }
 }
@@ -520,6 +547,43 @@ impl Substitutions {
         script: Option<ScriptTags>,
         glyphs: &mut Vec<SubGlyph>,
     ) {
+        self.apply_stages(data, script, &[ALL_FEATURES], false, glyphs, |_, _| {});
+    }
+
+    /// Apply the lookups in several passes, one per entry of `stages`.
+    ///
+    /// A stage is a set of feature bits; a lookup runs in a stage when some
+    /// feature that reached it is in that stage's set, and it sees only the
+    /// glyphs eligible for the features in the intersection. [`apply`](Self::apply)
+    /// is the one-stage case, and for it this is exactly the old single pass:
+    /// every lookup, once, in LookupList order.
+    ///
+    /// Staging exists for the Indic shaper. Its eleven basic features have to
+    /// be applied *one at a time*, each as its own complete pass over the run,
+    /// because a later one is written to match glyphs an earlier one built —
+    /// `rphf` makes the reph that `abvs` then positions, `half` makes the
+    /// half-form that `cjct` then stacks. Run them together, in whatever order
+    /// the LookupList happens to list them, and the second half of that pair
+    /// looks at the run before the first half rewrote it and does nothing.
+    ///
+    /// `between` is called after each stage with the stage's index, for the
+    /// reordering that has to happen at a particular point in the sequence
+    /// rather than before or after all of it.
+    ///
+    /// `per_syllable` confines every match to one syllable — a lookup is
+    /// offered each maximal run of glyphs sharing a [`SubGlyph::syllable`]
+    /// separately, so no rule can see across a boundary. Indic features are
+    /// all declared that way: a ligature spanning two syllables is never what
+    /// the font meant, whatever its coverage says.
+    pub(crate) fn apply_stages(
+        &self,
+        data: &[u8],
+        script: Option<ScriptTags>,
+        stages: &[u64],
+        per_syllable: bool,
+        glyphs: &mut Vec<SubGlyph>,
+        mut between: impl FnMut(usize, &mut Vec<SubGlyph>),
+    ) {
         let mut ctx = Ctx {
             lookup_list: self.lookup_list,
             depth: MAX_NESTING,
@@ -528,10 +592,66 @@ impl Substitutions {
             mask: ALWAYS,
             serial: 0,
         };
-        for (lookup, mask) in self.lookups.for_script(script) {
-            ctx.mask = mask;
-            apply_lookup(data, lookup, glyphs, &mut ctx);
+        // Hoisted out of both loops for the same reason `Ctx::scratch` is: a
+        // per-syllable stage would otherwise allocate once per syllable per
+        // lookup, and Devanagari text is nothing but syllables.
+        let mut piece: Vec<SubGlyph> = Vec::new();
+        for (i, &stage) in stages.iter().enumerate() {
+            for (lookup, mask) in self.lookups.for_script(script) {
+                let mask = mask & stage;
+                if mask == 0 {
+                    continue;
+                }
+                ctx.mask = mask;
+                if per_syllable {
+                    apply_per_syllable(data, lookup, glyphs, &mut ctx, &mut piece);
+                } else {
+                    apply_lookup(data, lookup, glyphs, &mut ctx);
+                }
+            }
+            between(i, glyphs);
         }
+    }
+}
+
+/// Run one lookup over each syllable of `glyphs` in turn, never across a
+/// boundary.
+///
+/// Each syllable is copied out, rewritten alone, and spliced back, which is
+/// what makes the boundary real rather than advisory: a lookup handed only one
+/// syllable cannot match beyond it however it is written, and neither can the
+/// backtrack or lookahead of a chaining rule inside it. Restricting the
+/// *starting* position instead would not do — a two-glyph ligature starting on
+/// the syllable's last glyph would still swallow the next syllable's first.
+///
+/// The splice may change the syllable's length, so the walk tracks where the
+/// next one now begins rather than trusting the original indices.
+fn apply_per_syllable(
+    data: &[u8],
+    lookup: &Lookup,
+    glyphs: &mut Vec<SubGlyph>,
+    ctx: &mut Ctx,
+    piece: &mut Vec<SubGlyph>,
+) {
+    let mut at = 0usize;
+    while at < glyphs.len() {
+        let Some(first) = glyphs.get(at) else { break };
+        let syllable = first.syllable;
+        let end = glyphs
+            .iter()
+            .enumerate()
+            .skip(at)
+            .find(|&(_, g)| g.syllable != syllable)
+            .map_or(glyphs.len(), |(j, _)| j);
+        piece.clear();
+        piece.extend_from_slice(glyphs.get(at..end).unwrap_or_default());
+        apply_lookup(data, lookup, piece, ctx);
+        let len = piece.len();
+        glyphs.splice(at..end, piece.iter().copied());
+        // The floor of one is only reachable if a syllable rewrote itself to
+        // nothing, which no lookup type can do; it is here so the walk
+        // terminates without relying on that.
+        at = at.saturating_add(len.max(1));
     }
 }
 
@@ -2042,6 +2162,102 @@ mod tests {
         let (data, subs) = fi_font();
         assert_eq!(subst(&data, &subs, &[10]), [10]);
         assert!(subst(&data, &subs, &[]).is_empty());
+    }
+
+    /// Run the lookups over `gids`, each glyph tagged with the syllable given
+    /// alongside it, confined so that no rule may look across a boundary.
+    fn per_syllable(data: &[u8], subs: &Substitutions, gids: &[(u16, u8)]) -> Vec<u16> {
+        let mut glyphs: Vec<SubGlyph> = gids
+            .iter()
+            .enumerate()
+            .map(|(i, &(gid, syllable))| SubGlyph {
+                syllable,
+                ..SubGlyph::new(gid, i)
+            })
+            .collect();
+        subs.apply_stages(data, None, &[ALL_FEATURES], true, &mut glyphs, |_, _| {});
+        glyphs.iter().map(|g| g.gid).collect()
+    }
+
+    #[test]
+    fn a_ligature_does_not_form_across_a_syllable_boundary() {
+        let (data, subs) = fi_font();
+        // The same two glyphs, the same lookup: one syllable ligates, two do
+        // not. Nothing about the font differs between the two calls.
+        assert_eq!(per_syllable(&data, &subs, &[(10, 0), (11, 0)]), [20]);
+        assert_eq!(per_syllable(&data, &subs, &[(10, 0), (11, 1)]), [10, 11]);
+    }
+
+    #[test]
+    fn every_syllable_is_shaped_and_not_just_the_first() {
+        let (data, subs) = fi_font();
+        assert_eq!(
+            per_syllable(&data, &subs, &[(10, 0), (11, 0), (10, 1), (11, 1)]),
+            [20, 20]
+        );
+    }
+
+    #[test]
+    fn a_syllable_that_shrinks_does_not_lose_the_next_one() {
+        let (data, subs) = fi_font();
+        // The first syllable's three glyphs become one, so the second no
+        // longer starts where it did. Splicing by the rewritten length rather
+        // than the original is what keeps `l` and the `fi` after it.
+        assert_eq!(
+            per_syllable(
+                &data,
+                &subs,
+                &[(10, 0), (10, 0), (11, 0), (12, 1), (10, 2), (11, 2)]
+            ),
+            [21, 12, 20]
+        );
+    }
+
+    #[test]
+    fn a_syllable_of_one_glyph_is_still_offered_to_the_lookup() {
+        let (data, subs) = fi_font();
+        // Every glyph its own syllable: nothing can ligate, and the walk must
+        // still reach the end rather than stalling on a syllable that came
+        // back the length it went in.
+        assert_eq!(
+            per_syllable(&data, &subs, &[(10, 0), (11, 1), (10, 2), (11, 3)]),
+            [10, 11, 10, 11]
+        );
+    }
+
+    #[test]
+    fn a_stage_naming_no_feature_rewrites_nothing() {
+        let (data, subs) = fi_font();
+        let mut glyphs: Vec<SubGlyph> = [10u16, 11]
+            .iter()
+            .enumerate()
+            .map(|(i, &gid)| SubGlyph::new(gid, i))
+            .collect();
+        subs.apply_stages(&data, None, &[0], false, &mut glyphs, |_, _| {});
+        assert_eq!(glyphs.iter().map(|g| g.gid).collect::<Vec<_>>(), [10, 11]);
+    }
+
+    #[test]
+    fn the_callback_runs_once_after_each_stage() {
+        let (data, subs) = fi_font();
+        let mut glyphs: Vec<SubGlyph> = [10u16, 11]
+            .iter()
+            .enumerate()
+            .map(|(i, &gid)| SubGlyph::new(gid, i))
+            .collect();
+        let mut seen: Vec<(usize, usize)> = Vec::new();
+        // Stage 0 selects nothing, so the ligature is still two glyphs when
+        // the first callback runs and one by the second: the callback sees the
+        // run as that stage left it, which is the whole point of it.
+        subs.apply_stages(
+            &data,
+            None,
+            &[0, ALL_FEATURES],
+            false,
+            &mut glyphs,
+            |i, glyphs| seen.push((i, glyphs.len())),
+        );
+        assert_eq!(seen, [(0, 2), (1, 1)]);
     }
 
     const IGNORE_MARKS: u16 = 0x0008;

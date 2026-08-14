@@ -31,6 +31,7 @@ use alloc::vec::Vec;
 use crate::FontMetrics;
 use crate::raster::{GlyphMask, rasterize};
 use crate::sfnt::{Face, PathCmd, SfntError};
+use crate::shape::{GlyphKey, ShapedGlyph, ShapedRun, TAB_WIDTH_IN_SPACES};
 
 /// How many rasterized glyphs one [`ScaledFont`] keeps before it starts
 /// evicting.
@@ -356,29 +357,74 @@ impl ScaledFont {
         f32::from(self.face.kern(left, right)) * self.scale
     }
 
-    /// Width of `text` in pixels, ignoring line breaks.
+    /// The glyphs `text` turns into, with final advances.
     ///
-    /// This only needs `hmtx` and the kerning tables, so it does not rasterize
-    /// anything and does not touch the cache.
+    /// Everything that walks text goes through here — measuring, drawing,
+    /// hit-testing, truncating — so that they cannot come to different
+    /// answers about the same string. See [`shape`](crate::shape) for why
+    /// that is not a theoretical concern.
+    ///
+    /// Does not rasterize anything and does not touch the glyph cache: this
+    /// needs `cmap`, `hmtx` and the layout tables only, which is what lets a
+    /// widget measure its label without paying to draw it.
     #[must_use]
-    pub fn measure(&self, text: &str) -> f32 {
-        let mut w = 0.0_f32;
-        let mut prev = None;
-        for ch in text.chars() {
+    pub fn shape(&self, text: &str) -> ShapedRun {
+        let space = self.glyph_id(' ');
+        let mut glyphs: Vec<ShapedGlyph> = Vec::new();
+        // Whether the glyph just pushed may be kerned against the next one. A
+        // tab may not: its advance is a layout decision, not a glyph width,
+        // and a face that kerns after a space would quietly narrow it.
+        let mut kernable = false;
+        for (cluster, ch) in text.char_indices() {
+            // A tab has no glyph. Drawn through `cmap` it comes out as the
+            // missing-glyph box, one space wide; the width every caller wants
+            // is several spaces of nothing. Substituting the space glyph gets
+            // both — it draws blank, and its advance is the unit to multiply.
+            if ch == '\t' {
+                let advance = self
+                    .face
+                    .advance(space)
+                    .map_or(0.0, |a| f32::from(a) * self.scale);
+                glyphs.push(ShapedGlyph {
+                    key: GlyphKey::outline(space),
+                    cluster,
+                    advance: advance * TAB_WIDTH_IN_SPACES,
+                    kern_next: 0.0,
+                });
+                kernable = false;
+                continue;
+            }
             let gid = self.glyph_id(ch);
             // Kerning is part of the width, not a drawing-time flourish: a
             // measurement that leaves it out is one that disagrees with what
             // the compositor puts on the screen, which is how a label ends up
-            // centred half a pixel off in every button on the desktop.
-            if let Some(prev) = prev {
-                w += self.kern(prev, gid);
+            // centred half a pixel off in every button on the desktop. It is
+            // charged to the *preceding* glyph so that the advances sum to
+            // the run's width.
+            if let Some(last) = glyphs.last_mut().filter(|_| kernable) {
+                let kern = self.kern(last.key.gid(), gid);
+                last.advance += kern;
+                last.kern_next = kern;
             }
-            if let Ok(adv) = self.face.advance(gid) {
-                w += f32::from(adv) * self.scale;
-            }
-            prev = Some(gid);
+            let advance = self
+                .face
+                .advance(gid)
+                .map_or(0.0, |a| f32::from(a) * self.scale);
+            glyphs.push(ShapedGlyph {
+                key: GlyphKey::outline(gid),
+                cluster,
+                advance,
+                kern_next: 0.0,
+            });
+            kernable = true;
         }
-        w
+        ShapedRun::new(glyphs)
+    }
+
+    /// Width of `text` in pixels, ignoring line breaks.
+    #[must_use]
+    pub fn measure(&self, text: &str) -> f32 {
+        self.shape(text).width()
     }
 
     /// Break `text` into lines no wider than `max_width`, at whitespace.
@@ -421,17 +467,15 @@ impl ScaledFont {
     /// alpha, so a fully opaque colour still anti-aliases.
     pub fn draw_text(&mut self, text: &str, target: &mut Target<'_>, x: f32, y: f32) -> f32 {
         let mut pen = x;
-        let mut prev = None;
-        for ch in text.chars() {
-            let gid = self.glyph_id(ch);
-            if let Some(prev) = prev {
-                pen += self.kern(prev, gid);
-            }
-            prev = Some(gid);
-            let Ok(glyph) = self.glyph(gid) else {
+        // Shaped up front, and into a local, because the loop needs `&mut
+        // self` to rasterize while it walks the run.
+        let run = self.shape(text);
+        for shaped in run.glyphs() {
+            let advance = shaped.advance;
+            let Ok(glyph) = self.glyph(shaped.key.gid()) else {
+                pen += advance;
                 continue;
             };
-            let advance = glyph.advance;
             // A mask's left/top come from a bitmap bounded by
             // `MAX_GLYPH_PIXELS`, so they are small integers; the pen and
             // baseline are caller-supplied and may be anything, which is why

@@ -289,28 +289,20 @@ pub fn digit_advance(size: f32, weight: FontWeightHint) -> f32 {
 
 /// The longest prefix of `text` that fits in `max_width`, as a byte index.
 ///
-/// Breaks between characters, never inside one: half a glyph reads as a
-/// rendering fault rather than as elided text, and a byte-sliced UTF-8
-/// sequence is not text at all.
+/// Breaks between glyphs, never inside one: half a glyph reads as a rendering
+/// fault rather than as elided text, a byte-sliced UTF-8 sequence is not text
+/// at all, and half a ligature is both.
 pub fn fit(text: &str, max_width: f32, size: f32, weight: FontWeightHint) -> usize {
     if max_width <= 0.0 {
         return 0;
     }
-    with_font(size, weight, |font| {
-        let mut used = 0.0;
-        for (idx, ch) in text.char_indices() {
-            // Measured per character rather than by re-measuring the whole
-            // prefix each step, which would be quadratic in the line length.
-            let Some((_, advance)) = font.glyph(ch) else {
-                continue;
-            };
-            if used + advance > max_width {
-                return idx;
-            }
-            used += advance;
-        }
-        text.len()
-    })
+    // Shaped once and walked, rather than re-measured per prefix, which would
+    // be quadratic in the line length. Going through the shaped run — rather
+    // than summing each character's bare advance, which is what this used to
+    // do — is what makes the cut agree with `measure`: an unkerned sum drifts
+    // from the width the text is actually drawn at, so an ellipsis appeared a
+    // few pixels from where the string really ended.
+    with_font(size, weight, |font| font.shape(text).fit(max_width, text.len()))
 }
 
 /// The longest *suffix* of `text` that fits in `max_width`, as the byte index
@@ -319,26 +311,14 @@ pub fn fit(text: &str, max_width: f32, size: f32, weight: FontWeightHint) -> usi
 /// The mirror of [`fit`], for the cases where the end of the string is the part
 /// worth keeping — a filesystem path, where the filename matters and the
 /// leading directories do not, is the usual one. Like [`fit`] it breaks between
-/// characters: an index into the middle of a UTF-8 sequence is not a string
+/// glyphs: an index into the middle of a UTF-8 sequence is not a string
 /// boundary, and slicing there is an abort rather than a cosmetic fault.
 pub fn fit_end(text: &str, max_width: f32, size: f32, weight: FontWeightHint) -> usize {
     if max_width <= 0.0 {
         return text.len();
     }
     with_font(size, weight, |font| {
-        let mut used = 0.0;
-        for (idx, ch) in text.char_indices().rev() {
-            let Some((_, advance)) = font.glyph(ch) else {
-                continue;
-            };
-            if used + advance > max_width {
-                // `idx` is the character that did not fit, so the suffix that
-                // does starts after it.
-                return idx.saturating_add(ch.len_utf8());
-            }
-            used += advance;
-        }
-        0
+        font.shape(text).fit_end(max_width, text.len())
     })
 }
 
@@ -613,19 +593,18 @@ pub fn char_index_at(text: &str, offset: f32, size: f32, weight: FontWeightHint)
     if offset <= 0.0 {
         return 0;
     }
-    with_font(size, weight, |font| {
-        let mut x = 0.0;
-        for (n, ch) in text.chars().enumerate() {
-            let Some((_, advance)) = font.glyph(ch) else {
-                continue;
-            };
-            if offset < x + advance / 2.0 {
-                return n;
-            }
-            x += advance;
-        }
-        text.chars().count()
-    })
+    // The shaped run answers in byte offsets, which is the honest currency —
+    // a caret can only sit at a glyph boundary, and with ligatures that is not
+    // every character boundary. This converts because the callers still count
+    // characters; the conversion is where a caret inside a ligature gets
+    // rounded to the ligature's start rather than into the middle of it.
+    let at = with_font(size, weight, |font| {
+        font.shape(text).offset_at(offset, text.len())
+    });
+    text.get(..at).map_or_else(
+        || text.chars().count(),
+        |prefix| prefix.chars().count(),
+    )
 }
 
 #[cfg(test)]
@@ -669,6 +648,55 @@ mod tests {
         let cut = fit(text, one * 2.5, 16.0, FontWeightHint::Regular);
         assert!(text.is_char_boundary(cut), "cut {cut} splits a character");
         assert_eq!(&text[..cut], "éé");
+    }
+
+    /// Every query about a string has to be answered from the same layout.
+    ///
+    /// This is the bug that made the shaped run necessary: `measure` applied
+    /// kerning and `fit`/`char_index_at` summed bare per-character advances,
+    /// so on text with kerned pairs in it — which is most text — the prefix
+    /// `fit` chose could measure *wider* than the limit it was given, and a
+    /// click landed on one character while the caret was drawn at another.
+    /// The strings below are chosen for their kerned pairs.
+    #[test]
+    fn fit_agrees_with_measure() {
+        for text in ["AVATAR Types", "To Yo P. r. f)", "Wavy Table"] {
+            let full = measure(text, 16.0, FontWeightHint::Regular);
+            let mut max = 0.0_f32;
+            while max <= full + 8.0 {
+                let cut = fit(text, max, 16.0, FontWeightHint::Regular);
+                assert!(text.is_char_boundary(cut), "{text:?}: cut {cut} splits a character");
+                let kept = measure(&text[..cut], 16.0, FontWeightHint::Regular);
+                assert!(
+                    kept <= max + 0.001,
+                    "{text:?}: fit chose {cut} bytes at limit {max}, but they measure {kept}"
+                );
+                max += 1.0;
+            }
+        }
+    }
+
+    /// A click and the caret it produces must land in the same place.
+    #[test]
+    fn a_click_and_the_caret_agree() {
+        let text = "AVATAR Types";
+        let full = measure(text, 16.0, FontWeightHint::Regular);
+        let mut offset = 0.0_f32;
+        while offset <= full {
+            let n = char_index_at(text, offset, 16.0, FontWeightHint::Regular);
+            assert!(n <= text.chars().count());
+            // The caret is drawn at the width of the text before it, so the
+            // gap it names must be no further from the click than the widest
+            // glyph in the run — otherwise the caret visibly jumps away from
+            // where the user pressed.
+            let before: String = text.chars().take(n).collect();
+            let x = measure(&before, 16.0, FontWeightHint::Regular);
+            assert!(
+                (x - offset).abs() <= 16.0,
+                "clicked at {offset}, caret drawn at {x} (character {n})"
+            );
+            offset += 1.0;
+        }
     }
 
     #[test]

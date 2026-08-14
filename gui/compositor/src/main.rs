@@ -1802,20 +1802,16 @@ impl RenderEngine {
         let baseline = y as f32 + font.metrics().ascent;
         let max_x = max_width.map(|w| x.saturating_add(w as i32));
         let mut pen = x as f32;
-        let mut prev = None;
 
-        for ch in text.chars() {
-            // The toolkit measured this string with kerning applied, so
-            // drawing it without would put every glyph after the first `AV` or
-            // `To` in the run a fraction to the right of where the layout that
-            // sized the widget expects it.
-            if let Some(prev) = prev {
-                pen += font.kern(prev, ch);
-            }
-            prev = Some(ch);
-            let Some((mask, advance)) = font.glyph(ch) else {
-                continue;
-            };
+        // Shaped rather than walked character by character, so this run is
+        // spaced exactly as the toolkit measured it — same kerning, same
+        // ligatures, same tab width. Laying text out here by a different rule
+        // from the process that sized the widget is how every centred label
+        // ends up off by half the difference, with neither process looking
+        // wrong on its own.
+        let run = font.shape(text);
+        for shaped in run.glyphs() {
+            let advance = shaped.advance;
             // Measured before drawing, so a glyph that would cross the limit is
             // dropped whole rather than clipped down the middle.
             if let Some(mx) = max_x
@@ -1823,7 +1819,9 @@ impl RenderEngine {
             {
                 break;
             }
-            blend_mask(fb, mask, pen, baseline, color, opacity, clip.as_ref());
+            if let Some(mask) = font.glyph_mask(shaped.key) {
+                blend_mask(fb, mask, pen, baseline, color, opacity, clip.as_ref());
+            }
             pen += advance;
         }
     }

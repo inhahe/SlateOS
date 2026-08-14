@@ -45,6 +45,7 @@ pub mod raster;
 pub mod scaled;
 pub mod select;
 pub mod sfnt;
+pub mod shape;
 pub mod system;
 
 use alloc::collections::BTreeMap;

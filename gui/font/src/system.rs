@@ -33,6 +33,7 @@ use alloc::vec::Vec;
 use crate::raster::GlyphMask;
 use crate::scaled::{ScaledFont, ScaledFontError, Target, blit_mask, pixel_coord};
 use crate::sfnt::{Face, SfntError};
+use crate::shape::{GlyphKey, ShapedGlyph, ShapedRun, TAB_WIDTH_IN_SPACES};
 use crate::{FONT_HEIGHT, Font, FontMetrics, GlyphBitmap};
 
 /// A font that can draw text, backed by either an outline face or the
@@ -156,13 +157,52 @@ impl SystemFont {
         self.metrics().line_height
     }
 
+    /// The glyphs `text` turns into, with final advances.
+    ///
+    /// The single entry point for anything that walks text: measuring,
+    /// drawing, hit-testing and truncating all read the same run, so they
+    /// cannot disagree about where a character sits. See
+    /// [`shape`](crate::shape).
+    #[must_use]
+    pub fn shape(&self, text: &str) -> ShapedRun {
+        match &self.backend {
+            Backend::Outline(f) => f.shape(text),
+            // The bitmap face is a fixed grid: one glyph per character, no
+            // kerning to apply and no substitutions to make. It still shapes
+            // rather than being special-cased at every call site, so that the
+            // callers stay backend-agnostic.
+            Backend::Bitmap { font, .. } => ShapedRun::new(
+                text.char_indices()
+                    .map(|(cluster, ch)| {
+                        // Same tab rule as the outline path, for the same
+                        // reason: the built-in face has no tab glyph either,
+                        // and its measurement already widened one to four
+                        // cells while its drawing did not.
+                        let (key, advance) = if ch == '\t' {
+                            (
+                                GlyphKey::bitmap(' '),
+                                font.glyph(' ').advance * TAB_WIDTH_IN_SPACES,
+                            )
+                        } else {
+                            (GlyphKey::bitmap(ch), font.glyph(ch).advance)
+                        };
+                        ShapedGlyph {
+                            key,
+                            cluster,
+                            advance,
+                            // A fixed grid has no pair corrections to make.
+                            kern_next: 0.0,
+                        }
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
     /// Width of `text` in pixels, ignoring line breaks.
     #[must_use]
     pub fn measure(&self, text: &str) -> f32 {
-        match &self.backend {
-            Backend::Outline(f) => f.measure(text),
-            Backend::Bitmap { font, .. } => font.measure_line(text),
-        }
+        self.shape(text).width()
     }
 
     /// Breaks `text` into lines no wider than `max_width`, at whitespace.
@@ -184,13 +224,13 @@ impl SystemFont {
     /// without re-measuring.
     pub fn draw_text(&mut self, text: &str, target: &mut Target<'_>, x: f32, y: f32) -> f32 {
         let mut pen = x;
-        let mut prev = None;
-        for ch in text.chars() {
-            if let Some(prev) = prev {
-                pen += self.kern(prev, ch);
-            }
-            prev = Some(ch);
-            let Some((mask, advance)) = self.glyph(ch) else {
+        // Shaped into a local because the loop needs `&mut self` to rasterize
+        // while it walks the run.
+        let run = self.shape(text);
+        for shaped in run.glyphs() {
+            let advance = shaped.advance;
+            let Some(mask) = self.glyph_mask(shaped.key) else {
+                pen += advance;
                 continue;
             };
             // A mask's left/top are small integers bounded by the glyph size;
@@ -210,36 +250,21 @@ impl SystemFont {
         pen
     }
 
-    /// How much to move the pen between `prev` and `ch`, over and above
-    /// `prev`'s advance — the font's own correction for a pair whose nominal
-    /// advances leave them looking too far apart (`AV`) or too close.
+    /// The coverage mask for a shaped glyph, rasterizing and caching it if
+    /// this is the first time it has been asked for.
     ///
-    /// Zero for the bitmap face, which is a fixed grid and has nothing to
-    /// correct, and zero for the many outline faces that ship no kerning.
+    /// [`draw_text`](Self::draw_text) covers the common case, but it can only
+    /// draw into a [`Target`] — a flat `[u32]` surface with one colour and no
+    /// clipping beyond its own bounds. The compositor blends every pixel
+    /// through a clip stack and a per-window opacity, so it needs the
+    /// coverage values themselves rather than a finished blit. Handing out
+    /// the mask keeps that policy where it belongs instead of growing
+    /// `Target` a field at a time until it is a compositor.
     ///
-    /// Callers that draw a glyph at a time have to add this themselves;
-    /// [`measure`](Self::measure) and [`draw_text`](Self::draw_text) already
-    /// do. It is exposed rather than hidden because the compositor cannot use
-    /// either of those — it blends coverage through its own clip stack — and
-    /// it must not space text differently from the way it was measured.
-    #[must_use]
-    pub fn kern(&self, prev: char, ch: char) -> f32 {
-        match &self.backend {
-            Backend::Outline(f) => f.kern(f.glyph_id(prev), f.glyph_id(ch)),
-            Backend::Bitmap { .. } => 0.0,
-        }
-    }
-
-    /// The coverage mask for `ch` and the pen advance past it, rasterizing and
-    /// caching it if this is the first time it has been asked for.
-    ///
-    /// `draw_text` covers the common case, but it can only draw into a
-    /// [`Target`] — a flat `[u32]` surface with one colour and no clipping
-    /// beyond its own bounds. The compositor blends every pixel through a clip
-    /// stack and a per-window opacity, so it needs the coverage values
-    /// themselves rather than a finished blit. Handing out the mask keeps that
-    /// policy where it belongs instead of growing `Target` a field at a time
-    /// until it is a compositor.
+    /// The advance is *not* returned with it: it belongs to the
+    /// [`ShapedGlyph`] the key came from, because it depends on the glyph's
+    /// neighbours. A caller that took it from here would be back to spacing
+    /// text differently from the way it was measured.
     ///
     /// Returns `None` only when an outline glyph fails to rasterize; the
     /// bitmap backend always answers, with tofu if it must.
@@ -247,20 +272,15 @@ impl SystemFont {
     /// The mask is positioned by its `left`/`top`, measured from the pen
     /// position on the baseline with y growing downward — identical for both
     /// backends, so a caller never learns which one it has.
-    pub fn glyph(&mut self, ch: char) -> Option<(&GlyphMask, f32)> {
+    pub fn glyph_mask(&mut self, key: GlyphKey) -> Option<&GlyphMask> {
         match &mut self.backend {
-            Backend::Outline(f) => {
-                let gid = f.glyph_id(ch);
-                let glyph = f.glyph(gid).ok()?;
-                Some((&glyph.mask, glyph.advance))
-            }
+            Backend::Outline(f) => Some(&f.glyph(key.gid()).ok()?.mask),
             Backend::Bitmap { font, masks } => {
+                let ch = key.ch();
                 let glyph = font.glyph(ch);
-                let advance = glyph.advance;
                 // `font` and `masks` are disjoint fields, so the closure may
                 // read the face while the entry holds the cache.
-                let mask = masks.entry(ch).or_insert_with(|| mask_from_bitmap(glyph));
-                Some((mask, advance))
+                Some(masks.entry(ch).or_insert_with(|| mask_from_bitmap(glyph)))
             }
         }
     }
@@ -535,7 +555,12 @@ mod tests {
             } else {
                 "bitmap"
             };
-            let (mask, advance) = font.glyph('A').expect("'A' must render");
+            let run = font.shape("A");
+            assert_eq!(run.len(), 1, "{which}: one letter, one glyph");
+            let shaped = run.glyphs()[0];
+            assert!(shaped.advance > 0.0, "{which}: pen must advance");
+            assert_eq!(shaped.cluster, 0, "{which}: the glyph came from byte 0");
+            let mask = font.glyph_mask(shaped.key).expect("'A' must render");
             assert!(mask.width > 0 && mask.height > 0, "{which}: empty mask");
             assert_eq!(
                 mask.coverage.len(),
@@ -547,7 +572,6 @@ mod tests {
                 "{which}: a capital A must sit above the baseline, got top {}",
                 mask.top
             );
-            assert!(advance > 0.0, "{which}: pen must advance");
         }
     }
 
@@ -556,8 +580,9 @@ mod tests {
         // Text redraws the same few dozen letters every frame; expanding each
         // one again per occurrence would put an allocation on that path.
         let mut font = SystemFont::builtin(16.0);
-        let first = font.glyph('e').unwrap().0.clone();
-        let second = font.glyph('e').unwrap().0;
+        let key = font.shape("e").glyphs()[0].key;
+        let first = font.glyph_mask(key).unwrap().clone();
+        let second = font.glyph_mask(key).unwrap();
         assert_eq!(&first, second, "cached mask differs from the first one");
         let Backend::Bitmap { masks, .. } = &font.backend else {
             panic!("builtin() must take the bitmap path");

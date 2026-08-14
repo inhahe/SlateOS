@@ -1081,7 +1081,10 @@ const MAX_LOCKED_PATHS: usize = 1024;
 /// does for every VFS operation.  1024 entries covers deep directory
 /// hierarchies and multi-process workloads.  At ~200 bytes per entry,
 /// the total overhead is ~200 KiB.
-pub(super) const VFS_DCACHE_SIZE: usize = 1024;
+// pub(crate) rather than pub(super) so `bench.rs` can report the scan length
+// next to the measured lookup cost — the two numbers only mean anything
+// together (a linear scan's cost is a function of how many slots are live).
+pub(crate) const VFS_DCACHE_SIZE: usize = 1024;
 
 /// A single entry in the VFS path resolution cache.
 struct VfsDcacheEntry {

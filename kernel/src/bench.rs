@@ -1540,6 +1540,9 @@ pub fn run_all() {
 
     // --- VFS benchmarks (fs zone) ---
     bench_vfs_stat();
+    // Runs immediately after vfs_stat so it sees the same dcache occupancy
+    // that vfs_stat was measured against.
+    bench_vfs_stat_breakdown();
     bench_vfs_read_write();
     bench_vfs_readdir();
 
@@ -3069,6 +3072,66 @@ fn bench_vfs_stat() {
             result.min_ns, target_ns
         );
     }
+}
+
+/// Diagnostic breakdown of `vfs_stat_root`, which misses its 700 ns target
+/// by ~8.5x (5920 ns measured on the first release-profile run).
+///
+/// This exists to locate the cost rather than guess at it.  `Vfs::stat` is
+/// exactly two phases and both are reachable from public API, so the split
+/// needs no new plumbing:
+///
+/// * `Vfs::stat(p)`          = `resolve_follow(p)` + `stat_resolved(p)`
+/// * `Vfs::stat_resolved(p)` = the second phase alone
+///
+/// so the difference is `resolve_follow` — namespace translation, path
+/// normalisation, and the `VFS_DCACHE` lookup.  The suspicion under test is
+/// the dcache: `VfsDcache::lookup` (`fs/vfs.rs`) is a **linear scan over all
+/// `VFS_DCACHE_SIZE` = 1024 entries** doing a full `PathBuf` compare per
+/// entry, which CLAUDE.md's performance rules forbid outright ("Linear scans
+/// … must be O(1) or O(log n)").  If that is the cost, `resolve_follow`
+/// dominates and the cost tracks `valid_entries`, not path depth.  If instead
+/// `stat_resolved` dominates, the dcache is a red herring and the underlying
+/// per-filesystem `stat` is the problem.
+///
+/// The hit counters are reported too, because a scan that *misses* walks all
+/// 1024 slots while a hit stops early — so hit rate and occupancy together
+/// determine the expected scan length.
+fn bench_vfs_stat_breakdown() {
+    use crate::fs::vfs::Vfs;
+
+    if Vfs::stat("/").is_err() {
+        serial_println!("[bench] vfs_stat_breakdown: SKIP (VFS not initialized)");
+        return;
+    }
+
+    let (hits_before, misses_before, valid_entries) = Vfs::dcache_stats();
+
+    // Phase A+B together.
+    let full = run("vfs_stat_breakdown_full", 500, || {
+        let _ = core::hint::black_box(Vfs::stat("/"));
+    });
+    // Phase B alone. "/" is already normalised and mount-relative, so this is
+    // the same work `stat` does after `resolve_follow` returns.
+    let resolved_only = run("vfs_stat_breakdown_resolved", 500, || {
+        let _ = core::hint::black_box(Vfs::stat_resolved("/"));
+    });
+
+    let (hits_after, misses_after, valid_after) = Vfs::dcache_stats();
+
+    let resolve_ns = full.min_ns.saturating_sub(resolved_only.min_ns);
+    serial_println!(
+        "[bench]   vfs_stat_breakdown: full {}ns = resolve_follow ~{}ns + stat_resolved {}ns",
+        full.min_ns, resolve_ns, resolved_only.min_ns
+    );
+    serial_println!(
+        "[bench]   vfs_stat_breakdown: dcache {} valid entries (of {}), +{} hits +{} misses over the run",
+        valid_after,
+        crate::fs::vfs::VFS_DCACHE_SIZE,
+        hits_after.saturating_sub(hits_before),
+        misses_after.saturating_sub(misses_before)
+    );
+    let _ = (valid_entries, misses_before);
 }
 
 /// Benchmark VFS read + write cycle.

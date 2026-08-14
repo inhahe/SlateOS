@@ -58129,14 +58129,47 @@ masks with `0x3` and has no both-flags test), so the libc check was also
 inconsistent with the layer below it. Removed: it is the filesystem's
 judgement, not libc's.
 
-**What remains.** The ~230 surviving `is_null() -> EFAULT` sites have not been
+**Fifth pass, 2026-08-13 — `unistd.rs` (13 sites).** Most were already correct
+and several already carried citations (`realpath`, `canonicalize_file_name`
+and `getrandom` were fixed in the earlier passes; `chdir`, `chroot`,
+`getresuid`/`getresgid`, `sysinfo` and the `*at` paths all forward the pointer
+to a syscall, so `EFAULT` stands). Three did not:
+
+- **`getentropy(NULL, 512)` was `EFAULT`; glibc gives `EIO`.** glibc's
+  `getentropy` (sysdeps/unix/sysv/linux/getentropy.c) opens with
+  `if (length > 256) { __set_errno (EIO); return -1; }` before it forms
+  `end = buffer + length` or issues `getrandom`. And `getentropy(NULL, 0)`
+  now *succeeds*: the `while (buffer < end)` loop does not run, so no syscall
+  is issued and the pointer is never touched — the same shape `getrandom`
+  already documented one function above.
+- **`gethostname(NULL, 0)` was `EFAULT`; glibc gives `ENAMETOOLONG`.**
+  `__gethostname` (sysdeps/posix/gethostname.c) never checks the pointer; it
+  `memcpy`s `min (len, node_len)` bytes and *then* tests
+  `node_len > len`. With `len == 0` the copy moves nothing, so a NULL buffer
+  is safe and the length test decides.
+- **`gethostname` did not truncate.** The same `memcpy` runs unconditionally,
+  so glibc fills a too-small buffer with as much of the name as fits —
+  truncated and not null-terminated — before returning `ENAMETOOLONG`. We
+  left the caller's buffer untouched, so a caller that ignored the return
+  value read stale bytes instead of a truncated hostname. Now matched.
+
+`getdomainname` is a **deliberate** divergence, now documented at the function:
+glibc (misc/getdomain.c, the `_UTSNAME_DOMAIN_LENGTH` branch Linux takes) has
+no length rejection at all and returns 0 after truncating, so a short buffer
+silently receives an unterminated string. We keep `EINVAL` — quiet truncation
+is the corruption this codebase forbids, and it is what the Linux man page
+documents. Because the check is ours, it is ours to order, and it now goes
+first, so `getdomainname(NULL, 0)` is `EINVAL` rather than `EFAULT`.
+
+**What remains.** The ~215 surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. The densest remaining concentrations
-are `file.rs` (28), `spawn.rs` (16), `socket.rs` (15) and `unistd.rs` (13).
-None of them needs §303's reasoning, which is specific to NPTL's shape — they
-are ordinary §300 lookups: does the pointer reach a syscall or not, and in
-what order relative to the call's other arguments. The xattr pass is the
-template: expect the constants to be right and the *ordering* to be wrong.
+are `file.rs` (28), `spawn.rs` (16) and `socket.rs` (15). None of them needs
+§303's reasoning, which is specific to NPTL's shape — they are ordinary §300
+lookups: does the pointer reach a syscall or not, and in what order relative
+to the call's other arguments. The xattr and unistd passes are the template:
+expect the constants to be right and the *ordering* to be wrong, and expect
+the reading to turn up an adjacent behavioural bug or two on the way.
 
 **Reproduce.** Not a runtime failure. `rg -A3 'is_null\(\)' posix/src`, filtered
 for `EFAULT` in the following lines, enumerates the candidate sites; each has to

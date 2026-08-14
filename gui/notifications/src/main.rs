@@ -69,6 +69,15 @@ const TOAST_SHADOW_BLUR: f32 = 12.0;
 const TOAST_RIGHT_MARGIN: f32 = 16.0;
 const TOAST_TOP_MARGIN: f32 = 48.0;
 const MAX_VISIBLE_TOASTS: usize = 4;
+/// Font size of a toast's body text.
+const TOAST_BODY_FONT_SIZE: f32 = 12.0;
+/// Baseline-to-baseline spacing of the toast body, in pixels.
+///
+/// Named because `toast_height` and the per-line draw both depend on it; as
+/// two separate literals they could disagree and clip the last line.
+const TOAST_BODY_LINE_HEIGHT: f32 = 16.0;
+/// Most body lines a toast will show before eliding.
+const TOAST_BODY_MAX_LINES: usize = 3;
 const CLOSE_BTN_SIZE: f32 = 20.0;
 const PROGRESS_BAR_HEIGHT: f32 = 4.0;
 const ACTION_BTN_HEIGHT: f32 = 28.0;
@@ -605,8 +614,47 @@ impl NotificationDaemon {
         self.history.iter().find(|n| n.id == id)
     }
 
+    /// The body text, broken into the lines the toast will draw.
+    ///
+    /// `RenderCommand::Text` does not wrap — the compositor clips at
+    /// `max_width` — so a body sent as one command showed only its first
+    /// line's worth of characters, silently and with nothing to mark that the
+    /// rest had been dropped. `toast_height` grows from this same list, so a
+    /// two-line body cannot overlap the toast stacked beneath it.
+    ///
+    /// Capped at [`TOAST_BODY_MAX_LINES`]: a toast is a glance, not a reader,
+    /// and an unbounded one would push the rest of the stack off screen. The
+    /// last kept line is elided so the cut is visible rather than reading as
+    /// the end of the sentence.
+    fn body_lines(&self, notif: &Notification) -> Vec<String> {
+        let max_width = TOAST_WIDTH - TOAST_PADDING * 2.0 - 16.0;
+        let mut lines = text::wrap(
+            &notif.body,
+            max_width,
+            TOAST_BODY_FONT_SIZE,
+            FontWeightHint::Regular,
+        );
+        if lines.len() > TOAST_BODY_MAX_LINES {
+            lines.truncate(TOAST_BODY_MAX_LINES);
+            if let Some(last) = lines.last_mut() {
+                *last = text::elide(
+                    &format!("{last}…"),
+                    max_width,
+                    "…",
+                    TOAST_BODY_FONT_SIZE,
+                    FontWeightHint::Regular,
+                );
+            }
+        }
+        lines
+    }
+
     fn toast_height(&self, notif: &Notification) -> f32 {
         let mut h = TOAST_MIN_HEIGHT;
+        // `TOAST_MIN_HEIGHT` already has room for one body line; each further
+        // line makes the toast taller rather than spilling out of it.
+        let extra_lines = self.body_lines(notif).len().saturating_sub(1);
+        h += extra_lines as f32 * TOAST_BODY_LINE_HEIGHT;
         if !notif.actions.is_empty() {
             h += ACTION_BTN_HEIGHT + 8.0;
         }
@@ -941,16 +989,18 @@ impl NotificationDaemon {
                 max_width: Some(TOAST_WIDTH - TOAST_PADDING * 2.0 - CLOSE_BTN_SIZE - 16.0),
             });
 
-            // Body text.
-            cmds.push(RenderCommand::Text {
-                x: toast_x + TOAST_PADDING + 8.0,
-                y: y + TOAST_PADDING + 34.0,
-                text: notif.body.clone(),
-                color: SUBTEXT1,
-                font_size: 12.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(TOAST_WIDTH - TOAST_PADDING * 2.0 - 16.0),
-            });
+            // Body text, one command per wrapped line.
+            for (n, line) in self.body_lines(notif).iter().enumerate() {
+                cmds.push(RenderCommand::Text {
+                    x: toast_x + TOAST_PADDING + 8.0,
+                    y: y + TOAST_PADDING + 34.0 + n as f32 * TOAST_BODY_LINE_HEIGHT,
+                    text: line.clone(),
+                    color: SUBTEXT1,
+                    font_size: TOAST_BODY_FONT_SIZE,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(TOAST_WIDTH - TOAST_PADDING * 2.0 - 16.0),
+                });
+            }
 
             // Close button (X).
             let close_x = toast_x + TOAST_WIDTH - TOAST_PADDING - CLOSE_BTN_SIZE;
@@ -1524,6 +1574,104 @@ mod tests {
             group_key: None,
             read: false,
         }
+    }
+
+    /// A daemon showing one notification whose body is `body`.
+    fn daemon_with_body(body: &str) -> NotificationDaemon {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        let mut notif = make_test_notification(0, NotificationPriority::Normal);
+        notif.body = String::from(body);
+        daemon.handle_request(NotificationRequest::Send(notif));
+        daemon
+    }
+
+    /// Every body line the toast drew, as (y, text), in draw order.
+    fn drawn_body_lines(daemon: &NotificationDaemon) -> Vec<(f32, String)> {
+        daemon
+            .render_toasts()
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    y,
+                    text,
+                    font_size,
+                    color,
+                    ..
+                } if (font_size - TOAST_BODY_FONT_SIZE).abs() < 0.01 && color == SUBTEXT1 => {
+                    Some((y, text))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_long_toast_body_is_wrapped_not_clipped() {
+        // `RenderCommand::Text` clips at `max_width` rather than wrapping, so a
+        // body sent as one command showed only its first line.
+        let body = "The backup finished but three files were skipped because \
+                    they were open in another program.";
+        let daemon = daemon_with_body(body);
+        let lines = drawn_body_lines(&daemon);
+
+        assert!(lines.len() > 1, "drawn as {} line(s)", lines.len());
+        assert_eq!(
+            lines
+                .iter()
+                .flat_map(|(_, l)| l.split_whitespace())
+                .collect::<Vec<_>>(),
+            body.split_whitespace().collect::<Vec<_>>(),
+            "the drawn lines are not the body"
+        );
+    }
+
+    #[test]
+    fn a_taller_toast_does_not_overlap_the_one_below_it() {
+        // The stacking offset comes from `toast_height`, so a body that wraps
+        // has to make the toast taller or it draws over its neighbour.
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        for body in ["Short.", "Short."] {
+            let mut notif = make_test_notification(0, NotificationPriority::Normal);
+            notif.body = String::from(body);
+            daemon.handle_request(NotificationRequest::Send(notif));
+        }
+        let one_line = daemon.toast_height(&daemon.history[0]);
+
+        let wrapped = daemon_with_body(
+            "The backup finished but three files were skipped because they \
+             were open in another program at the time.",
+        );
+        let many_lines = wrapped.toast_height(&wrapped.history[0]);
+        assert!(
+            many_lines > one_line,
+            "a wrapped body ({many_lines}) got no more room than a short one ({one_line})"
+        );
+
+        // And the last line stays inside the box the toast was given.
+        let lines = drawn_body_lines(&wrapped);
+        let last_y = lines.iter().map(|&(y, _)| y).fold(f32::MIN, f32::max);
+        assert!(
+            last_y + TOAST_BODY_LINE_HEIGHT <= TOAST_TOP_MARGIN + many_lines,
+            "the last line at {last_y} falls outside a toast {many_lines} tall"
+        );
+    }
+
+    #[test]
+    fn an_endless_toast_body_is_capped_and_marked_as_cut() {
+        // A toast is a glance, not a reader: an unbounded one would push the
+        // rest of the stack off screen. The cut has to be visible, or a
+        // truncated sentence reads as the whole one.
+        let daemon = daemon_with_body(&"word ".repeat(400));
+        let lines = drawn_body_lines(&daemon);
+
+        assert_eq!(lines.len(), TOAST_BODY_MAX_LINES);
+        let last = &lines[TOAST_BODY_MAX_LINES - 1].1;
+        assert!(last.ends_with('…'), "{last:?} does not show that it was cut");
+        assert!(
+            text::measure(last, TOAST_BODY_FONT_SIZE, FontWeightHint::Regular)
+                <= TOAST_WIDTH - TOAST_PADDING * 2.0 - 16.0,
+            "the elided line {last:?} is wider than the toast"
+        );
     }
 
     #[test]

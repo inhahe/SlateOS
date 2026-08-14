@@ -58126,8 +58126,9 @@ surfaced three things worth carrying forward:
 
 ## TD-GUI-TEXT-COMMAND-DOES-NOT-WRAP — callers assume `max_width` wraps, but it clips
 
-**Status.** Open. The two worst instances are fixed (`7948cf8d5` and the
-`AlertDialog` fix in the same series); the rest of the tree is unaudited.
+**Status.** Open. Three instances fixed — the About dialog's licence list
+(`7948cf8d5`), every `AlertDialog` (`46db88142`) and the notification toast
+body — but the app tree is unaudited.
 
 **What it is.** `RenderCommand::Text` carries a `max_width`, and the obvious
 reading is that the compositor wraps to it. It does not. `Compositor::draw_text`
@@ -58143,7 +58144,7 @@ So `max_width` is a **clip**, and it produces exactly one line. Any caller that
 hands a paragraph to a single `Text` command is showing only its first line's
 worth of characters — silently, with no marker that anything was dropped.
 
-**What it broke.** Two found so far, both user-visible:
+**What it broke.** Three found so far, all user-visible:
 
 - `gui/desktop/src/about.rs` — each open-source licence went out as one command,
   so the About dialog's Licences tab showed roughly the first line of each
@@ -58154,6 +58155,9 @@ worth of characters — silently, with no marker that anything was dropped.
   one command, and `compute_height` reserved a flat `FONT_SIZE * 3.0` for it
   regardless of length, so a long error message was cut to one line inside a box
   sized for three.
+- `gui/notifications` — every toast body. `toast_height` did not depend on the
+  body at all, so the fix had to grow the toast as well as wrap the text, or a
+  two-line body would have drawn over the toast stacked beneath it.
 
 **Proper fix.** `guitk::text::wrap(text, max_width, size, weight)` (added in
 `7948cf8d5`) breaks a string into the lines it will actually be drawn as; emit
@@ -58173,6 +58177,16 @@ Two things the fixes had to get right, and any further one will too:
   Wrapping alone would then draw the overflow straight through the button row —
   text on top of the controls that dismiss the dialog. The render loop breaks
   once a line would reach the buttons.
+- **A bounded surface caps the lines and says so.** A toast is a glance, not a
+  reader, so wrapping it without limit would push the rest of the stack off
+  screen. It takes three lines and elides the last, because a body cut without
+  a mark reads as a complete sentence — the reader cannot tell there was more.
+
+**Where it is *not* a bug.** `max_width` on a single-line label — a title, a
+column cell, a status-bar message — is doing exactly what it should. Clipping is
+the intended behaviour there, and the fix for an over-long one is `text::elide`,
+not wrapping. Only reach for `wrap` where the text is prose the user is meant to
+read in full.
 
 **Where to look next.** Unaudited callers passing prose to a single command,
 found by grepping for a `Text` command whose body is a `description` / `body` /

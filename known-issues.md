@@ -42859,6 +42859,36 @@ an unresolvable access returns `-EFAULT` instead of halting.
 
 **Discovered:** 2026-06-30 (page-cache §36 sub-task 4 review).
 
+**[A] 2026-08-14 — made self-identifying (diagnostic only, not a fix).**
+The fix stays blocked on a repro, but *recognising* a recurrence did not
+have to be. `kernel/src/idt.rs` (fatal-#PF path, just after the
+`CS/RFLAGS/RSP/SS` line) now tests the exact signature — `error & 4 == 0`
+(ring-0) && `error & 2 != 0` (write) && `error & 1 != 0` (present) &&
+`cr2 < USER_SPACE_END` — and on a match prints
+`*** MATCHES known-issues.md W-KERNEL-COW-WRITE ***` followed by the
+faulting PTE's flags via `page_table::translate_flags()`.
+
+The PTE dump is what makes this decisive rather than suggestive, because
+`PageFlags::COW` is an explicit software bit (bit 9) with the documented
+invariant "only meaningful when PRESENT is set and WRITABLE is cleared".
+So the three outcomes are distinguishable without further inference:
+- `USER_ACCESSIBLE && !WRITABLE && COW` → **CONFIRMED** unbroken CoW page;
+  the printed RIP names the kernel write path that must call
+  `mm::user::validate_user_write()` (the fix above).
+- `USER_ACCESSIBLE && !WRITABLE && !COW` → not CoW at all; a kernel write
+  to a genuinely read-only mapping — a different bug, and the diagnostic
+  says so rather than mislabelling it.
+- writable and/or not user-accessible → the error code matched but the PTE
+  disagrees, i.e. a stale TLB entry or a concurrent unmap.
+
+Deliberately *not* done: routing ring-0 user-address faults into
+`try_resolve_fault`. That remains rejected for the lock-re-entrancy reason
+in the paragraph above; this change cannot deadlock because it only reads
+page tables on a path already committed to `halt_loop()` with interrupts
+disabled. Same tactic as the bytes-at-RIP dump added for
+`B-PTHREAD-TEARDOWN-PF`: when a bug is rare and unreproducible, the
+actionable work is to guarantee the *next* occurrence is self-explaining.
+
 ### B-COMPACT1. Memory-compaction self-test (`collect_private_frames`) panicked non-deterministically across boots — FIXED 2026-06-16
 
 **Where:** `kernel/src/mm/compact.rs` — `self_test()` Test 5; the API under test is
@@ -44675,6 +44705,44 @@ statement executors `execute_while_loop`, `execute_select`,
 String` (`208`), which is the ~270-call-site figure this entry quotes. History
 (`entries: Vec<String>`, `2629`) has to move to `Vec<Vec<u8>>` as well, or
 recalling a byte-bearing command re-corrupts it.
+
+**Correction 3 (2026-08-14): 270 is the `resolve_path` count, not the size of
+the job — and quoting it here has been under-selling this task by ~6×.** The
+conversion is bounded by every *`str`-only method* reachable from
+`execute()`, not by one function's callers. Measured over the 84,845 lines of
+`kernel/src/kshell.rs`:
+
+| method | sites | on `[u8]`? |
+|---|---:|---|
+| `.parse::<…>` | 1153 | no — parse at the numeric leaf via `from_utf8` |
+| `.split_whitespace` | 552 | **no equivalent — must be written** |
+| `.trim*` | 292 | free (`trim_ascii`, already stable; used in `oci.rs:683`) |
+| `.push_str` | 160 | free (`extend_from_slice`) |
+| `.starts_with` | 138 | free (`slice::starts_with`) |
+| `.as_str` | 109 | free (`&v[..]`) |
+| `.strip_prefix` | 89 | free (`slice::strip_prefix`) |
+| `.to_lowercase` | 63 | `to_ascii_lowercase` (already byte-correct here) |
+| `.ends_with` | 53 | free (`slice::ends_with`) |
+| `.splitn` | 51 | signature differs (`slice::splitn` takes a predicate) |
+| `.split_once` | 15 | **no equivalent — must be written** |
+
+So ~**1520 `str`-method sites** plus ~**1150 `parse::<>` sites**, against the
+~270 this entry advertised. The useful split is that **631** of them
+(`trim`/`starts_with`/`ends_with`/`strip_prefix`) need *no* new code at all —
+`[u8]` already has them — so the extension trait only has to supply
+`split_ascii_whitespace`, `split_once` and a `splitn` shim. That is a small
+trait carrying a very large mechanical diff, which is the opposite shape from
+what this entry originally implied ("a self-contained rewrite of the cursor
+arithmetic").
+
+**Representation decisions (settled, so the next session need not re-litigate):**
+reuse the existing `Path`/`PathBuf` (`kernel/src/fs/path.rs`) for path leaves
+rather than inventing a second byte-string type; make the parser helpers an
+**extension trait on `[u8]`**, *not* a newtype — a newtype forces wrap/unwrap
+noise across all ~1500 sites for no invariant that `[u8]` doesn't already
+give; and write it in-house rather than adding `bstr` (the kernel is `no_std`
+on a custom target, `bstr` is only ever a host-side transitive dependency
+here, and `fs/path.rs` already proves the in-house pattern carries its weight).
 
 **Consequence for sequencing.** A partial conversion is worse than none: if the
 editor becomes byte-clean but `execute()` still takes `&str`, the lossy step

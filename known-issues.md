@@ -59934,6 +59934,23 @@ They are diffed against `a18ea83a9`, a run this entry now shows was itself
 contaminated, so the comparison is contaminated at both ends. They need a clean
 run-over-clean-run comparison before anyone reads them as real.
 
+**[A] Update 2026-08-14 — stage 2 verified, and all four elevated benchmarks
+were indeed contamination.** Run `5a2002bac` reported `spread 2%` over **10**
+mid-suite samples (267–275 cycles), so the sampling works end to end. Against
+that clean run every one of the four returned to its established value:
+`shm_rw_64bytes` 771 → **414**, `tcp_checksum_v4` 35410 → **20182**,
+`net_ipv4_parse` 1645 → **952**, `net_ethernet_parse` 1216 → **829**. None was
+a regression, which is what the refusal to report them was protecting.
+
+**Honest limitation — the production check has not yet been observed firing.**
+The unit tests prove the *logic* fires (a 173% mid-suite spread with quiet
+endpoints reads as contaminated), and both real runs so far were clean, so the
+mid-suite path has only ever been seen returning "OK". Host contamination
+cannot be summoned on demand, so this is a check believed-good rather than
+demonstrated-good in production — the precise distinction this entry exists to
+insist on. It should not be described as proven until a real run trips it.
+Whole-suite drift for `5a2002bac` was +3.1%.
+
 ### [A] B-BENCH-WATCHLIST-WATCHED-LESS-THAN-HALF-THE-SUITE-IT-GUARDS. `BENCH_CRITICAL_PATHS` omitted idt.rs, fs/, net/ and crypto.rs — FIXED 2026-08-14
 
 **Where:** `scripts/boot-test.sh`, `BENCH_CRITICAL_PATHS` (feeds

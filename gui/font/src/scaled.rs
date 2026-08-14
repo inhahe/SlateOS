@@ -369,39 +369,60 @@ impl ScaledFont {
     /// widget measure its label without paying to draw it.
     #[must_use]
     pub fn shape(&self, text: &str) -> ShapedRun {
+        // Three passes, because each one needs all of the previous one's
+        // output. A ligature replaces several glyphs with one, so it cannot be
+        // decided while characters are still arriving; and kerning applies to
+        // the glyphs that *survive* substitution, so `fi` must be kerned as
+        // the single glyph it became, not as the `f` and `i` it was.
         let space = self.glyph_id(' ');
-        let mut glyphs: Vec<ShapedGlyph> = Vec::new();
-        // Whether the glyph just pushed may be kerned against the next one. A
-        // tab may not: its advance is a layout decision, not a glyph width,
-        // and a face that kerns after a space would quietly narrow it.
-        let mut kernable = false;
+        let mut gids: Vec<u16> = Vec::with_capacity(text.len());
+        let mut clusters: Vec<usize> = Vec::with_capacity(text.len());
+        let mut tabs: Vec<bool> = Vec::with_capacity(text.len());
         for (cluster, ch) in text.char_indices() {
             // A tab has no glyph. Drawn through `cmap` it comes out as the
             // missing-glyph box, one space wide; the width every caller wants
             // is several spaces of nothing. Substituting the space glyph gets
             // both — it draws blank, and its advance is the unit to multiply.
-            if ch == '\t' {
-                let advance = self
-                    .face
-                    .advance(space)
-                    .map_or(0.0, |a| f32::from(a) * self.scale);
-                glyphs.push(ShapedGlyph {
-                    key: GlyphKey::outline(space),
-                    cluster,
-                    advance: advance * TAB_WIDTH_IN_SPACES,
-                    kern_next: 0.0,
-                });
-                kernable = false;
-                continue;
+            let tab = ch == '\t';
+            gids.push(if tab { space } else { self.glyph_id(ch) });
+            clusters.push(cluster);
+            tabs.push(tab);
+        }
+
+        let ligated = self.face.has_ligatures();
+        let mut glyphs: Vec<ShapedGlyph> = Vec::with_capacity(gids.len());
+        // Whether the glyph just pushed may be kerned against the next one. A
+        // tab may not: its advance is a layout decision, not a glyph width,
+        // and a face that kerns after a space would quietly narrow it.
+        let mut kernable = false;
+        let mut i = 0usize;
+        while let (Some(&gid), Some(&cluster)) = (gids.get(i), clusters.get(i)) {
+            let tab = tabs.get(i).copied().unwrap_or(false);
+            let mut taken = 1usize;
+            let mut gid = gid;
+            if ligated && !tab {
+                // A ligature may not reach across a tab. The tab is not a
+                // glyph the font knows about, so joining what sits either side
+                // of it would silently swallow the gap it exists to make.
+                let end = tabs
+                    .iter()
+                    .skip(i)
+                    .position(|&t| t)
+                    .map_or(gids.len(), |n| i.saturating_add(n));
+                if let Some(window) = gids.get(i..end)
+                    && let Some((lig, count)) = self.face.ligature(window)
+                {
+                    gid = lig;
+                    taken = count;
+                }
             }
-            let gid = self.glyph_id(ch);
             // Kerning is part of the width, not a drawing-time flourish: a
             // measurement that leaves it out is one that disagrees with what
             // the compositor puts on the screen, which is how a label ends up
             // centred half a pixel off in every button on the desktop. It is
             // charged to the *preceding* glyph so that the advances sum to
             // the run's width.
-            if let Some(last) = glyphs.last_mut().filter(|_| kernable) {
+            if !tab && let Some(last) = glyphs.last_mut().filter(|_| kernable) {
                 let kern = self.kern(last.key.gid(), gid);
                 last.advance += kern;
                 last.kern_next = kern;
@@ -412,11 +433,19 @@ impl ScaledFont {
                 .map_or(0.0, |a| f32::from(a) * self.scale);
             glyphs.push(ShapedGlyph {
                 key: GlyphKey::outline(gid),
+                // The cluster is the first component's byte offset, so a
+                // caret or a truncation can land before or after the ligature
+                // but never inside it — there is no boundary there to find.
                 cluster,
-                advance,
+                advance: if tab {
+                    advance * TAB_WIDTH_IN_SPACES
+                } else {
+                    advance
+                },
                 kern_next: 0.0,
             });
-            kernable = true;
+            kernable = !tab;
+            i = i.saturating_add(taken.max(1));
         }
         ShapedRun::new(glyphs)
     }

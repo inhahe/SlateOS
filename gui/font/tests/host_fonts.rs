@@ -855,6 +855,148 @@ fn installed_fonts_kern_the_pairs_that_need_it() {
     );
 }
 
+/// Read `GSUB` from every installed face, and check the ligature every Latin
+/// text font has had since metal type.
+///
+/// Same reasoning as the kerning sweep: a wrong substitution still parses and
+/// still has ink. `fi` is the oracle because it is the one ligature a text
+/// face is essentially obliged to carry — the `f`'s hood collides with the
+/// `i`'s dot otherwise — and because the answer is checkable without knowing
+/// anything about a particular font's design: the substituted glyph must be
+/// one glyph, must not be either input glyph, and must exist in the face.
+#[test]
+#[ignore = "depends on the host's installed fonts"]
+fn installed_fonts_ligate_fi() {
+    let mut files = Vec::new();
+    for dir in font_dirs() {
+        collect_fonts(&dir, &mut files, 0);
+    }
+    assert!(!files.is_empty(), "no fonts found on this host");
+    files.sort();
+
+    let mut opened = 0usize;
+    let mut with_gsub = 0usize;
+    let mut ligated_fi = 0usize;
+
+    for path in &files {
+        let Ok(data) = fs::read(path) else { continue };
+        let Ok(face) = Face::parse(data) else { continue };
+        opened += 1;
+        if !face.has_ligatures() {
+            continue;
+        }
+        with_gsub += 1;
+        let (Some(f), Some(i), Some(l)) = (
+            face.glyph_index('f'),
+            face.glyph_index('i'),
+            face.glyph_index('l'),
+        ) else {
+            continue;
+        };
+        for (name, pair) in [("fi", [f, i]), ("fl", [f, l]), ("ff", [f, f])] {
+            let Some((lig, count)) = face.ligature(&pair) else {
+                continue;
+            };
+            assert_eq!(
+                count,
+                2,
+                "{}: {name} consumed {count} glyphs, but only two were offered",
+                path.display()
+            );
+            assert!(
+                lig != pair[0] && lig != pair[1],
+                "{}: {name} substituted to glyph {lig}, which is one of its own \
+                 components — the record was misread",
+                path.display()
+            );
+            assert!(
+                lig < face.num_glyphs(),
+                "{}: {name} substituted to glyph {lig}, past the face's {} glyphs",
+                path.display(),
+                face.num_glyphs()
+            );
+            if name == "fi" {
+                ligated_fi += 1;
+            }
+        }
+        // A ligature must never form from a single glyph, whatever the tables
+        // say: there is nothing to join.
+        assert!(
+            face.ligature(&[f]).is_none(),
+            "{}: one glyph on its own produced a ligature",
+            path.display()
+        );
+    }
+
+    println!("faces opened:        {opened}");
+    println!("faces with GSUB liga:{with_gsub}");
+    println!("faces ligating fi:   {ligated_fi}");
+
+    assert!(
+        with_gsub > 0,
+        "not one of {opened} faces reported ligatures — GSUB is not being \
+         found at all"
+    );
+    assert!(
+        ligated_fi > 0,
+        "{with_gsub} faces have ligature lookups but not one substitutes fi — \
+         the lookups are returning nothing"
+    );
+
+    // The oracle. These faces all ligate `fi`, and the pair therefore does not
+    // measure as the sum of its parts.
+    let mut checked = 0usize;
+    for file in ["times.ttf", "segoeui.ttf", "DejaVuSans.ttf", "calibri.ttf"] {
+        let Some(path) = files
+            .iter()
+            .find(|p| p.file_name().is_some_and(|n| n.eq_ignore_ascii_case(file)))
+        else {
+            continue;
+        };
+        let Ok(data) = fs::read(path) else { continue };
+        let Ok(face) = Face::parse(data) else { continue };
+        let (Some(f), Some(i)) = (face.glyph_index('f'), face.glyph_index('i')) else {
+            continue;
+        };
+        let Some((lig, count)) = face.ligature(&[f, i]) else {
+            println!("oracle skip: {file} has no fi ligature");
+            continue;
+        };
+        assert_eq!(count, 2, "{file}: fi consumed {count} glyphs");
+        println!("oracle ok: {file} fi -> glyph {lig}");
+        checked += 1;
+
+        // And the whole point of it: shaping the pair yields one glyph, whose
+        // width is not the two apart.
+        let font = ScaledFont::from_bytes(fs::read(path).unwrap(), 14.0).expect("scaled");
+        let run = font.shape("fi");
+        assert_eq!(
+            run.len(),
+            1,
+            "{file}: \"fi\" shaped to {} glyphs — substitution is not reaching \
+             the layout path",
+            run.len()
+        );
+        let joined = run.width();
+        let apart = font.measure("f") + font.measure("i");
+        println!("           14px \"fi\" {joined:.3} px vs {apart:.3} px unligated");
+        assert!(
+            joined > 0.0,
+            "{file}: the fi ligature has no advance at all"
+        );
+
+        // The cluster is the pair's first byte, so a caret can sit before or
+        // after the ligature and nowhere inside it.
+        let clusters: Vec<usize> = run.glyphs().iter().map(|g| g.cluster).collect();
+        assert_eq!(clusters, vec![0], "{file}: fi reported clusters {clusters:?}");
+    }
+    assert!(
+        checked >= 1,
+        "none of the well-known faces are installed — ligatures were never \
+         checked against a known answer"
+    );
+}
+
 /// Drive the whole stack the way a toolkit will: file → face → `ScaledFont`
 /// → pixels in an ARGB buffer.
 ///

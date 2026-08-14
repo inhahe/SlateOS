@@ -61,6 +61,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::fmt;
 
+use crate::gsub::Ligatures;
 use crate::kern::Kerning;
 
 // ---------------------------------------------------------------------------
@@ -423,6 +424,9 @@ pub struct Face {
     /// Pair kerning, from `GPOS` or the legacy `kern` table. `None` for the
     /// many faces — monospace ones especially — that carry none.
     kerning: Option<Kerning>,
+    /// Ligature substitution from `GSUB`. `None` for a face with no `GSUB`,
+    /// or one whose `GSUB` carries no `liga`/`rlig` ligature lookups.
+    ligatures: Option<Ligatures>,
 }
 
 /// Where a face sits within its family — the axes a font picker selects on.
@@ -519,6 +523,7 @@ impl Face {
         let mut os2 = None;
         let mut cff = None;
         let mut gpos = None;
+        let mut gsub = None;
         let mut kern = None;
         let mut has_cff2 = false;
 
@@ -551,6 +556,7 @@ impl Face {
                 b"OS/2" => os2 = Some(span),
                 b"CFF " => cff = Some(span),
                 b"GPOS" => gpos = Some(span),
+                b"GSUB" => gsub = Some(span),
                 b"kern" => kern = Some(span),
                 b"CFF2" => has_cff2 = true,
                 _ => {}
@@ -630,6 +636,9 @@ impl Face {
         // deferring it would mean re-deciding "GPOS or the legacy table?" on
         // every pair of glyphs drawn.
         let kerning = Kerning::parse(&data, gpos, kern);
+        // Same reasoning: a list of subtable offsets, found once, rather than
+        // a `GSUB` walk per glyph.
+        let ligatures = Ligatures::parse(&data, gsub);
 
         Ok(Self {
             metrics: FaceMetrics {
@@ -647,6 +656,7 @@ impl Face {
             name,
             style,
             kerning,
+            ligatures,
             data,
         })
     }
@@ -1028,6 +1038,30 @@ impl Face {
     #[must_use]
     pub fn has_kerning(&self) -> bool {
         self.kerning.is_some()
+    }
+
+    /// The ligature that replaces the start of `glyphs`, if the face has one:
+    /// the substituted glyph and how many of the input glyphs it consumed.
+    ///
+    /// The caller walks its run left to right and asks at each position; a
+    /// `None` means "this glyph stands alone", which is the answer almost
+    /// everywhere. Only the *start* of the slice is considered, so the caller
+    /// stays in control of where a ligature may begin — it can refuse to let
+    /// one span a tab, a style change or a bidi run boundary.
+    #[must_use]
+    pub fn ligature(&self, glyphs: &[u16]) -> Option<(u16, usize)> {
+        self.ligatures
+            .as_ref()
+            .and_then(|l| l.match_at(&self.data, glyphs))
+    }
+
+    /// Whether this face carries any ligature substitution this can read.
+    ///
+    /// Exposed for the same reason as [`Face::has_kerning`]: to tell "no
+    /// ligature for this pair" apart from "this face has none at all".
+    #[must_use]
+    pub fn has_ligatures(&self) -> bool {
+        self.ligatures.is_some()
     }
 
     /// Left side bearing for a glyph, in font units.

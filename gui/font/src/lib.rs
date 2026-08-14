@@ -39,6 +39,7 @@
 extern crate alloc;
 
 pub mod cff;
+mod gsub;
 mod kern;
 mod otl;
 pub mod raster;

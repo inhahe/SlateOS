@@ -74,7 +74,7 @@ fn substitute(face: &Face, script: Option<ScriptTags>, gids: &[u16]) -> Vec<SubG
     let mut glyphs: Vec<SubGlyph> = gids
         .iter()
         .enumerate()
-        .map(|(i, &gid)| SubGlyph { gid, cluster: i })
+        .map(|(i, &gid)| SubGlyph::new(gid, i))
         .collect();
     face.substitute(script, &mut glyphs);
     glyphs
@@ -1929,4 +1929,129 @@ fn a_string_renders_into_a_buffer() {
         }
         println!("|{row}|");
     }
+}
+
+/// Shape Arabic with every installed face and check that the letters join.
+///
+/// Arabic drawn as a row of isolated letters is not "slightly off" — to
+/// someone who reads it, it is close to unreadable, in the way English set as
+/// I S O L A T E D C A P S with no word shapes would be. Yet it parses, it has
+/// ink, and every other test in this file passes on it. Only an assertion
+/// about the *forms* catches it, which is what this is.
+///
+/// The oracle needs no knowledge of any particular face's design:
+///
+/// * `ببب` — three behs, a dual-joining letter — must come out as three
+///   glyphs, and the middle one is medial, so it must differ from the glyph
+///   the same letter gets standing alone;
+/// * a space breaks a word, so `بب بب` must shape the two halves identically;
+/// * `اب` starts with alef, which joins only backwards, so the beh after it
+///   cannot be medial — it must shape as the beh of a fresh word does.
+///
+/// A face with no Arabic joining rules at all fails the first check and is
+/// skipped, not failed: plenty of Latin-only faces map Arabic through a
+/// fallback `cmap` without carrying a single positional lookup.
+#[test]
+#[ignore = "depends on the host's installed fonts"]
+fn installed_fonts_join_arabic_letters() {
+    // beh, a dual-joining letter present in every face with any Arabic at all.
+    const BEH: &str = "\u{628}";
+    // alef, which joins only to what precedes it.
+    const ALEF: &str = "\u{627}";
+
+    let mut files = Vec::new();
+    for dir in font_dirs() {
+        collect_fonts(&dir, &mut files, 0);
+    }
+    assert!(!files.is_empty(), "no fonts found on this host");
+    files.sort();
+
+    let mut with_arabic = 0usize;
+    let mut joining = 0usize;
+    let mut examples = Vec::new();
+
+    for path in &files {
+        let Ok(data) = fs::read(path) else { continue };
+        let Ok(face) = Face::parse(data) else { continue };
+        if !face.has_substitutions() || face.glyph_index('\u{628}').is_none() {
+            continue;
+        }
+        let Ok(font) = ScaledFont::from_bytes(fs::read(path).unwrap(), 16.0) else {
+            continue;
+        };
+        with_arabic += 1;
+
+        let alone = font.shape(BEH);
+        let word = font.shape(&BEH.repeat(3));
+        if alone.len() != 1 || word.len() != 3 {
+            // A face that ligates the run has said something this oracle
+            // cannot read; it is not evidence either way.
+            continue;
+        }
+        let isolated = alone.glyphs()[0].key.raw();
+        let gids: Vec<u32> = word.glyphs().iter().map(|g| g.key.raw()).collect();
+        if gids.iter().all(|&g| g == isolated) {
+            // No positional lookups: a Latin face that happens to have the
+            // letter, which is common and is not a bug.
+            continue;
+        }
+        joining += 1;
+        if examples.len() < 5 {
+            examples.push(format!(
+                "{}: isolated {isolated}, word {gids:?}",
+                path.file_name().unwrap().to_string_lossy()
+            ));
+        }
+
+        assert_ne!(
+            gids[1], isolated,
+            "{}: the middle beh of a three-letter word kept its isolated \
+             form — `medi` was not applied",
+            path.display()
+        );
+
+        // A space ends a word, so the two halves must shape alike.
+        let two = font.shape(&format!("{BEH}{BEH} {BEH}{BEH}"));
+        if two.len() == 5 {
+            let g: Vec<u32> = two.glyphs().iter().map(|x| x.key.raw()).collect();
+            assert_eq!(
+                (g[0], g[1]),
+                (g[3], g[4]),
+                "{}: a space did not break the word — {g:?}",
+                path.display()
+            );
+        }
+
+        // Alef joins only backwards, so what follows it starts a fresh join:
+        // the two behs after an alef must shape as those same two behs do
+        // alone. Compared against a *two*-letter word rather than against
+        // `gids`, because a face with contextual alternates may legitimately
+        // give the initial beh of a two-letter word a different glyph from
+        // the initial beh of a three-letter one — that is the face doing its
+        // job, not a joining error.
+        let pair = font.shape(&BEH.repeat(2));
+        let after_alef = font.shape(&format!("{ALEF}{BEH}{BEH}"));
+        if pair.len() == 2 && after_alef.len() == 3 {
+            let p: Vec<u32> = pair.glyphs().iter().map(|x| x.key.raw()).collect();
+            let g: Vec<u32> = after_alef.glyphs().iter().map(|x| x.key.raw()).collect();
+            assert_eq!(
+                (g[1], g[2]),
+                (p[0], p[1]),
+                "{}: the beh after an alef did not start a new join — {g:?} \
+                 against {p:?}",
+                path.display()
+            );
+        }
+    }
+
+    println!("faces with Arabic and a GSUB: {with_arabic}");
+    println!("faces that join:              {joining}");
+    for line in &examples {
+        println!("  {line}");
+    }
+    assert!(
+        joining >= 1,
+        "no installed face joined Arabic at all ({with_arabic} had the \
+         letters and a GSUB) — the positional features are not being applied"
+    );
 }

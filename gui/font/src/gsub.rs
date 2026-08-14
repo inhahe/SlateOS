@@ -46,8 +46,15 @@
 //! * **`rlig`** — *required* ligatures. For Latin this is nearly empty; for
 //!   Arabic, `lam-alef` is not optional, and a face that has it will look
 //!   wrong without it. Reading it costs nothing beyond a second tag.
-//! * **`clig`, `calt`** — contextual ligatures and contextual alternates, the
-//!   features lookup types 5 and 6 exist for.
+//! * **`clig`, `calt`, `rclt`** — contextual ligatures, contextual alternates
+//!   and required contextual alternates: the features lookup types 5 and 6
+//!   exist for. All three are default-on in HarfBuzz too.
+//!
+//! And the four *positional* features, which are on by default but not
+//! unconditional — see "Positional forms" below:
+//!
+//! * **`isol`, `init`, `medi`, `fina`** — the cursive forms of a letter
+//!   standing alone, starting a word, inside one, and ending one.
 //!
 //! Lookup types:
 //!
@@ -58,36 +65,120 @@
 //!   precomposed letter into a base and a mark so that GPOS can then attach
 //!   the mark; without it, a face that ships only the decomposed forms draws
 //!   the missing-glyph box for text that is perfectly well spelled.
+//! * **3, `AlternateSubst`** — one glyph, a set of candidates, and an index
+//!   into the set that comes from the value the caller gave the feature. Every
+//!   feature read here is on-or-off, and "on" is the value 1, which selects the
+//!   first alternate. Microsoft Uighur writes its positional substitutions this
+//!   way, so skipping the type meant leaving every Uighur word unjoined.
 //! * **4, `LigatureSubst`** — several glyphs for one.
+//!
+//! # Positional forms, and why a feature tag is not enough
+//!
+//! Arabic is written joined, and a letter's glyph depends on its neighbours.
+//! A face ships the four forms and reaches them through `isol`, `init`, `medi`
+//! and `fina` — but those lookups are ordinary type-1 substitutions whose
+//! coverage is, typically, *every* Arabic letter in the face. Applying `fina`
+//! the way `liga` is applied would rewrite a whole word into final forms.
+//!
+//! So each glyph carries a mask of the features it is eligible for, and each
+//! lookup carries the mask of the features that reached it (see
+//! [`otl`](crate::otl)). A lookup is offered a position only when the two
+//! intersect. The unconditional features set their bit on every glyph, so they
+//! behave exactly as before; the positional four set theirs on the one glyph
+//! [`joining`](crate::joining) says takes that form.
+//!
+//! The mask is checked at the position a lookup is *applied* to, and not on
+//! the glyphs a ligature or a context goes on to match. HarfBuzz checks both.
+//! The difference can only show up in a face whose positional feature reaches
+//! a multi-glyph lookup — real ones use type 1 — and closing it means
+//! threading the mask through every matcher. Noted rather than guessed at.
 //!
 //! # What is deliberately not implemented
 //!
-//! * **Type 3, `AlternateSubst`**, which picks by an alternate index that only
-//!   a per-run feature list can supply, and there is none yet — so it has no
-//!   default-on caller to serve.
+//! * **Alternates past the first.** Type 3 is applied, but only ever with
+//!   index 1, because there is no per-run feature list for a caller to say
+//!   "the third swash" with. That is the right answer for every feature read
+//!   here, all of which are on-or-off; it would be the wrong one for `aalt`,
+//!   which is not read.
+//! * **Lookup flags.** `IgnoreMarks`, `IgnoreLigatures`, `IgnoreBaseGlyphs`
+//!   and the mark-filtering sets are not honoured, so a lookup that means to
+//!   step over a combining mark is instead stopped by it. Tracked as
+//!   `TD-FONT-IGNORES-GSUB-LOOKUP-FLAGS`.
 //! * **`dlig`, `hlig`, `swsh`** and the other opt-in features, which are off
 //!   by default by design and have no way to be turned on yet — there is no
 //!   per-run feature list to turn them on *with*.
 //! * **Language selection.** Only each script's DefaultLangSys is read, so a
 //!   `locl` override registered under `SRB ` or `TRK ` is not reached. See
 //!   [`otl`](crate::otl) and `TD-FONT-IGNORES-LANGSYS-OVERRIDES`.
-//! * **The joining and reordering features** — `init`/`medi`/`fina`/`isol` for
-//!   Arabic, `rphf`/`half`/`pref`/`abvs` for Indic. These are not chosen by
-//!   tag but computed by a per-script state machine over the cluster, which is
-//!   a shaper this crate does not have yet.
+//! * **The reordering features** — `rphf`, `half`, `pref`, `abvs` and the rest
+//!   of the Indic and Universal Shaping Engine sets. Unlike the Arabic four,
+//!   these need the cluster *rearranged* before the features are chosen, which
+//!   is a shaper this crate does not have yet. See
+//!   `TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`.
+//! * **Syriac's `fin2`, `fin3` and `med2`**, the alaph forms, and Arabic's
+//!   `mset` and `stch`. See [`joining`](crate::joining).
 
 use alloc::vec::Vec;
 
+use crate::joining::Form;
 use crate::otl::{
     ByScript, Lookup, MAX_SUBTABLES, coverage_index, glyph_class, lookup_at, lookup_list,
 };
 use crate::script::ScriptTags;
 use crate::sfnt::{Span, u16_at};
 
+/// The features read, in the order whose positions become the mask bits.
+///
+/// The unconditional ones come first so that "every feature a glyph always
+/// gets" is one contiguous run of bits ([`ALWAYS`]); the four positional ones
+/// follow, one bit each.
+const FEATURES: &[&[u8; 4]] = &[
+    // Unconditional: every glyph is eligible for all of these.
+    b"ccmp", b"locl", b"liga", b"rlig", b"clig", b"calt", b"rclt",
+    // Positional: a glyph is eligible for at most one, and only when the
+    // cursive joining pass says so.
+    b"isol", b"init", b"medi", b"fina",
+];
+
+/// The feature mask every glyph carries: bits for the seven unconditional
+/// entries of [`FEATURES`], and none of the four positional ones.
+///
+/// Written out rather than computed from `FEATURES`, so that no shift or
+/// subtraction appears in a path the arithmetic lints police. The two are
+/// kept in step by `the_masks_match_the_feature_list`, which fails if an
+/// entry is ever inserted or reordered.
+const ALWAYS: u32 = 0b0111_1111;
+/// The bit for `isol`, the eighth entry of [`FEATURES`].
+const ISOL: u32 = 0b1000_0000;
+/// The bit for `init`, the ninth.
+const INIT: u32 = 0b1_0000_0000;
+/// The bit for `medi`, the tenth.
+const MEDI: u32 = 0b10_0000_0000;
+/// The bit for `fina`, the eleventh.
+const FINA: u32 = 0b100_0000_0000;
+
+/// The mask for a glyph whose cursive form is `form`.
+///
+/// `None` — a space, a mark, a Latin letter, anything in a face with no
+/// cursive script at all — gets the unconditional features only.
+fn form_mask(form: Option<Form>) -> u32 {
+    ALWAYS
+        | match form {
+            None => 0,
+            Some(Form::Isolated) => ISOL,
+            Some(Form::Initial) => INIT,
+            Some(Form::Medial) => MEDI,
+            Some(Form::Final) => FINA,
+        }
+}
+
 /// `GSUB` lookup type for single substitution: one glyph for one glyph.
 const LOOKUP_SINGLE: u16 = 1;
 /// `GSUB` lookup type for multiple substitution: one glyph becomes several.
 const LOOKUP_MULTIPLE: u16 = 2;
+/// `GSUB` lookup type for alternate substitution: one glyph, several
+/// candidates, an index chooses.
+const LOOKUP_ALTERNATE: u16 = 3;
 /// `GSUB` lookup type for ligature substitution: several glyphs for one.
 const LOOKUP_LIGATURE: u16 = 4;
 /// `GSUB` lookup type for contextual substitution: a rule that fires only
@@ -107,6 +198,7 @@ const LOOKUP_EXTENSION: u16 = 7;
 const NESTABLE: &[u16] = &[
     LOOKUP_SINGLE,
     LOOKUP_MULTIPLE,
+    LOOKUP_ALTERNATE,
     LOOKUP_LIGATURE,
     LOOKUP_CONTEXT,
     LOOKUP_CHAIN_CONTEXT,
@@ -169,6 +261,37 @@ pub struct SubGlyph {
     /// a caret can honestly be drawn: the joined glyph has no interior
     /// boundary to point at.
     pub cluster: usize,
+    /// Which features this glyph is eligible for, one bit per entry of
+    /// `FEATURES`. Private because it is this module's own bookkeeping: a
+    /// caller has no way to know which bit is which, and setting it wrongly
+    /// would silently disable ligatures.
+    mask: u32,
+}
+
+impl SubGlyph {
+    /// A glyph eligible for the unconditional features and no others — which
+    /// is every glyph outside a cursive script.
+    #[must_use]
+    pub fn new(gid: u16, cluster: usize) -> Self {
+        Self {
+            gid,
+            cluster,
+            mask: ALWAYS,
+        }
+    }
+
+    /// The same, but eligible for the positional feature that `form` names.
+    ///
+    /// `None` is identical to [`new`](Self::new): a character that takes no
+    /// cursive form is not eligible for any of the four.
+    #[must_use]
+    pub(crate) fn cursive(gid: u16, cluster: usize, form: Option<Form>) -> Self {
+        Self {
+            gid,
+            cluster,
+            mask: form_mask(form),
+        }
+    }
 }
 
 /// The substitutions of one face, as the lookups to run and in what order.
@@ -197,13 +320,7 @@ impl Substitutions {
     /// ligature would break the grid.
     pub(crate) fn parse(data: &[u8], gsub: Option<Span>) -> Option<Self> {
         let base = gsub?.off;
-        let lookups = ByScript::parse(
-            data,
-            base,
-            &[b"ccmp", b"locl", b"liga", b"rlig", b"clig", b"calt"],
-            NESTABLE,
-            LOOKUP_EXTENSION,
-        )?;
+        let lookups = ByScript::parse(data, base, FEATURES, NESTABLE, LOOKUP_EXTENSION)?;
         Some(Self {
             lookups,
             lookup_list: lookup_list(data, base)?,
@@ -231,8 +348,8 @@ impl Substitutions {
             depth: MAX_NESTING,
             scratch: Vec::new(),
         };
-        for lookup in self.lookups.for_script(script) {
-            apply_lookup(data, lookup, glyphs, &mut ctx);
+        for (lookup, mask) in self.lookups.for_script(script) {
+            apply_lookup(data, lookup, mask, glyphs, &mut ctx);
         }
     }
 }
@@ -264,9 +381,19 @@ struct Ctx {
 /// That is what stops a font whose output is also its input — a ligature of
 /// itself, a glyph that decomposes to itself — from looping, and it lives here
 /// rather than in each type so that no type can forget it.
-fn apply_lookup(data: &[u8], lookup: &Lookup, glyphs: &mut Vec<SubGlyph>, ctx: &mut Ctx) {
+///
+/// `mask` is the set of features that reached this lookup; a position whose
+/// glyph is eligible for none of them is stepped over. For every feature but
+/// the cursive four that is no restriction at all — their bits are set on
+/// every glyph — so this is a comparison, not a branch a run of Latin pays
+/// for.
+fn apply_lookup(data: &[u8], lookup: &Lookup, mask: u32, glyphs: &mut Vec<SubGlyph>, ctx: &mut Ctx) {
     let mut i = 0usize;
     while i < glyphs.len() {
+        if glyphs.get(i).is_some_and(|g| g.mask & mask == 0) {
+            i = i.saturating_add(1);
+            continue;
+        }
         // A match that somehow produced nothing would leave `i` where it was;
         // the floor of one is what makes the walk terminate regardless.
         let step = apply_at(data, lookup, glyphs, i, ctx).unwrap_or(0).max(1);
@@ -295,6 +422,7 @@ fn apply_at(
     match lookup.kind {
         LOOKUP_SINGLE => apply_single(data, subs, glyphs, i),
         LOOKUP_MULTIPLE => apply_multiple(data, subs, glyphs, i, ctx),
+        LOOKUP_ALTERNATE => apply_alternate(data, subs, glyphs, i),
         LOOKUP_LIGATURE => apply_ligature(data, subs, glyphs, i),
         LOOKUP_CONTEXT => apply_context(data, subs, glyphs, i, ctx),
         LOOKUP_CHAIN_CONTEXT => apply_chain_context(data, subs, glyphs, i, ctx),
@@ -371,13 +499,73 @@ fn apply_multiple(
     // `Some` after pushing at least one glyph, so a match here is never empty
     // and never carries a failed subtable's partial read. Checking emptiness
     // again would be dead code that hides the guard inside.
-    let cluster = glyph.cluster;
     let grown = ctx.scratch.len();
-    glyphs.splice(
-        i..=i,
-        ctx.scratch.iter().map(|&gid| SubGlyph { gid, cluster }),
-    );
+    // Every glyph of the sequence inherits the source's cluster *and* its
+    // feature mask: they all came from the one character, so they are all
+    // eligible for exactly what it was. A `ccmp` that splits a letter into a
+    // base and a mark must not leave the base ineligible for `fina`.
+    glyphs.splice(i..=i, ctx.scratch.iter().map(|&gid| SubGlyph { gid, ..glyph }));
     Some(grown)
+}
+
+/// Apply an `AlternateSubst` lookup at one position.
+///
+/// The subtable offers a *set* of glyphs for each covered one and leaves the
+/// choice to the caller — the format exists for `aalt`, "access all
+/// alternates", where an application shows the user a menu of swashes. Nothing
+/// here has a menu, so why apply it at all?
+///
+/// Because the choice is only open for a feature the caller gave a *value*.
+/// An on-by-default feature has the value 1, and 1 selects the first
+/// alternate: OpenType numbers them from one, so an alternate substitution
+/// reached from a boolean feature is a single substitution with extra steps.
+/// HarfBuzz arrives at the same answer by the same route — it packs the
+/// feature's value into the glyph mask and indexes with it, which for a
+/// boolean feature is always 1.
+///
+/// And it matters: Microsoft Uighur writes its `init`, `medi` and `fina` as
+/// type 3. Skipping the type left every Uighur word in isolated forms while
+/// every other Arabic face on the host shaped correctly.
+///
+/// The position is independent of every other, so the run's length and
+/// clusters come out unchanged.
+fn apply_alternate(
+    data: &[u8],
+    subtables: &[usize],
+    glyphs: &mut [SubGlyph],
+    i: usize,
+) -> Option<usize> {
+    let glyph = glyphs.get_mut(i)?;
+    let gid = subtables
+        .iter()
+        .find_map(|&sub| alternate_at(data, sub, glyph.gid))?;
+    glyph.gid = gid;
+    Some(1)
+}
+
+/// The first alternate one `AlternateSubst` subtable offers for `glyph`.
+fn alternate_at(data: &[u8], sub: usize, glyph: u16) -> Option<u16> {
+    // Only one format is defined; a subtable claiming another is one this
+    // cannot read rather than one to guess at.
+    if u16_at(data, sub)? != 1 {
+        return None;
+    }
+    let coverage = sub.checked_add(usize::from(u16_at(data, sub.checked_add(2)?)?))?;
+    let index = coverage_index(data, coverage, glyph)?;
+    let count = u16_at(data, sub.checked_add(4)?)?;
+    if index >= count {
+        return None;
+    }
+    let at = sub
+        .checked_add(6)?
+        .checked_add(usize::from(index).checked_mul(2)?)?;
+    let set = sub.checked_add(usize::from(u16_at(data, at)?))?;
+    // An empty set has no first alternate, which is a subtable with nothing to
+    // say rather than a reason to substitute glyph zero.
+    if u16_at(data, set)? == 0 {
+        return None;
+    }
+    u16_at(data, set.checked_add(2)?)
 }
 
 /// The sequence one `MultipleSubst` subtable puts in place of `glyph`, written
@@ -1276,6 +1464,16 @@ mod tests {
         out
     }
 
+    /// `AlternateSubstFormat1`: one set of candidates per covered glyph.
+    ///
+    /// Byte-for-byte the same layout as [`multiple`] — coverage, a count, an
+    /// offset per covered glyph, and each target a count followed by glyph
+    /// ids. Only the lookup type tells the two apart, which is exactly why
+    /// `a_subtable_is_read_as_the_type_its_lookup_declares` exists.
+    fn alternate(glyphs: &[u16], sets: &[&[u16]]) -> Vec<u8> {
+        multiple(glyphs, sets)
+    }
+
     /// A `GSUB` table with `features.len()` features and one lookup each, in
     /// the order given — which is both the feature order and the LookupList
     /// order, so a test can say which lookup runs first.
@@ -1568,7 +1766,7 @@ mod tests {
         let mut glyphs: Vec<SubGlyph> = gids
             .iter()
             .enumerate()
-            .map(|(i, &gid)| SubGlyph { gid, cluster: i })
+            .map(|(i, &gid)| SubGlyph::new(gid, i))
             .collect();
         subs.apply(data, None, &mut glyphs);
         glyphs.iter().map(|g| g.gid).collect()
@@ -1579,7 +1777,7 @@ mod tests {
         let mut glyphs: Vec<SubGlyph> = gids
             .iter()
             .enumerate()
-            .map(|(i, &gid)| SubGlyph { gid, cluster: i })
+            .map(|(i, &gid)| SubGlyph::new(gid, i))
             .collect();
         subs.apply(data, None, &mut glyphs);
         glyphs.iter().map(|g| g.cluster).collect()
@@ -1685,6 +1883,102 @@ mod tests {
         assert_eq!(subst(&data, &subs, &[10]), &[15]);
     }
 
+    /// Run every lookup over `gids`, each glyph eligible for the cursive form
+    /// beside it, and report what comes out.
+    fn subst_cursive(
+        data: &[u8],
+        subs: &Substitutions,
+        run: &[(u16, Option<Form>)],
+    ) -> Vec<u16> {
+        let mut glyphs: Vec<SubGlyph> = run
+            .iter()
+            .enumerate()
+            .map(|(i, &(gid, form))| SubGlyph::cursive(gid, i, form))
+            .collect();
+        subs.apply(data, None, &mut glyphs);
+        glyphs.iter().map(|g| g.gid).collect()
+    }
+
+    /// The whole point of the mask. A real face's `fina` covers every letter
+    /// it has, so a `fina` applied the way `liga` is applied would rewrite an
+    /// entire word into final forms.
+    #[test]
+    fn a_positional_feature_reaches_only_the_glyph_that_takes_that_form() {
+        // One `fina` lookup covering all three glyphs of the run.
+        let data = gsub_table(b"fina", LOOKUP_SINGLE, &single_delta(&[10, 11, 12], 5));
+        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        assert_eq!(
+            subst_cursive(
+                &data,
+                &subs,
+                &[
+                    (10, Some(Form::Initial)),
+                    (11, Some(Form::Medial)),
+                    (12, Some(Form::Final)),
+                ]
+            ),
+            // Only the last one is eligible, though all three are covered.
+            &[10, 11, 17]
+        );
+    }
+
+    /// The mirror image: an unconditional feature is unaffected by the forms,
+    /// which is what keeps every Latin string shaping exactly as before.
+    #[test]
+    fn an_unconditional_feature_reaches_every_glyph_whatever_its_form() {
+        let data = gsub_table(b"liga", LOOKUP_SINGLE, &single_delta(&[10, 11, 12], 5));
+        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        assert_eq!(
+            subst_cursive(
+                &data,
+                &subs,
+                &[
+                    (10, Some(Form::Initial)),
+                    (11, None),
+                    (12, Some(Form::Final)),
+                ]
+            ),
+            &[15, 16, 17]
+        );
+    }
+
+    /// The mask constants are written out rather than derived, so this is what
+    /// stops a feature inserted into the middle of [`FEATURES`] from silently
+    /// aiming `fina`'s bit at `rclt`.
+    #[test]
+    fn the_masks_match_the_feature_list() {
+        let bit = |tag: &[u8; 4]| {
+            let i = FEATURES
+                .iter()
+                .position(|f| *f == tag)
+                .unwrap_or_else(|| panic!("{tag:?} is not in FEATURES"));
+            1u32 << i
+        };
+        assert_eq!(bit(b"isol"), ISOL);
+        assert_eq!(bit(b"init"), INIT);
+        assert_eq!(bit(b"medi"), MEDI);
+        assert_eq!(bit(b"fina"), FINA);
+        // `ALWAYS` is exactly the features that are not positional.
+        let positional = ISOL | INIT | MEDI | FINA;
+        let all = (1u32 << FEATURES.len()) - 1;
+        assert_eq!(ALWAYS, all & !positional);
+        // And they really are a prefix: no unconditional feature may sit
+        // after a positional one, or `ALWAYS` would not be contiguous.
+        assert_eq!(ALWAYS.count_ones() + positional.count_ones(), all.count_ones());
+        assert_eq!(ALWAYS.trailing_ones(), ALWAYS.count_ones());
+    }
+
+    /// A glyph eligible for no positional form at all — every glyph outside a
+    /// cursive script — must not be reached by one.
+    #[test]
+    fn a_glyph_with_no_form_is_reached_by_no_positional_feature() {
+        for tag in [b"isol", b"init", b"medi", b"fina"] {
+            let data = gsub_table(tag, LOOKUP_SINGLE, &single_delta(&[10], 5));
+            let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+            assert_eq!(subst(&data, &subs, &[10]), &[10], "{:?}", *tag);
+        }
+    }
+
     #[test]
     fn a_feature_only_a_language_system_reaches_is_not_applied() {
         // The other half of the same question. A `locl` registered under
@@ -1734,11 +2028,52 @@ mod tests {
 
     #[test]
     fn a_lookup_type_we_cannot_apply_is_not_mistaken_for_one_we_can() {
-        // Type 3, `AlternateSubst`, has the same coverage-then-array shape as
-        // the single substitution above, so a walk that ignored the lookup
-        // type would happily read it and substitute the wrong glyph.
-        let data = gsub_table(b"liga", 3, &single_list(&[10], &[42]));
+        // Type 8, `ReverseChainSingleSubst`, opens with a format and a
+        // coverage offset just as the single substitution above does, so a
+        // walk that ignored the lookup type would happily read it and
+        // substitute the wrong glyph.
+        let data = gsub_table(b"liga", 8, &single_list(&[10], &[42]));
         assert!(Substitutions::parse(&data, Some(span(0, data.len()))).is_none());
+    }
+
+    /// The first alternate is what an on-or-off feature selects: OpenType
+    /// numbers alternates from one, and "on" is the value one.
+    #[test]
+    fn an_alternate_substitution_takes_the_first_candidate() {
+        let data = gsub_table(
+            b"liga",
+            LOOKUP_ALTERNATE,
+            &alternate(&[10], &[&[42, 43, 44]]),
+        );
+        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        assert_eq!(subst(&data, &subs, &[10]), &[42]);
+        // An uncovered glyph is left alone.
+        assert_eq!(subst(&data, &subs, &[11]), &[11]);
+    }
+
+    /// An empty set has no first alternate. Reading one anyway would take the
+    /// two bytes after the count — whatever happens to follow the table.
+    #[test]
+    fn an_empty_alternate_set_substitutes_nothing() {
+        let data = gsub_table(b"liga", LOOKUP_ALTERNATE, &alternate(&[10], &[&[]]));
+        let Some(subs) = Substitutions::parse(&data, Some(span(0, data.len()))) else {
+            return;
+        };
+        assert_eq!(subst(&data, &subs, &[10]), &[10]);
+    }
+
+    /// The two formats are byte-identical, so only the declared lookup type
+    /// separates "one glyph becomes three" from "one glyph becomes the first
+    /// of three".
+    #[test]
+    fn a_subtable_is_read_as_the_type_its_lookup_declares() {
+        let bytes = alternate(&[10], &[&[42, 43, 44]]);
+        let as_alt = gsub_table(b"liga", LOOKUP_ALTERNATE, &bytes);
+        let as_mult = gsub_table(b"liga", LOOKUP_MULTIPLE, &bytes);
+        let alt = Substitutions::parse(&as_alt, Some(span(0, as_alt.len()))).unwrap();
+        let mult = Substitutions::parse(&as_mult, Some(span(0, as_mult.len()))).unwrap();
+        assert_eq!(subst(&as_alt, &alt, &[10]), &[42]);
+        assert_eq!(subst(&as_mult, &mult, &[10]), &[42, 43, 44]);
     }
 
     // ---- script selection ----
@@ -1813,11 +2148,11 @@ mod tests {
     #[test]
     fn a_run_gets_only_its_own_scripts_features() {
         let (data, subs) = two_script_font();
-        let mut latin_run = vec![SubGlyph { gid: 10, cluster: 0 }];
+        let mut latin_run = vec![SubGlyph::new(10, 0)];
         subs.apply(&data, LATIN, &mut latin_run);
         assert_eq!(latin_run.first().map(|g| g.gid), Some(60));
 
-        let mut arabic_run = vec![SubGlyph { gid: 10, cluster: 0 }];
+        let mut arabic_run = vec![SubGlyph::new(10, 0)];
         subs.apply(&data, ARABIC, &mut arabic_run);
         assert_eq!(arabic_run.first().map(|g| g.gid), Some(50));
     }
@@ -1832,12 +2167,12 @@ mod tests {
             preferred: *b"hebr",
             fallback: *b"hebr",
         });
-        let mut glyphs = vec![SubGlyph { gid: 10, cluster: 0 }];
+        let mut glyphs = vec![SubGlyph::new(10, 0)];
         subs.apply(&data, hebrew, &mut glyphs);
         assert_eq!(glyphs.first().map(|g| g.gid), Some(10));
         // And a run with no script of its own, which asks for `DFLT`, is in
         // the same position here: this face registers no default either.
-        let mut none = vec![SubGlyph { gid: 10, cluster: 0 }];
+        let mut none = vec![SubGlyph::new(10, 0)];
         subs.apply(&data, None, &mut none);
         assert_eq!(none.first().map(|g| g.gid), Some(10));
     }
@@ -1849,7 +2184,7 @@ mod tests {
         let data = gsub_table(b"liga", LOOKUP_SINGLE, &single_list(&[10], &[42]));
         let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
         for script in [LATIN, ARABIC, None] {
-            let mut glyphs = vec![SubGlyph { gid: 10, cluster: 0 }];
+            let mut glyphs = vec![SubGlyph::new(10, 0)];
             subs.apply(&data, script, &mut glyphs);
             assert_eq!(
                 glyphs.first().map(|g| g.gid),
@@ -1905,8 +2240,8 @@ mod tests {
 
         let subs = Substitutions::parse(&out, Some(span(0, out.len()))).unwrap();
         let mut glyphs = vec![
-            SubGlyph { gid: 10, cluster: 0 },
-            SubGlyph { gid: 11, cluster: 1 },
+            SubGlyph::new(10, 0),
+            SubGlyph::new(11, 1),
         ];
         subs.apply(&out, LATIN, &mut glyphs);
         assert_eq!(

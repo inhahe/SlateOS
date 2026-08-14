@@ -40,6 +40,8 @@ extern crate alloc;
 
 pub mod cff;
 pub mod gsub;
+mod joining;
+mod joining_tables;
 mod kern;
 mod mark;
 mod norm;

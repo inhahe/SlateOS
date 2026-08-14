@@ -220,6 +220,7 @@ def main():
     mine = ours(CORPUS, fonts)
 
     agree = 0
+    reversed_only = Counter()
     differ = Counter()
     examples = {}
     skipped = 0
@@ -234,15 +235,28 @@ def main():
                 continue
             if got == expected:
                 agree += 1
+            elif got == expected[::-1]:
+                # Same glyphs, opposite order: HarfBuzz reverses a
+                # right-to-left buffer so the caller can draw it left to
+                # right, and this crate does not reorder at all yet. The
+                # *shaping* agreed exactly, which for Arabic is the whole
+                # question — so this is worth separating from a real
+                # disagreement rather than burying in the total.
+                reversed_only[CORPUS[i]] += 1
             else:
                 differ[CORPUS[i]] += 1
                 examples.setdefault(
                     CORPUS[i], (os.path.basename(path), got, expected)
                 )
 
-    print(f"agree  {agree}")
-    print(f"differ {sum(differ.values())}")
+    print(f"agree    {agree}")
+    print(f"reversed {sum(reversed_only.values())}  (same glyphs, RTL order)")
+    print(f"differ   {sum(differ.values())}")
     print(f"faces HarfBuzz would not open: {skipped}")
+    if reversed_only:
+        print("\nreversed only, by string:")
+        for text, n in reversed_only.most_common():
+            print(f"  {n:5}  {text!r}")
     if differ:
         print("\nby string, most disagreed first:")
         for text, n in differ.most_common():

@@ -30,6 +30,7 @@ use alloc::vec::Vec;
 
 use crate::FontMetrics;
 use crate::gsub::SubGlyph;
+use crate::joining::{self, Form};
 use crate::norm;
 use crate::raster::{GlyphMask, rasterize};
 use crate::script::{self, ScriptTags};
@@ -399,16 +400,26 @@ impl ScaledFont {
         // from a pen that kerning is still moving.
         let space = self.glyph_id(' ');
         let pieces = norm::pieces(text, |ch| self.face.glyph_index(ch).is_some());
+        // Which cursive form each character takes, decided from the characters
+        // rather than the glyphs because it is a property of the *text*: what
+        // a letter joins to does not depend on which face is drawing it. Empty
+        // for text that does not join, which is nearly all of it.
+        let mut forms: Vec<Option<Form>> = Vec::new();
+        joining::forms(&pieces, &mut forms);
         let mut glyphs: Vec<SubGlyph> = Vec::with_capacity(pieces.len());
         let mut tabs: Vec<bool> = Vec::with_capacity(pieces.len());
-        for &(ch, cluster) in &pieces {
+        for (i, &(ch, cluster)) in pieces.iter().enumerate() {
             // A tab has no glyph. Drawn through `cmap` it comes out as the
             // missing-glyph box, one space wide; the width every caller wants
             // is several spaces of nothing. Substituting the space glyph gets
             // both — it draws blank, and its advance is the unit to multiply.
             let tab = ch == '\t';
             let gid = if tab { space } else { self.glyph_id(ch) };
-            glyphs.push(SubGlyph { gid, cluster });
+            glyphs.push(SubGlyph::cursive(
+                gid,
+                cluster,
+                forms.get(i).copied().flatten(),
+            ));
             tabs.push(tab);
         }
 

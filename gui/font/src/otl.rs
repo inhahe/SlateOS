@@ -35,6 +35,16 @@
 //! to offer the run, and is shaped without features rather than with all of
 //! them.
 //!
+//! # Feature masks
+//!
+//! Every lookup comes back paired with a mask saying which of the requested
+//! feature tags reached it. Most callers can ignore it: a feature like `liga`
+//! is unconditional, so the lookups it reaches simply run. Arabic's positional
+//! features are not — `fina` is an ordinary substitution covering every letter
+//! in the face, and applying it the way `liga` is applied would turn a whole
+//! word into final forms. The mask is how [`gsub`](crate::gsub) restricts such
+//! a lookup to the glyphs [`joining`](crate::joining) marked eligible.
+//!
 //! # What is not here
 //!
 //! **Language selection.** Only the DefaultLangSys of the chosen script is
@@ -57,6 +67,17 @@ use alloc::vec::Vec;
 
 use crate::script::ScriptTags;
 use crate::sfnt::{u16_at, u32_at};
+
+/// A lookup, named by number, and the mask of the feature tags that reached
+/// it.
+///
+/// The number is a LookupList index before the lookups are decoded and a
+/// position in [`ByScript::lookups`] afterwards. The two are never mixed: the
+/// translation happens exactly once, at the end of [`ByScript::parse`].
+type Masked = (u16, u32);
+
+/// One script's tag and the lookups it selects, each with its mask.
+type Selection = ([u8; 4], Vec<Masked>);
 
 /// A resolved script: where its DefaultLangSys is, and where the FeatureList
 /// that its indices point into begins.
@@ -230,14 +251,29 @@ pub(crate) struct ByScript {
     /// Every lookup any script reaches, in LookupList order — which is the
     /// order they must be applied in.
     lookups: Vec<Lookup>,
-    /// Script tag to the positions in `lookups` it selects, sorted by tag so
-    /// a run can find its own with a binary search. Positions are ascending,
-    /// so applying them in order is applying them in LookupList order.
-    scripts: Vec<([u8; 4], Vec<u16>)>,
+    /// Script tag to the positions in `lookups` it selects, each with the
+    /// mask of the feature tags that reached it; sorted by tag so a run can
+    /// find its own with a binary search. Positions are ascending, so applying
+    /// them in order is applying them in LookupList order.
+    ///
+    /// The mask is per *script* rather than stored on the [`Lookup`] because
+    /// one lookup may be reached by different features under different
+    /// scripts — a face may use the same substitution for Latin's `liga` and
+    /// Arabic's `fina`. Folding the two together would let the Latin run's
+    /// unconditional `liga` bit switch on a lookup that, for the Arabic run,
+    /// must only reach final-form glyphs.
+    scripts: Vec<Selection>,
 }
 
 impl ByScript {
     /// Resolve `tags` for every script `base` registers.
+    ///
+    /// Each lookup comes back paired with a mask: bit *i* is set when the
+    /// feature tagged `tags[i]` reached it. Callers that apply features
+    /// unconditionally can ignore it; the one that cannot is `GSUB`, where the
+    /// Arabic positional features are ordinary substitutions covering every
+    /// letter and are correct only for the glyphs the shaper marked eligible.
+    /// Tags past the 32nd get no bit, since nothing here asks for that many.
     ///
     /// Returns `None` when no script selects any lookup of a wanted type,
     /// which is not an error: a monospace face has no ligatures by design.
@@ -252,7 +288,7 @@ impl ByScript {
         let lookup_count = u16_at(data, lookup_list)?;
 
         // Which lookups each script selects, and the union of all of them.
-        let mut selected: Vec<([u8; 4], Vec<u16>)> = Vec::new();
+        let mut selected: Vec<Selection> = Vec::new();
         let mut union: Vec<u16> = Vec::new();
         for tag in script_tags(data, base)? {
             // A script is asked for under its own tag exactly: the fallback
@@ -261,7 +297,12 @@ impl ByScript {
             let Some((_, indices)) = lookup_indices(data, base, tags, Some(ScriptTags::exactly(tag))) else {
                 continue;
             };
-            union.extend(indices.iter().copied().filter(|&i| i < lookup_count));
+            union.extend(
+                indices
+                    .iter()
+                    .map(|&(i, _)| i)
+                    .filter(|&i| i < lookup_count),
+            );
             selected.push((tag, indices));
         }
         union.sort_unstable();
@@ -300,14 +341,16 @@ impl ByScript {
             at.push((idx, pos));
         }
 
-        let mut scripts: Vec<([u8; 4], Vec<u16>)> = Vec::new();
+        let mut scripts: Vec<Selection> = Vec::new();
         for (tag, indices) in selected {
             // `indices` is ascending and deduplicated, and `at` ascends in
             // both columns, so the result is ascending and unique too.
-            let positions: Vec<u16> = indices
+            let positions: Vec<Masked> = indices
                 .iter()
-                .filter_map(|idx| at.binary_search_by_key(idx, |&(i, _)| i).ok())
-                .filter_map(|k| at.get(k).map(|&(_, pos)| pos))
+                .filter_map(|&(idx, mask)| {
+                    let k = at.binary_search_by_key(&idx, |&(i, _)| i).ok()?;
+                    at.get(k).map(|&(_, pos)| (pos, mask))
+                })
                 .collect();
             if !positions.is_empty() {
                 scripts.push((tag, positions));
@@ -328,7 +371,8 @@ impl ByScript {
         &self.lookups
     }
 
-    /// The lookups that apply to a run of `script`, in the order they run.
+    /// The lookups that apply to a run of `script`, in the order they run,
+    /// each with the mask of the feature tags that reached it.
     ///
     /// Follows the same fallback chain as [`select`]: the run's script, its
     /// older OpenType spelling, then the two default tags. An empty iterator
@@ -338,7 +382,7 @@ impl ByScript {
     pub(crate) fn for_script(
         &self,
         script: Option<ScriptTags>,
-    ) -> impl Iterator<Item = &Lookup> {
+    ) -> impl Iterator<Item = (&Lookup, u32)> {
         let positions = fallback_chain(script)
             .find_map(|want| {
                 self.scripts
@@ -350,7 +394,7 @@ impl ByScript {
             .unwrap_or(&[]);
         positions
             .iter()
-            .filter_map(|&at| self.lookups.get(usize::from(at)))
+            .filter_map(|&(at, mask)| Some((self.lookups.get(usize::from(at))?, mask)))
     }
 }
 
@@ -408,17 +452,20 @@ pub(crate) fn lookup_at(
     read_lookup(data, lookup, want, extension, budget)
 }
 
-/// Which lookups the features tagged `tags` use, and where the LookupList is.
+/// Which lookups the features tagged `tags` use, each with the mask of the
+/// tags that reached it, and where the LookupList is.
 ///
-/// Ascending and deduplicated, because lookups apply in LookupList order
-/// regardless of the order a feature happens to list them in, and two features
-/// may share one.
+/// Ascending and deduplicated by index, because lookups apply in LookupList
+/// order regardless of the order a feature happens to list them in. Two
+/// features may share a lookup, and when they do the masks are combined: the
+/// lookup then applies wherever *either* feature would have applied it, which
+/// is what HarfBuzz does with the same collision.
 fn lookup_indices(
     data: &[u8],
     base: usize,
     tags: &[&[u8; 4]],
     script: Option<ScriptTags>,
-) -> Option<(usize, Vec<u16>)> {
+) -> Option<(usize, Vec<Masked>)> {
     let lookup_list = lookup_list(data, base)?;
     let LangSys {
         lang_sys,
@@ -447,9 +494,14 @@ fn lookup_indices(
         let Some(tag) = rec.checked_add(4).and_then(|e| data.get(rec..e)) else {
             continue;
         };
-        if !tags.iter().any(|want| want.as_slice() == tag) {
+        let Some(which) = tags.iter().position(|want| want.as_slice() == tag) else {
             continue;
-        }
+        };
+        // Bit per tag, in the order the caller listed them. A caller asking
+        // for more than 32 gets no bit for the rest, which would silently
+        // disable them — so it must not; nothing here comes close.
+        let mask = u32::try_from(which).ok().and_then(|b| 1u32.checked_shl(b));
+        let Some(mask) = mask else { continue };
         let Some(feature) = u16_at(data, rec.checked_add(4)?)
             .and_then(|o| feature_list.checked_add(usize::from(o)))
         else {
@@ -459,13 +511,20 @@ fn lookup_indices(
         for j in 0..usize::from(count) {
             let at = feature.checked_add(4)?.checked_add(j.checked_mul(2)?)?;
             if let Some(idx) = u16_at(data, at) {
-                indices.push(idx);
+                indices.push((idx, mask));
             }
         }
     }
-    indices.sort_unstable();
-    indices.dedup();
-    (!indices.is_empty()).then_some((lookup_list, indices))
+    // Sort by index, then fold the duplicates together by OR-ing their masks.
+    indices.sort_unstable_by_key(|&(idx, _)| idx);
+    let mut folded: Vec<Masked> = Vec::with_capacity(indices.len());
+    for (idx, mask) in indices {
+        match folded.last_mut() {
+            Some((last, into)) if *last == idx => *into |= mask,
+            _ => folded.push((idx, mask)),
+        }
+    }
+    (!folded.is_empty()).then_some((lookup_list, folded))
 }
 
 /// One lookup, if it is of a type in `want`, with extensions unwrapped.

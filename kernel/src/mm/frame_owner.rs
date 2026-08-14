@@ -344,11 +344,87 @@ impl Drop for OwnerScope {
 // Statistics
 // ---------------------------------------------------------------------------
 
-/// Total set() calls since boot.
-static TOTAL_SETS: AtomicU64 = AtomicU64::new(0);
+/// One CPU's diagnostic counters, padded to its own cache line.
+///
+/// These were a single pair of global `AtomicU64`s incremented with
+/// `fetch_add` on every `set`/`clear` — that is, on **every frame allocation
+/// and free in the system**. Two problems, and the file already knew about
+/// both: `CURRENT_OWNER` a few lines up is padded per-CPU with a comment
+/// explaining that an unpadded shared array on this path "would turn each
+/// `OwnerScope` into a false-sharing storm". The counters sat on exactly the
+/// same path, unpadded, in one cache line, and every CPU wrote them.
+///
+/// 1. **Cross-CPU contention.** A `lock`-prefixed RMW on one shared line from
+///    every CPU on every alloc is the cache-line ping-pong CLAUDE.md's
+///    performance rules name explicitly — for a counter nothing reads except
+///    a diagnostic dump.
+/// 2. **Emulation cost.** TCG cannot always lower a guest atomic RMW inline;
+///    the fallback stops the world and re-executes the instruction, which is
+///    thousands of cycles. Under the boot-test emulator these two increments
+///    dominated the measured cost of ownership tagging.
+///
+/// Both go away by giving each CPU its own line.
+#[repr(align(64))]
+struct CpuStats {
+    /// `set()` calls made by this CPU.
+    sets: AtomicU64,
+    /// `clear()` calls made by this CPU.
+    clears: AtomicU64,
+}
 
-/// Total clear() calls since boot.
-static TOTAL_CLEARS: AtomicU64 = AtomicU64::new(0);
+/// Per-CPU `set`/`clear` counters, summed on read by [`summary`].
+static PER_CPU_STATS: [CpuStats; MAX_CPUS] = {
+    #[allow(clippy::declare_interior_mutable_const)]
+    const INIT: CpuStats = CpuStats {
+        sets: AtomicU64::new(0),
+        clears: AtomicU64::new(0),
+    };
+    [INIT; MAX_CPUS]
+};
+
+/// Add one to a counter that only the running CPU writes.
+///
+/// This is deliberately a relaxed load-add-store rather than a `fetch_add`.
+/// A read-modify-write would be atomic against an interrupt on this CPU, but
+/// atomicity is not what is wanted here: the slot is per-CPU, so there is no
+/// other *writer* to be atomic against, and the RMW's only remaining effect
+/// is its cost (a bus lock on hardware, a potential stop-the-world re-execute
+/// under TCG).
+///
+/// The accepted trade is that an interrupt landing between the load and the
+/// store loses that increment. These are diagnostic counters for a `frame`
+/// ownership dump; an occasional missed count is invisible, and paying an
+/// atomic RMW on every frame allocation to avoid it is not a trade worth
+/// making. Concurrent *readers* already tolerate staleness — `summary()` sums
+/// the per-CPU slots without any snapshot guarantee.
+#[inline]
+fn bump(counter: &AtomicU64) {
+    let prev = counter.load(Ordering::Relaxed);
+    counter.store(prev.wrapping_add(1), Ordering::Relaxed);
+}
+
+/// Sum one per-CPU counter across every CPU.
+///
+/// Diagnostic-only: CPUs are read one at a time with no snapshot, so the
+/// total can straddle concurrent updates. That is fine for a statistics dump
+/// and is the reason the hot path gets to stay lock-free.
+fn sum_per_cpu(select: fn(&CpuStats) -> &AtomicU64) -> u64 {
+    let mut total: u64 = 0;
+    for cpu in &PER_CPU_STATS {
+        total = total.wrapping_add(select(cpu).load(Ordering::Relaxed));
+    }
+    total
+}
+
+/// Total `set()` calls across all CPUs since boot.
+fn total_sets() -> u64 {
+    sum_per_cpu(|c| &c.sets)
+}
+
+/// Total `clear()` calls across all CPUs since boot.
+fn total_clears() -> u64 {
+    sum_per_cpu(|c| &c.clears)
+}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -371,7 +447,9 @@ pub fn set(frame_idx: usize, owner: Owner) {
     unsafe {
         p.write(owner as u8);
     }
-    TOTAL_SETS.fetch_add(1, Ordering::Relaxed);
+    if let Some(stats) = PER_CPU_STATS.get(crate::smp::fast_cpu_index()) {
+        bump(&stats.sets);
+    }
 }
 
 /// Clear ownership of a frame (mark as free).
@@ -388,7 +466,9 @@ pub fn clear(frame_idx: usize) {
     unsafe {
         p.write(Owner::Free as u8);
     }
-    TOTAL_CLEARS.fetch_add(1, Ordering::Relaxed);
+    if let Some(stats) = PER_CPU_STATS.get(crate::smp::fast_cpu_index()) {
+        bump(&stats.clears);
+    }
 }
 
 /// Query the owner of a specific frame.
@@ -461,8 +541,8 @@ pub fn summary() -> OwnerSummary {
             counts,
             total_allocated: 0,
             total_free: 0,
-            total_sets: TOTAL_SETS.load(Ordering::Relaxed),
-            total_clears: TOTAL_CLEARS.load(Ordering::Relaxed),
+            total_sets: total_sets(),
+            total_clears: total_clears(),
         };
     }
 
@@ -485,8 +565,8 @@ pub fn summary() -> OwnerSummary {
         counts,
         total_allocated,
         total_free,
-        total_sets: TOTAL_SETS.load(Ordering::Relaxed),
-        total_clears: TOTAL_CLEARS.load(Ordering::Relaxed),
+        total_sets: total_sets(),
+        total_clears: total_clears(),
     }
 }
 

@@ -594,6 +594,143 @@ fn installed_fonts_report_their_names() {
     );
 }
 
+/// Check that every installed face reports a usable weight/slant/width, and
+/// that the well-known ones report the *right* one.
+///
+/// This is what a family selector matches on, and a wrong answer here is
+/// invisible in every other test: a face that misreports itself as regular
+/// still parses, still rasterizes, still has ink. It just means asking for
+/// bold text gets the regular file.
+///
+/// The oracle is a family's own four files. `arialbd.ttf` is Arial Bold and
+/// nothing else, so it must come back at weight 700; `ariali.ttf` must come
+/// back italic and *not* bold. Checking a family as a set also catches the
+/// failure that a single-file check cannot — a parser that returned a
+/// constant would satisfy "arial.ttf is regular" and fail here.
+#[test]
+#[ignore = "depends on the host's installed fonts"]
+fn installed_fonts_report_their_style() {
+    let mut files = Vec::new();
+    for dir in font_dirs() {
+        collect_fonts(&dir, &mut files, 0);
+    }
+    assert!(!files.is_empty(), "no fonts found on this host");
+    files.sort();
+
+    let mut opened = 0usize;
+    let mut by_weight: std::collections::BTreeMap<u16, usize> = std::collections::BTreeMap::new();
+    let mut italics = 0usize;
+    let mut condensed = Vec::new();
+
+    for path in &files {
+        let Ok(data) = fs::read(path) else { continue };
+        let Ok(face) = Face::parse(data) else {
+            continue;
+        };
+        opened += 1;
+        let style = face.style();
+        // The invariants the fallbacks exist to guarantee. A face outside
+        // these ranges would be excluded from every match it should win.
+        assert!(
+            (100..=1000).contains(&style.weight),
+            "{}: weight {} is off the scale",
+            path.display(),
+            style.weight
+        );
+        assert!(
+            (1..=9).contains(&style.width),
+            "{}: width class {} is off the scale",
+            path.display(),
+            style.width
+        );
+        *by_weight.entry(style.weight).or_default() += 1;
+        if style.italic {
+            italics += 1;
+        }
+        if style.width != 5 {
+            condensed.push((face.family().unwrap_or_default(), style.width));
+        }
+    }
+
+    println!("faces opened: {opened}");
+    println!("italic:       {italics}");
+    println!("weights seen:");
+    for (w, n) in &by_weight {
+        println!("  {w}: {n}");
+    }
+    println!("non-normal widths: {}", condensed.len());
+    for (family, w) in condensed.iter().take(12) {
+        println!("  {family:?} width class {w}");
+    }
+
+    // A host with hundreds of fonts has both weights and some italics; if it
+    // did not, the checks above would be passing vacuously.
+    assert!(
+        by_weight.len() > 1,
+        "every face on this host reported the same weight — the field is not \
+         being read"
+    );
+    assert!(italics > 0, "not one italic face — the slant flags are not being read");
+
+    // The oracle: a family's own files, which differ *only* in style.
+    let oracles: [(&str, u16, bool); 12] = [
+        ("arial.ttf", 400, false),
+        ("arialbd.ttf", 700, false),
+        ("ariali.ttf", 400, true),
+        ("arialbi.ttf", 700, true),
+        ("times.ttf", 400, false),
+        ("timesbd.ttf", 700, false),
+        ("timesi.ttf", 400, true),
+        ("timesbi.ttf", 700, true),
+        ("cour.ttf", 400, false),
+        ("courbd.ttf", 700, false),
+        ("DejaVuSans.ttf", 400, false),
+        ("DejaVuSans-Bold.ttf", 700, false),
+    ];
+    let mut checked = 0usize;
+    for (file, weight, italic) in oracles {
+        let Some(path) = files
+            .iter()
+            .find(|p| p.file_name().is_some_and(|n| n.eq_ignore_ascii_case(file)))
+        else {
+            continue;
+        };
+        let Ok(data) = fs::read(path) else { continue };
+        let Ok(face) = Face::parse(data) else { continue };
+        let style = face.style();
+        assert_eq!(
+            (style.weight, style.italic),
+            (weight, italic),
+            "{} reported {style:?}",
+            path.display()
+        );
+        checked += 1;
+        println!("oracle ok: {file} -> {style:?}");
+    }
+    assert!(
+        checked >= 2,
+        "only {checked} well-known faces installed — the styles were never \
+         checked against a known answer"
+    );
+
+    // Arial Narrow is the condensed member of the Arial family, and is the
+    // reason width class is read at all: without it, a request for "Arial"
+    // can be answered with a narrow face that measures quite differently.
+    if let Some(path) = files
+        .iter()
+        .find(|p| p.file_name().is_some_and(|n| n.eq_ignore_ascii_case("arialn.ttf")))
+        && let Ok(data) = fs::read(path)
+        && let Ok(face) = Face::parse(data)
+    {
+        assert!(
+            face.style().width < 5,
+            "Arial Narrow reported width class {}, which is not condensed",
+            face.style().width
+        );
+        println!("oracle ok: arialn.ttf -> {:?}", face.style());
+    }
+}
+
 /// Drive the whole stack the way a toolkit will: file → face → `ScaledFont`
 /// → pixels in an ARGB buffer.
 ///

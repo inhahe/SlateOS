@@ -409,6 +409,56 @@ pub struct Face {
     /// face is opened to draw with, and only a font picker or a family lookup
     /// ever asks for the strings.
     name: Option<Span>,
+    /// Where this face sits in its family. Decoded eagerly, unlike `name`,
+    /// because it is six bytes at fixed offsets rather than a table walk.
+    style: Style,
+}
+
+/// Where a face sits within its family — the axes a font picker selects on.
+///
+/// Taken from `OS/2`, which is the table that describes the face's design
+/// rather than its outlines. Fonts within one family differ only in these,
+/// which is what makes them the right key for "give me the bold one".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Style {
+    /// `usWeightClass`, on the CSS scale: 100 (Thin) to 900 (Black), with 400
+    /// regular and 700 bold. Numeric rather than an enum because the scale is
+    /// continuous — a family may ship 300, 350 and 400 — and collapsing it to
+    /// named steps at parse time would throw away what the selector needs to
+    /// choose between them.
+    pub weight: u16,
+    /// Whether the face is italic or oblique. The two are not distinguished:
+    /// no UI in this system offers a choice between them, and many families
+    /// label a true italic with the oblique bit anyway.
+    pub italic: bool,
+    /// `usWidthClass`: 1 (ultra-condensed) to 9 (ultra-expanded), 5 normal.
+    ///
+    /// Needed because a condensed face is normally a *separate* typographic
+    /// family member rather than a separate family, so without this a request
+    /// for "Arial" can be answered with Arial Narrow.
+    pub width: u8,
+}
+
+impl Style {
+    /// The weight of an unremarkable text face.
+    pub const REGULAR: u16 = 400;
+    /// The weight `Weight::Bold` asks for.
+    pub const BOLD: u16 = 700;
+    /// `usWidthClass` for a face that is not condensed or extended.
+    pub const NORMAL_WIDTH: u8 = 5;
+
+    /// What a face claims when it says nothing: upright, regular, normal width.
+    const DEFAULT: Self = Self {
+        weight: Self::REGULAR,
+        italic: false,
+        width: Self::NORMAL_WIDTH,
+    };
+}
+
+impl Default for Style {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
 }
 
 /// Where a face keeps its outlines.
@@ -455,6 +505,7 @@ impl Face {
         let mut glyf = None;
         let mut cmap = None;
         let mut name = None;
+        let mut os2 = None;
         let mut cff = None;
         let mut has_cff2 = false;
 
@@ -484,6 +535,7 @@ impl Face {
                 b"glyf" => glyf = Some(span),
                 b"cmap" => cmap = Some(span),
                 b"name" => name = Some(span),
+                b"OS/2" => os2 = Some(span),
                 b"CFF " => cff = Some(span),
                 b"CFF2" => has_cff2 = true,
                 _ => {}
@@ -556,6 +608,9 @@ impl Face {
             None => None,
         };
 
+        let os2_data = os2.and_then(|s| data.get(s.off..s.off.checked_add(s.len)?));
+        let style = Self::parse_style(os2_data, head_data);
+
         Ok(Self {
             metrics: FaceMetrics {
                 ascender,
@@ -570,8 +625,72 @@ impl Face {
             hmtx,
             cmap: cmap_sub,
             name,
+            style,
             data,
         })
+    }
+
+    /// Decode the face's place in its family from `OS/2`, falling back to
+    /// `head`.
+    ///
+    /// `OS/2` is optional in the spec and genuinely absent from some older and
+    /// some Apple-only faces, so `head.macStyle` is the backstop: it carries
+    /// only bold and italic flags, which is exactly enough to tell a family's
+    /// four legacy members apart. That is why this never fails — a face with
+    /// no style information at all is a regular upright one, which is both the
+    /// most likely truth and the least damaging guess.
+    fn parse_style(os2: Option<&[u8]>, head: &[u8]) -> Style {
+        // `macStyle` bit 0 is bold and bit 1 is italic. Read first so it can
+        // fill in for whichever `OS/2` field turns out to be unusable.
+        let mac_style = u16_at(head, 44).unwrap_or(0);
+        let mac_bold = mac_style & 0x0001 != 0;
+        let mac_italic = mac_style & 0x0002 != 0;
+
+        let Some(os2) = os2 else {
+            return Style {
+                weight: if mac_bold { Style::BOLD } else { Style::REGULAR },
+                italic: mac_italic,
+                width: Style::NORMAL_WIDTH,
+            };
+        };
+
+        // `fsSelection` bit 0 is italic and bit 9 is oblique. Both are folded
+        // together (see `Style::italic`); `macStyle` covers a face that sets
+        // neither but does set the old flag.
+        let fs_selection = u16_at(os2, 62).unwrap_or(0);
+        let italic = fs_selection & 0x0001 != 0 || fs_selection & 0x0200 != 0 || mac_italic;
+
+        let weight = match u16_at(os2, 4) {
+            // Pre-OpenType files used a 1..=9 scale for the same axis, and
+            // enough of them survive that reading a `3` as "thinner than
+            // Thin" would misfile them. 1..=9 is not a valid CSS weight, so
+            // the two ranges cannot be confused.
+            Some(w @ 1..=9) => w.saturating_mul(100),
+            // Out of range, including the 0 that some generators emit for
+            // "unspecified". `macStyle` is the only thing left to go on.
+            Some(0) | None => {
+                if mac_bold {
+                    Style::BOLD
+                } else {
+                    Style::REGULAR
+                }
+            }
+            Some(w) => w.min(1000),
+        };
+
+        // 0 and values above 9 are out of the defined range; a face that
+        // cannot describe its width is treated as normal rather than as
+        // extremely condensed, which would exclude it from every match.
+        let width = u16_at(os2, 6)
+            .and_then(|w| u8::try_from(w).ok())
+            .filter(|w| (1..=9).contains(w))
+            .unwrap_or(Style::NORMAL_WIDTH);
+
+        Style {
+            weight,
+            italic,
+            width,
+        }
     }
 
     /// Find the offset of the table directory, unwrapping a collection.
@@ -716,6 +835,18 @@ impl Face {
     #[must_use]
     pub fn postscript_name(&self) -> Option<String> {
         self.name(name_id::POSTSCRIPT)
+    }
+
+    /// Where this face sits in its family: weight, slant and width.
+    ///
+    /// This is what a selector matches on. It comes from the face's own
+    /// `OS/2` table rather than from its [`subfamily`](Self::subfamily)
+    /// string, because the string is free text in whatever language the
+    /// vendor chose — "Halbfett", "Demi", "65 Medium" — while the numbers are
+    /// on one defined scale.
+    #[must_use]
+    pub const fn style(&self) -> Style {
+        self.style
     }
 
     /// Map a character to a glyph id, or `None` when the face has no glyph
@@ -1973,5 +2104,131 @@ pub(crate) mod tests {
             read_name(&table, name_id::FAMILY).as_deref(),
             Some("Inter SemiBold")
         );
+    }
+
+    // ---- OS/2 style ------------------------------------------------------
+
+    /// A `head` table long enough to hold `macStyle`, with those flags set.
+    fn head_with(mac_style: u16) -> Vec<u8> {
+        let mut head = vec![0_u8; 54];
+        head.splice(44..46, mac_style.to_be_bytes());
+        head
+    }
+
+    /// An `OS/2` table long enough to hold `fsSelection`.
+    fn os2_with(weight: u16, width: u16, fs_selection: u16) -> Vec<u8> {
+        let mut os2 = vec![0_u8; 78];
+        os2.splice(4..6, weight.to_be_bytes());
+        os2.splice(6..8, width.to_be_bytes());
+        os2.splice(62..64, fs_selection.to_be_bytes());
+        os2
+    }
+
+    #[test]
+    fn os2_reports_the_face_style() {
+        let head = head_with(0);
+        let os2 = os2_with(700, 5, 0x0020);
+        let style = Face::parse_style(Some(&os2), &head);
+        assert_eq!(style.weight, Style::BOLD);
+        assert!(!style.italic);
+        assert_eq!(style.width, Style::NORMAL_WIDTH);
+    }
+
+    #[test]
+    fn italic_is_read_from_either_flag_that_means_it() {
+        let head = head_with(0);
+        // fsSelection bit 0 is italic, bit 9 is oblique; both mean slanted,
+        // and a face setting only the old macStyle bit must not read upright.
+        for (os2_bits, mac, why) in [
+            (0x0001, 0, "fsSelection italic"),
+            (0x0200, 0, "fsSelection oblique"),
+            (0x0000, 0x0002, "macStyle italic with OS/2 silent"),
+        ] {
+            let os2 = os2_with(400, 5, os2_bits);
+            let style = Face::parse_style(Some(&os2), &head_with(mac));
+            assert!(style.italic, "{why} was not read as italic");
+        }
+        assert!(!Face::parse_style(Some(&os2_with(400, 5, 0)), &head).italic);
+    }
+
+    #[test]
+    fn a_face_with_no_os2_falls_back_to_macstyle() {
+        // OS/2 is optional in the spec and absent from some older and
+        // Apple-only faces; macStyle is the only style information they have.
+        let bold = Face::parse_style(None, &head_with(0x0001));
+        assert_eq!(bold.weight, Style::BOLD);
+        assert!(!bold.italic);
+
+        let italic = Face::parse_style(None, &head_with(0x0002));
+        assert_eq!(italic.weight, Style::REGULAR);
+        assert!(italic.italic);
+
+        let plain = Face::parse_style(None, &head_with(0));
+        assert_eq!(plain, Style::default());
+    }
+
+    #[test]
+    fn the_old_one_to_nine_weight_scale_is_recognised() {
+        // Pre-OpenType files used 1..=9 for the same axis. Read literally, a
+        // `7` would be lighter than the lightest CSS weight and the face
+        // would never be chosen as a family's bold.
+        for (raw, expected) in [(1_u16, 100_u16), (4, 400), (7, 700), (9, 900)] {
+            let style = Face::parse_style(Some(&os2_with(raw, 5, 0)), &head_with(0));
+            assert_eq!(style.weight, expected, "usWeightClass {raw}");
+        }
+    }
+
+    #[test]
+    fn an_unusable_weight_falls_back_rather_than_being_believed() {
+        // Some generators write 0 for "unspecified". Believing it would file
+        // the face as lighter than Thin.
+        let regular = Face::parse_style(Some(&os2_with(0, 5, 0)), &head_with(0));
+        assert_eq!(regular.weight, Style::REGULAR);
+        let bold = Face::parse_style(Some(&os2_with(0, 5, 0)), &head_with(0x0001));
+        assert_eq!(bold.weight, Style::BOLD, "macStyle said bold");
+        // Absurdly large values are clamped to the top of the scale rather
+        // than wrapping or being discarded.
+        assert_eq!(
+            Face::parse_style(Some(&os2_with(65535, 5, 0)), &head_with(0)).weight,
+            1000
+        );
+    }
+
+    #[test]
+    fn an_out_of_range_width_reads_as_normal() {
+        // A face that cannot describe its width must not be filed as
+        // ultra-condensed, or it is excluded from every ordinary match.
+        for raw in [0_u16, 10, 999] {
+            let style = Face::parse_style(Some(&os2_with(400, raw, 0)), &head_with(0));
+            assert_eq!(style.width, Style::NORMAL_WIDTH, "usWidthClass {raw}");
+        }
+        assert_eq!(
+            Face::parse_style(Some(&os2_with(400, 3, 0)), &head_with(0)).width,
+            3,
+            "a condensed face keeps its width"
+        );
+    }
+
+    #[test]
+    fn a_truncated_os2_does_not_panic_or_lie() {
+        // Version 0 of OS/2 is 78 bytes, but files exist that are shorter
+        // than their own version claims. Every field read must degrade to the
+        // fallback rather than reading past the end.
+        for len in [0_usize, 2, 5, 7, 61, 63] {
+            let os2 = os2_with(700, 3, 0x0001);
+            let truncated = os2.get(..len).expect("shorter than the table");
+            let style = Face::parse_style(Some(truncated), &head_with(0));
+            // Whatever it could not read must have taken a defined default.
+            assert!(style.weight >= 100 && style.weight <= 1000);
+            assert!((1..=9).contains(&style.width));
+        }
+    }
+
+    #[test]
+    fn the_synthetic_face_reports_a_default_style() {
+        // It carries no OS/2 and a zeroed macStyle, which is the case every
+        // other test in this file runs against.
+        let face = Face::parse(build_test_font()).expect("parse");
+        assert_eq!(face.style(), Style::default());
     }
 }

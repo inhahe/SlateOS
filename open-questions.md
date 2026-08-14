@@ -714,6 +714,78 @@ Roadmap lines ~297-298 (`roadmap.md` Lane A backlog) and `design.txt` lines
 84-95.
 
 
+## Q45 — [A] The kshell byte-purity conversion is ~40× larger than its own scoping estimate. Convert the whole shell, or make only the *expanded word* byte-clean? — Status: OPEN
+
+**Background.** `known-issues.md` → `TD-KSHELL-LINE-EDITOR-IS-UTF8` records that
+the shell cannot type or tab-complete a non-UTF-8 filename, and prescribes
+converting the editor **and** the statement executors together, on the
+reasoning that a partial conversion just relocates the lossy step from the
+keyboard to the parser entry, where it is *less* visible. Stage (a) of that
+plan has landed (`kernel/src/bytestr.rs`, commit `d19372dd4`).
+
+**What changed.** Measuring the remaining stages against the actual file, the
+scope is far larger than the entry assumed. `kernel/src/kshell.rs` is **84,845
+lines**, and **879 of its 1,024 functions** take or return `&str`/`String`.
+The entry's "~1520 call sites" counted *method calls*, not signatures.
+`execute_single` is a full bash-like parser — alias expansion, array syntax,
+`(( ))` arithmetic, `eval`, pipes, redirects, heredocs — and its logic is
+text-oriented throughout (`line.starts_with("((")`, `line.get(2..)`, …). So
+"one coherent change over the editor and the statement executors" means
+rewriting essentially the entire shell in a single commit.
+
+Worth noting what is *not* implicated: only **6** `from_utf8_lossy` sites exist
+in the whole file, and all six are file-*content* formatting (`column`, `diff`),
+not path handling. The byte-purity problem is confined to the path pipeline.
+
+**Options.**
+
+- **A — Convert the whole shell as one commit, per the original entry.**
+  *Pros:* no lossy step anywhere; matches the entry's stated reasoning; every
+  command becomes byte-clean including non-path arguments.
+  *Cons:* an 879-signature rewrite of an 85k-line file, unreviewable as one
+  diff, landing against a working shell; a single mechanical slip breaks a
+  shell that currently works, for a defect the entry itself classifies as *not*
+  data loss ("nothing is corrupted or silently lost… a usability gap in one
+  interactive front end"). Costly to reverse. Many boot-test cycles.
+
+- **B — Make the *expanded word* byte-clean, not the command line.** Keep the
+  source line as text; convert word expansion, `resolve_path`, tab completion
+  and the path-consuming commands to `[u8]`. The user reaches arbitrary bytes
+  via the `$'\xff'` escape, and completion emits that spelling for candidates
+  that are not valid UTF-8.
+  *Pros:* this is **exactly how bash works** — the script source is text, the
+  expanded argument is a byte string; the shell already parses `$'…'` (7 sites),
+  so the input mechanism exists; it fixes the actual user-visible bug; the diff
+  is a small fraction of A and is genuinely coherent along the *data-flow* axis
+  rather than the layer axis, so it introduces no lossy step.
+  *Cons:* a literal raw 0xFF byte still cannot be *typed* directly (it must be
+  escaped); departs from the plan recorded in the entry.
+
+- **C — Leave it as documented debt.** *Pros:* zero regression risk. *Cons:*
+  the gap persists; CLAUDE.md's byte-purity rule stays violated in this front
+  end.
+
+**Claude's recommendation: B.** It fixes the real defect (a non-UTF-8 filename
+becomes reachable and completable) at a small fraction of A's risk, and it is
+the design real shells actually use — the entry's "partial conversion is worse
+than none" objection targets a *layer* split (editor byte-clean, parser not),
+which B is not: B converts one data path end-to-end. A's extra benefit over B
+is byte-purity for non-path arguments, which no known use case needs.
+
+This is flagged rather than decided because A vs. B is an architectural fork on
+a large, costly-to-reverse change, and because B knowingly departs from a plan
+already written into `known-issues.md`.
+
+**Where it bites.** `kernel/src/kshell.rs`: `resolve_path` (208, 270 call
+sites), `get_cwd` (194), the editor — `line_buf` (2872), `History.entries`
+(2631), `replace_line` (2921), `redraw_from_cursor` (2955),
+`reverse_search_mode` (3061), `read_line` (3191) — and `execute` (3872) /
+`execute_single` (4149) plus the sibling statement executors. Helpers already
+exist in `kernel/src/bytestr.rs`.
+
+**In the meantime** Claude is not starting either conversion, and is picking up
+other unblocked Lane A work.
+
 ---
 
 Recently resolved (see `design-decisions.md` for the full rationale):

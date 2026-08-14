@@ -45192,6 +45192,37 @@ byte as two UTF-8 bytes while `cursor += 1` advances by one, desynchronising
 the cursor from the buffer. The type change and the guard widening must be in
 the same commit.
 
+**[A] Correction 4 (2026-08-14) — this entry's scope estimate is ~40× low, and
+stages (b)+(c) are now gated on operator decision `open-questions.md` Q45.**
+
+The "~1520 call sites" figure counted *method calls*. Measured against the
+file: `kshell.rs` is **84,845 lines** and **879 of its 1,024 functions** take
+or return `&str`/`String`. `execute_single` is a full bash-like parser (alias
+expansion, array syntax, `(( ))` arithmetic, `eval`, pipes, redirects,
+heredocs) whose logic is text-oriented throughout. So "one coherent change
+over the editor **and** the statement executors" means rewriting essentially
+the whole shell in a single unreviewable commit, against a shell that
+currently works — for a defect this entry itself classifies as *not* data loss.
+
+Also measured, and cutting the other way: only **6** `from_utf8_lossy` sites
+exist in the whole file, and all six are file-*content* formatting (`column`,
+`diff`), not path handling. The byte-purity problem is confined to the path
+pipeline, which is a small part of those 879 signatures.
+
+That suggests a decomposition this entry did not consider: make the *expanded
+word* byte-clean rather than the command line — convert word expansion,
+`resolve_path`, completion and the path-consuming commands, and let the user
+reach arbitrary bytes through the `$'\xff'` escape the shell **already parses**
+(7 sites). That is how bash itself works (source is text, expanded argument is
+a byte string), it fixes the user-visible bug, and it does *not* fall to this
+entry's "partial conversion is worse than none" objection — that objection
+targets a **layer** split (editor byte-clean, parser not), whereas this
+converts one **data path** end-to-end and so introduces no lossy step.
+
+A-vs-B is an architectural fork on a large, costly-to-reverse change, and B
+knowingly departs from the plan written above, so it is the operator's call:
+see `open-questions.md` **Q45**. Stage (a) is independently useful either way.
+
 ### TD-OILS-AN-UPPERCASE-G-WAS-READ-BY-THE-HALF-OF-THE-COMMAND-THAT-ONLY-EVER-READS-THE-LOWERCASE-ONE. `declare -Ga g=(1 2)` bound the array globally where bash keeps it in the frame — 2026-08-12 — FIXED 2026-08-12
 
 **Where:** `userspace/oils/src/interp.rs`, [`Shell::in_declare_global_scope`].

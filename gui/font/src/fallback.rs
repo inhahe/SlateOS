@@ -169,6 +169,37 @@ pub(crate) fn zeroes_mark_advances(tags: Option<ScriptTags>) -> bool {
     tags.is_none_or(|tags| NO_ZERO_WIDTH_MARKS.binary_search(&tags.preferred).is_err())
 }
 
+/// The script tag a run of `tags` insists the face's `GPOS` name before it will
+/// accept any of it, if there is one.
+///
+/// Almost always `None`: a run takes whatever the face's `GPOS` offers it,
+/// through `DFLT` if the face registers nothing closer. Hebrew is the
+/// exception, and as far as HarfBuzz is concerned the *only* exception — it is
+/// the one shaper that sets a `gpos_tag`, and
+///
+/// ```c
+/// bool disable_gpos = plan.shaper->gpos_tag &&
+///                     plan.shaper->gpos_tag != plan.map.chosen_script[1];
+/// ```
+///
+/// turns the whole positioning table off for a Hebrew run in a face that files
+/// its `GPOS` under anything else. The reason is that a face's `DFLT` (or
+/// `latn`) positioning is written for the script the face is *for*: applying
+/// Latin's accent anchors to Hebrew points is worse than not positioning them,
+/// because it silently produces plausible-looking wrong geometry instead of
+/// falling through to the fallback that measures the glyphs.
+///
+/// Confirmed by measurement, not read off the source: shaping one string per
+/// script through HarfBuzz against Consolas — whose `GPOS` names `cyrl`, `grek`
+/// and `latn`, and no `DFLT` — the fallback runs for Hebrew and for nothing
+/// else, Arabic, Devanagari, Myanmar, Khmer, Mongolian, Syriac, Thaana,
+/// Ethiopic and Thai all keeping their unzeroed advances. See
+/// `TD-FONT-GATES-THE-MARK-FALLBACK-ON-THE-FACE-NOT-THE-RUN`.
+pub(crate) fn demands_own_gpos_script(tags: Option<ScriptTags>) -> Option<[u8; 4]> {
+    let tags = tags?;
+    (tags.preferred == *b"hebr").then_some(*b"hebr")
+}
+
 /// A glyph's ink box, in the shape the placement arithmetic wants it.
 ///
 /// Not [`BBox`](crate::sfnt::BBox), which is four edges. This is an origin
@@ -446,6 +477,33 @@ mod tests {
             );
         }
         assert!(zeroes_mark_advances(None));
+    }
+
+    /// Hebrew is the whole of the list, and the negative half is what makes it
+    /// a claim: if this ever answered `Some` for another script, that script's
+    /// runs would refuse the `GPOS` of every face that files its features
+    /// under `DFLT` — which is most faces — and be positioned by measurement
+    /// instead of by the anchors the designer drew.
+    #[test]
+    fn only_hebrew_demands_a_gpos_registered_under_its_own_name() {
+        assert_eq!(
+            demands_own_gpos_script(Some(ScriptTags::exactly(*b"hebr"))),
+            Some(*b"hebr")
+        );
+        for tag in [
+            *b"latn", *b"arab", *b"cyrl", *b"grek", *b"thai", *b"dev2", *b"deva", *b"khmr",
+            *b"mym2", *b"tibt", *b"hani", *b"DFLT",
+        ] {
+            assert_eq!(
+                demands_own_gpos_script(Some(ScriptTags::exactly(tag))),
+                None,
+                "{:?} must take whatever GPOS the face offers",
+                core::str::from_utf8(&tag)
+            );
+        }
+        // A scriptless run — digits, punctuation, a lone mark — has no name to
+        // demand and so demands nothing.
+        assert_eq!(demands_own_gpos_script(None), None);
     }
 
     /// AGENCYB.TTF's `a`, whose numbers the placement rules below were

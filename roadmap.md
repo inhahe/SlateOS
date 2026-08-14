@@ -418,13 +418,25 @@ Roadmap:
   and the per-script zeroing list, were both measured against HarfBuzz on
   a face declaring no `GSUB`, `GPOS` or `GDEF`; taking `Mc` too made the
   sweep worse than the bug did. `agree` 10731 → 10917, `misplaced`
-  1027 → 841, the Thai string alone 215 → 29. Next unblocked step is the
-  rest of shaping: no Indic reordering
-  (`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`), no Hebrew or Arabic
-  mark re-sorting (`TD-FONT-DOES-NOT-RE-SORT-HEBREW-AND-ARABIC-MARKS`,
-  which is 465 of the remaining 841), no language selection
-  (`TD-FONT-IGNORES-LANGSYS-OVERRIDES`). Vello itself waits on `[A]`'s
-  GPU driver.
+  1027 → 841, the Thai string alone 215 → 29. Marks are then sorted a
+  second time, into the order they are *drawn*
+  (`TD-FONT-DOES-NOT-RE-SORT-HEBREW-AND-ARABIC-MARKS` closed, §419):
+  Unicode's fixed-position combining classes are a canonical ordering and
+  not a stacking order, so `norm::display_class` permutes them the way
+  HarfBuzz's `_hb_modified_combining_class` does and `norm::pieces` sorts
+  by that after NFC — leaving the output deliberately not NFC for Hebrew,
+  Arabic, Telugu, Thai and Tibetan. `agree` 10917 → 11223, `reordered`
+  32 → 0. And the mark fallback is now gated on the *run* rather than on
+  the face (`TD-FONT-GATES-THE-MARK-FALLBACK-ON-THE-FACE-NOT-THE-RUN`
+  closed): Hebrew is the one script whose shaper refuses a `GPOS` that
+  does not name `hebr`, measured on Consolas against nine other scripts
+  that do not, so a Hebrew point in a Latin-and-Arabic face is placed by
+  measurement instead of left at full width. `agree` 11223 → 11709,
+  `misplaced` 625 → 139, with every non-Hebrew string byte-identical.
+  Next unblocked step is the rest of shaping: no Indic reordering
+  (`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`), no language selection
+  (`TD-FONT-IGNORES-LANGSYS-OVERRIDES`), and no device tables in
+  `ValueRecord`. Vello itself waits on `[A]`'s GPU driver.
 - `[C]` Wayland-inspired compositor: GPU acceleration, currently a software
   rasterizer (lines ~4605, ~4619)
 - `[C]` Video-encoded capture fallback, H.264/VP9 (lines ~4623, ~5060)

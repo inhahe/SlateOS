@@ -65,6 +65,7 @@ use crate::gpos::{Adjust, Positioning, Run};
 use crate::gsub::{SubGlyph, Substitutions};
 use crate::kern::Kerning;
 use crate::mark::MarkPositioning;
+use crate::otl;
 use crate::script::ScriptTags;
 
 // ---------------------------------------------------------------------------
@@ -452,6 +453,14 @@ pub struct Face {
     /// [`has_positioning`](Face::has_positioning) for why the distinction is
     /// worth a field.
     has_positioning: bool,
+    /// Every script tag the `GPOS` ScriptList names, sorted. Empty for a face
+    /// with no `GPOS`.
+    ///
+    /// The *names*, not the selections: [`positioning`](Self::positioning)
+    /// records only the scripts that reach a lookup this crate can apply, which
+    /// is a narrower set and the wrong one for the one caller here. See
+    /// [`gpos_names_script`](Face::gpos_names_script).
+    gpos_scripts: Vec<[u8; 4]>,
 }
 
 /// Where a face sits within its family — the axes a font picker selects on.
@@ -675,6 +684,14 @@ impl Face {
         let marks = MarkPositioning::parse(&data, gpos, gdef);
         // And again: the feature walk is per face, the selection per run.
         let positioning = gpos.and_then(|span| Positioning::parse(&data, span, gdef));
+        // Four bytes per script and a handful of scripts per face, so this is
+        // cheaper than the offset walk that finds it and is wanted on a path
+        // that runs once per shaped run.
+        let mut gpos_scripts = gpos
+            .and_then(|span| otl::script_tags(&data, span.off))
+            .unwrap_or_default();
+        gpos_scripts.sort_unstable();
+        gpos_scripts.dedup();
 
         Ok(Self {
             metrics: FaceMetrics {
@@ -696,6 +713,7 @@ impl Face {
             marks,
             positioning,
             has_positioning: gpos.is_some(),
+            gpos_scripts,
             data,
         })
     }
@@ -1227,6 +1245,22 @@ impl Face {
     #[must_use]
     pub fn has_positioning(&self) -> bool {
         self.has_positioning
+    }
+
+    /// Whether the face's `GPOS` ScriptList names `tag` itself.
+    ///
+    /// Deliberately not "would a run of `tag` reach any lookup": no fallback
+    /// chain is followed, and a script table with no usable lookups still
+    /// counts. The caller is [`fallback::demands_own_gpos_script`], which asks
+    /// on behalf of a script whose shaper refuses a face's `GPOS` unless the
+    /// face was written with that script in mind — and a face that names the
+    /// script was, whatever it then chose to do about it.
+    ///
+    /// [`fallback::demands_own_gpos_script`]:
+    ///     crate::fallback::demands_own_gpos_script
+    #[must_use]
+    pub(crate) fn gpos_names_script(&self, tag: &[u8; 4]) -> bool {
+        self.gpos_scripts.binary_search(tag).is_ok()
     }
 
     /// The glyph's ink box in font units, or `None` if it cannot be read.
@@ -1895,6 +1929,15 @@ pub(crate) mod tests {
     /// * glyph 2 — 'B' at U+0042: a triangle with one off-curve point
     /// * glyph 3 — 'C' at U+0043: a composite placing glyph 1 at +500,+200
     pub(crate) fn build_test_font() -> Vec<u8> {
+        assemble(&build_test_tables())
+    }
+
+    /// The fixture's tables, before they are laid out.
+    ///
+    /// Separate from [`build_test_font`] so a test can add one more table to
+    /// the list — see [`build_test_font_with_gpos_scripts`] — rather than
+    /// re-deriving four glyphs and a `cmap` to change one thing.
+    fn build_test_tables() -> Vec<([u8; 4], Vec<u8>)> {
         fn be16(v: u16) -> [u8; 2] {
             v.to_be_bytes()
         }
@@ -2023,7 +2066,7 @@ pub(crate) mod tests {
         cmap.extend_from_slice(&be32(12)); // offset to subtable
         cmap.extend_from_slice(&sub4);
 
-        assemble(&[
+        alloc::vec![
             (*b"cmap", cmap),
             (*b"glyf", glyf),
             (*b"head", head),
@@ -2031,7 +2074,57 @@ pub(crate) mod tests {
             (*b"hmtx", hmtx),
             (*b"loca", loca),
             (*b"maxp", maxp),
-        ])
+        ]
+    }
+
+    /// The fixture plus a `GPOS` that registers exactly `scripts` and does
+    /// nothing.
+    ///
+    /// An empty FeatureList and an empty LookupList, so the table positions
+    /// nothing at all — which is the point. The question it exists to ask is
+    /// whether a *run* accepts the face's `GPOS`, and that is decided by the
+    /// ScriptList alone: a face that names a script has been written with it in
+    /// mind whatever it then does about it, and a face that does not name one
+    /// has not. A table with real lookups in it would let a test pass for the
+    /// wrong reason, by positioning something.
+    ///
+    /// `scripts` is written into the ScriptList in the order given, since a
+    /// real font's ScriptList is in whatever order its compiler emitted and
+    /// nothing may depend on it being sorted.
+    pub(crate) fn build_test_font_with_gpos_scripts(scripts: &[[u8; 4]]) -> Vec<u8> {
+        let n = u16::try_from(scripts.len()).expect("a test may not register 65536 scripts");
+        // The ScriptList begins right after the five-field header, each
+        // ScriptRecord is six bytes, and each of the (identical, empty) script
+        // tables it points at is four.
+        let script_list = 10usize;
+        let records = 2 + 6 * usize::from(n);
+        let mut gpos: Vec<u8> = Vec::new();
+        gpos.extend_from_slice(&1u16.to_be_bytes()); // majorVersion
+        gpos.extend_from_slice(&0u16.to_be_bytes()); // minorVersion
+        gpos.extend_from_slice(&u16::try_from(script_list).unwrap().to_be_bytes());
+        // FeatureList and LookupList sit after the ScriptList, which is the
+        // record array plus one four-byte table per record.
+        let feature_list = script_list + records + 4 * usize::from(n);
+        gpos.extend_from_slice(&u16::try_from(feature_list).unwrap().to_be_bytes());
+        gpos.extend_from_slice(&u16::try_from(feature_list + 2).unwrap().to_be_bytes());
+        gpos.extend_from_slice(&n.to_be_bytes()); // scriptCount
+        for (i, tag) in scripts.iter().enumerate() {
+            gpos.extend_from_slice(tag);
+            // Offsets in a ScriptRecord are from the start of the ScriptList.
+            let at = records + 4 * i;
+            gpos.extend_from_slice(&u16::try_from(at).unwrap().to_be_bytes());
+        }
+        for _ in scripts {
+            gpos.extend_from_slice(&0u16.to_be_bytes()); // defaultLangSysOffset
+            gpos.extend_from_slice(&0u16.to_be_bytes()); // langSysCount
+        }
+        gpos.extend_from_slice(&0u16.to_be_bytes()); // featureCount
+        gpos.extend_from_slice(&0u16.to_be_bytes()); // lookupCount
+
+        let mut tables = build_test_tables();
+        tables.push((*b"GPOS", gpos));
+        tables.sort_unstable_by_key(|&(tag, _)| tag);
+        assemble(&tables)
     }
 
     /// Lay out tables into a valid sfnt container.
@@ -2061,6 +2154,35 @@ pub(crate) mod tests {
 
     fn face() -> Face {
         Face::parse(build_test_font()).expect("synthetic font must parse")
+    }
+
+    #[test]
+    fn a_face_names_the_gpos_scripts_its_script_list_registers() {
+        // Deliberately unsorted in the file: `gpos_names_script` binary-searches
+        // and so depends on the sort happening at parse time.
+        let bytes = build_test_font_with_gpos_scripts(&[*b"latn", *b"DFLT", *b"arab"]);
+        let f = Face::parse(bytes).expect("a font with a GPOS must parse");
+        assert!(f.has_positioning(), "the file carries a GPOS");
+        for tag in [b"latn", b"DFLT", b"arab"] {
+            assert!(f.gpos_names_script(tag), "{} is registered", tag_text(tag));
+        }
+        for tag in [b"hebr", b"thai", b"dflt"] {
+            assert!(!f.gpos_names_script(tag), "{} is not", tag_text(tag));
+        }
+    }
+
+    #[test]
+    fn a_face_with_no_gpos_names_no_script() {
+        let f = face();
+        assert!(!f.has_positioning());
+        for tag in [b"latn", b"DFLT", b"hebr"] {
+            assert!(!f.gpos_names_script(tag), "{} cannot be named", tag_text(tag));
+        }
+    }
+
+    /// A tag as text, for assertion messages only.
+    fn tag_text(tag: &[u8; 4]) -> alloc::string::String {
+        tag.iter().map(|&b| char::from(b)).collect()
     }
 
     #[test]

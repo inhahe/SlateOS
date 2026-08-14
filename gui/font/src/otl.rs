@@ -434,7 +434,7 @@ impl ByScript {
 }
 
 /// Every script tag the table's ScriptList registers, in file order.
-fn script_tags(data: &[u8], base: usize) -> Option<Vec<[u8; 4]>> {
+pub(crate) fn script_tags(data: &[u8], base: usize) -> Option<Vec<[u8; 4]>> {
     let script_list = base.checked_add(usize::from(u16_at(data, base.checked_add(4)?)?))?;
     let count = u16_at(data, script_list)?;
     let mut out = Vec::with_capacity(usize::from(count));

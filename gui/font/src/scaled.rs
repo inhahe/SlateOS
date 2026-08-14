@@ -484,12 +484,6 @@ impl ScaledFont {
         // for text that does not join, which is nearly all of it.
         let mut forms: Vec<Option<Form>> = Vec::new();
         joining::forms(&pieces, &mut forms);
-        // Whether marks will have to be placed by measurement rather than by
-        // the font's own anchors. Decided once, here, because it also changes
-        // what counts as a mark further down: with no `GPOS` there is no
-        // anchor coverage to ask, so the answer has to come from the
-        // character's combining class instead of from the glyph.
-        let synthesize = !self.face.has_positioning();
         // Split now, while glyphs are still one per piece, so that a run
         // boundary counted in pieces is a boundary counted in glyphs. That
         // stops being true the moment anything ligates. Both users need it
@@ -499,13 +493,16 @@ impl ScaledFont {
         let runs = script::runs(&pieces, &piece_levels);
         let mut glyphs: Vec<SubGlyph> = Vec::with_capacity(pieces.len());
         let mut tabs: Vec<bool> = Vec::with_capacity(pieces.len());
-        // The run the piece loop is inside, and the two things the fallback
-        // asks about its script: whether a mark here may be *placed* by
-        // measurement, and whether a mark here takes no room. Two questions
-        // and not one — ten scripts answer them differently, see
-        // [`fallback::zeroes_mark_advances`]. Walked forward with the loop
-        // rather than searched, since both are in piece order.
+        // The run the piece loop is inside, and the three things the fallback
+        // asks about its script: whether the face's `GPOS` applies to this run
+        // at all, whether a mark here may be *placed* by measurement, and
+        // whether a mark here takes no room. Three questions and not one — the
+        // first is about the face as well as the script, and ten scripts answer
+        // the last two differently, see [`fallback::zeroes_mark_advances`].
+        // Walked forward with the loop rather than searched, since all three
+        // are in piece order.
         let mut run = 0usize;
+        let mut synth = runs.first().is_none_or(|&(_, t)| !self.applies_gpos(t));
         let mut placeable = runs.first().is_none_or(|&(_, t)| fallback::positions_marks(t));
         let mut zeroed = runs
             .first()
@@ -513,6 +510,7 @@ impl ScaledFont {
         for (i, &(ch, cluster)) in pieces.iter().enumerate() {
             while runs.get(run).is_some_and(|&(end, _)| end <= i) {
                 run = run.saturating_add(1);
+                synth = runs.get(run).is_none_or(|&(_, t)| !self.applies_gpos(t));
                 placeable = runs
                     .get(run)
                     .is_none_or(|&(_, t)| fallback::positions_marks(t));
@@ -527,7 +525,7 @@ impl ScaledFont {
             let tab = ch == '\t';
             let gid = if tab { space } else { self.glyph_id(ch) };
             glyphs.push(SubGlyph {
-                klass: if synthesize && placeable && !tab {
+                klass: if synth && placeable && !tab {
                     fallback::attach_class(ch)
                 } else {
                     0
@@ -538,13 +536,34 @@ impl ScaledFont {
                 // for all but ten scripts a mark takes no room either way. Nor
                 // is it gated on the combining class, which is an ordering and
                 // leaves plenty of marks at zero.
-                mark: synthesize && zeroed && !tab && norm::is_mark(ch),
+                mark: synth && zeroed && !tab && norm::is_mark(ch),
                 ..SubGlyph::cursive(gid, cluster, forms.get(i).copied().flatten())
             });
             tabs.push(tab);
         }
 
         let segments = self.substitute_runs(&runs, &mut glyphs, &mut tabs);
+
+        // The same question the piece loop asked, re-asked per *glyph*, because
+        // the two are no longer the same list: a stretch that ligated is
+        // shorter than the pieces it came from, so a piece index cannot be used
+        // to look anything up down here. The segments survive that — they are
+        // rewritten by the substitution to say where each stretch landed — and
+        // they carry the script, which is the only input the answer has.
+        //
+        // A glyph no segment covers is a tab, which is not a mark and is not
+        // positioned by anything, so `false` is both answers at once.
+        let mut synth_at: Vec<bool> = alloc::vec![false; glyphs.len()];
+        for segment in &segments {
+            let answer = !self.applies_gpos(segment.script);
+            for slot in synth_at
+                .get_mut(segment.start..segment.end)
+                .unwrap_or_default()
+            {
+                *slot = answer;
+            }
+        }
+        let synthesize = synth_at.iter().any(|&yes| yes);
 
         let marked = self.face.has_marks();
         // The combining classes, one per glyph, kept aside for the placement
@@ -563,14 +582,17 @@ impl ScaledFont {
         //
         // Two ways to be a mark, because two different things are being asked.
         // A face with anchors is asked about the *glyph*, since that is what
-        // the anchors are indexed by and what `GDEF` classes. A face with no
-        // `GPOS` can only be asked about the *character*, and the answer is
-        // its general category — carried on the glyph as `SubGlyph::mark`,
-        // because substitution is free to change the glyph id and a cluster
-        // cannot tell a base from the marks that share it. The two never both
-        // apply — `synthesize` means there is no `GPOS` and so nothing for
-        // `marked` to have come from but `GDEF` — which is why one vector can
-        // serve the pass and the fallback both.
+        // the anchors are indexed by and what `GDEF` classes. A run the face's
+        // `GPOS` does not reach can only be asked about the *character*, and
+        // the answer is its general category — carried on the glyph as
+        // `SubGlyph::mark`, because substitution is free to change the glyph id
+        // and a cluster cannot tell a base from the marks that share it.
+        //
+        // Both can be true of one glyph, and `||` is the right join: a Hebrew
+        // point in a face that classes it in `GDEF` but files its `GPOS` under
+        // `latn` is a mark by either route, and HarfBuzz zeroes it by either
+        // route too — `GDEF` late-zeroing and the fallback are separate passes
+        // there, both switched on.
         let marks: Vec<bool> = glyphs
             .iter()
             .enumerate()
@@ -642,7 +664,7 @@ impl ScaledFont {
             // pen arrives on the mark's *right*, which is where a mark drawn
             // at offset zero already belongs.
             let back = if mark
-                && synthesize
+                && synth_at.get(i).copied().unwrap_or(false)
                 && klasses.get(i).copied().unwrap_or(0) == 0
                 && levels
                     .get(glyph.cluster)
@@ -721,13 +743,15 @@ impl ScaledFont {
         };
 
         if synthesize {
-            // The only mark pass left here. A face *with* `GPOS` had its marks
-            // placed by the positioning pass, in font units and before the
+            // The only mark pass left here. A run the positioning pass *did*
+            // reach had its marks placed there, in font units and before the
             // reordering — which is where the placement belongs, since a
             // mark's offset is measured against a pen the lookups themselves
-            // were still moving. The two are mutually exclusive by
-            // construction: `synthesize` means the face has no `GPOS`, and a
-            // face with no `GPOS` has no anchors to place anything by.
+            // were still moving. The two never touch the same glyph: a run the
+            // pass ran on has `klass` zero throughout, because the piece loop
+            // only fills `klass` in where `applies_gpos` said no, and this pass
+            // does nothing to a glyph whose class is zero but treat it as a
+            // base.
             self.synthesize_marks(&mut out, &visual, &klasses, &levels);
         }
         ShapedRun::reordered(out, visual)
@@ -844,6 +868,27 @@ impl ScaledFont {
         segments
     }
 
+    /// Whether the face's `GPOS` positions a run of `script` — and so, by its
+    /// negation, whether that run's marks have to be placed by measurement.
+    ///
+    /// Two conditions, and the second is the one that makes this a question
+    /// about the run rather than about the face. The face must carry a `GPOS`
+    /// at all; see [`Face::has_positioning`](crate::sfnt::Face::has_positioning)
+    /// for why a face that has one is taken at its word even when it positions
+    /// nothing. And the run's script must accept it: Hebrew does not accept a
+    /// `GPOS` written for some other script, which is
+    /// [`fallback::demands_own_gpos_script`] and the only case there is.
+    ///
+    /// Asked once per run and once per segment rather than cached, because the
+    /// answer is a binary search over a handful of four-byte tags and caching
+    /// it would mean deciding where — the face cannot hold it, since it depends
+    /// on the run.
+    fn applies_gpos(&self, script: Option<ScriptTags>) -> bool {
+        self.face.has_positioning()
+            && fallback::demands_own_gpos_script(script)
+                .is_none_or(|tag| self.face.gpos_names_script(&tag))
+    }
+
     /// Position each of `segments` with the face's `GPOS`, into one adjustment
     /// per glyph in `glyphs`.
     ///
@@ -868,6 +913,13 @@ impl ScaledFont {
             return out;
         }
         for segment in segments {
+            // A segment whose script refuses this face's `GPOS` outright. Not
+            // "no lookup matched" — those two look the same in the output and
+            // are not the same claim, and it is this one that switches the
+            // measuring fallback on for the segment.
+            if !self.applies_gpos(segment.script) {
+                continue;
+            }
             let span = segment.start..segment.end;
             let (Some(run), Some(widths), Some(is_mark)) = (
                 glyphs.get(span.clone()),
@@ -1368,10 +1420,98 @@ pub fn blit_mask(mask: &GlyphMask, target: &mut Target<'_>, x: i32, y: i32) {
 )]
 mod tests {
     use super::*;
-    use crate::sfnt::tests::build_test_font;
+    use crate::sfnt::tests::{build_test_font, build_test_font_with_gpos_scripts};
 
     fn font(px: f32) -> ScaledFont {
         ScaledFont::from_bytes(build_test_font(), px).unwrap()
+    }
+
+    /// LAMED then QAMATS: one Hebrew letter and one Hebrew point, neither of
+    /// which the fixture has a glyph for, so both come out `.notdef` — which is
+    /// exactly the case this is about. The point is still a point.
+    const POINTED: &str = "\u{5dc}\u{5b8}";
+
+    /// A face that registers `scripts` in its `GPOS`, shaping [`POINTED`] at
+    /// the em size, reports these advances.
+    ///
+    /// The em size so the numbers are the font's own units: the fixture is a
+    /// 1000-unit em and `.notdef` is 600 units wide.
+    fn pointed_advances(scripts: &[[u8; 4]]) -> Vec<f32> {
+        let f = ScaledFont::from_bytes(build_test_font_with_gpos_scripts(scripts), 1000.0)
+            .unwrap();
+        f.shape(POINTED)
+            .glyphs()
+            .iter()
+            .map(|g| g.advance)
+            .collect()
+    }
+
+    /// The bug this fixes: a face carrying a `GPOS` for some other script used
+    /// to switch the measuring fallback off for *every* run in it, because the
+    /// question was asked of the file rather than of the run. A Hebrew point in
+    /// a Latin-and-Arabic face then kept its full nominal advance and sat
+    /// beside its letter instead of under it.
+    ///
+    /// HarfBuzz's rule, and now ours: the Hebrew shaper is the one that sets a
+    /// `gpos_tag`, so a Hebrew run refuses a `GPOS` whose ScriptList does not
+    /// name `hebr` and is positioned by measurement instead. Measured against
+    /// HarfBuzz over the host's 556 faces, this is the difference between 249
+    /// and 6 disagreements on the corpus's pointed-Hebrew string.
+    #[test]
+    fn a_hebrew_run_refuses_a_gpos_written_for_another_script() {
+        // No `hebr`: the fallback runs, and a mark takes no room.
+        for scripts in [
+            [*b"DFLT", *b"arab", *b"latn"].as_slice(),
+            [*b"latn"].as_slice(),
+            [*b"cyrl", *b"grek"].as_slice(),
+        ] {
+            assert_eq!(
+                pointed_advances(scripts),
+                alloc::vec![600.0, 0.0],
+                "a GPOS naming {scripts:?} says nothing about Hebrew"
+            );
+        }
+        // `hebr` present: the face has been written with Hebrew in mind, so it
+        // is taken at its word even though this `GPOS` positions nothing, and
+        // the point keeps the advance `hmtx` gave it.
+        for scripts in [
+            [*b"hebr"].as_slice(),
+            [*b"DFLT", *b"hebr", *b"latn"].as_slice(),
+        ] {
+            assert_eq!(
+                pointed_advances(scripts),
+                alloc::vec![600.0, 600.0],
+                "a GPOS naming {scripts:?} owns its Hebrew"
+            );
+        }
+    }
+
+    /// The other half of the same claim: a face with no `GPOS` at all falls
+    /// back for every script, and one whose `GPOS` names the run's own script
+    /// falls back for none — so the new gate cannot have been implemented by
+    /// simply always falling back, or never.
+    #[test]
+    fn a_latin_run_takes_whatever_gpos_the_face_offers() {
+        // 'A' plus a combining acute, which is an `Mn` mark and so would be
+        // zeroed by the fallback. The fixture has no glyph for the acute.
+        let acute = "A\u{301}";
+        let advances = |scripts: &[[u8; 4]]| -> Vec<f32> {
+            ScaledFont::from_bytes(build_test_font_with_gpos_scripts(scripts), 1000.0)
+                .unwrap()
+                .shape(acute)
+                .glyphs()
+                .iter()
+                .map(|g| g.advance)
+                .collect::<Vec<_>>()
+        };
+        // 'A' is glyph 1, 300 units wide. A `GPOS` under `DFLT` alone still
+        // covers a Latin run, so no fallback and the acute keeps its width.
+        assert_eq!(advances(&[*b"DFLT"]), alloc::vec![300.0, 600.0]);
+        assert_eq!(advances(&[*b"hebr"]), alloc::vec![300.0, 600.0]);
+        // No `GPOS` at all, and the fallback runs for everything.
+        let bare = ScaledFont::from_bytes(build_test_font(), 1000.0).unwrap();
+        let got: Vec<f32> = bare.shape(acute).glyphs().iter().map(|g| g.advance).collect();
+        assert_eq!(got, alloc::vec![300.0, 0.0]);
     }
 
     #[test]

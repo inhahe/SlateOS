@@ -5060,12 +5060,22 @@ pub const NAME_TO_HANDLE_AT_FLAGS_VALID: i32 = AT_SYMLINK_FOLLOW | AT_EMPTY_PATH
 ///
 /// Validation order matches `fs/fhandle.c::sys_name_to_handle_at`:
 /// 1. Unknown flag bits → `EINVAL`.
-/// 2. `pathname`, `handle`, or `mount_id` NULL → `EFAULT`.  Linux
-///    actually defers `handle`/`mount_id` checks until after
-///    `user_path_at`, but our model can do the cheap NULL check up
-///    front without observable difference.
+/// 2. `pathname` NULL → `EFAULT`.  `user_path_at(dfd, name, …)` takes
+///    `getname_flags(name)` as an *argument* to `filename_lookup`, so the
+///    name is imported — and faults — before `dfd` is ever consulted.
 /// 3. If `dirfd != AT_FDCWD`, it must be a valid open fd → `EBADF`.
-/// 4. All validated → `ENOSYS`.
+/// 4. `handle` or `mount_id` NULL → `EFAULT`.  These are only touched in
+///    `do_sys_name_to_handle`, which runs *after* `user_path_at` succeeds.
+/// 5. All validated → `ENOSYS`.
+///
+/// An earlier version checked all three pointers together at step 2 and
+/// justified it as "our model can do the cheap NULL check up front without
+/// observable difference".  There is an observable difference, and it is the
+/// obvious one: `name_to_handle_at(bad_fd, "p", NULL, NULL, 0)` is `EBADF`
+/// upstream and was `EFAULT` here.  (This was the third doc comment in the
+/// audit found *arguing* for an order rather than citing one — see
+/// design-decisions.md §303 and the `bind` and `posix_spawnattr_setflags`
+/// cases.)
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn name_to_handle_at(
     dirfd: Fd,
@@ -5078,7 +5088,7 @@ pub extern "C" fn name_to_handle_at(
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    if pathname.is_null() || handle.is_null() || mount_id.is_null() {
+    if pathname.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
@@ -5091,6 +5101,10 @@ pub extern "C" fn name_to_handle_at(
             // lookup_fd already set EBADF.
             return -1;
         }
+    }
+    if handle.is_null() || mount_id.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
     }
     errno::set_errno(errno::ENOSYS);
     -1
@@ -10572,9 +10586,11 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
+    /// NULL pathname AND bad dirfd — EFAULT wins, because `user_path_at`
+    /// passes `getname_flags(name)` as an *argument* to `filename_lookup`, so
+    /// the name is imported before `dfd` is consulted.
     #[test]
     fn test_name_to_handle_at_pointer_check_before_dirfd_check() {
-        // NULL pathname AND bad dirfd — EFAULT wins.
         crate::errno::set_errno(0);
         let ret = name_to_handle_at(
             -5,
@@ -10585,6 +10601,24 @@ mod tests {
         );
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    /// But `handle` and `mount_id` are read only in `do_sys_name_to_handle`,
+    /// which runs *after* `user_path_at` returns — so with a good path they
+    /// rank below the dirfd.  We used to check all three pointers together and
+    /// answer EFAULT here.
+    #[test]
+    fn test_name_to_handle_at_dirfd_outranks_the_output_pointers() {
+        crate::errno::set_errno(0);
+        let ret = name_to_handle_at(
+            -5,
+            b"foo\0".as_ptr(),
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
     // --- open_by_handle_at: pointer validation --------------------------

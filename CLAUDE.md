@@ -291,6 +291,36 @@ killed); `125` failed to launch; `130` interrupted. Prefer this over bare
 potentially-hanging test suites through it in the background so a genuine
 deadlock is bounded and can never orphan.
 
+### Background a long run with `run_in_background: true`, never `nohup … &`
+
+Boot tests (~8 min), soaks (hours) and full workspace builds must not block
+the conversation. Background them with the Bash tool's **`run_in_background`
+parameter**. Do **not** hand-roll it with `nohup … &`, `start /b`, or a
+trailing `&` inside the command.
+
+The difference is not cosmetic. A job started with `run_in_background: true`
+is owned by the tool harness, which means:
+
+- **It appears in the operator's background-task list.** A `nohup`-detached
+  job is invisible there, so the operator sees an idle agent with no way to
+  tell that a 3-hour soak is in fact running.
+- **You get a completion notification.** A detached job cannot notify anyone
+  when it finishes. You would only discover the result by polling on a
+  timer — which wastes wake-ups, and silently loses the result entirely if
+  the loop ends before the job does.
+- **Its output is captured** to a file you can read incrementally, and the
+  job can be inspected and stopped through the harness.
+
+If a long run is *already* going as a detached process and killing it would
+throw away real work, don't restart it — background a **watcher** instead,
+which gets you the notification without losing progress:
+
+```bash
+# with run_in_background: true
+while kill -0 <pid> 2>/dev/null; do sleep 30; done
+echo "=== finished ==="; tail -20 <logfile>
+```
+
 ---
 
 ## Performance — Benchmark Everything Critical

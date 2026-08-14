@@ -626,6 +626,93 @@ the 63 gate sites led by `posix/src/process.rs` (13) and `posix/src/unistd.rs`
 projected), `kernel/src/syscall/handlers.rs` (`sys_cap_query`), and
 `known-issues.md` → `TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S`.
 
+## Q40 — Install the GNAT/SPARK and LLVM toolchains? Two Lane A roadmap items are blocked on them, and nothing else in Lane A is — Status: OPEN
+
+**Question.** The Lane A roadmap backlog has five items. Three are either
+"Later" (NTFS/Btrfs/ZFS/F2FS), lane-C-driven (TCP/IP stack), or a very large
+port that wants its own go-ahead (AMDGPU / i915-xe). The remaining two are the
+natural next increments — and **both are blocked on a compiler that is not
+installed on this machine**, not on any design or code question:
+
+| Roadmap item | Needs | Probe result |
+|---|---|---|
+| `[A]` Ada/SPARK FFI bridge for kernel-space drivers | `gnat`, `gprbuild`, `gnatprove` | all missing |
+| `[A]` Enable LLVM CFI as default for C/C++ compilation | `clang`, `lld` | both missing |
+
+(Probed 2026-08-14 via `command -v`. The `*ada*` directories under
+`userspace/` are coincidental CLI names — `ada-cli`, `cutadapt-cli` — not an
+Ada toolchain. A stray `ld.lld` exists under an Embarcadero install but is not
+a usable LLVM toolchain.)
+
+Per the global tooling rule I install missing tools myself when that is safe
+and self-contained, and pause to ask when it is heavyweight, system-wide, or
+has licensing implications. Both of these are in the "ask" category, and they
+are separable, so please answer them independently.
+
+**Option A — install GNAT/SPARK (unblocks the Ada FFI bridge).**
+
+- *Pro:* it is the only thing standing between the roadmap and a design-spec
+  feature. `design.txt` (lines 84-95) is specific about what it buys: SPARK
+  *proves* driver logic has no buffer overflows, no integer overflows and no
+  invalid state transitions, and the layering it names — Rust kernel → FFI →
+  SPARK driver in kernel space → IOMMU-constrained DMA — is a real
+  defence-in-depth story rather than a nice-to-have.
+- *Con:* it is the heaviest of the three asks. Beyond the ~1-2 GB toolchain
+  there is a **licensing fork** worth your call (FSF GNAT via MSYS2/MinGW vs
+  AdaCore's GNAT Pro; GNAT Community is discontinued), and a real technical
+  cost: a freestanding kernel needs a **restricted Ada runtime** (ZFP or
+  light), because the full runtime wants an OS underneath it. That is
+  configuration work, not just an install.
+- *Con:* `gnatprove` is what makes this "SPARK" rather than "Ada". If we
+  install a toolchain without the prover, we get FFI plumbing and none of the
+  proof — i.e. the entire justification.
+
+**Option B — install clang + lld (unblocks LLVM CFI).**
+
+- *Pro:* much lighter and less contentious; clang/lld are a standard,
+  well-understood install with no licensing question.
+- *Con:* the payoff is presently small. The rule is that C is used *only* when
+  porting existing C code (ext4, Mesa, Chromium), so "CFI as default for C/C++"
+  currently governs a very small amount of compilation — the C in
+  `scripts/create-ext4-rootfs.sh` is built with **gcc**, and that script is
+  Lane B's. Enabling CFI as a default would therefore reach across a lane
+  boundary to change Lane B's build for a benefit that only materialises once
+  the big C ports land.
+- *Con:* CFI wants LTO, which changes build times and link behaviour for
+  everything it touches.
+
+**Option C — install neither now; defer both.**
+
+- *Pro:* neither item is on the critical path today, and there is unblocked
+  Lane A work (see below), so the cost of waiting is zero.
+- *Con:* it leaves the Lane A roadmap backlog effectively down to
+  "Later"/large-port items, so the *next* time Lane A needs a task the same
+  question comes back.
+
+**Claude's recommendation:** **B now, A when you want the driver-safety story
+started, and tell me which GNAT.** clang/lld is cheap, uncontroversial, and I
+can install it without further input if you say go. GNAT/SPARK I would rather
+not choose for you: the FSF-vs-AdaCore call and the restricted-runtime
+decision are both yours, and installing the wrong one wastes the larger
+download. I would also want to sequence A *after* the IOMMU work it pairs with
+in `design.txt`, so it is not urgent.
+
+**What I am doing in the meantime — this question blocks nothing.** I have
+moved to `TD-KSHELL-LINE-EDITOR-IS-UTF8`, which is unblocked, in-lane, pure
+Rust, and a genuine correctness item rather than polish: `CLAUDE.md`'s rule 7
+says OS-boundary data is bytes and must never be forced through UTF-8, and the
+kshell line editor currently holds the command line as a `String`, so a
+filename containing a non-UTF-8 byte can be listed but neither typed nor
+tab-completed. Please do **not** treat this question as a reason to expect me
+idle.
+
+**Where it bites:** `scripts/kasan-build.sh`-style toolchain probing generally;
+for A, a new `drivers/spark/` tree plus a `build.rs` FFI shim and
+`toolchain/`-side runtime configuration; for B, `.cargo/config.toml` C flags
+and `scripts/create-ext4-rootfs.sh` (Lane B — would need a `requests/` entry).
+Roadmap lines ~297-298 (`roadmap.md` Lane A backlog) and `design.txt` lines
+84-95.
+
 
 ---
 

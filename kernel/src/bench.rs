@@ -1542,6 +1542,9 @@ pub fn run_all() {
     bench_vfs_stat();
     // Runs immediately after vfs_stat so it sees the same dcache occupancy
     // that vfs_stat was measured against.
+    // Before the VFS breakdown: it interprets its stages in terms of lock
+    // cost, so the lock cost had better be measured first.
+    bench_lock_primitives();
     bench_vfs_stat_breakdown();
     bench_vfs_read_write();
     bench_vfs_readdir();
@@ -3101,6 +3104,81 @@ fn bench_vfs_stat() {
 /// `resolve_follow` is therefore split one level further, into the three
 /// stages it actually performs, so the next fix is aimed by measurement
 /// instead of by inspection.
+/// Benchmark the cost of acquiring and releasing an **uncontended** lock.
+///
+/// This anchor was missing, and its absence is why a wrong number went
+/// unchallenged for a whole investigation.  A prediction about `stat("/")`
+/// argued that "`sched_pick_next` = 40 ns and it takes the run-queue lock,
+/// therefore an uncontended spinlock is ≲ 20 ns" — but `bench_sched_pick_next`
+/// builds a *local* `PriorityRoundRobin` on the stack and never touches
+/// `SCHED.lock()`.  The one figure bounding the most common operation in the
+/// kernel was measured on a lock-free path.  The prediction missed by 4.9x.
+/// See `B-VFS-STAT-ROOT-IS-12x-OVER-TARGET-AND-THE-DCACHE-IS-NOT-WHY`.
+///
+/// Three variants, because the interesting quantity is a difference, not an
+/// absolute:
+///
+/// * **raw** — `spin::Mutex`, the bare atomic `try_lock` + store. The floor.
+/// * **tracked** — `crate::sync::Mutex` as the kernel actually uses it, with
+///   `TRACKING_ENABLED` in its default (on) state. Every acquisition calls
+///   `lockdep::lock_acquire`, `preempt_disable`, **one `rdtsc`**, and
+///   `stats.record_uncontended()`; every release calls a **second `rdtsc`**,
+///   `record_hold`, `lockdep::lock_release` and `preempt_enable`.
+/// * **untracked** — the same type with tracking off, which skips both `rdtsc`
+///   calls and the stat recording but keeps lockdep and preempt.
+///
+/// `tracked - untracked` is therefore the price of contention statistics, and
+/// `untracked - raw` the price of lockdep plus preemption control. Both are
+/// paid by **every lock acquisition in the kernel**, so if they are large this
+/// is not a VFS finding at all — it is a whole-kernel one, and every benchmark
+/// in this suite that takes a lock is partly measuring instrumentation.
+fn bench_lock_primitives() {
+    // NB: fully qualified. `Mutex` is aliased to `PreemptSpinMutex` at the top
+    // of this file, which is a *different* lock type with different overhead --
+    // the one under investigation is `crate::sync::Mutex`, the type
+    // `PROCESS_NS` and friends use.
+    static RAW: spin::Mutex<u64> = spin::Mutex::new(0);
+    static TRACKED: crate::sync::Mutex<u64> = crate::sync::Mutex::new(0);
+
+    let raw = run("lock_raw_spin", 2000, || {
+        let mut g = RAW.lock();
+        *g = core::hint::black_box(*g).wrapping_add(1);
+    });
+
+    let tracked = run("lock_tracked", 2000, || {
+        let mut g = TRACKED.lock();
+        *g = core::hint::black_box(*g).wrapping_add(1);
+    });
+
+    // Toggle tracking off for the third variant, then restore it. Restoring
+    // matters: leaving it off would silently change the cost of every lock in
+    // every benchmark that runs after this one.
+    crate::sync::set_tracking_enabled(false);
+    let untracked = run("lock_tracked_no_stats", 2000, || {
+        let mut g = TRACKED.lock();
+        *g = core::hint::black_box(*g).wrapping_add(1);
+    });
+    crate::sync::set_tracking_enabled(true);
+
+    serial_println!(
+        "[bench]   lock acquire+release: raw {}ns, tracked {}ns, tracked-without-stats {}ns",
+        raw.min_ns, tracked.min_ns, untracked.min_ns
+    );
+    serial_println!(
+        "[bench]   lock overhead: contention stats +{}ns, lockdep+preempt +{}ns",
+        tracked.min_ns.saturating_sub(untracked.min_ns),
+        untracked.min_ns.saturating_sub(raw.min_ns),
+    );
+
+    // Scored against the tracked variant, because that is what the kernel
+    // actually pays. 500ns is the value the vfs_stat stage split *implied*
+    // (3 locks + 3 map lookups + 1 alloc = 1948ns); this benchmark exists to
+    // replace that inference with a measurement, so the target is deliberately
+    // set at the inferred value: if the inference was right this sits exactly
+    // on the line, and any movement is then real.
+    score("lock_uncontended", &tracked, 500);
+}
+
 fn bench_vfs_stat_breakdown() {
     use crate::fs::vfs::Vfs;
 
@@ -3187,6 +3265,14 @@ fn bench_vfs_stat_breakdown() {
         crate::fs::vfs::VFS_DCACHE_SIZE,
         hits_after.saturating_sub(hits_before),
         misses_after.saturating_sub(misses_before)
+    );
+    // "The fast path did not help" and "the fast path was never taken" are
+    // different findings, and telling them apart after the fact is exactly what
+    // went wrong twice on this benchmark. Print which one it is.
+    serial_println!(
+        "[bench]   vfs_stat_breakdown: namespace fast path {} (NS_FEATURES_ACTIVE={})",
+        if crate::ipc::namespace::ns_features_active() { "DISABLED" } else { "available" },
+        crate::ipc::namespace::ns_features_active(),
     );
     let _ = (valid_entries, misses_before);
 }
@@ -3580,8 +3666,17 @@ fn bench_net_firewall_check() {
         "[bench]   net_firewall_inbound_check: min {}ns ({}cycles)",
         result.min_ns, result.min_cycles
     );
-    // Target from baselines.toml: 2000ns (runs on every inbound packet).
-    score("firewall_check", &result, 2000);
+    // Target from baselines.toml: 1000ns (runs on every inbound packet).
+    //
+    // This literal said 2000 while the file said 1000, and the comment cited
+    // the file for the number it disagreed with -- the exact failure that
+    // `report_baselines()` in scripts/bench-history.py was added to catch, and
+    // the last of the 11 it found. The file wins: its 1000ns is corroborated
+    // by its own `target_cycles = 3700` (1000ns at 3.7GHz), whereas the 2000
+    // here had no support other than a citation that was not true. Measured
+    // 53ns, so this is comfortable either way -- which is precisely why it
+    // could drift undetected for so long.
+    score("firewall_check", &result, 1000);
 }
 
 /// Benchmark DNS query packet building (label encoding).

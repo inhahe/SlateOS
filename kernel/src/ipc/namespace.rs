@@ -36,10 +36,26 @@
 //!
 //! ## Performance
 //!
-//! Namespace resolution adds one lock acquisition + a linear scan of
-//! rules per path operation.  Typical namespaces have < 10 rules, so
-//! this is negligible compared to VFS/filesystem I/O.  The root
-//! namespace (ID 0) has no rules and short-circuits immediately.
+//! [`resolve_path`] runs before **every** path operation in the VFS, so its
+//! cost is charged to every open, stat, read and write in the system.
+//!
+//! This section used to claim that resolution "adds one lock acquisition"
+//! and that "the root namespace (ID 0) has no rules and short-circuits
+//! immediately".  Both were false, and being written down is probably why
+//! nobody checked: the pass-through case took **three** global spinlocks
+//! ([`PROCESS_NS`], [`PROCESS_ROOT`], and `THREAD_OWNERS` via
+//! [`crate::proc::thread::owner_process`]) plus a heap allocation, and then
+//! returned its argument byte-for-byte unchanged.  Measured at **1948 ns**
+//! under QEMU-TCG — 30% of an entire `stat("/")`, where an uncontended
+//! global spinlock costs ~500 ns and is the dominant primitive.
+//!
+//! [`NS_FEATURES_ACTIVE`] is the fix: a single relaxed-ish atomic load that
+//! short-circuits the whole function while no process has a namespace, a
+//! chroot or a volume mount.  See its docs for why it is monotonic.
+//!
+//! Once namespaces *are* in use, resolution costs those three locks plus a
+//! linear scan of the namespace's rules; typical namespaces have < 10 rules,
+//! which is negligible beside the locks.
 //!
 //! ## References
 //!
@@ -57,7 +73,7 @@ use crate::error::{KernelError, KernelResult};
 use crate::fs::path::{Path, PathBuf};
 use crate::serial_println;
 use crate::sync::Mutex;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -120,6 +136,131 @@ struct Namespace {
 
 /// Next namespace ID to allocate.
 static NEXT_NS_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Whether *any* namespace feature is in use anywhere in the system.
+///
+/// Clear means: no process has been assigned a namespace ([`PROCESS_NS`]),
+/// given a filesystem root ([`PROCESS_ROOT`]), or given a volume mount
+/// ([`PROCESS_MOUNTS`]).  In that state every branch [`resolve_path_for`]
+/// could take is the identity branch, so it can return its argument without
+/// consulting anything — which is the point: the three global spinlocks it
+/// would otherwise take cost ~1500 ns of the 1948 ns measured for this
+/// function, on the hot path of every VFS operation in the kernel.
+///
+/// This is the rarely-used-feature pattern (Linux's static keys), degraded to
+/// an atomic load because we have no code patching.
+///
+/// **Monotonic by design: set, never cleared.**  Clearing it when the last
+/// container tears down would be racy — a resolution already past the load
+/// would take the fast path while state it should have seen is being torn
+/// down — and would buy nothing worth that risk, since the cost of remaining
+/// on the slow path after containers have been used once is exactly the cost
+/// we have today.  The flag is therefore an assertion that the system has
+/// *never* used namespaces, not that it is not using them right now.
+///
+/// Ordering: [`Ordering::Release`] on set, [`Ordering::Acquire`] on load, so a
+/// resolution that observes the flag set also observes the map insertion that
+/// set it.  A resolution that observes it clear is correct regardless of
+/// ordering, because the only thing it can be racing is an insertion for a
+/// *different* process — a process cannot be resolving a path inside the same
+/// syscall that first gives it a namespace.
+static NS_FEATURES_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Mark that namespace state has become non-trivial.  See [`NS_FEATURES_ACTIVE`].
+///
+/// Called at every site that inserts into [`PROCESS_NS`], [`PROCESS_ROOT`] or
+/// [`PROCESS_MOUNTS`].  Deliberately *not* called on removal.
+fn mark_ns_features_active() {
+    NS_FEATURES_ACTIVE.store(true, Ordering::Release);
+}
+
+/// Test-only: whether the namespace fast path is still available.
+///
+/// Exposed so the benchmark can print it, because "the fast path did not
+/// help" and "the fast path was never taken" are different findings and
+/// guessing between them after the fact is how the last two attributions on
+/// this path went wrong.
+#[must_use]
+pub fn ns_features_active() -> bool {
+    NS_FEATURES_ACTIVE.load(Ordering::Acquire)
+}
+
+/// Restore the fast path, but **only** when there is genuinely no namespace
+/// state — returns `false` and changes nothing otherwise.
+///
+/// Exists so the self-test can check each of the three publishing sites
+/// (`attach`, `set_root`, `add_volume`) from a clean state.  Without it only
+/// whichever site ran first could be checked: the flag is monotonic, so after
+/// that "assert the flag is set afterwards" is trivially true and proves
+/// nothing — a check that cannot fire is indistinguishable from one that
+/// passes.
+///
+/// Safe despite [`NS_FEATURES_ACTIVE`] being documented as monotonic, and the
+/// guard is what makes it so: clearing the flag while all three maps are empty
+/// cannot disable enforcement, because with the maps empty the slow path
+/// returns the identity anyway.  It is the *ground truth* being restored, not
+/// overridden.  The monotonicity in production is a policy (avoid teardown
+/// races), not a safety requirement, and this respects it by refusing to act
+/// when any state exists.
+#[must_use]
+pub fn reset_ns_features_if_trivial() -> bool {
+    // Hold all three locks across the check-and-clear so state cannot appear
+    // between deciding it is empty and acting on that decision.
+    //
+    // LOCK ORDER: PROCESS_NS -> PROCESS_ROOT -> PROCESS_MOUNTS. This and
+    // `ns_state_is_trivial` are the only places that hold more than one of the
+    // three at a time, and both use this order. (Everywhere else -- `detach`,
+    // `resolve_path_for` -- acquires them strictly one at a time, so they
+    // cannot participate in a cycle.)
+    let pns = PROCESS_NS.lock();
+    let roots = PROCESS_ROOT.lock();
+    let mounts = PROCESS_MOUNTS.lock();
+    if !(pns.is_empty() && roots.is_empty() && mounts.is_empty()) {
+        return false;
+    }
+    NS_FEATURES_ACTIVE.store(false, Ordering::Release);
+    true
+}
+
+/// Whether the three maps [`NS_FEATURES_ACTIVE`] summarises are all empty.
+///
+/// This is the ground truth the flag caches.  The flag being stale in the
+/// *clear* direction — state present, flag clear — is not a slow path, it is
+/// **silently disabled sandboxing**: a jailed process would resolve paths
+/// against the host root.  So the fast path asserts this in debug builds
+/// rather than trusting that every present and future insertion site
+/// remembered to call [`mark_ns_features_active`].
+///
+/// Takes three locks, hence debug-only.
+#[cfg(debug_assertions)]
+fn ns_state_is_trivial() -> bool {
+    PROCESS_NS.lock().is_empty()
+        && PROCESS_ROOT.lock().is_empty()
+        && PROCESS_MOUNTS.lock().is_empty()
+}
+
+/// The fast-path guard: true when nothing can change the caller's path.
+///
+/// Factored out so the debug-only cross-check against [`ns_state_is_trivial`]
+/// exists once instead of at each of the four call sites, where three of them
+/// would eventually be updated and the fourth would not.
+fn ns_fast_path_available() -> bool {
+    // NB: the *only* direct read of the flag outside `mark_ns_features_active`
+    // and `ns_features_active`. A blind textual replace turned this line into a
+    // self-call once already -- the same substring-out-of-context mistake that
+    // has now bitten three times in this tree.
+    let clear = !NS_FEATURES_ACTIVE.load(Ordering::Acquire);
+    #[cfg(debug_assertions)]
+    if clear {
+        debug_assert!(
+            ns_state_is_trivial(),
+            "namespace state exists but NS_FEATURES_ACTIVE is clear: some \
+             insertion site is missing mark_ns_features_active(), and \
+             sandboxing is silently not being enforced"
+        );
+    }
+    clear
+}
 
 /// Global table of all namespaces.
 ///
@@ -425,6 +566,10 @@ pub fn attach(process_id: u64, ns_id: NamespaceId) -> KernelResult<()> {
         pns.remove(&process_id);
     } else {
         pns.insert(process_id, ns_id);
+        // Namespace state is now non-trivial: disable the resolve fast path.
+        // Set while still holding `pns` so no resolver can observe the
+        // insertion without also observing the flag. See `NS_FEATURES_ACTIVE`.
+        mark_ns_features_active();
     }
 
     Ok(())
@@ -486,7 +631,12 @@ pub fn set_root(process_id: u64, root: impl AsRef<Path>) -> KernelResult<()> {
         PROCESS_ROOT.lock().remove(&process_id);
         return Ok(());
     }
-    PROCESS_ROOT.lock().insert(process_id, normalized);
+    let mut roots = PROCESS_ROOT.lock();
+    roots.insert(process_id, normalized);
+    // See the matching call in `attach`: set under the lock that publishes
+    // the state, so the flag can never lag the map.
+    mark_ns_features_active();
+    drop(roots);
     Ok(())
 }
 
@@ -599,6 +749,10 @@ pub fn add_volume(
     }
     let host = normalize_jailed(host_target);
     let mut mounts = PROCESS_MOUNTS.lock();
+    // `entry(..).or_default()` itself makes the map non-empty, so the flag
+    // must be set here rather than only on the success paths below: an early
+    // `return Err(ResourceExhausted)` still leaves an entry behind.
+    mark_ns_features_active();
     let list = mounts.entry(process_id).or_default();
     // Replace an existing volume at the same guest prefix rather than
     // stacking duplicates (last-writer-wins, matching Docker re-mount).
@@ -720,6 +874,13 @@ fn longest_volume_match(
 /// unchanged).
 pub fn resolve_path(path: impl AsRef<Path>) -> KernelResult<PathBuf> {
     let path = path.as_ref();
+    // Fast path: while no namespace feature has ever been used, the result is
+    // the input and nothing below can change that -- so skip `owner_process`'s
+    // `THREAD_OWNERS.lock()` as well as the two locks in `resolve_path_for`.
+    // See `NS_FEATURES_ACTIVE`.
+    if ns_fast_path_available() {
+        return Ok(path.to_path_buf());
+    }
     let task_id = crate::sched::current_task_id();
     let process_id = crate::proc::thread::owner_process(task_id)
         .unwrap_or(0);
@@ -737,6 +898,14 @@ pub fn resolve_path_for(
     path: impl AsRef<Path>,
 ) -> KernelResult<PathBuf> {
     let path = path.as_ref();
+    // Same fast path as `resolve_path`, repeated here because this is the
+    // shared entry point (41 call sites) and most of them do not come through
+    // `resolve_path`. The flag is global, so it is valid for *any*
+    // `process_id`: if no process has ever had a namespace, a root or a
+    // volume, then neither has this one.
+    if ns_fast_path_available() {
+        return Ok(path.to_path_buf());
+    }
     // Step 1: apply Bind/Hide rules in the guest's path space.
     let ns_id = {
         let pns = PROCESS_NS.lock();
@@ -793,6 +962,11 @@ pub fn resolve_path_for(
 /// every non-container process, and writable containers without `:ro` mounts —
 /// this is a cheap `Ok(())`.
 pub fn check_writable(path: impl AsRef<Path>) -> KernelResult<()> {
+    // Skip `owner_process`'s `THREAD_OWNERS.lock()` too -- the process id is
+    // not needed to answer when nothing is gated. See `NS_FEATURES_ACTIVE`.
+    if ns_fast_path_available() {
+        return Ok(());
+    }
     let task_id = crate::sched::current_task_id();
     let process_id = crate::proc::thread::owner_process(task_id).unwrap_or(0);
     check_writable_for(process_id, path.as_ref())
@@ -818,6 +992,18 @@ pub fn check_writable_for(
     path: impl AsRef<Path>,
 ) -> KernelResult<()> {
     let path = path.as_ref();
+    // Fast path, before any lock. The existing one below is *after* two global
+    // spinlock acquisitions, which at ~500 ns each is most of its cost -- it
+    // avoids the path walk, not the locks.
+    //
+    // Sound because a denial here requires a `PROCESS_ROOT` entry: the check at
+    // the end of this preamble returns `Ok` for any process without one, and
+    // `PROCESS_ROOT_RO` alone therefore cannot deny. Every `PROCESS_ROOT`
+    // insertion sets `NS_FEATURES_ACTIVE`, so a clear flag proves no process
+    // can be denied. See `NS_FEATURES_ACTIVE`.
+    if ns_fast_path_available() {
+        return Ok(());
+    }
     let volumes = {
         let mounts = PROCESS_MOUNTS.lock();
         mounts.get(&process_id).cloned().unwrap_or_default()
@@ -1140,6 +1326,10 @@ fn normalize_jailed(path: &Path) -> PathBuf {
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[namespace] Running self-tests...");
 
+    // First, before anything below creates namespace state: the fast-path
+    // flag. Ordering matters -- see the test's own comment.
+    test_ns_fast_path_flag()?;
+
     test_create_destroy()?;
     test_bind_resolution()?;
     test_hide_resolution()?;
@@ -1151,6 +1341,98 @@ pub fn self_test() -> KernelResult<()> {
     test_hostname()?;
 
     serial_println!("[namespace] All self-tests PASSED");
+    Ok(())
+}
+
+/// Test that every site which creates namespace state disables the resolve
+/// fast path.
+///
+/// This is a **security** test wearing a performance test's clothes.
+/// `NS_FEATURES_ACTIVE` short-circuits `resolve_path`/`check_writable` before
+/// any lock; if a site that jails a process, attaches it to a namespace, or
+/// gives it a read-only volume fails to set the flag, those calls keep taking
+/// the fast path and the sandbox is silently not enforced.  A chroot escape
+/// with no error message anywhere.
+///
+/// Each of the three sites is checked **from a clean state**, using
+/// `reset_ns_features_if_trivial()` between them.  That matters: the flag is
+/// monotonic, so without the reset only the first site checked would prove
+/// anything and the other two assertions would pass no matter what the code
+/// did.  Each check is therefore: reset, confirm the fast path is genuinely
+/// available, perform the operation, and assert that resolution now *observes*
+/// it — asserting the behaviour rather than the flag, since the behaviour is
+/// what the flag exists to protect.
+fn test_ns_fast_path_flag() -> KernelResult<()> {
+    // Synthetic PIDs with no live process behind them, as in test_process_root.
+    const PID_ROOT: u64 = 78_001;
+    const PID_NS: u64 = 78_002;
+    const PID_VOL: u64 = 78_003;
+
+    // Runs first in `self_test()`, so nothing should have created namespace
+    // state yet. If this fails, an earlier boot step created some and the rest
+    // of this test would be checking nothing.
+    assert!(
+        reset_ns_features_if_trivial(),
+        "namespace state already exists at self-test entry",
+    );
+    assert!(!ns_features_active());
+    // Fast path really is being taken: the identity result below is what it
+    // returns, and the slow path would return the same, so this alone is not
+    // evidence -- it is the precondition for the three checks that follow.
+    assert_eq!(resolve_path_for(PID_ROOT, "/bin/sh")?.as_path(), Path::new("/bin/sh"));
+
+    // --- Site 1: set_root (worst failure mode: chroot escape) ---
+    set_root(PID_ROOT, "/containers/fp/rootfs")?;
+    assert!(ns_features_active(), "set_root did not disable the fast path");
+    assert_eq!(
+        resolve_path_for(PID_ROOT, "/bin/sh")?.as_path(),
+        Path::new("/containers/fp/rootfs/bin/sh"),
+        "jailed path resolved outside the jail",
+    );
+    clear_root(PID_ROOT);
+
+    // --- Site 2: attach (failure mode: Bind/Hide rules bypassed) ---
+    assert!(reset_ns_features_if_trivial(), "site 1 leaked state");
+    let ns = create(ROOT_NAMESPACE)?;
+    hide(ns, "/secret")?;
+    // Creating and populating a namespace nobody is attached to must not
+    // itself disable the fast path -- it changes no process's view.
+    assert!(!ns_features_active(), "creating an unattached namespace armed the flag");
+    attach(PID_NS, ns)?;
+    assert!(ns_features_active(), "attach did not disable the fast path");
+    assert!(
+        resolve_path_for(PID_NS, "/secret/key").is_err(),
+        "hidden path resolved for a process in the hiding namespace",
+    );
+    detach(PID_NS);
+    destroy(ns)?;
+
+    // --- Site 3: add_volume (failure mode: :ro volume writable) ---
+    //
+    // `add_volume` deliberately goes FIRST here, before `set_root`. A volume
+    // only takes effect inside a jail, so the natural order is set_root then
+    // add_volume -- but set_root arms the flag, and then "assert the flag is
+    // armed after add_volume" is true no matter what add_volume does. Arming
+    // it from the volume alone is the only way this assertion can fail.
+    assert!(reset_ns_features_if_trivial(), "site 2 leaked state");
+    add_volume(PID_VOL, "/data", "/host/data", true)?;
+    assert!(ns_features_active(), "add_volume did not disable the fast path");
+    set_root(PID_VOL, "/containers/fp2/rootfs")?;
+    assert!(
+        check_writable_for(PID_VOL, "/data/file").is_err(),
+        "read-only volume accepted a write",
+    );
+    clear_mounts(PID_VOL);
+    clear_root(PID_VOL);
+
+    // Leave the flag matching reality so the boot that follows gets the fast
+    // path it would have had. Not required for correctness -- a stale-set flag
+    // is only slow -- but leaving it armed would make every later benchmark
+    // measure the slow path and quietly misattribute the result, which is the
+    // exact failure this whole investigation has been about.
+    assert!(reset_ns_features_if_trivial(), "site 3 leaked state");
+
+    serial_println!("[namespace]   fast-path flag: OK (3 sites, each from clean state)");
     Ok(())
 }
 

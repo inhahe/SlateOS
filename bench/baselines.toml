@@ -1068,6 +1068,37 @@ budget by construction.  Measured 19019ns min but 230395ns mean — a 12x \
 mean/min spread that the dispersion check flags, so this benchmark \
 stalls during its own run and its movement should not be trusted."""
 
+# --- Synchronisation primitives ---
+
+[lock_uncontended]
+description = "crate::sync::Mutex acquire + release, uncontended, tracking on (as the kernel runs it)"
+tcg_target_ns = 500
+source      = "Inferred from the vfs_stat_root stage split (3 locks + 3 map lookups + 1 alloc = 1948ns); this benchmark exists to replace that inference with a measurement"
+notes       = """
+**The anchor whose absence caused a 4.9x prediction miss.**  A prediction \
+about vfs_stat_root argued that an uncontended spinlock costs <=20ns, citing \
+sched_pick_next (40ns) as "a benchmark that takes the run-queue lock".  It \
+does not: bench_sched_pick_next builds a local PriorityRoundRobin on the \
+stack and never touches SCHED.lock().  The suite had anchors for allocation, \
+context switch and syscall dispatch but none for the most common operation in \
+the kernel, so a fabricated figure went unchallenged.
+
+The target is deliberately set at the *inferred* 500ns rather than at a \
+measured value, so that the first run grades the inference: landing on the \
+line confirms the cost model behind \
+B-NAMESPACE-RESOLVE-TAKES-3-GLOBAL-LOCKS-TO-RETURN-ITS-INPUT, and landing \
+far off refutes it.  Retarget to the measured value once it is known.
+
+`crate::sync::Mutex` is not a bare spinlock: every acquisition runs \
+lockdep::lock_acquire, preempt_disable, one rdtsc and a contention-stat \
+update, and every release runs a second rdtsc, record_hold, \
+lockdep::lock_release and preempt_enable — with TRACKING_ENABLED defaulting \
+to on, including during benchmark boots.  The benchmark therefore reports \
+three variants (raw spin::Mutex / tracked / tracked-with-stats-off) so the \
+instrumentation cost is separated from the lock itself.  If that overhead is \
+large it is not a VFS finding but a whole-kernel one: every benchmark in this \
+suite that takes a lock is partly measuring instrumentation."""
+
 # --- Scheduler ---
 
 [pick_next]

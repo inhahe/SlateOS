@@ -33,7 +33,8 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 
 use osfont::system::{FontCache, Weight};
 
-use crate::render::FontWeightHint;
+use crate::color::Color;
+use crate::render::{FontWeightHint, RenderCommand};
 
 /// The process-wide font cache.
 ///
@@ -279,6 +280,185 @@ pub fn wrap(text: &str, max_width: f32, size: f32, weight: FontWeightHint) -> Ve
         return text.split('\n').map(str::to_string).collect();
     }
     with_font(size, weight, |font| font.wrap(text, max_width))
+}
+
+/// A block of prose, drawn as one [`RenderCommand::Text`] per wrapped line.
+///
+/// # Why this exists
+///
+/// [`wrap`] gives a caller the lines; this makes it hard to then get the
+/// *height* wrong. That is the part that has broken repeatedly. A caller
+/// drawing a paragraph has to reserve room for it — a detail pane advances a
+/// cursor, a card sizes itself, a list stacks items — and doing that from
+/// anything other than the lines it drew means two calculations for one
+/// quantity. Both observed forms were wrong the same way: a flat per-field
+/// allowance (the next field lands on top of a long paragraph) and a byte
+/// count over a guessed characters-per-line (2–4x too tall for non-ASCII, and
+/// blind to how wide the glyphs actually are).
+///
+/// [`draw`](Paragraph::draw) returns the height it used, measured from the
+/// commands it just emitted, so there is only one calculation to be right.
+///
+/// ```no_run
+/// # use guitk::color::Color;
+/// # use guitk::render::{FontWeightHint, RenderCommand};
+/// # use guitk::text::Paragraph;
+/// # let mut cmds: Vec<RenderCommand> = Vec::new();
+/// # let (x, mut y, width) = (0.0, 0.0, 200.0);
+/// y += Paragraph::new("a note the user typed", Color::rgb(200, 200, 200))
+///     .at(x, y, width)
+///     .font(13.0, FontWeightHint::Regular)
+///     .draw(&mut cmds);
+/// // `y` is now below the note, however many lines it turned out to be.
+/// ```
+///
+/// [`RenderCommand::Text`]: crate::render::RenderCommand::Text
+#[derive(Clone, Debug)]
+pub struct Paragraph<'a> {
+    text: &'a str,
+    color: Color,
+    x: f32,
+    y: f32,
+    width: f32,
+    size: f32,
+    weight: FontWeightHint,
+    line_height: Option<f32>,
+    max_lines: Option<usize>,
+}
+
+impl<'a> Paragraph<'a> {
+    /// Default point size, matching the toolkit's body text.
+    const DEFAULT_SIZE: f32 = 13.0;
+
+    /// A paragraph of `text` drawn in `color`.
+    ///
+    /// Position and width have no sensible default, so call [`at`](Self::at)
+    /// before drawing; a paragraph with no width reports its text unwrapped
+    /// rather than breaking after every word.
+    pub fn new(text: &'a str, color: Color) -> Self {
+        Self {
+            text,
+            color,
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            size: Self::DEFAULT_SIZE,
+            weight: FontWeightHint::Regular,
+            line_height: None,
+            max_lines: None,
+        }
+    }
+
+    /// Place the paragraph's top-left at (`x`, `y`) with `width` px of room.
+    #[must_use]
+    pub fn at(mut self, x: f32, y: f32, width: f32) -> Self {
+        self.x = x;
+        self.y = y;
+        self.width = width;
+        self
+    }
+
+    /// Set the font. Defaults to 13 px regular.
+    #[must_use]
+    pub fn font(mut self, size: f32, weight: FontWeightHint) -> Self {
+        self.size = size;
+        self.weight = weight;
+        self
+    }
+
+    /// Override the baseline-to-baseline spacing.
+    ///
+    /// Defaults to the font's own [`line_height`], which is what the compositor
+    /// will draw with. Override it to match a layout that was built around a
+    /// specific figure — changing the spacing of an existing pane is a visible
+    /// change even when it is an improvement.
+    #[must_use]
+    pub fn line_height(mut self, height: f32) -> Self {
+        self.line_height = Some(height);
+        self
+    }
+
+    /// Draw at most `max` lines, marking the last kept line with an ellipsis.
+    ///
+    /// For a bounded surface — a toast, a card in a stack — where the text may
+    /// legitimately be longer than the room it has. The mark matters: a body
+    /// cut without one reads as a complete sentence.
+    #[must_use]
+    pub fn max_lines(mut self, max: usize) -> Self {
+        self.max_lines = Some(max);
+        self
+    }
+
+    /// The spacing actually in use.
+    fn spacing(&self) -> f32 {
+        self.line_height
+            .unwrap_or_else(|| line_height(self.size, self.weight))
+    }
+
+    /// The lines this paragraph will be drawn as, ellipsis included.
+    ///
+    /// Empty text has no lines, so an absent field takes no room — which is
+    /// what every caller wants and what each of them used to write out as an
+    /// `if !field.is_empty()` around the whole block. [`wrap`] instead reports
+    /// one empty line, because there its answer is about paragraph structure;
+    /// here it is about what will be drawn, and nothing will be. Text that is
+    /// *deliberately* blank lines is not empty and keeps its room.
+    #[must_use]
+    pub fn lines(&self) -> Vec<String> {
+        if self.text.is_empty() {
+            return Vec::new();
+        }
+        let mut lines = wrap(self.text, self.width, self.size, self.weight);
+        if let Some(max) = self.max_lines
+            && lines.len() > max
+        {
+            lines.truncate(max);
+            if let Some(last) = lines.last_mut() {
+                *last = elide(
+                    &format!("{last}…"),
+                    self.width,
+                    "…",
+                    self.size,
+                    self.weight,
+                );
+            }
+        }
+        lines
+    }
+
+    /// The height the paragraph will occupy.
+    ///
+    /// Only for callers that must size a container *before* filling it. Where
+    /// the drawing and the sizing can happen together, prefer [`draw`]'s return
+    /// value — one call cannot disagree with itself.
+    ///
+    /// [`draw`]: Self::draw
+    #[must_use]
+    pub fn height(&self) -> f32 {
+        self.lines().len() as f32 * self.spacing()
+    }
+
+    /// Emit one text command per line, and report the height used.
+    pub fn draw(&self, cmds: &mut Vec<RenderCommand>) -> f32 {
+        let spacing = self.spacing();
+        let lines = self.lines();
+        for (n, line) in lines.iter().enumerate() {
+            cmds.push(RenderCommand::Text {
+                x: self.x,
+                y: self.y + n as f32 * spacing,
+                text: line.clone(),
+                color: self.color,
+                font_size: self.size,
+                font_weight: self.weight,
+                // Belt and braces: every line already fits, but a caller that
+                // set a width the glyphs cannot honour (a single unbreakable
+                // word) gets a clipped line rather than one running out of its
+                // container.
+                max_width: Some(self.width),
+            });
+        }
+        lines.len() as f32 * spacing
+    }
 }
 
 /// The character index in `text` nearest to `offset` pixels from its start.
@@ -601,6 +781,113 @@ mod tests {
             );
             previous = n;
         }
+    }
+
+    const PROSE: &str = "The height a paragraph reserves has to come from the \
+        lines it actually drew, because anything else is a second calculation \
+        of the same quantity and the two will drift apart.";
+
+    fn ink() -> Color {
+        Color::rgb(205, 214, 244)
+    }
+
+    /// The `(y, text)` of every text command in `cmds`.
+    fn drawn(cmds: &[RenderCommand]) -> Vec<(f32, String)> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { y, text, .. } => Some((*y, text.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_paragraph_reserves_exactly_the_height_it_drew() {
+        // The whole point of `draw` returning the height: a caller cannot end
+        // up reserving room for a different number of lines than it emitted.
+        let mut cmds = Vec::new();
+        let p = Paragraph::new(PROSE, ink())
+            .at(10.0, 20.0, 180.0)
+            .font(13.0, FontWeightHint::Regular)
+            .line_height(18.0);
+        let used = p.draw(&mut cmds);
+
+        let lines = drawn(&cmds);
+        assert!(lines.len() > 1, "the prose was not wrapped");
+        assert!((used - lines.len() as f32 * 18.0).abs() < 0.01);
+        assert!((used - p.height()).abs() < 0.01, "height() disagrees with draw()");
+
+        // Each line sits one spacing below the last, starting at the top.
+        for (n, (y, _)) in lines.iter().enumerate() {
+            assert!((y - (20.0 + n as f32 * 18.0)).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn a_paragraph_loses_no_words() {
+        let mut cmds = Vec::new();
+        Paragraph::new(PROSE, ink())
+            .at(0.0, 0.0, 150.0)
+            .draw(&mut cmds);
+        let joined = drawn(&cmds)
+            .iter()
+            .map(|(_, t)| t.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        for word in PROSE.split_whitespace() {
+            assert!(joined.contains(word), "the paragraph lost {word:?}");
+        }
+    }
+
+    #[test]
+    fn every_drawn_line_fits_the_width_it_was_given() {
+        let mut cmds = Vec::new();
+        Paragraph::new(PROSE, ink())
+            .at(0.0, 0.0, 160.0)
+            .font(12.0, FontWeightHint::Regular)
+            .draw(&mut cmds);
+        for (_, line) in drawn(&cmds) {
+            assert!(
+                measure(&line, 12.0, FontWeightHint::Regular) <= 160.0 + 0.01,
+                "{line:?} is wider than the 160px it was given"
+            );
+        }
+    }
+
+    #[test]
+    fn a_capped_paragraph_marks_the_cut() {
+        // A body cut without a mark reads as a complete sentence.
+        let mut cmds = Vec::new();
+        let used = Paragraph::new(PROSE, ink())
+            .at(0.0, 0.0, 120.0)
+            .line_height(16.0)
+            .max_lines(2)
+            .draw(&mut cmds);
+
+        let lines = drawn(&cmds);
+        assert_eq!(lines.len(), 2);
+        assert!((used - 32.0).abs() < 0.01, "a capped paragraph reserved {used}");
+        let last = &lines[1].1;
+        assert!(last.ends_with('…'), "the cut was not marked: {last:?}");
+        assert!(
+            measure(last, Paragraph::DEFAULT_SIZE, FontWeightHint::Regular) <= 120.01,
+            "the ellipsis pushed the last line out of its box: {last:?}"
+        );
+    }
+
+    #[test]
+    fn a_cap_longer_than_the_text_changes_nothing() {
+        let uncapped = Paragraph::new(PROSE, ink()).at(0.0, 0.0, 200.0);
+        let capped = uncapped.clone().max_lines(500);
+        assert_eq!(uncapped.lines(), capped.lines());
+    }
+
+    #[test]
+    fn an_empty_paragraph_draws_nothing_and_takes_no_room() {
+        let mut cmds = Vec::new();
+        let used = Paragraph::new("", ink()).at(0.0, 0.0, 200.0).draw(&mut cmds);
+        assert!(drawn(&cmds).is_empty());
+        assert!(used.abs() < 0.01, "an empty paragraph reserved {used}");
     }
 
     #[test]

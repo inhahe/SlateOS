@@ -62,6 +62,19 @@ const SEARCH_BAR_HEIGHT: f32 = 40.0;
 const CATEGORY_PILL_HEIGHT: f32 = 28.0;
 const TOOLBAR_HEIGHT: f32 = 36.0;
 
+/// Point size of an episode's description in the detail view.
+const DESCRIPTION_FONT_SIZE: f32 = 13.0;
+/// Point size of an episode's show notes.
+const NOTES_FONT_SIZE: f32 = 12.0;
+/// Line spacing of both prose fields in the detail view.
+const PROSE_LINE_HEIGHT: f32 = 18.0;
+/// Space under a prose field before the next section starts. Sized so that a
+/// one-line field keeps roughly the room it always had.
+const PROSE_SECTION_GAP: f32 = 22.0;
+/// Space under the show notes before the bookmark rows below them. Sized so
+/// that one line of notes occupies the 24px it always has.
+const NOTES_BOOKMARK_GAP: f32 = 6.0;
+
 // ============================================================================
 // Categories
 // ============================================================================
@@ -2491,16 +2504,16 @@ impl PodcastApp {
         });
         detail_y += 22.0;
 
-        cmds.push(RenderCommand::Text {
-            x: pad,
-            y: detail_y,
-            text: episode.description.clone(),
-            color: SUBTEXT0,
-            font_size: 13.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(text_w),
-        });
-        detail_y += 40.0;
+        // `RenderCommand::Text` clips at `max_width` rather than wrapping, so
+        // an episode description used to be shown as its first line and no
+        // more. `Paragraph::draw` returns the height it used, so the sections
+        // below start under the description however long it turns out to be.
+        detail_y += text::Paragraph::new(&episode.description, SUBTEXT0)
+            .at(pad, detail_y, text_w)
+            .font(DESCRIPTION_FONT_SIZE, FontWeightHint::Regular)
+            .line_height(PROSE_LINE_HEIGHT)
+            .draw(cmds);
+        detail_y += PROSE_SECTION_GAP;
 
         // Notes section.
         if episode.notes.has_content() {
@@ -2526,16 +2539,16 @@ impl PodcastApp {
             detail_y += 22.0;
 
             if !episode.notes.text.is_empty() {
-                cmds.push(RenderCommand::Text {
-                    x: pad,
-                    y: detail_y,
-                    text: episode.notes.text.clone(),
-                    color: SUBTEXT0,
-                    font_size: 12.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(text_w),
-                });
-                detail_y += 24.0;
+                // Show notes are the one field here a user writes at length, so
+                // drawing them as a single clipped line lost the most. The
+                // bookmark rows are stacked directly below, so the cursor has to
+                // advance over the lines actually drawn or they land on top.
+                detail_y += text::Paragraph::new(&episode.notes.text, SUBTEXT0)
+                    .at(pad, detail_y, text_w)
+                    .font(NOTES_FONT_SIZE, FontWeightHint::Regular)
+                    .line_height(PROSE_LINE_HEIGHT)
+                    .draw(cmds);
+                detail_y += NOTES_BOOKMARK_GAP;
             }
 
             // Bookmarks.
@@ -4711,6 +4724,181 @@ mod tests {
         app.sidebar_selection = SidebarSelection::Downloads;
         let cmds = app.render();
         assert!(!cmds.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Prose fields of the episode detail pane
+    // -----------------------------------------------------------------------
+
+    /// Long enough to need several lines across the detail pane at either of
+    /// the prose sizes, and with a distinctive final word to check nothing was
+    /// dropped off the end.
+    const LONG_PROSE: &str = "This week we sit down with the maintainer of a \
+        long-running open source project to talk about how a hobby weekend \
+        experiment turned into infrastructure that thousands of companies now \
+        depend on, what changed about the way the work felt once that happened, \
+        and how the funding question was eventually answered. Recorded in \
+        Gothenburg.";
+
+    fn app_with_prose_episode() -> PodcastApp {
+        let mut app = PodcastApp::new(800.0, 600.0);
+        let pid = app.podcasts[0].id;
+        let eid = app.podcasts[0].episodes[0].id;
+        app.podcasts[0].episodes[0].description = LONG_PROSE.to_string();
+        app.set_episode_notes(pid, eid, LONG_PROSE);
+        app.add_episode_bookmark(pid, eid, 120, "Key point");
+        app.selected_episode_id = Some(eid);
+        app.main_view = MainView::EpisodeDetail;
+        app
+    }
+
+    /// The detail pane on its own, so that text drawn elsewhere in the window
+    /// cannot be mistaken for one of its prose fields.
+    fn detail_pane(app: &PodcastApp) -> Vec<RenderCommand> {
+        let mut cmds = Vec::new();
+        app.render_episode_detail(&mut cmds, 0.0, 800.0, 600.0);
+        cmds
+    }
+
+    /// The lines of one prose field: every text of that colour and size drawn
+    /// below the named section heading, top to bottom.
+    fn prose_under(
+        cmds: &[RenderCommand],
+        heading: &str,
+        size: f32,
+    ) -> Vec<(f32, String)> {
+        let heading_y = cmds
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text { text, y, .. } if text == heading => Some(*y),
+                _ => None,
+            })
+            .expect("the section heading is drawn");
+        let mut lines: Vec<(f32, String)> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    y,
+                    text,
+                    color,
+                    font_size,
+                    ..
+                } if *color == SUBTEXT0
+                    && (*font_size - size).abs() < 0.01
+                    && *y > heading_y =>
+                {
+                    Some((*y, text.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        lines.sort_by(|a, b| a.0.total_cmp(&b.0));
+        lines
+    }
+
+    /// The top of the first bookmark row, identified by its 60x20 pill.
+    fn first_bookmark_y(cmds: &[RenderCommand]) -> f32 {
+        cmds.iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    y, width, height, ..
+                } if (*width - 60.0).abs() < 0.01 && (*height - 20.0).abs() < 0.01 => {
+                    Some(*y)
+                }
+                _ => None,
+            })
+            .fold(f32::INFINITY, f32::min)
+    }
+
+    #[test]
+    fn a_long_episode_description_is_wrapped_not_truncated() {
+        let app = app_with_prose_episode();
+        let cmds = detail_pane(&app);
+        let lines = prose_under(&cmds, "Description", DESCRIPTION_FONT_SIZE);
+        assert!(
+            lines.len() > 1,
+            "a paragraph-length description was drawn as {} line(s)",
+            lines.len()
+        );
+        let drawn = lines
+            .iter()
+            .map(|(_, t)| t.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            drawn.contains("Gothenburg"),
+            "the end of the description was cut off: {drawn}"
+        );
+    }
+
+    #[test]
+    fn long_show_notes_are_wrapped_not_truncated() {
+        let app = app_with_prose_episode();
+        let cmds = detail_pane(&app);
+        let lines = prose_under(&cmds, "Notes", NOTES_FONT_SIZE);
+        assert!(
+            lines.len() > 1,
+            "paragraph-length notes were drawn as {} line(s)",
+            lines.len()
+        );
+        let drawn = lines
+            .iter()
+            .map(|(_, t)| t.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            drawn.contains("Gothenburg"),
+            "the end of the notes was cut off: {drawn}"
+        );
+    }
+
+    #[test]
+    fn the_notes_section_starts_below_the_description() {
+        let app = app_with_prose_episode();
+        let cmds = detail_pane(&app);
+        let description = prose_under(&cmds, "Description", DESCRIPTION_FONT_SIZE);
+        let last_line = description
+            .last()
+            .map_or(0.0, |(y, _)| *y + PROSE_LINE_HEIGHT);
+        let heading_y = cmds
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text { text, y, .. } if text == "Notes" => Some(*y),
+                _ => None,
+            })
+            .expect("the notes heading is drawn");
+        assert!(
+            heading_y >= last_line,
+            "the Notes heading at {heading_y} sits inside the description, \
+             which runs to {last_line}"
+        );
+    }
+
+    #[test]
+    fn bookmarks_start_below_the_show_notes() {
+        let app = app_with_prose_episode();
+        let cmds = detail_pane(&app);
+        let notes = prose_under(&cmds, "Notes", NOTES_FONT_SIZE);
+        let last_line = notes.last().map_or(0.0, |(y, _)| *y + PROSE_LINE_HEIGHT);
+        let bookmark_y = first_bookmark_y(&cmds);
+        assert!(
+            bookmark_y >= last_line,
+            "the first bookmark at {bookmark_y} is drawn over the notes, \
+             which run to {last_line}"
+        );
+    }
+
+    #[test]
+    fn an_episode_with_no_notes_draws_no_notes_body() {
+        let mut app = app_with_prose_episode();
+        let pid = app.podcasts[0].id;
+        let eid = app.podcasts[0].episodes[0].id;
+        app.set_episode_notes(pid, eid, "");
+        let cmds = detail_pane(&app);
+        assert!(
+            prose_under(&cmds, "Notes", NOTES_FONT_SIZE).is_empty(),
+            "an empty notes field still drew a line"
+        );
     }
 
     // -----------------------------------------------------------------------

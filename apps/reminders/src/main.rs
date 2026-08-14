@@ -83,6 +83,25 @@ const NOTIFICATION_HEIGHT: f32 = 48.0;
 const CORNER_RADIUS: f32 = 8.0;
 const SMALL_RADIUS: f32 = 4.0;
 
+/// Point size of the prose fields (description, notes) in the detail panel.
+const PROSE_FONT_SIZE: f32 = 12.0;
+/// Line spacing of those fields.
+const PROSE_LINE_HEIGHT: f32 = 18.0;
+/// Space left under a prose field before the next one starts. Sized so that a
+/// one-line field occupies the 24px it always has.
+const PROSE_FIELD_GAP: f32 = 6.0;
+
+/// A prose field of the detail panel — a description or a set of notes.
+///
+/// Shared by the fields rather than written out at each, so that they cannot
+/// drift into laying their text out differently from one another.
+fn detail_prose(text: &str, x: f32, y: f32, width: f32) -> text::Paragraph<'_> {
+    text::Paragraph::new(text, SUBTEXT0)
+        .at(x, y, width)
+        .font(PROSE_FONT_SIZE, FontWeightHint::Regular)
+        .line_height(PROSE_LINE_HEIGHT)
+}
+
 // ============================================================================
 // Date and time types
 // ============================================================================
@@ -2523,16 +2542,13 @@ impl RemindersApp {
                 max_width: Some(content_w),
             });
             row_y += 14.0;
-            cmds.push(RenderCommand::Text {
-                x: x + pad,
-                y: row_y,
-                text: task.description.clone(),
-                font_size: 12.0,
-                color: SUBTEXT0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(content_w),
-            });
-            row_y += 24.0;
+            // `RenderCommand::Text` clips at `max_width` rather than wrapping,
+            // so a description longer than the panel is wide used to reach the
+            // user as its first line and nothing else. `Paragraph::draw`
+            // reports the height it used, so the cursor advances over what was
+            // actually drawn and the fields below cannot land on top of it.
+            row_y += detail_prose(&task.description, x + pad, row_y, content_w).draw(cmds);
+            row_y += PROSE_FIELD_GAP;
         }
 
         // Notes
@@ -2547,16 +2563,8 @@ impl RemindersApp {
                 max_width: Some(content_w),
             });
             row_y += 14.0;
-            cmds.push(RenderCommand::Text {
-                x: x + pad,
-                y: row_y,
-                text: task.notes.clone(),
-                font_size: 12.0,
-                color: SUBTEXT0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(content_w),
-            });
-            row_y += 24.0;
+            row_y += detail_prose(&task.notes, x + pad, row_y, content_w).draw(cmds);
+            row_y += PROSE_FIELD_GAP;
         }
 
         // Subtasks
@@ -4050,6 +4058,82 @@ mod tests {
         app.select_task(first_id);
         let cmds = app.render();
         assert!(!cmds.is_empty());
+    }
+
+    const LONG_NOTES: &str = "Bring the signed copy and the two spare batteries; \
+        the office does not stock them and the courier desk closes at four, so \
+        anything not handed over by then waits until Monday.";
+
+    /// An app with one selected task carrying a long description and notes.
+    fn app_with_prose_task() -> RemindersApp {
+        let now = make_now();
+        let mut app = RemindersApp::new(1100.0, 720.0, now);
+        let mut task = Task::new(0, "Collect the parcel", now);
+        task.description = LONG_NOTES.to_string();
+        task.notes = LONG_NOTES.to_string();
+        let id = app.store.add(task);
+        app.select_task(id);
+        app
+    }
+
+    /// The `(y, text)` of every prose line drawn in the detail panel.
+    fn prose_lines(app: &RemindersApp) -> Vec<(f32, String)> {
+        app.render()
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    y,
+                    text,
+                    font_size,
+                    color,
+                    ..
+                } if (font_size - PROSE_FONT_SIZE).abs() < 0.01 && color == SUBTEXT0 => {
+                    Some((y, text))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_long_description_is_wrapped_not_truncated() {
+        // `RenderCommand::Text` clips at `max_width`, so these fields used to
+        // reach the user as their first line and nothing else.
+        let app = app_with_prose_task();
+        let lines = prose_lines(&app);
+        assert!(
+            lines.len() > 2,
+            "two multi-line fields produced only {} line(s)",
+            lines.len()
+        );
+        let drawn: String = lines
+            .iter()
+            .map(|(_, t)| t.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        for word in LONG_NOTES.split_whitespace() {
+            assert!(drawn.contains(word), "the detail panel lost {word:?}");
+        }
+    }
+
+    #[test]
+    fn detail_panel_fields_do_not_overlap_each_other() {
+        // The panel is a running cursor, so a field that wrapped without
+        // advancing it would be drawn over by the one below.
+        let app = app_with_prose_task();
+        let mut lines = prose_lines(&app);
+        lines.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for pair in lines.windows(2) {
+            let (top, bottom) = (&pair[0], &pair[1]);
+            assert!(
+                bottom.0 - top.0 >= PROSE_LINE_HEIGHT - 0.01,
+                "{:?} at {} and {:?} at {} are less than a line apart",
+                top.1,
+                top.0,
+                bottom.1,
+                bottom.0
+            );
+        }
     }
 
     #[test]

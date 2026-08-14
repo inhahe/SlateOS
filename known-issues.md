@@ -38313,7 +38313,7 @@ not clear IF).
 
 ---
 
-### B-PTHREAD-CHILD-JUMPS-TO-GARBAGE. One `pthread_create`d thread intermittently starts at a bogus RIP and is killed; the process keeps running and reports a wrong answer — OPEN (1 in 10 boots, measured) 2026-08-13
+### B-PTHREAD-CHILD-JUMPS-TO-GARBAGE. One `pthread_create`d thread intermittently starts at a bogus RIP and is killed; the process keeps running and reports a wrong answer — PARTIALLY FIXED (defect 2 fixed 2026-08-13; defect 1 still OPEN, 1 in 10 boots) 2026-08-13
 
 **Symptom.** A deliberate 40-boot soak (`scripts/wedge-soak.sh`, run
 `soak-20260813-093459`) was launched to hunt an unrelated wedge. It did not
@@ -38374,7 +38374,8 @@ contents logged at `clone` time — see below.
 
 **Two separate defects are visible here, and the second one is arguably worse:**
 
-1. The thread jumped to garbage (above).
+1. The thread jumped to garbage (above). **Still OPEN** — see "Next step"
+   below.
 2. **The process did not die, and reported a plausible-looking wrong answer.**
    `pthread_join` on the killed thread returned success with `ret == NULL`,
    which is how `joinsum` became 9 instead of 10. On Linux a `SIGSEGV` in any
@@ -38386,6 +38387,64 @@ contents logged at `clone` time — see below.
    `pthread_join` on a thread the kernel killed should be distinguishable, and
    a ring-3 fault with no SEH handler should take down the process, not one
    thread of it.
+   **FIXED 2026-08-13.** Three changes, all of which had to land together:
+
+   - `kernel/src/idt.rs::kill_userspace_task_with_info` now calls
+     `proc::thread::kill_process_threads(pid)` instead of
+     `on_thread_exit(task_id)`: an unhandled ring-3 fault — one that both
+     the Linux-ABI signal path (`try_deliver_linux_fault_signal`) and the
+     native SEH trampoline (`try_dispatch_user_exception`) declined —
+     takes down the **whole process**, which is the default disposition
+     under both Windows SEH and Linux `SIGSEGV`. `kill_process_threads`
+     subsumes the old `on_thread_exit` for the faulting task itself
+     (`sched::kill_task` refuses the *current* task, which is
+     `task_exit`'s job, but the thread→process mapping is still dropped).
+   - `kernel/src/proc/thread.rs` replaces `THREAD_EXIT_VALUES:
+     BTreeMap<TaskId, i64>` with `THREAD_OUTCOMES: BTreeMap<TaskId,
+     ThreadOutcome>`, where `ThreadOutcome` is `Exited(i64) | Killed`.
+     `join()` used to report `Ok(0)` for *any* thread that ended without
+     recording a value — which is exactly what a killed thread looks like
+     — so a dead worker's contribution silently vanished into a zero.
+     Every involuntary death path now calls `record_killed()` **before**
+     `on_thread_exit` (which is what releases a parked joiner, so a marker
+     written afterwards can arrive too late), and `join()` reports
+     `KernelError::Cancelled`. Reaching the "no outcome at all" case now
+     means the caller joined a *detached* thread, which is `EINVAL`, not a
+     silent zero. New `proc::thread` self-test 8
+     (`test_killed_thread_does_not_join_normally`) locks this in.
+   - `test_blocking_join`'s second phase had to change with the semantics,
+     and the way it failed is worth recording: it models a thread that dies
+     *without* passing through `thread_exit_with_value` (a crash), and it
+     asserted the old `Ok(0)`. The first boot after the fix duly printed
+     `FAIL: join() returned -9223372036854775808` — `i64::MIN` being the
+     joiner's `unwrap_or` sentinel for "join returned `Err`". The phase now
+     stamps `record_killed()` on the target, which is what the real crash
+     path does, and expects `Cancelled`. The joiner also had to stop
+     folding the error into the value (`join(t).unwrap_or(i64::MIN)`) and
+     publish the value and the error discriminant in separate atomics —
+     the same value/error ambiguity that forced the `SYS_THREAD_JOIN` ABI
+     change, reproduced in miniature in the test harness.
+   - `SYS_THREAD_JOIN` (512) changed shape: the exit value now travels
+     through an `arg1` out-pointer and the syscall returns `0`/`-errno`.
+     The old value-in-rax ABI **could not represent the fix**: a thread may
+     exit with a legitimately negative value — `pthread_exit(PTHREAD_CANCELED)`
+     is `(void *)-1`, and `Cancelled` is `-5` — so an exit value and an
+     error code were indistinguishable. `posix`'s `pthread_join` passes a
+     stack slot, and maps `Cancelled` to a *successful* join returning
+     `PTHREAD_CANCELED`, which is precisely the slot POSIX reserves for
+     "this thread did not finish normally".
+
+   Also fixed in passing: kshell's `kill` command called `sched::kill_task`
+   directly, which only marks the scheduler task Dead — leaving the
+   thread→process mapping registered, IRQ registrations dangling and any
+   joiner parked forever. It now goes through the new
+   `proc::thread::kill_thread()`, which records the kill, kills the task
+   and runs the universal death hook.
+
+   Note the failing fixture above reaches `pthread_join` through *glibc's*
+   futex-based join over the Linux ABI, not through `SYS_THREAD_JOIN`, so
+   for that test it is the `idt.rs` half that makes the difference: the
+   process now dies instead of printing `joinsum=9`.
 
 **Distinct from the neighbouring pthread entries.** B-PTHREAD-TEARDOWN-PF
 (below) is a *kernel*-mode `#PF` at a near-null address during *teardown*;
@@ -38397,12 +38456,19 @@ B-PTHREAD-YIELDBUDGET (resolved) was a silent hang, not a fault.
 soak script already treats a self-test regression as a catch and preserves
 the serial log, which is how this was captured.
 
-**Next step when picked up.** Add a `clone`-time trace to
+**Next step when picked up (defect 1).** Add a `clone`-time trace to
 `kernel/src/proc/thread_clone.rs` printing, for each child: the requested TLS
 base, the `%fs` base actually installed, and the first 8 bytes at
 `tls_base + offsetof(struct pthread, start_routine)`; then soak until it trips.
 The failure is frequent enough (1/10) that a single 20-boot soak should catch
 it with the trace attached.
+
+**How the defect-2 fix changes what a soak looks like.** Before, the 1-in-10
+boot that hit this produced a *quiet wrong answer* (`counter=30000
+joinsum=9`) that only the self-test's exact-value assertion caught. Now the
+process dies on the fault, so the same race surfaces as a loud failure. That
+is the intended consequence, not a regression — and it is exactly the signal
+the trace above needs.
 
 ---
 
@@ -41080,6 +41146,43 @@ exactly:
   timeout) post-fix returned **12/12 clean BOOT_OK, zero catches** — no silent
   wedge, no NMI dump, no liveness dump. Wedge no longer reproduces. Before the
   fix, this soak caught a silent wedge within the first few iterations.
+- **Bug-class audit (2026-08-13, done — do not redo).** Since `ACCT` and
+  `TSC_FREQ` were two instances of one class (*a lock reachable from interrupt
+  context*), the ISR-reachable surface was swept for further instances. Result:
+  **clean — TSC_FREQ was the sole remaining outlier.** Verified:
+  - `kernel/src/timekeeping.rs` and `kernel/src/apic.rs` now contain **zero**
+    `.lock()` calls — the whole clock read path is lock-free and NMI-safe.
+  - `sched::timer_tick` (the 100 Hz path, `sched/mod.rs:2822-2996`) takes only
+    `try_lock` + atomics: `SCHED.try_lock`, `PER_CPU_SCHED.tick` (try_lock, and
+    degrades safely if normal code holds the per-CPU queue lock),
+    `cgroup::cpu_charge` (try_lock), `rcu::quiescent_state` (atomic).
+  - `handle_nmi` (`idt.rs:1526`) helpers are all lock-free: `count_vector`
+    (atomic), `sched::bsp_heartbeat` (atomic), `smp::current_cpu_index`
+    (rdtscp/atomic), `hardlockup::kick_staleness_ns` (now lock-free).
+  - `sched::account_fault` (page-fault path) is `try_lock`-guarded.
+  - The other scalar/getter-shaped statics (`HPET_TABLE_PHYS`, `FADT_TABLE_PHYS`,
+    the `fs/*` `INITIALIZED` flags, `net` `LISTENER`/`NEXT_PORT`) are **not**
+    ISR-reachable — e.g. `acpi::hpet_table_phys()` is called only from
+    `hpet::init()`.
+  - **Signature to watch for in future:** the danger is not an obvious
+    `FOO.lock()` inside an ISR — those are already disciplined — but a *hidden*
+    lock inside an innocent-looking **getter** (`tsc_freq()` looked like a pure
+    read). When adding a lock to any leaf accessor, check whether an ISR can
+    reach it.
+- **Bearing on the intermittent-hang family (hypothesis, NOT yet closed).** This
+  wedge is a strong candidate root cause for the long-running "intermittent
+  silent boot hang, serial truncated at whatever self-test happened to be
+  running" family — `B-FORKEXEC-BOOT-HANG`, `W1` (OOM self-test), and the OCI
+  multi-stage catch above. It fits every observed property: a *shared low-level
+  primitive* (`clock_monotonic` is called from nearly everywhere) rather than any
+  one test's logic; non-deterministic because it needs an IRQ to land in a narrow
+  lock-hold window; a different freeze locus each occurrence; total silence with
+  no `#PF`/PANIC (a spin, not a fault); and IF=0, which blinds the timer-driven
+  watchdogs. `W1` had already independently concluded "traced to spin::Mutex /
+  interrupt-window timing … the OOM code is the *victim*, not the cause."
+  **Those entries are deliberately left OPEN** — 12 clean boots does not
+  statistically discriminate bugs whose historical rate was ~1-in-20+. If any of
+  them recurs, the HMP RIP-capture will now name the wedged instruction directly.
 
 ### B-ACCT-SPINLOCK-STALL. `ACCT` (mm memory-accounting) spinlock self-deadlock — ROOT-CAUSED + FIXED 2026-07-03
 

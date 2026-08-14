@@ -75,6 +75,7 @@ mod bench;
 mod blkdev;
 mod ahci;
 mod boot;
+mod bytestr;
 mod cap;
 mod cet;
 mod cgroup;
@@ -4536,6 +4537,14 @@ extern "C" fn kernel_main() -> ! {
     // worth checking on every boot rather than trusting it.
     if let Err(e) = fs::path::self_test() {
         serial_println!("WARNING: Path self-test failed: {:?}", e);
+    }
+    // The byte-string splitters that the kshell parser is being converted
+    // onto. Each one is claimed to behave exactly like its `str` counterpart,
+    // and a ~1500-site mechanical conversion is only safe while that holds —
+    // a helper that differed in one edge case would plant a bug at whichever
+    // site hit it, with nothing in the diff to show for it.
+    if let Err(e) = bytestr::self_test() {
+        serial_println!("WARNING: bytestr self-test failed: {:?}", e);
     }
     // The octal escaper that lets those byte paths be written into the
     // line-oriented text formats (/proc/mounts, the trash index). A bug here

@@ -45142,6 +45142,56 @@ real reason it is a big task — not the cursor arithmetic.
 free build machine to iterate against (a boot test was occupying QEMU during
 this scoping pass).
 
+**[A] Update 2026-08-14 — stage (a) has LANDED: `kernel/src/bytestr.rs`.**
+
+The scoping pass above reduced the ~1520 `str`-method call sites to three
+missing operations; those now exist. `ByteStrExt` is an extension trait on
+`[u8]` supplying `split_ascii_whitespace` (552 sites), `splitn_byte` (51),
+`split_once_byte`/`split_once_str` (15), plus `split_byte`,
+`rsplit_once_byte`, `find_str` and `find_byte`. The other 631 sites
+(`trim*`, `starts_with`, `ends_with`, `strip_prefix`) need no new code —
+`[u8]` already has them.
+
+An extension trait rather than a newtype: a newtype buys no invariant that
+`[u8]` lacks (there *is* no invariant — any byte sequence is legal) while
+forcing wrap/unwrap noise across all ~1500 sites. `split_ascii_whitespace`
+deliberately keeps `str`'s exact spelling so those 552 sites need **no edit
+at all** once the buffer type changes; the delimiter-taking ones are suffixed
+`_byte`/`_str` so a bare `split_once` cannot silently resolve to a future
+inherent slice method, which would win over the trait and change behaviour
+with no compile error.
+
+**How the equivalence was verified, and why that mattered.** The module
+claims each method matches its `str` counterpart *exactly*. A ~1500-site
+mechanical diff is only safe while that holds — a helper differing in one
+edge case plants a bug at whichever site hits it, with nothing in the diff to
+show for it. Checking that claim against a *reading* of the documentation was
+not good enough, because the awkward edges are exactly where a confident
+misreading is likely. So `scripts/bytestr-oracle.rs` runs the self-test's
+exact cases through real `std::str` on the host and prints what std actually
+does. All cases matched, including `splitn(0, …)` → nothing, `"a,".splitn(2)`
+→ `["a", ""]`, `"".split(',')` → one empty field, and `find("")` → `Some(0)`.
+The oracle lives on the host because the kernel is `no_std` and cannot link
+std — which is precisely why the equivalence cannot be asserted in-tree.
+
+`bytestr::self_test()` is wired into the boot battery (the kernel binary sets
+`test = false`, so `self_test()` is the only place these run). Boot test
+PASSED, and the serial log carries all five subtest lines plus
+`bytestr::self_test PASSED` — confirmed present rather than merely
+not-failing, since a self-test that never executes is indistinguishable from
+one that passes.
+
+**Remaining, unchanged in substance:** stages (b) and (c) still must land
+together per the paragraph above. Stage (b) is `line_buf` (kshell.rs:2872),
+`History.entries` (2631) and four functions (`replace_line` 2921,
+`redraw_from_cursor` 2955, `reverse_search_mode` 3061, `read_line` 3191).
+Note the landmine at kshell.rs:3583: `buf.insert(cursor, ch as char)` takes a
+*byte* index, so widening the `ch >= 0x20 && ch < 0x7F` guard at 3580 to
+accept 0x80..=0xFF **without** changing the buffer type would encode each such
+byte as two UTF-8 bytes while `cursor += 1` advances by one, desynchronising
+the cursor from the buffer. The type change and the guard widening must be in
+the same commit.
+
 ### TD-OILS-AN-UPPERCASE-G-WAS-READ-BY-THE-HALF-OF-THE-COMMAND-THAT-ONLY-EVER-READS-THE-LOWERCASE-ONE. `declare -Ga g=(1 2)` bound the array globally where bash keeps it in the frame — 2026-08-12 — FIXED 2026-08-12
 
 **Where:** `userspace/oils/src/interp.rs`, [`Shell::in_declare_global_scope`].

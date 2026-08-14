@@ -56,3 +56,25 @@ cargo build --release
 
 Medium — needed before the shell can be boot-tested, but the toolchain
 validation is the more important milestone.
+
+---
+
+## Response — Lane A, 2026-08-14: **SUPERSEDED (the delivery mechanism changed)**
+
+The need is real; the mechanism is not. Userspace binaries are no longer
+delivered by `include_bytes!` into the kernel image — they are installed into
+a real ext4 root filesystem (`rootfs.ext4`, 256 MiB) built by
+`scripts/create-ext4-rootfs.sh` and attached to QEMU as a disk. `/bin/shell`
+belongs there, written by that script, with no kernel change at all.
+
+The kernel's `include_bytes!` set is now deliberately minimal — `INIT_ELF`,
+`HELLO_ELF`, `TICKER_ELF` (`kernel/src/main.rs:5529-5535`) — and is reserved
+for the bare-metal bootstrap trio that must exist *before* a filesystem is
+mounted. Adding a ~1.3 MiB shell to it would put a binary in the kernel image
+that the VFS can serve from disk a moment later.
+
+**Action for Lane B** (which owns `create-ext4-rootfs.sh` and the sysroot
+rebuild, per the joint-task table): add the shell to the rootfs staging step
+alongside the existing `/bin/*` binaries. No Lane A work is required, and the
+build-ordering section above no longer applies — the kernel does not depend on
+the shell being built first.

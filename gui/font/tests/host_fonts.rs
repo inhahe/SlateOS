@@ -30,7 +30,8 @@
     clippy::float_cmp,
     clippy::print_stdout,
     clippy::arithmetic_side_effects,
-    clippy::indexing_slicing
+    clippy::indexing_slicing,
+    clippy::cast_precision_loss
 )]
 
 use std::fs;
@@ -994,6 +995,171 @@ fn installed_fonts_ligate_fi() {
         checked >= 1,
         "none of the well-known faces are installed — ligatures were never \
          checked against a known answer"
+    );
+}
+
+/// Read `GPOS` mark attachment from every installed face, and check that a
+/// combining acute ends up over the letter rather than beside it.
+///
+/// This is the one part of shaping whose failure is unmissable rather than
+/// subtle — an unpositioned mark lands at the pen, which is the *left edge*
+/// of the base glyph's cell, so `e` + U+0301 draws the accent in the gap
+/// before the `e`. The oracle is therefore loose on purpose: the exact
+/// placement is the designer's business, but the accent must move right (past
+/// the pen, into the letter) and up (above the baseline).
+#[test]
+#[ignore = "depends on the host's installed fonts"]
+fn installed_fonts_place_combining_marks() {
+    const ACUTE: char = '\u{0301}';
+
+    let mut files = Vec::new();
+    for dir in font_dirs() {
+        collect_fonts(&dir, &mut files, 0);
+    }
+    assert!(!files.is_empty(), "no fonts found on this host");
+    files.sort();
+
+    let mut opened = 0usize;
+    let mut with_marks = 0usize;
+    let mut placed = 0usize;
+
+    for path in &files {
+        let Ok(data) = fs::read(path) else { continue };
+        let Ok(face) = Face::parse(data) else { continue };
+        opened += 1;
+        if !face.has_marks() {
+            continue;
+        }
+        with_marks += 1;
+        let (Some(e), Some(acute)) = (face.glyph_index('e'), face.glyph_index(ACUTE)) else {
+            continue;
+        };
+        // A face can carry mark lookups that cover an entirely different
+        // script: DejaVu Sans Mono's single `MarkBasePos` covers 15 Lao
+        // glyphs and has never heard of `acutecomb`. That face has nothing
+        // to say about a Latin accent, so it is skipped rather than failed —
+        // the sweep's job is to check the faces that *do* answer.
+        let Some((dx, dy)) = face.mark_on_base(e, acute) else {
+            continue;
+        };
+        placed += 1;
+        assert!(
+            face.is_mark(acute),
+            "{}: anchors an acute onto an 'e' yet does not class U+0301 as a \
+             mark — the mark would be kerned and advanced like a letter",
+            path.display()
+        );
+        assert!(
+            !face.is_mark(e),
+            "{}: 'e' is classed as a combining mark",
+            path.display()
+        );
+        // A displacement is a placement within the glyph, so it is bounded by
+        // the em; anything larger means a misread anchor and would put the
+        // accent on a different letter.
+        //
+        // The *sign* is not an oracle here, unlike kerning's. A monospace face
+        // draws its combining acute already at accent height inside its cell,
+        // so its anchors coincide with the base's and the displacement is
+        // legitimately (0, 0) — Cascadia Code is exactly that. What the mark
+        // ends up over is checked below, on the run, where the glyph's own
+        // extents are available to check it against.
+        let em = i32::from(face.units_per_em());
+        assert!(
+            i32::from(dx).abs() <= em && i32::from(dy).abs() <= em * 2,
+            "{}: acute displaced by ({dx}, {dy}) on a {em} unit em",
+            path.display()
+        );
+    }
+
+    println!("faces opened:              {opened}");
+    println!("faces that know marks:     {with_marks}");
+    println!("faces placing the acute:   {placed}");
+
+    assert!(
+        with_marks > 0,
+        "not one of {opened} faces can tell a mark from a letter — GDEF \
+         classes and GPOS mark lookups are not being found at all"
+    );
+    assert!(
+        placed > 0,
+        "{with_marks} faces know about marks but not one places a combining \
+         acute on an 'e' — the anchors are returning nothing"
+    );
+
+    // The oracle, driven all the way through shaping: the accent must be a
+    // zero-width glyph displaced onto the letter before it.
+    let mut checked = 0usize;
+    for file in ["segoeui.ttf", "DejaVuSans.ttf", "calibri.ttf", "times.ttf"] {
+        let Some(path) = files
+            .iter()
+            .find(|p| p.file_name().is_some_and(|n| n.eq_ignore_ascii_case(file)))
+        else {
+            continue;
+        };
+        let Ok(data) = fs::read(path) else { continue };
+        let mut font = ScaledFont::from_bytes(data, 32.0).expect("scaled");
+        let run = font.shape(&format!("e{ACUTE}"));
+        if run.len() != 2 {
+            println!("oracle skip: {file} shaped e+acute to {} glyphs", run.len());
+            continue;
+        }
+        let base = run.glyphs()[0];
+        let mark = run.glyphs()[1];
+        assert_eq!(mark.cluster, 1, "{file}: the acute starts at byte 1");
+
+        // A combining mark takes no room: the pair measures as the bare `e`.
+        assert!(
+            (run.width() - base.advance).abs() < 0.5,
+            "{file}: e+acute measures {:.3} px against the bare e's {:.3} px",
+            run.width(),
+            base.advance
+        );
+
+        // Where the ink actually lands. The bug this exists to catch is an
+        // accent drawn at the pen — i.e. in the gap *before* the letter —
+        // so the test is that the accent's ink overlaps the letter's cell
+        // horizontally and sits above the baseline. Both are true of every
+        // design; neither is true of an unpositioned mark in a proportional
+        // face.
+        let (left, width, top) = {
+            let mask = font.glyph_mask(mark.key).expect("the acute must draw");
+            (mask.left, mask.width, mask.top)
+        };
+        // The same arithmetic the draw loop does: the pen has already walked
+        // past the `e` by the time the mark is drawn, and `offset` displaces
+        // the ink from *there*. Leaving the pen out is exactly the mistake
+        // that makes an accent look correct in a debugger and land a whole
+        // advance to the left on the screen.
+        let pen = base.advance;
+        let ink_left = pen + mark.offset.0 + left as f32;
+        let ink_right = ink_left + width as f32;
+        // `top` is downward-positive from the baseline; `offset.1` is upward.
+        let ink_top = top as f32 - mark.offset.1;
+        println!(
+            "oracle ok: {file} 32px acute offset ({:.2}, {:.2}); ink x \
+             {ink_left:.2}..{ink_right:.2} within the e's 0..{:.2}, top \
+             {ink_top:.2}",
+            mark.offset.0, mark.offset.1, base.advance
+        );
+        assert!(
+            ink_right > 0.0 && ink_left < base.advance,
+            "{file}: the acute's ink spans {ink_left:.2}..{ink_right:.2}, \
+             which does not overlap the e's 0..{:.2} — it is being drawn \
+             beside the letter rather than on it",
+            base.advance
+        );
+        assert!(
+            ink_top < 0.0,
+            "{file}: the acute's ink starts {ink_top:.2} px below the \
+             baseline"
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 1,
+        "none of the well-known faces placed a combining acute — mark \
+         attachment was never checked against a known answer"
     );
 }
 

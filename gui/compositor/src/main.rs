@@ -1820,7 +1820,17 @@ impl RenderEngine {
                 break;
             }
             if let Some(mask) = font.glyph_mask(shaped.key) {
-                blend_mask(fb, mask, pen, baseline, color, opacity, clip.as_ref());
+                // `offset` is zero except on an attached combining mark, and
+                // its `y` points up where the screen's points down.
+                blend_mask(
+                    fb,
+                    mask,
+                    pen + shaped.offset.0,
+                    baseline - shaped.offset.1,
+                    color,
+                    opacity,
+                    clip.as_ref(),
+                );
             }
             pen += advance;
         }

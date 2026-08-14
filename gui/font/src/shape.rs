@@ -41,10 +41,10 @@
 //! # What this is not
 //!
 //! It is not a full shaper. There is no script itemisation, no bidi, no
-//! reordering, no mark attachment. It handles the substitutions and the
-//! spacing that Latin text needs and that the previous per-character loop got
-//! wrong; scripts that need reordering to be legible are not yet supported
-//! and would need a real shaper (see `roadmap.md`).
+//! reordering, and no contextual substitution. It handles the substitutions
+//! and the spacing that Latin and accented text need and that the previous
+//! per-character loop got wrong; scripts that need reordering to be legible
+//! are not yet supported and would need a real shaper (see `roadmap.md`).
 
 use alloc::vec::Vec;
 
@@ -124,6 +124,13 @@ pub struct ShapedGlyph {
     /// sense with the `V` behind it — that is a real off-by-a-pixel: the
     /// truncated string measures *wider* than the budget it was cut to fit.
     pub kern_next: f32,
+    /// Where to draw this glyph relative to the pen, in pixels, `y` upwards.
+    ///
+    /// Zero for everything except an attached combining mark, which is drawn
+    /// on top of the glyph before it rather than after it. The offset does not
+    /// move the pen — it is a displacement of the ink only, which is what lets
+    /// a mark sit over a base that has already been advanced past.
+    pub offset: (f32, f32),
 }
 
 /// The glyphs a string turns into, ready to draw.
@@ -283,6 +290,7 @@ mod tests {
                     cluster: i,
                     advance: 10.0,
                     kern_next: 0.0,
+                    offset: (0.0, 0.0),
                 })
                 .collect(),
         )
@@ -321,12 +329,14 @@ mod tests {
                 cluster: 0,
                 advance: 9.92,
                 kern_next: -0.4,
+                offset: (0.0, 0.0),
             },
             ShapedGlyph {
                 key: GlyphKey::bitmap('V'),
                 cluster: 1,
                 advance: 10.0,
                 kern_next: 0.0,
+                offset: (0.0, 0.0),
             },
         ]);
         // The whole run is still 19.92 wide as drawn.
@@ -375,10 +385,10 @@ mod tests {
     fn a_ligature_is_never_split() {
         // "office": o, ffi (one glyph, three chars), c, e.
         let r = ShapedRun::new(alloc::vec![
-            ShapedGlyph { key: GlyphKey::bitmap('o'), cluster: 0, advance: 10.0, kern_next: 0.0 },
-            ShapedGlyph { key: GlyphKey::bitmap('\u{FB03}'), cluster: 1, advance: 20.0, kern_next: 0.0 },
-            ShapedGlyph { key: GlyphKey::bitmap('c'), cluster: 4, advance: 10.0, kern_next: 0.0 },
-            ShapedGlyph { key: GlyphKey::bitmap('e'), cluster: 5, advance: 10.0, kern_next: 0.0 },
+            ShapedGlyph { key: GlyphKey::bitmap('o'), cluster: 0, advance: 10.0, kern_next: 0.0, offset: (0.0, 0.0) },
+            ShapedGlyph { key: GlyphKey::bitmap('\u{FB03}'), cluster: 1, advance: 20.0, kern_next: 0.0, offset: (0.0, 0.0) },
+            ShapedGlyph { key: GlyphKey::bitmap('c'), cluster: 4, advance: 10.0, kern_next: 0.0, offset: (0.0, 0.0) },
+            ShapedGlyph { key: GlyphKey::bitmap('e'), cluster: 5, advance: 10.0, kern_next: 0.0, offset: (0.0, 0.0) },
         ]);
         assert!((r.width() - 50.0).abs() < f32::EPSILON);
 

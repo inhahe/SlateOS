@@ -317,6 +317,23 @@ impl ScaledFont {
             .ok_or(ScaledFontError::Sfnt(SfntError::GlyphOutOfRange))
     }
 
+    /// The coverage bitmap for one glyph of a [`ShapedRun`] this font
+    /// produced.
+    ///
+    /// `None` when the glyph cannot be decoded, which is not something a
+    /// caller can act on — a run is drawn glyph by glyph and one that will not
+    /// rasterize is skipped, the pen still advancing so the rest of the line
+    /// stays where it was measured to be.
+    ///
+    /// This is the only way to get from a [`GlyphKey`] to pixels, and it is
+    /// deliberately the only way: the key is opaque so that a caller cannot
+    /// start treating an outline run and a bitmap run differently. See
+    /// [`SystemFont::glyph_mask`](crate::system::SystemFont::glyph_mask) for
+    /// the backend-agnostic form.
+    pub fn glyph_mask(&mut self, key: GlyphKey) -> Option<&GlyphMask> {
+        Some(&self.glyph(key.gid()).ok()?.mask)
+    }
+
     fn rasterize_glyph(&self, gid: u16) -> Result<Glyph, ScaledFontError> {
         let outline = self.face.outline(gid)?;
         let advance = f32::from(self.face.advance(gid)?) * self.scale;
@@ -369,11 +386,12 @@ impl ScaledFont {
     /// widget measure its label without paying to draw it.
     #[must_use]
     pub fn shape(&self, text: &str) -> ShapedRun {
-        // Three passes, because each one needs all of the previous one's
+        // Four passes, because each one needs all of the previous one's
         // output. A ligature replaces several glyphs with one, so it cannot be
-        // decided while characters are still arriving; and kerning applies to
-        // the glyphs that *survive* substitution, so `fi` must be kerned as
-        // the single glyph it became, not as the `f` and `i` it was.
+        // decided while characters are still arriving; kerning applies to the
+        // glyphs that *survive* substitution, so `fi` must be kerned as the
+        // single glyph it became, not as the `f` and `i` it was; and a mark's
+        // placement is measured from a pen that kerning is still moving.
         let space = self.glyph_id(' ');
         let mut gids: Vec<u16> = Vec::with_capacity(text.len());
         let mut clusters: Vec<usize> = Vec::with_capacity(text.len());
@@ -390,6 +408,7 @@ impl ScaledFont {
         }
 
         let ligated = self.face.has_ligatures();
+        let marked = self.face.has_marks();
         let mut glyphs: Vec<ShapedGlyph> = Vec::with_capacity(gids.len());
         // Whether the glyph just pushed may be kerned against the next one. A
         // tab may not: its advance is a layout decision, not a glyph width,
@@ -416,13 +435,24 @@ impl ScaledFont {
                     taken = count;
                 }
             }
+            // A combining mark is not part of the spacing: real faces mark
+            // their kerning lookups "ignore marks" so that `A` and `V` still
+            // kern with an accent between them. This engine walks the run
+            // strictly in order and cannot skip, so it declines instead —
+            // pairs separated by a mark go unkerned, which loses a fraction of
+            // a pixel, where kerning *against* the mark would shove the accent
+            // off the letter it belongs to.
+            let mark = marked && !tab && self.face.is_mark(gid);
             // Kerning is part of the width, not a drawing-time flourish: a
             // measurement that leaves it out is one that disagrees with what
             // the compositor puts on the screen, which is how a label ends up
             // centred half a pixel off in every button on the desktop. It is
             // charged to the *preceding* glyph so that the advances sum to
             // the run's width.
-            if !tab && let Some(last) = glyphs.last_mut().filter(|_| kernable) {
+            if !tab
+                && !mark
+                && let Some(last) = glyphs.last_mut().filter(|_| kernable)
+            {
                 let kern = self.kern(last.key.gid(), gid);
                 last.advance += kern;
                 last.kern_next = kern;
@@ -437,17 +467,95 @@ impl ScaledFont {
                 // caret or a truncation can land before or after the ligature
                 // but never inside it — there is no boundary there to find.
                 cluster,
-                advance: if tab {
+                // A combining mark takes no room, whatever `hmtx` says. Many
+                // faces give U+0301 a real advance — Segoe UI's is over half
+                // an `e` — because the same outline doubles as the spacing
+                // acute; honouring it would put a gap after every accented
+                // letter and make `é` measure wider than `e`. HarfBuzz zeroes
+                // mark advances for the same reason.
+                advance: if mark {
+                    0.0
+                } else if tab {
                     advance * TAB_WIDTH_IN_SPACES
                 } else {
                     advance
                 },
                 kern_next: 0.0,
+                offset: (0.0, 0.0),
             });
-            kernable = !tab;
+            kernable = !tab && !mark;
             i = i.saturating_add(taken.max(1));
         }
+
+        if marked {
+            self.attach_marks(&mut glyphs);
+        }
         ShapedRun::new(glyphs)
+    }
+
+    /// Displace every combining mark in `glyphs` onto the glyph it belongs to.
+    ///
+    /// Runs after advances are final, because a mark's placement is expressed
+    /// relative to its base glyph's *origin* while the mark is drawn at the
+    /// pen — and the distance between those two is the sum of the advances in
+    /// between, kerning included.
+    ///
+    /// Marks whose face offers no anchor for them are left at the pen. That
+    /// is visibly wrong, but it is wrong in the way the font asked for: the
+    /// alternative is inventing a placement, which would be wrong in a way
+    /// nobody could trace back to the font.
+    fn attach_marks(&self, glyphs: &mut [ShapedGlyph]) {
+        // Where each glyph's pen sits, which is what an offset is measured
+        // against.
+        let mut pen = 0.0f32;
+        let mut pens: Vec<f32> = Vec::with_capacity(glyphs.len());
+        for glyph in glyphs.iter() {
+            pens.push(pen);
+            pen += glyph.advance;
+        }
+
+        // What a mark attaches to: the last ordinary glyph for the first mark
+        // of a stack, the mark before it for the rest.
+        let mut base: Option<usize> = None;
+        let mut stacked: Option<usize> = None;
+        for i in 0..glyphs.len() {
+            let Some(gid) = glyphs.get(i).map(|g| g.key.gid()) else {
+                break;
+            };
+            if !self.face.is_mark(gid) {
+                base = Some(i);
+                stacked = None;
+                continue;
+            }
+            // Stacking first: the second accent of a pair belongs above the
+            // first, not on the letter. A face with `mark` but no `mkmk` falls
+            // back to the base, which puts both accents in one place — its
+            // own tables ask for nothing better.
+            let onto = stacked
+                .and_then(|at| {
+                    let below = glyphs.get(at)?.key.gid();
+                    Some((at, self.face.mark_on_mark(below, gid)?))
+                })
+                .or_else(|| {
+                    let at = base?;
+                    let under = glyphs.get(at)?.key.gid();
+                    Some((at, self.face.mark_on_base(under, gid)?))
+                });
+            if let Some((at, (dx, dy))) = onto {
+                // The anchor glyph may itself be a displaced mark, so start
+                // from where it actually ended up rather than from its pen.
+                let from = glyphs.get(at).map_or((0.0, 0.0), |g| g.offset);
+                let back =
+                    pens.get(at).copied().unwrap_or(0.0) - pens.get(i).copied().unwrap_or(0.0);
+                if let Some(glyph) = glyphs.get_mut(i) {
+                    glyph.offset = (
+                        from.0 + f32::from(dx) * self.scale + back,
+                        from.1 + f32::from(dy) * self.scale,
+                    );
+                }
+            }
+            stacked = Some(i);
+        }
     }
 
     /// Width of `text` in pixels, ignoring line breaks.
@@ -510,10 +618,12 @@ impl ScaledFont {
             // baseline are caller-supplied and may be anything, which is why
             // the sum goes through `pixel_coord` (which rejects the
             // degenerate cases) and then `blit_mask` (which clips the rest).
+            // `offset` is zero except on an attached combining mark, and its
+            // `y` points up where the screen's points down.
             #[allow(clippy::cast_precision_loss)]
             let placed = (
-                pixel_coord(pen + glyph.mask.left as f32),
-                pixel_coord(y + glyph.mask.top as f32),
+                pixel_coord(pen + shaped.offset.0 + glyph.mask.left as f32),
+                pixel_coord(y - shaped.offset.1 + glyph.mask.top as f32),
             );
             if let (Some(gx), Some(gy)) = placed {
                 blit_mask(&glyph.mask, target, gx, gy);

@@ -63,6 +63,7 @@ use core::fmt;
 
 use crate::gsub::Ligatures;
 use crate::kern::Kerning;
+use crate::mark::MarkPositioning;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -427,6 +428,10 @@ pub struct Face {
     /// Ligature substitution from `GSUB`. `None` for a face with no `GSUB`,
     /// or one whose `GSUB` carries no `liga`/`rlig` ligature lookups.
     ligatures: Option<Ligatures>,
+    /// Where combining marks attach, from `GPOS` `mark`/`mkmk` and `GDEF`.
+    /// `None` for the many faces that only ever expect precomposed
+    /// characters.
+    marks: Option<MarkPositioning>,
 }
 
 /// Where a face sits within its family — the axes a font picker selects on.
@@ -522,6 +527,7 @@ impl Face {
         let mut name = None;
         let mut os2 = None;
         let mut cff = None;
+        let mut gdef = None;
         let mut gpos = None;
         let mut gsub = None;
         let mut kern = None;
@@ -555,6 +561,7 @@ impl Face {
                 b"name" => name = Some(span),
                 b"OS/2" => os2 = Some(span),
                 b"CFF " => cff = Some(span),
+                b"GDEF" => gdef = Some(span),
                 b"GPOS" => gpos = Some(span),
                 b"GSUB" => gsub = Some(span),
                 b"kern" => kern = Some(span),
@@ -639,6 +646,7 @@ impl Face {
         // Same reasoning: a list of subtable offsets, found once, rather than
         // a `GSUB` walk per glyph.
         let ligatures = Ligatures::parse(&data, gsub);
+        let marks = MarkPositioning::parse(&data, gpos, gdef);
 
         Ok(Self {
             metrics: FaceMetrics {
@@ -657,6 +665,7 @@ impl Face {
             style,
             kerning,
             ligatures,
+            marks,
             data,
         })
     }
@@ -1062,6 +1071,54 @@ impl Face {
     #[must_use]
     pub fn has_ligatures(&self) -> bool {
         self.ligatures.is_some()
+    }
+
+    /// Whether `glyph` is a combining mark — drawn onto what precedes it
+    /// rather than after it.
+    ///
+    /// `false` for every glyph in a face that says nothing about marks at
+    /// all, which is the right answer there: with neither `GDEF` classes nor
+    /// anchors there is no way to tell a mark from a letter, and treating it
+    /// as a letter at least advances the pen instead of stacking the run on
+    /// one spot.
+    #[must_use]
+    pub fn is_mark(&self, glyph: u16) -> bool {
+        self.marks
+            .as_ref()
+            .is_some_and(|m| m.is_mark(&self.data, glyph))
+    }
+
+    /// How far `mark` must move from `base`'s origin to sit where the face
+    /// wants it, in font units, `y` upwards.
+    ///
+    /// The displacement is from the *base glyph's origin*, not from the pen
+    /// the mark would otherwise be drawn at — the caller knows how far the
+    /// pen has moved since the base and subtracts it.
+    #[must_use]
+    pub fn mark_on_base(&self, base: u16, mark: u16) -> Option<(i16, i16)> {
+        self.marks
+            .as_ref()
+            .and_then(|m| m.on_base(&self.data, base, mark))
+    }
+
+    /// The same, for a mark stacked on another mark, so that the second
+    /// accent of a pair clears the first instead of overprinting it.
+    #[must_use]
+    pub fn mark_on_mark(&self, below: u16, mark: u16) -> Option<(i16, i16)> {
+        self.marks
+            .as_ref()
+            .and_then(|m| m.on_mark(&self.data, below, mark))
+    }
+
+    /// Whether this face can tell a combining mark from a letter — because it
+    /// carries `GPOS` mark anchors, `GDEF` glyph classes, or both.
+    ///
+    /// A shaper uses this to skip the mark pass entirely on the majority of
+    /// faces that have nothing to say, rather than paying a per-glyph
+    /// [`is_mark`](Self::is_mark) for an answer that is always `false`.
+    #[must_use]
+    pub fn has_marks(&self) -> bool {
+        self.marks.is_some()
     }
 
     /// Left side bearing for a glyph, in font units.

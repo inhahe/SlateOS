@@ -190,8 +190,10 @@ impl SystemFont {
                             key,
                             cluster,
                             advance,
-                            // A fixed grid has no pair corrections to make.
+                            // A fixed grid has no pair corrections to make,
+                            // and no anchors to attach a combining mark with.
                             kern_next: 0.0,
+                            offset: (0.0, 0.0),
                         }
                     })
                     .collect(),
@@ -237,10 +239,12 @@ impl SystemFont {
             // the pen and baseline are caller-supplied and may be anything,
             // which is why the sum goes through `pixel_coord` (which rejects
             // the degenerate cases) and then `blit_mask` (which clips).
+            // `offset` is zero except on an attached combining mark, and its
+            // `y` points up where the screen's points down.
             #[allow(clippy::cast_precision_loss)]
             let placed = (
-                pixel_coord(pen + mask.left as f32),
-                pixel_coord(y + mask.top as f32),
+                pixel_coord(pen + shaped.offset.0 + mask.left as f32),
+                pixel_coord(y - shaped.offset.1 + mask.top as f32),
             );
             if let (Some(gx), Some(gy)) = placed {
                 blit_mask(mask, target, gx, gy);

@@ -39,7 +39,7 @@
 extern crate alloc;
 
 pub mod cff;
-mod gsub;
+pub mod gsub;
 mod kern;
 mod mark;
 mod otl;

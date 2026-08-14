@@ -329,10 +329,16 @@ Roadmap:
   measuring, drawing, hit-testing and truncation all walk, so they cannot
   disagree; GSUB `liga`/`rlig` ligatures ride on that (§402), as does GPOS
   mark attachment, so a combining accent sits on its letter instead of in
-  the gap before it (§403). Next unblocked step is the rest of shaping: no
-  contextual substitution (GSUB 5/6), no mark-to-ligature attachment (GPOS
-  5), no bidi, no complex-script reordering. Vello itself waits on `[A]`'s
-  GPU driver.
+  the gap before it (§403). GSUB is now an ordered list of lookups rather
+  than a bag of subtables, so a font's own ordering holds; single
+  substitution (type 1) and `ccmp` ride on that (§406) — taken before the
+  contextual types below, which invoke other lookups by index and so needed
+  them first. Next unblocked step is the rest of shaping: no multiple
+  substitution (GSUB 2, blocked on `shape.rs` allowing glyphs to share a
+  cluster), no contextual substitution (GSUB 5/6), no script/language
+  selection (`TD-GSUB-APPLIES-EVERY-SCRIPTS-FEATURES`), no
+  mark-to-ligature attachment (GPOS 5), no bidi, no complex-script
+  reordering. Vello itself waits on `[A]`'s GPU driver.
 - `[C]` Wayland-inspired compositor: GPU acceleration, currently a software
   rasterizer (lines ~4605, ~4619)
 - `[C]` Video-encoded capture fallback, H.264/VP9 (lines ~4623, ~5060)

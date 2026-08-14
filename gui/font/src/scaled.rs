@@ -29,6 +29,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::FontMetrics;
+use crate::gsub::SubGlyph;
 use crate::raster::{GlyphMask, rasterize};
 use crate::sfnt::{Face, PathCmd, SfntError};
 use crate::shape::{GlyphKey, ShapedGlyph, ShapedRun, TAB_WIDTH_IN_SPACES};
@@ -387,14 +388,13 @@ impl ScaledFont {
     #[must_use]
     pub fn shape(&self, text: &str) -> ShapedRun {
         // Four passes, because each one needs all of the previous one's
-        // output. A ligature replaces several glyphs with one, so it cannot be
-        // decided while characters are still arriving; kerning applies to the
-        // glyphs that *survive* substitution, so `fi` must be kerned as the
-        // single glyph it became, not as the `f` and `i` it was; and a mark's
-        // placement is measured from a pen that kerning is still moving.
+        // output. `GSUB` decides which glyphs there are, and cannot run while
+        // characters are still arriving; kerning applies to the glyphs that
+        // *survive* substitution, so `fi` must be kerned as the single glyph
+        // it became, not as the `f` and `i` it was; and a mark's placement is
+        // measured from a pen that kerning is still moving.
         let space = self.glyph_id(' ');
-        let mut gids: Vec<u16> = Vec::with_capacity(text.len());
-        let mut clusters: Vec<usize> = Vec::with_capacity(text.len());
+        let mut glyphs: Vec<SubGlyph> = Vec::with_capacity(text.len());
         let mut tabs: Vec<bool> = Vec::with_capacity(text.len());
         for (cluster, ch) in text.char_indices() {
             // A tab has no glyph. Drawn through `cmap` it comes out as the
@@ -402,39 +402,24 @@ impl ScaledFont {
             // is several spaces of nothing. Substituting the space glyph gets
             // both — it draws blank, and its advance is the unit to multiply.
             let tab = ch == '\t';
-            gids.push(if tab { space } else { self.glyph_id(ch) });
-            clusters.push(cluster);
+            let gid = if tab { space } else { self.glyph_id(ch) };
+            glyphs.push(SubGlyph { gid, cluster });
             tabs.push(tab);
         }
 
-        let ligated = self.face.has_ligatures();
+        if self.face.has_substitutions() {
+            self.substitute_between_tabs(&mut glyphs, &mut tabs);
+        }
+
         let marked = self.face.has_marks();
-        let mut glyphs: Vec<ShapedGlyph> = Vec::with_capacity(gids.len());
+        let mut out: Vec<ShapedGlyph> = Vec::with_capacity(glyphs.len());
         // Whether the glyph just pushed may be kerned against the next one. A
         // tab may not: its advance is a layout decision, not a glyph width,
         // and a face that kerns after a space would quietly narrow it.
         let mut kernable = false;
-        let mut i = 0usize;
-        while let (Some(&gid), Some(&cluster)) = (gids.get(i), clusters.get(i)) {
+        for (i, glyph) in glyphs.iter().enumerate() {
             let tab = tabs.get(i).copied().unwrap_or(false);
-            let mut taken = 1usize;
-            let mut gid = gid;
-            if ligated && !tab {
-                // A ligature may not reach across a tab. The tab is not a
-                // glyph the font knows about, so joining what sits either side
-                // of it would silently swallow the gap it exists to make.
-                let end = tabs
-                    .iter()
-                    .skip(i)
-                    .position(|&t| t)
-                    .map_or(gids.len(), |n| i.saturating_add(n));
-                if let Some(window) = gids.get(i..end)
-                    && let Some((lig, count)) = self.face.ligature(window)
-                {
-                    gid = lig;
-                    taken = count;
-                }
-            }
+            let gid = glyph.gid;
             // A combining mark is not part of the spacing: real faces mark
             // their kerning lookups "ignore marks" so that `A` and `V` still
             // kern with an accent between them. This engine walks the run
@@ -451,7 +436,7 @@ impl ScaledFont {
             // the run's width.
             if !tab
                 && !mark
-                && let Some(last) = glyphs.last_mut().filter(|_| kernable)
+                && let Some(last) = out.last_mut().filter(|_| kernable)
             {
                 let kern = self.kern(last.key.gid(), gid);
                 last.advance += kern;
@@ -461,12 +446,13 @@ impl ScaledFont {
                 .face
                 .advance(gid)
                 .map_or(0.0, |a| f32::from(a) * self.scale);
-            glyphs.push(ShapedGlyph {
+            out.push(ShapedGlyph {
                 key: GlyphKey::outline(gid),
-                // The cluster is the first component's byte offset, so a
-                // caret or a truncation can land before or after the ligature
-                // but never inside it — there is no boundary there to find.
-                cluster,
+                // Substitution carried this along: a ligature reports its
+                // first component's byte offset, so a caret or a truncation
+                // can land before or after it but never inside it — there is
+                // no boundary there to find.
+                cluster: glyph.cluster,
                 // A combining mark takes no room, whatever `hmtx` says. Many
                 // faces give U+0301 a real advance — Segoe UI's is over half
                 // an `e` — because the same outline doubles as the spacing
@@ -484,13 +470,49 @@ impl ScaledFont {
                 offset: (0.0, 0.0),
             });
             kernable = !tab && !mark;
-            i = i.saturating_add(taken.max(1));
         }
 
         if marked {
-            self.attach_marks(&mut glyphs);
+            self.attach_marks(&mut out);
         }
-        ShapedRun::new(glyphs)
+        ShapedRun::new(out)
+    }
+
+    /// Substitute each stretch of `glyphs` between tabs, separately.
+    ///
+    /// A substitution may not reach across a tab. The tab is not a glyph the
+    /// font knows about, so joining what sits either side of it would silently
+    /// swallow the gap it exists to make — and a `GSUB` lookup, which is
+    /// handed a whole run and matches anywhere in it, has no way to be told
+    /// about a boundary except by not being shown across it.
+    ///
+    /// Both vectors are rewritten, since a run that ligates comes out shorter
+    /// and `tabs` has to keep lining up with it.
+    fn substitute_between_tabs(&self, glyphs: &mut Vec<SubGlyph>, tabs: &mut Vec<bool>) {
+        let mut out: Vec<SubGlyph> = Vec::with_capacity(glyphs.len());
+        let mut out_tabs: Vec<bool> = Vec::with_capacity(tabs.len());
+        let mut run: Vec<SubGlyph> = Vec::new();
+        // One past the end, where there is no glyph and `tabs` reads `true`,
+        // so that the last stretch is flushed by the same code as every
+        // stretch a tab ends — including the whole of a run with no tabs at
+        // all, which is nearly every run.
+        for i in 0..=glyphs.len() {
+            if !tabs.get(i).copied().unwrap_or(true) {
+                if let Some(glyph) = glyphs.get(i) {
+                    run.push(*glyph);
+                }
+                continue;
+            }
+            self.face.substitute(&mut run);
+            out_tabs.extend(core::iter::repeat_n(false, run.len()));
+            out.append(&mut run);
+            if let Some(glyph) = glyphs.get(i) {
+                out.push(*glyph);
+                out_tabs.push(true);
+            }
+        }
+        *glyphs = out;
+        *tabs = out_tabs;
     }
 
     /// Displace every combining mark in `glyphs` onto the glyph it belongs to.

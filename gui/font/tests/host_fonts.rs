@@ -37,8 +37,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use osfont::gsub::SubGlyph;
 use osfont::raster::rasterize;
 use osfont::scaled::{ScaledFont, Target};
+use osfont::shape::TAB_WIDTH_IN_SPACES;
 use osfont::sfnt::{name_id, Face, PathCmd, SfntError};
 
 /// Directories a font might live in, on any host this repo is developed on.
@@ -51,6 +53,21 @@ fn font_dirs() -> Vec<PathBuf> {
     dirs.push(PathBuf::from("/System/Library/Fonts"));
     dirs.retain(|d| d.is_dir());
     dirs
+}
+
+/// Run `face`'s `GSUB` over `gids` as one run, one source character each.
+///
+/// The face takes a whole run rather than answering about a position, because
+/// its lookups apply in order across all of it; a helper is what keeps that
+/// from being spelled out at each of the four call sites below.
+fn substitute(face: &Face, gids: &[u16]) -> Vec<SubGlyph> {
+    let mut glyphs: Vec<SubGlyph> = gids
+        .iter()
+        .enumerate()
+        .map(|(i, &gid)| SubGlyph { gid, cluster: i })
+        .collect();
+    face.substitute(&mut glyphs);
+    glyphs
 }
 
 fn collect_fonts(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) {
@@ -883,7 +900,7 @@ fn installed_fonts_ligate_fi() {
         let Ok(data) = fs::read(path) else { continue };
         let Ok(face) = Face::parse(data) else { continue };
         opened += 1;
-        if !face.has_ligatures() {
+        if !face.has_substitutions() {
             continue;
         }
         with_gsub += 1;
@@ -895,15 +912,20 @@ fn installed_fonts_ligate_fi() {
             continue;
         };
         for (name, pair) in [("fi", [f, i]), ("fl", [f, l]), ("ff", [f, f])] {
-            let Some((lig, count)) = face.ligature(&pair) else {
+            let out = substitute(&face, &pair);
+            if out.len() != 1 {
+                // Not every face ligates every pair, and one that leaves a
+                // pair alone must leave it *whole*.
+                assert_eq!(
+                    out.iter().map(|g| g.gid).collect::<Vec<_>>(),
+                    pair.to_vec(),
+                    "{}: {name} came back as neither one glyph nor the two it \
+                     went in as",
+                    path.display()
+                );
                 continue;
-            };
-            assert_eq!(
-                count,
-                2,
-                "{}: {name} consumed {count} glyphs, but only two were offered",
-                path.display()
-            );
+            }
+            let lig = out[0].gid;
             assert!(
                 lig != pair[0] && lig != pair[1],
                 "{}: {name} substituted to glyph {lig}, which is one of its own \
@@ -916,14 +938,22 @@ fn installed_fonts_ligate_fi() {
                 path.display(),
                 face.num_glyphs()
             );
+            assert_eq!(
+                out[0].cluster,
+                0,
+                "{}: {name} reported cluster {}, not its first component's",
+                path.display(),
+                out[0].cluster
+            );
             if name == "fi" {
                 ligated_fi += 1;
             }
         }
         // A ligature must never form from a single glyph, whatever the tables
         // say: there is nothing to join.
-        assert!(
-            face.ligature(&[f]).is_none(),
+        assert_eq!(
+            substitute(&face, &[f]).len(),
+            1,
             "{}: one glyph on its own produced a ligature",
             path.display()
         );
@@ -944,8 +974,12 @@ fn installed_fonts_ligate_fi() {
          the lookups are returning nothing"
     );
 
-    // The oracle. These faces all ligate `fi`, and the pair therefore does not
-    // measure as the sum of its parts.
+    // The oracle: faces whose answer is known independently of this parser.
+    // Not all of them ligate `fi` — Windows' own Times New Roman and Segoe UI
+    // ship no `liga` covering it, which is why each file may skip and only the
+    // count at the end is required. A face that *does* must turn the two
+    // glyphs into one, at the first one's cluster, all the way through
+    // shaping.
     let mut checked = 0usize;
     for file in ["times.ttf", "segoeui.ttf", "DejaVuSans.ttf", "calibri.ttf"] {
         let Some(path) = files
@@ -959,12 +993,12 @@ fn installed_fonts_ligate_fi() {
         let (Some(f), Some(i)) = (face.glyph_index('f'), face.glyph_index('i')) else {
             continue;
         };
-        let Some((lig, count)) = face.ligature(&[f, i]) else {
+        let out = substitute(&face, &[f, i]);
+        if out.len() != 1 {
             println!("oracle skip: {file} has no fi ligature");
             continue;
-        };
-        assert_eq!(count, 2, "{file}: fi consumed {count} glyphs");
-        println!("oracle ok: {file} fi -> glyph {lig}");
+        }
+        println!("oracle ok: {file} fi -> glyph {}", out[0].gid);
         checked += 1;
 
         // And the whole point of it: shaping the pair yields one glyph, whose
@@ -995,6 +1029,243 @@ fn installed_fonts_ligate_fi() {
         checked >= 1,
         "none of the well-known faces are installed — ligatures were never \
          checked against a known answer"
+    );
+}
+
+/// Run every installed face's `GSUB` over ordinary Latin prose and check that
+/// it leaves it alone.
+///
+/// This is the safety net under the substitution pass rather than a test of a
+/// feature. `ccmp` and the single-substitution lookups are applied to *all*
+/// text, unconditionally, which is what every shaper does — but it also means
+/// a misread coverage table or a delta applied to the wrong glyph would
+/// silently replace the letters of every label on the desktop with whatever
+/// happened to sit at the wrong offset. The failure would be legible text of
+/// the wrong letters, which is exactly the kind of thing a rasterization test
+/// sails past.
+///
+/// The oracle is that a Latin face has nothing to do here: `ccmp` exists to
+/// normalise sequences involving marks and dotted letters, and there are no
+/// marks in this string. So every glyph must come out as `cmap` put it in.
+/// A face that legitimately substitutes is not a failure of this test — it is
+/// reported, and the assertion is on the *proportion*, because a parser fault
+/// would hit fonts in bulk while a genuine `ccmp` rule hits a handful.
+///
+/// On the development host eight of 275 faces change it, and both causes are
+/// understood:
+///
+/// * The six Linux Libertine files have a `Th` ligature, which "The" triggers.
+///   The run comes back one glyph shorter, which is the font working.
+/// * `ebrima.ttf` and `ebrimabd.ttf` substitute the *space*, from a `ccmp`
+///   lookup belonging to one of the African scripts they cover. That one is a
+///   genuine wrong answer, and it is the known no-script-selection limitation
+///   biting — see `TD-GSUB-APPLIES-EVERY-SCRIPTS-FEATURES` in
+///   `known-issues.md`. It is left in the count deliberately: when script
+///   selection lands, this number should drop to six.
+#[test]
+#[ignore = "depends on the host's installed fonts"]
+fn installed_fonts_leave_plain_latin_alone() {
+    // No `fi`, `fl` or `ff`: a ligature here would be correct, and would
+    // muddy an oracle that is about single substitution.
+    const PROSE: &str = "The quick brown vex jumps lazy dogs 0123456789";
+
+    let mut files = Vec::new();
+    for dir in font_dirs() {
+        collect_fonts(&dir, &mut files, 0);
+    }
+    assert!(!files.is_empty(), "no fonts found on this host");
+    files.sort();
+
+    let mut with_gsub = 0usize;
+    let mut changed = Vec::new();
+    for path in &files {
+        let Ok(data) = fs::read(path) else { continue };
+        let Ok(face) = Face::parse(data) else { continue };
+        if !face.has_substitutions() {
+            continue;
+        }
+        with_gsub += 1;
+        let before: Vec<u16> = PROSE.chars().filter_map(|c| face.glyph_index(c)).collect();
+        if before.len() != PROSE.chars().count() {
+            // The face cannot spell the string; it has nothing to say here.
+            continue;
+        }
+        let after = substitute(&face, &before);
+        let gids: Vec<u16> = after.iter().map(|g| g.gid).collect();
+        if gids != before {
+            // Report *what* moved, not just that something did: a ligature
+            // shortening the run is a font doing its job, while a same-length
+            // run of different ids is the shape a misread table would take.
+            let at = after
+                .iter()
+                .position(|g| Some(&g.gid) != before.get(g.cluster))
+                .unwrap_or(0);
+            let cluster = after.get(at).map_or(0, |g| g.cluster);
+            changed.push((
+                path.clone(),
+                format!(
+                    "{} glyphs from {}, first change at char {cluster} ({:?})",
+                    after.len(),
+                    before.len(),
+                    PROSE.chars().nth(cluster).unwrap_or('?')
+                ),
+            ));
+            continue;
+        }
+        // Unchanged glyphs must still be one per character, each carrying its
+        // own cluster: a pass that dropped or duplicated an entry while
+        // substituting nothing would leave the ids equal and the run wrong.
+        let clusters: Vec<usize> = after.iter().map(|g| g.cluster).collect();
+        assert_eq!(
+            clusters,
+            (0..before.len()).collect::<Vec<_>>(),
+            "{}: an unchanged run came back with clusters {clusters:?}",
+            path.display()
+        );
+    }
+
+    println!("faces with GSUB:     {with_gsub}");
+    println!("faces changing prose:{}", changed.len());
+    for (path, what) in changed.iter().take(20) {
+        println!("  {}: {what}", path.display());
+    }
+
+    assert!(
+        with_gsub > 0,
+        "not one face reported substitutions — GSUB is not being found at all"
+    );
+    // A tenth is far above what genuine `ccmp` rules touch on Latin prose and
+    // far below what a misread table would: the point is to catch a fault that
+    // hits fonts in bulk, not to forbid a font from having a rule.
+    assert!(
+        changed.len() * 10 < with_gsub,
+        "{} of {with_gsub} faces changed plain Latin prose — that is not \
+         `ccmp` doing its job, that is the substitution pass misreading tables",
+        changed.len()
+    );
+}
+
+/// Shape text containing a tab in every installed face, and check that the tab
+/// survives substitution intact.
+///
+/// A tab is not a glyph the font knows about. It is carried through shaping as
+/// the *space* glyph because that draws blank and gives a unit to multiply —
+/// but it is a layout decision wearing a glyph's clothes, and a `GSUB` lookup
+/// handed the whole run has no way to tell the difference. Two things can go
+/// wrong, and both are silent:
+///
+/// * A single substitution covering the space replaces it, and the tab draws
+///   as whatever that lookup meant for a real space. `ebrima.ttf` has exactly
+///   such a rule (see `TD-GSUB-APPLIES-EVERY-SCRIPTS-FEATURES`), so this is
+///   not hypothetical on the development host.
+/// * A ligature joins the space to a neighbour, the run comes out shorter, and
+///   the tab flags stop lining up with the glyphs — after which every advance
+///   past that point is charged to the wrong glyph.
+///
+/// Neither can happen while each stretch between tabs is substituted
+/// separately, which is what this pins down: the lookups never see across the
+/// boundary, so the tab arrives at layout as the glyph `cmap` gave.
+#[test]
+#[ignore = "depends on the host's installed fonts"]
+fn installed_fonts_leave_a_tab_alone() {
+    let mut files = Vec::new();
+    for dir in font_dirs() {
+        collect_fonts(&dir, &mut files, 0);
+    }
+    assert!(!files.is_empty(), "no fonts found on this host");
+    files.sort();
+
+    let mut with_gsub = 0usize;
+    // Faces whose `GSUB` would substitute a lone space if it were shown one.
+    // These are the ones that make this test more than a formality; the count
+    // is printed so that a host with none of them does not look like a pass.
+    let mut would_touch_space = 0usize;
+
+    for path in &files {
+        let Ok(data) = fs::read(path) else { continue };
+        let Ok(face) = Face::parse(data) else { continue };
+        if !face.has_substitutions() {
+            continue;
+        }
+        let (Some(_), Some(space)) = (face.glyph_index('x'), face.glyph_index(' ')) else {
+            continue;
+        };
+        with_gsub += 1;
+        let touched = substitute(&face, &[space])
+            .first()
+            .is_some_and(|g| g.gid != space);
+        if touched {
+            would_touch_space += 1;
+        }
+
+        let Ok(mut font) = ScaledFont::from_bytes(fs::read(path).unwrap(), 14.0) else {
+            continue;
+        };
+        let run = font.shape("x\tx");
+        assert_eq!(
+            run.len(),
+            3,
+            "{}: \"x\\tx\" shaped to {} glyphs — a substitution reached across \
+             the tab",
+            path.display(),
+            run.len()
+        );
+        let clusters: Vec<usize> = run.glyphs().iter().map(|g| g.cluster).collect();
+        assert_eq!(
+            clusters,
+            vec![0, 1, 2],
+            "{}: \"x\\tx\" reported clusters {clusters:?}",
+            path.display()
+        );
+        // The tab's width is the layout constant times the *unsubstituted*
+        // space, read straight off the face — deliberately not `shape(" ")`,
+        // which is a real space and so is the face's to substitute. If the tab
+        // flags had slipped out of step with the glyphs, or the tab had been
+        // replaced by a glyph of another width, this is where it shows.
+        let scale = 14.0 / f32::from(face.units_per_em());
+        let expected = f32::from(face.advance(space).unwrap_or(0)) * scale * TAB_WIDTH_IN_SPACES;
+        let (tab_key, tab_advance) = (run.glyphs()[1].key, run.glyphs()[1].advance);
+        assert!(
+            (tab_advance - expected).abs() <= 0.01,
+            "{}: the tab advanced {tab_advance} px, not the {expected} px of \
+             four spaces{}",
+            path.display(),
+            if touched { " — the face's own space rule reached it" } else { "" }
+        );
+        // And it must draw nothing. The advance alone would not catch a
+        // substitution to a glyph that happens to be the same width, and a tab
+        // that draws ink is the most visible failure of the lot.
+        let inked = font
+            .glyph_mask(tab_key)
+            .is_some_and(|m| m.coverage.iter().any(|&c| c != 0));
+        assert!(
+            !inked,
+            "{}: the glyph standing in for the tab draws ink — it is not the \
+             space it went in as{}",
+            path.display(),
+            if touched { " (this face substitutes ' ')" } else { "" }
+        );
+        let letter = font.shape("x");
+        assert_eq!(
+            letter.len(),
+            1,
+            "{}: \"x\" alone shaped to {} glyphs",
+            path.display(),
+            letter.len()
+        );
+        assert!(
+            (run.glyphs()[0].advance - letter.glyphs()[0].advance).abs() <= 0.01,
+            "{}: the letter before the tab shaped differently from the same \
+             letter alone",
+            path.display()
+        );
+    }
+
+    println!("faces with GSUB:        {with_gsub}");
+    println!("faces substituting ' ': {would_touch_space}");
+    assert!(
+        with_gsub > 0,
+        "not one face reported substitutions — GSUB is not being found at all"
     );
 }
 

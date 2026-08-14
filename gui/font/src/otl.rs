@@ -37,6 +37,28 @@ use crate::sfnt::{u16_at, u32_at};
 /// largest seen on the development host is 4.
 pub(crate) const MAX_SUBTABLES: usize = 64;
 
+/// One lookup: what it does, and where the subtables that do it live.
+///
+/// Kept as a unit rather than flattened into one list of subtables because a
+/// lookup is the unit of *application*: the whole of lookup 1 runs across the
+/// whole buffer before any of lookup 2 does, so a substitution the first makes
+/// is visible to the second. Flattening loses that boundary, and with it the
+/// only thing that makes `ccmp` reliably run before `liga`.
+///
+/// Callers that genuinely have one lookup type and no ordering to preserve —
+/// pair kerning, mark attachment — use [`feature_subtables`] instead and get
+/// the flat list.
+#[derive(Clone, Debug)]
+pub(crate) struct Lookup {
+    /// The lookup type, in the numbering of the table it came from, and with
+    /// any extension redirect already resolved: a caller never sees the
+    /// extension type itself, only what it wrapped.
+    pub(crate) kind: u16,
+    /// Absolute byte offsets of this lookup's subtables, in the order the font
+    /// lists them — which is the order they are tried in, first match winning.
+    pub(crate) subtables: Vec<usize>,
+}
+
 /// Offsets of the subtables reachable from the features tagged `tags`.
 ///
 /// `want` is the lookup type whose subtables the caller can read, and
@@ -54,12 +76,62 @@ pub(crate) fn feature_subtables(
     want: u16,
     extension: u16,
 ) -> Option<Vec<usize>> {
+    let mut out = Vec::new();
+    for lookup in feature_lookups(data, base, tags, &[want], extension)? {
+        out.extend_from_slice(&lookup.subtables);
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// The lookups of type `want` reachable from the features tagged `tags`, in
+/// the order they must be applied.
+///
+/// That order is the LookupList's, not the order a feature happens to name
+/// them in: the font decides which of its lookups runs first, and a feature
+/// only says *which* it needs.
+///
+/// See [`feature_subtables`] for `extension`, and for why nothing found is
+/// `None` rather than an empty vector.
+pub(crate) fn feature_lookups(
+    data: &[u8],
+    base: usize,
+    tags: &[&[u8; 4]],
+    want: &[u16],
+    extension: u16,
+) -> Option<Vec<Lookup>> {
+    let (lookup_list, indices) = lookup_indices(data, base, tags)?;
+    let lookup_count = u16_at(data, lookup_list)?;
+    let mut out: Vec<Lookup> = Vec::new();
+    // Shared across lookups, so that a font with a hundred small lookups is
+    // capped the same way as one with a single enormous lookup.
+    let mut budget = MAX_SUBTABLES;
+    for idx in indices {
+        if idx >= lookup_count || budget == 0 {
+            continue;
+        }
+        let at = lookup_list
+            .checked_add(2)?
+            .checked_add(usize::from(idx).checked_mul(2)?)?;
+        let Some(lookup) = u16_at(data, at).and_then(|o| lookup_list.checked_add(usize::from(o)))
+        else {
+            continue;
+        };
+        if let Some(lookup) = read_lookup(data, lookup, want, extension, &mut budget) {
+            out.push(lookup);
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// Which lookups the features tagged `tags` use, and where the LookupList is.
+///
+/// Ascending and deduplicated, because lookups apply in LookupList order
+/// regardless of the order a feature happens to list them in, and two features
+/// may share one.
+fn lookup_indices(data: &[u8], base: usize, tags: &[&[u8; 4]]) -> Option<(usize, Vec<u16>)> {
     let feature_list = base.checked_add(usize::from(u16_at(data, base.checked_add(6)?)?))?;
     let lookup_list = base.checked_add(usize::from(u16_at(data, base.checked_add(8)?)?))?;
 
-    // Which lookups the wanted features use. Ascending and deduplicated,
-    // because lookups apply in LookupList order regardless of the order a
-    // feature happens to list them in, and two features may share one.
     let mut indices = Vec::new();
     let feature_count = u16_at(data, feature_list)?;
     for i in 0..usize::from(feature_count) {
@@ -79,45 +151,36 @@ pub(crate) fn feature_subtables(
     }
     indices.sort_unstable();
     indices.dedup();
-    if indices.is_empty() {
-        return None;
-    }
-
-    let lookup_count = u16_at(data, lookup_list)?;
-    let mut subtables = Vec::new();
-    for idx in indices {
-        if idx >= lookup_count {
-            continue;
-        }
-        let at = lookup_list
-            .checked_add(2)?
-            .checked_add(usize::from(idx).checked_mul(2)?)?;
-        let Some(lookup) = u16_at(data, at).and_then(|o| lookup_list.checked_add(usize::from(o)))
-        else {
-            continue;
-        };
-        collect_subtables(data, lookup, want, extension, &mut subtables);
-        if subtables.len() >= MAX_SUBTABLES {
-            break;
-        }
-    }
-    (!subtables.is_empty()).then_some(subtables)
+    (!indices.is_empty()).then_some((lookup_list, indices))
 }
 
-/// Append one lookup's subtables of type `want`, unwrapping extensions.
-fn collect_subtables(data: &[u8], lookup: usize, want: u16, extension: u16, out: &mut Vec<usize>) {
-    let (Some(kind), Some(count)) = (
-        u16_at(data, lookup),
-        lookup.checked_add(4).and_then(|o| u16_at(data, o)),
-    ) else {
-        return;
-    };
-    if kind != want && kind != extension {
-        return;
+/// One lookup, if it is of a type in `want`, with extensions unwrapped.
+///
+/// `budget` is how many more subtables may be followed in total, decremented
+/// as they are taken — a corrupt or hostile font must not be able to make
+/// lookup quadratic by declaring thousands of them.
+fn read_lookup(
+    data: &[u8],
+    lookup: usize,
+    want: &[u16],
+    extension: u16,
+    budget: &mut usize,
+) -> Option<Lookup> {
+    let kind = u16_at(data, lookup)?;
+    let count = u16_at(data, lookup.checked_add(4)?)?;
+    let extended = kind == extension;
+    if !extended && !want.contains(&kind) {
+        return None;
     }
+    // For an extension lookup the real type is not known until a subtable has
+    // been unwrapped. The spec requires every subtable of one lookup to have
+    // the same type, so the first one seen settles it and a later disagreement
+    // is a malformed font, not a second type to honour.
+    let mut effective = if extended { None } else { Some(kind) };
+    let mut subtables = Vec::new();
     for i in 0..usize::from(count) {
-        if out.len() >= MAX_SUBTABLES {
-            return;
+        if *budget == 0 {
+            break;
         }
         let Some(sub) = lookup
             .checked_add(6)
@@ -127,13 +190,17 @@ fn collect_subtables(data: &[u8], lookup: usize, want: u16, extension: u16, out:
         else {
             continue;
         };
-        if kind == want {
-            out.push(sub);
+        if !extended {
+            subtables.push(sub);
+            *budget = budget.saturating_sub(1);
             continue;
         }
         // An extension subtable is a three-field redirect: format, the type it
         // wraps, then a 32-bit offset from the extension's own start.
-        if sub.checked_add(2).and_then(|o| u16_at(data, o)) != Some(want) {
+        let Some(wrapped) = sub.checked_add(2).and_then(|o| u16_at(data, o)) else {
+            continue;
+        };
+        if !want.contains(&wrapped) || effective.is_some_and(|k| k != wrapped) {
             continue;
         }
         if let Some(target) = sub
@@ -142,9 +209,13 @@ fn collect_subtables(data: &[u8], lookup: usize, want: u16, extension: u16, out:
             .and_then(|o| usize::try_from(o).ok())
             .and_then(|o| sub.checked_add(o))
         {
-            out.push(target);
+            effective = Some(wrapped);
+            subtables.push(target);
+            *budget = budget.saturating_sub(1);
         }
     }
+    let kind = effective?;
+    (!subtables.is_empty()).then_some(Lookup { kind, subtables })
 }
 
 /// Where `glyph` sits in a coverage table, or `None` if it is not covered.

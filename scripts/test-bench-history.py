@@ -357,6 +357,57 @@ def test_drift_needs_samples(bh):
           sorted(e[0] for e in regressed), ["b0", "b1", "b2"])
 
 
+def test_baselines_crosscheck(bh, tmpdir):
+    """The target cross-check must distinguish its three failure modes.
+
+    They are different problems and collapsing them would hide the worst one.
+    A *disagreement* means one of the two files was edited without the other,
+    so a benchmark is being graded against a number its own documentation
+    contradicts. *Unbaselined* means the kernel's literal is the only record of
+    the target. *Unused* means the file claims coverage that does not exist.
+
+    Also pins the None case: an unparseable file must not read as agreement.
+    """
+    entries = {
+        "agrees": (100, 500, "PASS", None, None),
+        "disagrees": (100, 500, "PASS", None, None),
+        "unbaselined": (100, 700, "OVER", None, None),
+    }
+    baselines = {"agrees": 500, "disagrees": 900, "unused": 42}
+
+    import io
+    import contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        bh.report_baselines(entries, baselines)
+    out = buf.getvalue()
+    check("disagreement is reported with both numbers",
+          "disagrees: kernel says 500ns, file says 900ns" in out, True)
+    check("unbaselined benchmark is named", "unbaselined" in out, True)
+    check("unused baseline is named", "unused" in out, True)
+    # Match on a whole line, not a substring: "disagrees:" contains "agrees:",
+    # so a substring test passes for the wrong reason -- it was doing so until
+    # this assertion was tightened.
+    check("an agreeing benchmark is not reported",
+          any(line.strip().startswith("agrees:") for line in out.splitlines()),
+          False)
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        bh.report_baselines(entries, None)
+    check("unparseable baselines read as UNVERIFIED, not as agreement",
+          "UNVERIFIED" in buf.getvalue(), True)
+
+    # And the real file must load, with the units it actually uses.
+    real = bh.load_baselines()
+    if real is None:
+        print("SKIP  real baselines load (needs Python 3.11+)")
+        return
+    check("real baselines load to a non-empty target map", bool(real), True)
+    check("ms targets are scaled to ns",
+          real.get("compositor_frame_4k"), 2_000_000)
+
+
 def test_baselines_is_valid_toml():
     """`bench/baselines.toml` must actually be TOML, with no duplicate tables.
 
@@ -437,6 +488,8 @@ def main():
     test_drift_is_subtracted(bh)
     test_drift_needs_samples(bh)
     test_baselines_is_valid_toml()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        test_baselines_crosscheck(bh, tmpdir)
 
     print()
     if _FAILURES:

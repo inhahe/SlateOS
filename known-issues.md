@@ -60871,3 +60871,49 @@ reconciling the names � one canonical name per benchmark, used by both the
 work list. Until then the parse test added today guarantees only that the file
 is *loadable*, not that it is *true*.
 
+
+#### FOLLOW-UP 2026-08-14 (2): the file is now *checked*, and 11 targets disagree
+
+`bench-history.py` gained `load_baselines()` + `report_baselines()`, which
+compare the target the kernel prints on each `SCORE` line — the literal in
+`bench.rs` — against the target this file states. The very first run of that
+check, against `build/serial-test.txt` (63 benchmarks):
+
+```
+Baselines: 11 disagree, 15 unbaselined, 7 unused
+  context_switch:      kernel says   5000ns, file says  10000ns
+  crypto_aead_1KiB:    kernel says 100000ns, file says  70000ns
+  crypto_sha256_1KiB:  kernel says  50000ns, file says  40000ns
+  dns_build_query:     kernel says  40000ns, file says   2000ns   (20x)
+  firewall_check:      kernel says   2000ns, file says   1000ns
+  heap_alloc_free_64:  kernel says    400ns, file says    200ns
+  http_mime_type:      kernel says   2000ns, file says    500ns   (4x)
+  io_ring_nop:         kernel says    200ns, file says    300ns
+  ipc_channel:         kernel says   2000ns, file says   3000ns
+  page_fault:          kernel says  10000ns, file says   8000ns
+  syscall_dispatch:    kernel says    200ns, file says   1200ns   (6x)
+```
+
+**Every PASS/OVER verdict for those 11 has been graded against a number its own
+documentation contradicts.** The direction matters case by case: `syscall_dispatch`
+measured 653 ns is *OVER* against the kernel's 200 ns and would *PASS* against
+the file's 1200 ns. Which is correct is not obvious — 200 ns is the CLAUDE.md
+hardware figure (Linux getpid ~100 ns, "within 2x"), while 1200 ns looks like a
+TCG-adjusted budget. That is exactly why the check **reports and does not
+reconcile**: picking a side automatically is how the two drifted apart.
+
+The check distinguishes three failure modes deliberately, because they are
+different problems: *disagree* (one side edited without the other), *unbaselined*
+(the Rust literal is the only record of the target — 15 benchmarks, including
+`vfs_stat_root`), and *unused* (the file claims coverage that does not exist — 7).
+It also refuses to conflate an unparseable file with an agreeing one, printing
+`UNVERIFIED`; that distinction is the entire lesson of this entry and is pinned
+by a test.
+
+Table renames brought name-matching from 30/63 to 48/63 (the tables moved, not
+the benchmarks — `history.jsonl` is append-only and its names cannot change
+without orphaning every historical record). 23 checks pass, up from 13.
+
+**Still open:** the 11 disagreements need adjudicating one at a time, and the 15
+unbaselined benchmarks need tables with real provenance. Both are now *visible on
+every bench run* rather than invisible, which is the change that matters.

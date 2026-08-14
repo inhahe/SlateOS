@@ -316,6 +316,94 @@ def report_dispersion(current_entries):
         print(f"    {name}: mean is {ratio:.0f}x its min")
 
 
+#: Keys under which a table in `bench/baselines.toml` may state a nanosecond
+#: target. Cycle- and access-denominated targets are deliberately absent: they
+#: are not comparable with the kernel's `SCORE` line, which is always in ns.
+_BASELINE_NS_KEYS = (("target_ns", 1), ("target_us", 1_000), ("target_ms", 1_000_000))
+
+
+def load_baselines(path=None):
+    """Parse `bench/baselines.toml` into {name: target_ns}, or None.
+
+    None means the file could not be read or parsed *at all*, which callers
+    must not confuse with "the file agrees" -- the distinction this whole
+    module keeps rediscovering.
+    """
+    path = path or os.path.join(REPO_ROOT, "bench", "baselines.toml")
+    try:
+        import tomllib
+    except ImportError:  # Python < 3.11: no stdlib TOML.
+        return None
+    try:
+        with open(path, "rb") as handle:
+            data = tomllib.load(handle)
+    except (OSError, ValueError) as exc:
+        print(f"bench-history: cannot parse {path}: {exc}", file=sys.stderr)
+        return None
+    targets = {}
+    for name, table in data.items():
+        if not isinstance(table, dict):
+            continue
+        for key, scale in _BASELINE_NS_KEYS:
+            if key in table and isinstance(table[key], (int, float)):
+                targets[name] = int(table[key] * scale)
+                break
+    return targets
+
+
+def report_baselines(current_entries, baselines):
+    """Cross-check the kernel's own targets against `bench/baselines.toml`.
+
+    The kernel prints `SCORE <name> <measured> <target> ...`, where the target
+    is a **literal in `kernel/src/bench.rs`** with a comment beside it saying
+    "from baselines.toml". Nothing ever verified that claim: the file was not
+    parsed anywhere in the tree, and had in fact been invalid TOML -- two
+    `[compositor_frame_4k]` tables -- for months without anyone noticing. See
+    `TD-BASELINES-TOML-IS-INVALID-TOML-AND-NOTHING-READS-IT`.
+
+    This makes the claim checkable. It compares the two numbers and reports
+    three distinct failures, which are genuinely different problems:
+
+    * **disagree** -- both sides state a target and the values differ. One of
+      them has been edited without the other; the file is lying.
+    * **no baseline** -- the kernel grades a benchmark against a target that
+      exists nowhere but the Rust literal, so it has no recorded provenance.
+    * **unused baseline** -- the file states a target for something the suite
+      does not measure, which reads as coverage and is not.
+
+    Reporting only. Deciding which side is right needs a human or a citation,
+    and silently trusting either one is how the two drifted apart to begin
+    with.
+    """
+    if baselines is None:
+        print("  Baselines: bench/baselines.toml could not be parsed - "
+              "targets are UNVERIFIED (this is not the same as agreeing).")
+        return
+    disagree, missing = [], []
+    for name, vals in sorted(current_entries.items()):
+        kernel_target = vals[1]
+        if name not in baselines:
+            missing.append(name)
+        elif baselines[name] != kernel_target:
+            disagree.append((name, kernel_target, baselines[name]))
+    unused = sorted(set(baselines) - set(current_entries))
+
+    if not (disagree or missing or unused):
+        print(f"  Baselines: all {len(current_entries)} targets agree with "
+              "bench/baselines.toml.")
+        return
+    print(f"  Baselines: {len(disagree)} disagree, {len(missing)} unbaselined, "
+          f"{len(unused)} unused (bench/baselines.toml vs the kernel's own "
+          "SCORE targets):")
+    for name, kernel_target, file_target in disagree:
+        print(f"    {name}: kernel says {kernel_target}ns, file says "
+              f"{file_target}ns")
+    if missing:
+        print(f"    no baseline for: {', '.join(missing)}")
+    if unused:
+        print(f"    baseline never measured: {', '.join(unused)}")
+
+
 #: Profile assumed for records written before the field existed.
 #:
 #: Every record up to 2026-08-14 was produced by a boot-test.sh that ran a bare
@@ -438,6 +526,11 @@ def diff(previous, current, threshold_pct):
 def report(previous, current_entries, threshold_pct):
     """Print the run-over-run comparison. Returns True if anything regressed."""
     current = {name: vals[0] for name, vals in current_entries.items()}
+
+    # Run before the early return: the target cross-check is independent of
+    # whether there is a previous record to diff against, and the first record
+    # on a host is exactly when a wrong target is most likely to go unnoticed.
+    report_baselines(current_entries, load_baselines())
 
     if previous is None:
         print(

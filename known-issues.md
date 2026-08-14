@@ -57778,29 +57778,49 @@ It is wrong wherever glibc implements the function in userspace and rejects the
 NULL argument itself with an early return, because no syscall is ever issued and
 glibc's own errno is `EINVAL`.
 
-Four such functions were found and fixed on 2026-08-13 (see
-`design-decisions.md` §300 for the policy and the glibc citations):
+Three such functions were found and fixed on 2026-08-13, verified line-by-line
+against glibc 2.39's source (see `design-decisions.md` §300):
 
-- `ptsname_r(fd, NULL, n)` → `EINVAL` (`posix/src/ioctl.rs`)
 - `realpath(NULL, buf)` → `EINVAL` (`posix/src/unistd.rs`)
 - `canonicalize_file_name(NULL)` → `EINVAL` (`posix/src/unistd.rs`)
 - `__realpath_chk(NULL, …)` → `EINVAL` (`posix/src/file.rs`, delegates)
 
-**What remains.** The other NULL checks in `posix/` have *not* been individually
-classified. This entry is open for coverage, not because any specific remaining
-site is suspected wrong: the `xattr`, `stat`, and `file` NULL-path checks
-spot-checked during the fix are all syscall-forwarding and correctly `EFAULT`.
+A fourth candidate, `ptsname_r`, turned out to be a different and worse bug: it
+checked `buf` *before* the descriptor, whereas glibc's `__ptsname_r` issues
+`ioctl(fd, TIOCGPTN)` first and never examines `buf` when that fails. The
+ordering — not the errno constant — was the divergence. It now matches glibc,
+and the function has no NULL check at all. Full analysis in §300.
 
-**Reproduce.** Not a runtime failure. `rg 'is_null\(\).*\n.*EFAULT' posix/src`
-enumerates the candidate sites; each has to be checked against the corresponding
-glibc translation unit.
+**What remains.** 289 `is_null() -> EFAULT` sites across 56 files in
+`posix/src/` have *not* been individually classified. This entry is open for
+coverage, not because any specific remaining site is known wrong: the `xattr`,
+`stat`, and `file` NULL-path checks spot-checked during the fix are all
+syscall-forwarding and correctly `EFAULT`. The densest concentrations, and so
+the places to start, are `pthread.rs` (47), `file.rs` (28), `spawn.rs` (16),
+`socket.rs` (15), `unistd.rs` (13), `xattr.rs` (11), and `ioctl.rs` /
+`process.rs` (10 each). `pthread.rs` deserves the first look: NPTL is pure
+userspace, so none of its 47 sites can be justified by "the kernel would say
+`EFAULT`" — but glibc mostly does not check at all there and simply faults, so
+the right answer per function needs deciding, not merely looking up.
+
+**Reproduce.** Not a runtime failure. `rg -A3 'is_null\(\)' posix/src`, filtered
+for `EFAULT` in the following lines, enumerates the candidate sites; each has to
+be checked against the corresponding glibc translation unit.
 
 **Proper fix.** Walk the list once. For each site decide: does the pointer reach
 a syscall (keep `EFAULT`) or does glibc reject it in userspace (use glibc's
-errno)? Where it is the latter, change the code, change the test, and put the
-glibc file name and its actual check in a comment at both — a test that encodes
-an errno with no upstream citation is only evidence that the code and the test
-were written by the same pass. Doing this needs `D:\refsrc\` to gain a glibc
-checkout alongside the bash one (see `TOOLING-BASH-5.2.37-SOURCE`); until then
-each function has to be reasoned about from its man page and POSIX text, which
-is slower and slightly less certain.
+errno)? Check the *order* of the validations too, not only the constant — that
+is what `ptsname_r` actually got wrong, and an ordering bug changes the answer
+for every NULL caller regardless of which errno the check sets. Where a change
+is warranted, change the code, change the test, and put the glibc file name and
+its actual check in a comment at both: a test that encodes an errno with no
+upstream citation is only evidence that the code and the test were written by
+the same pass.
+
+**Tooling.** `D:\refsrc\glibc-2.39` (added 2026-08-13; shallow clone of the
+`glibc-2.39` tag from the `bminor/glibc` GitHub mirror — `sourceware.org`
+answers 429) is the reference for this work, alongside the bash checkout in
+`TOOLING-BASH-5.2.37-SOURCE`. Do **not** do this audit from man pages:
+`ptsname_r`'s documented `EINVAL` has not matched any glibc implementation
+since the TIOCGPTN fast path landed, and trusting the man page is exactly how
+the first attempt at this fix went wrong.

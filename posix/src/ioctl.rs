@@ -2780,13 +2780,15 @@ mod tests {
     // --- ptsname_r ---
 
     #[test]
-    fn test_ptsname_r_null_buf_einval() {
-        // glibc's __ptsname_r starts with `if (buf == NULL) return EINVAL;`
-        // *before* dereferencing, and POSIX lists EINVAL for a NULL buf.
+    fn test_ptsname_r_null_buf_still_reports_the_fd_verdict() {
+        // glibc 2.39's __ptsname_r issues ioctl(fd, TIOCGPTN) before it
+        // looks at `buf` at all, so on a live non-PTY fd a Linux caller
+        // sees ENOTTY — the ioctl's errno — no matter what `buf` holds.
+        // Not EINVAL, and not EFAULT.
         let fd = open_test_fd();
         crate::errno::set_errno(0);
         assert_eq!(ptsname_r(fd, core::ptr::null_mut(), 64), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
         let _ = fdtable::close_fd(fd);
     }
 
@@ -2819,13 +2821,13 @@ mod tests {
     // --- ordering ---
 
     #[test]
-    fn test_ptsname_r_null_buf_beats_bad_fd() {
-        // NULL buf is rejected with EINVAL even when fd would also fail.
-        // This documents the priority order, and matches glibc, whose
-        // NULL-buf check precedes any use of the descriptor.
+    fn test_ptsname_r_bad_fd_beats_null_buf() {
+        // The priority order, and it runs the opposite way to the obvious
+        // guess: glibc validates the descriptor via TIOCGPTN first and
+        // never reaches the buffer, so a bad fd wins over a NULL `buf`.
         crate::errno::set_errno(0);
         assert_eq!(ptsname_r(-1, core::ptr::null_mut(), 64), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
     #[test]
@@ -2891,11 +2893,12 @@ mod tests {
 
     #[test]
     fn test_buggy_ptsname_r_with_null_buf() {
-        // Common bug: caller forgets to allocate the buffer.  Reported as
-        // EINVAL (argument-domain error), matching glibc/POSIX.
+        // Common bug: caller forgets to allocate the buffer.  It still
+        // fails, but on the descriptor rather than the buffer — fd 0 is
+        // open and is not a PTY master, so ENOTTY, exactly as on Linux.
         crate::errno::set_errno(0);
         assert_eq!(ptsname_r(0, core::ptr::null_mut(), 64), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
     }
 }
 
@@ -3005,13 +3008,17 @@ pub extern "C" fn ptsname(fd: i32) -> *mut u8 {
 /// ever ship PTY support, decide whether to switch to the strict
 /// return-the-errno convention — see todo.txt.
 ///
-/// Validation order matches glibc's ptsname_r (which calls
-/// `ioctl(fd, TIOCGPTN)` and then formats a path):
+/// Validation order matches glibc's `__ptsname_r`
+/// (`sysdeps/unix/sysv/linux/ptsname.c`, checked against glibc 2.39),
+/// which issues `ioctl(fd, TIOCGPTN)` *first* and only formats a path
+/// into `buf` if that succeeds:
 ///
-/// 1. `buf == NULL`         -> `EINVAL`
-/// 2. `fd < 0`              -> `EBADF`
-/// 3. `fd` not in fdtable   -> `EBADF`
-/// 4. otherwise             -> `ENOTTY` (not a PTY master).
+/// 1. `fd < 0`              -> `EBADF`
+/// 2. `fd` not in fdtable   -> `EBADF`
+/// 3. otherwise             -> `ENOTTY` (not a PTY master).
+///
+/// The fd verdict therefore outranks the state of `buf` — see the
+/// note in the body about why `buf == NULL` is not checked up front.
 ///
 /// `buflen` is not separately validated: a non-PTY fd produces
 /// ENOTTY before we'd reach a buffer-size check, and we never have
@@ -3021,17 +3028,6 @@ pub extern "C" fn ptsname(fd: i32) -> *mut u8 {
 /// before writing the path.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ptsname_r(fd: i32, buf: *mut u8, _buflen: usize) -> i32 {
-    if buf.is_null() {
-        // EINVAL, not EFAULT: glibc's __ptsname_r rejects a NULL buffer
-        // with an explicit `if (buf == NULL) return EINVAL;` *before* it
-        // ever dereferences the pointer, so this is an argument-domain
-        // error rather than a fault.  POSIX likewise lists EINVAL for a
-        // NULL `buf`.  (A blanket NULL->EFAULT sweep briefly changed this
-        // to EFAULT; the divergence is user-visible to portable callers
-        // that branch on EINVAL, so it is restored here.)
-        crate::errno::set_errno(crate::errno::EINVAL);
-        return -1;
-    }
     if fd < 0 {
         crate::errno::set_errno(crate::errno::EBADF);
         return -1;
@@ -3040,6 +3036,23 @@ pub extern "C" fn ptsname_r(fd: i32, buf: *mut u8, _buflen: usize) -> i32 {
         crate::errno::set_errno(crate::errno::EBADF);
         return -1;
     }
+    // The fd exists but is not a PTY master — nothing on this system is,
+    // because `posix_openpt` returns ENOSYS.  glibc learns the same thing
+    // from TIOCGPTN failing and returns that errno *without ever examining
+    // `buf`*, so reporting the fd verdict here (rather than an argument
+    // complaint about `buf`) is what a Linux caller actually sees.
+    //
+    // When PTY support lands, the NULL-`buf` check belongs immediately
+    // below this line, between identifying the master and writing the
+    // path.  The errno to use there is EINVAL: glibc 2.39 has no NULL
+    // check at all and simply segfaults in `__stpcpy (buf, devpts)`, and
+    // musl clamps the length to 0 and yields ERANGE — neither is
+    // acceptable behaviour to copy, while both POSIX.1-2024 and
+    // `ptsname_r(3)` document EINVAL for a NULL `buf`.
+    //
+    // `buf` is deliberately unexamined until then; there is no path here
+    // that could dereference it.
+    let _ = buf;
     crate::errno::set_errno(crate::errno::ENOTTY);
     -1
 }

@@ -31,7 +31,8 @@
 //! [`select`] resolves a script tag to a LangSys, following OpenType's
 //! fallback chain: the requested script, then its older spelling for the Indic
 //! scripts OpenType renumbered, then `DFLT`, then a script literally named
-//! `dflt`. A face that registers its features under none of those has nothing
+//! `dflt`, and finally `latn` for the old fonts that file everything there.
+//! A face that registers its features under none of those has nothing
 //! to offer the run, and is shaped without features rather than with all of
 //! them. The chain stops at the first tag the face *registers*, even if that
 //! script then names no features at all — script selection and feature
@@ -114,9 +115,9 @@ fn select(data: &[u8], base: usize, script: Option<ScriptTags>) -> Option<LangSy
 
     // Order matters and is the whole of the policy: the run's own script
     // first, then the older OpenType spelling of it, then the two ways a font
-    // says "these features are for everything". `DFLT` is the registered
-    // default script tag; `dflt` is a common misspelling that real fonts ship,
-    // and every shaper accepts it.
+    // says "these features are for everything", then `latn` as a last resort.
+    // `DFLT` is the registered default script tag; `dflt` is a common
+    // misspelling that real fonts ship, and every shaper accepts it.
     for want in fallback_chain(script) {
         let Some(script_table) = find_script(data, script_list, &want) else {
             continue;
@@ -139,17 +140,29 @@ fn select(data: &[u8], base: usize, script: Option<ScriptTags>) -> Option<LangSy
 ///
 /// Order is the whole of the policy: the run's own script first, then the
 /// older OpenType spelling of it for the Indic scripts OpenType renumbered,
-/// then the two ways a font says "these features are for everything". `DFLT`
-/// is the registered default script tag; `dflt` is a misspelling that real
-/// fonts ship, and every shaper accepts it.
+/// then the two ways a font says "these features are for everything", then
+/// `latn`. `DFLT` is the registered default script tag; `dflt` is a
+/// misspelling that real fonts ship, and every shaper accepts it.
 ///
 /// A run with no script of its own — all digits and punctuation — starts at
 /// `DFLT`, which is also what HarfBuzz does with a `Common` buffer.
+///
+/// `latn` is the last resort, and HarfBuzz's: old fonts file everything there
+/// whatever they are really for, and a face that registers no default script
+/// at all would otherwise shape nothing. `Gabriola.ttf` needs it — its `GPOS`
+/// registers `cyrl`, `grek` and `latn` and no default, so `123 456` reaches
+/// its `kern` feature only through this entry.
 fn fallback_chain(script: Option<ScriptTags>) -> impl Iterator<Item = [u8; 4]> {
     let (preferred, fallback) = script.map(|s| (s.preferred, s.fallback)).unzip();
-    [preferred, fallback, Some(*b"DFLT"), Some(*b"dflt")]
-        .into_iter()
-        .flatten()
+    [
+        preferred,
+        fallback,
+        Some(*b"DFLT"),
+        Some(*b"dflt"),
+        Some(*b"latn"),
+    ]
+    .into_iter()
+    .flatten()
 }
 
 /// Where the ScriptTable for `want` begins, if the ScriptList has one.

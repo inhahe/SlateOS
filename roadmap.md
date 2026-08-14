@@ -456,7 +456,11 @@ Roadmap:
   face may file a positioning lookup under `calt` — Monoid-Italic files its
   entire italic side-bearing correction there
   (`TD-GPOS-ASKS-ONLY-FOR-POSITIONING-SOUNDING-FEATURES`).
-  `agree` 11820 → 11826, `misplaced` 28 → 22.
+  `agree` 11820 → 11826, `misplaced` 28 → 22. And the script fallback chain
+  ends with `latn`, as HarfBuzz's does, so a face that registers no default
+  script (Gabriola registers `cyrl`/`grek`/`latn`) still kerns a run of digits
+  (`TD-FONT-SCRIPT-FALLBACK-STOPS-BEFORE-LATIN`).
+  `agree` 11826 → 11828, `misplaced` 22 → 20.
   Next unblocked step is the rest of shaping: no Indic reordering
   (`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`), no language selection
   (`TD-FONT-IGNORES-LANGSYS-OVERRIDES`), and no device tables in

@@ -2597,21 +2597,43 @@ mod tests {
         assert_eq!(arabic_run.first().map(|g| g.gid), Some(50));
     }
 
-    /// A face that registers neither the run's script nor a default has
-    /// nothing to say about it, and saying nothing is the correct answer —
-    /// the alternative is applying some other writing system's rules.
+    /// A face that registers neither the run's script, nor a default, nor
+    /// `latn` has nothing to say about it, and saying nothing is the correct
+    /// answer — the alternative is applying some other writing system's rules.
+    ///
+    /// `latn` is the chain's last resort, and HarfBuzz's: old fonts file
+    /// everything under it whatever they are really for, so a face that
+    /// registers it answers for every run that gets that far. `Gabriola.ttf`
+    /// needs exactly that — its `GPOS` registers `cyrl`, `grek` and `latn` and
+    /// no default at all, so `123 456` reaches its `kern` feature only here.
     #[test]
-    fn a_script_the_face_does_not_register_gets_nothing() {
-        let (data, subs) = two_script_font();
+    fn a_script_the_face_does_not_register_falls_back_to_latin_and_then_nothing() {
         let hebrew = Some(ScriptTags {
             preferred: *b"hebr",
             fallback: *b"hebr",
         });
+
+        // This face registers `latn`, so the chain ends there rather than
+        // empty-handed.
+        let (data, subs) = two_script_font();
+        let mut glyphs = vec![SubGlyph::new(10, 0)];
+        subs.apply(&data, hebrew, &mut glyphs);
+        assert_eq!(glyphs.first().map(|g| g.gid), Some(60));
+        // A run with no script of its own asks for `DFLT` first, which this
+        // face does not register either, and lands in the same place.
+        let mut none = vec![SubGlyph::new(10, 0)];
+        subs.apply(&data, None, &mut none);
+        assert_eq!(none.first().map(|g| g.gid), Some(60));
+
+        // A face with no `latn` and no default really does say nothing.
+        let data = gsub_scripts(&[(b"arab", b"liga")], LOOKUP_SINGLE, &[&single_list(
+            &[10],
+            &[50],
+        )]);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         let mut glyphs = vec![SubGlyph::new(10, 0)];
         subs.apply(&data, hebrew, &mut glyphs);
         assert_eq!(glyphs.first().map(|g| g.gid), Some(10));
-        // And a run with no script of its own, which asks for `DFLT`, is in
-        // the same position here: this face registers no default either.
         let mut none = vec![SubGlyph::new(10, 0)];
         subs.apply(&data, None, &mut none);
         assert_eq!(none.first().map(|g| g.gid), Some(10));

@@ -320,7 +320,9 @@ Roadmap:
 
 - `[C]` Vulkan loader and basic GPU command submission (line ~4596)
 - `[C]` OpenGL via Mesa (line ~4601) — see joint task
-- `[C]` 2D drawing library: Vello + HarfBuzz (line ~4602)
+- `[C]` 2D drawing library: Vello + HarfBuzz (line ~4602) — font engine done;
+  next unblocked steps are wiring `ScaledFont` into the compositor/toolkit and
+  the CFF outline interpreter. Vello itself waits on `[A]`'s GPU driver.
 - `[C]` Wayland-inspired compositor: GPU acceleration, currently a software
   rasterizer (lines ~4605, ~4619)
 - `[C]` Video-encoded capture fallback, H.264/VP9 (lines ~4623, ~5060)
@@ -4941,7 +4943,12 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [x] `/dev/dri/card0` + `renderD128` bound to the primary GPU device (`drm::primary_device`), so a libdrm/Mesa client's render node targets the GPU rather than the fallback dumb framebuffer.
   - [~] **Acceleration payoff gated on Q18** (open-questions.md): real 3D/virgl needs a virgl-capable test env (`virtio-gpu-gl` + host GL/display + virglrenderer — the headless CI is 2D-only) **and** the Mesa port (§4583, a large external C port needing operator go-ahead). Next kernel-side step (render-ioctl dispatch with honest no-3D reporting) is option B in Q18, available on request.
 - [ ] `[C]` OpenGL via Mesa (port Mesa's Vulkan and OpenGL drivers)
-- [ ] `[C]` 2D drawing library: Vello (Rust-native, GPU compute shaders) + HarfBuzz via FFI for complex text shaping
+- [-] `[C]` 2D drawing library: Vello (Rust-native, GPU compute shaders) + HarfBuzz via FFI for complex text shaping
+  - [x] **Font engine** (`gui/font/src/{sfnt,raster,scaled}.rs`) — the GPU-independent half. sfnt/TrueType container parser (`head`/`hhea`/`maxp`/`hmtx`/`loca`/`glyf`/`cmap` formats 0/4/12, composite glyphs), anti-aliased signed-area rasterizer (analytic coverage, non-zero winding, bounds-clipped because font files are untrusted input), and `ScaledFont` — glyph cache, derived metrics, `measure`/`wrap`/`draw_text` plus an 8-bit-coverage blitter. Replaces the single procedural 8x16 bitmap face the entire UI was capped at. Verified three ways: synthetic fixture, 556 host fonts (538 opened, 18 CFF rejected cleanly, 563k outlines walked, 68k glyphs rasterized at two sizes, zero panics), and ASCII-art rendering that proves letters look like letters (an ink count cannot tell a correct 'o' from a scrambled one). Tradeoffs in design-decisions.md §86.
+  - [ ] CFF/Type 2 charstring outlines — `TD-FONT-NO-CFF-OUTLINES` in known-issues.md (18/556 host fonts, mostly Adobe faces; currently a hard parse error rather than a face that silently draws nothing)
+  - [ ] Wire `ScaledFont` into the compositor / toolkit / desktop text paths so scalable AA text actually reaches the screen
+  - [ ] HarfBuzz via FFI for complex-script shaping (today it is 1:1 char→glyph through `cmap`: no ligatures, kerning, mark attachment, bidi or Indic reordering)
+  - [~] Vello proper (GPU compute-shader path renderer) — **blocked on** `[A]`'s DRM/KMS + GPU driver and the Mesa port; the CPU rasterizer above is the fallback that path will eventually bypass
 
 ### 3.3 Compositor
 - [-] `[C]` Wayland-inspired compositor (userspace):

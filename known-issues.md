@@ -58161,15 +58161,79 @@ is the corruption this codebase forbids, and it is what the Linux man page
 documents. Because the check is ours, it is ours to order, and it now goes
 first, so `getdomainname(NULL, 0)` is `EINVAL` rather than `EFAULT`.
 
-**What remains.** The ~215 surviving `is_null() -> EFAULT` sites have not been
+**Sixth pass, 2026-08-14 — `socket.rs` (15 sites).** Every constant was already
+right; every bug was an ordering bug, and the answers this time came almost
+entirely from `net/socket.c` rather than glibc, because the socket calls are
+thin syscall wrappers. The one thing worth carrying forward is that *the
+descriptor lookup is not uniformly first*: Linux splits the socket entry points
+into two families, and the split is deliberate, not accidental.
+
+- **`bind` / `connect` checked the address before the descriptor.**
+  `__sys_bind` (net/socket.c:1835) calls `sockfd_lookup_light` and only then
+  `move_addr_to_kernel`, so `bind(-1, NULL, len)` is `EBADF`; ours said
+  `EFAULT`. `__sys_connect` (:2056) is the same via `fdget`. Fixed, and the
+  existing `test_phase201_bind_null_addr_efault_before_eacces` had to move to a
+  real socket fd — it had been passing `-1` and so was silently asserting the
+  wrong precedence all along.
+- **The two calls disagree about `ENOTSOCK`, and that is upstream's doing.**
+  `bind` uses `sockfd_lookup_light` (:553), which resolves *and* type-checks
+  before the address is read, so `ENOTSOCK` outranks `EFAULT`. `connect` uses a
+  bare `fdget` and calls `sock_from_file` inside `__sys_connect_file`, i.e.
+  *after* `move_addr_to_kernel`, so there `EFAULT` outranks `ENOTSOCK`. Both
+  are now spelled out at the call sites with a cross-reference, because the
+  asymmetry reads like a mistake and would otherwise be "tidied up".
+- **`addrlen == 0` must not fault.** `move_addr_to_kernel` (:247) returns 0 at
+  `ulen == 0` *before* its `copy_from_user`, so `bind(fd, NULL, 0)` never
+  touches the pointer and falls through to the protocol's own length test:
+  `EINVAL`, not `EFAULT`. A short-but-nonzero `addrlen` does reach the copy, so
+  there `EFAULT` wins over that same `EINVAL`. Both directions now have tests.
+- **`socketpair` faulted before it validated the type flags.**
+  `__sys_socketpair` (:1729) tests `flags & ~(SOCK_CLOEXEC | SOCK_NONBLOCK)` at
+  :1737, before it has reserved a descriptor — but reaches
+  `put_user(fd1, &usockvec[0])` at :1758 *before* `sock_create` at :1771. So
+  exactly one check outranks `EFAULT` (the flag `EINVAL`) and the family, type
+  and protocol verdicts all rank below it. The first guess — that all of them
+  outranked `EFAULT` — was wrong, and only reading the function settled it.
+- **`inet_ntop` rejected NULL pointers before looking at the family.** glibc's
+  `inet_ntop` (resolv/inet_ntop.c) is a bare `switch (af)` with no pointer
+  checks at all, so an unrecognised family is `EAFNOSUPPORT` whatever the
+  pointers hold. Within a family, `inet_ntop4` formats into a stack buffer and
+  compares against `size` before its closing `strcpy`, so `ENOSPC` also
+  outranks a NULL `dst`. The `dst` check now lives in both formatters, just
+  after the `ENOSPC` test; the full order is `EAFNOSUPPORT`, `src`, `ENOSPC`,
+  `dst`.
+- **`setsockopt`'s multicast path conflated two errors into one.** It answered
+  `EINVAL` for both a short `optlen` and a NULL `optval`.
+  `do_ip_setsockopt` (net/ipv4/ip_sockglue.c:1222-1233) rejects
+  `optlen < sizeof(struct ip_mreq)` and only then runs `copy_from_sockptr`, so
+  they are distinct verdicts. Folding them told a caller with a correctly-sized
+  buffer at a bad address that its *length* was wrong.
+- **`sendmsg` / `recvmsg` read the header before the descriptor**, and worse,
+  returned 0 for an empty `msg_iov` without ever looking at the fd.
+  `__sys_sendmsg` (:2634) and `__sys_recvmsg` run `sockfd_lookup_light` before
+  `___sys_sendmsg` copies the header in. Note the contrast with `sendto` /
+  `recvfrom`: `__sys_sendto` (:2161) and `__sys_recvfrom` (:2224) import the
+  user buffer *first*, so there `EFAULT` genuinely does outrank `EBADF` and our
+  existing order was right. A new `socket_fd_is_valid()` helper carries the
+  `sockfd_lookup_light` semantics (and the citation) once.
+- **A zero-length `send`/`recv`/`recvfrom` returned 0 on a closed fd.** The
+  POSIX no-op was short-circuiting above the descriptor lookup, but
+  `__sys_sendto`/`__sys_recvfrom` look the descriptor up whatever the length
+  is. A zero-length send is a common idiom for probing a socket's liveness;
+  ours could not distinguish a live socket from a closed one.
+
+**What remains.** The ~200 surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. The densest remaining concentrations
-are `file.rs` (28), `spawn.rs` (16) and `socket.rs` (15). None of them needs
-§303's reasoning, which is specific to NPTL's shape — they are ordinary §300
-lookups: does the pointer reach a syscall or not, and in what order relative
-to the call's other arguments. The xattr and unistd passes are the template:
-expect the constants to be right and the *ordering* to be wrong, and expect
-the reading to turn up an adjacent behavioural bug or two on the way.
+are `file.rs` (28) and `spawn.rs` (16). Neither needs §303's reasoning, which
+is specific to NPTL's shape — they are ordinary §300 lookups: does the pointer
+reach a syscall or not, and in what order relative to the call's other
+arguments. The xattr, unistd and socket passes are the template: expect the
+constants to be right and the *ordering* to be wrong, and expect the reading to
+turn up an adjacent behavioural bug or two on the way. `socket.rs` adds one
+more habit worth keeping — **do not generalise a rule from one sibling call to
+the next**; `bind` and `connect` order `ENOTSOCK` oppositely, and `sendmsg` and
+`sendto` order `EBADF` oppositely, in the same file.
 
 **Reproduce.** Not a runtime failure. `rg -A3 'is_null\(\)' posix/src`, filtered
 for `EFAULT` in the following lines, enumerates the candidate sites; each has to

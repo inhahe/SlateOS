@@ -427,6 +427,32 @@ fn meta_ptr() -> *mut [Option<SocketMeta>; MAX_SOCKETS] {
     core::ptr::addr_of_mut!(SOCKET_META)
 }
 
+/// Resolve `fd` the way Linux's `sockfd_lookup_light` (net/socket.c:553) does:
+/// `fdget` first, so an unopened descriptor is `EBADF`, and only then
+/// `sock_from_file`, so an open non-socket is `ENOTSOCK`.
+///
+/// Returns `false` with `errno` already set when the descriptor is unusable.
+/// Entry points whose upstream counterpart calls `sockfd_lookup_light` *before*
+/// reading their user arguments (`bind`, `sendmsg`, `recvmsg`, `setsockopt`,
+/// `getsockopt`, …) must call this first; the ones that import their buffer
+/// first (`sendto`, `recvfrom`) must not.
+fn socket_fd_is_valid(fd: i32) -> bool {
+    let Some(entry) = fdtable::get_fd(fd) else {
+        errno::set_errno(errno::EBADF);
+        return false;
+    };
+    match entry.kind {
+        HandleKind::TcpStream
+        | HandleKind::TcpListener
+        | HandleKind::UdpSocket
+        | HandleKind::UnixStream => true,
+        _ => {
+            errno::set_errno(errno::ENOTSOCK);
+            false
+        }
+    }
+}
+
 /// Store metadata for a socket fd.
 fn set_meta(fd: i32, meta: SocketMeta) {
     if fd >= 0 && (fd as usize) < MAX_SOCKETS {
@@ -887,20 +913,36 @@ unsafe fn is_valid_ipv4(s: *const u8) -> bool {
 /// least `size` bytes.
 ///
 /// Returns `dst` on success, or null with errno set.
+///
+/// # Error precedence
+///
+/// glibc's `inet_ntop` (resolv/inet_ntop.c) is a bare `switch (af)` with no
+/// pointer checks at all: an unrecognised family returns `EAFNOSUPPORT`
+/// whatever the pointers are, and a recognised one dereferences them (i.e.
+/// faults — `EFAULT` is our substitute).  Within a family, `inet_ntop4`
+/// formats into a stack buffer and compares against `size` before it copies,
+/// so `ENOSPC` also outranks a NULL `dst`.  The full order is therefore
+/// `EAFNOSUPPORT`, then `src`, then `ENOSPC`, then `dst`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn inet_ntop(af: i32, src: *const u8, dst: *mut u8, size: u32) -> *const u8 {
-    if src.is_null() || dst.is_null() {
+    match af {
+        AF_INET | AF_INET6 => {}
+        _ => {
+            errno::set_errno(errno::EAFNOSUPPORT);
+            return core::ptr::null();
+        }
+    }
+
+    // Both formatters read `src` before they look at anything else.
+    if src.is_null() {
         errno::set_errno(errno::EFAULT);
         return core::ptr::null();
     }
 
-    match af {
-        AF_INET => inet_ntop4(src, dst, size),
-        AF_INET6 => inet_ntop6(src, dst, size),
-        _ => {
-            errno::set_errno(errno::EAFNOSUPPORT);
-            core::ptr::null()
-        }
+    if af == AF_INET {
+        inet_ntop4(src, dst, size)
+    } else {
+        inet_ntop6(src, dst, size)
     }
 }
 
@@ -921,6 +963,12 @@ fn inet_ntop4(src: *const u8, dst: *mut u8, size: u32) -> *const u8 {
     let needed = pos.wrapping_add(1); // +null
     if (size as usize) < needed {
         errno::set_errno(errno::ENOSPC);
+        return core::ptr::null();
+    }
+
+    // glibc reaches `dst` only in the final `strcpy`, after the ENOSPC test.
+    if dst.is_null() {
+        errno::set_errno(errno::EFAULT);
         return core::ptr::null();
     }
 
@@ -1014,6 +1062,12 @@ fn inet_ntop6(src: *const u8, dst: *mut u8, size: u32) -> *const u8 {
     let needed = pos.wrapping_add(1);
     if (size as usize) < needed {
         errno::set_errno(errno::ENOSPC);
+        return core::ptr::null();
+    }
+
+    // glibc reaches `dst` only in the final `strcpy`, after the ENOSPC test.
+    if dst.is_null() {
+        errno::set_errno(errno::EFAULT);
         return core::ptr::null();
     }
 
@@ -1282,25 +1336,35 @@ pub extern "C" fn socket(domain: i32, sock_type: i32, protocol: i32) -> i32 {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::too_many_lines)] // Splitting this function would fragment the connect() logic across TCP/UDP handling.
 pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: SocklenT) -> i32 {
-    if addr.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-
-    if (addrlen as usize) < core::mem::size_of::<SockaddrIn>() {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-
+    // Linux's order, from `__sys_connect` (net/socket.c:2056): `fdget(fd)`
+    // decides EBADF *first*, so a bad descriptor beats every argument error.
     let Some(entry) = fdtable::get_fd(fd) else {
         errno::set_errno(errno::EBADF);
         return -1;
     };
 
+    // Then `move_addr_to_kernel` (net/socket.c:247).  It returns 0 early when
+    // `ulen == 0` — the copy never runs — so a zero addrlen does not fault even
+    // on a NULL pointer; it falls through to the protocol's length check below.
+    if addrlen != 0 && addr.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+
+    // `__sys_connect` uses a bare `fdget`, not `sockfd_lookup_light`, so
+    // `sock_from_file` runs *after* the address copy: here ENOTSOCK ranks below
+    // EFAULT.  `bind` is the other way round — see the comment there.
     let Some(mut meta) = get_meta(fd) else {
         errno::set_errno(errno::ENOTSOCK);
         return -1;
     };
+
+    // Last, the protocol handler's own length test (`inet_stream_connect` →
+    // `__inet_stream_connect`, net/ipv4/af_inet.c).
+    if (addrlen as usize) < core::mem::size_of::<SockaddrIn>() {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
 
     // SAFETY: addr is non-null and addrlen >= sizeof(SockaddrIn).
     // Use read_unaligned because Sockaddr has weaker alignment than SockaddrIn.
@@ -1510,9 +1574,10 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
 /// Ports below 1024 ("privileged ports") require `CAP_NET_BIND_SERVICE`.
 /// Linux enforces this inside `inet_bind()` → `inet_csk_get_port()` /
 /// `udp_lib_get_port()` via `inet_port_requires_bind_service(port)`.
-/// The check runs after all argument validation (EFAULT, EBADF, EINVAL,
-/// EAFNOSUPPORT) so callers with bad arguments see the argument error,
-/// not EACCES.  Port 0 (ephemeral) and ports ≥ 1024 bypass the gate.
+/// The check runs after all argument validation (EBADF, ENOTSOCK, EFAULT,
+/// EINVAL, EAFNOSUPPORT — in that order, see the body) so callers with bad
+/// arguments see the argument error, not EACCES.  Port 0 (ephemeral) and
+/// ports ≥ 1024 bypass the gate.
 ///
 /// Returns 0 on success, -1 on error.
 ///
@@ -1521,16 +1586,11 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
 /// `addr` must point to a valid `SockaddrIn`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn bind(fd: i32, addr: *const Sockaddr, addrlen: SocklenT) -> i32 {
-    if addr.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-
-    if (addrlen as usize) < core::mem::size_of::<SockaddrIn>() {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-
+    // Linux's order, from `__sys_bind` (net/socket.c:1835): `sockfd_lookup_light`
+    // (net/socket.c:553) decides EBADF and then ENOTSOCK *before*
+    // `move_addr_to_kernel` ever looks at the address, so both descriptor errors
+    // outrank every argument error.  (`connect` differs: it uses a bare `fdget`,
+    // so its ENOTSOCK ranks *below* EFAULT.  The asymmetry is upstream's.)
     let Some(entry) = fdtable::get_fd(fd) else {
         errno::set_errno(errno::EBADF);
         return -1;
@@ -1540,6 +1600,21 @@ pub unsafe extern "C" fn bind(fd: i32, addr: *const Sockaddr, addrlen: SocklenT)
         errno::set_errno(errno::ENOTSOCK);
         return -1;
     };
+
+    // `move_addr_to_kernel` (net/socket.c:247) returns 0 early when `ulen == 0`,
+    // so a zero addrlen never dereferences the pointer — it falls through to the
+    // protocol's length check below and yields EINVAL, not EFAULT.
+    if addrlen != 0 && addr.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+
+    // Last, the protocol handler's own length test (`inet_bind` →
+    // `__inet_bind`, net/ipv4/af_inet.c).
+    if (addrlen as usize) < core::mem::size_of::<SockaddrIn>() {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
 
     // SAFETY: addr is non-null and addrlen >= sizeof(SockaddrIn).
     // Use read_unaligned because Sockaddr has weaker alignment than SockaddrIn.
@@ -1939,15 +2014,19 @@ pub unsafe extern "C" fn send(fd: i32, buf: *const u8, len: usize, flags: i32) -
         return -1;
     }
 
-    // POSIX: send with len==0 succeeds with 0 bytes (no-op).
-    if len == 0 {
-        return 0;
-    }
-
     let Some(entry) = fdtable::get_fd(fd) else {
         errno::set_errno(errno::EBADF);
         return -1;
     };
+
+    // POSIX: send with len==0 succeeds with 0 bytes (no-op) — but only on a
+    // *valid* descriptor.  `__sys_sendto` (net/socket.c:2161) always runs
+    // `sockfd_lookup_light`, whatever the length, so a zero-length send is the
+    // documented way to probe a socket for EBADF/ENOTSOCK and must not
+    // short-circuit above the lookup.
+    if len == 0 {
+        return 0;
+    }
 
     // MSG_NOSIGNAL (0x4000) is a no-op — we have no SIGPIPE.
     // MSG_DONTWAIT (0x40) — non-blocking hint (also triggered by O_NONBLOCK).
@@ -2103,16 +2182,18 @@ pub unsafe extern "C" fn recv(fd: i32, buf: *mut u8, len: usize, flags: i32) -> 
         return -1;
     }
 
-    // POSIX: recv with len==0 succeeds immediately with 0 bytes.
-    // This is NOT an EOF indicator — it's a no-op.
-    if len == 0 {
-        return 0;
-    }
-
     let Some(entry) = fdtable::get_fd(fd) else {
         errno::set_errno(errno::EBADF);
         return -1;
     };
+
+    // POSIX: recv with len==0 succeeds immediately with 0 bytes.
+    // This is NOT an EOF indicator — it's a no-op.  It still requires a valid
+    // descriptor: `__sys_recvfrom` (net/socket.c:2224) runs
+    // `sockfd_lookup_light` regardless of `size`, so EBADF/ENOTSOCK win.
+    if len == 0 {
+        return 0;
+    }
 
     // Build kernel flags from POSIX MSG_* constants.
     // MSG_PEEK (0x02), MSG_TRUNC (0x20), and MSG_DONTWAIT (0x40) are
@@ -2702,18 +2783,20 @@ pub unsafe extern "C" fn recvfrom(
         return -1;
     }
 
-    // POSIX: recvfrom with len==0 succeeds immediately with 0 bytes.
-    // Without this, a zero-length TCP recv returns 0 from the kernel
-    // which would be incorrectly interpreted as EOF.  This matches
-    // recv()'s behavior and Linux's semantics.
-    if len == 0 {
-        return 0;
-    }
-
     let Some(entry) = fdtable::get_fd(fd) else {
         errno::set_errno(errno::EBADF);
         return -1;
     };
+
+    // POSIX: recvfrom with len==0 succeeds immediately with 0 bytes.
+    // Without this, a zero-length TCP recv returns 0 from the kernel
+    // which would be incorrectly interpreted as EOF.  This matches
+    // recv()'s behavior and Linux's semantics — including the ordering:
+    // `__sys_recvfrom` (net/socket.c:2224) looks the descriptor up whatever
+    // `size` is, so EBADF still beats the zero-length success.
+    if len == 0 {
+        return 0;
+    }
 
     // Build kernel flags (MSG_PEEK=0x02, MSG_TRUNC=0x20, MSG_DONTWAIT=0x40).
     let kern_flags = {
@@ -3203,9 +3286,18 @@ fn setsockopt_multicast(
         return -1;
     }
 
-    // Validate the option value is an IpMreq.
-    if optval.is_null() || (optlen as usize) < core::mem::size_of::<IpMreq>() {
+    // Validate the option value is an IpMreq.  Linux's `do_ip_setsockopt`
+    // (net/ipv4/ip_sockglue.c:1222-1233) tests `optlen < sizeof(struct ip_mreq)`
+    // and only then runs `copy_from_sockptr`, so a short optlen is EINVAL and a
+    // bad pointer at an adequate optlen is EFAULT.  They are distinct verdicts;
+    // folding both into EINVAL told a caller with a valid-length buffer at a
+    // bad address that its *length* was wrong.
+    if (optlen as usize) < core::mem::size_of::<IpMreq>() {
         errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if optval.is_null() {
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
 
@@ -4544,12 +4636,18 @@ fn write_u16_decimal(buf: &mut [u8; 6], pos: &mut usize, val: u16) {
 pub extern "C" fn socketpair(domain: i32, sock_type: i32, protocol: i32, sv: *mut [i32; 2]) -> i32 {
     // ---- Argument validation (all paths here return before any
     // syscall, so they are exercisable by host unit tests) ----
-    if sv.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
+    //
+    // The order below is `__sys_socketpair`'s (net/socket.c:1729).  It tests
+    // the type's flag bits at :1737 — before it has reserved a descriptor, let
+    // alone looked at `usockvec` — but it reaches `put_user(fd1, &usockvec[0])`
+    // at :1758 *before* `sock_create` at :1771.  So the flag EINVAL outranks
+    // EFAULT, and EFAULT in turn outranks the family/type/protocol verdicts.
+
     // A negative type cannot carry valid flag bits (SOCK_NONBLOCK and
-    // SOCK_CLOEXEC are both well below the sign bit).
+    // SOCK_CLOEXEC are both well below the sign bit), so upstream's single
+    // `flags & ~(SOCK_CLOEXEC | SOCK_NONBLOCK)` test rejects it; we spell that
+    // case out separately only because `!SOCK_TYPE_MASK` on a negative `i32`
+    // is easier to reason about once the sign bit is already excluded.
     if sock_type < 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -4560,6 +4658,11 @@ pub extern "C" fn socketpair(domain: i32, sock_type: i32, protocol: i32, sv: *mu
         return -1;
     }
     let base_type = sock_type & SOCK_TYPE_MASK;
+
+    if sv.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
 
     // Only Unix-domain pairs are supported.
     if domain != AF_UNIX {
@@ -4689,6 +4792,15 @@ pub struct Cmsghdr {
 pub unsafe extern "C" fn sendmsg(fd: i32, msg: *const Msghdr, flags: i32) -> isize {
     const STACK_BUF: usize = 4096;
     const LARGE_BUF: usize = 16384;
+
+    // `__sys_sendmsg` (net/socket.c:2634) runs `sockfd_lookup_light` before
+    // `___sys_sendmsg` copies the header in, so EBADF/ENOTSOCK outrank both the
+    // EFAULT on `msg` and the zero-length success below.  (`sendto` is the
+    // other way round: `__sys_sendto` at :2171 imports the buffer *first*.)
+    if !socket_fd_is_valid(fd) {
+        return -1;
+    }
+
     if msg.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -4908,6 +5020,15 @@ pub unsafe extern "C" fn sendmsg(fd: i32, msg: *const Msghdr, flags: i32) -> isi
 pub unsafe extern "C" fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize {
     const STACK_BUF_SMALL: usize = 4096;
     const STACK_BUF_LARGE: usize = 16384; // One 16 KiB page.
+
+    // `__sys_recvmsg` (net/socket.c) runs `sockfd_lookup_light` before
+    // `___sys_recvmsg` copies the header in, so EBADF/ENOTSOCK outrank both the
+    // EFAULT on `msg` and the zero-length success below.  (`recvfrom` is the
+    // other way round: `__sys_recvfrom` at :2237 imports the buffer *first*.)
+    if !socket_fd_is_valid(fd) {
+        return -1;
+    }
+
     if msg.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -8918,14 +9039,19 @@ mod tests {
     // -- ordering: argument errors beat EACCES ----------------------------
 
     /// NULL addr + no cap → EFAULT (argument check before cap).
+    ///
+    /// The descriptor must be a real socket: `__sys_bind` (net/socket.c:1835)
+    /// resolves it via `sockfd_lookup_light` *before* `move_addr_to_kernel`
+    /// looks at the address, so a bad fd would mask the EFAULT with EBADF.
     #[test]
     fn test_phase201_bind_null_addr_efault_before_eacces() {
         let _g = phase201_cap::CapGuard::snapshot();
         phase201_cap::drop_cap_net_bind_service();
+        let fd = make_tcp_socket();
         crate::errno::set_errno(0);
         let ret = unsafe {
             bind(
-                -1,
+                fd,
                 core::ptr::null(),
                 core::mem::size_of::<SockaddrIn>() as SocklenT,
             )
@@ -8936,6 +9062,7 @@ mod tests {
             crate::errno::EFAULT,
             "EFAULT for NULL addr must precede EACCES"
         );
+        crate::file::close(fd);
     }
 
     /// Bad fd + no cap → EBADF (fd check before cap).
@@ -9184,5 +9311,217 @@ mod tests {
         let ret = socket(AF_INET, SOCK_RAW, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // -----------------------------------------------------------------
+    // Argument-validation *order*
+    //
+    // Every assertion below names the upstream function and the line whose
+    // position in the source it encodes.  Ordering is part of the ABI: a
+    // caller that switches on errno to decide what to retry gets a different
+    // answer when two checks trade places, so a test that only pins the
+    // constant is not enough.
+    // -----------------------------------------------------------------
+
+    /// `__sys_bind` (net/socket.c:1835) resolves the descriptor via
+    /// `sockfd_lookup_light` before `move_addr_to_kernel` (:247) reads the
+    /// address, so EBADF outranks EFAULT.
+    #[test]
+    fn bind_bad_fd_outranks_a_null_address() {
+        crate::errno::set_errno(0);
+        let ret = unsafe {
+            bind(
+                -1,
+                core::ptr::null(),
+                core::mem::size_of::<SockaddrIn>() as SocklenT,
+            )
+        };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    /// Same for `__sys_connect` (net/socket.c:2056), whose `fdget` is also
+    /// ahead of `move_addr_to_kernel`.
+    #[test]
+    fn connect_bad_fd_outranks_a_null_address() {
+        crate::errno::set_errno(0);
+        let ret = unsafe {
+            connect(
+                -1,
+                core::ptr::null(),
+                core::mem::size_of::<SockaddrIn>() as SocklenT,
+            )
+        };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    /// `move_addr_to_kernel` returns 0 at `ulen == 0` (net/socket.c:251)
+    /// *before* the `copy_from_user` at :253, so a zero addrlen never touches
+    /// the pointer and the verdict comes from the protocol's own length test:
+    /// EINVAL, not EFAULT.
+    #[test]
+    fn bind_zero_addrlen_does_not_fault_on_a_null_address() {
+        let fd = make_tcp_socket();
+        crate::errno::set_errno(0);
+        let ret = unsafe { bind(fd, core::ptr::null(), 0) };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        crate::file::close(fd);
+    }
+
+    /// And a short-but-nonzero addrlen *does* reach the copy, so there EFAULT
+    /// wins over the protocol's EINVAL.
+    #[test]
+    fn bind_short_nonzero_addrlen_still_faults_on_a_null_address() {
+        let fd = make_tcp_socket();
+        crate::errno::set_errno(0);
+        let ret = unsafe { bind(fd, core::ptr::null(), 4) };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        crate::file::close(fd);
+    }
+
+    /// `__sys_socketpair` (net/socket.c:1729) tests the type's flag bits at
+    /// :1737, before it has reserved a descriptor — so a bad flag outranks the
+    /// `put_user(fd1, &usockvec[0])` fault at :1758.
+    #[test]
+    fn socketpair_bad_type_flags_outrank_a_null_vector() {
+        crate::errno::set_errno(0);
+        let ret = socketpair(AF_UNIX, SOCK_STREAM | 0x0100_0000, 0, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// But `put_user` at :1758 comes *before* `sock_create` at :1771, so the
+    /// fault outranks EAFNOSUPPORT — the family is never examined.
+    #[test]
+    fn socketpair_null_vector_outranks_a_bad_family() {
+        crate::errno::set_errno(0);
+        let ret = socketpair(0xbeef, SOCK_STREAM, 0, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    /// glibc's `inet_ntop` (resolv/inet_ntop.c) is a bare `switch (af)` with no
+    /// pointer checks, so an unknown family wins over both NULL pointers.
+    #[test]
+    fn inet_ntop_bad_family_outranks_null_pointers() {
+        crate::errno::set_errno(0);
+        let ret = inet_ntop(0xbeef, core::ptr::null(), core::ptr::null_mut(), 64);
+        assert!(ret.is_null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::EAFNOSUPPORT);
+    }
+
+    /// `inet_ntop4` formats into a stack buffer and compares the result against
+    /// `size` before the closing `strcpy`, so ENOSPC outranks a NULL `dst`.
+    #[test]
+    fn inet_ntop_too_small_size_outranks_a_null_destination() {
+        let src = [127u8, 0, 0, 1];
+        crate::errno::set_errno(0);
+        let ret = inet_ntop(AF_INET, src.as_ptr(), core::ptr::null_mut(), 4);
+        assert!(ret.is_null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSPC);
+    }
+
+    /// A NULL `dst` at an adequate `size` reaches the `strcpy` and faults.
+    #[test]
+    fn inet_ntop_null_destination_at_an_adequate_size_faults() {
+        let src = [127u8, 0, 0, 1];
+        crate::errno::set_errno(0);
+        let ret = inet_ntop(AF_INET, src.as_ptr(), core::ptr::null_mut(), 64);
+        assert!(ret.is_null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    /// `do_ip_setsockopt` (net/ipv4/ip_sockglue.c:1222) rejects a short optlen
+    /// before `copy_from_sockptr` at :1226, and the two verdicts are distinct:
+    /// short → EINVAL, NULL at an adequate length → EFAULT.
+    #[test]
+    fn setsockopt_mreq_short_optlen_and_null_optval_are_different_errors() {
+        let fd = socket(AF_INET, SOCK_DGRAM, 0);
+        assert!(fd >= 0, "socket() must succeed");
+
+        crate::errno::set_errno(0);
+        let short = setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, core::ptr::null(), 4);
+        assert_eq!(short, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        crate::errno::set_errno(0);
+        let faulted = setsockopt(
+            fd,
+            IPPROTO_IP,
+            IP_ADD_MEMBERSHIP,
+            core::ptr::null(),
+            core::mem::size_of::<IpMreq>() as SocklenT,
+        );
+        assert_eq!(faulted, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+
+        crate::file::close(fd);
+    }
+
+    /// `__sys_sendmsg` (net/socket.c:2634) runs `sockfd_lookup_light` before
+    /// `___sys_sendmsg` copies the header, so EBADF outranks EFAULT.
+    #[test]
+    fn sendmsg_bad_fd_outranks_a_null_header() {
+        crate::errno::set_errno(0);
+        let ret = unsafe { sendmsg(-1, core::ptr::null(), 0) };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    /// Same for `__sys_recvmsg`.
+    #[test]
+    fn recvmsg_bad_fd_outranks_a_null_header() {
+        crate::errno::set_errno(0);
+        let ret = unsafe { recvmsg(-1, core::ptr::null_mut(), 0) };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    /// `__sys_sendto` (net/socket.c:2161) looks the descriptor up whatever the
+    /// length is, so a zero-length send on a closed fd is EBADF — not the
+    /// zero-byte success POSIX grants a *valid* one.
+    #[test]
+    fn zero_length_send_on_a_bad_fd_is_still_ebadf() {
+        crate::errno::set_errno(0);
+        let ret = unsafe { send(-1, core::ptr::null(), 0, 0) };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    /// The same for the receive side (`__sys_recvfrom`, net/socket.c:2224).
+    #[test]
+    fn zero_length_recv_on_a_bad_fd_is_still_ebadf() {
+        crate::errno::set_errno(0);
+        let ret = unsafe { recv(-1, core::ptr::null_mut(), 0, 0) };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+
+        crate::errno::set_errno(0);
+        let ret = unsafe {
+            recvfrom(
+                -1,
+                core::ptr::null_mut(),
+                0,
+                0,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            )
+        };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    /// A zero-length send on a *valid* socket still succeeds with 0 — the
+    /// reordering above must not have turned the POSIX no-op into an error.
+    #[test]
+    fn zero_length_send_on_a_valid_socket_is_still_a_no_op() {
+        let fd = make_tcp_socket();
+        crate::errno::set_errno(0);
+        assert_eq!(unsafe { send(fd, core::ptr::null(), 0, 0) }, 0);
+        assert_eq!(unsafe { recv(fd, core::ptr::null_mut(), 0, 0) }, 0);
+        crate::file::close(fd);
     }
 }

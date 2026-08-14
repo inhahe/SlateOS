@@ -51,7 +51,7 @@ const MAX_NESTED: usize = 16;
 /// A rule set is already keyed by the first glyph or its class, so a real one
 /// holds a handful; the cap is what stops a corrupt `seqRuleCount` from making
 /// every position in a line scan tens of thousands of rules.
-const MAX_RULES: usize = 256;
+pub(crate) const MAX_RULES: usize = 256;
 
 /// How deep a contextual lookup's invocations may nest.
 ///

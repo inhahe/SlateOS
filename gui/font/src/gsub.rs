@@ -128,6 +128,7 @@ use crate::otl::{
 use crate::script::ScriptTags;
 use crate::sfnt::{Span, u16_at};
 use crate::skip::{CLASS_BASE, CLASS_MARK, Definitions, Skipper};
+use crate::would::would_apply;
 
 /// The features read, in the order whose positions become the mask bits.
 ///
@@ -191,21 +192,21 @@ fn form_mask(form: Option<Form>) -> u64 {
 }
 
 /// `GSUB` lookup type for single substitution: one glyph for one glyph.
-const LOOKUP_SINGLE: u16 = 1;
+pub(crate) const LOOKUP_SINGLE: u16 = 1;
 /// `GSUB` lookup type for multiple substitution: one glyph becomes several.
-const LOOKUP_MULTIPLE: u16 = 2;
+pub(crate) const LOOKUP_MULTIPLE: u16 = 2;
 /// `GSUB` lookup type for alternate substitution: one glyph, several
 /// candidates, an index chooses.
-const LOOKUP_ALTERNATE: u16 = 3;
+pub(crate) const LOOKUP_ALTERNATE: u16 = 3;
 /// `GSUB` lookup type for ligature substitution: several glyphs for one.
-const LOOKUP_LIGATURE: u16 = 4;
+pub(crate) const LOOKUP_LIGATURE: u16 = 4;
 /// `GSUB` lookup type for contextual substitution: a rule that fires only
 /// where a given sequence of glyphs stands, and then invokes other lookups.
-const LOOKUP_CONTEXT: u16 = 5;
+pub(crate) const LOOKUP_CONTEXT: u16 = 5;
 /// `GSUB` lookup type for chaining contextual substitution: like
 /// [`LOOKUP_CONTEXT`], but the context extends either side of what is
 /// substituted.
-const LOOKUP_CHAIN_CONTEXT: u16 = 6;
+pub(crate) const LOOKUP_CHAIN_CONTEXT: u16 = 6;
 /// `GSUB` lookup type for an extension, which wraps a subtable of another type
 /// at a 32-bit offset. `GPOS` numbers its own extension 9; the two tables
 /// number their lookup types independently.
@@ -611,6 +612,54 @@ impl Substitutions {
             }
             between(i, glyphs);
         }
+    }
+
+    /// Would the feature tagged `tag`, on a run of `script`, substitute
+    /// exactly the glyph sequence `glyphs`?
+    ///
+    /// This is a question, not an instruction: nothing is rewritten, and
+    /// `glyphs` need not be — and for its callers never is — part of any run.
+    /// The Indic shaper asks it before it lays a syllable out, because where
+    /// the base consonant goes and where the others sit relative to it are
+    /// facts about the *typeface*: whether this font draws this consonant
+    /// under the base is something only this font can say. See
+    /// [`would`](crate::would) for what each lookup type counts as an answer.
+    ///
+    /// `false` for a tag not in [`FEATURES`], since a feature this crate never
+    /// asks a face for has no bit and so reaches no lookup. That is the right
+    /// answer for the wrong reason, and it is why every tag the shaper probes
+    /// must also be listed there.
+    // Called only by the tests until the Indic shaper is wired in. `expect`
+    // rather than `allow` on purpose: the moment it is wired in, this goes
+    // unfulfilled and the compiler asks for the line back. `cfg_attr` because
+    // the tests below do call it, so under `cfg(test)` there is nothing to
+    // expect and the expectation would itself be the warning.
+    //
+    // This one attribute covers the whole of [`would`](crate::would) as well:
+    // an item marked dead-code-allowed is a live root for the reachability
+    // pass, so nothing it calls is reported either.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the Indic shaper is not wired in yet")
+    )]
+    pub(crate) fn would_substitute(
+        &self,
+        data: &[u8],
+        script: Option<ScriptTags>,
+        tag: &[u8; 4],
+        glyphs: &[u16],
+        zero_context: bool,
+    ) -> bool {
+        let bit = FEATURES
+            .iter()
+            .position(|want| *want == tag)
+            .and_then(|i| u32::try_from(i).ok())
+            .and_then(|i| 1u64.checked_shl(i));
+        let Some(bit) = bit else { return false };
+        self.lookups
+            .for_script(script)
+            .filter(|&(_, mask)| mask & bit != 0)
+            .any(|(lookup, _)| would_apply(data, lookup, glyphs, zero_context))
     }
 }
 
@@ -2258,6 +2307,139 @@ mod tests {
             |i, glyphs| seen.push((i, glyphs.len())),
         );
         assert_eq!(seen, [(0, 2), (1, 1)]);
+    }
+
+    /// Would `tag` substitute `gids`, under the strict rule that a chaining
+    /// rule with any context does not answer?
+    fn would(data: &[u8], subs: &Substitutions, tag: &[u8; 4], gids: &[u16]) -> bool {
+        subs.would_substitute(data, None, tag, gids, true)
+    }
+
+    #[test]
+    fn a_ligature_feature_answers_about_the_pair_it_would_form() {
+        let (data, subs) = fi_font();
+        assert!(would(&data, &subs, b"liga", &[10, 11]));
+        assert!(would(&data, &subs, b"liga", &[10, 10]));
+        assert!(would(&data, &subs, b"liga", &[10, 10, 11]));
+        // A pair the font has no ligature for.
+        assert!(!would(&data, &subs, b"liga", &[10, 12]));
+        // The wrong way round: coverage is on the *first* glyph.
+        assert!(!would(&data, &subs, b"liga", &[11, 10]));
+    }
+
+    #[test]
+    fn a_sequence_the_rule_only_starts_is_not_an_answer() {
+        let (data, subs) = fi_font();
+        // The question is whether the feature substitutes *exactly* this
+        // sequence. `f` alone begins three ligatures and is none of them, and
+        // `f f i l` is one with a stray glyph after it — a shaper deciding
+        // where a consonant sits must not read either as a yes.
+        assert!(!would(&data, &subs, b"liga", &[10]));
+        assert!(!would(&data, &subs, b"liga", &[10, 10, 11, 12]));
+        assert!(!would(&data, &subs, b"liga", &[]));
+    }
+
+    #[test]
+    fn a_tag_this_crate_never_asks_a_face_for_reaches_nothing() {
+        let (data, subs) = fi_font();
+        // Not in `FEATURES`, so it has no bit and no lookup carries it. Every
+        // tag the Indic shaper probes has to be added there first.
+        assert!(!would(&data, &subs, b"rphf", &[10, 11]));
+    }
+
+    #[test]
+    fn a_single_substitution_answers_about_one_glyph_and_no_more() {
+        let sub = single_delta(&[10, 11], 5);
+        let data = gsub_table(b"liga", LOOKUP_SINGLE, &sub);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+        assert!(would(&data, &subs, b"liga", &[10]));
+        assert!(would(&data, &subs, b"liga", &[11]));
+        assert!(!would(&data, &subs, b"liga", &[12]));
+        // One glyph in, one glyph out: a two-glyph question is not one this
+        // lookup type can ever answer yes to.
+        assert!(!would(&data, &subs, b"liga", &[10, 11]));
+    }
+
+    #[test]
+    fn a_decomposition_answers_like_a_replacement() {
+        let sub = multiple(&[10], &[&[10, 11, 12]]);
+        let data = gsub_table(b"liga", LOOKUP_MULTIPLE, &sub);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+        // What it turns into is not the question; whether it touches the glyph
+        // is. HarfBuzz answers the same way, and the callers only ever ask
+        // about the input.
+        assert!(would(&data, &subs, b"liga", &[10]));
+        assert!(!would(&data, &subs, b"liga", &[11]));
+    }
+
+    #[test]
+    fn a_context_with_no_context_answers_about_its_input() {
+        let sub = context3(&[&[10], &[11]], &[(0, 0)]);
+        let data = gsub_table(b"liga", LOOKUP_CONTEXT, &sub);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+        assert!(would(&data, &subs, b"liga", &[10, 11]));
+        assert!(!would(&data, &subs, b"liga", &[10, 12]));
+        assert!(!would(&data, &subs, b"liga", &[10]));
+    }
+
+    #[test]
+    fn a_chaining_rule_that_needs_a_neighbour_does_not_answer() {
+        // `10 11` becomes something, but only after a `9`. Probed on its own
+        // there is no `9` and never will be, so under the strict rule the
+        // font is reported as saying nothing about the pair.
+        let sub = chain_context3(&[&[9]], &[&[10], &[11]], &[], &[(0, 0)]);
+        let data = gsub_table(b"liga", LOOKUP_CHAIN_CONTEXT, &sub);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+        assert!(!subs.would_substitute(&data, None, b"liga", &[10, 11], true));
+        // With the strict rule off — which is what the old Indic
+        // specification and Malayalam need — the context is ignored rather
+        // than failed, and the input alone decides.
+        assert!(subs.would_substitute(&data, None, b"liga", &[10, 11], false));
+        // Ignored, not matched: the input still has to be right.
+        assert!(!subs.would_substitute(&data, None, b"liga", &[10, 12], false));
+    }
+
+    #[test]
+    fn a_chaining_rule_with_no_neighbours_answers_either_way() {
+        let sub = chain_context3(&[], &[&[10], &[11]], &[], &[(0, 0)]);
+        let data = gsub_table(b"liga", LOOKUP_CHAIN_CONTEXT, &sub);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+        assert!(subs.would_substitute(&data, None, b"liga", &[10, 11], true));
+        assert!(subs.would_substitute(&data, None, b"liga", &[10, 11], false));
+        assert!(!subs.would_substitute(&data, None, b"liga", &[10, 11, 12], true));
+    }
+
+    #[test]
+    fn a_chaining_rule_set_answers_the_same_as_a_bare_one() {
+        // Format 1: the same rule reached through a coverage-keyed rule set.
+        let set = rule_set_of(&[chained(&[], &[11], &[], &[(0, 0)])]);
+        let sub = context1(&[10], &[set]);
+        let data = gsub_table(b"liga", LOOKUP_CHAIN_CONTEXT, &sub);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+        assert!(would(&data, &subs, b"liga", &[10, 11]));
+        assert!(!would(&data, &subs, b"liga", &[10, 12]));
+        // The same rule with a lookahead stops answering.
+        let set = rule_set_of(&[chained(&[], &[11], &[12], &[(0, 0)])]);
+        let sub = context1(&[10], &[set]);
+        let data = gsub_table(b"liga", LOOKUP_CHAIN_CONTEXT, &sub);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+        assert!(!would(&data, &subs, b"liga", &[10, 11]));
+    }
+
+    #[test]
+    fn a_feature_the_script_does_not_name_answers_no() {
+        // Two scripts, each naming its own feature; the lookup is only
+        // `latn`'s. A run of Arabic must not be told the font would ligate.
+        let data = gsub_scripts(
+            &[(b"arab", b"init"), (b"latn", b"liga")],
+            LOOKUP_LIGATURE,
+            &[&fi_subtable()],
+        );
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+        let latn = ScriptTags::exactly(*b"latn");
+        let arab = ScriptTags::exactly(*b"arab");
+        assert!(subs.would_substitute(&data, Some(latn), b"liga", &[10, 11], true));
+        assert!(!subs.would_substitute(&data, Some(arab), b"liga", &[10, 11], true));
     }
 
     const IGNORE_MARKS: u16 = 0x0008;

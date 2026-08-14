@@ -466,7 +466,12 @@ Roadmap:
   orders its 624 legacy kern pairs by the second glyph alone, and the two
   probe sequences find disjoint sets of 13 of them
   (`TD-FONT-BINARY-SEARCH-PROBES-IN-A-DIFFERENT-ORDER-FROM-EVERY-OTHER-ENGINE`).
-  `agree` 11828 → 11829, `misplaced` 20 → 19.
+  `agree` 11828 → 11829, `misplaced` 20 → 19. And the sweep now reports the
+  two mixed-script corpus strings apart from its verdict, since HarfBuzz
+  guesses one script for the whole buffer where we itemize — the Hebrew and
+  Arabic buckets were the itemizer, not the shaper, and each had cost a
+  diagnosis to dismiss (design-decisions §412). `misplaced` 19 → 13, and all
+  13 are the one Devanagari string.
   Next unblocked step is the rest of shaping: no Indic reordering
   (`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`), no language selection
   (`TD-FONT-IGNORES-LANGSYS-OVERRIDES`), and no device tables in

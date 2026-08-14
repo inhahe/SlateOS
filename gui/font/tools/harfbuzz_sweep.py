@@ -30,6 +30,11 @@ Disagreement is not automatically failure. Some of it is deliberate — the
 divergences are recorded in `design-decisions.md` §410 — and the value of the
 sweep is that the *set* of disagreements stays the one you expect. A new
 string appearing in the report is the signal.
+
+The `mixed` line is not a verdict at all: HarfBuzz guesses one script for the
+whole buffer where this crate itemizes into script runs, so for the two
+mixed-script strings the halves are answering different questions. See
+`MIXED`.
 """
 
 import argparse
@@ -73,6 +78,8 @@ CORPUS = [
     "1/2 3/4",
     "0O1lI",
     # Mixed scripts in one string, which is the case script runs exist for.
+    # Listed in `MIXED` below: the two halves are not answering the same
+    # question here, so their disagreements are reported apart from the rest.
     "hello \\u05e9\\u05dc\\u05d5\\u05dd world",
     "abc \\u0627\\u0644\\u0639\\u0631\\u0628\\u064a\\u0629 xyz",
     # Arabic on its own, where a face with Arabic features should use them.
@@ -107,6 +114,32 @@ CORPUS = [
     # Scriptless text, which selects the font's default features.
     "123 456",
 ]
+
+# Corpus entries the two halves cannot be asked the same question about.
+#
+# `hb_buffer_guess_segment_properties` picks *one* script and one direction for
+# the whole buffer, from the first strong character. This crate itemizes into
+# script runs and shapes each on its own. For a string that is entirely one
+# script the two agree by construction; for a mixed one they do not, and the
+# difference is the itemizer, not the shaper:
+#
+# * `hello <hebrew> world` guesses Latin, so HarfBuzz never selects `hebr` and
+#   never applies the lamed/vav kern that our Hebrew run does. Shaping the
+#   Hebrew word on its own agrees exactly, -10 and all.
+# * `abc <arabic> xyz` guesses Latin too, so the Arabic is shaped with no
+#   joining at all — HarfBuzz returns the isolated forms where we return the
+#   joined ones.
+#
+# Both are counted and reported, but apart: a difference here says nothing
+# about whether the shaper is right, and burying it with the ones that do is
+# how a real regression hides behind forty-nine lines of noise.
+MIXED = frozenset(
+    [
+        "hello \\u05e9\\u05dc\\u05d5\\u05dd world",
+        "abc \\u0627\\u0644\\u0639\\u0631\\u0628\\u064a\\u0629 xyz",
+    ]
+)
+assert MIXED <= set(CORPUS), "MIXED names a string that is not in the corpus"
 
 
 def unescape(line):
@@ -236,8 +269,9 @@ def theirs(path, strings):
         buf = hb.Buffer()
         buf.add_str(text)
         # The same thing this crate does not do: guess one script for the
-        # whole string. It is the divergence the mixed-script entries in the
-        # corpus are there to expose.
+        # whole string. For a single-script string that is the same answer an
+        # itemizer gives; for a mixed one it is not, which is why `MIXED`
+        # holds those two entries out of the verdict.
         buf.guess_segment_properties()
         rtl = str(buf.direction).lower().endswith("rtl")
         try:
@@ -340,6 +374,7 @@ def main():
     order_only = Counter()
     placed = Counter()
     differ = Counter()
+    mixed = Counter()
     examples = {}
     placed_examples = {}
     skipped = 0
@@ -357,7 +392,15 @@ def main():
             # the buffer was right-to-left, logical when it did not.
             logical, visual = got
             ours_here, ours_pos = visual if rtl else logical
-            if ours_here == expected:
+            if CORPUS[i] in MIXED:
+                # Not a verdict on the shaper — see `MIXED`. Counted as
+                # agreement only when the itemizer happened not to matter for
+                # this face, which is the interesting half of the answer.
+                if ours_here == expected and same_positions(ours_pos, expected_pos):
+                    agree += 1
+                else:
+                    mixed[CORPUS[i]] += 1
+            elif ours_here == expected:
                 if same_positions(ours_pos, expected_pos):
                     agree += 1
                 else:
@@ -390,6 +433,7 @@ def main():
     print(f"reordered {sum(order_only.values())}  (same glyphs, different order)")
     print(f"misplaced {sum(placed.values())}  (same glyphs, different positions)")
     print(f"differ   {sum(differ.values())}")
+    print(f"mixed    {sum(mixed.values())}  (itemizer, not shaper — see MIXED)")
     print(f"faces HarfBuzz would not open: {skipped}")
     if placed:
         print("\nsame glyphs in different places, by string:")
@@ -400,6 +444,10 @@ def main():
     if order_only:
         print("\nsame glyphs in a different order, by string:")
         for text, n in order_only.most_common():
+            print(f"  {n:5}  {text!r}")
+    if mixed:
+        print("\nmixed-script strings, where HarfBuzz guessed one script:")
+        for text, n in mixed.most_common():
             print(f"  {n:5}  {text!r}")
     if differ:
         print("\nby string, most disagreed first:")

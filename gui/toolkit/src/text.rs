@@ -96,6 +96,22 @@ pub fn ascent(size: f32, weight: FontWeightHint) -> f32 {
     with_font(size, weight, |font| font.metrics().ascent)
 }
 
+/// The x at which to draw `text` so that it is centred on `center`.
+///
+/// Centring is by far the most common thing callers wanted a width for — and
+/// the thing the old estimates got most visibly wrong, since the error in a
+/// guessed width is halved into the offset and so grows with the label. Having
+/// it here means an app centres text by saying so, rather than by re-deriving
+/// "measure, halve, subtract" and picking its own fudge factor on the way.
+pub fn center_x(text: &str, center: f32, size: f32, weight: FontWeightHint) -> f32 {
+    center - measure(text, size, weight) / 2.0
+}
+
+/// The x at which to draw `text` so that it ends at `right`.
+pub fn right_x(text: &str, right: f32, size: f32, weight: FontWeightHint) -> f32 {
+    right - measure(text, size, weight)
+}
+
 /// Width of a single `'0'`, for callers laying out columns of digits or
 /// treating text as a grid.
 ///
@@ -264,6 +280,38 @@ mod tests {
         assert_eq!(f(w * 0.6), 1, "right half of the first character");
         assert_eq!(f(w * 1.6), 2);
         assert_eq!(f(w * 100.0), 3, "past the end is the end");
+    }
+
+    #[test]
+    fn centering_puts_equal_space_on_both_sides() {
+        let text = "centred";
+        let (size, weight) = (16.0, FontWeightHint::Regular);
+        let x = center_x(text, 100.0, size, weight);
+        let left = x;
+        let right = x + measure(text, size, weight);
+        assert!(
+            (100.0 - left - (right - 100.0)).abs() < 0.01,
+            "{left}..{right} is not centred on 100"
+        );
+    }
+
+    #[test]
+    fn centering_is_not_biased_by_byte_length() {
+        // The bug the old estimates had: an accented label measured twice as
+        // wide, so centring it pushed it half a label to the left.
+        let (size, weight) = (16.0, FontWeightHint::Regular);
+        assert_eq!(
+            center_x("eee", 100.0, size, weight),
+            center_x("ééé", 100.0, size, weight)
+        );
+    }
+
+    #[test]
+    fn right_alignment_ends_where_asked() {
+        let text = "right";
+        let (size, weight) = (16.0, FontWeightHint::Regular);
+        let x = right_x(text, 250.0, size, weight);
+        assert!((x + measure(text, size, weight) - 250.0).abs() < 0.01);
     }
 
     #[test]

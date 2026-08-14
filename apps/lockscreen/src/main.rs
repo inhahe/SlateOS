@@ -23,6 +23,7 @@ use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, Mo
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Theme — Catppuccin Mocha palette
@@ -1121,10 +1122,7 @@ impl LockScreen {
         } else {
             self.time.format_hhmm()
         };
-        // Approximate centering: estimate character width at this font size.
-        let approx_char_width = CLOCK_FONT_SIZE * 0.55;
-        let time_width = time_str.len() as f32 * approx_char_width;
-        let time_x = cx - time_width / 2.0;
+        let time_x = text::center_x(&time_str, cx, CLOCK_FONT_SIZE, FontWeightHint::Light);
 
         tree.push(RenderCommand::Text {
             x: time_x,
@@ -1141,9 +1139,7 @@ impl LockScreen {
             && let Some(ref date) = self.date
         {
             let date_str = date.format_long();
-            let date_char_width = DATE_FONT_SIZE * 0.55;
-            let date_width = date_str.len() as f32 * date_char_width;
-            let date_x = cx - date_width / 2.0;
+            let date_x = text::center_x(&date_str, cx, DATE_FONT_SIZE, FontWeightHint::Regular);
             let date_y = CLOCK_Y + CLOCK_FONT_SIZE + 12.0;
 
             tree.push(RenderCommand::Text {
@@ -1160,9 +1156,7 @@ impl LockScreen {
         // "Click or press any key" hint at the bottom.
         let hint_text = "Press any key or click to unlock";
         let hint_font_size: f32 = 14.0;
-        let hint_char_width = hint_font_size * 0.55;
-        let hint_width = hint_text.len() as f32 * hint_char_width;
-        let hint_x = cx - hint_width / 2.0;
+        let hint_x = text::center_x(hint_text, cx, hint_font_size, FontWeightHint::Regular);
         let hint_y = self.screen_height - 80.0;
 
         tree.push(RenderCommand::Text {
@@ -1188,9 +1182,7 @@ impl LockScreen {
         // Display name.
         let user = self.active_user();
         let name = &user.display_name;
-        let name_char_width = DISPLAY_NAME_FONT_SIZE * 0.55;
-        let name_width = name.len() as f32 * name_char_width;
-        let name_x = cx - name_width / 2.0;
+        let name_x = text::center_x(name, cx, DISPLAY_NAME_FONT_SIZE, FontWeightHint::Bold);
         let name_y = avatar_y + AVATAR_DIAMETER + SECTION_GAP;
 
         tree.push(RenderCommand::Text {
@@ -1216,9 +1208,8 @@ impl LockScreen {
         // Error message.
         if self.show_error {
             let error_text = "Incorrect password";
-            let err_char_width = ERROR_FONT_SIZE * 0.55;
-            let err_width = error_text.len() as f32 * err_char_width;
-            let err_x = cx - err_width / 2.0 + shake_offset;
+            let err_x = text::center_x(error_text, cx, ERROR_FONT_SIZE, FontWeightHint::Regular)
+                + shake_offset;
             let err_y = field_y + PASSWORD_FIELD_HEIGHT + 12.0;
 
             tree.push(RenderCommand::Text {
@@ -1238,9 +1229,7 @@ impl LockScreen {
                 "Too many attempts. Try again in {}",
                 self.lockout.format_remaining()
             );
-            let lock_char_width = LOCKOUT_FONT_SIZE * 0.55;
-            let lock_width = lockout_msg.len() as f32 * lock_char_width;
-            let lock_x = cx - lock_width / 2.0;
+            let lock_x = text::center_x(&lockout_msg, cx, LOCKOUT_FONT_SIZE, FontWeightHint::Bold);
             let lock_y = field_y + PASSWORD_FIELD_HEIGHT + 32.0;
 
             tree.push(RenderCommand::Text {
@@ -1259,9 +1248,7 @@ impl LockScreen {
             && let Some(ref hint) = self.active_user().password_hint
         {
             let hint_str = format!("Hint: {hint}");
-            let hint_char_width = HINT_FONT_SIZE * 0.55;
-            let hint_width = hint_str.len() as f32 * hint_char_width;
-            let hint_x = cx - hint_width / 2.0;
+            let hint_x = text::center_x(&hint_str, cx, HINT_FONT_SIZE, FontWeightHint::Regular);
             let hint_y = field_y + PASSWORD_FIELD_HEIGHT + 52.0;
 
             tree.push(RenderCommand::Text {
@@ -1306,9 +1293,7 @@ impl LockScreen {
 
         // Initials text centered in the circle.
         let initials = &user.initials;
-        let char_width = font_size * 0.6;
-        let text_width = initials.len() as f32 * char_width;
-        let text_x = center_x - text_width / 2.0;
+        let text_x = text::center_x(initials, center_x, font_size, FontWeightHint::Bold);
         let text_y = top_y + (diameter - font_size) / 2.0;
 
         tree.push(RenderCommand::Text {
@@ -1454,9 +1439,7 @@ impl LockScreen {
         // "Switch user" label.
         let label = "Switch user";
         let label_font_size: f32 = 12.0;
-        let label_char_width = label_font_size * 0.55;
-        let label_width = label.len() as f32 * label_char_width;
-        let label_x = cx - label_width / 2.0;
+        let label_x = text::center_x(label, cx, label_font_size, FontWeightHint::Regular);
         let label_y = list_start_y - 20.0;
 
         tree.push(RenderCommand::Text {
@@ -1502,9 +1485,12 @@ impl LockScreen {
             );
 
             // Small avatar initials.
-            let initials_char_width = SMALL_AVATAR_FONT_SIZE * 0.6;
-            let initials_width = user.initials.len() as f32 * initials_char_width;
-            let initials_x = avatar_x + SMALL_AVATAR_DIAMETER / 2.0 - initials_width / 2.0;
+            let initials_x = text::center_x(
+                &user.initials,
+                avatar_x + SMALL_AVATAR_DIAMETER / 2.0,
+                SMALL_AVATAR_FONT_SIZE,
+                FontWeightHint::Bold,
+            );
             let initials_y = avatar_y
                 + (SMALL_AVATAR_DIAMETER - SMALL_AVATAR_FONT_SIZE) / 2.0;
 

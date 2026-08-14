@@ -138,10 +138,16 @@ def load_history(path):
 
 
 def append_record(path, record):
-    """Append one JSON-lines record, creating bench/ if needed."""
+    """Append one JSON-lines record, creating bench/ if needed.
+
+    `newline="\\n"` is not incidental: Python's text mode would translate to
+    CRLF on Windows, and this file is appended to by every benchmark boot and
+    committed to git. Mixed line endings in an append-only log are exactly the
+    kind of thing that produces phantom whole-file diffs later.
+    """
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "a", encoding="utf-8") as handle:
+        with open(path, "a", encoding="utf-8", newline="\n") as handle:
             handle.write(json.dumps(record, sort_keys=True) + "\n")
     except OSError as exc:
         print(f"bench-history: cannot write {path}: {exc}", file=sys.stderr)

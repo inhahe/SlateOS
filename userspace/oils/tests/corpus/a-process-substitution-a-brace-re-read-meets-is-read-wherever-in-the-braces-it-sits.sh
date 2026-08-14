@@ -20,13 +20,14 @@
 # `'` run and a backslash each shield it, and a subscript is stepped over whole
 # (and then fails as arithmetic, which is a different construct's complaint).
 #
-# One position is deliberately left out: an **arithmetic** fragment — the offset
-# and length of `${z:o:l}`. The scan reads it the same way and bash reports the
-# same three lines, but osh's arithmetic there diverges over `<` before any of
-# this (`${z:1<(2)}` is `bcdef` in bash and an `operand expected` in osh, with no
-# process substitution written at all), so a row here would be measuring that
-# instead. See known-issues
-# TD-OILS-A-LESS-THAN-IN-A-BRACE-ARITHMETIC-FRAGMENT-LOSES-ITS-LEFT-OPERAND.
+# The **bounds** of `${z:o:l}` are the position that shows the two halves are
+# separate questions. The scan walks a bound — it is not a subscript, nothing
+# steps over it — so the read happens and a body that will not parse gives this
+# file's three lines. But the *expansion* is `expand_arith_string`'s, under
+# `Q_DOUBLE_QUOTES|Q_ARITH`, which is exactly what stops `expand_word_internal`
+# performing one (subst.c:11079). So a bound is read like a pattern and
+# performed like an operand, and a well-formed `<( … )` in one reaches the
+# arithmetic evaluator as the characters it was written with.
 #
 # Verified against bash 5.2.37.
 
@@ -56,6 +57,23 @@ x="A\${z/p/'<(fi)'}B"; e 'echo "${x@P}"'
 e 'x='\''A${z#"<(fi)"}B'\''; echo "${x@P}"'
 e 'x='\''A${z#\<(fi)}B'\''; echo "${x@P}"'
 e 'x='\''A${z[<(fi)]#q}B'\''; echo "${x@P}"'
+x="A\${z:'<(fi)'}B"; e 'echo "${x@P}"'
+e 'x='\''A${z:"<(fi)"}B'\''; echo "${x@P}"'
+e 'x='\''A${z:\<(fi)}B'\''; echo "${x@P}"'
+
+echo "=== a bound is walked as well, being no subscript ==="
+e 'x='\''A${z:<(fi)}B'\''; echo "${x@P}"'
+e 'x='\''A${z:0:<(fi)}B'\''; echo "${x@P}"'
+e 'x='\''A${z:>(fi)}B'\''; echo "${x@P}"'
+e 'a=(q w); x='\''A${a[@]:<(fi)}B'\''; echo "${x@P}"'
+e 'x='\''A${@:<(fi)}B'\''; echo "${x@P}"'
+e 'x='\''A${z:<(fi)}B'\''; echo ${x@P}'
+e 'PS4='\''A${z:<(fi)}B'\''; set -x; :; set +x'
+
+echo "=== …and read is all it is: the evaluator meets the characters ==="
+e 'z=abcdef; echo "${z:<(echo 1)}"'
+e 'z=abcdef; echo "${z:0:<(echo 1)}"'
+e 'z=abcdef; x='\''${z:<(echo 1)}'\''; echo "${x@P}"'
 
 echo "=== read and performed, unlike the operand — shape only, never the path ==="
 e 'z=Z; x='\''A${z/Z/<(echo hi)}B'\''; y=${x@P}; case $y in A?*B) echo shaped;; *) echo "other:$y";; esac'

@@ -6987,12 +6987,12 @@ fn parse_slice_bounds(
     let length = match len {
         Some((s, len_line)) => {
             let text = bytes::from_chars(s.iter().copied());
-            Some(Box::new(word_subscript_from_source_at(&text, opts, q.as_pattern(), len_line)?))
+            Some(Box::new(word_bound_from_source_at(&text, opts, q.as_pattern(), len_line)?))
         }
         None => None,
     };
     let off_text = bytes::from_chars(off.iter().copied());
-    let offset = word_subscript_from_source_at(&off_text, opts, q.as_pattern(), line)?;
+    let offset = word_bound_from_source_at(&off_text, opts, q.as_pattern(), line)?;
     Ok(Some((Box::new(offset), length)))
 }
 
@@ -7852,17 +7852,23 @@ pub(crate) fn word_verbatim_from_source_at(
     verbatim_word_at(s, opts, q, line, Frag::Word)
 }
 
-/// Which of the two verbatim readings a fragment gets. They differ in one
-/// thing: whether a `<( … )` written in the fragment is performed. See
+/// Which of the three verbatim readings a fragment gets. They differ in what a
+/// `<( … )` written in the fragment means — whether it is *performed*, and
+/// whether the `${ … }` scan even *read* it. See
 /// [`crate::lexer::lex_subscript_verbatim`].
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Frag {
     /// A pattern, a replacement or a bare operand — expanded as a word, so a
     /// process substitution in it runs.
     Word,
-    /// A subscript or a substring bound — expanded as an arithmetic string
-    /// (`Q_DOUBLE_QUOTES|Q_ARITH`), so one does not.
+    /// A subscript — expanded as an arithmetic string
+    /// (`Q_DOUBLE_QUOTES|Q_ARITH`), so one does not run; and stepped over whole
+    /// by the `${ … }` scan, so one is not read either.
     Arith,
+    /// A substring bound — [`Frag::Arith`] except that the scan does reach it,
+    /// so a process substitution here is read for its extent. See
+    /// [`crate::lexer::Verbatim::Bound`].
+    Bound,
 }
 
 fn verbatim_word_at(
@@ -7884,6 +7890,7 @@ fn verbatim_word_at(
     let read = match frag {
         Frag::Word => crate::lexer::lex_word_verbatim_opts,
         Frag::Arith => crate::lexer::lex_subscript_verbatim,
+        Frag::Bound => crate::lexer::lex_bound_verbatim,
     };
     let mut segs = read(s, lex_opts, q.read_ctx()).map_err(|e| ParseError::new(&e.msg))?;
     map_frag_segs(&mut segs, line);
@@ -7947,6 +7954,21 @@ pub(crate) fn word_subscript_from_source_at(
     line: u32,
 ) -> Result<Word, ParseError> {
     let mut w = verbatim_word_at(s, opts, q, line, Frag::Arith)?;
+    attach_subscript_reads(&mut w, opts, q, line)?;
+    Ok(w)
+}
+
+/// [`word_subscript_from_source_at`] for the other arithmetic fragment, a
+/// **substring bound**. The two differ only in whether the `${ … }` scan
+/// reached the text — see [`crate::lexer::Verbatim::Bound`] — and a `' … '` run
+/// in either is read the same way, the scan having stepped over it in both.
+pub(crate) fn word_bound_from_source_at(
+    s: BStr<'_>,
+    opts: ParseOpts,
+    q: Quoting,
+    line: u32,
+) -> Result<Word, ParseError> {
+    let mut w = verbatim_word_at(s, opts, q, line, Frag::Bound)?;
     attach_subscript_reads(&mut w, opts, q, line)?;
     Ok(w)
 }

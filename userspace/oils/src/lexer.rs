@@ -2420,13 +2420,33 @@ enum Verbatim {
     /// bare, so `'…'` quotes and every backslash escapes the character after it,
     /// and a `<( … )` in it is performed.
     Bare,
-    /// A subscript or a substring bound — text the arithmetic evaluator will
-    /// read. Exactly [`Verbatim::Bare`], except that a `<( … )` is *not*
-    /// performed: `arrayfunc.c` expands both with `Q_DOUBLE_QUOTES|Q_ARITH`, and
-    /// the quoting flag is what `expand_word_internal` branches on
+    /// A subscript — text the arithmetic evaluator will read. Exactly
+    /// [`Verbatim::Bare`], except that a `<( … )` is *not* performed:
+    /// `arrayfunc.c` expands both with `Q_DOUBLE_QUOTES|Q_ARITH`, and the
+    /// quoting flag is what `expand_word_internal` branches on
     /// (subst.c:11079). So `${a[<(echo 1)]}` is an arithmetic error naming the
     /// nine characters, not one naming a `/dev/fd/N`.
     Arith,
+    /// A **substring bound** — the other fragment the arithmetic evaluator
+    /// reads, and [`Verbatim::Arith`] in every respect but one: the `${ … }`
+    /// scan *reaches* it, so a `<( … )` here is read for its extent even though
+    /// it is never performed.
+    ///
+    /// That is the whole of the difference, and it is not about arithmetic at
+    /// all — it is about which characters the scan walked. A subscript is
+    /// stepped over whole (`skip_matched_pair` from the `[`), so the body
+    /// inside one is never offered to `extract_command_subst`; a bound lies in
+    /// the open. Measured against bash 5.2.37 on text no parser read:
+    ///
+    /// | written | bash |
+    /// |---|---|
+    /// | `x='A${z:0:<(fi)}B'; echo "${x@P}"` | the parse diagnostics, then `bad substitution`, then the text |
+    /// | `x='A${z[<(fi)]}B'; echo "${x@P}"` | `<(fi): operand expected`, then `AB` |
+    ///
+    /// So the row this mode gets is [`Verbatim::Dquote`]'s, not
+    /// [`Verbatim::Bare`]'s: read, and kept as the characters it was written
+    /// with.
+    Bound,
     /// The *replacement* of `${var/pat/repl}`: as [`Verbatim::Bare`], except that
     /// `\&` and `\\` keep their backslash for the later `&`-scan.
     Replacement,
@@ -2478,9 +2498,9 @@ pub fn lex_word_verbatim_opts(
     lx.read_word_verbatim(Verbatim::Bare, &[])
 }
 
-/// [`lex_word_verbatim_opts`] for an **array subscript** or a **substring
-/// bound** — a fragment read exactly as a pattern is, except that a `<( … )`
-/// written in it is not performed. See [`Verbatim::Arith`].
+/// [`lex_word_verbatim_opts`] for an **array subscript** — a fragment read
+/// exactly as a pattern is, except that a `<( … )` written in it is neither
+/// performed nor read. See [`Verbatim::Arith`].
 ///
 /// # Errors
 /// Returns [`LexError`] on an unterminated quote or substitution.
@@ -2492,6 +2512,23 @@ pub fn lex_subscript_verbatim(
     let mut lx = Lexer::new(src, opts);
     lx.apply_ctx(ctx);
     lx.read_word_verbatim(Verbatim::Arith, &[])
+}
+
+/// [`lex_subscript_verbatim`] for a **substring bound**, the other fragment the
+/// arithmetic evaluator reads — same in everything but that a `<( … )` in it is
+/// read for its extent, the `${ … }` scan having reached it. See
+/// [`Verbatim::Bound`].
+///
+/// # Errors
+/// Returns [`LexError`] on an unterminated quote or substitution.
+pub fn lex_bound_verbatim(
+    src: BStr<'_>,
+    opts: ParseOpts,
+    ctx: ReadCtx,
+) -> Result<Vec<Seg>, LexError> {
+    let mut lx = Lexer::new(src, opts);
+    lx.apply_ctx(ctx);
+    lx.read_word_verbatim(Verbatim::Bound, &[])
 }
 
 /// Lex `src` as if it were the body of a double-quoted string that runs to the
@@ -5282,9 +5319,10 @@ impl Lexer {
                         Err(e) => return Err(e.at(self.eof_line())),
                     }
                 }
-                // The same construct in a **double-quoted operand**, where the
-                // expansion above declines it — but where the `${ … }` scan
-                // that produced this text still *read* it.
+                // The same construct in a **double-quoted operand** or a
+                // **substring bound**, where the expansion above declines it —
+                // but where the `${ … }` scan that produced this text still
+                // *read* it.
                 // `extract_dollar_brace_string` names `$(`, `<(` and `>(` in
                 // one row and hands each to `extract_command_subst`
                 // (subst.c:1881-1950), so the body is parsed for its extent
@@ -5311,8 +5349,12 @@ impl Lexer {
                 // syntax error raised. `in_run` is the run's own bookkeeping
                 // from the second `'` arm above; `self.here_text` is true inside
                 // one, so it cannot stand in for this.
+                // A [`Verbatim::Bound`] needs no `in_run` guard of its own —
+                // there a `'` really is a quote, so the first `'` arm has
+                // already consumed the run whole and this row never meets its
+                // interior — but the condition holds trivially either way.
                 '<' | '>'
-                    if mode == Verbatim::Dquote
+                    if matches!(mode, Verbatim::Dquote | Verbatim::Bound)
                         && !in_run
                         && self.here_text
                         && self.at(self.pos + 1) == Some('(') =>

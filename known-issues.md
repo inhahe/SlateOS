@@ -59088,7 +59088,7 @@ something that exists, or what a `cat` of it reads.
 **How it was found:** implementing part (A) — the eager parse and re-print of a
 process substitution met by a `${ … }` body scan.
 
-### [B] TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN. bash's `brace_gobbler` and its `${x@P}` re-read each meet a `<(` osh's do not — 2026-08-14 — ⚠️ OPEN (both halves ✅ FIXED 2026-08-14; one residue remains — the arithmetic fragment, below)
+### [B] TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN. bash's `brace_gobbler` and its `${x@P}` re-read each meet a `<(` osh's do not — 2026-08-14 — ✅ FIXED 2026-08-14 (both halves, and the arithmetic-fragment residue)
 
 Two residues of TD-OILS-A-PROCESS-SUBSTITUTION-IN-A-BRACE-BODY-IS-NEVER-PERFORMED
 (above), left after both halves of it were done. Each is a *second* scan of the
@@ -59260,7 +59260,8 @@ and only the row is missing.
   (unbraced text, `" … "`, `' … '`, backslash), the stepped-over subscript, and
   the `PS4` spelling of the same re-read.
 
-* **✅ FIXED 2026-08-14 for every position but the arithmetic one.** The row
+* **✅ FIXED 2026-08-14** (every position but the arithmetic one; that one
+  closed later the same day, at the end of this bullet)**.** The row
   was wired for the double-quoted **operand** only, and bash's scan reads the
   whole `${ … }` body — it walks characters and knows nothing of the `#`, `/`
   or `^^` it has already passed — so every other fragment wanted the same row:
@@ -59302,12 +59303,34 @@ and only the row is missing.
   `a-process-substitution-a-brace-re-read-meets-is-read-wherever-in-the-braces-it-sits.sh`,
   21 rows, IDENTICAL against bash 5.2.37.
 
-  **⚠️ Still open: the arithmetic fragment** — the offset and length of
-  `${z:o:l}`, which is `Verbatim::Arith` and has no `<(` row. It is left for
-  its own fix because osh diverges there over `<` before any process
-  substitution is written at all (`${z:1<(2)}` is `bcdef` in bash and an
-  `operand expected` in osh), so fixing the row alone would not close the gap.
-  See TD-OILS-A-LESS-THAN-IN-A-BRACE-ARITHMETIC-FRAGMENT-LOSES-ITS-LEFT-OPERAND.
+  **✅ The arithmetic fragment, 2026-08-14.** Deferred at first, because osh
+  diverged over `<` in a bound before any process substitution was written at
+  all (`${z:1<(2)}` is `bcdef` in bash and was an `operand expected` in osh);
+  that was fixed as
+  TD-OILS-A-LESS-THAN-IN-A-BRACE-ARITHMETIC-FRAGMENT-LOSES-ITS-LEFT-OPERAND,
+  and this row followed.
+
+  It was **not** simply `Verbatim::Arith`'s row, as the deferral assumed. A
+  subscript shares that mode and must *not* get it: bash's scan steps over a
+  subscript whole (`skip_matched_pair` from the `[`), so `${z[<(fi)]}` never
+  offers its body to `extract_command_subst` and is an `operand expected` —
+  which osh already matched. A bound is walked in the open. So the mode split
+  in two: `Verbatim::Bound` / `Frag::Bound`, reached by `lex_bound_verbatim`
+  and `parser::word_bound_from_source_at`, identical to `Arith` in every
+  respect but that it takes `Dquote`'s unread-`<(` arm. That is the whole
+  change — the arm was already written for the operand, and the read/perform
+  split it produces (`SubBody::Unread`) is exactly a bound's: read for its
+  extent by the scan, never performed, because `Q_DOUBLE_QUOTES|Q_ARITH` is
+  what stops `expand_word_internal` (subst.c:11079).
+
+  No interp-side work was needed: `unparse::nested_parts` already classifies
+  `ParamSubstr`/`ArraySlice` bounds as `Nested::Operand`, so
+  `Shell::brace_scanned_subs_slice` was already descending into them.
+
+  **Verified:** 14 further rows in the same corpus case (the bound in offset
+  and length position, `${a[@]:…}` and `${@:…}`, the `@P` and `PS4` spellings,
+  the three quotings that shield it, and the well-formed `${z:<(echo 1)}` that
+  reaches the evaluator as characters), IDENTICAL against bash 5.2.37.
 
 **How it was found:** implementing the entry above.
 
@@ -59450,16 +59473,19 @@ Verified by the corpus case
 `a-slice-cuts-its-bounds-with-skiparith-and-reads-each-as-arithmetic.sh`
 (75 rows, IDENTICAL), the lib suite and a full sweep.
 
-**Unblocked, not yet done:** the arithmetic-fragment row named under "Blocks"
-above is now the *only* thing left of it. It is a separate row from this
-entry's: `${z:1<(2)}` evaluates correctly now, but `x='A${z:0:<(fi)}B'; echo
-"${x@P}"` still prints `AB` where bash reads the body for its extent and
-reports `bad substitution`. The reason it is not simply the `Verbatim::Arith`
-row this entry's title suggested is that the *subscript* shares that mode and
-must **not** get it: bash's `${ … }` scan steps over a subscript whole
+**Unblocked, and then done (same day):** the arithmetic-fragment row named
+under "Blocks" above was the only thing left of
+TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN,
+and it is now closed there. It was a separate row from this entry's — after
+this fix `${z:1<(2)}` evaluated correctly but `x='A${z:0:<(fi)}B'; echo
+"${x@P}"` still printed `AB`, where bash reads the body for its extent and
+reports `bad substitution`. It turned out **not** to be the `Verbatim::Arith`
+row this entry's title suggested, because the *subscript* shares that mode and
+must not get it: bash's `${ … }` scan steps over a subscript whole
 (`skip_matched_pair`), so `${z[<(fi)]}` never offers its body to the scan and
-is an `operand expected` in bash — which osh already matches. A bound is not
-stepped over, so only a bound wants the row. `Frag::Arith` has to split in two.
+is an `operand expected` in bash — which osh already matched. Only a bound is
+walked in the open, so `Frag::Arith` split in two and the new `Frag::Bound`
+took the row. See that entry for the change.
 
 ### [B] TD-OILS-AN-UNBALANCED-PAREN-IN-A-SLICES-BOUNDS-IS-AN-ARITHMETIC-ERROR-NOT-A-BAD-SUBSTITUTION
 

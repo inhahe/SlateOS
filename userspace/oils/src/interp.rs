@@ -12511,7 +12511,7 @@ impl Shell {
                 }
                 // Double quotes: expand (params/cmd-sub run) but the result is
                 // matched literally, per bash.
-                WordPart::DoubleQuoted(parts) => {
+                WordPart::DoubleQuoted { parts, .. } => {
                     // Each word the quoted list broke off is escaped on its own:
                     // the break is between them, not inside either.
                     let items: Vec<Vec<EChar>> = self
@@ -27553,7 +27553,7 @@ impl Shell {
                     push_chars(&mut cur, s.as_bytes(), true);
                     started = true;
                 }
-                WordPart::DoubleQuoted(parts) => {
+                WordPart::DoubleQuoted { parts, .. } => {
                     let items = quoted_echars(&self.cond_dquote_items(parts));
                     lay_out_fields(&items, &mut broken, &mut cur, &mut open);
                     started = true;
@@ -28089,7 +28089,7 @@ impl Shell {
                     }
                     open = true;
                 }
-                WordPart::DoubleQuoted(parts) => {
+                WordPart::DoubleQuoted { parts, .. } => {
                     // `"${arr[@]}"` (and `"$@"`) expand to one field per element,
                     // preserving embedded whitespace; empty arrays yield no field.
                     // `"${!arr[@]}"` does the same over the keys/indices.
@@ -28617,9 +28617,10 @@ impl Shell {
             }
             let WordPart::Literal(text) = part else {
                 out.push(match part {
-                    WordPart::DoubleQuoted(inner) => {
-                        WordPart::DoubleQuoted(self.arith_subscript_parts(inner))
-                    }
+                    WordPart::DoubleQuoted { parts: inner, closed } => WordPart::DoubleQuoted {
+                        parts: self.arith_subscript_parts(inner),
+                        closed: *closed,
+                    },
                     other => other.clone(),
                 });
                 cur = pe;
@@ -28808,7 +28809,7 @@ impl Shell {
                     cur.extend_from_slice(t.as_bytes());
                     at_tilde_pos = false;
                 }
-                WordPart::DoubleQuoted(parts) => {
+                WordPart::DoubleQuoted { parts, .. } => {
                     cur.extend_from_slice(&self.expand_double_quoted(parts));
                     at_tilde_pos = false;
                 }
@@ -28875,7 +28876,7 @@ impl Shell {
                     out.extend_from_slice(t.as_bytes());
                     at_tilde_pos = false;
                 }
-                WordPart::DoubleQuoted(parts) => {
+                WordPart::DoubleQuoted { parts, .. } => {
                     out.extend_from_slice(&self.expand_double_quoted(parts));
                     at_tilde_pos = false;
                 }
@@ -29138,7 +29139,7 @@ impl Shell {
             match part {
                 WordPart::Literal(s) => self.push_literal_annotated(&mut buf, s, idx == 0),
                 WordPart::SingleQuoted { text, .. } => push_chars(&mut buf, text.as_bytes(), true),
-                WordPart::DoubleQuoted(parts) => {
+                WordPart::DoubleQuoted { parts, .. } => {
                     let items = quoted_echars(&self.cond_dquote_items(parts));
                     lay_out_fields(&items, &mut broken, &mut buf, &mut open);
                 }
@@ -29441,7 +29442,7 @@ impl Shell {
                     // Single-quoted: fully literal, including any `&`.
                     out.extend(bytes::chars(s.as_bytes()).map(ReplTok::Lit));
                 }
-                WordPart::DoubleQuoted(parts) => {
+                WordPart::DoubleQuoted { parts, .. } => {
                     // Double-quoted: the expansion is quoted, so `&` is literal.
                     let s = self.expand_double_quoted(parts);
                     out.extend(bytes::chars(s.as_bytes()).map(ReplTok::Lit));
@@ -29564,7 +29565,7 @@ impl Shell {
         // the scan would be *inside*, and the substitutions in them are read
         // where they stand — by [`Self::command_sub_body_inner`], which answers
         // the string-level rule instead.
-        if matches!(part, WordPart::DoubleQuoted(_)) {
+        if matches!(part, WordPart::DoubleQuoted { .. }) {
             return false;
         }
         // Nor is a `$(( … ))` or a `$[ … ]`. Its own arm reads it —
@@ -29886,7 +29887,7 @@ impl Shell {
             // `if (c == '"') { dquote = !dquote; i++; continue; }` — the quote
             // itself never reaches `temp`, and what it held is scanned by the
             // same loop with `dquote` raised.
-            if let WordPart::DoubleQuoted(inner) = p {
+            if let WordPart::DoubleQuoted { parts: inner, .. } = p {
                 Self::stripdq_quoted_text(inner, &mut out);
             } else {
                 out.push_str(&crate::unparse::parts_src(std::slice::from_ref(p)));
@@ -29947,7 +29948,7 @@ impl Shell {
                 WordPart::Literal(_) => {}
                 // A `"` is stripped and what it held is scanned by the same
                 // loop, which is the state this walk is already in.
-                WordPart::DoubleQuoted(inner) => Self::rhs_scanned_subs(inner, out),
+                WordPart::DoubleQuoted { parts: inner, .. } => Self::rhs_scanned_subs(inner, out),
                 // The `${` half of the same row hands the brace to
                 // `extract_dollar_brace_string` — the brace scan, entered fresh,
                 // so its single-quote state neither inherits nor leaks.
@@ -30476,7 +30477,7 @@ impl Shell {
         // Outside one the `"` really does open `skip_double_quoted`, which
         // reads a `$(` but knows nothing of single quotes — so the run starts
         // fresh and leaves the outer state as it found it.
-        let dq = matches!(part, WordPart::DoubleQuoted(_)) && !q.squote;
+        let dq = matches!(part, WordPart::DoubleQuoted { .. }) && !q.squote;
         let saved = dq.then(|| std::mem::replace(q, ScanQuote { squote: false, dquote: true }));
         for (kind, parts) in crate::unparse::nested_parts(part) {
             if kind == crate::unparse::Nested::Index {
@@ -31064,7 +31065,7 @@ impl Shell {
             WordPart::TokenText(raw) => raw.clone(),
             // Literal/quoted handled by callers.
             WordPart::Literal(s) | WordPart::SingleQuoted { text: s, .. } => s.clone(),
-            WordPart::DoubleQuoted(parts) => self.expand_double_quoted(parts),
+            WordPart::DoubleQuoted { parts, .. } => self.expand_double_quoted(parts),
             // Not handled by callers: the text this produces is `add_string`ed
             // into the word being built, so it joins as ordinary *unquoted*
             // characters — which is what every walk's fall-through arm does with
@@ -35460,7 +35461,7 @@ impl Shell {
                         out.push(b'\'');
                     }
                 }
-                WordPart::DoubleQuoted(parts) => {
+                WordPart::DoubleQuoted { parts, .. } => {
                     let s = self.expand_double_quoted(parts);
                     out.extend_from_slice(&s);
                 }
@@ -40101,6 +40102,7 @@ impl Shell {
                 parts: vec![WordPart::SingleQuoted {
                     text: a.clone(),
                     escaped: false,
+                    closed: true,
                     parts: None,
                 }],
             });
@@ -44305,6 +44307,7 @@ impl Shell {
                 parts: vec![WordPart::SingleQuoted {
                     text: value,
                     escaped: false,
+                    closed: true,
                     parts: None,
                 }],
             }),
@@ -57897,7 +57900,7 @@ fn part_has_quoted_at(part: &WordPart, quoted: bool) -> bool {
         return true;
     }
     match part {
-        WordPart::DoubleQuoted(inner) => parts_have_quoted_at(inner, true),
+        WordPart::DoubleQuoted { parts: inner, .. } => parts_have_quoted_at(inner, true),
         // The `:-`/`:+` operand, whose word is expanded where the substitution
         // stands. Only these two carry a word that makes fields of its own; a
         // pattern or a subscript is text by the time it matters.
@@ -58724,7 +58727,7 @@ fn word_is_all_quoted(w: &Word) -> bool {
     !w.parts.is_empty()
         && w.parts
             .iter()
-            .all(|p| matches!(p, WordPart::SingleQuoted { .. } | WordPart::DoubleQuoted(_)))
+            .all(|p| matches!(p, WordPart::SingleQuoted { .. } | WordPart::DoubleQuoted { .. }))
 }
 
 /// Case-aware glob match whose pattern carries per-character quoting

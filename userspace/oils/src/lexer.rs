@@ -643,13 +643,26 @@ pub enum Seg {
     /// backslash-escaped character, which means exactly the same thing
     /// (`a\*b` ≡ `a'*'b`).
     ///
-    /// The `bool` is `true` for the backslash spelling. The two are
+    /// `escaped` is `true` for the backslash spelling. The two are
     /// interchangeable during expansion, but bash prints a stored function
     /// body back in whichever form the source wrote (`declare -f`), so the
     /// distinction has to survive lexing.
-    Sq(Str, bool),
+    ///
+    /// `closed` records that the source really wrote the mate — see
+    /// [`Seg::Dq`]. It is meaningless, and always `true`, for the backslash
+    /// spelling, which has no quotes to match.
+    Sq { text: Str, escaped: bool, closed: bool },
     /// Double-quoted run of fragments.
-    Dq(Vec<Seg>),
+    ///
+    /// The `bool` says whether the closing `"` was in the source. It normally
+    /// was — reaching the end of the input first is an error. But a run read
+    /// under [`ParseOpts::tolerant`] is one `string_extract_double_quoted` is
+    /// walking over a *finished word* rather than a stream, and there a `"`
+    /// with no mate is not an error at all: the walk simply ends where the
+    /// text does. Whoever prints the word back has to know which happened, or
+    /// it invents a byte the source never held — see
+    /// [`crate::unparse::part_src`].
+    Dq(Vec<Seg>, bool),
     /// `$name` / `$1` / `$?` … a bare parameter reference.
     Param(String),
     /// `${ … }` — raw inner text, parsed later, plus the 1-based source line the
@@ -2575,7 +2588,8 @@ pub fn lex_bound_verbatim(
 pub fn lex_dquote_body(src: BStr<'_>) -> Result<Vec<Seg>, LexError> {
     let mut lx = Lexer::new(src, ParseOpts::default());
     lx.apply_ctx(ReadCtx::VALUE);
-    lx.read_double_quote_until(false)
+    // The run has no quotes to be short of: it is the whole text.
+    Ok(lx.read_double_quote_until(false)?.0)
 }
 
 /// Lex `src` the way bash's **brace scan** walks it, rather than the way the
@@ -2600,7 +2614,7 @@ pub fn lex_brace_scan_body(src: BStr<'_>) -> Result<Vec<Seg>, LexError> {
     let mut lx = Lexer::new(src, ParseOpts::default());
     lx.apply_ctx(ReadCtx::VALUE);
     lx.brace_scan = true;
-    lx.read_double_quote_until(false)
+    Ok(lx.read_double_quote_until(false)?.0)
 }
 
 /// Lex the *replacement* of `${var/pat/repl}` verbatim, like
@@ -3819,7 +3833,7 @@ fn walk_seg_lines(segs: &mut [Seg], f: &dyn Fn(&mut u32)) {
         match seg {
             Seg::CmdSub(_, close, _) => f(close),
             Seg::ProcSub(_, _, open, _) => f(open),
-            Seg::Dq(inner) => walk_seg_lines(inner, f),
+            Seg::Dq(inner, _) => walk_seg_lines(inner, f),
             _ => {}
         }
     }
@@ -5089,14 +5103,14 @@ impl Lexer {
                 '\'' => {
                     flush_lit(&mut segs, &mut lit);
                     self.pos += 1;
-                    let s = self.read_single_quote()?;
-                    segs.push(Seg::Sq(s, false));
+                    let (text, closed) = self.read_single_quote()?;
+                    segs.push(Seg::Sq { text, escaped: false, closed });
                 }
                 '"' => {
                     flush_lit(&mut segs, &mut lit);
                     self.pos += 1;
-                    let inner = self.read_double_quote()?;
-                    segs.push(Seg::Dq(inner));
+                    let (inner, closed) = self.read_double_quote()?;
+                    segs.push(Seg::Dq(inner, closed));
                 }
                 '`' => {
                     flush_lit(&mut segs, &mut lit);
@@ -5192,8 +5206,8 @@ impl Lexer {
                 '\'' if mode != Verbatim::Dquote => {
                     flush_lit(&mut segs, &mut lit);
                     self.pos += 1;
-                    let s = self.read_single_quote()?;
-                    segs.push(Seg::Sq(s, false));
+                    let (text, closed) = self.read_single_quote()?;
+                    segs.push(Seg::Sq { text, escaped: false, closed });
                 }
                 // …but bash's *parser* never read what lies between one and its
                 // mate. A `${ … }` is a grouping construct (`open != close`), so
@@ -5261,7 +5275,8 @@ impl Lexer {
                     let inner = self.read_double_quote();
                     self.brace_scan = scan;
                     self.opts.tolerant = outer;
-                    segs.push(Seg::Dq(inner?));
+                    let (inner, closed) = inner?;
+                    segs.push(Seg::Dq(inner, closed));
                 }
                 '`' => {
                     flush_lit(&mut segs, &mut lit);
@@ -5287,7 +5302,7 @@ impl Lexer {
                             if let Some(next) = next {
                                 // Quoted, so the character it protected is not
                                 // read again as a substitution or a quote.
-                                segs.push(Seg::Sq(next.to_str(), true));
+                                segs.push(Seg::Sq { text: next.to_str(), escaped: true, closed: true });
                             }
                         }
                         // Not an escape: the backslash stands for itself, and the
@@ -5335,7 +5350,7 @@ impl Lexer {
                             // pattern back as written. Same rationale and
                             // representation as in `read_word_inner`.
                             flush_lit(&mut segs, &mut lit);
-                            segs.push(Seg::Sq(next.to_str(), true));
+                            segs.push(Seg::Sq { text: next.to_str(), escaped: true, closed: true });
                         }
                     }
                 }
@@ -5718,14 +5733,14 @@ impl Lexer {
                 '\'' => {
                     flush_lit(segs, &mut lit);
                     self.pos += 1;
-                    let s = self.read_single_quote()?;
-                    segs.push(Seg::Sq(s, false));
+                    let (text, closed) = self.read_single_quote()?;
+                    segs.push(Seg::Sq { text, escaped: false, closed });
                 }
                 '"' => {
                     flush_lit(segs, &mut lit);
                     self.pos += 1;
-                    let inner = self.read_double_quote()?;
-                    segs.push(Seg::Dq(inner));
+                    let (inner, closed) = self.read_double_quote()?;
+                    segs.push(Seg::Dq(inner, closed));
                 }
                 '`' => {
                     flush_lit(segs, &mut lit);
@@ -5771,7 +5786,7 @@ impl Lexer {
                             next.push_to(&mut lit);
                         } else {
                             flush_lit(segs, &mut lit);
-                            segs.push(Seg::Sq(next.to_str(), true));
+                            segs.push(Seg::Sq { text: next.to_str(), escaped: true, closed: true });
                         }
                     } else {
                         self.note_continuation();
@@ -5803,21 +5818,23 @@ impl Lexer {
         Ok(())
     }
 
-    fn read_single_quote(&mut self) -> Result<Str, LexError> {
+    /// The run's text, and whether the closing `'` was there to end it — see
+    /// [`Seg::Sq`]'s `closed`.
+    fn read_single_quote(&mut self) -> Result<(Str, bool), LexError> {
         let open = self.cur_line();
         let mut s = Str::new();
         loop {
             match self.peek() {
                 Some('\'') => {
                     self.pos += 1;
-                    return Ok(s);
+                    return Ok((s, true));
                 }
                 Some(_) => self.take_into(&mut s),
                 // `string_extract_single_quoted` stops at the end of what it
                 // was given and says nothing; only the parser, still hunting
                 // the end of the word, calls that an error. See
                 // [`ParseOpts::tolerant`].
-                None if self.opts.tolerant => return Ok(s),
+                None if self.opts.tolerant => return Ok((s, false)),
                 None => return Err(eof_matching('\'').at(open)),
             }
         }
@@ -5866,7 +5883,7 @@ impl Lexer {
         }
     }
 
-    fn read_double_quote(&mut self) -> Result<Vec<Seg>, LexError> {
+    fn read_double_quote(&mut self) -> Result<(Vec<Seg>, bool), LexError> {
         self.read_double_quote_until(true)
     }
 
@@ -5882,7 +5899,11 @@ impl Lexer {
     /// end of the input. That is `string_extract_double_quoted` itself, which
     /// is handed a finished word rather than a stream and has nothing to be
     /// short of.
-    fn read_double_quote_until(&mut self, closed: bool) -> Result<Vec<Seg>, LexError> {
+    ///
+    /// The returned flag is whether a `"` really ended the run, which is the
+    /// only thing that tells that third shape apart from the second. See
+    /// [`Seg::Dq`].
+    fn read_double_quote_until(&mut self, closed: bool) -> Result<(Vec<Seg>, bool), LexError> {
         let open = self.cur_line();
         let mut segs: Vec<Seg> = Vec::new();
         let mut lit = Str::new();
@@ -5896,13 +5917,13 @@ impl Lexer {
                     return Err(eof_matching('"').at(open).eager_bodies(eager_bodies_in(&segs)));
                 }
                 flush_lit(&mut segs, &mut lit);
-                return Ok(segs);
+                return Ok((segs, false));
             };
             match c {
                 '"' if closed => {
                     self.pos += 1;
                     flush_lit(&mut segs, &mut lit);
-                    return Ok(segs);
+                    return Ok((segs, true));
                 }
                 '\\' => {
                     self.pos += 1;
@@ -5920,7 +5941,7 @@ impl Lexer {
                         Some(n @ ('"' | '\\' | '$' | '`')) => {
                             self.pos += 1;
                             flush_lit(&mut segs, &mut lit);
-                            segs.push(Seg::Sq(one(n), true));
+                            segs.push(Seg::Sq { text: one(n), escaped: true, closed: true });
                         }
                         Some('\n') => {
                             self.pos += 1;
@@ -5984,7 +6005,9 @@ impl Lexer {
                                 Ok(seg) => segs.push(seg),
                                 Err(e) => return Err(e.eager_bodies(eager_bodies_in(&segs))),
                             }
-                            return Ok(segs);
+                            // The run ends on the unclosed construct, not on a
+                            // `"` — there is no mate to print back.
+                            return Ok((segs, false));
                         }
                     }
                 }
@@ -6000,7 +6023,7 @@ impl Lexer {
                             Ok(seg) => segs.push(seg),
                             Err(e) => return Err(e.eager_bodies(eager_bodies_in(&segs))),
                         }
-                        return Ok(segs);
+                        return Ok((segs, false));
                     }
                 },
                 _ => self.take_into(&mut lit),
@@ -6042,14 +6065,14 @@ impl Lexer {
                 // escapes processed (no expansion/splitting — like `'…'`).
                 self.pos += 1;
                 let s = self.read_ansi_c_quote()?;
-                Ok(Some(Seg::Sq(s, false)))
+                Ok(Some(Seg::Sq { text: s, escaped: false, closed: true }))
             }
             Some('"') if quote_form => {
                 // `$"…"` — locale translation. We have no message catalogs, so
                 // it behaves as a plain double-quoted string (bash's fallback).
                 self.pos += 1;
-                let inner = self.read_double_quote()?;
-                Ok(Some(Seg::Dq(inner)))
+                let (inner, closed) = self.read_double_quote()?;
+                Ok(Some(Seg::Dq(inner, closed)))
             }
             Some('{') => {
                 self.pos += 1;
@@ -8296,7 +8319,7 @@ fn eager_bodies_in(segs: &[Seg]) -> Vec<EagerBody> {
                     out.push(EagerBody { src: raw.clone(), line: *open, procsub: true });
                 }
                 Seg::ParamBraced(_, _, subs, _) | Seg::Arith(_, _, subs) => spans(subs, out),
-                Seg::Dq(inner) => walk(inner, out),
+                Seg::Dq(inner, _) => walk(inner, out),
                 _ => {}
             }
         }
@@ -8339,7 +8362,7 @@ fn scan_heredoc_segs(body: BStr<'_>, expand: bool) -> Result<Vec<Seg>, LexError>
                         // literal run — but it also records the backslash, so
                         // `declare -f` can print the body back as written.
                         flush_lit(&mut segs, &mut lit);
-                        segs.push(Seg::Sq(one(n), true));
+                        segs.push(Seg::Sq { text: one(n), escaped: true, closed: true });
                     }
                     Some('\n') => {
                         lx.pos += 1;
@@ -9538,7 +9561,7 @@ mod tests {
                     Seg::ParamBraced(raw, _, _, _) => {
                         return Some(String::from_utf8(raw.clone()).expect("body is text"));
                     }
-                    Seg::Dq(inner) => {
+                    Seg::Dq(inner, _) => {
                         if let Some(found) = first_braced(inner) {
                             return Some(found);
                         }
@@ -9601,7 +9624,7 @@ mod tests {
                         let body = String::from_utf8(raw.clone()).expect("body is text");
                         return Some((body, spliced.iter().map(|r| (r.start, r.end)).collect()));
                     }
-                    Seg::Dq(inner) => {
+                    Seg::Dq(inner, _) => {
                         if let Some(found) = first_braced(inner) {
                             return Some(found);
                         }

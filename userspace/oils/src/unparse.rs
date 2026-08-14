@@ -1467,7 +1467,7 @@ pub(crate) fn gobbler_word(word: &Word, opts: crate::lexer::ParseOpts) -> Word {
 /// move every tail after it, so it is dropped rather than trusted.
 fn fill_quoted_runs(parts: &mut [WordPart], dquoted: bool, opts: crate::lexer::ParseOpts) {
     for p in parts.iter_mut() {
-        if let WordPart::SingleQuoted { text, escaped, parts: sub } = p {
+        if let WordPart::SingleQuoted { text, escaped, parts: sub, .. } = p {
             if dquoted
                 && sub.is_none()
                 && !*escaped
@@ -1780,7 +1780,7 @@ macro_rules! nested_parts_fn {
                 (Nested::Operand, p)
             }
             match p {
-                WordPart::DoubleQuoted(parts) => vec![(Nested::Quoted, parts.$slice())],
+                WordPart::DoubleQuoted { parts, .. } => vec![(Nested::Quoted, parts.$slice())],
                 WordPart::ParamOp { index, arg: a, .. } => {
                     idx(index).into_iter().chain([arg(a.parts.$slice())]).collect()
                 }
@@ -1874,21 +1874,33 @@ pub(crate) fn part_src(p: &WordPart) -> Str {
         // expanded at parse time), and it is the only spelling a sentinel swapped
         // *inside* the quotes can show through. See [`attach_tails_by`] and
         // [`crate::ast::WordPart::SingleQuoted`].
-        WordPart::SingleQuoted { text, escaped, parts } => match parts {
+        WordPart::SingleQuoted { text, escaped, closed, parts } => match parts {
             Some(ps) => {
                 let mut s = b"'".to_vec();
                 s.push_str(&parts_src(ps));
-                s.push(b'\'');
+                if *closed {
+                    s.push(b'\'');
+                }
                 s
             }
-            None => quoted_lit_src(text, *escaped),
+            None if *closed => quoted_lit_src(text, *escaped),
+            // A run with no mate cannot go through `sh_single_quote`, whose
+            // whole job is to produce a *quoted* spelling — it would supply the
+            // very byte that was missing. See [`crate::ast::WordPart`].
+            None => bfmt![b"'", text],
         },
-        WordPart::DoubleQuoted(parts) => {
+        WordPart::DoubleQuoted { parts, closed } => {
             let mut s = b"\"".to_vec();
             for p in parts {
                 s.push_str(&part_src(p));
             }
-            s.push(b'"');
+            // Only where the source wrote it. A run that ended at the end of
+            // the text never held a closing quote, and inventing one puts a
+            // byte in the word that nothing read — every diagnostic naming the
+            // word then repeats it. See [`crate::ast::WordPart`].
+            if *closed {
+                s.push(b'"');
+            }
             s
         }
         // The brackets came off the source and go back on it: the parts are the

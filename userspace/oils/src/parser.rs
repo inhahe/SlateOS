@@ -2606,7 +2606,7 @@ fn map_segs(segs: &mut [Seg], map: &LineMap) {
                 map_arith_comsubs(nested, map);
             }
             Seg::ProcSub(_, _, open, _) => *open = map.map(*open),
-            Seg::Dq(inner) => map_segs(inner, map),
+            Seg::Dq(inner, _) => map_segs(inner, map),
             _ => {}
         }
     }
@@ -6100,10 +6100,10 @@ fn word_from_segs_in(segs: &[Seg], opts: ParseOpts, q: Quoting) -> Result<Word, 
 /// *its* words — so the body must not also cut the word holding it.
 fn segs_hold_a_nul(segs: &[Seg]) -> bool {
     segs.iter().any(|s| match s {
-        Seg::Lit(t) | Seg::Sq(t, _) | Seg::ParamBraced(t, ..) | Seg::Arith(t, ..) => {
+        Seg::Lit(t) | Seg::Sq { text: t, .. } | Seg::ParamBraced(t, ..) | Seg::Arith(t, ..) => {
             t.contains(&0)
         }
-        Seg::Dq(inner) => segs_hold_a_nul(inner),
+        Seg::Dq(inner, _) => segs_hold_a_nul(inner),
         // An unclosed construct's text is echoed back by a diagnostic rather
         // than expanded, and the diagnostic writes bytes rather than a C string.
         Seg::Param(_) | Seg::CmdSub(..) | Seg::ProcSub(..) | Seg::Unclosed(_) => false,
@@ -6128,7 +6128,7 @@ fn segs_splice_past_the_brace(segs: &[Seg]) -> bool {
         Seg::ParamBraced(raw, _, _, spliced) if !spliced.is_empty() => {
             matches!(crate::wordscan::expansion_body_len(raw, true), BraceEnd::Early(_))
         }
-        Seg::Dq(inner) => segs_splice_past_the_brace(inner),
+        Seg::Dq(inner, _) => segs_splice_past_the_brace(inner),
         _ => false,
     })
 }
@@ -6447,19 +6447,20 @@ fn seg_to_parts(
 fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, ParseError> {
     Ok(match seg {
         Seg::Lit(s) => WordPart::Literal(s.clone()),
-        Seg::Sq(s, escaped) => WordPart::SingleQuoted {
-            text: s.clone(),
+        Seg::Sq { text, escaped, closed } => WordPart::SingleQuoted {
+            text: text.clone(),
             escaped: *escaped,
+            closed: *closed,
             // Filled in afterwards, and only for a subscript or a substring
             // bound. See [`word_subscript_from_source_at`].
             parts: None,
         },
-        Seg::Dq(inner) => {
+        Seg::Dq(inner, closed) => {
             let mut parts = Vec::with_capacity(inner.len());
             for s in inner {
                 seg_to_parts(s, opts, Quoting::Dquote, &mut parts)?;
             }
-            WordPart::DoubleQuoted(parts)
+            WordPart::DoubleQuoted { parts, closed: *closed }
         }
         Seg::Param(n) => WordPart::Param { name: n.clone(), braced: false },
         Seg::Unclosed(u) => WordPart::Unclosed(u.clone()),
@@ -8035,7 +8036,7 @@ fn attach_subscript_reads(
     let inner_q = q.as_unread();
     let mut any = false;
     for part in &mut w.parts {
-        let WordPart::SingleQuoted { text, escaped: false, parts } = part else {
+        let WordPart::SingleQuoted { text, escaped: false, parts, .. } = part else {
             continue;
         };
         if text.is_empty() {

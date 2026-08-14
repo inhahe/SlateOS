@@ -709,7 +709,7 @@ impl Word {
         fn parts_ok(parts: &[WordPart]) -> bool {
             parts.iter().all(|p| match p {
                 WordPart::Literal(_) | WordPart::SingleQuoted { .. } => true,
-                WordPart::DoubleQuoted(inner) => parts_ok(inner),
+                WordPart::DoubleQuoted { parts: inner, .. } => parts_ok(inner),
                 _ => false,
             })
         }
@@ -753,10 +753,26 @@ pub enum WordPart {
     SingleQuoted {
         text: Str,
         escaped: bool,
+        /// Whether the closing `'` was in the source — see
+        /// [`WordPart::DoubleQuoted`]'s field of the same name. Always `true`
+        /// for the backslash spelling, which has no quotes to match.
+        closed: bool,
         parts: Option<Vec<WordPart>>,
     },
     /// Double-quoted run of parts (expansion, but no splitting/globbing).
-    DoubleQuoted(Vec<WordPart>),
+    ///
+    /// `closed` is whether the source really wrote the mate. It normally did:
+    /// a word whose `"` never closes is a parse error. But
+    /// `string_extract_double_quoted` walks a *finished word* rather than a
+    /// stream — the text of an `${x@P}`, a `PS4`, a here-document body — and
+    /// there an unmated `"` is not an error at all; the run simply ends where
+    /// the text does. Only this field tells the two apart afterwards, and
+    /// without it [`crate::unparse::part_src`] prints back a byte the source
+    /// never held, which every diagnostic naming the word then repeats.
+    DoubleQuoted {
+        parts: Vec<WordPart>,
+        closed: bool,
+    },
     /// An array subscript that an **arithmetic** word expansion met in the word
     /// itself and expands *in place*, ahead of any second reading — bash's
     /// `expand_array_subscript` (subst.c:10836-10894), reached from
@@ -1241,7 +1257,7 @@ impl WordPart {
             }
 
             // Reached, and carrying sub-words.
-            WordPart::DoubleQuoted(parts) => {
+            WordPart::DoubleQuoted { parts, .. } => {
                 parts.iter().find_map(|p| p.first_scanned_arith(hides_closer))
             }
             WordPart::ParamOp { index, arg, .. } => {
@@ -1910,6 +1926,7 @@ pub fn dup_move_source(target: &Word) -> Option<Word> {
         } => Some(WordPart::SingleQuoted {
             text: text.strip_suffix(b"-")?.to_vec(),
             escaped: true,
+            closed: true,
             parts: None,
         }),
         _ => return None,
@@ -2071,6 +2088,7 @@ mod tests {
                 WordPart::SingleQuoted {
                     text: Vec::new(),
                     escaped: true,
+                    closed: true,
                     parts: None
                 },
             ]
@@ -2082,6 +2100,7 @@ mod tests {
             vec![WordPart::SingleQuoted {
                 text: Vec::new(),
                 escaped: true,
+                closed: true,
                 parts: None
             }]
         );

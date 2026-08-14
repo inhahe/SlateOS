@@ -262,6 +262,27 @@ pub struct SubGlyph {
     /// Left at `0` unless the face needs the fallback at all, since deriving
     /// it costs a table lookup per character.
     pub(crate) klass: u8,
+    /// Whether this glyph's character is a non-spacing combining mark —
+    /// general category `Mn`.
+    ///
+    /// Separate from [`klass`](Self::klass) because it answers a different
+    /// question and is true in cases the class is not. `klass` says *where*
+    /// the fallback should put a mark and is left at `0` for the scripts whose
+    /// marks the fallback declines to place; this says only *that* it is a
+    /// mark, which is what decides its advance is zero — and a mark takes no
+    /// room whether or not anything is willing to place it. It is also true
+    /// for the marks Unicode leaves at combining class 0 because they never
+    /// need reordering, U+0E35 THAI SARA II among them.
+    ///
+    /// Carried through substitution exactly as `klass` is: no lookup has an
+    /// opinion about it, and a ligature keeps its first component's, which is
+    /// the base's, which is false.
+    ///
+    /// Left `false` unless the face has no `GPOS`, since a face that has one
+    /// has a `GDEF` to be asked about the glyph instead — a better answer,
+    /// because it is about the glyph substitution actually produced rather
+    /// than about the character it started as.
+    pub(crate) mark: bool,
     /// Where this glyph sits inside a ligature, once one has swallowed it or
     /// the glyphs around it. Written by ligature substitution and read by
     /// `GPOS`'s mark-to-ligature attachment, which is the only thing that
@@ -396,6 +417,7 @@ impl SubGlyph {
             cluster,
             mask: ALWAYS,
             klass: 0,
+            mark: false,
             lig: Lig::default(),
         }
     }
@@ -411,6 +433,7 @@ impl SubGlyph {
             cluster,
             mask: form_mask(form),
             klass: 0,
+            mark: false,
             lig: Lig::default(),
         }
     }
@@ -429,6 +452,7 @@ impl SubGlyph {
             cluster,
             mask,
             klass: 0,
+            mark: false,
             lig: Lig::default(),
         }
     }

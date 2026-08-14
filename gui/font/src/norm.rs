@@ -55,7 +55,9 @@
 
 use alloc::vec::Vec;
 
-use crate::norm_tables::{COMBINES_BACKWARD, CCC, NO_COMPOSE, PAIRS, PAIRS_BY_PARTS, SINGLETONS};
+use crate::norm_tables::{
+    COMBINES_BACKWARD, CCC, MARKS, NO_COMPOSE, PAIRS, PAIRS_BY_PARTS, SINGLETONS,
+};
 
 /// The first Hangul syllable, and the counts that make its composition
 /// arithmetic rather than a table. See UAX #15 §16 "Hangul".
@@ -97,6 +99,32 @@ pub(crate) fn combining_class(ch: char) -> u8 {
         Some(&(lo, _, ccc)) if cp >= lo => ccc,
         _ => 0,
     }
+}
+
+/// Whether `ch` is a non-spacing combining mark — general category `Mn`.
+///
+/// `Mn` alone, and not the whole of `M*`. `Mc`, the *spacing* combining marks,
+/// is deliberately outside it: a Devanagari matra genuinely occupies width, so
+/// calling it a mark here would take that width away and pile the vowel onto
+/// the consonant. HarfBuzz draws the line in the same place, in
+/// `hb_synthesize_glyph_classes`.
+///
+/// Distinct from `combining_class(ch) != 0`, which is the thing a caller
+/// reaches for and which is wrong: a combining class is a canonical
+/// *ordering*, and a mark that never needs reordering is left at class 0.
+/// U+0E35 THAI SARA II is one. Asking the class instead charges such a mark a
+/// full advance and draws the text a box too wide per mark.
+///
+/// This is what HarfBuzz uses to decide a glyph is a mark when the face's
+/// `GDEF` has no class for it, and it is a separate decision from whether the
+/// mark may be *placed* by measurement — see
+/// [`positions_marks`](crate::fallback::positions_marks), which several
+/// scripts turn off while their marks still take no room.
+#[must_use]
+pub(crate) fn is_mark(ch: char) -> bool {
+    let cp = ch as u32;
+    let i = MARKS.partition_point(|&(_, hi)| hi < cp);
+    MARKS.get(i).is_some_and(|&(lo, _)| cp >= lo)
 }
 
 /// Whether `text` can possibly change under [`nfc`].
@@ -454,6 +482,37 @@ mod tests {
 
     fn clusters(pieces: &[Piece]) -> Vec<usize> {
         pieces.iter().map(|&(_, c)| c).collect()
+    }
+
+    /// The reason `is_mark` exists at all: a mark whose combining class is
+    /// zero. Asking the class — which is what the shaper used to do — calls
+    /// U+0E35 a base and charges it a full advance, which is a Thai word drawn
+    /// a mark's width too wide per vowel.
+    #[test]
+    fn a_mark_with_no_combining_class_is_still_a_mark() {
+        assert_eq!(combining_class('\u{e35}'), 0);
+        assert!(is_mark('\u{e35}'));
+    }
+
+    /// And the other half of the same claim: a *spacing* combining mark is not
+    /// one. U+093F DEVANAGARI VOWEL SIGN I is category `Mc`, it genuinely
+    /// occupies width, and zeroing it would pile the vowel onto the consonant.
+    #[test]
+    fn a_spacing_combining_mark_is_not_a_mark_here() {
+        assert!(!is_mark('\u{93f}'));
+    }
+
+    #[test]
+    fn ordinary_letters_and_the_table_edges_are_not_marks() {
+        for ch in ['a', 'A', '0', ' ', '\u{5d0}', '\u{4e00}', '\u{10ffff}'] {
+            assert!(!is_mark(ch), "{ch:?}");
+        }
+        // One from each of a few blocks, so a table regenerated with the ranges
+        // mis-sorted cannot pass: a binary search over a broken table finds
+        // whatever it happens to land on.
+        for ch in ['\u{301}', '\u{5b8}', '\u{64e}', '\u{94d}', '\u{fe00}', '\u{e0100}'] {
+            assert!(is_mark(ch), "{ch:?}");
+        }
     }
 
     #[test]

@@ -34,6 +34,11 @@ Three tables come out, and each exists for a reason the shaper needs:
             Needed to sort marks into canonical order and to know when a
             mark blocks the composition of a later one.
 
+`MARKS`     which characters are non-spacing combining marks — general
+            category `Mn` — as ranges. A separate question from `CCC`, and
+            asked by a different caller: the shaper zeroes a mark's advance,
+            and a mark with combining class 0 still takes no room.
+
 Hangul is absent on purpose: its composition is arithmetic, so
 `norm.rs` computes it rather than storing eleven thousand rows.
 """
@@ -84,9 +89,32 @@ def combining_ranges():
     return out
 
 
+def mark_ranges():
+    """Characters of general category `Mn`, as ranges.
+
+    `Mn` and not the whole of `M*`, which is HarfBuzz's
+    `hb_synthesize_glyph_classes` — the function that decides a glyph is a
+    mark when the face's `GDEF` has no classes to ask. `Mc`, the spacing
+    combining marks, is deliberately outside it: a matra genuinely occupies
+    width, and giving it none would pile it onto the consonant. Confirmed by
+    measurement rather than read off the source — HarfBuzz zeroes U+A9B4
+    JAVANESE VOWEL SIGN TARUNG's neighbours and not it.
+    """
+    out = []
+    for cp in range(0x110000):
+        if unicodedata.category(chr(cp)) != "Mn":
+            continue
+        if out and out[-1][1] == cp - 1:
+            out[-1][1] = cp
+        else:
+            out.append([cp, cp])
+    return out
+
+
 def main():
     pairs, singletons = canonical_pairs_and_singletons()
     ranges = combining_ranges()
+    marks = mark_ranges()
 
     # Which of the pairs actually recompose. Asking the UCD directly, rather
     # than reading CompositionExclusions.txt, catches all four reasons a pair
@@ -171,6 +199,23 @@ def main():
         w(f"pub(crate) static CCC: [(u32, u32, u8); {len(ranges)}] = [\n")
         for lo, hi, ccc in ranges:
             w(f"    (0x{lo:04X}, 0x{hi:04X}, {ccc}),\n")
+        w("];\n\n")
+
+        w("/// Characters of general category `Mn` as sorted, disjoint ranges:\n")
+        w("/// `(first, last)`.\n")
+        w("///\n")
+        w("/// A combining class is not this question. Most marks have a non-zero\n")
+        w("/// class, but the class is about canonical *ordering* and plenty of\n")
+        w("/// marks do not need ordering — U+0E35 THAI SARA II is `Mn` with class\n")
+        w("/// 0 — so a run keyed on the class alone charges those marks a full\n")
+        w("/// advance and measures the text far too wide.\n")
+        w(f"pub(crate) static MARKS: [(u32, u32); {len(marks)}] = [\n")
+        for i in range(0, len(marks), 4):
+            w(
+                "    "
+                + " ".join(f"(0x{lo:04X}, 0x{hi:04X})," for lo, hi in marks[i : i + 4])
+                + "\n"
+            )
         w("];\n")
 
     print(f"wrote {out}")
@@ -178,6 +223,7 @@ def main():
     print(f"  {len(pairs)} pair decompositions, {len(excluded)} of them excluded")
     print(f"  {len(singletons)} singleton decompositions")
     print(f"  {len(ranges)} combining-class ranges")
+    print(f"  {len(marks)} mark ranges")
     if len(pairs) > 0xFFFF:
         sys.exit("PAIRS no longer fits a u16 index")
 

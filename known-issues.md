@@ -59721,3 +59721,79 @@ the table would go.
 **How it was found.** `gui/font/tools/harfbuzz_sweep.py`, after the corpus
 gained Thai and pointed Hebrew for the `GPOS` 7/8 work. Run it and look for
 the Thai string in the `same glyphs in different places` list.
+
+**Fixed** (2026-08-14). `SubGlyph` gained `mark: bool` beside `klass`, set in
+the piece loop from the character's general category and carried through
+substitution untouched, and the `marks` vector now reads it. `klass` went back
+to meaning only "where the fallback should put it". Sweep: agree 10731 →
+10917, misplaced 1027 → 841, the Thai string 215 → 29.
+
+Two things the entry above got wrong, both caught by measuring HarfBuzz rather
+than by reading it.
+
+*The category is `Mn`, not `M*`.* Taking all three of `Mn | Mc | Me` made the
+sweep **worse** — agree 10731 → 10496, misplaced 1027 → 1262, Devanagari alone
+13 → 230 — because `Mc`, the *spacing* combining marks, genuinely occupy width;
+zeroing a matra piles the vowel onto its consonant. `hb_synthesize_glyph_classes`
+takes `Mn` only. Probed directly against `AGENCYB.TTF` (no `GSUB`, `GPOS` or
+`GDEF` at all, so nothing but the synthesized classes can be answering): it
+zeroes U+A9B4 JAVANESE VOWEL SIGN TARUNG's `Mn` neighbours and not it.
+
+*Zeroing is gated per script too, by a different list.* Ten scripts — the nine
+Indic `*2` tags and `khmr` — do not zero mark advances at all, because their
+shapers set `zero_width_marks = NONE`; Thai, Myanmar and USE decline the
+*placement* but still zero. So there are three flags, not two, and
+`fallback::zeroes_mark_advances` is the new one. Without it Devanagari
+regressed on its own.
+
+**And the offset shift.** Zeroing an advance stops the pen but not the drawing:
+the mark is still drawn where the pen arrived, which is the far side of the
+letter. HarfBuzz's `adjust_mark_offsets` subtracts the advance from the offset,
+gated on `!has_gpos_mark && HB_DIRECTION_IS_FORWARD`. `scaled.rs` now does the
+same for a zeroed mark the fallback will not place — `klass == 0`, which is the
+same claim — which is what took Thai from 233 to 29 after the mark-ness change
+alone had left it above its own baseline.
+
+Tests: `norm::tests::a_mark_with_no_combining_class_is_still_a_mark`,
+`a_spacing_combining_mark_is_not_a_mark_here`,
+`ordinary_letters_and_the_table_edges_are_not_marks`,
+`fallback::tests::declining_to_place_a_mark_is_not_declining_to_zero_it`,
+`the_scripts_that_keep_their_mark_advances_are_sorted`.
+
+`fallback::attach_class`'s Thai/Lao special case was **kept**, not deleted as
+proposed — but only because deleting it is a different entry's job. It turns
+out to be unreachable rather than wrong: `attach_class` is called only for a
+run whose script passed `positions_marks`, and `thai` and `lao ` are both in
+`COMPLEX_SCRIPTS`. See TD-FONT-FALLBACK-CLASSES-SCRIPTS-IT-NEVER-PLACES.
+
+## TD-FONT-FALLBACK-CLASSES-SCRIPTS-IT-NEVER-PLACES
+
+**What.** `fallback::attach_class` carries position classes for scripts
+`fallback::positions_marks` always refuses, so those arms can never run.
+`scaled.rs` calls `attach_class` only when the run's script is *not* in
+`COMPLEX_SCRIPTS`; `thai`, `lao ` and `tibt` are all in it. That makes dead:
+
+- the whole `if cp & !0xFF == 0x0E00` block (Thai and Lao vowel signs, and the
+  phinthu), and
+- the `103 | 107` (Thai sara u/uu and mai), `118 | 122` (Lao) and `129 | 132`
+  (Tibetan) arms of the `match klass` below it.
+
+**Why it is not simply a bug.** The mappings are *correct*; they are just
+unreachable, and they became unreachable when `COMPLEX_SCRIPTS` grew to the
+full list of scripts with a non-default HarfBuzz shaper. HarfBuzz agrees that
+these marks should not be fallback-placed — its Thai, Lao (via the default
+shaper's Thai path), Myanmar and Tibetan/USE shapers all set
+`fallback_position = false` — so deleting the arms changes no output.
+
+**Proper fix.** Delete them, and say in `attach_class`'s doc that it is only
+ever asked about a script the fallback places, so an arm for one it does not is
+a claim that can never be checked. Not merged into the mark-ness fix because
+that change had to be measurable against the sweep and this one is provably a
+no-op; a commit that mixes the two cannot be bisected.
+
+**Risk of not doing it.** Low, but it is the kind of debt that misleads: the
+next reader of `attach_class` will believe Thai vowels are placed here, and
+will debug the wrong function when they are not.
+
+**Where.** `gui/font/src/fallback.rs`, `attach_class` (~line 244) and
+`COMPLEX_SCRIPTS` (~line 115).

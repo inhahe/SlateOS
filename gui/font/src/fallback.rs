@@ -138,6 +138,37 @@ pub(crate) fn positions_marks(tags: Option<ScriptTags>) -> bool {
     tags.is_none_or(|tags| COMPLEX_SCRIPTS.binary_search(&tags.preferred).is_err())
 }
 
+/// The scripts whose marks keep their advance even so.
+///
+/// A much shorter list than [`COMPLEX_SCRIPTS`], and a different question.
+/// Declining to *place* a mark says the geometry cannot be guessed; it does
+/// not say the mark takes room. HarfBuzz keeps the two apart — every shaper
+/// carries a `fallback_position` flag and a separate `zero_width_marks` one —
+/// and only the Indic and Khmer shapers set the second to `NONE`. Its Thai,
+/// Myanmar and USE shapers all decline the placement and zero the advance
+/// anyway.
+///
+/// Measured rather than transcribed, since the shaper a script reaches
+/// depends on what the *font* declares and the interesting case here is a
+/// font that declares nothing. Shaping "consonant + `Mn` mark" with HarfBuzz
+/// against a face with no `GSUB`, `GPOS` or `GDEF` at all: Devanagari,
+/// Bengali, Gurmukhi, Gujarati, Oriya, Tamil, Telugu, Kannada, Malayalam and
+/// Khmer keep the advance; Sinhala, Myanmar, Tibetan, Mongolian, Cham,
+/// Balinese, Thai, Lao and Hebrew zero it.
+static NO_ZERO_WIDTH_MARKS: [[u8; 4]; 10] = [
+    *b"bng2", *b"dev2", *b"gjr2", *b"gur2", *b"khmr", *b"knd2", *b"mlm2", *b"ory2", *b"tel2",
+    *b"tml2",
+];
+
+/// Whether a run of this script has its marks' advances zeroed.
+///
+/// Separate from [`positions_marks`], and true for nearly everything: a
+/// combining mark takes no room whether or not anything is willing to work
+/// out where to draw it. See [`NO_ZERO_WIDTH_MARKS`] for the ten that differ.
+pub(crate) fn zeroes_mark_advances(tags: Option<ScriptTags>) -> bool {
+    tags.is_none_or(|tags| NO_ZERO_WIDTH_MARKS.binary_search(&tags.preferred).is_err())
+}
+
 /// A glyph's ink box, in the shape the placement arithmetic wants it.
 ///
 /// Not [`BBox`](crate::sfnt::BBox), which is four edges. This is an origin
@@ -402,6 +433,38 @@ mod tests {
     #[test]
     fn scriptless_text_still_gets_the_fallback() {
         assert!(positions_marks(None));
+    }
+
+    #[test]
+    fn the_scripts_that_keep_their_mark_advances_are_sorted() {
+        assert!(
+            NO_ZERO_WIDTH_MARKS.is_sorted(),
+            "NO_ZERO_WIDTH_MARKS is out of order"
+        );
+    }
+
+    /// The two questions are not the same question, and this is the case that
+    /// proves it: Thai and Myanmar decline the *placement* but still want the
+    /// advance taken away, while Devanagari and Khmer decline both. Reading
+    /// one answer off the other zeroes ten scripts' marks that should keep
+    /// their width, or charges every Thai vowel a full one.
+    #[test]
+    fn declining_to_place_a_mark_is_not_declining_to_zero_it() {
+        for tag in [*b"thai", *b"mym2", *b"tibt", *b"latn", *b"hebr", *b"arab"] {
+            assert!(
+                zeroes_mark_advances(Some(ScriptTags::exactly(tag))),
+                "{:?} should be zeroed",
+                core::str::from_utf8(&tag)
+            );
+        }
+        for tag in [*b"dev2", *b"bng2", *b"khmr", *b"tml2", *b"ory2"] {
+            assert!(
+                !zeroes_mark_advances(Some(ScriptTags::exactly(tag))),
+                "{:?} should keep its advances",
+                core::str::from_utf8(&tag)
+            );
+        }
+        assert!(zeroes_mark_advances(None));
     }
 
     /// AGENCYB.TTF's `a`, whose numbers the placement rules below were

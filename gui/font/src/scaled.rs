@@ -499,17 +499,26 @@ impl ScaledFont {
         let runs = script::runs(&pieces, &piece_levels);
         let mut glyphs: Vec<SubGlyph> = Vec::with_capacity(pieces.len());
         let mut tabs: Vec<bool> = Vec::with_capacity(pieces.len());
-        // The run the piece loop is inside, and whether the fallback may run
-        // there. Walked forward with the loop rather than searched, since both
-        // are in piece order.
+        // The run the piece loop is inside, and the two things the fallback
+        // asks about its script: whether a mark here may be *placed* by
+        // measurement, and whether a mark here takes no room. Two questions
+        // and not one — ten scripts answer them differently, see
+        // [`fallback::zeroes_mark_advances`]. Walked forward with the loop
+        // rather than searched, since both are in piece order.
         let mut run = 0usize;
         let mut placeable = runs.first().is_none_or(|&(_, t)| fallback::positions_marks(t));
+        let mut zeroed = runs
+            .first()
+            .is_none_or(|&(_, t)| fallback::zeroes_mark_advances(t));
         for (i, &(ch, cluster)) in pieces.iter().enumerate() {
             while runs.get(run).is_some_and(|&(end, _)| end <= i) {
                 run = run.saturating_add(1);
                 placeable = runs
                     .get(run)
                     .is_none_or(|&(_, t)| fallback::positions_marks(t));
+                zeroed = runs
+                    .get(run)
+                    .is_none_or(|&(_, t)| fallback::zeroes_mark_advances(t));
             }
             // A tab has no glyph. Drawn through `cmap` it comes out as the
             // missing-glyph box, one space wide; the width every caller wants
@@ -523,6 +532,13 @@ impl ScaledFont {
                 } else {
                     0
                 },
+                // Gated on `zeroed` and not on `placeable`, which is the whole
+                // point of the two fields being separate: declining to *place*
+                // a script's marks is not a claim that they are not marks, and
+                // for all but ten scripts a mark takes no room either way. Nor
+                // is it gated on the combining class, which is an ordering and
+                // leaves plenty of marks at zero.
+                mark: synthesize && zeroed && !tab && norm::is_mark(ch),
                 ..SubGlyph::cursive(gid, cluster, forms.get(i).copied().flatten())
             });
             tabs.push(tab);
@@ -548,18 +564,19 @@ impl ScaledFont {
         // Two ways to be a mark, because two different things are being asked.
         // A face with anchors is asked about the *glyph*, since that is what
         // the anchors are indexed by and what `GDEF` classes. A face with no
-        // `GPOS` can only be asked about the *character*: it has said nothing
-        // about any glyph, so the combining class is the only evidence there
-        // is. The two never both apply — `synthesize` means there is no `GPOS`
-        // and so nothing for `marked` to have come from but `GDEF` — which is
-        // why one vector can serve the pass and the fallback both.
+        // `GPOS` can only be asked about the *character*, and the answer is
+        // its general category — carried on the glyph as `SubGlyph::mark`,
+        // because substitution is free to change the glyph id and a cluster
+        // cannot tell a base from the marks that share it. The two never both
+        // apply — `synthesize` means there is no `GPOS` and so nothing for
+        // `marked` to have come from but `GDEF` — which is why one vector can
+        // serve the pass and the fallback both.
         let marks: Vec<bool> = glyphs
             .iter()
             .enumerate()
             .map(|(i, glyph)| {
                 let tab = tabs.get(i).copied().unwrap_or(false);
-                (marked && !tab && self.face.is_mark(glyph.gid))
-                    || (synthesize && glyph.klass != 0)
+                (marked && !tab && self.face.is_mark(glyph.gid)) || glyph.mark
             })
             .collect();
         let advances: Vec<i32> = glyphs
@@ -610,6 +627,31 @@ impl ScaledFont {
                 last.kern_next = kern;
             }
             let advance = self.px(adjust.x_advance);
+            // How far back a zeroed mark has to be moved so that taking its
+            // advance away does not also move its image.
+            //
+            // Zeroing the advance stops the pen travelling, but the mark is
+            // drawn at the pen it *arrives* at, which is still the far side of
+            // the letter. HarfBuzz's `adjust_mark_offsets` subtracts the
+            // advance from the offset for exactly this reason, and only when
+            // nothing else is going to place the mark — `!has_gpos_mark` there,
+            // `klass == 0` here, which is the same claim in the same order:
+            // a mark the fallback below will position gets an offset measured
+            // from its base and does not want a second, blind shift on top.
+            // Left-to-right only, as in HarfBuzz: in a right-to-left run the
+            // pen arrives on the mark's *right*, which is where a mark drawn
+            // at offset zero already belongs.
+            let back = if mark
+                && synthesize
+                && klasses.get(i).copied().unwrap_or(0) == 0
+                && levels
+                    .get(glyph.cluster)
+                    .is_none_or(|l| l.is_multiple_of(2))
+            {
+                advance
+            } else {
+                0.0
+            };
             out.push(ShapedGlyph {
                 key: GlyphKey::outline(gid),
                 // Substitution carried this along: a ligature reports its
@@ -639,7 +681,7 @@ impl ScaledFont {
                 // fallback fills those in below. `y` points up, which is both
                 // `GPOS`'s convention and `ShapedGlyph`'s, so it passes through
                 // unflipped; the flip happens once, at the blit.
-                offset: (self.px(adjust.x_offset), self.px(adjust.y_offset)),
+                offset: (self.px(adjust.x_offset) - back, self.px(adjust.y_offset)),
             });
             if mark {
                 // Keep the mark in the run between the pair, but only while

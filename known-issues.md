@@ -43,6 +43,165 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
+### [A] B-CONSOLE-LOCK-IS-TAKEN-FROM-A-HARD-IRQ-WITH-A-PLAIN-LOCK. The keyboard ISR echoes through `CONSOLE.lock()`, so any task interrupted while holding the console wedges the CPU forever, silently — 2026-08-14 — OPEN
+
+**Symptom (predicted, not yet observed).** The machine stops dead with no
+output, no panic, no stall report. Nothing is printed because the CPU is
+spinning inside an interrupt handler on a lock whose holder is the very
+frame the interrupt suspended.
+
+**The chain.** All five links are `grep`-verifiable, no inference:
+
+| # | Site | Call |
+|---|---|---|
+| 1 | `kernel/src/ioapic.rs:730` | `pub extern "C" fn handle_device_irq(irq: u32)` — **hard IRQ context** |
+| 2 | `kernel/src/ioapic.rs:746` | → `keyboard::handle_scancode()` |
+| 3 | `kernel/src/keyboard.rs:282` | → `handle_normal()` |
+| 4 | `kernel/src/keyboard.rs:461` | → `push_char()` |
+| 5 | `kernel/src/keyboard.rs:489,490,491,497` | → `crate::console::putchar(ch)` |
+
+and `console::putchar` (`kernel/src/console.rs:850`) opens with
+`let mut con = CONSOLE.lock();` where `CONSOLE`
+(`kernel/src/console.rs:679`) is a **raw `spin::Mutex`** and `lock()` is
+the plain, interrupts-enabled acquire.
+
+So: task T calls any of the 45 `CONSOLE.lock()` sites. While T holds the
+lock, IRQ 1 fires **on the same CPU**. The ISR runs on T's stack, reaches
+`putchar`, and spins on a lock that only T can release — and T cannot run
+again until the ISR returns. Permanent, silent, single-CPU deadlock.
+`SCROLLBACK` (line 478) and `COLOR_SCHEME` (line 107) are raw the same
+way; they are reachable from the same ISR because `putchar` → `scroll_up_locked`
+→ `SCROLLBACK.lock()` (line 2271).
+
+**Why it is silent.** This is the distinguishing feature, and the reason
+it is worth writing down rather than just fixing. Both instrumented lock
+types route contention through a 30-second stall detector that fires from
+*inside* the spin loop (`kernel/src/sync.rs`, `STALL_SECONDS` at line 73).
+A raw `spin::Mutex` has no such detector: it spins forever and reports
+nothing. A wedge on this lock therefore produces exactly zero evidence.
+
+**Why it has not been hit constantly.** Exposure is reduced — but not
+eliminated — by two accidents:
+
+* kshell drives the keyboard with `ECHO_ENABLED` off, so the shell's own
+  key handling does not take the console lock from the ISR. The default
+  canonical-TTY echo-on path does.
+* The window is only as wide as a console critical section, and most of
+  the 45 are a few instructions. `write_str` over a long line, and any
+  call that scrolls (full-screen `memmove` plus a scrollback `Vec::push`
+  that can realloc), are the wide ones.
+
+Reduced exposure is not a defence. This is a "works until it doesn't"
+bug: the odds scale with typing during output, which is precisely what an
+interactive shell does.
+
+**Contrast: `serial.rs` already defends this exact case, three ways.**
+`serial::_print` (`kernel/src/serial.rs:204`) wraps the whole acquire in
+`crate::cpu::without_interrupts(...)`, claims a per-CPU `IN_PRINT` flag
+*before* taking the lock, and falls back to a lock-free
+`SerialPort::emergency()` on re-entry. Its doc comment (lines 190–198)
+describes the failure mode verbatim: "a garbled report can be read, a
+deadlock cannot." `console.rs` has none of the three. The two files
+diverged; only one of them was thought about.
+
+**Proper fix.** Convert `CONSOLE`, `SCROLLBACK` and `COLOR_SCHEME` from
+`spin::Mutex` to `crate::sync::Mutex` and change every acquisition to
+`lock_irqsave()`. That is the structural fix, not a mitigation: masking
+interrupts on the local CPU for the hold makes the reentrant arrival
+*impossible* rather than merely unlikely, and it is categorical — it
+protects against any future IRQ-context console user, not just the
+keyboard. It also lands the locks in the instrumented type, so a future
+wedge here reports itself instead of hanging mutely, and lockdep gets the
+`CONSOLE → SCROLLBACK` edge.
+
+This matches Q24's taxonomy (design-decisions.md §70): `CONSOLE` is a
+**non-leaf** lock — `scroll_up_locked` (line ~2255) takes
+`SCROLLBACK.lock()` at line 2271 while the caller holds `CONSOLE` — so it
+takes `crate::sync::Mutex`, not `PreemptSpinMutex`.
+
+**Invariant the fix relies on, recorded so it is not silently broken
+later.** `lock_irqsave` closes the *interrupt* window; it does not close
+an *exception* window, because `cli` does not mask faults. The fix is
+therefore complete only while no exception handler prints to the console.
+That holds today and was checked, not assumed: the only `console::` callers
+outside `console.rs` are `keyboard.rs`, `kshell.rs` and `ipc/io_ring.rs`,
+and the `#[panic_handler]` (`kernel/src/main.rs:5952`) executes `cli()` and
+then uses `serial_println!` exclusively. If a fault handler is ever taught
+to write to the console, it must first grow a per-CPU re-entrancy guard in
+the shape of `serial.rs`'s `IN_PRINT`.
+
+**Cost of the fix, stated honestly rather than glossed.** `lock_irqsave`
+masks interrupts for the whole hold, so the widest console critical section
+is now also the widest interrupts-off window on the system: `scroll_up_locked`
+(`kernel/src/console.rs:~2296`) does a ~3 MiB framebuffer `ptr::copy` plus a
+per-pixel clear of the bottom row while holding `CONSOLE`. That is hundreds
+of microseconds to low milliseconds. This is accepted, for three reasons:
+
+* It is task context, not ISR context, so it is not measured against the
+  10 µs ISR budget.
+* It cannot be narrowed while the lock is held — dropping `IF` mid-scroll
+  to shorten the window is precisely the reentrant arrival the fix exists
+  to prevent, so any "optimisation" here reintroduces the deadlock.
+* The alternative (leave the lock raw and hope the ISR never lands inside
+  a critical section) trades a bounded latency cost for an unbounded,
+  silent, permanent hang. That is not a trade.
+
+The console's other whole-screen loops were already written to drop the
+lock first (`clear_screen` at ~868, `apply_scheme` at ~312 both capture the
+geometry, `drop(con)`, then blit) — so the exposure really is limited to
+the scroll path.
+
+Usefully, the conversion also makes the cost *measurable*: `lock_irqsave`
+feeds `crate::cpu::irqoff_tracker`, so `irqoff` in kshell now reports the
+max interrupts-off duration this path actually produces, instead of it
+being invisible. That number is the evidence that should drive
+TD-CONSOLE-ECHO-RUNS-IN-HARD-IRQ-CONTEXT below.
+
+**Not related to B-FORKEXEC-BOOT-HANG.** Tempting, but no: the
+diagnostics that went missing in that hang were `serial_println!`, and
+serial is a wholly separate lock with its own (working) defence. Recording
+the non-link so a later session does not "solve" that hang by pointing at
+this fix.
+
+**Separate concern, deliberately not folded into this fix.** Rendering
+glyphs into the framebuffer from inside a hard IRQ handler blows CLAUDE.md's
+"total ISR latency < 10 µs" target by orders of magnitude, deadlock or no
+deadlock. The right shape is Linux's: the ISR queues the character and a
+bottom half does the echo, after which the console lock is task-context-only
+again. That is a different change with a different risk profile, so it is
+logged below as TD-CONSOLE-ECHO-RUNS-IN-HARD-IRQ-CONTEXT rather than
+smuggled into a deadlock fix.
+
+### [A] TD-CONSOLE-ECHO-RUNS-IN-HARD-IRQ-CONTEXT. Keyboard echo renders glyphs to the framebuffer from inside the IRQ 1 handler — 2026-08-14 — OPEN
+
+**The debt.** `handle_device_irq` → `keyboard::handle_scancode` →
+`push_char` → `console::putchar` (chain tabulated in
+B-CONSOLE-LOCK-IS-TAKEN-FROM-A-HARD-IRQ-WITH-A-PLAIN-LOCK above) does the
+full console pipeline — escape-sequence state machine, glyph blit, and on
+the last column a whole-screen scroll (`memmove` of the framebuffer plus a
+scrollback `Vec::push` that can hit the heap allocator) — with the CPU
+inside a hard interrupt handler.
+
+**Why it matters.** CLAUDE.md's interrupt-dispatch budget is "total ISR
+latency < 10 µs, deferred work via softirq/tasklet equivalent". A
+full-screen scroll at 1024×768×32bpp is ~3 MiB of `memmove`; it is not
+within three orders of magnitude of 10 µs. Every keystroke that lands on
+the bottom line therefore stalls the timer tick and every other device.
+
+**Proper fix.** Split the echo out of the ISR the way Linux splits n_tty:
+the handler decodes the scancode and pushes the resulting byte(s) into the
+existing input ring, and a bottom half (the tty/console task) drains the
+ring and does the rendering in task context. Once the console lock is
+task-context-only, the `lock_irqsave` from the deadlock fix above becomes
+belt-and-braces rather than load-bearing — keep it anyway, since it is what
+makes the guarantee categorical for any *future* IRQ-context printer.
+
+**Why not done now.** It changes echo latency and ordering
+(character-visible-at-keystroke becomes character-visible-at-next-drain),
+which is a user-visible interactivity change and wants its own boot test
+and its own commit. The deadlock is the urgent half and is fixed
+independently.
+
 ### B-MOUNT-ACCEPTS-UNREACHABLE-MOUNT-POINTS. `Vfs::mount` succeeds when the mount point's parent does not exist, producing a filesystem nothing can reach — 2026-08-13 — ✅ FIXED 2026-08-13 (`kernel/src/fs/vfs.rs`, `kernel/src/fs/overlay.rs`)
 
 **Symptom.** The overlay filesystem self-test failed on every boot, so the boot

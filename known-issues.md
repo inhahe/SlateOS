@@ -43,6 +43,40 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
+### TD-FONT-NO-CFF-OUTLINES. `osfont` cannot draw any `.otf` whose outlines are PostScript/CFF rather than TrueType — 2026-08-13 — OPEN
+
+**What.** `gui/font/src/sfnt.rs` parses the sfnt container, `cmap`, `hmtx`,
+`loca` and `glyf`. Outlines in the `CFF `/`CFF2` tables are a completely
+different representation — a Type 2 charstring stack machine, not a point
+list — and are not implemented. `Face::parse` detects them and returns
+`SfntError::CffOutlinesUnsupported`.
+
+**Why it is an error and not an empty glyph.** Falling through would produce a
+face that opens successfully and then renders every glyph blank, which looks
+like a rasterizer bug at the call site and is very hard to trace back here.
+Failing at `parse` names the actual limitation.
+
+**Scope, measured.** On this development host (`cargo test -p osfont
+--target x86_64-pc-windows-gnu --test host_fonts -- --ignored --nocapture`):
+**18 of 556** installed fonts are CFF; the other 538 open and rasterize. So
+this affects ~3% of a typical Windows font set — but that 3% includes most
+Adobe faces and a good deal of what users install by hand, and *all* of
+`.otf` in the colloquial sense.
+
+**Proper fix.** A Type 2 charstring interpreter in a new `gui/font/src/cff.rs`:
+INDEX/DICT parsing to find the CharStrings and Private DICTs, then the
+charstring machine itself (`rmoveto`/`hlineto`/`rrcurveto`/… , the
+`hstem`-counting rule that determines how many arguments `hintmask` eats,
+local and global subroutine calls with the bias, and `seac`-style accented
+composition via `endchar`). Output is cubic Béziers, so `sfnt::PathCmd` needs
+a `CurveTo` variant and `raster.rs` needs a cubic flattener beside the
+quadratic one — both are small additions, the charstring machine is the work.
+
+**Until then.** Ship a TrueType-flavoured system font. Anything that lets a
+user pick an arbitrary font file must surface
+`SfntError::CffOutlinesUnsupported` as a real message rather than treating
+every parse failure as "corrupt file".
+
 ### B-MOUNT-ACCEPTS-UNREACHABLE-MOUNT-POINTS. `Vfs::mount` succeeds when the mount point's parent does not exist, producing a filesystem nothing can reach — 2026-08-13 — ✅ FIXED 2026-08-13 (`kernel/src/fs/vfs.rs`, `kernel/src/fs/overlay.rs`)
 
 **Symptom.** The overlay filesystem self-test failed on every boot, so the boot

@@ -1808,6 +1808,25 @@ struct DiscardAbort {
 /// — a direct call, with nothing in between to intercept. So the 2 stands
 /// wherever it was raised, in a script and inside a subshell alike, and such a
 /// site arms `demote: false`.
+/// Where a `${ … }` scan's single forward pass stands between quotes — see
+/// [`Shell::brace_scanned_subs_slice`].
+///
+/// The scan carries no quoting *context* the way an expansion does; it only
+/// steps over runs. A `'` sends it to `skip_single_quoted`, which hunts for the
+/// next `'` and reads nothing at all in between; a `"` sends it to
+/// `skip_double_quoted`, which hunts for the next `"` and reads a `$(` or a
+/// `${` on the way but has no row for `<(` or `>(`. Neither skipper knows the
+/// other's character, so each quote is an ordinary byte inside the other's run
+/// — which is why this is two flags and not one state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ScanQuote {
+    /// Inside a `' … '` run: nothing in it is read.
+    squote: bool,
+    /// Inside a `" … "` run: the `$(` and `${` rows still fire, the two
+    /// process-substitution spellings do not.
+    dquote: bool,
+}
+
 /// How `xparse_dolparen`'s read of a `$( … )` extent came out — see
 /// [`Shell::comsub_reparse_read`].
 ///
@@ -29932,7 +29951,7 @@ impl Shell {
                 // The `${` half of the same row hands the brace to
                 // `extract_dollar_brace_string` — the brace scan, entered fresh,
                 // so its single-quote state neither inherits nor leaks.
-                _ => Self::brace_scanned_subs_in(p, out, &mut false),
+                _ => Self::brace_scanned_subs_in(p, out, &mut ScanQuote::default()),
             }
         }
     }
@@ -29946,11 +29965,18 @@ impl Shell {
     fn extent_read_of_rest(&mut self, rest: BStr<'_>) -> ExtentRead {
         // A remainder that will not lex holds nothing this scan can read, and is
         // not a diagnostic of its own — see [`Shell::expand_extent_rest`].
-        let Ok(word) = crate::parser::dquote_word_from_source(rest, self.parse_opts()) else {
+        //
+        // …and lexed the way the *scan* walks it, not the way the expansion
+        // does: this text is the scan's own remainder, so its `<( … )` and
+        // `>( … )` are read for their extent exactly as a `$( … )` is. See
+        // [`crate::parser::brace_scan_word_from_source`]. Whether the scan was
+        // inside a quote when it reached one of them is
+        // [`Shell::brace_scanned_subs_slice`]'s question, below.
+        let Ok(word) = crate::parser::brace_scan_word_from_source(rest, self.parse_opts()) else {
             return ExtentRead::Closed;
         };
         let mut subs: Vec<&WordPart> = Vec::new();
-        Self::brace_scanned_subs_slice(&word.parts, &mut subs, &mut false);
+        Self::brace_scanned_subs_slice(&word.parts, &mut subs, &mut ScanQuote::default());
         self.extent_read_of_subs(&subs)
     }
 
@@ -30432,24 +30458,34 @@ impl Shell {
     /// single quotes — so the run starts fresh and leaves the outer state as it
     /// found it.
     fn brace_scanned_subs<'a>(part: &'a WordPart, out: &mut Vec<&'a WordPart>) {
-        Self::brace_scanned_subs_in(part, out, &mut false);
+        Self::brace_scanned_subs_in(part, out, &mut ScanQuote::default());
     }
 
     fn brace_scanned_subs_in<'a>(
         part: &'a WordPart,
         out: &mut Vec<&'a WordPart>,
-        squote: &mut bool,
+        q: &mut ScanQuote,
     ) {
-        let dq = matches!(part, WordPart::DoubleQuoted(_));
-        let saved = dq.then(|| std::mem::replace(squote, false));
+        // A double-quoted *part* is a `"` the word lex found — which is the
+        // scan's `"` only where the scan was not already inside a `' … '` run
+        // of its own. Inside one the quotes are ordinary characters it stepped
+        // over, so the run's contents sit at brace level as far as the scan is
+        // concerned and its state simply carries on through them (the `'` that
+        // ends the run is in there too, and closes it where it stands).
+        //
+        // Outside one the `"` really does open `skip_double_quoted`, which
+        // reads a `$(` but knows nothing of single quotes — so the run starts
+        // fresh and leaves the outer state as it found it.
+        let dq = matches!(part, WordPart::DoubleQuoted(_)) && !q.squote;
+        let saved = dq.then(|| std::mem::replace(q, ScanQuote { squote: false, dquote: true }));
         for (kind, parts) in crate::unparse::nested_parts(part) {
             if kind == crate::unparse::Nested::Index {
                 continue;
             }
-            Self::brace_scanned_subs_slice(parts, out, squote);
+            Self::brace_scanned_subs_slice(parts, out, q);
         }
         if let Some(s) = saved {
-            *squote = s;
+            *q = s;
         }
     }
 
@@ -30460,7 +30496,7 @@ impl Shell {
     fn brace_scanned_subs_slice<'a>(
         parts: &'a [WordPart],
         out: &mut Vec<&'a WordPart>,
-        squote: &mut bool,
+        q: &mut ScanQuote,
     ) {
         for p in parts {
             match p {
@@ -30485,12 +30521,24 @@ impl Shell {
                 WordPart::CommandSub { .. }
                 | WordPart::ArithSub { bracket: false, .. }
                 | WordPart::ProcSub { body: ProcSubBody::Unread { .. }, .. } => {
-                    if !*squote {
+                    // A `' … '` run hides all three; a `" … "` run hides only
+                    // the two process-substitution spellings, because the `"`
+                    // sends the scan into `skip_double_quoted`, whose own row
+                    // is the `$(`/`${` pair alone. Measured against bash
+                    // 5.2.37 under `${…@P}`: `A${z:-"P1<(echo hi⏎S1}B` reports
+                    // nothing but `bad substitution`, where the same word
+                    // written `$(` reports the unterminated read first.
+                    let hidden = if q.dquote { Self::procsub_spelling(p) } else { q.squote };
+                    if !hidden {
                         out.push(p);
                     }
                 }
                 // The literal runs *are* the raw text between the constructs,
-                // which is the only text the scan reads a quote out of.
+                // which is the only text the scan reads a quote out of. Each
+                // quote is invisible inside the other's run, exactly as the two
+                // skippers are: `skip_single_quoted` hunts for a `'` and
+                // `skip_double_quoted` for a `"`, and neither knows the other
+                // character at all.
                 WordPart::Literal(t) => {
                     let mut it = t.iter();
                     while let Some(&b) = it.next() {
@@ -30498,13 +30546,26 @@ impl Shell {
                             b'\\' => {
                                 it.next();
                             }
-                            b'\'' => *squote = !*squote,
+                            b'\'' if !q.dquote => q.squote = !q.squote,
+                            b'"' if !q.squote => q.dquote = !q.dquote,
                             _ => {}
                         }
                     }
                 }
-                _ => Self::brace_scanned_subs_in(p, out, squote),
+                _ => Self::brace_scanned_subs_in(p, out, q),
             }
+        }
+    }
+
+    /// Whether `part` is one of the scan's two *process*-substitution
+    /// spellings — the ones `skip_double_quoted` does not have a row for. Both
+    /// carry their delimiter because a body no parser read has one shape for
+    /// all three openers; see [`crate::ast::SubDelim`].
+    fn procsub_spelling(part: &WordPart) -> bool {
+        match part {
+            WordPart::ProcSub { body: ProcSubBody::Unread { .. }, .. } => true,
+            WordPart::CommandSub { body: CmdSubBody::Unread { delim, .. } } => !delim.is_performed(),
+            _ => false,
         }
     }
 

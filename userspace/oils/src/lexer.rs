@@ -1145,6 +1145,32 @@ struct Lexer {
     /// text survives as written is [`Lexer::ansi_c_quote`]'s, and the two come
     /// apart — see there.
     here_text: bool,
+    /// This scan stands in for bash's **brace scan** — `extract_dollar_brace_
+    /// string` — rather than for the expansion that follows it, and the two do
+    /// not read the same text the same way.
+    ///
+    /// The scan is a separate forward pass over the undecoded word, and its
+    /// quote rules are its own: a `' … '` run is stepped over whole
+    /// (`skip_single_quoted`, subst.c:1926-1938), a `"` opens
+    /// `skip_double_quoted`, and `$(`, `<(` and `>(` are **one row**
+    /// (subst.c:1881-1950) — all three handed to `extract_command_subst`, which
+    /// parses the body for its extent and reports what will not parse.
+    /// `expand_word_internal`, coming after, has already lost the `'`s (they are
+    /// ordinary characters to it) and performs only the `$(` spelling.
+    ///
+    /// So a `<(` a *word* lex buries inside a double-quoted run may still be one
+    /// the scan read at brace level, and the report bash prints for it comes
+    /// from the scan, not the expansion. With this flag set, the double-quote
+    /// body reader emits such a run as an [`SubBody::Unread`] segment carrying
+    /// its own spelling — which the expansion prints straight back
+    /// ([`crate::ast::SubDelim::is_performed`]), so the word's value is
+    /// unchanged and only the extent walk gains a construct to read.
+    ///
+    /// Set for the two places a brace scan's text is lexed and the expansion's
+    /// quoting would otherwise hide the construct: [`lex_brace_scan_body`], and
+    /// the `"` run of an unread operand that opened *inside* a `' … '` run —
+    /// where the scan never saw a quote at all.
+    brace_scan: bool,
     /// `$'…'` and `$"…"` are **quote forms** in the text this scan is reading.
     ///
     /// Not the same question as [`Lexer::here_text`], and not derivable from it.
@@ -1824,6 +1850,7 @@ impl Lexer {
             taken: Vec::new(),
             bare_splices: Vec::new(),
             here_text: false,
+            brace_scan: false,
             ansi_c_quote: true,
             cmd_pos: CmdPos::new(),
             cmd_pos_upto: 0,
@@ -2548,6 +2575,31 @@ pub fn lex_bound_verbatim(
 pub fn lex_dquote_body(src: BStr<'_>) -> Result<Vec<Seg>, LexError> {
     let mut lx = Lexer::new(src, ParseOpts::default());
     lx.apply_ctx(ReadCtx::VALUE);
+    lx.read_double_quote_until(false)
+}
+
+/// Lex `src` the way bash's **brace scan** walks it, rather than the way the
+/// expansion after it does — for the text a `${ … }` scan has still to cross
+/// when an extent read has stopped part way down it.
+///
+/// The two differ over exactly one thing here: `extract_dollar_brace_string`
+/// names `$(`, `<(` and `>(` in one row and reads all three
+/// (subst.c:1881-1950), where the expansion performs only the first. So this is
+/// [`lex_dquote_body`] with [`Lexer::brace_scan`] set, which adds the other two
+/// as segments that carry their spelling and are never performed — leaving the
+/// word's value identical and only the extent walk richer.
+///
+/// A `"` in this text is *not* handled here, because the scan's quote state at
+/// this point is not the reader's to know: the run may have opened inside a
+/// `' … '` the scan stepped over whole. The walk that consumes these segments
+/// tracks it over the literal runs instead.
+///
+/// # Errors
+/// Returns [`LexError`] on an unterminated substitution.
+pub fn lex_brace_scan_body(src: BStr<'_>) -> Result<Vec<Seg>, LexError> {
+    let mut lx = Lexer::new(src, ParseOpts::default());
+    lx.apply_ctx(ReadCtx::VALUE);
+    lx.brace_scan = true;
     lx.read_double_quote_until(false)
 }
 
@@ -5196,7 +5248,18 @@ impl Lexer {
                     self.pos += 1;
                     let short = self.here_text || self.opts.tolerant;
                     let outer = std::mem::replace(&mut self.opts.tolerant, short);
+                    // A run that opened *inside* a `' … '` one is a run the
+                    // brace scan never saw: it stepped over the single quotes
+                    // whole and met this text at brace level, where a `<(` is
+                    // read exactly as a `$(` is. So the reader keeps looking
+                    // for those two while the run lasts — see
+                    // [`Lexer::brace_scan`]. Outside a run the `"` is the
+                    // scan's own too, and there `skip_double_quoted` reads the
+                    // `$(` spelling alone, which is what this reader already
+                    // does.
+                    let scan = std::mem::replace(&mut self.brace_scan, in_run && self.here_text);
                     let inner = self.read_double_quote();
+                    self.brace_scan = scan;
                     self.opts.tolerant = outer;
                     segs.push(Seg::Dq(inner?));
                 }
@@ -5863,6 +5926,49 @@ impl Lexer {
                             self.pos += 1;
                         }
                         _ => lit.push(b'\\'),
+                    }
+                }
+                // The brace scan's third and fourth spellings of the `$(` row.
+                // A double-quoted run means nothing to that scan where this
+                // flag is set — see [`Lexer::brace_scan`] — so a `<(` here is
+                // one it read at brace level, and its extent is read exactly as
+                // a `$(`'s is. The segment carries its own delimiter and is
+                // never performed, so the expansion prints the run back
+                // unchanged; only the extent walk gains a construct.
+                //
+                // Whether the *scan* was inside a quote of its own when it got
+                // here is the caller's to know and not this reader's: a `"` in
+                // this text is a byte the scan may still have been outside of
+                // (it sat inside a `' … '` run), and the walk that consumes
+                // these segments tracks that state over the literal runs. See
+                // `Shell::brace_scanned_subs_slice`.
+                '<' | '>' if self.brace_scan && self.at(self.pos + 1) == Some('(') => {
+                    flush_lit(&mut segs, &mut lit);
+                    let delim = if c == '<' { SubDelim::ProcIn } else { SubDelim::ProcOut };
+                    self.pos += 2;
+                    let body = self.pos;
+                    match self.read_subst_body(false) {
+                        Ok(raw) => {
+                            let close = self.cur_line();
+                            segs.push(Seg::CmdSub(raw, close, SubBody::Unread {
+                                closed: true,
+                                delim,
+                            }));
+                        }
+                        // No mate, and in unread text that is not this scan's
+                        // failure either: `extract_command_subst` takes the
+                        // rest of the string for the body and leaves the
+                        // complaint to the expansion's own read.
+                        Err(e) if self.unread_comsub(&e) => {
+                            let src = self.slice(body, self.chars.len());
+                            self.pos = self.chars.len();
+                            let close = self.cur_line();
+                            segs.push(Seg::CmdSub(src, close, SubBody::Unread {
+                                closed: false,
+                                delim,
+                            }));
+                        }
+                        Err(e) => return Err(e.at(self.eof_line())),
                     }
                 }
                 '`' => {

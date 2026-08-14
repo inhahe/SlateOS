@@ -8152,6 +8152,31 @@ pub(crate) fn dquote_word_from_source(s: BStr<'_>, opts: ParseOpts) -> Result<Wo
     Ok(word)
 }
 
+/// Like [`dquote_word_from_source`], but reading `s` the way the `${ … }`
+/// **scan** walks it rather than the way the expansion after it does: a `<( … )`
+/// and a `>( … )` are read for their extent there, exactly as a `$( … )` is
+/// (subst.c:1881-1950). See [`crate::lexer::lex_brace_scan_body`].
+///
+/// The extra parts carry their own spelling and are never performed, so the
+/// word expands to the same bytes [`dquote_word_from_source`] would give; the
+/// difference is only what an extent walk over it finds to read.
+///
+/// # Errors
+/// Returns [`ParseError`] on an unterminated substitution inside `s`.
+pub(crate) fn brace_scan_word_from_source(s: BStr<'_>, opts: ParseOpts) -> Result<Word, ParseError> {
+    if s.is_empty() {
+        return Ok(Word::default());
+    }
+    let segs = crate::lexer::lex_brace_scan_body(s).map_err(|e| ParseError::new(&e.msg))?;
+    let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
+    for seg in &segs {
+        parts.push(seg_to_part(seg, opts, Quoting::Unread)?);
+    }
+    let mut word = Word { parts };
+    crate::unparse::attach_comsub_tails(&mut word);
+    Ok(word)
+}
+
 /// Like [`word_verbatim_from_source`] but for the *replacement* half of
 /// `${var/pat/repl}`: a literal `\&`/`\\` is preserved (not consumed at lex
 /// time) so the runtime `&`-substitution can distinguish an escaped ampersand

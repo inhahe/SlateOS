@@ -45,6 +45,8 @@ mod context;
 mod fallback;
 mod gpos;
 pub mod gsub;
+mod indic;
+mod indic_tables;
 mod joining;
 mod joining_tables;
 mod kern;

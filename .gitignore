@@ -94,3 +94,7 @@ __pycache__/
 # Exception: this saved page is intentionally tracked (reference kept in-repo),
 # even though the blanket *.html rule above ignores saved web pages.
 !Aero Desktop (offline).html
+
+# HarfBuzz sources fetched for reference by the Indic shaper work.
+# Not ours, not built, not shipped.
+.hbref/

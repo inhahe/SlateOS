@@ -59910,14 +59910,53 @@ the earlier 2026-08-14 brace-scan fix.
 Row 2 is a lost diagnostic only; the same row before the brace-scan fix had the
 wrong value *and* ran `f`, so it is much improved.
 
+**A second mechanism loses the same report where the brace *does* close**
+(measured 2026-08-14, `build/pr1.sh` r3). `A${z:-'i"t'<(fi⏎S1}B` reports `fi`
+in bash and expands to `[AZZB]`; osh now gets the value right (it was the
+undecoded word until the unmated-`"` fix of the same day) but still says
+nothing. That path never goes near `extent_read_of_rest`: the brace closed, so
+the reads are replayed off the *parsed operand*, and the operand lexer is
+`read_word_verbatim` in [`Verbatim::Dquote`] — which has a perfectly good `<(`
+row, but never reaches it, because the `"` inside the `' … '` run opens a
+quoted run that swallows `t'<(fi⏎S1` whole.
+
+Both scans are right about their own text and wrong about each other's, which
+is the shape of the whole issue: bash runs **two** passes over these bytes with
+**different quote rules** — `extract_dollar_brace_string`, where a `'` run is
+skipped and a `"` is a quote, and `expand_word_internal`, where a `'` is an
+ordinary character and a `"` is a quote. osh derives the reads from the
+expansion's lex in one path and from a string-level lex in the other, and
+neither is the scan's.
+
 **What the proper fix looks like.** A real lex entry for "text a brace scan is
-walking" — not `lex_dquote_body` with a row bolted on. It needs, at its own
-level: the `<(`/`>(` openers beside `$(`; a `'` that consumes to the next `'`
-or to end of string, offering nothing inside it; and a `"` that consumes to the
-next `"` or to end of string, offering only `$(` (and `` ` ``) inside it. Then
-`extent_read_of_rest` and `unclosed_brace_reads` use it and `lex_dquote_body`
-keeps its current string-level callers unchanged — the p1/p2 probe above
-confirms those answers are right as they stand.
+walking" — not `lex_dquote_body` with a row bolted on, and not the operand lex
+either. It needs, at its own level: the `<(`/`>(` openers beside `$(`; a `'`
+that consumes to the next `'` or to end of string, offering nothing inside it;
+and a `"` that consumes to the next `"` or to end of string, offering only `$(`
+(and `` ` ``) inside it. A backslash hides the byte after it. Then
+`extent_read_of_rest`, `unclosed_brace_reads` **and `brace_extent_scan`** all
+take their reads from that one pass, `lex_dquote_body` keeps its current
+string-level callers unchanged — the p1/p2 probe above confirms those answers
+are right as they stand — and the operand lex stops being asked a question it
+was never answering.
+
+These rows are the acceptance test the table above does not already cover — the
+ones that pin *which* quote wins when the two are interleaved (measured
+2026-08-14 against bash 5.2.37, `build/pr1.sh`):
+
+| word (inside `v='…'`, via `"${v@P}"`) | bash 5.2.37 | osh today |
+|---|---|---|
+| `A${z:-"it's"$(fi⏎S1}B` | reports `fi`, `[AZZB]` | same |
+| `A${z:-"it's"<(fi⏎S1}B` | reports `fi`, `[AZZB]` | same |
+| `A${z:-'i"t'<(fi⏎S1}B` | reports `fi`, `[AZZB]` | **silent**, `[AZZB]` |
+| `A${z:-P1\'<(echo hi⏎S1}B` | reports EOF, `bad substitution` | **silent**, condemned |
+| `A${z:->(echo hi⏎S1}B` | reports EOF, `bad substitution` | **silent**, condemned |
+| `A${z:-${y:-<(fi⏎S1}B` | reports `fi`, `bad substitution` | same |
+
+So a `'` inside a closed `" … "` run opens nothing (rows 1-2) and a `"` inside a
+closed `' … '` run opens nothing (row 3) — each quote is invisible inside the
+other's run — and a backslash spends itself on the quote it precedes, leaving
+the `<(` after it live (row 4).
 
 An attempt that added only the `<(`/`>(` row to `lex_dquote_body` was written
 and reverted on 2026-08-14, before being compiled, because these measurements

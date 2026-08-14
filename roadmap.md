@@ -433,6 +433,11 @@ Roadmap:
   that do not, so a Hebrew point in a Latin-and-Arabic face is placed by
   measurement instead of left at full width. `agree` 11223 → 11709,
   `misplaced` 625 → 139, with every non-Hebrew string byte-identical.
+  That sweep then caught a rendering bug: a `glyf` glyph is drawn at the
+  left side bearing `hmtx` states, not at its stored `xMin`, which every
+  rasterizer knows and we did not
+  (`TD-FONT-DRAWS-A-GLYPH-AT-ITS-STORED-XMIN-NOT-ITS-STATED-BEARING`).
+  `agree` 11709 → 11724.
   Next unblocked step is the rest of shaping: no Indic reordering
   (`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`), no language selection
   (`TD-FONT-IGNORES-LANGSYS-OVERRIDES`), and no device tables in

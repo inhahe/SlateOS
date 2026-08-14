@@ -342,6 +342,28 @@ impl Outline {
         b
     }
 
+    /// Move every point right by `dx` font units.
+    ///
+    /// Used for the one shift a `glyf` outline needs after parsing — see
+    /// [`Face::glyf_shift`].
+    fn translate_x(&mut self, dx: f32) {
+        for cmd in &mut self.commands {
+            match cmd {
+                PathCmd::MoveTo(p) | PathCmd::LineTo(p) => p.x += dx,
+                PathCmd::QuadTo(a, b) => {
+                    a.x += dx;
+                    b.x += dx;
+                }
+                PathCmd::CurveTo(a, b, c) => {
+                    a.x += dx;
+                    b.x += dx;
+                    c.x += dx;
+                }
+                PathCmd::Close => {}
+            }
+        }
+    }
+
     /// Append `other`, transformed by `t`. Used to assemble composites.
     fn extend_transformed(&mut self, other: &Self, t: &Transform) {
         self.commands.reserve(other.commands.len());
@@ -1295,12 +1317,51 @@ impl Face {
         };
         let end = span.off.checked_add(span.len)?;
         let g = self.data.get(span.off..end)?;
+        let dx = self.glyf_shift(gid);
         Some(BBox {
-            x_min: f32::from(i16_at(g, 2)?),
+            x_min: f32::from(i16_at(g, 2)?) + dx,
             y_min: f32::from(i16_at(g, 4)?),
-            x_max: f32::from(i16_at(g, 6)?),
+            x_max: f32::from(i16_at(g, 6)?) + dx,
             y_max: f32::from(i16_at(g, 8)?),
         })
+    }
+
+    /// How far a `glyf` glyph's ink has to move right for it to start at the
+    /// left side bearing `hmtx` states.
+    ///
+    /// The spec says a glyph's stored `xMin` and its `hmtx` left side bearing
+    /// are the same number, and in most fonts, for most glyphs, they are.
+    /// Where they disagree every real rasterizer believes `hmtx` and moves the
+    /// outline: FreeType sets `pp1.x = bbox.xMin - left_bearing` and then
+    /// translates the loaded points by `-pp1.x` (`TT_Process_Simple_Glyph`),
+    /// and HarfBuzz reports `x_bearing = lsb` with the header's width under a
+    /// comment calling it "undocumented rasterizer behavior"
+    /// (`hb-ot-glyf-table.hh`).
+    ///
+    /// Windows ships a font that needs it: `LATINWD.TTF` stores `.notdef` at
+    /// `xMin = 0` with a left side bearing of 68, so its 546-unit box belongs
+    /// centred in the 682-unit cell, not flush against the pen. Reading the
+    /// header alone drew it 68 units too far left and, because the mark
+    /// fallback measures ink boxes, dragged every combining mark on a
+    /// `.notdef` base along with it.
+    ///
+    /// Zero whenever the two agree, whenever the glyph has no outline, and
+    /// whenever `hmtx` cannot answer — never an error, because a face with a
+    /// damaged `hmtx` should still draw.
+    fn glyf_shift(&self, gid: u16) -> f32 {
+        let Ok(Some(span)) = self.glyph_span(gid) else {
+            return 0.0;
+        };
+        let Some(x_min) = span
+            .off
+            .checked_add(span.len)
+            .and_then(|end| self.data.get(span.off..end))
+            .and_then(|g| i16_at(g, 2))
+        else {
+            return 0.0;
+        };
+        self.left_side_bearing(gid)
+            .map_or(0.0, |lsb| f32::from(lsb) - f32::from(x_min))
     }
 
     /// Left side bearing for a glyph, in font units.
@@ -1421,6 +1482,9 @@ impl Face {
         }
         let mut out = Outline::default();
         self.outline_into(gid, &mut out, 0)?;
+        // The points are stored relative to the glyph's own `xMin`; the
+        // rasterizer positions them from `hmtx`. See `glyf_shift`.
+        out.translate_x(self.glyf_shift(gid));
         Ok(out)
     }
 
@@ -1929,7 +1993,18 @@ pub(crate) mod tests {
     /// * glyph 2 — 'B' at U+0042: a triangle with one off-curve point
     /// * glyph 3 — 'C' at U+0043: a composite placing glyph 1 at +500,+200
     pub(crate) fn build_test_font() -> Vec<u8> {
-        assemble(&build_test_tables())
+        assemble(&build_test_tables(TRUE_LSB_3))
+    }
+
+    /// Glyph 3's left side bearing, equal to its stored `xMin` as a
+    /// well-formed font's is. [`build_test_font_with_trailing_lsb`] is how a
+    /// test disagrees with it.
+    const TRUE_LSB_3: i16 = 600;
+
+    /// The fixture with glyph 3's `hmtx` bearing set to `lsb`, which the
+    /// glyph's stored `xMin` of 600 then contradicts.
+    fn build_test_font_with_trailing_lsb(lsb: i16) -> Vec<u8> {
+        assemble(&build_test_tables(lsb))
     }
 
     /// The fixture's tables, before they are laid out.
@@ -1937,7 +2012,7 @@ pub(crate) mod tests {
     /// Separate from [`build_test_font`] so a test can add one more table to
     /// the list — see [`build_test_font_with_gpos_scripts`] — rather than
     /// re-deriving four glyphs and a `cmap` to change one thing.
-    fn build_test_tables() -> Vec<([u8; 4], Vec<u8>)> {
+    fn build_test_tables(lsb_3: i16) -> Vec<([u8; 4], Vec<u8>)> {
         fn be16(v: u16) -> [u8; 2] {
             v.to_be_bytes()
         }
@@ -2032,7 +2107,7 @@ pub(crate) mod tests {
             hmtx.extend_from_slice(&be16(adv));
             hmtx.extend_from_slice(&be16i(lsb));
         }
-        hmtx.extend_from_slice(&be16i(25)); // glyph 3's lsb only
+        hmtx.extend_from_slice(&be16i(lsb_3)); // glyph 3's lsb only
 
         // ---- cmap: one format-4 subtable, platform 3 encoding 1 -------------
         // Segments: 0x41..0x43 -> gids 1..3 (idDelta = 1 - 0x41), then the
@@ -2121,7 +2196,7 @@ pub(crate) mod tests {
         gpos.extend_from_slice(&0u16.to_be_bytes()); // featureCount
         gpos.extend_from_slice(&0u16.to_be_bytes()); // lookupCount
 
-        let mut tables = build_test_tables();
+        let mut tables = build_test_tables(TRUE_LSB_3);
         tables.push((*b"GPOS", gpos));
         tables.sort_unstable_by_key(|&(tag, _)| tag);
         assemble(&tables)
@@ -2225,7 +2300,7 @@ pub(crate) mod tests {
         // but has its own bearing.
         assert_eq!(f.advance(3).unwrap(), 400);
         assert_eq!(f.left_side_bearing(1).unwrap(), 100);
-        assert_eq!(f.left_side_bearing(3).unwrap(), 25);
+        assert_eq!(f.left_side_bearing(3).unwrap(), TRUE_LSB_3);
         assert_eq!(f.advance(4), Err(SfntError::GlyphOutOfRange));
     }
 
@@ -2283,6 +2358,29 @@ pub(crate) mod tests {
         assert_eq!(b.y_min, 200.0);
         assert_eq!(b.x_max, 700.0);
         assert_eq!(b.y_max, 300.0);
+    }
+
+    #[test]
+    fn an_outline_lands_on_the_bearing_hmtx_states_not_its_stored_x_min() {
+        // Glyph 3's header says its ink starts at 600; `hmtx` says 25. Every
+        // real rasterizer believes `hmtx` and moves the outline the 575 units
+        // between them — see `Face::glyf_shift`.
+        let bytes = build_test_font_with_trailing_lsb(25);
+        let f = Face::parse(bytes).unwrap();
+        let o = f.outline(3).unwrap();
+        assert_eq!(
+            o.commands.first(),
+            Some(&PathCmd::MoveTo(Point::new(25.0, 200.0)))
+        );
+        // The reported box moves with the ink, and keeps its width.
+        let b = f.glyph_bbox(3).unwrap();
+        assert_eq!(b.x_min, 25.0);
+        assert_eq!(b.x_max, 125.0);
+        // Vertically nothing moved.
+        assert_eq!(b.y_min, 200.0);
+        assert_eq!(b.y_max, 300.0);
+        // A glyph whose two numbers agree is untouched.
+        assert_eq!(f.glyph_bbox(1).unwrap().x_min, 100.0);
     }
 
     #[test]

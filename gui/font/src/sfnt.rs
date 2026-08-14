@@ -175,8 +175,12 @@ impl Point {
 
 /// One step of a glyph outline.
 ///
-/// TrueType outlines are quadratic only; there is no cubic variant here
-/// because `glyf` cannot express one.
+/// Both curve orders appear because the two outline formats disagree:
+/// `glyf` can only express quadratics, and CFF's Type 2 charstrings can only
+/// express cubics. Converting one to the other is either lossy (cubic to
+/// quadratic needs subdivision to stay under a tolerance) or pointless
+/// (quadratic to cubic inflates every curve for no gain), so the path type
+/// carries both and the rasterizer flattens each in its own terms.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PathCmd {
     /// Start a new contour at this point.
@@ -185,6 +189,8 @@ pub enum PathCmd {
     LineTo(Point),
     /// Quadratic bezier: control point, then end point.
     QuadTo(Point, Point),
+    /// Cubic bezier: two control points, then end point. CFF outlines only.
+    CurveTo(Point, Point, Point),
     /// Close the current contour back to its `MoveTo`.
     Close,
 }
@@ -311,6 +317,11 @@ impl Outline {
                     extend(c);
                     extend(p);
                 }
+                PathCmd::CurveTo(c1, c2, p) => {
+                    extend(c1);
+                    extend(c2);
+                    extend(p);
+                }
                 PathCmd::Close => {}
             }
         }
@@ -325,6 +336,9 @@ impl Outline {
                 PathCmd::MoveTo(p) => PathCmd::MoveTo(t.apply(p)),
                 PathCmd::LineTo(p) => PathCmd::LineTo(t.apply(p)),
                 PathCmd::QuadTo(c, p) => PathCmd::QuadTo(t.apply(c), t.apply(p)),
+                PathCmd::CurveTo(c1, c2, p) => {
+                    PathCmd::CurveTo(t.apply(c1), t.apply(c2), t.apply(p))
+                }
                 PathCmd::Close => PathCmd::Close,
             });
         }

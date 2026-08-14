@@ -184,11 +184,14 @@ impl ScaledFont {
             }
         };
         for cmd in &outline.commands {
-            // A quadratic's control point is an upper bound on the curve,
-            // never a point on it, so only its endpoint counts — which is
-            // why every arm below looks at the endpoint and nothing else.
+            // A curve's control points are an upper bound on the curve, never
+            // points on it, so only the endpoint counts — which is why every
+            // arm below looks at the endpoint and nothing else.
             match *cmd {
-                PathCmd::MoveTo(p) | PathCmd::LineTo(p) | PathCmd::QuadTo(_, p) => note(p.y),
+                PathCmd::MoveTo(p)
+                | PathCmd::LineTo(p)
+                | PathCmd::QuadTo(_, p)
+                | PathCmd::CurveTo(_, _, p) => note(p.y),
                 PathCmd::Close => {}
             }
         }

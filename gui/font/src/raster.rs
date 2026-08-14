@@ -147,6 +147,39 @@ fn quad_segments(p0: Point, ctrl: Point, p1: Point) -> u32 {
     u32::try_from(n.clamp(1, 256)).unwrap_or(1)
 }
 
+/// Subdivision count for a cubic bezier, on the same error budget as
+/// [`quad_segments`].
+///
+/// The chord error over a sub-interval of length `h` is at most
+/// `h²·max|B''|/8`. A quadratic's second derivative is the constant
+/// `2(p0 - 2c + p1)`; a cubic's is `6[(1-t)·d1 + t·d2]` with
+/// `d1 = p0 - 2c1 + c2` and `d2 = c1 - 2c2 + p1`, so it is bounded by
+/// `6·max(|d1|, |d2|)` — three times as large as a quadratic's for the same
+/// deviation magnitude. Holding the error fixed therefore needs `sqrt(3)`
+/// times as many segments, which is why the constant here is `3⁴ = 81` times
+/// [`quad_segments`]'s: the count is a fourth root, so a factor of `sqrt(3)`
+/// in `n` is a factor of `9` inside it, applied to a `dev_sq` that is itself
+/// a square.
+fn cubic_segments(p0: Point, c1: Point, c2: Point, p1: Point) -> u32 {
+    const TOLERANCE: f32 = 27.0;
+    let d1x = p0.x - 2.0 * c1.x + c2.x;
+    let d1y = p0.y - 2.0 * c1.y + c2.y;
+    let d2x = c1.x - 2.0 * c2.x + p1.x;
+    let d2y = c1.y - 2.0 * c2.y + p1.y;
+    let dev_sq = d1x
+        .mul_add(d1x, d1y * d1y)
+        .max(d2x.mul_add(d2x, d2y * d2y));
+    // Below this the formula yields less than one segment anyway.
+    if dev_sq < 1.0 / 27.0 {
+        return 1;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    // As in `quad_segments`: a fourth root of a bounded positive float,
+    // clamped straight afterwards.
+    let n = (TOLERANCE * dev_sq).sqrt().sqrt().floor() as i64;
+    u32::try_from(n.clamp(1, 256)).unwrap_or(1)
+}
+
 // ---------------------------------------------------------------------------
 // The accumulator
 // ---------------------------------------------------------------------------
@@ -407,6 +440,11 @@ fn outline_bounds(outline: &Outline, scale: f32) -> Result<Option<Bounds>, Raste
                 note(to_px(ctrl));
                 note(to_px(p));
             }
+            PathCmd::CurveTo(c1, c2, p) => {
+                note(to_px(c1));
+                note(to_px(c2));
+                note(to_px(p));
+            }
             PathCmd::Close => {}
         }
     }
@@ -427,6 +465,27 @@ fn flatten_quad(acc: &mut Accumulator, from: Point, ctrl: Point, to: Point) {
         // de Casteljau, written out: B(t) = (1-t)^2 from + 2(1-t)t ctrl + t^2 to
         let bx = mt.mul_add(mt * from.x, (2.0 * mt * t).mul_add(ctrl.x, t * t * to.x));
         let by = mt.mul_add(mt * from.y, (2.0 * mt * t).mul_add(ctrl.y, t * t * to.y));
+        let pt = Point::new(bx, by);
+        acc.line(prev, pt);
+        prev = pt;
+    }
+}
+
+/// Append a cubic Bézier to `acc` as a fan of line segments.
+fn flatten_cubic(acc: &mut Accumulator, from: Point, c1: Point, c2: Point, to: Point) {
+    let steps = cubic_segments(from, c1, c2, to);
+    let inv = 1.0 / f32::from(u16::try_from(steps).unwrap_or(1));
+    let mut prev = from;
+    for i in 1..=steps {
+        let t = f32::from(u16::try_from(i).unwrap_or(1)) * inv;
+        let mt = 1.0 - t;
+        // B(t) = (1-t)^3 from + 3(1-t)^2 t c1 + 3(1-t) t^2 c2 + t^3 to
+        let w0 = mt * mt * mt;
+        let w1 = 3.0 * mt * mt * t;
+        let w2 = 3.0 * mt * t * t;
+        let w3 = t * t * t;
+        let bx = w0.mul_add(from.x, w1.mul_add(c1.x, w2.mul_add(c2.x, w3 * to.x)));
+        let by = w0.mul_add(from.y, w1.mul_add(c1.y, w2.mul_add(c2.y, w3 * to.y)));
         let pt = Point::new(bx, by);
         acc.line(prev, pt);
         prev = pt;
@@ -518,6 +577,13 @@ pub fn rasterize(outline: &Outline, scale: f32) -> Result<GlyphMask, RasterError
                 flatten_quad(&mut acc, cur, ctrl, p);
                 cur = p;
             }
+            PathCmd::CurveTo(c1, c2, p) => {
+                let c1 = place(to_px(c1));
+                let c2 = place(to_px(c2));
+                let p = place(to_px(p));
+                flatten_cubic(&mut acc, cur, c1, c2, p);
+                cur = p;
+            }
             PathCmd::Close => {
                 if cur != start {
                     acc.line(cur, start);
@@ -561,6 +627,23 @@ mod tests {
         mask.coverage.iter().map(|c| f32::from(*c) / 255.0).sum()
     }
 
+    /// The bounding box of the pixels that actually got ink, in the mask's
+    /// own placed coordinates (`left`/`top` applied), so that two masks with
+    /// different buffer sizes can still be compared.
+    fn ink_box(mask: &GlyphMask) -> (i32, i32, i32, i32) {
+        let mut b = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+        for y in 0..mask.height {
+            for x in 0..mask.width {
+                if mask.at(x, y) == 0 {
+                    continue;
+                }
+                let (px, py) = (mask.left + x as i32, mask.top + y as i32);
+                b = (b.0.min(px), b.1.min(py), b.2.max(px), b.3.max(py));
+            }
+        }
+        b
+    }
+
     fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> Vec<PathCmd> {
         vec![
             PathCmd::MoveTo(Point::new(x0, y0)),
@@ -580,6 +663,119 @@ mod tests {
             PathCmd::LineTo(Point::new(x1, y0)),
             PathCmd::Close,
         ]
+    }
+
+    /// The cubic that traces exactly the same curve as a given quadratic.
+    ///
+    /// Every quadratic is a cubic whose control points sit two-thirds of the
+    /// way from each endpoint towards the quadratic's single control point.
+    /// This is an identity, not an approximation, which is what makes it a
+    /// usable oracle: the cubic code path has to agree with the quadratic one
+    /// to within flattening error and nothing else.
+    fn elevate(p0: Point, c: Point, p1: Point) -> PathCmd {
+        const TWO_THIRDS: f32 = 2.0 / 3.0;
+        PathCmd::CurveTo(
+            Point::new(
+                TWO_THIRDS.mul_add(c.x - p0.x, p0.x),
+                TWO_THIRDS.mul_add(c.y - p0.y, p0.y),
+            ),
+            Point::new(
+                TWO_THIRDS.mul_add(c.x - p1.x, p1.x),
+                TWO_THIRDS.mul_add(c.y - p1.y, p1.y),
+            ),
+            p1,
+        )
+    }
+
+    #[test]
+    fn a_cubic_draws_the_same_shape_as_the_quadratic_it_elevates() {
+        let p0 = Point::new(0.0, 0.0);
+        let c = Point::new(50.0, 200.0);
+        let p1 = Point::new(100.0, 0.0);
+
+        let quad = Outline {
+            commands: vec![
+                PathCmd::MoveTo(p0),
+                PathCmd::QuadTo(c, p1),
+                PathCmd::LineTo(p0),
+                PathCmd::Close,
+            ],
+        };
+        let cubic = Outline {
+            commands: vec![
+                PathCmd::MoveTo(p0),
+                elevate(p0, c, p1),
+                PathCmd::LineTo(p0),
+                PathCmd::Close,
+            ],
+        };
+
+        let a = rasterize(&quad, 1.0).unwrap();
+        let b = rasterize(&cubic, 1.0).unwrap();
+        // The two masks are *not* the same size, and should not be: the
+        // bounding box is taken over control points, and elevation moves the
+        // control point from the quadratic's y=200 down to two cubic controls
+        // at y=133. Both bound the same curve, whose peak is at y=100. So the
+        // comparison has to be of the ink, in absolute coordinates.
+        assert_eq!(
+            ink_box(&a),
+            ink_box(&b),
+            "the two curves cover different pixels"
+        );
+        // Both are flattened, with different segment counts, so the two masks
+        // differ by a sliver along the curve rather than not at all. A
+        // half-percent of the ink is far tighter than any wrong evaluation of
+        // the cubic basis could land.
+        let (ia, ib) = (ink(&a), ink(&b));
+        assert!(ia > 100.0, "the oracle drew nothing: {ia}");
+        assert!(
+            (ia - ib).abs() < ia * 0.005,
+            "cubic ink {ib} differs from the equivalent quadratic's {ia}"
+        );
+    }
+
+    #[test]
+    fn a_degenerate_cubic_is_a_straight_edge() {
+        // Controls on the chord: the curve *is* the chord, so the result must
+        // be the triangle, not something bulging off it.
+        let tri = |mid: PathCmd| Outline {
+            commands: vec![
+                PathCmd::MoveTo(Point::new(0.0, 0.0)),
+                PathCmd::LineTo(Point::new(40.0, 0.0)),
+                mid,
+                PathCmd::Close,
+            ],
+        };
+        let straight = rasterize(&tri(PathCmd::LineTo(Point::new(0.0, 40.0))), 1.0).unwrap();
+        let curved = rasterize(
+            &tri(PathCmd::CurveTo(
+                Point::new(26.666_666, 13.333_333),
+                Point::new(13.333_333, 26.666_666),
+                Point::new(0.0, 40.0),
+            )),
+            1.0,
+        )
+        .unwrap();
+        let (a, b) = (ink(&straight), ink(&curved));
+        assert!((a - 800.0).abs() < 2.0, "the oracle is not the triangle: {a}");
+        assert!((a - b).abs() < 1.0, "a flat cubic drew {b}, not the triangle's {a}");
+    }
+
+    #[test]
+    fn a_tighter_cubic_gets_more_segments() {
+        let p0 = Point::new(0.0, 0.0);
+        let p1 = Point::new(100.0, 0.0);
+        let gentle = cubic_segments(p0, Point::new(33.0, 1.0), Point::new(66.0, 1.0), p1);
+        let tight = cubic_segments(p0, Point::new(33.0, 300.0), Point::new(66.0, 300.0), p1);
+        assert!(gentle < tight, "gentle {gentle} was not cheaper than tight {tight}");
+        assert!(tight <= 256, "segment count is unbounded: {tight}");
+        // Same deviation, more curvature to resolve: a cubic must not be
+        // flattened as coarsely as a quadratic.
+        let quad = quad_segments(p0, Point::new(50.0, 300.0), p1);
+        assert!(
+            tight > quad,
+            "cubic {tight} used no more segments than quadratic {quad}"
+        );
     }
 
     #[test]

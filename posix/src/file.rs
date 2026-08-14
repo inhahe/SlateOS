@@ -7147,10 +7147,12 @@ mod tests {
 
     #[test]
     fn test_realpath_chk_null_path() {
+        // Delegates to `realpath`, which rejects a NULL path with EINVAL
+        // in userspace (glibc stdlib/canonicalize.c), not EFAULT.
         let mut buf = [0u8; 256];
         let result = __realpath_chk(core::ptr::null(), buf.as_mut_ptr(), 256);
         assert!(result.is_null());
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     // -- *at() functions with AT_FDCWD delegate to non-at versions --

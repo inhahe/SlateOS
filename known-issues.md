@@ -57758,3 +57758,49 @@ Two ways to make deferring the shootdown actually sound:
 invisible gap into a measured one — it says whether this is a once-a-boot event
 or a never event, which decides whether (a)/(b) is worth its risk at all, and it
 is the only way to tell afterwards that the fix worked.
+
+---
+
+### [B] D-POSIX-NULL-POINTER-ERRNO-NEEDS-A-PER-FUNCTION-AUDIT. The rest of `posix/`'s `is_null() -> EFAULT` checks have not been classified against glibc — 2026-08-13 — OPEN (tech debt)
+
+**Where:** `posix/src/**` — every `if p.is_null() { set_errno(EFAULT); … }`.
+
+**What.** An undocumented sweep (referred to in `todo.txt` only as "Phase 215")
+applied a blanket rule that any NULL pointer argument to a `posix/` entry point
+yields `EFAULT`. A following phase then edited the tests that disagreed with the
+sweep so they asserted `EFAULT` too, which made the divergence invisible: code
+and test agreed, and both were wrong.
+
+The blanket rule is correct wherever the pointer is forwarded to a syscall —
+Linux's `copy_from_user` rejects the unmapped NULL page with `EFAULT`, so
+`open(NULL, …)`, `stat(NULL, …)`, `getxattr(NULL, …)` and friends match Linux.
+It is wrong wherever glibc implements the function in userspace and rejects the
+NULL argument itself with an early return, because no syscall is ever issued and
+glibc's own errno is `EINVAL`.
+
+Four such functions were found and fixed on 2026-08-13 (see
+`design-decisions.md` §300 for the policy and the glibc citations):
+
+- `ptsname_r(fd, NULL, n)` → `EINVAL` (`posix/src/ioctl.rs`)
+- `realpath(NULL, buf)` → `EINVAL` (`posix/src/unistd.rs`)
+- `canonicalize_file_name(NULL)` → `EINVAL` (`posix/src/unistd.rs`)
+- `__realpath_chk(NULL, …)` → `EINVAL` (`posix/src/file.rs`, delegates)
+
+**What remains.** The other NULL checks in `posix/` have *not* been individually
+classified. This entry is open for coverage, not because any specific remaining
+site is suspected wrong: the `xattr`, `stat`, and `file` NULL-path checks
+spot-checked during the fix are all syscall-forwarding and correctly `EFAULT`.
+
+**Reproduce.** Not a runtime failure. `rg 'is_null\(\).*\n.*EFAULT' posix/src`
+enumerates the candidate sites; each has to be checked against the corresponding
+glibc translation unit.
+
+**Proper fix.** Walk the list once. For each site decide: does the pointer reach
+a syscall (keep `EFAULT`) or does glibc reject it in userspace (use glibc's
+errno)? Where it is the latter, change the code, change the test, and put the
+glibc file name and its actual check in a comment at both — a test that encodes
+an errno with no upstream citation is only evidence that the code and the test
+were written by the same pass. Doing this needs `D:\refsrc\` to gain a glibc
+checkout alongside the bash one (see `TOOLING-BASH-5.2.37-SOURCE`); until then
+each function has to be reasoned about from its man page and POSIX text, which
+is slower and slightly less certain.

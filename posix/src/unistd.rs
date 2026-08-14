@@ -1484,6 +1484,8 @@ pub extern "C" fn confstr(name: i32, buf: *mut u8, len: usize) -> usize {
 /// bytes.  If null, returns null with `EINVAL` (POSIX allows malloc
 /// fallback, but we are `no_std`).
 ///
+/// A null `path` also returns null with `EINVAL`, matching glibc.
+///
 /// **Limitation**: symlinks are not followed.  The returned path has
 /// `.`/`..` resolved and is absolute, but intermediate symlink
 /// components are not dereferenced.  This matches `realpath -s`
@@ -1493,7 +1495,15 @@ pub extern "C" fn confstr(name: i32, buf: *mut u8, len: usize) -> usize {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn realpath(path: *const u8, resolved_path: *mut u8) -> *mut u8 {
     if path.is_null() {
-        errno::set_errno(errno::EFAULT);
+        // EINVAL, not EFAULT: glibc's realpath is implemented entirely in
+        // userspace and opens with an explicit
+        //   `if (name == NULL) { __set_errno (EINVAL); return NULL; }`
+        // (stdlib/canonicalize.c, citing SUSv2 "must return an error if
+        // either parameter is a null pointer") *before* the path is ever
+        // dereferenced or handed to a syscall.  A NULL `path` is therefore
+        // an argument-domain error here, unlike the raw path-taking
+        // syscalls where the kernel reports a bad user pointer as EFAULT.
+        errno::set_errno(errno::EINVAL);
         return core::ptr::null_mut();
     }
     if resolved_path.is_null() {
@@ -1550,7 +1560,8 @@ pub extern "C" fn realpath(path: *const u8, resolved_path: *mut u8) -> *mut u8 {
 /// returned pointer.
 ///
 /// Returns a `malloc`'d null-terminated string on success, or null on
-/// error with errno set.
+/// error with errno set.  A null `path` returns null with `EINVAL`,
+/// matching glibc (which forwards straight to `__realpath`).
 ///
 /// # Safety
 ///
@@ -1558,7 +1569,10 @@ pub extern "C" fn realpath(path: *const u8, resolved_path: *mut u8) -> *mut u8 {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn canonicalize_file_name(path: *const u8) -> *mut u8 {
     if path.is_null() {
-        errno::set_errno(errno::EFAULT);
+        // EINVAL, not EFAULT: glibc implements this as `__realpath (name,
+        // NULL)`, and __realpath rejects a NULL `name` with EINVAL before
+        // dereferencing it.  See the note on `realpath` above.
+        errno::set_errno(errno::EINVAL);
         return core::ptr::null_mut();
     }
 
@@ -5475,10 +5489,13 @@ mod tests {
 
     #[test]
     fn test_realpath_null_path() {
+        // glibc rejects a NULL `name` with EINVAL in userspace before the
+        // pointer is ever dereferenced (stdlib/canonicalize.c), so this is
+        // an argument-domain error, not a fault.
         let mut buf = [0u8; PATH_MAX];
         let ret = realpath(core::ptr::null(), buf.as_mut_ptr());
         assert!(ret.is_null());
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     #[test]
@@ -5505,9 +5522,11 @@ mod tests {
 
     #[test]
     fn test_canonicalize_file_name_null() {
+        // glibc: canonicalize_file_name(NULL) == realpath(NULL, NULL) ==
+        // EINVAL, rejected in userspace before any dereference.
         let ret = canonicalize_file_name(core::ptr::null());
         assert!(ret.is_null());
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     #[test]

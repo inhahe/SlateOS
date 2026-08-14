@@ -2780,11 +2780,13 @@ mod tests {
     // --- ptsname_r ---
 
     #[test]
-    fn test_ptsname_r_null_buf_efault() {
+    fn test_ptsname_r_null_buf_einval() {
+        // glibc's __ptsname_r starts with `if (buf == NULL) return EINVAL;`
+        // *before* dereferencing, and POSIX lists EINVAL for a NULL buf.
         let fd = open_test_fd();
         crate::errno::set_errno(0);
         assert_eq!(ptsname_r(fd, core::ptr::null_mut(), 64), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
         let _ = fdtable::close_fd(fd);
     }
 
@@ -2818,11 +2820,12 @@ mod tests {
 
     #[test]
     fn test_ptsname_r_null_buf_beats_bad_fd() {
-        // NULL buf is rejected with EFAULT even when fd would also fail.
-        // This documents the priority order.
+        // NULL buf is rejected with EINVAL even when fd would also fail.
+        // This documents the priority order, and matches glibc, whose
+        // NULL-buf check precedes any use of the descriptor.
         crate::errno::set_errno(0);
         assert_eq!(ptsname_r(-1, core::ptr::null_mut(), 64), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]
@@ -2888,10 +2891,11 @@ mod tests {
 
     #[test]
     fn test_buggy_ptsname_r_with_null_buf() {
-        // Common bug: caller forgets to allocate the buffer.
+        // Common bug: caller forgets to allocate the buffer.  Reported as
+        // EINVAL (argument-domain error), matching glibc/POSIX.
         crate::errno::set_errno(0);
         assert_eq!(ptsname_r(0, core::ptr::null_mut(), 64), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 }
 
@@ -3018,7 +3022,14 @@ pub extern "C" fn ptsname(fd: i32) -> *mut u8 {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ptsname_r(fd: i32, buf: *mut u8, _buflen: usize) -> i32 {
     if buf.is_null() {
-        crate::errno::set_errno(crate::errno::EFAULT);
+        // EINVAL, not EFAULT: glibc's __ptsname_r rejects a NULL buffer
+        // with an explicit `if (buf == NULL) return EINVAL;` *before* it
+        // ever dereferences the pointer, so this is an argument-domain
+        // error rather than a fault.  POSIX likewise lists EINVAL for a
+        // NULL `buf`.  (A blanket NULL->EFAULT sweep briefly changed this
+        // to EFAULT; the divergence is user-visible to portable callers
+        // that branch on EINVAL, so it is restored here.)
+        crate::errno::set_errno(crate::errno::EINVAL);
         return -1;
     }
     if fd < 0 {

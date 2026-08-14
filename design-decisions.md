@@ -9096,3 +9096,88 @@ be collapsed to uniform `&Path` later by a mechanical pass over the call sites
 once the churn has settled. Decision 3 is confined to `json_push_path` /
 `json_extract_path` in `fs/journal.rs`; switching to base64 or to surrogate
 escapes is a two-function change plus a format-version bump.
+
+---
+
+## §300 — A NULL pointer is `EFAULT` only where the kernel would see it; glibc's own pre-checks keep their `EINVAL`
+
+**Date:** 2026-08-13
+**Decided by:** Claude (autonomous)
+
+### The problem
+
+`posix/` had a blanket rule, applied by an undocumented sweep (recorded only
+obliquely in `todo.txt` as "Phase 215"), that any NULL pointer argument to a
+libc entry point is reported as `EFAULT`. A follow-up phase then "fixed" the
+tests that disagreed with the sweep, cementing the behaviour with green tests.
+
+The rule is right most of the time and wrong in a specific, identifiable class
+of cases. It is right whenever the pointer is forwarded to a syscall: Linux
+validates user pointers in `copy_from_user`/`copy_to_user`, a NULL page is not
+mapped, and the kernel returns `EFAULT`. So `open(NULL, …)`, `stat(NULL, …)`,
+`getxattr(NULL, …)` all correctly produce `EFAULT`, and our sweep matched
+Linux there.
+
+It is wrong whenever the function is implemented *entirely in userspace* and
+glibc rejects the NULL argument with an explicit early return, before the
+pointer is ever dereferenced or handed to the kernel. Those functions produce
+`EINVAL`, and no syscall is issued at all, so there is no kernel to produce an
+`EFAULT`. Four of ours had drifted:
+
+| Function | glibc source | glibc errno | ours (before) |
+|---|---|---|---|
+| `ptsname_r(fd, NULL, n)` | `sysdeps/unix/sysv/linux/ptsname.c` — `if (buf == NULL) { __set_errno (EINVAL); return EINVAL; }` | `EINVAL` | `EFAULT` |
+| `realpath(NULL, buf)` | `stdlib/canonicalize.c` — `if (name == NULL) { __set_errno (EINVAL); return NULL; }`, citing SUSv2 | `EINVAL` | `EFAULT` |
+| `canonicalize_file_name(NULL)` | forwards to `__realpath (name, NULL)` | `EINVAL` | `EFAULT` |
+| `__realpath_chk(NULL, …)` | forwards to `realpath` | `EINVAL` | `EFAULT` |
+
+In `ptsname_r`'s case the *doc comment on our own function* already said
+`buf == NULL -> EINVAL`; only the body and the tests said otherwise, which is
+how the divergence survived review.
+
+### Decision
+
+The policy is stated positively rather than as a blanket:
+
+> **`EFAULT` is what the kernel reports for a pointer it cannot access.** Use
+> it in `posix/` when the argument would reach a syscall. When a function is
+> implemented in userspace and upstream glibc rejects the argument itself with
+> an early return, mirror glibc's errno — which for a NULL argument is
+> `EINVAL`, an argument-domain error, not a fault.
+
+The four functions above now return `EINVAL`, each with a comment naming the
+glibc translation unit and quoting its check, so the next sweep has something
+to read before it changes them back. Their tests assert `EINVAL` and carry the
+same citation; `test_ptsname_r_null_buf_efault` was renamed to
+`…_null_buf_einval` so the test name cannot re-assert the wrong contract.
+
+### Alternatives considered
+
+**Keep the blanket `EFAULT`.** Simpler to state, and uniform: one rule, no
+per-function research, no risk of a half-applied sweep. But it is wrong in a
+way that is visible to real programs. A portable caller that branches on
+`EINVAL` — the errno POSIX documents for `ptsname_r`'s NULL `buf`, and the one
+every Linux man page shows — takes the wrong branch on SlateOS. The whole
+point of the compatibility layer is that unmodified Linux binaries behave as
+they do on Linux; "uniform but divergent" is the failure mode this project
+exists to avoid, and it is exactly the "correct-but-naive" pattern CLAUDE.md
+warns about.
+
+**Make it configurable / strict-vs-lenient mode.** Rejected as unjustified
+machinery: there is a single correct answer per function (whatever glibc
+does), so there is nothing for a knob to select.
+
+### Consequences
+
+- The rule now requires *reading glibc* for each NULL check rather than
+  applying a regex. That is the cost, and it is the right cost — it is the
+  same discipline the rest of the compatibility layer already uses.
+- A future audit should sweep the remaining `is_null() -> EFAULT` sites in
+  `posix/` and classify each as syscall-forwarding (keep `EFAULT`) or
+  userspace-pre-check (switch to glibc's errno). The `xattr`, `stat`, and
+  `file` NULL-path checks spot-checked during this change are all
+  syscall-forwarding and correctly `EFAULT`; the audit is about coverage, not
+  a suspicion that more are wrong.
+- Tests that encode an errno now carry a one-line citation of the upstream
+  source. Without it, a test is only evidence that the code and the test were
+  written by the same pass — which is precisely what happened here.

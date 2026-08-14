@@ -437,7 +437,11 @@ Roadmap:
   left side bearing `hmtx` states, not at its stored `xMin`, which every
   rasterizer knows and we did not
   (`TD-FONT-DRAWS-A-GLYPH-AT-ITS-STORED-XMIN-NOT-ITS-STATED-BEARING`).
-  `agree` 11709 → 11724.
+  `agree` 11709 → 11724. And a mark's advance is zeroed on either of
+  HarfBuzz's two independent grounds rather than only the fallback's, so a
+  face with a `GPOS` but no `GDEF` no longer charges a full box per mark
+  (`TD-FONT-ZEROES-A-MARKS-ADVANCE-ONLY-WHEN-THE-FALLBACK-RUNS`).
+  `agree` 11724 → 11777, `misplaced` 139 → 71.
   Next unblocked step is the rest of shaping: no Indic reordering
   (`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`), no language selection
   (`TD-FONT-IGNORES-LANGSYS-OVERRIDES`), and no device tables in

@@ -125,6 +125,18 @@ impl MarkPositioning {
         })
     }
 
+    /// Whether the face's `GDEF` classifies glyphs at all.
+    ///
+    /// The question is about the table, not about any one glyph: a face with a
+    /// `GlyphClassDef` has stated which of its glyphs are marks, and a glyph it
+    /// leaves out is a glyph it declined to call a mark. A face without one has
+    /// stated nothing, and the shaper has to work the answer out from the
+    /// characters instead — HarfBuzz's `fallback_glyph_classes`, which is
+    /// exactly `!hb_ot_layout_has_glyph_classes (face)`.
+    pub(crate) fn classifies(&self) -> bool {
+        self.class_def.is_some()
+    }
+
     /// Whether `glyph` is a combining mark — one that is drawn onto what
     /// precedes it rather than after it.
     pub(crate) fn is_mark(&self, data: &[u8], glyph: u16) -> bool {

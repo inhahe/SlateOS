@@ -501,6 +501,22 @@ impl ScaledFont {
         // the last two differently, see [`fallback::zeroes_mark_advances`].
         // Walked forward with the loop rather than searched, since all three
         // are in piece order.
+        // Whether this face leaves it to the shaper to say which glyphs are
+        // marks. A face with a `GDEF` `GlyphClassDef` has stated it, and a
+        // glyph the table omits is one it declined to call a mark; a face
+        // without one has stated nothing, and the general category of the
+        // *character* is the only answer available. HarfBuzz's
+        // `fallback_glyph_classes`, and — this is the part that was missing —
+        // it has nothing to do with whether `GPOS` applies, because zeroing a
+        // mark's advance happens twice on two different grounds:
+        // `zero_mark_widths_by_gdef` runs on every face and reads the glyph's
+        // class, while the measuring fallback's own `zero_mark_advances` runs
+        // only when the fallback does and reads the character's general
+        // category. `DejaVuMathTeXGyre.ttf` on Thai needs the first: it has a
+        // `GPOS` so no fallback runs, and no `GDEF` at all so the classes are
+        // synthesized, and HarfBuzz zeroes two `Mn` characters it cannot draw
+        // where we charged them a full missing-glyph box each.
+        let by_category = !self.face.classifies_glyphs();
         let mut run = 0usize;
         let mut synth = runs.first().is_none_or(|&(_, t)| !self.applies_gpos(t));
         let mut placeable = runs.first().is_none_or(|&(_, t)| fallback::positions_marks(t));
@@ -530,13 +546,17 @@ impl ScaledFont {
                 } else {
                     0
                 },
-                // Gated on `zeroed` and not on `placeable`, which is the whole
-                // point of the two fields being separate: declining to *place*
-                // a script's marks is not a claim that they are not marks, and
-                // for all but ten scripts a mark takes no room either way. Nor
-                // is it gated on the combining class, which is an ordering and
-                // leaves plenty of marks at zero.
-                mark: synth && zeroed && !tab && norm::is_mark(ch),
+                // Either of HarfBuzz's two zeroing passes is enough, and they
+                // are gated on different things — see `by_category`. The
+                // fallback's own pass runs exactly when the fallback does, so
+                // it takes `placeable`; the `GDEF` pass runs on every face but
+                // is switched off entirely for the ten scripts of
+                // [`fallback::zeroes_mark_advances`], so it takes `zeroed`.
+                // Neither is gated on the combining class, which is an ordering
+                // and leaves plenty of marks at zero.
+                mark: !tab
+                    && norm::is_mark(ch)
+                    && ((synth && placeable) || (by_category && zeroed)),
                 ..SubGlyph::cursive(gid, cluster, forms.get(i).copied().flatten())
             });
             tabs.push(tab);
@@ -1420,7 +1440,10 @@ pub fn blit_mask(mask: &GlyphMask, target: &mut Target<'_>, x: i32, y: i32) {
 )]
 mod tests {
     use super::*;
-    use crate::sfnt::tests::{build_test_font, build_test_font_with_gpos_scripts};
+    use crate::sfnt::tests::{
+        build_test_font, build_test_font_with_gdef_classes, build_test_font_with_gpos_scripts,
+        build_test_font_with_layout,
+    };
 
     fn font(px: f32) -> ScaledFont {
         ScaledFont::from_bytes(build_test_font(), px).unwrap()
@@ -1431,18 +1454,25 @@ mod tests {
     /// exactly the case this is about. The point is still a point.
     const POINTED: &str = "\u{5dc}\u{5b8}";
 
-    /// A face that registers `scripts` in its `GPOS`, shaping [`POINTED`] at
-    /// the em size, reports these advances.
+    /// How far below the baseline each glyph is drawn, shaping [`POINTED`] at
+    /// the em size against a face that registers `scripts` in its `GPOS`.
     ///
     /// The em size so the numbers are the font's own units: the fixture is a
-    /// 1000-unit em and `.notdef` is 600 units wide.
-    fn pointed_advances(scripts: &[[u8; 4]]) -> Vec<f32> {
+    /// 1000-unit em, `.notdef` is 600 units wide, and the fallback's clearance
+    /// is `upem / 16` = 62.
+    ///
+    /// The *vertical* offset, and not the advance which this used to read,
+    /// because the advance no longer answers the question: a face with no
+    /// `GDEF` zeroes a mark's advance whether or not anything placed it — see
+    /// `by_category` in `shape`. Nothing but the measuring fallback ever moves
+    /// a glyph off the baseline, so a non-zero drop here means it ran.
+    fn pointed_drops(scripts: &[[u8; 4]]) -> Vec<f32> {
         let f = ScaledFont::from_bytes(build_test_font_with_gpos_scripts(scripts), 1000.0)
             .unwrap();
         f.shape(POINTED)
             .glyphs()
             .iter()
-            .map(|g| g.advance)
+            .map(|g| g.offset.1)
             .collect()
     }
 
@@ -1459,28 +1489,30 @@ mod tests {
     /// and 6 disagreements on the corpus's pointed-Hebrew string.
     #[test]
     fn a_hebrew_run_refuses_a_gpos_written_for_another_script() {
-        // No `hebr`: the fallback runs, and a mark takes no room.
+        // No `hebr`: the fallback runs, and the point is measured onto the
+        // underside of its letter — one clearance below the baseline, since
+        // `.notdef` here draws nothing and its box is empty.
         for scripts in [
             [*b"DFLT", *b"arab", *b"latn"].as_slice(),
             [*b"latn"].as_slice(),
             [*b"cyrl", *b"grek"].as_slice(),
         ] {
             assert_eq!(
-                pointed_advances(scripts),
-                alloc::vec![600.0, 0.0],
+                pointed_drops(scripts),
+                alloc::vec![0.0, -62.0],
                 "a GPOS naming {scripts:?} says nothing about Hebrew"
             );
         }
         // `hebr` present: the face has been written with Hebrew in mind, so it
         // is taken at its word even though this `GPOS` positions nothing, and
-        // the point keeps the advance `hmtx` gave it.
+        // the point is left on the baseline where `hmtx` put it.
         for scripts in [
             [*b"hebr"].as_slice(),
             [*b"DFLT", *b"hebr", *b"latn"].as_slice(),
         ] {
             assert_eq!(
-                pointed_advances(scripts),
-                alloc::vec![600.0, 600.0],
+                pointed_drops(scripts),
+                alloc::vec![0.0, 0.0],
                 "a GPOS naming {scripts:?} owns its Hebrew"
             );
         }
@@ -1492,26 +1524,71 @@ mod tests {
     /// simply always falling back, or never.
     #[test]
     fn a_latin_run_takes_whatever_gpos_the_face_offers() {
-        // 'A' plus a combining acute, which is an `Mn` mark and so would be
-        // zeroed by the fallback. The fixture has no glyph for the acute.
+        // 'A' plus a combining acute, which is an `Mn` mark. The fixture has no
+        // glyph for the acute, so it comes out `.notdef` — 600 units wide and
+        // drawing nothing.
         let acute = "A\u{301}";
-        let advances = |scripts: &[[u8; 4]]| -> Vec<f32> {
-            ScaledFont::from_bytes(build_test_font_with_gpos_scripts(scripts), 1000.0)
+        let shaped = |bytes: Vec<u8>| -> Vec<(f32, f32)> {
+            ScaledFont::from_bytes(bytes, 1000.0)
                 .unwrap()
                 .shape(acute)
                 .glyphs()
                 .iter()
-                .map(|g| g.advance)
+                .map(|g| (g.advance, g.offset.1))
                 .collect::<Vec<_>>()
         };
+        let with_gpos =
+            |scripts: &[[u8; 4]]| shaped(build_test_font_with_gpos_scripts(scripts));
         // 'A' is glyph 1, 300 units wide. A `GPOS` under `DFLT` alone still
-        // covers a Latin run, so no fallback and the acute keeps its width.
-        assert_eq!(advances(&[*b"DFLT"]), alloc::vec![300.0, 600.0]);
-        assert_eq!(advances(&[*b"hebr"]), alloc::vec![300.0, 600.0]);
-        // No `GPOS` at all, and the fallback runs for everything.
-        let bare = ScaledFont::from_bytes(build_test_font(), 1000.0).unwrap();
-        let got: Vec<f32> = bare.shape(acute).glyphs().iter().map(|g| g.advance).collect();
-        assert_eq!(got, alloc::vec![300.0, 0.0]);
+        // covers a Latin run, so nothing measures the acute onto it and it
+        // stays on the baseline — but it is still an `Mn` character in a face
+        // with no `GDEF`, so it still takes no room.
+        assert_eq!(with_gpos(&[*b"DFLT"]), alloc::vec![(300.0, 0.0), (0.0, 0.0)]);
+        assert_eq!(with_gpos(&[*b"hebr"]), alloc::vec![(300.0, 0.0), (0.0, 0.0)]);
+        // No `GPOS` at all, and the fallback runs for everything: the acute is
+        // lifted a clearance above the top of 'A', whose ink reaches y = 100.
+        assert_eq!(
+            shaped(build_test_font()),
+            alloc::vec![(300.0, 0.0), (0.0, 162.0)]
+        );
+    }
+
+    /// Both of HarfBuzz's zeroing passes, each shown where the other cannot
+    /// reach.
+    ///
+    /// `A` plus a combining acute the fixture has no glyph for, so the acute is
+    /// a 600-unit `.notdef` unless something takes its width away.
+    ///
+    /// - A face that classifies its glyphs and carries a `GPOS`: no fallback
+    ///   runs, and the `GDEF` pass reads the class rather than the character.
+    ///   This face calls every glyph it mentions a base, `.notdef` included, so
+    ///   the acute keeps its width — a face that has stated which of its glyphs
+    ///   are marks is believed.
+    /// - The same classes with no `GPOS`: the fallback runs, and *its* zeroing
+    ///   reads the general category, so the acute loses its width and is
+    ///   measured onto the letter regardless of what `GDEF` called it. This is
+    ///   the pass that the `GDEF` one cannot stand in for.
+    #[test]
+    fn a_face_that_classifies_its_glyphs_decides_which_of_them_take_room() {
+        // Glyphs 0..=3, every one of them a base.
+        const BASES: &[u16] = &[1, 1, 1, 1];
+        let shaped = |bytes: Vec<u8>| -> Vec<(f32, f32)> {
+            ScaledFont::from_bytes(bytes, 1000.0)
+                .unwrap()
+                .shape("A\u{301}")
+                .glyphs()
+                .iter()
+                .map(|g| (g.advance, g.offset.1))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            shaped(build_test_font_with_layout(&[*b"DFLT"], BASES)),
+            alloc::vec![(300.0, 0.0), (600.0, 0.0)]
+        );
+        assert_eq!(
+            shaped(build_test_font_with_gdef_classes(BASES)),
+            alloc::vec![(300.0, 0.0), (0.0, 162.0)]
+        );
     }
 
     #[test]

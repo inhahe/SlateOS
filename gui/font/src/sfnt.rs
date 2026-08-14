@@ -1214,6 +1214,18 @@ impl Face {
             .is_some_and(|m| m.is_mark(&self.data, glyph))
     }
 
+    /// Whether the face's `GDEF` sorts its glyphs into classes.
+    ///
+    /// Narrower than [`has_marks`](Self::has_marks), which is also true of a
+    /// face that has mark anchors and no `GlyphClassDef`. This is the question
+    /// that decides whether the shaper may believe the *face* about which
+    /// glyphs are marks, or has to work it out from the characters —
+    /// HarfBuzz's `fallback_glyph_classes`, `!hb_ot_layout_has_glyph_classes`.
+    #[must_use]
+    pub(crate) fn classifies_glyphs(&self) -> bool {
+        self.marks.as_ref().is_some_and(MarkPositioning::classifies)
+    }
+
     /// Position one run of glyphs with this face's `GPOS`.
     ///
     /// One adjustment per glyph, in font units: what its advance became and how
@@ -2155,18 +2167,81 @@ pub(crate) mod tests {
     /// The fixture plus a `GPOS` that registers exactly `scripts` and does
     /// nothing.
     ///
-    /// An empty FeatureList and an empty LookupList, so the table positions
-    /// nothing at all — which is the point. The question it exists to ask is
-    /// whether a *run* accepts the face's `GPOS`, and that is decided by the
-    /// ScriptList alone: a face that names a script has been written with it in
-    /// mind whatever it then does about it, and a face that does not name one
-    /// has not. A table with real lookups in it would let a test pass for the
-    /// wrong reason, by positioning something.
-    ///
     /// `scripts` is written into the ScriptList in the order given, since a
     /// real font's ScriptList is in whatever order its compiler emitted and
-    /// nothing may depend on it being sorted.
+    /// nothing may depend on it being sorted. See
+    /// [`build_test_font_with_layout`] for why the table is empty.
     pub(crate) fn build_test_font_with_gpos_scripts(scripts: &[[u8; 4]]) -> Vec<u8> {
+        build_test_font_with_layout(scripts, &[])
+    }
+
+    /// The fixture plus a `GDEF` whose `GlyphClassDef` gives glyph `i` the
+    /// class `classes[i]`, counting from glyph 0.
+    ///
+    /// See [`build_test_font_with_layout`] for what the classes mean and for
+    /// the combination of the two tables.
+    pub(crate) fn build_test_font_with_gdef_classes(classes: &[u16]) -> Vec<u8> {
+        build_test_font_with_layout(&[], classes)
+    }
+
+    /// The fixture with a `GPOS` registering `scripts` and a `GDEF`
+    /// classifying `classes`, either of which is omitted when empty.
+    ///
+    /// The `GPOS` has an empty FeatureList and an empty LookupList, so the
+    /// table positions nothing at all — which is the point. The question it
+    /// exists to ask is whether a *run* accepts the face's `GPOS`, and that is
+    /// decided by the ScriptList alone: a face that names a script has been
+    /// written with it in mind whatever it then does about it, and a face that
+    /// does not name one has not. A table with real lookups in it would let a
+    /// test pass for the wrong reason, by positioning something.
+    ///
+    /// In `classes`, `1` is base, `2` ligature, `3` mark, and `0` — which is
+    /// also the class of any glyph past the end of the slice — is
+    /// "unclassified". The distinction that matters to the shaper is not any
+    /// one glyph's class but whether the table exists at all: a face that
+    /// classifies has stated which of its glyphs are marks, so a glyph it
+    /// leaves out is one it declined to call a mark, and the general category
+    /// of the character must not second-guess it. No `AttachList`,
+    /// `LigCaretList` or `MarkAttachClassDef`, all of which are legitimately
+    /// absent from real fonts and none of which this asks about.
+    ///
+    /// Both together is not a contrivance: it is the ordinary shape of a real
+    /// font, and the only way to reach the case where a face has said which
+    /// glyphs are marks *and* nothing is going to fall back.
+    pub(crate) fn build_test_font_with_layout(scripts: &[[u8; 4]], classes: &[u16]) -> Vec<u8> {
+        let mut tables = build_test_tables(TRUE_LSB_3);
+        if !scripts.is_empty() {
+            tables.push((*b"GPOS", empty_gpos(scripts)));
+        }
+        if !classes.is_empty() {
+            tables.push((*b"GDEF", glyph_classes(classes)));
+        }
+        tables.sort_unstable_by_key(|&(tag, _)| tag);
+        assemble(&tables)
+    }
+
+    /// A `GDEF` 1.0 whose only content is a `GlyphClassDef`.
+    fn glyph_classes(classes: &[u16]) -> Vec<u8> {
+        let n = u16::try_from(classes.len()).expect("a test may not classify 65536 glyphs");
+        let mut gdef: Vec<u8> = Vec::new();
+        gdef.extend_from_slice(&1u16.to_be_bytes()); // majorVersion
+        gdef.extend_from_slice(&0u16.to_be_bytes()); // minorVersion
+        gdef.extend_from_slice(&12u16.to_be_bytes()); // glyphClassDefOffset
+        gdef.extend_from_slice(&0u16.to_be_bytes()); // attachListOffset
+        gdef.extend_from_slice(&0u16.to_be_bytes()); // ligCaretListOffset
+        gdef.extend_from_slice(&0u16.to_be_bytes()); // markAttachClassDefOffset
+        // ClassDefFormat 1, starting at glyph 0 so the array is the classes.
+        gdef.extend_from_slice(&1u16.to_be_bytes());
+        gdef.extend_from_slice(&0u16.to_be_bytes()); // startGlyphID
+        gdef.extend_from_slice(&n.to_be_bytes()); // glyphCount
+        for class in classes {
+            gdef.extend_from_slice(&class.to_be_bytes());
+        }
+        gdef
+    }
+
+    /// A `GPOS` whose ScriptList names `scripts` and which positions nothing.
+    fn empty_gpos(scripts: &[[u8; 4]]) -> Vec<u8> {
         let n = u16::try_from(scripts.len()).expect("a test may not register 65536 scripts");
         // The ScriptList begins right after the five-field header, each
         // ScriptRecord is six bytes, and each of the (identical, empty) script
@@ -2195,11 +2270,7 @@ pub(crate) mod tests {
         }
         gpos.extend_from_slice(&0u16.to_be_bytes()); // featureCount
         gpos.extend_from_slice(&0u16.to_be_bytes()); // lookupCount
-
-        let mut tables = build_test_tables(TRUE_LSB_3);
-        tables.push((*b"GPOS", gpos));
-        tables.sort_unstable_by_key(|&(tag, _)| tag);
-        assemble(&tables)
+        gpos
     }
 
     /// Lay out tables into a valid sfnt container.

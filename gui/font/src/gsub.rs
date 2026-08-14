@@ -402,6 +402,16 @@ pub(crate) struct Lig {
     /// On a glyph that stood *between* the components: which one it follows,
     /// counted from one. Meaningless, and read as `0`, when `comps` is set.
     comp: u8,
+    /// Whether a ligature substitution produced this glyph.
+    ///
+    /// Separate from `comps` on purpose, even though a ligature sets both.
+    /// This is HarfBuzz's *glyph property* `LIGATED`, `comps` is its *ligature
+    /// property* `IS_LIG_BASE`, and the two come apart: decomposing a ligature
+    /// leaves the ligature properties alone — the pieces are still inside the
+    /// components they were inside — while the glyph properties gain
+    /// `MULTIPLIED`. The Indic shaper reads exactly that combination, and
+    /// clears both bits again without disturbing the component numbering.
+    ligated: bool,
     /// Whether this glyph is one piece of a multiple substitution's output.
     ///
     /// It changes what the glyph is worth to a later ligature: the pieces of
@@ -420,34 +430,43 @@ const LIG_FIELD_MAX: u8 = 0x0F;
 
 impl Lig {
     /// The glyph a ligature substitution produced.
+    ///
+    /// Clearing `multiplied` is HarfBuzz's, and it has a note explaining why:
+    /// Uniscribe only cares about the *last* transformation, so a glyph that
+    /// ligated, decomposed and ligated again is forgiven the decomposition.
     fn ligature(id: u8, components: u8) -> Self {
         Self {
             id,
             comps: (components & LIG_FIELD_MAX).max(1),
             comp: 0,
+            ligated: true,
             multiplied: false,
         }
     }
 
-    /// A glyph that stood between the components of ligature `id`, following
-    /// component `comp`.
-    fn mark(id: u8, comp: u8) -> Self {
+    /// The same glyph, renumbered as one that stood between the components of
+    /// ligature `id`, following component `comp`.
+    ///
+    /// Only the ligature properties change: whether this glyph ligated or was
+    /// decomposed is a fact about its history that renumbering it into a new
+    /// ligature does not alter.
+    fn mark(self, id: u8, comp: u8) -> Self {
         Self {
             id,
             comps: 0,
             comp: comp & LIG_FIELD_MAX,
-            multiplied: false,
+            ..self
         }
     }
 
-    /// One piece of a multiple substitution's output, the `n`-th counted from
-    /// zero — so the first piece is `0`, meaning "part of no component", which
-    /// is what keeps a decomposition that nothing later ligates looking
-    /// exactly like the glyph it replaced.
-    fn piece(n: u8) -> Self {
+    /// The same glyph as the `n`-th piece of a multiple substitution's output,
+    /// counted from zero — so the first piece is `0`, meaning "part of no
+    /// component", which is what keeps a decomposition that nothing later
+    /// ligates looking exactly like the glyph it replaced.
+    fn piece(self, n: u8) -> Self {
         Self {
             multiplied: true,
-            ..Self::mark(0, n)
+            ..self.mark(0, n)
         }
     }
 
@@ -459,7 +478,18 @@ impl Lig {
             id,
             comps: components,
             comp,
+            ligated: components > 0,
             multiplied: false,
+        }
+    }
+
+    /// The same, as a multiple substitution leaves it after breaking the
+    /// ligature apart again.
+    #[cfg(test)]
+    pub(crate) fn split(self) -> Self {
+        Self {
+            multiplied: true,
+            ..self
         }
     }
 
@@ -471,7 +501,36 @@ impl Lig {
     /// a conjunct. HarfBuzz answers the same question the same way and in the
     /// same place: its `is_one_of` opens with "if it ligated, all bets are off".
     pub(crate) fn ligated(self) -> bool {
-        self.comps > 0
+        self.ligated
+    }
+
+    /// Whether a multiple substitution split this glyph out of another.
+    pub(crate) fn multiplied(self) -> bool {
+        self.multiplied
+    }
+
+    /// Whether this glyph ligated and was *not* later broken apart again.
+    ///
+    /// The Indic shaper's test for "did the font really form this?" — a reph
+    /// only moves if the `Ra,Halant` behind it actually joined, and a pre-base
+    /// Ra only moves if `pref` actually produced something. A glyph that
+    /// ligated and then decomposed produced nothing that survives, so it does
+    /// not count.
+    pub(crate) fn ligated_and_didnt_multiply(self) -> bool {
+        self.ligated && !self.multiplied
+    }
+
+    /// Forget that this glyph ligated or was decomposed, keeping which
+    /// ligature it belongs to and which component of it.
+    ///
+    /// HarfBuzz's `_hb_glyph_info_clear_ligated_and_multiplied`, used in one
+    /// place: an Indic virama that ligated into a conjunct and was then split
+    /// back out has lost the category the shaper needs, and restoring the
+    /// category is only half the repair — the glyph also has to stop looking
+    /// like a ligature, or every `is_halant` test still refuses it.
+    pub(crate) fn clear_ligated_and_multiplied(&mut self) {
+        self.ligated = false;
+        self.multiplied = false;
     }
 
     /// Which component of its ligature this glyph follows, or `0` for "none" —
@@ -978,17 +1037,26 @@ fn apply_multiple(
     // eligible for exactly what it was. A `ccmp` that splits a letter into a
     // base and a mark must not leave the base ineligible for `fina`.
     //
-    // The ligature bookkeeping is the exception. A glyph that already belongs
-    // to a ligature keeps that — its pieces are still inside the component it
-    // was inside, and overwriting it would strand them. A glyph that does not
-    // gets one piece number each, so a ligature swallowing the pieces later
-    // can tell they were one thing.
+    // The ligature bookkeeping is the exception, and it splits in two. The
+    // component *numbering* is left alone for a glyph that already belongs to
+    // a ligature — its pieces are still inside the component it was inside,
+    // and overwriting it would strand them; a glyph that belongs to none gets
+    // one piece number each, so a ligature swallowing the pieces later can
+    // tell they were one thing. The record that a decomposition happened at
+    // all is stamped either way, because that is a fact about every piece.
     glyphs.splice(
         i..=i,
         ctx.scratch.iter().enumerate().map(|(n, &gid)| SubGlyph {
             gid,
-            lig: if pieces && glyph.lig.id == 0 {
-                Lig::piece(u8::try_from(n).unwrap_or(u8::MAX))
+            lig: if pieces {
+                if glyph.lig.id == 0 {
+                    glyph.lig.piece(u8::try_from(n).unwrap_or(u8::MAX))
+                } else {
+                    Lig {
+                        multiplied: true,
+                        ..glyph.lig
+                    }
+                }
             } else {
                 glyph.lig
             },
@@ -1253,7 +1321,7 @@ fn renumber(glyphs: &mut [SubGlyph], at: usize, id: u8, so_far: u8, last: u8) {
     let comp = so_far
         .saturating_sub(last)
         .saturating_add(this.min(last));
-    glyph.lig = Lig::mark(id, comp);
+    glyph.lig = glyph.lig.mark(id, comp);
 }
 
 /// Look for a ligature starting at `glyphs[i]` in one `LigatureSubst`
@@ -3176,6 +3244,46 @@ mod tests {
         let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
         assert_eq!(subst(&data, &subs, &[10, 12]), [30, 40]);
         assert_eq!(clusters(&data, &subs, &[10, 12]), [0, 0]);
+    }
+
+    #[test]
+    fn decomposing_a_ligature_records_that_it_was_broken_apart() {
+        // The two halves of the bookkeeping come apart here, which is the
+        // whole reason they are two fields. The component numbering survives —
+        // the pieces are still inside the component the ligature was inside,
+        // and renumbering them would strand any marks pointing at it — but
+        // both pieces now also say a decomposition happened, and that is what
+        // stops the Indic shaper treating either of them as a formed ligature.
+        let data = gsub_table(b"ccmp", LOOKUP_MULTIPLE, &multiple(&[10], &[&[30, 31]]));
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+        let mut glyphs = alloc::vec![SubGlyph {
+            lig: Lig::at(3, 2, 0),
+            ..SubGlyph::new(10, 0)
+        }];
+        subs.apply(&data, None, &mut glyphs);
+        assert_eq!(glyphs.len(), 2);
+        for g in &glyphs {
+            assert_eq!(g.lig.id, 3);
+            assert!(g.lig.ligated());
+            assert!(g.lig.multiplied());
+            assert!(!g.lig.ligated_and_didnt_multiply());
+        }
+    }
+
+    #[test]
+    fn replacing_a_ligature_with_one_glyph_is_not_a_decomposition() {
+        // A one-glyph Sequence is a replacement: nothing was split, so nothing
+        // should look as though it had been.
+        let data = gsub_table(b"ccmp", LOOKUP_MULTIPLE, &multiple(&[10], &[&[30]]));
+        let subs = Substitutions::parse(&data, Some(span(0, data.len())), None).unwrap();
+        let mut glyphs = alloc::vec![SubGlyph {
+            lig: Lig::at(3, 2, 0),
+            ..SubGlyph::new(10, 0)
+        }];
+        subs.apply(&data, None, &mut glyphs);
+        assert_eq!(glyphs.len(), 1);
+        assert!(!glyphs[0].lig.multiplied());
+        assert!(glyphs[0].lig.ligated_and_didnt_multiply());
     }
 
     #[test]

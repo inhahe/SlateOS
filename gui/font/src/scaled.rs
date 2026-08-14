@@ -416,6 +416,16 @@ impl ScaledFont {
         f32::from(self.face.kern_across(left, right, between)) * self.scale
     }
 
+    /// The same, read from the legacy `kern` table alone.
+    ///
+    /// What the shaper charges a pair in a run whose script reaches no `GPOS`
+    /// `kern` feature. Not public: a caller with no run behind it has no script
+    /// to decide with, and [`kern_across`](Self::kern_across) is the answer for
+    /// that caller.
+    fn legacy_kern_across(&self, left: u16, right: u16, between: &[u16]) -> f32 {
+        f32::from(self.face.legacy_kern_across(left, right, between)) * self.scale
+    }
+
     /// Font units to pixels.
     ///
     /// The cast is exact for anything a layout table can produce: font units
@@ -574,13 +584,30 @@ impl ScaledFont {
         // A glyph no segment covers is a tab, which is not a mark and is not
         // positioned by anything, so `false` is both answers at once.
         let mut synth_at: Vec<bool> = alloc::vec![false; glyphs.len()];
+        // And, the same way and for the same reason, whether the segment's
+        // kerning has to come from the legacy `kern` table. Also a per-segment
+        // question, because `GPOS` files its `kern` feature under particular
+        // scripts: Leelawadee registers only `thai`, so the Latin half of a
+        // mixed line reaches no `GPOS` kerning and wants the legacy table while
+        // the Thai half does not. A segment the pass skipped outright reaches
+        // no `GPOS` feature of any kind, so it wants the legacy table too.
+        let legacy = self.face.has_legacy_kern();
+        let mut legacy_at: Vec<bool> = alloc::vec![false; glyphs.len()];
         for segment in &segments {
-            let answer = !self.applies_gpos(segment.script);
+            let applies = self.applies_gpos(segment.script);
+            let answer = !applies;
+            let kern = legacy && (!applies || !self.face.gpos_kerns(segment.script));
             for slot in synth_at
                 .get_mut(segment.start..segment.end)
                 .unwrap_or_default()
             {
                 *slot = answer;
+            }
+            for slot in legacy_at
+                .get_mut(segment.start..segment.end)
+                .unwrap_or_default()
+            {
+                *slot = kern;
             }
         }
         let synthesize = synth_at.iter().any(|&yes| yes);
@@ -627,10 +654,10 @@ impl ScaledFont {
             .collect();
         let adjusted = self.position_segments(&segments, &glyphs, &advances, &marks, &levels);
         // Whether pairs still have to be kerned one at a time here. They do
-        // only for a face whose kerning is the legacy `kern` table, which the
-        // positioning pass cannot read; a `GPOS` face's pairs have already been
-        // charged by the pass, in the company of every other lookup.
-        let legacy_kerning = self.face.kerns_outside_gpos();
+        // only where the run's kerning is the legacy `kern` table's, which the
+        // positioning pass cannot read; pairs the pass has already charged must
+        // not be charged again, in the company of every other lookup.
+        let legacy_kerning = legacy_at.iter().any(|&yes| yes);
         let mut out: Vec<ShapedGlyph> = Vec::with_capacity(glyphs.len());
         // Where in `out` the left half of the next kerning pair sits, and the
         // glyphs standing between it and the position being filled. A tab is
@@ -659,12 +686,12 @@ impl ScaledFont {
             // charged to the pair's *left* glyph — not to whatever was pushed
             // last — so that the advances still sum to the run's width when
             // the pair was read across a mark.
-            if legacy_kerning
+            if legacy_at.get(i).copied().unwrap_or(false)
                 && !tab
                 && !mark
                 && let Some(last) = kern_left.and_then(|at| out.get_mut(at))
             {
-                let kern = self.kern_across(last.key.gid(), gid, &between);
+                let kern = self.legacy_kern_across(last.key.gid(), gid, &between);
                 last.advance += kern;
                 last.kern_next = kern;
             }

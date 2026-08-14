@@ -85,16 +85,23 @@ const LOOKUP_EXTENSION: u16 = 9;
 /// looking them up on demand ever does.
 #[derive(Clone, Debug)]
 pub(crate) struct Kerning {
-    kind: Kind,
-    /// The subtables to consult, in application order, grouped by the lookup
-    /// that owns them.
+    /// The `GPOS` `PairPos` subtables the `kern` feature reaches, in
+    /// application order, grouped by the lookup that owns them.
     ///
     /// Grouped rather than flattened because a lookup's `lookupFlag` says
     /// which glyphs the pair may be read *across* — `IgnoreMarks` is on
     /// virtually every real `kern` lookup, and is what makes `A` and `V` still
     /// kern with an accent between them. A flat list of subtables has thrown
     /// that away.
-    lookups: Vec<Group>,
+    gpos: Vec<Group>,
+    /// The legacy `kern` table's usable format-0 subtables, in order.
+    ///
+    /// Kept even when `gpos` is non-empty, because which of the two a *run*
+    /// should read is not a property of the face: `GPOS` files its `kern`
+    /// feature under particular scripts, and a run whose script the table does
+    /// not register reaches no `kern` feature at all and must fall back here.
+    /// See [`Kerning::legacy_pair`].
+    legacy: Vec<usize>,
     /// `GDEF`'s class definitions, which is what turns a flag bit into a set
     /// of glyphs.
     defs: Definitions,
@@ -108,49 +115,62 @@ struct Group {
     subtables: Vec<usize>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Kind {
-    /// `GPOS` `PairPos` subtables reached from the `kern` feature.
-    Gpos,
-    /// Legacy `kern` format-0 subtables.
-    Legacy,
-}
-
 impl Kerning {
-    /// Find this face's kerning, preferring `GPOS` over the legacy table.
+    /// Find this face's kerning, from `GPOS`, the legacy table, or both.
     ///
     /// Returns `None` when the face has neither, or has them but they contain
     /// nothing this reads — which is not an error: most monospace faces and
     /// many display faces genuinely have no kerning.
+    ///
+    /// Both are kept when both are present. Which one a *run* should read is a
+    /// question about the run's script, not about the face — see
+    /// [`legacy_pair`](Self::legacy_pair) — and a parse that threw one away
+    /// could not answer it later.
     pub(crate) fn parse(
         data: &[u8],
         gpos: Option<Span>,
         legacy: Option<Span>,
         gdef: Option<Span>,
     ) -> Option<Self> {
-        let defs = Definitions::parse(data, gdef);
-        if let Some(span) = gpos
-            && let Some(lookups) = parse_gpos(data, span)
-        {
-            return Some(Self {
-                kind: Kind::Gpos,
-                lookups,
-                defs,
-            });
+        let gpos = gpos.and_then(|span| parse_gpos(data, span)).unwrap_or_default();
+        let legacy = legacy
+            .and_then(|span| parse_legacy(data, span))
+            .unwrap_or_default();
+        if gpos.is_empty() && legacy.is_empty() {
+            return None;
         }
-        // The legacy table predates lookups and has no flags, so it is one
-        // group that skips nothing — which is also the historically correct
-        // reading: engines that used it kerned strictly adjacent glyphs.
-        let lookups = alloc::vec![Group {
-            flag: 0,
-            filter: 0,
-            subtables: parse_legacy(data, legacy?)?,
-        }];
         Some(Self {
-            kind: Kind::Legacy,
-            lookups,
-            defs,
+            gpos,
+            legacy,
+            defs: Definitions::parse(data, gdef),
         })
+    }
+
+    /// Whether the pairs [`pair`](Self::pair) reads come from the legacy `kern`
+    /// table rather than from `GPOS`.
+    ///
+    /// The distinction decides whether a shaper that runs the full `GPOS`
+    /// positioning pass should *also* walk pairs through here. It should not
+    /// when the pairs are `GPOS`'s: the pass has already applied those lookups,
+    /// in order and with every other lookup interleaved, and charging them a
+    /// second time would double every kern. It must when they are the legacy
+    /// table's, since the pass cannot see that table at all — which is also
+    /// where HarfBuzz draws the line (`hb_ot_layout_has_kerning`, consulted
+    /// only when `GPOS` carries no `kern` feature).
+    ///
+    /// This is the *face-wide* answer, which is the only one a pair-at-a-time
+    /// interface with no run behind it can give. A shaper that has a run should
+    /// ask [`has_legacy`](Self::has_legacy) and its own script instead.
+    #[must_use]
+    pub(crate) fn is_legacy(&self) -> bool {
+        self.gpos.is_empty()
+    }
+
+    /// Whether the face ships a legacy `kern` table this can read, whatever
+    /// `GPOS` also offers.
+    #[must_use]
+    pub(crate) fn has_legacy(&self) -> bool {
+        !self.legacy.is_empty()
     }
 
     /// The adjustment to `left`'s advance when `right` follows it, in font
@@ -165,24 +185,8 @@ impl Kerning {
     /// OpenType applies lookups in order — a later lookup positions the output
     /// of an earlier one, so for a single adjustment the earliest match is the
     /// one that would have been applied.
-    /// Whether this kerning came from the legacy `kern` table rather than from
-    /// `GPOS`.
-    ///
-    /// The distinction decides whether a shaper that runs the full `GPOS`
-    /// positioning pass should *also* walk pairs through here. It should not
-    /// when the pairs are `GPOS`'s: the pass has already applied those lookups,
-    /// in order and with every other lookup interleaved, and charging them a
-    /// second time would double every kern. It must when they are the legacy
-    /// table's, since the pass cannot see that table at all — which is also
-    /// where HarfBuzz draws the line (`hb_ot_layout_has_kerning`, consulted
-    /// only when `GPOS` carries no `kern` feature).
-    #[must_use]
-    pub(crate) fn is_legacy(&self) -> bool {
-        self.kind == Kind::Legacy
-    }
-
     pub(crate) fn pair(&self, data: &[u8], left: u16, right: u16, between: &[u16]) -> i16 {
-        for group in &self.lookups {
+        for group in &self.gpos {
             if !between.is_empty() {
                 let skip = Skipper::new(data, self.defs, group.flag, group.filter, u32::MAX);
                 if !between.iter().all(|&g| skip.skips(g)) {
@@ -190,13 +194,34 @@ impl Kerning {
                 }
             }
             for &off in &group.subtables {
-                let found = match self.kind {
-                    Kind::Gpos => pair_pos(data, off, left, right),
-                    Kind::Legacy => legacy_pair(data, off, left, right),
-                };
-                if let Some(v) = found {
+                if let Some(v) = pair_pos(data, off, left, right) {
                     return v;
                 }
+            }
+        }
+        if self.gpos.is_empty() {
+            return self.legacy_pair(data, left, right, between);
+        }
+        0
+    }
+
+    /// The same, read from the legacy `kern` table only.
+    ///
+    /// What a run whose script reaches no `GPOS` `kern` feature wants, even on
+    /// a face whose `GPOS` kerns some *other* script — HarfBuzz's `apply_kern`,
+    /// which is switched on by `!has_gpos_kern`, and `has_gpos_kern` is looked
+    /// up in the plan's selected script rather than across the whole table.
+    ///
+    /// The legacy table predates lookups and has no flags, so it skips nothing:
+    /// that is the historically correct reading, since the engines that used it
+    /// kerned strictly adjacent glyphs.
+    pub(crate) fn legacy_pair(&self, data: &[u8], left: u16, right: u16, between: &[u16]) -> i16 {
+        if !between.is_empty() {
+            return 0;
+        }
+        for &off in &self.legacy {
+            if let Some(v) = legacy_pair(data, off, left, right) {
+                return v;
             }
         }
         0
@@ -470,7 +495,7 @@ mod tests {
     fn the_legacy_table_is_read_when_there_is_no_gpos() {
         let data = legacy_table(0x0001, &[(1, 2, -80), (1, 3, -50), (4, 2, -20)]);
         let k = Kerning::parse(&data, None, Some(span(0, data.len())), None).expect("kern parses");
-        assert_eq!(k.kind, Kind::Legacy);
+        assert!(k.is_legacy());
         assert_eq!(k.pair(&data, 1, 2, &[]), -80);
         assert_eq!(k.pair(&data, 4, 2, &[]), -20);
         assert_eq!(k.pair(&data, 2, 1, &[]), 0);
@@ -522,8 +547,33 @@ mod tests {
             None,
         )
         .expect("GPOS parses");
-        assert_eq!(k.kind, Kind::Gpos);
+        assert!(!k.is_legacy());
         assert_eq!(k.pair(&data, 1, 2, &[]), -80);
+    }
+
+    /// A face that ships both keeps both. Which one a run should read is a
+    /// question about the run's script — Leelawadee's `GPOS` kerns `thai` and
+    /// nothing else, so its Latin text wants the legacy table even though the
+    /// pair-at-a-time interface prefers `GPOS` face-wide — and a parse that
+    /// threw one away could not answer it later.
+    #[test]
+    fn a_face_with_both_keeps_both() {
+        let mut data = gpos_table_tagged(*b"kern", -80);
+        let legacy_at = data.len();
+        data.extend(legacy_table(0x0001, &[(1, 2, -10)]));
+        let k = Kerning::parse(
+            &data,
+            Some(span(0, legacy_at)),
+            Some(span(legacy_at, data.len() - legacy_at)),
+            None,
+        )
+        .expect("both parse");
+        assert!(!k.is_legacy());
+        assert!(k.has_legacy());
+        assert_eq!(k.pair(&data, 1, 2, &[]), -80);
+        assert_eq!(k.legacy_pair(&data, 1, 2, &[]), -10);
+        // The legacy table has no lookup flags and so reads across nothing.
+        assert_eq!(k.legacy_pair(&data, 1, 2, &[3]), 0);
     }
 
     #[test]
@@ -540,7 +590,7 @@ mod tests {
             None,
         )
         .expect("falls back to kern");
-        assert_eq!(k.kind, Kind::Legacy);
+        assert!(k.is_legacy());
         assert_eq!(k.pair(&data, 1, 2, &[]), -10);
     }
 

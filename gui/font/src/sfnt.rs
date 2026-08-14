@@ -1249,6 +1249,51 @@ impl Face {
         self.positioning.is_some()
     }
 
+    /// Whether the face ships a legacy `kern` table this can read, whatever
+    /// `GPOS` also offers.
+    ///
+    /// Deliberately not the same question as
+    /// [`kerns_outside_gpos`](Self::kerns_outside_gpos), which asks whether the
+    /// legacy table is the one the *pair-at-a-time* interface reads and so
+    /// answers `false` the moment `GPOS` carries any `kern` feature at all. A
+    /// shaper has a run, and a run has a script; the two halves of its decision
+    /// are this and [`gpos_kerns`](Self::gpos_kerns).
+    #[must_use]
+    pub(crate) fn has_legacy_kern(&self) -> bool {
+        self.kerning.as_ref().is_some_and(Kerning::has_legacy)
+    }
+
+    /// Whether a run of `script` reaches a `kern` feature in this face's
+    /// `GPOS`.
+    ///
+    /// A face files its `GPOS` features under particular scripts, so this is a
+    /// question about the run and not about the face: Leelawadee registers only
+    /// `thai`, so its Latin text reaches no `GPOS` kerning at all even though
+    /// the table plainly has some, and must be kerned from the legacy table
+    /// instead. HarfBuzz makes the same call the same way — `apply_kern` is
+    /// switched on by `!has_gpos_kern`, and `has_gpos_kern` is looked up in the
+    /// shaping plan's *selected* script.
+    #[must_use]
+    pub(crate) fn gpos_kerns(&self, script: Option<ScriptTags>) -> bool {
+        self.positioning
+            .as_ref()
+            .is_some_and(|gpos| gpos.kerns(script))
+    }
+
+    /// The legacy `kern` table's adjustment to `left`'s advance when `right`
+    /// follows it, ignoring whatever `GPOS` says about the pair.
+    ///
+    /// What a run that [`has_legacy_kern`](Self::has_legacy_kern) and no
+    /// [`gpos_kerns`](Self::gpos_kerns) needs. Distinct from
+    /// [`kern_across`](Self::kern_across), which prefers `GPOS` face-wide and
+    /// so would answer 0 for exactly the faces this exists for.
+    #[must_use]
+    pub(crate) fn legacy_kern_across(&self, left: u16, right: u16, between: &[u16]) -> i16 {
+        self.kerning
+            .as_ref()
+            .map_or(0, |k| k.legacy_pair(&self.data, left, right, between))
+    }
+
     /// Whether this face can tell a combining mark from a letter — because it
     /// carries `GPOS` mark anchors, `GDEF` glyph classes, or both.
     ///

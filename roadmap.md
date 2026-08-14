@@ -441,7 +441,12 @@ Roadmap:
   HarfBuzz's two independent grounds rather than only the fallback's, so a
   face with a `GPOS` but no `GDEF` no longer charges a full box per mark
   (`TD-FONT-ZEROES-A-MARKS-ADVANCE-ONLY-WHEN-THE-FALLBACK-RUNS`).
-  `agree` 11724 → 11777, `misplaced` 139 → 71.
+  `agree` 11724 → 11777, `misplaced` 139 → 71. And legacy `kern`-table
+  kerning is now decided per run rather than per face, so a face whose
+  `GPOS` kerns only its own script (Leelawadee registers `thai` alone) no
+  longer leaves its Latin text unkerned
+  (`TD-FONT-DECIDES-LEGACY-KERNING-PER-FACE-NOT-PER-RUN`).
+  `agree` 11777 → 11806, `misplaced` 71 → 42.
   Next unblocked step is the rest of shaping: no Indic reordering
   (`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`), no language selection
   (`TD-FONT-IGNORES-LANGSYS-OVERRIDES`), and no device tables in

@@ -119,6 +119,14 @@ const FEATURES: [&[u8; 4]; 7] = [
     b"abvm", b"blwm", b"curs", b"dist", b"kern", b"mark", b"mkmk",
 ];
 
+/// Where `kern` sits in [`FEATURES`], and so which bit of the mask
+/// [`ByScript::for_script`] hands back means "the `kern` feature reached this
+/// lookup". Checked by `the_kern_bit_names_the_kern_feature`.
+const KERN_FEATURE: usize = 4;
+
+/// That position as a mask bit.
+const KERN_MASK: u32 = 1 << KERN_FEATURE;
+
 /// `lookupFlag` bit 0. On a cursive lookup it says which end of the join is
 /// anchored — not, despite the name, which way the text runs.
 const RIGHT_TO_LEFT: u16 = 0x0001;
@@ -275,6 +283,25 @@ impl Positioning {
             lookup_list: lookup_list(data, gpos.off)?,
             defs: Definitions::parse(data, gdef),
         })
+    }
+
+    /// Whether a run of `script` reaches a `kern` feature here.
+    ///
+    /// A face files its `GPOS` features under particular scripts, so this is a
+    /// question about the run and not about the face: Leelawadee registers only
+    /// `thai`, and a Latin run in it reaches no `kern` feature at all even
+    /// though the table plainly has one. The caller uses the answer to decide
+    /// whether to fall back to the legacy `kern` table, which is exactly what
+    /// HarfBuzz's `has_gpos_kern` is for — it too is looked up in the plan's
+    /// selected script rather than across the whole table.
+    ///
+    /// The script fallback chain is [`ByScript::for_script`]'s, so a face that
+    /// registers `DFLT` answers for every run, as it should.
+    #[must_use]
+    pub(crate) fn kerns(&self, script: Option<ScriptTags>) -> bool {
+        self.lookups
+            .for_script(script)
+            .any(|(_, mask)| mask & KERN_MASK != 0)
     }
 
     /// Position one run, returning one adjustment per glyph.
@@ -906,6 +933,15 @@ fn resolve(out: &mut [Adjust], i: usize, j: usize, kind: Attach, rtl: bool) {
 mod tests {
     use super::*;
 
+    /// [`KERN_MASK`] is a bit position written by hand against a list two
+    /// declarations away, so the one thing that would silently break it —
+    /// someone inserting a feature tag above `kern` — is what this catches.
+    #[test]
+    fn the_kern_bit_names_the_kern_feature() {
+        assert_eq!(FEATURES.get(KERN_FEATURE), Some(&b"kern"));
+        assert_eq!(KERN_MASK, 1 << KERN_FEATURE);
+    }
+
     fn be16(v: u16) -> [u8; 2] {
         v.to_be_bytes()
     }
@@ -1220,6 +1256,16 @@ mod tests {
     /// thing a contextual rule exists to prevent. So this shape is not a
     /// convenience — it is the arrangement the tests are about.
     fn gpos_table(lookups: &[(u16, Vec<u8>)]) -> Vec<u8> {
+        gpos_table_for(b"DFLT", b"kern", lookups)
+    }
+
+    /// The same, with the ScriptList's one script and the FeatureList's one
+    /// feature named by the caller.
+    ///
+    /// Both are fixed at `DFLT`/`kern` in [`gpos_table`] because most tests
+    /// only want the lookups to be reachable. The tests that vary them are
+    /// about reachability itself: which runs a feature is filed for.
+    fn gpos_table_for(script: &[u8; 4], feature: &[u8; 4], lookups: &[(u16, Vec<u8>)]) -> Vec<u8> {
         let n = lookups.len();
         // ScriptList: one DFLT script whose DefaultLangSys names feature 0.
         // count(2) + record(6) + Script(4) + LangSys(6 + one index).
@@ -1238,7 +1284,7 @@ mod tests {
         out.extend_from_slice(&be16(u16::try_from(lookup_list).unwrap()));
 
         out.extend_from_slice(&be16(1)); // scriptCount
-        out.extend_from_slice(b"DFLT");
+        out.extend_from_slice(script);
         out.extend_from_slice(&be16(8)); // Script, from the ScriptList
         out.extend_from_slice(&be16(4)); // defaultLangSys, from the Script
         out.extend_from_slice(&be16(0)); // langSysCount
@@ -1248,7 +1294,7 @@ mod tests {
         out.extend_from_slice(&be16(0)); // feature 0
 
         out.extend_from_slice(&be16(1)); // featureCount
-        out.extend_from_slice(b"kern");
+        out.extend_from_slice(feature);
         out.extend_from_slice(&be16(8)); // Feature, from the FeatureList
         out.extend_from_slice(&be16(0)); // featureParams
         out.extend_from_slice(&be16(1)); // lookupIndexCount
@@ -1329,6 +1375,40 @@ mod tests {
         }
         out.extend_from_slice(&covs);
         out
+    }
+
+    /// A face's `GPOS` kerns a *run*, not a face: the feature is filed under
+    /// particular scripts, and a run whose script the table does not register
+    /// reaches none of it and has to fall back to the legacy `kern` table.
+    /// Leelawadee is the real case — it registers `thai` and nothing else, so
+    /// its Latin text is kerned entirely from its legacy table.
+    #[test]
+    fn a_kern_feature_belongs_only_to_the_scripts_that_name_it() {
+        let sub = || {
+            single_pos1(
+                &[7],
+                Value {
+                    x_advance: -40,
+                    ..Value::default()
+                },
+            )
+        };
+        let asks = |script: &[u8; 4], feature: &[u8; 4]| {
+            let data = gpos_table_for(script, feature, &[(SINGLE_POS, sub())]);
+            let pos = Positioning::parse(&data, span(0, data.len()), None).expect("GPOS parses");
+            let latin = pos.kerns(Some(ScriptTags::exactly(*b"latn")));
+            let thai = pos.kerns(Some(ScriptTags::exactly(*b"thai")));
+            let none = pos.kerns(None);
+            (latin, thai, none)
+        };
+        // Filed under `thai` alone: only a Thai run reaches it. A run with no
+        // script of its own — all digits and punctuation — starts at `DFLT`,
+        // which this table does not register either.
+        assert_eq!(asks(b"thai", b"kern"), (false, true, false));
+        // Filed under `DFLT`: every run reaches it, through the fallback chain.
+        assert_eq!(asks(b"DFLT", b"kern"), (true, true, true));
+        // A `mark` feature is not a `kern` one, whatever lookups it reaches.
+        assert_eq!(asks(b"DFLT", b"mark"), (false, false, false));
     }
 
     /// Position `ids` with the whole table at `data`, and report the x offsets.

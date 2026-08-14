@@ -1340,6 +1340,23 @@ pub fn self_test() -> KernelResult<()> {
     test_volume_mounts()?;
     test_hostname()?;
 
+    // Restore the fast path that the tests above disabled. `attach`,
+    // `set_root` and `add_volume` arm NS_FEATURES_ACTIVE monotonically, so
+    // without this the self-tests leave every VFS path operation in the
+    // running kernel paying three global spinlocks it does not need. That is
+    // not hypothetical: the bench boot printed `namespace fast path DISABLED`
+    // and the namespace fast-path predictions missed for exactly this reason.
+    //
+    // Doubles as a leak check. It can only succeed if every namespace test
+    // above cleaned up its process state, so a test that forgets a
+    // `detach`/`clear_root`/`clear_mounts` fails here rather than silently
+    // degrading the rest of the boot.
+    assert!(
+        reset_ns_features_if_trivial(),
+        "a namespace self-test leaked process state (attach/set_root/add_volume \
+         without a matching detach/clear_root/clear_mounts)",
+    );
+
     serial_println!("[namespace] All self-tests PASSED");
     Ok(())
 }

@@ -3115,7 +3115,7 @@ fn bench_vfs_stat() {
 /// kernel was measured on a lock-free path.  The prediction missed by 4.9x.
 /// See `B-VFS-STAT-ROOT-IS-12x-OVER-TARGET-AND-THE-DCACHE-IS-NOT-WHY`.
 ///
-/// Three variants, because the interesting quantity is a difference, not an
+/// The variants, because the interesting quantity is a difference, not an
 /// absolute:
 ///
 /// * **raw** — `spin::Mutex`, the bare atomic `try_lock` + store. The floor.
@@ -3124,14 +3124,33 @@ fn bench_vfs_stat() {
 ///   `lockdep::lock_acquire`, `preempt_disable`, **one `rdtsc`**, and
 ///   `stats.record_uncontended()`; every release calls a **second `rdtsc`**,
 ///   `record_hold`, `lockdep::lock_release` and `preempt_enable`.
-/// * **untracked** — the same type with tracking off, which skips both `rdtsc`
-///   calls and the stat recording but keeps lockdep and preempt.
+/// * **no-lockdep** — the same type with `lockdep::set_enabled(false)`, so both
+///   `lock_acquire` and `lock_release` return on their first load.
+/// * **untracked** — the same type with `TRACKING_ENABLED` off.
 ///
-/// `tracked - untracked` is therefore the price of contention statistics, and
-/// `untracked - raw` the price of lockdep plus preemption control. Both are
-/// paid by **every lock acquisition in the kernel**, so if they are large this
-/// is not a VFS finding at all — it is a whole-kernel one, and every benchmark
-/// in this suite that takes a lock is partly measuring instrumentation.
+/// Plus the two suspected components measured **directly**, in isolation,
+/// rather than inferred from the differences: a bare `preempt_disable()` /
+/// `preempt_enable()` pair and a bare `rdtsc()` pair. Direct measurement is
+/// the point: the first version of this benchmark reported a lumped
+/// "lockdep+preempt +629ns" and I then *reasoned* about which half dominated —
+/// the same move that has been wrong every single time this session. The
+/// components and the differences are printed together so they can disagree;
+/// if `lockdep + preempt + 2×rdtsc` does not roughly account for
+/// `tracked - raw`, the model is missing something and says so out loud.
+///
+/// A caveat the first version got wrong: **untracked is not "tracked minus the
+/// statistics".** With tracking off, `Mutex::lock` skips the `try_lock` fast
+/// path entirely and calls `lock_contended()`, which is `#[cold]`,
+/// `#[inline(never)]`, and computes `tsc_freq()` plus its own `rdtsc()` before
+/// the first acquisition attempt. So `set_tracking_enabled(false)` can be
+/// *slower* than leaving it on — which is exactly what the first run measured
+/// (654 ns vs 628 ns) and what the old "+0ns for stats" line misreported as
+/// statistics being free.
+///
+/// Whatever the split, it is paid by **every lock acquisition in the kernel**,
+/// so if it is large this is not a VFS finding at all — it is a whole-kernel
+/// one, and every benchmark in this suite that takes a lock is partly
+/// measuring instrumentation.
 fn bench_lock_primitives() {
     // NB: fully qualified. `Mutex` is aliased to `PreemptSpinMutex` at the top
     // of this file, which is a *different* lock type with different overhead --
@@ -3150,8 +3169,21 @@ fn bench_lock_primitives() {
         *g = core::hint::black_box(*g).wrapping_add(1);
     });
 
-    // Toggle tracking off for the third variant, then restore it. Restoring
-    // matters: leaving it off would silently change the cost of every lock in
+    // Toggle lockdep off for the third variant, then restore it. Safe to
+    // toggle here only because no tracked lock is held at this point -- see
+    // `lockdep::set_enabled`. Restoring matters twice over: leaving it off
+    // would both change the cost of every later lock and silently retire the
+    // deadlock validator for the rest of the boot.
+    let lockdep_was_on = crate::lockdep::is_enabled();
+    crate::lockdep::set_enabled(false);
+    let no_lockdep = run("lock_no_lockdep", 2000, || {
+        let mut g = TRACKED.lock();
+        *g = core::hint::black_box(*g).wrapping_add(1);
+    });
+    crate::lockdep::set_enabled(lockdep_was_on);
+
+    // Toggle tracking off for the fourth variant, then restore it. Same
+    // reasoning: leaving it off would silently change the cost of every lock in
     // every benchmark that runs after this one.
     crate::sync::set_tracking_enabled(false);
     let untracked = run("lock_tracked_no_stats", 2000, || {
@@ -3160,15 +3192,60 @@ fn bench_lock_primitives() {
     });
     crate::sync::set_tracking_enabled(true);
 
+    // The two suspected components, measured on their own rather than
+    // differenced out of the variants above.
+    let preempt = run("preempt_pair", 2000, || {
+        crate::sched::preempt_disable();
+        crate::sched::preempt_enable();
+    });
+    let tsc_pair = run("rdtsc_pair", 2000, || {
+        let a = rdtsc();
+        let b = rdtsc();
+        let _ = core::hint::black_box(b.wrapping_sub(a));
+    });
+
     serial_println!(
-        "[bench]   lock acquire+release: raw {}ns, tracked {}ns, tracked-without-stats {}ns",
-        raw.min_ns, tracked.min_ns, untracked.min_ns
+        "[bench]   lock acquire+release: raw {}ns, tracked {}ns, no-lockdep {}ns, no-stats {}ns",
+        raw.min_ns, tracked.min_ns, no_lockdep.min_ns, untracked.min_ns
     );
     serial_println!(
-        "[bench]   lock overhead: contention stats +{}ns, lockdep+preempt +{}ns",
-        tracked.min_ns.saturating_sub(untracked.min_ns),
-        untracked.min_ns.saturating_sub(raw.min_ns),
+        "[bench]   lock components (measured): preempt pair {}ns, rdtsc pair {}ns",
+        preempt.min_ns, tsc_pair.min_ns
     );
+    // Lockdep's per-acquire cost used to be O(registered classes) — a linear
+    // scan run twice per lock operation — so this number was the multiplier on
+    // it. Printed even now that the lookup is a hash, because it is what would
+    // reveal the regression if the index were ever bypassed.
+    serial_println!(
+        "[bench]   lock context: {} lockdep classes registered",
+        crate::lockdep::class_count()
+    );
+
+    // Differences, and then the check that the differences and the direct
+    // measurements tell the same story. `lockdep_delta` is the only component
+    // obtained by subtraction, so it is the one to distrust; the residual line
+    // is what would expose it.
+    let lockdep_delta = tracked.min_ns.saturating_sub(no_lockdep.min_ns);
+    let total_delta = tracked.min_ns.saturating_sub(raw.min_ns);
+    let accounted = lockdep_delta
+        .saturating_add(preempt.min_ns)
+        .saturating_add(tsc_pair.min_ns);
+    serial_println!(
+        "[bench]   lock overhead: total +{}ns = lockdep {}ns + preempt {}ns + rdtsc {}ns \
+         + unexplained {}ns",
+        total_delta,
+        lockdep_delta,
+        preempt.min_ns,
+        tsc_pair.min_ns,
+        total_delta.saturating_sub(accounted),
+    );
+    if accounted > total_delta {
+        serial_println!(
+            "[bench]   lock overhead: WARNING components ({}ns) exceed the measured \
+             total ({}ns) -- the cost model is wrong, not merely imprecise",
+            accounted, total_delta
+        );
+    }
 
     // Scored against the tracked variant, because that is what the kernel
     // actually pays. 500ns is the value the vfs_stat stage split *implied*
@@ -3274,6 +3351,71 @@ fn bench_vfs_stat_breakdown() {
         if crate::ipc::namespace::ns_features_active() { "DISABLED" } else { "available" },
         crate::ipc::namespace::ns_features_active(),
     );
+    // ---- Coherence gate -------------------------------------------------
+    //
+    // Everything above is stage attribution by subtraction, and subtraction is
+    // only meaningful if the stages were measured under comparable conditions.
+    // They are not guaranteed to be: `min` over 500 iterations still reflects
+    // whatever the *host* was doing during those 500 iterations, and under TCG
+    // that varies enormously (this block has recorded per-iteration maxima of
+    // 1.1e8 cycles -- 21 ms -- inside a benchmark whose min is 2.5 us).
+    //
+    // So: re-measure the very first quantity, unchanged, at the *end* of the
+    // block. `full` and `full_again` are the same code over the same input; any
+    // difference between them is pure measurement drift across the width of
+    // this block, and it bounds how much of every stage difference above is
+    // real. Without this, a run where the harness drifted 1.7x mid-block looks
+    // exactly like a run where a stage got 1.7x slower -- and the last run was
+    // that run: `vfs_stat_root` and `vfs_stat_breakdown_full` are byte-identical
+    // benchmarks and reported 2971 ns and 4976 ns in the same boot, while the
+    // stage components summed to 133% of the whole they were subtracted from.
+    // Both facts were printed and neither was flagged.
+    let full_again = run("vfs_stat_breakdown_full2", 500, || {
+        let _ = core::hint::black_box(Vfs::stat("/"));
+    });
+    let (lo, hi) = if full.min_ns <= full_again.min_ns {
+        (full.min_ns, full_again.min_ns)
+    } else {
+        (full_again.min_ns, full.min_ns)
+    };
+    // Percent, not a ratio: integer division of a ratio would floor 1.9x to 1.
+    let drift_pct = if lo == 0 { 0 } else { (hi.saturating_sub(lo)).saturating_mul(100) / lo };
+    const DRIFT_LIMIT_PCT: u64 = 25;
+    serial_println!(
+        "[bench]   vfs_stat_breakdown: drift check — same benchmark twice: {}ns then {}ns ({}%)",
+        full.min_ns, full_again.min_ns, drift_pct
+    );
+    if drift_pct > DRIFT_LIMIT_PCT {
+        serial_println!(
+            "[bench]   vfs_stat_breakdown: WARNING run is NOT internally coherent ({}% > {}%) \
+             — the stage split above is measurement drift and must not be used to attribute \
+             cost; only cross-boot-replicated totals are usable from this run",
+            drift_pct, DRIFT_LIMIT_PCT
+        );
+    }
+    // The second, independent coherence check: the parts must add up to the
+    // whole. `resolve_follow` is measured both directly and by subtracting
+    // `stat_resolved` from `full`; those are the same quantity by construction,
+    // so a large disagreement means at least one of the three measurements is
+    // not measuring what its name says.
+    let sum_pct = if full.min_ns == 0 {
+        0
+    } else {
+        resolve_direct.min_ns.saturating_add(resolved_only.min_ns).saturating_mul(100)
+            / full.min_ns
+    };
+    serial_println!(
+        "[bench]   vfs_stat_breakdown: parts/whole check — resolve {}ns + resolved {}ns = {}% of full {}ns",
+        resolve_direct.min_ns, resolved_only.min_ns, sum_pct, full.min_ns
+    );
+    if !(75..=125).contains(&sum_pct) {
+        serial_println!(
+            "[bench]   vfs_stat_breakdown: WARNING parts sum to {}% of the whole — the stage \
+             attribution above is not arithmetic, it is noise",
+            sum_pct
+        );
+    }
+
     let _ = (valid_entries, misses_before);
 }
 

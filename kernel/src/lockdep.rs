@@ -32,7 +32,7 @@
 
 use crate::serial_println;
 use crate::smp;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -80,6 +80,141 @@ static mut CLASSES: [LockClass; MAX_CLASSES] = [LockClass::empty(); MAX_CLASSES]
 
 /// Number of registered classes.
 static CLASS_COUNT: AtomicU32 = AtomicU32::new(0);
+
+// ---------------------------------------------------------------------------
+// Class index — O(1) address → class lookup
+// ---------------------------------------------------------------------------
+//
+// This lookup runs on **every** `lock_acquire` and **every** `lock_release`,
+// i.e. twice per lock operation everywhere in the kernel, so its cost is added
+// to every critical section in the system.  It used to be a linear scan of the
+// whole class table.
+//
+// Measured: with lockdep on, an uncontended `sync::Mutex` acquire+release cost
+// 632 ns; with lockdep off, 232 ns.  The 400 ns difference is ~66% of the
+// entire tracked-mutex overhead, and it is spent almost entirely here — two
+// scans of up to `MAX_CLASSES` = 128 entries.  The cost is also *positional*:
+// a lock registered early is found in a few iterations, one registered late
+// pays the full scan, so the same lockdep call is cheap or expensive depending
+// on boot order.  That is precisely the "linear scan on a hot path" that
+// CLAUDE.md forbids, hiding inside the debugging infrastructure rather than the
+// code being debugged.
+//
+// Replaced with an open-addressed hash index, as Linux does
+// (`classhash_table` in `kernel/locking/lockdep.c`).  Entries are append-only
+// and never removed, so a probe run is contiguous and terminating on the first
+// empty bucket is correct.
+//
+// This is the fix that made the "keep lockdep in release builds or not?"
+// question go away: the validator was not inherently expensive, its index was.
+
+/// log2 of the number of hash buckets.
+const CLASS_HASH_SHIFT: u32 = 9;
+
+/// Bucket count. Power of two so the probe wrap is a mask, and 4x
+/// `MAX_CLASSES` so the table never exceeds a 25% load factor — at which
+/// linear probing averages well under two probes.
+const CLASS_HASH_BUCKETS: usize = 1 << CLASS_HASH_SHIFT;
+
+const _: () = assert!(
+    CLASS_HASH_BUCKETS >= MAX_CLASSES * 2,
+    "class hash must stay under 50% load or probe runs grow without bound"
+);
+
+/// Open-addressed index from lock address to class slot.
+///
+/// Holds `class_index + 1`; `0` means "empty". The bias is what lets a single
+/// atomic word encode "absent" without a second array.
+static CLASS_HASH: [AtomicU16; CLASS_HASH_BUCKETS] =
+    [const { AtomicU16::new(0) }; CLASS_HASH_BUCKETS];
+
+/// Read one class's identifying address.
+///
+/// Deliberately returns the `usize` by value rather than a reference to the
+/// entry: Rust 2024 rejects `&CLASSES[i]` outright (a shared reference to a
+/// mutable static is UB the moment another CPU appends), while reading a `Copy`
+/// field through the index expression forms no reference at all.
+#[inline]
+fn class_id(idx: usize) -> Option<usize> {
+    if idx >= MAX_CLASSES {
+        return None;
+    }
+    // SAFETY: `idx` is bounds-checked above, and the read is a place expression
+    // on a `Copy` field, so no reference to the static is created. Entries are
+    // append-only: a slot's `id` is written once, before the slot is published.
+    #[allow(clippy::indexing_slicing)]
+    Some(unsafe { CLASSES[idx].id })
+}
+
+/// Bucket for a lock address.
+///
+/// Fibonacci hashing (Knuth 6.4): multiply by 2^64/φ and take the *high* bits.
+/// Taking low bits directly would be much worse than the linear scan it
+/// replaces — lock addresses are statics, so they are at least 8-byte aligned
+/// and often spaced by a fixed stride, which puts every one of them in the same
+/// handful of buckets. The multiply spreads that structure across the whole
+/// word before the shift selects from the top.
+const fn class_bucket(addr: usize) -> usize {
+    let mixed = (addr as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    (mixed >> (64 - CLASS_HASH_SHIFT)) as usize
+}
+
+/// Look up a lock address in the hash index. `None` if not registered.
+#[inline]
+fn hash_lookup(addr: usize) -> Option<u16> {
+    let mut bucket = class_bucket(addr);
+    // Bounded by the table size: a full table would otherwise spin forever.
+    for _ in 0..CLASS_HASH_BUCKETS {
+        let slot = CLASS_HASH.get(bucket)?.load(Ordering::Acquire);
+        if slot == 0 {
+            // Empty bucket ends the probe run. Correct only because classes are
+            // never removed; a future removal would have to leave a tombstone.
+            return None;
+        }
+        let idx = slot - 1;
+        // `slot` was published only after `CLASSES[idx]` was fully written
+        // (see `find_or_register_class`), and the Acquire load above pairs with
+        // that Release store, so the entry is initialised.
+        if class_id(idx as usize) == Some(addr) {
+            return Some(idx);
+        }
+        bucket = (bucket + 1) & (CLASS_HASH_BUCKETS - 1);
+    }
+    None
+}
+
+/// Publish a freshly registered class into the hash index.
+///
+/// Returns the index callers should use: normally `idx`, but if another CPU
+/// registered the *same* address concurrently, the winner's index instead.
+/// Returning the winner matters — two class indices for one lock would split
+/// its dependency edges across two nodes and quietly weaken the cycle check.
+/// (The loser's `CLASSES` slot is then wasted; leaking one slot out of 128 in a
+/// race that needs two CPUs to first-touch the same lock in the same instant is
+/// the cheaper of the two failures.)
+fn hash_insert(addr: usize, idx: u16) -> u16 {
+    let mut bucket = class_bucket(addr);
+    for _ in 0..CLASS_HASH_BUCKETS {
+        let Some(cell) = CLASS_HASH.get(bucket) else {
+            return idx;
+        };
+        // Release: everything written to CLASSES[idx] must be visible to any
+        // CPU that Acquire-loads this slot in `hash_lookup`.
+        match cell.compare_exchange(0, idx + 1, Ordering::Release, Ordering::Acquire) {
+            Ok(_) => return idx,
+            Err(occupied) => {
+                let other = occupied - 1;
+                // Same as `hash_lookup`: a published slot names an initialised
+                // entry.
+                if class_id(other as usize) == Some(addr) {
+                    return other;
+                }
+            }
+        }
+        bucket = (bucket + 1) & (CLASS_HASH_BUCKETS - 1);
+    }
+    idx
+}
 
 // ---------------------------------------------------------------------------
 // Dependency graph (edges: "class A was held when class B was acquired")
@@ -169,7 +304,22 @@ pub fn init() {
 /// Disable lock order checking (e.g., during shutdown or panic).
 #[allow(dead_code)]
 pub fn disable() {
-    ENABLED.store(false, Ordering::Release);
+    set_enabled(false);
+}
+
+/// Turn lock order checking on or off without the banner `init()` prints.
+///
+/// Used by the lock microbenchmark to measure lockdep's share of
+/// `sync::Mutex`'s per-acquire cost by differencing.
+///
+/// **Only toggle while the calling CPU holds no tracked lock.** The per-CPU
+/// held stack is maintained by `lock_acquire`/`lock_release`, and both are
+/// no-ops while disabled: a lock acquired enabled and released disabled leaves
+/// a stale class on the stack forever, and the reverse underflows the depth.
+/// Either way every later ordering report becomes fiction — and a validator
+/// that reports fiction is worse than one that is off, because it is believed.
+pub fn set_enabled(enabled: bool) {
+    ENABLED.store(enabled, Ordering::Release);
 }
 
 /// Notify lockdep that a lock is being acquired.
@@ -480,15 +630,10 @@ pub fn dump_held_locks(cpu: usize) {
 
 /// Find an existing class by lock address, or register a new one.
 fn find_or_register_class(lock_addr: usize, name: &[u8]) -> Option<u16> {
-    let count = CLASS_COUNT.load(Ordering::Relaxed) as usize;
-
-    // Search existing classes.
-    for i in 0..count.min(MAX_CLASSES) {
-        // SAFETY: Reading from the class array is safe — entries are
-        // append-only and we only read up to the current count.
-        if unsafe { CLASSES[i].id } == lock_addr {
-            return Some(i as u16);
-        }
+    // O(1) index lookup. This is the hot path: on a warm kernel every acquire
+    // finds an existing class here and returns.
+    if let Some(idx) = hash_lookup(lock_addr) {
+        return Some(idx);
     }
 
     // Register new class.
@@ -507,19 +652,15 @@ fn find_or_register_class(lock_addr: usize, name: &[u8]) -> Option<u16> {
         CLASSES[idx].name[..copy_len].copy_from_slice(&name[..copy_len]);
         CLASSES[idx].name_len = copy_len as u8;
     }
-    Some(idx as u16)
+    // Publish only after the entry is fully written — `hash_insert`'s Release
+    // store is what makes it safe for another CPU to follow the index here.
+    #[allow(clippy::cast_possible_truncation)] // idx < MAX_CLASSES = 128
+    Some(hash_insert(lock_addr, idx as u16))
 }
 
 /// Find an existing class by lock address.
 fn find_class(lock_addr: usize) -> Option<u16> {
-    let count = CLASS_COUNT.load(Ordering::Relaxed) as usize;
-    for i in 0..count.min(MAX_CLASSES) {
-        // SAFETY: i < count ≤ MAX_CLASSES, so CLASSES[i] is within bounds.
-        if unsafe { CLASSES[i].id } == lock_addr {
-            return Some(i as u16);
-        }
-    }
-    None
+    hash_lookup(lock_addr)
 }
 
 /// Record a dependency edge (from → to).  Returns true if this is a NEW edge.
@@ -785,6 +926,9 @@ pub fn self_test() {
     assert_eq!(held_rec, 0, "held stack empty after recursive-test releases");
     serial_println!("[lockdep]   Recursive self-deadlock detection: OK");
 
+    // Test 8: the class hash index agrees with an exhaustive scan.
+    test_class_hash_index();
+
     // Restore state.
     ENABLED.store(prev_enabled, Ordering::Relaxed);
 
@@ -795,4 +939,96 @@ pub fn self_test() {
         VIOLATIONS.load(Ordering::Relaxed)
     );
     serial_println!("[lockdep] Self-test PASSED");
+}
+
+/// Verify the O(1) class index against the O(n) scan it replaced.
+///
+/// This is the test that keeps the optimisation honest. If `hash_lookup` ever
+/// misses a class that is in fact registered, `find_or_register_class` silently
+/// registers a *second* class for the same lock — and then the two halves of
+/// that lock's dependency edges live on different graph nodes, no cycle is ever
+/// found through it, and lockdep goes quiet while looking exactly as healthy as
+/// before. Nothing else in the system would notice: a validator that stops
+/// finding violations is indistinguishable from a kernel that stopped having
+/// them.
+///
+/// So the linear scan is not deleted, it is demoted to the oracle: every
+/// registered class must be found by the hash at the same index the scan finds
+/// it at, and the two must agree on absence too.
+fn test_class_hash_index() {
+    let count = (CLASS_COUNT.load(Ordering::Relaxed) as usize).min(MAX_CLASSES);
+
+    // Every registered class is found, at the index the scan would report.
+    let mut checked = 0usize;
+    for i in 0..count {
+        let Some(id) = class_id(i) else {
+            continue;
+        };
+        // Scan oracle: the first slot carrying this id.
+        let mut scan = None;
+        for j in 0..count {
+            if class_id(j) == Some(id) {
+                scan = Some(j as u16);
+                break;
+            }
+        }
+        assert_eq!(
+            hash_lookup(id),
+            scan,
+            "class hash disagrees with the linear scan for a registered lock"
+        );
+        checked += 1;
+    }
+
+    // Absence agrees too. This address is never used as a lock: it is
+    // non-canonical, so no real lock can live there, and the fake addresses the
+    // tests above use are all 0xDEAD_000x.
+    const UNREGISTERED: usize = 0xBADD_C0DE_BADD_C0DE;
+    assert!(
+        hash_lookup(UNREGISTERED).is_none(),
+        "class hash reports an address that was never registered"
+    );
+
+    // Idempotence: registering the same address twice must yield one class.
+    // This is the property the whole index exists to provide, and the one whose
+    // failure is silent, so it is asserted directly rather than inferred.
+    const FRESH: usize = 0xBADD_C0DE_0000_0001;
+    let first = find_or_register_class(FRESH, b"hash-test");
+    let second = find_or_register_class(FRESH, b"hash-test");
+    assert!(first.is_some(), "registration failed (class table full?)");
+    assert_eq!(first, second, "same address registered as two classes");
+
+    // Collision handling: an address that hashes to the *same bucket* as
+    // `FRESH` must still be found, and must be a distinct class. Without a
+    // correct probe sequence this is the case that breaks, and it cannot occur
+    // by luck in a test that only uses a handful of well-spread addresses — so
+    // the colliding address is searched for rather than hoped for.
+    let target_bucket = class_bucket(FRESH);
+    let mut collider = None;
+    for candidate in 1u64..100_000 {
+        let addr = 0xBADD_C0DE_0000_0000usize.wrapping_add(candidate as usize);
+        if addr != FRESH && class_bucket(addr) == target_bucket {
+            collider = Some(addr);
+            break;
+        }
+    }
+    if let Some(addr) = collider {
+        let c1 = find_or_register_class(addr, b"hash-coll");
+        assert!(c1.is_some(), "colliding registration failed");
+        assert_ne!(c1, first, "colliding addresses collapsed into one class");
+        assert_eq!(hash_lookup(addr), c1, "colliding class not found by probe");
+        assert_eq!(hash_lookup(FRESH), first, "probe run broke the earlier entry");
+        serial_println!(
+            "[lockdep]   class hash: OK ({} classes verified vs scan, bucket collision handled)",
+            checked
+        );
+    } else {
+        // Not a silent pass: if no collider was found the collision path went
+        // untested and the log must say so.
+        serial_println!(
+            "[lockdep]   class hash: OK ({} classes verified vs scan) — WARNING no \
+             colliding address found in 100k candidates, probe path UNTESTED",
+            checked
+        );
+    }
 }

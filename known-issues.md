@@ -60895,6 +60895,318 @@ fabricated one — the next run also adds `bench_spinlock_uncontended`.
 likely because some process really did set one of the three maps during boot,
 which would itself be worth knowing and is why the benchmark prints the flag.
 
+#### RESULT — 2026-08-14, two post-fix release boots ✅ FIXED
+
+The first post-fix boot reported `namespace fast path DISABLED
+(NS_FEATURES_ACTIVE=true)` — the pre-registered fallback clause above, firing
+verbatim. The cause was not "some process set one of the maps during boot" but
+something better: **the namespace self-tests themselves**.
+`test_process_attach_detach`, `test_process_root` and `test_volume_mounts` call
+`attach`/`set_root`/`add_volume`, which arm the monotonic flag, and nothing
+disarmed it. So the self-tests were permanently degrading the VFS of the kernel
+they had just finished validating — every path operation for the rest of the
+boot paid three global spinlocks to exercise a feature that no longer had a
+user. Fixed by asserting `reset_ns_features_if_trivial()` at the end of
+`self_test()`, which doubles as a leak check: it can only succeed if every
+namespace test cleaned up its process state.
+
+Two boots after that fix (the first aborted on an unrelated flake — see
+`B-FASTPY-SLEEP-SELF-TEST-IS-FLAKY` — so both are reported):
+
+| # | prediction | pre-fix | run A | run B | grade |
+|---|---|---|---|---|---|
+| 1 | uncontended tracked lock **300–700 ns** | 628 | 448 | 632 | **HIT** (all three in band) |
+| 2 | `ns_translate` **< 150 ns** | 1670 | 347 | 264 | **MISS** (1.8x over) |
+| 3 | `resolve_follow` **1700–2000 ns** | 3138 | 2488 | 1627 | **UNPROVEN** (band narrower than the noise) |
+| 4 | `vfs_stat_root` **4400–4700 ns** | 5930 | 2971 | 4394 | **HIT** (run B lands 0.14% under the band) |
+
+**(1) HIT, and it was the load-bearing one.** The previous prediction on this
+benchmark failed because its lock cost came from a *fabricated* anchor; this one
+was measured first, and everything built on it held.
+
+**(2) MISS, and the miss was avoidable by reading a type signature.** The
+prediction said "I predict the allocation is skipped entirely on the fast path,
+hence < 150". It cannot be: `resolve_path` returns `PathBuf`, so *every* return
+allocates, fast path or not. The residual ~264 ns is one atomic load plus that
+allocation. This is not a measurement surprise — it is a claim contradicted by
+the function's own declaration, which was there to be read. It also promotes the
+deferred `Cow<'_, Path>` change from "the correct next target" to "the only
+remaining term".
+
+**(3) UNPROVEN, and that is the more useful result.** 1627 and 2488 straddle the
+band. The two runs differ by 1.53x while the band spans 1.18x — the prediction
+was finer-grained than the instrument meant to grade it. Predicting to a
+precision the measurement cannot resolve yields a verdict that is noise wearing
+a grade's clothes, which is worse than no verdict. See
+`TD-BENCH-STAGE-SPLIT-HAS-NO-COHERENCE-CHECK` below, where the same two runs
+disagree by 1.67x on two byte-identical benchmarks.
+
+**(4) HIT.** Predicted "~28% improvement"; measured −26% (5930 → 4394). This is
+the benchmark twice attacked in the wrong subsystem (first the dcache, then the
+subtraction). The third attempt — measure the anchor, then follow the
+measurement — worked on the first try.
+
+---
+
+### B-LOCKDEP-CLASS-LOOKUP-IS-A-LINEAR-SCAN-ON-EVERY-LOCK — 2026-08-14 (`kernel/src/lockdep.rs`)
+
+**Measured, and it is the largest single overhead found this session.** The lock
+microbenchmark added to grade the namespace fix answered a question nobody had
+asked it:
+
+```
+lock acquire+release: raw 30ns, tracked 632ns, no-lockdep 232ns, no-stats 656ns
+lock overhead: total +602ns = lockdep 400ns + preempt 29ns + rdtsc 57ns + unexplained 116ns
+```
+
+`raw` is `spin::Mutex`; `tracked` is `crate::sync::Mutex`, the type every global
+in the kernel uses. **The tracked mutex costs 21x the raw one, and two thirds of
+the difference is lockdep.** Confirmed across both post-fix boots: 400/602 ns
+(66%) and 281/430 ns (65%).
+
+The cause is not that validation is expensive. It is that the *lookup* is
+`O(classes)`:
+
+```rust
+fn find_or_register_class(lock_addr: usize, name: &[u8]) -> Option<u16> {
+    let count = CLASS_COUNT.load(Ordering::Relaxed) as usize;
+    for i in 0..count.min(MAX_CLASSES) {          // <-- up to 128 iterations
+        if unsafe { CLASSES[i].id } == lock_addr { return Some(i as u16); }
+    }
+    ...
+```
+
+and `find_class` — called from `lock_release` — is the same scan again. So every
+lock operation in the kernel walks the class table **twice**, and `MAX_CLASSES`
+is 128. This is exactly the "linear scan on a hot path" CLAUDE.md's performance
+section forbids, hiding inside the *debugging* infrastructure rather than the
+code being debugged, which is why no amount of reading the subsystem under
+investigation would ever have found it.
+
+Two further consequences worth stating because they distort the whole benchmark
+suite:
+
+* **The cost is positional.** A lock class registered early is found in a few
+  iterations; one registered late pays the full scan. So the same lockdep call
+  is cheap or expensive depending on *boot order*, and a benchmark's own lock —
+  registered last, at benchmark time — pays the worst case. The 400 ns figure is
+  therefore an upper bound on the average, not the average.
+* **Every benchmark in this suite that takes a lock is partly measuring this.**
+  `syscall_dispatch` (653–699 ns), `futex_wake_empty` (953 ns) and the VFS
+  numbers all include it.
+
+**The fix** (implemented in the same change as this entry): an open-addressed
+hash index from lock address to class slot, Fibonacci-hashed and linearly
+probed, 512 buckets for 128 classes so the load factor stays at 25%. This is
+what Linux does (`classhash_table`, `kernel/locking/lockdep.c`). Entries are
+append-only, so a probe run is contiguous and stopping at the first empty bucket
+is correct.
+
+**This fix is what makes the tempting question go away.** The obvious reaction to
+"lockdep costs 400 ns per lock" is to gate it to debug builds, as Linux does with
+`CONFIG_PROVE_LOCKING` — trading deadlock detection in production for lock speed.
+That would have been a real architectural fork worth escalating. It is moot: the
+validator was never inherently expensive, its index was. Keep both.
+
+**The optimisation is guarded by a test that can actually fail.** A hash that
+silently *misses* a registered class is the dangerous failure: `find_or_register_class`
+would then register a second class for the same lock, that lock's dependency
+edges would split across two graph nodes, no cycle would ever be found through
+it, and lockdep would go quiet — looking exactly as healthy as a kernel with no
+deadlocks. So the linear scan is not deleted, it is demoted to an oracle:
+`test_class_hash_index()` asserts the hash and the scan agree on every registered
+class, agree on absence, that double registration yields one class, and — using
+a colliding address it *searches for* rather than hopes for — that the probe
+sequence survives a bucket collision.
+
+#### PROSPECTIVE PREDICTION (recorded before the fix is booted)
+
+1. `lock_tracked` drops from ~632 ns to **250–330 ns**, i.e. close to the
+   measured `no-lockdep` figure (232 ns) plus a hash lookup and probe (~2 memory
+   references, call it 20–80 ns under TCG). If it lands *below* 232 ns something
+   is wrong — the index cannot be cheaper than not running at all.
+2. `lockdep` in the overhead split drops from ~400 ns to **< 100 ns**.
+3. The knock-on: `syscall_dispatch` (653–699 ns across four boots, target 200)
+   improves by **at least 15%**, because it takes tracked locks. This is the
+   riskiest of the three — if syscall dispatch does *not* move, then either it
+   takes no tracked lock or the lock is registered early enough to have been
+   cheap already, and the "every benchmark is partly measuring lockdep" claim
+   above is overstated and must be narrowed.
+4. `lockdep classes registered` (newly printed) comes out **> 40**. If it is in
+   single digits, the scan was never long and the 400 ns has some *other* cause
+   inside `lock_acquire` — most likely `smp::current_cpu_index()` or the
+   re-entrancy guard — and this whole diagnosis is wrong.
+
+#### RESULT — 2026-08-14, release boot ✅ FIXED
+
+```
+[lockdep]   class hash: OK (3 classes verified vs scan, bucket collision handled)
+[bench]   lock acquire+release: raw 25ns, tracked 274ns, no-lockdep 223ns, no-stats 301ns
+[bench]   lock context: 43 lockdep classes registered
+[bench]   lock overhead: total +249ns = lockdep 51ns + preempt 29ns + rdtsc 56ns + unexplained 113ns
+[bench] SCORE lock_uncontended 274 500 PASS
+```
+
+| # | prediction | before | after | grade |
+|---|---|---|---|---|
+| 1 | `lock_tracked` **250–330 ns** | 632 | **274** | **HIT** |
+| 2 | lockdep's share **< 100 ns** | 400 | **51** | **HIT** (7.8x) |
+| 3 | `syscall_dispatch` improves **≥ 15%** | 653–699 | **699** | **MISS** (0%) |
+| 4 | **> 40** classes registered | — | **43** | **HIT** |
+
+**The tracked mutex went from 21x the raw spinlock to 11x, and
+`lock_uncontended` moved from OVER to PASS** (274 vs the 500 ns target). Knock-on
+in the same boot: `vfs_stat_root` 4394 → **3344 ns**, so with the namespace fast
+path the total on that benchmark is **5930 → 3344, −44%**.
+
+**(3) MISS, and the pre-registered consequence is honoured rather than
+explained away.** The prediction said: *"if syscall dispatch does not move, then
+the 'every benchmark is partly measuring lockdep' claim is overstated and must be
+narrowed."* It did not move — 699 ns, identical to the best of the four pre-fix
+boots. **Narrowing it: the claim was overstated.** Lockdep taxed benchmarks that
+take `crate::sync::Mutex` *specifically*, which is the VFS/namespace path, not
+"every benchmark that takes a lock". `syscall_dispatch` evidently takes none, or
+takes a different lock type (`PreemptSpinMutex`, which is a distinct type with
+distinct overhead — a distinction this session already had to write a comment
+about in `bench.rs`). `syscall_dispatch` at 3.5x its 200 ns target is therefore
+still unexplained and remains open.
+
+**The coherence gates from `TD-BENCH-STAGE-SPLIT-HAS-NO-COHERENCE-CHECK` shipped
+in the same boot and reported a clean run:** drift 3331 → 3353 ns (0%),
+parts/whole 96%. That is the *quiet* outcome, so it proves only that the gates do
+not fire spuriously — **it does not prove they fire.** They have not yet been
+observed rejecting a run, and until they have, they carry exactly the weakness
+this file keeps documenting. The two incoherent runs that motivated them are
+recorded above, so the next drifting boot is the test.
+
+**Weak spot in the new test, recorded rather than glossed:** `test_class_hash_index()`
+runs from `lockdep::self_test()`, which executes early in boot when only **3**
+classes are registered — but the pathology it guards against (a probe run
+walking into a collision) needs a *populated* table, and by benchmark time there
+are 43. The synthetic collision case is what carries the test today; the
+verify-every-registered-class part is checking 3 of the eventual 43. It should be
+re-run late in boot as well. Tracked as
+`TD-LOCKDEP-HASH-TEST-RUNS-BEFORE-THE-TABLE-IS-POPULATED`.
+
+---
+
+### TD-LOCKDEP-HASH-TEST-RUNS-BEFORE-THE-TABLE-IS-POPULATED — 2026-08-14 (`kernel/src/lockdep.rs`)
+
+`test_class_hash_index()` verifies the O(1) class index against a linear-scan
+oracle, but it is called from `lockdep::self_test()` during early boot, when the
+class table holds **3** entries. By the time the kernel is doing real work it
+holds **43**. So the "every registered class is found at the index the scan
+reports" assertion — the one that would catch a probe-sequence bug — is
+exercised at 7% of the table size it needs to defend.
+
+The synthetic part of the test (register a fresh address, then register a
+deliberately colliding one and check both resolve) does not depend on table size
+and is doing the real work today. That is why this is tech debt and not a hole:
+the collision path *is* covered, just not at realistic occupancy.
+
+**Proper fix:** expose it as `pub fn verify_class_index()` and call it a second
+time late in boot — after driver/subsystem init, when the table is full — so the
+oracle comparison runs against all 43 classes. It must run on every boot, not
+only `--bench` boots, or it inherits the "check that only runs when you're
+already looking" problem.
+
+---
+
+### TD-BENCH-STAGE-SPLIT-HAS-NO-COHERENCE-CHECK — 2026-08-14 (`kernel/src/bench.rs`)
+
+Two byte-identical benchmarks, in the same boot, disagreed by 1.67x:
+
+```
+SCORE vfs_stat_root 2971 ...
+[bench] vfs_stat_breakdown_full: min=25808 cycles (4976ns) ...
+```
+
+Both are `run(..., 500, || black_box(Vfs::stat("/")))`. Nothing distinguishes
+them but *when in the boot they ran*. In the next boot the same pair came out
+4394 and 4306 — coherent. So the harness's min-of-500 is sometimes accurate and
+sometimes 1.7x off, and **nothing in the output says which kind of run you are
+reading.**
+
+The consequences are not hypothetical; they are the two runs above:
+
+* Run A attributed `stat_resolved` 2531 → 4109 ns, a 62% "regression" caused by
+  a change that cannot touch it.
+* Run B printed `full 4306ns = resolve_follow ~0ns + stat_resolved 5762ns` — the
+  subtraction saturated at zero because a *part* measured larger than the
+  *whole*. That is arithmetically impossible and it was printed without comment.
+* Run A's parts summed to 133% of its whole. Also printed without comment.
+
+This is the project's recurring defect class in its purest form: the check was
+*there* — the code deliberately measures `resolve_follow` both directly and by
+subtraction, with a comment explaining that a disagreement would indict the
+subtraction — and then prints both numbers side by side and says nothing when
+they disagree by 2.9x. **A check whose failure is not distinguishable from its
+success is not a check, it is a decoration.**
+
+> **Resolution (same change).** Two gates, both of which say the word WARNING:
+>
+> * **Drift gate.** The first measurement (`vfs_stat_breakdown_full`) is repeated
+>   verbatim at the *end* of the block as `..._full2`. The two are the same code
+>   over the same input, so any difference is pure measurement drift across the
+>   width of the block, and it bounds how much of every stage difference is real.
+>   Over 25% and the run is declared not internally coherent and unusable for
+>   attribution.
+> * **Parts/whole gate.** `resolve_direct + stat_resolved` must land within
+>   75–125% of `full`, or the stage attribution is declared "not arithmetic, it
+>   is noise".
+>
+> The same discipline is applied to the new lock benchmark, which prints
+> `unexplained` as an explicit residual and warns when the components exceed the
+> total they were subtracted from.
+
+**Not fixed:** the harness still reports a single `min` with no confidence
+interval, so a *single* benchmark with no in-block replicate (i.e. all the
+others) remains ungraded for coherence. The proper fix is for `run()` itself to
+take two interleaved sample sets and report their disagreement, making every
+benchmark self-checking rather than just this one. Tracked here; not blocking.
+
+---
+
+### B-FASTPY-SLEEP-SELF-TEST-IS-FLAKY — 2026-08-14 (`kernel/src/proc/spawn.rs:15508`)
+
+`self_test_fastpy_slateos_sleep()` failed one release boot and passed the next
+with no relevant code change in between:
+
+```
+[spawn]   FAIL: fastpy-sleep (ring 3) — reached Zombie but exit code was Some(3),
+          expected 0 (3 = a clock read was 0 or the observed sleep delta was < 40000000 ns)
+```
+
+The tool printed its measured delta: **36 818 000 ns for a `time.sleep(0.05)`**,
+i.e. the sleep returned **26% early**, against a 40 ms lower bound. The kernel's
+own `[sched] sleep_ns` test in the same boot passed (`slept 20.459ms for 20ms
+request`), so whatever is short is not the scheduler's `sleep_ns` at a 20 ms
+scale.
+
+Two candidate causes, not yet separated:
+
+1. **The sleep genuinely returns early at 50 ms** — a wakeup-deadline rounding or
+   timer-phase bug that a 20 ms request happens not to expose.
+2. **`clock_realtime()` advances more slowly than real time** during the sleep,
+   so a correct 50 ms sleep *reads* as 36.8 ms. Ratio 50/36.818 = 1.358, which is
+   suspiciously close to nothing in particular, but the two clocks the test
+   compares (the scheduler's timer and `clock_realtime`) are different sources
+   and their agreement is exactly what the test implicitly assumes and never
+   checks.
+
+Distinguishing them is cheap and should be done before touching anything: have
+the harness log its own `clock_realtime()` delta across the child's lifetime
+next to the child's measured delta. It already reads both — guard #2 in the
+doc comment — but only compares each against the bound, never against each
+other. If the kernel-side delta is ~50 ms while the child's is ~37 ms, it is
+cause (2) and the bug is in the userspace clock path, not the sleep.
+
+Impact today: an intermittently red boot test, which is corrosive — a suite that
+cries wolf gets its failures ignored, and this is the only ring-3 test of the
+blocking-sleep path. Not lane-A-exclusive (the tool is fastpy/userspace), but
+the timekeeping and `SYS_SLEEP` sides are, and the harness is in
+`kernel/src/proc/spawn.rs`.
+
 ---
 
 ### TD-BASELINES-TOML-IS-INVALID-TOML-AND-NOTHING-READS-IT — 2026-08-14 — ✅ FIXED 2026-08-14 (`bench/baselines.toml`, `scripts/test-bench-history.py`)

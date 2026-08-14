@@ -22,7 +22,8 @@
 use crate::ast::{
     AndOr, AndOrOp, ArrayElem, ArrayIndex, AssignRhs, Assignment, BulkOp, CaseMode, CmdSubBody,
     Command, DupSpelling, dup_spelling,
-    CondExpr, Item, ItemSep, ParamOp, Pipeline, Program, Redirect, RedirectOp, ReplaceAnchor,
+    CondExpr, Item, ItemSep, ParamOp, Pipeline, ProcSubBody, Program, Redirect, RedirectOp,
+    ReplaceAnchor,
     SimpleCommand, Word, WordPart,
 };
 use crate::bfmt;
@@ -1356,11 +1357,17 @@ fn attach_tails_scoped(parts: &mut [WordPart], index: bool) {
             WordPart::CommandSub {
                 body: CmdSubBody::Parsed { .. } | CmdSubBody::Unread { .. }
             }
+            // The `<(`/`>(` spellings of the same unread body: one scan reads
+            // all three (`extract_dollar_brace_string`, subst.c:1881-1950), so
+            // one remainder answers for all three. See
+            // [`crate::ast::ProcSubBody::Unread`].
+                | WordPart::ProcSub { body: ProcSubBody::Unread { .. }, .. }
         )
     };
     attach_tails_by(parts, &is_comsub, index, &mut |p, tail| match p {
         WordPart::CommandSub { body: CmdSubBody::Parsed { tail: t, .. } } => *t = Some(tail),
         WordPart::CommandSub { body: CmdSubBody::Unread { tail: t, .. } } => *t = tail,
+        WordPart::ProcSub { body: ProcSubBody::Unread { tail: t, .. }, .. } => *t = tail,
         _ => {}
     });
     // A `$(( … ))` wants the same remainder, and for a stronger reason: its
@@ -2009,7 +2016,15 @@ pub(crate) fn part_src(p: &WordPart) -> Str {
         // `>(...)`, and 5042 is the one call — so it is re-printed the same way,
         // leading-space guard included.
         WordPart::ProcSub { input, body } => {
-            comsub_reprint(if *input { b"<(" } else { b">(" }, body)
+            let open: BStr<'_> = if *input { b"<(" } else { b">(" };
+            match body {
+                ProcSubBody::Parsed(prog) => comsub_reprint(open, prog),
+                // No parse to re-print: the bytes stand as they were written,
+                // exactly as an unread `$( … )` body's do.
+                ProcSubBody::Unread { src, closed, .. } => {
+                    bfmt![open, src, if *closed { b")".as_slice() } else { b"" }]
+                }
+            }
         }
         // Rendered from the parts rather than from `expr`, which is the same
         // bytes: that is what lets `attach_comsub_tails` swap one of the

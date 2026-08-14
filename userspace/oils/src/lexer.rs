@@ -615,6 +615,25 @@ fn shift_ranges(
     })
 }
 
+/// Which read found a [`Seg::ProcSub`] — the same split [`SubBody`] makes for
+/// the `$(` spelling.
+///
+/// A `<( … )` written where a parser was reading is parsed there and then, and
+/// what survives is the re-print (`parser::procsub_reprints`). One written in
+/// text no parser read — the body of a `${ … }` that reached the shell as a
+/// *value*, which `${x@P}` and `PS4` re-read — has had no such parse: the only
+/// read of it is the one `extract_dollar_brace_string` makes for its extent
+/// (subst.c:1881-1950), which happens later and where a failure leaves the
+/// brace unclosed rather than ending the script. See [`crate::ast::ProcSubBody`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcRead {
+    /// A parser read the body where it was written.
+    Eager,
+    /// Only a `${ … }` scan will; `closed` says whether a `)` was found before
+    /// the text ran out.
+    Unread { closed: bool },
+}
+
 /// A word fragment, preserving quoting for later expansion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Seg {
@@ -689,7 +708,8 @@ pub enum Seg {
     /// shift is from the *opening* delimiter, not the closing one: a process
     /// substitution runs as a child command rather than as a body bash re-reads
     /// after the enclosing scan.
-    ProcSub(bool, Str, u32),
+    /// The last field says which read this was — see [`ProcRead`].
+    ProcSub(bool, Str, u32, ProcRead),
     /// A construct left open in text no parser read, which is not a lexing
     /// failure at all but a *runtime* one — see [`Unclosed`].
     ///
@@ -3709,7 +3729,7 @@ fn walk_seg_lines(segs: &mut [Seg], f: &dyn Fn(&mut u32)) {
     for seg in segs {
         match seg {
             Seg::CmdSub(_, close, _) => f(close),
-            Seg::ProcSub(_, _, open) => f(open),
+            Seg::ProcSub(_, _, open, _) => f(open),
             Seg::Dq(inner) => walk_seg_lines(inner, f),
             _ => {}
         }
@@ -5220,6 +5240,16 @@ impl Lexer {
                 // the re-print, which is what bash performs too: the token
                 // buffer a `${ … }` scan leaves behind holds the re-print and
                 // nothing else, as `declare -f` shows.
+                //
+                // …unless no parser ever read this text, which is
+                // `self.here_text`. Then there was no first parse to leave a
+                // re-print, and the only read of the body is the one
+                // `extract_dollar_brace_string` makes for its extent — later,
+                // and from where a failure leaves the brace unclosed rather
+                // than ending the script. The body is carried as text to be
+                // read there; see [`crate::ast::ProcSubBody`]. Performing it is
+                // unaffected: the expansion is only reached at all if that read
+                // succeeded, and then it is performed exactly as above.
                 '<' | '>'
                     if matches!(mode, Verbatim::Bare | Verbatim::Replacement)
                         && self.at(self.pos + 1) == Some('(') =>
@@ -5227,13 +5257,30 @@ impl Lexer {
                     flush_lit(&mut segs, &mut lit);
                     let input = c == '<';
                     let open_line = self.cur_line();
+                    let read = if self.here_text {
+                        ProcRead::Unread { closed: true }
+                    } else {
+                        ProcRead::Eager
+                    };
                     // Past the `<`/`>` and the `(`, leaving the cursor where
                     // `read_subst_body` wants it. Word level here as in
                     // [`Lexer::read_word_inner`], so the body's delimiter is
                     // that `(` and never an enclosing `"`.
                     self.pos += 2;
-                    let raw = self.read_subst_body(false).map_err(|e| e.at(self.eof_line()))?;
-                    segs.push(Seg::ProcSub(input, raw, open_line));
+                    let body = self.pos;
+                    match self.read_subst_body(false) {
+                        Ok(raw) => segs.push(Seg::ProcSub(input, raw, open_line, read)),
+                        // No mate, and in unread text that is not this scan's
+                        // failure either — the same standing the `$(` spelling
+                        // gets in [`Lexer::read_word_verbatim`]'s dquote arm.
+                        Err(e) if read != ProcRead::Eager && self.unread_comsub(&e) => {
+                            let src = self.slice(body, self.chars.len());
+                            self.pos = self.chars.len();
+                            let open = ProcRead::Unread { closed: false };
+                            segs.push(Seg::ProcSub(input, src, open_line, open));
+                        }
+                        Err(e) => return Err(e.at(self.eof_line())),
+                    }
                 }
                 // The same construct in a **double-quoted operand**, where the
                 // expansion above declines it — but where the `${ … }` scan
@@ -5532,7 +5579,7 @@ impl Lexer {
                 // like any other (parse.y:5071), so the body's delimiter is that
                 // `(` and never an enclosing `"`.
                 let raw = self.read_subst_body(false).map_err(|e| e.at(self.eof_line()))?;
-                segs.push(Seg::ProcSub(input, raw, open_line));
+                segs.push(Seg::ProcSub(input, raw, open_line, ProcRead::Eager));
                 continue;
             }
             match c {
@@ -7964,7 +8011,11 @@ fn eager_bodies_in(segs: &[Seg]) -> Vec<EagerBody> {
                 Seg::CmdSub(raw, close, SubBody::Eager) => {
                     out.push(EagerBody { src: raw.clone(), line: *close, procsub: false });
                 }
-                Seg::ProcSub(_, raw, open) => {
+                // Only a body a parser read is parsed eagerly. One that reached
+                // the shell inside a value is parsed by the `${ … }` scan that
+                // finds it instead, later and elsewhere — see
+                // [`crate::ast::ProcSubBody`].
+                Seg::ProcSub(_, raw, open, ProcRead::Eager) => {
                     out.push(EagerBody { src: raw.clone(), line: *open, procsub: true });
                 }
                 Seg::ParamBraced(_, _, subs, _) | Seg::Arith(_, _, subs) => spans(subs, out),
@@ -8812,7 +8863,7 @@ mod tests {
                 .iter()
                 .find_map(|t| match t {
                     Tok::Word(segs) => segs.iter().find_map(|s| match s {
-                        Seg::CmdSub(raw, _, SubBody::Eager) | Seg::ProcSub(_, raw, _) => Some(raw.clone()),
+                        Seg::CmdSub(raw, _, SubBody::Eager) | Seg::ProcSub(_, raw, _, _) => Some(raw.clone()),
                         _ => None,
                     }),
                     _ => None,
@@ -9060,7 +9111,7 @@ mod tests {
                 .iter()
                 .find_map(|t| match t {
                     Tok::Word(segs) => segs.iter().find_map(|s| match s {
-                        Seg::CmdSub(raw, _, SubBody::Eager) | Seg::ProcSub(_, raw, _) => Some(raw.clone()),
+                        Seg::CmdSub(raw, _, SubBody::Eager) | Seg::ProcSub(_, raw, _, _) => Some(raw.clone()),
                         _ => None,
                     }),
                     _ => None,

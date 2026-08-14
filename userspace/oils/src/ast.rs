@@ -1099,7 +1099,53 @@ pub enum WordPart {
         /// `true` for `<(cmd)` (the command's output is read); `false` for
         /// `>(cmd)` (data written to the file is sent to the command).
         input: bool,
-        body: Program,
+        body: ProcSubBody,
+    },
+}
+
+/// How a [`WordPart::ProcSub`] body reached the shell — the same split
+/// [`CmdSubBody`] makes for the `$(` spelling, and for the same reason.
+///
+/// bash reads a `<( … )` twice when it is written where a parser was reading:
+/// `parse_comsub` (parse.y:5028's comment names all three spellings) parses it
+/// for its extent, and the re-print it keeps is read again when the word is
+/// expanded. Written in text no parser read — the body of a `${ … }` that
+/// reached the shell as a *value*, which `${x@P}` and `PS4` re-read — only the
+/// second read happens, and the *scan* that finds it
+/// (`extract_dollar_brace_string`, subst.c:1881-1950) is the one that parses it
+/// for its extent.
+///
+/// The two are not interchangeable. A body a parser read has already raised its
+/// syntax error, as the enclosing script's; one only the scan read raises it
+/// from the scan, where a failure does not end the script but leaves the brace
+/// unclosed — `bad substitution`, and the text printed as written. Measured
+/// against bash 5.2.37, `x='A${z#<(fi)}B'; echo "${x@P}"` reports the parse
+/// twice and then `bad substitution`, byte for byte as the `$(` spelling does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProcSubBody {
+    /// A body a parser read, held as the tree that parse produced. Its syntax
+    /// errors were the enclosing parse's, and `declare -f` re-prints it.
+    Parsed(Program),
+    /// A body only a `${ … }` scan read, held as text.
+    ///
+    /// Kept as text and not as a tree because the scan's read can *fail*, and a
+    /// failure here is not the parse error the [`ProcSubBody::Parsed`] spelling
+    /// raises — it is the brace never closing. The read is made by
+    /// [`crate::interp::Shell::extent_read_of_subs`], which reaches this body
+    /// through [`crate::interp::Shell::brace_scanned_subs_slice`]; only if it
+    /// succeeds is the expansion reached at all, and the body parsed and
+    /// performed there.
+    Unread {
+        /// The body text, between the `(` and its `)`.
+        src: Str,
+        /// Everything after the closing `)` in the string this body sits in —
+        /// what the extent read echoes as its remainder. Filled by
+        /// [`crate::unparse::attach_comsub_tails`] once the word is assembled,
+        /// exactly as [`CmdSubBody::Unread::tail`] is.
+        tail: Str,
+        /// Whether a `)` was found at all. A body with none takes the rest of
+        /// the string, as `extract_command_subst` does.
+        closed: bool,
     },
 }
 

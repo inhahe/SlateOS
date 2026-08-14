@@ -35,7 +35,7 @@ use crate::ast::{
     CondExpr, ForArithClause, ForClause, FunctionDef, HereDoc, IfClause, Item, ItemSep, LineMap,
     LoopClause,
     ParamOp,
-    Pipeline, Program,
+    Pipeline, ProcSubBody, Program,
     Redirect, RedirectOp, ReplaceAnchor, SelectClause, SimpleCommand, SubDelim, SubshellClause,
     Word, WordPart,
 };
@@ -43,7 +43,7 @@ use crate::assoc::AssocArray;
 use crate::bfmt;
 use crate::bytes::{self, BStr, Ch, Str};
 use crate::lexer::{
-    AliasExpansion, CmdSubSpan, DparenCopy, HeredocEof, ParseOpts, Op, ReaderWarning, Seg, Spanned,
+    AliasExpansion, CmdSubSpan, DparenCopy, HeredocEof, ParseOpts, Op, ProcRead, ReaderWarning, Seg, Spanned,
     Tok, SubBody, SubOpen, TokSpan, Tokenized, UngatheredHeredoc,
     expand_aliases_tracked, tokenize,
     tokenize_paren_body, tokenize_deferred, tokenize_spanned, word_is_assignment,
@@ -2605,7 +2605,7 @@ fn map_segs(segs: &mut [Seg], map: &LineMap) {
                 *open = map.map(*open);
                 map_arith_comsubs(nested, map);
             }
-            Seg::ProcSub(_, _, open) => *open = map.map(*open),
+            Seg::ProcSub(_, _, open, _) => *open = map.map(*open),
             Seg::Dq(inner) => map_segs(inner, map),
             _ => {}
         }
@@ -6591,9 +6591,24 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
             // from here. See [`crate::ast::WordPart::ArithSub::tail`].
             WordPart::ArithSub { expr, bracket: *bracket, parts, tail: Str::new() }
         }
-        Seg::ProcSub(input, raw, open_line) => WordPart::ProcSub {
+        Seg::ProcSub(input, raw, open_line, read) => WordPart::ProcSub {
             input: *input,
-            body: parse_procsub_body(raw, *open_line, opts)?,
+            body: match read {
+                ProcRead::Eager => {
+                    ProcSubBody::Parsed(parse_procsub_body(raw, *open_line, opts)?)
+                }
+                // Not parsed here: no parser read the text this was written in,
+                // so the read that finds it is the `${ … }` scan's, made later
+                // and from where a failure is `bad substitution` rather than a
+                // script syntax error. The `tail` is filled by
+                // `unparse::attach_comsub_tails` once the word is assembled,
+                // exactly as an unread `$( … )` body's is.
+                ProcRead::Unread { closed } => ProcSubBody::Unread {
+                    src: raw.clone(),
+                    tail: Str::new(),
+                    closed: *closed,
+                },
+            },
         },
     })
 }
@@ -8054,7 +8069,7 @@ fn word_from_source(
             }
             first = false;
             for seg in segs {
-                if let Seg::ProcSub(input, raw, _) = seg {
+                if let Seg::ProcSub(input, raw, _, _) = seg {
                     let open: BStr<'_> = if *input { b"<(" } else { b">(" };
                     parts.push(WordPart::Literal(bfmt![open, raw, b")"]));
                     continue;

@@ -59088,7 +59088,7 @@ something that exists, or what a `cat` of it reads.
 **How it was found:** implementing part (A) — the eager parse and re-print of a
 process substitution met by a `${ … }` body scan.
 
-### [B] TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN. bash's `brace_gobbler` and its `${x@P}` re-read each meet a `<(` osh's do not — 2026-08-14 — ⚠️ OPEN (both halves ✅ FIXED 2026-08-14; one residue of the second remains, below)
+### [B] TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN. bash's `brace_gobbler` and its `${x@P}` re-read each meet a `<(` osh's do not — 2026-08-14 — ⚠️ OPEN (both halves ✅ FIXED 2026-08-14; one residue remains — the arithmetic fragment, below)
 
 Two residues of TD-OILS-A-PROCESS-SUBSTITUTION-IN-A-BRACE-BODY-IS-NEVER-PERFORMED
 (above), left after both halves of it were done. Each is a *second* scan of the
@@ -59260,26 +59260,54 @@ and only the row is missing.
   (unbraced text, `" … "`, `' … '`, backslash), the stepped-over subscript, and
   the `PS4` spelling of the same re-read.
 
-* **⚠️ RESIDUE, STILL OPEN.** The row is wired for the double-quoted **operand**
-  only. bash's scan reads the whole `${ … }` body, so every other fragment in
-  it wants the same row, and osh has none of them:
+* **✅ FIXED 2026-08-14 for every position but the arithmetic one.** The row
+  was wired for the double-quoted **operand** only, and bash's scan reads the
+  whole `${ … }` body — it walks characters and knows nothing of the `#`, `/`
+  or `^^` it has already passed — so every other fragment wanted the same row:
 
-  | written (as `x`, then `echo "${x@P}"`) | bash | osh |
+  | written (as `x`, then `echo "${x@P}"`) | bash | osh before |
   |---|---|---|
   | `A${z#<(fi)}B` (pattern) | reports ×2, `bad substitution`, text | right text, **no diagnostics** |
   | `A${z/p/<(fi)}B` (replacement) | reports ×2, `bad substitution`, text | right text, **no diagnostics** |
   | `A${z^^<(fi)}B` (case pattern) | reports ×2, `bad substitution`, text | right text, **no diagnostics** |
   | `A${z:0:<(fi)}B` (offset) | reports ×2, `bad substitution`, text | `AB` |
 
-  The `$( … )` spelling is right in all four (measured), so again only the row
-  is missing. It is harder than the operand's was, because in three of the four
-  the substitution is *both* read for its extent **and** performed — a
-  replacement really does expand to `/dev/fd/N` — so the part cannot simply be
-  the non-performed `CmdSubBody::Unread` the operand's is. The proper fix is to
-  give `WordPart::ProcSub` the `src`/`tail` an unread body needs and add it to
-  `Shell::brace_scanned_subs_slice`'s match, so one part can answer for both.
-  The offset row is a fourth shape again: it goes through `Verbatim::Arith`,
-  whose fragments have no `<(` row at all.
+  The `$( … )` spelling was right in all four (measured), so again only the row
+  was missing. It was harder than the operand's, because in these positions the
+  substitution is *both* read for its extent **and** performed — a replacement
+  really does expand to `/dev/fd/N`, measured — so the part could not simply be
+  the non-performed `CmdSubBody::Unread` the operand's is.
+
+  **What was done.** The split `CmdSubBody` already makes between a body a
+  parser read and one only a scan read is now made for the process-substitution
+  part too, so one part answers for both halves:
+
+  * `ast::ProcSubBody` — `Parsed(Program)` or `Unread { src, tail, closed }` —
+    replaces the bare `Program` in `WordPart::ProcSub`.
+  * `lexer::ProcRead` (`Eager` / `Unread { closed }`) rides on `Seg::ProcSub`;
+    the `Verbatim::Bare | Verbatim::Replacement` arm of
+    `Lexer::read_word_verbatim` picks it from `self.here_text`, and now
+    tolerates a missing `)` exactly as the `$(` spelling does.
+  * `parser::seg_to_part` parses only an eager body. An unread one is carried
+    as text, because its read belongs to the scan and happens later, from
+    where a failure is `bad substitution` rather than a script syntax error.
+  * `unparse`: an unread body prints back as written, and joins
+    `attach_comsub_tails` so it gets the same remainder the `$(` spelling does.
+  * `interp`: `Shell::brace_scanned_subs_slice` collects it,
+    `Shell::extent_read_of_subs` reads it through the same
+    `comsub_reparse_read`, and the new `Shell::proc_sub_body` parses-then-
+    performs at expansion — only reachable if that read succeeded.
+
+  **Verified:** corpus case
+  `a-process-substitution-a-brace-re-read-meets-is-read-wherever-in-the-braces-it-sits.sh`,
+  21 rows, IDENTICAL against bash 5.2.37.
+
+  **⚠️ Still open: the arithmetic fragment** — the offset and length of
+  `${z:o:l}`, which is `Verbatim::Arith` and has no `<(` row. It is left for
+  its own fix because osh diverges there over `<` before any process
+  substitution is written at all (`${z:1<(2)}` is `bcdef` in bash and an
+  `operand expected` in osh), so fixing the row alone would not close the gap.
+  See TD-OILS-A-LESS-THAN-IN-A-BRACE-ARITHMETIC-FRAGMENT-LOSES-ITS-LEFT-OPERAND.
 
 **How it was found:** implementing the entry above.
 
@@ -59328,3 +59356,45 @@ to hand.
 **How it was found:** measuring the `<(` row of
 TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN
 against its `$(` twin, which turned out to be wrong the same way.
+
+### [B] TD-OILS-A-LESS-THAN-IN-A-BRACE-ARITHMETIC-FRAGMENT-LOSES-ITS-LEFT-OPERAND
+
+**Status:** open. Found 2026-08-14, measured against bash 5.2.37.
+
+A `<` in the offset or length of `${z:o:l}` swallows everything to its left.
+The same expression inside a plain `$(( ... ))` is fine, so this is the brace
+fragment's own reading of the text, not the arithmetic evaluator's:
+
+| written | bash | osh |
+|---|---|---|
+| `z=abcdef; echo "${z:1<(2)}"` | `bcdef` | `z: <(2): syntax error: operand expected` |
+| `z=abcdef; echo "${z:0:1<(2)}"` | `a` | same error |
+| `echo $(( 1<(2) ))` | `1` | `1` |
+
+bash reads `1<(2)` as `1 < (2)`, which is `1`, so the offset is 1. osh
+evaluates `<(2)` alone -- the `1` is gone by the time the evaluator sees the
+expression, which is what the quoted error token shows.
+
+**Where:** `userspace/oils/src/lexer.rs`, the `Verbatim::Arith` path of
+[`Lexer::read_word_verbatim`], and whatever splits a `${z:o:l}` body into its
+two fragments in `userspace/oils/src/parser.rs`. The `<` is being taken for
+something other than a comparison operator -- most likely a fragment boundary.
+
+**Proper fix:** treat `<` in an arithmetic fragment as the comparison operator
+it is, so the whole fragment reaches the evaluator. A `<(` there is *not* a
+process substitution to be performed either -- measured, `${z:0:<(echo 1)}` is
+an `operand expected` in bash with the characters `<(echo 1)` standing as the
+error token, which osh already matches.
+
+**Blocks:** the arithmetic-fragment row of
+TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN.
+bash's `${ ... }` scan reads a `<( ... )` in an arithmetic fragment exactly as it
+reads one anywhere else in the body -- `x='A${z:0:<(fi)}B'; echo "${x@P}"`
+reports the parse twice and then `bad substitution`, where osh prints `AB` --
+but a corpus row for it would be measuring this bug instead, so the corpus case
+`a-process-substitution-a-brace-re-read-meets-is-read-wherever-in-the-braces-it-sits.sh`
+leaves that position out and says so.
+
+**How it was found:** measuring where bash's brace scan reads a `<( ... )`,
+while checking whether the `Verbatim::Arith` fragments needed the same row as
+the pattern and replacement ones.

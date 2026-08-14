@@ -124,7 +124,7 @@ use crate::ast::{
     CondBinOp, CondBinary, CondUnary,
     CondExpr, DeclArray,
     ForArithClause, ForClause, FunctionDef, IfClause, LineMap, LoopClause, ParamOp, Pipeline,
-    Program, Redirect,
+    ProcSubBody, Program, Redirect,
     RedirectOp,
     ReplaceAnchor, SelectClause, SimpleCommand, SubshellClause, Word, WordPart,
 };
@@ -29599,6 +29599,23 @@ impl Shell {
                     Some(read) => return read,
                 }
             }
+            // The other two spellings of the same read, and the same read of
+            // them: `extract_command_subst` does not know which delimiter sent
+            // it, so a body that will not parse fails identically. See
+            // [`crate::ast::ProcSubBody::Unread`].
+            if let WordPart::ProcSub { body: ProcSubBody::Unread { src, tail, closed }, .. } = sub {
+                let read = self.comsub_reparse_read(src, tail, *closed);
+                if let ExtentRead::Abandoned { rest, .. } = &read {
+                    if !rest.is_empty() {
+                        return self.extent_read_of_rest(&rest.clone());
+                    }
+                    return read;
+                }
+                if read != ExtentRead::Closed {
+                    return read;
+                }
+                continue;
+            }
             let WordPart::CommandSub { body } = sub else {
                 continue;
             };
@@ -30383,7 +30400,21 @@ impl Shell {
                 // order (subst.c:1431-1437). A `$[ … ]` is not that row —
                 // `string[i+1]` is `[`, not `(` — so nothing reads it and the
                 // scan meets what is inside it directly.
-                WordPart::CommandSub { .. } | WordPart::ArithSub { bracket: false, .. } => {
+                // The scan's `$(` row is really three: `extract_dollar_brace_
+                // string` names `$(`, `<(` and `>(` together and hands each to
+                // the same `extract_command_subst` (subst.c:1881-1950). So a
+                // process substitution in a body is read for its extent exactly
+                // as the dollar spelling is, wherever in the braces it sits —
+                // measured, `x='A${z#<(fi)}B'; echo "${x@P}"` reports the parse
+                // twice and then `bad substitution`, byte for byte as
+                // `$(fi)` there does.
+                //
+                // Only the unread spelling is here. A body a parser read is a
+                // [`crate::ast::ProcSubBody::Parsed`], and what this scan meets
+                // of one is its re-print, which parses back.
+                WordPart::CommandSub { .. }
+                | WordPart::ArithSub { bracket: false, .. }
+                | WordPart::ProcSub { body: ProcSubBody::Unread { .. }, .. } => {
                     if !*squote {
                         out.push(p);
                     }
@@ -30687,7 +30718,7 @@ impl Shell {
             // The substitution's path is a temp file name this shell generates,
             // so it is ASCII by construction — the only place a value's bytes are
             // known to be text.
-            WordPart::ProcSub { input, body } => self.proc_sub(*input, body).into_bytes(),
+            WordPart::ProcSub { input, body } => self.proc_sub_body(*input, body),
             // The extent read comes first, exactly as it does for a `${ … }`:
             // `param_expand` extracts the whole `$(( … ))` before it expands a
             // byte of it, and a `$( … )` inside is really parsed there. See
@@ -34999,6 +35030,30 @@ impl Shell {
     /// enclosing command finishes (see [`Shell::finish_procsubs`]). This is not
     /// streaming — a `<(tail -f)`-style infinite producer would block here — which
     /// is a documented limitation (see known-issues TD-OILS22).
+    /// [`Shell::proc_sub`] over whichever read found the body — see
+    /// [`ProcSubBody`].
+    ///
+    /// An unread body is parsed here rather than at parse time, because no
+    /// parser read the text it was written in. Reaching this at all means the
+    /// `${ … }` scan's own read of it succeeded
+    /// ([`Shell::extent_read_of_subs`]), so it parses; the one caller that can
+    /// arrive with a body that does not is a prompt expansion, where that read
+    /// is suppressed, and there the construct stands as the text it was written
+    /// as — nothing ran, so there is no path to substitute.
+    fn proc_sub_body(&mut self, input: bool, body: &ProcSubBody) -> Str {
+        let open: &[u8] = if input { b"<(" } else { b">(" };
+        match body {
+            ProcSubBody::Parsed(prog) => self.proc_sub(input, prog).into_bytes(),
+            ProcSubBody::Unread { src, closed, .. } => {
+                let line = self.source_line();
+                match crate::parser::parse_procsub_body(src, line, self.parse_opts()) {
+                    Ok(prog) => self.proc_sub(input, &prog).into_bytes(),
+                    Err(_) => bfmt![open, src, if *closed { b")".as_slice() } else { b"" }],
+                }
+            }
+        }
+    }
+
     fn proc_sub(&mut self, input: bool, body: &Program) -> String {
         let path = unique_temp_path("osh_psub");
         // A substitution runs in its own process in bash, so its status never

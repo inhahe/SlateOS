@@ -16016,6 +16016,30 @@ impl Shell {
         self.scalar_for_subscript(name).map_or_else(Vec::new, |v| vec![v])
     }
 
+    /// The bounds text of a slice whose `(` never closed — bash reports
+    /// ``bad substitution: no closing `)' in <text>`` *instead of* either bound,
+    /// and only here, after everything that answers before the bounds are
+    /// measured (an unset parameter, an empty array). See
+    /// [`crate::ast::WordPart::ArraySlice`]'s `unclosed`, which documents the
+    /// cut this comes from.
+    ///
+    /// `no_longjmp_on_fatal_error` — [`Shell::prompt_expanding`] — **suppresses**
+    /// it rather than rewording it, and with the complaint gone the characters
+    /// go on to the evaluator, so the same text under `${x@P}` or `PS4` reports
+    /// the *arithmetic* error. Measured, `z=abcdef` and `x='${z:(1}'`:
+    /// `echo "${z:(1}"` is the bad substitution and the command is discarded,
+    /// while `echo "${x@P}"` says ``z: (1: missing `)'`` and prints `${z:(1}`.
+    ///
+    /// Returns `true` when it reported, which is every caller's "no field".
+    fn slice_bounds_unclosed(&mut self, unclosed: Option<&Str>) -> bool {
+        let Some(text) = unclosed.filter(|_| !self.prompt_expanding) else {
+            return false;
+        };
+        self.perrln(&bfmt![b"bad substitution: no closing `)' in ", text]);
+        self.arm_discard(1);
+        true
+    }
+
     /// Compute an array/positional slice (`${a[@]:off:len}`, `${@:off:len}`).
     ///
     /// The offset is a **subscript**, not a position, whenever the parameter has
@@ -16051,6 +16075,7 @@ impl Shell {
         star: bool,
         offset: &Word,
         length: &Option<Box<Word>>,
+        unclosed: Option<&Str>,
     ) -> Vec<Str> {
         let positional = name == "@" || name == "*";
         // The reference bash tags an offset/length arithmetic error with:
@@ -16084,7 +16109,7 @@ impl Shell {
         // bash's own walk does for it. See [`Self::in_target_scope`].
         let target = resolved.clone().and_then(RefTarget::into_name);
         self.in_opt_target_scope(resolved.as_ref(), move |sh| {
-            sh.slice_elements_resolved(target, positional, param_ref, offset, length)
+            sh.slice_elements_resolved(target, positional, param_ref, offset, length, unclosed)
         })
     }
 
@@ -16098,6 +16123,7 @@ impl Shell {
         param_ref: Str,
         offset: &Word,
         length: &Option<Box<Word>>,
+        unclosed: Option<&Str>,
     ) -> Vec<Str> {
         // A name that is no array at all is not a one-element list: bash falls
         // through to the plain `${v:off:len}` substring operator, so `v=scalar`
@@ -16107,7 +16133,7 @@ impl Shell {
             && !self.assoc.contains_key(t)
             && let Some(value) = self.vars.get(t).cloned()
         {
-            return self.scalar_slice(&value, offset, length, &param_ref);
+            return self.scalar_slice(&value, offset, length, unclosed, &param_ref);
         }
         // An associative array has no subscripts to count and bash does not
         // count its positions the ordinary way either. An *empty* one is left
@@ -16119,7 +16145,7 @@ impl Shell {
             .map(|m| m.values().cloned().collect::<Vec<Str>>())
             .filter(|v| !v.is_empty());
         if let Some(values) = assoc {
-            return self.assoc_slice(&values, offset, length, &param_ref);
+            return self.assoc_slice(&values, offset, length, unclosed, &param_ref);
         }
         // A real indexed array answers with its subscripts; everything else is
         // a gapless list whose position stands in for one.
@@ -16155,6 +16181,9 @@ impl Shell {
         // and neither does a set-but-empty scalar, which has one position and
         // went to [`Shell::scalar_slice`] above.
         if elems.is_empty() {
+            return Vec::new();
+        }
+        if self.slice_bounds_unclosed(unclosed) {
             return Vec::new();
         }
         let Some(mut off) = self.eval_arith_substr_bound(offset, &param_ref) else {
@@ -16244,8 +16273,12 @@ impl Shell {
         values: &[Str],
         offset: &Word,
         length: &Option<Box<Word>>,
+        unclosed: Option<&Str>,
         param_ref: BStr<'_>,
     ) -> Vec<Str> {
+        if self.slice_bounds_unclosed(unclosed) {
+            return Vec::new();
+        }
         let Some(off) = self.eval_arith_substr_bound(offset, param_ref) else {
             return Vec::new();
         };
@@ -16296,8 +16329,12 @@ impl Shell {
         value: BStr<'_>,
         offset: &Word,
         length: &Option<Box<Word>>,
+        unclosed: Option<&Str>,
         param_ref: BStr<'_>,
     ) -> Vec<Str> {
+        if self.slice_bounds_unclosed(unclosed) {
+            return Vec::new();
+        }
         let Some(off) = self.eval_arith_substr_bound(offset, param_ref) else {
             return Vec::new();
         };
@@ -27608,8 +27645,9 @@ impl Shell {
                 star: false,
                 offset,
                 length,
+                unclosed,
             } => {
-                let elems = self.slice_elements(name, false, offset, length);
+                let elems = self.slice_elements(name, false, offset, length, unclosed.as_ref());
                 Some(self.join_derived_nosplit(&elems))
             }
             WordPart::ArrayKeys { name, star: false } => {
@@ -27811,10 +27849,11 @@ impl Shell {
                     star,
                     offset,
                     length,
+                    unclosed,
                 },
             ] if !*star || self.star_unjoins() => {
                 self.saw_quoted_list |= !*star;
-                Some(self.slice_elements(name, *star, offset, length))
+                Some(self.slice_elements(name, *star, offset, length, unclosed.as_ref()))
             }
             // `"${a[@]#pat}"` / `"${@^^}"` — one field per element
             // after the element-wise transform.
@@ -30553,6 +30592,7 @@ impl Shell {
                 index,
                 offset,
                 length,
+                unclosed,
             } => {
                 // `${x:off:len}` — a malformed offset/length is fatal (bash), and
                 // a negative length that puts the end before the start is a fatal
@@ -30594,7 +30634,7 @@ impl Shell {
                             .ref_label
                             .clone()
                             .unwrap_or_else(|| crate::unparse::name_sub(name, index));
-                        self.scalar_slice(&value, offset, length, &param_ref)
+                        self.scalar_slice(&value, offset, length, unclosed.as_ref(), &param_ref)
                             .into_iter()
                             .next()
                             .unwrap_or_default()
@@ -30676,8 +30716,9 @@ impl Shell {
                 star,
                 offset,
                 length,
+                unclosed,
             } => {
-                let fields = self.slice_elements(name, *star, offset, length);
+                let fields = self.slice_elements(name, *star, offset, length, unclosed.as_ref());
                 self.join_derived(&fields, *star)
             }
             WordPart::ArrayBulk { name, star, op } => {
@@ -33920,9 +33961,14 @@ impl Shell {
                 star,
                 offset,
                 length,
-            } => Some(SplitItems::List(
-                self.slice_elements(name, *star, offset, length),
-            )),
+                unclosed,
+            } => Some(SplitItems::List(self.slice_elements(
+                name,
+                *star,
+                offset,
+                length,
+                unclosed.as_ref(),
+            ))),
             WordPart::ArrayOp {
                 name,
                 star,
@@ -64062,11 +64108,12 @@ fn array_target_part(part: &WordPart, name: String, star: bool) -> Option<WordPa
             star,
             op: BulkOp::BadTransform { op: op.clone() },
         },
-        WordPart::ParamSubstr { offset, length, .. } => WordPart::ArraySlice {
+        WordPart::ParamSubstr { offset, length, unclosed, .. } => WordPart::ArraySlice {
             name,
             star,
             offset: offset.clone(),
             length: length.clone(),
+            unclosed: unclosed.clone(),
         },
         _ => return None,
     })

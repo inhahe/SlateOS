@@ -1927,7 +1927,9 @@ pub(crate) fn part_src(p: &WordPart) -> Str {
             };
             bfmt![b"${", &name_sub(name, index), op, &word_src(pattern), b"}"]
         }
-        WordPart::ParamSubstr { name, index, offset, length } => {
+        // An `unclosed` needs nothing here: the walk that set it consumed the
+        // whole bounds text, so `offset` already holds every character of it.
+        WordPart::ParamSubstr { name, index, offset, length, .. } => {
             let mut s = bfmt![b"${", &name_sub(name, index), b":", &word_src(offset)];
             if let Some(len) = length {
                 s.push(b':');
@@ -2069,7 +2071,7 @@ pub(crate) fn part_src(p: &WordPart) -> Str {
         WordPart::BadTransform { name, index, op } => {
             bfmt![b"${", &name_sub(name, index), b"@", &word_src(op), b"}"]
         }
-        WordPart::ArraySlice { name, star, offset, length } => {
+        WordPart::ArraySlice { name, star, offset, length, .. } => {
             let sub = name_bulk(name, *star);
             let mut s = bfmt![b"${", &sub, b":", &word_src(offset)];
             if let Some(len) = length {

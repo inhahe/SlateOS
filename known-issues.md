@@ -59412,14 +59412,17 @@ process substitution to be performed either -- measured, `${z:0:<(echo 1)}` is
 an `operand expected` in bash with the characters `<(echo 1)` standing as the
 error token, which osh already matches.
 
-**Blocks:** the arithmetic-fragment row of
+**Blocked, and then unblocked (same day):** the arithmetic-fragment row of
 TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN.
 bash's `${ ... }` scan reads a `<( ... )` in an arithmetic fragment exactly as it
 reads one anywhere else in the body -- `x='A${z:0:<(fi)}B'; echo "${x@P}"`
-reports the parse twice and then `bad substitution`, where osh prints `AB` --
-but a corpus row for it would be measuring this bug instead, so the corpus case
+reports the parse twice and then `bad substitution`, where osh printed `AB` --
+but a corpus row for it would have been measuring this bug instead, so the
+corpus case
 `a-process-substitution-a-brace-re-read-meets-is-read-wherever-in-the-braces-it-sits.sh`
-leaves that position out and says so.
+left that position out and said so. The fix below removed the obstacle, and the
+rows went in the same day: that case now measures a bound in seven further
+positions.
 
 **How it was found:** measuring where bash's brace scan reads a `<( ... )`,
 while checking whether the `Verbatim::Arith` fragments needed the same row as
@@ -59489,7 +59492,9 @@ took the row. See that entry for the change.
 
 ### [B] TD-OILS-AN-UNBALANCED-PAREN-IN-A-SLICES-BOUNDS-IS-AN-ARITHMETIC-ERROR-NOT-A-BAD-SUBSTITUTION
 
-**Status:** open. Found 2026-08-14, measured against bash 5.2.37.
+**Status:** ✅ FIXED 2026-08-14. Found 2026-08-14, measured against bash 5.2.37.
+The fix turned up a second rule of the same walk, fixed with it — see "The fix"
+at the end.
 
 `skiparith` (subst.c) balances parens while looking for the colon that cuts
 `${x:off:len}` in two, and an unbalanced `(` makes it run off the end. bash
@@ -59534,11 +59539,52 @@ the empty one, and the call sites raise ``bad substitution: no closing `)' in
 only, so it needs its own carrier on the word part rather than a reuse of
 `BadSubst`, whose printer names `${…}` entire.
 
-**Blocks:** one row of the corpus case
+**Blocked:** one row of the corpus case
 `a-slice-cuts-its-bounds-with-skiparith-and-reads-each-as-arithmetic.sh`,
-which says so in its header and leaves the shape out.
+which said so in its header and left the shape out. Now measured there.
 
 **How it was found:** measuring bash's slice bounds exhaustively while fixing
 TD-OILS-A-LESS-THAN-IN-A-BRACE-ARITHMETIC-FRAGMENT-LOSES-ITS-LEFT-OPERAND. It
 was the last of four divergences that measurement turned up, and the only one
 not fixed there.
+
+**The fix (2026-08-14).** Two things, because measuring the first turned up the
+second.
+
+**(1) The complaint.** `slice_split_colon` now returns the depth it ended at
+beside the split index, `parse_slice_bounds` carries a non-zero one as
+`SliceBounds::unclosed`, and both `WordPart::ParamSubstr` and
+`WordPart::ArraySlice` gained an `unclosed: Option<Str>` field for it. It is a
+field on the operator rather than a `WordPart::BadSubst`, because *where* it is
+raised is the whole of what distinguishes the two: `${z:}` is a bad
+substitution even for an unset parameter, while `${u:(1}` with `u` unset is
+silently empty. So the check sits exactly where the offset would have been
+evaluated — `Shell::slice_bounds_unclosed`, called from `scalar_slice`,
+`assoc_slice` and the indexed path of `slice_elements_resolved`, each after its
+own "nothing to measure" exit. Every ordering measured lines up: an empty
+array, an empty `$@`, `set -u`, and a set-but-empty scalar (which *does* report,
+having one position).
+
+`no_longjmp_on_fatal_error` — `Shell::prompt_expanding` — **suppresses** the
+complaint rather than rewording it, so under `${x@P}` or `PS4` the characters go
+on to the evaluator and the arithmetic error is what comes out. That is the
+`if (no_longjmp_on_fatal_error == 0)` guard the report sits behind, and it is
+why osh's *old* answer was right in those two contexts and only those two.
+
+**(2) The walk is quote-aware.** Measuring (1) showed the walk steps over a
+`' … '` run, a `" … "` run and a backslash-escape whole — all three counters
+included, not just the paren one. `${z:"1:2"}` does not split (the evaluator
+meets `1:2` as one bound and says so), `${z:1"?"2:3}` does split (the quoted `?`
+buys no colon), and `${z:0"("}`, `${z:0'('}`, `${z:0\(}` and `${z:(1"("2)}` are
+all balanced. osh's walk saw none of that, so before this fix it both cut in the
+wrong place and complained where bash did not. Note this is about the *walk*
+only: the quote characters stay in the bound, and the arithmetic reading each
+half is given removes them (or does not — a `' … '` keeps its second reading).
+
+The walk is over the text **as written**, which the same measurement pins down
+from the other side: `p="("; ${z:$p 1}` and `${z:$(echo "(1")}` are ordinary
+arithmetic errors, each being balanced as written however unbalanced its value.
+
+**Verified:** 37 further rows in
+`a-slice-cuts-its-bounds-with-skiparith-and-reads-each-as-arithmetic.sh`, the
+lib suite and a full sweep.

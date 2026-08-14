@@ -6901,8 +6901,8 @@ fn split_name_subscript(
 }
 
 /// Where the `:` that separates a slice's offset from its length is — bash's
-/// `skiparith` (subst.c), which is not `strchr`. Two things hide a colon from
-/// it, and both are measured against bash 5.2.37 with `z=abcdef`:
+/// `skiparith` (subst.c), which is not `strchr`. Three things hide a colon from
+/// it, and all are measured against bash 5.2.37 with `z=abcdef`:
 ///
 /// * **A pending `?`.** One `:` is skipped for each `?` seen, the ternary's own
 ///   colon belonging to the ternary. `${z:1?2:3}` is `cdef` — the whole text is
@@ -6912,26 +6912,62 @@ fn split_name_subscript(
 /// * **A paren.** Nothing inside a `( … )` counts at all, colon and `?` alike:
 ///   `${z:(1?2:3)}` is `cdef` and `${z:(1?2:3):1}` is `c`. An *unbalanced* `(`
 ///   therefore hides the rest of the text outright.
+/// * **A quote.** A `' … '` run, a `" … "` run and a backslash-escape are each
+///   stepped over whole, before any of the counting: `${z:"1:2"}` does not
+///   split (the evaluator meets `1:2` as one bound and says so) and neither
+///   `${z:1"?"2:3}`'s `?` nor `${z:0"("}`'s paren counts. The characters
+///   themselves stay in the bound — the quotes are removed later, by the
+///   arithmetic reading each half is given — so this is only about the walk.
 ///
-/// Returns `rest.len()` when no colon splits, which is the "offset only" case.
-fn slice_split_colon(rest: &[Ch]) -> usize {
+/// The walk is over the text **as written**, which is why an expansion that
+/// *yields* an unbalanced paren is none of its business: `p="("; ${z:$p 1}` and
+/// `${z:$(echo "(1")}` are ordinary arithmetic errors, the raw text of each
+/// being balanced.
+///
+/// Returns `rest.len()` when no colon splits, which is the "offset only" case,
+/// and `true` when a `(` was still open at the end — bash's own
+/// `no closing `)'` condition, since the walk ran off looking for its match.
+fn slice_split_colon(rest: &[Ch]) -> (usize, bool) {
     let (mut skipcol, mut depth) = (0u32, 0u32);
-    for (i, &c) in rest.iter().enumerate() {
+    let mut i = 0;
+    while let Some(&c) = rest.get(i) {
+        i += 1;
         match syn(c) {
+            // A quoted run is stepped over whole, an unterminated one running
+            // to the end. Inside `" … "` a backslash still escapes, inside
+            // `' … '` nothing does.
+            q @ ('\'' | '"') => {
+                while let Some(&d) = rest.get(i) {
+                    i += 1;
+                    match syn(d) {
+                        c if c == q => break,
+                        '\\' if q == '"' => i += 1,
+                        _ => {}
+                    }
+                }
+            }
+            '\\' => i += 1,
             '(' => depth += 1,
             ')' if depth > 0 => depth -= 1,
             _ if depth > 0 => {}
             ':' if skipcol > 0 => skipcol -= 1,
-            ':' => return i,
+            ':' => return (i - 1, false),
             '?' => skipcol += 1,
             _ => {}
         }
     }
-    rest.len()
+    (rest.len(), depth > 0)
 }
 
-/// A slice's two bounds: the offset, and the length if a colon cut one off.
-type SliceBounds = (Box<Word>, Option<Box<Word>>);
+/// A slice's two bounds, as [`parse_slice_bounds`] cut them.
+struct SliceBounds {
+    offset: Box<Word>,
+    /// `Some` where a colon cut a length off. Always `None` beside an
+    /// `unclosed`, the unbalanced walk having consumed the whole text.
+    length: Option<Box<Word>>,
+    /// See [`crate::ast::WordPart::ArraySlice`]'s field of the same name.
+    unclosed: Option<Str>,
+}
 
 /// Parse the `offset[:length]` portion of a substring/slice expansion (the
 /// text after the leading `:`). The offset and each length are parsed as
@@ -6943,7 +6979,9 @@ type SliceBounds = (Box<Word>, Option<Box<Word>>);
 /// It is the *text* that must be non-empty, not what it expands to: `${z:$e}`
 /// with `e=` is `abcdef`, and so is `${z:$(echo)}`. A colon and nothing else is
 /// fine on both sides of it — `${z::}` is the empty string, offset and length
-/// both reading as 0.
+/// both reading as 0. An unbalanced `(` is a bad substitution too, but a later
+/// and differently-worded one, so it rides along as
+/// [`SliceBounds::unclosed`] rather than as a `None`.
 fn parse_slice_bounds(
     rest: &[Ch],
     opts: ParseOpts,
@@ -6953,7 +6991,8 @@ fn parse_slice_bounds(
     if rest.is_empty() {
         return Ok(None);
     }
-    let (off, len) = match Some(slice_split_colon(rest)).filter(|&i| i < rest.len()) {
+    let (split, unbalanced) = slice_split_colon(rest);
+    let (off, len) = match Some(split).filter(|&i| i < rest.len()) {
         Some(idx) => (
             rest.get(..idx).unwrap_or_default(),
             // The offset it follows may span lines — `${x:$(`/`echo 1`/`):2}` —
@@ -6993,7 +7032,14 @@ fn parse_slice_bounds(
     };
     let off_text = bytes::from_chars(off.iter().copied());
     let offset = word_bound_from_source_at(&off_text, opts, q.as_pattern(), line)?;
-    Ok(Some((Box::new(offset), length)))
+    // The unbalanced text is kept as characters rather than rebuilt from the
+    // word: bash quotes back what the writer wrote, and nothing in it has been
+    // expanded yet when the complaint is made.
+    Ok(Some(SliceBounds {
+        offset: Box::new(offset),
+        length,
+        unclosed: unbalanced.then(|| off_text.clone()),
+    }))
 }
 
 /// Is `name` a parameter that `${#…}` may take the length of?
@@ -7310,7 +7356,7 @@ fn parse_braced_param_in(
             // `${a[@]:off:len}` / `${a[*]:off:len}` — array slice (a `:` not
             // followed by a `-=+?` operator char).
             if syn_at(&rest, 0) == ':' && !matches!(syn_at(&rest, 1), '-' | '=' | '+' | '?') {
-                let Some((offset, length)) =
+                let Some(b) =
                     parse_slice_bounds(rest.get(1..).unwrap_or_default(), opts, q, rest_line)?
                 else {
                     return Ok(WordPart::BadSubst(raw.to_vec()));
@@ -7318,8 +7364,9 @@ fn parse_braced_param_in(
                 return Ok(WordPart::ArraySlice {
                     name,
                     star: matches!(index, ArrayIndex::Star),
-                    offset,
-                    length,
+                    offset: b.offset,
+                    length: b.length,
+                    unclosed: b.unclosed,
                 });
             }
             // `${a[@]#pat}` / `${a[*]/x/y}` / `${a[@]^^}` / `${a[@]@Q}` — an
@@ -7387,16 +7434,16 @@ fn parse_braced_param_in(
         && syn_at(&rest, 0) == ':'
         && !matches!(syn_at(&rest, 1), '-' | '=' | '+' | '?')
     {
-        let Some((offset, length)) =
-            parse_slice_bounds(rest.get(1..).unwrap_or_default(), opts, q, rest_line)?
+        let Some(b) = parse_slice_bounds(rest.get(1..).unwrap_or_default(), opts, q, rest_line)?
         else {
             return Ok(WordPart::BadSubst(raw.to_vec()));
         };
         return Ok(WordPart::ArraySlice {
             name: name.clone(),
             star: name == "*",
-            offset,
-            length,
+            offset: b.offset,
+            length: b.length,
+            unclosed: b.unclosed,
         });
     }
     // `${@#pat}` / `${*/x/y}` / `${@^^}` — element-wise transform over the
@@ -7540,7 +7587,7 @@ fn parse_braced_param_in(
         // Substring `:offset[:length]` — but `:` followed by one of -=+? is the
         // use/assign/alt/error operator, handled below.
         ':' if !matches!(syn_at(&rest, 1), '-' | '=' | '+' | '?') => {
-            let Some((offset, length)) =
+            let Some(b) =
                 parse_slice_bounds(rest.get(1..).unwrap_or_default(), opts, q, rest_line)?
             else {
                 return Ok(WordPart::BadSubst(raw.to_vec()));
@@ -7548,8 +7595,9 @@ fn parse_braced_param_in(
             Ok(WordPart::ParamSubstr {
                 name,
                 index: elem_index,
-                offset,
-                length,
+                offset: b.offset,
+                length: b.length,
+                unclosed: b.unclosed,
             })
         }
         // `:-`, `:=`, `:+`, `:?` and the colon-less `-=+?` forms.
@@ -10700,7 +10748,9 @@ mod tests {
         // the very same reader — it used to be tokenized, which is what made it
         // the one context that disagreed with the subscript beside it.
         let bound: Vec<Ch> = bytes::chars(b"<(echo 1)").collect();
-        assert!(!live(&parse_slice_bounds(&bound, opts, Quoting::Bare, 1).unwrap().unwrap().0));
+        assert!(!live(
+            &parse_slice_bounds(&bound, opts, Quoting::Bare, 1).unwrap().unwrap().offset
+        ));
         // A double-quoted operand keeps the characters. So does a quoted run
         // inside a *bare* one — the quotes are what the test is about, not
         // which fragment it is.

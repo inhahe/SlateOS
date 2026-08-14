@@ -831,6 +831,10 @@ pub enum WordPart {
         index: Option<Box<Word>>,
         offset: Box<Word>,
         length: Option<Box<Word>>,
+        /// The whole bounds text, when an unbalanced `(` in it ran `skiparith`
+        /// off the end. See [`WordPart::ArraySlice`]'s field of the same name,
+        /// which documents the rule; the two operators share it.
+        unclosed: Option<Str>,
     },
     /// `${name/pat/repl}` (first) / `${name//pat/repl}` (all) /
     /// `${name/#pat/repl}` (anchored at start) / `${name/%pat/repl}` (anchored at
@@ -1009,6 +1013,22 @@ pub enum WordPart {
         star: bool,
         offset: Box<Word>,
         length: Option<Box<Word>>,
+        /// The whole bounds text, when an unbalanced `(` in it ran `skiparith`
+        /// (subst.c) off the end looking for the colon — which bash answers with
+        /// ``bad substitution: no closing `)' in <text>``, *instead of* either
+        /// bound, and before it evaluates either. It is the same `depth` counter
+        /// that hides a colon inside a `( … )`, so the two are one walk:
+        /// `${z:(0):(1}` splits normally and the length is an ordinary
+        /// arithmetic error, while `${z:(1:2}` is this. Being unbalanced also
+        /// means the walk consumed the whole text, so there is never a `length`
+        /// beside a `Some` here — `offset` holds the same characters this does.
+        ///
+        /// It is *not* a [`WordPart::BadSubst`], though it prints the same two
+        /// words: an unset parameter is answered before it (`unset u;
+        /// "${u:(1}"` is silently empty, where `"${u:}"` is a bad substitution),
+        /// so it belongs where the bounds are measured rather than where the
+        /// operator is parsed.
+        unclosed: Option<Str>,
     },
     /// A pattern/case/substitution operator applied to *every* element of an
     /// array (`${a[@]#pat}`, `${a[@]/x/y}`, `${a[@]^^}`, `${a[@]@Q}`) or to every

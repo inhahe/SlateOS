@@ -324,9 +324,11 @@ Roadmap:
   (TrueType *and* CFF outlines); family lookup (`guitk::fontdb`) and CSS-4
   face matching (`osfont::select`) done; the toolkit and the compositor now
   both draw in a real system face, resolved through one shared function so
-  they cannot diverge (§400). Next unblocked step is shaping: the layout path
-  is still one advance per `char`, so there is no kerning, no ligature, and no
-  combining-mark positioning. Vello itself waits on `[A]`'s GPU driver.
+  they cannot diverge (§400). Pair kerning done, from GPOS and the legacy
+  `kern` table (§401). Next unblocked step is the rest of shaping: the layout
+  path is still one glyph per `char`, so there is no ligature, no
+  combining-mark positioning and no bidi. Vello itself waits on `[A]`'s GPU
+  driver.
 - `[C]` Wayland-inspired compositor: GPU acceleration, currently a software
   rasterizer (lines ~4605, ~4619)
 - `[C]` Video-encoded capture fallback, H.264/VP9 (lines ~4623, ~5060)

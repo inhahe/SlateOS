@@ -6523,10 +6523,34 @@ impl Lexer {
                             // land in `raw` like any others. See
                             // [`Lexer::bare_splices`].
                             let body_splices = std::mem::take(&mut self.bare_splices);
-                            let inner = self.read_balanced_inner('(', ')', true, true)?;
+                            let body = self.pos;
+                            let read = self.read_balanced_inner('(', ')', true, true);
                             self.arith_comsubs = outer;
                             let inner_splices =
                                 std::mem::replace(&mut self.bare_splices, body_splices);
+                            let inner = match read {
+                                Ok(inner) => inner,
+                                // No mate, in text no parser read: the read was
+                                // handed the rest of the string and says where
+                                // this run carries on from, exactly as at brace
+                                // level. See [`Lexer::unread_comsub_stop`].
+                                //
+                                // Letting the error out instead is what made
+                                // `A${z:-P1"$(echo hi⏎S1}B` *run* `S1}`: the
+                                // bail reached [`Lexer::unclosed_seg`], which
+                                // turned the whole word into a string-level
+                                // `$( … )` and performed it. bash condemns the
+                                // brace — the `"` swallows to end of string and
+                                // there is nothing left to close on — having
+                                // first reported the read.
+                                Err(e) if self.unread_comsub(&e) => {
+                                    raw.extend_from_slice(b"$(");
+                                    let read = self.unread_comsub_stop(body);
+                                    raw.extend_from_slice(&read);
+                                    continue;
+                                }
+                                Err(e) => return Err(e),
+                            };
                             let start = raw.len();
                             raw.extend_from_slice(b"$(");
                             self.bare_splices.extend(shift_ranges(inner_splices, raw.len()));

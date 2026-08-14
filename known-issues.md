@@ -59884,19 +59884,31 @@ nevertheless agrees with bash on every *quoted* row above, by a different
 mechanism in each case: where the run closes, the brace closes too and the word
 goes through `parse_braced_param_in`, which does model quotes; where the run does
 not close, `lex_dquote_body`'s missing `<(` row happens to suppress the same read
-bash's skip suppresses. Two rows are left where the mechanisms do not coincide:
+bash's skip suppresses. Two rows were left where the mechanisms did not coincide;
+the first of them is now fixed:
 
 | word (inside `v='…'`, via `"${v@P}"`) | bash 5.2.37 | osh |
 |---|---|---|
-| `A${z:-P1"$(echo hi⏎S1}B` | reports EOF, `bad substitution`, undecoded | reports EOF, **runs `S1}`**, `[Ahi]` |
+| `A${z:-P1"$(echo hi⏎S1}B` | reports EOF, `bad substitution`, undecoded | ✅ same since 2026-08-14 |
 | `A${z:-'p$(echo hi'q$(fi⏎S1}B` | reports `fi`, `[AZZB]` | silent, `[AZZB]` |
 
-Row 1 is the serious one — a spurious command execution. A lone `"` should open
-a run that swallows to end of string, leaving the brace nothing to close on;
-osh instead falls through to the string level, which performs the abandoned
-extent and splices the remainder. It is **pre-existing** (measured identical on
-the commit before the 2026-08-14 fix). Row 2 is a lost diagnostic only; the same
-row before that fix had the wrong value *and* ran `f`, so it is much improved.
+Row 1 was the serious one — a **spurious command execution**: osh reported the
+EOF, then ran `S1}` and produced `[Ahi]`. A lone `"` opens a run that swallows to
+end of string, leaving the brace nothing to close on, so bash condemns the word;
+osh instead let the failed read out of `read_opaque_span`'s `"`-run `$(` sub-arm,
+where [`Lexer::unclosed_seg`] degraded the whole word into a *string-level*
+`$( … )` and then performed it. Fixed 2026-08-14 by giving that sub-arm
+(`userspace/oils/src/lexer.rs`, `read_opaque_span`'s `'"'` arm) the same
+`Err(e) if self.unread_comsub(&e)` recovery the two `read_dollar_brace_body`
+arms already had: re-emit the `$(` into the raw text, take back what the reader
+consumed with `Lexer::unread_comsub_stop`, and `continue` the quoted-run loop.
+The read is still reported — it happened — and the run then swallows the rest,
+so the brace never closes and the word is condemned, exactly as in bash. The bug
+was **pre-existing**, not a regression: measured identical on the commit before
+the earlier 2026-08-14 brace-scan fix.
+
+Row 2 is a lost diagnostic only; the same row before the brace-scan fix had the
+wrong value *and* ran `f`, so it is much improved.
 
 **What the proper fix looks like.** A real lex entry for "text a brace scan is
 walking" — not `lex_dquote_body` with a row bolted on. It needs, at its own
@@ -59912,13 +59924,13 @@ and reverted on 2026-08-14, before being compiled, because these measurements
 showed it would have regressed the three suppressed rows above (they are silent
 in bash today and in osh today, and would have started reporting).
 
-**Impact.** Three shapes, in order of severity. A lone `"` before a `$( … )` in
-an unclosed brace body makes osh **run a command bash does not** and yield the
-wrong value. A `<(`/`>(` at brace level loses its diagnostic (the value already
-agrees). A `' … '` run beside a failing read loses its diagnostic too. All three
-are pre-existing in `extent_read_of_rest`; `unclosed_brace_reads` (new
-2026-08-14) inherits them. Reachable only through `@P`/`PS4`/here-doc text
-holding a malformed `${ … }`.
+**Impact.** Two shapes remain, both **diagnostics only** — the values already
+agree. A `<(`/`>(` at brace level loses its read report; a `' … '` run beside a
+failing read loses its report too. The third and worst shape — a lone `"` before
+a `$( … )` making osh run a command bash does not, and yield the wrong value —
+was fixed 2026-08-14 (see row 1 above). Both remaining shapes are pre-existing in
+`extent_read_of_rest`; `unclosed_brace_reads` (new 2026-08-14) inherits them.
+Reachable only through `@P`/`PS4`/here-doc text holding a malformed `${ … }`.
 
 ---
 

@@ -232,3 +232,17 @@ impl RenderTree {
         self.commands.clear();
     }
 }
+
+/// A tree is a sink for commands, the same as the bare `Vec<RenderCommand>`
+/// the other half of the app tree builds.
+///
+/// Drawing helpers that emit several commands at once — `text::Paragraph`, for
+/// one — take `&mut impl Extend<RenderCommand>` so that they work with either
+/// shape. Without this a caller holding a tree would have to reach past it into
+/// `commands`, which is exactly the kind of detail a helper should not make
+/// its callers know about.
+impl Extend<RenderCommand> for RenderTree {
+    fn extend<T: IntoIterator<Item = RenderCommand>>(&mut self, iter: T) {
+        self.commands.extend(iter);
+    }
+}

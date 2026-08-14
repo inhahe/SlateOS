@@ -439,11 +439,15 @@ impl<'a> Paragraph<'a> {
     }
 
     /// Emit one text command per line, and report the height used.
-    pub fn draw(&self, cmds: &mut Vec<RenderCommand>) -> f32 {
+    ///
+    /// Takes any command sink, so that it serves both of the shapes the app
+    /// tree draws into: a bare `Vec<RenderCommand>` and a
+    /// [`RenderTree`](crate::render::RenderTree).
+    pub fn draw(&self, cmds: &mut impl Extend<RenderCommand>) -> f32 {
         let spacing = self.spacing();
         let lines = self.lines();
-        for (n, line) in lines.iter().enumerate() {
-            cmds.push(RenderCommand::Text {
+        cmds.extend(lines.iter().enumerate().map(|(n, line)| {
+            RenderCommand::Text {
                 x: self.x,
                 y: self.y + n as f32 * spacing,
                 text: line.clone(),
@@ -455,8 +459,8 @@ impl<'a> Paragraph<'a> {
                 // word) gets a clipped line rather than one running out of its
                 // container.
                 max_width: Some(self.width),
-            });
-        }
+            }
+        }));
         lines.len() as f32 * spacing
     }
 }

@@ -446,7 +446,11 @@ Roadmap:
   `GPOS` kerns only its own script (Leelawadee registers `thai` alone) no
   longer leaves its Latin text unkerned
   (`TD-FONT-DECIDES-LEGACY-KERNING-PER-FACE-NOT-PER-RUN`).
-  `agree` 11777 → 11806, `misplaced` 71 → 42.
+  `agree` 11777 → 11806, `misplaced` 71 → 42. And the script fallback chain
+  now stops at the first script the face *registers*, so a face that registers
+  `latn` with no DefaultLangSys (NotoSansLisu) is no longer handed `DFLT`'s
+  features (`TD-FONT-FALLS-BACK-PAST-A-SCRIPT-THE-FACE-REGISTERS`).
+  `agree` 11806 → 11820, `misplaced` 42 → 28.
   Next unblocked step is the rest of shaping: no Indic reordering
   (`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`), no language selection
   (`TD-FONT-IGNORES-LANGSYS-OVERRIDES`), and no device tables in

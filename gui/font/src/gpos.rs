@@ -1322,6 +1322,98 @@ mod tests {
         out
     }
 
+    /// The same, with a second script that has *no* DefaultLangSys.
+    ///
+    /// `DFLT` names the `kern` feature; `script` is registered and empty, the
+    /// shape `NotoSansLisu-Bold.ttf` gives `latn` when it files its Latin
+    /// features under `MOL ` and `ROM ` alone.
+    fn gpos_table_with_empty_script(script: &[u8; 4], lookups: &[(u16, Vec<u8>)]) -> Vec<u8> {
+        let n = lookups.len();
+        // count(2) + two records(6 each) + the `DFLT` Script(4) and its
+        // LangSys(6 + one index) + the empty Script(4).
+        let script_len = 2 + 12 + 12 + 4;
+        let feature_list = 10 + script_len;
+        let lookup_list = feature_list + 8 + 6;
+        let lookups_at = lookup_list + 2 + n * 2;
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&be16(1)); // major
+        out.extend_from_slice(&be16(0)); // minor
+        out.extend_from_slice(&be16(10)); // scriptList
+        out.extend_from_slice(&be16(u16::try_from(feature_list).unwrap()));
+        out.extend_from_slice(&be16(u16::try_from(lookup_list).unwrap()));
+
+        out.extend_from_slice(&be16(2)); // scriptCount
+        out.extend_from_slice(b"DFLT");
+        out.extend_from_slice(&be16(14)); // Script, from the ScriptList
+        out.extend_from_slice(script);
+        out.extend_from_slice(&be16(26)); // the empty Script
+        out.extend_from_slice(&be16(4)); // defaultLangSys, from the Script
+        out.extend_from_slice(&be16(0)); // langSysCount
+        out.extend_from_slice(&be16(0)); // lookupOrder, always zero
+        out.extend_from_slice(&be16(0xFFFF)); // no required feature
+        out.extend_from_slice(&be16(1)); // featureIndexCount
+        out.extend_from_slice(&be16(0)); // feature 0
+        out.extend_from_slice(&be16(0)); // no defaultLangSys at all
+        out.extend_from_slice(&be16(0)); // langSysCount
+
+        out.extend_from_slice(&be16(1)); // featureCount
+        out.extend_from_slice(b"kern");
+        out.extend_from_slice(&be16(8)); // Feature, from the FeatureList
+        out.extend_from_slice(&be16(0)); // featureParams
+        out.extend_from_slice(&be16(1)); // lookupIndexCount
+        out.extend_from_slice(&be16(0)); // lookup 0
+
+        out.extend_from_slice(&be16(u16::try_from(n).unwrap()));
+        for i in 0..n {
+            let at = lookups_at + i * 8 - lookup_list;
+            out.extend_from_slice(&be16(u16::try_from(at).unwrap()));
+        }
+        let mut sub_at = lookups_at + n * 8;
+        for (i, (kind, subtable)) in lookups.iter().enumerate() {
+            let lookup = lookups_at + i * 8;
+            out.extend_from_slice(&be16(*kind));
+            out.extend_from_slice(&be16(0)); // lookupFlag
+            out.extend_from_slice(&be16(1)); // subTableCount
+            out.extend_from_slice(&be16(u16::try_from(sub_at - lookup).unwrap()));
+            sub_at += subtable.len();
+        }
+        for (_, subtable) in lookups {
+            out.extend_from_slice(subtable);
+        }
+        out
+    }
+
+    /// Registering a script and giving it nothing is a statement, and the
+    /// statement is "this script gets no features" — not "look somewhere else".
+    /// `NotoSansLisu-Bold.ttf` registers `latn` with no DefaultLangSys, and
+    /// HarfBuzz shapes its Latin text with no `GPOS` at all: script selection
+    /// falls back, language selection does not, and once `latn` is chosen the
+    /// run is stuck with what `latn` names.
+    #[test]
+    fn a_registered_script_with_no_features_does_not_fall_back_to_dflt() {
+        let sub = single_pos1(
+            &[7],
+            Value {
+                x_advance: -40,
+                ..Value::default()
+            },
+        );
+        let data = gpos_table_with_empty_script(b"latn", &[(SINGLE_POS, sub)]);
+        let pos = Positioning::parse(&data, span(0, data.len()), None).expect("GPOS parses");
+        // A script the table does not register reaches `DFLT`, as ever.
+        assert!(pos.kerns(Some(ScriptTags::exactly(*b"thai"))));
+        assert!(pos.kerns(None));
+        // `latn` is registered, so the chain stops there — and finds nothing.
+        assert!(!pos.kerns(Some(ScriptTags::exactly(*b"latn"))));
+        assert_eq!(
+            pos.lookups
+                .for_script(Some(ScriptTags::exactly(*b"latn")))
+                .count(),
+            0
+        );
+    }
+
     /// A `SequenceContextFormat3`: one coverage per input position, then the
     /// `SequenceLookupRecord`s.
     ///

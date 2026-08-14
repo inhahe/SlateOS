@@ -33,7 +33,9 @@
 //! scripts OpenType renumbered, then `DFLT`, then a script literally named
 //! `dflt`. A face that registers its features under none of those has nothing
 //! to offer the run, and is shaped without features rather than with all of
-//! them.
+//! them. The chain stops at the first tag the face *registers*, even if that
+//! script then names no features at all — script selection and feature
+//! selection are separate steps, and only the first falls back.
 //!
 //! # Feature masks
 //!
@@ -81,9 +83,14 @@ type Selection = ([u8; 4], Vec<Masked>);
 
 /// A resolved script: where its DefaultLangSys is, and where the FeatureList
 /// that its indices point into begins.
+///
+/// `lang_sys` is `None` when the script table was found but names no default
+/// language system. That is not the same as not finding the script at all: the
+/// script *was* chosen, and having chosen it the run gets the features it
+/// names, which is none. See [`select`].
 #[derive(Clone, Copy, Debug)]
 struct LangSys {
-    lang_sys: usize,
+    lang_sys: Option<usize>,
     feature_list: usize,
 }
 
@@ -92,6 +99,15 @@ struct LangSys {
 ///
 /// `script` is `None` for a run with no script of its own — all digits and
 /// punctuation — which goes straight to the default entries.
+///
+/// The chain stops at the first script tag the ScriptList *has*, whether or not
+/// that script table turns out to offer anything. Selecting the script and
+/// selecting its language system are two separate steps in OpenType, and only
+/// the first one falls back: a face that registers `latn` with no DefaultLangSys
+/// — `NotoSansLisu-Bold.ttf` on the development host does, filing its features
+/// under `MOL ` and `ROM ` alone — is saying its Latin text gets no features,
+/// not that its Latin text should be shaped as `DFLT`. Reading on to `DFLT`
+/// there would attach marks the font deliberately declines to attach.
 fn select(data: &[u8], base: usize, script: Option<ScriptTags>) -> Option<LangSys> {
     let script_list = base.checked_add(usize::from(u16_at(data, base.checked_add(4)?)?))?;
     let feature_list = base.checked_add(usize::from(u16_at(data, base.checked_add(6)?)?))?;
@@ -105,15 +121,14 @@ fn select(data: &[u8], base: usize, script: Option<ScriptTags>) -> Option<LangSy
         let Some(script_table) = find_script(data, script_list, &want) else {
             continue;
         };
-        // A script table may exist and still have no default language system,
-        // in which case it says nothing about a run with no language — so
-        // keep looking rather than concluding the font has nothing.
+        // A script table may exist and still have no default language system.
+        // The run has been placed under this script all the same, and gets the
+        // no features that its default language system names.
         let off = u16_at(data, script_table)?;
-        if off == 0 {
-            continue;
-        }
         return Some(LangSys {
-            lang_sys: script_table.checked_add(usize::from(off))?,
+            lang_sys: (off != 0)
+                .then(|| script_table.checked_add(usize::from(off)))
+                .flatten(),
             feature_list,
         });
     }
@@ -387,11 +402,14 @@ impl ByScript {
                     at.get(k).map(|&(_, pos)| (pos, mask))
                 })
                 .collect();
-            if !positions.is_empty() {
-                scripts.push((tag, positions));
-            }
+            // Kept even when empty. An empty entry is what stops `for_script`'s
+            // fallback chain at a script the font registers and then gives
+            // nothing: having been chosen, the script's own answer — none —
+            // is the run's answer, and reading on to `DFLT` would apply rules
+            // the font filed under another script entirely.
+            scripts.push((tag, positions));
         }
-        if scripts.is_empty() {
+        if lookups.is_empty() {
             return None;
         }
         scripts.sort_unstable_by_key(|&(tag, _)| tag);
@@ -410,10 +428,11 @@ impl ByScript {
     /// each with the mask of the feature tags that reached it.
     ///
     /// Follows the same fallback chain as [`select`]: the run's script, its
-    /// older OpenType spelling, then the two default tags. An empty iterator
-    /// means this face has nothing for the run, which is a normal answer — and
-    /// the right one, since the alternative is applying another script's rules
-    /// to it.
+    /// older OpenType spelling, then the two default tags — and stops at the
+    /// first tag the face registers, whether or not that script selected
+    /// anything. An empty iterator means this face has nothing for the run,
+    /// which is a normal answer — and the right one, since the alternative is
+    /// applying another script's rules to it.
     pub(crate) fn for_script(
         &self,
         script: Option<ScriptTags>,
@@ -490,6 +509,12 @@ pub(crate) fn lookup_at(
 /// Which lookups the features tagged `tags` use, each with the mask of the
 /// tags that reached it, and where the LookupList is.
 ///
+/// `None` only when `script` resolves to no script table at all. A script that
+/// resolves and then names none of `tags` comes back with an empty list, which
+/// is a different answer and has to stay different: it is what tells
+/// [`ByScript::parse`] to record the script as offering nothing rather than to
+/// leave it out and let the run fall through to `DFLT`.
+///
 /// Ascending and deduplicated by index, because lookups apply in LookupList
 /// order regardless of the order a feature happens to list them in. Two
 /// features may share a lookup, and when they do the masks are combined: the
@@ -510,10 +535,15 @@ fn lookup_indices(
     // The LangSys names features by index into the FeatureList, and *only*
     // those features apply to this run. This indirection is the whole point of
     // the ScriptList: the FeatureList is the font's whole inventory, and a
-    // language system picks its subset out of it.
-    let feature_count = u16_at(data, lang_sys.checked_add(4)?)?;
+    // language system picks its subset out of it. No LangSys at all means the
+    // script names no features, which is an answer and not a failure.
+    let feature_count = lang_sys
+        .and_then(|at| at.checked_add(4))
+        .and_then(|at| u16_at(data, at))
+        .unwrap_or(0);
     let mut indices = Vec::new();
     for i in 0..usize::from(feature_count) {
+        let Some(lang_sys) = lang_sys else { break };
         let at = lang_sys.checked_add(6)?.checked_add(i.checked_mul(2)?)?;
         let Some(feature_index) = u16_at(data, at) else {
             continue;
@@ -559,7 +589,11 @@ fn lookup_indices(
             _ => folded.push((idx, mask)),
         }
     }
-    (!folded.is_empty()).then_some((lookup_list, folded))
+    // Empty is a result, not a failure: a script the face registers and then
+    // gives no wanted feature has answered the question. `None` here is
+    // reserved for "there is no such script", which is what lets the caller
+    // stop the fallback chain at the right place.
+    Some((lookup_list, folded))
 }
 
 /// One lookup, if it is of a type in `want`, with extensions unwrapped.

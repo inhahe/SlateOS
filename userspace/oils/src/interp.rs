@@ -99,7 +99,7 @@
 use bstr::ByteSlice;
 // The same TZ engine the libc's `strftime`/`localtime` use, so `printf '%(%Z)T'`
 // in osh and a C program's `date` can never disagree about local time.
-use tzrules::Tz;
+use tzrules::{Tz, TzFile, TzInfo};
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -108,7 +108,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{self, BufRead, IsTerminal, Read, Seek, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command as PCommand, Stdio};
+use std::rc::Rc;
 use std::sync::{Arc, Mutex, RwLock, mpsc};
 
 use crate::arith::{self, VarLookup};
@@ -18919,8 +18921,11 @@ impl Shell {
         let (epoch, _) = unix_time();
         let epoch = epoch as i64;
         // One reading for the whole prompt: `\t` and `\D{%Z}` in the same `PS1`
-        // must not straddle a `TZ` change, just as they share one `epoch`.
-        let tz = self.shell_tz();
+        // must not straddle a `TZ` change, just as they share one `epoch`. The
+        // snapshot owns its zoneinfo bytes, so the borrowed view below stays
+        // valid for the whole prompt even though the escapes take `&mut self`.
+        let zone = self.shell_tz();
+        let tz = zone.view();
         // The escapes insert *values* — the working directory, `$0`, the host
         // name — so what comes out is bytes even though the prompt source is
         // text: `PS1='\w$ '` in a directory whose name is not UTF-8 must still
@@ -37579,18 +37584,59 @@ impl Shell {
     /// arrives already exported (see [`Self::import_environment`]), and
     /// assigning to an exported name keeps the attribute.
     ///
-    /// An unset, empty or unparseable `TZ` is UTC, matching both POSIX and
+    /// `TZ` may be a POSIX rule string or the name of a binary zoneinfo file,
+    /// and both are resolved here exactly as the libc's `tzset` resolves them
+    /// (`posix::tz::resolve_tz_value`) — same search order (rule first, file
+    /// second, `:` forcing the file), same [`TZDIR`](Self::zoneinfo_dir)
+    /// override, same `/etc/localtime` default, same refusal of a `..` in the
+    /// name. That duplication is the point: osh cannot call the SlateOS libc's
+    /// `tzset` (it is a Rust program with its own runtime), so the only way
+    /// `date` and `printf '%(%T)T'` can agree is for both to walk the same
+    /// rules over the same [`tzrules`] engine.
+    ///
+    /// An unset, empty or unresolvable `TZ` is UTC, matching both POSIX and
     /// [`tzrules::Tz::parse`]'s contract. A shell that has not imported the
     /// environment (every unit test) has nothing in `exported`, so tests render
     /// in UTC no matter what the host's `TZ` says — the determinism is a
-    /// consequence of bash's rule, not a carve-out from it.
-    fn shell_tz(&mut self) -> Tz {
+    /// consequence of bash's rule, not a carve-out from it, and it is why the
+    /// `/etc/localtime` default is taken only by a shell that really did
+    /// inherit a process environment.
+    fn shell_tz(&mut self) -> ShellZone {
         if !self.exported.contains("TZ") {
-            return Tz::UTC;
+            // No exported `TZ` at all: a real shell follows the machine's own
+            // zone, as glibc does when `TZ` is unset. A test shell has no
+            // machine to follow — it never imported an environment — so it
+            // stays on UTC and renders the same time on every host.
+            if self.env_imported {
+                return ShellZone::from_file(Path::new(LOCALTIME_PATH));
+            }
+            return ShellZone::Posix(Tz::UTC);
         }
+        let dir = self.zoneinfo_dir();
         match self.param_value("TZ") {
-            Some(raw) if !raw.is_empty() => Tz::parse(&raw).unwrap_or(Tz::UTC),
-            _ => Tz::UTC,
+            Some(raw) if !raw.is_empty() => ShellZone::resolve(&raw, &dir),
+            _ => ShellZone::Posix(Tz::UTC),
+        }
+    }
+
+    /// The tree a bare zone name is looked up in, from the shell's exported
+    /// `TZDIR` (glibc's override) or the compiled-in default.
+    ///
+    /// Read from the shell's own variables rather than `std::env`, for the same
+    /// reason [`Self::shell_tz`] reads `TZ` there: an exported assignment is
+    /// what a child `date` would see, so the shell's own rendering must agree
+    /// with it. It also keeps the lookup independent of the host the tests run
+    /// on. A non-UTF-8 or empty value falls back to the default — such a
+    /// directory names nothing in any real tzdata tree.
+    fn zoneinfo_dir(&mut self) -> String {
+        if !self.exported.contains("TZDIR") {
+            return TZDIR_DEFAULT.to_string();
+        }
+        match self.param_value("TZDIR") {
+            Some(raw) if !raw.is_empty() => {
+                String::from_utf8(raw).unwrap_or_else(|_| TZDIR_DEFAULT.to_string())
+            }
+            _ => TZDIR_DEFAULT.to_string(),
         }
     }
 
@@ -43376,8 +43422,8 @@ impl Shell {
         // Resolved once for the whole format, not per `%(…)T`: bash calls
         // `tzset()` at assignment time, so every conversion in one `printf`
         // sees the same zone even if the format somehow changed it.
-        let tz = self.shell_tz();
-        let text = format_printf(fmt, fargs, &mut diags, &tz);
+        let zone = self.shell_tz();
+        let text = format_printf(fmt, fargs, &mut diags, &zone.view());
         let PrintfDiags { errors, warnings, notes, fatal, .. } = diags;
         let num_status = i32::from(!errors.is_empty() || fatal.is_some());
         // Merge errors and warnings into one offset-ordered message stream so
@@ -63821,7 +63867,7 @@ struct PrintfDiags {
     base: usize,
 }
 
-fn format_printf(fmt: &[u8], args: &[Str], diags: &mut PrintfDiags, tz: &Tz) -> Str {
+fn format_printf(fmt: &[u8], args: &[Str], diags: &mut PrintfDiags, tz: &Zone<'_>) -> Str {
     // Bash reuses the format string until all arguments are consumed. Repeat the
     // format while arguments remain, stopping if a pass consumes none (the
     // format has no argument-consuming conversions) to avoid an infinite loop.
@@ -63891,7 +63937,7 @@ fn format_printf_once(
     args: &[Str],
     arg_i: &mut usize,
     diags: &mut PrintfDiags,
-    tz: &Tz,
+    tz: &Zone<'_>,
 ) -> (Str, bool) {
     let mut out = Str::new();
     // A format string is a shell word: its *syntax* is ASCII, but its literal
@@ -63937,7 +63983,7 @@ fn format_conversion(
     arg_i: &mut usize,
     out: &mut Str,
     diags: &mut PrintfDiags,
-    tz: &Tz,
+    tz: &Zone<'_>,
 ) -> bool {
     // Literal `%%` short-circuit (no flags/width may precede it).
     if chars.peek() == Some(&b'%') {
@@ -64510,14 +64556,150 @@ fn iso_week(year: i64, yday: i64, wday: usize) -> (i64, i64) {
     }
 }
 
-/// Render a `strftime`-style format for `printf '%(FORMAT)T'`. `epoch` is
-/// seconds since the Unix epoch and `tz` is the zone to render it in — see
-/// [`Shell::shell_tz`], which resolves it from the shell's *exported* `TZ`
-/// exactly as bash's `sv_tz` does. Supports the common specifiers
-/// `%Y %C %y %m %d %e %H %I %k %l %M %S %p %P %A %a %B %b %h %j %u %w %s %z %Z
-/// %V %G %g %n %t %F %T %R %D %r %c %x %X %%`; an unknown specifier is emitted
-/// verbatim. `%z` and `%Z` report the offset and abbreviation `tz` was in at
-/// `epoch`, so they follow a DST rule across its transitions.
+// ---------------------------------------------------------------------------
+// The shell's timezone
+// ---------------------------------------------------------------------------
+
+/// Where zoneinfo files live when `TZ` names one without a leading `/`.
+const TZDIR_DEFAULT: &str = "/usr/share/zoneinfo";
+
+/// The system-wide zone, followed when no `TZ` is exported.
+const LOCALTIME_PATH: &str = "/etc/localtime";
+
+/// Largest zoneinfo file the shell will load. The biggest in tzdata is under
+/// 4 KiB, so this is generous; the cap exists so a `TZ` pointing at a huge file
+/// cannot make the shell read it into memory on every prompt.
+const MAX_ZONEINFO_BYTES: usize = 64 * 1024;
+
+/// An owned snapshot of the shell's timezone.
+///
+/// Owned rather than borrowed because a zoneinfo zone *is* the file's bytes: a
+/// [`TzFile`] reads the transition table out of them on every lookup instead of
+/// copying it, so something has to hold them. Taking a snapshot — rather than
+/// borrowing the shell — is what lets `prompt_decode` keep one zone for a whole
+/// prompt while still calling `&mut self` methods for `\w` and `\u`.
+///
+/// See [`Shell::shell_tz`] for how `TZ` selects between the two arms.
+#[derive(Clone, Debug)]
+enum ShellZone {
+    /// A POSIX `TZ` rule string, or the UTC default.
+    Posix(Tz),
+    /// The bytes of a zoneinfo file, already known to parse as TZif.
+    ///
+    /// `Rc`, so that handing a caller a snapshot per prompt is a refcount bump
+    /// rather than a few kilobytes of memcpy.
+    File(Rc<[u8]>),
+}
+
+impl ShellZone {
+    /// Resolve a non-empty `TZ` value, falling back to UTC.
+    ///
+    /// A leading `:` forces the file interpretation, which is how POSIX spells
+    /// "the rest is implementation-defined" and how every libc reads it.
+    /// Otherwise a POSIX rule string is tried first and a file only if that
+    /// fails — the order glibc uses, and it matters because `EST5EDT` is both a
+    /// valid rule *and* a file name in the zoneinfo tree.
+    fn resolve(value: &[u8], dir: &str) -> Self {
+        if let Some(name) = value.strip_prefix(b":") {
+            return Self::from_name(name, dir);
+        }
+        match Tz::parse(value) {
+            Some(tz) => Self::Posix(tz),
+            None => Self::from_name(value, dir),
+        }
+    }
+
+    /// Load the zoneinfo file `name` refers to under `dir`, falling back to UTC.
+    fn from_name(name: &[u8], dir: &str) -> Self {
+        let Some(path) = zoneinfo_path(name, dir) else {
+            return Self::Posix(Tz::UTC);
+        };
+        Self::from_file(&path)
+    }
+
+    /// Read and validate a zoneinfo file, falling back to UTC.
+    ///
+    /// The bytes are parsed *here* so that a file which is not TZif never
+    /// becomes a zone: every later lookup then has a file it already knows
+    /// parses, and cannot silently answer UTC halfway through a prompt.
+    fn from_file(path: &Path) -> Self {
+        let Ok(file) = std::fs::File::open(path) else {
+            return Self::Posix(Tz::UTC);
+        };
+        // One byte past the cap, so an oversized file is *refused* rather than
+        // silently truncated to a prefix that might still parse as TZif — and so
+        // that `TZ=/dev/zero` cannot be read until the shell runs out of memory.
+        let mut bytes = Vec::new();
+        if std::io::Read::take(file, MAX_ZONEINFO_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .is_err()
+            || bytes.len() > MAX_ZONEINFO_BYTES
+        {
+            return Self::Posix(Tz::UTC);
+        }
+        if TzFile::parse(&bytes).is_none() {
+            return Self::Posix(Tz::UTC);
+        }
+        Self::File(bytes.into())
+    }
+
+    /// Borrow this zone as something that can answer lookups.
+    fn view(&self) -> Zone<'_> {
+        match self {
+            Self::Posix(tz) => Zone::Posix(*tz),
+            // `from_file`/`resolve` only build this arm from bytes that parsed,
+            // so the fallback is unreachable; it exists so a shell rendering a
+            // prompt cannot panic.
+            Self::File(bytes) => TzFile::parse(bytes).map_or(Zone::Posix(Tz::UTC), Zone::File),
+        }
+    }
+}
+
+/// A borrowed view of a [`ShellZone`], which is what the rendering code needs.
+#[derive(Clone, Copy, Debug)]
+enum Zone<'a> {
+    /// A POSIX rule.
+    Posix(Tz),
+    /// A zoneinfo file's transition table.
+    File(TzFile<'a>),
+}
+
+impl Zone<'_> {
+    /// The zone state at UTC instant `t`.
+    fn lookup(&self, t: i64) -> TzInfo {
+        match self {
+            Self::Posix(tz) => tz.lookup(t),
+            Self::File(f) => f.lookup(t),
+        }
+    }
+}
+
+/// Build the path of the zoneinfo file `name` names, or `None` for a name that
+/// must not be resolved.
+///
+/// `TZ` is inherited from whoever started the shell, so a name containing a
+/// `..` component is refused: without that check `TZ=../../../etc/shadow` would
+/// make the shell open an arbitrary file and reveal, through whether the time
+/// changed, that it parsed as TZif. `dir` is the tree to look in — see
+/// [`Shell::zoneinfo_dir`].
+fn zoneinfo_path(name: &[u8], dir: &str) -> Option<PathBuf> {
+    if name.is_empty() || name.contains(&0) {
+        return None;
+    }
+    // A `..` *inside* a component is not a traversal; only a whole component is.
+    if name.split(|&b| b == b'/').any(|part| part == b"..") {
+        return None;
+    }
+    // A zone name is a file name, and file names are bytes — but `Path` on the
+    // host build is UTF-8-ish, and a non-UTF-8 zone name names nothing in any
+    // real tzdata tree, so refusing it loses nothing.
+    let name = std::str::from_utf8(name).ok()?;
+    if name.starts_with('/') {
+        return Some(PathBuf::from(name));
+    }
+    Some(Path::new(dir).join(name))
+}
+
 /// Append a strftime rendering to a prompt buffer.
 ///
 /// **TD-OILS-BYTE-STRINGS scaffold.** Prompt expansion is still `String`-based,
@@ -64526,11 +64708,20 @@ fn iso_week(year: i64, yday: i64, wday: usize) -> (i64, i64) {
 /// pure ASCII and so pass through unharmed; this whole helper disappears when
 /// prompt expansion becomes byte-native.
 #[allow(deprecated)]
-fn push_prompt_strftime(out: &mut Str, fmt: &[u8], epoch: i64, tz: &Tz) {
+fn push_prompt_strftime(out: &mut Str, fmt: &[u8], epoch: i64, tz: &Zone<'_>) {
     out.extend_from_slice(&format_strftime(fmt, epoch, tz));
 }
 
-fn format_strftime(fmt: &[u8], epoch: i64, tz: &Tz) -> Str {
+/// Render a `strftime`-style format for `printf '%(FORMAT)T'`. `epoch` is
+/// seconds since the Unix epoch and `tz` is the zone to render it in — see
+/// [`Shell::shell_tz`], which resolves it from the shell's *exported* `TZ`
+/// exactly as bash's `sv_tz` does. Supports the common specifiers
+/// `%Y %C %y %m %d %e %H %I %k %l %M %S %p %P %A %a %B %b %h %j %u %w %s %z %Z
+/// %V %G %g %n %t %F %T %R %D %r %c %x %X %%`; an unknown specifier is emitted
+/// verbatim. `%z` and `%Z` report the offset and abbreviation `tz` was in at
+/// `epoch`, so they follow a DST rule across its transitions — whether that
+/// rule came from a `TZ` string or from a zoneinfo file's transition table.
+fn format_strftime(fmt: &[u8], epoch: i64, tz: &Zone<'_>) -> Str {
     const WDAY_FULL: [&[u8]; 7] = [
         b"Sunday", b"Monday", b"Tuesday", b"Wednesday", b"Thursday", b"Friday", b"Saturday",
     ];
@@ -73754,19 +73945,198 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
     }
 
-    /// An unset, empty or unparseable `TZ` is UTC — POSIX's rule and
-    /// [`tzrules::Tz::parse`]'s contract. Notably a bare zoneinfo name such as
-    /// `America/New_York` is *not* a POSIX TZ string and lands here, because
-    /// SlateOS has no tzdata to resolve it against yet.
+    /// An unset, empty or unresolvable `TZ` is UTC — POSIX's rule and
+    /// [`tzrules::Tz::parse`]'s contract.
+    ///
+    /// A bare zoneinfo name is now *looked up* rather than rejected outright
+    /// (see [`Shell::shell_tz`]), so the names here are pointed at a tree that
+    /// does not exist: what is being pinned is the fallback when the lookup
+    /// finds nothing, not the old "a name is never a zone" behaviour.
     #[test]
-    fn printf_time_falls_back_to_utc_for_a_zone_it_cannot_parse() {
-        for tz in ["", "America/New_York", "EST5EDT,garbage", "%%%"] {
+    fn printf_time_falls_back_to_utc_for_a_zone_it_cannot_resolve() {
+        for tz in [
+            "",
+            "America/New_York",
+            "EST5EDT,garbage",
+            "%%%",
+            // Refused before it is opened: a `..` component would let an
+            // inherited `TZ` walk out of the zoneinfo tree.
+            "../../../etc/passwd",
+        ] {
             assert_eq!(
-                run(&format!("export TZ='{tz}'; printf '%(%H %Z)T\\n' 1000000000")).0,
+                run(&format!(
+                    "export TZDIR=/nonexistent-zoneinfo; export TZ='{tz}'; \
+                     printf '%(%H %Z)T\\n' 1000000000"
+                ))
+                .0,
                 "01 UTC\n",
                 "TZ={tz:?} should render as UTC"
             );
         }
+    }
+
+    /// A TZif v2 file for a US-eastern-like zone: two recorded transitions in
+    /// 2020 and an `EST5EDT,M3.2.0,M11.1.0` footer — the shape `zic -b slim`
+    /// emits, with a zero-transition v1 block ahead of the v2 one.
+    ///
+    /// Built here rather than copied from tzdata so the test needs no zoneinfo
+    /// on the host, and so what it asserts is legible from the bytes.
+    fn eastern_tzif() -> Vec<u8> {
+        fn header(out: &mut Vec<u8>, timecnt: u32, typecnt: u32, charcnt: u32) {
+            out.extend_from_slice(b"TZif2");
+            out.extend_from_slice(&[0; 15]);
+            for n in [0, 0, 0, timecnt, typecnt, charcnt] {
+                out.extend_from_slice(&u32::to_be_bytes(n));
+            }
+        }
+        fn ttinfo(out: &mut Vec<u8>, utoff: i32, isdst: u8, desigidx: u8) {
+            out.extend_from_slice(&i32::to_be_bytes(utoff));
+            out.extend_from_slice(&[isdst, desigidx]);
+        }
+        let mut b = Vec::new();
+        // v1 block: the two types, no transitions (what a slim file carries).
+        header(&mut b, 0, 2, 8);
+        ttinfo(&mut b, -5 * 3600, 0, 0);
+        ttinfo(&mut b, -4 * 3600, 1, 4);
+        b.extend_from_slice(b"EST\0EDT\0");
+        // v2 block: 8-byte transition times.
+        header(&mut b, 2, 2, 8);
+        b.extend_from_slice(&i64::to_be_bytes(1_583_650_800)); // 2020-03-08 EST->EDT
+        b.extend_from_slice(&i64::to_be_bytes(1_604_210_400)); // 2020-11-01 EDT->EST
+        b.extend_from_slice(&[1, 0]);
+        ttinfo(&mut b, -5 * 3600, 0, 0);
+        ttinfo(&mut b, -4 * 3600, 1, 4);
+        b.extend_from_slice(b"EST\0EDT\0");
+        b.extend_from_slice(b"\nEST5EDT,M3.2.0,M11.1.0\n");
+        b
+    }
+
+    /// [`eastern_tzif`] written to a scratch `TZDIR` as `Fixture/Eastern`.
+    fn eastern_zoneinfo_dir() -> ScratchDir {
+        let dir = ScratchDir::new("osh_tzdir");
+        std::fs::create_dir(dir.join("Fixture")).expect("create fixture zone dir");
+        std::fs::write(dir.join("Fixture/Eastern"), eastern_tzif()).expect("write fixture zone");
+        dir
+    }
+
+    /// A `TZ` naming a real zoneinfo file renders from that file's transition
+    /// table, so osh and a child `date` agree once tzdata ships. The fixture is
+    /// written to a scratch tree and reached via an exported `TZDIR`, which is
+    /// why this test needs no tzdata on the host.
+    #[test]
+    fn printf_time_reads_a_zoneinfo_file() {
+        let dir = eastern_zoneinfo_dir();
+        let tzdir = dir.slashed();
+        // 1593561600 = 2020-07-01 00:00 UTC, between the fixture's two recorded
+        // transitions: the answer comes from the transition table, not the
+        // footer, and is EDT (-4h) — 20:00 the previous day.
+        assert_eq!(
+            run(&format!(
+                "export TZDIR='{tzdir}'; export TZ=Fixture/Eastern; \
+                 printf '%(%H %Z %z)T\\n' 1593561600"
+            ))
+            .0,
+            "20 EDT -0400\n"
+        );
+        // Winter, still inside the table: the standard half.
+        assert_eq!(
+            run(&format!(
+                "export TZDIR='{tzdir}'; export TZ=Fixture/Eastern; \
+                 printf '%(%Z %z)T\\n' 1583020800"
+            ))
+            .0,
+            "EST -0500\n"
+        );
+        // 1908000000 = 2030-06-21, past the last recorded transition, where the
+        // POSIX footer governs. Without it the zone would freeze on the table's
+        // final entry (EST) and report the wrong offset for every future date.
+        assert_eq!(
+            run(&format!(
+                "export TZDIR='{tzdir}'; export TZ=Fixture/Eastern; \
+                 printf '%(%Z %z)T\\n' 1908000000"
+            ))
+            .0,
+            "EDT -0400\n"
+        );
+        // A leading `:` forces the file interpretation, which is how POSIX
+        // spells "the rest is implementation-defined".
+        assert_eq!(
+            run(&format!(
+                "export TZDIR='{tzdir}'; export TZ=:Fixture/Eastern; \
+                 printf '%(%Z)T\\n' 1593561600"
+            ))
+            .0,
+            "EDT\n"
+        );
+    }
+
+    /// A name that is *both* a valid POSIX rule and a file resolves as the rule,
+    /// matching glibc — the file is reached only through a leading `:`. The two
+    /// disagree here on purpose: the fixture file is US-eastern, the rule is
+    /// a fixed +0 zone, so which one answered is unambiguous.
+    #[test]
+    fn printf_time_prefers_a_tz_rule_over_a_file_of_the_same_name() {
+        let dir = eastern_zoneinfo_dir();
+        std::fs::write(dir.join("XXX0"), eastern_tzif()).expect("write rule-named zone");
+        let tzdir = dir.slashed();
+        assert_eq!(
+            run(&format!(
+                "export TZDIR='{tzdir}'; export TZ=XXX0; printf '%(%Z %z)T\\n' 1593561600"
+            ))
+            .0,
+            "XXX +0000\n"
+        );
+        assert_eq!(
+            run(&format!(
+                "export TZDIR='{tzdir}'; export TZ=:XXX0; printf '%(%Z %z)T\\n' 1593561600"
+            ))
+            .0,
+            "EDT -0400\n"
+        );
+    }
+
+    /// A file that is not TZif is not a zone: the shell keeps UTC rather than
+    /// rendering from whatever the bytes happened to decode to. Checked at load
+    /// time, so a prompt cannot start in one zone and finish in another.
+    #[test]
+    fn printf_time_refuses_a_zoneinfo_file_that_is_not_tzif() {
+        let dir = eastern_zoneinfo_dir();
+        std::fs::write(dir.join("Fixture/Junk"), b"not a zoneinfo file").expect("write junk");
+        // Truncated after a header whose counts all still add up: rejected by
+        // the mandatory v2 footer, not by a count check.
+        let full = eastern_tzif();
+        let cut = full.len() - b"\nEST5EDT,M3.2.0,M11.1.0\n".len();
+        std::fs::write(dir.join("Fixture/Cut"), &full[..cut]).expect("write truncated");
+        let tzdir = dir.slashed();
+        for name in ["Fixture/Junk", "Fixture/Cut", "Fixture/Missing"] {
+            assert_eq!(
+                run(&format!(
+                    "export TZDIR='{tzdir}'; export TZ={name}; printf '%(%H %Z)T\\n' 1000000000"
+                ))
+                .0,
+                "01 UTC\n",
+                "TZ={name} should render as UTC"
+            );
+        }
+    }
+
+    /// The prompt escapes take one zone snapshot for the whole prompt, and that
+    /// snapshot owns its zoneinfo bytes — so a `\D{…}` rendering from a file is
+    /// the same zone the `%(…)T` conversion would have used.
+    #[test]
+    fn prompt_time_escapes_read_a_zoneinfo_file() {
+        let dir = eastern_zoneinfo_dir();
+        let mut sh = new_shell();
+        sh.run_source(format!("export TZDIR='{}'", dir.slashed()).as_bytes());
+        sh.run_source(b"export TZ=Fixture/Eastern");
+        // Renders *now*, so only the fact that it came from the file — an
+        // eastern abbreviation with a matching offset — can be asserted.
+        let out = sh.prompt_decode("\\D{%Z %z}");
+        assert!(
+            out == b"EST -0500".to_vec() || out == b"EDT -0400".to_vec(),
+            "prompt rendered {:?}, expected an eastern zone from the fixture file",
+            String::from_utf8_lossy(&out)
+        );
     }
 
     /// The `\t`-family prompt escapes share the printf engine, so a prompt and

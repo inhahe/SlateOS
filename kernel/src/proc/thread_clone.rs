@@ -130,6 +130,18 @@ pub fn register_clear_child_tid(task_id: TaskId, ctid_ptr: u64) {
     }
 }
 
+/// Drop `task_id`'s `ctid` registration without performing the exit-time
+/// zero-write or futex wake.
+///
+/// Used only to unwind a failed two-phase spawn: the ctid is registered while
+/// the child is still suspended, so if `thread::admit` then fails the child
+/// will never run and never reach `on_thread_exit_hook`.  Without this the
+/// entry would sit in [`CLEAR_CHILD_TID`] forever, keyed on a task id that is
+/// gone — a slow leak, and a latent mis-fire if task ids are ever recycled.
+pub fn forget_clear_child_tid(task_id: TaskId) {
+    CLEAR_CHILD_TID.lock().remove(&task_id);
+}
+
 /// Look up (without removing) a task's registered `ctid` address.
 ///
 /// Used by `prctl(PR_GET_TID_ADDRESS)` to report the address of the
@@ -496,7 +508,12 @@ pub fn clone_thread(
     // thread's userspace %gs base (the authoritative Task field, 0 if unset).
     let child_gs = crate::sched::current_task_gs_base();
 
-    let task_id = match thread::spawn_with_tls(
+    // Phase 1 of the two-phase spawn: the child is registered with the process
+    // but is NOT yet runnable, so it cannot run — or exit — while we install
+    // the ctid/settid state below.  Registering any of that *after* admission
+    // races the child to completion; see `thread::spawn_suspended_with_tls`
+    // (B-PTHREAD-JOIN-LOST-CTID).
+    let task_id = match thread::spawn_suspended_with_tls(
         parent_pid,
         b"cloned-thread",
         priority,
@@ -521,12 +538,11 @@ pub fn clone_thread(
     // the task was admitted — deliberately not done here, where the child may
     // already be running (see the computation above and thread.rs).
 
-    // The task may already be running by the time we get here, but
-    // for CLONE_PARENT_SETTID Linux promises that the parent's TID
-    // store is observable BEFORE the parent's own return from
-    // clone() — and we are still in the parent's syscall frame, so
-    // doing the copy now (before we return our value to userspace)
-    // satisfies that ordering.
+    // The child is still suspended here, so all three registrations below are
+    // race-free.  For CLONE_PARENT_SETTID Linux promises that the parent's TID
+    // store is observable BEFORE the parent's own return from clone() — we are
+    // still in the parent's syscall frame, so doing the copy now (before we
+    // return our value to userspace) satisfies that ordering.
 
     let tid_for_user: i32 = i32::try_from(task_id).unwrap_or(i32::MAX);
 
@@ -551,7 +567,11 @@ pub fn clone_thread(
     // CLONE_CHILD_SETTID: store the new TID at *ctid in the shared
     // AS.  The child would do this itself in normal Linux, but
     // doing it from the parent is equivalent and simpler (no
-    // trampoline argument plumbing).
+    // trampoline argument plumbing).  Doing it while the child is still
+    // suspended is also what makes it safe: were the child allowed to run and
+    // exit first, its exit hook would zero *ctid and this store would then
+    // resurrect a non-zero tid into a dead thread's descriptor, hanging any
+    // `pthread_join` on it just as surely as a missed wake.
     if (args.flags & CLONE_CHILD_SETTID) != 0 && args.child_tid_ptr != 0 {
         let _ = unsafe {
             crate::mm::user::copy_to_user(
@@ -562,9 +582,24 @@ pub fn clone_thread(
         };
     }
 
-    // CLONE_CHILD_CLEARTID: register the ctid for futex-on-exit.
+    // CLONE_CHILD_CLEARTID: register the ctid for futex-on-exit.  This MUST be
+    // in place before the child is admitted: `on_thread_exit_hook` looks the
+    // entry up and returns early when it is absent, skipping both the *ctid
+    // zero-write and the futex wake that `pthread_join` is parked on.
     if (args.flags & CLONE_CHILD_CLEARTID) != 0 && args.child_tid_ptr != 0 {
         register_clear_child_tid(task_id, args.child_tid_ptr);
+    }
+
+    // Phase 2: everything the exit path needs is registered — let the child run.
+    // On failure `admit` has already unwound the thread registration and
+    // destroyed the task, but the ctid entry we just installed is keyed on a
+    // task id that will never exit, so drop it here rather than leaking it.
+    if let Err(e) = thread::admit(parent_pid, task_id) {
+        forget_clear_child_tid(task_id);
+        // SAFETY: `image_raw` came from `Box::into_raw` above and was not
+        // consumed — the task never ran, so the trampoline never freed it.
+        drop(unsafe { Box::from_raw(image_raw as *mut [u64; REG_IMAGE_LEN]) });
+        return Err(e);
     }
 
     Ok(task_id)

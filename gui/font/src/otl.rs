@@ -1,0 +1,264 @@
+//! The tables `GSUB` and `GPOS` have in common.
+//!
+//! OpenType Layout is two tables with one shape. Both begin with the same
+//! header, both reach their real content through the same three lists
+//! (script → feature → lookup), and both express "which glyphs does this
+//! apply to?" with the same coverage and class-definition tables. Only the
+//! *subtables* at the end of that walk differ: `GSUB`'s replace glyphs,
+//! `GPOS`'s move them.
+//!
+//! So the walk lives here once. The alternative — a copy in each of
+//! [`kern`](crate::kern) and [`gsub`](crate::gsub) — is how a bounds check
+//! ends up in one copy and not the other, and a font that crashes the
+//! substitution path but not the positioning path is a bug nobody would
+//! think to look for.
+//!
+//! Every function here is total: a malformed or truncated table yields
+//! `None`, never a panic and never a read past the end of `data`. Offsets
+//! are absolute byte positions into the whole font file, since that is what
+//! the callers cache.
+//!
+//! # What is not here
+//!
+//! **Script and language selection.** The walk starts at the FeatureList and
+//! takes every feature with a wanted tag, rather than starting at the
+//! ScriptList and taking the features the run's script and language actually
+//! select. Doing it properly needs the itemised script of the run, which is a
+//! shaper's job and comes later; until then, using all of them is wrong only
+//! for a face that varies a feature by script, which is rare, and the failure
+//! is a slightly wrong gap rather than a wrong glyph.
+
+use alloc::vec::Vec;
+
+use crate::sfnt::{u16_at, u32_at};
+
+/// A limit on how many subtables are followed, so that a corrupt or hostile
+/// font cannot make lookup quadratic. Real fonts use single digits; the
+/// largest seen on the development host is 4.
+pub(crate) const MAX_SUBTABLES: usize = 64;
+
+/// Offsets of the subtables reachable from the features tagged `tags`.
+///
+/// `want` is the lookup type whose subtables the caller can read, and
+/// `extension` is the lookup type that table uses for its 32-bit-offset
+/// redirect (9 in `GPOS`, 7 in `GSUB`) — the two tables number their lookup
+/// types independently, so neither can be hardcoded here.
+///
+/// Returns `None` rather than an empty vector when nothing is found, because
+/// every caller treats "this table has nothing for me" as a reason to fall
+/// back rather than as a result.
+pub(crate) fn feature_subtables(
+    data: &[u8],
+    base: usize,
+    tags: &[&[u8; 4]],
+    want: u16,
+    extension: u16,
+) -> Option<Vec<usize>> {
+    let feature_list = base.checked_add(usize::from(u16_at(data, base.checked_add(6)?)?))?;
+    let lookup_list = base.checked_add(usize::from(u16_at(data, base.checked_add(8)?)?))?;
+
+    // Which lookups the wanted features use. Ascending and deduplicated,
+    // because lookups apply in LookupList order regardless of the order a
+    // feature happens to list them in, and two features may share one.
+    let mut indices = Vec::new();
+    let feature_count = u16_at(data, feature_list)?;
+    for i in 0..usize::from(feature_count) {
+        let rec = feature_list.checked_add(2)?.checked_add(i.checked_mul(6)?)?;
+        let tag = data.get(rec..rec.checked_add(4)?)?;
+        if !tags.iter().any(|want| want.as_slice() == tag) {
+            continue;
+        }
+        let feature = feature_list.checked_add(usize::from(u16_at(data, rec.checked_add(4)?)?))?;
+        let count = u16_at(data, feature.checked_add(2)?)?;
+        for j in 0..usize::from(count) {
+            let at = feature.checked_add(4)?.checked_add(j.checked_mul(2)?)?;
+            if let Some(idx) = u16_at(data, at) {
+                indices.push(idx);
+            }
+        }
+    }
+    indices.sort_unstable();
+    indices.dedup();
+    if indices.is_empty() {
+        return None;
+    }
+
+    let lookup_count = u16_at(data, lookup_list)?;
+    let mut subtables = Vec::new();
+    for idx in indices {
+        if idx >= lookup_count {
+            continue;
+        }
+        let at = lookup_list
+            .checked_add(2)?
+            .checked_add(usize::from(idx).checked_mul(2)?)?;
+        let Some(lookup) = u16_at(data, at).and_then(|o| lookup_list.checked_add(usize::from(o)))
+        else {
+            continue;
+        };
+        collect_subtables(data, lookup, want, extension, &mut subtables);
+        if subtables.len() >= MAX_SUBTABLES {
+            break;
+        }
+    }
+    (!subtables.is_empty()).then_some(subtables)
+}
+
+/// Append one lookup's subtables of type `want`, unwrapping extensions.
+fn collect_subtables(data: &[u8], lookup: usize, want: u16, extension: u16, out: &mut Vec<usize>) {
+    let (Some(kind), Some(count)) = (
+        u16_at(data, lookup),
+        lookup.checked_add(4).and_then(|o| u16_at(data, o)),
+    ) else {
+        return;
+    };
+    if kind != want && kind != extension {
+        return;
+    }
+    for i in 0..usize::from(count) {
+        if out.len() >= MAX_SUBTABLES {
+            return;
+        }
+        let Some(sub) = lookup
+            .checked_add(6)
+            .and_then(|o| i.checked_mul(2).and_then(|d| o.checked_add(d)))
+            .and_then(|at| u16_at(data, at))
+            .and_then(|o| lookup.checked_add(usize::from(o)))
+        else {
+            continue;
+        };
+        if kind == want {
+            out.push(sub);
+            continue;
+        }
+        // An extension subtable is a three-field redirect: format, the type it
+        // wraps, then a 32-bit offset from the extension's own start.
+        if sub.checked_add(2).and_then(|o| u16_at(data, o)) != Some(want) {
+            continue;
+        }
+        if let Some(target) = sub
+            .checked_add(4)
+            .and_then(|o| u32_at(data, o))
+            .and_then(|o| usize::try_from(o).ok())
+            .and_then(|o| sub.checked_add(o))
+        {
+            out.push(target);
+        }
+    }
+}
+
+/// Where `glyph` sits in a coverage table, or `None` if it is not covered.
+pub(crate) fn coverage_index(data: &[u8], table: usize, glyph: u16) -> Option<u16> {
+    match u16_at(data, table)? {
+        1 => {
+            let count = u16_at(data, table.checked_add(2)?)?;
+            let first = table.checked_add(4)?;
+            // A sorted list of glyph ids; the position *is* the index.
+            let i = binary_search(usize::from(count), |i| {
+                let at = first.checked_add(i.checked_mul(2)?)?;
+                Some(u16_at(data, at)?.cmp(&glyph))
+            })?;
+            u16::try_from(i).ok()
+        }
+        2 => {
+            let count = u16_at(data, table.checked_add(2)?)?;
+            let first = table.checked_add(4)?;
+            let at = range_containing(data, first, usize::from(count), glyph)?;
+            let start = u16_at(data, at)?;
+            let base = u16_at(data, at.checked_add(4)?)?;
+            // The record says where its first glyph sits; the rest of the
+            // range follows on consecutively.
+            base.checked_add(glyph.checked_sub(start)?)
+        }
+        _ => None,
+    }
+}
+
+/// The class `glyph` belongs to. Class 0 is "everything not listed", which is
+/// a real class that a subtable may act on, so an unlisted glyph is `Some(0)`
+/// rather than `None`.
+pub(crate) fn glyph_class(data: &[u8], table: usize, glyph: u16) -> Option<u16> {
+    match u16_at(data, table)? {
+        1 => {
+            let start = u16_at(data, table.checked_add(2)?)?;
+            let count = u16_at(data, table.checked_add(4)?)?;
+            let Some(i) = glyph.checked_sub(start).filter(|i| *i < count) else {
+                return Some(0);
+            };
+            let at = table
+                .checked_add(6)?
+                .checked_add(usize::from(i).checked_mul(2)?)?;
+            Some(u16_at(data, at).unwrap_or(0))
+        }
+        2 => {
+            let count = u16_at(data, table.checked_add(2)?)?;
+            let first = table.checked_add(4)?;
+            let class = range_containing(data, first, usize::from(count), glyph)
+                .and_then(|at| u16_at(data, at.checked_add(4)?));
+            Some(class.unwrap_or(0))
+        }
+        _ => None,
+    }
+}
+
+/// Find the record covering `glyph` in a sorted array of `count` six-byte
+/// range records starting at `first`, and return its offset.
+///
+/// Coverage format 2 and class-definition format 2 have exactly this shape —
+/// `start`, `end`, then one payload field — so they share the search. The
+/// offset comes back rather than the payload because the two want different
+/// fields out of the record, and computing both eagerly is what makes a
+/// non-matching probe fail: `glyph - start` underflows on every range the
+/// search steps over on its way to the right one.
+pub(crate) fn range_containing(
+    data: &[u8],
+    first: usize,
+    count: usize,
+    glyph: u16,
+) -> Option<usize> {
+    binary_search(count, |i| {
+        let at = first.checked_add(i.checked_mul(6)?)?;
+        let start = u16_at(data, at)?;
+        let end = u16_at(data, at.checked_add(2)?)?;
+        Some(if end < glyph {
+            core::cmp::Ordering::Less
+        } else if start > glyph {
+            core::cmp::Ordering::Greater
+        } else {
+            core::cmp::Ordering::Equal
+        })
+    })
+    .and_then(|i| first.checked_add(i.checked_mul(6)?))
+}
+
+/// Binary search over `count` records, returning the index of the one whose
+/// `probe` reports [`Ordering::Equal`](core::cmp::Ordering::Equal).
+///
+/// Shared because every sorted array in these tables — coverage lists,
+/// coverage ranges, class ranges, pair records, legacy kern pairs — is
+/// searched the same way, and writing the loop five times is how an off-by-one
+/// gets into one copy and not the others. A `probe` that fails (a truncated
+/// table) ends the search rather than reading past the end.
+pub(crate) fn binary_search(
+    count: usize,
+    probe: impl Fn(usize) -> Option<core::cmp::Ordering>,
+) -> Option<usize> {
+    let mut lo = 0usize;
+    let mut hi = count;
+    while lo < hi {
+        let mid = lo.checked_add(hi.checked_sub(lo)?.checked_div(2)?)?;
+        match probe(mid)? {
+            core::cmp::Ordering::Less => lo = mid.checked_add(1)?,
+            core::cmp::Ordering::Greater => hi = mid,
+            core::cmp::Ordering::Equal => return Some(mid),
+        }
+    }
+    None
+}
+
+/// Size in bytes of a value record with `format`: one 16-bit field per set bit.
+pub(crate) fn value_size(format: u16) -> usize {
+    // At most 16 bits are set, so the product is at most 32 and the cast
+    // cannot lose anything on any target.
+    (format.count_ones() as usize).saturating_mul(2)
+}

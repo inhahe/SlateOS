@@ -40,6 +40,7 @@ extern crate alloc;
 
 pub mod cff;
 mod kern;
+mod otl;
 pub mod raster;
 pub mod scaled;
 pub mod select;

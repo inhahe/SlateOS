@@ -687,6 +687,12 @@ const CANARY_SAMPLE_EVERY: u32 = 8;
 static CANARY_MIN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(u64::MAX);
 static CANARY_MAX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static CANARY_SAMPLES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Reference measurements whose two arms failed to separate.
+///
+/// Tracked separately from `CANARY_SAMPLES` because "the instrument failed"
+/// and "the instrument found nothing" are different results, and collapsing
+/// them is what let a dead canary report a reassuring 0% spread.
+static CANARY_INVALID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 /// Counts `score` calls so every Nth one triggers a sample.
 static CANARY_SCORED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
@@ -714,15 +720,24 @@ fn canary_record(measured: u64) {
 fn maybe_canary_sample() {
     let n = CANARY_SCORED.fetch_add(1, Ordering::Relaxed);
     if n.wrapping_rem(CANARY_SAMPLE_EVERY) == 0 {
-        let (measured, _, _) = measure_access_cost();
-        canary_record(measured);
+        match measure_access_cost().0 {
+            Some(measured) => canary_record(measured),
+            // Do not fold a failed measurement into the extremes: a `0` would
+            // drag CANARY_MIN to zero and make the spread meaningless (or,
+            // once every sample fails, make it a serene 0%). Count it instead,
+            // so the verdict can say the instrument failed.
+            None => {
+                CANARY_INVALID.fetch_add(1, Ordering::Relaxed);
+            }
+        }
     }
 }
 
 /// One amplified A/B measurement of a guest memory access, in cycles.
 ///
 /// Returns `(measured, nop, store)` — the per-access cost, and the two raw
-/// arm totals behind it.
+/// arm totals behind it. `measured` is `None` when the two arms failed to
+/// separate: see "Why this returns an Option" below.
 ///
 /// Factored into its own function because this same measurement is taken
 /// **twice** per suite: once before the benchmarks, to calibrate the budgets,
@@ -730,8 +745,34 @@ fn maybe_canary_sample() {
 /// meaningful if both ends measure precisely the same thing, so there is
 /// deliberately one implementation and no parameters to let the two drift
 /// apart.
-fn measure_access_cost() -> (u64, u64, u64) {
+///
+/// # Why the store is `write_volatile` and not a relaxed atomic store
+///
+/// It used to be `CALIBRATION_BYTE.store(black_box(1), Relaxed)`, and under
+/// optimisation that measured **zero**, because a relaxed atomic store is LLVM
+/// `monotonic` and dead-store elimination may drop all but the last of a run of
+/// monotonic stores to one address. The 64 stores per window collapsed to
+/// about one, leaving the "store" arm *cheaper* than the "nop" arm (measured:
+/// nop=400, store=244), and `saturating_sub` reported the negative delta as 0.
+/// `black_box` is a hint, and the elimination it was asked to prevent is
+/// precisely what happened once the optimiser was turned on. `write_volatile`
+/// is a guarantee: the compiler may not elide it. It also compiles to exactly
+/// one guest store instruction, which is what this claims to be measuring.
+///
+/// The arms are kept symmetric — same loop, same `black_box` on the value —
+/// so the delta is the store instruction and nothing else.
+///
+/// # Why this returns an Option
+///
+/// A failed A/B is not a measurement of zero. If the arms do not separate by
+/// at least one cycle per access, the right output is "could not measure", so
+/// that callers report an instrument failure instead of a suspiciously round
+/// number. Reporting 0 is how the canary spent nine consecutive runs certifying
+/// nothing at all — see known-issues.md
+/// B-BENCH-CANARY-MEASURES-ZERO-IN-RELEASE-AND-BLAMES-THE-HOST.
+fn measure_access_cost() -> (Option<u64>, u64, u64) {
     static CALIBRATION_BYTE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+    let cell = CALIBRATION_BYTE.as_ptr();
     let n = CANARY_STORES_PER_WINDOW;
     let (nop, store) = ab_interleaved(
         CANARY_ROUNDS,
@@ -739,7 +780,7 @@ fn measure_access_cost() -> (u64, u64, u64) {
             timed(|| {
                 let mut i = 0u64;
                 while i < n {
-                    core::hint::black_box(i);
+                    core::hint::black_box(1u8);
                     i = i.wrapping_add(1);
                 }
             })
@@ -748,13 +789,26 @@ fn measure_access_cost() -> (u64, u64, u64) {
             timed(|| {
                 let mut i = 0u64;
                 while i < n {
-                    CALIBRATION_BYTE.store(core::hint::black_box(1u8), Ordering::Relaxed);
+                    // SAFETY: `cell` points at a live `'static` AtomicU8, so it
+                    // is valid and correctly aligned for the whole program. A
+                    // one-byte store cannot tear, and `CALIBRATION_BYTE` exists
+                    // solely as this loop's scratch target — nothing else in
+                    // the kernel reads or writes it — so there is no concurrent
+                    // access for this write to race with.
+                    unsafe { core::ptr::write_volatile(cell, core::hint::black_box(1u8)) };
                     i = i.wrapping_add(1);
                 }
             })
         },
     );
-    (store.saturating_sub(nop) / n, nop, store)
+    // Require a full cycle per access before believing the delta: below that
+    // the integer division would floor to 0 anyway, and a sub-cycle "cost" for
+    // a TCG guest store is not a small measurement, it is a broken one.
+    let measured = store
+        .checked_sub(nop)
+        .filter(|delta| *delta >= n)
+        .map(|delta| delta / n);
+    (measured, nop, store)
 }
 
 /// Re-measure the reference access cost and report whether the host stayed
@@ -781,42 +835,71 @@ fn measure_access_cost() -> (u64, u64, u64) {
 /// percentage of `start`, so 100 means the host was equally loaded at both
 /// ends. The pair is recorded unconditionally rather than only on failure —
 /// a verdict alone would leave no way to ever calibrate the threshold.
-fn report_canary(start: u64) {
-    let (end, _, _) = measure_access_cost();
-    // The endpoints are samples too, so fold them in before reading extremes.
-    canary_record(start);
-    canary_record(end);
+fn report_canary(start: Option<u64>) {
+    let (end, end_nop, end_store) = measure_access_cost();
+    // The endpoints are samples too, so fold them in before reading extremes —
+    // but only the ones that measured something.
+    for endpoint in [start, end] {
+        match endpoint {
+            Some(measured) => canary_record(measured),
+            None => {
+                CANARY_INVALID.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
 
-    // Guard the division: a zero start would mean the calibration itself
-    // failed, and the run's budgets are already untrustworthy in that case.
+    // Guard the division: a missing start means the calibration itself failed,
+    // and the run's budgets are already untrustworthy in that case.
+    let (start, end) = (start.unwrap_or(0), end.unwrap_or(0));
     let pct = if start > 0 {
         end.saturating_mul(100) / start
     } else {
         0
     };
 
-    let lo = CANARY_MIN.load(Ordering::Relaxed);
-    let hi = CANARY_MAX.load(Ordering::Relaxed);
     let samples = CANARY_SAMPLES.load(Ordering::Relaxed);
+    let invalid = CANARY_INVALID.load(Ordering::Relaxed);
+    // `CANARY_MIN` still holds its u64::MAX sentinel when nothing valid was
+    // ever recorded. Print 0 rather than the sentinel, which would otherwise
+    // read as an 18-quintillion-cycle memory access.
+    let lo = if samples == 0 { 0 } else { CANARY_MIN.load(Ordering::Relaxed) };
+    let hi = CANARY_MAX.load(Ordering::Relaxed);
     // Spread as a percentage of the quietest sample: the minimum is the best
     // estimate of the uncontended cost, so this reads as "how much slower did
     // the machine get at its worst moment".
-    let spread = if lo > 0 && lo != u64::MAX {
+    let spread = if lo > 0 {
         hi.saturating_sub(lo).saturating_mul(100) / lo
     } else {
         0
     };
 
-    // `<start> <end> <pct>` keeps its original meaning; the trailing four are
+    // `<start> <end> <pct>` keeps its original meaning; the trailing fields are
     // an append-only extension, so the one record written before mid-suite
-    // sampling existed still reads back correctly.
+    // sampling existed still reads back correctly. `invalid` is the newest.
     serial_println!(
-        "[bench] CANARY {} {} {} {} {} {} {}",
-        start, end, pct, lo, hi, spread, samples
+        "[bench] CANARY {} {} {} {} {} {} {} {}",
+        start, end, pct, lo, hi, spread, samples, invalid
     );
 
-    let contaminated = start == 0 || spread > CANARY_TOLERANCE_PCT;
-    if contaminated {
+    // Three outcomes, deliberately not two. "The instrument failed" is not
+    // "the instrument found contamination": reporting the second when the
+    // first is true sends the reader hunting for host load that was never
+    // there, which is exactly what nine release runs did.
+    if invalid > 0 || samples == 0 {
+        serial_println!(
+            "[bench] CANARY BROKEN: {} of {} reference measurements could not \
+             separate their two arms (last: nop={} store={} over {} stores/window), \
+             so contamination is UNKNOWN for this run — not clean. The A/B arms \
+             differ only by one volatile byte store; if the store arm is no longer \
+             the dearer of the two, the optimiser has removed it again. See \
+             known-issues.md B-BENCH-CANARY-MEASURES-ZERO-IN-RELEASE-AND-BLAMES-THE-HOST.",
+            invalid,
+            samples + invalid,
+            end_nop,
+            end_store,
+            CANARY_STORES_PER_WINDOW
+        );
+    } else if spread > CANARY_TOLERANCE_PCT {
         serial_println!(
             "[bench] CONTAMINATED: the reference access cost spread {}% across {} \
              samples during the suite ({}-{} cycles, endpoints {} -> {} = {}%, \
@@ -910,18 +993,30 @@ pub fn run_all() {
     // contamination canary (see `report_canary`).
     let (access_floor, canary_start) = {
         let (measured, nop, store) = measure_access_cost();
-        // Still clamped: if the two arms somehow land equal the budgets below
-        // must not all collapse to 0 and turn every check into a guaranteed
-        // failure. With the amplification above this should never bind, and if
-        // the printed `measured` is ever at or below it, treat the run's
-        // budget-based verdicts as unreliable rather than as findings.
-        let floor = core::cmp::max(measured, 100);
-        serial_println!(
-            "[bench]   memory_access_floor: {} cycles/guest byte-store (measured={} \
-             over {} stores/window: nop={} store={}, {} interleaved rounds) — budgets \
-             below are multiples of this",
-            floor, measured, CANARY_STORES_PER_WINDOW, nop, store, CANARY_ROUNDS
-        );
+        // Still clamped: if the two arms land equal the budgets below must not
+        // all collapse to 0 and turn every check into a guaranteed failure.
+        let floor = core::cmp::max(measured.unwrap_or(0), 100);
+        match measured {
+            Some(value) => serial_println!(
+                "[bench]   memory_access_floor: {} cycles/guest byte-store (measured={} \
+                 over {} stores/window: nop={} store={}, {} interleaved rounds) — budgets \
+                 below are multiples of this",
+                floor, value, CANARY_STORES_PER_WINDOW, nop, store, CANARY_ROUNDS
+            ),
+            // The clamp used to absorb this silently, and did so on all nine
+            // release-profile runs while its own comment said it should never
+            // bind. Say it out loud: every budget below is now a multiple of an
+            // arbitrary constant rather than of a measured cost, so a budget
+            // verdict in this run is not evidence about the code.
+            None => serial_println!(
+                "[bench]   memory_access_floor: UNMEASURED — the A/B arms did not \
+                 separate (nop={} store={} over {} stores/window, {} interleaved \
+                 rounds; the store arm must be the dearer of the two). Falling back \
+                 to the arbitrary clamp of {} cycles: budget-based verdicts below are \
+                 NOT calibrated to this machine and must not be read as findings.",
+                nop, store, CANARY_STORES_PER_WINDOW, CANARY_ROUNDS, floor
+            ),
+        }
         (floor, measured)
     };
 

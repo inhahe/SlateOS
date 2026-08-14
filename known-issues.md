@@ -61957,3 +61957,194 @@ the total because one of the pairs was measured against the fast boot.
 candidate boot against the median of the recent history before calling anything
 a regression or an improvement. A single boot on this host can be off by ±25%
 uniformly, which is larger than most of the effects being chased.
+
+---
+
+## B-BENCH-CANARY-MEASURES-ZERO-IN-RELEASE-AND-BLAMES-THE-HOST
+
+**Status:** open, fix in progress.
+**Where:** `kernel/src/bench.rs` — `measure_access_cost`, `report_canary`,
+`maybe_canary_sample`, and the `access_floor` calibration in `run_all`.
+`scripts/bench-history.py` — `canary_is_contaminated`.
+
+### The symptom
+
+Every release-profile boot emits:
+
+```
+[bench]   memory_access_floor: 100 cycles/guest byte-store (measured=0 over 64
+          stores/window: nop=400 store=244, 500 interleaved rounds)
+[bench] CANARY 0 0 0 0 0 0 10
+[bench] CONTAMINATED: the reference access cost spread 0% across 10 samples
+        during the suite (0-0 cycles, ...). Host load changed mid-run ...
+```
+
+Read that carefully: the **nop** arm (400 cycles) is *more expensive* than the
+**store** arm (244), and the message blames host load for a spread of **0%**.
+
+### Root cause
+
+`measure_access_cost` times two loops that differ only by a
+`CALIBRATION_BYTE.store(black_box(1u8), Relaxed)`, and returns
+`(store - nop) / n`. A relaxed atomic store is LLVM `monotonic`, and dead-store
+elimination is permitted to drop all but the last of a run of monotonic stores
+to the same address. With optimisation on, the 64 stores per window collapse to
+roughly one, so the "store" arm ends up doing *less* work than the "nop" arm —
+whose `black_box(i)` per iteration is not removable. `saturating_sub` then
+turns the negative delta into 0.
+
+`black_box` is a *hint*; the elimination it is asked to prevent is exactly what
+happened once the optimiser was turned on.
+
+### Blast radius: the check has never once fired in the profile it now runs in
+
+| record | profile | canary min-max | spread |
+|---|---|---|---|
+| 15:19 | debug | 267-275 | 2% |
+| 15:35 | debug | 266-309 | 16% |
+| 15:57 | release | 1-2 | 100% |
+| 16:16 | release | 1-2 | 100% |
+| 16:48 -> 20:30 (7 runs) | release | 0-0 | 0% |
+
+The canary worked in debug and died the moment the harness moved to the release
+profile. **All nine release records have a dead canary** — including the
+2026-08-14T19:05 boot that ran 24% fast across all 64 benchmarks and cost two
+bogus regression write-ups. The contamination detector could not fire on the
+single run it most existed for. That is the third instance in this file of the
+same failure: *a check that cannot fire is indistinguishable from a check that
+passes.*
+
+Two further consequences:
+
+* `access_floor` silently fell back to its `max(measured, 100)` clamp, so every
+  budget-based verdict in the release runs is a multiple of an arbitrary
+  constant, not of a measured cost. The clamp's own comment says "this should
+  never bind" — it has bound on every release run.
+* The kernel and the script both report the failure as *contamination*
+  (`start <= 0` -> `return True` in `canary_is_contaminated`). "The instrument
+  failed" and "the instrument detected a problem" are different findings, and
+  printing the second when the first is true sends the reader hunting for host
+  load that was never there.
+
+### The fix
+
+1. Make the store un-eliminable by *guarantee* rather than by hint: a
+   `write_volatile` of one byte, which the compiler is not permitted to elide.
+   Keep the two arms symmetric so the delta is still exactly one guest store.
+2. Make the measurement able to say "invalid": return `Option<u64>`, `None`
+   when the arms fail to separate by at least one cycle per access. A failed
+   A/B is not a measurement of zero.
+3. Report the three states distinctly — measured-and-clean,
+   measured-and-contaminated, and could-not-measure — in both the kernel line
+   and `bench-history.py`.
+4. Assert it at boot, so a future optimiser that kills the store again says so
+   on the serial line instead of quietly reporting 0.
+
+### Prospective predictions (registered before the fix is built)
+
+* **P11.** With the volatile store, the release-profile per-access cost comes
+  out non-zero and in the same order as the debug figure of 267-275
+  cycles/store: **within [134, 550]**. HIT if it lands in that band, MISS
+  otherwise.
+* **P12.** The store arm exceeds the nop arm by at least one cycle per access
+  in every one of the ~10 samples, so zero samples are reported invalid.
+* **P13.** `access_floor` stops binding at its clamp of 100 — i.e. the printed
+  `floor` equals the printed `measured` rather than 100.
+
+### Follow-up: the kernel's validity bound is looser than the script's
+
+The script now rejects a per-access figure below
+`CANARY_MIN_RESOLVABLE = ceil(100 / CANARY_TOLERANCE_PCT) = 4` cycles, because
+below that one cycle of integer quantisation outweighs the tolerance the spread
+is judged against. The kernel's `measure_access_cost` only requires the arms to
+separate by one cycle per access (`delta >= n`).
+
+So there is a window — a measured cost of 1-3 cycles — in which the kernel
+would print `Canary OK` while `bench-history.py`, replaying the same line,
+returns `broken`. Neither verdict is wrong by its own rule; having two rules is
+the defect. The two must agree, or a log means one thing live and another thing
+later, which is precisely the drift that
+`B-SCFILTER-DENIES-EVERY-SYSCALL-1000-TO-1100` was.
+
+**Fix:** derive the kernel's bound the same way — require
+`delta >= n * (100 / CANARY_TOLERANCE_PCT)` rather than `delta >= n` — and
+state in both places that the two are the same rule. Deferred only because the
+kernel was mid-build when the script-side bound was derived; batched with the
+`saturating_add` cleanup in `report_canary` for the next boot cycle. This
+window cannot be reached on a healthy host (the honest measurement is 266-309
+cycles), so nothing observable depends on it today.
+
+### RESULT — the canary is alive, and two of three predictions missed
+
+Boot `2026-08-14T21:xx`, release profile, PASSED. The line that had read
+`nop=400 store=244` for nine runs now reads:
+
+```
+[bench]   memory_access_floor: 100 cycles/guest byte-store (measured=16 over 64
+          stores/window: nop=224 store=1288, 500 interleaved rounds)
+[bench] CANARY 16 43 268 16 43 168 10 0
+[bench] CONTAMINATED: ... spread 168% across 10 samples (16-43 cycles) ...
+```
+
+The store arm is now the dearer of the two by 1064 cycles, so `write_volatile`
+did what `black_box` could not. **The canary fired on its first honest run**,
+and the verdict is corroborated from two independent directions: five
+benchmarks show 6-109x in-run dispersion, and `crypto_sha256_1KiB` "improved"
+4.5x in a run that touched no crypto code. Non-uniform contamination is exactly
+what this detects and what the drift correction (a flat +0.0% this run) cannot.
+
+**P12 — HIT.** `invalid=0`: every one of the ten measurements separated its
+arms.
+
+**P11 — MISS, and badly.** Predicted 134-550 cycles; measured **16**.
+
+**P13 — MISS.** Predicted the `max(measured, 100)` clamp would stop binding.
+It still binds, because 16 < 100.
+
+### Why P11 missed: the number I anchored on measured something else
+
+I predicted the release figure would land near the debug-profile figure of
+266-309 cycles, on the assumption that both measure the same quantity. They do
+not. In an unoptimised build *both* arms are scaffolding — `black_box` and the
+atomic store each become real call sequences with stack traffic — so the debug
+delta was mostly loop overhead that happened not to cancel, and only
+incidentally contained a store. The optimised delta is the store and almost
+nothing else. **16 cycles is the first honest measurement of this quantity**,
+and it is entirely plausible: a TCG softmmu store with a TLB hit is a handful
+of host cycles.
+
+So the error was not in the fix; it was in treating a number produced by a
+different build configuration as a baseline for this one. That is the same
+mistake as baselining against a single boot, one level up: I baselined against
+a single *profile*.
+
+### What that invalidates
+
+`CANARY_STORES_PER_WINDOW`'s own comment says: "at N=64 a ~200-cycle access
+shows up as ~13k cycles — an order of magnitude clear of the few-hundred-cycle
+harness wander." That reasoning was built on the artefact. With the measured
+16 cycles the window delta is ~1064 cycles against a 224-cycle nop arm — a
+factor of ~5, not an order of magnitude. **The amplification the design
+depends on is no longer there**, so part of this run's 168% spread may be the
+measurement's own instability rather than host load.
+
+`access_floor` is likewise affected: the clamp of 100 was chosen as "well below
+normal, will never bind" when normal was believed to be ~200. Normal is 16, so
+the clamp now binds always, and every budget is ~6x looser than intended. That
+errs toward false negatives, which is the safe direction, but it means no
+release-run budget verdict has been calibrated to this machine.
+
+### Next, and it is a measurement rather than a guess
+
+Restore the stated design margin using the measured cost: N such that the
+window delta is ~10x the few-hundred-cycle wander is 13000/16 ~= 812, so
+`CANARY_STORES_PER_WINDOW = 1024`. The cost is negligible (12 samples x 2 arms
+x 500 rounds x 1024 iterations ~= 6M loop iterations, well under a second).
+
+* **P14.** At N=1024 the spread across mid-suite samples drops below the 25%
+  tolerance *if* the 168% was amplification noise. HIT if spread < 25% on an
+  otherwise-quiet host.
+* **P15.** The per-access figure stays near 16 cycles (within 12-24), since
+  amplification should change the precision of the estimate and not its value.
+  This is the control: if the mean moves with N, the measurement is
+  scale-dependent and the whole approach needs rethinking rather than retuning.

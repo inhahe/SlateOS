@@ -59547,6 +59547,44 @@ faces, 56 of which ship a type-5 lookup: with the dispatch entry removed,
 agree 10055 / misplaced 125; with it, **agree 10081 / misplaced 99** — 26
 face×string cases fixed and none broken.
 
+**Types 7 and 8 fixed** (2026-08-14). Only device tables remain open, so this
+entry still stays.
+
+The plan above held. `gui/font/src/context.rs` now holds the matching both
+tables share — `context_match`, `chain_match` and everything under them, moved
+out of `gsub.rs` unchanged — and `gpos.rs` grew an `at` entry point the
+recursion re-enters through with the same `MAX_NESTING` budget. The asymmetry
+the entry predicted is real and is the whole difference between the two
+`nested` functions: `gsub::apply_nested` has to track where each matched glyph
+moved to and mark the ones a ligature swallowed as absent, because a
+substitution can grow or shrink the run under a later record's feet;
+`gpos::nested` runs each record against the position the match reported,
+because positioning never changes the run's length. `Positioning` also had to
+start keeping the LookupList offset: a contextual rule names its lookups by
+index into that list, and they may be lookups no feature reaches — which is
+how a face hides a helper.
+
+One thing that was *not* predicted: recursion must not re-test the skipper.
+HarfBuzz's `apply_lookup` calls `dispatch` directly and lets the invoked
+subtable's own coverage decide; a nested lookup is named by index, not found
+by scanning, so the feature mask and the ignore flags have already had their
+say. `gsub::apply_at` had quietly worked this way already and `gpos::at`
+matches it.
+
+**Measured.** Finding a string that reaches these lookups took two tries. The
+first — pointed Hebrew — reaches none: `DavidCLM-Medium.otf`'s 24 type-8
+subtables all require a *meteg* (`U+05BD`, glyph 114) in the lookahead, and
+the corpus had none, so 274k subtable attempts across the host font set
+matched zero times and the dispatch looked dead when it was merely unreached.
+The second, `\u05dc\u05dc\u05b8\u05bd` (LAMED, LAMED QAMATS METEG), is the
+case the rules exist for: a meteg shares the space under a letter with
+whatever vowel is already there, so the face shifts the vowel aside with a
+chained rule keyed on "letter, vowel, meteg". Over the 18 Hebrew faces on this
+host: with the two types in `KINDS`, **18/18 agree with HarfBuzz**; with them
+removed, **18/18 misplaced**. On `DavidCLM-Medium.otf` specifically the meteg
+lands at x=77 and the qamats at x=315, both exactly HarfBuzz's, against x=2 and
+x=240 without.
+
 ## TD-FONT-DOES-NOT-RE-SORT-HEBREW-AND-ARABIC-MARKS
 
 **What.** Unicode gives Hebrew points the canonical combining classes 10–26
@@ -59586,6 +59624,17 @@ classes.
 `gui/font/src/fallback.rs` — `attach_class`, whose doc records the
 transposition.
 
+**Now visible in the sweep.** The corpus gained pointed Hebrew — `U+05E9
+U+05B8 U+05C1 U+05DC U+05D5 U+05B9 U+05DD` — for the `GPOS` 7/8 work, and it
+is in exactly the order that shows this. On `AGENCYB.TTF` (no `GPOS`, no
+Hebrew, so every glyph is notdef) the qamats and the shin dot come out in
+opposite slots from HarfBuzz's, with the right offsets each: ours places the
+shin dot at visual 4 with `y +1761` and the qamats at 5 with `y -1761`,
+HarfBuzz the reverse, because its sort moved the shin dot ahead of the qamats.
+465 of the sweep's `misplaced` cases are this string. The sweep reports it as
+`misplaced` rather than `reordered` only because the glyphs are all notdef and
+so compare equal — on a face that has the glyphs it is a reordering.
+
 ## TD-FONT-GATES-THE-MARK-FALLBACK-ON-THE-CHARACTERS-SCRIPT-NOT-THE-FONTS
 
 **What.** `fallback::positions_marks` decides whether a run may have its marks
@@ -59619,3 +59668,56 @@ it apply HarfBuzz's rule.
 **Where.** `gui/font/src/fallback.rs` — `positions_marks` and
 `COMPLEX_SCRIPTS`; `gui/font/src/scaled.rs` — `shape`, where the runs are
 split.
+
+## TD-FONT-DECIDES-MARK-NESS-FROM-THE-COMBINING-CLASS
+
+**What.** On a face with no `GPOS`, `scaled.rs` settles whether a glyph is a
+combining mark with `synthesize && glyph.klass != 0`, and `klass` is
+`fallback::attach_class(ch)` — a *combining class*, and only stored at all
+when the run's script passed `fallback::positions_marks`. Two separate
+questions are being answered by one field, and both answers are wrong in a
+case the sweep now shows.
+
+HarfBuzz keeps them apart. `_hb_glyph_info_is_mark` comes from `GDEF`, or
+from the character's **general category** when there is no `GDEF`; it drives
+`zero_mark_widths_by_gdef`, which zeroes the advance and shifts the mark back
+over its base. `fallback_position` is a *separate* flag that only decides
+whether `_hb_ot_shape_fallback_mark_position` gets to compute an offset. A
+complex-script shaper turns the second off and leaves the first on.
+
+**Symptom, one.** A complex script on a face that does not cover it keeps a
+full advance per mark, so the text measures far too wide. `AGENCYB.TTF` (no
+`GPOS`, no Thai) on `U+0E17 U+0E35 U+0E48 U+0E19 U+0E35 U+0E48`:
+
+    ours       adv 1024 x6
+    harfbuzz   adv 1024, (x -1024, adv 0), (x -1024, adv 0), adv 1024, ...
+
+Six notdef boxes in a row where HarfBuzz draws three. `positions_marks`
+returns false for `thai`, so `klass` is left at `0`, so the marks are not
+marks. 215 of the sweep's `misplaced` cases are this one string.
+
+**Symptom, two.** Even inside a script the fallback *does* place, a mark whose
+combining class is `0` is not treated as a mark. `U+0E35` THAI SARA II is
+general category `Mn` with `ccc = 0`; HarfBuzz zeroes it, we do not. The
+Thai/Lao patch at the top of `attach_class` invents a position class for
+exactly these characters, which is the same information arriving too late and
+by the wrong route.
+
+**Proper fix.** Give `SubGlyph` a `mark: bool` beside `klass`, set from the
+character's general category (`Mn | Me | Mc`), carried through substitution
+the way `klass` already is — untouched by every lookup, a ligature keeping
+its first component's. Then `marks[i]` reads that field and `klass` goes back
+to meaning only "where the fallback should put it", zeroed by `placeable` as
+now. This needs a general-category table in `norm.rs`; there is a combining
+class table there already to model it on, and the M* ranges are the only part
+of the category data anything here wants.
+
+**Where.** `gui/font/src/scaled.rs` — the `marks` vector (~line 556) and the
+`klass:` initialiser in the piece loop (~line 521); `gui/font/src/gsub.rs` —
+`SubGlyph`; `gui/font/src/fallback.rs` — `attach_class`, whose Thai/Lao
+special case the general category subsumes; `gui/font/src/norm.rs` — where
+the table would go.
+
+**How it was found.** `gui/font/tools/harfbuzz_sweep.py`, after the corpus
+gained Thai and pointed Hebrew for the `GPOS` 7/8 work. Run it and look for
+the Thai string in the `same glyphs in different places` list.

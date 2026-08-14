@@ -400,11 +400,19 @@ Roadmap:
   glyph (`Lig`, `stamp_components`, `ligation_allowed`) and `mark.rs`
   reads the `LigatureArray` off it. With a lam-fatha-alef string added to
   the sweep, `agree` went 10055 → 10081 over the 56 host faces that ship
-  the lookup type. Next unblocked step is the rest of shaping: no Indic
-  reordering (`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`), no
-  contextual positioning, GPOS 7/8
-  (`TD-GPOS-HAS-NO-CONTEXTUAL-OR-MARK-TO-LIGATURE-POSITIONING`), no
-  language selection (`TD-FONT-IGNORES-LANGSYS-OVERRIDES`). Vello itself
+  the lookup type. Contextual and chained contextual positioning (GPOS
+  7/8) done: those subtables are byte-for-byte GSUB 5/6, so the matching
+  moved into a shared `gui/font/src/context.rs` both tables call and only
+  the applying is per-table — `gpos::nested` is the lighter half, since
+  positioning never changes the run's length the way substitution does.
+  Proven live rather than by self-consistency: with a Hebrew
+  letter-vowel-meteg string added to the sweep, all 18 Hebrew host faces
+  agree with HarfBuzz with the two types on and all 18 disagree with them
+  off. Next unblocked step is the rest of shaping: no Indic reordering
+  (`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`), mark-ness taken from
+  the combining class rather than the general category
+  (`TD-FONT-DECIDES-MARK-NESS-FROM-THE-COMBINING-CLASS`), no language
+  selection (`TD-FONT-IGNORES-LANGSYS-OVERRIDES`). Vello itself
   waits on `[A]`'s GPU driver.
 - `[C]` Wayland-inspired compositor: GPU acceleration, currently a software
   rasterizer (lines ~4605, ~4619)

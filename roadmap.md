@@ -308,6 +308,18 @@ Copying build outputs across worktrees is fine — they are artifacts, not
 source, so this is not a cross-lane edit even though `services/**` is lane
 B's tree. Rebuild them from source instead if you need them current.
 
+Finally, `limine/` (the bootloader, `/limine/` in `.gitignore`, ~5.4 MiB) is
+an external download that no worktree gets from git. Without it staging dies
+with `cp: cannot stat '…/limine/BOOTX64.EFI'`:
+
+```bash
+cp -r "D:/visual studio projects/os/limine" "D:/visual studio projects/os-lane-a/"
+```
+
+OVMF firmware is found in the system QEMU install, not the worktree, so it
+needs nothing. In short, a fresh lane worktree needs three things copied in:
+**`rootfs.ext4`, the six service ELFs, and `limine/`.**
+
 To confirm the glibc tests actually ran, grep the serial log for
 `REAL glibc pthread` rather than trusting the PASSED line alone.
 

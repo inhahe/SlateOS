@@ -148,12 +148,25 @@ kill_qemu() {
 }
 # Default boot timeout.  The boot path runs the full self-test suite before
 # printing BOOT_OK, including the Path-Z ring-3 toolchain tests (each spawns a
-# real glibc/tcc/make/dash process under ld.so), which now dominate boot time:
-# a clean boot reaches BOOT_OK around ~305s and the suite keeps growing as new
-# Path-Z rungs land.  Keep a comfortable margin over the observed boot time so
-# the default invocation never spuriously "times out" on a healthy kernel;
-# override with --timeout= for slower hosts or the --bench wait marker.
-TIMEOUT=480
+# real glibc/tcc/make/dash process under ld.so), which now dominate boot time.
+#
+# This number has to be maintained.  It was 480s against a measured ~305s
+# boot; by 2026-08-14 a healthy boot reached BOOT_OK at ~456s — a 24s margin,
+# and the in-kernel liveness detector was already firing "BOOT DEADLINE
+# EXCEEDED" with a task-table dump on every clean run.  The failure mode when
+# the margin runs out is nasty: a perfectly healthy kernel is killed mid-boot
+# and reported as a hang, which costs a diagnosis cycle before anyone thinks
+# to check the clock.  So the default is set at roughly 2x the observed boot,
+# not just above it.
+#
+# Detecting a *real* hang quickly is not this knob's job — that is
+# --stall-secs=N, which watches for the serial log going silent and does not
+# care how long a healthy boot takes.
+#
+# Measured: BOOT_OK at ~456s (2026-08-14, TCG, qemu64).  Re-measure and raise
+# this when the self-test suite grows; override with --timeout= for slower
+# hosts.
+TIMEOUT=900
 # Did the caller pass --timeout= explicitly?  Only used to decide whether
 # --bench may raise the default (see BENCH_TIMEOUT below); an explicit
 # --timeout= always wins.

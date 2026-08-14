@@ -626,6 +626,85 @@ the 63 gate sites led by `posix/src/process.rs` (13) and `posix/src/unistd.rs`
 projected), `kernel/src/syscall/handlers.rs` (`sys_cap_query`), and
 `known-issues.md` → `TD-POSIX-CAPS-ARE-NOT-THE-KERNEL'S`.
 
+---
+
+## B-Q1 — The zoneinfo reader is done and nothing on disk to read: which tzdata do we ship, from where, and how is it updated? — Status: OPEN
+
+*(First question filed under `roadmap.md`'s lane-prefix convention; the
+unprefixed `Q1`–`Q44` above predate the three-lane split.)*
+
+**Raised by Claude (Lane B)** (2026-08-13), on finishing
+`known-issues.md` → `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`.
+
+**The situation.** As of today both the libc and osh resolve `TZ` through real
+binary zoneinfo files: `tzrules::TzFile` reads TZif v1/v2/v3 (RFC 8536) with no
+allocator, `TZ=America/New_York` is looked up under `TZDIR` (default
+`/usr/share/zoneinfo`), and an unset `TZ` follows `/etc/localtime` exactly as
+glibc does. The reader is tested and the search order matches glibc's.
+
+**Nothing is on disk.** So `TZ=America/New_York` still silently answers UTC —
+the user gets UTC while believing they selected Eastern — and a fresh machine
+still has no wall clock it can be honest about. Every piece of the fix is built
+except the data, and shipping the data is a packaging decision rather than a
+coding one, which is why it stops here instead of me picking.
+
+**Why this needs you rather than me.** Three sub-decisions, none with an
+obviously-correct answer, and all of them user-visible:
+
+**(a) Which zones.** A full tzdata is ~450 KiB of binaries plus ~1 800 files.
+
+- **A1 — full tzdata.** Everything, including backward-compatibility links
+  (`US/Eastern`, `Asia/Calcutta`). Any ported program finds the name it expects.
+  Costs ~450 KiB of every base image forever.
+- **A2 — current zones only** (`zic -b slim`, no `backward` links). ~250 KiB,
+  ~350 files. A script or a container image that says `TZ=US/Eastern` — a very
+  common spelling — breaks, silently, back to UTC.
+- **A3 — a minimal set at install, the rest as a `pkg/` package.** The
+  installer ships the zone the user picks plus UTC; `pkg install tzdata` gets
+  the rest. Smallest image; but a program that needs a zone the user never
+  picked fails on a machine that looks fully installed.
+
+**(b) Where the bytes come from.** We do not have `zic`, and I would rather not
+write one — it is a real compiler for the tzdata source grammar, and getting it
+subtly wrong means a wrong clock that nobody notices for months.
+
+- **B1 — vendor the prebuilt binaries** from the IANA distribution into the
+  repo (or into `pkg/`), checked in and version-pinned. Reproducible; no build
+  dependency. Adds ~450 KiB of binary to git history per update.
+- **B2 — port `zic`** (it is small, portable C) and compile tzdata from the
+  text sources at image-build time. Keeps only text in git and makes the data
+  auditable, at the cost of a C port on the critical path of the image build.
+- **B3 — generate the TZif files with a small Rust tool of our own** reading
+  the tzdata text sources. Same benefit as B2 with no C port, but it is the
+  option most likely to be subtly wrong, for the reason above.
+
+**(c) How it is updated.** tzdata changes several times a year, usually at
+short notice, and a stale one is a wrong clock — the failure mode that started
+this entry.
+
+- **C1 — a `pkg/` package updated like anything else.** Fits the existing
+  machinery; a user who never updates drifts.
+- **C2 — updated with the OS image only.** Simple, but ties a timezone fix to a
+  full release.
+- **C3 — a dedicated fast channel** for tzdata (and only tzdata), so a zone
+  change ships without a release.
+
+**My recommendation: A1 + B1 + C1.** Full tzdata because ~450 KiB is nothing
+against being wrong about `US/Eastern`, and because the whole reason to use TZif
+rather than invent something is that ported programs expect what everyone else
+ships. Vendored prebuilt binaries because the alternative is writing or porting
+a compiler for a grammar whose bugs are invisible. A `pkg/` package because the
+update cadence is exactly what `pkg/` exists for, and C3's dedicated channel is
+infrastructure to build only once C1 has proven too slow in practice.
+
+**Where it bites:** `pkg/` (the packaging decision), `posix/src/tz.rs`
+(`TZDIR_DEFAULT`, `LOCALTIME_PATH`, `load_zoneinfo`),
+`userspace/oils/src/interp.rs` (`TZDIR_DEFAULT`, `Shell::zoneinfo_dir`),
+`tzrules/src/tzif.rs` (the reader, already done), the installer (which must
+write `/etc/localtime`), and the two tests that assert the current
+UTC fallback — `test_zoneinfo_names_resolve_to_utc_until_tzdata_is_shipped`
+(libc) and `printf_time_falls_back_to_utc_for_a_zone_it_cannot_resolve` (oils),
+both of which should start failing the day the data lands.
 
 ---
 

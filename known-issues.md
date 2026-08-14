@@ -5858,7 +5858,7 @@ cannot simply stop pinning" worry below.
 Tests (`interp.rs`): `printf_time_renders_in_the_exported_zone`,
 `printf_time_percent_s_is_zone_independent`,
 `printf_time_ignores_an_unexported_tz`,
-`printf_time_falls_back_to_utc_for_a_zone_it_cannot_parse`,
+`printf_time_falls_back_to_utc_for_a_zone_it_cannot_resolve`,
 `prompt_time_escapes_render_in_the_exported_zone` — the last uses the DST-less
 `NPT-5:45` because a prompt renders *now*, so a DST zone's `%Z` would assert one
 thing in July and another in January.
@@ -5867,7 +5867,9 @@ thing in July and another in January.
 unset `TZ`, and a zoneinfo name like `America/New_York` (which is not a POSIX
 `TZ` string), still resolve to UTC — in the libc and the shell alike. That is
 now a *consistent* gap rather than a disagreement, and closing it needs tzdata
-on the machine.
+on the machine. *(Update 2026-08-13: the reader and the `/etc/localtime`
+default now exist on both sides; only shipping tzdata remains — see that
+entry.)*
 
 The original report follows.
 
@@ -5920,7 +5922,43 @@ comment now points at `Shell::shell_tz` and describes the real rule.)*
 
 ---
 
-### TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ. With `TZ` unset — or set to a zoneinfo name — local time is UTC — 2026-08-13 — OPEN
+### TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ. With `TZ` unset — or set to a zoneinfo name — local time is UTC — 2026-08-13 — MOSTLY FIXED 2026-08-13; residual is a packaging decision, `open-questions.md` `B-Q1`
+
+**Fixed 2026-08-13** in three commits — `tzrules: read TZif (RFC 8536) binary
+zoneinfo files`, `posix: resolve TZ through zoneinfo files, and follow
+/etc/localtime`, and `oils: resolve TZ through zoneinfo files, like the libc
+does`. Two of the three parts of the proper fix below are done:
+
+* **The reader exists.** `tzrules::TzFile` parses TZif v1/v2/v3 with no
+  allocator: a zero-copy borrowed view over the file's bytes, every structural
+  invariant checked once at parse (bounds, counts, designation indices, sorted
+  transition times, `isdst ∈ {0,1}`) so the lookup path is total and a
+  hostile `TZ=/path/to/anything` cannot steer a binary search off an array. The
+  v2+ footer is **mandatory**, which is the only check that catches a file
+  truncated exactly at the end of its data block. As predicted, the existing
+  POSIX-string engine became the *tail* rather than being replaced: `zic -b
+  slim` stops emitting transitions once the footer describes them, so `Tz`
+  governs everything at or past the last recorded transition and the file path
+  and the rule path can never disagree about a future date. 42 tests.
+* **The system default exists.** With no `TZ`, the libc now reads
+  `/etc/localtime`, and so does an osh that really imported a process
+  environment. `TZ` naming a zone is resolved under `TZDIR` (default
+  `/usr/share/zoneinfo`) with glibc's search order — rule first, file second, a
+  leading `:` forcing the file, because `EST5EDT` is both — and a `..`
+  *component* refused so an inherited `TZ` cannot walk out of the tree.
+
+**Residual: no tzdata ships.** `TZ=America/New_York` is now *looked up* rather
+than rejected outright, but there is nothing on disk to find, so it still falls
+back to UTC. Which files, from where, and how they are updated is a packaging
+decision (`pkg/`) — a full tzdata is ~450 KiB of the base image and a stale one
+is a wrong clock — so it is now `open-questions.md` `B-Q1` rather than work
+anyone should start unasked. The tests that pinned the old behaviour were
+renamed to say what they now pin (the fallback when the *lookup* finds nothing,
+not "a name is never a zone"): libc
+`test_zoneinfo_names_resolve_to_utc_until_tzdata_is_shipped`, oils
+`printf_time_falls_back_to_utc_for_a_zone_it_cannot_resolve`.
+
+The original report follows.
 
 **Where:** `posix/src/tz.rs` `read_env_tz` (the `None`/unparseable arms) and
 `userspace/oils/src/interp.rs` `Shell::shell_tz`. Both funnel into
@@ -5954,13 +5992,15 @@ The gap is one of coverage, not of consistency, and a POSIX `TZ` string
   consumers need it and neither may allocate on the parse path. TZif v2+ files
   carry a POSIX `TZ` string in their footer for times past the last recorded
   transition, so the existing engine becomes the *tail* of the new one rather
-  than being replaced.
+  than being replaced. *(Done.)*
 * Ship tzdata: which files, from where, and how they are updated is a packaging
   decision (`pkg/`) and belongs in `open-questions.md` before it is coded — a
   full tzdata is ~450 KiB of the base image, and a stale one is a wrong clock.
+  *(Filed as `open-questions.md` `B-Q1`.)*
 * A system-wide default: `/etc/localtime` (a TZif file or a symlink into the
   zoneinfo tree) is the portable spelling and is what any ported program will
-  look for, so prefer it over inventing a YAML setting.
+  look for, so prefer it over inventing a YAML setting. *(Done — `/etc/localtime`
+  it is.)*
 
 **Found and fixed while writing this warning: the taskbar clock had exactly the
 shape being warned against.** `gui/desktop/src/calendar.rs`'s

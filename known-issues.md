@@ -43538,6 +43538,65 @@ truncation; given two recorded recurrences now, a finer-grained marker
 pass around the `mm::oom::self_test()` / `sysctl::set` lock window
 (per the F1/F4 method) is the priority diagnostic when next observed.
 
+**Mechanism identified 2026-08-14 — this is very likely the console-lock
+deadlock, already fixed twice since the last recurrence.**
+
+The entry has been carrying a *statistical* closure bar (~90 clean boots)
+because no mechanism was known. There is now a mechanism, and it makes the
+blind-soak bar the wrong instrument.
+
+Look at the fingerprint rather than the location. Serial stops **mid-token**
+— `[sysctl] mm.oom_pol…`, cut inside the sysctl name — and never resumes,
+while an immediate identical-binary re-run is clean. Truncation *mid-print* is
+the discriminator: the UART write is synchronous and takes ~87 µs/char, so a
+CPU that wedged for some unrelated reason would overwhelmingly wedge
+*between* lines, with the in-flight line already flushed. Stopping inside the
+formatting of an argument means the printing CPU itself stopped, mid-write,
+holding the `SERIAL` spin mutex. That is the same shape as
+`B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT` (`EXCEPTION:
+Page Fault (#PF) at` truncated exactly where `{:#x}` would have formatted
+`frame.rip`), and it matches this entry's own long-standing assessment that
+`mm::oom::self_test()` is *the victim, not the cause* — the self-test is
+simply whatever happened to be printing.
+
+**All of W1's evidence predates every fix to that path.** W1's recurrences are
+2026-06-10 and 2026-06-12, and its last soak is 2026-06-14. `serial.rs` has
+since gained, in order:
+
+| Commit | Date | What it closed |
+|---|---|---|
+| `cac8d7624` | 2026-07-03 | lock-free `emergency_println!` (an escape hatch existed at all) |
+| `1e5c091f4` | 2026-07-15 | `cli` around the `SERIAL` critical section — same-CPU **interrupt** re-entry |
+| `58102abca` | 2026-08-12 | per-CPU `IN_PRINT` + emergency fallback — same-CPU **exception** re-entry |
+
+`1e5c091f4`'s own commit message calls it the "long-open boot-wedge" fix, and
+its in-source note describes precisely W1's symptom: *"a task holds it mid-write
+and a timer/IRQ handler on the SAME CPU then tries to print … the handler spins
+forever on the lock the interrupted task can no longer release — a hard
+single-CPU wedge."* W1 is the OOM self-test's instance of that wedge.
+
+**Consequence for the closure condition.** W1 can no longer present as a
+*silent* mid-line truncation, by construction and along both remaining paths:
+
+- if the re-entry is an interrupt, `cli` now prevents it from happening at all;
+- if it is an exception (or anything else that re-enters `_print` on this CPU),
+  the per-CPU flag routes the nested write to the lock-free emergency port, so
+  the fault **prints** instead of spinning.
+
+So the next occurrence, if any, is expected to yield a legible report rather
+than silence. Recommend **retargeting the bar from ~90 blind boots to one
+observation**: treat W1 as cured-incidentally on the reasoning above, and
+re-open it *only* on a truncation that still produces no diagnostics — which
+would falsify this analysis and be far more informative than the 83 remaining
+clean boots the old bar asks for. Note also that the recorded streak of 7 is
+stale bookkeeping, not a real count: many dozens of routine boots have passed
+since 2026-06-14 (including a 20/20 pthread soak on 2026-08-13) with no
+recurrence, and the entry's own rule counts routine boots toward the streak.
+
+Left at WATCHLIST rather than closed unilaterally, since retargeting a closure
+condition an earlier session set deliberately is the operator's call if they
+want it; the analysis above is the argument for doing so.
+
 ### W2. Deferred benchmark suite livelocks in `bench_pick_next` after `context_switch` → `BENCH_OK` never prints — ROOT-CAUSED & FIXED 2026-06-14
 
 **RESOLUTION 2026-06-14 — root cause was the mouse cursor task busy-yielding,

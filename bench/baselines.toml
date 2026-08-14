@@ -88,6 +88,7 @@ memory per fault, so expect ~1.5-2x Linux per fault but fewer total \
 faults for sequential workloads."""
 
 [memory_access_floor]
+not_a_target = true      # a calibration constant re-measured every run, not a budget
 description  = "One guest byte-store to an ordinary .bss static — the harness's resolution limit"
 measured_cycles = 284
 source       = "kernel/src/bench.rs run_all, calibration block; QEMU TCG qemu64"
@@ -386,10 +387,14 @@ linux_ns    = 350
 target_ns   = 700
 source      = "Linux dcache lookup published range: 200-500ns per component"
 
-[compositor_frame_4k]
-description = "Full desktop composite at 4K resolution"
-target_ms   = 2.0
-source      = "Design target: must not miss 144Hz vsync (6.9ms budget)"
+# NOTE: a second `[compositor_frame_4k]` table lived here and has been merged
+# into the one above.  The two disagreed on the unit itself (`target_ms = 2.0`
+# here vs `target_ns = 2000000` there) and only the other carried the measured
+# figure and the optimisation history, so this one was strictly poorer.  A
+# duplicate table makes the whole file invalid TOML, which went unnoticed for
+# months because nothing parsed it — see
+# `TD-BASELINES-TOML-IS-INVALID-TOML-AND-NOTHING-READS-IT` in known-issues.md.
+# `tests/test_baselines.py` now parses this file, so a duplicate fails CI.
 
 [net_tcp_checksum_v4_1460b]
 description = "TCP checksum with IPv4 pseudo-header, MSS-sized segment"

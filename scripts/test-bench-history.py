@@ -357,6 +357,73 @@ def test_drift_needs_samples(bh):
           sorted(e[0] for e in regressed), ["b0", "b1", "b2"])
 
 
+def test_baselines_is_valid_toml():
+    """`bench/baselines.toml` must actually be TOML, with no duplicate tables.
+
+    This test exists because the file was **not** valid TOML for months and
+    nobody noticed: it carried two `[compositor_frame_4k]` tables that
+    disagreed even on the unit (`target_ms = 2.0` vs `target_ns = 2000000`).
+    It went undetected because every reference to the file in the tree is a
+    *comment* -- `kernel/src/bench.rs` hard-codes each target as a literal and
+    says "from baselines.toml" beside it. So the file looked like the
+    authority while the actual authority was ~60 scattered literals, and a
+    parser was never pointed at it.
+
+    That is the project's recurring failure mode once more: a check that
+    cannot fire is indistinguishable from a check that passes. Parsing the
+    file here is the smallest change that makes it able to fire at all. It
+    does not fix the duplication of targets between this file and `bench.rs`
+    -- that is tracked separately -- but it does guarantee the file is
+    machine-readable, which is the precondition for ever closing that gap.
+    """
+    try:
+        import tomllib
+    except ImportError:  # Python < 3.11
+        print("SKIP  baselines.toml parse (tomllib needs Python 3.11+)")
+        return
+    path = os.path.join(REPO_ROOT, "bench", "baselines.toml")
+    try:
+        with open(path, "rb") as handle:
+            data = tomllib.load(handle)
+    except Exception as exc:  # noqa: BLE001 - report any parse failure
+        check(f"baselines.toml parses as TOML ({exc})", False, True)
+        return
+    check("baselines.toml parses as TOML", True, True)
+    check("baselines.toml is non-empty", bool(data), True)
+    # Every table must carry a target in *some* unit, or declare that it is
+    # not a target at all. A table with neither is a baseline that can never
+    # be compared against -- dead weight that reads as coverage, which is the
+    # same defect one level down.
+    #
+    # The unit is matched by prefix rather than by an enumerated list, because
+    # the units here are genuinely open-ended and deliberately so: alongside
+    # `target_ns`/`target_cycles` there are delta-based ones
+    # (`target_accesses_over_nop`, `target_accesses_delta`) that exist because
+    # TCG's harness overhead swamps the absolute number. An enumerated list
+    # would have to be extended in lockstep with the file and would silently
+    # under-report the day it wasn't -- the failure this test is here to stop.
+    #
+    # `not_a_target = true` is the declarative opt-out for calibration
+    # constants and host metadata. It lives in the data rather than in a name
+    # list here so that adding such a table does not require editing this test.
+    def is_namespace(table):
+        # `[qemu.foo]` creates an implicit `qemu` parent whose every value is
+        # a sub-table. Such a parent is a namespace, not a baseline, and has
+        # no target of its own; the leaves under it are recorded *measurements*
+        # (`min_ns`/`min_cycles` on this host), which is a third kind of table
+        # again. Recursing into them would be wrong, not merely noisy.
+        return bool(table) and all(isinstance(v, dict) for v in table.values())
+
+    missing = sorted(
+        name for name, table in data.items()
+        if isinstance(table, dict)
+        and not is_namespace(table)
+        and not table.get("not_a_target", False)
+        and not any(k.startswith("target") for k in table)
+    )
+    check("every baseline names a target unit or opts out", missing, [])
+
+
 def main():
     bh = load_module()
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -369,6 +436,7 @@ def main():
     test_history_still_loads(bh)
     test_drift_is_subtracted(bh)
     test_drift_needs_samples(bh)
+    test_baselines_is_valid_toml()
 
     print()
     if _FAILURES:

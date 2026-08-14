@@ -60747,3 +60747,59 @@ those two lines and needs no further argument.
 **Standing caution, restated:** predictions 1–3 lean on the same
 fine-grained cost reasoning that got the tcp_checksum sign wrong. Treat a hit as
 weak confirmation and a miss as strong disconfirmation.
+
+---
+
+### TD-BASELINES-TOML-IS-INVALID-TOML-AND-NOTHING-READS-IT — 2026-08-14 — ✅ FIXED 2026-08-14 (`bench/baselines.toml`, `scripts/test-bench-history.py`)
+
+`bench/baselines.toml` — the file CLAUDE.md names as the place performance
+baselines live, and which ~30 comments across `kernel/src/bench.rs` cite as
+their source — **did not parse as TOML.** It carried two `[compositor_frame_4k]`
+tables, at lines 296 and 389, which is a hard error in every conforming parser:
+
+```
+tomllib.TOMLDecodeError: Cannot declare ('compositor_frame_4k',) twice
+                         (at line 389, column 21)
+```
+
+The two disagreed about the **unit**: `target_ns = 2000000` in one,
+`target_ms = 2.0` in the other. Only one carried the measured figure and the
+optimisation history (48.6 ms → 21.4 → 15.8 → 11.9 → 10.6 ms). So the file had
+been carrying two contradictory records of the same benchmark, and a parser
+that tolerated duplicates would have silently taken whichever came last.
+
+**Why it survived: nothing reads the file.** Every reference to it in the tree
+is a *comment*. `kernel/src/bench.rs` hard-codes each target as a literal with
+`// Target from baselines.toml: < 200 ns` beside it; `scripts/bench-history.py`
+never opens the file. So the file *looked* like the authority while the real
+authority was ~60 scattered literals in Rust, and no parser was ever pointed at
+the thing that was supposed to be the source of truth.
+
+**This is the fifth instance of the same defect class**, after
+`TD-BENCHMARKS-...` (the suite never ran), `B-BENCH-WATCHLIST-...` (the watch
+list never looked), `B-BENCH-COMPARATOR-...` (the diff named innocents) and
+`TD-BENCH-CANARY-...` (the canary never fired). The invariant keeps holding: *a
+check that cannot fire is indistinguishable from a check that passes.* Here it
+went one step further — the artefact could not even be **loaded**, and that too
+was indistinguishable from health, because loading was never attempted.
+
+> **Resolution.** The duplicate table is merged (the poorer one removed, with a
+> comment at the site recording why). `scripts/test-bench-history.py` gained
+> `test_baselines_is_valid_toml()`, which `tomllib.load`s the real file — so the
+> file is now machine-read for the first time and a duplicate or syntax error
+> fails the suite. The test also asserts every table names a target in some
+> unit, matched by `target*` **prefix** rather than an enumerated list (the
+> units are open-ended by design: `target_accesses_over_nop` and
+> `target_accesses_delta` exist because TCG harness overhead swamps the
+> absolute number, and an enumerated list would silently under-report the day
+> it wasn't extended). Calibration constants and host metadata opt out via a
+> declarative `not_a_target = true` in the data rather than a name list in the
+> test. Writing that assertion immediately found four more tables to classify.
+> 16 checks pass.
+
+**Not fixed — the duplication itself.** Targets still live in two places: this
+file and the literals in `bench.rs`, with nothing keeping them in sync, so they
+can drift silently and at least one (`vfs_stat_root`: 700 ns in the file) should
+be re-derived anyway. The proper fix is for the kernel's scorecard to be checked
+against the parsed file by `bench-history.py`, so the file becomes the authority
+it already claims to be. Blocked on nothing but effort; tracked here.

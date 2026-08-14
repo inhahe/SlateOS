@@ -256,7 +256,17 @@ pub fn fast_cpu_index() -> usize {
         return cpu_idx as usize;
     }
 
-    // Tier 3: APIC MMIO — slowest but always works.
+    // Tier 3: APIC MMIO — slowest, and only usable once the APIC is mapped.
+    //
+    // Before `apic::init` runs, reading an APIC register would dereference a
+    // null base: a `debug_assert` failure in debug builds, a wild read in
+    // release ones.  Early-boot callers do exist — the frame allocator tags
+    // frame ownership from its very first allocation, long before the APIC is
+    // up — and at that point the system is still strictly uniprocessor, so
+    // CPU 0 is the correct answer here, not a fallback guess.
+    if !crate::apic::is_ready() {
+        return 0;
+    }
     let apic_id = crate::apic::read_id();
     let idx = APIC_TO_CPU[apic_id as usize].load(Ordering::Relaxed);
     if idx == 0xFF { 0 } else { idx as usize }

@@ -124,6 +124,18 @@ pub const TICK_RATE_HZ: u32 = 100;
 static APIC_BASE_VIRT: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 
+/// Whether the local APIC has been mapped and is safe to read.
+///
+/// Callers that can run *before* `apic::init` (early-boot allocator paths,
+/// per-CPU accessors) must check this first: `apic_read` would otherwise
+/// dereference a null base — a `debug_assert` failure in debug builds and a
+/// wild read in release ones.
+#[must_use]
+#[inline]
+pub fn is_ready() -> bool {
+    APIC_BASE_VIRT.load(core::sync::atomic::Ordering::Relaxed) != 0
+}
+
 /// Whether the APIC timer is running.
 static TIMER_ACTIVE: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);

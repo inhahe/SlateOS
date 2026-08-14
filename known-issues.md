@@ -2473,7 +2473,7 @@ TD-OILS-AN-UPPERCASE-G-WAS-READ-BY-THE-HALF-OF-THE-COMMAND-THAT-ONLY-EVER-READS-
 
 ---
 
-### TD-OILS-A-COMPOUND-LITERAL-REFUSES-A-KIND-CHANGE-THE-BUILTIN-BEFORE-IT-HAS-ALREADY-MADE. `readonly -A g=([k]=v)` over a frame-local indexed array refuses where bash converts — 2026-08-12
+### TD-OILS-A-COMPOUND-LITERAL-REFUSES-A-KIND-CHANGE-THE-BUILTIN-BEFORE-IT-HAS-ALREADY-MADE. `readonly -A g=([k]=v)` over a frame-local indexed array refuses where bash converts — 2026-08-12 — ✅ FIXED 2026-08-14
 
 **Where:** `userspace/oils/src/interp.rs`, [`Shell::array_kind_conflict`] /
 [`Shell::compound_kind_refusal`] and their caller in
@@ -2536,9 +2536,98 @@ Note the second row: the refusal must be raised *before*
 [`Shell::make_empty_global`] runs, since that would otherwise put an empty
 associative entry beside the indexed `z` it was asked to refuse.
 
+**Fixed 2026-08-14.** The refusal is asked of step 1's name, and the literal
+converts rather than refuses:
+
+* [`Shell::in_declare_global_scope`] records, for each compound operand, the
+  name **step 1** resolved to — `global_chain_path(name).last()`, the
+  `nameref_cell (refvar)` of declare.def:735-741, falling back on the name
+  where that walk found no reference at all. It is read *before*
+  [`Shell::enter_global_scope`], because the swap is about to rewrite the chain
+  it is read from, and stashed in the new `Shell::declare_step1_names` for the
+  length of the expansion half. `None` there means no swap, which is exactly
+  when the literal takes `do_compound_assignment`'s unscoped `else` branch and
+  so does own the refusal.
+* [`Shell::declare_compounds_scoped`] asks [`Shell::array_kind_conflict`] of
+  that name instead of the literal's target. The *lookup* still happens after
+  the swap, which is what puts the global binding of a name step 1 read
+  globally in reach; only the name is carried across. The
+  `make_empty_global` ordering worry above turns out not to arise — the empty
+  variable step 1 makes is made in the kind that was asked for, so it can never
+  be the conflict — but it is moot either way, since a `carried` name is only
+  produced where the chain reached *nothing*, and a name nothing answers to has
+  no kind to conflict with.
+* Past the refusal with the other kind still in the table is a road only the
+  swap opens, and there the literal *converts*: `convert_var_to_assoc` /
+  `convert_var_to_array` (subst.c:3520-3527) replace the storage rather than
+  reinterpret it, so `declare_compounds_scoped` now drops the other kind's
+  entry before [`Shell::array_kind_apply`] runs. Nothing is carried in as
+  element 0 — that is what `declare -a` over a *scalar* does, not this.
+
+Corpus: `the-kind-of-an-array-is-refused-by-the-command-that-would-convert-it.sh`;
+test `the_kind_of_an_array_is_refused_by_the_command_that_would_convert_it`.
+The one shape still diverging is split out below as
+TD-OILS-AN-ASSOCIATIVE-LITERALS-WORDS-ARE-NOT-REQUOTED-WHEN-THE-CONVERSION-GOES-THE-OTHER-WAY.
+
 **How it was found:** writing the corpus case
 `the-restart-happens-before-chklocal-so-step-one-outlives-the-frames-own-binding.sh`;
 the `local -a g=(9)` section had to be dropped from it.
+
+---
+
+### TD-OILS-AN-ASSOCIATIVE-LITERALS-WORDS-ARE-NOT-REQUOTED-WHEN-THE-CONVERSION-GOES-THE-OTHER-WAY. bash expands a compound literal in the shape of the variable it *found* and assigns it in the shape it converted to — 2026-08-14 — ⚠️ OPEN
+
+**Where:** `userspace/oils/src/interp.rs`, [`Shell::declare_compounds_scoped`],
+which applies the array kind and only then expands the literal. bash does it the
+other way round, and the seam shows.
+
+`do_compound_assignment`'s scoped branches call `expand_compound_array_assignment
+(v, value, flags)` with the variable **as found**, convert it, and only then
+`assign_compound_array_list`. Where `v` is associative the expansion runs
+`quote_compound_array_list`, which single-quotes each word's subscript and value
+separately so a `[k]=v` survives re-parsing. If the command asked for `-a`, those
+already-quoted words are then assigned to an *indexed* array, quotes and all:
+
+```sh
+declare -n g=z                                        # so step 1 goes to `z`
+f() { local -A g=([j]=9); readonly -a g=(x "a b"); declare -p g; }; f
+# bash: declare -ar g=([0]="'x'" [1]="'a b'")
+# osh : declare -ar g=([0]="x"   [1]="a b")
+```
+
+and a subscript in the literal becomes an arithmetic error, the indexed
+assignment being handed `['5']=`:
+
+```sh
+declare -n g=z
+f() { local -A g=([j]=9); readonly -a g=([5]=q w); }; f
+# bash: '5': syntax error: operand expected (error token is "'5'")
+# osh : (assigns element 5)
+```
+
+The reverse direction is clean, `quote_compound_array_list` being called only for
+an associative `v`: an indexed local converted to associative by `readonly -A`
+matches already.
+
+**Proper fix.** Split the compound literal's *expansion shape* from its
+*assignment shape*: expand in the kind the target held when the operand was
+reached, requote the resulting words when that kind was associative and the
+command asked for the other one, then convert and assign the requoted words in
+the asked kind.
+
+**Why it is not done yet.** The road is only reachable through a `declare -n`
+restart that parts step 1's name from the literal's, over a frame-local
+associative array, with `-a` and a globally-scoped assignment builtin — and what
+it reproduces is a self-evident bash bug (values that grow quotes, subscripts
+that become arithmetic errors). Inverting the expand/convert order in
+`declare_compounds_scoped` touches every compound operand of every declaration
+builtin, which is a great deal of risk for four shapes of the 240-shape kind
+matrix. The substantive half — *which* variable is refused, and that the
+conversion happens at all — is fixed above.
+
+**How it was found:** fixing
+TD-OILS-A-COMPOUND-LITERAL-REFUSES-A-KIND-CHANGE-THE-BUILTIN-BEFORE-IT-HAS-ALREADY-MADE
+opened the conversion road that the old refusal had kept shut.
 
 ---
 

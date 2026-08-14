@@ -5494,6 +5494,29 @@ pub struct Shell {
     /// the store — which is what [`Shell::with_live_binding`] does, and why the
     /// list it needs has to be visible from inside the builtin.
     declare_global_swap: Vec<(String, usize, VarSnapshot)>,
+    /// The name **step 1** of each compound operand resolved to, for the scoped
+    /// declaration currently expanding — `None` where no swap is in force.
+    ///
+    /// An array's kind is refused by whichever command is asked to change it,
+    /// and under a swap that is not the compound literal. `make_internal_declare`
+    /// runs first and refuses at declare.def:876; the literal that follows takes
+    /// one of `do_compound_assignment`'s two *scoped* branches (subst.c:3484,
+    /// 3513), and neither of those has a refusal in it —
+    /// `make_local_assoc_variable` and `convert_var_to_assoc` replace or convert
+    /// without a word. Only the unscoped `else` branch reports, which is the road
+    /// taken when there is no swap and so no entry here.
+    ///
+    /// The two commands do not resolve the same name (see
+    /// [`Shell::enter_global_scope`]), so the operand as written is not enough:
+    ///
+    /// ```sh
+    /// declare -n g=z                                  # step 1 restarts on `z`
+    /// f() { local -a g=(9); readonly -A g=([k]=v); }  # the literal stays home
+    /// ```
+    ///
+    /// `z` is unset, so nothing refuses and the frame's indexed `g` is converted
+    /// — where asking the *literal's* target would have refused it.
+    declare_step1_names: Option<Vec<(String, String)>>,
     /// Collects the `set -x` rendering of a compound assignment's elements while
     /// the literal is being expanded. `Some` only while `apply_assignment` binds a
     /// *declaration builtin's* compound operand with tracing on.
@@ -6345,6 +6368,7 @@ impl Shell {
             decl_builtin_ctx: false,
             readonly_kept_entry: false,
             declare_global_swap: Vec::new(),
+            declare_step1_names: None,
             xtrace_compound: None,
             compound_expanded: false,
             glob_error: None,
@@ -12894,6 +12918,7 @@ impl Shell {
             decl_builtin_ctx: false,
             readonly_kept_entry: false,
             declare_global_swap: Vec::new(),
+            declare_step1_names: None,
             xtrace_compound: None,
             compound_expanded: false,
             glob_error: None,
@@ -48010,7 +48035,14 @@ impl Shell {
             flags.global = flags.assn_global || global_builtin;
         }
         if !flags.global && !global_builtin {
-            return body(self);
+            // No swap, so the literal takes `do_compound_assignment`'s unscoped
+            // `else` branch and refuses an array-kind change for itself. Clear
+            // any outer declaration's answer rather than letting it leak into a
+            // command substitution nested in this one's literal.
+            let prev = self.declare_step1_names.take();
+            let outcome = body(self);
+            self.declare_step1_names = prev;
+            return outcome;
         }
         let mut names = if global_builtin {
             Vec::new()
@@ -48087,6 +48119,23 @@ impl Shell {
         } else {
             Vec::new()
         };
+        // The name each compound operand's **step 1** resolved to, read here
+        // because the swap below is about to rewrite the chain it is read from.
+        // It is the same walk [`Shell::enter_global_scope`] asks `chklocal` of —
+        // `nameref_cell (refvar)`, the cell the global-only walk ended on
+        // (declare.def:735-741), falling back on the name where that walk found
+        // no reference at all. See [`Shell::declare_step1_names`] for what is
+        // asked of it.
+        let step1 = expansion_half.then(|| {
+            decl_arrays
+                .iter()
+                .map(|d| {
+                    let n = &d.assign.name;
+                    let end = self.global_chain_path(n).and_then(|p| p.last().cloned());
+                    (n.clone(), end.unwrap_or_else(|| n.clone()))
+                })
+                .collect()
+        });
         let saved = self.enter_global_scope(&names, &compound, flags);
         // Whatever the swap really did hide, it owes for — and only that: where
         // the global side of the lookup was empty the swap is made for the
@@ -48099,7 +48148,9 @@ impl Shell {
             }
         }
         let prev = std::mem::replace(&mut self.declare_global_swap, saved);
+        let prev_step1 = std::mem::replace(&mut self.declare_step1_names, step1);
         let outcome = body(self);
+        self.declare_step1_names = prev_step1;
         let saved = std::mem::replace(&mut self.declare_global_swap, prev);
         self.leave_global_scope(saved);
         outcome
@@ -48862,7 +48913,21 @@ impl Shell {
             // `self.arrays` — which looks exactly like silent data loss to a
             // script. Reject with bash's message and status 1, leaving the
             // variable untouched (`unset` first is the way to change kind).
-            if let Some(kinds) = self.array_kind_conflict(&target, assoc, indexed) {
+            //
+            // *Which* variable is asked, though, belongs to whichever command
+            // does the refusing — and under a scope swap that is step 1 rather
+            // than the literal, which is by then in one of the two scoped
+            // branches that convert without a word. So the name comes from
+            // [`Shell::declare_step1_names`], read before the swap; the lookup
+            // is made here, after it, because the swap is what puts the global
+            // binding of a name step 1 read globally in reach.
+            let step1_name = self
+                .declare_step1_names
+                .as_ref()
+                .and_then(|m| m.iter().find(|(n, _)| *n == a.name))
+                .map(|(_, t)| t.clone());
+            let asked = step1_name.as_deref().unwrap_or(target.as_str());
+            if let Some(kinds) = self.array_kind_conflict(asked, assoc, indexed) {
                 let Some(held) = self.compound_kind_refusal(&a.name, kinds, cmd) else {
                     return Err(Flow::Discard);
                 };
@@ -48876,6 +48941,24 @@ impl Shell {
             // the array is indexed unless the command asked for the other kind.
             if local_array_fallback {
                 self.vars.remove(&target);
+            }
+            // Past the refusal above with the *other* kind still in the table is
+            // a road only a scope swap opens: the refusal belongs to step 1, and
+            // step 1 asks it of its own name (see [`Shell::declare_step1_names`]).
+            // The literal is then in one of `do_compound_assignment`'s scoped
+            // branches, whose `convert_var_to_assoc` / `convert_var_to_array`
+            // (subst.c:3520-3527) *replace* the storage rather than reinterpret
+            // it — what the old kind held is gone, and nothing is carried in as
+            // element 0 either:
+            //
+            // ```sh
+            // declare -n g=z
+            // f() { local -a g=(9); readonly -A g=([k]=v); }   # declare -Ar g=([k]="v" )
+            // ```
+            if assoc {
+                self.arrays.remove(&target);
+            } else if indexed {
+                self.assoc.remove(&target);
             }
             if assoc {
                 self.array_kind_apply(&target, true);
@@ -77238,6 +77321,65 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             out,
             "declare -- g=\"loc\"\ndeclare -a g=([0]=\"1\" [1]=\"2\")\n"
         );
+        assert_eq!(st, 0);
+    }
+
+    /// An array's kind is refused by whichever command is asked to change it,
+    /// and under a scope swap that is **step 1** — `make_internal_declare`,
+    /// which refuses at declare.def:876. The compound literal that follows is by
+    /// then in one of `do_compound_assignment`'s two *scoped* branches
+    /// (subst.c:3484, 3513), and neither of those has a refusal in it:
+    /// `convert_var_to_assoc` and its indexed twin replace the storage without a
+    /// word. Only the unscoped `else` branch — `assign_array_from_string` →
+    /// `find_or_make_array_variable` (arrayfunc.c:504) — reports, which is the
+    /// road taken where there is no swap at all.
+    ///
+    /// The two commands do not resolve the same name (see
+    /// [`Shell::enter_global_scope`]), so *which* variable is asked is the whole
+    /// of it: a `declare -n` restart carries step 1 out to a name that answers
+    /// differently, and the frame's own array is then converted rather than
+    /// refused.
+    #[test]
+    fn the_kind_of_an_array_is_refused_by_the_command_that_would_convert_it() {
+        // No swap: the literal's own road refuses, untagged.
+        let (out, st) = run("declare -a g=(7); declare -A g=([k]=v); declare -p g");
+        assert_eq!(out, "");
+        assert_eq!(st, 1);
+        // A swap, but the two commands agree on the name.
+        let (out, st) = run("f() { local -a g=(9); readonly -A g=([k]=v); declare -p g; }; f");
+        assert_eq!(out, "");
+        assert_eq!(st, 1);
+        // The restart parts them, and `z` is unset — so nothing refuses, and the
+        // literal converts the frame's own indexed array.
+        for cmd in ["readonly", "export"] {
+            let mark = if cmd == "readonly" { "r" } else { "x" };
+            let (out, st) = run(&format!(
+                "declare -n g=z; f() {{ local -a g=(9); {cmd} -A g=([k]=v); declare -p g; }}; f; declare -p z"
+            ));
+            assert_eq!(out, format!("declare -A{mark} g=([k]=\"v\" )\ndeclare -A z\n"), "{cmd}");
+            assert_eq!(st, 0, "{cmd}");
+        }
+        // `z` already holds the kind asked for: still nothing to refuse.
+        let (out, st) = run(
+            "declare -n g=z; declare -A z=([q]=1)
+             f() { local -a g=(9); readonly -A g=([k]=v); declare -p g; }; f; declare -p z",
+        );
+        assert_eq!(out, "declare -Ar g=([k]=\"v\" )\ndeclare -A z=([q]=\"1\" )\n");
+        assert_eq!(st, 0);
+        // `z` holds the *other* kind, so step 1 refuses — naming `g`, the name
+        // as written, the restart not having happened.
+        let (out, st) = run(
+            "declare -n g=z; declare -a z=(7)
+             f() { local -a g=(9); readonly -A g=([k]=v); declare -p g; }; f",
+        );
+        assert_eq!(out, "");
+        assert_eq!(st, 1);
+        // The conversion replaces the storage: nothing is carried across as
+        // element 0, the way `declare -a` widens a *scalar*.
+        let (out, st) = run(
+            "declare -n g=z; f() { local -a g=(1 2 3); readonly -A g=([k]=v); declare -p g; }; f",
+        );
+        assert_eq!(out, "declare -Ar g=([k]=\"v\" )\n");
         assert_eq!(st, 0);
     }
 

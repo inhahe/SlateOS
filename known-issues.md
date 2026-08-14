@@ -60001,3 +60001,86 @@ check that cannot fire is indistinguishable from a check that passes — and
 every one of these was *my own* freshly-written tooling, reporting success.
 When adding a guard, the first test should be "does it fire on a case I know
 is positive?", not "does it run cleanly?".
+
+### [A] B-BENCH-TCP-CHECKSUM-PAIR-ALTERNATES-1.7x. One of `tcp_checksum_v4`/`v6` runs ~1.7x slow every build, and which one flips — OPEN
+
+**Where:** `kernel/src/bench.rs`, `bench_net_tcp_checksum_v4` (3281) /
+`bench_net_tcp_checksum_v6` (3340) and their bench-local kernels
+`tcp_checksum_bench` (3309) / `tcp_checksum_v6_bench` (3366).
+
+**What.** Across all five recorded runs on host `Logoplex3`, exactly one
+member of the pair sits near ~35000 ns while the other sits near ~20000 ns,
+and *which* member is the slow one changes from build to build:
+
+| commit | `tcp_checksum_v4` | `tcp_checksum_v6` |
+|---|---|---|
+| `bf26aabdb` | 20667 | 23021 |
+| `17dbde179` | 25279 | 25751 |
+| `a18ea83a9` | 20714 | **35899** |
+| `be167dd90` | **35410** | 20953 |
+| `5a2002bac` | 20182 | **35039** |
+
+The two kernels are near-identical byte-at-a-time fold loops over the same
+1460-byte segment; v6 does 36 more pseudo-header bytes than v4, i.e. ~2.5%
+more work. A 1.7x gap between them — in either direction — is not explicable
+by the work they do.
+
+**Why this is NOT host contamination** (the interesting part). The recorded
+figure is `result.min_ns`, the **minimum** over 2000 iterations, and since the
+append-only `mean_ns` extension landed we also record the mean, so
+`mean/min` is available as a within-run dispersion measure. A transient host
+burst inflates the mean far more than the min. It does not do that here:
+
+| commit | benchmark | min | mean/min |
+|---|---|---|---|
+| `be167dd90` | `tcp_checksum_v4` (slow one) | 35410 | 1.16 |
+| `be167dd90` | `tcp_checksum_v6` (fast one) | 20953 | 1.20 |
+| `5a2002bac` | `tcp_checksum_v4` (fast one) | 20182 | 1.21 |
+| `5a2002bac` | `tcp_checksum_v6` (slow one) | 35039 | 1.33 |
+
+In both runs the slow member's dispersion is indistinguishable from the fast
+member's. Compare the genuinely burst-hit numbers in the same records:
+`net_ethernet_parse` at 2.86 and `context_switch` at 10.62 in `be167dd90`.
+So the slow member is uniformly ~1.7x slower across all 2000 iterations with
+perfectly normal spread — a *steady-state* property of that build, not an
+event that happened during it.
+
+**Leading hypothesis.** Code-layout sensitivity under QEMU TCG. The two loops
+are compiled separately (deliberately duplicated "to avoid depending on tcp
+module internals"), so their alignment and translation-block boundaries shift
+with every unrelated code change. Whichever one lands unluckily — hot loop
+straddling a TB boundary or a host page — pays a fixed per-iteration penalty.
+That model predicts exactly what is observed: a uniform multiplier, stable
+within a run, re-rolled at each build.
+
+**Why it matters.** Both are on the `over_target` list (targets 2000/2200 ns,
+measured 20000–35000), so the absolute numbers are already known-bad under TCG
+and nobody is being misled about pass/fail. The damage is to the *comparator*:
+a 1.7x swing that re-rolls every build is pure noise in any commit-to-commit
+diff, and `TD-BENCH-COMPARATOR-NEEDS-PER-BENCHMARK-VARIANCE` will size its
+band from exactly this history. If the band is fitted without knowing this
+pair is bimodal, it will either be stretched wide enough to hide real
+regressions everywhere else, or it will keep flagging these two forever.
+
+**Next diagnostic** (cheap, no boot needed for step 1): dump the symbol
+addresses of the two bench kernels across two builds
+(`nm`/`objdump -t` on the kernel ELF, filter `tcp_checksum.*bench`) and check
+whether the slow member correlates with alignment — e.g. its hot loop crossing
+a 4 KiB host page. If it does, the fix is to force alignment on both loops
+rather than to chase the benchmark. If it does not, the next suspect is the
+TCG translation cache and the honest resolution is to mark the pair as
+TCG-unreliable and exclude it from comparator diffs.
+
+**Broader finding this exposes — `mean/min` is a better contamination
+discriminator than the canary.** The canary called run `5a2002bac` clean
+(spread 2% over 10 samples). In that same run `crypto_ed25519_verify` had
+mean 323487129 against min 31875588 — a **10.15x** ratio — and
+`context_switch` had 10.62x in the run before it. The canary samples the host
+between benchmarks; `mean/min` measures dispersion *inside* the benchmark that
+was actually running, which is where the burst lands. The data is already
+being recorded per benchmark and needs no cross-record history to interpret,
+so a per-benchmark "this number is suspect" flag is available now and is
+strictly more sensitive than the suite-wide canary flag. Note this does not
+retire the canary: `mean/min` cannot see a *sustained* load change that slows
+every iteration equally, which is precisely the case the canary endpoints
+catch. They are complementary, and the comparator should consult both.

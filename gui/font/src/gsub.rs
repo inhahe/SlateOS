@@ -134,30 +134,38 @@ use crate::skip::{CLASS_BASE, CLASS_MARK, Definitions, Skipper};
 /// The unconditional ones come first so that "every feature a glyph always
 /// gets" is one contiguous run of bits ([`ALWAYS`]); the four positional ones
 /// follow, one bit each.
+///
+/// The positioning-sounding tags at the end of the unconditional run are here
+/// for the same reason the substitution-sounding ones are in
+/// [`gpos`](crate::gpos)'s list: HarfBuzz builds one feature map and compiles
+/// it against both tables, so nothing stops a face filing a substitution under
+/// `mark` or a `PairPos` under `calt`. The two lists are the same set,
+/// deliberately.
 const FEATURES: &[&[u8; 4]] = &[
     // Unconditional: every glyph is eligible for all of these.
-    b"ccmp", b"locl", b"liga", b"rlig", b"clig", b"calt", b"rclt",
+    b"ccmp", b"locl", b"liga", b"rlig", b"clig", b"calt", b"rclt", b"abvm", b"blwm", b"curs",
+    b"dist", b"kern", b"mark", b"mkmk",
     // Positional: a glyph is eligible for at most one, and only when the
     // cursive joining pass says so.
     b"isol", b"init", b"medi", b"fina",
 ];
 
-/// The feature mask every glyph carries: bits for the seven unconditional
+/// The feature mask every glyph carries: bits for the fourteen unconditional
 /// entries of [`FEATURES`], and none of the four positional ones.
 ///
 /// Written out rather than computed from `FEATURES`, so that no shift or
 /// subtraction appears in a path the arithmetic lints police. The two are
 /// kept in step by `the_masks_match_the_feature_list`, which fails if an
 /// entry is ever inserted or reordered.
-const ALWAYS: u32 = 0b0111_1111;
-/// The bit for `isol`, the eighth entry of [`FEATURES`].
-const ISOL: u32 = 0b1000_0000;
-/// The bit for `init`, the ninth.
-const INIT: u32 = 0b1_0000_0000;
-/// The bit for `medi`, the tenth.
-const MEDI: u32 = 0b10_0000_0000;
-/// The bit for `fina`, the eleventh.
-const FINA: u32 = 0b100_0000_0000;
+const ALWAYS: u32 = 0b0011_1111_1111_1111;
+/// The bit for `isol`, the fifteenth entry of [`FEATURES`].
+const ISOL: u32 = 0b0100_0000_0000_0000;
+/// The bit for `init`, the sixteenth.
+const INIT: u32 = 0b1000_0000_0000_0000;
+/// The bit for `medi`, the seventeenth.
+const MEDI: u32 = 0b1_0000_0000_0000_0000;
+/// The bit for `fina`, the eighteenth.
+const FINA: u32 = 0b10_0000_0000_0000_0000;
 
 /// The mask for a glyph whose cursive form is `form`.
 ///

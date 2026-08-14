@@ -60254,3 +60254,11 @@ for variable fonts, and the shaper-specific tags (`init`/`medi`/`fina` for
 Arabic, the Indic reordering set) — those need the per-glyph masks `GSUB`
 already has, and no installed face was observed to file a positioning lookup
 under one.
+
+**Mirrored in `GSUB`.** The same argument runs the other way — nothing stops a
+face filing a substitution under `mark` or `kern` — so `gsub.rs`'s `FEATURES`
+gained the same seven tags and the two lists are now the same set. `ALWAYS`
+widens from 7 bits to 14 and the four positional bits move up with it;
+`the_masks_match_the_feature_list` is what checks that. No face in the sweep
+corpus exercises it (`agree` and `misplaced` are unchanged at 11826/22), so
+this half is correctness by symmetry rather than a measured fix.

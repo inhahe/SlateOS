@@ -258,6 +258,64 @@ pub struct BenchResult {
     pub mean_ns: u64,
 }
 
+/// Time a single execution of `f`, in TSC cycles.
+///
+/// The leading read is serialised so earlier work cannot drift into the
+/// measured window; the trailing one is not, because the following
+/// instructions are the caller's arithmetic and cannot be reordered ahead of
+/// the `rdtsc` in a way that matters here.
+/// Any value the closure returns is kept alive with `black_box` *after* the
+/// clock stops, so the optimiser cannot delete the work being measured
+/// without that keep-alive landing inside the measured window.
+#[inline]
+fn timed<R, F: FnOnce() -> R>(f: F) -> u64 {
+    let start = rdtsc_serialized();
+    let produced = f();
+    let elapsed = rdtsc().saturating_sub(start);
+    core::hint::black_box(produced);
+    elapsed
+}
+
+/// Compare two alternatives by **interleaving** their iterations, returning
+/// `(min_a, min_b)` in cycles.
+///
+/// Use this instead of two `run()` calls whenever the question is "what does
+/// X cost?" rather than "how fast is X?".  Two consecutive measurement
+/// windows on a live system are not the same system: a service waking during
+/// the second window inflates it wholesale, and `min` does not rescue you —
+/// it is robust to *spikes*, not to a window that is uniformly busier than
+/// its neighbour.  This is not hypothetical; the `frame_owner` A/B below
+/// reported a 10826-cycle cost that way, and the same measurement
+/// interleaved reported a fraction of it.
+///
+/// Interleaving fixes that because the two arms run microseconds apart, so
+/// any load drifting on a scheduling timescale lifts both equally and cancels
+/// in the difference.
+///
+/// Each closure returns *its own* elapsed cycles rather than being timed from
+/// the outside, so an arm can do untimed setup (flipping a feature flag,
+/// say) before starting its own clock.  Use [`timed`] for the measured part.
+fn ab_interleaved<A, B>(rounds: u32, mut a: A, mut b: B) -> (u64, u64)
+where
+    A: FnMut() -> u64,
+    B: FnMut() -> u64,
+{
+    // Warm both arms: first-touch costs (TCG translation of the block, cold
+    // branch predictors) belong to neither measurement.
+    for _ in 0..core::cmp::max(rounds / 20, 5) {
+        let _ = a();
+        let _ = b();
+    }
+
+    let mut min_a = u64::MAX;
+    let mut min_b = u64::MAX;
+    for _ in 0..rounds {
+        min_a = min_a.min(a());
+        min_b = min_b.min(b());
+    }
+    (min_a, min_b)
+}
+
 /// Run a micro-benchmark, reporting min/mean/max cycles.
 ///
 /// Executes `f` a total of `warmup + iterations` times.  The first
@@ -534,15 +592,21 @@ pub fn run_all() {
     // tier-3 APIC MMIO read would differ by well under the noise of a fixed
     // nanosecond target. Subtracting a nop measured by the same harness in the
     // same conditions leaves the cost of the lookup itself.
+    //
+    // The nop and the lookup are interleaved rather than run as two separate
+    // 2000-iteration windows. They were two windows to begin with, and across
+    // two boots of the *same binary* that reported 0 and then 274 cycles for
+    // an operation that is one relaxed load — the spread was ambient load in
+    // whichever window drew the busier neighbour, not the code.
     {
-        let nop = run("bench_floor_nop", 2000, || {
-            core::hint::black_box(0u64);
-        });
-        let idx = run("fast_cpu_index", 2000, || {
-            core::hint::black_box(crate::smp::fast_cpu_index());
-        });
+        const ROUNDS: u32 = 2000;
+        let (nop_cycles, idx_cycles) = ab_interleaved(
+            ROUNDS,
+            || timed(|| core::hint::black_box(0u64)),
+            || timed(|| core::hint::black_box(crate::smp::fast_cpu_index())),
+        );
 
-        let cost = idx.min_cycles.saturating_sub(nop.min_cycles);
+        let cost = idx_cycles.saturating_sub(nop_cycles);
         // An APIC MMIO round-trip under emulation is a device access — a TCG
         // exit and an MMIO dispatch, hundreds of cycles at minimum. Tier 0 and
         // tier 1 are a load and a register read. The threshold sits between
@@ -552,14 +616,14 @@ pub fn run_all() {
         if cost <= MMIO_SUSPICION_CYCLES {
             serial_println!(
                 "[bench]   fast_cpu_index: PASS ({} cycles over an empty closure; \
-                 floor={} cycles)",
-                cost, nop.min_cycles
+                 nop={} idx={}, {} interleaved rounds)",
+                cost, nop_cycles, idx_cycles, ROUNDS
             );
         } else {
             serial_println!(
                 "[bench]   fast_cpu_index: SLOW ({} cycles over an empty closure, \
-                 limit {}) — suspect a fallback to the APIC MMIO path",
-                cost, MMIO_SUSPICION_CYCLES
+                 limit {}; nop={} idx={}) — suspect a fallback to the APIC MMIO path",
+                cost, MMIO_SUSPICION_CYCLES, nop_cycles, idx_cycles
             );
         }
     }
@@ -609,11 +673,9 @@ pub fn run_all() {
     // does not save you — it is robust to *spikes*, not to a window that is
     // uniformly busier than its neighbour.
     //
-    // So the arms alternate per iteration instead. Adjacent alloc+free pairs
-    // are microseconds apart, so any load that drifts on a scheduling
-    // timescale lifts both arms equally and cancels in the difference. Only
-    // the `ENABLED` flag differs between them, and it is toggled outside the
-    // timed region.
+    // So the arms alternate per iteration instead (see `ab_interleaved`).
+    // Only the `ENABLED` flag differs between them, and it is flipped outside
+    // the timed region.
     //
     // Ordering note: tracking is restored to its entry value afterwards, so
     // the experiment cannot leave ownership accounting silently disabled for
@@ -624,29 +686,25 @@ pub fn run_all() {
         const ROUNDS: u32 = 400;
         let was_enabled = frame_owner::is_enabled();
 
-        // One alloc+free cycle, timed. Factored out so both arms execute
-        // byte-identical code and cannot differ by inlining.
-        let timed_alloc_free = || -> u64 {
-            let start = rdtsc_serialized();
+        // One alloc+free cycle. Both arms call this same function, so they
+        // cannot differ by inlining or by TCG translating two distinct blocks.
+        let alloc_free = || {
             let f = frame::alloc_frame().expect("bench: alloc");
             // SAFETY: frame was just allocated, exclusively ours.
             unsafe { frame::free_frame(f).expect("bench: free"); }
-            rdtsc().saturating_sub(start)
         };
 
-        for _ in 0..20 {
-            let _ = timed_alloc_free();
-        }
-
-        let mut min_off = u64::MAX;
-        let mut min_on = u64::MAX;
-        for _ in 0..ROUNDS {
-            frame_owner::disable();
-            min_off = min_off.min(timed_alloc_free());
-
-            frame_owner::enable();
-            min_on = min_on.min(timed_alloc_free());
-        }
+        let (min_off, min_on) = ab_interleaved(
+            ROUNDS,
+            || {
+                frame_owner::disable();
+                timed(alloc_free)
+            },
+            || {
+                frame_owner::enable();
+                timed(alloc_free)
+            },
+        );
 
         // Restore whatever the system was doing before the experiment.
         if !was_enabled {
@@ -674,6 +732,57 @@ pub fn run_all() {
                 delta, OWNER_TAG_BUDGET_CYCLES, min_off, min_on, ROUNDS
             );
         }
+    }
+
+    // --- What a relaxed atomic RMW actually costs here ---
+    //
+    // This exists to make the previous benchmark's verdict *actionable*. The
+    // ownership path is a relaxed load, a bounds check, a byte store and a
+    // relaxed `fetch_add` on each of set() and clear() — code that on real
+    // hardware is tens of cycles, yet the A/B above measured it in the
+    // thousands. When a measurement and a static reading of the code disagree
+    // by two orders of magnitude, one of them is wrong, and guessing which is
+    // how people end up "optimising" the wrong line.
+    //
+    // The `fetch_add` is the one component that can be pathological under
+    // emulation: TCG cannot always lower a guest atomic RMW inline, and the
+    // fallback (`cpu_loop_exit_atomic`) aborts the translation block and
+    // re-executes the instruction with the world stopped. That is thousands
+    // of cycles for one increment. Two of them per alloc+free would account
+    // for the whole gap — and would mean the "regression" is an artefact of
+    // the emulator that does not exist on hardware.
+    //
+    // So measure it directly rather than reasoning about it. The counter is
+    // local to the benchmark so nothing else contends for the line.
+    {
+        static BENCH_RMW_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+        const ROUNDS: u32 = 2000;
+        let (min_nop, min_rmw) = ab_interleaved(
+            ROUNDS,
+            || timed(|| core::hint::black_box(0u64)),
+            || {
+                timed(|| {
+                    BENCH_RMW_COUNTER.fetch_add(1, Ordering::Relaxed);
+                })
+            },
+        );
+
+        let cost = min_rmw.saturating_sub(min_nop);
+        serial_println!(
+            "[bench]   atomic_fetch_add_relaxed: {} cycles over an empty closure \
+             (nop={} rmw={}, {} interleaved rounds){}",
+            cost,
+            min_nop,
+            min_rmw,
+            ROUNDS,
+            if cost >= 1000 {
+                " — TCG is not lowering this inline; statistics counters do \
+                 not belong on the allocator hot path"
+            } else {
+                ""
+            }
+        );
     }
 
     // --- Page allocation with zeroing (alloc_zeroed + free cycle) ---

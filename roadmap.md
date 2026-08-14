@@ -336,9 +336,15 @@ Roadmap:
   them first. Multiple substitution (GSUB 2) rides on that too, so `ccmp`
   can decompose a precomposed letter for the mark placer; a cluster is now
   a boundary rather than an index and every `ShapedRun` query works in
-  whole clusters (§407). Next unblocked step is the rest of shaping: no
-  contextual substitution (GSUB 5/6), no script/language selection
-  (`TD-GSUB-APPLIES-EVERY-SCRIPTS-FEATURES`), no mark-to-ligature
+  whole clusters (§407). Contextual substitution (GSUB 5/6) done, all six
+  subtable formats, invoking other lookups by LookupList index; every type
+  is now a rule about one position driven by a shared pass, and
+  `clig`/`calt` are on by default (§408). Substitution is cross-checked
+  against HarfBuzz over all 556 installed faces, which is what found the
+  subtable budget that had been silently truncating 61 of them (§409).
+  Next unblocked step is the rest of shaping: no script/language selection
+  (`TD-GSUB-APPLIES-EVERY-SCRIPTS-FEATURES`), no Unicode normalization
+  (the only remaining HarfBuzz disagreement), no mark-to-ligature
   attachment (GPOS 5), no bidi, no complex-script reordering. Vello itself
   waits on `[A]`'s GPU driver.
 - `[C]` Wayland-inspired compositor: GPU acceleration, currently a software

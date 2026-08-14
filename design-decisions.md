@@ -10219,3 +10219,208 @@ fit_end, offset_at}` and the `ShapedGlyph::cluster` doc in
 `gui/font/src/shape.rs`; the host tests `installed_fonts_leave_a_tab_alone` and
 `shaped_runs_agree_with_their_strings_about_boundaries` in
 `gui/font/tests/host_fonts.rs`.
+
+## §408 — A lookup type is a rule about one position; the pass belongs to a shared driver (GSUB 5/6)
+
+**Date:** 2026-08-14
+**Decided by:** Claude (autonomous)
+
+### Context
+
+GSUB lookup types 5 (contextual) and 6 (chained contextual) do not
+substitute anything themselves. They match a pattern and then say "run
+lookup 12 at input glyph 0, then lookup 7 at input glyph 2." The lookups
+they name are named *by index into the font's LookupList* — not by
+feature, not by anything a feature walk would have found. That is exactly
+how a font hides a helper lookup that only makes sense inside one
+context.
+
+Until now every lookup type in `gsub.rs` owned its own loop over the run:
+`apply_single` walked the buffer, `apply_ligature` walked the buffer, and
+so on. Types 5/6 cannot be written that way, because what they need is to
+apply some *other* lookup at one position.
+
+### Decision
+
+Invert it. Each lookup type became a function that answers one question —
+"what, if anything, do you do at position `i`, and how far does that
+carry the cursor?" — and a single shared driver (`apply_lookup`) turns
+any such rule into a pass over the run. `apply_at` dispatches on the
+type.
+
+Consequences that fall out of the shape rather than being decided
+separately:
+
+- **Termination is structural.** The driver resumes past what a match
+  produced, so a lookup is never offered its own output. A font whose
+  ligature is also its own input, or whose Multiple Substitution
+  decomposes a glyph to itself, cannot loop. Because this lives in the
+  driver, no lookup type can forget it — which is the real argument for
+  the refactor, over and above types 5/6 needing it.
+- **Recursion is bounded explicitly**, by `MAX_NESTING = 6` carried in
+  `Ctx`, since a font may have lookup 5 invoke lookup 6 invoke lookup 5.
+
+### The hard part: nested position bookkeeping
+
+A `SequenceLookupRecord` names a glyph of the input *as it was matched*.
+But the lookup it invokes may grow the run (Multiple Substitution) or
+shrink it (Ligature), and a later record in the same list still refers to
+the original numbering. Tracking a single offset is not enough, because a
+ligature does not just shift later glyphs left — it *swallows* some of
+them, and a later record must not silently slide onto a glyph the context
+never matched.
+
+So positions are a `Vec<Option<usize>>`, one entry per matched input
+glyph. Growth shifts later entries right. Shrinkage shifts them left
+*and* sets the swallowed ones to `None`, and a record naming a `None`
+position is skipped. `None` is "this glyph no longer exists," which is a
+different fact from "this glyph moved," and conflating them is the bug
+this representation exists to prevent.
+
+### Alternatives considered
+
+- **Whole-run passes only, with types 5/6 re-entering `apply_lookup`.**
+  Rejected: a nested lookup must apply at *one* position, not everywhere.
+  Re-running a lookup across the whole run would apply it to text the
+  context never matched.
+- **Re-matching the context after each nested lookup**, instead of
+  tracking positions. Simpler to write, but quadratic, and it changes
+  meaning: the spec matches the context once and then edits it.
+- **Decoding the whole LookupList up front** so nested lookups are a
+  table index. Rejected: most of it is never reached by a given run, and
+  re-reading a lookup header on invocation is a handful of offsets.
+
+### Format details worth recording
+
+- Format 1 rules name glyph ids, format 2 rules name *classes*. It is one
+  rule layout read two ways, which is why they share the `By` enum. This
+  bit us in testing: a rule written `&[11]` (a glyph id) in a format-2
+  context is a class number, and matched the wrong thing.
+- Chained format 2 has **three separate ClassDefs**. A glyph may be one
+  class as lookahead and another as input. Reusing one ClassDef for all
+  three would be wrong on real fonts.
+- Backtrack is stored **closest-glyph-first**: entry 0 is the glyph
+  immediately before the input, not the leftmost of the context.
+- A null (zero) offset means "absent" everywhere in OpenType. Following
+  one lands back on the subtable's own header, where a format number
+  would be read as a coverage format and match plausible-looking
+  garbage. `sub_offset` refuses null for this reason.
+
+### `clig` and `calt` are on by default
+
+Both are `On by default` in the OpenType spec, and `calt` in particular
+is what makes many faces look right rather than merely legible. Turning
+them on changed shaping on 292 of the installed faces, so it is a real
+behaviour change, not a formality.
+
+It immediately broke `installed_fonts_ligate_fi`, which demanded that a
+pair that does not ligate come back as *the same two glyphs*. Cambria
+resolves the `f`+`i` collision contextually instead — a `calt` swaps in a
+short-hooked `f` and leaves two glyphs. HarfBuzz produces the identical
+`[976, 139]`, so our answer was right and the test's assumption was
+stale. The test now checks length, clusters and glyph range, and counts
+the faces taking the contextual route.
+
+### Where this lives
+
+`gui/font/src/gsub.rs` (`Ctx`, `apply_lookup`, `apply_at`,
+`apply_nested`, `context_match`, `chain_match`, `By`, `Nested`);
+`otl::{lookup_list, lookup_at}` in `gui/font/src/otl.rs`;
+`installed_fonts_ligate_fi` in `gui/font/tests/host_fonts.rs`.
+
+## §409 — Shape every installed face against HarfBuzz, and set limits from what that measures
+
+**Date:** 2026-08-14
+**Decided by:** Claude (autonomous)
+
+### Context
+
+Our GSUB implementation had 222 unit tests, mutation-tested guards, and
+13 host-font tests over 556 real faces. All green. It was also silently
+dropping most of the lookups in 61 of the 365 installed faces that have a
+`GSUB`.
+
+The unit tests could not catch it because they build their own fonts, and
+a font written to test a feature has exactly the lookups that feature
+needs. The host tests could not catch it because *returning the input
+unchanged is a legal answer*: a face with no ligature for `fi` correctly
+gives back two glyphs, so "gave back two glyphs" cannot distinguish a
+face that has no ligature from a face whose ligature we failed to reach.
+Every assertion we had was consistent with the bug.
+
+### Decision
+
+Use HarfBuzz as an independent oracle: shape a fixed corpus through every
+installed face with both implementations and compare glyph ids. This
+meant installing `uharfbuzz` on the development host.
+
+Result over 556 faces and 13 strings: **6426 agree, 324 differ**, and the
+324 fall into exactly three classes, of which one was ours:
+
+- **288 — `e` + U+0301.** HarfBuzz runs its own Unicode normalizer
+  (`hb-ot-shape-normalize`) before GSUB and composes the pair to a single
+  precomposed glyph. That is not GSUB and not a fault in our tables; it
+  is a genuine missing stage, now the next shaping item on the roadmap.
+- **33 — Amiri and FiraCode** losing Latin ligatures and contextual
+  alternates entirely. A real bug: see below.
+- **3 — Calibri `1/2`.** A one-glyph disagreement in fraction handling,
+  logged in `known-issues.md` rather than guessed at.
+
+### The bug it found, and the rule it produced
+
+`otl::MAX_SUBTABLES` was 64, shared across every lookup a face's features
+reach, and its doc comment justified that as "real fonts use single
+digits; the largest seen on the development host is 4." That number was
+per *lookup*. Summed across the lookups our features reach, 61 installed
+faces exceed 64 and the worst declares 1874.
+
+Amiri lists its large Arabic feature set before its Latin `liga`, so the
+budget was exhausted before the ligature lookup was reached and `office`
+came back as six separate glyphs. FiraCode never reached the `calt` that
+shortens `f` before `i`.
+
+The cap itself is kept — the cost of a shape is the run length times this
+number, so a hostile font must not be able to set it — but the value is
+now measured and the measurement is recorded beside it:
+
+| measure | worst face | count |
+|---|---|---|
+| subtables in one lookup | SansSerifCollection | 675 |
+| lookups reached | SansSerifCollection | 256 |
+| subtables in total | SansSerifCollection | 1874 |
+| runner-up total | JetBrains Mono | 768 |
+
+8192 is a little over four times the worst real face. Exceeding it still
+shapes with the lookups found rather than rejecting the font: a slightly
+wrong ligature is a better failure than a blank page.
+
+**The general rule this establishes: a limit whose justification is a
+glance is a bug waiting to happen, and the failure mode of a limit set
+too low is silence.** Any budget, cap or depth in this crate should carry
+the measurement that set it, so the next person to touch it knows what it
+protects against and what it must clear.
+
+### Alternatives considered
+
+- **Derive the budget from the table's byte length** (a subtable offset
+  costs two bytes, so the count is bounded by `len/2`). Attractive
+  because it cannot be outgrown, but it makes the worst case scale with
+  font size, which is precisely what the cap exists to stop.
+- **Reject a face that exceeds the budget.** Rejected: a face that is
+  merely large is not hostile, and a missing font is a worse
+  user-visible failure than a missing ligature.
+- **Commit the HarfBuzz comparison as a test.** Rejected for now: it
+  needs Python and `uharfbuzz` on the host, which the Rust test suite
+  cannot assume. What is committed instead is
+  `installed_fonts_reach_lookups_past_the_subtable_budget`, which names
+  specific faces whose answers are known to live deep. The choice of
+  faces is the content of that test: JetBrains Mono declares more
+  subtables than FiraCode and is deliberately *not* listed, because
+  HarfBuzz shapes its `fi` unchanged too — a deep face only makes a
+  witness when something deep applies to it.
+
+### Where this lives
+
+`MAX_SUBTABLES` and its measurement table in `gui/font/src/otl.rs`;
+`installed_fonts_reach_lookups_past_the_subtable_budget` in
+`gui/font/tests/host_fonts.rs`.

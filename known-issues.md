@@ -43382,6 +43382,77 @@ boots (128/128 total) keep them closed.  See F6 and F7 in Fixed Bugs.
 The two items discovered 2026-06-10 — quota Test 5 and FS interceptor
 deny — are now fixed; see F8 and F9.)_
 
+### B-FONT-CALIBRI-SHAPES-A-FRACTION-SLASH-DIFFERENTLY-FROM-HARFBUZZ. Three faces disagree by one glyph on `1/2` — 2026-08-14 — OPEN
+
+**Where:** `gui/font/src/gsub.rs`, the substitution pass; the disagreement is
+in whichever lookup rewrites `/` (or the digits around it) in Calibri's
+`GSUB`. Not yet narrowed to a lookup type.
+
+**Symptom.** Shaping the string `1/2` through `calibri.ttf`, `calibrib.ttf`
+and `calibril.ttf` gives `[1005, 877, 1006]` where HarfBuzz gives
+`[1005, 876, 1006]` — same glyph count, same outer glyphs, one differing
+glyph in the middle. Glyph 876 vs 877 is almost certainly fraction slash
+(U+2044) versus solidus, or two widths of the same mark.
+
+**How it was found.** Cross-checking our shaper against HarfBuzz over all 556
+installed faces and a 13-string corpus (see design-decisions.md §409):
+6426 agreed, 324 differed, and after the subtable-budget fix and setting
+aside HarfBuzz's own Unicode normalizer, these three faces are the entire
+remaining disagreement.
+
+**Reproduce.** Install `uharfbuzz` (`pip install uharfbuzz`), shape `"1/2"`
+through `C:\Windows\Fonts\calibri.ttf` with features `kern`, `mark`, `mkmk`,
+`curs` and `locl` disabled, and compare against `osfont`'s `substitute`.
+
+**Why it is filed rather than fixed.** It is a single glyph in one family and
+the correct answer is not obvious from the outside: it could be our
+`calt`/`clig` picking a rule HarfBuzz's rule ordering rejects, or a lookup
+type we do not implement (Alternate Substitution, type 3, is not implemented)
+being skipped where HarfBuzz applies it. Deciding needs the actual lookup
+dumped, not a guess.
+
+**What the proper fix looks like.** Dump Calibri's `GSUB` lookups covering
+glyph 876/877, find which lookup HarfBuzz applies that we do not (or which we
+apply that it does not), and either implement the missing type or fix the
+rule ordering. Then add the pair to
+`installed_fonts_reach_lookups_past_the_subtable_budget`'s table of faces
+with known answers.
+
+### TD-FONT-SHAPING-HAS-NO-UNICODE-NORMALIZATION-STAGE. `e` + combining acute is not composed before GSUB — 2026-08-14 — OPEN
+
+**Where:** `gui/font/src/shape.rs`, between mapping characters to glyphs and
+running `gsub::Substitutions::apply`. There is no normalization stage at all.
+
+**Symptom.** Shaping `"e\u{301}"` gives two glyphs — the base letter and a
+combining accent placed by GPOS — where HarfBuzz gives the single
+precomposed glyph for `é`. This affects **288 of the 556 installed faces**,
+which is by far the largest single class of disagreement with HarfBuzz.
+
+**Why it is not a GSUB bug.** HarfBuzz runs its own Unicode normalizer
+(`hb-ot-shape-normalize`) as a distinct stage before applying GSUB. Real
+shapers compose to NFC and then, if the font cannot render the composed
+form, decompose again and place marks. We do neither: we take the string's
+code points as given.
+
+**Consequence today.** The output is not *wrong* — the accent is attached at
+its GPOS anchor and looks right — but it is a different glyph run from every
+other shaper, which means metrics, hit-testing offsets and any future
+comparison against a reference rendering will disagree. It also means a face
+that has a good precomposed `é` glyph but poor anchors renders worse than it
+should.
+
+**What the proper fix looks like.** A normalization stage in `shape.rs` that
+runs before substitution: compose to NFC using a compact Unicode composition
+table (the canonical-composition pairs, not the whole UCD), check the
+composed character has a glyph in the face, and fall back to the decomposed
+form when it does not. The decompose-when-unmappable direction matters as
+much as the compose direction — that is how a face without `é` still shows
+an accented e.
+
+**Blocks.** Nothing, but it is the largest remaining shaping gap and the
+next roadmap item after contextual substitution.
+
+
 ---
 
 ## Fixed Bugs

@@ -60,14 +60,22 @@ import statistics
 import subprocess
 import sys
 
-# `[bench] SCORE <name> <measured_ns> <target_ns> <PASS|OVER> [<mean_ns> <iters>]`
+# `[bench] SCORE <name> <measured_ns> <target_ns|-> <PASS|OVER|TRACK> [<mean_ns> <iters>]`
 #
 # The trailing pair is optional because it was added after the history file
 # already had records in it: logs written before the kernel emitted it must
 # still parse, or the one longitudinal record we have gets truncated at the
 # point of the change. Absent, dispersion is simply unknown for that run.
+#
+# `- TRACK` is a benchmark the kernel records without grading, because it has no
+# published hardware target (the `vfs_stat_breakdown_*` phases,
+# `ipc_channel_roundtrip_64k`). It must be accepted here for the same reason it
+# had to be emitted there: a line this regex rejects is silently dropped, and a
+# benchmark that is dropped by the parser is indistinguishable from one the
+# kernel never measured. The target column is `-` and not `0` so that "has no
+# target" cannot be confused with "has a target of zero and failed it".
 SCORE_RE = re.compile(
-    r"^\[bench\]\s+SCORE\s+(\S+)\s+(\d+)\s+(\d+)\s+(PASS|OVER)"
+    r"^\[bench\]\s+SCORE\s+(\S+)\s+(\d+)\s+(\d+|-)\s+(PASS|OVER|TRACK)"
     r"(?:\s+(\d+)\s+(\d+))?\s*$"
 )
 
@@ -173,7 +181,13 @@ def parse_serial(path):
                 if match:
                     name, measured, target, verdict, mean, iters = match.groups()
                     entries[name] = (
-                        int(measured), int(target), verdict,
+                        int(measured),
+                        # None for a tracked benchmark. Callers that grade
+                        # against the target must skip these rather than treat
+                        # the absence as a disagreement -- see
+                        # check_baseline_agreement.
+                        None if target == "-" else int(target),
+                        verdict,
                         int(mean) if mean is not None else None,
                         int(iters) if iters is not None else None,
                     )
@@ -605,6 +619,11 @@ def report_baselines(current_entries, baselines):
     * **unused baseline** -- the file states a target for something the suite
       does not measure, which reads as coverage and is not.
 
+    A *tracked* benchmark (target `-` on the wire, `None` here) is none of the
+    three: it declares no target, so there is nothing to cross-check. It is
+    counted and named in the summary but never listed as unbaselined, which it
+    would otherwise be on every single run.
+
     Reporting only. Deciding which side is right needs a human or a citation,
     and silently trusting either one is how the two drifted apart to begin
     with.
@@ -613,22 +632,40 @@ def report_baselines(current_entries, baselines):
         print("  Baselines: bench/baselines.toml could not be parsed - "
               "targets are UNVERIFIED (this is not the same as agreeing).")
         return
-    disagree, missing = [], []
+    disagree, missing, tracked = [], [], []
     for name, vals in sorted(current_entries.items()):
         kernel_target = vals[1]
-        if name not in baselines:
+        if kernel_target is None:
+            # A tracked benchmark states no target, so there is nothing here to
+            # agree or disagree with. Listing it as "unbaselined" would be a
+            # false report -- it is not missing a baseline, it is a benchmark
+            # that deliberately has none -- and would grow the missing list on
+            # every run until the real unbaselined entries were lost in it.
+            tracked.append(name)
+        elif name not in baselines:
             missing.append(name)
         elif baselines[name] != kernel_target:
             disagree.append((name, kernel_target, baselines[name]))
-    unused = sorted(set(baselines) - set(current_entries))
+    # Tracked names are excluded from `unused` too: a baseline that names one
+    # is a real inconsistency (the file grades something the kernel does not),
+    # so it must stay reportable, and set-differencing against every parsed
+    # name would hide it. Hence the difference is taken against the *graded*
+    # names only.
+    graded = {n for n, v in current_entries.items() if v[1] is not None}
+    unused = sorted(set(baselines) - graded)
 
+    # Stated whenever there are any, including on the all-agree path: the count
+    # is how a reader tells "N benchmarks agree" from "N benchmarks were graded
+    # and M more were not graded at all", which are different facts about the
+    # run and would otherwise both print the same line.
+    suffix = f" ({len(tracked)} tracked without a target)" if tracked else ""
     if not (disagree or missing or unused):
-        print(f"  Baselines: all {len(current_entries)} targets agree with "
-              "bench/baselines.toml.")
+        print(f"  Baselines: all {len(graded)} targets agree with "
+              f"bench/baselines.toml{suffix}.")
         return
     print(f"  Baselines: {len(disagree)} disagree, {len(missing)} unbaselined, "
-          f"{len(unused)} unused (bench/baselines.toml vs the kernel's own "
-          "SCORE targets):")
+          f"{len(unused)} unused{suffix} (bench/baselines.toml vs the kernel's "
+          "own SCORE targets):")
     for name, kernel_target, file_target in disagree:
         print(f"    {name}: kernel says {kernel_target}ns, file says "
               f"{file_target}ns")

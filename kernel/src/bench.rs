@@ -463,11 +463,40 @@ pub fn run_with_cache_info<F: FnMut()>(name: &str, iterations: u32, mut f: F) ->
 // Scorecard — automated baseline comparison
 // ---------------------------------------------------------------------------
 
-/// A single scorecard entry comparing a benchmark against its target.
+/// A single scorecard entry: a benchmark's measurement, and *optionally* a
+/// hardware target to grade it against.
 struct ScoreEntry {
     name: &'static str,
     measured_ns: u64,
-    target_ns: u64,
+    /// `None` for a benchmark with no meaningful hardware target.
+    ///
+    /// This used to be a plain `u64`, which fused two independent jobs into
+    /// one: entering a benchmark into the longitudinal record, and grading it
+    /// against a published figure. A benchmark with nothing to grade against
+    /// therefore could not be recorded *at all* — the only way onto the
+    /// scorecard was to invent a target, and an invented target of 0 grades as
+    /// a permanent failure and skews the pass/fail summary. That reasoning is
+    /// still written out at the `ipc_channel_roundtrip_64k` call site, which
+    /// concluded "deliberately NOT added to the scorecard" and printed prose
+    /// instead.
+    ///
+    /// Prose is unparseable, so those benchmarks were not merely ungraded but
+    /// unrecorded: `bench/history.jsonl` has no entry for any of them and
+    /// `scripts/bench-history.py` cannot flag a regression in one. Verified
+    /// rather than assumed — every release record in that file carries zero
+    /// `vfs_stat_breakdown_*` entries. The five phases of the VFS path lookup,
+    /// which are the first place a namespace-translation regression would show
+    /// up, were readable only by hand-diffing serial logs.
+    ///
+    /// Splitting the two jobs is what makes them recordable: [`track`] files a
+    /// measurement with no target, [`score`] files one with a target. See
+    /// `known-issues.md → B-BENCH-BREAKDOWN-PHASES-ARE-NOT-RECORDED`.
+    target_ns: Option<u64>,
+    /// Whether the benchmark met its target; always `false` when there is none.
+    ///
+    /// Read it only alongside `target_ns`: on a tracked entry it means "not
+    /// graded", not "failed". `print_scorecard` and the dashboard therefore
+    /// both compute their pass/fail summary over the targeted subset.
     passed: bool,
     /// Mean nanoseconds per iteration, carried alongside the reported minimum.
     ///
@@ -500,10 +529,15 @@ pub struct ScoreInfo {
     pub name: &'static str,
     /// Measured minimum nanoseconds.
     pub measured_ns: u64,
-    /// Target nanoseconds from baselines.
-    pub target_ns: u64,
-    /// Whether the benchmark met its target.
-    pub passed: bool,
+    /// Target nanoseconds from baselines, or `None` if the benchmark is
+    /// tracked for regression comparison only and has no hardware target.
+    pub target_ns: Option<u64>,
+    /// Whether the benchmark met its target, or `None` if it has no target.
+    ///
+    /// Deliberately not a bare `bool`: a tracked benchmark has not failed, and
+    /// reporting `false` for it would put it in the failure count of every
+    /// consumer that did not think to check `target_ns` first.
+    pub passed: Option<bool>,
 }
 
 /// Return a snapshot of the current scorecard for external use.
@@ -517,7 +551,7 @@ pub fn scorecard_snapshot() -> Vec<ScoreInfo> {
             name: e.name,
             measured_ns: e.measured_ns,
             target_ns: e.target_ns,
-            passed: e.passed,
+            passed: e.target_ns.map(|_| e.passed),
         })
         .collect()
 }
@@ -550,7 +584,29 @@ fn accesses(cycles: u64, floor: u64) -> (u64, u64) {
 }
 
 fn score(name: &'static str, result: &BenchResult, target_ns: u64) {
-    let passed = result.min_ns <= target_ns;
+    record(name, result, Some(target_ns));
+}
+
+/// Record a benchmark that has no hardware target, for regression tracking only.
+///
+/// Use this for any measurement worth comparing run-over-run but not worth
+/// grading against a published figure: the phase decomposition of a larger
+/// benchmark, a baseline for a cost rather than a latency budget, an
+/// exploratory number. It lands in `bench/history.jsonl` exactly like a scored
+/// benchmark and is diffed against the previous boot exactly like one — it just
+/// never appears in the pass/fail summary or the over-target list.
+///
+/// The alternative, and what this code did before, is to print the number in a
+/// human-readable line and drop it. That is not a lighter-weight form of
+/// recording it; it is not recording it. See [`ScoreEntry::target_ns`].
+fn track(name: &'static str, result: &BenchResult) {
+    record(name, result, None);
+}
+
+fn record(name: &'static str, result: &BenchResult, target_ns: Option<u64>) {
+    // `false` for an untargeted entry is "not graded", not "failed"; every
+    // reader of `passed` pairs it with `target_ns`. See `ScoreEntry::passed`.
+    let passed = target_ns.is_some_and(|t| result.min_ns <= t);
     SCORECARD.lock().push(ScoreEntry {
         name,
         measured_ns: result.min_ns,
@@ -574,7 +630,14 @@ fn score(name: &'static str, result: &BenchResult, target_ns: u64) {
 ///
 /// ```text
 /// [bench] SCORE <name> <measured_ns> <target_ns> <PASS|OVER> <mean_ns> <iters>
+/// [bench] SCORE <name> <measured_ns> -           TRACK      <mean_ns> <iters>
 /// ```
+///
+/// The second form is a benchmark recorded by [`track`] rather than [`score`]:
+/// it has no hardware target, so there is nothing to grade and the target
+/// column reads `-`. It is recorded and diffed run-over-run exactly like the
+/// first form — which is the whole point, since the alternative available
+/// before the two forms existed was to print prose and record nothing.
 ///
 /// The trailing `<mean_ns> <iters>` are an append-only extension: the parser
 /// treats them as optional so logs recorded before they existed still read
@@ -600,27 +663,56 @@ fn score(name: &'static str, result: &BenchResult, target_ns: u64) {
 #[allow(clippy::arithmetic_side_effects)]
 fn print_scorecard() {
     let entries = SCORECARD.lock();
-    let total = entries.len();
+    // Counted over the *targeted* subset. A tracked entry has no target, so
+    // including it would inflate the denominator with benchmarks that could
+    // never be "within hardware target" and make the ratio drift downward
+    // every time one was added.
+    let graded = entries.iter().filter(|e| e.target_ns.is_some()).count();
     let passed = entries.iter().filter(|e| e.passed).count();
-    let failed = total.saturating_sub(passed);
+    let failed = graded.saturating_sub(passed);
+    let tracked = entries.len().saturating_sub(graded);
 
     // Machine-readable first, so a truncated log still yields a usable record.
     for entry in &*entries {
-        serial_println!(
-            "[bench] SCORE {} {} {} {} {} {}",
-            entry.name,
-            entry.measured_ns,
-            entry.target_ns,
-            if entry.passed { "PASS" } else { "OVER" },
-            entry.mean_ns,
-            entry.iterations
-        );
+        match entry.target_ns {
+            Some(target) => serial_println!(
+                "[bench] SCORE {} {} {} {} {} {}",
+                entry.name,
+                entry.measured_ns,
+                target,
+                if entry.passed { "PASS" } else { "OVER" },
+                entry.mean_ns,
+                entry.iterations
+            ),
+            // `-` rather than `0`: a zero target is indistinguishable from a
+            // real target of zero, and the parser has to be able to tell "no
+            // target" from "a target this failed to meet".
+            None => serial_println!(
+                "[bench] SCORE {} {} - TRACK {} {}",
+                entry.name, entry.measured_ns, entry.mean_ns, entry.iterations
+            ),
+        }
     }
 
-    serial_println!(
-        "[bench] === Scorecard: {}/{} within hardware target ===",
-        passed, total
-    );
+    // Two whole lines rather than a computed suffix: `format!` is not in scope
+    // in this crate and pulling in `alloc::format` to build a fragment of a
+    // diagnostic would put a heap allocation in the benchmark harness itself.
+    //
+    // The tracked count is named and not silently omitted — otherwise the
+    // difference between this denominator and the number of SCORE lines above
+    // is an unexplained discrepancy for anyone checking one against the other.
+    if tracked > 0 {
+        serial_println!(
+            "[bench] === Scorecard: {}/{} within hardware target, \
+             {} tracked without one ===",
+            passed, graded, tracked
+        );
+    } else {
+        serial_println!(
+            "[bench] === Scorecard: {}/{} within hardware target ===",
+            passed, graded
+        );
+    }
 
     if failed > 0 {
         serial_println!(
@@ -628,21 +720,26 @@ fn print_scorecard() {
              TCG measurements are 10-400x hardware; compare bench/history.jsonl):"
         );
         for entry in &*entries {
-            if !entry.passed {
-                let pct = if entry.target_ns > 0 {
-                    entry.measured_ns.saturating_mul(100) / entry.target_ns
+            // `Some(target)` and not `!entry.passed`: a tracked entry also has
+            // `passed == false`, and listing it here would report a benchmark
+            // as over a target it does not have.
+            if let Some(target) = entry.target_ns
+                && !entry.passed
+            {
+                let pct = if target > 0 {
+                    entry.measured_ns.saturating_mul(100) / target
                 } else {
                     0
                 };
                 serial_println!(
                     "[bench]   {} : {}ns (target {}ns, {}%)",
-                    entry.name, entry.measured_ns, entry.target_ns, pct
+                    entry.name, entry.measured_ns, target, pct
                 );
             }
         }
     }
 
-    if failed == 0 && total > 0 {
+    if failed == 0 && graded > 0 {
         serial_println!("[bench] All benchmarks within target.");
     }
 }
@@ -2654,10 +2751,15 @@ fn bench_ipc_channel_large() {
 
     // No hard latency target: this is a baseline for the data-handling cost,
     // not a pass/fail gate (the small-message round-trip carries the < 2 µs
-    // hot-path target).  Deliberately NOT added to the scorecard — a target of
-    // 0 would always register as a failure and skew the pass/fail summary.
-    // Report min/mean for regression tracking instead; a future zero-copy path
-    // should drive this well below the copy-bound number.
+    // hot-path target).  The comment here used to continue "deliberately NOT
+    // added to the scorecard — a target of 0 would always register as a failure
+    // and skew the pass/fail summary", and then say the min/mean were reported
+    // "for regression tracking instead".  The first half was right and the
+    // second half was false: a serial line is not a regression record, and this
+    // benchmark was absent from `bench/history.jsonl` for its whole life, so
+    // the future zero-copy improvement it anticipates would have had nothing to
+    // be compared against.  `track` records it without inventing a target.
+    track("ipc_channel_roundtrip_64k", &result);
     serial_println!(
         "[bench]   ipc_channel_roundtrip_64k: baseline min {}ns mean {}ns (64 KiB payload)",
         result.min_ns, result.mean_ns
@@ -3901,6 +4003,21 @@ fn bench_vfs_stat_breakdown() {
     });
 
     let (hits_after, misses_after, valid_after) = Vfs::dcache_stats();
+
+    // Recorded, not merely printed. These five phases are the decomposition of
+    // the VFS path lookup, so they are the first place a regression in path
+    // resolution shows up — and until `track` existed they were computed,
+    // printed as prose in the lines below, and dropped, because `score` was the
+    // only way onto the scorecard and none of them has a published hardware
+    // target to be scored against. The prose stays (it states the *relations*
+    // between the phases, which no single recorded number does); what changes
+    // is that `bench/history.jsonl` now carries the phases themselves and
+    // `scripts/bench-history.py` can diff them run-over-run.
+    track("vfs_stat_breakdown_full", &full);
+    track("vfs_stat_breakdown_resolved", &resolved_only);
+    track("vfs_stat_breakdown_resolve", &resolve_direct);
+    track("vfs_stat_breakdown_ns", &ns_only);
+    track("vfs_stat_breakdown_prologue", &prologue);
 
     let resolve_ns = full.min_ns.saturating_sub(resolved_only.min_ns);
     serial_println!(

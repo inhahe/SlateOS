@@ -798,6 +798,64 @@ def test_baselines_crosscheck(bh, tmpdir):
           real.get("compositor_frame_4k"), 2_000_000)
 
 
+def test_tracked_benchmarks_round_trip(bh, tmpdir):
+    """A benchmark with no hardware target must still reach the record.
+
+    This is the bug B-BENCH-BREAKDOWN-PHASES-ARE-NOT-RECORDED was: `score()`
+    could only file a benchmark *with* a target, so the five
+    `vfs_stat_breakdown_*` phases and `ipc_channel_roundtrip_64k` were printed
+    as prose and dropped. Every release record in `bench/history.jsonl` carries
+    zero of them.
+
+    The fix adds a second wire form, `<measured> - TRACK <mean> <iters>`, and
+    the failure mode it introduces is that the parser silently ignores a line it
+    does not match -- which looks exactly like the kernel never measuring it.
+    So this asserts the whole path: the line parses, the target reads as None
+    rather than as a number, the measurement survives, and the graded forms are
+    unaffected.
+    """
+    log = write(tmpdir, "tracked.txt", "\n".join([
+        "[bench] SCORE graded_pass 100 500 PASS 120 2000",
+        "[bench] SCORE graded_over 900 500 OVER 950 2000",
+        "[bench] SCORE vfs_stat_breakdown_ns 263 - TRACK 310 500",
+        "[bench] SCORE ipc_channel_roundtrip_64k 41234 - TRACK 55000 200",
+    ]) + "\n")
+    entries = bh.parse_serial(log)
+
+    check("a TRACK line is not dropped by the parser",
+          "vfs_stat_breakdown_ns" in entries, True)
+    check("all four SCORE lines parse", len(entries), 4)
+    check("a tracked target reads as None, not 0",
+          entries["vfs_stat_breakdown_ns"][1], None)
+    check("a tracked measurement survives",
+          entries["vfs_stat_breakdown_ns"][0], 263)
+    check("a tracked verdict is TRACK",
+          entries["vfs_stat_breakdown_ns"][2], "TRACK")
+    check("tracked dispersion survives",
+          entries["ipc_channel_roundtrip_64k"][3:], (55000, 200))
+    check("a graded target still reads as a number",
+          entries["graded_pass"][1], 500)
+
+    # `over_target` is what the history record stores as the run's failure
+    # count. A TRACK entry must not land in it -- it has no target to be over.
+    over = sum(1 for v in entries.values() if v[2] == "OVER")
+    check("tracked entries are not counted as over-target", over, 1)
+
+    # And the cross-check must not report them as unbaselined, which is the
+    # shape this fix would take if it were half-applied: the parser accepts the
+    # line, then every run reports two permanently-missing baselines.
+    import io
+    import contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        bh.report_baselines(entries, {"graded_pass": 500, "graded_over": 500})
+    out = buf.getvalue()
+    check("a tracked benchmark is not reported as unbaselined",
+          "no baseline for" in out, False)
+    check("tracked benchmarks are counted in the summary",
+          "2 tracked without a target" in out, True)
+
+
 def test_baselines_is_valid_toml():
     """`bench/baselines.toml` must actually be TOML, with no duplicate tables.
 

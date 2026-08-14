@@ -511,6 +511,22 @@ static SCORECARD: Mutex<alloc::vec::Vec<ScoreEntry>> = Mutex::new(alloc::vec::Ve
 ///
 /// Call from within benchmark functions after comparing against the target.
 /// The scorecard summary is printed at the end of `run_all()`.
+/// Express a cycle count as memory accesses, to one decimal place.
+///
+/// Returns `(whole, tenths)` for printing as `{}.{}`. Plain integer division
+/// is not good enough for these diagnostics: a 282-cycle call floor against a
+/// 284-cycle access floor is 0.99 accesses and truncates to a flat `0`, which
+/// reads as "this costs nothing" in exactly the line whose job is to say where
+/// the cost lives. Rounding down to a tenth still understates, but it can no
+/// longer round a whole access away to zero.
+fn accesses(cycles: u64, floor: u64) -> (u64, u64) {
+    if floor == 0 {
+        return (0, 0);
+    }
+    let tenths = cycles.saturating_mul(10) / floor;
+    (tenths / 10, tenths % 10)
+}
+
 fn score(name: &'static str, result: &BenchResult, target_ns: u64) {
     let passed = result.min_ns <= target_ns;
     SCORECARD.lock().push(ScoreEntry {
@@ -522,6 +538,29 @@ fn score(name: &'static str, result: &BenchResult, target_ns: u64) {
 }
 
 /// Print the scorecard summary showing which benchmarks met targets.
+///
+/// Emits two things. First a machine-readable `SCORE` line for **every**
+/// entry, passing or not:
+///
+/// ```text
+/// [bench] SCORE <name> <measured_ns> <target_ns> <PASS|OVER>
+/// ```
+///
+/// `scripts/bench-history.py` parses those, appends them to
+/// `bench/history.jsonl`, and diffs the run against the previous boot **on the
+/// same host**. That diff, not the target comparison, is the signal that
+/// actually means something here: under TCG every guest memory access costs a
+/// softmmu lookup of a few hundred host cycles where hardware takes an L1 hit
+/// at 1-4, so absolute hardware targets are unreachable by construction and
+/// most of this suite reports "ABOVE TARGET" on perfectly correct code. A
+/// run-over-run comparison cancels that emulation constant; an absolute target
+/// cannot. Passing entries must therefore be printed too — a benchmark that
+/// quietly doubles while still beating its target is exactly the regression
+/// the failure-only list has always been blind to.
+///
+/// Second, the human-readable over-target list, kept because it is a useful
+/// map of where the emulator is slowest, but explicitly labelled as reference
+/// rather than as a verdict.
 #[allow(clippy::arithmetic_side_effects)]
 fn print_scorecard() {
     let entries = SCORECARD.lock();
@@ -529,10 +568,27 @@ fn print_scorecard() {
     let passed = entries.iter().filter(|e| e.passed).count();
     let failed = total.saturating_sub(passed);
 
-    serial_println!("[bench] === Scorecard: {}/{} passed ===", passed, total);
+    // Machine-readable first, so a truncated log still yields a usable record.
+    for entry in &*entries {
+        serial_println!(
+            "[bench] SCORE {} {} {} {}",
+            entry.name,
+            entry.measured_ns,
+            entry.target_ns,
+            if entry.passed { "PASS" } else { "OVER" }
+        );
+    }
+
+    serial_println!(
+        "[bench] === Scorecard: {}/{} within hardware target ===",
+        passed, total
+    );
 
     if failed > 0 {
-        serial_println!("[bench] ABOVE TARGET:");
+        serial_println!(
+            "[bench] OVER HARDWARE TARGET (reference, not a regression verdict — \
+             TCG measurements are 10-400x hardware; compare bench/history.jsonl):"
+        );
         for entry in &*entries {
             if !entry.passed {
                 let pct = if entry.target_ns > 0 {
@@ -870,21 +926,22 @@ pub fn run_all() {
         const OWNER_TAG_BUDGET_ACCESSES: u64 = 150; // From baselines.toml
         let budget = access_floor.saturating_mul(OWNER_TAG_BUDGET_ACCESSES);
         let delta = min_on.saturating_sub(min_off);
+        let (acc_whole, acc_tenth) = accesses(delta, access_floor);
         if delta <= budget {
             serial_println!(
                 "[bench]   page_alloc_free_owner_ab: PASS (tagging costs {} cycles/\
-                 alloc+free = {} accesses, limit {} accesses; off={} on={}, {} \
+                 alloc+free = {}.{} accesses, limit {} accesses; off={} on={}, {} \
                  interleaved rounds)",
-                delta, delta / access_floor, OWNER_TAG_BUDGET_ACCESSES,
+                delta, acc_whole, acc_tenth, OWNER_TAG_BUDGET_ACCESSES,
                 min_off, min_on, ROUNDS
             );
         } else {
             serial_println!(
                 "[bench]   page_alloc_free_owner_ab: SLOW (tagging costs {} cycles/\
-                 alloc+free = {} accesses, limit {} accesses; off={} on={}, {} \
+                 alloc+free = {}.{} accesses, limit {} accesses; off={} on={}, {} \
                  interleaved rounds) — suspect an MMIO, a lock, or a per-frame \
                  loop that should be one write_bytes",
-                delta, delta / access_floor, OWNER_TAG_BUDGET_ACCESSES,
+                delta, acc_whole, acc_tenth, OWNER_TAG_BUDGET_ACCESSES,
                 min_off, min_on, ROUNDS
             );
         }
@@ -961,12 +1018,14 @@ pub fn run_all() {
 
                 let call_floor = set_off.saturating_sub(nop_off);
                 let real_work = set_on.saturating_sub(set_off);
+                let (cf_whole, cf_tenth) = accesses(call_floor, access_floor);
+                let (rw_whole, rw_tenth) = accesses(real_work, access_floor);
                 serial_println!(
-                    "[bench]   frame_owner_set_split: call_floor={} cycles ({} \
-                     accesses) work={} cycles ({} accesses) (nop_off={} set_off={} \
+                    "[bench]   frame_owner_set_split: call_floor={} cycles ({}.{} \
+                     accesses) work={} cycles ({}.{} accesses) (nop_off={} set_off={} \
                      nop_on={} set_on={}, {} interleaved rounds)",
-                    call_floor, call_floor / access_floor,
-                    real_work, real_work / access_floor,
+                    call_floor, cf_whole, cf_tenth,
+                    real_work, rw_whole, rw_tenth,
                     nop_off, set_off, nop_on, set_on, ROUNDS
                 );
 

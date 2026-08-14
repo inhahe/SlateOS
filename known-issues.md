@@ -159,6 +159,45 @@ Note that (3) is the one that would actually have caught the bug that motivated
 this entry: a 736 → ~2500 cycle regression still passes a 3700-cycle target.
 The targets are sized against Linux, not against our own last-known-good.
 
+**Progress 2026-08-14 — (3) is DONE; (1) and (2) remain open.**
+
+`print_scorecard` now emits a machine-readable line for **every** entry, not
+just the failures:
+
+```text
+[bench] SCORE <name> <measured_ns> <target_ns> <PASS|OVER>
+```
+
+`scripts/bench-history.py` parses those out of the serial log, appends a
+JSON-lines record (timestamp, host, git commit, all measurements) to
+`bench/history.jsonl`, and diffs the run against the previous record **from the
+same host**, reporting anything that moved more than a threshold (default 25%)
+plus benchmarks that appeared or vanished. `boot-test.sh::print_bench_results`
+invokes it automatically, non-fatally.
+
+Three things about the design are deliberate:
+
+* **Passing entries are recorded too.** The old failure-only list was blind to
+  precisely the bug that motivated this entry — a benchmark that doubles while
+  still beating a Linux-sized target never appeared in the output at all.
+* **Diffs are same-host only.** A different machine or QEMU build moves every
+  number at once; reporting "no baseline" beats reporting a hardware difference
+  as a regression.
+* **Over-target is no longer phrased as a failure**, in the kernel output or in
+  `boot-test.sh`. It is labelled reference. That follows directly from
+  `TD-BENCH-OWNER-AB-BUDGET-WAS-AN-ABSOLUTE-CYCLE-COUNT`: under TCG the
+  hardware targets are unreachable by construction, so treating them as
+  verdicts trains the reader to ignore the whole suite — which is how a real
+  regression hid in it.
+
+`boot-test.sh` previously advised "compare against prior runs rather than
+treating this as a hard regression" while nothing stored prior runs, making the
+advice unfollowable. It is now followable.
+
+Still open: (1) making the *absence* of benchmark results loud on a routine
+non-`--bench` boot, and (2) deciding when `--bench` runs, since it roughly
+doubles the boot cycle under TCG.
+
 ---
 
 ### B-PATHZ-PREREQUISITE-SKIPS-ARE-SILENT. 26 Path-Z self-test rungs (every `tcc` rung, Parts 35–60) have been no-opping on every boot while the boot test reported PASSED — 2026-08-13 — ✅ FIXED 2026-08-13 (`kernel/src/proc/spawn.rs`, `kernel/src/main.rs`, `scripts/boot-test.sh`)
@@ -44062,6 +44101,33 @@ page_alloc_free_owner_ab: SLOW (17176 cycles/alloc+free = 171 accesses, limit 40
    observed multiplier independently, and that the looseness costs no detection
    power: this is a structural tripwire, not a stopwatch, and every failure it
    guards against is an order-of-magnitude event, not a percentage.
+
+**Verified 2026-08-14** on the boot following both follow-up fixes:
+
+```
+memory_access_floor: 284 cycles/guest byte-store (measured=284 over 64 stores/window: nop=8238 store=26474)
+fast_cpu_index: PASS (476 cycles over an empty closure, limit 1136 = 4 accesses)
+page_alloc_free_owner_ab: PASS (tagging costs 11778 cycles/alloc+free = 41 accesses, limit 150)
+frame_owner_set_split: call_floor=282 cycles work=3054 cycles
+```
+
+The amplified calibration produced `measured=284` where the single-store form
+produced `74`, so the clamp no longer binds and the floor is a real quantity.
+It cross-checks: the independently-measured `.bss` control in
+`frame_owner_set_split` came out at 218 on an earlier boot, and 284 exceeds
+that by roughly the loop overhead this deliberately declines to subtract.
+
+The detail worth keeping in view is that the absolute cycle figure — **11778** —
+sits squarely in the same 7660-11288 band that was reported as `SLOW` for five
+consecutive boots. Not one line of `frame_owner` changed between those runs and
+this one. Only the unit the budget is written in changed, which is the whole
+thesis of this entry stated as a measurement.
+
+**Follow-up wart, also fixed:** the split diagnostic printed
+`call_floor=282 cycles (0 accesses)` — 0.99 accesses truncated to `0` by
+integer division, reading as "this costs nothing" in the one line whose job is
+to say where the cost lives. Access counts now print to one decimal via a
+`accesses(cycles, floor) -> (whole, tenths)` helper.
 
 This keeps the checks doing what they exist for. The failures worth catching —
 an uncached MMIO round-trip, a contended lock, a per-frame loop where a

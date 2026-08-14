@@ -408,21 +408,39 @@ resolve_kernel_symbol() {
 }
 
 # Print the micro-benchmark result lines from the serial log.  The kernel emits
-# them as "[bench] <name>: <number>" plus PASS / "ABOVE TARGET" verdicts from a
-# background task that runs AFTER BOOT_OK.  We surface an "ABOVE TARGET" verdict
-# as a soft PERF NOTE rather than a hard failure: under QEMU's TCG interpreter
-# the absolute cycle counts are noisy and routinely exceed the bare-metal
-# targets, so a slow run here is not by itself a regression signal — it's a
-# prompt to compare against the previous run's numbers.
+# them as "[bench] <name>: <number>" plus PASS / "OVER HARDWARE TARGET" lines
+# from a background task that runs AFTER BOOT_OK.
+#
+# An over-target verdict is NOT a failure here and is not reported as one.
+# Under QEMU's TCG interpreter every guest memory access carries a softmmu
+# lookup costing a few hundred host cycles, where real hardware takes an L1 hit
+# at 1-4 cycles, so the bare-metal targets in bench/baselines.toml are
+# unreachable by construction and most of the suite sits 10-400x over them
+# while being perfectly correct.  Five boots were once spent chasing exactly
+# that illusion (known-issues.md,
+# TD-BENCH-OWNER-AB-BUDGET-WAS-AN-ABSOLUTE-CYCLE-COUNT).
+#
+# The comparison that does carry signal is run-over-run on this same host,
+# which cancels the emulation constant.  scripts/bench-history.py records each
+# run to bench/history.jsonl and diffs against the previous one.  This used to
+# say "compare against prior runs" without anything storing them, which made
+# the advice unfollowable.
 print_bench_results() {
     local file="$1"
     [ -f "$file" ] || return 0
     echo "=== Benchmark results ==="
-    grep -E '^\[bench\]' "$file" || echo "(no [bench] lines found)"
-    if grep -q "ABOVE TARGET" "$file"; then
-        echo "PERF NOTE: one or more benchmarks reported ABOVE TARGET."
-        echo "  (QEMU/TCG cycle counts are noisy; compare against prior runs"
-        echo "   rather than treating this as a hard regression.)"
+    # The machine-readable SCORE lines are for bench-history.py, not the reader.
+    grep -E '^\[bench\]' "$file" | grep -v '^\[bench\] SCORE ' \
+        || echo "(no [bench] lines found)"
+
+    # Record and diff.  Never fatal: a missing python or a write failure must
+    # not turn a healthy boot into a failed one.
+    if command -v python &>/dev/null; then
+        python "$SCRIPT_DIR/bench-history.py" --serial "$file" || true
+    elif command -v python3 &>/dev/null; then
+        python3 "$SCRIPT_DIR/bench-history.py" --serial "$file" || true
+    else
+        echo "(python not found; skipping benchmark history diff)"
     fi
 }
 

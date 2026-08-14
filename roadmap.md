@@ -408,12 +408,23 @@ Roadmap:
   Proven live rather than by self-consistency: with a Hebrew
   letter-vowel-meteg string added to the sweep, all 18 Hebrew host faces
   agree with HarfBuzz with the two types on and all 18 disagree with them
-  off. Next unblocked step is the rest of shaping: no Indic reordering
-  (`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`), mark-ness taken from
-  the combining class rather than the general category
-  (`TD-FONT-DECIDES-MARK-NESS-FROM-THE-COMBINING-CLASS`), no language
-  selection (`TD-FONT-IGNORES-LANGSYS-OVERRIDES`). Vello itself
-  waits on `[A]`'s GPU driver.
+  off. Mark-ness now comes from the general category and not the
+  combining class (`TD-FONT-DECIDES-MARK-NESS-FROM-THE-COMBINING-CLASS`
+  closed): three flags where there was one field — `SubGlyph::mark` from
+  category `Mn`, `fallback::zeroes_mark_advances` for the ten scripts
+  whose marks keep their advance, and `klass` back to meaning only where
+  the fallback should put it — plus HarfBuzz's `adjust_mark_offsets`
+  shift for a zeroed mark nothing else places. `Mn` and not all of `M*`,
+  and the per-script zeroing list, were both measured against HarfBuzz on
+  a face declaring no `GSUB`, `GPOS` or `GDEF`; taking `Mc` too made the
+  sweep worse than the bug did. `agree` 10731 → 10917, `misplaced`
+  1027 → 841, the Thai string alone 215 → 29. Next unblocked step is the
+  rest of shaping: no Indic reordering
+  (`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`), no Hebrew or Arabic
+  mark re-sorting (`TD-FONT-DOES-NOT-RE-SORT-HEBREW-AND-ARABIC-MARKS`,
+  which is 465 of the remaining 841), no language selection
+  (`TD-FONT-IGNORES-LANGSYS-OVERRIDES`). Vello itself waits on `[A]`'s
+  GPU driver.
 - `[C]` Wayland-inspired compositor: GPU acceleration, currently a software
   rasterizer (lines ~4605, ~4619)
 - `[C]` Video-encoded capture fallback, H.264/VP9 (lines ~4623, ~5060)

@@ -364,10 +364,17 @@ Roadmap:
 
 Known-issues (open, kernel-owned):
 
-- `B-PTHREAD-CHILD-JUMPS-TO-GARBAGE` defect 1 — clone-time TLS/`%fs` trace in
-  `kernel/src/proc/thread_clone.rs`, then a ~20-boot soak. **(defect 2 fixed
-  2026-08-13)**
-- `B-PTHREAD-TEARDOWN-PF` — kernel `#PF` @ 0x97 during clone-thread teardown
+- ~~`B-PTHREAD-CHILD-JUMPS-TO-GARBAGE` defect 1~~ — **FIXED 2026-08-13**
+  (`975114f54`): `%fs`/`%gs` are now seeded before the child is admitted
+  (`spawn_suspended_with_tls()` → register → `admit()`), so a timer preemption
+  can no longer let the child run the glibc clone entry with an unseeded `%fs`.
+  Corroborated by a 20/20 clean soak. (defect 2 fixed 2026-08-13 `315a7e0ca`.)
+- `B-PTHREAD-TEARDOWN-PF` — kernel `#PF` @ 0x97 during clone-thread teardown.
+  **Blocked on a repro**: 20 boots produced zero occurrences (vs. the stale
+  1-in-5 historical rate), and the recorded mechanism does not fit the capture
+  (assumed a write, but error=0x0 is a read — RIP was likely mis-attributed to
+  the nearest preceding symbol). A bytes-at-RIP dump is now emitted on kernel
+  `#PF` (`5431facbd`) so the next occurrence settles it.
 - `B-FORKEXEC-BOOT-HANG` — intermittent hang at the glibc fork+exec self-test
 - `B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT` — re-run with
   `--hard-lockup-watchdog`

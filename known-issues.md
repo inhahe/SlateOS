@@ -38549,7 +38549,7 @@ the same single occurrence, definition only, exists at commit `315a7e0ca`).
 
 ---
 
-### B-PTHREAD-CHILD-JUMPS-TO-GARBAGE. One `pthread_create`d thread intermittently starts at a bogus RIP and is killed; the process keeps running and reports a wrong answer — PARTIALLY FIXED (defect 2 fixed 2026-08-13; defect 1 still OPEN, 1 in 10 boots) 2026-08-13
+### B-PTHREAD-CHILD-JUMPS-TO-GARBAGE. One `pthread_create`d thread intermittently starts at a bogus RIP and is killed; the process keeps running and reports a wrong answer — FIXED (defect 2 fixed 2026-08-13 `315a7e0ca`; defect 1 fixed 2026-08-13 `975114f54`, corroborated by a 20/20 clean soak) 2026-08-13
 
 **Symptom.** A deliberate 40-boot soak (`scripts/wedge-soak.sh`, run
 `soak-20260813-093459`) was launched to hunt an unrelated wedge. It did not
@@ -38692,12 +38692,52 @@ B-PTHREAD-YIELDBUDGET (resolved) was a silent hang, not a fault.
 soak script already treats a self-test regression as a catch and preserves
 the serial log, which is how this was captured.
 
-**Next step when picked up (defect 1).** Add a `clone`-time trace to
+**Next step when picked up (defect 1).** ~~Add a `clone`-time trace to
 `kernel/src/proc/thread_clone.rs` printing, for each child: the requested TLS
 base, the `%fs` base actually installed, and the first 8 bytes at
 `tls_base + offsetof(struct pthread, start_routine)`; then soak until it trips.
 The failure is frequent enough (1/10) that a single 20-boot soak should catch
-it with the trace attached.
+it with the trace attached.~~ **Superseded — the defect was found by static
+audit instead, see below.**
+
+**Defect 1 FIXED 2026-08-13** (`975114f54`, *seed thread `%fs`/`%gs` base
+before admission*). The planned trace was never needed: auditing the spawn
+path for the register-after-admit pattern found the mechanism directly.
+
+`clone_thread` called `thread::spawn_with_tls`, which **admitted the child to
+the run queue before writing its `%fs`/`%gs` base**. On our uniprocessor
+(TCG) build a timer preemption inside that window lets the child start with an
+unseeded `%fs`. glibc's clone entry stub loads the thread function from
+TLS — a `%fs`-relative fetch of `struct pthread`'s `start_routine` — so with a
+stale/zero `%fs` base it reads a garbage word and jumps to it. That is exactly
+the reported signature: worker `id == 0` (the first child created, i.e. the one
+most likely to be preempted before seeding) starting at a bogus RIP with
+`rip == aux == CR2`, the fault address *being* the instruction pointer.
+
+Fixed structurally rather than by reordering two statements: `thread` now
+exposes a two-phase API — `spawn_suspended_with_tls()` (create + register
+everything, including the TLS bases) followed by an explicit `admit()` — so a
+child cannot become runnable before its per-thread state exists.
+`spawn_with_tls` is retained as a thin wrapper that calls both.
+
+**Confirmation and its honest limits.** The 20-boot soak this entry asked for
+has since run (`build/hang-catches/soak-ctidfix.log`, 2026-08-13 23:02 →
+2026-08-14 01:52): **20/20 boots passed**, every one reporting
+`REAL glibc pthread (… 40000 mutex/futex ops, pthread_join, captured 48 bytes
+== expected): OK` — i.e. the exact `counter=40000 joinsum=10` assertion whose
+failure defined this bug — and zero kernel faults.
+
+That is consistent with a fix but is **not** statistically conclusive on its
+own: at the measured 1-in-10 rate, 20 clean boots would happen by chance
+`0.9^20 ≈ 12%` of the time. The confidence comes primarily from the mechanism
+being understood and closed by construction, with the soak as corroboration.
+If a `counter=30000 joinsum=9` (or the now-loud faulting variant) ever
+reappears, reopen this entry rather than assuming a new bug.
+
+**Bug class.** Third of three register-after-admit defects found in this
+subsystem, alongside B-PTHREAD-JOIN-LOST-CTID (the ctid registration) and
+B-THREAD-JOIN-EXIT-RACE (the join-waiter registration). Worth grepping for
+whenever new per-thread state is keyed on a task id.
 
 **How the defect-2 fix changes what a soak looks like.** Before, the 1-in-10
 boot that hit this produced a *quiet wrong answer* (`counter=30000

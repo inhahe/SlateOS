@@ -11,6 +11,7 @@
 //! syntax it recognises is entirely ASCII, so [`syn`] gives every scanning site
 //! an ASCII view without any of them having to case-split on decodability.
 
+use crate::ast::SubDelim;
 use crate::bfmt;
 use crate::bytes::{self, BStr, Ch, Str};
 
@@ -472,7 +473,12 @@ pub enum SubBody {
     /// takes the body to be everything up to the end of the text and leaves the
     /// complaint to the expansion's own read. See
     /// [`crate::ast::CmdSubBody::Unread::closed`].
-    Unread { closed: bool },
+    ///
+    /// `delim` is which of the three spellings wrote it. Only the unread form
+    /// needs to record that, because only it reaches a word the same shape for
+    /// all three: `extract_dollar_brace_string` names `$(`, `<(` and `>(` in
+    /// one row (subst.c:1881-1950). See [`crate::ast::SubDelim`].
+    Unread { closed: bool, delim: SubDelim },
     /// `` ` … ` `` — parsed at expansion time. Carries the body *exactly as
     /// written*, backslashes and all: bash echoes a backtick body rather than
     /// re-printing it, and re-printing is not merely untidy — a nested `` \` ``
@@ -5144,6 +5150,22 @@ impl Lexer {
                         }
                         // Not an escape: the backslash stands for itself, and the
                         // character after it is read as it would have been.
+                        //
+                        // With one exception, and it is not this read's — the
+                        // `${ … }` *scan* that produced this text honours a
+                        // backslash whatever follows it (`extract_dollar_brace_
+                        // string`'s `case '\\'` steps over the next character,
+                        // subst.c:1899), so a `<(` behind one was never read
+                        // and never parsed. Measured against bash 5.2.37:
+                        // `x='A${z:-\<(fi)}B'; echo "${x@P}"` prints
+                        // `A\<(fi)B` and reports nothing. Taking the `<`/`>`
+                        // into the literal run here is what keeps the arm
+                        // below from meeting it; the bytes are unchanged
+                        // either way.
+                        Some('<' | '>') if self.at(self.pos + 1) == Some('(') => {
+                            lit.push(b'\\');
+                            self.take_into(&mut lit);
+                        }
                         _ => lit.push(b'\\'),
                     }
                 }
@@ -5212,6 +5234,59 @@ impl Lexer {
                     self.pos += 2;
                     let raw = self.read_subst_body(false).map_err(|e| e.at(self.eof_line()))?;
                     segs.push(Seg::ProcSub(input, raw, open_line));
+                }
+                // The same construct in a **double-quoted operand**, where the
+                // expansion above declines it — but where the `${ … }` scan
+                // that produced this text still *read* it.
+                // `extract_dollar_brace_string` names `$(`, `<(` and `>(` in
+                // one row and hands each to `extract_command_subst`
+                // (subst.c:1881-1950), so the body is parsed for its extent
+                // wherever in the braces it sits, and a body that will not
+                // parse fails identically whichever delimiter opened it.
+                // Measured against bash 5.2.37, `x='A${z:-<(fi)}TAIL'; echo
+                // "${x@P}"` and the same written `$(fi)` are byte for byte the
+                // same, down to the remainder the diagnostic quotes.
+                //
+                // Only text no parser read reaches this arm — a source
+                // `"${x:-<(fi)}"` was read by [`Lexer::read_dollar_brace`],
+                // whose own `<(` row parses the body eagerly and splices the
+                // re-print (`parser::procsub_reprints`). So the segment is
+                // [`SubBody::Unread`], and it carries its spelling because
+                // nothing downstream performs it: see
+                // [`crate::ast::SubDelim`].
+                '<' | '>'
+                    if mode == Verbatim::Dquote
+                        && self.here_text
+                        && self.at(self.pos + 1) == Some('(') =>
+                {
+                    flush_lit(&mut segs, &mut lit);
+                    let delim = if c == '<' { SubDelim::ProcIn } else { SubDelim::ProcOut };
+                    self.pos += 2;
+                    let body = self.pos;
+                    match self.read_subst_body(false) {
+                        Ok(raw) => {
+                            let close = self.cur_line();
+                            segs.push(Seg::CmdSub(raw, close, SubBody::Unread {
+                                closed: true,
+                                delim,
+                            }));
+                        }
+                        // No mate, and in unread text that is not this scan's
+                        // failure either: `extract_command_subst` takes the
+                        // rest of the string for the body and leaves the
+                        // complaint to the expansion's own read, exactly as
+                        // for a `$(`.
+                        Err(e) if self.unread_comsub(&e) => {
+                            let src = self.slice(body, self.chars.len());
+                            self.pos = self.chars.len();
+                            let close = self.cur_line();
+                            segs.push(Seg::CmdSub(src, close, SubBody::Unread {
+                                closed: false,
+                                delim,
+                            }));
+                        }
+                        Err(e) => return Err(e.at(self.eof_line())),
+                    }
                 }
                 '$' => match self.read_dollar(false) {
                     Ok(Some(seg)) => {
@@ -5879,7 +5954,7 @@ impl Lexer {
                             let src = self.slice(body, self.chars.len());
                             self.pos = self.chars.len();
                             let close = self.cur_line();
-                            let kind = SubBody::Unread { closed: false };
+                            let kind = SubBody::Unread { closed: false, delim: SubDelim::Dollar };
                             return Ok(Some(Seg::CmdSub(src, close, kind)));
                         }
                         Err(e) => return Err(e.at(self.eof_line())),
@@ -5971,7 +6046,7 @@ impl Lexer {
         match e.unclosed.take().map(|b| *b) {
             Some(UnreadEof::Subst(u)) => Ok(Seg::Unclosed(u)),
             Some(UnreadEof::CmdSub(src)) => {
-                Ok(Seg::CmdSub(src, self.cur_line(), SubBody::Unread { closed: false }))
+                Ok(Seg::CmdSub(src, self.cur_line(), SubBody::Unread { closed: false, delim: SubDelim::Dollar }))
             }
             None => Err(e),
         }
@@ -6009,7 +6084,11 @@ impl Lexer {
     /// eager one, or [`SubBody::Unread`] when the text being scanned is not one
     /// a parser ever read as a word. See [`Lexer::here_text`].
     fn subst_kind(&self) -> SubBody {
-        if self.here_text { SubBody::Unread { closed: true } } else { SubBody::Eager }
+        if self.here_text {
+            SubBody::Unread { closed: true, delim: SubDelim::Dollar }
+        } else {
+            SubBody::Eager
+        }
     }
 
     /// [`Lexer::read_balanced`] for the body of a `$( … )` or `<( … )`
@@ -9249,16 +9328,22 @@ mod tests {
         }
         // `"${z:-$'$(echo Q)'}"`: the body is `z:-$(echo Q)` and the operand
         // `$(echo Q)`, all nine bytes of it spliced.
-        assert_eq!(kinds("$(echo Q)", &[(0, 9)]), vec![SubBody::Unread { closed: true }]);
+        assert_eq!(
+            kinds("$(echo Q)", &[(0, 9)]),
+            vec![SubBody::Unread { closed: true, delim: SubDelim::Dollar }]
+        );
         // The same operand with no splice behind it is read where it stands.
         assert_eq!(kinds("$(echo Q)", &[]), vec![SubBody::Eager]);
         // A window is a window: one written substitution and one spliced beside
         // it in the same operand keep their own answers.
         assert_eq!(
             kinds("$(a)$(b)", &[(4, 8)]),
-            vec![SubBody::Eager, SubBody::Unread { closed: true }],
+            vec![SubBody::Eager, SubBody::Unread { closed: true, delim: SubDelim::Dollar }],
         );
         // A `' … '` run still speaks for what it covers, splices or none.
-        assert_eq!(kinds("'$(a)'", &[]), vec![SubBody::Unread { closed: true }]);
+        assert_eq!(
+            kinds("'$(a)'", &[]),
+            vec![SubBody::Unread { closed: true, delim: SubDelim::Dollar }]
+        );
     }
 }

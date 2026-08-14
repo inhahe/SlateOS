@@ -34224,6 +34224,22 @@ impl Shell {
     /// body's own error was itself fatal (a nested `$( … )`) — and carries on
     /// with the enclosing command.
     fn command_sub_body(&mut self, body: &CmdSubBody) -> Str {
+        // Only the `$(` spelling is *performed*. The other two reach a body
+        // here when a `${ … }` scan read their extent and nothing else did:
+        // `extract_dollar_brace_string` names all three in one row
+        // (subst.c:1881-1950), so the read is shared, but the text it read is
+        // then expanded as a word — and `expand_word_internal` declines a
+        // process substitution under `W_DQUOTE` (subst.c:9942), which the
+        // re-read of a `${x@P}` always is. Measured against bash 5.2.37:
+        // `x='A${z:-<(echo HI)}B'; echo ${x@P}` prints `A<(echo HI)B` and runs
+        // nothing, quoted or not. So the part stands as the text it was
+        // written as — no child, and no `comsub_count` bump either, because no
+        // substitution ran. See [`crate::ast::SubDelim`].
+        if let CmdSubBody::Unread { delim, src, closed, .. } = body
+            && !delim.is_performed()
+        {
+            return bfmt![delim.bytes(), src, if *closed { b")".as_slice() } else { b"" }];
+        }
         // Count every command substitution so callers (e.g. pure assignments)
         // can tell whether one ran while expanding a value.
         self.comsub_count = self.comsub_count.wrapping_add(1);

@@ -1996,8 +1996,11 @@ pub(crate) fn part_src(p: &WordPart) -> Str {
             // any of it, so there is no re-print to print instead.
             // A `$(` with no mate prints back with none either: the source held
             // no `)` and this text *is* the source.
-            CmdSubBody::Unread { src, closed, .. } => {
-                bfmt![b"$(", src, if *closed { b")".as_slice() } else { b"" }]
+            // The spelling is the one the source wrote: a body no parser read
+            // can be any of the three, because the scan that read its extent
+            // names them in one row (see [`SubDelim`]).
+            CmdSubBody::Unread { delim, src, closed, .. } => {
+                bfmt![delim.bytes(), src, if *closed { b")".as_slice() } else { b"" }]
             }
             CmdSubBody::Parsed { prog, .. } => comsub_reprint(b"$(", prog),
         },

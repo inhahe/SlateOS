@@ -1389,6 +1389,45 @@ impl LineMap {
 /// wherever the two differ in *length*: a compound command re-prints over
 /// several lines, so `$LINENO` after one inside the same body sits that much
 /// lower.
+/// Which delimiter opened an *unread* substitution — see
+/// [`CmdSubBody::Unread`].
+///
+/// Only the unread spelling needs to record this. A body a parser read is a
+/// [`CmdSubBody::Parsed`] for the `$(` spelling and a [`WordPart::ProcSub`] for
+/// the other two, so the two shapes already tell them apart; a body no parser
+/// read has one shape for all three, because bash's
+/// `extract_dollar_brace_string` reads all three the same way
+/// (subst.c:1881-1950) and only the *expansion* after it tells them apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubDelim {
+    /// `$( … )` — performed where the expansion meets it.
+    Dollar,
+    /// `<( … )` — read by the scan, never performed by it.
+    ProcIn,
+    /// `>( … )` — likewise.
+    ProcOut,
+}
+
+impl SubDelim {
+    /// The opening delimiter as written — the bytes the body prints back in.
+    #[must_use]
+    pub fn bytes(self) -> &'static [u8] {
+        match self {
+            SubDelim::Dollar => b"$(",
+            SubDelim::ProcIn => b"<(",
+            SubDelim::ProcOut => b">(",
+        }
+    }
+
+    /// Whether the expansion that meets this body *performs* it. Only the `$(`
+    /// spelling is a command substitution; the other two are read for their
+    /// extent alone and then stand as the text they were written as.
+    #[must_use]
+    pub fn is_performed(self) -> bool {
+        matches!(self, SubDelim::Dollar)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CmdSubBody {
     /// `$( … )` — parsed with the enclosing source, then re-read at expansion
@@ -1456,6 +1495,20 @@ pub enum CmdSubBody {
     /// in a here-document body reports one line further down than a
     /// `` ` … ` `` in the same body does.
     Unread {
+        /// Which of the three spellings wrote it.
+        ///
+        /// The *read* is the same for all three — `extract_dollar_brace_string`
+        /// names `$(`, `<(` and `>(` in one row and hands each to
+        /// `extract_command_subst` (subst.c:1881-1950), so a body that will not
+        /// parse fails identically whichever opened it, down to the remainder
+        /// the diagnostic quotes (which starts at the body, never at the
+        /// delimiter). Measured against bash 5.2.37, `A${z:-<(fi)}TAIL` and
+        /// `A${z:-$(fi)}TAIL` under `${x@P}` are byte for byte the same.
+        ///
+        /// What differs is everything *after* the read: only a `$(` is
+        /// performed ([`SubDelim::is_performed`]), and each prints back in the
+        /// delimiter it was written with ([`SubDelim::bytes`]).
+        delim: SubDelim,
         /// The body exactly as written — there is no re-print to stand in for it.
         src: Str,
         /// The rest of the enclosing word, as [`CmdSubBody::Parsed::tail`], and

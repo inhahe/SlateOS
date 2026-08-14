@@ -59088,7 +59088,7 @@ something that exists, or what a `cat` of it reads.
 **How it was found:** implementing part (A) — the eager parse and re-print of a
 process substitution met by a `${ … }` body scan.
 
-### [B] TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN. bash's `brace_gobbler` and its `${x@P}` re-read each meet a `<(` osh's do not — 2026-08-14 — ⚠️ OPEN (the `brace_gobbler` half ✅ FIXED 2026-08-14)
+### [B] TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN. bash's `brace_gobbler` and its `${x@P}` re-read each meet a `<(` osh's do not — 2026-08-14 — ⚠️ OPEN (both halves ✅ FIXED 2026-08-14; one residue of the second remains, below)
 
 Two residues of TD-OILS-A-PROCESS-SUBSTITUTION-IN-A-BRACE-BODY-IS-NEVER-PERFORMED
 (above), left after both halves of it were done. Each is a *second* scan of the
@@ -59153,7 +59153,12 @@ and only the row is missing.
   words brace expansion does not reach (assignment RHS, `case` word, here-doc
   body), the read happening before expansion (`z=Z`, `${z:+…}`), and the `declare
   -f` re-print.
-* **⚠️ STILL OPEN.** `x='${z:-<(fi)}'; echo "${x@P}"` — bash's `extract_dollar_brace_string`
+* **✅ FIXED 2026-08-14 for the double-quoted operand** (`${z:-…}`, `${z:+…}`,
+  `${z:=…}`, `${z:?…}` and the plain `${z-…}` family) — which is the position
+  the report named, and the only one a `${x@P}`/`PS4` re-read reaches with the
+  quoting bash's own expansion declines a process substitution under. The
+  remaining positions are a residue of their own, logged at the end of this
+  bullet. Original report: `x='${z:-<(fi)}'; echo "${x@P}"` — bash's `extract_dollar_brace_string`
   (subst.c:1881-1950) has a `<(` row of its own and recurses into it with a real
   parse, so the `@P` re-read is a `bad substitution` and the text is printed
   unchanged; osh splices the re-print and prints `<(fi)`.
@@ -59169,16 +59174,21 @@ and only the row is missing.
   performed: `A${z:-<(echo A >&2)}B` prints `A<(echo A >&2)B` and no `A` on
   stderr.
 
-  osh already matches on six of those shapes. What it gets wrong:
+  osh already matched on six of those shapes. What it got wrong:
 
-  | written (as `x`, then `echo "${x@P}"`) | bash | osh |
+  | written (as `x`, then `echo "${x@P}"`) | bash | osh (before) |
   |---|---|---|
   | `A${z:-<(fi)}TAIL` | reports, `bad substitution`, text | `A<(fi)TAIL` |
   | `A${z:-${y:-<(fi)}}B` | reports (nested body too) | `A<(fi)B` |
   | `A${z:-p<(fi)q$(for)r}B` | reports the **`<(fi)`** | reports the `$(for)` |
   | `A${z:-<(fi}B` | `unexpected EOF`, `bad substitution`, text | runs `fi}` — `command not found` |
 
-  **Why it is not a two-line change.** The `<(` span *is* already collected —
+  All but the last now match. The last is a *different* defect that the `$(`
+  spelling has identically — see
+  TD-OILS-AN-UNCLOSED-SUBSTITUTION-IN-AN-UNREAD-BRACE-BODY-IS-RUN-INSTEAD-OF-REFUSED
+  below — so it was left alone here rather than fixed twice.
+
+  **Why it was not a two-line change.** The `<(` span *is* already collected —
   `Lexer::read_dollar_brace` has the row (lexer.rs:7069) and records a
   `CmdSubSpan` with `SubOpen::Proc`, its `src`, its `range` and
   `SubBody::Unread`. What is missing is a [`WordPart`] for
@@ -59213,4 +59223,108 @@ and only the row is missing.
   `Shell::gobbled_procsubs` does for the `brace_gobbler` half above, and the
   reason that one could be done without touching the AST.
 
+  **What was done.** The first of the two: the part carries its spelling, which
+  makes both blockers vanish rather than needing to be worked around.
+
+  * `ast::SubDelim { Dollar, ProcIn, ProcOut }`, with `bytes()` (the delimiter
+    as written) and `is_performed()` (true only for `Dollar`). Recorded on
+    `CmdSubBody::Unread` and on the lexer's `SubBody::Unread`. Only the unread
+    form needs it: a body a parser *read* is a `CmdSubBody::Parsed` for `$(`
+    and a `WordPart::ProcSub` for the other two, so those two shapes already
+    tell the spellings apart.
+  * `Lexer::read_word_verbatim` gained a `<(`/`>(` row for `Verbatim::Dquote`
+    **when the text is unread** (`self.here_text`), emitting
+    `Seg::CmdSub(body, close, SubBody::Unread { delim })`. The existing
+    `Verbatim::Bare | Verbatim::Replacement` row above it is untouched — those
+    fragments really do *perform* the substitution, measured:
+    `x='A${z/p/<(echo hi)}B'; echo "${x@P}"` prints a `/dev/fd/N` in bash.
+  * `unparse.rs` prints the body back in `delim.bytes()`, and
+    `Shell::command_sub_body` returns that text instead of running anything
+    when `!delim.is_performed()`.
+  * The backslash arm of the same loop takes a `\<(`/`\>(` into the literal
+    run, because the *scan* that produced this text honours a backslash
+    whatever follows it (`extract_dollar_brace_string`'s `case '\\'`,
+    subst.c:1899) while the operand's own dquote read does not. `A${z:-\<(fi)}B`
+    prints `A\<(fi)B` and reports nothing.
+
+  Both blockers then answer themselves: the `tail` is filled by
+  `unparse::attach_comsub_tails` over the whole assembled word (so it runs past
+  the `}`, giving `` `fi)}TAIL' ``), and the interleaving is
+  `Shell::brace_scanned_subs`'s existing left-to-right walk.
+
+  **Verified:** `userspace/oils/tests/corpus/a-process-substitution-a-brace-re-read-meets-is-read-like-the-dollar-spelling.sh`,
+  22 rows, all matching bash 5.2.37 — the byte-identity with the `$(` spelling,
+  both interleavings, the nested body, the not-performed rows (including
+  `>(cat)` and a body writing to stderr, quoted and unquoted), the read
+  happening before the operand is chosen (`z=Z`, `${z:+…}`), the four shields
+  (unbraced text, `" … "`, `' … '`, backslash), the stepped-over subscript, and
+  the `PS4` spelling of the same re-read.
+
+* **⚠️ RESIDUE, STILL OPEN.** The row is wired for the double-quoted **operand**
+  only. bash's scan reads the whole `${ … }` body, so every other fragment in
+  it wants the same row, and osh has none of them:
+
+  | written (as `x`, then `echo "${x@P}"`) | bash | osh |
+  |---|---|---|
+  | `A${z#<(fi)}B` (pattern) | reports ×2, `bad substitution`, text | right text, **no diagnostics** |
+  | `A${z/p/<(fi)}B` (replacement) | reports ×2, `bad substitution`, text | right text, **no diagnostics** |
+  | `A${z^^<(fi)}B` (case pattern) | reports ×2, `bad substitution`, text | right text, **no diagnostics** |
+  | `A${z:0:<(fi)}B` (offset) | reports ×2, `bad substitution`, text | `AB` |
+
+  The `$( … )` spelling is right in all four (measured), so again only the row
+  is missing. It is harder than the operand's was, because in three of the four
+  the substitution is *both* read for its extent **and** performed — a
+  replacement really does expand to `/dev/fd/N` — so the part cannot simply be
+  the non-performed `CmdSubBody::Unread` the operand's is. The proper fix is to
+  give `WordPart::ProcSub` the `src`/`tail` an unread body needs and add it to
+  `Shell::brace_scanned_subs_slice`'s match, so one part can answer for both.
+  The offset row is a fourth shape again: it goes through `Verbatim::Arith`,
+  whose fragments have no `<(` row at all.
+
 **How it was found:** implementing the entry above.
+
+### [B] TD-OILS-AN-UNCLOSED-SUBSTITUTION-IN-AN-UNREAD-BRACE-BODY-IS-RUN-INSTEAD-OF-REFUSED. `x='A${z:-$(fi}B'; echo "${x@P}"` runs `fi}` where bash reports `bad substitution` — 2026-08-14 — ⚠️ OPEN
+
+A `$( … ` with no `)` inside a `${ … }` written in text no parser read — a
+`${x@P}` re-read, a `PS4`, a here-document body. bash reads the extent with
+`xparse_dolparen`, which fails at end of input; `si` is left past the end of the
+string, so the brace never closes, so `parameter_brace_expand` reports
+`bad substitution` naming the whole text and prints the text unchanged. Nothing
+is run. osh gets the *first* diagnostic right and then runs the body anyway:
+
+```sh
+x='A${z:-$(fi}B'; echo "${x@P}"
+# bash: command substitution: line 3: unexpected EOF while looking for matching `)'
+#       line 1: A${z:-$(fi}B: bad substitution
+#       A${z:-$(fi}B
+# osh:  command substitution: line 3: unexpected EOF while looking for matching `)'
+#       line 1: fi}: command not found
+#       A
+
+x='A${z:-$(echo hi}B'; echo "${x@P}"
+# bash: … unexpected EOF …; … bad substitution; A${z:-$(echo hi}B
+# osh:  … unexpected EOF …; Ahi}
+```
+
+Both spellings are affected identically — `<(fi}` behaves exactly as `$(fi}`,
+which is the point: the delimiter is not what is wrong here.
+
+**Where:** `userspace/oils/src/interp.rs`, [`Shell::extent_read_of_subs`]
+(~29622) and [`Shell::run_abandoned_extent`]. The scan classifies the failed
+read as `ExtentRead::Abandoned { body, rest }` and hands the body on to be run.
+That classification is *right* for an abandoned extent bash really does run on
+— it is `extract_command_subst`'s no-`)` path with the `jump_to_top_level`
+suppressed — but wrong when the caller is the brace scan, because there the
+unclosed read is also what stops the `}` from ever being found, and the
+`bad substitution` that follows pre-empts the run.
+
+**Proper fix:** distinguish the two callers. `extent_read_of_subs` should
+report the abandonment to the brace scan (so `brace_extent_scan` fails the
+whole `${ … }` and takes the `bad substitution` path with the source text)
+rather than letting the body reach `run_abandoned_extent`. The `closed: false`
+flag on `CmdSubBody::Unread` already names exactly this shape, so the test is
+to hand.
+
+**How it was found:** measuring the `<(` row of
+TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN
+against its `$(` twin, which turned out to be wrong the same way.

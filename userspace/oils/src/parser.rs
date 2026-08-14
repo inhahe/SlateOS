@@ -36,8 +36,8 @@ use crate::ast::{
     LoopClause,
     ParamOp,
     Pipeline, Program,
-    Redirect, RedirectOp, ReplaceAnchor, SelectClause, SimpleCommand, SubshellClause, Word,
-    WordPart,
+    Redirect, RedirectOp, ReplaceAnchor, SelectClause, SimpleCommand, SubDelim, SubshellClause,
+    Word, WordPart,
 };
 use crate::assoc::AssocArray;
 use crate::bfmt;
@@ -6251,10 +6251,13 @@ fn arith_unread_subs(expr: &Str, nested: &[CmdSubSpan]) -> Vec<WordPart> {
         if s.range.start < at || s.range.end > expr.len() {
             continue;
         }
-        let SubBody::Unread { closed } = s.kind else { continue };
+        let SubBody::Unread { closed, .. } = s.kind else { continue };
         parts.push(WordPart::Literal(expr.get(at..s.range.start).unwrap_or_default().to_vec()));
         parts.push(WordPart::CommandSub {
             body: CmdSubBody::Unread {
+                // The spans this walk keeps are filtered to `SubOpen::Dollar`
+                // above, so the spelling is never in doubt here.
+                delim: SubDelim::Dollar,
                 src: s.src.clone(),
                 // Filled by `unparse::attach_comsub_tails`, once the word this
                 // arithmetic sits in has been assembled.
@@ -6518,7 +6521,14 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
                 // source. The `tail` is filled by
                 // `unparse::attach_comsub_tails` once the word is assembled,
                 // exactly as a `Parsed` body's is.
-                SubBody::Unread { closed } => CmdSubBody::Unread {
+                // A `Seg::CmdSub` is the `$( … )` spelling everywhere a parser
+                // read the text, because the other two are lowered to a live
+                // [`WordPart::ProcSub`] there. In *unread* text they are not
+                // — nothing performs one, and the segment records which
+                // delimiter wrote it so the part can print and stand as its
+                // own source. See [`SubDelim`].
+                SubBody::Unread { closed, delim } => CmdSubBody::Unread {
+                    delim: *delim,
                     src: raw.clone(),
                     tail: Str::new(),
                     close_line: *close_line,

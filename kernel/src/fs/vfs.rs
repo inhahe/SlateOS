@@ -1383,6 +1383,42 @@ impl Vfs {
             return Err(KernelError::InvalidArgument);
         }
 
+        // Refuse a mount that path lookup could never reach.
+        //
+        // `resolve_inner` walks every non-final component and requires each
+        // to exist in its containing filesystem — a mount point counts,
+        // because `resolve_mount`'s longest-prefix match maps it to the
+        // mounted fs. So a mount at `/mnt/x` when `/mnt` does not exist is
+        // registered, consumes an `fs_id`, appears in `/proc/mounts`, and is
+        // reachable by *nothing*: every lookup dies on the `mnt` component
+        // before it ever consults the mount table.
+        //
+        // That is the silently-wrong-behaviour class this codebase keeps
+        // paying for, and it cost a real debugging session: overlay
+        // self-test 13 mounted at `/mnt/ovl-cow-test`, `mount` returned
+        // `Ok`, the log said "Mounted overlay filesystem at
+        // '/mnt/ovl-cow-test' (rw)", and the very next read failed
+        // `NotFound` — pointing the investigation at the overlay engine,
+        // which was working perfectly.
+        //
+        // Only the *parent* must exist, not the mount point itself. Linux
+        // requires the mount point directory to exist, but our boot sequence
+        // mounts `/proc`, `/dev` and `/sys` over a root memfs that has no
+        // such directories, and longest-prefix matching makes the mount
+        // point itself reachable regardless. Requiring the parent is the
+        // weakest condition that makes "registered" and "reachable" mean the
+        // same thing.
+        //
+        // Checked before taking `VFS.lock()`, because `stat` re-enters the
+        // VFS and would deadlock against our own guard.
+        if let Some(parent) = mount_path.parent() {
+            match Self::stat(parent) {
+                Ok(entry) if entry.entry_type == EntryType::Directory => {}
+                Ok(_) => return Err(KernelError::NotADirectory),
+                Err(e) => return Err(e),
+            }
+        }
+
         let mut vfs = VFS.lock();
 
         // Check for duplicate mount point.

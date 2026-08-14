@@ -39374,6 +39374,64 @@ idle-reschedule bug). Given the Q24 lineage, the highest-value proactive step is
 the kernel-wide raw-spin holder-preemption audit already queued as **Q24** in
 `open-questions.md`; this hang is another data point for doing that audit.
 
+**[A] Static audit 2026-08-14c — the silence itself is evidence, and it rules
+out both instrumented lock types.** Two facts about the lock implementations
+turn "no output" from a dead end into a filter:
+
+1. **`crate::sync::Mutex::lock()` disables preemption for the whole hold**
+   (`sync.rs:432`) *and* routes contention through `lock_contended()`, whose
+   stall detector fires after `STALL_SECONDS = 30` of wall-clock spinning,
+   naming the lock, the wedged CPU/task and the locks that CPU already holds.
+2. **`PreemptSpinMutex::lock()` does the same** — `preempt_disable()` then
+   `spin_with_stall()` (`sync.rs:924-931`).
+
+Both detectors fire from *inside* the spin loop, so per their own
+documentation they work "regardless of IF state", and 30 s is far inside the
+480 s timeout this hang consumed. **Therefore a >400 s silent wedge cannot
+have been spinning on a `crate::sync::Mutex` or a `PreemptSpinMutex`** — one
+of them would have announced itself. What remains:
+
+- a **raw `spin::Mutex`** (no preempt-disable *and* no stall detector — the
+  un-converted Q24 remainder), or
+- a non-lock infinite loop / failure to reschedule, or
+- a wedge whose own diagnostic cannot escape (see the console note below).
+
+This is a genuine prune, and it doubles as a **prioritisation criterion for
+the Q24 sweep**: converting a raw lock buys not only holder-preemption safety
+but self-reporting, so each conversion permanently shrinks the set of places a
+future silent hang can hide. Progress on Q24 is therefore measurable, not just
+hygienic.
+
+**Hypotheses checked and RULED OUT (do not re-derive these):**
+
+- *Both registered exit hooks are clean.* `notify_exit_hooks`
+  (`sched/mod.rs:1085`) runs only two real hooks — `pacct::on_task_exit`,
+  which is lock-free (atomics + a static ring; its one call into
+  `sched::task_info` is deliberately the single-task variant, chosen to avoid
+  a long SCHED hold), and `sched::supervisor::on_task_exit`, which uses
+  `crate::sync::Mutex` (`SUPERV`) and so is both preempt-safe and
+  stall-instrumented. The supervisor's restart path is also correctly
+  deferred: it copies the restart info out, `drop(table)`s, and schedules via
+  ktimer *specifically* to avoid spawning in the dying task's context.
+- *"An IRQ handler self-deadlocks on the raw `SERIAL` lock."* Plausible on
+  paper — `serial.rs:147` really is a raw `spin::Mutex` — but `_print`
+  (`serial.rs:204`) already defends it three ways: the whole body runs under
+  `cpu::without_interrupts`, a **per-CPU `IN_PRINT` flag** is claimed *before*
+  the lock is taken (deliberately before, so a nested exception during the
+  *wait* also takes the safe path), and any re-entry falls back to
+  `SerialPort::emergency()`, which does not lock at all. So a nested print
+  cannot wedge on `SERIAL`.
+
+**Remaining lead — `kernel/src/console.rs` is entirely raw.** `CONSOLE`,
+`SCROLLBACK` and `COLOR_SCHEME` (`console.rs:107/478/679`) are `spin::Mutex`
+via `use spin::Mutex`, i.e. no preempt-disable and no stall detector, and
+`console.rs` has no equivalent of serial's `IN_PRINT` re-entrancy guard. It is
+a strong Q24 conversion candidate on its own merits, and it is the one place
+where the silence argument above is *not* evidence of innocence: a wedge on an
+output lock cannot report itself. Note this does **not** by itself explain
+this hang's silence, because the diagnostics that went missing were
+`serial_println!`, and serial is independent of console.
+
 ### D-SHM-MAP-NOCAP. `SYS_SHM_MAP`/`SYS_SHM_SIZE`/`SYS_SHM_CLOSE` do not verify the caller owns the handle — RESOLVED 2026-07-14
 
 **RESOLVED 2026-07-14 (option (b) — IPC provider-PID + `shm::authorize` grant).**
@@ -59230,3 +59288,54 @@ the next question is whether the `handlers.rs` change shifted code layout
 
 **Do not** act on either theory from the current two runs; that is exactly the
 inference-from-insufficient-samples mistake the entry above documents.
+
+### [A] B-BENCH-WATCHLIST-WATCHED-LESS-THAN-HALF-THE-SUITE-IT-GUARDS. `BENCH_CRITICAL_PATHS` omitted idt.rs, fs/, net/ and crypto.rs — FIXED 2026-08-14
+
+**Where:** `scripts/boot-test.sh`, `BENCH_CRITICAL_PATHS` (feeds
+`report_bench_absence`).
+
+**What.** The list added earlier the same day to close
+`TD-BENCHMARKS-ARE-NEVER-ACTUALLY-RUN-BY-THE-BOOT-GATE` held five entries —
+`kernel/src/{mm,sched,ipc,syscall,smp.rs}` — because it was derived from
+CLAUDE.md's perf-critical *table*, read as directory names. The suite it is
+supposed to guard measures far more than that. Against the 63 recorded
+benchmark names:
+
+- `isr_latency`, `page_fault` → **`kernel/src/idt.rs`**. CLAUDE.md's table
+  names both "interrupt dispatch" and "page fault handling", but the handlers
+  live in `idt.rs`, not under `mm/` — so the two benchmarks that measure them
+  were unwatched.
+- 8 × `vfs_*` (`read_256`, `write_256`, `readdir`, `stat_{root,3comp,deep}`,
+  `throughput_16k_{read,write}`) → **`kernel/src/fs`**. CLAUDE.md lists "VFS
+  path lookup" and "filesystem read/write" as critical.
+- ~20 × `net_*`, `tcp_checksum_*`, `dns_build_query`, `firewall_check`,
+  `http_*`, `dashboard_api_*` → **`kernel/src/net`** (`http.rs`,
+  `dashboard.rs` live under it).
+- 9 × `crypto_*` → **`kernel/src/crypto.rs`**.
+
+So **30+ of 63 benchmarks measured code the watch list did not watch**, and a
+change to any of them printed "No perf-critical changes since the last
+benchmarked commit, so skipping the suite is reasonable here." Confidently,
+and wrongly.
+
+**How it surfaced.** The `W-KERNEL-COW-WRITE` diagnostic commit edits
+`kernel/src/idt.rs`. The following boot reported no perf-critical changes —
+while the suite contains `isr_latency` and `page_fault`, both measured by code
+in that exact file. (No real regression: that diagnostic sits on the fatal
+path, which is not hot. The harness had no way to know that, and did not
+reason about it — it simply never looked.)
+
+**Fix.** Widened the list to the four missing paths and annotated **every**
+entry with the benchmarks it guards, so the mapping is auditable instead of
+implicit. Verified: `git diff --name-only 17dbde179 HEAD` over the new list
+now returns `kernel/src/idt.rs`, which the old list missed.
+
+**Lesson (the recurring one this week).** This is the third instance in a row
+of the same shape: `TD-BENCHMARKS-...` (the suite silently never ran),
+`B-BENCH-COMPARATOR-CALLS-SUITE-WIDE-HOST-NOISE-A-REGRESSION` (the diff
+confidently named innocent benchmarks), and now a watch list that confidently
+reported "nothing to see" about a file it had never been told to look at. A
+check that cannot fire is indistinguishable from a check that passes — and
+every one of these was *my own* freshly-written tooling, reporting success.
+When adding a guard, the first test should be "does it fire on a case I know
+is positive?", not "does it run cleanly?".

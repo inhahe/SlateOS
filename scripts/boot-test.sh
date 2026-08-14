@@ -99,12 +99,35 @@ report_pathz_skips() {
 # "Performance-Critical Subsystems" table.  A change under any of these is a
 # change that CLAUDE.md requires benchmarking, so it is the trigger for
 # nagging about a stale benchmark record.
+# Each entry is annotated with the benchmarks it actually guards.  Keep that
+# mapping accurate: this list is only useful if it covers everything the suite
+# measures, and the failure mode when it does not is SILENT -- an unwatched
+# path reports "no perf-critical changes", which is exactly the false negative
+# this whole mechanism exists to prevent.
+#
+# The first version of this list was derived from CLAUDE.md's perf-critical
+# table read as *directories*, and it missed more than half the suite: 30+ of
+# the 63 benchmarks measured code in idt.rs, fs/, net/ and crypto.rs, none of
+# which were listed.  Cross-check against `python scripts/bench-history.py
+# --list` / the recorded entry names when adding a benchmark.
 BENCH_CRITICAL_PATHS=(
-    "kernel/src/mm"
-    "kernel/src/sched"
-    "kernel/src/ipc"
-    "kernel/src/syscall"
-    "kernel/src/smp.rs"
+    "kernel/src/mm"           # page_alloc_free, heap_alloc_free_64
+    "kernel/src/sched"        # context_switch, pick_next, sched_pick_next
+    "kernel/src/ipc"          # ipc_*, futex_wake_empty, shm_*, cp_*,
+                              #   io_ring_nop, service_connect
+    "kernel/src/syscall"      # syscall_dispatch
+    "kernel/src/smp.rs"       # cross-CPU paths behind the above
+    "kernel/src/idt.rs"       # isr_latency, page_fault -- CLAUDE.md lists both
+                              #   "interrupt dispatch" and "page fault
+                              #   handling"; the handlers live here, not in mm/
+    "kernel/src/fs"           # vfs_read_256, vfs_write_256, vfs_readdir,
+                              #   vfs_stat_{root,3comp,deep},
+                              #   vfs_throughput_16k_{read,write}
+    "kernel/src/net"          # net_*, tcp_checksum_*, dns_build_query,
+                              #   firewall_check, and http_*/dashboard_api_*
+                              #   (net/http.rs, net/dashboard.rs)
+    "kernel/src/crypto.rs"    # crypto_* (sha256/sha512/hmac/chacha20/poly1305/
+                              #   aead/ed25519/x25519)
 )
 
 # Say — out loud — that this boot produced NO benchmark numbers.

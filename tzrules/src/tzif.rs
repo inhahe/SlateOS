@@ -230,19 +230,51 @@ impl<'a> TzFile<'a> {
         self.type_idx.len()
     }
 
-    /// Whether this zone ever observes daylight saving (the POSIX `daylight`
-    /// global).
+    /// Whether this zone observes daylight saving under its *current* rules
+    /// (the POSIX `daylight` global).
     ///
-    /// True if any recorded state is a DST state, or if the tail rule has a DST
-    /// half — a zone that abandoned DST decades ago still answers `true`, which
-    /// is what glibc reports, because `daylight` describes the zone's history
-    /// and not the current instant.
+    /// A zone that abandoned DST — Europe/Moscow in 2011, São Paulo in 2019 —
+    /// answers `false` even though its history is full of DST transitions,
+    /// because the tail rule describes today and the transitions describe the
+    /// past.  That is what glibc reports for the same file.
     #[must_use]
     pub fn has_dst(&self) -> bool {
-        let any_dst = (0..self.types.len().saturating_div(TTINFO_LEN))
-            .filter_map(|ty| self.type_record(ty))
-            .any(|rec| rec.1 == 1);
-        any_dst || self.tail.is_some_and(|t| t.has_dst())
+        self.daylight().is_some()
+    }
+
+    /// The zone's standard-time state, for `tzname[0]` and the POSIX
+    /// `timezone` global.
+    ///
+    /// The tail rule wins when there is one, because it describes the zone as
+    /// it stands rather than as it once was; otherwise this is the most recent
+    /// recorded standard-time state.  Linear in the transition count, so
+    /// callers should resolve it once when they install the zone rather than
+    /// on every `localtime`.
+    #[must_use]
+    pub fn standard(&self) -> TzInfo {
+        if let Some(tail) = self.tail {
+            return TzInfo { gmtoff: tail.std_gmtoff, is_dst: false, name: tail.std_name };
+        }
+        self.most_recent(false).unwrap_or_else(|| self.info_of_type(usize::from(self.default_type)))
+    }
+
+    /// The zone's daylight-saving state, for `tzname[1]`, or `None` for a zone
+    /// that does not currently observe it.  See [`Self::standard`].
+    #[must_use]
+    pub fn daylight(&self) -> Option<TzInfo> {
+        if let Some(tail) = self.tail {
+            let dst = tail.dst?;
+            return Some(TzInfo { gmtoff: dst.gmtoff, is_dst: true, name: dst.name });
+        }
+        self.most_recent(true)
+    }
+
+    /// The state of the latest transition whose `is_dst` matches `want_dst`.
+    fn most_recent(&self, want_dst: bool) -> Option<TzInfo> {
+        self.type_idx.iter().rev().find_map(|&ty| {
+            let info = self.info_of_type(usize::from(ty));
+            (info.is_dst == want_dst).then_some(info)
+        })
     }
 
     /// The zone state at UTC instant `t` (seconds since the epoch).
@@ -615,6 +647,49 @@ mod tests {
         let tz = TzFile::parse(f.as_slice()).expect("valid TZif");
         assert_eq!(tz.transition_count(), 2);
         assert_eq!(tz.tail(), Tz::parse(b"EST5EDT,M3.2.0,M11.1.0"));
+        assert!(tz.has_dst());
+        assert_eq!(tz.standard().gmtoff, -5 * 3600);
+        assert_eq!(tz.standard().name, name(b"EST"));
+        assert_eq!(tz.daylight().expect("EST5EDT has a DST half").name, name(b"EDT"));
+    }
+
+    #[test]
+    fn a_zone_that_abandoned_dst_reports_none_despite_its_history() {
+        // The shape of Europe/Moscow: DST transitions on record, and a tail
+        // rule with no DST half because the zone stopped observing it.
+        let mut b = Buf::new();
+        header(&mut b, b'2', 0, 2, 8);
+        b.ttinfo(3 * 3600, 0, 0);
+        b.ttinfo(4 * 3600, 1, 4);
+        b.put(b"MSK\0MSD\0");
+        header(&mut b, b'2', 2, 2, 8);
+        b.i64(354_920_400); // 1981 — into DST
+        b.i64(370_728_000); // 1981 — back out
+        b.put(&[1, 0]);
+        b.ttinfo(3 * 3600, 0, 0);
+        b.ttinfo(4 * 3600, 1, 4);
+        b.put(b"MSK\0MSD\0");
+        b.put(b"\nMSK-3\n");
+        let tz = TzFile::parse(b.as_slice()).expect("valid TZif");
+        assert!(!tz.has_dst(), "the tail rule describes today, not 1981");
+        assert_eq!(tz.standard().gmtoff, 3 * 3600);
+        // The history is still readable, it just does not set `daylight`.
+        assert!(tz.lookup(360_000_000).is_dst);
+    }
+
+    #[test]
+    fn a_file_with_no_tail_summarises_from_its_last_transitions() {
+        let mut b = Buf::new();
+        header(&mut b, 0, 2, 2, 8);
+        b.put(&1_583_650_800_i32.to_be_bytes());
+        b.put(&1_604_210_400_i32.to_be_bytes());
+        b.put(&[1, 0]);
+        b.ttinfo(-5 * 3600, 0, 0);
+        b.ttinfo(-4 * 3600, 1, 4);
+        b.put(EASTERN_DESIG);
+        let tz = TzFile::parse(b.as_slice()).expect("valid v1 TZif");
+        assert_eq!(tz.standard().name, name(b"EST"));
+        assert_eq!(tz.daylight().expect("DST is on record").name, name(b"EDT"));
         assert!(tz.has_dst());
     }
 

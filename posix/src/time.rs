@@ -770,7 +770,8 @@ fn publish_tz_globals() {
         (*core::ptr::addr_of_mut!(tzname)) =
             [TzPtr(crate::tz::name_ptr(0)), TzPtr(crate::tz::name_ptr(1))];
         // POSIX's sign is west-positive; ours is east-positive.
-        (*core::ptr::addr_of_mut!(timezone)) = i64::from(tz.std_gmtoff).saturating_neg();
+        (*core::ptr::addr_of_mut!(timezone)) =
+            i64::from(tz.standard().gmtoff).saturating_neg();
         (*core::ptr::addr_of_mut!(daylight)) = i32::from(tz.has_dst());
     }
 }
@@ -4832,9 +4833,9 @@ mod tests {
     fn test_tzset_installs_the_zone_named_by_tz() {
         let _tz = TzGuard::set(b"EST5EDT,M3.2.0,M11.1.0");
         let zone = crate::tz::current();
-        assert_eq!(zone.std_name.as_bytes(), b"EST");
-        assert_eq!(zone.std_gmtoff, -5 * 3600);
-        let dst = zone.dst.as_ref().expect("EST5EDT has a daylight zone");
+        assert_eq!(zone.standard().name.as_bytes(), b"EST");
+        assert_eq!(zone.standard().gmtoff, -5 * 3600);
+        let dst = zone.daylight().expect("EST5EDT has a daylight zone");
         assert_eq!(dst.name.as_bytes(), b"EDT");
         assert_eq!(dst.gmtoff, -4 * 3600);
     }
@@ -5097,12 +5098,15 @@ mod tests {
         assert_eq!(tm.tm_gmtoff, 0);
     }
 
-    /// A zoneinfo name (`America/New_York`) needs tzdata we do not ship,
-    /// so it resolves to UTC.  Documented here so the day we do ship
-    /// tzdata this test fails loudly instead of the behaviour changing
+    /// A zoneinfo name (`America/New_York`) is now *looked up* — the libc
+    /// reads and honours a TZif file when one is there (see
+    /// [`crate::tz::Zone`]) — but SlateOS ships no tzdata yet, so the open
+    /// fails and the zone degrades to UTC.  Shipping tzdata is a packaging
+    /// decision tracked separately; this test pins the fallback so the day
+    /// the files appear it fails loudly rather than the behaviour changing
     /// silently.
     #[test]
-    fn test_zoneinfo_names_currently_resolve_to_utc() {
+    fn test_zoneinfo_names_resolve_to_utc_until_tzdata_is_shipped() {
         let _tz = TzGuard::set(b"America/New_York");
         let tm = local_tm(1_626_350_400);
         assert_eq!(

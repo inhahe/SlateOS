@@ -32,6 +32,7 @@ use guitk::layout::{FlexAlign, FlexDirection, FlexItem, FlexJustify, SizeConstra
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::{Borders, CornerRadii, Edges, FontWeight, Style, TextAlign};
+use guitk::text;
 #[allow(unused_imports)]
 use guitk::widget::{Widget, WidgetId, WidgetTree};
 
@@ -68,8 +69,39 @@ pub mod colors {
 #[allow(dead_code)]
 const DEFAULT_BYTES_PER_LINE: usize = 16;
 
-/// Character width approximation for monospace text at a given font size.
-const CHAR_WIDTH_FACTOR: f32 = 0.6;
+/// Width of one cell of the hex dump's character grid, at `font_size`.
+///
+/// A hex dump is a genuine grid: the byte at column 7 of one line has to sit
+/// directly above the byte at column 7 of the next, and the click handler
+/// inverts this arithmetic to turn an x coordinate back into a byte offset.
+/// So the grid stays — but the cell now comes from the face rather than from
+/// `font_size * 0.6`, a guess that put the caret on the wrong byte as soon as
+/// the face's digit advance was anything but exactly six tenths of an em.
+///
+/// Digits, specifically: every glyph the grid is built for is a hex digit, and
+/// a face that advances digits uniformly (all of them do, so columns of figures
+/// line up) gives a cell that is right for the content by construction.
+fn cell_width(font_size: f32) -> f32 {
+    text::digit_advance(font_size, FontWeightHint::Regular)
+}
+
+/// The text drawn on `doc`'s tab, modified marker included.
+///
+/// The marker is part of the label rather than something the renderer appends,
+/// so the width the tab is given and the string it is given are always the same
+/// string: a tab that gained a ` *` used to overflow by exactly two cells.
+fn tab_label(doc: &HexDocument) -> String {
+    let mut label = doc.display_name();
+    if doc.modified {
+        label.push_str(" *");
+    }
+    label
+}
+
+/// Width of the tab drawn for `label`, including the 8 px padding on each side.
+fn tab_label_width(label: &str) -> f32 {
+    text::measure(label, UI_FONT_SIZE, FontWeightHint::Regular) + 16.0
+}
 
 /// Font size for hex dump display.
 const HEX_FONT_SIZE: f32 = 13.0;
@@ -2053,7 +2085,7 @@ impl HexEditor {
 
         let line = (content_y / LINE_HEIGHT) as usize;
         let absolute_line = line.saturating_add(self.active_doc().view.scroll_offset);
-        let char_w = HEX_FONT_SIZE * CHAR_WIDTH_FACTOR;
+        let char_w = cell_width(HEX_FONT_SIZE);
 
         // Offset column width (10 chars for hex offset "00000000: ").
         let offset_col_width = char_w * 10.0;
@@ -2230,13 +2262,14 @@ impl HexEditor {
         });
 
         let mut tab_x: f32 = 4.0;
-        let char_w = UI_FONT_SIZE * CHAR_WIDTH_FACTOR;
 
         for (i, doc) in self.documents.iter().enumerate() {
-            let name = doc.display_name();
-            let modified_mark = if doc.modified { " *" } else { "" };
-            let tab_label = format!("{name}{modified_mark}");
-            let tab_width = (tab_label.len() as f32) * char_w + 16.0;
+            // The tab strip is chrome, not grid: it holds filenames, which are
+            // proportional text and may hold any byte but `/` and NUL. Sizing
+            // it in nominal cells made an accented filename's tab half again
+            // as wide as the name inside it.
+            let label = tab_label(doc);
+            let tab_width = tab_label_width(&label);
 
             let bg_color = if i == self.active_tab {
                 colors::BASE
@@ -2267,7 +2300,7 @@ impl HexEditor {
             tree.push(RenderCommand::Text {
                 x: tab_x + 8.0,
                 y: y + 8.0,
-                text: tab_label,
+                text: label,
                 color: text_color,
                 font_size: UI_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
@@ -2299,7 +2332,7 @@ impl HexEditor {
         };
         let vis = self.visible_lines();
         let bpl = doc.view.bytes_per_line.value();
-        let char_w = HEX_FONT_SIZE * CHAR_WIDTH_FACTOR;
+        let char_w = cell_width(HEX_FONT_SIZE);
 
         // Clip to hex view area.
         tree.push(RenderCommand::PushClip {
@@ -2575,7 +2608,6 @@ impl HexEditor {
         });
 
         let text_y = y + 5.0;
-        let _char_w = UI_FONT_SIZE * CHAR_WIDTH_FACTOR;
 
         // Offset (hex + decimal).
         let offset_hex = format!("0x{:08X}", doc.cursor);
@@ -3216,6 +3248,94 @@ mod tests {
     fn test_document_display_name_untitled() {
         let doc = HexDocument::new();
         assert_eq!(doc.display_name(), "Untitled");
+    }
+
+    // ====================================================================
+    // Text measurement — the hex grid and the proportional chrome
+    // ====================================================================
+
+    #[test]
+    fn the_hex_cell_is_derived_from_the_face() {
+        // Not a hardcoded fraction of the em: the grid has to match what the
+        // face actually advances a digit by, or the caret lands on the wrong
+        // byte. All that is asserted here is the derivation, since the value
+        // is the face's business.
+        let cell = cell_width(HEX_FONT_SIZE);
+        assert!(cell > 0.0, "a hex cell has to have a width");
+        assert_eq!(
+            cell,
+            text::digit_advance(HEX_FONT_SIZE, FontWeightHint::Regular)
+        );
+        // And it scales with the size, because it is measured at the size.
+        assert!(cell_width(HEX_FONT_SIZE * 2.0) > cell);
+    }
+
+    #[test]
+    fn clicking_a_hex_column_selects_that_byte() {
+        // The render arithmetic and the click arithmetic have to agree. This
+        // walks the columns of the first line, clicking the middle of each
+        // byte's two hex digits, and checks the cursor lands on that byte.
+        let mut app = HexEditor::new(1200.0, 800.0);
+        app.documents[0] = HexDocument::from_data((0u8..=255).collect());
+
+        let cell = cell_width(HEX_FONT_SIZE);
+        let bpl = app.active_doc().view.bytes_per_line.value();
+        let y = TOOLBAR_HEIGHT + TAB_BAR_HEIGHT + LINE_HEIGHT / 2.0;
+
+        for col in 0..bpl {
+            // Centre of the byte's "XX" pair, in the same units the renderer
+            // lays the line out in.
+            let x = cell * 10.0 + (col as f32) * cell * 3.0 + cell;
+            app.handle_mouse_click(x, y, false);
+            assert_eq!(
+                app.active_doc().cursor,
+                col,
+                "a click in column {col} selected the wrong byte"
+            );
+            assert!(app.active_doc().cursor_in_hex);
+        }
+    }
+
+    #[test]
+    fn a_tab_label_carries_its_modified_marker() {
+        let mut doc = HexDocument::from_file("/tmp/file.bin", vec![1, 2, 3]);
+        assert_eq!(tab_label(&doc), "file.bin");
+        doc.modified = true;
+        assert_eq!(tab_label(&doc), "file.bin *");
+        // And the marker widens the tab, so it cannot overflow it.
+        assert!(tab_label_width("file.bin *") > tab_label_width("file.bin"));
+    }
+
+    #[test]
+    fn tab_labels_fit_their_tabs() {
+        for name in [
+            "Untitled",
+            "file.bin",
+            "a-rather-long-firmware-image-name.rom *",
+            // A filename is bytes, not ASCII: ours admit everything but `/`
+            // and NUL. Sized by byte length this tab was half again too wide.
+            "imagen-de-arranque-ñ.bin",
+            "ファームウェア.bin",
+        ] {
+            let drawn = text::measure(name, UI_FONT_SIZE, FontWeightHint::Regular);
+            let tab = tab_label_width(name);
+            assert!(
+                drawn + 16.0 <= tab + 0.01,
+                "{name:?} does not fit its tab ({drawn} in {tab})"
+            );
+        }
+    }
+
+    #[test]
+    fn tab_width_is_not_driven_by_byte_length() {
+        // Same character count, very different byte counts. If these came out
+        // proportional to `len()`, the second tab would be ~3x the first.
+        let ascii = tab_label_width("aaa.bin");
+        let wide = tab_label_width("ふふふ.bin");
+        assert!(
+            wide < ascii * 3.0,
+            "tab width is tracking bytes, not glyphs ({ascii} vs {wide})"
+        );
     }
 
     // ====================================================================

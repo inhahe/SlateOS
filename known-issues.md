@@ -43931,6 +43931,114 @@ deny — are now fixed; see F8 and F9.)_
 
 ## Fixed Bugs
 
+### TD-BENCH-OWNER-AB-BUDGET-WAS-AN-ABSOLUTE-CYCLE-COUNT. Five boots of "ownership tagging costs 8500 cycles" were the emulator, not the code — 2026-08-14 — RESOLVED 2026-08-14
+
+**Where:** `kernel/src/bench.rs` (`run_all`, the `page_alloc_free_owner_ab` and
+`fast_cpu_index` budget checks) and `bench/baselines.toml`.
+
+**Symptom.** `page_alloc_free_owner_ab` reported `SLOW (tagging costs N
+cycles/alloc+free, limit 500)` on five consecutive boots: **10826 / 7660 /
+8512 / 10580 / 11288**. `fast_cpu_index` simultaneously reported `SLOW (274 /
+282 cycles, limit 200)` — on boots *after* the tier-0 fix that benchmark had
+been added to prove worked.
+
+**Why it was worth chasing rather than dismissing as noise.** The
+reproducibility. A number that lands within ±20% five times is measuring
+something. And the accused code is trivial: `frame_owner::set` is a relaxed
+load, a bounds check, a byte store and a counter bump. When a measurement and
+a static reading of the code disagree by two orders of magnitude, one of them
+is wrong, and guessing which is how people end up optimising the wrong line.
+
+**Three hypotheses, each killed by measurement rather than by argument:**
+
+1. *Ambient load / windowing.* The first version ran 500 iterations with
+   tagging off, then 500 with it on. Two consecutive windows on a live system
+   are not the same system, and `min` does not save you — it is robust to
+   *spikes*, not to a window uniformly busier than its neighbour. The evidence
+   was in the same output: the off window had `max=129078` while the on window
+   had `max=635531436` and a 30x higher mean. Fixed by alternating the arms
+   every iteration (`ab_interleaved`), microseconds apart, so drift on a
+   scheduling timescale lifts both and cancels. **The number did not move.**
+2. *TCG's atomic-RMW fallback.* TCG cannot always lower a guest atomic RMW
+   inline; `cpu_loop_exit_atomic` aborts the translation block and re-executes
+   with the world stopped — thousands of cycles for one increment. Two shared
+   `fetch_add` statistics counters sat on exactly this path. Measured directly:
+   `atomic_fetch_add_relaxed` came out at **0-238 cycles**, so the two counters
+   accounted for ~124 of ~8500. (The counters were moved to per-CPU
+   cache-line-padded slots anyway, on general principles — the file already
+   padded `CURRENT_OWNER` per-CPU with a comment about a "false-sharing storm"
+   while leaving these unpadded on the same path. That commit says explicitly
+   that it was *not* the cause.)
+3. *The halves don't add up.* A first split put `set` at 2978 cycles and
+   `current_owner` at 924 — `set + clear + current ≈ 6900` against a measured
+   8512-10580, so they did add up and the cost was genuinely inside `set`.
+   **But that split was flawed**: it never controlled the `ENABLED` flag, so
+   "2978 cycles for `set`" lumped the cost of *calling* `set` together with the
+   cost of the work `set` does — the two things that had to be told apart,
+   pointing at opposite conclusions.
+
+**What actually settled it.** A three-arm experiment: `set` with tracking
+**off** (the early-return path — the harness's floor for calling into
+`frame_owner`), `set` with tracking **on**, and a byte store to an ordinary
+`.bss` static as a control. Result:
+
+```
+frame_owner_set_split: call_floor=278 work=2416 bss_store_control=218
+```
+
+**A single byte store to plain kernel `.bss` costs 218 cycles in this
+harness.** `set` performs about half a dozen guest memory accesses (the
+`ENABLED` load, the length and pointer loads inside `slot`, the tag store, and
+the per-CPU counter's load and store); 6 × 218 ≈ 1300, the right order for the
+measured 2416. Under TCG *every* guest memory access carries a softmmu lookup
+costing a few hundred host cycles; the same accesses on real hardware are L1
+hits at ~1-4 cycles. So ownership tagging adds ~16 memory accesses per
+alloc+free — **~30 cycles of real machine, ~2500 cycles of emulator.**
+
+Nothing had regressed. The benchmark was measuring the emulator and comparing
+it to a budget sized for hardware.
+
+**The real defect, and it is a general one.** An absolute cycle budget cannot
+work in this harness. It conflates the code under test with an emulation
+constant that varies with the host, the QEMU build and the accelerator, and it
+fails permanently on code that is correct. `fast_cpu_index`'s 200-cycle budget
+was the same defect in its purest form: **200 cycles is below the harness's
+floor for a single memory access**, so *no* implementation could ever have
+passed it — the check was structurally incapable of reporting PASS, and it was
+accusing the very fix it had been added to guard.
+
+**Fix — budgets in units of measured memory accesses.** `run_all` now measures
+`memory_access_floor` first (a byte store to a dedicated `.bss` static,
+interleaved against an empty closure, clamped to a minimum of 100 so a
+noise-driven 0 cannot collapse every budget to 0) and expresses both delta
+budgets as multiples of it:
+
+* `fast_cpu_index`: 4 accesses (was 200 cycles). Clear of the noise, still far
+  under an APIC MMIO round-trip.
+* `page_alloc_free_owner_ab`: 40 accesses (was 500 cycles). The path performs
+  ~16, so 2.5x headroom absorbs variation in how many the optimiser folds.
+
+This keeps the checks doing what they exist for. The failures worth catching —
+an uncached MMIO round-trip, a contended lock, a per-frame loop where a
+`write_bytes` belongs (which scales with `count`) — cost 10-100x a plain
+access on hardware *and* under emulation, so they still blow past the budget.
+
+**Kept as a permanent diagnostic:** the `frame_owner_set_split` line, now
+reported in access units. If the A/B ever fires again it says in one line
+whether the cost is inside `set`'s working path or elsewhere — the fork this
+investigation burned four boots failing to resolve by argument.
+
+**Lesson for the next benchmark added to this file.** Any threshold on an
+in-kernel QEMU/TCG measurement must be expressed relative to something
+measured by the same harness in the same run. Absolute nanosecond and cycle
+targets taken from Linux publications belong in `baselines.toml` as *context*;
+they cannot be pass/fail gates here. The pre-existing `ABOVE TARGET` verdicts
+in this suite (e.g. `isr_latency: 233451ns, target 10000ns, 2334%`) are the
+same category of statement and should be read as "this is what the emulator
+does", not as regressions.
+
+---
+
 ### B-SPAWN-SYSCALLS-NEVER-RECORDED-THE-PARENT. Every syscall-spawned child was unreapable, uncapability'd, and escaped its parent's namespace — 2026-08-14 — FIXED 2026-08-14
 
 **Where:** `kernel/src/syscall/handlers.rs` — `sys_process_spawn` (~3279) and

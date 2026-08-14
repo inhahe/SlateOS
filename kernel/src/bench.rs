@@ -570,6 +570,76 @@ pub fn run_all() {
     // boot under QEMU emulation.  For real hardware benchmarks, increase
     // counts 10-50x.
 
+    // --- Calibration: what one guest memory access costs in this harness ---
+    //
+    // Every threshold below this point is expressed as a multiple of this
+    // number rather than as an absolute cycle count, and that is the single
+    // most important thing about the micro-benchmarks in this file. The
+    // reason is a false alarm that cost four boots to run down.
+    //
+    // `page_alloc_free_owner_ab` reported that frame-ownership tagging cost
+    // 7660-11288 cycles per alloc+free, reproducibly, across five boots. The
+    // code it was accusing is a relaxed load, a bounds check, a byte store and
+    // a counter bump on each of `set` and `clear` — tens of cycles on
+    // hardware. Successive experiments killed every hypothesis that would have
+    // made the code guilty: interleaving the arms (ambient load), measuring a
+    // relaxed atomic RMW directly (TCG's `cpu_loop_exit_atomic` fallback), and
+    // finally splitting `set` into its early-return path and its working path.
+    //
+    // The split is what explained it, and the answer was not in `frame_owner`
+    // at all. `set`'s *work* measured 2416 cycles; a single byte store to an
+    // ordinary `.bss` static — this calibration — measured 218. `set` performs
+    // roughly half a dozen guest memory accesses (the `ENABLED` load, the
+    // length and pointer loads inside `slot`, the tag store, the per-CPU
+    // counter's load and store), and 6 x 218 is 1300, the right order. Under
+    // TCG *every* guest memory access carries a softmmu lookup costing a few
+    // hundred host cycles; on real hardware the same accesses are L1 hits at
+    // ~1-4 cycles each. So ownership tagging costs ~10 memory accesses per
+    // alloc+free, which is ~30 cycles of real machine and ~2500 cycles of
+    // emulator. Nothing regressed. The benchmark was measuring the emulator.
+    //
+    // An absolute cycle budget therefore cannot work here: it conflates the
+    // code under test with an emulation constant that varies with the host,
+    // the QEMU build and the accelerator, and it would keep failing forever on
+    // code that is correct. Measuring the constant and quoting budgets in
+    // units of it makes the check scale-invariant — and it still catches what
+    // these budgets exist to catch, because the failures worth catching (an
+    // uncached MMIO round-trip, a lock, a per-frame loop that should be one
+    // `write_bytes`) cost 10-100x a plain access on *both* hardware and TCG.
+    //
+    // Measured first so everything below can use it. A store rather than a
+    // load, to match the accesses that dominate the paths being judged, and to
+    // its own static so nothing else shares the cache line.
+    let access_floor = {
+        static CALIBRATION_BYTE: core::sync::atomic::AtomicU8 =
+            core::sync::atomic::AtomicU8::new(0);
+        const ROUNDS: u32 = 2000;
+        let (nop, store) = ab_interleaved(
+            ROUNDS,
+            || timed(|| core::hint::black_box(0u64)),
+            || {
+                timed(|| {
+                    CALIBRATION_BYTE.store(core::hint::black_box(1u8), Ordering::Relaxed);
+                })
+            },
+        );
+        // The subtraction can land at 0: the nop arm's own minimum wanders by
+        // several hundred cycles between adjacent measurements in one run
+        // (408 vs 726 has been observed), which is itself larger than the
+        // access being measured. Clamp to a floor so a noise-driven 0 cannot
+        // collapse every budget below to 0 and turn every check into a
+        // guaranteed failure.
+        let measured = store.saturating_sub(nop);
+        let floor = core::cmp::max(measured, 100);
+        serial_println!(
+            "[bench]   memory_access_floor: {} cycles/guest byte-store (measured={} \
+             nop={} store={}, {} interleaved rounds) — budgets below are multiples \
+             of this",
+            floor, measured, nop, store, ROUNDS
+        );
+        floor
+    };
+
     // --- CPU index lookup (the per-CPU-data primitive under every hot path) ---
     //
     // This is not an interesting operation in itself; it is benchmarked
@@ -607,23 +677,32 @@ pub fn run_all() {
         );
 
         let cost = idx_cycles.saturating_sub(nop_cycles);
-        // An APIC MMIO round-trip under emulation is a device access — a TCG
-        // exit and an MMIO dispatch, hundreds of cycles at minimum. Tier 0 and
-        // tier 1 are a load and a register read. The threshold sits between
-        // those two populations by a wide margin; it exists to catch "we fell
-        // back to MMIO", not to police single cycles.
-        const MMIO_SUSPICION_CYCLES: u64 = 200;
-        if cost <= MMIO_SUSPICION_CYCLES {
+        // An APIC MMIO round-trip under emulation is a *device* access — a TCG
+        // exit and an MMIO dispatch, an order of magnitude beyond an ordinary
+        // memory access. Tier 0 and tier 1 are a load and a register read, so
+        // a healthy lookup is one access or less.
+        //
+        // The budget was an absolute 200 cycles and reported SLOW on every
+        // healthy boot after the tier-0 fix landed (274, 282), because 200 is
+        // *below this harness's floor for a single memory access* — the nop
+        // baseline alone wanders by more than that between adjacent
+        // measurements in one run. It was accusing correct code of the very
+        // regression it had just been added to prove was fixed. Four accesses
+        // sits clear of the noise while still being far under an MMIO
+        // round-trip.
+        let mmio_suspicion = access_floor.saturating_mul(4);
+        if cost <= mmio_suspicion {
             serial_println!(
-                "[bench]   fast_cpu_index: PASS ({} cycles over an empty closure; \
-                 nop={} idx={}, {} interleaved rounds)",
-                cost, nop_cycles, idx_cycles, ROUNDS
+                "[bench]   fast_cpu_index: PASS ({} cycles over an empty closure, \
+                 limit {} = 4 accesses; nop={} idx={}, {} interleaved rounds)",
+                cost, mmio_suspicion, nop_cycles, idx_cycles, ROUNDS
             );
         } else {
             serial_println!(
                 "[bench]   fast_cpu_index: SLOW ({} cycles over an empty closure, \
-                 limit {}; nop={} idx={}) — suspect a fallback to the APIC MMIO path",
-                cost, MMIO_SUSPICION_CYCLES, nop_cycles, idx_cycles
+                 limit {} = 4 accesses; nop={} idx={}) — suspect a fallback to the \
+                 APIC MMIO path",
+                cost, mmio_suspicion, nop_cycles, idx_cycles
             );
         }
     }
@@ -711,101 +790,87 @@ pub fn run_all() {
             frame_owner::disable();
         }
 
-        // Tagging is two relaxed loads, a bounds check, a byte store and a
-        // relaxed fetch_add per side — tens of cycles even under TCG. The
-        // threshold is an order of magnitude above that: it is sized to catch
-        // a *structural* regression (a CPU-index lookup falling back to APIC
-        // MMIO, a lock appearing on the path), not to police instructions.
-        const OWNER_TAG_BUDGET_CYCLES: u64 = 500; // From baselines.toml
+        // Count what tagging actually adds, in *memory accesses*, because
+        // that is the unit this harness can measure (see the calibration
+        // block at the top of `run_all`). Per alloc+free:
+        //
+        //   2 x `is_enabled`            = 2   (one in tag_alloc, one in untag)
+        //   `current_owner`             = 2   (fast_cpu_index + the slot load)
+        //   `set`  : ENABLED, len, ptr, tag store, counter load+store = 6
+        //   `clear`: the same                                          = 6
+        //                                                              ----
+        //                                                              ~16
+        //
+        // The budget is 40 — 2.5x headroom, so ordinary variation in how many
+        // accesses the optimiser folds cannot trip it, while the failures this
+        // check exists for still do: an APIC MMIO round-trip or a contended
+        // lock costs 10-100x a plain access, and a per-frame loop where a
+        // `write_bytes` belongs scales with `count` and blows straight past 40.
+        //
+        // The previous budget was an absolute 500 cycles and reported SLOW on
+        // five consecutive healthy boots (7660-11288). That was not tagging
+        // being slow; it was ~16 guest memory accesses at TCG's few-hundred-
+        // cycles-each, against a budget sized for real hardware. The whole
+        // investigation is written up in known-issues.md under
+        // TD-BENCH-OWNER-AB-BUDGET-WAS-AN-ABSOLUTE-CYCLE-COUNT.
+        const OWNER_TAG_BUDGET_ACCESSES: u64 = 40; // From baselines.toml
+        let budget = access_floor.saturating_mul(OWNER_TAG_BUDGET_ACCESSES);
         let delta = min_on.saturating_sub(min_off);
-        if delta <= OWNER_TAG_BUDGET_CYCLES {
+        if delta <= budget {
             serial_println!(
                 "[bench]   page_alloc_free_owner_ab: PASS (tagging costs {} cycles/\
-                 alloc+free, limit {}; off={} on={}, {} interleaved rounds)",
-                delta, OWNER_TAG_BUDGET_CYCLES, min_off, min_on, ROUNDS
+                 alloc+free = {} accesses, limit {} accesses; off={} on={}, {} \
+                 interleaved rounds)",
+                delta, delta / access_floor, OWNER_TAG_BUDGET_ACCESSES,
+                min_off, min_on, ROUNDS
             );
         } else {
             serial_println!(
                 "[bench]   page_alloc_free_owner_ab: SLOW (tagging costs {} cycles/\
-                 alloc+free, limit {}; off={} on={}, {} interleaved rounds) \
-                 — suspect an MMIO or a lock on the ownership path",
-                delta, OWNER_TAG_BUDGET_CYCLES, min_off, min_on, ROUNDS
+                 alloc+free = {} accesses, limit {} accesses; off={} on={}, {} \
+                 interleaved rounds) — suspect an MMIO, a lock, or a per-frame \
+                 loop that should be one write_bytes",
+                delta, delta / access_floor, OWNER_TAG_BUDGET_ACCESSES,
+                min_off, min_on, ROUNDS
             );
         }
     }
 
-    // --- What a relaxed atomic RMW actually costs here ---
+    // --- Breakdown of `frame_owner::set`, in memory accesses ---
     //
-    // This exists to make the previous benchmark's verdict *actionable*. The
-    // ownership path is a relaxed load, a bounds check, a byte store and a
-    // relaxed `fetch_add` on each of set() and clear() — code that on real
-    // hardware is tens of cycles, yet the A/B above measured it in the
-    // thousands. When a measurement and a static reading of the code disagree
-    // by two orders of magnitude, one of them is wrong, and guessing which is
-    // how people end up "optimising" the wrong line.
+    // Kept as a permanent diagnostic rather than deleted with the
+    // investigation that produced it, because it is what makes the A/B above
+    // *actionable*. If `page_alloc_free_owner_ab` ever reports SLOW again,
+    // this line says immediately whether the added cost is inside `set`'s
+    // working path or somewhere else on the allocator's ownership path, which
+    // is the fork the original investigation burned four boots failing to
+    // resolve by argument.
     //
-    // The `fetch_add` is the one component that can be pathological under
-    // emulation: TCG cannot always lower a guest atomic RMW inline, and the
-    // fallback (`cpu_loop_exit_atomic`) aborts the translation block and
-    // re-executes the instruction with the world stopped. That is thousands
-    // of cycles for one increment. Two of them per alloc+free would account
-    // for the whole gap — and would mean the "regression" is an artefact of
-    // the emulator that does not exist on hardware.
+    // Two numbers, both against the shared `access_floor` calibration:
     //
-    // So measure it directly rather than reasoning about it. The counter is
-    // local to the benchmark so nothing else contends for the line.
-    {
-        static BENCH_RMW_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-        const ROUNDS: u32 = 2000;
-        let (min_nop, min_rmw) = ab_interleaved(
-            ROUNDS,
-            || timed(|| core::hint::black_box(0u64)),
-            || {
-                timed(|| {
-                    BENCH_RMW_COUNTER.fetch_add(1, Ordering::Relaxed);
-                })
-            },
-        );
-
-        let cost = min_rmw.saturating_sub(min_nop);
-        serial_println!(
-            "[bench]   atomic_fetch_add_relaxed: {} cycles over an empty closure \
-             (nop={} rmw={}, {} interleaved rounds){}",
-            cost,
-            min_nop,
-            min_rmw,
-            ROUNDS,
-            if cost >= 1000 {
-                " — TCG is not lowering this inline; statistics counters do \
-                 not belong on the allocator hot path"
-            } else {
-                ""
-            }
-        );
-    }
-
-    // --- Where the frame_owner cost actually is ---
+    //   call_floor  `set` with tracking **off** — the early-return path. Pays
+    //               the closure, the call and one relaxed load. This is the
+    //               harness's floor for "call into `mm::frame_owner`".
+    //   work        `set` with tracking **on**, minus `call_floor`. All shared
+    //               overhead cancels, leaving the bounds check, the tag store
+    //               and the counter bump: the code the A/B accuses.
     //
-    // The A/B above says ownership tagging costs ~8500 cycles per alloc+free,
-    // reproducibly (10826 / 7660 / 8512 across three boots). Reading the code
-    // says tens: `is_enabled` is a relaxed load, `current_owner` is a load
-    // plus `fast_cpu_index` (measured at ~190 cycles), `set`/`clear` are a
-    // bounds check and a byte store.
+    // Measured 278 and 2416 against an `access_floor` of 218 — i.e. `work` is
+    // ~11 accesses for a function that performs about half a dozen, which is
+    // the right order and is why the verdict was "nothing is wrong with the
+    // code, the budget was in the wrong unit". A future `work` of 50+ accesses
+    // would mean something genuinely appeared inside `set`.
     //
-    // Two hypotheses have already been killed by measurement rather than by
-    // argument. Ambient load: the arms are interleaved now, and the number
-    // survived. The atomic RMW: `atomic_fetch_add_relaxed` measures 62
-    // cycles, so the two counters accounted for ~124 of ~8500. Guessing a
-    // third time is not a method, so this splits the difference in half —
-    // everything *inside* set/clear on one side, everything else on the
-    // other. Whichever half carries the cost is where to look next; if
-    // neither does, the A/B is measuring something other than the tagging
-    // code and the benchmark is what needs fixing.
+    // Controlling the `ENABLED` flag is the part an earlier version of this
+    // got wrong: without it, "the cost of `set`" silently lumps together the
+    // cost of *calling* `set` with the cost of the work it does, and those two
+    // point at opposite conclusions.
     //
     // A frame is held for the duration so the index being written is one this
     // benchmark genuinely owns — scribbling a tag onto a frame in use by
-    // something else would corrupt the very diagnostic being measured.
+    // something else would corrupt the very diagnostic being measured. The
+    // `ENABLED` flag is restored to its entry value at the end, so the
+    // experiment cannot leave ownership accounting silently off.
     {
         use crate::mm::{frame, frame_owner};
 
@@ -814,27 +879,41 @@ pub fn run_all() {
                 #[allow(clippy::arithmetic_side_effects)]
                 let idx = (held.addr() / frame::FRAME_SIZE as u64) as usize;
                 const ROUNDS: u32 = 2000;
+                let was_enabled = frame_owner::is_enabled();
 
-                let (nop_a, set_cycles) = ab_interleaved(
+                // (1) Early-return path: the harness floor for this call.
+                let (nop_off, set_off) = ab_interleaved(
                     ROUNDS,
                     || timed(|| core::hint::black_box(0u64)),
-                    || timed(|| frame_owner::set(idx, frame_owner::Owner::Unknown)),
-                );
-                serial_println!(
-                    "[bench]   frame_owner_set: {} cycles over an empty closure \
-                     (nop={} set={})",
-                    set_cycles.saturating_sub(nop_a), nop_a, set_cycles
+                    || {
+                        frame_owner::disable();
+                        timed(|| frame_owner::set(idx, frame_owner::Owner::Unknown))
+                    },
                 );
 
-                let (nop_b, owner_cycles) = ab_interleaved(
+                // (2) Full path.
+                let (nop_on, set_on) = ab_interleaved(
                     ROUNDS,
                     || timed(|| core::hint::black_box(0u64)),
-                    || timed(|| frame_owner::current_owner()),
+                    || {
+                        frame_owner::enable();
+                        timed(|| frame_owner::set(idx, frame_owner::Owner::Unknown))
+                    },
                 );
+
+                if !was_enabled {
+                    frame_owner::disable();
+                }
+
+                let call_floor = set_off.saturating_sub(nop_off);
+                let real_work = set_on.saturating_sub(set_off);
                 serial_println!(
-                    "[bench]   frame_owner_current_owner: {} cycles over an empty \
-                     closure (nop={} cur={})",
-                    owner_cycles.saturating_sub(nop_b), nop_b, owner_cycles
+                    "[bench]   frame_owner_set_split: call_floor={} cycles ({} \
+                     accesses) work={} cycles ({} accesses) (nop_off={} set_off={} \
+                     nop_on={} set_on={}, {} interleaved rounds)",
+                    call_floor, call_floor / access_floor,
+                    real_work, real_work / access_floor,
+                    nop_off, set_off, nop_on, set_on, ROUNDS
                 );
 
                 // Restore the tag the allocator gave it, then hand it back.
@@ -846,7 +925,8 @@ pub fn run_all() {
             }
             Err(e) => {
                 serial_println!(
-                    "[bench]   frame_owner_set: SKIPPED (no frame available: {:?})",
+                    "[bench]   frame_owner_set_split: SKIPPED (no frame \
+                     available: {:?})",
                     e
                 );
             }

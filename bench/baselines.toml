@@ -87,10 +87,37 @@ walk, page zeroing, and PTE installation. Our 16 KiB pages zero 4x more \
 memory per fault, so expect ~1.5-2x Linux per fault but fewer total \
 faults for sequential workloads."""
 
+[memory_access_floor]
+description  = "One guest byte-store to an ordinary .bss static — the harness's resolution limit"
+measured_cycles = 218
+source       = "kernel/src/bench.rs run_all, calibration block; QEMU TCG qemu64"
+notes        = """
+Not a performance target. This is the *unit* the two delta-based budgets \
+below are quoted in, and it is re-measured on every run rather than \
+hard-coded, so the checks stay valid across host speed, QEMU build and \
+accelerator.
+
+Why it exists: under TCG every guest memory access carries a softmmu \
+lookup costing a few hundred host cycles, where on real hardware the same \
+access is an L1 hit at ~1-4 cycles. A budget written in absolute cycles \
+therefore measures the emulator, not the code, and fails permanently on \
+correct code. Quoting budgets as "N memory accesses" makes them \
+scale-invariant while still catching the failures they exist for — an \
+uncached MMIO round-trip, a contended lock, or a per-frame loop that \
+should be one write_bytes all cost 10-100x a plain access on hardware \
+*and* under emulation.
+
+Also records the harness's resolution limit: anything smaller than one \
+access is not measurable here. The empty-closure baseline itself wanders \
+by more than this between adjacent measurements in a single run (408 vs \
+726 observed), which is why the measured value is clamped to a minimum of \
+100 before use — a noise-driven 0 would collapse every budget to 0 and \
+turn every check into a guaranteed failure."""
+
 [fast_cpu_index]
 description  = "Resolve the running CPU's sequential index (per-CPU data lookup)"
 linux_ns     = 5
-target_cycles_over_nop = 200
+target_accesses_over_nop = 4
 source       = "Linux smp_processor_id() is a %gs-relative load, ~1-3 cycles"
 notes        = """
 Measured as a *delta over an empty closure*, not as an absolute number. \
@@ -106,11 +133,19 @@ several times inside every allocator benchmark. The threshold is \
 deliberately loose — it detects a fall-through to the APIC MMIO path \
 (a TCG exit plus MMIO dispatch), not single cycles. Tier 0 (uniprocessor, \
 no AP started) and tier 1 (RDPID) are single-digit cycles; tier 2 \
-(rdtscp) is ~30-40."""
+(rdtscp) is ~30-40.
+
+The budget was `target_cycles_over_nop = 200` and reported SLOW on every \
+healthy boot *after* the tier-0 fix landed (274, 282) — it was accusing \
+correct code of the exact regression it had been added to prove was \
+fixed. 200 cycles is below this harness's floor for a single memory \
+access (see [memory_access_floor]), so no implementation could have \
+passed it. Now 4 accesses: clear of the noise, still far under an MMIO \
+round-trip."""
 
 [page_alloc_free_owner_ab]
 description  = "Frame alloc+free with frame_owner tagging off vs on (interleaved)"
-target_cycles_delta = 500
+target_accesses_delta = 40
 source       = "A/B experiment, kernel/src/bench.rs run_all"
 notes        = """
 Absolute allocator numbers from the in-kernel harness are close to \
@@ -133,7 +168,25 @@ both equally and cancels in the difference.
 
 This exists because a frame_owner regression once shipped unnoticed behind \
 exactly the kind of absolute threshold described above (see \
-B-FAST-CPU-INDEX-FELL-BACK-TO-AN-APIC-MMIO-READ-ON-EVERY-ALLOC)."""
+B-FAST-CPU-INDEX-FELL-BACK-TO-AN-APIC-MMIO-READ-ON-EVERY-ALLOC).
+
+Budget unit changed from cycles to *memory accesses* 2026-08-14. The \
+budget was `target_cycles_delta = 500` and reported SLOW on five \
+consecutive healthy boots (10826 / 7660 / 8512 / 10580 / 11288). \
+Interleaving the arms did not move it, and neither did removing the \
+shared atomic counters, so the number was real — it just was not what the \
+budget assumed. Splitting `frame_owner::set` into its early-return path \
+and its working path settled it: `set`'s work measured 2416 cycles while \
+a single byte store to ordinary .bss measured 218, and `set` performs \
+about half a dozen memory accesses. Tagging adds ~16 guest memory \
+accesses per alloc+free; that is ~30 cycles on real hardware and ~2500 \
+under TCG. Nothing had regressed. See \
+TD-BENCH-OWNER-AB-BUDGET-WAS-AN-ABSOLUTE-CYCLE-COUNT in known-issues.md.
+
+40 accesses is 2.5x the ~16 the path actually performs, so variation in \
+how many the optimiser folds cannot trip it, while a lock, an MMIO \
+round-trip, or a per-frame loop that should be one write_bytes (which \
+scales with `count`) all still do."""
 
 [page_alloc_free]
 description  = "Physical page allocate + free cycle"

@@ -139,13 +139,9 @@ mod backup_settings;
 mod device_settings;
 #[allow(dead_code)]
 mod security_dialog;
-/// Where settings panels persist what the user chose — the one place in the
-/// shell that decides which file configuration lives in and how it is written
-/// without risking the user's copy.
-#[allow(dead_code)]
-mod config;
 
-use appearance_settings::{AppearanceSettings, TaskbarStyle, TransparencyLevel};
+use appearance::config;
+use appearance::{AppearanceSettings, TaskbarStyle, TransparencyLevel};
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers};
 use guitk::render::RenderTree;
@@ -1211,7 +1207,7 @@ fn main() {
 )]
 mod theme_tests {
     use super::*;
-    use appearance_settings::{AccentColor, ThemeMode};
+    use appearance::{AccentColor, ThemeMode};
 
     /// Contrast ratio per WCAG 2.x, for asserting that text is readable rather
     /// than merely "a different colour".

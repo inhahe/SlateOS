@@ -19,3 +19,8 @@ tzrules = { path = "../../tzrules" }
 # and then changes a setting in the UI has to get their annotations back.
 # See yamldoc/src/lib.rs.
 yamldoc = { path = "../../yamldoc" }
+
+# The appearance settings model, shared with the Settings application so the
+# two processes cannot disagree about what the user chose. The shell paints
+# from it (DesktopTheme::from_settings) and hosts the panel that edits it.
+appearance = { path = "../appearance" }

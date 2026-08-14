@@ -58481,3 +58481,58 @@ behind a newly added field the way the hand-written check did.
 file" and light-accent sections of `gui/desktop/src/appearance_settings.rs`;
 `DesktopTheme` and `DesktopShell::{set_appearance, load_appearance}` in
 `gui/desktop/src/main.rs`; `yamldoc/src/lib.rs`.
+
+## TD-THREE-INDEPENDENT-APPEARANCE-MODELS
+
+**What.** "What the desktop looks like" is modelled three separate times, in
+three crates, with three incompatible representations and no shared owner:
+
+| Where | Type | Accent model | Persisted? |
+|---|---|---|---|
+| `gui/desktop/src/appearance_settings.rs` | `ThemeMode {Dark, Light, System}` | `AccentColor` — 14 named variants + `Custom(Color)` | yes, `appearance.yaml` via `yamldoc` |
+| `apps/settings/src/main.rs` | `ThemeMode {Light, Dark, System}` | `accent_color_index: usize` into a local array | **no** — nothing is written or read |
+| `gui/toolkit/src/theme.rs` | `ThemeMode {Light, Dark, Custom(String)}` | full `Theme` struct of ~30 colours | n/a (a widget palette, not a preference) |
+
+The first two are the same *user-facing setting* in two processes. They do not
+agree on the type, the variant order, or the file, and only one of them has a
+file at all. `apps/settings` is the application a user actually opens to change
+their theme (the desktop's ~20 `*_settings.rs` panels are all `#[allow(dead_code)]`
+and unconstructed), and it is the one that persists nothing.
+
+**Why it bites.** Concretely, today: changing the accent in the Settings app
+changes nothing on the desktop and is forgotten when the app closes, while the
+desktop reads an `appearance.yaml` that the Settings app never writes. Two
+processes that disagree about a user preference is the same class of bug as
+design-decisions.md §400 (desktop and compositor disagreeing about the font) —
+one setting, one writer, or they diverge.
+
+`accent_color_index: usize` is the sharper half. It is a position in a local
+array, so persisting it directly would create a file format that silently
+remaps every user's accent the moment an accent is inserted or reordered —
+exactly the label-vs-spelling failure that `yaml_enum!` exists to prevent.
+
+**Proper fix.** One shared model, in a crate both sides depend on:
+
+1. Extract the model half of `appearance_settings.rs` — the enums, the two
+   accent palettes, `AppearanceSettings`, `yaml_enum!`, `read_from`/`write_into`
+   — plus `gui/desktop/src/config.rs` into a new `gui/appearance` crate. The
+   config location and the atomic-write protocol have to move with it: two
+   processes writing one file must agree on the path *and* on how it is
+   replaced, not merely on the schema. Leave `AppearanceSettingsUI` and all
+   rendering behind in the desktop.
+2. Rewire `apps/settings`' Personalization pages onto it, deleting its local
+   `ThemeMode` and index-based accent list, and give it load/save.
+3. `gui/toolkit`'s `ThemeMode` stays as it is — a widget palette is a different
+   thing from a stored preference, and collapsing them would make the toolkit
+   depend on a config file. The shared crate should *derive* a `guitk::Theme`,
+   the way `DesktopTheme::from_settings` already derives the shell's palette.
+
+Still open after that: a running app has no way to learn the file changed, so
+a live desktop and a live Settings app still need a change notification (the
+same channel §400 wants for the font). Persisting first at least makes the two
+agree across a restart.
+
+**Where.** `gui/desktop/src/appearance_settings.rs`, `gui/desktop/src/config.rs`,
+`apps/settings/src/main.rs` (`ThemeMode` at :342, `ACCENT_COLORS` at :380,
+`theme_mode`/`accent_color_index` at :685, the Themes/Colors pages at
+:1634/:1709 and their handlers at :3199/:3247), `gui/toolkit/src/theme.rs`.

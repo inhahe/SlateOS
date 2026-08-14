@@ -57949,10 +57949,12 @@ the first attempt at this fix went wrong.
 ## TD-APPS-ESTIMATE-TEXT-WIDTH — apps still guess at text width instead of measuring it
 
 **Status.** Open, in progress. The toolkit and the compositor were converted on
-2026-08-13 (`fa5135c36`, `f2d74c8a2`). Six applications have followed:
+2026-08-13 (`fa5135c36`, `f2d74c8a2`). Ten applications have followed:
 `lockscreen` (`1523f7412`), `filediff` (`353a41211`), `tmux` (`99198808c`),
-`markdowneditor` (`77bf7bf14`), `regextester` (`504c67bc0`) and `jsonviewer`
-(`0c107cce7`). Roughly 150 sites across ~73 files remain.
+`markdowneditor` (`77bf7bf14`), `regextester` (`504c67bc0`), `jsonviewer`
+(`0c107cce7`), `logviewer` (`f5befec99`), `snippets` (`537a9eaa8`),
+`credmanager` (`dba94444d`), `diskimager` (`1e5dc7edb`) and `netscan`
+(`1b436c341`). Roughly 130 sites across ~67 files remain.
 
 **What it is.** Roughly 322 sites across ~90 files under `apps/` and
 `gui/desktop/` size and position text with a per-app fudge factor —
@@ -57972,12 +57974,11 @@ The visible symptoms are the same class the toolkit had: labels overflowing
 their buttons, text cursors landing between characters rather than on them, and
 centred text drifting off-centre in proportion to its length.
 
-**Where it lives.** Densest remaining, in order: `apps/logviewer` (8),
-`apps/snippets` (7), `apps/credmanager` (7), `apps/diskimager` (6),
-`apps/netscan` (5), `apps/netmanager` (5), `apps/hexeditor` (5), `apps/defrag`
-(5), then a long tail of four and fewer. `apps/editor/src/main.rs` is a special
-case: it declares its own `char_width` config field, mirroring the
-`SimpleTextViewConfig` design that was fixed in `guitk/textview`.
+**Where it lives.** Densest remaining, in order: `apps/netmanager` (5),
+`apps/hexeditor` (5, the terminal-grid pattern), `apps/defrag` (5), then a long
+tail of four and fewer. `apps/editor/src/main.rs` is a special case: it declares
+its own `char_width` config field, mirroring the `SimpleTextViewConfig` design
+that was fixed in `guitk/textview`.
 
 **Reproduce.** `rg 'len\(\) as f32\)? \* [0-9]|CHAR_WIDTH|char_width' apps/
 gui/desktop/`. Note the earlier version of this command missed two forms that
@@ -58032,3 +58033,30 @@ for deliberately rather than only fixing the multiplication:
   helper comparing `s.len()` (bytes) against a character budget derived from
   the nominal cell. These cut accented text short when it fitted *and* let wide
   text overflow. Delete them for `text::elide`, which measures the ellipsis too.
+  Four found so far: `regextester`, `logviewer`, `snippets`, `diskimager`.
+
+**And what the next four turned up.** Two more classes, both worse than a
+mis-sized label:
+
+- **Byte-sliced truncation is a crash, not a glitch.** `diskimager`'s
+  `truncate_path` kept the *tail* of a path with `&path[path.len() - keep..]`.
+  That index lands mid-character on any path holding a non-ASCII byte, and
+  slicing a `str` off a character boundary aborts. Our paths admit every byte
+  but `/` and NUL, so it was reachable. Fixing it properly needed a toolkit
+  addition — `text::elide_start` and its `fit_end` primitive (`1e5dc7edb`) —
+  because eliding a path from the *front* (`/home/user/proje...`) throws away
+  the only part the reader wanted; from the start it reads `...deep/disk.img`.
+  Reach for `elide_start` for paths, `elide` for anything read left-to-right
+  (a hash, a message, a title).
+- **Punctuation drawn but not measured.** A field rendered as `[source]` or
+  `#tag` was repeatedly sized from the bare `source` / `tag`, so whatever came
+  next overlapped the closing bracket, or the last character sat on a pill's
+  rounded edge. Found in `logviewer`, `snippets` and `credmanager`. Measure the
+  string that is actually drawn — ideally by building it once and using it for
+  both.
+
+`credmanager` is the model for the drift fix: `draw_badge` now *returns* the
+width it drew, and the three callers that lay something out beside a badge use
+that instead of each re-deriving it. Three separate estimates for one badge had
+already diverged there (`len*7.0+12` drawn, `len*7.5+16` used for the tag
+strip's wrap test, `len*7.0+20` before the audit list's entry name).

@@ -242,15 +242,15 @@ Known-issues (open, kernel-owned):
 Roadmap:
 
 - `[B]` Integrate fastpy into the build system — **initiative F, in progress**
-  (line ~24)
-- `[B]` Port **Oils (OSH)** — initiative A, in progress (line ~1506)
-- `[B]` Enough of POSIX libc for gcc/coreutils/bash/CPython (line ~1184)
-- `[B]` Translate POSIX calls to native syscalls (line ~1445)
-- `[B]` gcc, cmake, make, pkg-config via the POSIX layer (line ~5050)
-- `[B]` Rust toolchain, CPython, fastpy compiler self-hosting (lines ~5051–5053)
-- `[B]` Linux syscall translation layer — userspace half (line ~5108)
-- `[B]` `/proc` emulation completeness (line ~5122)
-- `[B]` ALSA/PulseAudio compatibility shim — userspace half (line ~5125)
+  (line ~312)
+- `[B]` Port **Oils (OSH)** — initiative A, in progress (line ~1794)
+- `[B]` Enough of POSIX libc for gcc/coreutils/bash/CPython (line ~1472)
+- `[B]` Translate POSIX calls to native syscalls (line ~1733)
+- `[B]` gcc, cmake, make, pkg-config via the POSIX layer (line ~5338)
+- `[B]` Rust toolchain, CPython, fastpy compiler self-hosting (lines ~5339–5341)
+- `[B]` Linux syscall translation layer — userspace half (line ~5396)
+- `[B]` `/proc` emulation completeness (line ~5410)
+- `[B]` ALSA/PulseAudio compatibility shim — userspace half (line ~5413)
 
 Known-issues (open, userland-owned): the whole **`TD-OILS-*` family** (~35
 entries) plus `TD-FASTPY-PURE-MODE-FVALUE`, `BUG-DASH-CMDSUB-INTERMITTENT-HANG`,

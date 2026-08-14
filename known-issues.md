@@ -207,7 +207,18 @@ it, the heading must be written in its post-fix state in that same commit.**
 If the fix is not complete there, the write-up should say what remains rather
 than inheriting a blanket `OPEN`. The cheap standing check is
 `grep -n '— OPEN$' known-issues.md`, confirming each hit against the code
-before trusting it — which is how these two were caught.
+before trusting it — which is how these were caught.
+
+**How widespread it was, measured rather than assumed.** Having found two, the
+obvious question was whether the rest of the `OPEN` list could be trusted, so
+all six Lane-A `— OPEN` headings were checked against the code. **Three of the
+six were stale** — this one, the RTL8139 entry below, and
+`TD-BENCHMARKS-ARE-NEVER-ACTUALLY-RUN-BY-THE-BOOT-GATE`, the last of which had
+even accumulated an internal `**Closed 2026-08-14 …**` paragraph while its
+heading still said `OPEN`. So the file's headline status was wrong for **half**
+the open list. That is the number worth remembering: this was not two
+oversights, it was the normal outcome of the workflow that produced them, and
+the only reason it looked like an exception is that nobody had counted.
 
 ### [A] B-RTL8139-SEND-SPINS-FOR-THE-EVENT-WHOSE-HANDLER-WANTS-THE-LOCK-IT-HOLDS. `send()` polls 100 000 times for TX-complete while holding the lock `handle_irq` blocks on — 2026-08-14 — **FIXED** (`64f7d2fd9`)
 
@@ -479,7 +490,7 @@ APIs that take a path and validate only its syntax.
 
 ---
 
-### [A] TD-BENCHMARKS-ARE-NEVER-ACTUALLY-RUN-BY-THE-BOOT-GATE. The whole performance suite — baselines, targets, scorecard — is spawned and then killed mid-run on every boot test — 2026-08-14 — OPEN
+### [A] TD-BENCHMARKS-ARE-NEVER-ACTUALLY-RUN-BY-THE-BOOT-GATE. The whole performance suite — baselines, targets, scorecard — is spawned and then killed mid-run on every boot test — 2026-08-14 — **FIXED** (all three options landed; see "Closed 2026-08-14" below)
 
 **Where:** `kernel/src/main.rs` (`deferred_bench_task`, spawn site ~5505),
 `kernel/src/bench.rs` (`run_all`, `score`, `SCORECARD`),
@@ -59997,6 +60008,47 @@ demonstrated-good in production — the precise distinction this entry exists to
 insist on. It should not be described as proven until a real run trips it.
 Whole-suite drift for `5a2002bac` was +3.1%.
 
+**RECURRENCE 2026-08-14, run `fcd066231` — I did it again, and this time it
+landed on a number I then acted on.** During the ~58 s QEMU bench run I ran
+`grep` over the 60 000-line `known-issues.md`, `git log`, `git show`, and
+several `Read`s. The dispersion report for that run flagged five benchmarks at
+≥5x `mean/min`, and **`vfs_stat_root` was one of them at 12x**. I then took
+that run's `vfs_stat_root` = 5920 ns, called it "8.5x over its 700 ns target",
+committed that claim, and opened an investigation into the VFS dcache on the
+strength of it.
+
+The number may well still be broadly right — `score()` records `min_ns`, and a
+burst inflates the mean far more than the min. But "broadly right" is not the
+standard, and the specific escape hatch does not close here: this benchmark is
+**500 iterations at ~6 µs ≈ 3 ms of wall time**. A host load episode lasting
+longer than 3 ms — which is to say, essentially any of them — covers the
+*entire* benchmark and inflates min and mean together, leaving `mean/min`
+looking normal while every sample is uniformly slow. The 12x ratio says a
+burst happened *inside* those 3 ms; it says nothing about whether a slower,
+broader episode also raised the floor. So the honest status of 5920 ns is
+**unverified**, not "confirmed 8.5x over".
+
+Two things follow, and both were done rather than noted:
+
+1. The re-measurement (the `vfs_stat_breakdown` run) is executed with **no
+   agent commands issued while QEMU is running** — the read-only work is done
+   before the run starts or after it finishes, never during.
+2. The dcache finding is not being justified by the 5920 ns figure at all. It
+   rests on reading the code: `VfsDcache::lookup` is a linear scan over 1024
+   slots with a full `PathBuf` compare per slot, which is a design defect
+   under CLAUDE.md's "linear scans … must be O(1) or O(log n)" rule
+   independently of what any timer says. A contaminated benchmark can motivate
+   a code review; it must not be the evidence.
+
+**The pattern, stated plainly, because this is the second occurrence.** The
+first time, the contamination hit numbers I merely recorded. This time it hit
+a number I *reasoned from* within minutes of producing it. The entry above
+correctly predicted the mechanism and even built the detector that caught it —
+and the detector working did not stop me, because I read the dispersion list
+*after* I had already drawn the conclusion. A check that fires after the
+decision is documentation, not a gate. The ordering is the fix: read the
+dispersion report **before** quoting any number from a run, not after.
+
 ### [A] B-BENCH-WATCHLIST-WATCHED-LESS-THAN-HALF-THE-SUITE-IT-GUARDS. `BENCH_CRITICAL_PATHS` omitted idt.rs, fs/, net/ and crypto.rs — FIXED 2026-08-14
 
 **Where:** `scripts/boot-test.sh`, `BENCH_CRITICAL_PATHS` (feeds
@@ -60352,6 +60404,16 @@ remaining over-target entries (`syscall_dispatch` 661 ns vs 200,
 findings this suite has produced, because they are the first measured on the
 code that would ship. They should be triaged on their own merits — `vfs_stat`
 at 22x and 8x target is the standout — and are not this entry's subject.
+
+**Caveat on those 15, added after the fact.** This run's dispersion report
+flagged five benchmarks at ≥5x `mean/min`, and `vfs_stat_root` — the one
+singled out as "the standout" above — was among them at **12x**. I ran greps
+and git commands during the QEMU boot, which is exactly the mistake recorded
+in `TD-BENCH-RUNS-ARE-CONTAMINATED-BY-THE-AGENTS-OWN-COMMANDS`. The
+over-target *set* is unlikely to be an artefact (a 22x miss does not come from
+host noise), but the individual magnitudes from this run should be treated as
+provisional until re-measured on an idle host. See the RECURRENCE note in that
+entry for why `min_ns` does not fully rescue a 3 ms benchmark.
 
 ### [A] B-BENCH-ENTIRE-SUITE-MEASURES-AN-UNOPTIMISED-KERNEL. Every recorded benchmark ran at `opt-level = 0` and was scored against optimised-reference targets — **FIXED 2026-08-14, confirmed by measurement**
 

@@ -342,11 +342,18 @@ Roadmap:
   `clig`/`calt` are on by default (§408). Substitution is cross-checked
   against HarfBuzz over all 556 installed faces, which is what found the
   subtable budget that had been silently truncating 61 of them (§409).
-  Next unblocked step is the rest of shaping: no script/language selection
-  (`TD-GSUB-APPLIES-EVERY-SCRIPTS-FEATURES`), no Unicode normalization
-  (the only remaining HarfBuzz disagreement), no mark-to-ligature
-  attachment (GPOS 5), no bidi, no complex-script reordering. Vello itself
-  waits on `[A]`'s GPU driver.
+  Unicode normalization done: text is folded to NFC before any `cmap`
+  lookup, then taken back apart for a face that cannot draw the composed
+  form, as two layers so that canonically equivalent spellings render
+  identically (§410). The same sweep found symbol-encoded `cmap` subtables
+  going unread, which had made every string in Wingdings and four other
+  faces a row of empty boxes. Agreement with HarfBuzz over the corpus is
+  now 9368/10008 runs, and every remaining disagreement is a documented
+  deliberate divergence. Next unblocked step is the rest of shaping: no
+  script/language selection (`TD-GSUB-APPLIES-EVERY-SCRIPTS-FEATURES`), no
+  Alternate Substitution (GSUB 3), no mark-to-ligature attachment
+  (GPOS 5), no bidi, no complex-script reordering. Vello itself waits on
+  `[A]`'s GPU driver.
 - `[C]` Wayland-inspired compositor: GPU acceleration, currently a software
   rasterizer (lines ~4605, ~4619)
 - `[C]` Video-encoded capture fallback, H.264/VP9 (lines ~4623, ~5060)

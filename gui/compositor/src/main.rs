@@ -1508,18 +1508,33 @@ fn blend_mask(
 struct RenderEngine {
     clip_stack: ClipStack,
     translate_stack: TranslateStack,
-    /// Shared with the toolkit's measurement path: same type, same rounding
-    /// rule, so a label the toolkit sized cannot be drawn in a different font
-    /// than the one it was measured in.
+    /// Same type, same rounding rule, and — because the faces are installed by
+    /// [`guitk::text::install_ui_faces`] rather than chosen here — the same
+    /// files as the toolkit measured with. A label the toolkit sized therefore
+    /// cannot be drawn in a different font than the one it was measured in.
+    ///
+    /// A cache of its own, rather than the toolkit's process-global one,
+    /// because this process only ever draws: it would take that cache's lock
+    /// for every glyph run and never once measure anything.
     fonts: FontCache,
 }
 
 impl RenderEngine {
     fn new() -> Self {
+        let mut fonts = FontCache::new();
+        match guitk::text::install_ui_faces(&mut fonts) {
+            Some(family) => eprintln!("compositor: UI font: {family}"),
+            // Not fatal: the cache keeps its built-in bitmap face, so text
+            // still draws. Worth saying out loud, though, since every label on
+            // the screen will look wrong and the cause is off-screen.
+            None => eprintln!(
+                "compositor: no system UI font found, falling back to the built-in bitmap face"
+            ),
+        }
         Self {
             clip_stack: ClipStack::default(),
             translate_stack: TranslateStack::default(),
-            fonts: FontCache::new(),
+            fonts,
         }
     }
 

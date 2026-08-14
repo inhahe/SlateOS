@@ -29,7 +29,7 @@
 //! [`tabs`]: crate::tabs
 //! [`pathbar`]: crate::pathbar
 
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use osfont::select::Query;
 use osfont::system::{FontCache, Weight};
@@ -105,26 +105,39 @@ struct Fonts {
 fn cache() -> &'static Mutex<Fonts> {
     static CACHE: OnceLock<Mutex<Fonts>> = OnceLock::new();
     CACHE.get_or_init(|| {
-        let mut fonts = Fonts {
-            cache: FontCache::new(),
-            family: None,
-        };
-        for family in DEFAULT_UI_FAMILIES {
-            if install_into(&mut fonts, family) {
-                break;
-            }
-        }
-        Mutex::new(fonts)
+        let mut cache = FontCache::new();
+        let family = install_ui_faces(&mut cache).map(str::to_string);
+        Mutex::new(Fonts { cache, family })
     })
 }
 
-/// Install `family` into `fonts`, reporting whether it worked.
+/// Load the default UI font into `cache`, returning the family that won.
 ///
-/// Both weights must load, and the state is only changed once both have: a
+/// Public because the compositor keeps a [`FontCache`] of its own: it draws
+/// every process's text and never measures any, so routing its glyph runs
+/// through this module's lock would buy nothing. What it does have to share is
+/// the *choice* of face. If it picked a family by its own rule, or walked its
+/// own fallback list, then on any host where the two lists disagree the
+/// system would measure in one font and draw in another. Calling this is how
+/// a second cache is made to agree by construction instead of by two lists
+/// being maintained in step.
+///
+/// Returns `None`, having changed nothing, if no family on the list resolves;
+/// the cache then keeps its built-in bitmap face.
+pub fn install_ui_faces(cache: &mut FontCache) -> Option<&'static str> {
+    DEFAULT_UI_FAMILIES
+        .iter()
+        .copied()
+        .find(|family| install_family(cache, family))
+}
+
+/// Load `family`'s regular and bold faces into `cache`, reporting success.
+///
+/// Both weights must load, and the cache is only touched once both have: a
 /// half-installed family would draw bold text in the old face and regular in
 /// the new one, which looks like a rendering fault rather than a missing
 /// font.
-fn install_into(fonts: &mut Fonts, family: &str) -> bool {
+pub fn install_family(cache: &mut FontCache, family: &str) -> bool {
     let db = font_db();
     let (Ok(regular), Ok(bold)) = (
         db.load(family, Query::regular()),
@@ -132,9 +145,8 @@ fn install_into(fonts: &mut Fonts, family: &str) -> bool {
     ) else {
         return false;
     };
-    fonts.cache.set_face(Weight::Regular, std::sync::Arc::new(regular));
-    fonts.cache.set_face(Weight::Bold, std::sync::Arc::new(bold));
-    fonts.family = Some(family.to_string());
+    cache.set_face(Weight::Regular, Arc::new(regular));
+    cache.set_face(Weight::Bold, Arc::new(bold));
     true
 }
 
@@ -149,7 +161,11 @@ fn install_into(fonts: &mut Fonts, family: &str) -> bool {
 /// every process that draws, or measuring and drawing will disagree.
 pub fn set_font_family(family: &str) -> bool {
     let mut fonts = cache().lock().unwrap_or_else(PoisonError::into_inner);
-    install_into(&mut fonts, family)
+    if !install_family(&mut fonts.cache, family) {
+        return false;
+    }
+    fonts.family = Some(family.to_string());
+    true
 }
 
 /// The family UI text is currently drawn in, or `None` if no installed font

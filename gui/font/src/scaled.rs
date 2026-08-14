@@ -32,6 +32,7 @@ use crate::FontMetrics;
 use crate::gsub::SubGlyph;
 use crate::norm;
 use crate::raster::{GlyphMask, rasterize};
+use crate::script::{self, ScriptTags};
 use crate::sfnt::{Face, PathCmd, SfntError};
 use crate::shape::{GlyphKey, ShapedGlyph, ShapedRun, TAB_WIDTH_IN_SPACES};
 
@@ -397,9 +398,10 @@ impl ScaledFont {
         // not as the `f` and `i` it was; and a mark's placement is measured
         // from a pen that kerning is still moving.
         let space = self.glyph_id(' ');
-        let mut glyphs: Vec<SubGlyph> = Vec::with_capacity(text.len());
-        let mut tabs: Vec<bool> = Vec::with_capacity(text.len());
-        for (ch, cluster) in norm::pieces(text, |ch| self.face.glyph_index(ch).is_some()) {
+        let pieces = norm::pieces(text, |ch| self.face.glyph_index(ch).is_some());
+        let mut glyphs: Vec<SubGlyph> = Vec::with_capacity(pieces.len());
+        let mut tabs: Vec<bool> = Vec::with_capacity(pieces.len());
+        for &(ch, cluster) in &pieces {
             // A tab has no glyph. Drawn through `cmap` it comes out as the
             // missing-glyph box, one space wide; the width every caller wants
             // is several spaces of nothing. Substituting the space glyph gets
@@ -411,7 +413,10 @@ impl ScaledFont {
         }
 
         if self.face.has_substitutions() {
-            self.substitute_between_tabs(&mut glyphs, &mut tabs);
+            // Glyphs are still one per piece here, so a run boundary counted
+            // in pieces is a boundary counted in glyphs. That stops being true
+            // the moment anything ligates, which is why the split happens now.
+            self.substitute_runs(&script::runs(&pieces), &mut glyphs, &mut tabs);
         }
 
         let marked = self.face.has_marks();
@@ -481,34 +486,77 @@ impl ScaledFont {
         ShapedRun::new(out)
     }
 
-    /// Substitute each stretch of `glyphs` between tabs, separately.
+    /// Substitute each stretch of `glyphs` between tabs and script changes,
+    /// separately and each under its own script.
     ///
-    /// A substitution may not reach across a tab. The tab is not a glyph the
-    /// font knows about, so joining what sits either side of it would silently
-    /// swallow the gap it exists to make — and a `GSUB` lookup, which is
-    /// handed a whole run and matches anywhere in it, has no way to be told
+    /// Two boundaries, for two reasons.
+    ///
+    /// A substitution may not reach across a **tab**. The tab is not a glyph
+    /// the font knows about, so joining what sits either side of it would
+    /// silently swallow the gap it exists to make — and a `GSUB` lookup, which
+    /// is handed a whole run and matches anywhere in it, has no way to be told
     /// about a boundary except by not being shown across it.
+    ///
+    /// A substitution may not reach across a **script change** either, and
+    /// here the boundary is not only about reach but about *which rules*: the
+    /// features on each side are chosen by different script tags, and a face
+    /// that registers both Arabic and Latin has two features called `liga`
+    /// that mean different things. Shaping the whole string under one script —
+    /// which is what a single call would do, and what HarfBuzz's
+    /// `guess_segment_properties` does — applies one writing system's rules to
+    /// the other's half of the string.
+    ///
+    /// `runs` is [`script::runs`]'s output over the pieces these glyphs came
+    /// from, so its ends are glyph indices for as long as nothing has ligated
+    /// yet — which is why this is the pass that consumes them.
     ///
     /// Both vectors are rewritten, since a run that ligates comes out shorter
     /// and `tabs` has to keep lining up with it.
-    fn substitute_between_tabs(&self, glyphs: &mut Vec<SubGlyph>, tabs: &mut Vec<bool>) {
+    fn substitute_runs(
+        &self,
+        runs: &[(usize, Option<ScriptTags>)],
+        glyphs: &mut Vec<SubGlyph>,
+        tabs: &mut Vec<bool>,
+    ) {
         let mut out: Vec<SubGlyph> = Vec::with_capacity(glyphs.len());
         let mut out_tabs: Vec<bool> = Vec::with_capacity(tabs.len());
         let mut run: Vec<SubGlyph> = Vec::new();
+        // Which script run `i` falls in. Advanced rather than searched: `i`
+        // only moves forward, and there are a handful of runs at most.
+        let mut at = 0usize;
+        // The script the *open* stretch was collected under, which is not the
+        // script at `i` once a boundary has been crossed. Keeping it separate
+        // is what makes a stretch shaped under the script that opened it.
+        let mut open: Option<ScriptTags> = None;
         // One past the end, where there is no glyph and `tabs` reads `true`,
         // so that the last stretch is flushed by the same code as every
         // stretch a tab ends — including the whole of a run with no tabs at
         // all, which is nearly every run.
         for i in 0..=glyphs.len() {
+            // Ends are exclusive: `end == i` means the run stopped *before*
+            // this glyph, so the stretch closes and `i` opens the next one.
+            if runs.get(at).is_some_and(|&(end, _)| end <= i) {
+                if !run.is_empty() {
+                    self.face.substitute(open, &mut run);
+                    out_tabs.extend(core::iter::repeat_n(false, run.len()));
+                    out.append(&mut run);
+                }
+                while runs.get(at).is_some_and(|&(end, _)| end <= i) {
+                    at = at.saturating_add(1);
+                }
+            }
+            open = runs.get(at).and_then(|&(_, script)| script);
             if !tabs.get(i).copied().unwrap_or(true) {
                 if let Some(glyph) = glyphs.get(i) {
                     run.push(*glyph);
                 }
                 continue;
             }
-            self.face.substitute(&mut run);
-            out_tabs.extend(core::iter::repeat_n(false, run.len()));
-            out.append(&mut run);
+            if !run.is_empty() {
+                self.face.substitute(open, &mut run);
+                out_tabs.extend(core::iter::repeat_n(false, run.len()));
+                out.append(&mut run);
+            }
             if let Some(glyph) = glyphs.get(i) {
                 out.push(*glyph);
                 out_tabs.push(true);

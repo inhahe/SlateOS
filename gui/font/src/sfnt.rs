@@ -64,6 +64,7 @@ use core::fmt;
 use crate::gsub::{SubGlyph, Substitutions};
 use crate::kern::Kerning;
 use crate::mark::MarkPositioning;
+use crate::script::ScriptTags;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -1085,9 +1086,17 @@ impl Face {
     /// The caller decides what one run is, and so where a substitution may
     /// not reach: a tab, a style change and a bidi run boundary are all
     /// expressed by passing the pieces separately.
-    pub fn substitute(&self, glyphs: &mut Vec<SubGlyph>) {
+    ///
+    /// `script` says which of the face's features apply. It matters because a
+    /// tag is not unique — a face supporting both Arabic and Latin has two
+    /// features called `liga`, meaning entirely different things — so a run
+    /// shaped under the wrong script can be rewritten by rules written for
+    /// another writing system. `None` asks for the face's default features,
+    /// which is the right answer for a run of digits and punctuation and the
+    /// only one available for a caller holding bare glyph ids.
+    pub fn substitute(&self, script: Option<ScriptTags>, glyphs: &mut Vec<SubGlyph>) {
         if let Some(subs) = self.substitutions.as_ref() {
-            subs.apply(&self.data, glyphs);
+            subs.apply(&self.data, script, glyphs);
         }
     }
 

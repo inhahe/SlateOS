@@ -94,6 +94,18 @@ impl GlyphKey {
     pub(crate) fn ch(self) -> char {
         char::from_u32(self.0).unwrap_or(char::REPLACEMENT_CHARACTER)
     }
+
+    /// The raw value behind this key. **For diagnostics only.**
+    ///
+    /// It is a glyph id in an outline face and a character in the bitmap one,
+    /// which is precisely the distinction this type exists to hide — so
+    /// nothing that *draws* may call it. It exists for the tools that check
+    /// this crate against an external shaper: they report glyph ids, and
+    /// cannot be compared against without speaking in them.
+    #[must_use]
+    pub fn raw(self) -> u32 {
+        self.0
+    }
 }
 
 /// One glyph of a shaped run.

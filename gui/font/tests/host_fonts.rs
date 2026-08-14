@@ -40,8 +40,18 @@ use std::path::{Path, PathBuf};
 use osfont::gsub::SubGlyph;
 use osfont::raster::rasterize;
 use osfont::scaled::{ScaledFont, Target};
+use osfont::script::ScriptTags;
 use osfont::shape::TAB_WIDTH_IN_SPACES;
 use osfont::sfnt::{name_id, Face, PathCmd, SfntError};
+
+/// Every glyph these tests substitute came from Latin text, so Latin is the
+/// script its features must be chosen under. Spelled once, because passing the
+/// wrong script here would silently disable every ligature in the file and the
+/// tests would still pass — they would just stop testing anything.
+const LATIN: Option<ScriptTags> = Some(ScriptTags {
+    preferred: *b"latn",
+    fallback: *b"latn",
+});
 
 /// Directories a font might live in, on any host this repo is developed on.
 fn font_dirs() -> Vec<PathBuf> {
@@ -60,13 +70,13 @@ fn font_dirs() -> Vec<PathBuf> {
 /// The face takes a whole run rather than answering about a position, because
 /// its lookups apply in order across all of it; a helper is what keeps that
 /// from being spelled out at each of the four call sites below.
-fn substitute(face: &Face, gids: &[u16]) -> Vec<SubGlyph> {
+fn substitute(face: &Face, script: Option<ScriptTags>, gids: &[u16]) -> Vec<SubGlyph> {
     let mut glyphs: Vec<SubGlyph> = gids
         .iter()
         .enumerate()
         .map(|(i, &gid)| SubGlyph { gid, cluster: i })
         .collect();
-    face.substitute(&mut glyphs);
+    face.substitute(script, &mut glyphs);
     glyphs
 }
 
@@ -913,7 +923,7 @@ fn installed_fonts_ligate_fi() {
             continue;
         };
         for (name, pair) in [("fi", [f, i]), ("fl", [f, l]), ("ff", [f, f])] {
-            let out = substitute(&face, &pair);
+            let out = substitute(&face, LATIN, &pair);
             if out.len() != 1 {
                 // A pair that does not ligate must come back as two glyphs
                 // standing where they went in. It need not come back as the
@@ -977,7 +987,7 @@ fn installed_fonts_ligate_fi() {
         // A ligature must never form from a single glyph, whatever the tables
         // say: there is nothing to join.
         assert_eq!(
-            substitute(&face, &[f]).len(),
+            substitute(&face, LATIN, &[f]).len(),
             1,
             "{}: one glyph on its own produced a ligature",
             path.display()
@@ -1019,7 +1029,7 @@ fn installed_fonts_ligate_fi() {
         let (Some(f), Some(i)) = (face.glyph_index('f'), face.glyph_index('i')) else {
             continue;
         };
-        let out = substitute(&face, &[f, i]);
+        let out = substitute(&face, LATIN, &[f, i]);
         if out.len() != 1 {
             println!("oracle skip: {file} has no fi ligature");
             continue;
@@ -1115,7 +1125,7 @@ fn installed_fonts_reach_lookups_past_the_subtable_budget() {
         if gids.len() != text.chars().count() {
             continue;
         }
-        let out = substitute(&face, &gids);
+        let out = substitute(&face, LATIN, &gids);
         assert_eq!(
             out.len(),
             *want,
@@ -1202,7 +1212,7 @@ fn installed_fonts_leave_plain_latin_alone() {
             // The face cannot spell the string; it has nothing to say here.
             continue;
         }
-        let after = substitute(&face, &before);
+        let after = substitute(&face, LATIN, &before);
         let gids: Vec<u16> = after.iter().map(|g| g.gid).collect();
         if gids != before {
             // Report *what* moved, not just that something did: a ligature
@@ -1547,7 +1557,7 @@ fn installed_fonts_leave_a_tab_alone() {
             continue;
         };
         with_gsub += 1;
-        let touched = substitute(&face, &[space])
+        let touched = substitute(&face, LATIN, &[space])
             .first()
             .is_some_and(|g| g.gid != space);
         if touched {

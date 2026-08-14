@@ -18,19 +18,116 @@
 //! are absolute byte positions into the whole font file, since that is what
 //! the callers cache.
 //!
+//! # Script selection
+//!
+//! The walk starts at the ScriptList, not the FeatureList. That matters
+//! because a tag is not unique: a face supporting both Arabic and Latin has
+//! two features called `liga`, filed under different scripts and meaning
+//! entirely different things. Walking the FeatureList and taking every record
+//! with a wanted tag — which this module used to do — applies both to
+//! everything, so an Arabic rule can rewrite a Latin word. `ebrima.ttf` on the
+//! development host has such a rule.
+//!
+//! [`select`] resolves a script tag to a LangSys, following OpenType's
+//! fallback chain: the requested script, then its older spelling for the Indic
+//! scripts OpenType renumbered, then `DFLT`, then a script literally named
+//! `dflt`. A face that registers its features under none of those has nothing
+//! to offer the run, and is shaped without features rather than with all of
+//! them.
+//!
 //! # What is not here
 //!
-//! **Script and language selection.** The walk starts at the FeatureList and
-//! takes every feature with a wanted tag, rather than starting at the
-//! ScriptList and taking the features the run's script and language actually
-//! select. Doing it properly needs the itemised script of the run, which is a
-//! shaper's job and comes later; until then, using all of them is wrong only
-//! for a face that varies a feature by script, which is rare, and the failure
-//! is a slightly wrong gap rather than a wrong glyph.
+//! **Language selection.** Only the DefaultLangSys of the chosen script is
+//! used; the LangSysRecords, which hold the per-language overrides (Turkish
+//! dotless i, Serbian Cyrillic italics), are skipped. That needs a language
+//! to come down from the caller, which nothing above this crate tracks yet.
+//! Tracked as `TD-FONT-IGNORES-LANGSYS-OVERRIDES`.
+//!
+//! **Required features.** A LangSys may name one feature as required, outside
+//! its feature index list. Nothing in the tag sets this crate asks for is ever
+//! registered that way in practice, but skipping it is a real gap.
+//!
+//! **Script selection for `GPOS`.** Only `GSUB` selects per run, through
+//! [`ByScript`]. Kerning and mark attachment take the union over every script,
+//! through [`feature_subtables`], because they are consulted a glyph pair at a
+//! time from a public API with no run behind it. Tracked as
+//! `TD-GPOS-APPLIES-EVERY-SCRIPTS-FEATURES`.
 
 use alloc::vec::Vec;
 
+use crate::script::ScriptTags;
 use crate::sfnt::{u16_at, u32_at};
+
+/// A resolved script: where its DefaultLangSys is, and where the FeatureList
+/// that its indices point into begins.
+#[derive(Clone, Copy, Debug)]
+struct LangSys {
+    lang_sys: usize,
+    feature_list: usize,
+}
+
+/// Find the LangSys that governs a run of `script`, following OpenType's
+/// fallback chain.
+///
+/// `script` is `None` for a run with no script of its own — all digits and
+/// punctuation — which goes straight to the default entries.
+fn select(data: &[u8], base: usize, script: Option<ScriptTags>) -> Option<LangSys> {
+    let script_list = base.checked_add(usize::from(u16_at(data, base.checked_add(4)?)?))?;
+    let feature_list = base.checked_add(usize::from(u16_at(data, base.checked_add(6)?)?))?;
+
+    // Order matters and is the whole of the policy: the run's own script
+    // first, then the older OpenType spelling of it, then the two ways a font
+    // says "these features are for everything". `DFLT` is the registered
+    // default script tag; `dflt` is a common misspelling that real fonts ship,
+    // and every shaper accepts it.
+    for want in fallback_chain(script) {
+        let Some(script_table) = find_script(data, script_list, &want) else {
+            continue;
+        };
+        // A script table may exist and still have no default language system,
+        // in which case it says nothing about a run with no language — so
+        // keep looking rather than concluding the font has nothing.
+        let off = u16_at(data, script_table)?;
+        if off == 0 {
+            continue;
+        }
+        return Some(LangSys {
+            lang_sys: script_table.checked_add(usize::from(off))?,
+            feature_list,
+        });
+    }
+    None
+}
+
+/// The script tags to try for a run of `script`, best first.
+///
+/// Order is the whole of the policy: the run's own script first, then the
+/// older OpenType spelling of it for the Indic scripts OpenType renumbered,
+/// then the two ways a font says "these features are for everything". `DFLT`
+/// is the registered default script tag; `dflt` is a misspelling that real
+/// fonts ship, and every shaper accepts it.
+///
+/// A run with no script of its own — all digits and punctuation — starts at
+/// `DFLT`, which is also what HarfBuzz does with a `Common` buffer.
+fn fallback_chain(script: Option<ScriptTags>) -> impl Iterator<Item = [u8; 4]> {
+    let (preferred, fallback) = script.map(|s| (s.preferred, s.fallback)).unzip();
+    [preferred, fallback, Some(*b"DFLT"), Some(*b"dflt")]
+        .into_iter()
+        .flatten()
+}
+
+/// Where the ScriptTable for `want` begins, if the ScriptList has one.
+fn find_script(data: &[u8], script_list: usize, want: &[u8; 4]) -> Option<usize> {
+    let count = u16_at(data, script_list)?;
+    for i in 0..usize::from(count) {
+        let rec = script_list.checked_add(2)?.checked_add(i.checked_mul(6)?)?;
+        if data.get(rec..rec.checked_add(4)?)? != want.as_slice() {
+            continue;
+        }
+        return script_list.checked_add(usize::from(u16_at(data, rec.checked_add(4)?)?));
+    }
+    None
+}
 
 /// A limit on how many subtables are followed in total, so that a corrupt or
 /// hostile font cannot make shaping arbitrarily slow: every glyph of a run is
@@ -80,12 +177,22 @@ pub(crate) struct Lookup {
     pub(crate) subtables: Vec<usize>,
 }
 
-/// Offsets of the subtables reachable from the features tagged `tags`.
+/// Offsets of the subtables reachable from the features tagged `tags`, under
+/// *any* script the font registers.
 ///
 /// `want` is the lookup type whose subtables the caller can read, and
 /// `extension` is the lookup type that table uses for its 32-bit-offset
 /// redirect (9 in `GPOS`, 7 in `GSUB`) — the two tables number their lookup
 /// types independently, so neither can be hardcoded here.
+///
+/// The union over scripts is deliberate and is what separates this from
+/// [`ByScript`]. It exists for the `GPOS` callers — pair kerning and mark
+/// attachment — which have no run to ask about: they are consulted one glyph
+/// pair at a time, from a public API that has no script to pass. That is a
+/// real, if narrow, gap: see `TD-GPOS-APPLIES-EVERY-SCRIPTS-FEATURES`. It is
+/// narrow because a positioning subtable is gated on glyph coverage, so a
+/// face's Arabic `kern` simply does not cover Latin glyphs; substitution has
+/// no such protection, which is why `GSUB` uses [`ByScript`] instead.
 ///
 /// Returns `None` rather than an empty vector when nothing is found, because
 /// every caller treats "this table has nothing for me" as a reason to fall
@@ -98,48 +205,169 @@ pub(crate) fn feature_subtables(
     extension: u16,
 ) -> Option<Vec<usize>> {
     let mut out = Vec::new();
-    for lookup in feature_lookups(data, base, tags, &[want], extension)? {
+    for lookup in ByScript::parse(data, base, tags, &[want], extension)?.all() {
         out.extend_from_slice(&lookup.subtables);
     }
     (!out.is_empty()).then_some(out)
 }
 
-/// The lookups of type `want` reachable from the features tagged `tags`, in
-/// the order they must be applied.
+/// The lookups a table offers, resolved once per script the font registers.
 ///
-/// That order is the LookupList's, not the order a feature happens to name
-/// them in: the font decides which of its lookups runs first, and a feature
-/// only says *which* it needs.
+/// Selection is per *run* — a mixed Arabic-and-Latin string is two runs and
+/// picks different features for each — but decoding is per *face*, and the two
+/// have to be reconciled somewhere. Doing the feature walk at shaping time is
+/// the obvious answer and is too slow: on the worst installed face it means
+/// re-reading 1874 subtable offsets for every string drawn, on a path that
+/// runs once per label per frame.
 ///
-/// See [`feature_subtables`] for `extension`, and for why nothing found is
-/// `None` rather than an empty vector.
-pub(crate) fn feature_lookups(
-    data: &[u8],
-    base: usize,
-    tags: &[&[u8; 4]],
-    want: &[u16],
-    extension: u16,
-) -> Option<Vec<Lookup>> {
-    let (lookup_list, indices) = lookup_indices(data, base, tags)?;
-    let lookup_count = u16_at(data, lookup_list)?;
-    let mut out: Vec<Lookup> = Vec::new();
-    // Shared across lookups, so that a font with a hundred small lookups is
-    // capped the same way as one with a single enormous lookup.
-    let mut budget = MAX_SUBTABLES;
-    for idx in indices {
-        if idx >= lookup_count || budget == 0 {
-            continue;
+/// So every script the font registers is resolved up front. The lookups
+/// themselves are decoded *once* and shared: scripts overwhelmingly select
+/// overlapping sets of them, and a face that registers ten scripts would
+/// otherwise hold ten copies of nearly the same list. What varies per script
+/// is only which of them apply, and that is two bytes each.
+#[derive(Clone, Debug)]
+pub(crate) struct ByScript {
+    /// Every lookup any script reaches, in LookupList order — which is the
+    /// order they must be applied in.
+    lookups: Vec<Lookup>,
+    /// Script tag to the positions in `lookups` it selects, sorted by tag so
+    /// a run can find its own with a binary search. Positions are ascending,
+    /// so applying them in order is applying them in LookupList order.
+    scripts: Vec<([u8; 4], Vec<u16>)>,
+}
+
+impl ByScript {
+    /// Resolve `tags` for every script `base` registers.
+    ///
+    /// Returns `None` when no script selects any lookup of a wanted type,
+    /// which is not an error: a monospace face has no ligatures by design.
+    pub(crate) fn parse(
+        data: &[u8],
+        base: usize,
+        tags: &[&[u8; 4]],
+        want: &[u16],
+        extension: u16,
+    ) -> Option<Self> {
+        let lookup_list = lookup_list(data, base)?;
+        let lookup_count = u16_at(data, lookup_list)?;
+
+        // Which lookups each script selects, and the union of all of them.
+        let mut selected: Vec<([u8; 4], Vec<u16>)> = Vec::new();
+        let mut union: Vec<u16> = Vec::new();
+        for tag in script_tags(data, base)? {
+            // A script is asked for under its own tag exactly: the fallback
+            // chain belongs to the *run*, in `for_script`, and applying it
+            // here would file `DFLT`'s lookups under every script's name.
+            let Some((_, indices)) = lookup_indices(data, base, tags, Some(ScriptTags::exactly(tag))) else {
+                continue;
+            };
+            union.extend(indices.iter().copied().filter(|&i| i < lookup_count));
+            selected.push((tag, indices));
         }
-        let at = lookup_list
-            .checked_add(2)?
-            .checked_add(usize::from(idx).checked_mul(2)?)?;
-        let Some(lookup) = u16_at(data, at).and_then(|o| lookup_list.checked_add(usize::from(o)))
+        union.sort_unstable();
+        union.dedup();
+
+        // Decode each lookup exactly once, in LookupList order. Scripts
+        // overwhelmingly select overlapping sets, and a face registering ten
+        // scripts would otherwise hold ten copies of nearly the same list.
+        // Decoding in order is what makes a script's positions ascending, and
+        // therefore what makes "apply them in order" the correct thing to do.
+        let mut budget = MAX_SUBTABLES;
+        let mut lookups: Vec<Lookup> = Vec::new();
+        // LookupList index to its position in `lookups`, ascending in both.
+        let mut at: Vec<(u16, u16)> = Vec::new();
+        for idx in union {
+            if budget == 0 {
+                break;
+            }
+            let Some(off) = lookup_list
+                .checked_add(2)
+                .and_then(|o| o.checked_add(usize::from(idx).checked_mul(2)?))
+                .and_then(|a| u16_at(data, a))
+                .and_then(|o| lookup_list.checked_add(usize::from(o)))
+            else {
+                continue;
+            };
+            // Not of a type this caller can apply — most of a font's lookups,
+            // for most callers.
+            let Some(lookup) = read_lookup(data, off, want, extension, &mut budget) else {
+                continue;
+            };
+            let Ok(pos) = u16::try_from(lookups.len()) else {
+                break;
+            };
+            lookups.push(lookup);
+            at.push((idx, pos));
+        }
+
+        let mut scripts: Vec<([u8; 4], Vec<u16>)> = Vec::new();
+        for (tag, indices) in selected {
+            // `indices` is ascending and deduplicated, and `at` ascends in
+            // both columns, so the result is ascending and unique too.
+            let positions: Vec<u16> = indices
+                .iter()
+                .filter_map(|idx| at.binary_search_by_key(idx, |&(i, _)| i).ok())
+                .filter_map(|k| at.get(k).map(|&(_, pos)| pos))
+                .collect();
+            if !positions.is_empty() {
+                scripts.push((tag, positions));
+            }
+        }
+        if scripts.is_empty() {
+            return None;
+        }
+        scripts.sort_unstable_by_key(|&(tag, _)| tag);
+        Some(Self { lookups, scripts })
+    }
+
+    /// Every lookup any script reaches, in the order they must be applied.
+    ///
+    /// For the callers that have no run to ask about — see
+    /// [`feature_subtables`], which is the only one.
+    pub(crate) fn all(&self) -> &[Lookup] {
+        &self.lookups
+    }
+
+    /// The lookups that apply to a run of `script`, in the order they run.
+    ///
+    /// Follows the same fallback chain as [`select`]: the run's script, its
+    /// older OpenType spelling, then the two default tags. An empty iterator
+    /// means this face has nothing for the run, which is a normal answer — and
+    /// the right one, since the alternative is applying another script's rules
+    /// to it.
+    pub(crate) fn for_script(
+        &self,
+        script: Option<ScriptTags>,
+    ) -> impl Iterator<Item = &Lookup> {
+        let positions = fallback_chain(script)
+            .find_map(|want| {
+                self.scripts
+                    .binary_search_by_key(&want, |&(tag, _)| tag)
+                    .ok()
+                    .and_then(|i| self.scripts.get(i))
+                    .map(|(_, positions)| positions.as_slice())
+            })
+            .unwrap_or(&[]);
+        positions
+            .iter()
+            .filter_map(|&at| self.lookups.get(usize::from(at)))
+    }
+}
+
+/// Every script tag the table's ScriptList registers, in file order.
+fn script_tags(data: &[u8], base: usize) -> Option<Vec<[u8; 4]>> {
+    let script_list = base.checked_add(usize::from(u16_at(data, base.checked_add(4)?)?))?;
+    let count = u16_at(data, script_list)?;
+    let mut out = Vec::with_capacity(usize::from(count));
+    for i in 0..usize::from(count) {
+        let rec = script_list.checked_add(2)?.checked_add(i.checked_mul(6)?)?;
+        let Some(tag) = data
+            .get(rec..rec.checked_add(4)?)
+            .and_then(|s| <[u8; 4]>::try_from(s).ok())
         else {
             continue;
         };
-        if let Some(lookup) = read_lookup(data, lookup, want, extension, &mut budget) {
-            out.push(lookup);
-        }
+        out.push(tag);
     }
     (!out.is_empty()).then_some(out)
 }
@@ -185,19 +413,48 @@ pub(crate) fn lookup_at(
 /// Ascending and deduplicated, because lookups apply in LookupList order
 /// regardless of the order a feature happens to list them in, and two features
 /// may share one.
-fn lookup_indices(data: &[u8], base: usize, tags: &[&[u8; 4]]) -> Option<(usize, Vec<u16>)> {
-    let feature_list = base.checked_add(usize::from(u16_at(data, base.checked_add(6)?)?))?;
+fn lookup_indices(
+    data: &[u8],
+    base: usize,
+    tags: &[&[u8; 4]],
+    script: Option<ScriptTags>,
+) -> Option<(usize, Vec<u16>)> {
     let lookup_list = lookup_list(data, base)?;
+    let LangSys {
+        lang_sys,
+        feature_list,
+    } = select(data, base, script)?;
 
+    // The LangSys names features by index into the FeatureList, and *only*
+    // those features apply to this run. This indirection is the whole point of
+    // the ScriptList: the FeatureList is the font's whole inventory, and a
+    // language system picks its subset out of it.
+    let feature_count = u16_at(data, lang_sys.checked_add(4)?)?;
     let mut indices = Vec::new();
-    let feature_count = u16_at(data, feature_list)?;
     for i in 0..usize::from(feature_count) {
-        let rec = feature_list.checked_add(2)?.checked_add(i.checked_mul(6)?)?;
-        let tag = data.get(rec..rec.checked_add(4)?)?;
+        let at = lang_sys.checked_add(6)?.checked_add(i.checked_mul(2)?)?;
+        let Some(feature_index) = u16_at(data, at) else {
+            continue;
+        };
+        let Some(rec) = feature_list
+            .checked_add(2)
+            .and_then(|o| o.checked_add(usize::from(feature_index).checked_mul(6)?))
+        else {
+            continue;
+        };
+        // An index past the end of the FeatureList is corruption, not a
+        // reason to stop: the rest of the list may still be sound.
+        let Some(tag) = rec.checked_add(4).and_then(|e| data.get(rec..e)) else {
+            continue;
+        };
         if !tags.iter().any(|want| want.as_slice() == tag) {
             continue;
         }
-        let feature = feature_list.checked_add(usize::from(u16_at(data, rec.checked_add(4)?)?))?;
+        let Some(feature) = u16_at(data, rec.checked_add(4)?)
+            .and_then(|o| feature_list.checked_add(usize::from(o)))
+        else {
+            continue;
+        };
         let count = u16_at(data, feature.checked_add(2)?)?;
         for j in 0..usize::from(count) {
             let at = feature.checked_add(4)?.checked_add(j.checked_mul(2)?)?;

@@ -34,10 +34,20 @@
 //!
 //! * **`ccmp`** — glyph composition and decomposition. Normalises a run so the
 //!   later lookups, and mark attachment, see what they expect.
+//! * **`locl`** — localized forms. Under the DefaultLangSys — the only
+//!   LangSys this crate reads — this is the face's *default* localization,
+//!   which is what every shaper applies when the caller names no language.
+//!   Leaving it out was visible: Sans Serif Collection maps `space` through
+//!   its Latin `locl`, so every space in every Latin string came out as the
+//!   wrong glyph. It is safe to read only because features are now chosen per
+//!   script; under the old script-blind walk it would have handed a Latin run
+//!   some other writing system's letterforms.
 //! * **`liga`** — standard ligatures. The `fi` family.
 //! * **`rlig`** — *required* ligatures. For Latin this is nearly empty; for
 //!   Arabic, `lam-alef` is not optional, and a face that has it will look
 //!   wrong without it. Reading it costs nothing beyond a second tag.
+//! * **`clig`, `calt`** — contextual ligatures and contextual alternates, the
+//!   features lookup types 5 and 6 exist for.
 //!
 //! Lookup types:
 //!
@@ -55,24 +65,23 @@
 //! * **Type 3, `AlternateSubst`**, which picks by an alternate index that only
 //!   a per-run feature list can supply, and there is none yet — so it has no
 //!   default-on caller to serve.
-//! * **Types 5 and 6, contextual and chaining-contextual substitution**, which
-//!   `clig` and `calt` need. They work by invoking other lookups *by index* at
-//!   matched positions, so they are built on top of the single-lookup
-//!   application here rather than beside it.
 //! * **`dlig`, `hlig`, `swsh`** and the other opt-in features, which are off
 //!   by default by design and have no way to be turned on yet — there is no
-//!   per-run feature list to turn them on *with*. `locl` is left out for the
-//!   opposite reason: it is on by default, but it is *language*-specific, and
-//!   applying it without knowing the run's language would give every reader
-//!   some other locale's letterforms.
-//! * **Script and language selection**, for the reason given in
-//!   [`otl`](crate::otl).
+//!   per-run feature list to turn them on *with*.
+//! * **Language selection.** Only each script's DefaultLangSys is read, so a
+//!   `locl` override registered under `SRB ` or `TRK ` is not reached. See
+//!   [`otl`](crate::otl) and `TD-FONT-IGNORES-LANGSYS-OVERRIDES`.
+//! * **The joining and reordering features** — `init`/`medi`/`fina`/`isol` for
+//!   Arabic, `rphf`/`half`/`pref`/`abvs` for Indic. These are not chosen by
+//!   tag but computed by a per-script state machine over the cluster, which is
+//!   a shaper this crate does not have yet.
 
 use alloc::vec::Vec;
 
 use crate::otl::{
-    Lookup, MAX_SUBTABLES, coverage_index, feature_lookups, glyph_class, lookup_at, lookup_list,
+    ByScript, Lookup, MAX_SUBTABLES, coverage_index, glyph_class, lookup_at, lookup_list,
 };
+use crate::script::ScriptTags;
 use crate::sfnt::{Span, u16_at};
 
 /// `GSUB` lookup type for single substitution: one glyph for one glyph.
@@ -169,9 +178,10 @@ pub struct SubGlyph {
 /// face that is drawn with touches a handful of the entries in them.
 #[derive(Clone, Debug)]
 pub(crate) struct Substitutions {
-    /// The lookups reachable from the default-on features, in the order the
-    /// font's LookupList puts them, which is the order they apply in.
-    lookups: Vec<Lookup>,
+    /// The lookups reachable from the default-on features, keyed by the script
+    /// that reaches them and in the order the font's LookupList puts them,
+    /// which is the order they apply in.
+    lookups: ByScript,
     /// Where the font's LookupList begins. Kept because a contextual lookup
     /// names the lookups it invokes by index into it, and those may be lookups
     /// no feature reaches — which is exactly how a font hides a helper.
@@ -187,10 +197,10 @@ impl Substitutions {
     /// ligature would break the grid.
     pub(crate) fn parse(data: &[u8], gsub: Option<Span>) -> Option<Self> {
         let base = gsub?.off;
-        let lookups = feature_lookups(
+        let lookups = ByScript::parse(
             data,
             base,
-            &[b"ccmp", b"liga", b"rlig", b"clig", b"calt"],
+            &[b"ccmp", b"locl", b"liga", b"rlig", b"clig", b"calt"],
             NESTABLE,
             LOOKUP_EXTENSION,
         )?;
@@ -200,19 +210,28 @@ impl Substitutions {
         })
     }
 
-    /// Apply every lookup to `glyphs`, in order, rewriting it in place.
+    /// Apply every lookup this face offers a run of `script` to `glyphs`, in
+    /// order, rewriting it in place.
     ///
     /// `glyphs` is one substitution run and the lookups may join anything in
     /// it, so a caller that does not want a ligature to form across some
     /// boundary of its own — a tab, a style change, a bidi run edge — passes
-    /// the pieces separately rather than the whole line.
-    pub(crate) fn apply(&self, data: &[u8], glyphs: &mut Vec<SubGlyph>) {
+    /// the pieces separately rather than the whole line. A script boundary is
+    /// such a boundary, and the reason `script` is a parameter rather than a
+    /// property of the face: applying Arabic's `liga` to a Latin word is how a
+    /// face that supports both silently corrupts one of them.
+    pub(crate) fn apply(
+        &self,
+        data: &[u8],
+        script: Option<ScriptTags>,
+        glyphs: &mut Vec<SubGlyph>,
+    ) {
         let mut ctx = Ctx {
             lookup_list: self.lookup_list,
             depth: MAX_NESTING,
             scratch: Vec::new(),
         };
-        for lookup in &self.lookups {
+        for lookup in self.lookups.for_script(script) {
             apply_lookup(data, lookup, glyphs, &mut ctx);
         }
     }
@@ -1079,27 +1098,102 @@ mod tests {
     /// next subtable" from "give up on this glyph": the font's order is the
     /// order they are tried in, and the first one that matches wins.
     fn gsub_subtables(tag: &[u8; 4], kind: u16, subtables: &[&[u8]]) -> Vec<u8> {
-        // header 10 | scriptList (empty, 2) | featureList | lookupList | subs
+        gsub_scripts(&[(b"DFLT", tag)], kind, subtables)
+    }
+
+    /// A ScriptList: one Script per entry, each with a DefaultLangSys naming
+    /// the feature indices given and no language-specific systems.
+    ///
+    /// Every offset inside is relative to the ScriptList's own start, so a
+    /// caller only has to know where it put the block and how long it came
+    /// out — not what is inside it.
+    fn script_list(scripts: &[(&[u8; 4], &[u16])]) -> Vec<u8> {
+        let n = scripts.len();
+        let mut out = Vec::new();
+        out.extend_from_slice(&be16(u16::try_from(n).unwrap()));
+        // The Script tables follow the records, each one a 4-byte Script
+        // header plus its DefaultLangSys.
+        let mut at = 2 + n * 6;
+        for (tag, features) in scripts {
+            out.extend_from_slice(*tag);
+            out.extend_from_slice(&be16(u16::try_from(at).unwrap()));
+            at += 4 + 6 + features.len() * 2;
+        }
+        for (_, features) in scripts {
+            out.extend_from_slice(&be16(4)); // defaultLangSys, from the Script
+            out.extend_from_slice(&be16(0)); // langSysCount
+            out.extend_from_slice(&be16(0)); // lookupOrder, always zero
+            out.extend_from_slice(&be16(0xFFFF)); // no required feature
+            out.extend_from_slice(&be16(u16::try_from(features.len()).unwrap()));
+            for f in *features {
+                out.extend_from_slice(&be16(*f));
+            }
+        }
+        out
+    }
+
+    /// A `GSUB` table registering one feature per entry of `scripts`, each
+    /// under its own script tag, and one lookup of `kind` that every one of
+    /// them selects.
+    ///
+    /// Several scripts naming the same lookup is the arrangement that matters:
+    /// it is what a real face supporting two writing systems looks like, and
+    /// the reason the selection walk starts at the ScriptList rather than the
+    /// FeatureList — a tag alone does not say which script a feature is for.
+    fn gsub_scripts(scripts: &[(&[u8; 4], &[u8; 4])], kind: u16, subtables: &[&[u8]]) -> Vec<u8> {
+        // header 10 | scriptList | featureList | lookupList | subtables
+        //
+        // Each script gets its own Script table with a DefaultLangSys naming
+        // exactly one feature — its own, by position in `scripts`.
+        let n = scripts.len();
+        let indices: Vec<[u16; 1]> = (0..n).map(|i| [u16::try_from(i).unwrap()]).collect();
+        let entries: Vec<(&[u8; 4], &[u16])> = scripts
+            .iter()
+            .zip(&indices)
+            .map(|((script, _), idx)| (*script, idx.as_slice()))
+            .collect();
+        let tags: Vec<&[u8; 4]> = scripts.iter().map(|&(_, tag)| tag).collect();
+        gsub_from_scripts(&script_list(&entries), &tags, kind, subtables)
+    }
+
+    /// A `GSUB` table over a caller-built ScriptList: one Feature per entry of
+    /// `tags`, each naming the single lookup of `kind`.
+    ///
+    /// Split out from [`gsub_scripts`] so a test can hand in a ScriptList that
+    /// [`script_list`] cannot express — a script whose features are reachable
+    /// only through a language system, for one.
+    fn gsub_from_scripts(
+        script_block: &[u8],
+        tags: &[&[u8; 4]],
+        kind: u16,
+        subtables: &[&[u8]],
+    ) -> Vec<u8> {
+        let n = tags.len();
+        let feature_list = 10 + script_block.len();
+        // count(2) + one 6-byte FeatureRecord each, then the Features.
+        let features_at = 2 + n * 6;
+        let feature_len = 6usize; // params + count + one index
+        let lookup_list = feature_list + features_at + n * feature_len;
+
         let mut out = Vec::new();
         out.extend_from_slice(&be16(1)); // major
         out.extend_from_slice(&be16(0)); // minor
         out.extend_from_slice(&be16(10)); // scriptList
-        out.extend_from_slice(&be16(12)); // featureList
-        let feature_list = 12usize;
-        // FeatureList: count(2) + one 6-byte record = 8, then the Feature.
-        let feature = feature_list + 8;
-        let feature_len = 6usize; // params + count + one index
-        let lookup_list = feature + feature_len;
+        out.extend_from_slice(&be16(u16::try_from(feature_list).unwrap()));
         out.extend_from_slice(&be16(u16::try_from(lookup_list).unwrap()));
-        out.extend_from_slice(&be16(0)); // scriptList: zero scripts
+        out.extend_from_slice(script_block);
 
-        out.extend_from_slice(&be16(1)); // featureCount
-        out.extend_from_slice(tag);
-        out.extend_from_slice(&be16(8)); // offset from featureList
-
-        out.extend_from_slice(&be16(0)); // featureParams
-        out.extend_from_slice(&be16(1)); // lookupIndexCount
-        out.extend_from_slice(&be16(0)); // lookup 0
+        out.extend_from_slice(&be16(u16::try_from(n).unwrap())); // featureCount
+        for (i, tag) in tags.iter().enumerate() {
+            out.extend_from_slice(*tag);
+            let at = features_at + i * feature_len;
+            out.extend_from_slice(&be16(u16::try_from(at).unwrap()));
+        }
+        for _ in 0..n {
+            out.extend_from_slice(&be16(0)); // featureParams
+            out.extend_from_slice(&be16(1)); // lookupIndexCount
+            out.extend_from_slice(&be16(0)); // lookup 0
+        }
 
         // LookupList: count(2) + one offset(2) = 4, then the Lookup.
         out.extend_from_slice(&be16(1));
@@ -1191,7 +1285,13 @@ mod tests {
     /// slices through it would obscure them all to serve two.
     fn gsub_lookups(features: &[(&[u8; 4], u16, Vec<u8>)]) -> Vec<u8> {
         let n = features.len();
-        let feature_list = 12usize;
+        // One default script that selects every feature, which is what a
+        // Latin-only face ships and what leaves the feature order — the thing
+        // these tests are about — the only variable.
+        let all: Vec<u16> = (0..n).map(|i| u16::try_from(i).unwrap()).collect();
+        let script_block = script_list(&[(b"DFLT", &all)]);
+
+        let feature_list = 10 + script_block.len();
         // count(2) + one 6-byte record each, then one 6-byte Feature each
         // (params, lookupIndexCount, one index).
         let features_at = feature_list + 2 + n * 6;
@@ -1206,7 +1306,7 @@ mod tests {
         out.extend_from_slice(&be16(10)); // scriptList
         out.extend_from_slice(&be16(u16::try_from(feature_list).unwrap()));
         out.extend_from_slice(&be16(u16::try_from(lookup_list).unwrap()));
-        out.extend_from_slice(&be16(0)); // scriptList: zero scripts
+        out.extend_from_slice(&script_block);
 
         out.extend_from_slice(&be16(u16::try_from(n).unwrap()));
         for (i, (tag, _, _)) in features.iter().enumerate() {
@@ -1470,7 +1570,7 @@ mod tests {
             .enumerate()
             .map(|(i, &gid)| SubGlyph { gid, cluster: i })
             .collect();
-        subs.apply(data, &mut glyphs);
+        subs.apply(data, None, &mut glyphs);
         glyphs.iter().map(|g| g.gid).collect()
     }
 
@@ -1481,7 +1581,7 @@ mod tests {
             .enumerate()
             .map(|(i, &gid)| SubGlyph { gid, cluster: i })
             .collect();
-        subs.apply(data, &mut glyphs);
+        subs.apply(data, None, &mut glyphs);
         glyphs.iter().map(|g| g.cluster).collect()
     }
 
@@ -1574,11 +1674,41 @@ mod tests {
     }
 
     #[test]
-    fn a_language_specific_feature_is_left_alone() {
-        // `locl` is on by default in a shaper that knows the run's language.
-        // This one does not, and applying it regardless would hand every
-        // reader some other locale's letterforms.
+    fn the_default_localization_is_applied() {
+        // `locl` under the DefaultLangSys is the face's *default* localized
+        // form — the one a shaper applies when the caller names no language,
+        // which is this crate's only mode. Sans Serif Collection maps `space`
+        // through its Latin `locl`, so skipping this feature turned every
+        // space in every Latin string into the wrong glyph.
         let data = gsub_table(b"locl", LOOKUP_SINGLE, &single_delta(&[10], 5));
+        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        assert_eq!(subst(&data, &subs, &[10]), &[15]);
+    }
+
+    #[test]
+    fn a_feature_only_a_language_system_reaches_is_not_applied() {
+        // The other half of the same question. A `locl` registered under
+        // `TRK ` is Turkish, not the default, and reaching it would hand a
+        // reader who never asked for Turkish its dotless `i`. The gap this
+        // pins down is deliberate and tracked as
+        // `TD-FONT-IGNORES-LANGSYS-OVERRIDES`: only DefaultLangSys is read,
+        // so a face whose *only* route to a feature is a language system
+        // contributes nothing at all.
+        let mut scripts = Vec::new();
+        scripts.extend_from_slice(&be16(1)); // scriptCount
+        scripts.extend_from_slice(b"latn");
+        scripts.extend_from_slice(&be16(8)); // the Script table follows
+        scripts.extend_from_slice(&be16(0)); // no DefaultLangSys
+        scripts.extend_from_slice(&be16(1)); // langSysCount
+        scripts.extend_from_slice(b"TRK ");
+        scripts.extend_from_slice(&be16(10)); // LangSys, from the Script
+        scripts.extend_from_slice(&be16(0)); // lookupOrder, always zero
+        scripts.extend_from_slice(&be16(0xFFFF)); // no required feature
+        scripts.extend_from_slice(&be16(1)); // featureIndexCount
+        scripts.extend_from_slice(&be16(0)); // feature 0
+
+        let sub = single_delta(&[10], 5);
+        let data = gsub_from_scripts(&scripts, &[b"locl"], LOOKUP_SINGLE, &[&sub]);
         assert!(Substitutions::parse(&data, Some(span(0, data.len()))).is_none());
     }
 
@@ -1609,6 +1739,181 @@ mod tests {
         // type would happily read it and substitute the wrong glyph.
         let data = gsub_table(b"liga", 3, &single_list(&[10], &[42]));
         assert!(Substitutions::parse(&data, Some(span(0, data.len()))).is_none());
+    }
+
+    // ---- script selection ----
+
+    /// A `GSUB` with two `liga` features, one Arabic and one Latin, each
+    /// reaching a lookup of its own. This is the shape that made script
+    /// selection necessary: `ebrima.ttf` on the development host really does
+    /// have an Arabic rule that a script-blind walk applies to Latin text.
+    fn two_script_font() -> (Vec<u8>, Substitutions) {
+        // Feature 0 (`arab`) → lookup 0, turns 10 into 50.
+        // Feature 1 (`latn`) → lookup 1, turns 10 into 60.
+        let all = script_list(&[(b"arab", &[0]), (b"latn", &[1])]);
+        let feature_list = 10 + all.len();
+        let lookup_list = feature_list + 2 + 2 * 6 + 2 * 6;
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&be16(1));
+        out.extend_from_slice(&be16(0));
+        out.extend_from_slice(&be16(10));
+        out.extend_from_slice(&be16(u16::try_from(feature_list).unwrap()));
+        out.extend_from_slice(&be16(u16::try_from(lookup_list).unwrap()));
+        out.extend_from_slice(&all);
+
+        out.extend_from_slice(&be16(2)); // featureCount
+        for (i, tag) in [b"liga", b"liga"].into_iter().enumerate() {
+            out.extend_from_slice(tag);
+            out.extend_from_slice(&be16(u16::try_from(2 + 2 * 6 + i * 6).unwrap()));
+        }
+        for i in 0..2u16 {
+            out.extend_from_slice(&be16(0)); // featureParams
+            out.extend_from_slice(&be16(1)); // lookupIndexCount
+            out.extend_from_slice(&be16(i));
+        }
+
+        // Two lookups, each with one single-substitution subtable.
+        let subtables = [single_list(&[10], &[50]), single_list(&[10], &[60])];
+        let lookups_at = lookup_list + 2 + 2 * 2;
+        out.extend_from_slice(&be16(2));
+        for i in 0..2 {
+            let at = lookups_at + i * 8 - lookup_list;
+            out.extend_from_slice(&be16(u16::try_from(at).unwrap()));
+        }
+        let mut sub_at = lookups_at + 2 * 8;
+        for (i, sub) in subtables.iter().enumerate() {
+            out.extend_from_slice(&be16(LOOKUP_SINGLE));
+            out.extend_from_slice(&be16(0));
+            out.extend_from_slice(&be16(1));
+            let lookup = lookups_at + i * 8;
+            out.extend_from_slice(&be16(u16::try_from(sub_at - lookup).unwrap()));
+            sub_at += sub.len();
+        }
+        for sub in &subtables {
+            out.extend_from_slice(sub);
+        }
+
+        let subs = Substitutions::parse(&out, Some(span(0, out.len()))).expect("two scripts");
+        (out, subs)
+    }
+
+    const LATIN: Option<ScriptTags> = Some(ScriptTags {
+        preferred: *b"latn",
+        fallback: *b"latn",
+    });
+
+    const ARABIC: Option<ScriptTags> = Some(ScriptTags {
+        preferred: *b"arab",
+        fallback: *b"arab",
+    });
+
+    /// The whole point: two features with the same tag mean different things,
+    /// and a run gets only the one filed under its own script.
+    #[test]
+    fn a_run_gets_only_its_own_scripts_features() {
+        let (data, subs) = two_script_font();
+        let mut latin_run = vec![SubGlyph { gid: 10, cluster: 0 }];
+        subs.apply(&data, LATIN, &mut latin_run);
+        assert_eq!(latin_run.first().map(|g| g.gid), Some(60));
+
+        let mut arabic_run = vec![SubGlyph { gid: 10, cluster: 0 }];
+        subs.apply(&data, ARABIC, &mut arabic_run);
+        assert_eq!(arabic_run.first().map(|g| g.gid), Some(50));
+    }
+
+    /// A face that registers neither the run's script nor a default has
+    /// nothing to say about it, and saying nothing is the correct answer —
+    /// the alternative is applying some other writing system's rules.
+    #[test]
+    fn a_script_the_face_does_not_register_gets_nothing() {
+        let (data, subs) = two_script_font();
+        let hebrew = Some(ScriptTags {
+            preferred: *b"hebr",
+            fallback: *b"hebr",
+        });
+        let mut glyphs = vec![SubGlyph { gid: 10, cluster: 0 }];
+        subs.apply(&data, hebrew, &mut glyphs);
+        assert_eq!(glyphs.first().map(|g| g.gid), Some(10));
+        // And a run with no script of its own, which asks for `DFLT`, is in
+        // the same position here: this face registers no default either.
+        let mut none = vec![SubGlyph { gid: 10, cluster: 0 }];
+        subs.apply(&data, None, &mut none);
+        assert_eq!(none.first().map(|g| g.gid), Some(10));
+    }
+
+    /// `DFLT` is what a run falls back to, and what a face that says nothing
+    /// about scripts registers. Every other test in this file relies on it.
+    #[test]
+    fn an_unregistered_script_falls_back_to_the_default_one() {
+        let data = gsub_table(b"liga", LOOKUP_SINGLE, &single_list(&[10], &[42]));
+        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        for script in [LATIN, ARABIC, None] {
+            let mut glyphs = vec![SubGlyph { gid: 10, cluster: 0 }];
+            subs.apply(&data, script, &mut glyphs);
+            assert_eq!(
+                glyphs.first().map(|g| g.gid),
+                Some(42),
+                "{script:?} should have fallen back to DFLT"
+            );
+        }
+    }
+
+    /// A feature no language system reaches is inert, however invitingly it is
+    /// tagged. A walk that started at the FeatureList would apply it anyway.
+    #[test]
+    fn a_feature_no_script_reaches_does_not_apply() {
+        // One script, `latn`, whose DefaultLangSys names feature 1 — so
+        // feature 0, also a `liga`, is registered and unreachable.
+        let all = script_list(&[(b"latn", &[1])]);
+        let feature_list = 10 + all.len();
+        let lookup_list = feature_list + 2 + 2 * 6 + 2 * 6;
+        let mut out = Vec::new();
+        out.extend_from_slice(&be16(1));
+        out.extend_from_slice(&be16(0));
+        out.extend_from_slice(&be16(10));
+        out.extend_from_slice(&be16(u16::try_from(feature_list).unwrap()));
+        out.extend_from_slice(&be16(u16::try_from(lookup_list).unwrap()));
+        out.extend_from_slice(&all);
+        out.extend_from_slice(&be16(2));
+        for i in 0..2usize {
+            out.extend_from_slice(b"liga");
+            out.extend_from_slice(&be16(u16::try_from(2 + 2 * 6 + i * 6).unwrap()));
+        }
+        for i in 0..2u16 {
+            out.extend_from_slice(&be16(0));
+            out.extend_from_slice(&be16(1));
+            out.extend_from_slice(&be16(i));
+        }
+        let subtables = [single_list(&[10], &[50]), single_list(&[11], &[60])];
+        let lookups_at = lookup_list + 2 + 2 * 2;
+        out.extend_from_slice(&be16(2));
+        for i in 0..2 {
+            out.extend_from_slice(&be16(u16::try_from(lookups_at + i * 8 - lookup_list).unwrap()));
+        }
+        let mut sub_at = lookups_at + 2 * 8;
+        for (i, sub) in subtables.iter().enumerate() {
+            out.extend_from_slice(&be16(LOOKUP_SINGLE));
+            out.extend_from_slice(&be16(0));
+            out.extend_from_slice(&be16(1));
+            out.extend_from_slice(&be16(u16::try_from(sub_at - (lookups_at + i * 8)).unwrap()));
+            sub_at += sub.len();
+        }
+        for sub in &subtables {
+            out.extend_from_slice(sub);
+        }
+
+        let subs = Substitutions::parse(&out, Some(span(0, out.len()))).unwrap();
+        let mut glyphs = vec![
+            SubGlyph { gid: 10, cluster: 0 },
+            SubGlyph { gid: 11, cluster: 1 },
+        ];
+        subs.apply(&out, LATIN, &mut glyphs);
+        assert_eq!(
+            glyphs.iter().map(|g| g.gid).collect::<Vec<_>>(),
+            [10, 60],
+            "the unreachable feature 0 was applied"
+        );
     }
 
     // ---- single substitution ----

@@ -47,6 +47,8 @@ mod norm_tables;
 mod otl;
 pub mod raster;
 pub mod scaled;
+pub mod script;
+mod script_tables;
 pub mod select;
 pub mod sfnt;
 pub mod shape;

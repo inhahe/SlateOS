@@ -62322,3 +62322,223 @@ the budgets collapse to 0") is fully done by those two paths, and a *valid*
 measurement should be used as measured. Deferred only until P17 grades: if the
 measurement is still not scale-invariant, tightening budgets onto it would be
 building on the same sand.
+
+### The 40% "CONTAMINATED" verdict was rounding, not host load — 2026-08-14 (`kernel/src/bench.rs`)
+
+Grading P17 produced a clean scale-invariance result (`0% apart`) and, in the
+same output, exposed the next defect in the same instrument. It is not a new
+kind of mistake — it is the *fourth* consecutive one, and they rhyme.
+
+**The arithmetic.** The reference store costs **5 cycles**. `measure_access_at`
+returned `delta / n` as a whole number, so the smallest representable change is
+one cycle — **20% of the quantity being measured**. A spread is taken across two
+samples, so it can carry *two* roundings: **40%**. The tolerance is **25%**.
+
+> At a 5-cycle reference cost, a whole-cycle instrument reports a perfectly
+> quiet host as 40% contaminated. The threshold cannot be satisfied by any
+> machine, however idle.
+
+That is not hypothetical. The N=1024 run reported exactly `CONTAMINATED: ... 40%
+... (5-7 cycles)`. I read it at the time as leftover host load. It was two
+rounding steps.
+
+**Why `CANARY_MIN_RESOLVABLE` did not catch it.** That bound (`ceil(100/25) = 4`
+cycles/access) was introduced for precisely this failure mode and is *still
+correct* — but it bounds a **one**-cycle error at the tolerance. A spread spans
+two samples and so can be twice that. The guard was off by exactly a factor of
+two, in the direction that lets the bad case through.
+
+**Why raising the tolerance would have been the wrong fix.** The obvious repair
+is to widen `CANARY_TOLERANCE_PCT` past 40. That would have silenced the symptom
+while destroying the check: a canary that tolerates 40% cannot detect the host
+load it exists to detect. The store genuinely costs ~5 cycles and **no threshold
+can legislate the hardware slower**. The defect was never in the threshold.
+
+**The precision was measured and then thrown away.** The raw delta is ~5290
+cycles over 1024 stores. That is *three significant figures that the hardware
+actually produced*, and `delta / n` discarded all but one. The fix is not to
+measure harder; it is to stop deleting the measurement:
+
+- `measure_access_at` now returns **centicycles** (`delta * 100 / n`), putting
+  the quantisation step at 0.01 cycle (~0.2%) — two orders of magnitude *under*
+  the tolerance instead of comfortably over it.
+- `spread` and `pct` are computed from the centicycle values, so the verdicts
+  get the accuracy. This is the only place it was ever wanted.
+- The `[bench] CANARY` wire format still prints **whole cycles**, so all ten
+  historical records and `scripts/bench-history.py` keep meaning exactly what
+  they meant. Human-readable lines gained a tenths digit.
+- `const fn centi_parts(c) -> (whole, tenths)` is the single display conversion,
+  so no call site can print a centicycle count as if it were a cycle count.
+
+**The unit change had one genuinely dangerous consequence**, and it is worth
+recording because it is the same failure as the debug/release profile mix-up
+that made P11 and P13 miss. `access_floor` feeds two PASS/FAIL budgets as a
+plain multiplier (`access_floor * 4`, `access_floor * 150`). Had `measured`
+flowed into it unconverted, both budgets would have silently inflated **100x**
+while every printed number still looked entirely plausible. The conversion is
+therefore done at exactly one site, next to a comment saying why, rather than at
+the two consumers.
+
+**The pattern across all four defects in this one instrument:**
+
+| # | The instrument reported | The truth | Root cause |
+|---|---|---|---|
+| 1 | `0%` spread — clean | nothing was measured | relaxed store dead-store-eliminated |
+| 2 | `168%` spread | scaffolding, not the store | control arm unrolled, store arm not |
+| 3 | `40%` — contaminated | a quiet host | one-cycle quantisation on a 5-cycle quantity |
+| 4 | `0%` spread — clean | *pending: see P18* | possibly quantisation again, hiding real variation |
+
+Every one of the first three was a **false verdict about the host**, and every
+one was found by grading a registered prediction rather than by reading the
+output. Rows 1 and 3 are the same failure in opposite directions: an instrument
+that cannot resolve its own quantity will report either "perfectly clean" or
+"badly contaminated" — and both readings are the *absence* of a measurement
+wearing the costume of one.
+
+#### PREDICTION P18 — registered before the boot that tests it
+
+The previous run's `spread 0%` is **not yet evidence of a quiet host**: with
+whole-cycle output, 0% is also what you get when real variation is smaller than
+one cycle and rounds away. The centicycle build can distinguish these, so:
+
+- **P18(a)** — the reported `spread` will be **non-zero**, because the 0% was
+  quantisation collapsing real sub-cycle variation, not genuine exactness.
+  *Falsified if it comes back exactly 0%*, which would mean the samples really
+  are identical to 0.01 cycle and the previous 0% was honest.
+- **P18(b)** — it will be **under 25%**, i.e. `Canary OK`, because 40% was two
+  roundings and both are now gone.
+- **P18(c)** — `access_floor` will still print **100** (the clamp still binds at
+  a measured ~5 cycles), and *not* 500. A 500 would mean the unit conversion was
+  missed and both budget verdicts are 100x wrong.
+- **P18(d)** — the scale check will print a **tenths digit** (`5.x cycles/store`),
+  not a bare `500`.
+
+P18(c) is the one that matters: it is a direct test that I did not repeat the
+profile/unit confusion while writing the fix for a defect caused by discarding
+precision.
+
+#### SELF-CAUGHT — the CENTI fix makes each record contradict itself
+
+Found by replaying all 18 history records through `canary_verdict` rather than
+by re-reading the diff, and it is a defect **I introduced in this change**.
+
+The `[bench] CANARY` wire format was deliberately left in whole cycles so the
+existing records and the Python parser keep their meaning. But `spread` is now
+computed from *centicycles*, while `min` and `max` on the same line are still
+rounded to whole cycles. Those are two statements about one measurement, and
+they can now disagree outright:
+
+    CANARY 5 5 100 5 5 6 12 0
+                   ^^^ ^      min == max ("the extremes were identical")
+                       ^      spread = 6%  ("they differed by 6%")
+
+A future reader — or a future me writing a regression post-mortem — would have
+to pick which half of the record to believe. That is precisely the kind of
+self-inconsistent artefact that produced the two bogus regression write-ups this
+whole thread exists to undo.
+
+**Why the earlier reasoning missed it.** "Keep the wire format unchanged so
+history stays comparable" is a good instinct, and I applied it to the *fields*
+without noticing that it silently split the record's precision in two: the
+derived field got the accuracy and the fields it is derived *from* did not. The
+compatibility argument is sound for `start`/`end`/`pct` — which are used only as
+magnitudes — and unsound for `min`/`max`, which are the inputs to a verdict.
+
+**The fix** (deferred until P18 is graded, so the format the prediction was
+registered against is the format that gets tested): append `min_centi` and
+`max_centi` as new trailing fields — append-only, so `CANARY_RE`'s optional
+trailing groups and all 18 existing records are unaffected — and have
+`canary_verdict` prefer them when present. That also gives the Python side the
+discriminator it currently lacks: a record carrying centicycle extremes has a
+trustworthy `spread`, and one without it is a whole-cycle record whose spread may
+be two roundings wide. Right now the script cannot tell those apart, so it must
+keep reporting the 21:37 record as `contaminated` even though that verdict is
+known to be false.
+
+**Deliberately not done:** retroactively rewriting the 21:37 record's verdict.
+The measurement really did happen and really did read 40%; the record is honest
+about what the instrument said. What was wrong was the instrument, and that is
+documented here. Editing history to match a later understanding would destroy
+the only evidence that this failure mode occurred.
+
+### RESULT P18 — the finer instrument refuted the reason I built it — 2026-08-14
+
+Boot PASSED. Serial output:
+
+    canary scale check: OK — 5.1 cycles/store at N=1024, 5.1 at N=2048 (0% apart)
+    memory_access_floor: 100 cycles/guest byte-store (measured=5.1 ...
+                         nop=14154 store=19442, 500 interleaved rounds)
+    CANARY 5 5 100 5 7 47 10 0
+    CONTAMINATED: ... spread 47% across 10 samples (5.1-7.5 cycles) ...
+
+| | predicted | measured | grade |
+|---|---|---|---|
+| P18(a) | spread non-zero | 47% | **HIT** |
+| P18(b) | under 25%, `Canary OK` | 47%, CONTAMINATED | **MISS** |
+| P18(c) | `access_floor` prints 100, not 500 | `100`, `measured=5.1` | **HIT** |
+| P18(d) | tenths digit in the scale check | `5.1 cycles/store` | **HIT** |
+
+**P18(b) is the one that matters, and it destroys the premise of the entry above
+it.** I claimed the 40% CONTAMINATED verdict was two cycles of rounding on a
+5-cycle quantity. At 0.01-cycle resolution the spread is **5.1 to 7.5 cycles**.
+That is a real 2.4-cycle difference — 240 times the quantisation step. Rounding
+cannot produce it.
+
+> **RETRACTED:** "the 40% CONTAMINATED verdict was rounding, not host load."
+> The variation is real. The whole-cycle instrument read 5→7 (40%); the
+> centicycle instrument reads 5.1→7.5 (47%). Those are the *same measurement*,
+> and the coarse one was not lying about it.
+
+**The fix was still right; my reason for it was wrong.** Carrying hundredths was
+worth doing — it is precisely what settled the question, and quantisation *was*
+a genuine confound that made the verdict unreadable. But I sold it as removing a
+false alarm, and it did the opposite: it confirmed the alarm and took away my
+excuse for ignoring it. Had P18(b) not been registered as a falsifiable claim, I
+would very likely have read "47%, still contaminated" as the fix not working yet
+and gone looking for more precision to add.
+
+**This is the fifth defect in this instrument, and the first one where the
+instrument was right and I was wrong.** Row 3 of the table above is hereby
+corrected: the 40% was not quantisation. Which re-opens the question the whole
+thread was trying to close — *what is actually moving the reference cost by 47%
+mid-suite?*
+
+**The evidence narrows it considerably**, and points away from the thing the
+message blames:
+
+- The two calibration measurements, taken back-to-back at suite start, agree to
+  **0%** (5.1 and 5.1 at N=1024 and N=2048).
+- The two *endpoints* agree exactly: `5 -> 5`, `pct = 100`.
+- Yet the 10 samples taken **between benchmarks** span 5.1–7.5.
+
+Host load that arrives and departs would have to miss both endpoints and both
+calibration runs while hitting the middle. Possible, but the simpler reading is
+that the canary is measuring **the suite's own after-effects** — cache and TLB
+residency, and TCG translation-block pressure, left behind by whichever
+benchmark just ran. If so, `CONTAMINATED: Host load changed mid-run` is a **third
+kind of false attribution**: the number is real, the cause named is not.
+
+#### PREDICTION P19 — registered before the discriminating run exists
+
+Attribute the variation before acting on it. The canary currently records only
+the extremes, which cannot distinguish "a burst hit sample 4" from "samples
+following heavy-footprint benchmarks are systematically dearer."
+
+- **P19(a)** — the high samples are **not** randomly placed: recording each
+  sample's position in the suite will show the dear ones clustering after the
+  same benchmarks across two consecutive runs. *Falsified if the positions of
+  the top samples differ between runs*, which would indicate genuine host load.
+- **P19(b)** — the spread will **stay above the 25% tolerance** on a machine
+  that is otherwise idle, because the cause is internal to the suite. Falsified
+  by a quiet-machine run reading under 25%.
+
+If P19(a) holds, the tolerance is not the thing to tune (item 7 in the backlog):
+a suite-induced offset is not contamination, and the canary must either sample
+from a fixed cache state or report position-correlated variation as a distinct,
+correctly-named verdict.
+
+**Note the record wrote `min=5 max=7 spread=47`** — `(7-5)/5 = 40%`, not 47%.
+That is exactly the self-contradiction predicted in the SELF-CAUGHT entry above,
+now demonstrated on real data rather than argued from the diff. It raises the
+priority of appending `min_centi`/`max_centi`: the two halves of this record
+disagree, and the *rounded* half is the one a future reader would reach for.

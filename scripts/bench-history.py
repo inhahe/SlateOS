@@ -116,8 +116,31 @@ CANARY_TOLERANCE_PCT = 25
 #: This is what the 15:57 and 16:16 release records look like: min=1, max=2,
 #: "spread 100%". They were classified as *contamination* on the strength of a
 #: single cycle of rounding, which is the same category error as calling a dead
-#: canary clean -- just in the other direction. For scale, the only honest
-#: measurement of this same quantity on this same host is 266-309 cycles.
+#: canary clean -- just in the other direction.
+#:
+#: CORRECTION 2026-08-14: this comment used to end "the only honest measurement
+#: of this same quantity on this same host is 266-309 cycles." That was wrong,
+#: and wrong in a way this constant exists to guard against -- 266-309 was a
+#: *debug*-profile figure quoted as if it settled the release case. The honest
+#: release measurement is **~5 cycles**. Every number in this file that is
+#: compared against a per-access cost must therefore be read at that scale.
+#:
+#: KNOWN LIMITATION, proven 2026-08-14: this bound does *not* make the spread
+#: verdict safe, and it was in force when the canary raised a 40% false alarm on
+#: a quiet host. It bounds a **one**-cycle rounding at the tolerance, but a
+#: spread is taken across *two* samples and so can carry two roundings -- twice
+#: the bound. At the real 5-cycle cost that is 40% against a 25% tolerance, so no
+#: machine could have passed. Raising this constant is *not* the repair: it would
+#: reject the hardware's true cost as unmeasurable. The repair is in the kernel,
+#: which now computes the spread in hundredths of a cycle (`CENTI` in
+#: `kernel/src/bench.rs`) and so never rounds the verdict into existence.
+#:
+#: What this constant still does, and why it is kept: the kernel now applies the
+#: identical bound to `delta` *before* emitting a sample, so no record written by
+#: the current kernel can fail this test -- on live data it is a check that
+#: cannot fire. It is retained solely to keep judging the **historical** records
+#: written before that filter existed. Deleting it as dead code would silently
+#: re-admit the 15:57 and 16:16 records as usable.
 CANARY_MIN_RESOLVABLE = math.ceil(100 / CANARY_TOLERANCE_PCT)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

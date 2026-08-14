@@ -699,6 +699,40 @@ const CANARY_TOLERANCE_PCT: u64 = 25;
 /// tool cannot disagree about whether a record is usable.
 const CANARY_MIN_RESOLVABLE: u64 = 100u64.div_ceil(CANARY_TOLERANCE_PCT);
 
+/// Fixed-point scale for the per-access cost: hundredths of a cycle.
+///
+/// The reference cost is a *small integer number of cycles* (measured: 5), and
+/// the spread test compares two such numbers. At 5 cycles one cycle of integer
+/// rounding is 20% and a two-sample spread can be two cycles — 40% — so a
+/// perfectly quiet host reads as contaminated against the 25% tolerance. That
+/// is not hypothetical: the 2026-08-14T21:5x run reported exactly 40% ("5-7
+/// cycles") and it was rounding, not load.
+///
+/// `CANARY_MIN_RESOLVABLE` does not save us here. It bounds a *one*-cycle error
+/// at the tolerance; a spread spans two samples and so can be twice that.
+/// Raising the bound instead would be the wrong fix anyway — the store really
+/// does cost ~5 cycles, and a threshold cannot legislate the hardware faster.
+///
+/// The precision is not missing, only discarded: the raw delta is ~5290 cycles
+/// over 1024 stores, i.e. three significant figures that *were* measured and
+/// that `delta / n` throws away. Carrying hundredths keeps them, putting the
+/// quantisation step at 0.01 cycle (~0.2%) — two orders of magnitude under the
+/// tolerance instead of comfortably over it. The serial line still prints whole
+/// cycles, so the recorded wire format is unchanged; only `spread` and `pct`
+/// get the accuracy, which is exactly where it was wanted.
+const CENTI: u64 = 100;
+
+/// Split a centicycle count into `(whole_cycles, tenths)` for display.
+///
+/// Every centicycle value that reaches a human goes through here, so no call
+/// site can accidentally print a raw centicycle count as if it were cycles —
+/// which is the mistake this whole file exists to keep catching one level up.
+/// Tenths, not hundredths: the extra digit is carried for the *arithmetic*
+/// (`spread`, `pct`), not because anyone needs to read a hundredth of a cycle.
+const fn centi_parts(c: u64) -> (u64, u64) {
+    (c / CENTI, (c % CENTI) / 10)
+}
+
 /// Take a mid-suite canary sample every Nth scored benchmark.
 ///
 /// 8 gives roughly 8 samples across the current 63-benchmark suite — enough
@@ -873,7 +907,11 @@ fn measure_access_at(trip: u64) -> (Option<u64>, u64, u64) {
     let measured = store
         .checked_sub(nop)
         .filter(|delta| *delta >= n.saturating_mul(CANARY_MIN_RESOLVABLE))
-        .map(|delta| delta / n);
+        // Centicycles, not cycles: see CENTI. `delta` is ~5290 over 1024
+        // stores, so `delta / n` would round three measured significant figures
+        // away and leave a single digit whose quantisation step is 20% of
+        // itself.
+        .map(|delta| delta.saturating_mul(CENTI) / n);
     (measured, nop, store)
 }
 
@@ -908,8 +946,12 @@ fn scale_invariance_check(base: u64) -> bool {
         return false;
     };
     // Percent difference against the smaller of the two, so the figure reads as
-    // "how much did doubling the loop change the answer".
+    // "how much did doubling the loop change the answer". Both are centicycles;
+    // the ratio is unit-invariant, but the *printed* values are not, so they go
+    // through `centi_parts` below.
     let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    let (a_c, a_t) = centi_parts(a);
+    let (b_c, b_t) = centi_parts(b);
     let diff_pct = if lo > 0 {
         hi.saturating_sub(lo).saturating_mul(100) / lo
     } else {
@@ -917,19 +959,19 @@ fn scale_invariance_check(base: u64) -> bool {
     };
     if diff_pct > CANARY_TOLERANCE_PCT {
         serial_println!(
-            "[bench]   canary scale check: FAILED — {} cycles/store at N={} but {} at N={} \
+            "[bench]   canary scale check: FAILED — {}.{} cycles/store at N={} but {}.{} at N={} \
              ({}% apart, tolerance {}%). The per-access cost must not depend on the trip \
              count; that it does means the A/B subtraction is measuring loop scaffolding \
              as well as the store, so this run's access_floor is not a physical quantity. \
              See known-issues.md B-BENCH-CANARY-MEASURES-ZERO-IN-RELEASE-AND-BLAMES-THE-HOST.",
-            a, base, b, base.saturating_mul(2), diff_pct, CANARY_TOLERANCE_PCT
+            a_c, a_t, base, b_c, b_t, base.saturating_mul(2), diff_pct, CANARY_TOLERANCE_PCT
         );
         return false;
     }
     serial_println!(
-        "[bench]   canary scale check: OK — {} cycles/store at N={}, {} at N={} ({}% apart, \
+        "[bench]   canary scale check: OK — {}.{} cycles/store at N={}, {}.{} at N={} ({}% apart, \
          tolerance {}%), so the delta scales with the store count and not with the loop.",
-        a, base, b, base.saturating_mul(2), diff_pct, CANARY_TOLERANCE_PCT
+        a_c, a_t, base, b_c, b_t, base.saturating_mul(2), diff_pct, CANARY_TOLERANCE_PCT
     );
     true
 }
@@ -996,12 +1038,23 @@ fn report_canary(start: Option<u64>) {
         0
     };
 
+    // The wire format stays in whole cycles. `pct` and `spread` above were
+    // computed from the centicycle values, so they carry the full measured
+    // precision; these four are the human-facing magnitudes and a hundredth of
+    // a cycle is not a magnitude anyone reads. Keeping the units unchanged also
+    // means every historical record and `scripts/bench-history.py` continue to
+    // mean exactly what they meant.
+    let (start_c, start_t) = centi_parts(start);
+    let (end_c, end_t) = centi_parts(end);
+    let (lo_c, lo_t) = centi_parts(lo);
+    let (hi_c, hi_t) = centi_parts(hi);
+
     // `<start> <end> <pct>` keeps its original meaning; the trailing fields are
     // an append-only extension, so the one record written before mid-suite
     // sampling existed still reads back correctly. `invalid` is the newest.
     serial_println!(
         "[bench] CANARY {} {} {} {} {} {} {} {}",
-        start, end, pct, lo, hi, spread, samples, invalid
+        start_c, end_c, pct, lo_c, hi_c, spread, samples, invalid
     );
 
     // Three outcomes, deliberately not two. "The instrument failed" is not
@@ -1025,16 +1078,19 @@ fn report_canary(start: Option<u64>) {
     } else if spread > CANARY_TOLERANCE_PCT {
         serial_println!(
             "[bench] CONTAMINATED: the reference access cost spread {}% across {} \
-             samples during the suite ({}-{} cycles, endpoints {} -> {} = {}%, \
-             tolerance {}%). Host load changed mid-run, so a single-benchmark \
+             samples during the suite ({}.{}-{}.{} cycles, endpoints {}.{} -> {}.{} \
+             = {}%, tolerance {}%). Host load changed mid-run, so a single-benchmark \
              outlier in this run is unproven — do not read it as a regression.",
-            spread, samples, lo, hi, start, end, pct, CANARY_TOLERANCE_PCT
+            spread, samples,
+            lo_c, lo_t, hi_c, hi_t,
+            start_c, start_t, end_c, end_t,
+            pct, CANARY_TOLERANCE_PCT
         );
     } else {
         serial_println!(
             "[bench] Canary OK: reference access cost stable across {} samples \
-             ({}-{} cycles, spread {}%).",
-            samples, lo, hi, spread
+             ({}.{}-{}.{} cycles, spread {}%).",
+            samples, lo_c, lo_t, hi_c, hi_t, spread
         );
     }
 }
@@ -1125,15 +1181,25 @@ pub fn run_all() {
         // "UNMEASURED" reporting path the arms-did-not-separate case uses --
         // both mean "the instrument failed", which is not "the code is fine".
         let measured = if scale_ok { measured } else { None };
+        // UNIT CHANGE: `measured` is centicycles (see CENTI), but every consumer
+        // of `access_floor` multiplies it against a raw cycle delta
+        // (`access_floor * 4`, `access_floor * OWNER_TAG_BUDGET_ACCESSES`), so the
+        // floor must be *cycles*. Converting here rather than at those sites keeps
+        // exactly one place in the file where the two units meet. Getting this
+        // wrong would inflate both budget verdicts 100x while every printed number
+        // still looked plausible — the same silent-units failure as the debug/
+        // release profile mix-up that made P11 and P13 miss.
+        let measured_cycles = measured.map(|c| c / CENTI);
         // Still clamped: if the two arms land equal the budgets below must not
         // all collapse to 0 and turn every check into a guaranteed failure.
-        let floor = core::cmp::max(measured.unwrap_or(0), 100);
+        let floor = core::cmp::max(measured_cycles.unwrap_or(0), 100);
         match measured {
             Some(value) => serial_println!(
-                "[bench]   memory_access_floor: {} cycles/guest byte-store (measured={} \
+                "[bench]   memory_access_floor: {} cycles/guest byte-store (measured={}.{} \
                  over {} stores/window: nop={} store={}, {} interleaved rounds) — budgets \
                  below are multiples of this",
-                floor, value, CANARY_STORES_PER_WINDOW, nop, store, CANARY_ROUNDS
+                floor, centi_parts(value).0, centi_parts(value).1,
+                CANARY_STORES_PER_WINDOW, nop, store, CANARY_ROUNDS
             ),
             // The clamp used to absorb this silently, and did so on all nine
             // release-profile runs while its own comment said it should never

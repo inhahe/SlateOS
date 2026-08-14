@@ -18,9 +18,10 @@ The lanes were drawn so that the three sets of files a lane writes to are
 disjoint, and so that each lane has a deep enough backlog to run for days
 without waiting on another lane.
 
-**Read this whole section before picking a task.** The single-agent rule
-"edit any file freely" (CLAUDE.md, "Single Session") is **suspended** while
-three agents are live; the ownership map below replaces it.
+**Read this whole section before picking a task.** It is the authority for
+lane ownership; CLAUDE.md ("Three Sessions — Find Out Which One You Are,
+First") is the short pointer to it. The old single-agent rule "edit any
+file freely" no longer applies — the ownership map below replaces it.
 
 ### Step 0 — which agent am I?
 

@@ -42,18 +42,51 @@ Or from bash without vcvarsall, pass the full cl.exe path and ensure the Windows
 
 ---
 
-## Single Session — Zone Names as Navigation Aid
+## Three Sessions — Find Out Which One You Are, First
 
-This repo is now worked by a **single Claude session at a time**. The
-multi-session zero-contention architecture (per-zone fragment files,
-self-registration patterns, request dropbox) is no longer in force —
-edit any file freely. If you need to change a shared trait, change it.
-If you need to add a workspace member, add it. There's no other session
-to coordinate with.
+This repo is worked by **three Claude sessions simultaneously**, one per
+Claude account. Each owns a disjoint lane of the tree and must not write
+outside it: two sessions editing the same file, with one silently
+clobbering the other on its next write, is the most expensive failure
+mode in this arrangement.
 
-The zone names below are kept as a **navigation aid only** — they tell
-you where in the tree a given subsystem lives. They are no longer
-ownership boundaries.
+**Before you touch a file, run:**
+
+```bash
+python scripts/which-lane.py
+```
+
+It reports your lane from `CLAUDE_CONFIG_DIR` (set per account), along
+with your branch and the globs you may and may not write:
+
+| `CLAUDE_CONFIG_DIR` | Lane | Scope | Branch |
+|---|---|---|---|
+| `~/.claude` (or unset) | **A** | kernel & core — `kernel/**`, `bench/**`, the boot test | `lane-a` |
+| `~/.claude-account-b` | **B** | POSIX & userland — `posix/**`, `userspace/**`, `services/**`, `init/**` | `lane-b` |
+| `~/.claude-account-c` | **C** | graphics, apps & net — `gui/**`, `apps/**`, `net*/**`, `pkg/**` | `lane-c` |
+
+If it exits 2 (`lane: UNKNOWN`), **stop and ask the operator** — do not
+guess a lane.
+
+**The full rules live in `roadmap.md` → "Three-Agent Parallel
+Execution"**: the ownership map, the `requests/` dropbox for cross-lane
+changes, the append-only conventions for the shared documents
+(`known-issues.md`, `design-decisions.md`, `open-questions.md`,
+`todo.txt`), the per-lane `design-decisions.md` numbering split, the
+`build/.boot-lock` protocol that serialises QEMU, and the per-lane
+backlogs. Read that section before picking a task.
+
+Work only roadmap items tagged with your own lane letter. When you need a
+change in another lane's tree, file `requests/<from>-<to>-<slug>.md` and
+pick up something else rather than making the change yourself.
+
+If the project ever drops back to a single session, restore
+`roadmap.single-agent.md` over `roadmap.md` and this section reverts to
+"edit any file freely."
+
+The zone names below are a **navigation aid** — they tell you where in
+the tree a given subsystem lives. The lane table above, not this table,
+is the ownership boundary.
 
 | Zone | Covers | Typical paths |
 |------|--------|---------------|
@@ -76,12 +109,15 @@ ownership boundaries.
 
 ### Branch Strategy
 
-Work on feature branches and merge to `main` when the work compiles and
-passes tests. Before merging:
+Each lane works on its own branch — `lane-a`, `lane-b`, `lane-c` — and
+merges to `main` when the work compiles and passes tests. Before merging:
 
-- `git pull --rebase origin main`
+- `git pull --rebase origin main` (rebase, never merge)
 - Run the full test suite
 - Only then merge
+
+Because the boot test builds the whole workspace, a broken lane blocks the
+other two. Never merge a red tree to `main` "to unblock myself."
 
 ### CLAUDE.md
 

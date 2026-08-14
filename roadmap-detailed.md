@@ -1127,7 +1127,20 @@ a direct user gesture and needs none of them._
 ### 2.7 Shell and Basic Userspace Tools
 
 #### Shells
-- [ ] Port Oils (bash-compatible, replaces bash for POSIX compatibility)
+- [-] Port Oils (bash-compatible, replaces bash for POSIX compatibility) — **in
+  progress as `userspace/oils` (binary `osh`), and its bash-fidelity scope is
+  FROZEN as of 2026-08-14: see design-decisions.md §305 before doing any parity
+  work.** GNU bash 5.2 itself cross-compiles and runs on SlateOS, so byte-for-byte
+  osh↔bash parity is no longer a goal; osh divergences are fixed only when
+  something we ship or run hits them, when they are crash/hang/data-loss/security
+  bugs, or when they are regressions. The `TD-OILS-*` family in `known-issues.md`
+  is gated by that criterion and is not a burn-down list.
+- [x] Cross-compile **GNU bash 5.2** for SlateOS — done 2026-08-12
+  (`scripts/bash-spike/`). 5,349,720-byte static ELF against
+  `toolchain/sysroot/lib/libc.a`, zero undefined symbols, no shims; proven each
+  boot by `kernel/src/proc/spawn.rs::self_test_bash_on_slateos_libc`. Ships beside
+  osh as the exact-bash escape hatch and the intended on-device differential
+  oracle (§305).
 - [ ] Port Nushell as default interactive shell (Rust, structured data piping)
 - [ ] **Windows-shell familiarity layer: a `cmd.exe` emulator (and, stretch, a PowerShell emulator).** For users migrating from Windows, provide a shell that accepts classic `cmd.exe` syntax — the builtin commands (`dir`, `copy`, `move`, `del`, `ren`, `type`, `cd`/`chdir`, `md`/`mkdir`, `rd`/`rmdir`, `cls`, `echo`, `set`, `path`, `where`, `for`, `if`, `goto`, `call`, `start`, `title`, `%VAR%`/`%ERRORLEVEL%` expansion, `&`/`&&`/`||`/`|` operators, `.bat`/`.cmd` batch-file execution) — mapping them onto native filesystem/process/env syscalls so muscle-memory and existing `.bat` scripts work. It is an *emulation/compat layer*, not the default shell (Nushell stays default); it lives alongside Oils the same way. **Stretch goal: a PowerShell emulator** — much larger scope (a real object pipeline, cmdlets, .NET-esque type system). Two realistic paths, to be decided when tackled: (a) port PowerShell Core (open-source, MIT) via the .NET/CoreCLR runtime once that's available on the OS — the faithful option; or (b) a *subset* emulator covering the most common cmdlets (`Get-ChildItem`/`gci`, `Get-Content`, `Set-Location`, `Copy-Item`, `Where-Object`, `ForEach-Object`, `Select-Object`, `$_`, object pipeline basics) mapped onto Nushell's already-structured pipeline where semantics align. Record as an open question which path to take before starting PowerShell specifically; the `cmd.exe` emulator is the committed near-term deliverable and does not depend on it.
 

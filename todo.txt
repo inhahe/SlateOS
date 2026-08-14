@@ -53968,7 +53968,38 @@ FAILs).  Reversible (pure translator change; no PCB/state).
 ## ############################################################################
 ## Lane B — POSIX & userland
 ## ############################################################################
-(no lane-B-specific entries yet; see the pre-split entries above)
+## OPEN (2026-08-14, operator decision — design-decisions.md §305):
+## osh's bash-fidelity scope is FROZEN. READ §305 BEFORE ANY osh PARITY WORK.
+##   GNU bash 5.2 cross-compiles and runs on SlateOS (since 2026-07-22; proven
+##   by kernel/src/proc/spawn.rs::self_test_bash_on_slateos_libc). So
+##   byte-for-byte osh<->bash parity is no longer a goal. Fix an osh divergence
+##   ONLY if (a) something we ship or run actually hits it, (b) it is a
+##   crash/hang/data-loss/security/wrong-exit-status bug, or (c) it is a
+##   regression against an already-green corpus case. Do NOT fix and do NOT add
+##   a corpus case for: diagnostic wording or the exact substring a message
+##   echoes; artifacts of bash being 40-year-old C; constructs reachable only by
+##   adversarial input whose only difference is the error text. Out-of-scope
+##   divergences get "SCOPE: out of frozen scope (S305)" in their TD-OILS-*
+##   entry and stay unfixed. The corpus does not grow for its own sake.
+##   The ~325 open TD-OILS-* entries are NOT a burn-down list.
+##
+## OPEN (2026-08-14) — recurring audit: design decisions with expiry conditions
+##   S305's root cause was procedural: S72 rejected cross-compiling bash because
+##   no C->slateos toolchain existed, wrote its own "How to reverse" clause, the
+##   clause fired 4 days later (2026-07-22, zig cc + libc.a), and nobody checked
+##   for 25 days -- ~1,100 of oils' 1,210 commits landed on a dead premise.
+##   THE STANDING RULE (S305): a decision whose rationale rests on a missing
+##   prerequisite must have its reversing condition tracked HERE, as live work,
+##   not only in the entry's prose. And: WHEN YOU LAND A NEW CAPABILITY, grep
+##   design-decisions.md for entries that were rejected for lack of it --
+##     grep -nE "no C/C\+\+|cross-toolchain|prerequisite|How to reverse" design-decisions.md
+##   Whoever landed zig cc was best placed to notice, and didn't.
+##   ACTION: periodically re-read every "How to reverse"/"revisit if..." clause
+##   in design-decisions.md and confirm its premise still holds. Known clauses
+##   of this shape today: S72 (SPENT -- superseded by S305), S73 (YSH: "once a
+##   C++/slateos toolchain exists" -- the C half has fired, the C++ half has
+##   NOT; YSH is genuine Oils C++, so this one is still correctly blocked -- but
+##   re-check it whenever C++ cross-compilation lands).
 
 ## ############################################################################
 ## Lane C — graphics, apps & net

@@ -12,9 +12,45 @@ work that should be done now."
 
 ---
 
+## ⛔ The `TD-OILS-*` family is scope-gated — read this before picking one up
+
+**design-decisions.md §305 (operator, 2026-08-14) froze osh's bash-fidelity
+scope.** There are ~325 open `TD-OILS-*` entries in this file. **They are not a
+backlog to burn down**, and the general "fix bugs immediately" rule above does
+**not** apply to them by default.
+
+GNU bash 5.2 itself cross-compiles and runs on SlateOS (since 2026-07-22 —
+`scripts/bash-spike/`, `kernel/src/proc/spawn.rs::self_test_bash_on_slateos_libc`),
+so byte-for-byte osh↔bash parity stopped being a goal. **Fix an osh divergence
+only if:**
+
+- something we actually ship or run hits it; **or**
+- it is a crash, hang, data-loss, security, or wrong-exit-status-that-propagates
+  bug — i.e. a bug on its own terms, independent of bash; **or**
+- it is a regression against an already-green corpus case.
+
+**Do not fix, and do not add a corpus case for:** diagnostic wording or the exact
+substring a message echoes; artifacts of bash being a 40-year-old C program
+(`OPTIND=4294967297` wrapping through an `int`); constructs reachable only by
+adversarial input whose only observable difference is the error text.
+
+When a divergence is real but out of scope, annotate its entry
+`SCOPE: out of frozen scope (§305)` and leave it unfixed. If something genuinely
+needs exact bash, **run bash**. Read §305 in full before doing any osh parity
+work — it also records *why* this cap exists, which is a 25-day misdirection
+worth not repeating.
+
+---
+
 ## Reference Material
 
 ### TOOLING-BASH-5.2.37-SOURCE. A local copy of the reference shell's own source, at `D:\refsrc\bash-5.2`
+
+⚠️ **Scope note (2026-08-14, §305):** the parity goal described below is now
+**capped** — see the banner at the top of this file. This source tree remains the
+right way to *answer* a parity question, but the question should only be asked
+for a divergence that passes §305's criterion. Historically, it was asked for
+everything.
 
 The oils work is driven toward byte-exact parity with the bash on this machine,
 `C:\Program Files\Git\usr\bin\bash.exe`, which reports
@@ -60094,60 +60130,216 @@ bash prints for a malformed `${ … }` whose operand holds a `"` opened inside a
 
 ---
 
-### TD-OILS-AN-UNMATED-SQUOTE-IN-A-SUBSCRIPT-LOSES-ITS-QUOTE-BYTES-FROM-THE-WORD-PRINTED-BACK — 2026-08-14
+### TD-OILS-AN-UNMATED-SQUOTE-IN-A-SUBSCRIPT-LOSES-ITS-QUOTE-BYTES-FROM-THE-WORD-PRINTED-BACK — 2026-08-14 — ✅ FIXED 2026-08-14
 
-**Where:** the `` bad substitution: no closing `}' `` path —
-`userspace/oils/src/wordscan.rs` (`word_fault`, which re-scans
-`crate::unparse::word_src`) and `Shell::unclosed_in_word`
-(`userspace/oils/src/interp.rs`).
+**Where:** `attach_subscript_reads` (`userspace/oils/src/parser.rs`), which gives
+each top-level `' … '` of an arithmetic fragment its interior parse.
 
-**Repro** (bash 5.2.37, `build/pr15.sh` x1):
+**Repro** (bash 5.2.37):
 
 ```sh
 declare -a arr=(10 20 30)
-echo A${arr['1]}B
-echo GUARD1
+declare -A m=([k]=V)
+echo "[${arr['x${m:-']}]"
 ```
 
-bash and osh agree on how far the runaway `' … '` run reaches — both swallow
-the following lines, because a `'` in a `${ … }` the gobbler is scanning opens
-a run that ends only at its mate, wherever in the remaining input that is. They
-disagree on the **text they then print back**:
+bash names `` 'x${m:-' `` — the whole fragment, quotes included. osh named
+`x${m:-` — the interior of the run alone.
 
-| | bash 5.2.37 | osh |
-|---|---|---|
-| named word begins | `` `'1]}B` `` | `` `1]}B` `` |
-| named word ends | ``echo "A${arr['1`` | ``echo "A${arr[`` |
+**Cause, which was not the one first written here.** The first note guessed the
+text came from `crate::unparse::word_src` by way of `crate::wordscan::word_fault`.
+It does not: `word_fault` returns `None` for these words, and the word source osh
+builds is byte-correct. The diagnostic comes from `Shell::expand_unclosed` on an
+`Unclosed::BadSubst` whose `text` the *interior's own lexer* filled in with
+`Lexer::whole_text` — the interior being a string of osh's making. bash has no
+such string: an arithmetic fragment is expanded with `Q_DOUBLE_QUOTES` set, which
+switches the single quote off, so `expand_word_internal` walks straight through
+the pair and the string it was handed is the fragment. Both "no closing"
+reporters echo that string (`report_error (…, string)`, subst.c:1498 for
+`$[ … ]`, subst.c:1972 for `${ … }`).
 
-So osh drops the run's opening `'` and stops its tail two bytes early. The
-extent is right and the value is unaffected; only the echoed text is wrong.
+That also explains the shape the note found puzzling — a name that begins one
+byte late and ends two bytes early is exactly the interior of a `' … '` run.
+There were not two faults there, but there is a second one beside it; see
+`TD-OILS-A-BRACE-WHOSE-NAME-SCAN-RUNS-OFF-A-FRAGMENT-TAKES-THE-OTHER-DIAGNOSTIC`.
 
-**Not** either defect fixed the same day. That day's reprint fix *added* a byte
-at print time where this one *drops* two, and its brace-scan fix touched which
-openers a scan counts. Binaries built from the commit before each were diffed
-against this repro directly and are byte-identical to today's, so the defect is
-older than both and independent of them.
+**Fix.** `attach_subscript_reads` already re-measures the fragment after parsing
+an interior — that is what `crate::unparse::attach_comsub_tails` does for a
+`$( … )`'s echoed remainder. It now also re-*names*: a new
+`name_unclosed_after_the_fragment` walks the interiors it just attached and gives
+every top-level `WordPart::Unclosed(Unclosed::BadSubst { text, .. })` the
+fragment's source for its `text`. Only the run's own level is renamed; a `" … "`
+inside the interior is carved out by `string_extract_double_quoted` as its own
+string and keeps naming itself, as one written a character to the left of the `'`
+would. `src` is left alone — it is the construct's spelling for a re-print, not a
+diagnostic's `%s`.
 
-**What the proper fix looks like.** The text is `crate::unparse::word_src(w)`
-and nothing else: `Shell::begin_word` computes it once, hands it to
-`crate::wordscan::word_fault`, and the `WordFault::Brace(s.to_vec())` raised at
-`wordscan.rs:221`/`:229` carries that same string through to
-`Shell::dq_unclosed_brace`. So this *is* a `part_src` result — the "text taken
-from a source span" alternative is ruled out — and the run must be reaching
-print as something other than an unmated `WordPart::SingleQuoted`, because that
-arm now writes a leading `'`.
-
-Note the shape of the difference before assuming it is one bug: bash's name is
-`'` + osh's name + `'1`. The missing tail is two bytes *past* where osh's word
-ends, which is an **extent** difference, not a printing one — so there are
-plausibly two faults here, one dropping the opening quote and one stopping the
-scan early. Measure them apart first.
-
-**Impact.** Diagnostics only. Reachable through any `${ … }` whose subscript or
-substring bound holds a `'` with no mate.
+Corpus:
+`a-construct-left-open-in-a-quoted-subscript-names-the-fragment-around-it.sh`
+(seven rows: a `${ … }` body scan running off, the same with text after the run,
+a `$[ … ]`, both substring bounds, and a run that closes nothing early).
 
 ---
 
+### TD-OILS-A-BRACE-WHOSE-NAME-SCAN-RUNS-OFF-A-FRAGMENT-TAKES-THE-OTHER-DIAGNOSTIC — 2026-08-14 — ✅ FIXED 2026-08-14
+
+**Where:** `Shell::expand_unclosed` (`userspace/oils/src/interp.rs`) and the
+`Unclosed::BadSubst` the lexer raises for it (`userspace/oils/src/lexer.rs`).
+
+**Repro** (bash 5.2.37):
+
+```sh
+declare -a arr=(10 20 30)
+declare -A m=([k]=V)
+echo "[${arr['x${m']}]"
+```
+
+| | |
+|---|---|
+| bash | `` 'x${m': bad substitution `` |
+| osh | ``bad substitution: no closing `}' in 'x${m'`` |
+
+The same string is named — that much was fixed the same day — but it is the
+wrong one of bash's two messages.
+
+**Why bash has two.** A `${ … }` in a string is read in two steps, and only the
+second one is `extract_dollar_brace_string`. First `parameter_brace_expand`
+extracts the *name* with `string_extract (string, &t_index, "#%^,~:-=?+/@}",
+SX_VARNAME)` (subst.c:9550), which stops at one of those operator characters or
+at the end of the string — `SX_VARNAME` stepping over a whole `[ … ]` subscript
+on the way. If it stopped at the end, `c` is `NUL` and the `switch (c)` falls to
+`default: case '\0': bad_substitution:` (subst.c:10018-10024), which is
+`report_error (_("%s: bad substitution"), string)` and no longjmp. Only if it
+stopped at an *operator* does the body go to `extract_dollar_brace_string`, whose
+own running-out is the "no closing" one that longjmps (subst.c:1972).
+
+So the two messages divide on whether the unclosed brace got as far as an
+operator, and the division is visible:
+
+| fragment | bash |
+|---|---|
+| `'x${m'` | `` 'x${m': bad substitution `` |
+| `'x${#m'` | `` 'x${#m': bad substitution `` |
+| `'x${m[0]'` | `` 'x${m[0]': bad substitution `` |
+| `'x${m['` | `` 'x${m[': bad substitution `` |
+| `'x${m:-'` | ``no closing `}' in 'x${m:-'`` |
+
+**Two things the entry got wrong, found while fixing it.**
+
+*It is not only a fragment.* A here-document body takes the same two messages,
+and osh had the same one answer for both — `cat <<E`/`a${m b`/`E` is
+`a${m b⏎: bad substitution` in bash. The `${x@P}` case really does collapse
+(`no_longjmp_on_fatal_error` makes `extract_dollar_brace_string` return `NULL`
+quietly and its caller fall to the same label), which is why the divergence
+looked narrower than it was.
+
+*The name scan is not the whole story.* Two checks between it and
+`extract_dollar_brace_string` also reach `bad_substitution:` with an operator
+already found — `valid_brace_expansion_word` on the name (subst.c:9803) and the
+length branch's `string[sindex-1] != RBRACE` (subst.c:9687). So `'x${m[a:b'`
+(the `:` *is* reached, but `m[a` is no name) and `'x${#q:-'` are both plain bad
+substitutions. A third check, `parameter_brace_expand_indir` (subst.c:9807),
+runs there too and reports in the missing brace's place: `a${!nosuch:-b` is
+`nosuch: invalid indirect expansion`, and a pointer holding `not a name` is
+`not a name: invalid variable name`.
+
+**The fix.** None of this needed new state on `Unclosed::BadSubst`. osh already
+had the whole decision procedure — `Shell::unterminated_brace_kind`, written for
+the arithmetic-string scanner, which answers `BadSub` / `NoClosing` /
+`Indir(name)` from the body text alone and has `Shell::arith_indir_resolves`
+beside it for the third. `Shell::expand_unclosed` now asks it, for `close ==
+'}'`, before anything else it does, and a new `Shell::unclosed_bad_substitution`
+reports the `BadSub` answer naming `text` (bash's `string`) with the
+`ErrexitOrPosix` class the `bad_substitution:` label carries.
+
+Asking it *first* matters, and is bash's own order: a `$( … )` written inside
+the name is walked over by `string_extract` without being parsed, so
+`a${m$(fi) b` names the bad substitution and never mentions the `fi` — where osh
+used to run `Shell::unclosed_brace_reads` first and report the `fi`.
+
+**Fixed by:** `Shell::expand_unclosed` + `Shell::unclosed_bad_substitution`
+(`userspace/oils/src/interp.rs`). Corpus:
+`a-brace-whose-name-scan-runs-off-the-text-is-a-bad-substitution-not-a-missing-brace.sh`
+— sixteen shapes covering the fragment, the here-document, the command
+substitution in each half, all three indirection outcomes and the prompt
+collapse, byte-identical to bash 5.2.37 including stderr.
+
+---
+
+### TD-OILS-AN-UNCLOSED-ARITH-SUBSTITUTION-IN-A-QUOTED-SUBSCRIPT-IS-NOT-CAUGHT-BEFORE-EXPANSION — 2026-08-14
+
+**Where:** `crate::wordscan` (`userspace/oils/src/wordscan.rs`), the word-extent
+pass `Shell::begin_word` runs before a word is expanded.
+
+**Repro** (bash 5.2.37):
+
+```sh
+declare -a arr=(10 20 30)
+echo "$(touch RAN)[${arr['x$(( 1+ ']}]"
+```
+
+bash prints ``bad substitution: no closing `)' in "$(touch RAN)[${arr['x$(( 1+ ']}]"``
+— the **whole word** — and `RAN` is never created. osh prints
+``bad substitution: no closing `)' in 'x$(( 1+ '`` — the fragment — and the
+`touch` runs.
+
+The side effect is the real defect; the name follows from it. bash reaches this
+one on the *extent* pass, before any part of the word expands, so it names the
+string that pass was walking. osh reaches it only when the subscript is expanded,
+by which time the substitution ahead of it has already run.
+
+**Not the same as the two entries above.** Those are about which string a fault
+found *during* the fragment's expansion names. This one is about a fault bash
+finds before expansion starts and osh does not find at all until later.
+
+**What the proper fix looks like.** `wordscan::scan` has rows for `${`,
+`` ` ``, `$(`, `$[` and `<(`/`>(`, and its faults are `WordFault::Brace` and
+`WordFault::Backquote`. An unclosed `$((` inside a `' … '` in a subscript is a
+third: `extract_delimited_string`'s (subst.c:1498), which names the scanned
+string and closes it with `)`. Adding it means teaching `word_fault` a fault that
+carries its own closing delimiter, and teaching the subscript skip that a `'` in
+there does not hide a `$((` from the enclosing scan.
+
+**Impact.** A command substitution written before such a subscript runs when bash
+would not have run it. Narrow, but it is a side effect and not just text.
+
+---
+
+### TD-OILS-A-BACKQUOTE-IN-A-QUOTED-SUBSCRIPT-IS-A-PARSE-ERROR-WHERE-BASH-EXPANDS — 2026-08-14
+
+**Where:** the `' … '` interior parse of an arithmetic fragment —
+`attach_subscript_reads` (`userspace/oils/src/parser.rs`) and the lexer path
+behind it.
+
+**Repro** (bash 5.2.37):
+
+```sh
+declare -a arr=(10 20 30)
+echo "[${arr['x`fi']}]"
+echo TAIL
+```
+
+| | |
+|---|---|
+| bash | ``bad substitution: no closing "`" in `fi'`` at line 2, then `TAIL` |
+| osh | ``unexpected EOF while looking for matching `` ` ``'`` at line 4 — the script never runs |
+
+osh turns a runtime diagnostic into a *parse* error, so the whole script is
+rejected. bash's parser stops at the `'` and resumes at its mate, so the
+backquote inside is text as far as any parse is concerned; it is met only by
+`param_expand`'s own `string_extract (…, SX_REQMATCH)` at expansion time
+(subst.c:11269), which names `string + t_index` — the text from the backquote on.
+
+**What the proper fix looks like.** The interior is already parsed with
+`ParseOpts::tolerant`; an unmatched backquote there has to become an
+`Unclosed::Backquote` segment rather than a `LexError` that escapes as a parse
+error, exactly as an unmatched `${` becomes an `Unclosed::BadSubst`. Its `src` —
+which is also its `%s` — runs from the backquote to the end of the **fragment**,
+so it wants the same widening `name_unclosed_after_the_fragment` gives the brace
+case.
+
+**Impact.** A whole script is rejected where bash runs it. The most severe of the
+four found around this repro.
 
 ### TD-OILS-A-SQUOTE-RUN-DOES-NOT-CUT-A-SUBSTITUTION-SHORT-FOR-THE-BRACE-SCAN. A `$( … )` opened inside one swallows the read that should have followed it — 2026-08-14
 

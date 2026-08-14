@@ -58126,9 +58126,9 @@ surfaced three things worth carrying forward:
 
 ## TD-GUI-TEXT-COMMAND-DOES-NOT-WRAP — callers assume `max_width` wraps, but it clips
 
-**Status.** Open. Three instances fixed — the About dialog's licence list
-(`7948cf8d5`), every `AlertDialog` (`46db88142`) and the notification toast
-body — but the app tree is unaudited.
+**Status.** Open. `gui/**` is done — the About dialog's licence list
+(`7948cf8d5`), every `AlertDialog` (`46db88142`), the notification toast body
+(`f559ea8b1`) and `InputDialog`'s prompt. The app tree is unaudited.
 
 **What it is.** `RenderCommand::Text` carries a `max_width`, and the obvious
 reading is that the compositor wraps to it. It does not. `Compositor::draw_text`
@@ -58144,7 +58144,7 @@ So `max_width` is a **clip**, and it produces exactly one line. Any caller that
 hands a paragraph to a single `Text` command is showing only its first line's
 worth of characters — silently, with no marker that anything was dropped.
 
-**What it broke.** Three found so far, all user-visible:
+**What it broke.** Four found so far, all user-visible:
 
 - `gui/desktop/src/about.rs` — each open-source licence went out as one command,
   so the About dialog's Licences tab showed roughly the first line of each
@@ -58158,6 +58158,9 @@ worth of characters — silently, with no marker that anything was dropped.
 - `gui/notifications` — every toast body. `toast_height` did not depend on the
   body at all, so the fix had to grow the toast as well as wrap the text, or a
   two-line body would have drawn over the toast stacked beneath it.
+- `modal.rs`'s `InputDialog` — the prompt got a flat one-line allowance
+  (`FONT_SIZE + 12.0`) in both the height and the running `content_y`, so the
+  input field was drawn over the second line of any longer prompt.
 
 **Proper fix.** `guitk::text::wrap(text, max_width, size, weight)` (added in
 `7948cf8d5`) breaks a string into the lines it will actually be drawn as; emit
@@ -58190,8 +58193,14 @@ read in full.
 
 **Where to look next.** Unaudited callers passing prose to a single command,
 found by grepping for a `Text` command whose body is a `description` / `body` /
-`message` / `notes` / `content` field with `max_width: Some(..)`. Candidates:
-`gui/notifications` (toast body), `apps/contacts` (the notes field),
-`apps/whiteboard` (sticky-note content), `apps/weather` (alert descriptions),
-`InputDialog`'s prompt in `modal.rs`. Status-bar messages are *not* in scope —
-truncating those to one line is the intended behaviour.
+`message` / `notes` / `content` field with `max_width: Some(..)`. Remaining
+candidates, all under `apps/`: `contacts` (the notes field), `whiteboard`
+(sticky-note content), `weather` (alert descriptions), `dbviewer` (query result
+messages). Status-bar messages are *not* in scope — truncating those to one line
+is the intended behaviour, and the survey turns up many of them
+(`automator`, `dictionary`, `diskimager`).
+
+Each fix has the same three questions: what is the text's box, what reserves
+that box's height, and does anything downstream of it move. Where the answer to
+the third is "yes" — a stacked list, a following field — the height and the
+drawn lines must come from one call, not two.

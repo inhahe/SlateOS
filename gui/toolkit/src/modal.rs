@@ -43,6 +43,8 @@ const COLOR_SCRIM: Color = Color::rgba(0, 0, 0, 160);
 
 const DIALOG_MIN_WIDTH: f32 = 320.0;
 const DIALOG_MAX_WIDTH: f32 = 600.0;
+/// Fixed outer width of an [`InputDialog`], which does not auto-size.
+const INPUT_DIALOG_WIDTH: f32 = DIALOG_MIN_WIDTH + 80.0;
 const DIALOG_MIN_HEIGHT: f32 = 160.0;
 const DIALOG_MAX_HEIGHT: f32 = 500.0;
 const DIALOG_CORNER_RADIUS: f32 = 12.0;
@@ -1092,6 +1094,21 @@ impl InputDialog {
         }
     }
 
+    /// The prompt, broken into the lines it will be drawn as.
+    ///
+    /// `RenderCommand::Text` clips at `max_width` rather than wrapping, so a
+    /// prompt longer than one line has to be broken up here. `render` derives
+    /// both the dialog height and the input field's position from this list, so
+    /// the field cannot land on top of the prompt above it.
+    fn message_lines(&self) -> Vec<String> {
+        crate::text::wrap(
+            &self.message,
+            INPUT_DIALOG_WIDTH - CONTENT_PADDING * 2.0,
+            FONT_SIZE,
+            FontWeightHint::Regular,
+        )
+    }
+
     /// Render the input dialog.
     pub fn render(&self, parent_width: f32, parent_height: f32, tree: &mut RenderTree) {
         if !self.overlay.active && self.overlay.opacity <= 0.0 {
@@ -1100,9 +1117,14 @@ impl InputDialog {
 
         self.overlay.render(parent_width, parent_height, tree);
 
-        let width = DIALOG_MIN_WIDTH + 80.0;
+        let width = INPUT_DIALOG_WIDTH;
         let has_error = self.validation_error.is_some();
-        let height = TITLE_BAR_HEIGHT + CONTENT_PADDING + FONT_SIZE + 12.0
+        // The prompt is wrapped rather than clipped, so the room reserved for
+        // it is the height of its own lines. A flat one-line allowance used to
+        // push the input field up over the second line of any longer prompt.
+        let message_lines = self.message_lines();
+        let message_height = message_lines.len() as f32 * MESSAGE_LINE_HEIGHT;
+        let height = TITLE_BAR_HEIGHT + CONTENT_PADDING + message_height + 12.0
             + INPUT_HEIGHT + (if has_error { FONT_SIZE_SMALL + 8.0 } else { 0.0 })
             + CONTENT_PADDING + BUTTON_HEIGHT + CONTENT_PADDING;
         let x = (parent_width - width) / 2.0;
@@ -1158,18 +1180,20 @@ impl InputDialog {
             max_width: Some(width - CONTENT_PADDING * 2.0),
         });
 
-        // Message.
+        // Message, one command per wrapped line.
         let mut content_y = y + TITLE_BAR_HEIGHT + CONTENT_PADDING;
-        tree.push(RenderCommand::Text {
-            x: x + CONTENT_PADDING,
-            y: content_y,
-            text: self.message.clone(),
-            color: COLOR_SUBTEXT1,
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(width - CONTENT_PADDING * 2.0),
-        });
-        content_y += FONT_SIZE + 12.0;
+        for (n, line) in message_lines.iter().enumerate() {
+            tree.push(RenderCommand::Text {
+                x: x + CONTENT_PADDING,
+                y: content_y + n as f32 * MESSAGE_LINE_HEIGHT,
+                text: line.clone(),
+                color: COLOR_SUBTEXT1,
+                font_size: FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(width - CONTENT_PADDING * 2.0),
+            });
+        }
+        content_y += message_height + 12.0;
 
         // Input field.
         let input_width = width - CONTENT_PADDING * 2.0;
@@ -2469,6 +2493,54 @@ mod tests {
         assert!(
             last_y + MESSAGE_LINE_HEIGHT <= buttons_y,
             "the last message line at {last_y} runs into the buttons at {buttons_y}"
+        );
+    }
+
+    #[test]
+    fn an_input_dialog_field_clears_a_wrapped_prompt() {
+        // The prompt used to get a flat one-line allowance, so the input field
+        // was drawn over the second line of anything longer.
+        let prompt = "Enter the full path of the directory to index, including \
+                      any network share you want covered by the search.";
+        let mut dialog = InputDialog::prompt("Index", prompt, "");
+        dialog.show();
+        dialog.overlay.opacity = 1.0;
+
+        let mut tree = RenderTree::new();
+        dialog.render(800.0, 600.0, &mut tree);
+
+        let lines: Vec<f32> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    y,
+                    font_size,
+                    color,
+                    ..
+                } if (*font_size - FONT_SIZE).abs() < 0.01 && *color == COLOR_SUBTEXT1 => Some(*y),
+                _ => None,
+            })
+            .collect();
+        assert!(lines.len() > 1, "the prompt was drawn as one line");
+
+        // The input field is the first surface-coloured box of INPUT_HEIGHT.
+        let field_y = tree
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::FillRect { y, height, .. }
+                    if (*height - INPUT_HEIGHT).abs() < 0.01 =>
+                {
+                    Some(*y)
+                }
+                _ => None,
+            })
+            .expect("the input dialog drew no input field");
+        let prompt_bottom = lines.iter().fold(f32::MIN, |a, &b| a.max(b)) + MESSAGE_LINE_HEIGHT;
+        assert!(
+            prompt_bottom <= field_y,
+            "the prompt ends at {prompt_bottom}, below the input field at {field_y}"
         );
     }
 

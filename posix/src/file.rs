@@ -26,6 +26,52 @@ use crate::types::*;
 
 /// Open a file.
 ///
+/// The part of Linux's `build_open_flags` (fs/open.c) that rejects a flag
+/// combination outright, factored out so `open` and `openat` can both run it
+/// in the position upstream runs it: *first*.
+///
+/// `do_sys_openat2` calls `build_open_flags(how, &op)` and returns its error
+/// before it ever calls `getname(filename)` — and before `do_filp_open`
+/// touches `dfd`.  So an impossible flag word outranks both a NULL path
+/// (`EFAULT`) and a bad directory fd (`EBADF`).  We used to check the path
+/// first and never made this check at all.
+///
+/// Only the combinations that survive `build_open_how`'s masking are listed.
+/// Unknown *individual* bits are not an error for `open`/`openat`: upstream
+/// notes that "older syscalls implicitly clear all of the invalid flags …
+/// before calling build_open_flags(), but openat2(2) checks all of its
+/// arguments", which is why [`openat2`] rejects them and this does not.
+///
+/// Returns `false` with `errno` already set when the flags are unusable.
+fn validate_open_flags(flags: i32) -> bool {
+    // "Block bugs where O_DIRECTORY | O_CREAT created regular files."  Both
+    // bits together are always a caller error; upstream returns EINVAL.
+    if flags & fcntl::O_DIRECTORY != 0 && flags & fcntl::O_CREAT != 0 {
+        errno::set_errno(errno::EINVAL);
+        return false;
+    }
+
+    // O_TMPFILE is `__O_TMPFILE | O_DIRECTORY`, and upstream enforces both
+    // that pairing and that the open is for writing, *before* the filesystem
+    // ever gets a chance to say it doesn't support tmpfiles.  Our EOPNOTSUPP
+    // for the unsupported-but-well-formed case therefore has to rank below
+    // these two EINVALs — it corresponds to `do_tmpfile`, which runs inside
+    // `path_openat`, long after `getname`.
+    if flags & RAW_O_TMPFILE_I32 != 0 {
+        if flags & fcntl::O_DIRECTORY == 0 {
+            errno::set_errno(errno::EINVAL);
+            return false;
+        }
+        let acc = flags & fcntl::O_ACCMODE;
+        if acc != fcntl::O_WRONLY && acc != fcntl::O_RDWR {
+            errno::set_errno(errno::EINVAL);
+            return false;
+        }
+    }
+
+    true
+}
+
 /// Translates POSIX `open(path, flags, mode)` to our native
 /// `SYS_FS_OPEN(path_ptr, path_len, flags, create_mode)`.
 ///
@@ -37,6 +83,13 @@ use crate::types::*;
 /// Returns a file descriptor on success, -1 on error (errno set).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn open(path: *const u8, flags: i32, mode: ModeT) -> Fd {
+    // `build_open_flags` (fs/open.c) runs before `getname(filename)` in
+    // `do_sys_openat2`, so every verdict it reaches outranks a bad path
+    // pointer.  See `validate_open_flags`.
+    if !validate_open_flags(flags) {
+        return -1;
+    }
+
     if path.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -235,6 +288,16 @@ pub extern "C" fn close(fd: Fd) -> i32 {
 /// Returns number of bytes read, 0 at EOF, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
+    // The descriptor first, whatever `count` is.  `ksys_read`
+    // (fs/read_write.c:604) opens with `fdget_pos(fd)` and returns `-EBADF`
+    // when it comes back empty; only inside `vfs_read` (:458) does
+    // `access_ok(buf, count)` produce `EFAULT`.  So `EBADF` outranks `EFAULT`,
+    // and — because Linux has no zero-length shortcut above the lookup —
+    // `read(closed_fd, buf, 0)` is `EBADF`, not a silent 0.
+    let Some(entry) = lookup_fd(fd) else {
+        return -1;
+    };
+
     if buf.is_null() && count > 0 {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -242,13 +305,11 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
     // POSIX: "If nbyte is 0, read() will return 0 and have no other
     // results."  Short-circuit before touching the kernel so a 0-length
     // read on a reset TCP connection doesn't spuriously return an error.
+    // (`access_ok(NULL, 0)` succeeds upstream, so a NULL buffer at count 0 is
+    // likewise not a fault.)
     if count == 0 {
         return 0;
     }
-
-    let Some(entry) = lookup_fd(fd) else {
-        return -1;
-    };
 
     let ret = match entry.kind {
         HandleKind::File => syscall3(SYS_FS_READ, entry.handle, buf as u64, count as u64),
@@ -439,6 +500,13 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
 /// Returns number of bytes written, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
+    // The descriptor first — `ksys_write` (fs/read_write.c:628) is `fdget_pos`
+    // then `vfs_write`, whose `access_ok` (:458, via the same path as
+    // `vfs_read`) is what yields `EFAULT`.  See `read` above.
+    let Some(entry) = lookup_fd(fd) else {
+        return -1;
+    };
+
     if buf.is_null() && count > 0 {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -450,10 +518,6 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
     if count == 0 {
         return 0;
     }
-
-    let Some(entry) = lookup_fd(fd) else {
-        return -1;
-    };
 
     let ret = match entry.kind {
         HandleKind::File => {
@@ -680,14 +744,11 @@ pub extern "C" fn lseek(fd: Fd, offset: OffT, whence: i32) -> OffT {
 /// programs.  Pipes and consoles return `ESPIPE`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pread(fd: Fd, buf: *mut u8, count: SizeT, offset: OffT) -> SsizeT {
-    if buf.is_null() && count > 0 {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-    // POSIX: "If nbyte is 0, read() will return 0 and have no other results."
-    if count == 0 {
-        return 0;
-    }
+    // `ksys_pread64` (fs/read_write.c:652) fixes the whole order: `pos < 0`
+    // (:658) → EINVAL, `fdget` (:661) → EBADF, `!FMODE_PREAD` (:664) → ESPIPE,
+    // and only then `vfs_read`'s `access_ok` (:458) → EFAULT.  We used to run
+    // it backwards.
+    //
     // POSIX: pread with negative offset shall fail with EINVAL.
     // Without this check, a negative OffT cast to u64 becomes a huge
     // positive seek position, causing spurious errors or wrong data.
@@ -703,6 +764,18 @@ pub extern "C" fn pread(fd: Fd, buf: *mut u8, count: SizeT, offset: OffT) -> Ssi
     if entry.kind != HandleKind::File {
         errno::set_errno(errno::ESPIPE);
         return -1;
+    }
+
+    if buf.is_null() && count > 0 {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // POSIX: "If nbyte is 0, read() will return 0 and have no other results."
+    // Below the ESPIPE test, not above it: upstream reaches `vfs_read` (which
+    // is what returns the 0) only after the `FMODE_PREAD` check, so a
+    // zero-length pread on a pipe is ESPIPE rather than a silent success.
+    if count == 0 {
+        return 0;
     }
 
     // Save current position.
@@ -745,15 +818,10 @@ pub extern "C" fn pread(fd: Fd, buf: *mut u8, count: SizeT, offset: OffT) -> Ssi
 /// Same seek→write→seek-back strategy as `pread`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pwrite(fd: Fd, buf: *const u8, count: SizeT, offset: OffT) -> SsizeT {
-    if buf.is_null() && count > 0 {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-    // POSIX: "If nbyte is 0 and the file is a regular file, write() will
-    // return zero and have no other results."
-    if count == 0 {
-        return 0;
-    }
+    // Same order as `pread`, from `ksys_pwrite64` (fs/read_write.c:686):
+    // `pos < 0` (:692) → EINVAL, `fdget` (:695) → EBADF, `!FMODE_PWRITE`
+    // (:698) → ESPIPE, then `vfs_write`'s `access_ok` → EFAULT.
+    //
     // POSIX: pwrite with negative offset shall fail with EINVAL.
     if offset < 0 {
         errno::set_errno(errno::EINVAL);
@@ -767,6 +835,17 @@ pub extern "C" fn pwrite(fd: Fd, buf: *const u8, count: SizeT, offset: OffT) -> 
     if entry.kind != HandleKind::File {
         errno::set_errno(errno::ESPIPE);
         return -1;
+    }
+
+    if buf.is_null() && count > 0 {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // POSIX: "If nbyte is 0 and the file is a regular file, write() will
+    // return zero and have no other results."  Below the ESPIPE test — see
+    // `pread`.
+    if count == 0 {
+        return 0;
     }
 
     // Save current position.
@@ -1868,14 +1947,21 @@ pub extern "C" fn rmdir(path: *const u8) -> i32 {
 /// Truncate a file to a specified length (by path).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn truncate(path: *const u8, length: OffT) -> i32 {
-    if path.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
     // POSIX: "If length is negative, the function shall fail and the
     // file size shall remain unchanged.  [EINVAL]."
+    //
+    // Before the path, not after: `do_sys_truncate` (fs/open.c:129) is
+    // `if (length < 0) return -EINVAL;` and only then `user_path_at`, so a
+    // negative length is decided while the pointer is still untouched.
+    // `ftruncate` below has the same shape for the same reason
+    // (`do_sys_ftruncate`, fs/open.c:164-170, puts the EINVAL above `fdget`'s
+    // EBADF).
     if length < 0 {
         errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if path.is_null() {
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
 
@@ -2334,6 +2420,14 @@ pub const AT_EACCESS: i32 = 0x200;
 /// POSIX: if `path` is absolute, `dirfd` is ignored.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn openat(dirfd: i32, path: *const u8, flags: i32, mode: ModeT) -> Fd {
+    // Before the dirfd is resolved: `build_open_flags` runs at the top of
+    // `do_sys_openat2`, ahead of `do_filp_open`'s use of `dfd`, so an
+    // impossible flag word outranks `EBADF` for the directory.  (`open`
+    // re-runs this check; it is cheap and idempotent, and running it here too
+    // is what keeps the *ordering* right on the non-AT_FDCWD path.)
+    if !validate_open_flags(flags) {
+        return -1;
+    }
     if dirfd == AT_FDCWD || is_absolute_path(path) {
         return open(path, flags, mode);
     }
@@ -6534,21 +6628,173 @@ mod tests {
         let _ = close_range(999, 999, 0);
     }
 
-    // -- pread / pwrite validation --
+    // -- open flag validation, and its position --
+
+    /// "Block bugs where O_DIRECTORY | O_CREAT created regular files"
+    /// (`build_open_flags`, fs/open.c).  We had no such check at all.
+    #[test]
+    fn test_open_directory_plus_creat_is_einval() {
+        let path = b"/tmp/does-not-matter\0";
+        assert_eq!(
+            open(path.as_ptr(), fcntl::O_DIRECTORY | fcntl::O_CREAT, 0o644),
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// `build_open_flags` runs before `getname(filename)` in `do_sys_openat2`,
+    /// so the flag verdict outranks a NULL path.
+    #[test]
+    fn test_open_bad_flags_outrank_a_null_path() {
+        assert_eq!(
+            open(
+                core::ptr::null(),
+                fcntl::O_DIRECTORY | fcntl::O_CREAT,
+                0o644
+            ),
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// …and before `do_filp_open` uses `dfd`, so it outranks a bad dirfd too.
+    #[test]
+    fn test_openat_bad_flags_outrank_a_bad_dirfd() {
+        let path = b"relative/path\0";
+        assert_eq!(
+            openat(-1, path.as_ptr(), fcntl::O_DIRECTORY | fcntl::O_CREAT, 0o644),
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// `__O_TMPFILE` without `O_DIRECTORY` is EINVAL upstream — the pairing is
+    /// enforced so that old kernels give an explicit error.
+    #[test]
+    fn test_open_raw_tmpfile_without_directory_is_einval() {
+        let path = b"/tmp\0";
+        assert_eq!(
+            open(path.as_ptr(), RAW_O_TMPFILE_I32 | fcntl::O_WRONLY, 0o644),
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// O_TMPFILE for reading is EINVAL: `!(acc_mode & MAY_WRITE)`.
+    #[test]
+    fn test_open_tmpfile_readonly_is_einval() {
+        let path = b"/tmp\0";
+        assert_eq!(
+            open(path.as_ptr(), fcntl::O_TMPFILE | fcntl::O_RDONLY, 0o644),
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// A *well-formed* O_TMPFILE open is the one we genuinely can't service,
+    /// and it still reports EOPNOTSUPP — that verdict corresponds to
+    /// `do_tmpfile` inside `path_openat`, which upstream reaches only after
+    /// the two EINVALs above.
+    #[test]
+    fn test_open_wellformed_tmpfile_is_still_eopnotsupp() {
+        let path = b"/tmp\0";
+        assert_eq!(
+            open(path.as_ptr(), fcntl::O_TMPFILE | fcntl::O_WRONLY, 0o644),
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EOPNOTSUPP);
+    }
+
+    // -- read / write descriptor-before-buffer ordering --
+
+    /// `ksys_read` (fs/read_write.c:604) is `fdget_pos` first; `EFAULT` only
+    /// arises inside `vfs_read` (:458).  A zero-length read is *not* a
+    /// shortcut past the lookup — upstream has no such shortcut — so probing a
+    /// closed descriptor with `read(fd, buf, 0)` must report EBADF.
+    #[test]
+    fn test_read_bad_fd_outranks_a_null_buffer() {
+        assert_eq!(read(-1, core::ptr::null_mut(), 10), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
 
     #[test]
+    fn test_read_zero_count_on_a_closed_fd_is_ebadf() {
+        let mut buf = [0u8; 1];
+        assert_eq!(read(-1, buf.as_mut_ptr(), 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_write_bad_fd_outranks_a_null_buffer() {
+        assert_eq!(write(-1, core::ptr::null(), 10), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_write_zero_count_on_a_closed_fd_is_ebadf() {
+        let buf = [0u8; 1];
+        assert_eq!(write(-1, buf.as_ptr(), 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    /// A NULL buffer at count 0 is not a fault: `access_ok(NULL, 0)` succeeds
+    /// upstream, so the call reaches `vfs_read` and returns 0.
+    #[test]
+    fn test_read_null_buffer_at_zero_count_is_not_a_fault() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
+        assert_eq!(read(fd, core::ptr::null_mut(), 0), 0);
+        let _ = close(fd);
+    }
+
+    // -- truncate validation order --
+
+    /// `do_sys_truncate` (fs/open.c:129) rejects a negative length before
+    /// `user_path_at` ever looks at the path, so EINVAL outranks EFAULT.
+    /// `ftruncate` had this right already (fs/open.c:164-170); `truncate` did
+    /// not.
+    #[test]
+    fn test_truncate_negative_length_outranks_a_null_path() {
+        assert_eq!(truncate(core::ptr::null(), -1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_truncate_null_path_at_a_valid_length_is_efault() {
+        assert_eq!(truncate(core::ptr::null(), 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    /// The sibling: a negative length is decided above `fdget`'s EBADF.
+    #[test]
+    fn test_ftruncate_negative_length_outranks_a_bad_fd() {
+        assert_eq!(ftruncate(-1, -1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- pread / pwrite validation --
+
+    /// These need a *seekable* fd.  They used to pass fd 0, which is a console
+    /// here, and so were only reaching the EFAULT/zero-count shortcuts that
+    /// used to sit above the descriptor checks.  `pread` on a tty is `ESPIPE`
+    /// upstream (`ksys_pread64`, fs/read_write.c:664), which is what fd 0 now
+    /// correctly yields — see `test_pread_on_a_console_is_espipe` below.
+    #[test]
     fn test_pread_null_buf_nonzero_count() {
-        let result = pread(0, core::ptr::null_mut(), 10, 0);
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
+        let result = pread(fd, core::ptr::null_mut(), 10, 0);
         assert_eq!(result, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        let _ = close(fd);
     }
 
     #[test]
     fn test_pread_zero_count() {
         // POSIX: "If nbyte is 0, read() will return 0."
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         let mut buf = [0u8; 1];
-        let result = pread(0, buf.as_mut_ptr(), 0, 0);
+        let result = pread(fd, buf.as_mut_ptr(), 0, 0);
         assert_eq!(result, 0);
+        let _ = close(fd);
     }
 
     #[test]
@@ -6559,18 +6805,61 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
+    /// `pos < 0` (fs/read_write.c:658) is tested before `fdget` (:661), so a
+    /// negative offset outranks a closed descriptor.
+    #[test]
+    fn test_pread_negative_offset_outranks_a_bad_fd() {
+        let mut buf = [0u8; 10];
+        let result = pread(-1, buf.as_mut_ptr(), 10, -1);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// …and `fdget` in turn precedes `vfs_read`'s `access_ok` (:458), so a bad
+    /// descriptor outranks a NULL buffer.
+    #[test]
+    fn test_pread_bad_fd_outranks_a_null_buffer() {
+        let result = pread(-1, core::ptr::null_mut(), 10, 0);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    /// The `FMODE_PREAD` test (:664) sits above `vfs_read` too, so a
+    /// zero-length pread on an unseekable fd is `ESPIPE`, not a silent 0.
+    #[test]
+    fn test_pread_on_a_console_is_espipe() {
+        let fd = fdtable::alloc_fd(fdtable::HandleKind::Console, 0).expect("fd available");
+        let mut buf = [0u8; 1];
+        let result = pread(fd, buf.as_mut_ptr(), 0, 0);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESPIPE);
+        let _ = close(fd);
+    }
+
     #[test]
     fn test_pwrite_null_buf_nonzero_count() {
-        let result = pwrite(0, core::ptr::null(), 10, 0);
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
+        let result = pwrite(fd, core::ptr::null(), 10, 0);
         assert_eq!(result, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        let _ = close(fd);
     }
 
     #[test]
     fn test_pwrite_zero_count() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         let buf = [0u8; 1];
-        let result = pwrite(0, buf.as_ptr(), 0, 0);
+        let result = pwrite(fd, buf.as_ptr(), 0, 0);
         assert_eq!(result, 0);
+        let _ = close(fd);
+    }
+
+    /// Same three ranks as `pread`, from `ksys_pwrite64` (:686).
+    #[test]
+    fn test_pwrite_bad_fd_outranks_a_null_buffer() {
+        let result = pwrite(-1, core::ptr::null(), 10, 0);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
     #[test]
@@ -7116,15 +7405,23 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
+    // These delegate to `pread`, so they need a seekable fd for the same
+    // reason the `pread` tests above do — fd 0 is a console and now yields
+    // ESPIPE before the buffer is ever examined.
+
     #[test]
     fn test_pread_chk_null_buf() {
-        assert_eq!(__pread_chk(0, core::ptr::null_mut(), 10, 0, 10), -1);
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
+        assert_eq!(__pread_chk(fd, core::ptr::null_mut(), 10, 0, 10), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        let _ = close(fd);
     }
 
     #[test]
     fn test_pread_chk_zero_count() {
-        assert_eq!(__pread_chk(0, core::ptr::null_mut(), 0, 0, 0), 0);
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
+        assert_eq!(__pread_chk(fd, core::ptr::null_mut(), 0, 0, 0), 0);
+        let _ = close(fd);
     }
 
     #[test]
@@ -7136,13 +7433,17 @@ mod tests {
 
     #[test]
     fn test_pread64_chk_null_buf() {
-        assert_eq!(__pread64_chk(0, core::ptr::null_mut(), 10, 0, 10), -1);
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
+        assert_eq!(__pread64_chk(fd, core::ptr::null_mut(), 10, 0, 10), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        let _ = close(fd);
     }
 
     #[test]
     fn test_pread64_chk_zero_count() {
-        assert_eq!(__pread64_chk(0, core::ptr::null_mut(), 0, 0, 0), 0);
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
+        assert_eq!(__pread64_chk(fd, core::ptr::null_mut(), 0, 0, 0), 0);
+        let _ = close(fd);
     }
 
     #[test]

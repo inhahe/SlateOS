@@ -38849,6 +38849,60 @@ running on a *borrowed* or already-freed stack, or an off-by-one stack write in
 the clone/exit path. The `dump_stack_scan` capture should show the exact stack
 address holding `&CURRENT_TASK_IDS[0]` relative to task 123's `rsp`.
 
+**Update 2026-08-14a — the assumed byte decode does not fit the error code, so
+the "stored qword is the cell base" story is incomplete.** Audit 2026-07-15b
+explains the `+0x2` as "the resolver rounding to the nearest preceding symbol;
+the stored qword is the cell base". That reading is doubtful:
+`scripts/resolve-rip.sh` reports *nearest preceding symbol + offset*, so a
+report of `+0x2` means RIP genuinely **was** `&CURRENT_TASK_IDS[0] + 2`, not
+the base. The natural mechanism is instead: `ret` jumped to the base, the
+instruction there executed, and the *next* instruction — at base+2 — faulted.
+
+But that does not close either. `panic_diagnostics()` reported the current task
+as 123, so CPU 0's cell held `123 = 0x7B`, i.e. bytes `7B 00 00 00 00 00 00 00`:
+
+- `base+0`: `7B 00` = `JNP rel8 +0` — whether or not the branch is taken, the
+  next instruction is at `base+2`. Consistent with the observed RIP.
+- `base+2`: `00 00` = `add byte [rax], al` — a read-modify-**write**. On a
+  not-present page x86 reports error bit 1 set, i.e. `error = 0x2`.
+
+The captured error was `0x0` (**read**). So the faulting instruction was *not*
+`add [rax], al`, and at least one of the assumptions (which cell, what it held,
+or that RIP is inside `CURRENT_TASK_IDS` at all) is wrong. A plausible
+alternative is that the resolver attributed RIP to `CURRENT_TASK_IDS` merely
+because it is the nearest *preceding* symbol — the true target may be a later,
+symbol-less location, which would invalidate the whole "per-CPU cell address"
+inference and with it the search direction of audit 2 above.
+
+**Action taken instead of more inference: the handler now dumps the raw bytes
+at RIP** (`idt.rs`, right after `dump_stack_scan`, guarded by a
+`page_table::translate` mapped-check so it cannot itself fault, and emitted
+after the scan so it can never displace it). One repro now settles what
+executed, rather than another round of decode guesswork.
+
+**Update 2026-08-14b — 20 consecutive boots, zero occurrences.** The
+confirmation soak for B-PTHREAD-JOIN-LOST-CTID ran 20 full boots
+(`build/hang-catches/soak-ctidfix.log`, 23:02–01:52) with **no `EXCEPTION:` /
+`Page Fault` / `FATAL` line at all**, on a build carrying both
+register-after-admit fixes (`%fs`-base-before-admit and
+ctid-before-admit). Against the historically recorded ~1/5 rate that is
+`0.8^20 ≈ 1.2%` likely, which is real evidence the rate has dropped.
+
+Two candidate explanations, not yet distinguished:
+
+1. **The TLS fix cured it.** B-PTHREAD-CHILD-JUMPS-TO-GARBAGE defect 1 let a
+   clone child run before its `%fs` base was seeded — itself a control-flow /
+   wild-access defect in *this exact self-test*. A shared root cause is very
+   plausible.
+2. **The rate merely drifted.** The 1/5 figure is from 2026-07-15, a month and
+   many changes ago, so the null hypothesis "unchanged rate" may already have
+   been false for unrelated reasons.
+
+Deliberately **not** downgrading this entry to FIXED on that evidence: 20 clean
+boots cannot separate "cured" from "rarer", and silently closing it would throw
+away the instrumentation's value. Keep at WATCH; if a repro appears, the new
+bytes-at-RIP dump plus the existing stack scan should close it in one capture.
+
 ### B-FORKEXEC-BOOT-HANG. Intermittent silent boot hang at the glibc `fork()`+`execl()`+`waitpid()` self-test — WATCH (rare, non-fatal to a re-run) 2026-07-15
 
 **Symptom (1 occurrence, 2026-07-15):** During

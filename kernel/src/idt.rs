@@ -2557,6 +2557,40 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
     // recovers the culprit.
     crate::backtrace::dump_stack_scan(frame.rsp, 64);
 
+    // Raw bytes at RIP — decisive when RIP has landed *outside* `.text`.
+    //
+    // A control-flow hijack (B-PTHREAD-TEARDOWN-PF) leaves RIP pointing into a
+    // data region, and the whole question is then "what did those bytes decode
+    // to, and does that explain CR2 and the error code?".  Without the bytes we
+    // can only guess: the recorded 2026-07-15 capture (RIP =
+    // `sched::CURRENT_TASK_IDS+0x2`, CR2 = 0x97, error = 0x0) was read as "the
+    // cell holds a task id, so the bytes are `7B 00 00 00 …`" — but that
+    // decodes to `add [rax], al`, a read-modify-write, which would report
+    // error = 0x2 (write).  The observed error was 0x0 (read), so that story is
+    // incomplete.  Dumping the actual bytes settles it in one repro instead of
+    // another round of inference.
+    //
+    // Emitted *after* the stack scan on purpose: the scan names the hijacked
+    // caller and must never be displaced by a nested fault here.
+    {
+        // `translate` also rejects non-canonical addresses, so a wild RIP is
+        // handled here rather than faulting the read below.
+        let rip_page_ok =
+            page_table::translate(page_table::active_pml4_phys(), VirtAddr::new(frame.rip))
+                .is_some();
+        if rip_page_ok {
+            // SAFETY: the page containing `frame.rip` was just confirmed mapped
+            // in the active address space, so reading bytes from it cannot
+            // fault.  We read at most 16 bytes and stop at a page boundary, so
+            // we never touch the (possibly unmapped) following page.
+            let avail = (0x1000 - (frame.rip & 0xFFF)).min(16) as usize;
+            let bytes = unsafe { core::slice::from_raw_parts(frame.rip as *const u8, avail) };
+            serial_println!("  bytes @RIP ({avail}): {bytes:02x?}");
+        } else {
+            serial_println!("  <bytes @RIP unavailable: {:#018x} not mapped>", frame.rip);
+        }
+    }
+
     // Print task context for easier debugging (uses try_lock).
     let sched_info = sched::panic_diagnostics();
     let name_slice = sched_info.name.get(..sched_info.name_len).unwrap_or(&[]);

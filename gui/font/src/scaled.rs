@@ -370,13 +370,16 @@ impl ScaledFont {
             // A mask's left/top come from a bitmap bounded by
             // `MAX_GLYPH_PIXELS`, so they are small integers; the pen and
             // baseline are caller-supplied and may be anything, which is why
-            // the result is only ever handed to `blit_mask`, which clips.
-            #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-            let (gx, gy) = (
-                (pen + glyph.mask.left as f32) as i32,
-                (y + glyph.mask.top as f32) as i32,
+            // the sum goes through `pixel_coord` (which rejects the
+            // degenerate cases) and then `blit_mask` (which clips the rest).
+            #[allow(clippy::cast_precision_loss)]
+            let placed = (
+                pixel_coord(pen + glyph.mask.left as f32),
+                pixel_coord(y + glyph.mask.top as f32),
             );
-            blit_mask(&glyph.mask, target, gx, gy);
+            if let (Some(gx), Some(gy)) = placed {
+                blit_mask(&glyph.mask, target, gx, gy);
+            }
             pen += advance;
         }
         pen
@@ -430,6 +433,27 @@ fn blend_channel(src: u32, dst: u32, alpha: u32) -> u32 {
     src.saturating_mul(alpha)
         .saturating_add(dst.saturating_mul(inv))
         / 255
+}
+
+/// Converts a pen position to a whole-pixel coordinate, or `None` when it is
+/// not a real number.
+///
+/// Rust's `as` maps NaN to `0` and saturates infinities, so feeding a
+/// degenerate layout straight into `blit_mask` would stamp the text at the
+/// origin instead of dropping it — a corrupt or uninitialised position would
+/// paint garbage over the top-left of the screen rather than doing nothing
+/// visible, which is far harder to diagnose. Infinities are excluded too:
+/// they saturate to `i32::MIN`/`MAX`, which clips correctly today only
+/// because `blit_mask` adds to them with `saturating_add`.
+pub(crate) fn pixel_coord(v: f32) -> Option<i32> {
+    if !v.is_finite() {
+        return None;
+    }
+    // Guarded by `is_finite` above, and the range check keeps the cast from
+    // saturating, so the truncation is exactly the intended floor-toward-zero.
+    #[allow(clippy::cast_possible_truncation)]
+    let clamped = (v >= -2_147_483_648.0 && v <= 2_147_483_647.0).then_some(v as i32);
+    clamped
 }
 
 /// Blend one anti-aliased mask onto a surface at `(x, y)`.

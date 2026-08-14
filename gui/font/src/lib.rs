@@ -24,7 +24,9 @@ extern crate alloc;
 pub mod raster;
 pub mod scaled;
 pub mod sfnt;
+pub mod system;
 
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -200,8 +202,12 @@ pub struct Font {
     metrics: FontMetrics,
     /// Scale factor relative to the base 8x16 font (1 = native).
     scale: u32,
-    /// Glyph storage indexed internally.
-    glyphs: Vec<(char, GlyphBitmap)>,
+    /// Glyph storage, keyed by character.
+    ///
+    /// A map rather than a list because `glyph()` is called once per character
+    /// drawn: a linear scan over the ~450 glyphs in the built-in face would put
+    /// an O(n) probe on the hot text path for every letter on screen.
+    glyphs: BTreeMap<char, GlyphBitmap>,
     /// Replacement glyph for missing codepoints.
     replacement: GlyphBitmap,
 }
@@ -227,7 +233,7 @@ impl Font {
     /// A factor of 2 produces a 16x32 font, factor 3 produces 24x48, etc.
     pub fn scaled(base: &Font, scale: u32) -> Self {
         let scale = if scale == 0 { 1 } else { scale };
-        let scaled_glyphs: Vec<(char, GlyphBitmap)> = base
+        let scaled_glyphs: BTreeMap<char, GlyphBitmap> = base
             .glyphs
             .iter()
             .map(|(ch, g)| (*ch, g.scaled(scale)))
@@ -254,11 +260,7 @@ impl Font {
 
     /// Looks up the glyph for a character, returning the replacement glyph if not found.
     pub fn glyph(&self, ch: char) -> &GlyphBitmap {
-        self.glyphs
-            .iter()
-            .find(|(c, _)| *c == ch)
-            .map(|(_, g)| g)
-            .unwrap_or(&self.replacement)
+        self.glyphs.get(&ch).unwrap_or(&self.replacement)
     }
 
     /// Returns the font's overall metrics.
@@ -844,89 +846,55 @@ fn blend_channel(src: u32, dst: u32, alpha: u32) -> u32 {
 const FONT_WIDTH: u32 = 8;
 const FONT_HEIGHT: u32 = 16;
 
-fn build_system_font(style: FontStyle) -> Font {
-    let mut glyphs: Vec<(char, GlyphBitmap)> = Vec::new();
+/// Wraps packed bitmap data as a glyph in the fixed 8x16 cell.
+///
+/// Every glyph in the built-in face has the same box and the same baseline —
+/// it is a monospace bitmap font — so the geometry belongs in one place rather
+/// than repeated at each range.
+fn cell(bitmap: Vec<u8>) -> GlyphBitmap {
+    GlyphBitmap {
+        width: FONT_WIDTH,
+        height: FONT_HEIGHT,
+        advance: FONT_WIDTH as f32,
+        bearing_x: 0.0,
+        bearing_y: FONT_HEIGHT as f32 - 2.0, // baseline at row 14
+        bitmap,
+    }
+}
 
-    // Generate Basic Latin (U+0020..U+007E)
+fn build_system_font(style: FontStyle) -> Font {
+    let mut glyphs: BTreeMap<char, GlyphBitmap> = BTreeMap::new();
+    let bold = style == FontStyle::Bold;
+
+    // Basic Latin (U+0020..U+007E)
     for codepoint in 0x20u32..=0x7E {
         if let Some(ch) = char::from_u32(codepoint) {
-            let bitmap_data = generate_ascii_glyph(ch, style == FontStyle::Bold);
-            glyphs.push((
-                ch,
-                GlyphBitmap {
-                    width: FONT_WIDTH,
-                    height: FONT_HEIGHT,
-                    advance: FONT_WIDTH as f32,
-                    bearing_x: 0.0,
-                    bearing_y: FONT_HEIGHT as f32 - 2.0, // baseline at row 14
-                    bitmap: bitmap_data,
-                },
-            ));
+            glyphs.insert(ch, cell(generate_ascii_glyph(ch, bold)));
         }
     }
 
-    // Generate box drawing characters (U+2500..U+257F)
+    // Box drawing characters (U+2500..U+257F)
     for codepoint in 0x2500u32..=0x257F {
         if let Some(ch) = char::from_u32(codepoint) {
-            let bitmap_data = generate_box_drawing(ch);
-            glyphs.push((
-                ch,
-                GlyphBitmap {
-                    width: FONT_WIDTH,
-                    height: FONT_HEIGHT,
-                    advance: FONT_WIDTH as f32,
-                    bearing_x: 0.0,
-                    bearing_y: FONT_HEIGHT as f32 - 2.0,
-                    bitmap: bitmap_data,
-                },
-            ));
+            glyphs.insert(ch, cell(generate_box_drawing(ch)));
         }
     }
 
-    // Generate block elements (U+2580..U+259F)
+    // Block elements (U+2580..U+259F)
     for codepoint in 0x2580u32..=0x259F {
         if let Some(ch) = char::from_u32(codepoint) {
-            let bitmap_data = generate_block_element(ch);
-            glyphs.push((
-                ch,
-                GlyphBitmap {
-                    width: FONT_WIDTH,
-                    height: FONT_HEIGHT,
-                    advance: FONT_WIDTH as f32,
-                    bearing_x: 0.0,
-                    bearing_y: FONT_HEIGHT as f32 - 2.0,
-                    bitmap: bitmap_data,
-                },
-            ));
+            glyphs.insert(ch, cell(generate_block_element(ch)));
         }
     }
 
     // Latin-1 Supplement stubs (render as replacement box)
     for codepoint in 0x00A0u32..=0x00FF {
         if let Some(ch) = char::from_u32(codepoint) {
-            let bitmap_data = generate_replacement_glyph();
-            glyphs.push((
-                ch,
-                GlyphBitmap {
-                    width: FONT_WIDTH,
-                    height: FONT_HEIGHT,
-                    advance: FONT_WIDTH as f32,
-                    bearing_x: 0.0,
-                    bearing_y: FONT_HEIGHT as f32 - 2.0,
-                    bitmap: bitmap_data,
-                },
-            ));
+            glyphs.insert(ch, cell(generate_replacement_glyph()));
         }
     }
 
-    let replacement = GlyphBitmap {
-        width: FONT_WIDTH,
-        height: FONT_HEIGHT,
-        advance: FONT_WIDTH as f32,
-        bearing_x: 0.0,
-        bearing_y: FONT_HEIGHT as f32 - 2.0,
-        bitmap: generate_replacement_glyph(),
-    };
+    let replacement = cell(generate_replacement_glyph());
 
     Font {
         name: String::from("Slate OS Mono"),

@@ -357,14 +357,18 @@ Roadmap:
   `fina` through a per-glyph feature mask intersected with a per-(script,
   lookup) one, so a positional lookup reaches only the glyphs that take
   that form; GSUB 3 (Alternate Substitution) and `rclt` came with it
-  (§412). All 44 Arabic-capable faces now give HarfBuzz's glyphs exactly,
-  reversed — the shaping agrees and only RTL reordering is left. Agreement
-  over an 18-string corpus is 9023 identical + 44 reversed of 10008 runs,
-  and every remaining disagreement is either a documented deliberate
+  (§412). GSUB lookup flags followed: one skipping iterator
+  (`gui/font/src/skip.rs`) that every matcher steps through, honouring
+  `IgnoreMarks` and its neighbours and folding in the feature-mask gate
+  (§413) — which fixed vowelled Arabic on 8 further faces. All 44
+  Arabic-capable faces now give HarfBuzz's glyphs exactly, reversed — the
+  shaping agrees and only RTL reordering is left. Agreement over a
+  19-string corpus is 9535 identical + 88 reversed of 10564 runs, and
+  every remaining disagreement is either a documented deliberate
   divergence or a shaper not yet written. Next unblocked step is the rest
   of shaping: no Indic reordering
   (`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`), no bidi
-  (`TD-FONT-DOES-NOT-REORDER-RIGHT-TO-LEFT-TEXT`), no lookup flags
+  (`TD-FONT-DOES-NOT-REORDER-RIGHT-TO-LEFT-TEXT`), no GPOS lookup flags
   (`TD-FONT-IGNORES-GSUB-LOOKUP-FLAGS`), no language selection
   (`TD-FONT-IGNORES-LANGSYS-OVERRIDES`), no mark-to-ligature attachment
   (GPOS 5). Vello itself waits on `[A]`'s GPU driver.

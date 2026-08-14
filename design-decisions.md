@@ -10867,7 +10867,10 @@ only in its do-nothing configuration — proving that `IgnoreMarks` forms a
 ligature across a mark and keeps the mark, that it still stops at a non-mark,
 that the flag hides nothing when the face ships no `GDEF`, that a mark
 filtering set hides every mark it does *not* name, and that a chaining rule
-skips marks in its backtrack.
+skips marks in its backtrack. Measured end to end by the sweep: the corpus
+gained a fully vowelled Arabic string, which 8 of the 556 host faces shaped
+wrongly before this change (949 differ / 36 reversed) and none do after
+(941 / 44).
 
 **Where.** `gui/font/src/skip.rs` (new), `Lookup::flag` / `Lookup::filter` and
 `read_lookup` in `gui/font/src/otl.rs`, `Substitutions::parse` / `Ctx` /

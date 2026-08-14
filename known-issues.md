@@ -59189,7 +59189,10 @@ mark-attachment class are all honoured; `otl.rs` now also reads
 `markFilteringSet`, which sits after the subtable-offset array rather than in
 the Lookup header. Twelve unit tests in `skip.rs` and six end-to-end GSUB
 tests (`ignore_marks_forms_the_ligature_across_the_mark` and its neighbours)
-cover it.
+cover it. The sweep corpus gained the vowelled Arabic string this entry said
+it was missing (`\u0628\u0650\u0633\u0652\u0645\u0650`), and it
+discriminates: against the pre-`Skipper` source 8 faces shape it wrongly
+(949 differ / 36 reversed), against the current one none do (941 / 44).
 
 **Still open — the GPOS half.** `RightToLeft` is still not honoured (it
 governs cursive attachment, which we do not implement) and neither kerning

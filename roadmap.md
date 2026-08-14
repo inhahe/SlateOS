@@ -325,10 +325,12 @@ Roadmap:
   face matching (`osfont::select`) done; the toolkit and the compositor now
   both draw in a real system face, resolved through one shared function so
   they cannot diverge (§400). Pair kerning done, from GPOS and the legacy
-  `kern` table (§401). Next unblocked step is the rest of shaping: the layout
-  path is still one glyph per `char`, so there is no ligature, no
-  combining-mark positioning and no bidi. Vello itself waits on `[A]`'s GPU
-  driver.
+  `kern` table (§401). Text is now shaped once into a `ShapedRun` that
+  measuring, drawing, hit-testing and truncation all walk, so they cannot
+  disagree; GSUB `liga`/`rlig` ligatures ride on that (§402). Next unblocked
+  step is the rest of shaping: no combining-mark positioning (GPOS mark
+  attachment), no contextual substitution, no bidi. Vello itself waits on
+  `[A]`'s GPU driver.
 - `[C]` Wayland-inspired compositor: GPU acceleration, currently a software
   rasterizer (lines ~4605, ~4619)
 - `[C]` Video-encoded capture fallback, H.264/VP9 (lines ~4623, ~5060)

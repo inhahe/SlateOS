@@ -527,26 +527,39 @@ pub fn run_all() {
     // uncached APIC MMIO read. The tier-0 uniprocessor fast path fixed it.
     // Keeping a direct measurement here means the next such regression is
     // visible in one line instead of being inferred from allocator noise.
+    // It is measured *against an empty closure*, not against an absolute
+    // threshold. Under TCG the harness itself (two serialized TSC reads) costs
+    // several hundred cycles, which is far more than the operation, so an
+    // absolute number mostly reports emulation overhead: a tier-0 lookup and a
+    // tier-3 APIC MMIO read would differ by well under the noise of a fixed
+    // nanosecond target. Subtracting a nop measured by the same harness in the
+    // same conditions leaves the cost of the lookup itself.
     {
-        let result = run("fast_cpu_index", 2000, || {
+        let nop = run("bench_floor_nop", 2000, || {
+            core::hint::black_box(0u64);
+        });
+        let idx = run("fast_cpu_index", 2000, || {
             core::hint::black_box(crate::smp::fast_cpu_index());
         });
-        // A tier-0/tier-1 lookup is a handful of cycles; an APIC MMIO
-        // round-trip under emulation is orders of magnitude more. The
-        // threshold is deliberately loose — it is there to catch "we fell
+
+        let cost = idx.min_cycles.saturating_sub(nop.min_cycles);
+        // An APIC MMIO round-trip under emulation is a device access — a TCG
+        // exit and an MMIO dispatch, hundreds of cycles at minimum. Tier 0 and
+        // tier 1 are a load and a register read. The threshold sits between
+        // those two populations by a wide margin; it exists to catch "we fell
         // back to MMIO", not to police single cycles.
-        let target_ns = 100u64;
-        score("fast_cpu_index", &result, target_ns);
-        if result.min_ns <= target_ns {
+        const MMIO_SUSPICION_CYCLES: u64 = 200;
+        if cost <= MMIO_SUSPICION_CYCLES {
             serial_println!(
-                "[bench]   fast_cpu_index: PASS (min {}ns / {} cycles <= target {}ns)",
-                result.min_ns, result.min_cycles, target_ns
+                "[bench]   fast_cpu_index: PASS ({} cycles over an empty closure; \
+                 floor={} cycles)",
+                cost, nop.min_cycles
             );
         } else {
             serial_println!(
-                "[bench]   fast_cpu_index: ABOVE TARGET (min {}ns / {} cycles > target {}ns) \
-                 — suspect a fallback to the APIC MMIO path",
-                result.min_ns, result.min_cycles, target_ns
+                "[bench]   fast_cpu_index: SLOW ({} cycles over an empty closure, \
+                 limit {}) — suspect a fallback to the APIC MMIO path",
+                cost, MMIO_SUSPICION_CYCLES
             );
         }
     }
@@ -571,6 +584,94 @@ pub fn run_all() {
             serial_println!(
                 "[bench]   page_alloc_free: ABOVE TARGET (min {}ns > target {}ns)",
                 result.min_ns, target_ns
+            );
+        }
+    }
+
+    // --- Page allocation, A/B against frame-ownership tracking ---
+    //
+    // `page_alloc_free` above is an *absolute* number, and absolute numbers
+    // from this harness are close to unreadable: it runs as a deferred
+    // low-priority task on a live system, so the mean and max are dominated by
+    // preemption (maxima of ~700M cycles line up with service restarts), and
+    // under TCG even `min` carries a large emulation constant that has nothing
+    // to do with the code being measured. Comparing such a number against a
+    // baseline recorded on a different-sized kernel, months apart, cannot tell
+    // you whether a specific change cost anything.
+    //
+    // This pair can — but only if the two arms are *interleaved*. The first
+    // version of this benchmark ran 500 iterations with tagging off, then 500
+    // with it on, and reported that tagging cost 10826 cycles per alloc+free.
+    // That number was false, and the evidence was in the same output: the off
+    // window had max=129078 (nothing perturbed it) while the on window had
+    // max=635531436 and a 30x higher mean (a service woke up during it). Two
+    // consecutive windows on a live system are not the same system, and `min`
+    // does not save you — it is robust to *spikes*, not to a window that is
+    // uniformly busier than its neighbour.
+    //
+    // So the arms alternate per iteration instead. Adjacent alloc+free pairs
+    // are microseconds apart, so any load that drifts on a scheduling
+    // timescale lifts both arms equally and cancels in the difference. Only
+    // the `ENABLED` flag differs between them, and it is toggled outside the
+    // timed region.
+    //
+    // Ordering note: tracking is restored to its entry value afterwards, so
+    // the experiment cannot leave ownership accounting silently disabled for
+    // the rest of the boot.
+    {
+        use crate::mm::{frame, frame_owner};
+
+        const ROUNDS: u32 = 400;
+        let was_enabled = frame_owner::is_enabled();
+
+        // One alloc+free cycle, timed. Factored out so both arms execute
+        // byte-identical code and cannot differ by inlining.
+        let timed_alloc_free = || -> u64 {
+            let start = rdtsc_serialized();
+            let f = frame::alloc_frame().expect("bench: alloc");
+            // SAFETY: frame was just allocated, exclusively ours.
+            unsafe { frame::free_frame(f).expect("bench: free"); }
+            rdtsc().saturating_sub(start)
+        };
+
+        for _ in 0..20 {
+            let _ = timed_alloc_free();
+        }
+
+        let mut min_off = u64::MAX;
+        let mut min_on = u64::MAX;
+        for _ in 0..ROUNDS {
+            frame_owner::disable();
+            min_off = min_off.min(timed_alloc_free());
+
+            frame_owner::enable();
+            min_on = min_on.min(timed_alloc_free());
+        }
+
+        // Restore whatever the system was doing before the experiment.
+        if !was_enabled {
+            frame_owner::disable();
+        }
+
+        // Tagging is two relaxed loads, a bounds check, a byte store and a
+        // relaxed fetch_add per side — tens of cycles even under TCG. The
+        // threshold is an order of magnitude above that: it is sized to catch
+        // a *structural* regression (a CPU-index lookup falling back to APIC
+        // MMIO, a lock appearing on the path), not to police instructions.
+        const OWNER_TAG_BUDGET_CYCLES: u64 = 500; // From baselines.toml
+        let delta = min_on.saturating_sub(min_off);
+        if delta <= OWNER_TAG_BUDGET_CYCLES {
+            serial_println!(
+                "[bench]   page_alloc_free_owner_ab: PASS (tagging costs {} cycles/\
+                 alloc+free, limit {}; off={} on={}, {} interleaved rounds)",
+                delta, OWNER_TAG_BUDGET_CYCLES, min_off, min_on, ROUNDS
+            );
+        } else {
+            serial_println!(
+                "[bench]   page_alloc_free_owner_ab: SLOW (tagging costs {} cycles/\
+                 alloc+free, limit {}; off={} on={}, {} interleaved rounds) \
+                 — suspect an MMIO or a lock on the ownership path",
+                delta, OWNER_TAG_BUDGET_CYCLES, min_off, min_on, ROUNDS
             );
         }
     }

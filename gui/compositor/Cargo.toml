@@ -6,3 +6,4 @@ description = "SlateOS Compositor — display server with window compositing and
 [dependencies]
 guitk = { path = "../toolkit" }
 guiremote = { path = "../remote" }
+osfont = { path = "../font" }

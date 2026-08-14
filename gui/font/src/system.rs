@@ -20,6 +20,7 @@
 //! record `bearing_y`, the distance from the baseline up to the top of the
 //! cell.
 
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -39,7 +40,14 @@ enum Backend {
     /// A scalable face loaded from a font file.
     Outline(ScaledFont),
     /// The built-in bitmap face, scaled by an integer factor.
-    Bitmap(Font),
+    Bitmap {
+        font: Font,
+        /// Widened 1-bit glyphs, so a run of text does not re-expand the same
+        /// letter once per occurrence. Unbounded on purpose: the built-in face
+        /// has a few hundred glyphs and no more, so this cannot grow the way
+        /// [`ScaledFont`]'s cache — fed by arbitrary faces — can.
+        masks: BTreeMap<char, GlyphMask>,
+    },
 }
 
 impl SystemFont {
@@ -51,20 +59,25 @@ impl SystemFont {
     /// size must supply a real font file.
     #[must_use]
     pub fn builtin(px_per_em: f32) -> Self {
-        Self {
-            backend: Backend::Bitmap(Font::scaled(&Font::system_mono(), builtin_scale(px_per_em))),
-        }
+        Self::from_bitmap(Font::scaled(&Font::system_mono(), builtin_scale(px_per_em)))
     }
 
     /// The built-in bold bitmap face at the integer scale closest to
     /// `px_per_em`.
     #[must_use]
     pub fn builtin_bold(px_per_em: f32) -> Self {
+        Self::from_bitmap(Font::scaled(
+            &Font::system_mono_bold(),
+            builtin_scale(px_per_em),
+        ))
+    }
+
+    fn from_bitmap(font: Font) -> Self {
         Self {
-            backend: Backend::Bitmap(Font::scaled(
-                &Font::system_mono_bold(),
-                builtin_scale(px_per_em),
-            )),
+            backend: Backend::Bitmap {
+                font,
+                masks: BTreeMap::new(),
+            },
         }
     }
 
@@ -110,7 +123,7 @@ impl SystemFont {
     pub fn metrics(&self) -> &FontMetrics {
         match &self.backend {
             Backend::Outline(f) => f.metrics(),
-            Backend::Bitmap(f) => f.metrics(),
+            Backend::Bitmap { font, .. } => font.metrics(),
         }
     }
 
@@ -125,7 +138,7 @@ impl SystemFont {
     pub fn measure(&self, text: &str) -> f32 {
         match &self.backend {
             Backend::Outline(f) => f.measure(text),
-            Backend::Bitmap(f) => f.measure_line(text),
+            Backend::Bitmap { font, .. } => font.measure_line(text),
         }
     }
 
@@ -138,7 +151,7 @@ impl SystemFont {
             // (break at spaces, never inside a word) is not outline-specific,
             // so it is reimplemented here against `measure` rather than
             // duplicated into the bitmap type.
-            Backend::Bitmap(_) => wrap_with(text, max_width, &|s| self.measure(s)),
+            Backend::Bitmap { .. } => wrap_with(text, max_width, &|s| self.measure(s)),
         }
     }
 
@@ -147,9 +160,60 @@ impl SystemFont {
     /// Returns the pen position after the last glyph, so runs can be chained
     /// without re-measuring.
     pub fn draw_text(&mut self, text: &str, target: &mut Target<'_>, x: f32, y: f32) -> f32 {
+        let mut pen = x;
+        for ch in text.chars() {
+            let Some((mask, advance)) = self.glyph(ch) else {
+                continue;
+            };
+            // A mask's left/top are small integers bounded by the glyph size;
+            // the pen and baseline are caller-supplied and may be anything,
+            // which is why the sum goes through `pixel_coord` (which rejects
+            // the degenerate cases) and then `blit_mask` (which clips).
+            #[allow(clippy::cast_precision_loss)]
+            let placed = (
+                pixel_coord(pen + mask.left as f32),
+                pixel_coord(y + mask.top as f32),
+            );
+            if let (Some(gx), Some(gy)) = placed {
+                blit_mask(mask, target, gx, gy);
+            }
+            pen += advance;
+        }
+        pen
+    }
+
+    /// The coverage mask for `ch` and the pen advance past it, rasterizing and
+    /// caching it if this is the first time it has been asked for.
+    ///
+    /// `draw_text` covers the common case, but it can only draw into a
+    /// [`Target`] — a flat `[u32]` surface with one colour and no clipping
+    /// beyond its own bounds. The compositor blends every pixel through a clip
+    /// stack and a per-window opacity, so it needs the coverage values
+    /// themselves rather than a finished blit. Handing out the mask keeps that
+    /// policy where it belongs instead of growing `Target` a field at a time
+    /// until it is a compositor.
+    ///
+    /// Returns `None` only when an outline glyph fails to rasterize; the
+    /// bitmap backend always answers, with tofu if it must.
+    ///
+    /// The mask is positioned by its `left`/`top`, measured from the pen
+    /// position on the baseline with y growing downward — identical for both
+    /// backends, so a caller never learns which one it has.
+    pub fn glyph(&mut self, ch: char) -> Option<(&GlyphMask, f32)> {
         match &mut self.backend {
-            Backend::Outline(f) => f.draw_text(text, target, x, y),
-            Backend::Bitmap(f) => draw_bitmap_text(f, text, target, x, y),
+            Backend::Outline(f) => {
+                let gid = f.glyph_id(ch);
+                let glyph = f.glyph(gid).ok()?;
+                Some((&glyph.mask, glyph.advance))
+            }
+            Backend::Bitmap { font, masks } => {
+                let glyph = font.glyph(ch);
+                let advance = glyph.advance;
+                // `font` and `masks` are disjoint fields, so the closure may
+                // read the face while the entry holds the cache.
+                let mask = masks.entry(ch).or_insert_with(|| mask_from_bitmap(glyph));
+                Some((mask, advance))
+            }
         }
     }
 
@@ -161,7 +225,7 @@ impl SystemFont {
     pub fn as_scaled(&self) -> Option<&ScaledFont> {
         match &self.backend {
             Backend::Outline(f) => Some(f),
-            Backend::Bitmap(_) => None,
+            Backend::Bitmap { .. } => None,
         }
     }
 }
@@ -213,29 +277,12 @@ fn wrap_with(text: &str, max_width: f32, measure: &dyn Fn(&str) -> f32) -> Vec<S
     lines
 }
 
-/// Draws a run with the bitmap backend.
+/// Widens a 1-bit glyph into the same 8-bit coverage the outline path
+/// produces, so both backends share one blitter and one placement rule.
 ///
-/// The 1-bit glyphs are widened to the same 8-bit coverage the outline path
-/// produces so both backends go through one blitter: a bitmap pixel is simply
-/// fully covered or not covered at all. That costs one allocation per glyph
-/// drawn, which is why it is the fallback path and not the main one.
-fn draw_bitmap_text(font: &Font, text: &str, target: &mut Target<'_>, x: f32, y: f32) -> f32 {
-    let mut pen = x;
-    for ch in text.chars() {
-        let glyph = font.glyph(ch);
-        let mask = mask_from_bitmap(glyph);
-        // The pen and baseline are caller-supplied and may be anything, which
-        // is why the position goes through `pixel_coord` (which rejects the
-        // degenerate cases) and then `blit_mask` (which clips the rest).
-        if let (Some(gx), Some(gy)) = (pixel_coord(pen), pixel_coord(y - glyph.bearing_y)) {
-            blit_mask(&mask, target, gx, gy);
-        }
-        pen += glyph.advance;
-    }
-    pen
-}
-
-/// Expands a 1-bit glyph into a coverage mask.
+/// A bitmap pixel is simply fully covered or not covered at all, so this
+/// trades memory for uniformity: 8x the bytes of the packed form, in exchange
+/// for callers never having to ask which backend they hold.
 fn mask_from_bitmap(glyph: &GlyphBitmap) -> GlyphMask {
     let mut coverage =
         Vec::with_capacity((glyph.width as usize).saturating_mul(glyph.height as usize));
@@ -244,14 +291,21 @@ fn mask_from_bitmap(glyph: &GlyphBitmap) -> GlyphMask {
             coverage.push(if glyph.pixel_at(x, y) { 255 } else { 0 });
         }
     }
+    // `bearing_y` measures upward from the baseline to the top of the cell,
+    // while `top` measures downward from it, so the sign flips. Negating in
+    // here rather than at each draw site is what lets the outline and bitmap
+    // masks be placed by identical arithmetic.
+    // Saturating because `as` maps a NaN or absurd bearing to a saturated
+    // `i32`, and negating `i32::MIN` would overflow.
+    #[allow(clippy::cast_possible_truncation)]
+    let top = (glyph.bearing_y as i32).saturating_neg();
     GlyphMask {
         width: glyph.width,
         height: glyph.height,
-        // `blit_mask` places the mask's top-left corner, and the caller has
-        // already subtracted `bearing_y` from the baseline, so both offsets
-        // are zero here rather than repeating that adjustment.
+        // The built-in face is monospace with no side bearing: ink starts at
+        // the pen.
         left: 0,
-        top: 0,
+        top,
         coverage,
     }
 }
@@ -292,6 +346,48 @@ mod tests {
         let f = SystemFont::builtin(0.0);
         assert!(f.measure("x") > 0.0);
         assert!(f.line_height() > 0.0);
+    }
+
+    #[test]
+    fn both_backends_report_a_glyph_the_same_way() {
+        // The whole point of the facade: a caller that pulls masks out itself
+        // — the compositor does, because it blends through a clip stack —
+        // must not be able to tell which backend answered.
+        let outline = SystemFont::from_bytes(build_test_font(), 24.0).unwrap();
+        for mut font in [SystemFont::builtin(16.0), outline] {
+            let which = if font.is_scalable() {
+                "outline"
+            } else {
+                "bitmap"
+            };
+            let (mask, advance) = font.glyph('A').expect("'A' must render");
+            assert!(mask.width > 0 && mask.height > 0, "{which}: empty mask");
+            assert_eq!(
+                mask.coverage.len(),
+                (mask.width * mask.height) as usize,
+                "{which}: coverage is not width*height"
+            );
+            assert!(
+                mask.top < 0,
+                "{which}: a capital A must sit above the baseline, got top {}",
+                mask.top
+            );
+            assert!(advance > 0.0, "{which}: pen must advance");
+        }
+    }
+
+    #[test]
+    fn a_repeated_letter_is_only_rasterized_once() {
+        // Text redraws the same few dozen letters every frame; expanding each
+        // one again per occurrence would put an allocation on that path.
+        let mut font = SystemFont::builtin(16.0);
+        let first = font.glyph('e').unwrap().0.clone();
+        let second = font.glyph('e').unwrap().0;
+        assert_eq!(&first, second, "cached mask differs from the first one");
+        let Backend::Bitmap { masks, .. } = &font.backend else {
+            panic!("builtin() must take the bitmap path");
+        };
+        assert_eq!(masks.len(), 1, "one distinct letter, one cache entry");
     }
 
     #[test]

@@ -90,16 +90,50 @@ faults for sequential workloads."""
 [fast_cpu_index]
 description  = "Resolve the running CPU's sequential index (per-CPU data lookup)"
 linux_ns     = 5
-target_ns    = 100
+target_cycles_over_nop = 200
 source       = "Linux smp_processor_id() is a %gs-relative load, ~1-3 cycles"
 notes        = """
-Benchmarked not for its own sake but as a multiplier: it is called twice \
-per frame alloc/free and twice per heap alloc/free, so its cost is paid \
-several times inside every allocator benchmark. The target is deliberately \
-loose — it exists to detect a fall-through to the tier-3 APIC MMIO read \
-(hundreds of cycles under emulation), not to police single cycles. \
-Tier 0 (uniprocessor, no AP started) and tier 1 (RDPID) are both single- \
-digit cycles; tier 2 (rdtscp) is ~30-40."""
+Measured as a *delta over an empty closure*, not as an absolute number. \
+Under TCG the harness itself (two serialized TSC reads) costs several \
+hundred cycles — more than the operation — so an absolute target would \
+mostly report emulation overhead and could not separate a tier-0 lookup \
+from a tier-3 APIC MMIO read. Subtracting a nop measured by the same \
+harness in the same conditions leaves the cost of the lookup.
+
+Benchmarked not for its own sake but as a multiplier: called twice per \
+frame alloc/free and twice per heap alloc/free, so its cost is paid \
+several times inside every allocator benchmark. The threshold is \
+deliberately loose — it detects a fall-through to the APIC MMIO path \
+(a TCG exit plus MMIO dispatch), not single cycles. Tier 0 (uniprocessor, \
+no AP started) and tier 1 (RDPID) are single-digit cycles; tier 2 \
+(rdtscp) is ~30-40."""
+
+[page_alloc_free_owner_ab]
+description  = "Frame alloc+free with frame_owner tagging off vs on (interleaved)"
+target_cycles_delta = 500
+source       = "A/B experiment, kernel/src/bench.rs run_all"
+notes        = """
+Absolute allocator numbers from the in-kernel harness are close to \
+unreadable: it runs as a deferred low-priority task on a live system, so \
+mean and max are dominated by preemption (maxima near 700M cycles line up \
+with service restarts), and under TCG even min carries a large emulation \
+constant. Comparing such a number against a baseline recorded on a \
+differently-sized kernel months earlier cannot tell you whether a given \
+change cost anything.
+
+An A/B pair can, but only if the two arms are *interleaved*. Two \
+consecutive 500-iteration windows are not the same system: the first \
+version of this benchmark ran off-then-on and reported that tagging cost \
+10826 cycles, which was pure ambient load — the off window had max=129078 \
+(nothing perturbed it) while the on window had max=635531436 and a 30x \
+higher mean. `min` is robust to spikes, not to a window that is uniformly \
+busier than its neighbour. The arms therefore alternate every iteration, \
+microseconds apart, so load that drifts on a scheduling timescale lifts \
+both equally and cancels in the difference.
+
+This exists because a frame_owner regression once shipped unnoticed behind \
+exactly the kind of absolute threshold described above (see \
+B-FAST-CPU-INDEX-FELL-BACK-TO-AN-APIC-MMIO-READ-ON-EVERY-ALLOC)."""
 
 [page_alloc_free]
 description  = "Physical page allocate + free cycle"

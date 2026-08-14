@@ -16,7 +16,11 @@
 #                                       # numbers (the micro-benchmarks run in a
 #                                       # deferred background task AFTER BOOT_OK,
 #                                       # so the default fast path never sees
-#                                       # them — use this to catch perf regressions)
+#                                       # them — use this to catch perf
+#                                       # regressions).  Raises the default
+#                                       # timeout to 1200s, since the suite
+#                                       # runs well past BOOT_OK; an explicit
+#                                       # --timeout= still wins.
 #   ./scripts/boot-test.sh --hard-lockup-watchdog
 #                                       # attach a QEMU i6300esb PCI watchdog set
 #                                       # to inject an NMI on timeout. OFF by
@@ -150,6 +154,19 @@ kill_qemu() {
 # the default invocation never spuriously "times out" on a healthy kernel;
 # override with --timeout= for slower hosts or the --bench wait marker.
 TIMEOUT=480
+# Did the caller pass --timeout= explicitly?  Only used to decide whether
+# --bench may raise the default (see BENCH_TIMEOUT below); an explicit
+# --timeout= always wins.
+TIMEOUT_EXPLICIT=0
+# Timeout used when --bench is given and --timeout= is not.  The benchmark
+# suite runs *after* BOOT_OK, as a deferred low-priority task, and it is not
+# cheap under TCG: the asymmetric-crypto benchmarks alone are tens of seconds
+# each (ed25519_sign averages ~433ms per iteration for 50 iterations).  A
+# --bench run at the 480s boot default therefore reaches BOOT_OK and is then
+# killed part-way through the crypto section, reporting "Boot test FAILED
+# (BENCH_OK not reached)" for a kernel that booted perfectly.  That is a
+# harness false negative, and it happened.
+BENCH_TIMEOUT=1200
 NO_BUILD=0
 NO_STAGE=0
 BENCH=0
@@ -185,11 +202,18 @@ for arg in "$@"; do
         # note on B-KNULLJUMP-SIGNAL).
         --no-stage) NO_BUILD=1; NO_STAGE=1 ;;
         --bench) BENCH=1; WAIT_MARKER="BENCH_OK" ;;
-        --timeout=*) TIMEOUT="${arg#*=}" ;;
+        --timeout=*) TIMEOUT="${arg#*=}"; TIMEOUT_EXPLICIT=1 ;;
         --stall-secs=*) STALL_SECS="${arg#*=}" ;;
         --hard-lockup-watchdog) HARD_LOCKUP_WATCHDOG=1 ;;
     esac
 done
+
+# --bench waits for a marker that is emitted long after BOOT_OK, so it needs a
+# correspondingly longer budget.  Applied only if the caller did not pick a
+# timeout themselves — an explicit --timeout= always wins, in either direction.
+if [ "$BENCH" = "1" ] && [ "$TIMEOUT_EXPLICIT" = "0" ]; then
+    TIMEOUT="$BENCH_TIMEOUT"
+fi
 
 # Optional hard-lockup NMI watchdog device (see --hard-lockup-watchdog above and
 # Q20).  Empty unless opted in, so the default QEMU command line is unchanged.

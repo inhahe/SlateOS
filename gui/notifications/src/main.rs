@@ -29,6 +29,7 @@ use guitk::event::{EventResult, Modifiers, MouseEventKind};
 use guitk::render::FontWeightHint;
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::text;
 
 use std::collections::HashMap;
 
@@ -72,6 +73,9 @@ const CLOSE_BTN_SIZE: f32 = 20.0;
 const PROGRESS_BAR_HEIGHT: f32 = 4.0;
 const ACTION_BTN_HEIGHT: f32 = 28.0;
 const ACTION_BTN_PADDING: f32 = 12.0;
+
+/// Height (and minimum width) of the unread-count pill.
+const BADGE_HEIGHT: f32 = 22.0;
 
 const CENTER_WIDTH: f32 = 400.0;
 const CENTER_HEADER_HEIGHT: f32 = 48.0;
@@ -1000,7 +1004,12 @@ impl NotificationDaemon {
             if !notif.actions.is_empty() {
                 let mut btn_x = toast_x + TOAST_PADDING + 8.0;
                 for action in &notif.actions {
-                    let btn_width = action.label.len() as f32 * 7.0 + ACTION_BTN_PADDING * 2.0;
+                    let btn_width = text::padded_width(
+                        &action.label,
+                        ACTION_BTN_PADDING,
+                        12.0,
+                        FontWeightHint::Regular,
+                    );
                     cmds.push(RenderCommand::FillRect {
                         x: btn_x,
                         y: extra_y,
@@ -1075,17 +1084,26 @@ impl NotificationDaemon {
         let unread_count = self.history.iter().filter(|n| !n.read).count();
         if unread_count > 0 {
             let badge_text = format!("{unread_count}");
-            let badge_width = badge_text.len() as f32 * 8.0 + 12.0;
+            // A count badge is a pill, and a pill holding one digit should be
+            // round rather than a squashed oval — so the measured width is
+            // floored at the badge's own height.
+            let badge_width =
+                text::padded_width(&badge_text, 6.0, 11.0, FontWeightHint::Bold).max(BADGE_HEIGHT);
             cmds.push(RenderCommand::FillRect {
                 x: center_x + 140.0,
                 y: 12.0,
                 width: badge_width,
-                height: 22.0,
+                height: BADGE_HEIGHT,
                 color: MAUVE,
                 corner_radii: CornerRadii::all(11.0),
             });
             cmds.push(RenderCommand::Text {
-                x: center_x + 140.0 + 6.0,
+                x: text::center_x(
+                    &badge_text,
+                    center_x + 140.0 + badge_width / 2.0,
+                    11.0,
+                    FontWeightHint::Bold,
+                ),
                 y: 15.0,
                 text: badge_text,
                 color: CRUST,
@@ -1452,6 +1470,43 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- text measurement ---
+
+    #[test]
+    fn an_action_button_fits_its_label() {
+        // Action labels come from whatever application posted the notification,
+        // so they are arbitrary user-visible text in whatever language that
+        // application speaks. Sized at seven pixels a byte, any of them with an
+        // accent in it overflowed its button.
+        for label in ["Reply", "Mark as read", "Snooze", "Répondre", "既読にする"] {
+            let w = text::padded_width(label, ACTION_BTN_PADDING, 12.0, FontWeightHint::Regular);
+            let drawn = text::measure(label, 12.0, FontWeightHint::Regular);
+            assert!(
+                drawn + ACTION_BTN_PADDING * 2.0 <= w + 0.01,
+                "{label:?} overflows its action button"
+            );
+        }
+    }
+
+    #[test]
+    fn a_one_digit_unread_badge_is_round() {
+        // The pill is drawn with a radius of half its height, so a width below
+        // that height renders as a squashed oval rather than a circle.
+        let w = text::padded_width("3", 6.0, 11.0, FontWeightHint::Bold).max(BADGE_HEIGHT);
+        assert!((w - BADGE_HEIGHT).abs() < 0.01, "one-digit badge is {w} wide");
+    }
+
+    #[test]
+    fn a_many_digit_unread_badge_grows_to_fit() {
+        let one = text::padded_width("3", 6.0, 11.0, FontWeightHint::Bold).max(BADGE_HEIGHT);
+        let many = text::padded_width("128", 6.0, 11.0, FontWeightHint::Bold).max(BADGE_HEIGHT);
+        assert!(
+            many > one,
+            "a three-digit badge is no wider than a one-digit one"
+        );
+        assert!(text::measure("128", 11.0, FontWeightHint::Bold) + 12.0 <= many + 0.01);
+    }
 
     fn make_test_notification(id_hint: u64, priority: NotificationPriority) -> Notification {
         Notification {

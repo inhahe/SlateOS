@@ -21,6 +21,8 @@
 
 extern crate alloc;
 
+pub mod sfnt;
+
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;

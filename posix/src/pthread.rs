@@ -75,6 +75,21 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, AtomicUsize
 /// Opaque pthread_t type — holds the kernel task ID.
 pub type PthreadT = u64;
 
+/// `KernelError::Cancelled` as it appears in a syscall return register.
+///
+/// `SYS_THREAD_JOIN` reports it when the target thread was *killed* —
+/// an unhandled ring-3 fault, an explicit kill, or process teardown —
+/// rather than exiting on its own.  Kept in sync with
+/// `kernel/src/error.rs`.
+const KERNEL_ERR_CANCELLED: i64 = -5;
+
+/// `PTHREAD_CANCELED` — `(void *)-1`, the value POSIX reserves for the
+/// return of a thread that did not finish normally.
+///
+/// Mirrors [`crate::linux_pthread_key_types::PTHREAD_CANCELED`] as the
+/// signed value stored in the kernel's `i64` exit-value slot.
+const PTHREAD_CANCELED_VALUE: i64 = -1;
+
 /// Opaque pthread_attr_t type (glibc x86_64: 56 bytes).
 pub type PthreadAttrT = [u8; 56];
 
@@ -579,18 +594,36 @@ pub extern "C" fn pthread_join(thread_id: PthreadT, retval: *mut *mut u8) -> i32
         }
     }
 
-    let ret = syscall::syscall1(syscall::SYS_THREAD_JOIN, thread_id);
+    // The exit value comes back through an out-pointer, not the return
+    // register: a thread may exit with a legitimately negative value
+    // (`pthread_exit(PTHREAD_CANCELED)` is `(void *)-1`), which a
+    // value-in-rax ABI could not tell apart from an error code.
+    let mut exit_value: i64 = 0;
+    let ret = syscall::syscall2(
+        syscall::SYS_THREAD_JOIN,
+        thread_id,
+        (&raw mut exit_value) as u64,
+    );
 
     if ret < 0 {
-        // The kernel returns negative error codes; map to POSIX.
-        return errno::ESRCH;
+        // `Cancelled` (-5) means the target was killed — an unhandled
+        // fault, an explicit kill, or process teardown — so it never
+        // produced a value.  POSIX reserves exactly one representation
+        // for that: `PTHREAD_CANCELED`.  Report it as a *successful*
+        // join with that sentinel rather than as ESRCH, so the caller
+        // can tell "the thread died" from "no such thread" — and, above
+        // all, never sees it as a normal return of 0.  The stack is
+        // still ours to reclaim below either way.
+        if ret != KERNEL_ERR_CANCELLED {
+            return errno::ESRCH;
+        }
+        exit_value = PTHREAD_CANCELED_VALUE;
     }
 
-    // The kernel returns the exit value from SYS_THREAD_EXIT.
     if !retval.is_null() {
         // SAFETY: caller guarantees retval is a valid pointer.
         unsafe {
-            *retval = ret as *mut u8;
+            *retval = exit_value as *mut u8;
         }
     }
 
@@ -638,7 +671,9 @@ pub extern "C" fn pthread_detach(thread_id: PthreadT) -> i32 {
         // We now own the reclaim: join to guarantee it is off its stack,
         // then free it.
         Err(STATE_EXITED) => {
-            let _ = syscall::syscall1(syscall::SYS_THREAD_JOIN, thread_id);
+            // Reaping only — the exit value is discarded, so pass a null
+            // out-pointer rather than a scratch slot.
+            let _ = syscall::syscall2(syscall::SYS_THREAD_JOIN, thread_id, 0);
             let base = slot.stack_base.load(Ordering::Relaxed);
             let size = slot.map_size.load(Ordering::Relaxed);
             release_slot(slot);

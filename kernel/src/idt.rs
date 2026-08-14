@@ -1152,12 +1152,32 @@ fn kill_userspace_task(exception_name: &str, frame: &InterruptStackFrame) -> ! {
     kill_userspace_task_with_info(exception_name, frame, None);
 }
 
-/// Kill the current task with crash information recorded in the PCB.
+/// Terminate the faulting **process** because one of its threads took an
+/// unrecoverable ring-3 exception that nothing handled.
 ///
 /// The crash info (exception code, faulting address, etc.) is stored
 /// in the process's PCB so the parent can retrieve it via
 /// `SYS_PROCESS_CRASH_INFO`.  The exit code is set to a negative
 /// value derived from the exception code (convention: crash = negative).
+///
+/// # Why the whole process, not just this thread
+///
+/// This is the *default action* point: the Linux-ABI signal path and the
+/// native SEH trampoline have both already declined to handle the fault, so
+/// there is no handler anywhere and the process's state is undefined — the
+/// thread died mid-way through whatever invariant it was maintaining, still
+/// holding whatever locks it held.  Both models we implement agree that this
+/// ends the process: an unhandled SEH exception terminates the process on
+/// Windows, and the default disposition of SIGSEGV/SIGILL/SIGFPE/SIGBUS
+/// terminates the process on Linux.
+///
+/// Killing only the faulting thread — which is what this did before — let the
+/// survivors run on and produce a **plausible-looking wrong answer**: a
+/// `pthread_join` on the killed thread returned success with a NULL result, so
+/// a worker's contribution silently vanished from the total and the program
+/// exited 0.  See `B-PTHREAD-CHILD-JUMPS-TO-GARBAGE` in `known-issues.md`,
+/// where exactly that turned a hard thread-startup bug into a quiet
+/// off-by-one-worker in the answer.
 ///
 /// This function never returns.
 fn kill_userspace_task_with_info(
@@ -1174,20 +1194,37 @@ fn kill_userspace_task_with_info(
         "  CS={:#x} RFLAGS={:#x} RSP={:#x} SS={:#x}",
         frame.cs, frame.rflags, frame.rsp, frame.ss
     );
-    // Record crash info in the PCB before killing the thread.
-    // This allows the parent process (service manager) to distinguish
-    // crashes from normal exits and get diagnostic details.
-    if let Some(info) = crash {
-        if let Some(pid) = crate::proc::thread::owner_process(task_id) {
-            serial_println!(
-                "[exception] Recording crash: pid={} exception={} rip={:#x} aux={:#x}",
-                pid, info.exception_code, info.faulting_rip, info.aux
-            );
-            let _ = crate::proc::pcb::set_crash_info(pid, info);
-        }
+
+    let owner = crate::proc::thread::owner_process(task_id);
+
+    // Record crash info in the PCB before killing anything.  This both gives
+    // the parent (service manager) the diagnostic details via
+    // `SYS_PROCESS_CRASH_INFO` and sets the process's exit code to the
+    // negative crash encoding, so the death is distinguishable from `exit(0)`.
+    if let (Some(pid), Some(info)) = (owner, crash) {
+        serial_println!(
+            "[exception] Recording crash: pid={} exception={} rip={:#x} aux={:#x}",
+            pid, info.exception_code, info.faulting_rip, info.aux
+        );
+        let _ = crate::proc::pcb::set_crash_info(pid, info);
     }
 
-    crate::proc::thread::on_thread_exit(task_id);
+    if let Some(pid) = owner {
+        // Take down every sibling thread as well.  `kill_process_threads`
+        // refuses the *current* task in the scheduler (that is `task_exit`'s
+        // job, below) but does drop its thread→process mapping, so this
+        // subsumes the `on_thread_exit(task_id)` this path used to do.
+        let killed = crate::proc::thread::kill_process_threads(pid);
+        serial_println!(
+            "[exception] Terminating process {} — unhandled ring-3 fault ({} thread(s))",
+            pid, killed
+        );
+    } else {
+        // A ring-3 task with no owning process (nothing but self-tests spawn
+        // these): there is no process to take down, so just end the task.
+        crate::proc::thread::on_thread_exit(task_id);
+    }
+
     sched::task_exit();
     cpu::halt_loop();
 }

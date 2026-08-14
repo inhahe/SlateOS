@@ -6228,7 +6228,12 @@ fn cmd_kill(args: &str) {
         return;
     }
 
-    if crate::sched::kill_task(task_id) {
+    // Go through `proc::thread::kill_thread`, not `sched::kill_task`:
+    // the latter only marks the scheduler task Dead, leaving the
+    // thread→process mapping registered, IRQ registrations dangling, and
+    // any `join()` on the victim parked forever — and, once woken,
+    // reporting a bogus normal return instead of "cancelled".
+    if crate::proc::thread::kill_thread(task_id) {
         shell_println!("Killed task {}.", task_id);
     } else {
         shell_println!(

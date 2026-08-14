@@ -1588,11 +1588,20 @@ pub const SYS_THREAD_EXIT: u64 = 511;
 /// Wait for a specific thread to exit and retrieve its exit value.
 ///
 /// `arg0`: task ID of the thread to wait for.
+/// `arg1`: user pointer to an `i64` that receives the exit value, or
+///         null to discard it.
 ///
 /// Blocks the calling thread until the target thread exits.  The
 /// target must belong to the same process as the caller.
 ///
-/// Returns: the target thread's exit value on success.
+/// Returns: 0 on success, negative error on failure.  In particular
+/// `Cancelled` means the target was *killed* (unhandled fault, explicit
+/// kill, or process teardown) and so never produced a value.
+///
+/// The exit value travels through `arg1` rather than the return register
+/// because a thread may legitimately exit with a negative value —
+/// `pthread_exit(PTHREAD_CANCELED)` is `(void *)-1` — which a
+/// value-in-rax ABI cannot tell apart from an error code.
 pub const SYS_THREAD_JOIN: u64 = 512;
 
 /// Suspend (pause) a thread.

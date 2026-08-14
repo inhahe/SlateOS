@@ -41,6 +41,7 @@ extern crate alloc;
 pub mod bidi;
 mod bidi_tables;
 pub mod cff;
+mod context;
 mod fallback;
 mod gpos;
 pub mod gsub;

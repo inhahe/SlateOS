@@ -112,6 +112,30 @@ pub fn right_x(text: &str, right: f32, size: f32, weight: FontWeightHint) -> f32
     right - measure(text, size, weight)
 }
 
+/// Width of a box that holds `text` with `padding` px of space on each side.
+///
+/// Buttons, tabs, chips, badges and pills are all this shape, and before this
+/// existed every one of them wrote `label.len() as f32 * 8.0 + 16.0` — a byte
+/// count, so any label with a non-ASCII character in it got a box two to three
+/// times too wide. Naming the shape means the padding stays a padding and the
+/// width stays a width.
+pub fn padded_width(text: &str, padding: f32, size: f32, weight: FontWeightHint) -> f32 {
+    measure(text, size, weight) + padding * 2.0
+}
+
+/// Width of a box that holds `text` at *whichever* weight it ends up drawn at.
+///
+/// For a strip whose selected item is drawn bold and the rest regular. Sizing
+/// each item to the weight it currently has makes the whole strip shuffle
+/// sideways every time the selection moves, because the selected item grows and
+/// pushes its neighbours along; sizing them all to the widest weight they can
+/// take keeps the layout still and still fits the text.
+pub fn padded_width_any_weight(text: &str, padding: f32, size: f32) -> f32 {
+    let bold = measure(text, size, FontWeightHint::Bold);
+    let regular = measure(text, size, FontWeightHint::Regular);
+    bold.max(regular) + padding * 2.0
+}
+
 /// Width of a single `'0'`, for callers laying out columns of digits or
 /// treating text as a grid.
 ///
@@ -436,6 +460,53 @@ mod tests {
         let regular = measure("lll", 16.0, FontWeightHint::Regular);
         let bold = measure("lll", 16.0, FontWeightHint::Bold);
         assert!(bold >= regular, "bold {bold} < regular {regular}");
+    }
+
+    #[test]
+    fn a_padded_box_holds_its_text_and_its_padding() {
+        let label = "Preferences";
+        let w = padded_width(label, 12.0, 13.0, FontWeightHint::Regular);
+        assert!((w - measure(label, 13.0, FontWeightHint::Regular) - 24.0).abs() < 0.01);
+        // Zero padding is the bare text, not a special case.
+        assert!(
+            (padded_width(label, 0.0, 13.0, FontWeightHint::Regular)
+                - measure(label, 13.0, FontWeightHint::Regular))
+            .abs()
+                < 0.01
+        );
+    }
+
+    #[test]
+    fn a_padded_box_is_not_sized_by_byte_length() {
+        // Same glyph count, three times the bytes. Sized the old way the second
+        // box was three times the first; measured they are comparable.
+        let ascii = padded_width("aaaa", 10.0, 13.0, FontWeightHint::Regular);
+        let wide = padded_width("ええええ", 10.0, 13.0, FontWeightHint::Regular);
+        assert!(wide < ascii * 3.0, "{ascii} vs {wide}");
+    }
+
+    #[test]
+    fn an_any_weight_box_fits_both_weights() {
+        for label in ["Visual", "Magnifier", "Keyboard & Mouse"] {
+            let w = padded_width_any_weight(label, 9.0, 12.0);
+            for weight in [FontWeightHint::Bold, FontWeightHint::Regular] {
+                assert!(
+                    measure(label, 12.0, weight) + 18.0 <= w + 0.01,
+                    "{label:?} overflows at {weight:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_any_weight_box_does_not_change_with_the_weight() {
+        // The point of it: the box a tab gets must not depend on whether that
+        // tab happens to be the selected one, or the strip walks sideways.
+        let a = padded_width_any_weight("Audio", 9.0, 12.0);
+        let b = padded_width_any_weight("Audio", 9.0, 12.0);
+        assert_eq!(a, b);
+        assert!(a >= padded_width("Audio", 9.0, 12.0, FontWeightHint::Bold) - 0.01);
+        assert!(a >= padded_width("Audio", 9.0, 12.0, FontWeightHint::Regular) - 0.01);
     }
 
     #[test]

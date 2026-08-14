@@ -60959,7 +60959,7 @@ says the column is a mix and points at which key records which.
 **Three were real disagreements.** Two are settled by CLAUDE.md's performance
 table, which outranks the file:
 
-* `context_швитch`→`context_switch`: file said 10 µs, spec says *"Target: < 5 µs"* → file corrected.
+* `context_switch`: file said 10 µs, spec says *"Target: < 5 µs"* → file corrected.
 * `page_fault`: file said 8 µs, spec says *"Target: < 10 µs"* → file corrected.
 * `ipc_channel`: file said 3 µs, spec says *"Target: < 2 µs round-trip"* → file corrected.
 * `syscall_dispatch`: file said 1200 ns, derived by doubling a **638 ns WSL2

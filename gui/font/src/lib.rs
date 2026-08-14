@@ -21,6 +21,7 @@
 
 extern crate alloc;
 
+pub mod cff;
 pub mod raster;
 pub mod scaled;
 pub mod sfnt;

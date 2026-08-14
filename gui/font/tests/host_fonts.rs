@@ -176,13 +176,26 @@ fn every_installed_font_parses_or_fails_cleanly() {
     files.sort();
 
     let mut opened = 0usize;
-    let mut cff = 0usize;
+    let mut unsupported = 0usize;
     let mut other_err = Vec::new();
     let mut glyphs_walked = 0usize;
     let mut glyphs_rastered = 0usize;
     let mut ink_pixels = 0u64;
+    // `.otf` is the extension the PostScript-outline fonts use. Counting them
+    // separately is what turns this from "most fonts still work" into a check
+    // that the CFF path specifically does: before `cff.rs` existed every one
+    // of these failed to open.
+    let mut otf_found = 0usize;
+    let mut otf_opened = 0usize;
+    let mut otf_ink = 0u64;
 
     for path in &files {
+        let is_otf = path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("otf"));
+        if is_otf {
+            otf_found += 1;
+        }
         let Ok(data) = fs::read(path) else { continue };
         match Face::parse(data) {
             Ok(face) => {
@@ -191,15 +204,21 @@ fn every_installed_font_parses_or_fails_cleanly() {
                 glyphs_walked += tally.outlines;
                 glyphs_rastered += tally.rastered;
                 ink_pixels += tally.ink;
+                if is_otf {
+                    otf_opened += 1;
+                    otf_ink += tally.ink;
+                }
             }
-            Err(SfntError::CffOutlinesUnsupported) => cff += 1,
+            Err(SfntError::CffUnsupported(_)) => unsupported += 1,
             Err(e) => other_err.push((path.clone(), e)),
         }
     }
 
     println!("fonts found:      {}", files.len());
     println!("opened:           {opened}");
-    println!("CFF (unsupported): {cff}");
+    println!("unsupported CFF construct: {unsupported}");
+    println!("`.otf` found / opened:     {otf_found} / {otf_opened}");
+    println!("`.otf` ink pixels:         {otf_ink}");
     println!("glyph outlines walked: {glyphs_walked}");
     println!("glyphs rasterized:     {glyphs_rastered}");
     println!("ink pixels produced:   {ink_pixels}");
@@ -208,6 +227,10 @@ fn every_installed_font_parses_or_fails_cleanly() {
     }
 
     assert!(opened > 0, "not one installed font opened");
+    if otf_found > 0 {
+        assert!(otf_opened > 0, "{otf_found} `.otf` fonts and not one opened");
+        assert!(otf_ink > 0, "`.otf` fonts opened but rasterized no ink");
+    }
 }
 
 /// An ordinary Latin text face from this host, for the shape tests below.
@@ -250,7 +273,64 @@ fn letters_look_like_letters() {
     let data = fs::read(&face_path).expect("read font");
     let face = Face::parse(data).expect("parse font");
     println!("face: {}", face_path.display());
+    show_and_check_letters(&face);
+}
 
+/// The same shape proof for a **CFF** face.
+///
+/// The TrueType path and the CFF path share nothing but the `Outline` type
+/// between them: a different table, a different parser, a different curve
+/// order, a different flattener. A CFF glyph could come out mirrored, or with
+/// its contours wound the wrong way so the counter fills instead of cancels,
+/// and every aggregate check in this file would still pass — they count ink,
+/// and a wrong glyph has ink. Only looking at it catches that, so this prints
+/// it and asserts the same two structural properties.
+#[test]
+#[ignore = "depends on the host's installed fonts"]
+fn cff_letters_look_like_letters() {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    for dir in font_dirs() {
+        collect_fonts(&dir, &mut candidates, 0);
+    }
+    candidates.sort();
+    candidates.retain(|p| {
+        p.extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("otf"))
+    });
+    if candidates.is_empty() {
+        println!("no `.otf` fonts on this host — nothing to check");
+        return;
+    }
+
+    // Not every `.otf` is a Latin text face; take the first that maps the
+    // letters this test looks at.
+    let mut checked = 0usize;
+    for path in &candidates {
+        let Ok(data) = fs::read(path) else { continue };
+        let Ok(face) = Face::parse(data) else { continue };
+        if !['A', 'g', 'l', 'o']
+            .iter()
+            .all(|c| face.glyph_index(*c).is_some())
+        {
+            continue;
+        }
+        println!("CFF face: {}", path.display());
+        show_and_check_letters(&face);
+        checked += 1;
+        if checked == 2 {
+            break;
+        }
+    }
+    assert!(
+        checked > 0,
+        "{} `.otf` fonts on this host and not one produced Latin letters",
+        candidates.len()
+    );
+}
+
+/// Print four letters as ASCII art and assert the two properties that
+/// distinguish a letter from noise.
+fn show_and_check_letters(face: &Face) {
     for ch in ['A', 'g', 'l', 'o'] {
         let Some(gid) = face.glyph_index(ch) else {
             continue;

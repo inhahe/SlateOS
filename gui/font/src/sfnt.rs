@@ -16,10 +16,11 @@
 //!
 //! # What is supported
 //!
-//! * Container: bare TrueType (`0x00010000`, `true`), OpenType with
-//!   TrueType outlines (`OTTO` is *detected and rejected*, see below), and
-//!   TrueType Collections (`ttcf` — the first face is used).
-//! * Tables: `head`, `hhea`, `maxp`, `hmtx`, `loca`, `glyf`, `cmap`.
+//! * Container: bare TrueType (`0x00010000`, `true`), OpenType with either
+//!   outline flavour (`OTTO`), and TrueType Collections (`ttcf` — the first
+//!   face is used).
+//! * Tables: `head`, `hhea`, `maxp`, `hmtx`, `loca`, `glyf`, `cmap`, and
+//!   `CFF ` by way of [`cff`](crate::cff).
 //! * `cmap` subtable formats 0 (byte), 4 (BMP segmented) and 12 (full
 //!   UCS-4 groups), chosen in that order of preference: a format-12 Unicode
 //!   subtable wins over format 4, which wins over format 0.
@@ -27,17 +28,17 @@
 //!   consecutive off-curve points, and contours that begin off-curve.
 //! * Composite glyphs, including nested composites, with the `WE_HAVE_A_SCALE`
 //!   / `X_AND_Y_SCALE` / `TWO_BY_TWO` transforms.
+//! * PostScript outlines — Type 2 charstrings in a `CFF ` table. Those are a
+//!   different representation entirely (a stack machine with subroutines, not
+//!   a point list), so they live in their own module; this one detects the
+//!   table, hands it over, and presents the result as the same `Outline`.
+//!   See [`cff`](crate::cff) for what that module covers.
 //!
 //! # What is not, and why that is an error rather than a silent wrong answer
 //!
-//! * **CFF/Type2 outlines** (`OTTO`-flavoured `.otf`). Those store outlines
-//!   as Type 2 charstrings in a `CFF ` table — a completely different format
-//!   (an interpreter with a stack machine, subroutines and hint operators),
-//!   not a variant of `glyf`. Parsing it is a separate body of work. A face
-//!   with CFF outlines therefore fails to open with
-//!   `SfntError::CffOutlinesUnsupported` rather than opening and then
-//!   returning empty outlines for every glyph, which would look like a
-//!   rendering bug rather than a missing feature.
+//! * **CFF2** (the variable-font revision of `CFF `). A face carrying one
+//!   fails to open with `SfntError::CffUnsupported` rather than being
+//!   misparsed as CFF, which it structurally resembles but is not.
 //! * **Hinting.** `fpgm`/`prep`/glyph instructions are skipped. Modern
 //!   rendering at reasonable sizes with anti-aliasing does not need the
 //!   TrueType interpreter, and running untrusted bytecode from a font file
@@ -79,8 +80,10 @@ pub enum SfntError {
     GlyphOutOfRange,
     /// No `cmap` subtable in a format we can read.
     UnsupportedCmap,
-    /// The face stores outlines as CFF/Type2 charstrings, not `glyf`.
-    CffOutlinesUnsupported,
+    /// The face stores outlines in a CFF construct that [`cff`](crate::cff)
+    /// deliberately does not guess at — CFF2, Type 1 charstrings, or one of
+    /// the Type 2 arithmetic operators. The string names which.
+    CffUnsupported(&'static str),
     /// Composite glyphs nest deeper than [`MAX_COMPOSITE_DEPTH`].
     CompositeTooDeep,
 }
@@ -94,9 +97,7 @@ impl fmt::Display for SfntError {
             Self::MalformedTable(t) => write!(f, "table '{t}' is malformed"),
             Self::GlyphOutOfRange => f.write_str("glyph id is out of range"),
             Self::UnsupportedCmap => f.write_str("no readable cmap subtable"),
-            Self::CffOutlinesUnsupported => {
-                f.write_str("font uses CFF/Type2 outlines, which are not supported yet")
-            }
+            Self::CffUnsupported(what) => write!(f, "unsupported CFF construct: {what}"),
             Self::CompositeTooDeep => f.write_str("composite glyph nests too deeply"),
         }
     }
@@ -401,12 +402,31 @@ pub struct Face {
     metrics: FaceMetrics,
     num_glyphs: u16,
     num_h_metrics: u16,
-    /// `indexToLocFormat`: false = 16-bit `loca` (offsets halved), true = 32-bit.
-    loca_long: bool,
-    loca: Span,
-    glyf: Span,
+    outlines: Outlines,
     hmtx: Span,
     cmap: Option<CmapSub>,
+}
+
+/// Where a face keeps its outlines.
+///
+/// The two are alternatives, not options: a font has `loca`+`glyf` or it has
+/// `CFF `, never both, and the tables of one are meaningless to the other.
+/// Making that an enum rather than a pair of `Option` fields is what stops
+/// the rest of the parser from having to ask "and what if neither?" at every
+/// step.
+#[derive(Clone, Debug)]
+enum Outlines {
+    /// TrueType: `loca` indexes into `glyf`.
+    Glyf {
+        /// `indexToLocFormat`: false = 16-bit `loca` (offsets halved), true = 32-bit.
+        loca_long: bool,
+        loca: Span,
+        glyf: Span,
+    },
+    /// PostScript: Type 2 charstrings in `CFF `. Boxed because it is much the
+    /// larger of the two variants and every `Face` would otherwise carry its
+    /// size.
+    Cff(alloc::boxed::Box<crate::cff::Cff>),
 }
 
 impl Face {
@@ -430,7 +450,8 @@ impl Face {
         let mut loca = None;
         let mut glyf = None;
         let mut cmap = None;
-        let mut has_cff = false;
+        let mut cff = None;
+        let mut has_cff2 = false;
 
         for i in 0..usize::from(num_tables) {
             let rec = records
@@ -457,23 +478,16 @@ impl Face {
                 b"loca" => loca = Some(span),
                 b"glyf" => glyf = Some(span),
                 b"cmap" => cmap = Some(span),
-                b"CFF " => has_cff = true,
+                b"CFF " => cff = Some(span),
+                b"CFF2" => has_cff2 = true,
                 _ => {}
             }
-        }
-
-        // Report the CFF case before the missing-glyf case: "this font uses a
-        // format we don't read yet" is actionable, "glyf is missing" is not.
-        if glyf.is_none() && has_cff {
-            return Err(SfntError::CffOutlinesUnsupported);
         }
 
         let head = head.ok_or(SfntError::MissingTable("head"))?;
         let hhea = hhea.ok_or(SfntError::MissingTable("hhea"))?;
         let maxp = maxp.ok_or(SfntError::MissingTable("maxp"))?;
         let hmtx = hmtx.ok_or(SfntError::MissingTable("hmtx"))?;
-        let loca = loca.ok_or(SfntError::MissingTable("loca"))?;
-        let glyf = glyf.ok_or(SfntError::MissingTable("glyf"))?;
 
         let head_data = data
             .get(head.off..head.off.checked_add(head.len).ok_or(SfntError::TooShort)?)
@@ -484,11 +498,37 @@ impl Face {
             // make every scale computation a division by zero.
             return Err(SfntError::MalformedTable("head"));
         }
-        let loca_format = i16_at(head_data, 50).ok_or(SfntError::MalformedTable("head"))?;
-        let loca_long = match loca_format {
-            0 => false,
-            1 => true,
-            _ => return Err(SfntError::MalformedTable("head")),
+
+        // Which outline format this face uses. `glyf` wins when a file
+        // somehow carries both: a `glyf` face is the one whose `loca` and
+        // `head.indexToLocFormat` were validated above, so preferring it
+        // keeps the two consistent.
+        let outlines = if let (Some(loca), Some(glyf)) = (loca, glyf) {
+            let loca_format = i16_at(head_data, 50).ok_or(SfntError::MalformedTable("head"))?;
+            let loca_long = match loca_format {
+                0 => false,
+                1 => true,
+                _ => return Err(SfntError::MalformedTable("head")),
+            };
+            Outlines::Glyf {
+                loca_long,
+                loca,
+                glyf,
+            }
+        } else if let Some(span) = cff {
+            Outlines::Cff(alloc::boxed::Box::new(crate::cff::Cff::parse(
+                &data,
+                span.off,
+                span.len,
+                units_per_em,
+            )?))
+        } else if has_cff2 {
+            // CFF2 is the variable-font revision of CFF: no Name INDEX, blend
+            // operators, an item-variation store. Running it as CFF would
+            // misread it rather than fail.
+            return Err(SfntError::CffUnsupported("CFF2 table"));
+        } else {
+            return Err(SfntError::MissingTable("glyf"));
         };
 
         let hhea_data = data
@@ -520,9 +560,7 @@ impl Face {
             },
             num_glyphs,
             num_h_metrics,
-            loca_long,
-            loca,
-            glyf,
+            outlines,
             hmtx,
             cmap: cmap_sub,
             data,
@@ -803,10 +841,17 @@ impl Face {
         if gid >= self.num_glyphs {
             return Err(SfntError::GlyphOutOfRange);
         }
+        let Outlines::Glyf {
+            loca_long,
+            loca,
+            glyf,
+        } = &self.outlines
+        else {
+            return Err(SfntError::MissingTable("glyf"));
+        };
         let i = usize::from(gid);
-        let (start, end) = if self.loca_long {
-            let a = self
-                .loca
+        let (start, end) = if *loca_long {
+            let a = loca
                 .off
                 .checked_add(i.checked_mul(4).ok_or(SfntError::TooShort)?)
                 .ok_or(SfntError::TooShort)?;
@@ -818,8 +863,7 @@ impl Face {
                 usize::try_from(e).map_err(|_| SfntError::TooShort)?,
             )
         } else {
-            let a = self
-                .loca
+            let a = loca
                 .off
                 .checked_add(i.checked_mul(2).ok_or(SfntError::TooShort)?)
                 .ok_or(SfntError::TooShort)?;
@@ -839,15 +883,14 @@ impl Face {
         let len = end
             .checked_sub(start)
             .ok_or(SfntError::MalformedTable("loca"))?;
-        let off = self
-            .glyf
+        let off = glyf
             .off
             .checked_add(start)
             .ok_or(SfntError::MalformedTable("loca"))?;
         if off.checked_add(len).is_none_or(|e| e > self.data.len()) {
             return Err(SfntError::MalformedTable("loca"));
         }
-        if len > self.glyf.len {
+        if len > glyf.len {
             return Err(SfntError::MalformedTable("loca"));
         }
         Ok(Some(Span { off, len }))
@@ -864,6 +907,16 @@ impl Face {
     /// self-inconsistent, [`SfntError::CompositeTooDeep`] when composite
     /// components nest past [`MAX_COMPOSITE_DEPTH`].
     pub fn outline(&self, gid: u16) -> Result<Outline, SfntError> {
+        if let Outlines::Cff(cff) = &self.outlines {
+            // A CFF face's glyph count lives in the CharStrings INDEX as well
+            // as in `maxp`. `maxp` is what every other part of this module
+            // trusts, so the range check stays here and `cff` is asked only
+            // for glyphs it agrees exist.
+            if gid >= self.num_glyphs {
+                return Err(SfntError::GlyphOutOfRange);
+            }
+            return cff.outline(&self.data, gid);
+        }
         let mut out = Outline::default();
         self.outline_into(gid, &mut out, 0)?;
         Ok(out)

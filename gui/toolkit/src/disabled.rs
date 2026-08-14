@@ -293,9 +293,9 @@ fn reduce_alpha(color: Color, factor: f32) -> Color {
 /// The tooltip is positioned above the control by default. If `above` is false,
 /// it is positioned below.
 pub fn render_reason_tooltip(reason: &str, x: f32, y: f32, above: bool) -> Vec<RenderCommand> {
-    // Estimate text width (rough: 7px per character at 12pt).
-    let char_width = TOOLTIP_FONT_SIZE * 0.58;
-    let text_width = reason.len() as f32 * char_width;
+    // Measured rather than estimated: the tooltip's background is sized from
+    // this, so a wrong answer here is a visible box that does not fit its text.
+    let text_width = crate::text::width(reason, TOOLTIP_FONT_SIZE);
     let box_width = text_width + TOOLTIP_PADDING * 2.0;
     let box_height = TOOLTIP_FONT_SIZE + TOOLTIP_PADDING * 2.0;
 

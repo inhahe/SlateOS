@@ -230,6 +230,84 @@ impl SystemFont {
     }
 }
 
+/// How heavy a face to draw with.
+///
+/// Deliberately two values rather than a numeric weight axis: the built-in
+/// face has exactly two, and a `u16` weight would promise a range nothing can
+/// currently deliver. Widening this when variable fonts arrive is a smaller
+/// change than un-promising a range.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Weight {
+    #[default]
+    Regular,
+    Bold,
+}
+
+/// The fonts a UI draws with, one per distinct size and weight.
+///
+/// Exists because measuring and drawing must agree. A widget asks "how wide is
+/// this label" while laying out, and the compositor asks "what glyphs does this
+/// label have" while drawing; if those two round the requested size
+/// differently — or use different faces — labels overflow their buttons and
+/// text cursors land between characters. Sharing one cache makes that class of
+/// bug unrepresentable rather than merely unlikely.
+///
+/// Caching matters because a [`SystemFont`] owns rasterized glyphs: rebuilding
+/// one per label would re-rasterize the alphabet on every frame. The map stays
+/// small on its own, being keyed by the sizes a UI actually asks for, and a UI
+/// has a handful of text sizes rather than a continuum of them.
+#[derive(Debug, Default)]
+pub struct FontCache {
+    fonts: BTreeMap<(u32, Weight), SystemFont>,
+}
+
+impl FontCache {
+    /// An empty cache.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The font for `px` and `weight`, building it on first use.
+    pub fn get(&mut self, px: f32, weight: Weight) -> &mut SystemFont {
+        self.fonts
+            .entry((round_px(px), weight))
+            .or_insert_with(|| match weight {
+                Weight::Regular => SystemFont::builtin(px),
+                Weight::Bold => SystemFont::builtin_bold(px),
+            })
+    }
+
+    /// How many distinct fonts have been built.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.fonts.len()
+    }
+
+    /// Whether no font has been built yet.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.fonts.is_empty()
+    }
+}
+
+/// Normalises a requested pixel size to a cache key.
+///
+/// Rounded to a whole pixel so 13.9 and 14.0 share one entry rather than
+/// rasterizing the alphabet twice for a difference no one can see. Clamped
+/// because the size may have crossed a process boundary: a non-finite or
+/// absurd request must yield a readable font rather than a panic or a
+/// gigabyte of coverage.
+fn round_px(px: f32) -> u32 {
+    if !px.is_finite() {
+        return 16;
+    }
+    // The clamp keeps the cast in range whatever the caller asked for.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let rounded = px.clamp(1.0, 512.0).round() as u32;
+    rounded
+}
+
 /// Picks the integer scale of the built-in face closest to `px_per_em`.
 ///
 /// Clamped to at least 1: a zero or negative request would otherwise produce a
@@ -388,6 +466,51 @@ mod tests {
             panic!("builtin() must take the bitmap path");
         };
         assert_eq!(masks.len(), 1, "one distinct letter, one cache entry");
+    }
+
+    #[test]
+    fn the_cache_keys_on_rounded_size_and_weight() {
+        let mut cache = FontCache::new();
+        assert!(cache.is_empty());
+        cache.get(16.0, Weight::Regular);
+        cache.get(16.4, Weight::Regular); // rounds to the same key
+        assert_eq!(cache.len(), 1, "16.0 and 16.4 must share a font");
+        cache.get(16.0, Weight::Bold);
+        cache.get(32.0, Weight::Regular);
+        assert_eq!(cache.len(), 3, "size and weight each key the cache");
+    }
+
+    #[test]
+    fn a_hostile_size_still_yields_a_readable_font() {
+        // A size may have crossed a process boundary, so it is not necessarily
+        // a number at all -- and a 1e30-pixel face would be a memory bomb.
+        let mut cache = FontCache::new();
+        for px in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -1.0, 0.0, 1e30] {
+            let font = cache.get(px, Weight::Regular);
+            assert!(font.line_height() > 0.0, "px = {px} gave an unusable font");
+            assert!(font.measure("x") > 0.0, "px = {px} measures to nothing");
+        }
+    }
+
+    #[test]
+    fn measuring_agrees_with_drawing() {
+        // The reason the cache exists: a widget measures a label to size its
+        // button, and the compositor draws it. If those disagree the text
+        // overflows. `measure` must equal the pen distance `draw_text` covers.
+        let mut cache = FontCache::new();
+        for (px, weight) in [(16.0, Weight::Regular), (48.0, Weight::Bold)] {
+            let font = cache.get(px, weight);
+            let expected = font.measure("Hamburgefonstiv");
+            let mut buf = surface(4096, 128);
+            let mut target = Target {
+                buffer: &mut buf,
+                stride: 4096,
+                height: 128,
+                color: 0xFFFF_FFFF,
+            };
+            let end = font.draw_text("Hamburgefonstiv", &mut target, 0.0, 64.0);
+            assert_eq!(end, expected, "{px}px {weight:?}: measure != pen advance");
+        }
     }
 
     #[test]

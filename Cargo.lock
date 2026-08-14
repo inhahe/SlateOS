@@ -4038,6 +4038,9 @@ dependencies = [
 [[package]]
 name = "guitk"
 version = "0.1.0"
+dependencies = [
+ "osfont",
+]
 
 [[package]]
 name = "guix-cli"

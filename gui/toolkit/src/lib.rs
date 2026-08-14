@@ -49,6 +49,7 @@ pub mod signal;
 pub mod style;
 pub mod svg;
 pub mod tabs;
+pub mod text;
 pub mod textview;
 pub mod theme;
 pub mod tree;

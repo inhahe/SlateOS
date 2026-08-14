@@ -521,9 +521,14 @@ impl ContextMenu {
         width.max(MIN_MENU_WIDTH)
     }
 
-    /// Rough text width estimation (monospace-ish approximation).
+    /// Width of `text`, as the compositor will actually draw it.
+    ///
+    /// This used to be `text.len() as f32 * font_size * 0.6`, which sized the
+    /// menu for a font nobody draws in: `len` counts bytes, so an accented
+    /// label reserved twice the room it needed, and the 0.6 was one of five
+    /// different fudge factors scattered across the toolkit.
     fn estimate_text_width(text: &str, font_size: f32) -> f32 {
-        text.len() as f32 * font_size * 0.6
+        crate::text::width(text, font_size)
     }
 
     fn total_height(&self) -> f32 {
@@ -781,7 +786,7 @@ impl Tooltip {
     fn compute_width(&self) -> f32 {
         let lines = self.wrap_text();
         let max_line_width: f32 = lines.iter()
-            .map(|l| l.len() as f32 * TOOLTIP_FONT_SIZE * 0.6)
+            .map(|l| crate::text::width(l, TOOLTIP_FONT_SIZE))
             .fold(0.0_f32, f32::max);
         (max_line_width + TOOLTIP_PADDING * 2.0).min(self.max_width + TOOLTIP_PADDING * 2.0)
     }
@@ -792,10 +797,16 @@ impl Tooltip {
         line_count as f32 * TOOLTIP_LINE_HEIGHT + TOOLTIP_PADDING * 2.0
     }
 
-    /// Simple word-wrap at max_width.
+    /// Word-wrap at `max_width` pixels.
+    ///
+    /// Wrapping is decided by measuring the candidate line, not by counting its
+    /// characters against an estimated cell width. The two are not the same
+    /// thing in a proportional face — a line of `W`s is far wider than a line
+    /// of `i`s — and since `compute_width` measures the lines this produces,
+    /// wrapping on a different rule than the box is sized on is exactly how a
+    /// tooltip ends up with text hanging past its own background.
     fn wrap_text(&self) -> Vec<String> {
-        let max_chars = (self.max_width / (TOOLTIP_FONT_SIZE * 0.6)) as usize;
-        if max_chars == 0 {
+        if self.max_width <= 0.0 {
             return vec![self.text.clone()];
         }
 
@@ -810,8 +821,15 @@ impl Tooltip {
             let mut current_line = String::new();
             for word in words {
                 if current_line.is_empty() {
+                    // A word wider than the whole tooltip still gets its own
+                    // line: breaking mid-word would be worse than overflowing,
+                    // and `compute_width` clamps the box either way.
                     current_line = word.to_string();
-                } else if current_line.len() + 1 + word.len() <= max_chars {
+                    continue;
+                }
+                let candidate_width =
+                    crate::text::width(&format!("{current_line} {word}"), TOOLTIP_FONT_SIZE);
+                if candidate_width <= self.max_width {
                     current_line.push(' ');
                     current_line.push_str(word);
                 } else {
@@ -1121,5 +1139,38 @@ mod tests {
         tooltip.start_hover(DEFAULT_VIEWPORT_WIDTH - 5.0, DEFAULT_VIEWPORT_HEIGHT - 5.0, 0);
         assert!(tooltip.x < DEFAULT_VIEWPORT_WIDTH - 5.0);
         assert!(tooltip.y < DEFAULT_VIEWPORT_HEIGHT - 5.0);
+    }
+
+    #[test]
+    fn tooltip_wraps_by_measured_width_not_character_count() {
+        // Wrapping and box-sizing have to use the same rule. `W` is far wider
+        // than the old 0.6-of-the-font-size guess and `i` far narrower, so a
+        // count-based wrap produced lines that overflowed the box it sized.
+        for text in [
+            "WWWW WWWW WWWW WWWW WWWW WWWW",
+            "iiii iiii iiii iiii iiii iiii",
+            "ééé ééé ééé ééé ééé ééé ééé ééé",
+        ] {
+            let tooltip = Tooltip::new(text);
+            for line in tooltip.wrap_text() {
+                // A single word may legitimately exceed the limit — it is not
+                // broken mid-word — but a wrapped line never should.
+                if line.split_whitespace().count() < 2 {
+                    continue;
+                }
+                assert!(
+                    crate::text::width(&line, TOOLTIP_FONT_SIZE) <= tooltip.max_width,
+                    "{line:?} is wider than the tooltip that will contain it"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tooltip_wrapping_never_loses_a_word() {
+        let text = "the quick brown fox jumps over the lazy dog";
+        let tooltip = Tooltip::new(text);
+        let joined = tooltip.wrap_text().join(" ");
+        assert_eq!(joined.split_whitespace().collect::<Vec<_>>(), text.split_whitespace().collect::<Vec<_>>());
     }
 }

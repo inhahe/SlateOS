@@ -47,7 +47,7 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use osfont::raster::GlyphMask;
-use osfont::system::SystemFont;
+use osfont::system::{FontCache, Weight};
 
 mod buffer;
 pub use buffer::{BufferFormat, SharedBuffer};
@@ -1435,21 +1435,15 @@ impl TranslateStack {
 // Text rendering
 // ---------------------------------------------------------------------------
 
-/// The fonts the compositor draws with, one per distinct size and weight.
+/// Translates the toolkit's weight hint into the one `osfont` understands.
 ///
-/// This used to be a private 8x14 face with about ninety hand-drawn ASCII
-/// glyphs, which meant three things: every non-ASCII character in a window
-/// title came out as a filled box, the `font_size` and `font_weight` that apps
-/// send in their render trees were silently discarded, and the OS carried two
-/// unrelated hand-drawn fonts. `osfont` already solves all three, so the
-/// compositor now asks it for glyphs instead of keeping its own.
-///
-/// Sizes are cached because a `SystemFont` owns rasterized glyphs: rebuilding
-/// one per text command would re-rasterize the alphabet on every frame. The
-/// set stays small on its own — it is keyed by what the UI actually asks for,
-/// and a UI has a handful of text sizes, not a continuum of them.
-struct TextRenderer {
-    fonts: BTreeMap<(u32, u8), SystemFont>,
+/// `Light` maps to regular because the built-in face has two weights and no
+/// third; drawing it bold would be worse than drawing it regular.
+fn weight_of(hint: FontWeightHint) -> Weight {
+    match hint {
+        FontWeightHint::Bold => Weight::Bold,
+        FontWeightHint::Regular | FontWeightHint::Light => Weight::Regular,
+    }
 }
 
 /// Blend one glyph's coverage into the framebuffer.
@@ -1506,41 +1500,6 @@ fn blend_mask(
     }
 }
 
-impl TextRenderer {
-    fn new() -> Self {
-        Self {
-            fonts: BTreeMap::new(),
-        }
-    }
-
-    /// The font for `size` and `weight`, building it on first use.
-    fn font(&mut self, size: f32, weight: FontWeightHint) -> &mut SystemFont {
-        // Rounded to a whole pixel so that 13.9 and 14.0 share one cache entry
-        // rather than rasterizing the alphabet twice for a difference no one
-        // can see. Clamped because the size arrives from another process.
-        let px = if size.is_finite() {
-            size.clamp(1.0, 512.0).round() as u32
-        } else {
-            DEFAULT_FONT_SIZE as u32
-        };
-        // `FontWeightHint` is not `Hash`, and making it so would mean editing
-        // the toolkit's public API for the compositor's convenience.
-        let bold = u8::from(weight == FontWeightHint::Bold);
-        self.fonts.entry((px, bold)).or_insert_with(|| {
-            // Only the built-in face is reachable today: the compositor has no
-            // filesystem to load a font file from. When it does, this is the
-            // one line that changes — `SystemFont::or_builtin(bytes, px)` —
-            // and every caller below gets anti-aliased scalable text with no
-            // further edits, which is the whole reason for the facade.
-            if bold == 1 {
-                SystemFont::builtin_bold(px as f32)
-            } else {
-                SystemFont::builtin(px as f32)
-            }
-        })
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Rendering engine
 // ---------------------------------------------------------------------------
@@ -1549,7 +1508,10 @@ impl TextRenderer {
 struct RenderEngine {
     clip_stack: ClipStack,
     translate_stack: TranslateStack,
-    text: TextRenderer,
+    /// Shared with the toolkit's measurement path: same type, same rounding
+    /// rule, so a label the toolkit sized cannot be drawn in a different font
+    /// than the one it was measured in.
+    fonts: FontCache,
 }
 
 impl RenderEngine {
@@ -1557,7 +1519,7 @@ impl RenderEngine {
         Self {
             clip_stack: ClipStack::default(),
             translate_stack: TranslateStack::default(),
-            text: TextRenderer::new(),
+            fonts: FontCache::new(),
         }
     }
 
@@ -1821,7 +1783,7 @@ impl RenderEngine {
         weight: FontWeightHint,
     ) {
         let clip = self.clip_stack.current().copied();
-        let font = self.text.font(size, weight);
+        let font = self.fonts.get(size, weight_of(weight));
         let baseline = y as f32 + font.metrics().ascent;
         let max_x = max_width.map(|w| x.saturating_add(w as i32));
         let mut pen = x as f32;
@@ -3336,8 +3298,8 @@ impl Compositor {
         // size, so the title stays centred if the title-bar font ever changes.
         let line_height = self
             .render_engine
-            .text
-            .font(DEFAULT_FONT_SIZE, FontWeightHint::Regular)
+            .fonts
+            .get(DEFAULT_FONT_SIZE, Weight::Regular)
             .line_height();
         let text_y = tb_y + (TITLE_BAR_HEIGHT as i32 - line_height as i32) / 2;
         let max_text_width = tb_width.saturating_sub(
@@ -5311,29 +5273,27 @@ mod tests {
     }
 
     #[test]
-    fn test_font_cache_reuses_entries() {
-        // A `SystemFont` owns rasterized glyphs; rebuilding one per text
-        // command would re-rasterize the alphabet every frame.
-        let mut text = TextRenderer::new();
-        text.font(16.0, FontWeightHint::Regular);
-        text.font(16.4, FontWeightHint::Regular); // rounds to the same entry
-        assert_eq!(text.fonts.len(), 1, "16.0 and 16.4 must share a font");
-        text.font(16.0, FontWeightHint::Bold);
-        text.font(32.0, FontWeightHint::Regular);
-        assert_eq!(text.fonts.len(), 3, "weight and size each key the cache");
+    fn test_light_weight_falls_back_to_regular_not_bold() {
+        // The built-in face has two weights. Rendering `Light` as bold would
+        // be the opposite of what was asked for, so it must map to regular.
+        assert_eq!(weight_of(FontWeightHint::Light), Weight::Regular);
+        assert_eq!(weight_of(FontWeightHint::Regular), Weight::Regular);
+        assert_eq!(weight_of(FontWeightHint::Bold), Weight::Bold);
     }
 
     #[test]
     fn test_font_size_from_a_hostile_client_still_draws() {
         // `font_size` crosses a process boundary, so it is not necessarily a
-        // number at all. Every case must yield a usable font rather than a
-        // panic or an empty one.
-        let mut text = TextRenderer::new();
-        for size in [f32::NAN, f32::INFINITY, -1.0, 0.0, 1e30] {
-            assert!(
-                text.font(size, FontWeightHint::Regular).line_height() > 0.0,
-                "font_size = {size} produced an unusable font"
-            );
+        // number at all. A nonsense size must fall back to a readable one
+        // rather than panicking or drawing nothing.
+        for size in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -1.0, 0.0] {
+            let (rows, _) = ink_of("W", size, FontWeightHint::Regular, None);
+            assert!(!rows.is_empty(), "font_size = {size} drew nothing");
         }
+        // An enormous size is clamped rather than honoured — a 1e30-pixel face
+        // would be a memory bomb — so its glyphs are merely too big for this
+        // 200x120 surface. What matters is that asking does not panic.
+        let (rows, _) = ink_of("W", 1e30, FontWeightHint::Regular, None);
+        assert!(rows.is_empty(), "a 512px glyph should not fit in 120 rows");
     }
 }

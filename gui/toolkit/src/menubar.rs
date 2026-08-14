@@ -192,9 +192,14 @@ fn key_to_lower_char(key: &Key) -> Option<char> {
     }
 }
 
-/// Rough monospace-ish text width estimation (same heuristic as `menu.rs`).
+/// Width of `text`, as the compositor will actually draw it.
+///
+/// The menu bar places mnemonic underlines by measuring the text before the
+/// underlined character, so this has to agree with the drawn glyphs exactly —
+/// the old byte-count heuristic put the underline under the wrong letter as
+/// soon as a label contained anything non-ASCII.
 fn estimate_text_width(text: &str, font_size: f32) -> f32 {
-    text.len() as f32 * font_size * 0.6
+    crate::text::width(text, font_size)
 }
 
 // ─── Open-submenu state (for nested dropdown submenus) ─────────────────────

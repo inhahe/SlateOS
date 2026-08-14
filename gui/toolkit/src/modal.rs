@@ -707,7 +707,13 @@ impl AlertDialog {
             let label = btn.label();
             let text_color = if btn.is_primary() { COLOR_CRUST } else { COLOR_TEXT };
             tree.push(RenderCommand::Text {
-                x: btn_x + (BUTTON_MIN_WIDTH - (label.len() as f32 * 7.0)) / 2.0,
+                // Centred on the label's measured width. The flat 7px-per-byte
+                // guess this replaces drifted further off-centre the longer the
+                // label was, and mis-centred non-ASCII labels badly.
+                x: btn_x
+                    + (BUTTON_MIN_WIDTH
+                        - crate::text::measure(label, FONT_SIZE, FontWeightHint::Bold))
+                        / 2.0,
                 y: y + (BUTTON_HEIGHT - FONT_SIZE) / 2.0,
                 text: label.to_string(),
                 color: text_color,

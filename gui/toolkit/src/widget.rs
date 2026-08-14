@@ -375,13 +375,27 @@ impl Widget {
     // Layout
     // ======================================================================
 
+    /// Width of `text` in this widget's own font, in pixels.
+    ///
+    /// Layout used to guess at `text.len() as f32 * font_size * 0.6`. That was
+    /// two errors at once: `len` counts bytes, so any non-ASCII label was sized
+    /// two to four times too wide, and even for ASCII the 0.6 was a constant
+    /// picked for a fixed-cell font the compositor no longer draws. A button
+    /// sized by a different rule than its label is drawn by is a button whose
+    /// text hangs off the end of it.
+    fn measure(&self, text: &str) -> f32 {
+        crate::text::measure(
+            text,
+            self.style.font_size,
+            weight_to_hint(self.style.font_weight),
+        )
+    }
+
     /// Compute intrinsic content size for this widget.
     pub fn intrinsic_size(&self) -> Size {
         match &self.kind {
             WidgetKind::Label { text } => {
-                // Approximate text size (proper measurement needs font metrics)
-                let char_width = self.style.font_size * 0.6;
-                let width = text.len() as f32 * char_width;
+                let width = self.measure(text);
                 let height = self.style.font_size * self.style.line_height;
                 Size::new(
                     width + self.style.padding.horizontal(),
@@ -389,8 +403,7 @@ impl Widget {
                 )
             }
             WidgetKind::Button { text, .. } => {
-                let char_width = self.style.font_size * 0.6;
-                let width = text.len() as f32 * char_width;
+                let width = self.measure(text);
                 let height = self.style.font_size * self.style.line_height;
                 Size::new(
                     width + self.style.padding.horizontal(),
@@ -404,9 +417,8 @@ impl Widget {
                 )
             }
             WidgetKind::Checkbox { label, .. } => {
-                let char_width = self.style.font_size * 0.6;
                 let checkbox_size = self.style.font_size;
-                let width = checkbox_size + 8.0 + label.len() as f32 * char_width;
+                let width = checkbox_size + 8.0 + self.measure(label);
                 let height = self.style.font_size * self.style.line_height;
                 Size::new(
                     width + self.style.padding.horizontal(),

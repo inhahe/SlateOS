@@ -1327,6 +1327,24 @@ pub extern "C" fn pthread_cond_timedwait(
         return errno::EFAULT;
     }
 
+    // Before anything else — before the mutex is released, before the
+    // generation counter is even read.  `___pthread_cond_timedwait64`
+    // (nptl/pthread_cond_wait.c:635) opens with
+    // `if (! valid_nanoseconds (abstime->tv_nsec)) return EINVAL;`, so a
+    // malformed deadline is rejected with the mutex still held and no
+    // observable side effect.  Note this is *not* the placement
+    // `pthread_mutex_timedlock` uses; see the comment there.
+    //
+    // A negative `tv_sec` is not covered: `valid_nanoseconds` looks only at
+    // `tv_nsec`, so a deadline in the past falls through to the loop below
+    // and times out immediately, which is correct.
+    // SAFETY: abstime verified non-null above; the caller's C-ABI contract
+    // is that it points to a live, properly aligned `Timespec`.
+    let abs = unsafe { &*abstime };
+    if !crate::time::valid_nanoseconds(abs.tv_nsec) {
+        return errno::EINVAL;
+    }
+
     let c = unsafe { &*cond };
     let current_gen = c.generation.load(Ordering::Acquire);
 
@@ -1336,7 +1354,6 @@ pub extern "C" fn pthread_cond_timedwait(
     }
 
     // Get current time and compute deadline with full nanosecond precision.
-    let abs = unsafe { &*abstime };
     let dl_secs = abs.tv_sec;
     let dl_nanos = abs.tv_nsec;
     let mut now_ts = crate::stat::Timespec {
@@ -2402,9 +2419,25 @@ pub extern "C" fn pthread_mutex_timedlock(
         return 0;
     }
 
-    // Spin with timeout check.
+    // Only now — after the fast path has failed and we are committed to
+    // blocking.  `pthread_mutex_timedlock.c:221` reads "We are about to
+    // block; check whether the timeout is invalid", and the check sits
+    // inside the contended branch, so an *uncontended* `timedlock` with a
+    // malformed deadline succeeds and never looks at the timespec.  POSIX
+    // permits exactly this: "the validity of the abstime parameter need not
+    // be checked if the lock can be immediately acquired."
+    //
+    // The placement is deliberately different from `pthread_cond_timedwait`
+    // above and from `sem_timedwait`, both of which check eagerly — glibc
+    // took the lazy option here and the eager one there, and
+    // `pthread_rwlock_common.c:286-291` documents having *switched* from
+    // lazy to eager for rwlocks.  Do not unify them.
+    // SAFETY: abstime verified non-null above.
     let dl_secs = unsafe { (*abstime).tv_sec };
     let dl_nanos = unsafe { (*abstime).tv_nsec };
+    if !crate::time::valid_nanoseconds(dl_nanos) {
+        return errno::EINVAL;
+    }
 
     loop {
         // Check timeout by reading current time.
@@ -5378,6 +5411,128 @@ mod tests {
         let ret = pthread_mutex_timedlock(&raw mut m, &ts);
         assert_eq!(ret, 0, "timedlock on unlocked mutex should succeed");
         // Unlock.
+        unsafe {
+            pthread_mutex_unlock(&raw mut m);
+        }
+    }
+
+    /// glibc checks the deadline only once it is about to block
+    /// (`nptl/pthread_mutex_timedlock.c:221`, "We are about to block; check
+    /// whether the timeout is invalid"), so an uncontended acquisition never
+    /// looks at `tv_nsec` and a malformed one is not an error.  POSIX allows
+    /// this: "the validity of the abstime parameter need not be checked if
+    /// the lock can be immediately acquired."
+    #[test]
+    fn test_pthread_mutex_timedlock_uncontended_ignores_a_bad_deadline() {
+        // SAFETY: zero-init is valid for PthreadMutexT (all-zeros = unlocked).
+        let mut m: PthreadMutexT = unsafe { core::mem::zeroed() };
+        unsafe {
+            pthread_mutex_init(&raw mut m, core::ptr::null());
+        }
+        let ts = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: 1_000_000_000, // exactly out of range
+        };
+        assert_eq!(
+            pthread_mutex_timedlock(&raw mut m, &ts),
+            0,
+            "the fast path must not consult the timespec"
+        );
+        unsafe {
+            pthread_mutex_unlock(&raw mut m);
+        }
+    }
+
+    /// The other half of the same rule: once the fast path fails, the very
+    /// next thing glibc does is reject the deadline, so a contended
+    /// `timedlock` with a malformed `tv_nsec` is `EINVAL` and never spins.
+    #[test]
+    fn test_pthread_mutex_timedlock_contended_rejects_a_bad_deadline() {
+        // SAFETY: zero-init is valid for PthreadMutexT (all-zeros = unlocked).
+        let mut m: PthreadMutexT = unsafe { core::mem::zeroed() };
+        unsafe {
+            pthread_mutex_init(&raw mut m, core::ptr::null());
+            // A NORMAL mutex, so re-locking from this thread contends rather
+            // than recursing or reporting EDEADLK — the fast path fails and
+            // we reach the deadline check without ever blocking.
+            assert_eq!(pthread_mutex_lock(&raw mut m), 0);
+        }
+        for bad in [-1i64, 1_000_000_000, i64::MAX] {
+            let ts = crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: bad,
+            };
+            assert_eq!(
+                pthread_mutex_timedlock(&raw mut m, &ts),
+                crate::errno::EINVAL,
+                "tv_nsec={bad} must be EINVAL once the lock is contended"
+            );
+        }
+        unsafe {
+            pthread_mutex_unlock(&raw mut m);
+        }
+    }
+
+    /// `___pthread_cond_timedwait64` (nptl/pthread_cond_wait.c:635) checks
+    /// the deadline as its first statement, so — unlike `timedlock` — there
+    /// is no fast path that skips it, and the mutex is still held on return.
+    #[test]
+    fn test_pthread_cond_timedwait_rejects_a_bad_deadline_before_unlocking() {
+        // SAFETY: zero-init is valid for both types (all-zeros = unlocked /
+        // generation 0).
+        let mut m: PthreadMutexT = unsafe { core::mem::zeroed() };
+        let mut c: PthreadCondT = unsafe { core::mem::zeroed() };
+        unsafe {
+            pthread_mutex_init(&raw mut m, core::ptr::null());
+        }
+        pthread_cond_init(&raw mut c, core::ptr::null());
+        unsafe {
+            assert_eq!(pthread_mutex_lock(&raw mut m), 0);
+        }
+        let ts = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: 1_000_000_000,
+        };
+        assert_eq!(
+            pthread_cond_timedwait(&raw mut c, &raw mut m, &ts),
+            crate::errno::EINVAL
+        );
+        // The rejection must be side-effect-free: glibc returns before the
+        // mutex is released, so the caller still owns it.
+        assert_eq!(
+            unsafe { pthread_mutex_trylock(&raw mut m) },
+            crate::errno::EBUSY,
+            "a rejected timedwait must not have dropped the mutex"
+        );
+        unsafe {
+            pthread_mutex_unlock(&raw mut m);
+        }
+    }
+
+    /// `valid_nanoseconds` looks only at `tv_nsec`, so a deadline already in
+    /// the past is a *timeout*, not a malformed argument.  This pins the
+    /// boundary that separates the two, and is the reason we cannot reuse
+    /// the kernel's stricter `timespec64_valid` here.
+    #[test]
+    fn test_pthread_cond_timedwait_negative_tv_sec_is_etimedout_not_einval() {
+        // SAFETY: zero-init is valid for both types.
+        let mut m: PthreadMutexT = unsafe { core::mem::zeroed() };
+        let mut c: PthreadCondT = unsafe { core::mem::zeroed() };
+        unsafe {
+            pthread_mutex_init(&raw mut m, core::ptr::null());
+        }
+        pthread_cond_init(&raw mut c, core::ptr::null());
+        unsafe {
+            assert_eq!(pthread_mutex_lock(&raw mut m), 0);
+        }
+        let ts = crate::stat::Timespec {
+            tv_sec: -1,
+            tv_nsec: 0,
+        };
+        assert_eq!(
+            pthread_cond_timedwait(&raw mut c, &raw mut m, &ts),
+            crate::errno::ETIMEDOUT
+        );
         unsafe {
             pthread_mutex_unlock(&raw mut m);
         }

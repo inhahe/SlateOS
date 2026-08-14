@@ -282,6 +282,19 @@ pub extern "C" fn sem_timedwait(sem: *mut SemT, abstime: *const crate::stat::Tim
         return -1;
     }
 
+    // Eagerly, above the fast path: `___sem_timedwait64`
+    // (nptl/sem_timedwait.c:28) rejects the deadline *before*
+    // `__new_sem_wait_fast`, so a malformed `tv_nsec` is `EINVAL` even on a
+    // semaphore whose count is positive and which would not have blocked.
+    // `pthread_mutex_timedlock` makes the opposite choice with the same
+    // POSIX licence; the asymmetry is glibc's, so we copy it rather than
+    // reconcile it.
+    // SAFETY: abstime verified non-null above.
+    if !crate::time::valid_nanoseconds(unsafe { (*abstime).tv_nsec }) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
     let atomic = unsafe { &(*sem).value };
 
     loop {
@@ -1238,6 +1251,51 @@ mod tests {
         let ret = sem_timedwait(&raw mut sem, core::ptr::null());
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    /// `___sem_timedwait64` (nptl/sem_timedwait.c:28) validates the deadline
+    /// *before* `__new_sem_wait_fast`, so a positive count does not excuse a
+    /// malformed `tv_nsec`.  This is the opposite of
+    /// `pthread_mutex_timedlock`, which checks lazily — see
+    /// `pthread::tests::test_pthread_mutex_timedlock_uncontended_ignores_a_bad_deadline`.
+    #[test]
+    fn test_sem_timedwait_checks_the_deadline_before_the_fast_path() {
+        let mut sem = SemT {
+            value: core::sync::atomic::AtomicI32::new(0),
+        };
+        // Count 1: the wait would have succeeded immediately.
+        sem_init(&raw mut sem, 0, 1);
+        for bad in [-1i64, 1_000_000_000] {
+            crate::errno::set_errno(0);
+            let ts = crate::stat::Timespec {
+                tv_sec: 999_999,
+                tv_nsec: bad,
+            };
+            assert_eq!(sem_timedwait(&raw mut sem, &ts), -1, "tv_nsec={bad}");
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        }
+        // And the rejection must not have consumed the count.
+        let mut val: i32 = 0;
+        sem_getvalue(&raw mut sem, &raw mut val);
+        assert_eq!(val, 1, "a rejected timedwait must not decrement");
+    }
+
+    /// A negative `tv_sec` is a deadline in the past, not a malformed
+    /// timespec: `valid_nanoseconds` never looks at `tv_sec`.  With the
+    /// count exhausted this must time out rather than report `EINVAL`.
+    #[test]
+    fn test_sem_timedwait_negative_tv_sec_is_etimedout_not_einval() {
+        crate::errno::set_errno(0);
+        let mut sem = SemT {
+            value: core::sync::atomic::AtomicI32::new(0),
+        };
+        sem_init(&raw mut sem, 0, 0);
+        let ts = crate::stat::Timespec {
+            tv_sec: -1,
+            tv_nsec: 0,
+        };
+        assert_eq!(sem_timedwait(&raw mut sem, &ts), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ETIMEDOUT);
     }
 
     // -- sem_init with pshared (ignored but accepted) --

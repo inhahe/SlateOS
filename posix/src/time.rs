@@ -79,6 +79,27 @@ pub struct Timeval {
 // Functions
 // ---------------------------------------------------------------------------
 
+/// Is `ns` a well-formed `timespec.tv_nsec`?
+///
+/// This is glibc's `valid_nanoseconds` (`include/time.h:517`) verbatim:
+/// `0 <= ns && ns < 1000000000`.  It deliberately says nothing about
+/// `tv_sec` — a negative `tv_sec` is a *deadline in the past*, not a
+/// malformed timespec, so the blocking primitives that use this predicate
+/// (`pthread_cond_timedwait`, `pthread_mutex_timedlock`, `sem_timedwait`)
+/// return `ETIMEDOUT` for it rather than `EINVAL`.
+///
+/// Do not confuse it with the kernel's `timespec64_valid`
+/// (`include/linux/time64.h`), which *does* reject `tv_sec < 0` ("Dates
+/// before 1970 are bogus") and is the predicate behind the `EINVAL` from
+/// `mq_timedsend`/`mq_timedreceive`.  The two rules genuinely differ, and
+/// which one applies depends on whether the deadline is interpreted by
+/// glibc or handed to a syscall.
+#[must_use]
+#[inline]
+pub(crate) fn valid_nanoseconds(ns: i64) -> bool {
+    (0..1_000_000_000).contains(&ns)
+}
+
 /// Sleep for a specified number of seconds.
 ///
 /// Returns 0 on success, or the remaining seconds if interrupted.

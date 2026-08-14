@@ -974,7 +974,16 @@ fn deadline_from_timespec(p: *const Timespec) -> Result<u64, ()> {
     }
     // SAFETY: caller contract.
     let ts = unsafe { *p };
-    if ts.tv_nsec < 0 || ts.tv_nsec >= 1_000_000_000 {
+    // The kernel's rule, not glibc's: `mq_timedsend`/`mq_timedreceive` are
+    // bare syscalls, so the deadline is vetted by `prepare_timeout`
+    // (ipc/mqueue.c) → `timespec64_valid` (include/linux/time64.h), which
+    // rejects `tv_sec < 0` outright ("Dates before 1970 are bogus") as well
+    // as an out-of-range `tv_nsec`.  That is stricter than glibc's
+    // `valid_nanoseconds`, which the pthread and semaphore timed waits use
+    // and which treats a negative `tv_sec` as a deadline in the past rather
+    // than a malformed timespec.  Both rules are right for their own
+    // callers; do not share one predicate between them.
+    if ts.tv_sec < 0 || !crate::time::valid_nanoseconds(ts.tv_nsec) {
         errno::set_errno(errno::EINVAL);
         return Err(());
     }
@@ -1514,6 +1523,32 @@ mod tests {
             tv_nsec: 2_000_000_000,
         };
         let r = mq_timedsend(fd, b"x".as_ptr(), 1, 0, &raw const bad);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(mq_close(fd), 0);
+    }
+
+    /// The mq_* deadline is vetted by the kernel, not by glibc:
+    /// `prepare_timeout` (ipc/mqueue.c) calls `timespec64_valid`, which
+    /// rejects `tv_sec < 0` ("Dates before 1970 are bogus").  glibc's
+    /// `valid_nanoseconds` — used by the pthread and semaphore timed waits —
+    /// does not, and there a negative `tv_sec` merely times out.  The two
+    /// families follow different rules on purpose.
+    #[test]
+    fn test_timedsend_negative_tv_sec_einval() {
+        let fd = open_default(b"/qtnegsec\0", O_NONBLOCK);
+        assert!(fd > 0);
+        let bad = Timespec {
+            tv_sec: -1,
+            tv_nsec: 0,
+        };
+        let r = mq_timedsend(fd, b"x".as_ptr(), 1, 0, &raw const bad);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        // Same rule on the receive side; both go through
+        // `deadline_from_timespec`.
+        let mut buf = [0u8; 64];
+        let r = mq_timedreceive(fd, buf.as_mut_ptr(), 64, core::ptr::null_mut(), &raw const bad);
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
         assert_eq!(mq_close(fd), 0);

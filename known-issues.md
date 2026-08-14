@@ -58343,46 +58343,70 @@ defect marker.** Three for three. When you find one, do not evaluate the
 argument — go read the upstream function, because the argument exists precisely
 because nobody did.
 
-### [B] D-POSIX-SOCKET-META-WAS-NOT-SCOPED-TO-ITS-FD-TABLE — ✅ FIXED 2026-08-14
+**Ninth pass, 2026-08-14 — the timed waits (4 sites).** This one started as a
+`pthread.rs` pass and immediately stopped being one: §303 had already walked
+that file, so there was nothing left to classify there. What the re-read *did*
+surface is that none of the blocking primitives validated `tv_nsec` at all.
+glibc has a single shared predicate for it, `valid_nanoseconds`
+(`include/time.h:517`, `0 <= ns && ns < 1000000000`), and calls it from
+`pthread_cond_timedwait`, `pthread_mutex_timedlock`, the rwlock timed
+variants and `sem_timedwait`. We called it from none of them, so a malformed
+deadline silently became a very long — or instantly expired — wait.
 
-**Found while running the eighth audit pass**, not by looking for it:
-`socket::tests::test_phase201_bind_port443_no_cap_eacces` failed once with
-`ENOTSOCK` where `EACCES` was expected, then passed three runs in a row.
+The interesting part is that the *same* predicate is invoked from three
+different places in the control flow, and the differences are deliberate:
 
-`SOCKET_META` (posix/src/socket.rs) is indexed by fd number, so it must have
-exactly the same scope as the fd table it is keyed by. `fdtable` made its
-storage **per-thread** on host builds (design-decisions.md §110) precisely
-because libtest runs tests on parallel threads. `SOCKET_META` stayed a
-process-global `static mut`, and the mismatch was reachable: two tests on
-different threads each create a socket and, drawing from *separate* per-thread
-fd tables, both get the same fd number `N` — near-certain, not unlikely, since
-each thread's table starts empty. They then shared one `SOCKET_META[N]`, and
-the first to `close()` wiped the entry the other was still using, whose next
-call saw a live fd with no metadata and reported `ENOTSOCK` for a good socket.
+- `pthread_cond_timedwait` checks **first**, before the mutex is released
+  (`nptl/pthread_cond_wait.c:635` is the function's opening statement). The
+  rejection is side-effect-free and the caller still holds the mutex.
+- `pthread_mutex_timedlock` checks **lazily**, inside the contended branch —
+  `nptl/pthread_mutex_timedlock.c:221` is literally commented "We are about
+  to block; check whether the timeout is invalid." So an *uncontended*
+  `timedlock` with `tv_nsec = 1e9` returns 0 and never reads the timespec.
+  POSIX licenses this: "the validity of the abstime parameter need not be
+  checked if the lock can be immediately acquired."
+- `sem_timedwait` checks **eagerly**, above `__new_sem_wait_fast`
+  (`nptl/sem_timedwait.c:28`), so the same call shape that succeeds for a
+  mutex is `EINVAL` for a semaphore.
 
-Fixed by giving `SOCKET_META` the same `cfg`-split storage as
-`fdtable::fd_store`. Six consecutive full runs clean afterwards.
+That is the sixth pass's "do not generalise from a sibling" rule again, but
+sharper: here the three call sites share a *predicate* and still differ in
+placement, and glibc knows it — `pthread_rwlock_common.c:286-291` carries a
+comment explaining that the rwlocks were **switched from lazy to eager**, with
+POSIX permitting either. So the lesson is not just that siblings differ, it is
+that **a shared helper is not evidence of a shared control flow.** Porting the
+helper (the seventh pass's rule) is necessary and not sufficient; you still
+have to place each call where its own caller places it.
 
-Two things worth keeping from this. First, the `// SAFETY: Single-threaded
-access.` comments on these accesses were **true on the target and false under
-`cargo test`** — a safety comment that silently changes truth value with
-`cfg` is worse than none, and `fdtable` had already learned this lesson
-without the fix being propagated to the table keyed by its own indices.
-Second, an intermittent failure at roughly one run in four is easy to
-dismiss as noise when it appears in a test unrelated to what you are
-changing; it was worth the ten minutes to chase.
+The fourth site is the counterexample that keeps the predicate honest.
+`mq_timedsend`/`mq_timedreceive` are bare syscalls, so their deadline is
+vetted by the *kernel*: `prepare_timeout` (ipc/mqueue.c) → `timespec64_valid`
+(include/linux/time64.h), which additionally rejects `tv_sec < 0` ("Dates
+before 1970 are bogus"). glibc's `valid_nanoseconds` never looks at `tv_sec`,
+so a negative one is a deadline in the past — `ETIMEDOUT`, not `EINVAL`. Our
+`deadline_from_timespec` had the nsec half and was missing the `tv_sec` half.
+Two predicates that look interchangeable, differ in one line, and apply to
+adjacent functions in the same crate: the §300 question ("does the pointer
+reach a syscall") turns out to decide not only the errno but *which validity
+rule applies at all*.
 
-**What remains.** The ~157 surviving `is_null() -> EFAULT` sites have not been
+Habit from this pass: **when you find a validation missing, find its
+predicate upstream before you write one** — and then check whether the
+upstream predicate is glibc's or the kernel's, because the two disagree and
+the disagreement is load-bearing.
+
+**What remains.** The surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
-specific remaining site is known wrong. With `file.rs` done, the one remaining
-dense cluster is `pthread.rs` (~48); after that the list is a long tail —
-`process.rs` (10), `epoll.rs` (9), then a run of files with eight or fewer
-each. `pthread.rs` is a different shape of pass from the seven before it: its
-upstream is not a syscall wrapper at all but nptl's own C, so for most of its
-entry points "does the pointer reach a syscall" has the answer *no* and the
-question becomes which of glibc's own early returns fires first — expect
-`EINVAL` and `ESRCH` to matter more than `EFAULT` there, and expect a good
-number of the sites to be checks glibc does not make at all.
+specific remaining site is known wrong. **No dense cluster is left.**
+`pthread.rs` looks like the largest concentration in a raw `rg` count (~48
+sites), but it is not open work: design-decisions.md §303 already walked it,
+fixed its nine ordering bugs, and settled the pointer sites wholesale —
+NPTL has no NULL checks at all, so there is no upstream errno to look up and
+`EFAULT` is the adopted substitute. Do not re-open it by grep count. After
+`file.rs`, the largest genuinely-unclassified files are `process.rs` (10) and
+`epoll.rs` (9), and everything below that is a long tail of eight or fewer per
+file — a shape that argues for retiring this entry by sampling rather than by
+another file-at-a-time sweep.
 
 Four habits carry forward, one per pass that produced one. From `socket.rs`:
 **do not generalise a rule from one sibling call to the next** — `bind` and
@@ -58434,3 +58458,63 @@ Do **not** do this audit from man pages:
 `ptsname_r`'s documented `EINVAL` has not matched any glibc implementation
 since the TIOCGPTN fast path landed, and trusting the man page is exactly how
 the first attempt at this fix went wrong.
+
+### [B] D-POSIX-SOCKET-META-WAS-NOT-SCOPED-TO-ITS-FD-TABLE — ✅ FIXED 2026-08-14
+
+**Found while running the eighth audit pass**, not by looking for it:
+`socket::tests::test_phase201_bind_port443_no_cap_eacces` failed once with
+`ENOTSOCK` where `EACCES` was expected, then passed three runs in a row.
+
+`SOCKET_META` (posix/src/socket.rs) is indexed by fd number, so it must have
+exactly the same scope as the fd table it is keyed by. `fdtable` made its
+storage **per-thread** on host builds (design-decisions.md §110) precisely
+because libtest runs tests on parallel threads. `SOCKET_META` stayed a
+process-global `static mut`, and the mismatch was reachable: two tests on
+different threads each create a socket and, drawing from *separate* per-thread
+fd tables, both get the same fd number `N` — near-certain, not unlikely, since
+each thread's table starts empty. They then shared one `SOCKET_META[N]`, and
+the first to `close()` wiped the entry the other was still using, whose next
+call saw a live fd with no metadata and reported `ENOTSOCK` for a good socket.
+
+Fixed by giving `SOCKET_META` the same `cfg`-split storage as
+`fdtable::fd_store`. Six consecutive full runs clean afterwards.
+
+Two things worth keeping from this. First, the `// SAFETY: Single-threaded
+access.` comments on these accesses were **true on the target and false under
+`cargo test`** — a safety comment that silently changes truth value with
+`cfg` is worse than none, and `fdtable` had already learned this lesson
+without the fix being propagated to the table keyed by its own indices.
+Second, an intermittent failure at roughly one run in four is easy to
+dismiss as noise when it appears in a test unrelated to what you are
+changing; it was worth the ten minutes to chase.
+
+### [B] D-POSIX-TIMED-WAITS-DID-NOT-VALIDATE-TV-NSEC — ✅ FIXED 2026-08-14
+
+`pthread_cond_timedwait`, `pthread_mutex_timedlock` and `sem_timedwait`
+accepted any `timespec` whatsoever. A `tv_nsec` of `1_000_000_000` or `-1` —
+the classic result of adding a nanosecond offset without carrying into
+`tv_sec` — should be `EINVAL` (glibc `valid_nanoseconds`, `include/time.h:517`);
+instead it fell through to the deadline comparison, where a too-large
+`tv_nsec` silently extended the wait by up to a second and a negative one made
+the call return `ETIMEDOUT` immediately. Both are wrong in the direction that
+hides the caller's bug. Separately, `mqueue::deadline_from_timespec` checked
+`tv_nsec` but not `tv_sec < 0`, which the kernel's `timespec64_valid` rejects.
+
+Fixed by adding `time::valid_nanoseconds` (glibc's predicate, verbatim) and
+calling it from each site **at the position its own upstream uses** — eagerly
+in `pthread_cond_timedwait` and `sem_timedwait`, lazily (contended branch
+only) in `pthread_mutex_timedlock` — plus the missing `tv_sec` half in
+`mqueue`. See the ninth-pass write-up under
+`D-POSIX-NULL-POINTER-ERRNO-NEEDS-A-PER-FUNCTION-AUDIT` for why the three
+placements differ and why the mqueue predicate is not the same predicate.
+
+Seven tests pin the distinctions, including the two that would silently pass
+under a naive "check it at the top of every function" fix:
+`test_pthread_mutex_timedlock_uncontended_ignores_a_bad_deadline` and
+`test_sem_timedwait_checks_the_deadline_before_the_fast_path`.
+
+**Not fixed, because we do not have them:** `pthread_cond_clockwait`,
+`sem_clockwait` and the `pthread_rwlock_{timed,clock}{rd,wr}lock` family are
+unimplemented. When they are added they need the same predicate plus
+`futex_abstimed_supported_clockid`, and the rwlocks check **eagerly** — see
+the comment at `pthread_rwlock_common.c:286-291`.

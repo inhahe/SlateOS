@@ -29,6 +29,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::FontMetrics;
+use crate::bidi::{self, Base, Level};
 use crate::gsub::SubGlyph;
 use crate::joining::{self, Form};
 use crate::norm;
@@ -165,6 +166,17 @@ impl ScaledFont {
     #[must_use]
     pub fn shared_face(&self) -> Arc<Face> {
         Arc::clone(&self.face)
+    }
+
+    /// The face's design grid, in units per em.
+    ///
+    /// Only interesting to a caller comparing this crate's output with another
+    /// shaper's: pin a face to this many pixels and the scale factor is one,
+    /// so shaped advances come out in the font's own units, which is what
+    /// every other shaper reports. `examples/shape_dump.rs` does exactly that.
+    #[must_use]
+    pub fn units_per_em(&self) -> u16 {
+        self.face.units_per_em()
     }
 
     /// Read a font file and pin it to a size in one step.
@@ -397,16 +409,45 @@ impl ScaledFont {
     /// widget measure its label without paying to draw it.
     #[must_use]
     pub fn shape(&self, text: &str) -> ShapedRun {
-        // Five passes, because each one needs all of the previous one's
-        // output. Normalization settles *which characters there are* and so
-        // must finish before any of them is looked up in `cmap`; `GSUB`
-        // decides which glyphs there are, and cannot run while characters are
-        // still arriving; kerning applies to the glyphs that *survive*
-        // substitution, so `fi` must be kerned as the single glyph it became,
-        // not as the `f` and `i` it was; and a mark's placement is measured
-        // from a pen that kerning is still moving.
+        // Six passes, because each one needs all of the previous one's
+        // output. Bidi settles which characters are mirrored and where the
+        // direction boundaries are, and it reads the string as typed;
+        // normalization settles *which characters there are* and so must
+        // finish before any of them is looked up in `cmap`; `GSUB` decides
+        // which glyphs there are, and cannot run while characters are still
+        // arriving; kerning applies to the glyphs that *survive* substitution,
+        // so `fi` must be kerned as the single glyph it became, not as the `f`
+        // and `i` it was; reordering needs the finished glyphs; and a mark's
+        // placement is measured from a pen that both kerning and reordering
+        // are still moving.
         let space = self.glyph_id(' ');
-        let pieces = norm::pieces(text, |ch| self.face.glyph_index(ch).is_some());
+        // A level per byte of `text`, indexed by the byte offset a character
+        // starts at — which is what a glyph's cluster is, whatever
+        // substitution did to the glyph count. Empty for text that needs no
+        // bidi at all, which is every left-to-right string.
+        let levels = byte_levels(text);
+        let mut pieces = norm::pieces(text, |ch| self.face.glyph_index(ch).is_some());
+        // A level per *piece*, for the run splitter, and rule L4 while we are
+        // here: a bracket in a right-to-left run is drawn as its pair, because
+        // the character encodes the bracket that *opens* and which side that
+        // is depends on which way the text runs.
+        let piece_levels: Vec<Level> = if levels.is_empty() {
+            Vec::new()
+        } else {
+            let out: Vec<Level> = pieces
+                .iter()
+                .map(|&(_, at)| levels.get(at).copied().unwrap_or(0))
+                .collect();
+            for (piece, level) in pieces.iter_mut().zip(out.iter()) {
+                if !level.is_multiple_of(2)
+                    && let Some(m) = bidi::mirror(piece.0)
+                    && self.face.glyph_index(m).is_some()
+                {
+                    piece.0 = m;
+                }
+            }
+            out
+        };
         // Which cursive form each character takes, decided from the characters
         // rather than the glyphs because it is a property of the *text*: what
         // a letter joins to does not depend on which face is drawing it. Empty
@@ -434,7 +475,11 @@ impl ScaledFont {
             // Glyphs are still one per piece here, so a run boundary counted
             // in pieces is a boundary counted in glyphs. That stops being true
             // the moment anything ligates, which is why the split happens now.
-            self.substitute_runs(&script::runs(&pieces), &mut glyphs, &mut tabs);
+            self.substitute_runs(
+                &script::runs(&pieces, &piece_levels),
+                &mut glyphs,
+                &mut tabs,
+            );
         }
 
         let marked = self.face.has_marks();
@@ -512,10 +557,30 @@ impl ScaledFont {
             }
         }
 
+        // Rule L2, over glyphs rather than characters: a ligature is one glyph
+        // for several characters and a decomposition several glyphs for one,
+        // so by now the run has no one-to-one correspondence left with the
+        // string — but every glyph still knows the byte it came from, and so
+        // its level.
+        let visual = if levels.is_empty() {
+            Vec::new()
+        } else {
+            let per_glyph: Vec<Level> = out
+                .iter()
+                .map(|g| levels.get(g.cluster).copied().unwrap_or(0))
+                .collect();
+            let order = bidi::visual_order(&per_glyph);
+            recharge_kerns(&mut out, &order);
+            order
+                .into_iter()
+                .map(|i| u32::try_from(i).unwrap_or(u32::MAX))
+                .collect()
+        };
+
         if marked {
-            self.attach_marks(&mut out);
+            self.attach_marks(&mut out, &visual);
         }
-        ShapedRun::new(out)
+        ShapedRun::reordered(out, visual)
     }
 
     /// Substitute each stretch of `glyphs` between tabs and script changes,
@@ -609,13 +674,30 @@ impl ScaledFont {
     /// is visibly wrong, but it is wrong in the way the font asked for: the
     /// alternative is inventing a placement, which would be wrong in a way
     /// nobody could trace back to the font.
-    fn attach_marks(&self, glyphs: &mut [ShapedGlyph]) {
+    fn attach_marks(&self, glyphs: &mut [ShapedGlyph], visual: &[u32]) {
         // Where each glyph's pen sits, which is what an offset is measured
-        // against.
+        // against — indexed by logical position, but accumulated in *drawing*
+        // order, because a pen is a place on the line and reordering moves it.
+        // In a right-to-left word the mark is drawn before the letter it sits
+        // on, so its pen is the lower of the two and the displacement below
+        // comes out positive; in a left-to-right word it is the other way
+        // round. Neither case is special-cased: the subtraction is the same
+        // one, and it is right because both pens are real positions.
         let mut pen = 0.0f32;
-        let mut pens: Vec<f32> = Vec::with_capacity(glyphs.len());
-        for glyph in glyphs.iter() {
-            pens.push(pen);
+        let mut pens: Vec<f32> = Vec::new();
+        pens.resize(glyphs.len(), 0.0);
+        let logical = (0..glyphs.len()).map(|i| u32::try_from(i).unwrap_or(u32::MAX));
+        let drawn: Vec<u32> = if visual.is_empty() {
+            logical.collect()
+        } else {
+            visual.to_vec()
+        };
+        for v in drawn {
+            let Ok(i) = usize::try_from(v) else { continue };
+            let Some(glyph) = glyphs.get(i) else { continue };
+            if let Some(slot) = pens.get_mut(i) {
+                *slot = pen;
+            }
             pen += glyph.advance;
         }
 
@@ -712,7 +794,11 @@ impl ScaledFont {
         // Shaped up front, and into a local, because the loop needs `&mut
         // self` to rasterize while it walks the run.
         let run = self.shape(text);
-        for shaped in run.glyphs() {
+        // Drawing order, not logical order: in a right-to-left run the two
+        // differ, and it is this loop's accumulating pen that makes the
+        // difference visible.
+        let drawn: Vec<ShapedGlyph> = run.draw_order().copied().collect();
+        for shaped in &drawn {
             let advance = shaped.advance;
             let Ok(glyph) = self.glyph(shaped.key.gid()) else {
                 pen += advance;
@@ -736,6 +822,86 @@ impl ScaledFont {
             pen += advance;
         }
         pen
+    }
+}
+
+/// A bidi embedding level per *byte* of `text`, at the offsets characters
+/// start at, or empty for text that needs no bidi at all.
+///
+/// Indexed by byte offset rather than by character because that is what
+/// survives the rest of the pipeline: normalization composes and decomposes,
+/// substitution ligates, and neither keeps a character count — but every
+/// piece and every glyph carries the byte offset it came from, and the level
+/// of the character starting there is the level it should be drawn at.
+///
+/// The whole of it is skipped for a string with no right-to-left character
+/// and no directional formatting in it, which is every string this crate is
+/// asked to draw on an English desktop. See [`bidi::is_trivially_ltr`].
+fn byte_levels(text: &str) -> Vec<Level> {
+    if bidi::is_trivially_ltr(text) {
+        return Vec::new();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    // `Base::Auto` — rule P2 — because the direction of a string is a
+    // property of what it says. A caller that knows better (a UI label in a
+    // left-to-right layout, say) cannot say so yet; that is a signature
+    // change, filed as `TD-FONT-CANNOT-BE-TOLD-A-PARAGRAPH-DIRECTION` in
+    // `known-issues.md`.
+    let para = bidi::resolve(&chars, Base::Auto);
+    let mut out: Vec<Level> = vec![0; text.len()];
+    for ((at, _), level) in text.char_indices().zip(para.render_levels()) {
+        if let Some(slot) = out.get_mut(at) {
+            *slot = level;
+        }
+    }
+    out
+}
+
+/// Move each kern onto the glyph that is now to the *left* of the pair.
+///
+/// Kerning is a correction to the gap between two glyph images. Which of the
+/// two carries it in its advance is bookkeeping — but it is bookkeeping that
+/// depends on the order they are drawn in, because an advance pushes the pen
+/// rightwards regardless of which way the text reads. The shaping pass charges
+/// every kern to the pair's logically-first glyph, which is the left one in
+/// left-to-right text; after rule L2 has reversed a run, the left one is the
+/// logically-*second*, and leaving the kern where it was would put the gap on
+/// the far side of the pair — visible as a word whose letters are correctly
+/// ordered and incorrectly spaced.
+///
+/// So: strip every kern, then walk the pairs that are actually adjacent on
+/// the line and give each its own kern back. A pair that became adjacent only
+/// through reordering — the two glyphs either side of a direction boundary —
+/// gets nothing, which is right: they were never kerned as a pair, and
+/// HarfBuzz does not kern across a run boundary either.
+fn recharge_kerns(glyphs: &mut [ShapedGlyph], order: &[usize]) {
+    let kerns: Vec<f32> = glyphs.iter().map(|g| g.kern_next).collect();
+    if kerns.iter().all(|&k| k == 0.0) {
+        return;
+    }
+    for glyph in glyphs.iter_mut() {
+        glyph.advance -= glyph.kern_next;
+        glyph.kern_next = 0.0;
+    }
+    for pair in order.windows(2) {
+        let (Some(&left), Some(&right)) = (pair.first(), pair.get(1)) else {
+            continue;
+        };
+        let kern = if right == left.saturating_add(1) {
+            // Still in logical order: the kern is already the left glyph's.
+            kerns.get(left).copied().unwrap_or(0.0)
+        } else if left == right.saturating_add(1) {
+            // Reversed: the pair was charged to what is now the right glyph.
+            kerns.get(right).copied().unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        if kern != 0.0
+            && let Some(glyph) = glyphs.get_mut(left)
+        {
+            glyph.advance += kern;
+            glyph.kern_next = kern;
+        }
     }
 }
 
@@ -1115,5 +1281,77 @@ mod tests {
         blit_mask(&mask, &mut target, 0, 0);
         let grey = buf[0] & 0xFF;
         assert!((100..=160).contains(&grey), "expected mid grey, got {grey}");
+    }
+
+    /// `n` glyphs 10 px wide, with `kern` charged to glyph `at` as the
+    /// shaping pass charges it: added to the advance *and* recorded.
+    fn kerned(n: usize, at: usize, kern: f32) -> alloc::vec::Vec<ShapedGlyph> {
+        (0..n)
+            .map(|i| ShapedGlyph {
+                key: crate::shape::GlyphKey::outline(u16::try_from(i).unwrap()),
+                cluster: i,
+                advance: if i == at { 10.0 + kern } else { 10.0 },
+                kern_next: if i == at { kern } else { 0.0 },
+                offset: (0.0, 0.0),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_reversal_moves_a_kern_to_the_pair_s_new_left_glyph() {
+        // Three glyphs, the pair (0,1) kerned by -2, drawn right to left.
+        let mut glyphs = kerned(3, 0, -2.0);
+        recharge_kerns(&mut glyphs, &[2, 1, 0]);
+        // Glyph 1 is now the left half of the pair, so it holds the kern and
+        // glyph 0 — now on the right, kerning against nothing — does not.
+        assert!((glyphs[1].kern_next + 2.0).abs() < f32::EPSILON);
+        assert!((glyphs[1].advance - 8.0).abs() < f32::EPSILON);
+        assert!(glyphs[0].kern_next.abs() < f32::EPSILON);
+        assert!((glyphs[0].advance - 10.0).abs() < f32::EPSILON);
+        // The line is the same width either way round.
+        let width: f32 = glyphs.iter().map(|g| g.advance).sum();
+        assert!((width - 28.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_kern_survives_an_order_that_did_not_change() {
+        let mut glyphs = kerned(3, 1, -2.0);
+        recharge_kerns(&mut glyphs, &[0, 1, 2]);
+        assert!((glyphs[1].kern_next + 2.0).abs() < f32::EPSILON);
+        assert!((glyphs[1].advance - 8.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_pair_the_reversal_invented_is_not_kerned() {
+        // (0,1) were kerned; the order draws 0 beside 2, which never were a
+        // pair. Charging them anything would invent a correction the face
+        // never asked for.
+        let mut glyphs = kerned(3, 0, -2.0);
+        recharge_kerns(&mut glyphs, &[2, 0, 1]);
+        assert!(glyphs[2].kern_next.abs() < f32::EPSILON);
+        // 0 is followed by 1 here, so that pair keeps its kern.
+        assert!((glyphs[0].kern_next + 2.0).abs() < f32::EPSILON);
+        let width: f32 = glyphs.iter().map(|g| g.advance).sum();
+        assert!((width - 28.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn an_unkerned_run_is_left_exactly_as_it_was() {
+        let mut glyphs = kerned(3, 0, 0.0);
+        let before = glyphs.clone();
+        recharge_kerns(&mut glyphs, &[2, 1, 0]);
+        assert_eq!(glyphs, before);
+    }
+
+    #[test]
+    fn levels_are_not_resolved_for_text_that_cannot_need_them() {
+        assert!(byte_levels("The quick brown fox").is_empty());
+        assert!(byte_levels("").is_empty());
+        // Every byte of a two-byte character gets the level, so a lookup by
+        // cluster start cannot miss.
+        let levels = byte_levels("a\u{5d0}");
+        assert_eq!(levels.len(), 3);
+        assert_eq!(levels[0], 0);
+        assert_eq!(levels[1], 1);
     }
 }

@@ -257,42 +257,144 @@ impl Paragraph {
     /// after X9 for exactly that reason.
     #[must_use]
     pub fn reorder(&self) -> Vec<usize> {
-        let mut order: Vec<usize> = self.retained.clone();
         let levels: Vec<Level> = self
             .retained
             .iter()
             .map(|&i| self.levels.get(i).copied().unwrap_or(self.level))
             .collect();
-        let Some(&highest) = levels.iter().max() else {
-            return order;
-        };
-        // The lowest odd level, which is where the reversing stops. Levels
-        // below it are all even and all left-to-right, so reversing them would
-        // be wrong.
-        let Some(&lowest_odd) = levels.iter().filter(|l| *l % 2 == 1).min() else {
-            return order;
-        };
-
-        let mut level = highest;
-        while level >= lowest_odd && level > 0 {
-            let mut i = 0;
-            while i < levels.len() {
-                if levels.get(i).is_none_or(|&l| l < level) {
-                    i = i.saturating_add(1);
-                    continue;
-                }
-                let start = i;
-                while levels.get(i).is_some_and(|&l| l >= level) {
-                    i = i.saturating_add(1);
-                }
-                if let Some(slice) = order.get_mut(start..i) {
-                    slice.reverse();
-                }
-            }
-            level = level.saturating_sub(1);
-        }
-        order
+        visual_order(&levels)
+            .into_iter()
+            .map(|at| self.retained.get(at).copied().unwrap_or(at))
+            .collect()
     }
+
+    /// A level per character for a *renderer*, with the characters rule X9
+    /// removed given a neighbour's level instead of their own.
+    ///
+    /// [`levels`](Self::levels) reports what the algorithm resolved, where a
+    /// removed character keeps the level in force *before* it. That is right
+    /// for the algorithm and wrong for a glyph stream that still contains the
+    /// character: an `LRE` between two Arabic letters would sit at level 0
+    /// between two level-1 neighbours, splitting one level run into two, and
+    /// L2 would then reverse the two halves separately and put the word in the
+    /// wrong order. [`reorder`](Self::reorder) avoids that by dropping the
+    /// removed characters entirely — but a shaper cannot always drop them,
+    /// because `ZWJ` is one of them and Arabic joining is decided by it.
+    ///
+    /// So here they ride along with their neighbours: each takes the level of
+    /// the character before it that survived X9, or the paragraph's own level
+    /// when there is none. They are invisible either way; all that matters is
+    /// that they never divide a run.
+    #[must_use]
+    pub fn render_levels(&self) -> Vec<Level> {
+        let mut out = self.levels.clone();
+        if self.retained.len() == self.levels.len() {
+            return out;
+        }
+        let mut prev = self.level;
+        for i in 0..out.len() {
+            if self.original.get(i).is_some_and(|c| c.is_removed_by_x9()) {
+                if let Some(slot) = out.get_mut(i) {
+                    *slot = prev;
+                }
+            } else {
+                prev = out.get(i).copied().unwrap_or(prev);
+            }
+        }
+        out
+    }
+}
+
+/// Rule L2 over a level per item: the order those items are drawn in.
+///
+/// From the highest level down to the lowest odd level, reverse every
+/// contiguous stretch at or above that level. The nesting falls out of doing
+/// it repeatedly — an English phrase inside an Arabic sentence is reversed
+/// once as part of the Arabic and once on its own, which puts it back the
+/// right way round.
+///
+/// Taking a level array rather than a [`Paragraph`] is what lets a shaper
+/// apply L2 to *glyphs*: a ligature is one glyph for several characters and a
+/// decomposition is several glyphs for one, so by the time there is something
+/// to draw the run no longer has one item per character. What it does still
+/// have is a level per item.
+#[must_use]
+pub fn visual_order(levels: &[Level]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..levels.len()).collect();
+    let Some(&highest) = levels.iter().max() else {
+        return order;
+    };
+    // The lowest odd level, which is where the reversing stops. Levels below
+    // it are all even and all left-to-right, so reversing them would be wrong.
+    // No odd level at all means nothing moves, which is the answer for every
+    // left-to-right string.
+    let Some(&lowest_odd) = levels.iter().filter(|l| !l.is_multiple_of(2)).min() else {
+        return order;
+    };
+
+    let mut level = highest;
+    while level >= lowest_odd && level > 0 {
+        let mut i = 0;
+        while i < levels.len() {
+            if levels.get(i).is_none_or(|&l| l < level) {
+                i = i.saturating_add(1);
+                continue;
+            }
+            let start = i;
+            while levels.get(i).is_some_and(|&l| l >= level) {
+                i = i.saturating_add(1);
+            }
+            if let Some(slice) = order.get_mut(start..i) {
+                slice.reverse();
+            }
+        }
+        level = level.saturating_sub(1);
+    }
+    order
+}
+
+/// Can `text` be laid out without resolving it at all?
+///
+/// True when nothing in it can produce a right-to-left run: no strong
+/// right-to-left character, and no explicit directional formatting. Every
+/// character is then at an even level, [`visual_order`] is the identity and
+/// rule L4 mirrors nothing — so a shaper can skip the entire algorithm, which
+/// is the answer for English and for every other left-to-right script.
+///
+/// The code-point comparison is not a micro-optimization but the whole of the
+/// check's cost in the common case: the lowest right-to-left character in
+/// Unicode is U+0590, so a string of Latin, Greek, Cyrillic, Han or Devanagari
+/// is rejected by one comparison per character and never reaches the class
+/// table at all.
+///
+/// Note what is *not* here: `EN` and `AN` do raise a character's level (rule
+/// I1 takes a digit in left-to-right text to level 2), but only ever to an
+/// even one, so digits neither reverse nor mirror and do not disqualify the
+/// fast path.
+#[must_use]
+pub fn is_trivially_ltr(text: &str) -> bool {
+    /// U+0590, the first code point in the Hebrew block, below which no
+    /// character is `R`, `AL`, or an explicit directional formatting control.
+    const LOWEST_RTL: u32 = 0x590;
+    !text.chars().any(|ch| {
+        ch as u32 >= LOWEST_RTL
+            && matches!(
+                class(ch),
+                Class::R
+                    | Class::Al
+                    | Class::Rle
+                    | Class::Rlo
+                    | Class::Rli
+                    | Class::Fsi
+                    // These four cannot make a level odd by themselves, but
+                    // they are removed by rule X9 and so must not be drawn.
+                    // Sending them down the slow path is what removes them.
+                    | Class::Lre
+                    | Class::Lro
+                    | Class::Lri
+                    | Class::Pdf
+            )
+    })
 }
 
 /// `Bidi_Class` of one character.

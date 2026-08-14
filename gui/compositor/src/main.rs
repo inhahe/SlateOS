@@ -1810,7 +1810,13 @@ impl RenderEngine {
         // ends up off by half the difference, with neither process looking
         // wrong on its own.
         let run = font.shape(text);
-        for shaped in run.glyphs() {
+        // Drawing order, not logical order: the two differ only when the run
+        // contains right-to-left text, and there the logical order would put
+        // the first letter of a Hebrew word on the left — the word backwards.
+        // The truncation below is a further reason: `max_width` has to cut the
+        // glyphs that fall off the *right of the line*, which is what this
+        // walk reaches last only in this order.
+        for shaped in run.draw_order() {
             let advance = shaped.advance;
             // Measured before drawing, so a glyph that would cross the limit is
             // dropped whole rather than clipped down the middle.

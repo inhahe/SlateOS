@@ -120,7 +120,11 @@ def font_files(root):
 
 
 def ours(corpus, fonts):
-    """`{(path, index): [gid, ...]}` from this crate's shaper."""
+    """`{(path, index): ((lgids, lpos), (vgids, vpos))}` from this crate.
+
+    `l` is logical order, `v` is the order rule L2 draws in, and a position is
+    `(advance, dx, dy)` in font units.
+    """
     with tempfile.NamedTemporaryFile(
         "w", suffix=".txt", delete=False, encoding="utf-8", newline="\n"
     ) as f:
@@ -166,15 +170,39 @@ def ours(corpus, fonts):
     out = {}
     for line in run.stdout.splitlines():
         parts = line.split("\t")
-        if len(parts) != 3:
+        if len(parts) != 6:
             continue
-        path, index, gids = parts
-        out[(path, int(index))] = [int(g) for g in gids.split(",") if g]
+        path, index, logical, visual, logical_pos, visual_pos = parts
+        out[(path, int(index))] = (
+            (gids(logical), positions(logical_pos)),
+            (gids(visual), positions(visual_pos)),
+        )
     return out
 
 
+def gids(field):
+    return [int(g) for g in field.split(",") if g]
+
+
+def positions(field):
+    return [tuple(int(n) for n in p.split(";")) for p in field.split(",") if p]
+
+
 def theirs(path, strings):
-    """`[[gid, ...], ...]` from HarfBuzz, or `None` if it will not open."""
+    """`[([gid, ...], [(adv, dx, dy), ...], rtl), ...]`, or `None` if it will
+    not open.
+
+    `rtl` is the direction HarfBuzz guessed, and it decides which of our two
+    orders its answer is comparable to. HarfBuzz does no bidi of its own: it
+    picks one direction for the whole buffer, so its output is our *visual*
+    order when it guessed right-to-left and our *logical* order when it did
+    not. Comparing against the wrong one of those writes off every
+    right-to-left string as a difference, which is what this sweep used to do.
+
+    Positions are in font units: an `hb.Font` with no scale set reports the
+    face's own design units, which is why `shape_dump` builds its face at the
+    em size rather than at some pixel size that would round.
+    """
     try:
         with open(path, "rb") as f:
             blob = hb.Blob(f.read())
@@ -191,13 +219,77 @@ def theirs(path, strings):
         # whole string. It is the divergence the mixed-script entries in the
         # corpus are there to expose.
         buf.guess_segment_properties()
+        rtl = str(buf.direction).lower().endswith("rtl")
         try:
             hb.shape(font, buf)
         except Exception:  # noqa: BLE001
             out.append(None)
             continue
-        out.append([info.codepoint for info in buf.glyph_infos])
+        out.append(
+            (
+                [info.codepoint for info in buf.glyph_infos],
+                [
+                    (round(p.x_advance), round(p.x_offset), round(p.y_offset))
+                    for p in buf.glyph_positions
+                ],
+                rtl,
+            )
+        )
     return out
+
+
+# One font unit. Both sides print integers, but they round independently — a
+# position that is 249.5 in the design is allowed to be 249 on one side and 250
+# on the other. Two units apart is a real difference at any em size.
+TOLERANCE = 1
+
+
+def places(pos):
+    """`([(ink x, ink y), ...], total advance)` from `[(advance, dx, dy)]`.
+
+    Compare *this*, not the raw advances, because the two engines charge a
+    kern to different glyphs and both are right. HarfBuzz splits a legacy
+    `kern` value in half: the left glyph's advance takes `k >> 1` and the
+    right glyph takes the remainder in *both* its advance and its offset. We
+    put the whole correction on the left glyph's advance, which is what makes
+    a run's width the sum of its advances and what
+    [`ShapedGlyph::kern_next`] documents. Arial Rounded Bold shaping `Th`
+    (kern -27) is the worked example: HarfBuzz says advances 1266, 1224 with
+    the `h` offset -13; we say 1253, 1237 with no offset. Every glyph lands on
+    the same pixel and the run is the same width. Only a comparison of raw
+    advances would call that a disagreement.
+    """
+    x = 0
+    out = []
+    for adv, dx, dy in pos:
+        out.append((x + dx, dy))
+        x += adv
+    return out, x
+
+
+def same_positions(ours_pos, expected_pos):
+    ours, ours_width = places(ours_pos)
+    expected, expected_width = places(expected_pos)
+    if len(ours) != len(expected) or abs(ours_width - expected_width) > TOLERANCE:
+        return False
+    return all(
+        all(abs(a - b) <= TOLERANCE for a, b in zip(one, other))
+        for one, other in zip(ours, expected)
+    )
+
+
+def first_difference(ours_pos, expected_pos):
+    """The first glyph the two disagree about, rather than the whole run."""
+    ours, ours_width = places(ours_pos)
+    expected, expected_width = places(expected_pos)
+    if len(ours) != len(expected):
+        return f"{len(ours)} glyphs vs {len(expected)}"
+    for n, (one, other) in enumerate(zip(ours, expected)):
+        if any(abs(a - b) > TOLERANCE for a, b in zip(one, other)):
+            return f"glyph {n} at {one} vs {other}"
+    if abs(ours_width - expected_width) > TOLERANCE:
+        return f"width {ours_width} vs {expected_width}"
+    return "no difference"
 
 
 def main():
@@ -225,42 +317,69 @@ def main():
     mine = ours(CORPUS, fonts)
 
     agree = 0
-    reversed_only = Counter()
+    order_only = Counter()
+    placed = Counter()
     differ = Counter()
     examples = {}
+    placed_examples = {}
     skipped = 0
     for path in fonts:
         hb_out = theirs(path, strings)
         if hb_out is None:
             skipped += 1
             continue
-        for i, expected in enumerate(hb_out):
+        for i, answer in enumerate(hb_out):
             got = mine.get((path, i))
-            if got is None or expected is None:
+            if got is None or answer is None:
                 continue
-            if got == expected:
-                agree += 1
-            elif got == expected[::-1]:
-                # Same glyphs, opposite order: HarfBuzz reverses a
-                # right-to-left buffer so the caller can draw it left to
-                # right, and this crate does not reorder at all yet. The
-                # *shaping* agreed exactly, which for Arabic is the whole
-                # question — so this is worth separating from a real
-                # disagreement rather than burying in the total.
-                reversed_only[CORPUS[i]] += 1
+            expected, expected_pos, rtl = answer
+            # Ours in the order HarfBuzz was asked for: visual when it decided
+            # the buffer was right-to-left, logical when it did not.
+            logical, visual = got
+            ours_here, ours_pos = visual if rtl else logical
+            if ours_here == expected:
+                if same_positions(ours_pos, expected_pos):
+                    agree += 1
+                else:
+                    # The glyphs are right and they are in the right places
+                    # relative to each other only if this is empty. Kerning
+                    # and mark attachment live here and nowhere else in this
+                    # sweep: a mark stacked on the wrong base picks the same
+                    # glyph id as one stacked on the right base.
+                    placed[CORPUS[i]] += 1
+                    placed_examples.setdefault(
+                        CORPUS[i],
+                        (os.path.basename(path), ours_pos, expected_pos),
+                    )
+            elif sorted(ours_here) == sorted(expected):
+                # Same glyphs, different order. Now that this crate resolves
+                # bidi and HarfBuzz still does not, this is where the mixed
+                # strings land: HarfBuzz guesses one direction for the whole
+                # buffer and leaves the Arabic half of a Latin sentence
+                # backwards, where we reorder each run on its own. The
+                # *shaping* agreed exactly, so it is worth separating from a
+                # real disagreement rather than burying in the total.
+                order_only[CORPUS[i]] += 1
             else:
                 differ[CORPUS[i]] += 1
                 examples.setdefault(
-                    CORPUS[i], (os.path.basename(path), got, expected)
+                    CORPUS[i], (os.path.basename(path), ours_here, expected)
                 )
 
-    print(f"agree    {agree}")
-    print(f"reversed {sum(reversed_only.values())}  (same glyphs, RTL order)")
+    print(f"agree    {agree}  (same glyphs, same positions)")
+    print(f"reordered {sum(order_only.values())}  (same glyphs, different order)")
+    print(f"misplaced {sum(placed.values())}  (same glyphs, different positions)")
     print(f"differ   {sum(differ.values())}")
     print(f"faces HarfBuzz would not open: {skipped}")
-    if reversed_only:
-        print("\nreversed only, by string:")
-        for text, n in reversed_only.most_common():
+    if placed:
+        print("\nsame glyphs in different places, by string:")
+        for text, n in placed.most_common():
+            face, got, expected = placed_examples[text]
+            print(f"  {n:5}  {text!r}")
+            print(f"         e.g. {face}: {first_difference(got, expected)}")
+    if order_only:
+        print("\nsame glyphs in a different order, by string:")
+        for text, n in order_only.most_common():
             print(f"  {n:5}  {text!r}")
     if differ:
         print("\nby string, most disagreed first:")

@@ -157,22 +157,91 @@ pub struct ShapedGlyph {
 }
 
 /// The glyphs a string turns into, ready to draw.
+///
+/// The glyphs are in **logical** order — the order the characters were typed
+/// in — and [`draw_order`](Self::draw_order) gives the order they are drawn
+/// in, which differs only for text containing a right-to-left run. Keeping
+/// logical order as the storage order is what lets every query below stay in
+/// terms of the string: a cluster is a byte offset, clusters only ever
+/// increase along the array, and a caret or a cut is a position in the text
+/// rather than a position on the screen.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ShapedRun {
     glyphs: Vec<ShapedGlyph>,
+    /// Logical index of each glyph, in the order they are drawn (rule L2), or
+    /// empty when that is the identity — which it is for all left-to-right
+    /// text, and so for nearly every run this crate ever builds.
+    visual: Vec<u32>,
 }
 
 impl ShapedRun {
-    /// Build a run from its glyphs. Crate-internal: only a font knows how to
-    /// produce a correct one.
+    /// Build a run from its glyphs, drawn in the order they are given.
+    /// Crate-internal: only a font knows how to produce a correct one.
     pub(crate) fn new(glyphs: Vec<ShapedGlyph>) -> Self {
-        Self { glyphs }
+        Self {
+            glyphs,
+            visual: Vec::new(),
+        }
     }
 
-    /// The glyphs, in drawing order.
+    /// The same, for a run whose glyphs are drawn in some other order.
+    ///
+    /// `visual` is one logical index per glyph, in drawing order — rule L2's
+    /// output. A `visual` that is the identity is dropped, so that the common
+    /// case costs nothing to carry and [`is_reordered`](Self::is_reordered)
+    /// answers what it says it does.
+    pub(crate) fn reordered(glyphs: Vec<ShapedGlyph>, visual: Vec<u32>) -> Self {
+        let identity = visual
+            .iter()
+            .enumerate()
+            .all(|(i, &v)| usize::try_from(v).is_ok_and(|v| v == i));
+        Self {
+            glyphs,
+            visual: if identity { Vec::new() } else { visual },
+        }
+    }
+
+    /// The glyphs in **logical** order: glyph *n* comes from text no earlier
+    /// than glyph *n − 1*.
+    ///
+    /// This is the order to walk for anything about the *text* — clusters,
+    /// carets, cuts. To put ink on a screen use [`draw_order`](Self::draw_order)
+    /// instead, which is the same glyphs rearranged by rule L2. The two agree
+    /// unless the run contains right-to-left text.
     #[must_use]
     pub fn glyphs(&self) -> &[ShapedGlyph] {
         &self.glyphs
+    }
+
+    /// The glyphs in the order they are drawn, left to right.
+    ///
+    /// Each glyph's `advance` moves the pen and each `offset` displaces its
+    /// ink, exactly as in a run that needed no reordering: the advances are
+    /// computed for *this* order, so a caller draws a bidirectional run with
+    /// the same three lines it draws an English one with.
+    pub fn draw_order(&self) -> impl Iterator<Item = &ShapedGlyph> + '_ {
+        let by_index = self
+            .visual
+            .iter()
+            .filter_map(|&v| self.glyphs.get(usize::try_from(v).ok()?));
+        // `chain` rather than a branch returning two types: the logical
+        // iterator is empty exactly when `visual` is populated.
+        let in_order: &[ShapedGlyph] = if self.visual.is_empty() {
+            &self.glyphs
+        } else {
+            &[]
+        };
+        in_order.iter().chain(by_index)
+    }
+
+    /// Is the drawing order different from the logical order?
+    ///
+    /// True only for a run containing right-to-left text. A caller that wants
+    /// to know whether its own cluster arithmetic is still geometrically
+    /// meaningful — a caret, a selection highlight — asks this.
+    #[must_use]
+    pub fn is_reordered(&self) -> bool {
+        !self.visual.is_empty()
     }
 
     /// Total width in pixels.
@@ -305,6 +374,11 @@ impl ShapedRun {
     /// right half of a letter puts the caret after it.
     ///
     /// `end` is the source string's length, for a click past the last glyph.
+    ///
+    /// Measures along the *logical* order, so on a run where
+    /// [`is_reordered`](Self::is_reordered) is true — one containing
+    /// right-to-left text — the answer is the position that many pixels into
+    /// the text rather than that many pixels across the screen. See `x_of`.
     #[must_use]
     pub fn offset_at(&self, offset: f32, end: usize) -> usize {
         if offset <= 0.0 {
@@ -335,6 +409,18 @@ impl ShapedRun {
     /// An offset inside a ligature reports the start of the ligature, since
     /// that is the only place a caret can honestly be drawn: the glyph has no
     /// interior boundary to point at.
+    ///
+    /// # Bidirectional text
+    ///
+    /// This sums advances in logical order, which is the distance *into the
+    /// text* rather than the distance *across the line*. The two are the same
+    /// number until the run contains a right-to-left stretch, and then they
+    /// are not: a caret in bidirectional text has two legitimate positions for
+    /// one byte offset, at the two ends of the direction boundary, and picking
+    /// between them needs the embedding levels this type does not yet carry.
+    /// [`is_reordered`](Self::is_reordered) is how a caller finds out that it
+    /// is in that case. Tracked as `TD-FONT-CARETS-ARE-NOT-BIDIRECTIONAL` in
+    /// `known-issues.md`.
     #[must_use]
     pub fn x_of(&self, at: usize, end: usize) -> f32 {
         let mut x = 0.0;
@@ -587,5 +673,51 @@ mod tests {
                 "fit_end({budget}) returned {start}, a suffix {width} px wide"
             );
         }
+    }
+
+    /// A run whose glyph keys spell `text`, so a drawing order is readable.
+    fn spelled(text: &str) -> Vec<ShapedGlyph> {
+        text.chars()
+            .enumerate()
+            .map(|(i, ch)| ShapedGlyph {
+                key: GlyphKey::bitmap(ch),
+                cluster: i,
+                advance: 10.0,
+                kern_next: 0.0,
+                offset: (0.0, 0.0),
+            })
+            .collect()
+    }
+
+    fn drawn(run: &ShapedRun) -> String {
+        run.draw_order().map(|g| g.key.ch()).collect()
+    }
+
+    #[test]
+    fn a_permutation_that_changes_nothing_is_not_stored() {
+        let run = ShapedRun::reordered(spelled("abc"), vec![0, 1, 2]);
+        assert!(!run.is_reordered());
+        // And the walk still works: it falls through to the glyph slice.
+        assert_eq!(drawn(&run), "abc");
+    }
+
+    #[test]
+    fn draw_order_follows_the_permutation_and_glyphs_do_not() {
+        let run = ShapedRun::reordered(spelled("abc"), vec![2, 1, 0]);
+        assert!(run.is_reordered());
+        assert_eq!(drawn(&run), "cba");
+        // The point of keeping both: clusters stay sorted for the queries.
+        let logical: String = run.glyphs().iter().map(|g| g.key.ch()).collect();
+        assert_eq!(logical, "abc");
+        assert!(run.glyphs().windows(2).all(|w| w[0].cluster <= w[1].cluster));
+    }
+
+    #[test]
+    fn a_partial_permutation_drops_glyphs_rather_than_panicking() {
+        // Nothing should build one, but `visual` is a plain vector and a
+        // reordering bug that produced an out-of-range index must not take
+        // the process with it.
+        let run = ShapedRun::reordered(spelled("abc"), vec![1, 9]);
+        assert_eq!(drawn(&run), "b");
     }
 }

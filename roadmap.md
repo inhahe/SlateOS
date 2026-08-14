@@ -371,13 +371,23 @@ Roadmap:
   shaping loop say what stood between a pair — so `A` and `V` keep kerning
   with an accent between them on the 82 of 139 host faces whose lookups ask
   for it, and do not on the ones that do not, matching HarfBuzz to the unit
-  on all five oracle faces. Next unblocked step is the rest of shaping: no
-  Indic reordering
-  (`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`), no bidi
-  (`TD-FONT-DOES-NOT-REORDER-RIGHT-TO-LEFT-TEXT`), no mark-attachment
-  lookup flags (`TD-FONT-IGNORES-GSUB-LOOKUP-FLAGS`), no language selection
-  (`TD-FONT-IGNORES-LANGSYS-OVERRIDES`), no mark-to-ligature attachment
-  (GPOS 5). Vello itself waits on `[A]`'s GPU driver.
+  on all five oracle faces. Bidi done (§415): `gui/font/src/bidi.rs` is a
+  full UAX #9 pass — all 91,707 cases of Unicode's `BidiCharacterTest.txt`
+  — resolved inside `shape`, because rule L4 mirroring must precede `cmap`,
+  `script::runs` must split on level parity, and kerns must be re-charged
+  onto the pair's new left glyph after the reversal. `ShapedRun` keeps
+  logical order and carries a permutation that `draw_order()` walks, left
+  empty when it would be the identity. The sweep's `reordered` bucket is 0
+  across 556 faces × 19 strings, and it now compares *positions* in font
+  units too, which found three further gaps. Next unblocked step is the
+  rest of shaping: no Indic reordering
+  (`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`), no fallback mark
+  positioning (`TD-FONT-HAS-NO-FALLBACK-MARK-POSITIONING`, the largest
+  measured divergence left — 489 of 559 misplaced runs), no GPOS single or
+  cursive adjustment (`TD-FONT-IGNORES-GPOS-SINGLE-AND-CURSIVE-ADJUSTMENTS`),
+  no language selection (`TD-FONT-IGNORES-LANGSYS-OVERRIDES`), no
+  mark-to-ligature attachment (GPOS 5). Vello itself waits on `[A]`'s GPU
+  driver.
 - `[C]` Wayland-inspired compositor: GPU acceleration, currently a software
   rasterizer (lines ~4605, ~4619)
 - `[C]` Video-encoded capture fallback, H.264/VP9 (lines ~4623, ~5060)

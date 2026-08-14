@@ -59142,6 +59142,30 @@ in logical order; `gui/font/src/script.rs` — `runs`, where levels would join
 scripts as a run boundary; `gui/font/tools/harfbuzz_sweep.py` — the
 `reversed_only` counter, which will drop to zero when this is done.
 
+**Resolved (2026-08-14).** `gui/font/src/bidi.rs` is the UAX #9 pass this
+asked for — all 91,707 cases of Unicode's `BidiCharacterTest.txt` pass — and
+`shape` now runs it. The shape of the fix is the one proposed above with one
+correction: the levels are resolved *inside* `shape` rather than above it,
+because three of the five things that depend on them are shaping decisions
+that a layout stage above the shaper cannot make. Rule L4 mirroring has to
+happen before `cmap`, or the wrong glyph is looked up; `script::runs` has to
+split on level parity, or a ligature forms across a direction change; and
+kerning has to be re-charged after the reversal, because a kern is charged to
+the pair's *logically*-first glyph and reversal makes that the right-hand one.
+`ShapedRun` keeps its glyphs in logical order — every existing query, every
+cluster invariant, unchanged — and carries a `visual: Vec<u32>` permutation
+beside them, which `draw_order()` walks and which is left empty when it would
+be the identity, so left-to-right text pays one `is_trivially_ltr` scan and
+nothing else. See `design-decisions.md` §415.
+
+The sweep's `reordered` count is **0** across all 556 host faces × 19 strings:
+every right-to-left string now matches HarfBuzz's glyph order exactly. Two
+things this entry mentioned are *not* resolved and are filed separately:
+`shape` still cannot be told a base direction other than `Base::Auto`
+(`TD-FONT-CANNOT-BE-TOLD-A-PARAGRAPH-DIRECTION`), and the caret queries still
+measure into the text rather than across the line
+(`TD-FONT-CARETS-ARE-NOT-BIDIRECTIONAL`).
+
 ## TD-FONT-IGNORES-GSUB-LOOKUP-FLAGS
 
 **What.** Every GSUB lookup carries a `lookupFlag`: `RightToLeft`,
@@ -59250,3 +59274,140 @@ entry above did not anticipate: the gate applies to the *input* only.
 backtrack and lookahead walks use it — a neighbour is a neighbour whatever
 feature reached the rule, and gating context on the mask made every chaining
 `fina` rule fail when its lookahead was a medial letter.
+
+## TD-FONT-CANNOT-BE-TOLD-A-PARAGRAPH-DIRECTION
+
+**What.** `ScaledFont::shape` resolves the bidi base direction with
+`Base::Auto` — UAX #9 rule P2, "the first strong character decides" — and has
+no parameter with which a caller could say otherwise.
+
+**Symptom.** A string with no strong character at all, or one whose first
+strong character is the wrong way round for its context, lays out against its
+container. `"(123)"` in a right-to-left paragraph is the standard example: P2
+finds nothing strong, defaults to left-to-right, and the parentheses come out
+mirrored the wrong way. A Hebrew UI label reading `"OK"` is the same problem
+from the other side. Nothing in the sweep catches this, because HarfBuzz's
+`guess_segment_properties` makes exactly the same guess.
+
+**Why it is filed rather than fixed.** The fix is a signature change, and the
+right signature depends on a caller that does not exist yet. `shape(&str)` is
+called from the toolkit, the compositor and two apps; adding a `Base` argument
+to all of them before anything can *supply* one usefully would be churn that
+has to be redone when the paragraph model above it lands. The layout stage
+that knows the container's direction is the one that should pass it.
+
+**Proper fix.** `shape_with(&self, text: &str, base: Base)` beside the current
+`shape`, which keeps calling it with `Base::Auto`. `bidi::Base` is already the
+public enum with the three cases (`Auto`, `Ltr`, `Rtl`), and `byte_levels` in
+`scaled.rs` already takes the base as a value — it is threaded through, just
+not exposed.
+
+**Where.** `gui/font/src/scaled.rs` — `shape` and the `byte_levels` helper
+below it, whose doc comment names this entry.
+
+## TD-FONT-CARETS-ARE-NOT-BIDIRECTIONAL
+
+**What.** `ShapedRun::x_of` and `ShapedRun::offset_at` convert between a byte
+offset and an x position by summing advances in *logical* order. That is the
+distance **into the text**, not the distance **across the line**, and the two
+are the same number only when the run is not reordered.
+
+**Symptom.** Click and caret placement in right-to-left or mixed text. Given
+`hello שלום world`, clicking between the `ש` and the `ל` — visually the right
+end of the Hebrew word — gets the byte offset of a character near its left
+end. Arrow keys land in the wrong place for the same reason. Nothing renders
+wrongly: `draw_order()` is correct and the text looks right; it is only the
+mapping back from a pixel that is wrong.
+
+**Why it is filed rather than fixed.** It is not a bug in the sum, it is a
+missing concept. In bidirectional text one byte offset has *two* legitimate
+caret positions — at a direction boundary the caret can be at the visual end
+of the left-to-right run or the visual start of the right-to-left one, and
+which is correct depends on which direction the user is typing. Every mature
+implementation models this explicitly (a "strong" and a "weak" caret, or an
+affinity flag on the position). Answering with one x and calling it done just
+moves the wrongness somewhere less visible.
+
+**Proper fix.** `x_of` returns the position in the drawn order: walk
+`draw_order()` accumulating advances and stop at the glyph whose cluster is
+the offset asked for. `offset_at` does the inverse, and both grow an affinity
+so a boundary can be asked about from either side. The existing behaviour
+stays available as a measurement — `width_upto`, which is what the truncation
+code actually wants and what it uses `x_of` for today.
+
+**Where.** `gui/font/src/shape.rs` — `x_of` and `offset_at`, whose doc
+comments both name this entry; `ShapedRun::visual`, which holds everything the
+fix needs.
+
+## TD-FONT-HAS-NO-FALLBACK-MARK-POSITIONING
+
+**What.** A combining mark is placed on its base by the `GPOS` `mark` feature
+(lookup types 4 and 6), which `mark.rs` implements. A face that has no such
+lookups gets nothing: the mark keeps its own advance and is drawn *after* the
+base at the pen, side by side with it, rather than on top of it.
+
+**Symptom, measured.** This is the single largest positional divergence in the
+sweep — 489 of the 559 `misplaced` face×string pairs. `c` + cedilla + acute
+disagrees on 222 faces and fully-vowelled Arabic (`بِسْمِ`) on 233. The first
+example the sweep prints is exact: on `AGENCYB.TTF` we draw the cedilla at
+x=817 with a full advance, HarfBuzz draws it at x=-104, y=1138 with no
+advance. The user-visible effect is `ç` rendering as `c` followed by a
+free-standing cedilla, and vowelled Arabic rendering as letters interleaved
+with their own vowel signs at full width — which is how the text looked before
+the mark table was implemented, for every face that lacks one.
+
+**Why it is filed rather than fixed.** It needs glyph *extents*, which nothing
+in the shaping path currently asks for. HarfBuzz's fallback
+(`hb-ot-shape-fallback.cc`) centres the mark horizontally over the base's ink
+box and stacks it above or below according to the mark's canonical combining
+class — 230 above, 220 below, and a running "how high have we stacked already"
+for a second mark on the same base. All of that is measured from the outline
+bounding boxes of two glyphs. We can compute those (`raster.rs` walks the
+outline already, and `glyf` stores a bbox per glyph outright) but shaping has
+never needed to, so the plumbing is new.
+
+**Proper fix.** A `bbox(gid)` on the face, reading `glyf`'s per-glyph bounding
+box directly where it exists and walking the `CFF` charstring where it does
+not; then a fallback pass in `attach_marks` that runs for a mark no `GPOS`
+lookup positioned: zero the advance, centre on the base's box, and offset
+vertically by the base's top or bottom plus the height already consumed by
+marks of the same class. The combining class is in `norm_tables.rs`.
+
+**Where.** `gui/font/src/scaled.rs` — `attach_marks`, which today does nothing
+for a mark that no lookup matched; `gui/font/src/mark.rs`, which knows which
+marks those are.
+
+## TD-FONT-IGNORES-GPOS-SINGLE-AND-CURSIVE-ADJUSTMENTS
+
+**What.** Of `GPOS`'s eight lookup types we apply 2 (pair, in `kern.rs`) and
+4/6 (mark-to-base and mark-to-mark, in `mark.rs`). Type 1, single adjustment,
+and type 3, cursive attachment, are parsed past and ignored, as are 5, 7 and
+8.
+
+**Symptom, measured.** Amiri Bold disagrees with HarfBuzz on plain unvowelled
+`العربية` on 6 faces' worth of strings: our glyph 3 sits at x=794, HarfBuzz's
+at x=877. The face has 30 type-1 lookups and one type-3, and the 83-unit
+difference is a single adjustment applying the same value to the glyph's
+placement and its advance — the standard way an Arabic face tunes one letter's
+fit without touching the pair table. Cursive attachment is what makes a
+joining script's letters sit on a common baseline curve rather than on the
+straight one; without it a face like Amiri that relies on `curs` draws a
+visibly broken join.
+
+**Why it is filed rather than fixed.** Type 1 alone is genuinely small — a
+coverage lookup and a `ValueRecord`, both already parsed by `kern.rs` — but
+doing it alone would leave the sweep's Arabic differences barely changed,
+because the same faces need type 3, and type 3 is a different shape of
+problem: it chains, so an attachment moves every glyph after it and the
+`RightToLeft` lookup flag changes which end of the chain is anchored.
+
+**Proper fix.** A positioning pass structured like the substitution one:
+`feature_lookups` collects the `GPOS` lookups a run's features reach, and each
+is applied in order through the same `Skipper` that `GSUB` uses, with types 1,
+2, 3, 4 and 6 dispatched from one place. That subsumes `kern.rs`'s standalone
+pair walk and `mark.rs`'s standalone mark pass, both of which currently pick
+their own lookups out of the table.
+
+**Where.** `gui/font/src/kern.rs` — the pair walk and its `feature_lookups`;
+`gui/font/src/mark.rs`; `gui/font/src/scaled.rs` — `shape`, where the passes
+are sequenced.

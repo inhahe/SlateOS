@@ -13,11 +13,11 @@
 //!
 //! * [`ScriptTags::of`] maps one character to the OpenType script tag(s) a font would
 //!   file its features under.
-//! * [`runs`] splits a piece list into maximal stretches of one script, which
-//!   is the unit substitution has to be applied over. Splitting matters
-//!   because the alternative — one script for the whole string, which is what
-//!   HarfBuzz's `guess_segment_properties` does — silently applies Latin rules
-//!   to the Arabic half of a mixed string.
+//! * [`runs`] splits a piece list into maximal stretches of one script *and
+//!   one direction*, which is the unit substitution has to be applied over.
+//!   Splitting matters because the alternative — one script for the whole
+//!   string, which is what HarfBuzz's `guess_segment_properties` does —
+//!   silently applies Latin rules to the Arabic half of a mixed string.
 //!
 //! # Characters with no script of their own
 //!
@@ -43,6 +43,7 @@
 
 use alloc::vec::Vec;
 
+use crate::bidi::Level;
 use crate::norm::Piece;
 use crate::script_tables::{SCRIPT_RANGES, SCRIPT_TAGS};
 
@@ -100,24 +101,43 @@ impl ScriptTags {
     }
 }
 
-/// Split `pieces` into maximal stretches of one script.
+/// Split `pieces` into maximal stretches of one script and one direction.
 ///
 /// Each entry is `(end, tags)`, where `end` is the index one past the last
 /// piece of the run: run *n* covers `pieces[prev_end..end]`. Ends rather than
 /// ranges because that is what the caller slices with, and because it makes
 /// the "runs partition the input" invariant impossible to state wrongly.
 ///
+/// `levels` is one bidi embedding level per piece, or empty for text that
+/// needs no bidi at all. Only the *parity* of a level is a boundary here, not
+/// the level itself: a digit inside English is raised to level 2 by rule I1
+/// and still reads left to right, so splitting the run there would refuse a
+/// ligature or a contextual form for no reason. A change of parity is a real
+/// boundary — the two sides are drawn in opposite directions, and a
+/// substitution that reached across one would join glyphs that end up at
+/// opposite ends of the line.
+///
 /// The result always covers the whole of `pieces` and is never empty for
 /// non-empty input. `tags` is `None` for a run with no script at all, which
 /// happens only when the entire input is scriptless.
 #[must_use]
-pub(crate) fn runs(pieces: &[Piece]) -> Vec<(usize, Option<ScriptTags>)> {
+pub(crate) fn runs(pieces: &[Piece], levels: &[Level]) -> Vec<(usize, Option<ScriptTags>)> {
     let mut out: Vec<(usize, Option<ScriptTags>)> = Vec::new();
     if pieces.is_empty() {
         return out;
     }
+    let rtl = |i: usize| levels.get(i).is_some_and(|l| !l.is_multiple_of(2));
     let mut current: Option<ScriptTags> = None;
+    let mut direction = rtl(0);
     for (i, &(ch, _)) in pieces.iter().enumerate() {
+        // A direction change closes the run whatever the character is, since
+        // even a space belongs to one side or the other once the two sides
+        // read opposite ways.
+        if rtl(i) != direction {
+            out.push((i, current));
+            current = None;
+            direction = rtl(i);
+        }
         let Some(found) = ScriptTags::of(ch) else {
             // Scriptless: extends whatever is open, whether or not anything
             // is. This is what keeps `"a b"` one run and `"1 2"` one run.
@@ -148,7 +168,11 @@ mod tests {
     }
 
     fn tags_of(text: &str) -> Vec<(usize, Option<[u8; 4]>)> {
-        runs(&pieces(text))
+        tags_at(text, &[])
+    }
+
+    fn tags_at(text: &str, levels: &[Level]) -> Vec<(usize, Option<[u8; 4]>)> {
+        runs(&pieces(text), levels)
             .into_iter()
             .map(|(end, t)| (end, t.map(|t| t.preferred)))
             .collect()
@@ -247,7 +271,7 @@ mod tests {
             "e\u{301} \u{5d0}\u{5b0}",
         ] {
             let p = pieces(text);
-            let out = runs(&p);
+            let out = runs(&p, &[]);
             assert_eq!(out.is_empty(), p.is_empty(), "{text:?}");
             let mut prev = 0usize;
             for &(end, _) in &out {
@@ -256,6 +280,35 @@ mod tests {
             }
             assert_eq!(prev, p.len(), "{text:?}: runs do not cover the input");
         }
+    }
+
+    /// A change of *direction* is a boundary even when the script does not
+    /// change — an English quotation inside an Arabic sentence is Latin on
+    /// both sides of nothing, but the two halves are drawn opposite ways.
+    #[test]
+    fn a_direction_change_splits_a_run_that_the_script_would_not() {
+        // "ab cd" with the middle three pieces right-to-left.
+        let levels = [0, 0, 1, 1, 1, 0, 0];
+        assert_eq!(
+            tags_at("ab cd x", &levels),
+            vec![(2, Some(*b"latn")), (5, Some(*b"latn")), (7, Some(*b"latn"))]
+        );
+    }
+
+    /// But a change of *level* alone is not: rule I1 raises a digit inside
+    /// English to level 2, which still reads left to right. Splitting there
+    /// would refuse a ligature or a contextual form for no reason at all.
+    #[test]
+    fn a_level_change_that_keeps_the_direction_is_not_a_boundary() {
+        assert_eq!(tags_at("ab12cd", &[0, 0, 2, 2, 0, 0]), vec![(6, Some(*b"latn"))]);
+    }
+
+    /// An empty level list means "no bidi here", not "level zero everywhere
+    /// except where the slice ran out" — the fast path must not invent a
+    /// boundary at the end of it.
+    #[test]
+    fn no_levels_at_all_is_one_direction() {
+        assert_eq!(tags_at("ab cd", &[]), tags_of("ab cd"));
     }
 
     #[test]

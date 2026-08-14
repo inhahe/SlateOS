@@ -2175,3 +2175,140 @@ fn installed_fonts_join_arabic_letters() {
          letters and a GSUB) — the positional features are not being applied"
     );
 }
+
+/// Right-to-left text comes back in an order that can be drawn.
+///
+/// The unit tests prove the bidi algorithm against Unicode's own conformance
+/// data, and prove `draw_order` against a permutation handed to it. Neither
+/// proves the join: that `shape` resolves the levels of the string it was
+/// given, applies them to the glyphs it produced, and hands the run a
+/// permutation that matches. Only a real face can answer that, because only a
+/// real face turns characters into glyphs.
+///
+/// The oracle needs nothing face-specific:
+///
+/// * three Hebrew letters must be drawn in exactly the reverse of the order
+///   they were typed in;
+/// * with a Latin letter on each side, only the Hebrew reverses — the run
+///   splits into three, and the outer two keep their order;
+/// * a plain Latin string is not reordered at all, so `draw_order` and
+///   `glyphs` are the same sequence and `is_reordered` is false;
+/// * the width does not depend on the order. That is the check that catches a
+///   kern re-charged to the wrong glyph: `recharge_kerns` strips every kern
+///   and gives them back, and if it gave back a different set the run would
+///   change width when it was reversed.
+#[test]
+#[ignore = "depends on the host's installed fonts"]
+fn installed_fonts_reorder_right_to_left_text() {
+    // Alef, bet, gimel: three plain Hebrew letters, in a language with no
+    // joining behaviour, so a face that has them shapes them one for one.
+    const HEBREW: &str = "\u{5d0}\u{5d1}\u{5d2}";
+
+    let mut files = Vec::new();
+    for dir in font_dirs() {
+        collect_fonts(&dir, &mut files, 0);
+    }
+    assert!(!files.is_empty(), "no fonts found on this host");
+    files.sort();
+
+    let mut with_hebrew = 0usize;
+    let mut checked = 0usize;
+
+    for path in &files {
+        let Ok(data) = fs::read(path) else { continue };
+        let Ok(face) = Face::parse(data) else { continue };
+        if !"\u{5d0}\u{5d1}\u{5d2}AB"
+            .chars()
+            .all(|ch| face.glyph_index(ch).is_some())
+        {
+            continue;
+        }
+        let Ok(font) = ScaledFont::from_bytes(fs::read(path).unwrap(), 16.0) else {
+            continue;
+        };
+        with_hebrew += 1;
+
+        let run = font.shape(HEBREW);
+        if run.len() != 3 {
+            // A face that ligated or decomposed has said something this
+            // oracle cannot read.
+            continue;
+        }
+        checked += 1;
+
+        assert!(
+            run.is_reordered(),
+            "{}: a Hebrew word came back in logical order",
+            path.display()
+        );
+        let logical: Vec<u32> = run.glyphs().iter().map(|g| g.key.raw()).collect();
+        let drawn: Vec<u32> = run.draw_order().map(|g| g.key.raw()).collect();
+        let mut backwards = logical.clone();
+        backwards.reverse();
+        assert_eq!(
+            drawn,
+            backwards,
+            "{}: Hebrew was not reversed — drawn {drawn:?}, typed {logical:?}",
+            path.display()
+        );
+
+        // Clusters are still sorted in the *logical* order, which is what
+        // every query on the run depends on.
+        assert!(
+            run.glyphs().windows(2).all(|w| w[0].cluster <= w[1].cluster),
+            "{}: reordering disturbed the clusters",
+            path.display()
+        );
+
+        // One Latin letter each side: three runs, and only the middle one
+        // turns round.
+        let mixed = font.shape(&format!("A{HEBREW}B"));
+        if mixed.len() == 5 {
+            let ids: Vec<u32> = mixed.draw_order().map(|g| g.key.raw()).collect();
+            let latin: Vec<u32> = font
+                .shape("AB")
+                .glyphs()
+                .iter()
+                .map(|g| g.key.raw())
+                .collect();
+            if latin.len() == 2 {
+                assert_eq!(
+                    ids,
+                    [latin[0], logical[2], logical[1], logical[0], latin[1]],
+                    "{}: the Latin either side of a Hebrew word moved — {ids:?}",
+                    path.display()
+                );
+            }
+        }
+
+        // Latin alone is untouched, and pays for nothing.
+        let latin = font.shape("The quick brown fox");
+        assert!(
+            !latin.is_reordered(),
+            "{}: Latin came back reordered",
+            path.display()
+        );
+        let by_order: Vec<u32> = latin.draw_order().map(|g| g.key.raw()).collect();
+        let by_index: Vec<u32> = latin.glyphs().iter().map(|g| g.key.raw()).collect();
+        assert_eq!(by_order, by_index, "{}: Latin draw order", path.display());
+
+        // Width is the same whichever way the glyphs are walked. A kern given
+        // back to the wrong glyph would still show here, because the sum over
+        // the whole run would change.
+        let mixed_width: f32 = mixed.draw_order().map(|g| g.advance).sum();
+        assert!(
+            (mixed_width - mixed.width()).abs() <= 0.01,
+            "{}: the run is {mixed_width} px drawn and {} px measured",
+            path.display(),
+            mixed.width()
+        );
+    }
+
+    println!("faces with Hebrew and Latin: {with_hebrew}");
+    println!("faces checked:               {checked}");
+    assert!(
+        checked >= 1,
+        "no installed face has three Hebrew letters and two Latin ones \
+         ({with_hebrew} matched the cmap check)"
+    );
+}

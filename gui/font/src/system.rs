@@ -229,7 +229,11 @@ impl SystemFont {
         // Shaped into a local because the loop needs `&mut self` to rasterize
         // while it walks the run.
         let run = self.shape(text);
-        for shaped in run.glyphs() {
+        // Drawing order, not logical order: they differ for a right-to-left
+        // run, and it is this loop's accumulating pen that makes the
+        // difference visible.
+        let drawn: Vec<ShapedGlyph> = run.draw_order().copied().collect();
+        for shaped in &drawn {
             let advance = shaped.advance;
             let Some(mask) = self.glyph_mask(shaped.key) else {
                 pen += advance;

@@ -788,6 +788,59 @@ other unblocked Lane A work.
 
 ---
 
+## Q46 — [A] Every benchmark ever recorded measured an `opt-level = 0` kernel. Should the *non-bench* boot test also switch to release, or only the bench path? — Status: OPEN
+
+**Background.** `scripts/boot-test.sh:602` runs a bare `cargo build` and stages
+`target/x86_64-unknown-none/debug/kernel`. The bench suite is compiled in
+unconditionally — `--bench` only changes which serial marker is awaited — and
+`[profile.dev]` has no kernel `opt-level` override, so all 5 records and all 63
+benchmarks in `bench/history.jsonl` were measured unoptimised and scored
+against `baselines.toml` targets drawn from optimised Linux/Fuchsia/L4
+implementations. Full write-up:
+`known-issues.md` → `B-BENCH-ENTIRE-SUITE-MEASURES-AN-UNOPTIMISED-KERNEL`.
+
+**What is not in question.** That `--bench` must build `--release` is not a
+tradeoff — a benchmark that does not measure the shipped build is not a
+benchmark, and `[profile.release.package.kernel]` (`opt-level = 3`,
+`codegen-units = 1`) already exists for exactly this. Claude is proceeding with
+that plus an append-only `profile` field in each history record, so debug
+records are never diffed against release ones. **The question is only about the
+default, non-bench boot test.**
+
+**Option A — leave the default boot test on debug (Claude's lean).**
+- *For:* fast iteration on the ~405 s TCG cycle; readable panics and intact
+  frame pointers when a boot fails; `--bench` already roughly doubles the cycle
+  so the slow path is opt-in.
+- *Against:* two kernel builds live in the tree, and release-only behaviour —
+  miscompiles, UB that only manifests optimised, different timing and stack
+  layout — is then exercised *only* on bench runs, which are the runs nobody
+  reads for correctness. That is a real correctness gap, not just a tidiness
+  one.
+
+**Option B — build release everywhere; the boot test always tests what ships.**
+- *For:* one binary, and the boot test's PASS then means the shipped kernel
+  boots. Any release-only bug surfaces on every run rather than on bench runs.
+- *Against:* slower rebuilds on every iteration, and degraded diagnostics
+  exactly when a boot fails, which is when they matter most. `opt-level = 3`
+  with `codegen-units = 1` on this kernel is not a cheap build.
+
+**Option C — debug by default, plus a periodic release boot test.**
+- *For:* keeps fast iteration and still exercises the release binary on a
+  schedule.
+- *Against:* another mode to maintain, and "periodic" needs a trigger nobody
+  has defined; in practice it tends to mean "never".
+
+**Recommendation: A, with the gap named rather than ignored** — the bench path
+becomes the release path, and if a release-only defect ever shows up there it
+promotes this to B immediately. Claude will not decide between A and B
+unilaterally because B changes the default cost and diagnostics of every boot
+test the other two lanes run, which is theirs to feel as much as Lane A's.
+
+**In the meantime** Claude is implementing the `--bench` → release change and
+the `profile` history field, which is common to all three options.
+
+---
+
 Recently resolved (see `design-decisions.md` for the full rationale):
 
 - Q38 Should osh be locale-aware, or UTF-8-only? — resolved 2026-08-07 (§104):

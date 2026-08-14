@@ -416,15 +416,77 @@ pub(crate) struct SocketMeta {
     cork: bool,
 }
 
-/// Per-fd socket metadata table.
+/// Backing storage for the per-fd socket metadata table.
 ///
-/// Indexed by fd number.  Only valid for fds with socket handle kinds.
-static mut SOCKET_META: [Option<SocketMeta>; MAX_SOCKETS] = [None; MAX_SOCKETS];
+/// Indexed by fd number; only meaningful for fds with socket handle kinds.
+///
+/// **This table must have exactly the same scope as the fd table it is keyed
+/// by.**  On the target that is process-global, because a posix process has
+/// one fd table.  On host builds the fd table is per-*thread* (see
+/// `fdtable::fd_store` and design-decisions.md §110, which made that split so
+/// libtest's parallel threads stop handing each other fd numbers) — so this
+/// table has to be per-thread too.
+///
+/// It was not, and the mismatch was observable: two tests on different threads
+/// each allocate a socket and, drawing from *separate* per-thread fd tables,
+/// both get the same fd number `N`.  They then shared one `SOCKET_META[N]`.
+/// When the first finished and `close()`d, `clear_meta(N)` wiped the entry the
+/// second was still using, and its next call saw a live fd with no metadata —
+/// reporting `ENOTSOCK` for a perfectly good socket.  That is what made
+/// `test_phase201_bind_port443_no_cap_eacces` fail intermittently (observed
+/// once in roughly four full runs of the suite).
+mod meta_store {
+    use super::{SocketMeta, MAX_SOCKETS};
+
+    /// The table type, named once so the two implementations agree.
+    pub(super) type MetaTable = [Option<SocketMeta>; MAX_SOCKETS];
+
+    const META_INIT: MetaTable = [None; MAX_SOCKETS];
+
+    #[cfg(target_os = "none")]
+    mod imp {
+        use super::{MetaTable, META_INIT};
+
+        static mut SOCKET_META: MetaTable = META_INIT;
+
+        pub(super) fn table() -> *mut MetaTable {
+            &raw mut SOCKET_META
+        }
+    }
+
+    #[cfg(not(target_os = "none"))]
+    mod imp {
+        use super::{MetaTable, META_INIT};
+        use core::cell::UnsafeCell;
+
+        std::thread_local! {
+            static SOCKET_META: UnsafeCell<MetaTable> =
+                const { UnsafeCell::new(META_INIT) };
+        }
+
+        /// Used only during thread-local teardown, when the real table has
+        /// already been dropped — mirrors `fdtable`'s `FD_FALLBACK`, so a late
+        /// `close()` from a destructor scribbles somewhere harmless rather
+        /// than panicking.
+        static mut META_FALLBACK: MetaTable = META_INIT;
+
+        pub(super) fn table() -> *mut MetaTable {
+            SOCKET_META
+                .try_with(UnsafeCell::get)
+                .unwrap_or(&raw mut META_FALLBACK)
+        }
+    }
+
+    /// Raw pointer to this thread's (host) or the process's (target) table.
+    pub(super) fn table() -> *mut MetaTable {
+        imp::table()
+    }
+}
 
 /// Get a mutable pointer to the metadata table.
 #[inline]
-fn meta_ptr() -> *mut [Option<SocketMeta>; MAX_SOCKETS] {
-    core::ptr::addr_of_mut!(SOCKET_META)
+fn meta_ptr() -> *mut meta_store::MetaTable {
+    meta_store::table()
 }
 
 /// Resolve `fd` the way Linux's `sockfd_lookup_light` (net/socket.c:553) does:

@@ -40,6 +40,7 @@
 use guitk::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha theme
@@ -3148,7 +3149,7 @@ impl DbViewerApp {
         let mut bx = 130.0;
         for (i, label) in buttons.iter().enumerate() {
             let color = colors.get(i).copied().unwrap_or(SUBTEXT0);
-            let btn_w = label.len() as f32 * 8.0 + 16.0;
+            let btn_w = text::padded_width(label, 8.0, 11.0, FontWeightHint::Regular);
             cmds.push(RenderCommand::FillRect {
                 x: bx,
                 y: 6.0,
@@ -3184,7 +3185,7 @@ impl DbViewerApp {
         for (i, tab) in self.tabs.iter().enumerate() {
             let is_active = i == self.active_tab;
             let tab_label = &tab.db.name;
-            let tw = tab_label.len() as f32 * 7.5 + 32.0;
+            let tw = text::padded_width_any_weight(tab_label, 16.0, 12.0);
 
             let bg = if is_active { BASE } else { CRUST };
             cmds.push(RenderCommand::FillRect {
@@ -3716,7 +3717,7 @@ impl DbViewerApp {
         for panel in BottomPanel::all() {
             let is_active = *panel == self.bottom_panel;
             let label = panel.label();
-            let tw = label.len() as f32 * 7.0 + 16.0;
+            let tw = text::padded_width_any_weight(label, 8.0, 11.0);
 
             cmds.push(RenderCommand::FillRect {
                 x: tx,
@@ -3834,8 +3835,12 @@ impl DbViewerApp {
                     SqlToken::Whitespace => (" ".to_owned(), TEXT, FontWeightHint::Regular),
                 };
 
-                let char_w = 7.2;
-                let text_w = text.len() as f32 * char_w;
+                // Measured in the token's *own* weight: keywords are drawn
+                // bold, so a fixed cell laid the next token on top of the tail
+                // of every SELECT and WHERE. And a quoted string literal is
+                // drawn with its quotes, which the byte count did include but
+                // only by accident of them being one byte each.
+                let text_w = text::measure(&text, 12.0, weight);
 
                 if tx_pos + text_w < x + max_w {
                     cmds.push(RenderCommand::Text {
@@ -4420,6 +4425,60 @@ fn main() {
 )]
 mod tests {
     use super::*;
+
+    // --- text measurement ---
+
+    #[test]
+    fn toolbar_buttons_fit_their_labels() {
+        for label in ["Execute", "New Tab", "Export", "Import"] {
+            let w = text::padded_width(label, 8.0, 11.0, FontWeightHint::Regular);
+            let drawn = text::measure(label, 11.0, FontWeightHint::Regular);
+            assert!(drawn + 16.0 <= w + 0.01, "{label:?} overflows its button");
+        }
+    }
+
+    #[test]
+    fn a_database_tab_fits_its_name_at_either_weight() {
+        // Database names are filenames, so any byte but `/` and NUL.
+        for name in ["main.db", "inventário.sqlite", "顧客.db"] {
+            let w = text::padded_width_any_weight(name, 16.0, 12.0);
+            for weight in [FontWeightHint::Bold, FontWeightHint::Regular] {
+                assert!(
+                    text::measure(name, 12.0, weight) + 32.0 <= w + 0.01,
+                    "{name:?} overflows its tab at {weight:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn highlighted_sql_tokens_do_not_overlap() {
+        // Keywords are drawn bold. A fixed 7.2 px cell laid the next token on
+        // top of the tail of every SELECT and WHERE.
+        let tokens: [(&str, FontWeightHint); 6] = [
+            ("SELECT", FontWeightHint::Bold),
+            (" ", FontWeightHint::Regular),
+            ("*", FontWeightHint::Bold),
+            (" ", FontWeightHint::Regular),
+            ("FROM", FontWeightHint::Bold),
+            (" clientes", FontWeightHint::Regular),
+        ];
+        let mut x = 0.0_f32;
+        let mut spans = Vec::new();
+        for (t, weight) in tokens {
+            let w = text::measure(t, 12.0, weight);
+            spans.push((x, x + w));
+            x += w;
+        }
+        for pair in spans.windows(2) {
+            let (_, end) = pair[0];
+            let (next_start, _) = pair[1];
+            assert!(
+                next_start >= end - 0.01,
+                "a token starts at {next_start} but the one before it ends at {end}"
+            );
+        }
+    }
 
     // --- Data type tests ---
 

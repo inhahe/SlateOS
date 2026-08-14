@@ -28,6 +28,7 @@ use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::text;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -2132,7 +2133,16 @@ impl SystemRestoreUI {
                 corner_radii: CornerRadii::all(4.0),
             });
             rt.push(RenderCommand::Text {
-                x: tab_x + tab_width / 2.0 - 20.0,
+                x: text::center_x(
+                    mode.label(),
+                    tab_x + tab_width / 2.0,
+                    FONT_SIZE,
+                    if is_active {
+                        FontWeightHint::Bold
+                    } else {
+                        FontWeightHint::Regular
+                    },
+                ),
                 y: toolbar_y + TOOLBAR_HEIGHT / 2.0 - FONT_SIZE / 2.0,
                 text: mode.label().to_string(),
                 color: text_color,
@@ -2165,7 +2175,12 @@ impl SystemRestoreUI {
                 corner_radii: CornerRadii::all(4.0),
             });
             rt.push(RenderCommand::Text {
-                x: btn_x + BUTTON_WIDTH / 2.0 - 20.0,
+                x: text::center_x(
+                    label,
+                    btn_x + BUTTON_WIDTH / 2.0,
+                    FONT_SIZE,
+                    FontWeightHint::Bold,
+                ),
                 y: toolbar_y + TOOLBAR_HEIGHT / 2.0 - FONT_SIZE / 2.0,
                 text: label.to_string(),
                 color: COLOR_BASE,
@@ -2945,7 +2960,7 @@ impl SystemRestoreUI {
         if !snap.tags.is_empty() {
             let mut tag_x = col1_x;
             for tag in &snap.tags {
-                let tag_width = tag.len() as f32 * 7.0 + 16.0;
+                let tag_width = text::padded_width(tag, 8.0, FONT_SIZE_SMALL, FontWeightHint::Regular);
                 rt.push(RenderCommand::FillRect {
                     x: tag_x,
                     y,
@@ -3001,16 +3016,29 @@ impl SystemRestoreUI {
                     } else {
                         COLOR_SUBTEXT0
                     };
+                    // The name is capped at 150 px, so the chain has to
+                    // advance by what was *drawn*, not by the full name: a
+                    // long name used to push the next link off past the clip
+                    // and a short accented one used to collide with it. Elide
+                    // rather than clip, so the reader can see it was cut.
+                    let shown = text::elide(
+                        &ancestor.name,
+                        150.0,
+                        "...",
+                        FONT_SIZE_SMALL,
+                        FontWeightHint::Regular,
+                    );
+                    let shown_w = text::measure(&shown, FONT_SIZE_SMALL, FontWeightHint::Regular);
                     rt.push(RenderCommand::Text {
                         x: cx,
                         y: chain_y,
-                        text: ancestor.name.clone(),
+                        text: shown,
                         color: name_color,
                         font_size: FONT_SIZE_SMALL,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(150.0),
                     });
-                    cx += ancestor.name.len() as f32 * 6.5 + 4.0;
+                    cx += shown_w + 4.0;
                 }
             }
         }
@@ -3019,7 +3047,12 @@ impl SystemRestoreUI {
     /// Render placeholder when no snapshot is selected.
     fn render_no_selection(&self, rt: &mut RenderTree, panel_y: f32) {
         rt.push(RenderCommand::Text {
-            x: WINDOW_WIDTH / 2.0 - 100.0,
+            x: text::center_x(
+                "Select a snapshot to view details",
+                WINDOW_WIDTH / 2.0,
+                FONT_SIZE,
+                FontWeightHint::Regular,
+            ),
             y: panel_y + DETAILS_PANEL_HEIGHT / 2.0 - FONT_SIZE / 2.0,
             text: "Select a snapshot to view details".to_string(),
             color: COLOR_OVERLAY0,
@@ -3066,7 +3099,12 @@ impl SystemRestoreUI {
             stats.total_display(),
         );
         rt.push(RenderCommand::Text {
-            x: WINDOW_WIDTH / 2.0 - 80.0,
+            x: text::center_x(
+                &storage_text,
+                WINDOW_WIDTH / 2.0,
+                FONT_SIZE_SMALL,
+                FontWeightHint::Regular,
+            ),
             y: bar_y + STATUS_BAR_HEIGHT / 2.0 - FONT_SIZE_SMALL / 2.0,
             text: storage_text,
             color: COLOR_SUBTEXT0,
@@ -3848,10 +3886,16 @@ impl SystemRestoreUI {
             }
 
             // Percentage.
+            let percent = format!("{}%", progress.percentage());
             rt.push(RenderCommand::Text {
-                x: ox + overlay_w / 2.0 - 15.0,
+                x: text::center_x(
+                    &percent,
+                    ox + overlay_w / 2.0,
+                    FONT_SIZE_SMALL,
+                    FontWeightHint::Bold,
+                ),
                 y: bar_y + 3.0,
-                text: format!("{}%", progress.percentage()),
+                text: percent,
                 color: COLOR_TEXT,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Bold,
@@ -3979,6 +4023,36 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- text measurement ---
+
+    #[test]
+    fn tag_pills_fit_their_tags() {
+        // Snapshot tags are user-entered, so they are arbitrary text.
+        for tag in ["auto", "before-upgrade", "manuell", "リリース前"] {
+            let w = text::padded_width(tag, 8.0, FONT_SIZE_SMALL, FontWeightHint::Regular);
+            let drawn = text::measure(tag, FONT_SIZE_SMALL, FontWeightHint::Regular);
+            assert!(drawn + 16.0 <= w + 0.01, "{tag:?} overflows its pill");
+        }
+    }
+
+    #[test]
+    fn an_ancestry_link_advances_by_what_was_drawn() {
+        // Each link is capped at 150 px. Advancing by the *full* name pushed
+        // the next link past the clip; advancing by a byte estimate made a
+        // short accented name collide with it. Elide, then advance by the
+        // elided width.
+        let long = "a-very-long-snapshot-name-that-will-not-fit-in-one-hundred-and-fifty-pixels";
+        let shown = text::elide(long, 150.0, "...", FONT_SIZE_SMALL, FontWeightHint::Regular);
+        let w = text::measure(&shown, FONT_SIZE_SMALL, FontWeightHint::Regular);
+        assert!(w <= 150.0 + 0.01, "the elided link is {w} wide");
+        assert!(shown.ends_with("..."), "a cut link does not say it was cut");
+
+        // A name that fits is left alone and advances by its own width.
+        let short = "base";
+        let shown = text::elide(short, 150.0, "...", FONT_SIZE_SMALL, FontWeightHint::Regular);
+        assert_eq!(shown, short);
+    }
 
     // --- SnapshotType tests ---
 

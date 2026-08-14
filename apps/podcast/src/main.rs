@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -2184,7 +2185,7 @@ impl PodcastApp {
         for filter in &filters {
             let label = filter.label();
             let selected = self.episode_filter == *filter;
-            let label_width = label.len() as f32 * 7.5 + 16.0;
+            let label_width = text::padded_width(label, 8.0, 12.0, FontWeightHint::Regular);
 
             if selected {
                 cmds.push(RenderCommand::FillRect {
@@ -2424,10 +2425,16 @@ impl PodcastApp {
         // Status badges.
         let status_label = episode.status.label();
         let dl_label = episode.download_status.label();
+        // One width for the status badge, used both to draw it and to place
+        // the badge that follows it. These were two separate estimates with
+        // different padding (+16 drawn, +24 for the next badge's x), so the
+        // gap between the two pills was whatever the difference happened to be
+        // rather than 8 px.
+        let status_w = text::padded_width(status_label, 8.0, 11.0, FontWeightHint::Bold);
         cmds.push(RenderCommand::FillRect {
             x: pad,
             y: detail_y,
-            width: status_label.len() as f32 * 7.0 + 16.0,
+            width: status_w,
             height: 22.0,
             color: SURFACE1,
             corner_radii: CornerRadii::all(11.0),
@@ -2441,11 +2448,11 @@ impl PodcastApp {
             font_weight: FontWeightHint::Bold,
             max_width: Some(120.0),
         });
-        let dl_badge_x = pad + status_label.len() as f32 * 7.0 + 24.0;
+        let dl_badge_x = pad + status_w + 8.0;
         cmds.push(RenderCommand::FillRect {
             x: dl_badge_x,
             y: detail_y,
-            width: dl_label.len() as f32 * 7.0 + 16.0,
+            width: text::padded_width(dl_label, 8.0, 11.0, FontWeightHint::Bold),
             height: 22.0,
             color: SURFACE1,
             corner_radii: CornerRadii::all(11.0),
@@ -3410,6 +3417,42 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- text measurement ---
+
+    #[test]
+    fn filter_pills_fit_their_labels() {
+        for filter in [
+            EpisodeFilter::All,
+            EpisodeFilter::Unplayed,
+            EpisodeFilter::InProgress,
+            EpisodeFilter::Played,
+            EpisodeFilter::Downloaded,
+        ] {
+            let label = filter.label();
+            let w = text::padded_width(label, 8.0, 12.0, FontWeightHint::Regular);
+            let drawn = text::measure(label, 12.0, FontWeightHint::Regular);
+            assert!(drawn + 16.0 <= w + 0.01, "{label:?} overflows its pill");
+        }
+    }
+
+    #[test]
+    fn the_two_status_badges_are_eight_pixels_apart() {
+        // The status badge's width was estimated twice with different padding
+        // (+16 to draw it, +24 to place the next badge), so the gap between the
+        // two pills was the difference between two guesses rather than 8 px.
+        for label in ["Unplayed", "In Progress", "Played"] {
+            let w = text::padded_width(label, 8.0, 11.0, FontWeightHint::Bold);
+            let pad = 12.0_f32;
+            let next_x = pad + w + 8.0;
+            assert!(
+                (next_x - (pad + w)) - 8.0 < 0.01,
+                "{label:?}: badges are not 8 px apart"
+            );
+            // And the pill holds the text it was measured for.
+            assert!(text::measure(label, 11.0, FontWeightHint::Bold) + 16.0 <= w + 0.01);
+        }
+    }
 
     // -----------------------------------------------------------------------
     // Category tests

@@ -19,6 +19,7 @@ use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, Mo
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::text;
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -2936,7 +2937,7 @@ impl SpreadsheetApp {
 
         let font_weight = if bold { FontWeightHint::Bold } else { FontWeightHint::Regular };
         cmds.push(RenderCommand::Text {
-            x: x + w / 2.0 - (label.len() as f32 * 3.5),
+            x: text::center_x(label, x + w / 2.0, SMALL_FONT, font_weight),
             y: y + h / 2.0 - 5.0,
             text: label.to_string(),
             font_size: SMALL_FONT,
@@ -3327,10 +3328,25 @@ impl SpreadsheetApp {
                         FontWeightHint::Regular
                     };
 
+                    // A spreadsheet's columns are pixel widths, not character
+                    // cells, so alignment is a measurement — and it has to be
+                    // taken in the cell's own weight, since a bold cell drawn
+                    // with a regular-weight offset is the one that drifts out
+                    // of its column.
                     let text_x = match cell.format.alignment {
                         Alignment::Left => cell_x + 4.0,
-                        Alignment::Center => cell_x + col_w / 2.0 - (display_text.len() as f32 * 3.5),
-                        Alignment::Right => cell_x + col_w - (display_text.len() as f32 * 7.0) - 4.0,
+                        Alignment::Center => text::center_x(
+                            &display_text,
+                            cell_x + col_w / 2.0,
+                            FONT_SIZE,
+                            font_weight,
+                        ),
+                        Alignment::Right => text::right_x(
+                            &display_text,
+                            cell_x + col_w - 4.0,
+                            FONT_SIZE,
+                            font_weight,
+                        ),
                     };
 
                     cmds.push(RenderCommand::Text {
@@ -3780,7 +3796,7 @@ impl SpreadsheetApp {
         let buttons = ["Find Next", "Replace", "Replace All"];
         let mut bx = dlg_x + 12.0;
         for label in &buttons {
-            let bw = label.len() as f32 * 7.0 + 16.0;
+            let bw = text::padded_width(label, 8.0, SMALL_FONT, FontWeightHint::Regular);
             cmds.push(RenderCommand::FillRect {
                 x: bx,
                 y: btn_y,
@@ -3914,6 +3930,56 @@ fn main() {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    // -- text measurement --
+
+    #[test]
+    fn a_centred_cell_is_centred_in_its_column() {
+        // In the cell's own weight: a bold cell placed with a regular-weight
+        // offset is the one that drifts out of its column.
+        let col_w = 90.0;
+        for (value, weight) in [
+            ("1234.50", FontWeightHint::Regular),
+            ("Total", FontWeightHint::Bold),
+            ("Übertrag", FontWeightHint::Bold),
+        ] {
+            let x = text::center_x(value, col_w / 2.0, FONT_SIZE, weight);
+            let w = text::measure(value, FONT_SIZE, weight);
+            assert!(
+                (x + w / 2.0 - col_w / 2.0).abs() < 0.01,
+                "{value:?} is not centred in its column"
+            );
+        }
+    }
+
+    #[test]
+    fn a_right_aligned_cell_ends_at_the_column_edge() {
+        let col_w: f32 = 90.0;
+        for value in ["1", "1234.50", "-99 %"] {
+            let right = col_w - 4.0;
+            let x = text::right_x(value, right, FONT_SIZE, FontWeightHint::Regular);
+            let w = text::measure(value, FONT_SIZE, FontWeightHint::Regular);
+            assert!(
+                (x + w - right).abs() < 0.01,
+                "{value:?} does not end at the column edge"
+            );
+        }
+    }
+
+    #[test]
+    fn a_column_of_numbers_lines_up_on_the_right() {
+        // The point of right alignment in a spreadsheet: the decimal points of
+        // a column of figures have to sit above one another.
+        let right = 86.0;
+        for value in ["1.50", "23.50", "456.50"] {
+            let end = text::right_x(value, right, FONT_SIZE, FontWeightHint::Regular)
+                + text::measure(value, FONT_SIZE, FontWeightHint::Regular);
+            assert!(
+                (end - right).abs() < 0.01,
+                "{value:?} ends at {end}, not {right}"
+            );
+        }
+    }
 
     // -- CellAddr tests --
 

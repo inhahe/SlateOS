@@ -48,6 +48,7 @@
 use guitk::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha theme
@@ -84,13 +85,41 @@ const SIDEBAR_WIDTH: f32 = 320.0;
 const STATUS_BAR_HEIGHT: f32 = 28.0;
 const PADDING: f32 = 10.0;
 const LINE_HEIGHT: f32 = 20.0;
-const CHAR_WIDTH: f32 = 8.4;
 const SMALL_TEXT: f32 = 12.0;
 const NORMAL_TEXT: f32 = 14.0;
 const HEADER_TEXT: f32 = 16.0;
 const TITLE_TEXT: f32 = 18.0;
 const TREE_INDENT: f32 = 20.0;
 const TREE_ICON_SIZE: f32 = 14.0;
+
+/// The text drawn on `doc`'s tab, dirty marker included.
+fn tab_label(doc: &Document) -> String {
+    if doc.dirty {
+        format!("{} *", doc.title)
+    } else {
+        doc.title.clone()
+    }
+}
+
+/// Width of the tab drawn for `doc`.
+///
+/// Hit-testing and rendering share this, because when each computed its own
+/// the two drifted: the click test sized the tab from `doc.title` while the
+/// render sized it from the title *plus* its dirty marker, so a modified
+/// document's tab was drawn wider than the region that would select it.
+///
+/// Measured bold whatever the tab's state, since the active tab is drawn
+/// bold — sizing each tab to its current weight would reflow the whole strip
+/// every time the user switched tabs.
+fn tab_width(doc: &Document) -> f32 {
+    text::measure(&tab_label(doc), SMALL_TEXT, FontWeightHint::Bold) + 40.0
+}
+
+/// Width of the view-mode chip for `mode`, likewise shared with its hit test
+/// and measured bold so the strip does not reflow on selection.
+fn mode_width(mode: ViewMode) -> f32 {
+    text::measure(mode.label(), SMALL_TEXT, FontWeightHint::Bold) + 20.0
+}
 
 // Limits
 const MAX_INPUT_LEN: usize = 1_048_576;
@@ -2407,7 +2436,7 @@ impl App {
     fn handle_tab_click(&mut self, x: f32) {
         let mut tab_x = PADDING;
         for (i, doc) in self.documents.iter().enumerate() {
-            let tab_width = doc.title.len() as f32 * CHAR_WIDTH + 40.0;
+            let tab_width = tab_width(doc);
             if x >= tab_x && x < tab_x + tab_width {
                 self.active_tab = i;
                 return;
@@ -2423,7 +2452,7 @@ impl App {
     fn handle_mode_click(&mut self, x: f32) {
         let mut mode_x = PADDING;
         for mode in &VIEW_MODES {
-            let mode_width = mode.label().len() as f32 * CHAR_WIDTH + 20.0;
+            let mode_width = mode_width(*mode);
             if x >= mode_x && x < mode_x + mode_width {
                 if let Some(doc) = self.documents.get_mut(self.active_tab) {
                     doc.view_mode = *mode;
@@ -2511,7 +2540,7 @@ impl App {
         ];
         let mut bx = 200.0;
         for (label, color) in &buttons {
-            let bw = label.len() as f32 * CHAR_WIDTH + 16.0;
+            let bw = text::width(label, SMALL_TEXT) + 16.0;
             cmds.push(RenderCommand::FillRect {
                 x: bx,
                 y: 8.0,
@@ -2559,7 +2588,7 @@ impl App {
         let mut tab_x = PADDING;
         for (i, doc) in self.documents.iter().enumerate() {
             let is_active = i == self.active_tab;
-            let tab_width = doc.title.len() as f32 * CHAR_WIDTH + 40.0;
+            let tab_width = tab_width(doc);
 
             // Tab background
             cmds.push(RenderCommand::FillRect {
@@ -2576,14 +2605,8 @@ impl App {
                 },
             });
 
-            // Dirty indicator
-            let label = if doc.dirty {
-                format!("{} *", doc.title)
-            } else {
-                doc.title.clone()
-            };
-
-            // Tab label
+            // Tab label (dirty marker included)
+            let label = tab_label(doc);
             cmds.push(RenderCommand::Text {
                 x: tab_x + 10.0,
                 y: y + 16.0,
@@ -2660,7 +2683,7 @@ impl App {
         let mut mode_x = PADDING;
         for mode in &VIEW_MODES {
             let is_active = *mode == active_mode;
-            let mode_width = mode.label().len() as f32 * CHAR_WIDTH + 20.0;
+            let mode_width = mode_width(*mode);
 
             if is_active {
                 cmds.push(RenderCommand::FillRect {
@@ -2828,7 +2851,7 @@ impl App {
                 }
 
                 // Label (key name or index)
-                let label_width = node.label.len() as f32 * CHAR_WIDTH;
+                let label_width = text::measure(&node.label, NORMAL_TEXT, FontWeightHint::Bold);
                 cmds.push(RenderCommand::Text {
                     x: indent_x,
                     y: row_y + 14.0,
@@ -2852,7 +2875,7 @@ impl App {
                 });
 
                 // Value
-                let value_x = colon_x + CHAR_WIDTH + 4.0;
+                let value_x = colon_x + text::width(":", NORMAL_TEXT) + 4.0;
                 cmds.push(RenderCommand::Text {
                     x: value_x,
                     y: row_y + 14.0,
@@ -2938,20 +2961,25 @@ impl App {
             if let Some(line_spans) = highlighted.get(i) {
                 let mut span_x = gutter_width + 4.0;
                 for span in line_spans {
+                    let span_weight = if span.bold {
+                        FontWeightHint::Bold
+                    } else {
+                        FontWeightHint::Regular
+                    };
                     cmds.push(RenderCommand::Text {
                         x: span_x,
                         y: row_y + 14.0,
                         text: span.text.clone(),
                         color: span.color,
                         font_size: NORMAL_TEXT,
-                        font_weight: if span.bold {
-                            FontWeightHint::Bold
-                        } else {
-                            FontWeightHint::Regular
-                        },
+                        font_weight: span_weight,
                         max_width: Some(width - span_x - PADDING),
                     });
-                    span_x += span.text.len() as f32 * CHAR_WIDTH;
+                    // A key is drawn bold and its value is not, so each run
+                    // has to advance the pen by its own width in its own
+                    // weight; one nominal cell per byte put the value halfway
+                    // through the key on any line with non-ASCII text.
+                    span_x += text::measure(&span.text, NORMAL_TEXT, span_weight);
                 }
             }
         }
@@ -4786,5 +4814,55 @@ mod tests {
         let diffs = diff_json(&a, &b);
         assert_eq!(diffs.len(), 1);
         assert!(diffs[0].path.contains("c"));
+    }
+    // --- Tab and chip geometry ---
+
+    /// Clicking a tab has to select the tab the user sees. Hit-testing and
+    /// rendering used to size the tab separately, and the two disagreed: the
+    /// click test measured `doc.title` while the render measured the title
+    /// plus its dirty marker, so a modified document's tab was drawn wider
+    /// than the region that selected it and the strip drifted out of step
+    /// from that tab onwards.
+    #[test]
+    fn a_dirty_tab_is_as_wide_as_it_looks() {
+        let mut doc = Document::new(1, "notes.json".to_string());
+        let clean = tab_width(&doc);
+        doc.dirty = true;
+        let dirty = tab_width(&doc);
+        assert!(
+            dirty > clean,
+            "the dirty marker takes room, so the tab has to grow for it"
+        );
+        assert!(
+            text::measure(&tab_label(&doc), SMALL_TEXT, FontWeightHint::Bold) <= dirty - 20.0,
+            "the label does not fit inside the tab drawn for it"
+        );
+    }
+
+    /// The active tab is drawn bold. If each tab were measured in its own
+    /// current weight the whole strip would reflow every time the user
+    /// switched tabs, so every tab is measured bold.
+    #[test]
+    fn the_tab_strip_does_not_reflow_on_selection() {
+        let doc = Document::new(1, "a-reasonably-long-name.json".to_string());
+        let w = tab_width(&doc);
+        let bold = text::measure(&tab_label(&doc), SMALL_TEXT, FontWeightHint::Bold);
+        let regular = text::measure(&tab_label(&doc), SMALL_TEXT, FontWeightHint::Regular);
+        assert!(bold >= regular);
+        assert!(w >= bold + 20.0, "no room for the close button");
+    }
+
+    /// Same rule for the view-mode chips, and every mode's label must fit.
+    #[test]
+    fn every_view_mode_chip_fits_its_label() {
+        for mode in &VIEW_MODES {
+            let w = mode_width(*mode);
+            let label = text::measure(mode.label(), SMALL_TEXT, FontWeightHint::Bold);
+            assert!(
+                label <= w - 20.0 + 0.01,
+                "{:?} does not fit its chip",
+                mode.label()
+            );
+        }
     }
 }

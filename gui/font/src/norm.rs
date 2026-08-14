@@ -101,6 +101,78 @@ pub(crate) fn combining_class(ch: char) -> u8 {
     }
 }
 
+/// The class `ch` sorts by when the marks are put into the order they are
+/// *drawn* in rather than the order Unicode normalizes them to.
+///
+/// Unicode's combining classes 10–36, 84, 91, 103 and 129–132 are the
+/// "fixed-position" classes, and their numeric values are a canonical
+/// ordering: they exist so that two spellings of the same text normalize to
+/// one, not so that the marks come out stacked correctly. For Hebrew and
+/// Arabic they are in nearly the opposite order from the one the marks are
+/// drawn in — a Hebrew vowel is typed before the shin dot and drawn under the
+/// letter while the dot goes over it, and Arabic shadda is typed after a vowel
+/// and drawn nearer the letter than it.
+///
+/// So this permutes them into an order whose *numbers* are stacking order,
+/// bottom to top, and the shaper sorts a second time with it. HarfBuzz's
+/// `_hb_modified_combining_class`, and it does the same thing for the same
+/// reason. Every block below is a bijection onto itself — the Hebrew arms are
+/// a permutation of 10–26, the Arabic ones of 27–35 — which is what keeps the
+/// second sort from merging two marks that canonical order kept apart, and
+/// what lets [`crate::fallback::attach_class`] go on matching real classes.
+///
+/// Classes outside those blocks pass through, including every class 200 and
+/// up: those already *are* positions and are already in stacking order.
+#[must_use]
+pub(crate) fn display_class(ch: char) -> u8 {
+    permute(combining_class(ch))
+}
+
+/// [`display_class`]'s table, taken over the class rather than the character
+/// so that the property the second sort rests on — that each block is a
+/// bijection onto itself — is a thing a test can check directly.
+fn permute(klass: u8) -> u8 {
+    match klass {
+        // Hebrew points, in the order the SBL Hebrew manual stacks them:
+        // shin dot, sin dot, dagesh, rafe, holam, the hatafs, tsere, segol,
+        // patah, qamats, sheva, hiriq, qubuts, meteg, varika.
+        10 => 22,
+        11 => 15,
+        12 => 16,
+        13 => 17,
+        14 => 23,
+        15 => 18,
+        16 => 19,
+        17 => 20,
+        18 => 21,
+        19 => 14,
+        20 => 24,
+        21 => 12,
+        22 => 25,
+        23 => 13,
+        24 => 10,
+        25 => 11,
+        // Arabic: shadda (33) is typed last and drawn first, so it moves ahead
+        // of the vowels at 27–32 and they each shift up by one. Unicode says
+        // as much in its normalization FAQ and declines to renumber, because
+        // the classes are stability guarantees.
+        k @ 27..=32 => k.saturating_add(1),
+        33 => 27,
+        // The Telugu length marks and Thai sara u/uu, which are the only
+        // vowel signs in these ranges with a non-zero class and so are the
+        // only ones that reorder around the virama at class 9. They belong
+        // before it; 3, 4 and 5 are unassigned and below it.
+        84 => 4,
+        91 => 5,
+        103 => 3,
+        // Tibetan: with several vowel signs, u is drawn before i, which is
+        // what makes a multi-vowel Dzongkha syllable come out right.
+        130 => 132,
+        132 => 131,
+        other => other,
+    }
+}
+
 /// Whether `ch` is a non-spacing combining mark — general category `Mn`.
 ///
 /// `Mn` alone, and not the whole of `M*`. `Mc`, the *spacing* combining marks,
@@ -260,25 +332,31 @@ fn decompose_into(ch: char, cluster: usize, out: &mut Vec<Piece>, depth: u32) {
     }
 }
 
-/// Sort each run of non-starters into canonical order.
+/// Sort each run of non-starters by `class`.
 ///
-/// Stable and by combining class only, per UAX #15: two marks of the *same*
-/// class are visually stacked in the order they were typed, so reordering
-/// them would move an accent. This is an insertion sort because the runs are
-/// one or two marks long in practice and the algorithm's stability is easier
-/// to see than to look up.
-fn canonical_order(pieces: &mut [Piece]) {
+/// Stable and by class only, per UAX #15: two marks of the *same* class are
+/// visually stacked in the order they were typed, so reordering them would
+/// move an accent. This is an insertion sort because the runs are one or two
+/// marks long in practice and the algorithm's stability is easier to see than
+/// to look up.
+///
+/// The class function is a parameter because this sort is run twice, over two
+/// different orderings of the same marks — [`combining_class`] for canonical
+/// order, [`display_class`] for the order they are drawn in. The algorithm is
+/// identical and only the key differs; both keys agree about which characters
+/// are starters, which is what makes one loop able to serve both.
+fn sort_marks(pieces: &mut [Piece], class: impl Fn(char) -> u8) {
     for i in 1..pieces.len() {
         let Some(&(ch, cluster)) = pieces.get(i) else {
             continue;
         };
-        let ccc = combining_class(ch);
+        let ccc = class(ch);
         if ccc == 0 {
             continue;
         }
         let mut j = i;
         while let Some(&(prev, _)) = j.checked_sub(1).and_then(|k| pieces.get(k)) {
-            let prev_ccc = combining_class(prev);
+            let prev_ccc = class(prev);
             // Stop at a starter: a mark never moves past the character it
             // attaches to. Stop at an equal class: that is what makes this
             // stable, and stacking order is meaningful within a class.
@@ -313,7 +391,7 @@ pub(crate) fn nfc(text: &str) -> Vec<Piece> {
         }
         decompose_into(ch, cluster, &mut pieces, 0);
     }
-    canonical_order(&mut pieces);
+    sort_marks(&mut pieces, combining_class);
     compose(&mut pieces);
     pieces
 }
@@ -371,14 +449,26 @@ fn compose(pieces: &mut Vec<Piece>) {
 
 /// The characters a face should actually be asked for, given `text`.
 ///
-/// The whole stage, and the only entry point the shaper uses: normalize to
-/// NFC, then take back apart whatever this face cannot draw. Both halves are
-/// skipped when they would do nothing, which is the usual case — ASCII takes
-/// one scan of the string and one scan of the pieces, and neither table is
-/// consulted twice.
+/// Three steps, and the only entry point the shaper uses: normalize to NFC,
+/// take back apart whatever this face cannot draw, then put the marks into
+/// the order they are drawn in. All three are skipped when they would do
+/// nothing, which is the usual case — ASCII takes one scan of the string and
+/// one scan of the pieces, and neither table is consulted twice.
+///
+/// The output is therefore **not** NFC for Hebrew, Arabic, Telugu, Thai and
+/// Tibetan: within a run of marks it is [`display_class`] order, which is what
+/// the rest of the shaper wants and what HarfBuzz produces. `nfc` is still
+/// exactly NFC, and is what a caller with a text question rather than a
+/// drawing one should ask. The reordering is confined to a mark run, so no
+/// character crosses the base it attaches to and every cluster is unchanged;
+/// the string this stage describes is the same string, spelled for a renderer.
 #[must_use]
 pub(crate) fn pieces(text: &str, has_glyph: impl Fn(char) -> bool) -> Vec<Piece> {
-    let mut out = if needs_work(text) {
+    // One question, asked once, gating both of the passes that only marks can
+    // make work for: a string with no marks and nothing to decompose has
+    // nothing to reorder and nothing to take apart.
+    let work = needs_work(text);
+    let mut out = if work {
         nfc(text)
     } else {
         // Already NFC by inspection, so the offsets are the string's own and
@@ -386,6 +476,12 @@ pub(crate) fn pieces(text: &str, has_glyph: impl Fn(char) -> bool) -> Vec<Piece>
         text.char_indices().map(|(at, ch)| (ch, at)).collect()
     };
     fit_to_face(&mut out, has_glyph);
+    if work {
+        // After `fit_to_face` and not before: splitting a character the face
+        // cannot draw adds marks, and those marks have to be sorted with the
+        // rest rather than left wherever the decomposition put them.
+        sort_marks(&mut out, display_class);
+    }
     out
 }
 
@@ -500,6 +596,86 @@ mod tests {
     #[test]
     fn a_spacing_combining_mark_is_not_a_mark_here() {
         assert!(!is_mark('\u{93f}'));
+    }
+
+    /// The property the second sort rests on. If two classes the canonical
+    /// sort keeps apart mapped to one display class, the display sort would
+    /// merge them and their typed order would start deciding their stacking
+    /// order — silently, and only for the pair that collided.
+    #[test]
+    fn each_permuted_block_is_a_bijection_onto_itself() {
+        // Hebrew and Arabic-with-Syriac. Every class in both ranges is one
+        // Unicode assigns, so the image has to be the range itself.
+        for (lo, hi) in [(10u8, 26u8), (27, 36)] {
+            let mut got: Vec<u8> = (lo..=hi).map(permute).collect();
+            got.sort_unstable();
+            let want: Vec<u8> = (lo..=hi).collect();
+            assert_eq!(got, want, "classes {lo}..={hi} are not permuted onto themselves");
+        }
+        // Tibetan is stated over the classes Unicode *assigns* rather than
+        // over the range: 131 is unassigned, so 132 is free to take it and
+        // the range as a whole is not a permutation. HarfBuzz's table collides
+        // there too, and for the same reason it does not matter.
+        let mut tibetan = [permute(129), permute(130), permute(132)];
+        tibetan.sort_unstable();
+        assert_eq!(tibetan, [129, 131, 132]);
+        // The three that deliberately leave their block, to land below the
+        // virama at class 9. They must not collide with each other or with
+        // anything Unicode assigns.
+        assert_eq!([permute(103), permute(84), permute(91)], [3, 4, 5]);
+    }
+
+    /// A class the permutation says nothing about is left exactly alone —
+    /// above all class 0, since a starter that became a mark, or the reverse,
+    /// would let the sort move a mark past the letter it belongs to.
+    #[test]
+    fn the_permutation_leaves_every_other_class_alone() {
+        for k in 0..=255u8 {
+            // Note the fixed points *inside* the permuted blocks: 26 (point
+            // varika) is already stacked last among the Hebrew points, and 34,
+            // 35 and 36 (sukun, superscript alef, superscript alaph) already
+            // follow the vowels they are drawn above.
+            let moved = matches!(k, 10..=25 | 27..=33 | 84 | 91 | 103 | 130 | 132);
+            assert_eq!(permute(k) == k, !moved, "class {k}");
+            assert_eq!(permute(k) == 0, k == 0, "class {k} changed starter-ness");
+        }
+    }
+
+    /// The string the sweep found this with. Canonical order leaves it as
+    /// typed — qamats is class 18 and the shin dot 24, already ascending —
+    /// but the dot is drawn above the letter and the vowel below it, so the
+    /// dot has to come first.
+    #[test]
+    fn hebrew_points_come_out_in_the_order_they_are_stacked() {
+        let typed = "\u{5e9}\u{5b8}\u{5c1}";
+        assert_eq!(chars(&pieces(typed, |_| true)), "\u{5e9}\u{5c1}\u{5b8}");
+        // Every mark still belongs to the letter: reordering inside a run
+        // cannot change which base a mark is charged to.
+        assert_eq!(clusters(&pieces(typed, |_| true)), vec![0, 0, 0]);
+        // And NFC itself is untouched. It answers a question about the text,
+        // not about the drawing, and two callers want different answers.
+        assert_eq!(chars(&nfc(typed)), typed);
+    }
+
+    /// Arabic shadda is typed after the vowel and drawn nearer the letter, so
+    /// it has to move ahead of it. Unicode's own normalization FAQ names this
+    /// case and declines to renumber the classes, because they are frozen.
+    #[test]
+    fn arabic_shadda_precedes_the_vowel_it_is_typed_after() {
+        let out = pieces("\u{628}\u{64e}\u{651}", |_| true);
+        assert_eq!(chars(&out), "\u{628}\u{651}\u{64e}");
+    }
+
+    /// Two marks of the same class are stacked in the order they were typed,
+    /// and the second sort has to be as stable as the first.
+    #[test]
+    fn marks_of_one_class_keep_the_order_they_were_typed_in() {
+        // Two class-230 marks above an `a`: acute then grave stays acute
+        // then grave, whichever sort ran.
+        let out = pieces("a\u{301}\u{300}", |_| true);
+        assert_eq!(chars(&out), "\u{e1}\u{300}");
+        let out = pieces("a\u{300}\u{301}", |_| true);
+        assert_eq!(chars(&out), "\u{e0}\u{301}");
     }
 
     #[test]

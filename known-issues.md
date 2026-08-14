@@ -59635,6 +59635,33 @@ HarfBuzz the reverse, because its sort moved the shin dot ahead of the qamats.
 `misplaced` rather than `reordered` only because the glyphs are all notdef and
 so compare equal — on a face that has the glyphs it is a reordering.
 
+**Fixed** (2026-08-14). `norm::sort_marks` now takes the class function as a
+parameter and runs twice: `nfc` sorts with `combining_class`, and
+`norm::pieces` sorts again with the new `display_class` — HarfBuzz's
+`_hb_modified_combining_class`, a permutation of the fixed-position blocks
+whose numeric order is stacking order. Sweep: `agree` 10917 → 11223,
+`misplaced` 841 → 625, `reordered` 32 → 0, `differ` 998 → 940, and this string
+465 → 249.
+
+The decision the entry was waiting on is recorded as `design-decisions.md`
+§419. It went the way that keeps §410 intact: `nfc()` is still exactly NFC, and
+the second sort lives in `pieces`, the shaper's entry point, which has been
+font-dependent since §410 and promises only "the characters a face should
+actually be asked for". Sorting inside `nfc` — which is what HarfBuzz does,
+since its normalizer is private to the shaper — would have made the name a lie.
+
+Two things the tests found that reading HarfBuzz would not have:
+
+- Class 26 (Hebrew point varika) and 34–36 (sukun, superscript alef,
+  superscript alaph) are **fixed points**, not part of the permutation.
+- The Tibetan block is not a bijection onto its own range: 132 maps to 131,
+  which is legal only because Unicode assigns no character class 131. Stating
+  the claim over the range rather than over the assigned classes fails.
+
+**Still open at 249 for this string, and 249 for the meteg one.** Both are now
+a different disagreement — not the order of the marks but where they are put —
+and both want their own entry once diagnosed.
+
 ## TD-FONT-GATES-THE-MARK-FALLBACK-ON-THE-CHARACTERS-SCRIPT-NOT-THE-FONTS
 
 **What.** `fallback::positions_marks` decides whether a run may have its marks

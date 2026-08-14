@@ -44001,6 +44001,71 @@ no key can still be entered. Not blocked on anything; deferred because the
 editor's cursor arithmetic is `char`-indexed throughout and converting it is a
 self-contained but non-trivial rewrite.
 
+**Scoping pass 2026-08-14 — two claims above are wrong, and the real cost is
+in a different place than this entry says.** Read the code before planning
+from the paragraph above.
+
+**Correction 1: the cursor arithmetic is not `char`-indexed. It is already
+byte-indexed throughout.** `cursor` is derived from and compared against
+`buf.len()` (a *byte* length) at every site — `kshell.rs:3333, 3370, 3374,
+3376, 3395, 3410, 3509, 3531, 3554, 3573, 3582, 3586` — and the redraw path
+already slices bytes (`buf.as_bytes().get(cursor..)`, `redraw_from_cursor`,
+`kshell.rs:2955-2969`) and already emits bytes (`console::putchar(b)`).
+`replace_line` (`kshell.rs:2921-2949`) is likewise pure byte arithmetic. So
+the editor is not a UTF-8-aware editor that needs converting to bytes; it is a
+byte editor whose buffer happens to be typed `String`. Converting the four
+editor functions is close to a mechanical type change (`String`→`Vec<u8>`,
+`&str`→`&[u8]`), *not* the "non-trivial rewrite" this entry warns about.
+
+Corollary: because the arithmetic is byte-based while `String` is char-based,
+the current code is already subtly wrong for multibyte input — `String::remove`
+/`String::insert` at a non-char-boundary byte index panic. It never fires only
+because of the input guard described next.
+
+**Correction 2: the escape-input suggestion cites the wrong shell.** The
+`$'\xff'` ANSI-C quoting that "the shell already parses in word expansion" is
+**Oils/osh** — `userspace/oils/`, Lane B, userspace. This entry is about
+**kshell**, the in-kernel shell, which has no ANSI-C quoting at all (no
+`$'...'` parser exists in `kernel/src/kshell.rs`). So the escape input has to
+be *built*, not reused, and whoever picks this up should not plan around
+borrowing it.
+
+**The actual gate on typing a high byte** is a single match guard:
+`kshell.rs:3580`, `ch if ch >= 0x20 && ch < 0x7F`. Bytes ≥ 0x80 fall through
+to the `_ => {}` arm and are silently discarded. **Landmine for whoever widens
+it:** the insert on the next line is `buf.insert(cursor, ch as char)`
+(`kshell.rs:3583`). `ch` is a `u8`; `ch as char` maps 0x80..=0xFF to
+U+0080..=U+00FF, which `String::insert` then encodes as **two** UTF-8 bytes.
+Widening the guard without changing the buffer type would therefore insert two
+bytes for one keystroke and desynchronise the byte-indexed cursor from the
+buffer — a corruption bug, and a worse state than today's honest refusal. The
+type change must land first, or with it.
+
+**Where the cost actually is: the parser, not the editor.** The editor is four
+functions (`read_line` `3191-3601`, `reverse_search_mode` `3061-3190`,
+`replace_line`, `redraw_from_cursor`) with exactly **one** real caller
+(`kshell.rs:2892`; the only other is a unit test at `64187`). The expensive
+part is everything downstream of that caller, which is uniformly `&str`:
+`execute(line: &str)` (`3872`), `execute_single` (`4149`), and the sibling
+statement executors `execute_while_loop`, `execute_select`,
+`execute_until_loop`, `execute_for_loop`, `execute_cfor_loop`, `execute_case`,
+`execute_function`, `execute_input_redirect`, `execute_redirect`,
+`execute_heredoc`, `execute_pipe_chain` — plus `resolve_path(path: &str) ->
+String` (`208`), which is the ~270-call-site figure this entry quotes. History
+(`entries: Vec<String>`, `2629`) has to move to `Vec<Vec<u8>>` as well, or
+recalling a byte-bearing command re-corrupts it.
+
+**Consequence for sequencing.** A partial conversion is worse than none: if the
+editor becomes byte-clean but `execute()` still takes `&str`, the lossy step
+just moves from the keyboard to the parser entry, where it is *less* visible.
+So this should land as one coherent change over the editor **and** the
+statement executors, not as an "editor first, parser later" split. That is the
+real reason it is a big task — not the cursor arithmetic.
+
+**Status:** unblocked and in-lane; not started, because the conversion wants a
+free build machine to iterate against (a boot test was occupying QEMU during
+this scoping pass).
+
 ### TD-OILS-AN-UPPERCASE-G-WAS-READ-BY-THE-HALF-OF-THE-COMMAND-THAT-ONLY-EVER-READS-THE-LOWERCASE-ONE. `declare -Ga g=(1 2)` bound the array globally where bash keeps it in the frame — 2026-08-12 — FIXED 2026-08-12
 
 **Where:** `userspace/oils/src/interp.rs`, [`Shell::in_declare_global_scope`].

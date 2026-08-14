@@ -43,16 +43,18 @@
 //!
 //! * **1, `SingleSubst`** — one glyph for one glyph, in both its formats: a
 //!   delta applied to every covered glyph, or an explicit list.
+//! * **2, `MultipleSubst`** — one glyph becomes several, each carrying the
+//!   cluster of the character behind it. This is how `ccmp` decomposes a
+//!   precomposed letter into a base and a mark so that GPOS can then attach
+//!   the mark; without it, a face that ships only the decomposed forms draws
+//!   the missing-glyph box for text that is perfectly well spelled.
 //! * **4, `LigatureSubst`** — several glyphs for one.
 //!
 //! # What is deliberately not implemented
 //!
-//! * **Type 2, `MultipleSubst`** (one glyph becomes several) and **type 3,
-//!   `AlternateSubst`**. Type 2 needs a run whose glyphs may share a cluster,
-//!   which is a change to [`shape`](crate::shape)'s invariants rather than to
-//!   this module. Type 3 picks by an alternate index that only a per-run
-//!   feature list can supply, and there is none yet — so it has no default-on
-//!   caller to serve.
+//! * **Type 3, `AlternateSubst`**, which picks by an alternate index that only
+//!   a per-run feature list can supply, and there is none yet — so it has no
+//!   default-on caller to serve.
 //! * **Types 5 and 6, contextual and chaining-contextual substitution**, which
 //!   `clig` and `calt` need. They work by invoking other lookups *by index* at
 //!   matched positions, so they are built on top of the single-lookup
@@ -73,6 +75,8 @@ use crate::sfnt::{Span, u16_at};
 
 /// `GSUB` lookup type for single substitution: one glyph for one glyph.
 const LOOKUP_SINGLE: u16 = 1;
+/// `GSUB` lookup type for multiple substitution: one glyph becomes several.
+const LOOKUP_MULTIPLE: u16 = 2;
 /// `GSUB` lookup type for ligature substitution: several glyphs for one.
 const LOOKUP_LIGATURE: u16 = 4;
 /// `GSUB` lookup type for an extension, which wraps a subtable of another type
@@ -86,6 +90,15 @@ const LOOKUP_EXTENSION: u16 = 7;
 /// forms). The cap is what stops a corrupt `componentCount` from making every
 /// position in a line scan to the end of it.
 const MAX_COMPONENTS: usize = 16;
+
+/// A ceiling on how many glyphs one glyph may decompose into.
+///
+/// The inverse of [`MAX_COMPONENTS`] and set to match it: real decompositions
+/// are two or three glyphs (a base and its marks), and a font claiming to turn
+/// one glyph into thousands is not a font a run should be resized for. The cap
+/// bounds the growth of the buffer, which is otherwise the one place
+/// substitution can allocate without limit.
+const MAX_SEQUENCE: usize = 16;
 
 /// A glyph on its way through substitution.
 ///
@@ -129,7 +142,7 @@ impl Substitutions {
             data,
             gsub?.off,
             &[b"ccmp", b"liga", b"rlig"],
-            &[LOOKUP_SINGLE, LOOKUP_LIGATURE],
+            &[LOOKUP_SINGLE, LOOKUP_MULTIPLE, LOOKUP_LIGATURE],
             LOOKUP_EXTENSION,
         )?;
         Some(Self { lookups })
@@ -145,8 +158,9 @@ impl Substitutions {
         for lookup in &self.lookups {
             match lookup.kind {
                 LOOKUP_SINGLE => apply_single(data, &lookup.subtables, glyphs),
+                LOOKUP_MULTIPLE => apply_multiple(data, &lookup.subtables, glyphs),
                 LOOKUP_LIGATURE => apply_ligature(data, &lookup.subtables, glyphs),
-                // `feature_lookups` was asked for these two types only, so
+                // `feature_lookups` was asked for these three types only, so
                 // there is nothing else to reach here; ignoring anything that
                 // does is what keeps adding a type to that list from being
                 // able to silently corrupt a run.
@@ -199,6 +213,92 @@ fn single_at(data: &[u8], sub: usize, glyph: u16) -> Option<u16> {
         }
         _ => None,
     }
+}
+
+/// Run one `MultipleSubst` lookup across the whole run.
+///
+/// The run grows: each replaced glyph becomes a sequence, and every glyph of
+/// that sequence carries the cluster of the one it replaced, because they all
+/// came from the same character. That is what makes `ShapedGlyph::cluster` a
+/// many-to-many mapping, and why the queries on
+/// [`ShapedRun`](crate::shape::ShapedRun) work in whole clusters.
+///
+/// Walking resumes *after* the inserted glyphs, so what this lookup produced
+/// is not offered back to it — the same rule as everywhere else here, and the
+/// reason a font that decomposes A into A cannot loop.
+fn apply_multiple(data: &[u8], subtables: &[usize], glyphs: &mut Vec<SubGlyph>) {
+    let mut i = 0usize;
+    let mut sequence: Vec<u16> = Vec::new();
+    while i < glyphs.len() {
+        let Some(glyph) = glyphs.get(i).copied() else {
+            break;
+        };
+        if subtables
+            .iter()
+            .find_map(|&sub| sequence_at(data, sub, glyph.gid, &mut sequence))
+            .is_none()
+        {
+            i = i.saturating_add(1);
+            continue;
+        }
+        // `sequence_at` owns the buffer: it clears on entry and only returns
+        // `Some` after pushing at least one glyph, so a match here is never
+        // empty and never carries a failed subtable's partial read. Checking
+        // emptiness again would be dead code that hides the guard inside.
+        let cluster = glyph.cluster;
+        let grown = i.saturating_add(sequence.len());
+        glyphs.splice(
+            i..=i,
+            sequence.iter().map(|&gid| SubGlyph { gid, cluster }),
+        );
+        i = grown;
+    }
+}
+
+/// The sequence one `MultipleSubst` subtable puts in place of `glyph`, written
+/// into `out`.
+///
+/// `out` is cleared here rather than by the caller, because the caller tries
+/// the subtables of a lookup in turn: a subtable that reads half a sequence and
+/// then finds the table truncated must not leave those glyphs in front of the
+/// next subtable's answer. Clearing on entry makes `out` mean "what the
+/// subtable that returned `Some` matched", nothing more. Returning the glyphs
+/// through a buffer rather than a fresh `Vec` is what keeps a run of ordinary
+/// text — where nothing matches — from allocating once per position.
+fn sequence_at(data: &[u8], sub: usize, glyph: u16, out: &mut Vec<u16>) -> Option<()> {
+    out.clear();
+    // Only one format is defined, and a subtable claiming another is one this
+    // cannot read rather than one to guess at.
+    if u16_at(data, sub)? != 1 {
+        return None;
+    }
+    let coverage = sub.checked_add(usize::from(u16_at(data, sub.checked_add(2)?)?))?;
+    let index = coverage_index(data, coverage, glyph)?;
+    let count = u16_at(data, sub.checked_add(4)?)?;
+    if index >= count {
+        return None;
+    }
+    let at = sub
+        .checked_add(6)?
+        .checked_add(usize::from(index).checked_mul(2)?)?;
+    let sequence = sub.checked_add(usize::from(u16_at(data, at)?))?;
+    let glyph_count = usize::from(u16_at(data, sequence)?);
+    // A sequence of length zero would delete the glyph. The spec forbids it,
+    // and some shapers honour it anyway for compatibility — but a deleted
+    // glyph takes its cluster with it, and a character that no query can name
+    // a position for is worse than a character drawn as it arrived. Refusing
+    // here rather than in the caller is what lets a *later* subtable of the
+    // same lookup still have its say.
+    if glyph_count == 0 || glyph_count > MAX_SEQUENCE {
+        return None;
+    }
+    for i in 0..glyph_count {
+        let at = sequence
+            .checked_add(2)?
+            .checked_add(i.checked_mul(2)?)?;
+        out.push(u16_at(data, at)?);
+    }
+    Some(())
 }
 
 /// Run one `LigatureSubst` lookup across the whole run.
@@ -369,7 +469,17 @@ mod tests {
     /// A `GSUB` table with one feature tagged `tag`, one lookup of `kind`, and
     /// `subtable` as that lookup's only subtable.
     fn gsub_table(tag: &[u8; 4], kind: u16, subtable: &[u8]) -> Vec<u8> {
-        // header 10 | scriptList (empty, 2) | featureList | lookupList | sub
+        gsub_subtables(tag, kind, &[subtable])
+    }
+
+    /// A `GSUB` table with one feature tagged `tag` and one lookup of `kind`
+    /// holding every subtable in `subtables`, in the order given.
+    ///
+    /// Several subtables in one lookup is the case that separates "try the
+    /// next subtable" from "give up on this glyph": the font's order is the
+    /// order they are tried in, and the first one that matches wins.
+    fn gsub_subtables(tag: &[u8; 4], kind: u16, subtables: &[&[u8]]) -> Vec<u8> {
+        // header 10 | scriptList (empty, 2) | featureList | lookupList | subs
         let mut out = Vec::new();
         out.extend_from_slice(&be16(1)); // major
         out.extend_from_slice(&be16(0)); // minor
@@ -396,11 +506,18 @@ mod tests {
         out.extend_from_slice(&be16(4));
         out.extend_from_slice(&be16(kind));
         out.extend_from_slice(&be16(0)); // flags
-        out.extend_from_slice(&be16(1)); // subTableCount
+        out.extend_from_slice(&be16(u16::try_from(subtables.len()).unwrap()));
         let lookup = lookup_list + 4;
-        let sub_at = out.len() + 2;
-        out.extend_from_slice(&be16(u16::try_from(sub_at - lookup).unwrap()));
-        out.extend_from_slice(subtable);
+        // Offsets are measured from the start of the Lookup, and the first
+        // subtable begins after the whole offset array.
+        let mut at = out.len() + subtables.len() * 2 - lookup;
+        for s in subtables {
+            out.extend_from_slice(&be16(u16::try_from(at).unwrap()));
+            at += s.len();
+        }
+        for s in subtables {
+            out.extend_from_slice(s);
+        }
         out
     }
 
@@ -426,6 +543,40 @@ mod tests {
         out.extend_from_slice(&be16(u16::try_from(to.len()).unwrap()));
         for g in to {
             out.extend_from_slice(&be16(*g));
+        }
+        out.extend_from_slice(&coverage);
+        out
+    }
+
+    /// `MultipleSubstFormat1`: one sequence per covered glyph.
+    ///
+    /// `sequences[n]` is what `glyphs[n]` decomposes into. A sequence may be
+    /// empty, which is how the "zero glyphs deletes the glyph" case is built.
+    fn multiple(glyphs: &[u16], sequences: &[&[u16]]) -> Vec<u8> {
+        assert_eq!(glyphs.len(), sequences.len());
+        let coverage = coverage1(glyphs);
+        // header(6) + one offset per sequence, then the Sequence tables, then
+        // the coverage.
+        let header = 6 + sequences.len() * 2;
+        let mut at = header;
+        let mut offsets = Vec::new();
+        for seq in sequences {
+            offsets.push(at);
+            at += 2 + seq.len() * 2;
+        }
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&be16(1)); // substFormat
+        out.extend_from_slice(&be16(u16::try_from(at).unwrap())); // coverage
+        out.extend_from_slice(&be16(u16::try_from(sequences.len()).unwrap()));
+        for off in &offsets {
+            out.extend_from_slice(&be16(u16::try_from(*off).unwrap()));
+        }
+        for seq in sequences {
+            out.extend_from_slice(&be16(u16::try_from(seq.len()).unwrap()));
+            for g in *seq {
+                out.extend_from_slice(&be16(*g));
+            }
         }
         out.extend_from_slice(&coverage);
         out
@@ -763,5 +914,165 @@ mod tests {
         let data = gsub_table(b"liga", LOOKUP_LIGATURE, &sub);
         let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
         assert_eq!(subst(&data, &subs, &[10, 11, 12]), [10, 11, 12]);
+    }
+
+    #[test]
+    fn a_multiple_substitution_decomposes_one_glyph_into_several() {
+        // 10 is a precomposed letter the face draws as a base plus a mark.
+        let data = gsub_table(b"ccmp", LOOKUP_MULTIPLE, &multiple(&[10], &[&[30, 31]]));
+        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        assert_eq!(subst(&data, &subs, &[10]), [30, 31]);
+        assert_eq!(subst(&data, &subs, &[9, 10, 11]), [9, 30, 31, 11]);
+        // Uncovered glyphs are untouched.
+        assert_eq!(subst(&data, &subs, &[9, 11]), [9, 11]);
+    }
+
+    #[test]
+    fn a_decomposed_glyph_gives_every_piece_its_own_characters_cluster() {
+        // The clusters are what the layout queries key on: both new glyphs
+        // came from the same character, so both must name its byte offset.
+        // Anything else and a caret can be drawn between them.
+        let data = gsub_table(b"ccmp", LOOKUP_MULTIPLE, &multiple(&[11], &[&[30, 31, 32]]));
+        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        assert_eq!(subst(&data, &subs, &[10, 11, 12]), [10, 30, 31, 32, 12]);
+        assert_eq!(clusters(&data, &subs, &[10, 11, 12]), [0, 1, 1, 1, 2]);
+    }
+
+    #[test]
+    fn every_glyph_of_a_run_is_decomposed_not_just_the_first() {
+        let data = gsub_table(b"ccmp", LOOKUP_MULTIPLE, &multiple(&[10, 12], &[&[30, 31], &[40, 41]]));
+        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        assert_eq!(subst(&data, &subs, &[10, 11, 12]), [30, 31, 11, 40, 41]);
+        assert_eq!(clusters(&data, &subs, &[10, 11, 12]), [0, 0, 1, 2, 2]);
+    }
+
+    #[test]
+    fn a_decomposition_is_not_offered_back_to_the_lookup_that_made_it() {
+        // 10 decomposes to 30 and 12 — and 12 is itself covered. Walking has
+        // to resume *past* the whole insertion, so the 12 this lookup just
+        // wrote is left alone; resuming one glyph on would decompose it again
+        // and hand back three glyphs.
+        let data = gsub_table(
+            b"ccmp",
+            LOOKUP_MULTIPLE,
+            &multiple(&[10, 12], &[&[30, 12], &[40, 41]]),
+        );
+        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        assert_eq!(subst(&data, &subs, &[10]), [30, 12]);
+        // A 12 that was in the run to begin with is still decomposed: the rule
+        // is about what this lookup produced, not about the glyph id.
+        assert_eq!(subst(&data, &subs, &[12]), [40, 41]);
+
+        // And the degenerate case the same rule has to cover: a glyph that
+        // decomposes to itself. Anything re-examining its own output would not
+        // terminate here at all, which is why the rule is a rule and not a
+        // tidiness preference.
+        let data = gsub_table(b"ccmp", LOOKUP_MULTIPLE, &multiple(&[10], &[&[10, 30]]));
+        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        assert_eq!(subst(&data, &subs, &[10]), [10, 30]);
+    }
+
+    #[test]
+    fn a_decomposition_feeds_a_later_ligature() {
+        // The ordering rule, in the direction `ccmp` exists for: 10 becomes
+        // 30 and 31, and only then does a ligature covering 31+12 have
+        // anything to join. Cluster 1 is swallowed by the ligature, so the
+        // run ends 30(cluster 0), 40(cluster 0) — the ligature keeps its
+        // first component's cluster, which is the decomposed character's.
+        let set = ligature_set(&[ligature(40, &[12])]);
+        let data = gsub_lookups(&[
+            (b"ccmp", LOOKUP_MULTIPLE, multiple(&[10], &[&[30, 31]])),
+            (b"liga", LOOKUP_LIGATURE, ligature_subst(&[31], &[set])),
+        ]);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        assert_eq!(subst(&data, &subs, &[10, 12]), [30, 40]);
+        assert_eq!(clusters(&data, &subs, &[10, 12]), [0, 0]);
+    }
+
+    #[test]
+    fn a_sequence_of_no_glyphs_leaves_the_glyph_alone() {
+        // The spec forbids an empty Sequence; some shapers delete the glyph
+        // anyway. Deleting takes the cluster with it, leaving a character no
+        // caret position corresponds to, so this refuses instead.
+        let data = gsub_table(b"ccmp", LOOKUP_MULTIPLE, &multiple(&[10], &[&[]]));
+        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        assert_eq!(subst(&data, &subs, &[10, 11]), [10, 11]);
+        assert_eq!(clusters(&data, &subs, &[10, 11]), [0, 1]);
+    }
+
+    #[test]
+    fn an_empty_sequence_lets_a_later_subtable_of_the_same_lookup_answer() {
+        // Refusing an empty Sequence is not the same as giving up on the
+        // glyph. The subtables of a lookup are tried in turn, so the refusal
+        // has to be *this subtable's* — the next one still gets its say.
+        let empty = multiple(&[10], &[&[]]);
+        let real = multiple(&[10], &[&[30, 31]]);
+        let data = gsub_subtables(b"ccmp", LOOKUP_MULTIPLE, &[&empty, &real]);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        assert_eq!(subst(&data, &subs, &[10]), [30, 31]);
+        assert_eq!(clusters(&data, &subs, &[10]), [0, 0]);
+    }
+
+    #[test]
+    fn a_subtable_that_reads_half_a_sequence_leaves_nothing_behind() {
+        // The first subtable covers 10 and its Sequence claims two glyphs,
+        // but the table ends between them: the read collects one glyph and
+        // then fails. Those glyphs are not an answer, and must not turn up in
+        // front of the one the second subtable does have.
+        let real = multiple(&[10], &[&[30, 31]]);
+        // A MultipleSubstFormat1 by hand, so its Sequence can be pointed at
+        // the very end of the table — the only place a read can run off.
+        let mut bad = Vec::new();
+        bad.extend_from_slice(&be16(1)); // substFormat
+        bad.extend_from_slice(&be16(8)); // coverage, after the offset array
+        bad.extend_from_slice(&be16(1)); // sequenceCount
+        bad.extend_from_slice(&be16(0)); // sequence offset, patched below
+        bad.extend_from_slice(&coverage1(&[10]));
+
+        let mut data = gsub_subtables(b"ccmp", LOOKUP_MULTIPLE, &[&bad, &real]);
+        let sub = data.len() - real.len() - bad.len();
+        let tail = data.len();
+        data.extend_from_slice(&be16(2)); // glyphCount
+        data.extend_from_slice(&be16(44)); // glyph 0 — and then nothing
+        let offset = be16(u16::try_from(tail - sub).unwrap());
+        data[sub + 6..sub + 8].copy_from_slice(&offset);
+
+        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        assert_eq!(subst(&data, &subs, &[10]), [30, 31]);
+    }
+
+    #[test]
+    fn a_sequence_longer_than_the_cap_is_refused() {
+        let long: Vec<u16> = (0..u16::try_from(MAX_SEQUENCE + 1).unwrap()).collect();
+        let data = gsub_table(b"ccmp", LOOKUP_MULTIPLE, &multiple(&[10], &[&long]));
+        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        assert_eq!(subst(&data, &subs, &[10]), [10]);
+
+        // And exactly the cap is still allowed: the bound is on absurdity,
+        // not on a font that happens to be at the limit.
+        let at_cap: Vec<u16> = (0..u16::try_from(MAX_SEQUENCE).unwrap()).collect();
+        let data = gsub_table(b"ccmp", LOOKUP_MULTIPLE, &multiple(&[10], &[&at_cap]));
+        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        assert_eq!(subst(&data, &subs, &[10]).len(), MAX_SEQUENCE);
+    }
+
+    #[test]
+    fn a_multiple_substitution_of_an_unknown_format_is_refused() {
+        let mut sub = multiple(&[10], &[&[30, 31]]);
+        sub[0..2].copy_from_slice(&be16(2));
+        let data = gsub_table(b"ccmp", LOOKUP_MULTIPLE, &sub);
+        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        assert_eq!(subst(&data, &subs, &[10]), [10]);
+    }
+
+    #[test]
+    fn a_truncated_multiple_substitution_is_survivable() {
+        let data = gsub_table(b"ccmp", LOOKUP_MULTIPLE, &multiple(&[10, 12], &[&[30, 31], &[40]]));
+        let subs = Substitutions::parse(&data, Some(span(0, data.len()))).unwrap();
+        for cut in 0..data.len() {
+            let short = &data[..cut];
+            let _ = Substitutions::parse(short, Some(span(0, short.len())));
+            let _ = subst(short, &subs, &[10, 11, 12]);
+        }
     }
 }

@@ -1051,7 +1051,7 @@ fn installed_fonts_ligate_fi() {
 /// reported, and the assertion is on the *proportion*, because a parser fault
 /// would hit fonts in bulk while a genuine `ccmp` rule hits a handful.
 ///
-/// On the development host eight of 275 faces change it, and both causes are
+/// On the development host eight of 281 faces change it, and both causes are
 /// understood:
 ///
 /// * The six Linux Libertine files have a `Th` ligature, which "The" triggers.
@@ -1142,6 +1142,184 @@ fn installed_fonts_leave_plain_latin_alone() {
         "{} of {with_gsub} faces changed plain Latin prose — that is not \
          `ccmp` doing its job, that is the substitution pass misreading tables",
         changed.len()
+    );
+}
+
+/// Shape text every installed face has an opinion about, and check that the
+/// run and the source string still agree about where the boundaries are.
+///
+/// Substitution makes the glyph-to-character mapping many-to-many in both
+/// directions: a ligature is one glyph for several characters, and a
+/// `MultipleSubst` decomposition is several glyphs for one. Every caret, cut
+/// and hit test in the desktop is a byte offset into the *string*, so the only
+/// offsets any of them may name are the ones a cluster starts at. An answer
+/// that falls anywhere else is a caret drawn inside a ligature, or a slice
+/// taken through the middle of a character — a panic in the best case and
+/// mojibake in the worst.
+///
+/// The unit tests pin this on runs built by hand. This pins it on whatever 281
+/// real fonts actually do with text they have rules for, which is the part no
+/// fixture can predict.
+///
+/// On the development host `cambria.ttc` is the face that exercises the
+/// growing direction: `"été"` comes out as five glyphs with clusters
+/// `[0, 0, 2, 3, 3]`, because its `ccmp` decomposes each precomposed `é` into
+/// an `e` and an acute so that GPOS can then attach the accent. That is the
+/// textbook reason `MultipleSubst` exists, and it is why the test insists at
+/// the end that *something* grew: with type 2 silently not applied, every
+/// assertion here would still pass while only ever seeing the ligature case.
+#[test]
+#[ignore = "depends on the host's installed fonts"]
+fn shaped_runs_agree_with_their_strings_about_boundaries() {
+    // Strings chosen so that some face has a rule for each: Latin ligatures,
+    // a combining sequence, its precomposed spelling, Devanagari (whose
+    // `ccmp` decomposes), and Arabic (whose `rlig` is not optional).
+    const STRINGS: &[&str] = &[
+        "office",
+        "e\u{0301}",
+        "\u{00E9}t\u{00E9}",
+        "\u{0928}\u{094D}\u{0937}",
+        "\u{0644}\u{0627}",
+        "waffle iron",
+    ];
+
+    let mut files = Vec::new();
+    for dir in font_dirs() {
+        collect_fonts(&dir, &mut files, 0);
+    }
+    assert!(!files.is_empty(), "no fonts found on this host");
+    files.sort();
+
+    let mut checked = 0usize;
+    let mut grew = 0usize;
+    let mut shrank = 0usize;
+    let mut grew_examples: Vec<String> = Vec::new();
+
+    for path in &files {
+        let Ok(data) = fs::read(path) else { continue };
+        let Ok(face) = Face::parse(data) else { continue };
+        if !face.has_substitutions() {
+            continue;
+        }
+        let Ok(font) = ScaledFont::from_bytes(fs::read(path).unwrap(), 16.0) else {
+            continue;
+        };
+        checked += 1;
+
+        for text in STRINGS {
+            let run = font.shape(text);
+            let end = text.len();
+            let clusters: Vec<usize> = run.glyphs().iter().map(|g| g.cluster).collect();
+            if run.len() > text.chars().count() {
+                grew += 1;
+                if grew_examples.len() < 5 {
+                    grew_examples.push(format!(
+                        "{}: {text:?} -> {} glyphs, clusters {clusters:?}",
+                        path.display(),
+                        run.len()
+                    ));
+                }
+            } else if run.len() < text.chars().count() {
+                shrank += 1;
+            }
+
+            // Non-decreasing, and every one a real character boundary. A
+            // cluster that went backwards, or landed mid-character, would make
+            // every query below meaningless rather than merely wrong.
+            for (i, &c) in clusters.iter().enumerate() {
+                assert!(
+                    text.is_char_boundary(c),
+                    "{}: {text:?} glyph {i} has cluster {c}, not a character \
+                     boundary",
+                    path.display()
+                );
+                if i > 0 {
+                    assert!(
+                        c >= clusters[i - 1],
+                        "{}: {text:?} clusters go backwards: {clusters:?}",
+                        path.display()
+                    );
+                }
+            }
+
+            // The advances must sum to the width, or measuring and drawing
+            // disagree about where the string ends.
+            let summed: f32 = run.glyphs().iter().map(|g| g.advance).sum();
+            assert!(
+                (summed - run.width()).abs() <= 0.01,
+                "{}: {text:?} sums to {summed} but reports {}",
+                path.display(),
+                run.width()
+            );
+
+            // Every answer a query gives must be a cluster start or the end of
+            // the string — the two kinds of position that exist.
+            let allowed = |at: usize| at == end || clusters.contains(&at);
+            let width = run.width().ceil().max(1.0);
+            let mut px = 0.0f32;
+            while px <= width {
+                for (what, at) in [
+                    ("fit", run.fit(px, end)),
+                    ("fit_end", run.fit_end(px, end)),
+                    ("offset_at", run.offset_at(px, end)),
+                ] {
+                    assert!(
+                        allowed(at),
+                        "{}: {text:?} {what}({px}) = {at}, which is not a \
+                         cluster boundary; clusters are {clusters:?}",
+                        path.display()
+                    );
+                    assert!(
+                        text.is_char_boundary(at),
+                        "{}: {text:?} {what}({px}) = {at}, mid-character",
+                        path.display()
+                    );
+                }
+                px += 1.0;
+            }
+
+            // And the caret must never move backwards as it advances through
+            // the string, however the glyphs were rearranged underneath.
+            let mut last = 0.0f32;
+            for at in 0..=end {
+                if !text.is_char_boundary(at) {
+                    continue;
+                }
+                let x = run.x_of(at, end);
+                assert!(
+                    x >= last - 0.01,
+                    "{}: {text:?} caret went backwards, x_of({at}) = {x} after \
+                     {last}",
+                    path.display()
+                );
+                assert!(
+                    x <= run.width() + 0.01,
+                    "{}: {text:?} x_of({at}) = {x}, past the run's {} px",
+                    path.display(),
+                    run.width()
+                );
+                last = x;
+            }
+        }
+    }
+
+    println!("faces checked:     {checked}");
+    println!("runs that grew:    {grew}");
+    for example in &grew_examples {
+        println!("  {example}");
+    }
+    println!("runs that shrank:  {shrank}");
+    assert!(
+        checked > 0,
+        "not one face reported substitutions — GSUB is not being found at all"
+    );
+    // If nothing anywhere grows, `MultipleSubst` is not reaching the layout
+    // path and everything above is testing the ligature case twice.
+    assert!(
+        grew > 0,
+        "not one of {checked} faces decomposed any of these strings — either \
+         no installed face has a `ccmp` decomposition, or type 2 is not being \
+         applied"
     );
 }
 

@@ -333,12 +333,14 @@ Roadmap:
   than a bag of subtables, so a font's own ordering holds; single
   substitution (type 1) and `ccmp` ride on that (§406) — taken before the
   contextual types below, which invoke other lookups by index and so needed
-  them first. Next unblocked step is the rest of shaping: no multiple
-  substitution (GSUB 2, blocked on `shape.rs` allowing glyphs to share a
-  cluster), no contextual substitution (GSUB 5/6), no script/language
-  selection (`TD-GSUB-APPLIES-EVERY-SCRIPTS-FEATURES`), no
-  mark-to-ligature attachment (GPOS 5), no bidi, no complex-script
-  reordering. Vello itself waits on `[A]`'s GPU driver.
+  them first. Multiple substitution (GSUB 2) rides on that too, so `ccmp`
+  can decompose a precomposed letter for the mark placer; a cluster is now
+  a boundary rather than an index and every `ShapedRun` query works in
+  whole clusters (§407). Next unblocked step is the rest of shaping: no
+  contextual substitution (GSUB 5/6), no script/language selection
+  (`TD-GSUB-APPLIES-EVERY-SCRIPTS-FEATURES`), no mark-to-ligature
+  attachment (GPOS 5), no bidi, no complex-script reordering. Vello itself
+  waits on `[A]`'s GPU driver.
 - `[C]` Wayland-inspired compositor: GPU acceleration, currently a software
   rasterizer (lines ~4605, ~4619)
 - `[C]` Video-encoded capture fallback, H.264/VP9 (lines ~4623, ~5060)

@@ -102,9 +102,20 @@ pub struct ShapedGlyph {
     /// Which glyph to draw.
     pub key: GlyphKey,
     /// Byte offset in the shaped string of the first character this glyph
-    /// came from. Several glyphs never share a cluster here (nothing yet
-    /// decomposes one character into several), but several characters share
-    /// one when they ligate.
+    /// came from.
+    ///
+    /// The mapping is many-to-many in both directions. Several *characters*
+    /// share one cluster when they ligate: `ffi` is one glyph reporting the
+    /// offset of the `f`. Several *glyphs* share one cluster when a character
+    /// decomposes: GSUB LookupType 2 turns one glyph into a sequence, and
+    /// every glyph of that sequence reports the offset of the character it
+    /// came from.
+    ///
+    /// So a cluster is not an index and glyph *n* is not character *n*. What
+    /// it is is a boundary: a caret, a cut and a hit test may only land where
+    /// a cluster starts, because nowhere else in the run corresponds to a
+    /// position in the string. The queries on [`ShapedRun`] all work in whole
+    /// clusters for that reason. Clusters are non-decreasing along a run.
     pub cluster: usize,
     /// How far to move the pen after drawing this glyph, in pixels.
     ///
@@ -170,6 +181,47 @@ impl ShapedRun {
         self.glyphs.len()
     }
 
+    /// One past the last glyph sharing the cluster of the glyph at `i`.
+    ///
+    /// A cluster is the unit every query below works in, because it is the
+    /// only unit that corresponds to a position in the source string. A
+    /// decomposed character is several glyphs that must be counted, kept and
+    /// dropped together — taking half of them would report a width for a
+    /// string that cannot be sliced there.
+    fn group_end(&self, i: usize) -> usize {
+        let Some(cluster) = self.glyphs.get(i).map(|g| g.cluster) else {
+            return i;
+        };
+        self.glyphs
+            .iter()
+            .enumerate()
+            .skip(i)
+            .find(|(_, g)| g.cluster != cluster)
+            .map_or(self.glyphs.len(), |(j, _)| j)
+    }
+
+    /// The first glyph sharing the cluster of the glyph *before* `i`, i.e. the
+    /// start of the last cluster of `self.glyphs[..i]`. The mirror of
+    /// [`group_end`](Self::group_end), for the queries that walk backwards.
+    fn group_start(&self, i: usize) -> usize {
+        let Some(cluster) = i.checked_sub(1).and_then(|j| self.glyphs.get(j)).map(|g| g.cluster)
+        else {
+            return i;
+        };
+        self.glyphs
+            .iter()
+            .take(i)
+            .rposition(|g| g.cluster != cluster)
+            .map_or(0, |j| j.saturating_add(1))
+    }
+
+    /// Total advance of `self.glyphs[from..to]`.
+    fn span_width(&self, from: usize, to: usize) -> f32 {
+        self.glyphs
+            .get(from..to)
+            .map_or(0.0, |g| g.iter().map(|g| g.advance).sum())
+    }
+
     /// The byte offset at which to cut the source string so that what remains
     /// is at most `max_width` wide.
     ///
@@ -183,6 +235,10 @@ impl ShapedRun {
     #[must_use]
     pub fn fit(&self, max_width: f32, end: usize) -> usize {
         let mut used = 0.0;
+        // This one needs no cluster grouping, unlike its mirror: it returns
+        // the failing glyph's *cluster*, and every glyph of a decomposed
+        // character carries the same one, so stopping part-way through a
+        // character still cuts before the whole of it.
         for glyph in &self.glyphs {
             // The caller slices the string here and draws the piece on its
             // own, so the width to test is the prefix's width *alone*: this
@@ -210,12 +266,21 @@ impl ShapedRun {
     pub fn fit_end(&self, max_width: f32, end: usize) -> usize {
         let mut used = 0.0;
         let mut start = end;
-        for glyph in self.glyphs.iter().rev() {
-            if used + glyph.advance > max_width {
+        let mut i = self.glyphs.len();
+        // A whole cluster at a time, not a glyph at a time. Taking one glyph
+        // of a decomposed character and stopping would return a byte offset
+        // that re-shapes into *both* of its glyphs — a suffix measured at one
+        // width and drawn at another, which is the divergence this type exists
+        // to prevent.
+        while i > 0 {
+            let from = self.group_start(i);
+            let width = self.span_width(from, i);
+            if used + width > max_width {
                 return start;
             }
-            used += glyph.advance;
-            start = glyph.cluster;
+            used += width;
+            start = self.glyphs.get(from).map_or(start, |g| g.cluster);
+            i = from;
         }
         0
     }
@@ -234,11 +299,20 @@ impl ShapedRun {
             return self.glyphs.first().map_or(end, |g| g.cluster);
         }
         let mut x = 0.0;
-        for glyph in &self.glyphs {
-            if offset < x + glyph.advance / 2.0 {
-                return glyph.cluster;
+        let mut i = 0usize;
+        // The midpoint that matters is the *cluster's*, not a glyph's: a
+        // character drawn as two glyphs has one gap before it and one after,
+        // and a click in its left half belongs to the first of them. Splitting
+        // on each glyph's own midpoint would put the tipping point three
+        // quarters of the way across the character.
+        while i < self.glyphs.len() {
+            let to = self.group_end(i);
+            let width = self.span_width(i, to);
+            if offset < x + width / 2.0 {
+                return self.glyphs.get(i).map_or(end, |g| g.cluster);
             }
-            x += glyph.advance;
+            x += width;
+            i = to;
         }
         end
     }
@@ -252,19 +326,22 @@ impl ShapedRun {
     #[must_use]
     pub fn x_of(&self, at: usize, end: usize) -> f32 {
         let mut x = 0.0;
-        for (i, glyph) in self.glyphs.iter().enumerate() {
-            // A glyph spans from its own cluster up to the next one's, so it
-            // is fully behind `at` only once the *following* glyph starts at
-            // or before it. Testing this glyph's own cluster instead is what
-            // would walk past a ligature and report the caret after it.
-            let next = self
-                .glyphs
-                .get(i.saturating_add(1))
-                .map_or(end, |n| n.cluster);
+        let mut i = 0usize;
+        // A *cluster* spans from its own byte offset up to the next cluster's,
+        // so it is fully behind `at` only once the following cluster starts at
+        // or before it. Two things go wrong if this walks glyphs instead:
+        // testing a glyph's own cluster steps past a ligature and reports the
+        // caret after it, and testing the next *glyph's* cluster counts the
+        // first half of a decomposed character — `x_of(0)` on glyphs
+        // `[A(0), B(0), C(1)]` answering `A`'s advance instead of zero.
+        while i < self.glyphs.len() {
+            let to = self.group_end(i);
+            let next = self.glyphs.get(to).map_or(end, |g| g.cluster);
             if next > at {
                 return x;
             }
-            x += glyph.advance;
+            x += self.span_width(i, to);
+            i = to;
         }
         x
     }
@@ -410,5 +487,93 @@ mod tests {
         assert!((r.x_of(3, 6) - 10.0).abs() < f32::EPSILON);
         assert!((r.x_of(4, 6) - 30.0).abs() < f32::EPSILON);
         assert!((r.x_of(6, 6) - 50.0).abs() < f32::EPSILON);
+    }
+
+    /// The other direction of the same relation: one *character* drawn as
+    /// several glyphs, which GSUB LookupType 2 produces.
+    ///
+    /// Every query has to treat those glyphs as one unit. The failure mode is
+    /// not a crash but an off-by-a-glyph: a caret drawn between the two halves
+    /// of a character, or a suffix measured at a width the string it names
+    /// does not have.
+    #[test]
+    fn a_decomposed_character_is_never_split() {
+        // "aXb", where X is one character drawn as two 10 px glyphs — say a
+        // precomposed vowel the font renders as a base plus a sign.
+        let r = ShapedRun::new(alloc::vec![
+            ShapedGlyph { key: GlyphKey::bitmap('a'), cluster: 0, advance: 10.0, kern_next: 0.0, offset: (0.0, 0.0) },
+            ShapedGlyph { key: GlyphKey::bitmap('X'), cluster: 1, advance: 10.0, kern_next: 0.0, offset: (0.0, 0.0) },
+            ShapedGlyph { key: GlyphKey::bitmap('\u{0301}'), cluster: 1, advance: 10.0, kern_next: 0.0, offset: (0.0, 0.0) },
+            ShapedGlyph { key: GlyphKey::bitmap('b'), cluster: 2, advance: 10.0, kern_next: 0.0, offset: (0.0, 0.0) },
+        ]);
+        assert!((r.width() - 40.0).abs() < f32::EPSILON);
+
+        // The caret before X is before *both* its glyphs. This is the case the
+        // old glyph-at-a-time walk got wrong: it counted the first glyph and
+        // answered 20.
+        assert!((r.x_of(0, 3)).abs() < f32::EPSILON);
+        assert!((r.x_of(1, 3) - 10.0).abs() < f32::EPSILON);
+        assert!((r.x_of(2, 3) - 30.0).abs() < f32::EPSILON);
+        assert!((r.x_of(3, 3) - 40.0).abs() < f32::EPSILON);
+
+        // A suffix keeps whole characters: 25 px is room for `b` and no more,
+        // because X costs 20 and half an X is not a byte offset.
+        assert_eq!(r.fit_end(25.0, 3), 2);
+        assert_eq!(r.fit_end(30.0, 3), 1);
+        assert_eq!(r.fit_end(35.0, 3), 1);
+        assert_eq!(r.fit_end(40.0, 3), 0);
+
+        // And a prefix does too.
+        assert_eq!(r.fit(15.0, 3), 1);
+        assert_eq!(r.fit(25.0, 3), 1);
+        assert_eq!(r.fit(30.0, 3), 2);
+
+        // The click tips at X's own midpoint — 20 px in — not at the midpoint
+        // of its first glyph.
+        assert_eq!(r.offset_at(15.0, 3), 1);
+        assert_eq!(r.offset_at(19.0, 3), 1);
+        assert_eq!(r.offset_at(21.0, 3), 2);
+
+        // No query may ever name a position inside X. There is only one: X
+        // starts at byte 1 and ends at byte 2, and it is one character, so
+        // there is no interior byte to name — the check is that every answer
+        // is a real cluster boundary.
+        let boundaries = [0usize, 1, 2, 3];
+        for px in 0..50 {
+            let px = f32::from(u16::try_from(px).unwrap());
+            assert!(boundaries.contains(&r.fit(px, 3)), "fit({px})");
+            assert!(boundaries.contains(&r.fit_end(px, 3)), "fit_end({px})");
+            assert!(boundaries.contains(&r.offset_at(px, 3)), "offset_at({px})");
+        }
+    }
+
+    /// Whatever `fit_end` hands back must name a suffix that really does fit,
+    /// which is the property a glyph-at-a-time walk breaks on a decomposed
+    /// character: it counts one glyph's advance and returns an offset whose
+    /// string draws with two.
+    #[test]
+    fn a_suffix_is_never_wider_than_the_budget_it_was_cut_to() {
+        let r = ShapedRun::new(alloc::vec![
+            ShapedGlyph { key: GlyphKey::bitmap('a'), cluster: 0, advance: 7.0, kern_next: 0.0, offset: (0.0, 0.0) },
+            ShapedGlyph { key: GlyphKey::bitmap('X'), cluster: 1, advance: 11.0, kern_next: 0.0, offset: (0.0, 0.0) },
+            ShapedGlyph { key: GlyphKey::bitmap('\u{0301}'), cluster: 1, advance: 5.0, kern_next: 0.0, offset: (0.0, 0.0) },
+            ShapedGlyph { key: GlyphKey::bitmap('b'), cluster: 2, advance: 9.0, kern_next: 0.0, offset: (0.0, 0.0) },
+        ]);
+        for px in 0..40 {
+            let budget = f32::from(u16::try_from(px).unwrap());
+            let start = r.fit_end(budget, 3);
+            // Width of the suffix beginning at `start`, summed from the run
+            // itself so the two cannot drift apart.
+            let width: f32 = r
+                .glyphs()
+                .iter()
+                .filter(|g| g.cluster >= start)
+                .map(|g| g.advance)
+                .sum();
+            assert!(
+                width <= budget || start == 3,
+                "fit_end({budget}) returned {start}, a suffix {width} px wide"
+            );
+        }
     }
 }

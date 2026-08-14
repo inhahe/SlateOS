@@ -58,6 +58,13 @@ const PALETTE_SWATCH_SIZE: f32 = 22.0;
 const PALETTE_GAP: f32 = 3.0;
 const PAGE_TAB_HEIGHT: f32 = 28.0;
 
+/// Inset of a sticky note's text from each edge of the note, in canvas units.
+const STICKY_PADDING: f32 = 8.0;
+/// Point size a sticky note's text is laid out at, before zoom.
+const STICKY_FONT_SIZE: f32 = 12.0;
+/// Line-to-line spacing of a sticky note's text, before zoom.
+const STICKY_LINE_HEIGHT: f32 = 16.0;
+
 const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 10.0;
 const GRID_SIZE: f32 = 20.0;
@@ -440,6 +447,27 @@ fn point_to_segment_distance(px: f32, py: f32, x1: f32, y1: f32, x2: f32, y2: f3
     let proj_x = x1 + t * dx;
     let proj_y = y1 + t * dy;
     ((px - proj_x).powi(2) + (py - proj_y).powi(2)).sqrt()
+}
+
+/// A sticky note's content, broken into the lines that fit across the note.
+///
+/// Laid out in canvas units rather than screen pixels, so zooming moves and
+/// scales the note without reflowing it — where the lines break is a property
+/// of the note, not of how closely the user happens to be looking at it. A
+/// glyph whose scaled advance does not divide evenly then leaves a line a
+/// fraction too wide for the note at some zoom levels; the `max_width` on the
+/// drawn command clips that fraction, which costs a character at the margin
+/// rather than letting the text run off the note.
+fn sticky_note_lines(bounds: &Rect, content: &str) -> Vec<String> {
+    if content.is_empty() {
+        return Vec::new();
+    }
+    text::wrap(
+        content,
+        bounds.width - STICKY_PADDING * 2.0,
+        STICKY_FONT_SIZE,
+        FontWeightHint::Regular,
+    )
 }
 
 // ============================================================================
@@ -2326,16 +2354,29 @@ impl WhiteboardApp {
                     color: *bg_color,
                     corner_radii: CornerRadii::all(4.0),
                 });
-                // Text (dark for readability on colored background)
-                if !content.is_empty() {
+                // Text (dark for readability on colored background), one
+                // command per wrapped line. `RenderCommand::Text` clips at
+                // `max_width` rather than wrapping, so the whole content used
+                // to come out as the first line's worth of characters and
+                // nothing else — a note is a paragraph the user wrote and
+                // expects to read back.
+                let text_width = bounds.width - STICKY_PADDING * 2.0;
+                for (n, line) in sticky_note_lines(bounds, content).iter().enumerate() {
+                    let line_top = STICKY_PADDING + n as f32 * STICKY_LINE_HEIGHT;
+                    // A note is a fixed box the user drew; text that does not
+                    // fit is left undrawn rather than spilling onto the canvas
+                    // over whatever else is there.
+                    if line_top + STICKY_LINE_HEIGHT > bounds.height {
+                        break;
+                    }
                     cmds.push(RenderCommand::Text {
-                        x: (bounds.x + 8.0) * self.zoom,
-                        y: (bounds.y + 8.0) * self.zoom,
-                        text: content.clone(),
+                        x: (bounds.x + STICKY_PADDING) * self.zoom,
+                        y: (bounds.y + line_top) * self.zoom,
+                        text: line.clone(),
                         color: MOCHA_CRUST,
-                        font_size: 12.0 * self.zoom,
+                        font_size: STICKY_FONT_SIZE * self.zoom,
                         font_weight: FontWeightHint::Regular,
-                        max_width: Some((bounds.width - 16.0) * self.zoom),
+                        max_width: Some(text_width * self.zoom),
                     });
                 }
             }
@@ -3959,6 +4000,105 @@ mod tests {
         });
         let cmds = app.render();
         assert!(cmds.len() > 10);
+    }
+
+    /// The `(y, text)` of every line drawn into a sticky note at `bounds`.
+    ///
+    /// Identified by the note's own left edge, so nothing else drawn in the
+    /// note's colour can be mistaken for its body.
+    fn sticky_lines_drawn(app: &WhiteboardApp, bounds: &Rect) -> Vec<(f32, String)> {
+        let left = (bounds.x + STICKY_PADDING) * app.zoom;
+        app.render()
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    x, y, text, color, ..
+                } if color == MOCHA_CRUST && (x - left).abs() < 0.01 => Some((y, text)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A note big enough for several lines of the paragraph below.
+    fn app_with_sticky(bounds: Rect, content: &str) -> WhiteboardApp {
+        let mut app = WhiteboardApp::new(1280.0, 800.0);
+        app.add_shape(ShapeKind::StickyNote {
+            bounds,
+            content: content.to_string(),
+            bg_color: MOCHA_YELLOW,
+        });
+        app
+    }
+
+    const STICKY_PARAGRAPH: &str = "Remember to check the deployment schedule \
+        with the release team before the freeze, and to file the rollback plan \
+        alongside it so nobody has to invent one under pressure.";
+
+    #[test]
+    fn a_long_sticky_note_is_wrapped_not_truncated_to_one_line() {
+        // `RenderCommand::Text` clips at `max_width`, so the whole note used to
+        // come out as its first line's worth of characters and nothing else.
+        let bounds = Rect::new(40.0, 40.0, 220.0, 240.0);
+        let app = app_with_sticky(bounds, STICKY_PARAGRAPH);
+        let lines = sticky_lines_drawn(&app, &bounds);
+
+        assert!(
+            lines.len() > 1,
+            "the note was drawn as {} command(s); it needs one per line",
+            lines.len()
+        );
+        // Every word the user typed is still on the note somewhere.
+        let drawn: String = lines
+            .iter()
+            .map(|(_, t)| t.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        for word in STICKY_PARAGRAPH.split_whitespace() {
+            assert!(drawn.contains(word), "the note lost the word {word:?}");
+        }
+    }
+
+    #[test]
+    fn sticky_note_text_stays_inside_the_note() {
+        // A note is a fixed box the user drew, so text longer than it fits is
+        // dropped rather than spilling onto the canvas over other shapes.
+        let bounds = Rect::new(40.0, 40.0, 120.0, 60.0);
+        let app = app_with_sticky(bounds, STICKY_PARAGRAPH);
+
+        let bottom = (bounds.y + bounds.height) * app.zoom;
+        for (y, text) in sticky_lines_drawn(&app, &bounds) {
+            assert!(
+                y + STICKY_LINE_HEIGHT * app.zoom <= bottom + 0.01,
+                "line {text:?} at {y} runs past the bottom of the note at {bottom}"
+            );
+        }
+    }
+
+    #[test]
+    fn zooming_a_sticky_note_does_not_reflow_it() {
+        // Line breaks are laid out in canvas units, so they are a property of
+        // the note rather than of how closely the user is looking at it.
+        let bounds = Rect::new(40.0, 40.0, 220.0, 400.0);
+        let mut app = app_with_sticky(bounds, STICKY_PARAGRAPH);
+        let at_1x: Vec<String> = sticky_lines_drawn(&app, &bounds)
+            .into_iter()
+            .map(|(_, t)| t)
+            .collect();
+
+        app.set_zoom(2.5);
+        let at_2_5x: Vec<String> = sticky_lines_drawn(&app, &bounds)
+            .into_iter()
+            .map(|(_, t)| t)
+            .collect();
+
+        assert_eq!(at_1x, at_2_5x, "zooming re-broke the note's lines");
+    }
+
+    #[test]
+    fn an_empty_sticky_note_draws_no_text() {
+        let bounds = Rect::new(40.0, 40.0, 150.0, 100.0);
+        let app = app_with_sticky(bounds, "");
+        assert!(sticky_lines_drawn(&app, &bounds).is_empty());
     }
 
     #[test]

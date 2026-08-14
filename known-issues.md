@@ -60748,6 +60748,153 @@ those two lines and needs no further argument.
 fine-grained cost reasoning that got the tcp_checksum sign wrong. Treat a hit as
 weak confirmation and a miss as strong disconfirmation.
 
+#### RESULT — 2026-08-14, release profile, commit `f9807f73a` (`build/stage-split.log`)
+
+```
+vfs_stat_breakdown: full 6423ns = resolve_follow ~3843ns + stat_resolved 2580ns
+vfs_stat_breakdown: resolve_follow measured directly 3504ns (vs 3843ns by subtraction)
+vfs_stat_breakdown: resolve_follow 3504ns = ns_translate 1948ns + validate_normalize 318ns + dcache_hit ~1238ns
+vfs_stat_breakdown: resolve_path("/") -> "/" (1 bytes)
+vfs_stat_breakdown: dcache 25 valid entries (of 1024), +1100 hits +0 misses over the run
+```
+
+| # | prediction | actual | verdict |
+|---|---|---|---|
+| 1 | `ns_translate` < 400 ns | **1948 ns** | **MISS, 4.9x** |
+| 2 | `validate_normalize` < 400 ns | 318 ns | hit |
+| 3 | `dcache_hit` < 500 ns | **~1238 ns** | **MISS, 2.5x** |
+| 4 | three stages sum < 1500 ns | **3504 ns** | **MISS, 2.3x** |
+| 5 | "the subtraction is what was wrong" | subtraction was **right** | **disconfirmed** |
+
+**Prediction 5 was wrong in the way that matters most: it was an escape
+hatch.** It said that if the stages came out cheap, the *subtraction* must be
+the error and the real culprit would be `stat_resolved`. Both halves are
+refuted outright by the two lines this run was built to print:
+`resolve_path("/")` returns `"/"` unchanged (1 byte), so the different-inputs
+hazard that would have made subtraction unsound never existed on this path; and
+the direct measurement (3504 ns) agrees with the subtraction (3843 ns) to within
+9.7%. `resolve_follow` really is ~55% of the whole stat, exactly where
+subtraction put it. I did **not** misattribute the cost twice — I misattributed
+it once, to the dcache, and then predicted I had misattributed it again in the
+opposite direction. The second guess was as wrong as the first.
+
+**Why 1 and 3 missed: a bad anchor, and it was bad by misreading the code.**
+The prediction leaned on "`sched_pick_next` = 40 ns, and it takes the run-queue
+lock, therefore an uncontended spinlock is ≲ 20 ns." That premise is simply
+false about the benchmark. `bench_sched_pick_next` builds a **local**
+`PriorityRoundRobin::new()` on the stack and calls `rq.pick_next()` directly —
+it never touches `SCHED.lock()`. **It takes no lock at all.** So the one number
+in the anchor table that was supposed to bound lock cost was measuring a
+lock-free path, and the 20 ns figure was manufactured from nothing. This is the
+same failure as the dcache: a claim about what the code does, asserted from
+reading rather than from measuring, load-bearing for the conclusion.
+
+**The cost model the measurement actually supports.** Solving the three stages
+against their contents (3 locks + 3 map lookups + 1 alloc = 1948; 1 lock + ~25
+path compares + 1 alloc = 1238; a byte scan + 1 alloc = 318) gives a consistent
+fit at roughly:
+
+| primitive | implied cost under QEMU-TCG |
+|---|---|
+| uncontended **global spinlock** acquire+release | **~500 ns** |
+| heap alloc (small) | ~180 ns (matches `heap_alloc_free_64`) |
+| one dcache path compare | ~21 ns |
+
+A lock is ~3x an allocation here, and the whole path is **lock-dominated**: 4
+global spinlocks across `resolve_follow` alone, ~2000 ns of its 3504. Every
+optimisation instinct I had was aimed at allocations and at scan length, and
+both are minor terms.
+
+**But that model is derived, not measured, and deriving is what just failed
+twice.** So the next run adds `bench_spinlock_uncontended` to measure the
+primitive directly. The suite has anchors for allocation, context switch and
+syscall dispatch but none for the single most common operation in the kernel,
+which is precisely why a fabricated 20 ns figure went unchallenged.
+
+**Consequences (tracked as `B-NAMESPACE-RESOLVE-TAKES-3-GLOBAL-LOCKS-TO-RETURN-ITS-INPUT` below).**
+`ns_translate` is 1948 ns — 56% of `resolve_follow`, 30% of the entire stat —
+and for a process in the root namespace with no chroot and no volume mounts
+(i.e. every process on a normal desktop) it does all of that work to **return
+its input unchanged**.
+
+---
+
+### B-NAMESPACE-RESOLVE-TAKES-3-GLOBAL-LOCKS-TO-RETURN-ITS-INPUT — 2026-08-14 (`kernel/src/ipc/namespace.rs`)
+
+**Measured, not inferred:** `ns_translate` = **1948 ns**, which is 56% of
+`resolve_follow` and **30% of an entire `stat("/")`**. See the RESULT section of
+`B-VFS-STAT-ROOT-IS-12x-OVER-TARGET-AND-THE-DCACHE-IS-NOT-WHY` above.
+
+`namespace::resolve_path` is called before **every** path operation in the VFS —
+read, write, stat, open, mkdir, unlink, all of it. For a process in the root
+namespace with no chroot and no volume mounts — which is every process on a
+normal desktop, and every process in this kernel today — the entire function
+body is:
+
+1. `current_task_id()` — cheap, an atomic load.
+2. `owner_process(task_id)` → **`THREAD_OWNERS.lock()`** + map get.
+3. **`PROCESS_NS.lock()`** + map get → `ROOT_NAMESPACE`.
+4. `path.to_path_buf()` — a heap allocation.
+5. **`PROCESS_ROOT.lock()`** + map get → `None`.
+6. Return the path, byte-for-byte identical to the input.
+
+**Three global spinlock acquisitions and one heap allocation, to return the
+argument unchanged.** At the measured ~500 ns per uncontended global spinlock
+under TCG, the locks alone are ~1500 of the 1948 ns.
+
+This is not a micro-optimisation target, it is a missing fast path. The
+structure charges every path operation in the system for a feature (containers)
+that is not in use, and the charge is paid in the most expensive primitive
+available.
+
+**The fix** — a global "namespace features are in use" flag, checked with one
+relaxed atomic load before any lock is taken:
+
+* An `AtomicBool` (`NS_FEATURES_ACTIVE`) set with `Release` ordering at the
+  three sites that can make namespace state non-trivial: inserting into
+  `PROCESS_NS`, into `PROCESS_ROOT`, and into `PROCESS_MOUNTS`.
+* `resolve_path_for` loads it with `Acquire`; if clear, it returns immediately.
+* **The flag is never cleared.** Clearing it on the last teardown would
+  introduce a race with a resolve already in flight, and the cost of staying on
+  the slow path after containers have been used once is exactly the cost we have
+  today. Monotonic is the sound choice and it is deliberate, not an oversight.
+
+This is the standard rarely-used-feature pattern (Linux's static keys). It does
+not change behaviour for any process: with the flag clear, no process has a
+namespace, a root, or a volume, so every branch the slow path could take is the
+identity branch — which is what makes the fast path a refactor rather than a
+semantic change.
+
+**The allocation in step 4 survives this fix** and is the correct next target:
+`resolve_path` returns `PathBuf`, so the pass-through allocates a copy that
+`resolve_prologue` immediately re-allocates in `normalize_path`. Returning
+`Cow<'_, Path>` would remove one of the two. Deferred until the lock fix is
+measured, because at ~180 ns it is a third of a single lock and chasing it first
+would have been another instance of optimising the minor term.
+
+#### PROSPECTIVE PREDICTION (recorded before the fix is built)
+
+Same protocol, and this time with a directly measured anchor rather than a
+fabricated one — the next run also adds `bench_spinlock_uncontended`.
+
+1. `bench_spinlock_uncontended` comes out in **300–700 ns**. This is the load-
+   bearing one: the whole cost model above stands or falls on it. If it lands
+   below ~150 ns, the lock attribution is wrong and something else in
+   `ns_translate` is the real cost.
+2. `ns_translate` drops from 1948 ns to **< 150 ns** (one atomic load, one
+   allocation removed only if the `Cow` change lands too — so expect ~180 ns if
+   the allocation stays; I predict the allocation is skipped entirely on the
+   fast path, hence < 150).
+3. `resolve_follow` drops from 3504 ns to **1700–2000 ns**, now dominated by
+   `dcache_hit`.
+4. Full `vfs_stat_root` drops from ~6151 ns to **~4400–4700 ns**, a ~28%
+   improvement on a benchmark I twice tried to fix by looking at the wrong
+   subsystem.
+
+**If (1) holds but (2) does not**, the fast path is not being taken — most
+likely because some process really did set one of the three maps during boot,
+which would itself be worth knowing and is why the benchmark prints the flag.
+
 ---
 
 ### TD-BASELINES-TOML-IS-INVALID-TOML-AND-NOTHING-READS-IT — 2026-08-14 — ✅ FIXED 2026-08-14 (`bench/baselines.toml`, `scripts/test-bench-history.py`)

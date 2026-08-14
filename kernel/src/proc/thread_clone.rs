@@ -476,12 +476,34 @@ pub fn clone_thread(
         crate::sched::get_effective_priority(crate::sched::current_task_id())
             .unwrap_or(crate::sched::task::DEFAULT_PRIORITY);
 
-    let task_id = match thread::spawn(
+    // Compute the child's persistent FS (TLS) base *before* spawning so it can
+    // be seeded onto the Task while it is still suspended.  IA32_FS_BASE is a
+    // global CPU register not saved in the GP Context; the trampoline's
+    // one-shot WRMSR only sets it for the first run, and the switch-in path
+    // restores `Task::fs_base` unconditionally — so if the child were admitted
+    // with fs_base still 0, being preempted before we seeded it would clobber
+    // its TLS base and send glibc's `start_thread` to a garbage `start_routine`
+    // (B-PTHREAD-CHILD-JUMPS-TO-GARBAGE defect 1).
+    // CLONE_SETTLS (new_tls != 0) gives the thread its own TLS block;
+    // otherwise it inherits the calling thread's current FS base.
+    let child_fs = if args.new_tls != 0 {
+        args.new_tls
+    } else {
+        // SAFETY: reading IA32_FS_BASE is side-effect-free.
+        unsafe { crate::cpu::rdmsr(crate::cpu::IA32_FS_BASE) }
+    };
+    // clone() has no "set GS" flag, so the new thread inherits the calling
+    // thread's userspace %gs base (the authoritative Task field, 0 if unset).
+    let child_gs = crate::sched::current_task_gs_base();
+
+    let task_id = match thread::spawn_with_tls(
         parent_pid,
         b"cloned-thread",
         priority,
         clone_thread_trampoline,
         image_raw,
+        child_fs,
+        child_gs,
     ) {
         Ok(id) => id,
         Err(e) => {
@@ -495,24 +517,9 @@ pub fn clone_thread(
         }
     };
 
-    // Seed the new thread's persistent FS (TLS) base so the scheduler
-    // restores it on every switch-in.  IA32_FS_BASE is a global CPU
-    // register not saved in the GP Context; the trampoline's one-shot
-    // WRMSR only sets it for the first run, so without this the base
-    // would be lost the first time the thread is preempted and resumed.
-    // CLONE_SETTLS (new_tls != 0) gives the thread its own TLS block;
-    // otherwise it inherits the calling thread's current FS base.
-    let child_fs = if args.new_tls != 0 {
-        args.new_tls
-    } else {
-        // SAFETY: reading IA32_FS_BASE is side-effect-free.
-        unsafe { crate::cpu::rdmsr(crate::cpu::IA32_FS_BASE) }
-    };
-    crate::sched::set_task_fs_base(task_id, child_fs);
-    // clone() has no "set GS" flag, so the new thread inherits the calling
-    // thread's userspace %gs base (the authoritative Task field, 0 if unset).
-    let child_gs = crate::sched::current_task_gs_base();
-    crate::sched::set_task_gs_base(task_id, child_gs);
+    // NOTE: the child's FS/GS bases were seeded by `spawn_with_tls` *before*
+    // the task was admitted — deliberately not done here, where the child may
+    // already be running (see the computation above and thread.rs).
 
     // The task may already be running by the time we get here, but
     // for CLONE_PARENT_SETTID Linux promises that the parent's TID

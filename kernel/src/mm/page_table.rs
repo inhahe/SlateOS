@@ -546,7 +546,13 @@ impl PtPagePool {
     /// All 4 pages are pushed onto the free list.
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
     fn refill(&mut self) -> KernelResult<()> {
-        let frame = frame::alloc_frame()?;
+        // Attribute this frame to page-table storage in the frame-owner
+        // census — the allocator itself cannot tell who is asking.
+        let frame = {
+            let _own =
+                super::frame_owner::OwnerScope::new(super::frame_owner::Owner::PageTable);
+            frame::alloc_frame()?
+        };
         let base = frame.addr();
         super::memtype::charge(super::memtype::MemType::PageTable, 1);
 

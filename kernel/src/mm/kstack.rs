@@ -277,6 +277,9 @@ pub fn alloc() -> KernelResult<KstackInfo> {
     } else {
         STACK_FRAMES.next_power_of_two().trailing_zeros() as usize
     };
+    // Attribute the stack's frames to `KernelStack` in the owner census.
+    let _own =
+        super::frame_owner::OwnerScope::new(super::frame_owner::Owner::KernelStack);
     let phys_frame = match frame::alloc_order(order) {
         Ok(f) => f,
         Err(e) => {

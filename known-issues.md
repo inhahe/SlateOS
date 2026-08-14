@@ -57943,3 +57943,55 @@ answers 429) is the reference for this work, alongside the bash checkout in
 `ptsname_r`'s documented `EINVAL` has not matched any glibc implementation
 since the TIOCGPTN fast path landed, and trusting the man page is exactly how
 the first attempt at this fix went wrong.
+
+---
+
+## TD-APPS-ESTIMATE-TEXT-WIDTH — apps still guess at text width instead of measuring it
+
+**Status.** Open. The toolkit and the compositor were converted on 2026-08-13
+(`fa5135c36`, `f2d74c8a2`); the applications were not.
+
+**What it is.** Roughly 322 sites across ~90 files under `apps/` and
+`gui/desktop/` size and position text with a per-app fudge factor —
+`text.len() as f32 * font_size * k`, where `k` is 0.5 in `apps/ebook`, 0.55 in
+`apps/lockscreen` and `apps/launcher`, 0.6 in `apps/editor`, and a bare 8.0
+elsewhere. Every one of these is wrong in the same two ways the toolkit's were:
+
+1. `str::len` counts **bytes**, so any non-ASCII text is measured two to four
+   times too wide. This was invisible while the compositor drew a box for every
+   non-ASCII character; it is visible now that they render.
+2. The constant describes a fixed 8x14 cell that the compositor no longer
+   draws. `font_size` is honoured now, and the built-in face is only monospace
+   until an outline face is loaded — at which point every one of these
+   estimates becomes wrong even for ASCII.
+
+The visible symptoms are the same class the toolkit had: labels overflowing
+their buttons, text cursors landing between characters rather than on them, and
+centred text drifting off-centre in proportion to its length.
+
+**Where it lives.** Densest first: `apps/lockscreen/src/main.rs` (20 sites),
+`apps/filediff` (11), `apps/tmux` (10), `apps/markdowneditor` (10),
+`apps/regextester` (9), `apps/jsonviewer` (9), `apps/credmanager` (8),
+`apps/nonogram` (7), `apps/diskimager` (6). `apps/editor/src/main.rs` is a
+special case: it declares its own `char_width` config field, mirroring the
+`SimpleTextViewConfig` design that was just fixed in `guitk/textview`.
+
+**Reproduce.** `rg 'len\(\) as f32 \*|char_width|CHAR_W' apps/ gui/desktop/`.
+
+**Proper fix.** Call `guitk::text` — `measure`, `width`, `fit`, `elide`,
+`char_index_at`, `line_height`, `digit_advance` — which every app already has
+in scope via its `guitk` dependency. There is no new API to design; the module
+exists and the toolkit's own nine modules are already converted to it. Two
+judgement calls recur:
+
+- **Terminal-style views** (`apps/tmux`, `apps/hexeditor`, `apps/logviewer`)
+  genuinely want a character grid. Keep the grid, but derive the cell width
+  from `text::digit_advance(font_size, weight)` rather than hardcoding it, and
+  count **characters** rather than bytes — this is exactly what
+  `guitk::textview::SimpleTextView` now does, and it is the pattern to copy.
+- **Prose and labels** should measure. Where a widget both measures and draws,
+  the two must go through one call so they cannot drift — see
+  `RichTextView::span_font`/`span_width` for the shape of that.
+
+Best done a few apps at a time, each with a test that a measured label fits the
+box drawn for it. It is mechanical, but it is 90 files, so it is not one commit.

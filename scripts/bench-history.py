@@ -59,9 +59,15 @@ import statistics
 import subprocess
 import sys
 
-# `[bench] SCORE <name> <measured_ns> <target_ns> <PASS|OVER>`
+# `[bench] SCORE <name> <measured_ns> <target_ns> <PASS|OVER> [<mean_ns> <iters>]`
+#
+# The trailing pair is optional because it was added after the history file
+# already had records in it: logs written before the kernel emitted it must
+# still parse, or the one longitudinal record we have gets truncated at the
+# point of the change. Absent, dispersion is simply unknown for that run.
 SCORE_RE = re.compile(
-    r"^\[bench\]\s+SCORE\s+(\S+)\s+(\d+)\s+(\d+)\s+(PASS|OVER)\s*$"
+    r"^\[bench\]\s+SCORE\s+(\S+)\s+(\d+)\s+(\d+)\s+(PASS|OVER)"
+    r"(?:\s+(\d+)\s+(\d+))?\s*$"
 )
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -70,7 +76,9 @@ DEFAULT_HISTORY = os.path.join(REPO_ROOT, "bench", "history.jsonl")
 
 
 def parse_serial(path):
-    """Extract {name: (measured_ns, target_ns, verdict)} from a serial log.
+    """Extract {name: (measured_ns, target_ns, verdict, mean_ns, iters)}.
+
+    `mean_ns` and `iters` are `None` for a log predating their emission.
 
     Returns an empty dict if the log has no scorecard, which is the normal
     case for a boot run without `--bench`.
@@ -83,8 +91,12 @@ def parse_serial(path):
             for line in handle:
                 match = SCORE_RE.match(line.strip())
                 if match:
-                    name, measured, target, verdict = match.groups()
-                    entries[name] = (int(measured), int(target), verdict)
+                    name, measured, target, verdict, mean, iters = match.groups()
+                    entries[name] = (
+                        int(measured), int(target), verdict,
+                        int(mean) if mean is not None else None,
+                        int(iters) if iters is not None else None,
+                    )
     except FileNotFoundError:
         print(f"bench-history: no serial log at {path}", file=sys.stderr)
         return {}
@@ -401,13 +413,24 @@ def main(argv=None):
             ).replace(microsecond=0).isoformat(),
             "host": host,
             "commit": git_commit(),
-            # Only the measured number is worth storing per benchmark; the
-            # target is static and already lives in baselines.toml.
+            # The target is static and already lives in baselines.toml, so
+            # only the measured number goes here.
             "entries": {n: v[0] for n, v in current_entries.items()},
             "over_target": sum(
                 1 for v in current_entries.values() if v[2] == "OVER"
             ),
         }
+        # Dispersion goes in *sibling* maps rather than by widening `entries`
+        # to a dict-of-dicts. history.jsonl is append-only and already holds
+        # records without these fields; changing the shape of `entries` would
+        # mean every reader had to handle two shapes forever, for no gain over
+        # a key that is simply absent on older records.
+        mean_ns = {n: v[3] for n, v in current_entries.items() if v[3] is not None}
+        iters = {n: v[4] for n, v in current_entries.items() if v[4] is not None}
+        if mean_ns:
+            record["mean_ns"] = mean_ns
+        if iters:
+            record["iterations"] = iters
         if append_record(args.history, record):
             print(f"  Recorded {len(current_entries)} benchmarks to "
                   f"{os.path.relpath(args.history, REPO_ROOT)}")

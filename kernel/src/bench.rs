@@ -469,6 +469,28 @@ struct ScoreEntry {
     measured_ns: u64,
     target_ns: u64,
     passed: bool,
+    /// Mean nanoseconds per iteration, carried alongside the reported minimum.
+    ///
+    /// Not a second performance number — a *dispersion* number. The scorecard
+    /// reports `min` because it is the least contaminated estimate of the
+    /// code's cost, but that makes every entry look equally trustworthy when
+    /// they are not: a benchmark whose mean sits at 1.05x its min took a clean
+    /// measurement on nearly every iteration, whereas one at 6x (measured:
+    /// `dashboard_api_status`, 160.4ms mean against a 24.4ms min) was
+    /// interrupted on most of them, so its min is whichever iteration happened
+    /// to dodge the interference. Those two entries cannot share a regression
+    /// threshold, and today they do.
+    ///
+    /// `scripts/bench-history.py` needs a per-benchmark noise scale to size its
+    /// band, and the alternative source — the spread of the same benchmark
+    /// across past runs — requires several recorded runs before it says
+    /// anything, of which there are currently three. `mean/min` is available
+    /// from a single boot. See `known-issues.md →
+    /// TD-BENCH-COMPARATOR-NEEDS-PER-BENCHMARK-VARIANCE`.
+    mean_ns: u64,
+    /// Iterations the mean was taken over; a mean over 50 samples and one over
+    /// 2000 do not carry the same weight.
+    iterations: u32,
 }
 
 /// Public view of a scorecard entry for the dashboard API.
@@ -534,6 +556,8 @@ fn score(name: &'static str, result: &BenchResult, target_ns: u64) {
         measured_ns: result.min_ns,
         target_ns,
         passed,
+        mean_ns: result.mean_ns,
+        iterations: result.iterations,
     });
 }
 
@@ -543,8 +567,14 @@ fn score(name: &'static str, result: &BenchResult, target_ns: u64) {
 /// entry, passing or not:
 ///
 /// ```text
-/// [bench] SCORE <name> <measured_ns> <target_ns> <PASS|OVER>
+/// [bench] SCORE <name> <measured_ns> <target_ns> <PASS|OVER> <mean_ns> <iters>
 /// ```
+///
+/// The trailing `<mean_ns> <iters>` are an append-only extension: the parser
+/// treats them as optional so logs recorded before they existed still read
+/// back. They are not a second performance figure — see [`ScoreEntry::mean_ns`]
+/// for why the comparator needs a per-benchmark dispersion number and why the
+/// spread across past runs could not supply one.
 ///
 /// `scripts/bench-history.py` parses those, appends them to
 /// `bench/history.jsonl`, and diffs the run against the previous boot **on the
@@ -571,11 +601,13 @@ fn print_scorecard() {
     // Machine-readable first, so a truncated log still yields a usable record.
     for entry in &*entries {
         serial_println!(
-            "[bench] SCORE {} {} {} {}",
+            "[bench] SCORE {} {} {} {} {} {}",
             entry.name,
             entry.measured_ns,
             entry.target_ns,
-            if entry.passed { "PASS" } else { "OVER" }
+            if entry.passed { "PASS" } else { "OVER" },
+            entry.mean_ns,
+            entry.iterations
         );
     }
 

@@ -59875,11 +59875,28 @@ differently:
 So the brace scan delegates a `" … "` run to a double-quote skipper that has
 the `$(` row and **not** the `<(`/`>(` row — bash's ordinary rule that there is
 no process substitution inside double quotes — and skips a `' … '` run whole,
-offering its interior to nothing. `lex_dquote_body` models neither: it treats
-both quote characters as ordinary literals (correct for `Q_DOUBLE_QUOTES`, where
-the string *is* already the quoted run), so it reads a `$(` inside `' … '` that
-bash never reaches. **That single-quote row is a live divergence today**,
-independent of the `<(` one this entry is named for.
+offering its interior to nothing.
+
+`lex_dquote_body` models neither — it treats both quote characters as ordinary
+literals, which is correct for `Q_DOUBLE_QUOTES`, where the string *is* already
+the quoted run. Measured (`build/pq1.sh`, `build/pq2.sh`, `build/pq3.sh`), osh
+nevertheless agrees with bash on every *quoted* row above, by a different
+mechanism in each case: where the run closes, the brace closes too and the word
+goes through `parse_braced_param_in`, which does model quotes; where the run does
+not close, `lex_dquote_body`'s missing `<(` row happens to suppress the same read
+bash's skip suppresses. Two rows are left where the mechanisms do not coincide:
+
+| word (inside `v='…'`, via `"${v@P}"`) | bash 5.2.37 | osh |
+|---|---|---|
+| `A${z:-P1"$(echo hi⏎S1}B` | reports EOF, `bad substitution`, undecoded | reports EOF, **runs `S1}`**, `[Ahi]` |
+| `A${z:-'p$(echo hi'q$(fi⏎S1}B` | reports `fi`, `[AZZB]` | silent, `[AZZB]` |
+
+Row 1 is the serious one — a spurious command execution. A lone `"` should open
+a run that swallows to end of string, leaving the brace nothing to close on;
+osh instead falls through to the string level, which performs the abandoned
+extent and splices the remainder. It is **pre-existing** (measured identical on
+the commit before the 2026-08-14 fix). Row 2 is a lost diagnostic only; the same
+row before that fix had the wrong value *and* ran `f`, so it is much improved.
 
 **What the proper fix looks like.** A real lex entry for "text a brace scan is
 walking" — not `lex_dquote_body` with a row bolted on. It needs, at its own
@@ -59895,11 +59912,13 @@ and reverted on 2026-08-14, before being compiled, because these measurements
 showed it would have regressed the three suppressed rows above (they are silent
 in bash today and in osh today, and would have started reporting).
 
-**Impact.** Two shapes. The `<(`/`>(` one is a missing diagnostic only — the
-value already agrees. The `' … '` one is a *spurious* diagnostic: osh reports a
-read bash never makes. Both are pre-existing in `extent_read_of_rest`;
-`unclosed_brace_reads` (new 2026-08-14) inherits them. Reachable only through
-`@P`/`PS4`/here-doc text holding a malformed `${ … }`.
+**Impact.** Three shapes, in order of severity. A lone `"` before a `$( … )` in
+an unclosed brace body makes osh **run a command bash does not** and yield the
+wrong value. A `<(`/`>(` at brace level loses its diagnostic (the value already
+agrees). A `' … '` run beside a failing read loses its diagnostic too. All three
+are pre-existing in `extent_read_of_rest`; `unclosed_brace_reads` (new
+2026-08-14) inherits them. Reachable only through `@P`/`PS4`/here-doc text
+holding a malformed `${ … }`.
 
 ---
 

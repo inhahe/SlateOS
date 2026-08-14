@@ -2366,7 +2366,7 @@ Corpus:
 `every_builtin_has_a_help_topic` — the third-list check that would catch a
 builtin with no `HELP_TABLE` entry to answer from.
 
-### TD-OILS-THE-SHAPE-AND-FOLD-LETTERS-ARE-APPLIED-BY-THE-LITERALS-HALF-ONLY-AND-NOT-BY-THE-BUILTIN-AFTER-IT. `declare -gGa g=(1 2)` left the frame's own `g` a scalar — 2026-08-12
+### TD-OILS-THE-SHAPE-AND-FOLD-LETTERS-ARE-APPLIED-BY-THE-LITERALS-HALF-ONLY-AND-NOT-BY-THE-BUILTIN-AFTER-IT. `declare -gGa g=(1 2)` left the frame's own `g` a scalar — 2026-08-12 — ✅ FIXED 2026-08-14
 
 **Where:** `userspace/oils/src/interp.rs`,
 [`Shell::declare_compounds_scoped`] (which reads `-a`/`-A`/`-i`/`-l`/`-u`/`-c`/`-I`
@@ -2429,19 +2429,44 @@ having `apply_bound_compound` set them — would close these two rows, but it
 would be a fifth mark bolted to the reduced path and would leave
 `make_empty_global` standing. Do the structural one.
 
-**Why it is not done yet.** The operand loop is ~1950 lines
-(interp.rs:45133-47081) and every one of its steps was written on the stated
-assumption that a compound operand never enters it — the local shadow above all,
-which phase 1 already made under a *different* `-g` swap than the builtin half
-runs under, so redoing it could leave two shadows of one name. Reconciling that
-is a real piece of work against 635 corpus cases, and the observable payoff is
-two matrix rows. Deferred deliberately, not by oversight: no band-aid has been
-applied in the meantime, and the entry above is the whole of the debt.
-Do it when the next divergence in the same place raises the payoff — most
-likely alongside
-TD-OILS-A-COMPOUND-LITERAL-REFUSES-A-KIND-CHANGE-THE-BUILTIN-BEFORE-IT-HAS-ALREADY-MADE
-below, which is the same asymmetry seen from the refusal side and would be
-fixed by the same change.
+**Fixed 2026-08-14** — the structural one, as prescribed. Four changes:
+
+* [`Shell::builtin_declare_scoped`]'s operand loop takes a `DeclOperand::Bound`
+  as the **bare name** rather than as four replayed marks: `name_val` is the
+  operand truncated at the `=`, so it carries no value, `value` is `None` of its
+  own accord, and the whole assignment arm is skipped without a flag to say so.
+  `BoundCompound` keeps only what genuinely happened earlier — the phase-1 local
+  refusal, the nameref refusal — and lost its `target` field, the loop now
+  resolving the name for itself.
+* [`Shell::apply_bound_compound`] and `BoundCompoundFlags` are gone (90 lines).
+* [`Shell::in_declare_global_scope`] sorts a compound operand into `names`
+  rather than `compound` for the `declare` family's builtin half: there it is
+  bash's step 3, an ordinary bare-name operand of `declare_internal`, and
+  resolves as step 1 did. `export`/`readonly` are excepted — their third command
+  is their own operand loop, not `declare_internal`.
+* [`Shell::enter_global_scope`] asks `chklocal` of the name the **restart**
+  arrived at (`nameref_cell (refvar)`, i.e. the end of
+  [`Shell::global_chain_path`]) rather than of the name as written, which is
+  what declare.def:735-774 does and what makes `declare -gGa g=(1 2)` under
+  `declare -n g=z` leave the frame's own `g` alone. And
+  [`Shell::global_bind_names`] now makes **no swap** where the global walk and
+  the live walk land on the same variable through a global reference:
+  `find_global_variable` reads only its first link from the global table, so a
+  chain that re-enters a name a local holds runs *through* that local, and
+  un-shadowing it would splice the local out of the middle and leave a cycle
+  that warns twice where bash warns not at all.
+
+`make_empty_global` did **not** disappear: it is still what step 1 leaves behind
+for `export`/`readonly`, whose third command makes no such variable. For the
+`declare` family it is now unreachable, the swap having put step 3 on the name
+itself.
+
+Verified against bash 5.2.37: the two matrix rows above, the `-i`/`-l`/`-u`
+rows, and the whole 642-case corpus (`scripts/osh-bash-diff.py`, 642 matched, 0
+failed). Tests:
+[`interp::tests::the_letters_of_a_compound_declaration_land_a_third_time_where_the_builtin_resolves`];
+corpus
+`the-letters-of-a-compound-declaration-land-a-third-time-where-the-builtin-resolves.sh`.
 
 **How it was found:** the 240-shape kind-letter matrix, while fixing
 TD-OILS-AN-UPPERCASE-G-WAS-READ-BY-THE-HALF-OF-THE-COMMAND-THAT-ONLY-EVER-READS-THE-LOWERCASE-ONE.
@@ -2482,6 +2507,34 @@ existing refusal then keeps firing for the plain-assignment road (`g=([k]=v)`
 and top-level declarations), which is the `find_or_make_array_variable` one.
 
 **Affected:** 4 shapes of the 240-shape kind matrix (`/tmp/kind_matrix.sh`).
+
+**Narrowed 2026-08-14** to `readonly`/`export` alone. Fixing
+TD-OILS-THE-SHAPE-AND-FOLD-LETTERS-ARE-APPLIED-BY-THE-LITERALS-HALF-ONLY-AND-NOT-BY-THE-BUILTIN-AFTER-IT
+put the `declare` family's step 3 back on the operand loop and its own restart,
+so the same shape spelled with `declare` now agrees:
+
+```sh
+( declare -n g=z; f() { local -a g=(9); declare -gGA g=([k]=v); declare -p g; }; f
+  declare -p z )
+# declare -a g=([0]="9")  /  declare -A z=([k]="v" )   — osh and bash alike
+```
+
+`readonly`/`export` still diverge because their step 3 is *not*
+`declare_internal` and so is deliberately excepted from that routing; their step
+1 still has no voice of its own here. Measured ground truth for the fix (bash
+5.2.37) — the refusal is asked of **step 1's** name, and the answer turns on
+what that name already holds:
+
+```sh
+declare -n g=z;                  f() { local -a g=(9); readonly -A g=([k]=v); }; f
+# declare -Ar g=([k]="v" ) and declare -A z    — `z` unset, so no conflict
+declare -n g=z; declare -a z=(7); f() { local -a g=(9); readonly -A g=([k]=v); }; f
+# g: cannot convert indexed to associative array — `z` is indexed, so it refuses
+```
+
+Note the second row: the refusal must be raised *before*
+[`Shell::make_empty_global`] runs, since that would otherwise put an empty
+associative entry beside the indexed `z` it was asked to refuse.
 
 **How it was found:** writing the corpus case
 `the-restart-happens-before-chklocal-so-step-one-outlives-the-frames-own-binding.sh`;

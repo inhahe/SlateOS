@@ -3947,12 +3947,12 @@ struct BoundCompound {
     /// Where the operand sat among the builtin's own words (`args`, i.e.
     /// `argv[1..]`), so it takes its turn at the position it was written.
     at: usize,
-    /// The operand as it was written, which the builtin's diagnostics name —
-    /// not `target`, which a nameref operand resolves to.
+    /// The operand as it was written, which is both what the builtin's
+    /// diagnostics name and what its operand loop is handed: bash's third
+    /// command is the word truncated at the `=` (`expand_declaration_argument`,
+    /// subst.c:12493), so it resolves the name for itself rather than
+    /// inheriting wherever phase 1's binding landed.
     name: String,
-    /// Where phase 1's binding actually landed, which is what the builtin's
-    /// attributes are applied to.
-    target: String,
     /// The builtin's half of a refusal phase 1 already reported once (a
     /// `noassign` name or a readonly global, both refused twice over). Present
     /// means the operand was abandoned whole: bash applies none of the
@@ -3970,29 +3970,6 @@ struct BoundCompound {
 enum DeclOperand<'a> {
     Word(&'a Str),
     Bound(&'a BoundCompound),
-}
-
-/// The flag letters [`Shell::apply_bound_compound`] acts on, gathered so the
-/// eleven of them travel as one argument.
-#[derive(Clone, Copy)]
-struct BoundCompoundFlags {
-    /// Both `-a` and `-A` were named in the `-` direction, which the builtin
-    /// refuses against the (associative) array the literal has already bound.
-    /// Decided by the caller rather than from `-a`/`-A` here, because only the
-    /// `declare` family makes the check at all: `readonly -aA q=(1)` and
-    /// `export -aA q=(1)` are separate entry points that never do, and `-p`
-    /// short-circuits into print mode before reaching it.
-    kind_conflict: bool,
-    unset_assoc: bool,
-    unset_indexed: bool,
-    nameref: bool,
-    unset_nameref: bool,
-    export: bool,
-    unset_export: bool,
-    readonly: bool,
-    unset_readonly: bool,
-    trace: bool,
-    unset_trace: bool,
 }
 
 /// What a declaration builtin's *word-expansion* half leaves for its *builtin*
@@ -21606,7 +21583,22 @@ impl Shell {
             names.iter().map(|n| (n, false)).chain(compound.iter().map(|n| (n, true)))
         {
             let bind = self.global_bind_names(name, compound, flags);
-            if flags.chklocal && self.chklocal_reaches_this_frame(name) {
+            // Which name the question is asked of, then, is the whole of the
+            // difference. `declare_internal` asks it of `nameref_cell (refvar)`
+            // — the cell the *global-only* walk ended on — and only falls back
+            // on the name as written where that walk found no reference at all
+            // (declare.def:735-741). [`Shell::global_chain_path`] is that walk,
+            // and its last element is that cell. A name no reference moves
+            // answers as itself, so the two questions part only over a chain.
+            let end = match compound {
+                true => None,
+                false => self.global_chain_path(name).and_then(|p| p.last().cloned()),
+            };
+            let asked = end.as_deref().unwrap_or(name.as_str());
+            if flags.chklocal && self.chklocal_reaches_this_frame(asked) {
+                // The literal stayed home while the restart went on: what step 1
+                // made at the far end is left behind, unswapped and empty, for
+                // there is nothing here to bind it to.
                 if let Some(last) = bind.names.last()
                     && last != name
                     && !self.chklocal_reaches_this_frame(last)
@@ -21809,6 +21801,33 @@ impl Shell {
         let names = match &end {
             GlobalChainEnd::Reached(RefTarget { base, sub: None, scope: RefScope::Live })
                 if base == name =>
+            {
+                Vec::new()
+            }
+            // The two walks land on the same variable, so there is nothing for
+            // the swap to move — and moving anything would be worse than
+            // useless. `find_global_variable` reads only its *first* link from
+            // the global table and every link after it innermost-first
+            // (variables.c:2400), so a chain that re-enters a name a local
+            // holds runs *through* that local: `declare -n g=z; declare -n z=g`
+            // under `local -n g=w` reads `g(global)→z→g(local)→w` and answers
+            // `w`. Un-shadowing `g` would splice the local out of the middle of
+            // that chain and leave `g→z→g`, a cycle — a different answer, and a
+            // pair of warnings bash never prints.
+            //
+            // It takes a **reference** in the global table for the two walks to
+            // differ at all, though: where the global binding is an ordinary
+            // variable the walk is one link long and stops on it, and then the
+            // swap is the whole of how it is reached — the live walk may spin
+            // through a local cycle to the same name and must not be the one
+            // that runs.
+            //
+            // Only the builtin's own walk is this walk. The compound literal
+            // asks a different question and is left to the arms below.
+            GlobalChainEnd::Reached(t)
+                if !compound
+                    && self.nameref_cell_in(name, 0).is_some()
+                    && self.walk_ref_name(name).target.as_ref() == Some(t) =>
             {
                 Vec::new()
             }
@@ -45302,75 +45321,6 @@ impl Shell {
         status
     }
 
-    /// The builtin's half of a compound `name=(…)` operand: the refusals it
-    /// raises against the array phase 1 already bound, and the attributes only
-    /// it applies. Returns whether the operand was refused, which fails the
-    /// command.
-    ///
-    /// Each refusal abandons the operand where bash's builtin would have gone on
-    /// to the attributes, so none of them is applied afterwards — that is what
-    /// leaves `declare -x +a q=(1 2)` an unexported array. The order of the
-    /// three is bash's: a `-n` breach outranks the destroy refusal, which
-    /// outranks the `-a`/`-A` self-conflict (`declare -a q=(1); declare -aA +a q`
-    /// reports "cannot destroy" because both come from the same lookup and the
-    /// destroy check is first).
-    fn apply_bound_compound(
-        &mut self,
-        c: &BoundCompound,
-        tag: &str,
-        f: BoundCompoundFlags,
-    ) -> bool {
-        // Refused as a local in phase 1, which reported the compound-assignment
-        // machinery's half of the diagnostic; this is the builtin's. bash
-        // abandons such an operand whole, so nothing below runs for it.
-        if let Some(msg) = &c.refused_local {
-            self.berrln(msg);
-            return true;
-        }
-        if c.refused_nameref {
-            self.perrln(&format!("{tag}: {}: reference variable cannot be an array", c.name));
-            return true;
-        }
-        if (f.unset_indexed && self.arrays.contains_key(&c.target))
-            || (f.unset_assoc && self.assoc.contains_key(&c.target))
-        {
-            self.perrln(&format!(
-                "{tag}: {}: cannot destroy array variables in this way",
-                c.name
-            ));
-            return true;
-        }
-        if f.kind_conflict {
-            self.perrln(&format!(
-                "{tag}: {}: cannot convert associative to indexed array",
-                c.name
-            ));
-            return true;
-        }
-        // The nameref attribute is the one that goes on the operand as written
-        // rather than on the name the binding landed under: `+n` is about the
-        // reference itself.
-        if f.unset_nameref {
-            self.nameref_attr.remove(&c.name);
-        } else if f.nameref {
-            self.nameref_attr.insert(c.name.clone());
-        }
-        if f.unset_trace {
-            self.trace_attr.remove(&c.target);
-        } else if f.trace {
-            self.trace_attr.insert(c.target.clone());
-        }
-        if f.unset_export {
-            self.exported.remove(&c.target);
-        } else if f.export {
-            self.mark_exported(c.target.clone());
-        }
-        if f.readonly && !f.unset_readonly {
-            self.readonly.insert(c.target.clone());
-        }
-        false
-    }
-
     /// The declaration proper, run with the bindings it is to act on already
     /// live — so it never has to care whether `-g` was given beyond skipping the
     /// local-shadowing step.
@@ -45637,39 +45587,47 @@ impl Shell {
             ops.push(DeclOperand::Bound(c));
         }
         for op in &ops {
-            let name_val = match op {
-                DeclOperand::Word(w) => *w,
-                // A compound operand: phase 1 bound it, so all that is left is
-                // what the *builtin* would have done to it — the refusals it
-                // raises and the attributes only it applies. Everything else in
-                // this loop (identifier validation, the local shadow, the
-                // assignment, the kind and value attributes) already happened
-                // there, before the literal bound.
-                DeclOperand::Bound(c) => {
-                    if self.apply_bound_compound(
-                        c,
-                        tag,
-                        BoundCompoundFlags {
-                            // This loop is the `declare` family's, which is the
-                            // only one that makes the check; see the field.
-                            kind_conflict: assoc && indexed && !print_mode,
-                            unset_assoc,
-                            unset_indexed,
-                            nameref,
-                            unset_nameref,
-                            export,
-                            unset_export,
-                            readonly,
-                            unset_readonly,
-                            trace,
-                            unset_trace,
-                        },
-                    ) {
-                        status = 1;
-                    }
+            // A compound operand enters this loop as the **bare name**, which is
+            // what bash's third command is: `expand_declaration_argument`
+            // (subst.c:12653) hands step 3 the operand truncated at the `=`
+            // (subst.c:12493) and runs it as the real builtin. So `declare -gGa
+            // g=(1 2)` ends in a genuine `declare -gGa g`, and every letter it
+            // carries lands wherever *this* loop's own lookup goes — which is
+            // not where the literal went, since only the builtin half reads the
+            // uppercase `G` (see [`Shell::in_declare_global_scope`]).
+            //
+            // The word has no `=`, so `value` below is `None` and the whole
+            // assignment arm is skipped of its own accord: step 3 sets the
+            // letters *as attributes only*, never re-folding or re-evaluating
+            // what the variable already holds, and converts the shape only when
+            // a kind letter was given — carrying an old scalar in as element 0,
+            // exactly as `declare -a` over an existing scalar does.
+            //
+            // [`BoundCompound`] is then only what genuinely happened *earlier*:
+            // the refusals phase 1 recorded, which bash raises here because its
+            // step 1 raised them here.
+            let (name_val, bound): (BStr<'_>, Option<&BoundCompound>) = match op {
+                DeclOperand::Word(w) => (w.as_slice(), None),
+                DeclOperand::Bound(c) => (c.name.as_bytes(), Some(c)),
+            };
+            // Refused back in phase 1, which spoke the compound-assignment
+            // machinery's half of the diagnostic; this is the builtin's. bash
+            // abandons such an operand whole, so nothing below runs for it.
+            if let Some(c) = bound {
+                if let Some(msg) = &c.refused_local {
+                    self.berrln(msg);
+                    status = 1;
                     continue;
                 }
-            };
+                if c.refused_nameref {
+                    self.perrln(&format!(
+                        "{tag}: {}: reference variable cannot be an array",
+                        c.name
+                    ));
+                    status = 1;
+                    continue;
+                }
+            }
             // `local -` does two things, not one.
             //
             // The documented half makes the shell's `set` options local to this
@@ -45705,7 +45663,7 @@ impl Shell {
             //
             // `-` is not a valid identifier, so nothing else can ever create
             // this name and no other code path has to guard against it.
-            if is_local && name_val.as_slice() == b"-" {
+            if is_local && name_val == b"-" {
                 // Only the first `local -` in the frame captures; a later one
                 // must not overwrite the earlier baseline (bash restores to the
                 // state at the first `local -`).
@@ -45742,7 +45700,7 @@ impl Shell {
             // all, so `1x=v`, `=5` and `bad@name=v` stay whole and are quoted
             // back whole by the refusal below, exactly as bash quotes them.
             let (name, append, value): (BStr<'_>, bool, Option<Str>) =
-                match attr_assignment_split(name_val.as_slice()) {
+                match attr_assignment_split(name_val) {
                     Some(eq) => {
                         let plus = eq > 0 && name_val.get(eq - 1) == Some(&b'+');
                         let end = if plus { eq - 1 } else { eq };
@@ -45752,7 +45710,7 @@ impl Shell {
                             Some(name_val.get(eq + 1..).unwrap_or_default().to_vec()),
                         )
                     }
-                    None => (name_val.as_slice(), false, None),
+                    None => (name_val, false, None),
                 };
             // An empty name is no name, and bash says so rather than passing
             // over the operand: `declare ""`, `declare -- ""`, `declare -a ""`,
@@ -45835,7 +45793,7 @@ impl Shell {
                     self.err_prefix(),
                     tag,
                     b": `",
-                    name_val.as_slice(),
+                    name_val,
                     b"': not a valid identifier"
                 ]);
                 status = 1;
@@ -47111,7 +47069,7 @@ impl Shell {
                             self.err_prefix(),
                             tag,
                             b": `",
-                            name_val.as_slice(),
+                            name_val,
                             b"': operand is not valid text"
                         ]);
                         status = 1;
@@ -48054,7 +48012,7 @@ impl Shell {
         if !flags.global && !global_builtin {
             return body(self);
         }
-        let names = if global_builtin {
+        let mut names = if global_builtin {
             Vec::new()
         } else {
             Self::declare_operand_names(argv.get(1..).unwrap_or_default())
@@ -48065,13 +48023,34 @@ impl Shell {
         flags.chklocal = flags.chklocal || global_builtin;
         flags.assn_global = flags.assn_global || global_builtin;
         // Compound operands were lifted out of `argv` into `decl_arrays`, so
-        // their names have to be collected separately — and kept apart, since
-        // the name a compound literal binds is not found the same way (see
-        // [`Shell::global_bind_name`]).
+        // their names have to be collected separately.
+        //
+        // Which of the two lists they belong in is decided by *which command*
+        // this half is. In the **expansion half** they are the compound literal
+        // (bash's step 2), which finds the name it binds its own way — see
+        // [`Shell::global_bind_names`] — so they are kept apart. In the
+        // `declare` family's **builtin half** they are bash's step 3, `declare
+        // -gGa g`, an ordinary bare-name operand of `declare_internal`: it
+        // resolves exactly as step 1 did, which is what `names` models. Sorting
+        // them into `compound` there would give step 3 the *literal's* answer,
+        // and a `declare -n` restart is precisely where the two part — the
+        // letters would land on the frame's own `g` where bash carries them out
+        // to `z`.
+        //
+        // `export` and `readonly` are excepted because their third command is
+        // not `declare_internal` at all — it is their own operand loop, which
+        // has no `mkglobal` restart to make and asks `chklocal` of the name as
+        // written. `declare -n g=z; f() { local g=5; readonly -a g=(1 2); }`
+        // marks *the frame's own* `g` and leaves the `z` step 1 made unmarked.
         let mut compound: Vec<String> = Vec::new();
         for d in decl_arrays {
-            if !names.contains(&d.assign.name) && !compound.contains(&d.assign.name) {
+            if names.contains(&d.assign.name) || compound.contains(&d.assign.name) {
+                continue;
+            }
+            if expansion_half || global_builtin {
                 compound.push(d.assign.name.clone());
+            } else {
+                names.push(d.assign.name.clone());
             }
         }
         // A **frame-local** reference the swap is about to hide is still the
@@ -48645,7 +48624,6 @@ impl Shell {
                     bound.push(BoundCompound {
                         at,
                         name: a.name.clone(),
-                        target: spelled.clone().unwrap_or_else(|| a.name.clone()),
                         refused_local: Some(held),
                         refused_nameref: false,
                     });
@@ -48769,7 +48747,6 @@ impl Shell {
             bound.push(BoundCompound {
                 at,
                 name: a.name.clone(),
-                target: target.clone(),
                 refused_local: None,
                 refused_nameref: false,
             });
@@ -49262,8 +49239,8 @@ impl Shell {
             // A printing command still reaches the builtin with the operand it
             // was refused, so the builtin's half of a phase-1 local refusal is
             // still spoken — it is only the *attributes* a printing command
-            // applies none of, which is why the rest of `apply_bound_compound`
-            // is skipped here rather than the whole of it.
+            // applies none of, which is why only that refusal is spoken here
+            // rather than the operand loop being run at all.
             for c in bound {
                 if let Some(msg) = &c.refused_local {
                     self.berrln(msg);
@@ -77191,6 +77168,77 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             );
             assert_eq!(st, 0, "{cmd}");
         }
+    }
+
+    /// The third command a compound declaration decomposes into is a **real
+    /// operand of the real builtin**, and its letters land where *it* resolves.
+    ///
+    /// `expand_declaration_argument` (subst.c:12653) hands the builtin the
+    /// operand truncated at the `=` (subst.c:12493), so `declare -gGa g=(1 2)`
+    /// ends in a genuine `declare -gGa g`. Having no `=`, it assigns nothing: it
+    /// sets the letters *as attributes only* — never re-folding and never
+    /// re-evaluating what the variable already holds — and converts the shape
+    /// only when a kind letter was given, carrying an old scalar in as element
+    /// 0, exactly as `declare -a` over an existing scalar does.
+    ///
+    /// Where it lands is its own question, and not the literal's: only the
+    /// builtin half reads the uppercase `G` (execute_cmd.c:4246), and only it
+    /// makes the `mkglobal` restart (declare.def:735). Corpus:
+    /// `the-letters-of-a-compound-declaration-land-a-third-time-where-the-builtin-resolves.sh`.
+    #[test]
+    fn the_letters_of_a_compound_declaration_land_a_third_time_where_the_builtin_resolves() {
+        // No literal at all: the letters land, the value is left as it stands.
+        for (cmd, want) in [
+            ("declare -gGa g", "declare -a g=([0]=\"old\")\n"),
+            ("declare -gGi g", "declare -i g=\"old\"\n"),
+            ("declare -gGu g", "declare -u g=\"old\"\n"),
+        ] {
+            let (out, st) = run(&format!("g=old; f() {{ {cmd}; declare -p g; }}; f"));
+            assert_eq!(out, want, "{cmd}");
+            assert_eq!(st, 0, "{cmd}");
+        }
+
+        // And the same with a literal in front of them. The fold and the
+        // arithmetic belong to the assignment step 2 already made.
+        for (cmd, want) in [
+            ("declare -gGl g=(1 2)", "declare -l g=\"Ab7+1\"\n"),
+            ("declare -gGu g=(1 2)", "declare -u g=\"Ab7+1\"\n"),
+            ("declare -gGi g=(1 2)", "declare -i g=\"Ab7+1\"\n"),
+            ("declare -gGa g=(1 2)", "declare -a g=([0]=\"Ab7+1\")\n"),
+            ("declare -gGA g=(1 2)", "declare -A g=([0]=\"Ab7+1\" )\n"),
+        ] {
+            let (out, st) = run(&format!("f() {{ local g=Ab7+1; {cmd}; declare -p g; }}; f"));
+            assert_eq!(out, want, "{cmd}");
+            assert_eq!(st, 0, "{cmd}");
+        }
+
+        // Step 1 sets the letters *before* step 2 stores, though, so a literal's
+        // own elements do fold and do evaluate.
+        let (out, st) = run("g=abC; f() { declare -gGu g=(x yZ); declare -p g; }; f");
+        assert_eq!(out, "declare -au g=([0]=\"X\" [1]=\"YZ\")\n");
+        assert_eq!(st, 0);
+        let (out, st) = run("g=2+3; f() { declare -gGi g=(4+5 6); declare -p g; }; f");
+        assert_eq!(out, "declare -ai g=([0]=\"9\" [1]=\"6\")\n");
+        assert_eq!(st, 0);
+
+        // `chklocal` keeps the builtin at home where nothing moves it, and the
+        // lowercase letter alone carries it out — so the very same literal
+        // leaves two different frames' bindings behind.
+        let (out, st) = run(
+            "g=old; f() { local g=loc; declare -gGa g=(1 2); declare -p g; }; f; declare -p g",
+        );
+        assert_eq!(
+            out,
+            "declare -a g=([0]=\"loc\")\ndeclare -a g=([0]=\"1\" [1]=\"2\")\n"
+        );
+        assert_eq!(st, 0);
+        let (out, st) =
+            run("g=old; f() { local g=loc; declare -ga g=(1 2); declare -p g; }; f; declare -p g");
+        assert_eq!(
+            out,
+            "declare -- g=\"loc\"\ndeclare -a g=([0]=\"1\" [1]=\"2\")\n"
+        );
+        assert_eq!(st, 0);
     }
 
     /// A nameref walk gives up two ways — it closes on a name it has already

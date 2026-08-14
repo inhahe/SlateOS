@@ -3085,18 +3085,22 @@ fn bench_vfs_stat() {
 /// * `Vfs::stat_resolved(p)` = the second phase alone
 ///
 /// so the difference is `resolve_follow` — namespace translation, path
-/// normalisation, and the `VFS_DCACHE` lookup.  The suspicion under test is
-/// the dcache: `VfsDcache::lookup` (`fs/vfs.rs`) is a **linear scan over all
-/// `VFS_DCACHE_SIZE` = 1024 entries** doing a full `PathBuf` compare per
-/// entry, which CLAUDE.md's performance rules forbid outright ("Linear scans
-/// … must be O(1) or O(log n)").  If that is the cost, `resolve_follow`
-/// dominates and the cost tracks `valid_entries`, not path depth.  If instead
-/// `stat_resolved` dominates, the dcache is a red herring and the underlying
-/// per-filesystem `stat` is the problem.
+/// normalisation, and the `VFS_DCACHE` lookup.
 ///
-/// The hit counters are reported too, because a scan that *misses* walks all
-/// 1024 slots while a hit stops early — so hit rate and occupancy together
-/// determine the expected scan length.
+/// **The dcache was the first suspect and it was wrong.**  `VfsDcache::lookup`
+/// is a linear scan over `VFS_DCACHE_SIZE` = 1024 slots, which CLAUDE.md's
+/// performance rules forbid outright ("Linear scans … must be O(1) or
+/// O(log n)"), so it looked like the answer.  The occupancy line below said
+/// otherwise: 25 live entries, 100% hit rate, so a hit-scan terminates in ~25
+/// iterations.  A linear scan's cost is a function of occupancy, not capacity.
+/// The scan is still a latent defect — the *miss* path walks all 1024 slots,
+/// and occupancy grows — but it is not what makes `stat("/")` slow.  The
+/// counters stay in the output precisely so that conclusion keeps being
+/// checked as occupancy changes.
+///
+/// `resolve_follow` is therefore split one level further, into the three
+/// stages it actually performs, so the next fix is aimed by measurement
+/// instead of by inspection.
 fn bench_vfs_stat_breakdown() {
     use crate::fs::vfs::Vfs;
 
@@ -3117,6 +3121,33 @@ fn bench_vfs_stat_breakdown() {
         let _ = core::hint::black_box(Vfs::stat_resolved("/"));
     });
 
+    // Phase A measured *directly* rather than by subtraction.  `resolve_path`
+    // is a public alias for `resolve_follow`, so the two numbers are the same
+    // quantity obtained two ways; if they disagree, the subtraction is what is
+    // wrong, not the code under it.  That check matters here because `stat`
+    // feeds `stat_resolved` the *resolved* path, whereas the isolated
+    // `stat_resolved` benchmark is fed "/" — if resolution rewrites the path,
+    // subtraction silently charges the difference to the wrong phase.
+    let resolve_direct = run("vfs_stat_breakdown_resolve", 500, || {
+        let _ = core::hint::black_box(Vfs::resolve_path("/"));
+    });
+
+    // Phase A1: per-process namespace translation alone.  For the root
+    // namespace this is semantically a no-op — it returns the input path
+    // unchanged — but it still takes `PROCESS_NS.lock()` and `PROCESS_ROOT
+    // .lock()` and allocates a `PathBuf` to say so.  Measuring it separately
+    // is the point: a no-op that costs anything is pure overhead on every
+    // path operation the OS performs.
+    let root_path = crate::fs::path::Path::new("/");
+    let ns_only = run("vfs_stat_breakdown_ns", 500, || {
+        let _ = core::hint::black_box(crate::ipc::namespace::resolve_path(root_path));
+    });
+    // Phase A1+A2: the whole prologue — namespace translation, then
+    // `validate_path` + `normalize_path` (a second allocation).
+    let prologue = run("vfs_stat_breakdown_prologue", 500, || {
+        let _ = core::hint::black_box(Vfs::resolve_prologue(root_path));
+    });
+
     let (hits_after, misses_after, valid_after) = Vfs::dcache_stats();
 
     let resolve_ns = full.min_ns.saturating_sub(resolved_only.min_ns);
@@ -3124,6 +3155,32 @@ fn bench_vfs_stat_breakdown() {
         "[bench]   vfs_stat_breakdown: full {}ns = resolve_follow ~{}ns + stat_resolved {}ns",
         full.min_ns, resolve_ns, resolved_only.min_ns
     );
+    // Within `resolve_follow`, the residual after the prologue is the dcache
+    // lock + linear scan + `PathBuf` clone of the hit.  Subtracting measured
+    // stages rather than attributing by inspection: the last time this hot
+    // path was reasoned about from the code alone, the conclusion was wrong.
+    serial_println!(
+        "[bench]   vfs_stat_breakdown: resolve_follow measured directly {}ns (vs {}ns by subtraction)",
+        resolve_direct.min_ns, resolve_ns
+    );
+    serial_println!(
+        "[bench]   vfs_stat_breakdown: resolve_follow {}ns = ns_translate {}ns + validate_normalize {}ns + dcache_hit ~{}ns",
+        resolve_direct.min_ns,
+        ns_only.min_ns,
+        prologue.min_ns.saturating_sub(ns_only.min_ns),
+        resolve_direct.min_ns.saturating_sub(prologue.min_ns)
+    );
+    // What resolution actually returns decides whether the subtraction above
+    // compares like with like: `stat` stats *this*, the isolated benchmark
+    // stats "/".
+    match Vfs::resolve_path("/") {
+        Ok(p) => serial_println!(
+            "[bench]   vfs_stat_breakdown: resolve_path(\"/\") -> {:?} ({} bytes)",
+            core::str::from_utf8(p.as_path().as_bytes()).unwrap_or("<non-utf8>"),
+            p.as_path().as_bytes().len()
+        ),
+        Err(e) => serial_println!("[bench]   vfs_stat_breakdown: resolve_path(\"/\") -> Err({:?})", e),
+    }
     serial_println!(
         "[bench]   vfs_stat_breakdown: dcache {} valid entries (of {}), +{} hits +{} misses over the run",
         valid_after,

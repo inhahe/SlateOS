@@ -1540,6 +1540,25 @@ impl Vfs {
         Self::resolve_follow(path.as_ref())
     }
 
+    /// The fixed prologue every path resolution pays, before the dcache is
+    /// even consulted: per-process namespace translation (which may remap or
+    /// block the path entirely), syntactic validation, and normalisation.
+    ///
+    /// Extracted because `resolve_follow` and `resolve_no_follow` carried it
+    /// verbatim, and because it is a *measurement seam*: this is unconditional
+    /// work on the hottest path in the VFS, so its cost has to be attributable
+    /// separately from the cache lookup that follows it.  `bench.rs` calls it
+    /// directly for that reason — hence `pub(crate)` rather than private.
+    ///
+    /// Returns the normalised, namespace-translated path ready for cache
+    /// lookup or a full walk.
+    pub(crate) fn resolve_prologue(path: &Path) -> KernelResult<PathBuf> {
+        let ns_path = crate::ipc::namespace::resolve_path(path)?;
+        let path = ns_path.as_path();
+        validate_path(path)?;
+        Ok(normalize_path(path))
+    }
+
     /// Internal: resolve following all symlinks.
     ///
     /// Walks path components one at a time, checking each for symlink
@@ -1554,13 +1573,7 @@ impl Vfs {
     /// `FileSystem` trait (like Linux's namei) to avoid re-resolving
     /// parent components.
     fn resolve_follow(path: &Path) -> KernelResult<PathBuf> {
-        // Apply per-process namespace translation before anything else.
-        // This may remap or block the path entirely.
-        let ns_path = crate::ipc::namespace::resolve_path(path)?;
-        let path = ns_path.as_path();
-
-        validate_path(path)?;
-        let norm = normalize_path(path);
+        let norm = Self::resolve_prologue(path)?;
 
         // Check VFS dcache first — avoids component-by-component lstat walk.
         {
@@ -1600,12 +1613,7 @@ impl Vfs {
     /// Used for operations that act on the entry itself: `remove`,
     /// `rmdir`, `lstat`, `readlink`, `symlink`, `rename`.
     fn resolve_no_follow(path: &Path) -> KernelResult<PathBuf> {
-        // Apply per-process namespace translation before anything else.
-        let ns_path = crate::ipc::namespace::resolve_path(path)?;
-        let path = ns_path.as_path();
-
-        validate_path(path)?;
-        let norm = normalize_path(path);
+        let norm = Self::resolve_prologue(path)?;
 
         // Check VFS dcache first.
         {

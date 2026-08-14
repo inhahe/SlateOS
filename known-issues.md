@@ -60695,3 +60695,55 @@ component against a 200–500 ns/component target. If the fixed per-resolution
 prologue is the cause of `vfs_stat_root`, it does not explain this one — 2
 components cost 5.4x one component, so there is a *per-component* cost here too.
 Both need the same treatment.
+
+#### PROSPECTIVE PREDICTION (written and committed before the stage-split run)
+
+Same protocol as `B-BENCH-TCP-CHECKSUM-PAIR-BIMODAL-1.7x`: the prediction is
+committed before the measurement exists, so it can be graded rather than
+rationalised. Last time this protocol caught me getting a *sign* wrong; the
+point is to let it do that again.
+
+**Primitive costs from the same release run** (`bench/history.jsonl`, commit
+`040049442`) — these are the anchors, not guesses:
+
+| primitive | measured | what it bounds |
+|---|---|---|
+| `heap_alloc_free_64` | 184 ns | one alloc+free pair ⇒ a single alloc ≲ 180 ns |
+| `sched_pick_next` | 40 ns | takes the run-queue lock ⇒ an uncontended spinlock is *cheap*, ≲ 20 ns |
+| `context_switch` | 1275 ns | nothing here should approach this |
+
+**What each stage actually does** (from the code, and this is the weak part —
+inspection is exactly what was wrong about the dcache):
+
+* `ns_translate` = `current_task_id()` + `owner_process()` (a `THREAD_OWNERS.lock()` + `BTreeMap::get`) + `PROCESS_NS.lock()` + get + `path.to_path_buf()` (**1 alloc**, of a 1-byte path) + `PROCESS_ROOT.lock()` + get → `None`. So **3 spinlocks + 3 map lookups + 1 alloc**.
+* `validate_normalize` = a byte scan of `"/"` + `normalize_path` (**1 alloc**).
+* `dcache_hit` = `VFS_DCACHE.lock()` + ~25 path compares + `entry.resolved.clone()` (**1 alloc**).
+
+**Predictions, falsifiable:**
+
+1. `ns_translate` < 400 ns.
+2. `validate_normalize` < 400 ns.
+3. `dcache_hit` < 500 ns.
+4. **Therefore the three stages sum to well under the 3749 ns that subtraction
+   attributed to `resolve_follow` — I predict the sum is < 1500 ns.** Three
+   allocations at ≤180 ns and six-ish uncontended spinlocks at ≤20 ns simply
+   do not reach 3.7 µs.
+5. **If (4) holds, the subtraction is what was wrong.** The specific mechanism I
+   expect: `Vfs::stat` feeds `stat_resolved` the *resolved* path, while the
+   isolated `vfs_stat_breakdown_resolved` benchmark feeds it the literal `"/"`.
+   If `resolve_path("/")` returns something longer than `"/"`, then the
+   `stat_resolved` inside `stat` is doing strictly more work than the isolated
+   measurement of it, and subtraction charges that surplus to `resolve_follow`.
+   **In that case the real culprit is `stat_resolved` — `resolve_mount`'s
+   `VFS.lock()` + linear mount scan + `to_path_buf()` + `Arc::clone`, then
+   `fs.lock().stat()` — and I will have misattributed the cost twice in a row
+   on this one benchmark.**
+
+This run therefore carries a direct measurement of `resolve_follow`
+(`Vfs::resolve_path` is a public alias for it) *alongside* the subtraction, plus
+a print of what `resolve_path("/")` actually returns. Prediction 5 is decided by
+those two lines and needs no further argument.
+
+**Standing caution, restated:** predictions 1–3 lean on the same
+fine-grained cost reasoning that got the tcp_checksum sign wrong. Treat a hit as
+weak confirmation and a miss as strong disconfirmation.

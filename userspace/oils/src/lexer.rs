@@ -479,6 +479,12 @@ pub struct CmdSubSpan {
     pub kind: SubBody,
 }
 
+/// What [`Lexer::read_dollar_brace`] reads out of a `${ … }`: the body's raw
+/// text, the `$( … )` spans the scan stepped over inside it, and the stretches
+/// of that text the scan *wrote* rather than read — see [`Lexer::bare_splices`].
+/// All three are scoped to the one body and measured against it.
+type BracedBody = (Str, Vec<CmdSubSpan>, Vec<core::ops::Range<usize>>);
+
 /// Move a collection of spans from the buffer they were gathered in to the
 /// buffer that buffer is being spliced into, `by` bytes along.
 ///
@@ -491,6 +497,19 @@ fn shift_spans(nested: Vec<CmdSubSpan>, by: usize) -> impl Iterator<Item = CmdSu
         let start = s.range.start.checked_add(by)?;
         let end = s.range.end.checked_add(by)?;
         Some(CmdSubSpan { range: start..end, ..s })
+    })
+}
+
+/// The same shift for a body's [`Lexer::bare_splices`], which are ranges into
+/// the buffer they were collected for and so move with it.
+fn shift_ranges(
+    ranges: Vec<core::ops::Range<usize>>,
+    by: usize,
+) -> impl Iterator<Item = core::ops::Range<usize>> {
+    ranges.into_iter().filter_map(move |r| {
+        let start = r.start.checked_add(by)?;
+        let end = r.end.checked_add(by)?;
+        Some(start..end)
     })
 }
 
@@ -528,11 +547,13 @@ pub enum Seg {
     /// [`Lexer::read_dollar_brace`] and the `ParamBraced` arm of the parser's
     /// `seg_to_part`.
     ///
-    /// The fourth field is [`Lexer::bare_splice`]: the body holds text the scan
-    /// wrote but never read, so the `}` the *expansion* stops at may lie inside
-    /// it. See [`crate::wordscan::expansion_body_len`], which is what the
-    /// parser then asks.
-    ParamBraced(Str, u32, Vec<CmdSubSpan>, bool),
+    /// The fourth field is [`Lexer::bare_splices`]: the ranges of the body the
+    /// scan wrote but never read. Two readers ask about them. The `}` the
+    /// *expansion* stops at may lie inside one, which is
+    /// [`crate::wordscan::expansion_body_len`]'s question; and a `$( … )` inside
+    /// one was never parsed, which is the operand lexer's — see
+    /// [`crate::parser::operand_from_source`].
+    ParamBraced(Str, u32, Vec<CmdSubSpan>, Vec<core::ops::Range<usize>>),
     /// `$( … )` / `` ` … ` `` — raw inner source, parsed later, plus the 1-based
     /// source line of the substitution's *closing* delimiter.
     ///
@@ -966,14 +987,24 @@ struct Lexer {
     /// Every `raw_from .. raw` a gather has closed, in order. See
     /// [`Spanned::taken`].
     taken: Vec<(u32, u32)>,
-    /// Set by [`Lexer::read_dollar_brace_body`] when it spliced a translated
-    /// `$'…'` into the body **unquoted** — bash's third row (parse.y:3887).
+    /// Where [`Lexer::read_dollar_brace_body`] spliced a translated `$'…'` into
+    /// the body **unquoted** — bash's third row (parse.y:3887).
     ///
-    /// The splice writes text into the body that this scan never read back, so
-    /// the body it hands out may reach past the `}` the *expansion* will close
-    /// at. Only the `${ … }` reader raises it and only the segment builder
-    /// consumes it, which clears it as it goes; nothing else looks.
-    bare_splice: bool,
+    /// The splice writes text into the body that this scan never read back, and
+    /// two things follow from that. The body may reach past the `}` the
+    /// *expansion* will close at, which is what
+    /// [`crate::wordscan::expansion_body_len`] is asked about. And a `$( … )`
+    /// the translation produced was never parsed, so it is
+    /// [`crate::ast::CmdSubBody::Unread`] — met for the first time by whatever
+    /// scans the stored word, exactly as one written inside a `' … '` run is.
+    /// Telling those bytes from the ones the scan *did* read is why this is a
+    /// list of ranges rather than a flag.
+    ///
+    /// Offsets are into the body being built by the scan that owns them, so a
+    /// scan that splices its buffer into a longer one shifts them as it does so
+    /// — the same rule [`CmdSubSpan::range`] follows, and the same
+    /// save-and-restore around every construct that starts a buffer of its own.
+    bare_splices: Vec<core::ops::Range<usize>>,
     /// The text this scan is reading is text bash **never read as a word** — a
     /// here-document body, a `PS4`, a `${x@P}` value.
     ///
@@ -1669,7 +1700,7 @@ impl Lexer {
             raw: 0,
             raw_from: 0,
             taken: Vec::new(),
-            bare_splice: false,
+            bare_splices: Vec::new(),
             here_text: false,
             ansi_c_quote: true,
             cmd_pos: CmdPos::new(),
@@ -2314,7 +2345,7 @@ pub fn lex_word_verbatim_opts(
 ) -> Result<Vec<Seg>, LexError> {
     let mut lx = Lexer::new(src, opts);
     lx.apply_ctx(ctx);
-    lx.read_word_verbatim(Verbatim::Bare)
+    lx.read_word_verbatim(Verbatim::Bare, &[])
 }
 
 /// Lex `src` as if it were the body of a double-quoted string that runs to the
@@ -2352,7 +2383,7 @@ pub fn lex_dquote_body(src: BStr<'_>) -> Result<Vec<Seg>, LexError> {
 pub fn lex_replacement_verbatim(src: BStr<'_>, ctx: ReadCtx) -> Result<Vec<Seg>, LexError> {
     let mut lx = Lexer::new(src, ParseOpts::default());
     lx.apply_ctx(ctx);
-    lx.read_word_verbatim(Verbatim::Replacement)
+    lx.read_word_verbatim(Verbatim::Replacement, &[])
 }
 
 /// Lex `src` as the operand of a substitution written inside double quotes — the
@@ -2373,12 +2404,34 @@ pub fn lex_replacement_verbatim(src: BStr<'_>, ctx: ReadCtx) -> Result<Vec<Seg>,
 /// `Quoting::Unread`). An operand is never a pattern, so it never gets a
 /// here-document fragment's re-extraction and its `$'…'` stays as written.
 ///
+/// `unread` gives the stretches of `src` — as **byte** ranges — that the brace
+/// scan *spliced* in rather than read: a bare `$'…'` translation, bash's third
+/// row (parse.y:3887). No parser passed over those bytes, so a `$( … )` in one
+/// is [`crate::ast::CmdSubBody::Unread`] just as a `' … '` run's is. See
+/// [`Lexer::bare_splices`], which is where they are collected, and
+/// [`Lexer::read_word_verbatim`], which consumes them.
+///
 /// # Errors
 /// Returns [`LexError`] on an unterminated quote or substitution.
-pub fn lex_operand_in_dquote(src: BStr<'_>, ctx: ReadCtx) -> Result<Vec<Seg>, LexError> {
+pub fn lex_operand_in_dquote(
+    src: BStr<'_>,
+    ctx: ReadCtx,
+    unread: &[core::ops::Range<usize>],
+) -> Result<Vec<Seg>, LexError> {
     let mut lx = Lexer::new(src, ParseOpts::default());
     lx.apply_ctx(ctx);
-    lx.read_word_verbatim(Verbatim::Dquote)
+    // The scan counts in characters and the ranges arrive in bytes, so map one
+    // to the other over the very decoding the scan will do. A splice writes
+    // whole characters, so both ends land on a boundary; an end past the last
+    // character is the text's own end.
+    let unread: Vec<core::ops::Range<usize>> = if unread.is_empty() {
+        Vec::new()
+    } else {
+        let offs: Vec<usize> = bytes::char_positions(src).map(|(o, _)| o).collect();
+        let at = |b: usize| offs.partition_point(|&o| o < b);
+        unread.iter().map(|r| at(r.start)..at(r.end)).collect()
+    };
+    lx.read_word_verbatim(Verbatim::Dquote, &unread)
 }
 
 /// What the previously read token was, to the precision the command-position
@@ -4860,23 +4913,43 @@ impl Lexer {
     /// Used for the pattern and replacement of `${var/pat/repl}`, where bash
     /// applies expansion and quote removal but neither word-splitting nor
     /// operator tokenization, so embedded/leading/trailing spaces are literal.
-    fn read_word_verbatim(&mut self, mode: Verbatim) -> Result<Vec<Seg>, LexError> {
+    ///
+    /// `unread` names stretches of the input — as character index ranges — that
+    /// reached this word by a *splice* rather than by being read: bash's bare
+    /// `$'…'` translation (parse.y:3887), whose bytes the brace scan wrote into
+    /// the operand without any parser ever passing over them. Inside one, this
+    /// scan is not a read either, so a `$( … )` there comes out
+    /// [`crate::ast::CmdSubBody::Unread`] — the same standing the `' … '` run
+    /// below gives what it covers. See [`Lexer::bare_splices`] and
+    /// [`crate::parser::operand_from_source`].
+    fn read_word_verbatim(
+        &mut self,
+        mode: Verbatim,
+        unread: &[core::ops::Range<usize>],
+    ) -> Result<Vec<Seg>, LexError> {
         let mut segs: Vec<Seg> = Vec::new();
         let mut lit = Str::new();
         // Where the `' … '` run the cursor is inside ends, in [`Verbatim::Dquote`]
-        // — see the second `'` arm below — and what [`Lexer::here_text`] was
-        // before the run started.
+        // — see the second `'` arm below — and whether the cursor is inside one
+        // at all (a run with no mate reaches the end of the text, so `sq_close`
+        // being `None` does not mean the run is over).
         let mut sq_close: Option<usize> = None;
-        let outside_run = self.here_text;
+        let mut in_run = false;
+        // What [`Lexer::here_text`] was before any of this: outside both a run
+        // and a splice, the answer is still whatever the caller set.
+        let outside = self.here_text;
         while let Some(c) = self.peek() {
             // The run's own closing quote: a literal like its mate, and past it
             // a parser was reading again.
             if sq_close == Some(self.pos) {
                 sq_close = None;
-                self.here_text = outside_run;
+                in_run = false;
                 lit.push(b'\'');
                 self.pos += 1;
                 continue;
+            }
+            if !in_run {
+                self.here_text = outside || unread.iter().any(|r| r.contains(&self.pos));
             }
             match c {
                 // Inside quotes a `'` opens nothing — it is a character like any
@@ -4911,6 +4984,7 @@ impl Lexer {
                     // Without a mate the run is the rest of the text — what a
                     // `read_single_quote` that ran out would have taken.
                     sq_close = (self.pos + 1..self.chars.len()).find(|&i| self.at(i) == Some('\''));
+                    in_run = true;
                     self.here_text = true;
                     lit.push(b'\'');
                     self.pos += 1;
@@ -5004,16 +5078,17 @@ impl Lexer {
                     Err(e) => {
                         flush_lit(&mut segs, &mut lit);
                         segs.push(self.unclosed_seg(e)?);
-                        self.here_text = outside_run;
+                        self.here_text = outside;
                         return Ok(segs);
                     }
                 },
                 _ => self.take_into(&mut lit),
             }
         }
-        // A run with no mate reaches here still open; the flag is the cursor's,
-        // not the text's, so it does not outlive the scan.
-        self.here_text = outside_run;
+        // A run with no mate — or a splice that runs to the end — reaches here
+        // still open; the flag is the cursor's, not the text's, so it does not
+        // outlive the scan.
+        self.here_text = outside;
         flush_lit(&mut segs, &mut lit);
         Ok(segs)
     }
@@ -5493,16 +5568,13 @@ impl Lexer {
                 // `${` the delimiter it is standing in (`parse_matched_pair (cd,
                 // '{', '}', …)`, parse.y:5033), and `rflags` is `P_DQUOTE` when
                 // that delimiter is a `"` (parse.y:3696).
-                // Scoped to this `${ … }`: cleared going in so a splice from an
-                // earlier construct in the same word cannot be blamed on it, and
-                // again coming out so a later one starts clean. A splice at any
-                // depth inside — in a `"…"` run in the body, in a body nested in
-                // that one — is this segment's, because it is this segment's raw
-                // text the leftover has to be carved out of.
-                self.bare_splice = false;
-                let (raw, nested) =
+                // The splices come back scoped to this `${ … }` and measured
+                // against its raw text — a splice at any depth inside, in a
+                // `"…"` run in the body or in a body nested in that one, is
+                // this segment's, because it is this segment's raw text the
+                // leftover has to be carved out of.
+                let (raw, nested, spliced) =
                     self.read_dollar_brace(in_dquote).map_err(|e| self.unread_eof(e, '}', dollar, true))?;
-                let spliced = std::mem::take(&mut self.bare_splice);
                 Ok(Some(Seg::ParamBraced(raw, open, nested, spliced)))
             }
             Some('[') => {
@@ -5511,10 +5583,16 @@ impl Lexer {
                 self.pos += 1;
                 let open = self.cur_line();
                 let outer = std::mem::take(&mut self.arith_comsubs);
+                // An arithmetic body is a segment of its own, and nothing asks
+                // it which of its bytes a splice wrote — so the collection is
+                // set aside and dropped rather than joining the enclosing
+                // word's. See [`Lexer::bare_splices`].
+                let outer_splices = std::mem::take(&mut self.bare_splices);
                 let raw = self
                     .read_balanced('[', ']')
                     .map_err(|e| self.unread_eof(e.at(open), ']', dollar, false))?;
                 let nested = std::mem::replace(&mut self.arith_comsubs, outer);
+                self.bare_splices = outer_splices;
                 Ok(Some(Seg::Arith(raw, true, nested)))
             }
             Some('(') => {
@@ -5551,10 +5629,13 @@ impl Lexer {
                     let open = self.cur_line();
                     self.adv();
                     let outer = std::mem::take(&mut self.arith_comsubs);
+                    // Set aside and dropped, as for `$[ … ]` above.
+                    let outer_splices = std::mem::take(&mut self.bare_splices);
                     let raw = self
                         .read_balanced('(', ')')
                         .map_err(|e| self.unread_eof(e.at(open), ')', dollar, true))?;
                     let nested = std::mem::replace(&mut self.arith_comsubs, outer);
+                    self.bare_splices = outer_splices;
                     // `chk_arithsub`'s own preamble: the body must open with the
                     // `(` this scan counted and close with its mate.
                     if let Some(expr) = raw
@@ -5782,8 +5863,13 @@ impl Lexer {
         // read as a word then — `command_substitute` parses it, `$'…'` and all —
         // and that read starts from the source this collects. See
         // [`Lexer::here_text`] and [`crate::ast::CmdSubBody::Unread`].
+        // The body is re-read as a word at expansion time, from this source, so
+        // which of its bytes a splice wrote is that read's question and not this
+        // one's. See [`Lexer::bare_splices`].
+        let outer_splices = std::mem::take(&mut self.bare_splices);
         let r = self.read_balanced_inner('(', ')', true, dq);
         self.arith_comsubs = outer;
+        self.bare_splices = outer_splices;
         if r.is_err() {
             // bash reads this body with a whole nested `yyparse`, and `parse_comsub`
             // (parse.y:4133) zeroes `need_here_doc` before starting it. The saved
@@ -5969,12 +6055,13 @@ impl Lexer {
                             // nothing in it is deferred by sitting one level in.
                             // This one is inside the double-quoted run, so it
                             // carries `P_DQUOTE` (parse.y:3696).
-                            let (inner, nested) = self.read_dollar_brace(true)?;
+                            let (inner, nested, spliced) = self.read_dollar_brace(true)?;
                             raw.extend_from_slice(b"${");
                             // Shifted as the body is spliced: the ranges came
                             // out relative to `inner`, and from here on they
                             // have to name the same bytes of `raw`.
                             self.arith_comsubs.extend(shift_spans(nested, raw.len()));
+                            self.bare_splices.extend(shift_ranges(spliced, raw.len()));
                             raw.extend_from_slice(&inner);
                             raw.push(b'}');
                         }
@@ -6017,10 +6104,19 @@ impl Lexer {
                             // `parse_matched_pair` (parse.y:3960 has no
                             // `push_delimiter`, unlike `read_token_word`'s
                             // parse.y:5041). So the body inherits the `"`.
+                            // The splices go the other way from the spans: they
+                            // are not a record of what to re-read but of which
+                            // bytes of `raw` no scan read, and the body's bytes
+                            // land in `raw` like any others. See
+                            // [`Lexer::bare_splices`].
+                            let body_splices = std::mem::take(&mut self.bare_splices);
                             let inner = self.read_balanced_inner('(', ')', true, true)?;
                             self.arith_comsubs = outer;
+                            let inner_splices =
+                                std::mem::replace(&mut self.bare_splices, body_splices);
                             let start = raw.len();
                             raw.extend_from_slice(b"$(");
+                            self.bare_splices.extend(shift_ranges(inner_splices, raw.len()));
                             raw.extend_from_slice(&inner);
                             raw.push(b')');
                             self.arith_comsubs.push(CmdSubSpan {
@@ -6066,11 +6162,12 @@ impl Lexer {
                 // reached from inside a `"…"` pushes nothing over it
                 // (parse.y:3960). So `"$(echo ${x:-$'a\tb'})"` splices bare,
                 // where the same body written unquoted re-quotes. See `dq`.
-                let (inner, nested) = self.read_dollar_brace(dq)?;
+                let (inner, nested, spliced) = self.read_dollar_brace(dq)?;
                 raw.extend_from_slice(b"${");
                 // See the `"`-run arm above: the body's ranges are relative to
                 // `inner` until it is spliced.
                 self.arith_comsubs.extend(shift_spans(nested, raw.len()));
+                self.bare_splices.extend(shift_ranges(spliced, raw.len()));
                 raw.extend_from_slice(&inner);
                 raw.push(b'}');
                 Ok(true)
@@ -6624,11 +6721,16 @@ impl Lexer {
     /// written inside a double-quoted run. The body is read the same either way;
     /// all it decides is what becomes of a `$'…'` in it, and that is the one
     /// place bash 5.2's answer differs from 5.3's. See the arm below.
-    fn read_dollar_brace(&mut self, in_dquote: bool) -> Result<(Str, Vec<CmdSubSpan>), LexError> {
+    fn read_dollar_brace(&mut self, in_dquote: bool) -> Result<BracedBody, LexError> {
         let outer = std::mem::take(&mut self.arith_comsubs);
+        // The splices are ranges into the body this call is about to build, so
+        // they are scoped to it exactly as the spans are. See
+        // [`Lexer::bare_splices`].
+        let outer_splices = std::mem::take(&mut self.bare_splices);
         let r = self.read_dollar_brace_body(in_dquote);
         let nested = std::mem::replace(&mut self.arith_comsubs, outer);
-        r.map(|raw| (raw, nested))
+        let spliced = std::mem::replace(&mut self.bare_splices, outer_splices);
+        r.map(|raw| (raw, nested, spliced))
     }
 
     /// The scan proper for [`Lexer::read_dollar_brace`].
@@ -6815,7 +6917,7 @@ impl Lexer {
                         let s = crate::escape::ansi_c_translate(&self.read_ansi_c_source()?);
                         if in_dquote && state != crate::wordscan::DolBrace::Quote {
                             // Text this scan will not read back — see
-                            // [`Lexer::bare_splice`] and
+                            // [`Lexer::bare_splices`] and
                             // [`crate::wordscan::expansion_body_len`].
                             //
                             // `nestlen = ttranslen` (parse.y:3892), so a NUL the
@@ -6824,8 +6926,9 @@ impl Lexer {
                             // lands in ends there rather than the translation. See
                             // `parser::segs_hold_a_nul` and
                             // `parser::word_expanded_from_its_text`.
-                            self.bare_splice = true;
+                            let start = raw.len();
                             raw.extend_from_slice(&s);
+                            self.bare_splices.push(start..raw.len());
                         } else {
                             // `nestlen = strlen (nestret)` (parse.y:3870, 3886)
                             // after `sh_single_quote` took the translation as a
@@ -6845,9 +6948,10 @@ impl Lexer {
                             // `echo ${#x:-${y:-$(fi)}}` is a syntax error, not a
                             // `bad substitution`, so the record has to travel out
                             // past the level that collected it.
-                            let (inner, nested) = self.read_dollar_brace(in_dquote)?;
+                            let (inner, nested, spliced) = self.read_dollar_brace(in_dquote)?;
                             // `${` is already written, so the body starts here.
                             self.arith_comsubs.extend(shift_spans(nested, raw.len()));
+                            self.bare_splices.extend(shift_ranges(spliced, raw.len()));
                             raw.extend_from_slice(&inner);
                             raw.push(b'}');
                         }
@@ -6958,8 +7062,12 @@ impl Lexer {
         // See [`Lexer::arith_comsubs`]: the spans belong to *this* scan, so the
         // enclosing one's collection is set aside for the duration.
         let outer = std::mem::take(&mut self.arith_comsubs);
+        // Set aside and dropped: an arithmetic body is a segment of its own.
+        // See [`Lexer::bare_splices`].
+        let outer_splices = std::mem::take(&mut self.bare_splices);
         let r = self.read_arith_body_inner(adjacent);
         let nested = std::mem::replace(&mut self.arith_comsubs, outer);
+        self.bare_splices = outer_splices;
         r.map(|raw| (raw, nested))
     }
 
@@ -8787,14 +8895,23 @@ mod tests {
     /// quotes with the body still in `DOLBRACE_PARAM`/`OP`/`WORD`
     /// (parse.y:3887). The other two re-quote it with `sh_single_quote`, and
     /// only the bare one leaves text in the body the scan never read back.
+    ///
+    /// What is recorded is *where* the translation landed, because two readers
+    /// need to tell those bytes from the ones the scan read: the one looking for
+    /// the `}` the expansion stops at, and the operand lexer, for which a
+    /// `$( … )` in a splice was never parsed.
     #[test]
     fn only_a_bare_splice_raises_the_flag() {
-        fn first_braced(segs: &[Seg]) -> Option<(String, bool)> {
+        // The splices come back as start/end pairs rather than as ranges, so that a
+        // one-element expectation can still be written `vec![…]` — a `vec!` of one
+        // range trips `single_range_in_vec_init`, a lint for `vec![0..3]` written
+        // where `(0..3).collect()` was meant.
+        fn first_braced(segs: &[Seg]) -> Option<(String, Vec<(usize, usize)>)> {
             for seg in segs {
                 match seg {
                     Seg::ParamBraced(raw, _, _, spliced) => {
                         let body = String::from_utf8(raw.clone()).expect("body is text");
-                        return Some((body, *spliced));
+                        return Some((body, spliced.iter().map(|r| (r.start, r.end)).collect()));
                     }
                     Seg::Dq(inner) => {
                         if let Some(found) = first_braced(inner) {
@@ -8813,22 +8930,60 @@ mod tests {
         };
         // Row three: the `:-` word is `DOLBRACE_WORD`, so the translation goes
         // in as it stands and the `}` it carries is text the scan wrote.
-        assert_eq!(braced(r#""${x:-$'a}b'}""#), ("x:-a}b".to_string(), true));
+        assert_eq!(braced(r#""${x:-$'a}b'}""#), ("x:-a}b".to_string(), vec![(3, 6)]));
         // The name is `DOLBRACE_PARAM`, which is the third row too.
-        assert_eq!(braced(r#""${$'a}b'}""#), ("a}b".to_string(), true));
+        assert_eq!(braced(r#""${$'a}b'}""#), ("a}b".to_string(), vec![(0, 3)]));
         // Row two: past a `#` the state is `DOLBRACE_QUOTE`, so the
         // translation is re-quoted and contributes no text of its own.
-        assert_eq!(braced(r#""${q#$'a}b'}""#), ("q#'a}b'".to_string(), false));
-        assert_eq!(braced(r#""${q%$'z'}""#), ("q%'z'".to_string(), false));
+        assert_eq!(braced(r#""${q#$'a}b'}""#), ("q#'a}b'".to_string(), vec![]));
+        assert_eq!(braced(r#""${q%$'z'}""#), ("q%'z'".to_string(), vec![]));
         // Row one: no `P_DQUOTE`, so re-quoted whatever the state.
-        assert_eq!(braced("${x:-$'a}b'}"), ("x:-'a}b'".to_string(), false));
+        assert_eq!(braced("${x:-$'a}b'}"), ("x:-'a}b'".to_string(), vec![]));
         // Nothing to translate, nothing to splice.
-        assert_eq!(braced(r#""${x:-a}""#), ("x:-a".to_string(), false));
+        assert_eq!(braced(r#""${x:-a}""#), ("x:-a".to_string(), vec![]));
         // A splice anywhere inside is this segment's, because it is this
-        // segment's raw text a leftover would have to be carved out of.
-        assert_eq!(braced(r#""${a:-${b:-$'x}y'}}""#), ("a:-${b:-x}y}".to_string(), true));
+        // segment's raw text a leftover would have to be carved out of — and
+        // the range moves with the body it was carved from.
+        assert_eq!(braced(r#""${a:-${b:-$'x}y'}}""#), ("a:-${b:-x}y}".to_string(), vec![(8, 11)]));
         // The recursion resets the state, so an inner `#` is row two on its
         // own account even where the outer body is row three.
-        assert_eq!(braced(r#""${a:-${b#$'x'}}""#), ("a:-${b#'x'}".to_string(), false));
+        assert_eq!(braced(r#""${a:-${b#$'x'}}""#), ("a:-${b#'x'}".to_string(), vec![]));
+        // Two of them in one body, in order.
+        assert_eq!(
+            braced(r#""${x:-$'a'p$'b'}""#),
+            ("x:-apb".to_string(), vec![(3, 4), (5, 6)]),
+        );
+    }
+
+    /// A `$( … )` the operand scan meets inside one of those splices was never
+    /// parsed — the bytes around it were *written* by the brace scan, not read
+    /// by it — so it comes back [`SubBody::Unread`], exactly as one inside a
+    /// `' … '` run does. Outside a splice the same spelling is an ordinary
+    /// eager read, which is what makes the window and not the operand the unit.
+    #[test]
+    fn a_splice_is_the_only_part_of_an_operand_no_parser_read() {
+        fn kinds(src: &str, unread: &[core::ops::Range<usize>]) -> Vec<SubBody> {
+            super::lex_operand_in_dquote(src.as_bytes(), ReadCtx::SOURCE, unread)
+                .expect("operand lexes")
+                .iter()
+                .filter_map(|s| match s {
+                    Seg::CmdSub(_, _, kind) => Some(kind.clone()),
+                    _ => None,
+                })
+                .collect()
+        }
+        // `"${z:-$'$(echo Q)'}"`: the body is `z:-$(echo Q)` and the operand
+        // `$(echo Q)`, all nine bytes of it spliced.
+        assert_eq!(kinds("$(echo Q)", &[0..9]), vec![SubBody::Unread { closed: true }]);
+        // The same operand with no splice behind it is read where it stands.
+        assert_eq!(kinds("$(echo Q)", &[]), vec![SubBody::Eager]);
+        // A window is a window: one written substitution and one spliced beside
+        // it in the same operand keep their own answers.
+        assert_eq!(
+            kinds("$(a)$(b)", &[4..8]),
+            vec![SubBody::Eager, SubBody::Unread { closed: true }],
+        );
+        // A `' … '` run still speaks for what it covers, splices or none.
+        assert_eq!(kinds("'$(a)'", &[]), vec![SubBody::Unread { closed: true }]);
     }
 }

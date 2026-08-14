@@ -6082,7 +6082,7 @@ fn segs_splice_past_the_brace(segs: &[Seg]) -> bool {
     segs.iter().any(|s| match s {
         // The splice only happens inside double quotes, so the scan that
         // decides where the expansion ends is the double-quoted one.
-        Seg::ParamBraced(raw, _, _, true) => {
+        Seg::ParamBraced(raw, _, _, spliced) if !spliced.is_empty() => {
             matches!(crate::wordscan::expansion_body_len(raw, true), BraceEnd::Early(_))
         }
         Seg::Dq(inner) => segs_splice_past_the_brace(inner),
@@ -6287,7 +6287,7 @@ fn seg_to_parts(
     out: &mut Vec<WordPart>,
 ) -> Result<(), ParseError> {
     if let Seg::ParamBraced(raw, _, nested, spliced) = seg
-        && *spliced
+        && !spliced.is_empty()
         // The splice only happens inside double quotes, so the scan that
         // decides is the double-quoted one.
         && !matches!(crate::wordscan::expansion_body_len(raw, true), BraceEnd::Same)
@@ -6328,8 +6328,8 @@ fn seg_to_part(seg: &Seg, opts: ParseOpts, q: Quoting) -> Result<WordPart, Parse
         // The body is lexed again in here, from its own line 1, so every
         // fragment of it has to be told the physical line it starts on — see
         // [`frag_line`] and [`map_frag_segs`].
-        Seg::ParamBraced(raw, open, nested, _) => {
-            let mut part = parse_braced_param_in(raw, opts, q, *open);
+        Seg::ParamBraced(raw, open, nested, spliced) => {
+            let mut part = parse_braced_param_in(raw, opts, q, *open, spliced);
             // A `$( … )` in the body is parsed by bash where it *reads* it, so
             // its syntax error beats every verdict the `${ … }` could reach —
             // a runtime `bad substitution`, an outright refusal of the body's
@@ -6777,6 +6777,42 @@ fn is_length_target(name: &str) -> bool {
         || (!name.is_empty() && name.bytes().all(|b| b.is_ascii_digit()))
 }
 
+/// Carry [`parse_braced_param_in`]'s splice ranges into the coordinates of a
+/// stretch of text carved out of the body: the `from..from + len` bytes of it,
+/// which land at `to` in the buffer being built. Ranges outside that stretch are
+/// dropped, and one straddling its edge is clipped to it — an operand only wants
+/// to know which of *its own* bytes no scan read.
+fn splices_within(
+    splices: &[core::ops::Range<usize>],
+    from: usize,
+    len: usize,
+    to: usize,
+) -> Vec<core::ops::Range<usize>> {
+    if splices.is_empty() {
+        return Vec::new();
+    }
+    let end = from.saturating_add(len);
+    splices
+        .iter()
+        .filter_map(|r| {
+            let start = r.start.max(from);
+            let stop = r.end.min(end);
+            (start < stop).then(|| (start - from + to)..(stop - from + to))
+        })
+        .collect()
+}
+
+/// [`splices_within`] for an operand, which is always a byte *suffix* of the
+/// body — everything before it was consumed as a name and an operator, character
+/// by character, so its offset is just what the two lengths differ by.
+fn operand_splices(
+    splices: &[core::ops::Range<usize>],
+    raw: BStr<'_>,
+    arg: BStr<'_>,
+) -> Vec<core::ops::Range<usize>> {
+    splices_within(splices, raw.len().saturating_sub(arg.len()), arg.len(), 0)
+}
+
 /// Parse a `${ … }` body that reached the expander as *text* rather than as a
 /// segment the word lexer had already lowered — an arithmetic string, or a
 /// `${!ref…` whose brace never closed. `q` is the quoting the text is being
@@ -6786,18 +6822,27 @@ pub(crate) fn parse_braced_param(
     opts: ParseOpts,
     q: Quoting,
 ) -> Result<WordPart, ParseError> {
-    parse_braced_param_in(raw, opts, q, RUNTIME_TEXT)
+    // Text that reached the expander is text no scan of ours spliced into: what
+    // a `$'…'` in it becomes is that expansion's business, not a parse's.
+    parse_braced_param_in(raw, opts, q, RUNTIME_TEXT, &[])
 }
 
 /// [`parse_braced_param`] with the quoting the `${…}` was written in, which
 /// only its operand cares about (see [`Quoting`]), and the physical line the
 /// body starts on, which every fragment of it is numbered from (see
 /// [`frag_line`]).
+///
+/// `splices` are the stretches of `raw` the word lexer wrote in without reading
+/// — a bare `$'…'` translation, bash's third row (parse.y:3887) — as byte ranges
+/// into `raw`. Only an operand can hold one and still be parsed, so they are
+/// carried no further than [`operand_from_source`], which hands them to
+/// [`crate::lexer::lex_operand_in_dquote`].
 fn parse_braced_param_in(
     raw: BStr<'_>,
     opts: ParseOpts,
     q: Quoting,
     line: u32,
+    splices: &[core::ops::Range<usize>],
 ) -> Result<WordPart, ParseError> {
     if let Some(after_hash) = raw.strip_prefix(b"#") {
         if after_hash.is_empty() {
@@ -6936,10 +6981,19 @@ fn parse_braced_param_in(
             } else {
                 name.clone().into_bytes()
             };
-            modifier_src.extend(bytes::from_chars(remaining.iter().copied()));
+            let rest_bytes = bytes::from_chars(remaining.iter().copied());
+            // The modifier text is the tail of the body with a different head
+            // glued on, so a splice in that tail moves by the difference.
+            let moved = splices_within(
+                splices,
+                raw.len().saturating_sub(rest_bytes.len()),
+                rest_bytes.len(),
+                modifier_src.len(),
+            );
+            modifier_src.extend(rest_bytes);
             // The name spliced on the front is a stand-in with no newline in it,
             // so the modifier text still begins where it did in the real body.
-            let mut target = parse_braced_param_in(&modifier_src, opts, q, remaining_line)?;
+            let mut target = parse_braced_param_in(&modifier_src, opts, q, remaining_line, &moved)?;
             if positional {
                 if name == "@" && matches!(target, WordPart::ParamCase { .. }) {
                     return Ok(WordPart::BadSubst(raw.to_vec()));
@@ -7082,7 +7136,13 @@ fn parse_braced_param_in(
                 star,
                 op,
                 colon,
-                arg: Box::new(operand_from_source(&arg_str, opts, q, rest_line)?),
+                arg: Box::new(operand_from_source(
+                    &arg_str,
+                    opts,
+                    q,
+                    rest_line,
+                    &operand_splices(splices, raw, &arg_str),
+                )?),
             });
         }
     };
@@ -7155,7 +7215,13 @@ fn parse_braced_param_in(
                 name,
                 op,
                 colon,
-                arg: Box::new(operand_from_source(&arg_str, opts, q, rest_line)?),
+                arg: Box::new(operand_from_source(
+                    &arg_str,
+                    opts,
+                    q,
+                    rest_line,
+                    &operand_splices(splices, raw, &arg_str),
+                )?),
             });
         }
     }
@@ -7273,7 +7339,13 @@ fn parse_braced_param_in(
                 index: elem_index,
                 op,
                 colon,
-                arg: Box::new(operand_from_source(&arg_str, opts, q, rest_line)?),
+                arg: Box::new(operand_from_source(
+                    &arg_str,
+                    opts,
+                    q,
+                    rest_line,
+                    &operand_splices(splices, raw, &arg_str),
+                )?),
                 // Written directly, the name read and the name complained about
                 // are the same one; only indirection separates them.
                 label: None,
@@ -7686,15 +7758,18 @@ fn operand_from_source(
     opts: ParseOpts,
     q: Quoting,
     line: u32,
+    splices: &[core::ops::Range<usize>],
 ) -> Result<Word, ParseError> {
     if !q.dquoted() {
+        // A splice only happens inside double quotes (parse.y:3882 requotes
+        // otherwise), so there is nothing to carry down this path.
         return word_verbatim_from_source_at(s, opts, q, line);
     }
     if s.is_empty() {
         return Ok(Word::default());
     }
-    let mut segs =
-        crate::lexer::lex_operand_in_dquote(s, q.read_ctx()).map_err(|e| ParseError::new(&e.msg))?;
+    let mut segs = crate::lexer::lex_operand_in_dquote(s, q.read_ctx(), splices)
+        .map_err(|e| ParseError::new(&e.msg))?;
     map_frag_segs(&mut segs, line);
     let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
     for seg in &segs {

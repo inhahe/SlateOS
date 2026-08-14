@@ -4231,6 +4231,68 @@ Reaching this needs a `"` (or a `` ` ``) inside a backquote body inside `" … "
 inside a word with a `{`, so it is not on any ordinary road. All 24 other cases
 of the probe matrix that produced it agree with bash.
 
+### TD-OILS-A-QUOTE-RUN-IN-A-PATTERN-OPERAND-IS-NOT-GOBBLED. `"${z#'$(fi)'}"` runs where bash drops the command — 2026-08-14 — ⚠️ OPEN
+
+**Where:** `userspace/oils/src/interp.rs`, `Shell::has_gobbled_sub` (~27065) and
+`Shell::gobbled_subs`. Both descend into a `WordPart::SingleQuoted` only through
+its `parts` — the run's *second* reading, which is filled in for a subscript and
+a substring bound (`word_subscript_from_source_at`) and nowhere else. A pattern
+and a replacement carry `parts: None`, so whatever the run hides is invisible to
+the scan.
+
+**What is wrong.** Inside `" … "` the gobbler's `quoted` is `"`, so its `'` row
+(braces.c:670) is never reached and the run is *not* a quote to it: the `$(` row
+of the `quoted == '"'` branch fires on what is inside. bash's parser, meanwhile,
+did read the run as a quote — under `DOLBRACE_QUOTE` a `'` quotes (parse.y:3836,
+3840) — which is why the diagnostic's remainder still shows the `'`. So the two
+readers disagree by design, and only one of them is modelled here.
+
+This is the same disagreement as
+TD-OILS-A-SINGLE-QUOTED-RUN-IN-A-BARE-SUB-WORD-OF-A-BRACE-IS-A-QUOTE (fixed) and
+TD-OILS-A-QUOTE-INSIDE-A-GOBBLED-BACKQUOTE-BODY-DOES-NOT-END-THE-RUN (open), in
+a third place.
+
+**Reproduce.** With `z` unset:
+
+```sh
+echo "1[${z#'$(fi)'}]";     echo "1 rc=$?"
+echo "2[${z//x/'$(fi)'}]";  echo "2 rc=$?"
+echo "3[${z%'$(fi)'}]";     echo "3 rc=$?"
+echo "4[${z:-'$(fi)'}]";    echo "4 rc=$?"   # already agrees
+```
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| 1–3 stdout | — | `1[]` / `2[]` / `3[]` |
+| 1–3 stderr | ``command substitution: … `fi)'}]"' `` | — |
+| 1–3 `$?` | 1 | 0 |
+| 4 | agrees (`$?` 1, same remainder) | agrees |
+
+Row 4 agrees because a `:-`-style operand keeps its `'` as a *character* and the
+substitution stays a part of the word, which the walk already finds.
+
+**The fix.** Not new machinery — the same second reading the subscript case
+already carries, filled in one more place. In the copy `gobble_scan` makes for
+the scan, walk the word and give every `SingleQuoted` inside `" … "` a
+`parts: Some(…)` lexed from its text with
+`crate::parser::dquote_word_from_source` (which is what the run *is* to the
+gobbler: more double-quoted text). Everything downstream then works unchanged —
+`unparse::part_src` already prints such a run from its parts rather than its
+text (unparse.rs:1789), so `attach_tails_by`'s sentinel shows through the quotes
+and `gobbler_word` measures the tails against the whole word by itself, and
+`gobbled_subs`'s existing `SingleQuoted` arm finds them. `has_gobbled_sub` needs
+a matching cheap over-answer, as it already has for a backquote inside `" … "`.
+A run whose text will not lex holds nothing the scan can read, so it keeps
+`None`.
+
+**Found by** the `$' … '` bare-splice work
+(TD-OILS-A-SINGLE-QUOTED-COMMAND-SUBSTITUTION-IN-A-BRACE-OPERAND-IS-PARSED): the
+`#`/`//` rows of its corpus case are exactly this, since a translation written
+past a `#` is re-quoted (parse.y:3866) into such a run. Those two rows are held
+out of
+`tests/corpus/an-ansi-c-translation-spliced-bare-into-a-brace-operand-was-never-read.sh`
+and go back in when this is fixed.
+
 ### TD-OILS-A-REDIRECTION-TARGET-IS-NOT-BRACE-EXPANDED. `> f{1,2}` writes a file called `f{1,2}` where bash calls it ambiguous — 2026-08-10 — ✅ FIXED 2026-08-10
 
 **Where:** `userspace/oils/src/interp.rs` — wherever a redirection's target word
@@ -5921,10 +5983,40 @@ carries its arithmetic reading beside its text, and the scan follows that readin
 when it is inside `" … "`:
 TD-OILS-A-SINGLE-QUOTED-RUN-IN-A-BARE-SUB-WORD-OF-A-BRACE-IS-A-QUOTE.)
 
-The `$' … '` splice named above is a further one: bash stores the *translation* and
-the gobbler meets a bare `$( … )` in it, echoing `` `fi)}]"' `` with no `'`. osh
-sets `bare_splice` when it reads one but the spliced text is not given
-`CmdSubBody::Unread` bodies, so `"${z:-$'$(fi)'}"` is still a parse error.
+The `$' … '` splice named above was a further one: bash stores the *translation*
+and the gobbler meets a bare `$( … )` in it, echoing `` `fi)}]"' `` with no `'`,
+where osh raised only a `bare_splice` flag and parsed the spliced text like any
+other — so `"${z:-$'$(fi)'}"` was a script syntax error.
+
+**Fixed 2026-08-14.** The flag became a *list of ranges*,
+`Lexer::bare_splices`: where in the body the third row (parse.y:3887) wrote
+without reading. They ride `Seg::ParamBraced`'s fourth field, are shifted by
+`shift_ranges` at every site that splices one buffer into a longer one (the same
+rule `CmdSubSpan::range` follows), are clipped into the operand's own
+coordinates by `parser::operand_splices`, and reach
+`Lexer::read_word_verbatim` through `lex_operand_in_dquote` as *unread windows*
+— inside one, `here_text` is set exactly as a `' … '` run sets it, so a
+`$( … )` there is `CmdSubBody::Unread` and is met by the scan that reads the
+stored word rather than by a parser.
+Corpus: `tests/corpus/an-ansi-c-translation-spliced-bare-into-a-brace-operand-was-never-read.sh`.
+
+Two rows of that case are held back, and they are *not* the splice's: written
+past a `#` or `//` the translation is re-quoted (parse.y:3866), and reaching
+bash's answer for `"${z#$'$(fi)'}"` needs the run the re-quoting made to be
+gobbled — TD-OILS-A-QUOTE-RUN-IN-A-PATTERN-OPERAND-IS-NOT-GOBBLED, which the
+same probe found and which is not about `$' … '` at all (`"${z#'$(fi)'}"`
+diverges on its own).
+
+**Residual — the splice that never closes.** `echo "15[${z:-$'$(fi'}]"` splices
+`$(fi` with no `)`, so the scan runs off the end of the word. bash's reader is
+still looking for the `)` and then for the `"`, and says
+`command substitution: line N: unexpected EOF while looking for matching `"'`;
+osh's `expansion_body_len` answers `Unclosed` first and the body is deferred as
+text, which the runtime reports as
+``bad substitution: no closing `}' in "15[${z:-$(fi}]"``. `$?` is 1 either way
+and the shell carries on either way, so only the wording differs. Reaching bash's
+is the unclosed-`$( … )`-inside-an-unread-word shape, not the splice's — see
+TD-OILS-A-COMSUB-THAT-NEVER-CLOSES-HIDES-THE-ERROR-INSIDE-IT.
 
 ---
 
@@ -9877,11 +9969,15 @@ rest as ordinary word text. Modelled as:
   *expansion's* scan over `${body}` and answers `Same`, `Early(len)` (the
   expansion closes at `len`; `body[len+1..]` plus the parser's `}` is word text)
   or `Unclosed` (a spliced quote swallowed the `}`).
-- `Lexer::bare_splice`, a flag `read_dollar_brace_body` raises only on the third
-  row and `read_dollar` scopes to one `${ … }` (cleared going in, taken coming
-  out), landing as the fourth field of `Seg::ParamBraced`. A splice at any depth
-  inside is that segment's, because it is that segment's raw text a leftover has
-  to be carved out of.
+- `Lexer::bare_splices`, the ranges of the body `read_dollar_brace_body` wrote on
+  the third row and never read back, which `read_dollar_brace` scopes to one
+  `${ … }` (taken going in, restored coming out) and `shift_ranges` moves
+  whenever a buffer is spliced into a longer one. They land as the fourth field
+  of `Seg::ParamBraced`. A splice at any depth inside is that segment's, because
+  it is that segment's raw text a leftover has to be carved out of. (Started as a
+  `bare_splice` **flag**; it became a list when the operand needed to tell the
+  spliced bytes from the read ones — see the `$' … '` splice paragraph under
+  TD-OILS-A-SINGLE-QUOTED-COMMAND-SUBSTITUTION-IN-A-BRACE-OPERAND-IS-PARSED.)
 - `parser::seg_to_parts` — one segment, one part, except where the flag is up and
   `expansion_body_len` says anything but `Same`. Then nothing about the body's
   *shape* can be asked (`"${x:-$'a"b'}"` is the word `"${x:-a"b}"`, whose `"`

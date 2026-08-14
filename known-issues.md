@@ -58099,13 +58099,44 @@ source and cited in both the code and the test — full reasoning in
   the asymmetry is Linux's, not ours (`sched_setaffinity`'s `get_user_cpu_mask`
   does no size rejection and copies first, so `EFAULT` wins there).
 
-**What remains.** The ~240 surviving `is_null() -> EFAULT` sites have not been
+**Fourth pass, 2026-08-13 — `xattr.rs` (11 sites).** Every one of these
+pointers *does* reach a syscall, so §300's rule keeps `EFAULT` for all of them
+and not one constant changed. The ordering was wrong throughout, though. Linux
+resolves the path in `path_getxattr`/`path_setxattr`/`path_removexattr`
+(fs/xattr.c) **before** the attribute name is ever read, and for the setters
+`setxattr_copy` (fs/xattr.c:598-602) checks the flags before the name too. Our
+entry points checked `path.is_null() || name.is_null()` as one test and then
+the flags, giving three divergences:
+
+- A nonexistent path with a NULL name was `EFAULT`; Linux gives `ENOENT`,
+  because the name is not read until the path has resolved. (Bare metal only.)
+- A bad flag with a NULL name was `EFAULT` in `setxattr`/`lsetxattr`/
+  `fsetxattr`; Linux gives `EINVAL`.
+- The path and the name were conflated, so neither could outrank the other.
+
+The order is now path → (flags) → name in all nine path/name entry points,
+enforced by two shared helpers, `resolve_xattr_path` and `check_xattr_name`,
+which carry the citation once instead of at eleven call sites.
+
+The same pass found an *invented* check: `setxattr_flags_valid` rejected
+`XATTR_CREATE | XATTR_REPLACE` with `EINVAL`, an errno Linux never returns for
+it. The kernel's only flag test is the mask `flags & ~(XATTR_CREATE |
+XATTR_REPLACE)`, which both bits pass; the filesystem then answers from the
+attribute's state — `EEXIST` if it exists, `ENODATA` if it does not (ext4's
+`ext4_xattr_set_handle`, fs/ext4/xattr.c:2412-2423). Our own kernel already
+agreed with Linux (`xattr_validate_size_flags` in `kernel/src/syscall/linux.rs`
+masks with `0x3` and has no both-flags test), so the libc check was also
+inconsistent with the layer below it. Removed: it is the filesystem's
+judgement, not libc's.
+
+**What remains.** The ~230 surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
 specific remaining site is known wrong. The densest remaining concentrations
-are `file.rs` (28), `spawn.rs` (16), `socket.rs` (15), `unistd.rs` (13) and
-`xattr.rs` (11). None of them needs §303's reasoning, which is specific to
-NPTL's shape — they are ordinary §300 lookups: does the pointer reach a
-syscall or not.
+are `file.rs` (28), `spawn.rs` (16), `socket.rs` (15) and `unistd.rs` (13).
+None of them needs §303's reasoning, which is specific to NPTL's shape — they
+are ordinary §300 lookups: does the pointer reach a syscall or not, and in
+what order relative to the call's other arguments. The xattr pass is the
+template: expect the constants to be right and the *ordering* to be wrong.
 
 **Reproduce.** Not a runtime failure. `rg -A3 'is_null\(\)' posix/src`, filtered
 for `EFAULT` in the following lines, enumerates the candidate sites; each has to

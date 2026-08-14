@@ -33,16 +33,65 @@ pub const XATTR_REPLACE: i32 = 2;
 
 /// Validate the `flags` argument to the `set*xattr` family.
 ///
-/// Returns `false` (and sets `errno = EINVAL`) when the flags are invalid:
-/// any bit outside `XATTR_CREATE | XATTR_REPLACE`, or both flags set at
-/// once (Linux rejects the contradictory "create and replace" request).
+/// Returns `false` (and sets `errno = EINVAL`) when any bit outside
+/// `XATTR_CREATE | XATTR_REPLACE` is set.  That is the whole of Linux's test:
+/// `setxattr_copy` (fs/xattr.c:598) is `if (ctx->flags &
+/// ~(XATTR_CREATE|XATTR_REPLACE)) return -EINVAL;` and nothing more.
+///
+/// Setting *both* flags is deliberately **not** rejected here, though it used
+/// to be.  It is not a libc-level error: the mask above lets it through, and
+/// the filesystem then answers from the attribute's actual state — `EEXIST`
+/// when it exists (`XATTR_CREATE` loses) and `ENODATA` when it does not
+/// (`XATTR_REPLACE` loses); see ext4's `ext4_xattr_set_handle`
+/// (fs/ext4/xattr.c:2412-2423) for the canonical shape.  Deciding it in
+/// userspace both returned an errno Linux never returns for this call and
+/// usurped a judgement only the filesystem can make.  Our own kernel already
+/// agrees with Linux — `xattr_validate_size_flags`
+/// (kernel/src/syscall/linux.rs) masks with `0x3` and has no both-flags test.
 fn setxattr_flags_valid(flags: i32) -> bool {
     if flags & !(XATTR_CREATE | XATTR_REPLACE) != 0 {
         errno::set_errno(errno::EINVAL);
         return false;
     }
-    if (flags & XATTR_CREATE != 0) && (flags & XATTR_REPLACE != 0) {
-        errno::set_errno(errno::EINVAL);
+    true
+}
+
+/// Validate and resolve the `path` argument of a `*xattr` entry point.
+///
+/// This is the point in Linux's `path_getxattr` / `path_setxattr` /
+/// `path_removexattr` (fs/xattr.c) where `user_path_at` runs: **before** the
+/// attribute name is read and, for the setters, before the flags are checked.
+/// Every caller must therefore run this first, so that a bad path outranks a
+/// bad name — a NULL path with a NULL name is `EFAULT` from the path, and a
+/// *nonexistent* path with a NULL name is `ENOENT`, not `EFAULT`.
+///
+/// On the host build there is no filesystem to resolve against, so only the
+/// pointer check applies; the resulting length is unused there.
+fn resolve_xattr_path(path: *const u8, buf: &mut [u8; crate::unistd::PATH_MAX]) -> Option<usize> {
+    if path.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return None;
+    }
+    #[cfg(target_os = "none")]
+    {
+        crate::file::resolve_or_err(path, buf)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = buf;
+        Some(0)
+    }
+}
+
+/// Validate the attribute-name argument of a `*xattr` entry point.
+///
+/// Linux reads the name with `strncpy_from_user` (fs/xattr.c, in `getxattr`,
+/// `setxattr_copy` and `removexattr`), which faults on a NULL pointer — but
+/// only after the path has been resolved and, in the setters, after the flags
+/// have been checked.  Callers must respect that order.
+fn check_xattr_name(name: *const u8) -> bool {
+    if name.is_null() {
+        errno::set_errno(errno::EFAULT);
         return false;
     }
     true
@@ -212,21 +261,20 @@ pub extern "C" fn getxattr(
     value: *mut u8,
     size: usize,
 ) -> SsizeT {
-    if path.is_null() || name.is_null() {
-        errno::set_errno(errno::EFAULT);
+    let mut buf = [0u8; crate::unistd::PATH_MAX];
+    let Some(len) = resolve_xattr_path(path, &mut buf) else {
+        return -1;
+    };
+    if !check_xattr_name(name) {
         return -1;
     }
     #[cfg(target_os = "none")]
     {
-        let mut buf = [0u8; crate::unistd::PATH_MAX];
-        let Some(len) = crate::file::resolve_or_err(path, &mut buf) else {
-            return -1;
-        };
         do_getxattr(buf.as_ptr(), len, name, value, size, false)
     }
     #[cfg(not(target_os = "none"))]
     {
-        let _ = (value, size);
+        let _ = (len, value, size);
         0
     }
 }
@@ -240,21 +288,20 @@ pub extern "C" fn lgetxattr(
     value: *mut u8,
     size: usize,
 ) -> SsizeT {
-    if path.is_null() || name.is_null() {
-        errno::set_errno(errno::EFAULT);
+    let mut buf = [0u8; crate::unistd::PATH_MAX];
+    let Some(len) = resolve_xattr_path(path, &mut buf) else {
+        return -1;
+    };
+    if !check_xattr_name(name) {
         return -1;
     }
     #[cfg(target_os = "none")]
     {
-        let mut buf = [0u8; crate::unistd::PATH_MAX];
-        let Some(len) = crate::file::resolve_or_err(path, &mut buf) else {
-            return -1;
-        };
         do_getxattr(buf.as_ptr(), len, name, value, size, true)
     }
     #[cfg(not(target_os = "none"))]
     {
-        let _ = (value, size);
+        let _ = (len, value, size);
         0
     }
 }
@@ -262,12 +309,14 @@ pub extern "C" fn lgetxattr(
 /// Get an extended attribute value by file descriptor.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fgetxattr(fd: i32, name: *const u8, value: *mut u8, size: usize) -> SsizeT {
+    // `SYSCALL_DEFINE4(fgetxattr)` opens with `fdget (fd)` and returns `-EBADF`
+    // before it reaches `getxattr()`, which is where the name is read, so a bad
+    // descriptor outranks a bad name (fs/xattr.c).
     if fd < 0 || crate::fdtable::get_fd(fd).is_none() {
         errno::set_errno(errno::EBADF);
         return -1;
     }
-    if name.is_null() {
-        errno::set_errno(errno::EFAULT);
+    if !check_xattr_name(name) {
         return -1;
     }
     #[cfg(target_os = "none")]
@@ -298,24 +347,26 @@ pub extern "C" fn setxattr(
     size: usize,
     flags: i32,
 ) -> i32 {
-    if path.is_null() || name.is_null() {
-        errno::set_errno(errno::EFAULT);
+    // Linux's order, from `path_setxattr` down into `setxattr_copy`
+    // (fs/xattr.c): resolve the path, *then* reject bad flags, *then* read the
+    // name.  So a bad flag beats a NULL name, and the path beats both.
+    let mut buf = [0u8; crate::unistd::PATH_MAX];
+    let Some(len) = resolve_xattr_path(path, &mut buf) else {
+        return -1;
+    };
+    if !setxattr_flags_valid(flags) {
         return -1;
     }
-    if !setxattr_flags_valid(flags) {
+    if !check_xattr_name(name) {
         return -1;
     }
     #[cfg(target_os = "none")]
     {
-        let mut buf = [0u8; crate::unistd::PATH_MAX];
-        let Some(len) = crate::file::resolve_or_err(path, &mut buf) else {
-            return -1;
-        };
         do_setxattr(buf.as_ptr(), len, name, value, size, flags, false)
     }
     #[cfg(not(target_os = "none"))]
     {
-        let _ = (value, size);
+        let _ = (len, value, size);
         0
     }
 }
@@ -330,24 +381,23 @@ pub extern "C" fn lsetxattr(
     size: usize,
     flags: i32,
 ) -> i32 {
-    if path.is_null() || name.is_null() {
-        errno::set_errno(errno::EFAULT);
+    let mut buf = [0u8; crate::unistd::PATH_MAX];
+    let Some(len) = resolve_xattr_path(path, &mut buf) else {
+        return -1;
+    };
+    if !setxattr_flags_valid(flags) {
         return -1;
     }
-    if !setxattr_flags_valid(flags) {
+    if !check_xattr_name(name) {
         return -1;
     }
     #[cfg(target_os = "none")]
     {
-        let mut buf = [0u8; crate::unistd::PATH_MAX];
-        let Some(len) = crate::file::resolve_or_err(path, &mut buf) else {
-            return -1;
-        };
         do_setxattr(buf.as_ptr(), len, name, value, size, flags, true)
     }
     #[cfg(not(target_os = "none"))]
     {
-        let _ = (value, size);
+        let _ = (len, value, size);
         0
     }
 }
@@ -361,15 +411,17 @@ pub extern "C" fn fsetxattr(
     size: usize,
     flags: i32,
 ) -> i32 {
+    // `SYSCALL_DEFINE5(fsetxattr)` takes the descriptor first, then calls
+    // `setxattr()` → `setxattr_copy`, which checks the flags before reading the
+    // name (fs/xattr.c:598-602).  So: fd, flags, name.
     if fd < 0 || crate::fdtable::get_fd(fd).is_none() {
         errno::set_errno(errno::EBADF);
         return -1;
     }
-    if name.is_null() {
-        errno::set_errno(errno::EFAULT);
+    if !setxattr_flags_valid(flags) {
         return -1;
     }
-    if !setxattr_flags_valid(flags) {
+    if !check_xattr_name(name) {
         return -1;
     }
     #[cfg(target_os = "none")]
@@ -394,21 +446,17 @@ pub extern "C" fn fsetxattr(
 /// List extended attribute names.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn listxattr(path: *const u8, list: *mut u8, size: usize) -> SsizeT {
-    if path.is_null() {
-        errno::set_errno(errno::EFAULT);
+    let mut buf = [0u8; crate::unistd::PATH_MAX];
+    let Some(len) = resolve_xattr_path(path, &mut buf) else {
         return -1;
-    }
+    };
     #[cfg(target_os = "none")]
     {
-        let mut buf = [0u8; crate::unistd::PATH_MAX];
-        let Some(len) = crate::file::resolve_or_err(path, &mut buf) else {
-            return -1;
-        };
         do_listxattr(buf.as_ptr(), len, list, size, false)
     }
     #[cfg(not(target_os = "none"))]
     {
-        let _ = (list, size);
+        let _ = (len, list, size);
         0
     }
 }
@@ -417,21 +465,17 @@ pub extern "C" fn listxattr(path: *const u8, list: *mut u8, size: usize) -> Ssiz
 /// lists the link inode's own xattrs (`llistxattr`).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn llistxattr(path: *const u8, list: *mut u8, size: usize) -> SsizeT {
-    if path.is_null() {
-        errno::set_errno(errno::EFAULT);
+    let mut buf = [0u8; crate::unistd::PATH_MAX];
+    let Some(len) = resolve_xattr_path(path, &mut buf) else {
         return -1;
-    }
+    };
     #[cfg(target_os = "none")]
     {
-        let mut buf = [0u8; crate::unistd::PATH_MAX];
-        let Some(len) = crate::file::resolve_or_err(path, &mut buf) else {
-            return -1;
-        };
         do_listxattr(buf.as_ptr(), len, list, size, true)
     }
     #[cfg(not(target_os = "none"))]
     {
-        let _ = (list, size);
+        let _ = (len, list, size);
         0
     }
 }
@@ -465,20 +509,20 @@ pub extern "C" fn flistxattr(fd: i32, list: *mut u8, size: usize) -> SsizeT {
 /// Remove an extended attribute.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn removexattr(path: *const u8, name: *const u8) -> i32 {
-    if path.is_null() || name.is_null() {
-        errno::set_errno(errno::EFAULT);
+    let mut buf = [0u8; crate::unistd::PATH_MAX];
+    let Some(len) = resolve_xattr_path(path, &mut buf) else {
+        return -1;
+    };
+    if !check_xattr_name(name) {
         return -1;
     }
     #[cfg(target_os = "none")]
     {
-        let mut buf = [0u8; crate::unistd::PATH_MAX];
-        let Some(len) = crate::file::resolve_or_err(path, &mut buf) else {
-            return -1;
-        };
         do_removexattr(buf.as_ptr(), len, name, false)
     }
     #[cfg(not(target_os = "none"))]
     {
+        let _ = len;
         0
     }
 }
@@ -487,20 +531,20 @@ pub extern "C" fn removexattr(path: *const u8, name: *const u8) -> i32 {
 /// removes from the link inode's own xattrs (`lremovexattr`).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lremovexattr(path: *const u8, name: *const u8) -> i32 {
-    if path.is_null() || name.is_null() {
-        errno::set_errno(errno::EFAULT);
+    let mut buf = [0u8; crate::unistd::PATH_MAX];
+    let Some(len) = resolve_xattr_path(path, &mut buf) else {
+        return -1;
+    };
+    if !check_xattr_name(name) {
         return -1;
     }
     #[cfg(target_os = "none")]
     {
-        let mut buf = [0u8; crate::unistd::PATH_MAX];
-        let Some(len) = crate::file::resolve_or_err(path, &mut buf) else {
-            return -1;
-        };
         do_removexattr(buf.as_ptr(), len, name, true)
     }
     #[cfg(not(target_os = "none"))]
     {
+        let _ = len;
         0
     }
 }
@@ -512,8 +556,7 @@ pub extern "C" fn fremovexattr(fd: i32, name: *const u8) -> i32 {
         errno::set_errno(errno::EBADF);
         return -1;
     }
-    if name.is_null() {
-        errno::set_errno(errno::EFAULT);
+    if !check_xattr_name(name) {
         return -1;
     }
     #[cfg(target_os = "none")]
@@ -558,13 +601,16 @@ mod tests {
         assert_eq!(XATTR_CREATE & XATTR_REPLACE, 0);
     }
 
+    /// The only rejection is a bit outside the mask, matching `setxattr_copy`
+    /// (fs/xattr.c:598): `if (ctx->flags & ~(XATTR_CREATE|XATTR_REPLACE))
+    /// return -EINVAL;`.  Both flags together passes the mask, so libc must let
+    /// it through — see `test_setxattr_both_flags_is_not_a_libc_error`.
     #[test]
     fn test_setxattr_flags_valid() {
         assert!(setxattr_flags_valid(0));
         assert!(setxattr_flags_valid(XATTR_CREATE));
         assert!(setxattr_flags_valid(XATTR_REPLACE));
-        // Both at once is contradictory → EINVAL.
-        assert!(!setxattr_flags_valid(XATTR_CREATE | XATTR_REPLACE));
+        assert!(setxattr_flags_valid(XATTR_CREATE | XATTR_REPLACE));
         // Unknown bit → EINVAL.
         assert!(!setxattr_flags_valid(0x100));
     }
@@ -676,10 +722,17 @@ mod tests {
         assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
-    // -- Conflicting / invalid setxattr flags → EINVAL --
+    // -- Invalid setxattr flags → EINVAL --
 
+    /// `XATTR_CREATE | XATTR_REPLACE` used to be rejected here with `EINVAL`,
+    /// which Linux never returns for it: the only flag test is the mask in
+    /// `setxattr_copy` (fs/xattr.c:598), which both bits pass.  The filesystem
+    /// then answers from the attribute's state — `EEXIST` if it exists,
+    /// `ENODATA` if it does not (ext4's `ext4_xattr_set_handle`,
+    /// fs/ext4/xattr.c:2412-2423).  That is not a decision libc can make, so we
+    /// forward and let the call succeed here on the host build.
     #[test]
-    fn test_setxattr_both_flags_einval() {
+    fn test_setxattr_both_flags_is_not_a_libc_error() {
         errno::set_errno(0);
         assert_eq!(
             setxattr(
@@ -689,9 +742,8 @@ mod tests {
                 5,
                 XATTR_CREATE | XATTR_REPLACE,
             ),
-            -1
+            0
         );
-        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     #[test]
@@ -708,6 +760,62 @@ mod tests {
             -1
         );
         assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    // -- Ordering: path, then flags, then name --
+
+    /// Linux resolves the path in `path_setxattr` before it ever calls
+    /// `setxattr_copy`, so the path outranks both the flags and the name
+    /// (fs/xattr.c).  A NULL path with a bad flag *and* a NULL name is still
+    /// `EFAULT`.
+    #[test]
+    fn test_setxattr_path_outranks_flags_and_name() {
+        errno::set_errno(0);
+        assert_eq!(
+            setxattr(core::ptr::null(), core::ptr::null(), core::ptr::null(), 0, 0x40),
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    /// `setxattr_copy` checks the flags (fs/xattr.c:598) before it reads the
+    /// name with `strncpy_from_user` (fs/xattr.c:601), so a bad flag outranks a
+    /// NULL name.  We used to return `EFAULT` here, having checked the name
+    /// first.
+    #[test]
+    fn test_setxattr_flags_outrank_a_null_name() {
+        errno::set_errno(0);
+        assert_eq!(
+            setxattr(b"/tmp/test\0".as_ptr(), core::ptr::null(), core::ptr::null(), 0, 0x40),
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// Same ordering in the symlink-preserving variant.
+    #[test]
+    fn test_lsetxattr_flags_outrank_a_null_name() {
+        errno::set_errno(0);
+        assert_eq!(
+            lsetxattr(b"/tmp\0".as_ptr(), core::ptr::null(), core::ptr::null(), 0, 0x40),
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// And in the descriptor variant, below the `EBADF` from `fdget`:
+    /// `SYSCALL_DEFINE5(fsetxattr)` → `setxattr()` → `setxattr_copy`, flags
+    /// before name (fs/xattr.c).
+    #[test]
+    fn test_fsetxattr_flags_outrank_a_null_name() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
+        errno::set_errno(0);
+        assert_eq!(
+            fsetxattr(fd, core::ptr::null(), core::ptr::null(), 0, 0x40),
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        let _ = fdtable::close_fd(fd);
     }
 
     // -- fd variants: bad fd → EBADF --
@@ -763,16 +871,13 @@ mod tests {
     #[test]
     fn test_fsetxattr_bad_fd_beats_flag_check() {
         // EBADF is reported before the flag validation, matching the order
-        // Linux uses (the fd is checked first).
+        // Linux uses: `SYSCALL_DEFINE5(fsetxattr)` returns from `fdget` before
+        // it calls `setxattr()` → `setxattr_copy` (fs/xattr.c).  The bad flag
+        // is an out-of-mask bit; `XATTR_CREATE | XATTR_REPLACE`, which this
+        // test used to pass, is not rejected at all.
         errno::set_errno(0);
         assert_eq!(
-            fsetxattr(
-                -1,
-                b"user.test\0".as_ptr(),
-                b"v\0".as_ptr(),
-                1,
-                XATTR_CREATE | XATTR_REPLACE
-            ),
+            fsetxattr(-1, b"user.test\0".as_ptr(), b"v\0".as_ptr(), 1, 0x40),
             -1
         );
         assert_eq!(errno::get_errno(), errno::EBADF);

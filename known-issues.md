@@ -43,7 +43,17 @@ fresh measurement disagree, the measurement wins.
 
 ## Active Bugs
 
-### [A] B-CONSOLE-LOCK-IS-TAKEN-FROM-A-HARD-IRQ-WITH-A-PLAIN-LOCK. The keyboard ISR echoes through `CONSOLE.lock()`, so any task interrupted while holding the console wedges the CPU forever, silently — 2026-08-14 — OPEN
+### [A] B-CONSOLE-LOCK-IS-TAKEN-FROM-A-HARD-IRQ-WITH-A-PLAIN-LOCK. The keyboard ISR echoes through `CONSOLE.lock()`, so any task interrupted while holding the console wedges the CPU forever, silently — 2026-08-14 — **FIXED** (`a18ea83a9`)
+
+> **Resolution.** The fix landed in the *same commit* that added this entry,
+> so everything below is written in the pre-fix voice ("Proper fix. Convert
+> …") and describes work that is **already done**. Re-verified 2026-08-14:
+> `kernel/src/console.rs` imports `crate::sync::Mutex` (line 71), all three
+> statics are `Mutex::named` (`COLOR_SCHEME` 134, `SCROLLBACK` 512,
+> `CONSOLE` 720), and the file now contains **45 `lock_irqsave()`
+> acquisitions (34 + 7 + 4) and zero plain `.lock()` calls and zero
+> `spin::` references**. The heading said `OPEN` until this correction —
+> see the process note at the end of this entry.
 
 **Symptom (predicted, not yet observed).** The machine stops dead with no
 output, no panic, no stall report. Nothing is printed because the CPU is
@@ -172,7 +182,43 @@ again. That is a different change with a different risk profile, so it is
 logged below as TD-CONSOLE-ECHO-RUNS-IN-HARD-IRQ-CONTEXT rather than
 smuggled into a deadlock fix.
 
-### [A] B-RTL8139-SEND-SPINS-FOR-THE-EVENT-WHOSE-HANDLER-WANTS-THE-LOCK-IT-HOLDS. `send()` polls 100 000 times for TX-complete while holding the lock `handle_irq` blocks on — 2026-08-14 — OPEN
+**Process note — why this entry said `OPEN` for a bug that was already
+fixed.** Both this entry and the RTL8139 one below were written *while
+investigating*, in the future tense ("**Proper fix.** Convert `CONSOLE` …"),
+and then committed **together with the fix that carried them out**. The prose
+was accurate when drafted and stale by the time it was committed, and the
+`— OPEN` in the heading — the only part anyone skimming the file actually
+reads — was never flipped. Both entries then sat mislabelled until a later
+session went looking for "open Lane A bugs to fix", picked these two off the
+`grep '— OPEN$'` list, and found the work already done.
+
+That is an expensive failure mode in both directions: it invites duplicate
+work, and worse, it corrodes trust in the file — if the `OPEN` list contains
+fixed bugs, the natural correction is to stop believing the file, which is the
+opposite of what a bug tracker is for. Note it is the same shape as the
+benchmark failures recorded later in this file
+(`B-BENCH-CANARY-CERTIFIES-CLEAN-RUNS…` and its three predecessors): **a
+status that is never re-checked degrades into a status that is merely
+asserted.** The heading is a claim about the world; committing it unchanged
+alongside a fix makes it a claim about nothing.
+
+The rule that prevents it: **when one commit both writes up a bug and fixes
+it, the heading must be written in its post-fix state in that same commit.**
+If the fix is not complete there, the write-up should say what remains rather
+than inheriting a blanket `OPEN`. The cheap standing check is
+`grep -n '— OPEN$' known-issues.md`, confirming each hit against the code
+before trusting it — which is how these two were caught.
+
+### [A] B-RTL8139-SEND-SPINS-FOR-THE-EVENT-WHOSE-HANDLER-WANTS-THE-LOCK-IT-HOLDS. `send()` polls 100 000 times for TX-complete while holding the lock `handle_irq` blocks on — 2026-08-14 — **FIXED** (`64f7d2fd9`)
+
+> **Resolution.** As with the console entry above, the fix landed in the same
+> commit that added the write-up, so the "**Proper fix.**" paragraph below
+> describes work already done. Re-verified 2026-08-14: all four `DEVICE`
+> acquisitions in `kernel/src/rtl8139.rs` are `lock_irqsave()` (lines 364,
+> 375, 573, 605) and none is a plain `lock()`. The *deadlock* is closed; the
+> 100 000-iteration busy-wait inside `send` is deliberately **still there**
+> and is still worth fixing — see the final paragraph of this entry for the
+> block-and-wake rewrite, which remains open work.
 
 **Found by auditing the bug *class* rather than the bug.** After fixing
 B-CONSOLE-LOCK-IS-TAKEN-FROM-A-HARD-IRQ above, the obvious question was
@@ -60242,7 +60288,91 @@ a confound and the straddle explanation is wrong — in that case the same-binar
 re-run table above (v6 35048 vs 35039, 0.03%) still stands as proof the effect
 is deterministic per build, and a different per-build mechanism must be found.
 
-### [A] B-BENCH-ENTIRE-SUITE-MEASURES-AN-UNOPTIMISED-KERNEL. Every recorded benchmark ran at `opt-level = 0` and was scored against optimised-reference targets — OPEN
+**RESULT of the prediction above — run `fcd066231`, release profile,
+2026-08-14T15:57:59.** Scored against the four predictions as written, with no
+edits to them:
+
+| | Predicted | Measured | Verdict |
+|---|---|---|---|
+| 1. v6/v4 ratio | 1.00–1.20 (≥1.5 falsifies) | **0.93** | central claim **holds**, band missed |
+| 2. v6 slightly slower than v4 | yes, low single-digit % | v6 **6.6% faster** | **WRONG** |
+| 3. both drop ~10x | v4 2000–3000 ns, v6 2200–3500 ns | v4 **1716**, v6 **1602** | order right, **both beat the band** |
+| 4. no cross-profile baseline diff | refuses to compare | refused, verbatim | **holds exactly** |
+
+Raw: `v4 min 1716 ns (6366 cyc), mean 1772` and `v6 min 1602 ns (5946 cyc),
+mean 1663`. Dispersion 1.03 and 1.04 — both clean, so neither number is a
+contaminated read. Against the debug records (v4 20182–35410, v6 20953–35899)
+that is **11.8x and 21.9x faster**, and both now pass their 2000/2200 ns
+targets — the first time either has, ever.
+
+The bimodality is gone outright. Across the six debug records the ~35000 band
+was occupied by v6, v6, v4, v6, v6 and neither (a middle run at 25279/25751);
+in release both members sit in a 1602–1716 band with no elevated member. So
+the entry's *central* claim is confirmed: **the 1.7x swing was an artefact of
+the build, not a property of the checksum code.**
+
+**But this run does not isolate the page-straddle mechanism, and it would be
+dishonest to close the entry as if it had.** Going from `opt-level = 0` to `3`
+rewrote the code completely — new instruction sequences, 2x unrolling, new
+addresses, new inlining decisions. The straddle hypothesis predicted the gap
+would vanish and it vanished; but so would *any* hypothesis of the form "this
+is a build artefact", which is a much weaker and much easier claim. I changed
+two variables at once and can only credit the one they share. The experiment
+confirms the **class**, not the **mechanism**.
+
+**Prediction 2 failing matters more than prediction 1 succeeding.** v6 does
+strictly more work than v4 — a 40-byte pseudo-header instead of 12 — *and* in
+this build pays an out-of-line `callq` plus a `ret` (an indirect branch, not
+direct-chainable between TCG translation blocks) on every one of its 2000
+iterations. It came out faster anyway. That is the same fine-grained "what
+costs what under TCG" reasoning the straddle story rests on, applied to a case
+where the answer was checkable, and it got the *sign* wrong. Confidence in the
+straddle attribution should be downgraded accordingly, not raised by
+prediction 1.
+
+**The experiment that would actually isolate it** (not yet done): stay within
+one profile and move a function's address deliberately — insert padding, or a
+`#[repr(align)]`/`.balign` on the hot loop — so that a loop which currently
+sits interior to a page is pushed across a boundary, with nothing else
+changed. Same optimisation level, same instructions, same trip count, one
+variable. Until that is run, "TCG translation blocks are page-bounded" remains
+a plausible and well-documented QEMU property that *fits* the data rather than
+a mechanism this project has demonstrated.
+
+**Much larger incidental result: the profile switch moved the whole suite.**
+`over_target` went **58–59 of 63 on every debug record to 15 of 63 on
+release** — scorecard `48/63 within hardware target`. The suite had been
+reporting a near-total failure that was overwhelmingly an artefact of
+measuring unoptimised codegen, exactly as
+`B-BENCH-ENTIRE-SUITE-MEASURES-AN-UNOPTIMISED-KERNEL` predicted. The 15
+remaining over-target entries (`syscall_dispatch` 661 ns vs 200,
+`futex_wake_empty` 944 vs 500, `futex_wait_mismatch` 1507 vs 500,
+`vfs_stat_root` 5920 vs 700, `vfs_stat_deep_2comp` 31046 vs 1400,
+`isr_latency` 164652 cyc vs 37000, …) are now the first *credible* performance
+findings this suite has produced, because they are the first measured on the
+code that would ship. They should be triaged on their own merits — `vfs_stat`
+at 22x and 8x target is the standout — and are not this entry's subject.
+
+### [A] B-BENCH-ENTIRE-SUITE-MEASURES-AN-UNOPTIMISED-KERNEL. Every recorded benchmark ran at `opt-level = 0` and was scored against optimised-reference targets — **FIXED 2026-08-14, confirmed by measurement**
+
+> **Resolution.** `scripts/boot-test.sh` now builds `--release` and stages from
+> `target/x86_64-unknown-none/release/kernel` when `--bench` is passed, and
+> `bench-history.py` records/compares a `profile` field so release and debug
+> records are never diffed against each other. Confirmed end-to-end by run
+> `fcd066231`: the release kernel built clean (0 warnings, 9m25s), booted, and
+> **`over_target` fell from 58–59 of 63 on every debug record to 15 of 63** —
+> scorecard `48/63 within hardware target`. The comparator correctly refused
+> to diff against the six debug records. Quantified per-benchmark evidence is
+> in the RESULT section of
+> `B-BENCH-TCP-CHECKSUM-PAIR-BIMODAL-1.7x` above (e.g. `tcp_checksum_v4`
+> 20667 → 1716 ns, `v6` 35048 → 1602 ns).
+>
+> Two things this did **not** settle, both tracked elsewhere and neither a
+> reason to keep this entry open: (a) whether the *non-bench* boot test should
+> also build release — that is **Q46**, still with the operator, and the
+> default deliberately stays debug meanwhile; (b) the 15 benchmarks still over
+> target, which are now genuine findings rather than codegen artefacts and
+> need triage on their own merits.
 
 **Where:** `scripts/boot-test.sh:602` (`"$CARGO" build`) and `:218`
 (`KERNEL_BIN=".../target/x86_64-unknown-none/debug/kernel"`); `Cargo.toml`

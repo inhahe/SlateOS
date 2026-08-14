@@ -39,6 +39,7 @@ use guitk::layout::{FlexAlign, FlexDirection, FlexItem, FlexJustify, SizeConstra
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::{Borders, CornerRadii, Edges, FontWeight, Style, TextAlign};
+use guitk::text;
 #[allow(unused_imports)]
 use guitk::widget::{Widget, WidgetId, WidgetTree};
 
@@ -108,8 +109,25 @@ const TOOLBAR_HEIGHT: f32 = 38.0;
 /// Height of the status bar.
 const STATUS_BAR_HEIGHT: f32 = 26.0;
 
-/// Approximate character width for monospace at content font size.
-const CHAR_WIDTH: f32 = 7.8;
+/// Width of one cell of the diff content grid.
+///
+/// The two panels are a code view: every row is laid out against the same
+/// column positions, so the content is a grid and the cell has to come from
+/// the face it is drawn in rather than from a guess. This used to be a
+/// hardcoded 7.8, which matched the built-in face at 13 px and nothing else —
+/// with any other face the prefix column, the inline highlight rectangles and
+/// the text they are meant to sit behind all drifted apart.
+///
+/// Only the *content* panels are a grid. Toolbar labels and status text are
+/// proportional UI text and are measured with `text::width`.
+fn char_width() -> f32 {
+    text::digit_advance(CONTENT_FONT_SIZE, FontWeightHint::Regular)
+}
+
+/// How many grid cells `text` occupies. Characters, not bytes.
+fn columns(text: &str) -> f32 {
+    text.chars().count() as f32
+}
 
 /// Maximum number of search results to track.
 const MAX_SEARCH_RESULTS: usize = 10_000;
@@ -1187,7 +1205,7 @@ impl FileDiffApp {
         ];
 
         for (mode, label) in &modes {
-            let btn_w = label.len() as f32 * CHAR_WIDTH + 16.0;
+            let btn_w = text::width(label, UI_FONT_SIZE) + 16.0;
             let is_active = self.view_mode == *mode;
 
             tree.push(RenderCommand::FillRect {
@@ -1233,7 +1251,7 @@ impl FileDiffApp {
         let nav_buttons = [("Prev", "F7"), ("Next", "F8")];
         for (label, shortcut) in &nav_buttons {
             let full_label = format!("{label} ({shortcut})");
-            let btn_w = full_label.len() as f32 * CHAR_WIDTH + 16.0;
+            let btn_w = text::width(&full_label, UI_FONT_SIZE) + 16.0;
 
             tree.push(RenderCommand::FillRect {
                 x: *btn_x,
@@ -1272,7 +1290,7 @@ impl FileDiffApp {
             ("Blank", self.ignore_opts.ignore_blank_lines),
         ];
         for (label, active) in &ignore_toggles {
-            let btn_w = label.len() as f32 * CHAR_WIDTH + 16.0;
+            let btn_w = text::width(label, UI_FONT_SIZE) + 16.0;
 
             tree.push(RenderCommand::FillRect {
                 x: *btn_x,
@@ -1312,7 +1330,7 @@ impl FileDiffApp {
         } else {
             "Sync: OFF"
         };
-        let sync_w = sync_label.len() as f32 * CHAR_WIDTH + 16.0;
+        let sync_w = text::width(sync_label, UI_FONT_SIZE) + 16.0;
         let sync_x = self.width - sync_w - 8.0;
 
         tree.push(RenderCommand::FillRect {
@@ -1521,7 +1539,7 @@ impl FileDiffApp {
         });
 
         // Text content
-        let text_x = prefix_x + CHAR_WIDTH * 2.0;
+        let text_x = prefix_x + char_width() * 2.0;
         tree.push(RenderCommand::Text {
             x: text_x,
             y: y + 3.0,
@@ -1614,7 +1632,7 @@ impl FileDiffApp {
         });
 
         // Render text with inline highlights
-        let text_x = GUTTER_WIDTH + PANEL_PADDING + CHAR_WIDTH * 2.0;
+        let text_x = GUTTER_WIDTH + PANEL_PADDING + char_width() * 2.0;
         if row.spans.is_empty() {
             tree.push(RenderCommand::Text {
                 x: text_x,
@@ -1643,7 +1661,7 @@ impl FileDiffApp {
             }
 
             if span.changed {
-                let span_w = span_text.len() as f32 * CHAR_WIDTH;
+                let span_w = columns(span_text) * char_width();
                 let highlight_color = match row.op {
                     DiffOp::Insert => colors::ADD_LINE_BG,
                     DiffOp::Delete => colors::DEL_LINE_BG,
@@ -1681,7 +1699,7 @@ impl FileDiffApp {
                 max_width: None,
             });
 
-            char_offset += span_text.len() as f32 * CHAR_WIDTH;
+            char_offset += columns(span_text) * char_width();
         }
     }
 
@@ -1931,9 +1949,13 @@ impl FileDiffApp {
             if total_hunks > 0 {
                 let decided = merge.decided_count();
                 let merge_text = format!("Merge: {decided}/{total_hunks}");
-                let merge_w = merge_text.len() as f32 * CHAR_WIDTH + 8.0;
                 tree.push(RenderCommand::Text {
-                    x: self.width - merge_w - 8.0,
+                    x: text::right_x(
+                        &merge_text,
+                        self.width - 16.0,
+                        UI_FONT_SIZE,
+                        FontWeightHint::Regular,
+                    ),
                     y: text_y,
                     text: merge_text,
                     color: if decided == total_hunks {
@@ -2059,7 +2081,12 @@ fn render_diff_line(tree: &mut RenderTree, params: &DiffLineParams<'_>) {
     if let Some(ln) = params.line_num {
         let ln_text = format!("{}", ln.saturating_add(1));
         tree.push(RenderCommand::Text {
-            x: params.x + GUTTER_WIDTH - ln_text.len() as f32 * CHAR_WIDTH - 4.0,
+            x: text::right_x(
+                &ln_text,
+                params.x + GUTTER_WIDTH - 4.0,
+                CONTENT_FONT_SIZE,
+                FontWeightHint::Regular,
+            ),
             y: params.y + 3.0,
             text: ln_text,
             color: colors::OVERLAY0,
@@ -2949,5 +2976,71 @@ mod tests {
         };
         search.search(&diff.edits);
         assert!(search.current().is_some());
+    }
+    // --- Text measurement tests ---
+
+    /// Every toolbar label has to fit the button drawn around it. The button
+    /// is sized by measuring the label, so this only fails if someone puts an
+    /// estimate back — which is how the old 7.8-px guess let "Side-by-Side"
+    /// spill past its own background at any face wider than the built-in one.
+    #[test]
+    fn toolbar_labels_fit_inside_their_buttons() {
+        let app = FileDiffApp::default();
+        let mut tree = RenderTree::new();
+        app.render_toolbar(&mut tree);
+
+        let mut box_at: Option<(f32, f32)> = None;
+        let mut checked = 0;
+        for cmd in &tree.commands {
+            match cmd {
+                RenderCommand::FillRect { x, width, .. } => box_at = Some((*x, *width)),
+                RenderCommand::Text {
+                    x,
+                    text,
+                    font_size,
+                    font_weight,
+                    ..
+                } => {
+                    let Some((bx, bw)) = box_at else { continue };
+                    let end = x + text::measure(text, *font_size, *font_weight);
+                    assert!(
+                        end <= bx + bw + 0.5,
+                        "{text:?} ends at {end} but its button ends at {}",
+                        bx + bw
+                    );
+                    checked += 1;
+                }
+                _ => {}
+            }
+        }
+        assert!(checked > 3, "expected several toolbar labels, saw {checked}");
+    }
+
+    /// The content panels are a grid, so a span's highlight rectangle covers a
+    /// whole number of cells. It has to be counted in characters: `len()` is
+    /// bytes, which made an accented word's highlight two or three times too
+    /// wide and painted over the columns beside it.
+    #[test]
+    fn inline_highlight_is_measured_in_cells_not_bytes() {
+        let ascii = columns("abc") * char_width();
+        let accented = columns("áéí") * char_width();
+        assert!(
+            (ascii - accented).abs() < f32::EPSILON,
+            "three characters are three cells wide however many bytes they take"
+        );
+        assert!(char_width() > 0.0, "a zero cell would collapse every column");
+    }
+
+    /// The gutter right-aligns line numbers, so even the widest one still has
+    /// to start inside the gutter rather than being pushed off its left edge.
+    #[test]
+    fn line_numbers_stay_inside_the_gutter() {
+        for n in ["1", "42", "9999"] {
+            let right = GUTTER_WIDTH - 4.0;
+            let x = text::right_x(n, right, CONTENT_FONT_SIZE, FontWeightHint::Regular);
+            assert!(x >= 0.0, "line number {n} starts at {x}, left of the gutter");
+            let end = x + text::measure(n, CONTENT_FONT_SIZE, FontWeightHint::Regular);
+            assert!((end - right).abs() < 0.01, "{n} ends at {end}, not at {right}");
+        }
     }
 }

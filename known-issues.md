@@ -5956,6 +5956,63 @@ unterminated body stop being executed.
 **Not urgent:** both shapes need `@P` to be visible at all (any other context
 takes the `longjmp` on the first failure), and both are malformed input.
 
+**Re-measured 2026-08-14, and the framing above is wrong in a way that makes
+the fix smaller — read this before the text above.** "A word that never parses
+runs no reads at all" is not what happens, and the two shapes are not two
+faults. Taken apart one read at a time (`build/pgV.sh`), osh is **exact** on
+everything except one shape:
+
+| word (inside `v='…'`, shown via `"${v@P}"`) | bash | osh |
+|---|---|---|
+| `A$(for⏎sB` — no brace at all | reports, runs `fo`, `[Apr⏎sB]` | **same** |
+| `A${z:-pr$(for⏎s)q}B` — brace, `$(` closes | reports, `[AZZB]` | **same** |
+| `A${z:-pr⏎sB` — unclosed brace, no `$(` | `bad substitution`, raw text | **same** |
+| `A${z:-P1$(for⏎S1}B` | reports, `[AZZB]` | reports, **runs `fo`**, `[A⏎S1}B]` |
+| `A${z:-P1$(echo hi⏎S1}B` | reports EOF, `bad substitution`, raw text | reports EOF, **runs `echo hi` *and* `S1}`**, `[Ahi]` |
+| `A${z:-P1$(for⏎S1B` | reports, `bad substitution`, raw text | reports, **runs `fo`**, `[A⏎S1B]` |
+
+So the fault is exactly one thing: **a `$( … )` inside a `${ … }` that never
+closes**. There osh applies the *string-level* rule — `failed_extent_split` /
+`run_abandoned_extent`, "run what was read less a byte and splice the rest" —
+where the brace-level rule applies. The lost `fi` report of shape (a) is a
+*consequence* of that, not a separate lost-report bug: each read reports
+correctly on its own, and the first one's report is lost only because the
+second one drags the word onto the string-level path.
+
+**This is worse than "a diagnostic is missing".** Row 5 runs `echo hi` — a real
+side effect — and then `S1}` as a command, where bash runs nothing at all and
+answers `bad substitution`. Malformed input in a *prompt* is attacker-adjacent
+(`PS1`, `${x@P}`), so treat this as the reason to fix it rather than as a
+formatting nicety.
+
+**Both halves of the correct behaviour are already written; neither is
+reached.** bash's `extract_dollar_brace_string` hands a nested `$(` to
+`extract_command_subst`, i.e. a *real parse*, and the two rows above are its
+two outcomes — which osh already distinguishes, in
+`Shell::brace_extent_scan`'s `ExtentRead::Abandoned` arms
+(`userspace/oils/src/interp.rs`):
+
+- the parse **errors part way** (`for⏎`), so `si` stops at that line, the brace
+  scan resumes after it and finds the `}` — `Abandoned { rest, .. } if
+  !rest.is_empty() => false`, the brace closes and expands, `[AZZB]`;
+- the parse **runs the string out** (`echo hi⏎…`), so `si` is past the end and
+  the brace has no `}` left — `Abandoned { .. }` with an empty rest, which sets
+  `extent_consumed` and emits `bad substitution`.
+
+`wordscan::edbs` independently models the *second* outcome on pure source text
+(its `$(` arm at `wordscan.rs:458` paren-counts and `break`s to `Err` on
+overrun, which `begin_word` turns into the diagnostic). It gets row 5 right for
+the wrong reason and would get row 4 wrong, because a paren count is not the
+parse: `$(for⏎S1}B` has no `)` at all, so the count overruns where bash's parse
+stops early and lets the brace close.
+
+**So the fix is not "grow the scan into the lexer".** It is to stop the
+`${ … }` case from falling through to the string-level path when the nested
+`$(` does not close, and route it to the `ExtentRead` arms that already exist —
+the open question being where the word is condemned today, since `begin_word`
+asks `wordscan::word_fault` about `unparse::word_src(w)` and therefore needs a
+parsed `Word` that this input never yields.
+
 ---
 
 ### TD-OILS-A-SINGLE-QUOTED-COMMAND-SUBSTITUTION-IN-A-BRACE-OPERAND-IS-PARSED. `"${z:-'$(fi⏎q)'}"` is a parse error where bash defers it to expansion — 2026-08-10

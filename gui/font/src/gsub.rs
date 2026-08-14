@@ -269,6 +269,23 @@ pub struct SubGlyph {
     /// it is the module that decides, for every matcher, whether a position is
     /// eligible.
     pub(crate) mask: u32,
+    /// Where this glyph's character attaches, if it is a combining mark —
+    /// [`fallback::attach_class`](crate::fallback::attach_class) of the
+    /// character `cmap` looked it up from, and `0` for anything that is not a
+    /// mark.
+    ///
+    /// It rides along here rather than being recovered later from
+    /// [`cluster`](Self::cluster), because a cluster is a byte offset shared
+    /// by a base and every mark on it and so cannot tell them apart; and
+    /// rather than from the glyph id, because the glyph id is precisely what
+    /// substitution is free to change. Substitution has no opinion about
+    /// combining classes, so every lookup carries this through untouched — and
+    /// a ligature keeps its first component's, which is the base's, which is
+    /// zero.
+    ///
+    /// Left at `0` unless the face needs the fallback at all, since deriving
+    /// it costs a table lookup per character.
+    pub(crate) klass: u8,
 }
 
 impl SubGlyph {
@@ -280,6 +297,7 @@ impl SubGlyph {
             gid,
             cluster,
             mask: ALWAYS,
+            klass: 0,
         }
     }
 
@@ -293,6 +311,7 @@ impl SubGlyph {
             gid,
             cluster,
             mask: form_mask(form),
+            klass: 0,
         }
     }
 
@@ -305,7 +324,12 @@ impl SubGlyph {
     #[cfg(test)]
     #[must_use]
     pub(crate) fn masked(gid: u16, cluster: usize, mask: u32) -> Self {
-        Self { gid, cluster, mask }
+        Self {
+            gid,
+            cluster,
+            mask,
+            klass: 0,
+        }
     }
 }
 

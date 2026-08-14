@@ -59377,6 +59377,29 @@ marks of the same class. The combining class is in `norm_tables.rs`.
 for a mark that no lookup matched; `gui/font/src/mark.rs`, which knows which
 marks those are.
 
+**Resolved 2026-08-14.** `gui/font/src/fallback.rs` implements it, as a
+transcription of `hb-ot-shape-fallback.cc` — see `design-decisions.md` §416
+for the three decisions it took. The sketch above was right about the
+mechanism and wrong about the trigger in two ways, both of which cost a round
+of the sweep to find:
+
+* The trigger is **no `GPOS` table at all**, not "no lookup matched this
+  mark". A face that has a `GPOS` and chose not to position this mark has made
+  a statement, and Candara on this host is exactly that face; HarfBuzz leaves
+  its marks alone and so must we. `Face::has_positioning` carries the
+  distinction.
+* It is gated **per script**. Running it on Devanagari zeroed the virama's
+  advance and centred it, which the sweep caught as 33 *new* misplaced runs.
+  `fallback::positions_marks` excludes the 101 tags whose HarfBuzz shaper sets
+  `fallback_position = false`.
+
+Measured: the `misplaced` bucket over 556 faces × 19 strings fell from **559
+to 98**, and both of the failures quoted above — `c` + cedilla + acute, and
+vowelled Arabic — are gone. Two smaller divergences the implementation
+knowingly leaves behind are filed below as
+`TD-FONT-DOES-NOT-RE-SORT-HEBREW-AND-ARABIC-MARKS` and
+`TD-FONT-GATES-THE-MARK-FALLBACK-ON-THE-CHARACTERS-SCRIPT-NOT-THE-FONTS`.
+
 ## TD-FONT-IGNORES-GPOS-SINGLE-AND-CURSIVE-ADJUSTMENTS
 
 **What.** Of `GPOS`'s eight lookup types we apply 2 (pair, in `kern.rs`) and
@@ -59411,3 +59434,76 @@ their own lookups out of the table.
 **Where.** `gui/font/src/kern.rs` — the pair walk and its `feature_lookups`;
 `gui/font/src/mark.rs`; `gui/font/src/scaled.rs` — `shape`, where the passes
 are sequenced.
+
+## TD-FONT-DOES-NOT-RE-SORT-HEBREW-AND-ARABIC-MARKS
+
+**What.** Unicode gives Hebrew points the canonical combining classes 10–26
+and Arabic vowel signs 27–36. Those numbers are an *ordering*, not a place on
+the glyph, and the order they impose is not the order the marks are drawn in.
+HarfBuzz deals with this by permuting them into a private set of "modified
+combining classes" (`hb-unicode.hh`) whose numeric order *is* display order,
+so that its normalizer's canonical sort leaves the marks stacked bottom-to-top
+in the right sequence. `gui/font/src/fallback.rs` implements the
+*recategorization* those classes feed — transposed to match on real Unicode
+classes, which is sound because the permutation is injective within each
+block — but not the re-sorting.
+
+**Symptom.** Two Hebrew points, or two Arabic marks, typed in an order that
+canonical ordering does not already fix, stack in the wrong vertical order on
+a face with no `GPOS`. Both marks are on the right letter and on the right
+side of it; only their order relative to each other is wrong. Not currently
+visible in the sweep, whose Hebrew and Arabic strings are all in an order
+where the two agree.
+
+**Why it is filed rather than fixed.** It is a change to `norm.rs`'s canonical
+ordering pass, not to the fallback: the sort has to run on the modified
+classes for the reordering to happen at all, which means `norm::pieces` would
+need a second class function used only for sorting, and its output would then
+differ from NFC for these scripts. That is a real decision about what
+`norm.rs` promises — see `design-decisions.md` §410, which says it normalizes
+to NFC as a layer that knows nothing about the font — and it wants making
+deliberately rather than as a side-effect of the fallback.
+
+**Proper fix.** Add the modified-class table to `norm_tables.rs`, sort with it
+inside the shaper only, and document that `ScaledFont::shape`'s piece order is
+display order rather than NFC order for Hebrew and Arabic. Then the fallback's
+`attach_class` needs no change at all — it already matches on the real
+classes.
+
+**Where.** `gui/font/src/norm.rs` — the canonical ordering pass;
+`gui/font/src/fallback.rs` — `attach_class`, whose doc records the
+transposition.
+
+## TD-FONT-GATES-THE-MARK-FALLBACK-ON-THE-CHARACTERS-SCRIPT-NOT-THE-FONTS
+
+**What.** `fallback::positions_marks` decides whether a run may have its marks
+placed by measurement from the OpenType tag the run's *characters* map to. In
+HarfBuzz the same decision is made from the tag the *font* registers its
+features under: `hb_ot_shaper_categorize` takes `gsub_script`, and sends
+Devanagari to its default shaper — which does run the fallback — when the font
+declares only `DFLT` or `latn`, and Myanmar there too when the font declares
+`mymr` rather than `mym2`.
+
+**Symptom.** A face that carries Devanagari glyphs, has no `GPOS`, and has no
+Devanagari script record in its `GSUB` leaves its Devanagari combining marks
+(anusvara, candrabindu, the Vedic accents) unplaced where HarfBuzz would
+centre them. The same for a Myanmar face tagged `mymr`. No face on this host
+shows it — the sweep's Devanagari divergences are all `GPOS`-path ones on
+faces that do have a `GPOS`.
+
+**Why it is filed rather than fixed.** Following HarfBuzz means asking the
+font which scripts it declares before deciding how to place a mark, which
+couples the fallback to the `GSUB` script list for the sake of a rare
+combination. The coupling is not free: `shape` would have to resolve each
+run's tag against the face's `ScriptList` *before* building glyphs, which is
+work every string would pay for.
+
+**Proper fix.** If it ever matters: `otl.rs` already resolves a script tag
+against a table's `ScriptList` for the substitution pass. Hoist that
+resolution to run once per run alongside `script::runs`, hand the resolved tag
+(or the `DFLT` fallback that was used instead) to `positions_marks`, and let
+it apply HarfBuzz's rule.
+
+**Where.** `gui/font/src/fallback.rs` — `positions_marks` and
+`COMPLEX_SCRIPTS`; `gui/font/src/scaled.rs` — `shape`, where the runs are
+split.

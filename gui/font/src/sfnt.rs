@@ -436,6 +436,12 @@ pub struct Face {
     /// `None` for the many faces that only ever expect precomposed
     /// characters.
     marks: Option<MarkPositioning>,
+    /// Whether the file carries a `GPOS` table at all — which is a different
+    /// question from whether any of the three things this crate reads out of
+    /// it (kerning, `mark`, `mkmk`) is present. See
+    /// [`has_positioning`](Face::has_positioning) for why the distinction is
+    /// worth a field.
+    has_positioning: bool,
 }
 
 /// Where a face sits within its family — the axes a font picker selects on.
@@ -676,6 +682,7 @@ impl Face {
             kerning,
             substitutions,
             marks,
+            has_positioning: gpos.is_some(),
             data,
         })
     }
@@ -1173,6 +1180,67 @@ impl Face {
     #[must_use]
     pub fn has_marks(&self) -> bool {
         self.marks.is_some()
+    }
+
+    /// Whether the face carries a `GPOS` table at all.
+    ///
+    /// Not the same question as [`has_marks`](Self::has_marks) or
+    /// [`has_kerning`](Self::has_kerning), and the difference decides whether a
+    /// shaper may invent placements. A face *with* `GPOS` has been through a
+    /// designer who chose what to position and what to leave alone: if it
+    /// carries no `mark` feature, that is a statement, not an omission, and
+    /// synthesizing accent placement there would fight the design and collide
+    /// with the `GPOS` lookups this crate does not read yet. A face with no
+    /// `GPOS` at all has made no such statement — nothing in it can place a
+    /// combining mark, so a mark left at the pen is simply wrong, and a
+    /// synthesized position is the best answer available.
+    ///
+    /// This is the same line HarfBuzz draws (`hb_ot_layout_has_positioning`),
+    /// which matters because HarfBuzz is what this crate's shaping is checked
+    /// against — see `gui/font/tools/harfbuzz_sweep.py`.
+    #[must_use]
+    pub fn has_positioning(&self) -> bool {
+        self.has_positioning
+    }
+
+    /// The glyph's ink box in font units, or `None` if it cannot be read.
+    ///
+    /// Distinct from [`Outline::bbox`] on the outline this face would hand
+    /// back: for a `glyf` face this is the box the font *states* in the
+    /// glyph's own header, which is the tight box around the curves, whereas
+    /// walking the outline yields the hull of the control points and so a
+    /// slightly larger one. The stated box is what FreeType and HarfBuzz
+    /// report, and it is free — four `i16`s at a fixed offset, no point
+    /// decoding, no composite recursion.
+    ///
+    /// A glyph with no outline (space, and anything `loca` gives zero length)
+    /// has an all-zero box rather than `None`: it exists and it draws nothing,
+    /// which is a different answer from "cannot say".
+    ///
+    /// CFF faces have no stated box, so there the outline is walked and the
+    /// result is the conservative one.
+    #[must_use]
+    pub fn glyph_bbox(&self, gid: u16) -> Option<BBox> {
+        const EMPTY: BBox = BBox {
+            x_min: 0.0,
+            y_min: 0.0,
+            x_max: 0.0,
+            y_max: 0.0,
+        };
+        if let Outlines::Cff(_) = &self.outlines {
+            return Some(self.outline(gid).ok()?.bbox().unwrap_or(EMPTY));
+        }
+        let Some(span) = self.glyph_span(gid).ok()? else {
+            return Some(EMPTY);
+        };
+        let end = span.off.checked_add(span.len)?;
+        let g = self.data.get(span.off..end)?;
+        Some(BBox {
+            x_min: f32::from(i16_at(g, 2)?),
+            y_min: f32::from(i16_at(g, 4)?),
+            x_max: f32::from(i16_at(g, 6)?),
+            y_max: f32::from(i16_at(g, 8)?),
+        })
     }
 
     /// Left side bearing for a glyph, in font units.

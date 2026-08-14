@@ -1940,6 +1940,110 @@ fn installed_fonts_place_combining_marks() {
     );
 }
 
+/// The faces that never wrote down where an accent goes must still put it on
+/// the letter.
+///
+/// The test above only ever asks faces that *have* `GPOS` mark anchors. A
+/// large share of the host's installed faces have no `GPOS` table at all, and
+/// before the fallback existed every one of them drew a combining accent at
+/// the pen — in the gap *after* the letter, overprinting whatever came next.
+/// This is the check that the measured placement replaces that.
+///
+/// The base is `f` for the same reason as above: `e` + U+0301 composes to
+/// `é` and leaves no mark to place, while `f` + acute has no precomposed form
+/// on any face.
+#[test]
+#[ignore = "depends on the host's installed fonts"]
+fn installed_fonts_without_gpos_still_place_combining_marks() {
+    const BASE: char = 'f';
+    const ACUTE: char = '\u{0301}';
+
+    let mut files = Vec::new();
+    for dir in font_dirs() {
+        collect_fonts(&dir, &mut files, 0);
+    }
+    assert!(!files.is_empty(), "no fonts found on this host");
+    files.sort();
+
+    let mut without_gpos = 0usize;
+    let mut checked = 0usize;
+
+    for path in &files {
+        let Ok(data) = fs::read(path) else { continue };
+        let Ok(face) = Face::parse(data.clone()) else {
+            continue;
+        };
+        if face.has_positioning() {
+            continue;
+        }
+        without_gpos += 1;
+        if face.glyph_index(BASE).is_none() || face.glyph_index(ACUTE).is_none() {
+            continue;
+        }
+        let Ok(mut font) = ScaledFont::from_bytes(data, 32.0) else {
+            continue;
+        };
+        let run = font.shape(&format!("{BASE}{ACUTE}"));
+        if run.len() != 2 {
+            continue;
+        }
+        let base = run.glyphs()[0];
+        let mark = run.glyphs()[1];
+        // A combining mark takes no room, so the pair measures as the bare
+        // letter. This is the half of the fallback that matters even when the
+        // accent itself draws nothing.
+        assert!(
+            (run.width() - base.advance).abs() < 0.5,
+            "{}: {BASE}+acute measures {:.3} px against the bare letter's \
+             {:.3} px — the mark's advance was not zeroed",
+            path.display(),
+            run.width(),
+            base.advance
+        );
+        // A face whose combining acute is blank has nothing to place.
+        let Some(mask) = font.glyph_mask(mark.key) else {
+            continue;
+        };
+        if mask.width == 0 {
+            continue;
+        }
+        checked += 1;
+        // The same arithmetic the draw loop does: the pen has walked past the
+        // letter by the time the mark is drawn, and `offset` displaces the ink
+        // from there.
+        let ink_left = base.advance + mark.offset.0 + mask.left as f32;
+        let ink_right = ink_left + mask.width as f32;
+        assert!(
+            ink_right > 0.0 && ink_left < base.advance,
+            "{}: the acute's ink spans {ink_left:.2}..{ink_right:.2}, which \
+             does not overlap the letter's 0..{:.2} — a face with no GPOS is \
+             drawing the accent beside the letter again",
+            path.display(),
+            base.advance
+        );
+        // `top` is downward-positive from the baseline; `offset.1` is upward.
+        assert!(
+            mask.top as f32 - mark.offset.1 < 0.0,
+            "{}: the acute's ink starts below the baseline",
+            path.display()
+        );
+    }
+
+    println!("faces with no GPOS at all: {without_gpos}");
+    println!("of those, accent placed:   {checked}");
+    assert!(
+        without_gpos > 0,
+        "every one of {} installed faces claims a GPOS table, which cannot be \
+         right — the table probe is broken",
+        files.len()
+    );
+    assert!(
+        checked > 0,
+        "{without_gpos} faces have no GPOS and not one of them drew a \
+         combining acute — the fallback never ran"
+    );
+}
+
 /// Drive the whole stack the way a toolkit will: file → face → `ScaledFont`
 /// → pixels in an ARGB buffer.
 ///

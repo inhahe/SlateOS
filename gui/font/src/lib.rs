@@ -41,6 +41,7 @@ extern crate alloc;
 pub mod bidi;
 mod bidi_tables;
 pub mod cff;
+mod fallback;
 pub mod gsub;
 mod joining;
 mod joining_tables;

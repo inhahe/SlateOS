@@ -379,11 +379,15 @@ Roadmap:
   logical order and carries a permutation that `draw_order()` walks, left
   empty when it would be the identity. The sweep's `reordered` bucket is 0
   across 556 faces × 19 strings, and it now compares *positions* in font
-  units too, which found three further gaps. Next unblocked step is the
+  units too, which found three further gaps. Fallback mark positioning done
+  (§416): `gui/font/src/fallback.rs` transcribes `hb-ot-shape-fallback.cc`
+  for the 222 of 556 host faces that carry no `GPOS` at all — zero the
+  mark's advance, measure its place from two ink boxes and its
+  recategorized combining class — gated per script, since a Brahmic cluster
+  needs a reordering pass this crate does not have. The sweep's `misplaced`
+  bucket went 559 → 98. Next unblocked step is the
   rest of shaping: no Indic reordering
-  (`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`), no fallback mark
-  positioning (`TD-FONT-HAS-NO-FALLBACK-MARK-POSITIONING`, the largest
-  measured divergence left — 489 of 559 misplaced runs), no GPOS single or
+  (`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`), no GPOS single or
   cursive adjustment (`TD-FONT-IGNORES-GPOS-SINGLE-AND-CURSIVE-ADJUSTMENTS`),
   no language selection (`TD-FONT-IGNORES-LANGSYS-OVERRIDES`), no
   mark-to-ligature attachment (GPOS 5). Vello itself waits on `[A]`'s GPU

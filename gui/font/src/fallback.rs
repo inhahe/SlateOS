@@ -1,0 +1,570 @@
+//! Placing a combining mark on a face that cannot say where it goes.
+//!
+//! [`GPOS` mark attachment](crate::mark) is the right answer to "where does
+//! this accent sit?", because the font's designer wrote it down. Thousands of
+//! shipping faces never wrote it down: they carry no `GPOS` table at all,
+//! having been built for an era when a `é` was one character with one glyph
+//! and a bare U+0301 was somebody else's problem. Drawn by that font, `c` +
+//! U+0327 + U+0301 puts the cedilla and the acute at the pen — which is the
+//! *left edge* of the following cell — so the two accents overprint each
+//! other in the gap after the letter. On a sweep of 556 installed faces
+//! against HarfBuzz, that single failure accounted for roughly 489 of the 559
+//! runs this crate placed differently.
+//!
+//! This module is the answer of last resort: measure the base, measure the
+//! mark, and centre one on the other. It is deliberately a *reimplementation
+//! of HarfBuzz's* fallback (`hb-ot-shape-fallback.cc`) rather than an
+//! independently invented one, down to the truncating integer division and
+//! the `upem/16` gap. Two reasons. The output is checked against HarfBuzz —
+//! an "improvement" here would read as a regression in the sweep and hide
+//! real divergence in the noise. And the numbers themselves are not arbitrary
+//! taste: they are what a decade of complaints about specific fonts settled
+//! on, and this crate has no evidence to overrule them with.
+//!
+//! # When it runs
+//!
+//! Two conditions, both necessary.
+//!
+//! The face must have **no `GPOS` table whatsoever** — see
+//! [`Face::has_positioning`](crate::sfnt::Face::has_positioning) for why that
+//! is the line, and not "no `mark` feature".
+//!
+//! And the run's script must be one this crate can place marks for at all:
+//! see [`positions_marks`]. Devanagari, Khmer, Thai and the rest of the
+//! complex scripts are excluded, because in those scripts a mark's place in
+//! the cluster is decided by a reordering pass this crate does not have, and
+//! centring a virama on the consonant it follows is worse than leaving it
+//! where it fell.
+//!
+//! # What it does
+//!
+//! Every mark's advance is zeroed, and its offset is computed from two ink
+//! boxes and its canonical combining class:
+//!
+//! * **Horizontally** the mark is centred on the base — or left-aligned,
+//!   right-aligned, or hung off the base's right edge, according to the class.
+//!   The base's box is replaced by `0 .. advance` first, so that a zero-ink
+//!   base (a space) still centres its mark sensibly.
+//! * **Vertically** the mark clears the base's top or bottom by `upem/16`,
+//!   and each further mark of the same class clears the one before it, so a
+//!   stack of two accents does not collapse into one.
+//!
+//! The combining class is first *recategorized*: Unicode's fixed-position
+//! classes for Hebrew (10–26), Arabic (27–36), Thai, Lao and Tibetan encode a
+//! canonical ordering, not a place on the glyph, so they have to be mapped
+//! onto the "above/below/left/right" classes before the geometry means
+//! anything. [`attach_class`] is that map.
+
+use crate::norm;
+use crate::script::ScriptTags;
+
+/// Combining classes that name a position rather than an ordering.
+///
+/// Unicode's own values, as `UAX #44` assigns them. Named here because the
+/// geometry below switches on all twelve and bare numbers would make it
+/// unreadable.
+mod class {
+    pub(super) const ATTACHED_BELOW_LEFT: u8 = 200;
+    pub(super) const ATTACHED_BELOW: u8 = 202;
+    pub(super) const ATTACHED_ABOVE: u8 = 214;
+    pub(super) const ATTACHED_ABOVE_RIGHT: u8 = 216;
+    pub(super) const BELOW_LEFT: u8 = 218;
+    pub(super) const BELOW: u8 = 220;
+    pub(super) const BELOW_RIGHT: u8 = 222;
+    pub(super) const ABOVE_LEFT: u8 = 228;
+    pub(super) const ABOVE: u8 = 230;
+    pub(super) const ABOVE_RIGHT: u8 = 232;
+    pub(super) const DOUBLE_BELOW: u8 = 233;
+    pub(super) const DOUBLE_ABOVE: u8 = 234;
+}
+
+use class::{
+    ABOVE, ABOVE_LEFT, ABOVE_RIGHT, ATTACHED_ABOVE, ATTACHED_ABOVE_RIGHT, ATTACHED_BELOW,
+    ATTACHED_BELOW_LEFT, BELOW, BELOW_LEFT, BELOW_RIGHT, DOUBLE_ABOVE, DOUBLE_BELOW,
+};
+
+/// The OpenType script tags whose marks this fallback must not touch,
+/// sorted so [`positions_marks`] can binary-search it.
+///
+/// These are the scripts HarfBuzz hands to one of its four complex shapers —
+/// Indic, Khmer, Myanmar, USE — or to the Thai shaper, every one of which
+/// sets `fallback_position = false` (`hb-ot-shaper-*.cc`). The list is the
+/// script set of `hb_ot_shaper_categorize` in `hb-ot-shaper.hh`, mapped
+/// through this crate's own tag table.
+///
+/// The reason those shapers refuse the fallback is the same reason this crate
+/// must: in a Brahmic cluster the marks are not a stack of accents sitting on
+/// one base. A virama is a *spacing* glyph that suppresses a vowel, a matra
+/// may be reordered to before the consonant it logically follows, and which
+/// glyph a mark belongs to is not "the last non-mark to my left" but the
+/// output of a reordering pass. Measuring a box and centring on it produces a
+/// confident wrong answer; leaving the mark at its natural advance produces
+/// an obviously unshaped one, which is both more honest and, in practice,
+/// closer to legible.
+///
+/// Matched on the *preferred* tag only. That is the tag a character's script
+/// maps to, not one resolved against the font's `GSUB`, so it differs from
+/// HarfBuzz in one corner: HarfBuzz sends Devanagari to its default shaper —
+/// and so does run the fallback — when the font registers its features under
+/// `DFLT` or `latn` rather than under `dev2`/`deva`, and likewise sends
+/// Myanmar there for a font tagged `mymr`. Following that would mean asking
+/// the font which scripts it declares before deciding how to place a mark,
+/// which is a coupling this crate does not want for the sake of faces that
+/// carry Devanagari glyphs, no `GPOS`, and no Devanagari `GSUB` script
+/// record. Noted in `known-issues.md`.
+static COMPLEX_SCRIPTS: [[u8; 4]; 101] = [
+    *b"adlm", *b"ahom", *b"bali", *b"batk", *b"berf", *b"bhks", *b"bng2", *b"brah", *b"bugi",
+    *b"buhd", *b"cakm", *b"cham", *b"chrs", *b"cpmn", *b"dev2", *b"diak", *b"dogr", *b"dupl",
+    *b"egyp", *b"elym", *b"gara", *b"gjr2", *b"gong", *b"gonm", *b"gran", *b"gukh", *b"gur2",
+    *b"hano", *b"hmng", *b"hmnp", *b"java", *b"kali", *b"kawi", *b"khar", *b"khmr", *b"khoj",
+    *b"kits", *b"knd2", *b"krai", *b"kthi", *b"lana", *b"lao ", *b"lepc", *b"limb", *b"mahj",
+    *b"maka", *b"mand", *b"mani", *b"marc", *b"medf", *b"mlm2", *b"modi", *b"mong", *b"mtei",
+    *b"mult", *b"mym2", *b"nagm", *b"nand", *b"newa", *b"nko ", *b"onao", *b"ory2", *b"ougr",
+    *b"phag", *b"phlp", *b"plrd", *b"rjng", *b"rohg", *b"saur", *b"shrd", *b"sidd", *b"sidt",
+    *b"sind", *b"sinh", *b"sogd", *b"sogo", *b"soyo", *b"sund", *b"sunu", *b"sylo", *b"tagb",
+    *b"takr", *b"tale", *b"tavt", *b"tayo", *b"tel2", *b"tfng", *b"tglg", *b"thai", *b"tibt",
+    *b"tirh", *b"tml2", *b"tnsa", *b"todr", *b"tols", *b"toto", *b"tutg", *b"vith", *b"wcho",
+    *b"yezi", *b"zanb",
+];
+
+/// Whether a run of this script may have its marks placed by measurement.
+///
+/// `None` — a run with no script of its own, which is what an entirely
+/// scriptless string like `"123"` or a lone combining mark produces — is
+/// allowed: that is HarfBuzz's default shaper, and its fallback is on.
+///
+/// See [`COMPLEX_SCRIPTS`] for what is excluded and why.
+pub(crate) fn positions_marks(tags: Option<ScriptTags>) -> bool {
+    tags.is_none_or(|tags| COMPLEX_SCRIPTS.binary_search(&tags.preferred).is_err())
+}
+
+/// A glyph's ink box, in the shape the placement arithmetic wants it.
+///
+/// Not [`BBox`](crate::sfnt::BBox), which is four edges. This is an origin
+/// plus two signed extents, because that is what the arithmetic adds and
+/// subtracts: `y_bearing` is the **top** of the ink and `height` runs
+/// **downwards** and is therefore negative, so `y_bearing + height` is the
+/// bottom. That convention is FreeType's and HarfBuzz's, and keeping it means
+/// the placement rules below can be read against theirs line for line instead
+/// of being mentally sign-flipped.
+///
+/// Font units, as integers, for the same reason: HarfBuzz does this
+/// arithmetic in font units with truncating integer division, and doing it in
+/// floats would round differently in the last unit and make an exact
+/// comparison impossible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Extents {
+    /// Left edge of the ink.
+    pub(crate) x_bearing: i32,
+    /// Top edge of the ink.
+    pub(crate) y_bearing: i32,
+    /// Width, rightwards, so non-negative.
+    pub(crate) width: i32,
+    /// Height, *downwards*, so non-positive.
+    pub(crate) height: i32,
+}
+
+impl Extents {
+    /// The box of a glyph that draws nothing.
+    pub(crate) const BLANK: Self = Self {
+        x_bearing: 0,
+        y_bearing: 0,
+        width: 0,
+        height: 0,
+    };
+
+    /// The box around `x_min .. x_max` by `y_min .. y_max`.
+    pub(crate) fn new(x_min: i32, y_min: i32, x_max: i32, y_max: i32) -> Self {
+        Self {
+            x_bearing: x_min,
+            y_bearing: y_max,
+            width: x_max.saturating_sub(x_min),
+            height: y_min.saturating_sub(y_max),
+        }
+    }
+}
+
+/// Where the class map recategorizes `ch` to, for the purpose of placing it.
+///
+/// Zero means "not a combining mark", which is what the caller uses to tell a
+/// base from a mark.
+///
+/// Three groups of input are handled:
+///
+/// * Classes **200 and up** already name a position (`ABOVE`, `BELOW_RIGHT`,
+///   …) and pass through untouched. That is nearly every mark in Latin,
+///   Greek, Cyrillic and Vietnamese.
+/// * Classes **10–36, 103, 107, 118, 122, 129–132** are Unicode's
+///   *fixed-position* classes. Their numeric value encodes the order the
+///   marks must be sorted into, not where they are drawn, so each is mapped
+///   onto the position class its script actually wants — Arabic fatha above,
+///   kasra below, Hebrew sheva below, shin dot above-right, and so on.
+/// * A handful of **Thai and Lao vowel signs carry class 0** despite being
+///   drawn above or below, because they never reorder. They are recognised by
+///   code point.
+///
+/// The mapping is HarfBuzz's `recategorize_combining_class`, transposed from
+/// its "modified" combining classes back onto Unicode's. HarfBuzz permutes
+/// classes 10–26 and 27–35 before this point so that Hebrew and Arabic marks
+/// *sort* into display order; the permutation is injective and this function
+/// does not sort, so matching on the unpermuted value selects exactly the same
+/// characters. What this crate does not do is the reordering itself — see
+/// `known-issues.md`.
+pub(crate) fn attach_class(ch: char) -> u8 {
+    let mut klass = norm::combining_class(ch);
+    if klass >= 200 {
+        return klass;
+    }
+    let cp = u32::from(ch);
+    // Thai and Lao, which need the code point and not just the class: the
+    // vowel signs below are drawn above or below the consonant but never
+    // reorder, so Unicode leaves them at class 0.
+    if cp & !0xFF == 0x0E00 {
+        if klass == 0 {
+            klass = match cp {
+                0x0E31 | 0x0E34..=0x0E37 | 0x0E47 | 0x0E4C..=0x0E4E => ABOVE_RIGHT,
+                0x0EB1 | 0x0EB4..=0x0EB7 | 0x0EBB | 0x0ECC | 0x0ECD => ABOVE,
+                0x0EBC => BELOW,
+                _ => 0,
+            };
+        } else if cp == 0x0E3A {
+            // Thai phinthu, class 9, is drawn below and to the right.
+            klass = BELOW_RIGHT;
+        }
+    }
+    match klass {
+        // Hebrew points. Everything under the letter except the dots that
+        // distinguish shin from sin, the holam that sits to the upper left,
+        // the varika above, and rafe which touches the letter's top.
+        10..=18 | 20 | 22 => BELOW,
+        23 => ATTACHED_ABOVE,
+        24 => ABOVE_RIGHT,
+        19 | 25 => ABOVE_LEFT,
+        26 => ABOVE,
+        // Dagesh (21) is *inside* the letter, which no position class
+        // describes; left alone it centres horizontally and does not move
+        // vertically, which is as close as this scheme gets.
+        //
+        // Arabic and Syriac vowels: everything above but kasra and kasratan.
+        27 | 28 | 30 | 31 | 33..=36 => ABOVE,
+        29 | 32 => BELOW,
+        // Thai sara u/uu and mai.
+        103 => BELOW_RIGHT,
+        107 => ABOVE_RIGHT,
+        // Lao sign u/uu and mai.
+        118 => BELOW,
+        122 => ABOVE,
+        // Tibetan vowel signs aa, i, u.
+        129 | 132 => BELOW,
+        130 => ABOVE,
+        other => other,
+    }
+}
+
+/// Displace `mark` onto `base`, and grow `base` to cover it.
+///
+/// Returns the mark's offset from the *base glyph's origin* in font units,
+/// `y` upwards — the same thing [`Face::mark_on_base`] returns for a face that
+/// can answer, so that the caller subtracts the pen travel identically in both
+/// cases.
+///
+/// `base` is `&mut` because the second mark of a stack must clear the first:
+/// each call extends the box upwards or downwards by what it just placed, so
+/// passing the same box through a run of marks stacks them. The caller resets
+/// it to the base glyph's own box whenever the combining class changes, since
+/// marks above and marks below grow the box in opposite directions and must
+/// not see each other's growth.
+///
+/// `gap` is the clearance between one mark and the next, `upem/16`. `rtl` only
+/// affects the two *double* classes (U+035C–U+0362 and friends), which are
+/// drawn straddling the join between two glyphs and so hang off whichever edge
+/// of the base the next glyph is on.
+///
+/// [`Face::mark_on_base`]: crate::sfnt::Face::mark_on_base
+pub(crate) fn place(base: &mut Extents, mark: &Extents, klass: u8, gap: i32, rtl: bool) -> (i32, i32) {
+    // Horizontal. Note that every arm subtracts the mark's own left bearing:
+    // the offset moves the mark's *origin*, and what has to land in the right
+    // place is its ink.
+    let x = match klass {
+        DOUBLE_BELOW | DOUBLE_ABOVE => {
+            // Half of it belongs to the next glyph, so it straddles the edge
+            // between them: centred on the base's trailing edge.
+            let edge = if rtl {
+                base.x_bearing
+            } else {
+                base.x_bearing.saturating_add(base.width)
+            };
+            edge.saturating_sub(mark.width / 2).saturating_sub(mark.x_bearing)
+        }
+        ATTACHED_BELOW_LEFT | BELOW_LEFT | ABOVE_LEFT => {
+            base.x_bearing.saturating_sub(mark.x_bearing)
+        }
+        ATTACHED_ABOVE_RIGHT | BELOW_RIGHT | ABOVE_RIGHT => base
+            .x_bearing
+            .saturating_add(base.width)
+            .saturating_sub(mark.width)
+            .saturating_sub(mark.x_bearing),
+        // Centre, which is where an unrecognised class goes too — a mark
+        // whose position nobody stated is least wrong in the middle.
+        _ => base
+            .x_bearing
+            .saturating_add((base.width.saturating_sub(mark.width)) / 2)
+            .saturating_sub(mark.x_bearing),
+    };
+
+    // Vertical. `y_bearing` is the top and `height` is negative, so "grow
+    // downwards" is `height -= n` and "grow upwards" is `y_bearing += n`.
+    let mut y = 0;
+    match klass {
+        DOUBLE_BELOW | BELOW_LEFT | BELOW | BELOW_RIGHT | ATTACHED_BELOW_LEFT | ATTACHED_BELOW => {
+            if !matches!(klass, ATTACHED_BELOW_LEFT | ATTACHED_BELOW) {
+                // An *attached* mark touches the letter; every other kind
+                // clears it.
+                base.height = base.height.saturating_sub(gap);
+            }
+            y = base
+                .y_bearing
+                .saturating_add(base.height)
+                .saturating_sub(mark.y_bearing);
+            if (gap > 0) == (y > 0) {
+                // The mark's own ink already reaches below the base's bottom,
+                // so moving it down would open a hole. Leave it where it is
+                // and record how far past the base it goes, so the next mark
+                // still clears it.
+                base.height = base.height.saturating_sub(y);
+                y = 0;
+            }
+            base.height = base.height.saturating_add(mark.height);
+        }
+        DOUBLE_ABOVE | ABOVE_LEFT | ABOVE | ABOVE_RIGHT | ATTACHED_ABOVE | ATTACHED_ABOVE_RIGHT => {
+            if !matches!(klass, ATTACHED_ABOVE | ATTACHED_ABOVE_RIGHT) {
+                base.y_bearing = base.y_bearing.saturating_add(gap);
+                base.height = base.height.saturating_sub(gap);
+            }
+            y = base
+                .y_bearing
+                .saturating_sub(mark.y_bearing.saturating_add(mark.height));
+            if (gap > 0) != (y > 0) {
+                // The mark hangs so far below its own origin that placing it
+                // by its bottom edge would drop it onto the letter. Split the
+                // difference rather than either overprinting or floating.
+                let correction = y.saturating_neg() / 2;
+                base.y_bearing = base.y_bearing.saturating_add(correction);
+                base.height = base.height.saturating_sub(correction);
+                y = y.saturating_add(correction);
+            }
+            base.y_bearing = base.y_bearing.saturating_sub(mark.height);
+            base.height = base.height.saturating_add(mark.height);
+        }
+        // LEFT, RIGHT, and the classes that only order marks rather than
+        // place them: centred horizontally above, and not moved vertically.
+        _ => {}
+    }
+    (x, y)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The gate table is binary-searched, so it has to be sorted, and a typo
+    /// in a four-byte literal is otherwise invisible.
+    #[test]
+    fn the_excluded_scripts_are_sorted() {
+        assert!(COMPLEX_SCRIPTS.is_sorted(), "COMPLEX_SCRIPTS is out of order");
+    }
+
+    /// The scripts whose marks are a stack of accents on one base get the
+    /// fallback; the ones whose marks are decided by a reordering pass this
+    /// crate does not have do not.
+    #[test]
+    fn only_the_simple_scripts_get_their_marks_placed() {
+        for tag in [*b"latn", *b"grek", *b"cyrl", *b"hebr", *b"arab", *b"syrc", *b"hang"] {
+            assert!(
+                positions_marks(Some(ScriptTags::exactly(tag))),
+                "{:?} should be placed",
+                core::str::from_utf8(&tag)
+            );
+        }
+        // Indic (both spellings of the *preferred* tag are the `2` ones),
+        // Khmer, Myanmar, Thai and a USE script.
+        for tag in [*b"dev2", *b"bng2", *b"khmr", *b"mym2", *b"thai", *b"lao ", *b"tibt"] {
+            assert!(
+                !positions_marks(Some(ScriptTags::exactly(tag))),
+                "{:?} should be left alone",
+                core::str::from_utf8(&tag)
+            );
+        }
+    }
+
+    /// Text with no script of its own — `"123"`, or a combining mark with
+    /// nothing before it — is HarfBuzz's default shaper, whose fallback is on.
+    #[test]
+    fn scriptless_text_still_gets_the_fallback() {
+        assert!(positions_marks(None));
+    }
+
+    /// AGENCYB.TTF's `a`, whose numbers the placement rules below were
+    /// checked against HarfBuzz with.
+    fn agency_a() -> Extents {
+        // Ink 78..733 by -4..1010, but the base's box is always replaced by
+        // `0 .. advance` horizontally, and its advance is 815.
+        let mut e = Extents::new(78, -4, 733, 1010);
+        e.x_bearing = 0;
+        e.width = 815;
+        e
+    }
+
+    /// The same face's missing-glyph box, which is what its combining marks
+    /// come out as: 128..896 by 0..1633.
+    fn agency_notdef() -> Extents {
+        Extents::new(128, 0, 896, 1633)
+    }
+
+    #[test]
+    fn a_positional_class_passes_through() {
+        assert_eq!(attach_class('\u{0301}'), ABOVE);
+        assert_eq!(attach_class('\u{0323}'), BELOW);
+        assert_eq!(attach_class('\u{0328}'), ATTACHED_BELOW);
+    }
+
+    #[test]
+    fn an_ordinary_letter_is_not_a_mark() {
+        assert_eq!(attach_class('a'), 0);
+        assert_eq!(attach_class('\u{05D0}'), 0);
+        assert_eq!(attach_class('\u{0627}'), 0);
+    }
+
+    #[test]
+    fn arabic_vowels_are_sorted_above_and_below() {
+        // fatha, damma, shadda, sukun, superscript alef.
+        for ch in ['\u{064E}', '\u{064F}', '\u{0651}', '\u{0652}', '\u{0670}'] {
+            assert_eq!(attach_class(ch), ABOVE, "{ch:?}");
+        }
+        // kasra and kasratan are the two that hang below.
+        for ch in ['\u{0650}', '\u{064D}'] {
+            assert_eq!(attach_class(ch), BELOW, "{ch:?}");
+        }
+    }
+
+    #[test]
+    fn hebrew_points_are_mostly_below() {
+        // sheva, hiriq, qamats, meteg.
+        for ch in ['\u{05B0}', '\u{05B4}', '\u{05B8}', '\u{05BD}'] {
+            assert_eq!(attach_class(ch), BELOW, "{ch:?}");
+        }
+        // The shin dot goes upper right, the sin dot upper left, and holam
+        // joins the sin dot.
+        assert_eq!(attach_class('\u{05C1}'), ABOVE_RIGHT);
+        assert_eq!(attach_class('\u{05C2}'), ABOVE_LEFT);
+        assert_eq!(attach_class('\u{05B9}'), ABOVE_LEFT);
+        // Rafe touches the top of the letter.
+        assert_eq!(attach_class('\u{05BF}'), ATTACHED_ABOVE);
+    }
+
+    #[test]
+    fn a_thai_vowel_with_no_class_is_still_a_mark() {
+        // U+0E34 sara i has combining class 0 because it never reorders, but
+        // it is drawn above the consonant.
+        assert_eq!(norm::combining_class('\u{0E34}'), 0);
+        assert_eq!(attach_class('\u{0E34}'), ABOVE_RIGHT);
+        // U+0E3A phinthu has class 9 and is drawn below right.
+        assert_eq!(attach_class('\u{0E3A}'), BELOW_RIGHT);
+        // A Thai consonant in the same block is left alone.
+        assert_eq!(attach_class('\u{0E01}'), 0);
+    }
+
+    #[test]
+    fn a_mark_below_clears_the_letters_bottom() {
+        // HarfBuzz on AGENCYB.TTF, `a` + U+0323: offset (-920, -1765) once
+        // the pen travel of 815 is taken off the horizontal.
+        let mut base = agency_a();
+        let (x, y) = place(&mut base, &agency_notdef(), BELOW, 2048 / 16, false);
+        assert_eq!((x - 815, y), (-920, -1765));
+    }
+
+    #[test]
+    fn a_mark_above_clears_the_letters_top() {
+        // `a` + U+030C on the same face: (-920, 1138).
+        let mut base = agency_a();
+        let (x, y) = place(&mut base, &agency_notdef(), ABOVE, 2048 / 16, false);
+        assert_eq!((x - 815, y), (-920, 1138));
+    }
+
+    #[test]
+    fn a_second_mark_stacks_clear_of_the_first() {
+        let gap = 2048 / 16;
+        let mut base = agency_a();
+        // Two below: -1765 then -3526.
+        let (_, first) = place(&mut base, &agency_notdef(), BELOW, gap, false);
+        let (_, second) = place(&mut base, &agency_notdef(), BELOW, gap, false);
+        assert_eq!((first, second), (-1765, -3526));
+
+        let mut base = agency_a();
+        // Two above: 1138 then 2899.
+        let (_, first) = place(&mut base, &agency_notdef(), ABOVE, gap, false);
+        let (_, second) = place(&mut base, &agency_notdef(), ABOVE, gap, false);
+        assert_eq!((first, second), (1138, 2899));
+    }
+
+    #[test]
+    fn an_attached_mark_gets_no_clearance() {
+        // `o` + U+0328 on AGENCYB: ink 82..748 by 0..1010, advance 831, and
+        // HarfBuzz puts the ogonek at y = -1633 — the base's bottom with no
+        // gap added, unlike the -1761 a BELOW mark would get.
+        let mut base = Extents::new(82, 0, 748, 1010);
+        base.x_bearing = 0;
+        base.width = 831;
+        let (_, y) = place(&mut base, &agency_notdef(), ATTACHED_BELOW, 2048 / 16, false);
+        assert_eq!(y, -1633);
+    }
+
+    #[test]
+    fn a_capital_is_measured_by_its_own_box() {
+        // `A` + U+0323 on AGENCYB: ink 37..887 by 0..1567, advance 924, and
+        // HarfBuzz reports (-974, -1761).
+        let mut base = Extents::new(37, 0, 887, 1567);
+        base.x_bearing = 0;
+        base.width = 924;
+        let (x, y) = place(&mut base, &agency_notdef(), BELOW, 2048 / 16, false);
+        assert_eq!((x - 924, y), (-974, -1761));
+    }
+
+    #[test]
+    fn alignment_follows_the_class() {
+        let gap = 2048 / 16;
+        let mark = agency_notdef();
+        let centred = place(&mut agency_a(), &mark, ABOVE, gap, false).0;
+        let left = place(&mut agency_a(), &mark, ABOVE_LEFT, gap, false).0;
+        let right = place(&mut agency_a(), &mark, ABOVE_RIGHT, gap, false).0;
+        // Base 0..815, mark ink 128..896 (width 768).
+        assert_eq!(left, -128);
+        assert_eq!(centred, (815 - 768) / 2 - 128);
+        assert_eq!(right, 815 - 768 - 128);
+        assert!(left < centred && centred < right);
+    }
+
+    #[test]
+    fn a_double_mark_hangs_off_the_edge_the_next_glyph_is_on() {
+        let gap = 2048 / 16;
+        let mark = agency_notdef();
+        let ltr = place(&mut agency_a(), &mark, DOUBLE_ABOVE, gap, false).0;
+        let rtl = place(&mut agency_a(), &mark, DOUBLE_ABOVE, gap, true).0;
+        assert_eq!(ltr, 815 - 768 / 2 - 128);
+        assert_eq!(rtl, -768 / 2 - 128);
+    }
+
+    #[test]
+    fn a_class_that_only_orders_does_not_move_the_mark_vertically() {
+        // Dagesh (class 21) is inside the letter; nothing describes that, so
+        // it centres and stays on the baseline.
+        assert_eq!(attach_class('\u{05BC}'), 21);
+        let mut base = agency_a();
+        let before = base;
+        let (x, y) = place(&mut base, &agency_notdef(), 21, 2048 / 16, false);
+        assert_eq!(y, 0);
+        assert_eq!(x, (815 - 768) / 2 - 128);
+        // And it leaves no footprint for a following mark to clear.
+        assert_eq!(base, before);
+    }
+}

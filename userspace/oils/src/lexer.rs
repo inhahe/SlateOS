@@ -5172,11 +5172,33 @@ impl Lexer {
                     lit.push(b'\'');
                     self.pos += 1;
                 }
+                // In text no parser read, the run may have no mate and still not
+                // be an error: what expands it is `string_extract_double_quoted`,
+                // handed a *finished word* rather than a stream, and its walk ends
+                // at the end of the string as readily as at a `"`. That is the
+                // third shape in [`Lexer::read_double_quote_until`], and
+                // [`Lexer::here_text`] is the question it turns on.
+                //
+                // The only way an unmated `"` reaches here at all is inside a
+                // `' … '` run, because the brace scan is what hands this operand
+                // over and it steps over a run whole — anywhere else the scan
+                // meets the `"` itself, swallows the rest of the word with it and
+                // raises `bad substitution` before there is an operand to lex
+                // (measured: `${nope:-a"b}c` and `${nope#a"b}c` are both that).
+                // So this is the `${nope:-'a"b'}c` shape, which bash 5.2.37
+                // expands to `'ab'c` under `${…@P}`: the `'`s are ordinary
+                // characters, the `"` opens a run that takes `b'` to the end of
+                // the operand, and quote removal drops the `"` alone. Letting the
+                // error out instead condemned the whole word, and silently — the
+                // failure is not one bash ever has.
                 '"' => {
                     flush_lit(&mut segs, &mut lit);
                     self.pos += 1;
-                    let inner = self.read_double_quote()?;
-                    segs.push(Seg::Dq(inner));
+                    let short = self.here_text || self.opts.tolerant;
+                    let outer = std::mem::replace(&mut self.opts.tolerant, short);
+                    let inner = self.read_double_quote();
+                    self.opts.tolerant = outer;
+                    segs.push(Seg::Dq(inner?));
                 }
                 '`' => {
                     flush_lit(&mut segs, &mut lit);

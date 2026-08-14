@@ -240,9 +240,30 @@ pub(crate) fn feature_subtables(
     extension: u16,
 ) -> Option<Vec<usize>> {
     let mut out = Vec::new();
-    for lookup in ByScript::parse(data, base, tags, &[want], extension)?.all() {
+    for lookup in feature_lookups(data, base, tags, want, extension)? {
         out.extend_from_slice(&lookup.subtables);
     }
+    (!out.is_empty()).then_some(out)
+}
+
+/// The same walk as [`feature_subtables`], keeping the lookups whole.
+///
+/// The flat list is the right shape for a caller that only wants coverage —
+/// mark attachment asks "does any subtable have an anchor for this pair" and
+/// the answer does not depend on which lookup the subtable came from. It is
+/// the wrong shape for kerning, because a `kern` lookup's `lookupFlag` says
+/// which glyphs the pair may be read *across*, and flattening throws the flag
+/// away along with the lookup it belonged to.
+pub(crate) fn feature_lookups(
+    data: &[u8],
+    base: usize,
+    tags: &[&[u8; 4]],
+    want: u16,
+    extension: u16,
+) -> Option<Vec<Lookup>> {
+    let out = ByScript::parse(data, base, tags, &[want], extension)?
+        .all()
+        .to_vec();
     (!out.is_empty()).then_some(out)
 }
 
@@ -380,7 +401,7 @@ impl ByScript {
     /// Every lookup any script reaches, in the order they must be applied.
     ///
     /// For the callers that have no run to ask about — see
-    /// [`feature_subtables`], which is the only one.
+    /// [`feature_subtables`] and [`feature_lookups`], which are the only two.
     pub(crate) fn all(&self) -> &[Lookup] {
         &self.lookups
     }

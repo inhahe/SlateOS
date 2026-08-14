@@ -883,6 +883,126 @@ fn installed_fonts_kern_the_pairs_that_need_it() {
     );
 }
 
+/// A kerning pair with a combining mark between it, over every installed face.
+///
+/// Real faces flag their `kern` lookups `IgnoreMarks` precisely so that a pair
+/// keeps kerning when an accent lands between the two letters — the mark takes
+/// no room, so the letters are still adjacent as far as spacing is concerned.
+/// An engine that walks the run strictly in order cannot see that, and quietly
+/// widens every accented word by one kern.
+///
+/// `T` + combining acute + `o` is the probe because `T` has no precomposed
+/// acute form in Unicode, so normalization cannot compose the mark away and
+/// leave nothing between the pair; `A`/`V` would have become `Á` and proved
+/// nothing. `To` kerns in essentially every Latin text face.
+#[test]
+#[ignore = "depends on the host's installed fonts"]
+fn a_mark_between_a_kerning_pair_costs_the_kern_only_if_the_flag_says_so() {
+    let mut files = Vec::new();
+    for dir in font_dirs() {
+        collect_fonts(&dir, &mut files, 0);
+    }
+    assert!(!files.is_empty(), "no fonts found on this host");
+    files.sort();
+
+    let mut kerning_pairs = 0usize;
+    let mut read_across = 0usize;
+    let mut declined = 0usize;
+
+    for path in &files {
+        let Ok(data) = fs::read(path) else { continue };
+        let Ok(face) = Face::parse(data) else { continue };
+        let (Some(t), Some(o), Some(acute)) = (
+            face.glyph_index('T'),
+            face.glyph_index('o'),
+            face.glyph_index('\u{0301}'),
+        ) else {
+            continue;
+        };
+        if face.kern(t, o) == 0 || !face.is_mark(acute) {
+            continue;
+        }
+        kerning_pairs += 1;
+        if face.kern_across(t, o, &[acute]) == face.kern(t, o) {
+            read_across += 1;
+        } else {
+            declined += 1;
+        }
+    }
+
+    println!("faces kerning (T,o):        {kerning_pairs}");
+    println!("  kern read across a mark:  {read_across}");
+    println!("  lookup declined to:       {declined}");
+
+    assert!(
+        kerning_pairs > 0,
+        "no installed face kerns (T,o) with a combining acute available — the \
+         probe never ran"
+    );
+    // If this is zero the flag is not being read at all: `IgnoreMarks` is on
+    // virtually every real `kern` lookup, so at least the mainstream text
+    // faces must come out on the reading-across side.
+    assert!(
+        read_across > 0,
+        "not one of {kerning_pairs} kerning faces would read (T,o) across a \
+         combining acute — the lookup flags are being ignored"
+    );
+
+    // And the same at the level a caller sees, against a known answer that
+    // runs *both* ways. HarfBuzz shapes these five faces and makes the
+    // accented string wider than the bare one by exactly:
+    //
+    //   arial 0, times 0, segoeui 0 — their `kern` lookups are `IgnoreMarks`
+    //   DejaVuSans 348, verdana 220 — their `PairPos` lookups carry flag 0,
+    //                                 so the mark really does break the pair
+    //
+    // Both halves matter. A test that only checked the first three would pass
+    // just as well on an engine that skipped every mark unconditionally, and
+    // that engine gives the wrong answer for the other two: the flag has to be
+    // *read*, not assumed.
+    let mut checked = 0usize;
+    for (file, widens_by) in [
+        ("arial.ttf", 0_u16),
+        ("times.ttf", 0),
+        ("segoeui.ttf", 0),
+        ("DejaVuSans.ttf", 348),
+        ("verdana.ttf", 220),
+    ] {
+        let Some(path) = files
+            .iter()
+            .find(|p| p.file_name().is_some_and(|n| n.eq_ignore_ascii_case(file)))
+        else {
+            continue;
+        };
+        let Ok(data) = fs::read(path) else { continue };
+        let Ok(face) = Face::parse(data) else { continue };
+        let want = 14.0 * f32::from(widens_by) / f32::from(face.units_per_em());
+        let font = ScaledFont::from_bytes(fs::read(path).expect("re-read"), 14.0).expect("scaled");
+        let bare = font.measure("To");
+        let accented = font.measure("T\u{0301}o");
+        // A twentieth of a pixel: room for the scaling to round, far less than
+        // the smallest of the kerns being told apart.
+        assert!(
+            (accented - bare - want).abs() < 0.05,
+            "{file}: \"To\" measured {bare:.3} px and the accented one \
+             {accented:.3} px, a difference of {:.3} px — HarfBuzz makes it \
+             {widens_by} units, {want:.3} px",
+            accented - bare
+        );
+        println!(
+            "oracle ok: {file} \"To\" {bare:.3} px, accented {accented:.3} px \
+             (+{widens_by} units, as HarfBuzz)"
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 2,
+        "fewer than two of the well-known faces are installed — the \
+         measurement was never checked against a known answer in both \
+         directions"
+    );
+}
+
 /// Read `GSUB` from every installed face, and check the ligature every Latin
 /// text font has had since metal type.
 ///

@@ -44,6 +44,18 @@
 //! * **Device tables.** They tune a value for one specific ppem; the value
 //!   without them is the designer's intent at any size.
 //!
+//! # Reading across a mark
+//!
+//! Real faces mark their `kern` lookups `IgnoreMarks`, so that `A` and `V`
+//! still kern with an accent between them. A pair-at-a-time interface cannot
+//! step over the accent by itself, so the caller says what stood between the
+//! pair and this decides, per lookup, whether that lookup's flag would have
+//! let it see past — which is the same question
+//! [`Skipper`](crate::skip::Skipper) answers for `GSUB`. That is why the
+//! subtables are grouped by lookup here rather than flattened: the flag
+//! belongs to the lookup, and two lookups reached by the same feature may
+//! disagree about it.
+//!
 //! Because this reads a *pair* at a time, it is not a shaper and cannot become
 //! one: real shaping reorders and substitutes glyphs before positioning them.
 //! It is the part of shaping that can be done without knowing anything about
@@ -52,9 +64,10 @@
 use alloc::vec::Vec;
 
 use crate::otl::{
-    MAX_SUBTABLES, binary_search, coverage_index, feature_subtables, glyph_class, value_size,
+    MAX_SUBTABLES, binary_search, coverage_index, feature_lookups, glyph_class, value_size,
 };
 use crate::sfnt::{Span, i16_at, u16_at};
+use crate::skip::{Definitions, Skipper};
 
 /// Value-record flag for a horizontal advance adjustment on the first glyph.
 const X_ADVANCE: u16 = 0x0004;
@@ -80,7 +93,25 @@ const LOOKUP_EXTENSION: u16 = 9;
 #[derive(Clone, Debug)]
 pub(crate) struct Kerning {
     kind: Kind,
-    /// Absolute byte offsets of the subtables, in application order.
+    /// The subtables to consult, in application order, grouped by the lookup
+    /// that owns them.
+    ///
+    /// Grouped rather than flattened because a lookup's `lookupFlag` says
+    /// which glyphs the pair may be read *across* — `IgnoreMarks` is on
+    /// virtually every real `kern` lookup, and is what makes `A` and `V` still
+    /// kern with an accent between them. A flat list of subtables has thrown
+    /// that away.
+    lookups: Vec<Group>,
+    /// `GDEF`'s class definitions, which is what turns a flag bit into a set
+    /// of glyphs.
+    defs: Definitions,
+}
+
+/// One lookup's subtables, with the flag that governs reading across glyphs.
+#[derive(Clone, Debug)]
+struct Group {
+    flag: u16,
+    filter: u16,
     subtables: Vec<usize>,
 }
 
@@ -98,37 +129,65 @@ impl Kerning {
     /// Returns `None` when the face has neither, or has them but they contain
     /// nothing this reads — which is not an error: most monospace faces and
     /// many display faces genuinely have no kerning.
-    pub(crate) fn parse(data: &[u8], gpos: Option<Span>, legacy: Option<Span>) -> Option<Self> {
+    pub(crate) fn parse(
+        data: &[u8],
+        gpos: Option<Span>,
+        legacy: Option<Span>,
+        gdef: Option<Span>,
+    ) -> Option<Self> {
+        let defs = Definitions::parse(data, gdef);
         if let Some(span) = gpos
-            && let Some(subtables) = parse_gpos(data, span)
+            && let Some(lookups) = parse_gpos(data, span)
         {
             return Some(Self {
                 kind: Kind::Gpos,
-                subtables,
+                lookups,
+                defs,
             });
         }
-        let subtables = parse_legacy(data, legacy?)?;
+        // The legacy table predates lookups and has no flags, so it is one
+        // group that skips nothing — which is also the historically correct
+        // reading: engines that used it kerned strictly adjacent glyphs.
+        let lookups = alloc::vec![Group {
+            flag: 0,
+            filter: 0,
+            subtables: parse_legacy(data, legacy?)?,
+        }];
         Some(Self {
             kind: Kind::Legacy,
-            subtables,
+            lookups,
+            defs,
         })
     }
 
     /// The adjustment to `left`'s advance when `right` follows it, in font
     /// units. Negative pulls the pair together, which is the common case.
     ///
+    /// `between` is what stands between the two in the run — normally nothing.
+    /// A lookup is consulted only if its flag would have let it see past
+    /// *every* glyph in `between`, which is what lets `A` and `V` kern with an
+    /// accent between them without letting them kern across a letter.
+    ///
     /// The first subtable with an entry for the pair wins, matching the way
     /// OpenType applies lookups in order — a later lookup positions the output
     /// of an earlier one, so for a single adjustment the earliest match is the
     /// one that would have been applied.
-    pub(crate) fn pair(&self, data: &[u8], left: u16, right: u16) -> i16 {
-        for &off in &self.subtables {
-            let found = match self.kind {
-                Kind::Gpos => pair_pos(data, off, left, right),
-                Kind::Legacy => legacy_pair(data, off, left, right),
-            };
-            if let Some(v) = found {
-                return v;
+    pub(crate) fn pair(&self, data: &[u8], left: u16, right: u16, between: &[u16]) -> i16 {
+        for group in &self.lookups {
+            if !between.is_empty() {
+                let skip = Skipper::new(data, self.defs, group.flag, group.filter, u32::MAX);
+                if !between.iter().all(|&g| skip.skips(g)) {
+                    continue;
+                }
+            }
+            for &off in &group.subtables {
+                let found = match self.kind {
+                    Kind::Gpos => pair_pos(data, off, left, right),
+                    Kind::Legacy => legacy_pair(data, off, left, right),
+                };
+                if let Some(v) = found {
+                    return v;
+                }
             }
         }
         0
@@ -139,20 +198,28 @@ impl Kerning {
 // GPOS
 // ---------------------------------------------------------------------------
 
-/// Collect the `PairPos` subtables reachable from `GPOS`'s `kern` feature.
+/// Collect the `PairPos` lookups reachable from `GPOS`'s `kern` feature.
 ///
 /// Returns `None` if the table is malformed, has no `kern` feature, or that
 /// feature reaches no pair-positioning subtable — in all of which cases the
 /// caller should fall back to the legacy table rather than conclude the face
 /// has no kerning.
-fn parse_gpos(data: &[u8], span: Span) -> Option<Vec<usize>> {
-    feature_subtables(
+fn parse_gpos(data: &[u8], span: Span) -> Option<Vec<Group>> {
+    let out: Vec<Group> = feature_lookups(
         data,
         span.off,
         &[b"kern"],
         LOOKUP_PAIR_POS,
         LOOKUP_EXTENSION,
-    )
+    )?
+    .into_iter()
+    .map(|l| Group {
+        flag: l.flag,
+        filter: l.filter,
+        subtables: l.subtables,
+    })
+    .collect();
+    (!out.is_empty()).then_some(out)
 }
 
 /// Look `left`/`right` up in one `PairPos` subtable.
@@ -542,27 +609,27 @@ mod tests {
     #[test]
     fn the_legacy_table_is_read_when_there_is_no_gpos() {
         let data = legacy_table(0x0001, &[(1, 2, -80), (1, 3, -50), (4, 2, -20)]);
-        let k = Kerning::parse(&data, None, Some(span(0, data.len()))).expect("kern parses");
+        let k = Kerning::parse(&data, None, Some(span(0, data.len())), None).expect("kern parses");
         assert_eq!(k.kind, Kind::Legacy);
-        assert_eq!(k.pair(&data, 1, 2), -80);
-        assert_eq!(k.pair(&data, 4, 2), -20);
-        assert_eq!(k.pair(&data, 2, 1), 0);
+        assert_eq!(k.pair(&data, 1, 2, &[]), -80);
+        assert_eq!(k.pair(&data, 4, 2, &[]), -20);
+        assert_eq!(k.pair(&data, 2, 1, &[]), 0);
     }
 
     #[test]
     fn a_vertical_or_minimum_subtable_is_left_alone() {
         // Vertical: the horizontal bit is clear.
         let vertical = legacy_table(0x0000, &[(1, 2, -80)]);
-        assert!(Kerning::parse(&vertical, None, Some(span(0, vertical.len()))).is_none());
+        assert!(Kerning::parse(&vertical, None, Some(span(0, vertical.len())), None).is_none());
         // Minimum: the values bound the spacing rather than adjusting it, so
         // applying them as adjustments would spread the text apart.
         let minimum = legacy_table(0x0003, &[(1, 2, -80)]);
-        assert!(Kerning::parse(&minimum, None, Some(span(0, minimum.len()))).is_none());
+        assert!(Kerning::parse(&minimum, None, Some(span(0, minimum.len())), None).is_none());
     }
 
     #[test]
     fn a_face_with_neither_table_has_no_kerning() {
-        assert!(Kerning::parse(&[], None, None).is_none());
+        assert!(Kerning::parse(&[], None, None, None).is_none());
     }
 
     #[test]
@@ -572,10 +639,10 @@ mod tests {
             let data = &full[..cut];
             // Whatever survives parsing must still answer without reading past
             // the end: a font file is untrusted input.
-            if let Some(k) = Kerning::parse(data, None, Some(span(0, data.len()))) {
-                let _ = k.pair(data, 1, 2);
-                let _ = k.pair(data, 1, 3);
-                let _ = k.pair(data, 7, 7);
+            if let Some(k) = Kerning::parse(data, None, Some(span(0, data.len())), None) {
+                let _ = k.pair(data, 1, 2, &[]);
+                let _ = k.pair(data, 1, 3, &[]);
+                let _ = k.pair(data, 7, 7, &[]);
             }
         }
     }
@@ -592,10 +659,11 @@ mod tests {
             &data,
             Some(span(0, legacy_at)),
             Some(span(legacy_at, data.len() - legacy_at)),
+            None,
         )
         .expect("GPOS parses");
         assert_eq!(k.kind, Kind::Gpos);
-        assert_eq!(k.pair(&data, 1, 2), -80);
+        assert_eq!(k.pair(&data, 1, 2, &[]), -80);
     }
 
     #[test]
@@ -609,17 +677,18 @@ mod tests {
             &data,
             Some(span(0, legacy_at)),
             Some(span(legacy_at, data.len() - legacy_at)),
+            None,
         )
         .expect("falls back to kern");
         assert_eq!(k.kind, Kind::Legacy);
-        assert_eq!(k.pair(&data, 1, 2), -10);
+        assert_eq!(k.pair(&data, 1, 2, &[]), -10);
     }
 
     #[test]
     fn an_extension_lookup_is_followed_to_the_subtable_it_wraps() {
         let data = gpos_table_extension(-65);
-        let k = Kerning::parse(&data, Some(span(0, data.len())), None).expect("extension parses");
-        assert_eq!(k.pair(&data, 1, 2), -65);
+        let k = Kerning::parse(&data, Some(span(0, data.len())), None, None).expect("extension parses");
+        assert_eq!(k.pair(&data, 1, 2, &[]), -65);
     }
 
     /// A minimal GPOS with a `kern` feature over one `PairPos` lookup.
@@ -628,13 +697,20 @@ mod tests {
     }
 
     fn gpos_table_tagged(tag: [u8; 4], value: i16) -> Vec<u8> {
-        let (body, sub_at) = gpos_skeleton(tag, 10, LOOKUP_PAIR_POS);
+        let (body, sub_at) = gpos_skeleton(tag, 10, LOOKUP_PAIR_POS, 0);
+        finish_gpos(body, sub_at, value)
+    }
+
+    /// The same, with a `lookupFlag` on the lookup — which is what decides
+    /// whether the pair may be read across an intervening glyph.
+    fn gpos_table_flagged(value: i16, flag: u16) -> Vec<u8> {
+        let (body, sub_at) = gpos_skeleton(*b"kern", 10, LOOKUP_PAIR_POS, flag);
         finish_gpos(body, sub_at, value)
     }
 
     /// The same, but with the `PairPos` behind an extension lookup.
     fn gpos_table_extension(value: i16) -> Vec<u8> {
-        let (mut body, ext_at) = gpos_skeleton(*b"kern", 10, LOOKUP_EXTENSION);
+        let (mut body, ext_at) = gpos_skeleton(*b"kern", 10, LOOKUP_EXTENSION, 0);
         // The extension subtable sits where the PairPos would have, and points
         // past the end of everything written so far.
         let sub_at = body.len();
@@ -648,7 +724,12 @@ mod tests {
     /// GPOS header + a FeatureList with one feature + a LookupList with one
     /// lookup, returning the bytes and the offset of the lookup's first
     /// subtable (which the caller fills in).
-    fn gpos_skeleton(tag: [u8; 4], sub_len: usize, lookup_type: u16) -> (Vec<u8>, usize) {
+    fn gpos_skeleton(
+        tag: [u8; 4],
+        sub_len: usize,
+        lookup_type: u16,
+        flag: u16,
+    ) -> (Vec<u8>, usize) {
         let header = 10;
         let feature_list = header;
         let feature = feature_list + 2 + 6;
@@ -675,7 +756,7 @@ mod tests {
         t.extend(be16(u16::try_from(lookup - lookup_list).unwrap()));
         // Lookup.
         t.extend(be16(lookup_type));
-        t.extend(be16(0)); // lookupFlag
+        t.extend(be16(flag)); // lookupFlag
         t.extend(be16(1)); // subTableCount
         t.extend(be16(u16::try_from(sub - lookup).unwrap()));
         assert_eq!(t.len(), sub);
@@ -700,5 +781,95 @@ mod tests {
         sub.extend(coverage1(&[1]));
         body.extend(sub);
         body
+    }
+
+    /// A `GDEF` that calls every glyph in `marks` — which must be ascending —
+    /// a mark, and says nothing about any other glyph.
+    ///
+    /// Without one of these a lookup's "ignore marks" flag names an empty set,
+    /// because nothing has said which glyphs the marks are.
+    fn gdef_marks(marks: &[u16]) -> Vec<u8> {
+        let header = 12;
+        let mut t = vec![];
+        t.extend(be16(1)); // majorVersion
+        t.extend(be16(0)); // minorVersion
+        t.extend(be16(u16::try_from(header).unwrap())); // glyphClassDefOffset
+        t.extend(be16(0)); // attachListOffset
+        t.extend(be16(0)); // ligCaretListOffset
+        t.extend(be16(0)); // markAttachClassDefOffset
+        // ClassDefFormat 2, one single-glyph range per mark, all class 3.
+        t.extend(be16(2));
+        t.extend(be16(u16::try_from(marks.len()).unwrap()));
+        for g in marks {
+            t.extend(be16(*g));
+            t.extend(be16(*g));
+            t.extend(be16(3)); // MARK
+        }
+        t
+    }
+
+    /// A GPOS and a GDEF laid out the way a face presents them: two spans into
+    /// one file, not two files.
+    fn with_gdef(gpos: &[u8], gdef: &[u8]) -> (Vec<u8>, Kerning) {
+        let mut data = gpos.to_vec();
+        let at = data.len();
+        data.extend_from_slice(gdef);
+        let k = Kerning::parse(&data, Some(span(0, at)), None, Some(span(at, gdef.len())))
+            .expect("a flagged kern lookup must still parse");
+        (data, k)
+    }
+
+    /// `IgnoreMarks`, the flag that is on virtually every real `kern` lookup.
+    const IGNORE_MARKS: u16 = 0x0008;
+
+    #[test]
+    fn a_kern_lookup_that_ignores_marks_reads_the_pair_across_one() {
+        let (data, k) = with_gdef(&gpos_table_flagged(-80, IGNORE_MARKS), &gdef_marks(&[90]));
+        // The pair itself is unchanged by the flag.
+        assert_eq!(k.pair(&data, 1, 2, &[]), -80);
+        // An accent between the two letters is stepped over, which is the whole
+        // point: `A` and `V` keep kerning with a mark between them.
+        assert_eq!(k.pair(&data, 1, 2, &[90]), -80);
+        // Several of them, still all marks.
+        assert_eq!(k.pair(&data, 1, 2, &[90, 90]), -80);
+    }
+
+    #[test]
+    fn ignoring_marks_does_not_mean_ignoring_letters() {
+        let (data, k) = with_gdef(&gpos_table_flagged(-80, IGNORE_MARKS), &gdef_marks(&[90]));
+        // Glyph 7 is not a mark, so the pair is not adjacent and is not kerned.
+        assert_eq!(k.pair(&data, 1, 2, &[7]), 0);
+        // One mark and one letter is still a letter in the way.
+        assert_eq!(k.pair(&data, 1, 2, &[90, 7]), 0);
+    }
+
+    #[test]
+    fn an_unflagged_kern_lookup_declines_to_read_across_anything() {
+        // The historically correct reading for a lookup that never asked to
+        // skip: kerning applies to strictly adjacent glyphs.
+        let (data, k) = with_gdef(&gpos_table_flagged(-80, 0), &gdef_marks(&[90]));
+        assert_eq!(k.pair(&data, 1, 2, &[]), -80);
+        assert_eq!(k.pair(&data, 1, 2, &[90]), 0);
+    }
+
+    #[test]
+    fn a_flag_with_no_gdef_behind_it_hides_nothing() {
+        // "Ignore marks" over a face that never classified its glyphs names an
+        // empty set, so even glyph 90 stops the pair.
+        let data = gpos_table_flagged(-80, IGNORE_MARKS);
+        let k = Kerning::parse(&data, Some(span(0, data.len())), None, None)
+            .expect("a flagged lookup parses without a GDEF");
+        assert_eq!(k.pair(&data, 1, 2, &[]), -80);
+        assert_eq!(k.pair(&data, 1, 2, &[90]), 0);
+    }
+
+    #[test]
+    fn the_legacy_table_kerns_only_adjacent_glyphs() {
+        // `kern` predates lookups and has no flags to honour, so there is no
+        // basis for reading across anything.
+        let data = legacy_table(0x0001, &[(1, 2, -10)]);
+        let k = Kerning::parse(&data, None, Some(span(0, data.len())), None).expect("legacy parses");
+        assert_eq!(k.pair(&data, 1, 2, &[]), -10);
+        assert_eq!(k.pair(&data, 1, 2, &[90]), 0);
     }
 }

@@ -205,8 +205,13 @@ impl<'a> Skipper<'a> {
     /// `None` and nothing is skipped — which is the right answer: a flag that
     /// says "ignore marks" over a face that never said which glyphs are marks
     /// has named an empty set.
+    ///
+    /// Public because `GPOS` asks the question about a bare glyph id rather
+    /// than about a position in a run: kerning is consulted a pair at a time,
+    /// and what it needs to know is whether the glyphs standing between the
+    /// pair are ones this lookup would have stepped over.
     #[must_use]
-    fn skips(self, glyph: u16) -> bool {
+    pub(crate) fn skips(self, glyph: u16) -> bool {
         if self.is_trivial() {
             return false;
         }

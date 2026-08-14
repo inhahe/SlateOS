@@ -375,7 +375,14 @@ impl ScaledFont {
     /// applied for them.
     #[must_use]
     pub fn kern(&self, left: u16, right: u16) -> f32 {
-        f32::from(self.face.kern(left, right)) * self.scale
+        self.kern_across(left, right, &[])
+    }
+
+    /// The same, for a pair with `between` standing between them — the marks a
+    /// face's "ignore marks" kerning is meant to be read across.
+    #[must_use]
+    pub fn kern_across(&self, left: u16, right: u16, between: &[u16]) -> f32 {
+        f32::from(self.face.kern_across(left, right, between)) * self.scale
     }
 
     /// The glyphs `text` turns into, with final advances.
@@ -432,32 +439,34 @@ impl ScaledFont {
 
         let marked = self.face.has_marks();
         let mut out: Vec<ShapedGlyph> = Vec::with_capacity(glyphs.len());
-        // Whether the glyph just pushed may be kerned against the next one. A
-        // tab may not: its advance is a layout decision, not a glyph width,
-        // and a face that kerns after a space would quietly narrow it.
-        let mut kernable = false;
+        // Where in `out` the left half of the next kerning pair sits, and the
+        // glyphs standing between it and the position being filled. A tab is
+        // never a left half: its advance is a layout decision, not a glyph
+        // width, and a face that kerns after a space would quietly narrow it.
+        let mut kern_left: Option<usize> = None;
+        let mut between: Vec<u16> = Vec::new();
         for (i, glyph) in glyphs.iter().enumerate() {
             let tab = tabs.get(i).copied().unwrap_or(false);
             let gid = glyph.gid;
-            // A combining mark is not part of the spacing: real faces mark
+            // A combining mark is not part of the spacing, and real faces mark
             // their kerning lookups "ignore marks" so that `A` and `V` still
-            // kern with an accent between them. This engine walks the run
-            // strictly in order and cannot skip, so it declines instead —
-            // pairs separated by a mark go unkerned, which loses a fraction of
-            // a pixel, where kerning *against* the mark would shove the accent
-            // off the letter it belongs to.
+            // kern with an accent between them. The mark goes into `between`
+            // and the face decides from its own lookup flags whether to read
+            // across it; kerning *against* the mark instead would shove the
+            // accent off the letter it belongs to.
             let mark = marked && !tab && self.face.is_mark(gid);
             // Kerning is part of the width, not a drawing-time flourish: a
             // measurement that leaves it out is one that disagrees with what
             // the compositor puts on the screen, which is how a label ends up
             // centred half a pixel off in every button on the desktop. It is
-            // charged to the *preceding* glyph so that the advances sum to
-            // the run's width.
+            // charged to the pair's *left* glyph — not to whatever was pushed
+            // last — so that the advances still sum to the run's width when
+            // the pair was read across a mark.
             if !tab
                 && !mark
-                && let Some(last) = out.last_mut().filter(|_| kernable)
+                && let Some(last) = kern_left.and_then(|at| out.get_mut(at))
             {
-                let kern = self.kern(last.key.gid(), gid);
+                let kern = self.kern_across(last.key.gid(), gid, &between);
                 last.advance += kern;
                 last.kern_next = kern;
             }
@@ -488,7 +497,19 @@ impl ScaledFont {
                 kern_next: 0.0,
                 offset: (0.0, 0.0),
             });
-            kernable = !tab && !mark;
+            if mark {
+                // Keep the mark in the run between the pair, but only while
+                // there is a pair to read across: a mark with no letter before
+                // it starts nothing.
+                if kern_left.is_some() {
+                    between.push(gid);
+                }
+            } else {
+                between.clear();
+                // A tab ends the pair rather than starting one, so the glyph
+                // after it kerns against nothing.
+                kern_left = (!tab).then(|| out.len().saturating_sub(1));
+            }
         }
 
         if marked {

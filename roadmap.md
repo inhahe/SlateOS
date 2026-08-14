@@ -365,11 +365,17 @@ Roadmap:
   shaping agrees and only RTL reordering is left. Agreement over a
   19-string corpus is 9535 identical + 88 reversed of 10564 runs, and
   every remaining disagreement is either a documented deliberate
-  divergence or a shaper not yet written. Next unblocked step is the rest
-  of shaping: no Indic reordering
+  divergence or a shaper not yet written. Kerning then followed the flags
+  too (§414): `otl::feature_lookups` keeps a lookup whole so `kern.rs` can
+  read each `lookupFlag`, and `kern_across(left, right, between)` lets the
+  shaping loop say what stood between a pair — so `A` and `V` keep kerning
+  with an accent between them on the 82 of 139 host faces whose lookups ask
+  for it, and do not on the ones that do not, matching HarfBuzz to the unit
+  on all five oracle faces. Next unblocked step is the rest of shaping: no
+  Indic reordering
   (`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`), no bidi
-  (`TD-FONT-DOES-NOT-REORDER-RIGHT-TO-LEFT-TEXT`), no GPOS lookup flags
-  (`TD-FONT-IGNORES-GSUB-LOOKUP-FLAGS`), no language selection
+  (`TD-FONT-DOES-NOT-REORDER-RIGHT-TO-LEFT-TEXT`), no mark-attachment
+  lookup flags (`TD-FONT-IGNORES-GSUB-LOOKUP-FLAGS`), no language selection
   (`TD-FONT-IGNORES-LANGSYS-OVERRIDES`), no mark-to-ligature attachment
   (GPOS 5). Vello itself waits on `[A]`'s GPU driver.
 - `[C]` Wayland-inspired compositor: GPU acceleration, currently a software

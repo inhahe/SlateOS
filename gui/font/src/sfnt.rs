@@ -646,7 +646,10 @@ impl Face {
         // Eager, unlike `name`: the result is a short list of offsets, and
         // deferring it would mean re-deciding "GPOS or the legacy table?" on
         // every pair of glyphs drawn.
-        let kerning = Kerning::parse(&data, gpos, kern);
+        // `GDEF` comes along for the same reason it does below: a `kern`
+        // lookup marked "ignore marks" needs something to have said which
+        // glyphs are marks before the flag means anything.
+        let kerning = Kerning::parse(&data, gpos, kern, gdef);
         // Same reasoning: a list of subtable offsets, found once, rather than
         // a `GSUB` walk per glyph.
         // `GDEF` comes along because a lookup's flag is expressed in terms of
@@ -1064,9 +1067,20 @@ impl Face {
     /// alternative is drawing nothing.
     #[must_use]
     pub fn kern(&self, left: u16, right: u16) -> i16 {
+        self.kern_across(left, right, &[])
+    }
+
+    /// The same, for a pair with `between` standing between them in the run.
+    ///
+    /// Real faces mark their kerning lookups "ignore marks" precisely so that
+    /// `A` and `V` keep kerning with an accent between them. Only a lookup
+    /// whose flag would have let it see past every glyph in `between` is
+    /// consulted, so a pair separated by a *letter* is still not kerned.
+    #[must_use]
+    pub fn kern_across(&self, left: u16, right: u16, between: &[u16]) -> i16 {
         self.kerning
             .as_ref()
-            .map_or(0, |k| k.pair(&self.data, left, right))
+            .map_or(0, |k| k.pair(&self.data, left, right, between))
     }
 
     /// Whether this face carries any pair kerning this can read.

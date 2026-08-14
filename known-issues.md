@@ -59194,15 +59194,27 @@ it was missing (`\u0628\u0650\u0633\u0652\u0645\u0650`), and it
 discriminates: against the pre-`Skipper` source 8 faces shape it wrongly
 (949 differ / 36 reversed), against the current one none do (941 / 44).
 
-**Still open — the GPOS half.** `RightToLeft` is still not honoured (it
-governs cursive attachment, which we do not implement) and neither kerning
-nor mark attachment consults the flag at all. Both reach their subtables
-through `otl::feature_subtables`, which returns a flat list and discards the
-`Lookup` the flag came from; honouring it there means changing that function
-to hand back the lookup rather than its subtables, and threading a `Skipper`
-into `kern.rs` and `mark.rs`. The practical cost today is small — mark
-attachment already positions relative to the base it finds — but it will
-matter for GPOS 5 (mark-to-ligature).
+**Resolved for kerning (2026-08-14).** `otl::feature_lookups` now hands back
+the `Lookup` whole rather than a flat list of subtables, so `kern.rs` keeps
+its lookups grouped and each group carries its own `lookupFlag`. `Face::kern`
+gained a sibling, `kern_across(left, right, between)`, and the shaping loop in
+`scaled.rs` tracks the marks standing between a pair instead of declining to
+kern across them; a group is consulted only if its flag would have skipped
+every glyph in `between`. Checked by five unit tests in `kern.rs` and one host
+test, `a_mark_between_a_kerning_pair_costs_the_kern_only_if_the_flag_says_so`,
+which measures `T` + combining acute + `o` against HarfBuzz's own answer on
+five faces in *both* directions — arial/times/segoeui read across the mark
+(+0 units), DejaVuSans (+348) and verdana (+220) do not, because their
+`PairPos` lookups carry flag 0. All five agree with HarfBuzz to the unit. Of
+the 139 host faces that kern `(T,o)`, 82 now read the pair across a mark.
+
+**Still open — mark attachment and `RightToLeft`.** `mark.rs` still does not
+consult the flag, and `RightToLeft` is still not honoured (it governs cursive
+attachment, which we do not implement). The practical cost of the first is
+nil today — `scaled.rs` picks a mark's base by walking back past marks, which
+is what `IgnoreMarks` would have said anyway — but it will matter for GPOS 5
+(mark-to-ligature), where `IgnoreLigatures` and the mark-attachment class
+change which component a mark lands on.
 
 ## TD-FONT-CHECKS-FEATURE-MASKS-ONLY-AT-THE-APPLIED-POSITION
 

@@ -1786,28 +1786,6 @@ struct DiscardAbort {
     past_eval: bool,
 }
 
-/// An armed **fatal** abort: the status the shell ends with, and whether a
-/// handler in the way may answer 1 in its place.
-///
-/// The second field is the difference between bash's two ways of ending a
-/// shell from inside an expansion. Nearly all of them `jump_to_top_level`, and
-/// a jump is *interceptable*: whatever `setjmp (top_level)` sits between the
-/// error and the top — a subshell, a command substitution, a compound-command
-/// stage — catches it first and supplies its own status, which is why
-/// `set -u; ( echo $nope )` is 1 where the same reference at the top of a `-c`
-/// shell is 127. [`Shell::fatal_abort_status`] is that rule, and `demote` is
-/// how a site asks for it.
-///
-/// A few do not jump at all. `parser_error` (error.c) ends with
-///
-/// ```c
-///     if (exit_immediately_on_error)
-///       exit_shell (last_command_exit_value = 2);
-/// ```
-///
-/// — a direct call, with nothing in between to intercept. So the 2 stands
-/// wherever it was raised, in a script and inside a subshell alike, and such a
-/// site arms `demote: false`.
 /// Where a `${ … }` scan's single forward pass stands between quotes — see
 /// [`Shell::brace_scanned_subs_slice`].
 ///
@@ -1891,6 +1869,28 @@ enum ArithRoute {
     Aborted,
 }
 
+/// An armed **fatal** abort: the status the shell ends with, and whether a
+/// handler in the way may answer 1 in its place.
+///
+/// The second field is the difference between bash's two ways of ending a
+/// shell from inside an expansion. Nearly all of them `jump_to_top_level`, and
+/// a jump is *interceptable*: whatever `setjmp (top_level)` sits between the
+/// error and the top — a subshell, a command substitution, a compound-command
+/// stage — catches it first and supplies its own status, which is why
+/// `set -u; ( echo $nope )` is 1 where the same reference at the top of a `-c`
+/// shell is 127. [`Shell::fatal_abort_status`] is that rule, and `demote` is
+/// how a site asks for it.
+///
+/// A few do not jump at all. `parser_error` (error.c) ends with
+///
+/// ```c
+///     if (exit_immediately_on_error)
+///       exit_shell (last_command_exit_value = 2);
+/// ```
+///
+/// — a direct call, with nothing in between to intercept. So the 2 stands
+/// wherever it was raised, in a script and inside a subshell alike, and such a
+/// site arms `demote: false`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FatalAbort {
     /// The status the shell ends with where nothing intercepts the abort.

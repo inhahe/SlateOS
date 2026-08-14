@@ -107,10 +107,36 @@ is the ownership boundary.
 | **pkg** | package manager, content-addressed store, generations | `pkg/` |
 | **bench** | all benchmarks and performance infrastructure | `bench/` |
 
+### Worktrees — one checkout per lane
+
+**Work in your lane's own directory, not in `D:\visual studio projects\os`.**
+
+| Lane | Directory | Branch |
+|---|---|---|
+| **A** | `D:\visual studio projects\os-lane-a` | `lane-a` |
+| **B** | `D:\visual studio projects\os-lane-b` | `lane-b` |
+| **C** | `D:\visual studio projects\os-lane-c` | `lane-c` |
+| — | `D:\visual studio projects\os` | `main` — integration/merge tree only |
+
+A branch does **not** isolate a working directory: a repository has one
+checkout per worktree, so three agents sharing `os` and each "working on
+their own branch" all share one `HEAD`. When one runs `git checkout`, it
+moves everyone's HEAD and drags the others' uncommitted edits onto the
+switched-to branch. That is not hypothetical — it already happened here and
+interleaved two lanes' half-finished edits in one file. `git worktree` is
+the mechanism that actually isolates: one checkout per lane, each pinned to
+its branch, each with its own `target/`.
+
+Consequences: never `git checkout` a different branch inside your worktree
+(merge or cherry-pick instead); never edit files in `os`; never
+`git worktree remove` or `git branch -D` another lane's tree or branch —
+another agent may have uncommitted work there. See `roadmap.md` Step 0.5.
+
 ### Branch Strategy
 
-Each lane works on its own branch — `lane-a`, `lane-b`, `lane-c` — and
-merges to `main` when the work compiles and passes tests. Before merging:
+Each lane works on its own branch — `lane-a`, `lane-b`, `lane-c`, each in
+its own worktree above — and merges to `main` when the work compiles and
+passes tests. Before merging:
 
 - `git pull --rebase origin main` (rebase, never merge)
 - Run the full test suite

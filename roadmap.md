@@ -53,6 +53,50 @@ do not edit anything shared; ask the operator, then add the mapping to
 `SUFFIX_TO_LANE` in `scripts/which-lane.py`. Writing outside your lane is
 the one failure mode that silently destroys another agent's work.
 
+### Step 0.5 — which *directory* am I working in?
+
+**A branch does not isolate a working directory.** This is the mistake the
+first three-lane attempt made, and it cost real work: all three agents were
+started in `D:\visual studio projects\os`, each told to "work on your own
+branch". But a repository has *one* checkout per working tree, so when lane B
+ran `git checkout lane-b`, it moved every agent's `HEAD` and carried lane C's
+uncommitted edits onto lane B's branch. Branches provided zero isolation
+while creating a convincing illusion of it — two lanes' half-finished edits
+to `kernel/src/proc/thread.rs` ended up interleaved in one file, and one
+lane's work was committed under another lane's commit message.
+
+The fix is `git worktree`: one checkout per lane, each permanently on its own
+branch, each with its own `target/`.
+
+| Lane | Work in this directory | Branch |
+|---|---|---|
+| **A** | `D:\visual studio projects\os-lane-a` | `lane-a` |
+| **B** | `D:\visual studio projects\os-lane-b` | `lane-b` |
+| **C** | `D:\visual studio projects\os-lane-c` | `lane-c` |
+| — | `D:\visual studio projects\os` | `main` — **integration tree only** |
+
+Rules that follow from this:
+
+- **Never `git checkout` another branch in your worktree.** Your worktree
+  *is* your branch. Switching branches is what caused the collision above.
+  If you need something from another lane, `git merge origin/main` or
+  cherry-pick — do not switch.
+- **Never edit files in `D:\visual studio projects\os`.** It exists to merge
+  the three lanes and run integration boot tests. Treat it as read-only
+  unless you are performing a merge.
+- **Never run `git worktree remove` on a directory that is not yours,** and
+  never `git branch -D` another lane's branch. Another agent may be mid-edit
+  in it with uncommitted work, which those commands delete.
+- If your worktree does not exist yet, create it from the integration tree
+  (`git -C "D:/visual studio projects/os" worktree add "D:/visual studio
+  projects/os-lane-<x>" lane-<x>`) and move there before doing anything else.
+  If the branch is currently checked out somewhere else, git will refuse —
+  that means another tree still holds it; resolve that first rather than
+  forcing it.
+- The first build in a fresh worktree is a full one (no shared `target/`).
+  That is the intended cost: a shared `target/` between lanes would
+  reintroduce exactly the interference the worktrees exist to remove.
+
 ### The three lanes
 
 | Lane | Name | You are this lane if `CLAUDE_CONFIG_DIR` is… | Owns (writes freely) | Never writes |
@@ -153,7 +197,9 @@ version bump there rebuilds everyone's world.
 
 ### 5. Git
 
-- Each lane works on its own branch: `lane-a`, `lane-b`, `lane-c`.
+- Each lane works on its own branch **in its own worktree** — see Step 0.5.
+  Your worktree is permanently on your branch; never `git checkout` another
+  branch inside it.
 - Rebase on `main`, never merge: `git pull --rebase origin main`.
 - Merge to `main` only when your lane's tree builds **and** a boot test
   passes. Because the boot test builds *everything*, a broken lane blocks
@@ -167,17 +213,25 @@ version bump there rebuilds everyone's world.
   means someone else landed first: `git pull --rebase`, re-test, push
   again.
 
-### 6. The build and boot test are shared, serialized resources
+### 6. Builds are per-worktree; the host machine is still shared
 
-`cargo build`, `cargo test --workspace` and `scripts/boot-test.sh` all take
-the same `target/` lock and the same QEMU/serial log
-(`build/serial-test.txt`). Two agents booting at once will overwrite each
-other's serial log and read the wrong result.
+Since Step 0.5 each lane has its own worktree, so `target/`, `build/` and
+`build/serial-test.txt` are **no longer shared** — the old `build/.boot-lock`
+protocol is obsolete and two lanes may build and boot simultaneously without
+corrupting each other's serial log.
 
-**Protocol:** take the lock file `build/.boot-lock` before a boot test —
-write your lane letter and a timestamp into it, delete it when done. If it
-exists and is under 20 minutes old, another lane is booting: do something
-else and retry. A stale lock (>20 min) may be broken.
+What is still shared is the *machine*. Three concurrent full builds plus a
+QEMU instance will saturate CPU and disk, and a boot test that is starved of
+CPU can miss its serial marker and fail spuriously. So:
+
+- Before concluding that a boot test failed, check whether another lane was
+  building at the same time; re-run once on an idle machine before filing a
+  bug.
+- If `scripts/boot-test.sh` binds a fixed host port (gdb stub, monitor,
+  network forward), two simultaneous boots will collide on it. Pass a
+  lane-specific port rather than editing the default.
+- Never kill a QEMU or `cargo` process you did not start — it is probably
+  another lane's boot test. Kill by PID, never by image name.
 
 For everyday work prefer `cargo build -p <your crate>` and
 `cargo test -p <your crate>`, which contend far less than a full workspace

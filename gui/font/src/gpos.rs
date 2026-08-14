@@ -30,19 +30,35 @@
 //! own pen — because until then the base may still move, and a mark stacked on
 //! a mark stacked on a base needs the whole chain settled from the root down.
 //!
+//! # Contextual positioning
+//!
+//! Types 7 and 8 do not position anything themselves: they match a pattern and
+//! name *other* lookups to run at particular glyphs of it. The matching is the
+//! same machinery `GSUB`'s types 5 and 6 use, and lives in
+//! [`context`](crate::context); what is here is only the running of the
+//! records, in [`Positioning::nested`].
+//!
+//! It is much less bookkeeping than `GSUB`'s, and for one reason: positioning
+//! never adds or removes a glyph. The positions the match reported are still
+//! the right ones when the last record runs, whereas a substitution may have
+//! ligated a glyph away under a later record's feet.
+//!
 //! # What is not here
 //!
-//! Types 5 (mark-to-ligature), 7 (contextual) and 8 (chained contextual). See
-//! `TD-GPOS-HAS-NO-CONTEXTUAL-OR-MARK-TO-LIGATURE-POSITIONING`. Device tables
-//! are read past: they tune a value for one specific ppem, and the value
-//! without them is the designer's intent at every size.
+//! Device tables are read past: they tune a value for one specific ppem, and
+//! the value without them is the designer's intent at every size. See
+//! `TD-GPOS-HAS-NO-CONTEXTUAL-OR-MARK-TO-LIGATURE-POSITIONING`.
 
 use alloc::vec::Vec;
 
+use crate::context::{
+    MAX_NESTING, Matched, chain_match, context_match, read_records,
+};
 use crate::gsub::SubGlyph;
 use crate::mark::{attachment, lig_attachment};
 use crate::otl::{
-    ByScript, Lookup, binary_search, coverage_index, glyph_class, value_size,
+    ByScript, Lookup, MAX_SUBTABLES, binary_search, coverage_index, glyph_class, lookup_at,
+    lookup_list, value_size,
 };
 use crate::script::ScriptTags;
 use crate::sfnt::{Span, i16_at, u16_at};
@@ -61,6 +77,12 @@ const MARK_BASE_POS: u16 = 4;
 const MARK_LIG_POS: u16 = 5;
 /// Mark-to-mark attachment.
 const MARK_MARK_POS: u16 = 6;
+/// Contextual positioning: "when these glyphs stand together, run these other
+/// lookups at these of them". `GSUB` calls the same table type 5.
+const CONTEXT_POS: u16 = 7;
+/// Chained contextual positioning: the same, with a backtrack and a lookahead
+/// that must match but are not themselves positioned. `GSUB` calls it type 6.
+const CHAIN_CONTEXT_POS: u16 = 8;
 /// Extension: a subtable of another type behind a 32-bit offset, so that a
 /// large table can exceed the 16-bit offsets used everywhere else. `GSUB`
 /// numbers its own extension differently, which is why the shared walk takes
@@ -70,13 +92,20 @@ const EXTENSION_POS: u16 = 9;
 /// The lookup types this module can apply, in the order [`ByScript`] wants
 /// them: as a set, not a sequence — application order comes from the
 /// LookupList, not from here.
-const KINDS: [u16; 6] = [
+///
+/// Doubles as the set a *nested* invocation may reach, for the same reason it
+/// is the set a feature may reach: a contextual lookup may invoke another
+/// contextual one, and there is no type this module applies at the top level
+/// that it should refuse to apply under a context.
+const KINDS: [u16; 8] = [
     SINGLE_POS,
     PAIR_POS,
     CURSIVE_POS,
     MARK_BASE_POS,
     MARK_LIG_POS,
     MARK_MARK_POS,
+    CONTEXT_POS,
+    CHAIN_CONTEXT_POS,
 ];
 
 /// The positioning features applied to every run.
@@ -226,6 +255,10 @@ pub(crate) struct Run<'a> {
 #[derive(Clone, Debug)]
 pub(crate) struct Positioning {
     lookups: ByScript,
+    /// Where the font's LookupList begins. Kept because a contextual lookup
+    /// names the lookups it invokes by index into it, and those may be lookups
+    /// no feature reaches — which is exactly how a font hides a helper.
+    lookup_list: usize,
     defs: Definitions,
 }
 
@@ -233,12 +266,13 @@ impl Positioning {
     /// Resolve the positioning lookups of a face that has a `GPOS` table.
     ///
     /// `None` when no script reaches a lookup of a type this module applies,
-    /// which is a normal answer: a face whose whole `GPOS` is contextual has
-    /// nothing here to run.
+    /// which is a normal answer: a face whose `GPOS` holds only vertical
+    /// features has nothing here to run.
     pub(crate) fn parse(data: &[u8], gpos: Span, gdef: Option<Span>) -> Option<Self> {
         let lookups = ByScript::parse(data, gpos.off, &FEATURES, &KINDS, EXTENSION_POS)?;
         Some(Self {
             lookups,
+            lookup_list: lookup_list(data, gpos.off)?,
             defs: Definitions::parse(data, gdef),
         })
     }
@@ -278,11 +312,7 @@ impl Positioning {
         let mut i = 0usize;
         while i < run.glyphs.len() {
             let next = if skip.considers(run.glyphs, i) {
-                lookup
-                    .subtables
-                    .iter()
-                    .copied()
-                    .find_map(|sub| self.one(data, lookup, sub, run, i, out))
+                self.at(data, lookup, run, i, out, MAX_NESTING)
             } else {
                 None
             };
@@ -295,6 +325,33 @@ impl Positioning {
         }
     }
 
+    /// Apply one lookup at exactly one position, first matching subtable
+    /// winning, and report where to resume.
+    ///
+    /// This is also the entry point a contextual lookup calls back into, which
+    /// is why it is "at a position" rather than "across the run": a nested
+    /// lookup applies where the context matched and nowhere else. Like
+    /// `gsub`'s counterpart it does *not* re-test the skipper here — the
+    /// walk above does that for the top level, and a nested invocation is
+    /// deliberately exempt, exactly as in HarfBuzz: the context has already
+    /// decided this glyph is the one to act on, and the helper's own coverage
+    /// is what decides whether it fires.
+    fn at(
+        &self,
+        data: &[u8],
+        lookup: &Lookup,
+        run: &Run<'_>,
+        i: usize,
+        out: &mut [Adjust],
+        depth: usize,
+    ) -> Option<usize> {
+        lookup
+            .subtables
+            .iter()
+            .copied()
+            .find_map(|sub| self.one(data, lookup, sub, run, i, out, depth))
+    }
+
     /// Try one subtable at one position, reporting where to resume.
     fn one(
         &self,
@@ -304,6 +361,7 @@ impl Positioning {
         run: &Run<'_>,
         i: usize,
         out: &mut [Adjust],
+        depth: usize,
     ) -> Option<usize> {
         match lookup.kind {
             SINGLE_POS => single(data, sub, run.glyphs, i, out),
@@ -349,8 +407,71 @@ impl Positioning {
                 }
                 attach(data, sub, run.glyphs, i, j, out)
             }
+            CONTEXT_POS => {
+                let skip = Skipper::new(data, self.defs, lookup.flag, lookup.filter, u32::MAX);
+                // A local rather than a field, so that a nested contextual
+                // lookup does not reuse the buffer its caller is matching in.
+                let mut rules = Vec::new();
+                let hit = context_match(data, sub, run.glyphs, i, skip, &mut rules)?;
+                Some(self.nested(data, run, i, &hit, out, depth))
+            }
+            CHAIN_CONTEXT_POS => {
+                let skip = Skipper::new(data, self.defs, lookup.flag, lookup.filter, u32::MAX);
+                let mut rules = Vec::new();
+                let hit = chain_match(data, sub, run.glyphs, i, skip, &mut rules)?;
+                Some(self.nested(data, run, i, &hit, out, depth))
+            }
             _ => None,
         }
+    }
+
+    /// Run the lookups a context match calls for, and report how far the match
+    /// reaches.
+    ///
+    /// Simpler than `gsub`'s counterpart in exactly the one way that makes
+    /// `gsub`'s hard: positioning never adds or removes a glyph, so the
+    /// absolute positions the match reported are still the right ones when the
+    /// last record runs. There is nothing to re-index and nothing that can
+    /// stop existing halfway through.
+    fn nested(
+        &self,
+        data: &[u8],
+        run: &Run<'_>,
+        start: usize,
+        hit: &Matched,
+        out: &mut [Adjust],
+        depth: usize,
+    ) -> usize {
+        // The span the match covers, which is not the number of glyphs it
+        // matched: anything the lookup's flag skipped stands inside it and
+        // still occupies a position the caller must step over.
+        let span = hit.end.saturating_sub(start).max(1);
+        // Out of depth: the context still counts as matched, so the caller
+        // steps over it, but nothing is invoked. Silently applying at depth
+        // zero is what would let a lookup that invokes itself run forever.
+        if depth == 0 {
+            return span;
+        }
+        let mut records = Vec::new();
+        read_records(data, hit.records, hit.count, &mut records);
+        for rec in &records {
+            let Some(&at) = hit.positions().get(usize::from(rec.at)) else {
+                continue;
+            };
+            let mut budget = MAX_SUBTABLES;
+            let Some(lookup) = lookup_at(
+                data,
+                self.lookup_list,
+                rec.lookup,
+                &KINDS,
+                EXTENSION_POS,
+                &mut budget,
+            ) else {
+                continue;
+            };
+            self.at(data, &lookup, run, at, out, depth.saturating_sub(1));
+        }
+        span
     }
 }
 
@@ -1088,5 +1209,232 @@ mod tests {
         // Both chains cleared; the test is that this returned at all.
         assert_eq!(out[0].chain, 0);
         assert_eq!(out[1].chain, 0);
+    }
+
+    /// A whole `GPOS` table holding `lookups` in LookupList order, of which
+    /// only lookup 0 is reached by a feature.
+    ///
+    /// The rest are reachable *only* by index, which is how a real face ships
+    /// a contextual lookup's helpers: a helper a feature also selected would
+    /// run over the whole run as well as under the context, which is the one
+    /// thing a contextual rule exists to prevent. So this shape is not a
+    /// convenience — it is the arrangement the tests are about.
+    fn gpos_table(lookups: &[(u16, Vec<u8>)]) -> Vec<u8> {
+        let n = lookups.len();
+        // ScriptList: one DFLT script whose DefaultLangSys names feature 0.
+        // count(2) + record(6) + Script(4) + LangSys(6 + one index).
+        let script_len = 2 + 6 + 4 + 8;
+        let feature_list = 10 + script_len;
+        // count(2) + record(6), then a 6-byte Feature naming lookup 0.
+        let lookup_list = feature_list + 8 + 6;
+        // count(2) + one offset each, then one 8-byte Lookup header each.
+        let lookups_at = lookup_list + 2 + n * 2;
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&be16(1)); // major
+        out.extend_from_slice(&be16(0)); // minor
+        out.extend_from_slice(&be16(10)); // scriptList
+        out.extend_from_slice(&be16(u16::try_from(feature_list).unwrap()));
+        out.extend_from_slice(&be16(u16::try_from(lookup_list).unwrap()));
+
+        out.extend_from_slice(&be16(1)); // scriptCount
+        out.extend_from_slice(b"DFLT");
+        out.extend_from_slice(&be16(8)); // Script, from the ScriptList
+        out.extend_from_slice(&be16(4)); // defaultLangSys, from the Script
+        out.extend_from_slice(&be16(0)); // langSysCount
+        out.extend_from_slice(&be16(0)); // lookupOrder, always zero
+        out.extend_from_slice(&be16(0xFFFF)); // no required feature
+        out.extend_from_slice(&be16(1)); // featureIndexCount
+        out.extend_from_slice(&be16(0)); // feature 0
+
+        out.extend_from_slice(&be16(1)); // featureCount
+        out.extend_from_slice(b"kern");
+        out.extend_from_slice(&be16(8)); // Feature, from the FeatureList
+        out.extend_from_slice(&be16(0)); // featureParams
+        out.extend_from_slice(&be16(1)); // lookupIndexCount
+        out.extend_from_slice(&be16(0)); // lookup 0
+
+        out.extend_from_slice(&be16(u16::try_from(n).unwrap()));
+        for i in 0..n {
+            let at = lookups_at + i * 8 - lookup_list;
+            out.extend_from_slice(&be16(u16::try_from(at).unwrap()));
+        }
+        // Every Lookup header is the same size, so the subtables sit in a
+        // block after all of them and each offset is measured from its own.
+        let mut sub_at = lookups_at + n * 8;
+        for (i, (kind, subtable)) in lookups.iter().enumerate() {
+            let lookup = lookups_at + i * 8;
+            out.extend_from_slice(&be16(*kind));
+            out.extend_from_slice(&be16(0)); // lookupFlag
+            out.extend_from_slice(&be16(1)); // subTableCount
+            out.extend_from_slice(&be16(u16::try_from(sub_at - lookup).unwrap()));
+            sub_at += subtable.len();
+        }
+        for (_, subtable) in lookups {
+            out.extend_from_slice(subtable);
+        }
+        out
+    }
+
+    /// A `SequenceContextFormat3`: one coverage per input position, then the
+    /// `SequenceLookupRecord`s.
+    ///
+    /// Format 3 rather than 1 or 2 because the rule-set formats are matched by
+    /// [`context`](crate::context), whose own tests cover all three; what is
+    /// new here is what happens *after* a match, so the tests use the format
+    /// that gets there with the least scaffolding.
+    fn context3(inputs: &[u16], records: &[(u16, u16)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&be16(3));
+        out.extend_from_slice(&be16(u16::try_from(inputs.len()).unwrap()));
+        out.extend_from_slice(&be16(u16::try_from(records.len()).unwrap()));
+        let mut at = 6 + inputs.len() * 2 + records.len() * 4;
+        let mut covs = Vec::new();
+        for &gid in inputs {
+            out.extend_from_slice(&be16(u16::try_from(at).unwrap()));
+            let cov = coverage1(&[gid]);
+            at += cov.len();
+            covs.extend_from_slice(&cov);
+        }
+        for &(at, lookup) in records {
+            out.extend_from_slice(&be16(at));
+            out.extend_from_slice(&be16(lookup));
+        }
+        out.extend_from_slice(&covs);
+        out
+    }
+
+    /// A `ChainedSequenceContextFormat3`.
+    fn chain3(back: &[u16], inputs: &[u16], ahead: &[u16], records: &[(u16, u16)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut covs = Vec::new();
+        // header(2) + three counts(2 each) + one offset per glyph of the three
+        // parts + the record count(2) + the records.
+        let total = back.len() + inputs.len() + ahead.len();
+        let mut at = 2 + 6 + total * 2 + 2 + records.len() * 4;
+        out.extend_from_slice(&be16(3));
+        for part in [back, inputs, ahead] {
+            out.extend_from_slice(&be16(u16::try_from(part.len()).unwrap()));
+            for &gid in part {
+                out.extend_from_slice(&be16(u16::try_from(at).unwrap()));
+                let cov = coverage1(&[gid]);
+                at += cov.len();
+                covs.extend_from_slice(&cov);
+            }
+        }
+        out.extend_from_slice(&be16(u16::try_from(records.len()).unwrap()));
+        for &(at, lookup) in records {
+            out.extend_from_slice(&be16(at));
+            out.extend_from_slice(&be16(lookup));
+        }
+        out.extend_from_slice(&covs);
+        out
+    }
+
+    /// Position `ids` with the whole table at `data`, and report the x offsets.
+    fn positioned(data: &[u8], ids: &[u16]) -> Vec<i32> {
+        let run = glyphs(ids);
+        let advances = alloc::vec![0i32; ids.len()];
+        let marks = alloc::vec![false; ids.len()];
+        let pos = Positioning::parse(data, span(0, data.len()), None).unwrap();
+        pos.apply(
+            data,
+            &Run {
+                glyphs: &run,
+                advances: &advances,
+                marks: &marks,
+                rtl: false,
+                script: None,
+            },
+        )
+        .iter()
+        .map(|a| a.x_offset)
+        .collect()
+    }
+
+    fn span(off: usize, len: usize) -> Span {
+        Span { off, len }
+    }
+
+    /// A single adjustment that moves `gid` right by `dx`, for a context to
+    /// invoke.
+    fn nudge(gid: u16, dx: i16) -> Vec<u8> {
+        single_pos1(
+            &[gid],
+            Value {
+                x_placement: dx,
+                ..Value::default()
+            },
+        )
+    }
+
+    #[test]
+    fn a_context_positions_only_the_glyph_its_record_names() {
+        // Lookup 1 covers glyph 11 and no feature reaches it, so the only way
+        // it can fire is through the context — which names input 1 of the pair
+        // (10, 11). The stray 11 at the front is the control: if the helper
+        // were reachable on its own, it would have moved too.
+        let data = gpos_table(&[
+            (CONTEXT_POS, context3(&[10, 11], &[(1, 1)])),
+            (SINGLE_POS, nudge(11, 70)),
+        ]);
+        assert_eq!(positioned(&data, &[11, 10, 11]), alloc::vec![0, 0, 70]);
+        // No 10 to start the context, so nothing fires at all.
+        assert_eq!(positioned(&data, &[11, 11]), alloc::vec![0, 0]);
+    }
+
+    #[test]
+    fn a_context_may_position_a_glyph_the_helper_alone_would_not_reach() {
+        // Two records naming two different inputs, one of which is the glyph
+        // the context was keyed on. This is what separates "run the lookup at
+        // the match" from "run it at the glyph the record names".
+        let data = gpos_table(&[
+            (CONTEXT_POS, context3(&[10, 11], &[(0, 1), (1, 2)])),
+            (SINGLE_POS, nudge(10, 5)),
+            (SINGLE_POS, nudge(11, 9)),
+        ]);
+        assert_eq!(positioned(&data, &[10, 11]), alloc::vec![5, 9]);
+    }
+
+    #[test]
+    fn a_record_naming_a_glyph_past_the_input_is_ignored() {
+        // `at` is an index into the matched input, and a font may name one the
+        // rule never matched. Letting it through would position whatever glyph
+        // happened to stand there.
+        let data = gpos_table(&[
+            (CONTEXT_POS, context3(&[10], &[(4, 1)])),
+            (SINGLE_POS, nudge(10, 70)),
+        ]);
+        assert_eq!(positioned(&data, &[10, 10]), alloc::vec![0, 0]);
+    }
+
+    #[test]
+    fn a_chained_context_will_not_fire_without_its_backtrack() {
+        // The lookahead is there for the same reason: both must match, and
+        // neither is positioned — only the input is.
+        let data = gpos_table(&[
+            (CHAIN_CONTEXT_POS, chain3(&[7], &[10], &[8], &[(0, 1)])),
+            (SINGLE_POS, nudge(10, 40)),
+        ]);
+        assert_eq!(positioned(&data, &[7, 10, 8]), alloc::vec![0, 40, 0]);
+        // Wrong glyph before, and after.
+        assert_eq!(positioned(&data, &[6, 10, 8]), alloc::vec![0, 0, 0]);
+        assert_eq!(positioned(&data, &[7, 10, 9]), alloc::vec![0, 0, 0]);
+        // No backtrack at all: the input is at the start of the run.
+        assert_eq!(positioned(&data, &[10, 8]), alloc::vec![0, 0]);
+    }
+
+    #[test]
+    fn a_context_that_invokes_itself_stops_at_the_nesting_cap() {
+        // Lookup 0 names itself at its own input glyph, which nothing in the
+        // format forbids and a corrupt font can arrange. The cap is what makes
+        // this terminate; the second record is what makes the depth visible,
+        // since each level that got to run adds its own nudge.
+        let data = gpos_table(&[
+            (CONTEXT_POS, context3(&[10], &[(0, 0), (0, 1)])),
+            (SINGLE_POS, nudge(10, 1)),
+        ]);
+        let dx = i32::try_from(MAX_NESTING).unwrap();
+        assert_eq!(positioned(&data, &[10]), alloc::vec![dx]);
     }
 }

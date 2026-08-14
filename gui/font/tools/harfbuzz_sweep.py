@@ -87,6 +87,21 @@ CORPUS = [
     # This is the string mark-to-ligature positioning exists for, and the only
     # one in the corpus where getting the component wrong is visible.
     "\\u0644\\u064e\\u0627",
+    # Pointed Hebrew: SHIN QAMATS SHIN-DOT, LAMED, VAV HOLAM, FINAL MEM. The
+    # points sit at a height that depends on the letter under them and on what
+    # else is already there.
+    "\\u05e9\\u05b8\\u05c1\\u05dc\\u05d5\\u05b9\\u05dd",
+    # LAMED, LAMED QAMATS METEG. The meteg is a vertical stroke that shares the
+    # space under the letter with whatever vowel is already there, so a Hebrew
+    # face shifts the vowel aside — and writes that shift as a *chained
+    # contextual* rule keyed on "letter, vowel, meteg". This is the string GPOS
+    # types 7 and 8 exist for; the pointed-Hebrew entry above has no meteg and
+    # so reaches no such rule.
+    "\\u05dc\\u05dc\\u05b8\\u05bd",
+    # Thai with a tone mark over a vowel over a consonant. A tone mark that has
+    # a vowel under it must be lifted clear of it, and Thai faces write that
+    # lift as a contextual rule too.
+    "\\u0e17\\u0e35\\u0e48\\u0e19\\u0e35\\u0e48",
     # Devanagari, the reason script tags have two spellings.
     "\\u0939\\u093f\\u0928\\u094d\\u0926\\u0940",
     # Scriptless text, which selects the font's default features.

@@ -172,6 +172,117 @@ again. That is a different change with a different risk profile, so it is
 logged below as TD-CONSOLE-ECHO-RUNS-IN-HARD-IRQ-CONTEXT rather than
 smuggled into a deadlock fix.
 
+### [A] B-RTL8139-SEND-SPINS-FOR-THE-EVENT-WHOSE-HANDLER-WANTS-THE-LOCK-IT-HOLDS. `send()` polls 100 000 times for TX-complete while holding the lock `handle_irq` blocks on — 2026-08-14 — OPEN
+
+**Found by auditing the bug *class* rather than the bug.** After fixing
+B-CONSOLE-LOCK-IS-TAKEN-FROM-A-HARD-IRQ above, the obvious question was
+whether the console was the only place a hard-IRQ handler blocks on a
+lock that task context also takes. `handle_device_irq`
+(`kernel/src/ioapic.rs:731`) is the sole hard-IRQ device dispatch, so the
+audit is bounded and can be made *complete* rather than sampled:
+
+| Callee in `handle_device_irq` | Verdict |
+|---|---|
+| `cputime::enter_irq` / `exit_irq` | lock-free (atomics) |
+| `ktrace::record` | lock-free |
+| `keyboard::handle_scancode` (irq 1) | was the console bug — now fixed |
+| `mouse::handle_irq` (irq 12) | lock-free |
+| `virtio::blk::handle_irq` | lock-free (atomics + port I/O) |
+| `virtio::net::handle_irq` | lock-free (its `DEVICE` is never touched from IRQ) |
+| `rtl8139::handle_irq` | **plain `DEVICE.lock()` — this entry** |
+| `irq_notify`, `irq_storm::record_irq` | lock-free |
+| `sched::try_wake` | `SCHED.try_lock()` — correct by design, returns false and raises a softirq |
+| `apic::eoi` | lock-free |
+| `softirq::process_pending` | re-enables interrupts first — different class, see below |
+
+One finding. `e1000` was checked too and is clean *for a different reason*:
+it has no `handle_irq` at all (it is polled), so its `DEVICE` is
+task-context-only.
+
+**The bug.** `rtl8139::handle_irq` (`kernel/src/rtl8139.rs:553`) does
+`let guard = DEVICE.lock();` in hard-IRQ context. The same `DEVICE`
+(line 181) is taken in task context by `with_device` (line 361), which is
+what `send` (366) and `recv` (372) go through — and `with_device` holds
+the lock across the whole closure.
+
+**Why this one is worse than the console.** Look at what `send` does while
+holding the lock (`kernel/src/rtl8139.rs:392`):
+
+```rust
+// Wait for the descriptor to become available (OWN bit clear
+// means hardware finished with it).
+for _ in 0..100_000u32 {
+    let status = unsafe { port::inl(self.io_base + status_reg) };
+    if status & TX_STATUS_OWN == 0 { break; }
+}
+```
+
+The OWN bit is cleared by the hardware finishing the previous transmit —
+**which is precisely the event that raises the TX-complete interrupt.** So
+the code spins, holding `DEVICE`, waiting for the exact hardware event
+whose interrupt handler will block on `DEVICE`. This is not a narrow race
+window that a busy system might hit; it is a loop that waits for the
+trigger while holding the trigger handler's lock. On any TX-active link
+the interrupt lands inside that loop essentially by construction.
+
+**Why it hasn't been seen.** The RTL8139 is not the NIC the QEMU boot test
+runs — virtio-net and e1000 are — so `handle_irq` never fires here. The
+driver is untested-in-anger, not correct.
+
+**One mitigating difference from the console bug:** `DEVICE` is already a
+`crate::sync::Mutex` (`use crate::sync::Mutex` at line 26), so the 30-second
+stall detector *will* fire and name the lock. This hangs loudly rather than
+silently. It still hangs.
+
+**Proper fix.** Change all `DEVICE` acquisitions in `rtl8139.rs` to
+`lock_irqsave()` — the same structural fix as the console, for the same
+reason. Note that on this driver `lock_irqsave` inside `send` is not merely
+protective: it is what makes the poll loop terminate, because with the
+interrupt masked the handler cannot run at all until `send` releases, and
+the OWN bit is observable by polling regardless of whether the interrupt
+was delivered.
+
+Separately, the 100 000-iteration poll while holding a lock is bad shape on
+its own merits (it is a busy-wait for a device with no bound in time). The
+right long-term structure is the one `virtio::blk` already uses: the ISR
+acknowledges at the device with atomics only and wakes a task, and the
+descriptor wait becomes a block-and-wake rather than a spin. That is a
+driver rewrite, so it is not folded into the deadlock fix.
+
+**The exception class was audited too, and is clean — by design, not by
+luck.** This matters because `cli` does not mask faults, so an exception
+handler that blocks on a task-held lock cannot be fixed by `lock_irqsave`
+at all; it has to use `try_lock`. Checked:
+
+* `idt.rs` itself takes **no** locks (0 acquisition sites in the file).
+* `mm::fault::resolve` (`kernel/src/mm/fault.rs:262`) uses
+  `KERNEL_AS.try_lock().ok_or(KernelError::PageFault)?`, with a comment
+  naming the exact hazard: *"if we faulted while holding this lock (e.g.,
+  during VMA manipulation), the fault is in critical code and cannot be
+  resolved."* `add_kernel_vma`/`remove_kernel_vma` (290, 299) keep the plain
+  `lock()`, correctly — they are task-context-only and the fault path never
+  blocks on them.
+* `proc::pcb::try_resolve_fault` (`kernel/src/proc/pcb.rs:5370`) uses
+  `PROCESS_TABLE.try_lock()`, and further drops the guard *before* CoW
+  resolution because that path allocates.
+
+**The pattern worth noticing.** The memory-management code was written with
+this hazard in mind throughout — `try_lock` plus a comment explaining the
+re-entrancy every time. The device and console code was not: plain `lock()`
+everywhere, no comment, no defence. The discipline exists in one half of the
+tree and is absent from the other, which is why both bugs found so far are
+in drivers/console and none are in `mm`. When auditing further, weight
+driver code accordingly.
+
+**Audit scope note, so the next session knows what was *not* covered.**
+Softirq handlers (`softirq::process_pending`, called after EOI with
+interrupts *re-enabled*) are a third class: they can be interrupted by a
+further device IRQ, so a lock shared between a softirq handler and a
+hard-IRQ handler has the same failure mode. That intersection is currently
+empty because the only hard-IRQ lock acquisition in the whole tree is the
+`rtl8139` one above — but it stops being empty the moment another ISR
+learns to take a lock, so the check has to be redone whenever one does.
+
 ### [A] TD-CONSOLE-ECHO-RUNS-IN-HARD-IRQ-CONTEXT. Keyboard echo renders glyphs to the framebuffer from inside the IRQ 1 handler — 2026-08-14 — OPEN
 
 **The debt.** `handle_device_irq` → `keyboard::handle_scancode` →
@@ -59419,7 +59530,60 @@ feature within a week.
 burned five boots on "ownership tagging costs 8500 cycles" that was also the
 emulator rather than the code. Same underlying trap, one level up.
 
-### [A] W-BENCH-THREE-BENCHMARKS-ABOVE-SUITE-DRIFT-WITH-NO-MATCHING-CODE-CHANGE. firewall_check / shm_create_close / ipc_semaphore — WATCH, needs a third data point
+### [A] W-BENCH-THREE-BENCHMARKS-ABOVE-SUITE-DRIFT-WITH-NO-MATCHING-CODE-CHANGE. firewall_check / shm_create_close / ipc_semaphore — ✅ RESOLVED 2026-08-14: all three were noise
+
+**RESOLUTION (2026-08-14, third run `a18ea83a9`).** All three were noise, and
+the third run says so about as loudly as data can. They came back not merely
+to the suite median but to *below* their first-run values — and they are the
+**top three entries in the IMPROVED list**, in the same order they had
+occupied in REGRESSED:
+
+| benchmark | run 1 `bf26aabdb` | run 2 `17dbde179` | run 3 `a18ea83a9` | verdict |
+|---|---|---|---|---|
+| `firewall_check` | 270 ns | 482 ns | **228 ns** | run 2 is the outlier |
+| `shm_create_close` | 58 556 ns | 84 996 ns | **56 734 ns** | run 2 is the outlier |
+| `ipc_semaphore` | 11 676 ns | 16 112 ns | **11 219 ns** | run 2 is the outlier |
+
+Runs 1 and 3 agree to within 3–16 % in every case; run 2 stands alone. A real
+regression does not un-regress with no code change, so the correct reading is
+that run 2 was the anomaly, not run 3 — i.e. these were never regressions at
+all, and the flat 25 % threshold flagged them purely because their intrinsic
+spread exceeds it. The prediction recorded below — that `firewall_check` at
+270 ns would prove the noisiest by construction — held: its spread is 111 %,
+the second-widest in the suite.
+
+**Measured per-benchmark spread (max/min across the three runs), which is the
+number the comparator has been missing all along:**
+
+* median across all 63 benchmarks: **13 %**
+* but the tail is long: `crypto_ed25519_verify` 416 %, `firewall_check` 111 %,
+  `tcp_checksum_v6` 56 %, `shm_create_close` 50 %, `sched_pick_next` 49 %,
+  `syscall_dispatch` 44 %, `ipc_semaphore` 44 %.
+
+So a flat 25 % threshold is below the natural spread of at least seven
+benchmarks and far above that of the median one — it is simultaneously too
+tight and too loose, which is exactly the failure mode observed. **This
+promotes the "proper fix" named below from a suggestion to the next task:
+give the comparator a per-benchmark variance estimate.** Logged as
+TD-BENCH-COMPARATOR-NEEDS-PER-BENCHMARK-VARIANCE below.
+
+**Caveat recorded honestly: run 3 is partially contaminated, by me.** I ran
+greps, `git`, and `python` in the same window as the benchmark suite, having
+explicitly noted beforehand that the machine should be idle. Median drift
+correction removes a *uniform* slowdown; it cannot remove contention that
+lands on whichever benchmark happens to be running at the time. That is the
+most likely explanation for run 3's own new outliers —
+`crypto_ed25519_verify` (30.7M → 31.4M → **158.6M**, i.e. two tight samples
+then 5.1×) is the longest-running benchmark in the suite and therefore the
+most exposed to a contention window. Do **not** treat that as a regression on
+this evidence; see TD-BENCH-RUNS-ARE-CONTAMINATED-BY-THE-AGENTS-OWN-COMMANDS
+below.
+
+The original WATCH text follows unchanged.
+
+---
+
+### [A] W-BENCH-THREE-BENCHMARKS-ABOVE-SUITE-DRIFT-WITH-NO-MATCHING-CODE-CHANGE (original entry). firewall_check / shm_create_close / ipc_semaphore — WATCH, needs a third data point
 
 **Where:** benchmarks `firewall_check`, `shm_create_close`, `ipc_semaphore`;
 history in `bench/history.jsonl` (host `Logoplex3`).
@@ -59447,6 +59611,80 @@ the next question is whether the `handlers.rs` change shifted code layout
 
 **Do not** act on either theory from the current two runs; that is exactly the
 inference-from-insufficient-samples mistake the entry above documents.
+
+### [A] TD-BENCH-COMPARATOR-NEEDS-PER-BENCHMARK-VARIANCE. A flat 25% threshold is below the natural spread of seven benchmarks and far above the median one's — 2026-08-14 — OPEN
+
+**Where:** `scripts/bench-history.py`, `diff()` / `THRESHOLD_PCT`.
+
+**What.** The comparator flags a benchmark when its drift-corrected change
+exceeds a fixed ±25 %. Three runs of history now show that a single flat
+threshold cannot work, because the suite's per-benchmark spread (max/min
+across runs, *with no code change explaining it*) ranges over an order of
+magnitude:
+
+* median benchmark: 13 % spread → 25 % is far too loose; a genuine 20 %
+  regression here would pass unnoticed.
+* `crypto_ed25519_verify` 416 %, `firewall_check` 111 %, `tcp_checksum_v6`
+  56 %, `shm_create_close` 50 %, `sched_pick_next` 49 %, `syscall_dispatch`
+  44 %, `ipc_semaphore` 44 % → 25 % is far too tight; these produce false
+  positives every single run.
+
+Two investigation cycles have now been spent hand-adjudicating false
+positives thrown by this threshold (see the RESOLVED entry above and
+B-BENCH-COMPARATOR-CALLS-SUITE-WIDE-HOST-NOISE-A-REGRESSION). That is the
+signal to fix the estimator rather than keep adjudicating its output.
+
+**Proper fix.** Give each benchmark its own noise band derived from its own
+history, and flag only moves outside it. Concretely: keep the existing
+whole-suite median drift correction (it removes the common factor correctly
+and is not in question), then compare the drift-corrected change against a
+robust per-benchmark dispersion — median absolute deviation of the log-ratios
+across the recorded runs — rather than a constant. Retain a flat *floor* so
+that a benchmark with an implausibly tight history cannot be flagged on a
+sub-noise move, and require a minimum number of runs (the existing
+`MIN_SAMPLES_FOR_DRIFT` precedent) before the per-benchmark band is trusted,
+falling back to the flat threshold until then.
+
+**Test it the same way the drift fix was tested:** replay the estimator
+against the recorded `bench/history.jsonl` and confirm it drops the three
+now-known-noise entries while still flagging a deliberately injected
+regression. Do not ship it on reasoning alone — that is the mistake this
+whole thread of entries keeps documenting.
+
+### [A] TD-BENCH-RUNS-ARE-CONTAMINATED-BY-THE-AGENTS-OWN-COMMANDS. I ran greps and git during a benchmark suite after noting the machine had to be idle — 2026-08-14 — OPEN
+
+**What.** The benchmark suite runs under QEMU TCG, which is pure emulation and
+entirely CPU-bound, so any other load on the host scales the measurements.
+During run 3 (`a18ea83a9`) I ran roughly a dozen `grep`, `git`, `python` and
+file-read commands in the same window, despite having stated at the start of
+the run that the machine needed to stay idle for the numbers to mean anything.
+
+**Why the existing drift correction does not save it.** The median-ratio
+correction removes a *uniform* whole-suite factor — a machine that is
+consistently 6 % slower for the whole run. Contention from a handful of short
+commands is not uniform: it lands on whichever benchmark is executing at that
+moment and leaves the rest untouched. It therefore shows up as exactly what a
+real regression looks like — one or two benchmarks clear of an unchanged
+median. `crypto_ed25519_verify` is the canary: 30.7M → 31.4M → 158.6M ns,
+i.e. two runs agreeing within 2 % and then a 5.1× jump, on a benchmark whose
+source did not change and which is the longest-running in the suite (so the
+most likely to overlap a command).
+
+**Proper fix — structural, not a discipline reminder.** "Remember to stay
+idle" is not a fix; it already failed once, the same day it was written down.
+Make contamination *detectable* instead: have the bench harness re-run one
+cheap, low-variance reference benchmark at the start and again at the end of
+the suite, and record both. If the two disagree by more than a few percent,
+the host load changed mid-run and the whole run should be marked contaminated
+in `history.jsonl` and excluded from comparison (or at minimum reported as
+such). This turns "the operator/agent must behave" into a property the data
+itself can verify — the same principle as the stall detectors: a check that
+cannot fire is indistinguishable from a check that passes.
+
+**Interim mitigation until that exists:** when a `--bench` run is in flight,
+do read-only work only if it is genuinely necessary, and prefer to simply
+wait. Treat any single-benchmark outlier in a run that overlapped agent
+activity as unproven.
 
 ### [A] B-BENCH-WATCHLIST-WATCHED-LESS-THAN-HALF-THE-SUITE-IT-GUARDS. `BENCH_CRITICAL_PATHS` omitted idt.rs, fs/, net/ and crypto.rs — FIXED 2026-08-14
 

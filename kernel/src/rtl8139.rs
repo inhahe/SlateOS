@@ -178,7 +178,21 @@ pub struct Rtl8139Device {
 }
 
 /// Global device instance.
-static DEVICE: Mutex<Option<Rtl8139Device>> = Mutex::new(None);
+///
+/// Reachable from BOTH task context (`with_device`, and so `send`/`recv`)
+/// and hard-IRQ context ([`handle_irq`]), so **every** acquisition must use
+/// `lock_irqsave`, never the plain `lock()`. With a plain acquire the driver
+/// deadlocks by construction rather than by race: `Rtl8139Device::send`
+/// holds this lock while spinning up to 100 000 times for the TX descriptor's
+/// OWN bit to clear, and the hardware event that clears OWN is the very one
+/// that raises the TX-complete interrupt whose handler blocks on this lock.
+/// See `known-issues.md →
+/// B-RTL8139-SEND-SPINS-FOR-THE-EVENT-WHOSE-HANDLER-WANTS-THE-LOCK-IT-HOLDS`.
+///
+/// Masking interrupts for the hold is also what makes that poll loop
+/// terminate: the OWN bit is observable by polling whether or not the
+/// interrupt was delivered, so deferring the interrupt costs nothing here.
+static DEVICE: Mutex<Option<Rtl8139Device>> = Mutex::named(None, b"RTL8139_DEV");
 
 /// IRQ line used by this device (set during init).
 static IRQ_LINE: AtomicU8 = AtomicU8::new(0);
@@ -347,7 +361,7 @@ pub fn init(hhdm_offset: u64) {
         _tx_frame: Some(tx_frame),
     };
 
-    *DEVICE.lock() = Some(device);
+    *DEVICE.lock_irqsave() = Some(device);
 
     crate::serial_println!("[rtl8139] RTL8139 initialized (io_base={:#06x}, IRQ {})",
         io_base, pci_dev.irq_line);
@@ -358,7 +372,7 @@ pub fn with_device<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&mut Rtl8139Device) -> R,
 {
-    let mut guard = DEVICE.lock();
+    let mut guard = DEVICE.lock_irqsave();
     guard.as_mut().map(f)
 }
 
@@ -556,7 +570,7 @@ pub fn handle_irq(irq: u32) {
         return;
     }
 
-    let guard = DEVICE.lock();
+    let guard = DEVICE.lock_irqsave();
     if let Some(ref dev) = *guard {
         // Read ISR to determine interrupt source and acknowledge.
         // SAFETY: Standard register read/write.
@@ -588,7 +602,7 @@ fn find_rtl8139() -> Option<pci::PciDevice> {
 
 /// Verify driver initialization.
 pub fn self_test() {
-    let guard = DEVICE.lock();
+    let guard = DEVICE.lock_irqsave();
     if guard.is_none() {
         crate::serial_println!("[rtl8139] Self-test: no device (skipped)");
         return;

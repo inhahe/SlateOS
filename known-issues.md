@@ -58271,20 +58271,132 @@ four `add*` bugs were one bug, replicated four times by four separate readings
 of four man pages that each say only "EBADF … the value specified by fildes is
 negative".
 
-**What remains.** The ~185 surviving `is_null() -> EFAULT` sites have not been
+**Eighth pass, 2026-08-14 — `file.rs` (28 sites).** The last dense cluster, and
+the one that most rewarded reading. `file.rs` wraps thin syscalls, so — as in
+`socket.rs` — the constants were nearly all right and the *orderings* were
+wrong; but three of the entry points here have a **three- or four-deep** rank,
+and we had several of them almost exactly reversed.
+
+- **`read`/`write` short-circuited a zero-length call above the descriptor
+  lookup.** `ksys_read` (fs/read_write.c:604) is `fdget_pos` first, and there
+  is no zero-length shortcut anywhere upstream; `EFAULT` arises only later from
+  `access_ok` inside `vfs_read` (:458). So `read(closed_fd, buf, 0)` was
+  silently returning 0. This is the *same bug* the sixth pass fixed in
+  `send`/`recv` — and a zero-length read is a common liveness probe, so the
+  silent success is the worst possible answer.
+- **`pread`/`pwrite` ran a four-deep order backwards.** `ksys_pread64` (:652)
+  is `pos < 0` → `EINVAL`, `fdget` → `EBADF`, `!FMODE_PREAD` → `ESPIPE`, then
+  `EFAULT`. We had `EFAULT`, zero-count, `EINVAL`, `EBADF`, `ESPIPE`.
+- **The `pread`/`preadv` tests had been passing `fd 0`** — a console — so once
+  `ESPIPE` was ordered correctly they *all* failed. They had only ever
+  exercised the shortcuts that used to sit above the descriptor checks; none of
+  them had ever reached the code they were named for. Same failure mode as
+  `test_phase201_bind_null_addr_efault_before_eacces` in the sixth pass, at
+  larger scale: **a test that picks a convenient fd rather than the right one
+  silently stops testing anything once the ordering is fixed.**
+- **The vectored calls folded three distinct verdicts into one `EINVAL`.**
+  `iov.is_null() || iovcnt <= 0 || iovcnt > 1024` was a single branch.
+  `iovec_from_user` (lib/iov_iter.c) separates them: `nr_segs == 0` returns an
+  *empty iterator* (success, 0 bytes) before anything else, `nr_segs >
+  UIO_MAXIOV` is `EINVAL`, and `copy_iovec_from_user` is `EFAULT`. The zero
+  case is deliberate and commented upstream — "SuS says the readv() function
+  *may* fail if the iovcnt argument was less than or equal to 0 … Linux has
+  traditionally returned zero for zero segments" — and we were failing it.
+  Note the interaction with the previous point: the zero-segment call is
+  exactly the one a per-segment loop never checks a descriptor for, so it is
+  also the one that must still report `EBADF`.
+- **`truncate` checked the path before the length, and its own sibling ten
+  lines below already had it right.** `do_sys_truncate` (fs/open.c:129) rejects
+  a negative length before `user_path_at`; `do_sys_ftruncate` (:164-170) puts
+  the same `EINVAL` above `fdget`'s `EBADF`, and `ftruncate` implemented that
+  correctly. Adjacent functions, same file, one right and one wrong — the
+  sixth pass's "do not generalise from a sibling" habit cuts both ways: you
+  also cannot assume a sibling's *correctness* transfers.
+- **`open`/`openat` never rejected `O_DIRECTORY|O_CREAT`** (nor `O_TMPFILE`
+  without `O_DIRECTORY`, nor without write access). `build_open_flags`
+  (fs/open.c) returns `EINVAL` for all three and runs ahead of both
+  `getname(filename)` and `do_filp_open`'s use of `dfd`, so they outrank
+  `EFAULT` for the path *and* `EBADF` for the directory. Factored into
+  `validate_open_flags()` so both entry points run it in upstream's position.
+  Our `EOPNOTSUPP` for a well-formed-but-unsupported `O_TMPFILE` correctly
+  ranks below them: it corresponds to `do_tmpfile`, reached only inside
+  `path_openat`.
+- **`name_to_handle_at` — the third invented justification.** It checked
+  `pathname`, `handle` and `mount_id` together, with a doc comment conceding
+  that Linux "defers `handle`/`mount_id` checks until after `user_path_at`, but
+  our model can do the cheap NULL check up front **without observable
+  difference**." The difference is observable and obvious:
+  `name_to_handle_at(bad_fd, "p", NULL, NULL, 0)` is `EBADF` upstream and was
+  `EFAULT` here. After `bind` (sixth pass) and `posix_spawnattr_setflags`
+  (seventh), that is three doc comments that *argued for* an order instead of
+  citing one, and all three arguments were wrong.
+- **`openat2` was already correct**, cited step by step against `sys_openat2`.
+  Worth recording: the pass is not uniformly finding bugs, and the one function
+  that had been written *from* the upstream source rather than from a man page
+  is the one that needed nothing.
+
+**The habit this pass adds — and it is the most useful one so far.** Every
+wrong answer in this file was produced by a comment or a test that reasoned
+about what an errno *ought* to be. Every right answer was produced by someone
+reading the function. So: **a doc comment that argues for an ordering is a
+defect marker.** Three for three. When you find one, do not evaluate the
+argument — go read the upstream function, because the argument exists precisely
+because nobody did.
+
+### [B] D-POSIX-SOCKET-META-WAS-NOT-SCOPED-TO-ITS-FD-TABLE — ✅ FIXED 2026-08-14
+
+**Found while running the eighth audit pass**, not by looking for it:
+`socket::tests::test_phase201_bind_port443_no_cap_eacces` failed once with
+`ENOTSOCK` where `EACCES` was expected, then passed three runs in a row.
+
+`SOCKET_META` (posix/src/socket.rs) is indexed by fd number, so it must have
+exactly the same scope as the fd table it is keyed by. `fdtable` made its
+storage **per-thread** on host builds (design-decisions.md §110) precisely
+because libtest runs tests on parallel threads. `SOCKET_META` stayed a
+process-global `static mut`, and the mismatch was reachable: two tests on
+different threads each create a socket and, drawing from *separate* per-thread
+fd tables, both get the same fd number `N` — near-certain, not unlikely, since
+each thread's table starts empty. They then shared one `SOCKET_META[N]`, and
+the first to `close()` wiped the entry the other was still using, whose next
+call saw a live fd with no metadata and reported `ENOTSOCK` for a good socket.
+
+Fixed by giving `SOCKET_META` the same `cfg`-split storage as
+`fdtable::fd_store`. Six consecutive full runs clean afterwards.
+
+Two things worth keeping from this. First, the `// SAFETY: Single-threaded
+access.` comments on these accesses were **true on the target and false under
+`cargo test`** — a safety comment that silently changes truth value with
+`cfg` is worse than none, and `fdtable` had already learned this lesson
+without the fix being propagated to the table keyed by its own indices.
+Second, an intermittent failure at roughly one run in four is easy to
+dismiss as noise when it appears in a test unrelated to what you are
+changing; it was worth the ten minutes to chase.
+
+**What remains.** The ~157 surviving `is_null() -> EFAULT` sites have not been
 individually classified. This entry stays open for coverage, not because any
-specific remaining site is known wrong. The densest remaining concentration is
-`file.rs` (28) — an ordinary §300 lookup: does the pointer reach a syscall or
-not, and in what order relative to the call's other arguments. The xattr,
-unistd, socket and spawn passes are the template: expect the *ordering* to be
-wrong, expect the reading to turn up an adjacent behavioural bug or two on the
-way, and do not assume the constants are right just because the previous four
-files mostly had them right. Two habits carry forward. From `socket.rs`: **do
-not generalise a rule from one sibling call to the next** — `bind` and
+specific remaining site is known wrong. With `file.rs` done, the one remaining
+dense cluster is `pthread.rs` (~48); after that the list is a long tail —
+`process.rs` (10), `epoll.rs` (9), then a run of files with eight or fewer
+each. `pthread.rs` is a different shape of pass from the seven before it: its
+upstream is not a syscall wrapper at all but nptl's own C, so for most of its
+entry points "does the pointer reach a syscall" has the answer *no* and the
+question becomes which of glibc's own early returns fires first — expect
+`EINVAL` and `ESRCH` to matter more than `EFAULT` there, and expect a good
+number of the sites to be checks glibc does not make at all.
+
+Four habits carry forward, one per pass that produced one. From `socket.rs`:
+**do not generalise a rule from one sibling call to the next** — `bind` and
 `connect` order `ENOTSOCK` oppositely, and `sendmsg` and `sendto` order
 `EBADF` oppositely, in the same file. From `spawn.rs`: **when sibling
-functions share a check, port the upstream helper rather than the check**, and
-**distrust a doc comment that argues for an errno instead of citing one.**
+functions share a check, port the upstream helper rather than the check.**
+From `file.rs`: **a doc comment that argues for an ordering is a defect
+marker** — three for three across the last three passes — and **a test that
+picks a convenient fd rather than the correct one silently stops testing
+anything**, which is how eight `pread`/`pwrite` tests spent their whole lives
+never reaching the code they were named for. And across all eight: expect the
+*ordering* to be wrong more often than the constant, and do not assume a
+sibling's correctness transfers — `ftruncate` was right and `truncate` was
+wrong ten lines apart.
 
 **Reproduce.** Not a runtime failure. `rg -A3 'is_null\(\)' posix/src`, filtered
 for `EFAULT` in the following lines, enumerates the candidate sites; each has to

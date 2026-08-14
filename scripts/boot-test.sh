@@ -136,10 +136,10 @@ report_bench_absence() {
     echo "=== NO BENCHMARK RESULTS THIS RUN (--bench not given) ==="
     if [ "$started" = "yes" ]; then
         echo "  The deferred bench task started but was killed at $WAIT_MARKER before"
-        echo "  producing numbers. 'PASSED' above covers correctness only."
+        echo "  producing numbers. This run's PASS covers correctness only."
     else
-        echo "  The bench task never reached its first result. 'PASSED' above covers"
-        echo "  correctness only."
+        echo "  The bench task never reached its first result. This run's PASS"
+        echo "  covers correctness only."
     fi
 
     # Escalate only if perf-critical code moved since the last recorded run.

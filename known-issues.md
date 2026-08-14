@@ -59088,7 +59088,7 @@ something that exists, or what a `cat` of it reads.
 **How it was found:** implementing part (A) — the eager parse and re-print of a
 process substitution met by a `${ … }` body scan.
 
-### [B] TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN. bash's `brace_gobbler` and its `${x@P}` re-read each meet a `<(` osh's do not — 2026-08-14 — ⚠️ OPEN
+### [B] TD-OILS-A-PROCESS-SUBSTITUTION-A-SECOND-SCAN-FINDS-IN-A-BRACE-BODY-IS-NOT-PARSED-AGAIN. bash's `brace_gobbler` and its `${x@P}` re-read each meet a `<(` osh's do not — 2026-08-14 — ⚠️ OPEN (the `brace_gobbler` half ✅ FIXED 2026-08-14)
 
 Two residues of TD-OILS-A-PROCESS-SUBSTITUTION-IN-A-BRACE-BODY-IS-NEVER-PERFORMED
 (above), left after both halves of it were done. Each is a *second* scan of the
@@ -59100,7 +59100,7 @@ and only the row is missing.
 **Where:** `userspace/oils/src/interp.rs`, [`Shell::gobbled_subs`]; and the
 `${x@P}` re-read, `userspace/oils/src/parser.rs`, [`dquote_word_from_source`].
 
-* `echo "${z:-"<(fi)"}"` — bash reports
+* **✅ FIXED 2026-08-14.** `echo "${z:-"<(fi)"}"` — bash reports
   `command substitution: line N+1: syntax error near unexpected token 'fi'`
   plus the tail of the physical line, where osh prints `<(fi)`. The agent is
   **`brace_gobbler`**, whose command-substitution row names all three spellings
@@ -59117,17 +59117,43 @@ and only the row is missing.
   body that does parse, `echo "${z:-"<(echo hi)"}"` prints `<(echo hi)` in both
   shells, so this is a diagnostic and not a missing expansion.
 
-  osh already models the row: [`wordscan::gobbler_readable`] has `<`/`>` in its
-  unquoted comsub row and says this stretch is readable. What is missing is
-  something to hang it on. [`Shell::gobbled_subs`] walks the *parse*
-  structurally, and here the tree is right to hold characters — the `<(` sits in
-  a `" … "` run inside a double-quoted operand, where neither bash's expander
-  nor osh's reads one — so no part will ever appear for it. The fix is
-  therefore not another lexer mode but a text-level pass beside the structural
-  walk: over the stretches `gobbler_readable` reports, find each `<(`/`>(` and
-  parse its body for its error alone, as `gobbled_backtick_subs` already does
-  for a backquote.
-* `x='${z:-<(fi)}'; echo "${x@P}"` — bash's `extract_dollar_brace_string`
+  What was missing was something to hang the row on. [`Shell::gobbled_subs`]
+  walks the *parse* structurally, and here the tree is right to hold characters
+  — the `<(` sits in a `" … "` run inside a double-quoted operand, where neither
+  bash's expander nor osh's reads one — so no part was ever going to appear for
+  it. The fix is therefore not another lexer mode but a text-level pass beside
+  the structural walk, as `gobbled_backtick_subs` already is for a backquote:
+
+  * `wordscan::gobbler_procsubs(s, dquoted)` — the same flat-state loop as
+    `gobbler_readable`, reporting the index of each `<(`/`>(` met while `quoted`
+    is 0. (`gobbler_readable` could not answer this: it reports the stretches the
+    **`$(`** row fires in, which is `quoted == 0` *and* `quoted == '"'`, and the
+    `<(` row is the first of those alone.) A `$( … )` is skipped whole rather
+    than reported — that is the one spelling a part already stands for.
+  * `Shell::gobbled_procsubs` — for each index, lex `$(` + the rest of the word
+    with `parser::dquote_word_from_source` and take the resulting
+    `CmdSubBody::Unread`. The two spellings reach the same
+    `extract_command_subst`, so the swap is exact, and one lex settles the body,
+    the remainder and whether there was a `)` at all. It is a *lex*, not the
+    paren count `gobbler_readable` skips with, because `xparse_dolparen` is a
+    real parse: a `(` inside a quoted run of the body is not a nesting level to
+    it, and a count would carve `echo <(echo "(")` into a body that fails.
+  * The two are merged by **remainder length**: every tail the gobbler's word
+    carries is measured against the whole word (`unparse::gobbler_word`), so a
+    longer one is an earlier meeting. That is what keeps the interleaving right
+    where a word holds both — measured, `echo "${z:-'$(fi)'"<(for)"}"` reports
+    the `$(fi)` and `echo "${z:-"<(fi)"'$(for)'}"` the `<(fi)`.
+  * `Shell::has_gobbled_sub` — the cheap pre-test — gained a `WordPart::Literal`
+    row, answering wide (any `<(`/`>(` in a literal under quotes) so the word
+    reaches the scan that settles it.
+
+  **Verified:** `userspace/oils/tests/corpus/a-process-substitution-a-brace-scan-meets-is-read-where-the-quoting-is-clear.sh`,
+  29 rows, all matching bash 5.2.37 — including the parity (`"${z:-"a"<(fi)"b"}"`
+  is a *parse* error, `"${z:-"${y:-"<(fi)"}"}"` is silent), the `set +B` gate, the
+  words brace expansion does not reach (assignment RHS, `case` word, here-doc
+  body), the read happening before expansion (`z=Z`, `${z:+…}`), and the `declare
+  -f` re-print.
+* **⚠️ STILL OPEN.** `x='${z:-<(fi)}'; echo "${x@P}"` — bash's `extract_dollar_brace_string`
   (subst.c:1881-1950) has a `<(` row of its own and recurses into it with a real
   parse, so the `@P` re-read is a `bad substitution` and the text is printed
   unchanged; osh splices the re-print and prints `<(fi)`.

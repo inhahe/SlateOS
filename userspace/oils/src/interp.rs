@@ -27050,6 +27050,8 @@ impl Shell {
         let scoped = crate::unparse::gobbler_word(word, self.parse_opts());
         let mut subs: Vec<WordPart> = Vec::new();
         self.gobbled_subs(&scoped.parts, false, &mut subs);
+        // …and the one spelling no part can stand for is found in the text.
+        self.gobbled_procsubs(&src, &mut subs);
         let subs: Vec<&WordPart> = subs.iter().collect();
         // Whatever the read complains about, it is the scanner complaining and
         // the scanner was handed the whole word. See [`Shell::enter_scanned_word`].
@@ -27074,6 +27076,16 @@ impl Shell {
             // the diagnostic outright.
             if dquoted && matches!(p, WordPart::CommandSub { body: CmdSubBody::Backtick { .. } }) {
                 return true;
+            }
+            // A `<( … )` the parse left as characters is answered from the
+            // characters, and answered wide: the scan reads one only where its
+            // flat `quoted` has been cleared again, and this walk's `dquoted` is
+            // the *parse's* nesting, which says only that a run of quotes is in
+            // play at all. [`Shell::gobbled_procsubs`] settles it over the word's
+            // own text, and a scan that finds nothing reports nothing.
+            if let WordPart::Literal(text) = p {
+                return dquoted
+                    && (bytes::contains(text, b"<(") || bytes::contains(text, b">("));
             }
             if let WordPart::SingleQuoted { text, parts: sub, .. } = p {
                 if !dquoted {
@@ -27211,6 +27223,81 @@ impl Shell {
             for p in out.iter_mut().skip(start) {
                 Self::extend_gobbled_tail(p, &suffix);
             }
+        }
+    }
+
+    /// The `<( … )` and `>( … )` the gobbler reads that the parse left standing
+    /// as characters, spliced into `out` where the scan meets them.
+    ///
+    /// bash's parser reads a process substitution wherever it meets one —
+    /// `parse_matched_pair` names `<(`, `>(` and `$(` in one breath
+    /// (parse.y:5028) — but its `" … "` is a recursive call of that same
+    /// function with no such row, so a `<(` written inside a quoted run is
+    /// characters and nothing else. The gobbler's state does not nest, and the
+    /// *inner* `"` of `"${z:-"<(fi)"}"` clears it outright, so those same
+    /// characters are its unquoted comsub row (braces.c:675) and it parses them.
+    /// Measured against bash 5.2.37, that word reports `` `fi)"}"' `` where the
+    /// quotes one place over — `"${z:-"a"<(fi)"b"}"`, whose `<(` the parity
+    /// leaves *inside* the quotes — is a script syntax error instead, the parser
+    /// having reached that one. So there is no [`WordPart`] to walk to here and
+    /// [`Shell::gobbled_subs`] cannot answer: the text is the only record.
+    ///
+    /// The body is not carved out with a paren count but lexed, because a count
+    /// is not what the gobbler does with the extent: `extract_command_subst`
+    /// hands it to `xparse_dolparen`, a real parse, to which a `(` inside a
+    /// quoted run of the body is not a nesting level. Lexing `$(` and the rest
+    /// of the word *is* that read — the two spellings reach the same function —
+    /// and it settles the body, the remainder and whether there was a `)` at all
+    /// in one go.
+    ///
+    /// Where each lands among the substitutions the structural walk already
+    /// found is read off the remainders: every one of them is measured against
+    /// the whole word ([`crate::unparse::gobbler_word`]), so a longer remainder
+    /// is an earlier meeting.
+    fn gobbled_procsubs(&mut self, src: BStr<'_>, out: &mut Vec<WordPart>) {
+        for at in crate::wordscan::gobbler_procsubs(src, false) {
+            let Some(rest) = src.get(at.saturating_add(2)..) else {
+                continue;
+            };
+            let probe = bfmt![b"$(", rest];
+            let Ok(word) = crate::parser::dquote_word_from_source(&probe, self.parse_opts()) else {
+                continue;
+            };
+            // A body that begins `(` is the one shape the swap does not carry:
+            // the lexer reads `$((` as an arithmetic, where the gobbler's row
+            // was the `<(` and the `(` is only the body's first byte. Nothing
+            // this scan reports hangs on it — an arithmetic extent cannot fail
+            // the way a parse can — so it is passed over rather than modelled.
+            let Some(part @ WordPart::CommandSub { body: CmdSubBody::Unread { .. } }) =
+                word.parts.first()
+            else {
+                continue;
+            };
+            let tail = Self::gobbled_tail_len(part).unwrap_or(0);
+            let idx = out
+                .iter()
+                .position(|p| Self::gobbled_tail_len(p).is_some_and(|n| n < tail))
+                .unwrap_or(out.len());
+            out.insert(idx, part.clone());
+        }
+    }
+
+    /// How much of the word follows a substitution this scan read — the key
+    /// [`Shell::gobbled_procsubs`] orders by, and `None` for a part carrying no
+    /// remainder at all.
+    fn gobbled_tail_len(p: &WordPart) -> Option<usize> {
+        match p {
+            WordPart::ArithSub { tail, .. }
+            | WordPart::CommandSub {
+                body:
+                    CmdSubBody::Unread { tail, .. }
+                    | CmdSubBody::ArithFallback { tail, .. }
+                    | CmdSubBody::Backtick { tail, .. },
+            } => Some(tail.len()),
+            WordPart::CommandSub { body: CmdSubBody::Parsed { tail, .. } } => {
+                tail.as_ref().map(Vec::len)
+            }
+            _ => None,
         }
     }
 

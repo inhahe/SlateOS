@@ -140,14 +140,127 @@ mod device_settings;
 #[allow(dead_code)]
 mod security_dialog;
 
+#[cfg(test)]
+mod pointer_tests;
+
 use appearance::config;
 use appearance::{AppearanceSettings, TaskbarStyle, TransparencyLevel};
 use guitk::color::Color;
-use guitk::event::{Key, KeyEvent, Modifiers};
+use guitk::event::{Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::RenderTree;
+use launcher::{AppEntry, Category};
 
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+// ============================================================================
+// Geometry
+// ============================================================================
+
+/// An axis-aligned rectangle in screen pixels.
+///
+/// Every clickable part of the shell is described by exactly one `*_rect`
+/// accessor, which both the renderer and the mouse handler call. The
+/// alternative — a literal in the draw call and a matching literal in the hit
+/// test — produces a button that is clickable somewhere other than where it is
+/// drawn as soon as one of the two is edited, and nothing about the code makes
+/// the second one obviously wrong.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+impl Rect {
+    #[must_use]
+    pub const fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
+        Self { x, y, w, h }
+    }
+
+    /// Whether a point is inside.
+    ///
+    /// The left and top edges count as inside and the right and bottom edges as
+    /// outside, so two rectangles that share an edge cannot both claim the same
+    /// pixel — which is how a row of adjacent buttons must behave.
+    #[must_use]
+    pub fn contains(&self, px: f32, py: f32) -> bool {
+        px >= self.x && px < self.x + self.w && py >= self.y && py < self.y + self.h
+    }
+}
+
+/// Paint a rectangle. A thin wrapper so a rect can be passed as one value
+/// rather than unpacked into four arguments at every call site.
+fn fill(tree: &mut RenderTree, rect: Rect, color: Color) {
+    tree.fill_rect(rect.x, rect.y, rect.w, rect.h, color);
+}
+
+/// Outline a rectangle.
+fn stroke(tree: &mut RenderTree, rect: Rect, color: Color, width: f32) {
+    tree.stroke_rect(rect.x, rect.y, rect.w, rect.h, color, width);
+}
+
+/// How many whole rows a scroll of `dy` pixels moves a list of fixed-height
+/// rows.
+///
+/// A menu whose rows are all one height should not come to rest halfway
+/// between two of them, so a delta too small to cross a row boundary still
+/// moves one row rather than nothing — otherwise a mouse that reports small
+/// deltas cannot scroll the menu at all.
+fn scroll_rows(dy: f32) -> i32 {
+    let whole = (dy / START_MENU_ROW_HEIGHT) as i32;
+    if whole != 0 {
+        whole
+    } else if dy > 0.0 {
+        1
+    } else if dy < 0.0 {
+        -1
+    } else {
+        0
+    }
+}
+
+// --- Taskbar ---------------------------------------------------------------
+
+/// Width of the start button at the left end of the taskbar.
+const START_BUTTON_WIDTH: f32 = 48.0;
+/// Gap between the start button and the first window button.
+const TASKBAR_BUTTON_START_GAP: f32 = 8.0;
+/// Gap between adjacent window buttons.
+const TASKBAR_BUTTON_GAP: f32 = 4.0;
+/// Vertical inset of a window button inside the panel.
+const TASKBAR_BUTTON_INSET: f32 = 4.0;
+/// Widest a window button gets, however few windows are open.
+const TASKBAR_BUTTON_MAX_WIDTH: f32 = 160.0;
+/// Where the system tray (clock, desktop indicator) begins, measured from the
+/// right edge.
+const TRAY_WIDTH: f32 = 180.0;
+/// How much room the window buttons leave for the tray. Wider than the tray
+/// itself so the last button does not end flush against the clock.
+const TRAY_RESERVE: f32 = 200.0;
+
+// --- Start menu ------------------------------------------------------------
+
+const START_MENU_WIDTH: f32 = 300.0;
+const START_MENU_HEIGHT: f32 = 400.0;
+/// Space above the first application row, holding the "Applications" heading.
+const START_MENU_TOP_PADDING: f32 = 50.0;
+const START_MENU_ROW_HEIGHT: f32 = 36.0;
+/// Space below the last application row, holding the power options.
+const START_MENU_FOOTER: f32 = 48.0;
+/// Width of the scroll indicator drawn when the list is longer than the menu.
+const START_MENU_SCROLLBAR_WIDTH: f32 = 4.0;
+
+// --- Window decorations ----------------------------------------------------
+
+const TITLE_BAR_HEIGHT: f32 = 30.0;
+const WINDOW_BUTTON_SIZE: f32 = 16.0;
+/// Distance between the left edges of two adjacent title-bar buttons.
+const WINDOW_BUTTON_PITCH: f32 = 24.0;
+/// Distance from the window's right edge to the left edge of the close button.
+const WINDOW_BUTTON_MARGIN_RIGHT: f32 = 30.0;
+const WINDOW_BUTTON_MARGIN_TOP: f32 = 7.0;
 
 // ============================================================================
 // Window Management
@@ -178,6 +291,83 @@ pub struct ManagedWindow {
     pub icon_id: u32,
     /// Z-order (higher = on top).
     pub z_order: u32,
+    /// Where the window sat before it was maximized.
+    ///
+    /// Maximizing overwrites the window's geometry, so un-maximizing has
+    /// nothing to go back to unless the old geometry was kept: without this a
+    /// "restore" leaves the window exactly where maximizing put it, which looks
+    /// like the button doing nothing.
+    pub restored: Option<WindowGeometry>,
+}
+
+/// A window's position and size, in screen pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WindowGeometry {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl ManagedWindow {
+    /// The window's outer rectangle, title bar included.
+    #[must_use]
+    pub fn frame_rect(&self) -> Rect {
+        Rect::new(
+            self.x as f32,
+            self.y as f32,
+            self.width as f32,
+            self.height as f32,
+        )
+    }
+
+    /// The title bar, across the top of the frame.
+    #[must_use]
+    pub fn title_bar_rect(&self) -> Rect {
+        let frame = self.frame_rect();
+        Rect::new(frame.x, frame.y, frame.w, TITLE_BAR_HEIGHT.min(frame.h))
+    }
+
+    /// The area the client owns — everything below the title bar.
+    ///
+    /// Empty rather than negative for a window shorter than its own title bar,
+    /// which [`Rect::contains`] then correctly reports as containing nothing.
+    #[must_use]
+    pub fn content_rect(&self) -> Rect {
+        let frame = self.frame_rect();
+        let top = TITLE_BAR_HEIGHT.min(frame.h);
+        Rect::new(frame.x, frame.y + top, frame.w, frame.h - top)
+    }
+
+    /// The `slot`-th title-bar button, counting right to left from the close
+    /// button at slot 0.
+    fn title_button_rect(&self, slot: usize) -> Rect {
+        let frame = self.frame_rect();
+        Rect::new(
+            frame.x + frame.w - WINDOW_BUTTON_MARGIN_RIGHT - slot as f32 * WINDOW_BUTTON_PITCH,
+            frame.y + WINDOW_BUTTON_MARGIN_TOP,
+            WINDOW_BUTTON_SIZE,
+            WINDOW_BUTTON_SIZE,
+        )
+    }
+
+    /// The close button (rightmost).
+    #[must_use]
+    pub fn close_button_rect(&self) -> Rect {
+        self.title_button_rect(0)
+    }
+
+    /// The maximize/restore button.
+    #[must_use]
+    pub fn maximize_button_rect(&self) -> Rect {
+        self.title_button_rect(1)
+    }
+
+    /// The minimize button (leftmost of the three).
+    #[must_use]
+    pub fn minimize_button_rect(&self) -> Rect {
+        self.title_button_rect(2)
+    }
 }
 
 /// Window state.
@@ -187,6 +377,93 @@ pub enum WindowState {
     Maximized,
     Minimized,
     Fullscreen,
+}
+
+// ============================================================================
+// Pointer input
+// ============================================================================
+
+/// What lies under a point on the screen.
+///
+/// Hit testing is separated from acting on the hit so that "where is the
+/// pointer" can be asserted directly in tests, and so that the press, release
+/// and scroll paths all agree about what a point belongs to instead of each
+/// re-deriving it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hit {
+    /// The start button on the taskbar.
+    StartButton,
+    /// An application row of the open start menu, by index into
+    /// [`start_menu_entries`](DesktopShell::start_menu_entries).
+    StartMenuEntry(usize),
+    /// The open start menu, but not one of its rows.
+    StartMenuPanel,
+    /// A window button on the taskbar, by index into
+    /// [`visible_windows`](DesktopShell::visible_windows).
+    TaskbarButton(usize),
+    /// The taskbar panel, but not one of its controls.
+    TaskbarPanel,
+    /// A title-bar button.
+    WindowClose(WindowId),
+    WindowMaximize(WindowId),
+    WindowMinimize(WindowId),
+    /// A window's title bar, away from its buttons.
+    WindowTitleBar(WindowId),
+    /// A window's content area, which belongs to the client, not the shell.
+    WindowContent(WindowId),
+    /// Bare desktop.
+    Desktop,
+}
+
+impl Hit {
+    /// Whether the shell owns this pixel.
+    ///
+    /// Only the client's own content and the bare desktop are not the shell's;
+    /// everything the shell draws it also consumes clicks on.
+    #[must_use]
+    pub fn is_shell_chrome(self) -> bool {
+        !matches!(self, Self::WindowContent(_) | Self::Desktop)
+    }
+}
+
+/// What the shell wants its host — the compositor's event loop — to do about a
+/// pointer event.
+///
+/// The shell cannot start a process itself: it has no connection to the process
+/// server, and inventing one here would put policy about *how* programs start
+/// inside the window manager. It reports the intent instead, exactly as
+/// [`launcher::LauncherAction`] already does for the search dialog.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ShellAction {
+    /// The shell did not want this event; deliver it to the window under the
+    /// pointer. Focus may still have changed — click-to-focus raises a window
+    /// *and* lets the click through to it, which is what makes the first click
+    /// on an unfocused window press the button it landed on.
+    Pass,
+    /// The shell handled the event; no window should see it.
+    Consumed,
+    /// Start the program at this path. Implies [`Consumed`](Self::Consumed).
+    Launch(String),
+}
+
+/// A left-button press at a point — the first event a click delivers.
+#[must_use]
+pub fn click(x: f32, y: f32) -> MouseEvent {
+    MouseEvent {
+        x,
+        y,
+        kind: MouseEventKind::Press(MouseButton::Left),
+    }
+}
+
+/// A wheel event at a point, `dy` positive towards the start of a list.
+#[must_use]
+pub fn scroll(x: f32, y: f32, dy: f32) -> MouseEvent {
+    MouseEvent {
+        x,
+        y,
+        kind: MouseEventKind::Scroll { dx: 0.0, dy },
+    }
 }
 
 // ============================================================================
@@ -210,6 +487,15 @@ pub struct DesktopShell {
     pub taskbar_height: u32,
     /// Whether the start menu is open.
     pub start_menu_open: bool,
+    /// Index of the first application row the start menu shows.
+    ///
+    /// The menu is shorter than the application list, and a list that silently
+    /// stops at the eighth program makes the ninth unreachable rather than
+    /// merely unseen.
+    pub start_menu_scroll: usize,
+    /// The programs this desktop can start, shared with the search launcher so
+    /// that the two front ends cannot offer different applications.
+    pub apps: Vec<AppEntry>,
     /// Whether Alt+Tab switcher is active.
     pub alt_tab_active: bool,
     /// Alt+Tab selection index.
@@ -450,6 +736,8 @@ impl DesktopShell {
             screen_height,
             taskbar_height: 40,
             start_menu_open: false,
+            start_menu_scroll: 0,
+            apps: launcher::builtin_app_database(),
             alt_tab_active: false,
             alt_tab_index: 0,
             appearance: AppearanceSettings::default(),
@@ -490,8 +778,357 @@ impl DesktopShell {
             0,
             0,
             self.screen_width,
-            self.screen_height - self.taskbar_height,
+            self.screen_height.saturating_sub(self.taskbar_height),
         )
+    }
+
+    // ======================================================================
+    // Chrome geometry
+    //
+    // Every rectangle the shell draws or clicks comes from here. See [`Rect`].
+    // ======================================================================
+
+    /// The taskbar panel.
+    #[must_use]
+    pub fn taskbar_rect(&self) -> Rect {
+        Rect::new(
+            0.0,
+            self.screen_height.saturating_sub(self.taskbar_height) as f32,
+            self.screen_width as f32,
+            self.taskbar_height as f32,
+        )
+    }
+
+    /// The start button at the left end of the taskbar.
+    #[must_use]
+    pub fn start_button_rect(&self) -> Rect {
+        let bar = self.taskbar_rect();
+        Rect::new(bar.x, bar.y, START_BUTTON_WIDTH.min(bar.w), bar.h)
+    }
+
+    /// Where the system tray begins.
+    #[must_use]
+    pub fn tray_x(&self) -> f32 {
+        self.taskbar_rect().w - TRAY_WIDTH
+    }
+
+    /// How wide each taskbar window button is.
+    ///
+    /// The buttons shrink as windows are opened, so this cannot be a constant
+    /// in either the renderer or the hit test.
+    fn taskbar_button_width(&self) -> f32 {
+        let bar = self.taskbar_rect();
+        let available = (bar.w - START_BUTTON_WIDTH - TRAY_RESERVE).max(0.0);
+        let count = self.visible_windows().len().max(1) as f32;
+        TASKBAR_BUTTON_MAX_WIDTH.min(available / count)
+    }
+
+    /// The taskbar button for the `index`-th visible window.
+    #[must_use]
+    pub fn taskbar_button_rect(&self, index: usize) -> Rect {
+        let bar = self.taskbar_rect();
+        let w = self.taskbar_button_width();
+        let x = bar.x
+            + START_BUTTON_WIDTH
+            + TASKBAR_BUTTON_START_GAP
+            + index as f32 * (w + TASKBAR_BUTTON_GAP);
+        Rect::new(
+            x,
+            bar.y + TASKBAR_BUTTON_INSET,
+            w,
+            bar.h - TASKBAR_BUTTON_INSET * 2.0,
+        )
+    }
+
+    /// The start menu panel, anchored to the start button's corner.
+    #[must_use]
+    pub fn start_menu_rect(&self) -> Rect {
+        let bar = self.taskbar_rect();
+        Rect::new(
+            0.0,
+            bar.y - START_MENU_HEIGHT,
+            START_MENU_WIDTH,
+            START_MENU_HEIGHT,
+        )
+    }
+
+    /// How many application rows fit between the heading and the power options.
+    #[must_use]
+    pub fn start_menu_visible_rows(&self) -> usize {
+        let usable = self.start_menu_rect().h - START_MENU_TOP_PADDING - START_MENU_FOOTER;
+        if usable < START_MENU_ROW_HEIGHT {
+            return 0;
+        }
+        (usable / START_MENU_ROW_HEIGHT) as usize
+    }
+
+    /// The `row`-th drawn row of the start menu.
+    ///
+    /// `row` counts from the top of the visible list, so it is the index of the
+    /// entry at `start_menu_scroll + row` — the renderer and the hit test agree
+    /// about that offset because both go through
+    /// [`start_menu_entry_at`](Self::start_menu_entry_at).
+    #[must_use]
+    pub fn start_menu_row_rect(&self, row: usize) -> Rect {
+        let menu = self.start_menu_rect();
+        Rect::new(
+            menu.x,
+            menu.y + START_MENU_TOP_PADDING + row as f32 * START_MENU_ROW_HEIGHT,
+            menu.w,
+            START_MENU_ROW_HEIGHT,
+        )
+    }
+
+    /// The programs the start menu lists, in menu order.
+    ///
+    /// System actions — shutdown, lock, log out — are deliberately excluded:
+    /// they belong to the power options at the foot of the menu, not among the
+    /// applications, and mixing them in would make "Shutdown" one mis-click
+    /// away from "Screenshot".
+    #[must_use]
+    pub fn start_menu_entries(&self) -> Vec<&AppEntry> {
+        self.apps
+            .iter()
+            .filter(|app| matches!(app.category, Category::Application | Category::Setting))
+            .collect()
+    }
+
+    /// Which entry the `row`-th drawn row shows, if any.
+    fn start_menu_entry_at(&self, row: usize) -> Option<usize> {
+        let index = self.start_menu_scroll.checked_add(row)?;
+        (index < self.start_menu_entries().len()).then_some(index)
+    }
+
+    /// The furthest the menu can scroll and still be full.
+    fn start_menu_max_scroll(&self) -> usize {
+        self.start_menu_entries()
+            .len()
+            .saturating_sub(self.start_menu_visible_rows())
+    }
+
+    /// Move the start menu's list by whole rows, positive meaning towards the
+    /// first entry — the direction convention `guitk`'s grid already uses for a
+    /// positive scroll delta.
+    pub fn scroll_start_menu(&mut self, rows: i32) {
+        let max = self.start_menu_max_scroll();
+        let moved = if rows >= 0 {
+            self.start_menu_scroll.saturating_sub(rows.unsigned_abs() as usize)
+        } else {
+            self.start_menu_scroll.saturating_add(rows.unsigned_abs() as usize)
+        };
+        self.start_menu_scroll = moved.min(max);
+    }
+
+    /// Open or close the start menu.
+    ///
+    /// Opening rewinds the list: a menu that reopens where it was last left
+    /// hides the first application from a user who has no idea it scrolled.
+    pub fn toggle_start_menu(&mut self) {
+        self.start_menu_open = !self.start_menu_open;
+        if self.start_menu_open {
+            self.start_menu_scroll = 0;
+        }
+    }
+
+    // ======================================================================
+    // Pointer input
+    // ======================================================================
+
+    /// What is under a point, topmost surface first.
+    #[must_use]
+    pub fn hit_test(&self, x: f32, y: f32) -> Hit {
+        if self.start_menu_open {
+            let menu = self.start_menu_rect();
+            if menu.contains(x, y) {
+                for row in 0..self.start_menu_visible_rows() {
+                    if self.start_menu_row_rect(row).contains(x, y) {
+                        return match self.start_menu_entry_at(row) {
+                            Some(index) => Hit::StartMenuEntry(index),
+                            // A drawn-but-empty row past the end of the list is
+                            // still the menu, not what lies behind it.
+                            None => Hit::StartMenuPanel,
+                        };
+                    }
+                }
+                return Hit::StartMenuPanel;
+            }
+        }
+
+        if self.start_button_rect().contains(x, y) {
+            return Hit::StartButton;
+        }
+
+        if self.taskbar_rect().contains(x, y) {
+            for index in 0..self.visible_windows().len() {
+                if self.taskbar_button_rect(index).contains(x, y) {
+                    return Hit::TaskbarButton(index);
+                }
+            }
+            return Hit::TaskbarPanel;
+        }
+
+        // `visible_windows` is sorted bottom-to-top, and the topmost window is
+        // the one that receives the click.
+        for window in self.visible_windows().into_iter().rev() {
+            if !window.frame_rect().contains(x, y) {
+                continue;
+            }
+            if window.close_button_rect().contains(x, y) {
+                return Hit::WindowClose(window.id);
+            }
+            if window.maximize_button_rect().contains(x, y) {
+                return Hit::WindowMaximize(window.id);
+            }
+            if window.minimize_button_rect().contains(x, y) {
+                return Hit::WindowMinimize(window.id);
+            }
+            if window.title_bar_rect().contains(x, y) {
+                return Hit::WindowTitleBar(window.id);
+            }
+            return Hit::WindowContent(window.id);
+        }
+
+        Hit::Desktop
+    }
+
+    /// Handle a pointer event.
+    ///
+    /// Returns what the caller should do with it — see [`ShellAction`].
+    pub fn handle_mouse(&mut self, event: &MouseEvent) -> ShellAction {
+        match event.kind {
+            MouseEventKind::Press(button) => self.handle_press(event.x, event.y, button, false),
+            MouseEventKind::DoubleClick(button) => {
+                self.handle_press(event.x, event.y, button, true)
+            }
+            MouseEventKind::Scroll { dy, .. } => self.handle_scroll(event.x, event.y, dy),
+            // A release belongs to whoever took the press, so chrome swallows
+            // it: a client that saw a release it had no press for would treat a
+            // click on the title bar as a click on itself.
+            MouseEventKind::Release(_) => {
+                if self.hit_test(event.x, event.y).is_shell_chrome() {
+                    ShellAction::Consumed
+                } else {
+                    ShellAction::Pass
+                }
+            }
+            // Motion is not the shell's until it grows window dragging; until
+            // then forwarding it is what keeps hover states alive in clients.
+            MouseEventKind::Move | MouseEventKind::Enter | MouseEventKind::Leave => {
+                ShellAction::Pass
+            }
+        }
+    }
+
+    fn handle_press(&mut self, x: f32, y: f32, button: MouseButton, double: bool) -> ShellAction {
+        let hit = self.hit_test(x, y);
+
+        // A click anywhere outside an open menu dismisses it, and is spent
+        // doing so rather than also reaching what it landed on. Dismissing is
+        // what the user aimed at; acting as well would make the click do
+        // something they could not see coming.
+        if self.start_menu_open
+            && !matches!(
+                hit,
+                Hit::StartButton | Hit::StartMenuEntry(_) | Hit::StartMenuPanel
+            )
+        {
+            self.start_menu_open = false;
+            return ShellAction::Consumed;
+        }
+
+        // Only the primary button acts. The rest still cannot fall through to a
+        // client when they land on the shell's own surfaces.
+        if button != MouseButton::Left {
+            return if hit.is_shell_chrome() {
+                ShellAction::Consumed
+            } else {
+                ShellAction::Pass
+            };
+        }
+
+        match hit {
+            Hit::StartButton => {
+                self.toggle_start_menu();
+                ShellAction::Consumed
+            }
+            Hit::StartMenuEntry(index) => {
+                let path = self
+                    .start_menu_entries()
+                    .get(index)
+                    .map(|entry| entry.executable_path.clone());
+                match path {
+                    Some(path) => {
+                        self.start_menu_open = false;
+                        ShellAction::Launch(path)
+                    }
+                    None => ShellAction::Consumed,
+                }
+            }
+            Hit::StartMenuPanel | Hit::TaskbarPanel => ShellAction::Consumed,
+            Hit::TaskbarButton(index) => {
+                let id = self.visible_windows().get(index).map(|w| w.id);
+                if let Some(id) = id {
+                    // The button of the window you are already looking at
+                    // minimises it — the taskbar button is a toggle, not a
+                    // second way to focus what is already focused.
+                    if self.focused_window == Some(id) {
+                        self.minimize_window(id);
+                    } else {
+                        self.focus_window(id);
+                    }
+                }
+                ShellAction::Consumed
+            }
+            Hit::WindowClose(id) => {
+                self.remove_window(id);
+                ShellAction::Consumed
+            }
+            Hit::WindowMaximize(id) => {
+                self.focus_window(id);
+                self.toggle_maximize(id);
+                ShellAction::Consumed
+            }
+            Hit::WindowMinimize(id) => {
+                self.minimize_window(id);
+                ShellAction::Consumed
+            }
+            Hit::WindowTitleBar(id) => {
+                self.focus_window(id);
+                if double {
+                    self.toggle_maximize(id);
+                }
+                ShellAction::Consumed
+            }
+            Hit::WindowContent(id) => {
+                self.focus_window(id);
+                ShellAction::Pass
+            }
+            Hit::Desktop => ShellAction::Pass,
+        }
+    }
+
+    fn handle_scroll(&mut self, x: f32, y: f32, dy: f32) -> ShellAction {
+        if self.start_menu_open && self.start_menu_rect().contains(x, y) {
+            self.scroll_start_menu(scroll_rows(dy));
+            return ShellAction::Consumed;
+        }
+        if self.hit_test(x, y).is_shell_chrome() {
+            return ShellAction::Consumed;
+        }
+        ShellAction::Pass
+    }
+
+    /// Maximize a window, or restore it if it already is.
+    pub fn toggle_maximize(&mut self, id: WindowId) {
+        let maximized = self
+            .windows
+            .get(&id)
+            .is_some_and(|w| w.state == WindowState::Maximized);
+        if maximized {
+            self.restore_window(id);
+        } else {
+            self.maximize_window(id);
+        }
     }
 
     // ======================================================================
@@ -525,6 +1162,7 @@ impl DesktopShell {
             pid,
             icon_id: 0,
             z_order: self.next_z,
+            restored: None,
         };
         self.next_z += 1;
 
@@ -589,9 +1227,21 @@ impl DesktopShell {
     }
 
     /// Maximize a window to fill the work area.
+    ///
+    /// Remembers where the window was, so that restoring can put it back. Only
+    /// the first maximize records it: maximizing an already-maximized window
+    /// would otherwise record the maximized geometry as the one to return to.
     pub fn maximize_window(&mut self, id: WindowId) {
         let (wx, wy, ww, wh) = self.work_area();
         if let Some(w) = self.windows.get_mut(&id) {
+            if w.state != WindowState::Maximized {
+                w.restored = Some(WindowGeometry {
+                    x: w.x,
+                    y: w.y,
+                    width: w.width,
+                    height: w.height,
+                });
+            }
             w.state = WindowState::Maximized;
             w.x = wx;
             w.y = wy;
@@ -601,11 +1251,18 @@ impl DesktopShell {
         }
     }
 
-    /// Restore a window to normal state.
+    /// Restore a window to normal state, back where it was before it was
+    /// maximized if that is known.
     pub fn restore_window(&mut self, id: WindowId) {
         if let Some(w) = self.windows.get_mut(&id) {
             w.state = WindowState::Normal;
             w.visible = true;
+            if let Some(geometry) = w.restored.take() {
+                w.x = geometry.x;
+                w.y = geometry.y;
+                w.width = geometry.width;
+                w.height = geometry.height;
+            }
         }
     }
 
@@ -616,6 +1273,10 @@ impl DesktopShell {
             w.y = y;
             if w.state == WindowState::Maximized {
                 w.state = WindowState::Normal;
+                // The user has just placed the window themselves; the geometry
+                // it had before it was maximized is no longer where it should
+                // spring back to.
+                w.restored = None;
             }
         }
     }
@@ -627,6 +1288,7 @@ impl DesktopShell {
             w.height = height;
             if w.state == WindowState::Maximized {
                 w.state = WindowState::Normal;
+                w.restored = None;
             }
         }
     }
@@ -640,6 +1302,8 @@ impl DesktopShell {
             w.width = ww / 2;
             w.x = if left { wx } else { wx + (ww / 2) as i32 };
             w.state = WindowState::Normal;
+            // Snapping is the user placing the window, same as moving it.
+            w.restored = None;
         }
     }
 
@@ -824,46 +1488,31 @@ impl DesktopShell {
 
     /// Render the taskbar using the GUI toolkit.
     pub fn render_taskbar(&self) -> RenderTree {
-        let taskbar_y = (self.screen_height - self.taskbar_height) as f32;
-        let taskbar_w = self.screen_width as f32;
-        let taskbar_h = self.taskbar_height as f32;
-
+        let bar = self.taskbar_rect();
         let mut tree = RenderTree::new();
 
         // Taskbar background
-        tree.fill_rect(
-            0.0,
-            taskbar_y,
-            taskbar_w,
-            taskbar_h,
-            self.theme.taskbar_bg,
-        );
+        fill(&mut tree, bar, self.theme.taskbar_bg);
 
         // Start button
-        let start_w = 48.0;
+        let start = self.start_button_rect();
         let start_bg = if self.start_menu_open {
             self.theme.taskbar_active_bg
         } else {
             self.theme.taskbar_bg
         };
-        tree.fill_rect(0.0, taskbar_y, start_w, taskbar_h, start_bg);
+        fill(&mut tree, start, start_bg);
         tree.text(
-            12.0,
-            taskbar_y + 12.0,
+            start.x + 12.0,
+            start.y + 12.0,
             "\u{2261}", // hamburger menu icon
             self.theme.taskbar_accent,
             20.0,
         );
 
         // Window buttons
-        let mut btn_x = start_w + 8.0;
-        let btn_h = taskbar_h - 8.0;
-        let btn_y = taskbar_y + 4.0;
-
-        for window in self.visible_windows() {
-            let btn_w = 160.0f32.min(
-                (taskbar_w - start_w - 200.0) / self.visible_windows().len().max(1) as f32,
-            );
+        for (index, window) in self.visible_windows().iter().enumerate() {
+            let button = self.taskbar_button_rect(index);
 
             let bg = if Some(window.id) == self.focused_window {
                 self.theme.taskbar_active_bg
@@ -871,30 +1520,28 @@ impl DesktopShell {
                 self.theme.taskbar_bg
             };
 
-            tree.fill_rect(btn_x, btn_y, btn_w, btn_h, bg);
+            fill(&mut tree, button, bg);
 
             // Window title (truncated)
-            let max_chars = (btn_w / 8.0) as usize;
+            let max_chars = (button.w / 8.0) as usize;
             let title: String = window.title.chars().take(max_chars).collect();
             tree.text(
-                btn_x + 8.0,
-                btn_y + 8.0,
+                button.x + 8.0,
+                button.y + 8.0,
                 &title,
                 self.theme.taskbar_fg,
                 12.0,
             );
-
-            btn_x += btn_w + 4.0;
         }
 
         // System tray (right side)
-        let tray_x = taskbar_w - 180.0;
+        let tray_x = self.tray_x();
 
         // Clock
         let time_str = self.current_time_string();
         tree.text(
             tray_x + 100.0,
-            taskbar_y + 12.0,
+            bar.y + 12.0,
             &time_str,
             self.theme.taskbar_fg,
             13.0,
@@ -904,7 +1551,7 @@ impl DesktopShell {
         let desk_str = format!("Desktop {}", self.current_desktop + 1);
         tree.text(
             tray_x + 8.0,
-            taskbar_y + 12.0,
+            bar.y + 12.0,
             &desk_str,
             self.theme.taskbar_fg,
             11.0,
@@ -916,12 +1563,9 @@ impl DesktopShell {
     /// Render window decorations (title bar, borders) for all visible windows.
     pub fn render_window_decorations(&self) -> RenderTree {
         let mut tree = RenderTree::new();
-        let title_bar_height = 30.0f32;
 
         for window in self.visible_windows() {
-            let x = window.x as f32;
-            let y = window.y as f32;
-            let w = window.width as f32;
+            let title_bar = window.title_bar_rect();
 
             // Title bar. The foreground travels with the background: with
             // accented title bars the two differ by more than a shade, so one
@@ -935,35 +1579,31 @@ impl DesktopShell {
                 )
             };
 
-            tree.fill_rect(x, y, w, title_bar_height, title_bg);
+            fill(&mut tree, title_bar, title_bg);
 
             // Title text
             let title: String = window.title.chars().take(40).collect();
-            tree.text(x + 12.0, y + 8.0, &title, title_fg, 13.0);
+            tree.text(title_bar.x + 12.0, title_bar.y + 8.0, &title, title_fg, 13.0);
 
-            // Window control buttons (minimize, maximize, close)
-            let btn_size = 16.0f32;
-            let btn_y = y + 7.0;
-
-            // Close button (rightmost)
-            let close_x = x + w - 30.0;
-            tree.fill_rect(close_x, btn_y, btn_size, btn_size, Color::from_hex(0xF38BA8));
-            tree.text(close_x + 3.0, btn_y + 1.0, "x", Color::WHITE, 12.0);
-
-            // Maximize button
-            let max_x = close_x - 24.0;
-            tree.fill_rect(max_x, btn_y, btn_size, btn_size, Color::from_hex(0xA6E3A1));
-
-            // Minimize button
-            let min_x = max_x - 24.0;
-            tree.fill_rect(min_x, btn_y, btn_size, btn_size, Color::from_hex(0xF9E2AF));
+            // Window control buttons, right to left.
+            let close = window.close_button_rect();
+            fill(&mut tree, close, Color::from_hex(0xF38BA8));
+            tree.text(close.x + 3.0, close.y + 1.0, "x", Color::WHITE, 12.0);
+            fill(
+                &mut tree,
+                window.maximize_button_rect(),
+                Color::from_hex(0xA6E3A1),
+            );
+            fill(
+                &mut tree,
+                window.minimize_button_rect(),
+                Color::from_hex(0xF9E2AF),
+            );
 
             // Border
-            tree.stroke_rect(
-                x,
-                y,
-                w,
-                window.height as f32,
+            stroke(
+                &mut tree,
+                window.frame_rect(),
                 self.theme.window_border_color,
                 1.0,
             );
@@ -1042,56 +1682,69 @@ impl DesktopShell {
         }
 
         let mut tree = RenderTree::new();
-        let menu_w = 300.0;
-        let menu_h = 400.0;
-        let menu_x = 0.0;
-        let menu_y = (self.screen_height - self.taskbar_height) as f32 - menu_h;
+        let menu = self.start_menu_rect();
 
         // Background
-        tree.fill_rect(menu_x, menu_y, menu_w, menu_h, self.theme.start_menu_bg);
-        tree.stroke_rect(
-            menu_x,
-            menu_y,
-            menu_w,
-            menu_h,
-            self.theme.window_border_color,
-            1.0,
-        );
+        fill(&mut tree, menu, self.theme.start_menu_bg);
+        stroke(&mut tree, menu, self.theme.window_border_color, 1.0);
 
         // Title
         tree.text(
-            menu_x + 16.0,
-            menu_y + 16.0,
+            menu.x + 16.0,
+            menu.y + 16.0,
             "Applications",
             self.theme.accent_color,
             16.0,
         );
 
-        // Application entries (placeholder)
-        let apps = [
-            "Terminal",
-            "File Explorer",
-            "Text Editor",
-            "Settings",
-            "System Monitor",
-            "Calculator",
-        ];
-
-        for (i, app) in apps.iter().enumerate() {
-            let item_y = menu_y + 50.0 + i as f32 * 36.0;
+        // Application entries. Which entry a row shows is asked of
+        // `start_menu_entry_at`, the same function the hit test asks, so a
+        // scrolled menu cannot launch the program on the row above the one
+        // that was clicked.
+        let entries = self.start_menu_entries();
+        let rows = self.start_menu_visible_rows();
+        for row in 0..rows {
+            let Some(index) = self.start_menu_entry_at(row) else {
+                break;
+            };
+            let Some(entry) = entries.get(index) else {
+                break;
+            };
+            let rect = self.start_menu_row_rect(row);
             tree.text(
-                menu_x + 24.0,
-                item_y + 8.0,
-                app,
+                rect.x + 24.0,
+                rect.y + 8.0,
+                &entry.name,
                 self.theme.start_menu_fg,
                 14.0,
             );
         }
 
+        // A scroll indicator, so a list that continues past the last row says
+        // so. Sized and placed in proportion to the part of the list on screen.
+        let total = entries.len();
+        if total > rows && rows > 0 {
+            let track_top = self.start_menu_row_rect(0).y;
+            let track_h = rows as f32 * START_MENU_ROW_HEIGHT;
+            let thumb_h = (track_h * rows as f32 / total as f32).max(START_MENU_ROW_HEIGHT / 2.0);
+            let max_scroll = self.start_menu_max_scroll().max(1) as f32;
+            let progress = self.start_menu_scroll as f32 / max_scroll;
+            fill(
+                &mut tree,
+                Rect::new(
+                    menu.x + menu.w - START_MENU_SCROLLBAR_WIDTH - 2.0,
+                    track_top + (track_h - thumb_h) * progress,
+                    START_MENU_SCROLLBAR_WIDTH,
+                    thumb_h,
+                ),
+                self.theme.accent_color,
+            );
+        }
+
         // Power options at bottom
         tree.text(
-            menu_x + 16.0,
-            menu_y + menu_h - 40.0,
+            menu.x + 16.0,
+            menu.y + menu.h - 40.0,
             "Power",
             Color::GRAY,
             12.0,
@@ -1178,6 +1831,22 @@ fn main() {
         "After Alt+F4: {} windows remaining",
         desktop.windows.len()
     );
+
+    // Open the start menu and pick Settings out of it, the way a click would.
+    let start = desktop.start_button_rect();
+    desktop.handle_mouse(&click(start.x + 8.0, start.y + 8.0));
+    let settings_row = desktop
+        .start_menu_entries()
+        .iter()
+        .position(|entry| entry.name == "Settings")
+        .and_then(|index| index.checked_sub(desktop.start_menu_scroll));
+    if let Some(row) = settings_row {
+        let rect = desktop.start_menu_row_rect(row);
+        match desktop.handle_mouse(&click(rect.x + 8.0, rect.y + 8.0)) {
+            ShellAction::Launch(path) => println!("Start menu asked to launch: {path}"),
+            other => println!("Start menu returned {other:?}"),
+        }
+    }
 
     // Test window snapping
     desktop.snap_window(w1, true);

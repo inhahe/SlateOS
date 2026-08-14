@@ -58594,3 +58594,49 @@ untrusted input — `gui/compositor` (protocol messages), `gui/remote`,
 **Where.** `Cargo.toml` (`[workspace.lints.clippy]` at :105) and the
 `Cargo.toml` of every crate listed above. Reproduce the list with:
 `for f in gui/*/Cargo.toml apps/*/Cargo.toml; do grep -q "workspace = true" "$f" || echo "$f"; done`
+
+## TD-SHELL-HAS-NOWHERE-TO-SEND-A-LAUNCH
+
+**What.** `DesktopShell::handle_mouse` now answers a click on a start-menu row
+with `ShellAction::Launch("/usr/bin/settings")`, but nothing starts a process
+from it. `main()` prints the path; there is no caller in a real event loop
+because there is no real event loop — the shell has no channel to the process
+server, and `launcher::LauncherAction::Launch` has had the same dangling end
+since it was written.
+
+**Why it bites.** Every application in the start menu and in the search
+launcher is one unimplemented step away from actually running. The routing,
+the hit testing and the app database are all in place and tested; what is
+missing is exactly one edge — shell to process server.
+
+**Proper fix.** When the shell gains its compositor/IPC event loop, that loop
+consumes `ShellAction` and forwards `Launch(path)` to the process server over
+a channel. The intent deliberately stays a value rather than a `Command`
+spawned in the window manager: policy about *how* a program starts (namespace,
+capabilities, cgroup, environment) belongs to the service that owns process
+creation, not to the shell.
+
+**Where.** `gui/desktop/src/main.rs` — `ShellAction` and `handle_mouse`;
+`gui/desktop/src/launcher.rs` — `LauncherAction::Launch`.
+
+## TD-START-MENU-POWER-ROW-IS-A-LABEL
+
+**What.** The foot of the start menu draws the word "Power" in grey. It is
+text, not a control: `hit_test` reports `Hit::StartMenuPanel` there, and the
+five `Category::System` entries of the app database — Shutdown, Restart,
+Sleep, Lock, Logout — are consequently unreachable from the shell. They are
+filtered *out* of `start_menu_entries` on purpose, so that "Shutdown" is not
+one mis-click below "Screenshot"; but nothing yet offers them anywhere else.
+
+**Why it bites.** There is no way to shut the machine down from the desktop.
+
+**Proper fix.** A power submenu opened from that row: a small popup listing the
+`Category::System` entries, which resolves to the same `ShellAction::Launch`
+the application rows produce. `gui/desktop/src/power.rs` already models power
+actions and confirmation prompts and should be the thing that renders it,
+rather than a second list inside `render_start_menu`. Needs the same
+geometry-shared-with-the-hit-test treatment as the rows above it — see the
+`Rect` documentation in `main.rs`.
+
+**Where.** `gui/desktop/src/main.rs` — `render_start_menu`'s footer,
+`DesktopShell::hit_test`; `gui/desktop/src/power.rs`.

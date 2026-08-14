@@ -805,7 +805,14 @@ impl LauncherState {
 // Built-in app database
 // ============================================================================
 
-fn builtin_app_database() -> Vec<AppEntry> {
+/// The applications this desktop knows how to start.
+///
+/// Public because the launcher is not the only front end onto it: the shell's
+/// start menu offers the same programs, and a second hand-written list there
+/// would be free to drift away from this one — as it had, listing a "System
+/// Monitor" that no entry here has ever provided.
+#[must_use]
+pub fn builtin_app_database() -> Vec<AppEntry> {
     vec![
         AppEntry {
             name: "Terminal".to_string(),

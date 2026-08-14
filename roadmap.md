@@ -213,29 +213,61 @@ version bump there rebuilds everyone's world.
   means someone else landed first: `git pull --rebase`, re-test, push
   again.
 
-### 6. Builds are per-worktree; the host machine is still shared
+### 6. The boot test is a shared, serialized resource — automatically
 
-Since Step 0.5 each lane has its own worktree, so `target/`, `build/` and
-`build/serial-test.txt` are **no longer shared** — the old `build/.boot-lock`
-protocol is obsolete and two lanes may build and boot simultaneously without
-corrupting each other's serial log.
+Each lane works in its **own git worktree**, and `D:/visual studio
+projects/os` is the integration/merge tree only — nobody develops there:
 
-What is still shared is the *machine*. Three concurrent full builds plus a
-QEMU instance will saturate CPU and disk, and a boot test that is starved of
-CPU can miss its serial marker and fail spuriously. So:
+| Lane | Worktree | Branch |
+|---|---|---|
+| A | `D:/visual studio projects/os-lane-a` | `lane-a` |
+| B | `D:/visual studio projects/os-lane-b` | `lane-b` |
+| C | `D:/visual studio projects/os-lane-c` | `lane-c` |
+| — | `D:/visual studio projects/os` | `main` — merges only |
+
+Run `git worktree list` to confirm, and always work in the one that matches
+`scripts/which-lane.py`. Committing from the wrong worktree lands your
+commits on another lane's branch — recoverable only by cherry-picking.
+
+Because of the worktree split, `target/` and `build/serial-test.txt` are
+**per-lane and no longer shared**, so builds no longer contend for a cargo
+lock and boots can no longer clobber each other's serial log. (Earlier
+revisions of this section said otherwise; that predates the split.)
+
+What *is* still shared is the machine. We boot under **TCG** — pure
+emulation, entirely CPU-bound — so two concurrent QEMUs roughly double each
+other's wall-clock boot time and can push a healthy boot past the harness
+timeout, manufacturing phantom "hang" failures. A ~480 s/iteration soak
+starts timing out when another lane boots alongside it.
+
+**This is now enforced for you.** `scripts/boot-test.sh` takes a lock
+directory at `$(git rev-parse --git-common-dir)/slateos-boot-lock` — the one
+`.git` every worktree shares — before launching QEMU, and releases it in the
+same trap that reaps QEMU. You do not need to do anything by hand.
+
+- Acquisition is `mkdir` (atomic on NTFS and POSIX).
+- A lock older than 20 min is assumed dead and broken automatically.
+- `BOOT_LOCK=0` disables locking; `BOOT_LOCK_WAIT=<sec>` caps the wait
+  (default 3600). On expiry the boot proceeds **unlocked** rather than
+  failing — a slow boot beats a spurious error.
+
+For everyday work still prefer `cargo build -p <your crate>` and
+`cargo test -p <your crate>`: they compete for CPU with the other lanes even
+though they no longer share a lock.
+
+The lock covers QEMU, not `cargo`, so the machine is still shared in every
+other respect:
 
 - Before concluding that a boot test failed, check whether another lane was
-  building at the same time; re-run once on an idle machine before filing a
-  bug.
+  *building* at the same time — a full workspace build alongside a TCG boot
+  starves the boot of CPU and can miss the serial marker. Re-run once on an
+  idle machine before filing a bug.
 - If `scripts/boot-test.sh` binds a fixed host port (gdb stub, monitor,
-  network forward), two simultaneous boots will collide on it. Pass a
-  lane-specific port rather than editing the default.
+  network forward), pass a lane-specific port rather than editing the
+  default — the boot lock will normally prevent a collision, but not when
+  `BOOT_LOCK=0` or after a wait expiry lets a boot proceed unlocked.
 - Never kill a QEMU or `cargo` process you did not start — it is probably
   another lane's boot test. Kill by PID, never by image name.
-
-For everyday work prefer `cargo build -p <your crate>` and
-`cargo test -p <your crate>`, which contend far less than a full workspace
-build.
 
 ### 7. When you are blocked, you are not blocked
 

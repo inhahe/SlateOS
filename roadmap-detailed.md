@@ -2,6 +2,15 @@
 
 This is the fine-grained companion to `roadmap.md`. Every actionable feature from `design.txt` (and related design files) is listed here as a checkbox item. Where `design.txt` leaves an ambiguity or open question, it is marked with `AMBIGUITY:` for the human operator to resolve.
 
+> **Three agents are working this repo in parallel.** Lane ownership, the
+> `requests/` protocol and the shared-document rules are defined in
+> `roadmap.md` → "Three-Agent Parallel Execution". This file is the design
+> *reference*, not the status authority, so it carries no per-item lane tags:
+> a section belongs to whichever lane owns the code it describes
+> (**A** = `kernel/**`, **B** = `posix/**` + `userspace/**` + `services/**` +
+> `init/**`, **C** = `gui/**` + `apps/**` + `net*/**` + `pkg/**`). Annotate
+> only sections your lane owns; never reflow or reorder.
+
 Status key: `[ ]` not started, `[-]` in progress, `[x]` done, `[~]` deferred
 
 ### Testing Responsibility

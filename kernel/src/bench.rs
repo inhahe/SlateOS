@@ -785,6 +785,74 @@ pub fn run_all() {
         );
     }
 
+    // --- Where the frame_owner cost actually is ---
+    //
+    // The A/B above says ownership tagging costs ~8500 cycles per alloc+free,
+    // reproducibly (10826 / 7660 / 8512 across three boots). Reading the code
+    // says tens: `is_enabled` is a relaxed load, `current_owner` is a load
+    // plus `fast_cpu_index` (measured at ~190 cycles), `set`/`clear` are a
+    // bounds check and a byte store.
+    //
+    // Two hypotheses have already been killed by measurement rather than by
+    // argument. Ambient load: the arms are interleaved now, and the number
+    // survived. The atomic RMW: `atomic_fetch_add_relaxed` measures 62
+    // cycles, so the two counters accounted for ~124 of ~8500. Guessing a
+    // third time is not a method, so this splits the difference in half —
+    // everything *inside* set/clear on one side, everything else on the
+    // other. Whichever half carries the cost is where to look next; if
+    // neither does, the A/B is measuring something other than the tagging
+    // code and the benchmark is what needs fixing.
+    //
+    // A frame is held for the duration so the index being written is one this
+    // benchmark genuinely owns — scribbling a tag onto a frame in use by
+    // something else would corrupt the very diagnostic being measured.
+    {
+        use crate::mm::{frame, frame_owner};
+
+        match frame::alloc_frame() {
+            Ok(held) => {
+                #[allow(clippy::arithmetic_side_effects)]
+                let idx = (held.addr() / frame::FRAME_SIZE as u64) as usize;
+                const ROUNDS: u32 = 2000;
+
+                let (nop_a, set_cycles) = ab_interleaved(
+                    ROUNDS,
+                    || timed(|| core::hint::black_box(0u64)),
+                    || timed(|| frame_owner::set(idx, frame_owner::Owner::Unknown)),
+                );
+                serial_println!(
+                    "[bench]   frame_owner_set: {} cycles over an empty closure \
+                     (nop={} set={})",
+                    set_cycles.saturating_sub(nop_a), nop_a, set_cycles
+                );
+
+                let (nop_b, owner_cycles) = ab_interleaved(
+                    ROUNDS,
+                    || timed(|| core::hint::black_box(0u64)),
+                    || timed(|| frame_owner::current_owner()),
+                );
+                serial_println!(
+                    "[bench]   frame_owner_current_owner: {} cycles over an empty \
+                     closure (nop={} cur={})",
+                    owner_cycles.saturating_sub(nop_b), nop_b, owner_cycles
+                );
+
+                // Restore the tag the allocator gave it, then hand it back.
+                frame_owner::set(idx, frame_owner::Owner::Unknown);
+                // SAFETY: allocated by this block and not handed out since.
+                unsafe {
+                    let _ = frame::free_frame(held);
+                }
+            }
+            Err(e) => {
+                serial_println!(
+                    "[bench]   frame_owner_set: SKIPPED (no frame available: {:?})",
+                    e
+                );
+            }
+        }
+    }
+
     // --- Page allocation with zeroing (alloc_zeroed + free cycle) ---
     // This is the standard allocation pattern for page faults, stack
     // growth, and process creation.  Measures alloc + 16 KiB zero + free.

@@ -1435,6 +1435,72 @@ fn shaped_runs_agree_with_their_strings_about_boundaries() {
     );
 }
 
+/// A symbol-encoded face still maps plain ASCII.
+///
+/// Fonts like Wingdings and MT Extra ship only a platform-3 encoding-0 `cmap`,
+/// which keys on the byte the character had in the font's own 8-bit encoding
+/// lifted into the private-use area — `A` lives at U+F041, not U+0041. Without
+/// the retry in that range every one of these faces drew every string as a row
+/// of empty boxes, and nothing caught it: a face is *allowed* to have no `A`,
+/// so "no glyph" is a legal answer and no self-consistency check can tell it
+/// from a real one. Shaping the installed faces against HarfBuzz is what found
+/// it, and this is the standing witness.
+#[test]
+#[ignore = "depends on the host's installed fonts"]
+fn symbol_encoded_fonts_still_map_ascii() {
+    let mut files = Vec::new();
+    for dir in font_dirs() {
+        collect_fonts(&dir, &mut files, 0);
+    }
+    assert!(!files.is_empty(), "no fonts found on this host");
+    files.sort();
+
+    // Faces known to carry a symbol `cmap` and nothing else. Named rather than
+    // detected, so that a regression fails the test instead of quietly leaving
+    // it with no faces to check.
+    let symbol_only = ["WINGDNG2.TTF", "WINGDNG3.TTF", "MTEXTRA.TTF", "BSSYM7.TTF"];
+    let mut checked = 0usize;
+
+    for path in &files {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if !symbol_only.iter().any(|s| s.eq_ignore_ascii_case(name)) {
+            continue;
+        }
+        let Ok(data) = fs::read(path) else { continue };
+        let Ok(face) = Face::parse(data) else { continue };
+        let mut mapped = 0usize;
+        for cp in 0x20u32..0x7F {
+            let (Some(ch), Some(shifted)) = (char::from_u32(cp), char::from_u32(0xF000 + cp))
+            else {
+                continue;
+            };
+            // The retry is a *re-spelling*, not a guess: the two spellings of
+            // one character must agree exactly, including where neither is
+            // present. MT Extra is a maths font and genuinely lacks most
+            // letters, so "some ASCII maps" is the strongest claim that holds
+            // across all of these faces.
+            assert_eq!(
+                face.glyph_index(ch),
+                face.glyph_index(shifted),
+                "{name}: U+{cp:04X} and its U+F0xx spelling disagree"
+            );
+            if face.glyph_index(ch).is_some() {
+                mapped += 1;
+            }
+        }
+        assert!(
+            mapped > 0,
+            "{name}: no printable ASCII maps at all, so the symbol cmap was not consulted"
+        );
+        checked += 1;
+    }
+    assert!(
+        checked > 0,
+        "none of {symbol_only:?} are installed on this host"
+    );
+    println!("checked {checked} symbol-encoded faces");
+}
+
 /// Shape text containing a tab in every installed face, and check that the tab
 /// survives substitution intact.
 ///
@@ -1650,6 +1716,15 @@ fn installed_fonts_place_combining_marks() {
 
     // The oracle, driven all the way through shaping: the accent must be a
     // zero-width glyph displaced onto the letter before it.
+    //
+    // The base is `f`, not the `e` the sweep above uses, and the difference
+    // matters. The sweep asks the *face* about a pair of glyph ids, which
+    // normalization never sees. This asks the *shaper* about a string — and
+    // `e` + U+0301 is canonically U+00E9, so a face that has an `é` now gets
+    // one glyph and has no mark left to place. `f` + acute has no precomposed
+    // form in Unicode at all, so it survives normalization as two characters
+    // on every face and still exercises attachment.
+    const BASE: char = 'f';
     let mut checked = 0usize;
     for file in ["segoeui.ttf", "DejaVuSans.ttf", "calibri.ttf", "times.ttf"] {
         let Some(path) = files
@@ -1660,19 +1735,30 @@ fn installed_fonts_place_combining_marks() {
         };
         let Ok(data) = fs::read(path) else { continue };
         let mut font = ScaledFont::from_bytes(data, 32.0).expect("scaled");
-        let run = font.shape(&format!("e{ACUTE}"));
+        let run = font.shape(&format!("{BASE}{ACUTE}"));
         if run.len() != 2 {
-            println!("oracle skip: {file} shaped e+acute to {} glyphs", run.len());
+            println!(
+                "oracle skip: {file} shaped {BASE}+acute to {} glyphs",
+                run.len()
+            );
             continue;
         }
         let base = run.glyphs()[0];
         let mark = run.glyphs()[1];
-        assert_eq!(mark.cluster, 1, "{file}: the acute starts at byte 1");
+        // Both, not 0 and 1: a mark is charged to the character it attaches
+        // to, so the pair is one cluster and a caret cannot land between the
+        // letter and its accent.
+        assert_eq!(
+            mark.cluster, 0,
+            "{file}: the acute reported its own byte offset instead of its \
+             base's"
+        );
 
-        // A combining mark takes no room: the pair measures as the bare `e`.
+        // A combining mark takes no room: the pair measures as the bare base.
         assert!(
             (run.width() - base.advance).abs() < 0.5,
-            "{file}: e+acute measures {:.3} px against the bare e's {:.3} px",
+            "{file}: {BASE}+acute measures {:.3} px against the bare \
+             letter's {:.3} px",
             run.width(),
             base.advance
         );
@@ -1699,14 +1785,14 @@ fn installed_fonts_place_combining_marks() {
         let ink_top = top as f32 - mark.offset.1;
         println!(
             "oracle ok: {file} 32px acute offset ({:.2}, {:.2}); ink x \
-             {ink_left:.2}..{ink_right:.2} within the e's 0..{:.2}, top \
+             {ink_left:.2}..{ink_right:.2} within the letter's 0..{:.2}, top \
              {ink_top:.2}",
             mark.offset.0, mark.offset.1, base.advance
         );
         assert!(
             ink_right > 0.0 && ink_left < base.advance,
             "{file}: the acute's ink spans {ink_left:.2}..{ink_right:.2}, \
-             which does not overlap the e's 0..{:.2} — it is being drawn \
+             which does not overlap the letter's 0..{:.2} — it is being drawn \
              beside the letter rather than on it",
             base.advance
         );

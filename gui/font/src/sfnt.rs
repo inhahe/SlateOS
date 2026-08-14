@@ -372,6 +372,8 @@ pub(crate) struct Span {
 struct CmapSub {
     off: usize,
     format: u16,
+    /// Platform 3, encoding 0: the table keys on `0xF0xx`, not on Unicode.
+    symbol: bool,
 }
 
 /// Vertical metrics shared by every glyph in the face, in font units.
@@ -786,7 +788,8 @@ impl Face {
             // Platform 3 encoding 0 is "symbol": legitimate, but it maps
             // code points into the F0xx private-use range, so prefer a real
             // Unicode table when both exist.
-            let score = if platform == 3 && encoding == 0 {
+            let symbol = platform == 3 && encoding == 0;
+            let score = if symbol {
                 score.saturating_sub(1)
             } else {
                 score
@@ -797,6 +800,7 @@ impl Face {
                     CmapSub {
                         off: sub_off,
                         format,
+                        symbol,
                     },
                 ));
             }
@@ -896,6 +900,26 @@ impl Face {
     pub fn glyph_index(&self, ch: char) -> Option<u16> {
         let sub = self.cmap?;
         let cp = ch as u32;
+        if let Some(gid) = self.lookup(sub, cp) {
+            return Some(gid);
+        }
+        // A "symbol" table does not key on Unicode: it keys on the byte the
+        // character had in the font's own 8-bit encoding, lifted into the
+        // private-use area at U+F000. So Wingdings stores its `A` at U+F041
+        // and looking up U+0041 finds nothing — which is why fonts like
+        // Wingdings and MT Extra used to draw every string as a row of empty
+        // boxes even though the glyphs were right there. Retrying in that
+        // range is what every other shaper does, and it is safe: a face with
+        // a real Unicode table was preferred over this one already, and a
+        // character above U+00FF was never in an 8-bit encoding to begin
+        // with.
+        if sub.symbol && cp <= 0xFF {
+            return self.lookup(sub, 0xF000_u32.checked_add(cp)?);
+        }
+        None
+    }
+
+    fn lookup(&self, sub: CmapSub, cp: u32) -> Option<u16> {
         let gid = match sub.format {
             0 => self.cmap_format0(sub.off, cp),
             4 => self.cmap_format4(sub.off, cp),

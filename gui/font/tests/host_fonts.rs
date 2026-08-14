@@ -731,6 +731,130 @@ fn installed_fonts_report_their_style() {
     }
 }
 
+/// Read the kerning of every installed face, and check the pairs whose sign
+/// every Latin text font agrees on.
+///
+/// Kerning is the one part of the stack whose correctness cannot be seen in a
+/// glyph: a wrong pair still parses, still rasterizes, and still has ink. It
+/// shows up only as text spaced slightly wrong, which is exactly the kind of
+/// defect that survives every other test in this file.
+///
+/// The oracle is the sign, not the value. `AV`, `To` and `Yo` are the textbook
+/// pairs — two shapes whose nominal advances leave a visible hole — and a font
+/// that kerns them at all kerns them *negative*. A parser that read the wrong
+/// field, the wrong record, or the wrong endianness would almost certainly
+/// produce a positive number or a wild one, so the sign plus a sanity bound
+/// catches it without pinning any font's design.
+#[test]
+#[ignore = "depends on the host's installed fonts"]
+fn installed_fonts_kern_the_pairs_that_need_it() {
+    let mut files = Vec::new();
+    for dir in font_dirs() {
+        collect_fonts(&dir, &mut files, 0);
+    }
+    assert!(!files.is_empty(), "no fonts found on this host");
+    files.sort();
+
+    let mut opened = 0usize;
+    let mut with_kerning = 0usize;
+    let mut nonzero_pairs = 0usize;
+    let mut worst = 0_i16;
+
+    for path in &files {
+        let Ok(data) = fs::read(path) else { continue };
+        let Ok(face) = Face::parse(data) else { continue };
+        opened += 1;
+        if !face.has_kerning() {
+            continue;
+        }
+        with_kerning += 1;
+        // A kerning value is a correction, so it is a small fraction of an em.
+        // Anything near a whole em means a misread field, and would show on
+        // screen as a letter sitting on top of its neighbour.
+        let limit = i32::from(face.units_per_em()) / 2;
+        for (a, b) in [('A', 'V'), ('T', 'o'), ('Y', 'o'), ('P', '.'), ('r', '.')] {
+            let (Some(ga), Some(gb)) = (face.glyph_index(a), face.glyph_index(b)) else {
+                continue;
+            };
+            let v = face.kern(ga, gb);
+            if v != 0 {
+                nonzero_pairs += 1;
+                assert!(
+                    i32::from(v).abs() <= limit,
+                    "{}: kern({a},{b}) = {v}, more than half of the {} unit em",
+                    path.display(),
+                    face.units_per_em()
+                );
+                worst = worst.min(v);
+            }
+        }
+    }
+
+    println!("faces opened:       {opened}");
+    println!("faces with kerning: {with_kerning}");
+    println!("non-zero pairs:     {nonzero_pairs}");
+    println!("largest pull-in:    {worst} units");
+
+    assert!(
+        with_kerning > 0,
+        "not one of {opened} faces reported kerning — the tables are not \
+         being found at all"
+    );
+    assert!(
+        nonzero_pairs > 0,
+        "{with_kerning} faces have kerning tables but not one kerned any of \
+         the pairs that always kern — the lookups are returning nothing"
+    );
+
+    // The oracle. These faces all kern AV, and all pull it together.
+    let mut checked = 0usize;
+    for file in [
+        "arial.ttf",
+        "times.ttf",
+        "segoeui.ttf",
+        "DejaVuSans.ttf",
+        "verdana.ttf",
+    ] {
+        let Some(path) = files
+            .iter()
+            .find(|p| p.file_name().is_some_and(|n| n.eq_ignore_ascii_case(file)))
+        else {
+            continue;
+        };
+        let Ok(data) = fs::read(path) else { continue };
+        let Ok(face) = Face::parse(data) else { continue };
+        let (Some(a), Some(v)) = (face.glyph_index('A'), face.glyph_index('V')) else {
+            continue;
+        };
+        let kern = face.kern(a, v);
+        assert!(
+            kern < 0,
+            "{file}: kern(A,V) = {kern}, but every Latin text face pulls that \
+             pair together"
+        );
+        println!("oracle ok: {file} kern(A,V) = {kern}");
+        checked += 1;
+
+        // And the whole point of it: the pair measures narrower than the sum
+        // of its parts, at the size a UI actually draws at.
+        let font = ScaledFont::from_bytes(fs::read(path).unwrap(), 14.0).expect("scaled");
+        let pair = font.measure("AV");
+        let apart = font.measure("A") + font.measure("V");
+        assert!(
+            pair < apart,
+            "{file}: \"AV\" measured {pair:.3} px, no narrower than the \
+             {apart:.3} px it would be unkerned — measurement is ignoring the \
+             kerning the face reports"
+        );
+        println!("           14px \"AV\" {pair:.3} px vs {apart:.3} px unkerned");
+    }
+    assert!(
+        checked >= 1,
+        "none of the well-known faces are installed — kerning was never \
+         checked against a known answer"
+    );
+}
+
 /// Drive the whole stack the way a toolkit will: file → face → `ScaledFont`
 /// → pixels in an ARGB buffer.
 ///

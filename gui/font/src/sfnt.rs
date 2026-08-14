@@ -61,6 +61,8 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::fmt;
 
+use crate::kern::Kerning;
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -121,19 +123,19 @@ pub const MAX_COMPOSITE_DEPTH: u8 = 8;
 // Big-endian primitive reads, all bounds-checked
 // ---------------------------------------------------------------------------
 
-fn u16_at(d: &[u8], off: usize) -> Option<u16> {
+pub(crate) fn u16_at(d: &[u8], off: usize) -> Option<u16> {
     let end = off.checked_add(2)?;
     let b: [u8; 2] = d.get(off..end)?.try_into().ok()?;
     Some(u16::from_be_bytes(b))
 }
 
-fn i16_at(d: &[u8], off: usize) -> Option<i16> {
+pub(crate) fn i16_at(d: &[u8], off: usize) -> Option<i16> {
     let end = off.checked_add(2)?;
     let b: [u8; 2] = d.get(off..end)?.try_into().ok()?;
     Some(i16::from_be_bytes(b))
 }
 
-fn u32_at(d: &[u8], off: usize) -> Option<u32> {
+pub(crate) fn u32_at(d: &[u8], off: usize) -> Option<u32> {
     let end = off.checked_add(4)?;
     let b: [u8; 4] = d.get(off..end)?.try_into().ok()?;
     Some(u32::from_be_bytes(b))
@@ -358,9 +360,9 @@ impl Outline {
 
 /// Byte range of a table within the font file.
 #[derive(Clone, Copy, Debug)]
-struct Span {
-    off: usize,
-    len: usize,
+pub(crate) struct Span {
+    pub(crate) off: usize,
+    pub(crate) len: usize,
 }
 
 /// A `cmap` subtable we know how to read.
@@ -418,6 +420,9 @@ pub struct Face {
     /// Where this face sits in its family. Decoded eagerly, unlike `name`,
     /// because it is six bytes at fixed offsets rather than a table walk.
     style: Style,
+    /// Pair kerning, from `GPOS` or the legacy `kern` table. `None` for the
+    /// many faces — monospace ones especially — that carry none.
+    kerning: Option<Kerning>,
 }
 
 /// Where a face sits within its family — the axes a font picker selects on.
@@ -513,6 +518,8 @@ impl Face {
         let mut name = None;
         let mut os2 = None;
         let mut cff = None;
+        let mut gpos = None;
+        let mut kern = None;
         let mut has_cff2 = false;
 
         for i in 0..usize::from(num_tables) {
@@ -543,6 +550,8 @@ impl Face {
                 b"name" => name = Some(span),
                 b"OS/2" => os2 = Some(span),
                 b"CFF " => cff = Some(span),
+                b"GPOS" => gpos = Some(span),
+                b"kern" => kern = Some(span),
                 b"CFF2" => has_cff2 = true,
                 _ => {}
             }
@@ -617,6 +626,11 @@ impl Face {
         let os2_data = os2.and_then(|s| data.get(s.off..s.off.checked_add(s.len)?));
         let style = Self::parse_style(os2_data, head_data);
 
+        // Eager, unlike `name`: the result is a short list of offsets, and
+        // deferring it would mean re-deciding "GPOS or the legacy table?" on
+        // every pair of glyphs drawn.
+        let kerning = Kerning::parse(&data, gpos, kern);
+
         Ok(Self {
             metrics: FaceMetrics {
                 ascender,
@@ -632,6 +646,7 @@ impl Face {
             cmap: cmap_sub,
             name,
             style,
+            kerning,
             data,
         })
     }
@@ -987,6 +1002,32 @@ impl Face {
             .checked_add(usize::from(idx).checked_mul(4).ok_or(SfntError::TooShort)?)
             .ok_or(SfntError::TooShort)?;
         u16_at(&self.data, off).ok_or(SfntError::MalformedTable("hmtx"))
+    }
+
+    /// How much to add to `left`'s advance when `right` follows it, in font
+    /// units. Negative pulls the pair closer, which is the common case.
+    ///
+    /// Zero is the answer for the overwhelming majority of pairs, and for
+    /// every pair in a face that carries no kerning at all — so this is an
+    /// adjustment to an advance, never a replacement for one.
+    ///
+    /// Infallible on purpose. A malformed kerning table means text that is
+    /// spaced slightly wrong, which is not worth failing a draw over when the
+    /// alternative is drawing nothing.
+    #[must_use]
+    pub fn kern(&self, left: u16, right: u16) -> i16 {
+        self.kerning
+            .as_ref()
+            .map_or(0, |k| k.pair(&self.data, left, right))
+    }
+
+    /// Whether this face carries any pair kerning this can read.
+    ///
+    /// Exposed for diagnostics and for tests that need to tell "kerned to
+    /// zero" apart from "has no kerning".
+    #[must_use]
+    pub fn has_kerning(&self) -> bool {
+        self.kerning.is_some()
     }
 
     /// Left side bearing for a glyph, in font units.

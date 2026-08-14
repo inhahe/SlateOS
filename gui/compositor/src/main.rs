@@ -1802,8 +1802,17 @@ impl RenderEngine {
         let baseline = y as f32 + font.metrics().ascent;
         let max_x = max_width.map(|w| x.saturating_add(w as i32));
         let mut pen = x as f32;
+        let mut prev = None;
 
         for ch in text.chars() {
+            // The toolkit measured this string with kerning applied, so
+            // drawing it without would put every glyph after the first `AV` or
+            // `To` in the run a fraction to the right of where the layout that
+            // sized the widget expects it.
+            if let Some(prev) = prev {
+                pen += font.kern(prev, ch);
+            }
+            prev = Some(ch);
             let Some((mask, advance)) = font.glyph(ch) else {
                 continue;
             };

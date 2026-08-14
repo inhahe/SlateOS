@@ -343,18 +343,40 @@ impl ScaledFont {
         self.order.push(gid);
     }
 
+    /// The gap to add between two glyphs, in pixels, on top of the first
+    /// one's advance. Negative for the pairs that need pulling together.
+    ///
+    /// Separate from `glyph` because a caller that draws one glyph at a time
+    /// (the compositor does, so that it can blend coverage through its own
+    /// clip stack) has to be able to ask about a pair without giving up the
+    /// per-glyph loop. Callers that use `measure` or `draw_text` get it
+    /// applied for them.
+    #[must_use]
+    pub fn kern(&self, left: u16, right: u16) -> f32 {
+        f32::from(self.face.kern(left, right)) * self.scale
+    }
+
     /// Width of `text` in pixels, ignoring line breaks.
     ///
-    /// This only needs `hmtx`, so it does not rasterize anything and does not
-    /// touch the cache.
+    /// This only needs `hmtx` and the kerning tables, so it does not rasterize
+    /// anything and does not touch the cache.
     #[must_use]
     pub fn measure(&self, text: &str) -> f32 {
         let mut w = 0.0_f32;
+        let mut prev = None;
         for ch in text.chars() {
             let gid = self.glyph_id(ch);
+            // Kerning is part of the width, not a drawing-time flourish: a
+            // measurement that leaves it out is one that disagrees with what
+            // the compositor puts on the screen, which is how a label ends up
+            // centred half a pixel off in every button on the desktop.
+            if let Some(prev) = prev {
+                w += self.kern(prev, gid);
+            }
             if let Ok(adv) = self.face.advance(gid) {
                 w += f32::from(adv) * self.scale;
             }
+            prev = Some(gid);
         }
         w
     }
@@ -399,8 +421,13 @@ impl ScaledFont {
     /// alpha, so a fully opaque colour still anti-aliases.
     pub fn draw_text(&mut self, text: &str, target: &mut Target<'_>, x: f32, y: f32) -> f32 {
         let mut pen = x;
+        let mut prev = None;
         for ch in text.chars() {
             let gid = self.glyph_id(ch);
+            if let Some(prev) = prev {
+                pen += self.kern(prev, gid);
+            }
+            prev = Some(gid);
             let Ok(glyph) = self.glyph(gid) else {
                 continue;
             };

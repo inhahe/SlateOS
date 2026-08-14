@@ -184,7 +184,12 @@ impl SystemFont {
     /// without re-measuring.
     pub fn draw_text(&mut self, text: &str, target: &mut Target<'_>, x: f32, y: f32) -> f32 {
         let mut pen = x;
+        let mut prev = None;
         for ch in text.chars() {
+            if let Some(prev) = prev {
+                pen += self.kern(prev, ch);
+            }
+            prev = Some(ch);
             let Some((mask, advance)) = self.glyph(ch) else {
                 continue;
             };
@@ -203,6 +208,26 @@ impl SystemFont {
             pen += advance;
         }
         pen
+    }
+
+    /// How much to move the pen between `prev` and `ch`, over and above
+    /// `prev`'s advance — the font's own correction for a pair whose nominal
+    /// advances leave them looking too far apart (`AV`) or too close.
+    ///
+    /// Zero for the bitmap face, which is a fixed grid and has nothing to
+    /// correct, and zero for the many outline faces that ship no kerning.
+    ///
+    /// Callers that draw a glyph at a time have to add this themselves;
+    /// [`measure`](Self::measure) and [`draw_text`](Self::draw_text) already
+    /// do. It is exposed rather than hidden because the compositor cannot use
+    /// either of those — it blends coverage through its own clip stack — and
+    /// it must not space text differently from the way it was measured.
+    #[must_use]
+    pub fn kern(&self, prev: char, ch: char) -> f32 {
+        match &self.backend {
+            Backend::Outline(f) => f.kern(f.glyph_id(prev), f.glyph_id(ch)),
+            Backend::Bitmap { .. } => 0.0,
+        }
     }
 
     /// The coverage mask for `ch` and the pen advance past it, rasterizing and

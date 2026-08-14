@@ -43,10 +43,10 @@
 
 #![allow(dead_code)]
 
-use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------
@@ -89,8 +89,14 @@ const FFLG_CRC32: u64 = 0x0004;
 /// A single entry in a RAR5 archive.
 #[derive(Debug, Clone)]
 pub struct RarEntry {
-    /// Filename (UTF-8).
-    pub name: String,
+    /// Filename, as the raw bytes stored in the header.
+    ///
+    /// RAR5 nominally specifies UTF-8 here, but the field is a length-prefixed
+    /// byte run that nothing validates, so an archive can carry any bytes at
+    /// all — and a name written on a system using a legacy encoding usually
+    /// does.  Decoding it as `str` turned every such name into `""`, so the
+    /// member listed and extracted under a name that was not its own.
+    pub name: PathBuf,
     /// Uncompressed size in bytes.
     pub unpacked_size: u64,
     /// Compressed size in bytes (data area).
@@ -282,10 +288,9 @@ pub fn parse(data: &[u8]) -> KernelResult<Vec<RarEntry>> {
                 if pos + name_len > header_end {
                     return Err(KernelError::CorruptedData);
                 }
-                let name = core::str::from_utf8(
-                    data.get(pos..pos + name_len).ok_or(KernelError::CorruptedData)?
-                ).unwrap_or("");
-                let name = String::from(name);
+                let name = PathBuf::from(
+                    data.get(pos..pos + name_len).ok_or(KernelError::CorruptedData)?,
+                );
 
                 // Data area starts right after the header.
                 let data_offset = header_end;
@@ -499,8 +504,8 @@ pub fn self_test() -> KernelResult<()> {
             serial_println!("[rar]   ERROR: expected 1 entry, got {}", entries.len());
             return Err(KernelError::CorruptedData);
         }
-        if entries[0].name != "hello.txt" {
-            serial_println!("[rar]   ERROR: name mismatch: '{}'", entries[0].name);
+        if entries[0].name.as_path() != Path::new("hello.txt") {
+            serial_println!("[rar]   ERROR: name mismatch: '{}'", entries[0].name.display());
             return Err(KernelError::CorruptedData);
         }
         if entries[0].unpacked_size != 12 {
@@ -515,7 +520,7 @@ pub fn self_test() -> KernelResult<()> {
             serial_println!("[rar]   ERROR: incorrectly marked as directory");
             return Err(KernelError::CorruptedData);
         }
-        serial_println!("[rar]   parse OK (1 entry: '{}')", entries[0].name);
+        serial_println!("[rar]   parse OK (1 entry: '{}')", entries[0].name.display());
     }
 
     // --- Test 2: extract stored entry ---
@@ -590,11 +595,11 @@ pub fn self_test() -> KernelResult<()> {
             serial_println!("[rar]   ERROR: expected 2 entries, got {}", entries.len());
             return Err(KernelError::CorruptedData);
         }
-        if !entries[0].is_dir || entries[0].name != "mydir/" {
+        if !entries[0].is_dir || entries[0].name.as_path() != Path::new("mydir/") {
             serial_println!("[rar]   ERROR: first entry not a directory");
             return Err(KernelError::CorruptedData);
         }
-        if entries[1].is_dir || entries[1].name != "mydir/data.bin" {
+        if entries[1].is_dir || entries[1].name.as_path() != Path::new("mydir/data.bin") {
             serial_println!("[rar]   ERROR: second entry incorrect");
             return Err(KernelError::CorruptedData);
         }

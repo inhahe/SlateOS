@@ -324,7 +324,7 @@ fn list_cpio(data: &[u8]) -> KernelResult<Vec<ArchiveEntry>> {
 fn list_ar(data: &[u8]) -> KernelResult<Vec<ArchiveEntry>> {
     let ar_entries = crate::fs::ar::unar(data)?;
     Ok(ar_entries.iter().map(|e| ArchiveEntry {
-        name: PathBuf::from(e.name.as_str()),
+        name: e.name.clone(),
         size: e.data.len() as u64,
         kind: EntryKind::File, // AR only has files.
         mtime: e.mtime,
@@ -338,7 +338,7 @@ fn list_ar(data: &[u8]) -> KernelResult<Vec<ArchiveEntry>> {
 fn list_rar(data: &[u8]) -> KernelResult<Vec<ArchiveEntry>> {
     let rar_entries = crate::fs::rar::parse(data)?;
     Ok(rar_entries.iter().map(|e| ArchiveEntry {
-        name: PathBuf::from(e.name.as_str()),
+        name: e.name.clone(),
         size: e.unpacked_size,
         kind: if e.is_dir { EntryKind::Directory } else { EntryKind::File },
         mtime: e.mtime as u64,
@@ -352,7 +352,7 @@ fn list_rar(data: &[u8]) -> KernelResult<Vec<ArchiveEntry>> {
 fn list_7z(data: &[u8]) -> KernelResult<Vec<ArchiveEntry>> {
     let entries = crate::fs::sevenz::un7z(data)?;
     Ok(entries.iter().map(|e| ArchiveEntry {
-        name: PathBuf::from(e.name.as_str()),
+        name: e.name.clone(),
         size: e.data.len() as u64,
         kind: if e.is_dir { EntryKind::Directory } else { EntryKind::File },
         mtime: 0,
@@ -409,19 +409,19 @@ pub fn extract_one_format<N: AsRef<Path> + ?Sized>(
         }
         ArchiveFormat::Ar => {
             let entries = crate::fs::ar::unar(data)?;
-            let entry = entries.iter().find(|e| Path::new(e.name.as_str()) == name)
+            let entry = entries.iter().find(|e| e.name.as_path() == name)
                 .ok_or(KernelError::NotFound)?;
             Ok(entry.data.clone())
         }
         ArchiveFormat::Rar => {
             let entries = crate::fs::rar::parse(data)?;
-            let entry = entries.iter().find(|e| Path::new(e.name.as_str()) == name)
+            let entry = entries.iter().find(|e| e.name.as_path() == name)
                 .ok_or(KernelError::NotFound)?;
             crate::fs::rar::entry_data(data, entry).map(<[u8]>::to_vec)
         }
         ArchiveFormat::SevenZ => {
             let entries = crate::fs::sevenz::un7z(data)?;
-            let entry = entries.iter().find(|e| Path::new(e.name.as_str()) == name)
+            let entry = entries.iter().find(|e| e.name.as_path() == name)
                 .ok_or(KernelError::NotFound)?;
             Ok(entry.data.clone())
         }
@@ -545,9 +545,11 @@ pub fn extract_all_format<D: AsRef<Path> + ?Sized>(
 ///
 /// # Errors
 /// - [`KernelError::NotSupported`] if `fmt` has no writer.
-/// - [`KernelError::InvalidArgument`] if a member name is not valid UTF-8 and
-///   the target format's writer still models names as `String` (`ar` only).
-///   See [`name_for_string_writer`].
+/// - [`KernelError::InvalidArgument`] if a member name cannot be represented in
+///   the target container — currently only `ar`, which has no escape mechanism
+///   and so rejects an empty name, a name starting with `/`, or one containing
+///   the `/\n` sequence that terminates its long-name table. Every writer takes
+///   byte names, so this is never about UTF-8.
 pub fn create(fmt: ArchiveFormat, entries: &[CreateEntry]) -> KernelResult<Vec<u8>> {
     if !fmt.supports_create() {
         return Err(KernelError::NotSupported);
@@ -569,18 +571,6 @@ pub fn create(fmt: ArchiveFormat, entries: &[CreateEntry]) -> KernelResult<Vec<u
     );
 
     Ok(data)
-}
-
-/// Narrow a byte member name to the `String` that the `ar` writer still takes.
-///
-/// `ar` stores names as raw bytes on disk, so this narrowing is an artefact of
-/// the in-kernel writer type, not of the file format — see `known-issues.md`.
-/// Until it carries [`PathBuf`] end to end, a name that is not valid UTF-8 is
-/// **rejected** rather than lossily transcoded: silently replacing bytes would
-/// write an archive whose member cannot be extracted back to the file it came
-/// from.
-fn name_for_string_writer(name: &Path) -> KernelResult<String> {
-    name.to_str().map(String::from).ok_or(KernelError::InvalidArgument)
 }
 
 /// Append the `/` that directory members conventionally carry, when the caller
@@ -665,7 +655,7 @@ fn create_ar(entries: &[CreateEntry]) -> KernelResult<Vec<u8>> {
     for e in entries.iter().filter(|e| e.kind == EntryKind::File) {
         // AR only supports files.
         ar_entries.push(ArEntry {
-            name: name_for_string_writer(&e.name)?,
+            name: e.name.clone(),
             data: e.data.clone(),
             mtime: 0,
             uid: 0,

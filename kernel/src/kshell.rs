@@ -80707,7 +80707,7 @@ fn cmd_ar_list(args: &[&str]) {
         crate::console_println!(
             "  {:>8o}  {:>5}:{:<5}  {:>10}  {}",
             entry.mode, entry.uid, entry.gid,
-            entry.data.len(), entry.name
+            entry.data.len(), entry.name.display()
         );
         total_size = total_size.wrapping_add(entry.data.len() as u64);
     }
@@ -80777,7 +80777,7 @@ fn cmd_ar_extract(args: &[&str]) {
         // format enforces that, so the write goes through the shared jail guard
         // (Zip Slip) rather than trusting the archive.
         let Ok(dest) = crate::fs::pathutil::confine_under(&target_dir, &entry.name) else {
-            crate::console_println!("ar: refusing unsafe member '{}'", entry.name);
+            crate::console_println!("ar: refusing unsafe member '{}'", entry.name.display());
             errors = errors.wrapping_add(1);
             continue;
         };
@@ -80823,7 +80823,7 @@ fn cmd_ar_create(args: &[&str]) {
                 // Use the filename part only (strip directory).
                 let name = path.rsplit('/').next().unwrap_or(&path);
                 entries.push(crate::fs::ar::ArEntry {
-                    name: alloc::string::String::from(name),
+                    name: crate::fs::path::PathBuf::from(name),
                     data,
                     mtime: 0,
                     uid: 0,
@@ -80924,41 +80924,58 @@ fn dpkg_read_deb(path: &str) -> Option<alloc::vec::Vec<crate::fs::ar::ArEntry>> 
     }
 }
 
+/// Byte-prefix test on a member name.
+///
+/// Deliberately not [`crate::fs::path::Path::starts_with`]: that one is
+/// component-wise (like `std`'s), so `"control.tar"` would *not* match
+/// `"control.tar.gz"`. dpkg member matching is a plain byte prefix.
+fn name_has_prefix(name: &crate::fs::path::Path, prefix: &str) -> bool {
+    name.as_bytes().starts_with(prefix.as_bytes())
+}
+
+/// Byte-suffix test on a member name.
+///
+/// `Path` has no `ends_with` for the same reason as above — a component-wise
+/// suffix is not what "does this member end in `.gz`" means.
+fn name_has_suffix(name: &crate::fs::path::Path, suffix: &str) -> bool {
+    name.as_bytes().ends_with(suffix.as_bytes())
+}
+
 /// Find an ar member by name prefix (e.g., "control.tar" or "data.tar").
 fn dpkg_find_member<'a>(
     entries: &'a [crate::fs::ar::ArEntry],
     prefix: &str,
 ) -> Option<&'a crate::fs::ar::ArEntry> {
-    entries.iter().find(|e| e.name.starts_with(prefix))
+    entries.iter().find(|e| name_has_prefix(e.name.as_path(), prefix))
 }
 
 /// Decompress a tar.{gz,xz,zst,bz2} member into raw tar data.
 fn dpkg_decompress_tar(member: &crate::fs::ar::ArEntry) -> Option<alloc::vec::Vec<u8>> {
     let data = &member.data;
-    let name = &member.name;
+    let name = member.name.as_path();
 
-    if name.ends_with(".gz") || name.ends_with(".tgz") {
+    if name_has_suffix(name, ".gz") || name_has_suffix(name, ".tgz") {
         // Gzip-compressed.
         if data.len() >= 2 && data[0] == 0x1F && data[1] == 0x8B {
             match crate::fs::compress::gunzip(data) {
                 Ok(d) => return Some(d),
                 Err(e) => {
-                    crate::console_println!("dpkg: gzip decompress of '{}' failed: {:?}", name, e);
+                    crate::console_println!("dpkg: gzip decompress of '{}' failed: {:?}", name.display(), e);
                     return None;
                 }
             }
         }
-    } else if name.ends_with(".xz") {
+    } else if name_has_suffix(name, ".xz") {
         if data.get(..6) == Some(&[0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00]) {
             match crate::fs::xz::unxz(data) {
                 Ok(d) => return Some(d),
                 Err(e) => {
-                    crate::console_println!("dpkg: xz decompress of '{}' failed: {:?}", name, e);
+                    crate::console_println!("dpkg: xz decompress of '{}' failed: {:?}", name.display(), e);
                     return None;
                 }
             }
         }
-    } else if name.ends_with(".zst") {
+    } else if name_has_suffix(name, ".zst") {
         if data.len() >= 4 {
             let magic = u32::from(data[0])
                 | (u32::from(data[1]) << 8)
@@ -80968,18 +80985,18 @@ fn dpkg_decompress_tar(member: &crate::fs::ar::ArEntry) -> Option<alloc::vec::Ve
                 match crate::fs::zstd::unzstd(data) {
                     Ok(d) => return Some(d),
                     Err(e) => {
-                        crate::console_println!("dpkg: zstd decompress of '{}' failed: {:?}", name, e);
+                        crate::console_println!("dpkg: zstd decompress of '{}' failed: {:?}", name.display(), e);
                         return None;
                     }
                 }
             }
         }
-    } else if name.ends_with(".bz2") {
+    } else if name_has_suffix(name, ".bz2") {
         if data.starts_with(b"BZh") {
             match crate::fs::bzip2::bunzip2(data) {
                 Ok(d) => return Some(d),
                 Err(e) => {
-                    crate::console_println!("dpkg: bzip2 decompress of '{}' failed: {:?}", name, e);
+                    crate::console_println!("dpkg: bzip2 decompress of '{}' failed: {:?}", name.display(), e);
                     return None;
                 }
             }
@@ -81013,7 +81030,7 @@ fn cmd_dpkg_info(args: &[&str]) {
     // Show .deb members.
     crate::console_println!("  members:");
     for m in &members {
-        crate::console_println!("    {} ({} bytes)", m.name, m.data.len());
+        crate::console_println!("    {} ({} bytes)", m.name.display(), m.data.len());
     }
 
     // Decompress and parse the control.tar to show package metadata.
@@ -81328,7 +81345,7 @@ fn cmd_un7z(args: &str) {
             let type_str = if entry.is_dir { "dir" } else { "file" };
             crate::console_println!(
                 "  {:>10}  {:>4}  {}",
-                entry.data.len(), type_str, entry.name
+                entry.data.len(), type_str, entry.name.display()
             );
             total_size = total_size.wrapping_add(entry.data.len() as u64);
             if entry.is_dir {
@@ -81352,7 +81369,7 @@ fn cmd_un7z(args: &str) {
         // Member names are attacker-controlled: route the join through the
         // shared jail guard so `../../etc/passwd` cannot escape (Zip Slip).
         let Ok(dest) = crate::fs::pathutil::confine_under(&target_dir, &entry.name) else {
-            crate::console_println!("un7z: refusing unsafe member '{}'", entry.name);
+            crate::console_println!("un7z: refusing unsafe member '{}'", entry.name.display());
             errors = errors.wrapping_add(1);
             continue;
         };
@@ -81492,7 +81509,7 @@ fn cmd_unrar(args: &str) {
             let mode = if entry.is_stored { "store" } else { "comp" };
             crate::console_println!(
                 "  {:>10}  {:>10}  {:>4}  {:>5}  {}",
-                entry.unpacked_size, entry.packed_size, type_str, mode, entry.name
+                entry.unpacked_size, entry.packed_size, type_str, mode, entry.name.display()
             );
             total_size = total_size.wrapping_add(entry.unpacked_size);
             if entry.is_dir {
@@ -81517,7 +81534,7 @@ fn cmd_unrar(args: &str) {
         // Member names are attacker-controlled: route the join through the
         // shared jail guard so `../../etc/passwd` cannot escape (Zip Slip).
         let Ok(dest) = crate::fs::pathutil::confine_under(&target_dir, &entry.name) else {
-            crate::console_println!("unrar: refusing unsafe member '{}'", entry.name);
+            crate::console_println!("unrar: refusing unsafe member '{}'", entry.name.display());
             errors = errors.wrapping_add(1);
             continue;
         };
@@ -81528,7 +81545,7 @@ fn cmd_unrar(args: &str) {
         }
 
         if !entry.is_stored {
-            crate::console_println!("unrar: skip '{}' (compressed, not extractable)", entry.name);
+            crate::console_println!("unrar: skip '{}' (compressed, not extractable)", entry.name.display());
             skipped = skipped.wrapping_add(1);
             continue;
         }
@@ -81555,7 +81572,7 @@ fn cmd_unrar(args: &str) {
                 }
             }
             Err(e) => {
-                crate::console_println!("unrar: extract '{}': {:?}", entry.name, e);
+                crate::console_println!("unrar: extract '{}': {:?}", entry.name.display(), e);
                 errors = errors.wrapping_add(1);
             }
         }

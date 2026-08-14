@@ -576,7 +576,18 @@ all, and have the io_ring opcodes (and any future `pread`/`pwrite` syscalls)
 call those. The seek-sandwich should not exist anywhere. Until then the io_ring
 opcodes at least report the restore failure instead of discarding it.
 
-### D-VFS-PATHS-ARE-STR-NOT-BYTES — 2026-08-13 — TECH DEBT (`fs/`, `kernel/src/fs/`, every path-taking syscall)
+### D-VFS-PATHS-ARE-STR-NOT-BYTES — 2026-08-13 — CORE CONVERSION DONE, merged to `main` 2026-08-13 (residual debt tracked separately)
+
+> **Status.** The conversion itself is finished and merged: the `FileSystem`
+> trait, the `Vfs` public API, the dcache, every path-taking syscall handler and
+> all the in-kernel consumers now speak byte paths, and `cargo build`, `cargo
+> clippy`, `cargo test --workspace` and the QEMU boot test are all green on
+> `main`.  `TD-ARCHIVE-WRITER-NAMES-ARE-STRING-NOT-BYTES` (ar/rar/7z member
+> names) is likewise now FIXED.  What remains is one *narrower* item with its
+> own entry, not this one: `TD-KSHELL-LINE-EDITOR-IS-UTF8` (the shell's editor
+> buffer and CWD).  Keep this entry for the background below; do not re-open it
+> for that.
+
 
 **What.** `fs::Vfs`'s path API takes `&str`, so every handler that receives a
 path from userspace must run `core::str::from_utf8` (or
@@ -660,14 +671,17 @@ Done:
   `fswalk` and ~25 smaller modules; `fs/tar`, `fs/cpio`, `fs/zip` and the
   unified `fs/archive` layer.
 
-Remaining: nothing for the core conversion. Two follow-ups are carried
-separately — `TD-ARCHIVE-WRITER-NAMES-ARE-STRING-NOT-BYTES` (ar/rar/7z member
-names) and `TD-KSHELL-LINE-EDITOR-IS-UTF8` (the interactive editor cannot type
-or tab-complete a byte name that the API now handles fine).
+Remaining: nothing for the core conversion, and
+`TD-ARCHIVE-WRITER-NAMES-ARE-STRING-NOT-BYTES` (ar/rar/7z member names) is now
+fixed too. One follow-up is still carried separately —
+`TD-KSHELL-LINE-EDITOR-IS-UTF8` (the interactive editor cannot type or
+tab-complete a byte name that the API now handles fine).
 
 **What the conversion turned up.** The sweep was not merely mechanical; it
-exposed four real bugs, each written up separately under *Fixed Bugs*:
+exposed six real bugs, each written up separately under *Fixed Bugs*:
 `B-CPIO-DROPS-NON-UTF8-MEMBER-NAMES`, `B-ZIP-FABRICATES-MEMBER-NAMES`,
+`B-RAR-DROPS-NON-UTF8-MEMBER-NAMES`,
+`B-7Z-COLLAPSES-UNPAIRED-SURROGATES-IN-MEMBER-NAMES`,
 `B-MKDIR-ALL-BUILT-A-RELATIVE-PATH-FROM-AN-ABSOLUTE-ONE`, and the ext4
 readdir skip described above. It also let six hand-rolled path-jail joins in
 `kshell` (`tar`, `cpio`, `ar`/`dpkg`, `un7z`, `unrar`, `unzip` extract) be
@@ -43382,6 +43396,51 @@ directory-member test became a byte test
 use `.display()`, which is lossy *for the terminal only* and never feeds back
 into a filename.
 
+### B-RAR-DROPS-NON-UTF8-MEMBER-NAMES. A RAR5 member whose name is not UTF-8 parsed as `""` — 2026-08-13 — FIXED 2026-08-13
+
+**Where:** `kernel/src/fs/rar.rs`, the file-header name decode in `parse`.
+
+**What it was:** `RarEntry::name` was a `String` and the parser did
+`core::str::from_utf8(bytes).unwrap_or("")`. RAR5 nominally specifies UTF-8 in
+the name field, but the field is a length-prefixed byte run that *nothing*
+validates — neither the format's own CRC (which covers the header bytes, not
+their encoding) nor our parser — so an archive written by a tool that stored
+locale bytes yields raw non-UTF-8 there routinely.
+
+**Consequence:** the same shape as the cpio bug and just as silent. `unrar -l`
+listed the member with an empty name; `unrar` fed `""` to
+`pathutil::confine_under`, so the member either vanished or, for several such
+members, they all collided on one name — the last one written won. No
+diagnostic in either case.
+
+**Fix:** `RarEntry::name` is a `PathBuf` built with `PathBuf::from(bytes)`; no
+decode happens at all. The self-test's name comparisons became
+`name.as_path() != Path::new("…")` and its prints `.display()`.
+
+### B-7Z-COLLAPSES-UNPAIRED-SURROGATES-IN-MEMBER-NAMES. Distinct 7z members collided on one name — 2026-08-13 — FIXED 2026-08-13
+
+**Where:** `kernel/src/fs/sevenz.rs`, the `K_NAME` property decode in the
+header parser.
+
+**What it was:** 7z stores names as NUL-terminated UTF-16LE, and the parser did
+`String::from_utf16_lossy(&name_u16)`. "Lossy" here means *every* unpaired
+surrogate becomes U+FFFD. Windows filenames are UTF-16 with no well-formedness
+requirement, so unpaired surrogates are legal on the filesystem the archive was
+most likely built on. Two members named `a\u{D800}.txt` and `a\u{DC00}.txt` are
+distinct files on disk but decoded to the *same* string here.
+
+**Consequence:** the listing showed two identical names, and extraction wrote
+one file twice — the second silently overwriting the first, so `un7z` reported
+success having lost a file's contents. The old code also ran
+`name.replace('\\', "/")` *after* the lossy decode.
+
+**Fix:** added `PathBuf::from_utf16` — a proper UTF-16 → **WTF-8** encoder
+(UTF-8 extended so an unpaired surrogate encodes as its own 3-byte sequence),
+which is lossless and so keeps those two names distinct. `SevenZEntry::name`
+and `FileInfo::name` are `PathBuf`. The `\` → `/` normalisation now runs on the
+`u16` code units *before* the conversion, where it is a single code-unit
+comparison that cannot touch a byte inside a multi-byte sequence.
+
 ### TD-KSHELL-LINE-EDITOR-IS-UTF8. The shell's line editor and tab completion cannot type or complete a non-UTF-8 filename — 2026-08-13 — LOGGED 2026-08-13
 
 **Where:** `kernel/src/kshell.rs`, the line-editor buffer and the tab-completion
@@ -47361,52 +47420,54 @@ a bug: nothing on the target yet runs two threads through these entry points,
 and on the host `process_global!` makes each pool per-thread. Trigger to do it
 properly: before any target-side service is made multithreaded.
 
-### TD-ARCHIVE-WRITER-NAMES-ARE-STRING-NOT-BYTES. ar/rar/7z member names are still `String` — LOGGED 2026-08-13 — PARTIALLY FIXED 2026-08-13 (tar, cpio, zip converted)
+### TD-ARCHIVE-WRITER-NAMES-ARE-STRING-NOT-BYTES. ar/rar/7z member names were still `String` — LOGGED 2026-08-13 — FIXED 2026-08-13
 
-**Where:** `kernel/src/fs/ar.rs` (`ArEntry::name`), `kernel/src/fs/rar.rs`,
-`kernel/src/fs/sevenz.rs`.  The narrowing point is
-`kernel/src/fs/archive.rs::name_for_string_writer`.
+**Where:** `kernel/src/fs/ar.rs` (`ArEntry::name`), `kernel/src/fs/rar.rs`
+(`RarEntry::name`), `kernel/src/fs/sevenz.rs` (`SevenZEntry::name`,
+`FileInfo::name`).  The narrowing point was
+`kernel/src/fs/archive.rs::name_for_string_writer`, now deleted.
 
-**Fixed so far:** `fs::tar`, `fs::cpio` (`CpioEntry::name`, `::link_target`)
-and `fs::zip` (`ZipEntry::name`, `ZipWriteEntry::name`) now carry `PathBuf`
-end to end, and `create_zip`/`create_cpio` are infallible again.  Converting
-the *read* side of those two also uncovered and closed two silent
-data-corruption bugs — see `B-CPIO-DROPS-NON-UTF8-MEMBER-NAMES` and
-`B-ZIP-FABRICATES-MEMBER-NAMES` below.  Both were caused by the same thing:
-a parser that must produce a `String` has nowhere to put a byte sequence that
-is not UTF-8, so it invents something.  Assume `ar.rs`, `rar.rs` and
-`sevenz.rs` each carry a variant of that bug and audit their name-decoding as
-part of converting them.
+**What it was:** as part of `D-VFS-PATHS-ARE-STR-NOT-BYTES`, `fs::tar`,
+`fs::cpio`, `fs::zip` and the unified `fs::archive` layer moved to
+`fs::path::PathBuf` (raw bytes) member names.  These three format modules
+still modelled theirs as `String`.  On the *read* path that is harmless only
+if the parser did not already mangle the name — `archive::list_*` widens
+`String → PathBuf` losslessly, but it cannot undo a lossy decode.  On the
+*write* path a name that is not valid UTF-8 could not be handed to those
+writers at all, so `archive::create` rejected it with
+`KernelError::InvalidArgument` — an honest failure, but a capability gap:
+every one of these formats stores names as raw bytes on disk.
 
-**What it is:** as part of `D-VFS-PATHS-ARE-STR-NOT-BYTES`, `fs::tar`,
-`fs::cpio`, `fs::zip` and the unified `fs::archive` layer now carry member
-names as `fs::path::PathBuf` (raw bytes).  The remaining three format modules
-still model their names as `String`.  On the *read* path this is harmless
-*provided the parser did not already mangle the name* — `archive::list_*`
-widens `String → PathBuf` losslessly, but it cannot undo a lossy decode.  On
-the *write* path it is not harmless: a member name
-that is not valid UTF-8 cannot be handed to those writers at all, so
-`archive::create` now **rejects** it with `KernelError::InvalidArgument`
-(`name_for_string_writer`).  That is the honest failure — the alternative,
-`from_utf8_lossy`, would write an archive whose member cannot be extracted
-back to the file it came from — but it is still a capability gap: you cannot
-zip up a directory containing a file whose name has a stray byte in it, even
-though every one of those formats stores names as raw bytes on disk (zip has
-a UTF-8 *flag*, not a UTF-8 *requirement*; cpio and ar are NUL/space
-terminated byte fields).
+**As predicted, each parser carried its own variant of the mangling bug**, and
+converting them uncovered both: see `B-RAR-DROPS-NON-UTF8-MEMBER-NAMES`
+(non-UTF-8 name → `""`, member lost or colliding) and
+`B-7Z-COLLAPSES-UNPAIRED-SURROGATES-IN-MEMBER-NAMES` (`from_utf16_lossy`
+merged distinct Windows names onto one, so extraction overwrote a file).
+That is now four format parsers (cpio, zip, rar, 7z) that each invented a
+name because they had nowhere to put non-UTF-8 bytes — the recurring shape,
+not a coincidence.
 
-**Reproduce:** `archive::create(ArchiveFormat::Zip, &[CreateEntry { name:
-PathBuf::from(b"re\xffport.txt".as_slice()), .. }])` → `InvalidArgument`.
-The same content in a tar round-trips byte-for-byte (see
-`archive::test_tar_byte_name_roundtrip`).
+**Fix:** all three entry types carry `PathBuf` end to end.  Specifically:
 
-**Proper fix:** convert `ArEntry` and the rar/7z entry types' `name` and
-`link_target` fields to `PathBuf`, exactly as was done for
-`TarEntry`/`TarWriteEntry`, `CpioEntry` and `ZipEntry`/`ZipWriteEntry`, then
-delete `name_for_string_writer` and make `create_ar` infallible again.  The
-fallout is confined to those three modules plus `kshell.rs`'s `dpkg`/`ar`
-builtins.  Deferred only to keep the tar/archive commit reviewable; it is not
-blocked on anything.
+- **ar** — the parser trims the header's space padding and strips the single
+  `/` terminator (which is what lets a name *ending in a space* survive), and
+  resolves `/<offset>` against the GNU `//` long-name table with an
+  empty-name guard.  Because `ar` has no escape mechanism at all, `mkar` runs
+  a pre-pass (`check_member_name`) rejecting the three shapes it genuinely
+  cannot encode: an empty name, a name starting with `/` (which would be read
+  back as a long-name reference or the symbol table) and one containing the
+  `/\n` sequence that terminates a long-name-table record.  `create_ar` keeps
+  its `InvalidArgument` for those — never for UTF-8.
+- **rar** — `PathBuf::from(bytes)`; no decode at all.
+- **7z** — new `PathBuf::from_utf16` (UTF-16 → WTF-8, lossless), with the
+  `\` → `/` normalisation moved *before* the conversion.
+- `name_for_string_writer` is deleted; `archive::create`'s `# Errors` now
+  documents that `InvalidArgument` is an `ar`-representability failure only.
+
+**Regression test:** `ar::self_test`'s `test_byte_names` round-trips a short
+(inline) and a long (GNU-table) member name containing `0x80`/`0xFE`, checks a
+name ending in a space survives, and asserts `mkar` refuses each of the three
+unrepresentable shapes.
 
 ### TD-POSIX-LONG-DOUBLE-PRECISION. `long double` has the right *ABI* but only `double` (53-bit) *precision* — ACCEPTED LIMITATION 2026-07-30
 

@@ -328,6 +328,36 @@ impl fmt::Debug for Path {
 #[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PathBuf(Vec<u8>);
 
+/// Append `cp` to `out` in WTF-8.
+///
+/// Identical to UTF-8 except that surrogate code points (U+D800–U+DFFF) are
+/// encoded rather than rejected, which is what makes [`PathBuf::from_utf16`]
+/// lossless.  `cp` above U+10FFFF cannot occur: the only caller derives it
+/// from a surrogate pair, whose maximum is exactly U+10FFFF.
+fn encode_wtf8(cp: u32, out: &mut Vec<u8>) {
+    // Truncations below are all guarded by the range test that selects the
+    // branch, so each `as u8` keeps every bit that matters.
+    #[allow(clippy::cast_possible_truncation)]
+    match cp {
+        0x0000..=0x007F => out.push(cp as u8),
+        0x0080..=0x07FF => {
+            out.push(0xC0 | ((cp >> 6) as u8));
+            out.push(0x80 | ((cp & 0x3F) as u8));
+        }
+        0x0800..=0xFFFF => {
+            out.push(0xE0 | ((cp >> 12) as u8));
+            out.push(0x80 | (((cp >> 6) & 0x3F) as u8));
+            out.push(0x80 | ((cp & 0x3F) as u8));
+        }
+        _ => {
+            out.push(0xF0 | ((cp >> 18) as u8));
+            out.push(0x80 | (((cp >> 12) & 0x3F) as u8));
+            out.push(0x80 | (((cp >> 6) & 0x3F) as u8));
+            out.push(0x80 | ((cp & 0x3F) as u8));
+        }
+    }
+}
+
 impl PathBuf {
     /// An empty path.
     #[must_use]
@@ -345,6 +375,46 @@ impl PathBuf {
     #[must_use]
     pub const fn from_vec(v: Vec<u8>) -> Self {
         Self(v)
+    }
+
+    /// Build a path from UTF-16 code units, as stored by Windows-descended
+    /// formats (7z, NTFS/exFAT, UEFI, ZIP's Unicode extra field).
+    ///
+    /// The encoding is **WTF-8**, not UTF-8: a properly paired surrogate pair
+    /// becomes the 4-byte UTF-8 encoding of the combined scalar, while an
+    /// *unpaired* surrogate is encoded as the 3-byte form of the surrogate
+    /// code point itself.  That keeps the conversion lossless and reversible.
+    ///
+    /// This matters because unpaired surrogates occur in practice — Windows
+    /// filesystems accept any `u16` sequence as a name, so archives created
+    /// there really do contain them.  The obvious `String::from_utf16_lossy`
+    /// replaces each one with U+FFFD, which is the same silent corruption as
+    /// forcing UTF-8 on a byte path: two distinct names collapse to one, and
+    /// neither can be extracted back to the file it came from.
+    #[must_use]
+    pub fn from_utf16(units: &[u16]) -> Self {
+        let mut out: Vec<u8> = Vec::with_capacity(units.len());
+        let mut i = 0usize;
+        while let Some(&unit) = units.get(i) {
+            i = i.wrapping_add(1);
+            let cp: u32 = if (0xD800..0xDC00).contains(&unit) {
+                // High surrogate: consume the following low surrogate if there
+                // is one, otherwise encode the lone surrogate as-is.
+                match units.get(i) {
+                    Some(&low) if (0xDC00..0xE000).contains(&low) => {
+                        i = i.wrapping_add(1);
+                        0x1_0000u32
+                            .wrapping_add(u32::from(unit.wrapping_sub(0xD800)) << 10)
+                            .wrapping_add(u32::from(low.wrapping_sub(0xDC00)))
+                    }
+                    _ => u32::from(unit),
+                }
+            } else {
+                u32::from(unit)
+            };
+            encode_wtf8(cp, &mut out);
+        }
+        Self(out)
     }
 
     /// Give up the bytes.
@@ -675,6 +745,36 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // A name that merely begins with a dot is a normal name.
     assert!(Path::new("/a/.b").has_no_dot_components());
     assert!(Path::new("/a/...").has_no_dot_components());
+
+    serial_println!("  path::self_test 9: from_utf16 is WTF-8, not lossy UTF-8");
+    // ASCII, 2-byte, 3-byte.
+    assert_eq!(PathBuf::from_utf16(&[]).as_path(), Path::new(""));
+    assert_eq!(PathBuf::from_utf16(&[0x0061, 0x002F, 0x0062]).as_path(), Path::new("a/b"));
+    assert_eq!(PathBuf::from_utf16(&[0x00E9]).into_vec(), b"\xc3\xa9".to_vec());
+    assert_eq!(PathBuf::from_utf16(&[0x20AC]).into_vec(), b"\xe2\x82\xac".to_vec());
+    // A well-formed surrogate pair becomes the 4-byte encoding of one scalar
+    // (U+10437), not two 3-byte surrogates.
+    assert_eq!(
+        PathBuf::from_utf16(&[0xD801, 0xDC37]).into_vec(),
+        b"\xf0\x90\x90\xb7".to_vec()
+    );
+    // U+10FFFF, the largest scalar a pair can encode, must not overflow.
+    assert_eq!(
+        PathBuf::from_utf16(&[0xDBFF, 0xDFFF]).into_vec(),
+        b"\xf4\x8f\xbf\xbf".to_vec()
+    );
+    // The whole point: an unpaired surrogate keeps its own identity instead of
+    // collapsing onto U+FFFD, so two distinct Windows names stay distinct.
+    let lone_high = PathBuf::from_utf16(&[0x0061, 0xD800]);
+    let lone_low = PathBuf::from_utf16(&[0x0061, 0xDC00]);
+    assert_eq!(lone_high.clone().into_vec(), b"a\xed\xa0\x80".to_vec());
+    assert_eq!(lone_low.clone().into_vec(), b"a\xed\xb0\x80".to_vec());
+    assert_ne!(lone_high.as_path(), lone_low.as_path());
+    // A high surrogate followed by a non-low unit is unpaired, and the unit
+    // after it must still be encoded rather than swallowed.
+    assert_eq!(PathBuf::from_utf16(&[0xD800, 0x0061]).into_vec(), b"\xed\xa0\x80a".to_vec());
+    // A high surrogate at the very end must not read past the buffer.
+    assert_eq!(PathBuf::from_utf16(&[0xD800]).into_vec(), b"\xed\xa0\x80".to_vec());
 
     serial_println!("  path: all tests passed");
     Ok(())

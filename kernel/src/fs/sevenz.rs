@@ -37,10 +37,10 @@
 
 #![allow(dead_code)]
 
-use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::PathBuf;
 
 // ---------------------------------------------------------------------------
 // 7z constants
@@ -112,8 +112,14 @@ impl Folder {
 
 /// A file entry extracted from the archive.
 pub struct SevenZEntry {
-    /// File name (UTF-8, forward-slash separated).
-    pub name: String,
+    /// File name, forward-slash separated.
+    ///
+    /// 7z stores names as UTF-16LE.  They are converted with
+    /// [`PathBuf::from_utf16`], which is WTF-8 and therefore lossless: an
+    /// archive written on Windows may contain unpaired surrogates, and the
+    /// `String::from_utf16_lossy` this replaced turned each of them into
+    /// U+FFFD — collapsing distinct members onto one name.
+    pub name: PathBuf,
     /// File data (empty for directories).
     pub data: Vec<u8>,
     /// Whether this entry is a directory.
@@ -274,7 +280,7 @@ struct ArchiveHeader {
 
 /// Raw file info from the header.
 struct FileInfo {
-    name: String,
+    name: PathBuf,
     is_dir: bool,
     is_empty_stream: bool,
     size: u64,
@@ -565,7 +571,7 @@ fn parse_files_info(
     let num_files = reader.read_vli()? as usize;
     header.files.clear();
     header.files.resize_with(num_files, || FileInfo {
-        name: String::new(),
+        name: PathBuf::new(),
         is_dir: false,
         is_empty_stream: false,
         size: 0,
@@ -606,10 +612,19 @@ fn parse_files_info(
                         }
                         name_u16.push(ch);
                     }
-                    // Convert UTF-16 to UTF-8.
-                    let name = String::from_utf16_lossy(&name_u16);
-                    // Normalize path separators.
-                    let name = name.replace('\\', "/");
+                    // Normalise the Windows separator while still in UTF-16.
+                    // Doing it here rather than after the conversion keeps it a
+                    // single code-unit comparison and so cannot touch a byte
+                    // that is part of a multi-byte sequence.
+                    for unit in &mut name_u16 {
+                        if *unit == u16::from(b'\\') {
+                            *unit = u16::from(b'/');
+                        }
+                    }
+                    // UTF-16 -> WTF-8: lossless, so an unpaired surrogate in a
+                    // name written on Windows survives instead of becoming
+                    // U+FFFD and colliding with every other such name.
+                    let name = PathBuf::from_utf16(&name_u16);
                     if let Some(f) = header.files.get_mut(fi) {
                         f.name = name;
                     }
@@ -670,7 +685,7 @@ fn parse_files_info(
 
     // Mark empty-stream files without WIN_ATTRIBUTES as dirs if name ends with '/'.
     for f in &mut header.files {
-        if f.is_empty_stream && !f.is_dir && f.name.ends_with('/') {
+        if f.is_empty_stream && !f.is_dir && f.name.as_bytes().last() == Some(&b'/') {
             f.is_dir = true;
         }
     }
@@ -892,7 +907,7 @@ pub fn un7z(data: &[u8]) -> KernelResult<Vec<SevenZEntry>> {
             entries.push(SevenZEntry {
                 name: finfo.name.clone(),
                 data: Vec::new(),
-                is_dir: finfo.is_dir || finfo.name.ends_with('/'),
+                is_dir: finfo.is_dir || finfo.name.as_bytes().last() == Some(&b'/'),
             });
             continue;
         }

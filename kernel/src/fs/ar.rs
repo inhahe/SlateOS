@@ -48,10 +48,10 @@
 
 #![allow(dead_code)]
 
-use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
+use crate::fs::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -73,7 +73,13 @@ const HEADER_SIZE: usize = 60;
 /// A single member extracted from an ar archive.
 pub struct ArEntry {
     /// Member name (no trailing '/' or spaces).
-    pub name: String,
+    ///
+    /// A byte string, not text: `ar` stores the name as raw bytes in a
+    /// space-padded field, so every byte a filesystem accepts can appear here.
+    /// Modelling it as `String` meant a member whose name is not UTF-8 came
+    /// back as `""` (or `"???"` from the long-name table) — a silently wrong
+    /// name that extracts to the wrong file.
+    pub name: PathBuf,
     /// Member data.
     pub data: Vec<u8>,
     /// Modification time (Unix timestamp, 0 if not available).
@@ -225,18 +231,19 @@ pub fn unar(data: &[u8]) -> KernelResult<Vec<ArEntry>> {
         let member_data = data.get(data_start..data_end)
             .ok_or(KernelError::CorruptedData)?;
 
-        // Parse the member name.
-        let raw_name = core::str::from_utf8(name_field).unwrap_or("");
-        let raw_name = raw_name.trim_end();
+        // Parse the member name.  The field is *bytes*, space-padded on the
+        // right; it is never decoded as text, so a name containing arbitrary
+        // bytes survives.
+        let raw_name = trim_trailing_spaces(name_field);
 
         // Check for special members.
-        if raw_name == "/" {
+        if raw_name == b"/" {
             // Symbol table — skip.
             pos = align2(data_end);
             continue;
         }
 
-        if raw_name == "//" {
+        if raw_name == b"//" {
             // GNU long name table: stores long filenames separated by "/\n".
             long_names = member_data.to_vec();
             pos = align2(data_end);
@@ -244,15 +251,21 @@ pub fn unar(data: &[u8]) -> KernelResult<Vec<ArEntry>> {
         }
 
         // Resolve the member name.
-        let name = if raw_name.starts_with('/') && raw_name.len() > 1 {
+        let name = match raw_name.split_first() {
             // GNU extended name: "/offset" references into the long name table.
-            let offset_str = &raw_name[1..];
-            let offset = parse_decimal(offset_str.as_bytes()) as usize;
-            resolve_long_name(&long_names, offset)
-        } else {
-            // Regular name: strip trailing '/'.
-            let n = raw_name.strip_suffix('/').unwrap_or(raw_name);
-            String::from(n)
+            Some((&b'/', rest)) if !rest.is_empty() => {
+                let offset = parse_decimal(rest) as usize;
+                // A reference past the end of the table is corruption, not a
+                // name.  This used to yield the literal name "???", which
+                // extracts to a file that has nothing to do with the member.
+                resolve_long_name(&long_names, offset)
+                    .ok_or(KernelError::CorruptedData)?
+            }
+            // Regular name: strip the trailing '/' terminator.  Stripping it
+            // *after* the space trim is what lets a name end in a space
+            // survive the round trip, since the '/' sits between the name and
+            // the padding.
+            _ => PathBuf::from(raw_name.strip_suffix(b"/").unwrap_or(raw_name)),
         };
 
         entries.push(ArEntry {
@@ -271,22 +284,64 @@ pub fn unar(data: &[u8]) -> KernelResult<Vec<ArEntry>> {
     Ok(entries)
 }
 
+/// Reject member names that the `ar` container cannot store faithfully.
+///
+/// `ar` has no escape mechanism, so a name outside these rules would be written
+/// as-is and read back as something else.  Failing the whole archive is the
+/// only honest option — the alternative is handing the caller a file whose
+/// members silently do not match what they asked to archive.
+///
+/// # Errors
+/// - [`KernelError::InvalidArgument`] if the name is empty, begins with `/`
+///   (which the reader would take as a GNU long-name reference or as the
+///   symbol-table/long-name-table sentinel), or contains the `/\n` sequence
+///   that terminates entries in the long-name table.
+fn check_member_name(name: &Path) -> KernelResult<()> {
+    let bytes = name.as_bytes();
+    if bytes.is_empty() {
+        return Err(KernelError::InvalidArgument);
+    }
+    if bytes.first() == Some(&b'/') {
+        return Err(KernelError::InvalidArgument);
+    }
+    if bytes.windows(2).any(|w| w == b"/\n") {
+        return Err(KernelError::InvalidArgument);
+    }
+    Ok(())
+}
+
+/// Strip trailing ASCII spaces, which `ar` uses to pad its fixed-width fields.
+///
+/// Only spaces: NUL and every other byte is part of the name.
+fn trim_trailing_spaces(field: &[u8]) -> &[u8] {
+    let mut end = field.len();
+    while end > 0 && field.get(end.wrapping_sub(1)) == Some(&b' ') {
+        end = end.wrapping_sub(1);
+    }
+    field.get(..end).unwrap_or(&[])
+}
+
 /// Resolve a GNU extended name from the "//" long name table.
 ///
-/// Names in the table are terminated by "/\n".
-fn resolve_long_name(table: &[u8], offset: usize) -> String {
-    if offset >= table.len() {
-        return String::from("???");
-    }
+/// Names in the table are terminated by "/\n".  Returns `None` if `offset`
+/// falls outside the table, which means the archive is corrupt — the caller
+/// reports that rather than inventing a name.
+fn resolve_long_name(table: &[u8], offset: usize) -> Option<PathBuf> {
+    let remaining = table.get(offset..)?;
 
-    let remaining = &table[offset..];
     // Find the "/\n" terminator.
-    let end = remaining.windows(2)
+    let end = remaining
+        .windows(2)
         .position(|w| w == b"/\n")
         .unwrap_or(remaining.len());
 
-    let name_bytes = &remaining[..end];
-    String::from(core::str::from_utf8(name_bytes).unwrap_or("???"))
+    let name = remaining.get(..end)?;
+    // `table.get(len..)` succeeds with an empty slice, so an offset pointing
+    // exactly at the end of the table would otherwise yield an unnamed member.
+    if name.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(name))
 }
 
 /// Round up to 2-byte boundary.
@@ -305,11 +360,19 @@ fn align2(offset: usize) -> usize {
 pub fn mkar(entries: &[ArEntry]) -> KernelResult<Vec<u8>> {
     let mut buf = Vec::new();
 
+    // Reject anything the container cannot represent *before* writing a byte,
+    // so a caller never receives an archive that silently loses a name.
+    for entry in entries {
+        check_member_name(entry.name.as_path())?;
+    }
+
     // Global magic.
     buf.extend_from_slice(AR_MAGIC);
 
-    // Check if any names are longer than 15 chars (need GNU long name table).
-    let needs_long_names = entries.iter().any(|e| e.name.len() > 15);
+    // Check if any names are longer than 15 bytes (need GNU long name table).
+    // 15, not 16: a short name is stored with a trailing '/' terminator, so it
+    // must leave room for that byte inside the 16-byte field.
+    let needs_long_names = entries.iter().any(|e| e.name.as_bytes().len() > 15);
 
     let mut long_name_table = Vec::new();
     let mut name_offsets: Vec<Option<usize>> = Vec::new();
@@ -317,7 +380,7 @@ pub fn mkar(entries: &[ArEntry]) -> KernelResult<Vec<u8>> {
     if needs_long_names {
         // Build the long name table.
         for entry in entries {
-            if entry.name.len() > 15 {
+            if entry.name.as_bytes().len() > 15 {
                 let offset = long_name_table.len();
                 name_offsets.push(Some(offset));
                 long_name_table.extend_from_slice(entry.name.as_bytes());
@@ -443,6 +506,9 @@ pub fn self_test() -> KernelResult<()> {
     // Test 4: magic detection.
     test_magic()?;
 
+    // Test 5: names that are not UTF-8 and names ar cannot represent.
+    test_byte_names()?;
+
     crate::serial_println!("[ar] Self-test passed.");
     Ok(())
 }
@@ -483,7 +549,7 @@ fn test_parsing() -> KernelResult<()> {
 fn test_roundtrip() -> KernelResult<()> {
     let entries = vec![
         ArEntry {
-            name: String::from("hello.txt"),
+            name: PathBuf::from("hello.txt"),
             data: Vec::from(*b"Hello, ar!\n"),
             mtime: 1700000000,
             uid: 1000,
@@ -491,7 +557,7 @@ fn test_roundtrip() -> KernelResult<()> {
             mode: 0o100644,
         },
         ArEntry {
-            name: String::from("empty"),
+            name: PathBuf::from("empty"),
             data: Vec::new(),
             mtime: 0,
             uid: 0,
@@ -515,8 +581,8 @@ fn test_roundtrip() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    if extracted[0].name != "hello.txt" {
-        crate::serial_println!("[ar]   FAIL: entry 0 name: '{}'", extracted[0].name);
+    if extracted[0].name.as_path() != Path::new("hello.txt") {
+        crate::serial_println!("[ar]   FAIL: entry 0 name: '{}'", extracted[0].name.display());
         return Err(KernelError::InternalError);
     }
     if extracted[0].data != b"Hello, ar!\n" {
@@ -528,8 +594,8 @@ fn test_roundtrip() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    if extracted[1].name != "empty" {
-        crate::serial_println!("[ar]   FAIL: entry 1 name: '{}'", extracted[1].name);
+    if extracted[1].name.as_path() != Path::new("empty") {
+        crate::serial_println!("[ar]   FAIL: entry 1 name: '{}'", extracted[1].name.display());
         return Err(KernelError::InternalError);
     }
     if !extracted[1].data.is_empty() {
@@ -545,7 +611,7 @@ fn test_long_names() -> KernelResult<()> {
     // Create entries with names > 15 chars to exercise GNU extended names.
     let entries = vec![
         ArEntry {
-            name: String::from("short.txt"),
+            name: PathBuf::from("short.txt"),
             data: Vec::from(*b"short"),
             mtime: 0,
             uid: 0,
@@ -553,7 +619,7 @@ fn test_long_names() -> KernelResult<()> {
             mode: 0o100644,
         },
         ArEntry {
-            name: String::from("this_is_a_very_long_filename.txt"),
+            name: PathBuf::from("this_is_a_very_long_filename.txt"),
             data: Vec::from(*b"long name data"),
             mtime: 0,
             uid: 0,
@@ -561,7 +627,7 @@ fn test_long_names() -> KernelResult<()> {
             mode: 0o100644,
         },
         ArEntry {
-            name: String::from("another_extremely_long_name_here.rs"),
+            name: PathBuf::from("another_extremely_long_name_here.rs"),
             data: Vec::from(*b"more data"),
             mtime: 0,
             uid: 0,
@@ -578,18 +644,18 @@ fn test_long_names() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    if extracted[0].name != "short.txt" {
-        crate::serial_println!("[ar]   FAIL: entry 0: '{}'", extracted[0].name);
+    if extracted[0].name.as_path() != Path::new("short.txt") {
+        crate::serial_println!("[ar]   FAIL: entry 0: '{}'", extracted[0].name.display());
         return Err(KernelError::InternalError);
     }
 
-    if extracted[1].name != "this_is_a_very_long_filename.txt" {
-        crate::serial_println!("[ar]   FAIL: entry 1: '{}'", extracted[1].name);
+    if extracted[1].name.as_path() != Path::new("this_is_a_very_long_filename.txt") {
+        crate::serial_println!("[ar]   FAIL: entry 1: '{}'", extracted[1].name.display());
         return Err(KernelError::InternalError);
     }
 
-    if extracted[2].name != "another_extremely_long_name_here.rs" {
-        crate::serial_println!("[ar]   FAIL: entry 2: '{}'", extracted[2].name);
+    if extracted[2].name.as_path() != Path::new("another_extremely_long_name_here.rs") {
+        crate::serial_println!("[ar]   FAIL: entry 2: '{}'", extracted[2].name.display());
         return Err(KernelError::InternalError);
     }
 
@@ -624,5 +690,93 @@ fn test_magic() -> KernelResult<()> {
     }
 
     crate::serial_println!("[ar]   magic detection OK");
+    Ok(())
+}
+
+/// Member names that are not valid UTF-8 must round-trip byte-for-byte, and
+/// names `ar` genuinely cannot encode must be rejected rather than silently
+/// mangled.
+///
+/// This is the regression test for `TD-ARCHIVE-WRITER-NAMES-ARE-STRING-NOT-BYTES`:
+/// when `ArEntry::name` was a `String` these names could not even be
+/// constructed, and the writer's UTF-8 fallback wrote them as `"???"` — two
+/// different members colliding on one name.
+fn test_byte_names() -> KernelResult<()> {
+    // A short (inline, <= 15 byte) name and a long (GNU extended-name table)
+    // one, both carrying bytes that are not valid UTF-8 anywhere: 0x80 is a
+    // bare continuation byte and 0xFE never appears in UTF-8 at all.
+    let short: &[u8] = b"caf\xe9.o";
+    let long: &[u8] = b"a_very_long_\x80\xfe_object_name.o";
+
+    let entries = vec![
+        ArEntry {
+            name: PathBuf::from(short),
+            data: Vec::from(*b"short"),
+            mtime: 0,
+            uid: 0,
+            gid: 0,
+            mode: 0o100644,
+        },
+        ArEntry {
+            name: PathBuf::from(long),
+            data: Vec::from(*b"long"),
+            mtime: 0,
+            uid: 0,
+            gid: 0,
+            mode: 0o100644,
+        },
+    ];
+
+    let extracted = unar(&mkar(&entries)?)?;
+    if extracted.len() != 2 {
+        crate::serial_println!("[ar]   FAIL: byte names: expected 2, got {}", extracted.len());
+        return Err(KernelError::InternalError);
+    }
+    if extracted[0].name.as_bytes() != short || extracted[1].name.as_bytes() != long {
+        crate::serial_println!("[ar]   FAIL: byte names not preserved");
+        return Err(KernelError::InternalError);
+    }
+    if extracted[0].data != b"short" || extracted[1].data != b"long" {
+        crate::serial_println!("[ar]   FAIL: byte-name entry data mismatch");
+        return Err(KernelError::InternalError);
+    }
+
+    // A name ending in a space survives because the header's name field is
+    // terminated by `/`, not by the padding.
+    let trailing = vec![ArEntry {
+        name: PathBuf::from(&b"trailing "[..]),
+        data: Vec::new(),
+        mtime: 0,
+        uid: 0,
+        gid: 0,
+        mode: 0o100644,
+    }];
+    let back = unar(&mkar(&trailing)?)?;
+    if back.len() != 1 || back[0].name.as_bytes() != b"trailing " {
+        crate::serial_println!("[ar]   FAIL: trailing space in name not preserved");
+        return Err(KernelError::InternalError);
+    }
+
+    // The three shapes `ar` has no escape mechanism for must be refused up
+    // front, not written out as an archive that reads back as something else.
+    for bad in [&b""[..], &b"/abs"[..], &b"has/\nsep"[..]] {
+        let one = vec![ArEntry {
+            name: PathBuf::from(bad),
+            data: Vec::new(),
+            mtime: 0,
+            uid: 0,
+            gid: 0,
+            mode: 0o100644,
+        }];
+        if mkar(&one).is_ok() {
+            crate::serial_println!(
+                "[ar]   FAIL: accepted unrepresentable name '{}'",
+                Path::new(bad).display()
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    crate::serial_println!("[ar]   byte names OK (non-UTF-8 round-trip + rejections)");
     Ok(())
 }

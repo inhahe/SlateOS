@@ -45,7 +45,7 @@ use crate::bytes::{self, BStr, Ch, Str};
 use crate::lexer::{
     AliasExpansion, CmdSubSpan, DparenCopy, HeredocEof, ParseOpts, Op, ProcRead, ReaderWarning, Seg, Spanned,
     Tok, SubBody, SubOpen, TokSpan, Tokenized, UngatheredHeredoc,
-    expand_aliases_tracked, tokenize,
+    expand_aliases_tracked,
     tokenize_paren_body, tokenize_deferred, tokenize_spanned, word_is_assignment,
 };
 use crate::wordscan::BraceEnd;
@@ -6900,16 +6900,60 @@ fn split_name_subscript(
     Ok(NameSubscript::Split(name, None, chs.get(i..).unwrap_or_default().to_vec(), line))
 }
 
+/// Where the `:` that separates a slice's offset from its length is — bash's
+/// `skiparith` (subst.c), which is not `strchr`. Two things hide a colon from
+/// it, and both are measured against bash 5.2.37 with `z=abcdef`:
+///
+/// * **A pending `?`.** One `:` is skipped for each `?` seen, the ternary's own
+///   colon belonging to the ternary. `${z:1?2:3}` is `cdef` — the whole text is
+///   the offset, `1?2:3` being 2 — while `${z:1?2:3:1}` is `c`, the *second*
+///   colon splitting. The count is not capped at one: `${z:1?1?2:3:4}` is
+///   `cdef`, two `?` swallowing both colons.
+/// * **A paren.** Nothing inside a `( … )` counts at all, colon and `?` alike:
+///   `${z:(1?2:3)}` is `cdef` and `${z:(1?2:3):1}` is `c`. An *unbalanced* `(`
+///   therefore hides the rest of the text outright.
+///
+/// Returns `rest.len()` when no colon splits, which is the "offset only" case.
+fn slice_split_colon(rest: &[Ch]) -> usize {
+    let (mut skipcol, mut depth) = (0u32, 0u32);
+    for (i, &c) in rest.iter().enumerate() {
+        match syn(c) {
+            '(' => depth += 1,
+            ')' if depth > 0 => depth -= 1,
+            _ if depth > 0 => {}
+            ':' if skipcol > 0 => skipcol -= 1,
+            ':' => return i,
+            '?' => skipcol += 1,
+            _ => {}
+        }
+    }
+    rest.len()
+}
+
+/// A slice's two bounds: the offset, and the length if a colon cut one off.
+type SliceBounds = (Box<Word>, Option<Box<Word>>);
+
 /// Parse the `offset[:length]` portion of a substring/slice expansion (the
 /// text after the leading `:`). The offset and each length are parsed as
-/// arithmetic words. Splits on the *first* unescaped `:` only.
+/// arithmetic words. Splits on the one colon [`slice_split_colon`] finds.
+///
+/// `None` is a **bad substitution**: the text being empty outright is one, and
+/// uniformly so — `${z:}`, `${@:}`, `${*:}`, `${a[@]:}` and `${a[1]:}` all
+/// report `${…}: bad substitution` in bash 5.2.37, an unset parameter included.
+/// It is the *text* that must be non-empty, not what it expands to: `${z:$e}`
+/// with `e=` is `abcdef`, and so is `${z:$(echo)}`. A colon and nothing else is
+/// fine on both sides of it — `${z::}` is the empty string, offset and length
+/// both reading as 0.
 fn parse_slice_bounds(
     rest: &[Ch],
     opts: ParseOpts,
     q: Quoting,
     line: u32,
-) -> Result<(Box<Word>, Option<Box<Word>>), ParseError> {
-    let (off, len) = match rest.iter().position(|&c| syn(c) == ':') {
+) -> Result<Option<SliceBounds>, ParseError> {
+    if rest.is_empty() {
+        return Ok(None);
+    }
+    let (off, len) = match Some(slice_split_colon(rest)).filter(|&i| i < rest.len()) {
         Some(idx) => (
             rest.get(..idx).unwrap_or_default(),
             // The offset it follows may span lines — `${x:$(`/`echo 1`/`):2}` —
@@ -6918,21 +6962,38 @@ fn parse_slice_bounds(
         ),
         None => (rest, None),
     };
-    // Both bounds are arithmetic, so a `' … '` in either has the second reading
-    // a subscript's does — see [`attach_subscript_reads`].
+    // Both bounds are arithmetic, and so are read exactly as a subscript is —
+    // verbatim, with each top-level `' … '` given its second reading. They are
+    // *not* tokenized: bash never tokenizes either bound, it cuts the `${ … }`
+    // body at the `:` and hands the characters to `expand_arith_string` and
+    // then `evalexp`. Every operator a command tokenizer would have taken for
+    // its own is therefore an arithmetic operator here, which is what osh used
+    // to lose — measured against bash 5.2.37, `z=abcdef`:
+    //
+    // | written | bash | osh, tokenized |
+    // |---|---|---|
+    // | `${z:1<2}` | `bcdef` | `cdef` — an IO number and a redirect |
+    // | `${z:1>2}` | `abcdef` | `cdef` — likewise |
+    // | `${z:1<=2}` | `bcdef` | `=2: operand expected` |
+    // | `${z:1 < (2)}` | `bcdef` | `1 2: syntax error` |
+    // | `${z:1;2}` | `;2: invalid arithmetic operator` | `1 2: syntax error` |
+    // | `${z:1&2}` | `abcdef` | `1 2: syntax error` |
+    // | `${z:1?2:3}` | `cdef` | `` `:' expected `` — the split `:` is the bound's |
+    // | `${z:(1}` | ``no closing `)' `` | silently `abcdef` |
+    //
+    // The last two rows are the ones that show it is not merely a matter of
+    // which characters are operators: a tokenizer *drops* what it cannot make a
+    // word of, so an unbalanced `(` vanishes instead of being complained about.
     let length = match len {
         Some((s, len_line)) => {
             let text = bytes::from_chars(s.iter().copied());
-            let mut w = word_from_source(&text, opts, q.as_pattern(), len_line)?;
-            attach_subscript_reads(&mut w, opts, q.as_pattern(), len_line)?;
-            Some(Box::new(w))
+            Some(Box::new(word_subscript_from_source_at(&text, opts, q.as_pattern(), len_line)?))
         }
         None => None,
     };
     let off_text = bytes::from_chars(off.iter().copied());
-    let mut offset = word_from_source(&off_text, opts, q.as_pattern(), line)?;
-    attach_subscript_reads(&mut offset, opts, q.as_pattern(), line)?;
-    Ok((Box::new(offset), length))
+    let offset = word_subscript_from_source_at(&off_text, opts, q.as_pattern(), line)?;
+    Ok(Some((Box::new(offset), length)))
 }
 
 /// Is `name` a parameter that `${#…}` may take the length of?
@@ -7249,8 +7310,11 @@ fn parse_braced_param_in(
             // `${a[@]:off:len}` / `${a[*]:off:len}` — array slice (a `:` not
             // followed by a `-=+?` operator char).
             if syn_at(&rest, 0) == ':' && !matches!(syn_at(&rest, 1), '-' | '=' | '+' | '?') {
-                let (offset, length) =
-                    parse_slice_bounds(rest.get(1..).unwrap_or_default(), opts, q, rest_line)?;
+                let Some((offset, length)) =
+                    parse_slice_bounds(rest.get(1..).unwrap_or_default(), opts, q, rest_line)?
+                else {
+                    return Ok(WordPart::BadSubst(raw.to_vec()));
+                };
                 return Ok(WordPart::ArraySlice {
                     name,
                     star: matches!(index, ArrayIndex::Star),
@@ -7323,8 +7387,11 @@ fn parse_braced_param_in(
         && syn_at(&rest, 0) == ':'
         && !matches!(syn_at(&rest, 1), '-' | '=' | '+' | '?')
     {
-        let (offset, length) =
-            parse_slice_bounds(rest.get(1..).unwrap_or_default(), opts, q, rest_line)?;
+        let Some((offset, length)) =
+            parse_slice_bounds(rest.get(1..).unwrap_or_default(), opts, q, rest_line)?
+        else {
+            return Ok(WordPart::BadSubst(raw.to_vec()));
+        };
         return Ok(WordPart::ArraySlice {
             name: name.clone(),
             star: name == "*",
@@ -7473,8 +7540,11 @@ fn parse_braced_param_in(
         // Substring `:offset[:length]` — but `:` followed by one of -=+? is the
         // use/assign/alt/error operator, handled below.
         ':' if !matches!(syn_at(&rest, 1), '-' | '=' | '+' | '?') => {
-            let (offset, length) =
-                parse_slice_bounds(rest.get(1..).unwrap_or_default(), opts, q, rest_line)?;
+            let Some((offset, length)) =
+                parse_slice_bounds(rest.get(1..).unwrap_or_default(), opts, q, rest_line)?
+            else {
+                return Ok(WordPart::BadSubst(raw.to_vec()));
+            };
             Ok(WordPart::ParamSubstr {
                 name,
                 index: elem_index,
@@ -7883,8 +7953,9 @@ pub(crate) fn word_subscript_from_source_at(
 
 /// Give every top-level `' … '` of an already-parsed subscript or substring
 /// bound its arithmetic reading. See [`word_subscript_from_source_at`], which
-/// documents what the reading is; this is the half [`parse_slice_bounds`] needs
-/// too, its two bounds being tokenized rather than read verbatim.
+/// documents what the reading is. Both callers reach it through
+/// [`word_subscript_from_source_at`] — a subscript and the two bounds of
+/// [`parse_slice_bounds`], which are read the same way.
 fn attach_subscript_reads(
     w: &mut Word,
     opts: ParseOpts,
@@ -8030,53 +8101,6 @@ fn word_replacement_from_source(
     let mut parts: Vec<WordPart> = Vec::with_capacity(segs.len());
     for seg in &segs {
         parts.push(seg_to_part(seg, opts, q)?);
-    }
-    Ok(Word { parts })
-}
-
-/// Tokenize `s` and join what it holds into one word — the reader for the two
-/// bounds of `${x:off:len}`, which bash tokenizes rather than reads verbatim.
-///
-/// A `<( … )` in a bound is *not* performed. The bound goes to
-/// `expand_arith_string` under `Q_DOUBLE_QUOTES`, which is precisely what stops
-/// `expand_word_internal` reading one (subst.c:11079) — the same reason a
-/// subscript beside it does not, and osh's two arithmetic fragments used to
-/// disagree about this. The tokenizer that runs here has no mode for it, so the
-/// segment is turned back into the characters it was read from; the body it
-/// holds has already been parsed and re-printed by the `${ … }` scan that
-/// produced this text, so nothing is lost by not parsing it again.
-fn word_from_source(
-    s: BStr<'_>,
-    opts: ParseOpts,
-    q: Quoting,
-    line: u32,
-) -> Result<Word, ParseError> {
-    if s.is_empty() {
-        return Ok(Word::default());
-    }
-    let mut toks = tokenize(s, opts, q.read_ctx()).map_err(|e| ParseError::new(&e.msg))?;
-    for t in &mut toks {
-        if let Tok::Word(segs) = t {
-            map_frag_segs(segs, line);
-        }
-    }
-    let mut parts: Vec<WordPart> = Vec::new();
-    let mut first = true;
-    for t in &toks {
-        if let Tok::Word(segs) = t {
-            if !first {
-                parts.push(WordPart::Literal(" ".into()));
-            }
-            first = false;
-            for seg in segs {
-                if let Seg::ProcSub(input, raw, _, _) = seg {
-                    let open: BStr<'_> = if *input { b"<(" } else { b">(" };
-                    parts.push(WordPart::Literal(bfmt![open, raw, b")"]));
-                    continue;
-                }
-                parts.push(seg_to_part(seg, opts, q)?);
-            }
-        }
     }
     Ok(Word { parts })
 }
@@ -10650,10 +10674,11 @@ mod tests {
         // error names them.
         assert!(!live(&verbatim_word_at(b"<(echo 1)", opts, Quoting::Bare, 1, Frag::Arith).unwrap()));
         assert!(!live(&word_subscript_from_source(b"<(echo 1)", opts, Quoting::Bare).unwrap()));
-        // A substring bound is the other arithmetic fragment, and is tokenized
-        // rather than read verbatim — it used to be the one context that
-        // disagreed with the subscript beside it.
-        assert!(!live(&word_from_source(b"<(echo 1)", opts, Quoting::Bare, 1).unwrap()));
+        // A substring bound is the other arithmetic fragment, and now reaches
+        // the very same reader — it used to be tokenized, which is what made it
+        // the one context that disagreed with the subscript beside it.
+        let bound: Vec<Ch> = bytes::chars(b"<(echo 1)").collect();
+        assert!(!live(&parse_slice_bounds(&bound, opts, Quoting::Bare, 1).unwrap().unwrap().0));
         // A double-quoted operand keeps the characters. So does a quoted run
         // inside a *bare* one — the quotes are what the test is about, not
         // which fragment it is.

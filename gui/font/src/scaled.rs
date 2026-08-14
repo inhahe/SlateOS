@@ -30,6 +30,7 @@ use alloc::vec::Vec;
 
 use crate::FontMetrics;
 use crate::gsub::SubGlyph;
+use crate::norm;
 use crate::raster::{GlyphMask, rasterize};
 use crate::sfnt::{Face, PathCmd, SfntError};
 use crate::shape::{GlyphKey, ShapedGlyph, ShapedRun, TAB_WIDTH_IN_SPACES};
@@ -387,16 +388,18 @@ impl ScaledFont {
     /// widget measure its label without paying to draw it.
     #[must_use]
     pub fn shape(&self, text: &str) -> ShapedRun {
-        // Four passes, because each one needs all of the previous one's
-        // output. `GSUB` decides which glyphs there are, and cannot run while
-        // characters are still arriving; kerning applies to the glyphs that
-        // *survive* substitution, so `fi` must be kerned as the single glyph
-        // it became, not as the `f` and `i` it was; and a mark's placement is
-        // measured from a pen that kerning is still moving.
+        // Five passes, because each one needs all of the previous one's
+        // output. Normalization settles *which characters there are* and so
+        // must finish before any of them is looked up in `cmap`; `GSUB`
+        // decides which glyphs there are, and cannot run while characters are
+        // still arriving; kerning applies to the glyphs that *survive*
+        // substitution, so `fi` must be kerned as the single glyph it became,
+        // not as the `f` and `i` it was; and a mark's placement is measured
+        // from a pen that kerning is still moving.
         let space = self.glyph_id(' ');
         let mut glyphs: Vec<SubGlyph> = Vec::with_capacity(text.len());
         let mut tabs: Vec<bool> = Vec::with_capacity(text.len());
-        for (cluster, ch) in text.char_indices() {
+        for (ch, cluster) in norm::pieces(text, |ch| self.face.glyph_index(ch).is_some()) {
             // A tab has no glyph. Drawn through `cmap` it comes out as the
             // missing-glyph box, one space wide; the width every caller wants
             // is several spaces of nothing. Substituting the space glyph gets

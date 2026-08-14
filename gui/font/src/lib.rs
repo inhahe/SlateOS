@@ -42,6 +42,8 @@ pub mod cff;
 pub mod gsub;
 mod kern;
 mod mark;
+mod norm;
+mod norm_tables;
 mod otl;
 pub mod raster;
 pub mod scaled;

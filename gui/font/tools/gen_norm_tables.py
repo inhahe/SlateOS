@@ -1,0 +1,186 @@
+"""Generate `gui/font/src/norm_tables.rs` from Python's built-in Unicode database.
+
+Run from anywhere:
+
+    python gui/font/tools/gen_norm_tables.py
+
+The tables are generated rather than hand-written because they are the
+Unicode Character Database, and a hand-maintained copy of the UCD is a copy
+that silently goes stale. Regenerating is how the crate moves to a newer
+Unicode version: run this with a Python whose `unicodedata` is the version
+you want, and commit the diff.
+
+Three tables come out, and each exists for a reason the shaper needs:
+
+`PAIRS`     canonical decompositions of exactly two characters, sorted by the
+            composed character. Read forwards it decomposes; read through
+            `PAIRS_BY_PARTS` it composes. One table, both directions, because
+            they are the same fact.
+
+`NO_COMPOSE`
+            the composed characters in `PAIRS` that must *not* be recomposed
+            — Unicode's composition exclusions, plus the pairs whose first
+            character is itself a non-starter. Derived by asking the UCD
+            whether NFC of the two parts actually gives the composed
+            character back, so the exclusion list never has to be transcribed.
+
+`SINGLETONS`
+            canonical decompositions of one character (ANGSTROM SIGN to
+            A-with-ring, and the CJK compatibility ideographs). These never
+            recompose; they exist so a face that cannot draw the singleton
+            can still draw the letter.
+
+`CCC`       canonical combining classes, run-length encoded into ranges.
+            Needed to sort marks into canonical order and to know when a
+            mark blocks the composition of a later one.
+
+Hangul is absent on purpose: its composition is arithmetic, so
+`norm.rs` computes it rather than storing eleven thousand rows.
+"""
+
+import os
+import sys
+import unicodedata
+
+HANGUL_SYLLABLES = range(0xAC00, 0xD7A4)
+
+
+def canonical_pairs_and_singletons():
+    pairs = []
+    singletons = []
+    for cp in range(0x110000):
+        if cp in HANGUL_SYLLABLES:
+            continue
+        ch = chr(cp)
+        d = unicodedata.decomposition(ch)
+        # A decomposition beginning with a tag ("<font>", "<compat>", ...) is
+        # a *compatibility* decomposition. Applying those would replace a
+        # superscript with a digit and a ligature with its letters, which is
+        # NFKC — a different normal form, and the wrong one for rendering:
+        # the author asked for that character.
+        if not d or d.startswith("<"):
+            continue
+        parts = [int(p, 16) for p in d.split()]
+        if len(parts) == 1:
+            singletons.append((cp, parts[0]))
+        elif len(parts) == 2:
+            pairs.append((cp, parts[0], parts[1]))
+        else:
+            # Canonical decompositions are one or two characters, always.
+            raise SystemExit(f"U+{cp:04X} decomposes to {len(parts)} characters")
+    return pairs, singletons
+
+
+def combining_ranges():
+    out = []
+    for cp in range(0x110000):
+        ccc = unicodedata.combining(chr(cp))
+        if ccc == 0:
+            continue
+        if out and out[-1][1] == cp - 1 and out[-1][2] == ccc:
+            out[-1][1] = cp
+        else:
+            out.append([cp, cp, ccc])
+    return out
+
+
+def main():
+    pairs, singletons = canonical_pairs_and_singletons()
+    ranges = combining_ranges()
+
+    # Which of the pairs actually recompose. Asking the UCD directly, rather
+    # than reading CompositionExclusions.txt, catches all four reasons a pair
+    # is excluded (script-specific, post-composition, singleton, and
+    # non-starter) with one question.
+    excluded = [
+        c for c, a, b in pairs if unicodedata.normalize("NFC", chr(a) + chr(b)) != chr(c)
+    ]
+
+    # The second element of a pair that still composes, but only where that
+    # element is *not* a combining mark. This is what tells the fast path that
+    # a run needs work: a run changes under NFC either because something in it
+    # decomposes, or because something in it composes onto what precedes it.
+    # The second case is normally a mark, and the mark check already catches
+    # it — but Indic two-part vowels are starters (U+0B47 U+0B3E composes, and
+    # neither character has a decomposition or a combining class), so without
+    # this table such a run would be waved through unchanged.
+    seconds = sorted(
+        {b for c, a, b in pairs if c not in set(excluded) and unicodedata.combining(chr(b)) == 0}
+    )
+
+    pairs.sort()
+    order = sorted(range(len(pairs)), key=lambda i: (pairs[i][1], pairs[i][2]))
+    singletons.sort()
+    excluded.sort()
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    out = os.path.join(here, "..", "src", "norm_tables.rs")
+    with open(out, "w", encoding="utf-8", newline="\n") as f:
+        w = f.write
+        w("//! Canonical decomposition, composition and combining classes.\n")
+        w("//!\n")
+        w(f"//! Generated by `gui/font/tools/gen_norm_tables.py` from Unicode\n")
+        w(f"//! {unicodedata.unidata_version}. Do not edit: run the script instead.\n")
+        w("//!\n")
+        w("//! See that script for what each table is for. Hangul is not here —\n")
+        w("//! its composition is arithmetic and `norm.rs` computes it.\n")
+        w("\n")
+
+        w("/// Canonical decompositions of two characters, sorted by the composed\n")
+        w("/// character: `(composed, first, second)`.\n")
+        w(f"pub(crate) static PAIRS: [(u32, u32, u32); {len(pairs)}] = [\n")
+        for c, a, b in pairs:
+            w(f"    (0x{c:04X}, 0x{a:04X}, 0x{b:04X}),\n")
+        w("];\n\n")
+
+        w("/// Indices into [`PAIRS`] sorted by `(first, second)`, so that a pair\n")
+        w("/// of characters can be looked up as fast as a composed one. An index\n")
+        w("/// list rather than a second copy of the table: the rows are the same\n")
+        w("/// rows, and two copies could disagree.\n")
+        w(f"pub(crate) static PAIRS_BY_PARTS: [u16; {len(order)}] = [\n")
+        for i in range(0, len(order), 12):
+            w("    " + " ".join(f"{j}," for j in order[i : i + 12]) + "\n")
+        w("];\n\n")
+
+        w("/// Composed characters from [`PAIRS`] that must not be recomposed —\n")
+        w("/// Unicode's composition exclusions. Sorted.\n")
+        w(f"pub(crate) static NO_COMPOSE: [u32; {len(excluded)}] = [\n")
+        for i in range(0, len(excluded), 8):
+            w("    " + " ".join(f"0x{c:04X}," for c in excluded[i : i + 8]) + "\n")
+        w("];\n\n")
+
+        w("/// Canonical decompositions of a single character, sorted by it:\n")
+        w("/// `(composed, replacement)`. These never recompose.\n")
+        w(f"pub(crate) static SINGLETONS: [(u32, u32); {len(singletons)}] = [\n")
+        for c, a in singletons:
+            w(f"    (0x{c:04X}, 0x{a:04X}),\n")
+        w("];\n\n")
+
+        w("/// Characters that can compose onto the one before them but are not\n")
+        w("/// combining marks, sorted. Only used by the fast-path check: a run\n")
+        w("/// containing one of these may change under NFC even though nothing\n")
+        w("/// in it decomposes and nothing in it is a mark. Hangul jamo belong\n")
+        w("/// to this set too and are not listed — `norm.rs` knows their ranges.\n")
+        w(f"pub(crate) static COMBINES_BACKWARD: [u32; {len(seconds)}] = [\n")
+        for i in range(0, len(seconds), 8):
+            w("    " + " ".join(f"0x{c:04X}," for c in seconds[i : i + 8]) + "\n")
+        w("];\n\n")
+
+        w("/// Non-zero canonical combining classes as sorted, disjoint ranges:\n")
+        w("/// `(first, last, class)`. Everything not covered has class 0.\n")
+        w(f"pub(crate) static CCC: [(u32, u32, u8); {len(ranges)}] = [\n")
+        for lo, hi, ccc in ranges:
+            w(f"    (0x{lo:04X}, 0x{hi:04X}, {ccc}),\n")
+        w("];\n")
+
+    print(f"wrote {out}")
+    print(f"  Unicode {unicodedata.unidata_version}")
+    print(f"  {len(pairs)} pair decompositions, {len(excluded)} of them excluded")
+    print(f"  {len(singletons)} singleton decompositions")
+    print(f"  {len(ranges)} combining-class ranges")
+    if len(pairs) > 0xFFFF:
+        sys.exit("PAIRS no longer fits a u16 index")
+
+
+if __name__ == "__main__":
+    main()

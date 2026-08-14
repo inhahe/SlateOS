@@ -450,7 +450,13 @@ Roadmap:
   now stops at the first script the face *registers*, so a face that registers
   `latn` with no DefaultLangSys (NotoSansLisu) is no longer handed `DFLT`'s
   features (`TD-FONT-FALLS-BACK-PAST-A-SCRIPT-THE-FACE-REGISTERS`).
-  `agree` 11806 → 11820, `misplaced` 42 → 28.
+  `agree` 11806 → 11820, `misplaced` 42 → 28. And `GPOS` now asks for
+  HarfBuzz's whole feature set rather than the positioning-sounding tags
+  alone, since HarfBuzz compiles one feature map against both tables and a
+  face may file a positioning lookup under `calt` — Monoid-Italic files its
+  entire italic side-bearing correction there
+  (`TD-GPOS-ASKS-ONLY-FOR-POSITIONING-SOUNDING-FEATURES`).
+  `agree` 11820 → 11826, `misplaced` 28 → 22.
   Next unblocked step is the rest of shaping: no Indic reordering
   (`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`), no language selection
   (`TD-FONT-IGNORES-LANGSYS-OVERRIDES`), and no device tables in

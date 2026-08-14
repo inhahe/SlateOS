@@ -110,19 +110,28 @@ const KINDS: [u16; 8] = [
 
 /// The positioning features applied to every run.
 ///
-/// HarfBuzz's unconditional `GPOS` set, minus the vertical ones this crate has
-/// no layout for. All of them are on for every run: unlike `GSUB`, where the
-/// Arabic positional features must reach only the glyphs the shaper marked
-/// eligible, a positioning feature is gated by its own glyph coverage — a
-/// face's `abvm` simply does not cover glyphs that have nothing above them.
-const FEATURES: [&[u8; 4]; 7] = [
-    b"abvm", b"blwm", b"curs", b"dist", b"kern", b"mark", b"mkmk",
+/// HarfBuzz's unconditional set, minus the vertical ones this crate has no
+/// layout for. Not just the seven that *sound* like positioning: HarfBuzz
+/// builds **one** feature map and compiles it against both tables, so any
+/// feature it turns on may reach a `GPOS` lookup as readily as a `GSUB` one,
+/// and real faces use that. `Monoid-Italic.ttf` files its whole italic
+/// side-bearing correction under `calt` as a chained-context *positioning*
+/// lookup: asking `GPOS` for only the positioning-sounding tags left every
+/// letter after an `i` 64 units out of place.
+///
+/// All of them are on for every run: unlike `GSUB`, where the Arabic
+/// positional features must reach only the glyphs the shaper marked eligible,
+/// a positioning feature is gated by its own glyph coverage — a face's `abvm`
+/// simply does not cover glyphs that have nothing above them.
+const FEATURES: [&[u8; 4]; 14] = [
+    b"abvm", b"blwm", b"calt", b"ccmp", b"clig", b"curs", b"dist", b"kern", b"liga", b"locl",
+    b"mark", b"mkmk", b"rclt", b"rlig",
 ];
 
 /// Where `kern` sits in [`FEATURES`], and so which bit of the mask
 /// [`ByScript::for_script`] hands back means "the `kern` feature reached this
 /// lookup". Checked by `the_kern_bit_names_the_kern_feature`.
-const KERN_FEATURE: usize = 4;
+const KERN_FEATURE: usize = 7;
 
 /// That position as a mask bit.
 const KERN_MASK: u32 = 1 << KERN_FEATURE;
@@ -1320,6 +1329,27 @@ mod tests {
             out.extend_from_slice(subtable);
         }
         out
+    }
+
+    /// HarfBuzz builds one feature map and compiles it against both tables, so
+    /// a tag that sounds like substitution reaches positioning lookups just as
+    /// well. `Monoid-Italic.ttf` is the real case: its whole italic
+    /// side-bearing correction is a chained-context *positioning* lookup filed
+    /// under `calt`, and a `GPOS` that asks only for positioning-sounding tags
+    /// leaves every letter after an `i` 64 units out of place.
+    #[test]
+    fn a_substitution_tagged_feature_still_reaches_positioning_lookups() {
+        for tag in [b"calt", b"clig", b"liga", b"rclt", b"ccmp", b"locl"] {
+            let sub = single_pos1(
+                &[7],
+                Value {
+                    x_placement: -64,
+                    ..Value::default()
+                },
+            );
+            let data = gpos_table_for(b"DFLT", tag, &[(SINGLE_POS, sub)]);
+            assert_eq!(positioned(&data, &[7]), alloc::vec![-64], "{tag:?}");
+        }
     }
 
     /// The same, with a second script that has *no* DefaultLangSys.

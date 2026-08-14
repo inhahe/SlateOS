@@ -63,6 +63,9 @@
     reason = "the shaper that reads this table is not wired in yet"
 )]
 
+use alloc::vec::Vec;
+
+use crate::indic_machine::{ACCEPTS, TRANSITIONS};
 use crate::indic_tables::INDIC_RANGES;
 
 /// What a character is, for the purpose of building a syllable.
@@ -72,7 +75,14 @@ use crate::indic_tables::INDIC_RANGES;
 /// `gui/font/tools/gen_indic_tables.py` writes, so renaming one here means
 /// editing `RUST_CATEGORY` there; the generated file will not compile
 /// otherwise.
+///
+/// The discriminants are the column indices of
+/// [`indic_machine`](crate::indic_machine)'s transition table, so the *order*
+/// of the variants is load-bearing in a second way: reordering them silently
+/// mis-scans every syllable. `categories_index_the_machines_columns` is the
+/// test that says so out loud.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub(crate) enum Category {
     /// Not part of an Indic syllable. The default, and the answer for nearly
     /// every code point — including every Latin letter.
@@ -237,9 +247,74 @@ impl Category {
     }
 }
 
+/// Which of the grammar's seven rules matched a syllable.
+///
+/// The kind decides what reordering does with it — a vowel syllable has no
+/// base consonant to find, a non-Indic one is left exactly as it was — and it
+/// is also a diagnosis: [`Broken`](Self::Broken) means the text was not a
+/// well-formed syllable, which HarfBuzz answers by inserting a dotted circle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Syllable {
+    /// A consonant and everything hung on it. The ordinary case.
+    Consonant,
+    /// An independent vowel at the head instead of a consonant.
+    Vowel,
+    /// A cluster built on a placeholder or a dotted circle — a matra written
+    /// against a digit, or a lone mark shown on its ring.
+    Standalone,
+    /// A symbol (OM, avagraha) and its marks.
+    Symbol,
+    /// Not a well-formed syllable: a matra or a virama with nothing to attach
+    /// to. Still reordered, on the theory that showing something in roughly
+    /// the right place beats showing it in storage order.
+    Broken,
+    /// Not Indic at all, or a stray syllable modifier. Never reordered.
+    NonIndic,
+}
+
+/// Cut `cats` into syllables, appending `(start, end, kind)` to `out`.
+///
+/// The ranges tile the input exactly: they are contiguous, none is empty, and
+/// the last ends at `cats.len()`. That is guaranteed by the grammar's last
+/// rule, `other = any`, which matches a single character of any category
+/// whatsoever — so there is always *some* match and the scan always advances.
+///
+/// Longest match wins, and a tie goes to the rule the grammar lists first.
+/// Both are the ragel scanner's rules, and both matter: `Ra H C` is a
+/// consonant syllable of three characters, not a broken one of two followed
+/// by another.
+pub(crate) fn syllables(cats: &[Category], out: &mut Vec<(usize, usize, Syllable)>) {
+    out.clear();
+    let mut i = 0usize;
+    while i < cats.len() {
+        // State 1 is the start; state 0 is dead. See `indic_machine`.
+        let mut state = 1usize;
+        let mut best: Option<(usize, Syllable)> = None;
+        for (j, &cat) in cats.iter().enumerate().skip(i) {
+            let next = match TRANSITIONS.get(state).and_then(|row| row.get(cat as usize)) {
+                Some(&next) if next != 0 => usize::from(next),
+                // Dead, or a table that does not cover this state — either
+                // way nothing longer can match from here.
+                _ => break,
+            };
+            state = next;
+            if let Some(&Some(kind)) = ACCEPTS.get(state) {
+                best = Some((j.saturating_add(1), kind));
+            }
+        }
+        // `other = any` accepts one character of anything, so `best` is only
+        // ever `None` if the table is corrupt; advancing by one is then both
+        // the right answer and the one that guarantees termination.
+        let (end, kind) = best.unwrap_or((i.saturating_add(1), Syllable::NonIndic));
+        out.push((i, end, kind));
+        i = end;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     fn cat(ch: char) -> Category {
         Char::of(ch).category
@@ -355,6 +430,148 @@ mod tests {
                 assert!(prev < lo, "range starting {lo:#x} overlaps {prev:#x}");
             }
             last = Some(hi);
+        }
+    }
+
+    /// Every variant of [`Category`], in declaration order.
+    const ALL_CATEGORIES: [Category; 19] = [
+        Category::Other,
+        Category::Consonant,
+        Category::Vowel,
+        Category::Nukta,
+        Category::Halant,
+        Category::NonJoiner,
+        Category::Joiner,
+        Category::Matra,
+        Category::SyllableModifier,
+        Category::Cantillation,
+        Category::Placeholder,
+        Category::DottedCircle,
+        Category::MatraPost,
+        Category::Repha,
+        Category::Ra,
+        Category::ConsonantMedial,
+        Category::Symbol,
+        Category::ConsonantWithStacker,
+        Category::SyllableModifierPost,
+    ];
+
+    /// The scanner indexes a transition row by the category's discriminant,
+    /// so the enum's order and the generator's `CATEGORIES` tuple are one
+    /// fact written in two places. This is the test that keeps them one.
+    #[test]
+    fn categories_index_the_machines_columns() {
+        for (i, &cat) in ALL_CATEGORIES.iter().enumerate() {
+            assert_eq!(cat as usize, i, "{cat:?}");
+        }
+        assert!(!TRANSITIONS.is_empty(), "the machine has no states");
+        for row in &TRANSITIONS {
+            assert_eq!(row.len(), ALL_CATEGORIES.len());
+        }
+    }
+
+    fn cut(text: &str) -> Vec<(usize, usize, Syllable)> {
+        let cats: Vec<Category> = text.chars().map(|ch| Char::of(ch).category).collect();
+        let mut out = Vec::new();
+        syllables(&cats, &mut out);
+        out
+    }
+
+    /// `हिन्दी` is one syllable, not two — the न ् द conjunct in the middle
+    /// does not end it. Cutting it in the wrong place is how a shaper
+    /// reorders the vowel sign onto the wrong consonant.
+    #[test]
+    fn the_word_hindi_is_two_syllables() {
+        assert_eq!(
+            cut("\u{939}\u{93f}\u{928}\u{94d}\u{926}\u{940}"),
+            vec![(0, 2, Syllable::Consonant), (2, 6, Syllable::Consonant)]
+        );
+    }
+
+    /// A run of ordinary consonants is a syllable each: nothing joins them.
+    #[test]
+    fn consonants_with_nothing_between_them_do_not_join() {
+        assert_eq!(
+            cut("\u{939}\u{928}\u{926}"),
+            vec![
+                (0, 1, Syllable::Consonant),
+                (1, 2, Syllable::Consonant),
+                (2, 3, Syllable::Consonant),
+            ]
+        );
+    }
+
+    /// RA + virama at the head is a reph, and the syllable runs on past it —
+    /// which is the whole reason `reph` is in the grammar rather than being
+    /// left to fall out of `halant_group`.
+    #[test]
+    fn a_reph_belongs_to_the_syllable_it_starts() {
+        // र ् क — RA virama KA.
+        assert_eq!(
+            cut("\u{930}\u{94d}\u{915}"),
+            vec![(0, 3, Syllable::Consonant)]
+        );
+        // Without a following consonant it is still one syllable, but a
+        // consonant one — the RA is its own base and the virama is the
+        // syllable's trailing halant, not the head of a reph.
+        assert_eq!(cut("\u{930}\u{94d}"), vec![(0, 2, Syllable::Consonant)]);
+    }
+
+    /// An independent vowel heads a syllable of its own kind.
+    #[test]
+    fn an_independent_vowel_heads_a_vowel_syllable() {
+        // अ, then अ with anusvara.
+        assert_eq!(cut("\u{905}"), vec![(0, 1, Syllable::Vowel)]);
+        assert_eq!(
+            cut("\u{905}\u{902}"),
+            vec![(0, 2, Syllable::Vowel)]
+        );
+    }
+
+    /// A matra with nothing before it is broken, and a lone mark on a dotted
+    /// circle is a standalone cluster — the two ways text arrives malformed.
+    #[test]
+    fn malformed_text_is_still_cut_into_syllables() {
+        assert_eq!(cut("\u{93f}"), vec![(0, 1, Syllable::Broken)]);
+        assert_eq!(
+            cut("\u{25cc}\u{93f}"),
+            vec![(0, 2, Syllable::Standalone)]
+        );
+    }
+
+    /// Latin is one non-Indic syllable per character, which is what lets the
+    /// shaper run over a mixed run without a separate test for script.
+    #[test]
+    fn characters_outside_the_script_are_left_alone() {
+        assert_eq!(
+            cut("ab"),
+            vec![(0, 1, Syllable::NonIndic), (1, 2, Syllable::NonIndic)]
+        );
+        assert!(cut("").is_empty());
+    }
+
+    /// The ranges must tile the input exactly — contiguous, non-empty, and
+    /// ending where the text does. Everything downstream assumes it, and a
+    /// generated table is where a hole would come from.
+    #[test]
+    fn the_syllables_tile_every_string_they_are_given() {
+        for text in [
+            "\u{939}\u{93f}\u{928}\u{94d}\u{926}\u{940}",
+            "\u{930}\u{94d}\u{915}\u{94d}\u{937}",
+            "\u{9ac}\u{9be}\u{982}\u{9b2}\u{9be}",
+            "\u{c05}\u{c06}\u{c07}",
+            "\u{d15}\u{d4d}\u{d15}\u{d41}",
+            "a\u{939}1\u{93f}\u{200d}\u{25cc}",
+            "\u{200c}\u{94d}\u{951}\u{93c}",
+        ] {
+            let cut = cut(text);
+            let mut at = 0usize;
+            for &(start, end, _) in &cut {
+                assert_eq!(start, at, "{text:?} has a hole at {at}");
+                assert!(end > start, "{text:?} has an empty syllable at {at}");
+                at = end;
+            }
+            assert_eq!(at, text.chars().count(), "{text:?} was cut short");
         }
     }
 

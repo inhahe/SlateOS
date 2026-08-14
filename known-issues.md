@@ -4188,7 +4188,7 @@ Corpus: `a-backquote-body-inside-double-quotes-is-read-by-the-brace-scanner.sh`.
 Note the same walk reaches nothing inside a `<( … )` / `>( … )` body either,
 because `crate::unparse::nested_parts` returns no scope for a `ProcSub`.
 
-### TD-OILS-AN-UNPARSEABLE-SUBSTITUTION-IN-AN-UNTERMINATED-DQUOTE-LOSES-TO-THE-EOF. bash blames the `$( … )`, osh blames the quote — 2026-08-14 — ⚠️ OPEN
+### TD-OILS-AN-UNPARSEABLE-SUBSTITUTION-IN-AN-UNTERMINATED-DQUOTE-LOSES-TO-THE-EOF. bash blames the `$( … )`, osh blames the quote — 2026-08-14 — ✅ FIXED 2026-08-14
 
 **Where:** `userspace/oils/src/lexer.rs`, `Lexer::read_double_quote_until` — it
 scans a `" … "` for its closing quote and raises the unterminated-quote error at
@@ -4228,6 +4228,32 @@ be a parse error when nobody reads it — see
 TD-OILS-A-QUOTE-RUN-IN-A-PATTERN-OPERAND-IS-NOT-GOBBLED); this is the one case
 where the enclosing construct never closes, so there is no word to defer to and
 bash's own reader has already committed to the substitution.
+
+**Fixed 2026-08-14, along exactly the [`SubstBail`] line one construct further
+out.** The bodies are still lexed where they were, and are carried *out on the
+error* to be parsed by the one place that has `ParseOpts` in hand:
+
+- `LexError::quoted_subs: Option<Box<Vec<(Str, u32)>>>` — the eager `$( … )`
+  bodies a `" … "` read before it ran out, in reading order, each with the line
+  its `)` sat on. Filled by `lexer::eager_subs`, which searches the finished
+  segments for `Seg::CmdSub(_, _, SubBody::Eager)` and for the spans a
+  `Seg::ParamBraced`/`Seg::Arith` stepped over — measured, `echo " ${x:-$(fi)}`
+  and `echo " $(( $(fi) ))` both name `fi` too. A `SubBody::Backtick` is
+  deliberately not collected: that body is read as text now and parsed only at
+  expansion time, which is exactly why the backquote row disagreed with nothing.
+- It is attached at all three of `read_double_quote_until`'s failing exits, not
+  just the end-of-input one, because the quote can run out *inside* a later
+  substitution and the bodies read before that one still win:
+  `echo " $(fi) $(done` names `fi`.
+- `parser::quoted_sub_error`, consulted by `resolve_subst_bail` *before* the
+  `bail` path for the same reason, returns the first body error that is not
+  `is_incomplete()` — a body that merely ran out said nothing, which is where
+  `echo " $(a |` keeps its `` matching `)' ``.
+
+Verified by
+`userspace/oils/tests/corpus/a-substitution-inside-an-unterminated-quote-is-parsed-before-the-quote-is-missed.sh`
+(14 rows, all matching bash 5.2.37 in message *and* rc) and the unit test
+`parser::tests::a_body_read_inside_a_quote_that_ran_out_is_parsed_anyway`.
 
 **Found by** the flat-state gobbler fix below: the repro there
 (``echo "p`echo " ' $(fi)`q{,}"``) agrees on the *scan* now, and what is left of
@@ -4342,7 +4368,9 @@ differs, because the backquote then runs and its body (`echo " ' $(fi)`) has an
 unterminated `"` around an unparseable `$( … )`. bash reports the substitution's
 own syntax error; osh reports the unterminated quote. That is
 TD-OILS-AN-UNPARSEABLE-SUBSTITUTION-IN-AN-UNTERMINATED-DQUOTE-LOSES-TO-THE-EOF,
-which has nothing to do with brace expansion.
+which has nothing to do with brace expansion. Fixed the same day; with both in,
+the original repro agrees end to end — same two diagnostic lines, same `pq{,}`,
+same `$?` 0.
 
 ### TD-OILS-A-QUOTE-RUN-IN-A-PATTERN-OPERAND-IS-NOT-GOBBLED. `"${z#'$(fi)'}"` runs where bash drops the command — 2026-08-14 — ✅ FIXED 2026-08-14
 

@@ -431,8 +431,10 @@ impl From<crate::lexer::LexError> for ParseError {
     }
 }
 
-/// [`ParseError::from`], after giving a substitution body that the scan never
-/// found the `)` of its say. See [`crate::lexer::SubstBail`].
+/// [`ParseError::from`], after giving the substitution bodies the scan read but
+/// did not parse their say — the one it never found the `)` of
+/// ([`crate::lexer::SubstBail`]), and the ones it read whole inside a quote that
+/// then ran out ([`crate::lexer::LexError::quoted_subs`]).
 ///
 /// bash parses that body *as it reads it*, so an error in it comes out before
 /// the missing paren is ever noticed — ``echo $(fi`` is ``syntax error near
@@ -448,8 +450,33 @@ impl From<crate::lexer::LexError> for ParseError {
 /// means exactly that, and is bash's `EOF_Reached` path (parse.y:4170), on
 /// which the `)` message stands.
 fn resolve_subst_bail(e: crate::lexer::LexError, opts: ParseOpts) -> ParseError {
+    // A quote that ran out of input reports the bodies it read on the way there
+    // first: they sit earlier in the text than whatever the scan finally ran
+    // out inside, and bash reports the first failure it meets. See
+    // [`crate::lexer::LexError::quoted_subs`].
+    if let Some(subs) = e.quoted_subs.as_deref()
+        && let Some(err) = quoted_sub_error(subs, opts)
+    {
+        return err;
+    }
     let Some(bail) = e.bail.clone() else { return ParseError::from(e) };
     bail_body_error(&bail, opts).unwrap_or_else(|| ParseError::from(e))
+}
+
+/// The error bash's parse of the substitution bodies inside an unterminated
+/// quote would raise, or `None` if all of them parse (or merely run out of
+/// input themselves).
+///
+/// The bodies are in reading order and the first failure wins, which is bash
+/// reading left to right: `echo " $(fi) $(done)` names `fi`.
+///
+/// An end-of-input error is passed over for the same reason [`bail_body_error`]
+/// passes over one — a body that merely ran out did not *say* anything, and the
+/// enclosing quote's own missing `"` is then the thing to report.
+fn quoted_sub_error(subs: &[(Str, u32)], opts: ParseOpts) -> Option<ParseError> {
+    subs.iter().find_map(|(src, close)| {
+        parse_cmdsub_body(src, *close, opts).err().filter(|e| !e.is_incomplete())
+    })
 }
 
 /// The error bash's nested parse of an unterminated substitution body would
@@ -10288,6 +10315,44 @@ mod tests {
             ("echo $(echo \"x", "unexpected EOF while looking for matching `\"'"),
             ("echo $(echo 'x", "unexpected EOF while looking for matching `''"),
             ("echo $(echo `fi", "unexpected EOF while looking for matching ``'"),
+        ] {
+            assert_eq!(emsg(&parse(src).unwrap_err()), msg, "{src:?}");
+        }
+    }
+
+    /// The same order one construct further out: a `$( … )` that *closed* inside
+    /// a `" … "` that then ran out was still parsed where it was met, so its
+    /// error is reported and the quote never gets to miss its own `"`. See
+    /// `LexError::quoted_subs`. Every row is measured from bash 5.2.37.
+    #[test]
+    fn a_body_read_inside_a_quote_that_ran_out_is_parsed_anyway() {
+        let near = |t: &str| format!("syntax error near unexpected token `{t}'");
+        for (src, tok) in [
+            ("echo \" $(fi)", "fi"),
+            // A `${ … }` and a `$(( … ))` step over their nested `$( … )` with
+            // the same eager parse, so those bodies count too.
+            ("echo \" ${x:-$(fi)}", "fi"),
+            ("echo \" $(( $(fi) ))", "fi"),
+            // Left to right: the first body that will not parse wins, whether
+            // what follows is another whole body or the one the scan ran out in.
+            ("echo \" $(fi) $(done)", "fi"),
+            ("echo \" $(fi) $(done", "fi"),
+            ("echo \" $(fi) `done`", "fi"),
+        ] {
+            let e = parse(src).unwrap_err();
+            assert_eq!(emsg(&e), near(tok), "{src:?}");
+            // Found inside a body, so fatal to whoever was reading it.
+            assert!(e.fatal, "{src:?}");
+        }
+        // A backquote body is read as text to its mate and parsed only at
+        // expansion time, so nothing objects before the quote runs out — and a
+        // body that parses, or that merely ran out itself, says nothing either.
+        for (src, msg) in [
+            ("echo \" `fi`", "unexpected EOF while looking for matching `\"'"),
+            ("echo \"abc", "unexpected EOF while looking for matching `\"'"),
+            ("echo \" $(echo ok)", "unexpected EOF while looking for matching `\"'"),
+            ("echo \" $(a |", "unexpected EOF while looking for matching `)'"),
+            ("echo \" $(echo ok) $(if", "unexpected EOF while looking for matching `)'"),
         ] {
             assert_eq!(emsg(&parse(src).unwrap_err()), msg, "{src:?}");
         }

@@ -137,6 +137,29 @@ pub struct LexError {
     /// only text no parser read can set it, so the allocation never happens
     /// while lexing a script, and every other error stays cheap to move.
     pub unclosed: Option<Box<UnreadEof>>,
+    /// The `$( … )` bodies read inside a `" … "` that never closed, in the
+    /// order the reader met them, each with the line its `)` sat on — the pair
+    /// [`crate::parser::parse_cmdsub_body`] takes.
+    ///
+    /// The same reason as [`SubstBail`], one construct further out. bash's
+    /// `parse_matched_pair` parses a `$( … )` where it meets it, so a body that
+    /// will not parse is reported *there* and the quote never gets to miss its
+    /// closing `"`: `echo " $(fi)` is ``syntax error near unexpected token
+    /// `fi'``, not ``unexpected EOF while looking for matching `"'``. osh scans
+    /// the quote first and parses bodies afterwards, which is the opposite
+    /// order, so the bodies are carried out on the error to be given their say.
+    ///
+    /// Only an unterminated quote sets it: while the quote closes, the word is
+    /// built and each body is parsed in its ordinary place.
+    ///
+    /// It rides a [`SubstBail`] too, and outranks it, because the quote can run
+    /// out of input *inside* a later substitution: the bodies collected here
+    /// were read before that one, and bash reports the first failure it meets.
+    /// Measured: `echo " $(fi) $(done` names `fi`, not `done`.
+    ///
+    /// Boxed for the same reason as `unclosed` — nothing is allocated on a path
+    /// that succeeds.
+    pub quoted_subs: Option<Box<Vec<(Str, u32)>>>,
 }
 
 /// Which segment a scan that ran out of input in unread text becomes.
@@ -263,6 +286,7 @@ impl LexError {
             recoverable: false,
             bail: None,
             unclosed: None,
+            quoted_subs: None,
         }
     }
 
@@ -286,6 +310,18 @@ impl LexError {
     /// See [`UnreadEof`].
     pub(crate) fn unclosed(mut self, what: UnreadEof) -> Self {
         self.unclosed = Some(Box::new(what));
+        self
+    }
+
+    /// Carry out the substitution bodies read inside the quote this error ran
+    /// out of input inside, so that the parser can give them their say. Never
+    /// overwrites: an enclosing quote's list must not replace an inner one's,
+    /// which was read first and holds what bash would have parsed first. See
+    /// [`Self::quoted_subs`].
+    pub(crate) fn quoted_subs(mut self, subs: Vec<(Str, u32)>) -> Self {
+        if self.quoted_subs.is_none() && !subs.is_empty() {
+            self.quoted_subs = Some(Box::new(subs));
+        }
         self
     }
 }
@@ -312,6 +348,7 @@ fn eof_matching(close: char) -> LexError {
         recoverable: false,
         bail: None,
         unclosed: None,
+        quoted_subs: None,
     }
 }
 
@@ -5452,7 +5489,11 @@ impl Lexer {
         loop {
             let Some(c) = self.peek() else {
                 if closed && !self.opts.tolerant {
-                    return Err(eof_matching('"').at(open));
+                    // The bodies read on the way here go out with the error:
+                    // bash parsed each where it met it, so one that will not
+                    // parse is reported instead of this. See
+                    // [`LexError::quoted_subs`].
+                    return Err(eof_matching('"').at(open).quoted_subs(eager_subs(&segs)));
                 }
                 flush_lit(&mut segs, &mut lit);
                 return Ok(segs);
@@ -5496,7 +5537,10 @@ impl Lexer {
                             segs.push(Seg::CmdSub(raw, close, SubBody::Backtick(src)));
                         }
                         Err(e) => {
-                            segs.push(self.unclosed_seg(e)?);
+                            match self.unclosed_seg(e) {
+                                Ok(seg) => segs.push(seg),
+                                Err(e) => return Err(e.quoted_subs(eager_subs(&segs))),
+                            }
                             return Ok(segs);
                         }
                     }
@@ -5509,7 +5553,10 @@ impl Lexer {
                     Ok(None) => lit.push(b'$'),
                     Err(e) => {
                         flush_lit(&mut segs, &mut lit);
-                        segs.push(self.unclosed_seg(e)?);
+                        match self.unclosed_seg(e) {
+                            Ok(seg) => segs.push(seg),
+                            Err(e) => return Err(e.quoted_subs(eager_subs(&segs))),
+                        }
                         return Ok(segs);
                     }
                 },
@@ -7616,6 +7663,36 @@ fn flush_lit(segs: &mut Vec<Seg>, lit: &mut Str) {
     if !lit.is_empty() {
         segs.push(Seg::Lit(core::mem::take(lit)));
     }
+}
+
+/// The `$( … )` bodies a finished run of segments had *parsed where they were
+/// met*, in that order, each with the line its `)` sat on — the pair
+/// [`crate::parser::parse_cmdsub_body`] takes.
+///
+/// Only [`SubBody::Eager`] qualifies, and that is the whole distinction: a
+/// backquote body is read as text and parsed at expansion time, so a body that
+/// will not parse is not this scan's error. Measured, with the quote left open
+/// so that the scan fails too: `echo " $(fi)` reports `` near unexpected token
+/// `fi' ``, while `` echo " `fi` `` reports the unterminated quote.
+///
+/// A `${ … }` and a `$(( … ))` carry their own stepped-over spans and are
+/// searched as well — bash parsed those where it met them for the same reason,
+/// and measures the same: `echo " ${x:-$(fi)}` and `echo " $(( $(fi) ))` both
+/// name `fi`.
+fn eager_subs(segs: &[Seg]) -> Vec<(Str, u32)> {
+    let spans = |v: &[CmdSubSpan]| {
+        v.iter()
+            .filter(|s| s.kind == SubBody::Eager)
+            .map(|s| (s.src.clone(), s.close_line))
+            .collect::<Vec<_>>()
+    };
+    segs.iter()
+        .flat_map(|seg| match seg {
+            Seg::CmdSub(raw, close, SubBody::Eager) => vec![(raw.clone(), *close)],
+            Seg::ParamBraced(_, _, subs, _) | Seg::Arith(_, _, subs) => spans(subs),
+            _ => Vec::new(),
+        })
+        .collect()
 }
 
 /// Lower a here-document body into segments. When `expand` is false (quoted

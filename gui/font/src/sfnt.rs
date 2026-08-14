@@ -405,6 +405,10 @@ pub struct Face {
     outlines: Outlines,
     hmtx: Span,
     cmap: Option<CmapSub>,
+    /// The `name` table, kept as a span rather than decoded at parse time: a
+    /// face is opened to draw with, and only a font picker or a family lookup
+    /// ever asks for the strings.
+    name: Option<Span>,
 }
 
 /// Where a face keeps its outlines.
@@ -450,6 +454,7 @@ impl Face {
         let mut loca = None;
         let mut glyf = None;
         let mut cmap = None;
+        let mut name = None;
         let mut cff = None;
         let mut has_cff2 = false;
 
@@ -478,6 +483,7 @@ impl Face {
                 b"loca" => loca = Some(span),
                 b"glyf" => glyf = Some(span),
                 b"cmap" => cmap = Some(span),
+                b"name" => name = Some(span),
                 b"CFF " => cff = Some(span),
                 b"CFF2" => has_cff2 = true,
                 _ => {}
@@ -563,6 +569,7 @@ impl Face {
             outlines,
             hmtx,
             cmap: cmap_sub,
+            name,
             data,
         })
     }
@@ -665,6 +672,50 @@ impl Face {
     #[must_use]
     pub fn scale_for_px(&self, px_per_em: f32) -> f32 {
         px_per_em / f32::from(self.metrics.units_per_em)
+    }
+
+    /// A string from the `name` table, or `None` if the face does not carry
+    /// that name in an encoding this crate reads.
+    ///
+    /// See [`name_id`] for the ids worth asking for. Prefer the named
+    /// accessors — [`family`](Self::family), [`subfamily`](Self::subfamily),
+    /// [`postscript_name`](Self::postscript_name) — which apply the
+    /// typographic-versus-legacy preference that a bare id lookup cannot.
+    #[must_use]
+    pub fn name(&self, name_id: u16) -> Option<String> {
+        let span = self.name?;
+        let table = self.data.get(span.off..span.off.checked_add(span.len)?)?;
+        read_name(table, name_id)
+    }
+
+    /// The family this face belongs to — "Inter", "DejaVu Sans".
+    ///
+    /// Prefers the *typographic* family (name id 16) over the legacy one (id
+    /// 1), because the legacy pair exists to fit families into the four-style
+    /// regular/italic/bold/bold-italic model that old systems could address:
+    /// a face called "Inter SemiBold" in id 1 is "Inter" in id 16, and it is
+    /// id 16 that groups a large family the way a font menu should.
+    #[must_use]
+    pub fn family(&self) -> Option<String> {
+        self.name(name_id::TYPOGRAPHIC_FAMILY)
+            .or_else(|| self.name(name_id::FAMILY))
+    }
+
+    /// The style within the family — "Regular", "Bold Italic", "SemiBold".
+    #[must_use]
+    pub fn subfamily(&self) -> Option<String> {
+        self.name(name_id::TYPOGRAPHIC_SUBFAMILY)
+            .or_else(|| self.name(name_id::SUBFAMILY))
+    }
+
+    /// The PostScript name — the unique, ASCII, space-free identifier.
+    ///
+    /// This is the one name in the table specified to be unique across faces
+    /// and restricted to printable ASCII, so it is the right key for anything
+    /// that has to *identify* a face rather than show it to a person.
+    #[must_use]
+    pub fn postscript_name(&self) -> Option<String> {
+        self.name(name_id::POSTSCRIPT)
     }
 
     /// Map a character to a glyph id, or `None` when the face has no glyph
@@ -1251,6 +1302,155 @@ fn emit_contour(pts: &[GlyphPoint], out: &mut Outline) {
 }
 
 // ---------------------------------------------------------------------------
+// `name` table
+// ---------------------------------------------------------------------------
+
+/// The `name` table entries worth asking for by number.
+///
+/// The full list runs to 25 ids, most of which are legal text (the licence,
+/// the vendor URL) rather than anything a renderer or a font menu uses. These
+/// are the ones with a caller.
+pub mod name_id {
+    /// Family, in the legacy four-style grouping — see [`Face::family`].
+    ///
+    /// [`Face::family`]: super::Face::family
+    pub const FAMILY: u16 = 1;
+    /// Style within the legacy family: only ever Regular, Italic, Bold or
+    /// Bold Italic.
+    pub const SUBFAMILY: u16 = 2;
+    /// Human-readable full name, family and style together.
+    pub const FULL_NAME: u16 = 4;
+    /// Unique ASCII identifier for the face.
+    pub const POSTSCRIPT: u16 = 6;
+    /// Family in the unrestricted, typographic grouping.
+    pub const TYPOGRAPHIC_FAMILY: u16 = 16;
+    /// Style within the typographic family — "SemiBold", "Condensed Light".
+    pub const TYPOGRAPHIC_SUBFAMILY: u16 = 17;
+}
+
+/// One `name` record's string, decoded, choosing the best-encoded copy.
+///
+/// A face carries the same name several times over, once per platform and
+/// language it was built for, and the records are in no useful order. This
+/// scores every record for `name_id` and decodes the winner:
+///
+/// * A **Windows** (platform 3) or **Unicode** (platform 0) record is UTF-16BE
+///   and is preferred, because it can express every name any font uses.
+/// * **English** is preferred within that (Windows language 0x0409), so a face
+///   built for several markets reports the name a font menu here should show
+///   rather than whichever language happened to be recorded first.
+/// * A **Macintosh Roman** (platform 1, encoding 0) record is the fallback,
+///   decoded through a real MacRoman table rather than being assumed ASCII —
+///   the assumption silently corrupts every accented name.
+///
+/// Anything else — Mac non-Roman, the deprecated ISO platform, an unpaired
+/// UTF-16 surrogate — is skipped rather than guessed at, so a name is either
+/// right or absent.
+fn read_name(table: &[u8], name_id: u16) -> Option<String> {
+    let count = u16_at(table, 2)?;
+    let storage = usize::from(u16_at(table, 4)?);
+
+    let mut best: Option<(u8, usize, usize, u16, u16)> = None;
+    for i in 0..usize::from(count) {
+        let rec = 6usize.checked_add(i.checked_mul(12)?)?;
+        let platform = u16_at(table, rec)?;
+        let encoding = u16_at(table, rec.checked_add(2)?)?;
+        let language = u16_at(table, rec.checked_add(4)?)?;
+        if u16_at(table, rec.checked_add(6)?)? != name_id {
+            continue;
+        }
+        let len = usize::from(u16_at(table, rec.checked_add(8)?)?);
+        let off = storage.checked_add(usize::from(u16_at(table, rec.checked_add(10)?)?))?;
+        // A record whose string runs past the table is not a string.
+        if off.checked_add(len).is_none_or(|e| e > table.len()) {
+            continue;
+        }
+        let Some(score) = name_score(platform, encoding, language) else {
+            continue;
+        };
+        // Higher score wins; ties go to the first record, which is the
+        // font's own preferred order.
+        if best.is_none_or(|(s, ..)| score > s) {
+            best = Some((score, off, len, platform, encoding));
+        }
+    }
+
+    let (_, off, len, platform, _) = best?;
+    let bytes = table.get(off..off.checked_add(len)?)?;
+    if platform == 1 {
+        Some(decode_mac_roman(bytes))
+    } else {
+        decode_utf16_be(bytes)
+    }
+}
+
+/// How much this crate wants a given `name` record, or `None` to skip it.
+fn name_score(platform: u16, encoding: u16, language: u16) -> Option<u8> {
+    match platform {
+        // Windows. Encodings 1 (BMP) and 10 (full UCS-4) are both UTF-16BE on
+        // the wire; the rest are legacy codepages we do not decode.
+        3 if encoding == 1 || encoding == 10 => Some(if language == 0x0409 { 4 } else { 3 }),
+        // Unicode platform: always UTF-16BE, no language field to speak of.
+        0 => Some(2),
+        // Macintosh Roman.
+        1 if encoding == 0 => Some(if language == 0 { 1 } else { 0 }),
+        _ => None,
+    }
+}
+
+/// UTF-16BE to a `String`, or `None` if the bytes are not valid UTF-16.
+///
+/// Returning `None` rather than substituting replacement characters is
+/// deliberate: a mis-decoded family name silently fails to match the family it
+/// belongs to, which is harder to diagnose than a missing one.
+fn decode_utf16_be(bytes: &[u8]) -> Option<String> {
+    if !bytes.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut units = Vec::with_capacity(bytes.len() / 2);
+    for pair in bytes.chunks_exact(2) {
+        units.push(u16::from_be_bytes([*pair.first()?, *pair.get(1)?]));
+    }
+    char::decode_utf16(units)
+        .collect::<Result<String, _>>()
+        .ok()
+}
+
+/// The 128 characters MacRoman assigns above ASCII, in code order from 0x80.
+///
+/// Needed because the Macintosh records are the only copy of a name in plenty
+/// of older faces, and treating their high half as Latin-1 (or as ASCII) turns
+/// every accented family name into mojibake.
+const MAC_ROMAN_HIGH: [char; 128] = [
+    'Ä', 'Å', 'Ç', 'É', 'Ñ', 'Ö', 'Ü', 'á', 'à', 'â', 'ä', 'ã', 'å', 'ç', 'é', 'è', 'ê', 'ë', 'í',
+    'ì', 'î', 'ï', 'ñ', 'ó', 'ò', 'ô', 'ö', 'õ', 'ú', 'ù', 'û', 'ü', '†', '°', '¢', '£', '§', '•',
+    '¶', 'ß', '®', '©', '™', '´', '¨', '≠', 'Æ', 'Ø', '∞', '±', '≤', '≥', '¥', 'µ', '∂', '∑', '∏',
+    'π', '∫', 'ª', 'º', 'Ω', 'æ', 'ø', '¿', '¡', '¬', '√', 'ƒ', '≈', '∆', '«', '»', '…', '\u{a0}',
+    'À', 'Ã', 'Õ', 'Œ', 'œ', '–', '—', '“', '”', '‘', '’', '÷', '◊', 'ÿ', 'Ÿ', '⁄', '€', '‹', '›',
+    'ﬁ', 'ﬂ', '‡', '·', '‚', '„', '‰', 'Â', 'Ê', 'Á', 'Ë', 'È', 'Í', 'Î', 'Ï', 'Ì', 'Ó', 'Ô',
+    '\u{f8ff}', 'Ò', 'Ú', 'Û', 'Ù', 'ı', 'ˆ', '˜', '¯', '˘', '˙', '˚', '¸', '˝', '˛', 'ˇ',
+];
+
+/// MacRoman bytes to a `String`. Cannot fail — every byte has a character.
+fn decode_mac_roman(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|b| {
+            if b.is_ascii() {
+                char::from(*b)
+            } else {
+                // The index is `b - 0x80` for a non-ASCII byte, so it is in
+                // 0..128 and the table has 128 entries.
+                MAC_ROMAN_HIGH
+                    .get(usize::from(*b).saturating_sub(0x80))
+                    .copied()
+                    .unwrap_or('\u{fffd}')
+            }
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1610,5 +1810,168 @@ pub(crate) mod tests {
         let sequential = outer.apply(inner.apply(p));
         assert!((composed.x - sequential.x).abs() < 1e-4);
         assert!((composed.y - sequential.y).abs() < 1e-4);
+    }
+
+    // -- `name` table --------------------------------------------------
+
+    /// One `name` record, ready to be assembled by [`name_table`].
+    struct NameRec {
+        platform: u16,
+        encoding: u16,
+        language: u16,
+        name_id: u16,
+        /// The string exactly as it sits in the file — this deliberately takes
+        /// raw bytes, because half the point of these tests is what happens
+        /// when the bytes are *not* a well-formed string.
+        bytes: Vec<u8>,
+    }
+
+    /// Assemble a `name` table (format 0) from records.
+    fn name_table(recs: &[NameRec]) -> Vec<u8> {
+        let count = u16::try_from(recs.len()).unwrap();
+        let storage_off = 6 + 12 * usize::from(count);
+        let mut out = Vec::new();
+        out.extend_from_slice(&0u16.to_be_bytes()); // format
+        out.extend_from_slice(&count.to_be_bytes());
+        out.extend_from_slice(&u16::try_from(storage_off).unwrap().to_be_bytes());
+
+        let mut storage = Vec::new();
+        for r in recs {
+            out.extend_from_slice(&r.platform.to_be_bytes());
+            out.extend_from_slice(&r.encoding.to_be_bytes());
+            out.extend_from_slice(&r.language.to_be_bytes());
+            out.extend_from_slice(&r.name_id.to_be_bytes());
+            out.extend_from_slice(&u16::try_from(r.bytes.len()).unwrap().to_be_bytes());
+            out.extend_from_slice(&u16::try_from(storage.len()).unwrap().to_be_bytes());
+            storage.extend_from_slice(&r.bytes);
+        }
+        out.extend_from_slice(&storage);
+        out
+    }
+
+    fn utf16be(s: &str) -> Vec<u8> {
+        s.encode_utf16().flat_map(u16::to_be_bytes).collect()
+    }
+
+    fn rec(platform: u16, encoding: u16, language: u16, name_id: u16, bytes: Vec<u8>) -> NameRec {
+        NameRec {
+            platform,
+            encoding,
+            language,
+            name_id,
+            bytes,
+        }
+    }
+
+    #[test]
+    fn a_name_is_read_from_its_best_encoded_copy() {
+        // A shipped face carries the same name once per market it was built
+        // for, in no particular order. Taking the first match would make the
+        // family name depend on the font vendor's record ordering.
+        let table = name_table(&[
+            rec(1, 0, 0, name_id::FAMILY, b"MacFamily".to_vec()),
+            rec(3, 1, 0x0407, name_id::FAMILY, utf16be("DeutschFamilie")),
+            rec(3, 1, 0x0409, name_id::FAMILY, utf16be("Inter")),
+            rec(0, 3, 0, name_id::FAMILY, utf16be("UnicodeFamily")),
+        ]);
+        assert_eq!(read_name(&table, name_id::FAMILY).as_deref(), Some("Inter"));
+    }
+
+    #[test]
+    fn a_mac_only_name_decodes_through_mac_roman() {
+        // The bug this prevents: treating MacRoman's high half as ASCII or as
+        // Latin-1. 0x8E is 'é' in MacRoman but 'Ž' in Latin-1, and a face whose
+        // only name record is a Mac one is common in older files.
+        let table = name_table(&[rec(1, 0, 0, name_id::FAMILY, b"Caf\x8e".to_vec())]);
+        assert_eq!(read_name(&table, name_id::FAMILY).as_deref(), Some("Café"));
+    }
+
+    #[test]
+    fn a_name_in_an_encoding_we_cannot_read_is_absent_not_wrong() {
+        // Windows encoding 2 is Shift-JIS, not UTF-16. Decoding it as UTF-16
+        // would produce a plausible-looking wrong name that silently fails to
+        // match the family it belongs to.
+        let table = name_table(&[
+            rec(3, 2, 0x0411, name_id::FAMILY, b"\x82\xa0\x82\xa2".to_vec()),
+            rec(1, 32, 0, name_id::FAMILY, b"whatever".to_vec()),
+        ]);
+        assert_eq!(read_name(&table, name_id::FAMILY), None);
+    }
+
+    #[test]
+    fn a_record_pointing_outside_the_table_is_skipped() {
+        // Offsets in a `name` record are attacker-controlled in the sense that
+        // matters here: they come from a file the user chose.
+        let mut table = name_table(&[
+            rec(3, 1, 0x0409, name_id::FAMILY, utf16be("Good")),
+            rec(3, 1, 0x0409, name_id::POSTSCRIPT, utf16be("Good-Regular")),
+        ]);
+        // Rewrite the first record's length to run off the end.
+        let len_at = 6 + 8;
+        table[len_at..len_at + 2].copy_from_slice(&0xFFFFu16.to_be_bytes());
+        assert_eq!(read_name(&table, name_id::FAMILY), None);
+        assert_eq!(
+            read_name(&table, name_id::POSTSCRIPT).as_deref(),
+            Some("Good-Regular"),
+            "one bad record must not cost the whole table"
+        );
+    }
+
+    #[test]
+    fn an_odd_length_utf16_string_is_rejected() {
+        let table = name_table(&[rec(3, 1, 0x0409, name_id::FAMILY, b"\x00A\x00".to_vec())]);
+        assert_eq!(read_name(&table, name_id::FAMILY), None);
+    }
+
+    #[test]
+    fn an_unpaired_surrogate_is_rejected() {
+        // A lone high surrogate is not a character. Substituting U+FFFD would
+        // let a corrupt name compare unequal to itself across encodings.
+        let table = name_table(&[rec(
+            3,
+            1,
+            0x0409,
+            name_id::FAMILY,
+            alloc::vec![0xD8, 0x00, 0x00, 0x41],
+        )]);
+        assert_eq!(read_name(&table, name_id::FAMILY), None);
+    }
+
+    #[test]
+    fn a_face_with_no_name_table_reports_no_names() {
+        // `build_test_font` has no `name` table, which is exactly the case a
+        // font picker must survive: names are optional, drawing is not.
+        let face = Face::parse(build_test_font()).unwrap();
+        assert_eq!(face.family(), None);
+        assert_eq!(face.subfamily(), None);
+        assert_eq!(face.postscript_name(), None);
+        assert!(face.outline(face.glyph_index('A').unwrap()).is_ok());
+    }
+
+    #[test]
+    fn the_typographic_family_wins_over_the_legacy_one() {
+        // The whole reason both exist: id 1 must fit the four-style model, so
+        // a large family is split across several id-1 names. A font menu wants
+        // the id-16 grouping.
+        let table = name_table(&[
+            rec(3, 1, 0x0409, name_id::FAMILY, utf16be("Inter SemiBold")),
+            rec(3, 1, 0x0409, name_id::SUBFAMILY, utf16be("Regular")),
+            rec(3, 1, 0x0409, name_id::TYPOGRAPHIC_FAMILY, utf16be("Inter")),
+            rec(
+                3,
+                1,
+                0x0409,
+                name_id::TYPOGRAPHIC_SUBFAMILY,
+                utf16be("SemiBold"),
+            ),
+        ]);
+        assert_eq!(
+            read_name(&table, name_id::TYPOGRAPHIC_FAMILY).as_deref(),
+            Some("Inter")
+        );
+        assert_eq!(
+            read_name(&table, name_id::FAMILY).as_deref(),
+            Some("Inter SemiBold")
+        );
     }
 }

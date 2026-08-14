@@ -38,7 +38,7 @@ use std::path::{Path, PathBuf};
 
 use osfont::raster::rasterize;
 use osfont::scaled::{ScaledFont, Target};
-use osfont::sfnt::{Face, PathCmd, SfntError};
+use osfont::sfnt::{name_id, Face, PathCmd, SfntError};
 
 /// Directories a font might live in, on any host this repo is developed on.
 fn font_dirs() -> Vec<PathBuf> {
@@ -383,6 +383,215 @@ fn show_and_check_letters(face: &Face) {
             );
         }
     }
+}
+
+/// Read the `name` table of every installed font.
+///
+/// The synthetic unit tests prove the reader follows the spec on bytes we
+/// chose. They cannot prove it reads what vendors ship, and the `name` table
+/// is where vendors diverge most: records in four encodings for the same
+/// string, Mac-only faces, language IDs nobody documents, offsets that run
+/// past the table.
+///
+/// The load-bearing assertion is the **control-character** one. A name
+/// decoder that gets the encoding wrong does not fail — it succeeds and
+/// returns rubbish. Reading a UTF-16BE record as bytes yields `"A\0r\0i\0a\0l"`,
+/// which is a perfectly good `String` that no family lookup will ever match.
+/// A NUL or other control character in the middle of a font name is the
+/// signature of exactly that bug, and nothing else produces it.
+///
+/// The rest is checked against a **known oracle** (Arial is called "Arial")
+/// and by printing the families for a human to read, because mojibake in a
+/// name that happens to contain no control characters is visible to a person
+/// and to no assertion.
+#[test]
+#[ignore = "depends on the host's installed fonts"]
+fn installed_fonts_report_their_names() {
+    let mut files = Vec::new();
+    for dir in font_dirs() {
+        collect_fonts(&dir, &mut files, 0);
+    }
+    assert!(!files.is_empty(), "no fonts found on this host");
+    files.sort();
+
+    let mut opened = 0usize;
+    let mut with_family = 0usize;
+    let mut with_postscript = 0usize;
+    let mut non_ascii = Vec::new();
+    let mut nameless = Vec::new();
+    let mut bad_postscript = Vec::new();
+    let mut full_name_mismatch = 0usize;
+    let mut full_name_checked = 0usize;
+    let mut typographic_differs = Vec::new();
+    let mut families: Vec<String> = Vec::new();
+
+    for path in &files {
+        let Ok(data) = fs::read(path) else { continue };
+        let Ok(face) = Face::parse(data) else {
+            continue;
+        };
+        opened += 1;
+
+        // Every string the face can produce, checked as a group: whatever the
+        // id, no name may contain a control character.
+        for id in [
+            name_id::FAMILY,
+            name_id::SUBFAMILY,
+            name_id::FULL_NAME,
+            name_id::POSTSCRIPT,
+            name_id::TYPOGRAPHIC_FAMILY,
+            name_id::TYPOGRAPHIC_SUBFAMILY,
+        ] {
+            let Some(s) = face.name(id) else { continue };
+            assert!(
+                !s.is_empty(),
+                "{}: name {id} decoded to an empty string",
+                path.display()
+            );
+            assert!(
+                !s.chars().any(char::is_control),
+                "{}: name {id} = {s:?} contains a control character — the \
+                 record was decoded in the wrong encoding",
+                path.display()
+            );
+        }
+
+        match face.family() {
+            Some(f) => {
+                with_family += 1;
+                if !f.is_ascii() {
+                    non_ascii.push((path.clone(), f.clone()));
+                }
+                families.push(f);
+            }
+            None => nameless.push(path.clone()),
+        }
+
+        if let Some(ps) = face.postscript_name() {
+            with_postscript += 1;
+            // A PostScript name is a PostScript *identifier*: printable ASCII
+            // with the delimiters excluded. Vendors do ship violations, so
+            // this is counted and reported rather than asserted per font.
+            let ok = ps
+                .bytes()
+                .all(|b| (33..=126).contains(&b) && !b"()[]{}<>/%".contains(&b));
+            if !ok {
+                bad_postscript.push((path.clone(), ps));
+            }
+        }
+
+        // The classic relationship between the legacy names: id 4 is id 1
+        // plus the style. Counted, not asserted — it is a convention, and
+        // enough fonts break it that a hard check would be noise.
+        if let (Some(family), Some(full)) =
+            (face.name(name_id::FAMILY), face.name(name_id::FULL_NAME))
+        {
+            full_name_checked += 1;
+            if !full.starts_with(&family) {
+                full_name_mismatch += 1;
+            }
+        }
+
+        // Where a face carries both, the typographic family is the grouping a
+        // font menu wants and the legacy one is the four-style split of it —
+        // so the typographic name is normally a prefix of the legacy one.
+        // Collecting the cases where they differ at all is what shows the
+        // preference in `family()` is doing something.
+        if let (Some(typo), Some(legacy)) = (
+            face.name(name_id::TYPOGRAPHIC_FAMILY),
+            face.name(name_id::FAMILY),
+        ) {
+            if typo != legacy {
+                typographic_differs.push((typo, legacy));
+            }
+        }
+    }
+
+    families.sort();
+    families.dedup();
+
+    println!("fonts opened:            {opened}");
+    println!("with a family name:      {with_family}");
+    println!("with a PostScript name:  {with_postscript}");
+    println!("distinct families:       {}", families.len());
+    println!("full-name != family + style: {full_name_mismatch} of {full_name_checked}");
+    println!("typographic family differs:  {}", typographic_differs.len());
+
+    for (typo, legacy) in typographic_differs.iter().take(12) {
+        println!("  typographic {typo:?} vs legacy {legacy:?}");
+    }
+    println!("non-ASCII family names:  {}", non_ascii.len());
+    for (path, f) in non_ascii.iter().take(12) {
+        println!("  {f:?}  ({})", path.display());
+    }
+    for path in &nameless {
+        println!("  no family name: {}", path.display());
+    }
+    for (path, ps) in &bad_postscript {
+        println!("  odd PostScript name {ps:?} in {}", path.display());
+    }
+
+    // Read them. Mojibake that contains no control character is visible to a
+    // person and to nothing else.
+    println!("\nfamilies:");
+    for f in &families {
+        println!("  {f}");
+    }
+
+    assert!(opened > 0, "not one installed font opened");
+    // A `name` table is mandatory in both TrueType and OpenType. A handful of
+    // broken files is tolerable; a systematic failure is not.
+    assert!(
+        with_family * 50 >= opened * 49,
+        "only {with_family} of {opened} faces produced a family name"
+    );
+    assert!(
+        with_postscript * 10 >= opened * 9,
+        "only {with_postscript} of {opened} faces produced a PostScript name"
+    );
+
+    // A known oracle, so this test can fail on a *wrong* name and not just a
+    // missing one. These faces ship with their platform under these exact
+    // names; any that is absent on this host is skipped.
+    let oracles = [
+        ("arial.ttf", "Arial"),
+        ("times.ttf", "Times New Roman"),
+        ("cour.ttf", "Courier New"),
+        ("verdana.ttf", "Verdana"),
+        ("tahoma.ttf", "Tahoma"),
+        ("georgia.ttf", "Georgia"),
+        ("segoeui.ttf", "Segoe UI"),
+        ("DejaVuSans.ttf", "DejaVu Sans"),
+    ];
+    let mut oracles_checked = 0usize;
+    for (file, expected) in oracles {
+        let Some(path) = files.iter().find(|p| {
+            p.file_name()
+                .is_some_and(|n| n.eq_ignore_ascii_case(file))
+        }) else {
+            continue;
+        };
+        let Ok(data) = fs::read(path) else { continue };
+        let Ok(face) = Face::parse(data) else { continue };
+        assert_eq!(
+            face.family().as_deref(),
+            Some(expected),
+            "{} should be the {expected} family",
+            path.display()
+        );
+        oracles_checked += 1;
+        println!(
+            "oracle ok: {} -> {expected:?} / {:?} / {:?}",
+            file,
+            face.subfamily(),
+            face.postscript_name()
+        );
+    }
+    assert!(
+        oracles_checked > 0,
+        "none of the well-known faces are installed — the names were never \
+         checked against a known answer"
+    );
 }
 
 /// Drive the whole stack the way a toolkit will: file → face → `ScaledFont`

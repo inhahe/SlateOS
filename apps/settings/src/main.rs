@@ -10,6 +10,7 @@ mod associations;
 mod remote;
 mod snapshots;
 
+use appearance::{AccentColor, AnimationSpeed, AppearanceFile, ThemeMode, TransparencyLevel};
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
@@ -336,62 +337,15 @@ impl ScalePercent {
 // ============================================================================
 // Theme and personalization types
 // ============================================================================
-
-/// System-wide theme mode.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ThemeMode {
-    Light,
-    Dark,
-    System,
-}
-
-impl ThemeMode {
-    const ALL: &[Self] = &[Self::Light, Self::Dark, Self::System];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Light => "Light",
-            Self::Dark => "Dark",
-            Self::System => "System",
-        }
-    }
-}
-
-/// Animation speed preference.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AnimationSpeed {
-    Off,
-    Reduced,
-    Normal,
-}
-
-impl AnimationSpeed {
-    const ALL: &[Self] = &[Self::Off, Self::Reduced, Self::Normal];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Off => "Off",
-            Self::Reduced => "Reduced",
-            Self::Normal => "Normal",
-        }
-    }
-}
-
-/// Predefined accent colors for the color picker.
-const ACCENT_COLORS: &[Color] = &[
-    Color::from_hex(0x89B4FA), // Blue (default)
-    Color::from_hex(0xCBA6F7), // Mauve
-    Color::from_hex(0xF38BA8), // Pink
-    Color::from_hex(0xFAB387), // Peach
-    Color::from_hex(0xF9E2AF), // Yellow
-    Color::from_hex(0xA6E3A1), // Green
-    Color::from_hex(0x94E2D5), // Teal
-    Color::from_hex(0x74C7EC), // Sapphire
-    Color::from_hex(0xB4BEFE), // Lavender
-    Color::from_hex(0xF5C2E7), // Flamingo
-    Color::from_hex(0xEBA0AC), // Maroon
-    Color::from_hex(0x89DCEB), // Sky
-];
+//
+// There are none here any more. The theme mode, the accent palette, the
+// transparency level and the animation speed all live in the `appearance`
+// crate, because the desktop shell paints from the same values and one
+// preference cannot have two owners: the copy this file used to hold listed
+// twelve accents where the shell has fourteen, named them in a different
+// order, and stored the user's choice as a *position in that list* — a format
+// that would silently remap everyone's accent the first time a colour was
+// inserted. See known-issues.md TD-THREE-INDEPENDENT-APPEARANCE-MODELS.
 
 // ============================================================================
 // Network types
@@ -681,11 +635,12 @@ pub struct SettingsState {
     pub system_sounds_enabled: bool,
     pub app_volumes: Vec<AppVolume>,
 
-    // Personalization
-    pub theme_mode: ThemeMode,
-    pub accent_color_index: usize,
-    pub transparency_effects: bool,
-    pub animation_speed: AnimationSpeed,
+    // Personalization — the whole shared model, not a subset, and carrying
+    // the file it was read from. These pages edit only some of the settings
+    // today, but the file is saved whole: writing back a partial copy would
+    // erase the fields the desktop's own appearance panel set (fonts,
+    // cursors, corners) along with the user's comments.
+    pub appearance: AppearanceFile,
 
     // Network
     pub adapters: Vec<NetworkAdapter>,
@@ -770,6 +725,32 @@ impl Default for SettingsState {
 }
 
 impl SettingsState {
+    /// Read the user's saved appearance settings over the defaults.
+    ///
+    /// Separate from [`new`](Self::new) so the constructor stays free of I/O:
+    /// a `new()` that read `$HOME` would make every test's result depend on
+    /// the machine running it.
+    pub fn load_appearance(&mut self) {
+        self.appearance = AppearanceFile::load();
+    }
+
+    /// Write the appearance settings back to `appearance.yaml`.
+    ///
+    /// Called after each change rather than from a Save button, because the
+    /// Personalization pages apply immediately — clicking an accent recolours
+    /// the preview, and a user who saw the change happen has no reason to
+    /// expect it to need confirming.
+    ///
+    /// A failed write is reported to stderr and otherwise dropped: the choice
+    /// is in effect in this process either way, and there is nowhere in this
+    /// UI to surface an error yet. When there is a status line, this is the
+    /// call site that should feed it.
+    fn save_appearance(&mut self) {
+        if let Err(err) = self.appearance.save() {
+            eprintln!("settings: could not save appearance.yaml: {err}");
+        }
+    }
+
     /// Create a new settings state with sensible defaults.
     pub fn new() -> Self {
         Self {
@@ -844,11 +825,11 @@ impl SettingsState {
                 },
             ],
 
-            // Personalization defaults
-            theme_mode: ThemeMode::Dark,
-            accent_color_index: 0, // Blue
-            transparency_effects: true,
-            animation_speed: AnimationSpeed::Normal,
+            // Personalization defaults, not a read of the configuration
+            // file: a constructor that touched $HOME would make every test's
+            // result depend on the machine running it.
+            // `load_appearance()` does the I/O, from `main`.
+            appearance: AppearanceFile::new(),
 
             // Network defaults
             adapters: vec![
@@ -1218,6 +1199,50 @@ fn render_section_header(tree: &mut RenderTree, x: f32, y: f32, title: &str) -> 
         width: 1.0,
     });
     line_y + 12.0
+}
+
+// --- Pill rows -------------------------------------------------------------
+//
+// A row of small selectable buttons, used wherever a setting is one choice
+// out of a handful (theme transparency, animation speed). The renderer and
+// the click handler share this geometry rather than each carrying a copy of
+// the numbers: a second copy is how a button ends up drawn in one place and
+// clicked in another, and the drift is invisible until someone tries it.
+
+/// Width of one pill.
+const PILL_WIDTH: f32 = 72.0;
+/// Distance from one pill's left edge to the next.
+const PILL_PITCH: f32 = 80.0;
+const PILL_HEIGHT: f32 = 28.0;
+/// How far below the row's top edge the pills sit.
+const PILL_INSET_Y: f32 = 8.0;
+/// Distance from the content's left edge to the first pill — the same right
+/// column the toggles and dropdowns on other rows use.
+const PILL_ROW_X: f32 = 350.0;
+
+/// Draw a row of pills, the selected one filled with the accent color.
+fn render_pill_row(tree: &mut RenderTree, x: f32, y: f32, items: &[(&str, bool)]) {
+    for (idx, (label, active)) in items.iter().enumerate() {
+        let px = x + (idx as f32) * PILL_PITCH;
+        let (bg, fg) = if *active {
+            (COL_ACCENT, COL_CRUST)
+        } else {
+            (COL_SURFACE1, COL_SUBTEXT0)
+        };
+        fill_rounded(tree, px, y + PILL_INSET_Y, PILL_WIDTH, PILL_HEIGHT, bg, 6.0);
+        tree.text(px + 10.0, y + PILL_INSET_Y + 7.0, label, fg, 12.0);
+    }
+}
+
+/// Which pill of a row drawn at (`x`, `y`) the click landed on, if any.
+fn pill_row_hit(mx: f32, my: f32, x: f32, y: f32, count: usize) -> Option<usize> {
+    if my < y + PILL_INSET_Y || my >= y + PILL_INSET_Y + PILL_HEIGHT {
+        return None;
+    }
+    (0..count).find(|idx| {
+        let px = x + (*idx as f32) * PILL_PITCH;
+        mx >= px && mx < px + PILL_WIDTH
+    })
 }
 
 // ============================================================================
@@ -1631,7 +1656,7 @@ impl SettingsState {
         let card_spacing = 16.0;
         for (idx, mode) in ThemeMode::ALL.iter().enumerate() {
             let cx = x + (idx as f32) * (card_w + card_spacing);
-            let is_selected = *mode == self.theme_mode;
+            let is_selected = *mode == self.appearance.settings.theme_mode;
 
             // Card background
             let card_bg = if is_selected {
@@ -1687,23 +1712,26 @@ impl SettingsState {
         }
         y += card_h + SECTION_SPACING;
 
-        // Transparency effects
+        // Transparency. A row of levels rather than the on/off switch this
+        // page used to show: the setting has four values, and a switch that
+        // meant "Off or whatever it was" would forget a user's choice of
+        // Full every time they turned it off and on again.
         y = render_section_header(tree, x, y, "Effects");
-        render_setting_row(tree, x, y, "Transparency Effects", 0.0);
-        render_toggle(tree, x + 350.0, y + 12.0, self.transparency_effects);
+        render_setting_row(tree, x, y, "Transparency", 0.0);
+        let levels: Vec<(&str, bool)> = TransparencyLevel::ALL
+            .iter()
+            .map(|l| (l.label(), *l == self.appearance.settings.transparency))
+            .collect();
+        render_pill_row(tree, x + PILL_ROW_X, y, &levels);
         y += ITEM_HEIGHT;
 
         // Animation speed
         render_setting_row(tree, x, y, "Animation Speed", 0.0);
-        let speed_x = x + 350.0;
-        for (idx, speed) in AnimationSpeed::ALL.iter().enumerate() {
-            let btn_x = speed_x + (idx as f32) * 80.0;
-            let is_active = *speed == self.animation_speed;
-            let btn_bg = if is_active { COL_ACCENT } else { COL_SURFACE1 };
-            let btn_fg = if is_active { COL_CRUST } else { COL_SUBTEXT0 };
-            fill_rounded(tree, btn_x, y + 8.0, 72.0, 28.0, btn_bg, 6.0);
-            tree.text(btn_x + 10.0, y + 15.0, speed.label(), btn_fg, 12.0);
-        }
+        let speeds: Vec<(&str, bool)> = AnimationSpeed::ALL
+            .iter()
+            .map(|s| (s.label(), *s == self.appearance.settings.animation_speed))
+            .collect();
+        render_pill_row(tree, x + PILL_ROW_X, y, &speeds);
     }
 
     // --- Colors page (accent color picker) ---
@@ -1726,24 +1754,32 @@ impl SettingsState {
         let swatch_spacing = 10.0;
         let cols = 6;
 
-        for (idx, color) in ACCENT_COLORS.iter().enumerate() {
+        for (idx, accent) in AccentColor::presets().iter().enumerate() {
             let col = idx % cols;
             let row = idx / cols;
             let sx = x + (col as f32) * (swatch_size + swatch_spacing);
             let sy = y + (row as f32) * (swatch_size + swatch_spacing);
 
+            // The swatch shows what this accent will actually look like in
+            // the mode the user is in — the light palette is a darkened set,
+            // so showing the dark one would promise a colour they won't get.
+            let color = if self.appearance.settings.theme_mode.is_light() {
+                accent.color_light()
+            } else {
+                accent.color()
+            };
             fill_rounded(
                 tree,
                 sx,
                 sy,
                 swatch_size,
                 swatch_size,
-                *color,
+                color,
                 swatch_size / 2.0,
             );
 
             // Selection ring
-            if idx == self.accent_color_index {
+            if *accent == self.appearance.settings.accent_color {
                 tree.push(RenderCommand::StrokeRect {
                     x: sx - 3.0,
                     y: sy - 3.0,
@@ -1756,15 +1792,12 @@ impl SettingsState {
             }
         }
 
-        let grid_rows = ACCENT_COLORS.len().div_ceil(cols);
+        let grid_rows = AccentColor::presets().len().div_ceil(cols);
         y += (grid_rows as f32) * (swatch_size + swatch_spacing) + SECTION_SPACING;
 
         // Preview of current accent color
         y = render_section_header(tree, x, y, "Preview");
-        let preview_color = ACCENT_COLORS
-            .get(self.accent_color_index)
-            .copied()
-            .unwrap_or(COL_ACCENT);
+        let preview_color = self.appearance.settings.effective_accent();
 
         // Sample button
         fill_rounded(tree, x, y, 120.0, 36.0, preview_color, 6.0);
@@ -2913,7 +2946,26 @@ impl SettingsState {
     // ========================================================================
 
     /// Handle an input event, returning whether it was consumed.
+    ///
+    /// Any appearance setting the event changed is written back before this
+    /// returns. The check is a whole-struct comparison rather than a flag each
+    /// control sets, for the same reason the desktop's panel compares rather
+    /// than lists: a flag is one more thing a new control can forget, and the
+    /// symptom — a setting that works until you close the window — is one of
+    /// the harder ones to notice.
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        let before = self.appearance.settings.clone();
+        let result = self.dispatch_event(event);
+        if self.appearance.settings != before {
+            self.save_appearance();
+        }
+        result
+    }
+
+    /// Route an event to its handler. Split from [`handle_event`](Self::handle_event)
+    /// so the routing can be exercised without writing to the user's home
+    /// directory.
+    fn dispatch_event(&mut self, event: &Event) -> EventResult {
         match event {
             Event::Key(key_evt) => self.handle_key(key_evt),
             Event::Mouse(mouse_evt) => self.handle_mouse(mouse_evt),
@@ -3196,35 +3248,28 @@ impl SettingsState {
             for (idx, mode) in ThemeMode::ALL.iter().enumerate() {
                 let cx = content_x + (idx as f32) * (card_w + card_spacing);
                 if mx >= cx && mx < cx + card_w {
-                    self.theme_mode = *mode;
+                    self.appearance.settings.theme_mode = *mode;
                     return;
                 }
             }
         }
 
-        // Transparency toggle
+        // Transparency levels
         let effects_y = cards_y + card_h + SECTION_SPACING + 24.0 + 12.0;
-        let toggle_x = content_x + 350.0;
-        if my >= effects_y
-            && my < effects_y + ITEM_HEIGHT
-            && mx >= toggle_x
-            && mx < toggle_x + TOGGLE_WIDTH
+        let pill_x = content_x + PILL_ROW_X;
+        if let Some(idx) = pill_row_hit(mx, my, pill_x, effects_y, TransparencyLevel::ALL.len())
+            && let Some(level) = TransparencyLevel::ALL.get(idx)
         {
-            self.transparency_effects = !self.transparency_effects;
+            self.appearance.settings.transparency = *level;
             return;
         }
 
-        // Animation speed buttons
+        // Animation speed
         let anim_y = effects_y + ITEM_HEIGHT;
-        let speed_x = content_x + 350.0;
-        if my >= anim_y + 8.0 && my < anim_y + 36.0 {
-            for (idx, speed) in AnimationSpeed::ALL.iter().enumerate() {
-                let btn_x = speed_x + (idx as f32) * 80.0;
-                if mx >= btn_x && mx < btn_x + 72.0 {
-                    self.animation_speed = *speed;
-                    return;
-                }
-            }
+        if let Some(idx) = pill_row_hit(mx, my, pill_x, anim_y, AnimationSpeed::ALL.len())
+            && let Some(speed) = AnimationSpeed::ALL.get(idx)
+        {
+            self.appearance.settings.animation_speed = *speed;
         }
     }
 
@@ -3237,14 +3282,14 @@ impl SettingsState {
         let cols = 6;
 
         // Color swatches
-        for (idx, _color) in ACCENT_COLORS.iter().enumerate() {
+        for (idx, accent) in AccentColor::presets().iter().enumerate() {
             let col = idx % cols;
             let row = idx / cols;
             let sx = content_x + (col as f32) * (swatch_size + swatch_spacing);
             let sy = grid_y + (row as f32) * (swatch_size + swatch_spacing);
 
             if mx >= sx && mx < sx + swatch_size && my >= sy && my < sy + swatch_size {
-                self.accent_color_index = idx;
+                self.appearance.settings.accent_color = *accent;
                 return;
             }
         }
@@ -3573,6 +3618,9 @@ impl SettingsState {
 
 fn main() {
     let mut state = SettingsState::new();
+    // The Personalization pages open on what the user actually has, which is
+    // the same file the desktop shell paints from.
+    state.load_appearance();
 
     // In a real Slate OS environment, this would enter the compositor event loop.
     // For now, render one frame to verify the UI builds correctly.
@@ -3602,6 +3650,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use appearance::AppearanceSettings;
 
     // ---- Measured widths ----
 
@@ -3653,7 +3702,7 @@ mod tests {
         assert_eq!(state.current_page, SettingsPage::Display);
         assert!(state.search_query.is_empty());
         assert!(!state.night_light_enabled);
-        assert_eq!(state.theme_mode, ThemeMode::Dark);
+        assert_eq!(state.appearance.settings.theme_mode, ThemeMode::Dark);
     }
 
     #[test]
@@ -3711,8 +3760,8 @@ mod tests {
     #[test]
     fn test_theme_mode_selection() {
         let mut state = SettingsState::new();
-        assert_eq!(state.theme_mode, ThemeMode::Dark);
-        state.theme_mode = ThemeMode::Light;
+        assert_eq!(state.appearance.settings.theme_mode, ThemeMode::Dark);
+        state.appearance.settings.theme_mode = ThemeMode::Light;
         let tree = state.render();
         assert!(!tree.is_empty());
     }
@@ -3832,8 +3881,8 @@ mod tests {
     #[test]
     fn test_accent_color_selection() {
         let mut state = SettingsState::new();
-        assert_eq!(state.accent_color_index, 0);
-        state.accent_color_index = 5;
+        assert_eq!(state.appearance.settings.accent_color, AccentColor::Blue);
+        state.appearance.settings.accent_color = AccentColor::Green;
         state.current_page = SettingsPage::Colors;
         let tree = state.render();
         assert!(!tree.is_empty());
@@ -3889,5 +3938,158 @@ mod tests {
         let tree = state.render();
         // Should have more commands when dropdown is open (shadow + background + items)
         assert!(tree.len() > 30);
+    }
+
+    // ---- Personalization: the shared appearance model ----
+    //
+    // These drive the click handlers directly rather than through
+    // `handle_event`, which would write to the user's real `appearance.yaml`.
+    // The write itself is covered by `appearance`'s own config tests, which
+    // point $HOME at a temporary directory; what needs testing here is that
+    // the panel's geometry and the model agree.
+
+    /// Where the Themes page draws its pill rows, mirroring the layout in
+    /// `render_themes_page` / `handle_themes_click`.
+    fn themes_effects_y() -> f32 {
+        let cards_y = HEADER_HEIGHT + 8.0 + 24.0 + 12.0;
+        cards_y + 100.0 + SECTION_SPACING + 24.0 + 12.0
+    }
+
+    #[test]
+    fn test_theme_mode_card_click_sets_the_mode() {
+        let mut state = SettingsState::new();
+        let cards_y = HEADER_HEIGHT + 8.0 + 24.0 + 12.0;
+        // Second card: Light, since ThemeMode::ALL is Dark, Light, System.
+        state.handle_themes_click(100.0 + 156.0, cards_y + 10.0, 100.0);
+        assert_eq!(state.appearance.settings.theme_mode, ThemeMode::Light);
+    }
+
+    #[test]
+    fn test_every_transparency_level_can_be_picked() {
+        // The row this replaced was an on/off switch, which could not express
+        // Subtle or Moderate at all.
+        let y = themes_effects_y();
+        for (idx, level) in TransparencyLevel::ALL.iter().enumerate() {
+            let mut state = SettingsState::new();
+            let px = 100.0 + PILL_ROW_X + (idx as f32) * PILL_PITCH + 4.0;
+            state.handle_themes_click(px, y + PILL_INSET_Y + 4.0, 100.0);
+            assert_eq!(
+                state.appearance.settings.transparency, *level,
+                "pill {idx} should select {}",
+                level.label()
+            );
+        }
+    }
+
+    #[test]
+    fn test_every_animation_speed_can_be_picked() {
+        let y = themes_effects_y() + ITEM_HEIGHT;
+        for (idx, speed) in AnimationSpeed::ALL.iter().enumerate() {
+            let mut state = SettingsState::new();
+            let px = 100.0 + PILL_ROW_X + (idx as f32) * PILL_PITCH + 4.0;
+            state.handle_themes_click(px, y + PILL_INSET_Y + 4.0, 100.0);
+            assert_eq!(state.appearance.settings.animation_speed, *speed);
+        }
+    }
+
+    #[test]
+    fn test_a_click_in_the_gap_between_pills_changes_nothing() {
+        let mut state = SettingsState::new();
+        let y = themes_effects_y();
+        // Between the first and second pill.
+        let gap = 100.0 + PILL_ROW_X + PILL_WIDTH + 2.0;
+        state.handle_themes_click(gap, y + PILL_INSET_Y + 4.0, 100.0);
+        assert_eq!(
+            state.appearance.settings.transparency,
+            AppearanceSettings::default().transparency
+        );
+    }
+
+    #[test]
+    fn test_every_accent_swatch_can_be_picked() {
+        // The old page stored the choice as an index into a local twelve-colour
+        // array; the model has fourteen named accents and this walks all of
+        // them, so a swatch that cannot be reached is a failing test rather
+        // than a colour nobody can select.
+        let grid_y = HEADER_HEIGHT + 8.0 + 24.0 + 12.0 + 28.0;
+        for (idx, accent) in AccentColor::presets().iter().enumerate() {
+            let mut state = SettingsState::new();
+            let sx = 100.0 + ((idx % 6) as f32) * 46.0 + 4.0;
+            let sy = grid_y + ((idx / 6) as f32) * 46.0 + 4.0;
+            state.handle_colors_click(sx, sy, 100.0);
+            assert_eq!(
+                state.appearance.settings.accent_color, *accent,
+                "swatch {idx} should select {}",
+                accent.label()
+            );
+        }
+    }
+
+    #[test]
+    fn test_the_swatches_show_the_colors_of_the_mode_in_use() {
+        // A light-mode swatch drawn in the dark accent would promise a colour
+        // the user will not get: the light palette is a darkened set chosen to
+        // stay readable on a light background.
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Colors;
+        state.appearance.settings.theme_mode = ThemeMode::Light;
+        let light = state.render();
+        state.appearance.settings.theme_mode = ThemeMode::Dark;
+        let dark = state.render();
+        assert_ne!(light.len(), 0);
+        assert_ne!(
+            format!("{light:?}"),
+            format!("{dark:?}"),
+            "the accent grid should not paint identically in both modes"
+        );
+    }
+
+    #[test]
+    fn test_a_click_that_changes_an_accent_reaches_the_file() {
+        // The end-to-end claim of the whole rewiring: what this app writes is
+        // what the desktop shell reads. Runs against a scratch configuration
+        // directory, so it exercises the real save without touching anyone's
+        // `~/.config/slateos`.
+        appearance::config::testing::with_scratch_config("settings-accent", |root| {
+            let mut state = SettingsState::new();
+            state.current_category = SettingsCategory::Personalization;
+            state.current_page = SettingsPage::Colors;
+
+            // Third swatch of the first row — Teal, per AccentColor::presets.
+            let grid_y = HEADER_HEIGHT + 8.0 + 24.0 + 12.0 + 28.0;
+            let content_x = SIDEBAR_WIDTH + CONTENT_PADDING;
+            let evt = Event::Mouse(MouseEvent {
+                x: content_x + 2.0 * 46.0 + 4.0,
+                y: grid_y + 4.0,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            });
+            state.handle_event(&evt);
+            assert_eq!(state.appearance.settings.accent_color, AccentColor::Teal);
+
+            let path = appearance::config::testing::scratch_path(root, appearance::CONFIG_NAME);
+            assert!(path.is_file(), "the click should have written {path:?}");
+
+            // Read it back the way the shell does.
+            let saved = AppearanceSettings::read_from(&appearance::config::load(
+                appearance::CONFIG_NAME,
+            ));
+            assert_eq!(saved.accent_color, AccentColor::Teal);
+        });
+    }
+
+    #[test]
+    fn test_an_appearance_change_is_what_triggers_a_save() {
+        // The save is driven by comparing the settings before and after the
+        // event, so a control added later cannot forget to request one. Guard
+        // the converse here: an event that touches nothing must not decide the
+        // settings changed.
+        let mut state = SettingsState::new();
+        let before = state.appearance.settings.clone();
+        let evt = Event::Resize {
+            width: 1200,
+            height: 800,
+        };
+        state.dispatch_event(&evt);
+        assert_eq!(state.appearance.settings, before);
     }
 }

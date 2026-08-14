@@ -144,6 +144,15 @@ pub enum ThemeMode {
 }
 
 impl ThemeMode {
+    /// Every mode, in the order a chooser should offer them.
+    ///
+    /// The order is part of the shared model deliberately: the shell's
+    /// appearance panel and the Settings application both draw this as a row
+    /// of cards, and two front ends that listed the variants themselves would
+    /// be free to drift apart — the same preference in two places, offered in
+    /// two orders.
+    pub const ALL: &'static [Self] = &[Self::Dark, Self::Light, Self::System];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Dark => "Dark",
@@ -297,6 +306,9 @@ pub enum TransparencyLevel {
 }
 
 impl TransparencyLevel {
+    /// Every level, weakest effect first. See [`ThemeMode::ALL`].
+    pub const ALL: &'static [Self] = &[Self::Off, Self::Subtle, Self::Moderate, Self::Full];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Off => "Off",
@@ -335,6 +347,9 @@ pub enum AnimationSpeed {
 }
 
 impl AnimationSpeed {
+    /// Every speed, slowest-to-fastest with `Off` first. See [`ThemeMode::ALL`].
+    pub const ALL: &'static [Self] = &[Self::Off, Self::Slow, Self::Normal, Self::Fast];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Off => "Off",
@@ -942,6 +957,102 @@ impl AppearanceSettings {
             &["display", "scaling_percent"],
             i64::from(self.scaling_percent),
         );
+    }
+}
+
+// ============================================================================
+// The settings file
+// ============================================================================
+
+/// The settings group these preferences live in — `appearance.yaml` in the
+/// user's configuration directory.
+///
+/// The *name* is as much a part of the shared contract as the schema is: two
+/// processes that agree on every key but disagree about which file holds them
+/// have simply written two files.
+pub const CONFIG_NAME: &str = "appearance";
+
+/// The user's appearance settings together with the document they came from.
+///
+/// The pair is a type rather than two fields because keeping them together is
+/// an invariant, not a convenience: a save must splice the changed values back
+/// into the document that was read, since that document carries everything
+/// this model does not — the user's comments, their blank lines, their key
+/// order, and any setting belonging to a different version of the desktop.
+/// Rebuilding the file from [`AppearanceSettings`] alone silently deletes all
+/// of it, which is exactly the mistake that having one owner is meant to stop.
+///
+/// Both front ends hold one of these: the shell's appearance panel and the
+/// Settings application's Personalization pages.
+pub struct AppearanceFile {
+    /// The settings being edited. Public because both front ends bind
+    /// controls straight to the fields.
+    pub settings: AppearanceSettings,
+    /// The file as read, kept whole. See the type's documentation.
+    doc: Document,
+}
+
+impl Default for AppearanceFile {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AppearanceFile {
+    /// The defaults, backed by an empty document.
+    ///
+    /// Deliberately does *not* read the filesystem: a constructor that
+    /// consulted `$HOME` would make every caller's tests depend on the machine
+    /// running them. [`load`](Self::load) does the I/O.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            settings: AppearanceSettings::default(),
+            doc: Document::new(),
+        }
+    }
+
+    /// Read the user's saved settings from `appearance.yaml`.
+    ///
+    /// A missing or unreadable file yields the defaults — the ordinary state
+    /// on a fresh install, not an error to report to someone who has simply
+    /// never changed a setting.
+    #[must_use]
+    pub fn load() -> Self {
+        Self::from_document(config::load(CONFIG_NAME))
+    }
+
+    /// Open on an already-read document. Split out from [`load`](Self::load)
+    /// so the format can be exercised without a filesystem.
+    #[must_use]
+    pub fn from_document(doc: Document) -> Self {
+        Self {
+            settings: AppearanceSettings::read_from(&doc),
+            doc,
+        }
+    }
+
+    /// Fold the current settings into the document without touching the
+    /// filesystem, and return it.
+    pub fn apply(&mut self) -> &Document {
+        self.settings.write_into(&mut self.doc);
+        &self.doc
+    }
+
+    /// The document as it stands, without folding in pending changes.
+    #[must_use]
+    pub fn document(&self) -> &Document {
+        &self.doc
+    }
+
+    /// Write the current settings to `appearance.yaml`, atomically.
+    ///
+    /// # Errors
+    ///
+    /// If there is no configuration directory, or the file cannot be written.
+    pub fn save(&mut self) -> std::io::Result<()> {
+        self.apply();
+        config::store(CONFIG_NAME, &self.doc)
     }
 }
 

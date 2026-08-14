@@ -58484,6 +58484,27 @@ file" and light-accent sections of `gui/desktop/src/appearance_settings.rs`;
 
 ## TD-THREE-INDEPENDENT-APPEARANCE-MODELS
 
+**Fixed 2026-08-14** (steps 1 and 2 of the proper fix below; step 3 was
+"leave the toolkit alone", which stands). `gui/appearance` now owns the model,
+its configuration-file spellings, the file's name and location, and the atomic
+write. Both front ends hold an `AppearanceFile` — the settings together with
+the document they were read from, which is a type rather than two fields
+because a save has to splice into the file the user actually has, comments and
+unknown keys included. `apps/settings` reads that file at startup and writes it
+back whenever an event changed anything; the accent it stores is now a named
+`AccentColor` rather than a position in a local array, and its Personalization
+pages gained the two accents and the two transparency levels its own copy of
+the model could not express. Covered end to end by
+`test_a_click_that_changes_an_accent_reaches_the_file`, which runs against a
+scratch configuration directory via the new `appearance::config::testing`.
+
+Still open, as the end of this entry already noted: a running app has no way to
+learn the file changed, so a live desktop and a live Settings application agree
+only across a restart. That half belongs with the change-notification channel
+design-decisions.md §400 wants.
+
+The original entry follows.
+
 **What.** "What the desktop looks like" is modelled three separate times, in
 three crates, with three incompatible representations and no shared owner:
 

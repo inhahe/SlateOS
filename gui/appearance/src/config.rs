@@ -118,6 +118,95 @@ pub fn store(name: &str, doc: &Document) -> io::Result<()> {
     }
 }
 
+// Test support, so panicking on a broken precondition is the right behaviour:
+// a test whose sandbox cannot be created must fail loudly rather than quietly
+// fall through to the developer's real configuration directory. The module is
+// not `#[cfg(test)]` because dependent crates' tests need it.
+#[allow(clippy::expect_used)]
+pub mod testing {
+    //! Test support: run against a private, throwaway configuration directory.
+    //!
+    //! Anything that exercises [`load`](super::load) or
+    //! [`store`](super::store) for real needs somewhere to put the file that
+    //! is not the developer's own `~/.config/slateos`. That takes a scratch
+    //! directory, an environment variable, and — because the environment is
+    //! process-global while tests run in parallel — a lock. It lives here
+    //! rather than in each crate's test module because every settings panel
+    //! that gains persistence will want it, and three copies of a
+    //! `set_var`/restore dance is three chances to leave `$HOME` pointing at a
+    //! deleted directory for the rest of the run.
+
+    use std::env;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    /// The environment is process-global, so callers take turns rather than
+    /// racing each other over `XDG_CONFIG_HOME`.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Run `body` with the configuration directory pointed at a fresh empty
+    /// directory, which is removed afterwards. The directory is passed in so
+    /// the body can inspect what was written.
+    ///
+    /// # Panics
+    ///
+    /// If the scratch directory cannot be created.
+    pub fn with_scratch_config<T>(tag: &str, body: impl FnOnce(&Path) -> T) -> T {
+        // A poisoned lock means some other test panicked while holding it;
+        // the environment was still restored by the guard below, so there is
+        // nothing to recover and no reason to fail this test too.
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let mut root = env::temp_dir();
+        let id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        root.push(format!("slateos-scratch-{tag}-{id}"));
+        fs::create_dir_all(&root).expect("create scratch config dir");
+
+        let old_xdg = env::var_os("XDG_CONFIG_HOME");
+        let old_home = env::var_os("HOME");
+        // SAFETY: the lock above makes this the only thread touching the
+        // environment for the duration, which is what `set_var` requires.
+        unsafe {
+            env::set_var("XDG_CONFIG_HOME", &root);
+            // Removed as well as overridden: `config_dir` prefers XDG, but a
+            // test that clears XDG itself should not fall through to the
+            // developer's real home.
+            env::remove_var("HOME");
+        }
+
+        let out = body(&root);
+
+        // SAFETY: as above.
+        unsafe {
+            match old_xdg {
+                Some(v) => env::set_var("XDG_CONFIG_HOME", v),
+                None => env::remove_var("XDG_CONFIG_HOME"),
+            }
+            match old_home {
+                Some(v) => env::set_var("HOME", v),
+                None => env::remove_var("HOME"),
+            }
+        }
+        // Best effort: a scratch directory left behind in the system temp
+        // directory is litter, not a failure worth masking the test result.
+        let _ = fs::remove_dir_all(&root);
+        drop(guard);
+        out
+    }
+
+    /// The file a settings group would be written to inside the scratch
+    /// directory `root`.
+    #[must_use]
+    pub fn scratch_path(root: &Path, name: &str) -> PathBuf {
+        let mut path = root.join("slateos").join(name);
+        path.set_extension("yaml");
+        path
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

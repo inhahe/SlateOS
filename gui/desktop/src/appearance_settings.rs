@@ -7,9 +7,7 @@
 //! tabs, rows, hit-testing, and the pending-vs-saved pair that decides whether
 //! Save is live.
 
-use appearance::{
-    AccentColor, AppearanceSettings, ThemeMode, WindowCorners,
-};
+use appearance::{AccentColor, AppearanceFile, AppearanceSettings, ThemeMode, WindowCorners};
 use appearance::{
     BASE, BLUE, CRUST, GREEN, LAVENDER, SUBTEXT0, SURFACE0, SURFACE1, SURFACE2, TEXT, YELLOW,
 };
@@ -49,34 +47,28 @@ impl AppearanceTab {
 
 /// The settings group this panel persists — `appearance.yaml` in the user's
 /// configuration directory.
-pub const CONFIG_NAME: &str = "appearance";
+///
+/// Re-exported from the shared model, where the file's name belongs alongside
+/// its schema.
+pub use appearance::CONFIG_NAME;
 
 /// Appearance settings UI state.
 pub struct AppearanceSettingsUI {
     /// Active tab.
     pub active_tab: AppearanceTab,
-    /// The settings being edited.
-    pub settings: AppearanceSettings,
+    /// The settings being edited, together with the file they came from.
+    file: AppearanceFile,
     /// Saved settings for revert/dirty detection.
     saved: AppearanceSettings,
-    /// The user's configuration file, kept whole.
-    ///
-    /// Held rather than rebuilt on each save because it carries everything
-    /// this panel does not model — the user's comments, their blank lines,
-    /// their ordering, and any key belonging to another version of the
-    /// desktop. Rebuilding the file from `settings` would silently delete all
-    /// of it.
-    doc: Document,
 }
 
 impl AppearanceSettingsUI {
     pub fn new() -> Self {
-        let settings = AppearanceSettings::default();
+        let file = AppearanceFile::new();
         Self {
             active_tab: AppearanceTab::Theme,
-            saved: settings.clone(),
-            settings,
-            doc: Document::new(),
+            saved: file.settings.clone(),
+            file,
         }
     }
 
@@ -88,7 +80,12 @@ impl AppearanceSettingsUI {
     /// never changed a setting.
     #[must_use]
     pub fn load() -> Self {
-        Self::from_document(crate::config::load(CONFIG_NAME))
+        let file = AppearanceFile::load();
+        Self {
+            active_tab: AppearanceTab::Theme,
+            saved: file.settings.clone(),
+            file,
+        }
     }
 
     /// Open the panel on an already-read configuration document. Split out
@@ -96,13 +93,22 @@ impl AppearanceSettingsUI {
     /// filesystem.
     #[must_use]
     pub fn from_document(doc: Document) -> Self {
-        let settings = AppearanceSettings::read_from(&doc);
+        let file = AppearanceFile::from_document(doc);
         Self {
             active_tab: AppearanceTab::Theme,
-            saved: settings.clone(),
-            settings,
-            doc,
+            saved: file.settings.clone(),
+            file,
         }
+    }
+
+    /// The settings being edited.
+    pub fn settings(&self) -> &AppearanceSettings {
+        &self.file.settings
+    }
+
+    /// The settings being edited, for a control to change.
+    pub fn settings_mut(&mut self) -> &mut AppearanceSettings {
+        &mut self.file.settings
     }
 
     /// Whether settings have been changed from the saved state.
@@ -113,7 +119,7 @@ impl AppearanceSettingsUI {
     /// greyed out and the change was lost on close. A derived `PartialEq`
     /// cannot fall behind a new field the way a hand-written check does.
     pub fn is_dirty(&self) -> bool {
-        self.settings != self.saved
+        self.file.settings != self.saved
     }
 
     /// Fold the current settings into the configuration document and mark
@@ -122,9 +128,8 @@ impl AppearanceSettingsUI {
     /// [`save`](Self::save) is the usual entry point; this exists so a caller
     /// that manages its own storage — or a test — can get the document.
     pub fn apply(&mut self) -> &Document {
-        self.settings.write_into(&mut self.doc);
-        self.saved = self.settings.clone();
-        &self.doc
+        self.saved = self.file.settings.clone();
+        self.file.apply()
     }
 
     /// Save the current settings to `appearance.yaml`.
@@ -138,13 +143,13 @@ impl AppearanceSettingsUI {
     ///
     /// If there is no configuration directory, or the file cannot be written.
     pub fn save(&mut self) -> std::io::Result<()> {
-        self.apply();
-        crate::config::store(CONFIG_NAME, &self.doc)
+        self.saved = self.file.settings.clone();
+        self.file.save()
     }
 
     /// Revert to saved settings.
     pub fn revert(&mut self) {
-        self.settings = self.saved.clone();
+        self.file.settings = self.saved.clone();
     }
 
     /// Switch tabs.
@@ -262,9 +267,8 @@ impl AppearanceSettingsUI {
         });
         cy += 26.0;
 
-        let modes = [ThemeMode::Dark, ThemeMode::Light, ThemeMode::System];
-        for mode in &modes {
-            let selected = *mode == self.settings.theme_mode;
+        for mode in ThemeMode::ALL {
+            let selected = *mode == self.file.settings.theme_mode;
             cmds.push(RenderCommand::FillRect {
                 x,
                 y: cy,
@@ -329,7 +333,7 @@ impl AppearanceSettingsUI {
                 corner_radii: CornerRadii::all(swatch_size / 2.0),
             });
 
-            if *accent == self.settings.accent_color {
+            if *accent == self.file.settings.accent_color {
                 cmds.push(RenderCommand::StrokeRect {
                     x: sx - 3.0,
                     y: sy - 3.0,
@@ -346,13 +350,13 @@ impl AppearanceSettingsUI {
         cy += (rows as f32) * (swatch_size + swatch_gap) + 16.0;
 
         // Current accent display
-        let accent = self.settings.effective_accent();
+        let accent = self.file.settings.effective_accent();
         cmds.push(RenderCommand::Text {
             x,
             y: cy,
             text: format!(
                 "Current: {} (#{:02X}{:02X}{:02X})",
-                self.settings.accent_color.label(), accent.r, accent.g, accent.b,
+                self.file.settings.accent_color.label(), accent.r, accent.g, accent.b,
             ),
             font_size: 12.0,
             color: SUBTEXT0,
@@ -373,11 +377,11 @@ impl AppearanceSettingsUI {
         });
         cy += 26.0;
 
-        self.render_label_value(cmds, x, cy, width, "Level", self.settings.transparency.label());
+        self.render_label_value(cmds, x, cy, width, "Level", self.file.settings.transparency.label());
         cy += 28.0;
 
         // Transparency preview bar
-        let alpha = self.settings.transparency.panel_alpha();
+        let alpha = self.file.settings.transparency.panel_alpha();
         cmds.push(RenderCommand::FillRect {
             x,
             y: cy,
@@ -412,14 +416,14 @@ impl AppearanceSettingsUI {
         self.render_label_value(
             cmds, x, cy, width,
             "Scale",
-            &format!("{}%", self.settings.scaling_percent),
+            &format!("{}%", self.file.settings.scaling_percent),
         );
         let _ = cy;
     }
 
     fn render_fonts_tab(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
         let mut cy = y;
-        let fonts = &self.settings.fonts;
+        let fonts = &self.file.settings.fonts;
 
         cmds.push(RenderCommand::Text {
             x,
@@ -537,12 +541,12 @@ impl AppearanceSettingsUI {
         });
         cy += 26.0;
 
-        self.render_label_value(cmds, x, cy, width, "Speed", self.settings.animation_speed.label());
+        self.render_label_value(cmds, x, cy, width, "Speed", self.file.settings.animation_speed.label());
         cy += 28.0;
         self.render_label_value(
             cmds, x, cy, width,
             "Multiplier",
-            &format!("{:.2}x", self.settings.animation_speed.multiplier()),
+            &format!("{:.2}x", self.file.settings.animation_speed.multiplier()),
         );
         cy += 36.0;
 
@@ -565,7 +569,7 @@ impl AppearanceSettingsUI {
             WindowCorners::ExtraRounded,
         ];
         for style in &corner_styles {
-            let selected = *style == self.settings.window_corners;
+            let selected = *style == self.file.settings.window_corners;
             let preview_w = 50.0;
             cmds.push(RenderCommand::FillRect {
                 x,
@@ -612,15 +616,15 @@ impl AppearanceSettingsUI {
         });
         cy += 26.0;
 
-        self.render_label_value(cmds, x, cy, width, "Style", self.settings.taskbar_style.label());
+        self.render_label_value(cmds, x, cy, width, "Style", self.file.settings.taskbar_style.label());
         cy += 36.0;
 
         // Toggle switches
-        self.render_toggle_row(cmds, x, cy, width, "Accent on Taskbar", self.settings.accent_taskbar);
+        self.render_toggle_row(cmds, x, cy, width, "Accent on Taskbar", self.file.settings.accent_taskbar);
         cy += 32.0;
-        self.render_toggle_row(cmds, x, cy, width, "Accent on Title Bars", self.settings.accent_titlebars);
+        self.render_toggle_row(cmds, x, cy, width, "Accent on Title Bars", self.file.settings.accent_titlebars);
         cy += 32.0;
-        self.render_toggle_row(cmds, x, cy, width, "Drop Shadows", self.settings.drop_shadows);
+        self.render_toggle_row(cmds, x, cy, width, "Drop Shadows", self.file.settings.drop_shadows);
         let _ = cy;
     }
 
@@ -639,13 +643,13 @@ impl AppearanceSettingsUI {
         });
         cy += 26.0;
 
-        self.render_label_value(cmds, x, cy, width, "Size", self.settings.cursor_size.label());
+        self.render_label_value(cmds, x, cy, width, "Size", self.file.settings.cursor_size.label());
         cy += 28.0;
-        self.render_label_value(cmds, x, cy, width, "Scheme", self.settings.cursor_scheme.label());
+        self.render_label_value(cmds, x, cy, width, "Scheme", self.file.settings.cursor_scheme.label());
         cy += 36.0;
 
         // Cursor preview
-        let cursor_px = self.settings.cursor_size.pixels() as f32;
+        let cursor_px = self.file.settings.cursor_size.pixels() as f32;
         cmds.push(RenderCommand::FillRect {
             x,
             y: cy,
@@ -677,11 +681,11 @@ impl AppearanceSettingsUI {
         });
         cy += 26.0;
 
-        self.render_label_value(cmds, x, cy, width, "Size", self.settings.icon_size.label());
+        self.render_label_value(cmds, x, cy, width, "Size", self.file.settings.icon_size.label());
         cy += 28.0;
 
         // Icon size preview
-        let icon_px = self.settings.icon_size.pixels() as f32;
+        let icon_px = self.file.settings.icon_size.pixels() as f32;
         let preview_items = ["Documents", "Downloads", "Pictures"];
         for (i, name) in preview_items.iter().enumerate() {
             let ix = x + (i as f32) * (icon_px + 24.0);
@@ -801,14 +805,14 @@ mod tests {
     fn test_ui_dirty_detection() {
         let mut ui = AppearanceSettingsUI::new();
         assert!(!ui.is_dirty());
-        ui.settings.theme_mode = ThemeMode::Light;
+        ui.file.settings.theme_mode = ThemeMode::Light;
         assert!(ui.is_dirty());
     }
 
     #[test]
     fn test_ui_save() {
         let mut ui = AppearanceSettingsUI::new();
-        ui.settings.accent_color = AccentColor::Red;
+        ui.file.settings.accent_color = AccentColor::Red;
         assert!(ui.is_dirty());
         // `apply`, not `save`: the test is about the clean/dirty transition,
         // and `save` would write to the developer's own config directory.
@@ -819,13 +823,13 @@ mod tests {
     #[test]
     fn test_ui_revert() {
         let mut ui = AppearanceSettingsUI::new();
-        ui.settings.theme_mode = ThemeMode::Light;
-        ui.settings.accent_color = AccentColor::Green;
+        ui.file.settings.theme_mode = ThemeMode::Light;
+        ui.file.settings.accent_color = AccentColor::Green;
         assert!(ui.is_dirty());
         ui.revert();
         assert!(!ui.is_dirty());
-        assert_eq!(ui.settings.theme_mode, ThemeMode::Dark);
-        assert_eq!(ui.settings.accent_color, AccentColor::Blue);
+        assert_eq!(ui.file.settings.theme_mode, ThemeMode::Dark);
+        assert_eq!(ui.file.settings.accent_color, AccentColor::Blue);
     }
 
     #[test]
@@ -869,7 +873,7 @@ mod tests {
     #[test]
     fn test_ui_render_with_dirty() {
         let mut ui = AppearanceSettingsUI::new();
-        ui.settings.theme_mode = ThemeMode::Light;
+        ui.file.settings.theme_mode = ThemeMode::Light;
         let cmds = ui.render(600.0, 800.0);
         assert!(!cmds.is_empty());
     }
@@ -877,14 +881,14 @@ mod tests {
     #[test]
     fn test_ui_dirty_font_change() {
         let mut ui = AppearanceSettingsUI::new();
-        ui.settings.fonts.ui_size = 16.0;
+        ui.file.settings.fonts.ui_size = 16.0;
         assert!(ui.is_dirty());
     }
 
     #[test]
     fn test_ui_dirty_cursor_change() {
         let mut ui = AppearanceSettingsUI::new();
-        ui.settings.cursor_scheme = CursorScheme::Inverted;
+        ui.file.settings.cursor_scheme = CursorScheme::Inverted;
         assert!(ui.is_dirty());
     }
 
@@ -914,10 +918,10 @@ experimental:
   wobbly_windows: true
 ";
         let mut ui = AppearanceSettingsUI::from_document(Document::parse(original));
-        assert_eq!(ui.settings.theme_mode, ThemeMode::Dark);
-        assert_eq!(ui.settings.accent_color, AccentColor::Teal);
+        assert_eq!(ui.file.settings.theme_mode, ThemeMode::Dark);
+        assert_eq!(ui.file.settings.accent_color, AccentColor::Teal);
 
-        ui.settings.accent_color = AccentColor::Mauve;
+        ui.file.settings.accent_color = AccentColor::Mauve;
         let text = ui.apply().to_text();
 
         assert!(text.contains("# My desktop. Do not let the settings app eat these notes."));
@@ -940,7 +944,7 @@ experimental:
         let mut ui = AppearanceSettingsUI::from_document(Document::parse(
             "# notes\ntheme:\n  mode: dark\n",
         ));
-        ui.settings.fonts.ui_size = 14.0;
+        ui.file.settings.fonts.ui_size = 14.0;
         let once = ui.apply().to_text();
         let twice = ui.apply().to_text();
         assert_eq!(once, twice);
@@ -954,19 +958,19 @@ experimental:
         // Each of these left Save greyed out before `is_dirty` compared the
         // whole struct, so the change was silently lost on close.
         let mut ui = AppearanceSettingsUI::new();
-        ui.settings.fonts.mono_font = "Iosevka".to_string();
+        ui.file.settings.fonts.mono_font = "Iosevka".to_string();
         assert!(ui.is_dirty(), "mono_font change not detected");
 
         let mut ui = AppearanceSettingsUI::new();
-        ui.settings.fonts.subpixel = SubpixelMode::Bgr;
+        ui.file.settings.fonts.subpixel = SubpixelMode::Bgr;
         assert!(ui.is_dirty(), "subpixel change not detected");
 
         let mut ui = AppearanceSettingsUI::new();
-        ui.settings.fonts.smoothing = !ui.settings.fonts.smoothing;
+        ui.file.settings.fonts.smoothing = !ui.file.settings.fonts.smoothing;
         assert!(ui.is_dirty(), "smoothing change not detected");
 
         let mut ui = AppearanceSettingsUI::new();
-        ui.settings.custom_accent = Color::rgb(1, 2, 3);
+        ui.file.settings.custom_accent = Color::rgb(1, 2, 3);
         assert!(ui.is_dirty(), "custom_accent change not detected");
     }
 
@@ -975,7 +979,7 @@ experimental:
         // The old check ignored size changes under 0.1pt, which meant a slider
         // step could be a change the user could see but not save.
         let mut ui = AppearanceSettingsUI::new();
-        ui.settings.fonts.ui_size += 0.05;
+        ui.file.settings.fonts.ui_size += 0.05;
         assert!(ui.is_dirty());
         ui.apply();
         assert!(!ui.is_dirty());
@@ -984,7 +988,7 @@ experimental:
     #[test]
     fn test_ui_load_defaults_from_an_empty_document() {
         let ui = AppearanceSettingsUI::from_document(Document::new());
-        assert_eq!(ui.settings, AppearanceSettings::default());
+        assert_eq!(ui.file.settings, AppearanceSettings::default());
         assert!(!ui.is_dirty());
     }
 }

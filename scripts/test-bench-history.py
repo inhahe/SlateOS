@@ -457,6 +457,25 @@ def test_baselines_is_valid_toml():
     # `not_a_target = true` is the declarative opt-out for calibration
     # constants and host metadata. It lives in the data rather than in a name
     # list here so that adding such a table does not require editing this test.
+    #
+    # An *environment qualifier* may precede the unit: `tcg_target_ns` is the
+    # budget the suite is graded against under emulation, as distinct from the
+    # `target_ns` hardware reference. It is the same unit with a scope prefix,
+    # so the qualifier is stripped before the prefix test rather than being
+    # enumerated as a separate unit. Note this must not be softened into a
+    # substring match for "target": that would also match the `not_a_target`
+    # opt-out key itself, so every opted-out table would count as carrying a
+    # target and the test could never fail -- a check that cannot fire is
+    # indistinguishable from a check that passes.
+    _QUALIFIERS = ("tcg_",)
+
+    def names_a_target(key):
+        for qualifier in _QUALIFIERS:
+            if key.startswith(qualifier):
+                key = key[len(qualifier):]
+                break
+        return key.startswith("target")
+
     def is_namespace(table):
         # `[qemu.foo]` creates an implicit `qemu` parent whose every value is
         # a sub-table. Such a parent is a namespace, not a baseline, and has
@@ -470,9 +489,15 @@ def test_baselines_is_valid_toml():
         if isinstance(table, dict)
         and not is_namespace(table)
         and not table.get("not_a_target", False)
-        and not any(k.startswith("target") for k in table)
+        and not any(names_a_target(k) for k in table)
     )
     check("every baseline names a target unit or opts out", missing, [])
+    # The qualifier-stripping above is only correct if it still rejects the
+    # opt-out key; assert that directly rather than trusting the reading.
+    check("not_a_target does not read as a target unit",
+          names_a_target("not_a_target"), False)
+    check("tcg_target_ns reads as a target unit",
+          names_a_target("tcg_target_ns"), True)
 
 
 def main():

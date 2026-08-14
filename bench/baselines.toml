@@ -954,14 +954,199 @@ Requires procfs mounted at /proc.  Tests mount-point traversal \
 + procfs filename lookup.  Skips under QEMU when no filesystem \
 is mounted."""
 
-[vfs_throughput_16k]
-description = "VFS write+read cycle for 16 KiB file"
-target_ns   = 50000
-source      = "Full page write + read through VFS → driver → buffer"
+# The suite scores the write and the read separately (`vfs_throughput_16k_write`
+# and `vfs_throughput_16k_read`), so the combined `[vfs_throughput_16k]` table
+# that used to live here matched nothing and read as coverage it did not
+# provide.  Split, keeping the same 50000ns budget on each half.
+
+[vfs_throughput_16k_write]
+description = "VFS write of a 16 KiB file (one full page)"
+tcg_target_ns = 50000
+source      = "Full page write through VFS → driver → buffer"
 notes       = """
 Requires writable filesystem (FAT/tmpfs).  Skips when VFS not \
-available.  Target is conservative — dominated by file system \
-overhead, not raw I/O."""
+available.  Budget is conservative — dominated by file system \
+overhead, not raw I/O — and is a TCG budget, not a hardware \
+reference: no hardware figure has been recorded for this path."""
+
+[vfs_throughput_16k_read]
+description = "VFS read of a 16 KiB file (one full page)"
+tcg_target_ns = 50000
+source      = "Full page read through VFS → driver → buffer"
+notes       = """
+See vfs_throughput_16k_write.  Read is the cheaper half in practice \
+(24504ns vs 400373ns measured 2026-08-14), so the shared budget binds \
+only on the write."""
+
+# -------------------------------------------------------------------------
+# Baselines added 2026-08-14 for benchmarks the kernel scored against a
+# bare Rust literal with no recorded provenance.
+#
+# `report_baselines()` in scripts/bench-history.py flagged 15 such
+# benchmarks: the kernel graded them, printed PASS/OVER, and nothing in
+# the tree said where the number came from.  Each entry below states
+# whether the figure is a **hardware reference** (`target_ns`) or a
+# **TCG budget** (`tcg_target_ns`) — see the note in `load_baselines()`
+# for why conflating those two produced spurious 20x disagreements.
+#
+# Where the kernel's literal is unjustified, that is said here rather
+# than quietly blessed by copying it: recording a number in this file
+# is meant to add provenance, not to launder a guess into a citation.
+# -------------------------------------------------------------------------
+
+# --- VFS path resolution ---
+#
+# The family's targets all derive from `[vfs_path_component]` = 700ns,
+# but they apply it inconsistently, and writing them down side by side is
+# what exposes it.  The honest cost model for a stat is
+#
+#     stat(path) ≈ fixed_floor + n_components × per_component
+#
+# yet `vfs_stat_root` ("/") is charged 1 × 700 for **zero** components,
+# while `vfs_stat_deep` (2) and `vfs_stat_3comp` (3) are charged n × 700
+# and **nothing** for the fixed floor.  The floor is real and unrecorded:
+# every resolution pays namespace translation, syntactic validation and
+# normalisation before the cache is even consulted (`resolve_prologue` in
+# kernel/src/fs/vfs.rs, extracted precisely so it could be measured).
+# Until that floor has a measured value, the targets below are kept as
+# they are in bench.rs — but they are flagged, not endorsed.
+
+[vfs_stat_root]
+description = "VFS stat of \"/\" — the cheapest possible path"
+target_ns   = 700
+source      = "1 × [vfs_path_component] (700ns) — see the caveat below"
+notes       = """
+\"/\" has **zero** path components, so a per-component target does not \
+strictly apply: this benchmark measures the *fixed floor* of a stat \
+(namespace translation + validation + normalisation + dcache lookup + \
+mount resolution + the filesystem's own stat), not a component lookup. \
+700ns is therefore a stand-in for a floor that has never been measured \
+or budgeted separately.  Measured 6151ns under QEMU-TCG on 2026-08-14 \
+and reported as 8.8x OVER — but this is a *hardware* reference, and TCG \
+runs the same code several times slower, so that ratio is not by itself \
+evidence of a defect.  See \
+B-VFS-STAT-ROOT-IS-12x-OVER-TARGET-AND-THE-DCACHE-IS-NOT-WHY in \
+known-issues.md."""
+
+[vfs_stat_3comp]
+description = "VFS stat with a 3-component path"
+target_ns   = 2100
+source      = "3 × [vfs_path_component] (700ns), matching [vfs_stat_deep]'s 2 × 700"
+notes       = """
+Charges three component lookups and nothing for the fixed floor that \
+[vfs_stat_root] shows is the dominant term at shallow depths.  If the \
+floor turns out to be F, the coherent target is F + 3 × 700 and this \
+number is too tight by F."""
+
+[vfs_read_256]
+description = "VFS read of a 256-byte file"
+tcg_target_ns = 200000
+source      = "bench.rs: '<10us metadata cycle per design spec; a full 256B write+read is heavier — 200us under QEMU'"
+notes       = """
+Explicitly a QEMU/TCG budget, and a very loose one: measured 12941ns, \
+15x inside it.  A budget this slack cannot detect a 10x regression, so \
+it is a placeholder rather than a real guard.  Tighten once the \
+filesystem-backed path is stable enough to have a meaningful floor."""
+
+[vfs_write_256]
+description = "VFS write of a 256-byte file (create/overwrite)"
+tcg_target_ns = 200000
+source      = "Same derivation as vfs_read_256"
+notes       = """
+Measured 125508ns — only 1.6x inside the budget, where the read is 15x \
+inside it.  Same nominal budget, wildly different headroom: the write \
+path is the one that actually needs a measured target."""
+
+[vfs_readdir]
+description = "VFS readdir of the root directory"
+tcg_target_ns = 50000
+source      = "bench.rs literal; no hardware reference recorded"
+notes       = """
+No published figure was cited for this one.  Linux getdents on a small \
+cached directory is single-digit microseconds, so 50us is a TCG-scale \
+budget by construction.  Measured 19019ns min but 230395ns mean — a 12x \
+mean/min spread that the dispersion check flags, so this benchmark \
+stalls during its own run and its movement should not be trusted."""
+
+# --- Scheduler ---
+
+[pick_next]
+description = "sched::yield_now() with 4 runnable tasks (two context switches)"
+target_ns   = 10000
+source      = "2 × CLAUDE.md's <5us context-switch target; a yield is two switches"
+notes       = """
+This does **not** isolate pick_next — it measures a full yield, of which \
+the pick is a small fraction.  bench.rs says so.  The name is therefore \
+misleading and the target is a context-switch target wearing a \
+scheduler-lookup name.  See [sched_pick_next] for the isolated one."""
+
+[sched_pick_next]
+description = "PriorityRoundRobin::pick_next + enqueue, isolated, at queue depth 1024"
+tcg_target_ns = 1500
+source      = "bench.rs: set just above the ~900-950ns TCG rdtsc floor so an O(n) blow-up still trips it"
+notes       = """
+On hardware the pick+enqueue is single-digit ns; under TCG the harness \
+pays one CPUID-serialised rdtsc per iteration, which dominates entirely. \
+The absolute number is a floor artifact — **the real regression signal is \
+the O(1) ratio** bench.rs prints alongside it (depth 1 → 1024 must stay \
+flat).  A hardware target here would be meaningless, so none is given."""
+
+# --- Networking ---
+
+[net_checksum]
+description = "RFC 1071 one's-complement checksum over a 20-byte IPv4 header"
+tcg_target_ns = 500
+source      = "bench.rs literal; no hardware reference recorded"
+notes       = """
+Ten 16-bit adds with carry folding — on hardware this is a few ns. \
+Measured 18ns under TCG, i.e. 28x inside the budget, so this target \
+cannot fire on any plausible regression short of an accidental \
+allocation.  Kept for continuity; it is a smoke test, not a guard."""
+
+[net_ethernet_parse]
+description = "Ethernet header parse (14 bytes: dst/src MAC + ethertype)"
+tcg_target_ns = 200
+source      = "bench.rs literal; no hardware reference recorded"
+notes       = "Measured 24ns. Same caveat as net_checksum: far too loose to guard anything."
+
+[net_ipv4_parse]
+description = "IPv4 header parse and validate"
+tcg_target_ns = 300
+source      = "bench.rs literal; no hardware reference recorded"
+notes       = "Measured 48ns.  Same caveat as net_checksum."
+
+[net_arp_lookup]
+description = "ARP cache lookup, miss path (first packet to a new destination)"
+tcg_target_ns = 1000
+source      = "bench.rs literal; no hardware reference recorded"
+notes       = """
+Measured 1206ns — **OVER**, and the only one of the small networking \
+benchmarks whose budget actually binds.  This is the *miss* path, so it \
+walks the table; if the ARP cache is a linear scan, that is the reason, \
+and it is the same shape of defect as the VFS dcache miss path.  Worth a \
+look before tuning the number."""
+
+# --- HTTP / compression ---
+
+[http_gzip_1KiB]
+description = "gzip (deflate) compression of a 1 KiB HTTP body"
+tcg_target_ns = 200000
+source      = "bench.rs literal; scaled like the other QEMU crypto/HTTP budgets"
+notes       = """
+zlib on hardware compresses at roughly 30-60 MB/s, i.e. ~17-33us for \
+1 KiB, so 200us is a ~6-12x TCG allowance and is consistent with the \
+crypto budgets in the [qemu.*] tables.  Measured 208942ns — marginally \
+**OVER**, so unlike the networking budgets this one does bind."""
+
+[http_gzip_8KiB]
+description = "gzip (deflate) compression of an 8 KiB HTTP body"
+tcg_target_ns = 1000000
+source      = "bench.rs literal; ~5x the 1 KiB budget for 8x the input"
+notes       = """
+Measured 1087503ns — **OVER**.  Note the budget scales sub-linearly \
+(8x input, 5x budget) while deflate is roughly linear in input size \
+once the window is warm, so the 8 KiB case is held to a stricter \
+per-byte standard than the 1 KiB case.  That is probably unintentional."""
 
 # -------------------------------------------------------------------------
 # Measurement methodology notes

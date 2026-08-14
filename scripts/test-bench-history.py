@@ -558,6 +558,54 @@ def test_run_position_wired_into_report(bh):
           "OUTLIER RUN" in buf.getvalue(), False)
 
 
+def test_baseline_canary_is_reported(bh):
+    """A baseline's own canary verdict must reach the reader.
+
+    The record has always carried it; nothing on the comparison path read it,
+    so a baseline measured on a loaded machine looked exactly like one measured
+    on an idle machine. This asserts each of the four verdicts produces the
+    right line -- including that `clean` produces *no* line, since a warning
+    printed on every run is a warning nobody reads.
+    """
+    import io
+    import contextlib
+
+    def header(canary):
+        # Stored `entries` map name -> ns (a scalar); only the *current* run's
+        # entries are the wider tuple. Getting that backwards is what the first
+        # draft of this test did, and `global_drift` caught it immediately.
+        previous = {
+            "timestamp": "T", "commit": "c", "host": "h", "profile": "debug",
+            "entries": {"a": 100},
+        }
+        if canary is not None:
+            previous["canary"] = canary
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            bh.report(previous, {"a": (100, 700, "OK", None, None)}, 25.0)
+        return buf.getvalue()
+
+    clean = {"start": 100, "end": 101, "pct": 101, "min": 100, "max": 101,
+             "spread": 1, "samples": 5, "invalid": 0}
+    dirty = dict(clean)
+    dirty["max"], dirty["spread"] = 300, 200
+    broke = dict(clean)
+    broke["invalid"] = 3
+
+    check("a clean baseline prints no warning",
+          "WARNING" in header(clean), False)
+    check("a contaminated baseline is called out",
+          "contamination" in header(dirty), True)
+    check("the contaminated line quotes the measured spread",
+          "200%" in header(dirty), True)
+    check("a broken baseline is UNKNOWN, not contaminated",
+          "UNKNOWN" in header(broke), True)
+    check("a broken baseline is not called contaminated",
+          "measured host-load" in header(broke), False)
+    check("a canary-less baseline says so",
+          "predates" in header(None), True)
+
+
 def test_baselines_crosscheck(bh, tmpdir):
     """The target cross-check must distinguish its three failure modes.
 
@@ -718,6 +766,7 @@ def main():
     test_run_position_flags_outlier_baseline(bh)
     test_run_position_needs_history(bh)
     test_run_position_wired_into_report(bh)
+    test_baseline_canary_is_reported(bh)
     test_baselines_is_valid_toml()
     with tempfile.TemporaryDirectory() as tmpdir:
         test_baselines_crosscheck(bh, tmpdir)

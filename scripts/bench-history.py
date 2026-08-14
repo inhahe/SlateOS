@@ -723,6 +723,61 @@ def diff(previous, current, threshold_pct):
     return regressed, improved, added, removed, drift
 
 
+def report_baseline_canary(previous):
+    """State whether the run being diffed *against* was a trustworthy one.
+
+    Every record carries a `canary` block -- the kernel's own direct
+    measurement of whether the host stayed quiet for that run -- and until now
+    nothing on the comparison path read it. That is this file's recurring
+    defect in its purest form: the datum existed, was correct, and had no
+    consumer, so a baseline measured on a loaded machine was indistinguishable
+    from one measured on an idle machine.
+
+    It matters because the diff is a *ratio*. A baseline inflated by host load
+    makes the current run look uniformly faster, and the drift correction then
+    subtracts that whole-suite factor -- which is right for the benchmarks that
+    moved uniformly and wrong for any that did not, promoting them to
+    "REGRESSED". Two benchmarks were written up that way (`isr_latency` 2.34x,
+    `pick_next` 1.76x) against a baseline that is now known to be 24% fast.
+
+    Note the deliberate asymmetry with `report_run_position`: that one *infers*
+    an outlier statistically, from the run's position in the recent
+    distribution, and needs several records before it can say anything. This
+    one reads a measurement the kernel already took, and works on the second
+    record. When they agree the verdict is strong; when they disagree that is
+    itself worth seeing, so neither is folded into the other.
+
+    Nothing is skipped or auto-corrected here. Silently choosing an older,
+    cleaner baseline would make the printed diff answer a question the reader
+    did not ask -- so the baseline stays the most recent run, and its quality
+    is stated instead.
+    """
+    verdict = canary_verdict(previous.get("canary"))
+    if verdict == CANARY_CLEAN:
+        return
+    if verdict == CANARY_ABSENT:
+        print(
+            "  NOTE: the baseline run predates the host-load canary, so "
+            "whether that machine was quiet is unknown and unknowable."
+        )
+    elif verdict == CANARY_BROKEN:
+        print(
+            "  WARNING: the baseline run's canary could not measure "
+            "(instrument failure, not a busy host), so contamination is "
+            "UNKNOWN for it. Treat every movement below as unproven."
+        )
+    else:
+        canary = previous.get("canary") or {}
+        spread = canary.get("spread")
+        detail = f" (reference access cost spread {spread}%)" if spread else ""
+        print(
+            f"  WARNING: the baseline run's canary measured host-load "
+            f"contamination{detail}. It is a ratio's denominator, so the "
+            f"percentages below carry its error, and the drift correction "
+            f"removes only the part that moved uniformly."
+        )
+
+
 def report(previous, current_entries, threshold_pct,
            records=None, host=None, profile=LEGACY_PROFILE):
     """Print the run-over-run comparison. Returns True if anything regressed.
@@ -756,6 +811,7 @@ def report(previous, current_entries, threshold_pct,
         f"=== Benchmark history: {len(current)} benchmarks vs "
         f"{previous.get('timestamp', '?')} (commit {previous.get('commit', '?')}) ==="
     )
+    report_baseline_canary(previous)
     print(
         "  Comparison is run-over-run on this host, which cancels the TCG "
         "emulation constant."

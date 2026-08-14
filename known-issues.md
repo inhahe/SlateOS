@@ -1512,16 +1512,48 @@ got printed, and the wedge then prevents any later mechanism from reporting it.
 
 **Two separable fixes:**
 
-- **(a) Give the serial printer a re-entrancy escape.** If the lock is already
-  held by this CPU, fall back to the unlocked/polled emergency writer
-  (`emergency_println!` already exists for the hard-lockup path) instead of
-  spinning. Turns an evidence-free wedge into an interleaved-but-complete
-  report. This is the one worth doing regardless of the underlying fault, since
-  it is a diagnosis multiplier for every future wedge, not just this one.
-- **(b) Find the actual fault.** Blocked on capture: `scripts/boot-test.sh`
+- **(a) Give the serial printer a re-entrancy escape.** ✅ **DONE 2026-08-12**
+  (`58102abca`). If the lock is already held by this CPU, fall back to the
+  unlocked/polled emergency writer (`emergency_println!` already exists for the
+  hard-lockup path) instead of spinning. Turns an evidence-free wedge into an
+  interleaved-but-complete report. This is the one worth doing regardless of the
+  underlying fault, since it is a diagnosis multiplier for every future wedge,
+  not just this one. `serial::_print` now keeps a per-CPU `IN_PRINT` flag,
+  claimed *before* the lock is taken (so the window in which this CPU is merely
+  *waiting* for the lock is also covered), and a nested call from the same CPU
+  writes through `SerialPort::emergency()`. `serial::reentrancy_self_test()`
+  guards it at every boot by raising `#BP` from inside a `Display::fmt` — the
+  faithful reproduction of the failure, since the fault is taken *during the
+  formatting of an argument*, not merely during the write.
+- **(b) Find the actual fault.** Was blocked on capture: `scripts/boot-test.sh`
   attaches the HMP monitor and `capture_guest_state()` **only** when
-  `HARD_LOCKUP_WATCHDOG=1`, and this run was launched without it, so no live RIP
-  could be read from the wedged guest. Re-run with `HARD_LOCKUP_WATCHDOG=1`.
+  `HARD_LOCKUP_WATCHDOG=1`, and the original run was launched without it, so no
+  live RIP could be read from the wedged guest.
+
+  **The re-run was not merely forgotten — it was unrequestable.**
+  `kasan-build.sh --boot` `exec`'d `boot-test.sh --no-build` with a fixed,
+  empty argument list, so the instrumented profile — the one most likely to
+  wedge, and therefore the one that most needs the diagnostic options — was the
+  only profile that could not ask for them. Fixed 2026-08-14 (`2db09232a`):
+  everything after `--` is forwarded verbatim, so the capture run is now
+
+  ```bash
+  ./scripts/kasan-build.sh --boot -- --hard-lockup-watchdog --stall-secs=240
+  ```
+
+  `--stall-secs` matters as much as the watchdog here. A wedge is defined by
+  serial output *stopping*, and an instrumented boot is legitimately ~20x
+  slower, so waiting for the outer timeout to distinguish "wedged" from "slow"
+  wastes the whole budget; the stall detector calls it after 240 s of silence
+  and captures the frozen RIP on that path (`boot-test.sh:739-753`) rather than
+  only on timeout.
+
+  Note that fix (a) landed *after* the only observed occurrence, so the wedge
+  may no longer reproduce in its original evidence-destroying form: if the
+  nested print now escapes to the emergency port, the run should emit the
+  complete `#PF` line — the faulting RIP included — and then either recover or
+  fail in some new, legible way. Either outcome is progress; a silent
+  half-printed line is the one result that is now unexpected.
 
 **Not the same bug as B-KASAN-INSTRUMENTED-BUILD-PANICS-ON-ITS-OWN-REDZONE-CHECKS.**
 That one flooded `[kasan] CRITICAL` reports and panicked; this run reached 5560

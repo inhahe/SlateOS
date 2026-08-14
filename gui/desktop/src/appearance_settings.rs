@@ -8,6 +8,7 @@ use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
 use guitk::text;
+use yamldoc::Document;
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -37,6 +38,43 @@ const FLAMINGO: Color = Color::from_hex(0xF2CDCD);
 const MAROON: Color = Color::from_hex(0xEBA0AC);
 const SKY: Color = Color::from_hex(0x89DCFE);
 const SAPPHIRE: Color = Color::from_hex(0x74C7EC);
+
+// ============================================================================
+// Configuration-file spellings
+// ============================================================================
+
+/// Give an enum a spelling in the configuration file.
+///
+/// These names are deliberately **not** [`label`](ThemeMode::label). A label is
+/// what the user reads on screen — "Extra Large (96px)", "Accent Color" — and
+/// it changes when the wording is improved or the size preset is retuned. A
+/// config spelling is part of the file format: change it and every existing
+/// user's saved choice silently reverts to the default the next time the
+/// desktop starts. Keeping them separate means the UI text is free to move.
+macro_rules! yaml_enum {
+    ($ty:ty { $($variant:ident => $name:literal),+ $(,)? }) => {
+        impl $ty {
+            /// This value's spelling in the configuration file.
+            fn yaml_name(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $name,)+
+                }
+            }
+
+            /// The value a configuration file spelling names.
+            ///
+            /// `None` for a spelling this build does not know, which is how a
+            /// file written by a newer desktop degrades to the default rather
+            /// than refusing to load.
+            fn from_yaml_name(name: &str) -> Option<Self> {
+                match name {
+                    $($name => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
+        }
+    };
+}
 
 // ============================================================================
 // Theme mode
@@ -221,7 +259,7 @@ impl AnimationSpeed {
 // ============================================================================
 
 /// System font configuration.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FontSettings {
     /// UI font family name.
     pub ui_font: String,
@@ -435,7 +473,7 @@ impl TaskbarStyle {
 // ============================================================================
 
 /// All appearance/personalization settings.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AppearanceSettings {
     /// Light/dark/system theme mode.
     pub theme_mode: ThemeMode,
@@ -523,10 +561,276 @@ impl AppearanceSettings {
 
     /// Validate and clamp settings to sane ranges.
     pub fn validate(&mut self) {
-        // Clamp font sizes (NaN-safe: settings are read from YAML, never NaN).
+        // Clamp font sizes. `get_f64` never yields a NaN or an infinity, so
+        // `clamp` cannot be handed one from a config file; a NaN written by a
+        // future code path would panic here rather than propagate silently.
         self.fonts.ui_size = self.fonts.ui_size.clamp(8.0, 32.0);
         self.fonts.mono_size = self.fonts.mono_size.clamp(6.0, 32.0);
         self.scaling_percent = self.scaling_percent.clamp(100, 300);
+    }
+}
+
+// ============================================================================
+// Configuration file
+// ============================================================================
+
+// The spellings below are the on-disk format for `appearance.yaml`. Adding a
+// variant is free; renaming one is a breaking change to every user's file.
+yaml_enum!(ThemeMode { Dark => "dark", Light => "light", System => "system" });
+yaml_enum!(AccentColor {
+    Blue => "blue",
+    Lavender => "lavender",
+    Teal => "teal",
+    Green => "green",
+    Yellow => "yellow",
+    Peach => "peach",
+    Pink => "pink",
+    Mauve => "mauve",
+    Red => "red",
+    Rosewater => "rosewater",
+    Flamingo => "flamingo",
+    Maroon => "maroon",
+    Sky => "sky",
+    Sapphire => "sapphire",
+    Custom => "custom",
+});
+yaml_enum!(TransparencyLevel {
+    Off => "off",
+    Subtle => "subtle",
+    Moderate => "moderate",
+    Full => "full",
+});
+yaml_enum!(AnimationSpeed {
+    Off => "off",
+    Fast => "fast",
+    Normal => "normal",
+    Slow => "slow",
+});
+yaml_enum!(SubpixelMode {
+    None => "none",
+    Rgb => "rgb",
+    Bgr => "bgr",
+    VRgb => "vrgb",
+    VBgr => "vbgr",
+});
+yaml_enum!(IconSize {
+    Small => "small",
+    Medium => "medium",
+    Large => "large",
+    ExtraLarge => "extra-large",
+});
+yaml_enum!(CursorSize {
+    Small => "small",
+    Normal => "normal",
+    Large => "large",
+    ExtraLarge => "extra-large",
+});
+yaml_enum!(CursorScheme {
+    Default => "default",
+    Inverted => "inverted",
+    AccentColored => "accent",
+});
+yaml_enum!(WindowCorners {
+    Square => "square",
+    Subtle => "subtle",
+    Rounded => "rounded",
+    ExtraRounded => "extra-rounded",
+});
+yaml_enum!(TaskbarStyle {
+    Solid => "solid",
+    Translucent => "translucent",
+    Transparent => "transparent",
+});
+
+/// Spell a colour as CSS-style hex, the notation a user editing the file by
+/// hand will already know. The alpha byte appears only when it is not opaque,
+/// so the common case stays a familiar six digits.
+fn color_to_hex(color: Color) -> String {
+    if color.a == 255 {
+        format!("#{:02x}{:02x}{:02x}", color.r, color.g, color.b)
+    } else {
+        format!(
+            "#{:02x}{:02x}{:02x}{:02x}",
+            color.r, color.g, color.b, color.a
+        )
+    }
+}
+
+/// Read a `#rrggbb` or `#rrggbbaa` colour. `None` for anything else, so a
+/// mistyped colour falls back to the default rather than to black.
+fn color_from_hex(text: &str) -> Option<Color> {
+    let digits = text.strip_prefix('#')?;
+    if !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let byte = |i: usize| -> Option<u8> { u8::from_str_radix(digits.get(i..i + 2)?, 16).ok() };
+    match digits.len() {
+        6 => Some(Color::rgb(byte(0)?, byte(2)?, byte(4)?)),
+        8 => Some(Color::rgba(byte(0)?, byte(2)?, byte(4)?, byte(6)?)),
+        _ => None,
+    }
+}
+
+/// Read a value if the file has one, otherwise keep what is already there.
+///
+/// This is the whole reason settings are read into a `Default` rather than
+/// built from the file: a key the user has never touched, or one written by a
+/// newer version and since removed, leaves the field at its default instead of
+/// zeroing it.
+macro_rules! read_into {
+    ($slot:expr, $value:expr) => {
+        if let Some(value) = $value {
+            $slot = value;
+        }
+    };
+}
+
+impl AppearanceSettings {
+    /// Read settings from a configuration document.
+    ///
+    /// Every key is optional and every unreadable value is ignored, so a
+    /// missing file, a partial file and a file from a different version all
+    /// produce a usable result. The outcome is always [`validate`]d, because
+    /// the file is user-editable and nothing stops someone typing a font size
+    /// of 400.
+    ///
+    /// [`validate`]: Self::validate
+    #[must_use]
+    pub fn read_from(doc: &Document) -> Self {
+        let mut s = Self::default();
+
+        read_into!(
+            s.theme_mode,
+            doc.get_str(&["theme", "mode"])
+                .and_then(|v| ThemeMode::from_yaml_name(&v))
+        );
+        read_into!(
+            s.accent_color,
+            doc.get_str(&["theme", "accent"])
+                .and_then(|v| AccentColor::from_yaml_name(&v))
+        );
+        read_into!(
+            s.custom_accent,
+            doc.get_str(&["theme", "custom_accent"])
+                .and_then(|v| color_from_hex(&v))
+        );
+        read_into!(
+            s.transparency,
+            doc.get_str(&["theme", "transparency"])
+                .and_then(|v| TransparencyLevel::from_yaml_name(&v))
+        );
+
+        read_into!(s.fonts.ui_font, doc.get_str(&["fonts", "ui_font"]));
+        read_into!(
+            s.fonts.ui_size,
+            doc.get_f64(&["fonts", "ui_size"]).map(|v| v as f32)
+        );
+        read_into!(s.fonts.mono_font, doc.get_str(&["fonts", "mono_font"]));
+        read_into!(
+            s.fonts.mono_size,
+            doc.get_f64(&["fonts", "mono_size"]).map(|v| v as f32)
+        );
+        read_into!(s.fonts.hinting, doc.get_bool(&["fonts", "hinting"]));
+        read_into!(
+            s.fonts.subpixel,
+            doc.get_str(&["fonts", "subpixel"])
+                .and_then(|v| SubpixelMode::from_yaml_name(&v))
+        );
+        read_into!(s.fonts.smoothing, doc.get_bool(&["fonts", "smoothing"]));
+
+        read_into!(
+            s.animation_speed,
+            doc.get_str(&["effects", "animation_speed"])
+                .and_then(|v| AnimationSpeed::from_yaml_name(&v))
+        );
+        read_into!(
+            s.window_corners,
+            doc.get_str(&["effects", "window_corners"])
+                .and_then(|v| WindowCorners::from_yaml_name(&v))
+        );
+        read_into!(
+            s.taskbar_style,
+            doc.get_str(&["effects", "taskbar_style"])
+                .and_then(|v| TaskbarStyle::from_yaml_name(&v))
+        );
+        read_into!(
+            s.accent_taskbar,
+            doc.get_bool(&["effects", "accent_taskbar"])
+        );
+        read_into!(
+            s.accent_titlebars,
+            doc.get_bool(&["effects", "accent_titlebars"])
+        );
+        read_into!(s.drop_shadows, doc.get_bool(&["effects", "drop_shadows"]));
+
+        read_into!(
+            s.cursor_size,
+            doc.get_str(&["cursors", "size"])
+                .and_then(|v| CursorSize::from_yaml_name(&v))
+        );
+        read_into!(
+            s.cursor_scheme,
+            doc.get_str(&["cursors", "scheme"])
+                .and_then(|v| CursorScheme::from_yaml_name(&v))
+        );
+        read_into!(
+            s.icon_size,
+            doc.get_str(&["icons", "size"])
+                .and_then(|v| IconSize::from_yaml_name(&v))
+        );
+
+        // A scaling percentage outside u16 is not a number this UI can mean;
+        // `validate` clamps the rest of the range.
+        read_into!(
+            s.scaling_percent,
+            doc.get_i64(&["display", "scaling_percent"])
+                .and_then(|v| u16::try_from(v).ok())
+        );
+
+        s.validate();
+        s
+    }
+
+    /// Write these settings into a configuration document, leaving every
+    /// comment, blank line and unrelated key in it exactly as it was.
+    pub fn write_into(&self, doc: &mut Document) {
+        doc.set_str(&["theme", "mode"], self.theme_mode.yaml_name());
+        doc.set_str(&["theme", "accent"], self.accent_color.yaml_name());
+        doc.set_str(&["theme", "custom_accent"], &color_to_hex(self.custom_accent));
+        doc.set_str(&["theme", "transparency"], self.transparency.yaml_name());
+
+        doc.set_str(&["fonts", "ui_font"], &self.fonts.ui_font);
+        doc.set_f64(&["fonts", "ui_size"], f64::from(self.fonts.ui_size));
+        doc.set_str(&["fonts", "mono_font"], &self.fonts.mono_font);
+        doc.set_f64(&["fonts", "mono_size"], f64::from(self.fonts.mono_size));
+        doc.set_bool(&["fonts", "hinting"], self.fonts.hinting);
+        doc.set_str(&["fonts", "subpixel"], self.fonts.subpixel.yaml_name());
+        doc.set_bool(&["fonts", "smoothing"], self.fonts.smoothing);
+
+        doc.set_str(
+            &["effects", "animation_speed"],
+            self.animation_speed.yaml_name(),
+        );
+        doc.set_str(
+            &["effects", "window_corners"],
+            self.window_corners.yaml_name(),
+        );
+        doc.set_str(
+            &["effects", "taskbar_style"],
+            self.taskbar_style.yaml_name(),
+        );
+        doc.set_bool(&["effects", "accent_taskbar"], self.accent_taskbar);
+        doc.set_bool(&["effects", "accent_titlebars"], self.accent_titlebars);
+        doc.set_bool(&["effects", "drop_shadows"], self.drop_shadows);
+
+        doc.set_str(&["cursors", "size"], self.cursor_size.yaml_name());
+        doc.set_str(&["cursors", "scheme"], self.cursor_scheme.yaml_name());
+        doc.set_str(&["icons", "size"], self.icon_size.yaml_name());
+
+        doc.set_i64(
+            &["display", "scaling_percent"],
+            i64::from(self.scaling_percent),
+        );
     }
 }
 
@@ -558,6 +862,10 @@ impl AppearanceTab {
     }
 }
 
+/// The settings group this panel persists — `appearance.yaml` in the user's
+/// configuration directory.
+pub const CONFIG_NAME: &str = "appearance";
+
 /// Appearance settings UI state.
 pub struct AppearanceSettingsUI {
     /// Active tab.
@@ -566,6 +874,14 @@ pub struct AppearanceSettingsUI {
     pub settings: AppearanceSettings,
     /// Saved settings for revert/dirty detection.
     saved: AppearanceSettings,
+    /// The user's configuration file, kept whole.
+    ///
+    /// Held rather than rebuilt on each save because it carries everything
+    /// this panel does not model — the user's comments, their blank lines,
+    /// their ordering, and any key belonging to another version of the
+    /// desktop. Rebuilding the file from `settings` would silently delete all
+    /// of it.
+    doc: Document,
 }
 
 impl AppearanceSettingsUI {
@@ -575,34 +891,70 @@ impl AppearanceSettingsUI {
             active_tab: AppearanceTab::Theme,
             saved: settings.clone(),
             settings,
+            doc: Document::new(),
+        }
+    }
+
+    /// Open the panel on the user's saved settings, reading
+    /// `appearance.yaml`.
+    ///
+    /// A missing or unreadable file yields the defaults — the ordinary state
+    /// on a fresh install, not an error to report to someone who has simply
+    /// never changed a setting.
+    #[must_use]
+    pub fn load() -> Self {
+        Self::from_document(crate::config::load(CONFIG_NAME))
+    }
+
+    /// Open the panel on an already-read configuration document. Split out
+    /// from [`load`](Self::load) so the format can be tested without a
+    /// filesystem.
+    #[must_use]
+    pub fn from_document(doc: Document) -> Self {
+        let settings = AppearanceSettings::read_from(&doc);
+        Self {
+            active_tab: AppearanceTab::Theme,
+            saved: settings.clone(),
+            settings,
+            doc,
         }
     }
 
     /// Whether settings have been changed from the saved state.
+    ///
+    /// A whole-struct comparison, not a hand-picked list of fields: the list
+    /// this replaced omitted `mono_font`, `subpixel`, `smoothing` and
+    /// `custom_accent`, so changing the terminal font left the Save button
+    /// greyed out and the change was lost on close. A derived `PartialEq`
+    /// cannot fall behind a new field the way a hand-written check does.
     pub fn is_dirty(&self) -> bool {
-        // Compare key fields — full eq is tedious, so check the important ones
-        self.settings.theme_mode != self.saved.theme_mode
-            || self.settings.accent_color != self.saved.accent_color
-            || self.settings.transparency != self.saved.transparency
-            || self.settings.animation_speed != self.saved.animation_speed
-            || self.settings.icon_size != self.saved.icon_size
-            || self.settings.cursor_size != self.saved.cursor_size
-            || self.settings.window_corners != self.saved.window_corners
-            || self.settings.taskbar_style != self.saved.taskbar_style
-            || self.settings.accent_taskbar != self.saved.accent_taskbar
-            || self.settings.accent_titlebars != self.saved.accent_titlebars
-            || self.settings.drop_shadows != self.saved.drop_shadows
-            || self.settings.scaling_percent != self.saved.scaling_percent
-            || (self.settings.fonts.ui_size - self.saved.fonts.ui_size).abs() > 0.1
-            || (self.settings.fonts.mono_size - self.saved.fonts.mono_size).abs() > 0.1
-            || self.settings.fonts.ui_font != self.saved.fonts.ui_font
-            || self.settings.fonts.hinting != self.saved.fonts.hinting
-            || self.settings.cursor_scheme != self.saved.cursor_scheme
+        self.settings != self.saved
     }
 
-    /// Save current settings (marks as clean).
-    pub fn save(&mut self) {
+    /// Fold the current settings into the configuration document and mark
+    /// them clean, without touching the filesystem.
+    ///
+    /// [`save`](Self::save) is the usual entry point; this exists so a caller
+    /// that manages its own storage — or a test — can get the document.
+    pub fn apply(&mut self) -> &Document {
+        self.settings.write_into(&mut self.doc);
         self.saved = self.settings.clone();
+        &self.doc
+    }
+
+    /// Save the current settings to `appearance.yaml`.
+    ///
+    /// The settings are marked clean whether or not the write succeeds: the
+    /// user's choices are in memory and in effect either way, and leaving the
+    /// panel permanently dirty would only invite them to press Save again to
+    /// the same result. The error is returned so the caller can say so.
+    ///
+    /// # Errors
+    ///
+    /// If there is no configuration directory, or the file cannot be written.
+    pub fn save(&mut self) -> std::io::Result<()> {
+        self.apply();
+        crate::config::store(CONFIG_NAME, &self.doc)
     }
 
     /// Revert to saved settings.
@@ -1474,7 +1826,9 @@ mod tests {
         let mut ui = AppearanceSettingsUI::new();
         ui.settings.accent_color = AccentColor::Red;
         assert!(ui.is_dirty());
-        ui.save();
+        // `apply`, not `save`: the test is about the clean/dirty transition,
+        // and `save` would write to the developer's own config directory.
+        ui.apply();
         assert!(!ui.is_dirty());
     }
 
@@ -1558,5 +1912,291 @@ mod tests {
         assert_eq!(AppearanceTab::Fonts.label(), "Fonts");
         assert_eq!(AppearanceTab::Effects.label(), "Effects");
         assert_eq!(AppearanceTab::CursorsIcons.label(), "Cursors & Icons");
+    }
+
+    // ---- Configuration file ----
+
+    /// Settings that differ from the defaults in every field, so a
+    /// round-trip test cannot pass by accident on a field it forgot.
+    fn all_non_default() -> AppearanceSettings {
+        AppearanceSettings {
+            theme_mode: ThemeMode::Light,
+            accent_color: AccentColor::Custom,
+            custom_accent: Color::rgba(1, 2, 3, 4),
+            transparency: TransparencyLevel::Full,
+            animation_speed: AnimationSpeed::Slow,
+            fonts: FontSettings {
+                ui_font: "Cantarell".to_string(),
+                mono_font: "Iosevka".to_string(),
+                ui_size: 15.5,
+                mono_size: 11.0,
+                hinting: false,
+                subpixel: SubpixelMode::VBgr,
+                smoothing: false,
+            },
+            icon_size: IconSize::ExtraLarge,
+            cursor_size: CursorSize::Large,
+            cursor_scheme: CursorScheme::AccentColored,
+            window_corners: WindowCorners::Square,
+            taskbar_style: TaskbarStyle::Transparent,
+            accent_taskbar: true,
+            accent_titlebars: true,
+            drop_shadows: false,
+            scaling_percent: 150,
+        }
+    }
+
+    #[test]
+    fn test_config_round_trips_every_field() {
+        let settings = all_non_default();
+        assert_ne!(settings, AppearanceSettings::default());
+        let mut doc = Document::new();
+        settings.write_into(&mut doc);
+        let reread = AppearanceSettings::read_from(&Document::parse(&doc.to_text()));
+        assert_eq!(reread, settings);
+    }
+
+    #[test]
+    fn test_config_round_trips_every_enum_variant() {
+        // A typo in one `yaml_name` arm would otherwise only show up as one
+        // user's setting quietly resetting itself.
+        let mut settings = AppearanceSettings::default();
+        for accent in AccentColor::presets().iter().copied().chain([AccentColor::Custom]) {
+            settings.accent_color = accent;
+            for theme in [ThemeMode::Dark, ThemeMode::Light, ThemeMode::System] {
+                settings.theme_mode = theme;
+                let mut doc = Document::new();
+                settings.write_into(&mut doc);
+                let reread = AppearanceSettings::read_from(&Document::parse(&doc.to_text()));
+                assert_eq!(reread.accent_color, accent);
+                assert_eq!(reread.theme_mode, theme);
+            }
+        }
+        for (subpixel, corners, taskbar, cursor, icon, speed, transparency, scheme) in [
+            (
+                SubpixelMode::None,
+                WindowCorners::Square,
+                TaskbarStyle::Solid,
+                CursorSize::Small,
+                IconSize::Small,
+                AnimationSpeed::Off,
+                TransparencyLevel::Off,
+                CursorScheme::Default,
+            ),
+            (
+                SubpixelMode::Rgb,
+                WindowCorners::Subtle,
+                TaskbarStyle::Translucent,
+                CursorSize::Normal,
+                IconSize::Medium,
+                AnimationSpeed::Fast,
+                TransparencyLevel::Subtle,
+                CursorScheme::Inverted,
+            ),
+            (
+                SubpixelMode::Bgr,
+                WindowCorners::Rounded,
+                TaskbarStyle::Transparent,
+                CursorSize::Large,
+                IconSize::Large,
+                AnimationSpeed::Normal,
+                TransparencyLevel::Moderate,
+                CursorScheme::AccentColored,
+            ),
+            (
+                SubpixelMode::VRgb,
+                WindowCorners::ExtraRounded,
+                TaskbarStyle::Solid,
+                CursorSize::ExtraLarge,
+                IconSize::ExtraLarge,
+                AnimationSpeed::Slow,
+                TransparencyLevel::Full,
+                CursorScheme::Default,
+            ),
+            (
+                SubpixelMode::VBgr,
+                WindowCorners::Square,
+                TaskbarStyle::Translucent,
+                CursorSize::Small,
+                IconSize::Small,
+                AnimationSpeed::Off,
+                TransparencyLevel::Off,
+                CursorScheme::Inverted,
+            ),
+        ] {
+            settings.fonts.subpixel = subpixel;
+            settings.window_corners = corners;
+            settings.taskbar_style = taskbar;
+            settings.cursor_size = cursor;
+            settings.icon_size = icon;
+            settings.animation_speed = speed;
+            settings.transparency = transparency;
+            settings.cursor_scheme = scheme;
+            let mut doc = Document::new();
+            settings.write_into(&mut doc);
+            let reread = AppearanceSettings::read_from(&Document::parse(&doc.to_text()));
+            assert_eq!(reread, settings, "round trip of {settings:?}");
+        }
+    }
+
+    #[test]
+    fn test_config_yaml_names_are_distinct_within_each_enum() {
+        // Two variants sharing a spelling would make one of them unreadable.
+        let accents: Vec<_> = AccentColor::presets()
+            .iter()
+            .copied()
+            .chain([AccentColor::Custom])
+            .map(AccentColor::yaml_name)
+            .collect();
+        let mut sorted = accents.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), accents.len(), "duplicate accent spelling");
+    }
+
+    #[test]
+    fn test_config_missing_keys_fall_back_to_defaults() {
+        let doc = Document::parse("theme:\n  mode: light\n");
+        let settings = AppearanceSettings::read_from(&doc);
+        assert_eq!(settings.theme_mode, ThemeMode::Light);
+        // Everything the file did not mention is untouched.
+        let defaults = AppearanceSettings::default();
+        assert_eq!(settings.accent_color, defaults.accent_color);
+        assert_eq!(settings.fonts, defaults.fonts);
+        assert_eq!(settings.scaling_percent, defaults.scaling_percent);
+    }
+
+    #[test]
+    fn test_config_unknown_spellings_fall_back_to_defaults() {
+        // A file written by a newer desktop, or edited by hand with a typo.
+        let doc = Document::parse(
+            "theme:\n  mode: solarized\n  accent: chartreuse\n  custom_accent: not-a-color\n\
+             fonts:\n  subpixel: quadpixel\n  hinting: maybe\n",
+        );
+        let settings = AppearanceSettings::read_from(&doc);
+        let defaults = AppearanceSettings::default();
+        assert_eq!(settings.theme_mode, defaults.theme_mode);
+        assert_eq!(settings.accent_color, defaults.accent_color);
+        assert_eq!(settings.custom_accent, defaults.custom_accent);
+        assert_eq!(settings.fonts.subpixel, defaults.fonts.subpixel);
+        assert_eq!(settings.fonts.hinting, defaults.fonts.hinting);
+    }
+
+    #[test]
+    fn test_config_out_of_range_values_are_clamped_not_rejected() {
+        let doc = Document::parse(
+            "fonts:\n  ui_size: 400.0\n  mono_size: 1.0\ndisplay:\n  scaling_percent: 9000\n",
+        );
+        let settings = AppearanceSettings::read_from(&doc);
+        assert_eq!(settings.fonts.ui_size, 32.0);
+        assert_eq!(settings.fonts.mono_size, 6.0);
+        assert_eq!(settings.scaling_percent, 300);
+        // A percentage that does not even fit a u16 leaves the default alone.
+        let huge = Document::parse("display:\n  scaling_percent: 99999999\n");
+        assert_eq!(
+            AppearanceSettings::read_from(&huge).scaling_percent,
+            AppearanceSettings::default().scaling_percent
+        );
+    }
+
+    #[test]
+    fn test_config_colors_use_css_hex() {
+        assert_eq!(color_to_hex(Color::rgb(0x89, 0xB4, 0xFA)), "#89b4fa");
+        assert_eq!(color_to_hex(Color::rgba(1, 2, 3, 4)), "#01020304");
+        assert_eq!(color_from_hex("#89b4fa"), Some(Color::rgb(0x89, 0xB4, 0xFA)));
+        assert_eq!(color_from_hex("#89B4FA"), Some(Color::rgb(0x89, 0xB4, 0xFA)));
+        assert_eq!(color_from_hex("#01020304"), Some(Color::rgba(1, 2, 3, 4)));
+        for bad in ["89b4fa", "#89b4f", "#gggggg", "#", "", "#89b4fa00ff"] {
+            assert_eq!(color_from_hex(bad), None, "{bad} should not parse");
+        }
+    }
+
+    #[test]
+    fn test_config_save_preserves_the_users_comments_and_keys() {
+        // The whole point of yamldoc: a user annotates their file, changes one
+        // setting in the UI, and gets their annotations back.
+        let original = "\
+# My desktop. Do not let the settings app eat these notes.
+theme:
+  mode: dark      # I like it dark
+  accent: teal
+
+# Something a future version of the desktop writes.
+experimental:
+  wobbly_windows: true
+";
+        let mut ui = AppearanceSettingsUI::from_document(Document::parse(original));
+        assert_eq!(ui.settings.theme_mode, ThemeMode::Dark);
+        assert_eq!(ui.settings.accent_color, AccentColor::Teal);
+
+        ui.settings.accent_color = AccentColor::Mauve;
+        let text = ui.apply().to_text();
+
+        assert!(text.contains("# My desktop. Do not let the settings app eat these notes."));
+        assert!(text.contains("# I like it dark"));
+        assert!(
+            text.contains("wobbly_windows: true"),
+            "a key this version does not model was deleted:\n{text}"
+        );
+        assert!(text.contains("accent: mauve"), "the edit did not land:\n{text}");
+        assert!(!text.contains("accent: teal"));
+        assert_eq!(
+            AppearanceSettings::read_from(&Document::parse(&text)).accent_color,
+            AccentColor::Mauve
+        );
+    }
+
+    #[test]
+    fn test_config_saving_twice_produces_no_second_diff() {
+        // Otherwise every visit to the settings panel dirties the user's file.
+        let mut ui = AppearanceSettingsUI::from_document(Document::parse(
+            "# notes\ntheme:\n  mode: dark\n",
+        ));
+        ui.settings.fonts.ui_size = 14.0;
+        let once = ui.apply().to_text();
+        let twice = ui.apply().to_text();
+        assert_eq!(once, twice);
+        // And a save that changes nothing does not rewrite the file either.
+        let mut again = AppearanceSettingsUI::from_document(Document::parse(&once));
+        assert_eq!(again.apply().to_text(), once);
+    }
+
+    #[test]
+    fn test_ui_dirty_detects_the_fields_the_old_check_missed() {
+        // Each of these left Save greyed out before `is_dirty` compared the
+        // whole struct, so the change was silently lost on close.
+        let mut ui = AppearanceSettingsUI::new();
+        ui.settings.fonts.mono_font = "Iosevka".to_string();
+        assert!(ui.is_dirty(), "mono_font change not detected");
+
+        let mut ui = AppearanceSettingsUI::new();
+        ui.settings.fonts.subpixel = SubpixelMode::Bgr;
+        assert!(ui.is_dirty(), "subpixel change not detected");
+
+        let mut ui = AppearanceSettingsUI::new();
+        ui.settings.fonts.smoothing = !ui.settings.fonts.smoothing;
+        assert!(ui.is_dirty(), "smoothing change not detected");
+
+        let mut ui = AppearanceSettingsUI::new();
+        ui.settings.custom_accent = Color::rgb(1, 2, 3);
+        assert!(ui.is_dirty(), "custom_accent change not detected");
+    }
+
+    #[test]
+    fn test_ui_dirty_detects_a_font_size_nudge() {
+        // The old check ignored size changes under 0.1pt, which meant a slider
+        // step could be a change the user could see but not save.
+        let mut ui = AppearanceSettingsUI::new();
+        ui.settings.fonts.ui_size += 0.05;
+        assert!(ui.is_dirty());
+        ui.apply();
+        assert!(!ui.is_dirty());
+    }
+
+    #[test]
+    fn test_ui_load_defaults_from_an_empty_document() {
+        let ui = AppearanceSettingsUI::from_document(Document::new());
+        assert_eq!(ui.settings, AppearanceSettings::default());
+        assert!(!ui.is_dirty());
     }
 }

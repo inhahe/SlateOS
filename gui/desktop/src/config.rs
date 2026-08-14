@@ -1,0 +1,279 @@
+//! Where the desktop shell's configuration lives, and how it gets there.
+//!
+//! Every `*_settings.rs` panel in this crate edits state that has to outlive
+//! the session, and none of them had anywhere to put it. This module is the
+//! one place that answers "which file?" and "how do I write it without losing
+//! the user's copy if the power goes out mid-save?", so that twenty settings
+//! panels do not answer it twenty different ways.
+//!
+//! # Layout
+//!
+//! `$XDG_CONFIG_HOME/slateos/<name>.yaml`, falling back to
+//! `$HOME/.config/slateos/<name>.yaml`. Both spellings are honoured because
+//! the rest of the tree already assumes an XDG-shaped home (`~/.cache`,
+//! `~/.local/share/Trash`), and a user who has set `XDG_CONFIG_HOME` has said
+//! plainly where they want their configuration.
+//!
+//! With neither variable set there is no user to have settings, so
+//! [`store`] reports it rather than inventing a location — writing a user's
+//! personal preferences into a system-wide path because `$HOME` was missing
+//! would be worse than not writing them at all.
+//!
+//! # Durability
+//!
+//! [`store`] writes a temporary file beside the target and renames it over
+//! the original. A rename within a directory is atomic, so a reader — or a
+//! crash — sees either the whole old file or the whole new one, never the
+//! truncated middle of a save. Writing in place is how a settings dialog
+//! turns a power cut into an empty config file.
+
+use std::env;
+use std::fs;
+use std::io;
+use std::path::PathBuf;
+
+use yamldoc::Document;
+
+/// The directory holding this user's SlateOS configuration.
+///
+/// `None` when the environment names no home, which is the case in an early
+/// boot context or a stripped service environment.
+#[must_use]
+pub fn config_dir() -> Option<PathBuf> {
+    if let Some(xdg) = env::var_os("XDG_CONFIG_HOME")
+        && !xdg.is_empty()
+    {
+        return Some(PathBuf::from(xdg).join("slateos"));
+    }
+    let home = env::var_os("HOME")?;
+    if home.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(home).join(".config").join("slateos"))
+}
+
+/// The file a named settings group lives in.
+#[must_use]
+pub fn path_for(name: &str) -> Option<PathBuf> {
+    let mut path = config_dir()?;
+    path.push(name);
+    path.set_extension("yaml");
+    Some(path)
+}
+
+/// Read a settings group.
+///
+/// A file that does not exist, or cannot be read, yields an empty document —
+/// which every settings reader turns into its defaults. That is deliberately
+/// not an error: "the user has never opened this panel" is the ordinary case
+/// on a fresh install, not a failure to report.
+///
+/// A file that exists but holds something unreadable is *also* returned as
+/// itself rather than discarded, so that saving a single changed setting
+/// splices into the user's file instead of replacing it wholesale.
+#[must_use]
+pub fn load(name: &str) -> Document {
+    let Some(path) = path_for(name) else {
+        return Document::new();
+    };
+    match fs::read_to_string(&path) {
+        Ok(text) => Document::parse(&text),
+        Err(_) => Document::new(),
+    }
+}
+
+/// Write a settings group, atomically.
+///
+/// # Errors
+///
+/// If there is no configuration directory to write to, if it cannot be
+/// created, or if the write or the rename fails.
+pub fn store(name: &str, doc: &Document) -> io::Result<()> {
+    let path = path_for(name).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "no configuration directory: neither XDG_CONFIG_HOME nor HOME is set",
+        )
+    })?;
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    // Named for the target rather than randomly, so a crash between the write
+    // and the rename leaves one identifiable piece of litter that the next
+    // save overwrites — not an unbounded pile of temporaries.
+    let mut temp = path.clone();
+    let mut file_name = path.file_name().unwrap_or_default().to_os_string();
+    file_name.push(".new");
+    temp.set_file_name(file_name);
+
+    fs::write(&temp, doc.to_text())?;
+    match fs::rename(&temp, &path) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            // The temporary is not the user's file, so failing to clean it up
+            // is not worth masking the error that actually matters.
+            let _ = fs::remove_file(&temp);
+            Err(err)
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
+mod tests {
+    use super::*;
+
+    /// `env::set_var` is process-global, so these tests take turns rather than
+    /// racing each other over `HOME`.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Run `body` with the config-directory variables set as given, restoring
+    /// whatever the process had before.
+    fn with_env<T>(xdg: Option<&str>, home: Option<&str>, body: impl FnOnce() -> T) -> T {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let old_xdg = env::var_os("XDG_CONFIG_HOME");
+        let old_home = env::var_os("HOME");
+        // SAFETY: the lock above makes this the only thread touching the
+        // environment for the duration, which is what `set_var` requires.
+        unsafe {
+            match xdg {
+                Some(v) => env::set_var("XDG_CONFIG_HOME", v),
+                None => env::remove_var("XDG_CONFIG_HOME"),
+            }
+            match home {
+                Some(v) => env::set_var("HOME", v),
+                None => env::remove_var("HOME"),
+            }
+        }
+        let out = body();
+        // SAFETY: as above.
+        unsafe {
+            match old_xdg {
+                Some(v) => env::set_var("XDG_CONFIG_HOME", v),
+                None => env::remove_var("XDG_CONFIG_HOME"),
+            }
+            match old_home {
+                Some(v) => env::set_var("HOME", v),
+                None => env::remove_var("HOME"),
+            }
+        }
+        drop(guard);
+        out
+    }
+
+    /// A scratch directory that removes itself.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let mut path = env::temp_dir();
+            let id = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            path.push(format!("slateos-cfg-{tag}-{id}"));
+            fs::create_dir_all(&path).expect("create scratch dir");
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn xdg_config_home_wins_over_home() {
+        let dir = with_env(Some("/x"), Some("/h"), config_dir);
+        assert_eq!(dir, Some(PathBuf::from("/x").join("slateos")));
+    }
+
+    #[test]
+    fn home_is_the_fallback() {
+        let dir = with_env(None, Some("/h"), config_dir);
+        assert_eq!(dir, Some(PathBuf::from("/h").join(".config").join("slateos")));
+    }
+
+    #[test]
+    fn an_empty_variable_is_not_a_location() {
+        assert_eq!(with_env(Some(""), None, config_dir), None);
+        assert_eq!(with_env(None, Some(""), config_dir), None);
+        assert_eq!(with_env(None, None, config_dir), None);
+    }
+
+    #[test]
+    fn a_name_becomes_a_yaml_file() {
+        let path = with_env(Some("/x"), None, || path_for("appearance"));
+        assert_eq!(
+            path,
+            Some(PathBuf::from("/x").join("slateos").join("appearance.yaml"))
+        );
+    }
+
+    #[test]
+    fn a_missing_file_loads_as_an_empty_document() {
+        let temp = TempDir::new("missing");
+        let doc = with_env(Some(temp.0.to_str().unwrap()), None, || load("nothing-here"));
+        assert!(doc.is_empty());
+    }
+
+    #[test]
+    fn with_no_home_a_store_reports_it_instead_of_guessing() {
+        let mut doc = Document::new();
+        doc.set_i64(&["a"], 1);
+        let err = with_env(Some(""), Some(""), || store("appearance", &doc))
+            .expect_err("storing with no home should fail");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn a_stored_document_reloads_as_itself() {
+        let temp = TempDir::new("roundtrip");
+        let text = "# hand-written\nfonts:\n  size: 13  # points\n";
+        let doc = Document::parse(text);
+        with_env(Some(temp.0.to_str().unwrap()), None, || {
+            store("appearance", &doc).expect("store");
+            // The comment and the layout have to come back, not just the value.
+            assert_eq!(load("appearance").to_text(), text);
+            // And the file really is where `path_for` says it is.
+            let path = path_for("appearance").expect("path");
+            assert_eq!(fs::read_to_string(&path).expect("read"), text);
+        });
+    }
+
+    #[test]
+    fn a_second_store_leaves_no_temporary_behind() {
+        let temp = TempDir::new("clean");
+        with_env(Some(temp.0.to_str().unwrap()), None, || {
+            let mut doc = Document::parse("a: 1\n");
+            store("appearance", &doc).expect("first store");
+            doc.set_i64(&["a"], 2);
+            store("appearance", &doc).expect("second store");
+            assert_eq!(load("appearance").get_i64(&["a"]), Some(2));
+            let dir = config_dir().expect("dir");
+            let names: Vec<_> = fs::read_dir(&dir)
+                .expect("read dir")
+                .filter_map(Result::ok)
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(names, vec!["appearance.yaml".to_owned()]);
+        });
+    }
+
+    #[test]
+    fn store_creates_the_directory() {
+        let temp = TempDir::new("mkdir");
+        let nested = temp.0.join("deep").join("deeper");
+        with_env(Some(nested.to_str().unwrap()), None, || {
+            store("appearance", &Document::parse("a: 1\n")).expect("store");
+            assert_eq!(load("appearance").get_i64(&["a"]), Some(1));
+        });
+    }
+}

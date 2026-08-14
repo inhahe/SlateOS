@@ -139,6 +139,11 @@ mod backup_settings;
 mod device_settings;
 #[allow(dead_code)]
 mod security_dialog;
+/// Where settings panels persist what the user chose — the one place in the
+/// shell that decides which file configuration lives in and how it is written
+/// without risking the user's copy.
+#[allow(dead_code)]
+mod config;
 
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers};

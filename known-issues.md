@@ -58395,3 +58395,50 @@ un-drawable text.
 
 **Where.** `gui/desktop/src/appearance_settings.rs` (`save`, and the absent
 `load`); `gui/toolkit/src/text.rs::set_font_family` is the ready-made sink.
+
+**Update 2026-08-14 — the persistence half is done; the cross-process half is
+not.** `save()` is no longer a field copy. `gui/desktop/src/config.rs` is new
+and is the shell's one answer to "which file, and how do I write it without
+risking the user's copy": `$XDG_CONFIG_HOME/slateos/<name>.yaml`, falling back
+to `$HOME/.config/slateos/`, written to a `.new` temporary and renamed over the
+target so a crash mid-save cannot truncate the original. With neither variable
+set it reports `NotFound` rather than inventing a system-wide path to put one
+user's preferences in. `AppearanceSettingsUI` gained `load()`, `from_document()`
+and `apply()`; `save()` now returns `io::Result<()>`.
+
+The format layer is `AppearanceSettings::read_from`/`write_into` over the new
+`yamldoc` crate, so a save splices values into the user's own file: comments,
+blank lines, ordering and any key belonging to a different version of the
+desktop all survive, and a second identical save produces no diff. Reading is
+total — a missing key, an unknown enum spelling, or a value out of range leaves
+the field at its default (then `validate()` clamps), so a file from a newer
+desktop degrades instead of failing. Config spellings are deliberately separate
+from `label()`: the UI text is free to change without invalidating every user's
+saved choice.
+
+**A second bug was found and fixed on the way in.** `is_dirty()` compared a
+hand-picked list of "key fields" that omitted `mono_font`, `subpixel`,
+`smoothing` and `custom_accent` — so changing the terminal font left Save greyed
+out and the change was lost on close — and ignored font-size changes under
+0.1 pt, which a slider step can produce. `AppearanceSettings`/`FontSettings` now
+derive `PartialEq` and `is_dirty()` compares the whole struct, which cannot fall
+behind a newly added field the way the hand-written check did.
+
+**Still open (the reason this entry is narrowed, not closed):**
+
+1. **Nothing calls it yet.** `main.rs` does not construct an
+   `AppearanceSettingsUI`, so no startup path reads `appearance.yaml` and no
+   frame is affected by it. The panel is correct and tested in isolation; wiring
+   it into the shell's startup and its settings-window routing is the next step.
+2. **The compositor still cannot see the setting**, so driving `ui_font`
+   through `guitk::text::set_font_family` remains wrong for the reason above:
+   the desktop would measure in the chosen family while the compositor drew in
+   the compiled-in fallback (design-decisions.md §400). The fix is unchanged —
+   the desktop pushes the resolved family to the compositor over the existing
+   protocol, one writer, no guessing.
+3. **The other ~20 `*_settings.rs` panels are still `saved = settings.clone()`.**
+   `config.rs` is deliberately general so each can be converted the same way;
+   none have been.
+
+**Where (updated).** `gui/desktop/src/config.rs` (new); the "Configuration
+file" section of `gui/desktop/src/appearance_settings.rs`; `yamldoc/src/lib.rs`.

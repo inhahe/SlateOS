@@ -236,7 +236,7 @@ def test_canary_broken_is_not_contamination(bh, tmpdir):
           bh.parse_canary(log),
           {"start": 271, "end": 275, "pct": 101, "min": 271, "max": 279,
            "spread": 2, "samples": 9, "invalid": 3})
-    check("any failed measurement makes the canary broken",
+    check("a failed measurement among quiet ones makes the canary broken",
           v(bh.parse_canary(log)), bh.CANARY_BROKEN)
     check("a broken canary is NOT reported as contamination",
           bh.canary_is_contaminated(bh.parse_canary(log)), False)
@@ -303,6 +303,38 @@ def test_canary_broken_is_not_contamination(bh, tmpdir):
                     "max_centi": 750}
     check("a precise record over tolerance is contaminated, not broken",
           v(over_precise), bh.CANARY_CONTAMINATED)
+
+    # --- verdict precedence between "failed" and "found something" ---------
+    #
+    # CONTRACT CHANGED 2026-08-14, from measurement. This function used to
+    # return BROKEN on *any* `invalid > 0`, before it had even looked at the
+    # spread. The P20 positive control (scripts/canary-load-test.sh, 6 CPU
+    # spinners during the QEMU window) produced two runs whose real wire lines
+    # are transcribed below: in both, one of ten measurements failed to separate
+    # its arms while the other nine spread 53% and 117%. The old rule answered
+    # "contamination is UNKNOWN" about a run that was demonstrably, deliberately
+    # contaminated -- the instrument measured it and then declined to say so.
+    #
+    # Noise large enough to invert a 5-cycle A/B split *is* load, so those
+    # failures corroborate the spread rather than impeaching it.
+    loaded_1 = bh.parse_canary(write(tmpdir, "canary-loaded-1.txt",
+                                     "[bench] CANARY 0 10 0 8 12 53 9 1 826 1269\n"))
+    loaded_2 = bh.parse_canary(write(tmpdir, "canary-loaded-2.txt",
+                                     "[bench] CANARY 0 6 0 5 12 117 9 1 580 1259\n"))
+    check("a failed sample does not veto a measured 53% spread",
+          v(loaded_1), bh.CANARY_CONTAMINATED)
+    check("nor a measured 117% spread", v(loaded_2), bh.CANARY_CONTAMINATED)
+    check("and that verdict is reported as contamination",
+          bh.canary_is_contaminated(loaded_1), True)
+    # The mirror case, which must stay BROKEN: failures alongside a *quiet*
+    # spread. A failed sample is not a quiet one, so the excursion could be
+    # hiding in the measurement that did not come back.
+    quiet_with_failure = dict(loaded_1, spread=2, min_centi=500, max_centi=510)
+    check("failures alongside a quiet spread are still UNKNOWN",
+          v(quiet_with_failure), bh.CANARY_BROKEN)
+    # And nothing measured at all outranks everything: there is no finding.
+    check("zero valid samples is broken whatever the spread says",
+          v(dict(loaded_1, samples=0)), bh.CANARY_BROKEN)
 
     check("a legacy zero-start canary is broken",
           v({"start": 0, "end": 200, "pct": 0}), bh.CANARY_BROKEN)

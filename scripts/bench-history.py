@@ -255,15 +255,31 @@ def canary_verdict(canary):
     *contamination*, sending the reader after host load that was never there
     while the real fault (the optimiser had deleted the store being timed) went
     unnamed. "The instrument failed" is not "the instrument found a problem".
+
+    But "the instrument failed" does not outrank "the instrument found a
+    problem" either, and this function used to say it did: any `invalid > 0`
+    returned BROKEN before the spread was even looked at. The controlled load
+    test (P20) showed what that costs -- under 6 CPU spinners a run had 1 of 10
+    measurements fail to separate its arms while the other 9 spread 53%, and
+    both the kernel and this function answered "UNKNOWN". The failures are
+    evidence *for* contamination there, not against it: noise big enough to
+    invert a 5-cycle A/B split is load. So the precedence now matches the
+    kernel's `report_canary`: nothing measured at all is BROKEN; an
+    over-tolerance spread is CONTAMINATED even alongside failures; only a
+    *within*-tolerance spread with failures present is BROKEN, because a failed
+    sample is not a quiet one and could have hidden the excursion.
     """
     if canary is None:
         return CANARY_ABSENT
-    # `invalid` is authoritative when present: the kernel counted the failures
-    # directly. Older logs have no such field, so a zero/absent start is still
-    # read as a failed measurement.
-    if canary.get("invalid", 0) > 0:
+    # Nothing measured at all: there is no finding to report, over-tolerance or
+    # otherwise.
+    if canary.get("samples") == 0:
         return CANARY_BROKEN
-    if canary["start"] <= 0 or canary.get("samples") == 0:
+    # A missing start makes `pct` meaningless -- the kernel writes 0, which
+    # reads back as a 100% endpoint change -- so on a record with no
+    # independent `spread` field there is nothing left to judge. This is the
+    # exact shape of the nine dead release records.
+    if canary["start"] <= 0 and "spread" not in canary:
         return CANARY_BROKEN
     # A minimum below one cycle of usable resolution means the arms barely
     # separated: `min == 0` is the fully-eliminated case the pre-`invalid` logs
@@ -296,6 +312,12 @@ def canary_verdict(canary):
         over = canary["spread"] > CANARY_TOLERANCE_PCT
     else:
         over = abs(canary["pct"] - 100) > CANARY_TOLERANCE_PCT
+    # Arm-separation failures are decisive only when the samples that *did*
+    # measure came back quiet. `invalid` is authoritative when present (the
+    # kernel counted its own failures); on older logs a zero start is the same
+    # thing, one failed endpoint measurement.
+    if not over and (canary.get("invalid", 0) > 0 or canary["start"] <= 0):
+        return CANARY_BROKEN
     return CANARY_CONTAMINATED if over else CANARY_CLEAN
 
 

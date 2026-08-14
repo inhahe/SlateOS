@@ -62619,3 +62619,68 @@ been shown to fire on a known stimulus is not yet a detector.
 
 Until P20 grades, "the canary detects host load" is a well-supported hypothesis,
 not an established property.
+
+### RESULT P20 — the detector fires, and firing exposed a defect no idle run could
+
+**Graded 2026-08-14.** `scripts/canary-load-test.sh 6` — six pure-Python CPU
+spinners started only after `Booting QEMU` appears in the log, so the load lands
+on the measurement window and not on the build. Two trials, plus the idle run
+immediately before them as a control.
+
+| trial | wire record | spread | reference cost |
+|---|---|---|---|
+| idle (control) | `CANARY 5 5 99 5 5 0 10 0 516 517` | **0%** | 5.16 → 5.17 cycles |
+| loaded #1 | `CANARY 0 10 0 8 12 53 9 1 826 1269` | **53%** | 8.26 – 12.69 cycles |
+| loaded #2 | `CANARY 0 6 0 5 12 117 9 1 580 1259` | **117%** | 5.80 – 12.59 cycles |
+
+**P20(a) — HIT on the measurement, MISS on the verdict.** The spread went over
+tolerance exactly as predicted (53% and 117% against 25%), and the reference cost
+roughly doubled. But the run did *not* print `CONTAMINATED`; it printed
+`CANARY BROKEN: 1 of 10 reference measurements could not separate their two
+arms ... so contamination is UNKNOWN for this run`. The prediction named the
+verdict and the verdict was wrong, so this half is a miss — and it is the more
+useful half, because an idle machine could never have produced it. **The
+instrument measured the contamination and then declined to report it.**
+
+**P20(b) — HIT.** The traces:
+
+```
+#1  0:8.4  8:9.8  16:12.6  24:9.2  32:10.8  40:8.2  48:8.8  56:11.4  end:10.7
+#2  0:12.5 8:9.2  16:10.5  24:7.2  32:5.8   40:7.5  48:7.4  56:7.7   end:6.8
+```
+
+Spearman ρ between the two loaded traces is **0.048** — no rank agreement at
+all. #1 peaks at position 16 and is cheapest at 40; #2 peaks at position 0 and is
+cheapest at 32. A suite-induced effect (cache/TLB residue from the preceding
+benchmarks) is reproducible *by construction* — same benchmarks, same order,
+same positions — so ρ≈0 rules it out and leaves the applied load as the cause.
+This is the discriminator P19 lacked.
+
+**Conclusion: "the canary detects host load" is now an established property**,
+not an inference from two uncontrolled observations. The stimulus was set
+deliberately and the detector fired on it.
+
+#### The two defects P20 exposed, and the fix
+
+1. **`invalid > 0` outranked the spread check**, in both `report_canary` and
+   `scripts/bench-history.py`'s `canary_verdict`. One failed arm-separation out
+   of ten suppressed a 53% finding from the other nine. The verdicts are now
+   ordered by what can actually be concluded: `samples == 0` is BROKEN (nothing
+   was measured); an over-tolerance spread is CONTAMINATED *even with failures
+   present*, because noise big enough to invert a 5-cycle A/B split is itself
+   load and so corroborates the verdict; only a within-tolerance spread
+   alongside failures is BROKEN, since a failed sample is not a quiet one and
+   could have hidden the excursion.
+
+2. **The BROKEN message named one cause for a symptom with two.** It said "the
+   optimiser has removed it again" — true the first time, and written from that
+   single instance. P20 produced the identical symptom from the opposite cause
+   on a binary whose store the scale-invariance check had proven intact *in the
+   same run*. A reader trusting that wording would go disassemble a correct
+   function. `report_arm_failure_causes` now names both, quotes the
+   demonstrated failure count under load, and points at the scale-check line as
+   the discriminator between them.
+
+This is the fourth false attribution recorded in this thread and the second one
+found by building the instrument that could refute it rather than by reasoning
+about what the instrument must be saying.

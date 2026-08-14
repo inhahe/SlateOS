@@ -1012,6 +1012,38 @@ fn scale_invariance_check(base: u64) -> bool {
     true
 }
 
+/// Explain the two things that make an A/B reference measurement fail.
+///
+/// # Why both must be named
+///
+/// This message used to offer exactly one cause — "the optimiser has removed it
+/// again" — because that is what happened the first time and the text was
+/// written from that single instance. The controlled load test (P20) produced
+/// the identical symptom from the opposite cause: with six CPU spinners
+/// competing for the host, 1 of 10 measurements inverted in *both* trials, on a
+/// binary whose store had already been proven intact by the scale-invariance
+/// check in the same run.
+///
+/// A reader who trusts the old wording would go disassemble a function that is
+/// perfectly correct. Naming one cause for a symptom with two is how a
+/// diagnostic becomes a wild-goose chase, and it is the same false attribution
+/// this file has now recorded four times over.
+fn report_arm_failure_causes(invalid: u32) {
+    serial_println!(
+        "[bench]   arm-separation failure has two causes, and they need opposite \
+         responses. (1) HOST LOAD: the two arms differ by ~5 cycles per store, so \
+         competing work on the host can make noise exceed the signal and invert \
+         them. Demonstrated: 6 CPU spinners produced exactly {} such failure(s) \
+         per run on a known-good binary. Re-run on an idle machine before \
+         concluding anything. (2) OPTIMISER REMOVAL: the store was elided, so \
+         there is no signal at all. Distinguish them by the 'canary scale check' \
+         line above — if it reported OK, the store is intact and the cause is \
+         load, not codegen. See known-issues.md \
+         B-BENCH-CANARY-MEASURES-ZERO-IN-RELEASE-AND-BLAMES-THE-HOST.",
+        invalid
+    );
+}
+
 /// Re-measure the reference access cost and report whether the host stayed
 /// quiet for the whole suite.
 ///
@@ -1131,31 +1163,69 @@ fn report_canary(start: Option<u64>) {
     // "the instrument found contamination": reporting the second when the
     // first is true sends the reader hunting for host load that was never
     // there, which is exactly what nine release runs did.
-    if invalid > 0 || samples == 0 {
+    //
+    // But the precedence between them is not "any failure wins". A failed
+    // measurement does not erase the successful ones, and a positive finding
+    // from the samples that *did* measure is still a finding. The controlled
+    // load test (P20) proved this concretely: under 6 CPU spinners the suite
+    // reported CANARY BROKEN on a single failed arm-separation while the other
+    // nine samples showed an unmistakable 53% spread. The run was contaminated,
+    // the instrument had measured it, and the verdict said "UNKNOWN".
+    //
+    // So: no valid samples at all is BROKEN, because there is nothing to
+    // conclude from. Otherwise a spread over tolerance is CONTAMINATED even
+    // with failures present -- the failures corroborate it rather than
+    // undermining it. Only a *within*-tolerance spread alongside failures is
+    // UNKNOWN, since the failed samples could have hidden an excursion.
+    if samples == 0 {
+        serial_println!(
+            "[bench] CANARY BROKEN: all {} reference measurements could not \
+             separate their two arms (last: nop={} store={} over {} stores/window), \
+             so contamination is UNKNOWN for this run — not clean. See the note on \
+             causes below.",
+            invalid, end_nop, end_store, CANARY_STORES_PER_WINDOW
+        );
+        report_arm_failure_causes(invalid);
+    } else if invalid > 0 && spread <= CANARY_TOLERANCE_PCT {
         serial_println!(
             "[bench] CANARY BROKEN: {} of {} reference measurements could not \
-             separate their two arms (last: nop={} store={} over {} stores/window), \
-             so contamination is UNKNOWN for this run — not clean. The A/B arms \
-             differ only by one volatile byte store; if the store arm is no longer \
-             the dearer of the two, the optimiser has removed it again. See \
-             known-issues.md B-BENCH-CANARY-MEASURES-ZERO-IN-RELEASE-AND-BLAMES-THE-HOST.",
+             separate their two arms (last: nop={} store={} over {} stores/window). \
+             The other {} spread only {}% ({}.{}-{}.{} cycles), but a failed sample \
+             is not a quiet one — it could have been the excursion — so \
+             contamination is UNKNOWN for this run, NOT clean.",
             invalid,
             samples.saturating_add(invalid),
             end_nop,
             end_store,
-            CANARY_STORES_PER_WINDOW
+            CANARY_STORES_PER_WINDOW,
+            samples, spread, lo_c, lo_t, hi_c, hi_t
         );
+        report_arm_failure_causes(invalid);
     } else if spread > CANARY_TOLERANCE_PCT {
         serial_println!(
             "[bench] CONTAMINATED: the reference access cost spread {}% across {} \
              samples during the suite ({}.{}-{}.{} cycles, endpoints {}.{} -> {}.{} \
-             = {}%, tolerance {}%). Host load changed mid-run, so a single-benchmark \
-             outlier in this run is unproven — do not read it as a regression.",
+             = {}%, tolerance {}%){}. Host load changed mid-run, so a single-benchmark \
+             outlier in this run is unproven — do not read it as a regression. If you \
+             ran anything else on this machine during the QEMU window, that was the \
+             load: see scripts/boot-test.sh --bench.",
             spread, samples,
             lo_c, lo_t, hi_c, hi_t,
             start_c, start_t, end_c, end_t,
-            pct, CANARY_TOLERANCE_PCT
+            pct, CANARY_TOLERANCE_PCT,
+            // The failures are evidence *for* this verdict, not against it:
+            // noise large enough to invert a 5-cycle A/B split is itself load.
+            if invalid > 0 { " — and some measurements failed outright, see below" }
+            else { "" }
         );
+        if invalid > 0 {
+            serial_println!(
+                "[bench]   ...{} of {} reference measurements also failed to separate \
+                 their arms, which corroborates the verdict rather than weakening it.",
+                invalid, samples.saturating_add(invalid)
+            );
+            report_arm_failure_causes(invalid);
+        }
     } else {
         serial_println!(
             "[bench] Canary OK: reference access cost stable across {} samples \

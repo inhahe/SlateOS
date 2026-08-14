@@ -555,6 +555,48 @@ pub fn join(target_task: TaskId) -> KernelResult<i64> {
         waiters.insert(target_task, caller_task);
     }
 
+    // Register-then-recheck: the liveness check above released the
+    // `THREAD_OWNERS` lock before we took the `THREAD_JOIN_WAITERS` lock, so
+    // the target may have exited in between.  `on_thread_exit` drains the
+    // waiter map *before* removing itself from `THREAD_OWNERS`, so a target
+    // that is gone from `THREAD_OWNERS` now can no longer arrive to wake us —
+    // our entry would sit in the map forever and the park loop below, whose
+    // only exit condition is that entry being removed, would never terminate.
+    //
+    // Re-checking after publishing our registration closes the window in the
+    // one direction that matters: either the exit ran first (we observe it
+    // here and unwind), or it runs after our insert (it finds our entry and
+    // wakes us).  This is the same idiom the futex wait path uses for the
+    // signal-arrival race.  Ordering note: we drop the waiters lock before
+    // taking the owners lock, matching the acquisition order used above.
+    let target_gone = {
+        let owners = THREAD_OWNERS.lock();
+        !owners.contains_key(&target_task)
+    };
+    if target_gone {
+        // Withdraw our registration — but only if it is still ours.  A racing
+        // `on_thread_exit` may have already removed it and woken us, in which
+        // case the wake is real and we must fall through to collect the
+        // outcome rather than reporting the thread as missing.
+        let withdrawn = {
+            let mut waiters = THREAD_JOIN_WAITERS.lock();
+            if waiters.get(&target_task) == Some(&caller_task) {
+                waiters.remove(&target_task);
+                true
+            } else {
+                false
+            }
+        };
+        if withdrawn {
+            // The exit completed before we registered, so no wake is coming.
+            // Its outcome (if any) is already recorded.
+            if let Some(outcome) = take_outcome(target_task) {
+                return outcome_to_result(target_task, outcome);
+            }
+            return Err(KernelError::NoSuchProcess);
+        }
+    }
+
     // Park until the target thread actually exits.
     //
     // `block_current()` can return **spuriously**: a `sched::wake` that

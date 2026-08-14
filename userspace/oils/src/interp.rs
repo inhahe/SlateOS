@@ -27047,7 +27047,7 @@ impl Shell {
         // The tails have to be re-measured, because the gobbler's string is the
         // whole word — brackets included — and the parsed word carries the
         // scopes every other reader wants. See [`crate::unparse::gobbler_word`].
-        let scoped = crate::unparse::gobbler_word(word);
+        let scoped = crate::unparse::gobbler_word(word, self.parse_opts());
         let mut subs: Vec<WordPart> = Vec::new();
         self.gobbled_subs(&scoped.parts, false, &mut subs);
         let subs: Vec<&WordPart> = subs.iter().collect();
@@ -27075,8 +27075,21 @@ impl Shell {
             if dquoted && matches!(p, WordPart::CommandSub { body: CmdSubBody::Backtick { .. } }) {
                 return true;
             }
-            if let WordPart::SingleQuoted { parts: sub, .. } = p {
-                return dquoted && sub.as_ref().is_some_and(|w| Self::has_gobbled_sub(w, true));
+            if let WordPart::SingleQuoted { text, parts: sub, .. } = p {
+                if !dquoted {
+                    // The `'` row *is* reached at the top level, so the run is
+                    // skipped whole and holds nothing for the scan.
+                    return false;
+                }
+                if let Some(w) = sub.as_ref() {
+                    return Self::has_gobbled_sub(w, true);
+                }
+                // Otherwise the second reading has not been filled in yet —
+                // [`crate::unparse::gobbler_word`] does that, and it runs after
+                // this test. So answer from the text, and answer wide: inside
+                // `" … "` the only row of the gobbler that fires between the
+                // quotes is `$(`, and a scan that finds nothing reports nothing.
+                return bytes::contains(text, b"$(");
             }
             crate::unparse::nested_parts(p)
                 .into_iter()
@@ -27092,10 +27105,12 @@ impl Shell {
     /// [`WordPart::SingleQuoted`] met with `dquoted` false — the gobbler's
     /// `quoted` is 0 there, its `'` row is reached, and the run goes by unread.
     /// Inside `" … "` the `quoted` is `"`, that row is never reached, and the
-    /// run is read straight through; the parse can follow it because a subscript
-    /// and a substring bound carry the run's arithmetic reading beside its text
-    /// (see [`crate::ast::WordPart::SingleQuoted`]), which is precisely where
-    /// bash's own parser left a `'` standing as a character.
+    /// run is read straight through; the walk can follow it because the run
+    /// carries a second reading beside its text (see
+    /// [`crate::ast::WordPart::SingleQuoted`]) — the parser's own where a
+    /// subscript or a substring bound left a `'` standing as a character, and
+    /// otherwise the one [`crate::unparse::fill_quoted_runs`] makes for this
+    /// scan alone.
     ///
     /// A `` ` … ` `` is two different things to the gobbler depending on the
     /// same state. At the top level its `` ` `` row is reached, `quoted` becomes
@@ -27133,10 +27148,11 @@ impl Shell {
                 continue;
             }
             // …and inside `" … "` the `'` row is not reached, so the run is read
-            // straight through. The only such run the parse carries is a
-            // subscript's or a substring bound's, which is exactly where bash's
-            // own parser left a `'` standing as a character; its interior is the
-            // second reading beside the text. See
+            // straight through. Its interior is the second reading carried
+            // beside the text — filled at parse time for a subscript and a
+            // substring bound, where bash's own parser left a `'` standing as a
+            // character, and by [`crate::unparse::fill_quoted_runs`] for every
+            // other run this scan walks into. See
             // [`crate::ast::WordPart::SingleQuoted`].
             if let WordPart::SingleQuoted { parts: sub, .. } = p {
                 if let (true, Some(w)) = (dquoted, sub.as_ref()) {
@@ -27174,7 +27190,7 @@ impl Shell {
         // Re-scoped for the gobbler like the enclosing word was: its brackets
         // are not a scope either, and a backquote nested in this one wants the
         // remainder of *this* body before the glue below carries it further out.
-        let body = crate::unparse::gobbler_word(&body);
+        let body = crate::unparse::gobbler_word(&body, self.parse_opts());
         let start = out.len();
         self.gobbled_subs(&body.parts, true, out);
         let suffix = bfmt![b"`", tail];

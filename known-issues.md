@@ -4231,7 +4231,39 @@ Reaching this needs a `"` (or a `` ` ``) inside a backquote body inside `" … "
 inside a word with a `{`, so it is not on any ordinary road. All 24 other cases
 of the probe matrix that produced it agree with bash.
 
-### TD-OILS-A-QUOTE-RUN-IN-A-PATTERN-OPERAND-IS-NOT-GOBBLED. `"${z#'$(fi)'}"` runs where bash drops the command — 2026-08-14 — ⚠️ OPEN
+**Second site, added 2026-08-14 — and this one is a regression.**
+`unparse::fill_quoted_runs` (from
+TD-OILS-A-QUOTE-RUN-IN-A-PATTERN-OPERAND-IS-NOT-GOBBLED) lexes a `' … '` run
+inside `" … "` the same way — one double-quoted word, `quoted` pinned at `"` —
+so a `"` inside *that* run has the same unmodelled effect. Measured against
+bash 5.2.37, with `z` unset:
+
+```sh
+echo "A[${z#'a"`$(fi)`'}]"
+```
+
+| | bash 5.2.37 | osh |
+|---|---|---|
+| stdout | `A[]` | — |
+| stderr | — | ``command substitution: … `fi)`'}]"' `` |
+| `$?` | 0 | 1 |
+
+bash's `"` closes `quoted`, the `` ` `` then opens a backquote skip, and the
+`$(fi)` inside it is never read. osh keeps `quoted` at `"` for the whole run, so
+the backquote is not a skip, `gobbled_backtick_subs` walks into its body, and
+the `$(fi)` is read. Before the fill, osh did not enter the run at all and
+agreed with bash by accident — so this word matched before and does not now.
+That is the cost of the fill, taken knowingly: it is one narrow shape, against a
+common one that was wrong for every word.
+
+The fix above is one fix for both sites: a helper that runs the flat loop over
+verbatim text from a given starting `quoted` and hands back the stretches the
+`$(` row can fire in, used by `Shell::gobbled_backtick_subs` and
+`fill_quoted_runs` alike. For the latter the unreadable stretches go back in as
+`WordPart::Literal`, which keeps the run re-printing to its own bytes — the
+property every tail measured against it depends on.
+
+### TD-OILS-A-QUOTE-RUN-IN-A-PATTERN-OPERAND-IS-NOT-GOBBLED. `"${z#'$(fi)'}"` runs where bash drops the command — 2026-08-14 — ✅ FIXED 2026-08-14
 
 **Where:** `userspace/oils/src/interp.rs`, `Shell::has_gobbled_sub` (~27065) and
 `Shell::gobbled_subs`. Both descend into a `WordPart::SingleQuoted` only through
@@ -4271,27 +4303,48 @@ echo "4[${z:-'$(fi)'}]";    echo "4 rc=$?"   # already agrees
 Row 4 agrees because a `:-`-style operand keeps its `'` as a *character* and the
 substitution stays a part of the word, which the walk already finds.
 
-**The fix.** Not new machinery — the same second reading the subscript case
-already carries, filled in one more place. In the copy `gobble_scan` makes for
-the scan, walk the word and give every `SingleQuoted` inside `" … "` a
-`parts: Some(…)` lexed from its text with
-`crate::parser::dquote_word_from_source` (which is what the run *is* to the
-gobbler: more double-quoted text). Everything downstream then works unchanged —
-`unparse::part_src` already prints such a run from its parts rather than its
-text (unparse.rs:1789), so `attach_tails_by`'s sentinel shows through the quotes
-and `gobbler_word` measures the tails against the whole word by itself, and
-`gobbled_subs`'s existing `SingleQuoted` arm finds them. `has_gobbled_sub` needs
-a matching cheap over-answer, as it already has for a backquote inside `" … "`.
-A run whose text will not lex holds nothing the scan can read, so it keeps
-`None`.
+**Fixed 2026-08-14.** Not new machinery — the same second reading the subscript
+case already carries, filled in one more place. `unparse::fill_quoted_runs`
+runs first thing in `gobbler_word`, the copy `gobble_scan` makes for the scan,
+and gives every `SingleQuoted` inside `" … "` a `parts: Some(…)` lexed from its
+text with `crate::parser::dquote_word_from_source` — which is what the run *is*
+to the gobbler (more double-quoted text) and which builds none but
+`CmdSubBody::Unread` bodies, so a body that will not parse stays a runtime
+diagnostic and not a parse error.
+
+Everything downstream then works unchanged: `unparse::part_src` already prints
+such a run from its parts rather than its text, so `attach_tails_by`'s sentinel
+shows through the quotes and the tails come out measured against the *whole
+word*, `walk_parts_in` already descends through a filled run, and
+`gobbled_subs`'s existing `SingleQuoted` arm collects what is inside. The one
+other change is in `has_gobbled_sub`, which runs *before* the fill and so has to
+answer from the text: inside `" … "` the only gobbler row that fires between the
+quotes is `$(`, so a run whose text holds `$(` is answered yes — wide on
+purpose, exactly as a backquote inside `" … "` already is, since a scan that
+finds nothing reports nothing.
+
+Two runs are deliberately left alone, both because filling them would move every
+tail after them: a backslash-escaped character (`a\*b`, which is a
+`SingleQuoted` with `escaped`), whose source is not a quoted run at all; and one
+whose reading does not re-print to the very same bytes, which `fill_quoted_runs`
+checks for and declines.
+
+**Carries the same flat-state limitation as the backquote fix.** The run's text
+is lexed as *one* double-quoted word, so `quoted` stays `"` for the whole of it
+— where bash's loop would let a `"` **inside** the run set `quoted = 0`, after
+which a following `'` opens a skip the `$(` row cannot fire in. That is exactly
+TD-OILS-A-QUOTE-INSIDE-A-GOBBLED-BACKQUOTE-BODY-DOES-NOT-END-THE-RUN, now
+reachable through a second construct (`"${z#'a" '"'"'$(fi)'}"` rather than a
+backquote body), and the fix named there — splitting on the gobbler's own state
+machine before lexing — is the one fix for both places.
 
 **Found by** the `$' … '` bare-splice work
 (TD-OILS-A-SINGLE-QUOTED-COMMAND-SUBSTITUTION-IN-A-BRACE-OPERAND-IS-PARSED): the
 `#`/`//` rows of its corpus case are exactly this, since a translation written
-past a `#` is re-quoted (parse.y:3866) into such a run. Those two rows are held
+past a `#` is re-quoted (parse.y:3866) into such a run. Those two rows were held
 out of
 `tests/corpus/an-ansi-c-translation-spliced-bare-into-a-brace-operand-was-never-read.sh`
-and go back in when this is fixed.
+and are back in it now (rows 5 and 6).
 
 ### TD-OILS-A-REDIRECTION-TARGET-IS-NOT-BRACE-EXPANDED. `> f{1,2}` writes a file called `f{1,2}` where bash calls it ambiguous — 2026-08-10 — ✅ FIXED 2026-08-10
 
@@ -6000,12 +6053,13 @@ coordinates by `parser::operand_splices`, and reach
 stored word rather than by a parser.
 Corpus: `tests/corpus/an-ansi-c-translation-spliced-bare-into-a-brace-operand-was-never-read.sh`.
 
-Two rows of that case are held back, and they are *not* the splice's: written
-past a `#` or `//` the translation is re-quoted (parse.y:3866), and reaching
-bash's answer for `"${z#$'$(fi)'}"` needs the run the re-quoting made to be
-gobbled — TD-OILS-A-QUOTE-RUN-IN-A-PATTERN-OPERAND-IS-NOT-GOBBLED, which the
-same probe found and which is not about `$' … '` at all (`"${z#'$(fi)'}"`
-diverges on its own).
+Rows 5 and 6 of that case were held back at first, and they are *not* the
+splice's: written past a `#` or `//` the translation is re-quoted
+(parse.y:3866), and reaching bash's answer for `"${z#$'$(fi)'}"` needed the run
+the re-quoting made to be gobbled — TD-OILS-A-QUOTE-RUN-IN-A-PATTERN-OPERAND-IS-NOT-GOBBLED,
+which the same probe found, which is not about `$' … '` at all
+(`"${z#'$(fi)'}"` diverges on its own), and which is now fixed. Both rows are
+back in the case.
 
 **Residual — the splice that never closes.** `echo "15[${z:-$'$(fi'}]"` splices
 `$(fi` with no `)`, so the scan runs off the end of the word. bash's reader is
@@ -11603,6 +11657,20 @@ read too early". Measuring the reaping is, however, worth repeating here if it
 recurs: for the compgen case that measurement is what refuted the reaping
 theory outright (osh notices completion 20–30 ms *earlier* than bash in every
 job shape), and the same is likely true here.
+
+**Sighting 2026-08-14, and the detail was lost — read this before the next
+one.** One full-suite run came back `1490 passed; 1 failed` while a full
+`osh-bash-diff.py` sweep was running alongside it, i.e. with several hundred
+`osh`/`bash` processes being spawned on the same host. Three re-runs
+immediately after, still under the same sweep, were clean (`1491 passed`). The
+failing test's **name was not captured**, so this cannot be attributed to this
+entry or to any other — and that is the avoidable part: the run went through
+`run-timeout.py … | tail -5`, which keeps the summary line and throws away the
+`failures:` block above it, and a second attempt to re-read it with `grep` hit
+`Binary file (standard input) matches` because a corpus test writes NUL bytes
+to stdout. **Redirect to a file** (`cargo test … > /tmp/lt.txt 2>&1`) and grep
+the file, rather than piping, so a one-in-many failure is not thrown away the
+moment it finally happens.
 
 ### TD-OILS-THE-PIPELINE-STAGE-ORDER-TEST-ASSERTS-A-PREFERENCE-AS-A-GUARANTEE — 2026-08-08 — OPEN (accepted)
 

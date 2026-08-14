@@ -46,14 +46,15 @@ echo "3 rc=$?"
 echo "4[${z:-$'\x24(fi)'}]"
 echo "4 rc=$?"
 
-# The requoted rows — `"${z#$'$(fi)'}"` and `"${z//x/$'$(fi)'}"` — belong here
-# too: their remainder still shows the `'` the requoting put back. They are left
-# out because reaching that remainder needs a *second* fix, over the run the
-# requoting made rather than over the splice: inside `" … "` the gobbler's
-# `quoted` is `"`, so its `'` row is never reached and it reads straight into
-# the run, where osh's scan still stops at the quote. That is not about `$' … '`
-# at all — `"${z#'$(fi)'}"` diverges the same way. See known-issues.md
-# TD-OILS-A-QUOTE-RUN-IN-A-PATTERN-OPERAND-IS-NOT-GOBBLED.
+echo '=== written past a `#` or a `//` the splice is requoted, so the `'"'"'` shows'
+# `sh_single_quote` again (parse.y:3866) — the stored word keeps a `' … '` run
+# around the translation, and the remainder a diagnostic quotes still has the
+# `'` the requoting put back. What reads it is not the splice but the run: to
+# the gobbler, inside `" … "`, a `'` is not a quote at all.
+echo "5[${z#$'$(fi)'}]"
+echo "5 rc=$?"
+echo "6[${z//x/$'$(fi)'}]"
+echo "6 rc=$?"
 
 echo '=== no `"` around it, so `sh_single_quote` again and nothing is read'
 echo 7[${z:-$'$(fi)'}]

@@ -744,6 +744,12 @@ pub enum WordPart {
     /// have to be carried. `text` is the quote's reading, `parts` the
     /// arithmetic one, `None` everywhere a run cannot reach arithmetic. See
     /// [`crate::parser::word_subscript_from_source_at`].
+    ///
+    /// One reader more wants the same field, and fills it for itself rather
+    /// than at parse time: `brace_gobbler` inside `" … "`, where a `'` is not a
+    /// quote either. It is the only reader with that view of an ordinary
+    /// pattern or operand, so the fill is made in the copy it scans and nowhere
+    /// else — [`crate::unparse::fill_quoted_runs`].
     SingleQuoted {
         text: Str,
         escaped: bool,

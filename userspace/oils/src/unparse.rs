@@ -1407,8 +1407,11 @@ fn attach_tails_scoped(parts: &mut [WordPart], index: bool) {
 /// scopes the parsed word carries are the ones every *other* reader wants; this
 /// is a copy made for the one scan. See
 /// [`crate::interp::Shell::gobble_scan`].
-pub(crate) fn gobbler_word(word: &Word) -> Word {
+pub(crate) fn gobbler_word(word: &Word, opts: crate::lexer::ParseOpts) -> Word {
     let mut w = word.clone();
+    // Before any tail is measured, because filling a run in changes what the
+    // word renders as — [`part_src`] prints a filled run from its parts.
+    fill_quoted_runs(&mut w.parts, false, opts);
     attach_tails_scoped(&mut w.parts, true);
     // A backquote wants one too, and only here. Every other reader stops at the
     // closing `` ` `` — the body is `string_extract`'s byte hunt for it — but
@@ -1423,6 +1426,52 @@ pub(crate) fn gobbler_word(word: &Word) -> Word {
         }
     });
     w
+}
+
+/// Give every `' … '` run inside `" … "` the *second* reading the gobbler gives
+/// it — the run's text re-read as more double-quoted text.
+///
+/// The gobbler's `quoted` is `"` in there, so its `'` row (braces.c:670) is
+/// never reached and the run is not a quote to it at all: the `$(` row of the
+/// `quoted == '"'` branch fires on what is between the quotes, and a `$( … )`
+/// bash's *parser* skipped as quoted text is read here. That is the same
+/// disagreement a subscript already carries
+/// ([`crate::ast::WordPart::SingleQuoted`]'s `parts`), in a place the parser has
+/// no reason to fill: a pattern, a replacement, a `:-`-style operand.
+///
+/// So it is filled here, in the copy made for the scan, and everything
+/// downstream follows without a new case: [`part_src`] prints a filled run from
+/// its parts, so [`attach_tails_by`]'s sentinel shows through the quotes and the
+/// tails come out measured against the whole word, and
+/// [`crate::interp::Shell::gobbled_subs`]'s existing `SingleQuoted` arm collects
+/// what is inside.
+///
+/// [`crate::parser::dquote_word_from_source`] is the right reader twice over:
+/// double-quoted text is exactly what the run is to the scan, and every body it
+/// builds is [`crate::ast::CmdSubBody::Unread`] — nothing in here was read by a
+/// parser, so a body that will not parse must not be a parse error. Two runs are
+/// left alone: a backslash-escaped character (`a\*b`), whose source is not a
+/// quoted run at all and would re-print wrong, and one whose reading does not
+/// re-print to the very same bytes, which would move every tail after it.
+fn fill_quoted_runs(parts: &mut [WordPart], dquoted: bool, opts: crate::lexer::ParseOpts) {
+    for p in parts.iter_mut() {
+        if let WordPart::SingleQuoted { text, escaped, parts: sub } = p {
+            if dquoted
+                && sub.is_none()
+                && !*escaped
+                && let Ok(w) = crate::parser::dquote_word_from_source(text, opts)
+                && parts_src(&w.parts) == *text
+            {
+                *sub = Some(w.parts);
+            }
+            // A run that has one already is a subscript's or a bound's, and its
+            // reading is the same one — there is nothing further in to fill.
+            continue;
+        }
+        for (kind, w) in nested_parts_mut(p) {
+            fill_quoted_runs(w, dquoted || kind == Nested::Quoted, opts);
+        }
+    }
 }
 
 /// The sentinel-swap [`attach_tails_scoped`] runs once per kind of part that
@@ -2470,5 +2519,73 @@ mod tests {
     #[test]
     fn exported_empty_body_uses_noop() {
         assert_eq!(dump_exported("e() { :; }", "e"), "() {  :\n}");
+    }
+
+    /// The copy [`gobbler_word`] makes reads a `' … '` inside `" … "` the way
+    /// the gobbler does — through the quotes — while still rendering to the
+    /// very same bytes, which is what every tail in it is measured against.
+    #[test]
+    fn a_quote_run_under_a_dquote_is_filled_for_the_gobbler() {
+        /// The first word of `src`, and the same word re-scoped for the scan.
+        fn words(src: &str) -> (Word, Word) {
+            let prog = parse(src.as_bytes()).expect("parse");
+            let w = prog
+                .items
+                .iter()
+                .flat_map(|i| &i.list.first.commands)
+                .find_map(|c| match c {
+                    Command::Simple(s) => s.words.first().cloned(),
+                    _ => None,
+                })
+                .expect("a word");
+            let scoped = gobbler_word(&w, crate::lexer::ParseOpts::default());
+            (w, scoped)
+        }
+        /// Every `' … '` run in `w`, innermost last, with its filled reading.
+        fn runs(parts: &[WordPart], out: &mut Vec<Option<Vec<WordPart>>>) {
+            for p in parts {
+                if let WordPart::SingleQuoted { parts: sub, .. } = p {
+                    out.push(sub.clone());
+                    continue;
+                }
+                for (_, w) in nested_parts(p) {
+                    runs(w, out);
+                }
+            }
+        }
+        fn filled(w: &Word) -> Vec<Option<Vec<WordPart>>> {
+            let mut v = Vec::new();
+            runs(&w.parts, &mut v);
+            v
+        }
+
+        // A pattern operand: the parser read the run as a quote and left
+        // `parts` empty; the scan reads a `$( … )` through it.
+        let (plain, scoped) = words(r#""${z#'$(fi)'}""#);
+        assert_eq!(filled(&plain), vec![None]);
+        let one = filled(&scoped);
+        assert_eq!(one.len(), 1);
+        let inner = one[0].as_ref().expect("the run was filled");
+        assert!(
+            inner.iter().any(|p| matches!(
+                p,
+                WordPart::CommandSub { body: CmdSubBody::Unread { .. } },
+            )),
+            "the substitution inside the run is there, and unread: {inner:?}",
+        );
+        // And the fill is invisible to the rendering, so every tail measured
+        // against it lands where it did before.
+        assert_eq!(word_src(&plain), word_src(&scoped));
+
+        // Outside the quotes the gobbler's `'` row *is* reached — the run is
+        // skipped whole, so there is nothing to fill.
+        let (_, scoped) = words(r#"${z#'$(fi)'}"#);
+        assert_eq!(filled(&scoped), vec![None]);
+
+        // A backslash-escaped character is a `SingleQuoted` too, and is not a
+        // quoted run in the source at all: filling it would change the text.
+        let (plain, scoped) = words(r#""${z#\$(fi)}""#);
+        assert_eq!(filled(&scoped), filled(&plain));
+        assert_eq!(word_src(&plain), word_src(&scoped));
     }
 }

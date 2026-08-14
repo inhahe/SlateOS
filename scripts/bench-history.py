@@ -70,14 +70,25 @@ SCORE_RE = re.compile(
     r"(?:\s+(\d+)\s+(\d+))?\s*$"
 )
 
-# `[bench] CANARY <start_cycles> <end_cycles> <pct>`
+# `[bench] CANARY <start> <end> <pct> [<min> <max> <spread> <samples>]`
 #
-# The reference memory-access cost measured at both ends of the suite. `pct`
-# is `end` as a percentage of `start`, so 100 means the host was equally
-# loaded throughout. Optional for the same reason as the dispersion pair: it
-# postdates existing records, and a log without it simply has unknown
-# contamination rather than being unparseable.
-CANARY_RE = re.compile(r"^\[bench\]\s+CANARY\s+(\d+)\s+(\d+)\s+(\d+)\s*$")
+# The reference memory-access cost. `start`/`end`/`pct` are the suite's two
+# endpoints, `pct` being `end` as a percentage of `start`.
+#
+# The trailing four are an append-only extension covering samples taken
+# *throughout* the suite. They exist because endpoint-only sampling could not
+# fire on the case the canary was built for: its first real run reported the
+# endpoints stable to 3% while four benchmarks in that same run sat 40-160%
+# above their established values. Endpoints catch a sustained load change; the
+# contamination that matters is a transient burst landing on whichever
+# benchmark is running at the time.
+#
+# Optional so the one record written before mid-suite sampling existed still
+# parses -- and so a log without any canary at all is *unknown*, not clean.
+CANARY_RE = re.compile(
+    r"^\[bench\]\s+CANARY\s+(\d+)\s+(\d+)\s+(\d+)"
+    r"(?:\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+))?\s*$"
+)
 
 # Percent deviation at which a run is called contaminated. Must match
 # `CANARY_TOLERANCE_PCT` in `kernel/src/bench.rs`; the kernel prints its own
@@ -122,11 +133,14 @@ def parse_serial(path):
 
 
 def parse_canary(path):
-    """Extract the contamination canary as `(start, end, pct)`, or None.
+    """Extract the contamination canary as a dict, or None.
 
-    None means the log predates the canary (or the suite never finished), in
-    which case contamination is *unknown* for that run -- which is materially
-    different from "known clean", and callers must not conflate the two.
+    Keys: `start`, `end`, `pct` always; `min`, `max`, `spread`, `samples`
+    only when the log carries mid-suite sampling.
+
+    None means the log has no canary at all, in which case contamination is
+    *unknown* for that run -- materially different from "known clean", and
+    callers must not conflate the two.
 
     The last CANARY line wins, matching `parse_serial`'s last-wins behaviour
     for SCORE, so a concatenated/replayed log reports its final suite.
@@ -137,8 +151,19 @@ def parse_canary(path):
             for line in handle:
                 match = CANARY_RE.match(line.strip())
                 if match:
-                    start, end, pct = match.groups()
-                    result = (int(start), int(end), int(pct))
+                    start, end, pct, lo, hi, spread, samples = match.groups()
+                    result = {
+                        "start": int(start),
+                        "end": int(end),
+                        "pct": int(pct),
+                    }
+                    if lo is not None:
+                        result.update({
+                            "min": int(lo),
+                            "max": int(hi),
+                            "spread": int(spread),
+                            "samples": int(samples),
+                        })
     except FileNotFoundError:
         return None
     except OSError as exc:
@@ -148,7 +173,11 @@ def parse_canary(path):
 
 
 def canary_is_contaminated(canary):
-    """True if the canary shows the host load changed mid-suite.
+    """True if the canary shows host load changed during the suite.
+
+    Uses the mid-suite spread when the log has it, because that is the only
+    figure that can see a transient burst; falls back to the endpoint
+    comparison for records written before mid-suite sampling existed.
 
     None (no canary in the log) is *not* contaminated -- it is unknown. This
     returns False so that old records keep comparing as they always have;
@@ -156,10 +185,11 @@ def canary_is_contaminated(canary):
     """
     if canary is None:
         return False
-    start, _end, pct = canary
-    if start <= 0:
+    if canary["start"] <= 0:
         return True
-    return abs(pct - 100) > CANARY_TOLERANCE_PCT
+    if "spread" in canary:
+        return canary["spread"] > CANARY_TOLERANCE_PCT
+    return abs(canary["pct"] - 100) > CANARY_TOLERANCE_PCT
 
 
 def git_commit():
@@ -468,18 +498,21 @@ def main(argv=None):
     if canary is None:
         print("  Contamination canary: absent (log predates it) - unknown, "
               "not clean.")
-    elif canary_is_contaminated(canary):
-        start, end, pct = canary
-        print(f"  CONTAMINATED: reference access cost moved {pct}% across the "
-              f"suite ({start} -> {end} cycles, tolerance "
-              f"{CANARY_TOLERANCE_PCT}%).")
-        print("  Host load changed mid-run. A single-benchmark outlier here is "
-              "unproven - the drift correction removes a uniform factor, and "
-              "this is not one.")
     else:
-        start, end, pct = canary
-        print(f"  Canary OK: host load stable across the suite "
-              f"({start} -> {end} cycles, {pct}%).")
+        if "spread" in canary:
+            detail = (f"spread {canary['spread']}% over {canary['samples']} "
+                      f"samples ({canary['min']}-{canary['max']} cycles)")
+        else:
+            detail = (f"endpoints {canary['start']} -> {canary['end']} cycles, "
+                      f"{canary['pct']}% (no mid-suite sampling in this log)")
+        if canary_is_contaminated(canary):
+            print(f"  CONTAMINATED: reference access cost {detail}, tolerance "
+                  f"{CANARY_TOLERANCE_PCT}%.")
+            print("  Host load changed during the run. A single-benchmark "
+                  "outlier here is unproven - the drift correction removes a "
+                  "uniform factor, and this is not one.")
+        else:
+            print(f"  Canary OK: host load stable, {detail}.")
 
     if not args.no_record:
         record = {
@@ -511,8 +544,7 @@ def main(argv=None):
         # measurement could never be re-judged if the tolerance is retuned --
         # and the tolerance is explicitly a placeholder awaiting real data.
         if canary is not None:
-            start, end, pct = canary
-            record["canary"] = {"start": start, "end": end, "pct": pct}
+            record["canary"] = dict(canary)
             record["contaminated"] = canary_is_contaminated(canary)
         if append_record(args.history, record):
             print(f"  Recorded {len(current_entries)} benchmarks to "

@@ -559,6 +559,12 @@ fn score(name: &'static str, result: &BenchResult, target_ns: u64) {
         mean_ns: result.mean_ns,
         iterations: result.iterations,
     });
+    // Sampled here, after the lock is released, rather than from a list of
+    // hand-placed call sites in `run_all`: hooking the one function every
+    // benchmark already calls spreads the samples across the suite
+    // automatically and keeps doing so as benchmarks are added or reordered,
+    // which a hand-maintained list would not.
+    maybe_canary_sample();
 }
 
 /// Print the scorecard summary showing which benchmarks met targets.
@@ -666,6 +672,53 @@ const CANARY_STORES_PER_WINDOW: u64 = 64;
 /// `crypto_ed25519_verify` moved 5.1x when the host got busy.
 const CANARY_TOLERANCE_PCT: u64 = 25;
 
+/// Take a mid-suite canary sample every Nth scored benchmark.
+///
+/// 8 gives roughly 8 samples across the current 63-benchmark suite — enough
+/// resolution to catch a burst confined to a few benchmarks, without paying
+/// the reference measurement's cost 63 times.
+const CANARY_SAMPLE_EVERY: u32 = 8;
+
+/// Running extremes of the reference measurement across the suite.
+///
+/// Extremes rather than a list because the verdict only needs the spread, and
+/// two atomics need no allocation and no lock on a path that runs between
+/// benchmarks.
+static CANARY_MIN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(u64::MAX);
+static CANARY_MAX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static CANARY_SAMPLES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Counts `score` calls so every Nth one triggers a sample.
+static CANARY_SCORED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Fold one reference measurement into the running extremes.
+fn canary_record(measured: u64) {
+    CANARY_MIN.fetch_min(measured, Ordering::Relaxed);
+    CANARY_MAX.fetch_max(measured, Ordering::Relaxed);
+    CANARY_SAMPLES.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Sample the reference cost every [`CANARY_SAMPLE_EVERY`] scored benchmarks.
+///
+/// # Why mid-suite sampling exists
+///
+/// The first version of this canary measured only the suite's two endpoints,
+/// and its first real run showed why that is not enough: it reported the host
+/// stable to within 3% while four benchmarks in that same run
+/// (`shm_rw_64bytes`, `tcp_checksum_v4`, `net_ipv4_parse`,
+/// `net_ethernet_parse`) sat 40-160% above their established values. Endpoint
+/// sampling detects a *sustained* load change; the contamination this guards
+/// against is a *transient burst* that lands on whichever benchmark is
+/// executing at that moment and leaves the rest untouched. An endpoint-only
+/// check therefore could not fire on the very case it was built for — which
+/// is the failure mode this project keeps rediscovering.
+fn maybe_canary_sample() {
+    let n = CANARY_SCORED.fetch_add(1, Ordering::Relaxed);
+    if n.wrapping_rem(CANARY_SAMPLE_EVERY) == 0 {
+        let (measured, _, _) = measure_access_cost();
+        canary_record(measured);
+    }
+}
+
 /// One amplified A/B measurement of a guest memory access, in cycles.
 ///
 /// Returns `(measured, nop, store)` — the per-access cost, and the two raw
@@ -730,6 +783,10 @@ fn measure_access_cost() -> (u64, u64, u64) {
 /// a verdict alone would leave no way to ever calibrate the threshold.
 fn report_canary(start: u64) {
     let (end, _, _) = measure_access_cost();
+    // The endpoints are samples too, so fold them in before reading extremes.
+    canary_record(start);
+    canary_record(end);
+
     // Guard the division: a zero start would mean the calibration itself
     // failed, and the run's budgets are already untrustworthy in that case.
     let pct = if start > 0 {
@@ -737,24 +794,41 @@ fn report_canary(start: u64) {
     } else {
         0
     };
-    serial_println!("[bench] CANARY {} {} {}", start, end, pct);
 
-    let contaminated =
-        start == 0 || pct > 100u64.saturating_add(CANARY_TOLERANCE_PCT)
-            || pct < 100u64.saturating_sub(CANARY_TOLERANCE_PCT);
+    let lo = CANARY_MIN.load(Ordering::Relaxed);
+    let hi = CANARY_MAX.load(Ordering::Relaxed);
+    let samples = CANARY_SAMPLES.load(Ordering::Relaxed);
+    // Spread as a percentage of the quietest sample: the minimum is the best
+    // estimate of the uncontended cost, so this reads as "how much slower did
+    // the machine get at its worst moment".
+    let spread = if lo > 0 && lo != u64::MAX {
+        hi.saturating_sub(lo).saturating_mul(100) / lo
+    } else {
+        0
+    };
+
+    // `<start> <end> <pct>` keeps its original meaning; the trailing four are
+    // an append-only extension, so the one record written before mid-suite
+    // sampling existed still reads back correctly.
+    serial_println!(
+        "[bench] CANARY {} {} {} {} {} {} {}",
+        start, end, pct, lo, hi, spread, samples
+    );
+
+    let contaminated = start == 0 || spread > CANARY_TOLERANCE_PCT;
     if contaminated {
         serial_println!(
-            "[bench] CONTAMINATED: the reference access cost moved {}% across the \
-             suite ({} -> {} cycles, tolerance {}%). Host load changed mid-run, so \
-             a single-benchmark outlier in this run is unproven — do not read it as \
-             a regression.",
-            pct, start, end, CANARY_TOLERANCE_PCT
+            "[bench] CONTAMINATED: the reference access cost spread {}% across {} \
+             samples during the suite ({}-{} cycles, endpoints {} -> {} = {}%, \
+             tolerance {}%). Host load changed mid-run, so a single-benchmark \
+             outlier in this run is unproven — do not read it as a regression.",
+            spread, samples, lo, hi, start, end, pct, CANARY_TOLERANCE_PCT
         );
     } else {
         serial_println!(
-            "[bench] Canary OK: reference access cost stable across the suite \
-             ({} -> {} cycles, {}%).",
-            start, end, pct
+            "[bench] Canary OK: reference access cost stable across {} samples \
+             ({}-{} cycles, spread {}%).",
+            samples, lo, hi, spread
         );
     }
 }

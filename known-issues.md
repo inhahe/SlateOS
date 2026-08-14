@@ -59877,6 +59877,63 @@ do read-only work only if it is genuinely necessary, and prefer to simply
 wait. Treat any single-benchmark outlier in a run that overlapped agent
 activity as unproven.
 
+**[A] ✅ FIXED 2026-08-14 — and the first version of the fix was itself blind
+to the case it was built for.** Worth reading for the second half.
+
+*Stage 1 (commit `be167dd90`).* The reference memory-access cost that already
+calibrates every budget in `bench.rs` is now measured a second time at the end
+of the suite, emitted as `[bench] CANARY <start> <end> <pct>`, recorded by
+`bench-history.py` as a sibling key with a `contaminated` flag, and covered by
+11 checks in `test-bench-history.py`. The measurement was factored into one
+parameterless function used by both ends, because the comparison means nothing
+unless both ends measure precisely the same thing.
+
+*What the first real run showed (commit `be167dd90`, host Logoplex3).* Two
+things, one confirming the entry and one refuting the fix.
+
+Confirming: `crypto_ed25519_verify` came back at **30.0M ns**, against 30.7M
+and 31.4M in the two runs before the spike and 158.6M during it. Three runs
+now agree within 4% and the spike stands alone, so run `a18ea83a9` **was**
+contaminated, exactly as this entry argued. Whole-suite drift for the new run
+was −0.1%.
+
+Refuting: the canary reported the host stable to within **3%** (283 → 275
+cycles) — while in that same run `shm_rw_64bytes` (298 → 771), `tcp_checksum_v4`
+(20714 → 35410), `net_ipv4_parse` (933 → 1645) and `net_ethernet_parse`
+(873 → 1216) all sat 40–160% above their established values. So the run was
+contaminated and the canary passed it.
+
+*Why.* Endpoint sampling detects a **sustained** load change. The
+contamination described at the top of this entry is a **transient burst** that
+"lands on whichever benchmark is executing at that moment and leaves the rest
+untouched" — which by construction is invisible to a check that only looks at
+the two ends. The first fix was therefore a check that could not fire on its
+own motivating case: the failure mode this project keeps rediscovering, arrived
+at from the opposite direction.
+
+*Stage 2 (this commit).* The reference is now sampled **throughout** the suite
+— every 8th scored benchmark, giving ~8 samples across the 63 — and the verdict
+uses the min-to-max spread rather than the endpoint ratio. Sampling is hooked
+into `score()`, the one function every benchmark already calls, so it spreads
+automatically and stays correct as benchmarks are added or reordered; a
+hand-placed list of sample points in `run_all` would rot. The line gains four
+append-only fields, `[bench] CANARY <start> <end> <pct> <min> <max> <spread>
+<samples>`, so the single record written by stage 1 still reads back and is
+still judged by the endpoint rule it was written under.
+
+*Tolerance status.* Still 25%, still a placeholder. One clean-endpoint
+observation (3%) is not a distribution, and the mid-suite spread has now to be
+observed over several runs before the bound is tightened — the same discipline
+applied to `TD-BENCH-COMPARATOR-NEEDS-PER-BENCHMARK-VARIANCE`. The raw min/max
+are recorded on every run precisely so the bound can be retuned later against
+real data instead of being invented; a stored verdict alone could never be
+re-judged.
+
+*Consequence for the four elevated benchmarks above:* unproven, not regressions.
+They are diffed against `a18ea83a9`, a run this entry now shows was itself
+contaminated, so the comparison is contaminated at both ends. They need a clean
+run-over-clean-run comparison before anyone reads them as real.
+
 ### [A] B-BENCH-WATCHLIST-WATCHED-LESS-THAN-HALF-THE-SUITE-IT-GUARDS. `BENCH_CRITICAL_PATHS` omitted idt.rs, fs/, net/ and crypto.rs — FIXED 2026-08-14
 
 **Where:** `scripts/boot-test.sh`, `BENCH_CRITICAL_PATHS` (feeds

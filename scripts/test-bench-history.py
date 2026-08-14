@@ -121,26 +121,54 @@ def test_canary(bh, tmpdir):
     """
     clean = write(tmpdir, "canary-clean.txt",
                   "[bench] SCORE a 10 1 PASS\n"
-                  "[bench] CANARY 200 204 102\n")
-    check("canary parses", bh.parse_canary(clean), (200, 204, 102))
+                  "[bench] CANARY 283 275 97 271 279 2 9\n")
+    check("canary parses with mid-suite sampling",
+          bh.parse_canary(clean),
+          {"start": 283, "end": 275, "pct": 97,
+           "min": 271, "max": 279, "spread": 2, "samples": 9})
     check("a stable canary is not contaminated",
-          bh.canary_is_contaminated((200, 204, 102)), False)
+          bh.canary_is_contaminated(
+              {"start": 283, "end": 275, "pct": 97,
+               "min": 271, "max": 279, "spread": 2, "samples": 9}), False)
 
+    # THE case this whole mechanism exists for, and the one endpoint-only
+    # sampling was blind to: the suite starts and ends quiet, so `pct` is a
+    # reassuring 97, but a burst in the middle drove the reference 2.7x. Real
+    # run be167dd90 looked exactly like this -- endpoints within 3% while four
+    # benchmarks sat 40-160% above their established values.
+    burst = {"start": 283, "end": 275, "pct": 97,
+             "min": 271, "max": 740, "spread": 173, "samples": 9}
+    check("a mid-suite burst is contaminated despite quiet endpoints",
+          bh.canary_is_contaminated(burst), True)
+
+    # Legacy 3-field records fall back to the endpoint comparison.
+    legacy = write(tmpdir, "canary-legacy.txt", "[bench] CANARY 200 204 102\n")
+    check("legacy 3-field canary still parses",
+          bh.parse_canary(legacy), {"start": 200, "end": 204, "pct": 102})
+    check("legacy canary uses the endpoint comparison",
+          bh.canary_is_contaminated({"start": 200, "end": 204, "pct": 102}),
+          False)
     # 5.1x is the real observed case: crypto_ed25519_verify, 30.7M -> 158.6M.
-    check("a large mid-suite shift is contaminated",
-          bh.canary_is_contaminated((200, 1020, 510)), True)
+    check("a large sustained shift is contaminated (legacy form)",
+          bh.canary_is_contaminated({"start": 200, "end": 1020, "pct": 510}),
+          True)
     # Faster at the end counts too -- the host got *less* busy mid-run, which
     # contaminates just as thoroughly as getting busier.
     check("a downward shift is also contaminated",
-          bh.canary_is_contaminated((200, 100, 50)), True)
+          bh.canary_is_contaminated({"start": 200, "end": 100, "pct": 50}),
+          True)
     # Exactly at the tolerance is allowed; one percent past it is not.
-    check("deviation at the tolerance is allowed",
-          bh.canary_is_contaminated((100, 125, 125)), False)
-    check("deviation past the tolerance is contaminated",
-          bh.canary_is_contaminated((100, 126, 126)), True)
+    check("spread at the tolerance is allowed",
+          bh.canary_is_contaminated(
+              {"start": 100, "end": 100, "pct": 100,
+               "min": 100, "max": 125, "spread": 25, "samples": 9}), False)
+    check("spread past the tolerance is contaminated",
+          bh.canary_is_contaminated(
+              {"start": 100, "end": 100, "pct": 100,
+               "min": 100, "max": 126, "spread": 26, "samples": 9}), True)
     # A zero start means the calibration itself failed.
     check("a zero-start canary is contaminated",
-          bh.canary_is_contaminated((0, 200, 0)), True)
+          bh.canary_is_contaminated({"start": 0, "end": 200, "pct": 0}), True)
 
     # Absent canary: distinct from clean, and must not be reported as dirty.
     absent = write(tmpdir, "canary-absent.txt", "[bench] SCORE a 10 1 PASS\n")
@@ -150,16 +178,19 @@ def test_canary(bh, tmpdir):
 
     # Malformed canary lines must not be coerced into a record.
     bad = write(tmpdir, "canary-bad.txt",
-                "[bench] CANARY 200 204\n"        # missing pct
-                "[bench] CANARY x 204 102\n"      # non-numeric
-                "[bench] CANARY 200 204 102 7\n")  # trailing junk
+                "[bench] CANARY 200 204\n"            # missing pct
+                "[bench] CANARY x 204 102\n"          # non-numeric
+                "[bench] CANARY 200 204 102 7\n"      # half the extension
+                "[bench] CANARY 200 204 102 1 2 3\n"  # still half
+                "[bench] CANARY 1 2 3 4 5 6 7 8\n")   # trailing junk
     check("malformed canary lines are rejected", bh.parse_canary(bad), None)
 
     # Last wins, matching parse_serial, so a replayed log reports its final run.
     twice = write(tmpdir, "canary-twice.txt",
                   "[bench] CANARY 200 204 102\n"
                   "[bench] CANARY 300 900 300\n")
-    check("the last canary wins", bh.parse_canary(twice), (300, 900, 300))
+    check("the last canary wins",
+          bh.parse_canary(twice), {"start": 300, "end": 900, "pct": 300})
 
 
 def test_missing_log(bh, tmpdir):

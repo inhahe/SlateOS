@@ -55,6 +55,7 @@ import json
 import os
 import platform
 import re
+import statistics
 import subprocess
 import sys
 
@@ -168,15 +169,70 @@ def previous_for_host(records, host):
     return None
 
 
+#: Below this many comparable benchmarks the median is not a trustworthy
+#: estimate of the run's global speed factor, so we skip normalisation and
+#: compare raw.  A handful of benchmarks can genuinely all move together.
+MIN_SAMPLES_FOR_DRIFT = 8
+
+
+def global_drift(previous_entries, current):
+    """Estimate this run's whole-suite speed factor vs. the previous run.
+
+    Returns the **median** of every benchmark's ratio, or `None` when there are
+    too few comparable benchmarks for it to mean anything.
+
+    Why this is needed on top of run-over-run comparison
+    ---------------------------------------------------
+    The module docstring says run-over-run "cancels the emulation constant".
+    That is true across *hosts* but not across *runs on the same host*: TCG is
+    pure emulation and therefore CPU-bound, so whatever else the machine was
+    doing during a run scales the entire suite by a common factor.  A real
+    measurement of that: the 2026-08-14 run recorded a +6.1% median with 48 of
+    63 benchmarks slower, against a diff that touched only `sys_thread_join`'s
+    ABI -- code that not one of the flagged benchmarks executes.
+
+    A fixed absolute threshold cannot survive that.  Shift a distribution whose
+    own per-benchmark wobble reaches ~20% by a further 6% and its tail crosses
+    25%, so the comparator names six "REGRESSED" benchmarks that did not
+    change.  The tell is that the sorted tail was a smooth continuum --
+    24.4, 24.5, 24.6, 24.9, 26.3, 27.2, 27.6 -- with no gap anywhere near the
+    threshold: a real regression is a few outliers standing clear of a ~0%
+    median, not a slice taken out of the middle of a distribution.
+
+    The median (not the mean) is the estimator because it is unaffected by a
+    genuine regression in a minority of benchmarks -- which is precisely the
+    signal we must not subtract away.  Dividing each ratio by it leaves the
+    residual: how a benchmark moved *relative to its peers on the same run*.
+    """
+    ratios = [
+        measured / before
+        for name, measured in current.items()
+        if (before := previous_entries.get(name)) and before > 0
+    ]
+    if len(ratios) < MIN_SAMPLES_FOR_DRIFT:
+        return None
+    return statistics.median(ratios)
+
+
 def diff(previous, current, threshold_pct):
     """Split benchmarks into regressed / improved / added / removed.
 
     `threshold_pct` is deliberately coarse.  Even run-over-run on one host the
     in-kernel harness is noisy: it runs as a deferred low-priority task on a
     live system, so a 10-20% wobble carries no information.
+
+    The threshold is applied to the **drift-corrected** change (see
+    `global_drift`), so a run where the whole machine was busy does not report
+    its tail as a regression.  Each entry carries both numbers: the raw change
+    (what the reader would otherwise compute by hand) and the corrected one
+    that the decision was actually made on.
+
+    Returns `(regressed, improved, added, removed, drift)` where each
+    regressed/improved entry is `(name, before, after, raw_change, adj_change)`.
     """
     regressed, improved, added = [], [], []
     prev_entries = previous.get("entries", {})
+    drift = global_drift(prev_entries, current)
 
     for name, measured in sorted(current.items()):
         before = prev_entries.get(name)
@@ -185,14 +241,18 @@ def diff(previous, current, threshold_pct):
             continue
         if before <= 0:
             continue
-        change = (measured - before) * 100.0 / before
-        if change >= threshold_pct:
-            regressed.append((name, before, measured, change))
-        elif change <= -threshold_pct:
-            improved.append((name, before, measured, change))
+        raw_change = (measured - before) * 100.0 / before
+        if drift:
+            adj_change = ((measured / before) / drift - 1.0) * 100.0
+        else:
+            adj_change = raw_change
+        if adj_change >= threshold_pct:
+            regressed.append((name, before, measured, raw_change, adj_change))
+        elif adj_change <= -threshold_pct:
+            improved.append((name, before, measured, raw_change, adj_change))
 
     removed = sorted(set(prev_entries) - set(current))
-    return regressed, improved, added, removed
+    return regressed, improved, added, removed, drift
 
 
 def report(previous, current_entries, threshold_pct):
@@ -206,7 +266,9 @@ def report(previous, current_entries, threshold_pct):
         )
         return False
 
-    regressed, improved, added, removed = diff(previous, current, threshold_pct)
+    regressed, improved, added, removed, drift = diff(
+        previous, current, threshold_pct
+    )
 
     print(
         f"=== Benchmark history: {len(current)} benchmarks vs "
@@ -221,16 +283,47 @@ def report(previous, current_entries, threshold_pct):
         "reference and cannot be met under TCG -- see bench/baselines.toml.)"
     )
 
+    if drift:
+        drift_pct = (drift - 1.0) * 100.0
+        print(
+            f"  Whole-suite drift this run: {drift_pct:+.1f}% (median of all "
+            f"{len(current)} benchmarks)."
+        )
+        if abs(drift_pct) >= 15.0:
+            print(
+                "  !! That is large. TCG is CPU-bound, so a busy machine scales "
+                "every benchmark"
+            )
+            print(
+                "     at once -- check nothing else was building/booting, and "
+                "prefer re-running"
+            )
+            print("     before acting on anything below.")
+        print(
+            "  Percentages below are drift-corrected (raw change in "
+            "parentheses); only a"
+        )
+        print(
+            "  benchmark that moved relative to its peers is reported. See "
+            "global_drift()."
+        )
+
     if regressed:
-        print(f"  REGRESSED (>{threshold_pct:g}% slower):")
-        for name, before, after, change in sorted(
-            regressed, key=lambda r: -r[3]
+        print(f"  REGRESSED (>{threshold_pct:g}% slower than the suite):")
+        for name, before, after, raw, adj in sorted(
+            regressed, key=lambda r: -r[4]
         ):
-            print(f"    {name}: {before}ns -> {after}ns (+{change:.0f}%)")
+            print(
+                f"    {name}: {before}ns -> {after}ns "
+                f"({adj:+.0f}% vs suite, {raw:+.0f}% raw)"
+            )
     if improved:
-        print(f"  IMPROVED (>{threshold_pct:g}% faster):")
-        for name, before, after, change in sorted(improved, key=lambda r: r[3]):
-            print(f"    {name}: {before}ns -> {after}ns ({change:.0f}%)")
+        print(f"  IMPROVED (>{threshold_pct:g}% faster than the suite):")
+        for name, before, after, raw, adj in sorted(improved, key=lambda r: r[4]):
+            print(
+                f"    {name}: {before}ns -> {after}ns "
+                f"({adj:+.0f}% vs suite, {raw:+.0f}% raw)"
+            )
     if added:
         print("  NEW:")
         for name, measured in added:
@@ -240,7 +333,13 @@ def report(previous, current_entries, threshold_pct):
         for name in removed:
             print(f"    {name}")
     if not (regressed or improved or added or removed):
-        print(f"  No benchmark moved by more than {threshold_pct:g}%.")
+        if drift:
+            print(
+                f"  No benchmark moved by more than {threshold_pct:g}% "
+                f"relative to the suite."
+            )
+        else:
+            print(f"  No benchmark moved by more than {threshold_pct:g}%.")
 
     return bool(regressed)
 

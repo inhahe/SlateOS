@@ -94566,13 +94566,15 @@ st=1
         let mut sh = new_shell();
         // An operand-less `wait` spares the `$!` job from being marked reported
         // when it had already finished, so the status is still `-n`-answerable…
-        sh.run_source("( exit 3 ) & sleep 0.2".as_bytes());
+        sh.run_source("( exit 3 ) &".as_bytes());
+        settle_jobs(&mut sh);
         assert_eq!(sh.run_source("wait".as_bytes()), 0);
         assert_eq!(sh.run_source("wait -n".as_bytes()), 3, "spared job is still answerable");
         // …until a `jobs` listing announces it, after which bash denies the job
         // exists at all: 127 from a bare `-n`, and `no such job` for one named by
         // pid — while a *targeted* `wait PID` still replays the status.
-        sh.run_source("( exit 5 ) & p=$!; sleep 0.2".as_bytes());
+        sh.run_source("( exit 5 ) & p=$!".as_bytes());
+        settle_jobs(&mut sh);
         assert_eq!(sh.run_source("wait".as_bytes()), 0);
         assert_eq!(listing(&mut sh, "jobs").lines().count(), 1);
         assert!(
@@ -94945,6 +94947,27 @@ st=1
                 return;
             };
             if job.status.is_some() {
+                return;
+            }
+            std::thread::yield_now();
+        }
+    }
+
+    /// [`settle_job`] for the whole table — for a test that backgrounds a job
+    /// and does not keep its id, and so cannot name the one to wait for.
+    ///
+    /// Sleeping a fixed span instead is what made
+    /// `wait_n_ignores_a_job_whose_status_was_already_reported` flake under
+    /// parallel test load: the assertion there turns on the shell having
+    /// *already* noticed the exit when the operand-less `wait` arrives, and no
+    /// constant is long enough to promise that on a loaded machine.
+    fn settle_jobs(sh: &mut Shell) {
+        // The same grace as [`settle_job`], and for the same reason: a death
+        // inside it is not yet news. See [`Job::born_at`].
+        std::thread::sleep(JOB_EXIT_NOTICE_GRACE + std::time::Duration::from_millis(5));
+        loop {
+            sh.poll_jobs();
+            if sh.jobs.iter().all(|j| j.status.is_some()) {
                 return;
             }
             std::thread::yield_now();

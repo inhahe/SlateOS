@@ -59736,3 +59736,15 @@ and only the first is a case-margin problem.
 
 **Impact.** An intermittently red sweep, which is the gate on every commit —
 and the sweep takes ~19 minutes, so a re-run to disambiguate is expensive.
+
+**Sighting 2026-08-14, in the *unit* suite, and fixed there.**
+`interp::tests::wait_n_ignores_a_job_whose_status_was_already_reported` failed
+once under `cargo test -p oils --lib` (`wait -n` answered 127 where 3 was due,
+i.e. the operand-less `wait` had *not* spared the job) and passed when re-run
+alone. Same shape as this entry, but with a cause the test owned: it backgrounded
+`( exit 3 ) &` and then slept a constant `0.2` to make the job finish first, and
+no constant is long enough to promise that on a loaded machine. Fixed properly
+rather than by lengthening the sleep — a new `settle_jobs` test helper (the
+whole-table form of the existing `settle_job`) polls `poll_jobs` until every job
+has a status, after the same `JOB_EXIT_NOTICE_GRACE`. That removes this test from
+the flaky family; the *corpus* case above is untouched and stays open.

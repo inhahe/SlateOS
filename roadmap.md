@@ -169,15 +169,20 @@ version bump there rebuilds everyone's world.
 
 ### 6. The build and boot test are shared, serialized resources
 
-`cargo build`, `cargo test --workspace` and `scripts/boot-test.sh` all take
-the same `target/` lock and the same QEMU/serial log
-(`build/serial-test.txt`). Two agents booting at once will overwrite each
-other's serial log and read the wrong result.
+Since Step 0.5 put each lane in its own worktree, `target/` and `build/` are
+**not** shared any more — each checkout has its own, so two lanes can build
+and can each write their own `build/serial-test.txt` without collision. What
+is still shared is the machine: a full workspace build and a QEMU boot are
+both heavy, and two at once make each other slow and flaky (and QEMU may
+contend for the same host resources outright).
 
-**Protocol:** take the lock file `build/.boot-lock` before a boot test —
-write your lane letter and a timestamp into it, delete it when done. If it
-exists and is under 20 minutes old, another lane is booting: do something
-else and retry. A stale lock (>20 min) may be broken.
+**Protocol:** take the lock file **`D:\visual studio projects\os\build\.boot-lock`**
+— in the *integration* tree, which is the one path all three worktrees see —
+before a boot test. Write your lane letter and a timestamp into it, delete it
+when done. If it exists and is under 20 minutes old, another lane is booting:
+do something else and retry. A stale lock (>20 min) may be broken. A lock
+inside your own worktree locks nothing, which is what this said before the
+worktree split and why it never actually serialized anything.
 
 For everyday work prefer `cargo build -p <your crate>` and
 `cargo test -p <your crate>`, which contend far less than a full workspace
@@ -242,15 +247,15 @@ Known-issues (open, kernel-owned):
 Roadmap:
 
 - `[B]` Integrate fastpy into the build system — **initiative F, in progress**
-  (line ~312)
-- `[B]` Port **Oils (OSH)** — initiative A, in progress (line ~1794)
-- `[B]` Enough of POSIX libc for gcc/coreutils/bash/CPython (line ~1472)
-- `[B]` Translate POSIX calls to native syscalls (line ~1733)
-- `[B]` gcc, cmake, make, pkg-config via the POSIX layer (line ~5338)
-- `[B]` Rust toolchain, CPython, fastpy compiler self-hosting (lines ~5339–5341)
-- `[B]` Linux syscall translation layer — userspace half (line ~5396)
-- `[B]` `/proc` emulation completeness (line ~5410)
-- `[B]` ALSA/PulseAudio compatibility shim — userspace half (line ~5413)
+  (line ~317)
+- `[B]` Port **Oils (OSH)** — initiative A, in progress (line ~1799)
+- `[B]` Enough of POSIX libc for gcc/coreutils/bash/CPython (line ~1477)
+- `[B]` Translate POSIX calls to native syscalls (line ~1738)
+- `[B]` gcc, cmake, make, pkg-config via the POSIX layer (line ~5343)
+- `[B]` Rust toolchain, CPython, fastpy compiler self-hosting (lines ~5344–5346)
+- `[B]` Linux syscall translation layer — userspace half (line ~5401)
+- `[B]` `/proc` emulation completeness (line ~5415)
+- `[B]` ALSA/PulseAudio compatibility shim — userspace half (line ~5418)
 
 Known-issues (open, userland-owned): the whole **`TD-OILS-*` family** (~35
 entries) plus `TD-FASTPY-PURE-MODE-FVALUE`, `BUG-DASH-CMDSUB-INTERMITTENT-HANG`,

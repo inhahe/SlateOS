@@ -66,6 +66,15 @@ impl core::fmt::Display for ScaledFontError {
     }
 }
 
+impl core::error::Error for ScaledFontError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Sfnt(e) => Some(e),
+            Self::InvalidSize => None,
+        }
+    }
+}
+
 /// One glyph, rasterized and ready to blit.
 #[derive(Clone, Debug)]
 pub struct Glyph {

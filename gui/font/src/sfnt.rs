@@ -103,6 +103,12 @@ impl fmt::Display for SfntError {
     }
 }
 
+// `core::error::Error` rather than `std::error::Error`: the two are the same
+// trait, but naming it through `core` is what lets a caller wrap this in its
+// own error type without dragging `std` into this crate (see the crate docs
+// on `no_std`).
+impl core::error::Error for SfntError {}
+
 /// How deep composite glyphs may nest before we call the file malicious.
 ///
 /// Real fonts nest two levels at most (an accented letter referencing a base

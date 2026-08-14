@@ -77,6 +77,8 @@ impl fmt::Display for RasterError {
     }
 }
 
+impl core::error::Error for RasterError {}
+
 /// A rasterized glyph: 8-bit coverage plus where to put it.
 ///
 /// The bitmap is positioned by `left`/`top`, both measured from the pen

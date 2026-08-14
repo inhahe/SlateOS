@@ -37,6 +37,7 @@ pub mod disabled;
 pub mod dnd;
 pub mod event;
 pub mod filetypes;
+pub mod fontdb;
 pub mod grid;
 pub mod layout;
 pub mod menu;

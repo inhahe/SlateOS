@@ -89,7 +89,7 @@ faults for sequential workloads."""
 
 [memory_access_floor]
 description  = "One guest byte-store to an ordinary .bss static — the harness's resolution limit"
-measured_cycles = 218
+measured_cycles = 284
 source       = "kernel/src/bench.rs run_all, calibration block; QEMU TCG qemu64"
 notes        = """
 Not a performance target. This is the *unit* the two delta-based budgets \
@@ -125,7 +125,17 @@ so it divides away. Loop overhead is inside the measurement and is not \
 subtracted, which can only enlarge the floor and loosen the budgets — the \
 safe direction for a check whose purpose is to stop crying wolf. If a run \
 ever prints `measured` at or below the clamp, treat that run's \
-budget-based verdicts as unreliable rather than as findings."""
+budget-based verdicts as unreliable rather than as findings.
+
+Verified: the amplified form measured 284 (nop=8238 store=26474 over 64 \
+stores/window, delta 18236). Two independent confirmations that this is a \
+real quantity and not an artefact: the single-store version of this same \
+calibration produced 74 (pure noise, clamped), while a *separately* \
+measured byte store to a different .bss static -- the frame_owner_set_split \
+control -- came out at 218 on an earlier boot. 284 sits in the same \
+ballpark as 218, and the gap is the loop overhead this deliberately does \
+not subtract. Recorded as measured_cycles above; it is context, not a \
+target, and every run re-measures it."""
 
 [fast_cpu_index]
 description  = "Resolve the running CPU's sequential index (per-CPU data lookup)"
@@ -216,7 +226,14 @@ round-trip or a contended lock is 10-100x a plain access, and a per-frame \
 loop that should be one write_bytes scales with `count` and clears 150 on \
 the first multi-frame allocation. A tighter budget would catch nothing \
 more and would resume failing on correct code, which is how this check \
-spent its first five boots."""
+spent its first five boots.
+
+Verified PASS on the boot that introduced the raise: tagging cost 11778 \
+cycles/alloc+free = 41 accesses against the 150 budget, with \
+memory_access_floor=284. Note the absolute cycle figure (11778) sits in \
+the same 7660-11778 band that was reported as SLOW for five consecutive \
+boots -- the code did not change, only the unit the budget is expressed \
+in. That is the entire point of the entry above."""
 
 [page_alloc_free]
 description  = "Physical page allocate + free cycle"

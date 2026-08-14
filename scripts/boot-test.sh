@@ -95,6 +95,91 @@ report_pathz_skips() {
     return 0
 }
 
+# Directories whose contents are performance-critical per CLAUDE.md's
+# "Performance-Critical Subsystems" table.  A change under any of these is a
+# change that CLAUDE.md requires benchmarking, so it is the trigger for
+# nagging about a stale benchmark record.
+BENCH_CRITICAL_PATHS=(
+    "kernel/src/mm"
+    "kernel/src/sched"
+    "kernel/src/ipc"
+    "kernel/src/syscall"
+    "kernel/src/smp.rs"
+)
+
+# Say — out loud — that this boot produced NO benchmark numbers.
+#
+# Called only on the PASS paths, and only when --bench was NOT given.  It never
+# changes the exit code: a routine boot legitimately skips the suite, because
+# --bench roughly doubles the ~405 s TCG cycle.
+#
+# The point is that "PASSED" must not be readable as "performance was checked".
+# It was not: the deferred bench task is spawned on every boot and killed the
+# moment BOOT_OK appears, so an ordinary log contains at most the suite's own
+# header and never a single result
+# (known-issues.md -> TD-BENCHMARKS-ARE-NEVER-ACTUALLY-RUN-BY-THE-BOOT-GATE).
+# Same principle as the Path-Z fix above: a silent skip gets believed.
+#
+# It also answers "should I have run --bench?" instead of leaving it to
+# memory.  bench-history.py stamps each recorded run with its git commit, so
+# we can diff that commit against HEAD over the perf-critical paths and
+# escalate from a one-line note to a real warning only when this boot actually
+# contains unbenchmarked changes to code CLAUDE.md says must be benchmarked.
+report_bench_absence() {
+    local file="$1"
+    local hist="$PROJECT_ROOT/bench/history.jsonl"
+
+    # Did the suite at least start before QEMU was torn down?
+    local started="no"
+    [ -f "$file" ] && grep -qa 'Kernel micro-benchmarks' "$file" && started="yes"
+
+    echo "=== NO BENCHMARK RESULTS THIS RUN (--bench not given) ==="
+    if [ "$started" = "yes" ]; then
+        echo "  The deferred bench task started but was killed at $WAIT_MARKER before"
+        echo "  producing numbers. 'PASSED' above covers correctness only."
+    else
+        echo "  The bench task never reached its first result. 'PASSED' above covers"
+        echo "  correctness only."
+    fi
+
+    # Escalate only if perf-critical code moved since the last recorded run.
+    local last_commit=""
+    if [ -f "$hist" ]; then
+        last_commit="$(sed -n 's/.*"commit"[[:space:]]*:[[:space:]]*"\([0-9a-f]*\)".*/\1/p' "$hist" | tail -1)"
+    fi
+
+    if [ -z "$last_commit" ]; then
+        echo "  No previous run in bench/history.jsonl — there is no baseline for this"
+        echo "  host yet. Run: ./scripts/boot-test.sh --bench"
+        return 0
+    fi
+
+    if ! git -C "$PROJECT_ROOT" cat-file -e "${last_commit}^{commit}" 2>/dev/null; then
+        echo "  Last recorded run was $last_commit, which is not in this repo"
+        echo "  (rebased or not fetched); cannot tell what changed since."
+        echo "  Run: ./scripts/boot-test.sh --bench"
+        return 0
+    fi
+
+    local changed
+    changed="$(git -C "$PROJECT_ROOT" diff --name-only "$last_commit" HEAD -- \
+        "${BENCH_CRITICAL_PATHS[@]}" 2>/dev/null)"
+
+    if [ -n "$changed" ]; then
+        echo "  !! Performance-critical code changed since the last benchmarked commit"
+        echo "     ($last_commit). CLAUDE.md requires benchmarking these:"
+        echo "$changed" | head -8 | sed 's/^/       /'
+        local n
+        n="$(echo "$changed" | grep -c .)"
+        [ "$n" -gt 8 ] && echo "       ... and $((n - 8)) more"
+        echo "     Run: ./scripts/boot-test.sh --bench"
+    else
+        echo "  No perf-critical changes since the last benchmarked commit ($last_commit),"
+        echo "  so skipping the suite is reasonable here."
+    fi
+    return 0
+}
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
@@ -780,7 +865,11 @@ while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
             echo "=== Boot test FAILED ($WAIT_MARKER reached but a self-test failed) ==="
             exit 1
         fi
-        [ "$BENCH" -eq 1 ] && print_bench_results "$SERIAL_FILE"
+        if [ "$BENCH" -eq 1 ]; then
+            print_bench_results "$SERIAL_FILE"
+        else
+            report_bench_absence "$SERIAL_FILE"
+        fi
         report_pathz_skips "$SERIAL_FILE"
         echo "=== Boot test PASSED ==="
         exit 0
@@ -832,7 +921,11 @@ if [ -f "$SERIAL_FILE" ]; then
             echo "=== Boot test FAILED ($WAIT_MARKER reached but a self-test failed) ==="
             exit 1
         fi
-        [ "$BENCH" -eq 1 ] && print_bench_results "$SERIAL_FILE"
+        if [ "$BENCH" -eq 1 ]; then
+            print_bench_results "$SERIAL_FILE"
+        else
+            report_bench_absence "$SERIAL_FILE"
+        fi
         report_pathz_skips "$SERIAL_FILE"
         echo "=== Boot test PASSED ==="
         exit 0

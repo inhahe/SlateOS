@@ -39,6 +39,7 @@
 use guitk::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha theme
@@ -74,8 +75,26 @@ const STATUS_BAR_HEIGHT: f32 = 22.0;
 const TAB_BAR_HEIGHT: f32 = 28.0;
 const BORDER_WIDTH: f32 = 1.0;
 const PANE_BORDER_WIDTH: f32 = 1.0;
-const CHAR_WIDTH: f32 = 8.0;
-const CHAR_HEIGHT: f32 = 16.0;
+/// Font size of one terminal cell.
+const CELL_FONT_SIZE: f32 = 14.0;
+
+/// Width of one terminal cell.
+///
+/// A terminal really is a grid — the whole point is that column 40 of row 3
+/// sits above column 40 of row 4 — so the cell is a single number rather than
+/// a per-string measurement. But it has to be *the face's* number: this was a
+/// hardcoded 8.0, which matched the built-in face at 14 px and nothing else,
+/// so any other face drew glyphs that overhung the cell background behind
+/// them and the block cursor landed beside the character it marks.
+fn char_width() -> f32 {
+    text::digit_advance(CELL_FONT_SIZE, FontWeightHint::Regular)
+}
+
+/// Height of one terminal cell, likewise taken from the face rather than
+/// assumed, so tall faces do not overlap into the row below.
+fn char_height() -> f32 {
+    text::line_height(CELL_FONT_SIZE, FontWeightHint::Regular)
+}
 const PADDING: f32 = 4.0;
 const SMALL_TEXT: f32 = 11.0;
 const NORMAL_TEXT: f32 = 13.0;
@@ -1739,7 +1758,7 @@ impl Multiplexer {
         for (i, window) in session.windows.iter().enumerate() {
             let is_active = i == session.active_window;
             let label = &window.name;
-            let tab_w = label.len() as f32 * 7.5 + 24.0;
+            let tab_w = text::width(label, SMALL_TEXT) + 24.0;
 
             // Tab background
             let tab_bg = if is_active { SURFACE0 } else { MANTLE };
@@ -1808,8 +1827,9 @@ impl Multiplexer {
         if let Some(pane) = self.find_pane(pane_id) {
             let content_x = x + 2.0;
             let content_y = y + 2.0;
-            let visible_rows = ((height - 4.0) / CHAR_HEIGHT) as usize;
-            let visible_cols = ((width - 4.0) / CHAR_WIDTH) as usize;
+            let (cell_w, cell_h) = (char_width(), char_height());
+            let visible_rows = ((height - 4.0) / cell_h) as usize;
+            let visible_cols = ((width - 4.0) / cell_w) as usize;
 
             for row_idx in 0..visible_rows.min(pane.buffer.rows) {
                 if let Some(row) = pane.buffer.cells.get(row_idx) {
@@ -1818,15 +1838,15 @@ impl Multiplexer {
                             && (cell.ch != ' ' || cell.bg != BASE)
                         {
                             let (fg, bg) = TerminalBuffer::effective_colors(cell);
-                            let cx = content_x + col_idx as f32 * CHAR_WIDTH;
-                            let cy = content_y + row_idx as f32 * CHAR_HEIGHT;
+                            let cx = content_x + col_idx as f32 * cell_w;
+                            let cy = content_y + row_idx as f32 * cell_h;
 
                             // Cell background (only if non-default)
                             if bg != BASE {
                                 cmds.push(RenderCommand::FillRect {
                                     x: cx, y: cy,
-                                    width: CHAR_WIDTH,
-                                    height: CHAR_HEIGHT,
+                                    width: cell_w,
+                                    height: cell_h,
                                     color: bg,
                                     corner_radii: CornerRadii::ZERO,
                                 });
@@ -1838,10 +1858,10 @@ impl Multiplexer {
                                     x: cx,
                                     y: cy,
                                     text: cell.ch.to_string(),
-                                    font_size: CHAR_HEIGHT - 2.0,
+                                    font_size: CELL_FONT_SIZE,
                                     color: fg,
                                     font_weight: if cell.bold { FontWeightHint::Bold } else { FontWeightHint::Regular },
-                                    max_width: Some(CHAR_WIDTH),
+                                    max_width: Some(cell_w),
                                 });
                             }
                         }
@@ -1851,12 +1871,12 @@ impl Multiplexer {
 
             // Cursor
             if pane.buffer.cursor_visible && active && !pane.copy_mode {
-                let cx = content_x + pane.buffer.cursor_col as f32 * CHAR_WIDTH;
-                let cy = content_y + pane.buffer.cursor_row as f32 * CHAR_HEIGHT;
+                let cx = content_x + pane.buffer.cursor_col as f32 * cell_w;
+                let cy = content_y + pane.buffer.cursor_row as f32 * cell_h;
                 cmds.push(RenderCommand::FillRect {
                     x: cx, y: cy,
-                    width: CHAR_WIDTH,
-                    height: CHAR_HEIGHT,
+                    width: cell_w,
+                    height: cell_h,
                     color: Color::rgba(205, 214, 244, 128),
                     corner_radii: CornerRadii::ZERO,
                 });
@@ -2903,5 +2923,41 @@ mod tests {
             buf.write_str(&format!("Line {i}\n"));
         }
         assert!(buf.scrollback.len() <= MAX_SCROLLBACK);
+    }
+    // --- Cell metrics ---
+
+    /// A character has to fit the cell drawn behind it. When the cell was a
+    /// hardcoded 8.0 this held only for the built-in face; any wider face put
+    /// each glyph over its neighbour's background.
+    #[test]
+    fn a_character_fits_its_cell() {
+        let w = char_width();
+        for ch in ['0', 'W', 'i', '#', 'é'] {
+            let drawn = text::width(&ch.to_string(), CELL_FONT_SIZE);
+            assert!(
+                drawn <= w + 0.01,
+                "{ch:?} draws {drawn} px wide in a {w} px cell"
+            );
+        }
+    }
+
+    /// The row pitch has to clear the face's line height, or descenders land
+    /// in the row below.
+    #[test]
+    fn rows_do_not_overlap() {
+        assert!(char_height() >= text::ascent(CELL_FONT_SIZE, FontWeightHint::Regular));
+        assert!(char_height() > 0.0 && char_width() > 0.0);
+    }
+
+    /// Window tabs are chrome, not grid: the label is proportional text and
+    /// the tab is sized by measuring it, so a long window name cannot spill
+    /// past the tab drawn around it.
+    #[test]
+    fn window_tab_fits_its_label() {
+        for name in ["sh", "cargo watch", "very long window name"] {
+            let tab_w = text::width(name, SMALL_TEXT) + 24.0;
+            let label_end = 12.0 + text::width(name, SMALL_TEXT);
+            assert!(label_end <= tab_w - 8.0, "{name:?} overflows its tab");
+        }
     }
 }

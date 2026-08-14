@@ -29,6 +29,7 @@ use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, Mo
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::text;
 
 use std::collections::VecDeque;
 
@@ -75,6 +76,31 @@ const SMALL_RADIUS: f32 = 4.0;
 
 const MAX_HISTORY_ENTRIES: usize = 50;
 const MAX_HOSTS_DISPLAY: usize = 256;
+
+/// Font size of a view tab, a profile button and the topology legend.
+const CHIP_TEXT: f32 = 12.0;
+/// Font size of the topology legend's labels.
+const LEGEND_TEXT: f32 = 10.0;
+
+/// Width of the tab drawn for `tab`.
+///
+/// The click handler and the renderer each used to derive this from
+/// `label().len()`. Identical formulas today, but two copies of a layout rule
+/// is a drift waiting to happen — and the first time either side gained a
+/// padding tweak, clicking a tab would select its neighbour.
+///
+/// Measured bold whatever the tab's state, because the *active* tab is drawn
+/// bold: sizing each tab to its current weight would reflow the whole strip
+/// every time the selection moved.
+fn tab_width(tab: ViewTab) -> f32 {
+    text::measure(tab.label(), CHIP_TEXT, FontWeightHint::Bold) + 24.0
+}
+
+/// Width of the button drawn for `profile`. Bold for the same reason as
+/// [`tab_width`]: the selected profile is drawn bold.
+fn profile_width(profile: ScanProfile) -> f32 {
+    text::measure(profile.label(), CHIP_TEXT, FontWeightHint::Bold) + 20.0
+}
 
 // ============================================================================
 // IP Address Types
@@ -1487,7 +1513,7 @@ impl NetScanApp {
                 if my >= tab_y && my <= tab_y + TAB_HEIGHT {
                     let mut tab_x = PADDING;
                     for tab in &ViewTab::ALL {
-                        let tab_w = tab.label().len() as f32 * 8.0 + 24.0;
+                        let tab_w = tab_width(*tab);
                         if mx >= tab_x && mx <= tab_x + tab_w {
                             self.active_tab = *tab;
                             return EventResult::Consumed;
@@ -1501,7 +1527,7 @@ impl NetScanApp {
                 if my >= profile_y && my <= profile_y + BUTTON_HEIGHT {
                     let mut px = PADDING;
                     for (i, profile) in ScanProfile::ALL.iter().enumerate() {
-                        let pw = profile.label().len() as f32 * 8.0 + 20.0;
+                        let pw = profile_width(*profile);
                         if mx >= px && mx <= px + pw {
                             self.config.profile = *profile;
                             self.profile_tab_idx = i;
@@ -1719,7 +1745,7 @@ impl NetScanApp {
         let profile_y = y + 28.0;
         let mut px = PADDING;
         for (i, profile) in ScanProfile::ALL.iter().enumerate() {
-            let pw = profile.label().len() as f32 * 8.0 + 20.0;
+            let pw = profile_width(*profile);
             let is_selected = i == self.profile_tab_idx;
             let bg = if is_selected { BLUE } else { SURFACE0 };
             let fg = if is_selected { CRUST } else { TEXT_COLOR };
@@ -1864,7 +1890,7 @@ impl NetScanApp {
 
         let mut tab_x = PADDING;
         for tab in &ViewTab::ALL {
-            let tw = tab.label().len() as f32 * 8.0 + 24.0;
+            let tw = tab_width(*tab);
             let is_active = *tab == self.active_tab;
             let bg = if is_active { SURFACE0 } else { Color::TRANSPARENT };
             let fg = if is_active { BLUE } else { SUBTEXT0 };
@@ -1939,19 +1965,23 @@ impl NetScanApp {
             tree.push(RenderCommand::PopClip);
         } else {
             // Empty state
+            let headline = "No scan results yet";
+            let subline = "Press F5 or click Start Scan to begin";
             tree.push(RenderCommand::Text {
-                x: table_width / 2.0 - 80.0, y: rows_y + 80.0,
-                text: "No scan results yet".to_string(),
+                x: text::center_x(headline, table_width / 2.0, 14.0, FontWeightHint::Regular),
+                y: rows_y + 80.0,
+                text: headline.to_string(),
                 color: OVERLAY0,
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
             });
             tree.push(RenderCommand::Text {
-                x: table_width / 2.0 - 120.0, y: rows_y + 100.0,
-                text: "Press F5 or click Start Scan to begin".to_string(),
+                x: text::center_x(subline, table_width / 2.0, CHIP_TEXT, FontWeightHint::Regular),
+                y: rows_y + 100.0,
+                text: subline.to_string(),
                 color: SURFACE2,
-                font_size: 12.0,
+                font_size: CHIP_TEXT,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
             });
@@ -2413,9 +2443,11 @@ impl NetScanApp {
 
         if let Some(ref result) = self.results {
             if result.hosts.is_empty() {
+                let empty = "No hosts discovered";
                 tree.push(RenderCommand::Text {
-                    x: area_w / 2.0 - 40.0, y: content_y + area_h / 2.0,
-                    text: "No hosts discovered".to_string(),
+                    x: text::center_x(empty, area_w / 2.0, 13.0, FontWeightHint::Regular),
+                    y: content_y + area_h / 2.0,
+                    text: empty.to_string(),
                     color: OVERLAY0,
                     font_size: 13.0,
                     font_weight: FontWeightHint::Regular,
@@ -2514,16 +2546,19 @@ impl NetScanApp {
                     x: lx + 14.0, y: legend_y - 1.0,
                     text: label.to_string(),
                     color: SUBTEXT0,
-                    font_size: 10.0,
+                    font_size: LEGEND_TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                 });
-                lx += label.len() as f32 * 6.0 + 28.0;
+                // 14 px of swatch and gap before the label, 14 after it.
+                lx += 14.0 + text::measure(label, LEGEND_TEXT, FontWeightHint::Regular) + 14.0;
             }
         } else {
+            let empty = "Run a scan to see topology";
             tree.push(RenderCommand::Text {
-                x: area_w / 2.0 - 60.0, y: content_y + area_h / 2.0,
-                text: "Run a scan to see topology".to_string(),
+                x: text::center_x(empty, area_w / 2.0, 13.0, FontWeightHint::Regular),
+                y: content_y + area_h / 2.0,
+                text: empty.to_string(),
                 color: OVERLAY0,
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
@@ -3745,6 +3780,77 @@ mod tests {
         for _ in 0..100 {
             let val = rng.next_range(10, 20);
             assert!((10..=20).contains(&val));
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Text measurement
+    // ------------------------------------------------------------------
+
+    /// The click handler and the renderer walk the tab strip with the same
+    /// widths, so clicking a tab selects that tab. They used to be two
+    /// independent copies of the same formula, which is a drift waiting to
+    /// happen: the first padding tweak on either side offsets every tab after
+    /// the one that changed.
+    #[test]
+    fn clicking_a_tab_selects_that_tab() {
+        let mut app = NetScanApp::new();
+        let tab_y = TITLE_BAR_HEIGHT + CONFIG_PANEL_HEIGHT + PADDING + TAB_HEIGHT / 2.0;
+        let mut x = PADDING;
+        for tab in &ViewTab::ALL {
+            let w = tab_width(*tab);
+            // Click the middle of the tab.
+            let ev = guitk::event::MouseEvent {
+                x: x + w / 2.0,
+                y: tab_y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            };
+            assert_eq!(app.handle_mouse(&ev), EventResult::Consumed);
+            assert_eq!(app.active_tab, *tab, "clicking {:?} selected {:?}", tab, app.active_tab);
+            x += w + 4.0;
+        }
+    }
+
+    /// Every tab is measured in the bold weight the active one is drawn in, so
+    /// the strip does not reflow under the cursor when the selection moves.
+    #[test]
+    fn the_tab_strip_does_not_reflow_on_selection() {
+        for tab in &ViewTab::ALL {
+            let regular = text::measure(tab.label(), CHIP_TEXT, FontWeightHint::Regular);
+            assert!(
+                tab_width(*tab) >= regular + 24.0,
+                "{:?} is too narrow to hold its own bold label",
+                tab
+            );
+        }
+    }
+
+    /// A tab's label has to fit inside it with its 12 px of padding each side.
+    #[test]
+    fn tab_labels_fit_their_tabs() {
+        for tab in &ViewTab::ALL {
+            let drawn = text::measure(tab.label(), CHIP_TEXT, FontWeightHint::Bold);
+            assert!(drawn + 24.0 <= tab_width(*tab) + 0.01, "{:?} overflows its tab", tab);
+        }
+    }
+
+    /// Same for the profile buttons, whose click handler is likewise a second
+    /// walk over the same widths.
+    #[test]
+    fn clicking_a_profile_selects_that_profile() {
+        let mut app = NetScanApp::new();
+        let profile_y = TITLE_BAR_HEIGHT + PADDING + 32.0 + BUTTON_HEIGHT / 2.0;
+        let mut x = PADDING;
+        for profile in &ScanProfile::ALL {
+            let w = profile_width(*profile);
+            let ev = guitk::event::MouseEvent {
+                x: x + w / 2.0,
+                y: profile_y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            };
+            assert_eq!(app.handle_mouse(&ev), EventResult::Consumed);
+            assert_eq!(app.config.profile, *profile);
+            x += w + 6.0;
         }
     }
 }

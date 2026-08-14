@@ -47915,7 +47915,7 @@ loop:
       if (level > NAMEREF_MAX)
 	return ((SHELL_VAR *)0);	/* error message here? */
       newname = nameref_cell (v);
-      if (newname == 0 || *newname == ' ')
+      if (newname == 0 || *newname == '\0')
 	return ((SHELL_VAR *)0);
       oldv = v;
       ...

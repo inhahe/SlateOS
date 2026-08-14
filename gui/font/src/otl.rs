@@ -783,17 +783,40 @@ pub(crate) fn range_containing(
 /// searched the same way, and writing the loop five times is how an off-by-one
 /// gets into one copy and not the others. A `probe` that fails (a truncated
 /// table) ends the search rather than reading past the end.
+///
+/// # Why the interval is closed
+///
+/// On a sorted array every binary search agrees, so the shape of the loop
+/// would be a matter of taste. Not every array in a real font is sorted:
+/// `ELEPHNT.TTF`'s legacy `kern` table sorts its 624 pairs by the *second*
+/// glyph alone, in violation of the requirement that they be ordered by the
+/// two taken together. On such an array a search finds whatever its probe
+/// sequence happens to land on — 13 of the 624 pairs here — and *which* 13
+/// depends entirely on where the first probe falls.
+///
+/// So the loop is written as the closed-interval `[lo, hi]` form that C's
+/// `bsearch` and HarfBuzz's `hb_bsearch_impl` use, which first probes
+/// `(0 + count - 1) / 2` rather than the half-open form's `count / 2`. For
+/// `ELEPHNT` that is index 311 rather than 312, and the two sequences from
+/// there diverge completely: both find exactly 13 pairs, but disjoint sets of
+/// them, and only the closed one finds the `w`/`a` pair that the word
+/// "waffle" needs. Agreeing with every other engine on a malformed font is
+/// worth more than the tidier arithmetic, since the alternative is text that
+/// measures differently here than in a browser for no reason a reader could
+/// ever discover.
 pub(crate) fn binary_search(
     count: usize,
     probe: impl Fn(usize) -> Option<core::cmp::Ordering>,
 ) -> Option<usize> {
     let mut lo = 0usize;
-    let mut hi = count;
-    while lo < hi {
-        let mid = lo.checked_add(hi.checked_sub(lo)?.checked_div(2)?)?;
+    // An empty array, and the `hi` underflow below, both mean "no such
+    // record", which is the same `None` a failed probe returns.
+    let mut hi = count.checked_sub(1)?;
+    while lo <= hi {
+        let mid = lo.checked_add(hi)?.checked_div(2)?;
         match probe(mid)? {
             core::cmp::Ordering::Less => lo = mid.checked_add(1)?,
-            core::cmp::Ordering::Greater => hi = mid,
+            core::cmp::Ordering::Greater => hi = mid.checked_sub(1)?,
             core::cmp::Ordering::Equal => return Some(mid),
         }
     }
@@ -907,5 +930,56 @@ mod tests {
         // XPlacement + YPlacement + XAdvance.
         assert_eq!(value_size(0x0007), 6);
         assert_eq!(value_size(0xFFFF), 32);
+    }
+
+    #[test]
+    fn a_sorted_array_is_searched_correctly_at_every_size() {
+        for count in 0..64_usize {
+            for key in 0..count {
+                let found = binary_search(count, |i| Some(i.cmp(&key)));
+                assert_eq!(found, Some(key), "count {count} key {key}");
+            }
+            // One below the first record and one above the last: both ends of
+            // the interval must terminate rather than underflow or spin.
+            assert_eq!(binary_search(count, |i| Some((i + 1).cmp(&0))), None);
+            assert_eq!(binary_search(count, |i| Some(i.cmp(&count))), None);
+        }
+    }
+
+    /// The probe sequence is part of the contract, not an implementation
+    /// detail: on an array that is not sorted — which real fonts ship — it is
+    /// the only thing that decides what is found. This pins the closed
+    /// interval by watching where the first probe lands.
+    #[test]
+    fn the_first_probe_is_the_one_c_bsearch_would_make() {
+        for (count, want) in [(1_usize, 0_usize), (2, 0), (3, 1), (624, 311), (625, 312)] {
+            let first = core::cell::Cell::new(None);
+            let _ = binary_search(count, |i| {
+                if first.get().is_none() {
+                    first.set(Some(i));
+                }
+                Some(core::cmp::Ordering::Less)
+            });
+            assert_eq!(first.get(), Some(want), "count {count}");
+        }
+    }
+
+    /// `ELEPHNT.TTF` sorts its 624 legacy kern pairs by the second glyph
+    /// alone. A search over such an array finds whatever its probes land on,
+    /// so the only defensible answer is the one every other engine gives.
+    #[test]
+    fn an_unsorted_array_is_searched_the_way_harfbuzz_searches_it() {
+        // Sorted by the low half of the key only, exactly as that face is.
+        let arr: Vec<(u16, u16)> = (0..64_u16).map(|i| (63 - i, i)).collect();
+        let found: Vec<u16> = arr
+            .iter()
+            .filter(|&&key| {
+                binary_search(arr.len(), |i| Some(arr.get(i)?.cmp(&key))).is_some()
+            })
+            .map(|&(_, r)| r)
+            .collect();
+        // The closed interval first probes (0 + 63) / 2 = 31, so the only
+        // records reachable are the ones a descent from there can name.
+        assert_eq!(found, vec![31]);
     }
 }

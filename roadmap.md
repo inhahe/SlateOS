@@ -460,7 +460,13 @@ Roadmap:
   ends with `latn`, as HarfBuzz's does, so a face that registers no default
   script (Gabriola registers `cyrl`/`grek`/`latn`) still kerns a run of digits
   (`TD-FONT-SCRIPT-FALLBACK-STOPS-BEFORE-LATIN`).
-  `agree` 11826 → 11828, `misplaced` 22 → 20.
+  `agree` 11826 → 11828, `misplaced` 22 → 20. And the shared `binary_search`
+  walks the closed interval C's `bsearch` and HarfBuzz's `hb_bsearch_impl`
+  walk, which only shows on an array a font failed to sort — ELEPHNT.TTF
+  orders its 624 legacy kern pairs by the second glyph alone, and the two
+  probe sequences find disjoint sets of 13 of them
+  (`TD-FONT-BINARY-SEARCH-PROBES-IN-A-DIFFERENT-ORDER-FROM-EVERY-OTHER-ENGINE`).
+  `agree` 11828 → 11829, `misplaced` 20 → 19.
   Next unblocked step is the rest of shaping: no Indic reordering
   (`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`), no language selection
   (`TD-FONT-IGNORES-LANGSYS-OVERRIDES`), and no device tables in

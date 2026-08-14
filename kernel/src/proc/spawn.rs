@@ -460,7 +460,18 @@ impl<'a> SpawnOptions<'a> {
     }
 
     /// Set the parent process.
-    #[allow(dead_code)] // Public builder API — callers use SpawnOptions::new() + chaining.
+    ///
+    /// Leaving this at its default of 0 means "spawned by the kernel" and
+    /// disables the parent-capability grant and namespace inheritance in
+    /// [`spawn_process`] (steps 5b and 5c), as well as making the child
+    /// unreapable by any user process.  Every syscall-driven spawn must set
+    /// it; only genuine in-kernel spawns may leave it at 0.
+    ///
+    /// This deliberately carries **no** `#[allow(dead_code)]`.  It had one,
+    /// and that suppression is precisely what hid the fact that the builder
+    /// had no callers at all while both spawn syscalls quietly shipped
+    /// children with `parent = 0`.  If it ever goes unused again, that should
+    /// be a warning, not a comment.
     #[must_use]
     pub fn parent(mut self, pid: ProcessId) -> Self {
         self.parent = pid;
@@ -2193,6 +2204,7 @@ pub fn self_test() -> KernelResult<()> {
     test_spawn_from_elf()?;
     test_spawn_invalid_elf()?;
     test_spawn_with_capabilities()?;
+    test_spawn_records_parent()?;
     test_spawn_faulting_process()?;
     test_spawn_stack_growth()?;
     test_exec_process()?;
@@ -29215,6 +29227,108 @@ fn test_spawn_args_one_shot() -> KernelResult<()> {
 
     serial_println!("[spawn]   take_initial_args is one-shot: OK");
     Ok(())
+}
+
+/// Regression test: a spawned child must be reapable by its parent.
+///
+/// This is the contract both spawn syscalls depend on, and it was broken for
+/// as long as they existed: neither set `SpawnOptions::parent`, so every
+/// syscall-spawned child recorded `parent = 0`.  Three things follow from
+/// that, all of them silent:
+///
+///  * `pcb::try_reap` rejects a reap whose recorded parent does not match the
+///    caller, so `SYS_PROCESS_WAIT`/`_TRY_WAIT` returned `PermissionDenied`
+///    for every spawned child and each one leaked as a zombie.  The visible
+///    symptom was the `ticker` service crash-looping with "exited with code
+///    -400" — the supervisor was reporting a *denied syscall* as the child's
+///    exit status while the child was still happily running.
+///  * `spawn_process` step 5b never granted the parent a `Process` capability
+///    over the child.
+///  * `spawn_process` step 5c never propagated the filesystem namespace, so a
+///    process confined to a non-root namespace could spawn a child into the
+///    root namespace.
+///
+/// The test asserts the reap path specifically, because that is the one that
+/// distinguishes "parent recorded" from "parent defaulted to 0" with a single
+/// unambiguous error code.
+fn test_spawn_records_parent() -> KernelResult<()> {
+    let elf_data = elf::build_test_elf_public();
+
+    // A *real, non-zero* parent is required, and it has to be a process that
+    // actually exists.  The obvious shortcut — using the current task's owning
+    // process — is worse than useless here: self-tests run on a bare kernel
+    // task with no owning process, so it resolves to 0, which is exactly the
+    // value the bug produced.  The test would then have asserted `0 == 0` and
+    // passed against the broken code.  So spawn a throwaway process first and
+    // parent the child to it; that also gives step 5b a live process to hang
+    // the `Process` capability off.
+    let parent = spawn_process(&elf_data, &SpawnOptions::new("spawn-parent"))?;
+    let child = spawn_process(
+        &elf_data,
+        &SpawnOptions::new("spawn-child").parent(parent.pid),
+    )?;
+
+    let cleanup = |fail: bool| {
+        thread::on_thread_exit(child.task_id);
+        pcb::destroy(child.pid);
+        thread::on_thread_exit(parent.task_id);
+        pcb::destroy(parent.pid);
+        if fail {
+            Err(KernelError::InternalError)
+        } else {
+            Ok(())
+        }
+    };
+
+    // 1. The recorded parent must be what we asked for, not the 0 default.
+    let recorded = pcb::parent(child.pid);
+    if recorded != Some(parent.pid) {
+        serial_println!(
+            "[spawn]   FAIL: child records parent {:?}, expected {}",
+            recorded, parent.pid
+        );
+        return cleanup(true);
+    }
+
+    // 2. The negative assertion, and the one that actually pins the bug: PID 0
+    //    must *not* be able to reap this child.  Under the bug every spawned
+    //    child recorded `parent = 0`, so this call would have been permitted.
+    //    Asserting only the positive direction would still pass on broken code
+    //    if the recorded parent happened to match by accident.
+    match pcb::try_reap(0, child.pid) {
+        Err(KernelError::PermissionDenied) => {}
+        other => {
+            serial_println!(
+                "[spawn]   FAIL: PID 0 was allowed to reap process {} owned by \
+                 {} (got {:?}) — the parent field is not being enforced",
+                child.pid, parent.pid, other.map(|o| o.is_some())
+            );
+            return cleanup(true);
+        }
+    }
+
+    // 3. And the real parent must not be denied.  `Ok(None)` (child still
+    //    running) is a pass: the bug produced `Err(PermissionDenied)`, and it
+    //    is that specific error whose absence is being asserted.  Requiring a
+    //    reaped zombie instead would make the test a race against the emulator.
+    match pcb::try_reap(parent.pid, child.pid) {
+        Err(KernelError::PermissionDenied) => {
+            serial_println!(
+                "[spawn]   FAIL: parent {} denied reaping its own child {} \
+                 — SpawnOptions::parent was not applied",
+                parent.pid, child.pid
+            );
+            cleanup(true)
+        }
+        other => {
+            serial_println!(
+                "[spawn]   Spawned child records its parent, PID 0 cannot reap \
+                 it, its parent can (parent={} child={} reap={:?}): OK",
+                parent.pid, child.pid, other.map(|o| o.is_some())
+            );
+            cleanup(false)
+        }
+    }
 }
 
 /// Test: SpawnExArgs struct has correct layout for C ABI.

@@ -610,32 +610,65 @@ pub fn run_all() {
     // Measured first so everything below can use it. A store rather than a
     // load, to match the accesses that dominate the paths being judged, and to
     // its own static so nothing else shares the cache line.
+    //
+    // AMPLIFIED, and that detail is load-bearing. The first version of this
+    // block timed *one* store against one empty closure, and it did not
+    // survive its first verification boot: it reported `measured=74` with
+    // `nop=1278`, while the very next block in the same run measured `nop=448`.
+    // The harness's own minimum wanders by several hundred cycles between
+    // adjacent measurements, so a single ~200-cycle access has no signal above
+    // that noise, and the clamp below silently became the answer — which then
+    // under-scaled every budget derived from it and produced a spurious SLOW.
+    // Timing N stores in a loop and dividing by N puts the signal N times above
+    // the noise floor; the wander stays absolute, so it divides away too.
+    //
+    // The loop's own overhead (counter increment, compare, branch) is inside
+    // the measurement and is NOT subtracted. That is deliberate: it can only
+    // make the floor larger, hence every budget below it looser, hence this
+    // calibration incapable of manufacturing a false alarm. Erring toward
+    // false negatives is the right direction for a check whose entire purpose
+    // is to stop crying wolf at correct code.
     let access_floor = {
         static CALIBRATION_BYTE: core::sync::atomic::AtomicU8 =
             core::sync::atomic::AtomicU8::new(0);
-        const ROUNDS: u32 = 2000;
+        const ROUNDS: u32 = 500;
+        /// Stores per timed window. The per-window delta is ~N x one access,
+        /// so at N=64 a ~200-cycle access shows up as ~13k cycles — an order
+        /// of magnitude clear of the few-hundred-cycle harness wander.
+        const N: u64 = 64;
         let (nop, store) = ab_interleaved(
             ROUNDS,
-            || timed(|| core::hint::black_box(0u64)),
             || {
                 timed(|| {
-                    CALIBRATION_BYTE.store(core::hint::black_box(1u8), Ordering::Relaxed);
+                    let mut i = 0u64;
+                    while i < N {
+                        core::hint::black_box(i);
+                        i = i.wrapping_add(1);
+                    }
+                })
+            },
+            || {
+                timed(|| {
+                    let mut i = 0u64;
+                    while i < N {
+                        CALIBRATION_BYTE.store(core::hint::black_box(1u8), Ordering::Relaxed);
+                        i = i.wrapping_add(1);
+                    }
                 })
             },
         );
-        // The subtraction can land at 0: the nop arm's own minimum wanders by
-        // several hundred cycles between adjacent measurements in one run
-        // (408 vs 726 has been observed), which is itself larger than the
-        // access being measured. Clamp to a floor so a noise-driven 0 cannot
-        // collapse every budget below to 0 and turn every check into a
-        // guaranteed failure.
-        let measured = store.saturating_sub(nop);
+        // Still clamped: if the two arms somehow land equal the budgets below
+        // must not all collapse to 0 and turn every check into a guaranteed
+        // failure. With the amplification above this should never bind, and if
+        // the printed `measured` is ever at or below it, treat the run's
+        // budget-based verdicts as unreliable rather than as findings.
+        let measured = store.saturating_sub(nop) / N;
         let floor = core::cmp::max(measured, 100);
         serial_println!(
             "[bench]   memory_access_floor: {} cycles/guest byte-store (measured={} \
-             nop={} store={}, {} interleaved rounds) — budgets below are multiples \
-             of this",
-            floor, measured, nop, store, ROUNDS
+             over {} stores/window: nop={} store={}, {} interleaved rounds) — budgets \
+             below are multiples of this",
+            floor, measured, N, nop, store, ROUNDS
         );
         floor
     };
@@ -801,19 +834,40 @@ pub fn run_all() {
         //                                                              ----
         //                                                              ~16
         //
-        // The budget is 40 — 2.5x headroom, so ordinary variation in how many
-        // accesses the optimiser folds cannot trip it, while the failures this
-        // check exists for still do: an APIC MMIO round-trip or a contended
-        // lock costs 10-100x a plain access, and a per-frame loop where a
-        // `write_bytes` belongs scales with `count` and blows straight past 40.
+        // That is the *architectural* count, and the budget is not 16-ish,
+        // because the observed healthy value is consistently 2.5-3x it: 51.7
+        // accesses (11288 cycles / 218 floor) on one boot and ~57 on the next.
+        // The multiplier is explained, not fudged. `scripts/boot-test.sh` runs
+        // a plain `cargo build`, and the workspace's `[profile.dev]` sets only
+        // `panic = "abort"` — so opt-level is 0 and the kernel under benchmark
+        // is unoptimised. At opt-level 0 nothing is inlined, so each of the
+        // half-dozen calls on this path (`is_enabled`, `slot`, `set`, `clear`,
+        // `fast_cpu_index`, `bump`) executes a real prologue and epilogue, and
+        // every spilled local and saved register on those is another guest
+        // memory access that the architectural count above does not include.
+        // A ~3x inflation over the source-level access count is exactly what an
+        // unoptimised build predicts, and exactly what two independent boots
+        // measured.
         //
-        // The previous budget was an absolute 500 cycles and reported SLOW on
+        // The budget is therefore 150: ~3x the ~50 that healthy code actually
+        // costs here. That is deliberately generous, and the generosity is
+        // affordable because of what this check is for. It is not a stopwatch —
+        // TCG cannot support one (see the calibration block) — it is a
+        // structural tripwire, and every failure mode it exists to catch is an
+        // order-of-magnitude event, not a percentage: an APIC MMIO round-trip
+        // or a contended lock costs 10-100x a plain access, and a per-frame
+        // loop where a `write_bytes` belongs scales with `count` and leaves 150
+        // behind on the first multi-frame allocation. A tighter budget would
+        // not catch anything more; it would only resume failing on correct
+        // code, which is precisely how this check spent its first five boots.
+        //
+        // That previous budget was an absolute 500 cycles and reported SLOW on
         // five consecutive healthy boots (7660-11288). That was not tagging
         // being slow; it was ~16 guest memory accesses at TCG's few-hundred-
         // cycles-each, against a budget sized for real hardware. The whole
         // investigation is written up in known-issues.md under
         // TD-BENCH-OWNER-AB-BUDGET-WAS-AN-ABSOLUTE-CYCLE-COUNT.
-        const OWNER_TAG_BUDGET_ACCESSES: u64 = 40; // From baselines.toml
+        const OWNER_TAG_BUDGET_ACCESSES: u64 = 150; // From baselines.toml
         let budget = access_floor.saturating_mul(OWNER_TAG_BUDGET_ACCESSES);
         let delta = min_on.saturating_sub(min_off);
         if delta <= budget {

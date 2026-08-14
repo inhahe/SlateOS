@@ -66,15 +66,34 @@ static THREAD_OWNERS: Mutex<BTreeMap<TaskId, ProcessId>> =
 // Thread exit values and join waiters
 // ---------------------------------------------------------------------------
 
-/// Stores the exit value of threads that have exited.
+/// How a thread ended, from a joiner's point of view.
+///
+/// A joiner must be able to tell "ran to completion and produced this
+/// value" apart from "was killed before it produced anything".  Reporting
+/// the latter as a normal return with value 0 is a *silent wrong answer*:
+/// the joiner folds a zero into its result and the program exits
+/// successfully having quietly dropped the dead thread's work.  See
+/// known-issues.md `B-PTHREAD-CHILD-JUMPS-TO-GARBAGE`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThreadOutcome {
+    /// The thread ran to completion (or called `pthread_exit`) and
+    /// produced this value.
+    Exited(i64),
+    /// The thread was killed before it could produce a value: an
+    /// unhandled ring-3 fault, an explicit `kill`, or process teardown.
+    Killed,
+}
+
+/// Stores the outcome of threads that have ended.
 ///
 /// When a thread calls `thread_exit_with_value()`, its exit value is
-/// stored here.  The joining thread reads it from this map.  Entries
+/// stored here; when a thread is killed, [`ThreadOutcome::Killed`] is
+/// stored instead.  The joining thread reads it from this map.  Entries
 /// are removed when the join completes (or never, if no one joins).
 ///
 /// This is independent of process exit codes — each thread has its
 /// own exit value that another thread in the same process can retrieve.
-static THREAD_EXIT_VALUES: Mutex<BTreeMap<TaskId, i64>> =
+static THREAD_OUTCOMES: Mutex<BTreeMap<TaskId, ThreadOutcome>> =
     Mutex::named(BTreeMap::new(), b"THREXITV");
 
 /// Maps a thread being waited on → the task waiting on it.
@@ -115,6 +134,56 @@ pub fn spawn(
     priority: u8,
     entry: extern "C" fn(u64),
     arg: u64,
+) -> KernelResult<TaskId> {
+    // 0/0 = leave the TLS bases at the `Task` default (kernel tasks never
+    // read %fs, and a userspace task that needs one seeds it explicitly).
+    spawn_with_tls(pid, name, priority, entry, arg, 0, 0)
+}
+
+/// Spawn a thread, seeding its `%fs`/`%gs` bases **before** it can run.
+///
+/// Identical to [`spawn`] except that `fs_base`/`gs_base` are written onto
+/// the new [`Task`](crate::sched::task::Task) while it is still suspended,
+/// so the value is in place the first time the scheduler switches it in.
+///
+/// # Why this exists (B-PTHREAD-CHILD-JUMPS-TO-GARBAGE, defect 1)
+///
+/// `IA32_FS_BASE` is a global CPU register that is **not** part of the saved
+/// GP `Context` and is **never read back on switch-out** — `Task::fs_base` is
+/// its sole authority, and the switch-in path restores it unconditionally for
+/// every user task. A caller that did:
+///
+/// ```ignore
+/// let tid = thread::spawn(...)?;      // <-- task is ADMITTED here
+/// sched::set_task_fs_base(tid, fs);   // <-- too late
+/// ```
+///
+/// left a window in which the child was runnable with `fs_base == 0`. The
+/// child's *first* run survived it (the clone trampoline installs the base
+/// with a one-shot `WRMSR`), but if the child was **preempted** before the
+/// parent reached `set_task_fs_base`, its next switch-in restored the still
+/// zero `Task::fs_base` and clobbered the live MSR. glibc's `start_thread`
+/// then read `pd->start_routine` through a null TLS base and jumped to
+/// garbage — an intermittent (~1-in-10 boots) ring-3 fault whose `RIP`
+/// equalled `CR2` with an otherwise intact stack.
+///
+/// Seeding before admission closes the window structurally: there is no
+/// instant at which the task is schedulable with a wrong TLS base. This is
+/// the same "register everything before admitting the task" discipline that
+/// [`spawn`] already applies to `THREAD_OWNERS`/`pcb::add_thread` (which
+/// closed B-PTHREAD-YIELDBUDGET).
+///
+/// # Errors
+///
+/// Same as [`spawn`].
+pub fn spawn_with_tls(
+    pid: ProcessId,
+    name: &[u8],
+    priority: u8,
+    entry: extern "C" fn(u64),
+    arg: u64,
+    fs_base: u64,
+    gs_base: u64,
 ) -> KernelResult<TaskId> {
     // Verify the process exists before allocating resources.
     let proc_state = pcb::state(pid)
@@ -178,6 +247,19 @@ pub fn spawn(
         "[thread] Spawned thread (task {}) in process {}",
         task_id, pid
     );
+
+    // Seed the TLS bases while the task is still suspended.  This MUST happen
+    // before `admit`: the switch-in path restores `Task::fs_base` into
+    // IA32_FS_BASE unconditionally and never saves it back on switch-out, so a
+    // task admitted with a stale 0 here would have its trampoline-installed
+    // base clobbered the first time it was preempted and resumed.  See this
+    // function's doc comment (B-PTHREAD-CHILD-JUMPS-TO-GARBAGE defect 1).
+    if fs_base != 0 {
+        sched::set_task_fs_base(task_id, fs_base);
+    }
+    if gs_base != 0 {
+        sched::set_task_gs_base(task_id, gs_base);
+    }
 
     // All ownership is now registered — admit the task so it can be
     // scheduled.  Only after this point can the child run (and possibly
@@ -284,7 +366,7 @@ pub fn spawn_user(
 /// Record a thread's exit value for a later `join()`.
 ///
 /// A **detached** thread will never be joined, so retaining its exit
-/// value would leak the `THREAD_EXIT_VALUES` map entry until the owning
+/// value would leak the `THREAD_OUTCOMES` map entry until the owning
 /// process exits.  For detached threads we therefore store nothing.  This
 /// is the kernel-side counterpart of the userspace pthread self-unmap fix
 /// (see `posix/src/pthread.rs` and known-issues.md
@@ -296,8 +378,23 @@ fn record_exit_value(task_id: TaskId, exit_value: i64, detached: bool) {
         // to clear here.
         return;
     }
-    let mut exit_values = THREAD_EXIT_VALUES.lock();
-    exit_values.insert(task_id, exit_value);
+    let mut outcomes = THREAD_OUTCOMES.lock();
+    outcomes.insert(task_id, ThreadOutcome::Exited(exit_value));
+}
+
+/// Record that a thread was **killed** rather than exiting on its own.
+///
+/// Must be called *before* [`on_thread_exit`] on every involuntary death
+/// path, because `on_thread_exit` is what releases a parked joiner: once
+/// it has run, the joiner can wake and read the map at any moment, so a
+/// marker written afterwards may arrive too late.
+///
+/// Uses `or_insert` rather than an unconditional insert so that a thread
+/// which already recorded a real exit value and is only *then* swept up
+/// by process teardown keeps the value it produced.
+fn record_killed(task_id: TaskId) {
+    let mut outcomes = THREAD_OUTCOMES.lock();
+    outcomes.entry(task_id).or_insert(ThreadOutcome::Killed);
 }
 
 /// Exit the current thread with a value, supporting join.
@@ -356,12 +453,9 @@ pub fn join(target_task: TaskId) -> KernelResult<i64> {
         return Err(KernelError::InvalidArgument);
     }
 
-    // Check if the target has already exited.
-    {
-        let mut exit_values = THREAD_EXIT_VALUES.lock();
-        if let Some(exit_value) = exit_values.remove(&target_task) {
-            return Ok(exit_value);
-        }
+    // Check if the target has already ended.
+    if let Some(outcome) = take_outcome(target_task) {
+        return outcome_to_result(target_task, outcome);
     }
 
     // Verify the target belongs to the same process as the caller.
@@ -373,12 +467,11 @@ pub fn join(target_task: TaskId) -> KernelResult<i64> {
         match (caller_pid, target_pid) {
             (Some(cp), Some(tp)) if cp == tp => {} // Same process — OK.
             (_, None) => {
-                // Target not registered — may have already exited and
-                // been cleaned up.  Check exit values one more time.
+                // Target not registered — may have already ended and been
+                // cleaned up.  Check the outcome map one more time.
                 drop(owners);
-                let mut exit_values = THREAD_EXIT_VALUES.lock();
-                if let Some(exit_value) = exit_values.remove(&target_task) {
-                    return Ok(exit_value);
+                if let Some(outcome) = take_outcome(target_task) {
+                    return outcome_to_result(target_task, outcome);
                 }
                 return Err(KernelError::NoSuchProcess);
             }
@@ -422,24 +515,47 @@ pub fn join(target_task: TaskId) -> KernelResult<i64> {
         }
     }
 
-    // Woken up — retrieve the exit value.
-    {
-        let mut exit_values = THREAD_EXIT_VALUES.lock();
-        if let Some(exit_value) = exit_values.remove(&target_task) {
-            return Ok(exit_value);
-        }
+    // Woken up — retrieve the outcome.
+    if let Some(outcome) = take_outcome(target_task) {
+        return outcome_to_result(target_task, outcome);
     }
 
-    // The target died without recording an exit value.  That is expected
-    // for a detached thread (`record_exit_value` deliberately stores
-    // nothing) and for a thread killed by an unhandled exception or by
-    // process teardown, which run `on_thread_exit` without ever passing
-    // through `thread_exit_with_value`.  Report 0 rather than hanging.
+    // The target ended without recording any outcome at all.  That is
+    // expected only for a **detached** thread: `record_exit_value`
+    // deliberately stores nothing for one, because by contract nobody may
+    // join it.  Every involuntary death path records
+    // [`ThreadOutcome::Killed`], so reaching here means the caller joined
+    // a thread it had no right to join.
     serial_println!(
-        "[thread] join: task {} exited without an exit value (detached or killed) — reporting 0",
+        "[thread] join: task {} ended with no recorded outcome (detached?) — reporting EINVAL",
         target_task
     );
-    Ok(0)
+    Err(KernelError::InvalidArgument)
+}
+
+/// Remove and return a thread's recorded outcome, if any.
+fn take_outcome(task_id: TaskId) -> Option<ThreadOutcome> {
+    let mut outcomes = THREAD_OUTCOMES.lock();
+    outcomes.remove(&task_id)
+}
+
+/// Translate a recorded outcome into `join()`'s result.
+///
+/// A killed thread is reported as [`KernelError::Cancelled`], never as
+/// `Ok(0)` — see [`ThreadOutcome`].  The POSIX layer turns this into the
+/// `PTHREAD_CANCELED` return value, which is precisely the slot POSIX
+/// reserves for "this thread did not finish normally".
+fn outcome_to_result(task_id: TaskId, outcome: ThreadOutcome) -> KernelResult<i64> {
+    match outcome {
+        ThreadOutcome::Exited(v) => Ok(v),
+        ThreadOutcome::Killed => {
+            serial_println!(
+                "[thread] join: task {} was killed — reporting Cancelled, not a normal return",
+                task_id
+            );
+            Err(KernelError::Cancelled)
+        }
+    }
 }
 
 /// Notify that a thread has exited.
@@ -780,6 +896,10 @@ pub fn kill_process_threads(pid: ProcessId) -> usize {
     let mut killed: usize = 0;
 
     for &task_id in &task_ids {
+        // Record the involuntary death *before* `on_thread_exit`, which
+        // releases any parked joiner — see `record_killed`.
+        record_killed(task_id);
+
         // Mark the scheduler task as Dead and dequeue it.
         sched::kill_task(task_id);
 
@@ -791,6 +911,36 @@ pub fn kill_process_threads(pid: ProcessId) -> usize {
     }
 
     killed
+}
+
+/// Kill a single thread, leaving the rest of its process running.
+///
+/// This is the only correct way to take out one thread from outside it:
+/// it records the involuntary death so a `join()` on the victim reports
+/// [`KernelError::Cancelled`] instead of a bogus normal return, kills the
+/// scheduler task, *and* runs the universal death hook so the
+/// thread→process mapping, IRQ registrations and parked joiners are all
+/// cleaned up.  Calling `sched::kill_task` on its own — which is what the
+/// shell's `kill` command used to do — skips every one of those and
+/// leaves the thread registered forever with its joiner parked.
+///
+/// Returns `true` if the scheduler accepted the kill.  It refuses the
+/// *current* task (that is `task_exit`'s job) and tasks that are already
+/// dead.
+pub fn kill_thread(task_id: TaskId) -> bool {
+    record_killed(task_id);
+    let accepted = sched::kill_task(task_id);
+    if accepted {
+        on_thread_exit(task_id);
+    } else {
+        // Nothing died, so do not leave a phantom `Killed` marker behind
+        // that a later legitimate join would trip over.
+        let mut outcomes = THREAD_OUTCOMES.lock();
+        if outcomes.get(&task_id) == Some(&ThreadOutcome::Killed) {
+            outcomes.remove(&task_id);
+        }
+    }
+    accepted
 }
 
 /// Get the number of registered thread→process mappings.
@@ -827,7 +977,74 @@ pub fn self_test() -> KernelResult<()> {
     test_blocking_join()?;
     test_join_self_fails()?;
     test_detached_exit_not_retained()?;
+    test_killed_thread_does_not_join_normally()?;
 
+    Ok(())
+}
+
+/// Test 8: a **killed** thread does not join as a normal return.
+///
+/// Regression test for `B-PTHREAD-CHILD-JUMPS-TO-GARBAGE` defect 2.
+/// `join()` used to report `Ok(0)` for any thread that ended without
+/// recording an exit value, which is exactly what a killed thread looks
+/// like.  A worker's contribution then silently vanished from the
+/// caller's total and the program exited 0 — a wrong answer with no
+/// error reported anywhere.  A kill must surface as `Cancelled`.
+///
+/// Exercises the outcome map and `join()`'s already-ended fast path
+/// directly with synthetic task IDs, so no real thread has to be killed
+/// and the test cannot race the scheduler.
+fn test_killed_thread_does_not_join_normally() -> KernelResult<()> {
+    // Synthetic, never-scheduled task IDs, distinct from test 7's.
+    let killed: TaskId = TaskId::MAX - 11;
+    let exited: TaskId = TaskId::MAX - 12;
+
+    // A killed thread reports Cancelled, not Ok(0).
+    record_killed(killed);
+    match join(killed) {
+        Err(KernelError::Cancelled) => {}
+        other => {
+            serial_println!(
+                "[thread]   FAIL: join on a killed thread should be Cancelled, got {:?}",
+                other
+            );
+            let mut outcomes = THREAD_OUTCOMES.lock();
+            outcomes.remove(&killed);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // ...and the outcome is consumed, so a second join finds nothing.
+    // (The synthetic ID is not registered in `THREAD_OWNERS`, so `join`
+    // takes its "target not registered" path and reports NoSuchProcess.)
+    if join(killed) != Err(KernelError::NoSuchProcess) {
+        serial_println!(
+            "[thread]   FAIL: a killed thread's outcome should be consumed by join"
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // A thread that really exited keeps its value even if process
+    // teardown later sweeps it: `record_killed` must not clobber it.
+    record_exit_value(exited, -1, false);
+    record_killed(exited);
+    match join(exited) {
+        // -1 is `PTHREAD_CANCELED` at the C level: a perfectly legal
+        // exit value that the old value-in-rax join ABI could not tell
+        // apart from an error code.
+        Ok(-1) => {}
+        other => {
+            serial_println!(
+                "[thread]   FAIL: a real exit value must survive a later kill sweep, got {:?}",
+                other
+            );
+            let mut outcomes = THREAD_OUTCOMES.lock();
+            outcomes.remove(&exited);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    serial_println!("[thread]   Killed thread joins as Cancelled, not 0: OK");
     Ok(())
 }
 
@@ -845,8 +1062,8 @@ fn test_detached_exit_not_retained() -> KernelResult<()> {
     // Joinable: the value is recorded and retrievable.
     record_exit_value(fake, 7, false);
     {
-        let mut ev = THREAD_EXIT_VALUES.lock();
-        if ev.remove(&fake) != Some(7) {
+        let mut ev = THREAD_OUTCOMES.lock();
+        if ev.remove(&fake) != Some(ThreadOutcome::Exited(7)) {
             serial_println!(
                 "[thread]   FAIL: joinable exit value should have been recorded"
             );
@@ -857,7 +1074,7 @@ fn test_detached_exit_not_retained() -> KernelResult<()> {
     // Detached: nothing is stored, so nothing leaks.
     record_exit_value(fake, 7, true);
     {
-        let mut ev = THREAD_EXIT_VALUES.lock();
+        let mut ev = THREAD_OUTCOMES.lock();
         if ev.remove(&fake).is_some() {
             serial_println!(
                 "[thread]   FAIL: detached exit value must not be retained"
@@ -1022,8 +1239,8 @@ extern "C" fn test_thread_exit_entry(arg: u64) {
 
     // Store exit value.
     {
-        let mut exit_values = THREAD_EXIT_VALUES.lock();
-        exit_values.insert(task_id, exit_value);
+        let mut outcomes = THREAD_OUTCOMES.lock();
+        outcomes.insert(task_id, ThreadOutcome::Exited(exit_value));
     }
 
     // Wake any joiner.
@@ -1053,9 +1270,9 @@ fn test_thread_exit_with_value() -> KernelResult<()> {
 
     // Check that the exit value was stored.
     {
-        let mut exit_values = THREAD_EXIT_VALUES.lock();
-        match exit_values.remove(&task_id) {
-            Some(42) => {} // Expected.
+        let mut outcomes = THREAD_OUTCOMES.lock();
+        match outcomes.remove(&task_id) {
+            Some(ThreadOutcome::Exited(42)) => {} // Expected.
             other => {
                 serial_println!(
                     "[thread]   FAIL: exit value should be 42, got {:?}",
@@ -1104,11 +1321,11 @@ fn test_thread_join() -> KernelResult<()> {
     // Note: We call the join function's value-retrieval path directly
     // since the idle task (us) isn't registered as a process thread,
     // which would fail the same-process check.  Instead, verify the
-    // value is in THREAD_EXIT_VALUES.
+    // value is in THREAD_OUTCOMES.
     {
-        let mut exit_values = THREAD_EXIT_VALUES.lock();
-        match exit_values.remove(&target) {
-            Some(99) => {} // Expected.
+        let mut outcomes = THREAD_OUTCOMES.lock();
+        match outcomes.remove(&target) {
+            Some(ThreadOutcome::Exited(99)) => {} // Expected.
             other => {
                 serial_println!(
                     "[thread]   FAIL: join expected exit value 99, got {:?}",
@@ -1138,6 +1355,9 @@ static BJ_RESULT: core::sync::atomic::AtomicI64 = core::sync::atomic::AtomicI64:
 /// 1 = the joiner never registered, 2 = `join()` returned while the
 /// target was still alive.
 static BJ_FAIL: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// The error `join()` returned, as its `#[repr(i32)]` discriminant, or 0
+/// if it succeeded (no `KernelError` variant is 0).
+static BJ_ERR: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
 
 /// Join target: waits until the joiner has parked on it, then dies.
 ///
@@ -1148,10 +1368,12 @@ static BJ_FAIL: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::n
 /// boot task would therefore livelock.
 ///
 /// `arg != 0` records an exit value first (the `thread_exit_with_value`
-/// path); `arg == 0` records nothing (the crash / `exit_group` path,
-/// where the thread never passes through `thread_exit_with_value`).
+/// path); `arg == 0` records a *kill* instead (the crash / `exit_group`
+/// path, where the thread never passes through `thread_exit_with_value`
+/// and the exception or teardown code stamps `record_killed` on it).
 /// Either way the death is signalled only through `on_thread_exit`,
-/// which is where the join wake lives.
+/// which is where the join wake lives — neither `record_exit_value` nor
+/// `record_killed` wakes anybody, so the wake is still being tested.
 extern "C" fn bj_target_entry(arg: u64) {
     use core::sync::atomic::Ordering::SeqCst;
     let task_id = sched::current_task_id();
@@ -1181,14 +1403,32 @@ extern "C" fn bj_target_entry(arg: u64) {
 
     if arg != 0 {
         record_exit_value(task_id, 77, false);
+    } else {
+        record_killed(task_id);
     }
     on_thread_exit(task_id);
 }
 
 /// Joiner: blocks in `join(target)` and publishes the outcome.
+///
+/// `join()` returns a `Result`, and both halves matter to this test, so
+/// the two are published separately: `BJ_ERR` is 0 on success and the
+/// error's stable ABI discriminant otherwise, with `BJ_RESULT` only
+/// meaningful when `BJ_ERR` is 0.  (Folding an error into the value —
+/// the old `unwrap_or(i64::MIN)` — is exactly the ambiguity that made
+/// the value-in-rax join ABI unfixable; see design-decisions.md §127.)
 extern "C" fn bj_joiner_entry(target: u64) {
     use core::sync::atomic::Ordering::SeqCst;
-    BJ_RESULT.store(join(target).unwrap_or(i64::MIN), SeqCst);
+    match join(target) {
+        Ok(value) => {
+            BJ_RESULT.store(value, SeqCst);
+            BJ_ERR.store(0, SeqCst);
+        }
+        Err(e) => {
+            BJ_RESULT.store(0, SeqCst);
+            BJ_ERR.store(e as i32, SeqCst);
+        }
+    }
     BJ_DONE.store(1, SeqCst);
 }
 
@@ -1214,8 +1454,12 @@ fn bj_waiter_of(target: TaskId) -> Option<TaskId> {
 ///    phases kill the target through `on_thread_exit` alone; phase 2
 ///    additionally records no exit value, as a crash would not.
 fn test_blocking_join() -> KernelResult<()> {
-    run_blocking_join_phase(true, 77)?;
-    run_blocking_join_phase(false, 0)
+    run_blocking_join_phase(true, Ok(77))?;
+    // A crashed thread is *killed*, so it must not join as a normal
+    // return — that conflation is `B-PTHREAD-CHILD-JUMPS-TO-GARBAGE`
+    // defect 2, where a lost worker's contribution silently vanished
+    // from the caller's total and the program still exited 0.
+    run_blocking_join_phase(false, Err(KernelError::Cancelled))
 }
 
 /// Tear down a failed phase's fixture and fail.
@@ -1235,12 +1479,13 @@ fn bj_fail(pid: ProcessId, target: TaskId, joiner: TaskId) -> KernelResult<()> {
     Err(KernelError::InternalError)
 }
 
-fn run_blocking_join_phase(record_value: bool, expected: i64) -> KernelResult<()> {
+fn run_blocking_join_phase(record_value: bool, expected: KernelResult<i64>) -> KernelResult<()> {
     use core::sync::atomic::Ordering::SeqCst;
 
     BJ_DONE.store(0, SeqCst);
     BJ_FAIL.store(0, SeqCst);
     BJ_RESULT.store(i64::MIN, SeqCst);
+    BJ_ERR.store(i32::MIN, SeqCst);
 
     let pid = pcb::create("thread-test-blocking-join", 0);
     let target = spawn(
@@ -1293,11 +1538,19 @@ fn run_blocking_join_phase(record_value: bool, expected: i64) -> KernelResult<()
         return bj_fail(pid, target, joiner);
     }
 
-    let got = BJ_RESULT.load(SeqCst);
-    if got != expected {
+    // Compare on the wire form (value + discriminant) rather than
+    // rebuilding a `KernelError`, so an unexpected code prints as itself
+    // instead of being forced into the nearest known variant.
+    let err = BJ_ERR.load(SeqCst);
+    let value = BJ_RESULT.load(SeqCst);
+    let matched = match expected {
+        Ok(want) => err == 0 && value == want,
+        Err(want) => err == want as i32,
+    };
+    if !matched {
         serial_println!(
-            "[thread]   FAIL: join() returned {} (expected {}, record_value={})",
-            got, expected, record_value
+            "[thread]   FAIL: join() returned (value {}, err {}), expected {:?} (record_value={})",
+            value, err, expected, record_value
         );
         return bj_fail(pid, target, joiner);
     }

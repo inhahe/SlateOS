@@ -700,17 +700,21 @@ fn fork_process_clone_inner(
     // parent never set a custom %gs.
     let parent_gs = crate::sched::current_task_gs_base();
 
-    match thread::spawn(
+    // Seed the inherited FS/GS bases through `spawn_with_tls` so they are in
+    // place *before* the child is admitted.  Setting them after spawn returned
+    // would leave a window in which the child could be preempted and then have
+    // its trampoline-installed FS base clobbered by a still-zero `Task::fs_base`
+    // on switch-in (B-PTHREAD-CHILD-JUMPS-TO-GARBAGE defect 1).
+    match thread::spawn_with_tls(
         child_pid,
         b"forked",
         priority,
         fork_child_trampoline,
         image_raw,
+        parent_fs,
+        parent_gs,
     ) {
         Ok(task_id) => {
-            crate::sched::set_task_fs_base(task_id, parent_fs);
-            crate::sched::set_task_gs_base(task_id, parent_gs);
-
             // CLONE_PARENT_SETTID: write the child's TID into the
             // *parent's* memory at parent_tid_ptr.  We are still running
             // in the parent's syscall context (parent CR3 active), so the

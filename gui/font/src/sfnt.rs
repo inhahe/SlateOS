@@ -809,12 +809,17 @@ impl Face {
                 .ok_or(SfntError::MalformedTable("loca"))?;
             // The short format stores halved offsets, which is why a
             // short-loca font can only address 128 KiB of glyph data.
-            (usize::from(s).saturating_mul(2), usize::from(e).saturating_mul(2))
+            (
+                usize::from(s).saturating_mul(2),
+                usize::from(e).saturating_mul(2),
+            )
         };
         if end <= start {
             return Ok(None);
         }
-        let len = end.checked_sub(start).ok_or(SfntError::MalformedTable("loca"))?;
+        let len = end
+            .checked_sub(start)
+            .ok_or(SfntError::MalformedTable("loca"))?;
         let off = self
             .glyf
             .off
@@ -1014,7 +1019,9 @@ fn read_coord_deltas(
         } else if f & same_or_pos == 0 {
             let v = i32::from(i16_at(d, *pos).ok_or(SfntError::MalformedTable("glyf"))?);
             *pos = pos.checked_add(2).ok_or(SfntError::TooShort)?;
-            acc = acc.checked_add(v).ok_or(SfntError::MalformedTable("glyf"))?;
+            acc = acc
+                .checked_add(v)
+                .ok_or(SfntError::MalformedTable("glyf"))?;
         }
         out.push(acc);
     }
@@ -1050,7 +1057,9 @@ fn parse_simple_glyph(d: &[u8], num_contours: usize, out: &mut Outline) -> Resul
         }
     }
     let last = *end_pts.last().ok_or(SfntError::MalformedTable("glyf"))?;
-    let num_points = usize::from(last).checked_add(1).ok_or(SfntError::TooShort)?;
+    let num_points = usize::from(last)
+        .checked_add(1)
+        .ok_or(SfntError::TooShort)?;
 
     let mut pos = num_contours.checked_mul(2).ok_or(SfntError::TooShort)?;
     let instr_len = u16_at(d, pos).ok_or(SfntError::MalformedTable("glyf"))?;
@@ -1097,7 +1106,9 @@ fn parse_simple_glyph(d: &[u8], num_contours: usize, out: &mut Outline) -> Resul
 
     let mut start = 0usize;
     for end in &end_pts {
-        let end_idx = usize::from(*end).checked_add(1).ok_or(SfntError::TooShort)?;
+        let end_idx = usize::from(*end)
+            .checked_add(1)
+            .ok_or(SfntError::TooShort)?;
         let contour = points
             .get(start..end_idx)
             .ok_or(SfntError::MalformedTable("glyf"))?;

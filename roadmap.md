@@ -352,14 +352,22 @@ Roadmap:
   FeatureList, so a face's Arabic rules can no longer rewrite Latin text —
   which is what Calibri's `calt` had been doing to the slash in `1/2` and
   Ebrima's `ccmp` to the space in English prose. `locl` became safe to read
-  in the same change (§411). Agreement with HarfBuzz over an 18-string
-  corpus is 9066/10008 runs, and every remaining disagreement is either a
-  documented deliberate divergence or a shaper not yet written. Next
-  unblocked step is the rest of shaping: no Arabic joining or Indic
-  reordering (`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`), no language
-  selection (`TD-FONT-IGNORES-LANGSYS-OVERRIDES`), no Alternate
-  Substitution (GSUB 3), no mark-to-ligature attachment (GPOS 5), no bidi.
-  Vello itself waits on `[A]`'s GPU driver.
+  in the same change (§411). Arabic joining done: a cursive-joining pass
+  derives each character's positional form and gates `isol`/`init`/`medi`/
+  `fina` through a per-glyph feature mask intersected with a per-(script,
+  lookup) one, so a positional lookup reaches only the glyphs that take
+  that form; GSUB 3 (Alternate Substitution) and `rclt` came with it
+  (§412). All 44 Arabic-capable faces now give HarfBuzz's glyphs exactly,
+  reversed — the shaping agrees and only RTL reordering is left. Agreement
+  over an 18-string corpus is 9023 identical + 44 reversed of 10008 runs,
+  and every remaining disagreement is either a documented deliberate
+  divergence or a shaper not yet written. Next unblocked step is the rest
+  of shaping: no Indic reordering
+  (`TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`), no bidi
+  (`TD-FONT-DOES-NOT-REORDER-RIGHT-TO-LEFT-TEXT`), no lookup flags
+  (`TD-FONT-IGNORES-GSUB-LOOKUP-FLAGS`), no language selection
+  (`TD-FONT-IGNORES-LANGSYS-OVERRIDES`), no mark-to-ligature attachment
+  (GPOS 5). Vello itself waits on `[A]`'s GPU driver.
 - `[C]` Wayland-inspired compositor: GPU acceleration, currently a software
   rasterizer (lines ~4605, ~4619)
 - `[C]` Video-encoded capture fallback, H.264/VP9 (lines ~4623, ~5060)

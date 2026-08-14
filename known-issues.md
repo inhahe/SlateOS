@@ -59085,3 +59085,118 @@ produces.
 `Substitutions::parse` and the module doc's "What is deliberately not
 implemented"; `gui/font/src/scaled.rs` — `substitute_runs`, which is where a
 per-script shaper would be dispatched.
+
+**Resolved — the Arabic half (2026-08-14).** `gui/font/src/joining.rs` derives
+each character's positional form from its `Joining_Type` and its nearest
+non-transparent neighbours; `gui/font/src/otl.rs` records, per script, which
+feature tags reached each lookup; `gui/font/src/gsub.rs` intersects that with
+a per-glyph mask so a positional lookup reaches only the glyphs that take that
+form. The tag list gained `isol`/`init`/`medi`/`fina` and `rclt`, and GSUB
+type 3 (`AlternateSubst`) is now read, because Microsoft Uighur and others
+write their positional forms as type 3. Measured on the same sweep: all 44
+Arabic-capable faces now produce glyph-for-glyph identical output to HarfBuzz.
+`Amiri-Bold.ttf` gives `[55, 1700, 1428, 1745, 3113, 2420, 1633]` where it
+gave the isolated `[55, 84, 73, 65, 56, 90, 57]`. That is HarfBuzz's answer
+exactly reversed, because HarfBuzz reverses an RTL buffer for the caller and
+we do not reorder at all — see `TD-FONT-DOES-NOT-REORDER-RIGHT-TO-LEFT-TEXT`.
+The design is recorded in `design-decisions.md` §412.
+
+**Still open — the Indic half.** The 5 faces that disagree on `हिन्दी` are
+untouched: the `i`-matra is still not reordered before its consonant and the
+conjunct still does not form. That needs the Universal Shaping Engine pass,
+which is the substantially larger of the two and is what this entry now
+tracks.
+
+## TD-FONT-DOES-NOT-REORDER-RIGHT-TO-LEFT-TEXT
+
+**What.** `ScaledFont::shape` returns glyphs in logical order for every
+script. For Arabic and Hebrew the caller therefore gets the glyphs in the
+order the characters were typed, and drawing them left to right puts the
+first letter of the word on the left — the word runs backwards. HarfBuzz
+reverses an RTL buffer before returning it, precisely so that a caller who
+advances the pen left-to-right draws the word correctly.
+
+**Symptom, measured.** In the HarfBuzz sweep the 44 Arabic-capable faces are
+counted under `reversed` rather than `agree`: same glyphs, opposite order.
+The sweep classifies that case separately (`got == expected[::-1]`) so the
+distinction between "we shaped it wrong" and "we did not reorder it" stays
+visible; after the joining work the `differ` count for `العربية` is zero.
+
+**Why it is filed rather than fixed.** Reversing the run is a two-line change
+and would be the wrong fix on its own. The real requirement is UAX #9 bidi:
+a paragraph of mixed Arabic and Latin has to be resolved into directional
+runs by the algorithm — embedding levels, neutral resolution, the whole
+thing — before anyone knows which spans to reverse. Reversing every run whose
+script is RTL gets simple cases right and mixed text subtly wrong, which is
+worse than the current state because the failure stops being obvious. The
+bidi pass belongs above the shaper, next to `script::runs`, and wants to be
+written once for the whole toolkit rather than hidden inside the font crate.
+
+**Proper fix.** A UAX #9 implementation producing embedding levels per
+character; `script::runs` splits on level as well as script; the shaper keeps
+returning logical order and the layout stage reverses the runs whose level is
+odd. Mirroring (`U+0028` ↔ `U+0029` and friends) belongs in the same pass.
+
+**Where.** `gui/font/src/scaled.rs` — `shape`, which builds the glyph vector
+in logical order; `gui/font/src/script.rs` — `runs`, where levels would join
+scripts as a run boundary; `gui/font/tools/harfbuzz_sweep.py` — the
+`reversed_only` counter, which will drop to zero when this is done.
+
+## TD-FONT-IGNORES-GSUB-LOOKUP-FLAGS
+
+**What.** Every GSUB lookup carries a `lookupFlag`: `RightToLeft`,
+`IgnoreBaseGlyphs`, `IgnoreLigatures`, `IgnoreMarks`, `UseMarkFilteringSet`
+and a mark-attachment class in the high byte. We parse the field and then
+apply every lookup to every glyph regardless of it.
+
+**Symptom.** The flag that matters in practice is `IgnoreMarks`. A face that
+writes its Arabic ligatures as "these two letters, skipping any marks between
+them" expects the shaper to step over a fatha when matching; we do not, so
+the ligature silently fails to form on vowelled text. The sweep does not
+currently catch this because the Arabic corpus entry has one mark
+(`\u0629` is a letter, `\u064a` a letter) and the faces that would show it
+are the fully-vowelled Quranic ones.
+
+**Why it is filed rather than fixed.** It is not a local change. "Skip this
+glyph" has to be honoured by *every* matcher — single, ligature component
+walk, the backtrack/input/lookahead walks of types 5 and 6 — and each of
+those currently indexes the glyph vector directly. Doing it properly means a
+skipping iterator that all of them go through, which is the same refactor
+HarfBuzz did with `hb_ot_apply_context_t::skipping_iterator_t`. Doing it
+partially — honouring the flag in one matcher and not the others — produces
+inconsistent output that is harder to debug than uniformly ignoring it.
+
+**Proper fix.** A `Skipper` built once per lookup from its flag plus the
+`GDEF` glyph class definitions (which we already parse for mark placement),
+exposing `next(from)` / `prev(from)`; every matcher in `gsub.rs` and `gpos.rs`
+moves through it instead of `i + 1`. `UseMarkFilteringSet` additionally reads
+`GDEF`'s `MarkGlyphSetsDef`.
+
+**Where.** `gui/font/src/otl.rs` — `Lookup`, which holds the flag; every
+`apply_*` in `gui/font/src/gsub.rs`; the same in `gui/font/src/gpos.rs`. The
+module doc of `gsub.rs` names this ID under "not implemented".
+
+## TD-FONT-CHECKS-FEATURE-MASKS-ONLY-AT-THE-APPLIED-POSITION
+
+**What.** The per-glyph feature mask added with the joining shaper is tested
+against the lookup's mask at the position the lookup is *applied* to, and
+nowhere else. HarfBuzz tests it at every position a lookup matches — each
+component of a ligature, each glyph of a context's input sequence.
+
+**Symptom.** A face could write "the final form of this letter, when followed
+by that one" as a `fina` ligature; we would form it if the first glyph is
+final-form, without checking the second. In practice the second glyph of such
+a ligature is always in the same joining state as the first — that is what
+makes the ligature meaningful — so this has produced no observed divergence
+in the 556-face sweep. It is a narrowness in the model, not a measured bug.
+
+**Why it is filed rather than fixed.** The check wants to live in the same
+skipping iterator that `TD-FONT-IGNORES-GSUB-LOOKUP-FLAGS` needs, since both
+are "should this matcher consider this glyph". Building two separate
+mechanisms and then merging them is more work than waiting.
+
+**Proper fix.** Fold the mask test into the `Skipper` described above, so
+every matcher gets it for free.
+
+**Where.** `gui/font/src/gsub.rs` — `apply_lookup`, which is the single place
+the mask is consulted today.

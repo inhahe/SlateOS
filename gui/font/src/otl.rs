@@ -463,6 +463,26 @@ impl ByScript {
             .iter()
             .filter_map(|&(at, mask)| Some((self.lookups.get(usize::from(at))?, mask)))
     }
+
+    /// Which script tag [`for_script`](Self::for_script) actually took its
+    /// lookups from, or `None` when the face registers no tag in the chain.
+    ///
+    /// The Indic shaper needs it, and needs the *chosen* tag rather than the
+    /// run's: OpenType revised the Indic script tags, and the two spellings
+    /// select different behaviour from the shaper, not merely different
+    /// features. A face filing Devanagari under `deva` is asking to be shaped
+    /// by the rules Uniscribe applied before the revision — reph and half-form
+    /// classification done by the engine rather than by the font — and one
+    /// filing it under `dev2` is asking for the opposite. Only the face can
+    /// say which, and this is where it says it. See
+    /// [`indic_shape`](crate::indic_shape).
+    pub(crate) fn chosen_script(&self, script: Option<ScriptTags>) -> Option<[u8; 4]> {
+        fallback_chain(script).find(|want| {
+            self.scripts
+                .binary_search_by_key(want, |&(tag, _)| tag)
+                .is_ok()
+        })
+    }
 }
 
 /// Every script tag the table's ScriptList registers, in file order.

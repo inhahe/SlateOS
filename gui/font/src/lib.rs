@@ -43,10 +43,13 @@ mod bidi_tables;
 pub mod cff;
 mod context;
 mod fallback;
+#[cfg(test)]
+mod fixture;
 mod gpos;
 pub mod gsub;
 mod indic;
 mod indic_machine;
+mod indic_shape;
 mod indic_tables;
 mod joining;
 mod joining_tables;

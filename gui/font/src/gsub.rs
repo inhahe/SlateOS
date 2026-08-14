@@ -149,6 +149,18 @@ const FEATURES: &[&[u8; 4]] = &[
     // Positional: a glyph is eligible for at most one, and only when the
     // cursive joining pass says so.
     b"isol", b"init", b"medi", b"fina",
+    // Indic: a glyph is eligible for one of these only when the Indic shaper
+    // has laid its syllable out and said so. The order is HarfBuzz's
+    // `indic_features[]`, which is also the order they are *applied* in — the
+    // eleven basic ones one stage each, then the rest together — so
+    // [`indic_shape`](crate::indic_shape) can name a stage by its bit.
+    //
+    // `init` is not repeated: the Indic shaper's is the same tag as the
+    // cursive one, gated the same way (per glyph, set by the shaper), and no
+    // run is both Indic and cursive. HarfBuzz likewise builds one feature map
+    // per plan and lets whichever shaper is running own the tag.
+    b"nukt", b"akhn", b"rphf", b"rkrf", b"pref", b"blwf", b"abvf", b"half", b"pstf", b"vatu",
+    b"cjct", b"pres", b"abvs", b"blws", b"psts", b"haln",
 ];
 
 /// The feature mask every glyph carries: bits for the fourteen unconditional
@@ -175,6 +187,24 @@ const FINA: u64 = 0b10_0000_0000_0000_0000;
 /// occupies is a bit no lookup carries — so the extra ones select nothing and
 /// the constant needs no maintenance when the list grows.
 const ALL_FEATURES: u64 = u64::MAX;
+
+/// The mask bit of the feature tagged `tag`, or `0` for a tag this crate never
+/// asks a face for.
+///
+/// Zero is a usable answer rather than an error: a bit no feature occupies is a
+/// bit no lookup carries, so intersecting with it selects nothing — which is
+/// exactly what "this crate does not read that feature" should mean to a
+/// caller. It is the right answer for the wrong reason, and it is why every tag
+/// [`indic_shape`](crate::indic_shape) names must also be listed in
+/// [`FEATURES`]; `the_indic_features_all_have_bits` is the test that says so.
+pub(crate) fn feature_bit(tag: &[u8; 4]) -> u64 {
+    FEATURES
+        .iter()
+        .position(|want| *want == tag)
+        .and_then(|i| u32::try_from(i).ok())
+        .and_then(|i| 1u64.checked_shl(i))
+        .unwrap_or(0)
+}
 
 /// The mask for a glyph whose cursive form is `form`.
 ///
@@ -614,6 +644,17 @@ impl Substitutions {
         }
     }
 
+    /// Which script tag this face's features for `script` were taken from.
+    ///
+    /// Forwarded rather than reached through, because the Indic shaper holds a
+    /// `Substitutions` and has no business knowing that the script index
+    /// inside it is an [`otl::ByScript`](crate::otl::ByScript). See
+    /// [`ByScript::chosen_script`](crate::otl::ByScript::chosen_script) for why
+    /// the tag is a question worth asking.
+    pub(crate) fn chosen_script(&self, script: Option<ScriptTags>) -> Option<[u8; 4]> {
+        self.lookups.chosen_script(script)
+    }
+
     /// Would the feature tagged `tag`, on a run of `script`, substitute
     /// exactly the glyph sequence `glyphs`?
     ///
@@ -629,19 +670,6 @@ impl Substitutions {
     /// asks a face for has no bit and so reaches no lookup. That is the right
     /// answer for the wrong reason, and it is why every tag the shaper probes
     /// must also be listed there.
-    // Called only by the tests until the Indic shaper is wired in. `expect`
-    // rather than `allow` on purpose: the moment it is wired in, this goes
-    // unfulfilled and the compiler asks for the line back. `cfg_attr` because
-    // the tests below do call it, so under `cfg(test)` there is nothing to
-    // expect and the expectation would itself be the warning.
-    //
-    // This one attribute covers the whole of [`would`](crate::would) as well:
-    // an item marked dead-code-allowed is a live root for the reachability
-    // pass, so nothing it calls is reported either.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the Indic shaper is not wired in yet")
-    )]
     pub(crate) fn would_substitute(
         &self,
         data: &[u8],
@@ -650,12 +678,10 @@ impl Substitutions {
         glyphs: &[u16],
         zero_context: bool,
     ) -> bool {
-        let bit = FEATURES
-            .iter()
-            .position(|want| *want == tag)
-            .and_then(|i| u32::try_from(i).ok())
-            .and_then(|i| 1u64.checked_shl(i));
-        let Some(bit) = bit else { return false };
+        let bit = feature_bit(tag);
+        if bit == 0 {
+            return false;
+        }
         self.lookups
             .for_script(script)
             .filter(|&(_, mask)| mask & bit != 0)
@@ -1469,239 +1495,7 @@ fn apply_nested(
 mod tests {
     use super::*;
     use crate::context::MAX_CONTEXT;
-
-    fn be16(v: u16) -> [u8; 2] {
-        v.to_be_bytes()
-    }
-
-    fn span(off: usize, len: usize) -> Span {
-        Span { off, len }
-    }
-
-    /// Coverage format 1 over a sorted glyph list.
-    fn coverage1(glyphs: &[u16]) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.extend_from_slice(&be16(1));
-        out.extend_from_slice(&be16(u16::try_from(glyphs.len()).unwrap()));
-        for g in glyphs {
-            out.extend_from_slice(&be16(*g));
-        }
-        out
-    }
-
-    /// One `Ligature` record: the result glyph, then the components after the
-    /// first.
-    fn ligature(result: u16, rest: &[u16]) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.extend_from_slice(&be16(result));
-        out.extend_from_slice(&be16(u16::try_from(rest.len() + 1).unwrap()));
-        for g in rest {
-            out.extend_from_slice(&be16(*g));
-        }
-        out
-    }
-
-    /// A `LigatureSet`: its records in the order given, which is the order
-    /// they are tried in.
-    fn ligature_set(records: &[Vec<u8>]) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.extend_from_slice(&be16(u16::try_from(records.len()).unwrap()));
-        let mut at = 2 + records.len() * 2;
-        for r in records {
-            out.extend_from_slice(&be16(u16::try_from(at).unwrap()));
-            at += r.len();
-        }
-        for r in records {
-            out.extend_from_slice(r);
-        }
-        out
-    }
-
-    /// A whole `LigatureSubstFormat1` subtable: one set per covered first
-    /// glyph, in coverage order.
-    fn ligature_subst(first_glyphs: &[u16], sets: &[Vec<u8>]) -> Vec<u8> {
-        assert_eq!(first_glyphs.len(), sets.len());
-        let coverage = coverage1(first_glyphs);
-        let header = 6 + sets.len() * 2;
-        let mut out = Vec::new();
-        out.extend_from_slice(&be16(1));
-        out.extend_from_slice(&be16(u16::try_from(header).unwrap()));
-        out.extend_from_slice(&be16(u16::try_from(sets.len()).unwrap()));
-        let mut at = header + coverage.len();
-        for s in sets {
-            out.extend_from_slice(&be16(u16::try_from(at).unwrap()));
-            at += s.len();
-        }
-        out.extend_from_slice(&coverage);
-        for s in sets {
-            out.extend_from_slice(s);
-        }
-        out
-    }
-
-    /// A `GSUB` table with one feature tagged `tag`, one lookup of `kind`, and
-    /// `subtable` as that lookup's only subtable.
-    fn gsub_table(tag: &[u8; 4], kind: u16, subtable: &[u8]) -> Vec<u8> {
-        gsub_subtables(tag, kind, &[subtable])
-    }
-
-    /// A `GSUB` table with one feature tagged `tag` and one lookup of `kind`
-    /// holding every subtable in `subtables`, in the order given.
-    ///
-    /// Several subtables in one lookup is the case that separates "try the
-    /// next subtable" from "give up on this glyph": the font's order is the
-    /// order they are tried in, and the first one that matches wins.
-    fn gsub_subtables(tag: &[u8; 4], kind: u16, subtables: &[&[u8]]) -> Vec<u8> {
-        gsub_scripts(&[(b"DFLT", tag)], kind, subtables)
-    }
-
-    /// A ScriptList: one Script per entry, each with a DefaultLangSys naming
-    /// the feature indices given and no language-specific systems.
-    ///
-    /// Every offset inside is relative to the ScriptList's own start, so a
-    /// caller only has to know where it put the block and how long it came
-    /// out — not what is inside it.
-    fn script_list(scripts: &[(&[u8; 4], &[u16])]) -> Vec<u8> {
-        let n = scripts.len();
-        let mut out = Vec::new();
-        out.extend_from_slice(&be16(u16::try_from(n).unwrap()));
-        // The Script tables follow the records, each one a 4-byte Script
-        // header plus its DefaultLangSys.
-        let mut at = 2 + n * 6;
-        for (tag, features) in scripts {
-            out.extend_from_slice(*tag);
-            out.extend_from_slice(&be16(u16::try_from(at).unwrap()));
-            at += 4 + 6 + features.len() * 2;
-        }
-        for (_, features) in scripts {
-            out.extend_from_slice(&be16(4)); // defaultLangSys, from the Script
-            out.extend_from_slice(&be16(0)); // langSysCount
-            out.extend_from_slice(&be16(0)); // lookupOrder, always zero
-            out.extend_from_slice(&be16(0xFFFF)); // no required feature
-            out.extend_from_slice(&be16(u16::try_from(features.len()).unwrap()));
-            for f in *features {
-                out.extend_from_slice(&be16(*f));
-            }
-        }
-        out
-    }
-
-    /// A `GSUB` table registering one feature per entry of `scripts`, each
-    /// under its own script tag, and one lookup of `kind` that every one of
-    /// them selects.
-    ///
-    /// Several scripts naming the same lookup is the arrangement that matters:
-    /// it is what a real face supporting two writing systems looks like, and
-    /// the reason the selection walk starts at the ScriptList rather than the
-    /// FeatureList — a tag alone does not say which script a feature is for.
-    fn gsub_scripts(scripts: &[(&[u8; 4], &[u8; 4])], kind: u16, subtables: &[&[u8]]) -> Vec<u8> {
-        // header 10 | scriptList | featureList | lookupList | subtables
-        //
-        // Each script gets its own Script table with a DefaultLangSys naming
-        // exactly one feature — its own, by position in `scripts`.
-        let n = scripts.len();
-        let indices: Vec<[u16; 1]> = (0..n).map(|i| [u16::try_from(i).unwrap()]).collect();
-        let entries: Vec<(&[u8; 4], &[u16])> = scripts
-            .iter()
-            .zip(&indices)
-            .map(|((script, _), idx)| (*script, idx.as_slice()))
-            .collect();
-        let tags: Vec<&[u8; 4]> = scripts.iter().map(|&(_, tag)| tag).collect();
-        gsub_from_scripts(&script_list(&entries), &tags, kind, subtables)
-    }
-
-    /// A `GSUB` table over a caller-built ScriptList: one Feature per entry of
-    /// `tags`, each naming the single lookup of `kind`.
-    ///
-    /// Split out from [`gsub_scripts`] so a test can hand in a ScriptList that
-    /// [`script_list`] cannot express — a script whose features are reachable
-    /// only through a language system, for one.
-    fn gsub_from_scripts(
-        script_block: &[u8],
-        tags: &[&[u8; 4]],
-        kind: u16,
-        subtables: &[&[u8]],
-    ) -> Vec<u8> {
-        gsub_flagged_from_scripts(script_block, tags, kind, 0, 0, subtables)
-    }
-
-    /// A `GSUB` like [`gsub_table`], but with a `lookupFlag` — and, when the
-    /// flag asks for one, a `markFilteringSet` index — on its single lookup.
-    ///
-    /// The flag is the whole point of a handful of tests below: every other
-    /// builder here writes a zero flag, so without this one the skipping walk
-    /// is only ever exercised in its do-nothing configuration.
-    fn gsub_flagged(tag: &[u8; 4], kind: u16, flag: u16, filter: u16, subtable: &[u8]) -> Vec<u8> {
-        gsub_flagged_from_scripts(
-            &script_list(&[(b"DFLT", &[0])]),
-            &[tag],
-            kind,
-            flag,
-            filter,
-            &[subtable],
-        )
-    }
-
-    fn gsub_flagged_from_scripts(
-        script_block: &[u8],
-        tags: &[&[u8; 4]],
-        kind: u16,
-        flag: u16,
-        filter: u16,
-        subtables: &[&[u8]],
-    ) -> Vec<u8> {
-        let n = tags.len();
-        let feature_list = 10 + script_block.len();
-        // count(2) + one 6-byte FeatureRecord each, then the Features.
-        let features_at = 2 + n * 6;
-        let feature_len = 6usize; // params + count + one index
-        let lookup_list = feature_list + features_at + n * feature_len;
-
-        let mut out = Vec::new();
-        out.extend_from_slice(&be16(1)); // major
-        out.extend_from_slice(&be16(0)); // minor
-        out.extend_from_slice(&be16(10)); // scriptList
-        out.extend_from_slice(&be16(u16::try_from(feature_list).unwrap()));
-        out.extend_from_slice(&be16(u16::try_from(lookup_list).unwrap()));
-        out.extend_from_slice(script_block);
-
-        out.extend_from_slice(&be16(u16::try_from(n).unwrap())); // featureCount
-        for (i, tag) in tags.iter().enumerate() {
-            out.extend_from_slice(*tag);
-            let at = features_at + i * feature_len;
-            out.extend_from_slice(&be16(u16::try_from(at).unwrap()));
-        }
-        for _ in 0..n {
-            out.extend_from_slice(&be16(0)); // featureParams
-            out.extend_from_slice(&be16(1)); // lookupIndexCount
-            out.extend_from_slice(&be16(0)); // lookup 0
-        }
-
-        // LookupList: count(2) + one offset(2) = 4, then the Lookup.
-        out.extend_from_slice(&be16(1));
-        out.extend_from_slice(&be16(4));
-        out.extend_from_slice(&be16(kind));
-        out.extend_from_slice(&be16(flag));
-        out.extend_from_slice(&be16(u16::try_from(subtables.len()).unwrap()));
-        let lookup = lookup_list + 4;
-        // `markFilteringSet` sits between the offset array and whatever the
-        // offsets point at, so its presence moves the subtables along by two.
-        let set = usize::from(flag & 0x0010 != 0) * 2;
-        // Offsets are measured from the start of the Lookup, and the first
-        // subtable begins after the whole offset array.
-        let mut at = out.len() + subtables.len() * 2 + set - lookup;
-        for s in subtables {
-            out.extend_from_slice(&be16(u16::try_from(at).unwrap()));
-            at += s.len();
-        }
-        if set != 0 {
-            out.extend_from_slice(&be16(filter));
-        }
-        for s in subtables {
-            out.extend_from_slice(s);
-        }
-        out
-    }
+    use crate::fixture::*;
 
     /// `SingleSubstFormat1`: one delta over a covered range.
     fn single_delta(glyphs: &[u16], delta: u16) -> Vec<u8> {
@@ -2796,15 +2590,38 @@ mod tests {
         assert_eq!(bit(b"init"), INIT);
         assert_eq!(bit(b"medi"), MEDI);
         assert_eq!(bit(b"fina"), FINA);
-        // `ALWAYS` is exactly the features that are not positional.
-        let positional = ISOL | INIT | MEDI | FINA;
         assert!(FEATURES.len() < u64::BITS as usize, "a feature past the 64th gets no bit");
-        let all = (1u64 << FEATURES.len()) - 1;
-        assert_eq!(ALWAYS, all & !positional);
-        // And they really are a prefix: no unconditional feature may sit
-        // after a positional one, or `ALWAYS` would not be contiguous.
-        assert_eq!(ALWAYS.count_ones() + positional.count_ones(), all.count_ones());
+        // `ALWAYS` is a prefix of the list: every feature before the first
+        // positional one and none after it. Being a *prefix* is the property
+        // that lets it be a literal — an unconditional feature added after a
+        // positional one would make it discontiguous and this fail.
+        let positional = ISOL | INIT | MEDI | FINA;
         assert_eq!(ALWAYS.trailing_ones(), ALWAYS.count_ones());
+        assert_eq!(ALWAYS | positional, (1u64 << 18) - 1);
+        assert_eq!(ALWAYS & positional, 0);
+    }
+
+    /// Every tag the Indic shaper names has a bit, since a tag missing from
+    /// [`FEATURES`] would silently answer "this face has no such feature" —
+    /// the right answer for the wrong reason, and invisible.
+    #[test]
+    fn the_indic_features_all_have_bits() {
+        for tag in [
+            b"nukt", b"akhn", b"rphf", b"rkrf", b"pref", b"blwf", b"abvf", b"half", b"pstf",
+            b"vatu", b"cjct", b"init", b"pres", b"abvs", b"blws", b"psts", b"haln", b"locl",
+            b"ccmp",
+        ] {
+            assert_ne!(feature_bit(tag), 0, "{:?}", core::str::from_utf8(tag));
+        }
+        assert_eq!(feature_bit(b"zzzz"), 0);
+        // Distinct bits, or two features would turn each other on.
+        let mut seen = 0u64;
+        for tag in FEATURES {
+            let bit = feature_bit(tag);
+            assert_ne!(bit, 0, "{:?}", core::str::from_utf8(*tag));
+            assert_eq!(seen & bit, 0, "{:?} repeats a bit", core::str::from_utf8(*tag));
+            seen |= bit;
+        }
     }
 
     /// A glyph eligible for no positional form at all — every glyph outside a

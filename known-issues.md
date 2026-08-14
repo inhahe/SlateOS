@@ -60185,6 +60185,63 @@ its sampling interval. The comparator should consult both, and should treat
 "canary quiet **and** `mean/min` normal" as the only combination that
 licenses reading a number as real.
 
+**PROSPECTIVE PREDICTION, recorded 2026-08-14 BEFORE the first release-profile
+bench run.** This entry says above that the page-straddle mechanism "should be
+treated as provisional until that prediction has been made *before* a run and
+held." This section is that prediction. It was written from the disassembly of
+`target/x86_64-unknown-none/release/kernel` (built clean, 0 warnings, 9m25s)
+with **no release-profile measurement in existence yet** — the first such run
+has not been performed. Whatever the numbers turn out to be, this text is not
+to be edited afterwards; the result goes in a separate section below it.
+
+Structural facts read out of the release binary:
+
+| | v4 | v6 |
+|---|---|---|
+| closure inlined into the timed loop? | **yes** | **no** — `callq`+`ret` per iteration |
+| hot fold loop | `ffffffff80985cc2`–`…985cf7` | `ffffffff80976ba0`–`…976bc7` |
+| straddles a 4 KiB page? | **no** (all in `…985000`) | **no** (all in `…976000`) |
+| timed outer loop | `…985caa`–`…985d51` (page `…985`) | `…9864a5`–`…9864fd` (page `…986`) |
+| per-iteration indirect branch | none | one `ret` |
+| bytes consumed per loop iteration | 4 (2x unrolled) | 4 (2x unrolled) |
+
+So in the release build the *specific* mechanism this entry root-caused — a
+hot loop split across a guest page boundary — is **not active for either
+benchmark**. Both fold loops are comfortably interior to a page. If the 1.7x
+bimodal swing were caused by anything else, it should survive the profile
+change; if it was the straddle, it should vanish.
+
+Predictions, in falsifiable form:
+
+1. **The 1.7x v6/v4 gap collapses.** Predicted release ratio **1.00–1.20**.
+   A ratio still ≥1.5 falsifies the straddle explanation outright.
+2. **A residual v6 penalty is still expected, but small.** v6 pays one
+   out-of-line call and — the part that actually costs under TCG — one `ret`,
+   which is an *indirect* branch and cannot be direct-chained between
+   translation blocks; it takes a jump-cache lookup every iteration. But that
+   is one dispatch amortised over ~365 fold-loop iterations of real work, so
+   it should be a low-single-digit percentage, not a multiple. v6 also has the
+   genuinely larger 40-byte pseudo-header (the straight-line preamble at
+   `…976aa3`–`…976b8e`), which is real work and legitimately makes v6 slower.
+3. **Both numbers drop by roughly an order of magnitude** from the debug
+   figures (v4 ~20200–20700 ns, v6 ~35000 ns). The debug loop spilled every
+   intermediate to the stack and consumed 2 bytes per iteration; the release
+   loop is 10 instructions, register-only, 4 bytes per iteration. Predicted
+   release: **v4 ~2000–3000 ns, v6 ~2200–3500 ns** — i.e. at or near the
+   2000/2200 ns targets, which were set from optimised reference
+   implementations and have been failed by ~10x for the whole life of the
+   suite for exactly that reason.
+4. **The run is scored against no baseline.** `bench-history.py --profile
+   release` should report that no same-profile record exists and decline to
+   diff against the five debug records, rather than reporting a fabricated
+   ~10x "improvement". This is the profile-isolation change under test.
+
+If (1) holds and (3) holds, the mechanism is confirmed prospectively and the
+entry can be closed. If (1) fails while (3) holds, the optimisation level was
+a confound and the straddle explanation is wrong — in that case the same-binary
+re-run table above (v6 35048 vs 35039, 0.03%) still stands as proof the effect
+is deterministic per build, and a different per-build mechanism must be found.
+
 ### [A] B-BENCH-ENTIRE-SUITE-MEASURES-AN-UNOPTIMISED-KERNEL. Every recorded benchmark ran at `opt-level = 0` and was scored against optimised-reference targets — OPEN
 
 **Where:** `scripts/boot-test.sh:602` (`"$CARGO" build`) and `:218`

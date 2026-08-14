@@ -79,6 +79,21 @@ const CELL_PADDING: f32 = 8.0;
 const PAGE_SIZE: usize = 50;
 const DEFAULT_COL_WIDTH: f32 = 140.0;
 
+/// Point size of the query-result message above the results table.
+const RESULT_MSG_FONT_SIZE: f32 = 11.0;
+/// Line-to-line spacing of the query-result message, which is wrapped.
+const RESULT_MSG_LINE_HEIGHT: f32 = 14.0;
+/// Gap between the last line of the message and the results table below it.
+/// Chosen so a one-line message leaves the table exactly where it has always
+/// been (`y + 22`), which is the overwhelmingly common case.
+const RESULT_MSG_GAP: f32 = 4.0;
+/// Lines the message may take when a results table follows it. A message that
+/// accompanies rows is generated ("10 rows returned in 4 ms") and short; the
+/// cap is there so a pathological one cannot crowd out the results it is
+/// describing. A message with no table under it — an error — is free to use
+/// the whole pane, because there is nothing else to show.
+const RESULT_MSG_MAX_LINES_WITH_TABLE: usize = 3;
+
 // ============================================================================
 // SQL keywords for syntax highlighting
 // ============================================================================
@@ -3927,25 +3942,64 @@ impl DbViewerApp {
                 });
             }
             Some(result) => {
-                // Message
+                // Message. `RenderCommand::Text` clips at `max_width` rather
+                // than wrapping, so a message wider than the pane used to be
+                // cut mid-word with nothing to mark the cut — and the messages
+                // that run long are exactly the ones worth reading, the SQL
+                // errors saying what the engine rejected and where.
                 let msg_color = if result.is_error { RED } else { GREEN };
-                cmds.push(RenderCommand::Text {
-                    x: x + 12.0,
-                    y: y + 4.0,
-                    text: result.message.clone(),
-                    color: msg_color,
-                    font_size: 11.0,
-                    font_weight: FontWeightHint::Bold,
-                    max_width: Some(width - 24.0),
-                });
+                let msg_width = width - 24.0;
+                let mut message = text::wrap(
+                    &result.message,
+                    msg_width,
+                    RESULT_MSG_FONT_SIZE,
+                    FontWeightHint::Bold,
+                );
+                // The message is bounded, and the overflow is marked rather
+                // than dropped in silence.
+                let fits_in_pane =
+                    (((height - 4.0 - RESULT_MSG_GAP) / RESULT_MSG_LINE_HEIGHT) as usize).max(1);
+                let max_lines = if result.columns.is_empty() {
+                    fits_in_pane
+                } else {
+                    fits_in_pane.min(RESULT_MSG_MAX_LINES_WITH_TABLE)
+                };
+                if message.len() > max_lines {
+                    message.truncate(max_lines);
+                    if let Some(last) = message.last_mut() {
+                        *last = text::elide(
+                            &format!("{last}…"),
+                            msg_width,
+                            "…",
+                            RESULT_MSG_FONT_SIZE,
+                            FontWeightHint::Bold,
+                        );
+                    }
+                }
+                for (n, line) in message.iter().enumerate() {
+                    cmds.push(RenderCommand::Text {
+                        x: x + 12.0,
+                        y: y + 4.0 + n as f32 * RESULT_MSG_LINE_HEIGHT,
+                        text: line.clone(),
+                        color: msg_color,
+                        font_size: RESULT_MSG_FONT_SIZE,
+                        font_weight: FontWeightHint::Bold,
+                        max_width: Some(msg_width),
+                    });
+                }
 
                 // Result table
                 if !result.columns.is_empty() {
                     let col_count = result.columns.len();
                     let col_w = (width / col_count as f32).max(100.0).min(width);
 
-                    // Column headers
-                    let header_y = y + 22.0;
+                    // Column headers. The table follows the message rather than
+                    // sitting at a fixed offset from the top of the pane, so a
+                    // message that grew cannot be drawn over its own headers.
+                    let header_y = y
+                        + 4.0
+                        + message.len() as f32 * RESULT_MSG_LINE_HEIGHT
+                        + RESULT_MSG_GAP;
                     cmds.push(RenderCommand::FillRect {
                         x,
                         y: header_y,
@@ -5379,6 +5433,136 @@ mod tests {
         let result = app.query_result.as_ref().unwrap();
         assert!(!result.is_error);
         assert_eq!(result.rows.len(), 10);
+    }
+
+    const LONG_ERROR: &str = "near \"FORM\": syntax error at column 22 — the \
+        FROM clause of a SELECT must name a table that exists in the attached \
+        database, and no table named \"userz\" was found; did you mean \"users\"?";
+
+    /// An app whose results pane is showing `result`.
+    fn app_showing(result: QueryResult) -> DbViewerApp {
+        let mut app = DbViewerApp::new();
+        app.query_result = Some(result);
+        app.bottom_panel = BottomPanel::Results;
+        app
+    }
+
+    /// Height of the pane the results are rendered into by the helpers below.
+    const TEST_PANE_HEIGHT: f32 = 400.0;
+
+    /// The `(y, text)` of every result-message line, and the `y` of the results
+    /// table's header row.
+    ///
+    /// Renders the results pane on its own rather than the whole app, so that
+    /// text elsewhere in the window — the status bar and the SQL editor also
+    /// draw 11pt in red and green — cannot be mistaken for the message.
+    fn results_pane_layout(app: &DbViewerApp) -> (Vec<(f32, String)>, Option<f32>) {
+        let mut cmds = Vec::new();
+        app.render_results(&mut cmds, 0.0, 0.0, 1200.0, TEST_PANE_HEIGHT);
+        let lines = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    y,
+                    text,
+                    font_size,
+                    color,
+                    ..
+                } if (font_size - RESULT_MSG_FONT_SIZE).abs() < 0.01
+                    && (*color == RED || *color == GREEN) =>
+                {
+                    Some((*y, text.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        // The header row is the only 20px-tall fill in the pane.
+        let header_y = cmds.iter().find_map(|c| match c {
+            RenderCommand::FillRect { y, height, .. } if (height - 20.0).abs() < 0.01 => Some(*y),
+            _ => None,
+        });
+        (lines, header_y)
+    }
+
+    /// The `(y, text)` of every result-message line drawn.
+    fn result_message_lines(app: &DbViewerApp) -> Vec<(f32, String)> {
+        results_pane_layout(app).0
+    }
+
+    #[test]
+    fn a_long_query_error_is_wrapped_not_cut_mid_word() {
+        // `RenderCommand::Text` clips at `max_width`, so the error the engine
+        // reported used to reach the user as its first line and no more.
+        let app = app_showing(QueryResult::error(LONG_ERROR));
+        let lines = result_message_lines(&app);
+        assert!(
+            lines.len() > 1,
+            "the error was drawn as {} command(s)",
+            lines.len()
+        );
+        let drawn: String = lines
+            .iter()
+            .map(|(_, t)| t.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        for word in LONG_ERROR.split_whitespace() {
+            assert!(drawn.contains(word), "the error lost the word {word:?}");
+        }
+    }
+
+    #[test]
+    fn a_wordy_message_does_not_crowd_out_the_results() {
+        // The message is bounded by what is left of the pane after the table
+        // it introduces, and the cut is marked rather than silent.
+        let mut result = QueryResult::with_data(
+            vec!["id".to_owned(), "name".to_owned()],
+            vec![vec![CellValue::Integer(1), CellValue::Text("a".to_owned())]],
+        );
+        result.message = "word ".repeat(2000);
+        let app = app_showing(result);
+
+        let (lines, header_y) = results_pane_layout(&app);
+        let last = lines.last().map(|(_, t)| t.clone()).unwrap_or_default();
+        assert!(
+            last.ends_with('…'),
+            "the message was cut without a mark: {last:?}"
+        );
+        assert!(
+            lines.len() <= RESULT_MSG_MAX_LINES_WITH_TABLE,
+            "the message took {} lines over a results table",
+            lines.len()
+        );
+
+        // The column headers are still below the message, not under it.
+        let header_y = header_y.expect("the results pane drew no column headers");
+        let message_bottom = lines
+            .iter()
+            .map(|(y, _)| y + RESULT_MSG_LINE_HEIGHT)
+            .fold(f32::MIN, f32::max);
+        assert!(
+            header_y + 0.01 >= message_bottom,
+            "the headers at {header_y} sit inside the message, which ends at \
+             {message_bottom}"
+        );
+    }
+
+    #[test]
+    fn a_one_line_message_leaves_the_table_where_it_was() {
+        // The table follows the message now, so check the common case did not
+        // shift: a short message must still put the headers at y + 22.
+        let app = app_showing(QueryResult::with_data(
+            vec!["id".to_owned()],
+            vec![vec![CellValue::Integer(1)]],
+        ));
+        let (lines, header_y) = results_pane_layout(&app);
+        assert_eq!(lines.len(), 1, "the short message did not fit on one line");
+        let header_y = header_y.expect("the results pane drew no column headers");
+        // The pane is rendered at y = 0, and the header row has always been
+        // 22px down from the top of it.
+        assert!(
+            (header_y - 22.0).abs() < 0.01,
+            "the header row moved: {header_y} vs the expected 22"
+        );
     }
 
     #[test]

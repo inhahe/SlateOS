@@ -158,7 +158,14 @@ version bump there rebuilds everyone's world.
 - Merge to `main` only when your lane's tree builds **and** a boot test
   passes. Because the boot test builds *everything*, a broken lane blocks
   the other two — so never merge a red tree "to unblock myself."
-- `git push` remains the operator's action. Do not push.
+- **Push on your own volition, after every completed task** — unpushed
+  work is work at risk. Push your own lane branch (`git push origin
+  lane-<x>`); push `main` only after a merge that built and passed a boot
+  test.
+- **Never force-push.** A force-push to `main` or to another lane's branch
+  destroys the other two agents' work. A rejected non-fast-forward push
+  means someone else landed first: `git pull --rebase`, re-test, push
+  again.
 
 ### 6. The build and boot test are shared, serialized resources
 

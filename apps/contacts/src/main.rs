@@ -82,6 +82,10 @@ const FIELD_HEIGHT: f32 = 36.0;
 const SEARCH_BAR_HEIGHT: f32 = 40.0;
 const GROUP_CHIP_HEIGHT: f32 = 28.0;
 const MAX_RECENT: usize = 10;
+/// Point size of a contact's notes in the detail panel.
+const NOTES_FONT_SIZE: f32 = 13.0;
+/// Line-to-line spacing of the notes, which are wrapped rather than clipped.
+const NOTES_LINE_HEIGHT: f32 = 18.0;
 
 const ALPHABET: &[char] = &[
     'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
@@ -2465,16 +2469,32 @@ impl ContactsApp {
                 max_width: None,
             });
             cy += 16.0;
-            cmds.push(RenderCommand::Text {
-                x: cx + 8.0,
-                y: cy,
-                text: contact.notes.clone(),
-                font_size: 13.0,
-                color: SUBTEXT0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(panel_width - pad * 2.0 - 16.0),
-            });
-            cy += 24.0;
+            // `RenderCommand::Text` clips at `max_width` instead of wrapping,
+            // so the notes used to show only their first line's worth of
+            // characters — silently, with nothing to say the rest was there.
+            // They are broken into lines here and drawn one command each.
+            let notes_width = panel_width - pad * 2.0 - 16.0;
+            let notes = text::wrap(
+                &contact.notes,
+                notes_width,
+                NOTES_FONT_SIZE,
+                FontWeightHint::Regular,
+            );
+            for line in &notes {
+                cmds.push(RenderCommand::Text {
+                    x: cx + 8.0,
+                    y: cy,
+                    text: line.clone(),
+                    font_size: NOTES_FONT_SIZE,
+                    color: SUBTEXT0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(notes_width),
+                });
+                cy += NOTES_LINE_HEIGHT;
+            }
+            // The cursor advances over the lines actually drawn, so the groups
+            // chips below start under the notes rather than on top of them.
+            cy += 6.0;
         }
 
         // Groups chips
@@ -4468,6 +4488,96 @@ mod tests {
         let app = ContactsApp::new();
         let cmds = app.render();
         assert!(!cmds.is_empty());
+    }
+
+    const LONG_NOTES: &str = "Met at the Rust conference in Amsterdam; wants an \
+        introduction to the storage team before the next planning round, and \
+        prefers email over phone for anything that is not urgent.";
+
+    /// An app showing one contact's detail panel, with the given notes.
+    fn app_viewing_notes(notes: &str) -> ContactsApp {
+        let mut app = ContactsApp::new();
+        let mut c = Contact::new(0, "Dana", "Devlin");
+        c.notes = notes.to_string();
+        let id = app.store.add_contact(c);
+        app.view = DetailView::ViewContact(id);
+        app
+    }
+
+    /// The `(y, text)` of every notes line drawn in the detail panel.
+    fn notes_lines_drawn(app: &ContactsApp) -> Vec<(f32, String)> {
+        app.render()
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    y,
+                    text,
+                    font_size,
+                    color,
+                    ..
+                } if (font_size - NOTES_FONT_SIZE).abs() < 0.01 && color == SUBTEXT0 => {
+                    Some((y, text))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn long_notes_are_wrapped_not_truncated_to_one_line() {
+        // `RenderCommand::Text` clips at `max_width` rather than wrapping, so
+        // the notes used to show one line's worth of characters and no more.
+        let app = app_viewing_notes(LONG_NOTES);
+        let lines = notes_lines_drawn(&app);
+        assert!(
+            lines.len() > 1,
+            "the notes were drawn as {} command(s)",
+            lines.len()
+        );
+        let drawn: String = lines
+            .iter()
+            .map(|(_, t)| t.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        for word in LONG_NOTES.split_whitespace() {
+            assert!(drawn.contains(word), "the notes lost the word {word:?}");
+        }
+    }
+
+    #[test]
+    fn the_groups_section_starts_below_the_notes() {
+        // The detail panel is a running cursor, so wrapping the notes without
+        // advancing it would have drawn the groups heading over the notes.
+        let mut app = app_viewing_notes(LONG_NOTES);
+        let gid = app.store.add_group(ContactGroup::new(0, "Storage team"));
+        let DetailView::ViewContact(cid) = app.view else {
+            panic!("the app is not viewing a contact");
+        };
+        assert!(app.store.add_contact_to_group(cid, gid));
+
+        let notes_bottom = notes_lines_drawn(&app)
+            .iter()
+            .map(|(y, _)| y + NOTES_LINE_HEIGHT)
+            .fold(f32::MIN, f32::max);
+        let groups_heading_y = app
+            .render()
+            .into_iter()
+            .find_map(|c| match c {
+                RenderCommand::Text { y, ref text, .. } if text == "Groups" => Some(y),
+                _ => None,
+            })
+            .expect("the detail panel drew no groups heading");
+        assert!(
+            groups_heading_y >= notes_bottom,
+            "the groups heading at {groups_heading_y} sits inside the notes, \
+             which end at {notes_bottom}"
+        );
+    }
+
+    #[test]
+    fn a_contact_with_no_notes_draws_none() {
+        let app = app_viewing_notes("");
+        assert!(notes_lines_drawn(&app).is_empty());
     }
 
     #[test]

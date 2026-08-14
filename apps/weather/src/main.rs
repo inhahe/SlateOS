@@ -41,6 +41,18 @@ const LAVENDER: Color = Color::from_hex(0xB4BEFE);
 const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
 // ============================================================================
+// Alert card metrics
+// ============================================================================
+
+/// Point size of an alert's description text.
+const ALERT_BODY_FONT_SIZE: f32 = 13.0;
+/// Line-to-line spacing of an alert's description, which is wrapped to the card.
+const ALERT_BODY_LINE_HEIGHT: f32 = 18.0;
+/// Offset from the top of an alert card to the first line of its description,
+/// leaving room for the title above it.
+const ALERT_BODY_TOP: f32 = 40.0;
+
+// ============================================================================
 // Weather Conditions
 // ============================================================================
 
@@ -2023,7 +2035,23 @@ impl WeatherApp {
         }
 
         for alert in &self.alerts {
-            let card_h = 90.0;
+            // `RenderCommand::Text` clips at `max_width` rather than wrapping,
+            // so the description used to come out as its first line and no
+            // more. An alert's description is the part that says what to
+            // actually do about the weather, so it is wrapped and the card
+            // grows to hold it — the alerts below are a stacked list, and a
+            // card that did not grow would be overlapped by the next one.
+            let text_width = self.width - padding * 2.0 - 40.0;
+            let description = text::wrap(
+                &alert.description,
+                text_width,
+                ALERT_BODY_FONT_SIZE,
+                FontWeightHint::Regular,
+            );
+            let body_height = description.len() as f32 * ALERT_BODY_LINE_HEIGHT;
+            // 90.0 keeps the familiar card size for the one- and two-line
+            // descriptions that are the common case.
+            let card_h = (ALERT_BODY_TOP + body_height + 12.0).max(90.0);
             let severity_color = alert.severity.color();
 
             // Card background
@@ -2066,15 +2094,18 @@ impl WeatherApp {
                 max_width: Some(self.width - padding * 2.0 - 40.0),
             });
 
-            cmds.push(RenderCommand::Text {
-                x: padding + 20.0,
-                y: cy + 40.0,
-                text: alert.description.clone(),
-                font_size: 13.0,
-                color: SUBTEXT1,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(self.width - padding * 2.0 - 40.0),
-            });
+            // Description, one command per wrapped line.
+            for (n, line) in description.iter().enumerate() {
+                cmds.push(RenderCommand::Text {
+                    x: padding + 20.0,
+                    y: cy + ALERT_BODY_TOP + n as f32 * ALERT_BODY_LINE_HEIGHT,
+                    text: line.clone(),
+                    font_size: ALERT_BODY_FONT_SIZE,
+                    color: SUBTEXT1,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(text_width),
+                });
+            }
 
             cy += card_h + 12.0;
         }
@@ -3076,6 +3107,113 @@ mod tests {
             }
         });
         assert!(has_no_alerts);
+    }
+
+    const LONG_ALERT: &str = "Damaging winds and hail up to two centimetres \
+        are expected between four and nine this evening. Secure loose objects \
+        outdoors, stay away from windows, and avoid travel on exposed roads \
+        until the warning is lifted.";
+
+    /// An app showing the alerts view, with one alert carrying `description`.
+    fn app_with_alert(description: &str) -> WeatherApp {
+        let mut app = WeatherApp::new(900.0, 800.0);
+        app.active_view = ActiveView::Alerts;
+        app.alerts = vec![WeatherAlert {
+            alert_type: AlertType::Thunderstorm,
+            severity: AlertSeverity::Warning,
+            title: "Severe Thunderstorm".to_string(),
+            description: description.to_string(),
+        }];
+        app
+    }
+
+    /// The `(y, text)` of every alert-description line drawn.
+    fn alert_body_lines(app: &WeatherApp) -> Vec<(f32, String)> {
+        app.render()
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    y,
+                    text,
+                    font_size,
+                    color,
+                    ..
+                } if (font_size - ALERT_BODY_FONT_SIZE).abs() < 0.01 && color == SUBTEXT1 => {
+                    Some((y, text))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_long_alert_description_is_wrapped_not_truncated() {
+        // `RenderCommand::Text` clips at `max_width`, so the description used
+        // to show its first line only — and the description is the part of an
+        // alert that says what to actually do about the weather.
+        let app = app_with_alert(LONG_ALERT);
+        let lines = alert_body_lines(&app);
+        assert!(
+            lines.len() > 1,
+            "the description was drawn as {} command(s)",
+            lines.len()
+        );
+        let drawn: String = lines
+            .iter()
+            .map(|(_, t)| t.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        for word in LONG_ALERT.split_whitespace() {
+            assert!(drawn.contains(word), "the alert lost the word {word:?}");
+        }
+    }
+
+    #[test]
+    fn an_alert_card_grows_to_hold_its_description() {
+        // Alerts are a stacked list, so a card that did not grow would be
+        // overlapped by the next one drawn beneath it.
+        let short = app_with_alert("Winds gusting to 60 km/h.");
+        let long = app_with_alert(LONG_ALERT);
+
+        let card_height = |app: &WeatherApp| -> f32 {
+            // The card background is the widest fill in the alerts view.
+            app.render()
+                .into_iter()
+                .find_map(|c| match c {
+                    RenderCommand::FillRect {
+                        width,
+                        height,
+                        color,
+                        ..
+                    } if color == SURFACE0 && width > 400.0 => Some(height),
+                    _ => None,
+                })
+                .expect("the alerts view drew no card")
+        };
+
+        let long_h = card_height(&long);
+        assert!(
+            long_h > card_height(&short),
+            "a four-line description got the same {long_h}px card as a one-liner"
+        );
+        let body_bottom = alert_body_lines(&long)
+            .iter()
+            .map(|(y, _)| y + ALERT_BODY_LINE_HEIGHT)
+            .fold(f32::MIN, f32::max);
+        let card_top = long
+            .render()
+            .into_iter()
+            .find_map(|c| match c {
+                RenderCommand::FillRect {
+                    y, width, color, ..
+                } if color == SURFACE0 && width > 400.0 => Some(y),
+                _ => None,
+            })
+            .expect("the alerts view drew no card");
+        assert!(
+            body_bottom <= card_top + long_h,
+            "the description ends at {body_bottom}, past the bottom of its card"
+        );
     }
 
     #[test]

@@ -19,7 +19,11 @@
 description  = "Trivial syscall round-trip (getpid)"
 linux_cycles = 2589
 linux_ns     = 638
-target_ns    = 1200
+target_ns   = 200        # CLAUDE.md: 'Linux ~100ns for getpid; within 2x'
+# The 638ns linux_ns below was measured on WSL2 and is a *full syscall*
+# incl. spectre mitigations -- not the same quantity as dispatch, so it is
+# kept as context rather than used to derive the target. Consequence: the
+# measured 653ns is OVER, where the old 1200ns target made it PASS.
 target_cycles = 4800
 source       = "Measured: WSL2 Ubuntu, i7-8700K, 10M iterations"
 notes        = """
@@ -33,7 +37,7 @@ being in the same ballpark is."""
 description   = "Channel IPC send+recv round-trip"
 fuchsia_us    = 1.5
 l4_us         = 0.8
-target_us     = 3.0
+target_us   = 2.0   # CLAUDE.md: 'IPC channel send/recv ... Target: < 2us round-trip'
 source        = "Fuchsia perf docs; seL4 published benchmarks"
 notes         = """
 No local measurement yet — requires our IPC to be built first. \
@@ -66,7 +70,7 @@ description   = "Full context switch between two threads"
 # pipe round-trip measures 2 syscalls + 2 context switches + pipe overhead.
 # Pure context switch is lower. Linux lmbench on bare metal: 1-3us.
 linux_pipe_roundtrip_ns = 69281
-target_us     = 10.0
+target_us   = 5.0   # CLAUDE.md: 'Context switch ... Target: < 5us'
 source        = "Measured: WSL2 pipe bounce, i7-8700K, 500K iterations"
 notes         = """
 The pipe round-trip (69us) is inflated by WSL2 VM overhead and pipe \
@@ -79,7 +83,7 @@ description   = "Anonymous page fault (demand paging)"
 linux_cycles  = 14314
 linux_ns      = 3943
 target_cycles = 30000
-target_ns     = 8000
+target_ns   = 10000   # CLAUDE.md: 'Page fault handling ... Target: < 10us'
 source        = "Measured: WSL2 Ubuntu, i7-8700K, 50K/100K faults"
 notes         = """
 Cycle count is the reliable metric here. Includes TLB miss, page table \
@@ -249,6 +253,7 @@ allocator data structure directly (no virtualization needed). \
 This is the benchmark most amenable to host-side testing."""
 
 [heap_alloc_free_64]
+tcg_target_ns = 400   # benchmark measures alloc+free, i.e. 2x the 200ns per-alloc target
 description  = "Kernel heap allocation, common small size (64 bytes)"
 linux_ns     = 68
 target_ns    = 200
@@ -372,7 +377,7 @@ source        = "Eventfd write + CP notification + try_wait + drain"
 [io_ring_nop]
 description = "io_uring single SQE submission"
 linux_ns    = 150
-target_ns   = 300
+target_ns   = 200        # CLAUDE.md: 'Linux io_uring ~100-200ns per SQE; same order'
 source      = "Linux io_uring published range: 100-200ns per SQE"
 
 [isr_latency]
@@ -434,6 +439,7 @@ ENABLED flag).  When enabled with rules, measures the linear scan + \
 hash-based conntrack check."""
 
 [dns_build_query]
+tcg_target_ns = 40000   # bench.rs: Vec alloc costs ~35us under TCG; budget tracks regressions
 description = "DNS A-record query packet construction"
 target_ns   = 2000
 target_cycles = 7400
@@ -508,6 +514,7 @@ heavily unrolled.  Our Rust version is a direct port of FIPS 180-4 \
 without SIMD.  Used in TLS Finished, HKDF, file integrity."""
 
 [crypto_sha256_1KiB]
+tcg_target_ns = 50000   # bench.rs: OpenSSL 1KiB ~1500ns; TCG budget
 description = "SHA-256 hash of 1 KiB (16 blocks)"
 target_ns   = 40000
 source      = "~16× single-block cost, dominated by compression rounds"
@@ -555,6 +562,7 @@ uses u128 multiplies (which Rust compiles to 64×64→128 mulq on x86_64). \
 Throughput target: ~30 MiB/s under QEMU."""
 
 [crypto_aead_1KiB]
+tcg_target_ns = 100000   # bench.rs: OpenSSL chacha20-poly1305 1KiB ~2000ns; TCG budget
 description = "ChaCha20-Poly1305 AEAD encrypt, 1 KiB payload"
 target_ns   = 70000
 source      = "ChaCha20 encrypt + Poly1305 MAC + keystream generation"
@@ -856,6 +864,7 @@ strings).  Could be optimized with a zero-copy parser but the \
 current approach is correct and clear."""
 
 [http_mime_type]
+tcg_target_ns = 2000   # benchmark does 4 lookups, i.e. 4x the 500ns per-lookup target
 description = "MIME type lookup from file extension"
 target_ns   = 500
 source      = "Pure match statement, no allocation"

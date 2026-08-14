@@ -60917,3 +60917,67 @@ without orphaning every historical record). 23 checks pass, up from 13.
 **Still open:** the 11 disagreements need adjudicating one at a time, and the 15
 unbaselined benchmarks need tables with real provenance. Both are now *visible on
 every bench run* rather than invisible, which is the change that matters.
+
+#### FOLLOW-UP 2026-08-14 (3): the 11 disagreements were mostly ONE bug — two kinds of target merged into one number
+
+Adjudicating the 11 turned up a structural cause rather than eleven clerical
+errors. `bench.rs` says it plainly in its own comments:
+
+```rust
+// OpenSSL SHA-256 1KiB: ~1500ns.  QEMU target: 50000ns.
+score("crypto_sha256_1KiB", &result, 50000);
+
+// DNS query build includes a heap allocation (Vec::with_capacity) which
+// is expensive under QEMU (~35us).  Target set to 40us to track regressions
+// without false-failing on the allocation overhead.
+score("dns_build_query", &result, 40000);
+```
+
+**Those are TCG budgets, not hardware references** — and `baselines.toml` was
+storing the hardware reference under the same key. Comparing them reported a
+20x "disagreement" where in truth the two files were each right about a
+different quantity. Two more (`heap_alloc_free_64`, `http_mime_type`) were the
+same shape one level down: a *scope* difference, where the benchmark measures a
+fixed multiple of the per-operation target (alloc+free is 2x an alloc; the MIME
+benchmark does 4 lookups).
+
+Worse, `bench-history.py` printed this on every run:
+
+> *(The 'target' column in the scorecard above is a **hardware** reference and
+> cannot be met under TCG — see bench/baselines.toml.)*
+
+which is **false for at least six benchmarks**, whose targets are explicit QEMU
+budgets. The line explaining the number misdescribed it, and so did the
+scorecard headline: "48/63 within hardware target" counts passes that were
+scored against TCG budgets.
+
+**Fix: make the two kinds separate keys.** `target_ns` stays the hardware
+reference; `tcg_target_ns` is the budget the suite is graded against under
+emulation, and the cross-check prefers it when present. The explanatory line now
+says the column is a mix and points at which key records which.
+
+**Three were real disagreements.** Two are settled by CLAUDE.md's performance
+table, which outranks the file:
+
+* `context_швитch`→`context_switch`: file said 10 µs, spec says *"Target: < 5 µs"* → file corrected.
+* `page_fault`: file said 8 µs, spec says *"Target: < 10 µs"* → file corrected.
+* `ipc_channel`: file said 3 µs, spec says *"Target: < 2 µs round-trip"* → file corrected.
+* `syscall_dispatch`: file said 1200 ns, derived by doubling a **638 ns WSL2
+  measurement of a full syscall including spectre mitigations** — not the same
+  quantity as dispatch. Spec says *"Linux: ~100 ns for getpid. Target: within 2x"*
+  → 200 ns. **This one changes a verdict:** the measured 653 ns is OVER at
+  200 ns and would have PASSed at 1200 ns. The 638 ns figure is kept as context,
+  not as a derivation.
+* `io_ring_nop`: file said 300 ns (2x a 150 ns measurement), spec says
+  *"~100-200 ns per SQE; same order"* → 200 ns.
+
+Result: **11 disagreements → 1.**
+
+**The last one is instructive and is deliberately still open.** `firewall_check`
+carries the comment `// Target from baselines.toml: 2000ns` in `bench.rs` while
+the file says 1000 ns — a citation that is simply false, and the direction
+(2x looser) means the kernel silently relaxed its own target at some point.
+Both pass comfortably (measured 55 ns), so nothing is hidden by it; it is left
+for the next `bench.rs` change rather than fixed now, because a kernel edit
+during an in-flight release build would produce a binary that does not
+correspond to any commit. Recorded here so it is not lost.

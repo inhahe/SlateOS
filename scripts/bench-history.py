@@ -344,6 +344,18 @@ def load_baselines(path=None):
     for name, table in data.items():
         if not isinstance(table, dict):
             continue
+        # `tcg_target_ns` wins when present. The two are different quantities,
+        # not competing estimates of one: `target_ns` is the hardware reference
+        # (Linux/OpenSSL/Fuchsia), while `tcg_target_ns` is the budget the
+        # suite is actually graded against under emulation -- and for some
+        # benchmarks bench.rs says so outright ("OpenSSL SHA-256 1KiB: ~1500ns.
+        # QEMU target: 50000ns"). It also covers scope differences, where the
+        # benchmark measures a fixed multiple of the per-operation target
+        # (alloc+free = 2x an alloc; the MIME benchmark does 4 lookups).
+        # Conflating them produced spurious "disagreements" of up to 20x.
+        if isinstance(table.get("tcg_target_ns"), (int, float)):
+            targets[name] = int(table["tcg_target_ns"])
+            continue
         for key, scale in _BASELINE_NS_KEYS:
             if key in table and isinstance(table[key], (int, float)):
                 targets[name] = int(table[key] * scale)
@@ -552,8 +564,10 @@ def report(previous, current_entries, threshold_pct):
         "emulation constant."
     )
     print(
-        "  (The 'target' column in the scorecard above is a *hardware* "
-        "reference and cannot be met under TCG -- see bench/baselines.toml.)"
+        "  (The 'target' column in the scorecard above is a *mix*: mostly a "
+        "hardware reference that cannot be met under TCG, but for some "
+        "benchmarks an explicit TCG budget. bench/baselines.toml records "
+        "which is which as target_ns vs tcg_target_ns.)"
     )
 
     if drift:

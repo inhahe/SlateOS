@@ -25,6 +25,9 @@
 // panic — that is the failure being reported, not a defect to guard against.
 #![allow(
     clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::float_cmp,
     clippy::print_stdout,
     clippy::arithmetic_side_effects,
     clippy::indexing_slicing

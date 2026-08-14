@@ -6,3 +6,6 @@ description = "SlateOS Font Library — bitmap and outline font rendering"
 [lib]
 name = "osfont"
 path = "src/lib.rs"
+
+[lints]
+workspace = true

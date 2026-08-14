@@ -91,6 +91,15 @@ pub struct GlyphBitmap {
     pub bitmap: Vec<u8>,
 }
 
+/// The mask selecting column `x`'s bit within its packed byte.
+///
+/// Bit 7 is the leftmost pixel, so column `x` lives at bit `7 - x % 8`.
+/// Shifting a mask down is the same thing without the subtraction, whose
+/// non-negativity a reader would otherwise have to re-derive.
+const fn bit_mask(x: u32) -> u8 {
+    0x80_u8 >> (x % 8)
+}
+
 impl GlyphBitmap {
     /// Returns whether the pixel at (x, y) is set.
     ///
@@ -99,30 +108,39 @@ impl GlyphBitmap {
         if x >= self.width || y >= self.height {
             return false;
         }
-        let row_bytes = self.width.div_ceil(8);
-        let byte_idx = (y * row_bytes + x / 8) as usize;
-        let bit_idx = 7 - (x % 8);
-        self.bitmap.get(byte_idx).is_some_and(|b| (b >> bit_idx) & 1 != 0)
+        let row_bytes = self.width.div_ceil(8) as usize;
+        let byte_idx = (y as usize)
+            .saturating_mul(row_bytes)
+            .saturating_add(x as usize / 8);
+        self.bitmap
+            .get(byte_idx)
+            .is_some_and(|b| b & bit_mask(x) != 0)
     }
 
     /// Creates a scaled version of this glyph by an integer factor.
+    ///
+    /// A factor large enough to overflow the pixel count saturates rather than
+    /// wrapping; the allocation below would fail long before that point, so
+    /// saturating here only makes the failure honest instead of silently
+    /// producing a bitmap with the wrong dimensions.
     pub fn scaled(&self, factor: u32) -> Self {
-        let new_width = self.width * factor;
-        let new_height = self.height * factor;
-        let new_row_bytes = new_width.div_ceil(8);
-        let mut new_bitmap = vec![0u8; (new_row_bytes * new_height) as usize];
+        let new_width = self.width.saturating_mul(factor);
+        let new_height = self.height.saturating_mul(factor);
+        let new_row_bytes = new_width.div_ceil(8) as usize;
+        let mut new_bitmap = vec![0u8; new_row_bytes.saturating_mul(new_height as usize)];
 
         for y in 0..self.height {
             for x in 0..self.width {
                 if self.pixel_at(x, y) {
                     for dy in 0..factor {
                         for dx in 0..factor {
-                            let nx = x * factor + dx;
-                            let ny = y * factor + dy;
-                            let idx = (ny * new_row_bytes + nx / 8) as usize;
-                            let bit = 7 - (nx % 8);
+                            let nx = x.saturating_mul(factor).saturating_add(dx);
+                            let ny = y.saturating_mul(factor).saturating_add(dy);
+                            let idx = (ny as usize)
+                                .saturating_mul(new_row_bytes)
+                                .saturating_add(nx as usize / 8);
                             if let Some(byte) = new_bitmap.get_mut(idx) {
-                                *byte |= 1 << bit;
+                                *byte |= bit_mask(nx);
                             }
                         }
                     }
@@ -228,7 +246,7 @@ impl Font {
                 cap_height: base.metrics.cap_height * s,
                 x_height: base.metrics.x_height * s,
             },
-            scale: base.scale * scale,
+            scale: base.scale.saturating_mul(scale),
             glyphs: scaled_glyphs,
             replacement: base.replacement.scaled(scale),
         }
@@ -423,10 +441,8 @@ impl TextLayout {
     ///
     /// Word wrapping occurs at whitespace boundaries when text exceeds `max_width`.
     pub fn new(text: &str, font: &Font, max_width: f32) -> Self {
-        let glyph_advances: Vec<(char, f32)> = text
-            .chars()
-            .map(|ch| (ch, font.char_width(ch)))
-            .collect();
+        let glyph_advances: Vec<(char, f32)> =
+            text.chars().map(|ch| (ch, font.char_width(ch))).collect();
 
         Self {
             text: String::from(text),
@@ -588,12 +604,7 @@ impl TextLayout {
                         max_line_width = line_width;
                     }
                     let end = glyphs.len();
-                    self.apply_alignment(
-                        &mut glyphs,
-                        line_start_idx,
-                        end,
-                        line_width,
-                    );
+                    self.apply_alignment(&mut glyphs, line_start_idx, end, line_width);
                     line_number = line_number.saturating_add(1);
                     x = 0.0;
                     line_start_idx = glyphs.len();
@@ -641,12 +652,7 @@ impl TextLayout {
                             max_line_width = line_width;
                         }
                         let end = glyphs.len();
-                        self.apply_alignment(
-                            &mut glyphs,
-                            line_start_idx,
-                            end,
-                            line_width,
-                        );
+                        self.apply_alignment(&mut glyphs, line_start_idx, end, line_width);
                         line_number = line_number.saturating_add(1);
                         x = 0.0;
                         line_start_idx = glyphs.len();
@@ -696,7 +702,11 @@ impl TextLayout {
         };
 
         if offset > 0.0 {
-            for glyph in glyphs.iter_mut().skip(start).take(end.saturating_sub(start)) {
+            for glyph in glyphs
+                .iter_mut()
+                .skip(start)
+                .take(end.saturating_sub(start))
+            {
                 glyph.x += offset;
             }
         }
@@ -733,19 +743,27 @@ pub fn render_glyph_to_buffer(
     let alpha = (color >> 24) & 0xFF;
 
     for gy in 0..glyph.height {
-        let py = y + gy as i32;
+        // Saturating rather than wrapping: a glyph positioned absurdly far
+        // off-screen must stay off-screen, and a wrapped coordinate would
+        // land back inside the buffer and paint over unrelated pixels.
+        let py = y.saturating_add(i32::try_from(gy).unwrap_or(i32::MAX));
         if py < 0 || py >= buf_height as i32 {
             continue;
         }
 
         for gx in 0..glyph.width {
-            let px = x + gx as i32;
+            let px = x.saturating_add(i32::try_from(gx).unwrap_or(i32::MAX));
             if px < 0 || px >= stride as i32 {
                 continue;
             }
 
             if glyph.pixel_at(gx, gy) {
-                let idx = (py as u32 * stride + px as u32) as usize;
+                // Both coordinates were just proved non-negative and inside
+                // the buffer's extent, so this is the flat index of a pixel
+                // that exists; `get_mut` still checks, for free.
+                let idx = (py as usize)
+                    .saturating_mul(stride as usize)
+                    .saturating_add(px as usize);
                 if let Some(dest) = buffer.get_mut(idx) {
                     if alpha >= 255 {
                         *dest = color;
@@ -796,21 +814,26 @@ pub fn render_text_to_buffer(
 
 /// Alpha-blends a source color onto a destination color.
 fn alpha_blend(dest: u32, src: u32, src_alpha: u32) -> u32 {
-    let inv_alpha = 255 - src_alpha;
+    let alpha = src_alpha & 0xFF;
 
-    let sr = (src >> 16) & 0xFF;
-    let sg = (src >> 8) & 0xFF;
-    let sb = src & 0xFF;
-
-    let dr = (dest >> 16) & 0xFF;
-    let dg = (dest >> 8) & 0xFF;
-    let db = dest & 0xFF;
-
-    let r = (sr * src_alpha + dr * inv_alpha) / 255;
-    let g = (sg * src_alpha + dg * inv_alpha) / 255;
-    let b = (sb * src_alpha + db * inv_alpha) / 255;
+    let r = blend_channel((src >> 16) & 0xFF, (dest >> 16) & 0xFF, alpha);
+    let g = blend_channel((src >> 8) & 0xFF, (dest >> 8) & 0xFF, alpha);
+    let b = blend_channel(src & 0xFF, dest & 0xFF, alpha);
 
     0xFF00_0000 | (r << 16) | (g << 8) | b
+}
+
+/// Blends one 8-bit channel.
+///
+/// Every input is masked to 8 bits by its caller, so the weighted sum
+/// `src * alpha + dst * (255 - alpha)` peaks at `65_025` — far inside a `u32`,
+/// so it cannot overflow. The saturating forms state that invariant in the
+/// code rather than leaving the reader to re-derive it.
+fn blend_channel(src: u32, dst: u32, alpha: u32) -> u32 {
+    let inv = 255_u32.saturating_sub(alpha);
+    src.saturating_mul(alpha)
+        .saturating_add(dst.saturating_mul(inv))
+        / 255
 }
 
 // ---------------------------------------------------------------------------
@@ -828,14 +851,17 @@ fn build_system_font(style: FontStyle) -> Font {
     for codepoint in 0x20u32..=0x7E {
         if let Some(ch) = char::from_u32(codepoint) {
             let bitmap_data = generate_ascii_glyph(ch, style == FontStyle::Bold);
-            glyphs.push((ch, GlyphBitmap {
-                width: FONT_WIDTH,
-                height: FONT_HEIGHT,
-                advance: FONT_WIDTH as f32,
-                bearing_x: 0.0,
-                bearing_y: FONT_HEIGHT as f32 - 2.0, // baseline at row 14
-                bitmap: bitmap_data,
-            }));
+            glyphs.push((
+                ch,
+                GlyphBitmap {
+                    width: FONT_WIDTH,
+                    height: FONT_HEIGHT,
+                    advance: FONT_WIDTH as f32,
+                    bearing_x: 0.0,
+                    bearing_y: FONT_HEIGHT as f32 - 2.0, // baseline at row 14
+                    bitmap: bitmap_data,
+                },
+            ));
         }
     }
 
@@ -843,14 +869,17 @@ fn build_system_font(style: FontStyle) -> Font {
     for codepoint in 0x2500u32..=0x257F {
         if let Some(ch) = char::from_u32(codepoint) {
             let bitmap_data = generate_box_drawing(ch);
-            glyphs.push((ch, GlyphBitmap {
-                width: FONT_WIDTH,
-                height: FONT_HEIGHT,
-                advance: FONT_WIDTH as f32,
-                bearing_x: 0.0,
-                bearing_y: FONT_HEIGHT as f32 - 2.0,
-                bitmap: bitmap_data,
-            }));
+            glyphs.push((
+                ch,
+                GlyphBitmap {
+                    width: FONT_WIDTH,
+                    height: FONT_HEIGHT,
+                    advance: FONT_WIDTH as f32,
+                    bearing_x: 0.0,
+                    bearing_y: FONT_HEIGHT as f32 - 2.0,
+                    bitmap: bitmap_data,
+                },
+            ));
         }
     }
 
@@ -858,14 +887,17 @@ fn build_system_font(style: FontStyle) -> Font {
     for codepoint in 0x2580u32..=0x259F {
         if let Some(ch) = char::from_u32(codepoint) {
             let bitmap_data = generate_block_element(ch);
-            glyphs.push((ch, GlyphBitmap {
-                width: FONT_WIDTH,
-                height: FONT_HEIGHT,
-                advance: FONT_WIDTH as f32,
-                bearing_x: 0.0,
-                bearing_y: FONT_HEIGHT as f32 - 2.0,
-                bitmap: bitmap_data,
-            }));
+            glyphs.push((
+                ch,
+                GlyphBitmap {
+                    width: FONT_WIDTH,
+                    height: FONT_HEIGHT,
+                    advance: FONT_WIDTH as f32,
+                    bearing_x: 0.0,
+                    bearing_y: FONT_HEIGHT as f32 - 2.0,
+                    bitmap: bitmap_data,
+                },
+            ));
         }
     }
 
@@ -873,14 +905,17 @@ fn build_system_font(style: FontStyle) -> Font {
     for codepoint in 0x00A0u32..=0x00FF {
         if let Some(ch) = char::from_u32(codepoint) {
             let bitmap_data = generate_replacement_glyph();
-            glyphs.push((ch, GlyphBitmap {
-                width: FONT_WIDTH,
-                height: FONT_HEIGHT,
-                advance: FONT_WIDTH as f32,
-                bearing_x: 0.0,
-                bearing_y: FONT_HEIGHT as f32 - 2.0,
-                bitmap: bitmap_data,
-            }));
+            glyphs.push((
+                ch,
+                GlyphBitmap {
+                    width: FONT_WIDTH,
+                    height: FONT_HEIGHT,
+                    advance: FONT_WIDTH as f32,
+                    bearing_x: 0.0,
+                    bearing_y: FONT_HEIGHT as f32 - 2.0,
+                    bitmap: bitmap_data,
+                },
+            ));
         }
     }
 
@@ -911,59 +946,47 @@ fn build_system_font(style: FontStyle) -> Font {
     }
 }
 
+/// The replacement glyph: a hollow rectangle with a question mark inside,
+/// drawn for any character the built-in font has no art for.
+const REPLACEMENT: GlyphArt = [
+    "........", "........", ".######.", ".#....#.", ".#....#.", ".#.##.#.", ".#..#.#.", ".#..#.#.",
+    ".#.#..#.", ".#....#.", ".#.#..#.", ".#....#.", ".#....#.", ".######.", "........", "........",
+];
+
 /// Generates the replacement glyph: a hollow rectangle.
-#[allow(clippy::needless_range_loop)]
 fn generate_replacement_glyph() -> Vec<u8> {
     let mut rows = [[0u8; 8]; 16];
-
-    // Draw a hollow rectangle from rows 2..14, columns 1..7
-    for col in 1..7 {
-        rows[2][col] = 1;
-        rows[13][col] = 1;
-    }
-    for row in 2..14 {
-        rows[row][1] = 1;
-        rows[row][6] = 1;
-    }
-    // Question mark inside
-    rows[5][3] = 1;
-    rows[5][4] = 1;
-    rows[6][4] = 1;
-    rows[7][4] = 1;
-    rows[8][3] = 1;
-    rows[10][3] = 1;
-
+    paint(&REPLACEMENT, &mut rows);
     pack_bitmap(&rows)
 }
 
 /// Packs an 8x16 pixel grid into a 1-bit-per-pixel byte array.
 fn pack_bitmap(rows: &[[u8; 8]; 16]) -> Vec<u8> {
-    let mut data = vec![0u8; 16]; // 8 pixels wide = 1 byte per row
-    for (y, row) in rows.iter().enumerate() {
-        let mut byte: u8 = 0;
-        for (x, &pixel) in row.iter().enumerate() {
-            if pixel != 0 {
-                byte |= 1 << (7 - x);
-            }
-        }
-        data[y] = byte;
-    }
-    data
+    rows.iter()
+        .map(|row| {
+            row.iter()
+                .enumerate()
+                .filter(|&(_, &pixel)| pixel != 0)
+                .fold(0u8, |byte, (x, _)| byte | 0x80_u8 >> (x % 8))
+        })
+        .collect()
 }
 
 /// Generates a bitmap for a printable ASCII character.
-#[allow(clippy::needless_range_loop)]
 fn generate_ascii_glyph(ch: char, bold: bool) -> Vec<u8> {
     let mut rows = [[0u8; 8]; 16];
     fill_ascii_glyph(ch, &mut rows);
 
     if bold {
-        // Make bold by shifting right and OR-ing (thicker strokes)
-        let original = rows;
-        for y in 0..16 {
-            for x in 0..7 {
-                if original[y][x] != 0 {
-                    rows[y][x + 1] = 1;
+        // Thicken strokes by smearing each row one pixel to the right. The
+        // shifted-by-one zip reads the row as it was before this pass, so a
+        // pixel the smear just wrote is not itself smeared again — otherwise a
+        // single stem would bleed all the way to the right edge.
+        for row in &mut rows {
+            let original = *row;
+            for (cell, &left) in row.iter_mut().skip(1).zip(original.iter()) {
+                if left != 0 {
+                    *cell = 1;
                 }
             }
         }
@@ -979,460 +1002,518 @@ fn generate_ascii_glyph(ch: char, bold: bool) -> Vec<u8> {
 /// - Row 13 is the baseline
 /// - Rows 14-15 are below baseline (for descenders)
 /// - Column 0 is leftmost, column 7 is rightmost
-#[allow(clippy::too_many_lines, clippy::needless_range_loop)]
 fn fill_ascii_glyph(ch: char, rows: &mut [[u8; 8]; 16]) {
+    paint(ascii_art(ch), rows);
+}
+
+/// Paints pixel art onto a glyph grid.
+///
+/// Zipping rather than indexing means a short row or a short table leaves the
+/// rest of the grid blank instead of panicking; `every_glyph_is_well_formed`
+/// is the test that guarantees neither ever happens.
+fn paint(art: &GlyphArt, rows: &mut [[u8; 8]; 16]) {
+    for (row, line) in rows.iter_mut().zip(art.iter()) {
+        for (cell, ink) in row.iter_mut().zip(line.bytes()) {
+            *cell = u8::from(ink == b'#');
+        }
+    }
+}
+
+/// The 8x16 pixel art for one character: 16 rows of 8 columns, `#` meaning ink.
+type GlyphArt = [&'static str; 16];
+
+/// Every unmapped character renders as a filled block -- the traditional
+/// "this font has no glyph for that" tofu.
+const TOFU: GlyphArt = [
+    "........", "........", "........", ".######.", ".######.", ".######.", ".######.", ".######.",
+    ".######.", ".######.", ".######.", ".######.", ".######.", "........", "........", "........",
+];
+
+/// Looks up the pixel art for one ASCII character.
+///
+/// The glyphs are written as art rather than as a sequence of `rows[y][x] = 1`
+/// assignments, because a hand-drawn font can only be reviewed by looking at
+/// it -- and the imperative form additionally meant 450-odd unchecked index
+/// writes into a fixed-size grid.
+#[allow(clippy::too_many_lines)]
+fn ascii_art(ch: char) -> &'static GlyphArt {
     match ch {
-        ' ' => {} // empty
-        '!' => {
-            for r in 3..10 { rows[r][3] = 1; }
-            rows[12][3] = 1;
-        }
-        '"' => {
-            for r in 3..6 { rows[r][2] = 1; rows[r][5] = 1; }
-        }
-        '#' => {
-            for r in 3..13 { rows[r][2] = 1; rows[r][5] = 1; }
-            for c in 1..7 { rows[5][c] = 1; rows[9][c] = 1; }
-        }
-        '$' => {
-            for c in 2..6 { rows[3][c] = 1; rows[7][c] = 1; rows[11][c] = 1; }
-            for r in 3..8 { rows[r][2] = 1; }
-            for r in 7..12 { rows[r][5] = 1; }
-            for r in 2..13 { rows[r][4] = 1; }
-        }
-        '%' => {
-            rows[3][1] = 1; rows[3][2] = 1; rows[4][1] = 1; rows[4][2] = 1;
-            rows[11][5] = 1; rows[11][6] = 1; rows[12][5] = 1; rows[12][6] = 1;
-            for i in 0..8 { let r = 4 + i; let c = 1 + i; if r < 13 && c < 7 { rows[r][c] = 1; } }
-        }
-        '&' => {
-            for c in 2..5 { rows[3][c] = 1; rows[7][c] = 1; }
-            for r in 4..7 { rows[r][1] = 1; }
-            for r in 8..12 { rows[r][1] = 1; rows[r][6] = 1; }
-            for c in 2..6 { rows[12][c] = 1; }
-        }
-        '\'' => {
-            for r in 3..6 { rows[r][3] = 1; }
-        }
-        '(' => {
-            for r in 4..13 { rows[r][3] = 1; }
-            rows[3][4] = 1; rows[13][4] = 1;
-        }
-        ')' => {
-            for r in 4..13 { rows[r][4] = 1; }
-            rows[3][3] = 1; rows[13][3] = 1;
-        }
-        '*' => {
-            rows[4][3] = 1;
-            rows[5][2] = 1; rows[5][3] = 1; rows[5][4] = 1;
-            rows[6][3] = 1;
-        }
-        '+' => {
-            for r in 5..11 { rows[r][3] = 1; }
-            for c in 1..6 { rows[8][c] = 1; }
-        }
-        ',' => {
-            rows[12][3] = 1; rows[13][3] = 1; rows[14][2] = 1;
-        }
-        '-' => {
-            for c in 1..6 { rows[8][c] = 1; }
-        }
-        '.' => {
-            rows[12][3] = 1;
-        }
-        '/' => {
-            for i in 0..10 { let r = 3 + i; let c = 6 - i * 6 / 10; if r < 14 && c < 8 { rows[r][c] = 1; } }
-        }
-        '0' => {
-            for c in 2..6 { rows[3][c] = 1; rows[12][c] = 1; }
-            for r in 4..12 { rows[r][1] = 1; rows[r][6] = 1; }
-            // Diagonal slash through zero
-            for i in 0..6 { rows[5 + i][5 - i / 2] = 1; }
-        }
-        '1' => {
-            for r in 3..13 { rows[r][4] = 1; }
-            rows[4][3] = 1; rows[3][3] = 1;
-            for c in 2..7 { rows[12][c] = 1; }
-        }
-        '2' => {
-            for c in 2..6 { rows[3][c] = 1; rows[8][c] = 1; rows[12][c] = 1; }
-            for r in 4..8 { rows[r][6] = 1; }
-            for r in 9..12 { rows[r][1] = 1; }
-        }
-        '3' => {
-            for c in 2..6 { rows[3][c] = 1; rows[7][c] = 1; rows[12][c] = 1; }
-            for r in 4..7 { rows[r][6] = 1; }
-            for r in 8..12 { rows[r][6] = 1; }
-        }
-        '4' => {
-            for r in 3..8 { rows[r][2] = 1; rows[r][5] = 1; }
-            for c in 1..7 { rows[8][c] = 1; }
-            for r in 9..13 { rows[r][5] = 1; }
-        }
-        '5' => {
-            for c in 1..7 { rows[3][c] = 1; rows[7][c] = 1; rows[12][c] = 1; }
-            for r in 4..7 { rows[r][1] = 1; }
-            for r in 8..12 { rows[r][6] = 1; }
-        }
-        '6' => {
-            for c in 2..6 { rows[3][c] = 1; rows[7][c] = 1; rows[12][c] = 1; }
-            for r in 4..12 { rows[r][1] = 1; }
-            for r in 8..12 { rows[r][6] = 1; }
-        }
-        '7' => {
-            for c in 1..7 { rows[3][c] = 1; }
-            for r in 4..13 { rows[r][5] = 1; }
-        }
-        '8' => {
-            for c in 2..6 { rows[3][c] = 1; rows[7][c] = 1; rows[12][c] = 1; }
-            for r in 4..7 { rows[r][1] = 1; rows[r][6] = 1; }
-            for r in 8..12 { rows[r][1] = 1; rows[r][6] = 1; }
-        }
-        '9' => {
-            for c in 2..6 { rows[3][c] = 1; rows[7][c] = 1; rows[12][c] = 1; }
-            for r in 4..7 { rows[r][1] = 1; rows[r][6] = 1; }
-            for r in 8..12 { rows[r][6] = 1; }
-        }
-        ':' => {
-            rows[5][3] = 1; rows[10][3] = 1;
-        }
-        ';' => {
-            rows[5][3] = 1; rows[10][3] = 1; rows[11][2] = 1;
-        }
-        '<' => {
-            rows[5][5] = 1; rows[6][4] = 1; rows[7][3] = 1; rows[8][2] = 1;
-            rows[9][3] = 1; rows[10][4] = 1; rows[11][5] = 1;
-        }
-        '=' => {
-            for c in 1..6 { rows[6][c] = 1; rows[9][c] = 1; }
-        }
-        '>' => {
-            rows[5][2] = 1; rows[6][3] = 1; rows[7][4] = 1; rows[8][5] = 1;
-            rows[9][4] = 1; rows[10][3] = 1; rows[11][2] = 1;
-        }
-        '?' => {
-            for c in 2..6 { rows[3][c] = 1; }
-            for r in 4..6 { rows[r][6] = 1; }
-            rows[7][5] = 1; rows[8][4] = 1; rows[9][3] = 1;
-            rows[12][3] = 1;
-        }
-        '@' => {
-            for c in 2..6 { rows[3][c] = 1; rows[12][c] = 1; }
-            for r in 4..12 { rows[r][1] = 1; }
-            for r in 4..8 { rows[r][6] = 1; }
-            for r in 6..10 { rows[r][4] = 1; rows[r][5] = 1; }
-        }
-        'A' => {
-            for c in 2..6 { rows[3][c] = 1; rows[8][c] = 1; }
-            for r in 4..13 { rows[r][1] = 1; rows[r][6] = 1; }
-        }
-        'B' => {
-            for c in 1..6 { rows[3][c] = 1; rows[8][c] = 1; rows[12][c] = 1; }
-            for r in 3..13 { rows[r][1] = 1; }
-            for r in 4..8 { rows[r][6] = 1; }
-            for r in 9..12 { rows[r][6] = 1; }
-        }
-        'C' => {
-            for c in 2..6 { rows[3][c] = 1; rows[12][c] = 1; }
-            for r in 4..12 { rows[r][1] = 1; }
-        }
-        'D' => {
-            for c in 1..5 { rows[3][c] = 1; rows[12][c] = 1; }
-            for r in 3..13 { rows[r][1] = 1; }
-            for r in 4..12 { rows[r][6] = 1; }
-            rows[3][5] = 1; rows[12][5] = 1;
-        }
-        'E' => {
-            for c in 1..7 { rows[3][c] = 1; rows[8][c] = 1; rows[12][c] = 1; }
-            for r in 3..13 { rows[r][1] = 1; }
-        }
-        'F' => {
-            for c in 1..7 { rows[3][c] = 1; rows[8][c] = 1; }
-            for r in 3..13 { rows[r][1] = 1; }
-        }
-        'G' => {
-            for c in 2..6 { rows[3][c] = 1; rows[12][c] = 1; }
-            for r in 4..12 { rows[r][1] = 1; }
-            for r in 8..12 { rows[r][6] = 1; }
-            for c in 4..7 { rows[8][c] = 1; }
-        }
-        'H' => {
-            for r in 3..13 { rows[r][1] = 1; rows[r][6] = 1; }
-            for c in 1..7 { rows[8][c] = 1; }
-        }
-        'I' => {
-            for c in 2..6 { rows[3][c] = 1; rows[12][c] = 1; }
-            for r in 3..13 { rows[r][4] = 1; }
-        }
-        'J' => {
-            for r in 3..12 { rows[r][5] = 1; }
-            for c in 2..5 { rows[12][c] = 1; }
-            rows[11][1] = 1;
-        }
-        'K' => {
-            for r in 3..13 { rows[r][1] = 1; }
-            rows[5][5] = 1; rows[6][4] = 1; rows[7][3] = 1; rows[8][2] = 1;
-            rows[9][3] = 1; rows[10][4] = 1; rows[11][5] = 1; rows[12][6] = 1;
-        }
-        'L' => {
-            for r in 3..13 { rows[r][1] = 1; }
-            for c in 1..7 { rows[12][c] = 1; }
-        }
-        'M' => {
-            for r in 3..13 { rows[r][1] = 1; rows[r][6] = 1; }
-            rows[4][2] = 1; rows[4][5] = 1;
-            rows[5][3] = 1; rows[5][4] = 1;
-        }
-        'N' => {
-            for r in 3..13 { rows[r][1] = 1; rows[r][6] = 1; }
-            rows[4][2] = 1; rows[5][3] = 1; rows[6][3] = 1;
-            rows[7][4] = 1; rows[8][4] = 1; rows[9][5] = 1;
-        }
-        'O' => {
-            for c in 2..6 { rows[3][c] = 1; rows[12][c] = 1; }
-            for r in 4..12 { rows[r][1] = 1; rows[r][6] = 1; }
-        }
-        'P' => {
-            for c in 1..6 { rows[3][c] = 1; rows[8][c] = 1; }
-            for r in 3..13 { rows[r][1] = 1; }
-            for r in 4..8 { rows[r][6] = 1; }
-        }
-        'Q' => {
-            for c in 2..6 { rows[3][c] = 1; rows[12][c] = 1; }
-            for r in 4..12 { rows[r][1] = 1; rows[r][6] = 1; }
-            rows[10][4] = 1; rows[11][5] = 1; rows[12][6] = 1;
-        }
-        'R' => {
-            for c in 1..6 { rows[3][c] = 1; rows[8][c] = 1; }
-            for r in 3..13 { rows[r][1] = 1; }
-            for r in 4..8 { rows[r][6] = 1; }
-            rows[9][4] = 1; rows[10][5] = 1; rows[11][5] = 1; rows[12][6] = 1;
-        }
-        'S' => {
-            for c in 2..6 { rows[3][c] = 1; rows[8][c] = 1; rows[12][c] = 1; }
-            for r in 4..8 { rows[r][1] = 1; }
-            for r in 9..12 { rows[r][6] = 1; }
-        }
-        'T' => {
-            for c in 1..7 { rows[3][c] = 1; }
-            for r in 4..13 { rows[r][4] = 1; }
-        }
-        'U' => {
-            for r in 3..12 { rows[r][1] = 1; rows[r][6] = 1; }
-            for c in 2..6 { rows[12][c] = 1; }
-        }
-        'V' => {
-            for r in 3..10 { rows[r][1] = 1; rows[r][6] = 1; }
-            rows[10][2] = 1; rows[10][5] = 1;
-            rows[11][3] = 1; rows[11][4] = 1;
-            rows[12][3] = 1; rows[12][4] = 1;
-        }
-        'W' => {
-            for r in 3..11 { rows[r][1] = 1; rows[r][6] = 1; }
-            for r in 7..11 { rows[r][4] = 1; }
-            rows[11][2] = 1; rows[11][5] = 1;
-            rows[12][3] = 1; rows[12][4] = 1;
-        }
-        'X' => {
-            for r in 3..7 { rows[r][1] = 1; rows[r][6] = 1; }
-            rows[7][2] = 1; rows[7][5] = 1; rows[8][3] = 1; rows[8][4] = 1;
-            rows[9][2] = 1; rows[9][5] = 1;
-            for r in 10..13 { rows[r][1] = 1; rows[r][6] = 1; }
-        }
-        'Y' => {
-            for r in 3..6 { rows[r][1] = 1; rows[r][6] = 1; }
-            rows[6][2] = 1; rows[6][5] = 1;
-            rows[7][3] = 1; rows[7][4] = 1;
-            for r in 8..13 { rows[r][4] = 1; }
-        }
-        'Z' => {
-            for c in 1..7 { rows[3][c] = 1; rows[12][c] = 1; }
-            rows[4][6] = 1; rows[5][5] = 1; rows[6][5] = 1;
-            rows[7][4] = 1; rows[8][3] = 1; rows[9][3] = 1;
-            rows[10][2] = 1; rows[11][1] = 1;
-        }
-        '[' => {
-            for c in 3..6 { rows[3][c] = 1; rows[13][c] = 1; }
-            for r in 3..14 { rows[r][3] = 1; }
-        }
-        '\\' => {
-            for i in 0..10 { let r = 3 + i; let c = 1 + i * 6 / 10; if r < 14 && c < 8 { rows[r][c] = 1; } }
-        }
-        ']' => {
-            for c in 2..5 { rows[3][c] = 1; rows[13][c] = 1; }
-            for r in 3..14 { rows[r][4] = 1; }
-        }
-        '^' => {
-            rows[3][4] = 1;
-            rows[4][3] = 1; rows[4][5] = 1;
-            rows[5][2] = 1; rows[5][6] = 1;
-        }
-        '_' => {
-            for c in 0..8 { rows[14][c] = 1; }
-        }
-        '`' => {
-            rows[3][3] = 1; rows[4][4] = 1;
-        }
-        'a' => {
-            for c in 2..6 { rows[6][c] = 1; rows[12][c] = 1; }
-            for r in 7..12 { rows[r][6] = 1; }
-            for r in 9..12 { rows[r][1] = 1; }
-            for c in 2..7 { rows[8][c] = 1; }
-        }
-        'b' => {
-            for r in 3..13 { rows[r][1] = 1; }
-            for c in 2..6 { rows[6][c] = 1; rows[12][c] = 1; }
-            for r in 7..12 { rows[r][6] = 1; }
-        }
-        'c' => {
-            for c in 2..6 { rows[6][c] = 1; rows[12][c] = 1; }
-            for r in 7..12 { rows[r][1] = 1; }
-        }
-        'd' => {
-            for r in 3..13 { rows[r][6] = 1; }
-            for c in 2..6 { rows[6][c] = 1; rows[12][c] = 1; }
-            for r in 7..12 { rows[r][1] = 1; }
-        }
-        'e' => {
-            for c in 2..6 { rows[6][c] = 1; rows[12][c] = 1; }
-            for r in 7..9 { rows[r][1] = 1; rows[r][6] = 1; }
-            for c in 1..7 { rows[9][c] = 1; }
-            for r in 10..12 { rows[r][1] = 1; }
-        }
-        'f' => {
-            for c in 3..6 { rows[3][c] = 1; }
-            for r in 4..13 { rows[r][3] = 1; }
-            for c in 2..6 { rows[6][c] = 1; }
-        }
-        'g' => {
-            for c in 2..6 { rows[6][c] = 1; rows[12][c] = 1; rows[15][c] = 1; }
-            for r in 7..12 { rows[r][1] = 1; rows[r][6] = 1; }
-            for r in 13..15 { rows[r][6] = 1; }
-        }
-        'h' => {
-            for r in 3..13 { rows[r][1] = 1; }
-            for c in 2..6 { rows[6][c] = 1; }
-            for r in 7..13 { rows[r][6] = 1; }
-        }
-        'i' => {
-            rows[4][3] = 1;
-            for r in 6..13 { rows[r][3] = 1; }
-        }
-        'j' => {
-            rows[4][5] = 1;
-            for r in 6..14 { rows[r][5] = 1; }
-            for c in 2..5 { rows[14][c] = 1; }
-        }
-        'k' => {
-            for r in 3..13 { rows[r][1] = 1; }
-            rows[7][5] = 1; rows[8][4] = 1; rows[9][3] = 1;
-            rows[10][4] = 1; rows[11][5] = 1; rows[12][6] = 1;
-        }
-        'l' => {
-            for r in 3..12 { rows[r][3] = 1; }
-            rows[12][4] = 1; rows[12][5] = 1;
-        }
-        'm' => {
-            for r in 7..13 { rows[r][1] = 1; rows[r][4] = 1; rows[r][7] = 1; }
-            for c in 1..8 { rows[6][c] = 1; }
-        }
-        'n' => {
-            for r in 6..13 { rows[r][1] = 1; rows[r][6] = 1; }
-            for c in 2..6 { rows[6][c] = 1; }
-        }
-        'o' => {
-            for c in 2..6 { rows[6][c] = 1; rows[12][c] = 1; }
-            for r in 7..12 { rows[r][1] = 1; rows[r][6] = 1; }
-        }
-        'p' => {
-            for c in 2..6 { rows[6][c] = 1; rows[12][c] = 1; }
-            for r in 6..15 { rows[r][1] = 1; }
-            for r in 7..12 { rows[r][6] = 1; }
-        }
-        'q' => {
-            for c in 2..6 { rows[6][c] = 1; rows[12][c] = 1; }
-            for r in 6..15 { rows[r][6] = 1; }
-            for r in 7..12 { rows[r][1] = 1; }
-        }
-        'r' => {
-            for r in 6..13 { rows[r][2] = 1; }
-            for c in 3..6 { rows[6][c] = 1; }
-            rows[7][6] = 1;
-        }
-        's' => {
-            for c in 2..6 { rows[6][c] = 1; rows[9][c] = 1; rows[12][c] = 1; }
-            for r in 7..9 { rows[r][1] = 1; }
-            for r in 10..12 { rows[r][6] = 1; }
-        }
-        't' => {
-            for r in 3..12 { rows[r][3] = 1; }
-            for c in 2..6 { rows[6][c] = 1; }
-            rows[12][4] = 1; rows[12][5] = 1;
-        }
-        'u' => {
-            for r in 6..12 { rows[r][1] = 1; rows[r][6] = 1; }
-            for c in 2..7 { rows[12][c] = 1; }
-        }
-        'v' => {
-            for r in 6..10 { rows[r][1] = 1; rows[r][6] = 1; }
-            rows[10][2] = 1; rows[10][5] = 1;
-            rows[11][3] = 1; rows[11][4] = 1;
-            rows[12][3] = 1;
-        }
-        'w' => {
-            for r in 6..10 { rows[r][1] = 1; rows[r][4] = 1; rows[r][7] = 1; }
-            rows[10][2] = 1; rows[10][6] = 1;
-            rows[11][3] = 1; rows[11][5] = 1;
-            rows[12][4] = 1;
-        }
-        'x' => {
-            rows[6][1] = 1; rows[6][6] = 1;
-            rows[7][2] = 1; rows[7][5] = 1;
-            rows[8][3] = 1; rows[8][4] = 1;
-            rows[9][3] = 1; rows[9][4] = 1;
-            rows[10][2] = 1; rows[10][5] = 1;
-            rows[11][1] = 1; rows[11][6] = 1;
-        }
-        'y' => {
-            for r in 6..12 { rows[r][1] = 1; rows[r][6] = 1; }
-            for c in 2..7 { rows[12][c] = 1; }
-            for r in 13..15 { rows[r][6] = 1; }
-            for c in 2..6 { rows[15][c] = 1; }
-        }
-        'z' => {
-            for c in 1..7 { rows[6][c] = 1; rows[12][c] = 1; }
-            rows[7][5] = 1; rows[8][4] = 1; rows[9][4] = 1;
-            rows[10][3] = 1; rows[11][2] = 1;
-        }
-        '{' => {
-            rows[3][5] = 1; rows[4][4] = 1;
-            for r in 5..8 { rows[r][4] = 1; }
-            rows[8][3] = 1;
-            for r in 9..12 { rows[r][4] = 1; }
-            rows[12][4] = 1; rows[13][5] = 1;
-        }
-        '|' => {
-            for r in 3..14 { rows[r][4] = 1; }
-        }
-        '}' => {
-            rows[3][3] = 1; rows[4][4] = 1;
-            for r in 5..8 { rows[r][4] = 1; }
-            rows[8][5] = 1;
-            for r in 9..12 { rows[r][4] = 1; }
-            rows[12][4] = 1; rows[13][3] = 1;
-        }
-        '~' => {
-            rows[7][2] = 1; rows[6][3] = 1; rows[6][4] = 1;
-            rows[7][5] = 1; rows[6][6] = 1;
-        }
-        _ => {
-            // For any unhandled character, produce a filled block
-            for r in 3..13 {
-                for c in 1..7 {
-                    rows[r][c] = 1;
-                }
-            }
-        }
+        ' ' => &[
+            "........", "........", "........", "........", "........", "........", "........",
+            "........", "........", "........", "........", "........", "........", "........",
+            "........", "........",
+        ],
+        '!' => &[
+            "........", "........", "........", "...#....", "...#....", "...#....", "...#....",
+            "...#....", "...#....", "...#....", "........", "........", "...#....", "........",
+            "........", "........",
+        ],
+        '"' => &[
+            "........", "........", "........", "..#..#..", "..#..#..", "..#..#..", "........",
+            "........", "........", "........", "........", "........", "........", "........",
+            "........", "........",
+        ],
+        '#' => &[
+            "........", "........", "........", "..#..#..", "..#..#..", ".######.", "..#..#..",
+            "..#..#..", "..#..#..", ".######.", "..#..#..", "..#..#..", "..#..#..", "........",
+            "........", "........",
+        ],
+        '$' => &[
+            "........", "........", "....#...", "..####..", "..#.#...", "..#.#...", "..#.#...",
+            "..####..", "....##..", "....##..", "....##..", "..####..", "....#...", "........",
+            "........", "........",
+        ],
+        '%' => &[
+            "........", "........", "........", ".##.....", ".##.....", "..#.....", "...#....",
+            "....#...", ".....#..", "......#.", "........", ".....##.", ".....##.", "........",
+            "........", "........",
+        ],
+        '&' => &[
+            "........", "........", "........", "..###...", ".#......", ".#......", ".#......",
+            "..###...", ".#....#.", ".#....#.", ".#....#.", ".#....#.", "..####..", "........",
+            "........", "........",
+        ],
+        '\'' => &[
+            "........", "........", "........", "...#....", "...#....", "...#....", "........",
+            "........", "........", "........", "........", "........", "........", "........",
+            "........", "........",
+        ],
+        '(' => &[
+            "........", "........", "........", "....#...", "...#....", "...#....", "...#....",
+            "...#....", "...#....", "...#....", "...#....", "...#....", "...#....", "....#...",
+            "........", "........",
+        ],
+        ')' => &[
+            "........", "........", "........", "...#....", "....#...", "....#...", "....#...",
+            "....#...", "....#...", "....#...", "....#...", "....#...", "....#...", "...#....",
+            "........", "........",
+        ],
+        '*' => &[
+            "........", "........", "........", "........", "...#....", "..###...", "...#....",
+            "........", "........", "........", "........", "........", "........", "........",
+            "........", "........",
+        ],
+        '+' => &[
+            "........", "........", "........", "........", "........", "...#....", "...#....",
+            "...#....", ".#####..", "...#....", "...#....", "........", "........", "........",
+            "........", "........",
+        ],
+        ',' => &[
+            "........", "........", "........", "........", "........", "........", "........",
+            "........", "........", "........", "........", "........", "...#....", "...#....",
+            "..#.....", "........",
+        ],
+        '-' => &[
+            "........", "........", "........", "........", "........", "........", "........",
+            "........", ".#####..", "........", "........", "........", "........", "........",
+            "........", "........",
+        ],
+        '.' => &[
+            "........", "........", "........", "........", "........", "........", "........",
+            "........", "........", "........", "........", "........", "...#....", "........",
+            "........", "........",
+        ],
+        '/' => &[
+            "........", "........", "........", "......#.", "......#.", ".....#..", ".....#..",
+            "....#...", "...#....", "...#....", "..#.....", "..#.....", ".#......", "........",
+            "........", "........",
+        ],
+        '0' => &[
+            "........", "........", "........", "..####..", ".#....#.", ".#...##.", ".#...##.",
+            ".#..#.#.", ".#..#.#.", ".#.#..#.", ".#.#..#.", ".#....#.", "..####..", "........",
+            "........", "........",
+        ],
+        '1' => &[
+            "........", "........", "........", "...##...", "...##...", "....#...", "....#...",
+            "....#...", "....#...", "....#...", "....#...", "....#...", "..#####.", "........",
+            "........", "........",
+        ],
+        '2' => &[
+            "........", "........", "........", "..####..", "......#.", "......#.", "......#.",
+            "......#.", "..####..", ".#......", ".#......", ".#......", "..####..", "........",
+            "........", "........",
+        ],
+        '3' => &[
+            "........", "........", "........", "..####..", "......#.", "......#.", "......#.",
+            "..####..", "......#.", "......#.", "......#.", "......#.", "..####..", "........",
+            "........", "........",
+        ],
+        '4' => &[
+            "........", "........", "........", "..#..#..", "..#..#..", "..#..#..", "..#..#..",
+            "..#..#..", ".######.", ".....#..", ".....#..", ".....#..", ".....#..", "........",
+            "........", "........",
+        ],
+        '5' => &[
+            "........", "........", "........", ".######.", ".#......", ".#......", ".#......",
+            ".######.", "......#.", "......#.", "......#.", "......#.", ".######.", "........",
+            "........", "........",
+        ],
+        '6' => &[
+            "........", "........", "........", "..####..", ".#......", ".#......", ".#......",
+            ".#####..", ".#....#.", ".#....#.", ".#....#.", ".#....#.", "..####..", "........",
+            "........", "........",
+        ],
+        '7' => &[
+            "........", "........", "........", ".######.", ".....#..", ".....#..", ".....#..",
+            ".....#..", ".....#..", ".....#..", ".....#..", ".....#..", ".....#..", "........",
+            "........", "........",
+        ],
+        '8' => &[
+            "........", "........", "........", "..####..", ".#....#.", ".#....#.", ".#....#.",
+            "..####..", ".#....#.", ".#....#.", ".#....#.", ".#....#.", "..####..", "........",
+            "........", "........",
+        ],
+        '9' => &[
+            "........", "........", "........", "..####..", ".#....#.", ".#....#.", ".#....#.",
+            "..####..", "......#.", "......#.", "......#.", "......#.", "..####..", "........",
+            "........", "........",
+        ],
+        ':' => &[
+            "........", "........", "........", "........", "........", "...#....", "........",
+            "........", "........", "........", "...#....", "........", "........", "........",
+            "........", "........",
+        ],
+        ';' => &[
+            "........", "........", "........", "........", "........", "...#....", "........",
+            "........", "........", "........", "...#....", "..#.....", "........", "........",
+            "........", "........",
+        ],
+        '<' => &[
+            "........", "........", "........", "........", "........", ".....#..", "....#...",
+            "...#....", "..#.....", "...#....", "....#...", ".....#..", "........", "........",
+            "........", "........",
+        ],
+        '=' => &[
+            "........", "........", "........", "........", "........", "........", ".#####..",
+            "........", "........", ".#####..", "........", "........", "........", "........",
+            "........", "........",
+        ],
+        '>' => &[
+            "........", "........", "........", "........", "........", "..#.....", "...#....",
+            "....#...", ".....#..", "....#...", "...#....", "..#.....", "........", "........",
+            "........", "........",
+        ],
+        '?' => &[
+            "........", "........", "........", "..####..", "......#.", "......#.", "........",
+            ".....#..", "....#...", "...#....", "........", "........", "...#....", "........",
+            "........", "........",
+        ],
+        '@' => &[
+            "........", "........", "........", "..####..", ".#....#.", ".#....#.", ".#..###.",
+            ".#..###.", ".#..##..", ".#..##..", ".#......", ".#......", "..####..", "........",
+            "........", "........",
+        ],
+        'A' => &[
+            "........", "........", "........", "..####..", ".#....#.", ".#....#.", ".#....#.",
+            ".#....#.", ".######.", ".#....#.", ".#....#.", ".#....#.", ".#....#.", "........",
+            "........", "........",
+        ],
+        'B' => &[
+            "........", "........", "........", ".#####..", ".#....#.", ".#....#.", ".#....#.",
+            ".#....#.", ".#####..", ".#....#.", ".#....#.", ".#....#.", ".#####..", "........",
+            "........", "........",
+        ],
+        'C' => &[
+            "........", "........", "........", "..####..", ".#......", ".#......", ".#......",
+            ".#......", ".#......", ".#......", ".#......", ".#......", "..####..", "........",
+            "........", "........",
+        ],
+        'D' => &[
+            "........", "........", "........", ".#####..", ".#....#.", ".#....#.", ".#....#.",
+            ".#....#.", ".#....#.", ".#....#.", ".#....#.", ".#....#.", ".#####..", "........",
+            "........", "........",
+        ],
+        'E' => &[
+            "........", "........", "........", ".######.", ".#......", ".#......", ".#......",
+            ".#......", ".######.", ".#......", ".#......", ".#......", ".######.", "........",
+            "........", "........",
+        ],
+        'F' => &[
+            "........", "........", "........", ".######.", ".#......", ".#......", ".#......",
+            ".#......", ".######.", ".#......", ".#......", ".#......", ".#......", "........",
+            "........", "........",
+        ],
+        'G' => &[
+            "........", "........", "........", "..####..", ".#......", ".#......", ".#......",
+            ".#......", ".#..###.", ".#....#.", ".#....#.", ".#....#.", "..####..", "........",
+            "........", "........",
+        ],
+        'H' => &[
+            "........", "........", "........", ".#....#.", ".#....#.", ".#....#.", ".#....#.",
+            ".#....#.", ".######.", ".#....#.", ".#....#.", ".#....#.", ".#....#.", "........",
+            "........", "........",
+        ],
+        'I' => &[
+            "........", "........", "........", "..####..", "....#...", "....#...", "....#...",
+            "....#...", "....#...", "....#...", "....#...", "....#...", "..####..", "........",
+            "........", "........",
+        ],
+        'J' => &[
+            "........", "........", "........", ".....#..", ".....#..", ".....#..", ".....#..",
+            ".....#..", ".....#..", ".....#..", ".....#..", ".#...#..", "..###...", "........",
+            "........", "........",
+        ],
+        'K' => &[
+            "........", "........", "........", ".#......", ".#......", ".#...#..", ".#..#...",
+            ".#.#....", ".##.....", ".#.#....", ".#..#...", ".#...#..", ".#....#.", "........",
+            "........", "........",
+        ],
+        'L' => &[
+            "........", "........", "........", ".#......", ".#......", ".#......", ".#......",
+            ".#......", ".#......", ".#......", ".#......", ".#......", ".######.", "........",
+            "........", "........",
+        ],
+        'M' => &[
+            "........", "........", "........", ".#....#.", ".##..##.", ".#.##.#.", ".#....#.",
+            ".#....#.", ".#....#.", ".#....#.", ".#....#.", ".#....#.", ".#....#.", "........",
+            "........", "........",
+        ],
+        'N' => &[
+            "........", "........", "........", ".#....#.", ".##...#.", ".#.#..#.", ".#.#..#.",
+            ".#..#.#.", ".#..#.#.", ".#...##.", ".#....#.", ".#....#.", ".#....#.", "........",
+            "........", "........",
+        ],
+        'O' => &[
+            "........", "........", "........", "..####..", ".#....#.", ".#....#.", ".#....#.",
+            ".#....#.", ".#....#.", ".#....#.", ".#....#.", ".#....#.", "..####..", "........",
+            "........", "........",
+        ],
+        'P' => &[
+            "........", "........", "........", ".#####..", ".#....#.", ".#....#.", ".#....#.",
+            ".#....#.", ".#####..", ".#......", ".#......", ".#......", ".#......", "........",
+            "........", "........",
+        ],
+        'Q' => &[
+            "........", "........", "........", "..####..", ".#....#.", ".#....#.", ".#....#.",
+            ".#....#.", ".#....#.", ".#....#.", ".#..#.#.", ".#...##.", "..#####.", "........",
+            "........", "........",
+        ],
+        'R' => &[
+            "........", "........", "........", ".#####..", ".#....#.", ".#....#.", ".#....#.",
+            ".#....#.", ".#####..", ".#..#...", ".#...#..", ".#...#..", ".#....#.", "........",
+            "........", "........",
+        ],
+        'S' => &[
+            "........", "........", "........", "..####..", ".#......", ".#......", ".#......",
+            ".#......", "..####..", "......#.", "......#.", "......#.", "..####..", "........",
+            "........", "........",
+        ],
+        'T' => &[
+            "........", "........", "........", ".######.", "....#...", "....#...", "....#...",
+            "....#...", "....#...", "....#...", "....#...", "....#...", "....#...", "........",
+            "........", "........",
+        ],
+        'U' => &[
+            "........", "........", "........", ".#....#.", ".#....#.", ".#....#.", ".#....#.",
+            ".#....#.", ".#....#.", ".#....#.", ".#....#.", ".#....#.", "..####..", "........",
+            "........", "........",
+        ],
+        'V' => &[
+            "........", "........", "........", ".#....#.", ".#....#.", ".#....#.", ".#....#.",
+            ".#....#.", ".#....#.", ".#....#.", "..#..#..", "...##...", "...##...", "........",
+            "........", "........",
+        ],
+        'W' => &[
+            "........", "........", "........", ".#....#.", ".#....#.", ".#....#.", ".#....#.",
+            ".#..#.#.", ".#..#.#.", ".#..#.#.", ".#..#.#.", "..#..#..", "...##...", "........",
+            "........", "........",
+        ],
+        'X' => &[
+            "........", "........", "........", ".#....#.", ".#....#.", ".#....#.", ".#....#.",
+            "..#..#..", "...##...", "..#..#..", ".#....#.", ".#....#.", ".#....#.", "........",
+            "........", "........",
+        ],
+        'Y' => &[
+            "........", "........", "........", ".#....#.", ".#....#.", ".#....#.", "..#..#..",
+            "...##...", "....#...", "....#...", "....#...", "....#...", "....#...", "........",
+            "........", "........",
+        ],
+        'Z' => &[
+            "........", "........", "........", ".######.", "......#.", ".....#..", ".....#..",
+            "....#...", "...#....", "...#....", "..#.....", ".#......", ".######.", "........",
+            "........", "........",
+        ],
+        '[' => &[
+            "........", "........", "........", "...###..", "...#....", "...#....", "...#....",
+            "...#....", "...#....", "...#....", "...#....", "...#....", "...#....", "...###..",
+            "........", "........",
+        ],
+        '\\' => &[
+            "........", "........", "........", ".#......", ".#......", "..#.....", "..#.....",
+            "...#....", "....#...", "....#...", ".....#..", ".....#..", "......#.", "........",
+            "........", "........",
+        ],
+        ']' => &[
+            "........", "........", "........", "..###...", "....#...", "....#...", "....#...",
+            "....#...", "....#...", "....#...", "....#...", "....#...", "....#...", "..###...",
+            "........", "........",
+        ],
+        '^' => &[
+            "........", "........", "........", "....#...", "...#.#..", "..#...#.", "........",
+            "........", "........", "........", "........", "........", "........", "........",
+            "........", "........",
+        ],
+        '_' => &[
+            "........", "........", "........", "........", "........", "........", "........",
+            "........", "........", "........", "........", "........", "........", "........",
+            "########", "........",
+        ],
+        '`' => &[
+            "........", "........", "........", "...#....", "....#...", "........", "........",
+            "........", "........", "........", "........", "........", "........", "........",
+            "........", "........",
+        ],
+        'a' => &[
+            "........", "........", "........", "........", "........", "........", "..####..",
+            "......#.", "..#####.", ".#....#.", ".#....#.", ".#....#.", "..####..", "........",
+            "........", "........",
+        ],
+        'b' => &[
+            "........", "........", "........", ".#......", ".#......", ".#......", ".#####..",
+            ".#....#.", ".#....#.", ".#....#.", ".#....#.", ".#....#.", ".#####..", "........",
+            "........", "........",
+        ],
+        'c' => &[
+            "........", "........", "........", "........", "........", "........", "..####..",
+            ".#......", ".#......", ".#......", ".#......", ".#......", "..####..", "........",
+            "........", "........",
+        ],
+        'd' => &[
+            "........", "........", "........", "......#.", "......#.", "......#.", "..#####.",
+            ".#....#.", ".#....#.", ".#....#.", ".#....#.", ".#....#.", "..#####.", "........",
+            "........", "........",
+        ],
+        'e' => &[
+            "........", "........", "........", "........", "........", "........", "..####..",
+            ".#....#.", ".#....#.", ".######.", ".#......", ".#......", "..####..", "........",
+            "........", "........",
+        ],
+        'f' => &[
+            "........", "........", "........", "...###..", "...#....", "...#....", "..####..",
+            "...#....", "...#....", "...#....", "...#....", "...#....", "...#....", "........",
+            "........", "........",
+        ],
+        'g' => &[
+            "........", "........", "........", "........", "........", "........", "..####..",
+            ".#....#.", ".#....#.", ".#....#.", ".#....#.", ".#....#.", "..####..", "......#.",
+            "......#.", "..####..",
+        ],
+        'h' => &[
+            "........", "........", "........", ".#......", ".#......", ".#......", ".#####..",
+            ".#....#.", ".#....#.", ".#....#.", ".#....#.", ".#....#.", ".#....#.", "........",
+            "........", "........",
+        ],
+        'i' => &[
+            "........", "........", "........", "........", "...#....", "........", "...#....",
+            "...#....", "...#....", "...#....", "...#....", "...#....", "...#....", "........",
+            "........", "........",
+        ],
+        'j' => &[
+            "........", "........", "........", "........", ".....#..", "........", ".....#..",
+            ".....#..", ".....#..", ".....#..", ".....#..", ".....#..", ".....#..", ".....#..",
+            "..###...", "........",
+        ],
+        'k' => &[
+            "........", "........", "........", ".#......", ".#......", ".#......", ".#......",
+            ".#...#..", ".#..#...", ".#.#....", ".#..#...", ".#...#..", ".#....#.", "........",
+            "........", "........",
+        ],
+        'l' => &[
+            "........", "........", "........", "...#....", "...#....", "...#....", "...#....",
+            "...#....", "...#....", "...#....", "...#....", "...#....", "....##..", "........",
+            "........", "........",
+        ],
+        'm' => &[
+            "........", "........", "........", "........", "........", "........", ".#######",
+            ".#..#..#", ".#..#..#", ".#..#..#", ".#..#..#", ".#..#..#", ".#..#..#", "........",
+            "........", "........",
+        ],
+        'n' => &[
+            "........", "........", "........", "........", "........", "........", ".######.",
+            ".#....#.", ".#....#.", ".#....#.", ".#....#.", ".#....#.", ".#....#.", "........",
+            "........", "........",
+        ],
+        'o' => &[
+            "........", "........", "........", "........", "........", "........", "..####..",
+            ".#....#.", ".#....#.", ".#....#.", ".#....#.", ".#....#.", "..####..", "........",
+            "........", "........",
+        ],
+        'p' => &[
+            "........", "........", "........", "........", "........", "........", ".#####..",
+            ".#....#.", ".#....#.", ".#....#.", ".#....#.", ".#....#.", ".#####..", ".#......",
+            ".#......", "........",
+        ],
+        'q' => &[
+            "........", "........", "........", "........", "........", "........", "..#####.",
+            ".#....#.", ".#....#.", ".#....#.", ".#....#.", ".#....#.", "..#####.", "......#.",
+            "......#.", "........",
+        ],
+        'r' => &[
+            "........", "........", "........", "........", "........", "........", "..####..",
+            "..#...#.", "..#.....", "..#.....", "..#.....", "..#.....", "..#.....", "........",
+            "........", "........",
+        ],
+        's' => &[
+            "........", "........", "........", "........", "........", "........", "..####..",
+            ".#......", ".#......", "..####..", "......#.", "......#.", "..####..", "........",
+            "........", "........",
+        ],
+        't' => &[
+            "........", "........", "........", "...#....", "...#....", "...#....", "..####..",
+            "...#....", "...#....", "...#....", "...#....", "...#....", "....##..", "........",
+            "........", "........",
+        ],
+        'u' => &[
+            "........", "........", "........", "........", "........", "........", ".#....#.",
+            ".#....#.", ".#....#.", ".#....#.", ".#....#.", ".#....#.", "..#####.", "........",
+            "........", "........",
+        ],
+        'v' => &[
+            "........", "........", "........", "........", "........", "........", ".#....#.",
+            ".#....#.", ".#....#.", ".#....#.", "..#..#..", "...##...", "...#....", "........",
+            "........", "........",
+        ],
+        'w' => &[
+            "........", "........", "........", "........", "........", "........", ".#..#..#",
+            ".#..#..#", ".#..#..#", ".#..#..#", "..#...#.", "...#.#..", "....#...", "........",
+            "........", "........",
+        ],
+        'x' => &[
+            "........", "........", "........", "........", "........", "........", ".#....#.",
+            "..#..#..", "...##...", "...##...", "..#..#..", ".#....#.", "........", "........",
+            "........", "........",
+        ],
+        'y' => &[
+            "........", "........", "........", "........", "........", "........", ".#....#.",
+            ".#....#.", ".#....#.", ".#....#.", ".#....#.", ".#....#.", "..#####.", "......#.",
+            "......#.", "..####..",
+        ],
+        'z' => &[
+            "........", "........", "........", "........", "........", "........", ".######.",
+            ".....#..", "....#...", "....#...", "...#....", "..#.....", ".######.", "........",
+            "........", "........",
+        ],
+        '{' => &[
+            "........", "........", "........", ".....#..", "....#...", "....#...", "....#...",
+            "....#...", "...#....", "....#...", "....#...", "....#...", "....#...", ".....#..",
+            "........", "........",
+        ],
+        '|' => &[
+            "........", "........", "........", "....#...", "....#...", "....#...", "....#...",
+            "....#...", "....#...", "....#...", "....#...", "....#...", "....#...", "....#...",
+            "........", "........",
+        ],
+        '}' => &[
+            "........", "........", "........", "...#....", "....#...", "....#...", "....#...",
+            "....#...", ".....#..", "....#...", "....#...", "....#...", "....#...", "...#....",
+            "........", "........",
+        ],
+        '~' => &[
+            "........", "........", "........", "........", "........", "........", "...##.#.",
+            "..#..#..", "........", "........", "........", "........", "........", "........",
+            "........", "........",
+        ],
+        _ => &TOFU,
     }
 }
 
@@ -1442,101 +1523,139 @@ fn fill_ascii_glyph(ch: char, rows: &mut [[u8; 8]; 16]) {
 
 /// Generates a box drawing character bitmap.
 ///
-/// Box drawing characters are procedurally generated based on which edges
-/// (top, bottom, left, right) have lines, and whether lines are single or double.
-#[allow(clippy::needless_range_loop)]
+/// Matching on the character itself rather than on `ch as u32 - 0x2500` keeps
+/// the source readable and removes an underflow that only the caller's choice
+/// of range was preventing.
 fn generate_box_drawing(ch: char) -> Vec<u8> {
     let mut rows = [[0u8; 8]; 16];
-    let cx: usize = 4; // center x
-    let cy: usize = 8; // center y
-
-    // Decode which sides to draw based on the character
-    let code = ch as u32 - 0x2500;
-
-    match code {
-        0x00 => { // ─ horizontal line
-            for c in 0..8 { rows[cy][c] = 1; }
-        }
-        0x01 => { // ━ heavy horizontal
-            for c in 0..8 { rows[cy - 1][c] = 1; rows[cy][c] = 1; rows[cy + 1][c] = 1; }
-        }
-        0x02 => { // │ vertical line
-            for r in 0..16 { rows[r][cx] = 1; }
-        }
-        0x03 => { // ┃ heavy vertical
-            for r in 0..16 { rows[r][cx - 1] = 1; rows[r][cx] = 1; rows[r][cx + 1] = 1; }
-        }
-        0x0C => { // ┌ top-left corner
-            for c in cx..8 { rows[cy][c] = 1; }
-            for r in cy..16 { rows[r][cx] = 1; }
-        }
-        0x10 => { // ┐ top-right corner
-            for c in 0..=cx { rows[cy][c] = 1; }
-            for r in cy..16 { rows[r][cx] = 1; }
-        }
-        0x14 => { // └ bottom-left corner
-            for c in cx..8 { rows[cy][c] = 1; }
-            for r in 0..=cy { rows[r][cx] = 1; }
-        }
-        0x18 => { // ┘ bottom-right corner
-            for c in 0..=cx { rows[cy][c] = 1; }
-            for r in 0..=cy { rows[r][cx] = 1; }
-        }
-        0x1C => { // ├ left tee
-            for r in 0..16 { rows[r][cx] = 1; }
-            for c in cx..8 { rows[cy][c] = 1; }
-        }
-        0x24 => { // ┤ right tee
-            for r in 0..16 { rows[r][cx] = 1; }
-            for c in 0..=cx { rows[cy][c] = 1; }
-        }
-        0x2C => { // ┬ top tee
-            for c in 0..8 { rows[cy][c] = 1; }
-            for r in cy..16 { rows[r][cx] = 1; }
-        }
-        0x34 => { // ┴ bottom tee
-            for c in 0..8 { rows[cy][c] = 1; }
-            for r in 0..=cy { rows[r][cx] = 1; }
-        }
-        0x3C => { // ┼ cross
-            for c in 0..8 { rows[cy][c] = 1; }
-            for r in 0..16 { rows[r][cx] = 1; }
-        }
-        0x50 => { // ╔ double top-left
-            for c in cx..8 { rows[cy - 1][c] = 1; rows[cy + 1][c] = 1; }
-            for r in cy..16 { rows[r][cx - 1] = 1; rows[r][cx + 1] = 1; }
-            rows[cy - 1][cx - 1] = 1; rows[cy + 1][cx + 1] = 1;
-        }
-        0x51 => { // ╗ double top-right
-            for c in 0..=cx { rows[cy - 1][c] = 1; rows[cy + 1][c] = 1; }
-            for r in cy..16 { rows[r][cx - 1] = 1; rows[r][cx + 1] = 1; }
-            rows[cy - 1][cx + 1] = 1; rows[cy + 1][cx - 1] = 1;
-        }
-        0x54 => { // ╚ double bottom-left
-            for c in cx..8 { rows[cy - 1][c] = 1; rows[cy + 1][c] = 1; }
-            for r in 0..=cy { rows[r][cx - 1] = 1; rows[r][cx + 1] = 1; }
-            rows[cy + 1][cx - 1] = 1; rows[cy - 1][cx + 1] = 1;
-        }
-        0x55 => { // ╝ double bottom-right
-            for c in 0..=cx { rows[cy - 1][c] = 1; rows[cy + 1][c] = 1; }
-            for r in 0..=cy { rows[r][cx - 1] = 1; rows[r][cx + 1] = 1; }
-            rows[cy + 1][cx + 1] = 1; rows[cy - 1][cx - 1] = 1;
-        }
-        0x5E => { // ╬ double cross
-            for c in 0..8 { rows[cy - 1][c] = 1; rows[cy + 1][c] = 1; }
-            for r in 0..16 { rows[r][cx - 1] = 1; rows[r][cx + 1] = 1; }
-            rows[cy - 1][cx - 1] = 0; rows[cy - 1][cx + 1] = 0;
-            rows[cy + 1][cx - 1] = 0; rows[cy + 1][cx + 1] = 0;
-        }
-        _ => {
-            // Fallback for other box drawing: draw a cross (safe default)
-            for c in 0..8 { rows[cy][c] = 1; }
-            for r in 0..16 { rows[r][cx] = 1; }
-        }
-    }
-
+    paint(box_art(ch), &mut rows);
     pack_bitmap(&rows)
 }
+
+/// The pixel art for one box drawing character.
+///
+/// Anything in the block that is not drawn yet falls back to the cross, which
+/// at least keeps a table's lines connected.
+#[allow(clippy::too_many_lines)]
+fn box_art(ch: char) -> &'static GlyphArt {
+    match ch {
+        // horizontal
+        '\u{2500}' => &[
+            "........", "........", "........", "........", "........", "........", "........",
+            "........", "########", "........", "........", "........", "........", "........",
+            "........", "........",
+        ],
+        // heavy horizontal
+        '\u{2501}' => &[
+            "........", "........", "........", "........", "........", "........", "........",
+            "########", "########", "########", "........", "........", "........", "........",
+            "........", "........",
+        ],
+        // vertical
+        '\u{2502}' => &[
+            "....#...", "....#...", "....#...", "....#...", "....#...", "....#...", "....#...",
+            "....#...", "....#...", "....#...", "....#...", "....#...", "....#...", "....#...",
+            "....#...", "....#...",
+        ],
+        // heavy vertical
+        '\u{2503}' => &[
+            "...###..", "...###..", "...###..", "...###..", "...###..", "...###..", "...###..",
+            "...###..", "...###..", "...###..", "...###..", "...###..", "...###..", "...###..",
+            "...###..", "...###..",
+        ],
+        // top-left corner
+        '\u{250c}' => &[
+            "........", "........", "........", "........", "........", "........", "........",
+            "........", "....####", "....#...", "....#...", "....#...", "....#...", "....#...",
+            "....#...", "....#...",
+        ],
+        // top-right corner
+        '\u{2510}' => &[
+            "........", "........", "........", "........", "........", "........", "........",
+            "........", "#####...", "....#...", "....#...", "....#...", "....#...", "....#...",
+            "....#...", "....#...",
+        ],
+        // bottom-left corner
+        '\u{2514}' => &[
+            "....#...", "....#...", "....#...", "....#...", "....#...", "....#...", "....#...",
+            "....#...", "....####", "........", "........", "........", "........", "........",
+            "........", "........",
+        ],
+        // bottom-right corner
+        '\u{2518}' => &[
+            "....#...", "....#...", "....#...", "....#...", "....#...", "....#...", "....#...",
+            "....#...", "#####...", "........", "........", "........", "........", "........",
+            "........", "........",
+        ],
+        // left tee
+        '\u{251c}' => &[
+            "....#...", "....#...", "....#...", "....#...", "....#...", "....#...", "....#...",
+            "....#...", "....####", "....#...", "....#...", "....#...", "....#...", "....#...",
+            "....#...", "....#...",
+        ],
+        // right tee
+        '\u{2524}' => &[
+            "....#...", "....#...", "....#...", "....#...", "....#...", "....#...", "....#...",
+            "....#...", "#####...", "....#...", "....#...", "....#...", "....#...", "....#...",
+            "....#...", "....#...",
+        ],
+        // top tee
+        '\u{252c}' => &[
+            "........", "........", "........", "........", "........", "........", "........",
+            "........", "########", "....#...", "....#...", "....#...", "....#...", "....#...",
+            "....#...", "....#...",
+        ],
+        // bottom tee
+        '\u{2534}' => &[
+            "....#...", "....#...", "....#...", "....#...", "....#...", "....#...", "....#...",
+            "....#...", "########", "........", "........", "........", "........", "........",
+            "........", "........",
+        ],
+        // cross
+        '\u{253c}' => &[
+            "....#...", "....#...", "....#...", "....#...", "....#...", "....#...", "....#...",
+            "....#...", "########", "....#...", "....#...", "....#...", "....#...", "....#...",
+            "....#...", "....#...",
+        ],
+        // double top-left
+        '\u{2550}' => &[
+            "........", "........", "........", "........", "........", "........", "........",
+            "...#####", "...#.#..", "...#####", "...#.#..", "...#.#..", "...#.#..", "...#.#..",
+            "...#.#..", "...#.#..",
+        ],
+        // double top-right
+        '\u{2551}' => &[
+            "........", "........", "........", "........", "........", "........", "........",
+            "######..", "...#.#..", "######..", "...#.#..", "...#.#..", "...#.#..", "...#.#..",
+            "...#.#..", "...#.#..",
+        ],
+        // double bottom-left
+        '\u{2554}' => &[
+            "...#.#..", "...#.#..", "...#.#..", "...#.#..", "...#.#..", "...#.#..", "...#.#..",
+            "...#####", "...#.#..", "...#####", "........", "........", "........", "........",
+            "........", "........",
+        ],
+        // double bottom-right
+        '\u{2555}' => &[
+            "...#.#..", "...#.#..", "...#.#..", "...#.#..", "...#.#..", "...#.#..", "...#.#..",
+            "######..", "...#.#..", "######..", "........", "........", "........", "........",
+            "........", "........",
+        ],
+        // double cross
+        '\u{255e}' => &[
+            "...#.#..", "...#.#..", "...#.#..", "...#.#..", "...#.#..", "...#.#..", "...#.#..",
+            "###.#.##", "...#.#..", "###.#.##", "...#.#..", "...#.#..", "...#.#..", "...#.#..",
+            "...#.#..", "...#.#..",
+        ],
+        _ => &BOX_CROSS,
+    }
+}
+
+/// The fallback for a box drawing character that has no art yet.
+const BOX_CROSS: GlyphArt = [
+    "....#...", "....#...", "....#...", "....#...", "....#...", "....#...", "....#...", "....#...",
+    "########", "....#...", "....#...", "....#...", "....#...", "....#...", "....#...", "....#...",
+];
 
 // ---------------------------------------------------------------------------
 // Block element generation (U+2580..U+259F)
@@ -1545,139 +1664,296 @@ fn generate_box_drawing(ch: char) -> Vec<u8> {
 /// Generates a block element character bitmap.
 ///
 /// Block elements are filled rectangles covering portions of the cell.
-#[allow(clippy::needless_range_loop)]
 fn generate_block_element(ch: char) -> Vec<u8> {
     let mut rows = [[0u8; 8]; 16];
-    let code = ch as u32 - 0x2580;
-
-    match code {
-        0x00 => { // ▀ upper half block
-            for r in 0..8 { for c in 0..8 { rows[r][c] = 1; } }
-        }
-        0x01 => { // ▁ lower one-eighth block
-            for r in 14..16 { for c in 0..8 { rows[r][c] = 1; } }
-        }
-        0x02 => { // ▂ lower one-quarter block
-            for r in 12..16 { for c in 0..8 { rows[r][c] = 1; } }
-        }
-        0x03 => { // ▃ lower three-eighths block
-            for r in 10..16 { for c in 0..8 { rows[r][c] = 1; } }
-        }
-        0x04 => { // ▄ lower half block
-            for r in 8..16 { for c in 0..8 { rows[r][c] = 1; } }
-        }
-        0x05 => { // ▅ lower five-eighths block
-            for r in 6..16 { for c in 0..8 { rows[r][c] = 1; } }
-        }
-        0x06 => { // ▆ lower three-quarters block
-            for r in 4..16 { for c in 0..8 { rows[r][c] = 1; } }
-        }
-        0x07 => { // ▇ lower seven-eighths block
-            for r in 2..16 { for c in 0..8 { rows[r][c] = 1; } }
-        }
-        0x08 => { // █ full block
-            for r in 0..16 { for c in 0..8 { rows[r][c] = 1; } }
-        }
-        0x09 => { // ▉ left seven-eighths block
-            for r in 0..16 { for c in 0..7 { rows[r][c] = 1; } }
-        }
-        0x0A => { // ▊ left three-quarters block
-            for r in 0..16 { for c in 0..6 { rows[r][c] = 1; } }
-        }
-        0x0B => { // ▋ left five-eighths block
-            for r in 0..16 { for c in 0..5 { rows[r][c] = 1; } }
-        }
-        0x0C => { // ▌ left half block
-            for r in 0..16 { for c in 0..4 { rows[r][c] = 1; } }
-        }
-        0x0D => { // ▍ left three-eighths block
-            for r in 0..16 { for c in 0..3 { rows[r][c] = 1; } }
-        }
-        0x0E => { // ▎ left one-quarter block
-            for r in 0..16 { for c in 0..2 { rows[r][c] = 1; } }
-        }
-        0x0F => { // ▏ left one-eighth block
-            for r in 0..16 { rows[r][0] = 1; }
-        }
-        0x10 => { // ▐ right half block
-            for r in 0..16 { for c in 4..8 { rows[r][c] = 1; } }
-        }
-        0x11 => { // ░ light shade
-            for r in 0..16 {
-                for c in 0..8 {
-                    if (r + c) % 4 == 0 { rows[r][c] = 1; }
-                }
-            }
-        }
-        0x12 => { // ▒ medium shade
-            for r in 0..16 {
-                for c in 0..8 {
-                    if (r + c) % 2 == 0 { rows[r][c] = 1; }
-                }
-            }
-        }
-        0x13 => { // ▓ dark shade
-            for r in 0..16 {
-                for c in 0..8 {
-                    if (r + c) % 4 != 0 { rows[r][c] = 1; }
-                }
-            }
-        }
-        0x14 => { // ▔ upper one-eighth block
-            for r in 0..2 { for c in 0..8 { rows[r][c] = 1; } }
-        }
-        0x15 => { // ▕ right one-eighth block
-            for r in 0..16 { rows[r][7] = 1; }
-        }
-        0x16 => { // ▖ quadrant lower left
-            for r in 8..16 { for c in 0..4 { rows[r][c] = 1; } }
-        }
-        0x17 => { // ▗ quadrant lower right
-            for r in 8..16 { for c in 4..8 { rows[r][c] = 1; } }
-        }
-        0x18 => { // ▘ quadrant upper left
-            for r in 0..8 { for c in 0..4 { rows[r][c] = 1; } }
-        }
-        0x19 => { // ▙ quadrant upper left + lower left + lower right
-            for r in 0..8 { for c in 0..4 { rows[r][c] = 1; } }
-            for r in 8..16 { for c in 0..8 { rows[r][c] = 1; } }
-        }
-        0x1A => { // ▚ quadrant upper left + lower right
-            for r in 0..8 { for c in 0..4 { rows[r][c] = 1; } }
-            for r in 8..16 { for c in 4..8 { rows[r][c] = 1; } }
-        }
-        0x1B => { // ▛ quadrant upper left + upper right + lower left
-            for r in 0..8 { for c in 0..8 { rows[r][c] = 1; } }
-            for r in 8..16 { for c in 0..4 { rows[r][c] = 1; } }
-        }
-        0x1C => { // ▜ quadrant upper left + upper right + lower right
-            for r in 0..8 { for c in 0..8 { rows[r][c] = 1; } }
-            for r in 8..16 { for c in 4..8 { rows[r][c] = 1; } }
-        }
-        0x1D => { // ▝ quadrant upper right
-            for r in 0..8 { for c in 4..8 { rows[r][c] = 1; } }
-        }
-        0x1E => { // ▞ quadrant upper right + lower left
-            for r in 0..8 { for c in 4..8 { rows[r][c] = 1; } }
-            for r in 8..16 { for c in 0..4 { rows[r][c] = 1; } }
-        }
-        0x1F => { // ▟ quadrant upper right + lower left + lower right
-            for r in 0..8 { for c in 4..8 { rows[r][c] = 1; } }
-            for r in 8..16 { for c in 0..8 { rows[r][c] = 1; } }
-        }
-        _ => {} // unreachable for valid block element range
-    }
-
+    paint(block_art(ch), &mut rows);
     pack_bitmap(&rows)
 }
+
+/// The pixel art for one block element character.
+#[allow(clippy::too_many_lines)]
+fn block_art(ch: char) -> &'static GlyphArt {
+    match ch {
+        // upper half block
+        '\u{2580}' => &[
+            "########", "########", "########", "########", "########", "########", "########",
+            "########", "........", "........", "........", "........", "........", "........",
+            "........", "........",
+        ],
+        // lower one-eighth block
+        '\u{2581}' => &[
+            "........", "........", "........", "........", "........", "........", "........",
+            "........", "........", "........", "........", "........", "........", "........",
+            "########", "########",
+        ],
+        // lower one-quarter block
+        '\u{2582}' => &[
+            "........", "........", "........", "........", "........", "........", "........",
+            "........", "........", "........", "........", "........", "########", "########",
+            "########", "########",
+        ],
+        // lower three-eighths block
+        '\u{2583}' => &[
+            "........", "........", "........", "........", "........", "........", "........",
+            "........", "........", "........", "########", "########", "########", "########",
+            "########", "########",
+        ],
+        // lower half block
+        '\u{2584}' => &[
+            "........", "........", "........", "........", "........", "........", "........",
+            "........", "########", "########", "########", "########", "########", "########",
+            "########", "########",
+        ],
+        // lower five-eighths block
+        '\u{2585}' => &[
+            "........", "........", "........", "........", "........", "........", "########",
+            "########", "########", "########", "########", "########", "########", "########",
+            "########", "########",
+        ],
+        // lower three-quarters block
+        '\u{2586}' => &[
+            "........", "........", "........", "........", "########", "########", "########",
+            "########", "########", "########", "########", "########", "########", "########",
+            "########", "########",
+        ],
+        // lower seven-eighths block
+        '\u{2587}' => &[
+            "........", "........", "########", "########", "########", "########", "########",
+            "########", "########", "########", "########", "########", "########", "########",
+            "########", "########",
+        ],
+        // full block
+        '\u{2588}' => &[
+            "########", "########", "########", "########", "########", "########", "########",
+            "########", "########", "########", "########", "########", "########", "########",
+            "########", "########",
+        ],
+        // left seven-eighths block
+        '\u{2589}' => &[
+            "#######.", "#######.", "#######.", "#######.", "#######.", "#######.", "#######.",
+            "#######.", "#######.", "#######.", "#######.", "#######.", "#######.", "#######.",
+            "#######.", "#######.",
+        ],
+        // left three-quarters block
+        '\u{258a}' => &[
+            "######..", "######..", "######..", "######..", "######..", "######..", "######..",
+            "######..", "######..", "######..", "######..", "######..", "######..", "######..",
+            "######..", "######..",
+        ],
+        // left five-eighths block
+        '\u{258b}' => &[
+            "#####...", "#####...", "#####...", "#####...", "#####...", "#####...", "#####...",
+            "#####...", "#####...", "#####...", "#####...", "#####...", "#####...", "#####...",
+            "#####...", "#####...",
+        ],
+        // left half block
+        '\u{258c}' => &[
+            "####....", "####....", "####....", "####....", "####....", "####....", "####....",
+            "####....", "####....", "####....", "####....", "####....", "####....", "####....",
+            "####....", "####....",
+        ],
+        // left three-eighths block
+        '\u{258d}' => &[
+            "###.....", "###.....", "###.....", "###.....", "###.....", "###.....", "###.....",
+            "###.....", "###.....", "###.....", "###.....", "###.....", "###.....", "###.....",
+            "###.....", "###.....",
+        ],
+        // left one-quarter block
+        '\u{258e}' => &[
+            "##......", "##......", "##......", "##......", "##......", "##......", "##......",
+            "##......", "##......", "##......", "##......", "##......", "##......", "##......",
+            "##......", "##......",
+        ],
+        // left one-eighth block
+        '\u{258f}' => &[
+            "#.......", "#.......", "#.......", "#.......", "#.......", "#.......", "#.......",
+            "#.......", "#.......", "#.......", "#.......", "#.......", "#.......", "#.......",
+            "#.......", "#.......",
+        ],
+        // right half block
+        '\u{2590}' => &[
+            "....####", "....####", "....####", "....####", "....####", "....####", "....####",
+            "....####", "....####", "....####", "....####", "....####", "....####", "....####",
+            "....####", "....####",
+        ],
+        // light shade block
+        '\u{2591}' => &[
+            "#...#...", "...#...#", "..#...#.", ".#...#..", "#...#...", "...#...#", "..#...#.",
+            ".#...#..", "#...#...", "...#...#", "..#...#.", ".#...#..", "#...#...", "...#...#",
+            "..#...#.", ".#...#..",
+        ],
+        // medium shade block
+        '\u{2592}' => &[
+            "#.#.#.#.", ".#.#.#.#", "#.#.#.#.", ".#.#.#.#", "#.#.#.#.", ".#.#.#.#", "#.#.#.#.",
+            ".#.#.#.#", "#.#.#.#.", ".#.#.#.#", "#.#.#.#.", ".#.#.#.#", "#.#.#.#.", ".#.#.#.#",
+            "#.#.#.#.", ".#.#.#.#",
+        ],
+        // dark shade block
+        '\u{2593}' => &[
+            ".###.###", "###.###.", "##.###.#", "#.###.##", ".###.###", "###.###.", "##.###.#",
+            "#.###.##", ".###.###", "###.###.", "##.###.#", "#.###.##", ".###.###", "###.###.",
+            "##.###.#", "#.###.##",
+        ],
+        // upper one-eighth block
+        '\u{2594}' => &[
+            "########", "########", "........", "........", "........", "........", "........",
+            "........", "........", "........", "........", "........", "........", "........",
+            "........", "........",
+        ],
+        // right one-eighth block
+        '\u{2595}' => &[
+            ".......#", ".......#", ".......#", ".......#", ".......#", ".......#", ".......#",
+            ".......#", ".......#", ".......#", ".......#", ".......#", ".......#", ".......#",
+            ".......#", ".......#",
+        ],
+        // quadrant lower left block
+        '\u{2596}' => &[
+            "........", "........", "........", "........", "........", "........", "........",
+            "........", "####....", "####....", "####....", "####....", "####....", "####....",
+            "####....", "####....",
+        ],
+        // quadrant lower right block
+        '\u{2597}' => &[
+            "........", "........", "........", "........", "........", "........", "........",
+            "........", "....####", "....####", "....####", "....####", "....####", "....####",
+            "....####", "....####",
+        ],
+        // quadrant upper left block
+        '\u{2598}' => &[
+            "####....", "####....", "####....", "####....", "####....", "####....", "####....",
+            "####....", "........", "........", "........", "........", "........", "........",
+            "........", "........",
+        ],
+        // quadrant upper left + lower left + lower right block
+        '\u{2599}' => &[
+            "####....", "####....", "####....", "####....", "####....", "####....", "####....",
+            "####....", "########", "########", "########", "########", "########", "########",
+            "########", "########",
+        ],
+        // quadrant upper left + lower right block
+        '\u{259a}' => &[
+            "####....", "####....", "####....", "####....", "####....", "####....", "####....",
+            "####....", "....####", "....####", "....####", "....####", "....####", "....####",
+            "....####", "....####",
+        ],
+        // quadrant upper left + upper right + lower left block
+        '\u{259b}' => &[
+            "########", "########", "########", "########", "########", "########", "########",
+            "########", "####....", "####....", "####....", "####....", "####....", "####....",
+            "####....", "####....",
+        ],
+        // quadrant upper left + upper right + lower right block
+        '\u{259c}' => &[
+            "########", "########", "########", "########", "########", "########", "########",
+            "########", "....####", "....####", "....####", "....####", "....####", "....####",
+            "....####", "....####",
+        ],
+        // quadrant upper right block
+        '\u{259d}' => &[
+            "....####", "....####", "....####", "....####", "....####", "....####", "....####",
+            "....####", "........", "........", "........", "........", "........", "........",
+            "........", "........",
+        ],
+        // quadrant upper right + lower left block
+        '\u{259e}' => &[
+            "....####", "....####", "....####", "....####", "....####", "....####", "....####",
+            "....####", "####....", "####....", "####....", "####....", "####....", "####....",
+            "####....", "####....",
+        ],
+        // quadrant upper right + lower left + lower right block
+        '\u{259f}' => &[
+            "....####", "....####", "....####", "....####", "....####", "....####", "....####",
+            "....####", "########", "########", "########", "########", "########", "########",
+            "########", "########",
+        ],
+        _ => &BLANK,
+    }
+}
+
+/// An entirely empty cell.
+const BLANK: GlyphArt = [
+    "........", "........", "........", "........", "........", "........", "........", "........",
+    "........", "........", "........", "........", "........", "........", "........", "........",
+];
 
 // ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
+// A test asserting an exact metric *wants* `==`, and a test that indexes past
+// the end of its own fixture *should* panic — that is the failure being
+// reported, not a defect to guard against.
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::float_cmp,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
+
+    /// `paint` zips rather than indexes, so a row that is too short or a table
+    /// with too few rows would silently leave part of a glyph blank instead of
+    /// failing. This is the check that makes that impossible: it is the only
+    /// thing standing between a typo in the art and a quietly truncated letter.
+    #[test]
+    fn every_glyph_is_well_formed() {
+        let mut checked = 0usize;
+        let mut check = |what: &str, art: &GlyphArt| {
+            assert_eq!(art.len(), 16, "{what}: wrong row count");
+            for (y, row) in art.iter().enumerate() {
+                assert_eq!(row.len(), 8, "{what}: row {y} is {:?}", row);
+                assert!(
+                    row.bytes().all(|b| b == b'#' || b == b'.'),
+                    "{what}: row {y} has a character that is neither ink nor gap: {row:?}"
+                );
+            }
+            checked += 1;
+        };
+
+        for code in 0x20u32..=0x7E {
+            let ch = char::from_u32(code).expect("printable ASCII is a valid char");
+            check(&format!("U+{code:04X}"), ascii_art(ch));
+        }
+        for code in 0x2500u32..=0x257F {
+            let ch = char::from_u32(code).expect("box drawing is a valid char");
+            check(&format!("U+{code:04X}"), box_art(ch));
+        }
+        for code in 0x2580u32..=0x259F {
+            let ch = char::from_u32(code).expect("block elements are valid chars");
+            check(&format!("U+{code:04X}"), block_art(ch));
+        }
+        check("replacement", &REPLACEMENT);
+        check("tofu", &TOFU);
+
+        // 95 printable ASCII + 128 box drawing + 32 block elements + 2 spares.
+        assert_eq!(checked, 257);
+    }
+
+    /// The art tables replaced hand-written `rows[y][x] = 1` sequences. These
+    /// three glyphs are the ones whose shapes the rest of the suite leans on,
+    /// so they are pinned exactly rather than merely "renders something".
+    #[test]
+    fn art_matches_the_shapes_it_replaced() {
+        // 'l' is a stem in column 3, rows 3..=12, with a foot turning right.
+        assert_eq!(
+            ascii_art('l'),
+            &[
+                "........", "........", "........", "...#....", "...#....", "...#....", "...#....",
+                "...#....", "...#....", "...#....", "...#....", "...#....", "....##..", "........",
+                "........", "........",
+            ]
+        );
+        // The full block is solid; the left half block stops at column 3.
+        assert!(block_art('\u{2588}').iter().all(|r| *r == "########"));
+        assert!(block_art('\u{258C}').iter().all(|r| *r == "####...."));
+        // A horizontal rule sits on the vertical centre line, row 8.
+        assert_eq!(box_art('\u{2500}')[8], "########");
+        assert_eq!(box_art('\u{2500}')[7], "........");
+    }
 
     #[test]
     fn test_system_font_creation() {
@@ -1788,8 +2064,16 @@ mod tests {
         let result = layout.compute();
         assert_eq!(result.line_count, 2);
         // First line has A, B
-        let line0: Vec<&GlyphPosition> = result.glyphs.iter().filter(|g| g.line_number == 0).collect();
-        let line1: Vec<&GlyphPosition> = result.glyphs.iter().filter(|g| g.line_number == 1).collect();
+        let line0: Vec<&GlyphPosition> = result
+            .glyphs
+            .iter()
+            .filter(|g| g.line_number == 0)
+            .collect();
+        let line1: Vec<&GlyphPosition> = result
+            .glyphs
+            .iter()
+            .filter(|g| g.line_number == 1)
+            .collect();
         assert_eq!(line0.len(), 2);
         assert_eq!(line1.len(), 2);
     }
@@ -1830,8 +2114,7 @@ mod tests {
         let font = Font::system_mono();
         let g = font.glyph('A');
         // 'A' has pixels set (it's not blank)
-        let has_any_pixel = (0..g.height)
-            .any(|y| (0..g.width).any(|x| g.pixel_at(x, y)));
+        let has_any_pixel = (0..g.height).any(|y| (0..g.width).any(|x| g.pixel_at(x, y)));
         assert!(has_any_pixel);
     }
 
@@ -1888,7 +2171,10 @@ mod tests {
         // Every pixel should be set
         for y in 0..g.height {
             for x in 0..g.width {
-                assert!(g.pixel_at(x, y), "pixel ({x}, {y}) should be set in full block");
+                assert!(
+                    g.pixel_at(x, y),
+                    "pixel ({x}, {y}) should be set in full block"
+                );
             }
         }
     }
@@ -1900,13 +2186,19 @@ mod tests {
         // Upper half (rows 0..8) should be set
         for y in 0..8 {
             for x in 0..g.width {
-                assert!(g.pixel_at(x, y), "pixel ({x}, {y}) should be set in upper half");
+                assert!(
+                    g.pixel_at(x, y),
+                    "pixel ({x}, {y}) should be set in upper half"
+                );
             }
         }
         // Lower half (rows 8..16) should be clear
         for y in 8..16 {
             for x in 0..g.width {
-                assert!(!g.pixel_at(x, y), "pixel ({x}, {y}) should be clear in upper half");
+                assert!(
+                    !g.pixel_at(x, y),
+                    "pixel ({x}, {y}) should be clear in upper half"
+                );
             }
         }
     }
@@ -1933,7 +2225,10 @@ mod tests {
 
         let reg_count = count_pixels(reg_a);
         let bold_count = count_pixels(bold_a);
-        assert!(bold_count > reg_count, "bold should have more pixels than regular");
+        assert!(
+            bold_count > reg_count,
+            "bold should have more pixels than regular"
+        );
     }
 
     #[test]
@@ -1956,10 +2251,16 @@ mod tests {
     #[test]
     fn test_font_family() {
         let family = FontFamily::system_mono();
-        assert_eq!(family.variant(FontStyle::Regular).style(), FontStyle::Regular);
+        assert_eq!(
+            family.variant(FontStyle::Regular).style(),
+            FontStyle::Regular
+        );
         assert_eq!(family.variant(FontStyle::Bold).style(), FontStyle::Bold);
         // Italic falls back to regular since we don't have an italic variant
-        assert_eq!(family.variant(FontStyle::Italic).style(), FontStyle::Regular);
+        assert_eq!(
+            family.variant(FontStyle::Italic).style(),
+            FontStyle::Regular
+        );
     }
 
     #[test]

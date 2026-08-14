@@ -31,6 +31,8 @@ use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+#[allow(unused_imports)]
+use guitk::text;
 
 #[allow(unused_imports)]
 use std::collections::BTreeMap;
@@ -79,6 +81,29 @@ const BLOCK_GAP: f32 = 1.0;
 const LEGEND_HEIGHT: f32 = 32.0;
 const TAB_HEIGHT: f32 = 34.0;
 const PROGRESS_BAR_HEIGHT: f32 = 20.0;
+
+// ============================================================================
+// Text measurement
+// ============================================================================
+
+/// Width of a toolbar mode button sized to fit `label`.
+fn mode_button_width(label: &str) -> f32 {
+    text::measure(label, FONT_SIZE_SMALL, FontWeightHint::Regular) + 16.0
+}
+
+/// Width of the Analyze/Start/Pause/Resume button sized to fit `label`.
+fn action_button_width(label: &str) -> f32 {
+    text::measure(label, FONT_SIZE, FontWeightHint::Bold) + 20.0
+}
+
+/// Width of a view tab sized to fit `label`.
+///
+/// Measured bold whatever the tab's state, because the active tab is drawn
+/// bold: sizing each tab to its current weight would shuffle the whole strip
+/// sideways every time the selection moved.
+fn tab_width(label: &str) -> f32 {
+    text::measure(label, FONT_SIZE, FontWeightHint::Bold) + 24.0
+}
 
 // ============================================================================
 // Block state
@@ -1486,7 +1511,7 @@ impl DefragUI {
         // Optimization mode selector
         for mode in OptimizationMode::all().iter().rev() {
             let label = mode.label();
-            let btn_w = (label.len() as f32) * 8.0 + 16.0;
+            let btn_w = mode_button_width(label);
             btn_x -= btn_w + 4.0;
             let bg_color = if self.optimization_mode == *mode {
                 COLOR_BLUE
@@ -1544,7 +1569,7 @@ impl DefragUI {
             }
         }
 
-        let action_w = (action_label.len() as f32) * 8.0 + 20.0;
+        let action_w = action_button_width(action_label);
         let action_x = SIDEBAR_WIDTH + PADDING;
         tree.push(RenderCommand::FillRect {
             x: action_x,
@@ -1736,7 +1761,7 @@ impl DefragUI {
         for tab in ViewTab::all() {
             let label = tab.label();
             let is_active = self.view_tab == *tab;
-            let tab_w = (label.len() as f32) * 8.0 + 24.0;
+            let tab_w = tab_width(label);
 
             if is_active {
                 // Active tab highlight
@@ -1884,12 +1909,20 @@ impl DefragUI {
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                 });
-                lx += (label.len() as f32) * 7.0 + 30.0;
+                // 16 px from the swatch to the label, then 14 px of gap to
+                // the next swatch. The label's own width is measured, not
+                // guessed at seven pixels a byte.
+                lx += 16.0 + text::measure(label, FONT_SIZE_SMALL, FontWeightHint::Regular) + 14.0;
             }
         } else {
             // No analysis yet
             tree.push(RenderCommand::Text {
-                x: x + w / 2.0 - 120.0,
+                x: text::center_x(
+                    "Click Analyze to scan the drive",
+                    x + w / 2.0,
+                    FONT_SIZE_HEADING,
+                    FontWeightHint::Regular,
+                ),
                 y: y + h / 2.0,
                 text: "Click Analyze to scan the drive".to_string(),
                 color: COLOR_SUBTEXT0,
@@ -2011,10 +2044,11 @@ impl DefragUI {
         }
 
         // Percentage text
+        let percent = format_percent(progress.percent());
         tree.push(RenderCommand::Text {
-            x: x + w / 2.0 - 20.0,
+            x: text::center_x(&percent, x + w / 2.0, FONT_SIZE_SMALL, FontWeightHint::Bold),
             y: y + 3.0,
-            text: format_percent(progress.percent()),
+            text: percent,
             color: COLOR_TEXT,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
@@ -2067,7 +2101,12 @@ impl DefragUI {
         } else {
             // No analysis: show placeholder
             tree.push(RenderCommand::Text {
-                x: x + w / 2.0 - 140.0,
+                x: text::center_x(
+                    "Analyze a drive to see file details",
+                    x + w / 2.0,
+                    FONT_SIZE_HEADING,
+                    FontWeightHint::Regular,
+                ),
                 y: y + h / 2.0,
                 text: "Analyze a drive to see file details".to_string(),
                 color: COLOR_SUBTEXT0,
@@ -2286,7 +2325,12 @@ impl DefragUI {
         } else {
             // No stats at all
             tree.push(RenderCommand::Text {
-                x: x + w / 2.0 - 120.0,
+                x: text::center_x(
+                    "No statistics yet",
+                    x + w / 2.0,
+                    FONT_SIZE_HEADING,
+                    FontWeightHint::Regular,
+                ),
                 y: y + h / 2.0,
                 text: "No statistics yet".to_string(),
                 color: COLOR_SUBTEXT0,
@@ -2813,6 +2857,85 @@ fn main() {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- text measurement ------------------------------------------------------
+
+    #[test]
+    fn mode_buttons_fit_their_labels() {
+        for mode in OptimizationMode::all() {
+            let label = mode.label();
+            let drawn = text::measure(label, FONT_SIZE_SMALL, FontWeightHint::Regular);
+            // 8 px of padding each side, which is where the label is drawn.
+            assert!(
+                drawn + 16.0 <= mode_button_width(label) + 0.01,
+                "{label:?} overflows its mode button"
+            );
+        }
+    }
+
+    #[test]
+    fn the_action_button_fits_every_label_it_takes() {
+        // The button relabels itself as the run progresses, and each label has
+        // to fit the box drawn for it.
+        for label in ["Analyze", "Start", "Pause", "Resume"] {
+            let drawn = text::measure(label, FONT_SIZE, FontWeightHint::Bold);
+            assert!(
+                drawn + 20.0 <= action_button_width(label) + 0.01,
+                "{label:?} overflows the action button"
+            );
+        }
+    }
+
+    #[test]
+    fn tab_labels_fit_and_the_strip_does_not_reflow() {
+        for tab in ViewTab::all() {
+            let label = tab.label();
+            let w = tab_width(label);
+            // Drawn bold when active, regular when not. Both have to fit, and
+            // both have to get the *same* width or the strip would shuffle
+            // sideways as the selection moved.
+            for weight in [FontWeightHint::Bold, FontWeightHint::Regular] {
+                let drawn = text::measure(label, FONT_SIZE, weight);
+                assert!(
+                    drawn + 24.0 <= w + 0.01,
+                    "{label:?} overflows its tab at {weight:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn measuring_is_not_driven_by_byte_length() {
+        // Same character count, three times the bytes. The old estimate was
+        // eight pixels a byte, which made this label's button three times too
+        // wide; measuring keeps it in the same neighbourhood as the ASCII one.
+        let ascii = tab_width("aaaa");
+        let wide = tab_width("ええええ");
+        assert!(
+            wide < ascii * 3.0,
+            "tab width is tracking bytes, not glyphs ({ascii} vs {wide})"
+        );
+    }
+
+    #[test]
+    fn a_centred_placeholder_is_actually_centred() {
+        // These were centred by subtracting a guessed half-width — 120.0 for
+        // "No statistics yet", which is nearly twice that string's actual half
+        // width, so it sat well left of the panel it was meant to be centred in.
+        let centre = 500.0;
+        for label in [
+            "Click Analyze to scan the drive",
+            "Analyze a drive to see file details",
+            "No statistics yet",
+        ] {
+            let x = text::center_x(label, centre, FONT_SIZE_HEADING, FontWeightHint::Regular);
+            let w = text::measure(label, FONT_SIZE_HEADING, FontWeightHint::Regular);
+            assert!(
+                (x + w / 2.0 - centre).abs() < 0.01,
+                "{label:?} is not centred: spans {x}..{}", x + w
+            );
+        }
+    }
 
     // -- test helpers ----------------------------------------------------------
 

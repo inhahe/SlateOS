@@ -62200,3 +62200,81 @@ x 500 rounds x 1024 iterations ~= 6M loop iterations, well under a second).
   amplification should change the precision of the estimate and not its value.
   This is the control: if the mean moves with N, the measurement is
   scale-dependent and the whole approach needs rethinking rather than retuning.
+
+---
+
+### RESULT — the control fired: the A/B arms were never symmetric — 2026-08-14 (`kernel/src/bench.rs`)
+
+Boot of 2026-08-14T21:5x, N raised 64 → 1024. Both predictions MISS, and the
+one that matters is P15, which was written specifically to catch the case where
+retuning is the wrong response.
+
+| N | nop arm | store arm | delta / N |
+|---|---|---|---|
+| 64 | 224 (**3.50** cyc/iter) | 1288 (20.12 cyc/iter) | **16.62** |
+| 1024 | 14148 (**13.82** cyc/iter) | 19438 (18.98 cyc/iter) | **5.17** |
+
+* **P14 MISS** (directionally right): spread fell 168% → **40%**, a 4x
+  improvement, but still over the 25% tolerance. Given P15, this number is not
+  worth interpreting anyway — see below.
+* **P15 MISS, decisively.** Predicted 12–24 cycles; measured **5**. The mean
+  moved with N, which by the prediction's own terms means the approach needs
+  rethinking, not retuning.
+
+**The mechanism is fully determined by the table.** The store arm is *stable*
+across a 16x change in N — 20.12 vs 18.98 cyc/iter, 6% apart. The nop arm moved
+**4x**, 3.50 → 13.82. So the entire scale-dependence lives in the arm that is
+supposed to be the *control*.
+
+An empty loop with a compile-time-constant trip count and a body the optimiser
+can discard is fully unrollable; a loop of `write_volatile` is not, because
+every store must execute. At N=64 LLVM collapsed the nop arm's loop overhead
+and could not collapse the store arm's. At N=1024 the nop arm is too big to
+unroll, so both arms pay real loop overhead and it cancels.
+
+Which makes the arithmetic check out exactly:
+
+```
+N=1024 (both looped):   18.98 - 13.82 = 5.17   <- the store alone
+N=64   (nop unrolled):  20.12 -  3.50 = 16.62  = 5.2 (store) + ~11.4 (loop
+                                                  overhead the nop arm
+                                                  was not paying)
+```
+
+**So `measure_access_cost`'s own doc comment was false.** It claims: *"The arms
+are kept symmetric — same loop, same `black_box` on the value — so the delta is
+the store instruction and nothing else."* Symmetric *in source* is not
+symmetric *after optimisation*, and the delta was the store instruction **plus
+whatever asymmetry the optimiser introduced between the two loops**. That
+second term is N-dependent, which is precisely what P15 measured.
+
+Note this is the *same root cause class* as the original bug, one level along.
+That bug was "the optimiser removed the thing I was measuring." This one is
+"the optimiser removed the thing I was measuring it *against*." Both come from
+writing a benchmark whose validity depends on the optimiser declining to do
+something it is entitled to do, and then not checking.
+
+**16 was never the honest figure either.** The previous entry called 16 "the
+first honest measurement" of the store, and it was not — it was 5 cycles of
+store plus 11 cycles of scaffolding asymmetry. The honest figure is ~5. Every
+conclusion drawn from 16 must be re-derived, including the N=1024 sizing in the
+entry above, which used 13000/16 and should have used 13000/5.
+
+**The fix is two parts, and only the second is durable:**
+
+1. Make the trip count **opaque** — `let n = black_box(CANARY_STORES_PER_WINDOW)`
+   — so neither arm can be unrolled or const-folded, and the arms are symmetric
+   *by construction* rather than by hope.
+2. Make the instrument **check its own scale-invariance**, once per boot at
+   calibration: measure at N and at 2N and require the two per-access figures
+   to agree. If they disagree, the verdict is BROKEN (scale-dependent), not a
+   number. This is the durable half, because P15 only fired because I happened
+   to register it by hand — and a property that is only checked when someone
+   remembers to check it is, by this file's standing maxim, not checked at all.
+
+**Prediction P17** (registered before the measurement exists): with an opaque
+trip count, the nop arm's per-iteration cost becomes ~13-14 cyc/iter at *both*
+N=64 and N=1024 (i.e. the unrolling stops), and the per-access delta agrees
+within 25% across the two scales, landing near 5. MISS if the delta still moves
+more than 25% between N and 2N — which would mean the asymmetry is not
+unrolling and the A/B subtraction is unsound for a reason not yet identified.

@@ -654,10 +654,24 @@ fn print_scorecard() {
 /// Interleaved A/B rounds per reference measurement.
 const CANARY_ROUNDS: u32 = 500;
 
-/// Stores per timed window. The per-window delta is ~N x one access, so at
-/// N=64 a ~200-cycle access shows up as ~13k cycles — an order of magnitude
-/// clear of the few-hundred-cycle harness wander.
-const CANARY_STORES_PER_WINDOW: u64 = 64;
+/// Stores per timed window. The per-window delta is ~N x one access, so the
+/// point of a large N is to lift that delta an order of magnitude clear of the
+/// few-hundred-cycle wander of the harness itself.
+///
+/// This was 64, sized against a claimed ~200-cycle access. That figure was an
+/// artefact: it came from a debug build, where both arms of the A/B are mostly
+/// loop scaffolding, and it was quietly carried over to the release build,
+/// where the measured cost is **16 cycles** (boot of 2026-08-14: nop=224,
+/// store=1288 over 64 stores). At N=64 that is a 1064-cycle delta against a
+/// 224-cycle nop arm — a factor of ~5, not the order of magnitude the comment
+/// claimed. The design's amplification was not there.
+///
+/// 1024 restores it from the measured number rather than the artefact:
+/// 16 x 1024 ~ 16k cycles of signal against the same few-hundred-cycle wander.
+/// That the constant was justified by a number from a *different build
+/// profile* is the same error as baselining a benchmark against a single boot,
+/// one level up — see known-issues.md.
+const CANARY_STORES_PER_WINDOW: u64 = 1024;
 
 /// Percent by which the end-of-suite reference may differ from the
 /// start-of-suite one before the run is called contaminated.
@@ -671,6 +685,19 @@ const CANARY_STORES_PER_WINDOW: u64 = 64;
 /// recorded. Until then it only has to catch the gross case this exists for:
 /// `crypto_ed25519_verify` moved 5.1x when the host got busy.
 const CANARY_TOLERANCE_PCT: u64 = 25;
+
+/// Smallest per-access figure this measurement can resolve, in cycles.
+///
+/// Derived, not invented. The per-access cost is an integer quotient, so at a
+/// per-access value of `m` cycles one cycle of quantisation is `100 / m`
+/// percent. Once that exceeds `CANARY_TOLERANCE_PCT`, any "spread" the canary
+/// reports is rounding rather than host load, and the honest verdict is that
+/// the instrument could not measure — not that the machine was busy.
+///
+/// At a 25% tolerance this is 4 cycles. `scripts/bench-history.py` computes the
+/// identical bound from the identical constant, so the kernel and the history
+/// tool cannot disagree about whether a record is usable.
+const CANARY_MIN_RESOLVABLE: u64 = 100u64.div_ceil(CANARY_TOLERANCE_PCT);
 
 /// Take a mid-suite canary sample every Nth scored benchmark.
 ///
@@ -751,7 +778,7 @@ fn maybe_canary_sample() {
 /// It used to be `CALIBRATION_BYTE.store(black_box(1), Relaxed)`, and under
 /// optimisation that measured **zero**, because a relaxed atomic store is LLVM
 /// `monotonic` and dead-store elimination may drop all but the last of a run of
-/// monotonic stores to one address. The 64 stores per window collapsed to
+/// monotonic stores to one address. The N stores per window collapsed to
 /// about one, leaving the "store" arm *cheaper* than the "nop" arm (measured:
 /// nop=400, store=244), and `saturating_sub` reported the negative delta as 0.
 /// `black_box` is a hint, and the elimination it was asked to prevent is
@@ -759,8 +786,31 @@ fn maybe_canary_sample() {
 /// is a guarantee: the compiler may not elide it. It also compiles to exactly
 /// one guest store instruction, which is what this claims to be measuring.
 ///
-/// The arms are kept symmetric — same loop, same `black_box` on the value —
-/// so the delta is the store instruction and nothing else.
+/// # Why the trip count is `black_box`ed
+///
+/// This comment used to claim the arms were "kept symmetric — same loop, same
+/// `black_box` on the value — so the delta is the store instruction and nothing
+/// else." That was **false**, and measurably so: raising N from 64 to 1024
+/// moved the per-access figure from 16.6 cycles to 5.2, while the *store* arm's
+/// per-iteration cost stayed put (20.12 → 18.98). The whole 4x move was in the
+/// nop arm (3.50 → 13.82 cyc/iter).
+///
+/// The reason is that symmetric *in source* is not symmetric *after
+/// optimisation*. With a compile-time-constant trip count, an empty loop is
+/// fully unrollable and a loop of `write_volatile` is not, so at N=64 the nop
+/// arm paid no loop overhead and the store arm paid all of it. The delta was
+/// therefore the store instruction **plus ~11 cycles of scaffolding asymmetry**
+/// — a term that varies with N, which is exactly how it was caught.
+///
+/// Making `n` opaque removes the optimiser's ability to treat the two loops
+/// differently: it cannot unroll or const-fold a trip count it cannot see, so
+/// both arms compile to a real loop and the overhead cancels in the
+/// subtraction. Symmetry by construction rather than by hope.
+///
+/// Note the shape of the original bug and this one: first the optimiser removed
+/// the thing being measured, then it removed the thing being measured
+/// *against*. Both are cases of a benchmark whose validity silently depended on
+/// the optimiser declining to do something it was entitled to do.
 ///
 /// # Why this returns an Option
 ///
@@ -771,9 +821,22 @@ fn maybe_canary_sample() {
 /// nothing at all — see known-issues.md
 /// B-BENCH-CANARY-MEASURES-ZERO-IN-RELEASE-AND-BLAMES-THE-HOST.
 fn measure_access_cost() -> (Option<u64>, u64, u64) {
+    measure_access_at(CANARY_STORES_PER_WINDOW)
+}
+
+/// One A/B reference measurement at a given trip count.
+///
+/// Split out from [`measure_access_cost`] so the calibration path can run it at
+/// two scales and check that the answer does not depend on the scale — see
+/// [`scale_invariance_check`]. A per-access cost that changes when N changes is
+/// not a measurement of the access.
+fn measure_access_at(trip: u64) -> (Option<u64>, u64, u64) {
     static CALIBRATION_BYTE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
     let cell = CALIBRATION_BYTE.as_ptr();
-    let n = CANARY_STORES_PER_WINDOW;
+    // Opaque on purpose: a trip count the optimiser can see is a trip count it
+    // can unroll, and it will unroll the empty arm while leaving the volatile
+    // arm alone. See the doc comment above.
+    let n = core::hint::black_box(trip);
     let (nop, store) = ab_interleaved(
         CANARY_ROUNDS,
         || {
@@ -801,14 +864,74 @@ fn measure_access_cost() -> (Option<u64>, u64, u64) {
             })
         },
     );
-    // Require a full cycle per access before believing the delta: below that
-    // the integer division would floor to 0 anyway, and a sub-cycle "cost" for
-    // a TCG guest store is not a small measurement, it is a broken one.
+    // Require `CANARY_MIN_RESOLVABLE` cycles per access before believing the
+    // delta. The bound used to be one cycle — enough only to stop the integer
+    // division flooring to 0 — while scripts/bench-history.py independently
+    // rejected anything under 4. Neither rule was wrong by its own lights;
+    // having two rules for one question was the defect, so both now derive
+    // from the tolerance. See CANARY_MIN_RESOLVABLE.
     let measured = store
         .checked_sub(nop)
-        .filter(|delta| *delta >= n)
+        .filter(|delta| *delta >= n.saturating_mul(CANARY_MIN_RESOLVABLE))
         .map(|delta| delta / n);
     (measured, nop, store)
+}
+
+/// Check that the reference measurement does not depend on how many times it
+/// loops, and report the result.  Runs once per boot, at calibration.
+///
+/// # Why this is here rather than in a comment
+///
+/// The scale-dependence this catches was real, shipped, and invisible: the
+/// A/B's two arms optimised differently, so the per-access figure was 16.6
+/// cycles at N=64 and 5.2 at N=1024 for one and the same store instruction.
+/// It was found only because a prediction had been registered by hand to look
+/// for it. A property that is checked when someone remembers to check it is,
+/// by the maxim this file keeps re-learning, not checked at all — *a check that
+/// cannot fire is indistinguishable from a check that passes*. So the check
+/// becomes part of the instrument.
+///
+/// A physical cost per store cannot depend on the length of the loop around
+/// it. If it does, the subtraction is picking up something other than the
+/// store, and every budget derived from it is a number with no referent.
+///
+/// Returns `true` if the two scales agree within `CANARY_TOLERANCE_PCT`.
+fn scale_invariance_check(base: u64) -> bool {
+    let (small, _, _) = measure_access_at(base);
+    let (large, _, _) = measure_access_at(base.saturating_mul(2));
+    let (Some(a), Some(b)) = (small, large) else {
+        serial_println!(
+            "[bench]   canary scale check: UNMEASURABLE at N={} ({:?}) or N={} ({:?}) — \
+             the arms did not separate, so scale-invariance cannot be assessed.",
+            base, small, base.saturating_mul(2), large
+        );
+        return false;
+    };
+    // Percent difference against the smaller of the two, so the figure reads as
+    // "how much did doubling the loop change the answer".
+    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+    let diff_pct = if lo > 0 {
+        hi.saturating_sub(lo).saturating_mul(100) / lo
+    } else {
+        100
+    };
+    if diff_pct > CANARY_TOLERANCE_PCT {
+        serial_println!(
+            "[bench]   canary scale check: FAILED — {} cycles/store at N={} but {} at N={} \
+             ({}% apart, tolerance {}%). The per-access cost must not depend on the trip \
+             count; that it does means the A/B subtraction is measuring loop scaffolding \
+             as well as the store, so this run's access_floor is not a physical quantity. \
+             See known-issues.md B-BENCH-CANARY-MEASURES-ZERO-IN-RELEASE-AND-BLAMES-THE-HOST.",
+            a, base, b, base.saturating_mul(2), diff_pct, CANARY_TOLERANCE_PCT
+        );
+        return false;
+    }
+    serial_println!(
+        "[bench]   canary scale check: OK — {} cycles/store at N={}, {} at N={} ({}% apart, \
+         tolerance {}%), so the delta scales with the store count and not with the loop.",
+        a, base, b, base.saturating_mul(2), diff_pct, CANARY_TOLERANCE_PCT
+    );
+    true
 }
 
 /// Re-measure the reference access cost and report whether the host stayed
@@ -894,7 +1017,7 @@ fn report_canary(start: Option<u64>) {
              the dearer of the two, the optimiser has removed it again. See \
              known-issues.md B-BENCH-CANARY-MEASURES-ZERO-IN-RELEASE-AND-BLAMES-THE-HOST.",
             invalid,
-            samples + invalid,
+            samples.saturating_add(invalid),
             end_nop,
             end_store,
             CANARY_STORES_PER_WINDOW
@@ -992,7 +1115,16 @@ pub fn run_all() {
     // measurement is taken a second time at the end of the suite, as the
     // contamination canary (see `report_canary`).
     let (access_floor, canary_start) = {
+        // Before trusting the number, check that it *is* a number: a per-store
+        // cost that changes when the loop length changes is measuring the loop,
+        // not the store. Costs two extra A/B runs, once per boot.
+        let scale_ok = scale_invariance_check(CANARY_STORES_PER_WINDOW);
         let (measured, nop, store) = measure_access_cost();
+        // A scale-dependent measurement is not a measurement. Discard it rather
+        // than let it calibrate ~60 budgets, and fall through to the same
+        // "UNMEASURED" reporting path the arms-did-not-separate case uses --
+        // both mean "the instrument failed", which is not "the code is fine".
+        let measured = if scale_ok { measured } else { None };
         // Still clamped: if the two arms land equal the budgets below must not
         // all collapse to 0 and turn every check into a guaranteed failure.
         let floor = core::cmp::max(measured.unwrap_or(0), 100);
@@ -1009,11 +1141,16 @@ pub fn run_all() {
             // arbitrary constant rather than of a measured cost, so a budget
             // verdict in this run is not evidence about the code.
             None => serial_println!(
-                "[bench]   memory_access_floor: UNMEASURED — the A/B arms did not \
-                 separate (nop={} store={} over {} stores/window, {} interleaved \
-                 rounds; the store arm must be the dearer of the two). Falling back \
-                 to the arbitrary clamp of {} cycles: budget-based verdicts below are \
-                 NOT calibrated to this machine and must not be read as findings.",
+                "[bench]   memory_access_floor: UNMEASURED — {} (nop={} store={} over {} \
+                 stores/window, {} interleaved rounds). Falling back to the arbitrary \
+                 clamp of {} cycles: budget-based verdicts below are NOT calibrated to \
+                 this machine and must not be read as findings.",
+                if scale_ok {
+                    "the A/B arms did not separate; the store arm must be the dearer of the two"
+                } else {
+                    "the scale check above rejected the measurement, so the delta is not \
+                     attributable to the store"
+                },
                 nop, store, CANARY_STORES_PER_WINDOW, CANARY_ROUNDS, floor
             ),
         }

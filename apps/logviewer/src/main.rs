@@ -36,6 +36,7 @@
 use guitk::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
+use guitk::text;
 
 // ============================================================================
 // Catppuccin Mocha theme
@@ -70,7 +71,8 @@ const FILTER_BAR_HEIGHT: f32 = 36.0;
 const STATUS_BAR_HEIGHT: f32 = 24.0;
 const PADDING: f32 = 8.0;
 const LINE_HEIGHT: f32 = 20.0;
-const CHAR_WIDTH: f32 = 8.0;
+/// Font size of the level badge on a log row.
+const BADGE_TEXT: f32 = 10.0;
 const SMALL_TEXT: f32 = 12.0;
 const NORMAL_TEXT: f32 = 14.0;
 const HEADER_TEXT: f32 = 16.0;
@@ -874,7 +876,10 @@ impl App {
         // File tabs
         let mut tab_x = 140.0;
         for (fi, file) in self.files.iter().enumerate() {
-            let w = (file.name.len() as f32) * CHAR_WIDTH + 20.0;
+            // Measured bold whatever the tab's state: the active tab is drawn
+            // bold, and sizing each tab to its own weight would reflow the
+            // whole strip every time the user switched files.
+            let w = text::measure(&file.name, SMALL_TEXT, FontWeightHint::Bold) + 20.0;
             let active = fi == self.active_file;
 
             cmds.push(RenderCommand::FillRect {
@@ -906,7 +911,7 @@ impl App {
         let mut mx = WINDOW_WIDTH - 300.0;
         for mode in &modes {
             let label = mode.label();
-            let w = (label.len() as f32) * CHAR_WIDTH + 16.0;
+            let w = text::measure(label, SMALL_TEXT, FontWeightHint::Bold) + 16.0;
             let active = *mode == self.view_mode;
 
             cmds.push(RenderCommand::FillRect {
@@ -962,7 +967,7 @@ impl App {
         let mut lx = PADDING;
         for level in LogLevel::all() {
             let label = level.short_label();
-            let w = (label.len() as f32) * CHAR_WIDTH + 12.0;
+            let w = text::measure(label, BADGE_TEXT, FontWeightHint::Bold) + 12.0;
             let active = level.severity() >= self.filter.min_level.severity();
 
             cmds.push(RenderCommand::FillRect {
@@ -977,7 +982,7 @@ impl App {
                 x: lx + 6.0,
                 y: y + 11.0,
                 text: label.into(),
-                font_size: 10.0,
+                font_size: BADGE_TEXT,
                 color: if active { CRUST } else { OVERLAY0 },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(w),
@@ -1148,7 +1153,7 @@ impl App {
 
             // Level badge
             let level_label = entry.level.short_label();
-            let level_w = (level_label.len() as f32) * 7.0 + 8.0;
+            let level_w = text::measure(level_label, BADGE_TEXT, FontWeightHint::Bold) + 8.0;
             cmds.push(RenderCommand::FillRect {
                 x: cx,
                 y: ey + 2.0,
@@ -1161,7 +1166,7 @@ impl App {
                 x: cx + 4.0,
                 y: ey + 4.0,
                 text: level_label.into(),
-                font_size: 10.0,
+                font_size: BADGE_TEXT,
                 color: CRUST,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(level_w),
@@ -1170,25 +1175,26 @@ impl App {
 
             // Source
             if self.show_source && !entry.source.is_empty() {
+                // The brackets are drawn, so they have to be measured: the
+                // old estimate advanced by the bare source name and left the
+                // message overlapping the `]`.
+                let source_text = format!("[{}]", entry.source);
                 cmds.push(RenderCommand::Text {
                     x: cx,
                     y: ey + 3.0,
-                    text: format!("[{}]", entry.source),
+                    text: source_text.clone(),
                     font_size: SMALL_TEXT,
                     color: SKY,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(100.0),
                 });
-                cx += (entry.source.len() as f32) * 7.0 + 20.0;
+                cx += text::measure(&source_text, SMALL_TEXT, FontWeightHint::Bold) + 8.0;
             }
 
             // Message
             let msg_width = WINDOW_WIDTH - cx - PADDING;
-            let display_msg: String = entry
-                .message
-                .chars()
-                .take((msg_width / CHAR_WIDTH) as usize)
-                .collect();
+            let display_msg =
+                text::elide(&entry.message, msg_width, "...", NORMAL_TEXT, FontWeightHint::Regular);
             cmds.push(RenderCommand::Text {
                 x: cx,
                 y: ey + 3.0,
@@ -1201,10 +1207,16 @@ impl App {
         }
 
         if entries.is_empty() {
+            let empty = "No log entries match filters";
             cmds.push(RenderCommand::Text {
-                x: WINDOW_WIDTH / 2.0 - 80.0,
+                x: text::center_x(
+                    empty,
+                    WINDOW_WIDTH / 2.0,
+                    NORMAL_TEXT,
+                    FontWeightHint::Regular,
+                ),
                 y: y + height / 2.0,
-                text: "No log entries match filters".into(),
+                text: empty.into(),
                 font_size: NORMAL_TEXT,
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
@@ -1402,7 +1414,8 @@ impl App {
                     });
 
                     // Level badge
-                    let level_w = (entry.level.label().len() as f32) * 8.0 + 16.0;
+                    let level_w =
+                        text::measure(entry.level.label(), NORMAL_TEXT, FontWeightHint::Bold) + 16.0;
                     cmds.push(RenderCommand::FillRect {
                         x: PADDING + 12.0,
                         y: y + PADDING + 10.0,
@@ -1536,7 +1549,13 @@ impl App {
                     cmds.push(RenderCommand::Text {
                         x: PADDING + 24.0,
                         y: raw_y + 22.0,
-                        text: truncate_str(&entry.raw, 120),
+                        text: text::elide(
+                            &entry.raw,
+                            panel_w - 48.0,
+                            "...",
+                            SMALL_TEXT,
+                            FontWeightHint::Regular,
+                        ),
                         font_size: SMALL_TEXT,
                         color: OVERLAY0,
                         font_weight: FontWeightHint::Regular,
@@ -1547,10 +1566,11 @@ impl App {
                 }
 
         // No selection
+        let empty = "Select a log entry to view details";
         cmds.push(RenderCommand::Text {
-            x: WINDOW_WIDTH / 2.0 - 100.0,
+            x: text::center_x(empty, WINDOW_WIDTH / 2.0, NORMAL_TEXT, FontWeightHint::Regular),
             y: y + height / 2.0,
-            text: "Select a log entry to view details".into(),
+            text: empty.into(),
             font_size: NORMAL_TEXT,
             color: OVERLAY0,
             font_weight: FontWeightHint::Regular,
@@ -1612,15 +1632,6 @@ impl App {
                 max_width: Some(100.0),
             });
         }
-    }
-}
-
-fn truncate_str(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.into()
-    } else {
-        let t: String = s.chars().take(max.saturating_sub(3)).collect();
-        format!("{t}...")
     }
 }
 
@@ -2034,15 +2045,30 @@ mod tests {
 
     // --- Utility tests ---
 
+    /// The raw line at the foot of the detail panel is cut to the width of the
+    /// box drawn behind it. The old helper compared `s.len()` — bytes — against
+    /// a fixed budget of 120 "characters", so an accented line was cut short
+    /// while it still fitted, and a line of wide glyphs ran past the box.
     #[test]
-    fn test_truncate_short() {
-        assert_eq!(truncate_str("hello", 10), "hello");
+    fn the_raw_line_is_cut_to_the_box_drawn_behind_it() {
+        let room = 400.0;
+        for raw in [
+            "2026-08-14T10:00:00Z INFO kernel: a raw log line long enough to need cutting down",
+            "2026-08-14T10:00:00Z INFO kernel: une ligne brute avec des caractères accentués \
+             suffisamment longue",
+        ] {
+            let out = text::elide(raw, room, "...", SMALL_TEXT, FontWeightHint::Regular);
+            let w = text::measure(&out, SMALL_TEXT, FontWeightHint::Regular);
+            assert!(w <= room + 0.01, "{out:?} is {w} px in {room} px of room");
+            assert!(out.ends_with("..."), "a cut raw line should say so");
+        }
     }
 
+    /// A raw line that fits is left exactly as it is — no ellipsis, no loss.
     #[test]
-    fn test_truncate_long() {
-        let result = truncate_str("a very long string indeed", 10);
-        assert!(result.ends_with("..."));
+    fn a_short_raw_line_is_left_alone() {
+        let raw = "INFO ready";
+        assert_eq!(text::elide(raw, 400.0, "...", SMALL_TEXT, FontWeightHint::Regular), raw);
     }
 
     // --- Helper ---
@@ -2057,6 +2083,59 @@ mod tests {
             fields: Vec::new(),
             raw: String::new(),
             bookmarked: false,
+        }
+    }
+    // --- Text measurement ---
+
+    /// Every level badge has to fit the pill drawn behind it. The labels are
+    /// short and ASCII, so the old byte-count estimate happened to work — but
+    /// it worked for the wrong reason, and would stop the moment the face
+    /// changed or a label gained a non-ASCII character.
+    #[test]
+    fn level_badges_fit_their_pills() {
+        for level in LogLevel::all() {
+            let label = level.short_label();
+            let pill = text::measure(label, BADGE_TEXT, FontWeightHint::Bold) + 12.0;
+            assert!(
+                text::measure(label, BADGE_TEXT, FontWeightHint::Bold) <= pill - 12.0 + 0.01,
+                "{label:?} does not fit its pill"
+            );
+            assert!(pill > 12.0, "{label:?} produced an empty pill");
+        }
+    }
+
+    /// The source field is drawn with brackets around it, so it has to be
+    /// measured with them. The old estimate advanced the pen by the bare
+    /// source name, leaving the message overlapping the closing bracket.
+    #[test]
+    fn the_source_field_advances_past_its_brackets() {
+        let bare = text::measure("kernel", SMALL_TEXT, FontWeightHint::Bold);
+        let bracketed = text::measure("[kernel]", SMALL_TEXT, FontWeightHint::Bold);
+        assert!(
+            bracketed > bare,
+            "brackets are drawn, so they take room: {bare} vs {bracketed}"
+        );
+    }
+
+    /// A long message is cut to the room left on the row, by measured width.
+    #[test]
+    fn a_long_message_is_elided_to_the_room_left() {
+        let msg = "a log line that is far longer than the space left for it on the row";
+        let room = 120.0;
+        let out = text::elide(msg, room, "...", NORMAL_TEXT, FontWeightHint::Regular);
+        let w = text::measure(&out, NORMAL_TEXT, FontWeightHint::Regular);
+        assert!(w <= room + 0.01, "{out:?} is {w} px in {room} px of room");
+        assert!(out.ends_with("..."), "a cut message should say so");
+    }
+
+    /// The file-tab strip must not reflow when the selection moves, so every
+    /// tab is measured in the bold weight the active one is drawn in.
+    #[test]
+    fn the_file_tab_strip_does_not_reflow_on_selection() {
+        for name in ["app.log", "very-long-service-name.log"] {
+            let w = text::measure(name, SMALL_TEXT, FontWeightHint::Bold) + 20.0;
+            let regular = text::measure(name, SMALL_TEXT, FontWeightHint::Regular);
+            assert!(w >= regular + 20.0, "{name:?} tab is too narrow when bold");
         }
     }
 }
